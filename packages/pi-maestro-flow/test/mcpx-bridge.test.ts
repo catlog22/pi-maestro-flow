@@ -3,7 +3,7 @@ import { chmod, mkdtemp, readFile, rm, writeFile, mkdir } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ensureMcpxWorkspace, removeMcpxWorkspace, startWorkspaceLease, stopWorkspaceLease, _resetMcpxBridgeState, isMcpxConfigured, readTunnelState, readOpsPassword, readMcpxBearerToken, probeTunnelHealth, detectMcpxForPmf, removeWorkspaceByPath, readDelegatedTasks } from "../src/mcpx-bridge.ts";
+import { ensureMcpxWorkspace, removeMcpxWorkspace, startWorkspaceLease, stopWorkspaceLease, _resetMcpxBridgeState, isMcpxConfigured, readTunnelState, readOpsPassword, readMcpxBearerToken, probeTunnelHealth, detectMcpxForPmf, removeWorkspaceByPath, readDelegatedTasks, isQuickTunnelCommandLine, isValidTunnelPort, setQuickTunnelDiscoveryForTest } from "../src/mcpx-bridge.ts";
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -506,4 +506,21 @@ test("readTunnelState alive matches the real process table (tasklist CSV fix)", 
   // impossible pid is dead
   await writeFile(file, "4194304", "utf8");
   assert.equal(readTunnelState().alive, false, "impossible pid must be dead");
+});
+
+test("Quick Tunnel matching requires the exact local URL command", () => {
+  assert.equal(isQuickTunnelCommandLine("cloudflared tunnel --url http://127.0.0.1:19090", 19090), true);
+  assert.equal(isQuickTunnelCommandLine('"C:\\\\Program Files\\\\cloudflared\\\\cloudflared.exe" tunnel --url http://127.0.0.1:19090', 19090), true);
+  assert.equal(isQuickTunnelCommandLine("cloudflared tunnel run named-tunnel", 19090), false);
+  assert.equal(isQuickTunnelCommandLine("cloudflared tunnel --url http://127.0.0.1:19091", 19090), false);
+  assert.equal(isQuickTunnelCommandLine("cloudflared tunnel --url http://localhost:19090", 19090), false);
+  assert.equal(isQuickTunnelCommandLine("cloudflared tunnel --url http://127.0.0.1:19090 --no-autoupdate", 19090), false);
+});
+
+test("Quick Tunnel port validation covers TCP bounds", () => {
+  assert.equal(isValidTunnelPort(1), true);
+  assert.equal(isValidTunnelPort(65_535), true);
+  assert.equal(isValidTunnelPort(0), false);
+  assert.equal(isValidTunnelPort(65_536), false);
+  assert.equal(isValidTunnelPort(9090.5), false);
 });

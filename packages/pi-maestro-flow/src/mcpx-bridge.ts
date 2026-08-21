@@ -14,7 +14,7 @@
 
 import { randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { isIP } from "node:net";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
@@ -64,22 +64,53 @@ function absoluteRoot(root: string | undefined): string {
   return isAbsolute(rawRoot) ? resolve(rawRoot) : resolve(process.cwd(), rawRoot);
 }
 
-function runMcpx(args: string[]): { status: number | null; stderr: string } {
+function resolveMcpxSpawn(args: string[]): { binary: string; useShell: boolean } | { error: string } {
   const mcpx = locateMcpx();
-  if (!mcpx) return { status: null, stderr: "mcpx binary not found" };
+  if (!mcpx) return { error: "mcpx binary not found" };
   const useShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(mcpx);
   // npm shims require cmd.exe, but never pass shell metacharacters through a
   // shim. The normal installed mcpx.exe path uses shell:false and accepts all
   // valid Windows paths.
   if (useShell && args.some((arg) => /[\u0000\r\n&|<>^%!()]/.test(arg))) {
-    return { status: null, stderr: "unsafe Windows command argument" };
+    return { error: "unsafe Windows command argument" };
   }
-  const result = spawnSync(mcpx, args, {
+  return { binary: mcpx, useShell };
+}
+
+function runMcpx(args: string[]): { status: number | null; stderr: string } {
+  const plan = resolveMcpxSpawn(args);
+  if ("error" in plan) return { status: null, stderr: plan.error };
+  const result = spawnSync(plan.binary, args, {
     encoding: "utf8",
     timeout: 15_000,
-    shell: useShell,
+    shell: plan.useShell,
   });
   return { status: result.status, stderr: String(result.stderr || result.stdout || "").trim() };
+}
+
+/** Async variant for the lease heartbeat: spawnSync would block the TUI event
+ *  loop for up to 15s whenever the mcpx binary hangs or responds slowly. */
+function runMcpxAsync(args: string[]): Promise<{ status: number | null; stderr: string }> {
+  const plan = resolveMcpxSpawn(args);
+  if ("error" in plan) return Promise.resolve({ status: null, stderr: plan.error });
+  return new Promise((resolve) => {
+    const child = spawn(plan.binary, args, {
+      shell: plan.useShell,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    let output = "";
+    const capture = (chunk: Buffer) => { output = (output + chunk.toString()).slice(-16_384); };
+    child.stdout?.on("data", capture);
+    child.stderr?.on("data", capture);
+    const timer = setTimeout(() => { try { child.kill(); } catch { /* already dead */ } }, 15_000);
+    const finish = (status: number | null) => {
+      clearTimeout(timer);
+      resolve({ status, stderr: output.trim() });
+    };
+    child.on("error", () => finish(null));
+    child.on("close", (code) => finish(code));
+  });
 }
 
 /**
@@ -122,7 +153,7 @@ export async function ensureMcpxWorkspace(
  */
 function renewWorkspaceLease(absRoot: string, ttlSeconds: number, generation?: number): Promise<boolean> {
   return new Promise((resolve) => {
-    setImmediate(() => {
+    setImmediate(async () => {
       // A heartbeat renewal enqueued before stop() must not fire after stop.
       // generation is only supplied by the lease heartbeat; an explicit
       // ensureMcpxWorkspace call (no generation) always runs.
@@ -134,7 +165,7 @@ function renewWorkspaceLease(absRoot: string, ttlSeconds: number, generation?: n
         const args = ttlSeconds > 0
           ? ["workspace", "register", "--ttl", `${ttlSeconds}s`, absRoot]
           : ["workspace", "register", absRoot];
-        const { status, stderr } = runMcpx(args);
+        const { status, stderr } = await runMcpxAsync(args);
         const registered = status === 0;
         if (!registered) {
           console.warn(`[pi-maestro-flow] MCPX workspace registration failed (${status ?? "spawn error"}): ${stderr}`);
@@ -290,7 +321,9 @@ function isProcessAlive(pid: number): boolean {
     }
     process.kill(pid, 0);
     return true;
-  } catch {
+  } catch (error) {
+    // EPERM: the process exists but is owned by another user — report alive.
+    if ((error as NodeJS.ErrnoException).code === "EPERM") return true;
     return false;
   }
 }
@@ -609,6 +642,162 @@ function resolveCloudflared(): string | undefined {
   return undefined;
 }
 
+/** A process whose command line is an exact Cloudflare Quick Tunnel command. */
+export interface QuickTunnelProcess {
+  pid: number;
+  commandLine: string;
+}
+
+type QuickTunnelDiscovery = (localPort: number) => QuickTunnelProcess[] | undefined;
+let quickTunnelDiscoveryOverride: QuickTunnelDiscovery | undefined;
+
+/** Test hook for exercising adoption/start guards without touching real processes. */
+export function setQuickTunnelDiscoveryForTest(discovery: QuickTunnelDiscovery | undefined): () => void {
+  const previous = quickTunnelDiscoveryOverride;
+  quickTunnelDiscoveryOverride = discovery;
+  return () => { quickTunnelDiscoveryOverride = previous; };
+}
+
+/** Keep tunnel discovery and spawning bounded to a valid TCP port. */
+export function isValidTunnelPort(port: number): boolean {
+  return Number.isInteger(port) && port >= 1 && port <= 65_535;
+}
+
+const WINDOWS_QUICK_TUNNEL_QUERY =
+  "$ErrorActionPreference = 'Stop'; @(Get-CimInstance Win32_Process -Filter \"Name = 'cloudflared.exe'\" | Select-Object Name,ProcessId,CommandLine) | ConvertTo-Json -Compress";
+
+function quickTunnelCommandMatches(argv: string[], port: number): boolean {
+  if (argv.length !== 4) return false;
+  const executable = argv[0]!.split(/[\\/]/).pop()!.toLowerCase();
+  return (executable === "cloudflared" || executable === "cloudflared.exe")
+    && argv[1] === "tunnel"
+    && argv[2] === "--url"
+    && argv[3] === `http://127.0.0.1:${port}`;
+}
+
+function quickTunnelCommandLine(argv: string[]): string {
+  return argv.join(" ");
+}
+
+/** Return whether a command line is exactly a Quick Tunnel for `port`. */
+export function isQuickTunnelCommandLine(commandLine: string, port: number): boolean {
+  const trimmed = commandLine.trim();
+  const executableMatch = trimmed.match(/^(?:"([^"]+)"|(\S+))(?:\s+)(.*)$/);
+  if (!executableMatch) return false;
+  const executable = executableMatch[1] ?? executableMatch[2];
+  const args = executableMatch[3]!.trim().split(/\s+/);
+  return quickTunnelCommandMatches([executable!, ...args], port);
+}
+
+function parseWindowsProcessOutput(raw: string, port: number): QuickTunnelProcess[] | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (parsed === null) return [];
+  const entries: unknown[] = Array.isArray(parsed) ? parsed : [parsed];
+  const matches: QuickTunnelProcess[] = [];
+  for (const entry of entries) {
+    if (typeof entry !== "object" || entry === null) return undefined;
+    const record = entry as { Name?: unknown; ProcessId?: unknown; CommandLine?: unknown };
+    if (typeof record.Name !== "string") return undefined;
+    if (record.Name.toLowerCase() !== "cloudflared.exe") continue;
+    if (typeof record.ProcessId !== "number") return undefined;
+    // A cloudflared process with no readable command line cannot be confirmed
+    // as this Quick Tunnel, so refuse to continue rather than spawn another.
+    if (record.CommandLine === null || record.CommandLine === undefined) return undefined;
+    if (typeof record.CommandLine !== "string") return undefined;
+    if (!isQuickTunnelCommandLine(record.CommandLine, port)) continue;
+    if (Number.isInteger(record.ProcessId) && record.ProcessId > 0) {
+      matches.push({ pid: record.ProcessId, commandLine: record.CommandLine });
+    }
+  }
+  return matches;
+}
+
+function discoverWindowsQuickTunnels(port: number): QuickTunnelProcess[] | undefined {
+  const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", WINDOWS_QUICK_TUNNEL_QUERY], {
+    encoding: "utf8",
+    timeout: 5_000,
+    shell: false,
+    windowsHide: true,
+  });
+  if (result.status !== 0 || result.error) return undefined;
+  return parseWindowsProcessOutput(String(result.stdout || "[]"), port);
+}
+
+function discoverProcQuickTunnels(port: number): QuickTunnelProcess[] | undefined {
+  let entries: string[];
+  try {
+    entries = readdirSync("/proc");
+  } catch {
+    return undefined;
+  }
+  const matches: QuickTunnelProcess[] = [];
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue;
+    let raw: string;
+    try {
+      raw = readFileSync(`/proc/${entry}/cmdline`, "utf8");
+    } catch (error) {
+      // A process can disappear between readdir and read; other errors mean
+      // discovery is incomplete and must not be followed by a spawn.
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      return undefined;
+    }
+    if (!raw) continue;
+    const argv = raw.split("\0").filter((arg) => arg.length > 0);
+    if (quickTunnelCommandMatches(argv, port)) {
+      matches.push({ pid: Number(entry), commandLine: quickTunnelCommandLine(argv) });
+    }
+  }
+  return matches;
+}
+
+function discoverPsQuickTunnels(port: number): QuickTunnelProcess[] | undefined {
+  const result = spawnSync("ps", ["-wwaxo", "pid=,command="], {
+    encoding: "utf8",
+    timeout: 5_000,
+    shell: false,
+  });
+  if (result.status !== 0 || result.error) return undefined;
+  const matches: QuickTunnelProcess[] = [];
+  for (const line of String(result.stdout || "").split(/\r?\n/)) {
+    const match = line.match(/^\s*(\d+)\s+(.+?)\s*$/);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    const commandLine = match[2]!;
+    if (Number.isInteger(pid) && pid > 0 && isQuickTunnelCommandLine(commandLine, port)) {
+      matches.push({ pid, commandLine });
+    }
+  }
+  return matches;
+}
+
+/**
+ * Discover exact Quick Tunnel processes. `undefined` means the process query
+ * failed or was incomplete; callers must fail closed and never spawn then.
+ */
+export function discoverQuickTunnelProcesses(localPort: number): QuickTunnelProcess[] | undefined {
+  if (quickTunnelDiscoveryOverride) return quickTunnelDiscoveryOverride(localPort);
+  if (!isValidTunnelPort(localPort)) return undefined;
+  return process.platform === "win32"
+    ? discoverWindowsQuickTunnels(localPort)
+    : process.platform === "darwin"
+      ? discoverPsQuickTunnels(localPort)
+      : discoverProcQuickTunnels(localPort);
+}
+
+/** Strict identity check used before adopting or stopping a Quick Tunnel PID. */
+export function isQuickTunnelProcess(pid: number, localPort: number): boolean | undefined {
+  if (!Number.isInteger(pid) || pid <= 0 || !isValidTunnelPort(localPort)) return false;
+  const processes = discoverQuickTunnelProcesses(localPort);
+  if (!processes) return undefined;
+  return processes.some((process) => process.pid === pid);
+}
+
 /**
  * SEC-RV-006: verify the process at `pid` matches `expectedName` before
  * killing it, so a stale PID file cannot point at an unrelated process that
@@ -631,7 +820,12 @@ function processMatches(pid: number, expectedName: string): boolean {
   try {
     if (process.platform !== "win32") {
       const cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf8");
-      return cmdline.toLowerCase().includes(needle);
+      // Exact argv[0] basename identity. A substring match over the whole
+      // command line would also pass for unrelated processes (e.g. an editor
+      // or pager holding ~/.mcpx/config.yaml) when a PID was reused.
+      const argv0 = cmdline.split("\0").find((arg) => arg.length > 0) ?? "";
+      const base = argv0.split(/[\\/]/).pop()!.toLowerCase().replace(/\.exe$/, "");
+      return base === needle || base.startsWith(`${needle}-`) || base.startsWith(`${needle}_`);
     }
     // Windows: tasklist CSV, image name is the first column.
     const result = spawnSync("tasklist", ["/FI", `PID eq ${pid}`, "/NH", "/FO", "CSV"], {
@@ -655,8 +849,27 @@ function processMatches(pid: number, expectedName: string): boolean {
   }
 }
 
+const TERM_GRACE_MS = 2_000;
+const TERM_POLL_MS = 100;
+
+/**
+ * POSIX kill with SIGKILL escalation: SIGTERM first, then poll until the
+ * process is gone within the grace window, else SIGKILL. Without escalation a
+ * process that ignores SIGTERM would survive its own PID-file cleanup as an
+ * untracked orphan.
+ */
+export async function killProcessWithEscalation(pid: number): Promise<void> {
+  try { process.kill(pid, "SIGTERM"); } catch { return; } // ESRCH — already dead
+  const deadline = Date.now() + TERM_GRACE_MS;
+  while (Date.now() < deadline) {
+    if (!isProcessAlive(pid)) return;
+    await new Promise((resolve) => setTimeout(resolve, TERM_POLL_MS));
+  }
+  try { process.kill(pid, "SIGKILL"); } catch { /* already dead */ }
+}
+
 /** Kill a cloudflared tunnel process by PID (process tree on Windows). */
-function killTunnel(pid: number): void {
+async function killTunnel(pid: number): Promise<void> {
   // SEC-RV-006: verify identity before killing so a reused PID cannot target an
   // unrelated process. On mismatch, just clean the stale PID file and return.
   if (pid && !processMatches(pid, "cloudflared")) {
@@ -667,7 +880,7 @@ function killTunnel(pid: number): void {
     if (process.platform === "win32") {
       spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
     } else {
-      process.kill(pid, "SIGTERM");
+      await killProcessWithEscalation(pid);
     }
   } catch {
     // already dead
@@ -675,70 +888,83 @@ function killTunnel(pid: number): void {
 }
 
 /** Stop a Cloudflare quick tunnel tracked by the PID file (best-effort). */
-export function stopQuickTunnel(): void {
+export async function stopQuickTunnel(): Promise<void> {
   let pid: number | undefined;
   try {
     const raw = readFileSync(MCPX_TUNNEL_PID_FILE(), "utf8").trim();
     const parsed = Number(raw);
     if (Number.isInteger(parsed) && parsed > 0) pid = parsed;
   } catch { /* no PID file */ }
-  if (pid) killTunnel(pid);
+  if (pid) await killTunnel(pid);
   try { rmSync(MCPX_TUNNEL_PID_FILE(), { force: true }); } catch { /* best-effort */ }
 }
 
 /**
  * Restart the Cloudflare quick tunnel bound to 127.0.0.1:<port> and parse the
- * freshly generated trycloudflare.com URL. Stops any tunnel tracked by the PID
- * file first. Returns the new URL, or throws if cloudflared is missing / the
- * URL does not arrive within the timeout.
+ * freshly generated trycloudflare.com URL. Every exact Quick Tunnel currently
+ * bound to this port is stopped first, including processes with no PID file.
  */
 export async function restartQuickTunnel(localPort: number, timeoutMs = 30_000): Promise<string> {
+  if (!isValidTunnelPort(localPort)) throw new Error("无效的隧道端口（必须为 1-65535）");
   const binary = resolveCloudflared();
   if (!binary) throw new Error("未找到 cloudflared — 安装后重试");
-  // Stop any existing tunnel tracked by the PID file.
-  let oldPid: number | undefined;
+  const existing = discoverQuickTunnelProcesses(localPort);
+  if (!existing) throw new Error("无法确认现有 Quick Tunnel 进程，已停止启动以避免重复");
+  const oldPids = new Set(existing.map((process) => process.pid));
+  for (const process of existing) await killTunnel(process.pid);
   try {
-    const raw = readFileSync(MCPX_TUNNEL_PID_FILE(), "utf8").trim();
-    const parsed = Number(raw);
-    if (Number.isInteger(parsed) && parsed > 0) oldPid = parsed;
-  } catch { /* no pid file */ }
-  if (oldPid) {
-    killTunnel(oldPid);
-    try { rmSync(MCPX_TUNNEL_PID_FILE(), { force: true }); } catch { /* best-effort */ }
+    const pidFile = readFileSync(MCPX_TUNNEL_PID_FILE(), "utf8").trim();
+    const pid = Number(pidFile);
+    if (Number.isInteger(pid) && oldPids.has(pid)) rmSync(MCPX_TUNNEL_PID_FILE(), { force: true });
+  } catch { /* no PID file */ }
+  if (existing.length > 0) {
     await new Promise((resolve) => setTimeout(resolve, 500));
+    const remaining = discoverQuickTunnelProcesses(localPort);
+    if (!remaining) throw new Error("无法确认 Quick Tunnel 已停止，已停止启动以避免重复");
+    if (remaining.length > 0) throw new Error(`仍有 ${remaining.length} 个 Quick Tunnel 进程未停止，已停止启动`);
   }
   const isShim = process.platform === "win32" && /\.(cmd|bat)$/i.test(binary);
+  // Redirect child output to a log file instead of pipes: the tunnel is meant
+  // to outlive this process (detached + unref). Held pipes would kill it via
+  // SIGPIPE/EPIPE once this process exits and would leak the unbounded capture
+  // buffer; the child owns its inherited fd, so closing ours is safe.
+  const logPath = `${MCPX_TUNNEL_PID_FILE()}.log`;
+  let logFd: number | undefined;
+  try { logFd = openSync(logPath, "w"); } catch { /* no capture — URL parse will time out */ }
   const child = spawn(binary, ["tunnel", "--url", `http://127.0.0.1:${localPort}`], {
     detached: !isShim,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["ignore", logFd ?? "ignore", logFd ?? "ignore"],
     shell: isShim,
     windowsHide: true,
   });
   child.unref();
-  let output = "";
-  const capture = (chunk: Buffer) => { output += chunk.toString(); };
-  child.stdout?.on("data", capture);
-  child.stderr?.on("data", capture);
   try { writeFileSync(MCPX_TUNNEL_PID_FILE(), String(child.pid ?? ""), "utf8"); } catch { /* best-effort */ }
+  const readLog = (): string => {
+    if (logFd === undefined) return "";
+    try { return readFileSync(logPath, "utf8"); } catch { return ""; }
+  };
   const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const match = output.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
-    if (match) return match[0];
-    // Any child exit without a URL match is a hard failure — a clean exit
-    // (code 0) without a URL also means cloudflared is gone and the loop must
-    // not keep polling the dead pipe for the full timeout. Kill the child and
-    // clean the PID file to avoid an orphaned cloudflared holding port 9090.
-    if (child.exitCode !== null) {
-      try { child.kill(); } catch { /* already dead */ }
-      try { rmSync(MCPX_TUNNEL_PID_FILE(), { force: true }); } catch { /* best-effort */ }
-      throw new Error(`cloudflared 退出未取得 URL (exit=${child.exitCode}): ${output.slice(-400)}`);
+  try {
+    while (Date.now() < deadline) {
+      const match = readLog().match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
+      if (match) return match[0];
+      // Any child exit without a URL match is a hard failure — a clean exit
+      // (code 0) without a URL also means cloudflared is gone and the loop must
+      // not keep polling for the full timeout.
+      if (child.exitCode !== null) {
+        throw new Error(`cloudflared 退出未取得 URL (exit=${child.exitCode}): ${readLog().slice(-400)}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 400));
     }
-    await new Promise((resolve) => setTimeout(resolve, 400));
+    throw new Error(`cloudflared 启动超时未取得 URL: ${readLog().slice(-400)}`);
+  } catch (error) {
+    // Failure: kill the orphaned child and clean the PID file before throwing.
+    try { child.kill(); } catch { /* already dead */ }
+    try { rmSync(MCPX_TUNNEL_PID_FILE(), { force: true }); } catch { /* best-effort */ }
+    throw error;
+  } finally {
+    if (logFd !== undefined) { try { closeSync(logFd); } catch { /* best-effort */ } }
   }
-  // Timeout: kill the orphaned child and clean the PID file before throwing.
-  try { child.kill(); } catch { /* already dead */ }
-  try { rmSync(MCPX_TUNNEL_PID_FILE(), { force: true }); } catch { /* best-effort */ }
-  throw new Error(`cloudflared 启动超时未取得 URL: ${output.slice(-400)}`);
 }
 
 function replaceConfigAtomically(next: string): void {
@@ -772,7 +998,7 @@ export function updateConfigServerURL(url: string): void {
 }
 
 /** Stop the mcpx process tracked by ~/.mcpx/mcpx-server.pid (best-effort). */
-export function stopMcpx(): void {
+export async function stopMcpx(): Promise<void> {
   let pid: number | undefined;
   const pidFile = MCPX_PID_FILE();
   try {
@@ -791,7 +1017,7 @@ export function stopMcpx(): void {
     if (process.platform === "win32") {
       spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
     } else {
-      process.kill(pid, "SIGTERM");
+      await killProcessWithEscalation(pid);
     }
   } catch { /* already dead */ }
   try { rmSync(pidFile, { force: true }); } catch { /* best-effort */ }

@@ -20,7 +20,7 @@ import { existsSync, readFileSync, writeFileSync, renameSync, rmSync } from "nod
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Key, type Component, type Focusable, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
-import { locateMcpx, isProcessOwnedBy } from "../mcpx-bridge.ts";
+import { locateMcpx, discoverQuickTunnelProcesses, isProcessOwnedBy, isValidTunnelPort, killProcessWithEscalation } from "../mcpx-bridge.ts";
 
 export interface McpxWizardParams {
   cwd: string;
@@ -291,6 +291,8 @@ export class McpxWizardOverlay implements Component, Focusable {
   private draft = "";
   private status = "";
   private tunnelProcess: ReturnType<typeof spawn> | undefined;
+  private tunnelAdoptedPid: number | undefined;
+  private tunnelPort: number | undefined;
   private tunnelOutput = "";
   /** Exit code / signal captured when the cloudflared child died on its own (undefined while alive). */
   private tunnelExit: { code: number | null; signal: NodeJS.Signals | null } | undefined;
@@ -401,7 +403,7 @@ export class McpxWizardOverlay implements Component, Focusable {
       case "tunnel": {
         const hasCloudflared = isExecutableOnPath("cloudflared");
         const cloudflared = hasCloudflared ? fg("32", "✓ 已安装") : fg("31", "✗ 未安装");
-        const running = this.tunnelProcess
+        const running = this.tunnelProcess || this.tunnelAdoptedPid
           ? fg("32", `运行中${this.changes.tunnelUrl ? ` · ${this.changes.tunnelUrl}` : "（等待 URL…）"}`)
           : fg("2", "未运行");
         return [
@@ -430,7 +432,7 @@ export class McpxWizardOverlay implements Component, Focusable {
 
   /** Cloud/MCP client connection card (ChatGPT 'new plugin' style fields). */
   private renderConnectPreview(inner: number): string[] {
-    const port = this.changes.port ?? 9090;
+    const port = this.tunnelPort ?? (this.changes.port ?? 9090);
     const tunnelUrl = this.changes.tunnelUrl?.trim();
     const baseUrl = tunnelUrl ?? `http://127.0.0.1:${port}`;
     const auth = tunnelUrl
@@ -610,9 +612,25 @@ export class McpxWizardOverlay implements Component, Focusable {
 
   /** Start a Cloudflare quick tunnel bound to the local mcpx port and parse the generated URL. */
   private async startQuickTunnel(): Promise<void> {
-    if (this.tunnelProcess) {
+    const port = this.changes.port ?? 9090;
+    if (!isValidTunnelPort(port)) {
+      this.status = "无效的隧道端口（必须为 1-65535）";
+      this.params.requestRender();
+      return;
+    }
+    if (this.tunnelProcess || this.tunnelAdoptedPid) {
+      if (this.tunnelPort !== port) {
+        this.status = `已有隧道绑定端口 ${this.tunnelPort ?? "未知"}，请先停止后再更改端口`;
+        this.params.requestRender();
+        return;
+      }
       if (this.changes.tunnelUrl) {
         this.status = `隧道运行中: ${this.changes.tunnelUrl}`;
+        this.params.requestRender();
+        return;
+      }
+      if (!this.tunnelProcess) {
+        this.status = "隧道已认领但没有可读取的公网 URL，请检查 mcpx 配置后再继续";
         this.params.requestRender();
         return;
       }
@@ -622,20 +640,37 @@ export class McpxWizardOverlay implements Component, Focusable {
       await this.waitForTunnelUrl();
       return;
     }
-    // Adopt a tunnel left behind by a previous wizard session (PID file).
-    const existing = this.pidFromFile();
-    if (existing && isProcessOwnedBy(existing, "cloudflared")) {
-      this.status = `隧道已在运行（PID ${existing}）— 按 x 停止后重新启动`;
+
+    // Confirm the complete process list before adopting or spawning. An
+    // unavailable query is deliberately not treated as an empty result.
+    const candidates = discoverQuickTunnelProcesses(port);
+    if (!candidates) {
+      this.status = "无法确认 Quick Tunnel 进程，已停止启动以避免重复";
       this.params.requestRender();
       return;
     }
-    // Resolve the real executable path. Spawning the bare name with shell:true on
-    // Windows interposes cmd.exe between cloudflared and Node; with detached:true
-    // that shell interposition can drop the stdout/stderr pipe events carrying
-    // the quick-tunnel URL, so the wizard never sees it even though cloudflared
-    // is alive and printing it (metrics server up, edge registered). Spawn the
-    // resolved binary directly — only fall back to shell:true for .cmd/.bat shims
-    // (which genuinely need a shell to execute) so the URL output still reaches us.
+    if (candidates.length > 1) {
+      this.tunnelAdoptedPid = undefined;
+      this.status = `发现 ${candidates.length} 个相同端口的 Quick Tunnel，未启动新进程；请在 /mcpx 面板按 T 清理并重启`;
+      this.params.requestRender();
+      return;
+    }
+    if (candidates.length === 1) {
+      const candidate = candidates[0]!;
+      this.tunnelAdoptedPid = candidate.pid;
+      this.tunnelPort = port;
+      try { writeFileSync(this.tunnelPidPath(), String(candidate.pid), "utf8"); } catch { /* best-effort */ }
+      const configuredUrl = this.configuredTunnelUrl();
+      if (!this.changes.tunnelUrl && configuredUrl) this.changes.tunnelUrl = configuredUrl;
+      this.status = configuredUrl
+        ? `隧道已在运行（PID ${candidate.pid}）: ${configuredUrl}`
+        : `隧道已在运行（PID ${candidate.pid}），未取得 URL；请继续配置或按 x 停止`;
+      this.params.requestRender();
+      return;
+    }
+
+    // Resolve the real executable path and spawn only after the fail-closed
+    // discovery proved that no exact Quick Tunnel is currently running.
     const resolved = resolveExecutable("cloudflared");
     if (!resolved) {
       this.status = "未找到 cloudflared — 安装: winget install --id Cloudflare.cloudflared（Windows）/ brew install cloudflared（macOS）/ 官网安装包（Linux）";
@@ -646,18 +681,11 @@ export class McpxWizardOverlay implements Component, Focusable {
     this.tunnelOutput = "";
     this.tunnelExit = undefined;
     this.metricsUrl = undefined;
+    this.tunnelAdoptedPid = undefined;
     this.params.requestRender();
     try {
       const isShim = process.platform === "win32" && /\.(cmd|bat)$/i.test(resolved);
-      const child = spawn(resolved, ["tunnel", "--url", `http://127.0.0.1:${this.changes.port ?? 9090}`], {
-        // .exe: spawn directly (shell:false) so the URL pipe reaches Node, and
-        // detached so the tunnel survives the pi terminal closing.
-        // .cmd/.bat shims need a shell to run, but shell:true + detached:true
-        // empirically drops the output of any external exe the shim invokes (0
-        // bytes vs. arrives with detached:false). On Windows the shim's child
-        // stays alive across terminal close even without detached (new process
-        // group via the shell), and PID-file adoption + taskkill /T still stop
-        // it — so prefer delivering the URL over cross-session survival here.
+      const child = spawn(resolved, ["tunnel", "--url", `http://127.0.0.1:${port}`], {
         detached: !isShim,
         stdio: ["ignore", "pipe", "pipe"],
         shell: isShim,
@@ -665,6 +693,7 @@ export class McpxWizardOverlay implements Component, Focusable {
       });
       child.unref();
       this.tunnelProcess = child;
+      this.tunnelPort = port;
       this.tunnelOwnedHere = true;
       child.stdout?.on("data", (chunk: Buffer) => this.onTunnelOutput(chunk.toString()));
       child.stderr?.on("data", (chunk: Buffer) => this.onTunnelOutput(chunk.toString()));
@@ -685,6 +714,7 @@ export class McpxWizardOverlay implements Component, Focusable {
         if (this.tunnelProcess === child) {
           this.tunnelProcess = undefined;
           this.tunnelOwnedHere = false;
+          this.tunnelAdoptedPid = undefined;
           this.metricsUrl = undefined; // dead child no longer serves metrics
           try { rmSync(this.tunnelPidPath(), { force: true }); } catch { /* best-effort */ }
           // Preserve any error text already captured from stdout/stderr.
@@ -802,35 +832,47 @@ export class McpxWizardOverlay implements Component, Focusable {
 
   /** Stop the cloudflared tunnel, clear its PID file and the parsed URL. */
   private async stopTunnel(): Promise<void> {
-    let pid: number | undefined = this.tunnelProcess?.pid ?? this.pidFromFile();
+    const port = this.tunnelPort ?? (this.changes.port ?? 9090);
+    const pid: number | undefined = this.tunnelProcess?.pid ?? this.tunnelAdoptedPid ?? this.pidFromFile();
     if (!pid) {
       this.status = "未找到 cloudflared 进程";
       this.params.requestRender();
       return;
     }
-    if (!this.tunnelProcess && !isProcessOwnedBy(pid, "cloudflared")) {
-      try { rmSync(this.tunnelPidPath(), { force: true }); } catch { /* best-effort */ }
-      this.status = "未找到 cloudflared 进程";
-      this.params.requestRender();
-      return;
+    if (!this.tunnelProcess) {
+      if (!isValidTunnelPort(port)) {
+        this.status = "无效的隧道端口（必须为 1-65535）";
+        this.params.requestRender();
+        return;
+      }
+      const candidates = discoverQuickTunnelProcesses(port);
+      if (!candidates) {
+        this.status = "无法确认 Quick Tunnel 进程，未停止任何进程";
+        this.params.requestRender();
+        return;
+      }
+      if (!candidates.some((candidate) => candidate.pid === pid)) {
+        try { rmSync(this.tunnelPidPath(), { force: true }); } catch { /* best-effort */ }
+        this.status = "未找到严格匹配当前端口的 Quick Tunnel 进程";
+        this.params.requestRender();
+        return;
+      }
     }
     try {
       if (process.platform === "win32") {
-        spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
+        spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore", shell: false });
       } else if (this.tunnelProcess && !this.tunnelProcess.killed) {
         this.tunnelProcess.kill();
       } else {
-        try {
-          process.kill(pid, "SIGTERM");
-        } catch {
-          // ESRCH: already gone — treat as stopped
-        }
+        await killProcessWithEscalation(pid);
       }
       this.status = "已停止 cloudflared 隧道";
     } catch (error) {
       this.status = `停止隧道失败: ${error instanceof Error ? error.message : String(error)}`;
     }
     this.tunnelProcess = undefined;
+    this.tunnelAdoptedPid = undefined;
+    this.tunnelPort = undefined;
     this.tunnelOwnedHere = false;
     this.tunnelExit = undefined;
     this.metricsUrl = undefined;
@@ -850,6 +892,19 @@ export class McpxWizardOverlay implements Component, Focusable {
       const raw = readFileSync(this.tunnelPidPath(), "utf8").trim();
       const parsed = Number(raw);
       return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Read an already configured URL for display only; never invent one. */
+  private configuredTunnelUrl(): string | undefined {
+    const match = this.existingConfig.match(/^\s{2,}server_url:\s*"?([^"\n#]+)"?/m);
+    const value = match?.[1]?.trim();
+    if (!value || !/^https?:\/\//.test(value)) return undefined;
+    try {
+      const parsed = new URL(value);
+      return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.href.replace(/\/$/, "") : undefined;
     } catch {
       return undefined;
     }
@@ -914,14 +969,9 @@ function isExecutableOnPath(command: string): boolean {
 /**
  * Resolve `command` to the concrete executable path to spawn directly.
  *
- * Spawning the bare name with shell:true on Windows interposes cmd.exe between
- * cloudflared and Node; under detached:true that shell interposition can drop
- * the stdout/stderr pipe events carrying the quick-tunnel URL, so the wizard
- * never sees it even though cloudflared is alive and printing it (metrics server
- * up, edge registered). `where`/`which` returns matches in PATH order; the first
- * match is the one to spawn. The caller spawns .exe directly (shell:false) and
- * .cmd/.bat shims with shell:true (they need a shell to execute) — in both cases
- * the URL output reaches Node's pipe listeners.
+ * The caller uses shell:false for concrete executables and shell:true only for
+ * .cmd/.bat shims that genuinely need a shell; `where`/`which` returns matches
+ * in PATH order and the first match is used.
  */
 function resolveExecutable(command: string): string | undefined {
   const probe = spawnSync(process.platform === "win32" ? "where.exe" : "which", [command], {

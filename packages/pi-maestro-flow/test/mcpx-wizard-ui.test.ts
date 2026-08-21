@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { McpxWizardOverlay } from "../src/tui/mcpx-wizard.ts";
+import { setQuickTunnelDiscoveryForTest } from "../src/mcpx-bridge.ts";
 
 function makeWizard(overrides: { onWrite?: () => void } = {}) {
   const calls: string[] = [];
@@ -13,6 +14,17 @@ function makeWizard(overrides: { onWrite?: () => void } = {}) {
 }
 
 const renderText = (overlay: McpxWizardOverlay) => overlay.render(100).join("\n");
+
+let restoreDefaultDiscovery: (() => void) | undefined;
+test.beforeEach(() => {
+  // Keep host cloudflared processes out of shim-based UI tests. Individual
+  // adoption tests install a narrower override and restore this default.
+  restoreDefaultDiscovery = setQuickTunnelDiscoveryForTest(() => []);
+});
+test.afterEach(() => {
+  restoreDefaultDiscovery?.();
+  restoreDefaultDiscovery = undefined;
+});
 
 test("wizard starts at the listen step and shows all options", () => {
   const { overlay } = makeWizard();
@@ -58,6 +70,55 @@ test("auth step is gone — policy follows listen directly", () => {
   overlay.handleInput("\r"); // listen -> policy
   assert.match(renderText(overlay), /2\/7 命令策略/);
   assert.doesNotMatch(renderText(overlay), /认证模式/);
+});
+
+test("wizard adopts a discovered Quick Tunnel without relying on a PID file", async (t) => {
+  const { mkdtemp, rm, readFile } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = await mkdtemp(join(tmpdir(), "mcpx-adopt-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const pidPath = join(dir, "cloudflared.pid");
+  const previousPidFile = process.env.MCPX_TUNNEL_PID_FILE;
+  process.env.MCPX_TUNNEL_PID_FILE = pidPath;
+  t.after(() => {
+    if (previousPidFile === undefined) delete process.env.MCPX_TUNNEL_PID_FILE;
+    else process.env.MCPX_TUNNEL_PID_FILE = previousPidFile;
+  });
+  const restoreDiscovery = setQuickTunnelDiscoveryForTest((port) => port === 9090
+    ? [{ pid: 424242, commandLine: "cloudflared tunnel --url http://127.0.0.1:9090" }]
+    : []);
+  t.after(restoreDiscovery);
+
+  const { overlay } = makeWizard();
+  // Navigate to the tunnel step and start with no PID file present.
+  ["\x1b[B", "\x1b[B", "\r", "\x1b[B", "\r", "\r", "\x1b[B", "\r", "\r"].forEach((key) => overlay.handleInput(key));
+  overlay.handleInput("g");
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(overlay["tunnelProcess"], undefined, "an existing candidate must be adopted, not spawned");
+  assert.equal(overlay["tunnelAdoptedPid"], 424242);
+  assert.match(overlay["status"], /隧道已在运行（PID 424242）/);
+  assert.equal(await readFile(pidPath, "utf8"), "424242");
+});
+
+test("wizard refuses to spawn when multiple matching Quick Tunnels exist", async (t) => {
+  const restoreDiscovery = setQuickTunnelDiscoveryForTest((port) => port === 9090
+    ? [
+      { pid: 424242, commandLine: "cloudflared tunnel --url http://127.0.0.1:9090" },
+      { pid: 424243, commandLine: "cloudflared tunnel --url http://127.0.0.1:9090" },
+    ]
+    : []);
+  t.after(restoreDiscovery);
+
+  const { overlay } = makeWizard();
+  ["\x1b[B", "\x1b[B", "\r", "\x1b[B", "\r", "\r", "\x1b[B", "\r", "\r"].forEach((key) => overlay.handleInput(key));
+  overlay.handleInput("g");
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(overlay["tunnelProcess"], undefined);
+  assert.equal(overlay["tunnelAdoptedPid"], undefined);
+  assert.match(overlay["status"], /未启动新进程/);
 });
 
 test("tunnel step offers only the Cloudflare quick tunnel", async (t) => {
