@@ -1562,9 +1562,12 @@ export class McpxOverlay implements Component, Focusable {
 
 function sanitizeTerminalText(value: string): string {
   return value
-    .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "") // OSC 序列(标题等)
+    // 非颜色 CSI 序列清掉;SGR 颜色码(以 m 结尾)必须保留以维持 fg()/主题着色
     .replace(/\x1b\[(?![0-9;]*m)[0-9;?]*[ -/]*[@-~]/g, "")
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, "");
+    // C0/C1 控制:保留 ESC(0x1b,SGR 序列的一部分)与 \t\n;只剥除其余控制符
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001a\u001c-\u001f\u007f-\u009f]/g, "")
+    .replace(/\r/g, "");
 }
 
 function windowEventKey(event: McpxWindowEvent): string {
