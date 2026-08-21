@@ -442,6 +442,74 @@ test("a timed-out mid-turn submission holds new submissions until it settles", a
   assert.ok(notifications.some((message) => message.includes("eventually completed")));
 });
 
+test("a late zombie completion resumes the interrupted task", async () => {
+  const compactCalls: Array<{ onComplete: () => void; onError: (error: Error) => void }> = [];
+  const sent: string[] = [];
+  const guard = createMidTurnAutoCompaction({ sendUserMessage(message: string) { sent.push(message); } } as never, {
+    leaseTimeoutMs: 100,
+    arbiter: new CompactionArbiter(100),
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({
+      enabled: true,
+      reserveTokens: 16_384,
+      keepRecentTokens: 20_000,
+      model: "maestro-qwen/summary-small",
+    }),
+  });
+  const compactionModel = {
+    provider: "maestro-qwen",
+    id: "summary-small",
+    contextWindow: 400_000,
+    maxTokens: 128_000,
+  };
+  const ctx = {
+    cwd: "D:\\repo",
+    model: {
+      provider: "maestro-openai",
+      id: "session-large",
+      contextWindow: 1_000_000,
+      maxTokens: 128_000,
+    },
+    modelRegistry: {
+      find(provider: string, id: string) {
+        return provider === compactionModel.provider && id === compactionModel.id
+          ? compactionModel
+          : undefined;
+      },
+      async getApiKeyAndHeaders() {
+        return { ok: true, apiKey: "sk-test" };
+      },
+    },
+    abort() {},
+    compact(options: { onComplete: () => void; onError: (error: Error) => void }) {
+      compactCalls.push(options);
+    },
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: {
+      setStatus() {},
+      notify() {},
+    },
+  } as never;
+
+  // An exhausted intent aborts the run, so the task can only resume through
+  // the continuation prompt after compaction settles.
+  await guard.evaluate(highUsageToolBatch(1_100_000), ctx);
+  await guard.onAgentEnd(ctx);
+  assert.equal(compactCalls.length, 1, "an exhausted intent submits immediately");
+
+  // The watchdog fires before the host settles: ownership is revoked.
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.notEqual(guard.describeState().zombieOwner, undefined, "the watchdog marks the unsettled submission");
+
+  // The host eventually completes successfully: the task must resume.
+  compactCalls[0].onComplete();
+  assert.equal(guard.describeState().zombieOwner, undefined, "a late completion clears the zombie");
+  assert.ok(
+    sent.some((message) => message.startsWith("Continue the interrupted task")),
+    "a late zombie completion sends the continuation prompt",
+  );
+});
+
 test("compaction arbiter preserves output-limit ownership through instruction tags", () => {
   const arbiter = new CompactionArbiter();
   const outputLimit = arbiter.request("output-limit");

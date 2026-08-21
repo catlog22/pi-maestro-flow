@@ -1005,6 +1005,12 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
           "Request stopped because compaction settings changed while provider-pressure recovery was pending. Retry the request with the new settings.",
           "error",
         );
+      } else if (intent.contextExhausted || intent.loopCritical) {
+        // An interrupted task must never lose its settlement silently.
+        ctx.ui.notify(
+          "Interrupted task paused: compaction settings changed before the queued compaction ran. Send any message to continue the task.",
+          "warning",
+        );
       }
       return;
     }
@@ -1021,6 +1027,40 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         `Mid-turn compaction paused after ${state.breaker.consecutiveFailures} consecutive failures; it can retry after ${COMPACTION_BREAKER_COOLDOWN_TURNS} subsequent turns.`,
         "warning",
       );
+    };
+    // Shared post-failure continuation policy for an interrupted task
+    // (contextExhausted / loopCritical). Breaker-tripped cycles fall back to
+    // native compaction (exhausted) or a bare continue (loop-critical);
+    // otherwise a retry prompt asks the model to re-run compaction first.
+    // The watchdog path passes allowNativeFallback:false because an unconfirmed
+    // host submission may still be alive; prompt-based recovery is safe — its
+    // settle re-checks zombie state before submitting anything.
+    const recoverInterruptedTask = (
+      intent: PendingCompactionIntent,
+      options: { allowNativeFallback?: boolean } = {},
+    ): void => {
+      if (intent.requestBlocked) return;
+      if ((!intent.contextExhausted && !intent.loopCritical) || ctx.hasPendingMessages?.()) return;
+      if (state.breaker.trippedAtTurn !== undefined) {
+        notifyBreakerPaused();
+        if (intent.loopCritical) {
+          state.loopCriticalBlocked = false;
+          try {
+            pi.sendUserMessage(CONTINUE_PROMPT, { deliverAs: "followUp" });
+          } catch (recoveryError) {
+            ctx.ui.notify(`Mid-turn compaction recovery failed: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`, "error");
+          }
+        } else if (options.allowNativeFallback !== false) {
+          fallbackToNativeCompaction(ctx, intent);
+        }
+        return;
+      }
+      state.loopCriticalBlocked = false;
+      try {
+        pi.sendUserMessage(COMPACTION_RETRY_PROMPT, { deliverAs: "followUp" });
+      } catch (recoveryError) {
+        ctx.ui.notify(`Mid-turn compaction recovery failed: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`, "error");
+      }
     };
     const breakerCheck = compactionBreakerAllows(state.breaker, state.turnCount);
     if (state.breaker.trippedAtTurn !== undefined && breakerCheck.breaker.trippedAtTurn === undefined) {
@@ -1048,30 +1088,8 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         `${message}: ${error instanceof Error ? error.message : String(error)}`,
         intent.requestBlocked ? "error" : "warning",
       );
-      const breakerTripped = state.breaker.trippedAtTurn !== undefined;
       clearPending();
-      if (intent.requestBlocked) return;
-      if ((!intent.contextExhausted && !intent.loopCritical) || ctx.hasPendingMessages?.()) return;
-      if (breakerTripped) {
-        notifyBreakerPaused();
-        if (intent.loopCritical) {
-          state.loopCriticalBlocked = false;
-          try {
-            pi.sendUserMessage(CONTINUE_PROMPT, { deliverAs: "followUp" });
-          } catch (recoveryError) {
-            ctx.ui.notify(`Mid-turn compaction recovery failed: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`, "error");
-          }
-        } else {
-          fallbackToNativeCompaction(ctx, intent);
-        }
-        return;
-      }
-      state.loopCriticalBlocked = false;
-      try {
-        pi.sendUserMessage(COMPACTION_RETRY_PROMPT, { deliverAs: "followUp" });
-      } catch (recoveryError) {
-        ctx.ui.notify(`Mid-turn compaction recovery failed: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`, "error");
-      }
+      recoverInterruptedTask(intent);
     };
 
     let internals: PiCompactionInternals;
@@ -1105,9 +1123,10 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       else {
         clearPending();
         // The in-flight foreign compaction will relieve pressure, but the
-        // dropped intent is not requeued — say so instead of failing silently.
+        // dropped intent is not requeued — say so instead of failing silently,
+        // and tell the user how to resume an interrupted task.
         ctx.ui.notify(
-          `Mid-turn compaction intent dropped: a ${dependencies.arbiter.currentOwner()} compaction is already active.`,
+          `Mid-turn compaction intent dropped: a ${dependencies.arbiter.currentOwner()} compaction is already active. If a task was interrupted, send any message after it completes to resume.`,
           "info",
         );
       }
@@ -1172,7 +1191,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         ctx.ui.notify(
           tombstone
             ? `Mid-turn compaction skipped: a timed-out compaction may still be settling (~${Math.ceil(tombstone.remainingMs / 1000)}s hold left). It will retry on the next trigger.`
-            : "Mid-turn compaction skipped: the compaction arbiter is busy.",
+            : "Mid-turn compaction skipped: the compaction arbiter is busy. If a task was interrupted, send any message once pressure clears to resume.",
           "info",
         );
       }
@@ -1228,26 +1247,9 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
             : "Mid-turn compaction timed out; it will retry at the next pressure evaluation.",
           "warning",
         );
-        if (breakerTripped) notifyBreakerPaused();
-        if (!intent.contextExhausted && !intent.loopCritical) return;
-        if (ctx.hasPendingMessages?.()) return;
-        if (breakerTripped) {
-          if (intent.loopCritical) {
-            state.loopCriticalBlocked = false;
-            try {
-              pi.sendUserMessage(CONTINUE_PROMPT, { deliverAs: "followUp" });
-            } catch (recoveryError) {
-              ctx.ui.notify(`Mid-turn compaction recovery failed: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`, "error");
-            }
-          }
-          return;
-        }
-        state.loopCriticalBlocked = false;
-        try {
-          pi.sendUserMessage(COMPACTION_RETRY_PROMPT, { deliverAs: "followUp" });
-        } catch (recoveryError) {
-          ctx.ui.notify(`Mid-turn compaction recovery failed: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`, "error");
-        }
+        // No native fallback here: the timed-out submission may still be alive.
+        // Prompt-based recovery is safe — its settle re-checks zombie state.
+        recoverInterruptedTask(intent, { allowNativeFallback: false });
       }, leaseTimeoutMs);
       watchdog.unref?.();
     };
@@ -1260,6 +1262,10 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
           `The timed-out mid-turn compaction eventually failed: ${error instanceof Error ? error.message : String(error)}`,
           "warning",
         );
+        // The watchdog already recorded the failure and released the lease;
+        // ownership stays revoked, but the interrupted task must not strand.
+        if (!state.running) recoverInterruptedTask(intent);
+        return;
       }
       if (intent.generation !== state.generation || state.activeOwner !== owner) return;
       state.breaker = recordCompactionFailure(state.breaker, state.turnCount);
@@ -1277,34 +1283,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         state.providerPressureTerminal = false;
         return;
       }
-      if (!intent.contextExhausted && !intent.loopCritical) return;
-      if (state.breaker.trippedAtTurn !== undefined) {
-        notifyBreakerPaused();
-        if (intent.loopCritical) {
-          state.loopCriticalBlocked = false;
-          try {
-            pi.sendUserMessage(CONTINUE_PROMPT, { deliverAs: "followUp" });
-          } catch (recoveryError) {
-            ctx.ui.notify(
-              `Mid-turn compaction recovery failed: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`,
-              "error",
-            );
-          }
-        } else {
-          fallbackToNativeCompaction(ctx, intent);
-        }
-        return;
-      }
-      if (ctx.hasPendingMessages?.()) return;
-      state.loopCriticalBlocked = false;
-      try {
-        pi.sendUserMessage(COMPACTION_RETRY_PROMPT, { deliverAs: "followUp" });
-      } catch (recoveryError) {
-        ctx.ui.notify(
-          `Mid-turn compaction recovery failed: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`,
-          "error",
-        );
-      }
+      recoverInterruptedTask(intent);
     };
     try {
       ctx.ui.setStatus(COMPACTION_STATUS_KEY, formatCompactionStatus({
@@ -1327,6 +1306,25 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
             state.zombieOwner = undefined;
             state.zombieDeadlineMs = undefined;
             ctx.ui.notify("The timed-out mid-turn compaction eventually completed.", "info");
+            // The watchdog revoked ownership and recorded a failure, but the
+            // compaction itself succeeded: restore success bookkeeping and
+            // resume the interrupted task instead of stranding it.
+            if (state.activeOwner !== owner) {
+              if (state.running || (state.pendingIntent !== undefined && state.pendingIntent !== intent)) return;
+              if (state.pendingIntent === intent) state.pendingIntent = undefined;
+              if (state.lastTriggerKey === intent.triggerKey) state.lastTriggerKey = undefined;
+              persistPendingIntent(pi, state);
+              state.breaker = resetCompactionBreaker();
+              state.breakerNotified = false;
+              clearPressureStatus(ctx);
+              if ((!intent.contextExhausted && !intent.requestBlocked && !intent.loopCritical) || ctx.hasPendingMessages?.()) return;
+              try {
+                pi.sendUserMessage(CONTINUE_PROMPT, { deliverAs: "followUp" });
+              } catch (error) {
+                ctx.ui.notify(`Mid-turn continuation failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+              }
+              return;
+            }
           }
           if (state.activeOwner !== owner) return;
           state.breaker = resetCompactionBreaker();
