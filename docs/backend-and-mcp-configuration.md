@@ -1,0 +1,162 @@
+# 执行后端与外部 MCP 配置
+
+面向操作员：把一个外部执行体接进 teammate，以及给 dsh 运行时挂上外部 MCP。
+
+写适配器本身请看 [teammate-backend-adapter-contract.md](teammate-backend-adapter-contract.md)（接口、能力表、注册文档结构）。todo bridge 那一条 mcp-client 的两侧配置在 [dsh-todo-bridge-deployment.md](dsh-todo-bridge-deployment.md)，本文不重复。
+
+## 两层，别配错地方
+
+配置分属两个互不相干的层：
+
+| 层 | 文件 | 决定什么 |
+|---|---|---|
+| 宿主 | `.pi/teammate-backends.json` | 有哪些后端可派发、各自怎么启动 |
+| 运行时 | 后端自己的配置文件 | 该后端内部的能力，例如 dsh 的 `cordis.yml` 挂哪些 MCP |
+
+**外部 MCP 属于第二层。** 宿主对它一无所知，`.pi/teammate-backends.json` 里没有也不该有 MCP 字段。给 dsh 挂 MCP 就是编辑 `cordisConfig` 指向的那个 `cordis.yml`。
+
+## 第一层：注册后端
+
+`.pi/teammate-backends.json` 的结构、`mode` / `default` / `backends` 三个键的语义见契约文档的 Registering a backend 一节。这里只给两个后端的完整可用配置。
+
+```json
+{
+  "mode": "backend-registry",
+  "default": "pi-subprocess",
+  "backends": {
+    "cursor": {
+      "module": "pi-maestro-teammate/v1/acp-cli",
+      "config": {
+        "command": "/Users/<you>/.local/bin/agent",
+        "args": ["acp"],
+        "modelId": "cli/cursor",
+        "acpModel": "composer-2.5[fast=true]",
+        "startupTimeoutMs": 30000
+      }
+    },
+    "dsh": {
+      "module": "pi-maestro-backends/dsh",
+      "config": {
+        "cordisConfig": "/绝对路径/到/dsh/cordis.yml",
+        "model": "deepseek-v4-flash",
+        "apiKeyEnv": "DEEPSEEK_API_KEY"
+      }
+    }
+  }
+}
+```
+
+`mode` 缺省是 `legacy`，此时整个 registry 不生效，`cli/<tool>` 与显式 `backend` 都会被按名拒绝。要用就必须显式写 `backend-registry`。
+
+### ACP-CLI 后端字段
+
+任何说 ACP 的 CLI 都用这一个模块，一个 CLI 一条注册项。
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `command` | 是 | 可执行文件。指向包装脚本或符号链接，不要绕到内层二进制 |
+| `args` | 否 | 进入 ACP 模式的参数，例如 Cursor 是 `["acp"]`、Gemini 是 `["--acp"]` |
+| `modelId` | 否 | 该注册项服务的 `cli/<tool>` 路由；缺省由注册名派生 |
+| `acpModel` | 否 | 该注册项的默认内层模型，取值属于 CLI 自己的目录 |
+| `runTimeoutMs` | 否 | 运行起来之后的上限 |
+| `startupTimeoutMs` | 否 | 握手上限，默认 15000。**只该往上调** |
+| `cwd` / `env` | 否 | `env` 装的是**变量名**，含等号的条目会被拒 |
+| `mode` | 否 | `local`（默认）或 `ssh` |
+| `host` / `user` / `hostKeySha256` | `mode: "ssh"` 时是 | 缺任一条都会在读注册文档时报错，逐个点名 |
+| `port` / `identityFile` | 否 | `port` 默认 22 |
+
+**模型是两个轴，不是一个。** `modelId` 选的是哪个 CLI，`acpModel` 选的是那个 CLI 里的哪个模型。任务里 `model` 等于路由 id 时用注册项的 `acpModel`，不等于时该值本身就是内层模型。
+
+内层模型的合法取值只有 CLI 自己知道，配错了会在**发出 prompt 之前**失败，错误消息列出全部可用值——**报错本身就是目录**，不必先去别处查。
+
+`startupTimeoutMs` 的默认值 15000 是量过的：ACP 握手包含 `initialize` 与 `session/new` 两步，实测装好的 Claude Code 适配器在 5000 下仍会在 `session/new` 超时。`command` 走 `npx` 之类会先下载的启动方式要调更高。
+
+### dsh 后端字段
+
+| 字段 | 必填 | 默认 |
+|---|---|---|
+| `cordisConfig` | **是** | — |
+| `command` | 否 | `dsh-jsonrpc-agent` |
+| `provider` | 否 | `deepseek-official` |
+| `model` | 否 | `deepseek-v4-flash` |
+| `apiKeyEnv` | 否 | credential-ref |
+| `envPassthrough` | 否 | 变量名列表 |
+| `todoBridge` | 否 | `false` |
+| `cwd` / `maxTokens` | 否 | — |
+| `requestTimeoutMs` | 否 | `300000` |
+
+`cordisConfig` 是必填且没有默认值，路径不存在会在读注册文档时就失败，不会拖到运行期。
+
+**`apiKeyEnv` 存的是键名，不是密钥。** 它声明为 `credential-ref` 且位置是 `env-file-key`：宿主把键名写进 dsh 运行时自己的 env 文件（在 `cordis.yml` 旁边），密钥本身从不经过宿主。所以这个注册文档可以提交进仓库。
+
+## 第二层：给 dsh 挂外部 MCP
+
+编辑 `cordisConfig` 指向的 `cordis.yml`。该文件是插件条目的**列表**，不是映射。一个 MCP server 一条 `@deepseek-ai/dsh-mcp-client` 条目：
+
+```yaml
+- id: mcp-github
+  name: '@deepseek-ai/dsh-mcp-client'
+  config:
+    serverName: github
+    transport: stdio
+    command: npx
+    args: ['-y', '@modelcontextprotocol/server-github']
+    env:
+      GITHUB_TOKEN: !!js process.env.GITHUB_TOKEN
+
+- id: mcp-web
+  name: '@deepseek-ai/dsh-mcp-client'
+  config:
+    serverName: web
+    transport: streamable-http
+    url: http://localhost:3000/mcp
+```
+
+模型看到的工具名是 `mcp__<serverName>__<rawName>`，与 Claude Code、Codex 同一套命名。
+
+`serverName` 要匹配 `/^[A-Za-z0-9_-]{1,32}$/`，且在所有存活实例中唯一——重名会让后一条在加载时失败。名字里带其他字符不会报错，但公共名会被规范化并追加 hash 后缀，于是**按名字路由的规则和断言会失配**。
+
+该条目需要运行时装有 `@deepseek-ai/dsh-mcp-client`。它不在默认依赖内，要单独装。
+
+### 裁剪工具集
+
+挂进来的 server 若提供与宿主重复的工具（典型是文件读写），会让模型面对两套做同一件事的工具。多数 MCP server 支持用环境变量裁剪，例如：
+
+```yaml
+    env:
+      MAESTRO_ENABLED_TOOLS: maestro_wiki_search,store_knowhow
+```
+
+裁剪与否取决于 server 自身是否提供这个口子，mcp-client 不做过滤。
+
+### `!!js` 的两条硬规则
+
+`cordis.yml` 只在插件 `config` 与条目 `disabled` 下允许 `!!js`。
+
+**绝不能写 `!js`。** 单感叹号不是同一个标签，不会求值，会静默得到一个字符串。
+
+`disabled` 的值必须加引号，因为 YAML 的普通标量不允许以 `!` 开头。
+
+## 已知限制
+
+**MCP 启动超时继承 SDK 的 60 秒硬默认**，dsh 的 mcp-client 没有暴露这个配置项。要拉起 Node 进程的 server 冷启动慢时会卡在这里，而错误信息不会指向握手。
+
+**只桥接了 Tools。** MCP 的 Resources 与 Prompts 没有宿主消费者。
+
+**图像、音频与 resource 块在模型上下文里退化成占位符**，完整 JSON 仍保留在执行期的值里。
+
+**ACP-CLI 的超时是逐注册项而非逐任务**，因为 `TeammateRunSpec` 不带 `timeoutMs`。同一个 CLI 要两种超时就注册两条，配不同的 `config`。
+
+**ssh 模式的注册项无法发现模型**：探测在本进程拉起 agent，够不到远端目录，会明确拒绝而不是拿本机答案冒充。
+
+## 排错
+
+**`teammate backend "<name>" is not registered`** —— 任务点名的后端不在 `backends` 里，或 `mode` 还是 `legacy`。不会回落到默认后端。
+
+**`... loaded from "<module>" but exports no backend`** —— `module` 解析到了，但既没有 `default` 也没有以具名导出提供 `name` / `capabilities` / `start` 三者。
+
+**`ACP option "model" does not advertise "<值>"`** —— 内层模型名不在该 CLI 的目录里，错误消息已附完整目录。
+
+**运行成功但 CLI 用的不是你配的模型** —— 检查任务的 `model` 是否恰好等于路由 id，那种情况下用的是注册项的 `acpModel`。
+
+**dsh 运行判 failed 且警告提到 todo endpoint** —— 开了 `todoBridge` 但 `cordis.yml` 缺对应条目，见 [dsh-todo-bridge-deployment.md](dsh-todo-bridge-deployment.md)。
