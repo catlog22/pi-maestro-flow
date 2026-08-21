@@ -7,6 +7,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { altKey } from "pi-maestro-settings-core/v1";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
@@ -759,7 +760,7 @@ export function backgroundWaitGuidance(correlationId: string): string {
  * Appended to foreground detach acknowledgements so the Alt+B shortcut stays
  * discoverable across the root single, root graph, and nested foreground paths.
  */
-export const FOREGROUND_DETACH_HINT = "Alt+B detaches a foreground call to background.";
+export const FOREGROUND_DETACH_HINT = `${altKey("B")} detaches a foreground call to background.`;
 
 /**
  * One session-scoped Alt+B listener dispatches to the oldest active foreground
@@ -1933,7 +1934,7 @@ export function renderAgentStatusWidget(
     terminatedCount ? tuiT("widget.terminated", { count: terminatedCount }) : "",
   ].filter(Boolean).join(" · ");
   const lines = [truncateToWidth(
-    `${theme.bold(tuiT("widget.header"))}  ${theme.fg("dim", `${summary} · Alt+R`)}`,
+    `${theme.bold(tuiT("widget.header"))}  ${theme.fg("dim", `${summary} · ${altKey("R")}`)}`,
     safeWidth,
     "…",
   )];

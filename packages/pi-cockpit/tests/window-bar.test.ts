@@ -1,3 +1,4 @@
+import { altKey } from "pi-maestro-settings-core/v1";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -10,6 +11,9 @@ import { renderWindowBar, windowSessionColor } from "../src/window-bar.ts";
 import { renderWindowThreadView } from "../src/window-thread-view.ts";
 import { cockpitTuiLocale } from "../src/tui-i18n.ts";
 import type { SessionHostSnapshot } from "pi-maestro-teammate/v1/sessions";
+
+/** `altKey` escaped for use inside a regular expression: `+` is a metacharacter. */
+const altRe = (key: string): string => altKey(key).replaceAll("+", "\\+");
 
 cockpitTuiLocale.setLocale("en");
 
@@ -242,11 +246,11 @@ test("Window Bar shows the Alt+R list hint only outside a capturing overlay", ()
 		value.monitoredEndpointIds,
 		100,
 		theme as Theme,
-		{ shortcutHint: "Alt+R list" },
+		{ shortcutHint: `${altKey("R")} list` },
 	)[0]!;
 	const hidden = renderWindowBar(value.windows, state, value.monitoredEndpointIds, 100, theme as Theme)[0]!;
-	assert.match(visible, /Alt\+R list$/);
-	assert.doesNotMatch(hidden, /Alt\+R/);
+	assert.match(visible, new RegExp(`${altRe("R")} list$`));
+	assert.doesNotMatch(hidden, new RegExp(`${altRe("R")}`));
 });
 
 test("Window Bar empty state is width bounded", () => {

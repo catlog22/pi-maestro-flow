@@ -1,4 +1,4 @@
-import type { TranslationCatalogs } from "pi-maestro-settings-core/v1";
+import { altKey, type TranslationCatalogs } from "pi-maestro-settings-core/v1";
 
 export const CORE_TUI_CATALOGS = {
   en: {
@@ -71,8 +71,8 @@ export const CORE_TUI_CATALOGS = {
     "progress.header.pending": "{count} pending",
     "progress.header.agents": "agents {count}",
     "progress.header.delegated": "{count} delegated",
-    "progress.footer": "Alt+R details · 1-{max} view · 0 overview",
-    "progress.expand": "Alt+R details",
+    "progress.footer": `${altKey("R")} details · 1-{max} view · 0 overview`,
+    "progress.expand": `${altKey("R")} details`,
     "progress.quiet.failed": "failed",
     "progress.quiet.done": "done",
     "attach.messageCancelled": "Message cancelled",
@@ -194,8 +194,8 @@ export const CORE_TUI_CATALOGS = {
     "progress.header.pending": "{count} 个等待中",
     "progress.header.agents": "Agent {count}",
     "progress.header.delegated": "{count} 个已委派",
-    "progress.footer": "Alt+R 详情 · 1-{max} 查看 · 0 总览",
-    "progress.expand": "Alt+R 详情",
+    "progress.footer": `${altKey("R")} 详情 · 1-{max} 查看 · 0 总览`,
+    "progress.expand": `${altKey("R")} 详情`,
     "progress.quiet.failed": "失败",
     "progress.quiet.done": "完成",
     "attach.messageCancelled": "消息已取消",

@@ -1,3 +1,4 @@
+import { altKey } from "pi-maestro-settings-core/v1";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { renderBashBgSummary } from "../src/bash-bg-widget.ts";
@@ -5,6 +6,9 @@ import { cockpitTuiLocale } from "../src/tui-i18n.ts";
 import { resolveGlyphs } from "../src/icons.ts";
 import type { PaintTheme, WidthUtils } from "../src/render.ts";
 import type { BashBgJob } from "../src/types.ts";
+
+/** `altKey` escaped for use inside a regular expression: `+` is a metacharacter. */
+const altRe = (key: string): string => altKey(key).replaceAll("+", "\\+");
 
 cockpitTuiLocale.setLocale("en");
 
@@ -39,7 +43,7 @@ test("hideLiveDuration drops the live elapsed but keeps status, counts and hint"
 	assert.match(line, /BG/);
 	assert.match(line, /1 running/);
 	assert.doesNotMatch(line, /10s/);
-	assert.match(line, /Alt\+J details/);
+	assert.match(line, new RegExp(`${altRe("J")} details`));
 });
 
 test("hideLiveDuration also covers stopping jobs and keeps the static line stable", () => {
@@ -70,7 +74,7 @@ test("summary shows only active count, duration and detail shortcut", () => {
 	assert.match(line, /BG/);
 	assert.match(line, /2 running/);
 	assert.match(line, /8s/);
-	assert.match(line, /Alt\+J details/);
+	assert.match(line, new RegExp(`${altRe("J")} details`));
 	assert.doesNotMatch(line, /bg-2/);
 	assert.doesNotMatch(line, /npm run dev/);
 	assert.doesNotMatch(line, /http:\/\/localhost:3000/);

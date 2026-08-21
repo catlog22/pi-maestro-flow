@@ -1,3 +1,4 @@
+import { altKey } from "pi-maestro-settings-core/v1";
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Theme } from "@earendil-works/pi-coding-agent";
@@ -6,6 +7,9 @@ import { renderAgentBar } from "../src/agent-bar.ts";
 import type { CockpitEndpoint } from "../src/endpoint-store.ts";
 import { SessionUiState } from "../src/session-ui-state.ts";
 import type { AgentRow } from "../src/types.ts";
+
+/** `altKey` escaped for use inside a regular expression: `+` is a metacharacter. */
+const altRe = (key: string): string => altKey(key).replaceAll("+", "\\+");
 
 const theme: Pick<Theme, "fg" | "bold"> = {
 	fg: (color, text) => `\x1b[${color === "error" ? 31 : color === "warning" ? 33 : color === "success" ? 32 : 36}m${text}\x1b[0m`,
@@ -198,11 +202,11 @@ test("Agent Bar shows the Alt+R list hint only when the surface is not covered b
 	state.reconcile("agent", endpoints, "root");
 	const visible = stripAnsi(renderAgentBar(endpoints, state, 80, theme as Theme, {
 		now: 10_000,
-		shortcutHint: "Alt+R list",
+		shortcutHint: `${altKey("R")} list`,
 	})[0]);
 	const hidden = stripAnsi(renderAgentBar(endpoints, state, 80, theme as Theme, { now: 10_000 })[0]);
-	assert.match(visible, /Alt\+R list$/);
-	assert.doesNotMatch(hidden, /Alt\+R/);
+	assert.match(visible, new RegExp(`${altRe("R")} list$`));
+	assert.doesNotMatch(hidden, new RegExp(`${altRe("R")}`));
 });
 
 test("Agent Bar appends the live tool to a running agent chip", () => {

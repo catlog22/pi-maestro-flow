@@ -1,4 +1,4 @@
-import type { TranslationCatalogs } from "pi-maestro-settings-core/v1";
+import { altKey, type TranslationCatalogs } from "pi-maestro-settings-core/v1";
 
 export const SESSION_TUI_CATALOGS = {
   en: {
@@ -58,7 +58,7 @@ export const SESSION_TUI_CATALOGS = {
     "widget.retryingAction": "retrying · {action}",
     "widget.childOf": "child of @{name}",
     "widget.resultFrom": "result from {names}",
-    "widget.inspectMore": "└─ … {count} more · Alt+R to inspect",
+    "widget.inspectMore": `└─ … {count} more · ${altKey("R")} to inspect`,
     "widget.action.write": "writing file",
     "widget.action.read": "reading files",
     "widget.action.command": "running command",
@@ -140,7 +140,7 @@ export const SESSION_TUI_CATALOGS = {
     "widget.retryingAction": "重试中 · {action}",
     "widget.childOf": "@{name} 的子 Tasks",
     "widget.resultFrom": "结果来自 {names}",
-    "widget.inspectMore": "└─ … 还有 {count} 个 · 按 Alt+R 查看",
+    "widget.inspectMore": `└─ … 还有 {count} 个 · 按 ${altKey("R")} 查看`,
     "widget.action.write": "正在写入文件",
     "widget.action.read": "正在读取文件",
     "widget.action.command": "正在运行命令",

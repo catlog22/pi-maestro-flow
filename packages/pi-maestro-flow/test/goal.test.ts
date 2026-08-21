@@ -1,3 +1,4 @@
+import { altKey } from "pi-maestro-settings-core/v1";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -108,6 +109,9 @@ import {
 } from "../src/tools/todo.ts";
 import type { WorkflowSnapshot } from "../src/session/types.ts";
 import { renderGoalWidget, renderGoalPanel, type GoalWidgetModel, type GoalPanelEntry } from "../src/tui/goal-widget.ts";
+
+/** `altKey` escaped for use inside a regular expression: `+` is a metacharacter. */
+const altRe = (key: string): string => altKey(key).replaceAll("+", "\\+");
 
 function createContext(overrides: Partial<GoalContext> = {}): GoalContext {
   return {
@@ -889,7 +893,7 @@ test("goal panel renders a compact strip: current goal metrics plus one shared c
   assert.match(text, /Goal 2\/3/);
   assert.match(text, /ACTIVE/);
   assert.match(text, /12k\/50k/);
-  assert.match(text, /Alt\+G details/);
+  assert.match(text, new RegExp(`${altRe("G")} details`));
   assert.match(text, /✓ 1\/3 verified/);
   assert.match(text, /⏸ 3\/3 stopped/);
   assert.doesNotMatch(text, /First gate|Second gate|Final acceptance|Task [ABC]/);
@@ -954,7 +958,7 @@ test("goal lifecycle keeps a below-editor widget synchronized without displacing
     assert.equal(widgetKey, "goal-panel");
     assert.equal(widgetPlacement, "belowEditor");
     assert.match(renderCurrent(), /ACTIVE/);
-    assert.match(renderCurrent(), /Alt\+G details/);
+    assert.match(renderCurrent(), new RegExp(`${altRe("G")} details`));
     assert.doesNotMatch(renderCurrent(), /Keep Todo above the editor/);
 
     await executeGoalCommand({ action: "stop" }, ctx);

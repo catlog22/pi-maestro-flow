@@ -1,3 +1,4 @@
+import { altKey } from "pi-maestro-settings-core/v1";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
@@ -18,6 +19,9 @@ import { MonitorOverlay, type MonitorSessionRow } from "../src/tui/monitor-overl
 import { buildProgressTree } from "../src/tui/progress-tree.ts";
 import { renderTeammateResult } from "../src/tui/render.ts";
 import { SessionSendOverlay } from "../src/tui/session-send-overlay.ts";
+
+/** `altKey` escaped for use inside a regular expression: `+` is a metacharacter. */
+const altRe = (key: string): string => altKey(key).replaceAll("+", "\\+");
 
 const theme = {
   fg: (_role: string, text: string) => text,
@@ -195,9 +199,9 @@ test("progress and result surfaces render both supported locales", () => {
     assert.match(buildProgressTree(progress, palette, Date.now(), "en")[0]!.text, /running/);
     assert.match(buildProgressTree(progress, palette, Date.now(), "zh-CN")[0]!.text, /运行中/);
     initializeTuiLocale("zh-CN");
-    assert.match(renderTeammateResult(result, { expanded: false }, theme as never).render(80)[0]!, /Alt\+R 详情/);
+    assert.match(renderTeammateResult(result, { expanded: false }, theme as never).render(80)[0]!, new RegExp(`${altRe("R")} 详情`));
     initializeTuiLocale("en");
-    assert.match(renderTeammateResult(result, { expanded: false }, theme as never).render(80)[0]!, /Alt\+R details/);
+    assert.match(renderTeammateResult(result, { expanded: false }, theme as never).render(80)[0]!, new RegExp(`${altRe("R")} details`));
   } finally {
     initializeTuiLocale("en");
   }

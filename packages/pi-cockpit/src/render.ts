@@ -1,4 +1,5 @@
 import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
+import { altKey } from "pi-maestro-settings-core/v1";
 import { effectiveAgentStatus, isExpertLeader, type AgentDisplayStatus } from "./agents-store.ts";
 import type { AgentRow, TodoItem, ViewMode } from "./types.ts";
 import type { IconGlyphs } from "./icons.ts";
@@ -78,7 +79,7 @@ export interface RenderOpts {
 	agentContextRows?: readonly AgentRow[];
 }
 
-export const DEFAULT_TOGGLE_HINT = "Alt+T";
+export const DEFAULT_TOGGLE_HINT = altKey("T");
 
 // One cell per task stops scaling once the plan outgrows the terminal, so beyond
 // that the bar switches to a proportional summary instead of eating the whole line.
