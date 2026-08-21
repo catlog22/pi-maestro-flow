@@ -65,19 +65,23 @@ teammate({
 
 ## Installation
 
-pi-maestro-flow is a **Pi plugin** — install it with `pi install` (not a regular npm dependency).
-
-> **v0.18.0 is out:** fixes the Skill discovery regression that caused v0.17.0 to be withdrawn. npm `latest` and the recommended pinned version are now `0.18.0`.
+pi-maestro-flow is a **Pi plugin** — install it with `pi install` (not a regular npm dependency). A single command installs the whole suite: Flow acts as the install entry and automatically pulls in and registers the remaining extensions and dependencies.
 
 **Prerequisites:** [Node.js](https://nodejs.org) ≥ 22.19.0 · [Pi Coding Agent](https://github.com/earendil-works/pi) ≥ 0.74.0 (required)
 
 ```bash
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent   # host runtime
-pi install npm:pi-maestro-flow@0.22.0                              # install or upgrade the plugin
+pi install npm:pi-maestro-flow@0.22.0                              # install or upgrade the plugin (single entry)
 pi list                                                            # confirm Flow, Teammate, and Cockpit are listed
 ```
 
-Installing `pi-maestro-flow` automatically pulls and registers `pi-maestro-teammate` and `pi-cockpit`. Upgrades migrate Flow-managed companion paths; a same-name local development override is preserved and reported in the startup log, so update or remove that override explicitly. Restart Pi or reload extensions before retrying model-sensitive work.
+**Single-entry routing:** install only `pi-maestro-flow`; its postinstall handles the rest —
+
+- **Auto-registered companion extensions**: `pi-maestro-teammate` and `pi-cockpit` (written into `~/.pi/agent/settings.json`); upgrades migrate Flow-managed companion paths, and a same-name local development override is preserved and reported in the startup log, so update or remove that override explicitly.
+- **Installed as regular npm dependencies** (not Pi extensions): the core engine `maestro-flow`, the contract package `pi-maestro-backend-core`, and the implementation package `pi-maestro-backends` — they land in `node_modules` alongside Flow and are not registered separately.
+- **Bundled into each package tarball**: `pi-maestro-settings-core` (not installed standalone).
+
+Restart Pi or reload extensions before retrying model-sensitive work.
 
 ## Quick Start
 

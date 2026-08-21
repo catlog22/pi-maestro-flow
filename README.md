@@ -70,19 +70,23 @@ teammate({
 
 ## 安装
 
-pi-maestro-flow 是 **Pi 插件**，用 `pi install` 安装（不是普通 npm 依赖）。
-
-> **v0.18.0 已发布：** 修复 v0.17.0 的 Skill 发现回归（v0.17.0 已撤回）。当前 npm `latest` 和推荐固定版本均为 `0.18.0`。
+pi-maestro-flow 是 **Pi 插件**，用 `pi install` 安装（不是普通 npm 依赖）。只需一条命令即可获得全套件：Flow 会作为安装入口自动拉取并注册其余扩展与依赖。
 
 **前置条件：** [Node.js](https://nodejs.org) ≥ 22.19.0 · [Pi Coding Agent](https://github.com/earendil-works/pi) ≥ 0.74.0（必装）
 
 ```bash
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent   # 宿主运行时
-pi install npm:pi-maestro-flow@0.22.0                              # 安装或升级插件
+pi install npm:pi-maestro-flow@0.22.0                              # 安装或升级插件（单入口）
 pi list                                                            # 确认 Flow、Teammate 与 Cockpit 均已列出
 ```
 
-安装 `pi-maestro-flow` 会自动拉取并注册 `pi-maestro-teammate` 与 `pi-cockpit`。升级会迁移由 Flow 管理的旧 companion 路径；同名的本地开发覆盖会被保留并在启动日志中提示，需由用户自行升级或移除。重启 Pi 或 reload extensions 后再执行模型相关操作。
+**单入口全路由：** `pi install` 只需装 `pi-maestro-flow`，其余由其 postinstall 自动处理——
+
+- **自动注册的 companion 扩展**：`pi-maestro-teammate`、`pi-cockpit`（写入 `~/.pi/agent/settings.json`）；升级会迁移由 Flow 管理的旧 companion 路径，同名本地开发覆盖会被保留并在启动日志提示，需自行升级或移除。
+- **作为普通 npm 依赖一并安装的库**：核心引擎 `maestro-flow`、契约包 `pi-maestro-backend-core` 与实现包 `pi-maestro-backends`（均不是 Pi 扩展，只随 Flow 进 `node_modules`、不单独注册）。
+- **bundle 进各包 tarball 的配置契约**：`pi-maestro-settings-core`（不单独安装）。
+
+重启 Pi 或 reload extensions 后再执行模型相关操作。
 
 ## 快速开始
 
