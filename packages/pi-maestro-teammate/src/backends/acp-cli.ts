@@ -73,9 +73,10 @@ import {
  * adjudication before anything is spawned. The dispatch this replaces made the
  * same decision inside the run, after the config had been loaded.
  * `forkContext` — a Pi history entry describes a different runtime's tool set.
- * `modelSelection` — the registration *is* the route: one CLI per registration,
- * and `start` refuses a spec naming any other model rather than running the
- * wrong CLI under the requested model's name.
+ * `modelSelection` — honoured on both axes. The registration is the route, and a
+ * spec naming anything else names a model in the CLI's own catalogue, which
+ * `start` selects on the session it opens. A value that CLI does not advertise
+ * fails the run rather than silently leaving the agent on its current model.
  * `thinkingLevel` — no ACP field expresses it; the CLI's own config decides.
  * `todoBinding` — this backend passes no host tool to the child, so a task with
  * todos would stall at `in_progress` while the host waited for updates.
@@ -524,6 +525,15 @@ export function createAcpCliBackend(
     },
   };
 }
+
+/**
+ * Display text for the `acpCli.*` keys the fields above carry.
+ *
+ * Re-exported here because a host that registers this backend reads its
+ * `configFields` from this module: taking the wording from anywhere else lets a
+ * registration ship fields whose keys have no text.
+ */
+export { ACP_CLI_SETTINGS_CATALOGS } from "./acp-cli-catalog.ts";
 
 /**
  * The registered instance.

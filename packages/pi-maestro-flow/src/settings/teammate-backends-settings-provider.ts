@@ -37,6 +37,8 @@ import {
   type SettingsResource,
   type SettingsResourceRevision,
   type SettingsSnapshot,
+  type SupportedSettingsLocale,
+  type TranslationCatalogs,
   type SettingsValidationIssue,
   type SettingsValidationResult,
 } from "pi-maestro-settings-core/v1";
@@ -83,6 +85,58 @@ const DYNAMIC_OPTIONS_SOURCE = "teammateBackends.backend-options";
  */
 const DYNAMIC_OPTIONS_TIMEOUT_MS = 90_000;
 
+/** Display text for the dispatch settings this provider owns. */
+const PROVIDER_CATALOGS: Record<SupportedSettingsLocale, Record<string, string>> = {
+  en: {
+    "teammateBackends.provider": "Teammate backends",
+    "teammateBackends.provider.description":
+      "Which execution backends teammate can dispatch to, and how each is launched. A backend's own internals — a runtime's plugin configuration, the MCP servers it mounts — are configured where that backend reads them, not here.",
+    "teammateBackends.group.dispatch": "Dispatch",
+    "teammateBackends.mode": "Execution mode",
+    "teammateBackends.mode.description":
+      "Absent means legacy. Under legacy the registry is inert: a task naming a backend, or a `cli/<tool>` model, is refused by name rather than silently running Pi instead.",
+    "teammateBackends.mode.legacy": "Legacy (Pi subprocess only)",
+    "teammateBackends.mode.registry": "Backend registry",
+    "teammateBackends.default": "Default backend",
+    "teammateBackends.default.description":
+      "Serves a task that names none. A default that is not registered is rejected when the document is read.",
+    "teammateBackends.credentialValue.description":
+      "Written to the backend runtime's own env file, outside this repository, and never read back into this shell.",
+    "teammateBackends.error.documentMalformed":
+      "The registration document could not be parsed; writing is blocked so a rebuilt file cannot replace what you were about to repair.",
+    "teammateBackends.error.invalidMode": "Execution mode must be `legacy` or `backend-registry`.",
+    "teammateBackends.error.unknownBackend": "No backend is registered under that name.",
+    "teammateBackends.error.unknownKey": "That setting is not declared by this backend.",
+    "teammateBackends.error.credentialNameMissing": "Name the variable before setting its value.",
+    "teammateBackends.error.credentialNameInvalid":
+      "A variable name must match [A-Za-z_][A-Za-z0-9_]*.",
+  },
+  "zh-CN": {
+    "teammateBackends.provider": "Teammate 执行后端",
+    "teammateBackends.provider.description":
+      "teammate 能派发到哪些执行后端、各自怎么启动。后端自身的内部配置——运行时的插件配置、它挂哪些 MCP——在那个后端读取的地方配，不在这里。",
+    "teammateBackends.group.dispatch": "派发",
+    "teammateBackends.mode": "执行模式",
+    "teammateBackends.mode.description":
+      "留空等于 legacy。legacy 下整个 registry 不生效：点名后端的任务与 `cli/<tool>` 模型都会被按名拒绝，而不是悄悄改跑 Pi。",
+    "teammateBackends.mode.legacy": "Legacy（仅 Pi 子进程）",
+    "teammateBackends.mode.registry": "后端注册表",
+    "teammateBackends.default": "默认后端",
+    "teammateBackends.default.description":
+      "任务没点名后端时用它。默认值若未注册，会在读注册文档时被拒。",
+    "teammateBackends.credentialValue.description":
+      "写入该后端运行时自己的 env 文件（在本仓库之外），且永不回读到本界面。",
+    "teammateBackends.error.documentMalformed":
+      "注册文档无法解析；写入已被阻断，以免用重建出的文件覆盖掉你正要修复的内容。",
+    "teammateBackends.error.invalidMode": "执行模式只能是 `legacy` 或 `backend-registry`。",
+    "teammateBackends.error.unknownBackend": "没有以该名字注册的后端。",
+    "teammateBackends.error.unknownKey": "该后端没有声明这个设置项。",
+    "teammateBackends.error.credentialNameMissing": "先填变量名，再设置它的值。",
+    "teammateBackends.error.credentialNameInvalid":
+      "变量名必须匹配 [A-Za-z_][A-Za-z0-9_]*。",
+  },
+};
+
 /** What the provider needs to know about a backend; not the backend itself. */
 export interface BackendDescriptor {
   name: string;
@@ -107,6 +161,16 @@ export interface BackendDescriptor {
     config: Record<string, ConfigValue>,
     signal: AbortSignal,
   ) => Promise<readonly BackendConfigOption[]>;
+  /**
+   * Display text for this backend's `labelKey` / `descriptionKey` values.
+   *
+   * The keys belong to the backend that declares the fields, so their text does
+   * too: this provider stays ignorant of what any backend's settings mean, and
+   * a backend that adds a field brings its own wording. A descriptor with no
+   * catalog renders its keys verbatim — a defect the shell shows but nothing
+   * else reports.
+   */
+  catalogs?: TranslationCatalogs;
 }
 
 /** Everything the provider needs from its host. */
@@ -357,6 +421,48 @@ export function createTeammateBackendsSettingsProvider(
   const credentialPath = (backend: string): string => join(credentialRoot, backend, ".env");
 
   const resource = (): SettingsResource => ({ providerId: PROVIDER_ID, scope: "project", id: DOCUMENT_ID });
+
+  /**
+   * Merge this provider's own text with each backend's.
+   *
+   * Three sources, in one place because the shell takes one catalog per
+   * provider: the dispatch settings this file owns, the per-backend keys it
+   * composes (`teammateBackends.backend.<name>`, `teammateBackends.group.<name>`,
+   * and the `.value` companion a `credential-ref` field yields), and whatever a
+   * descriptor supplies for its own fields. A backend without a catalog still
+   * gets its name and group rendered; only its field labels fall back to keys.
+   *
+   * @returns catalogs for every locale any source defines.
+   */
+  const catalogs = (): TranslationCatalogs => {
+    const locales = new Set<SupportedSettingsLocale>(["en", "zh-CN"]);
+    for (const backend of options.backends) {
+      for (const locale of Object.keys(backend.catalogs ?? {})) {
+        locales.add(locale as SupportedSettingsLocale);
+      }
+    }
+    const merged: Partial<Record<SupportedSettingsLocale, Record<string, string>>> = {};
+    for (const locale of locales) {
+      const entries: Record<string, string> = {
+        ...(PROVIDER_CATALOGS[locale] ?? PROVIDER_CATALOGS.en ?? {}),
+      };
+      for (const backend of options.backends) {
+        // The registration name is the operator's own label for it, so it is
+        // rendered rather than translated.
+        entries[`teammateBackends.backend.${backend.name}`] = backend.name;
+        entries[`teammateBackends.group.${backend.name}`] = backend.name;
+        for (const field of backend.configFields ?? []) {
+          if (!servesCredential(field)) continue;
+          const label = backend.catalogs?.[locale]?.[field.labelKey]
+            ?? backend.catalogs?.en?.[field.labelKey];
+          if (label !== undefined) entries[`${field.labelKey}.value`] = label;
+        }
+        Object.assign(entries, backend.catalogs?.[locale] ?? {});
+      }
+      merged[locale] = entries;
+    }
+    return merged;
+  };
 
   const definitions = (): SettingDefinition[] => {
     const list: SettingDefinition[] = [
@@ -680,6 +786,7 @@ export function createTeammateBackendsSettingsProvider(
           hotUpdate: false,
         },
         settings: definitions(),
+        catalogs: catalogs(),
       };
     },
 

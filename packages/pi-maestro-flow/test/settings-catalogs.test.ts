@@ -1,11 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { SettingDefinition, SettingsContextV1 } from "pi-maestro-settings-core/v1";
+import dshBackend, { DSH_SETTINGS_CATALOGS } from "pi-maestro-backends/dsh";
+import acpCliBackend, { ACP_CLI_SETTINGS_CATALOGS } from "pi-maestro-teammate/v1/acp-cli";
 import { createApiManagerSettingsProvider } from "../src/settings/api-manager-settings-provider.ts";
 import { createFlowSettingsProvider } from "../src/settings/flow-settings-provider.ts";
 import { createMcpSettingsProvider } from "../src/settings/mcp-settings-provider.ts";
 import { createSkillsSettingsProvider } from "../src/settings/skills-settings-provider.ts";
 import { createSmartSearchSettingsProvider } from "../src/settings/smart-search-settings-provider.ts";
+import { createTeammateBackendsSettingsProvider } from "../src/settings/teammate-backends-settings-provider.ts";
 
 const context: SettingsContextV1 = { cwd: "/workspace", locale: "en" };
 
@@ -53,6 +59,36 @@ function assertBilingualCatalog(name: string, settings: readonly SettingDefiniti
   }
 }
 
+/**
+ * Builds the teammate-backends provider over the backends the extension really
+ * registers, so this gate reads the shipped wiring rather than a fixture: a
+ * backend whose fields arrive without a catalog is exactly the defect that has
+ * to fail here.
+ */
+function teammateBackendsProvider(catalogs: {
+  dsh?: typeof DSH_SETTINGS_CATALOGS;
+  acpCli?: typeof ACP_CLI_SETTINGS_CATALOGS;
+}) {
+  return createTeammateBackendsSettingsProvider({
+    workspaceRoot: mkdtempSync(join(tmpdir(), "catalog-ws-")),
+    credentialRoot: mkdtempSync(join(tmpdir(), "catalog-cred-")),
+    backends: [
+      {
+        name: dshBackend.name,
+        module: "pi-maestro-backends/dsh",
+        configFields: dshBackend.configFields,
+        ...(catalogs.dsh === undefined ? {} : { catalogs: catalogs.dsh }),
+      },
+      {
+        name: acpCliBackend.name,
+        module: "pi-maestro-teammate/v1/acp-cli",
+        configFields: acpCliBackend.configFields,
+        ...(catalogs.acpCli === undefined ? {} : { catalogs: catalogs.acpCli }),
+      },
+    ],
+  });
+}
+
 test("every settings provider ships a complete en/zh-CN catalog with identical key sets", async () => {
   const providers = [
     { name: "flow", describe: (await createFlowSettingsProvider({}).describe({ context })) },
@@ -60,10 +96,25 @@ test("every settings provider ships a complete en/zh-CN catalog with identical k
     { name: "mcp", describe: (await createMcpSettingsProvider({}).describe({ context })) },
     { name: "skills", describe: (await createSkillsSettingsProvider({}).describe({ context })) },
     { name: "smart-search", describe: (await createSmartSearchSettingsProvider({}).describe({ context })) },
+    {
+      name: "teammate-backends",
+      describe: await teammateBackendsProvider({
+        dsh: DSH_SETTINGS_CATALOGS,
+        acpCli: ACP_CLI_SETTINGS_CATALOGS,
+      }).describe({ context }),
+    },
   ];
   for (const { name, describe } of providers) {
     assertBilingualCatalog(name, describe.settings, describe.catalogs);
   }
+});
+
+test("a backend registered without a catalog fails the same gate rather than rendering its keys", async () => {
+  const described = await teammateBackendsProvider({ dsh: DSH_SETTINGS_CATALOGS }).describe({ context });
+  assert.throws(
+    () => assertBilingualCatalog("teammate-backends", described.settings, described.catalogs),
+    /acpCli\./,
+  );
 });
 
 test("list-crud item fields and label keys are all translated", async () => {

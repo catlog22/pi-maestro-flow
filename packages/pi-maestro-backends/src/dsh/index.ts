@@ -22,6 +22,15 @@ export {
   type DshHarnessDriver,
 } from "./backend.ts";
 
+/**
+ * Display text for the `dsh.*` keys this backend's `configFields` carry.
+ *
+ * Re-exported here because a host that registers this backend reads its fields
+ * from this module: taking the wording from anywhere else lets a registration
+ * ship fields whose keys have no text.
+ */
+export { DSH_SETTINGS_CATALOGS } from "./catalog.ts";
+
 /** The registerable backend: capability table plus the SDK-backed driver. */
 export default createDshBackend(async (config, options) => {
   const { createDshDriver } = await import("./driver.ts");
