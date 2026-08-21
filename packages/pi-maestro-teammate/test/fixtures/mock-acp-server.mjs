@@ -17,8 +17,17 @@ const MODEL_OPTIONS = [
   { value: "mock-deep[effort=high]", name: "Mock Deep" },
 ];
 
-/** Values this server was actually put on, newest last. */
-const selectedModels = [];
+// A second axis, so a client driving more than one selector is exercised. No
+// `thought_level` option is advertised on purpose: an agent that bakes
+// reasoning depth into its model values publishes nothing there, and a client
+// must report that axis as empty rather than inventing one.
+const MODE_OPTIONS = [
+  { value: "agent", name: "Agent" },
+  { value: "plan", name: "Plan" },
+];
+
+/** Values this server was actually put on, by config id. */
+const selected = {};
 
 function send(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -53,25 +62,36 @@ rl.on("line", (line) => {
       id: message.id,
       result: {
         sessionId,
-        configOptions: [{
-          id: "model",
-          name: "Model",
-          category: "model",
-          type: "select",
-          currentValue: MODEL_OPTIONS[0].value,
-          options: MODEL_OPTIONS,
-        }],
+        configOptions: [
+          {
+            id: "model",
+            name: "Model",
+            category: "model",
+            type: "select",
+            currentValue: MODEL_OPTIONS[0].value,
+            options: MODEL_OPTIONS,
+          },
+          {
+            id: "mode",
+            name: "Mode",
+            category: "mode",
+            type: "select",
+            currentValue: MODE_OPTIONS[0].value,
+            options: MODE_OPTIONS,
+          },
+        ],
       },
     });
     return;
   }
   if (message.method === "session/set_config_option") {
     const { configId, value } = message.params;
-    if (configId !== "model" || !MODEL_OPTIONS.some((option) => option.value === value)) {
+    const available = configId === "model" ? MODEL_OPTIONS : configId === "mode" ? MODE_OPTIONS : undefined;
+    if (!available || !available.some((option) => option.value === value)) {
       send({ jsonrpc: "2.0", id: message.id, error: { code: -32602, message: `unknown option ${configId}=${value}` } });
       return;
     }
-    selectedModels.push(value);
+    selected[configId] = value;
     send({ jsonrpc: "2.0", id: message.id, result: {} });
     return;
   }
@@ -88,7 +108,8 @@ rl.on("line", (line) => {
           sessionUpdate: "agent_message_chunk",
           content: {
             type: "text",
-            text: `hello from mock acp (${message.params.prompt}) model=${selectedModels.at(-1) ?? "unset"}`,
+            text: `hello from mock acp (${message.params.prompt}) `
+              + `model=${selected.model ?? "unset"} mode=${selected.mode ?? "unset"}`,
           },
         },
       },

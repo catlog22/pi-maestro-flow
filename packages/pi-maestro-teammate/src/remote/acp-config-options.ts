@@ -20,8 +20,32 @@ import type {
   SessionConfigSelectOptions,
 } from "@agentclientprotocol/sdk";
 
-/** The option id an agent conventionally gives its model selector. */
+/**
+ * The advertised selectors this client knows how to drive.
+ *
+ * Each value is both the ACP `category` and the option id agents conventionally
+ * use for it, which is why one string locates either. Adding an axis is adding
+ * a member here and a field that carries it — no per-agent code, because an
+ * agent that does not offer one simply advertises no option in that category
+ * and the axis reads as empty for it.
+ */
 export const ACP_MODEL_CONFIG_ID = "model";
+export const ACP_MODE_CONFIG_ID = "mode";
+export const ACP_THOUGHT_LEVEL_CONFIG_ID = "thought_level";
+
+/**
+ * The order selections are applied to a new session.
+ *
+ * Fixed rather than incidental: ACP says nothing about whether setting one
+ * option disturbs another, so the sequence has to be the same on every run for
+ * two runs of one registration to be comparable. Mode is set first because it
+ * is the coarsest choice, and the model last so it is the most recent word.
+ */
+export const ACP_SELECTION_ORDER: readonly string[] = [
+  ACP_MODE_CONFIG_ID,
+  ACP_THOUGHT_LEVEL_CONFIG_ID,
+  ACP_MODEL_CONFIG_ID,
+];
 
 /**
  * A grouped select entry, distinguished from a flat one by carrying its own
@@ -121,23 +145,29 @@ export function resolveSelectValue(
 }
 
 /**
- * Resolve a requested model against the options a session advertised.
+ * Resolve a requested value for one advertised selector.
+ *
+ * The same resolution serves every axis, because the difference between a model
+ * and a reasoning depth is which option the agent published it under, not how a
+ * client picks among the values.
  *
  * @param configOptions - options advertised by `session/new`.
- * @param requested - the model the task or registration asked for.
+ * @param configId - the selector to set; also the category preferred for it.
+ * @param requested - the value the task or registration asked for.
  * @returns the config id to set and the advertised value to set it to.
- * @throws when the agent advertises no model selector, or the value is not one
+ * @throws when the agent advertises no such selector, or the value is not one
  * it offers.
  */
-export function resolveModelSelection(
+export function resolveConfigSelection(
   configOptions: readonly SessionConfigOption[] | null | undefined,
+  configId: string,
   requested: string,
 ): { configId: string; value: string } {
-  const option = findSelectOption(configOptions, ACP_MODEL_CONFIG_ID);
+  const option = findSelectOption(configOptions, configId);
   if (option === undefined) {
     const advertised = (configOptions ?? []).map((candidate) => candidate.id).join(", ") || "none";
     throw new Error(
-      `ACP agent advertises no model selector, so "${requested}" cannot be honoured. `
+      `ACP agent advertises no "${configId}" selector, so "${requested}" cannot be honoured. `
       + `Advertised configuration options: ${advertised}`,
     );
   }
@@ -145,16 +175,23 @@ export function resolveModelSelection(
 }
 
 /**
- * The models a session advertised, for a configuration surface to display.
+ * The values one advertised selector offers, for a configuration surface.
+ *
+ * An empty result is the answer for an agent that does not offer this axis at
+ * all, and the settings shell renders it as such. That is why this reports
+ * emptiness rather than throwing: not offering a selector is a fact about the
+ * agent, not a failure of the request.
  *
  * @param configOptions - options advertised by `session/new`.
- * @returns each selectable model as its advertised value and label; empty when
- * the agent advertises no model selector.
+ * @param configId - the selector to read; also the category preferred for it.
+ * @returns each selectable value with its advertised label; empty when the
+ * agent advertises no such selector.
  */
-export function advertisedModels(
+export function advertisedValues(
   configOptions: readonly SessionConfigOption[] | null | undefined,
+  configId: string,
 ): readonly { value: string; label: string }[] {
-  const option = findSelectOption(configOptions, ACP_MODEL_CONFIG_ID);
+  const option = findSelectOption(configOptions, configId);
   if (option === undefined) return [];
   return flattenSelectOptions(option.options).map((candidate) => ({
     value: candidate.value,

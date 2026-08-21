@@ -44,7 +44,7 @@ test("a run reports the model the agent settled on, not the string it was asked 
     timeoutMs: 15_000,
     // Named, not the advertised value: resolution maps it to the catalogue
     // entry, and reporting the request back would hide which variant ran.
-    acpModel: "Mock Deep",
+    acpSelections: { model: "Mock Deep" },
   });
   assert.equal(run.terminalStatus, "completed");
   assert.equal(run.selectedModel, "mock-deep[effort=high]");
@@ -68,6 +68,45 @@ test("a run that requested no model reports none rather than a model nobody chos
   assert.match(run.messages[0]?.content ?? "", /model=unset/);
 });
 
+test("every requested axis is set on one session, not just the model", async () => {
+  const controller = new AbortController();
+  const run = await runLocalCliTool({
+    tool: "mock-acp",
+    config: mockToolConfig,
+    prompt: "say hi",
+    cwd: path.dirname(fixturePath),
+    signal: controller.signal,
+    timeoutMs: 15_000,
+    acpSelections: { model: "Mock Deep", mode: "plan" },
+  });
+  assert.equal(run.terminalStatus, "completed");
+  assert.equal(run.selectedModel, "mock-deep[effort=high]");
+  // The agent echoes both, so a client that dropped the second axis fails here
+  // rather than settling as a run that quietly used the default mode.
+  assert.match(run.messages[0]?.content ?? "", /model=mock-deep\[effort=high\] mode=plan/);
+});
+
+test("an axis the agent does not advertise fails the run rather than being skipped", async () => {
+  const controller = new AbortController();
+  const run = await runLocalCliTool({
+    tool: "mock-acp",
+    config: mockToolConfig,
+    prompt: "say hi",
+    cwd: path.dirname(fixturePath),
+    signal: controller.signal,
+    timeoutMs: 15_000,
+    // This server publishes no reasoning-depth selector, as agents that bake it
+    // into the model value do.
+    acpSelections: { thought_level: "high" },
+  });
+  assert.equal(run.terminalStatus, "failed");
+  assert.equal(run.selectedModel, undefined);
+  const failure = run.messages[0]?.content ?? "";
+  assert.match(failure, /no "thought_level" selector/);
+  // Names what the agent did advertise, so the operator can see it was reached.
+  assert.match(failure, /model/);
+});
+
 test("a model the agent does not advertise fails the run and lists what it does", async () => {
   const controller = new AbortController();
   const run = await runLocalCliTool({
@@ -77,7 +116,7 @@ test("a model the agent does not advertise fails the run and lists what it does"
     cwd: path.dirname(fixturePath),
     signal: controller.signal,
     timeoutMs: 15_000,
-    acpModel: "mock-imaginary",
+    acpSelections: { model: "mock-imaginary" },
   });
   assert.equal(run.terminalStatus, "failed");
   assert.equal(run.selectedModel, undefined);

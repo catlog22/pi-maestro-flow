@@ -181,7 +181,7 @@ test("acp-cli separates the route axis from the CLI's own model catalogue", asyn
   await (await backend.start(specOf({ model: "cli/mock" }), runOptionsOf(LOCAL_CONFIG))).outcome;
   assert.equal(launches.length, 1);
   assert.equal(launches[0]?.tool, "mock");
-  assert.equal(launches[0]?.acpModel, undefined);
+  assert.equal(launches[0]?.acpSelections?.model, undefined);
 
   // Any other value names a model inside that CLI. It reaches the launch rather
   // than being refused, and it does not change which CLI is launched.
@@ -191,7 +191,7 @@ test("acp-cli separates the route axis from the CLI's own model catalogue", asyn
   )).outcome;
   assert.equal(launches.length, 2);
   assert.equal(launches[1]?.tool, "mock");
-  assert.equal(launches[1]?.acpModel, "claude-opus-5[thinking=true]");
+  assert.equal(launches[1]?.acpSelections?.model, "claude-opus-5[thinking=true]");
 });
 
 test("acp-cli applies the registration's model only when the task names the route", async () => {
@@ -204,16 +204,16 @@ test("acp-cli applies the registration's model only when the task names the rout
 
   // Naming only the route leaves the registration's own default in force.
   await (await backend.start(specOf({ model: "cli/mock" }), runOptionsOf(config))).outcome;
-  assert.equal(launches[0]?.acpModel, "composer-2.5[fast=true]");
+  assert.equal(launches[0]?.acpSelections?.model, "composer-2.5[fast=true]");
 
   // A task naming a model overrides that default, so one registration serves a
   // whole CLI rather than one model of it.
   await (await backend.start(specOf({ model: "grok-4.6[effort=high]" }), runOptionsOf(config))).outcome;
-  assert.equal(launches[1]?.acpModel, "grok-4.6[effort=high]");
+  assert.equal(launches[1]?.acpSelections?.model, "grok-4.6[effort=high]");
 
   // A task naming no model at all still gets the registration's default.
   await (await backend.start(specOf(), runOptionsOf(config))).outcome;
-  assert.equal(launches[2]?.acpModel, "composer-2.5[fast=true]");
+  assert.equal(launches[2]?.acpSelections?.model, "composer-2.5[fast=true]");
 });
 
 test("acp-cli reports the route it was dispatched under beside the model that ran", async () => {
@@ -260,6 +260,77 @@ test("a failed run still reports the model it ran on", async () => {
   // Which model failed is the first thing a reader needs, so the selection
   // outlives the turn's outcome.
   assert.equal(result.executorModel, "grok-4.6[effort=high]");
+});
+
+test("every selector the registration names reaches the launch, keyed by ACP config id", async () => {
+  const launches: RunLocalCliToolParams[] = [];
+  const backend = createAcpCliBackend(async (params) => {
+    launches.push(params);
+    return CLEAN_RUN;
+  });
+  await (await backend.start(specOf(), runOptionsOf({
+    ...LOCAL_CONFIG,
+    acpModel: "composer-2.5",
+    acpMode: "plan",
+    acpThoughtLevel: "high",
+  }))).outcome;
+
+  // Keyed by the agent's own config ids, not by this backend's field names: the
+  // field is where an operator writes the value, the config id is where the
+  // agent reads it.
+  assert.deepEqual(launches[0]?.acpSelections, {
+    model: "composer-2.5",
+    mode: "plan",
+    thought_level: "high",
+  });
+});
+
+test("an unset selector is absent rather than defaulted by this backend", async () => {
+  const launches: RunLocalCliToolParams[] = [];
+  const backend = createAcpCliBackend(async (params) => {
+    launches.push(params);
+    return CLEAN_RUN;
+  });
+  await (await backend.start(specOf(), runOptionsOf({ ...LOCAL_CONFIG, acpMode: "plan" }))).outcome;
+
+  // Only what was named. The agent's own current setting is the only sensible
+  // default for the rest, and this backend does not know it.
+  assert.deepEqual(launches[0]?.acpSelections, { mode: "plan" });
+});
+
+test("acp-cli lists each selector from the agent, and reports an unpublished one as empty", async () => {
+  // A real executable: listing checks the configured command is launchable
+  // before reaching the agent.
+  const probeConfig: Record<string, ConfigValue> = {
+    command: process.execPath,
+    args: ["--version"],
+    modelId: "cli/mock",
+  };
+  const backend = createAcpCliBackend(undefined, async () => [
+    {
+      type: "select", id: "model", name: "Model", category: "model",
+      currentValue: "a[]", options: [{ value: "a[]", name: "a" }],
+    },
+    {
+      type: "select", id: "mode", name: "Mode", category: "mode",
+      currentValue: "agent", options: [{ value: "agent", name: "Agent" }, { value: "ask", name: "Ask" }],
+    },
+  ] as never);
+  const signal = AbortSignal.timeout(1_000);
+
+  assert.deepEqual(
+    await backend.listConfigOptions!("acpMode", probeConfig, signal),
+    [{ value: "agent", label: "Agent" }, { value: "ask", label: "Ask" }],
+  );
+  // The agent publishes no reasoning-depth selector, so the picker is empty.
+  // Empty rather than an error: not offering an axis is a fact about this CLI,
+  // and the settings shell renders it as such.
+  assert.deepEqual(await backend.listConfigOptions!("acpThoughtLevel", probeConfig, signal), []);
+  // A field that names no selector at all is still refused.
+  await assert.rejects(
+    () => backend.listConfigOptions!("runTimeoutMs", probeConfig, signal),
+    /publishes no options/,
+  );
 });
 
 test("acp-cli defaults its route to the registration name", async () => {

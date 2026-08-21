@@ -43,6 +43,12 @@ export const ACP_CLI_SETTINGS_CATALOGS: TranslationCatalogs = {
     "acpCli.acpModel": "Model",
     "acpCli.acpModel.description":
       "Default model inside this CLI's own catalogue, used when a task names only the route. A task naming a model overrides it. A displayed name is enough when the catalogue carries it once — `composer-2.5` reaches `composer-2.5[fast=true]` — and an ambiguous name is refused rather than assigned a variant. Values come from the CLI, so opening this list launches it.",
+    "acpCli.acpMode": "Mode",
+    "acpCli.acpMode.description":
+      "The agent's own operating mode, where it has one — Cursor offers Agent, Plan and Ask. Selecting a read-only mode is a protocol-level restriction, unlike launch flags that only widen what the agent may do. An empty list means this CLI publishes no modes.",
+    "acpCli.acpThoughtLevel": "Reasoning depth",
+    "acpCli.acpThoughtLevel.description":
+      "Set only when the CLI publishes reasoning depth as its own selector. Many bake it into the model value instead — Cursor's `grok-4.6[effort=high]` is one value, not a model plus a depth — and for those this list is empty and depth is chosen by picking a model.",
     "acpCli.runTimeoutMs": "Run timeout (ms)",
     "acpCli.runTimeoutMs.description":
       "Bounds the run once the CLI is talking. Applies per registration, not per task.",
@@ -75,6 +81,12 @@ export const ACP_CLI_SETTINGS_CATALOGS: TranslationCatalogs = {
     "acpCli.acpModel": "模型",
     "acpCli.acpModel.description":
       "该 CLI 自己目录里的默认模型，任务只点名路由时生效；任务点名模型则覆盖它。名字在目录里唯一时写显示名就够——`composer-2.5` 会解析到 `composer-2.5[fast=true]`；同名多个变体会被拒绝而不是替你挑一个。取值来自 CLI 本身，所以打开这个列表会拉起它。",
+    "acpCli.acpMode": "模式",
+    "acpCli.acpMode.description":
+      "该 agent 自己的运行模式（有的话）——Cursor 提供 Agent / Plan / Ask。选只读模式是**协议层**的限制，与只会放宽权限的启动参数不同。列表为空表示这个 CLI 不公布模式。",
+    "acpCli.acpThoughtLevel": "推理深度",
+    "acpCli.acpThoughtLevel.description":
+      "只有当该 CLI 把推理深度作为独立选项公布时才可设。很多 CLI 把它焊进模型取值里——Cursor 的 `grok-4.6[effort=high]` 是**一个取值**，不是「模型+深度」——那种情况下这里为空，深度靠选模型决定。",
     "acpCli.runTimeoutMs": "运行超时（毫秒）",
     "acpCli.runTimeoutMs.description": "CLI 开始应答之后的上限。作用于每条注册项，不是每个任务。",
     "acpCli.startupTimeoutMs": "握手超时（毫秒）",

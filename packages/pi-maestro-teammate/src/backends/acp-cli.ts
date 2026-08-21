@@ -54,7 +54,12 @@ import {
   probeCliToolCommand,
   type CliToolConfig,
 } from "../cli-tools/cli-tools-config.ts";
-import { advertisedModels } from "../remote/acp-config-options.ts";
+import {
+  ACP_MODE_CONFIG_ID,
+  ACP_MODEL_CONFIG_ID,
+  ACP_THOUGHT_LEVEL_CONFIG_ID,
+  advertisedValues,
+} from "../remote/acp-config-options.ts";
 import { probeAcpConfigOptions } from "../remote/acp-driver.ts";
 import {
   CLI_TOOL_MODEL_PREFIX,
@@ -97,6 +102,21 @@ const CAPABILITIES: BackendCapabilities = {
   steer: "unsupported",
   followUp: "unsupported",
   abort: "native",
+};
+
+/**
+ * Registration fields that name a value on one of the agent's own selectors.
+ *
+ * The map is the whole per-axis story: each field carries a value in the
+ * agent's vocabulary, and the ACP config id says which selector that vocabulary
+ * belongs to. Listing an axis and setting it read this same table, so a field
+ * whose picker fills is a field the run can set, and adding an axis is adding a
+ * row plus its field.
+ */
+const SELECTOR_FIELDS: Readonly<Record<string, string>> = {
+  acpModel: ACP_MODEL_CONFIG_ID,
+  acpMode: ACP_MODE_CONFIG_ID,
+  acpThoughtLevel: ACP_THOUGHT_LEVEL_CONFIG_ID,
 };
 
 /**
@@ -171,6 +191,26 @@ const CONFIG_FIELDS: readonly BackendConfigField[] = [
     kind: "dynamic-enum",
     labelKey: "acpCli.acpModel",
     descriptionKey: "acpCli.acpModel.description",
+  },
+  {
+    // The agent's own operating mode, where it has one — Cursor advertises
+    // agent / plan / ask. Declared for every registration and filled from the
+    // agent, so a CLI that offers no modes reports an empty list rather than
+    // this backend deciding which CLIs have modes.
+    key: "acpMode",
+    kind: "dynamic-enum",
+    labelKey: "acpCli.acpMode",
+    descriptionKey: "acpCli.acpMode.description",
+  },
+  {
+    // The agent's own reasoning-depth selector, for agents that publish one as
+    // a separate axis. Many bake reasoning depth into the model value instead
+    // and advertise nothing here; for those the picker is empty, which is the
+    // honest answer rather than a synthesised level this backend cannot set.
+    key: "acpThoughtLevel",
+    kind: "dynamic-enum",
+    labelKey: "acpCli.acpThoughtLevel",
+    descriptionKey: "acpCli.acpThoughtLevel.description",
   },
   {
     // Per registration, not per task: `TeammateRunSpec` carries no timeout, so
@@ -412,7 +452,8 @@ export function createAcpCliBackend(
       config: Record<string, ConfigValue>,
       signal: AbortSignal,
     ): Promise<readonly BackendConfigOption[]> {
-      if (field !== "acpModel") {
+      const configId = SELECTOR_FIELDS[field];
+      if (configId === undefined) {
         throw new Error(`teammate backend "acp-cli" publishes no options for setting "${field}"`);
       }
       const launch = launchConfigOf(config);
@@ -422,7 +463,7 @@ export function createAcpCliBackend(
         // path's ssh transport, which this operation does not build. Saying so
         // beats returning the local machine's answer for a remote target.
         throw new Error(
-          'teammate backend "acp-cli" cannot list models for an "ssh" registration: '
+          `teammate backend "acp-cli" cannot list "${field}" for an "ssh" registration: `
           + "the probe launches the agent locally, so the target host's catalogue is not reachable here",
         );
       }
@@ -444,7 +485,7 @@ export function createAcpCliBackend(
           ...(startupTimeoutMs === undefined ? {} : { startupTimeoutMs }),
         },
       );
-      return advertisedModels(advertised);
+      return advertisedValues(advertised, configId);
     },
 
     async start(spec: TeammateRunSpec, options: BackendRunOptions): Promise<BackendRun> {
@@ -459,6 +500,17 @@ export function createAcpCliBackend(
       const acpModel = spec.model === undefined || spec.model === route
         ? text(options.config, "acpModel")
         : spec.model;
+      // Every axis this registration named, in the agent's own vocabulary. An
+      // axis left unset is absent rather than defaulted here: the agent's own
+      // current setting is the only sensible default, and this backend does not
+      // know it.
+      const acpSelections: Record<string, string> = {};
+      if (acpModel !== undefined) acpSelections[ACP_MODEL_CONFIG_ID] = acpModel;
+      for (const [field, configId] of Object.entries(SELECTOR_FIELDS)) {
+        if (configId === ACP_MODEL_CONFIG_ID) continue;
+        const value = text(options.config, field);
+        if (value !== undefined) acpSelections[configId] = value;
+      }
       const tool = isCliToolModel(route) ? cliToolNameFromModel(route) : route;
       const aborter = new AbortController();
       const timeoutMs = count(options.config, "runTimeoutMs");
@@ -474,7 +526,7 @@ export function createAcpCliBackend(
           signal: cancellation.signal,
           ...(timeoutMs === undefined ? {} : { timeoutMs }),
           ...(startupTimeoutMs === undefined ? {} : { startupTimeoutMs }),
-          ...(acpModel === undefined ? {} : { acpModel }),
+          ...(Object.keys(acpSelections).length === 0 ? {} : { acpSelections }),
         }).finally(cancellation.release);
         const terminalStatus = terminalStatusOf(settled);
         const result: SingleResult = {

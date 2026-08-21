@@ -17,7 +17,7 @@ import {
   type SetSessionConfigOptionResponse,
   type Stream,
 } from "@agentclientprotocol/sdk";
-import { resolveModelSelection } from "./acp-config-options.ts";
+import { ACP_MODEL_CONFIG_ID, ACP_SELECTION_ORDER, resolveConfigSelection } from "./acp-config-options.ts";
 import {
   captureProcessTree,
   redactRemoteError,
@@ -68,15 +68,19 @@ export interface AcpDriverOptions {
   eventQueueBytes?: number;
   spawnChild?: SpawnChild;
   /**
-   * The model to select on the session the agent opens.
+   * Values to set on the session the agent opens, keyed by ACP config id.
    *
-   * Absent leaves the agent on whatever it advertises as current, which is the
-   * only behaviour available from an agent that offers no model selector. A
-   * value the agent does not advertise fails the run rather than falling back
-   * to that current model, so a stale registration cannot silently bill a
-   * different model than the one it names.
+   * One map rather than one option per axis: the client drives whatever the
+   * agent advertises, and an axis it does not advertise is absent from the
+   * agent rather than special in this client. An omitted key leaves that
+   * selector on whatever the agent treats as current, which is the only
+   * behaviour available from an agent that offers no such selector.
+   *
+   * A value the agent does not advertise fails the run rather than falling back
+   * to the current one, so a stale registration cannot silently run something
+   * other than what it names.
    */
-  model?: string;
+  selections?: Readonly<Record<string, string>>;
 }
 
 class AsyncEventQueue<T> implements AsyncIterable<T> {
@@ -335,15 +339,18 @@ function withTimeout<T>(promise: Promise<T>, milliseconds: number, label: string
  */
 export interface AcpRunHandleView extends RemoteRunHandle {
   /**
-   * The advertised value the session's model selector was set to.
+   * The advertised values this session's selectors were set to, by config id.
    *
-   * Undefined when no model was requested, which leaves the agent on whatever
-   * it treats as current — a value this client never learns. Otherwise this is
-   * the agent's own catalogue entry, not the requested string: a request naming
-   * a model by name resolves to the advertised value carrying it, so this
-   * reports the variant that actually ran.
+   * A key is present only once the agent accepted the value, so a reader may
+   * treat every entry as what ran rather than what was asked for. The values
+   * are the agent's own catalogue entries, not the requested strings: a request
+   * naming a model by name resolves to the advertised value carrying it, so
+   * this reports the variant that actually ran.
+   *
+   * An axis nobody asked for, and an axis the agent does not advertise, are
+   * both simply absent — this map claims nothing about either.
    */
-  readonly selectedModel: string | undefined;
+  readonly selected: Readonly<Record<string, string>>;
 }
 
 class AcpRunHandle implements AcpRunHandleView {
@@ -360,8 +367,8 @@ class AcpRunHandle implements AcpRunHandleView {
   readonly #closePromise: Promise<void>;
   readonly #toolNames = new Map<string, string>();
   readonly #endedTools = new Set<string>();
-  readonly #model: string | undefined;
-  #selectedModel: string | undefined;
+  readonly #selections: Readonly<Record<string, string>>;
+  readonly #selected: Record<string, string> = {};
   #resolveClosed!: () => void;
   #session?: ActiveSession;
   #snapshot: RemoteRunSnapshot;
@@ -385,14 +392,14 @@ class AcpRunHandle implements AcpRunHandleView {
     cancelGraceMs: number,
     startupTimeoutMs: number,
     eventQueueBytes: number,
-    model: string | undefined,
+    selections: Readonly<Record<string, string>>,
   ) {
     this.capture = Object.freeze({ ...capture });
     this.#child = child;
     this.#cancelGraceMs = cancelGraceMs;
     this.#startupTimeoutMs = startupTimeoutMs;
     this.#eventQueueBytes = eventQueueBytes;
-    this.#model = model;
+    this.#selections = selections;
     this.#processTree = captureProcessTree(child.pid);
     this.#queue = new AsyncEventQueue<RemoteRunEvent>(eventQueueBytes, serializedBytes, () => undefined);
     this.#snapshot = createRemoteRunSnapshot(capture, "connecting");
@@ -435,7 +442,7 @@ class AcpRunHandle implements AcpRunHandleView {
     cancelGraceMs: number,
     startupTimeoutMs: number,
     eventQueueBytes: number,
-    model: string | undefined,
+    selections: Readonly<Record<string, string>>,
   ): Promise<AcpRunHandle> {
     const handle = new AcpRunHandle(
       capture,
@@ -444,7 +451,7 @@ class AcpRunHandle implements AcpRunHandleView {
       cancelGraceMs,
       startupTimeoutMs,
       eventQueueBytes,
-      model,
+      selections,
     );
     try {
       await handle.#initialize(request);
@@ -526,46 +533,58 @@ class AcpRunHandle implements AcpRunHandleView {
       this.#startupTimeoutMs,
       "ACP session/new",
     );
-    await this.#selectModel(this.#session);
+    await this.#applySelections(this.#session);
     this.#emitState("running", "session/prompt");
     void this.#promptLoop(request.objective);
   }
 
   /**
-   * Set the requested model on a freshly opened session.
+   * Set every requested selector on a freshly opened session.
    *
    * Runs inside the startup bound rather than the run bound: a session that
-   * cannot be put on the requested model has not started, so failing here
-   * surfaces through `create` as a start failure instead of a run that quietly
-   * billed the agent's default.
+   * cannot be put in the requested configuration has not started, so failing
+   * here surfaces through `create` as a start failure instead of a run that
+   * quietly used the agent's defaults.
+   *
+   * Applied in `ACP_SELECTION_ORDER` so repeated runs of one registration
+   * configure the session identically; a requested id outside that order is
+   * applied after it, in the order the caller wrote it.
    *
    * @param session - the session `session/new` returned.
    */
-  async #selectModel(session: ActiveSession): Promise<void> {
-    if (this.#model === undefined) return;
-    const selection = resolveModelSelection(
-      session.newSessionResponse.configOptions,
-      this.#model,
-    );
-    await withTimeout(
-      this.#connection.agent.request<SetSessionConfigOptionResponse, SetSessionConfigOptionRequest>(
-        methods.agent.session.setConfigOption,
-        {
-          sessionId: session.sessionId,
-          configId: selection.configId,
-          value: selection.value,
-        },
-      ),
-      this.#startupTimeoutMs,
-      "ACP session/set_config_option",
-    );
-    // Recorded only after the agent accepted the value, so a reader can treat
-    // it as what ran rather than as what was asked for.
-    this.#selectedModel = selection.value;
+  async #applySelections(session: ActiveSession): Promise<void> {
+    const requested = Object.keys(this.#selections);
+    if (requested.length === 0) return;
+    const ordered = [
+      ...ACP_SELECTION_ORDER.filter((configId) => requested.includes(configId)),
+      ...requested.filter((configId) => !ACP_SELECTION_ORDER.includes(configId)),
+    ];
+    for (const configId of ordered) {
+      const selection = resolveConfigSelection(
+        session.newSessionResponse.configOptions,
+        configId,
+        this.#selections[configId]!,
+      );
+      await withTimeout(
+        this.#connection.agent.request<SetSessionConfigOptionResponse, SetSessionConfigOptionRequest>(
+          methods.agent.session.setConfigOption,
+          {
+            sessionId: session.sessionId,
+            configId: selection.configId,
+            value: selection.value,
+          },
+        ),
+        this.#startupTimeoutMs,
+        `ACP session/set_config_option (${configId})`,
+      );
+      // Recorded only after the agent accepted the value, so a reader can treat
+      // every entry as what ran rather than as what was asked for.
+      this.#selected[selection.configId] = selection.value;
+    }
   }
 
-  get selectedModel(): string | undefined {
-    return this.#selectedModel;
+  get selected(): Readonly<Record<string, string>> {
+    return this.#selected;
   }
 
   async #promptLoop(initial: string): Promise<void> {
@@ -958,14 +977,14 @@ export class AcpDriver implements RemoteDriver {
   readonly #startupTimeoutMs: number;
   readonly #eventQueueBytes: number;
   readonly #spawnChild: SpawnChild;
-  readonly #model: string | undefined;
+  readonly #selections: Readonly<Record<string, string>>;
   readonly #handles = new Map<string, AcpRunHandle>();
 
   constructor(options: AcpDriverOptions = {}) {
     this.#cancelGraceMs = options.cancelGraceMs ?? ACP_CANCEL_GRACE_MS;
     this.#startupTimeoutMs = options.startupTimeoutMs ?? ACP_STARTUP_TIMEOUT_MS;
     this.#eventQueueBytes = options.eventQueueBytes ?? ACP_EVENT_QUEUE_BYTES;
-    this.#model = options.model;
+    this.#selections = options.selections ?? {};
     if (!Number.isSafeInteger(this.#eventQueueBytes) || this.#eventQueueBytes < 1024) {
       throw new Error("ACP event queue byte limit must be a safe integer of at least 1024");
     }
@@ -998,7 +1017,7 @@ export class AcpDriver implements RemoteDriver {
       this.#cancelGraceMs,
       this.#startupTimeoutMs,
       this.#eventQueueBytes,
-      this.#model,
+      this.#selections,
     );
     this.#handles.set(capture.runId, handle);
     void handle.whenClosed().finally(() => {

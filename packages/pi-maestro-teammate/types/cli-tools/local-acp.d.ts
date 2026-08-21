@@ -92,14 +92,14 @@ export interface RunLocalCliToolParams {
      */
     startupTimeoutMs?: number;
     /**
-     * The model to select on the session the CLI opens.
+     * Values to select on the session the CLI opens, keyed by ACP config id.
      *
-     * Names one of the values the agent advertises on `session/new`, which is a
-     * different space from the `cli/<tool>` route that chose this CLI: the route
-     * picks the process, this picks what that process runs. Absent leaves the
-     * agent on its own current model.
+     * Each names one of the values the agent advertises on `session/new`, which
+     * is a different space from the `cli/<tool>` route that chose this CLI: the
+     * route picks the process, these pick how that process is configured. An
+     * omitted axis leaves the agent on its own current setting.
      */
-    acpModel?: string;
+    acpSelections?: Readonly<Record<string, string>>;
     /** Injectable ssh2 connection factory (tests only; defaults to real clients). */
     sshOptions?: SshDirectExecOptions;
 }
