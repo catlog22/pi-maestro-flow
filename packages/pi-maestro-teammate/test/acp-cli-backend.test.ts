@@ -517,16 +517,6 @@ test("naming a registry agent supplies the launch, and restating it is refused",
   );
   assert.ok(String(resolved.values.command).length > 0);
 
-  // Restating the launch beside the agent is refused rather than silently
-  // preferring one: they would disagree the moment the snapshot is refreshed.
-  const clash = resolveBackendConfig(acpCliBackend, {
-    acpAgent: "claude-acp",
-    command: "npx",
-    modelId: "cli/claude",
-  });
-  assert.equal(clash.errors.length, 1);
-  assert.match(clash.errors[0]!, /"command" cannot be set beside "acpAgent"/);
-
   const argClash = resolveBackendConfig(acpCliBackend, {
     acpAgent: "claude-acp",
     args: ["--acp"],
@@ -567,4 +557,46 @@ test("the registry picker answers from the snapshot without launching anything",
   );
   assert.ok(options.length > 20, `expected the snapshot's agents, got ${options.length}`);
   assert.ok(options.some((option) => option.value === "cursor"));
+});
+
+
+test("naming an executable beside a registry agent points at it, keeping the registry's arguments", () => {
+  // An operator with a build outside PATH is answering "where is it", not
+  // disagreeing with the registry — so the path wins and only the arguments
+  // come from the snapshot.
+  const resolved = resolveBackendConfig(acpCliBackend, {
+    acpAgent: "gemini",
+    command: "/opt/gemini/bin/gemini",
+    modelId: "cli/gemini",
+  });
+  assert.deepEqual(resolved.errors, []);
+  assert.equal(resolved.values.command, "/opt/gemini/bin/gemini");
+  // The arguments that follow an executable, not the runner's package
+  // specifier: launching a named binary must not hand it `-y <package>`.
+  const args = resolved.values.args as string[];
+  assert.ok(!args.includes("-y"), args.join(" "));
+  assert.ok(!args.some((argument) => argument.includes("@")), args.join(" "));
+  assert.ok(args.includes("--acp"), args.join(" "));
+});
+
+test("installing is off unless the registration asks for it", () => {
+  const off = resolveBackendConfig(acpCliBackend, { acpAgent: "claude-acp", modelId: "cli/claude" });
+  // Writing to disk and reaching the network is not a side effect of naming an
+  // agent; the runner path works without either.
+  assert.equal(off.values.acpInstall, "never");
+
+  const on = resolveBackendConfig(acpCliBackend, {
+    acpAgent: "claude-acp",
+    acpInstall: "auto",
+    modelId: "cli/claude",
+  });
+  assert.deepEqual(on.errors, []);
+  assert.equal(on.values.acpInstall, "auto");
+
+  const bad = resolveBackendConfig(acpCliBackend, {
+    acpAgent: "claude-acp",
+    installTimeoutMs: 0,
+    modelId: "cli/claude",
+  });
+  assert.ok(bad.errors.some((error) => /"installTimeoutMs" must be a positive/.test(error)), bad.errors.join(" | "));
 });

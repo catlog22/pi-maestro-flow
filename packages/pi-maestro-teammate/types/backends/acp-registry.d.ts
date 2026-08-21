@@ -68,3 +68,55 @@ export declare function resolveRegistryLaunch(agent: AcpRegistryAgent, options?:
     target?: string | undefined;
     isExecutable?: ExecutableProbe;
 }): ResolvedRegistryLaunch;
+/**
+ * Where installed agent copies live.
+ *
+ * Under Pi's agent directory rather than a global npm prefix: installing an
+ * agent must not change what the operator's own `npx`, `npm ls -g`, or PATH
+ * resolve, and removing the directory must undo it completely. Keyed by agent
+ * and version so refreshing the snapshot installs the new pin instead of
+ * silently reusing the old contents under the same path.
+ *
+ * @param agent - the snapshot entry to house.
+ * @returns the prefix `npm install --prefix` is given.
+ */
+export declare function installPrefixFor(agent: AcpRegistryAgent): string;
+/**
+ * The executable an install of this agent would provide, if it is there.
+ *
+ * @param agent - the snapshot entry to look for.
+ * @returns the absolute path to the installed executable, or undefined when no
+ * install is present or the agent declares no bin to look for.
+ */
+export declare function installedExecutable(agent: AcpRegistryAgent): string | undefined;
+/**
+ * Install one agent into its own prefix, so later runs skip the package runner.
+ *
+ * Only `npx` agents: a uvx package does not publish the script name this
+ * product would have to invoke afterwards, so installing one would leave
+ * nothing to run and the runner stays the only honest answer.
+ *
+ * Failure returns undefined rather than throwing. The runner path still works,
+ * so a network hiccup during an optional speed-up must not fail a task the
+ * operator asked to run.
+ *
+ * @param agent - the snapshot entry to install.
+ * @param options - abort signal, timeout, and installer injection for tests.
+ * @returns the installed executable, or undefined when the install did not
+ * produce one.
+ */
+export declare function installRegistryAgent(agent: AcpRegistryAgent, options?: {
+    signal?: AbortSignal;
+    timeoutMs?: number;
+    install?: AgentInstaller;
+}): Promise<string | undefined>;
+/** Installs one package specifier into a prefix; injectable for tests. */
+export type AgentInstaller = (spec: string, prefix: string, signal: AbortSignal | undefined, timeoutMs: number) => Promise<void>;
+/**
+ * Default install bound.
+ *
+ * Not a registration setting: this is one npm install of one small package, and
+ * a deployment that needs longer is on a network where the runner path is the
+ * better answer anyway. Exceeding it falls back rather than failing.
+ */
+export declare const ACP_INSTALL_TIMEOUT_MS = 180000;

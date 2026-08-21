@@ -20,6 +20,14 @@ export const ACP_CLI_SETTINGS_CATALOGS: TranslationCatalogs = {
     "acpCli.acpAgent": "Registry agent",
     "acpCli.acpAgent.description":
       "An id from the checked-in ACP registry snapshot, which then supplies the launch. An agent distributed through npx or uvx prefers a copy already on PATH and falls back to the runner; one that ships as a platform binary still needs its path in Executable, and contributes only its arguments. Setting Executable or Arguments beside this is refused rather than silently overridden. The snapshot pins versions and is refreshed by an explicit, reviewed step.",
+    "acpCli.acpInstall": "Install locally",
+    "acpCli.acpInstall.description":
+      "Off by default. On, the first run of an npx-distributed agent installs it under Pi's agent directory and later runs launch that copy — npx otherwise re-resolves the package every time. A failed install falls back to npx rather than failing the task. Never applies when you named the executable yourself, and never to uvx agents, whose script names are not published.",
+    "acpCli.acpInstall.never": "Always use the package runner",
+    "acpCli.acpInstall.auto": "Install on first use",
+    "acpCli.installTimeoutMs": "Install timeout (ms)",
+    "acpCli.installTimeoutMs.description":
+      "Bounds the one-off install, not the run. Exceeding it falls back to the package runner.",
     "acpCli.command": "Executable",
     "acpCli.command.description":
       "The CLI to launch. Point at the wrapper script or symlink on PATH rather than an inner binary, so an update that moves the target keeps working.",
@@ -63,6 +71,14 @@ export const ACP_CLI_SETTINGS_CATALOGS: TranslationCatalogs = {
     "acpCli.acpAgent": "注册表 agent",
     "acpCli.acpAgent.description":
       "签入的 ACP registry 快照里的 agent id，选定后由它提供启动方式。走 npx / uvx 分发的会**优先用 PATH 上已装的那份**，没装才回落到 runner；以平台二进制分发的仍需你在「可执行文件」里给路径，registry 只贡献参数。同时填了「可执行文件」或「启动参数」会被拒绝，而不是悄悄覆盖。快照钉死版本，只由显式且经评审的刷新步骤更新。",
+    "acpCli.acpInstall": "安装到本地",
+    "acpCli.acpInstall.description":
+      "默认关闭。打开后，npx 分发的 agent 首次运行会被安装到 Pi 的 agent 目录下，之后直接启动那份副本——否则 npx 每次都要重新解析包。安装失败会回落到 npx，而不是让任务失败。你自己填了可执行文件时不生效；uvx 分发的 agent 也不适用，因为它们不公布脚本名。",
+    "acpCli.acpInstall.never": "始终用包运行器",
+    "acpCli.acpInstall.auto": "首次使用时安装",
+    "acpCli.installTimeoutMs": "安装超时（毫秒）",
+    "acpCli.installTimeoutMs.description":
+      "约束那一次安装，不是运行本身。超时会回落到包运行器。",
     "acpCli.command": "可执行文件",
     "acpCli.command.description":
       "要启动的 CLI。指向 PATH 上的包装脚本或符号链接，不要指向内层二进制——升级换目录后前者仍然有效。",

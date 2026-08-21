@@ -61,7 +61,13 @@ import {
   advertisedValues,
 } from "../remote/acp-config-options.ts";
 import { probeAcpConfigOptions } from "../remote/acp-driver.ts";
-import { findRegistryAgent, registryAgentChoices, resolveRegistryLaunch } from "./acp-registry.ts";
+import {
+  findRegistryAgent,
+  installRegistryAgent,
+  installedExecutable,
+  registryAgentChoices,
+  resolveRegistryLaunch,
+} from "./acp-registry.ts";
 import {
   CLI_TOOL_MODEL_PREFIX,
   cliToolNameFromModel,
@@ -106,6 +112,25 @@ const CAPABILITIES: BackendCapabilities = {
 };
 
 /**
+ * The arguments that follow an executable, with no package specifier before them.
+ *
+ * A registration that names its own executable, and one that reached an
+ * installed copy, both launch the agent directly; only the runner path needs
+ * the specifier it resolves. Reading them from the snapshot keeps the two in
+ * step — the ACP-mode flag is the same either way.
+ *
+ * @param agent - the snapshot entry the registration named.
+ * @param launch - the launch resolved for this machine.
+ * @returns arguments to pass after the executable.
+ */
+function runnerArgumentsOf(
+  agent: ReturnType<typeof findRegistryAgent> & {},
+  launch: { args: readonly string[] },
+): readonly string[] {
+  return agent.launch.kind === "binary" ? launch.args : agent.launch.runnerArgs;
+}
+
+/**
  * Fill a registration's launch from the ACP registry snapshot.
  *
  * Writes into `values` rather than returning a launch, because `resolveConfig`
@@ -141,12 +166,16 @@ function applyRegistryLaunch(
   } catch (error) {
     return error instanceof Error ? error.message : String(error);
   }
-  if (launch.command !== undefined) {
-    if ((text(config, "command") ?? "").trim().length > 0) {
-      return `"command" cannot be set beside "acpAgent": agent "${agentId}" launches through ${agent.launch.kind}`;
-    }
-    values.command = launch.command;
+  // An explicit executable overrides the resolved one: an operator with a build
+  // outside PATH is naming where it is, not disagreeing with the registry. The
+  // arguments still come from the registry, and are the ones that follow an
+  // executable rather than the runner's package specifier.
+  const override = text(config, "command");
+  if (override !== undefined && override.trim().length > 0) {
+    values.args = [...runnerArgumentsOf(agent, launch)];
+    return undefined;
   }
+  if (launch.command !== undefined) values.command = launch.command;
   values.args = [...launch.args];
   return undefined;
 }
@@ -184,6 +213,29 @@ const CONFIG_FIELDS: readonly BackendConfigField[] = [
     kind: "dynamic-enum",
     labelKey: "acpCli.acpAgent",
     descriptionKey: "acpCli.acpAgent.description",
+  },
+  {
+    // Off by default: installing writes to disk and reaches the network, and a
+    // registration that only names an agent has not asked for either. The
+    // runner path works without it, so the choice is a speed-up an operator
+    // opts into rather than a side effect of naming an agent.
+    key: "acpInstall",
+    kind: "enum",
+    labelKey: "acpCli.acpInstall",
+    descriptionKey: "acpCli.acpInstall.description",
+    options: [
+      { value: "never", labelKey: "acpCli.acpInstall.never" },
+      { value: "auto", labelKey: "acpCli.acpInstall.auto" },
+    ],
+    default: "never",
+  },
+  {
+    // Bounds the one-off install, not the run. Exceeding it falls back to the
+    // runner rather than failing the task.
+    key: "installTimeoutMs",
+    kind: "integer",
+    labelKey: "acpCli.installTimeoutMs",
+    descriptionKey: "acpCli.installTimeoutMs.description",
   },
   {
     // Not declared `required`: `acpAgent` supplies it for every agent the
@@ -324,6 +376,43 @@ function count(config: Record<string, ConfigValue>, key: string): number | undef
  * @param config - this registration's resolved settings.
  * @returns the launch configuration.
  */
+/**
+ * The launch configuration for one run, installing the agent first when asked.
+ *
+ * `acpInstall: "auto"` trades one slow first run for fast later ones: `npx`
+ * re-resolves the package on every launch, so an installed copy is the
+ * difference between a handshake that answers immediately and one that waits on
+ * the network. A failed install is not a failed run — the runner path is still
+ * there, and returning it beats refusing to work because a speed-up did not
+ * apply.
+ *
+ * Never overrides an executable the registration named: that path is the
+ * operator's answer to "where is it", and installing a second copy would run
+ * something they did not point at.
+ *
+ * @param config - the resolved registration.
+ * @param signal - cancellation for the install.
+ * @returns the configuration to launch with.
+ */
+async function installedLaunchConfig(
+  config: Record<string, ConfigValue>,
+  signal: AbortSignal,
+): Promise<CliToolConfig> {
+  const base = launchConfigOf(config);
+  const agentId = text(config, "acpAgent");
+  if (agentId === undefined || text(config, "acpInstall") !== "auto") return base;
+  const agent = findRegistryAgent(agentId);
+  if (agent === undefined || agent.launch.kind !== "npx") return base;
+  // Already resolved to something other than the runner — an operator path or a
+  // copy on PATH — so there is nothing to speed up.
+  if (base.command !== agent.launch.command) return base;
+  const executable = installedExecutable(agent)
+    ?? await installRegistryAgent(agent, { signal, ...(count(config, "installTimeoutMs") === undefined ? {} : { timeoutMs: count(config, "installTimeoutMs")! }) });
+  return executable === undefined
+    ? base
+    : { ...base, command: executable, args: [...agent.launch.runnerArgs] };
+}
+
 function launchConfigOf(config: Record<string, ConfigValue>): CliToolConfig {
   const command = text(config, "command");
   const cwd = text(config, "cwd");
@@ -491,6 +580,10 @@ export function createAcpCliBackend(
       if (runTimeoutMs !== undefined && runTimeoutMs <= 0) {
         errors.push(`"runTimeoutMs" must be a positive number of milliseconds, got ${runTimeoutMs}`);
       }
+      const installTimeoutMs = count(config, "installTimeoutMs");
+      if (installTimeoutMs !== undefined && installTimeoutMs <= 0) {
+        errors.push(`"installTimeoutMs" must be a positive number of milliseconds, got ${installTimeoutMs}`);
+      }
       const startupTimeoutMs = count(config, "startupTimeoutMs");
       if (startupTimeoutMs !== undefined && startupTimeoutMs <= 0) {
         errors.push(
@@ -590,6 +683,11 @@ export function createAcpCliBackend(
       }
       const tool = isCliToolModel(route) ? cliToolNameFromModel(route) : route;
       const aborter = new AbortController();
+      // Installing is deferred to here because `resolveConfig` is synchronous
+      // and runs whenever the document is read — including while the settings
+      // shell renders. A registration stays launchable without it: this only
+      // upgrades the runner path to an installed copy.
+      const launchConfig = await installedLaunchConfig(options.config, aborter.signal);
       const timeoutMs = count(options.config, "runTimeoutMs");
       const startupTimeoutMs = count(options.config, "startupTimeoutMs");
       const cancellation = combineSignals(options.signal, aborter.signal);
@@ -597,7 +695,7 @@ export function createAcpCliBackend(
       const outcome = (async (): Promise<AttemptOutcome> => {
         const settled = await run({
           tool,
-          config: launchConfigOf(options.config),
+          config: launchConfig,
           prompt: spec.task,
           cwd: spec.cwd ?? options.baseCwd,
           signal: cancellation.signal,

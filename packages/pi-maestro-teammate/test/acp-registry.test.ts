@@ -3,6 +3,8 @@ import test from "node:test";
 import {
   currentRegistryTarget,
   findRegistryAgent,
+  installPrefixFor,
+  installRegistryAgent,
   registryAgentChoices,
   resolveRegistryLaunch,
 } from "../src/backends/acp-registry.ts";
@@ -97,4 +99,47 @@ test("the snapshot offers every listed agent, saying how each is distributed", (
   assert.match(cursor?.description ?? "", /platform binary/);
   const gemini = choices.find((choice) => choice.value === "gemini");
   assert.match(gemini?.description ?? "", /npx/);
+});
+
+test("installing puts an agent under its own pinned prefix, never a global one", () => {
+  const agent = runner();
+  const prefix = installPrefixFor(agent);
+  // Keyed by agent and version: refreshing the snapshot must install the new
+  // pin rather than reuse whatever sits under the old path.
+  assert.ok(prefix.includes(agent.id), prefix);
+  assert.ok(prefix.includes(agent.version), prefix);
+  assert.ok(prefix.includes("acp-agents"), prefix);
+});
+
+test("an install failure falls back to the runner instead of failing the run", async () => {
+  const agent = runner();
+  const executable = await installRegistryAgent(agent, {
+    install: () => Promise.reject(new Error("network is down")),
+  });
+  // Undefined, not a throw: the runner path still works, and an optional
+  // speed-up must not take down a task the operator asked to run.
+  assert.equal(executable, undefined);
+});
+
+test("the installer is given the pinned specifier, not the runner's argv", async () => {
+  const agent = runner();
+  const seen: string[] = [];
+  await installRegistryAgent(agent, {
+    install: (spec) => (seen.push(spec), Promise.reject(new Error("stop here"))),
+  });
+  assert.equal(seen.length, 1);
+  // `-y` and any ACP-mode flag belong to launching it, not to installing it.
+  assert.ok(!seen[0]!.startsWith("-"), seen[0]);
+  assert.match(seen[0]!, /@/);
+});
+
+test("a uvx agent is never installed, because nothing would know what to run", async () => {
+  const uvx = ACP_REGISTRY_AGENTS.find((a) => a.launch.kind === "uvx");
+  if (!uvx) return;
+  let called = false;
+  const executable = await installRegistryAgent(uvx, {
+    install: () => ((called = true), Promise.resolve()),
+  });
+  assert.equal(executable, undefined);
+  assert.equal(called, false, "a uvx package publishes no script name to launch afterwards");
 });

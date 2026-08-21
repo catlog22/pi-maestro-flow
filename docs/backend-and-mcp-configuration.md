@@ -107,7 +107,42 @@ cursor       bins=[]                    → operator (你给路径) acp
 
 **以平台二进制分发的仍要你给路径**（cursor、goose、opencode 等 16 个），本产品从不下载安装它们；registry 只贡献 `args`。
 
-填了 `acpAgent` 再填 `command` 或 `args` 会被**拒绝**而不是悄悄覆盖——刷新快照后两者就会不一致，而你无从判断实际跑的是哪个。
+### 自己填路径
+
+`command` 填了就用它，`acpAgent` 只贡献参数——这适用于**任何** agent，不只 binary。有自己那份构建、装在 PATH 之外的，直接指过去：
+
+```json
+"cursor": { "config": { "acpAgent": "cursor",
+                        "command": "/Users/<you>/.local/bin/agent",
+                        "modelId": "cli/cursor" } }
+
+"gemini": { "config": { "acpAgent": "gemini",
+                        "command": "/opt/gemini/bin/gemini",
+                        "modelId": "cli/gemini" } }
+```
+
+给了路径时传的是**跟在可执行文件后面的参数**（`--acp`），不是 runner 的包说明符（`-y <包名>`）——否则等于把 npx 的参数喂给一个直接可执行的程序。
+
+`args` 仍然**不能**和 `acpAgent` 同时填：参数来自 registry，两边都写就无从判断跑的是哪个。
+
+### 装到本地：`acpInstall`
+
+默认 `never`，每次都走 npx。改成 `auto` 后，**首次运行会把它装到 Pi 的 agent 目录下**，之后直接启动那份副本：
+
+```json
+"claude": { "config": { "acpAgent": "claude-acp", "acpInstall": "auto",
+                        "modelId": "cli/claude" } }
+```
+
+| | |
+|---|---|
+| 装到哪 | `<agent 目录>/acp-agents/<id>/<版本>/`，**不碰**你的全局 npm 前缀；删目录即可完全撤销 |
+| 何时装 | 派发时，不是读配置时——`resolveConfig` 是同步的，设置界面渲染时也会跑，不能在那里装包 |
+| 装失败 | **回落到 npx，不让任务失败**。一个加速手段不该拖垮你要跑的任务 |
+| 不适用 | 你自己填了 `command` 时（那是你指的程序）；uvx 分发的 agent（不公布脚本名，装了也不知道启动什么） |
+| 超时 | `installTimeoutMs`，只约束那一次安装；超时同样回落 |
+
+默认关闭是刻意的：写磁盘和联网都不该是「填了个 agent id」的副作用。
 
 **版本是钉死的。** 快照里写的版本就是会跑的版本，只由显式刷新更新：
 

@@ -8,6 +8,10 @@
  * whatever upstream published since.
  */
 
+import { execFile } from "node:child_process";
+import { existsSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { probeCliToolCommand, type CliToolConfig } from "../cli-tools/cli-tools-config.ts";
 import { ACP_REGISTRY_AGENTS, type AcpRegistryAgent } from "./acp-registry-snapshot.ts";
 
@@ -110,3 +114,103 @@ export function resolveRegistryLaunch(
   }
   return { command: agent.launch.command, args: agent.launch.args, source: "runner" };
 }
+
+/**
+ * Where installed agent copies live.
+ *
+ * Under Pi's agent directory rather than a global npm prefix: installing an
+ * agent must not change what the operator's own `npx`, `npm ls -g`, or PATH
+ * resolve, and removing the directory must undo it completely. Keyed by agent
+ * and version so refreshing the snapshot installs the new pin instead of
+ * silently reusing the old contents under the same path.
+ *
+ * @param agent - the snapshot entry to house.
+ * @returns the prefix `npm install --prefix` is given.
+ */
+export function installPrefixFor(agent: AcpRegistryAgent): string {
+  return join(getAgentDir(), "acp-agents", agent.id, agent.version);
+}
+
+/**
+ * The executable an install of this agent would provide, if it is there.
+ *
+ * @param agent - the snapshot entry to look for.
+ * @returns the absolute path to the installed executable, or undefined when no
+ * install is present or the agent declares no bin to look for.
+ */
+export function installedExecutable(agent: AcpRegistryAgent): string | undefined {
+  if (agent.launch.kind !== "npx") return undefined;
+  const prefix = installPrefixFor(agent);
+  for (const bin of agent.launch.bins) {
+    const candidate = join(prefix, "node_modules", ".bin", bin);
+    if (existsSync(candidate)) return candidate;
+  }
+  return undefined;
+}
+
+/**
+ * Install one agent into its own prefix, so later runs skip the package runner.
+ *
+ * Only `npx` agents: a uvx package does not publish the script name this
+ * product would have to invoke afterwards, so installing one would leave
+ * nothing to run and the runner stays the only honest answer.
+ *
+ * Failure returns undefined rather than throwing. The runner path still works,
+ * so a network hiccup during an optional speed-up must not fail a task the
+ * operator asked to run.
+ *
+ * @param agent - the snapshot entry to install.
+ * @param options - abort signal, timeout, and installer injection for tests.
+ * @returns the installed executable, or undefined when the install did not
+ * produce one.
+ */
+export async function installRegistryAgent(
+  agent: AcpRegistryAgent,
+  options: { signal?: AbortSignal; timeoutMs?: number; install?: AgentInstaller } = {},
+): Promise<string | undefined> {
+  if (agent.launch.kind !== "npx") return undefined;
+  const existing = installedExecutable(agent);
+  if (existing !== undefined) return existing;
+  // The pinned specifier, not the runner's argv: `-y` and any ACP-mode flags
+  // belong to launching it, not to installing it.
+  const spec = agent.launch.args.find((argument) => argument !== "-y" && !argument.startsWith("-"));
+  if (spec === undefined) return undefined;
+  const prefix = installPrefixFor(agent);
+  const install = options.install ?? npmInstall;
+  try {
+    mkdirSync(prefix, { recursive: true });
+    await install(spec, prefix, options.signal, options.timeoutMs ?? ACP_INSTALL_TIMEOUT_MS);
+  } catch {
+    // Diagnosed by the caller falling back to the runner, which reports its own
+    // failure if the agent is genuinely unreachable.
+    return undefined;
+  }
+  return installedExecutable(agent);
+}
+
+/** Installs one package specifier into a prefix; injectable for tests. */
+export type AgentInstaller = (
+  spec: string,
+  prefix: string,
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+) => Promise<void>;
+
+/**
+ * Default install bound.
+ *
+ * Not a registration setting: this is one npm install of one small package, and
+ * a deployment that needs longer is on a network where the runner path is the
+ * better answer anyway. Exceeding it falls back rather than failing.
+ */
+export const ACP_INSTALL_TIMEOUT_MS = 180_000;
+
+const npmInstall: AgentInstaller = (spec, prefix, signal, timeoutMs) =>
+  new Promise((resolve, reject) => {
+    execFile(
+      process.platform === "win32" ? "npm.cmd" : "npm",
+      ["install", "--prefix", prefix, "--no-audit", "--no-fund", "--loglevel", "error", spec],
+      { timeout: timeoutMs, windowsHide: true, ...(signal ? { signal } : {}) },
+      (error) => (error ? reject(error) : resolve()),
+    );
+  });
