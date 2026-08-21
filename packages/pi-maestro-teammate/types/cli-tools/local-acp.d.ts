@@ -64,6 +64,15 @@ export interface CliToolRunResult extends AcpToolObservation {
     };
     durationMs: number;
     terminalStatus: "completed" | "failed" | "cancelled" | "lost";
+    /**
+     * The model the CLI's session was put on, in that CLI's own catalogue.
+     *
+     * Absent when no model was requested, and on every failure that settles
+     * before the handshake selected one. Distinct from the `cli/<tool>` route
+     * that chose the CLI: the route names the process, this names what that
+     * process ran, and only this one answers which model produced the output.
+     */
+    selectedModel?: string;
 }
 export interface RunLocalCliToolParams {
     tool: string;

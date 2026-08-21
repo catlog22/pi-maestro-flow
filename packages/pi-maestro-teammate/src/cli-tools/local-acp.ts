@@ -12,7 +12,12 @@
 
 import { randomUUID } from "node:crypto";
 import type { RemoteAcpPolicy } from "../remote/types.ts";
-import { AcpDriver, ACP_STARTUP_TIMEOUT_MS, type AcpDriverOptions } from "../remote/acp-driver.ts";
+import {
+  AcpDriver,
+  ACP_STARTUP_TIMEOUT_MS,
+  type AcpDriverOptions,
+  type AcpRunHandleView,
+} from "../remote/acp-driver.ts";
 import type {
   RemoteDriverContext,
   RemoteRunHandle,
@@ -93,6 +98,15 @@ export interface CliToolRunResult extends AcpToolObservation {
   usage: { inputTokens?: number; outputTokens?: number; totalTokens?: number; costUsd?: number };
   durationMs: number;
   terminalStatus: "completed" | "failed" | "cancelled" | "lost";
+  /**
+   * The model the CLI's session was put on, in that CLI's own catalogue.
+   *
+   * Absent when no model was requested, and on every failure that settles
+   * before the handshake selected one. Distinct from the `cli/<tool>` route
+   * that chose the CLI: the route names the process, this names what that
+   * process ran, and only this one answers which model produced the output.
+   */
+  selectedModel?: string;
 }
 
 export interface RunLocalCliToolParams {
@@ -196,7 +210,7 @@ export async function runSshCliTool(
     ...(params.startupTimeoutMs === undefined ? {} : { startupTimeoutMs: params.startupTimeoutMs }),
     ...(params.acpModel === undefined ? {} : { model: params.acpModel }),
   });
-  let handle: RemoteRunHandle;
+  let handle: AcpRunHandleView;
   try {
     handle = await driver.start(
       {
@@ -222,6 +236,7 @@ export async function runSshCliTool(
   try {
     const result = await settleAcpRun(handle, params);
     const durationMs = Date.now() - startedAt;
+    const selected = selectedModelOf(handle);
     if (result.status === "completed") {
       return {
         exitCode: 0,
@@ -233,14 +248,33 @@ export async function runSshCliTool(
         durationMs,
         terminalStatus: "completed",
         ...observationOf(result),
+        ...selected,
       };
     }
     const reason = result.error
       ?? (result.status === "cancelled" ? "CLI tool run was cancelled" : "CLI tool run did not complete");
-    return failedResult(startedAt, reason, result.usage, durationMs, result.status, observationOf(result));
+    return {
+      ...failedResult(startedAt, reason, result.usage, durationMs, result.status, observationOf(result)),
+      ...selected,
+    };
   } finally {
     await driver.close();
   }
+}
+
+/**
+ * The settled session's model, as a spreadable fragment.
+ *
+ * Reported on failed and cancelled runs too: a session that selected a model
+ * and then failed still ran on it, and which model failed is the first thing a
+ * reader needs. Empty when the handshake settled before any selection, so an
+ * absent key never has to stand for a model nobody chose.
+ *
+ * @param handle - the settled run's handle.
+ * @returns `{ selectedModel }`, or an empty object when none was selected.
+ */
+function selectedModelOf(handle: AcpRunHandleView): Pick<CliToolRunResult, "selectedModel"> {
+  return handle.selectedModel === undefined ? {} : { selectedModel: handle.selectedModel };
 }
 
 /**
@@ -298,7 +332,7 @@ export async function runLocalCliTool(
     ...(params.startupTimeoutMs === undefined ? {} : { startupTimeoutMs: params.startupTimeoutMs }),
     ...(params.acpModel === undefined ? {} : { model: params.acpModel }),
   });
-  let handle: RemoteRunHandle;
+  let handle: AcpRunHandleView;
   try {
     handle = await driver.start(
       {
@@ -324,6 +358,7 @@ export async function runLocalCliTool(
   try {
     const result = await settleAcpRun(handle, params);
     const durationMs = Date.now() - startedAt;
+    const selected = selectedModelOf(handle);
     if (result.status === "completed") {
       return {
         exitCode: 0,
@@ -335,11 +370,15 @@ export async function runLocalCliTool(
         durationMs,
         terminalStatus: "completed",
         ...observationOf(result),
+        ...selected,
       };
     }
     const reason = result.error
       ?? (result.status === "cancelled" ? "CLI tool run was cancelled" : "CLI tool run did not complete");
-    return failedResult(startedAt, reason, result.usage, durationMs, result.status, observationOf(result));
+    return {
+      ...failedResult(startedAt, reason, result.usage, durationMs, result.status, observationOf(result)),
+      ...selected,
+    };
   } finally {
     await driver.close();
   }

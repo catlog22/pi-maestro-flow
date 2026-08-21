@@ -491,7 +491,12 @@ export function createAcpCliBackend(
             cost: settled.usage.costUsd ?? 0,
             turns: 1,
           },
+          // The route, because that is what the host dispatched and the only
+          // name it shares with this registration. What the CLI actually ran
+          // has its own namespace and is reported beside it; collapsing the two
+          // into one field would lose whichever it did not carry.
           model: route,
+          ...(settled.selectedModel === undefined ? {} : { executorModel: settled.selectedModel }),
           correlationId: options.correlationId,
           originCwd: spec.cwd ?? options.baseCwd,
           durationMs: settled.durationMs,

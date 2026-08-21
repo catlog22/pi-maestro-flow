@@ -92,6 +92,22 @@ export interface SingleResult {
   messages: Array<{ role: string; content: string }>;
   usage: Usage;
   model: string;
+  /**
+   * The model the executing runtime actually ran, in that runtime's own naming.
+   *
+   * `model` names what the host dispatched: for a backend whose model namespace
+   * is its own, that is the route (`cli/<tool>`), which identifies the process
+   * and not what ran inside it. Without this member two runs on different
+   * models are indistinguishable in the settled result.
+   *
+   * Written only after the runtime accepted the selection, so it reports what
+   * ran rather than what was asked for. Absent carries no claim either way: a
+   * backend sharing the host's model namespace never sets it because `model`
+   * already answers, and one that owns its namespace leaves it unset when it
+   * selected nothing, which leaves the runtime on a current model the host
+   * never learns.
+   */
+  executorModel?: string;
   correlationId: string;
   /** Unique identity of one published turn; stable across its compatibility projections. */
   publicationId?: string;

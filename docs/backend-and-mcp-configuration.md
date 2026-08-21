@@ -10,14 +10,28 @@
 
 | 层 | 文件 | 决定什么 |
 |---|---|---|
-| 宿主 | `.pi/teammate-backends.json` | 有哪些后端可派发、各自怎么启动 |
+| 宿主 | `teammate-backends.json` | 有哪些后端可派发、各自怎么启动 |
 | 运行时 | 后端自己的配置文件 | 该后端内部的能力，例如 dsh 的 `cordis.yml` 挂哪些 MCP |
 
-**外部 MCP 属于第二层。** 宿主对它一无所知，`.pi/teammate-backends.json` 里没有也不该有 MCP 字段。给 dsh 挂 MCP 就是编辑 `cordisConfig` 指向的那个 `cordis.yml`。
+**外部 MCP 属于第二层。** 宿主对它一无所知，`teammate-backends.json` 里没有也不该有 MCP 字段。给 dsh 挂 MCP 就是编辑 `cordisConfig` 指向的那个 `cordis.yml`。
 
 ## 第一层：注册后端
 
-`.pi/teammate-backends.json` 的结构、`mode` / `default` / `backends` 三个键的语义见契约文档的 Registering a backend 一节。这里只给两个后端的完整可用配置。
+### 放哪个文件
+
+注册文档有两处，按下面的顺序取**第一个存在的**：
+
+| 优先级 | 路径 | 适合 |
+|---|---|---|
+| 1 | `<工作区>/.pi/teammate-backends.json` | 只给这个项目用的后端 |
+| 2 | `<agent 目录>/teammate-backends.json`，默认 `~/.pi/agent/` | 所有项目共用；受 `PI_CODING_AGENT_DIR` 控制 |
+| 3 | 无文件 | 内置 `legacy` + `pi-subprocess` |
+
+**项目文档整份胜出，不与全局逐字段合并。** 项目里只要有这个文件，全局的 `mode`、`default`、`backends` 就全部不参与——否则会得到一份哪个文件里都不存在的配置。要在某个项目里覆盖一条全局注册，就把需要的全局条目一起抄进项目文档。
+
+全局文档**格式错误不会静默退回 legacy**：JSON 解析失败会点名该文件路径并报错，因为一份配错的全局注册和一台没配过的机器必须能区分。
+
+`mode` / `default` / `backends` 三个键的语义见契约文档的 Registering a backend 一节。下面给两个后端的完整可用配置。
 
 ```json
 {
@@ -157,6 +171,8 @@
 
 **`ACP option "model" does not advertise "<值>"`** —— 内层模型名不在该 CLI 的目录里，错误消息已附完整目录。
 
-**运行成功但 CLI 用的不是你配的模型** —— 检查任务的 `model` 是否恰好等于路由 id，那种情况下用的是注册项的 `acpModel`。
+**想知道某次运行到底跑了哪个模型** —— 看结果的 `executorModel`：那是 CLI 自己接受的目录取值，用它自己的命名；`model` 是宿主派发用的路由，两者不是一回事。`executorModel` 缺失表示这次没选模型，CLI 停在它自己的当前模型上，**不表示等于 `model`**。运行成功但模型不对时，先看任务的 `model` 是否恰好等于路由 id——那种情况下生效的是注册项的 `acpModel`。
+
+**改了注册文档但不生效** —— 项目里若存在 `.pi/teammate-backends.json`，全局那份整份不参与；确认你改的是实际生效的那一份。
 
 **dsh 运行判 failed 且警告提到 todo endpoint** —— 开了 `todoBridge` 但 `cordis.yml` 缺对应条目，见 [dsh-todo-bridge-deployment.md](dsh-todo-bridge-deployment.md)。

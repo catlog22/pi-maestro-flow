@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   displayMessageForResult,
+  displayResolvedModel,
   emitTeammateResultPublished,
   setAgentStructuredOutput,
   toStructuredResults,
@@ -297,4 +298,17 @@ test("buildWatchOutput omits the structured output block when absent", () => {
     agent: agentFixture({ correlationId: "run-xyz" }),
   }, 20).join("\n");
   assert.doesNotMatch(watched, /structured output/);
+});
+
+test("the model display names what ran, keeping the dispatched route as what was requested", () => {
+  // A backend that owns its model namespace: the host dispatched a route, the
+  // CLI ran something inside it. Reading `model` here printed the route on both
+  // halves of "Model: X (requested Y)" and told the reader nothing.
+  assert.equal(
+    displayResolvedModel(result({ model: "cli/cursor", executorModel: "composer-2.5[fast=true]" })),
+    "composer-2.5[fast=true]",
+  );
+  // A backend whose namespace is the host's reports one name for both, so the
+  // dispatched model stays the answer.
+  assert.equal(displayResolvedModel(result({ model: "deepseek-v4" })), "deepseek-v4");
 });

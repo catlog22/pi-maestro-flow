@@ -324,7 +324,29 @@ function withTimeout<T>(promise: Promise<T>, milliseconds: number, label: string
   });
 }
 
-class AcpRunHandle implements RemoteRunHandle {
+/**
+ * A run handle that also reports which model its session was put on.
+ *
+ * `RemoteRunHandle` stays model-free because model selection is an ACP session
+ * concept and no other driver has one. The value is read after the run settles,
+ * so it is declared here rather than pushed through the event stream: the
+ * selection happens once, during the handshake, and never changes for the life
+ * of the session.
+ */
+export interface AcpRunHandleView extends RemoteRunHandle {
+  /**
+   * The advertised value the session's model selector was set to.
+   *
+   * Undefined when no model was requested, which leaves the agent on whatever
+   * it treats as current — a value this client never learns. Otherwise this is
+   * the agent's own catalogue entry, not the requested string: a request naming
+   * a model by name resolves to the advertised value carrying it, so this
+   * reports the variant that actually ran.
+   */
+  readonly selectedModel: string | undefined;
+}
+
+class AcpRunHandle implements AcpRunHandleView {
   readonly capture: RemoteRunCapture;
   readonly #child: ChildProcessWithoutNullStreams;
   readonly #cancelGraceMs: number;
@@ -339,6 +361,7 @@ class AcpRunHandle implements RemoteRunHandle {
   readonly #toolNames = new Map<string, string>();
   readonly #endedTools = new Set<string>();
   readonly #model: string | undefined;
+  #selectedModel: string | undefined;
   #resolveClosed!: () => void;
   #session?: ActiveSession;
   #snapshot: RemoteRunSnapshot;
@@ -536,6 +559,13 @@ class AcpRunHandle implements RemoteRunHandle {
       this.#startupTimeoutMs,
       "ACP session/set_config_option",
     );
+    // Recorded only after the agent accepted the value, so a reader can treat
+    // it as what ran rather than as what was asked for.
+    this.#selectedModel = selection.value;
+  }
+
+  get selectedModel(): string | undefined {
+    return this.#selectedModel;
   }
 
   async #promptLoop(initial: string): Promise<void> {
@@ -942,7 +972,7 @@ export class AcpDriver implements RemoteDriver {
     this.#spawnChild = options.spawnChild ?? ((command, args, spawnOptions) => spawn(command, args, spawnOptions));
   }
 
-  async start(request: RemoteRunStartParams, context: RemoteDriverContext): Promise<RemoteRunHandle> {
+  async start(request: RemoteRunStartParams, context: RemoteDriverContext): Promise<AcpRunHandleView> {
     validateTrustedTarget(request, context);
     const capture: RemoteRunCapture = {
       workerId: context.workerId,

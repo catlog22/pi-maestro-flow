@@ -371,6 +371,23 @@ function isStructuredOutputConfirmation(text: string): boolean {
   return text === STRUCTURED_OUTPUT_CONFIRMATION || text === "(no output)";
 }
 
+/**
+ * The model to display as the one this run resolved to.
+ *
+ * The display pairs `requestedModel` with `resolvedModel` so a reader can see
+ * what was asked for beside what ran. A backend that owns its model namespace
+ * reports the dispatched route in `model` and what it actually ran in
+ * `executorModel`, so reading `model` here printed the route on both halves
+ * and told the reader nothing.
+ *
+ * @param result - the settled result to display.
+ * @returns the executing runtime's own model when it reported one, else the
+ * dispatched model.
+ */
+export function displayResolvedModel(result: SingleResult): string {
+  return result.executorModel ?? result.model;
+}
+
 export function displayMessageForResult(result: SingleResult): string {
   const warnings = result.warnings ?? [];
   /**

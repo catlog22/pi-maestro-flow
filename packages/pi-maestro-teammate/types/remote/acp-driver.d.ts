@@ -29,6 +29,27 @@ export interface AcpDriverOptions {
      */
     model?: string;
 }
+/**
+ * A run handle that also reports which model its session was put on.
+ *
+ * `RemoteRunHandle` stays model-free because model selection is an ACP session
+ * concept and no other driver has one. The value is read after the run settles,
+ * so it is declared here rather than pushed through the event stream: the
+ * selection happens once, during the handshake, and never changes for the life
+ * of the session.
+ */
+export interface AcpRunHandleView extends RemoteRunHandle {
+    /**
+     * The advertised value the session's model selector was set to.
+     *
+     * Undefined when no model was requested, which leaves the agent on whatever
+     * it treats as current — a value this client never learns. Otherwise this is
+     * the agent's own catalogue entry, not the requested string: a request naming
+     * a model by name resolves to the advertised value carrying it, so this
+     * reports the variant that actually ran.
+     */
+    readonly selectedModel: string | undefined;
+}
 /** What a configuration probe needs in order to launch the agent it asks. */
 export interface AcpProbeTarget {
     /** Executable and arguments, already resolved from the registration. */
@@ -65,7 +86,7 @@ export declare class AcpDriver implements RemoteDriver {
     #private;
     readonly id: "acp";
     constructor(options?: AcpDriverOptions);
-    start(request: RemoteRunStartParams, context: RemoteDriverContext): Promise<RemoteRunHandle>;
+    start(request: RemoteRunStartParams, context: RemoteDriverContext): Promise<AcpRunHandleView>;
     close(): Promise<void>;
 }
 export {};

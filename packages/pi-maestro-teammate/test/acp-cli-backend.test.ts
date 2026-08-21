@@ -216,6 +216,52 @@ test("acp-cli applies the registration's model only when the task names the rout
   assert.equal(launches[2]?.acpModel, "composer-2.5[fast=true]");
 });
 
+test("acp-cli reports the route it was dispatched under beside the model that ran", async () => {
+  const backend = createAcpCliBackend(async () => ({
+    ...CLEAN_RUN,
+    selectedModel: "composer-2.5[fast=true]",
+  }));
+  const { result } = await (await backend.start(
+    specOf({ model: "cli/mock" }),
+    runOptionsOf({ ...LOCAL_CONFIG, acpModel: "composer-2.5" }),
+  )).outcome;
+
+  // The host dispatched a route and gets it back under the name it used.
+  assert.equal(result.model, "cli/mock");
+  // What the CLI ran lives in its own namespace and is reported beside it, so
+  // two runs of one registration on different models are told apart.
+  assert.equal(result.executorModel, "composer-2.5[fast=true]");
+});
+
+test("a run that selected no model reports no executor model rather than repeating the route", async () => {
+  const backend = createAcpCliBackend(async () => CLEAN_RUN);
+  const { result } = await (await backend.start(
+    specOf({ model: "cli/mock" }),
+    runOptionsOf(LOCAL_CONFIG),
+  )).outcome;
+
+  assert.equal(result.model, "cli/mock");
+  // Absent, never the route: the CLI stayed on whatever it treats as current,
+  // and copying `model` here would claim knowledge the host does not have.
+  assert.equal(result.executorModel, undefined);
+});
+
+test("a failed run still reports the model it ran on", async () => {
+  const backend = createAcpCliBackend(async () => ({
+    ...CLEAN_RUN,
+    exitCode: 1,
+    terminalStatus: "failed",
+    messages: [{ role: "system", content: "the CLI gave up" }],
+    selectedModel: "grok-4.6[effort=high]",
+  }));
+  const { result } = await (await backend.start(specOf(), runOptionsOf(LOCAL_CONFIG))).outcome;
+
+  assert.equal(result.exitCode, 1);
+  // Which model failed is the first thing a reader needs, so the selection
+  // outlives the turn's outcome.
+  assert.equal(result.executorModel, "grok-4.6[effort=high]");
+});
+
 test("acp-cli defaults its route to the registration name", async () => {
   const launches: RunLocalCliToolParams[] = [];
   const backend = createAcpCliBackend(async (params) => {

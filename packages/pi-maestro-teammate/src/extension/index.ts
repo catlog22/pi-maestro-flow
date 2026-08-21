@@ -377,6 +377,7 @@ import {
   checkActiveAgentBudget,
   emitTeammateStarted,
   displayMessageForResult,
+  displayResolvedModel,
   terminalStatusForResult,
   resultIsError,
   aggregateTerminalStatus,
@@ -3153,7 +3154,7 @@ export default function registerTeammateExtension(
             const canonicalStatus = terminalStatusForResult(result, terminalStatus);
             result.terminalStatus = canonicalStatus;
             const target = state.activeRuns.get(result.correlationId) ?? activeAgent;
-            target.resolvedModel = target.resolvedModel ?? result.model;
+            target.resolvedModel = target.resolvedModel ?? displayResolvedModel(result);
             if (result.attemptedModels) target.attemptedModels = [...result.attemptedModels];
             setAgentStructuredOutput(target, result.structuredOutput);
             if (!isMultiTask && target.name === MONITOR_SESSION_NAME) {
@@ -3712,7 +3713,7 @@ export default function registerTeammateExtension(
                 cacheWriteTokens: result.usage.cacheWriteTokens,
                 durationMs: result.durationMs,
                 requestedModel: current?.requestedModel,
-                resolvedModel: result.model,
+                resolvedModel: displayResolvedModel(result),
                 attemptedModels: result.attemptedModels ?? current?.attemptedModels,
                 ...(resultIsError(result) ? { error: displayMessageForResult(result) } : {}),
                 ...(lifecyclePending && current?.resultReadyAt

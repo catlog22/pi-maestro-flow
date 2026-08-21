@@ -33,6 +33,59 @@ test("runLocalCliTool drives a local CLI over ACP and settles completed", async 
   assert.equal(run.usage.outputTokens, 7);
 });
 
+test("a run reports the model the agent settled on, not the string it was asked for", async () => {
+  const controller = new AbortController();
+  const run = await runLocalCliTool({
+    tool: "mock-acp",
+    config: mockToolConfig,
+    prompt: "say hi",
+    cwd: path.dirname(fixturePath),
+    signal: controller.signal,
+    timeoutMs: 15_000,
+    // Named, not the advertised value: resolution maps it to the catalogue
+    // entry, and reporting the request back would hide which variant ran.
+    acpModel: "Mock Deep",
+  });
+  assert.equal(run.terminalStatus, "completed");
+  assert.equal(run.selectedModel, "mock-deep[effort=high]");
+  // The agent echoes what it was actually put on, so this fails if the client
+  // reported a selection it never made on the wire.
+  assert.match(run.messages[0]?.content ?? "", /model=mock-deep\[effort=high\]/);
+});
+
+test("a run that requested no model reports none rather than a model nobody chose", async () => {
+  const controller = new AbortController();
+  const run = await runLocalCliTool({
+    tool: "mock-acp",
+    config: mockToolConfig,
+    prompt: "say hi",
+    cwd: path.dirname(fixturePath),
+    signal: controller.signal,
+    timeoutMs: 15_000,
+  });
+  assert.equal(run.terminalStatus, "completed");
+  assert.equal(run.selectedModel, undefined);
+  assert.match(run.messages[0]?.content ?? "", /model=unset/);
+});
+
+test("a model the agent does not advertise fails the run and lists what it does", async () => {
+  const controller = new AbortController();
+  const run = await runLocalCliTool({
+    tool: "mock-acp",
+    config: mockToolConfig,
+    prompt: "say hi",
+    cwd: path.dirname(fixturePath),
+    signal: controller.signal,
+    timeoutMs: 15_000,
+    acpModel: "mock-imaginary",
+  });
+  assert.equal(run.terminalStatus, "failed");
+  assert.equal(run.selectedModel, undefined);
+  const failure = run.messages[0]?.content ?? "";
+  assert.match(failure, /does not advertise "mock-imaginary"/);
+  assert.match(failure, /mock-deep\[effort=high\]/);
+});
+
 test("runLocalCliTool fails fast when the executable is missing", async () => {
   const controller = new AbortController();
   const run = await runLocalCliTool({
