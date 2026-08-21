@@ -71,6 +71,15 @@ test("an empty todo list is not a todo binding request", () => {
   assert.deepEqual(requiredCapabilities(task({ ...BARE, todos: [] })), []);
 });
 
+test("thinking off is not a thinking level request", () => {
+  assert.deepEqual(requiredCapabilities(task({ ...BARE, thinking: "off" })), []);
+  const result = validateBackendCapabilities(
+    [task({ ...BARE, thinking: "off" })],
+    () => ({ name: "dsh", capabilities: DSH }),
+  );
+  assert.deepEqual(result.errors, []);
+});
+
 test("a fully native backend produces no errors and no warnings", () => {
   const result = validateBackendCapabilities(
     [task({ ...BARE, outputSchema: {}, context: "fork" })],
