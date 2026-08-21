@@ -7,6 +7,8 @@ import {
   LoopScheduler,
   registerLoop,
   parseLoopDuration,
+  formatJob,
+  resolveLoopId,
   LOOP_UPDATE_EVENT,
   LOOP_QUERY_EVENT,
   type LoopJobSnapshot,
@@ -22,6 +24,7 @@ interface FakeTimer {
 function createHarness(
   execute?: (job: LoopJobSnapshot) => Promise<LoopRunResult>,
   onUpdate?: (jobs: LoopJobSnapshot[]) => void,
+  onTerminal?: (job: LoopJobSnapshot, outcome: "failed" | "completed") => void,
 ) {
   const timers: FakeTimer[] = [];
   let now = 1_000;
@@ -37,6 +40,7 @@ function createHarness(
       (timer as unknown as FakeTimer).cleared = true;
     },
     onUpdate,
+    onTerminal,
   });
 
   return {
@@ -196,6 +200,45 @@ test("duration parser accepts explicit units and rejects ambiguous values", () =
   assert.equal(parseLoopDuration("soon"), undefined);
 });
 
+// Invariant: status display MUST pair a stable glyph with the status text
+// (ui-conventions-004), and times MUST be human-readable relative values.
+test("formatJob pairs glyph with status text and uses relative times", () => {
+  const harness = createHarness();
+  harness.scheduler.create({ kind: "shell", task: "echo hi\n  second line", intervalMs: 60_000, maxRuns: 4 });
+  const formatted = formatJob(harness.scheduler.list()[0], 31_000);
+
+  assert.match(formatted, /○ loop-/, "scheduled glyph + id");
+  assert.match(formatted, /\bscheduled\b/);
+  assert.match(formatted, /next in 30s/, "relative next-run time");
+  assert.match(formatted, /"echo hi second line"/, "flattened task preview");
+  assert.doesNotMatch(formatted, /Z/, "no raw ISO timestamp");
+});
+
+test("formatJob marks terminal outcomes and truncates long results", async () => {
+  const harness = createHarness(async () => ({ ok: false, summary: "x".repeat(300) }));
+  harness.scheduler.create({ kind: "shell", task: "fail", intervalMs: 1_000, maxRuns: 3 });
+  harness.fire(0);
+  await flush();
+  const formatted = formatJob(harness.scheduler.list()[0], 2_000);
+
+  assert.match(formatted, /✗/, "failed glyph");
+  assert.match(formatted, /\bfailed\b/);
+  assert.match(formatted, /last 1s ago/);
+  const resultPart = formatted.split("result=")[1].split(" log=")[0];
+  assert.ok(resultPart.length <= 121, "result truncated to ~120 chars");
+});
+
+test("resolveLoopId resolves exact ids and unique prefixes, rejects ambiguity", () => {
+  const jobs: LoopJobSnapshot[] = [
+    { id: "loop-1-abc", kind: "shell", task: "a", intervalMs: 1_000, maxRuns: 1, runCount: 0, status: "scheduled", createdAt: 1 },
+    { id: "loop-2-def", kind: "shell", task: "b", intervalMs: 1_000, maxRuns: 1, runCount: 0, status: "scheduled", createdAt: 2 },
+  ];
+  assert.deepEqual(resolveLoopId("loop-2-def", jobs), { id: "loop-2-def" });
+  assert.deepEqual(resolveLoopId("loop-2", jobs), { id: "loop-2-def" }, "unique prefix resolves");
+  assert.ok("error" in resolveLoopId("loop-", jobs), "ambiguous prefix reports error");
+  assert.ok("error" in resolveLoopId("nope", jobs), "unknown id reports error");
+});
+
 test("loop is registered only by pi-maestro-flow", async () => {
   const flowIndex = await readFile(new URL("../src/extension/index.ts", import.meta.url), "utf8");
   const teammateIndex = await readFile(new URL("../../pi-maestro-teammate/src/extension/index.ts", import.meta.url), "utf8");
@@ -249,6 +292,39 @@ test("onUpdate fires on failed run", async () => {
   assert.equal(updates[1][0].status, "failed");
 });
 
+// Invariant: terminal outcomes MUST be announced once (ui-conventions-007) —
+// failures must not be silently discoverable only via list.
+test("onTerminal fires exactly once per terminal outcome", async () => {
+  const terminals: Array<{ id: string; outcome: string }> = [];
+  const failed = createHarness(
+    async () => ({ ok: false, summary: "boom" }),
+    undefined,
+    (job, outcome) => terminals.push({ id: job.id, outcome }),
+  );
+  failed.scheduler.create({ kind: "shell", task: "x", intervalMs: 1_000, maxRuns: 3 });
+  failed.fire(0);
+  await flush();
+  assert.deepEqual(terminals, [{ id: failed.scheduler.list()[0].id, outcome: "failed" }]);
+
+  const completed = createHarness(
+    async () => ({ ok: true, summary: "done" }),
+    undefined,
+    (job, outcome) => terminals.push({ id: job.id, outcome }),
+  );
+  completed.scheduler.create({ kind: "shell", task: "y", intervalMs: 1_000, maxRuns: 1 });
+  completed.fire(0);
+  await flush();
+  assert.equal(terminals.length, 2);
+  assert.deepEqual(terminals[1], { id: completed.scheduler.list()[0].id, outcome: "completed" });
+});
+
+test("terminal outcomes are announced via loop-event messages", async () => {
+  const source = await readFile(new URL("../src/tools/loop.ts", import.meta.url), "utf8");
+  assert.match(source, /onTerminal\(job, outcome\)/, "registerLoop wires onTerminal");
+  assert.match(source, /customType:\s*"loop-event"/, "announcement uses loop-event customType");
+  assert.match(source, /registerMessageRenderer\("loop-event"/, "registers loop-event renderer");
+});
+
 test("event constants are exported", () => {
   assert.equal(LOOP_UPDATE_EVENT, "loop:update");
   assert.equal(LOOP_QUERY_EVENT, "loop:query");
@@ -277,6 +353,7 @@ test("registerLoop publishes authoritative snapshots on scheduler updates and qu
     appendEntry(type: string, data: unknown) {
       entries.push({ type, data });
     },
+    sendMessage() {},
     registerTool(value: LoopTool) {
       tool = value;
     },

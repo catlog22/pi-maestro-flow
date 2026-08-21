@@ -65,6 +65,16 @@ export const LOOP_QUERY_EVENT = "loop:query";
 
 export type LoopKind = "prompt" | "shell";
 export type LoopStatus = "scheduled" | "running" | "completed" | "failed" | "cancelled";
+export type LoopTerminalOutcome = "failed" | "completed";
+
+// Stable glyph + text per state (ui-conventions-004): color only enhances.
+const STATUS_GLYPH: Record<LoopStatus, string> = {
+  scheduled: "○",
+  running: "●",
+  completed: "✓",
+  failed: "✗",
+  cancelled: "⊘",
+};
 
 export interface LoopRunResult {
   ok: boolean;
@@ -106,6 +116,8 @@ export interface LoopSchedulerOptions {
   clearTimer?: (timer: ReturnType<typeof setTimeout>) => void;
   /** Called after every state change (create, cancel, run completion). */
   onUpdate?: (jobs: LoopJobSnapshot[]) => void;
+  /** Called once when a loop reaches a terminal outcome (failed or completed). */
+  onTerminal?: (job: LoopJobSnapshot, outcome: LoopTerminalOutcome) => void;
 }
 
 export class LoopScheduler {
@@ -115,6 +127,7 @@ export class LoopScheduler {
   private core: SchedulerCore;
   private readonly coreOptions: SchedulerCoreOptions;
   private readonly onUpdate?: LoopSchedulerOptions["onUpdate"];
+  private readonly onTerminal?: LoopSchedulerOptions["onTerminal"];
   private counter = 0;
 
   constructor(options: LoopSchedulerOptions) {
@@ -127,6 +140,7 @@ export class LoopScheduler {
     };
     this.core = new SchedulerCore(this.coreOptions);
     this.onUpdate = options.onUpdate;
+    this.onTerminal = options.onTerminal;
   }
 
   create(input: CreateLoopInput): LoopJobSnapshot {
@@ -281,12 +295,14 @@ export class LoopScheduler {
       job.status = "failed";
       this.core.cancel(job.id);
       this.emitUpdate();
+      this.onTerminal?.(this.snapshot(job), "failed");
       return;
     }
     if (job.runCount >= job.maxRuns) {
       job.status = "completed";
       this.core.cancel(job.id);
       this.emitUpdate();
+      this.onTerminal?.(this.snapshot(job), "completed");
       return;
     }
     job.status = "scheduled";
@@ -348,12 +364,46 @@ function formatDuration(intervalMs: number): string {
   return `${intervalMs}ms`;
 }
 
-function formatJob(job: LoopJobSnapshot): string {
-  const progress = `${job.runCount}/${job.maxRuns}`;
-  const next = job.nextRunAt ? ` next=${new Date(job.nextRunAt).toISOString()}` : "";
-  const result = job.lastResult ? ` result=${job.lastResult.replace(/\s+/g, " ").slice(0, 120)}` : "";
+function truncateText(text: string, max: number): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+function formatRelative(at: number, now: number): string {
+  const delta = now - at;
+  const abs = Math.abs(delta);
+  const value = abs >= 86_400_000 ? `${Math.round(abs / 86_400_000)}d`
+    : abs >= 3_600_000 ? `${Math.round(abs / 3_600_000)}h`
+    : abs >= 60_000 ? `${Math.round(abs / 60_000)}m`
+    : `${Math.max(1, Math.round(abs / 1_000))}s`;
+  return delta >= 0 ? `${value} ago` : `in ${value}`;
+}
+
+/** Render one job as a single human-readable status line. Exported for tests. */
+export function formatJob(job: LoopJobSnapshot, now: number = Date.now()): string {
+  const parts = [
+    `${STATUS_GLYPH[job.status]} ${job.id}`,
+    job.status,
+    job.kind,
+    `every=${formatDuration(job.intervalMs)}`,
+    `runs=${job.runCount}/${job.maxRuns}`,
+    `"${truncateText(job.task, 40)}"`,
+  ];
+  if (job.nextRunAt !== undefined) parts.push(`next ${formatRelative(job.nextRunAt, now)}`);
+  if (job.lastRunAt !== undefined) parts.push(`last ${formatRelative(job.lastRunAt, now)}`);
+  const result = job.lastResult ? ` result=${truncateText(job.lastResult, 120)}` : "";
   const log = job.logDir ? ` log=${job.logDir}` : "";
-  return `${job.id} ${job.status} ${job.kind} every=${formatDuration(job.intervalMs)} runs=${progress}${next}${result}${log}`;
+  return `${parts.join(" ")}${result}${log}`;
+}
+
+/** Resolve a user-supplied loop id against known jobs: exact match, else unique prefix. */
+export function resolveLoopId(requested: string, jobs: LoopJobSnapshot[]): { id: string } | { error: string } {
+  const exact = jobs.find((j) => j.id === requested);
+  if (exact) return { id: exact.id };
+  const matches = jobs.filter((j) => j.id.startsWith(requested));
+  if (matches.length === 1) return { id: matches[0].id };
+  if (matches.length === 0) return { error: `Unknown loopId: ${requested}` };
+  return { error: `Ambiguous loopId "${requested}" matches: ${matches.map((j) => j.id).join(", ")}` };
 }
 
 export function parseLoopDuration(value: string): number | undefined {
@@ -389,6 +439,20 @@ export function registerLoop(pi: ExtensionAPI): void {
     onUpdate(jobs) {
       publishSnapshot(jobs);
       persistLoopState(jobs);
+    },
+    onTerminal(job, outcome) {
+      // Terminal states must stay visible (ui-conventions-007): announce
+      // failure/completion instead of leaving them discoverable only via list.
+      const headline = outcome === "failed"
+        ? `Loop ${job.id} failed at run ${job.runCount}/${job.maxRuns}`
+        : `Loop ${job.id} completed (${job.runCount}/${job.maxRuns} runs)`;
+      const summary = job.lastResult ? truncateText(job.lastResult, 160) : undefined;
+      pi.sendMessage({
+        customType: "loop-event",
+        content: summary ? `${headline}: ${summary}` : headline,
+        display: true,
+        details: { loopId: job.id, outcome, runCount: job.runCount, maxRuns: job.maxRuns },
+      });
     },
     async execute(job) {
       if (job.kind === "prompt") {
@@ -448,7 +512,9 @@ export function registerLoop(pi: ExtensionAPI): void {
         }
         if (params.action === "cancel") {
           if (!params.loopId) throw new Error("loopId is required for cancel.");
-          const job = scheduler.cancel(params.loopId);
+          const resolved = resolveLoopId(params.loopId, scheduler.list());
+          if ("error" in resolved) throw new Error(resolved.error);
+          const job = scheduler.cancel(resolved.id);
           if (!job) throw new Error(`Unknown loopId: ${params.loopId}`);
           return { content: [{ type: "text", text: `Cancelled ${job.id}.` }], details: { jobs: [job] } };
         }
@@ -475,7 +541,7 @@ export function registerLoop(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("loop", {
-    description: "Recurring session task: /loop prompt|shell <interval> [--max=N] <task> | /loop list | /loop cancel <id>",
+    description: "Recurring session task: /loop prompt|shell <interval> [--max=N] <task> | /loop list | /loop cancel [id] (bare cancel opens a picker)",
     async handler(args, ctx) {
       const tokens = args.trim().split(/\s+/).filter(Boolean);
       const action = tokens[0]?.toLowerCase();
@@ -486,8 +552,31 @@ export function registerLoop(pi: ExtensionAPI): void {
       }
       if (action === "cancel") {
         const id = tokens[1];
-        const job = id ? scheduler.cancel(id) : undefined;
-        ctx.ui.notify(job ? `Cancelled ${job.id}.` : id ? `Unknown loopId: ${id}` : "Usage: /loop cancel <id>", job ? "info" : "warning");
+        if (!id) {
+          const active = scheduler.list().filter((j) => j.status === "scheduled" || j.status === "running");
+          if (active.length === 0) {
+            ctx.ui.notify("No active loops.", "info");
+            return;
+          }
+          const labels = active.map((j) => formatJob(j));
+          const picked = await ctx.ui.select("Cancel which loop?", labels);
+          if (picked === undefined) return;
+          const job = scheduler.cancel(active[labels.indexOf(picked)]?.id);
+          if (!job) return;
+          ctx.ui.notify(`Cancelled ${job.id}.`, "info");
+          return;
+        }
+        const resolved = resolveLoopId(id, scheduler.list());
+        if ("error" in resolved) {
+          ctx.ui.notify(resolved.error, "warning");
+          return;
+        }
+        const job = scheduler.cancel(resolved.id);
+        if (!job) {
+          ctx.ui.notify(`Unknown loopId: ${id}`, "warning");
+          return;
+        }
+        ctx.ui.notify(`Cancelled ${job.id}.`, "info");
         return;
       }
       if (action !== "prompt" && action !== "shell") {
@@ -526,6 +615,18 @@ export function registerLoop(pi: ExtensionAPI): void {
     const content = typeof msg.content === "string" ? msg.content.split("\n").slice(1).join(" ") : "";
     const summary = content.length > 80 ? `${content.slice(0, 77)}…` : content;
     return new Text(`${theme.fg("muted", "⟳")} ${theme.fg("dim", label)}${theme.fg("dim", progress)} ${summary}`, 0, 0);
+  });
+
+  pi.registerMessageRenderer("loop-event", (msg, _opts, theme) => {
+    const details = msg.details as { outcome?: string; runCount?: number; maxRuns?: number } | undefined;
+    const failed = details?.outcome === "failed";
+    const progress = details?.runCount !== undefined && details?.maxRuns !== undefined
+      ? ` ${details.runCount}/${details.maxRuns}`
+      : "";
+    const content = typeof msg.content === "string" ? msg.content : "";
+    const headline = content.split(":")[0] || "loop event";
+    const color = failed ? "error" : "success";
+    return new Text(`${theme.fg(color, failed ? "✗" : "✓")} ${theme.fg(color, headline)}${theme.fg("dim", progress)}`, 0, 0);
   });
 
   // Restore persisted loops on session resume/reload; discover independent
