@@ -1,7 +1,7 @@
 {
   "name": "pi-maestro-teammate",
   "version": "2.0.0",
-  "description": "Pi extension — teammate agent dispatch with DAG task graphs, RPC messaging, and compact TUI",
+  "description": "Pi extension \u2014 teammate agent dispatch with DAG task graphs, RPC messaging, and compact TUI",
   "type": "module",
   "bin": {
     "pi-teammate-remote": "./bin/pi-teammate-remote.mjs"
@@ -20,7 +20,9 @@
     "check:declarations": "node scripts/check-declarations.mjs",
     "prepack": "npm run build:declarations && node ../../scripts/bundle-settings-core.mjs",
     "postpack": "node ../../scripts/bundle-settings-core.mjs --clean",
-    "test:e2e": "node --experimental-transform-types --import ./test/setup.ts --test --test-timeout=300000 test/backend-registry-dsh.e2e.test.ts"
+    "test:e2e": "node --experimental-transform-types --import ./test/setup.ts --test --test-timeout=300000 test/backend-registry-dsh.e2e.test.ts",
+    "refresh:acp-registry": "node scripts/refresh-acp-registry.mjs",
+    "check:acp-registry": "node scripts/refresh-acp-registry.mjs --check"
   },
   "main": "./src/index.ts",
   "types": "./types/index.d.ts",

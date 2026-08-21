@@ -68,8 +68,9 @@
 
 | 字段 | 必填 | 说明 |
 |---|---|---|
-| `command` | 是 | 可执行文件。指向包装脚本或符号链接，不要绕到内层二进制 |
-| `args` | 否 | 进入 ACP 模式的参数，例如 Cursor 是 `["acp"]`、Gemini 是 `["--acp"]` |
+| `acpAgent` | 否 | 签入的 ACP registry 快照里的 agent id；填了它就不用写下面两项，见下 |
+| `command` | 视情况 | 可执行文件。指向包装脚本或符号链接，不要绕到内层二进制。填了 `acpAgent` 且该 agent 走 npx/uvx 时不需要 |
+| `args` | 否 | 进入 ACP 模式的参数，例如 Cursor 是 `["acp"]`、Gemini 是 `["--acp"]`。填了 `acpAgent` 时**不能**再填 |
 | `modelId` | 否 | 该注册项服务的 `cli/<tool>` 路由；缺省由注册名派生 |
 | `acpModel` | 否 | 该注册项的默认内层模型，**可以只写模型名**，见下 |
 | `runTimeoutMs` | 否 | 运行起来之后的上限 |
@@ -82,6 +83,40 @@
 **模型是两个轴，不是一个。** `modelId` 选的是哪个 CLI，`acpModel` 选的是那个 CLI 里的哪个模型。任务里 `model` 等于路由 id 时用注册项的 `acpModel`，不等于时该值本身就是内层模型。
 
 内层模型的合法取值只有 CLI 自己知道，配错了会在**发出 prompt 之前**失败，错误消息列出全部可用值——**报错本身就是目录**，不必先去别处查。
+
+`startupTimeoutMs` 的默认值 15000 是量过的：ACP 握手包含 `initialize` 与 `session/new` 两步，实测装好的 Claude Code 适配器在 5000 下仍会在 `session/new` 超时。`command` 走 `npx` 之类会先下载的启动方式要调更高。
+
+### 不用手写启动命令：`acpAgent`
+
+仓库里签入了一份 [ACP registry](https://github.com/agentclientprotocol/registry) 快照（39 个 agent），填 `acpAgent` 就能让它提供启动方式：
+
+```json
+"claude": { "module": "pi-maestro-teammate/v1/acp-cli",
+            "config": { "acpAgent": "claude-acp", "modelId": "cli/claude" } }
+```
+
+**已装的优先用本地那份。** npx / uvx 分发的 agent，如果它安装的可执行文件已在 PATH 上，就直接用本地的，省掉 npx 每次重新解析包（冷缓存时会先下载）。可执行文件名取自**包自己的 manifest**，不是从包名猜的——`@google/gemini-cli` 装的是 `gemini`，`@qwen-code/qwen-code` 装的是 `qwen`，猜会猜错，而猜中一个同名的无关程序就会去启动它。
+
+本机实测：
+
+```
+gemini       bins=["gemini"]            → local    gemini --acp
+claude-acp   bins=["claude-agent-acp"]  → runner   npx -y @agentclientprotocol/claude-agent-acp@0.70.0
+cursor       bins=[]                    → operator (你给路径) acp
+```
+
+**以平台二进制分发的仍要你给路径**（cursor、goose、opencode 等 16 个），本产品从不下载安装它们；registry 只贡献 `args`。
+
+填了 `acpAgent` 再填 `command` 或 `args` 会被**拒绝**而不是悄悄覆盖——刷新快照后两者就会不一致，而你无从判断实际跑的是哪个。
+
+**版本是钉死的。** 快照里写的版本就是会跑的版本，只由显式刷新更新：
+
+```bash
+npm --prefix packages/pi-maestro-teammate run refresh:acp-registry   # 写入
+npm --prefix packages/pi-maestro-teammate run check:acp-registry     # 只检查是否过期
+```
+
+`check` 是给人看的，**没有接进任何闸门**：上游任何一个 agent 发版它就会过期，接进 CI 会让什么都没改的构建失败，那正好和"钉死"相反。
 
 ### 不用抄那串方括号
 
@@ -106,7 +141,6 @@
 
 公布了 `thought_level` 的 CLI 未来可以正经支持；Cursor 目前不在此列。
 
-`startupTimeoutMs` 的默认值 15000 是量过的：ACP 握手包含 `initialize` 与 `session/new` 两步，实测装好的 Claude Code 适配器在 5000 下仍会在 `session/new` 超时。`command` 走 `npx` 之类会先下载的启动方式要调更高。
 
 ### dsh 后端字段
 

@@ -505,3 +505,66 @@ test("acp-cli declaring a dynamic field is a registration error without its list
   assert.ok(dynamic.length > 0, "expected acp-cli to declare at least one dynamic field");
   assert.equal(typeof acpCliBackend.listConfigOptions, "function");
 });
+
+test("naming a registry agent supplies the launch, and restating it is refused", () => {
+  // A runner-distributed agent carries its own executable and arguments.
+  const resolved = resolveBackendConfig(acpCliBackend, { acpAgent: "claude-acp", modelId: "cli/claude" });
+  assert.deepEqual(resolved.errors, []);
+  const args = resolved.values.args as string[];
+  assert.ok(
+    resolved.values.command === "npx" || args.length === 0,
+    `expected npx or a local copy, got ${String(resolved.values.command)}`,
+  );
+  assert.ok(String(resolved.values.command).length > 0);
+
+  // Restating the launch beside the agent is refused rather than silently
+  // preferring one: they would disagree the moment the snapshot is refreshed.
+  const clash = resolveBackendConfig(acpCliBackend, {
+    acpAgent: "claude-acp",
+    command: "npx",
+    modelId: "cli/claude",
+  });
+  assert.equal(clash.errors.length, 1);
+  assert.match(clash.errors[0]!, /"command" cannot be set beside "acpAgent"/);
+
+  const argClash = resolveBackendConfig(acpCliBackend, {
+    acpAgent: "claude-acp",
+    args: ["--acp"],
+    modelId: "cli/claude",
+  });
+  assert.equal(argClash.errors.length, 1);
+  assert.match(argClash.errors[0]!, /"args" cannot be set beside "acpAgent"/);
+});
+
+test("a binary agent still needs its executable, and gets the registry's arguments", () => {
+  // Nothing here installs a platform binary, so naming one is not enough.
+  const missing = resolveBackendConfig(acpCliBackend, { acpAgent: "cursor", modelId: "cli/cursor" });
+  assert.equal(missing.errors.length, 1);
+  assert.match(missing.errors[0]!, /ships as a platform binary/);
+
+  const complete = resolveBackendConfig(acpCliBackend, {
+    acpAgent: "cursor",
+    command: "/opt/cursor/agent",
+    modelId: "cli/cursor",
+  });
+  assert.deepEqual(complete.errors, []);
+  assert.equal(complete.values.command, "/opt/cursor/agent");
+  assert.deepEqual(complete.values.args, ["acp"]);
+});
+
+test("an id the snapshot does not list is refused rather than launched", () => {
+  const resolved = resolveBackendConfig(acpCliBackend, { acpAgent: "not-an-agent", modelId: "cli/x" });
+  assert.ok(resolved.errors.some((error) => /the ACP registry snapshot does not list/.test(error)), resolved.errors.join(" | "));
+});
+
+test("the registry picker answers from the snapshot without launching anything", async () => {
+  // Unlike the model/mode/thought-level pickers, this one needs no agent: the
+  // ids are known locally, so an unlaunchable command must not stop it.
+  const options = await acpCliBackend.listConfigOptions!(
+    "acpAgent",
+    { command: "definitely-not-installed-xyz", modelId: "cli/x" },
+    AbortSignal.timeout(1_000),
+  );
+  assert.ok(options.length > 20, `expected the snapshot's agents, got ${options.length}`);
+  assert.ok(options.some((option) => option.value === "cursor"));
+});

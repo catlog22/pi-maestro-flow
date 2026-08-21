@@ -17,6 +17,9 @@ import type { TranslationCatalogs } from "pi-maestro-settings-core/v1";
 /** Catalog entries for every `acpCli.*` key the backend declares. */
 export const ACP_CLI_SETTINGS_CATALOGS: TranslationCatalogs = {
   en: {
+    "acpCli.acpAgent": "Registry agent",
+    "acpCli.acpAgent.description":
+      "An id from the checked-in ACP registry snapshot, which then supplies the launch. An agent distributed through npx or uvx prefers a copy already on PATH and falls back to the runner; one that ships as a platform binary still needs its path in Executable, and contributes only its arguments. Setting Executable or Arguments beside this is refused rather than silently overridden. The snapshot pins versions and is refreshed by an explicit, reviewed step.",
     "acpCli.command": "Executable",
     "acpCli.command.description":
       "The CLI to launch. Point at the wrapper script or symlink on PATH rather than an inner binary, so an update that moves the target keeps working.",
@@ -57,6 +60,9 @@ export const ACP_CLI_SETTINGS_CATALOGS: TranslationCatalogs = {
       "Bounds `initialize` and `session/new`, default 15000. Raise it when the command downloads before answering or the agent is slow to open a session; lowering it is what the default already guards against.",
   },
   "zh-CN": {
+    "acpCli.acpAgent": "注册表 agent",
+    "acpCli.acpAgent.description":
+      "签入的 ACP registry 快照里的 agent id，选定后由它提供启动方式。走 npx / uvx 分发的会**优先用 PATH 上已装的那份**，没装才回落到 runner；以平台二进制分发的仍需你在「可执行文件」里给路径，registry 只贡献参数。同时填了「可执行文件」或「启动参数」会被拒绝，而不是悄悄覆盖。快照钉死版本，只由显式且经评审的刷新步骤更新。",
     "acpCli.command": "可执行文件",
     "acpCli.command.description":
       "要启动的 CLI。指向 PATH 上的包装脚本或符号链接，不要指向内层二进制——升级换目录后前者仍然有效。",

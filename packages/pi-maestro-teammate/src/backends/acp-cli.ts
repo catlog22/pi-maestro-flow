@@ -61,6 +61,7 @@ import {
   advertisedValues,
 } from "../remote/acp-config-options.ts";
 import { probeAcpConfigOptions } from "../remote/acp-driver.ts";
+import { findRegistryAgent, registryAgentChoices, resolveRegistryLaunch } from "./acp-registry.ts";
 import {
   CLI_TOOL_MODEL_PREFIX,
   cliToolNameFromModel,
@@ -105,6 +106,52 @@ const CAPABILITIES: BackendCapabilities = {
 };
 
 /**
+ * Fill a registration's launch from the ACP registry snapshot.
+ *
+ * Writes into `values` rather than returning a launch, because `resolveConfig`
+ * publishes one resolved document and every later reader — the runner, the
+ * probe, the settings shell — must see the same one.
+ *
+ * A registration that names an agent *and* restates its launch is refused
+ * rather than silently preferring one: the two would disagree the moment the
+ * snapshot is refreshed, and the operator could not tell which one ran.
+ * `command` stays the operator's for binary agents, which this host never
+ * installs; only the arguments come from the registry.
+ *
+ * @param agentId - value of the `acpAgent` field.
+ * @param config - the registration as written.
+ * @param values - resolved document to fill; mutated in place.
+ * @returns an error message, or undefined when the launch resolved.
+ */
+function applyRegistryLaunch(
+  agentId: string,
+  config: Record<string, ConfigValue>,
+  values: Record<string, ConfigValue>,
+): string | undefined {
+  const agent = findRegistryAgent(agentId);
+  if (agent === undefined) {
+    return `"acpAgent" names "${agentId}", which the ACP registry snapshot does not list`;
+  }
+  if (list(config, "args").length > 0) {
+    return `"args" cannot be set beside "acpAgent": agent "${agentId}" carries its own arguments`;
+  }
+  let launch;
+  try {
+    launch = resolveRegistryLaunch(agent);
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  if (launch.command !== undefined) {
+    if ((text(config, "command") ?? "").trim().length > 0) {
+      return `"command" cannot be set beside "acpAgent": agent "${agentId}" launches through ${agent.launch.kind}`;
+    }
+    values.command = launch.command;
+  }
+  values.args = [...launch.args];
+  return undefined;
+}
+
+/**
  * Registration fields that name a value on one of the agent's own selectors.
  *
  * The map is the whole per-axis story: each field carries a value in the
@@ -129,11 +176,24 @@ const SELECTOR_FIELDS: Readonly<Record<string, string>> = {
  */
 const CONFIG_FIELDS: readonly BackendConfigField[] = [
   {
+    // An id from the checked-in ACP registry snapshot. Supplies the launch so a
+    // registration does not have to restate a package specifier the registry
+    // already pins; `command` stays required for agents that ship as binaries,
+    // because nothing here installs one.
+    key: "acpAgent",
+    kind: "dynamic-enum",
+    labelKey: "acpCli.acpAgent",
+    descriptionKey: "acpCli.acpAgent.description",
+  },
+  {
+    // Not declared `required`: `acpAgent` supplies it for every agent the
+    // registry distributes through a package runner. The requirement is
+    // conditional, so `resolveConfig` owns it and can say which of the two ways
+    // to satisfy it applies.
     key: "command",
     kind: "text",
     labelKey: "acpCli.command",
     descriptionKey: "acpCli.command.description",
-    required: true,
   },
   {
     key: "args",
@@ -407,8 +467,21 @@ export function createAcpCliBackend(
       if (mode !== "local" && mode !== "ssh") {
         errors.push(`"mode" must be "local" or "ssh", got "${mode}"`);
       }
-      if ((text(config, "command") ?? "").trim().length === 0) {
-        errors.push('"command" must name the executable to launch');
+      const values: Record<string, ConfigValue> = { ...config };
+      const agentId = text(config, "acpAgent");
+      const registryFailure = agentId === undefined
+        ? undefined
+        : applyRegistryLaunch(agentId, config, values);
+      if (registryFailure !== undefined) errors.push(registryFailure);
+      // Skipped once the registry step already failed: it stopped before it
+      // could fill the launch, so a further complaint about the executable
+      // describes that failure rather than a second thing to fix.
+      if (registryFailure === undefined && (text(values, "command") ?? "").trim().length === 0) {
+        errors.push(
+          agentId === undefined
+            ? '"command" must name the executable to launch, or "acpAgent" must name a registry agent that carries one'
+            : `"command" must name the executable: ACP registry agent "${agentId}" ships as a platform binary, which this host never installs`,
+        );
       }
       const port = count(config, "port");
       if (port !== undefined && (!Number.isInteger(port) || port < 1 || port > 65_535)) {
@@ -444,7 +517,7 @@ export function createAcpCliBackend(
           errors.push(`"${key}" is required when "mode" is "ssh"`);
         }
       }
-      return { values: config, errors };
+      return { values, errors };
     },
 
     async listConfigOptions(
@@ -452,6 +525,10 @@ export function createAcpCliBackend(
       config: Record<string, ConfigValue>,
       signal: AbortSignal,
     ): Promise<readonly BackendConfigOption[]> {
+      // Answered from the checked-in snapshot: the choices are agent ids, which
+      // are known without launching anything. Every other picker asks the agent
+      // itself, which is why the launch checks below apply only to those.
+      if (field === "acpAgent") return registryAgentChoices();
       const configId = SELECTOR_FIELDS[field];
       if (configId === undefined) {
         throw new Error(`teammate backend "acp-cli" publishes no options for setting "${field}"`);
