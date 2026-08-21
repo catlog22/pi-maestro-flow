@@ -8,6 +8,7 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type {
   BackendRegistryConfig,
   TeammateExecutionMode,
@@ -20,8 +21,18 @@ import type { RemoteWorkerManagerLike as RemoteManagerPort } from "pi-maestro-ba
 import { createPiSubprocessBackend, type PiSubprocessRunExtras } from "./pi-subprocess.ts";
 import type { BackendRunOptions } from "pi-maestro-backend-core/v1/backend";
 
-/** Registration document read from the project, relative to the workspace root. */
-const REGISTRY_FILE = join(".pi", "teammate-backends.json");
+/** Registration document name shared by global and project configuration. */
+const REGISTRY_FILE = "teammate-backends.json";
+
+/** Global registration document under Pi's configured agent directory. */
+export function getGlobalBackendRegistryPath(): string {
+  return join(getAgentDir(), REGISTRY_FILE);
+}
+
+/** Project registration document relative to the workspace root. */
+export function getProjectBackendRegistryPath(workspaceRoot: string): string {
+  return join(workspaceRoot, ".pi", REGISTRY_FILE);
+}
 
 /** Name under which Pi registers itself; it holds no privilege beyond the name. */
 export const PI_SUBPROCESS = "pi-subprocess";
@@ -104,37 +115,49 @@ function parseBackendRegistryDocument(raw: string, path: string): BackendRegistr
   };
 }
 
-/** Synchronously resolved documents, keyed by workspace root. */
+/** Synchronously resolved documents, keyed by workspace and global document path. */
 const syncDocuments = new Map<string, BackendRegistryConfig>();
 
-/**
- * Read the registration document synchronously, reusing an earlier read.
- *
- * Synchronous on purpose. Dispatch resolves the registry immediately before
- * spawning, and inserting an awaited read there delays the child by an I/O tick
- * — enough to break callers that address the child's stdin as soon as dispatch
- * returns. The file is small deployment configuration read once per root, in a
- * path that already performs synchronous file work.
- *
- * @param workspaceRoot - directory holding `.pi/`.
- * @returns the registration document.
- */
-export function backendRegistryConfigSync(workspaceRoot: string): BackendRegistryConfig {
-  const hit = syncDocuments.get(workspaceRoot);
-  if (hit !== undefined) return hit;
-  const path = join(workspaceRoot, REGISTRY_FILE);
+/** Read and validate one document, returning undefined only when it is absent. */
+function readBackendRegistryDocument(path: string): BackendRegistryConfig | undefined {
   let raw: string;
   try {
     raw = readFileSync(path, "utf-8");
   } catch (cause) {
-    if ((cause as NodeJS.ErrnoException).code === "ENOENT") {
-      syncDocuments.set(workspaceRoot, BUILT_IN);
-      return BUILT_IN;
-    }
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw new Error(`teammate backend registry at ${path} could not be read`, { cause });
   }
-  const config = parseBackendRegistryDocument(raw, path);
-  syncDocuments.set(workspaceRoot, config);
+  return parseBackendRegistryDocument(raw, path);
+}
+
+/**
+ * Read the effective registration document synchronously, reusing an earlier read.
+ *
+ * A project document is an explicit per-workspace decision and therefore wins
+ * as a whole. When it is absent, the global document under Pi's agent directory
+ * applies. Mixing their `mode` or `default` fields would create a registry that
+ * appears in neither file, so this is precedence rather than field merging.
+ *
+ * Synchronous on purpose. Dispatch resolves the registry immediately before
+ * spawning, and inserting an awaited read there delays the child by an I/O tick
+ * — enough to break callers that address its stdin as soon as dispatch returns.
+ *
+ * @param workspaceRoot - directory holding the project's `.pi/`.
+ * @param globalFilePath - global document path; injectable for isolated tests.
+ * @returns the project document, global fallback, or built-in legacy config.
+ */
+export function backendRegistryConfigSync(
+  workspaceRoot: string,
+  globalFilePath: string = getGlobalBackendRegistryPath(),
+): BackendRegistryConfig {
+  const cacheKey = `${workspaceRoot}\0${globalFilePath}`;
+  const hit = syncDocuments.get(cacheKey);
+  if (hit !== undefined) return hit;
+
+  const config = readBackendRegistryDocument(getProjectBackendRegistryPath(workspaceRoot))
+    ?? readBackendRegistryDocument(globalFilePath)
+    ?? BUILT_IN;
+  syncDocuments.set(cacheKey, config);
   return config;
 }
 
@@ -152,8 +175,9 @@ export function dispatchRegistrySync(
   workspaceRoot: string,
   extrasOf: (spec: TeammateRunSpec, options: BackendRunOptions) => PiSubprocessRunExtras,
   remoteManagerOf?: () => RemoteManagerPort,
+  globalFilePath: string = getGlobalBackendRegistryPath(),
 ): TeammateBackendRegistry | undefined {
-  const config = backendRegistryConfigSync(workspaceRoot);
+  const config = backendRegistryConfigSync(workspaceRoot, globalFilePath);
   if ((config.mode ?? "legacy") === "legacy") return undefined;
   return new TeammateBackendRegistry(config, backendLoader(extrasOf, remoteManagerOf));
 }
@@ -200,6 +224,11 @@ function backendLoader(
 
 /** Forget synchronously cached documents so an operator edit takes effect. */
 export function forgetBackendRegistryConfigSync(workspaceRoot?: string): void {
-  if (workspaceRoot === undefined) syncDocuments.clear();
-  else syncDocuments.delete(workspaceRoot);
+  if (workspaceRoot === undefined) {
+    syncDocuments.clear();
+    return;
+  }
+  for (const key of syncDocuments.keys()) {
+    if (key.startsWith(`${workspaceRoot}\0`)) syncDocuments.delete(key);
+  }
 }
