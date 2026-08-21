@@ -11,7 +11,10 @@
  * 任务 name 可能跨多次派发重名：resolveAgentOutput 返回匹配列表（id + 时间 + 内容预览），
  * readAgentOutput 在重名时抛歧义错误，不再静默取最新；精确 id / correlationId alias 不受影响。
  *
- * 分桶按工作区隔离；旧格式 <cwd>/.pi/agents/ 下的历史归档仍保留只读 fallback。
+ * 分桶按工作区隔离；桶创建时写入 .workspace 元数据（真实 cwd 路径），读取时若当前桶
+ * miss，按元数据发现 cwd 子树内的子工作区桶（近 → 远，如 per-task cwd 派发的 teammate
+ * 输出对父会话可见）；兄弟/无关工作区仍互相隔离，无元数据的旧桶不参与子树发现。
+ * 旧格式 <cwd>/.pi/agents/ 下的历史归档仍保留只读 fallback。
  * 只读消费方：src/tools/resource.ts；写入方：src/teammate/agent-output-capture.ts。
  * 测试可用环境变量 PI_AGENT_OUTPUT_ROOT 覆盖根目录。
  */
@@ -30,11 +33,12 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { lockSettingsResource } from "../settings/resource-lock.ts";
 
 const GLOBAL_OUTPUT_DIR_NAME = "teammate-output";
 const LEGACY_AGENTS_DIR_NAME = ".pi/agents";
+const WORKSPACE_META_FILE = ".workspace";
 export const MAX_AGENT_FILES = 100;
 const MAX_STORED_OUTPUT_CHARS = 512_000;
 const MAX_PATH_DEPTH = 10;
@@ -187,13 +191,77 @@ async function prepareOutputRoot(): Promise<string> {
   return root;
 }
 
-/** 当前工作区对应的全局分桶目录（准备就绪）。 */
+/** 当前工作区对应的全局分桶目录（准备就绪），并确保 .workspace 元数据存在。 */
 async function prepareBucketDir(cwd: string): Promise<string> {
   const root = await prepareOutputRoot();
   const bucket = join(root, workspaceBucketName(cwd));
   await mkdir(bucket, { recursive: true, mode: 0o700 });
   await assertDirectoryNotLinked(bucket, "bucket");
+  await writeWorkspaceMeta(bucket, cwd);
   return bucket;
+}
+
+interface BucketWorkspaceMeta {
+  cwd: string;
+}
+
+/** 桶的 .workspace 元数据（真实 cwd 路径）；已一致时幂等跳过。 */
+async function writeWorkspaceMeta(bucket: string, cwd: string): Promise<void> {
+  const workspace = resolve(cwd);
+  const filePath = join(bucket, WORKSPACE_META_FILE);
+  const existing = await readPrivateText(filePath).catch(() => undefined);
+  if (existing !== undefined) {
+    try {
+      const parsed = JSON.parse(existing) as Partial<BucketWorkspaceMeta>;
+      if (typeof parsed.cwd === "string" && resolve(parsed.cwd) === workspace) return;
+    } catch {
+      // 损坏的元数据重写修复
+    }
+  }
+  await writePrivateFile(filePath, JSON.stringify({ cwd: workspace } satisfies BucketWorkspaceMeta));
+}
+
+/** 读取桶的 .workspace 元数据；缺失、非真实文件或损坏时返回 undefined。 */
+async function readBucketWorkspaceMeta(bucket: string): Promise<BucketWorkspaceMeta | undefined> {
+  try {
+    const text = await readPrivateText(join(bucket, WORKSPACE_META_FILE));
+    if (text === undefined) return undefined;
+    const parsed = JSON.parse(text) as Partial<BucketWorkspaceMeta>;
+    return typeof parsed.cwd === "string" && parsed.cwd.length > 0
+      ? { cwd: parsed.cwd }
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * cwd 子树内的其他工作区分桶（按工作区路径深度近 → 远），只读、绝不创建。
+ * 依赖 .workspace 元数据识别桶的工作区路径；无元数据的旧桶不参与子树发现，
+ * 待该工作区下次写入（prepareBucketDir）时自动补齐。
+ */
+async function descendantBucketDirs(cwd: string): Promise<string[]> {
+  const root = outputRootResolved();
+  const rootInfo = await lstat(root).catch((error) => {
+    if (fileErrorCode(error) === "ENOENT") return undefined;
+    throw error;
+  });
+  if (!rootInfo || rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) return [];
+  const base = resolve(cwd);
+  const baseLower = base.toLowerCase();
+  const basePrefix = baseLower.endsWith(sep) ? baseLower : baseLower + sep;
+  const found: Array<{ path: string; depth: number }> = [];
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+    const bucket = join(root, entry.name);
+    const meta = await readBucketWorkspaceMeta(bucket);
+    if (!meta) continue;
+    const workspaceLower = resolve(meta.cwd).toLowerCase();
+    if (workspaceLower === baseLower || !workspaceLower.startsWith(basePrefix)) continue;
+    found.push({ path: bucket, depth: workspaceLower.split(sep).length });
+  }
+  found.sort((a, b) => a.depth - b.depth);
+  return found.map((entry) => entry.path);
 }
 
 /** Write a private temp file, then replace the record without following it. */
@@ -694,7 +762,8 @@ async function scanByName(
 /**
  * 按 correlationId latest alias 或任务 name 解析持久化输出。
  * 任务 name 命中多条记录时返回歧义列表（correlationId + 时间 + 预览），不静默取最新。
- * 仅受控全局桶解析 alias；旧工作区目录只支持精确 legacy 记录和 name 扫描。
+ * 查找顺序：当前工作区桶 → cwd 子树内子工作区桶（近 → 远）→ 旧版 <cwd>/.pi/agents。
+ * 当前桶与子树桶均解析 alias；旧工作区目录只支持精确 legacy 记录和 name 扫描。
  */
 export async function resolveAgentOutput(id: string, cwd: string): Promise<AgentOutputResolution> {
   const dirs: Array<{ path: string; aliases: boolean }> = [];
@@ -702,6 +771,9 @@ export async function resolveAgentOutput(id: string, cwd: string): Promise<Agent
     dirs.push({ path: await prepareBucketDir(cwd), aliases: true });
   } catch (error) {
     if (fileErrorCode(error) !== "ENOENT") throw error;
+  }
+  for (const bucket of await descendantBucketDirs(cwd)) {
+    dirs.push({ path: bucket, aliases: true });
   }
   try {
     dirs.push({ path: await assertContainedLegacyDir(cwd), aliases: false });

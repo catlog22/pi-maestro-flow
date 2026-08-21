@@ -114,18 +114,21 @@ test("resolveAgentOutput with duplicate names returns newest-first matches with 
   if (alias.kind === "record") assert.deepEqual(alias.record.output, { v: 2 });
 });
 
-test("workspace buckets isolate same-named tasks across workspaces", async () => {
-  const other = join(root, "other-workspace");
-  await persistAgentOutput("iso-1", "shared-name", "explorer", { workspace: "a" }, root);
-  await persistAgentOutput("iso-2", "shared-name", "explorer", { workspace: "b" }, other);
-  assert.deepEqual((await readAgentOutput("shared-name", root)).output, { workspace: "a" });
-  assert.deepEqual((await readAgentOutput("shared-name", other)).output, { workspace: "b" });
-  // 分桶完全隔离：跨工作区精确 correlationId 也不可见
+test("workspace buckets isolate same-named tasks across sibling workspaces", async () => {
+  const wsA = join(root, "iso-ws-a");
+  const wsB = join(root, "iso-ws-b");
+  await mkdir(wsA, { recursive: true });
+  await mkdir(wsB, { recursive: true });
+  await persistAgentOutput("iso-1", "shared-name", "explorer", { workspace: "a" }, wsA);
+  await persistAgentOutput("iso-2", "shared-name", "explorer", { workspace: "b" }, wsB);
+  assert.deepEqual((await readAgentOutput("shared-name", wsA)).output, { workspace: "a" });
+  assert.deepEqual((await readAgentOutput("shared-name", wsB)).output, { workspace: "b" });
+  // 兄弟工作区完全隔离：跨工作区精确 correlationId 也不可见
   await assert.rejects(
-    () => readAgentOutput("iso-2", root),
+    () => readAgentOutput("iso-2", wsA),
     (err: unknown) => err instanceof Error && err.message.includes('No persisted teammate output for "iso-2"'),
   );
-  assert.equal((await readAgentOutput("iso-2", other)).correlationId, "iso-2");
+  assert.equal((await readAgentOutput("iso-2", wsB)).correlationId, "iso-2");
 });
 
 test("readAgentOutput falls back to legacy <cwd>/.pi/agents records", async () => {
@@ -539,4 +542,54 @@ test("persistAgentOutput skips non-serializable or oversized outputs", async () 
     () => readAgentOutput("run-abc-4", root),
     (err: unknown) => err instanceof Error && err.message.includes("No persisted teammate output"),
   );
+});
+
+test("resolveAgentOutput falls back to descendant workspace buckets", async () => {
+  const parent = join(root, "descendant-proj");
+  const child = join(parent, "sub");
+  await mkdir(child, { recursive: true });
+  // 模拟 per-task cwd 派发：teammate 写入子目录工作区，父目录会话可读。
+  await persistAgentOutput("descendant-cid-1", "audit", "general", { ok: true }, child);
+
+  const byId = await readAgentOutput("descendant-cid-1", parent);
+  assert.equal(byId.correlationId, "descendant-cid-1");
+  const byName = await readAgentOutput("audit", parent);
+  assert.equal(byName.correlationId, "descendant-cid-1");
+
+  // 兄弟目录不可见（子树发现不破坏横向隔离）。
+  const sibling = join(root, "sibling-proj");
+  await mkdir(sibling, { recursive: true });
+  await assert.rejects(
+    () => readAgentOutput("descendant-cid-1", sibling),
+    /No persisted teammate output/,
+  );
+});
+
+test("legacy bucket without .workspace metadata is not discovered via subtree scan", async () => {
+  const parent = join(root, "legacy-scan-proj");
+  const child = join(parent, "sub");
+  await mkdir(child, { recursive: true });
+  await persistAgentOutput("old-cid-1", "old-task", "general", { legacy: true }, child);
+  const bucket = await bucketContaining("old-cid-1.json");
+  await rm(join(bucket, ".workspace"));
+  // 无元数据的旧桶不参与子树发现；该工作区下次写入后自动补齐元数据即可见。
+  await assert.rejects(
+    () => readAgentOutput("old-cid-1", parent),
+    /No persisted teammate output/,
+  );
+  await persistAgentOutput("old-cid-2", "old-task", "general", { fresh: true }, child);
+  assert.equal((await readAgentOutput("old-cid-1", parent)).correlationId, "old-cid-1");
+});
+
+test("current workspace bucket takes priority over descendant buckets", async () => {
+  const parent = join(root, "priority-proj");
+  const child = join(parent, "sub");
+  await mkdir(child, { recursive: true });
+  await persistAgentOutput("priority-cid-1", "audit", "general", { from: "child" }, child);
+  await persistAgentOutput("priority-cid-1", "audit", "general", { from: "parent" }, parent);
+
+  const fromParent = await readAgentOutput("priority-cid-1", parent);
+  assert.deepEqual(fromParent.output, { from: "parent" });
+  const fromChild = await readAgentOutput("priority-cid-1", child);
+  assert.deepEqual(fromChild.output, { from: "child" });
 });
