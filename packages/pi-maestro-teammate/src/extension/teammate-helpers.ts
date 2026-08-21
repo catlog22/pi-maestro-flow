@@ -1700,6 +1700,36 @@ export function findSettledAgent(
  */
 export const FAILED_AGENT_RETENTION_MS = 2 * 60_000;
 
+/**
+ * Raise a settled agent's recorded status when a stronger one arrives late.
+ *
+ * A run can settle and leave `activeRuns` before a caller cancellation is
+ * processed. The settled outcome then carries the cancellation, because the run
+ * folds it in, while this history kept whatever the earlier settle recorded —
+ * so `teammate observe` showed a run as completed that its own result reported
+ * as terminated.
+ *
+ * Only raises. `completed` is the weakest claim, the value used when nothing
+ * said otherwise, and `failed`/`terminated` are positive assertions about how a
+ * run ended; letting a late `completed` overwrite one would turn this into a
+ * race between event orderings. That is the precedence `aggregateTerminalStatuses`
+ * already applies across a graph, held here for one agent over time.
+ *
+ * @param state - registry holding the settled memo.
+ * @param correlationId - the run whose record may need correcting.
+ * @param waitStatus - the terminal status that arrived after the record.
+ */
+function correctSettledStatus(
+  state: TeammateState,
+  correlationId: string,
+  waitStatus: Extract<TeammateWaitStatus, "completed" | "failed" | "terminated">,
+): void {
+  if (waitStatus === "completed") return;
+  const record = state.recentlySettled?.get(correlationId);
+  if (!record || record.status !== "completed") return;
+  record.status = waitStatus;
+}
+
 export function killAgent(
   state: TeammateState,
   correlationId: string,
@@ -1708,7 +1738,10 @@ export function killAgent(
   abortProcess = true,
 ): void {
   const agent = state.activeRuns.get(correlationId);
-  if (!agent) return;
+  if (!agent) {
+    correctSettledStatus(state, correlationId, waitStatus);
+    return;
+  }
   agent.lastOutcome = {
     status: waitStatus,
     ...(agent.lastResult ? { message: agent.lastResult } : {}),

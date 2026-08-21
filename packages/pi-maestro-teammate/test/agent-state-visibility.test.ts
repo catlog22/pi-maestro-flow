@@ -485,3 +485,31 @@ test("the Alt+R selector distinguishes retrying from running", () => {
   // Green is reserved for an agent that is actually making progress.
   assert.doesNotMatch(panel, /\x1b\[32mRunning · retrying/);
 });
+
+test("a terminal status arriving after the agent settled corrects its history, and only upward", () => {
+  const state = makeState();
+  const agent = addAgent(state, "retrying");
+  const { correlationId } = agent;
+
+  // The run settles first; the caller's cancellation is processed after the
+  // agent has already left activeRuns.
+  killAgent(state, correlationId, agent.name, "completed", false);
+  assert.equal(state.recentlySettled?.get(correlationId)?.status, "completed");
+  assert.equal(state.activeRuns.has(correlationId), false);
+
+  // The settled result carries the cancellation, so this history must too —
+  // otherwise observe reports a run as completed that its own result reports as
+  // terminated.
+  killAgent(state, correlationId, agent.name, "terminated", false);
+  assert.equal(state.recentlySettled?.get(correlationId)?.status, "terminated");
+
+  // Only upward: a late `completed` is the value used when nothing said
+  // otherwise, and letting it overwrite a positive assertion would make the
+  // recorded outcome a race between event orderings.
+  killAgent(state, correlationId, agent.name, "completed", false);
+  assert.equal(state.recentlySettled?.get(correlationId)?.status, "terminated");
+
+  // A run with no settled record is left alone rather than invented.
+  killAgent(state, randomUUID(), undefined, "terminated", false);
+  assert.equal(state.recentlySettled?.size, 1);
+});
