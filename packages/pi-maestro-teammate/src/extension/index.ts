@@ -313,6 +313,19 @@ import {
   type ModelCatalogSnapshot,
   type TeammateModelCapability,
 } from "../models/model-catalog.ts";
+import { projectSessionModelCatalog } from "../models/model-session-availability.ts";
+import { sharedModelHealthCoordinator } from "../models/model-circuit-breaker.ts";
+import {
+  TEAMMATE_MODEL_SESSION_EVENT,
+  TEAMMATE_MODEL_SESSION_PROTOCOL_VERSION,
+  TEAMMATE_MODEL_SESSION_QUERY_EVENT,
+  type TeammateModelSessionEventV1,
+  type TeammateModelSessionQueryEventV1,
+} from "../public/v1/events.ts";
+import {
+  modelRegistryPairSync,
+  publishedModelRegistryPairSync,
+} from "../backends/registry-host.ts";
 import {
   loadCliToolsConfig,
   toCliToolModelEntries,
@@ -448,10 +461,22 @@ import {
   type WindowInboxQuery,
 } from "../sessions/window-inbox.ts";
 import { projectTeammateSessionEndpoints } from "./session-endpoints.ts";
+import {
+  CompletionDeliveryCoordinator,
+  type CompletionDeliveryEnvelope,
+} from "../completion-outbox/coordinator.ts";
+import type {
+  CompletionDispatchSeed,
+  CompletionResource,
+} from "../public/v1/completion-durability.ts";
 
 /** Shared-process bridge key: the root host publishes the live v1 mailbox registry here. */
 export { MAILBOX_REGISTRY_KEY } from "../public/v1/mailbox.ts";
 
+
+function completionWorkspaceId(cwd: string): string {
+  return createHash("sha256").update(cwd, "utf8").digest("hex");
+}
 
 function resolvedRunLocation(requested: string | undefined, base: string): string {
   if (!requested) return base;
@@ -547,15 +572,47 @@ export default function registerTeammateExtension(
   const ownsMonitorCommunication = (capture: MonitorCommunicationCapture | undefined): boolean =>
     monitorInteractionModeActive && monitorToolExposure?.isCurrent(capture) === true;
 
+  pi.events.on(TEAMMATE_MODEL_SESSION_QUERY_EVENT, (payload) => {
+    if (!payload || typeof payload !== "object") return;
+    const query = payload as Partial<TeammateModelSessionQueryEventV1>;
+    if (query.version !== TEAMMATE_MODEL_SESSION_PROTOCOL_VERSION
+      || typeof query.requestId !== "string" || query.requestId.length === 0) return;
+    const response: TeammateModelSessionEventV1 = {
+      version: TEAMMATE_MODEL_SESSION_PROTOCOL_VERSION,
+      requestId: query.requestId,
+      isChild,
+      hasCurrentRootMonitorAuthority: !isChild
+        && ownsMonitorCommunication(captureMonitorCommunication()),
+    };
+    pi.events.emit(TEAMMATE_MODEL_SESSION_EVENT, response);
+  });
+
   const refreshModelCatalog = (ctx: ExtensionContext): ModelCatalogSnapshot => {
-    const cliConfig = loadCliToolsConfig();
-    const cliEntries = cliConfig ? toCliToolModelEntries(cliConfig) : [];
-    const next = createModelCatalogSnapshot([
-      ...(ctx.modelRegistry?.getAvailable?.() ?? []),
-      ...cliEntries,
-    ]);
+    const hostEntries = ctx.modelRegistry?.getAvailable?.() ?? [];
+    const pair = modelRegistryPairSync(ctx.cwd, { hostModels: hostEntries });
+    if (pair !== undefined) sharedModelHealthCoordinator.reconcileProjection(pair.dispatch);
+    const entries = pair === undefined
+      ? (() => {
+        const cliConfig = loadCliToolsConfig(ctx.cwd);
+        const cliEntries = cliConfig ? toCliToolModelEntries(cliConfig) : [];
+        return [...hostEntries, ...cliEntries];
+      })()
+      : projectSessionModelCatalog(pair.discovery, {
+        isChild,
+        hasCurrentRootMonitorAuthority: !isChild
+          && ownsMonitorCommunication(captureMonitorCommunication()),
+        health: (route) => ({
+          healthy: sharedModelHealthCoordinator.isHealthy(route.modelRegistrationId),
+        }),
+      }).entries;
+    const next = createModelCatalogSnapshot(entries);
     if (next.signature !== modelCatalog.signature) modelCatalog = next;
     return modelCatalog;
+  };
+
+  const refreshModelCatalogSources = async (ctx: ExtensionContext): Promise<ModelCatalogSnapshot> => {
+    await refreshModelRegistry(ctx);
+    return refreshModelCatalog(ctx);
   };
 
   /** Catalog id of the main session's current model, when one is active. */
@@ -566,11 +623,11 @@ export default function registerTeammateExtension(
     return id.trim() ? id : undefined;
   };
 
-  const injectTeammateContext = (
+  const injectTeammateContext = async (
     event: { systemPrompt: string },
     ctx: ExtensionContext,
-  ): { systemPrompt: string } => {
-    const withModels = appendModelCatalog(event.systemPrompt, refreshModelCatalog(ctx));
+  ): Promise<{ systemPrompt: string }> => {
+    const withModels = appendModelCatalog(event.systemPrompt, await refreshModelCatalogSources(ctx));
     const withAgents = appendAgentCatalog(withModels, ctx.cwd);
     const withTaskType = canDispatchNestedTeammate
       ? appendTaskTypeRoutingContext(withAgents, ctx.cwd, discoverAgents(ctx.cwd))
@@ -616,6 +673,7 @@ export default function registerTeammateExtension(
     globals[bridgeKey] = bridge;
     const pendingRequests = bridge.pendingRequests;
     let unregisterChildProxyCaller: (() => void) | undefined;
+    const childCompletionCoordinator = new CompletionDeliveryCoordinator();
 
     const sendChildEvent = (message: Record<string, unknown>): void => {
       if (typeof process.send !== "function" || process.connected === false) return;
@@ -645,7 +703,24 @@ export default function registerTeammateExtension(
         );
       }
       publishSessionIdentity(ctx);
-      refreshModelCatalog(ctx);
+      const childSessionId = ctx.sessionManager.getSessionId();
+      void childCompletionCoordinator.bindSession({
+        target: {
+          workspaceId: completionWorkspaceId(ctx.cwd),
+          sessionId: childSessionId,
+          ...(process.env.PI_TEAMMATE_CORRELATION_ID
+            ? { correlationId: process.env.PI_TEAMMATE_CORRELATION_ID }
+            : {}),
+        },
+        entries: ctx.sessionManager.getEntries?.() ?? [],
+        send(envelope: CompletionDeliveryEnvelope) {
+          return bridge.ctx?.sessionManager.getSessionId() === childSessionId
+            && safeSendMessage(pi, envelope, { triggerTurn: true, deliverAs: "followUp" });
+        },
+      }).catch((error) => {
+        console.warn("[pi-maestro-teammate] child completion replay bind failed:", error);
+      });
+      void refreshModelCatalogSources(ctx);
       // Nested-context (proxy) tool: trimmed variant without the per-cwd routing
       // table; execution is proxied to the parent root process.
       proxyTeammateTool.description = buildTeammateToolDescription(ctx.cwd, { nested: true });
@@ -655,6 +730,13 @@ export default function registerTeammateExtension(
     pi.on("session_compact", (_event, ctx) => publishSessionIdentity(ctx));
     pi.on("message_end", (event, ctx) => {
       publishSessionIdentity(ctx);
+      void childCompletionCoordinator.receiveMessageEnd(event.message, {
+        workspaceId: completionWorkspaceId(ctx.cwd),
+        sessionId: ctx.sessionManager.getSessionId(),
+        ...(process.env.PI_TEAMMATE_CORRELATION_ID
+          ? { correlationId: process.env.PI_TEAMMATE_CORRELATION_ID }
+          : {}),
+      });
       if (event.message.role !== "assistant" || event.message.stopReason !== "error") return;
       const errorMessage = normalizePiRetryErrorMessage(event.message.errorMessage);
       if (!errorMessage || errorMessage === event.message.errorMessage) return;
@@ -666,6 +748,8 @@ export default function registerTeammateExtension(
       bridge.idleStableTicks = 0;
     });
     pi.on("session_shutdown", () => {
+      childCompletionCoordinator.unbindSession();
+      void childCompletionCoordinator.drain().finally(() => childCompletionCoordinator.dispose());
       disposeChildProxyCaller();
       if (bridge.pollTimer) clearInterval(bridge.pollTimer);
       bridge.pollTimer = undefined;
@@ -1050,6 +1134,7 @@ export default function registerTeammateExtension(
     namedAgents: new Map(),
   };
   rootGlobals[registryKey] = state;
+  const completionCoordinator = new CompletionDeliveryCoordinator();
 
   type RootSessionFence = Readonly<{ generation: number; sessionId: string | null }>;
   const captureRootSessionFence = (): RootSessionFence => Object.freeze({
@@ -2608,6 +2693,9 @@ export default function registerTeammateExtension(
           if (override.cwd !== undefined) task.cwd = override.cwd ?? undefined;
         }
       }
+      const dispatchModelCatalog = refreshModelCatalog(ctx);
+      const dispatchModelRegistryAuthority = publishedModelRegistryPairSync(ctx.cwd)?.dispatch;
+      const dispatchMonitorCapture = captureMonitorCommunication();
       // A remote working location is a backend selector, not a dispatch of its
       // own: the checks below are the ones that can only be made here, and the
       // task then travels the ordinary path, where the registry resolves
@@ -2623,7 +2711,7 @@ export default function registerTeammateExtension(
             details: { mode: isMultiTask ? inferGraphMode(normalizedTasks) : "single", results: [] },
           };
         }
-        if (!ownsMonitorCommunication(captureMonitorCommunication())) {
+        if (!ownsMonitorCommunication(dispatchMonitorCapture)) {
           return {
             content: [{ type: "text", text: "Remote working locations require active Monitor mode." }],
             isError: true,
@@ -2725,6 +2813,41 @@ export default function registerTeammateExtension(
       if (signal.aborted) {
         signal.removeEventListener("abort", abortForward);
         return cancelledBeforeStart();
+      }
+
+      const completionSessionId = ctx.sessionManager?.getSessionId?.();
+      const completionSeed: CompletionDispatchSeed | undefined = completionSessionId
+        ? {
+            dispatchId: correlationId,
+            deliveryGroupId: correlationId,
+            reservationId: randomUUID(),
+            mode: graphMode ?? "single",
+            target: {
+              workspaceId: workspaceIdForCwd(ctx.cwd),
+              sessionId: completionSessionId,
+            },
+            replyTarget: params.reply_to ?? "caller",
+            originCwd: baseCwd,
+            expectedTasks: isMultiTask ? taskCorrelationIds : [correlationId],
+            createdAt: Date.now(),
+          }
+        : undefined;
+      let completionDurable = false;
+      let completionNotificationRequired = false;
+      if (completionSeed) {
+        try {
+          completionDurable = (await completionCoordinator.beginDispatch(completionSeed)).durable;
+        } catch (error) {
+          signal.removeEventListener("abort", abortForward);
+          return {
+            content: [{
+              type: "text",
+              text: `Teammate dispatch rejected before spawn: ${error instanceof Error ? error.message : String(error)}`,
+            }],
+            isError: true,
+            details: { mode: (graphMode ?? "single") as Details["mode"], results: [] },
+          };
+        }
       }
 
       let detached = false;
@@ -2868,9 +2991,100 @@ export default function registerTeammateExtension(
       let singleCompletionNotificationRequested = false;
       let singleCompletionDelivered = false;
       const coldRestarting = new Set<string>();
+      const publicationCountByCorrelation = new Map<string, number>();
+      const additionalCompletionSeeds = new Map<string, CompletionDispatchSeed>();
       const isLogicallyWakeable = (result: SingleResult): boolean => {
         const target = state.activeRuns.get(result.correlationId);
         return result.wakeable !== false || Boolean(target?.restart && target.sessionFile);
+      };
+      const durableResources = (results: readonly SingleResult[]): CompletionResource[] =>
+        results.map((result) => {
+          if (!result.publicationId) {
+            throw new Error(`Completion result ${result.correlationId} has no immutable publicationId.`);
+          }
+          const outcome = result.terminalStatus === "terminated"
+            ? "terminated" as const
+            : result.exitCode === 0 ? "completed" as const : "failed" as const;
+          return {
+            correlationId: result.correlationId,
+            publicationId: result.publicationId,
+            uri: `agent://${result.publicationId}`,
+            ...(result.name ? { name: result.name } : {}),
+            agent: result.agent,
+            summary: displayMessageForResult(result).replace(/\s+/g, " ").trim().slice(0, 4_096),
+            outcome,
+          };
+        });
+      const requireDurableNotification = async (
+        kind: "single" | "graph" | "additional" | "failure",
+      ): Promise<void> => {
+        if (!completionDurable || !completionSeed) return;
+        await completionCoordinator.requireNotification({
+          dispatchId: completionSeed.dispatchId,
+          reservationId: completionSeed.reservationId,
+          kind,
+          requiredAt: Date.now(),
+        });
+        completionNotificationRequired = true;
+      };
+      const publishDurableCompletion = async (
+        kind: "single" | "graph" | "additional" | "failure",
+        outcome: "completed" | "failed" | "terminated",
+        summary: string,
+        results: readonly SingleResult[],
+      ): Promise<boolean> => {
+        if (!completionDurable || !completionSeed) return false;
+        await completionCoordinator.publishCompletion({
+          dispatchId: completionSeed.dispatchId,
+          reservationId: completionSeed.reservationId,
+          kind,
+          outcome,
+          summary: summary.slice(0, 4_096),
+          resources: durableResources(results),
+          finalizedAt: Date.now(),
+        });
+        return true;
+      };
+      const publishDurableFailure = async (
+        agent: string,
+        error: unknown,
+      ): Promise<boolean> => {
+        if (!completionDurable || !completionSeed) return false;
+        const message = error instanceof Error ? error.message : String(error);
+        const result: SingleResult = {
+          agent,
+          task: singleTask.prompt,
+          exitCode: 1,
+          messages: [{ role: "assistant", content: message }],
+          usage: {
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            cost: 0,
+            turns: 0,
+          },
+          model: "",
+          correlationId,
+          publicationId: randomUUID(),
+          originCwd: baseCwd,
+          durationMs: Date.now() - activeAgent.startedAt,
+          wakeable: false,
+          terminalStatus: "failed",
+          completionDispatchId: completionSeed.dispatchId,
+          completionReservationId: completionSeed.reservationId,
+          completionOutcome: "failed",
+        };
+        await emitTeammateResultPublished(pi, result, baseCwd);
+        return publishDurableCompletion("failure", "failed", message, [result]);
+      };
+      const notifyFailureWithFallback = (agent: string, error: unknown): void => {
+        void publishDurableFailure(agent, error).then((durable) => {
+          if (!durable) notifyBackgroundFailure(pi, id, agent, correlationId, error, state);
+        }).catch((durabilityError) => {
+          console.warn("[pi-maestro-teammate] durable failure publication failed; using direct delivery:", durabilityError);
+          notifyBackgroundFailure(pi, id, agent, correlationId, error, state);
+        });
       };
       const deliverSingleCompletion = (): void => {
         if (!ownsDispatchGeneration()) {
@@ -2912,23 +3126,34 @@ export default function registerTeammateExtension(
           // confirmed its lifecycle") that would overwrite the assistant's
           // actual answer.
           const lastMessage = displayMessageForResult(singlePublishedResult ?? terminal);
-          const delivered = safeSendMessage(
-            pi,
-            {
-              customType: "teammate-complete",
-              content: lastMessage,
-              display: true,
-              details: {
-                mode: "single",
-                results: [terminal],
-                ...(childCalls.size > 0 ? { childCalls: [...childCalls.values()] } : {}),
+          const fallbackDelivery = (): void => {
+            const delivered = safeSendMessage(
+              pi,
+              {
+                customType: "teammate-complete",
+                content: lastMessage,
+                display: true,
+                details: {
+                  mode: "single",
+                  results: [terminal],
+                  ...(childCalls.size > 0 ? { childCalls: [...childCalls.values()] } : {}),
+                },
               },
-            },
-            { triggerTurn: true },
-          );
-          if (!delivered) {
-            markSettledResultInspectable(state, correlationId);
-          }
+              { triggerTurn: true },
+            );
+            if (!delivered) markSettledResultInspectable(state, correlationId);
+          };
+          void publishDurableCompletion(
+            "single",
+            status === "terminated" ? "terminated" : terminal.exitCode === 0 ? "completed" : "failed",
+            lastMessage,
+            [singlePublishedResult ?? terminal],
+          ).then((durable) => {
+            if (!durable) fallbackDelivery();
+          }).catch((error) => {
+            console.warn("[pi-maestro-teammate] durable single completion failed; using direct delivery:", error);
+            fallbackDelivery();
+          });
         } else {
           // Foreground: wait for both published and terminal results.
           if (!singlePublishedResult || !singleTerminalResult) return;
@@ -3000,24 +3225,35 @@ export default function registerTeammateExtension(
           toStructuredResults(graphPublication.results, baseCwd),
         );
         if (graphCompletionNotificationRequested) {
-          const delivered = safeSendMessage(
-            pi,
-            {
-              customType: "teammate-complete",
-              content: graphPublication.summaries,
-              display: true,
-              details: {
-                mode: graphPublication.mode,
-                results: graphPublication.results,
-                progress: graphPublication.progress,
-                ...(childCalls.size > 0 ? { childCalls: [...childCalls.values()] } : {}),
+          const fallbackDelivery = (): void => {
+            const delivered = safeSendMessage(
+              pi,
+              {
+                customType: "teammate-complete",
+                content: graphPublication!.summaries,
+                display: true,
+                details: {
+                  mode: graphPublication!.mode,
+                  results: graphPublication!.results,
+                  progress: graphPublication!.progress,
+                  ...(childCalls.size > 0 ? { childCalls: [...childCalls.values()] } : {}),
+                },
               },
-            },
-            { triggerTurn: true },
-          );
-          if (!delivered) {
-            markSettledResultInspectable(state, correlationId);
-          }
+              { triggerTurn: true },
+            );
+            if (!delivered) markSettledResultInspectable(state, correlationId);
+          };
+          void publishDurableCompletion(
+            "graph",
+            terminalStatus === "terminated" ? "terminated" : exitCode === 0 ? "completed" : "failed",
+            graphPublication.summaries,
+            graphPublication.results,
+          ).then((durable) => {
+            if (!durable) fallbackDelivery();
+          }).catch((error) => {
+            console.warn("[pi-maestro-teammate] durable graph completion failed; using direct delivery:", error);
+            fallbackDelivery();
+          });
         }
       };
       const publishGraphResult = (
@@ -3049,16 +3285,39 @@ export default function registerTeammateExtension(
           terminalStatus === "terminated",
           toStructuredResults([result], baseCwd),
         );
-        if (!safeSendMessage(
-          pi,
-          {
-            customType: "teammate-complete",
-            content: displayMessageForResult(result),
-            display: true,
-            details: { mode: "single", results: [result] },
-          },
-          { triggerTurn: true },
-        )) markSettledResultInspectable(state, result.correlationId);
+        const lastMessage = displayMessageForResult(result);
+        const fallbackDelivery = (): void => {
+          if (!safeSendMessage(
+            pi,
+            {
+              customType: "teammate-complete",
+              content: lastMessage,
+              display: true,
+              details: { mode: "single", results: [result] },
+            },
+            { triggerTurn: true },
+          )) markSettledResultInspectable(state, result.correlationId);
+        };
+        const additionalSeed = result.publicationId
+          ? additionalCompletionSeeds.get(result.publicationId)
+          : undefined;
+        if (!additionalSeed) {
+          fallbackDelivery();
+          return;
+        }
+        additionalCompletionSeeds.delete(result.publicationId!);
+        void completionCoordinator.publishCompletion({
+          dispatchId: additionalSeed.dispatchId,
+          reservationId: additionalSeed.reservationId,
+          kind: "additional",
+          outcome: terminalStatus === "terminated" ? "terminated" : result.exitCode === 0 ? "completed" : "failed",
+          summary: lastMessage,
+          resources: durableResources([result]),
+          finalizedAt: Date.now(),
+        }).catch((error) => {
+          console.warn("[pi-maestro-teammate] durable additional completion failed; using direct delivery:", error);
+          fallbackDelivery();
+        });
       };
 
       const parentSessionFile = ctx.sessionManager?.getSessionFile?.() ?? undefined;
@@ -3071,7 +3330,11 @@ export default function registerTeammateExtension(
           // purely local dispatch must not pay for that. Only loading a remote
           // registration reaches this.
           remoteManagerOf: () => ensureRemoteMonitorBinding().port.port,
-          modelCapabilities: refreshModelCatalog(ctx).models,
+          modelCapabilities: dispatchModelCatalog.models,
+          ...(dispatchModelRegistryAuthority === undefined
+            ? {}
+            : { modelRegistryAuthority: dispatchModelRegistryAuthority }),
+          authorizeRemoteModelDispatch: () => ownsMonitorCommunication(dispatchMonitorCapture),
           ...(isSingle ? { correlationId } : {}),
           ...(isMultiTask ? { taskCorrelationIds } : {}),
           depth: activeAgent.depth,
@@ -3148,7 +3411,42 @@ export default function registerTeammateExtension(
           },
           onResultPublished: activeAgent.name === MONITOR_SESSION_NAME
             ? undefined
-            : (result, originCwd) => emitTeammateResultPublished(pi, result, originCwd),
+            : async (result, originCwd) => {
+                const publicationCount = (publicationCountByCorrelation.get(result.correlationId) ?? 0) + 1;
+                publicationCountByCorrelation.set(result.correlationId, publicationCount);
+                let resultCompletionSeed = publicationCount === 1 ? completionSeed : undefined;
+                let resultCompletionDurable = publicationCount === 1 ? completionDurable : false;
+                if (publicationCount > 1 && completionSeed && result.publicationId) {
+                  const additionalSeed: CompletionDispatchSeed = {
+                    ...completionSeed,
+                    dispatchId: result.publicationId,
+                    deliveryGroupId: result.publicationId,
+                    reservationId: randomUUID(),
+                    mode: "single",
+                    expectedTasks: [result.correlationId],
+                    createdAt: Date.now(),
+                  };
+                  resultCompletionDurable = (await completionCoordinator.beginDispatch(additionalSeed)).durable;
+                  if (resultCompletionDurable) {
+                    await completionCoordinator.requireNotification({
+                      dispatchId: additionalSeed.dispatchId,
+                      reservationId: additionalSeed.reservationId,
+                      kind: "additional",
+                      requiredAt: Date.now(),
+                    });
+                    additionalCompletionSeeds.set(result.publicationId, additionalSeed);
+                    resultCompletionSeed = additionalSeed;
+                  }
+                }
+                if (resultCompletionDurable && resultCompletionSeed) {
+                  result.completionDispatchId = resultCompletionSeed.dispatchId;
+                  result.completionReservationId = resultCompletionSeed.reservationId;
+                  result.completionOutcome = result.terminalStatus === "terminated"
+                    ? "terminated"
+                    : result.exitCode === 0 ? "completed" : "failed";
+                }
+                return emitTeammateResultPublished(pi, result, originCwd);
+              },
           onTurnComplete: (result: SingleResult, terminalStatus?: AgentTerminalStatus) => {
             const canonicalStatus = terminalStatusForResult(result, terminalStatus);
             result.terminalStatus = canonicalStatus;
@@ -3503,7 +3801,13 @@ export default function registerTeammateExtension(
               await refreshModelRegistry(ctx);
               return refreshModelCatalog(ctx).models;
             },
-            { authorizeCrossSession: proxyCanCrossSession },
+            {
+              authorizeCrossSession: proxyCanCrossSession,
+              completion: {
+                coordinator: completionCoordinator,
+                workspaceId: workspaceIdForCwd(state.baseCwd),
+              },
+            },
           );
           },
         };
@@ -3738,7 +4042,7 @@ export default function registerTeammateExtension(
               settleGraphTaskAgent(state, taskId, 1, message, false, "terminated");
             });
             settleGraphContainerAgent(state, correlationId, 1, message, false);
-            notifyBackgroundFailure(pi, id, activeGraphMode, correlationId, error, state);
+            notifyFailureWithFallback(activeGraphMode, error);
           };
 
           const completeGraphInBackground = (
@@ -3803,6 +4107,9 @@ export default function registerTeammateExtension(
                 // The aggregate owns no child process; only physical task rows are wakeable.
                 wakeable: false,
               }, false);
+              if (completionDurable && completionSeed) {
+                await completionCoordinator.settleForeground(completionSeed);
+              }
 
               return {
                 content: [{ type: "text", text: warningPrefix + summaries }],
@@ -3818,6 +4125,7 @@ export default function registerTeammateExtension(
             }
 
             // Manual and timed detach share the same background completion path.
+            await requireDurableNotification("graph");
             detached = true;
             completeGraphInBackground(graphPromise);
             const detachText = race.reason === "timeout"
@@ -3833,6 +4141,7 @@ export default function registerTeammateExtension(
             };
           }
 
+          await requireDurableNotification("graph");
           const bgPromise = executeGraph();
           completeGraphInBackground(bgPromise);
 
@@ -3882,6 +4191,9 @@ export default function registerTeammateExtension(
             if (!result) throw new Error("Foreground teammate finished without a result.");
             const lastMessage = displayMessageForResult(result);
             publishSingleResult(result, false);
+            if (completionDurable && completionSeed) {
+              await completionCoordinator.settleForeground(completionSeed);
+            }
             const details: Details = {
               mode: "single",
               results: [result],
@@ -3898,6 +4210,7 @@ export default function registerTeammateExtension(
           }
 
           // Manual and timed detach share the same background completion path.
+          await requireDurableNotification("single");
           markStallNotification();
           detached = true;
           runPromise.then((result) => {
@@ -3912,7 +4225,7 @@ export default function registerTeammateExtension(
               error instanceof Error ? error.message : String(error),
               false,
             );
-            notifyBackgroundFailure(pi, id, agentLabel, correlationId, error, state);
+            notifyFailureWithFallback(agentLabel, error);
           });
           const detachText = race.reason === "timeout"
             ? `■ @${singleTask.name ?? singleTask.agent} moved to background after ${waitMs}ms.`
@@ -3928,6 +4241,7 @@ export default function registerTeammateExtension(
         }
 
         // --- BACKGROUND (default) ---
+        await requireDurableNotification("single");
         markStallNotification();
         const options = makeOptions();
         const bgPromise = runWithProgressFlushCleanup(
@@ -3947,7 +4261,7 @@ export default function registerTeammateExtension(
             error instanceof Error ? error.message : String(error),
             false,
           );
-          notifyBackgroundFailure(pi, id, agentLabel, correlationId, error, state);
+          notifyFailureWithFallback(agentLabel, error);
         });
 
         return {
@@ -3960,6 +4274,11 @@ export default function registerTeammateExtension(
         };
       } finally {
         foregroundUpdateOpen = false;
+        if (completionDurable && completionSeed && !completionNotificationRequired) {
+          await completionCoordinator.abandon(completionSeed, "dispatch ended without a notification requirement").catch((error) => {
+            console.warn("[pi-maestro-teammate] completion dispatch cleanup failed:", error);
+          });
+        }
         if (params.background === false && !detached) {
           const agent = state.activeRuns.get(correlationId);
           if (agent?.status === "running" && !dispatchLifecyclePending) {
@@ -4726,12 +5045,14 @@ export default function registerTeammateExtension(
   const enterMonitorInteractionMode = (): void => {
     monitorToolExposure?.enter();
     monitorInteractionModeActive = true;
+    if (widgetCtx) refreshModelCatalog(widgetCtx);
     syncMonitorInteractionStatus();
   };
 
   const exitMonitorInteractionMode = (): void => {
     monitorInteractionModeActive = false;
     monitorToolExposure?.exit();
+    if (widgetCtx) refreshModelCatalog(widgetCtx);
     void shutdownRemoteMonitorBinding().catch((error) => {
       console.error("[pi-maestro-teammate] remote Monitor generation shutdown failed:", sanitizeRemoteMonitorError(error, "shutdown"));
     });
@@ -7512,6 +7833,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
           return undefined;
         }
       })(),
+      refreshModelCatalog: () => refreshModelCatalog(ctx).models,
       onTestRemote: testRemoteTarget,
       remoteTestTimeoutMs: 10_000,
     });
@@ -8353,6 +8675,22 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     registerTeammateSettings();
     state.sessionGeneration = (state.sessionGeneration ?? 0) + 1;
     state.currentSessionId = ctx.sessionManager?.getSessionId() ?? null;
+    const completionSessionId = state.currentSessionId;
+    if (completionSessionId) {
+      void completionCoordinator.bindSession({
+        target: {
+          workspaceId: workspaceIdForCwd(ctx.cwd),
+          sessionId: completionSessionId,
+        },
+        entries: ctx.sessionManager?.getEntries?.() ?? [],
+        send(envelope: CompletionDeliveryEnvelope) {
+          return state.currentSessionId === completionSessionId
+            && safeSendMessage(pi, envelope, { triggerTurn: true, deliverAs: "followUp" });
+        },
+      }).catch((error) => {
+        console.warn("[pi-maestro-teammate] completion replay bind failed:", error);
+      });
+    }
     widgetCtx = ctx;
     exitMonitorInteractionMode();
     installMonitorEscapeTap(ctx.ui);
@@ -8363,8 +8701,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     monitorConfig = loadMonitorConfigForRoot(ctx.cwd);
     // Mailbox is bound to the real session cwd (workspace isolation).
     rebindMailboxHostForSession();
-    refreshModelCatalog(ctx);
-    void refreshModelRegistry(ctx);
+    void refreshModelCatalogSources(ctx);
     tool.description = buildTeammateToolDescription(ctx.cwd);
     pi.registerTool(tool);
     sessionHostRegistry?.thread.rebuild(ctx.sessionManager?.getEntries?.() ?? []);
@@ -8380,6 +8717,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     if (workspaceReceiptReconcileTimer) clearInterval(workspaceReceiptReconcileTimer);
     workspaceReceiptReconcileTimer = setInterval(() => {
       void reconcileWorkspacePeerReceipts();
+      void completionCoordinator.reconcile();
       try {
         redriveStaleIncomingRootMessages();
       } catch (error) {
@@ -8398,6 +8736,12 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
 
   pi.on("message_end", (event) => {
     workspaceMainSessionActivityAt = Date.now();
+    if (state.currentSessionId) {
+      void completionCoordinator.receiveMessageEnd(event.message, {
+        workspaceId: workspaceIdForCwd(state.baseCwd),
+        sessionId: state.currentSessionId,
+      });
+    }
     const assistantText = workspaceAssistantMessageText(event.message);
     if (assistantText !== undefined) {
       workspaceMainAssistantText = truncateUtf8Tail(assistantText, MAIN_SESSION_PROGRESS_TEXT_BYTES);
@@ -8506,6 +8850,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     state.baseCwd = ctx.cwd;
     // Rebind if compaction moved to a different workspace.
     rebindMailboxHostForSession();
+    void refreshModelCatalogSources(ctx);
     state.currentSessionId = ctx.sessionManager?.getSessionId() ?? null;
     workspacePeerSessionName = ctx.sessionManager?.getSessionName?.() ?? undefined;
     markWorkspacePeerDirty();
@@ -8514,6 +8859,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
   });
 
   pi.on("session_shutdown", async (event) => {
+    completionCoordinator.unbindSession();
     state.sessionGeneration = (state.sessionGeneration ?? 0) + 1;
     state.currentSessionId = null;
     const shutdownReason = event?.reason ?? "quit";
@@ -8545,6 +8891,8 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     }
     redrivenIncoming.clear();
     replayedIncoming.clear();
+    await completionCoordinator.drain();
+    completionCoordinator.dispose();
     // Dispose EventBus subscriptions on shutdown (defensive; framework may auto-dispose).
     for (const d of disposers) {
       try { d(); } catch {}

@@ -233,17 +233,30 @@ test("a warning with no counterpart in the body is still rendered on a success",
   assert.match(out, /^\[warn\] structured output was requested but/);
 });
 
-test("structured result snapshots are cloned and retain their origin cwd", () => {
+test("structured result snapshots ignore provenance that was not built by registry dispatch", () => {
   const value = { nested: { verdict: "ok" } };
+  const provenance: NonNullable<SingleResult["provenance"]> = {
+    registryVersion: 2,
+    registryRevision: 7,
+    registryHash: "sha256",
+    modelRegistrationId: "registry/reviewer",
+    modelId: "intrinsic/reviewer",
+    deploymentId: "local-pi",
+    harness: "pi",
+    transport: { kind: "local-process", protocol: "pi-rpc" },
+  };
   const projected = toStructuredResults([result({
     name: "reviewer",
     structuredOutput: value,
+    provenance,
   })], "D:/workspace");
   assert.ok(projected);
   assert.equal(projected[0].originCwd, "D:/workspace");
   assert.equal(projected[0].name, "reviewer");
+  assert.equal(projected[0].provenance, undefined);
   (projected[0].structuredOutput as { nested: { verdict: string } }).nested.verdict = "mutated";
   assert.equal(value.nested.verdict, "ok");
+  assert.deepEqual(provenance.transport, { kind: "local-process", protocol: "pi-rpc" });
 });
 
 test("toStructuredResults carries the final assistant text for tasks without an outputSchema", () => {

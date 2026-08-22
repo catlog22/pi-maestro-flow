@@ -444,14 +444,15 @@ export function createResourceTool(): ToolDefinition<typeof ResourceParams, Reso
 - \`issue://owner/repo/N\` — GitHub issue (body + comments). \`issue://N\` uses the current repository.
 - \`skill://name\` — installed skill's SKILL.md (project .pi/skills, .agents/skills, then home).
 - \`rule://name\` — project rule files (agents → AGENTS.md, rules → RULES.md, cursor → .cursorrules, cline → .clinerules, plus .pi/rules/ and docs/).
-- \`agent://<correlationId>[/key[/index[/field]]]\` — output of a completed teammate subagent. Use the correlation ID returned by teammate-list or teammate results as the common query path; publicationId remains a compatibility alias. A task name matching multiple outputs returns a disambiguation list of correlation IDs, timestamps and previews — query by correlation ID to select one. Bare \`agent://<correlationId>\` returns the whole output; optional path segments pull one nested field by object key / array index, e.g. \`agent://catalog-audit-correlation/findings/0/path\`. Do NOT append \`/json\` — the bare URI already returns the output.
+- \`agent://<id>[/key[/index[/field]]]\` — published teammate output. Exact correlation and publication IDs resolve globally across workspace buckets; task-name discovery remains scoped to the caller's workspace/subtree and may return a disambiguation list. A correlation ID follows that task's latest publication, while a publication ID pins one immutable result; use task names only to discover candidates, then retain an exact ID. Bare \`agent://<id>\` returns the whole output; optional path segments load one nested field, e.g. \`agent://catalog-audit-correlation/findings/0/path\`. Do NOT append \`/json\`. Agent resources are not cached: reuse content already present in the current context instead of loading the same immutable URI again.
 
 pr:// and issue:// require the gh CLI (https://cli.github.com). Results are cached in memory for 5 minutes — re-reads within the window return the cached copy, so refetch after state changes only when the window has expired.
 Read local files with the built-in read tool — resource is for protocol resources only.`,
     promptSnippet: "Use resource for pr://, issue://, skill://, rule://, agent:// protocol resources; use read for local files.",
     promptGuidelines: [
       "pr://, issue://, skill://, rule://, agent:// protocol resources are read via the resource tool — do not pass them to the built-in read tool (read is for local files).",
-      "After a teammate task finishes, read its output via the returned correlation ID using agent://<correlationId>; use publicationId only when replaying a specific immutable publication.",
+      "For teammate results, use task names only to discover candidates; retain an exact correlation ID for that task's latest result or a publication ID for one immutable result. Exact IDs resolve globally; task-name lookup stays workspace-scoped.",
+      "Load the smallest required agent://<exact-id>/key/index subtree, never append /json, and do not reload an unchanged immutable URI already present in the current context.",
     ],
     parameters: ResourceParams,
     async execute(_id, params, signal, _onUpdate, ctx): Promise<AgentToolResult<ResourceDetails>> {

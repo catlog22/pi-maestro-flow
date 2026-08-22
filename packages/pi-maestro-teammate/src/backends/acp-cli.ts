@@ -106,7 +106,11 @@ const CAPABILITIES: BackendCapabilities = {
  * hold or forward. `env` carries variable *names* the parent process may pass
  * through, which is why an entry containing a value is refused below.
  */
-const CONFIG_FIELDS: readonly BackendConfigField[] = [
+/**
+ * Exported so the models CLI edit flow renders exactly the fields this backend
+ * validates against, without loading the backend for its capability table.
+ */
+export const ACP_CLI_CONFIG_FIELDS: readonly BackendConfigField[] = [
   {
     key: "command",
     kind: "text",
@@ -358,7 +362,7 @@ export function createAcpCliBackend(
     // The CLI process exits with its turn and keeps no addressable session, so a
     // failed attempt can only be re-run from the original prompt.
     recoveryShape: "replay" satisfies RecoveryShape,
-    configFields: CONFIG_FIELDS,
+    configFields: ACP_CLI_CONFIG_FIELDS,
 
     resolveConfig(config: Record<string, ConfigValue>): ResolvedBackendConfig {
       const errors: string[] = [];

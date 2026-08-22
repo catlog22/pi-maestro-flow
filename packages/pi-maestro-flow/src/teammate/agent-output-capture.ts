@@ -14,6 +14,11 @@
  */
 
 import { persistAgentOutputChecked } from "./agent-output-store.ts";
+import {
+  getCompletionDurabilityRegistry,
+  type CompletionOutcome,
+  type CompletionResource,
+} from "pi-maestro-teammate/v1/completion-durability";
 
 interface StructuredResultLike {
   correlationId?: unknown;
@@ -24,6 +29,10 @@ interface StructuredResultLike {
   structuredOutput?: unknown;
   /** Final assistant text carried by background `teammate:complete` events. */
   output?: unknown;
+  /** Durable completion dispatch metadata; absent for legacy/foreground-only publications. */
+  completionDispatchId?: unknown;
+  completionReservationId?: unknown;
+  completionOutcome?: unknown;
   /** Foreground transcript (SingleResult.messages); last assistant text is used. */
   messages?: Array<{ role?: unknown; content?: unknown }>;
 }
@@ -151,18 +160,57 @@ export function capturePublishedAgentResult(
   const correlationId = typeof result.correlationId === "string" ? result.correlationId : "unknown";
   const publicationId = typeof result.publicationId === "string" ? result.publicationId : undefined;
   const resourceId = correlationId;
-  const persistence = persistStructuredResults([payload.result], undefined).then((summary) => {
-    if (summary.stored !== 1) {
+  const persistence = (async () => {
+    const durableProvider = getCompletionDurabilityRegistry().current();
+    const raw = payload.result as StructuredResultLike;
+    const dispatchId = typeof raw.completionDispatchId === "string" ? raw.completionDispatchId : undefined;
+    const reservationId = typeof raw.completionReservationId === "string" ? raw.completionReservationId : undefined;
+    const outcome: CompletionOutcome = raw.completionOutcome === "failed" || raw.completionOutcome === "terminated"
+      ? raw.completionOutcome
+      : "completed";
+    const output = raw.structuredOutput ?? (typeof raw.output === "string" ? raw.output : finalMessageText(raw.messages));
+    const summary = typeof output === "string"
+      ? output.replace(/\s+/g, " ").trim().slice(0, 4_096)
+      : JSON.stringify(output)?.slice(0, 4_096) ?? "Teammate result published.";
+    const resource: CompletionResource | undefined = publicationId && dispatchId && reservationId
+      ? {
+          correlationId,
+          publicationId,
+          uri: `agent://${publicationId}`,
+          ...(typeof raw.name === "string" ? { name: raw.name } : {}),
+          ...(typeof raw.agent === "string" ? { agent: raw.agent } : {}),
+          summary,
+          outcome,
+        }
+      : undefined;
+    if (durableProvider && resource && dispatchId && reservationId) {
+      await durableProvider.stagePublication({
+        dispatchId,
+        reservationId,
+        resource,
+        stagedAt: Date.now(),
+      });
+    }
+    const summaryResult = await persistStructuredResults([payload.result], undefined);
+    if (summaryResult.stored !== 1) {
       throw new Error(
         `agent://${resourceId} persistence was not acknowledged `
-        + `(stored=${summary.stored}, skipped=${summary.skipped}, failed=${summary.failed})`,
+        + `(stored=${summaryResult.stored}, skipped=${summaryResult.skipped}, failed=${summaryResult.failed})`,
       );
+    }
+    if (durableProvider && resource && dispatchId && reservationId) {
+      await durableProvider.commitPublication({
+        dispatchId,
+        reservationId,
+        publicationId: resource.publicationId,
+        committedAt: Date.now(),
+      });
     }
     if (typeof payload.acknowledgeResource === "function") {
       (payload.acknowledgeResource as (uri: string) => void)(`agent://${resourceId}`);
     }
     if (publicationId) onStored?.(publicationId);
-  });
+  })();
   (payload.waitUntil as (promise: Promise<unknown>) => void)(persistence);
   return true;
 }

@@ -548,3 +548,34 @@ test("window rendering strips terminal control sequences from remote data", asyn
   assert.doesNotMatch(rendered, /\x1b\]52/);
   assert.doesNotMatch(rendered, /\x1b\[2J/);
 });
+
+test("fork install prompt covers not-installed, binary-without-fork, and installed states", async () => {
+  const { McpxOverlay } = await import("../src/tui/mcpx-overlay.ts");
+  const overlay = new McpxOverlay({
+    cwd: "D:/fork-prompt-demo",
+    requestRender: () => undefined,
+    close: () => undefined,
+  });
+  const base = {
+    refreshing: false, endpoint: "offline", workspaces: [], cwdRegistered: false,
+    thread: [], mcpServers: [], windows: [],
+  } satisfies Partial<McpxSnapshot>;
+
+  // 仅安装插件，mcpx 完全未安装 → 红色安装指引
+  overlay["snapshot"] = { ...base, binary: undefined, forkInstalled: false } satisfies McpxSnapshot;
+  let rows = overlay["renderForkRows"](100).join("\n");
+  assert.match(rows, /未安装 mcpx/);
+  assert.match(rows, /npm i -g mcpx-for-pmf/);
+
+  // 有 mcpx 二进制（源码编译/上游包）但未装 mcpx-for-pmf npm 包 → 黄色建议
+  overlay["snapshot"] = { ...base, binary: "/usr/local/bin/mcpx", forkInstalled: false } satisfies McpxSnapshot;
+  rows = overlay["renderForkRows"](100).join("\n");
+  assert.match(rows, /未检测到 mcpx-for-pmf 包/);
+  assert.match(rows, /npm i -g mcpx-for-pmf/);
+
+  // fork 已安装 → 绿色确认 + 版本
+  overlay["snapshot"] = { ...base, binary: "/usr/local/bin/mcpx", forkInstalled: true, forkVersion: "0.9.7" } satisfies McpxSnapshot;
+  rows = overlay["renderForkRows"](100).join("\n");
+  assert.match(rows, /mcpx-for-pmf 已安装/);
+  assert.match(rows, /v0\.9\.7/);
+});

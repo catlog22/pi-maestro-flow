@@ -33,6 +33,14 @@ import {
   type ObservationWaitStatus,
 } from "../public/v1/observation.ts";
 import {
+  CompletionDeliveryCoordinator,
+} from "../completion-outbox/coordinator.ts";
+import type { CompletionOutboxRecord } from "../completion-outbox/types.ts";
+import type {
+  CompletionDispatchSeed,
+  CompletionResource,
+} from "../public/v1/completion-durability.ts";
+import {
   formatCompact,
   formatVerbose,
   formatHeader,
@@ -95,6 +103,7 @@ import {
   isStructuredOutputSettlementDiagnostic,
   singleRunParamsOf,
 } from "../runs/execution.ts";
+import { publishedModelRegistryPairSync } from "../backends/registry-host.ts";
 import {
   confirmChildReloaded,
   confirmParked,
@@ -873,6 +882,10 @@ export function parseOutputSchema(value: unknown): Record<string, unknown> | und
 
 export interface TeammateProxyAuthority {
   authorizeCrossSession?: () => boolean;
+  completion?: {
+    coordinator: CompletionDeliveryCoordinator;
+    workspaceId: string;
+  };
 }
 
 export async function handleProxyRequest(
@@ -1106,6 +1119,44 @@ export async function handleProxyRequest(
         if (task.name) taskIndexByName.set(task.name, index);
       });
       const taskCorrelationIds: string[] = normalizedTasks?.map(() => randomUUID()) ?? [];
+      const completionReplyTarget = routedParams.reply_to ?? "caller";
+      const completionSessionId = completionReplyTarget === "main"
+        ? state.currentSessionId ?? undefined
+        : parentSessionId;
+      const completionSeed: CompletionDispatchSeed | undefined = authority.completion && completionSessionId
+        ? {
+            dispatchId: cid,
+            deliveryGroupId: cid,
+            reservationId: randomUUID(),
+            mode: normalizedTasks ? inferGraphMode(normalizedTasks) : "single",
+            target: {
+              workspaceId: authority.completion.workspaceId,
+              sessionId: completionSessionId,
+              ...(completionReplyTarget === "caller" && parentCid ? { correlationId: parentCid } : {}),
+            },
+            replyTarget: completionReplyTarget,
+            originCwd: dispatchOriginCwd,
+            expectedTasks: normalizedTasks ? taskCorrelationIds : [cid],
+            createdAt: Date.now(),
+          }
+        : undefined;
+      let completionDurable = false;
+      let completionNotificationRequired = false;
+      if (completionSeed && authority.completion) {
+        try {
+          completionDurable = (await authority.completion.coordinator.beginDispatch(completionSeed)).durable;
+        } catch (error) {
+          reply({ type: "teammate_proxy_result", requestId, result: {
+            content: [{
+              type: "text",
+              text: `Nested teammate dispatch rejected before spawn: ${error instanceof Error ? error.message : String(error)}`,
+            }],
+            isError: true,
+            details: { mode: normalizedTasks ? inferGraphMode(normalizedTasks) : "single", results: [] },
+          }});
+          return;
+        }
+      }
       const progressState = new Map<number, AgentProgressSnapshot>();
       normalizedTasks?.forEach((task, index) => {
         const dependencies = taskDependencyNames(task, taskNames)
@@ -1249,6 +1300,8 @@ export async function handleProxyRequest(
       let nestedCompletionNotificationRequested = false;
       let nestedCompletionDelivered = false;
       const nestedColdRestarting = new Set<string>();
+      const nestedPublicationCount = new Map<string, number>();
+      const nestedAdditionalSeeds = new Map<string, CompletionDispatchSeed>();
       const finishProxyDispatchTracking = (): boolean => {
         const cancelled = state.cancelledProxyDispatches?.get(requestId) === cid;
         if (state.proxyDispatchByRequest?.get(requestId) === cid) {
@@ -1259,6 +1312,47 @@ export async function handleProxyRequest(
           if (state.cancelledProxyDispatches?.size === 0) state.cancelledProxyDispatches = undefined;
         }
         return cancelled;
+      };
+      const nestedResources = (results: readonly SingleResult[]): CompletionResource[] =>
+        results.map((result) => {
+          if (!result.publicationId) throw new Error(`Nested completion ${result.correlationId} has no immutable publicationId.`);
+          const outcome = result.terminalStatus === "terminated"
+            ? "terminated" as const
+            : result.exitCode === 0 ? "completed" as const : "failed" as const;
+          return {
+            correlationId: result.correlationId,
+            publicationId: result.publicationId,
+            uri: `agent://${result.publicationId}`,
+            ...(result.name ? { name: result.name } : {}),
+            agent: result.agent,
+            summary: displayMessageForResult(result).replace(/\s+/g, " ").trim().slice(0, 4_096),
+            outcome,
+          };
+        });
+      const requireNestedNotification = async (kind: "single" | "graph" | "failure"): Promise<void> => {
+        if (!completionDurable || !completionSeed || !authority.completion) return;
+        await authority.completion.coordinator.requireNotification({
+          dispatchId: completionSeed.dispatchId,
+          reservationId: completionSeed.reservationId,
+          kind,
+          requiredAt: Date.now(),
+        });
+        completionNotificationRequired = true;
+      };
+      const publishNestedDurableCompletion = async (
+        publication: NestedCompletion,
+        terminalStatus: AgentTerminalStatus,
+      ): Promise<CompletionOutboxRecord | undefined> => {
+        if (!completionDurable || !completionSeed || !authority.completion) return undefined;
+        return authority.completion.coordinator.publishCompletion({
+          dispatchId: completionSeed.dispatchId,
+          reservationId: completionSeed.reservationId,
+          kind: normalizedTasks ? "graph" : "single",
+          outcome: terminalStatus === "terminated" ? "terminated" : publication.exitCode === 0 ? "completed" : "failed",
+          summary: publication.summary.slice(0, 4_096),
+          resources: nestedResources(publication.results),
+          finalizedAt: Date.now(),
+        });
       };
       const deliverNestedCompletion = (): void => {
         const lifecycleTerminal = normalizedTasks
@@ -1300,9 +1394,9 @@ export async function handleProxyRequest(
         ));
         if (nestedCompletionNotificationRequested) {
           const envelope = {
-            customType: "teammate-complete",
+            customType: "teammate-complete" as const,
             content: nestedPublication.summary,
-            display: true,
+            display: true as const,
             details: {
               mode: nestedPublication.mode,
               results: nestedPublication.results,
@@ -1310,19 +1404,39 @@ export async function handleProxyRequest(
               ...(nestedChildCalls.size > 0 ? { childCalls: [...nestedChildCalls.values()] } : {}),
             },
           };
-          const replyTarget = resolveAgentCompletionTarget(activeAgent);
-          const delivered = deliverTeammateCompleteNotification({
-            pi,
-            state,
-            envelope,
-            replyTarget,
-            parentCid,
-            parentSessionId,
-            sessionGeneration: state.sessionGeneration ?? 0,
+          const fallbackDelivery = (): void => {
+            const replyTarget = resolveAgentCompletionTarget(activeAgent);
+            const delivered = deliverTeammateCompleteNotification({
+              pi,
+              state,
+              envelope,
+              replyTarget,
+              parentCid,
+              parentSessionId,
+              sessionGeneration: state.sessionGeneration ?? 0,
+            });
+            if (!delivered) markSettledResultInspectable(state, cid);
+          };
+          void publishNestedDurableCompletion(nestedPublication, terminalStatus).then((record) => {
+            if (!record) {
+              fallbackDelivery();
+              return;
+            }
+            if (record.replyTarget !== "caller" || !authority.completion) return;
+            const delivered = deliverTeammateCompleteNotification({
+              pi,
+              state,
+              envelope: authority.completion.coordinator.deliveryEnvelope(record, false),
+              replyTarget: "caller",
+              parentCid,
+              parentSessionId,
+              sessionGeneration: state.sessionGeneration ?? 0,
+            });
+            if (!delivered) markSettledResultInspectable(state, cid);
+          }).catch((error) => {
+            console.warn("[pi-maestro-teammate] durable nested completion failed; using passive delivery:", error);
+            fallbackDelivery();
           });
-          if (!delivered) {
-            markSettledResultInspectable(state, cid);
-          }
         }
         finishProxyDispatchTracking();
       };
@@ -1352,20 +1466,43 @@ export async function handleProxyRequest(
           terminalStatus === "terminated",
           toStructuredResults([result], dispatchOriginCwd),
         );
-        if (!deliverTeammateCompleteNotification({
-          pi,
-          state,
-          envelope: {
-            customType: "teammate-complete",
-            content: displayMessageForResult(result),
-            display: true,
-            details: { mode: "single", results: [result] },
-          },
-          replyTarget: resolveAgentCompletionTarget(activeAgent),
-          parentCid,
-          parentSessionId,
-          sessionGeneration: state.sessionGeneration ?? 0,
-        })) markSettledResultInspectable(state, result.correlationId);
+        const lastMessage = displayMessageForResult(result);
+        const fallbackDelivery = (): void => {
+          if (!deliverTeammateCompleteNotification({
+            pi,
+            state,
+            envelope: {
+              customType: "teammate-complete",
+              content: lastMessage,
+              display: true,
+              details: { mode: "single", results: [result] },
+            },
+            replyTarget: resolveAgentCompletionTarget(activeAgent),
+            parentCid,
+            parentSessionId,
+            sessionGeneration: state.sessionGeneration ?? 0,
+          })) markSettledResultInspectable(state, result.correlationId);
+        };
+        const additionalSeed = result.publicationId
+          ? nestedAdditionalSeeds.get(result.publicationId)
+          : undefined;
+        if (!additionalSeed || !authority.completion) {
+          fallbackDelivery();
+          return;
+        }
+        nestedAdditionalSeeds.delete(result.publicationId!);
+        void authority.completion.coordinator.publishCompletion({
+          dispatchId: additionalSeed.dispatchId,
+          reservationId: additionalSeed.reservationId,
+          kind: "additional",
+          outcome: terminalStatus === "terminated" ? "terminated" : result.exitCode === 0 ? "completed" : "failed",
+          summary: lastMessage,
+          resources: nestedResources([result]),
+          finalizedAt: Date.now(),
+        }).catch((error) => {
+          console.warn("[pi-maestro-teammate] durable nested additional completion failed; using passive delivery:", error);
+          fallbackDelivery();
+        });
       };
 
       normalizedTasks?.forEach((task, index) => {
@@ -1623,10 +1760,14 @@ export async function handleProxyRequest(
         reportChildStatus(childCallStatusForProgress(latest.status), latest);
       });
 
+      const nestedModelRegistryAuthority = publishedModelRegistryPairSync(state.baseCwd)?.dispatch;
       const runOpts: RunTeammateOptions = {
         ...runtimeOptions,
         baseCwd: state.baseCwd,
         modelCapabilities: effectiveModelCapabilities,
+        ...(nestedModelRegistryAuthority === undefined
+          ? {}
+          : { modelRegistryAuthority: nestedModelRegistryAuthority }),
         ...(normalizedTasks ? { taskCorrelationIds } : { correlationId: cid }),
         depth: dispatchDepth,
         maxDispatchDepth: childMaxDispatchDepth,
@@ -1695,7 +1836,42 @@ export async function handleProxyRequest(
         onReclamationOutcome: (childId, outcome) => {
           recordChildReclamationOutcome(state, childId, outcome);
         },
-        onResultPublished: (result, originCwd) => emitTeammateResultPublished(pi, result, originCwd),
+        onResultPublished: async (result, originCwd) => {
+          const publicationCount = (nestedPublicationCount.get(result.correlationId) ?? 0) + 1;
+          nestedPublicationCount.set(result.correlationId, publicationCount);
+          let resultSeed = publicationCount === 1 ? completionSeed : undefined;
+          let resultDurable = publicationCount === 1 ? completionDurable : false;
+          if (publicationCount > 1 && completionSeed && authority.completion && result.publicationId) {
+            const additionalSeed: CompletionDispatchSeed = {
+              ...completionSeed,
+              dispatchId: result.publicationId,
+              deliveryGroupId: result.publicationId,
+              reservationId: randomUUID(),
+              mode: "single",
+              expectedTasks: [result.correlationId],
+              createdAt: Date.now(),
+            };
+            resultDurable = (await authority.completion.coordinator.beginDispatch(additionalSeed)).durable;
+            if (resultDurable) {
+              await authority.completion.coordinator.requireNotification({
+                dispatchId: additionalSeed.dispatchId,
+                reservationId: additionalSeed.reservationId,
+                kind: "additional",
+                requiredAt: Date.now(),
+              });
+              nestedAdditionalSeeds.set(result.publicationId, additionalSeed);
+              resultSeed = additionalSeed;
+            }
+          }
+          if (resultDurable && resultSeed) {
+            result.completionDispatchId = resultSeed.dispatchId;
+            result.completionReservationId = resultSeed.reservationId;
+            result.completionOutcome = result.terminalStatus === "terminated"
+              ? "terminated"
+              : result.exitCode === 0 ? "completed" : "failed";
+          }
+          return emitTeammateResultPublished(pi, result, originCwd);
+        },
         onTurnComplete: (result, terminalStatus) => {
           const canonicalStatus = terminalStatusForResult(result, terminalStatus);
           result.terminalStatus = canonicalStatus;
@@ -2059,6 +2235,39 @@ export async function handleProxyRequest(
         return message;
       };
 
+      const publishNestedFailure = async (error: unknown): Promise<boolean> => {
+        if (!completionDurable || !completionSeed || !authority.completion) return false;
+        const message = error instanceof Error ? error.message : String(error);
+        const result: SingleResult = {
+          agent: activeAgent.agent,
+          task: singleTask.prompt,
+          exitCode: 1,
+          messages: [{ role: "assistant", content: message }],
+          usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cost: 0, turns: 0 },
+          model: "",
+          correlationId: cid,
+          publicationId: randomUUID(),
+          originCwd: dispatchOriginCwd,
+          durationMs: Date.now() - activeAgent.startedAt,
+          wakeable: false,
+          terminalStatus: "failed",
+          completionDispatchId: completionSeed.dispatchId,
+          completionReservationId: completionSeed.reservationId,
+          completionOutcome: "failed",
+        };
+        await emitTeammateResultPublished(pi, result, dispatchOriginCwd);
+        await authority.completion.coordinator.publishCompletion({
+          dispatchId: completionSeed.dispatchId,
+          reservationId: completionSeed.reservationId,
+          kind: "failure",
+          outcome: "failed",
+          summary: message,
+          resources: nestedResources([result]),
+          finalizedAt: Date.now(),
+        });
+        return true;
+      };
+
       const mode = normalizedTasks ? inferGraphMode(normalizedTasks) : "single";
       const runningLabel = singleTask.name ?? activeAgent.agent;
 
@@ -2089,7 +2298,12 @@ export async function handleProxyRequest(
           const cancelled = finishProxyDispatchTracking();
           if (cancelled || !ownsDispatchGeneration()) return;
           settleNestedExecutionFailure(error);
-          notifyBackgroundFailure(pi, requestId, activeAgent.agent, cid, error, state);
+          void publishNestedFailure(error).then((durable) => {
+            if (!durable) notifyBackgroundFailure(pi, requestId, activeAgent.agent, cid, error, state);
+          }).catch((durabilityError) => {
+            console.warn("[pi-maestro-teammate] durable nested failure failed; using direct delivery:", durabilityError);
+            notifyBackgroundFailure(pi, requestId, activeAgent.agent, cid, error, state);
+          });
         });
       };
 
@@ -2139,6 +2353,9 @@ export async function handleProxyRequest(
         if (race.status === "failed") {
           const cancelled = finishProxyDispatchTracking();
           if (cancelled || !ownsDispatchGeneration()) return;
+          if (completionDurable && completionSeed && authority.completion) {
+            await authority.completion.coordinator.abandon(completionSeed, "nested foreground dispatch failed");
+          }
           const failureMessage = settleNestedExecutionFailure(race.error);
           emitNestedComplete(1);
           reply({ type: "teammate_proxy_result", requestId, result: {
@@ -2163,6 +2380,9 @@ export async function handleProxyRequest(
             return;
           }
           publishNestedCompletion(completed, false);
+          if (completionDurable && completionSeed && authority.completion) {
+            await authority.completion.coordinator.settleForeground(completionSeed);
+          }
           reply({ type: "teammate_proxy_result", requestId, result: completed.resultPayload });
           return;
         }
@@ -2171,6 +2391,7 @@ export async function handleProxyRequest(
           finishProxyDispatchTracking();
           return;
         }
+        await requireNestedNotification(normalizedTasks ? "graph" : "single");
         completeNestedInBackground(nestedPromise);
         const detachText = race.status === "timeout"
           ? `@${runningLabel} moved to background after ${waitMs}ms.`
@@ -2190,6 +2411,7 @@ export async function handleProxyRequest(
         return;
       }
 
+      await requireNestedNotification(normalizedTasks ? "graph" : "single");
       const nestedPromise = executeNested();
       completeNestedInBackground(nestedPromise);
       reply({ type: "teammate_proxy_result", requestId, result: {

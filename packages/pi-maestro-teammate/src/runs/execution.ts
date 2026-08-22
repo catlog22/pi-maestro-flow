@@ -34,15 +34,27 @@ import type {
   AgentTerminalStatus,
   AgentRunPhase,
   RecentToolInfo,
+  TeammateExecutionProvenance,
 } from "../shared/types.ts";
 import { wrapLeasedMessage, type LeaseToken } from "./session-handoff.ts";
-import { applyModelRouting, syncModelCircuitPolicies, type TeammateTaskType } from "../models/model-routing.ts";
+import {
+  applyModelRouting,
+  canHotSwitchModelRegistration,
+  resolveModelRegistrationRouting,
+  syncModelCircuitPolicies,
+  type ResolvedModelRegistrationCandidate,
+  type ResolvedModelRegistrationRouting,
+  type TeammateTaskType,
+} from "../models/model-routing.ts";
 import type { TeammateModelCapability } from "../models/model-catalog.ts";
 import {
   rankModelsByHealth,
   sharedModelCircuitBreaker,
+  sharedModelHealthCoordinator,
   type AcquiredModelCandidate,
+  type AcquiredModelHealthCandidate,
   type ModelCircuitBreaker,
+  type ModelHealthCoordinator,
 } from "../models/model-circuit-breaker.ts";
 import { getTeammateChildExtensions, getTeammateChildToolBroker } from "./child-extensions.ts";
 import {
@@ -51,9 +63,11 @@ import {
   type TeammateThinkingLevel,
 } from "../shared/thinking.ts";
 import {
+  classifyModelHealthFailure,
   classifyRetryError,
   extractRetryAfterMs,
   isFallbackProviderError,
+  ModelHealthAttemptState,
   retryDelayMs,
 } from "./retry.ts";
 import {
@@ -116,8 +130,10 @@ import {
   writeSchemaFile,
   writeSystemPromptFile,
 } from "./execution-infra.ts";
+import { assembleTaskPrompt } from "./briefing.ts";
 import type {
   JsonLineEvent,
+  ModelRegistryDispatchContext,
   NormalizedTask,
   RemoteLocationRouting,
   RunSingleTeammateParams,
@@ -134,7 +150,13 @@ import type {
 import { adjudicateTask, validateBackendCapabilities } from "pi-maestro-backends";
 import { outcomeOf } from "../backends/pi-subprocess.ts";
 import { closeBackendControlStdin, createBackendControlStdin } from "../backends/control-shim.ts";
-import { backendRegistryConfigSync, dispatchRegistrySync } from "../backends/registry-host.ts";
+import {
+  backendRegistryConfigSync,
+  dispatchRegistryForProjectionSync,
+  dispatchRegistrySync,
+  modelRegistryPairSync,
+  PI_SUBPROCESS,
+} from "../backends/registry-host.ts";
 import { runSingleAttempt } from "./pi-subprocess-attempt.ts";
 import type {
   AttemptOutcome,
@@ -142,6 +164,10 @@ import type {
   BackendRunOptions,
   ConfigValue,
 } from "pi-maestro-backend-core/v1/backend";
+import type {
+  BackendRegistry,
+  ResolvedBackend,
+} from "pi-maestro-backend-core/v1/registry";
 import type { TeammateRunSpec } from "pi-maestro-backend-core/v1/spec";
 
 export {
@@ -157,6 +183,255 @@ export type { RpcMessageMode } from "./pi-subprocess-attempt.ts";
 function providerOf(model: string): string | undefined {
   const slash = model.indexOf("/");
   return slash > 0 ? model.slice(0, slash) : undefined;
+}
+
+interface ModelRegistryRunBinding {
+  hostOptions: RunTeammateOptions;
+  cwd: string;
+  replyTo: ReplyTarget;
+}
+
+interface MutableModelRegistryDispatchContext extends ModelRegistryDispatchContext {
+  readonly plansByCorrelationId: Map<string, ResolvedModelRegistrationRouting>;
+  readonly resolutionsByCorrelationId: Map<string, Map<string, ResolvedBackend>>;
+}
+
+const modelRegistryRunBindings = new WeakMap<
+  ModelRegistryDispatchContext,
+  Map<string, ModelRegistryRunBinding>
+>();
+const hostRegistryProvenanceResults = new WeakMap<SingleResult, TeammateExecutionProvenance>();
+
+export function hostRegistryResultProvenance(
+  result: SingleResult,
+): TeammateExecutionProvenance | undefined {
+  const provenance = hostRegistryProvenanceResults.get(result);
+  return provenance === undefined ? undefined : structuredClone(provenance);
+}
+
+function captureModelRegistryAuthority(
+  options: RunTeammateOptions,
+): ModelRegistryDispatchContext["authority"] | undefined {
+  const captured = options.modelRegistryDispatch?.authority ?? options.modelRegistryAuthority;
+  if (captured !== undefined) return captured;
+  // Preserve the frozen 2.0 document/cache path exactly. The revision-aware
+  // reader is consulted only after that path has already opted into
+  // model-registry mode.
+  if ((backendRegistryConfigSync(options.baseCwd).mode ?? "legacy") !== "model-registry") {
+    return undefined;
+  }
+  return modelRegistryPairSync(options.baseCwd)?.dispatch;
+}
+
+function createModelRegistryDispatchContext(
+  authority: ModelRegistryDispatchContext["authority"],
+  options: RunTeammateOptions,
+): MutableModelRegistryDispatchContext {
+  const bindings = new Map<string, ModelRegistryRunBinding>();
+  const registry = options.backendRegistry ?? dispatchRegistryForProjectionSync(
+    authority,
+    (_spec, backendOptions) => {
+      const binding = bindings.get(backendOptions.correlationId);
+      if (binding === undefined) {
+        throw new Error(
+          `Model-registry backend started without an admitted run binding for correlationId=${backendOptions.correlationId}.`,
+        );
+      }
+      return binding;
+    },
+    options.remoteManagerOf,
+  );
+  const context: MutableModelRegistryDispatchContext = {
+    authority,
+    registry,
+    modelHealthCoordinator: (
+      options.modelHealthCoordinator ?? sharedModelHealthCoordinator
+    ).createProjectionView(authority),
+    plansByCorrelationId: new Map(),
+    resolutionsByCorrelationId: new Map(),
+  };
+  modelRegistryRunBindings.set(context, bindings);
+  return context;
+}
+
+function modelRegistrationPlan(
+  authority: ModelRegistryDispatchContext["authority"],
+  params: Pick<RunSingleTeammateParams, "model" | "fallbackModels" | "backend" | "cwd">,
+  agentConfig?: AgentConfig,
+): ResolvedModelRegistrationRouting {
+  return resolveModelRegistrationRouting(authority, {
+    model: params.model ?? agentConfig?.model,
+    fallbackModels: params.fallbackModels ?? agentConfig?.fallbackModels,
+    backend: params.backend,
+    cwd: params.cwd,
+  });
+}
+
+function isRemoteModelRegistration(candidate: ResolvedModelRegistrationCandidate): boolean {
+  return candidate.deployment.runtime.transport.kind === "remote-worker";
+}
+
+function ownsResumablePiCheckpoint(candidate: ResolvedModelRegistrationCandidate): boolean {
+  const transport = candidate.deployment.runtime.transport;
+  return candidate.deployment.registration.module === PI_SUBPROCESS
+    && candidate.deployment.runtime.harness === "pi"
+    && transport.kind === "local-process"
+    && transport.protocol === "pi-rpc";
+}
+
+function canResumePiCheckpoint(
+  from: ResolvedModelRegistrationCandidate,
+  to: ResolvedModelRegistrationCandidate,
+): boolean {
+  return from.route.deploymentId === to.route.deploymentId
+    && ownsResumablePiCheckpoint(from)
+    && ownsResumablePiCheckpoint(to);
+}
+
+function hasRemoteModelDispatchAuthority(options: RunTeammateOptions): boolean {
+  try {
+    return options.authorizeRemoteModelDispatch?.() === true;
+  } catch {
+    return false;
+  }
+}
+
+function modelRegistrationBackendSpecOf(
+  params: RunSingleTeammateParams,
+  cwd: string,
+  candidate: ResolvedModelRegistrationCandidate,
+): TeammateRunSpec {
+  const selector = candidate.route.selector;
+  return {
+    agent: params.agent,
+    task: params.task ?? "",
+    ...(params.name === undefined ? {} : { name: params.name }),
+    // TeammateBackend v1 has no deployment field. The selected canonical
+    // deployment travels through its existing registration selector.
+    backend: candidate.route.deploymentId,
+    ...(params.context === undefined ? {} : { context: params.context }),
+    // Fixed and deployment-default routes are selected by registration alone.
+    // Only adapter-model owns a backend model selector value.
+    ...(selector.kind === "adapter-model" ? { model: selector.value } : {}),
+    ...(params.thinking === undefined ? {} : { thinking: params.thinking as TeammateRunSpec["thinking"] }),
+    ...(params.outputSchema === undefined ? {} : { outputSchema: params.outputSchema }),
+    ...(params.todos === undefined ? {} : { todos: params.todos }),
+    ...(isRemoteModelRegistration(candidate) ? {} : { cwd }),
+  };
+}
+
+async function preflightModelRegistrationPlan(
+  context: MutableModelRegistryDispatchContext,
+  correlationId: string,
+  params: RunSingleTeammateParams,
+  cwd: string,
+  plan: ResolvedModelRegistrationRouting,
+  options: RunTeammateOptions,
+  graphTaskCount = 1,
+): Promise<string[]> {
+  const resolutions = new Map<string, ResolvedBackend>();
+  const warnings = (await Promise.all(plan.candidates.map(async (candidate) => {
+    if (isRemoteModelRegistration(candidate)) {
+      if (graphTaskCount > 1) {
+        throw new Error(
+          `Remote model registration ${JSON.stringify(candidate.modelRegistrationId)} supports only single-task dispatches; graph remote execution is not enabled.`,
+        );
+      }
+      if (!hasRemoteModelDispatchAuthority(options)) {
+        throw new Error(
+          `Remote model registration ${JSON.stringify(candidate.modelRegistrationId)} requires current root Monitor authority.`,
+        );
+      }
+    }
+    const spec = modelRegistrationBackendSpecOf(params, cwd, candidate);
+    const resolved = await context.registry.resolve(spec, candidate.route.deploymentId);
+    const verdict = validateBackendCapabilities(
+      [{ spec, ...(spec.name === undefined ? {} : { name: spec.name }) }],
+      () => ({ name: resolved.backend.name, capabilities: resolved.capabilities }),
+    );
+    if (verdict.errors.length > 0) throw new Error(verdict.errors.join("\n"));
+    resolutions.set(candidate.modelRegistrationId, resolved);
+    return verdict.warnings;
+  }))).flat();
+  context.plansByCorrelationId.set(correlationId, plan);
+  context.resolutionsByCorrelationId.set(correlationId, resolutions);
+  return warnings;
+}
+
+function candidateForRuntimeModel(
+  plan: ResolvedModelRegistrationRouting,
+  deploymentId: string,
+  runtimeModel: string | undefined,
+): ResolvedModelRegistrationCandidate | undefined {
+  if (runtimeModel === undefined) return undefined;
+  return plan.candidates.find((candidate) =>
+    candidate.route.deploymentId === deploymentId
+    && (candidate.modelRegistrationId === runtimeModel
+      || (candidate.route.selector.kind === "adapter-model"
+        && candidate.route.selector.value === runtimeModel)));
+}
+
+function registryResultCandidate(
+  result: SingleResult,
+  plan: ResolvedModelRegistrationRouting,
+  initialCandidate: ResolvedModelRegistrationCandidate,
+): ResolvedModelRegistrationCandidate {
+  const candidate = candidateForRuntimeModel(
+    plan,
+    initialCandidate.route.deploymentId,
+    result.model,
+  ) ?? initialCandidate;
+  result.model = candidate.modelRegistrationId;
+  return candidate;
+}
+
+function executionTransportProvenance(
+  candidate: ResolvedModelRegistrationCandidate,
+): TeammateExecutionProvenance["transport"] {
+  const transport = candidate.deployment.runtime.transport;
+  switch (transport.kind) {
+    case "local-process":
+      return { kind: transport.kind, protocol: transport.protocol };
+    case "acp-direct-ssh":
+      return { kind: transport.kind, protocol: transport.protocol };
+    case "dsh-direct-ssh":
+      return { kind: transport.kind, protocol: transport.protocol };
+    case "remote-worker":
+      return {
+        kind: transport.kind,
+        gateway: transport.gateway,
+        protocol: transport.protocol,
+        driver: transport.driver,
+      };
+    case "adapter-owned":
+      return { kind: transport.kind };
+  }
+}
+
+function attachRegistryResultProvenance(
+  result: SingleResult,
+  context: ModelRegistryDispatchContext,
+  plan: ResolvedModelRegistrationRouting,
+  initialCandidate: ResolvedModelRegistrationCandidate,
+): void {
+  const candidate = registryResultCandidate(result, plan, initialCandidate);
+  const provenance: TeammateExecutionProvenance = {
+    registryVersion: context.authority.registryVersion,
+    registryRevision: context.authority.revision,
+    registryHash: context.authority.hash,
+    modelRegistrationId: candidate.modelRegistrationId,
+    modelId: candidate.route.modelId,
+    deploymentId: candidate.route.deploymentId,
+    harness: candidate.deployment.runtime.harness,
+    transport: executionTransportProvenance(candidate),
+  };
+  result.provenance = provenance;
+  hostRegistryProvenanceResults.set(result, structuredClone(provenance));
+}
+
+function removeUntrustedResultProvenance(result: SingleResult): void {
+  delete result.provenance;
+  hostRegistryProvenanceResults.delete(result);
 }
 
 // ---------------------------------------------------------------------------
@@ -371,8 +646,14 @@ export async function runSingleTeammate(
   params: RunSingleTeammateParams,
   options: RunTeammateOptions,
 ): Promise<SingleResult> {
+  // Briefing assembly before any use of params.task so every downstream path
+  // (spawn stdin, resume prompt, rejection echo) sees the same final text.
+  if (params.briefing && params.briefing.length > 0) {
+    params = { ...params, task: assembleTaskPrompt(params.task ?? "", params.briefing) };
+  }
   const startTime = Date.now();
   const correlationId = options.correlationId ?? randomUUID();
+  let rejectionModel = params.model;
   let resolvedRunCwd: string | undefined;
   let publicationAwaitingCompletion: { publicationId: string; originCwd: string } | undefined;
   let agentDiscoveryWarning: string | undefined;
@@ -391,7 +672,7 @@ export async function runSingleTeammate(
     exitCode: 1,
     messages: [{ role: "system", content }],
     usage: emptyUsage(),
-    model: params.model ?? "unknown",
+    model: rejectionModel ?? "unknown",
     correlationId,
     durationMs: Date.now() - startTime,
   });
@@ -450,8 +731,20 @@ export async function runSingleTeammate(
     return rejectAndPublish("Teammate run aborted before launch.", "terminated");
   }
 
+  let modelRegistryContext = options.modelRegistryDispatch as MutableModelRegistryDispatchContext | undefined;
+  try {
+    const authority = captureModelRegistryAuthority(options);
+    if (authority !== undefined && modelRegistryContext === undefined) {
+      modelRegistryContext = createModelRegistryDispatchContext(authority, options);
+    }
+  } catch (error) {
+    return rejectAndPublish(
+      `Teammate model registry could not be loaded: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
   const remoteRouting = remoteLocationRouting(params.cwd);
-  if (remoteRouting !== undefined) {
+  if (remoteRouting !== undefined && modelRegistryContext === undefined) {
     if (params.backend !== undefined && params.backend !== remoteRouting.backend) {
       return rejectAndPublish(
         `Teammate task names backend "${params.backend}" and remote location "${params.cwd}"; `
@@ -472,6 +765,19 @@ export async function runSingleTeammate(
       );
     }
   }
+
+  const legacyPiResumeDeploymentKey = (model: string | undefined): string | undefined => {
+    if (modelRegistryContext !== undefined || options.backendRegistry !== undefined) return undefined;
+    const config = backendRegistryConfigSync(options.baseCwd);
+    const requestedBackend = backendNameOf(params, model, remoteRouting);
+    if ((config.mode ?? "legacy") === "legacy") {
+      return requestedBackend === undefined ? `legacy:${PI_SUBPROCESS}` : undefined;
+    }
+    const deploymentId = requestedBackend ?? config.default;
+    return config.backends[deploymentId]?.module === PI_SUBPROCESS
+      ? `backend-registry:${deploymentId}`
+      : undefined;
+  };
 
   // A remote task still needs a real local directory: agent discovery and
   // result publication both read one. The remote location itself is a target
@@ -516,52 +822,84 @@ export async function runSingleTeammate(
     name: params.name,
   });
 
-  // AC7: Model fallback — skip open circuits and try each healthy candidate.
-  const candidates = buildModelCandidates(
-    params.model ?? agentConfig.model,
-    params.fallbackModels ?? agentConfig.fallbackModels,
-  );
-  try {
-    for (let index = 0; index < candidates.length; index += 1) {
-      const candidate = candidates[index]!;
-      // Whoever executes the task owns the model namespace. A candidate routed
-      // to a registered backend names a model in that backend's catalogue, so
-      // the host neither validates its format nor resolves its bare names —
-      // the backend does both, against what it can actually reach. Deciding per
-      // candidate rather than once keeps a mixed fallback list honest: an
-      // explicit `backend` claims every candidate, while a `cli/<tool>` entry
-      // beside a `provider/model` entry claims only itself.
-      if (backendNameOf(params, candidate, remoteRouting) !== undefined) {
-        validateBackendModelSpecifier(candidate);
-        continue;
+  // AC7: Model fallback. Registry mode resolves canonical registrations from
+  // one authority projection and preflights the complete explicit chain before
+  // any backend starts. Legacy/backend-registry retain their existing model
+  // namespace and implicit fallback heuristics below.
+  let registrationPlan: ResolvedModelRegistrationRouting | undefined;
+  const breaker = options.modelCircuitBreaker ?? sharedModelCircuitBreaker;
+  const modelHealth: ModelHealthCoordinator | undefined = modelRegistryContext?.modelHealthCoordinator;
+  const modelHealthAttempt = modelRegistryContext === undefined
+    ? undefined
+    : new ModelHealthAttemptState(modelRegistryContext.authority.hash);
+  let candidates: string[];
+
+  if (modelRegistryContext !== undefined) {
+    try {
+      registrationPlan = modelRegistryContext.plansByCorrelationId.get(correlationId)
+        ?? modelRegistrationPlan(modelRegistryContext.authority, params, agentConfig);
+      rejectionModel = registrationPlan.candidates[0]?.modelRegistrationId ?? rejectionModel;
+      if (!modelRegistryContext.resolutionsByCorrelationId.has(correlationId)) {
+        await preflightModelRegistrationPlan(
+          modelRegistryContext,
+          correlationId,
+          params,
+          cwd,
+          registrationPlan,
+          options,
+        );
       }
-      candidates[index] = resolveModelSpecifier(candidate, options.modelCapabilities);
+      candidates = registrationPlan.candidates.map((candidate) => candidate.modelRegistrationId);
+    } catch (error) {
+      return rejectAndPublish(
+        `Teammate model registration preflight failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
-    candidates.splice(0, candidates.length, ...new Set(candidates));
-  } catch (error) {
-    return rejectAndPublish(error instanceof Error ? error.message : String(error));
+  } else {
+    candidates = buildModelCandidates(
+      params.model ?? agentConfig.model,
+      params.fallbackModels ?? agentConfig.fallbackModels,
+    );
+    try {
+      for (let index = 0; index < candidates.length; index += 1) {
+        const candidate = candidates[index]!;
+        // Whoever executes the task owns the model namespace. A candidate routed
+        // to a registered backend names a model in that backend's catalogue, so
+        // the host neither validates its format nor resolves its bare names.
+        if (backendNameOf(params, candidate, remoteRouting) !== undefined) {
+          validateBackendModelSpecifier(candidate);
+          continue;
+        }
+        candidates[index] = resolveModelSpecifier(candidate, options.modelCapabilities);
+      }
+      candidates.splice(0, candidates.length, ...new Set(candidates));
+    } catch (error) {
+      return rejectAndPublish(error instanceof Error ? error.message : String(error));
+    }
   }
 
-  const breaker = options.modelCircuitBreaker ?? sharedModelCircuitBreaker;
-  // When no explicit model or fallbacks are configured, try the pi default
-  // first (undefined), then each authenticated model as an implicit fallback.
-  // This prevents a terminal failure when the default provider has no quota.
-  const implicitFallbacks = candidates.length === 0
+  // When no explicit model or fallbacks are configured, only the legacy path
+  // tries the Pi default followed by every authenticated model. Model-registry
+  // mode has an explicit defaultModel registration and never consults this
+  // heuristic.
+  const implicitFallbacks = modelRegistryContext === undefined && candidates.length === 0
     ? (options.modelCapabilities ?? []).map((capability) => capability.id)
     : [];
   const baseCandidates: Array<string | undefined> = candidates.length > 0
     ? candidates
     : [undefined, ...implicitFallbacks];
-  // ④ Health-order the fallback tail (the primary stays first — it is the
-  // user's explicit choice). Healthy/never-tried fallbacks float up, while
-  // recovering (HALF_OPEN) trials and OPEN candidates sink.
+  // Health-order only the fallback tail; the configured primary stays first.
   const modelCandidates: Array<string | undefined> = baseCandidates.length > 1
     ? [
         baseCandidates[0],
-        ...rankModelsByHealth(
-          baseCandidates.slice(1).filter((model): model is string => model !== undefined),
-          breaker,
-        ),
+        ...(modelRegistryContext === undefined
+          ? rankModelsByHealth(
+              baseCandidates.slice(1).filter((model): model is string => model !== undefined),
+              breaker,
+            )
+          : modelHealth!.rankCandidates(
+              baseCandidates.slice(1).filter((model): model is string => model !== undefined),
+            )),
       ]
     : baseCandidates;
   const attemptedModels: string[] = [];
@@ -603,6 +941,13 @@ export async function runSingleTeammate(
       attemptedModels: attemptedModels.length > 1 ? attemptedModels : undefined,
       terminalStatus: "terminated",
     };
+    const trustedProvenance = lastResult === undefined
+      ? undefined
+      : hostRegistryResultProvenance(lastResult);
+    if (trustedProvenance !== undefined) {
+      result.provenance = trustedProvenance;
+      hostRegistryProvenanceResults.set(result, structuredClone(trustedProvenance));
+    }
     if (resolvedRunCwd) result.originCwd ??= resolvedRunCwd;
     publishTurnComplete(result, "terminated");
     return result;
@@ -611,46 +956,172 @@ export async function runSingleTeammate(
   const waitForRetry = options.waitForRetry ?? waitForRetryDelay;
   let candidateIndex = 0;
   let failedCandidateCount = 0;
-  // Providers whose credential just failed auth: their remaining candidates
-  // are doomed launches and are skipped (D1-A).
+  // The provider heuristic remains legacy-only. Registry mode suppresses auth
+  // by canonical deployment/route scope through ModelHealthAttemptState.
   const authSkippedProviders = new Set<string>();
-  // Acquisitions taken by in-process model switches (A path). Settled when the
-  // run that owns them settles: success records success, failure records a
-  // retryable failure. Keyed by model id.
-  const pendingModelAcquisitions = new Map<string, AcquiredModelCandidate>();
-  // True once an in-process switch moved away from the loop's original model.
-  // The original model's own trial then failed (that is why the switch
-  // happened) and must be charged accordingly at the terminal settlement,
-  // mirroring the B path's recordRetryableFailure for the failed candidate.
+  type CandidatePermit =
+    | { kind: "legacy"; acquisition: AcquiredModelCandidate }
+    | { kind: "registry"; acquisition: AcquiredModelHealthCandidate };
+
+  const acquireCandidatePermit = (model: string | undefined): CandidatePermit | null | undefined => {
+    if (model === undefined) return undefined;
+    if (modelRegistryContext === undefined) {
+      const acquisition = breaker.acquireCandidate(model);
+      return acquisition.allowed ? { kind: "legacy", acquisition } : null;
+    }
+    const target = modelHealth!.resolveTarget(model);
+    if (target === undefined) throw new TypeError(`Unknown canonical model health target ${JSON.stringify(model)}.`);
+    if (modelHealthAttempt!.shouldSkip(target)) return null;
+    const acquisition = modelHealth!.acquireCandidate(model);
+    return acquisition.allowed ? { kind: "registry", acquisition } : null;
+  };
+  const recordPermitSuccess = (permit: CandidatePermit): void => {
+    if (permit.kind === "legacy") breaker.recordSuccess(permit.acquisition);
+    else modelHealth!.recordSuccess(permit.acquisition);
+  };
+  const recordPermitFailure = (permit: CandidatePermit, error: string): ReturnType<typeof classifyModelHealthFailure> | undefined => {
+    if (permit.kind === "legacy") {
+      breaker.recordRetryableFailure(permit.acquisition);
+      return undefined;
+    }
+    const classification = classifyModelHealthFailure(
+      { message: error },
+      options.modelHealthFailureScopeClassifier,
+    );
+    if (classification.affectsCircuit && classification.scope !== "none") {
+      modelHealth!.recordFailure(permit.acquisition, classification.scope);
+      modelHealthAttempt!.noteFailure(permit.acquisition.target, classification);
+    } else {
+      modelHealth!.cancelCandidate(permit.acquisition);
+    }
+    return classification;
+  };
+  const releasePermit = (permit: CandidatePermit): void => {
+    if (permit.kind === "legacy") breaker.releaseCandidate(permit.acquisition);
+    else modelHealth!.releaseCandidate(permit.acquisition);
+  };
+  const cancelPermit = (permit: CandidatePermit): void => {
+    if (permit.kind === "legacy") breaker.cancelCandidate(permit.acquisition);
+    else modelHealth!.cancelCandidate(permit.acquisition);
+  };
+
+  // Acquisitions taken by in-process model switches. Registry keys are always
+  // canonical registration ids even though Pi receives adapter selector values.
+  const pendingModelAcquisitions = new Map<string, CandidatePermit>();
   let switchedAwayFromOriginal = false;
-  // Every model switched to within this run. A failed switch settles its
-  // acquisition immediately but stays in this set, so the chain can never
-  // re-select a model that already ran and failed (bounded failover).
   const switchedModels = new Set<string>();
-  const settlePendingModelAcquisitions = (success: boolean): void => {
-    for (const [model, acquisition] of pendingModelAcquisitions) {
-      if (success) breaker.recordSuccess(acquisition);
-      else breaker.recordRetryableFailure(acquisition);
+  const settlePendingModelAcquisitions = (success: boolean, error?: string): void => {
+    for (const [, permit] of pendingModelAcquisitions) {
+      if (success) recordPermitSuccess(permit);
+      else if (permit.kind === "legacy") breaker.recordRetryableFailure(permit.acquisition);
+      else recordPermitFailure(permit, error ?? "provider failure");
     }
     pendingModelAcquisitions.clear();
   };
-  // Session checkpoint of the most recent candidate that published one
-  // (via the child's `teammate_session_ready` IPC). A later candidate that
-  // fails mid-run can resume this checkpoint under a new model instead of
-  // replaying the whole task (cold restart + model override).
+  // Session checkpoint of the most recent Pi candidate that published one.
+  // Registry mode also pins the deployment that owns it: only another route on
+  // that exact local Pi deployment can consume the session safely.
   let lastSessionFile: string | undefined;
-  // Checkpoint handed to the next candidate after a resume-based failover;
-  // consumed when the next attemptOptions is built, then cleared.
-  let resumeHandoff: string | undefined;
+  let lastSessionCandidate: ResolvedModelRegistrationCandidate | undefined;
+  let lastSessionDeploymentKey: string | undefined;
+  interface ReplayFenceTotals {
+    completedToolCount: number;
+    inFlightToolCount: number;
+    externalReplayRisk: boolean;
+  }
+  interface PendingResumeHandoff extends ReplayFenceTotals {
+    sessionFile: string;
+    sourceCandidate?: ResolvedModelRegistrationCandidate;
+    sourceDeploymentKey?: string;
+    freshReplayClear: boolean;
+  }
+  const replayTotals: ReplayFenceTotals = {
+    completedToolCount: 0,
+    inFlightToolCount: 0,
+    externalReplayRisk: false,
+  };
+  let resumeHandoff: PendingResumeHandoff | undefined;
+  const appendReplayFenceDiagnostic = (
+    result: SingleResult,
+    facts: ReplayFenceTotals,
+    checkpointReason?: string,
+  ): void => {
+    result.capabilityDeliveries = [
+      ...(result.capabilityDeliveries ?? []),
+      {
+        capability: "modelSelection",
+        support: "withheld",
+        note:
+          `the side-effect replay fence stopped failover after completedTools=${facts.completedToolCount}, `
+          + `inFlightTools=${facts.inFlightToolCount}, externalReplayRisk=${facts.externalReplayRisk}`,
+      },
+    ];
+    result.messages.push({
+      role: "system",
+      content:
+        `Model fallback blocked by the side-effect replay fence `
+        + `(completedTools=${facts.completedToolCount}, inFlightTools=${facts.inFlightToolCount}, `
+        + `externalReplayRisk=${facts.externalReplayRisk}). `
+        + (checkpointReason === undefined ? "" : `${checkpointReason} `)
+        + `A fresh model process could repeat a completed tool, a tool whose effect is unknown, `
+        + `or external work observed through child IPC/runtime diagnostics.`,
+    });
+  };
 
   for (const modelToUse of modelCandidates) {
     if (options.signal?.aborted) return cancelAtBoundary("before a model candidate launched");
     if (modelToUse && modelToUse === resolvedDefaultModel) continue;
-    const candidateProvider = modelToUse ? providerOf(modelToUse) : undefined;
+    const candidateProvider = modelRegistryContext === undefined && modelToUse
+      ? providerOf(modelToUse)
+      : undefined;
     if (candidateProvider !== undefined && authSkippedProviders.has(candidateProvider)) continue;
     candidateIndex += 1;
-    const acquisition = modelToUse ? breaker.acquireCandidate(modelToUse) : undefined;
-    if (acquisition && !acquisition.allowed) continue;
+    const permit = acquireCandidatePermit(modelToUse);
+    if (permit === null) continue;
+    const registrationCandidate = modelToUse === undefined
+      ? undefined
+      : registrationPlan?.candidates.find((candidate) => candidate.modelRegistrationId === modelToUse);
+    if (modelRegistryContext !== undefined && registrationCandidate === undefined) {
+      return rejectAndPublish(`Unknown canonical model registration ${JSON.stringify(modelToUse)} in pinned dispatch plan.`);
+    }
+
+    const pendingHandoff = resumeHandoff;
+    let handoff: string | undefined;
+    if (pendingHandoff !== undefined) {
+      const canResume = fs.existsSync(pendingHandoff.sessionFile)
+        && (modelRegistryContext === undefined
+          ? pendingHandoff.sourceDeploymentKey !== undefined
+            && pendingHandoff.sourceDeploymentKey === legacyPiResumeDeploymentKey(modelToUse)
+          : pendingHandoff.sourceCandidate !== undefined
+            && registrationCandidate !== undefined
+            && canResumePiCheckpoint(pendingHandoff.sourceCandidate, registrationCandidate));
+      resumeHandoff = undefined;
+      if (canResume) {
+        handoff = pendingHandoff.sessionFile;
+      } else {
+        // This candidate starts from spec.task. The old Pi checkpoint no longer
+        // represents its history and must not leak into a later fallback.
+        lastSessionFile = undefined;
+        lastSessionCandidate = undefined;
+        lastSessionDeploymentKey = undefined;
+        if (!pendingHandoff.freshReplayClear) {
+          const sourceDeployment = pendingHandoff.sourceCandidate?.route.deploymentId
+            ?? pendingHandoff.sourceDeploymentKey;
+          const targetDeployment = registrationCandidate?.route.deploymentId;
+          if (lastResult !== undefined) {
+            appendReplayFenceDiagnostic(
+              lastResult,
+              pendingHandoff,
+              `The Pi checkpoint from deployment ${JSON.stringify(sourceDeployment ?? "legacy-pi")} `
+              + `cannot resume candidate ${JSON.stringify(modelToUse ?? "default")} on deployment `
+              + `${JSON.stringify(targetDeployment ?? "non-pi")}; that candidate would replay the original task.`,
+            );
+          }
+          if (permit !== undefined) cancelPermit(permit);
+          break;
+        }
+      }
+    }
     if (modelToUse) recordAttemptedModel(modelToUse);
 
     let settled = false;
@@ -660,15 +1131,8 @@ export async function runSingleTeammate(
       terminalStatus?: AgentTerminalStatus;
     }> = [];
     // Capture the child's published session file so a mid-run failure under
-    // this candidate can resume that checkpoint under the next model.
+    // this candidate can resume that checkpoint only on a compatible Pi route.
     const hostOnChildEvent = options.onChildEvent;
-    // A resume handoff from a failed predecessor loads that recorded session
-    // under this candidate's model (`--session <checkpoint> --model <model>`)   
-    // and replaces the original task text with a resume directive. Spread
-    // unconditionally so the handoff and the session-file capture never
-    // mutate the caller's own options object.
-    const handoff = resumeHandoff;
-    resumeHandoff = undefined;
     // In-process model failover: when the child settles a retryable provider
     // failure while still alive, pick the next healthy candidate from the
     // remaining chain and hand it to the child's `set_model` RPC. The same
@@ -676,66 +1140,143 @@ export async function runSingleTeammate(
     // switched to within this run are excluded, and a model that actually ran
     // (acknowledged switch) but failed again is settled immediately instead
     // of waiting for the run's terminal result.
-    const nextCandidateModel = (previousModel?: string): string | undefined => {
-      // A previous switch that ran and failed again is settled now: it has
-      // its own failure signal and must not wait for the run's terminal
-      // outcome (which would credit it with success if a later candidate
-      // recovers, or double-charge it if the run fails overall).
-      if (previousModel !== undefined) {
-        const previousAcquisition = pendingModelAcquisitions.get(previousModel);
-        if (previousAcquisition !== undefined) {
-          breaker.recordRetryableFailure(previousAcquisition);
-          pendingModelAcquisitions.delete(previousModel);
+    const nextCandidateModel = (error: string, previousModel?: string): string | undefined => {
+      const previousCandidateId = modelRegistryContext !== undefined
+        && registrationCandidate !== undefined
+        && registrationPlan !== undefined
+        ? candidateForRuntimeModel(
+            registrationPlan,
+            registrationCandidate.route.deploymentId,
+            previousModel,
+          )?.modelRegistrationId
+        : previousModel;
+      if (previousCandidateId !== undefined) {
+        const previousPermit = pendingModelAcquisitions.get(previousCandidateId);
+        if (previousPermit !== undefined) {
+          recordPermitFailure(previousPermit, error);
+          pendingModelAcquisitions.delete(previousCandidateId);
         }
+      } else if (modelRegistryContext !== undefined && permit !== undefined && !settled) {
+        // Settle the failed original route before acquiring another route on
+        // the same deployment. This releases the paired deployment permit and
+        // lets a route-scoped Pi failure hot-switch without violating the
+        // single half-open deployment trial invariant.
+        recordPermitFailure(permit, error);
+        settled = true;
       }
+
       const tail = modelCandidates.slice(candidateIndex).filter((candidate) => (
         candidate !== undefined
         && candidate !== modelToUse
         && candidate !== resolvedDefaultModel
         && !switchedModels.has(candidate)
-      ));
-      const ranked = rankModelsByHealth(tail as string[], breaker);
+      )) as string[];
+      const ranked = modelRegistryContext === undefined
+        ? rankModelsByHealth(tail, breaker)
+        : modelHealth!.rankCandidates(tail);
       for (const candidate of ranked) {
-        const candidateProvider = providerOf(candidate);
-        if (candidateProvider !== undefined && authSkippedProviders.has(candidateProvider)) continue;
-        const acquisition = breaker.acquireCandidate(candidate);
-        if (!acquisition.allowed) continue;
-        // The switch itself is the trial; keep the acquisition owned by the
-        // in-process run so a later terminal result settles it. The model is
-        // remembered for the whole run so a failed switch cannot re-select
-        // it.
-        pendingModelAcquisitions.set(candidate, acquisition);
+        const hotCandidate = registrationPlan?.candidates.find((entry) => entry.modelRegistrationId === candidate);
+        if (modelRegistryContext !== undefined) {
+          if (
+            registrationCandidate === undefined
+            || hotCandidate === undefined
+            || !canHotSwitchModelRegistration(registrationCandidate, hotCandidate)
+          ) continue;
+        } else {
+          const candidateProvider = providerOf(candidate);
+          if (candidateProvider !== undefined && authSkippedProviders.has(candidateProvider)) continue;
+        }
+        const nextPermit = acquireCandidatePermit(candidate);
+        if (nextPermit === null || nextPermit === undefined) continue;
+        pendingModelAcquisitions.set(candidate, nextPermit);
         switchedModels.add(candidate);
         recordAttemptedModel(candidate);
         if (previousModel === undefined) switchedAwayFromOriginal = true;
-        return candidate;
+        return hotCandidate?.route.selector.kind === "adapter-model"
+          ? hotCandidate.route.selector.value
+          : candidate;
       }
       return undefined;
     };
+    const hasHotSwitchCandidate = modelCandidates.slice(candidateIndex).some((candidate) => {
+      if (candidate === undefined) return false;
+      if (modelRegistryContext === undefined) return true;
+      const target = registrationPlan?.candidates.find((entry) => entry.modelRegistrationId === candidate);
+      return registrationCandidate !== undefined
+        && target !== undefined
+        && canHotSwitchModelRegistration(registrationCandidate, target);
+    });
     const baseAttemptOptions: RunTeammateOptions = {
       ...options,
       ...(handoff === undefined ? {} : {
         resumeSessionFile: handoff,
         resumePrompt: MODEL_FALLBACK_RESUME_PROMPT,
       }),
-      // Only arm the in-process switch when the candidate chain actually has
-      // a successor; with nothing left the failure settles through the
-      // standard path without an extra async hop. `candidateIndex` already
-      // counts this candidate, so the slice starts after it.
-      ...(modelCandidates.slice(candidateIndex).some((candidate) => candidate !== undefined)
-        ? { onModelFailover: (error, previousModel) => nextCandidateModel(previousModel) }
+      ...(registrationCandidate !== undefined && options.onProgress !== undefined ? {
+        onProgress: (data: AgentProgress): void => {
+          const requested = candidateForRuntimeModel(
+            registrationPlan!,
+            registrationCandidate.route.deploymentId,
+            data.requestedModel,
+          )?.modelRegistrationId ?? registrationCandidate.modelRegistrationId;
+          const resolved = candidateForRuntimeModel(
+            registrationPlan!,
+            registrationCandidate.route.deploymentId,
+            data.resolvedModel,
+          )?.modelRegistrationId ?? requested;
+          options.onProgress?.({
+            ...data,
+            requestedModel: requested,
+            resolvedModel: resolved,
+            attemptedModels: [...attemptedModels],
+          });
+        },
+      } : {}),
+      ...(options.onResultPublished !== undefined ? {
+        onResultPublished: async (result: SingleResult, originCwd: string): Promise<void> => {
+          if (registrationCandidate === undefined) {
+            removeUntrustedResultProvenance(result);
+          } else {
+            attachRegistryResultProvenance(
+              result,
+              modelRegistryContext!,
+              registrationPlan!,
+              registrationCandidate,
+            );
+            result.attemptedModels = attemptedModels.length > 1 ? [...attemptedModels] : undefined;
+          }
+          await options.onResultPublished?.(result, originCwd);
+        },
+      } : {}),
+      // Only arm an in-process switch when Pi can select the successor through
+      // another adapter-model registration on this exact deployment.
+      ...(hasHotSwitchCandidate
+        ? { onModelFailover: (error: string, previousModel?: string) => nextCandidateModel(error, previousModel) }
         : {}),
       onChildEvent: (event) => {
         if (event.type === "teammate_session_ready" && typeof event.sessionFile === "string") {
           lastSessionFile = event.sessionFile;
+          lastSessionCandidate = registrationCandidate;
+          lastSessionDeploymentKey = registrationCandidate === undefined
+            ? legacyPiResumeDeploymentKey(modelToUse)
+            : undefined;
         } else if (event.type === "teammate_model_switch_abandoned" && typeof event.model === "string") {
           // The switch never reached Pi's ack, so the target model never ran.
           // Release its trial acquisition instead of charging a phantom
           // failure at the terminal settlement.
-          const abandoned = pendingModelAcquisitions.get(event.model);
+          const abandonedId = registrationCandidate !== undefined
+            ? candidateForRuntimeModel(
+                registrationPlan!,
+                registrationCandidate.route.deploymentId,
+                event.model,
+              )?.modelRegistrationId
+            : event.model;
+          const abandoned = abandonedId === undefined
+            ? undefined
+            : pendingModelAcquisitions.get(abandonedId);
           if (abandoned !== undefined) {
-            breaker.releaseCandidate(abandoned);
-            pendingModelAcquisitions.delete(event.model);
+            releasePermit(abandoned);
+            pendingModelAcquisitions.delete(abandonedId!);
           }
         }
         hostOnChildEvent?.(event);
@@ -745,6 +1286,17 @@ export async function runSingleTeammate(
       ? {
           ...baseAttemptOptions,
           onTurnComplete(result, terminalStatus) {
+            if (registrationCandidate === undefined) {
+              removeUntrustedResultProvenance(result);
+            } else {
+              attachRegistryResultProvenance(
+                result,
+                modelRegistryContext!,
+                registrationPlan!,
+                registrationCandidate,
+              );
+              result.attemptedModels = attemptedModels.length > 1 ? [...attemptedModels] : undefined;
+            }
             const effectiveStatus = terminalStatus
               ?? (options.signal?.aborted ? "terminated" : undefined);
             if (completionState === "forwarding") {
@@ -787,7 +1339,8 @@ export async function runSingleTeammate(
         // the workspace document decides, which is what makes `mode:
         // "backend-registry"` in `.pi/teammate-backends.json` actually switch
         // the dispatch path rather than only describe an intent.
-        const registry = options.backendRegistry
+        const registry = modelRegistryContext?.registry
+          ?? options.backendRegistry
           ?? dispatchRegistrySync(
             options.baseCwd,
             () => ({ hostOptions: attemptOptions, cwd, replyTo }),
@@ -823,8 +1376,23 @@ export async function runSingleTeammate(
             params, agentConfig, cwd, correlationId, replyTo, startTime, modelToUse, attemptOptions,
           ));
         } else {
-          const spec = backendSpecOf(params, cwd, modelToUse, remoteRouting);
-          const { backend, config, capabilities } = await registry.resolve(spec, spec.backend);
+          const spec = registrationCandidate === undefined
+            ? backendSpecOf(params, cwd, modelToUse, remoteRouting)
+            : modelRegistrationBackendSpecOf(params, cwd, registrationCandidate);
+          if (registrationCandidate !== undefined
+            && isRemoteModelRegistration(registrationCandidate)
+            && !hasRemoteModelDispatchAuthority(options)) {
+            return rejectAndPublish(
+              `Remote model registration ${JSON.stringify(registrationCandidate.modelRegistrationId)} lost root Monitor authority before launch.`,
+            );
+          }
+          const preflightResolution = registrationCandidate === undefined
+            ? undefined
+            : modelRegistryContext?.resolutionsByCorrelationId
+              .get(correlationId)
+              ?.get(registrationCandidate.modelRegistrationId);
+          const { backend, config, capabilities } = preflightResolution
+            ?? await registry.resolve(spec, spec.backend);
           resolvedCapabilities = capabilities;
           // Adjudicate here too, not only in `runGraph`. Five production call
           // sites dispatch a single teammate directly, and a task whose backend
@@ -871,7 +1439,19 @@ export async function runSingleTeammate(
             startTime,
             config,
           );
-          const run = await backend.start(spec, backendOptions);
+          const bindings = modelRegistryContext === undefined
+            ? undefined
+            : modelRegistryRunBindings.get(modelRegistryContext);
+          if (bindings !== undefined) {
+            bindings.set(correlationId, { hostOptions: attemptOptions, cwd, replyTo });
+          }
+          let run: import("pi-maestro-backend-core/v1/backend").BackendRun;
+          try {
+            run = await backend.start(spec, backendOptions);
+          } catch (error) {
+            bindings?.delete(correlationId);
+            throw error;
+          }
           // Cancellation reaches the seam only through the control channel; a
           // host that merely stops awaiting leaves the runtime alive.
           const abortRun = (): void => { run.abort(); };
@@ -897,6 +1477,7 @@ export async function runSingleTeammate(
             attempt = await run.outcome;
           } finally {
             options.signal?.removeEventListener("abort", abortRun);
+            bindings?.delete(correlationId);
             // A settled run can no longer deliver, and the host checks
             // `writable` before writing.
             if (shim !== undefined) closeBackendControlStdin(shim);
@@ -934,6 +1515,16 @@ export async function runSingleTeammate(
         throw error;
       }
       const candidateResult = attempt.result;
+      if (registrationCandidate === undefined) {
+        removeUntrustedResultProvenance(candidateResult);
+      } else {
+        attachRegistryResultProvenance(
+          candidateResult,
+          modelRegistryContext!,
+          registrationPlan!,
+          registrationCandidate,
+        );
+      }
       attachDiscoveryWarning(candidateResult);
       lastResult = candidateResult;
       candidateResult.originCwd ??= cwd;
@@ -950,12 +1541,15 @@ export async function runSingleTeammate(
       }
 
       if (candidateResult.exitCode === 0) {
-        if (acquisition?.allowed) {
-          // The original model failed (that is why a switch happened); only
-          // the in-process successor models succeeded. Charge the original
-          // like the B path would, so the breaker learns which model fails.
-          if (switchedAwayFromOriginal) breaker.recordRetryableFailure(acquisition);
-          else breaker.recordSuccess(acquisition);
+        if (permit !== undefined && !settled) {
+          // Preserve the legacy hot-switch charge while registry mode settles
+          // the original failure inside the switch hook before acquiring the
+          // successor's scoped permit.
+          if (permit.kind === "legacy" && switchedAwayFromOriginal) {
+            breaker.recordRetryableFailure(permit.acquisition);
+          } else {
+            recordPermitSuccess(permit);
+          }
           settled = true;
         }
         settlePendingModelAcquisitions(true);
@@ -966,14 +1560,14 @@ export async function runSingleTeammate(
       }
 
       if (options.signal?.aborted) {
-        if (acquisition?.allowed) {
-          breaker.releaseCandidate(acquisition);
+        if (permit !== undefined && !settled) {
+          releasePermit(permit);
           settled = true;
         }
         // A caller cancellation is not a model failure: release every
         // in-process switch trial instead of charging the models.
-        for (const [, pendingAcquisition] of pendingModelAcquisitions) {
-          breaker.releaseCandidate(pendingAcquisition);
+        for (const [, pendingPermit] of pendingModelAcquisitions) {
+          releasePermit(pendingPermit);
         }
         pendingModelAcquisitions.clear();
         discardCompletion();
@@ -981,21 +1575,30 @@ export async function runSingleTeammate(
       }
 
       const error = resultFailureMessage(candidateResult.messages);
+      let registryFailureClassification: ReturnType<typeof classifyModelHealthFailure> | undefined;
+      if (modelRegistryContext !== undefined) {
+        if (permit !== undefined && !settled) {
+          registryFailureClassification = recordPermitFailure(permit, error);
+          settled = true;
+        }
+        settlePendingModelAcquisitions(false, error);
+      }
       const fallbackFailure = isFallbackProviderError(error);
       const recoveryFacts = attempt.recovery;
       const authoritativeFailure = recoveryFacts.settlementAuthority === "authoritative";
       const preActivityInfrastructureExit = recoveryFacts.preActivityInfrastructureExit;
-      // ⑤ Shared replay-fence semantics: blocked when any tool completed or
-      // its effect is unknown. The executor tracks counts (not names), so the
-      // reason string carries the counts explicitly.
-      const replayFenceClear = recoveryFacts !== undefined
-        && !buildReplayFence({
-          completedToolCount: recoveryFacts.completedToolCount,
-          unknownEffect: recoveryFacts.inFlightToolCount > 0 || recoveryFacts.externalReplayRisk,
-          blockedReason:
-            `Fresh replay blocked after completedTools=${recoveryFacts.completedToolCount}, `
-            + `inFlightTools=${recoveryFacts.inFlightToolCount}, externalReplayRisk=${recoveryFacts.externalReplayRisk}.`,
-        }).blocked;
+      // Fresh replay must account for every effect in a same-session fallback
+      // chain, not only the final Pi process that happened to fail.
+      replayTotals.completedToolCount += recoveryFacts.completedToolCount;
+      replayTotals.inFlightToolCount += recoveryFacts.inFlightToolCount;
+      replayTotals.externalReplayRisk ||= recoveryFacts.externalReplayRisk;
+      const replayFenceClear = !buildReplayFence({
+        completedToolCount: replayTotals.completedToolCount,
+        unknownEffect: replayTotals.inFlightToolCount > 0 || replayTotals.externalReplayRisk,
+        blockedReason:
+          `Fresh replay blocked after completedTools=${replayTotals.completedToolCount}, `
+          + `inFlightTools=${replayTotals.inFlightToolCount}, externalReplayRisk=${replayTotals.externalReplayRisk}.`,
+      }).blocked;
       // Failover here would cost the run its diagnosis and buy nothing. Every
       // candidate after the first carries an explicit model, so the capability
       // gate above refuses the task before any of them starts — no remote
@@ -1008,21 +1611,19 @@ export async function runSingleTeammate(
       // puts `spec.model` on the first candidate, so the gate refuses the whole
       // task outright and this path is never entered — which leaves exactly the
       // runs that produced a real provider diagnosis worth keeping.
-      const modelSelectionUnsupported = resolvedCapabilities?.modelSelection === "unsupported";
-      // A checkpoint published by this attempt (or a predecessor) enables the
-      // resume path: the next candidate loads the recorded session under its
-      // own model (`--session <checkpoint> --model <candidate>`), so tools
-      // already executed stay in history instead of being replayed. The
-      // side-effect fence therefore does not apply to resume-based failover —
-      // the failed run's own session is preserved, not re-run from scratch.
-      // The unknown-effect arm of the fence still applies: a tool that was
-      // in flight when the run died may have produced external side effects
-      // that are not yet recorded in the session, and a resumed model cannot
-      // be trusted to skip them (the resume prompt only forbids repeating
-      // calls whose results are already in history).
-      const resumableCheckpoint = lastSessionFile !== undefined && fs.existsSync(lastSessionFile);
-      const resumeUnknownEffect = recoveryFacts !== undefined
-        && (recoveryFacts.inFlightToolCount > 0 || recoveryFacts.externalReplayRisk);
+      const modelSelectionUnsupported = modelRegistryContext === undefined
+        && resolvedCapabilities?.modelSelection === "unsupported";
+      // A checkpoint bypasses the fresh-replay fence only provisionally. The
+      // next actually admitted candidate must still prove that it is another
+      // route on the exact local Pi deployment that owns this session.
+      const checkpointOwnedByPi = modelRegistryContext === undefined
+        ? lastSessionDeploymentKey !== undefined
+        : lastSessionCandidate !== undefined && ownsResumablePiCheckpoint(lastSessionCandidate);
+      const resumableCheckpoint = checkpointOwnedByPi
+        && lastSessionFile !== undefined
+        && fs.existsSync(lastSessionFile);
+      const resumeUnknownEffect = replayTotals.inFlightToolCount > 0
+        || replayTotals.externalReplayRisk;
       const failoverConditionsMet = resumableCheckpoint && !resumeUnknownEffect
         ? fallbackFailure
         : replayFenceClear
@@ -1050,37 +1651,13 @@ export async function runSingleTeammate(
           role: "system",
           content:
             `Model fallback blocked by the side-effect replay fence `
-            + `(checkpoint present but inFlightTools=${recoveryFacts.inFlightToolCount}, `
-            + `externalReplayRisk=${recoveryFacts.externalReplayRisk}). `
+            + `(checkpoint present but inFlightTools=${replayTotals.inFlightToolCount}, `
+            + `externalReplayRisk=${replayTotals.externalReplayRisk}). `
             + `A resumed model could repeat a tool whose effect is unknown; `
             + `the run settles as failed instead.`,
         });
       } else if (!resumableCheckpoint && (fallbackFailure || preActivityInfrastructureExit) && !replayFenceClear) {
-        const completedTools = recoveryFacts.completedToolCount;
-        const inFlightTools = recoveryFacts.inFlightToolCount;
-        const externalReplayRisk = recoveryFacts.externalReplayRisk;
-        // The remaining candidates were never tried, and not because no backend
-        // could serve them. Without this a fenced run is indistinguishable from
-        // one that simply had nothing left to fall back to.
-        candidateResult.capabilityDeliveries = [
-          ...(candidateResult.capabilityDeliveries ?? []),
-          {
-            capability: "modelSelection",
-            support: "withheld",
-            note:
-              `the side-effect replay fence stopped failover after completedTools=${completedTools}, `
-              + `inFlightTools=${inFlightTools}, externalReplayRisk=${externalReplayRisk}`,
-          },
-        ];
-        candidateResult.messages.push({
-          role: "system",
-          content:
-            `Model fallback blocked by the side-effect replay fence `
-            + `(completedTools=${completedTools}, inFlightTools=${inFlightTools}, `
-            + `externalReplayRisk=${externalReplayRisk}). `
-            + `A fresh model process could repeat a completed tool, a tool whose effect is unknown, `
-            + `or external work observed through child IPC/runtime diagnostics.`,
-        });
+        appendReplayFenceDiagnostic(candidateResult, replayTotals);
       } else if (modelSelectionUnsupported && failoverConditionsMet) {
         // Every other condition for failover held, so without this record the
         // result is indistinguishable from one that had no candidate left.
@@ -1121,28 +1698,34 @@ export async function runSingleTeammate(
       }
 
       if (fallbackEligible) {
-        if (acquisition?.allowed) {
-          if (preActivityInfrastructureExit) breaker.releaseCandidate(acquisition);
-          else breaker.recordRetryableFailure(acquisition);
+        if (permit?.kind === "legacy" && !settled) {
+          if (preActivityInfrastructureExit) breaker.releaseCandidate(permit.acquisition);
+          else breaker.recordRetryableFailure(permit.acquisition);
           settled = true;
         }
-        settlePendingModelAcquisitions(false);
+        if (modelRegistryContext === undefined) settlePendingModelAcquisitions(false);
         discardCompletion();
-        const kind = preActivityInfrastructureExit ? "non-retryable" : classifyRetryError(error);
-        // D1-A: an auth failure marks this provider's credential as bad —
-        // remaining same-provider candidates will fail identically, so skip
-        // them instead of launching doomed subprocesses.
-        if (kind === "auth" && modelToUse !== undefined) {
+        const kind = registryFailureClassification?.retryKind
+          ?? (preActivityInfrastructureExit ? "non-retryable" : classifyRetryError(error));
+        // Legacy credentials are provider-scoped. Registry mode already applied
+        // canonical route/deployment auth suppression above.
+        if (modelRegistryContext === undefined && kind === "auth" && modelToUse !== undefined) {
           const failedProvider = providerOf(modelToUse);
           if (failedProvider !== undefined) authSkippedProviders.add(failedProvider);
         }
-        // Resume handoff: the next candidate loads this attempt's recorded
-        // session under its own model instead of replaying the task from the
-        // start. `resumePrompt` replaces the original task text as the initial
-        // prompt (the task already lives inside the loaded session history),
-        // directing the model to continue from the recorded state.
-        if (resumableCheckpoint) {
-          resumeHandoff = lastSessionFile;
+        // Carry the checkpoint to the next admitted candidate. Compatibility is
+        // checked there, after health/auth skips, before the candidate is
+        // counted as attempted or allowed to start.
+        if (resumableCheckpoint && lastSessionFile !== undefined) {
+          resumeHandoff = {
+            sessionFile: lastSessionFile,
+            ...(lastSessionCandidate === undefined ? {} : { sourceCandidate: lastSessionCandidate }),
+            ...(lastSessionDeploymentKey === undefined ? {} : { sourceDeploymentKey: lastSessionDeploymentKey }),
+            freshReplayClear: replayFenceClear,
+            completedToolCount: replayTotals.completedToolCount,
+            inFlightToolCount: replayTotals.inFlightToolCount,
+            externalReplayRisk: replayTotals.externalReplayRisk,
+          };
         }
         // D2: bounded kind-aware backoff before the next candidate. Only
         // transient network/provider failures wait (a degraded provider gets
@@ -1157,19 +1740,18 @@ export async function runSingleTeammate(
         continue;
       }
 
-      if (acquisition?.allowed) {
-        breaker.releaseCandidate(acquisition);
+      if (permit !== undefined && !settled) {
+        releasePermit(permit);
         settled = true;
       }
-      settlePendingModelAcquisitions(false);
+      if (modelRegistryContext === undefined) settlePendingModelAcquisitions(false);
       candidateResult.attemptedModels = attemptedModels.length > 1 ? attemptedModels : undefined;
       commitCompletion();
       return candidateResult;
     } finally {
-      // A HALF_OPEN acquisition must always be settled exactly once.
-      if (!settled && acquisition?.allowed && acquisition.state === "HALF_OPEN") {
-        breaker.releaseCandidate(acquisition);
-      }
+      // Every half-open permit must settle exactly once. releasePermit is a
+      // no-op for ordinary CLOSED acquisitions.
+      if (!settled && permit !== undefined) releasePermit(permit);
     }
   }
 
@@ -1272,19 +1854,93 @@ export async function runGraph(
     return publishGraphRejection("Circular dependency detected in task graph", deps);
   }
 
-  // Capability adjudication sits beside the structural checks, not at dispatch.
-  // A task whose backend cannot produce structured output would otherwise burn
-  // a full model turn before its downstream sibling's {name.field} read failed.
-  let graphRegistry;
+  let graphModelRegistryContext = options.modelRegistryDispatch as MutableModelRegistryDispatchContext | undefined;
   try {
-    graphRegistry = options.backendRegistry
-      ?? dispatchRegistrySync(
-        options.baseCwd,
-        () => {
-          throw new Error("capability adjudication never starts a run");
-        },
-        options.remoteManagerOf,
-      );
+    const authority = captureModelRegistryAuthority(options);
+    if (authority !== undefined && graphModelRegistryContext === undefined) {
+      graphModelRegistryContext = createModelRegistryDispatchContext(authority, options);
+    }
+    if (graphModelRegistryContext !== undefined) {
+      const warningGroups = await Promise.all(tasks.map(async (task, index) => {
+        const remote = remoteLocationRouting(task.cwd);
+        const contained = resolveContainedCwd(
+          remote === undefined ? task.cwd : undefined,
+          options.baseCwd,
+        );
+        if ("error" in contained) throw new Error(contained.error);
+        const discovery = discoverAgents(contained.cwd, { includeDiagnostics: true });
+        const agentConfig = resolveAgent(discovery, task.agent);
+        if (agentConfig === undefined) {
+          const available = listAgentSummaries(discovery).map((agent) => agent.name).join(", ");
+          throw new Error(`Unknown teammate agent "${task.agent}". Available agents: ${available || "(none)"}.`);
+        }
+        const params: RunSingleTeammateParams = {
+          agent: task.agent,
+          task: task.prompt,
+          name: task.name,
+          backend: task.backend,
+          context: task.context,
+          model: task.model,
+          fallbackModels: task.fallbackModels,
+          thinking: task.thinking,
+          cwd: task.cwd,
+          outputSchema: task.outputSchema,
+          todos: task.todos,
+          briefing: task.briefing,
+        };
+        const taskCorrelationId = taskCorrelationIds[index]!;
+        const plan = graphModelRegistryContext!.plansByCorrelationId.get(taskCorrelationId)
+          ?? modelRegistrationPlan(graphModelRegistryContext!.authority, params, agentConfig);
+        if (graphModelRegistryContext!.resolutionsByCorrelationId.has(taskCorrelationId)) return [];
+        return preflightModelRegistrationPlan(
+          graphModelRegistryContext!,
+          taskCorrelationId,
+          params,
+          contained.cwd,
+          plan,
+          options,
+          tasks.length,
+        );
+      }));
+      for (const warning of warningGroups.flat()) {
+        options.onProgress?.({
+          agent: "teammate",
+          status: "running",
+          recentTools: [],
+          toolCount: 0,
+          tokens: 0,
+          durationMs: 0,
+          lastActivityAt: Date.now(),
+          startedAt: Date.now(),
+          lastMessage: warning,
+        });
+      }
+    }
+  } catch (cause) {
+    return publishGraphRejection(
+      `Teammate model registration preflight failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+      deps,
+    );
+  }
+  const graphRunOptions: RunTeammateOptions = graphModelRegistryContext === undefined
+    ? options
+    : { ...options, modelRegistryDispatch: graphModelRegistryContext };
+
+  // Capability adjudication sits beside the structural checks, not at dispatch.
+  // Registry-mode candidates were all adjudicated above; the frozen
+  // legacy/backend-registry path keeps its existing primary-only check.
+  let graphRegistry: BackendRegistry | undefined;
+  try {
+    graphRegistry = graphModelRegistryContext === undefined
+      ? options.backendRegistry
+        ?? dispatchRegistrySync(
+          options.baseCwd,
+          () => {
+            throw new Error("capability adjudication never starts a run");
+          },
+          options.remoteManagerOf,
+        )
+      : undefined;
   } catch (cause) {
     // A malformed or unloadable registration is a graph-level rejection, not a
     // throw out of runGraph: every other validation failure settles each task
@@ -1548,7 +2204,7 @@ export async function runGraph(
     await acquire();
 
     try {
-      if (options.signal?.aborted) {
+      if (graphRunOptions.signal?.aborted) {
         publishSyntheticFailure(task, idx, "Cancelled before child process launch.", "terminated");
         return;
       }
@@ -1569,15 +2225,16 @@ export async function runGraph(
           cwd: task.cwd,
           outputSchema: task.outputSchema,
           todos: task.todos,
+          briefing: task.briefing,
         },
         {
-          ...options,
+          ...graphRunOptions,
           correlationId: taskCorrelationIds[idx],
-          signal: options.taskSignals?.[idx] ?? options.signal,
-          onProgress: options.onProgress
+          signal: graphRunOptions.taskSignals?.[idx] ?? graphRunOptions.signal,
+          onProgress: graphRunOptions.onProgress
             ? (data) => {
                 try {
-                  options.onProgress?.({
+                  graphRunOptions.onProgress?.({
                     ...data,
                     name: task.name,
                     correlationId: taskCorrelationIds[idx],

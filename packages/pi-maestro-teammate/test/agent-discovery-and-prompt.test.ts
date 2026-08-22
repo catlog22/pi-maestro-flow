@@ -850,7 +850,7 @@ Custom prompt.
   }
 });
 
-test("child proxy tools receive the same dynamic teammate guidance", () => {
+test("child proxy tools receive the same dynamic teammate guidance", async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-proxy-"));
   const agentsDir = path.join(project, ".pi", "agents");
   fs.mkdirSync(agentsDir, { recursive: true });
@@ -916,7 +916,7 @@ Proxy specialist prompt.
     assert.match(String(refreshed?.description), /Available Teammate Agents section/);
     assert.equal(refreshed?.promptSnippet, TEAMMATE_PROMPT_SNIPPET);
     assert.equal(beforeAgentStartHandlers.length, 1);
-    const injected = beforeAgentStartHandlers[0]({ systemPrompt: "Base child prompt" }, context);
+    const injected = await beforeAgentStartHandlers[0]({ systemPrompt: "Base child prompt" }, context);
     assert.match(injected.systemPrompt, /- proxy-specialist: Specialist visible to child proxy tools/);
     assert.doesNotMatch(injected.systemPrompt, /Proxy specialist prompt/);
     assert.match(injected.systemPrompt, /## Teammate taskType routing/);
@@ -969,7 +969,7 @@ test("controlled Monitor child receives cross-window tool contracts", () => {
   }
 });
 
-test("terminal depth child knows its level and has no teammate dispatch tool", () => {
+test("terminal depth child knows its level and has no teammate dispatch tool", async () => {
   const tools = new Map<string, Record<string, unknown>>();
   const beforeAgentStartHandlers: Array<
     (event: { systemPrompt: string }, ctx: unknown) => { systemPrompt: string }
@@ -1010,7 +1010,7 @@ test("terminal depth child knows its level and has no teammate dispatch tool", (
       cwd: process.cwd(),
       modelRegistry: { getAvailable: () => [] },
     };
-    const injected = beforeAgentStartHandlers[0]({ systemPrompt: "Base terminal prompt" }, context);
+    const injected = await beforeAgentStartHandlers[0]({ systemPrompt: "Base terminal prompt" }, context);
     assert.doesNotMatch(injected.systemPrompt, /teammate-tasktype-routing:start/);
     assert.doesNotMatch(injected.systemPrompt, /## Teammate taskType routing/);
     assert.match(injected.systemPrompt, /depth 2\/2/);
@@ -1025,7 +1025,7 @@ test("terminal depth child knows its level and has no teammate dispatch tool", (
   }
 });
 
-test("root tool catalog refreshes across session cwd changes without losing metadata", () => {
+test("root tool catalog refreshes across session cwd changes without losing metadata", async () => {
   const firstProject = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-root-a-"));
   const secondProject = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-root-b-"));
   for (const [project, name] of [[firstProject, "root-alpha"], [secondProject, "root-beta"]] as const) {
@@ -1089,7 +1089,7 @@ ${name} prompt.
     assert.match(String(first?.description), /Available Teammate Agents section/);
     assert.deepEqual(first?.promptGuidelines, TEAMMATE_PROMPT_GUIDELINES);
     assert.equal(typeof first?.execute, "function");
-    const firstPrompt = beforeAgentStartHandlers[0]({ systemPrompt: "Base root prompt" }, context(firstProject));
+    const firstPrompt = await beforeAgentStartHandlers[0]({ systemPrompt: "Base root prompt" }, context(firstProject));
     assert.match(firstPrompt.systemPrompt, /- root-alpha: root-alpha role/);
     assert.match(firstPrompt.systemPrompt, /## Teammate taskType routing/);
     assert.match(firstPrompt.systemPrompt, /never changes a chosen agent's role, tools, permissions, or task scope/);
@@ -1101,7 +1101,7 @@ ${name} prompt.
     assert.match(String(second?.description), /Available Teammate Agents section/);
     assert.equal(second?.promptSnippet, TEAMMATE_PROMPT_SNIPPET);
     assert.equal(typeof second?.execute, "function");
-    const secondPrompt = beforeAgentStartHandlers[0](firstPrompt, context(secondProject));
+    const secondPrompt = await beforeAgentStartHandlers[0](firstPrompt, context(secondProject));
     assert.match(secondPrompt.systemPrompt, /- root-beta: root-beta role/);
     assert.doesNotMatch(secondPrompt.systemPrompt, /root-alpha role/);
   } finally {

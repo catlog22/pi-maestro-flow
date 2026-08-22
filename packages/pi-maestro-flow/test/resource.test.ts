@@ -18,10 +18,13 @@ function lines(component: { render(width: number): string[] }): string[] {
 
 let root: string;
 let previousCwd: string;
+let previousOutputRoot: string | undefined;
 
 before(async () => {
   root = await mkdtemp(join(tmpdir(), "pi-resource-"));
   previousCwd = process.cwd();
+  previousOutputRoot = process.env.PI_AGENT_OUTPUT_ROOT;
+  process.env.PI_AGENT_OUTPUT_ROOT = join(root, "agent-output");
   await mkdir(join(root, ".pi", "skills", "demo-skill"), { recursive: true });
   await writeFile(join(root, ".pi", "skills", "demo-skill", "SKILL.md"), "# Demo Skill\n\nBody of the demo skill.\n", "utf-8");
   await writeFile(join(root, "AGENTS.md"), "# Project Agents\n\nWorktree conventions.\n", "utf-8");
@@ -31,6 +34,8 @@ before(async () => {
 
 after(async () => {
   process.chdir(previousCwd);
+  if (previousOutputRoot === undefined) delete process.env.PI_AGENT_OUTPUT_ROOT;
+  else process.env.PI_AGENT_OUTPUT_ROOT = previousOutputRoot;
   await rm(root, { recursive: true, force: true });
 });
 
@@ -89,6 +94,20 @@ test("resource tool renders through a self shell (no host box) with compact quie
 	assert.equal(tool.renderShell, "self");
 	assert.ok(tool.renderCall);
 	assert.ok(tool.renderResult);
+});
+
+test("resource prompt contract distinguishes agent names, correlation ids and publication ids", () => {
+  const tool = createResourceTool();
+  const description = tool.description;
+  const guidelines = (tool.promptGuidelines ?? []).join("\n");
+  assert.match(description, /Exact correlation and publication IDs resolve globally/);
+  assert.match(description, /task-name discovery remains scoped/);
+  assert.match(description, /correlation ID follows that task's latest publication/);
+  assert.match(description, /publication ID pins one immutable result/);
+  assert.match(description, /Agent resources are not cached/);
+  assert.match(guidelines, /smallest required agent:\/\/<exact-id>\/key\/index subtree/);
+  assert.match(guidelines, /do not reload an unchanged immutable URI/);
+  assert.doesNotMatch(description, /publicationId remains a compatibility alias/);
 });
 
 test("resource quiet call row shows the uri and settles empty once complete", () => {
@@ -176,6 +195,32 @@ test("resolveResource keeps publication ids immutable while correlation id track
   assert.match((await resolveResource("agent://resource-publication-1", root)).content, /\"turn\": 1/);
   assert.match((await resolveResource("agent://resource-publication-2", root)).content, /\"turn\": 2/);
   assert.match((await resolveResource("agent://resource-versioned", root)).content, /\"turn\": 2/);
+});
+
+test("resolveResource loads an exact agent id from a parent workspace bucket", async () => {
+  const child = join(root, "packages", "child-resource");
+  await mkdir(child, { recursive: true });
+  await persistAgentOutputChecked(
+    "resource-parent-correlation",
+    "resource-parent-task",
+    "explorer",
+    { scope: "parent" },
+    root,
+    "resource-parent-publication",
+  );
+
+  assert.match(
+    (await resolveResource("agent://resource-parent-publication", child)).content,
+    /"scope": "parent"/,
+  );
+  assert.match(
+    (await resolveResource("agent://resource-parent-correlation", child)).content,
+    /"scope": "parent"/,
+  );
+  await assert.rejects(
+    () => resolveResource("agent://resource-parent-task", child),
+    /No persisted teammate output/,
+  );
 });
 
 test("resolveResource agent:// name with duplicates lists ids, times and previews", async () => {

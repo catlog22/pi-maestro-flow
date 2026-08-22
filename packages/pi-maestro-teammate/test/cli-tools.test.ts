@@ -98,6 +98,65 @@ test("probeCliToolCommand reports reachable and missing local executables", () =
   assert.match(missing.error ?? "", /not found|unreachable/);
 });
 
+test("probeCliToolCommand names the install package for known ACP adapters", () => {
+  const codex = probeCliToolCommand("codex-adapter-missing-probe", {
+    enabled: true,
+    command: "codex-acp",
+  });
+  assert.equal(codex.ok, false);
+  assert.match(codex.error ?? "", /npm i -g @agentclientprotocol\/codex-acp/);
+
+  // Windows launcher shims resolve to the same hint.
+  const shim = probeCliToolCommand("codex-shim-missing-probe", {
+    enabled: true,
+    command: "C:\\definitely\\missing\\codex-acp.cmd",
+  });
+  assert.equal(shim.ok, false);
+  assert.match(shim.error ?? "", /npm i -g @agentclientprotocol\/codex-acp/);
+
+  // Unknown commands stay hint-free.
+  const unknown = probeCliToolCommand("unknown-adapter-missing-probe", {
+    enabled: true,
+    command: "some-other-tool",
+  });
+  assert.equal(unknown.ok, false);
+  assert.doesNotMatch(unknown.error ?? "", /npm i -g/);
+});
+
+test("probeCliToolCommand validates absolute executable paths directly", () => {
+  const reachable = probeCliToolCommand("absolute-reachable-probe", {
+    enabled: true,
+    command: process.execPath,
+  });
+  assert.equal(reachable.ok, true);
+  assert.equal(reachable.command, process.execPath);
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cli-tools-absolute-probe-"));
+  const missingPath = path.join(dir, "missing-executable");
+  const missing = probeCliToolCommand("absolute-missing-probe", {
+    enabled: true,
+    command: missingPath,
+  });
+  assert.equal(missing.ok, false);
+  assert.equal(missing.error, `executable ${JSON.stringify(missingPath)} does not exist`);
+
+  const nonFile = probeCliToolCommand("absolute-non-file-probe", {
+    enabled: true,
+    command: dir,
+  });
+  assert.equal(nonFile.ok, false);
+  assert.equal(nonFile.error, `executable ${JSON.stringify(dir)} is not a file`);
+
+  const unusablePath = `${path.join(dir, "invalid-executable")}\0`;
+  const unusable = probeCliToolCommand("absolute-unusable-probe", {
+    enabled: true,
+    command: unusablePath,
+  });
+  assert.equal(unusable.ok, false);
+  assert.equal(unusable.error, `executable ${JSON.stringify(unusablePath)} is unusable`);
+  assert.doesNotMatch(unusable.error, /\0/);
+});
+
 test("probeCliToolCommand caches by the resolved command, not by the tool name", () => {
   // Two registrations may serve the same `cli/<tool>` route with different
   // executables, so a verdict cached under the route name would validate the

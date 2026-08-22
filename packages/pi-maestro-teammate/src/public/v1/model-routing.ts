@@ -8,4 +8,5 @@
  * not deprecated.
  */
 export * from "../../models/model-catalog.ts";
+export * from "../../models/model-session-availability.ts";
 export * from "../../models/model-routing.ts";

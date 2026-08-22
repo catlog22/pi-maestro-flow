@@ -67,12 +67,59 @@ test("a credential field yields a public name and a secret value, in different s
   assert.equal(value?.editor.kind, "secret");
 });
 
+test("provider, mode, backend, field, and error keys have bilingual catalogs", async () => {
+  const p = provider();
+  const description = await p.instance.describe({ context });
+  const catalogs = description.catalogs!;
+  const referenced = new Set<string>([
+    description.labelKey,
+    description.descriptionKey!,
+    "teammateBackends.error.documentMalformed",
+    "teammateBackends.error.unknownKey",
+    "teammateBackends.error.invalidMode",
+    "teammateBackends.error.unknownBackend",
+    "teammateBackends.error.credentialNameInvalid",
+    "teammateBackends.error.credentialNameMissing",
+    "teammateBackends.error.credentialValueInvalid",
+  ]);
+  for (const setting of description.settings) {
+    referenced.add(setting.group);
+    referenced.add(setting.labelKey);
+    if (setting.descriptionKey) referenced.add(setting.descriptionKey);
+    for (const option of setting.editor.options ?? []) referenced.add(option.labelKey);
+  }
+  for (const key of referenced) {
+    assert.ok(catalogs.en[key], `English catalog missing ${key}`);
+    assert.ok(catalogs["zh-CN"][key], `Chinese catalog missing ${key}`);
+    assert.notEqual(catalogs.en[key], key, `English catalog exposes raw key ${key}`);
+    assert.notEqual(catalogs["zh-CN"][key], key, `Chinese catalog exposes raw key ${key}`);
+  }
+});
+
 test("the dispatch mode defaults to legacy so an unwritten document changes nothing", async () => {
   const p = provider();
   const snapshot = await p.instance.read({ context });
   const mode = snapshot.effective.values.find((v) => v.key === "teammateBackends.mode");
   assert.equal(mode?.value, "legacy");
   assert.equal(mode?.source, "default");
+});
+
+test("commit reports the keys it applied and activates", async () => {
+  const p = provider();
+  const changes = [
+    { operation: "set" as const, key: "teammateBackends.mode", scope: "project" as const, value: "backend-registry" },
+    { operation: "set" as const, key: "teammateBackends.dsh.model", scope: "project" as const, value: "deepseek-v4" },
+  ];
+  const prepared = await p.instance.prepare!({ context, transactionId: "t-metadata", changes });
+  assert.equal(prepared.prepared, true);
+  const committed = await p.instance.commit!({
+    context,
+    transactionId: "t-metadata",
+    prepareToken: prepared.prepareToken!,
+  });
+  const keys = changes.map((change) => change.key);
+  assert.deepEqual(committed.changedKeys, keys);
+  assert.deepEqual(committed.activation, [{ boundary: "next-invocation", keys }]);
 });
 
 test("setting the mode writes it to the registration document", async () => {
@@ -126,12 +173,34 @@ test("a credential value goes to the runtime's env file and never into the docum
   assert.match(env, /^DEEPSEEK_API_KEY=sk-not-a-real-key$/m);
 });
 
+test("credential values containing CR, LF, or NUL fail closed without being echoed", async () => {
+  for (const [name, value] of [
+    ["LF", "sk-secret\nINJECTED=1"],
+    ["CR", "sk-secret\rINJECTED=1"],
+    ["NUL", "sk-secret\0INJECTED=1"],
+  ] as const) {
+    const p = provider();
+    const result = await commit(p, [{
+      operation: "set",
+      key: "teammateBackends.dsh.apiKeyEnv.value",
+      scope: "global",
+      value,
+    }]);
+    assert.equal(result.valid, false, `${name} must be rejected`);
+    assert.equal(result.issues[0]?.code, "credential-value-invalid");
+    assert.equal(JSON.stringify(result).includes("INJECTED=1"), false);
+    assert.equal(existsSync(p.envPath("dsh")), false);
+  }
+});
+
 test("the credential file is written owner-only", async () => {
   const p = provider();
   await commit(p, [
     { operation: "set", key: "teammateBackends.dsh.apiKeyEnv.value", scope: "global", value: "sk-x" },
   ]);
-  assert.equal(statSync(p.envPath("dsh")).mode & 0o777, 0o600);
+  if (process.platform !== "win32") {
+    assert.equal(statSync(p.envPath("dsh")).mode & 0o777, 0o600);
+  }
 });
 
 test("a set credential reads back masked, never echoed", async () => {
@@ -271,7 +340,9 @@ test("the credential directory is owner-only, not just the file", async () => {
   await commit(p, [
     { operation: "set", key: "teammateBackends.dsh.apiKeyEnv.value", scope: "global", value: "sk-x" },
   ]);
-  assert.equal(statSync(join(p.credentialRoot, "dsh")).mode & 0o777, 0o700);
+  if (process.platform !== "win32") {
+    assert.equal(statSync(join(p.credentialRoot, "dsh")).mode & 0o777, 0o700);
+  }
 });
 
 test("a credential the host cannot place gets no editor rather than a misplaced write", async () => {
@@ -363,6 +434,121 @@ test("a document edited after prepare is refused rather than overwritten", async
   );
   assert.equal(JSON.parse(readFileSync(p.documentPath, "utf-8")).default, "dsh");
 });
+
+test("a model-registry backend edit preserves every non-target v2 section and unknown field", async () => {
+  const p = provider();
+  mkdirSync(join(p.workspaceRoot, ".pi"), { recursive: true });
+  const original = {
+    version: 2,
+    mode: "model-registry",
+    default: "dsh.prod",
+    defaultModel: "registry/default",
+    thirdPartyTopLevel: { retain: true },
+    backends: {
+      "dsh.prod": {
+        module: "pi-maestro-backends/dsh",
+        registrationNote: "retain",
+        config: { model: "old-model", cordisConfig: "/old.yml", unknownFlag: true },
+      },
+      "vendor.deploy": {
+        module: "vendor/private-adapter",
+        config: { opaque: "retain", credentialRef: "VENDOR_TOKEN" },
+        vendorExtension: ["retain"],
+      },
+    },
+    models: {
+      "registry/default": {
+        modelId: "private/intrinsic",
+        deployment: "dsh.prod",
+        selector: { kind: "adapter-model", value: "old-model" },
+        deploymentDefault: true,
+      },
+    },
+    compatibility: {
+      version: 1,
+      modelAliases: { "registry/old": "registry/default" },
+      remoteLocations: {},
+    },
+  };
+  writeFileSync(p.documentPath, JSON.stringify(original), "utf-8");
+
+  const described = await p.instance.describe({ context });
+  assert.ok(described.settings.some((setting) => setting.key === "teammateBackends.dsh.prod.model"));
+  assert.ok(described.settings.some((setting) => setting.key === "teammateBackends.mode"
+    && setting.editor.kind === "enum"
+    && setting.editor.options?.some((option) => option.value === "model-registry")));
+
+  await commit(p, [{
+    operation: "set",
+    key: "teammateBackends.dsh.prod.model",
+    scope: "project",
+    value: "new-model",
+  }]);
+  const written = JSON.parse(readFileSync(p.documentPath, "utf-8"));
+  assert.equal(written.backends["dsh.prod"].config.model, "new-model");
+  assert.equal(written.backends["dsh.prod"].config.unknownFlag, true);
+  assert.equal(written.backends["dsh.prod"].registrationNote, "retain");
+  assert.deepEqual(written.backends["vendor.deploy"], original.backends["vendor.deploy"]);
+  assert.deepEqual(written.models, original.models);
+  assert.deepEqual(written.compatibility, original.compatibility);
+  assert.deepEqual(written.thirdPartyTopLevel, original.thirdPartyTopLevel);
+  assert.equal(written.version, 2);
+  assert.equal(written.defaultModel, "registry/default");
+});
+
+test("custom deployment keys are resolved exactly even when ids contain dots or prefix each other", async () => {
+  const p = provider();
+  mkdirSync(join(p.workspaceRoot, ".pi"), { recursive: true });
+  writeFileSync(p.documentPath, JSON.stringify({
+    version: 2,
+    mode: "model-registry",
+    default: "dsh",
+    defaultModel: "registry/default",
+    backends: {
+      dsh: { module: "pi-maestro-backends/dsh", config: { model: "base" } },
+      "dsh.prod": { module: "pi-maestro-backends/dsh", config: { model: "prod" } },
+    },
+    models: {
+      "registry/default": {
+        modelId: "private/default",
+        deployment: "dsh",
+        selector: { kind: "adapter-model", value: "base" },
+        deploymentDefault: true,
+      },
+    },
+  }), "utf-8");
+
+  await commit(p, [{
+    operation: "set",
+    key: "teammateBackends.dsh.prod.model",
+    scope: "project",
+    value: "prod-next",
+  }]);
+  const written = JSON.parse(readFileSync(p.documentPath, "utf-8"));
+  assert.equal(written.backends.dsh.config.model, "base");
+  assert.equal(written.backends["dsh.prod"].config.model, "prod-next");
+});
+
+test("an occupied built-in name with a different module is not given the built-in editor", async () => {
+  const p = provider();
+  mkdirSync(join(p.workspaceRoot, ".pi"), { recursive: true });
+  writeFileSync(p.documentPath, JSON.stringify({
+    mode: "backend-registry",
+    default: "dsh",
+    backends: { dsh: { module: "vendor/not-dsh", config: { model: "opaque" } } },
+  }), "utf-8");
+  const keys = (await p.instance.describe({ context })).settings.map((setting) => setting.key);
+  assert.equal(keys.includes("teammateBackends.dsh.model"), false);
+  const result = await commit(p, [{
+    operation: "set",
+    key: "teammateBackends.dsh.model",
+    scope: "project",
+    value: "must-not-write",
+  }]);
+  assert.equal(result.valid, false);
+  assert.equal(JSON.parse(readFileSync(p.documentPath, "utf-8")).backends.dsh.config.model, "opaque");
+});
+
 
 test("a dynamic field is described as a sourced picker and filled from the backend", async () => {
   const probes: { field: string; config: Record<string, unknown> }[] = [];

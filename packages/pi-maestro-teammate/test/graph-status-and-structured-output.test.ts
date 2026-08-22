@@ -452,6 +452,35 @@ test("runGraph results carry the task name for agent:// persistence", async () =
   assert.deepEqual(results[0].structuredOutput, { value: 3 });
 });
 
+test("runGraph forwards briefing into the child task prompt", async () => {
+  let stdin = "";
+  const baseSpawn = createStructuredSpawn([undefined]);
+  const spawn = ((...args: Parameters<typeof baseSpawn>) => {
+    const child = baseSpawn(...args);
+    child.stdin?.on("data", (chunk) => {
+      stdin += String(chunk);
+    });
+    return child;
+  }) as typeof baseSpawn;
+  const tasks: NormalizedTask[] = [{
+    agent: "general",
+    prompt: "review the module",
+    briefing: ["agent://parent-result", "file:docs/contract.md", "keep compatibility"],
+  }];
+
+  const results = await runGraph(tasks, 1, {
+    baseCwd: process.cwd(),
+    spawnChildProcess: spawn,
+  });
+
+  assert.equal(results[0]?.exitCode, 0);
+  assert.match(stdin, /review the module/);
+  assert.match(stdin, /## Briefing/);
+  assert.match(stdin, /\[agent\] agent:\/\/parent-result/);
+  assert.match(stdin, /\[file\] docs\/contract\.md/);
+  assert.match(stdin, /\[text\] keep compatibility/);
+});
+
 test("runGraph rejects a dependent prompt that resolves to empty text", async () => {
   let spawns = 0;
   const baseSpawn = createStructuredSpawn([{ value: "" }]);

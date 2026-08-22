@@ -577,6 +577,22 @@ export function persistAgentOutputChecked(
   return enqueueAgentOutput(correlationId, name, agent, output, cwd, publicationId);
 }
 
+/** Internal integration point for durability providers that colocate metadata with the output bucket. */
+export async function ensureAgentOutputBucket(cwd: string): Promise<string> {
+  return prepareBucketDir(cwd);
+}
+
+/** Verify one immutable publication is durably readable from its originating workspace. */
+export async function readExactAgentPublication(
+  publicationId: string,
+  cwd: string,
+): Promise<AgentOutputRecord | undefined> {
+  if (!isRecordId(publicationId)) return undefined;
+  const dir = await prepareBucketDir(cwd);
+  const record = await loadRecord(recordFile(dir, publicationId));
+  return record?.publicationId === publicationId ? record : undefined;
+}
+
 /** Report current-workspace occupancy and records without exposing other workspace buckets. */
 export async function getAgentOutputStoreUsage(cwd: string): Promise<AgentOutputStoreUsage> {
   const dir = await prepareBucketDir(cwd);

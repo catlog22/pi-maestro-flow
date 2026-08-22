@@ -11,6 +11,31 @@ export interface Usage {
   turns: number;
 }
 
+/** Closed, descriptive transport metadata safe to expose on settled results. */
+export type TeammateExecutionTransport =
+  | { kind: "local-process"; protocol: "pi-rpc" | "json-rpc-stdio" | "acp" }
+  | { kind: "acp-direct-ssh"; protocol: "acp" }
+  | { kind: "dsh-direct-ssh"; protocol: "json-rpc-stdio" }
+  | {
+      kind: "remote-worker";
+      gateway: "ssh";
+      protocol: "remote/2";
+      driver: "pi-rpc" | "acp";
+    }
+  | { kind: "adapter-owned" };
+
+/** Secret-free identity of the pinned model-registry route that settled a run. */
+export interface TeammateExecutionProvenance {
+  registryVersion: number;
+  registryRevision: number;
+  registryHash: string;
+  modelRegistrationId: string;
+  modelId: string;
+  deploymentId: string;
+  harness: "pi" | "dsh" | "acp" | "adapter-owned";
+  transport: TeammateExecutionTransport;
+}
+
 export interface SingleResult {
   agent: string;
   /** Optional dispatch name shown in compact completion rows. */
@@ -23,6 +48,10 @@ export interface SingleResult {
   correlationId: string;
   /** Unique identity of one published turn; stable across its compatibility projections. */
   publicationId?: string;
+  /** Durable completion dispatch linkage; populated by the root dispatcher. */
+  completionDispatchId?: string;
+  completionReservationId?: string;
+  completionOutcome?: "completed" | "failed" | "terminated";
   /** Resolved task cwd used for durable result projection. */
   originCwd?: string;
   durationMs: number;
@@ -53,6 +82,8 @@ export interface SingleResult {
    */
   backend?: string;
   capabilityDeliveries?: CapabilityDelivery[];
+  /** Pinned model-registry route identity; absent in legacy/backend-registry mode. */
+  provenance?: TeammateExecutionProvenance;
 }
 
 /**
@@ -404,6 +435,10 @@ export interface StructuredResult {
   correlationId: string;
   /** Unique identity of one published turn. */
   publicationId?: string;
+  /** Durable completion dispatch linkage; absent for legacy publications. */
+  completionDispatchId?: string;
+  completionReservationId?: string;
+  completionOutcome?: "completed" | "failed" | "terminated";
   /** Workspace cwd captured from the resolved task execution. */
   originCwd: string;
   /** Task name; absent when the dispatch had none. */
@@ -413,6 +448,8 @@ export interface StructuredResult {
   structuredOutput?: unknown;
   /** Final assistant message text; present when the task had no outputSchema. */
   output?: string;
+  /** Pinned model-registry route identity; absent in legacy/backend-registry mode. */
+  provenance?: TeammateExecutionProvenance;
 }
 
 /**

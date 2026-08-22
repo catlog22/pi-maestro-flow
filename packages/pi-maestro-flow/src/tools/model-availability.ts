@@ -1,10 +1,29 @@
+import { randomUUID } from "node:crypto";
 import type { AgentToolResult, AgentToolUpdateCallback } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { getEnabledTools, loadCliToolsConfig, probeCliToolCommand } from "../providers/cli-tools-loader.ts";
+import {
+  getEnabledTools,
+  loadCliToolsConfig,
+  probeCliToolCommand,
+  sshHostConfigOf,
+} from "../providers/cli-tools-loader.ts";
+import { probeSshCliExecutable } from "pi-maestro-teammate/src/remote/ssh-exec.ts";
 import { Text } from "@earendil-works/pi-tui";
 import { toolCallLine, toolResultLine } from "../quiet-render.ts";
 import { refreshModelRegistry } from "pi-maestro-teammate/v1/model-routing";
+import {
+  modelRegistrationAvailabilityDiagnostics,
+  type ModelRegistrationAvailabilityDiagnostic,
+} from "pi-maestro-teammate/src/public/v1/model-routing.ts";
+import { modelRegistryPairSync } from "pi-maestro-teammate/src/public/v1/backends.ts";
+import { sharedModelHealthCoordinator } from "pi-maestro-teammate/src/public/v1/retry.ts";
+import {
+  TEAMMATE_MODEL_SESSION_EVENT,
+  TEAMMATE_MODEL_SESSION_PROTOCOL_VERSION,
+  TEAMMATE_MODEL_SESSION_QUERY_EVENT,
+  type TeammateModelSessionEventV1,
+} from "pi-maestro-teammate/src/public/v1/events.ts";
 
 export const ModelAvailabilityParams = Type.Object({
   filter: Type.Optional(Type.String({ description: "Optional substring to filter model/tool names" })),
@@ -21,11 +40,32 @@ interface DelegateToolView {
   command: string;
 }
 
+export interface ModelRegistryAvailabilityView {
+  mode: "model-registry";
+  version: 2;
+  revision: number;
+  default_model: string;
+  registrations: ModelRegistrationAvailabilityDiagnostic[];
+}
+
 export interface ModelAvailabilityDetails {
   teammate_models: string[];
   delegate_tools: DelegateToolView[];
   delegate_fallback: DelegateToolView[];
   delegate_config_path: string | null;
+  /** Additive v2 diagnostics; null preserves the old-mode result shape. */
+  model_registry: ModelRegistryAvailabilityView | null;
+}
+
+interface ModelSessionAuthority {
+  isChild: boolean;
+  hasCurrentRootMonitorAuthority: boolean;
+}
+
+export interface ModelAvailabilityToolOptions {
+  sessionAuthority?: () => ModelSessionAuthority;
+  loadDelegateConfig?: typeof loadCliToolsConfig;
+  probeSshExecutable?: typeof probeSshCliExecutable;
 }
 
 function modelId(entry: unknown): string | null {
@@ -47,20 +87,66 @@ function listTeammateModels(ctx: ExtensionContext): string[] {
   return [...ids].sort((a, b) => a.localeCompare(b));
 }
 
-function listDelegateTools(): { tools: DelegateToolView[]; path: string | null } {
-  const config = loadCliToolsConfig();
+function modelRegistryAvailability(
+  ctx: ExtensionContext,
+  authority: ModelSessionAuthority,
+): ModelRegistryAvailabilityView | null {
+  const hostModels = ctx.modelRegistry?.getAvailable?.() ?? [];
+  const workspaceRoot = typeof ctx.cwd === "string" && ctx.cwd.length > 0
+    ? ctx.cwd
+    : process.cwd();
+  const pair = modelRegistryPairSync(workspaceRoot, { hostModels });
+  if (pair === undefined) return null;
+  sharedModelHealthCoordinator.reconcileProjection(pair.dispatch);
+  return {
+    mode: "model-registry",
+    version: pair.dispatch.registryVersion,
+    revision: pair.discovery.revision,
+    default_model: pair.discovery.defaultModel,
+    registrations: modelRegistrationAvailabilityDiagnostics(pair.discovery, {
+      ...authority,
+      health: (route) => ({
+        healthy: sharedModelHealthCoordinator.isHealthy(route.modelRegistrationId),
+      }),
+    }),
+  };
+}
+
+function availableRegistrationIds(registry: ModelRegistryAvailabilityView): string[] {
+  return registry.registrations
+    .filter((entry) => entry.registered
+      && entry.resolvable
+      && entry.sessionAvailable
+      && entry.healthy)
+    .map((entry) => entry.registrationId)
+    .sort((left, right) => left.localeCompare(right));
+}
+
+async function listDelegateTools(
+  cwd: string,
+  options: ModelAvailabilityToolOptions,
+): Promise<{ tools: DelegateToolView[]; path: string | null }> {
+  const config = (options.loadDelegateConfig ?? loadCliToolsConfig)(cwd);
   if (!config) return { tools: [], path: null };
-  const tools = getEnabledTools(config).map(({ name, config: toolConfig }) => {
+  const tools = await Promise.all(getEnabledTools(config).map(async ({ name, config: toolConfig }) => {
     const command = toolConfig.command?.trim() || name;
-    const probe = probeCliToolCommand(name, toolConfig);
+    const mode = toolConfig.mode ?? "local";
+    let reachable: boolean;
+    if (mode === "ssh") {
+      const hostConfig = sshHostConfigOf(toolConfig);
+      reachable = hostConfig !== null
+        && (await (options.probeSshExecutable ?? probeSshCliExecutable)(hostConfig, command)).ok;
+    } else {
+      reachable = probeCliToolCommand(name, toolConfig).ok;
+    }
     return {
       name,
-      mode: toolConfig.mode ?? "local",
+      mode,
       host: toolConfig.host?.trim() ?? "",
-      status: (probe.ok ? "ok" : "missing") as "ok" | "missing",
+      status: (reachable ? "ok" : "missing") as "ok" | "missing",
       command,
     };
-  });
+  }));
   return { tools, path: getCliToolsConfigHint() };
 }
 
@@ -83,14 +169,17 @@ function matchesFilter(value: string, filter: string): boolean {
   return value.toLowerCase().includes(filter.toLowerCase());
 }
 
-export function createModelAvailabilityTool(): ToolDefinition<typeof ModelAvailabilityParams, ModelAvailabilityDetails> {
+export function createModelAvailabilityTool(
+  options: ModelAvailabilityToolOptions = {},
+): ToolDefinition<typeof ModelAvailabilityParams, ModelAvailabilityDetails> {
   return {
     name: "model-availability",
     label: "Model Availability",
-    description: `Check which models are reachable for delegated work, across three sources:
+    description: `Check which models are reachable for delegated work, across model registrations and legacy sources:
 
-- **teammate_models**: pi's own authenticated models (the same set shown in <available_teammate_models>), selectable via the teammate tool's model field.
-- **delegate_tools**: CLI tools enabled in teammate-cli-tools.json (~/.pi/agent + project .pi), reachable as \`cli/<tool>\` teammate models. Each entry reports backend reachability (status ok/missing): local tools are checked via which/where, ssh-mode tools run on the configured remote host. Select \`cli/<tool>\` through the teammate model field (or task-type/role routing); dispatch executes the CLI over the Agent Client Protocol (local spawn, or direct ssh exec for ssh mode).
+- **teammate_models**: the session-available model ids selectable through the teammate tool. In model-registry mode these are canonical registration ids that passed all four gates.
+- **model_registry**: secret-free registration identity/topology and registered, resolvable, sessionAvailable, healthy, and sanitized unavailableReason diagnostics. Remote routes remain listed outside Monitor with a deterministic session-unavailable reason.
+- **delegate_tools**: CLI tools enabled in teammate-cli-tools.json (~/.pi/agent + the active project .pi). Local status is checked on PATH; SSH status is reported as reachable only after the remote executable probe completes. The legacy projection can expose these as cli/<tool>; model-registry mode requires an exact ACP deployment route plus compatibility.teammateCliToolsProjection.enabled.
 - **delegate_fallback**: enabled delegate tools NOT available as teammate models.
 
 Call this before routing to a specific external model (codex, gemini, claude, opencode) to confirm availability. For ordinary delegation, use the teammate tool directly.
@@ -110,6 +199,7 @@ Pitfall: the \`--to <tool>\` flag is mandatory. A bare \`maestro delegate codex\
             delegate_tools: details.delegate_tools ?? [],
             delegate_fallback: details.delegate_fallback ?? [],
             delegate_config_path: details.delegate_config_path ?? null,
+            model_registry: details.model_registry ?? null,
           },
         } as AgentToolResult<ModelAvailabilityDetails>);
       };
@@ -117,18 +207,32 @@ Pitfall: the \`--to <tool>\` flag is mandatory. A bare \`maestro delegate codex\
       steps.push("Enumerating pi teammate models (modelRegistry.getAvailable)…");
       emit({});
       await refreshModelRegistry(ctx);
-      const teammateModels = listTeammateModels(ctx);
-      steps.push(`Found ${teammateModels.length} authenticated teammate model(s).`);
-      emit({ teammate_models: teammateModels });
+      const authority = options.sessionAuthority?.() ?? {
+        isChild: process.env.PI_TEAMMATE_CHILD === "1",
+        hasCurrentRootMonitorAuthority: false,
+      };
+      const modelRegistry = modelRegistryAvailability(ctx, authority);
+      const teammateModels = modelRegistry === null
+        ? listTeammateModels(ctx)
+        : availableRegistrationIds(modelRegistry);
+      steps.push(modelRegistry === null
+        ? `Found ${teammateModels.length} authenticated teammate model(s).`
+        : `Found ${modelRegistry.registrations.length} registered model route(s); ${teammateModels.length} pass all availability gates.`);
+      emit({ teammate_models: teammateModels, model_registry: modelRegistry });
       if (signal?.aborted) throw new Error("Tool execution aborted.");
 
       steps.push("Reading teammate CLI tool config (teammate-cli-tools.json)…");
-      emit({ teammate_models: teammateModels });
-      const { tools: delegateTools, path: configPath } = listDelegateTools();
+      emit({ teammate_models: teammateModels, model_registry: modelRegistry });
+      const { tools: delegateTools, path: configPath } = await listDelegateTools(ctx.cwd, options);
       steps.push(configPath
         ? `Enabled delegate tools: ${delegateTools.map((tool) => tool.name).join(", ") || "(none)"}.`
         : "Delegate config not found — no Maestro delegate tools available.");
-      emit({ teammate_models: teammateModels, delegate_tools: delegateTools, delegate_config_path: configPath });
+      emit({
+        teammate_models: teammateModels,
+        delegate_tools: delegateTools,
+        delegate_config_path: configPath,
+        model_registry: modelRegistry,
+      });
       if (signal?.aborted) throw new Error("Tool execution aborted.");
 
       steps.push("Computing delegate-only fallback (tools not reachable as teammate models)…");
@@ -136,7 +240,13 @@ Pitfall: the \`--to <tool>\` flag is mandatory. A bare \`maestro delegate codex\
       steps.push(fallback.length > 0
         ? `Delegate-only fallback: ${fallback.map((tool) => tool.name).join(", ")} — route via \`maestro delegate --to <name>\`.`
         : "All enabled delegate tools are covered by teammate models.");
-      emit({ teammate_models: teammateModels, delegate_tools: delegateTools, delegate_fallback: fallback, delegate_config_path: configPath });
+      emit({
+        teammate_models: teammateModels,
+        delegate_tools: delegateTools,
+        delegate_fallback: fallback,
+        delegate_config_path: configPath,
+        model_registry: modelRegistry,
+      });
 
       const filteredTeammate = filter
         ? teammateModels.filter((model) => matchesFilter(model, filter))
@@ -147,12 +257,24 @@ Pitfall: the \`--to <tool>\` flag is mandatory. A bare \`maestro delegate codex\
       const filteredFallback = filter
         ? fallback.filter((tool) => matchesFilter(tool.name, filter) || matchesFilter(tool.command, filter))
         : fallback;
+      const filteredModelRegistry = modelRegistry === null || !filter
+        ? modelRegistry
+        : {
+            ...modelRegistry,
+            registrations: modelRegistry.registrations.filter((entry) =>
+              matchesFilter(entry.registrationId, filter)
+              || matchesFilter(entry.modelId, filter)
+              || matchesFilter(entry.deploymentId, filter)
+              || matchesFilter(entry.harness, filter)
+              || matchesFilter(entry.transport, filter)),
+          };
 
       const details: ModelAvailabilityDetails = {
         teammate_models: filteredTeammate,
         delegate_tools: filteredDelegate,
         delegate_fallback: filteredFallback,
         delegate_config_path: configPath,
+        model_registry: filteredModelRegistry,
       };
 
       const fallbackHint = fallback.length > 0
@@ -171,6 +293,7 @@ Pitfall: the \`--to <tool>\` flag is mandatory. A bare \`maestro delegate codex\
             delegate_tools: filteredDelegate,
             delegate_fallback: filteredFallback,
             delegate_config_path: configPath,
+            model_registry: filteredModelRegistry,
             hint: `${fallbackHint} The --to flag is mandatory; a bare \`maestro delegate codex\` treats "codex" as the prompt. ${cliHint}`,
           }, null, 2),
         }],
@@ -212,9 +335,41 @@ function renderProgress(steps: string[], details: Partial<ModelAvailabilityDetai
   if (details.delegate_fallback?.length) {
     lines.push(`   delegate_fallback: ${details.delegate_fallback.map((tool) => tool.name).join(", ")}`);
   }
+  if (details.model_registry) {
+    lines.push(`   model_registry: revision ${details.model_registry.revision} · ${details.model_registry.registrations.length} registration(s)`);
+  }
   return lines.join("\n");
 }
 
-export function registerModelAvailability(pi: ExtensionAPI): void {
-  pi.registerTool(createModelAvailabilityTool());
+function queryModelSessionAuthority(pi: ExtensionAPI): ModelSessionAuthority {
+  const requestId = randomUUID();
+  let response: TeammateModelSessionEventV1 | undefined;
+  const disposer = pi.events.on(TEAMMATE_MODEL_SESSION_EVENT, (payload) => {
+    if (!payload || typeof payload !== "object") return;
+    const candidate = payload as Partial<TeammateModelSessionEventV1>;
+    if (candidate.version !== TEAMMATE_MODEL_SESSION_PROTOCOL_VERSION
+      || candidate.requestId !== requestId
+      || typeof candidate.isChild !== "boolean"
+      || typeof candidate.hasCurrentRootMonitorAuthority !== "boolean") return;
+    response = candidate as TeammateModelSessionEventV1;
+  });
+  pi.events.emit(TEAMMATE_MODEL_SESSION_QUERY_EVENT, {
+    version: TEAMMATE_MODEL_SESSION_PROTOCOL_VERSION,
+    requestId,
+  });
+  if (typeof disposer === "function") disposer();
+  return response ?? {
+    isChild: process.env.PI_TEAMMATE_CHILD === "1",
+    hasCurrentRootMonitorAuthority: false,
+  };
+}
+
+export function registerModelAvailability(
+  pi: ExtensionAPI,
+  options: ModelAvailabilityToolOptions = {},
+): void {
+  pi.registerTool(createModelAvailabilityTool({
+    ...options,
+    sessionAuthority: () => queryModelSessionAuthority(pi),
+  }));
 }

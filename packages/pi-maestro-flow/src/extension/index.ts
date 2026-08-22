@@ -264,7 +264,9 @@ import {
 } from "pi-maestro-teammate/v1/types";
 import type { TeammateCompleteEvent, TeammateStartedEvent } from "pi-maestro-teammate/v1/events";
 import type { MailboxHostRegistry } from "pi-maestro-teammate/v1/mailbox";
+import { getCompletionDurabilityRegistry } from "pi-maestro-teammate/v1/completion-durability";
 import { sharedModelCircuitBreaker } from "pi-maestro-teammate/v1/retry";
+import { FlowCompletionDurabilityProvider } from "../teammate/completion-durability-provider.ts";
 import { createFlowSettingsProvider, registerFlowSettingsProvider } from "../settings/flow-settings-provider.ts";
 import {
   createApiManagerSettingsProvider,
@@ -362,6 +364,28 @@ const COCKPIT_UI_OWNERSHIP_EVENT = "cockpit:ui-ownership";
 const TEAMMATE_ATTACH_ENTRY = "maestro-teammate-attach";
 const GOAL_OVERLAY_KEY = "alt+g";
 const GOAL_OVERLAY_LABEL = altKey("G");
+
+// Terminals whose default config never delivers alt+X on macOS (no Meta, no
+// enhanced key reporting). WezTerm/Ghostty/Kitty negotiate the Kitty protocol
+// at startup and need no hint.
+const MAC_ALT_HINT_BY_TERMINAL: Record<string, string> = {
+  Apple_Terminal: "终端 → 设置 → 描述文件 → 键盘 → 勾选「使用 Option 键作为 Meta 键」",
+  "iTerm.app": "iTerm2 → Settings → Profiles → Keys → General → 将 Left/Right Option 设为 Esc+",
+  vscode: "VS Code 设置 terminal.integrated.macOptionIsMeta = true",
+};
+let macAltHintShown = false;
+
+/** One-shot macOS advisory: Alt shortcuts stay dead until Option acts as Meta. */
+function notifyMacAltShortcutHint(ctx: { ui: { notify(message: string, level?: "info" | "warning" | "error") : void } }): void {
+  if (process.platform !== "darwin" || macAltHintShown) return;
+  const fix = MAC_ALT_HINT_BY_TERMINAL[process.env.TERM_PROGRAM ?? ""];
+  if (!fix) return;
+  macAltHintShown = true;
+  ctx.ui.notify(
+    `macOS 检测：${TODO_TOGGLE_LABEL} 等 Alt 快捷键默认不生效。启用方法：${fix}。命令兜底：/maestro-todo、/maestro-goal、/plan。`,
+    "info",
+  );
+}
 
 export function shouldRestoreWorkflowGoal(
   reason: "startup" | "reload" | "new" | "resume" | "fork" | undefined,
@@ -835,14 +859,18 @@ export function registerChineseResponseMode(
 }
 
 export default function registerMaestroExtension(pi: ExtensionAPI): void {
+  const disposeCompletionDurabilityProvider = getCompletionDurabilityRegistry().register(
+    new FlowCompletionDurabilityProvider(),
+  );
   if (process.env.PI_TEAMMATE_CHILD === "1") {
+    pi.on("session_shutdown", () => disposeCompletionDurabilityProvider());
     registerMaestroChildSurface(pi);
     return;
   }
 
   const disposeTuiLocaleEvents = registerTuiLocaleEvents(pi.events);
   // Dispose EventBus subscriptions on shutdown (defensive; framework may auto-dispose).
-  const disposers: Array<() => void> = [];
+  const disposers: Array<() => void> = [disposeCompletionDurabilityProvider];
 
   // pi install's SettingsManager overwrites postinstall's settings.json writes
   // with its stale in-memory cache. Re-register companion packages at load time
@@ -2855,6 +2883,7 @@ Examples: { argv: ["session","status"] }, { argv: ["run","complete","run-abc","-
     const restoredGoal = getActiveGoal();
     workflowSessionOptedIn = false;
     todoSessionStart(ctx);
+    notifyMacAltShortcutHint(ctx);
     try {
       recoverPendingGoalTodoDetachesAfterTodoStart(ctx);
     } catch (error) {

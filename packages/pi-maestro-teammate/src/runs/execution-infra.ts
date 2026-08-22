@@ -27,7 +27,17 @@ import type {
   AgentTerminalStatus,
 } from "../shared/types.ts";
 import { wrapLeasedMessage, type LeaseToken } from "./session-handoff.ts";
-import { applyModelRouting, type TeammateTaskType } from "../models/model-routing.ts";
+import {
+  applyModelRouting,
+  type ResolvedModelRegistrationRouting,
+  type TeammateTaskType,
+} from "../models/model-routing.ts";
+import type { DispatchAuthorityProjection } from "../models/model-registry.ts";
+import type { ModelHealthCoordinator } from "../models/model-circuit-breaker.ts";
+import type {
+  BackendRegistry,
+  ResolvedBackend,
+} from "pi-maestro-backend-core/v1/registry";
 import type { TeammateModelCapability } from "../models/model-catalog.ts";
 import {
   sharedModelCircuitBreaker,
@@ -41,6 +51,7 @@ import {
 } from "../shared/thinking.ts";
 import {
   isFallbackProviderError,
+  type ModelHealthFailureScopeClassifier,
 } from "./retry.ts";
 
 // ---------------------------------------------------------------------------
@@ -92,6 +103,12 @@ export interface TeammateTaskSpec {
    * `["#1", "#2"]` are accepted.
    */
   todo?: string | string[];
+  /**
+   * Lazy background references appended to the task prompt without expansion
+   * (`agent://<id>`, `file:<path>`, or literal text). The child decides whether
+   * to load each one; see runs/briefing.ts.
+   */
+  briefing?: string[];
 }
 
 export type TeammateMode = "default" | "expert";
@@ -152,6 +169,17 @@ export interface RunSingleTeammateParams {
   outputSchema?: Record<string, unknown>;
   /** Todo task ids bound to this agent; injected into the child system prompt. */
   todos?: string[];
+  /** Lazy background references appended to the task prompt (see runs/briefing.ts). */
+  briefing?: string[];
+}
+
+export interface ModelRegistryDispatchContext {
+  readonly authority: DispatchAuthorityProjection;
+  readonly registry: BackendRegistry;
+  /** Projection-pinned target maps backed by the process-wide breaker stores. */
+  readonly modelHealthCoordinator: ModelHealthCoordinator;
+  readonly plansByCorrelationId: ReadonlyMap<string, ResolvedModelRegistrationRouting>;
+  readonly resolutionsByCorrelationId: ReadonlyMap<string, ReadonlyMap<string, ResolvedBackend>>;
 }
 
 export interface RunTeammateOptions {
@@ -165,7 +193,21 @@ export interface RunTeammateOptions {
    * which registers under its ordinary name. Both paths settle into the same
    * outcome, so nothing downstream branches on which ran.
    */
-  backendRegistry?: import("pi-maestro-backend-core/v1/registry").BackendRegistry;
+  backendRegistry?: BackendRegistry;
+  /** Captured model-registry dispatch authority; omitted outside model-registry mode. */
+  modelRegistryAuthority?: DispatchAuthorityProjection;
+  /** Scoped model/deployment health authority used only in model-registry mode. */
+  modelHealthCoordinator?: ModelHealthCoordinator;
+  /** Optional structured backend-aware failure attribution for scoped health. */
+  modelHealthFailureScopeClassifier?: ModelHealthFailureScopeClassifier;
+  /**
+   * Rechecks the exact root Monitor authority generation captured for this
+   * dispatch. Remote model registrations are denied when this is absent or
+   * returns false.
+   */
+  authorizeRemoteModelDispatch?: () => boolean;
+  /** @internal Pinned graph/single preflight shared across candidate attempts. */
+  modelRegistryDispatch?: ModelRegistryDispatchContext;
   /**
    * The host's remote Monitor wiring.
    *
@@ -323,6 +365,8 @@ export interface NormalizedTask {
   maxNestingDepth?: number;
   /** Optional Todo task ids bound to this agent (see TeammateTaskSpec.todo). */
   todos?: string[];
+  /** Lazy background references (see TeammateTaskSpec.briefing). */
+  briefing?: string[];
 }
 
 /**
@@ -370,6 +414,7 @@ export function singleRunParamsOf(
     // Copied rather than aliased: the roster record keeps its own array of the
     // same ids, and a run must not be able to reorder what the roster shows.
     ...(source.todos === undefined ? {} : { todos: [...source.todos] }),
+    ...(source.briefing === undefined ? {} : { briefing: [...source.briefing] }),
     ...(overrides.timeoutMs === undefined ? {} : { timeoutMs: overrides.timeoutMs }),
   };
 }
@@ -1026,6 +1071,20 @@ export function normalizeTodoBindings(todo: string | string[] | undefined): stri
   return result.length > 0 ? result : undefined;
 }
 
+/** Dedupe and trim briefing entries; empty results collapse to undefined. */
+export function normalizeBriefingEntries(briefing: string[] | undefined): string[] | undefined {
+  if (briefing === undefined) return undefined;
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const raw of briefing) {
+    const entry = String(raw).trim();
+    if (!entry || seen.has(entry)) continue;
+    seen.add(entry);
+    result.push(entry);
+  }
+  return result.length > 0 ? result : undefined;
+}
+
 // ---------------------------------------------------------------------------
 
 /** Public task prompt budget, measured after UTF-8 encoding. */
@@ -1253,6 +1312,7 @@ export function normalizeTeammateParams(
     timeoutMs: task.timeoutMs ?? params.timeoutMs,
     maxNestingDepth: task.maxNestingDepth ?? params.maxNestingDepth,
     todos: normalizeTodoBindings(task.todo),
+    briefing: normalizeBriefingEntries(task.briefing),
   }));
   const isMultiTask = normalized.length > 1;
 

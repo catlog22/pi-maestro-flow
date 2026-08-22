@@ -60,6 +60,22 @@ test("the document's mode is what switches it, and switching back is the same ed
   assert.equal(dispatchRegistrySync(legacyRoot, extras), undefined);
 });
 
+test("v2 authoring sections stay inert when rollback selects an existing 2.0 mode", () => {
+  const root = workspace(JSON.stringify({
+    version: 2,
+    mode: "backend-registry",
+    default: PI_SUBPROCESS,
+    defaultModel: "ignored/model",
+    backends: {},
+    models: { invalidButIgnored: true },
+    compatibility: { version: 999 },
+  }));
+  const config = backendRegistryConfigSync(root);
+  assert.equal(config.mode, "backend-registry");
+  assert.deepEqual(Object.keys(config.backends), [PI_SUBPROCESS]);
+  assert.notEqual(dispatchRegistrySync(root, extras), undefined);
+});
+
 test("an unknown mode fails at load with the modes it accepts", () => {
   const root = workspace(JSON.stringify({
     mode: "registry",
@@ -68,7 +84,7 @@ test("an unknown mode fails at load with the modes it accepts", () => {
   }));
   assert.throws(
     () => backendRegistryConfigSync(root),
-    /names mode "registry"; expected one of legacy \| backend-registry/,
+    /names mode "registry"; expected one of legacy \| backend-registry \| model-registry/,
   );
 });
 

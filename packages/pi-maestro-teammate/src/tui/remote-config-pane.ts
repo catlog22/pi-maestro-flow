@@ -7,6 +7,7 @@ import {
   matchesKey,
   truncateToWidth,
 } from "@earendil-works/pi-tui";
+import type { ModelCliRow } from "../models/cli-list.ts";
 import type { RemoteConfigState } from "../remote/config.ts";
 import type { RemoteHostConfig } from "../remote/types.ts";
 import { removeLastGrapheme, sanitizeSingleLineInput } from "./input-text.ts";
@@ -20,6 +21,16 @@ import {
 export type RemotePaneScope = "global" | "project";
 
 export type RemotePaneRow =
+  | {
+    kind: "deployment";
+    registrationId: string;
+    modelId: string;
+    deploymentId: string;
+    harness: string;
+    transportKind: string;
+    resolvable: boolean;
+    healthyStatic: boolean;
+  }
   | {
     kind: "host";
     id: string;
@@ -41,6 +52,9 @@ export type RemotePaneRow =
   };
 
 export type RemotePaneAction =
+  | { kind: "connection-edit-deployment"; registrationId: string }
+  | { kind: "connection-add-deployment" }
+  | { kind: "connection-upgrade-legacy" }
   | { kind: "remote-edit-host"; hostId: string; scope: RemotePaneScope }
   | { kind: "remote-new-host"; scope: RemotePaneScope }
   | { kind: "remote-edit-target"; targetId: string; scope: RemotePaneScope }
@@ -48,10 +62,20 @@ export type RemotePaneAction =
   | { kind: "remote-delete-host"; hostId: string; scope: RemotePaneScope }
   | { kind: "remote-delete-target"; targetId: string; scope: RemotePaneScope }
   | { kind: "remote-scope"; scope: RemotePaneScope }
-  | { kind: "reload"; tab: "remotes" };
+  | { kind: "reload"; tab: "connections" };
+
+export type RemotePaneDeployments =
+  | {
+    kind: "registry";
+    rows: readonly ModelCliRow[];
+    defaultModel: string;
+    diagnostics: readonly string[];
+  }
+  | { kind: "legacy" };
 
 export interface RemoteConfigPaneOptions {
   state: RemoteConfigState;
+  deployments?: RemotePaneDeployments;
   theme: { fg(role: string, text: string): string; bold(text: string): string };
   t: TuiTranslator;
   requestRender: () => void;
@@ -61,6 +85,8 @@ export interface RemoteConfigPaneOptions {
   /** Injectable test hook; the product default is a 10s SSH probe timeout. */
   testTimeoutMs?: number;
 }
+
+type RemotePaneItem = RemotePaneRow | { kind: "legacy-notice" };
 
 function tKey(key: string): TuiTranslationKey {
   return key as TuiTranslationKey;
@@ -85,12 +111,13 @@ function hostKeyPrefix(host: RemoteHostConfig): string {
 }
 
 /**
- * Pure-UI "Remote targets" tab embedded in the Teammate Control Center.
+ * Pure-UI connections tab embedded in the Teammate Control Center.
  *
- * The pane renders one scope at a time (global or project), emits
- * edit/create/delete/scope actions through `close`, and runs inline target
- * connectivity probes through `onTest`. Field-level wizards, persistence, and
- * real SSH testing live outside the pane.
+ * The pane renders precomputed registry deployments plus one remote scope at
+ * a time (global or project), emits edit/create/delete/scope actions through
+ * `close`, and runs inline target connectivity probes through `onTest`.
+ * Manifest access, field-level wizards, persistence, and real SSH testing live
+ * outside the pane.
  */
 export class RemoteConfigPane implements Component, Focusable {
   focused = false;
@@ -170,6 +197,10 @@ export class RemoteConfigPane implements Component, Focusable {
         this.options.close({ kind: "remote-new-target", scope: this.scope });
         return;
       }
+      if (matchesKey(data, "a")) {
+        this.options.close({ kind: "connection-add-deployment" });
+        return;
+      }
       if (matchesKey(data, "d")) {
         const row = this.visibleItems()[this.selected];
         if (row) this.deleteRow(row);
@@ -205,7 +236,19 @@ export class RemoteConfigPane implements Component, Focusable {
     if (items.length === 0) {
       rows.push(this.theme.fg("dim", this.t(tKey("remote.empty"))));
     } else {
-      rows.push(...items.map((row, index) => this.rowLine(row, index === this.selected, inner)));
+      let previousSection: "deployments" | "hosts" | "targets" | undefined;
+      for (const [index, row] of items.entries()) {
+        const section = row.kind === "deployment" || row.kind === "legacy-notice"
+          ? "deployments"
+          : row.kind === "host"
+            ? "hosts"
+            : "targets";
+        if (section !== previousSection) {
+          rows.push(this.sectionLine(section, inner));
+          previousSection = section;
+        }
+        rows.push(this.rowLine(row, index === this.selected, inner));
+      }
     }
     rows.push(this.theme.fg("dim", "─".repeat(inner)));
     if (this.statusText) rows.push(this.statusLine(inner));
@@ -263,37 +306,90 @@ export class RemoteConfigPane implements Component, Focusable {
       this.t(tKey("remote.newTarget")),
       this.t(tKey("remote.test")),
       this.t(tKey("remote.delete")),
-      "g/p scope",
+      this.t(tKey("connections.scopeHint")),
       this.t(tKey("remote.filter")),
       this.t(tKey("remote.close")),
+      this.t(tKey("connections.addDeployment")),
     ].join(" · ");
     return truncateToWidth(text, width, "…");
   }
 
-  private rowLine(row: RemotePaneRow, selected: boolean, width: number): string {
+  private sectionLine(section: "deployments" | "hosts" | "targets", width: number): string {
+    const key = section === "deployments"
+      ? "connections.deploymentsTitle"
+      : section === "hosts"
+        ? "connections.hostsTitle"
+        : "connections.targetsTitle";
+    return truncateToWidth(this.theme.bold(this.t(tKey(key))), width, "…");
+  }
+
+  private rowLine(row: RemotePaneItem, selected: boolean, width: number): string {
     const prefix = selected ? this.theme.fg("accent", "▸") : " ";
     const label = this.rowLabel(row);
-    const body = selected
-      ? this.theme.bold(this.theme.fg("accent", label))
-      : row.hidden
-        ? this.theme.fg("dim", label)
-        : label;
+    const body = row.kind === "legacy-notice"
+      ? this.theme.fg("dim", label)
+      : selected
+        ? this.theme.bold(this.theme.fg("accent", label))
+        : "hidden" in row && row.hidden
+          ? this.theme.fg("dim", label)
+          : label;
     return truncateToWidth(`${prefix} ${body}`, width, "…");
   }
 
-  private rowLabel(row: RemotePaneRow): string {
+  private rowLabel(row: RemotePaneItem): string {
+    if (row.kind === "legacy-notice") return this.t(tKey("connections.legacyNotice"));
+    if (row.kind === "deployment") {
+      const resolvable = row.resolvable ? "✓" : "✗";
+      return this.t(tKey("connections.deploymentRow"), {
+        registration: row.registrationId,
+        model: row.modelId,
+        harness: row.harness,
+        transport: row.transportKind,
+        resolvable,
+      });
+    }
     if (row.hidden) {
-      return row.kind === "host" ? `(hidden) [H] ${row.id}` : `(hidden) [T] ${row.id}`;
+      return row.kind === "host"
+        ? this.t(tKey("connections.hiddenHost"), { id: row.id })
+        : this.t(tKey("connections.hiddenTarget"), { id: row.id });
     }
     if (row.kind === "host") {
-      return `[H] ${row.id}  ${row.user}@${row.host}:${row.port} · SHA256:${row.keyPrefix}`;
+      return this.t(tKey("connections.hostRow"), {
+        id: row.id,
+        user: row.user,
+        host: row.host,
+        port: row.port,
+        keyPrefix: row.keyPrefix,
+      });
     }
-    return `[T] ${row.id}  ${row.driver} · ${row.cwd} · host ${row.host}`;
+    return this.t(tKey("connections.targetRow"), {
+      id: row.id,
+      driver: row.driver,
+      cwd: row.cwd,
+      host: row.host,
+    });
   }
 
-  private buildRows(): RemotePaneRow[] {
+  private buildRows(): RemotePaneItem[] {
     const { state } = this.options;
-    const rows: RemotePaneRow[] = [];
+    const rows: RemotePaneItem[] = [];
+    const deployments = this.options.deployments;
+    if (deployments?.kind === "legacy") {
+      rows.push({ kind: "legacy-notice" });
+    } else if (deployments?.kind === "registry") {
+      for (const row of deployments.rows) {
+        rows.push({
+          kind: "deployment",
+          registrationId: row.registrationId,
+          modelId: row.modelId,
+          deploymentId: row.deploymentId,
+          harness: row.harness,
+          transportKind: row.transportKind,
+          resolvable: row.resolvable,
+          healthyStatic: row.healthyStatic,
+        });
+      }
+    }
     if (this.scope === "global") {
       for (const [id, host] of Object.entries(state.global.hosts)) {
         rows.push({ kind: "host", id, host: host.host, user: host.user, port: host.port, keyPrefix: hostKeyPrefix(host), scope: "global" });
@@ -313,19 +409,48 @@ export class RemoteConfigPane implements Component, Focusable {
           : { kind: "target", id, host: entry.host, driver: entry.driver, cwd: entry.cwd, scope: "project" });
       }
     }
+    const order: Record<RemotePaneItem["kind"], number> = {
+      deployment: 0,
+      "legacy-notice": 0,
+      host: 1,
+      target: 2,
+    };
     rows.sort((left, right) => {
-      if (left.kind !== right.kind) return left.kind === "host" ? -1 : 1;
-      return left.id.localeCompare(right.id);
+      const sectionOrder = order[left.kind] - order[right.kind];
+      if (sectionOrder !== 0) return sectionOrder;
+      const leftId = left.kind === "deployment"
+        ? left.registrationId
+        : left.kind === "legacy-notice"
+          ? ""
+          : left.id;
+      const rightId = right.kind === "deployment"
+        ? right.registrationId
+        : right.kind === "legacy-notice"
+          ? ""
+          : right.id;
+      return leftId.localeCompare(rightId);
     });
     return rows;
   }
 
-  private rowSearchText(row: RemotePaneRow): string {
+  private rowSearchText(row: RemotePaneItem): string {
+    if (row.kind === "legacy-notice") return this.t(tKey("connections.legacyNotice"));
+    if (row.kind === "deployment") {
+      return [
+        row.registrationId,
+        row.modelId,
+        row.deploymentId,
+        row.harness,
+        row.transportKind,
+        row.resolvable ? "resolvable" : "unresolvable",
+        row.healthyStatic ? "healthy" : "unhealthy",
+      ].join(" ");
+    }
     if (row.kind === "host") return `${row.id} ${row.host}`;
     return `${row.id} ${row.host} ${row.driver} ${row.cwd}`;
   }
 
-  private visibleItems(): RemotePaneRow[] {
+  private visibleItems(): RemotePaneItem[] {
     const query = this.query.trim().toLowerCase();
     if (!query) return this.buildRows();
     return this.buildRows().filter((row) => this.rowSearchText(row).toLowerCase().includes(query));
@@ -345,22 +470,29 @@ export class RemoteConfigPane implements Component, Focusable {
     this.options.requestRender();
   }
 
-  private activateRow(row: RemotePaneRow): void {
-    if (row.kind === "host") this.options.close({ kind: "remote-edit-host", hostId: row.id, scope: this.scope });
-    else this.options.close({ kind: "remote-edit-target", targetId: row.id, scope: this.scope });
+  private activateRow(row: RemotePaneItem): void {
+    if (row.kind === "legacy-notice") {
+      this.options.close({ kind: "connection-upgrade-legacy" });
+    } else if (row.kind === "deployment") {
+      this.options.close({ kind: "connection-edit-deployment", registrationId: row.registrationId });
+    } else if (row.kind === "host") {
+      this.options.close({ kind: "remote-edit-host", hostId: row.id, scope: this.scope });
+    } else {
+      this.options.close({ kind: "remote-edit-target", targetId: row.id, scope: this.scope });
+    }
   }
 
-  private deleteRow(row: RemotePaneRow): void {
+  private deleteRow(row: RemotePaneItem): void {
     if (row.kind === "host") this.options.close({ kind: "remote-delete-host", hostId: row.id, scope: this.scope });
-    else this.options.close({ kind: "remote-delete-target", targetId: row.id, scope: this.scope });
+    else if (row.kind === "target") this.options.close({ kind: "remote-delete-target", targetId: row.id, scope: this.scope });
   }
 
-  private startTest(row: RemotePaneRow): void {
+  private startTest(row: RemotePaneItem): void {
     if (row.kind !== "target" || this.testingId) return;
     const targetId = row.id;
     this.testingId = targetId;
     this.statusTone = "dim";
-    this.statusText = `${this.t(tKey("remote.testing"), { id: targetId })} (connecting)`;
+    this.statusText = `${this.t(tKey("remote.testing"), { id: targetId })} ${this.t(tKey("connections.connecting"))}`;
     this.options.requestRender();
     const signal = AbortSignal.timeout(this.testTimeoutMs);
     void this.runTest(targetId, signal);
@@ -384,7 +516,7 @@ export class RemoteConfigPane implements Component, Focusable {
     } catch (error) {
       this.statusTone = "error";
       this.statusText = signal.aborted
-        ? `${this.t(tKey("remote.fail"))} timed out after ${this.timeoutLabel()}`
+        ? `${this.t(tKey("remote.fail"))} ${this.t(tKey("connections.timedOut"), { timeout: this.timeoutLabel() })}`
         : `${this.t(tKey("remote.fail"))} ${error instanceof Error ? error.message : String(error)}`;
     } finally {
       this.testingId = null;

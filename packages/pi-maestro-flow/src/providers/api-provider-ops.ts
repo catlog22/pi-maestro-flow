@@ -1636,6 +1636,63 @@ export async function renameModelThinkingDefault(
   });
 }
 
+/** Named entry in the /effort managed list; `level` must be a canonical Pi level. */
+export interface EffortLevelEntry {
+  name: string;
+  level: ThinkingLevel;
+}
+
+/** Absent `effortLevels` section means the full identity list — "默认全部都有". */
+export function defaultEffortEntries(): EffortLevelEntry[] {
+  return EFFORT_LEVELS.map((level) => ({ name: level, level }));
+}
+
+/**
+ * Load the managed /effort level list. Never throws: an absent or unreadable
+ * section falls back to the full identity list so the picker still renders;
+ * persistence errors surface later through the save path.
+ */
+export async function loadEffortLevels(defaultsPath: string): Promise<EffortLevelEntry[]> {
+  let root: Record<string, unknown>;
+  try {
+    root = await readModelsRoot(defaultsPath);
+  } catch {
+    return defaultEffortEntries();
+  }
+  const section = isRecord(root.effortLevels) ? root.effortLevels : undefined;
+  if (!section || !Array.isArray(section.entries)) return defaultEffortEntries();
+  const entries: EffortLevelEntry[] = [];
+  for (const item of section.entries) {
+    if (!isRecord(item)) continue;
+    if (typeof item.name !== "string" || item.name.trim().length === 0) continue;
+    if (!isCanonicalThinkingLevel(item.level)) continue;
+    entries.push({ name: item.name.trim(), level: item.level });
+  }
+  return entries;
+}
+
+export async function saveEffortLevels(
+  entries: readonly EffortLevelEntry[],
+  defaultsPath: string,
+): Promise<void> {
+  await serializeMutation(defaultsPath, async () => {
+    const exists = await fileExists(defaultsPath);
+    const root = await readModelsRoot(defaultsPath);
+    await writeModelsRoot({ ...root, version: 1, effortLevels: { entries } }, defaultsPath, exists);
+  });
+}
+
+export async function resetEffortLevels(defaultsPath: string): Promise<void> {
+  if (!await fileExists(defaultsPath)) return;
+  await serializeMutation(defaultsPath, async () => {
+    const root = await readModelsRoot(defaultsPath);
+    if (!isRecord(root.effortLevels)) return;
+    const next = { ...root };
+    delete next.effortLevels;
+    await writeModelsRoot(next, defaultsPath, true);
+  });
+}
+
 export async function renameDefaultModelRef(
   ctx: ExtensionCommandContext,
   modelsPath: string,

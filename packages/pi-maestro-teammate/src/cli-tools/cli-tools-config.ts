@@ -106,6 +106,62 @@ function readConfigFile(filePath: string): CliToolsConfig | null {
 }
 
 /**
+ * Read one compatibility overlay without the legacy loader's fail-open
+ * fallback. Model-registry publication must distinguish a missing overlay from
+ * a malformed one: the latter invalidates the new projection pair instead of
+ * retaining routes compiled from an earlier edit.
+ */
+function readProjectionConfigFile(filePath: string): CliToolsConfig | null {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(filePath, "utf-8");
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw new Error(`teammate CLI tools projection at ${filePath} could not be read`, { cause });
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (cause) {
+    throw new Error(`teammate CLI tools projection at ${filePath} is not valid JSON`, { cause });
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`teammate CLI tools projection at ${filePath} must contain a JSON object`);
+  }
+  const document = parsed as Record<string, unknown>;
+  if (document.version !== undefined && typeof document.version !== "string") {
+    throw new Error(`teammate CLI tools projection at ${filePath} must name a string "version"`);
+  }
+  if (!document.tools || typeof document.tools !== "object" || Array.isArray(document.tools)) {
+    throw new Error(`teammate CLI tools projection at ${filePath} must map "tools" to registrations`);
+  }
+  for (const [name, value] of Object.entries(document.tools as Record<string, unknown>)) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error(`teammate CLI tools projection at ${filePath}: tool "${name}" must be an object`);
+    }
+    if (typeof (value as { enabled?: unknown }).enabled !== "boolean") {
+      throw new Error(`teammate CLI tools projection at ${filePath}: tool "${name}" must name boolean "enabled"`);
+    }
+  }
+  return parsed as CliToolsConfig;
+}
+
+function mergeCliToolsConfigs(
+  globalConfig: CliToolsConfig | null,
+  projectConfig: CliToolsConfig | null,
+): CliToolsConfig | null {
+  if (!globalConfig && !projectConfig) return null;
+  if (!projectConfig) return globalConfig;
+  if (!globalConfig) return projectConfig;
+
+  return {
+    version: projectConfig.version ?? globalConfig.version ?? "1",
+    tools: { ...globalConfig.tools, ...projectConfig.tools },
+  };
+}
+
+/**
  * Load the effective teammate CLI tool config: project tools override global
  * tools (a project entry with enabled:false hides the global one). Returns null
  * when neither file exists. `cwd` drives project-file discovery and
@@ -121,19 +177,27 @@ export function loadCliToolsConfig(
 
   const globalConfig = readConfigFile(globalFile);
   const projectConfig = readConfigFile(projectFile);
-  if (!globalConfig && !projectConfig) return null;
+  return mergeCliToolsConfigs(globalConfig, projectConfig);
+}
 
-  if (!projectConfig) return globalConfig;
-  if (!globalConfig) return projectConfig;
-
-  const tools: Record<string, CliToolConfig> = { ...globalConfig.tools };
-  for (const [name, tool] of Object.entries(projectConfig.tools)) {
-    tools[name] = tool;
-  }
-  return {
-    version: projectConfig.version ?? globalConfig.version ?? "1",
-    tools,
-  };
+/**
+ * Load the effective CLI compatibility overlay for model-registry compilation.
+ * This uses the same project-over-global merge as {@link loadCliToolsConfig},
+ * but malformed files throw so a changed invalid source cannot leave a stale
+ * discovery/dispatch pair published. It performs no executable or network
+ * probes; only explicit `enabled` flags are consumed by the compiler.
+ */
+export function loadCliToolsConfigProjection(
+  cwd?: string,
+  globalFilePath?: string,
+): CliToolsConfig | null {
+  const dir = cwd ?? process.cwd();
+  const globalFile = globalFilePath ?? getGlobalCliToolsConfigPath();
+  const projectFile = getProjectCliToolsConfigPath(dir);
+  return mergeCliToolsConfigs(
+    readProjectionConfigFile(globalFile),
+    readProjectionConfigFile(projectFile),
+  );
 }
 
 /** Load the legacy ~/.maestro/cli-tools.json (Maestro delegate provider registration). */
@@ -225,11 +289,12 @@ function probeCacheKey(command: string, config: CliToolConfig): string {
 }
 
 /**
- * Probe whether a CLI tool is reachable. Local tools are checked with
- * which/where; ssh tools first validate config completeness (fail-closed) and
- * then optimistically report ok while an async SSH probe warms the cache, so
- * subsequent catalog refreshes drop unreachable hosts. Results are cached for a
- * short TTL because catalog refresh runs frequently.
+ * Probe whether a CLI tool is reachable. Absolute local commands are checked
+ * directly, while bare and relative commands are resolved with which/where;
+ * ssh tools first validate config completeness (fail-closed) and then
+ * optimistically report ok while an async SSH probe warms the cache, so
+ * subsequent catalog refreshes drop unreachable hosts. Results are cached for
+ * a short TTL because catalog refresh runs frequently.
  */
 export function probeCliToolCommand(
   name: string,
@@ -244,28 +309,60 @@ export function probeCliToolCommand(
   return probeLocalExecutable(key, command);
 }
 
+/**
+ * Known ACP adapters and the npm package that provides each, so a launch
+ * probe that cannot find one can name the exact install command instead of
+ * leaving the operator to guess where "codex-acp" comes from.
+ */
+const KNOWN_ACP_ADAPTER_PACKAGES: ReadonlyMap<string, string> = new Map([
+  ["codex-acp", "@agentclientprotocol/codex-acp"],
+  ["claude-agent-acp", "@agentclientprotocol/claude-agent-acp"],
+]);
+
+/** Install hint for a known adapter command; empty for anything else. */
+function adapterInstallHint(command: string): string {
+  const base = path.basename(command).replace(/\.(cmd|ps1|exe)$/i, "");
+  const pkg = KNOWN_ACP_ADAPTER_PACKAGES.get(base);
+  return pkg === undefined ? "" : `; install it with: npm i -g ${pkg}`;
+}
+
 function probeLocalExecutable(key: string, command: string): CliToolProbeResult {
+  const quotedCommand = JSON.stringify(command);
   let result: CliToolProbeResult;
-  try {
-    const lookup = process.platform === "win32" ? "where" : "which";
-    execFileSync(lookup, [command], {
-      encoding: "utf8",
-      timeout: PROBE_TIMEOUT_MS,
-      stdio: ["ignore", "ignore", "pipe"],
-      windowsHide: true,
-    });
-    result = { ok: true, command };
-  } catch (error) {
-    const code = error && typeof error === "object" && "code" in error
-      ? String((error as { code?: unknown }).code)
-      : undefined;
-    result = {
-      ok: false,
-      command,
-      error: code === "ENOENT"
-        ? `executable "${command}" not found on PATH`
-        : `executable "${command}" unreachable${code ? ` (${code})` : ""}`,
-    };
+  if (path.isAbsolute(command)) {
+    try {
+      const stat = fs.statSync(command);
+      if (!stat.isFile()) {
+        result = { ok: false, command, error: `executable ${quotedCommand} is not a file` };
+      } else {
+        fs.accessSync(command, fs.constants.X_OK);
+        result = { ok: true, command };
+      }
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error
+        ? String((error as { code?: unknown }).code)
+        : undefined;
+      result = {
+        ok: false,
+        command,
+        error: code === "ENOENT"
+          ? `executable ${quotedCommand} does not exist${adapterInstallHint(command)}`
+          : `executable ${quotedCommand} is unusable`,
+      };
+    }
+  } else {
+    try {
+      const lookup = process.platform === "win32" ? "where" : "which";
+      execFileSync(lookup, [command], {
+        encoding: "utf8",
+        timeout: PROBE_TIMEOUT_MS,
+        stdio: ["ignore", "ignore", "pipe"],
+        windowsHide: true,
+      });
+      result = { ok: true, command };
+    } catch {
+      result = { ok: false, command, error: `executable ${quotedCommand} not found on PATH${adapterInstallHint(command)}` };
+    }
   }
   probeCache.set(key, { result, at: Date.now() });
   return result;

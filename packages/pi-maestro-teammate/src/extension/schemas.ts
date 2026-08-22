@@ -89,12 +89,12 @@ export const TaskSpec = Type.Object({
   ),
   model: Type.Optional(
     Type.String({
-      description: "Exact provider/model override for this task; overrides the top-level model default. Omit unless the user explicitly requests this model — an omitted model inherits the main session's current model, then configured task-type/role routing, then the child's own default. An id outside the current model catalog fails fast at dispatch with 'Unknown teammate model specifier'.",
+      description: "Exact model registration override from the injected catalog; overrides the top-level model default. In model-registry mode this is a canonical registration id or configured alias, not an adapter selector. Omit unless the user explicitly requests this model; an omitted model inherits routing defaults. An id outside the current catalog fails fast at dispatch.",
     }),
   ),
   fallbackModels: Type.Optional(
     Type.Array(Type.String(), {
-      description: "Ordered provider/model fallbacks for this task; overrides the top-level fallback chain",
+      description: "Ordered model registration fallbacks for this task; overrides the top-level fallback chain",
     }),
   ),
   thinking: Type.Optional(ThinkingLevel),
@@ -126,6 +126,11 @@ export const TaskSpec = Type.Object({
     ], {
       description:
         "Optional Todo task id(s) bound to this agent, in priority order (first = highest). On start the host re-assigns each task's assignee to this agent (actor changes from root to the agent), auto-activates the first runnable one, and injects the whole list as a managed fragment; the agent drives its queue with `todo update`. The tasks must exist before dispatch — missing ids produce a warning and dispatch continues. Accepts `\"12\"`, `\"#12\"`, or an ordered array like `[\"#1\", \"#2\"]`.",
+    }),
+  ),
+  briefing: Type.Optional(
+    Type.Array(Type.String({ minLength: 1 }), { minItems: 1, description:
+      "Background material appended to this task's prompt. Forms: `agent://<id>` (global persisted result loaded on demand with the resource tool), `file:<path>` (loaded on demand relative to the child's cwd), or literal text (already inlined). Use it to hand over prior findings instead of re-delegating the same discovery.",
     }),
   ),
   maxNestingDepth: Type.Optional(
@@ -228,7 +233,7 @@ export const TeammateParams = Type.Object({
     Type.Boolean({
       default: false,
       description:
-        "Run in background (default: false). The foreground wait window is always bounded — multi-task calls use concurrencyWaitMs when provided, otherwise the smallest per-task timeoutMs or a 600000 ms (10 minutes) default. A call that outlives the window returns a background acknowledgement while the teammate continues, then delivers the result via one automatic teammate-complete notification. Explicit background calls acknowledge immediately and send that notification later. The completion is delivered automatically to the caller: for a root dispatch it arrives as a new turn in the root session; for a nested dispatch the work executes in the root process and the root forwards the same envelope over IPC, so it also arrives as a new turn in the dispatching child agent's session while that agent is still live (the root caller additionally receives it). If the dispatching agent has already ended, delivery is skipped and the result is settled and only inspectable via observe.",
+        "Run in background (default: false). The foreground wait window is always bounded — multi-task calls use concurrencyWaitMs when provided, otherwise the smallest per-task timeoutMs or a 600000 ms (10 minutes) default. A call that outlives the window returns a background acknowledgement while the teammate continues, then delivers the result via one automatic teammate-complete notification. Explicit background calls acknowledge immediately and send that notification later. The completion is delivered automatically to the caller: for a root dispatch it arrives as a new turn in the root session; for a nested dispatch the work executes in the root process and the root forwards the same envelope over IPC, so it also arrives as a new turn in the dispatching child agent's session while that agent is still live (the root caller additionally receives it). When the completion durability provider is enabled, an already-completed result whose notification misses a stale/reloaded context is queued for the exact dispatching session and redelivered when that same session resumes; forks and other sessions never inherit it. This does not restart unfinished agents. Set PI_TEAMMATE_COMPLETION_REDELIVERY=0 for legacy direct delivery. Without durable redelivery, or after expiry, the settled result remains inspectable via observe and agent:// resources.",
     }),
   ),
 
@@ -244,13 +249,13 @@ export const TeammateParams = Type.Object({
   model: Type.Optional(
     Type.String({
       description:
-        "Exact provider/model default from the injected available model catalog. Per-task model takes precedence. Omit unless the user explicitly requests this model — an omitted model inherits the main session's current model, then configured task-type/role routing, then the child's own default. An id outside the current model catalog fails fast at dispatch with 'Unknown teammate model specifier'.",
+        "Exact model registration default from the injected available catalog. Per-task model takes precedence. In model-registry mode this is a canonical registration id or configured alias, not an adapter selector. Omit unless the user explicitly requests this model; an omitted model inherits routing defaults. An id outside the current catalog fails fast at dispatch.",
     }),
   ),
   fallbackModels: Type.Optional(
     Type.Array(Type.String(), {
       description:
-        "Ordered provider/model fallback chain. Per-task fallbackModels takes precedence.",
+        "Ordered model registration fallback chain. Per-task fallbackModels takes precedence.",
     }),
   ),
   thinking: Type.Optional(ThinkingLevel),

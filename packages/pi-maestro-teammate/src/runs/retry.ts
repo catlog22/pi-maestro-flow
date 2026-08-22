@@ -93,7 +93,7 @@ const NON_RETRYABLE_ERROR =
 // matched explicitly so the unknown-failure default below can stay retryable
 // without relaunching doomed runs.
 const LOCAL_INFRASTRUCTURE_ERROR =
-  /\b(?:failed to spawn pi subprocess|teammate runtime error|teammate child process exited abnormally)\b/i;
+  /\b(?:failed to spawn pi subprocess|teammate runtime error|teammate child process exited abnormally|child exited before the correction prompt started|partial response was not accepted as success)\b/i;
 
 // A configured model can exist in the local catalog while the upstream
 // account group does not actually serve it. This is candidate-specific: a

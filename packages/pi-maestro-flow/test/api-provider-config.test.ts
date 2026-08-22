@@ -26,6 +26,7 @@ import {
 } from "../src/compaction/compaction-settings.ts";
 import {
   ALLOW_INSECURE_PROVIDER_HTTP_ENV,
+  configureCustomModelTarget,
   deleteApiProviderModelSettings,
   ensureApiRetryDefaults,
   loadApiProviderSettings,
@@ -1761,6 +1762,86 @@ test("/api-manager lists and deletes one provider without changing DeepSeek", as
   assert.match(notifications.at(-1) ?? "", /已删除/);
 });
 
+test("form Model ID field discovers gateway models via Ctrl+D and saves the selection", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-discovery-form-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  const defaultsPath = join(tempDir, "api-manager.json");
+  writeFileSync(modelsPath, JSON.stringify({
+    providers: {
+      relay: {
+        baseUrl: "https://relay.example/v1",
+        apiKey: "sk-test",
+        name: "Relay",
+        api: "openai-completions",
+        models: [{ id: "existing", contextWindow: 128_000, maxTokens: 16_384, reasoning: true }],
+      },
+    },
+  }, null, 2));
+
+  const fetchCalls: Array<{ url: string; authorization?: string }> = [];
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    fetchCalls.push({
+      url: String(input),
+      authorization: (init?.headers as Record<string, string> | undefined)?.authorization,
+    });
+    return new Response(JSON.stringify({ data: ["model-a", "model-b"] }), { status: 200 });
+  }) as typeof fetch;
+
+  const pi = { registerProvider() {}, unregisterProvider() {} } as any;
+
+  // Capture the form overlay so the test can drive it like a real TUI session.
+  let overlayFactory: ((tui: any, theme: any, keybindings: any, done: (value: any) => void) => unknown) | undefined;
+  let resolveCustom: (value: unknown) => void = () => {};
+  const theme = { fg: (_role: string, text: string) => text, bold: (text: string) => text };
+  const ctx = {
+    hasUI: true,
+    cwd: tempDir,
+    modelRegistry: { refresh() {}, getAll() { return []; } },
+    ui: {
+      custom<T>(factory: (tui: any, theme: any, keybindings: any, done: (value: T | undefined) => void) => unknown) {
+        overlayFactory = factory as typeof overlayFactory;
+        return new Promise<T | undefined>((resolve) => {
+          resolveCustom = resolve as unknown as (value: unknown) => void;
+        });
+      },
+      async confirm() { return true; },
+      async select() { throw new Error("picker must run inside the form overlay"); },
+      async input() { throw new Error("unexpected input prompt"); },
+      notify() {},
+    },
+  } as any;
+
+  const run = configureCustomModelTarget(pi, "relay", { modelId: null, adding: true }, ctx, modelsPath, defaultsPath);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(overlayFactory, "form overlay must open for the add path");
+
+  // Instantiate the captured overlay once; its done() resolves the form promise.
+  const overlay = overlayFactory!({ requestRender() {} }, theme, {}, resolveCustom) as { handleInput(data: string): void; render(width: number): string[] };
+  overlay.render(80);
+  for (let index = 0; index < 20; index += 1) {
+    if (overlay.render(80).join("\n").includes("› Model ID")) break;
+    overlay.handleInput("\x1b[B");
+  }
+  assert.match(overlay.render(80).join("\n"), /Ctrl\+D 识别模型/);
+  overlay.handleInput("\x04"); // Ctrl+D → probe /models with the form's connection values
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.match(overlay.render(80).join("\n"), /\[ \] model-a/);
+  overlay.handleInput(" "); // 勾选 model-a（model-b 已配置过滤外，不出现）
+  overlay.handleInput("\r"); // 确认回填
+  overlay.handleInput("\x13"); // Ctrl+S 提交表单
+  await run;
+
+  assert.deepEqual(fetchCalls, [{ url: "https://relay.example/v1/models", authorization: "Bearer sk-test" }]);
+  const saved = JSON.parse(readFileSync(modelsPath, "utf8"));
+  const ids = saved.providers.relay.models.map((model: any) => model.id);
+  assert.ok(ids.includes("existing"), "previously configured model must survive");
+  assert.ok(ids.includes("model-a"), "discovered selection must be saved");
+  assert.ok(!ids.includes("model-b"), "unselected discovered model must not be saved");
+});
+
 test("models.json custom API settings preserve DeepSeek models", async (t) => {
   const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-config-"));
   t.after(() => rmSync(tempDir, { recursive: true, force: true }));
@@ -1853,6 +1934,7 @@ test("/effort renders canonical capability order with current marker", async (t)
     "medium（当前）",
     "high",
     "xhigh",
+    "⚙ 管理思考等级…",
   ]);
   assert.equal(title, "选择思考强度（当前：medium）");
   assert.deepEqual(applied, ["high"]);
@@ -1883,7 +1965,7 @@ test("/effort filters unsupported canonical levels", async (t) => {
       notify() {},
     },
   });
-  assert.deepEqual(rendered, ["low", "medium（当前）", "high"]);
+  assert.deepEqual(rendered, ["low", "medium（当前）", "high", "⚙ 管理思考等级…"]);
 });
 
 test("/effort offers max when the model maps a max wire value", async (t) => {
@@ -1910,7 +1992,7 @@ test("/effort offers max when the model maps a max wire value", async (t) => {
     },
   });
   assert.ok(rendered.includes("max"));
-  assert.equal(rendered.at(-1), "max");
+  assert.deepEqual(rendered.slice(-2), ["max", "⚙ 管理思考等级…"]);
 });
 
 test("/effort persists API Manager and system providers by model key", async (t) => {
@@ -2164,6 +2246,183 @@ test("/effort cancellation and missing model are no-ops", async (t) => {
   assert.equal(notifications.at(-1)?.type, "warning");
   assert.equal(notifications.at(-1)?.message, "当前没有模型，无法调整思考强度。");
   assert.deepEqual(applied, []);
+});
+
+/** Scripted UI for /effort management flows: queues select returns/inputs, records rendered options. */
+function createEffortManagementUi(options: {
+  selects: Array<string | undefined>;
+  inputs?: string[];
+}) {
+  const state = {
+    rendered: [] as string[],
+    titles: [] as string[],
+    notifications: [] as Array<{ message: string; type: string }>,
+  };
+  return {
+    state,
+    ui: {
+      async select(title: string, opts: string[]) {
+        state.titles.push(title);
+        state.rendered = opts;
+        return options.selects.shift();
+      },
+      async input(_title: string, _initial: string) {
+        return options.inputs?.shift();
+      },
+      notify(message: string, type: string) { state.notifications.push({ message, type }); },
+      setStatus() {},
+    },
+  } as any;
+}
+
+const EFFORT_MANAGE_LABEL = "⚙ 管理思考等级…";
+
+test("/effort management adds a named alias mapped to a canonical level", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-mgmt-add-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const defaultsPath = join(tempDir, "api-manager.json");
+  const applied: string[] = [];
+  const harness = createEffortHarness({
+    modelsPath: join(tempDir, "models.json"),
+    defaultsPath,
+    apply(level) { applied.push(level); },
+  });
+  const view = createEffortManagementUi({
+    // picker → manage → add → name → target xhigh → picker shows alias → pick it
+    selects: [EFFORT_MANAGE_LABEL, "➕ 新增等级", "xhigh", "深度 → xhigh"],
+    inputs: ["深度"],
+  });
+  await harness.command.handler("", {
+    model: { provider: "openai", id: "gpt", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
+    get ui() { return view.ui; },
+  });
+  const saved = JSON.parse(readFileSync(defaultsPath, "utf8"));
+  assert.equal(saved.effortLevels.entries.at(-1).name, "深度");
+  assert.equal(saved.effortLevels.entries.at(-1).level, "xhigh");
+  assert.equal(saved.effortLevels.entries.length, 8);
+  assert.ok(view.state.rendered.includes("深度 → xhigh"));
+  assert.deepEqual(applied, ["xhigh"]);
+});
+
+test("/effort management deletes a default level and hides it from the picker", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-mgmt-remove-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const defaultsPath = join(tempDir, "api-manager.json");
+  const harness = createEffortHarness({
+    modelsPath: join(tempDir, "models.json"),
+    defaultsPath,
+  });
+  const view = createEffortManagementUi({
+    // picker → manage → remove → pick "off" → picker re-renders without "off"
+    selects: [EFFORT_MANAGE_LABEL, "🗑 删除等级", "off", undefined],
+  });
+  await harness.command.handler("", {
+    model: { provider: "openai", id: "gpt", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
+    get ui() { return view.ui; },
+  });
+  const saved = JSON.parse(readFileSync(defaultsPath, "utf8"));
+  assert.equal(saved.effortLevels.entries.length, 6);
+  assert.ok(saved.effortLevels.entries.every((entry: any) => entry.name !== "off"));
+  assert.ok(!view.state.rendered.includes("off"));
+});
+
+test("/effort management renames an entry and applies it under the new name", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-mgmt-rename-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const defaultsPath = join(tempDir, "api-manager.json");
+  const applied: string[] = [];
+  const harness = createEffortHarness({
+    modelsPath: join(tempDir, "models.json"),
+    defaultsPath,
+    apply(level) { applied.push(level); },
+  });
+  const view = createEffortManagementUi({
+    // picker → manage → rename → pick "high" → new name → picker → pick renamed entry
+    selects: [EFFORT_MANAGE_LABEL, "✏ 重命名", "high", "高 → high"],
+    inputs: ["高"],
+  });
+  await harness.command.handler("", {
+    model: { provider: "openai", id: "gpt", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
+    get ui() { return view.ui; },
+  });
+  const saved = JSON.parse(readFileSync(defaultsPath, "utf8"));
+  const renamed = saved.effortLevels.entries.find((entry: any) => entry.level === "high");
+  assert.equal(renamed.name, "高");
+  assert.deepEqual(applied, ["high"]);
+  assert.equal(view.state.notifications.at(-1)?.message, "思考强度已设为 high");
+});
+
+test("/effort management rejects duplicate names without writing", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-mgmt-dup-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const defaultsPath = join(tempDir, "api-manager.json");
+  const harness = createEffortHarness({
+    modelsPath: join(tempDir, "models.json"),
+    defaultsPath,
+  });
+  const view = createEffortManagementUi({
+    selects: [EFFORT_MANAGE_LABEL, "➕ 新增等级", undefined],
+    inputs: ["high"],
+  });
+  await harness.command.handler("", {
+    model: { provider: "openai", id: "gpt", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
+    get ui() { return view.ui; },
+  });
+  assert.equal(view.state.notifications.at(-1)?.type, "warning");
+  assert.match(view.state.notifications.at(-1)?.message ?? "", /已存在/);
+  assert.equal(existsSync(defaultsPath), false);
+});
+
+test("/effort management keeps at least one entry", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-mgmt-last-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const defaultsPath = join(tempDir, "api-manager.json");
+  writeFileSync(defaultsPath, JSON.stringify({
+    version: 1,
+    effortLevels: { entries: [{ name: "only", level: "low" }] },
+  }));
+  const harness = createEffortHarness({
+    modelsPath: join(tempDir, "models.json"),
+    defaultsPath,
+  });
+  const view = createEffortManagementUi({
+    selects: [EFFORT_MANAGE_LABEL, "🗑 删除等级", undefined],
+  });
+  await harness.command.handler("", {
+    model: { provider: "openai", id: "gpt", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
+    get ui() { return view.ui; },
+  });
+  assert.equal(view.state.notifications.at(-1)?.type, "warning");
+  assert.match(view.state.notifications.at(-1)?.message ?? "", /至少保留一个思考等级/);
+  const saved = JSON.parse(readFileSync(defaultsPath, "utf8"));
+  assert.equal(saved.effortLevels.entries.length, 1);
+});
+
+test("/effort management restores defaults by removing the persisted section", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-mgmt-reset-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const defaultsPath = join(tempDir, "api-manager.json");
+  writeFileSync(defaultsPath, JSON.stringify({
+    version: 1,
+    effortLevels: { entries: [{ name: "深度", level: "xhigh" }] },
+    modelDefaults: { "openai/gpt": "low" },
+  }));
+  const harness = createEffortHarness({
+    modelsPath: join(tempDir, "models.json"),
+    defaultsPath,
+  });
+  const view = createEffortManagementUi({
+    selects: [EFFORT_MANAGE_LABEL, "♻ 恢复默认", undefined],
+  });
+  await harness.command.handler("", {
+    model: { provider: "openai", id: "gpt", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
+    get ui() { return view.ui; },
+  });
+  const saved = JSON.parse(readFileSync(defaultsPath, "utf8"));
+  assert.equal("effortLevels" in saved, false);
+  assert.deepEqual(saved.modelDefaults, { "openai/gpt": "low" });
+  assert.ok(view.state.rendered.includes("off"));
+  assert.ok(!view.state.rendered.includes("深度 → xhigh"));
 });
 
 test("/effort persistence failure preserves existing default bytes and runtime", async (t) => {

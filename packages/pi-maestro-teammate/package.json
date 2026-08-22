@@ -4,6 +4,7 @@
   "description": "Pi extension — teammate agent dispatch with DAG task graphs, RPC messaging, and compact TUI",
   "type": "module",
   "bin": {
+    "pi-teammate-models": "./bin/pi-teammate-models.mjs",
     "pi-teammate-remote": "./bin/pi-teammate-remote.mjs"
   },
   "keywords": [
@@ -68,6 +69,10 @@
     "./v1/cli-tools": {
       "types": "./types/public/v1/cli-tools.d.ts",
       "default": "./src/public/v1/cli-tools.ts"
+    },
+    "./v1/completion-durability": {
+      "types": "./types/public/v1/completion-durability.d.ts",
+      "default": "./src/public/v1/completion-durability.ts"
     },
     "./v1/mailbox": {
       "types": "./types/public/v1/mailbox.d.ts",

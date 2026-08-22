@@ -117,6 +117,8 @@ test("genuine permanent errors stay non-retryable and not fallback-eligible", ()
   assert.equal(classifyRetryError("context_length_exceeded"), "non-retryable");
   assert.equal(classifyRetryError("invalid model: gpt-9"), "non-retryable");
   assert.equal(classifyRetryError("validation error"), "non-retryable");
+  assert.equal(classifyRetryError("the child exited before the correction prompt started"), "non-retryable");
+  assert.equal(classifyRetryError("the partial response was not accepted as success"), "non-retryable");
   assert.equal(isFallbackProviderError("context_length_exceeded"), false);
 });
 

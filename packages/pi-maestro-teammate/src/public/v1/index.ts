@@ -12,6 +12,7 @@ export * from "./agents.ts";
 export * from "./backends.ts";
 export * from "./child-extensions.ts";
 export * from "./cli-tools.ts";
+export * from "./completion-durability.ts";
 export * from "./events.ts";
 export * from "./execution.ts";
 export * from "./extension.ts";

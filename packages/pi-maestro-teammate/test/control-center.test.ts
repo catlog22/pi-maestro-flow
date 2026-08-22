@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { AttachOverlay } from "../src/tui/attach-overlay.ts";
 import {
   TeammateControlCenter,
+  showModelMappingOverlay,
   type ControlCenterActiveAgent,
 } from "../src/tui/model-mapping-overlay.ts";
 import type { AgentConfig } from "../src/agents/agents.ts";
@@ -155,10 +159,10 @@ function remoteState(): RemoteConfigState {
   };
 }
 
-test("remotes tab renders the pane and forwards pane actions with scope", () => {
-  const { center, closed } = makeCenter({ initialTab: "remotes", remoteState: remoteState() });
+test("connections tab renders the pane and forwards pane actions with scope", () => {
+  const { center, closed } = makeCenter({ initialTab: "connections", remoteState: remoteState() });
   const wide = center.render(100).join("\n");
-  assert.match(wide, /Remote targets/);
+  assert.match(wide, /Connections/);
   assert.match(wide, /\[global ●\]/);
   assert.match(wide, /\[H\] linux-a/);
   assert.match(wide, /\[T\] linux-a\/pi/);
@@ -172,15 +176,26 @@ test("remotes tab renders the pane and forwards pane actions with scope", () => 
 
   center.handleInput("\t");
   const afterTab = center.render(100).join("\n");
-  assert.match(afterTab, /Remotes 2/);
+  assert.match(afterTab, /Connections 2/);
   assert.match(afterTab, /\[Active 2\]/);
 });
 
-test("remotes tab without remote state falls back to the standard list view", () => {
-  const { center } = makeCenter({ initialTab: "remotes" });
+test("connections tab without remote state falls back to the standard list view", () => {
+  const { center } = makeCenter({ initialTab: "connections" });
   const wide = center.render(100).join("\n");
-  assert.match(wide, /Remotes 0/);
+  assert.match(wide, /Connections 0/);
   assert.match(wide, /Active/);
+});
+
+test("connections keeps the stable roles-to-active tab order and zh-CN label", () => {
+  const { center } = makeCenter({ initialTab: "roles" });
+  center.handleInput("\x1b[C");
+  assert.match(center.render(100).join("\n"), /\[Connections 0\]/);
+  center.handleInput("\x1b[C");
+  assert.match(center.render(100).join("\n"), /\[Active 2\]/);
+
+  const localized = makeCenter({ initialTab: "connections", locale: "zh-CN" }).center;
+  assert.match(localized.render(100).join("\n"), /\[连接 0\]/);
 });
 
 test("active detail shows the resolved working location", () => {
@@ -964,4 +979,153 @@ test("role assigned type shows the type model ahead of its role model override",
   assert.match(settings, /analysis · routes to openai\/gpt-5/);
   center.handleInput("\x1b[B");
   assert.match(center.render(100).join("\n"), /anthropic\/sonnet · fallback behind analysis/);
+});
+
+function registryDocument(): Record<string, unknown> {
+  return {
+    version: 2,
+    mode: "model-registry",
+    default: "local",
+    defaultModel: "fast-model",
+    backends: { local: { module: "pi-subprocess" } },
+    models: {
+      "fast-model": {
+        modelId: "provider/fast",
+        deployment: "local",
+        selector: { kind: "adapter-model", value: "provider/fast" },
+        deploymentDefault: true,
+      },
+    },
+  };
+}
+
+function writeManifest(cwd: string, document: Record<string, unknown>): string {
+  const file = path.join(cwd, ".pi", "teammate-backends.json");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, `${JSON.stringify(document, null, 2)}\n`, "utf8");
+  return file;
+}
+
+test("deployment edit routes through the connections wizard and refreshes the catalog", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "control-center-edit-"));
+  const file = writeManifest(cwd, registryDocument());
+  let overlays = 0;
+  let refreshes = 0;
+  let inputCalls = 0;
+  const ctx = {
+    cwd,
+    ui: {
+      custom(factory: (...args: unknown[]) => { render(width: number): string[]; handleInput(data: string): void }) {
+        return new Promise((resolve) => {
+          const component = factory({ requestRender() {} }, theme, {}, resolve);
+          if (overlays++ === 0) {
+            component.handleInput("\x1b[C");
+            component.handleInput("\x1b[C");
+            assert.match(component.render(100).join("\n"), /\[D\] fast-model/);
+            component.handleInput("\r");
+          } else {
+            component.handleInput("\x1b");
+          }
+        });
+      },
+      async select(_prompt: string, choices: string[]) { return choices[0]; },
+      async input() { return inputCalls++ === 0 ? "4000" : ""; },
+      async confirm() { return true; },
+      notify() {},
+    },
+  } as never;
+  try {
+    await showModelMappingOverlay(ctx, [], {
+      remoteState: remoteState(),
+      refreshModelCatalog: () => {
+        refreshes += 1;
+        return [{ id: "fast-model", reasoning: false }];
+      },
+    });
+    const written = JSON.parse(fs.readFileSync(file, "utf8")) as {
+      backends: { local: { config?: Record<string, unknown> } };
+    };
+    assert.equal(written.backends.local.config?.firstActivityTimeoutMs, 4000);
+    assert.equal(refreshes, 1);
+    assert.equal(overlays, 2);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("add deployment is reachable from the connections pane", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "control-center-add-"));
+  writeManifest(cwd, registryDocument());
+  let overlays = 0;
+  const prompts: string[] = [];
+  const ctx = {
+    cwd,
+    ui: {
+      custom(factory: (...args: unknown[]) => { handleInput(data: string): void }) {
+        return new Promise((resolve) => {
+          const component = factory({ requestRender() {} }, theme, {}, resolve);
+          if (overlays++ === 0) {
+            component.handleInput("\x1b[C");
+            component.handleInput("\x1b[C");
+            component.handleInput("a");
+          } else {
+            component.handleInput("\x1b");
+          }
+        });
+      },
+      async select(prompt: string) { prompts.push(prompt); return undefined; },
+      async input() { return undefined; },
+      async confirm() { return false; },
+      notify() {},
+    },
+  } as never;
+  try {
+    await showModelMappingOverlay(ctx, [], { remoteState: remoteState() });
+    assert.deepEqual(prompts, ["Backend family"]);
+    assert.equal(overlays, 2);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("legacy registry row routes to the upgrade wizard preview", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "control-center-legacy-"));
+  writeManifest(cwd, {
+    version: 1,
+    default: "legacy",
+    backends: { legacy: { module: "pi-subprocess" } },
+  });
+  let overlays = 0;
+  const confirmations: string[] = [];
+  const ctx = {
+    cwd,
+    ui: {
+      custom(factory: (...args: unknown[]) => { render(width: number): string[]; handleInput(data: string): void }) {
+        return new Promise((resolve) => {
+          const component = factory({ requestRender() {} }, theme, {}, resolve);
+          if (overlays++ === 0) {
+            component.handleInput("\x1b[C");
+            component.handleInput("\x1b[C");
+            assert.match(component.render(100).join("\n"), /Legacy registry document/);
+            component.handleInput("\r");
+          } else {
+            component.handleInput("\x1b");
+          }
+        });
+      },
+      async select() { return undefined; },
+      async input() { return undefined; },
+      async confirm(prompt: string) { confirmations.push(prompt); return false; },
+      notify() {},
+    },
+  } as never;
+  try {
+    await showModelMappingOverlay(ctx, [], { remoteState: remoteState() });
+    assert.equal(confirmations.length, 1);
+    assert.match(confirmations[0]!, /computed v2 skeleton/);
+    assert.match(confirmations[0]!, /legacy file will not be changed/i);
+    assert.equal(fs.existsSync(path.join(cwd, ".pi", "teammate-backends.json.upgraded.json")), false);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
 });

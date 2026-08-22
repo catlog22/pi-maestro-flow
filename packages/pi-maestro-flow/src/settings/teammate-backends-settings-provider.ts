@@ -54,6 +54,49 @@ const MODE_KEY = "teammateBackends.mode";
 const DEFAULT_KEY = "teammateBackends.default";
 const GROUP_DISPATCH = "teammateBackends.group.dispatch";
 
+const BASE_CATALOGS = {
+  en: {
+    "teammateBackends.provider": "Teammate backends",
+    "teammateBackends.provider.description": "Execution mode, default deployment, and backend configuration",
+    "teammateBackends.group.dispatch": "Dispatch",
+    "teammateBackends.mode": "Execution mode",
+    "teammateBackends.mode.description": "Select the dispatch authority used for the next invocation.",
+    "teammateBackends.mode.legacy": "Legacy",
+    "teammateBackends.mode.registry": "Backend registry",
+    "teammateBackends.mode.modelRegistry": "Model registry",
+    "teammateBackends.default": "Default deployment",
+    "teammateBackends.default.description": "Deployment used when a task does not select one.",
+    "teammateBackends.credentialValue.description": "Credential value stored in the backend runtime's owner-only environment file.",
+    "teammateBackends.error.documentMalformed": "The backend registration document at {path} is malformed.",
+    "teammateBackends.error.unknownKey": "Unknown teammate backend setting: {key}",
+    "teammateBackends.error.invalidMode": "Unsupported teammate execution mode.",
+    "teammateBackends.error.unknownBackend": "The selected backend deployment is not registered.",
+    "teammateBackends.error.credentialNameInvalid": "The credential variable name for {field} is invalid.",
+    "teammateBackends.error.credentialNameMissing": "Set the credential variable name for {field} before its value.",
+    "teammateBackends.error.credentialValueInvalid": "The credential value for {field} contains an unsupported control character.",
+  },
+  "zh-CN": {
+    "teammateBackends.provider": "Teammate 后端",
+    "teammateBackends.provider.description": "执行模式、默认部署与后端配置",
+    "teammateBackends.group.dispatch": "分派",
+    "teammateBackends.mode": "执行模式",
+    "teammateBackends.mode.description": "选择下一次调用使用的分派来源。",
+    "teammateBackends.mode.legacy": "旧版",
+    "teammateBackends.mode.registry": "后端注册表",
+    "teammateBackends.mode.modelRegistry": "模型注册表",
+    "teammateBackends.default": "默认部署",
+    "teammateBackends.default.description": "任务未指定部署时使用的默认值。",
+    "teammateBackends.credentialValue.description": "凭据值存储在后端运行时仅所有者可读的环境文件中。",
+    "teammateBackends.error.documentMalformed": "后端注册文档 {path} 格式错误。",
+    "teammateBackends.error.unknownKey": "未知的 Teammate 后端设置：{key}",
+    "teammateBackends.error.invalidMode": "不支持的 Teammate 执行模式。",
+    "teammateBackends.error.unknownBackend": "所选后端部署尚未注册。",
+    "teammateBackends.error.credentialNameInvalid": "{field} 的凭据变量名无效。",
+    "teammateBackends.error.credentialNameMissing": "请先设置 {field} 的凭据变量名，再设置其值。",
+    "teammateBackends.error.credentialValueInvalid": "{field} 的凭据值包含不支持的控制字符。",
+  },
+} as const;
+
 /**
  * Registration the document falls back to.
  *
@@ -119,11 +162,26 @@ export interface TeammateBackendsSettingsOptions {
   credentialRoot?: string;
 }
 
-/** The registration document as stored on disk. */
-interface Document {
+/** One deployment registration as stored on disk. Unknown fields are retained. */
+interface RegistrationDocument extends Record<string, unknown> {
+  module?: unknown;
+  config?: Record<string, JsonValue>;
+}
+
+/** The registration document as stored on disk. Unknown fields are retained. */
+interface Document extends Record<string, unknown> {
+  version?: unknown;
   mode?: TeammateExecutionMode;
   default?: string;
-  backends?: Record<string, { module?: string; config?: Record<string, JsonValue> }>;
+  defaultModel?: unknown;
+  backends?: Record<string, RegistrationDocument>;
+  models?: unknown;
+  compatibility?: unknown;
+}
+
+interface DeploymentDescriptor extends BackendDescriptor {
+  /** Exact key of this deployment in the registration document. */
+  name: string;
 }
 
 /** Setting key for one backend field. */
@@ -208,6 +266,25 @@ function readDocument(path: string): { document: Document; raw: string; malforme
   }
 }
 
+/** Narrow an unknown JSON value without changing it. */
+function jsonObject(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+/** Read an exact deployment registration without accepting prototype keys. */
+function registrationOf(document: Document, deploymentId: string): RegistrationDocument | undefined {
+  const backends = jsonObject(document.backends);
+  if (backends === undefined || !Object.hasOwn(backends, deploymentId)) return undefined;
+  return jsonObject(backends[deploymentId]) as RegistrationDocument | undefined;
+}
+
+/** Read a deployment's config when it is an object. */
+function registrationConfig(registration: RegistrationDocument | undefined): Record<string, JsonValue> {
+  return (jsonObject(registration?.config) ?? {}) as Record<string, JsonValue>;
+}
+
 /** Content hash used as the resource etag. */
 function etagOf(raw: string): string {
   return createHash("sha256").update(raw).digest("hex").slice(0, 16);
@@ -223,6 +300,8 @@ function etagOf(raw: string): string {
  * needs anyway.
  */
 const ENV_VARIABLE_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+/** Values are written as one dotenv assignment, so line/control injection fails closed. */
+const UNSAFE_CREDENTIAL_VALUE = /[\r\n\0]/;
 
 /**
  * Write a credential file, creating its directory owner-only.
@@ -244,6 +323,11 @@ function writeCredentialFile(path: string, content: string): void {
     // 0600 file mode below is the guarantee that does not depend on this.
   }
   writeFileDurableSync(path, content);
+  // Atomic replacement inherits the temporary file's mode on POSIX, but some
+  // hosts normalize it during rename. Reapply both custody boundaries after
+  // the final path exists.
+  try { chmodSync(path, 0o600); } catch { /* best effort on non-POSIX hosts */ }
+  try { chmodSync(directory, 0o700); } catch { /* see directory note above */ }
 }
 
 /**
@@ -333,6 +417,7 @@ export function createTeammateBackendsSettingsProvider(
   const staged = new Map<string, {
     document: Document;
     secrets: Map<string, EnvDocument>;
+    changedKeys: readonly string[];
     /** Etag of the document this transaction was prepared against. */
     etag: string;
     /** When this transaction was prepared, for expiry. */
@@ -354,11 +439,96 @@ export function createTeammateBackendsSettingsProvider(
     }
   };
 
-  const credentialPath = (backend: string): string => join(credentialRoot, backend, ".env");
+  const credentialDirectory = (deploymentId: string): string => {
+    if (/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(deploymentId)
+      && deploymentId !== "." && deploymentId !== "..") return deploymentId;
+    return `_deployment-${createHash("sha256").update(deploymentId).digest("hex").slice(0, 16)}`;
+  };
+
+  const credentialPath = (backend: string): string =>
+    join(credentialRoot, credentialDirectory(backend), ".env");
+
+  /**
+   * Bind stored deployment ids to shipped descriptors by exact module.
+   *
+   * A descriptor name is only offered as a new registration when the document
+   * does not already occupy that exact key. This prevents a third-party
+   * deployment called `dsh` from being edited with DSH's field declaration.
+   */
+  const deploymentDescriptors = (document: Document): DeploymentDescriptor[] => {
+    const deployments = new Map<string, DeploymentDescriptor>();
+    const backends = jsonObject(document.backends) ?? {};
+    for (const [deploymentId, rawRegistration] of Object.entries(backends)) {
+      const registration = jsonObject(rawRegistration);
+      const module = registration?.module;
+      if (typeof module !== "string") continue;
+      const descriptor = options.backends.find((candidate) => candidate.module === module);
+      if (descriptor !== undefined) deployments.set(deploymentId, { ...descriptor, name: deploymentId });
+    }
+    for (const descriptor of options.backends) {
+      if (!Object.hasOwn(backends, descriptor.name)) deployments.set(descriptor.name, descriptor);
+    }
+    return [...deployments.values()];
+  };
+
+  const availableDeploymentIds = (document: Document): string[] => {
+    const ids = new Set(deploymentDescriptors(document).map((deployment) => deployment.name));
+    for (const id of Object.keys(jsonObject(document.backends) ?? {})) ids.add(id);
+    return [...ids];
+  };
+
+  const deploymentField = (
+    document: Document,
+    key: string,
+  ): { deployment: DeploymentDescriptor; field: BackendConfigField; secret: boolean } | undefined => {
+    for (const deployment of deploymentDescriptors(document)) {
+      for (const field of deployment.configFields ?? []) {
+        if (key === fieldKey(deployment.name, field.key)) {
+          return { deployment, field, secret: false };
+        }
+        if (servesCredential(field) && key === secretKey(deployment.name, field.key)) {
+          return { deployment, field, secret: true };
+        }
+      }
+    }
+    return undefined;
+  };
+
+  const catalogs = (document: Document) => {
+    const en: Record<string, string> = { ...BASE_CATALOGS.en };
+    const zh: Record<string, string> = { ...BASE_CATALOGS["zh-CN"] };
+    const add = (key: string, english: string, chinese = english): void => {
+      en[key] ??= english;
+      zh[key] ??= chinese;
+    };
+    const labelOf = (value: string): string => {
+      const spaced = value
+        .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+        .replace(/[._-]+/g, " ")
+        .trim();
+      return spaced.length === 0 ? value : `${spaced[0]!.toUpperCase()}${spaced.slice(1)}`;
+    };
+    for (const deployment of deploymentDescriptors(document)) {
+      const deploymentLabel = labelOf(deployment.name);
+      add(`teammateBackends.group.${deployment.name}`, deploymentLabel);
+      add(`teammateBackends.backend.${deployment.name}`, deploymentLabel);
+      for (const field of deployment.configFields ?? []) {
+        const fieldLabel = labelOf(field.key);
+        add(field.labelKey, fieldLabel);
+        if (field.descriptionKey !== undefined) {
+          add(field.descriptionKey, `Configure ${fieldLabel}.`, `配置${fieldLabel}。`);
+        }
+        if (servesCredential(field)) add(`${field.labelKey}.value`, `${fieldLabel} value`, `${fieldLabel}值`);
+        for (const option of field.options ?? []) add(option.labelKey, labelOf(String(option.value)));
+      }
+    }
+    return { en, "zh-CN": zh };
+  };
 
   const resource = (): SettingsResource => ({ providerId: PROVIDER_ID, scope: "project", id: DOCUMENT_ID });
 
-  const definitions = (): SettingDefinition[] => {
+  const definitions = (document = readDocument(documentPath).document): SettingDefinition[] => {
+    const deployments = deploymentDescriptors(document);
     const list: SettingDefinition[] = [
       {
         key: MODE_KEY,
@@ -379,6 +549,7 @@ export function createTeammateBackendsSettingsProvider(
           options: [
             { value: "legacy", labelKey: "teammateBackends.mode.legacy" },
             { value: "backend-registry", labelKey: "teammateBackends.mode.registry" },
+            { value: "model-registry", labelKey: "teammateBackends.mode.modelRegistry" },
           ],
         },
       },
@@ -396,15 +567,15 @@ export function createTeammateBackendsSettingsProvider(
         reversibility: "full",
         editor: {
           kind: "enum",
-          options: options.backends.map((backend) => ({
-            value: backend.name,
-            labelKey: `teammateBackends.backend.${backend.name}`,
+          options: availableDeploymentIds(document).map((deploymentId) => ({
+            value: deploymentId,
+            labelKey: `teammateBackends.backend.${deploymentId}`,
           })),
         },
       },
     ];
 
-    for (const backend of options.backends) {
+    for (const backend of deployments) {
       let order = 0;
       for (const field of backend.configFields ?? []) {
         order += 1;
@@ -465,8 +636,8 @@ export function createTeammateBackendsSettingsProvider(
     record(MODE_KEY, document.mode, "legacy", "project");
     record(DEFAULT_KEY, document.default, "pi-subprocess", "project");
 
-    for (const backend of options.backends) {
-      const stored = document.backends?.[backend.name]?.config ?? {};
+    for (const backend of deploymentDescriptors(document)) {
+      const stored = registrationConfig(registrationOf(document, backend.name));
       const envDocument = readEnvDocument(credentialPath(backend.name));
       for (const field of backend.configFields ?? []) {
         record(
@@ -515,7 +686,7 @@ export function createTeammateBackendsSettingsProvider(
     const etag = etagOf(raw);
     const secrets = new Map<string, EnvDocument>();
     const issues: SettingsValidationIssue[] = [];
-    if (malformed) {
+    if (malformed || (document.backends !== undefined && jsonObject(document.backends) === undefined)) {
       issues.push({
         severity: "error",
         code: "document-malformed",
@@ -524,7 +695,7 @@ export function createTeammateBackendsSettingsProvider(
       });
       return { document, secrets, issues, etag };
     }
-    const known = new Map(definitions().map((definition) => [definition.key, definition]));
+    const known = new Map(definitions(document).map((definition) => [definition.key, definition]));
 
     for (const change of changes) {
       const definition = known.get(change.key);
@@ -541,8 +712,9 @@ export function createTeammateBackendsSettingsProvider(
 
       if (change.key === MODE_KEY) {
         if (change.operation === "unset") delete document.mode;
-        else if (change.value === "legacy" || change.value === "backend-registry") document.mode = change.value;
-        else {
+        else if (change.value === "legacy" || change.value === "backend-registry" || change.value === "model-registry") {
+          document.mode = change.value;
+        } else {
           issues.push({
             severity: "error",
             code: "invalid-mode",
@@ -556,7 +728,7 @@ export function createTeammateBackendsSettingsProvider(
 
       if (change.key === DEFAULT_KEY) {
         if (change.operation === "unset") delete document.default;
-        else if (options.backends.some((backend) => backend.name === change.value)) {
+        else if (availableDeploymentIds(document).includes(String(change.value))) {
           document.default = String(change.value);
         } else {
           issues.push({
@@ -570,14 +742,10 @@ export function createTeammateBackendsSettingsProvider(
         continue;
       }
 
-      const owner = options.backends.find((backend) =>
-        change.key.startsWith(`teammateBackends.${backend.name}.`));
-      if (owner === undefined) continue;
-      const remainder = change.key.slice(`teammateBackends.${owner.name}.`.length);
-      const isSecret = remainder.endsWith(".value");
-      const fieldName = isSecret ? remainder.slice(0, -".value".length) : remainder;
-      const field = (owner.configFields ?? []).find((candidate) => candidate.key === fieldName);
-      if (field === undefined) continue;
+      const selected = deploymentField(document, change.key);
+      if (selected === undefined) continue;
+      const { deployment: owner, field, secret: isSecret } = selected;
+      const fieldName = field.key;
 
       if (!isSecret) {
         // A credential reference names a lookup. Rejecting anything that is not
@@ -599,11 +767,10 @@ export function createTeammateBackendsSettingsProvider(
           }
         }
         document.backends ??= {};
-        document.backends[owner.name] ??= { module: owner.module };
-        // An entry written by an earlier release recorded the backend name as
-        // its module; repair it instead of leaving a document that cannot load.
-        document.backends[owner.name]!.module = owner.module;
-        const config = (document.backends[owner.name]!.config ??= {});
+        const registration = (document.backends[owner.name] ??= { module: owner.module });
+        // Existing deployments reached this branch only through an exact
+        // module match. Never rewrite their module or any sibling field.
+        const config = (registration.config ??= {});
         // The default when the document never recorded one: that is the name a
         // stored value is actually under, so a rename away from it must carry.
         const previous = config[fieldName] ?? (field.default as JsonValue | undefined);
@@ -627,7 +794,8 @@ export function createTeammateBackendsSettingsProvider(
         continue;
       }
 
-      const variable = (document.backends?.[owner.name]?.config?.[fieldName] ?? field.default) as string | undefined;
+      const variable = (registrationConfig(registrationOf(document, owner.name))[fieldName]
+        ?? field.default) as string | undefined;
       if (variable === undefined) {
         issues.push({
           severity: "error",
@@ -650,7 +818,17 @@ export function createTeammateBackendsSettingsProvider(
       }
       const entries = secrets.get(owner.name) ?? readEnvDocument(credentialPath(owner.name));
       if (change.operation === "unset") deleteEnvValue(entries, variable);
-      else if (typeof change.value === "string" && change.value !== SETTINGS_SECRET_SET_PLACEHOLDER) {
+      else if (typeof change.value !== "string" || UNSAFE_CREDENTIAL_VALUE.test(change.value)) {
+        issues.push({
+          severity: "error",
+          code: "credential-value-invalid",
+          messageKey: "teammateBackends.error.credentialValueInvalid",
+          // Never include the rejected value: this is a write-only secret.
+          params: { field: fieldName },
+          key: change.key,
+        });
+        continue;
+      } else if (change.value !== SETTINGS_SECRET_SET_PLACEHOLDER) {
         setEnvValue(entries, variable, change.value);
       }
       secrets.set(owner.name, entries);
@@ -666,6 +844,7 @@ export function createTeammateBackendsSettingsProvider(
 
   return {
     describe(_request: { context: SettingsContextV1 }) {
+      const { document } = readDocument(documentPath);
       return {
         id: PROVIDER_ID,
         version: PROVIDER_VERSION,
@@ -679,7 +858,8 @@ export function createTeammateBackendsSettingsProvider(
           rollback: "none" as const,
           hotUpdate: false,
         },
-        settings: definitions(),
+        settings: definitions(document),
+        catalogs: catalogs(document),
       };
     },
 
@@ -689,15 +869,14 @@ export function createTeammateBackendsSettingsProvider(
       if (request.optionsSource !== DYNAMIC_OPTIONS_SOURCE) {
         return { options: [], failure: `Unknown options source "${request.optionsSource}"` };
       }
-      // `teammateBackends.<backend>.<field>` — the same composition `fieldKey`
-      // writes, read back so the probe reaches the registration being edited
-      // rather than some default one.
-      const parts = request.key.split(".");
-      const backendName = parts[1];
-      const fieldName = parts.slice(2).join(".");
-      const descriptor = backendName === undefined
-        ? undefined
-        : options.backends.find((candidate) => candidate.name === backendName);
+      // Resolve the exact generated key back to its deployment. Deployment ids
+      // may contain dots or prefix one another, so splitting/startsWith would
+      // let one registration's editor probe another registration.
+      const { document } = readDocument(documentPath);
+      const selected = deploymentField(document, request.key);
+      const backendName = selected?.deployment.name;
+      const fieldName = selected?.field.key;
+      const descriptor = selected?.secret === false ? selected.deployment : undefined;
       if (descriptor?.listConfigOptions === undefined) {
         return { options: [], failure: `Backend "${backendName ?? request.key}" publishes no dynamic settings` };
       }
@@ -705,12 +884,11 @@ export function createTeammateBackendsSettingsProvider(
       // The probe launches whatever the document currently configures, so an
       // operator editing an unsaved command still probes the saved one. Saying
       // which values were used beats silently probing a different launch.
-      const { document } = readDocument(documentPath);
-      const config = (document.backends?.[backendName!]?.config ?? {}) as Record<string, ConfigValue>;
+      const config = registrationConfig(registrationOf(document, backendName!)) as Record<string, ConfigValue>;
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), DYNAMIC_OPTIONS_TIMEOUT_MS);
       try {
-        const published = await descriptor.listConfigOptions(fieldName, config, controller.signal);
+        const published = await descriptor.listConfigOptions(fieldName!, config, controller.signal);
         return {
           options: published.map((option) => ({
             value: option.value,
@@ -738,7 +916,13 @@ export function createTeammateBackendsSettingsProvider(
       const { document, secrets, issues, etag } = apply(request.changes);
       const valid = issues.every((issue) => issue.severity !== "error");
       if (valid) {
-        staged.set(request.transactionId, { document, secrets, etag, preparedAt: Date.now() });
+        staged.set(request.transactionId, {
+          document,
+          secrets,
+          changedKeys: request.changes.map((change) => change.key),
+          etag,
+          preparedAt: Date.now(),
+        });
       }
       return {
         prepared: valid,
@@ -778,8 +962,8 @@ export function createTeammateBackendsSettingsProvider(
       return {
         snapshot,
         revisions: snapshot.configured.resources,
-        changedKeys: [],
-        activation: [{ boundary: "next-invocation" as const, keys: [] }],
+        changedKeys: pending.changedKeys,
+        activation: [{ boundary: "next-invocation" as const, keys: pending.changedKeys }],
       };
     },
 

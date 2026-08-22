@@ -3,6 +3,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after, before } from "node:test";
+import {
+  getCompletionDurabilityRegistry,
+  type CompletionDurabilityProvider,
+} from "pi-maestro-teammate/v1/completion-durability";
 
 const {
   capturePublishedAgentResult,
@@ -341,4 +345,89 @@ test("published large result is summarized only after its canonical resource is 
   assert.match(displayed, /Full result: agent:\/\/integration-correlation$/);
   assert.equal((await readAgentOutput("integration-publication", root)).output, output);
   assert.equal((await readAgentOutput("integration-correlation", root)).output, output);
+});
+
+function durabilityProvider(overrides: Partial<CompletionDurabilityProvider>): CompletionDurabilityProvider {
+  return {
+    async beginDispatch(seed) {
+      return { dispatchId: seed.dispatchId, reservationId: seed.reservationId, deliveryGroupId: seed.deliveryGroupId };
+    },
+    async requireNotification() {},
+    async stagePublication() {},
+    async commitPublication() {},
+    async finalizeDelivery() { throw new Error("unused"); },
+    async listRecoverable() { return []; },
+    async acknowledgeApplied() {},
+    async abandonDispatch() {},
+    async prune() {},
+    ...overrides,
+  };
+}
+
+test("published capture stages before persistence and commits only after immutable readability", async () => {
+  const publicationId = "capture-order-publication";
+  const correlationId = "capture-order-correlation";
+  const order: string[] = [];
+  const registry = getCompletionDurabilityRegistry();
+  const dispose = registry.register(durabilityProvider({
+    async stagePublication(input) {
+      order.push("stage");
+      assert.equal(input.resource.publicationId, publicationId);
+      await assert.rejects(() => readAgentOutput(publicationId, root), /No persisted teammate output/);
+    },
+    async commitPublication(input) {
+      order.push("commit");
+      assert.equal(input.publicationId, publicationId);
+      assert.deepEqual((await readAgentOutput(publicationId, root)).output, { durable: true });
+    },
+  }));
+  let persistence: Promise<unknown> | undefined;
+  try {
+    assert.equal(capturePublishedAgentResult({
+      result: {
+        correlationId,
+        publicationId,
+        originCwd: root,
+        name: "capture-order",
+        agent: "general",
+        structuredOutput: { durable: true },
+        completionDispatchId: "dispatch-order",
+        completionReservationId: "reservation-order",
+        completionOutcome: "completed",
+      },
+      waitUntil(promise: Promise<unknown>) { persistence = promise; },
+    }), true);
+    assert.ok(persistence);
+    await persistence;
+    assert.deepEqual(order, ["stage", "commit"]);
+  } finally { dispose(); }
+});
+
+test("stage failure prevents immutable result persistence and acknowledgement", async () => {
+  const publicationId = "capture-stage-failure-publication";
+  const registry = getCompletionDurabilityRegistry();
+  const dispose = registry.register(durabilityProvider({
+    async stagePublication() { throw new Error("injected stage failure"); },
+  }));
+  let persistence: Promise<unknown> | undefined;
+  let acknowledged = false;
+  try {
+    capturePublishedAgentResult({
+      result: {
+        correlationId: "capture-stage-failure-correlation",
+        publicationId,
+        originCwd: root,
+        agent: "general",
+        output: "must not persist",
+        completionDispatchId: "dispatch-stage-failure",
+        completionReservationId: "reservation-stage-failure",
+      },
+      waitUntil(promise: Promise<unknown>) { persistence = promise; },
+      acknowledgeResource() { acknowledged = true; },
+    });
+    assert.ok(persistence);
+    await assert.rejects(persistence, /injected stage failure/);
+    await assert.rejects(() => readAgentOutput(publicationId, root), /No persisted teammate output/);
+    assert.equal(acknowledged, false);
+  } finally { dispose(); }
 });

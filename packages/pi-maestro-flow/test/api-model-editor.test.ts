@@ -18,6 +18,7 @@ function createOverlay(
   options: {
     validate?: (values: ApiModelFormValues) => string[];
     done?: (result: ApiModelEditorResult | undefined) => void;
+    discoverModels?: (values: ApiModelFormValues) => Promise<string[]>;
   } = {},
 ): ApiModelEditorOverlay {
   return new ApiModelEditorOverlay({
@@ -28,6 +29,7 @@ function createOverlay(
     requestRender() {},
     done: options.done ?? (() => undefined),
     validate: options.validate,
+    discoverModels: options.discoverModels,
   });
 }
 
@@ -226,4 +228,115 @@ test("API model form with unchanged sections is not dirty and cancels with a sin
   await flushInput();
   assert.deepEqual(results, [undefined]);
   assert.doesNotMatch(overlay.render(80).join("\n"), /再按 Esc 放弃/);
+});
+
+test("API model form discovers gateway models into the Model ID field via Ctrl+D", async () => {
+  let result: ApiModelEditorResult | undefined;
+  let receivedValues: ApiModelFormValues | undefined;
+  const overlay = createOverlay([
+    { id: "baseUrl", label: "Base URL", kind: "text", value: "https://relay/v1" },
+    { id: "modelId", label: "Model ID", kind: "text", value: "", discoverable: true },
+  ], {
+    done(value) { result = value; },
+    async discoverModels(values) {
+      receivedValues = { ...values } as ApiModelFormValues;
+      return ["model-a", "model-b"];
+    },
+  });
+
+  overlay.render(80);
+  overlay.handleInput("\x1b[B"); // baseUrl → modelId
+  // Footer advertises the shortcut while the discoverable field is focused.
+  assert.match(overlay.render(80).join("\n"), /Ctrl\+D 识别模型/);
+
+  overlay.handleInput("\x04"); // Ctrl+D 打开识别
+  await flushInput();
+  const picking = overlay.render(80).join("\n");
+  assert.match(picking, /model-a/);
+  assert.match(picking, /model-b/);
+
+  overlay.handleInput(" "); // 勾选 model-a
+  overlay.handleInput("\x1b[B"); // 光标到 model-b
+  overlay.handleInput(" "); // 勾选 model-b
+  overlay.handleInput("\r"); // 确认回填
+  overlay.handleInput("\x13"); // Ctrl+S 提交表单
+
+  assert.equal(receivedValues?.baseUrl, "https://relay/v1");
+  assert.equal(result?.values.modelId, "model-a,model-b");
+});
+
+test("API model form pre-checks ids already present in the Model ID field", async () => {
+  let result: ApiModelEditorResult | undefined;
+  const overlay = createOverlay([
+    { id: "modelId", label: "Model ID", kind: "text", value: "old-model", discoverable: true },
+  ], {
+    done(value) { result = value; },
+    async discoverModels() { return ["old-model", "new-model"]; },
+  });
+
+  overlay.render(80);
+  overlay.handleInput("\x04");
+  await flushInput();
+  assert.match(overlay.render(80).join("\n"), /\[x\] old-model/);
+  assert.match(overlay.render(80).join("\n"), /\[ \] new-model/);
+
+  overlay.handleInput("\x04"); // 已在识别列表时 Ctrl+D 无效
+  await flushInput();
+  assert.match(overlay.render(80).join("\n"), /\[x\] old-model/);
+
+  overlay.handleInput("\r"); // 不改动直接确认 → 保留原值
+  overlay.handleInput("\x13");
+  assert.equal(result?.values.modelId, "old-model");
+});
+
+test("API model form keeps the field untouched when confirming an empty discovery selection", async () => {
+  let result: ApiModelEditorResult | undefined;
+  const overlay = createOverlay([
+    { id: "modelId", label: "Model ID", kind: "text", value: "keep-me", discoverable: true },
+  ], {
+    done(value) { result = value; },
+    async discoverModels() { return ["model-a"]; },
+  });
+
+  overlay.render(80);
+  overlay.handleInput("\x04");
+  await flushInput();
+  overlay.handleInput(" "); // 勾选后又取消
+  overlay.handleInput(" ");
+  overlay.handleInput("\r"); // 空选确认 → 不改动字段
+  overlay.handleInput("\x13");
+  assert.equal(result?.values.modelId, "keep-me");
+});
+
+test("API model form surfaces discovery failures and returns to the form", async () => {
+  const overlay = createOverlay([
+    { id: "modelId", label: "Model ID", kind: "text", value: "", discoverable: true },
+  ], {
+    async discoverModels() { throw new Error("HTTP 401 Unauthorized"); },
+  });
+
+  overlay.render(80);
+  overlay.handleInput("\x04");
+  await flushInput();
+  const rendered = overlay.render(80).join("\n");
+  assert.match(rendered, /HTTP 401 Unauthorized/);
+  assert.doesNotMatch(rendered, /\[ \] model-a/);
+
+  // 失败后回到表单，Esc 仍走正常取消路径。
+  overlay.handleInput("\x1b");
+  await flushInput();
+  assert.match(overlay.render(80).join("\n"), /再按 Esc 放弃|Model ID/);
+});
+
+test("API model form shows an empty notice when discovery returns no new models", async () => {
+  const overlay = createOverlay([
+    { id: "modelId", label: "Model ID", kind: "text", value: "", discoverable: true },
+  ], {
+    async discoverModels() { return []; },
+  });
+
+  overlay.render(80);
+  overlay.handleInput("\x04");
+  await flushInput();
+  assert.match(overlay.render(80).join("\n"), /未识别到新模型/);
 });

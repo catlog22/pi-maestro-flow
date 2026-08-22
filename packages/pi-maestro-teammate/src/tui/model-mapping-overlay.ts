@@ -1,3 +1,5 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   CURSOR_MARKER,
@@ -13,6 +15,12 @@ import {
 import type { AgentConfig, AgentSource } from "../agents/agents.ts";
 import type { ModelCircuitPolicy, ModelCircuitSnapshot } from "../models/model-circuit-breaker.ts";
 import type { TeammateModelCapability } from "../models/model-catalog.ts";
+import { DEFAULT_MANIFEST_PATH } from "../models/cli.ts";
+import {
+  buildModelList,
+  renderLegacyUpgradeSkeleton,
+  type ModelListResult,
+} from "../models/cli-list.ts";
 import {
   TEAMMATE_TASK_TYPES,
   TEAMMATE_TASK_TYPE_META,
@@ -61,18 +69,24 @@ import {
 import {
   RemoteConfigPane,
   type RemotePaneAction,
+  type RemotePaneDeployments,
   type RemotePaneScope,
 } from "./remote-config-pane.ts";
 import {
+  wizardDeploymentAdd,
+  wizardDeploymentEdit,
+  wizardLegacyUpgrade,
+  wizardRemoteHost,
+  wizardRemoteTarget,
+  type WizardUi,
+} from "./connection-wizards.ts";
+import {
   loadRemoteConfigState,
   replaceRemoteConfigStores,
-  validateRemoteHostDraft,
-  validateRemoteTargetDraft,
   type RemoteConfigState,
 } from "../remote/config.ts";
-import type { RemoteHostConfig, RemoteTargetConfig } from "../remote/types.ts";
 
-export type ControlCenterTab = "profiles" | "routing" | "roles" | "remotes" | "active";
+export type ControlCenterTab = "profiles" | "routing" | "roles" | "connections" | "active";
 
 export interface ControlCenterActiveAgent {
   correlationId: string;
@@ -102,11 +116,15 @@ export interface TeammateControlCenterOptions {
   activeAgents?: readonly ControlCenterActiveAgent[];
   modelHealth?: readonly ModelCircuitSnapshot[];
   onOpenAgent?: (correlationId: string) => Promise<void>;
-  /** Remote configuration state for the Remotes tab. */
+  /** Remote configuration state for the Connections tab. */
   remoteState?: RemoteConfigState;
+  /** Precomputed model-registry projection for the connections pane. */
+  deployments?: RemotePaneDeployments;
   /** Probe a remote target (SSH handshake + protocol initialize); result text is already redacted. */
   onTestRemote?: (targetId: string, signal: AbortSignal) => Promise<string>;
   remoteTestTimeoutMs?: number;
+  /** Reload the extension's model catalog after registry writes or explicit reloads. */
+  refreshModelCatalog?: () => readonly TeammateModelCapability[];
   globalFilePath?: string;
   locale?: SupportedSettingsLocale;
 }
@@ -126,6 +144,7 @@ interface TeammateControlCenterParams {
   state?: ModelRoutingState;
   config?: LegacyControlCenterConfig;
   remoteState?: RemoteConfigState;
+  deployments?: RemotePaneDeployments;
   onTestRemote?: (targetId: string, signal: AbortSignal) => Promise<string>;
   remoteTestTimeoutMs?: number;
   theme: ControlCenterTheme;
@@ -152,7 +171,7 @@ interface TeammateControlCenterParams {
 }
 
 const SOURCE_ORDER: Record<AgentSource, number> = { package: 0, project: 1, user: 2, builtin: 3 };
-const TAB_ORDER: ControlCenterTab[] = ["profiles", "routing", "roles", "remotes", "active"];
+const TAB_ORDER: ControlCenterTab[] = ["profiles", "routing", "roles", "connections", "active"];
 
 function tabLabel(tab: ControlCenterTab, t: TuiTranslator): string {
   return t(`model.tab.${tab}` as TuiTranslationKey);
@@ -327,9 +346,9 @@ export class TeammateControlCenter implements Component, Focusable {
   private customTypeDraft = "";
   private keywordsInput: { kind: "create" | "edit"; taskType: TeammateTaskType } | null = null;
   private keywordsDraft = "";
-  private readonly queries: Record<ControlCenterTab, string> = { profiles: "", routing: "", roles: "", remotes: "", active: "" };
+  private readonly queries: Record<ControlCenterTab, string> = { profiles: "", routing: "", roles: "", connections: "", active: "" };
   private modelQuery = "";
-  private readonly selected: Record<ControlCenterTab, number> = { profiles: 0, routing: 0, roles: 0, remotes: 0, active: 0 };
+  private readonly selected: Record<ControlCenterTab, number> = { profiles: 0, routing: 0, roles: 0, connections: 0, active: 0 };
   private modelSelected = 0;
   private saving = false;
   private statusText = "";
@@ -402,6 +421,7 @@ export class TeammateControlCenter implements Component, Focusable {
     this.remotePane = params.remoteState
       ? new RemoteConfigPane({
           state: params.remoteState,
+          ...(params.deployments === undefined ? {} : { deployments: params.deployments }),
           theme: params.theme as unknown as { fg(role: string, text: string): string; bold(text: string): string },
           t: this.t,
           requestRender: () => params.requestRender(),
@@ -448,7 +468,7 @@ export class TeammateControlCenter implements Component, Focusable {
   }
 
   private dispatchDecodedToken(token: DecodedInputToken): void {
-    if (this.tab === "remotes" && this.remotePane) {
+    if (this.tab === "connections" && this.remotePane) {
       const text = token.kind === "paste" ? token.text : token.text;
       if (matchesKey(text, Key.tab)
         || matchesKey(text, Key.shift("tab"))
@@ -481,7 +501,7 @@ export class TeammateControlCenter implements Component, Focusable {
   }
 
   private handleDecodedInput(data: string): void {
-    if (this.tab === "remotes" && this.remotePane) {
+    if (this.tab === "connections" && this.remotePane) {
       if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) {
         this.switchTab(1);
         return;
@@ -593,7 +613,7 @@ export class TeammateControlCenter implements Component, Focusable {
   render(width: number): string[] {
     const w = Math.max(1, Math.min(width, 112));
     this.lastWidth = w;
-    if (this.tab === "remotes" && this.remotePane) return this.remotePane.render(w);
+    if (this.tab === "connections" && this.remotePane) return this.remotePane.render(w);
     const editing = !this.keywordsInput && !this.customTypeInput && (this.modelTaskType ?? this.modelRole);
     if (w < 24 || (editing && w < 40)) return [this.renderCompact(w)];
     return editing ? this.renderModels(w) : this.renderMain(w);
@@ -2412,7 +2432,7 @@ export class TeammateControlCenter implements Component, Focusable {
           ? this.taskTypes.length
           : tab === "roles"
             ? this.agents.length
-            : tab === "remotes"
+            : tab === "connections"
               ? this.remoteCount()
               : this.activeAgents.length;
       const label = `${tabLabel(tab, this.t)} ${count}`;
@@ -2426,7 +2446,10 @@ export class TeammateControlCenter implements Component, Focusable {
   private remoteCount(): number {
     const state = this.params.remoteState;
     if (!state) return 0;
-    return Object.keys(state.global.hosts).length
+    const deployments = this.params.deployments;
+    const deploymentCount = deployments?.kind === "registry" ? deployments.rows.length : deployments ? 1 : 0;
+    return deploymentCount
+      + Object.keys(state.global.hosts).length
       + Object.keys(state.global.targets).length
       + Object.keys(state.project.hosts).length
       + Object.keys(state.project.targets).length;
@@ -2642,12 +2665,54 @@ async function showProfilePersistenceStatus(
   });
 }
 
+interface ConnectionManifestSnapshot {
+  filePath: string;
+  manifestRaw?: string;
+  result?: ModelListResult;
+  deployments?: RemotePaneDeployments;
+}
+
+function loadConnectionManifestSnapshot(cwd: string): ConnectionManifestSnapshot {
+  const filePath = path.resolve(cwd, DEFAULT_MANIFEST_PATH);
+  let manifestRaw: string;
+  try {
+    manifestRaw = fs.readFileSync(filePath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { filePath };
+    throw error;
+  }
+  const result = buildModelList(manifestRaw, filePath, { legacyPreviewHook: () => {} });
+  return {
+    filePath,
+    manifestRaw,
+    result,
+    deployments: result.kind === "registry"
+      ? {
+          kind: "registry",
+          rows: result.rows,
+          defaultModel: result.defaultModel,
+          diagnostics: result.diagnostics,
+        }
+      : { kind: "legacy" },
+  };
+}
+
 export async function showModelMappingOverlay(
   ctx: ExtensionContext,
   availableModels: readonly TeammateModelCapability[],
   options: TeammateControlCenterOptions = {},
 ): Promise<void> {
   const t = createTuiTranslator(options.locale);
+  let catalogModels = availableModels;
+  let connectionManifest: ConnectionManifestSnapshot;
+  try {
+    connectionManifest = loadConnectionManifestSnapshot(ctx.cwd);
+  } catch (error) {
+    connectionManifest = { filePath: path.resolve(ctx.cwd, DEFAULT_MANIFEST_PATH) };
+    ctx.ui.notify(t("connections.registryLoadFailed", {
+      message: displayText(error instanceof Error ? error.message : String(error)),
+    }), "error");
+  }
   let initialTab: ControlCenterTab = "routing";
   let initialProfileId: string | undefined;
   let initialProfileQuery = "";
@@ -2683,11 +2748,14 @@ export async function showModelMappingOverlay(
     const action = await ctx.ui.custom<ControlCenterAction | null>((tui, theme, _keybindings, done) => {
       const controlCenter = new TeammateControlCenter({
         cwd: ctx.cwd,
-        availableModels,
+        availableModels: catalogModels,
         agents: options.agents ?? [],
         activeAgents: options.activeAgents ?? [],
         state,
         remoteState,
+        ...(connectionManifest.deployments === undefined
+          ? options.deployments === undefined ? {} : { deployments: options.deployments }
+          : { deployments: connectionManifest.deployments }),
         onTestRemote: options.onTestRemote,
         remoteTestTimeoutMs: options.remoteTestTimeoutMs,
         theme,
@@ -2719,8 +2787,8 @@ export async function showModelMappingOverlay(
 
     if (!action) return;
     if (isRemotePaneAction(action)) {
-      initialTab = "remotes";
-      const outcome = await handleRemotePaneAction(ctx, options, remoteState, action, t);
+      initialTab = "connections";
+      const outcome = await handleConnectionPaneAction(ctx, options, remoteState, connectionManifest, action, t);
       initialStatusText = outcome.message;
       initialStatusTone = outcome.ok ? "success" : "error";
       if (outcome.reloadRemote) {
@@ -2733,6 +2801,19 @@ export async function showModelMappingOverlay(
           });
         }
       }
+      if (outcome.ok && (outcome.reloadRemote || outcome.reloadCatalog)) {
+        try {
+          if (outcome.reloadCatalog) {
+            catalogModels = options.refreshModelCatalog?.() ?? catalogModels;
+          }
+          connectionManifest = loadConnectionManifestSnapshot(ctx.cwd);
+        } catch (error) {
+          initialStatusTone = "error";
+          initialStatusText = t("connections.registryLoadFailed", {
+            message: displayText(error instanceof Error ? error.message : String(error)),
+          });
+        }
+      }
       continue;
     }
     initialTab = action.tab;
@@ -2740,7 +2821,18 @@ export async function showModelMappingOverlay(
       if (options.onOpenAgent) await options.onOpenAgent(action.correlationId);
       continue;
     }
-    if (action.kind === "reload") continue;
+    if (action.kind === "reload") {
+      try {
+        catalogModels = options.refreshModelCatalog?.() ?? catalogModels;
+        connectionManifest = loadConnectionManifestSnapshot(ctx.cwd);
+      } catch (error) {
+        initialStatusTone = "error";
+        initialStatusText = t("connections.registryLoadFailed", {
+          message: displayText(error instanceof Error ? error.message : String(error)),
+        });
+      }
+      continue;
+    }
 
     initialProfileId = action.profileId;
     initialProfileQuery = action.profileQuery;
@@ -2900,7 +2992,7 @@ export async function showModelMappingOverlay(
 
     const outcome = await showProfilePersistenceStatus(
       ctx,
-      availableModels,
+      catalogModels,
       options,
       state,
       action.profileId,
@@ -2926,16 +3018,20 @@ export async function showModelMappingOverlay(
 }
 
 // ---------------------------------------------------------------------------
-// Remote configuration actions (Remotes tab)
+// Connection pane actions
 // ---------------------------------------------------------------------------
 
-interface RemotePaneOutcome {
+interface ConnectionPaneOutcome {
   ok: boolean;
   message: string;
   reloadRemote: boolean;
+  reloadCatalog: boolean;
 }
 
 const REMOTE_ACTION_KINDS = new Set([
+  "connection-edit-deployment",
+  "connection-add-deployment",
+  "connection-upgrade-legacy",
   "remote-new-host",
   "remote-edit-host",
   "remote-new-target",
@@ -2977,58 +3073,161 @@ function findTargetInState(state: RemoteConfigState, targetId: string) {
   return state.global.targets[targetId] ?? (state.project.targets[targetId] ?? undefined);
 }
 
-async function handleRemotePaneAction(
+function wizardUi(ctx: ExtensionContext, t: TuiTranslator): WizardUi {
+  return {
+    t,
+    input: (prompt, initial) => ctx.ui.input(prompt, initial),
+    select: (prompt, choices) => ctx.ui.select(prompt, [...choices]),
+    confirm: (prompt) => ctx.ui.confirm(prompt, ""),
+    write: (text) => ctx.ui.notify(displayText(text), "info"),
+  };
+}
+
+function wizardOutcome(
+  outcome: { ok: boolean; message?: string; reloadCatalog?: boolean } | { cancelled: true },
+): ConnectionPaneOutcome {
+  if ("cancelled" in outcome) {
+    return { ok: true, message: "", reloadRemote: false, reloadCatalog: false };
+  }
+  return {
+    ok: outcome.ok,
+    message: outcome.message ?? "",
+    reloadRemote: false,
+    reloadCatalog: outcome.reloadCatalog === true,
+  };
+}
+
+async function handleConnectionPaneAction(
   ctx: ExtensionContext,
   options: TeammateControlCenterOptions,
   state: RemoteConfigState | undefined,
+  manifest: ConnectionManifestSnapshot,
   action: RemotePaneAction,
   t: TuiTranslator,
-): Promise<RemotePaneOutcome> {
-  if (!state) {
-    return { ok: false, message: t("remote.loadFailed", { message: "state unavailable" }), reloadRemote: false };
-  }
+): Promise<ConnectionPaneOutcome> {
+  const ui = wizardUi(ctx, t);
   try {
     switch (action.kind) {
+      case "connection-edit-deployment": {
+        if (manifest.result?.kind !== "registry" || manifest.manifestRaw === undefined) {
+          return { ok: false, message: t("connections.registryRequired"), reloadRemote: false, reloadCatalog: false };
+        }
+        const row = manifest.result.rows.find((candidate) => candidate.registrationId === action.registrationId);
+        if (!row) {
+          return {
+            ok: false,
+            message: t("connections.registrationMissing", { id: displayText(action.registrationId) }),
+            reloadRemote: false,
+            reloadCatalog: false,
+          };
+        }
+        return wizardOutcome(await wizardDeploymentEdit(ui, {
+          filePath: manifest.filePath,
+          manifestRaw: manifest.manifestRaw,
+          rows: [row],
+        }));
+      }
+      case "connection-add-deployment":
+        return wizardOutcome(await wizardDeploymentAdd(ui, {
+          filePath: manifest.filePath,
+          manifestRaw: manifest.manifestRaw,
+        }));
+      case "connection-upgrade-legacy": {
+        if (manifest.result?.kind !== "legacy") {
+          return { ok: false, message: t("connections.legacyRequired"), reloadRemote: false, reloadCatalog: false };
+        }
+        const skeleton = renderLegacyUpgradeSkeleton(manifest.result.parsed, manifest.filePath);
+        return wizardOutcome(await wizardLegacyUpgrade(ui, skeleton, manifest.filePath));
+      }
       case "remote-new-host":
-        return await wizardRemoteHost(ctx, state, action.scope, undefined, undefined, t);
-      case "remote-edit-host":
-        return await wizardRemoteHost(ctx, state, action.scope, action.hostId, findHostInState(state, action.hostId), t);
+      case "remote-edit-host": {
+        if (!state) return unavailableRemoteState(t);
+        const hostId = action.kind === "remote-edit-host" ? action.hostId : undefined;
+        const outcome = await wizardRemoteHost(ui, {
+          state,
+          scope: action.scope,
+          cwd: ctx.cwd,
+          globalFilePath: options.globalFilePath,
+          ...(hostId === undefined ? {} : { id: hostId, current: findHostInState(state, hostId) }),
+          persist: (cwd, expected, next, globalFilePath) => {
+            replaceRemoteConfigStores(cwd, expected, next, globalFilePath);
+          },
+        });
+        return { ...outcome, reloadCatalog: false };
+      }
       case "remote-new-target":
-        return await wizardRemoteTarget(ctx, state, action.scope, undefined, undefined, t);
-      case "remote-edit-target":
-        return await wizardRemoteTarget(ctx, state, action.scope, action.targetId, findTargetInState(state, action.targetId), t);
+      case "remote-edit-target": {
+        if (!state) return unavailableRemoteState(t);
+        const targetId = action.kind === "remote-edit-target" ? action.targetId : undefined;
+        const outcome = await wizardRemoteTarget(ui, {
+          state,
+          scope: action.scope,
+          cwd: ctx.cwd,
+          globalFilePath: options.globalFilePath,
+          ...(targetId === undefined ? {} : { id: targetId, current: findTargetInState(state, targetId) }),
+          persist: (cwd, expected, next, globalFilePath) => {
+            replaceRemoteConfigStores(cwd, expected, next, globalFilePath);
+          },
+        });
+        return { ...outcome, reloadCatalog: false };
+      }
       case "remote-delete-host": {
+        if (!state) return unavailableRemoteState(t);
         const confirmed = await ctx.ui.confirm(t("remote.deleteHostTitle", { id: displayText(action.hostId) }), "");
-        if (!confirmed) return { ok: true, message: "", reloadRemote: false };
+        if (!confirmed) return { ok: true, message: "", reloadRemote: false, reloadCatalog: false };
         const stores = remoteScopeStores(state, action.scope);
         if (action.scope === "project") stores.project.hosts[action.hostId] = null;
         else delete stores.global.hosts[action.hostId];
         await persistRemoteStores(ctx, options, state, stores);
-        return { ok: true, message: t("remote.hostDeleted", { id: displayText(action.hostId) }), reloadRemote: true };
+        return {
+          ok: true,
+          message: t("remote.hostDeleted", { id: displayText(action.hostId) }),
+          reloadRemote: true,
+          reloadCatalog: false,
+        };
       }
       case "remote-delete-target": {
+        if (!state) return unavailableRemoteState(t);
         const confirmed = await ctx.ui.confirm(t("remote.deleteTargetTitle", { id: displayText(action.targetId) }), "");
-        if (!confirmed) return { ok: true, message: "", reloadRemote: false };
+        if (!confirmed) return { ok: true, message: "", reloadRemote: false, reloadCatalog: false };
         const stores = remoteScopeStores(state, action.scope);
         if (action.scope === "project") stores.project.targets[action.targetId] = null;
         else delete stores.global.targets[action.targetId];
         await persistRemoteStores(ctx, options, state, stores);
-        return { ok: true, message: t("remote.targetDeleted", { id: displayText(action.targetId) }), reloadRemote: true };
+        return {
+          ok: true,
+          message: t("remote.targetDeleted", { id: displayText(action.targetId) }),
+          reloadRemote: true,
+          reloadCatalog: false,
+        };
       }
       default:
-        return { ok: false, message: t("remote.saveFailed", { message: `Unknown action ${action.kind}` }), reloadRemote: false };
+        return {
+          ok: false,
+          message: t("connections.unknownAction"),
+          reloadRemote: false,
+          reloadCatalog: false,
+        };
     }
   } catch (error) {
     return {
       ok: false,
-      message: t("remote.saveFailed", { message: displayText(error instanceof Error ? error.message : String(error)) }),
+      message: t("connections.saveFailed", {
+        message: displayText(error instanceof Error ? error.message : String(error)),
+      }),
       reloadRemote: false,
+      reloadCatalog: false,
     };
   }
 }
 
-function remoteScopeTarget(stores: { global: RemoteConfigState["global"]; project: RemoteConfigState["project"] }, scope: RemotePaneScope) {
-  return scope === "global" ? stores.global : stores.project;
+function unavailableRemoteState(t: TuiTranslator): ConnectionPaneOutcome {
+  return {
+    ok: false,
+    message: t("remote.loadFailed", { message: t("connections.stateUnavailable") }),
+    reloadRemote: false,
+    reloadCatalog: false,
+  };
 }
 
 async function persistRemoteStores(
@@ -3042,102 +3241,4 @@ async function persistRemoteStores(
     project: { ...state.project, hosts: { ...state.project.hosts }, targets: { ...state.project.targets } },
   };
   replaceRemoteConfigStores(ctx.cwd, expected, stores, options?.globalFilePath);
-}
-
-async function wizardRemoteHost(
-  ctx: ExtensionContext,
-  state: RemoteConfigState,
-  scope: RemotePaneScope,
-  id: string | undefined,
-  current: RemoteHostConfig | undefined,
-  t: TuiTranslator,
-): Promise<RemotePaneOutcome> {
-  const freshId = id ?? await ctx.ui.input(t("remote.hostId"), "");
-  if (freshId === undefined) return { ok: true, message: "", reloadRemote: false };
-  if (!freshId.trim()) return { ok: false, message: t("remote.hostIdRequired"), reloadRemote: false };
-  const host = await ctx.ui.input(t("remote.hostAddress"), current?.host ?? "");
-  if (host === undefined) return { ok: true, message: "", reloadRemote: false };
-  const user = await ctx.ui.input(t("remote.hostUser"), current?.user ?? "");
-  if (user === undefined) return { ok: true, message: "", reloadRemote: false };
-  const port = await ctx.ui.input(t("remote.hostPort"), String(current?.port ?? 22));
-  if (port === undefined) return { ok: true, message: "", reloadRemote: false };
-  const hostKey = await ctx.ui.input(t("remote.hostKey"), current?.hostKeySha256 ?? "");
-  if (hostKey === undefined) return { ok: true, message: "", reloadRemote: false };
-  const identityFile = await ctx.ui.input(t("remote.identityFile"), current?.identityFile ?? "");
-  if (identityFile === undefined) return { ok: true, message: "", reloadRemote: false };
-  const draft: unknown = {
-    host,
-    user,
-    port: Number(port),
-    hostKeySha256: hostKey,
-    ...(identityFile.trim() ? { identityFile: identityFile.trim() } : {}),
-  };
-  const validation = validateRemoteHostDraft(freshId.trim(), draft);
-  if (!validation.ok) {
-    return { ok: false, message: t("remote.validationFailed", { error: validation.error }), reloadRemote: false };
-  }
-  const stores = remoteScopeStores(state, scope);
-  const target = remoteScopeTarget(stores, scope);
-  target.hosts[freshId.trim()] = draft as RemoteHostConfig;
-  await persistRemoteStores(ctx, undefined, state, stores);
-  return { ok: true, message: t("remote.hostSaved", { id: displayText(freshId.trim()) }), reloadRemote: true };
-}
-
-async function wizardRemoteTarget(
-  ctx: ExtensionContext,
-  state: RemoteConfigState,
-  scope: RemotePaneScope,
-  id: string | undefined,
-  current: RemoteTargetConfig | undefined,
-  t: TuiTranslator,
-): Promise<RemotePaneOutcome> {
-  const freshId = id ?? await ctx.ui.input(t("remote.targetId"), "");
-  if (freshId === undefined) return { ok: true, message: "", reloadRemote: false };
-  if (!freshId.trim()) return { ok: false, message: t("remote.targetIdRequired"), reloadRemote: false };
-  const hostIds = [
-    ...Object.keys(state.global.hosts),
-    ...Object.keys(state.project.hosts).filter((hostId) => state.project.hosts[hostId] !== null),
-  ];
-  const host = await ctx.ui.select(t("remote.targetHost"), hostIds);
-  if (host === undefined || !hostIds.includes(host)) return { ok: true, message: "", reloadRemote: false };
-  const cwd = await ctx.ui.input(t("remote.targetCwd"), current?.cwd ?? "");
-  if (cwd === undefined) return { ok: true, message: "", reloadRemote: false };
-  const driver = await ctx.ui.select(t("remote.targetDriver"), ["pi-rpc", "acp"]);
-  if (driver === undefined || (driver !== "pi-rpc" && driver !== "acp")) return { ok: true, message: "", reloadRemote: false };
-  const command = await ctx.ui.input(t("remote.targetCommand"), JSON.stringify(current?.command ?? ["pi"]));
-  if (command === undefined) return { ok: true, message: "", reloadRemote: false };
-  let parsedCommand: string[];
-  try {
-    const parsed = JSON.parse(command);
-    if (!Array.isArray(parsed) || parsed.some((entry) => typeof entry !== "string")) throw new Error("not argv");
-    parsedCommand = parsed;
-  } catch {
-    return { ok: false, message: t("remote.commandInvalid"), reloadRemote: false };
-  }
-  const env = await ctx.ui.input(t("remote.targetEnv"), JSON.stringify(current?.env ?? []));
-  if (env === undefined) return { ok: true, message: "", reloadRemote: false };
-  let parsedEnv: string[];
-  try {
-    const parsed = JSON.parse(env);
-    if (!Array.isArray(parsed) || parsed.some((entry) => typeof entry !== "string")) throw new Error("not env");
-    parsedEnv = parsed;
-  } catch {
-    return { ok: false, message: t("remote.envInvalid"), reloadRemote: false };
-  }
-  const draft: unknown = {
-    host,
-    cwd,
-    driver,
-    command: parsedCommand,
-    ...(parsedEnv.length === 0 ? {} : { env: parsedEnv }),
-  };
-  const validation = validateRemoteTargetDraft(freshId.trim(), draft);
-  if (!validation.ok) {
-    return { ok: false, message: t("remote.validationFailed", { error: validation.error }), reloadRemote: false };
-  }
-  const stores = remoteScopeStores(state, scope);
-  const target = remoteScopeTarget(stores, scope);
-  target.targets[freshId.trim()] = draft as RemoteTargetConfig;
-  await persistRemoteStores(ctx, undefined, state, stores);
-  return { ok: true, message: t("remote.targetSaved", { id: displayText(freshId.trim()) }), reloadRemote: true };
 }

@@ -39,6 +39,8 @@ export interface ApiModelFormField {
   value: string | boolean;
   choices?: readonly ApiModelFormChoice[];
   help?: string;
+  /** Text fields only: Ctrl+D opens the gateway model picker when discoverModels is provided. */
+  discoverable?: boolean;
 }
 
 export type ApiModelFormValues = Record<string, string | boolean>;
@@ -58,6 +60,8 @@ export interface ApiModelEditorOverlayParams {
   requestRender: () => void;
   done: (result: ApiModelEditorResult | undefined) => void;
   validate?: (values: ApiModelFormValues) => string[];
+  /** Enables Ctrl+D on discoverable fields; resolves selectable gateway model ids, throws on failure. */
+  discoverModels?: (values: ApiModelFormValues) => Promise<string[]>;
 }
 
 const CATALOGS = {
@@ -76,6 +80,11 @@ const CATALOGS = {
     "value.unset": "Not set",
     "footer.edit": "Enter confirm · Esc back · Ctrl+U clear · Backspace delete",
     "footer.normal": "Up/Down/Tab select · Enter edit · ←→/Space toggle · Ctrl+S continue · Esc cancel",
+    "footer.discover": "↑↓ move · Enter edit · Space toggle · Ctrl+S save · Esc · Ctrl+D discover",
+    "discover.title": "Discover gateway models",
+    "discover.loading": "Discovering models …",
+    "discover.empty": "No new models discovered.",
+    "discover.footer": "Up/Down move · Space toggle · Enter confirm · Esc back",
   },
   "zh-CN": {
     "tiny.title": "API model form",
@@ -92,14 +101,37 @@ const CATALOGS = {
     "value.unset": "未设置",
     "footer.edit": "Enter 确认 · Esc 返回 · Ctrl+U 清空 · Backspace 删除",
     "footer.normal": "↑↓/Tab 选择 · Enter 编辑 · ←→/Space 切换 · Ctrl+S 继续 · Esc 取消",
+    "footer.discover": "↑↓ 移动 · Enter 编辑 · Space 勾选 · Ctrl+S 提交 · Esc 返回 · Ctrl+D 识别模型",
+    "discover.title": "识别网关模型",
+    "discover.loading": "正在从网关识别模型 …",
+    "discover.empty": "未识别到新模型。",
+    "discover.footer": "↑↓ 移动 · Space 勾选 · Enter 确认 · Esc 返回",
   },
 } as const;
 
 type CatalogKey = keyof (typeof CATALOGS)["en"];
 
 const MAX_VISIBLE_FIELDS = 12;
+const MAX_VISIBLE_PICKS = 12;
+
+interface PickState {
+  loading: boolean;
+  ids: string[];
+  checked: Set<string>;
+  cursor: number;
+}
+
+function parseModelIdList(value: string): string[] {
+  const seen = new Set<string>();
+  for (const part of value.split(",")) {
+    const id = part.trim();
+    if (id) seen.add(id);
+  }
+  return [...seen];
+}
 const CTRL_S = "\x13";
 const CTRL_U = "\x15";
+const CTRL_D = "\x04";
 
 // 编辑模式下忽略的导航/编辑/功能键：其转义序列（如 `\x1b[A`）若被当作文本追加，
 // sanitize 后会把 `[A`、`[3~` 之类残渣混入输入（例如 URL 字段按方向键出现乱码）。
@@ -120,6 +152,7 @@ export class ApiModelEditorOverlay implements Component, Focusable {
   private secretClearOnCommit = false;
   private notice = "";
   private discardArmed = false;
+  private picking: PickState | null = null;
   private lastWidth = 80;
   private pasteFlushTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly pasteDecoder = new BracketedPasteDecoder();
@@ -157,6 +190,7 @@ export class ApiModelEditorOverlay implements Component, Focusable {
     const safeWidth = Math.max(1, Math.min(width, 140));
     this.lastWidth = safeWidth;
     if (safeWidth < 20) return [fit(`${this.t("tiny.title")} · ${this.selected + 1}/${this.fields.length}`, safeWidth)];
+    if (this.picking) return this.renderPick(safeWidth);
     const inner = safeWidth - 2;
     const rows: string[] = [
       headerLine(this.params.theme, this.params.title, [], inner),
@@ -221,12 +255,20 @@ export class ApiModelEditorOverlay implements Component, Focusable {
       if (matchesKey(data, Key.escape)) this.cancel();
       return;
     }
+    if (this.picking) {
+      this.handlePickInput(data);
+      return;
+    }
     if (this.editing) {
       this.handleEditInput(data);
       return;
     }
     if (data === CTRL_S || matchesKey(data, Key.ctrl("s"))) {
       this.submit();
+      return;
+    }
+    if (data === CTRL_D || matchesKey(data, Key.ctrl("d"))) {
+      this.maybeStartPick();
       return;
     }
     if (matchesKey(data, Key.escape)) {
@@ -286,6 +328,86 @@ export class ApiModelEditorOverlay implements Component, Focusable {
     this.secretClearOnCommit = false;
     this.editValue += field.kind === "number" ? printable.replace(/\D/g, "") : printable;
     this.notice = "";
+  }
+
+  private maybeStartPick(): void {
+    const field = this.currentField();
+    if (!this.params.discoverModels || !field?.discoverable || field.kind !== "text") return;
+    this.picking = { loading: true, ids: [], checked: new Set(), cursor: 0 };
+    this.params.discoverModels(this.values()).then((ids) => {
+      if (this.picking?.loading !== true) return;
+      const existing = parseModelIdList(String(field.value ?? ""));
+      this.picking = { loading: false, ids, checked: new Set(ids.filter((id) => existing.includes(id))), cursor: 0 };
+      this.params.requestRender();
+    }).catch((error: unknown) => {
+      if (this.picking?.loading !== true) return;
+      this.picking = null;
+      const message = error instanceof Error ? error.message : String(error);
+      this.notice = `${this.t("notice.error")} ${message}`;
+      this.params.requestRender();
+    });
+    this.params.requestRender();
+  }
+
+  private handlePickInput(data: string): void {
+    const pick = this.picking;
+    if (!pick) return;
+    if (matchesKey(data, Key.escape)) {
+      this.picking = null;
+      this.notice = "";
+      return;
+    }
+    if (pick.loading || pick.ids.length === 0) return;
+    if (matchesKey(data, Key.up)) {
+      pick.cursor = (pick.cursor - 1 + pick.ids.length) % pick.ids.length;
+      return;
+    }
+    if (matchesKey(data, Key.down)) {
+      pick.cursor = (pick.cursor + 1) % pick.ids.length;
+      return;
+    }
+    if (data === " ") {
+      const id = pick.ids[pick.cursor];
+      if (pick.checked.has(id)) pick.checked.delete(id);
+      else pick.checked.add(id);
+      return;
+    }
+    if (matchesKey(data, Key.enter) || data === "\r") {
+      // Confirm with nothing checked closes the picker without touching the field.
+      if (pick.checked.size > 0) {
+        const field = this.currentField();
+        if (field) field.value = pick.ids.filter((id) => pick.checked.has(id)).join(",");
+        this.markChanged();
+      }
+      this.picking = null;
+    }
+  }
+
+  private renderPick(width: number): string[] {
+    const inner = width - 2;
+    const pick = this.picking;
+    if (!pick) return [];
+    const rows: string[] = [
+      headerLine(this.params.theme, this.t("discover.title"), [], inner),
+      rule(inner),
+    ];
+    if (pick.loading) {
+      rows.push(fit(this.params.theme.fg("dim", this.t("discover.loading")), inner));
+    } else if (pick.ids.length === 0) {
+      rows.push(fit(this.params.theme.fg("warning", this.t("discover.empty")), inner));
+    } else {
+      const start = visibleStart(pick.cursor, pick.ids.length);
+      const idWidth = Math.min(60, Math.max(12, ...pick.ids.map((id) => visibleWidth(id))));
+      for (let offset = 0; offset < Math.min(MAX_VISIBLE_PICKS, pick.ids.length); offset += 1) {
+        const index = start + offset;
+        const id = pick.ids[index];
+        const marker = index === pick.cursor ? this.params.theme.fg("accent", "›") : " ";
+        const checkbox = pick.checked.has(id) ? this.params.theme.fg("success", "[x]") : "[ ]";
+        rows.push(fit(`${marker} ${checkbox} ${pad(id, idWidth)}`, inner));
+      }
+    }
+    rows.push(rule(inner), fit(this.t("discover.footer"), inner));
+    return frame(rows, width, this.params.theme);
   }
 
   private activateCurrent(): void {
@@ -390,7 +512,12 @@ export class ApiModelEditorOverlay implements Component, Focusable {
   }
 
   private footer(): string {
+    if (this.picking) return this.t("discover.footer");
     if (this.editing) return this.t("footer.edit");
+    const field = this.currentField();
+    if (field?.discoverable && this.params.discoverModels) {
+      return this.t("footer.discover");
+    }
     return this.t("footer.normal");
   }
 }

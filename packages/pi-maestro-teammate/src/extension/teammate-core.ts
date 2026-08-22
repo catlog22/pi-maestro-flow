@@ -18,6 +18,7 @@ import { createHash } from "node:crypto";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Check } from "typebox/value";
 import { isGuiTeammateToolAllowed, registerGuiTool, unregisterGuiTool } from "../shared/gui-registry.ts";
+import { altKey } from "../key-labels.ts";
 import type { WorkspaceSessionScan } from "../transcript/session-transcript.ts";
 import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchParams, TeammateWaitParams, TeammateMonitorParams, ObserveParams } from "./schemas.ts";
@@ -89,6 +90,7 @@ import {
   MAX_DEFAULT_DEPTH,
   resolveMaxActiveAgents,
   isStructuredOutputSettlementDiagnostic,
+  hostRegistryResultProvenance,
 } from "../runs/execution.ts";
 import {
   confirmChildReloaded,
@@ -219,7 +221,7 @@ export const TEAMMATE_PROMPT_GUIDELINES = [
   "Give every multi-task teammate item a stable unique name so nested work remains traceable and addressable; a {ref} that matches no task name is passed through as literal text.",
   "Set teammate concurrency explicitly for provider-safe fan-out; background defaults to false, so the call waits for results until completion or its foreground timeoutMs window, then moves unfinished work to background without terminating it.",
   "maxNestingDepth may be set on the root dispatch or per task (task wins, omission inherits the top-level value and defaults to the global ceiling): 0 disables nested teammate calls for the spawned agents, and only 0 and 1 are effective (2 is capped to 1 by the global 2-level ceiling; above 2 is rejected). Nested dispatches cannot extend that depth — at most they may pass maxNestingDepth: 0 as an explicit no-further-nesting marker.",
-  "After a nested (child-level) background dispatch, the completion is delivered automatically as a new turn in this agent's session — the root forwards the teammate-complete envelope over IPC while this agent is still live — so ending the turn to await the notification is correct; the root caller additionally sees the same notification. If this agent has ended, delivery is skipped and the result is only inspectable via observe.",
+  "After a nested (child-level) background dispatch, the completion is delivered automatically as a new turn in this agent's session — the root forwards the teammate-complete envelope over IPC while this agent is still live — so ending the turn to await the notification is correct; the root caller additionally sees the same notification. With completion durability enabled, an already-completed result that misses a stale context is queued only for this exact session and redelivered when it resumes; this never restarts unfinished agents or leaks into forks. Otherwise inspect the settled result via observe or agent://.",
   'Use teammate with context: "fork" only when the child needs the current conversation history; fresh context is the default, and in multi-task mode prefer per-task fork over a top-level default.',
   "After teammate returns a background acknowledgement (explicit background, manual detach, or elapsed foreground window), normally end the current turn and wait for the automatic teammate-complete notification, which will trigger a new turn with the result.",
   "Do not poll observe or teammate-list after starting background work; use observe action=status only for a one-off inspection explicitly needed for debugging or requested by the user.",
@@ -488,14 +490,21 @@ export function toStructuredResults(
     const structured = result.structuredOutput;
     const text = structured !== undefined ? undefined : finalResultText(result);
     if (structured === undefined && text === undefined) continue;
+    const provenance = hostRegistryResultProvenance(result);
     entries.push({
       correlationId: result.correlationId,
       ...(result.publicationId ? { publicationId: result.publicationId } : {}),
+      ...(result.completionDispatchId ? { completionDispatchId: result.completionDispatchId } : {}),
+      ...(result.completionReservationId ? { completionReservationId: result.completionReservationId } : {}),
+      ...(result.completionOutcome ? { completionOutcome: result.completionOutcome } : {}),
       originCwd: result.originCwd ?? originCwd,
       ...(result.name ? { name: result.name } : {}),
       agent: result.agent,
       ...(structured !== undefined ? { structuredOutput: structuredClone(structured) } : {}),
       ...(text !== undefined ? { output: text } : {}),
+      ...(provenance === undefined
+        ? {}
+        : { provenance }),
     });
   }
   return entries.length > 0 ? entries : undefined;
@@ -583,7 +592,7 @@ ${nested ? `Nested dispatch: this call is proxied to the parent root process —
 Expert Leader call:
   { mode: "expert", tasks: [{ prompt: "Investigate auth, delegate the necessary expert work, and synthesize the result" }] }
 
-Every dispatch uses a non-empty tasks array; prompt is the only required per-task field and lives inside tasks[]. In default mode, named tasks and dependsOn form the graph directly. Expert mode accepts exactly one objective task and turns it into the fixed workflow/planning Leader with maxNestingDepth=1; conflicting agent, taskType, or nesting overrides are rejected, and that Leader builds any required DAG with the same teammate tool. Optional per-task fields include agent, taskType, model, thinking, context, cwd, outputSchema, maxNestingDepth, name, dependsOn, description, todo, and timeoutMs. Omit outputSchema for ordinary tasks. In default mode, task-level values override top-level defaults except background, which is dispatch-level only. Use {name} or {name.field} in a dependent task's prompt, or dependsOn: ["name"] for ordering without output injection.
+Every dispatch uses a non-empty tasks array; prompt is the only required per-task field and lives inside tasks[]. In default mode, named tasks and dependsOn form the graph directly. Expert mode accepts exactly one objective task and turns it into the fixed workflow/planning Leader with maxNestingDepth=1; conflicting agent, taskType, or nesting overrides are rejected, and that Leader builds any required DAG with the same teammate tool. Optional per-task fields include agent, taskType, model, thinking, context, cwd, outputSchema, maxNestingDepth, name, dependsOn, description, todo, briefing, and timeoutMs. Omit outputSchema for ordinary tasks. In default mode, task-level values override top-level defaults except background, which is dispatch-level only. Use {name} or {name.field} in a dependent task's prompt, or dependsOn: ["name"] for ordering without output injection.
 
 Use an exact role name from the Available Teammate Agents section in the active system prompt. Unknown names are rejected.
 
@@ -735,14 +744,14 @@ export function appendTeammateDepthContext(
 }
 
 export function backgroundWaitGuidance(correlationId: string): string {
-  return `correlationId=${correlationId}. The teammate-complete notification is delivered automatically when the work finishes: for a root dispatch it arrives as a new turn in this session; for a nested dispatch the work runs in the root process and the root forwards the completion over IPC, so it also arrives as a new turn in this agent's session while this agent is still live (the root caller additionally sees it). If this agent has already ended, delivery is skipped and the result is settled and inspectable via observe. Do not poll observe or teammate-list. If this turn must consume the result, call observe exactly once with { action: "wait", targets: [{ kind: "teammate", id: "${correlationId}" }], timeoutMs: 600000 (10 minutes) }; otherwise end the turn now.`;
+  return `correlationId=${correlationId}. The teammate-complete notification is delivered automatically when the work finishes: for a root dispatch it arrives as a new turn in this session; for a nested dispatch the work runs in the root process and forwards completion to the exact dispatching child session. With completion durability enabled, an already-completed result that misses a stale/reloaded context is redelivered when that exact session resumes; forks never inherit it and unfinished agents are not restarted. The settled result remains inspectable via observe and agent://. Do not poll observe or teammate-list. If this turn must consume the result, call observe exactly once with { action: "wait", targets: [{ kind: "teammate", id: "${correlationId}" }], timeoutMs: 600000 (10 minutes) }; otherwise end the turn now.`;
 }
 
 /**
  * Appended to foreground detach acknowledgements so the Alt+B shortcut stays
  * discoverable across the root single, root graph, and nested foreground paths.
  */
-export const FOREGROUND_DETACH_HINT = "Alt+B detaches a foreground call to background.";
+export const FOREGROUND_DETACH_HINT = `${altKey("B")} detaches a foreground call to background.`;
 
 /**
  * One session-scoped Alt+B listener dispatches to the oldest active foreground
@@ -1916,7 +1925,7 @@ export function renderAgentStatusWidget(
     terminatedCount ? tuiT("widget.terminated", { count: terminatedCount }) : "",
   ].filter(Boolean).join(" · ");
   const lines = [truncateToWidth(
-    `${theme.bold(tuiT("widget.header"))}  ${theme.fg("dim", `${summary} · Alt+R`)}`,
+    `${theme.bold(tuiT("widget.header"))}  ${theme.fg("dim", `${summary} · ${altKey("R")}`)}`,
     safeWidth,
     "…",
   )];

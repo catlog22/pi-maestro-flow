@@ -6,6 +6,7 @@
  * of importing it by module specifier.
  */
 
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type {
@@ -17,6 +18,14 @@ import type { TeammateRunSpec } from "pi-maestro-backend-core/v1/spec";
 import { TeammateBackendRegistry } from "pi-maestro-backends";
 import { createRemoteBackend } from "pi-maestro-backends/remote";
 import type { RemoteWorkerManagerLike as RemoteManagerPort } from "pi-maestro-backends/remote";
+import { loadCliToolsConfigProjection, type CliToolsConfig } from "../cli-tools/cli-tools-config.ts";
+import type { AvailableModelEntry } from "../models/model-catalog.ts";
+import {
+  compileModelRegistryManifest,
+  parseModelRegistryManifest,
+  type CompiledModelRegistryPair,
+  type ProjectionIdentity,
+} from "../models/model-registry.ts";
 import { createPiSubprocessBackend, type PiSubprocessRunExtras } from "./pi-subprocess.ts";
 import type { BackendRunOptions } from "pi-maestro-backend-core/v1/backend";
 
@@ -48,7 +57,7 @@ const BUILT_IN: BackendRegistryConfig = {
 };
 
 /** The modes a document may name; anything else is a load-time error. */
-const MODES: readonly TeammateExecutionMode[] = ["legacy", "backend-registry"];
+const MODES: readonly TeammateExecutionMode[] = ["legacy", "backend-registry", "model-registry"];
 
 /**
  * Validate one registration document.
@@ -69,6 +78,16 @@ function parseBackendRegistryDocument(raw: string, path: string): BackendRegistr
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw new Error(`teammate backend registry at ${path} must contain a JSON object`);
+  }
+
+  const rawDocument = parsed as Record<string, unknown>;
+  if (rawDocument.mode === "model-registry") {
+    const manifest = parseModelRegistryManifest(raw, path);
+    return {
+      mode: manifest.mode,
+      default: manifest.default,
+      backends: manifest.backends,
+    };
   }
 
   const document = parsed as Partial<BackendRegistryConfig>;
@@ -104,8 +123,26 @@ function parseBackendRegistryDocument(raw: string, path: string): BackendRegistr
   };
 }
 
-/** Synchronously resolved documents, keyed by workspace root. */
+/** Synchronously resolved legacy/backend documents, keyed by workspace root. */
 const syncDocuments = new Map<string, BackendRegistryConfig>();
+
+/** Atomically published v2 projection pairs, keyed by workspace root. */
+const modelRegistryPairs = new Map<string, CompiledModelRegistryPair>();
+/** Last successfully published identity survives invalidation to keep revisions monotonic. */
+const modelRegistryGenerations = new Map<string, ProjectionIdentity>();
+
+function modeGenerationHash(mode: string): string {
+  return createHash("sha256").update(`<mode:${mode}>`, "utf8").digest("hex");
+}
+
+export interface ModelRegistryProjectionInputs {
+  /** Authenticated models currently visible to the host Pi registry. */
+  hostModels?: readonly AvailableModelEntry[];
+  /** Effective CLI overlay; null explicitly means no overlay. */
+  cliToolsConfig?: CliToolsConfig | null;
+  /** Test/embedding override for the global CLI overlay path. */
+  cliToolsGlobalFilePath?: string;
+}
 
 /**
  * Read the registration document synchronously, reusing an earlier read.
@@ -139,6 +176,153 @@ export function backendRegistryConfigSync(workspaceRoot: string): BackendRegistr
 }
 
 /**
+ * Read and atomically publish an opted-in model-registry projection pair.
+ *
+ * Unlike the frozen 2.0 backend reader, this path fingerprints its semantic
+ * inputs on every call. A hand edit therefore takes effect before the next
+ * prompt or dispatch without changing legacy cache behavior. Compilation is
+ * completed into a local pair first; only then is the workspace publication
+ * swapped. Any changed invalid input removes the publication, so callers can
+ * never fall back to a prior valid discovery or dispatch projection.
+ */
+export function modelRegistryPairSync(
+  workspaceRoot: string,
+  inputs: ModelRegistryProjectionInputs = {},
+): CompiledModelRegistryPair | undefined {
+  // The 2.0 reader is deliberately read-once per workspace. A catalog refresh
+  // must not bypass that boundary and activate an edit from legacy or
+  // backend-registry into model-registry. Explicit invalidation removes this
+  // cached authority; once model-registry is authoritative, the reads below
+  // remain revision-aware until they observe a rollback to an older mode.
+  const cachedConfig = syncDocuments.get(workspaceRoot);
+  if (cachedConfig !== undefined && cachedConfig.mode !== "model-registry") {
+    return undefined;
+  }
+  if (cachedConfig === undefined
+    && backendRegistryConfigSync(workspaceRoot).mode !== "model-registry") {
+    return undefined;
+  }
+
+  const path = join(workspaceRoot, REGISTRY_FILE);
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf-8");
+  } catch (cause) {
+    modelRegistryPairs.delete(workspaceRoot);
+    syncDocuments.delete(workspaceRoot);
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") {
+      const previous = modelRegistryGenerations.get(workspaceRoot);
+      if (previous !== undefined) {
+        modelRegistryGenerations.set(workspaceRoot, {
+          revision: previous.revision,
+          hash: modeGenerationHash("missing"),
+        });
+      }
+      return undefined;
+    }
+    throw new Error(`teammate backend registry at ${path} could not be read`, { cause });
+  }
+
+  try {
+    let envelope: unknown;
+    try {
+      envelope = JSON.parse(raw);
+    } catch {
+      // Use the shared parser for the canonical path-bearing diagnostic.
+      parseBackendRegistryDocument(raw, path);
+    }
+    if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)) {
+      parseBackendRegistryDocument(raw, path);
+    }
+    if ((envelope as { mode?: unknown }).mode !== "model-registry") {
+      // Preserve the exact legacy/backend-registry parser and validation path.
+      const legacyConfig = parseBackendRegistryDocument(raw, path);
+      modelRegistryPairs.delete(workspaceRoot);
+      syncDocuments.set(workspaceRoot, legacyConfig);
+      const previous = modelRegistryGenerations.get(workspaceRoot);
+      const modeHash = modeGenerationHash(legacyConfig.mode ?? "legacy");
+      if (previous !== undefined && previous.hash !== modeHash) {
+        modelRegistryGenerations.set(workspaceRoot, {
+          revision: previous.revision,
+          hash: modeHash,
+        });
+      }
+      return undefined;
+    }
+
+    const manifest = parseModelRegistryManifest(raw, path);
+    let cliToolsConfig: CliToolsConfig | null = null;
+    const projectionDiagnostics: string[] = [];
+    if (Object.hasOwn(inputs, "cliToolsConfig")) {
+      cliToolsConfig = inputs.cliToolsConfig ?? null;
+    } else if (manifest.compatibility?.teammateCliToolsProjection?.enabled === true) {
+      try {
+        cliToolsConfig = loadCliToolsConfigProjection(workspaceRoot, inputs.cliToolsGlobalFilePath);
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        projectionDiagnostics.push(`CLI compatibility projection is unavailable: ${message}`);
+      }
+    }
+    const compiled = compileModelRegistryManifest(manifest, {
+      hostModels: inputs.hostModels ?? [],
+      cliToolsConfig,
+      diagnostics: projectionDiagnostics,
+      previousIdentity: modelRegistryGenerations.get(workspaceRoot),
+    });
+    const published = modelRegistryPairs.get(workspaceRoot);
+    const backendConfig: BackendRegistryConfig = {
+      mode: manifest.mode,
+      default: manifest.default,
+      backends: manifest.backends,
+    };
+    if (published?.dispatch.hash === compiled.dispatch.hash) {
+      syncDocuments.set(workspaceRoot, backendConfig);
+      return published;
+    }
+
+    // These synchronous assignments form one publication boundary: no caller
+    // can observe the pair between them, and both are ready before this returns.
+    syncDocuments.set(workspaceRoot, backendConfig);
+    modelRegistryPairs.set(workspaceRoot, compiled);
+    modelRegistryGenerations.set(workspaceRoot, {
+      revision: compiled.dispatch.revision,
+      hash: compiled.dispatch.hash,
+    });
+    return compiled;
+  } catch (cause) {
+    modelRegistryPairs.delete(workspaceRoot);
+    syncDocuments.delete(workspaceRoot);
+    throw cause;
+  }
+}
+
+/** Return the currently published pair without reading or compiling sources. */
+export function publishedModelRegistryPairSync(workspaceRoot: string): CompiledModelRegistryPair | undefined {
+  return modelRegistryPairs.get(workspaceRoot);
+}
+
+/**
+ * Build a backend registry from one already-captured dispatch authority.
+ * Callers use this for the whole dispatch so a registry edit cannot split a
+ * candidate sweep across two model/deployment projections.
+ */
+export function dispatchRegistryForProjectionSync(
+  projection: CompiledModelRegistryPair["dispatch"],
+  extrasOf: (spec: TeammateRunSpec, options: BackendRunOptions) => PiSubprocessRunExtras,
+  remoteManagerOf?: () => RemoteManagerPort,
+): TeammateBackendRegistry {
+  const backends = Object.create(null) as BackendRegistryConfig["backends"];
+  for (const [deploymentId, deployment] of projection.deploymentsById) {
+    backends[deploymentId] = deployment.registration;
+  }
+  return new TeammateBackendRegistry({
+    mode: "model-registry",
+    default: projection.defaultDeployment,
+    backends,
+  }, backendLoader(extrasOf, remoteManagerOf));
+}
+
+/**
  * Resolve the registry a dispatch should use, without an awaited read.
  *
  * @param workspaceRoot - directory holding `.pi/`.
@@ -153,7 +337,16 @@ export function dispatchRegistrySync(
   extrasOf: (spec: TeammateRunSpec, options: BackendRunOptions) => PiSubprocessRunExtras,
   remoteManagerOf?: () => RemoteManagerPort,
 ): TeammateBackendRegistry | undefined {
-  const config = backendRegistryConfigSync(workspaceRoot);
+  let config = backendRegistryConfigSync(workspaceRoot);
+  if (config.mode === "model-registry") {
+    const pair = modelRegistryPairSync(workspaceRoot);
+    if (pair === undefined) {
+      // The revision-aware read may have observed a rollback to a 2.0 mode.
+      config = backendRegistryConfigSync(workspaceRoot);
+    } else {
+      return dispatchRegistryForProjectionSync(pair.dispatch, extrasOf, remoteManagerOf);
+    }
+  }
   if ((config.mode ?? "legacy") === "legacy") return undefined;
   return new TeammateBackendRegistry(config, backendLoader(extrasOf, remoteManagerOf));
 }
@@ -198,8 +391,13 @@ function backendLoader(
   };
 }
 
-/** Forget synchronously cached documents so an operator edit takes effect. */
+/** Forget cached documents and published pairs so an operator edit takes effect. */
 export function forgetBackendRegistryConfigSync(workspaceRoot?: string): void {
-  if (workspaceRoot === undefined) syncDocuments.clear();
-  else syncDocuments.delete(workspaceRoot);
+  if (workspaceRoot === undefined) {
+    syncDocuments.clear();
+    modelRegistryPairs.clear();
+  } else {
+    syncDocuments.delete(workspaceRoot);
+    modelRegistryPairs.delete(workspaceRoot);
+  }
 }
