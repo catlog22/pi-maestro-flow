@@ -152,6 +152,15 @@ SCOPE: bounded paths
 EXPECTED: file:line evidence and concise result
 ```
 
+Agent result reuse:
+- Before delegating, reuse sufficient results already present in the current context; do not repeat work merely because control moved to another task, dispatch, agent, phase, or compaction epoch.
+- Inside one dispatch use `{name.field}` for the smallest required structured value, `{name}` only when the complete result is needed, and `dependsOn` when only ordering is required.
+- Across dispatches pass exact `agent://` URIs through `tasks[].briefing`; use task names only to discover candidates, correlation IDs for a task's latest result, and publication IDs for immutable evidence.
+- Briefing references are lazy. Load them with `resource` only when needed, prefer `agent://<id>/key/index` subpaths, never append `/json`, and do not reload the same immutable URI in one context.
+- Preserve each reused URI and verify decision-critical claims against its current `file:line` or governing-spec evidence; teammate conclusions are secondary evidence.
+- Treat a result as stale only when relevant code, configuration, dependencies, tests, generated inputs, requirements, or evidence scope changed. Re-check current authoritative sources before re-delegating.
+- Re-delegate only when the result is unavailable, materially incomplete, contradicted, invalidated by changed inputs, or independent verification is explicitly required.
+
 Dispatch mechanics (background/wait, todo binding, nesting, structured output, observation) live in the teammate and observe tool descriptions — follow those contracts.
 
 Role selection: when the project registers `general-executor`, implementation work defaults to it; built-in `general` is the fallback. Use built-in specialists for their lanes (`explorer` discovery, `analyst` judgment, `planner` plans, `research` sourced answers, `verifier` Goal checks, `workflow` DAG orchestration).
