@@ -99,6 +99,63 @@ test("dsh declares only the capabilities its SDK actually serves", () => {
   assert.equal(backend.capabilities({}).followUp, "native");
 });
 
+test("concurrent runs select their own models without mutating registration config", async () => {
+  const registrationConfig = { ...CONFIG };
+  const originalConfig = { ...registrationConfig };
+  const driverConfigs: Record<string, unknown>[] = [];
+  const optionConfigs: Record<string, unknown>[] = [];
+  let releaseFactories!: () => void;
+  const bothFactoriesStarted = new Promise<void>((resolve) => { releaseFactories = resolve; });
+  const reportedModels: string[] = [];
+
+  const backend = createDshBackend(async (config, options) => {
+    driverConfigs.push(config);
+    optionConfigs.push(options.config);
+    if (driverConfigs.length === 2) releaseFactories();
+    await bothFactoriesStarted;
+    return fakeDriver(config.model === "selected-b" ? { fail: new Error("selected failure") } : {});
+  });
+
+  const [firstRun, secondRun] = await Promise.all([
+    backend.start({ ...SPEC, model: "selected-a" }, {
+      ...runOptions(registrationConfig),
+      correlationId: "model-a",
+      onTurnComplete: (result) => { reportedModels.push(result.model); },
+    }),
+    backend.start({ ...SPEC, model: "selected-b" }, {
+      ...runOptions(registrationConfig),
+      correlationId: "model-b",
+    }),
+  ]);
+  const [first, second] = await Promise.all([firstRun.outcome, secondRun.outcome]);
+
+  assert.deepEqual(driverConfigs.map((config) => config.model), ["selected-a", "selected-b"]);
+  assert.notStrictEqual(driverConfigs[0], registrationConfig);
+  assert.notStrictEqual(driverConfigs[1], registrationConfig);
+  assert.notStrictEqual(driverConfigs[0], driverConfigs[1]);
+  assert.strictEqual(optionConfigs[0], driverConfigs[0]);
+  assert.strictEqual(optionConfigs[1], driverConfigs[1]);
+  assert.deepEqual(registrationConfig, originalConfig);
+  assert.deepEqual([first.result.model, second.result.model], ["selected-a", "selected-b"]);
+  assert.deepEqual(reportedModels, ["selected-a"]);
+});
+
+test("an omitted run model preserves the registration default on a private config", async () => {
+  const registrationConfig = { ...CONFIG };
+  let driverConfig: Record<string, unknown> | undefined;
+  const backend = createDshBackend(async (config) => {
+    driverConfig = config;
+    return fakeDriver();
+  });
+
+  const outcome = await (await backend.start(SPEC, runOptions(registrationConfig))).outcome;
+
+  assert.notStrictEqual(driverConfig, registrationConfig);
+  assert.equal(driverConfig?.model, CONFIG.model);
+  assert.equal(outcome.result.model, CONFIG.model);
+  assert.deepEqual(registrationConfig, CONFIG);
+});
+
 test("a message arriving after a FAILED run is refused, like one after success", async () => {
   const backend = createDshBackend(async () => fakeDriver({ fail: new Error("stream died") }));
   const run = await backend.start(SPEC, runOptions());
@@ -199,6 +256,15 @@ test("a registration that passes a secret-bearing variable through is refused at
   // The other direction: an ordinary deployment variable is exactly what this
   // setting is for, so the gate must not swallow it too.
   assert.deepEqual(resolveConfig({ envPassthrough: ["HTTPS_PROXY"] }).errors, []);
+});
+
+test("envPassthrough rejects pasted assignments without retaining their values in diagnostics", () => {
+  const resolveConfig = createDshBackend(async () => fakeDriver()).resolveConfig!;
+  const pasted = "HTTPS_PROXY=https://user:secret@example.test";
+  const refused = resolveConfig({ envPassthrough: [pasted] });
+  assert.equal(refused.errors.length, 1);
+  assert.match(refused.errors[0]!, /must be environment variable names, not assignments or values/);
+  assert.doesNotMatch(refused.errors[0]!, /user:secret/);
 });
 
 test("cordisConfig is required because the runtime has no built-in fallback", () => {
@@ -689,4 +755,112 @@ test("the missing-entry diagnostic names the server the instruction assumes", as
   assert.ok(diagnostic.includes(`serverName: ${TODO_SERVER_NAME}`), diagnostic);
   assert.ok(diagnostic.includes(`process.env.${TODO_ENDPOINT_ENV}`), diagnostic);
   assert.ok(TODO_PUBLIC_TOOL_NAME.includes(TODO_SERVER_NAME));
+});
+
+/** A complete ssh registration: the shape the ssh rules below are stated against. */
+const SSH_CONFIG = { ...CONFIG, mode: "ssh", host: "build-01", user: "agent" };
+
+test("the ssh transport fields mirror the acp-cli surface", () => {
+  const fields = createDshBackend(async () => fakeDriver()).configFields ?? [];
+  const byKey = new Map(fields.map((field) => [field.key, field]));
+  // Same kinds and labels as `acp-cli`, so an operator configures one
+  // transport the same way twice.
+  assert.deepEqual(byKey.get("mode"), {
+    key: "mode",
+    kind: "enum",
+    options: [
+      { value: "local", labelKey: "dsh.mode.local" },
+      { value: "ssh", labelKey: "dsh.mode.ssh" },
+    ],
+    labelKey: "dsh.mode",
+    default: "local",
+  });
+  assert.equal(byKey.get("host")?.kind, "text");
+  assert.equal(byKey.get("user")?.kind, "text");
+  assert.equal(byKey.get("port")?.kind, "integer");
+  assert.equal(byKey.get("port")?.default, 22);
+  assert.equal(byKey.get("hostKeySha256")?.kind, "text");
+  assert.equal(byKey.get("identityFile")?.kind, "path");
+  // None of them is a credential-ref: like an ACP CLI, a remote dsh runtime
+  // resolves its own credentials from its own configuration.
+  for (const key of ["mode", "host", "user", "port", "hostKeySha256", "identityFile"]) {
+    assert.notEqual(byKey.get(key)?.kind, "credential-ref");
+  }
+});
+
+test("ssh mode requires a host and a user", () => {
+  const resolveConfig = createDshBackend(async () => fakeDriver()).resolveConfig!;
+  const incomplete = resolveConfig({ mode: "ssh" });
+  assert.match(incomplete.errors.join("\n"), /"host" is required when "mode" is "ssh"/);
+  assert.match(incomplete.errors.join("\n"), /"user" is required when "mode" is "ssh"/);
+  // A blank value is as good as none: whitespace-only names have failed every
+  // time they were accepted.
+  assert.ok(
+    resolveConfig({ mode: "ssh", host: "  ", user: "agent" }).errors.some((error) =>
+      /"host" is required/.test(error),
+    ),
+  );
+  // The complete registration passes.
+  assert.deepEqual(resolveConfig(SSH_CONFIG).errors, []);
+});
+
+test("port must be positive", () => {
+  const resolveConfig = createDshBackend(async () => fakeDriver()).resolveConfig!;
+  assert.match(resolveConfig({ port: 0 }).errors[0] ?? "", /"port" must be a positive number/);
+  assert.match(resolveConfig({ port: -1 }).errors[0] ?? "", /"port" must be a positive number/);
+});
+
+test("remote-bound launch fields refuse control characters over ssh", () => {
+  const resolveConfig = createDshBackend(async () => fakeDriver()).resolveConfig!;
+  // NUL, ESC, and DEL: one C0 terminator, one C0 escape introducer, and the
+  // DEL character the C0 rule is conventionally extended to cover.
+  for (const [name, character] of [["NUL", "\u0000"], ["ESC", "\u001b"], ["DEL", "\u007f"]] as const) {
+    for (const key of ["command", "cwd", "cordisConfig"]) {
+      const refused = resolveConfig({ ...SSH_CONFIG, [key]: `/x${character}/y` });
+      assert.equal(refused.errors.length, 1, `${key} with ${name}`);
+      assert.match(refused.errors[0]!, new RegExp(`"${key}" must not contain control characters`));
+    }
+  }
+  // Under local mode the same values never cross an ssh command line, so they
+  // are not refused here.
+  const local = resolveConfig({
+    ...CONFIG,
+    command: `/x${"\u0000"}/y`,
+    cwd: `/x${"\u001b"}/y`,
+    cordisConfig: `/x${"\u007f"}/y`,
+  });
+  assert.deepEqual(local.errors, []);
+});
+
+test("todoBridge is refused with ssh mode, naming the loopback endpoint", () => {
+  const resolveConfig = createDshBackend(async () => fakeDriver()).resolveConfig!;
+  const refused = resolveConfig({ ...SSH_CONFIG, todoBridge: true });
+  assert.equal(refused.errors.length, 1);
+  assert.match(refused.errors[0]!, /loopback/);
+  // Local mode keeps the bridge: its endpoint and its runtime share a host.
+  assert.deepEqual(resolveConfig({ ...CONFIG, todoBridge: true }).errors, []);
+});
+
+test("a short requestTimeoutMs over ssh warns without failing", () => {
+  const resolveConfig = createDshBackend(async () => fakeDriver()).resolveConfig!;
+  // Explicitly short.
+  const short = resolveConfig({ ...SSH_CONFIG, requestTimeoutMs: 60_000 });
+  assert.deepEqual(short.errors, []);
+  assert.equal(short.warnings?.length, 1);
+  assert.match(short.warnings![0]!, /each JSON-RPC request individually/);
+  assert.match(short.warnings![0]!, /300000/);
+  // Unset warns too: the operator chose nothing, which is how the assumption
+  // that requests stay local goes unnoticed.
+  const unset = resolveConfig({ mode: "ssh", host: "b", user: "a" });
+  assert.equal(unset.warnings?.length, 1);
+  assert.match(unset.warnings![0]!, /unset/);
+});
+
+test("the timeout warning stays silent at the threshold and under local mode", () => {
+  const resolveConfig = createDshBackend(async () => fakeDriver()).resolveConfig!;
+  assert.deepEqual(resolveConfig({ ...SSH_CONFIG, requestTimeoutMs: 300_000 }).warnings, undefined);
+  assert.deepEqual(resolveConfig({ ...SSH_CONFIG, requestTimeoutMs: 301_000 }).warnings, undefined);
+  // Local requests do not cross a network, so no warning is owed here even
+  // with the timeout short enough to warn over ssh.
+  assert.deepEqual(resolveConfig({ ...CONFIG, requestTimeoutMs: 60_000 }).warnings, undefined);
 });

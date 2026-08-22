@@ -17,6 +17,7 @@ import { createDshBackend } from "./backend.ts";
 
 export {
   createDshBackend,
+  DSH_CONFIG_FIELDS,
   type DshDriverFactory,
   type DshDriverOptions,
   type DshHarnessDriver,

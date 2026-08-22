@@ -137,5 +137,10 @@ export function resolveBackendConfig(
   // own resolution, so a backend never has to defend against shapes the
   // declaration already rejects.
   const resolved = backend.resolveConfig(values);
-  return { values: resolved.values, errors: resolved.errors };
+  // Advisory warnings survive resolution: a backend that flags a workable but
+  // risky configuration is speaking to the operator, and dropping the message
+  // here would silence it before anyone read it.
+  return resolved.warnings === undefined
+    ? { values: resolved.values, errors: resolved.errors }
+    : { values: resolved.values, errors: resolved.errors, warnings: resolved.warnings };
 }

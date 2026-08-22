@@ -23,10 +23,10 @@ const ESSENTIAL = process.platform === "win32" ? "SystemRoot" : "PATH";
 const DSH_ESSENTIALS = process.platform === "win32"
   ? [
     "APPDATA", "COMSPEC", "LOCALAPPDATA", "OS", "PATH", "PATHEXT", "ProgramData",
-    "ProgramFiles", "ProgramFiles(x86)", "SystemDrive", "SystemRoot", "TEMP",
-    "TMP", "USERPROFILE", "windir",
+    "ProgramFiles", "ProgramFiles(x86)", "SSH_AUTH_SOCK", "SystemDrive", "SystemRoot",
+    "TEMP", "TMP", "USERPROFILE", "windir",
   ]
-  : ["HOME", "LANG", "LC_ALL", "LOGNAME", "PATH", "SHELL", "TMPDIR", "TZ", "USER"];
+  : ["HOME", "LANG", "LC_ALL", "LOGNAME", "PATH", "SHELL", "SSH_AUTH_SOCK", "TMPDIR", "TZ", "USER"];
 
 test("a host credential the runtime never needs does not reach the child", () => {
   const before = process.env.OTHER_PROVIDER_TOKEN;

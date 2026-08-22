@@ -100,7 +100,11 @@ const CAPABILITIES: BackendCapabilities = {
   abort: "emulated",
 };
 
-const CONFIG_FIELDS: readonly BackendConfigField[] = [
+/**
+ * Exported so the models CLI edit flow renders exactly the fields this backend
+ * validates against, without constructing a backend or loading the SDK driver.
+ */
+export const DSH_CONFIG_FIELDS: readonly BackendConfigField[] = [
   {
     key: "command",
     kind: "text",
@@ -157,6 +161,26 @@ const CONFIG_FIELDS: readonly BackendConfigField[] = [
     labelKey: "dsh.envPassthrough",
     descriptionKey: "dsh.envPassthrough.description",
   },
+  {
+    // Where the runtime is launched. "ssh" names a remote launch: the fields
+    // below mirror the acp-cli backend's ssh surface (same kinds, same
+    // labels) so an operator configures one transport the same way twice.
+    // Declared here ahead of the launch wiring that consumes them; under the
+    // default "local" they are simply unused.
+    key: "mode",
+    kind: "enum",
+    options: [
+      { value: "local", labelKey: "dsh.mode.local" },
+      { value: "ssh", labelKey: "dsh.mode.ssh" },
+    ],
+    labelKey: "dsh.mode",
+    default: "local",
+  },
+  { key: "host", kind: "text", labelKey: "dsh.host" },
+  { key: "user", kind: "text", labelKey: "dsh.user" },
+  { key: "port", kind: "integer", labelKey: "dsh.port", default: 22 },
+  { key: "hostKeySha256", kind: "text", labelKey: "dsh.hostKeySha256" },
+  { key: "identityFile", kind: "path", labelKey: "dsh.identityFile" },
   {
     // Whether this registration carries the host's todo tool into the runtime.
     // A deployment setting must decide it, because the answer differs per
@@ -381,16 +405,18 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
     // new session and replays the prompt. The fence gates this backend exactly
     // as it gates Pi, and this declaration does not change that.
     recoveryShape: "in-context-continuation",
-    configFields: CONFIG_FIELDS,
+    configFields: DSH_CONFIG_FIELDS,
 
     resolveConfig(config: Record<string, ConfigValue>): ResolvedBackendConfig {
       const errors: string[] = [];
-      for (const key of ["maxTokens", "requestTimeoutMs"]) {
+      const warnings: string[] = [];
+      for (const key of ["maxTokens", "requestTimeoutMs", "port"]) {
         const value = config[key];
         if (value === undefined) continue;
         if (typeof value === "number" && value > 0) continue;
         errors.push(`"${key}" must be a positive number, got ${String(value)}`);
       }
+      const mode = text(config, "mode") ?? "local";
       // The credential field names a lookup; a value that looks like a key
       // means someone pasted the secret into a field built to hold a name. The
       // rejected value is never quoted back: the likeliest reason it failed is
@@ -412,7 +438,11 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
       if (Array.isArray(passthrough)) {
         for (const name of passthrough) {
           if (typeof name !== "string") continue;
-          if (SECRET_ENV_NAME.test(name)) {
+          if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+            errors.push(
+              `"envPassthrough" entries must be environment variable names, not assignments or values`,
+            );
+          } else if (SECRET_ENV_NAME.test(name)) {
             errors.push(
               `"envPassthrough" names ${name}, which is secret-bearing; the runtime resolves its own `
               + "credentials from its own configuration, so this process must not forward one",
@@ -424,16 +454,68 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
           }
         }
       }
-      return { values: config, errors };
+      // Checked at load rather than at launch, so an incomplete host is named
+      // while the operator is still looking at the registration document.
+      if (mode === "ssh") {
+        for (const key of ["host", "user"]) {
+          if ((text(config, key) ?? "").trim().length > 0) continue;
+          errors.push(`"${key}" is required when "mode" is "ssh"`);
+        }
+        // The launch fields cross an ssh command line to the far host, where a
+        // control character is an argv boundary or a terminal command, not
+        // text. Refused at load: a value like this is never what was meant.
+        const controlCharacter = /[\u0000-\u001F\u007F]/;
+        for (const key of ["command", "cwd", "cordisConfig"]) {
+          const value = text(config, key);
+          if (value === undefined || !controlCharacter.test(value)) continue;
+          errors.push(
+            `"${key}" must not contain control characters when "mode" is "ssh": `
+            + "the value crosses an ssh command line, where it cannot be carried as text",
+          );
+        }
+      }
+      // The todo endpoint listens on this host's loopback interface for this
+      // host's processes; a runtime launched on a far host connects to its own
+      // loopback, where nothing answers. Refused at load rather than failed
+      // per run, because no run over this registration can ever succeed.
+      if (config.todoBridge === true && mode === "ssh") {
+        errors.push(
+          '"todoBridge" cannot be combined with "mode": "ssh": the todo endpoint listens on '
+          + "this host's loopback interface, which a runtime launched on a remote host cannot reach",
+        );
+      }
+      // The SDK bounds each JSON-RPC request individually, not the whole turn,
+      // and over ssh every request now pays a network round trip. A short
+      // timeout still works on a fast link and fails mid-turn on a slow one,
+      // which is the failure an operator cannot see coming — so it is named
+      // here without stopping a registration that may be perfectly fine.
+      const timeout = config.requestTimeoutMs;
+      if (mode === "ssh" && (typeof timeout !== "number" || timeout < 300_000)) {
+        warnings.push(
+          `"requestTimeoutMs" is ${typeof timeout === "number" ? String(timeout) : "unset"} while "mode" is "ssh": `
+          + "the timeout bounds each JSON-RPC request individually rather than the whole turn, and over ssh "
+          + "every request crosses the network; consider raising it to at least 300000",
+        );
+      }
+      return { values: config, errors, ...(warnings.length === 0 ? {} : { warnings }) };
     },
 
     async start(spec: TeammateRunSpec, options: BackendRunOptions): Promise<BackendRun> {
       const startedAt = Date.now();
+      // A registration's resolved config is shared by every attempt. Each dsh
+      // harness fixes its model at construction, so select the task's route on
+      // a private snapshot rather than mutating (or ignoring) that shared
+      // registration object.
+      const runConfig: Record<string, ConfigValue> = {
+        ...options.config,
+        ...(spec.model === undefined ? {} : { model: spec.model }),
+      };
+      const effectiveModel = text(runConfig, "model") ?? "";
       // Started before the driver, because the runtime reads the URL out of its
       // environment as it boots: an endpoint opened afterwards would be one the
       // child had already decided did not exist.
       let endpoint: TodoEndpoint | undefined;
-      if (options.config.todoBridge === true) {
+      if (runConfig.todoBridge === true) {
         if (options.host.proxyToolCall === undefined) {
           throw new Error(
             "dsh backend has todoBridge enabled but the host supplied no proxyToolCall; "
@@ -449,8 +531,9 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
       // here so the driver never has to know a task-level cwd exists.
       let driver: DshHarnessDriver;
       try {
-        driver = await driverOf(options.config, {
+        driver = await driverOf(runConfig, {
           ...options,
+          config: runConfig,
           ...(spec.cwd === undefined ? {} : { baseCwd: spec.cwd }),
           ...(endpoint === undefined ? {} : { envExtras: { [TODO_ENDPOINT_ENV]: endpoint.url } }),
         });
@@ -574,7 +657,7 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
               + "but the runtime never connected to the todo endpoint; "
               + `add an mcp-client entry with transport: streamable-http, serverName: ${TODO_SERVER_NAME}, `
               + `url: !!js process.env.${TODO_ENDPOINT_ENV} to the cordis.yml at `
-              + `${text(options.config, "cordisConfig") ?? "the configured path"}`,
+              + `${text(runConfig, "cordisConfig") ?? "the configured path"}`,
             );
           }
           const terminalStatus: AgentTerminalStatus = aborted
@@ -596,7 +679,7 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
                 : [{ role: "system", content: describeFailure(providerFailure) }]),
             ],
             usage: NO_USAGE,
-            model: text(options.config, "model") ?? spec.model ?? "",
+            model: effectiveModel,
             correlationId: options.correlationId,
             durationMs: Date.now() - startedAt,
             toolCount,
@@ -643,7 +726,7 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
               content: aborted ? `dsh run aborted: ${String(cause)}` : `dsh run failed: ${String(cause)}`,
             }],
             usage: NO_USAGE,
-            model: text(options.config, "model") ?? spec.model ?? "",
+            model: effectiveModel,
             correlationId: options.correlationId,
             durationMs: Date.now() - startedAt,
             wakeable: false,
