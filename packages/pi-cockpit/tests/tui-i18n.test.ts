@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { checkCatalogCompleteness, SETTINGS_LOCALE_EVENT } from "pi-maestro-settings-core/v1";
+import { altKey, checkCatalogCompleteness, SETTINGS_LOCALE_EVENT } from "pi-maestro-settings-core/v1";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { renderSessionDetail } from "../src/session-detail.ts";
@@ -13,6 +13,9 @@ import {
 	bindCockpitTuiLocale,
 	cockpitTuiLocale,
 } from "../src/tui-i18n.ts";
+
+/** `altKey` escaped for use inside a regular expression: `+` is a metacharacter. */
+const altRe = (key: string): string => altKey(key).replaceAll("+", "\\+");
 
 class Events {
 	readonly handlers = new Map<string, Set<(payload: unknown) => void>>();
@@ -73,14 +76,14 @@ test("representative session surfaces rerender bilingually after a live locale e
 	let detail = renderSessionDetail([agent], agent.correlationId, 100, theme).join("\n");
 	assert.match(detail, /@builder/);
 	assert.match(detail, /sleeping/);
-	assert.match(detail, /Alt\+R preview/);
+	assert.match(detail, new RegExp(`${altRe("R")} preview`));
 
 	events.emit(SETTINGS_LOCALE_EVENT, { version: 1, locale: "zh-CN", generation: "live-toggle" });
 	assert.match(renderWindowBar([], state, [], 80, theme)[0] ?? "", /窗口 · 没有对等会话/);
 	detail = renderSessionDetail([agent], agent.correlationId, 100, theme).join("\n");
 	assert.match(detail, /@builder/, "agent identifiers are not translated");
 	assert.match(detail, /休眠中/);
-	assert.match(detail, /Alt\+R 预览/);
+	assert.match(detail, new RegExp(`${altRe("R")} 预览`));
 	for (let width = 1; width <= 120; width++) {
 		const lines = [
 			...renderWindowBar([], state, [], width, theme),

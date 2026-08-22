@@ -125,7 +125,7 @@ const DEFAULTS: Readonly<Record<NativeSettingKey, JsonValue>> = {
 	httpProxy: "",
 	"warnings.anthropicExtraUsage": true,
 	"retry.enabled": true,
-	"retry.maxRetries": 3,
+	"retry.maxRetries": 10,
 	"retry.baseDelayMs": 2000,
 };
 
@@ -291,7 +291,7 @@ const DEFINITIONS: readonly SettingDefinition[] = [
 	textDefinition("httpProxy", "native.group.network", 0, "native.httpProxy", "extension-reload", "native.httpProxy.description", true),
 	booleanDefinition("warnings.anthropicExtraUsage", "native.group.warnings", 0, "native.warnings.anthropicExtraUsage", "extension-reload"),
 	booleanDefinition("retry.enabled", "native.group.retry", 0, "native.retry.enabled", "extension-reload"),
-	intDefinition("retry.maxRetries", "native.group.retry", 1, "native.retry.maxRetries", 0, 100, "extension-reload"),
+	intDefinition("retry.maxRetries", "native.group.retry", 1, "native.retry.maxRetries", 0, 20, "extension-reload"),
 	intDefinition("retry.baseDelayMs", "native.group.retry", 2, "native.retry.baseDelayMs", 0, 600000, "extension-reload"),
 	actionDefinition("keybindings", "native.group.manage", 0, "native.keybindings", "native.keybindings", "native.action.keybindings", "native.keybindings.description"),
 ];

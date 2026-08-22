@@ -1,3 +1,4 @@
+import { altKey } from "pi-maestro-settings-core/v1";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Theme } from "@earendil-works/pi-coding-agent";

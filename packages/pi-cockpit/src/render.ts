@@ -1,11 +1,11 @@
 import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
+import { altKey } from "pi-maestro-settings-core/v1";
 import { effectiveAgentStatus, isExpertLeader, type AgentDisplayStatus } from "./agents-store.ts";
 import type { AgentRow, TodoItem, ViewMode } from "./types.ts";
 import type { IconGlyphs } from "./icons.ts";
 import { composeByPriority, fitLineByPriority, type PriorityGroup, type PrioritizedSegment, type WidthUtils } from "./layout.ts";
 import { AGENT_NARROW_ROW_CAP, AGENT_WIDE_ROW_CAP, fitRows } from "./viewport.ts";
 import { tuiStatus, tuiT } from "./tui-i18n.ts";
-import { altKey } from "./key-labels.ts";
 
 // Re-exported for existing importers; the shared implementation lives in layout.ts.
 export type { WidthUtils };

@@ -69,6 +69,14 @@ export type AcpConfigOptionProbe = typeof probeAcpConfigOptions;
  */
 export declare function createAcpCliBackend(run?: CliToolRunner, probe?: AcpConfigOptionProbe): TeammateBackend;
 /**
+ * Display text for the `acpCli.*` keys the fields above carry.
+ *
+ * Re-exported here because a host that registers this backend reads its
+ * `configFields` from this module: taking the wording from anywhere else lets a
+ * registration ship fields whose keys have no text.
+ */
+export { ACP_CLI_SETTINGS_CATALOGS } from "./acp-cli-catalog.ts";
+/**
  * The registered instance.
  *
  * `asBackend` takes a loaded module's `.default` when it has one and narrows the

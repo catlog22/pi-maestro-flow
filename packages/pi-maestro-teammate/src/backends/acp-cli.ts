@@ -54,8 +54,20 @@ import {
   probeCliToolCommand,
   type CliToolConfig,
 } from "../cli-tools/cli-tools-config.ts";
-import { advertisedModels } from "../remote/acp-config-options.ts";
+import {
+  ACP_MODE_CONFIG_ID,
+  ACP_MODEL_CONFIG_ID,
+  ACP_THOUGHT_LEVEL_CONFIG_ID,
+  advertisedValues,
+} from "../remote/acp-config-options.ts";
 import { probeAcpConfigOptions } from "../remote/acp-driver.ts";
+import {
+  findRegistryAgent,
+  installRegistryAgent,
+  installedExecutable,
+  registryAgentChoices,
+  resolveRegistryLaunch,
+} from "./acp-registry.ts";
 import {
   CLI_TOOL_MODEL_PREFIX,
   cliToolNameFromModel,
@@ -73,9 +85,10 @@ import {
  * adjudication before anything is spawned. The dispatch this replaces made the
  * same decision inside the run, after the config had been loaded.
  * `forkContext` — a Pi history entry describes a different runtime's tool set.
- * `modelSelection` — the registration *is* the route: one CLI per registration,
- * and `start` refuses a spec naming any other model rather than running the
- * wrong CLI under the requested model's name.
+ * `modelSelection` — honoured on both axes. The registration is the route, and a
+ * spec naming anything else names a model in the CLI's own catalogue, which
+ * `start` selects on the session it opens. A value that CLI does not advertise
+ * fails the run rather than silently leaving the agent on its current model.
  * `thinkingLevel` — no ACP field expresses it; the CLI's own config decides.
  * `todoBinding` — this backend passes no host tool to the child, so a task with
  * todos would stall at `in_progress` while the host waited for updates.
@@ -99,6 +112,90 @@ const CAPABILITIES: BackendCapabilities = {
 };
 
 /**
+ * The arguments that follow an executable, with no package specifier before them.
+ *
+ * A registration that names its own executable, and one that reached an
+ * installed copy, both launch the agent directly; only the runner path needs
+ * the specifier it resolves. Reading them from the snapshot keeps the two in
+ * step — the ACP-mode flag is the same either way.
+ *
+ * @param agent - the snapshot entry the registration named.
+ * @param launch - the launch resolved for this machine.
+ * @returns arguments to pass after the executable.
+ */
+function runnerArgumentsOf(
+  agent: ReturnType<typeof findRegistryAgent> & {},
+  launch: { args: readonly string[] },
+): readonly string[] {
+  return agent.launch.kind === "binary" ? launch.args : agent.launch.runnerArgs;
+}
+
+/**
+ * Fill a registration's launch from the ACP registry snapshot.
+ *
+ * Writes into `values` rather than returning a launch, because `resolveConfig`
+ * publishes one resolved document and every later reader — the runner, the
+ * probe, the settings shell — must see the same one.
+ *
+ * A registration that names an agent *and* restates its launch is refused
+ * rather than silently preferring one: the two would disagree the moment the
+ * snapshot is refreshed, and the operator could not tell which one ran.
+ * `command` stays the operator's for binary agents, which this host never
+ * installs; only the arguments come from the registry.
+ *
+ * @param agentId - value of the `acpAgent` field.
+ * @param config - the registration as written.
+ * @param values - resolved document to fill; mutated in place.
+ * @returns an error message, or undefined when the launch resolved.
+ */
+function applyRegistryLaunch(
+  agentId: string,
+  config: Record<string, ConfigValue>,
+  values: Record<string, ConfigValue>,
+): string | undefined {
+  const agent = findRegistryAgent(agentId);
+  if (agent === undefined) {
+    return `"acpAgent" names "${agentId}", which the ACP registry snapshot does not list`;
+  }
+  if (list(config, "args").length > 0) {
+    return `"args" cannot be set beside "acpAgent": agent "${agentId}" carries its own arguments`;
+  }
+  let launch;
+  try {
+    launch = resolveRegistryLaunch(agent);
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  // An explicit executable overrides the resolved one: an operator with a build
+  // outside PATH is naming where it is, not disagreeing with the registry. The
+  // arguments still come from the registry, and are the ones that follow an
+  // executable rather than the runner's package specifier.
+  const override = text(config, "command");
+  if (override !== undefined && override.trim().length > 0) {
+    values.args = [...runnerArgumentsOf(agent, launch)];
+    return undefined;
+  }
+  if (launch.command !== undefined) values.command = launch.command;
+  values.args = [...launch.args];
+  return undefined;
+}
+
+/**
+ * Registration fields that name a value on one of the agent's own selectors.
+ *
+ * The map is the whole per-axis story: each field carries a value in the
+ * agent's vocabulary, and the ACP config id says which selector that vocabulary
+ * belongs to. Listing an axis and setting it read this same table, so a field
+ * whose picker fills is a field the run can set, and adding an axis is adding a
+ * row plus its field.
+ */
+const SELECTOR_FIELDS: Readonly<Record<string, string>> = {
+  acpModel: ACP_MODEL_CONFIG_ID,
+  acpMode: ACP_MODE_CONFIG_ID,
+  acpThoughtLevel: ACP_THOUGHT_LEVEL_CONFIG_ID,
+};
+
+/**
  * This backend's settings — one CLI's launch, its location, and its route.
  *
  * No field is a `credential-ref`: an ACP CLI resolves its own provider
@@ -112,11 +209,47 @@ const CAPABILITIES: BackendCapabilities = {
  */
 export const ACP_CLI_CONFIG_FIELDS: readonly BackendConfigField[] = [
   {
+    // An id from the checked-in ACP registry snapshot. Supplies the launch so a
+    // registration does not have to restate a package specifier the registry
+    // already pins; `command` stays required for agents that ship as binaries,
+    // because nothing here installs one.
+    key: "acpAgent",
+    kind: "dynamic-enum",
+    labelKey: "acpCli.acpAgent",
+    descriptionKey: "acpCli.acpAgent.description",
+  },
+  {
+    // Off by default: installing writes to disk and reaches the network, and a
+    // registration that only names an agent has not asked for either. The
+    // runner path works without it, so the choice is a speed-up an operator
+    // opts into rather than a side effect of naming an agent.
+    key: "acpInstall",
+    kind: "enum",
+    labelKey: "acpCli.acpInstall",
+    descriptionKey: "acpCli.acpInstall.description",
+    options: [
+      { value: "never", labelKey: "acpCli.acpInstall.never" },
+      { value: "auto", labelKey: "acpCli.acpInstall.auto" },
+    ],
+    default: "never",
+  },
+  {
+    // Bounds the one-off install, not the run. Exceeding it falls back to the
+    // runner rather than failing the task.
+    key: "installTimeoutMs",
+    kind: "integer",
+    labelKey: "acpCli.installTimeoutMs",
+    descriptionKey: "acpCli.installTimeoutMs.description",
+  },
+  {
+    // Not declared `required`: `acpAgent` supplies it for every agent the
+    // registry distributes through a package runner. The requirement is
+    // conditional, so `resolveConfig` owns it and can say which of the two ways
+    // to satisfy it applies.
     key: "command",
     kind: "text",
     labelKey: "acpCli.command",
     descriptionKey: "acpCli.command.description",
-    required: true,
   },
   {
     key: "args",
@@ -176,6 +309,26 @@ export const ACP_CLI_CONFIG_FIELDS: readonly BackendConfigField[] = [
     descriptionKey: "acpCli.acpModel.description",
   },
   {
+    // The agent's own operating mode, where it has one — Cursor advertises
+    // agent / plan / ask. Declared for every registration and filled from the
+    // agent, so a CLI that offers no modes reports an empty list rather than
+    // this backend deciding which CLIs have modes.
+    key: "acpMode",
+    kind: "dynamic-enum",
+    labelKey: "acpCli.acpMode",
+    descriptionKey: "acpCli.acpMode.description",
+  },
+  {
+    // The agent's own reasoning-depth selector, for agents that publish one as
+    // a separate axis. Many bake reasoning depth into the model value instead
+    // and advertise nothing here; for those the picker is empty, which is the
+    // honest answer rather than a synthesised level this backend cannot set.
+    key: "acpThoughtLevel",
+    kind: "dynamic-enum",
+    labelKey: "acpCli.acpThoughtLevel",
+    descriptionKey: "acpCli.acpThoughtLevel.description",
+  },
+  {
     // Per registration, not per task: `TeammateRunSpec` carries no timeout, so
     // this is the finest granularity the contract can express today.
     key: "runTimeoutMs",
@@ -227,6 +380,43 @@ function count(config: Record<string, ConfigValue>, key: string): number | undef
  * @param config - this registration's resolved settings.
  * @returns the launch configuration.
  */
+/**
+ * The launch configuration for one run, installing the agent first when asked.
+ *
+ * `acpInstall: "auto"` trades one slow first run for fast later ones: `npx`
+ * re-resolves the package on every launch, so an installed copy is the
+ * difference between a handshake that answers immediately and one that waits on
+ * the network. A failed install is not a failed run — the runner path is still
+ * there, and returning it beats refusing to work because a speed-up did not
+ * apply.
+ *
+ * Never overrides an executable the registration named: that path is the
+ * operator's answer to "where is it", and installing a second copy would run
+ * something they did not point at.
+ *
+ * @param config - the resolved registration.
+ * @param signal - cancellation for the install.
+ * @returns the configuration to launch with.
+ */
+async function installedLaunchConfig(
+  config: Record<string, ConfigValue>,
+  signal: AbortSignal,
+): Promise<CliToolConfig> {
+  const base = launchConfigOf(config);
+  const agentId = text(config, "acpAgent");
+  if (agentId === undefined || text(config, "acpInstall") !== "auto") return base;
+  const agent = findRegistryAgent(agentId);
+  if (agent === undefined || agent.launch.kind !== "npx") return base;
+  // Already resolved to something other than the runner — an operator path or a
+  // copy on PATH — so there is nothing to speed up.
+  if (base.command !== agent.launch.command) return base;
+  const executable = installedExecutable(agent)
+    ?? await installRegistryAgent(agent, { signal, ...(count(config, "installTimeoutMs") === undefined ? {} : { timeoutMs: count(config, "installTimeoutMs")! }) });
+  return executable === undefined
+    ? base
+    : { ...base, command: executable, args: [...agent.launch.runnerArgs] };
+}
+
 function launchConfigOf(config: Record<string, ConfigValue>): CliToolConfig {
   const command = text(config, "command");
   const cwd = text(config, "cwd");
@@ -370,8 +560,21 @@ export function createAcpCliBackend(
       if (mode !== "local" && mode !== "ssh") {
         errors.push(`"mode" must be "local" or "ssh", got "${mode}"`);
       }
-      if ((text(config, "command") ?? "").trim().length === 0) {
-        errors.push('"command" must name the executable to launch');
+      const values: Record<string, ConfigValue> = { ...config };
+      const agentId = text(config, "acpAgent");
+      const registryFailure = agentId === undefined
+        ? undefined
+        : applyRegistryLaunch(agentId, config, values);
+      if (registryFailure !== undefined) errors.push(registryFailure);
+      // Skipped once the registry step already failed: it stopped before it
+      // could fill the launch, so a further complaint about the executable
+      // describes that failure rather than a second thing to fix.
+      if (registryFailure === undefined && (text(values, "command") ?? "").trim().length === 0) {
+        errors.push(
+          agentId === undefined
+            ? '"command" must name the executable to launch, or "acpAgent" must name a registry agent that carries one'
+            : `"command" must name the executable: ACP registry agent "${agentId}" ships as a platform binary, which this host never installs`,
+        );
       }
       const port = count(config, "port");
       if (port !== undefined && (!Number.isInteger(port) || port < 1 || port > 65_535)) {
@@ -380,6 +583,10 @@ export function createAcpCliBackend(
       const runTimeoutMs = count(config, "runTimeoutMs");
       if (runTimeoutMs !== undefined && runTimeoutMs <= 0) {
         errors.push(`"runTimeoutMs" must be a positive number of milliseconds, got ${runTimeoutMs}`);
+      }
+      const installTimeoutMs = count(config, "installTimeoutMs");
+      if (installTimeoutMs !== undefined && installTimeoutMs <= 0) {
+        errors.push(`"installTimeoutMs" must be a positive number of milliseconds, got ${installTimeoutMs}`);
       }
       const startupTimeoutMs = count(config, "startupTimeoutMs");
       if (startupTimeoutMs !== undefined && startupTimeoutMs <= 0) {
@@ -407,7 +614,7 @@ export function createAcpCliBackend(
           errors.push(`"${key}" is required when "mode" is "ssh"`);
         }
       }
-      return { values: config, errors };
+      return { values, errors };
     },
 
     async listConfigOptions(
@@ -415,7 +622,12 @@ export function createAcpCliBackend(
       config: Record<string, ConfigValue>,
       signal: AbortSignal,
     ): Promise<readonly BackendConfigOption[]> {
-      if (field !== "acpModel") {
+      // Answered from the checked-in snapshot: the choices are agent ids, which
+      // are known without launching anything. Every other picker asks the agent
+      // itself, which is why the launch checks below apply only to those.
+      if (field === "acpAgent") return registryAgentChoices();
+      const configId = SELECTOR_FIELDS[field];
+      if (configId === undefined) {
         throw new Error(`teammate backend "acp-cli" publishes no options for setting "${field}"`);
       }
       const launch = launchConfigOf(config);
@@ -425,7 +637,7 @@ export function createAcpCliBackend(
         // path's ssh transport, which this operation does not build. Saying so
         // beats returning the local machine's answer for a remote target.
         throw new Error(
-          'teammate backend "acp-cli" cannot list models for an "ssh" registration: '
+          `teammate backend "acp-cli" cannot list "${field}" for an "ssh" registration: `
           + "the probe launches the agent locally, so the target host's catalogue is not reachable here",
         );
       }
@@ -447,7 +659,7 @@ export function createAcpCliBackend(
           ...(startupTimeoutMs === undefined ? {} : { startupTimeoutMs }),
         },
       );
-      return advertisedModels(advertised);
+      return advertisedValues(advertised, configId);
     },
 
     async start(spec: TeammateRunSpec, options: BackendRunOptions): Promise<BackendRun> {
@@ -462,8 +674,24 @@ export function createAcpCliBackend(
       const acpModel = spec.model === undefined || spec.model === route
         ? text(options.config, "acpModel")
         : spec.model;
+      // Every axis this registration named, in the agent's own vocabulary. An
+      // axis left unset is absent rather than defaulted here: the agent's own
+      // current setting is the only sensible default, and this backend does not
+      // know it.
+      const acpSelections: Record<string, string> = {};
+      if (acpModel !== undefined) acpSelections[ACP_MODEL_CONFIG_ID] = acpModel;
+      for (const [field, configId] of Object.entries(SELECTOR_FIELDS)) {
+        if (configId === ACP_MODEL_CONFIG_ID) continue;
+        const value = text(options.config, field);
+        if (value !== undefined) acpSelections[configId] = value;
+      }
       const tool = isCliToolModel(route) ? cliToolNameFromModel(route) : route;
       const aborter = new AbortController();
+      // Installing is deferred to here because `resolveConfig` is synchronous
+      // and runs whenever the document is read — including while the settings
+      // shell renders. A registration stays launchable without it: this only
+      // upgrades the runner path to an installed copy.
+      const launchConfig = await installedLaunchConfig(options.config, aborter.signal);
       const timeoutMs = count(options.config, "runTimeoutMs");
       const startupTimeoutMs = count(options.config, "startupTimeoutMs");
       const cancellation = combineSignals(options.signal, aborter.signal);
@@ -471,13 +699,13 @@ export function createAcpCliBackend(
       const outcome = (async (): Promise<AttemptOutcome> => {
         const settled = await run({
           tool,
-          config: launchConfigOf(options.config),
+          config: launchConfig,
           prompt: spec.task,
           cwd: spec.cwd ?? options.baseCwd,
           signal: cancellation.signal,
           ...(timeoutMs === undefined ? {} : { timeoutMs }),
           ...(startupTimeoutMs === undefined ? {} : { startupTimeoutMs }),
-          ...(acpModel === undefined ? {} : { acpModel }),
+          ...(Object.keys(acpSelections).length === 0 ? {} : { acpSelections }),
         }).finally(cancellation.release);
         const terminalStatus = terminalStatusOf(settled);
         const result: SingleResult = {
@@ -494,7 +722,12 @@ export function createAcpCliBackend(
             cost: settled.usage.costUsd ?? 0,
             turns: 1,
           },
+          // The route, because that is what the host dispatched and the only
+          // name it shares with this registration. What the CLI actually ran
+          // has its own namespace and is reported beside it; collapsing the two
+          // into one field would lose whichever it did not carry.
           model: route,
+          ...(settled.selectedModel === undefined ? {} : { executorModel: settled.selectedModel }),
           correlationId: options.correlationId,
           originCwd: spec.cwd ?? options.baseCwd,
           durationMs: settled.durationMs,
@@ -528,6 +761,15 @@ export function createAcpCliBackend(
     },
   };
 }
+
+/**
+ * Display text for the `acpCli.*` keys the fields above carry.
+ *
+ * Re-exported here because a host that registers this backend reads its
+ * `configFields` from this module: taking the wording from anywhere else lets a
+ * registration ship fields whose keys have no text.
+ */
+export { ACP_CLI_SETTINGS_CATALOGS } from "./acp-cli-catalog.ts";
 
 /**
  * The registered instance.

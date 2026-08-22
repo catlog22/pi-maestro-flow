@@ -1,5 +1,4 @@
-import type { TranslationCatalogs } from "pi-maestro-settings-core/v1";
-import { altKey } from "../key-labels.ts";
+import { altKey, type TranslationCatalogs } from "pi-maestro-settings-core/v1";
 
 export const CORE_TUI_CATALOGS = {
   en: {

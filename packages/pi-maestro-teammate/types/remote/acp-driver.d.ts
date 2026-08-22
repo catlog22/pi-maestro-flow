@@ -19,15 +19,43 @@ export interface AcpDriverOptions {
     eventQueueBytes?: number;
     spawnChild?: SpawnChild;
     /**
-     * The model to select on the session the agent opens.
+     * Values to set on the session the agent opens, keyed by ACP config id.
      *
-     * Absent leaves the agent on whatever it advertises as current, which is the
-     * only behaviour available from an agent that offers no model selector. A
-     * value the agent does not advertise fails the run rather than falling back
-     * to that current model, so a stale registration cannot silently bill a
-     * different model than the one it names.
+     * One map rather than one option per axis: the client drives whatever the
+     * agent advertises, and an axis it does not advertise is absent from the
+     * agent rather than special in this client. An omitted key leaves that
+     * selector on whatever the agent treats as current, which is the only
+     * behaviour available from an agent that offers no such selector.
+     *
+     * A value the agent does not advertise fails the run rather than falling back
+     * to the current one, so a stale registration cannot silently run something
+     * other than what it names.
      */
-    model?: string;
+    selections?: Readonly<Record<string, string>>;
+}
+/**
+ * A run handle that also reports which model its session was put on.
+ *
+ * `RemoteRunHandle` stays model-free because model selection is an ACP session
+ * concept and no other driver has one. The value is read after the run settles,
+ * so it is declared here rather than pushed through the event stream: the
+ * selection happens once, during the handshake, and never changes for the life
+ * of the session.
+ */
+export interface AcpRunHandleView extends RemoteRunHandle {
+    /**
+     * The advertised values this session's selectors were set to, by config id.
+     *
+     * A key is present only once the agent accepted the value, so a reader may
+     * treat every entry as what ran rather than what was asked for. The values
+     * are the agent's own catalogue entries, not the requested strings: a request
+     * naming a model by name resolves to the advertised value carrying it, so
+     * this reports the variant that actually ran.
+     *
+     * An axis nobody asked for, and an axis the agent does not advertise, are
+     * both simply absent — this map claims nothing about either.
+     */
+    readonly selected: Readonly<Record<string, string>>;
 }
 /** What a configuration probe needs in order to launch the agent it asks. */
 export interface AcpProbeTarget {
@@ -65,7 +93,7 @@ export declare class AcpDriver implements RemoteDriver {
     #private;
     readonly id: "acp";
     constructor(options?: AcpDriverOptions);
-    start(request: RemoteRunStartParams, context: RemoteDriverContext): Promise<RemoteRunHandle>;
+    start(request: RemoteRunStartParams, context: RemoteDriverContext): Promise<AcpRunHandleView>;
     close(): Promise<void>;
 }
 export {};

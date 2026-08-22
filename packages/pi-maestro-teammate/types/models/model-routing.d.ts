@@ -188,9 +188,24 @@ export interface ModelRegistryRefreshContext {
  * routing and modelCapabilities validation until unrelated code refreshes.
  */
 export declare function refreshModelRegistry(ctx: ModelRegistryRefreshContext): Promise<void>;
+/**
+ * Configured routing targets that the current teammate catalog cannot reach.
+ *
+ * `mappedModel` skips unreachable targets silently (the dispatch then falls
+ * back down the inheritance chain), so this is the one place an operator can
+ * see that a task-type or role mapping names a model no gate currently
+ * admits. Empty `availableModels` means "no catalog knowledge" and yields no
+ * findings — absence of evidence must not read as breakage.
+ */
+export interface UnreachableRoutingTarget {
+    kind: "taskType" | "role";
+    key: string;
+    model: string;
+}
+export declare function unreachableRoutingTargets(config: ModelRoutingConfig, availableModels: readonly string[]): UnreachableRoutingTarget[];
 export declare function formatModelRoutingConfig(cwd: string, agents?: readonly {
     taskType?: TeammateTaskType;
-}[], globalFilePath?: string): string;
+}[], globalFilePath?: string, availableModels?: readonly string[]): string;
 export declare const TASK_TYPE_ROUTING_START_MARKER = "<!-- teammate-tasktype-routing:start -->";
 export declare const TASK_TYPE_ROUTING_END_MARKER = "<!-- teammate-tasktype-routing:end -->";
 /**
@@ -200,4 +215,4 @@ export declare const TASK_TYPE_ROUTING_END_MARKER = "<!-- teammate-tasktype-rout
  */
 export declare function appendTaskTypeRoutingContext(systemPrompt: string, cwd: string, agents?: readonly {
     taskType?: TeammateTaskType;
-}[], globalFilePath?: string): string;
+}[], globalFilePath?: string, availableModels?: readonly string[]): string;

@@ -181,7 +181,7 @@ test("acp-cli separates the route axis from the CLI's own model catalogue", asyn
   await (await backend.start(specOf({ model: "cli/mock" }), runOptionsOf(LOCAL_CONFIG))).outcome;
   assert.equal(launches.length, 1);
   assert.equal(launches[0]?.tool, "mock");
-  assert.equal(launches[0]?.acpModel, undefined);
+  assert.equal(launches[0]?.acpSelections?.model, undefined);
 
   // Any other value names a model inside that CLI. It reaches the launch rather
   // than being refused, and it does not change which CLI is launched.
@@ -191,7 +191,7 @@ test("acp-cli separates the route axis from the CLI's own model catalogue", asyn
   )).outcome;
   assert.equal(launches.length, 2);
   assert.equal(launches[1]?.tool, "mock");
-  assert.equal(launches[1]?.acpModel, "claude-opus-5[thinking=true]");
+  assert.equal(launches[1]?.acpSelections?.model, "claude-opus-5[thinking=true]");
 });
 
 test("acp-cli applies the registration's model only when the task names the route", async () => {
@@ -204,16 +204,133 @@ test("acp-cli applies the registration's model only when the task names the rout
 
   // Naming only the route leaves the registration's own default in force.
   await (await backend.start(specOf({ model: "cli/mock" }), runOptionsOf(config))).outcome;
-  assert.equal(launches[0]?.acpModel, "composer-2.5[fast=true]");
+  assert.equal(launches[0]?.acpSelections?.model, "composer-2.5[fast=true]");
 
   // A task naming a model overrides that default, so one registration serves a
   // whole CLI rather than one model of it.
   await (await backend.start(specOf({ model: "grok-4.6[effort=high]" }), runOptionsOf(config))).outcome;
-  assert.equal(launches[1]?.acpModel, "grok-4.6[effort=high]");
+  assert.equal(launches[1]?.acpSelections?.model, "grok-4.6[effort=high]");
 
   // A task naming no model at all still gets the registration's default.
   await (await backend.start(specOf(), runOptionsOf(config))).outcome;
-  assert.equal(launches[2]?.acpModel, "composer-2.5[fast=true]");
+  assert.equal(launches[2]?.acpSelections?.model, "composer-2.5[fast=true]");
+});
+
+test("acp-cli reports the route it was dispatched under beside the model that ran", async () => {
+  const backend = createAcpCliBackend(async () => ({
+    ...CLEAN_RUN,
+    selectedModel: "composer-2.5[fast=true]",
+  }));
+  const { result } = await (await backend.start(
+    specOf({ model: "cli/mock" }),
+    runOptionsOf({ ...LOCAL_CONFIG, acpModel: "composer-2.5" }),
+  )).outcome;
+
+  // The host dispatched a route and gets it back under the name it used.
+  assert.equal(result.model, "cli/mock");
+  // What the CLI ran lives in its own namespace and is reported beside it, so
+  // two runs of one registration on different models are told apart.
+  assert.equal(result.executorModel, "composer-2.5[fast=true]");
+});
+
+test("a run that selected no model reports no executor model rather than repeating the route", async () => {
+  const backend = createAcpCliBackend(async () => CLEAN_RUN);
+  const { result } = await (await backend.start(
+    specOf({ model: "cli/mock" }),
+    runOptionsOf(LOCAL_CONFIG),
+  )).outcome;
+
+  assert.equal(result.model, "cli/mock");
+  // Absent, never the route: the CLI stayed on whatever it treats as current,
+  // and copying `model` here would claim knowledge the host does not have.
+  assert.equal(result.executorModel, undefined);
+});
+
+test("a failed run still reports the model it ran on", async () => {
+  const backend = createAcpCliBackend(async () => ({
+    ...CLEAN_RUN,
+    exitCode: 1,
+    terminalStatus: "failed",
+    messages: [{ role: "system", content: "the CLI gave up" }],
+    selectedModel: "grok-4.6[effort=high]",
+  }));
+  const { result } = await (await backend.start(specOf(), runOptionsOf(LOCAL_CONFIG))).outcome;
+
+  assert.equal(result.exitCode, 1);
+  // Which model failed is the first thing a reader needs, so the selection
+  // outlives the turn's outcome.
+  assert.equal(result.executorModel, "grok-4.6[effort=high]");
+});
+
+test("every selector the registration names reaches the launch, keyed by ACP config id", async () => {
+  const launches: RunLocalCliToolParams[] = [];
+  const backend = createAcpCliBackend(async (params) => {
+    launches.push(params);
+    return CLEAN_RUN;
+  });
+  await (await backend.start(specOf(), runOptionsOf({
+    ...LOCAL_CONFIG,
+    acpModel: "composer-2.5",
+    acpMode: "plan",
+    acpThoughtLevel: "high",
+  }))).outcome;
+
+  // Keyed by the agent's own config ids, not by this backend's field names: the
+  // field is where an operator writes the value, the config id is where the
+  // agent reads it.
+  assert.deepEqual(launches[0]?.acpSelections, {
+    model: "composer-2.5",
+    mode: "plan",
+    thought_level: "high",
+  });
+});
+
+test("an unset selector is absent rather than defaulted by this backend", async () => {
+  const launches: RunLocalCliToolParams[] = [];
+  const backend = createAcpCliBackend(async (params) => {
+    launches.push(params);
+    return CLEAN_RUN;
+  });
+  await (await backend.start(specOf(), runOptionsOf({ ...LOCAL_CONFIG, acpMode: "plan" }))).outcome;
+
+  // Only what was named. The agent's own current setting is the only sensible
+  // default for the rest, and this backend does not know it.
+  assert.deepEqual(launches[0]?.acpSelections, { mode: "plan" });
+});
+
+test("acp-cli lists each selector from the agent, and reports an unpublished one as empty", async () => {
+  // A real executable: listing checks the configured command is launchable
+  // before reaching the agent.
+  const probeConfig: Record<string, ConfigValue> = {
+    command: process.execPath,
+    args: ["--version"],
+    modelId: "cli/mock",
+  };
+  const backend = createAcpCliBackend(undefined, async () => [
+    {
+      type: "select", id: "model", name: "Model", category: "model",
+      currentValue: "a[]", options: [{ value: "a[]", name: "a" }],
+    },
+    {
+      type: "select", id: "mode", name: "Mode", category: "mode",
+      currentValue: "agent", options: [{ value: "agent", name: "Agent" }, { value: "ask", name: "Ask" }],
+    },
+  ] as never);
+  const signal = AbortSignal.timeout(1_000);
+
+  assert.deepEqual(
+    await backend.listConfigOptions!("acpMode", probeConfig, signal),
+    [{ value: "agent", label: "Agent" }, { value: "ask", label: "Ask" }],
+  );
+  // The agent publishes no reasoning-depth selector, so the picker is empty.
+  // Empty rather than an error: not offering an axis is a fact about this CLI,
+  // and the settings shell renders it as such.
+  assert.deepEqual(await backend.listConfigOptions!("acpThoughtLevel", probeConfig, signal), []);
+  // A field that names no selector at all is still refused.
+  await assert.rejects(
+    () => backend.listConfigOptions!("runTimeoutMs", probeConfig, signal),
+    /publishes no options/,
+  );
 });
 
 test("acp-cli defaults its route to the registration name", async () => {
@@ -387,4 +504,99 @@ test("acp-cli declaring a dynamic field is a registration error without its list
   const dynamic = (acpCliBackend.configFields ?? []).filter((field) => field.kind === "dynamic-enum");
   assert.ok(dynamic.length > 0, "expected acp-cli to declare at least one dynamic field");
   assert.equal(typeof acpCliBackend.listConfigOptions, "function");
+});
+
+test("naming a registry agent supplies the launch, and restating it is refused", () => {
+  // A runner-distributed agent carries its own executable and arguments.
+  const resolved = resolveBackendConfig(acpCliBackend, { acpAgent: "claude-acp", modelId: "cli/claude" });
+  assert.deepEqual(resolved.errors, []);
+  const args = resolved.values.args as string[];
+  assert.ok(
+    resolved.values.command === "npx" || args.length === 0,
+    `expected npx or a local copy, got ${String(resolved.values.command)}`,
+  );
+  assert.ok(String(resolved.values.command).length > 0);
+
+  const argClash = resolveBackendConfig(acpCliBackend, {
+    acpAgent: "claude-acp",
+    args: ["--acp"],
+    modelId: "cli/claude",
+  });
+  assert.equal(argClash.errors.length, 1);
+  assert.match(argClash.errors[0]!, /"args" cannot be set beside "acpAgent"/);
+});
+
+test("a binary agent still needs its executable, and gets the registry's arguments", () => {
+  // Nothing here installs a platform binary, so naming one is not enough.
+  const missing = resolveBackendConfig(acpCliBackend, { acpAgent: "cursor", modelId: "cli/cursor" });
+  assert.equal(missing.errors.length, 1);
+  assert.match(missing.errors[0]!, /ships as a platform binary/);
+
+  const complete = resolveBackendConfig(acpCliBackend, {
+    acpAgent: "cursor",
+    command: "/opt/cursor/agent",
+    modelId: "cli/cursor",
+  });
+  assert.deepEqual(complete.errors, []);
+  assert.equal(complete.values.command, "/opt/cursor/agent");
+  assert.deepEqual(complete.values.args, ["acp"]);
+});
+
+test("an id the snapshot does not list is refused rather than launched", () => {
+  const resolved = resolveBackendConfig(acpCliBackend, { acpAgent: "not-an-agent", modelId: "cli/x" });
+  assert.ok(resolved.errors.some((error) => /the ACP registry snapshot does not list/.test(error)), resolved.errors.join(" | "));
+});
+
+test("the registry picker answers from the snapshot without launching anything", async () => {
+  // Unlike the model/mode/thought-level pickers, this one needs no agent: the
+  // ids are known locally, so an unlaunchable command must not stop it.
+  const options = await acpCliBackend.listConfigOptions!(
+    "acpAgent",
+    { command: "definitely-not-installed-xyz", modelId: "cli/x" },
+    AbortSignal.timeout(1_000),
+  );
+  assert.ok(options.length > 20, `expected the snapshot's agents, got ${options.length}`);
+  assert.ok(options.some((option) => option.value === "cursor"));
+});
+
+
+test("naming an executable beside a registry agent points at it, keeping the registry's arguments", () => {
+  // An operator with a build outside PATH is answering "where is it", not
+  // disagreeing with the registry — so the path wins and only the arguments
+  // come from the snapshot.
+  const resolved = resolveBackendConfig(acpCliBackend, {
+    acpAgent: "gemini",
+    command: "/opt/gemini/bin/gemini",
+    modelId: "cli/gemini",
+  });
+  assert.deepEqual(resolved.errors, []);
+  assert.equal(resolved.values.command, "/opt/gemini/bin/gemini");
+  // The arguments that follow an executable, not the runner's package
+  // specifier: launching a named binary must not hand it `-y <package>`.
+  const args = resolved.values.args as string[];
+  assert.ok(!args.includes("-y"), args.join(" "));
+  assert.ok(!args.some((argument) => argument.includes("@")), args.join(" "));
+  assert.ok(args.includes("--acp"), args.join(" "));
+});
+
+test("installing is off unless the registration asks for it", () => {
+  const off = resolveBackendConfig(acpCliBackend, { acpAgent: "claude-acp", modelId: "cli/claude" });
+  // Writing to disk and reaching the network is not a side effect of naming an
+  // agent; the runner path works without either.
+  assert.equal(off.values.acpInstall, "never");
+
+  const on = resolveBackendConfig(acpCliBackend, {
+    acpAgent: "claude-acp",
+    acpInstall: "auto",
+    modelId: "cli/claude",
+  });
+  assert.deepEqual(on.errors, []);
+  assert.equal(on.values.acpInstall, "auto");
+
+  const bad = resolveBackendConfig(acpCliBackend, {
+    acpAgent: "claude-acp",
+    installTimeoutMs: 0,
+    modelId: "cli/claude",
+  });
+  assert.ok(bad.errors.some((error) => /"installTimeoutMs" must be a positive/.test(error)), bad.errors.join(" | "));
 });

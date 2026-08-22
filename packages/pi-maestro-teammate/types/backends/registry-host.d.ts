@@ -14,6 +14,10 @@ import type { AvailableModelEntry } from "../models/model-catalog.ts";
 import { type CompiledModelRegistryPair } from "../models/model-registry.ts";
 import { type PiSubprocessRunExtras } from "./pi-subprocess.ts";
 import type { BackendRunOptions } from "pi-maestro-backend-core/v1/backend";
+/** Global registration document under Pi's configured agent directory. */
+export declare function getGlobalBackendRegistryPath(): string;
+/** Project registration document relative to the workspace root. */
+export declare function getProjectBackendRegistryPath(workspaceRoot: string): string;
 /** Name under which Pi registers itself; it holds no privilege beyond the name. */
 export declare const PI_SUBPROCESS = "pi-subprocess";
 /**
@@ -32,18 +36,22 @@ export interface ModelRegistryProjectionInputs {
     cliToolsGlobalFilePath?: string;
 }
 /**
- * Read the registration document synchronously, reusing an earlier read.
+ * Read the effective registration document synchronously, reusing an earlier read.
+ *
+ * A project document is an explicit per-workspace decision and therefore wins
+ * as a whole. When it is absent, the global document under Pi's agent directory
+ * applies. Mixing their `mode` or `default` fields would create a registry that
+ * appears in neither file, so this is precedence rather than field merging.
  *
  * Synchronous on purpose. Dispatch resolves the registry immediately before
  * spawning, and inserting an awaited read there delays the child by an I/O tick
- * — enough to break callers that address the child's stdin as soon as dispatch
- * returns. The file is small deployment configuration read once per root, in a
- * path that already performs synchronous file work.
+ * — enough to break callers that address its stdin as soon as dispatch returns.
  *
- * @param workspaceRoot - directory holding `.pi/`.
- * @returns the registration document.
+ * @param workspaceRoot - directory holding the project's `.pi/`.
+ * @param globalFilePath - global document path; injectable for isolated tests.
+ * @returns the project document, global fallback, or built-in legacy config.
  */
-export declare function backendRegistryConfigSync(workspaceRoot: string): BackendRegistryConfig;
+export declare function backendRegistryConfigSync(workspaceRoot: string, globalFilePath?: string): BackendRegistryConfig;
 /**
  * Read and atomically publish an opted-in model-registry projection pair.
  *
@@ -73,6 +81,6 @@ export declare function dispatchRegistryForProjectionSync(projection: CompiledMo
  * than silently local.
  * @returns the registry, or undefined when the document keeps the legacy path.
  */
-export declare function dispatchRegistrySync(workspaceRoot: string, extrasOf: (spec: TeammateRunSpec, options: BackendRunOptions) => PiSubprocessRunExtras, remoteManagerOf?: () => RemoteManagerPort): TeammateBackendRegistry | undefined;
+export declare function dispatchRegistrySync(workspaceRoot: string, extrasOf: (spec: TeammateRunSpec, options: BackendRunOptions) => PiSubprocessRunExtras, remoteManagerOf?: () => RemoteManagerPort, globalFilePath?: string): TeammateBackendRegistry | undefined;
 /** Forget cached documents and published pairs so an operator edit takes effect. */
 export declare function forgetBackendRegistryConfigSync(workspaceRoot?: string): void;

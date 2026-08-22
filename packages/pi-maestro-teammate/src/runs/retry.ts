@@ -1,7 +1,7 @@
 import type { ModelHealthScope, ModelHealthTarget } from "../models/model-circuit-breaker.ts";
 
 export const NETWORK_RETRY_POLICY = Object.freeze({
-  maxRetries: 5,
+  maxRetries: 10,
   initialDelayMs: 1_000,
   maxDelayMs: 16_000,
 });
@@ -28,7 +28,7 @@ export function resolveNetworkRetryPolicy(
   maxDelayMs: number;
 }> {
   return Object.freeze({
-    maxRetries: 5,
+    maxRetries: 10,
     initialDelayMs: 1_000,
     maxDelayMs: readRetryMaxDelayMs(env),
   });

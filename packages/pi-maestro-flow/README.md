@@ -91,6 +91,8 @@ After installation:
 
 ## Commands
 
+> **macOS:** the `Alt+…` shortcuts below are the **option** key and render as `Option+…`. Your terminal must be set to send option as Meta; see [pi-cockpit's README](../pi-cockpit/README.md#commands) for the iTerm2 and Terminal.app settings.
+
 | Command | Description |
 |---------|-------------|
 | `/permissions` | Inspect and manage permission rules; `/permissions yolo` enables bypass mode |

@@ -701,6 +701,9 @@ export function onToolCallPlan(event: {
       ? planMutationBlock(event.toolName, "the command modifies files or system state")
       : undefined;
   }
+  if (toolName === "computer_use") {
+    return planMutationBlock(`computer_use ${action || "unknown"}`);
+  }
   if (toolName === "browser") {
     return action === "open" || action === "close" ? undefined : planMutationBlock(`browser ${action || "run"}`);
   }

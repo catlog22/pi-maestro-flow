@@ -149,7 +149,7 @@ const DEFINITIONS: readonly SettingDefinition[] = [
     reversibility: "full",
     editor: { kind: "string-list" },
   },
-  intDefinition("maxRetries", "vision.group.retry", 0, "vision.maxRetries", 0, 10),
+  intDefinition("maxRetries", "vision.group.retry", 0, "vision.maxRetries", 0, 20),
   intDefinition("retryBackoffMs", "vision.group.retry", 1, "vision.retryBackoffMs", 0, 8000),
   intDefinition("timeoutMs", "vision.group.retry", 2, "vision.timeoutMs", 1000, 300000),
   intDefinition("maxImageBytes", "vision.group.retry", 3, "vision.maxImageBytes", 1024, 64 * 1024 * 1024),

@@ -48,8 +48,10 @@ export interface AdjudicatedTask {
  *
  * Requirements come only from what the orchestrator asked for: a task that
  * never sets `outputSchema` does not require it, so a backend lacking it stays
- * eligible. This keeps adjudication a pure function of orchestrator-visible
- * input rather than of backend inventory.
+ * eligible. The canonical `thinking: "off"` value means that no thinking
+ * control was requested and therefore does not require `thinkingLevel`.
+ * This keeps adjudication a pure function of orchestrator-visible input rather
+ * than of backend inventory.
  *
  * @param task - the task under validation.
  * @returns the required capability names, in declaration order.
@@ -59,7 +61,7 @@ export function requiredCapabilities(task: AdjudicatedTask): CapabilityName[] {
   if (task.spec.outputSchema !== undefined) required.push("outputSchema");
   if (task.spec.context === "fork") required.push("forkContext");
   if (task.spec.model !== undefined) required.push("modelSelection");
-  if (task.spec.thinking !== undefined) required.push("thinkingLevel");
+  if (task.spec.thinking !== undefined && task.spec.thinking !== "off") required.push("thinkingLevel");
   if (task.spec.todos !== undefined && task.spec.todos.length > 0) required.push("todoBinding");
   // `toolFilter`, `steer`, and `followUp` are absent by construction: no
   // orchestrator-visible field expresses the first, and the other two are not

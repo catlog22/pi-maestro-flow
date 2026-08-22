@@ -42,6 +42,7 @@ function sessionIdOf(ctx: { sessionManager?: { getSessionId?: () => string } }):
  */
 export const DEFAULT_DEFERRED_TOOL_NAMES = new Set([
   "browser",
+  "computer_use",
   "conflict",
   "loop",
   "lsp",

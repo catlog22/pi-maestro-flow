@@ -40,5 +40,5 @@ export type {
   ModelSelectorV2,
   ProjectionIdentity,
 } from "../../models/model-registry.ts";
-export { PI_SUBPROCESS_CONFIG_FIELDS } from "../../backends/pi-subprocess.ts";
+export { PI_SUBPROCESS_CONFIG_FIELDS, PI_SUBPROCESS_SETTINGS_CATALOGS } from "../../backends/pi-subprocess.ts";
 export type { PiSubprocessRunExtras } from "../../backends/pi-subprocess.ts";

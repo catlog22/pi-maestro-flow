@@ -7,12 +7,34 @@ import type { SettingsContextV1 } from "pi-maestro-settings-core/v1";
 import { SETTINGS_SECRET_SET_PLACEHOLDER } from "pi-maestro-settings-core/v1/schema";
 import { createTeammateBackendsSettingsProvider } from "../src/settings/teammate-backends-settings-provider.ts";
 
+const PI_TEST_CATALOG = {
+  en: {
+    "pi.resultReadyGraceMs": "Result-ready grace (ms)",
+  },
+  "zh-CN": {
+    "pi.resultReadyGraceMs": "结果就绪宽限（毫秒）",
+  },
+} as const;
+
+const DSH_TEST_CATALOG = {
+  en: {
+    "dsh.cordisConfig": "cordis.yml path",
+    "dsh.model": "Model",
+    "dsh.apiKeyEnv": "API key variable name",
+  },
+  "zh-CN": {
+    "dsh.cordisConfig": "cordis.yml 路径",
+    "dsh.model": "模型",
+    "dsh.apiKeyEnv": "API 密钥变量名",
+  },
+} as const;
+
 const context: SettingsContextV1 = { cwd: "/workspace", locale: "en" };
 
 const BACKENDS = [
   { name: "pi-subprocess", module: "pi-subprocess", configFields: [
     { key: "resultReadyGraceMs", kind: "integer" as const, labelKey: "pi.resultReadyGraceMs" },
-  ] },
+  ], catalogs: PI_TEST_CATALOG },
   { name: "dsh", module: "pi-maestro-backends/dsh", configFields: [
     { key: "cordisConfig", kind: "path" as const, labelKey: "dsh.cordisConfig", required: true },
     { key: "model", kind: "text" as const, labelKey: "dsh.model", default: "deepseek-v4-flash" },
@@ -23,7 +45,7 @@ const BACKENDS = [
       labelKey: "dsh.apiKeyEnv",
       default: "DEEPSEEK_API_KEY",
     },
-  ] },
+  ], catalogs: DSH_TEST_CATALOG },
 ];
 
 function provider() {

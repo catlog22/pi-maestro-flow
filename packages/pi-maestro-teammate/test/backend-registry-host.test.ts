@@ -10,6 +10,9 @@ import {
   forgetBackendRegistryConfigSync,
 } from "../src/backends/registry-host.ts";
 
+// Keep default-path tests isolated from the operator's real global registry.
+process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "teammate-backends-agent-"));
+
 /**
  * Reading the registration document and deciding the dispatch path.
  *
@@ -28,12 +31,63 @@ function workspace(document?: string): string {
   return root;
 }
 
+function globalDocument(document: string): string {
+  const root = mkdtempSync(join(tmpdir(), "teammate-backends-global-"));
+  const path = join(root, "teammate-backends.json");
+  writeFileSync(path, document, "utf-8");
+  return path;
+}
+
 const extras = (): never => {
   throw new Error("no run is started in these tests");
 };
 
 test("a project with no document stays on the legacy path", () => {
   assert.equal(dispatchRegistrySync(workspace(), extras), undefined);
+});
+
+test("a global document switches projects that have no document", () => {
+  const root = workspace();
+  const globalPath = globalDocument(JSON.stringify({
+    mode: "backend-registry",
+    default: "cursor",
+    backends: { cursor: { module: "some-acp-backend" } },
+  }));
+
+  const config = backendRegistryConfigSync(root, globalPath);
+  assert.equal(config.mode, "backend-registry");
+  assert.equal(config.default, "cursor");
+  assert.equal(config.backends.cursor?.module, "some-acp-backend");
+  assert.notEqual(dispatchRegistrySync(root, extras, undefined, globalPath), undefined);
+});
+
+test("a project document wins as a whole over the global document", () => {
+  const root = workspace(JSON.stringify({
+    mode: "legacy",
+    default: PI_SUBPROCESS,
+    backends: { project: { module: "project-backend" } },
+  }));
+  const globalPath = globalDocument(JSON.stringify({
+    mode: "backend-registry",
+    default: "cursor",
+    backends: { cursor: { module: "global-acp-backend" } },
+  }));
+
+  const config = backendRegistryConfigSync(root, globalPath);
+  assert.equal(config.mode, "legacy");
+  assert.equal(config.default, PI_SUBPROCESS);
+  assert.equal(config.backends.project?.module, "project-backend");
+  assert.equal(config.backends.cursor, undefined);
+  assert.equal(dispatchRegistrySync(root, extras, undefined, globalPath), undefined);
+});
+
+test("a malformed global document fails when no project document overrides it", () => {
+  const root = workspace();
+  const globalPath = globalDocument("{ not json");
+  assert.throws(
+    () => backendRegistryConfigSync(root, globalPath),
+    new RegExp(`teammate backend registry at ${globalPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} is not valid JSON`),
+  );
 });
 
 test("registrations alone do not switch the dispatch path", () => {

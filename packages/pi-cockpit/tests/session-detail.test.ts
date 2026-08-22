@@ -1,3 +1,4 @@
+import { altKey } from "pi-maestro-settings-core/v1";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { visibleWidth } from "@earendil-works/pi-tui";
@@ -11,6 +12,9 @@ import {
 } from "../src/session-detail.ts";
 import type { AgentRow } from "../src/types.ts";
 import { cockpitTuiLocale } from "../src/tui-i18n.ts";
+
+/** `altKey` escaped for use inside a regular expression: `+` is a metacharacter. */
+const altRe = (key: string): string => altKey(key).replaceAll("+", "\\+");
 
 cockpitTuiLocale.setLocale("en");
 
@@ -56,8 +60,8 @@ test("renderSessionDetail: renders the selected agent's status header and tail",
 
 test("renderSessionDetail: header explains scroll and visibility controls", () => {
 	const [header] = renderSessionDetail([agent()], "c1", 80, theme as Theme);
-	assert.match(header, /Alt\+R preview/);
-	assert.match(header, /Alt\+E hide/);
+	assert.match(header, new RegExp(`${altRe("R")} preview`));
+	assert.match(header, new RegExp(`${altRe("E")} hide`));
 });
 
 test("renderSessionDetail: running agent without tail names the thinking state", () => {
@@ -124,8 +128,8 @@ test("renderSessionDetail: explicit session view keeps content and actionable st
 	assert.match(text, /streaming model prose/);
 	assert.match(text, /read/);
 	assert.match(text, /provider warning/);
-	assert.match(lines[0], /Alt\+R preview/);
-	assert.match(lines[0], /Alt\+E hide/);
+	assert.match(lines[0], new RegExp(`${altRe("R")} preview`));
+	assert.match(lines[0], new RegExp(`${altRe("E")} hide`));
 	assert.equal(sessionDetailBodyLength(rows, "c1", 120), 3);
 });
 

@@ -1,9 +1,13 @@
+import { altKey } from "pi-maestro-settings-core/v1";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildProgressTree, selectPriorityProgressRows } from "../src/tui/progress-tree.ts";
 import { renderTeammateCall, renderTeammateResult } from "../src/tui/render.ts";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { Details, SingleResult } from "../src/shared/types.ts";
+
+/** `altKey` escaped for use inside a regular expression: `+` is a metacharacter. */
+const altRe = (key: string): string => altKey(key).replaceAll("+", "\\+");
 
 const theme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
 
@@ -90,7 +94,7 @@ test("completed teammate results expose the expand affordance", () => {
     details: { mode: "single", results: [result] },
   }, { expanded: false }, theme as never).render(80);
   assert.equal(collapsed.length, 1);
-  assert.match(collapsed[0], /Alt\+R details/);
+  assert.match(collapsed[0], new RegExp(`${altRe("R")} details`));
 });
 
 test("priority progress rows keep failures and the live edge visible", () => {

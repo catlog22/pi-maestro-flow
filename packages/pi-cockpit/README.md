@@ -113,6 +113,8 @@ The tab title is `frame + pi - <session> - <working state>`. The session part fo
 
 ## Commands
 
+> **macOS:** every `Alt+…` shortcut is the **option** key, and the hints render as `Option+…` there. The terminal has to deliver option as Meta or the keystroke inserts a character instead of firing the shortcut — iTerm2: *Profiles → Keys → Left/Right Option key → `Esc+`*; Terminal.app: *Settings → Profiles → Keyboard → Use Option as Meta key*. The registered binding is `alt+…` on every platform; only its name changes.
+
 - `/cockpit` — opens the settings overlay.
 - `/maestro-settings` — opens the unified settings shell (Cockpit, Flow, Teammate and integrations).
 - `Alt+J` — opens the background Bash jobs overlay (live status, command, cwd, duration, output tail).

@@ -3,8 +3,8 @@ import type { IconGlyphs } from "./icons.ts";
 import { fitLineByPriority, type PrioritizedSegment } from "./layout.ts";
 import { formatDuration, type PaintTheme, type WidthUtils } from "./render.ts";
 import type { BashBgJob } from "./types.ts";
+import { altKey } from "pi-maestro-settings-core/v1";
 import { tuiT } from "./tui-i18n.ts";
-import { altKey } from "./key-labels.ts";
 
 // Registered by cockpit itself (index.ts), so this hint is always accurate.
 export const DEFAULT_BASH_BG_HINT = altKey("J");

@@ -897,11 +897,12 @@ test("P7 acceptance block", async (t) => {
         "acp",          // family
         "",             // transport: local
         "acp-extra",    // new deployment id
+        "", "", "",     // acpAgent, acpInstall, installTimeoutMs (new acp-cli fields)
         "agent",        // command (required)
         "", "", "",     // args, cwd, env
         "",             // mode
         "", "", "", "", // host, user, port, hostKeySha256
-        "", "", "", "", // identityFile, modelId, acpModel, runTimeoutMs
+        "", "", "", "", "", "", // identityFile, modelId, acpModel, acpMode, acpThoughtLevel, runTimeoutMs
         "",             // startupTimeoutMs
         // First registration attempt targets the EXISTING deployment and
         // duplicates its adapter-model selector.

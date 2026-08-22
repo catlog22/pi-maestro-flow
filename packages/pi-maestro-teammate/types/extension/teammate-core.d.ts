@@ -35,6 +35,20 @@ export declare function aggregateTerminalStatuses(statuses: Iterable<AgentTermin
  * replayable URI). ~8K tokens keeps even the degraded path bounded.
  */
 export declare const UNPERSISTED_RESULT_INLINE_CAP_CHARS = 32000;
+/**
+ * The model to display as the one this run resolved to.
+ *
+ * The display pairs `requestedModel` with `resolvedModel` so a reader can see
+ * what was asked for beside what ran. A backend that owns its model namespace
+ * reports the dispatched route in `model` and what it actually ran in
+ * `executorModel`, so reading `model` here printed the route on both halves
+ * and told the reader nothing.
+ *
+ * @param result - the settled result to display.
+ * @returns the executing runtime's own model when it reported one, else the
+ * dispatched model.
+ */
+export declare function displayResolvedModel(result: SingleResult): string;
 export declare function displayMessageForResult(result: SingleResult): string;
 export declare function summarizeGraphResults(results: readonly SingleResult[], tasks: readonly NormalizedTask[]): string;
 export declare function aggregateGraphStructuredOutput(results: readonly SingleResult[], tasks: readonly NormalizedTask[]): Record<string, unknown> | undefined;

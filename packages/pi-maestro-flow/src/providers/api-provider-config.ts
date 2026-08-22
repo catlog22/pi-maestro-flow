@@ -430,8 +430,11 @@ export type ApiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "
 
 export const DEFAULT_THINKING_LEVEL: ApiThinkingLevel = "medium";
 export const API_RETRY_MAX_RETRIES = NETWORK_RETRY_POLICY.maxRetries;
-// Defaults mirror the pi runtime (settings-manager): maxRetries 3 / baseDelayMs 2000.
-export const API_RETRY_DEFAULT_MAX_RETRIES = 3;
+// Upper bound for user-configured retry count; deliberately higher than the runtime
+// default so users can raise retries without hitting the runtime's own cap.
+export const API_RETRY_MAX_RETRIES_LIMIT = 20;
+// Defaults mirror the pi runtime (settings-manager): maxRetries 10 / baseDelayMs 2000.
+export const API_RETRY_DEFAULT_MAX_RETRIES = 10;
 export const API_RETRY_DEFAULT_BASE_DELAY_MS = 2000;
 const DEFAULT_API_RETRY_SETTINGS: Readonly<ApiRetrySettings> = Object.freeze({
   enabled: true,
@@ -983,7 +986,7 @@ async function manageRetrySettings(
   let maxDelayMs = current.maxDelayMs;
   if (enabled) {
     const input = await ctx.ui.input(
-      t("retry.countPrompt", { max: API_RETRY_MAX_RETRIES }),
+      t("retry.countPrompt", { max: API_RETRY_MAX_RETRIES_LIMIT }),
       String(current.maxRetries),
     );
     if (input === undefined) return;

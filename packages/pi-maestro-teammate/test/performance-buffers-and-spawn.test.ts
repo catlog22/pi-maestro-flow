@@ -720,10 +720,10 @@ test("model specifiers resolve provider shorthand and reject unavailable exact r
 });
 
 test("network retry policy is bounded, progressive, and rejects permanent failures", () => {
-  assert.equal(NETWORK_RETRY_POLICY.maxRetries, 5);
+  assert.equal(NETWORK_RETRY_POLICY.maxRetries, 10);
   assert.deepEqual(
     Array.from({ length: NETWORK_RETRY_POLICY.maxRetries }, (_, index) => retryDelayMs(index + 1)),
-    [1_000, 2_000, 4_000, 8_000, 16_000],
+    [1_000, 2_000, 4_000, 8_000, 16_000, 16_000, 16_000, 16_000, 16_000, 16_000],
   );
   assert.equal(classifyRetryError("fetch failed: ECONNRESET"), "network");
   assert.equal(classifyRetryError("Error: Connection error."), "network");

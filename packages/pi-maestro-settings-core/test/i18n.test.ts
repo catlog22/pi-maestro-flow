@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  altKey,
+  altModifierLabel,
   checkCatalogCompleteness,
   createSettingsTranslator,
   detectSystemSettingsLocale,
@@ -130,4 +132,22 @@ test("catalog completeness reports missing and extra keys", () => {
     checkCatalogCompleteness({ en: { alpha: "A" }, "zh-CN": { alpha: "甲" } }),
     { complete: true, referenceLocale: "en", issues: [] },
   );
+});
+
+test("shortcut hints name the modifier the running platform's keyboard has", () => {
+  // The registered binding is `alt+…` everywhere; only its name differs. A Mac
+  // keyboard has no key called Alt, so a hint saying so sends the reader
+  // looking for a key that is not there.
+  assert.equal(altModifierLabel("darwin"), "Option");
+  assert.equal(altKey("R", "darwin"), "Option+R");
+  assert.equal(altKey("Shift+P", "darwin"), "Option+Shift+P");
+
+  for (const platform of ["linux", "win32", "freebsd"]) {
+    assert.equal(altModifierLabel(platform), "Alt", platform);
+    assert.equal(altKey("R", platform), "Alt+R", platform);
+  }
+
+  // Omitting the platform answers for the running one, which is what every
+  // caller does; asserting against the same source keeps this green on both.
+  assert.equal(altKey("R"), `${altModifierLabel(process.platform)}+R`);
 });

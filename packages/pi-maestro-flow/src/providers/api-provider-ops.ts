@@ -39,6 +39,7 @@ import {
 
 import {
   API_RETRY_MAX_RETRIES,
+  API_RETRY_MAX_RETRIES_LIMIT,
   apiFormatLabel,
   DEFAULT_THINKING_LEVEL,
   deleteApiProviderModelSettings,
@@ -1132,7 +1133,7 @@ export function resolveTargetToken(value: string): ChannelTarget | undefined {
 
 export function usageError(): Error {
   return new Error(
-    `用法：/api-manager list | retry [show|on [1-${API_RETRY_MAX_RETRIES}]|off] | cache [show|auto|off|on] | cache agent [show|short|long|none] | price [openai|qwen|anthropic|<Provider ID>] | stats | stats footer [on|off|show] | show|set|delete|enable|disable|logout|reset [openai|qwen|anthropic|<Provider ID>|new] | export [path] | import [path]`,
+    `用法：/api-manager list | retry [show|on [1-${API_RETRY_MAX_RETRIES_LIMIT}]|off] | cache [show|auto|off|on] | cache agent [show|short|long|none] | price [openai|qwen|anthropic|<Provider ID>] | stats | stats footer [on|off|show] | show|set|delete|enable|disable|logout|reset [openai|qwen|anthropic|<Provider ID>|new] | export [path] | import [path]`,
   );
 }
 
@@ -1943,8 +1944,8 @@ export function positiveInteger(value: string | number, label: string): number {
 
 export function retryCount(value: string | number): number {
   const parsed = positiveInteger(value, "最大重试次数");
-  if (parsed > API_RETRY_MAX_RETRIES) {
-    throw new Error(`最大重试次数必须在 1-${API_RETRY_MAX_RETRIES} 之间`);
+  if (parsed > API_RETRY_MAX_RETRIES_LIMIT) {
+    throw new Error(`最大重试次数必须在 1-${API_RETRY_MAX_RETRIES_LIMIT} 之间`);
   }
   return parsed;
 }

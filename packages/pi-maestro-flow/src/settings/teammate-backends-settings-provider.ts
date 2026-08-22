@@ -37,6 +37,8 @@ import {
   type SettingsResource,
   type SettingsResourceRevision,
   type SettingsSnapshot,
+  type SupportedSettingsLocale,
+  type TranslationCatalogs,
   type SettingsValidationIssue,
   type SettingsValidationResult,
 } from "pi-maestro-settings-core/v1";
@@ -150,6 +152,16 @@ export interface BackendDescriptor {
     config: Record<string, ConfigValue>,
     signal: AbortSignal,
   ) => Promise<readonly BackendConfigOption[]>;
+  /**
+   * Display text for this backend's `labelKey` / `descriptionKey` values.
+   *
+   * The keys belong to the backend that declares the fields, so their text does
+   * too: this provider stays ignorant of what any backend's settings mean, and
+   * a backend that adds a field brings its own wording. A descriptor with no
+   * catalog renders its keys verbatim — a defect the shell shows but nothing
+   * else reports.
+   */
+  catalogs?: TranslationCatalogs;
 }
 
 /** Everything the provider needs from its host. */
@@ -494,35 +506,48 @@ export function createTeammateBackendsSettingsProvider(
     return undefined;
   };
 
-  const catalogs = (document: Document) => {
-    const en: Record<string, string> = { ...BASE_CATALOGS.en };
-    const zh: Record<string, string> = { ...BASE_CATALOGS["zh-CN"] };
-    const add = (key: string, english: string, chinese = english): void => {
-      en[key] ??= english;
-      zh[key] ??= chinese;
-    };
-    const labelOf = (value: string): string => {
-      const spaced = value
-        .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-        .replace(/[._-]+/g, " ")
-        .trim();
-      return spaced.length === 0 ? value : `${spaced[0]!.toUpperCase()}${spaced.slice(1)}`;
-    };
+  /**
+   * Merge this provider's own text with each deployment's catalog.
+   *
+   * Three sources, in one place because the shell takes one catalog per
+   * provider: the dispatch settings this file owns, the per-deployment keys
+   * it composes (`teammateBackends.backend.<name>` and `.group.<name>`, rendered
+   * rather than translated because the registration name is the operator's
+   * own label), and whatever a descriptor supplies for its own fields. A
+   * deployment without a catalog still gets its name and group rendered; only
+   * its field labels fall back to their raw keys — which the settings catalog
+   * gate surfaces as a failure rather than silently rendering identifiers.
+   *
+   * The deployments come from {@link deploymentDescriptors} so a model-registry
+   * document that enables a subset of the registered backends still publishes
+   * exactly those.
+   */
+  const catalogs = (document: Document): TranslationCatalogs => {
+    const locales = new Set<SupportedSettingsLocale>(["en", "zh-CN"]);
     for (const deployment of deploymentDescriptors(document)) {
-      const deploymentLabel = labelOf(deployment.name);
-      add(`teammateBackends.group.${deployment.name}`, deploymentLabel);
-      add(`teammateBackends.backend.${deployment.name}`, deploymentLabel);
-      for (const field of deployment.configFields ?? []) {
-        const fieldLabel = labelOf(field.key);
-        add(field.labelKey, fieldLabel);
-        if (field.descriptionKey !== undefined) {
-          add(field.descriptionKey, `Configure ${fieldLabel}.`, `配置${fieldLabel}。`);
-        }
-        if (servesCredential(field)) add(`${field.labelKey}.value`, `${fieldLabel} value`, `${fieldLabel}值`);
-        for (const option of field.options ?? []) add(option.labelKey, labelOf(String(option.value)));
+      for (const locale of Object.keys(deployment.catalogs ?? {})) {
+        locales.add(locale as SupportedSettingsLocale);
       }
     }
-    return { en, "zh-CN": zh };
+    const merged: Partial<Record<SupportedSettingsLocale, Record<string, string>>> = {};
+    for (const locale of locales) {
+      const entries: Record<string, string> = { ...(BASE_CATALOGS[locale] ?? BASE_CATALOGS.en ?? {}) };
+      for (const deployment of deploymentDescriptors(document)) {
+        // The registration name is the operator's own label for it, so it is
+        // rendered rather than translated.
+        entries[`teammateBackends.backend.${deployment.name}`] = deployment.name;
+        entries[`teammateBackends.group.${deployment.name}`] = deployment.name;
+        for (const field of deployment.configFields ?? []) {
+          if (!servesCredential(field)) continue;
+          const label = deployment.catalogs?.[locale]?.[field.labelKey]
+            ?? deployment.catalogs?.en?.[field.labelKey];
+          if (label !== undefined) entries[`${field.labelKey}.value`] = label;
+        }
+        Object.assign(entries, deployment.catalogs?.[locale] ?? {});
+      }
+      merged[locale] = entries;
+    }
+    return merged;
   };
 
   const resource = (): SettingsResource => ({ providerId: PROVIDER_ID, scope: "project", id: DOCUMENT_ID });

@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { SessionConfigOption } from "@agentclientprotocol/sdk";
 import {
-  advertisedModels,
+  advertisedValues,
   findSelectOption,
   flattenSelectOptions,
-  resolveModelSelection,
+  resolveConfigSelection,
   resolveSelectValue,
 } from "../src/remote/acp-config-options.ts";
 
@@ -110,12 +110,12 @@ test("resolveSelectValue names every advertised value when it rejects one", () =
   );
 });
 
-test("resolveModelSelection reports the config id to set alongside the value", () => {
-  const selection = resolveModelSelection([modelOption()], "composer-2.5");
+test("resolveConfigSelection reports the config id to set alongside the value", () => {
+  const selection = resolveConfigSelection([modelOption()], "model", "composer-2.5");
   assert.deepEqual(selection, { configId: "model", value: "composer-2.5[fast=true]" });
 });
 
-test("resolveModelSelection refuses when the agent advertises no model selector", () => {
+test("resolveConfigSelection refuses an axis the agent does not advertise, naming what it does", () => {
   const modeOnly: SessionConfigOption[] = [{
     type: "select",
     id: "mode",
@@ -125,21 +125,24 @@ test("resolveModelSelection refuses when the agent advertises no model selector"
     options: [{ value: "agent", name: "Agent" }],
   } as SessionConfigOption];
   assert.throws(
-    () => resolveModelSelection(modeOnly, "composer-2.5"),
+    () => resolveConfigSelection(modeOnly, "model", "composer-2.5"),
     // Names what the agent did advertise, so the operator can see the agent was
     // reached and simply cannot serve the request.
-    (error: Error) => error.message.includes("no model selector")
+    (error: Error) => error.message.includes('no "model" selector')
       && error.message.includes("mode"),
   );
 });
 
-test("advertisedModels projects the selector for a configuration surface", () => {
-  assert.deepEqual(advertisedModels([modelOption()]), [
+test("advertisedValues projects the selector for a configuration surface", () => {
+  assert.deepEqual(advertisedValues([modelOption()], "model"), [
     { value: "default[]", label: "Auto" },
     { value: "composer-2.5[fast=true]", label: "composer-2.5" },
     { value: "claude-opus-5[thinking=true,context=300k]", label: "claude-opus-5" },
   ]);
   // An agent with no model selector yields nothing rather than throwing: a
   // configuration surface renders an empty list, it does not fail.
-  assert.deepEqual(advertisedModels([]), []);
+  assert.deepEqual(advertisedValues([], "model"), []);
+  // The same call on an axis this agent does not publish is empty, not an error:
+  // "this CLI has no reasoning-depth selector" is a fact to render, not a fault.
+  assert.deepEqual(advertisedValues([modelOption()], "thought_level"), []);
 });

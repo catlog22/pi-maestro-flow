@@ -35,7 +35,7 @@ test("a provider retry-after hint caps the backoff (earliest of the two)", () =>
 test("PI_RETRY_MAX_DELAY_MS overrides the backoff cap (last retry wait)", async () => {
   const policy = resolveNetworkRetryPolicy({ PI_RETRY_MAX_DELAY_MS: "32000" });
   assert.equal(policy.maxDelayMs, 32_000);
-  assert.equal(policy.maxRetries, 5);
+  assert.equal(policy.maxRetries, 10);
   assert.equal(policy.initialDelayMs, 1_000);
   assert.equal(resolveNetworkRetryPolicy({ PI_RETRY_MAX_DELAY_MS: "-5" }).maxDelayMs, 16_000);
   assert.equal(resolveNetworkRetryPolicy({ PI_RETRY_MAX_DELAY_MS: "abc" }).maxDelayMs, 16_000);

@@ -200,7 +200,7 @@ export function loadVisionDelegationConfig(agentDir = getAgentDir()): VisionDele
       maxEntries: integer(cache.maxEntries, defaults.cache.maxEntries, 1, 1_000),
     },
     fallbackModels: modelReferences(parsed.fallbackModels),
-    maxRetries: integer(parsed.maxRetries, defaults.maxRetries, 0, 10),
+    maxRetries: integer(parsed.maxRetries, defaults.maxRetries, 0, 20),
     retryBackoffMs: integer(parsed.retryBackoffMs, defaults.retryBackoffMs, 0, MAX_RETRY_BACKOFF_MS),
     retryBackoffCapMs: integer(parsed.retryBackoffCapMs, defaults.retryBackoffCapMs ?? MAX_RETRY_BACKOFF_MS, 0, 600_000),
     timeoutMs: integer(parsed.timeoutMs, defaults.timeoutMs, 1_000, 300_000),
@@ -426,7 +426,7 @@ export function registerVisionDelegation(pi: ExtensionAPI, options: VisionDelega
         const number = Number(values[1]);
         if (!Number.isInteger(number)) throw new Error(`Usage: /vision ${action} <integer>`);
         config = action === "retries"
-          ? { ...config, maxRetries: integer(number, config.maxRetries, 0, 10) }
+          ? { ...config, maxRetries: integer(number, config.maxRetries, 0, 20) }
           : { ...config, timeoutMs: integer(number, config.timeoutMs, 1_000, 300_000) };
         persist(ctx, `Vision ${action} updated.`);
         return;
@@ -539,10 +539,10 @@ async function showVisionManager(
       continue;
     }
     if (choice === "设置重试次数") {
-      const input = await ctx.ui.input("每个 Vision 模型最大重试次数（0-10）", String(current.maxRetries));
+      const input = await ctx.ui.input("每个 Vision 模型最大重试次数（0-20）", String(current.maxRetries));
       if (input === undefined) continue;
       const value = Number(input);
-      if (!Number.isInteger(value) || value < 0 || value > 10) { ctx.ui.notify("重试次数必须是 0-10 的整数。", "warning"); continue; }
+      if (!Number.isInteger(value) || value < 0 || value > 20) { ctx.ui.notify("重试次数必须是 0-20 的整数。", "warning"); continue; }
       current = { ...current, maxRetries: value };
       save(current, `Vision retries: ${value}.`);
       continue;

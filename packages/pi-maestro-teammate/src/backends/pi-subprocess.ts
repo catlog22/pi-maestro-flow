@@ -79,6 +79,63 @@ export const PI_SUBPROCESS_CONFIG_FIELDS: readonly BackendConfigField[] = TUNABL
   labelKey: `piSubprocess.${key}`,
 }));
 
+/**
+ * Display text for the `piSubprocess.*` keys this backend's `configFields` carry.
+ *
+ * The settings shell renders from labels, not keys: a field declared without an
+ * entry here reaches an operator as `piSubprocess.resultReadyGraceMs` rather
+ * than as a human label. Each tunable is a Pi-internal timing knob, so the
+ * wording says what it bounds, not how it is spelled.
+ */
+export const PI_SUBPROCESS_SETTINGS_CATALOGS = {
+  en: {
+    "piSubprocess.firstActivityTimeoutMs": "First-activity timeout (ms)",
+    "piSubprocess.firstActivityTimeoutMs.description":
+      "Milliseconds the subprocess has to report its first activity after launch before it is considered hung.",
+    "piSubprocess.resultReadyGraceMs": "Result-ready grace (ms)",
+    "piSubprocess.resultReadyGraceMs.description":
+      "Grace period after a run settles before its result is considered final, so a late completion can still be captured.",
+    "piSubprocess.outputLimitRecoveryTimeoutMs": "Output-limit recovery timeout (ms)",
+    "piSubprocess.outputLimitRecoveryTimeoutMs.description":
+      "Time allowed to recover a result whose output exceeded the size limit.",
+    "piSubprocess.structuredOutputRecoveryTimeoutMs": "Structured-output recovery timeout (ms)",
+    "piSubprocess.structuredOutputRecoveryTimeoutMs.description":
+      "Time allowed to recover a structured-output result that exceeded the size limit.",
+    "piSubprocess.toolExecutionHeartbeatMs": "Tool-execution heartbeat (ms)",
+    "piSubprocess.toolExecutionHeartbeatMs.description":
+      "Interval at which an active tool execution reports a heartbeat, used to detect stuck tools.",
+    "piSubprocess.interruptingSteerTimeoutMs": "Interrupting-steer timeout (ms)",
+    "piSubprocess.interruptingSteerTimeoutMs.description":
+      "Time an interrupting steer waits for the run to acknowledge before degrading to a queued follow-up.",
+    "piSubprocess.foregroundMaxRunMs": "Foreground max run (ms)",
+    "piSubprocess.foregroundMaxRunMs.description":
+      "Upper bound on a foreground run before it auto-detaches to background.",
+  },
+  "zh-CN": {
+    "piSubprocess.firstActivityTimeoutMs": "首次活动超时（毫秒）",
+    "piSubprocess.firstActivityTimeoutMs.description":
+      "子进程启动后报告首次活动的毫秒上限，超过即视为挂起。",
+    "piSubprocess.resultReadyGraceMs": "结果就绪宽限（毫秒）",
+    "piSubprocess.resultReadyGraceMs.description":
+      "运行结束后、结果被判定为最终之前的宽限期，以便补发迟到的完成。",
+    "piSubprocess.outputLimitRecoveryTimeoutMs": "输出超限恢复超时（毫秒）",
+    "piSubprocess.outputLimitRecoveryTimeoutMs.description":
+      "为输出超过大小限制的结果恢复所允许的时间。",
+    "piSubprocess.structuredOutputRecoveryTimeoutMs": "结构化输出恢复超时（毫秒）",
+    "piSubprocess.structuredOutputRecoveryTimeoutMs.description":
+      "为超过大小限制的结构化输出结果恢复所允许的时间。",
+    "piSubprocess.toolExecutionHeartbeatMs": "工具执行心跳（毫秒）",
+    "piSubprocess.toolExecutionHeartbeatMs.description":
+      "活动中的工具执行报告心跳的间隔，用于检测卡住的工具。",
+    "piSubprocess.interruptingSteerTimeoutMs": "中断式 steer 超时（毫秒）",
+    "piSubprocess.interruptingSteerTimeoutMs.description":
+      "中断式 steer 等待运行确认的时间，超时后降级为排队 follow-up。",
+    "piSubprocess.foregroundMaxRunMs": "前台最长运行（毫秒）",
+    "piSubprocess.foregroundMaxRunMs.description":
+      "前台运行自动转为后台之前的运行时长上限。",
+  },
+} as const;
+
 const CONFIG_FIELDS = PI_SUBPROCESS_CONFIG_FIELDS;
 
 /**

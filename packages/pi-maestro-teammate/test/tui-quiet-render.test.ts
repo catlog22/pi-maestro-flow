@@ -1,3 +1,4 @@
+import { altKey } from "pi-maestro-settings-core/v1";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test, { afterEach } from "node:test";
@@ -5,6 +6,9 @@ import { isQuietMode, setQuietMode } from "../src/quiet-state.ts";
 import { auxToolCallFallback, auxToolResultFallback, renderQuietTeammateAux, renderTeammateCall, renderTeammateListCall, renderTeammateListResult, renderTeammateResult } from "../src/tui/render.ts";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { Details, SingleResult } from "../src/shared/types.ts";
+
+/** `altKey` escaped for use inside a regular expression: `+` is a metacharacter. */
+const altRe = (key: string): string => altKey(key).replaceAll("+", "\\+");
 
 // Identity theme strips color so assertions read the plain text the quiet
 // renderer emits (two spaces + glyph + name + rest).
@@ -130,7 +134,7 @@ test("quiet streaming progress keeps agent and child trees but hides stream cont
   assert.match(rendered[1], /@focus/);
   assert.match(rendered[2], /└─.*@review.*child agent/);
   assert.doesNotMatch(rendered.join("\n"), /using|streaming|SECRET_TAIL_TEXT|CHILD_SECRET_TAIL/);
-  assert.doesNotMatch(rendered.join("\n"), /Alt\+R/);
+  assert.doesNotMatch(rendered.join("\n"), new RegExp(`${altRe("R")}`));
 });
 
 test("quiet streaming progress retains a structural row on a narrow viewport", () => {
@@ -179,7 +183,7 @@ test("quiet completed single result is one concise named line without its messag
   assert.match(rendered[0], /done/);
   assert.match(rendered[0], /30 tokens/);
   assert.doesNotMatch(rendered[0], /teammate|1\/1/);
-  assert.doesNotMatch(rendered.join("\n"), /complete output|Alt\+R/);
+  assert.doesNotMatch(rendered.join("\n"), new RegExp(`complete output|${altRe("R")}`));
 });
 
 test("quiet completed result keeps named progress rows without completed message bodies", () => {

@@ -1,6 +1,6 @@
 import type { ModelHealthScope, ModelHealthTarget } from "../models/model-circuit-breaker.ts";
 export declare const NETWORK_RETRY_POLICY: Readonly<{
-    maxRetries: 5;
+    maxRetries: 10;
     initialDelayMs: 1000;
     maxDelayMs: 16000;
 }>;
@@ -48,11 +48,13 @@ export interface ModelHealthAttemptSnapshot {
  * `status` (when known) normally short-circuits via {@link classifyByStatus};
  * an explicit upstream model-unavailable diagnostic is the narrow exception
  * because another configured candidate may still work. Otherwise the message
- * patterns apply, in order: auth → model availability → permanent → local
+ * patterns apply, in order: auth → abort/cancel → permanent → local
  * infrastructure → quota/payment → transport → provider overload. Anything
  * unrecognized defaults to retryable (`provider`): at the provider boundary an
  * unknown diagnostic is far more often transient than permanent, and the
- * retry/fallback paths are bounded anyway.
+ * retry/fallback paths are bounded anyway. Abort/cancel diagnostics are the
+ * exception: a user/lifecycle cancellation is never a model failure, so they
+ * classify as `non-retryable` to avoid replaying stopped work on any model.
  */
 export declare function classifyRetryError(message: string | undefined, status?: number): RetryErrorKind;
 /**

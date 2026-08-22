@@ -248,7 +248,7 @@ const DEFINITIONS: readonly SettingDefinition[] = [
     activation: "next-invocation",
     sensitivity: "public",
     reversibility: "full",
-    editor: { kind: "integer", min: 0, max: 10, step: 1 },
+    editor: { kind: "integer", min: 0, max: 20, step: 1 },
   },
   {
     key: "api.retry.baseDelayMs",
@@ -843,7 +843,7 @@ export function createApiManagerSettingsProvider(
           }
         }
         if (change.key === "api.retry.maxRetries" && change.operation === "set"
-          && (!Number.isSafeInteger(change.value) || (change.value as number) < 0 || (change.value as number) > 10)) {
+          && (!Number.isSafeInteger(change.value) || (change.value as number) < 0 || (change.value as number) > 20)) {
           issues.push({
             severity: "error",
             key: change.key,

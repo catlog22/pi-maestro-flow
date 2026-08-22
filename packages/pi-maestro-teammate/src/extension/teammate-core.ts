@@ -7,6 +7,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { altKey } from "pi-maestro-settings-core/v1";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
@@ -18,7 +19,6 @@ import { createHash } from "node:crypto";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Check } from "typebox/value";
 import { isGuiTeammateToolAllowed, registerGuiTool, unregisterGuiTool } from "../shared/gui-registry.ts";
-import { altKey } from "../key-labels.ts";
 import type { WorkspaceSessionScan } from "../transcript/session-transcript.ts";
 import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchParams, TeammateWaitParams, TeammateMonitorParams, ObserveParams } from "./schemas.ts";
@@ -371,6 +371,23 @@ function formatStructuredOutputForDisplay(result: SingleResult): string | undefi
 
 function isStructuredOutputConfirmation(text: string): boolean {
   return text === STRUCTURED_OUTPUT_CONFIRMATION || text === "(no output)";
+}
+
+/**
+ * The model to display as the one this run resolved to.
+ *
+ * The display pairs `requestedModel` with `resolvedModel` so a reader can see
+ * what was asked for beside what ran. A backend that owns its model namespace
+ * reports the dispatched route in `model` and what it actually ran in
+ * `executorModel`, so reading `model` here printed the route on both halves
+ * and told the reader nothing.
+ *
+ * @param result - the settled result to display.
+ * @returns the executing runtime's own model when it reported one, else the
+ * dispatched model.
+ */
+export function displayResolvedModel(result: SingleResult): string {
+  return result.executorModel ?? result.model;
 }
 
 export function displayMessageForResult(result: SingleResult): string {

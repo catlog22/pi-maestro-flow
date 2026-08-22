@@ -1,3 +1,4 @@
+import { altKey } from "pi-maestro-settings-core/v1";
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Theme } from "@earendil-works/pi-coding-agent";
@@ -7,6 +8,9 @@ import { DEFAULT_TOGGLE_HINT } from "../src/render.ts";
 import { makeSessionDetailWidget } from "../src/session-detail.ts";
 import { DEFAULT_CONFIG, type AgentRow, type TodoItem } from "../src/types.ts";
 import { cockpitTuiLocale } from "../src/tui-i18n.ts";
+
+/** `altKey` escaped for use inside a regular expression: `+` is a metacharacter. */
+const altRe = (key: string): string => altKey(key).replaceAll("+", "\\+");
 
 cockpitTuiLocale.setLocale("en");
 
@@ -80,7 +84,7 @@ test("visible Agents temporarily collapse an expanded Todo preference", () => {
 	})(tui, theme);
 	const collapsed = component.render(100);
 	assert.equal(collapsed.length, 1, "Agent activity leaves only the Todo summary");
-	assert.match(collapsed[0], /Alt\+T expand/);
+	assert.match(collapsed[0], new RegExp(`${altRe("T")} expand`));
 	assert.equal(config.todoExpanded, true, "the persisted preference is untouched");
 	agentPriority = false;
 	assert.equal(component.render(100).length, 3, "Todo restores after Agents leave");
