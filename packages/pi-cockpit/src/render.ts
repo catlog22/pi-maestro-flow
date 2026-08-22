@@ -5,6 +5,7 @@ import type { IconGlyphs } from "./icons.ts";
 import { composeByPriority, fitLineByPriority, type PriorityGroup, type PrioritizedSegment, type WidthUtils } from "./layout.ts";
 import { AGENT_NARROW_ROW_CAP, AGENT_WIDE_ROW_CAP, fitRows } from "./viewport.ts";
 import { tuiStatus, tuiT } from "./tui-i18n.ts";
+import { altKey } from "./key-labels.ts";
 
 // Re-exported for existing importers; the shared implementation lives in layout.ts.
 export type { WidthUtils };
@@ -78,7 +79,7 @@ export interface RenderOpts {
 	agentContextRows?: readonly AgentRow[];
 }
 
-export const DEFAULT_TOGGLE_HINT = "Alt+T";
+export const DEFAULT_TOGGLE_HINT = altKey("T");
 
 // One cell per task stops scaling once the plan outgrows the terminal, so beyond
 // that the bar switches to a proportional summary instead of eating the whole line.

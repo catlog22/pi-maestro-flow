@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { formatAgentMetric, renderAgents, renderTodos, type PaintTheme, type WidthUtils } from "../src/render.ts";
+import { formatAgentMetric, renderAgents, renderTodos, DEFAULT_TOGGLE_HINT, type PaintTheme, type WidthUtils } from "../src/render.ts";
 import { resolveGlyphs } from "../src/icons.ts";
 import type { AgentRow, TodoItem } from "../src/types.ts";
 import { cockpitTuiLocale } from "../src/tui-i18n.ts";
@@ -400,7 +400,8 @@ test("renderTodos list collapsed: summary only", () => {
 	assert.equal(lines.length, 1);
 	assert.ok(lines[0].includes("Todo"));
 	assert.ok(lines[0].includes("task 1"), "collapsed summary keeps the next actionable task");
-	assert.ok(lines[0].includes("Alt+T expand"));
+	assert.ok(lines[0].includes(`${DEFAULT_TOGGLE_HINT} expand`));
+
 });
 
 test("renderTodos collapsed line includes running state, member count and assignee", () => {
@@ -461,7 +462,7 @@ test("renderTodos compact: bar + percent, width bounded", () => {
 		assert.equal(lines.length, 1);
 		assert.ok(lines[0].includes("%"));
 		assert.ok(utils.measure(lines[0]) <= width, `w=${width}: ${lines[0]}`);
-		if (width === 60) assert.ok(lines[0].includes("Alt+T expand"));
+		if (width === 60) assert.ok(lines[0].includes(`${DEFAULT_TOGGLE_HINT} expand`));
 	}
 });
 

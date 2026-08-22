@@ -3,6 +3,7 @@ import test from "node:test";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
 import { makeAgentWidget, makeTodoWidget } from "../src/stack-widget.ts";
+import { DEFAULT_TOGGLE_HINT } from "../src/render.ts";
 import { makeSessionDetailWidget } from "../src/session-detail.ts";
 import { DEFAULT_CONFIG, type AgentRow, type TodoItem } from "../src/types.ts";
 import { cockpitTuiLocale } from "../src/tui-i18n.ts";
@@ -65,7 +66,7 @@ test("expanded Todo widget has one summary followed directly by task rows", () =
 	const lines = component.render(100);
 	assert.equal(lines.length, 3);
 	assert.equal(lines.filter((line) => line.includes("Todo")).length, 1);
-	assert.ok(lines[0].includes("Alt+T collapse"));
+	assert.ok(lines[0].includes(`${DEFAULT_TOGGLE_HINT} collapse`));
 	assert.ok(lines[1].includes("implement ownership"));
 });
 
