@@ -27,6 +27,7 @@ export declare const TaskSpec: Type.TObject<{
     timeoutMs: Type.TOptional<Type.TInteger>;
     background: Type.TOptional<Type.TBoolean>;
     todo: Type.TOptional<Type.TUnion<[Type.TString, Type.TArray<Type.TString>]>>;
+    briefing: Type.TOptional<Type.TArray<Type.TString>>;
     maxNestingDepth: Type.TOptional<Type.TInteger>;
 }>;
 export declare const TeammateParams: Type.TObject<{
@@ -50,6 +51,7 @@ export declare const TeammateParams: Type.TObject<{
         timeoutMs: Type.TOptional<Type.TInteger>;
         background: Type.TOptional<Type.TBoolean>;
         todo: Type.TOptional<Type.TUnion<[Type.TString, Type.TArray<Type.TString>]>>;
+        briefing: Type.TOptional<Type.TArray<Type.TString>>;
         maxNestingDepth: Type.TOptional<Type.TInteger>;
     }>>;
     concurrency: Type.TOptional<Type.TInteger>;
@@ -118,8 +120,8 @@ export declare const LocalObserveParams: Type.TUnsafe<{
     turn?: number | undefined;
     action: "status" | "wait" | "watch";
     targets: {
-        kind: string;
         id: string;
+        kind: string;
     }[];
 }>;
 export declare const TeammateMonitorParams: Type.TObject<{

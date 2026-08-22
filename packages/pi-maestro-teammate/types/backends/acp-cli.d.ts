@@ -29,9 +29,22 @@
  * reported as having touched nothing, so the host's replay fence cleared a
  * replay that would repeat those edits.
  */
-import type { AttemptRecoveryFacts, TeammateBackend } from "pi-maestro-backend-core/v1";
+import type { AttemptRecoveryFacts, BackendConfigField, TeammateBackend } from "pi-maestro-backend-core/v1";
 import { probeAcpConfigOptions } from "../remote/acp-driver.ts";
 import { type CliToolRunResult, type RunLocalCliToolParams } from "../cli-tools/local-acp.ts";
+/**
+ * This backend's settings — one CLI's launch, its location, and its route.
+ *
+ * No field is a `credential-ref`: an ACP CLI resolves its own provider
+ * credentials from its own configuration, so there is no secret for the host to
+ * hold or forward. `env` carries variable *names* the parent process may pass
+ * through, which is why an entry containing a value is refused below.
+ */
+/**
+ * Exported so the models CLI edit flow renders exactly the fields this backend
+ * validates against, without loading the backend for its capability table.
+ */
+export declare const ACP_CLI_CONFIG_FIELDS: readonly BackendConfigField[];
 /**
  * Translate one settled CLI run into the facts the host's failover reads.
  *

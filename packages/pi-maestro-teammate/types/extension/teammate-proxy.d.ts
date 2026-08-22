@@ -6,6 +6,7 @@
  * Mode: RPC subprocess — stdin open for steer/follow_up/abort
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { CompletionDeliveryCoordinator } from "../completion-outbox/coordinator.ts";
 import { type WorkspacePeerMessageKind, type WorkspacePeerWindowListing } from "./workspace-peers.ts";
 import type { RunTeammateParams } from "../runs/execution.ts";
 import type { TeammateState, ChildAgentCallSnapshot } from "../shared/types.ts";
@@ -58,6 +59,10 @@ export declare function parseThinkingInput(value: unknown): TeammateThinkingInpu
 export declare function parseOutputSchema(value: unknown): Record<string, unknown> | undefined;
 export interface TeammateProxyAuthority {
     authorizeCrossSession?: () => boolean;
+    completion?: {
+        coordinator: CompletionDeliveryCoordinator;
+        workspaceId: string;
+    };
 }
 export declare function handleProxyRequest(pi: ExtensionAPI, state: TeammateState, event: Record<string, unknown>, rawReply: (msg: unknown) => void, spawnedBy?: string, modelCapabilities?: readonly TeammateModelCapability[], onInteraction?: (event: Record<string, unknown>, reply: (message: unknown) => void, correlationId: string) => void, onChildStatus?: (child: ChildAgentCallSnapshot) => void, runtimeOptions?: TeammateRuntimeOptions, mailboxDeliver?: (request: {
     senderId: string;

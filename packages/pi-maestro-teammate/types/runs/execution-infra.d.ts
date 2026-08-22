@@ -12,10 +12,14 @@ import crossSpawn from "cross-spawn";
 import { type AgentConfig } from "../agents/agents.ts";
 import type { SingleResult, Usage, AgentProgress, AgentTerminalStatus } from "../shared/types.ts";
 import { type LeaseToken } from "./session-handoff.ts";
-import { type TeammateTaskType } from "../models/model-routing.ts";
+import { type ResolvedModelRegistrationRouting, type TeammateTaskType } from "../models/model-routing.ts";
+import type { DispatchAuthorityProjection } from "../models/model-registry.ts";
+import type { ModelHealthCoordinator } from "../models/model-circuit-breaker.ts";
+import type { BackendRegistry, ResolvedBackend } from "pi-maestro-backend-core/v1/registry";
 import type { TeammateModelCapability } from "../models/model-catalog.ts";
 import { type ModelCircuitBreaker } from "../models/model-circuit-breaker.ts";
 import { type TeammateThinkingInput, type TeammateThinkingLevel } from "../shared/thinking.ts";
+import { type ModelHealthFailureScopeClassifier } from "./retry.ts";
 export interface TeammateTaskSpec {
     prompt: string;
     /** Short human-readable purpose; display label when the task has no name. */
@@ -61,6 +65,12 @@ export interface TeammateTaskSpec {
      * `["#1", "#2"]` are accepted.
      */
     todo?: string | string[];
+    /**
+     * Lazy background references appended to the task prompt without expansion
+     * (`agent://<id>`, `file:<path>`, or literal text). The child decides whether
+     * to load each one; see runs/briefing.ts.
+     */
+    briefing?: string[];
 }
 export type TeammateMode = "default" | "expert";
 export interface RunTeammateParams {
@@ -118,6 +128,16 @@ export interface RunSingleTeammateParams {
     outputSchema?: Record<string, unknown>;
     /** Todo task ids bound to this agent; injected into the child system prompt. */
     todos?: string[];
+    /** Lazy background references appended to the task prompt (see runs/briefing.ts). */
+    briefing?: string[];
+}
+export interface ModelRegistryDispatchContext {
+    readonly authority: DispatchAuthorityProjection;
+    readonly registry: BackendRegistry;
+    /** Projection-pinned target maps backed by the process-wide breaker stores. */
+    readonly modelHealthCoordinator: ModelHealthCoordinator;
+    readonly plansByCorrelationId: ReadonlyMap<string, ResolvedModelRegistrationRouting>;
+    readonly resolutionsByCorrelationId: ReadonlyMap<string, ReadonlyMap<string, ResolvedBackend>>;
 }
 export interface RunTeammateOptions {
     baseCwd: string;
@@ -130,7 +150,21 @@ export interface RunTeammateOptions {
      * which registers under its ordinary name. Both paths settle into the same
      * outcome, so nothing downstream branches on which ran.
      */
-    backendRegistry?: import("pi-maestro-backend-core/v1/registry").BackendRegistry;
+    backendRegistry?: BackendRegistry;
+    /** Captured model-registry dispatch authority; omitted outside model-registry mode. */
+    modelRegistryAuthority?: DispatchAuthorityProjection;
+    /** Scoped model/deployment health authority used only in model-registry mode. */
+    modelHealthCoordinator?: ModelHealthCoordinator;
+    /** Optional structured backend-aware failure attribution for scoped health. */
+    modelHealthFailureScopeClassifier?: ModelHealthFailureScopeClassifier;
+    /**
+     * Rechecks the exact root Monitor authority generation captured for this
+     * dispatch. Remote model registrations are denied when this is absent or
+     * returns false.
+     */
+    authorizeRemoteModelDispatch?: () => boolean;
+    /** @internal Pinned graph/single preflight shared across candidate attempts. */
+    modelRegistryDispatch?: ModelRegistryDispatchContext;
     /**
      * The host's remote Monitor wiring.
      *
@@ -272,6 +306,8 @@ export interface NormalizedTask {
     maxNestingDepth?: number;
     /** Optional Todo task ids bound to this agent (see TeammateTaskSpec.todo). */
     todos?: string[];
+    /** Lazy background references (see TeammateTaskSpec.briefing). */
+    briefing?: string[];
 }
 /**
  * Project one normalized task into the params `runSingleTeammate` takes.
@@ -447,6 +483,8 @@ export declare function inferGraphMode(tasks: NormalizedTask[]): "parallel" | "c
  * ordered id list. The array order is the priority order (first = highest).
  */
 export declare function normalizeTodoBindings(todo: string | string[] | undefined): string[] | undefined;
+/** Dedupe and trim briefing entries; empty results collapse to undefined. */
+export declare function normalizeBriefingEntries(briefing: string[] | undefined): string[] | undefined;
 /** Public task prompt budget, measured after UTF-8 encoding. */
 export declare const MAX_TASK_PROMPT_BYTES: number;
 /** Return an actionable boundary error for a task prompt, if any. */

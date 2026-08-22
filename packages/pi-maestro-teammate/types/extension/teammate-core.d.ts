@@ -97,7 +97,7 @@ export declare function backgroundWaitGuidance(correlationId: string): string;
  * Appended to foreground detach acknowledgements so the Alt+B shortcut stays
  * discoverable across the root single, root graph, and nested foreground paths.
  */
-export declare const FOREGROUND_DETACH_HINT = "Alt+B detaches a foreground call to background.";
+export declare const FOREGROUND_DETACH_HINT: string;
 export declare function setPersistentUi(ui: ExtensionUIContext | undefined, resetOwners?: boolean): void;
 /** Registers one foreground owner; unregister is idempotent on every race path. */
 export declare function registerForegroundDetach(detach: () => void, ui?: ExtensionUIContext): () => void;

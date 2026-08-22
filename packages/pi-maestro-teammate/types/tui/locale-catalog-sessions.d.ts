@@ -56,7 +56,7 @@ export declare const SESSION_TUI_CATALOGS: {
         readonly "widget.retryingAction": "retrying · {action}";
         readonly "widget.childOf": "child of @{name}";
         readonly "widget.resultFrom": "result from {names}";
-        readonly "widget.inspectMore": "└─ … {count} more · Alt+R to inspect";
+        readonly "widget.inspectMore": `\u2514\u2500 \u2026 {count} more \u00B7 ${string} to inspect`;
         readonly "widget.action.write": "writing file";
         readonly "widget.action.read": "reading files";
         readonly "widget.action.command": "running command";
@@ -138,7 +138,7 @@ export declare const SESSION_TUI_CATALOGS: {
         readonly "widget.retryingAction": "重试中 · {action}";
         readonly "widget.childOf": "@{name} 的子 Tasks";
         readonly "widget.resultFrom": "结果来自 {names}";
-        readonly "widget.inspectMore": "└─ … 还有 {count} 个 · 按 Alt+R 查看";
+        readonly "widget.inspectMore": `\u2514\u2500 \u2026 \u8FD8\u6709 {count} \u4E2A \u00B7 \u6309 ${string} \u67E5\u770B`;
         readonly "widget.action.write": "正在写入文件";
         readonly "widget.action.read": "正在读取文件";
         readonly "widget.action.command": "正在运行命令";

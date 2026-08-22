@@ -1,5 +1,6 @@
 import { SETTINGS_LOCALE_EVENT, type SettingsLocaleEventV1, type SupportedSettingsLocale, type SystemSettingsLocaleOptions, type TranslationParams } from "pi-maestro-settings-core/v1";
 import { CORE_TUI_CATALOGS } from "./locale-catalog-core.ts";
+import { MODELS_CLI_CATALOGS } from "../models/cli-i18n.ts";
 import { MODEL_TUI_CATALOGS } from "./locale-catalog-model.ts";
 import { PROFILE_TUI_CATALOGS } from "./locale-catalog-profiles.ts";
 import { SESSION_TUI_CATALOGS } from "./locale-catalog-sessions.ts";
@@ -8,7 +9,8 @@ type CoreKey = keyof (typeof CORE_TUI_CATALOGS)["en"];
 type SessionKey = keyof (typeof SESSION_TUI_CATALOGS)["en"];
 type ModelKey = keyof (typeof MODEL_TUI_CATALOGS)["en"];
 type ProfileKey = keyof (typeof PROFILE_TUI_CATALOGS)["en"];
-export type TuiTranslationKey = CoreKey | SessionKey | ModelKey | ProfileKey;
+type ModelsCliKey = keyof (typeof MODELS_CLI_CATALOGS)["en"];
+export type TuiTranslationKey = CoreKey | SessionKey | ModelKey | ProfileKey | ModelsCliKey;
 export type TuiTranslator = (key: TuiTranslationKey, params?: TranslationParams) => string;
 export declare function getTuiLocale(): SupportedSettingsLocale;
 export declare function initializeTuiLocale(locale?: string | null | undefined, options?: SystemSettingsLocaleOptions): SupportedSettingsLocale;

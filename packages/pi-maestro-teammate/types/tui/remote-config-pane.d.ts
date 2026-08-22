@@ -1,8 +1,18 @@
 import { type Component, type Focusable } from "@earendil-works/pi-tui";
+import type { ModelCliRow } from "../models/cli-list.ts";
 import type { RemoteConfigState } from "../remote/config.ts";
 import { type SupportedSettingsLocale, type TuiTranslator } from "./locale.ts";
 export type RemotePaneScope = "global" | "project";
 export type RemotePaneRow = {
+    kind: "deployment";
+    registrationId: string;
+    modelId: string;
+    deploymentId: string;
+    harness: string;
+    transportKind: string;
+    resolvable: boolean;
+    healthyStatic: boolean;
+} | {
     kind: "host";
     id: string;
     host: string;
@@ -21,6 +31,13 @@ export type RemotePaneRow = {
     hidden?: boolean;
 };
 export type RemotePaneAction = {
+    kind: "connection-edit-deployment";
+    registrationId: string;
+} | {
+    kind: "connection-add-deployment";
+} | {
+    kind: "connection-upgrade-legacy";
+} | {
     kind: "remote-edit-host";
     hostId: string;
     scope: RemotePaneScope;
@@ -47,10 +64,19 @@ export type RemotePaneAction = {
     scope: RemotePaneScope;
 } | {
     kind: "reload";
-    tab: "remotes";
+    tab: "connections";
+};
+export type RemotePaneDeployments = {
+    kind: "registry";
+    rows: readonly ModelCliRow[];
+    defaultModel: string;
+    diagnostics: readonly string[];
+} | {
+    kind: "legacy";
 };
 export interface RemoteConfigPaneOptions {
     state: RemoteConfigState;
+    deployments?: RemotePaneDeployments;
     theme: {
         fg(role: string, text: string): string;
         bold(text: string): string;
@@ -64,12 +90,13 @@ export interface RemoteConfigPaneOptions {
     testTimeoutMs?: number;
 }
 /**
- * Pure-UI "Remote targets" tab embedded in the Teammate Control Center.
+ * Pure-UI connections tab embedded in the Teammate Control Center.
  *
- * The pane renders one scope at a time (global or project), emits
- * edit/create/delete/scope actions through `close`, and runs inline target
- * connectivity probes through `onTest`. Field-level wizards, persistence, and
- * real SSH testing live outside the pane.
+ * The pane renders precomputed registry deployments plus one remote scope at
+ * a time (global or project), emits edit/create/delete/scope actions through
+ * `close`, and runs inline target connectivity probes through `onTest`.
+ * Manifest access, field-level wizards, persistence, and real SSH testing live
+ * outside the pane.
  */
 export declare class RemoteConfigPane implements Component, Focusable {
     private readonly options;
@@ -96,6 +123,7 @@ export declare class RemoteConfigPane implements Component, Focusable {
     private filterLine;
     private statusLine;
     private footerLine;
+    private sectionLine;
     private rowLine;
     private rowLabel;
     private buildRows;

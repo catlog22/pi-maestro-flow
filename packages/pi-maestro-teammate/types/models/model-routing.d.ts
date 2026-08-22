@@ -1,7 +1,8 @@
 import type { RunTeammateParams } from "../runs/execution.ts";
 import { type TeammateTaskType } from "../shared/task-types.ts";
 import { type TeammateThinkingLevel } from "../shared/thinking.ts";
-import type { ModelCircuitPolicy, ModelCircuitBreaker } from "./model-circuit-breaker.ts";
+import type { ModelCircuitPolicy, ModelCircuitBreaker, ModelHealthCoordinator } from "./model-circuit-breaker.ts";
+import type { DispatchAuthorityProjection, ModelDeploymentRoute, ModelDispatchRoute } from "./model-registry.ts";
 export { TEAMMATE_TASK_TYPES, parseTeammateTaskType } from "../shared/task-types.ts";
 export type { TeammateTaskType } from "../shared/task-types.ts";
 export declare const TEAMMATE_TASK_TYPE_META: Record<string, {
@@ -149,6 +150,32 @@ export declare function applyModelRouting(params: RunTeammateParams, cwd: string
  * removed policies do not linger.
  */
 export declare function syncModelCircuitPolicies(breaker: ModelCircuitBreaker, cwd: string, globalFilePath?: string): void;
+/** Reconcile registry-mode health against the dispatch projection's stable hash. */
+export declare function reconcileModelHealthProjection(health: ModelHealthCoordinator, projection: DispatchAuthorityProjection): boolean;
+export interface ModelRegistrationRoutingInput {
+    model?: string;
+    fallbackModels?: readonly string[];
+    backend?: string;
+    cwd?: string;
+}
+export interface ResolvedModelRegistrationCandidate {
+    modelRegistrationId: string;
+    route: ModelDispatchRoute;
+    deployment: ModelDeploymentRoute;
+}
+export interface ResolvedModelRegistrationRouting {
+    candidates: readonly ResolvedModelRegistrationCandidate[];
+    requestedDeploymentId?: string;
+    remoteLocation?: string;
+}
+/**
+ * Resolve one registry-mode task entirely through the captured dispatch
+ * authority. No adapter model id, backend heuristic, or remote target name is
+ * treated as a registration implicitly.
+ */
+export declare function resolveModelRegistrationRouting(projection: DispatchAuthorityProjection, input: ModelRegistrationRoutingInput): ResolvedModelRegistrationRouting;
+/** Pi can hot-switch only between adapter selectors owned by one Pi deployment. */
+export declare function canHotSwitchModelRegistration(from: ResolvedModelRegistrationCandidate, to: ResolvedModelRegistrationCandidate): boolean;
 export interface ModelRegistryRefreshContext {
     modelRegistry?: {
         refresh?: () => Promise<unknown>;

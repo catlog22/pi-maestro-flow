@@ -7,9 +7,22 @@
  */
 import type { AgentActivity, AgentProgressSnapshot, AgentRunOutcome, AgentStatus, StructuredResult, TeammateResultPublishedEvent } from "../../shared/types.ts";
 import type { SessionHostSnapshot, WindowThreadSnapshot } from "../../sessions/session-core.ts";
-export type { TeammateResultPublishedEvent } from "../../shared/types.ts";
+export type { StructuredResult, TeammateExecutionProvenance, TeammateResultPublishedEvent, } from "../../shared/types.ts";
 export { TEAMMATE_COMPLETE_EVENT, TEAMMATE_MESSAGE_EVENT, TEAMMATE_OPEN_AGENT_EVENT, TEAMMATE_RESULT_PUBLISHED_EVENT, TEAMMATE_STARTED_EVENT, TEAMMATE_VIEWING_EVENT, } from "../../shared/types.ts";
 export { SESSION_HOST_REGISTRY_EVENT, WINDOW_THREAD_EVENT, } from "../../sessions/session-core.ts";
+/** Flow diagnostics query for current session/Monitor availability authority. */
+export declare const TEAMMATE_MODEL_SESSION_QUERY_EVENT = "teammate:model-session-query";
+/** Teammate response carrying only session topology gates, never route config. */
+export declare const TEAMMATE_MODEL_SESSION_EVENT = "teammate:model-session";
+export declare const TEAMMATE_MODEL_SESSION_PROTOCOL_VERSION: 1;
+export interface TeammateModelSessionQueryEventV1 {
+    version: typeof TEAMMATE_MODEL_SESSION_PROTOCOL_VERSION;
+    requestId: string;
+}
+export interface TeammateModelSessionEventV1 extends TeammateModelSessionQueryEventV1 {
+    isChild: boolean;
+    hasCurrentRootMonitorAuthority: boolean;
+}
 /** Tool identity of one child tool call, as reported inside a progress payload. */
 export interface TeammateEventTool {
     name: string;
@@ -156,4 +169,6 @@ export interface TeammateEventMap {
     "teammate:open-agent": TeammateOpenAgentEvent;
     "teammate:sessions": SessionHostSnapshot;
     "teammate:window-thread": WindowThreadSnapshot;
+    "teammate:model-session-query": TeammateModelSessionQueryEventV1;
+    "teammate:model-session": TeammateModelSessionEventV1;
 }

@@ -7,11 +7,12 @@
  *
  * Supports single, parallel (tasks[]), and chain (chain[]) execution modes.
  */
-import type { SingleResult, AgentProgress } from "../shared/types.ts";
+import type { SingleResult, AgentProgress, TeammateExecutionProvenance } from "../shared/types.ts";
 export * from "./execution-infra.ts";
 import type { NormalizedTask, RunSingleTeammateParams, RunTeammateOptions, RunTeammateParams } from "./execution-infra.ts";
 export { TOOL_EXECUTION_HEARTBEAT_MS, resolveAgentCacheRetention, sendRpcMessage, sendChildIpcMessage, dispatchChildIpcMessage, } from "./pi-subprocess-attempt.ts";
 export type { RpcMessageMode } from "./pi-subprocess-attempt.ts";
+export declare function hostRegistryResultProvenance(result: SingleResult): TeammateExecutionProvenance | undefined;
 /**
  * Convert a backend's progress payload into the host's progress record.
  *

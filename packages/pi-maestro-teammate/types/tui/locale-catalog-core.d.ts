@@ -69,8 +69,8 @@ export declare const CORE_TUI_CATALOGS: {
         readonly "progress.header.pending": "{count} pending";
         readonly "progress.header.agents": "agents {count}";
         readonly "progress.header.delegated": "{count} delegated";
-        readonly "progress.footer": "Alt+R details · 1-{max} view · 0 overview";
-        readonly "progress.expand": "Alt+R details";
+        readonly "progress.footer": `${string} details \u00B7 1-{max} view \u00B7 0 overview`;
+        readonly "progress.expand": `${string} details`;
         readonly "progress.quiet.failed": "failed";
         readonly "progress.quiet.done": "done";
         readonly "attach.messageCancelled": "Message cancelled";
@@ -192,8 +192,8 @@ export declare const CORE_TUI_CATALOGS: {
         readonly "progress.header.pending": "{count} 个等待中";
         readonly "progress.header.agents": "Agent {count}";
         readonly "progress.header.delegated": "{count} 个已委派";
-        readonly "progress.footer": "Alt+R 详情 · 1-{max} 查看 · 0 总览";
-        readonly "progress.expand": "Alt+R 详情";
+        readonly "progress.footer": `${string} \u8BE6\u60C5 \u00B7 1-{max} \u67E5\u770B \u00B7 0 \u603B\u89C8`;
+        readonly "progress.expand": `${string} \u8BE6\u60C5`;
         readonly "progress.quiet.failed": "失败";
         readonly "progress.quiet.done": "完成";
         readonly "attach.messageCancelled": "消息已取消";

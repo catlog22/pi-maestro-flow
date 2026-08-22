@@ -6,9 +6,9 @@ import type { TeammateModelCapability } from "../models/model-catalog.ts";
 import { type ModelRoutingRoleRules, type ModelRoutingRules, type ModelRoutingState, type ModelRoutingTypeMeta, type TeammateTaskType } from "../models/model-routing.ts";
 import { type TeammateThinkingLevel } from "../shared/thinking.ts";
 import { type SupportedSettingsLocale } from "./locale.ts";
-import { type RemotePaneAction } from "./remote-config-pane.ts";
+import { type RemotePaneAction, type RemotePaneDeployments } from "./remote-config-pane.ts";
 import { type RemoteConfigState } from "../remote/config.ts";
-export type ControlCenterTab = "profiles" | "routing" | "roles" | "remotes" | "active";
+export type ControlCenterTab = "profiles" | "routing" | "roles" | "connections" | "active";
 export interface ControlCenterActiveAgent {
     correlationId: string;
     agent: string;
@@ -42,11 +42,15 @@ export interface TeammateControlCenterOptions {
     activeAgents?: readonly ControlCenterActiveAgent[];
     modelHealth?: readonly ModelCircuitSnapshot[];
     onOpenAgent?: (correlationId: string) => Promise<void>;
-    /** Remote configuration state for the Remotes tab. */
+    /** Remote configuration state for the Connections tab. */
     remoteState?: RemoteConfigState;
+    /** Precomputed model-registry projection for the connections pane. */
+    deployments?: RemotePaneDeployments;
     /** Probe a remote target (SSH handshake + protocol initialize); result text is already redacted. */
     onTestRemote?: (targetId: string, signal: AbortSignal) => Promise<string>;
     remoteTestTimeoutMs?: number;
+    /** Reload the extension's model catalog after registry writes or explicit reloads. */
+    refreshModelCatalog?: () => readonly TeammateModelCapability[];
     globalFilePath?: string;
     locale?: SupportedSettingsLocale;
 }
@@ -64,6 +68,7 @@ interface TeammateControlCenterParams {
     state?: ModelRoutingState;
     config?: LegacyControlCenterConfig;
     remoteState?: RemoteConfigState;
+    deployments?: RemotePaneDeployments;
     onTestRemote?: (targetId: string, signal: AbortSignal) => Promise<string>;
     remoteTestTimeoutMs?: number;
     theme: ControlCenterTheme;

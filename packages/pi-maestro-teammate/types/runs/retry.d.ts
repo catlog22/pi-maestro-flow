@@ -1,3 +1,4 @@
+import type { ModelHealthScope, ModelHealthTarget } from "../models/model-circuit-breaker.ts";
 export declare const NETWORK_RETRY_POLICY: Readonly<{
     maxRetries: 5;
     initialDelayMs: 1000;
@@ -18,16 +19,69 @@ export declare const RESOLVED_NETWORK_RETRY_POLICY: Readonly<{
     maxDelayMs: number;
 }>;
 export type RetryErrorKind = "network" | "provider" | "fallback-only" | "auth" | "non-retryable";
+export type ModelHealthFailureScope = ModelHealthScope | "none";
+export interface ModelHealthFailureInput {
+    message?: string;
+    status?: number;
+    /** Authoritative backend-aware override when the text cannot identify ownership. */
+    scope?: ModelHealthFailureScope;
+}
+export interface ModelHealthFailureFacts extends ModelHealthFailureInput {
+    retryKind: RetryErrorKind;
+}
+export interface ModelHealthFailureClassification {
+    retryKind: RetryErrorKind;
+    scope: ModelHealthFailureScope;
+    affectsCircuit: boolean;
+    suppressAuth: boolean;
+}
+/** Optional backend hook for assigning a failure to deployment or route health. */
+export type ModelHealthFailureScopeClassifier = (failure: Readonly<ModelHealthFailureFacts>) => ModelHealthFailureScope | undefined;
+export interface ModelHealthAttemptSnapshot {
+    projectionFingerprint?: string;
+    quarantinedDeployments: readonly string[];
+    authSuppressions: readonly string[];
+}
 /**
  * Classify a provider failure for retry/fallback decisions.
  *
  * `status` (when known) normally short-circuits via {@link classifyByStatus};
  * an explicit upstream model-unavailable diagnostic is the narrow exception
  * because another configured candidate may still work. Otherwise the message
- * patterns apply, in order: auth → model availability → permanent →
- * quota/payment → transport → provider overload.
+ * patterns apply, in order: auth → model availability → permanent → local
+ * infrastructure → quota/payment → transport → provider overload. Anything
+ * unrecognized defaults to retryable (`provider`): at the provider boundary an
+ * unknown diagnostic is far more often transient than permanent, and the
+ * retry/fallback paths are bounded anyway.
  */
 export declare function classifyRetryError(message: string | undefined, status?: number): RetryErrorKind;
+/**
+ * Classify a registry-mode failure without coupling retry text parsing to a
+ * backend implementation. Backends may supply a scope directly or a hook for
+ * structured transport/provider errors; the retry kind remains the shared
+ * legacy classifier result.
+ */
+export declare function classifyModelHealthFailure(failure: ModelHealthFailureInput, classifyScope?: ModelHealthFailureScopeClassifier): ModelHealthFailureClassification;
+/** Collision-safe key for an attempt-local, scope-specific auth suppression. */
+export declare function modelHealthAuthSuppressionKey(scope: ModelHealthScope, target: ModelHealthTarget): string;
+export declare function isModelHealthAuthSuppressed(suppressions: ReadonlySet<string>, target: ModelHealthTarget): boolean;
+/** Candidate-sweep state; never survives the attempt that created it. */
+export declare class ModelHealthAttemptState {
+    private fingerprint;
+    private readonly quarantinedDeployments;
+    private readonly authSuppressions;
+    constructor(projectionFingerprint?: string);
+    get projectionFingerprint(): string | undefined;
+    /** Clear attempt-local decisions when a new registry projection is observed. */
+    reconcileProjectionFingerprint(projectionFingerprint: string): boolean;
+    quarantineDeployment(deploymentId: string): void;
+    isDeploymentQuarantined(deploymentId: string): boolean;
+    suppressAuth(scope: ModelHealthScope, target: ModelHealthTarget): void;
+    isAuthSuppressed(target: ModelHealthTarget): boolean;
+    shouldSkip(target: ModelHealthTarget): boolean;
+    noteFailure(target: ModelHealthTarget, failure: ModelHealthFailureClassification): void;
+    snapshot(): ModelHealthAttemptSnapshot;
+}
 /**
  * Pi core owns same-model provider retries in both the root session and
  * teammate children, but older Pi retry classifiers do not recognize the

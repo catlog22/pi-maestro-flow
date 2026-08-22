@@ -76,6 +76,14 @@ export declare function getProjectCliToolsConfigPath(cwd: string): string;
  * `globalFilePath` overrides the global file location (used by tests).
  */
 export declare function loadCliToolsConfig(cwd?: string, globalFilePath?: string): CliToolsConfig | null;
+/**
+ * Load the effective CLI compatibility overlay for model-registry compilation.
+ * This uses the same project-over-global merge as {@link loadCliToolsConfig},
+ * but malformed files throw so a changed invalid source cannot leave a stale
+ * discovery/dispatch pair published. It performs no executable or network
+ * probes; only explicit `enabled` flags are consumed by the compiler.
+ */
+export declare function loadCliToolsConfigProjection(cwd?: string, globalFilePath?: string): CliToolsConfig | null;
 /** Load the legacy ~/.maestro/cli-tools.json (Maestro delegate provider registration). */
 export declare function loadMaestroDelegateConfig(configPath?: string): MaestroDelegateConfig | null;
 /**
@@ -101,11 +109,12 @@ export interface CliToolProbeResult {
     error?: string;
 }
 /**
- * Probe whether a CLI tool is reachable. Local tools are checked with
- * which/where; ssh tools first validate config completeness (fail-closed) and
- * then optimistically report ok while an async SSH probe warms the cache, so
- * subsequent catalog refreshes drop unreachable hosts. Results are cached for a
- * short TTL because catalog refresh runs frequently.
+ * Probe whether a CLI tool is reachable. Absolute local commands are checked
+ * directly, while bare and relative commands are resolved with which/where;
+ * ssh tools first validate config completeness (fail-closed) and then
+ * optimistically report ok while an async SSH probe warms the cache, so
+ * subsequent catalog refreshes drop unreachable hosts. Results are cached for
+ * a short TTL because catalog refresh runs frequently.
  */
 export declare function probeCliToolCommand(name: string, config: CliToolConfig): CliToolProbeResult;
 /**
