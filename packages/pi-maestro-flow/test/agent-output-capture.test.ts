@@ -6,7 +6,7 @@ import test, { after, before } from "node:test";
 import {
   getCompletionDurabilityRegistry,
   type CompletionDurabilityProvider,
-} from "pi-maestro-teammate/v1/completion-durability";
+} from "pi-maestro-teammate/v1";
 
 const {
   capturePublishedAgentResult,

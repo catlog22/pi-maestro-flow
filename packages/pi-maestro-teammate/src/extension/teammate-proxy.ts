@@ -1499,6 +1499,18 @@ export async function handleProxyRequest(
           summary: lastMessage,
           resources: nestedResources([result]),
           finalizedAt: Date.now(),
+        }).then((record) => {
+          if (!record || record.replyTarget !== "caller") return;
+          const delivered = deliverTeammateCompleteNotification({
+            pi,
+            state,
+            envelope: authority.completion!.coordinator.deliveryEnvelope(record, false),
+            replyTarget: "caller",
+            parentCid,
+            parentSessionId,
+            sessionGeneration: state.sessionGeneration ?? 0,
+          });
+          if (!delivered) markSettledResultInspectable(state, result.correlationId);
         }).catch((error) => {
           console.warn("[pi-maestro-teammate] durable nested additional completion failed; using passive delivery:", error);
           fallbackDelivery();

@@ -18,7 +18,7 @@ import {
   getCompletionDurabilityRegistry,
   type CompletionOutcome,
   type CompletionResource,
-} from "pi-maestro-teammate/v1/completion-durability";
+} from "pi-maestro-teammate/v1";
 
 interface StructuredResultLike {
   correlationId?: unknown;

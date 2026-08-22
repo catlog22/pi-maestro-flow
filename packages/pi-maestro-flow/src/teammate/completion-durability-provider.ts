@@ -18,7 +18,7 @@ import {
   type CompletionPublicationInput,
   type CompletionResource,
   type CompletionTarget,
-} from "pi-maestro-teammate/v1/completion-durability";
+} from "pi-maestro-teammate/v1";
 import { ensureAgentOutputBucket, readExactAgentPublication } from "./agent-output-store.ts";
 import { lockSettingsResource } from "../settings/resource-lock.ts";
 

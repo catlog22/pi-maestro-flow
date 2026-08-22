@@ -264,7 +264,7 @@ import {
 } from "pi-maestro-teammate/v1/types";
 import type { TeammateCompleteEvent, TeammateStartedEvent } from "pi-maestro-teammate/v1/events";
 import type { MailboxHostRegistry } from "pi-maestro-teammate/v1/mailbox";
-import { getCompletionDurabilityRegistry } from "pi-maestro-teammate/v1/completion-durability";
+import { getCompletionDurabilityRegistry } from "pi-maestro-teammate/v1";
 import { sharedModelCircuitBreaker } from "pi-maestro-teammate/v1/retry";
 import { FlowCompletionDurabilityProvider } from "../teammate/completion-durability-provider.ts";
 import { createFlowSettingsProvider, registerFlowSettingsProvider } from "../settings/flow-settings-provider.ts";

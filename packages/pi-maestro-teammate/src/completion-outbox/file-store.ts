@@ -310,8 +310,16 @@ export class CompletionOutboxFileStore {
     if (deliveryId !== intent.deliveryId) throw new Error(`Completion intent deliveryId mismatch for ${intent.dispatchId}.`);
     return this.#withWorkspaceLock(intent.target.workspaceId, async () => {
       const existing = await this.#findRecord(intent.target, deliveryId);
-      if (existing) return existing;
       const reservation = await this.#readReservation(intent.target.workspaceId, intent.reservationId);
+      if (existing) {
+        const recovered = existing.state === "wal"
+          ? await this.#replaceRecord(existing, { state: "pending", updatedAt: this.#now(), nextAttemptAt: this.#now() })
+          : existing;
+        if (reservation?.state === "reserved" && targetEquals(reservation.target, intent.target)) {
+          await this.#consumeReservation(reservation, this.#now());
+        }
+        return recovered;
+      }
       if (!reservation || reservation.state !== "reserved" || !targetEquals(reservation.target, intent.target)) {
         throw new Error(`No live completion reservation ${intent.reservationId} for ${deliveryId}.`);
       }
@@ -340,12 +348,7 @@ export class CompletionOutboxFileStore {
       const pending = { ...pendingBase, contentRevision: computeCompletionContentRevision(pendingBase) };
       await writeJsonAtomic(this.#recordPath(intent.target, "pending", deliveryId), pending);
       await rm(this.#recordPath(intent.target, "wal", deliveryId), { force: true });
-      await writeJsonAtomic(this.#reservationPath(intent.target.workspaceId, intent.reservationId), {
-        ...reservation,
-        state: "consumed",
-        updatedAt: now,
-        expiresAt: now + COMPLETION_OUTBOX_RESERVATION_TERMINAL_TTL_MS,
-      } satisfies CompletionReservationRecord);
+      await this.#consumeReservation(reservation, now);
       return pending;
     });
   }
@@ -547,6 +550,15 @@ export class CompletionOutboxFileStore {
       result.releasedReservations += 1;
     }
     return result;
+  }
+
+  async #consumeReservation(reservation: CompletionReservationRecord, now: number): Promise<void> {
+    await writeJsonAtomic(this.#reservationPath(reservation.target.workspaceId, reservation.reservationId), {
+      ...reservation,
+      state: "consumed",
+      updatedAt: now,
+      expiresAt: now + COMPLETION_OUTBOX_RESERVATION_TERMINAL_TTL_MS,
+    } satisfies CompletionReservationRecord);
   }
 
   async #readReservation(workspaceId: string, reservationId: string): Promise<CompletionReservationRecord | undefined> {

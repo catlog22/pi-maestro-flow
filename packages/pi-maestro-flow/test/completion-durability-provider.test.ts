@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { CompletionDispatchSeed, CompletionResource } from "pi-maestro-teammate/v1/completion-durability";
+import type { CompletionDispatchSeed, CompletionResource } from "pi-maestro-teammate/v1";
 import { FlowCompletionDurabilityProvider } from "../src/teammate/completion-durability-provider.ts";
 import { persistAgentOutputChecked } from "../src/teammate/agent-output-store.ts";
 
