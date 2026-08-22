@@ -34,6 +34,7 @@ async function fixture(run: (input: {
     correlationId: "correlation-one",
     publicationId: "publication-one",
     uri: "agent://publication-one",
+    originCwd: cwd,
     name: "worker",
     agent: "general",
     summary: "done",

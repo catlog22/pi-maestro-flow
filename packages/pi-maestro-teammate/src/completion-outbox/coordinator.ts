@@ -94,7 +94,7 @@ export class CompletionDeliveryCoordinator {
   readonly #now: () => number;
   readonly #enabled: () => boolean;
   readonly #defer: (run: () => void) => void;
-  readonly #dispatches = new Map<string, CompletionDispatchHandle>();
+  readonly #dispatches = new Map<string, { handle: CompletionDispatchHandle; provider: CompletionDurabilityProvider }>();
   readonly #inflight = new Map<string, Promise<void>>();
   readonly #deferred = new Set<Promise<void>>();
   #binding: CompletionSessionBinding | undefined;
@@ -120,7 +120,9 @@ export class CompletionDeliveryCoordinator {
     await this.store.reserve(seed);
     try {
       const handle = await provider.beginDispatch(seed);
-      this.#dispatches.set(seed.dispatchId, handle);
+      // Pin the provider instance for this dispatch so a later registry
+      // replacement/unload cannot redirect or fail finalization mid-flight.
+      this.#dispatches.set(seed.dispatchId, { handle, provider });
       return { durable: true, handle };
     } catch (error) {
       await this.store.releaseReservation(seed.target, seed.reservationId).catch(() => undefined);
@@ -130,7 +132,7 @@ export class CompletionDeliveryCoordinator {
 
   async requireNotification(input: CompletionNotificationRequirement): Promise<void> {
     if (!this.#dispatches.has(input.dispatchId)) return;
-    const provider = this.#requireProvider();
+    const provider = this.#pinnedProvider(input.dispatchId);
     await provider.requireNotification(input);
   }
 
@@ -138,7 +140,7 @@ export class CompletionDeliveryCoordinator {
     const handle = this.#dispatches.get(seed.dispatchId);
     if (!handle) return;
     try {
-      await this.#requireProvider().abandonDispatch({
+      await this.#pinnedProvider(seed.dispatchId).abandonDispatch({
         dispatchId: seed.dispatchId,
         reservationId: seed.reservationId,
         reason,
@@ -152,7 +154,7 @@ export class CompletionDeliveryCoordinator {
 
   async publishCompletion(input: CompletionFinalizeInput): Promise<CompletionOutboxRecord | undefined> {
     if (!this.#dispatches.has(input.dispatchId)) return undefined;
-    const intent = await this.#requireProvider().finalizeDelivery(input);
+    const intent = await this.#pinnedProvider(input.dispatchId).finalizeDelivery(input);
     const record = await this.store.importIntent(intent);
     await this.#deliverDue(record.target, true);
     return record;
@@ -161,7 +163,7 @@ export class CompletionDeliveryCoordinator {
   async settleForeground(seed: CompletionDispatchSeed): Promise<void> {
     if (!this.#dispatches.has(seed.dispatchId)) return;
     try {
-      await this.#requireProvider().abandonDispatch({
+      await this.#pinnedProvider(seed.dispatchId).abandonDispatch({
         dispatchId: seed.dispatchId,
         reservationId: seed.reservationId,
         reason: "foreground tool result consumed completion",
@@ -276,7 +278,15 @@ export class CompletionDeliveryCoordinator {
         continue;
       }
       if (accepted) {
-        await this.store.markQueued(target, record.deliveryId, now + RECEIPT_DEADLINE_MS);
+        try {
+          await this.store.markQueued(target, record.deliveryId, now + RECEIPT_DEADLINE_MS);
+        } catch (error) {
+          // The model may already have the accepted envelope. Do not let this
+          // escape to the caller, which would trigger a second direct send.
+          // The durable pending record remains replayable and identifiable by
+          // the same deliveryId if the first envelope never reaches message_end.
+          console.warn(`[pi-maestro-teammate] accepted completion could not persist queued state for ${record.deliveryId}:`, error);
+        }
       } else {
         await this.store.returnToPending(target, record.deliveryId, "sendMessage rejected completion");
       }
@@ -338,7 +348,9 @@ export class CompletionDeliveryCoordinator {
     });
   }
 
-  #requireProvider(): CompletionDurabilityProvider {
+  #pinnedProvider(dispatchId: string): CompletionDurabilityProvider {
+    const pinned = this.#dispatches.get(dispatchId);
+    if (pinned) return pinned.provider;
     const provider = this.registry.current();
     if (!provider) throw new Error("Completion durability provider became unavailable.");
     return provider;

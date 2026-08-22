@@ -377,6 +377,7 @@ async function evictOldestRecords(dir: string, count: number): Promise<void> {
   if (count <= 0) return;
   const entries = await listCanonicalRecords(dir);
   const referenced = await aliasReferencedPublicationIds(dir);
+  for (const pinned of await manifestPinnedPublicationIds(dir)) referenced.add(pinned);
   const candidates: AgentOutputStoreEntry[] = [];
   const chosen = new Set<string>();
   for (const pool of [entries.filter((entry) => !referenced.has(entry.canonicalId)), entries]) {
@@ -394,6 +395,44 @@ async function evictOldestRecords(dir: string, count: number): Promise<void> {
     });
     await repairAliasesAfterDeletion(dir, entry.canonicalId);
   }
+}
+
+const COMPLETION_INTENT_DIR = ".completion-intents";
+
+/**
+ * 未结算（open/finalized）完成清单引用的 publication 在投递完成前不可淘汰，
+ * 否则恢复/重放会读到失效的 agent:// 资源。
+ */
+async function manifestPinnedPublicationIds(dir: string): Promise<Set<string>> {
+  const pinned = new Set<string>();
+  let names: string[];
+  try {
+    const entries = await readdir(join(dir, COMPLETION_INTENT_DIR), { withFileTypes: true });
+    names = entries.filter((entry) => entry.isFile() && entry.name.endsWith(".json")).map((entry) => entry.name);
+  } catch (error) {
+    if (fileErrorCode(error) === "ENOENT") return pinned;
+    throw error;
+  }
+  for (const fileName of names) {
+    const raw = await readPrivateText(join(dir, COMPLETION_INTENT_DIR, fileName));
+    if (raw === undefined) continue;
+    let parsed: { state?: unknown; published?: unknown; intent?: { resources?: unknown } };
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    if (parsed.state !== "open" && parsed.state !== "finalized") continue;
+    for (const published of Array.isArray(parsed.published) ? parsed.published : []) {
+      const publicationId = (published as { publicationId?: unknown } | null)?.publicationId;
+      if (typeof publicationId === "string") pinned.add(publicationId);
+    }
+    for (const resource of Array.isArray(parsed.intent?.resources) ? parsed.intent!.resources : []) {
+      const publicationId = (resource as { publicationId?: unknown } | null)?.publicationId;
+      if (typeof publicationId === "string") pinned.add(publicationId);
+    }
+  }
+  return pinned;
 }
 
 async function listCanonicalRecords(dir: string): Promise<AgentOutputStoreEntry[]> {

@@ -47,6 +47,7 @@ function intent(input: CompletionDispatchSeed): CompletionIntent {
       correlationId: input.expectedTasks[0]!,
       publicationId: `publication-${input.dispatchId}`,
       uri: `agent://publication-${input.dispatchId}`,
+      originCwd: input.originCwd,
       summary: "done",
       outcome: "completed",
     }],

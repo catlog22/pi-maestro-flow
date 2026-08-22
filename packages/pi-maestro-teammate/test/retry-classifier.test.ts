@@ -134,6 +134,22 @@ test("unrecognized failures default to retryable provider", () => {
   assert.equal(isFallbackProviderError("ERROR"), true);
 });
 
+test("wrapped runtime diagnostics classify by their inner error, not the envelope", () => {
+  const wrap = (inner: string): string =>
+    `Teammate runtime error (phase=message_end, agent=general, model=p/m, correlationId=c-1): ${inner}`;
+  // Inner provider/network failures stay retryable and fallback-eligible even
+  // though the envelope names the teammate runtime.
+  assert.equal(classifyRetryError(wrap("ECONNRESET")), "network");
+  assert.equal(isFallbackProviderError(wrap("ECONNRESET")), true);
+  assert.equal(isRetryableProviderError(wrap("Provider overloaded: 503")), true);
+  // Inner local-infrastructure failures stay non-retryable.
+  assert.equal(classifyRetryError(wrap("failed to spawn pi subprocess: ENOENT")), "non-retryable");
+  assert.equal(isFallbackProviderError(wrap("failed to spawn pi subprocess: ENOENT")), false);
+  // The recurring-boundary suffix must not defeat classification either.
+  const recurring = `${wrap("ECONNRESET")} [recurred across turn boundary]`;
+  assert.equal(isFallbackProviderError(recurring), true);
+});
+
 test("provider and quota classes keep their existing routing", () => {
   assert.equal(classifyRetryError("Provider overloaded: 503"), "provider");
   assert.equal(classifyRetryError("402 insufficient_quota"), "fallback-only");

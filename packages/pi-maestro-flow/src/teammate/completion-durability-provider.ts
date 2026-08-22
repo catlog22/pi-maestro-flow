@@ -174,7 +174,14 @@ export class FlowCompletionDurabilityProvider implements CompletionDurabilityPro
     this.#manifestPaths.set(seed.dispatchId, path);
     await this.#mutate(path, seed.dispatchId, (current, now) => {
       if (current) {
-        if (current.reservationId !== seed.reservationId || current.target.sessionId !== seed.target.sessionId) {
+        if (current.reservationId !== seed.reservationId
+          || current.deliveryGroupId !== seed.deliveryGroupId
+          || current.mode !== seed.mode
+          || current.replyTarget !== seed.replyTarget
+          || current.originCwd !== seed.originCwd
+          || current.target.workspaceId !== seed.target.workspaceId
+          || current.target.sessionId !== seed.target.sessionId
+          || current.expectedTasks.join("\n") !== [...seed.expectedTasks].join("\n")) {
           throw new Error(`Completion dispatch ${seed.dispatchId} already belongs to another target.`);
         }
         return current;
@@ -225,7 +232,7 @@ export class FlowCompletionDurabilityProvider implements CompletionDurabilityPro
       this.#assertReservation(current, input.reservationId);
       const staged = current.published.find((entry) => entry.publicationId === input.publicationId);
       if (!staged) throw new Error(`Publication ${input.publicationId} was not staged.`);
-      const record = await readExactAgentPublication(input.publicationId, current.originCwd);
+      const record = await readExactAgentPublication(input.publicationId, staged.originCwd);
       if (!record) throw new Error(`Immutable agent://${input.publicationId} is not readable.`);
       const published = current.published.map((entry) => entry.publicationId === input.publicationId
         ? { ...entry, state: "committed" as const, committedAt: input.committedAt }
@@ -243,7 +250,7 @@ export class FlowCompletionDurabilityProvider implements CompletionDurabilityPro
       const committed = new Map(current.published.filter((entry) => entry.state === "committed").map((entry) => [entry.publicationId, entry]));
       for (const resource of input.resources) {
         if (!committed.has(resource.publicationId)
-          || !await readExactAgentPublication(resource.publicationId, current.originCwd)) {
+          || !await readExactAgentPublication(resource.publicationId, resource.originCwd)) {
           throw new Error(`Completion publication ${resource.publicationId} is not durably committed.`);
         }
       }
@@ -285,7 +292,7 @@ export class FlowCompletionDurabilityProvider implements CompletionDurabilityPro
       if (manifest.state !== "finalized" || !manifest.intent || manifest.expiresAt <= Date.now()) continue;
       if (manifest.target.workspaceId !== target.workspaceId || manifest.target.sessionId !== target.sessionId
         || manifest.target.correlationId !== target.correlationId) continue;
-      const complete = await Promise.all(manifest.intent.resources.map((resource) => readExactAgentPublication(resource.publicationId, manifest.originCwd)));
+      const complete = await Promise.all(manifest.intent.resources.map((resource) => readExactAgentPublication(resource.publicationId, resource.originCwd)));
       if (complete.every(Boolean)) intents.push(manifest.intent);
     }
     return intents.sort((left, right) => left.createdAt - right.createdAt || left.deliveryId.localeCompare(right.deliveryId));

@@ -93,7 +93,19 @@ const NON_RETRYABLE_ERROR =
 // matched explicitly so the unknown-failure default below can stay retryable
 // without relaunching doomed runs.
 const LOCAL_INFRASTRUCTURE_ERROR =
-  /\b(?:failed to spawn pi subprocess|teammate runtime error|teammate child process exited abnormally|child exited before the correction prompt started|partial response was not accepted as success)\b/i;
+  /\b(?:failed to spawn pi subprocess|teammate child process exited abnormally|child exited before the correction prompt started|partial response was not accepted as success)\b/i;
+
+// `recordRuntimeEventError` wraps every Pi-reported diagnostic in a bounded
+// "Teammate runtime error (phase=…, agent=…, model=…, correlationId=…): <inner>"
+// envelope. Classification must judge the inner diagnostic — the wrapper text
+// itself carries no retry semantics, and matching it would mark every wrapped
+// provider/network failure non-retryable and silently disable fallback.
+const RUNTIME_ERROR_WRAPPER =
+  /^Teammate runtime error \(phase=[^)]*, agent=[^)]*, model=[^)]*, correlationId=[^)]*\): /;
+
+function unwrapRuntimeDiagnostic(message: string): string {
+  return message.replace(RUNTIME_ERROR_WRAPPER, "");
+}
 
 // A configured model can exist in the local catalog while the upstream
 // account group does not actually serve it. This is candidate-specific: a
@@ -153,19 +165,20 @@ function classifyByStatus(status: number | undefined): RetryErrorKind | undefine
  */
 export function classifyRetryError(message: string | undefined, status?: number): RetryErrorKind {
   if (!message) return "provider";
-  const effectiveStatus = status ?? extractHttpStatusFromMessage(message);
+  const diagnostic = unwrapRuntimeDiagnostic(message);
+  const effectiveStatus = status ?? extractHttpStatusFromMessage(diagnostic);
   if (effectiveStatus === 401) return "auth";
-  if (MODEL_UNAVAILABLE_ERROR.test(message)) return "fallback-only";
+  if (MODEL_UNAVAILABLE_ERROR.test(diagnostic)) return "fallback-only";
   if (effectiveStatus === 403) return "auth";
   const byStatus = classifyByStatus(effectiveStatus);
   if (byStatus !== undefined) return byStatus;
-  if (AUTH_ERROR.test(message)) return "auth";
-  if (NON_RETRYABLE_ERROR.test(message)) return "non-retryable";
-  if (LOCAL_INFRASTRUCTURE_ERROR.test(message)) return "non-retryable";
-  if (FALLBACK_ONLY_ERROR.test(message)) return "fallback-only";
-  if (STREAM_READ_ERROR.test(message)) return "network";
-  if (NETWORK_ERROR.test(message)) return "network";
-  if (PROVIDER_ERROR.test(message)) return "provider";
+  if (AUTH_ERROR.test(diagnostic)) return "auth";
+  if (NON_RETRYABLE_ERROR.test(diagnostic)) return "non-retryable";
+  if (LOCAL_INFRASTRUCTURE_ERROR.test(diagnostic)) return "non-retryable";
+  if (FALLBACK_ONLY_ERROR.test(diagnostic)) return "fallback-only";
+  if (STREAM_READ_ERROR.test(diagnostic)) return "network";
+  if (NETWORK_ERROR.test(diagnostic)) return "network";
+  if (PROVIDER_ERROR.test(diagnostic)) return "provider";
   return "provider";
 }
 

@@ -743,8 +743,8 @@ test("network retry policy is bounded, progressive, and rejects permanent failur
   );
   assert.equal(
     classifyRetryError("Teammate runtime error (phase=message_end, agent=planner, model=qwen, correlationId=abc): some provider issue"),
-    "non-retryable",
-    "a generic runtime wrapper cannot make an unknown failure transient",
+    "provider",
+    "wrapped diagnostics classify by their inner error; an unknown inner stays retryable",
   );
   assert.equal(
     classifyRetryError("Teammate child process exited abnormally (agent=general, correlationId=abc, exit=1, signal=SIGKILL, elapsed=5000ms, tools=3)."),

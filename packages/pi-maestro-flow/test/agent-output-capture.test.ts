@@ -365,7 +365,9 @@ function durabilityProvider(overrides: Partial<CompletionDurabilityProvider>): C
 }
 
 test("published capture stages before persistence and commits only after immutable readability", async () => {
-  const publicationId = "capture-order-publication";
+  // Unique id: resolveAgentOutput falls back to the shared global output root,
+  // so a fixed id can hit a stale record from a previous suite run.
+  const publicationId = `capture-order-publication-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const correlationId = "capture-order-correlation";
   const order: string[] = [];
   const registry = getCompletionDurabilityRegistry();

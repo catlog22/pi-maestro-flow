@@ -1323,6 +1323,7 @@ export async function handleProxyRequest(
             correlationId: result.correlationId,
             publicationId: result.publicationId,
             uri: `agent://${result.publicationId}`,
+            originCwd: result.originCwd ?? dispatchOriginCwd,
             ...(result.name ? { name: result.name } : {}),
             agent: result.agent,
             summary: displayMessageForResult(result).replace(/\s+/g, " ").trim().slice(0, 4_096),

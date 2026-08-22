@@ -3009,6 +3009,7 @@ export default function registerTeammateExtension(
             correlationId: result.correlationId,
             publicationId: result.publicationId,
             uri: `agent://${result.publicationId}`,
+            originCwd: result.originCwd ?? baseCwd,
             ...(result.name ? { name: result.name } : {}),
             agent: result.agent,
             summary: displayMessageForResult(result).replace(/\s+/g, " ").trim().slice(0, 4_096),
@@ -8675,16 +8676,21 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     registerTeammateSettings();
     state.sessionGeneration = (state.sessionGeneration ?? 0) + 1;
     state.currentSessionId = ctx.sessionManager?.getSessionId() ?? null;
+    state.baseCwd = ctx.cwd;
     const completionSessionId = state.currentSessionId;
+    const completionWorkspaceId = workspaceIdForCwd(ctx.cwd);
+    const completionGeneration = state.sessionGeneration;
     if (completionSessionId) {
       void completionCoordinator.bindSession({
         target: {
-          workspaceId: workspaceIdForCwd(ctx.cwd),
+          workspaceId: completionWorkspaceId,
           sessionId: completionSessionId,
         },
         entries: ctx.sessionManager?.getEntries?.() ?? [],
         send(envelope: CompletionDeliveryEnvelope) {
           return state.currentSessionId === completionSessionId
+            && state.sessionGeneration === completionGeneration
+            && workspaceIdForCwd(state.baseCwd) === completionWorkspaceId
             && safeSendMessage(pi, envelope, { triggerTurn: true, deliverAs: "followUp" });
         },
       }).catch((error) => {
@@ -8695,7 +8701,6 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     exitMonitorInteractionMode();
     installMonitorEscapeTap(ctx.ui);
     setPersistentUi(ctx.ui, true);
-    state.baseCwd = ctx.cwd;
     // Monitor ledger + config bind to the real session cwd.
     monitorLedgerRoot = ctx.cwd;
     monitorConfig = loadMonitorConfigForRoot(ctx.cwd);

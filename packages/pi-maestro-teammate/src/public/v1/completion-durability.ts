@@ -20,6 +20,7 @@ export interface CompletionResource {
   correlationId: string;
   publicationId: string;
   uri: `agent://${string}`;
+  originCwd: string;
   name?: string;
   agent?: string;
   summary: string;

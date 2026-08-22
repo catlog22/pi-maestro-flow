@@ -134,6 +134,7 @@ function validRecord(value: unknown): value is CompletionOutboxRecord {
       || !boundedString(resource.correlationId, 128)
       || !boundedString(resource.publicationId, 128)
       || resource.uri !== `agent://${resource.publicationId}`
+      || !boundedString(resource.originCwd, 4096)
       || typeof resource.summary !== "string"
       || Buffer.byteLength(resource.summary, "utf8") > COMPLETION_OUTBOX_MAX_SUMMARY_BYTES) return false;
   }
@@ -354,9 +355,15 @@ export class CompletionOutboxFileStore {
   }
 
   async listForTarget(target: CompletionTarget): Promise<CompletionOutboxRecord[]> {
-    const records: CompletionOutboxRecord[] = [];
-    for (const state of STATE_DIRS) records.push(...await this.#listState(target, state));
-    return records.sort((left, right) => left.createdAt - right.createdAt || left.deliveryId.localeCompare(right.deliveryId));
+    const byDelivery = new Map<string, CompletionOutboxRecord>();
+    for (const state of STATE_DIRS) {
+      for (const record of await this.#listState(target, state)) {
+        const current = byDelivery.get(record.deliveryId);
+        if (!current || record.updatedAt > current.updatedAt) byDelivery.set(record.deliveryId, record);
+      }
+    }
+    return [...byDelivery.values()]
+      .sort((left, right) => left.createdAt - right.createdAt || left.deliveryId.localeCompare(right.deliveryId));
   }
 
   async acquireClaim(target: CompletionTarget, deliveryId: string): Promise<CompletionOutboxRecord | undefined> {
@@ -438,7 +445,11 @@ export class CompletionOutboxFileStore {
   }
 
   async #replaceRecord(current: CompletionOutboxRecord, patch: Partial<CompletionOutboxRecord>): Promise<CompletionOutboxRecord> {
-    const { contentRevision: _revision, ...base } = { ...current, ...patch };
+    const monotonicPatch = {
+      ...patch,
+      updatedAt: Math.max(patch.updatedAt ?? current.updatedAt + 1, current.updatedAt + 1),
+    };
+    const { contentRevision: _revision, ...base } = { ...current, ...monotonicPatch };
     const next = { ...base, contentRevision: computeCompletionContentRevision(base) };
     if (!validRecord(next)) throw new Error(`Invalid completion outbox transition for ${current.deliveryId}.`);
     await writeJsonAtomic(this.#recordPath(current.target, next.state, next.deliveryId), next);
@@ -448,11 +459,13 @@ export class CompletionOutboxFileStore {
 
   async #findRecord(target: CompletionTarget, deliveryId: string): Promise<CompletionOutboxRecord | undefined> {
     if (!HASH_ID.test(deliveryId)) return undefined;
+    let newest: CompletionOutboxRecord | undefined;
     for (const state of STATE_DIRS) {
       const raw = await readSafeJson(this.#recordPath(target, state, deliveryId));
-      if (validRecord(raw) && targetEquals(raw.target, target)) return raw;
+      if (!validRecord(raw) || !targetEquals(raw.target, target)) continue;
+      if (!newest || raw.updatedAt > newest.updatedAt) newest = raw;
     }
-    return undefined;
+    return newest;
   }
 
   async #listState(target: CompletionTarget, state: CompletionOutboxState): Promise<CompletionOutboxRecord[]> {

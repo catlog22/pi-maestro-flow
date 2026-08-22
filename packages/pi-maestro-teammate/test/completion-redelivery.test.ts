@@ -83,6 +83,7 @@ const resource: CompletionResource = {
   correlationId: "correlation",
   publicationId: "publication",
   uri: "agent://publication",
+  originCwd: "D:/workspace",
   summary: "done",
   outcome: "completed",
 };

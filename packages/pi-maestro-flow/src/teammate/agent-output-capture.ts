@@ -165,6 +165,7 @@ export function capturePublishedAgentResult(
     const raw = payload.result as StructuredResultLike;
     const dispatchId = typeof raw.completionDispatchId === "string" ? raw.completionDispatchId : undefined;
     const reservationId = typeof raw.completionReservationId === "string" ? raw.completionReservationId : undefined;
+    const originCwd = typeof raw.originCwd === "string" && raw.originCwd.length > 0 ? raw.originCwd : undefined;
     const outcome: CompletionOutcome = raw.completionOutcome === "failed" || raw.completionOutcome === "terminated"
       ? raw.completionOutcome
       : "completed";
@@ -172,11 +173,12 @@ export function capturePublishedAgentResult(
     const summary = typeof output === "string"
       ? output.replace(/\s+/g, " ").trim().slice(0, 4_096)
       : JSON.stringify(output)?.slice(0, 4_096) ?? "Teammate result published.";
-    const resource: CompletionResource | undefined = publicationId && dispatchId && reservationId
+    const resource: CompletionResource | undefined = publicationId && dispatchId && reservationId && originCwd
       ? {
           correlationId,
           publicationId,
           uri: `agent://${publicationId}`,
+          originCwd,
           ...(typeof raw.name === "string" ? { name: raw.name } : {}),
           ...(typeof raw.agent === "string" ? { agent: raw.agent } : {}),
           summary,
