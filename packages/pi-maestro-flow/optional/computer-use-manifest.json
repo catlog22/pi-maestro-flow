@@ -1,0 +1,101 @@
+{
+  "$schema": "../schemas/computer-use-manifest.schema.json",
+  "schema_version": "computer-use-manifest/0.1",
+  "native_providers": [
+    {
+      "id": "onnxruntime-node",
+      "package": "onnxruntime-node",
+      "version": "1.21.0",
+      "status": "verified_local",
+      "platforms": ["win32", "darwin", "linux"],
+      "architectures": ["x64", "arm64"],
+      "exports": ["InferenceSession", "Tensor", "env", "listSupportedBackends"],
+      "verification": "Local require probe and package metadata inspection; no inference session created."
+    },
+    {
+      "id": "nut-js",
+      "package": "@nut-tree-fork/nut-js",
+      "version": "4.2.6",
+      "status": "registry_contract_only",
+      "platforms": ["win32", "darwin", "linux"],
+      "architectures": ["x64", "arm64"],
+      "exports": ["mouse", "keyboard", "screen", "getActiveWindow", "getWindows"],
+      "verification": "Registry tarball package metadata and declarations inspected; package is not installed locally."
+    },
+    {
+      "id": "screenshot-desktop",
+      "package": "screenshot-desktop",
+      "version": "1.15.6",
+      "status": "registry_contract_only",
+      "platforms": ["win32", "darwin", "linux"],
+      "exports": ["default", "listDisplays", "all"],
+      "verification": "Registry tarball package metadata, implementation, and README inspected; no screenshot call made. Linux requires ImageMagick or scrot according to the package README."
+    },
+    {
+      "id": "active-win",
+      "package": "active-win",
+      "version": "9.0.0",
+      "status": "registry_contract_only",
+      "platforms": ["win32", "darwin", "linux"],
+      "exports": ["activeWindow", "activeWindowSync", "openWindows", "openWindowsSync"],
+      "verification": "Registry tarball package metadata and declarations inspected; no window query made. Wayland is unsupported according to the package README."
+    },
+    {
+      "id": "node-window-manager",
+      "package": "node-window-manager",
+      "version": "2.2.4",
+      "status": "registry_contract_only",
+      "platforms": ["win32", "darwin"],
+      "unsupported_platforms": ["linux"],
+      "exports": ["windowManager", "Window", "Monitor"],
+      "verification": "Registry tarball package metadata and declarations inspected; Linux is marked work-in-progress in the package README; no window operation made."
+    }
+  ],
+  "model_artifacts": [
+    {
+      "id": "rapidocr.det.ch_ppocr_v3",
+      "kind": "ocr_detector",
+      "status": "verified_local",
+      "path": "python://rapidocr_onnxruntime@1.2.3/models/ch_PP-OCRv3_det_infer.onnx",
+      "package": "rapidocr-onnxruntime",
+      "package_version": "1.2.3",
+      "provenance": "Installed Python distribution inspected locally; model is shipped beneath its models directory.",
+      "sha256": "3439588c030faea393a54515f51e983d8e155b19a2e8aba7891934c1cf0de526"
+    },
+    {
+      "id": "rapidocr.rec.ch_ppocr_v3",
+      "kind": "ocr_recognizer",
+      "status": "verified_local",
+      "path": "python://rapidocr_onnxruntime@1.2.3/models/ch_PP-OCRv3_rec_infer.onnx",
+      "package": "rapidocr-onnxruntime",
+      "package_version": "1.2.3",
+      "provenance": "Installed Python distribution inspected locally; model is shipped beneath its models directory.",
+      "sha256": "897a3ededb38fee0dae2c1ccee38241f37df202c9509e3abca02e9217c5ee615"
+    },
+    {
+      "id": "rapidocr.cls.ch_ppocr_mobile_v2",
+      "kind": "ocr_classifier",
+      "status": "verified_local",
+      "path": "python://rapidocr_onnxruntime@1.2.3/models/ch_ppocr_mobile_v2.0_cls_infer.onnx",
+      "package": "rapidocr-onnxruntime",
+      "package_version": "1.2.3",
+      "provenance": "Installed Python distribution inspected locally; model is shipped beneath its models directory.",
+      "sha256": "e47acedf663230f8863ff1ab0e64dd2d82b838fceb5957146dab185a89d6215c"
+    },
+    {
+      "id": "omniparser.v2.icon_detect",
+      "kind": "ui_detector",
+      "status": "unverified_missing",
+      "path": "G:/github_lib/GenericAgent/temp/weights/icon_detect/model.pt",
+      "package": "ultralytics",
+      "package_version": null,
+      "provenance": null,
+      "diagnostic": "Required model.pt and the ultralytics package were not found locally. No authoritative model URL or digest was recorded; this artifact must not be downloaded or used implicitly."
+    }
+  ],
+  "fail_closed": {
+    "unverified_model_status": "unavailable",
+    "diagnostic_code": "MODEL_PROVENANCE_UNVERIFIED",
+    "allow_startup_without_optional_dependencies": true
+  }
+}

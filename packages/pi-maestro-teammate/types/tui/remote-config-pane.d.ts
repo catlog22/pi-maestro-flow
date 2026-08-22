@@ -105,6 +105,9 @@ export declare class RemoteConfigPane implements Component, Focusable {
     private query;
     private selected;
     private testingId;
+    /** Aborts the in-flight probe when the pane is disposed or a new test starts. */
+    private testAbort;
+    private disposed;
     private statusText;
     private statusTone;
     private lastWidth;
@@ -116,6 +119,8 @@ export declare class RemoteConfigPane implements Component, Focusable {
     dispose(): void;
     handleInput(data: string): void;
     render(width: number): string[];
+    /** Action-first single-column layout for narrow terminals (<40 columns). */
+    private renderCompactRows;
     private get theme();
     private frame;
     private headerLine;

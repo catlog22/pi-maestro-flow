@@ -321,7 +321,7 @@ const KNOWN_ACP_ADAPTER_PACKAGES: ReadonlyMap<string, string> = new Map([
 
 /** Install hint for a known adapter command; empty for anything else. */
 function adapterInstallHint(command: string): string {
-  const base = path.basename(command).replace(/\.(cmd|ps1|exe)$/i, "");
+  const base = path.basename(command).replace(/\.(cmd|ps1|bat|exe)$/i, "").toLowerCase();
   const pkg = KNOWN_ACP_ADAPTER_PACKAGES.get(base);
   return pkg === undefined ? "" : `; install it with: npm i -g ${pkg}`;
 }

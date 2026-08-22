@@ -95,6 +95,15 @@ const NON_RETRYABLE_ERROR =
 const LOCAL_INFRASTRUCTURE_ERROR =
   /\b(?:failed to spawn pi subprocess|teammate child process exited abnormally|child exited before the correction prompt started|partial response was not accepted as success)\b/i;
 
+// Abort/cancellation diagnostics. fetch/AbortController surfaces these as
+// "This operation was aborted", "The user aborted a request", or a bare
+// "aborted"/"Request was aborted". They are NOT model failures: the user or a
+// lifecycle hook cancelled the run, so retrying the same model or switching to
+// a fallback would replay work the user just stopped. Must be matched before
+// the unknown-failure default (which is retryable) so an abort stopReason
+// mislabelled as "error" does not trigger failover.
+const ABORT_ERROR = /\b(?:this operation was aborted|the (?:user|operation) aborted(?: a request)?|request was aborted|operation aborted|aborted)\b/i;
+
 // `recordRuntimeEventError` wraps every Pi-reported diagnostic in a bounded
 // "Teammate runtime error (phase=…, agent=…, model=…, correlationId=…): <inner>"
 // envelope. Classification must judge the inner diagnostic — the wrapper text
@@ -157,11 +166,13 @@ function classifyByStatus(status: number | undefined): RetryErrorKind | undefine
  * `status` (when known) normally short-circuits via {@link classifyByStatus};
  * an explicit upstream model-unavailable diagnostic is the narrow exception
  * because another configured candidate may still work. Otherwise the message
- * patterns apply, in order: auth → model availability → permanent → local
+ * patterns apply, in order: auth → abort/cancel → permanent → local
  * infrastructure → quota/payment → transport → provider overload. Anything
  * unrecognized defaults to retryable (`provider`): at the provider boundary an
  * unknown diagnostic is far more often transient than permanent, and the
- * retry/fallback paths are bounded anyway.
+ * retry/fallback paths are bounded anyway. Abort/cancel diagnostics are the
+ * exception: a user/lifecycle cancellation is never a model failure, so they
+ * classify as `non-retryable` to avoid replaying stopped work on any model.
  */
 export function classifyRetryError(message: string | undefined, status?: number): RetryErrorKind {
   if (!message) return "provider";
@@ -173,6 +184,7 @@ export function classifyRetryError(message: string | undefined, status?: number)
   const byStatus = classifyByStatus(effectiveStatus);
   if (byStatus !== undefined) return byStatus;
   if (AUTH_ERROR.test(diagnostic)) return "auth";
+  if (ABORT_ERROR.test(diagnostic)) return "non-retryable";
   if (NON_RETRYABLE_ERROR.test(diagnostic)) return "non-retryable";
   if (LOCAL_INFRASTRUCTURE_ERROR.test(diagnostic)) return "non-retryable";
   if (FALLBACK_ONLY_ERROR.test(diagnostic)) return "fallback-only";

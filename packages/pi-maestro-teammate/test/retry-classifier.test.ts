@@ -80,6 +80,22 @@ test("auth failures classify as auth and are fallback-eligible but never retried
   assert.equal(isFallbackProviderError("Unauthorized: invalid API key"), true);
 });
 
+test("abort/cancellation diagnostics classify as non-retryable (never switch models on ESC)", () => {
+  // bash ESC interrupt can surface as stopReason="error" with an abort
+  // diagnostic when a transport/provider does not set stopReason="aborted".
+  // These are user/lifecycle cancellations, not model failures: retrying the
+  // same model or switching to a fallback would replay work the user stopped.
+  assert.equal(classifyRetryError("This operation was aborted"), "non-retryable");
+  assert.equal(classifyRetryError("The operation was aborted"), "non-retryable");
+  assert.equal(classifyRetryError("The user aborted a request"), "non-retryable");
+  assert.equal(classifyRetryError("Request was aborted"), "non-retryable");
+  assert.equal(classifyRetryError("Operation aborted"), "non-retryable");
+  assert.equal(classifyRetryError("aborted"), "non-retryable");
+  // Neither same-model retry nor fallback model switch should trigger.
+  assert.equal(isRetryableProviderError("This operation was aborted"), false);
+  assert.equal(isFallbackProviderError("This operation was aborted"), false);
+});
+
 test("HTTP status short-circuits message text (authoritative)", () => {
   assert.equal(classifyRetryError("Provider returned error", 401), "auth");
   assert.equal(classifyRetryError("everything looks fine", 403), "auth");

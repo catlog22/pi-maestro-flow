@@ -1,0 +1,67 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Computer Use Native Provider and Model Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "native_providers", "model_artifacts", "fail_closed"],
+  "properties": {
+    "$schema": {"type": "string"},
+    "schema_version": {"const": "computer-use-manifest/0.1"},
+    "native_providers": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/nativeProvider"}
+    },
+    "model_artifacts": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/modelArtifact"}
+    },
+    "fail_closed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unverified_model_status", "diagnostic_code", "allow_startup_without_optional_dependencies"],
+      "properties": {
+        "unverified_model_status": {"const": "unavailable"},
+        "diagnostic_code": {"const": "MODEL_PROVENANCE_UNVERIFIED"},
+        "allow_startup_without_optional_dependencies": {"type": "boolean", "const": true}
+      }
+    }
+  },
+  "$defs": {
+    "nativeProvider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "package", "version", "status", "platforms", "exports", "verification"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9.-]+$"},
+        "package": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+        "status": {"enum": ["verified_local", "registry_contract_only", "unverified"]},
+        "platforms": {"type": "array", "items": {"enum": ["win32", "darwin", "linux"]}, "minItems": 1},
+        "architectures": {"type": "array", "items": {"enum": ["x64", "arm64"]}, "minItems": 1},
+        "unsupported_platforms": {"type": "array", "items": {"enum": ["win32", "darwin", "linux"]}},
+        "exports": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
+        "verification": {"type": "string", "minLength": 1}
+      }
+    },
+    "modelArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "status", "path", "package", "package_version", "provenance"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "kind": {"enum": ["ocr_detector", "ocr_recognizer", "ocr_classifier", "ui_detector"]},
+        "status": {"enum": ["verified_local", "registry_contract_only", "unverified_missing"]},
+        "path": {"type": "string", "minLength": 1},
+        "package": {"type": ["string", "null"]},
+        "package_version": {"type": ["string", "null"]},
+        "provenance": {"type": ["string", "null"]},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "diagnostic": {"type": "string", "minLength": 1}
+      },
+      "allOf": [
+        {"if": {"properties": {"status": {"const": "verified_local"}}}, "then": {"required": ["sha256", "provenance"]}},
+        {"if": {"properties": {"status": {"const": "unverified_missing"}}}, "then": {"required": ["diagnostic"], "properties": {"provenance": {"type": "null"}}}}
+      ]
+    }
+  }
+}

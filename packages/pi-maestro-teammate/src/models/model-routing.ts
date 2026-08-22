@@ -2179,18 +2179,57 @@ export async function refreshModelRegistry(ctx: ModelRegistryRefreshContext): Pr
   await refresh;
 }
 
+/**
+ * Configured routing targets that the current teammate catalog cannot reach.
+ *
+ * `mappedModel` skips unreachable targets silently (the dispatch then falls
+ * back down the inheritance chain), so this is the one place an operator can
+ * see that a task-type or role mapping names a model no gate currently
+ * admits. Empty `availableModels` means "no catalog knowledge" and yields no
+ * findings — absence of evidence must not read as breakage.
+ */
+export interface UnreachableRoutingTarget {
+  kind: "taskType" | "role";
+  key: string;
+  model: string;
+}
+
+export function unreachableRoutingTargets(
+  config: ModelRoutingConfig,
+  availableModels: readonly string[],
+): UnreachableRoutingTarget[] {
+  if (availableModels.length === 0) return [];
+  const known = new Set(availableModels);
+  const missing = (model: string | null | undefined): boolean =>
+    typeof model === "string" && model.trim().length > 0 && !known.has(model);
+  const targets: UnreachableRoutingTarget[] = [];
+  for (const [taskType, model] of Object.entries(config.mappings)) {
+    if (missing(model)) targets.push({ kind: "taskType", key: taskType, model: model! });
+  }
+  for (const [role, rules] of Object.entries(config.roleMappings ?? {})) {
+    if (rules && missing(rules.model)) targets.push({ kind: "role", key: role, model: rules.model! });
+  }
+  return targets;
+}
+
 export function formatModelRoutingConfig(
   cwd: string,
   agents: readonly { taskType?: TeammateTaskType }[] = [],
   globalFilePath = getGlobalModelRoutingPath(),
+  availableModels: readonly string[] = [],
 ): string {
   const config = loadModelRoutingConfig(cwd, globalFilePath);
-  return discoverRoutingTaskTypes(cwd, agents, config)
+  const table = discoverRoutingTaskTypes(cwd, agents, config)
     .map((taskType) => {
       const fallbacks = config.fallbackMappings?.[taskType]?.join(",") || "none";
       return `- ${taskType}: model=${config.mappings[taskType] ?? "auto/inherit main session"}, fallbacks=${fallbacks}, thinking=${config.thinkingLevels[taskType] ?? "inherit/default"}`;
     })
     .join("\n");
+  const unreachable = unreachableRoutingTargets(config, availableModels);
+  const warnings = unreachable.map((target) =>
+    `- ⚠ ${target.model} (${target.kind} "${target.key}") is not in the current teammate catalog; routing will skip it and fall back to inheritance`
+  );
+  return [table, ...warnings].filter((part) => part.length > 0).join("\n");
 }
 
 export const TASK_TYPE_ROUTING_START_MARKER = "<!-- teammate-tasktype-routing:start -->";
@@ -2206,9 +2245,10 @@ export function appendTaskTypeRoutingContext(
   cwd: string,
   agents: readonly { taskType?: TeammateTaskType }[] = [],
   globalFilePath = getGlobalModelRoutingPath(),
+  availableModels: readonly string[] = [],
 ): string {
   const config = loadModelRoutingConfig(cwd, globalFilePath);
-  const routingTable = formatModelRoutingConfig(cwd, agents, globalFilePath);
+  const routingTable = formatModelRoutingConfig(cwd, agents, globalFilePath, availableModels);
   const customTypes = discoverRoutingTaskTypes(cwd, agents, config)
     .filter((taskType) => !(TEAMMATE_TASK_TYPES as readonly string[]).includes(taskType))
     .map((taskType) => `  - ${taskType}`);

@@ -118,7 +118,13 @@
     "pi-maestro-settings-core"
   ],
   "optionalDependencies": {
-    "@konbakuyomu/smart-search": "https://github.com/konbakuyomu/smartsearch/archive/667c465d0f6ea16a423f03c434f94e21505d3595.tar.gz"
+    "@konbakuyomu/smart-search": "https://github.com/konbakuyomu/smartsearch/archive/667c465d0f6ea16a423f03c434f94e21505d3595.tar.gz",
+    "@nut-tree-fork/nut-js": "4.2.6",
+    "active-win": "9.0.0",
+    "node-window-manager": "2.2.4",
+    "onnxruntime-node": "1.21.0",
+    "screenshot-desktop": "1.15.6",
+    "tesseract.js": "^7.0.0"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",

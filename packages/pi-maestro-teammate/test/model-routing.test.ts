@@ -27,6 +27,8 @@ import {
   resolveTaskTypeMeta,
   saveGlobalProfileCustomType,
   saveGlobalProfileFallbackMapping,
+  formatModelRoutingConfig,
+  unreachableRoutingTargets,
   saveGlobalProfileModelMapping,
   saveGlobalProfileRoleMapping,
   saveGlobalProfileTypeRoles,
@@ -1405,6 +1407,43 @@ test("appendTaskTypeRoutingContext injects a concise, idempotent routing contrac
     assert.equal(second.match(/teammate-tasktype-routing:start/g)?.length, 1);
     assert.equal(second.match(/Legal task types/g)?.length, 1);
     assert.match(second, /^Base prompt/m);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('unreachableRoutingTargets flags catalog-missing task-type and role mappings', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mt-unreachable-'));
+  const globalPath = path.join(root, 'home', 'teammate-models.json');
+  const cwd = path.join(root, 'project');
+  fs.mkdirSync(cwd, { recursive: true });
+  try {
+    saveGlobalProfileModelMapping(cwd, 'default', 'explore', 'cli/codex', globalPath);
+    saveGlobalProfileModelMapping(cwd, 'default', 'review', 'provider/known', globalPath);
+    saveGlobalProfileRoleMapping(cwd, 'default', 'security-audit', { model: 'ghost/model' }, globalPath);
+    const config = loadModelRoutingConfig(cwd, globalPath);
+
+    // No catalog knowledge => no findings (absence of evidence is not breakage).
+    assert.deepEqual(unreachableRoutingTargets(config, []), []);
+
+    const targets = unreachableRoutingTargets(config, ['provider/known']);
+    assert.deepEqual(targets, [
+      { kind: 'taskType', key: 'explore', model: 'cli/codex' },
+      { kind: 'role', key: 'security-audit', model: 'ghost/model' },
+    ]);
+
+    // Everything reachable => no findings.
+    assert.deepEqual(
+      unreachableRoutingTargets(config, ['provider/known', 'cli/codex', 'ghost/model']),
+      [],
+    );
+
+    // The routing table surfaces the warning only when a catalog is supplied.
+    const warned = formatModelRoutingConfig(cwd, [], globalPath, ['provider/known']);
+    assert.match(warned, new RegExp('⚠ cli/codex \\(taskType "explore"\\) is not in the current teammate catalog'));
+    assert.match(warned, new RegExp('ghost/model \\(role "security-audit"\\)'));
+    const quiet = formatModelRoutingConfig(cwd, [], globalPath);
+    assert.doesNotMatch(quiet, /not in the current teammate catalog/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

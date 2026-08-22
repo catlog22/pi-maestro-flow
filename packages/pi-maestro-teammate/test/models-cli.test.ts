@@ -24,6 +24,7 @@ import {
   EditCancelled,
   parseConfigFieldInput,
   runEditFlow,
+  EDIT_EXIT_CODES,
   type EditFlowIO,
 } from "../src/models/cli-edit.ts";
 import { runAddFlow } from "../src/models/cli-add.ts";
@@ -597,6 +598,62 @@ test("P6 acceptance block", async (t) => {
       assert.equal(JSON.parse(readFileSync(file, "utf8")).backends.deploy.config.alpha, "local");
       assert.match(io.output.join(""), /last writer wins/i);
       assert.doesNotMatch(io.output.join(""), /sk-live_1234567890/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("publish gate rejects parse-valid documents the runtime compiler would refuse", async () => {
+    const { root, file } = rootFile(manifest({ alpha: "initial" }));
+    const baseline = readFileSync(file, "utf8");
+    // Parse-valid but topology-invalid: a fixed selector on a native-modelSelection module.
+    const topologyInvalid = `${JSON.stringify({
+      version: 2,
+      mode: "model-registry",
+      default: "deploy",
+      defaultModel: "model/default",
+      backends: { deploy: { module: "pi-subprocess" } },
+      models: {
+        "model/default": {
+          modelId: "x",
+          deployment: "deploy",
+          selector: { kind: "fixed" },
+          deploymentDefault: true,
+        },
+      },
+    }, null, 2)}\n`;
+    try {
+      await assert.rejects(
+        () => publishModelRegistryDocument({ file, candidateRaw: topologyInvalid, baselineRaw: baseline, io: writeIO() }),
+        /fixed selector/,
+      );
+      assert.equal(readFileSync(file, "utf8"), baseline);
+      assert.equal(statSync(`${file}.bak`, { throwIfNoEntry: false }), undefined);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("edit refuses an ssh candidate without host/user and writes nothing", async () => {
+    const { root, file } = rootFile(manifest({ alpha: "initial" }));
+    const io = new ScriptedEditIO(["deploy", "", "ssh", "", ""]);
+    try {
+      const exit = await runEditFlow({
+        file,
+        io,
+        importModule: async () => ({
+          configFields: [
+            { key: "alpha", kind: "text", labelKey: "f.alpha" },
+            { key: "mode", kind: "text", labelKey: "f.mode" },
+            { key: "host", kind: "text", labelKey: "f.host" },
+            { key: "user", kind: "text", labelKey: "f.user" },
+          ] as never,
+        }),
+      });
+      assert.equal(exit, EDIT_EXIT_CODES.invalidArguments);
+      assert.match(io.output.join(""), /host.*required|user.*required|is required/s);
+      assert.equal(readFileSync(file, "utf8"), manifest({ alpha: "initial" }));
+      assert.equal(statSync(`${file}.bak`, { throwIfNoEntry: false }), undefined);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

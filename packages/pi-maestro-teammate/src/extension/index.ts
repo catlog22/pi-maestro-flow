@@ -630,7 +630,7 @@ export default function registerTeammateExtension(
     const withModels = appendModelCatalog(event.systemPrompt, await refreshModelCatalogSources(ctx));
     const withAgents = appendAgentCatalog(withModels, ctx.cwd);
     const withTaskType = canDispatchNestedTeammate
-      ? appendTaskTypeRoutingContext(withAgents, ctx.cwd, discoverAgents(ctx.cwd))
+      ? appendTaskTypeRoutingContext(withAgents, ctx.cwd, discoverAgents(ctx.cwd), undefined, refreshModelCatalog(ctx).modelIds)
       : withAgents;
     const withDepth = appendTeammateDepthContext(withTaskType, currentDepth, currentMaxDispatchDepth);
     if (!monitorInteractionModeActive) monitorToolExposure?.syncInactive();

@@ -18,6 +18,7 @@ const CATALOG: Record<string, string> = {
   "connections.targetsTitle": "Worker targets",
   "connections.legacyNotice": "Legacy registry document · Enter to upgrade",
   "connections.addDeployment": "a add deployment",
+  "connections.compactHint": "enter open · n host · N target · t test · esc close",
   "connections.scopeHint": "g/p scope",
   "connections.deploymentRow": "[D] {registration} · {model} · {harness}/{transport} · resolvable {resolvable}",
   "connections.hiddenHost": "(hidden) [H] {id}",
@@ -233,4 +234,16 @@ test("widths below 20 preserve escape-only input", () => {
 
   pane.handleInput("\x1b");
   assert.deepEqual(actions, [null]);
+});
+
+test("widths below 40 degrade to an action-first single column", () => {
+  const { pane } = makePane();
+  const rows = pane.render(32);
+  const text = rows.join("\n");
+  // No frame, scope, filter, or section chrome — just rows plus status/hint.
+  assert.ok(!text.includes("╭"), "compact layout must drop the frame box");
+  assert.ok(!text.includes("●"), "compact layout must drop the scope line");
+  // The selectable content survives: a deployment row and the hint are present.
+  assert.match(text, /\[D\]|fast-model/i);
+  assert.match(text, /enter open|esc close/i);
 });

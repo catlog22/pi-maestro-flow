@@ -36,6 +36,9 @@ Thumbs.db
 # Materialized by prepare-package-skills/sync-pi; canonical sources live at
 # the workspace root .pi.
 packages/pi-maestro-flow/.pi/
+# tesseract.js downloads language packs (eng.traineddata, chi_sim.traineddata)
+# next to the package on first use; they are runtime caches, not sources.
+packages/pi-maestro-flow/*.traineddata
 
 # Sync toolchain staging dir (replaces the old tracked flow/ mirror)
 .pi-sync/
@@ -119,3 +122,10 @@ instr.txt
 # self-evolve runtime artifacts (global output lives in ~/.maestro/self-evolve)
 .pi/self-evolve/
 .pi/self-evolve.json
+
+# Local analysis scratch (unpacked npm sources, diagnostic dumps)
+.tmp-analysis/
+# Pi session transcript logs
+pi-session-*.html
+# Unrelated local Python experiment scripts
+/fit_engine*.py

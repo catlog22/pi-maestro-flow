@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
-import { parseModelRegistryManifest } from "./model-registry.ts";
+import { compileModelRegistryManifest, parseModelRegistryManifest } from "./model-registry.ts";
 import { redactText } from "./cli-redact.ts";
 import { createModelsCliTranslator, type ModelsCliTranslator } from "./cli-i18n.ts";
 
@@ -69,8 +69,12 @@ export async function publishModelRegistryDocument(
   const t = options.translate ?? createModelsCliTranslator("en");
 
   // Gate 1: the candidate must survive the exact parser the runtime loads
-  // with. A document that cannot be read back is not a document we wrote.
-  parseModelRegistryManifest(candidateRaw, file);
+  // with, and the topology its compiler validates (selector/driver
+  // compatibility). A document either would reject is not a document we write:
+  // publishing something the runtime refuses at load turns an immediate,
+  // local error into a confusing failure on the next dispatch.
+  const parsed = parseModelRegistryManifest(candidateRaw, file);
+  compileModelRegistryManifest(parsed);
 
   // Gate 2: re-read and compare against the edit's baseline bytes.
   let currentRaw: string | undefined;

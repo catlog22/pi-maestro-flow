@@ -3,10 +3,11 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { Browser, CDPSession, CookieParam, ElementHandle, Frame, HTTPRequest, HTTPResponse, KeyInput, Page, WaitForOptions } from "puppeteer-core";
+import type { Browser, CDPSession, CookieParam, ElementHandle, Frame, HTTPRequest, HTTPResponse, KeyInput, Page, Target, WaitForOptions } from "puppeteer-core";
 import puppeteer from "puppeteer-core";
 import { PROBE_JS, FIND_LISTS_JS, foldListsJs, monitorStartJs, MONITOR_STOP_JS, optimizeHtmlForTokens, smartTruncate, diffHtml, type HtmlDiff } from "./simplify.ts";
 import { STEALTH_INIT_JS, STEALTH_LAUNCH_ARGS } from "./stealth.ts";
+import { runOcr, runDetect, isLocalVisionError, type OcrOutcome, type DetectOutcome } from "../../providers/local-vision.ts";
 
 export type WaitUntil = "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
 
@@ -179,8 +180,21 @@ export class BrowserManager implements BrowserManagerLike {
     const displays: BrowserRunOutput["displays"] = [];
     const screenshots: BrowserRunOutput["screenshots"] = [];
     const beforeUrl = entry.page.isClosed() ? "" : entry.page.url();
-    let beforePages: Page[] = [];
-    try { beforePages = await raceAbort(entry.browser.pages(), signal, Math.min(2_000, timeoutMs)); } catch { /* best-effort */ }
+    // Capture new tabs via the targetcreated event instead of a before/after
+    // browser.pages() diff: window.open mid-run can race the after-snapshot and
+    // drop tabs that are still attaching (the race GA's extension explicitly
+    // avoided with chrome.tabs.onCreated). Collect Targets during the run; the
+    // entry page itself is excluded so a same-tab reload is not reported.
+    const ownTarget = entry.page.target();
+    const createdTargets = new Set<Target>();
+    const onTargetCreated = (target: Target) => {
+      if (target.type() === "page" && target !== ownTarget) createdTargets.add(target);
+    };
+    // A tab spawned and closed within the same run must not be reported (same
+    // semantics as the old before/after pages diff, which only saw survivors).
+    const onTargetDestroyed = (target: Target) => { createdTargets.delete(target); };
+    entry.browser.on("targetcreated", onTargetCreated);
+    entry.browser.on("targetdestroyed", onTargetDestroyed);
     let requestScope: RequestListenerScope | undefined;
     let runFailed = false;
     let cleanupFailed = false;
@@ -209,10 +223,14 @@ export class BrowserManager implements BrowserManagerLike {
       const navigated = Boolean(beforeUrl && afterUrl && beforeUrl !== afterUrl);
       let newTabs: Array<{ url: string }> | undefined;
       try {
-        const afterPages = await raceAbort(entry.browser.pages(), signal, Math.min(2_000, timeoutMs));
-        const beforeUrls = new Set(beforePages.map((p) => p.url()));
-        const added = afterPages.filter((p) => !beforeUrls.has(p.url())).map((p) => ({ url: p.url() }));
-        if (added.length > 0) newTabs = added;
+        if (createdTargets.size > 0) {
+          const settled = await Promise.all([...createdTargets].map(async (target) => {
+            try { const page = await raceAbort(target.page(), signal, Math.min(2_000, timeoutMs)); return { url: page?.url() ?? target.url() }; }
+            catch { return { url: target.url() }; }
+          }));
+          const added = settled.filter((item) => Boolean(item.url));
+          if (added.length > 0) newTabs = added;
+        }
       } catch { /* best-effort */ }
       return { displays, returnValue, screenshots, url: afterUrl, navigated: navigated || undefined, newTabs };
     } catch (error) {
@@ -220,6 +238,8 @@ export class BrowserManager implements BrowserManagerLike {
       if (isInterruptError(error)) await this.close(name);
       throw browserRunErrorHint(error);
     } finally {
+      entry.browser.off("targetcreated", onTargetCreated);
+      entry.browser.off("targetdestroyed", onTargetDestroyed);
       let cleanupError: unknown;
       try {
         requestScope?.cleanup();
@@ -589,6 +609,32 @@ function createTabApi(
       }
       return results;
     },
+    // On-page OCR (Tier 1 visual localization): capture a PNG, run the local
+    // OCR engine (tesseract.js) over it, and return text + per-line bbox in
+    // screenshot-pixel coordinates. The caller follows with tab.cdpClick(cx, cy).
+    // region crops the OCR to {x,y,w,h} screenshot pixels. If the optional
+    // engine is missing or fails the outcome is a structured {ok:false,...}
+    // object with an install hint — never a thrown crash — so run code can
+    // branch and fall back to describe_image (text only, no coordinates).
+    async ocr(options?: { region?: { x: number; y: number; w: number; h: number }; fullPage?: boolean; silent?: boolean; langs?: string }) {
+      const shot = await this.screenshot({ fullPage: options?.fullPage, silent: options?.silent ?? true });
+      const buffer = await fs.readFile(shot.path);
+      const dims = await pngDimensions(buffer);
+      const outcome: OcrOutcome = await runOcr(buffer, dims.width, dims.height, options?.region, options?.langs);
+      return outcome;
+    },
+    // UI element detection: like ocr but emits a list of labeled regions
+    // ({bbox,type,label,confidence}) suitable for finding buttons/labels on
+    // canvas or non-DOM pages. mode 'match' (default) and 'crop' currently
+    // collapse to OCR-line output (a future YOLO-backed engine can diverge);
+    // the parameter is honored so call sites stay stable across upgrades.
+    async detect(options?: { mode?: "match" | "crop"; fullPage?: boolean; silent?: boolean; langs?: string }) {
+      const shot = await this.screenshot({ fullPage: options?.fullPage, silent: options?.silent ?? true });
+      const buffer = await fs.readFile(shot.path);
+      const dims = await pngDimensions(buffer);
+      const outcome: DetectOutcome = await runDetect(buffer, dims.width, dims.height, options?.mode ?? "match", options?.langs);
+      return outcome;
+    },
     waitForUrl(pattern: string | RegExp, options?: { timeout?: number }) {
       const descriptor = typeof pattern === "string"
         ? { kind: "text", value: pattern, flags: "" }
@@ -604,6 +650,19 @@ function createTabApi(
     waitForNavigation(options?: WaitForOptions) { return page.waitForNavigation({ timeout: deadline(), ...options }); },
   };
   return api;
+}
+
+// Returns the pixel dimensions of a PNG buffer by reading the IHDR chunk
+// (bytes 16..24), avoiding a sharp/zlib dependency just to size a screenshot.
+function pngDimensions(buffer: Buffer): { width: number; height: number } {
+  if (buffer.length < 24 || buffer.subarray(0, 8).toString("hex") !== "89504e470d0a1a0a") {
+    throw new Error("Not a PNG buffer (screenshot returned an unexpected format).");
+  }
+  // IHDR width and height are big-endian uint32 at byte offsets 16 and 20.
+  const width = buffer.readUInt32BE(16);
+  const height = buffer.readUInt32BE(20);
+  if (!width || !height) throw new Error("PNG IHDR reported zero dimensions.");
+  return { width, height };
 }
 
 // Resolves "$N.dotted.path" references inside a cdpBatch command's params against
@@ -646,13 +705,16 @@ function profileDirFor(key: string): string {
 async function connectBrowser(options: BrowserOpenOptions, key: string): Promise<{ browser: Browser; owned: boolean; kind: "headless" | "headed" | "connected"; reused: boolean; profileDir?: string }> {
   if (options.attachUserProfile) {
     if (!options.userProfileDir) throw new Error("attach_user_profile requires app.user_profile_dir pointing at a Chrome user-data-dir whose browser runs with --remote-debugging-port.");
-    const port = await devToolsPortFor(options.userProfileDir);
+    let port = await devToolsPortFor(options.userProfileDir);
     if (!port) {
-      throw new Error(
-        `No live debug port at ${options.userProfileDir}. Start Chrome with:\n` +
-        `  chrome --remote-debugging-port=9222 --user-data-dir=${JSON.stringify(options.userProfileDir)}\n` +
-        `then retry. pi does not launch or copy the user profile.`,
-      );
+      // No live debug port: start the user's own Chrome with remote debugging on
+      // their profile (zero-setup attach). This mirrors GenericAgent's extension
+      // convenience without a second WS control channel — pi still drives via CDP.
+      // We never own this browser (owned=false) so it stays alive after close.
+      const executablePath = await findBrowserExecutable(options.executablePath, options.cwd);
+      if (!executablePath) throw new Error("No Chromium browser found to launch for attach_user_profile. Set app.path, PUPPETEER_EXECUTABLE_PATH, or CHROME_PATH, or start Chrome manually with --remote-debugging-port.");
+      if (await staleProfileProcessesExist(options.userProfileDir)) await reclaimProfileProcesses(options.userProfileDir);
+      port = await launchAttachedChrome(executablePath, options.userProfileDir, options);
     }
     const pending = puppeteer.connect({ browserURL: `http://127.0.0.1:${port}` });
     const browser = await acquireResource(pending, options.signal, options.timeoutMs, (late) => late.disconnect());
@@ -767,6 +829,34 @@ function runCapture(command: string, args: string[], timeoutMs: number): Promise
       else reject(new Error(`${command} exited with code ${code}: ${stderr.slice(0, 200)}`));
     });
   });
+}
+
+// Start the user's own Chrome with remote debugging on their profile, then poll
+// DevToolsActivePort until the endpoint is ready. The child is detached (unref)
+// so it survives pi's exit — the user keeps using their own browser. We do not
+// own it; a later attach call in the same session will reuse the live port via
+// devToolsPortFor + tryReuseBrowser path.
+async function launchAttachedChrome(executablePath: string, userProfileDir: string, options: BrowserOpenOptions): Promise<number> {
+  const port = 9222;
+  const args = [
+    `--remote-debugging-port=${port}`,
+    `--user-data-dir=${userProfileDir}`,
+    "--no-first-run",
+    "--no-default-browser-check",
+    ...(options.visible ? [] : ["--headless=new"]),
+    ...(options.args ?? []),
+  ];
+  const child = spawn(executablePath, args, { windowsHide: !options.visible, detached: true, stdio: "ignore" });
+  child.unref();
+  child.on("error", () => { /* best-effort; port poll will fail and surface a clear error */ });
+  const deadline = Date.now() + Math.min(options.timeoutMs, 15_000);
+  while (Date.now() < deadline) {
+    if (options.signal?.aborted) throw abortError();
+    const ready = await devToolsPortFor(userProfileDir);
+    if (ready) return ready;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+  throw new Error(`Started ${executablePath} with --remote-debugging-port=${port} but no DevToolsActivePort appeared at ${userProfileDir} within ${Math.min(options.timeoutMs, 15_000) / 1000}s. The profile may be locked by another Chrome instance; close it and retry.`);
 }
 
 async function launchBrowser(executablePath: string, options: BrowserOpenOptions, profileDir: string): Promise<{ browser: Browser; kind: "headless" | "headed" }> {

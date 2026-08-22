@@ -72,7 +72,7 @@ test("Cockpit session bar, command, and shortcut contracts stay stable", () => {
   });
   assert.deepEqual(
     [...source.matchAll(/pi\.registerShortcut\(([^,]+),/g)].map((match) => match[1]),
-    ["WINDOW_MONITOR_TOGGLE_KEY", "BASH_BG_OVERLAY_KEY", "SIDEBAR_RESIZE_KEY", "SESSION_DETAIL_TOGGLE_KEY", "SIDEBAR_FOCUS_KEY"],
+    ["WINDOW_MONITOR_TOGGLE_KEY", "BASH_BG_OVERLAY_KEY", "TODO_OVERLAY_KEY", "SIDEBAR_RESIZE_KEY", "SESSION_DETAIL_TOGGLE_KEY", "SIDEBAR_FOCUS_KEY"],
   );
 
   assert.match(source, /windowPrevious = sessionUi\.mode === "window" && matchesKey\(data, "alt\+left"\)/);
@@ -222,6 +222,23 @@ test("Cockpit defers settings-driven re-enable until the settings overlay is clo
 	assert.match(source, /if \(config\.enabled\) \{[\s\S]*?enableAfterClose = true;[\s\S]*?\} else \{/);
 	assert.match(source, /dispose\(\): void \{[\s\S]*?if \(enableAfterClose && config\.enabled\)[\s\S]*?queueMicrotask[\s\S]*?publishUiOwnership\(\);[\s\S]*?applyUi\(ctx\)/);
 	assert.doesNotMatch(source, /if \(config\.enabled\) \{\s*publishUiOwnership\(\);\s*applyUi\(ctx\);\s*\} else \{\s*enableAfterClose/);
+});
+
+test("Cockpit never pushes the dock overlay above a capturing overlay", () => {
+	const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+	// pi closes an overlay by popping the overlay-stack top, so a dock pushed
+	// while a capturing overlay (legacy settings panel, /maestro-settings shell)
+	// is open gets popped by that overlay's own close and strands it with Esc
+	// dead. The show path must defer while a capturing overlay is visible and
+	// flush once it closes; hide never pushes and stays immediate.
+	assert.match(source, /let deferredSidebarSync = false/);
+	assert.match(source, /\} else if \(capturingOverlayActive \|\| capturingOverlayVisible\(capturedTui\)\) \{\r?\n\t\t\tdeferredSidebarSync = true;/);
+	assert.match(source, /if \(config\.sidebar\.mode === "off"\) \{\r?\n\t\t\tdeferredSidebarSync = false;\r?\n\t\t\tdockEffectiveVisible = false;\r?\n\t\t\tcontroller\.hide\(\)/);
+	assert.match(source, /const exitCapturingOverlay = \(\): void => \{\r?\n\t\tcapturingOverlayActive = false;\r?\n\t\tflushDeferredSidebarSync\(\)/);
+	// The unified settings shell is itself a capturing overlay, so it must be
+	// wrapped for the deferral to see it (capturedTui can be unset when cockpit
+	// was disabled at session start).
+	assert.match(source, /enterCapturingOverlay\(\);\r?\n\t\t\ttry \{\r?\n\t\t\t\tawait showMaestroSettingsShell\(ctx, settingsRegistry, settingsLocale\);\r?\n\t\t\t\} finally \{\r?\n\t\t\t\tsettingsCommandCtx = undefined;\r?\n\t\t\t\texitCapturingOverlay\(\)/);
 });
 
 test("Cockpit sidebar controls persist only committed resize widths", () => {

@@ -2,7 +2,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { readFileSync, statSync } from "node:fs";
 import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, type Theme, type ThemeColor } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
-import { ambientKeysShouldYield } from "./capturing-overlay.ts";
+import { ambientKeysShouldYield, capturingOverlayVisible } from "./capturing-overlay.ts";
 import { Key, decodeKittyPrintable, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { AgentsStore, effectiveAgentStatus, type CompletePayload, type MessagePayload, type StartedPayload } from "./agents-store.ts";
 import { statusText, titleFor, workingMessage, type AmbientState } from "./ambient.ts";
@@ -1212,16 +1212,33 @@ export default function (pi: ExtensionAPI): void {
 		return sidebarController;
 	};
 
+	// show() pushes the dock onto pi's overlay stack, and pi closes an overlay
+	// by popping the stack top: a dock pushed while a capturing overlay (the
+	// legacy settings panel, the /maestro-settings shell) is still open gets
+	// popped by that overlay's own close, stranding it open with Esc dead.
+	// Defer the show until the stack is clear; hide() never pushes and stays
+	// immediate.
+	let deferredSidebarSync = false;
 	const syncSidebarMode = (ctx: ExtensionContext): void => {
 		const controller = ensureSidebarController(ctx);
 		controller.setWidth(config.sidebar.width);
 		if (config.sidebar.mode === "off") {
+			deferredSidebarSync = false;
 			dockEffectiveVisible = false;
 			controller.hide();
+		} else if (capturingOverlayActive || capturingOverlayVisible(capturedTui)) {
+			deferredSidebarSync = true;
 		} else {
+			deferredSidebarSync = false;
 			controller.show();
 		}
 		reconcileSurface(ctx);
+	};
+	const flushDeferredSidebarSync = (): void => {
+		if (!deferredSidebarSync) return;
+		deferredSidebarSync = false;
+		const ctx = lastCtx;
+		if (ctx && config.enabled && isTuiContext(ctx)) syncSidebarMode(ctx);
 	};
 
 	const disposeLayoutControllers = (): void => {
@@ -1966,6 +1983,7 @@ export default function (pi: ExtensionAPI): void {
 	};
 	const exitCapturingOverlay = (): void => {
 		capturingOverlayActive = false;
+		flushDeferredSidebarSync();
 		req();
 	};
 
@@ -2491,10 +2509,12 @@ export default function (pi: ExtensionAPI): void {
 				return;
 			}
 			settingsCommandCtx = ctx;
+			enterCapturingOverlay();
 			try {
 				await showMaestroSettingsShell(ctx, settingsRegistry, settingsLocale);
 			} finally {
 				settingsCommandCtx = undefined;
+				exitCapturingOverlay();
 			}
 		},
 	});

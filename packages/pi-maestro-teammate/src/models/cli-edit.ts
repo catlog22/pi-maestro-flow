@@ -377,6 +377,8 @@ export function createLinePrompter(io: EditFlowIO): {
 export const EDIT_EXIT_CODES = {
   /** External change present and the operator declined. */
   declinedExternalChange: 1,
+  /** The candidate config is invalid (e.g. ssh without host/user); nothing was written. */
+  invalidArguments: 1,
   /** Explicit EOF mid-flow; nothing was written. */
   eof: 2,
   /** A legacy document cannot be edited by this flow; nothing was written. */
@@ -531,6 +533,24 @@ export async function runEditFlow(options: EditFlowOptions): Promise<number> {
     if (edits.size === 0) {
       io.write(`${translator("models.cli.edit.noChanges")}\n`);
       return 0;
+    }
+
+    // Mirror the add flow's ssh-required rule against the candidate config:
+    // an ssh launch cannot compose without a host or user, so an edit that
+    // switches mode to "ssh" (or clears one of them) must not publish a
+    // manifest the backend would only reject at dispatch.
+    const candidate = { ...existingConfig };
+    for (const [key, value] of edits) candidate[key] = value;
+    if (candidate.mode === "ssh") {
+      const missing = ["host", "user"].filter((key) =>
+        candidate[key] === undefined || String(candidate[key]).trim().length === 0
+      );
+      if (missing.length > 0) {
+        for (const key of missing) {
+          io.write(`${translator("models.cli.add.requiredField", { key })}\n`);
+        }
+        return EDIT_EXIT_CODES.invalidArguments;
+      }
     }
 
     const candidateDocument = applyConfigEdits(

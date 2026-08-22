@@ -836,6 +836,47 @@ test("cancellation wins settlement arbitration without charging or falling back"
   }
 });
 
+test("abort diagnostic on error-stopped assistant message does not switch models (bash ESC regression)", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-"));
+  try {
+    writeProjectConfig(cwd, {
+      enabled: true,
+      fallbackModels: { "provider/primary": ["provider/backup"] },
+    });
+    // Simulate production ordering: ctx.signal is undefined at agent_settled
+    // (finishRun clears activeRun before _emitAgentSettled fires), so the
+    // ctx.signal?.aborted safeguard cannot rescue a mislabelled abort.
+    const runtime = harness(cwd);
+    await runtime.emit("session_start");
+    await runtime.emit("before_agent_start", { prompt: "work" });
+    await runtime.emit("turn_start", { turnIndex: 0 });
+    // A bash tool was interrupted mid-run; the provider surfaced the abort as
+    // stopReason="error" with an AbortError diagnostic instead of the canonical
+    // stopReason="aborted". This is the exact shape observed in production
+    // failover events ("This operation was aborted" -> fallback-scheduled).
+    await runtime.emit("agent_end", {
+      messages: [
+        { role: "assistant", stopReason: "tool_use", content: [{ type: "toolCall", id: "t1", name: "bash", arguments: { command: "sleep 100" } }] },
+        { role: "toolResult", toolCallId: "t1", toolName: "bash", content: [{ type: "text", text: "Command aborted" }], isError: true },
+        { role: "assistant", stopReason: "error", content: [], errorMessage: "This operation was aborted" },
+      ],
+    });
+    (runtime.ctx as unknown as { signal: AbortSignal | undefined }).signal = undefined;
+    await runtime.emit("agent_settled");
+
+    assert.deepEqual(runtime.selected, [], "abort must not switch the active model");
+    assert.equal(runtime.handoffs.length, 0, "abort must not schedule a fallback handoff");
+    assert.equal(
+      runtime.breaker.snapshot().find((entry) => entry.model === "provider/primary")?.state,
+      "CLOSED",
+      "abort must not charge the circuit",
+    );
+    assert.equal(snapshotModelFailoverSettlement()?.outcome, "cancelled");
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("image-triggered multimodal switch restores the original model on settle", async () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-restore-"));
   try {

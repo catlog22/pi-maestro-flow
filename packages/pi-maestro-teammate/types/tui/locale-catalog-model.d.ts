@@ -14,6 +14,7 @@ export declare const MODEL_TUI_CATALOGS: {
         readonly "connections.targetsTitle": "Worker targets";
         readonly "connections.legacyNotice": "Legacy registry document · Enter to upgrade";
         readonly "connections.addDeployment": "a add deployment";
+        readonly "connections.compactHint": "enter open · n host · N target · t test · esc close";
         readonly "connections.registryLoadFailed": "Model registry unavailable: {message}";
         readonly "connections.registryRequired": "A v2 model registry is required to edit this deployment.";
         readonly "connections.registrationMissing": "Model registration {id} is no longer available.";
@@ -269,6 +270,7 @@ export declare const MODEL_TUI_CATALOGS: {
         readonly "connections.targetsTitle": "工作目标";
         readonly "connections.legacyNotice": "旧版注册表文档 · 按 Enter 升级";
         readonly "connections.addDeployment": "a 新建部署";
+        readonly "connections.compactHint": "enter 打开 · n 主机 · N 目标 · t 测试 · esc 关闭";
         readonly "connections.registryLoadFailed": "Model 注册表不可用：{message}";
         readonly "connections.registryRequired": "编辑此部署需要 v2 Model 注册表。";
         readonly "connections.registrationMissing": "Model 注册项 {id} 已不可用。";

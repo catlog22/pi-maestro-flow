@@ -47,7 +47,7 @@ test("stealth module exports the webdriver/plugins/chrome/permissions patches an
 test("browser schema preserves open/run/close and full control inputs", () => {
   assert.deepEqual((BrowserParams.properties.action as { enum: string[] }).enum, ["open", "close", "run", "guide"]);
   assert.deepEqual(Object.keys(BrowserParams.properties).sort(), [
-    "action", "all", "app", "code", "dialogs", "kill", "name", "timeout", "url", "viewport", "visible", "wait_until",
+    "action", "all", "app", "code", "dialogs", "kill", "name", "timeout", "topic", "url", "viewport", "visible", "wait_until",
   ]);
   assert.equal(Check(BrowserParams, { action: "open" }), true);
   assert.equal(Check(BrowserParams, { action: "close" }), true);
@@ -84,7 +84,7 @@ test("browser tool guidelines expose probe/snapshot/diff/monitor helpers", async
   assert.match(joined, /tab\.cdpBatch\(/, "guidelines must mention tab.cdpBatch()");
   // Schema is unchanged: no new top-level action or param was added.
   assert.deepEqual(Object.keys(BrowserParams.properties).sort(), [
-    "action", "all", "app", "code", "dialogs", "kill", "name", "timeout", "url", "viewport", "visible", "wait_until",
+    "action", "all", "app", "code", "dialogs", "kill", "name", "timeout", "topic", "url", "viewport", "visible", "wait_until",
   ]);
 });
 
@@ -147,18 +147,51 @@ test("browser schema accepts app.attach_user_profile / app.user_profile_dir", ()
   assert.equal(Check(BrowserParams, { action: "open", app: { attach_user_profile: true } }), true);
 });
 
-test("browser guide action returns the in-tool SOP", async () => {
+test("browser guide returns registry index; topic loads one document", async () => {
   const manager = new FakeBrowserManager();
   const tool = createBrowserTool(manager);
   const ctx = { cwd: "D:/workspace" } as never;
-  const res = await tool.execute("guide", { action: "guide" }, undefined, undefined, ctx);
-  assert.equal(res.isError, undefined);
-  assert.equal(res.details?.action, "guide");
-  const text = res.content.filter((item) => item.type === "text").map((item) => "text" in item ? item.text : "").join("\n");
-  assert.match(text, /Turnstile/i, "guide must mention Turnstile");
-  assert.match(text, /evalInFrame/, "guide must mention evalInFrame");
-  assert.match(text, /cdpClick/, "guide must mention cdpClick");
-  assert.match(text, /attach_user_profile/, "guide must mention attach_user_profile");
+  // Bare guide -> directory index listing all documents
+  const index = await tool.execute("guide", { action: "guide" }, undefined, undefined, ctx);
+  assert.equal(index.isError, undefined);
+  assert.equal(index.details?.action, "guide");
+  const idxText = index.content.filter((item) => item.type === "text").map((item) => "text" in item ? item.text : "").join("\n");
+  assert.match(idxText, /core/, "index must list core");
+  assert.match(idxText, /captcha-strategies/, "index must list captcha-strategies");
+  assert.match(idxText, /automation-antipatterns/, "index must list automation-antipatterns");
+  for (const id of ["network-mocking", "auth-flows", "form-widgets", "list-scraping", "antibot-landscape"]) {
+    assert.match(idxText, new RegExp(id), `index must list ${id}`);
+  }
+  assert.doesNotMatch(idxText, /render=explicit/, "bare index must not inline full document bodies");
+  // topic:"core" -> the full core SOP
+  const core = await tool.execute("guide", { action: "guide", topic: "core" }, undefined, undefined, ctx);
+  const coreText = core.content.filter((item) => item.type === "text").map((item) => "text" in item ? item.text : "").join("\n");
+  assert.match(coreText, /Turnstile/i, "core SOP must mention Turnstile");
+  assert.match(coreText, /evalInFrame/, "core SOP must mention evalInFrame");
+  assert.match(coreText, /cdpClick/, "core SOP must mention cdpClick");
+  assert.match(coreText, /attach_user_profile/, "core SOP must mention attach_user_profile");
+  // Unknown topic -> error listing available ids
+  await assert.rejects(
+    () => tool.execute("guide", { action: "guide", topic: "nope" }, undefined, undefined, ctx),
+    /Unknown SOP topic/,
+  );
+});
+
+test("browser nudges on open/run before guide, and stays silent after", async () => {
+  const manager = new FakeBrowserManager();
+  const tool = createBrowserTool(manager);
+  const ctx = { cwd: "D:/workspace" } as never;
+  const hint = /SOP registry not read this session/;
+  // open before guide -> nudge appended
+  const opened = await tool.execute("open", { action: "open" }, undefined, undefined, ctx);
+  assert.match(opened.content.map((c) => "text" in c ? c.text : "").join("\n"), hint);
+  // run before guide -> nudge appended
+  const ran = await tool.execute("run", { action: "run", code: "return 1;" }, undefined, undefined, ctx);
+  assert.match(ran.content.map((c) => "text" in c ? c.text : "").join("\n"), hint);
+  // after reading the registry (bare index suffices) -> no more nudges
+  await tool.execute("guide", { action: "guide" }, undefined, undefined, ctx);
+  const reopened = await tool.execute("open", { action: "open" }, undefined, undefined, ctx);
+  assert.doesNotMatch(reopened.content.map((c) => "text" in c ? c.text : "").join("\n"), hint);
 });
 
 test("browser close supports one tab and all tabs, while run validates code and propagates abort", async () => {

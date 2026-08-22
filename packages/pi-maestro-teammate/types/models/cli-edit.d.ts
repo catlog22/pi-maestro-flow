@@ -121,6 +121,8 @@ export declare function createLinePrompter(io: EditFlowIO): {
 export declare const EDIT_EXIT_CODES: {
     /** External change present and the operator declined. */
     readonly declinedExternalChange: 1;
+    /** The candidate config is invalid (e.g. ssh without host/user); nothing was written. */
+    readonly invalidArguments: 1;
     /** Explicit EOF mid-flow; nothing was written. */
     readonly eof: 2;
     /** A legacy document cannot be edited by this flow; nothing was written. */

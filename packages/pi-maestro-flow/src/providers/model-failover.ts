@@ -148,6 +148,11 @@ type InjectedImageMessage = {
 };
 const FAILOVER_RETRY_PROMPT = "The previous model exhausted its native retries with a transient network, provider, or quota error. Retry the original user request from the beginning on the selected fallback model and complete it.";
 const FAILOVER_RECOVERY_MARKER = "maestro-model-failover";
+// Abort/cancellation diagnostics that some providers/transports surface on an
+// error-stopped assistant message instead of the canonical stopReason="aborted".
+// Matched in observeAgentEnd so a mislabelled abort is treated as cancellation
+// (no circuit charge, no model switch) rather than a retryable provider failure.
+const ABORT_DIAGNOSTIC = /\b(?:this operation was aborted|the (?:user|operation) aborted(?: a request)?|request was aborted|operation aborted|aborted)\b/i;
 /** Published on the pi event bus when a scheduled fallback handoff fails terminally. */
 export const FAILOVER_TERMINAL_EVENT = "maestro-failover-terminal";
 
@@ -308,6 +313,14 @@ function observeAgentEnd(
     }
     if (message.stopReason === "error") {
       const failure = message.errorMessage || fallbackFailure || "Provider returned error";
+      // Some providers/transports surface an abort as stopReason="error" with an
+      // abort diagnostic (e.g. "This operation was aborted") instead of the
+      // canonical stopReason="aborted". An abort is a user/lifecycle cancellation,
+      // not a model failure: treat it as cancelled so it neither charges the
+      // circuit nor switches models, matching the stopReason="aborted" path.
+      if (ABORT_DIAGNOSTIC.test(failure)) {
+        return { outcome: "cancelled", completedTools: [...completedTools], unknownEffect };
+      }
       return {
         outcome: "failed",
         failure,
@@ -319,6 +332,9 @@ function observeAgentEnd(
     return { outcome: "success", completedTools: [...completedTools], unknownEffect };
   }
   if (fallbackFailure) {
+    if (ABORT_DIAGNOSTIC.test(fallbackFailure)) {
+      return { outcome: "cancelled", completedTools: [...completedTools], unknownEffect };
+    }
     return {
       outcome: "failed",
       failure: fallbackFailure,

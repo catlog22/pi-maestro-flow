@@ -4,6 +4,7 @@ import {
   type ProjectionIdentity,
 } from "../public/v1/backends.ts";
 import { createModelsCliTranslator, type ModelsCliTranslator } from "./cli-i18n.ts";
+import { redactText } from "./cli-redact.ts";
 import type { SupportedSettingsLocale } from "pi-maestro-settings-core/v1";
 import {
   createLinePrompter,
@@ -163,7 +164,11 @@ export function buildUpgradedCopyDocument(parsed: unknown): Record<string, unkno
  * written and that writes to the legacy document itself are refused.
  */
 export function renderLegacyUpgradeSkeleton(parsed: unknown, documentPath: string): string {
-  const skeleton = JSON.stringify(buildUpgradedCopyDocument(parsed), null, 2);
+  // A legacy document predates the credential-ref discipline and may hold
+  // secret values inline in backends[*].config; the preview, the confirm
+  // prompt, and the sibling write all ride this text, so it passes the same
+  // redaction gate as the external-change diff.
+  const skeleton = redactText(JSON.stringify(buildUpgradedCopyDocument(parsed), null, 2));
   return [
     `Legacy upgrade preview for ${documentPath} — computed v2 skeleton (nothing has been written):`,
     skeleton,

@@ -126,6 +126,9 @@ export class RemoteConfigPane implements Component, Focusable {
   private query = "";
   private selected = 0;
   private testingId: string | null = null;
+  /** Aborts the in-flight probe when the pane is disposed or a new test starts. */
+  private testAbort: AbortController | null = null;
+  private disposed = false;
   private statusText = "";
   private statusTone: "dim" | "success" | "error" = "dim";
   private lastWidth = 80;
@@ -147,6 +150,8 @@ export class RemoteConfigPane implements Component, Focusable {
   invalidate(): void {}
 
   dispose(): void {
+    this.disposed = true;
+    this.testAbort?.abort();
     this.localeDisposer();
   }
 
@@ -223,6 +228,10 @@ export class RemoteConfigPane implements Component, Focusable {
   render(width: number): string[] {
     const w = Math.max(1, Math.min(width, 112));
     this.lastWidth = w;
+    // Governing ui-conventions spec: below 40 columns the tab degrades to an
+    // action-first single column — no frame, scope, filter, or section chrome,
+    // just the selectable rows plus status and a one-line hint.
+    if (w < 40) return this.renderCompactRows(w);
     const inner = Math.max(0, w - 2);
     const rows: string[] = [];
     rows.push(this.headerLine(inner));
@@ -254,6 +263,25 @@ export class RemoteConfigPane implements Component, Focusable {
     if (this.statusText) rows.push(this.statusLine(inner));
     rows.push(this.footerLine(inner));
     return this.frame(rows, w);
+  }
+
+  /** Action-first single-column layout for narrow terminals (<40 columns). */
+  private renderCompactRows(w: number): string[] {
+    const items = this.visibleItems();
+    this.selected = clampIndex(this.selected, items.length);
+    const rows: string[] = [
+      truncateToWidth(this.theme.fg("accent", this.theme.bold(this.t(tKey("remote.title")))), w, "…"),
+    ];
+    if (this.statusText) rows.push(this.statusLine(w));
+    if (items.length === 0) {
+      rows.push(this.theme.fg("dim", this.t(tKey("remote.empty"))));
+    } else {
+      for (const [index, row] of items.entries()) {
+        rows.push(this.rowLine(row, index === this.selected, w));
+      }
+    }
+    rows.push(this.theme.fg("dim", truncateToWidth(this.t(tKey("connections.compactHint")), w, "…")));
+    return rows;
   }
 
   private get theme(): RemoteConfigPaneOptions["theme"] {
@@ -494,8 +522,10 @@ export class RemoteConfigPane implements Component, Focusable {
     this.statusTone = "dim";
     this.statusText = `${this.t(tKey("remote.testing"), { id: targetId })} ${this.t(tKey("connections.connecting"))}`;
     this.options.requestRender();
-    const signal = AbortSignal.timeout(this.testTimeoutMs);
-    void this.runTest(targetId, signal);
+    const controller = new AbortController();
+    this.testAbort = controller;
+    const timeout = setTimeout(() => controller.abort(), this.testTimeoutMs);
+    void this.runTest(targetId, controller.signal).finally(() => clearTimeout(timeout));
   }
 
   private async runTest(targetId: string, signal: AbortSignal): Promise<void> {
@@ -509,6 +539,9 @@ export class RemoteConfigPane implements Component, Focusable {
           signal.addEventListener("abort", () => reject(signal.reason), { once: true });
         }),
       ]);
+      // The probe may resolve with a timeout string instead of rejecting
+      // (onTest catches aborts); treat any post-abort resolution as failure.
+      if (signal.aborted) throw signal.reason;
       this.statusTone = "success";
       this.statusText = result
         ? `${this.t(tKey("remote.ok"))} ${sanitizeSingleLineInput(result)}`
@@ -520,7 +553,9 @@ export class RemoteConfigPane implements Component, Focusable {
         : `${this.t(tKey("remote.fail"))} ${error instanceof Error ? error.message : String(error)}`;
     } finally {
       this.testingId = null;
-      this.options.requestRender();
+      if (this.testAbort?.signal === signal) this.testAbort = null;
+      // A disposed pane must not drive renders on the torn-down overlay.
+      if (!this.disposed) this.options.requestRender();
     }
   }
 

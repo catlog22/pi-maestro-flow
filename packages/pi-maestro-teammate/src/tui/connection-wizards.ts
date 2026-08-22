@@ -178,9 +178,23 @@ async function buildEditCandidate(
     }
   }
   if (edits.size === 0) return { noChanges: true };
+  // Mirror the add flow's ssh-required rule against the candidate config: an
+  // ssh launch cannot compose without a host or user, so the edit must not
+  // publish a manifest the backend would only reject at dispatch.
+  const candidate = { ...current };
+  for (const [key, value] of edits) candidate[key] = value;
+  const missing = candidate.mode === "ssh"
+    ? ["host", "user"].filter((key) =>
+      candidate[key] === undefined || String(candidate[key]).trim().length === 0)
+    : [];
   const next = applyConfigEdits(document, deploymentId, edits);
-  const raw = candidateRaw(next);
-  return { raw, errors: compileErrors(raw, filePath) };
+  const errors = [
+    ...missing.map((key) => wizardText(ui, "remote.validationFailed", {
+      error: `${key} is required when mode is "ssh"`,
+    })),
+    ...compileErrors(candidateRaw(next), filePath),
+  ];
+  return { raw: candidateRaw(next), errors };
 }
 
 /** Edit one deployment selected through its supplied model-list registration row. */
@@ -621,7 +635,7 @@ export async function wizardRemoteHost(
       : {}),
   };
   const validation = validateRemoteHostDraft(id, draft);
-  if (!validation.ok) return { ok: false, message: validation.error, reloadRemote: false };
+  if (!validation.ok) return { ok: false, message: wizardText(ui, "remote.validationFailed", { error: validation.error }), reloadRemote: false };
 
   const next = cloneStores(deps.state);
   const target = deps.scope === "global" ? next.global : next.project;
@@ -698,7 +712,7 @@ export async function wizardRemoteTarget(
     ...(env.length === 0 ? {} : { env }),
   } satisfies RemoteTargetConfig;
   const validation = validateRemoteTargetDraft(id, draft);
-  if (!validation.ok) return { ok: false, message: validation.error, reloadRemote: false };
+  if (!validation.ok) return { ok: false, message: wizardText(ui, "remote.validationFailed", { error: validation.error }), reloadRemote: false };
 
   const next = cloneStores(deps.state);
   const target = deps.scope === "global" ? next.global : next.project;
