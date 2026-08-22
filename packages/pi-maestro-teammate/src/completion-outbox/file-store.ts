@@ -109,6 +109,17 @@ export function computeCompletionContentRevision(
   return createHash("sha256").update(JSON.stringify(recordSemantic(record)), "utf8").digest("hex");
 }
 
+/** Crash remnants can leave one deliveryId in several state dirs; prefer the
+ * newest record, and on equal timestamps the most advanced lifecycle state,
+ * so a stale pending copy never overrides an accepted queued/applied one. */
+function completionRecordPrecedes(candidate: CompletionOutboxRecord, incumbent: CompletionOutboxRecord): boolean {
+  if (candidate.updatedAt !== incumbent.updatedAt) return candidate.updatedAt > incumbent.updatedAt;
+  const candidateState = STATE_DIRS.indexOf(candidate.state);
+  const incumbentState = STATE_DIRS.indexOf(incumbent.state);
+  if (candidateState !== incumbentState) return candidateState > incumbentState;
+  return false;
+}
+
 function validRecord(value: unknown): value is CompletionOutboxRecord {
   if (!value || typeof value !== "object") return false;
   const record = value as Partial<CompletionOutboxRecord>;
@@ -134,7 +145,9 @@ function validRecord(value: unknown): value is CompletionOutboxRecord {
       || !boundedString(resource.correlationId, 128)
       || !boundedString(resource.publicationId, 128)
       || resource.uri !== `agent://${resource.publicationId}`
-      || !boundedString(resource.originCwd, 4096)
+      // Legacy v1 records written before originCwd existed must stay readable;
+      // new writes always carry it.
+      || (resource.originCwd !== undefined && !boundedString(resource.originCwd, 4096))
       || typeof resource.summary !== "string"
       || Buffer.byteLength(resource.summary, "utf8") > COMPLETION_OUTBOX_MAX_SUMMARY_BYTES) return false;
   }
@@ -359,7 +372,7 @@ export class CompletionOutboxFileStore {
     for (const state of STATE_DIRS) {
       for (const record of await this.#listState(target, state)) {
         const current = byDelivery.get(record.deliveryId);
-        if (!current || record.updatedAt > current.updatedAt) byDelivery.set(record.deliveryId, record);
+        if (!current || completionRecordPrecedes(record, current)) byDelivery.set(record.deliveryId, record);
       }
     }
     return [...byDelivery.values()]
@@ -371,6 +384,11 @@ export class CompletionOutboxFileStore {
       const current = await this.#findRecord(target, deliveryId);
       if (!current || (current.state !== "pending" && current.state !== "queued")) return undefined;
       const now = this.#now();
+      // Expired records must never be delivered even before GC reaches them.
+      if (current.expiresAt <= now) {
+        await this.#replaceRecord(current, { state: "expired", updatedAt: now });
+        return undefined;
+      }
       if (current.claimOwnerId && current.claimOwnerId !== this.ownerId && (current.claimExpiresAt ?? 0) > now) return undefined;
       return this.#replaceRecord(current, {
         claimOwnerId: this.ownerId,
@@ -463,7 +481,7 @@ export class CompletionOutboxFileStore {
     for (const state of STATE_DIRS) {
       const raw = await readSafeJson(this.#recordPath(target, state, deliveryId));
       if (!validRecord(raw) || !targetEquals(raw.target, target)) continue;
-      if (!newest || raw.updatedAt > newest.updatedAt) newest = raw;
+      if (!newest || completionRecordPrecedes(raw, newest)) newest = raw;
     }
     return newest;
   }

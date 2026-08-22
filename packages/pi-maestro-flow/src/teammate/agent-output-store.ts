@@ -378,16 +378,13 @@ async function evictOldestRecords(dir: string, count: number): Promise<void> {
   const entries = await listCanonicalRecords(dir);
   const referenced = await aliasReferencedPublicationIds(dir);
   for (const pinned of await manifestPinnedPublicationIds(dir)) referenced.add(pinned);
+  // Pinned records are never eviction candidates: a temporary capacity
+  // overage is preferable to destroying the only durable copy needed for
+  // completion redelivery.
   const candidates: AgentOutputStoreEntry[] = [];
-  const chosen = new Set<string>();
-  for (const pool of [entries.filter((entry) => !referenced.has(entry.canonicalId)), entries]) {
-    for (let index = pool.length - 1; index >= 0 && candidates.length < count; index -= 1) {
-      const entry = pool[index]!;
-      if (!chosen.has(entry.canonicalId)) {
-        chosen.add(entry.canonicalId);
-        candidates.push(entry);
-      }
-    }
+  const pool = entries.filter((entry) => !referenced.has(entry.canonicalId));
+  for (let index = pool.length - 1; index >= 0 && candidates.length < count; index -= 1) {
+    candidates.push(pool[index]!);
   }
   for (const entry of candidates) {
     await unlink(recordFile(dir, entry.canonicalId)).catch((error) => {
@@ -398,38 +395,52 @@ async function evictOldestRecords(dir: string, count: number): Promise<void> {
 }
 
 const COMPLETION_INTENT_DIR = ".completion-intents";
+const MAX_MANIFEST_SCAN_BYTES = 256 * 1024;
 
 /**
- * 未结算（open/finalized）完成清单引用的 publication 在投递完成前不可淘汰，
- * 否则恢复/重放会读到失效的 agent:// 资源。
+ * 未结算（open/finalized）完成清单引用的 publication 在投递完成前不可淘汰。
+ * publication 可能落在与 manifest 不同的分桶（如子工作区），因此扫描共享根下
+ * 的全部分桶；单文件超过 manifest 大小上限时跳过解析。
  */
 async function manifestPinnedPublicationIds(dir: string): Promise<Set<string>> {
   const pinned = new Set<string>();
-  let names: string[];
+  const buckets = new Set<string>([dir]);
+  const root = outputRootResolved();
   try {
-    const entries = await readdir(join(dir, COMPLETION_INTENT_DIR), { withFileTypes: true });
-    names = entries.filter((entry) => entry.isFile() && entry.name.endsWith(".json")).map((entry) => entry.name);
+    for (const entry of await readdir(root, { withFileTypes: true })) {
+      if (entry.isDirectory() && !entry.isSymbolicLink()) buckets.add(join(root, entry.name));
+    }
   } catch (error) {
-    if (fileErrorCode(error) === "ENOENT") return pinned;
-    throw error;
+    if (fileErrorCode(error) !== "ENOENT") throw error;
   }
-  for (const fileName of names) {
-    const raw = await readPrivateText(join(dir, COMPLETION_INTENT_DIR, fileName));
-    if (raw === undefined) continue;
-    let parsed: { state?: unknown; published?: unknown; intent?: { resources?: unknown } };
+  for (const bucket of buckets) {
+    let names: string[];
     try {
-      parsed = JSON.parse(raw);
-    } catch {
-      continue;
+      const entries = await readdir(join(bucket, COMPLETION_INTENT_DIR), { withFileTypes: true });
+      names = entries.filter((entry) => entry.isFile() && entry.name.endsWith(".json")).map((entry) => entry.name);
+    } catch (error) {
+      if (fileErrorCode(error) === "ENOENT") continue;
+      throw error;
     }
-    if (parsed.state !== "open" && parsed.state !== "finalized") continue;
-    for (const published of Array.isArray(parsed.published) ? parsed.published : []) {
-      const publicationId = (published as { publicationId?: unknown } | null)?.publicationId;
-      if (typeof publicationId === "string") pinned.add(publicationId);
-    }
-    for (const resource of Array.isArray(parsed.intent?.resources) ? parsed.intent!.resources : []) {
-      const publicationId = (resource as { publicationId?: unknown } | null)?.publicationId;
-      if (typeof publicationId === "string") pinned.add(publicationId);
+    for (const fileName of names) {
+      const filePath = join(bucket, COMPLETION_INTENT_DIR, fileName);
+      const raw = await readPrivateText(filePath);
+      if (raw === undefined || raw.length > MAX_MANIFEST_SCAN_BYTES) continue;
+      let parsed: { state?: unknown; published?: unknown; intent?: { resources?: unknown } };
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        continue;
+      }
+      if (parsed.state !== "open" && parsed.state !== "finalized") continue;
+      for (const published of Array.isArray(parsed.published) ? parsed.published : []) {
+        const publicationId = (published as { publicationId?: unknown } | null)?.publicationId;
+        if (typeof publicationId === "string") pinned.add(publicationId);
+      }
+      for (const resource of Array.isArray(parsed.intent?.resources) ? parsed.intent!.resources : []) {
+        const publicationId = (resource as { publicationId?: unknown } | null)?.publicationId;
+        if (typeof publicationId === "string") pinned.add(publicationId);
+      }
     }
   }
   return pinned;

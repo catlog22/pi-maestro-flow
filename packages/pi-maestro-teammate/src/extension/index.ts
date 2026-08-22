@@ -704,9 +704,13 @@ export default function registerTeammateExtension(
       }
       publishSessionIdentity(ctx);
       const childSessionId = ctx.sessionManager.getSessionId();
+      // Fence deliveries to the exact workspace + session identity captured at
+      // bind time; compaction may keep the session id while changing cwd.
+      const childWorkspaceId = completionWorkspaceId(ctx.cwd);
+      const childSessionFile = ctx.sessionManager.getSessionFile?.();
       void childCompletionCoordinator.bindSession({
         target: {
-          workspaceId: completionWorkspaceId(ctx.cwd),
+          workspaceId: childWorkspaceId,
           sessionId: childSessionId,
           ...(process.env.PI_TEAMMATE_CORRELATION_ID
             ? { correlationId: process.env.PI_TEAMMATE_CORRELATION_ID }
@@ -715,6 +719,8 @@ export default function registerTeammateExtension(
         entries: ctx.sessionManager.getEntries?.() ?? [],
         send(envelope: CompletionDeliveryEnvelope) {
           return bridge.ctx?.sessionManager.getSessionId() === childSessionId
+            && bridge.ctx?.sessionManager.getSessionFile?.() === childSessionFile
+            && completionWorkspaceId(bridge.ctx?.cwd ?? "") === childWorkspaceId
             && safeSendMessage(pi, envelope, { triggerTurn: true, deliverAs: "followUp" });
         },
       }).catch((error) => {

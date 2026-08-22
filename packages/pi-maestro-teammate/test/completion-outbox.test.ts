@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import {
   computeCompletionDeliveryId,
@@ -16,6 +16,14 @@ import {
 } from "../src/completion-outbox/types.ts";
 
 const target: CompletionTarget = { workspaceId: "workspace-a", sessionId: "session-a" };
+
+async function findStateDir(root: string, state: string): Promise<string> {
+  const entries = await readdir(root, { recursive: true, withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.isDirectory() && entry.name === state) return join(entry.parentPath, entry.name);
+  }
+  throw new Error(`state dir ${state} not found under ${root}`);
+}
 
 function seed(id: string, owner: CompletionTarget = target): CompletionDispatchSeed {
   return {
@@ -162,4 +170,55 @@ test("linked output root is rejected", async () => {
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("legacy records without resource originCwd remain valid and listable", async () => {
+  await withStore(async (store) => {
+    const dispatch = seed("legacy");
+    await store.reserve(dispatch, 4_096);
+    const legacy = intent(dispatch);
+    delete (legacy.resources[0] as { originCwd?: string }).originCwd;
+    const pending = await store.importIntent(legacy);
+    assert.equal(pending.state, "pending");
+    const records = await store.listForTarget(target);
+    assert.equal(records.length, 1);
+    assert.equal(records[0]?.deliveryId, pending.deliveryId);
+  });
+});
+
+test("equal-timestamp crash remnants resolve to the most advanced state", async () => {
+  await withStore(async (store, _advance, root) => {
+    const dispatch = seed("remnant");
+    await store.reserve(dispatch, 4_096);
+    const pending = await store.importIntent(intent(dispatch));
+    // Simulate a crash between writing queued and removing pending: both state
+    // dirs hold the same deliveryId with identical updatedAt.
+    const pendingDir = await findStateDir(root, "pending");
+    const fileName = `${pending.deliveryId}.json`;
+    const queuedDir = join(dirname(pendingDir), "queued");
+    await mkdir(queuedDir, { recursive: true });
+    await writeFile(
+      join(queuedDir, fileName),
+      JSON.stringify({ ...pending, state: "queued" }),
+    );
+    const records = await store.listForTarget(target);
+    assert.equal(records.length, 1, "duplicate state files must collapse to one delivery");
+    assert.equal(records[0]?.state, "queued", "the accepted queued copy must win over stale pending");
+    const claimed = await store.acquireClaim(target, pending.deliveryId);
+    assert.equal(claimed?.state, "queued");
+  });
+});
+
+test("an expired pending record is never claimed for delivery", async () => {
+  await withStore(async (store, advance) => {
+    const dispatch = seed("expired-claim");
+    await store.reserve(dispatch, 4_096);
+    const pending = await store.importIntent(intent(dispatch));
+    advance(COMPLETION_OUTBOX_LIVE_TTL_MS + 1);
+    const claimed = await store.acquireClaim(target, pending.deliveryId);
+    assert.equal(claimed, undefined, "expired records must not be delivered");
+    const records = await store.listForTarget(target);
+    assert.equal(records.length, 1);
+    assert.equal(records[0]?.state, "expired");
+  });
 });

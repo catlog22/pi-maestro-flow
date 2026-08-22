@@ -169,8 +169,12 @@ export class FlowCompletionDurabilityProvider implements CompletionDurabilityPro
     if (!SAFE_ID.test(seed.dispatchId) || !SAFE_ID.test(seed.reservationId) || !seed.originCwd) {
       throw new Error("Invalid completion dispatch seed.");
     }
+    // A reused dispatchId must resolve its existing manifest across ALL
+    // buckets before a new path is chosen, otherwise a relocated originCwd
+    // would silently create a second manifest for the same dispatch.
+    const existingPath = await this.#locate(seed.dispatchId);
     const bucket = await ensureAgentOutputBucket(seed.originCwd);
-    const path = join(bucket, MANIFEST_DIR, `${hash(seed.dispatchId)}.json`);
+    const path = existingPath ?? join(bucket, MANIFEST_DIR, `${hash(seed.dispatchId)}.json`);
     this.#manifestPaths.set(seed.dispatchId, path);
     await this.#mutate(path, seed.dispatchId, (current, now) => {
       if (current) {
@@ -221,6 +225,9 @@ export class FlowCompletionDurabilityProvider implements CompletionDurabilityPro
       this.#assertReservation(current, input.reservationId);
       const existing = current.published.find((entry) => entry.publicationId === input.resource.publicationId);
       if (existing?.state === "committed") return current;
+      if (existing?.state === "staged" && existing.originCwd !== input.resource.originCwd) {
+        throw new Error(`Publication ${input.resource.publicationId} already staged from a different origin.`);
+      }
       const published = current.published.filter((entry) => entry.publicationId !== input.resource.publicationId);
       published.push({ ...input.resource, state: "staged", stagedAt: input.stagedAt });
       return withRevision({ ...this.#withoutRevision(current), published, updatedAt: now });
@@ -232,7 +239,9 @@ export class FlowCompletionDurabilityProvider implements CompletionDurabilityPro
       this.#assertReservation(current, input.reservationId);
       const staged = current.published.find((entry) => entry.publicationId === input.publicationId);
       if (!staged) throw new Error(`Publication ${input.publicationId} was not staged.`);
-      const record = await readExactAgentPublication(input.publicationId, staged.originCwd);
+      // Legacy manifests may lack per-resource originCwd; the dispatch origin
+      // is then the only known location.
+      const record = await readExactAgentPublication(input.publicationId, staged.originCwd ?? current.originCwd);
       if (!record) throw new Error(`Immutable agent://${input.publicationId} is not readable.`);
       const published = current.published.map((entry) => entry.publicationId === input.publicationId
         ? { ...entry, state: "committed" as const, committedAt: input.committedAt }
@@ -248,11 +257,16 @@ export class FlowCompletionDurabilityProvider implements CompletionDurabilityPro
       if (current.intent) { intent = current.intent; return current; }
       if (!current.notificationRequired) throw new Error(`Completion dispatch ${input.dispatchId} does not require notification.`);
       const committed = new Map(current.published.filter((entry) => entry.state === "committed").map((entry) => [entry.publicationId, entry]));
+      const resolvedResources: CompletionResource[] = [];
       for (const resource of input.resources) {
-        if (!committed.has(resource.publicationId)
-          || !await readExactAgentPublication(resource.publicationId, resource.originCwd)) {
+        // The committed entry owns the publication's location and identity;
+        // caller-supplied metadata never overrides it.
+        const entry = committed.get(resource.publicationId);
+        const origin = entry?.originCwd ?? current.originCwd;
+        if (!entry || !await readExactAgentPublication(resource.publicationId, origin)) {
           throw new Error(`Completion publication ${resource.publicationId} is not durably committed.`);
         }
+        resolvedResources.push({ ...resource, originCwd: origin });
       }
       const base: Omit<CompletionIntent, "contentRevision"> = {
         version: COMPLETION_DURABILITY_VERSION,
@@ -265,7 +279,7 @@ export class FlowCompletionDurabilityProvider implements CompletionDurabilityPro
         replyTarget: current.replyTarget,
         outcome: input.outcome,
         summary: Buffer.from(input.summary, "utf8").subarray(0, 4096).toString("utf8"),
-        resources: [...input.resources],
+        resources: resolvedResources,
         createdAt: current.createdAt,
         finalizedAt: input.finalizedAt,
       };
@@ -292,7 +306,7 @@ export class FlowCompletionDurabilityProvider implements CompletionDurabilityPro
       if (manifest.state !== "finalized" || !manifest.intent || manifest.expiresAt <= Date.now()) continue;
       if (manifest.target.workspaceId !== target.workspaceId || manifest.target.sessionId !== target.sessionId
         || manifest.target.correlationId !== target.correlationId) continue;
-      const complete = await Promise.all(manifest.intent.resources.map((resource) => readExactAgentPublication(resource.publicationId, resource.originCwd)));
+      const complete = await Promise.all(manifest.intent.resources.map((resource) => readExactAgentPublication(resource.publicationId, resource.originCwd ?? manifest.originCwd)));
       if (complete.every(Boolean)) intents.push(manifest.intent);
     }
     return intents.sort((left, right) => left.createdAt - right.createdAt || left.deliveryId.localeCompare(right.deliveryId));

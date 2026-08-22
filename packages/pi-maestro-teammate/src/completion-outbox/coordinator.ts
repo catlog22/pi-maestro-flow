@@ -297,8 +297,10 @@ export class CompletionDeliveryCoordinator {
     if (record.state === "applied" && record.providerAcknowledgedAt !== undefined) return;
     const applied = await this.store.markApplied(record.target, record.deliveryId);
     if (!applied || applied.providerAcknowledgedAt !== undefined) return;
-    const provider = this.registry.current();
-    if (!provider) return;
+    // Acknowledge through the provider that owns the dispatch, not whichever
+    // provider happens to be current now — a registry replacement must not
+    // strand the original manifest without a receipt.
+    const provider = this.#pinnedProvider(applied.dispatchId);
     const receipt: CompletionAppliedReceipt = {
       deliveryId: applied.deliveryId,
       dispatchId: applied.dispatchId,
@@ -309,6 +311,10 @@ export class CompletionDeliveryCoordinator {
     try {
       await provider.acknowledgeApplied(receipt);
       await this.store.markProviderAcknowledged(applied.target, applied.deliveryId);
+      // Delivery fully settled: release the pinned provider reference.
+      if (this.#dispatches.get(applied.dispatchId)?.provider === provider) {
+        this.#dispatches.delete(applied.dispatchId);
+      }
     } catch (error) {
       console.warn(`[pi-maestro-teammate] completion provider acknowledgement failed for ${applied.deliveryId}:`, error);
     }

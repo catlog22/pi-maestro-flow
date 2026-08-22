@@ -643,3 +643,50 @@ test("current workspace bucket takes priority over descendant buckets", async ()
   const fromChild = await readAgentOutput("priority-cid-1", child);
   assert.deepEqual(fromChild.output, { from: "child" });
 });
+
+/** Write an open completion manifest pinning the given publication ids. */
+async function writeOpenManifest(bucket: string, publicationIds: string[]): Promise<void> {
+  const dir = join(bucket, ".completion-intents");
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, "manifest-pin.json"), JSON.stringify({
+    state: "open",
+    published: publicationIds.map((publicationId) => ({ publicationId })),
+    intent: { resources: publicationIds.map((publicationId) => ({ publicationId })) },
+  }));
+}
+
+test("pinned publications are never evicted even at capacity", async () => {
+  const project = join(root, "pin-capacity-proj");
+  await mkdir(project, { recursive: true });
+  for (let index = 0; index < MAX_AGENT_FILES - 1; index += 1) {
+    await persistAgentOutput(`filler-${index}`, "filler", "general", { index }, project);
+  }
+  await persistAgentOutputChecked("pinned-corr", "pinned-task", "general", { durable: true }, project, "pinned-publication-1");
+  const bucket = await bucketContaining("pinned-publication-1.json");
+  await writeOpenManifest(bucket, ["pinned-publication-1"]);
+  // Two more writes force eviction past capacity.
+  await persistAgentOutput("spillover-1", "spill", "general", { n: 1 }, project);
+  await persistAgentOutput("spillover-2", "spill", "general", { n: 2 }, project);
+  assert.equal((await readAgentOutput("pinned-publication-1", project)).correlationId, "pinned-corr");
+});
+
+test("a manifest in another bucket pins publications across buckets", async () => {
+  const parent = join(root, "pin-cross-parent");
+  const child = join(parent, "sub");
+  await mkdir(child, { recursive: true });
+  // Publication lives in the child workspace bucket...
+  await persistAgentOutputChecked("cross-corr", "cross-task", "general", { cross: true }, child, "cross-publication-1");
+  const childBucket = await bucketContaining("cross-publication-1.json");
+  // ...while the open manifest stays in a sibling (parent) bucket.
+  let parentBucket: string | undefined;
+  for (const entry of await readdir(outRoot())) {
+    const bucket = join(outRoot(), entry);
+    if (bucket !== childBucket) parentBucket = bucket;
+  }
+  assert.ok(parentBucket, "expected a sibling bucket for the manifest");
+  await writeOpenManifest(parentBucket, ["cross-publication-1"]);
+  for (let index = 0; index < MAX_AGENT_FILES + 2; index += 1) {
+    await persistAgentOutput(`cross-filler-${index}`, "filler", "general", { index }, child);
+  }
+  assert.equal((await readAgentOutput("cross-publication-1", child)).correlationId, "cross-corr");
+});
