@@ -714,7 +714,9 @@ export function onToolCallPlan(event: {
     return planMutationBlock(`lsp ${action || "mutation"}`);
   }
   if (toolName === "teammate") {
-    const readOnlyAgents = new Set(["analyst", "research", "explorer", "planner"]);
+    // Plan mode delegates discovery to `explorer` and authoring to `planner` only;
+    // analysis/research belong inside the planner's single nested-agent budget.
+    const readOnlyAgents = new Set(["explorer", "planner"]);
     const topLevelAgent = typeof event.input.agent === "string" ? event.input.agent : "general";
     const tasks = Array.isArray(event.input.tasks) ? event.input.tasks : [];
     const agents = tasks.length > 0
@@ -727,7 +729,15 @@ export function onToolCallPlan(event: {
       ? undefined
       : planMutationBlock(`teammate ${agents.join(", ")}`);
   }
-  if (toolName === "teammate-send") return planMutationBlock("teammate-send");
+  if (toolName === "teammate-send") {
+    // Plan mode allows targeted revision of the same read-only planner/explorer
+    // (steer/follow_up are message injections, not project mutations), but still
+    // blocks abort, which terminates the agent and its subtree.
+    const mode = typeof event.input.mode === "string" ? event.input.mode : "follow_up";
+    return mode === "abort"
+      ? planMutationBlock("teammate-send abort")
+      : undefined;
+  }
   if (new Set([
     "read", "grep", "glob", "ls", "find", "ffgrep", "fffind", "ask-user-question",
     "teammate-list", "teammate-watch", "observe", "search_tool_bm25", "smart_search", "source_check",
@@ -752,7 +762,10 @@ function planMutationBlock(operation: string, detail?: string): { block: true; r
  * interpreters (`node -e`, `python -c`) is out of scope: this is an
  * accidental-mutation guard, not a sandbox.
  */
-const MUTATING_SHELL_VERBS = /\b(?:rm|rmdir|unlink|mv|mkdir|touch|truncate|ln|cp|dd|shred|tee|install|chmod|chown|chgrp|mkfs\w*|mount|umount|kill|pkill|killall|systemctl|service|reboot|halt|poweroff|shutdown|scp|rsync|sftp|vim|vi|nano|make|ninja|mvn|gradle|docker|kubectl|terraform|eval|tar|gzip|gunzip|bzip2|bunzip2|xz|unxz|zstd|unzstd|zip|unzip|7z|7za|rar|unrar)\b/;
+// Lookbehind instead of \b: a hyphen before the verb is a flag fragment
+// (e.g. `rg -ln`), not a command verb — \b would match inside it because `-`
+// is a word boundary.
+const MUTATING_SHELL_VERBS = /(?<![\w-])(?:rm|rmdir|unlink|mv|mkdir|touch|truncate|ln|cp|dd|shred|tee|install|chmod|chown|chgrp|mkfs\w*|mount|umount|kill|pkill|killall|systemctl|service|reboot|halt|poweroff|shutdown|scp|rsync|sftp|vim|vi|nano|make|ninja|mvn|gradle|docker|kubectl|terraform|eval|tar|gzip|gunzip|bzip2|bunzip2|xz|unxz|zstd|unzstd|zip|unzip|7z|7za|rar|unrar)\b/;
 const IN_PLACE_EDIT = /(?:^|\s)-[a-z]*i(?:[a-z]|\.|\s|$)/i;
 const SHELL_EXEC_FLAG = /(?:^|\s)-(?:[a-zA-Z]*c|Command)(?:\s|$)|(?:^|\s)\/c(?:\s|$)/;
 const SHELL_FAMILY = /\b(?:bash|sh|zsh|ksh|dash|fish|pwsh|powershell|cmd|command)\b/;
@@ -1808,22 +1821,40 @@ function buildPlanEnterNote(): string {
     "Planning quality:",
     "- Ground every decision in codebase evidence, not assumption.",
     "- Align every user requirement with a planned outcome and a verifiable acceptance check.",
-    "- Use the teammate tool to dispatch the built-in `planner` role for every final Plan, including",
-    "  small Plans (in Plan mode this overrides the general guideline against dispatching trivial work).",
-    "  Pass it the resolved requirements, evidence, constraints, and user-owned decisions.",
-    "  The planner owns the document and may call `analyst` for technical analysis and pressure review,",
-    "  `research` for project knowledge or external research, and `explorer` for codebase discovery and",
-    "  call-chain tracing. Require the planner to follow its role-level Plan document contract.",
-    "  Do not use implementation-capable agents in Plan mode. The root agent owns user interaction,",
+    "",
+    "Agent boundary (the hook only lets you dispatch `explorer` and `planner`):",
+    "- Standard flow (broad or uncertain scope): dispatch `explorer` ONCE with batched parallel",
+    "  prompts; unless the cross-module escalation below applies, dispatch one `planner`, passing",
+    "  each explorer result's exact `agent://` publication ID as an immutable briefing reference",
+    "  (use a correlation ID only when latest-turn semantics are intentional), plus your distilled",
+    "  evidence, resolved requirements, constraints, and every known red line (architecture invariants,",
+    "  compatibility rules) as a mandatory first-round checklist so the plan passes review in one",
+    "  round. Never re-dispatch planning from scratch; send targeted revision instructions to the same",
+    "  planner instead.",
+    "- Lightweight flow (small, well-understood task): skip agent exploration entirely — inspect the",
+    "  code yourself with read/search tools, then either author the draft via plan-update directly or",
+    "  make one `planner` call with that content injected. After spot-checking the result, go straight",
+    "  to ask-user-question / plan-confirm.",
+    "- Planner budget: the planner may call at most ONE nested read-only agent (prefer a pressure",
+    "  review of its near-final draft on architecturally risky changes) and must apply the findings by",
+    "  revising its own draft — no repeated review rounds, no delegate chains.",
+    "- Multi-planner escalation (cross-module scope only): when explorer evidence shows real module",
+    "  boundaries (>= 2 modules, interface contracts are the core risk), you may dispatch up to 3",
+    "  planners in parallel — one per module, each with maxNestingDepth: 0 (sub-planners get no nested",
+    "  agents) and a briefing carrying only that module's exact immutable explorer publication IDs",
+    "  and distilled evidence; never use a task-name URI as durable briefing. Root owns cross-module",
+    "  integration and synthesizes the final unified Plan (or designates one lead planner",
+    "  for integration). Single-module scope stays one planner.",
+    "- Do not use implementation-capable agents in Plan mode. The root agent owns user interaction,",
     "  evidence spot-checking, contract validation, plan-update, and plan-confirm; persist the returned",
-    "  Markdown only after that check, and return incomplete drafts to the same planner for revision",
-    "  instead of silently authoring or filling Plan sections itself.",
-    "- Run a Socratic pressure review before confirmation: challenge assumptions, contradictions,",
-    "  boundaries, failure cases, and integration effects with concrete code evidence.",
+    "  Markdown only after checking it against the planner role contract, and return incomplete drafts",
+    "  to the same planner for targeted revision (except in the lightweight flow, where you may author",
+    "  the small draft yourself).",
     "- Use ask-user-question for every user question. Ask 2-4 related questions per call, grouped by",
     "  one review branch; do not ask questions as plain assistant text.",
-    "- Keep reviewing until scope, boundaries, non-goals, requirements, and acceptance checks are",
-    "  explicitly locked; unresolved risks must stay visible.",
+    "- Root performs one contract spot-check covering scope, boundaries, non-goals, requirements, and",
+    "  acceptance checks. Send concrete gaps to the same planner as targeted revisions without starting",
+    "  another review chain; unresolved risks must stay visible.",
     "- Keep the final Markdown decision-complete and directly consumable by an execution agent. Omit",
     "  interview logs, delegate transcripts, and generic boilerplate. Validate the planner's draft",
     "  against the planner role contract before persisting it; return incomplete drafts for revision.",

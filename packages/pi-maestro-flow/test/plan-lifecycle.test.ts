@@ -872,23 +872,33 @@ test("Plan hooks preserve read-only discovery and block mutations before approva
     assert.equal(planResult?.message?.customType, "plan-mode-reminder");
     assert.match(planPrompt, /Align every user requirement/);
     assert.match(planPrompt, /verifiable acceptance check/);
-    for (const role of ["analyst", "research", "explorer", "planner"]) {
+    for (const role of ["explorer", "planner"]) {
       assert.ok(planPrompt.includes(`\`${role}\``), role);
     }
-    assert.match(planPrompt, /dispatch the built-in `planner` role for every final Plan, including\s+small Plans/);
-    assert.match(planPrompt, /The planner owns the document and may call `analyst`/);
-    assert.match(planPrompt, /role-level Plan document contract/);
+    assert.doesNotMatch(planPrompt, /`analyst`/);
+    assert.doesNotMatch(planPrompt, /`research`/);
+    assert.match(planPrompt, /dispatch `explorer` ONCE with batched parallel/);
+    assert.match(planPrompt, /unless the cross-module escalation below applies, dispatch one `planner`/);
+    assert.match(planPrompt, /exact `agent:\/\/` publication ID as an immutable briefing reference/);
+    assert.match(planPrompt, /correlation ID only when latest-turn semantics are intentional/);
+    assert.match(planPrompt, /Lightweight flow \(small, well-understood task\): skip agent exploration entirely/);
+    assert.match(planPrompt, /at most ONE nested read-only agent/);
+    assert.match(planPrompt, /revising its own draft/);
+    assert.match(planPrompt, /Multi-planner escalation \(cross-module scope only\)/);
+    assert.match(planPrompt, /up to 3\s+planners in parallel/);
+    assert.match(planPrompt, /maxNestingDepth: 0 \(sub-planners get no nested/);
+    assert.match(planPrompt, /briefing carrying only that module's exact immutable explorer publication IDs/);
+    assert.match(planPrompt, /never use a task-name URI as durable briefing/);
     assert.match(planPrompt, /evidence spot-checking, contract validation, plan-update, and plan-confirm/);
-    assert.match(planPrompt, /persist the returned\s+Markdown only after that check/);
-    assert.match(planPrompt, /return incomplete drafts\s+to the same planner/);
-    assert.match(planPrompt, /against the planner role contract before persisting it/);
-    assert.match(planPrompt, /Do not use\s+implementation-capable agents in Plan mode/);
+    assert.match(planPrompt, /persist the returned\s+Markdown only after checking it against the planner role contract/);
+    assert.match(planPrompt, /targeted revision/);
     assert.doesNotMatch(planPrompt, /Required Plan document contract/);
     assert.doesNotMatch(planPrompt, /## Objective/);
     assert.doesNotMatch(planPrompt, /Files \/ symbols/);
-    assert.match(planPrompt, /Socratic pressure review/);
     assert.match(planPrompt, /Use ask-user-question for every user question/);
     assert.match(planPrompt, /Ask 2-4 related questions per call/);
+    assert.match(planPrompt, /Root performs one contract spot-check/);
+    assert.match(planPrompt, /without starting\s+another review chain/);
     assert.match(planPrompt, /scope, boundaries, non-goals/);
     assert.match(planPrompt, /quality gates to key Todos/);
     for (const toolName of ["Read", "ffgrep", "fffind", "smart_search"]) {
@@ -901,6 +911,8 @@ test("Plan hooks preserve read-only discovery and block mutations before approva
     // Bash is default-allow in Plan mode: read-only discovery stays available...
     for (const command of [
       "rg -n Plan src",
+      "rg -ln persistAgentOutput packages",
+      "diff -u a.txt b.txt",
       "find . -name '*.ts'",
       "du -sh .",
       "ls -la | head -20",
@@ -932,6 +944,10 @@ test("Plan hooks preserve read-only discovery and block mutations before approva
     // ... only clearly mutating commands are blocked.
     for (const command of [
       "rm -rf src",
+      "xargs rm -f",
+      "; rm -rf src",
+      "(rm src) || true",
+      "mv a b",
       "sed -i 's/a/b/' src/app.ts",
       "git diff --output=review.patch",
       "git show --ext-diff HEAD",
@@ -972,6 +988,40 @@ test("Plan hooks preserve read-only discovery and block mutations before approva
     }
     assert.equal(onToolCallPlan({ toolName: "todo", input: { action: "list" } }), undefined);
     assert.match(onToolCallPlan({ toolName: "todo", input: { action: "create" } })?.reason ?? "", /blocked/);
+    // Plan mode dispatch allowlist: explorer and planner pass; other roles are blocked at root.
+    assert.equal(onToolCallPlan({
+      toolName: "teammate",
+      input: { tasks: [{ prompt: "find entry points", agent: "explorer" }] },
+    }), undefined);
+    assert.equal(onToolCallPlan({
+      toolName: "teammate",
+      input: { tasks: [{ prompt: "author the Plan", agent: "planner" }] },
+    }), undefined);
+    for (const role of ["analyst", "research", "general"]) {
+      assert.match(onToolCallPlan({
+        toolName: "teammate",
+        input: { tasks: [{ prompt: "work", agent: role }] },
+      })?.reason ?? "", /blocked/, role);
+    }
+    // Plan mode allows targeted revision of a read-only planner/explorer via teammate-send
+    // (steer/follow_up are message injections), but blocks abort (terminates the agent).
+    assert.equal(onToolCallPlan({
+      toolName: "teammate-send",
+      input: { to: "planner-1", message: "revise section 3", mode: "follow_up" },
+    }), undefined);
+    assert.equal(onToolCallPlan({
+      toolName: "teammate-send",
+      input: { to: "planner-1", message: "stop and rewrite", mode: "steer" },
+    }), undefined);
+    assert.match(onToolCallPlan({
+      toolName: "teammate-send",
+      input: { to: "planner-1", mode: "abort" },
+    })?.reason ?? "", /blocked/);
+    // Default mode (omitted) is follow_up — allowed.
+    assert.equal(onToolCallPlan({
+      toolName: "teammate-send",
+      input: { to: "planner-1", message: "revise section 3" },
+    }), undefined);
     assert.equal(onToolCallPlan({ toolName: "goal", input: { action: "get" } }), undefined);
     assert.match(onToolCallPlan({ toolName: "goal", input: { action: "create" } })?.reason ?? "", /blocked/);
     assert.match(onToolCallPlan({
