@@ -60,7 +60,7 @@ Called per task with the `TeammateRunSpec` and `BackendRunOptions`. It resolves 
 
 `TeammateRunSpec` carries only orchestrator-visible fields: `agent`, `task`, `name`, `backend`, `context`, `model`, `thinking`, `cwd`, `outputSchema`, `todos`. Most of what is absent is absent because the host enforces it — `fallbackModels` is sequenced by the host across attempts, `maxNestingDepth` is checked before a child starts, and `cwd` arrives already resolved.
 
-**`timeoutMs` is the exception, and it is the one you are most likely to want.** It is absent from `TeammateRunSpec` and enforced by nobody on the registry path: `RunSingleTeammateParams` carries a `timeoutMs`, `backendSpecOf` does not forward it, and the word does not appear in `execution.ts` at all. Two host call sites pass one today — the advisor and the delegation planner — and under `mode: "backend-registry"` both are dropped, for every backend rather than only for CLI ones. So a task-level timeout does not reach you, and no host watchdog is standing behind you.
+**`timeoutMs` is the exception, and it is the one you are most likely to want.** It is absent from `TeammateRunSpec` and enforced by nobody on either registry path: `RunSingleTeammateParams` carries a `timeoutMs`, `backendSpecOf` does not forward it, and the word does not appear in `execution.ts` at all. Two host call sites pass one today — the advisor and the delegation planner — and under `mode: "backend-registry"` or `mode: "model-registry"` both are dropped, for every backend rather than only for CLI ones. So a task-level timeout does not reach you, and no host watchdog is standing behind you.
 
 An adapter that needs a time bound declares one as a `configFields` entry and applies it itself. That makes the bound **per registration, not per task**: two tasks routed to the same registration get the same bound, and a caller cannot ask for a shorter one. `acp-cli`'s `runTimeoutMs` is that shape, and it is a deliberate accepted limit rather than an oversight — closing it means adding a field to `TeammateRunSpec`, which is a change to the published `v1` interface. Register the same module twice with different `config` when two workloads need different bounds.
 
@@ -167,9 +167,9 @@ Adjudication runs during graph validation and again on the single-dispatch path,
 
 The load-bearing rule for an adapter author: **the table records what this backend actually does, not what it could do**. Declaring `emulated` for something you have not built routes the task to you and then fails it — later, and with a worse diagnostic, than an honest `unsupported`.
 
-## Registering a backend
+## Registering a backend (legacy and backend-registry modes)
 
-The registration document is `.pi/teammate-backends.json` in the workspace root, shaped as `BackendRegistryConfig`:
+The original registration document is `.pi/teammate-backends.json`, shaped as `BackendRegistryConfig`:
 
 ```json
 {
@@ -188,10 +188,78 @@ The registration document is `.pi/teammate-backends.json` in the workspace root,
 }
 ```
 
-- `mode` is `legacy` or `backend-registry`, and **absent means `legacy`**. Writing registrations does not by itself change how anything runs; opting in is one explicit edit, and reverting is the same edit.
+- In this older document shape, `mode` is `legacy` or `backend-registry`, and **absent means `legacy`**. `model-registry` uses the v2 manifest below. Writing registrations does not by itself change how anything runs; opting in is one explicit edit, and reverting is the same edit.
 - `default` names the backend a task that names none will use. A `default` that is not registered is rejected when the document is read.
 - `backends` maps a registration name to a `BackendRegistration`, which is a `module` specifier plus an optional `config`.
 - The `pi-subprocess` registration is merged in automatically, so a document that only adds a backend does not lose Pi.
+
+## Model-registry v2
+
+`mode: "model-registry"` changes the authority from a backend name plus incidental model id into an explicit model-registration graph. The document must set `version: 2`, `default`, `defaultModel`, `backends`, and `models`. `defaultModel` must name an explicit `deploymentDefault: true` model on the default deployment.
+
+```json
+{
+  "version": 2,
+  "mode": "model-registry",
+  "default": "dsh-prod",
+  "defaultModel": "deepseek/production",
+  "backends": {
+    "dsh-prod": {
+      "module": "pi-maestro-backends/dsh",
+      "config": { "model": "deepseek-v4-pro", "apiKeyEnv": "DEEPSEEK_API_KEY" }
+    }
+  },
+  "models": {
+    "deepseek/production": {
+      "modelId": "deepseek-v4-pro",
+      "deployment": "dsh-prod",
+      "selector": { "kind": "adapter-model", "value": "deepseek-v4-pro" },
+      "deploymentDefault": true,
+      "capabilities": { "reasoning": true, "input": ["text"] }
+    }
+  },
+  "compatibility": {
+    "version": 1,
+    "teammateCliToolsProjection": { "enabled": false }
+  }
+}
+```
+
+The teammate `model` field selects the registration id (`deepseek/production`), not DSH's intrinsic model id or selector. DSH receives the `adapter-model` selector value. This separation lets two DSH deployments expose the same intrinsic model with different runtime configuration while retaining distinct registration identities.
+
+### Topology matrix
+
+| Deployment module | Harness | Transport | Model selector | Session availability |
+|---|---|---|---|---|
+| `pi-subprocess` | Pi | local process / Pi RPC | `adapter-model` or `deployment-default` | root and child sessions |
+| `pi-maestro-backends/dsh` (`mode: local`) | DSH | local process / JSON-RPC stdio | `adapter-model` or `deployment-default` | root and child sessions |
+| `pi-maestro-backends/dsh` (`mode: ssh`) | DSH | direct SSH / JSON-RPC stdio | `adapter-model` or `deployment-default` | root and child sessions |
+| `pi-maestro-teammate/v1/acp-cli` (`mode: local`) | ACP | local process / ACP | `adapter-model` or `deployment-default` | root and child sessions |
+| `pi-maestro-teammate/v1/acp-cli` (`mode: ssh`) | ACP | direct SSH / ACP | `adapter-model` or `deployment-default` | root and child sessions |
+| `remote-workers` | Pi or ACP | SSH gateway / `remote/2` | `fixed` only | active root Monitor session only |
+| third-party module | adapter-owned | adapter-owned until resolved | depends on resolved adapter | unavailable until resolution succeeds |
+
+`model-availability` keeps every registered route diagnostic-visible. Its additive `model_registry.registrations` matrix reports secret-free registration/model/deployment identity, normalized harness and transport, plus `registered`, `resolvable`, `sessionAvailable`, `healthy`, and a sanitized `unavailableReason`. A remote route outside Monitor remains in this matrix with the deterministic reason `Remote model routes are available only from the active root Monitor session.` It is omitted only from the selectable `teammate_models` catalog.
+
+### CLI compatibility projection
+
+`compatibility.teammateCliToolsProjection.enabled: true` is an explicit catalog compatibility projection, not a second dispatch authority. Each enabled `teammate-cli-tools.json` name is projected only when exactly one ACP deployment in `backends` owns `cli/<tool>` through its `config.modelId`. Zero or multiple matches produce a sanitized diagnostic and no model registration. Command, SSH, and credential values still come from the backend deployment; the compatibility file cannot launch a route by itself.
+
+### Settings, migration, and rollback
+
+The Flow Settings provider edits backend configuration only; it is **not a model registration editor**. In v2 it enumerates custom deployment ids by exact stored key plus exact module match. A backend-field edit preserves `version`, `defaultModel`, `models`, `compatibility`, custom and unknown third-party deployments, unknown config fields, and unknown top-level fields. Credential values remain outside the repository in owner-only runtime env files, and prepare/commit retains the document etag comparison.
+
+Migration from `backend-registry`:
+
+1. Back up `.pi/teammate-backends.json` and keep every existing deployment id and `module`/`config` entry.
+2. Add `version: 2`, change `mode` to `model-registry`, and create an explicit `models` entry for every selectable route. Mark exactly one model per default deployment with `deploymentDefault: true`, then set `defaultModel` to that registration id.
+3. For DSH, put the harness model in `selector.value`; for ACP use the route its deployment accepts; for remote workers use `fixed`.
+4. Enable the CLI compatibility projection only if the old `teammate-cli-tools.json` catalog is still needed, and verify each projected name has exactly one ACP owner.
+5. Reload extensions (or restart Pi) when entering from a cached older mode, then run `model-availability` and inspect all four gates. Once model-registry is active, valid semantic edits are revision-aware on subsequent prompt/dispatch boundaries.
+
+Rollback is a one-field mode change back to `backend-registry` or `legacy`, followed by an extension reload/restart. Keep the v2-only sections in place for round-trip preservation; the old-mode reader ignores them, and Flow Settings preserves fields it does not edit. This preservation does **not** guarantee valid re-entry into `model-registry`: the strict v2 parser may reject unsupported or unknown fields even when Flow Settings retained them unchanged. Remove or update unsupported fields before re-entering v2. After rollback the older reader is frozen again until the next invalidation boundary. Do not delete supported `models` or `compatibility` sections unless abandoning the migration permanently.
+
+The task-timeout gap applies to model-registry too: task-level `timeoutMs` is not forwarded into `TeammateRunSpec` and no registry-path watchdog enforces it. Use a backend registration's own timeout field, such as ACP `runTimeoutMs`, until the published spec changes.
 
 ### `cli/<tool>` routes and `teammate-cli-tools.json`
 
@@ -287,3 +355,24 @@ Its table differs from `acp-cli` for reasons that are each traceable to its tran
 - `abort: "emulated"` — there is no per-run cancel, so stopping one run means closing the runtime. `acp-cli` cancels its ACP session directly and declares `native`.
 
 Its `recoveryShape` is `in-context-continuation`, and the fence still gates it exactly as it gates a `replay` backend.
+
+### Direct SSH (`mode: ssh`)
+
+Setting `mode` to `ssh` turns the launch into an OpenSSH command line aimed at a remote host. Six fields govern it, mirroring the acp-cli backend's ssh surface so one transport is configured the same way twice:
+
+| Field | Meaning |
+|---|---|
+| `mode` | `"ssh"` selects the remote launch; every field below is unused under `local` |
+| `host`, `user`, `port` | the ssh destination; `host` and `user` become required, `port` defaults to 22 |
+| `hostKeySha256` | optional OpenSSH `SHA256:...` fingerprint; when set, the host key is pinned before launch |
+| `identityFile` | optional private key handed to ssh with `-i` plus `IdentitiesOnly=yes` |
+
+The remote side is **POSIX shell only**: the remote command is POSIX-quoted argv joined under `cd <cwd> && exec <runtime> <cordisConfig>`, executed by the remote login shell. A Windows remote without a POSIX shell is not a target.
+
+Authentication fails closed: the launch runs `ssh -o BatchMode=yes -o StrictHostKeyChecking=yes`, so there are no prompts, ever. With `identityFile` set, only that key is offered (`IdentitiesOnly`); without one, authentication proceeds through the host's agent (`SSH_AUTH_SOCK` is forwarded deliberately). Anything ssh would ask about — a missing key, an unknown host — is a failed launch, not a question.
+
+A pinned fingerprint is a **pre-flight pin, not handshake-time verification**. `ssh-keyscan` runs before launch, the returned records are matched against the configured fingerprint, and the matching lines are written to a single-entry known_hosts file that this launch's `UserKnownHostsFile` points at. That proves the host presented the pinned key *at scan time*; ssh then enforces it at connect time against that file. It does not turn the scan itself into an authenticated channel — pinning a fingerprint you read over a compromised path pins the attacker's key just as well. A host that rotates keys between scan and connect fails the launch closed, which is the intended behavior.
+
+Environment passthrough degrades to best-effort `SetEnv`: only names this host actually resolves are forwarded as `-o SetEnv=<name>=<value>`; an unset name is skipped rather than sent as an explicit empty value that would clobber whatever the far side already has. Note sshd accepts `SetEnv` only when its own `AcceptEnv` permits the name — a name the remote refuses is silently dropped by sshd, so anything the runtime genuinely needs should live in its own configuration beside `cordis.yml`.
+
+Two consequences deserve naming. `todoBridge` is unsupported under `ssh` and rejected at load: the todo endpoint listens on this host's loopback, which a runtime on a far host cannot reach. And `requestTimeoutMs` bounds each JSON-RPC request individually, not the whole turn — over ssh every request pays a network round trip, so a timeout tuned for localhost can fail mid-turn on a slow link; the resolver warns below 300000 rather than rejecting, because a fast link with a low bound is legitimately fine.

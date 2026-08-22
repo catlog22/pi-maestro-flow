@@ -6,7 +6,7 @@ Pi extension for dispatching one or more role-based teammate tasks through a sin
 
 ## Breaking Changes In 1.0
 
-> Current version: **1.7.1**. The 1.0 breaking changes below remain in effect; later releases added circuit breaker, retry resilience, quiet state, duration tracking, observe `watch`/`until=completed`, per-workspace mailbox isolation, lifecycle hardening, and receiver-safe model-registry refresh without breaking the public API.
+> Current version: **2.0.0**. The 1.0 breaking changes below remain in effect; later releases added circuit breaker, retry resilience, quiet state, duration tracking, observe `watch`/`until=completed`, per-workspace mailbox isolation, lifecycle hardening, and explicit model-registry routing without breaking the v1 public import paths.
 
 - Every public `teammate` call requires a non-empty `tasks` array.
 - Single-agent work is represented by `tasks` with one item.
@@ -258,7 +258,27 @@ Thinking precedence:
 task.thinking > top-level thinking > taskType mapping > role mapping > role frontmatter thinking > Pi default
 ```
 
-Role `fallbackModels` follow the selected primary model. Model identifiers must use exact authenticated `provider/model` values.
+Role `fallbackModels` follow the selected primary model. In legacy and backend-registry modes, model identifiers use exact authenticated `provider/model` values. In v2 model-registry mode they use canonical registration ids or configured aliases.
+
+## Model Registry
+
+`.pi/teammate-backends.json` has three modes:
+
+| Mode | Authority |
+|---|---|
+| absent / `legacy` | original Pi/CLI routing |
+| `backend-registry` | older backend registrations; model catalog remains a compatibility projection |
+| `model-registry` with `version: 2` | explicit deployment and model-registration graph |
+
+A v2 manifest preserves separate identities for the model registration, intrinsic model, deployment, and adapter selector. DSH deployments use `pi-maestro-backends/dsh` and select the harness model with an `adapter-model` selector. Pi, DSH, local ACP, and direct-SSH ACP routes are available in root and child sessions. `remote-workers` uses a `fixed` selector and is available only from the active root Monitor session.
+
+The Flow `model-availability` tool returns the selectable ids in its existing `teammate_models` field and adds a secret-free `model_registry.registrations` topology matrix. Every row reports `registered`, `resolvable`, `sessionAvailable`, `healthy`, and a sanitized `unavailableReason`; remote rows remain visible outside Monitor with a deterministic reason. Raw backend config, commands, SSH targets, selectors, and credential values are never included.
+
+CLI catalog compatibility is opt-in with `compatibility.teammateCliToolsProjection.enabled`. An enabled `teammate-cli-tools.json` entry is projected only when exactly one ACP deployment owns the matching `cli/<tool>` route. The compatibility file is not a launch authority.
+
+To migrate, back up the document, retain deployment ids/config, add `version: 2`, explicit `models`, one default registration on the default deployment, and `defaultModel`; then reload extensions and inspect all four gates. Roll back by changing only `mode` to `backend-registry` or `legacy` and reloading. Keeping `models`, `defaultModel`, and `compatibility` provides round-trip preservation, not guaranteed valid re-entry: the strict v2 parser may still reject unsupported or unknown fields. Flow Settings can edit exact module-matched deployment config and preserves all v2/unknown sections, but intentionally provides no model registration editor.
+
+Task-level `timeoutMs` is still not forwarded through either registry mode and no host watchdog replaces it. Configure a deployment timeout such as ACP `runTimeoutMs` when a bound is required. See [the backend adapter contract](../../docs/teammate-backend-adapter-contract.md) for the manifest, DSH example, topology matrix, migration, and rollback details.
 
 ## Agent Status Machine
 

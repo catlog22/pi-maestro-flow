@@ -2,6 +2,30 @@
 
 ## 2.0.0
 
+### pi-teammate-models CLI 与 DSH 直连 SSH（新增）
+
+- 新增独立 CLI `pi-teammate-models`（`list`/`path`/`edit`/`add`）：`list` 用与运行时相同的 parser 静态编译路由表，不加载任何 backend 模块；`edit` 按声明字段逐项编辑部署配置；`add` 引导完成 家族 → 传输变体 → 唯一部署 id → 类型校验字段（空输入应用默认值，credential-ref 只收变量名）→ 模型注册。写入前整份候选 manifest 重新编译，编号的编译错误（重复 selector、争夺部署默认、selector/拓扑不匹配）全部列出并重新提示；确认后走统一的验证 + 备份轮换 + 原子发布写路径。
+- 并发语义为文档化的后写入者胜：发布前重读文件，外部修改以脱敏 diff 展示并需显式确认（`--yes` 可预确认）。每次写入轮换 `<file>.bak` / `<file>.bak.1`，撤销即 `cp <file>.bak <file>`。支持 `--file` 替代路径与 `--locale en|zh-CN`。legacy/backend-registry 文档渲染计算出的 v2 升级骨架且绝不写入；唯一出口是 `[E] 显式写出升级副本`（写到 `<file>.upgraded.json`），默认 `[A] 中止`。
+- DSH 后端新增 `mode: "ssh"` 直连传输：通过 OpenSSH 在远端主机启动运行时（远端要求 POSIX shell）。`host`/`user` 在 ssh 下必填，可选 `port`、`identityFile`（附带 `IdentitiesOnly`）、`hostKeySha256` 指纹预检固定（启动前 `ssh-keyscan` 对照，非握手时验证）。认证走 `BatchMode=yes` + `StrictHostKeyChecking=yes`，永不提示；`envPassthrough` 以尽力而为的 `SetEnv` 转发（受远端 `AcceptEnv` 限制）；`todoBridge` 与 `mode: ssh` 互斥并在加载时拒绝；`requestTimeoutMs` 按单个 JSON-RPC 请求计，低于 300000 时给出告警。`cordisConfig`/`cwd` 为远端路径，仅做形态校验、不验证存在性。
+
+### Control Center Connections tab（新增）
+
+- Teammate Control Center 新增单一 **Connections**（zh-CN：**连接**）tab，把 v2 model-registry 部署的列表/编辑/新增嵌入现有 worker hosts/targets 视图；稳定 tab 顺序、统一筛选列表、窄屏降级及原有 host/target 命令与快捷键保持不变，部署不提供 TUI 删除操作。
+- TUI 与 CLI 共享声明式字段表单和部署/注册向导；字段校验失败在当前字段就地重新提示，整份 manifest 编译失败则显示编号错误并重新提示对应注册区块。部署写入复用同一 D12 发布管线，包括 parser 校验、外部修改确认、`.bak`/`.bak.1` 轮换与原子发布。
+- legacy/backend-registry 文档在 Connections tab 中进入显式升级预览流程，确认后只以排他创建方式写出 `<file>.upgraded.json`，不修改原文档；保存后重新加载 model catalog 并返回 Connections tab。
+
+### model-registry v2（新增模式）
+
+- 新增显式 `version: 2` + `mode: "model-registry"` manifest：`backends` 定义部署，`models` 定义 canonical 模型注册，`defaultModel` 必须指向默认部署上唯一的 `deploymentDefault` 注册。Pi、DSH、ACP、remote-worker 的 harness/transport/selector 拓扑由同一份投影编译，调度与目录共享 revision/hash 身份。
+- DSH 模型选择现在可在 manifest 中明确写成 `adapter-model` selector；teammate 的 `model` 选择注册 id，而 DSH 接收 selector value。`remote-workers` 使用 `fixed`，仅在当前 root Monitor session 中可选。
+- `model-availability` 保留旧输出字段，并新增无密钥的注册身份/拓扑与 `registered`、`resolvable`、`sessionAvailable`、`healthy` 四道门。Monitor 外的远端路由不再从诊断中消失，而是以确定性原因保留；backend config、命令、SSH target、selector 与凭据值不对外输出。
+- CLI 兼容投影必须由 `compatibility.teammateCliToolsProjection.enabled` 显式开启，且一个 `cli/<tool>` 必须恰好由一个 ACP 部署拥有；`teammate-cli-tools.json` 只提供兼容目录输入，不恢复启动权威。
+- Flow Settings 按 document key 与 module 精确匹配自定义部署，只修改目标 config path；round-trip 保留 `version`、`defaultModel`、`models`、`compatibility`、未知第三方部署/配置/顶层字段，并继续使用 etag CAS 与仓库外凭据文件。没有新增模型注册编辑器。
+- 迁移：备份原文件，保留部署 id/config，加入 v2 字段与显式模型注册，reload extension 后检查四道门。回滚只改 `mode` 为 `backend-registry` 或 `legacy` 并 reload；保留 v2-only 区段只是 round-trip 保留，不保证有效重进，严格 v2 parser 仍可能拒绝不支持或未知的字段。旧模式读缓存直到 invalidation，model-registry 激活后则按语义 revision 刷新。
+- 已知限制保持不变：task 级 `timeoutMs` 在 `backend-registry` 与 `model-registry` 都不会进入 `TeammateRunSpec`，也没有 host watchdog；需使用部署级超时（如 ACP `runTimeoutMs`）。
+
+> 下方“迁移两步”是 2.0.0 最初引入 **旧 `backend-registry` 模式**时的历史记录，原文保留；它不是 model-registry v2 的完整迁移说明。
+
 ### 行为变化（Breaking）
 
 - **`cli/<tool>` 只能由 `.pi/teammate-backends.json` 里的注册项派发，不再从 `teammate-cli-tools.json` 单独起跑。** 该文件缺失或仍是 legacy 模式时，任何 `cli/<tool>` 任务被当场拒绝而不再回落到 pi 子进程；模型 id 里的工具名即注册名，注册表按名字找不到就按名字报错。升级前只靠 `teammate-cli-tools.json` 跑 `cli/gemini` 的部署会在升级后停止派发。
