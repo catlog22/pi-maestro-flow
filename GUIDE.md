@@ -792,7 +792,7 @@ teammate({ agent: "delegate", task: "...", timeoutMs: 120000 })
 ```
 
 ### Modified Alt/Option Shortcuts Don't Work
-`Alt+Shift+P` requires a terminal that reports combined modifiers through the Kitty keyboard protocol or CSI-u. `Alt+T` and `Alt+G` use ordinary Meta-key sequences. Kitty, WezTerm, and Ghostty support enhanced modified-key reporting; in other terminals use `/plan` when `Alt+Shift+P` is unavailable. For `Alt+T` and `Alt+G` on macOS, configure Option as Meta/Esc+ in the terminal keyboard settings.
+All Maestro global shortcuts match on the `alt` token: `Alt+T` (todo panel), `Alt+G` (goal), `Alt+R` (session list), `Alt+W` (window monitor), `Alt+E` (session detail), `Alt+L` (sidebar focus), `Alt+M` (control center), `Alt+J` (background jobs), and the enhanced-reporting pair `Alt+Shift+P` (Plan) / `Alt+Shift+E` (enhance) / `Alt+Shift+T` (Cockpit todo center). Kitty, WezTerm, and Ghostty negotiate enhanced modified-key reporting automatically, so every shortcut works there out of the box — including on macOS. On macOS Terminal.app, iTerm2, and the VS Code integrated terminal, Option does not send Meta by default; enable it once per terminal: Terminal.app → Settings → Profiles → Keyboard → "Use Option as Meta Key"; iTerm2 → Settings → Profiles → Keys → General → set Left/Right Option to `Esc+`; VS Code → `terminal.integrated.macOptionIsMeta: true`. The TUI hints render as `Option+X` on macOS, and pi prints a one-time setup hint when it detects an affected terminal. Slash commands remain full fallbacks (`/maestro-todo`, `/maestro-goal`, `/plan`, `/enhance`, `/cockpit`).
 
 ### Long Session Context Overflow
 ```bash

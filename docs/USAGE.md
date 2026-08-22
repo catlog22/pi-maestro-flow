@@ -90,6 +90,7 @@ pi list
 | pi-maestro-flow | `ffgrep` | FFF 快速字面内容搜索 |
 | pi-maestro-flow | `fffind` | FFF 快速模糊文件搜索 |
 | pi-maestro-flow | `search_tool_bm25` | BM25 工具发现 |
+| pi-maestro-flow | `model-availability` | 无密钥的模型注册与路由诊断 |
 | pi-maestro-flow | `plan-enter` | 进入计划模式 |
 
 ---
@@ -125,6 +126,72 @@ teammate({
 顶层 `agent/taskType/model/thinking/context/cwd/outputSchema/timeoutMs` 是 task 默认值，task 同名字段覆盖。未指定角色时默认 `general`。`{name}`/`{name.field}` 注入上游输出，`dependsOn` 只声明顺序。`background` 默认 `false`。
 
 模型优先级：task model > 顶层 model > taskType 映射 > 角色 model > 父 Pi 模型。taskType 只影响路由，不改变角色行为。Control Center 会自动合并内置类型、当前发现的内置/项目/用户 Agent YAML 类型及已有映射类型；自定义 Agent 可声明新的小写类型标识。
+
+#### model-registry 模式
+
+`.pi/teammate-backends.json` 有三种需要区分的模式：缺省/`legacy` 保留原路径，`backend-registry` 使用旧式后端注册与附带模型目录，v2 `model-registry` 则要求显式的 `models`、`defaultModel` 与部署拓扑。此时 teammate 的 `model` 值是 canonical 模型注册 id，不是 backend id 或 adapter selector。
+
+DSH 部署使用 `pi-maestro-backends/dsh`，对应模型注册使用 `adapter-model` selector，其 `value` 是 DSH 模型。Pi、本地 ACP、直连 SSH ACP 在 root 与 child session 中均可用；`remote-workers` 只能使用 `fixed`，并且仅在当前 root Monitor session 中 sessionAvailable。
+
+迁移后运行 `model-availability`。兼容字段 `teammate_models`、`delegate_tools`、`delegate_fallback`、`delegate_config_path` 保留；新增的 `model_registry.registrations` 仅显示注册/模型/部署身份、标准化 harness/transport、`registered`、`resolvable`、`sessionAvailable`、`healthy` 四道门和净化后的 `unavailableReason`。Monitor 外的远端路由仍保留在诊断矩阵中，并给出确定性原因。
+
+CLI 兼容投影必须显式设置 `compatibility: { "version": 1, "teammateCliToolsProjection": { "enabled": true } }`。只有恰好一个 ACP 部署拥有相同 `cli/<tool>` 路由时，启用的 `teammate-cli-tools.json` 名称才会被投影；该文件不会重新成为启动权威。
+
+**外部 CLI 适配器需要自行安装**：配置连接只是指向一个可执行文件，teammate 不会自动安装任何包。已知 ACP 适配器的安装命令（全局装一次即可，适配器会自带对应 agent 运行时）：`codex-acp` ← `npm i -g @agentclientprotocol/codex-acp`；`claude-agent-acp` ← `npm i -g @agentclientprotocol/claude-agent-acp`。命令未安装时，启动探测与模型目录刷新会直接给出这条安装命令。
+
+迁移步骤：先备份文件并保留部署 id/config，再加入 `version: 2`、显式模型注册以及默认部署上唯一的默认模型，可选开启 CLI 投影，然后 reload extension 并检查四道诊断门。回滚只需把 `mode` 改回 `backend-registry` 或 `legacy` 并 reload；保留 `models`、`defaultModel`、`compatibility` 只是 round-trip 保留，不保证能有效重进。Flow Settings 只编辑 backend 字段，保留 v2/未知区段、CAS 与凭据隔离，不提供模型注册编辑器。严格 v2 parser 仍可能拒绝不支持或未知的字段，重进 `model-registry` 前必须删除或更新这些字段。
+
+已知缺口：registry dispatch 仍会丢弃 task 级 `timeoutMs`；`backend-registry` 与 `model-registry` 都没有 host watchdog。需要超时时应配置部署自己的字段，例如 ACP `runTimeoutMs`。完整 manifest 与拓扑契约见 [Teammate Backend Adapter Contract](teammate-backend-adapter-contract.md)。
+
+#### DSH 直连 SSH 模式
+
+DSH 部署设置 `"mode": "ssh"` 后会通过 OpenSSH 在远端主机上启动运行时。六个字段控制该传输：
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `mode` | enum | `"ssh"` 选择远端启动；默认 `"local"` 时忽略下列所有字段 |
+| `host` | text | 远端主机名；`ssh` 下**必填** |
+| `user` | text | 远端登录名；`ssh` 下**必填** |
+| `port` | integer | TCP 端口，默认 `22` |
+| `hostKeySha256` | text | 可选的 `SHA256:...` 指纹，启动前通过 `ssh-keyscan` 预检固定 |
+| `identityFile` | path | 可选私钥；ssh 随后只提供这把密钥（`IdentitiesOnly`） |
+
+`cordisConfig` 与 `cwd` 在 `ssh` 下是**远端路径**：它们进入远端 shell 命令（`cd <cwd> && exec <runtime> <cordisConfig>`），不由本机使用。校验在本机执行，因此只检查形态——控制字符会被拒绝（值要跨 ssh 命令行传递），但**不会验证存在性**：对远端路径做本机存在性检查本身就是错的，路径写错只会表现为启动失败，而不是注册被拒。
+
+认证为 BatchMode 且仅支持身份文件/agent：启动命令带 `-o BatchMode=yes -o StrictHostKeyChecking=yes`，任何情况下都不会出现提示符。配置了 `identityFile` 就只提供该密钥；未配置则由本机 ssh agent 完成认证。密码提示即失败，这是有意设计。
+
+`hostKeySha256` 是启动前预检固定，不等于握手时验证：`ssh-keyscan` 在启动前运行，指纹匹配在连接时对照固定的 known_hosts 文件强制执行。请通过可信渠道获取指纹；远端若在扫描与连接之间轮换主机密钥，启动会直接失败（符合预期）。
+
+`envPassthrough` 降级为尽力而为的 `SetEnv`：只有本机实际解析到的名字才会转发，而远端 sshd 会丢弃其 `AcceptEnv` 不允许的名字——运行时真正需要的内容请放在 `cordis.yml` 旁的自身配置里。
+
+`mode: ssh` 下不支持 `todoBridge` 并会在加载时被拒绝：todo endpoint 监听本机 loopback，远端运行时无法到达。
+
+`requestTimeoutMs` 约束的是单个 JSON-RPC 请求而非整个回合；走 ssh 时每个请求都要过一次网络，因此应调大它（低于 `300000` 时 resolver 会警告），而不是让按 localhost 调好的超时在回合中途失败。
+
+#### pi-teammate-models CLI
+
+`pi-teammate-models` 是独立的命令行工具，用于在不打开 Control Center 的情况下读取和维护 `.pi/teammate-backends.json`：
+
+```bash
+pi-teammate-models list                     # 静态路由表（不加载任何 backend 模块）
+pi-teammate-models edit                     # 编辑某个部署的配置字段
+pi-teammate-models add                      # 引导式部署 + 模型注册向导
+pi-teammate-models path                     # 打印解析后的文档路径
+```
+
+- **`list`** 用与运行时完全相同的 parser 编译 manifest，输出注册、模型、部署、拓扑、selector 以及 `registered`/`resolvable`/`healthy` 各门。Session 可用性恒为 `n/a`——CLI 不持有 root-monitor 权威。legacy/backend-registry 文档会渲染计算出的 v2 升级骨架且**绝不写入**；唯一出口是 `[E] 显式写出升级副本`，它写到 `<file>.upgraded.json`（绝不是旧文档本身），默认为 `[A] 中止`。
+- **`edit`** 先列出部署，再对选定部署的声明字段逐项提示并显示当前值；空输入保留当前值。credential-ref 字段只接受变量**名**——粘贴机密值会被拒绝并给出明确警告，且该值不会被回显。
+- **`add`** 按 家族（`pi`/`dsh`/`acp`/第三方）→ 传输变体（适用时选 `local`/`ssh`，并强制补全 `host`/`user`）→ 唯一部署 id → 按类型校验的字段（空输入应用默认值）→ 模型注册（id、内在 modelId、selector、部署默认）逐步引导。写入前会对整份候选 manifest 重新编译；编号的编译错误（重复 selector、争夺部署默认、selector/拓扑不匹配）会全部列出并重新提示注册区块。
+
+选项：`--file <path>`（替代文档路径）、`--locale en|zh-CN`、`--yes`（预确认覆盖外部修改）。并发语义为文档化的**后写入者胜**：发布前会重新读取文件，外部修改以脱敏 diff 展示且必须显式确认（或用 `--yes` 预确认）。每次写入都会轮换备份——`<file>.bak` 保存上一版文档，`<file>.bak.1` 保存上上一版——因此撤销就是 `cp <file>.bak <file>`。
+
+#### Control Center 的连接 tab
+
+通过 `Alt+M` 或 `/teammate-models` 打开 Teammate Control Center 后，中文界面中的 **连接**（英文 **Connections**）tab 会在同一个可筛选列表中合并两类配置：v2 model-registry 部署，以及旧版 worker hosts/targets。v2 部署可直接查看，按 Enter 使用与 CLI 共用的字段表单编辑，或按 `a` 通过共用向导新增；字段校验失败会在原字段就地重新提示，整份候选 manifest 的编译错误也会回到相应注册区块。
+
+部署的新增与编辑写回同一份 `.pi/teammate-backends.json`，并调用 CLI 的同一 D12 写入管线：运行时 parser 校验、外部修改确认、`.bak`/`.bak.1` 备份轮换和原子发布均保持一致。legacy/backend-registry 文档只提供升级预览；显式确认后也只会创建 `<file>.upgraded.json`，绝不覆盖原文档。TUI 不提供部署删除；需要调整部署时使用 `pi-teammate-models edit`。
+
+原有 worker host/target 操作与快捷键保持不变：`n`/`N` 新建 host/target、Enter 编辑、`d` 删除、`t` 测试、`g`/`p` 切换全局/项目范围、Tab/Shift+Tab 或左右方向键切换 tab、Esc 关闭。部署行不会响应 `d`，因此不会误用旧版删除命令。
 
 ### 2.2 maestro — 知识感知调度
 

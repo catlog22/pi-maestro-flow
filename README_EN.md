@@ -36,6 +36,8 @@ It ships as three plugins (install one, get all three):
 ## Core Features
 
 - 🔀 **Parallel multi-agent dispatch** — spawn multiple subprocess agents at once, with DAG dependency graphs and structured output
+- 🖥️ **pi-teammate-models CLI** — maintain `.pi/teammate-backends.json` from the terminal: static route table, field-level edit, and a guided registration wizard with compile validation before every write and undoable `.bak`/`.bak.1` backup rotation
+- 🌐 **DSH direct-SSH deployments** — `mode: ssh` launches the DeepSeek Harness runtime on a remote host over OpenSSH: BatchMode prompt-free auth, pre-flight host-key fingerprint pinning, and per-request timeout guidance
 - 🎯 **Goal — autonomous long-running objectives** — set an objective and token budget, loop autonomously across turns, audited by an independent verifier
 - 📝 **Plan — approve before you change** — draft a Markdown plan read-only; edits are released only after user approval; supports a dedicated Plan model
 - 🛰️ **Pi Cockpit visualization** — live view of running teammates and the todo plan, with 9 built-in themes; Quiet mode compresses tool output and folds thinking blocks

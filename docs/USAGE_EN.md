@@ -90,6 +90,7 @@ After installation, the plugin registers these tools with Pi:
 | pi-maestro-flow | `ffgrep` | FFF fast literal content search |
 | pi-maestro-flow | `fffind` | FFF fast fuzzy file search |
 | pi-maestro-flow | `search_tool_bm25` | BM25 tool discovery |
+| pi-maestro-flow | `model-availability` | Secret-free model registration and route diagnostics |
 | pi-maestro-flow | `plan-enter` | Enter Plan mode |
 
 ---
@@ -125,6 +126,72 @@ teammate({
 Top-level `agent/taskType/model/thinking/context/cwd/outputSchema/timeoutMs` values are task defaults; task values override them. The final role default is `general`. `{name}`/`{name.field}` inject upstream output and `dependsOn` declares ordering only. `background` defaults to `false`.
 
 Model precedence is task model > top-level model > taskType mapping > role model > parent Pi model. taskType affects routing only. The Control Center automatically combines built-in types, types declared by currently discovered built-in/project/user agent YAML, and types already present in routing configuration; custom agents may declare new lower-case identifiers.
+
+#### Model-registry mode
+
+`.pi/teammate-backends.json` supports three distinct modes: absent/`legacy` keeps the original path, `backend-registry` uses backend registrations with the older incidental model catalog, and v2 `model-registry` requires explicit `models`, `defaultModel`, and deployment topology. A teammate `model` value is then the canonical model registration id, not a backend id or adapter selector.
+
+For DSH, register a deployment using `pi-maestro-backends/dsh` and give its model registration an `adapter-model` selector whose `value` is the DSH model. Pi and local/direct-SSH ACP routes are session-available in root and child sessions; `remote-workers` routes use `fixed` and are session-available only in the active root Monitor session.
+
+Run `model-availability` after migration. The compatible `teammate_models`, `delegate_tools`, `delegate_fallback`, and `delegate_config_path` fields remain; additive `model_registry.registrations` rows expose only registration/model/deployment identity, normalized harness/transport, the `registered`, `resolvable`, `sessionAvailable`, and `healthy` gates, and a sanitized `unavailableReason`. Remote rows stay diagnostic-visible outside Monitor with a deterministic reason.
+
+CLI compatibility is opt-in through `compatibility: { "version": 1, "teammateCliToolsProjection": { "enabled": true } }`. It projects an enabled `teammate-cli-tools.json` name only when exactly one ACP deployment owns the matching `cli/<tool>` route; it does not restore that file as a launch authority.
+
+**External CLI adapters must be installed separately**: a connection config only names an executable; teammate never auto-installs packages. Install commands for the known ACP adapters (one global install each; the adapter bundles its agent runtime): `codex-acp` ← `npm i -g @agentclientprotocol/codex-acp`; `claude-agent-acp` ← `npm i -g @agentclientprotocol/claude-agent-acp`. When the command is missing, launch probes and catalog refreshes surface this exact install command.
+
+Migration: back up the file, retain deployment ids/config, add `version: 2`, explicit model registrations and one default model on the default deployment, optionally enable the CLI projection, reload extensions, then inspect all four diagnostic gates. Roll back by changing only `mode` to `backend-registry` or `legacy` and reloading; keeping `models`, `defaultModel`, and `compatibility` provides round-trip preservation, not guaranteed valid re-entry. Flow Settings edits backend fields only, preserves v2/unknown sections and CAS/credential custody, and does not provide a model registration editor. The strict v2 parser may still reject unsupported or unknown fields, which must be removed or updated before re-entering `model-registry`.
+
+Known gap: registry dispatch still drops task-level `timeoutMs`; neither `backend-registry` nor `model-registry` has a host watchdog. Configure a deployment timeout such as ACP `runTimeoutMs` where required. The complete manifest and topology contract is in [Teammate Backend Adapter Contract](teammate-backend-adapter-contract.md).
+
+#### DSH direct-SSH mode
+
+A DSH deployment with `"mode": "ssh"` launches its runtime on a remote host over OpenSSH. Six fields govern the transport:
+
+| Field | Kind | Meaning |
+|---|---|---|
+| `mode` | enum | `"ssh"` selects the remote launch; default `"local"` ignores every field below |
+| `host` | text | remote hostname; **required** under `ssh` |
+| `user` | text | remote login name; **required** under `ssh` |
+| `port` | integer | TCP port, default `22` |
+| `hostKeySha256` | text | optional `SHA256:...` fingerprint pinned via a pre-flight `ssh-keyscan` |
+| `identityFile` | path | optional private key; ssh then offers only that key (`IdentitiesOnly`) |
+
+`cordisConfig` and `cwd` are **remote paths** under `ssh`: they are consumed by the remote shell command (`cd <cwd> && exec <runtime> <cordisConfig>`), not by this host. Validation runs locally and therefore checks shape only — control characters are refused because the values cross an ssh command line, but existence is **not verified**: a local path check would simply be wrong for a remote path, so a typo surfaces as a failed launch, not a rejected registration.
+
+Authentication is BatchMode and identity-file/agent-only: the launch runs `ssh -o BatchMode=yes -o StrictHostKeyChecking=yes`, so nothing prompts. With `identityFile` only that key is offered; without one, the host's ssh agent authenticates. Password prompts are failures by design.
+
+`hostKeySha256` is a pre-flight pin, not handshake-time verification: `ssh-keyscan` runs before launch and the fingerprint match is enforced against the pinned known_hosts file at connect time. Pin a fingerprint obtained over a trusted channel; a rotated host key fails the launch closed.
+
+`envPassthrough` degrades to best-effort `SetEnv`: only names this host resolves are forwarded, and the remote sshd drops any name its `AcceptEnv` does not permit — keep anything essential in the runtime's own configuration beside `cordis.yml`.
+
+`todoBridge` is unsupported with `mode: ssh` and rejected at load: the todo endpoint listens on this host's loopback, unreachable from a remote runtime.
+
+`requestTimeoutMs` bounds each JSON-RPC request, not the whole turn; over ssh every request crosses the network, so raise it (the resolver warns below `300000`) rather than letting a localhost-tuned timeout fail mid-turn.
+
+#### pi-teammate-models CLI
+
+`pi-teammate-models` is a standalone CLI for reading and maintaining `.pi/teammate-backends.json` without opening the Control Center:
+
+```bash
+pi-teammate-models list                     # static route table (no backend modules loaded)
+pi-teammate-models edit                     # edit one deployment's configuration fields
+pi-teammate-models add                      # guided deployment + model registration wizard
+pi-teammate-models path                     # print the resolved document path
+```
+
+- **`list`** compiles the manifest through the same parser the runtime loads with and prints registration, model, deployment, topology, selector, and the `registered`/`resolvable`/`healthy` gates. Session availability is always `n/a` — a CLI holds no root-monitor authority. Legacy/backend-registry documents render a computed v2 upgrade skeleton and are **never written**; the only escape is `[E]xplicitly write upgraded copy`, which writes `<file>.upgraded.json` (never the legacy document itself), with `[A]bort` as the default.
+- **`edit`** lists deployments, then prompts over one deployment's declared configuration fields with current values shown; empty input keeps the current value. Credential-ref fields take a variable **NAME** only — pasting a secret value is rejected with an explicit warning and never echoed.
+- **`add`** walks family (`pi`/`dsh`/`acp`/third-party) → transport variant (`local`/`ssh` where applicable, with `host`/`user` enforced) → a unique deployment id → kind-validated fields with defaults applied on empty input → the model registration (id, intrinsic modelId, selector, deployment default). The whole candidate manifest is recompiled before writing; numbered compiler errors (duplicate selectors, competing deployment defaults, selector/topology mismatches) are shown and the registration block re-prompts.
+
+Options: `--file <path>` (alternate document path), `--locale en|zh-CN`, `--yes` (pre-confirm overwriting external changes). Concurrency is documented **last-writer-wins**: the file is re-read before publishing and any external change is shown as a redacted diff that must be confirmed (or pre-confirmed with `--yes`). Every write rotates backups — `<file>.bak` holds the previous document and `<file>.bak.1` the one before it — so undo is `cp <file>.bak <file>`.
+
+#### Connections tab in the Control Center
+
+Open the Teammate Control Center with `Alt+M` or `/teammate-models`. Its single **Connections** tab (labelled **连接** under `zh-CN`) merges two configuration families in one filterable list: v2 model-registry deployments and legacy worker hosts/targets. A v2 deployment can be inspected, edited with Enter through the field forms shared with the CLI, or added with `a` through the shared wizard. Invalid fields re-prompt in place, while whole-manifest compiler errors return to the relevant registration block.
+
+Deployment additions and edits write the same `.pi/teammate-backends.json` document through the CLI's D12 write pipeline, preserving the same runtime-parser validation, external-change confirmation, `.bak`/`.bak.1` rotation, and atomic publish. A legacy/backend-registry document exposes an upgrade preview only; explicit confirmation can create `<file>.upgraded.json` and never overwrites the source document. The TUI does not delete deployments; use `pi-teammate-models edit` when a deployment needs adjustment.
+
+Existing worker host/target operations and hotkeys are preserved: `n`/`N` creates a host/target, Enter edits, `d` deletes, `t` tests, `g`/`p` switches global/project scope, Tab/Shift+Tab or Left/Right changes tabs, and Esc closes. Deployment rows ignore `d`, so the legacy delete command cannot remove them.
 
 ### 2.2 maestro — Knowledge-Aware Dispatch
 

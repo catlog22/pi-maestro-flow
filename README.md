@@ -36,6 +36,8 @@
 ## 核心特性
 
 - 🔀 **并行多智能体调度** — 一次派出多个子进程智能体并行工作，支持 DAG 依赖图与结构化输出
+- 🖥️ **pi-teammate-models CLI** — 终端维护 `.pi/teammate-backends.json`：静态路由表、字段级编辑与引导式注册向导，写入前编译校验，`.bak`/`.bak.1` 备份轮换可撤销
+- 🌐 **DSH 直连 SSH 部署** — `mode: ssh` 通过 OpenSSH 在远端主机启动 DeepSeek Harness 运行时：BatchMode 免提示认证、主机密钥指纹预检固定、按请求超时调优告警
 - 🎯 **Goal 自主长时目标** — 设定目标与 Token 预算，跨多轮自主循环，完成后由独立验证器审计
 - 📝 **Plan 先批准再动手** — 只读起草 Markdown 计划，用户批准后才放行编辑；支持独立 Plan 模型
 - 🛰️ **Pi Cockpit 可视化** — 实时呈现运行中的 teammate 与 todo 计划，内置 9 套主题；Quiet 模式压缩工具输出与思考折叠

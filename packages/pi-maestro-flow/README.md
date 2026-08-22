@@ -104,6 +104,8 @@ After installation:
 | `/maestro-compaction` | Compaction settings TUI (threshold, model, capacity) |
 | `/maestro-keybindings` | Shortcut conflict audit and fix |
 | `/hooks` | Hook trust review; `/hooks install` opens the installer |
+
+> **macOS:** Alt shortcuts match on the `alt` token everywhere; the UI shows them as `Option+X`. Terminal.app, iTerm2, and the VS Code integrated terminal need Option configured as Meta/Esc+ (or `terminal.integrated.macOptionIsMeta`) before they deliver `alt+X`; Kitty/WezTerm/Ghostty work out of the box. Slash commands are always available as fallbacks, and pi prints a one-time setup hint on affected terminals.
 | `/mcp` | MCP server management |
 | `/mcp auth` | MCP OAuth authentication flow |
 | `/api-manager` | API provider configuration (models, retry settings) |
