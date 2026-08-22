@@ -3,9 +3,10 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { Browser, ElementHandle, HTTPRequest, HTTPResponse, KeyInput, Page, WaitForOptions } from "puppeteer-core";
+import type { Browser, CDPSession, CookieParam, ElementHandle, Frame, HTTPRequest, HTTPResponse, KeyInput, Page, WaitForOptions } from "puppeteer-core";
 import puppeteer from "puppeteer-core";
 import { PROBE_JS, FIND_LISTS_JS, foldListsJs, monitorStartJs, MONITOR_STOP_JS, optimizeHtmlForTokens, smartTruncate, diffHtml, type HtmlDiff } from "./simplify.ts";
+import { STEALTH_INIT_JS, STEALTH_LAUNCH_ARGS } from "./stealth.ts";
 
 export type WaitUntil = "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
 
@@ -21,6 +22,8 @@ export interface BrowserOpenOptions {
   viewport?: { width: number; height: number; scale?: number };
   waitUntil?: WaitUntil;
   dialogs?: "accept" | "dismiss";
+  attachUserProfile?: boolean;
+  userProfileDir?: string;
   signal?: AbortSignal;
   timeoutMs: number;
 }
@@ -71,6 +74,7 @@ interface TabEntry {
   elementSelectors: Map<number, string>;
   ownedTempFiles: Set<string>;
   busy: boolean;
+  cdpSession?: CDPSession;
 }
 
 interface OpeningEntry {
@@ -277,6 +281,7 @@ export class BrowserManager implements BrowserManagerLike {
   }
 
   async #configurePage(entry: TabEntry, options: BrowserOpenOptions): Promise<void> {
+    if (entry.kind !== "connected") await entry.page.evaluateOnNewDocument(STEALTH_INIT_JS);
     if (options.viewport) {
       await entry.page.setViewport({
         width: options.viewport.width,
@@ -474,6 +479,116 @@ function createTabApi(
       const handle = await resolve(selector) as ElementHandle<HTMLInputElement>;
       await handle.uploadFile(...filePaths.map((file) => path.resolve(cwd, file)));
     },
+    async cdp(method: string, params?: Record<string, unknown>) {
+      if (!entry.cdpSession || entry.cdpSession.connection() === null) entry.cdpSession = await page.target().createCDPSession();
+      return entry.cdpSession.send(method as never, params as never) as Promise<Record<string, unknown>>;
+    },
+    cookies: {
+      async get(filter?: { domain?: string; name?: string }) {
+        const all = await page.cookies();
+        if (!filter) return all;
+        return all.filter((cookie) =>
+          (!filter.domain || cookie.domain.includes(filter.domain)) &&
+          (!filter.name || cookie.name === filter.name),
+        );
+      },
+      async set(cookies: CookieParam | CookieParam[]) {
+        const list = Array.isArray(cookies) ? cookies : [cookies];
+        await page.setCookie(...list);
+      },
+      async delete(filter: { domain?: string; name?: string }) {
+        const all = await page.cookies();
+        for (const cookie of all) {
+          if ((!filter.domain || cookie.domain.includes(filter.domain)) && (!filter.name || cookie.name === filter.name)) {
+            await page.deleteCookie(cookie);
+          }
+        }
+      },
+    },
+    // Cross-origin iframe JS execution (B-2.1): puppeteer frames() already holds
+    // cross-origin frames with their own execution context; no need for GA's
+    // createIsolatedWorld dance.
+    async evalInFrame(
+      matcher: string | RegExp | ((frame: Frame) => boolean),
+      fn: (...args: unknown[]) => unknown,
+      ...args: unknown[]
+    ) {
+      const frames = page.frames();
+      const match = typeof matcher === "function"
+        ? frames.find(matcher)
+        : frames.find((frame) => frame === page.mainFrame() ? false : (typeof matcher === "string" ? frame.url().includes(matcher) : matcher.test(frame.url())));
+      if (!match) throw new Error(`No iframe matched ${typeof matcher === "string" ? JSON.stringify(matcher) : matcher.toString()}.`);
+      return match.evaluate(fn, ...args);
+    },
+    // Closed Shadow DOM pierce (B-2.2): puppeteer's `pierce/<selector>` engine
+    // crosses open AND closed shadow boundaries (unlike `page.$()`). Returns the
+    // element center so the caller can follow with tab.cdpClick(x, y). Use the
+    // `pierce/` prefix in the selector: tab.pierce('pierce/#shadow-btn').
+    async pierce(selector: string) {
+      const handle = await page.waitForSelector(`pierce/${selector}`, { timeout: deadline() });
+      if (!handle) throw new Error(`pierce(${JSON.stringify(selector)}) found no node.`);
+      const box = await handle.evaluate((element: Element) => {
+        const rect = element.getBoundingClientRect();
+        return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+      });
+      return { nodeId: 0, x: box.x, y: box.y };
+    },
+    // Physical-coordinate click (B-2.3): CDP Input.dispatchMouseEvent three-event
+    // sequence (moved -> pressed -> released) with a hover dwell so hover-dependent
+    // components (MUI Tooltip / Ant Dropdown) open before the press.
+    async cdpClick(x: number, y: number, options?: { hoverMs?: number }) {
+      if (!entry.cdpSession || entry.cdpSession.connection() === null) entry.cdpSession = await page.target().createCDPSession();
+      const session = entry.cdpSession;
+      const hoverMs = options?.hoverMs ?? 80;
+      const moved = session.send("Input.dispatchMouseEvent" as never, { type: "mouseMoved", x, y } as never);
+      await moved;
+      await new Promise((resolve) => setTimeout(resolve, hoverMs));
+      await session.send("Input.dispatchMouseEvent" as never, { type: "mousePressed", x, y, button: "left", clickCount: 1 } as never);
+      await session.send("Input.dispatchMouseEvent" as never, { type: "mouseReleased", x, y, button: "left", clickCount: 1 } as never);
+    },
+    // Autofill release (B-2.4): bringToFront (Chrome only releases protected values
+    // in the foreground tab), click the field via physical coords, then re-dispatch
+    // input/change so the framework picks up the now-exposed value.
+    async autofillRelease(selector: string) {
+      await page.bringToFront();
+      const box = await (await resolve(selector)).evaluate((element: Element) => {
+        const rect = element.getBoundingClientRect();
+        return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+      });
+      await this.cdpClick(box.x, box.y, { hoverMs: 120 });
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      await (await resolve(selector)).evaluate((element) => {
+        element.dispatchEvent(new Event("input", { bubbles: true }));
+        element.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+    },
+    // Download-dialog bypass (B-2.5): CDP Browser.setDownloadBehavior sets an
+    // allow path so Chrome does not block on the "download multiple files" prompt.
+    async setDownloadBehavior(downloadPath: string) {
+      if (!entry.cdpSession || entry.cdpSession.connection() === null) entry.cdpSession = await page.target().createCDPSession();
+      const resolved = path.resolve(cwd, downloadPath);
+      await fs.mkdir(resolved, { recursive: true });
+      await entry.cdpSession.send("Browser.setDownloadBehavior" as never, { behavior: "allow", downloadPath: resolved } as never);
+    },
+    // Batched CDP with $N.path chain references (B-2.6): send multiple CDP commands
+    // in one round-trip; later commands may reference earlier results via
+    // "$<index>.<dotted.path>" strings (recursively resolved from results so far).
+    async cdpBatch(commands: Array<{ method: string; params?: Record<string, unknown> }>) {
+      if (!entry.cdpSession || entry.cdpSession.connection() === null) entry.cdpSession = await page.target().createCDPSession();
+      const session = entry.cdpSession;
+      const results: unknown[] = [];
+      for (let i = 0; i < commands.length; i += 1) {
+        const command = commands[i];
+        const resolvedParams = command.params ? resolveDollarRefs(command.params, results) : undefined;
+        try {
+          const value = await session.send(command.method as never, resolvedParams as never);
+          results.push({ ok: true, value });
+        } catch (error) {
+          results.push({ ok: false, error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+      return results;
+    },
     waitForUrl(pattern: string | RegExp, options?: { timeout?: number }) {
       const descriptor = typeof pattern === "string"
         ? { kind: "text", value: pattern, flags: "" }
@@ -491,6 +606,32 @@ function createTabApi(
   return api;
 }
 
+// Resolves "$N.dotted.path" references inside a cdpBatch command's params against
+// the results collected so far (0-indexed). A failed prior command yields
+// undefined for any $N reference (mirroring GA's silent-undefined behavior), so
+// callers must check results[i].ok before relying on a referenced value.
+function resolveDollarRefs(value: unknown, results: unknown[]): unknown {
+  if (typeof value === "string" && /^\$\d+(\.[\w$]+)*$/.test(value)) {
+    const [indexPart, ...pathParts] = value.slice(1).split(".");
+    const index = Number(indexPart);
+    const entry = results[index];
+    if (!entry || typeof entry !== "object" || !("value" in entry)) return undefined;
+    let current: unknown = (entry as { value: unknown }).value;
+    for (const part of pathParts) {
+      if (current == null || typeof current !== "object") return undefined;
+      current = (current as Record<string, unknown>)[part];
+    }
+    return current;
+  }
+  if (Array.isArray(value)) return value.map((item) => resolveDollarRefs(item, results));
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) out[key] = resolveDollarRefs(item, results);
+    return out;
+  }
+  return value;
+}
+
 // Managed browser profiles live in a stable per-key directory instead of a fresh
 // random temp dir per launch. Chrome (not puppeteer) owns the directory's lifecycle:
 // puppeteer only deletes auto-generated temp profiles, so an explicit userDataDir is
@@ -503,6 +644,20 @@ function profileDirFor(key: string): string {
 }
 
 async function connectBrowser(options: BrowserOpenOptions, key: string): Promise<{ browser: Browser; owned: boolean; kind: "headless" | "headed" | "connected"; reused: boolean; profileDir?: string }> {
+  if (options.attachUserProfile) {
+    if (!options.userProfileDir) throw new Error("attach_user_profile requires app.user_profile_dir pointing at a Chrome user-data-dir whose browser runs with --remote-debugging-port.");
+    const port = await devToolsPortFor(options.userProfileDir);
+    if (!port) {
+      throw new Error(
+        `No live debug port at ${options.userProfileDir}. Start Chrome with:\n` +
+        `  chrome --remote-debugging-port=9222 --user-data-dir=${JSON.stringify(options.userProfileDir)}\n` +
+        `then retry. pi does not launch or copy the user profile.`,
+      );
+    }
+    const pending = puppeteer.connect({ browserURL: `http://127.0.0.1:${port}` });
+    const browser = await acquireResource(pending, options.signal, options.timeoutMs, (late) => late.disconnect());
+    return { browser, owned: false, kind: "connected", reused: false, profileDir: options.userProfileDir };
+  }
   if (options.cdpUrl) {
     const pending = puppeteer.connect({ browserURL: options.cdpUrl.replace(/\/$/, "") });
     const browser = await acquireResource(pending, options.signal, options.timeoutMs, (late) => late.disconnect());
@@ -620,7 +775,7 @@ async function launchBrowser(executablePath: string, options: BrowserOpenOptions
     headless: !options.visible,
     timeout: options.timeoutMs,
     userDataDir: profileDir,
-    args: ["--no-first-run", "--no-default-browser-check", ...(options.args ?? [])],
+    args: ["--no-first-run", "--no-default-browser-check", ...STEALTH_LAUNCH_ARGS, ...(options.args ?? [])],
     defaultViewport: options.viewport ? { width: options.viewport.width, height: options.viewport.height, deviceScaleFactor: options.viewport.scale } : undefined,
   });
   const kind: "headless" | "headed" = options.visible ? "headed" : "headless";
@@ -711,6 +866,7 @@ async function disablePageRequestInterception(page: Page): Promise<void> {
 }
 
 async function disposeEntry(entry: TabEntry): Promise<void> {
+  try { if (entry.cdpSession && entry.cdpSession.connection() !== null) await entry.cdpSession.detach(); } catch {}
   try { if (entry.ownedPage && !entry.page.isClosed()) await completesWithin(entry.page.close(), 2_000); } catch {}
   await disposeBrowser(entry.browser, entry.owned, entry.profileDir);
   await Promise.allSettled([...entry.ownedTempFiles].map((file) => fs.rm(file, { force: true })));
@@ -742,6 +898,7 @@ async function closeWithin(browser: Browser, profileDir?: string): Promise<void>
 }
 
 function browserKey(options: BrowserOpenOptions): string {
+  if (options.attachUserProfile) return `attach:${options.userProfileDir ?? ""}`;
   if (options.cdpUrl) return `cdp:${options.cdpUrl.replace(/\/$/, "")}`;
   return `launched:${options.visible ? "headed" : "headless"}:${path.resolve(options.cwd, options.executablePath ?? "auto")}:${JSON.stringify(options.args ?? [])}`;
 }
@@ -754,7 +911,7 @@ function browserOpenRequestKey(options: BrowserOpenOptions, browser: string): st
     viewport: options.viewport ?? null,
     waitUntil: options.waitUntil ?? "load",
     dialogs: options.dialogs ?? "accept",
-    visible: options.cdpUrl ? null : (options.visible ?? false),
+    visible: options.attachUserProfile || options.cdpUrl ? null : (options.visible ?? false),
   });
 }
 
