@@ -261,6 +261,12 @@ export interface ResolvedBackendConfig {
   values: Record<string, ConfigValue>;
   /** Load-time rejections; a non-empty list stops registration. */
   errors: readonly string[];
+  /**
+   * Advisory messages a registration may carry without being rejected: a
+   * configuration that works but is easy to get wrong. Optional because most
+   * backends have nothing advisory to say.
+   */
+  warnings?: readonly string[];
 }
 
 /**

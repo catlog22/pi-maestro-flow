@@ -28,8 +28,13 @@ import type { TeammateRunSpec } from "./spec.ts";
  * {@link BackendRegistry}. The Pi subprocess is registered as an ordinary
  * backend here, not as a bypass, so the seam is exercised by the default
  * deployment instead of only by third parties.
+ *
+ * `model-registry` — the teammate host first resolves a stable model
+ * registration to one existing v1 backend registration. This is an additive
+ * host routing mode, not a new backend protocol: the selected deployment still
+ * runs through {@link BackendRegistry} and {@link TeammateBackend} v1.
  */
-export type TeammateExecutionMode = "legacy" | "backend-registry";
+export type TeammateExecutionMode = "legacy" | "backend-registry" | "model-registry";
 
 /** One entry of the backend registration document. */
 export interface BackendRegistration {

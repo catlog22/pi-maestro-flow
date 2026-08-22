@@ -82,6 +82,31 @@ export interface CapabilityDelivery {
   note?: string;
 }
 
+/** Closed, descriptive transport metadata safe to expose on settled results. */
+export type TeammateExecutionTransport =
+  | { kind: "local-process"; protocol: "pi-rpc" | "json-rpc-stdio" | "acp" }
+  | { kind: "acp-direct-ssh"; protocol: "acp" }
+  | { kind: "dsh-direct-ssh"; protocol: "json-rpc-stdio" }
+  | {
+      kind: "remote-worker";
+      gateway: "ssh";
+      protocol: "remote/2";
+      driver: "pi-rpc" | "acp";
+    }
+  | { kind: "adapter-owned" };
+
+/** Secret-free identity of the pinned model-registry route that settled a run. */
+export interface TeammateExecutionProvenance {
+  registryVersion: number;
+  registryRevision: number;
+  registryHash: string;
+  modelRegistrationId: string;
+  modelId: string;
+  deploymentId: string;
+  harness: "pi" | "dsh" | "acp" | "adapter-owned";
+  transport: TeammateExecutionTransport;
+}
+
 /** One settled task execution. */
 export interface SingleResult {
   agent: string;
@@ -120,6 +145,8 @@ export interface SingleResult {
    */
   backend?: string;
   capabilityDeliveries?: CapabilityDelivery[];
+  /** Pinned model-registry route identity; absent in legacy/backend-registry mode. */
+  provenance?: TeammateExecutionProvenance;
 }
 
 /** Live control messages an orchestrator may send to a running task. */
