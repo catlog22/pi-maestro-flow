@@ -1,6 +1,6 @@
 ---
 name: maestro-odyssey
-description: "Long-running iterative cycle — one entry, six modes (debug|improve|planex|review|security|ui). Shared archaeology/audit → fix → verify → generalize → discover → persist skeleton with mode-specific dimensions. User-invoked campaign entry; single-step fixes route via /maestro-next Arguments: <intent> --mode debug|improve|planex|review|security|ui [-y] [-c]"
+description: "Long-running iterative cycle — one entry, seven modes (debug|improve|planex|review|security|defensive|ui). Shared archaeology/audit → fix → verify → generalize → discover → persist skeleton with mode-specific dimensions. User-invoked campaign entry; single-step fixes route via /maestro-next Arguments: <intent> --mode debug|improve|planex|review|security|defensive|ui [-y] [-c]"
 allowed-tools: Read Write Edit Bash Glob Grep teammate observe maestro
 disable-model-invocation: true
 session-mode: none
@@ -28,11 +28,12 @@ If any required file above was not expanded into context by the host, or its con
 - [odyssey-planex.md](~/.maestro/workflows/odyssey-planex.md) — read when mode=planex
 - [odyssey-review.md](~/.maestro/workflows/odyssey-review.md) — read when mode=review
 - [odyssey-security.md](~/.maestro/workflows/odyssey-security.md) — read when mode=security
+- [odyssey-defensive.md](~/.maestro/workflows/odyssey-defensive.md) — read when mode=defensive
 - [odyssey-ui.md](~/.maestro/workflows/odyssey-ui.md) — read when mode=ui
 </deferred_reading>
 
 <purpose>
-Long-running, evidence-driven iterative cycle. A single entry dispatches to one of six modes; all share the same
+Long-running, evidence-driven iterative cycle. A single entry dispatches to one of seven modes; all share the same
 skeleton — discovery → domain audit → fix → verify → generalize → discover siblings → persist knowledge —
 and iterate exhaustively until the mode's exit condition is met or escalation is required.
 </purpose>
@@ -51,10 +52,11 @@ Keyword matching: case-insensitive substring match against the intent text. Mult
 | requirement, implement, build, add feature, I need to implement, I need to build, I need to add, deliver feature, user story | `planex` |
 | ui, visual, layout, style, component, page, responsive, a11y, accessibility, UI design, visual design, design system, design tokens | `ui` |
 | security audit, OWASP, vulnerability, CVE, secrets scan, STRIDE, threat model, supply chain, dependency audit, dependencies, supply chain audit | `security` |
+| defensive programming, defensive code, exception swallowing, silent failure, fallback risk, default value risk, error suppression, 防御性编程, 防御性代码, 异常吞噬, 兜底风险 | `defensive` |
 | improve, optimize, performance, refactor quality, reliability, observability | `improve` |
 | review, audit, code check, check the code, inspect the code, inspect changes, "look over", zero-residual | `review` |
 
-Ambiguous / no match → Normal: [@ask] AskUserQuestion (6-way mode pick) | `-y`: E000.
+Ambiguous / no match → Normal: [@ask] AskUserQuestion (7-way mode pick) | `-y`: E000.
 
 **Mode registry:**
 
@@ -65,6 +67,7 @@ Ambiguous / no match → Normal: [@ask] AskUserQuestion (6-way mode pick) | `-y`
 | `planex` | Requirement → plan → execute → verify loop | (none) | PLAN + EXECUTE | (EXECUTE) → VERIFY → FIX loop | — |
 | `review` | Multi-dimension deep review → zero-residual fix | ARCHAEOLOGY, EXPLORE | REVIEW (4+ dims) | FIX → CONFIRM | — |
 | `security` | Read-only tiered security audit → severity matrix | RECON | SCAN (OWASP + deps + secrets + CI/CD + STRIDE + git) | (none — read-only) | — |
+| `defensive` | Business-anchor → backward-slice → 8-pattern scan → forward-propagate → risk score | ANCHOR, SLICE | SCAN (8 defensive patterns) + PROPAGATE | (none — read-only) | — |
 | `ui` | Visual survey → 6-dim audit → diverge → fix | SURVEY | AUDIT (6 dims) + DIVERGE | FIX → VERIFY | — |
 
 CONFIRM and VERIFY are synonymous — both refer to the post-fix validation phase. Mode workflow files use mode-specific naming; semantics are identical.
@@ -87,26 +90,27 @@ $ARGUMENTS
 | `--template <name>` | debug, planex | Predefined strategy/criteria template | — |
 | `--dimensions <list>` | improve, review, ui | Audit dimension subset | all |
 | `--fix-threshold <sev>` | improve, review, ui | Severity cutoff (critical\|high\|medium\|low\|all) | all |
-| `--tier quick\|standard\|deep` | security | Audit depth tier | standard |
+| `--tier quick\|standard\|deep` | security, defensive | Audit depth tier | standard |
+| `--sink-depth <list>` | defensive | Explicit sink layer focus (1\|2\|3\|all) | all |
 | `--max-iterations N` | planex | Max verify-fix cycles before escalation | 3 |
 | `--method agent\|cli\|auto` | planex | Task execution method | auto |
 | `--executor <tool>` | planex | Explicit CLI executor | first enabled |
 | `--skip-verify` | planex | Skip post-execution validation gate | false |
 
-`--skip-fix` applicability: security mode ignores (read-only, no fix phase); planex skips FIX loop but retains EXECUTE+VERIFY; debug/review/improve/ui skip FIX+VERIFY/CONFIRM. `--skip-fix` + `--skip-verify` on planex = PLAN only (no execution).
+`--skip-fix` applicability: security and defensive modes ignore (read-only, no fix phase); planex skips FIX loop but retains EXECUTE+VERIFY; debug/review/improve/ui skip FIX+VERIFY/CONFIRM. `--skip-fix` + `--skip-verify` on planex = PLAN only (no execution).
 
 Mode-scoped flags passed to inapplicable mode: emit W008 warning and ignore the flag.
 
 **Session creation**: follow `run-mode.md` exactly. Negotiate capabilities, then open a new Session with `maestro session open "<objective>" --id {slug} --chain odyssey-<mode> --participant {participant_id} --actor {actor_id} --request-id {request_id} --reason "<reason>" [--evidence <ref> ...] --json` (or resolve an existing compatible Session read-only via `session status`), then dispatch the mode step with fenced `maestro run next --session {session_id} ... --json` (chain) or self-start with `maestro run create odyssey-<mode> [args...] --session {session_id} ... --json` passing the mode arguments. Never abbreviate or omit the Session locator, the `orchestration_revision`/Run `revision` fence, or the `--participant`/`--actor` identity in an executable command.
 
 **Session**: `{run_dir}/outputs/`
-**Output**: `session.json` | `evidence.ndjson` | `understanding.md` | `explore.json` (debug/review only)
+**Output**: `session.json` | `evidence.ndjson` | `understanding.md` | `explore.json` (debug/review only) | `anchors.json` (defensive only)
 
 **Output boundary**: ALL session artifacts MUST target the run outputs directory (`{run_dir}/outputs/`) only. `.workflow/state.json` and all `sessions/<sid>/` protocol files are runtime-owned — a workflow never writes them. Source code modifications during fix/execute phases are in-scope but MUST be committed per action. NEVER write session artifacts outside `{run_dir}/outputs/`.
 
 **session.json — shared core + mode fields:**
 ```json
-{ "mode": "debug|improve|planex|review|security|ui",
+{ "mode": "debug|improve|planex|review|security|defensive|ui",
   "target": "", "dimensions": [],
   "patterns": [], "confirmation": null, "generalization_stats": null,
   "cross_phase_loops": 0 }
@@ -124,7 +128,7 @@ All base invariants apply (evidence append-only, session-as-state, phase goal tr
 2. **Phase goal tracking** — mark each goal done/failed before transition; no silent skips.
 3. **Generalize is mandatory** — GENERALIZE and DISCOVER execute unless `skip_generalize == true`. Prior-phase convergence, "no findings / all verified / zero remaining," or context pressure are NOT valid skip reasons. The phase itself determines whether patterns exist.
 4. **Zero-residual** (improve/review/ui) — every finding MUST have a concrete action (fix / issue / decision). "Report and shelve" and blanket "pre-existing" skips are forbidden.
-5. **Read-only** (security) — NEVER modify source code, configuration, or dependencies. Security audit produces reports only; fixes route to `--mode improve`.
+5. **Read-only** (security, defensive) — NEVER modify source code, configuration, or dependencies. Security and defensive audits produce reports only; fixes route to `--mode improve`.
 6. **Acceptance criteria are sacred** (planex) — no "close enough", no manual override without explicit escalation.
 7. **Browser is truth** (ui) — verify in real rendering, not just code review. Diverge before converge.
 8. **Goal tracking 与 session 双写** — 各 phase 进入/退出时同步创建/更新 goal，补充 session.json 的 UI 可见进度。
@@ -144,6 +148,7 @@ Self-iteration (logic in odyssey-base.md) applies to each mode's discovery + aud
 | planex | S_PLAN, S_VERIFY, S_GENERALIZE |
 | review | S_ARCHAEOLOGY, S_EXPLORE, S_REVIEW, S_FIX, S_GENERALIZE |
 | security | S_RECON, S_SCAN, S_GENERALIZE |
+| defensive | S_ANCHOR, S_SLICE, S_SCAN, S_PROPAGATE, S_GENERALIZE |
 | ui | S_SURVEY, S_AUDIT, S_DIVERGE, S_GENERALIZE |
 </self_iteration>
 
@@ -184,7 +189,7 @@ Mode-specific phase gates (Discovery, Audit, FIX, VERIFY/CONFIRM) are defined in
 - [ ] Domain audit completed with structured findings + severity matrix (or acceptance criteria + plan for planex)
 - [ ] understanding.md sections written progressively per mode
 - [ ] Fix + verify/confirm (unless --skip-fix); zero-residual for improve/review/ui; all criteria pass for planex
-- [ ] Read-only invariant maintained for security mode — zero source modifications
+- [ ] Read-only invariant maintained for security and defensive modes — zero source modifications
 - [ ] Multi-layer generalization + discovery triage (unless --skip-generalize); every unfixed finding individually justified
 - [ ] phase_goals derived, tracked, and hardened-audited; goal_mode injected via prepare goal:true; `-y` no blocking prompts
 - [ ] Session resumable via -c; mode-specific completion summary emitted
@@ -197,6 +202,8 @@ Mode-specific phase gates (Discovery, Audit, FIX, VERIFY/CONFIRM) are defined in
 | Discovery issues created | `/maestro-issue list --source {mode}-odyssey` |
 | Deeper debug needed (from any mode) | `/maestro-odyssey <finding> --mode debug` |
 | Security findings need remediation | `/maestro-odyssey <finding> --mode improve` |
+| Defensive findings need remediation | `/maestro-odyssey <finding> --mode improve` |
+| Defensive root-cause needed | `/maestro-odyssey <finding> --mode debug` |
 | Formal review of changes | `/maestro-odyssey <changed-files> --mode review` |
 | UI-related findings | `/maestro-odyssey <component> --mode ui` |
 | Document pattern | `/maestro-learn decompose <module>` |

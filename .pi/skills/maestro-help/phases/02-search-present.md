@@ -102,7 +102,7 @@
 | plan 完成 | step `execute --session {slug}` | 规划完成，开始执行 |
 | execute 完成 | step `review --session {slug}` | 执行完成，进入质量管线 |
 | review PASS | step `auto-test --session {slug}` | 补足测试覆盖 |
-| tests 全绿 + active session | `/maestro-session-seal` | 封印 session：知识提取 + DAG 推进 |
+| tests 全绿 + active session | `/maestro-session-manage-manage --complete` | 完成 session：知识对账 + DAG 推进 |
 | 所有 session sealed | step `roadmap` | DAG 完结，规划下一批 sessions |
 
 ### Mode 6: Skill & Agent Browsing

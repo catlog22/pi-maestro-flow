@@ -28,12 +28,7 @@ Intent-driven issue management (renamed from maestro-manage, narrowed to issues)
 </purpose>
 
 <dispatch>
-Execute the `issue` step inside a v3 Session: open one with `maestro session open "<objective>" --id <slug> --chain issue --participant {p} --actor {a} --request-id {r} --reason "<reason>" --json` and dispatch with fenced `maestro run next --session {session_id} ... --expected-orchestration-revision {rev} --json` (or self-start with `maestro run create issue [args...] --session {session_id} ... --json`), passing the full `$ARGUMENTS` as the step input (repeatable `--arg` / positional passthrough per the command contract). Read context read-only with `maestro session status` / `maestro session resume-view`; `maestro run complete {run_id} ... --advance` publishes outputs and auto-stages knowledge candidates. (v2's `run skill` dispatcher is removed from the v3 surface.)
+Read `~/.maestro/workflows/issue.md` and follow the execution document directly. Do not create a Session or Run just to load this document.
 
-The step classifies the intent, extracts parameters, and routes to the operation.
-
-- Free-form intent is classified into create / list / show / update / close / link / discover.
-- Explicit keywords (`create|list|status|show|update|close|link`) and `--flags` still work as deterministic shortcuts and override inferred values.
-- `discover` routes to the dedicated `issue-discover` step.
-- Ambiguous intent → the step asks the user to disambiguate.
+Pass the full `$ARGUMENTS` to the workflow. For `discover`, read `~/.maestro/workflows/issue-discover.md` instead. The workflow classifies the intent, extracts parameters, and routes to the requested issue operation.
 </dispatch>

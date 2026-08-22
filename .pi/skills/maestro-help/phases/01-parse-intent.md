@@ -60,7 +60,7 @@ const commandPrefixes = ["/", "maestro-", "manage-", "quality-", "spec-", "learn
 const knownCommands = [
   "maestro", "analyze", "plan", "execute", "init", "roadmap",
   "brainstorm", "blueprint", "overlay", "fork", "merge", "collab",
-  "session-seal",
+  "session-manage",
   "guard", "ralph",
   "grill", "next",
   "impeccable", "update",

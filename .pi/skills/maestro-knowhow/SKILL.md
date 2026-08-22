@@ -20,12 +20,7 @@ Intent-driven knowhow precipitation path (沉淀路径) — captures reusable kn
 </purpose>
 
 <dispatch>
-Execute the `knowhow` step inside a v3 Session: open one with `maestro session open "<objective>" --id <slug> --chain knowhow --participant {p} --actor {a} --request-id {r} --reason "<reason>" --json` and dispatch with fenced `maestro run next --session {session_id} ... --expected-orchestration-revision {rev} --json` (or self-start with `maestro run create knowhow [args...] --session {session_id} ... --json`), passing the full `$ARGUMENTS` as the step input (repeatable `--arg` / positional passthrough per the command contract; first arg `capture` is implied). Read context read-only with `maestro session status` / `maestro session resume-view`; `maestro run complete {run_id} ... --advance` publishes outputs and auto-stages knowledge candidates. (v2's `run skill` dispatcher is removed from the v3 surface.)
+Read `~/.maestro/workflows/knowhow.md` and follow the execution document directly. Do not create a Session or Run just to load this document.
 
-The step infers the content type from the intent, extracts the content, and writes the entry.
-
-- A recognized type keyword anywhere in the intent pins the type deterministically.
-- Otherwise the step infers the type from the intent (e.g. "决策/决定用X" → decision, "模板/这段代码" → template, "步骤/怎么部署" → recipe).
-- No clear type signal → the step asks the user to pick (6-option picker).
-- This command only captures; for knowhow store management use /maestro-knowledge.
+Pass the full `$ARGUMENTS` to the workflow as its intent (the first `capture` argument is implied). The workflow infers the content type, extracts the content, and writes the entry.
 </dispatch>

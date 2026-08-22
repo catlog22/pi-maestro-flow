@@ -14,12 +14,7 @@ Scopes: `project` (default) · `global` · `team` · `personal`
 </purpose>
 
 <dispatch>
-Execute the `specs-add` step inside a v3 Session: open one with `maestro session open "<objective>" --id <slug> --chain specs-add --participant {p} --actor {a} --request-id {r} --reason "<reason>" --json` and dispatch with fenced `maestro run next --session {session_id} ... --expected-orchestration-revision {rev} --json` (or self-start with `maestro run create specs-add [args...] --session {session_id} ... --json`), passing the full `$ARGUMENTS` as the step input (repeatable `--arg` / positional passthrough per the command contract; the `add` keyword is implied). Read context read-only with `maestro session status` / `maestro session resume-view`; `maestro run complete {run_id} ... --advance` publishes outputs and auto-stages knowledge candidates. (v2's `run skill` dispatcher is removed from the v3 surface.)
+Read `~/.maestro/workflows/specs-add.md` and follow the execution document directly. Do not create a Session or Run just to load this document.
 
-The step infers category + scope + content and appends the entry.
-
-- Explicit positional form `<category> <content>` and `--scope`/`--uid` flags still work and override inference.
-- Otherwise the step infers the category from the intent (e.g. "禁止用 any/命名规范" → coding, "服务间/依赖方向" → arch, "覆盖率/质量标准" → quality, "测试约定" → test).
-- Category unclear → the step asks the user to pick.
-- This command only adds specs; there are no load/remove/setup subcommands.
+Pass the full `$ARGUMENTS` to the workflow as its intent (the `add` keyword is implied). The workflow infers category, scope, and content, then appends the entry.
 </dispatch>

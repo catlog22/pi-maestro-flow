@@ -142,7 +142,7 @@ maestro session list 2>/dev/null   # read-only: enumerate session/3.0 Sessions
 | Latest artifact = plan | execute | execute --session {active} |
 | Latest artifact = execution | review | review --session {active} |
 | Review verdict = PASS | auto-test | auto-test --session {active} |
-| Tests green + active session | session-seal | (maestro-session-seal, not a step) |
+| Tests green + active session | session-manage --complete | (maestro-session-manage --complete, not a step) |
 | Any stage has gaps/failures | debug | debug {gap} |
 
 **Lifecycle main line:**
@@ -150,7 +150,7 @@ maestro session list 2>/dev/null   # read-only: enumerate session/3.0 Sessions
 init → {brainstorm | blueprint | analyze-macro} → roadmap
   → [per session] analyze → plan → execute
   → [quality gate] review → auto-test → test
-  → session-seal → next dep-ready session
+  → session-manage --complete → next dep-ready session
 ```
 
 **Multi-session resolution:** "Latest artifact" refers to the `active_session_id` in state.json. If no active session is set, use the most recently modified session. If multiple sessions are active, lifecycle inference applies only to the active one; surface others as context in S_PRESENT.
@@ -232,6 +232,7 @@ Dominant step = the step whose keyword appears first or carries the primary verb
 | spec / rule / constraint | `/maestro-spec "<intent>"` (retained command) | Suggest exact slash command; user invokes it |
 | init / project setup | `/maestro-init ...` (retained command) | Suggest exact slash command; user invokes it |
 | security / OWASP | `/maestro-odyssey "<scope>" --mode security` (odyssey campaign) | Output invocation; user invokes it |
+| defensive programming / exception swallowing / silent failure / fallback risk / 防御性编程 / 兜底风险 | `/maestro-odyssey "<scope>" --mode defensive` (odyssey campaign) | Output invocation; user invokes it |
 | learn / explore code / follow | `/maestro-learn follow|investigate|decompose|consult ...` (retained command) | Suggest exact slash command; user invokes it |
 | UI design / design system / polish / impeccable | `/maestro-impeccable "<intent>" ...` (retained command) | Suggest exact slash command; user invokes it |
 | harvest / extract knowledge | `/maestro-knowledge "<intent>"` (retained command) | Suggest exact slash command; user invokes it |

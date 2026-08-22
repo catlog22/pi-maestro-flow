@@ -157,7 +157,7 @@ const taskPatterns = [
 上游起源: brainstorm(发散) | blueprint(收敛) | grill(压力测试) → 可选
 理解层:   analyze "topic"(宏观) → scope_verdict 路由
 编排层:   roadmap(可选，仅 scope_verdict=large 时建议)
-执行层:   plan → execute → quality → session-seal
+执行层:   plan → execute → quality → session-manage --complete
 Companion: /maestro-companion → (直接完成)
 Issue 闭环: discover → create → analyze --gaps → plan --gaps → execute → close
 全自动:   /maestro -y → (自动路由)

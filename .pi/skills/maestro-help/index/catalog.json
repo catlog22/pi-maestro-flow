@@ -81,11 +81,11 @@
       "source": "../../commands/maestro-next.md"
     },
     {
-      "name": "maestro-session-seal",
-      "command": "/maestro-session-seal",
+      "name": "maestro-session-manage",
+      "command": "/maestro-session-manage",
       "category": "core",
-      "description": "Session 封印 — 知识提取 + 标记 sealed + DAG 推进（取代已废弃的 milestone-complete）",
-      "source": "../../commands/maestro-session-seal.md"
+      "description": "Session 管理 — 状态/resume-view 查看、知识对账晋升、complete/archive/unarchive 生命周期转换",
+      "source": "../../commands/maestro-session-manage.md"
     },
     {
       "name": "analyze",
@@ -795,7 +795,7 @@
     "roadmap",
     "plan",
     "execute",
-    "/maestro-session-seal"
+    "/maestro-session-manage --complete"
   ],
   "workflows": {
     "topology": {
@@ -835,7 +835,7 @@
         "test"
       ],
       "close": [
-        "maestro-session-seal"
+        "maestro-session-manage --complete"
       ]
     },
     "companion": {
