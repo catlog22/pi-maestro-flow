@@ -677,7 +677,10 @@ async function callCandidates(
             settle("release");
             throw aborted();
           }
-          const retryable = error instanceof VisionTimeoutError || isRetryableProviderError(message(error));
+          const retryable = error instanceof VisionTimeoutError
+            || (error instanceof VisionStopError && error.stopReason === "aborted"
+              ? false
+              : isRetryableProviderError(message(error)));
           if (!retryable) {
             settle("release");
             failures.push(`${reference}: ${message(error)}`);
@@ -811,6 +814,14 @@ class VisionTimeoutError extends Error {
   constructor(ms: number) { super(`vision request timed out after ${ms}ms`); this.name = "VisionTimeoutError"; }
 }
 
+/** A vision turn ended with an error/aborted stop reason; aborts release the candidate without recording a failure. */
+class VisionStopError extends Error {
+  constructor(readonly stopReason: "error" | "aborted", messageText: string) {
+    super(messageText);
+    this.name = "VisionStopError";
+  }
+}
+
 function completionGuard(parent: AbortSignal | undefined, ms: number): { signal: AbortSignal; deadline: Promise<never>; dispose(): void } {
   const controller = new AbortController();
   let rejectDeadline: (error: Error) => void = () => undefined;
@@ -834,7 +845,9 @@ async function delay(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 function assistantText(response: Awaited<ReturnType<typeof complete>>): string {
-  if (response.stopReason === "error" || response.stopReason === "aborted") throw new Error(response.errorMessage ?? `vision model stopped with ${response.stopReason}`);
+  if (response.stopReason === "error" || response.stopReason === "aborted") {
+    throw new VisionStopError(response.stopReason, response.errorMessage ?? `vision model stopped with ${response.stopReason}`);
+  }
   const text = response.content.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n\n").trim();
   if (!text) throw new Error("vision model returned no text content");
   return text;

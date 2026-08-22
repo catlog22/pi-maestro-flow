@@ -117,8 +117,19 @@ test("genuine permanent errors stay non-retryable and not fallback-eligible", ()
   assert.equal(classifyRetryError("context_length_exceeded"), "non-retryable");
   assert.equal(classifyRetryError("invalid model: gpt-9"), "non-retryable");
   assert.equal(classifyRetryError("validation error"), "non-retryable");
-  assert.equal(classifyRetryError(undefined), "non-retryable");
   assert.equal(isFallbackProviderError("context_length_exceeded"), false);
+});
+
+test("unrecognized failures default to retryable provider", () => {
+  // Real-world unknown diagnostics observed in failover events: these used to
+  // be judged permanent and killed runs; the default now retries/falls back.
+  assert.equal(classifyRetryError("Provider finish_reason: error"), "provider");
+  assert.equal(classifyRetryError("ERROR"), "provider");
+  assert.equal(classifyRetryError("some totally new failure mode"), "provider");
+  assert.equal(classifyRetryError(""), "provider");
+  assert.equal(classifyRetryError(undefined), "provider");
+  assert.equal(isRetryableProviderError("Provider finish_reason: error"), true);
+  assert.equal(isFallbackProviderError("ERROR"), true);
 });
 
 test("provider and quota classes keep their existing routing", () => {

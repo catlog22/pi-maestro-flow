@@ -105,7 +105,7 @@ test("resolveAgentOutput with duplicate names returns newest-first matches with 
   assert.equal(resolved.matches[1]!.id, "dup-c1");
   assert.match(resolved.matches[0]!.capturedAt, /^\d{4}-\d{2}-\d{2}T/);
   assert.equal(resolved.matches[0]!.preview, '{"v":2}');
-  // correlationId is the common query path; publicationId remains a compatibility alias.
+  // correlationId tracks the latest turn; publicationId pins one immutable result.
   const exact = await resolveAgentOutput("dup-pub-1", root);
   assert.equal(exact.kind, "record");
   if (exact.kind === "record") assert.deepEqual(exact.record.output, { v: 1 });
@@ -114,7 +114,7 @@ test("resolveAgentOutput with duplicate names returns newest-first matches with 
   if (alias.kind === "record") assert.deepEqual(alias.record.output, { v: 2 });
 });
 
-test("workspace buckets isolate same-named tasks across sibling workspaces", async () => {
+test("workspace buckets isolate names while exact ids remain globally readable", async () => {
   const wsA = join(root, "iso-ws-a");
   const wsB = join(root, "iso-ws-b");
   await mkdir(wsA, { recursive: true });
@@ -123,12 +123,30 @@ test("workspace buckets isolate same-named tasks across sibling workspaces", asy
   await persistAgentOutput("iso-2", "shared-name", "explorer", { workspace: "b" }, wsB);
   assert.deepEqual((await readAgentOutput("shared-name", wsA)).output, { workspace: "a" });
   assert.deepEqual((await readAgentOutput("shared-name", wsB)).output, { workspace: "b" });
-  // 兄弟工作区完全隔离：跨工作区精确 correlationId 也不可见
-  await assert.rejects(
-    () => readAgentOutput("iso-2", wsA),
-    (err: unknown) => err instanceof Error && err.message.includes('No persisted teammate output for "iso-2"'),
+  assert.deepEqual((await readAgentOutput("iso-2", wsA)).output, { workspace: "b" });
+  assert.deepEqual((await readAgentOutput("iso-1", wsB)).output, { workspace: "a" });
+});
+
+test("a child cwd resolves parent output by immutable publication id and correlation alias", async () => {
+  const parent = join(root, "parent-workspace");
+  const child = join(parent, "packages", "child");
+  await mkdir(child, { recursive: true });
+  await persistAgentOutputChecked(
+    "parent-explorer",
+    "parent-findings",
+    "explorer",
+    { source: "parent" },
+    parent,
+    "parent-publication",
   );
-  assert.equal((await readAgentOutput("iso-2", wsB)).correlationId, "iso-2");
+
+  assert.deepEqual((await readAgentOutput("parent-publication", child)).output, { source: "parent" });
+  assert.deepEqual((await readAgentOutput("parent-explorer", child)).output, { source: "parent" });
+  await assert.rejects(
+    () => readAgentOutput("parent-findings", child),
+    (err: unknown) => err instanceof Error
+      && err.message.includes('No persisted teammate output for "parent-findings"'),
+  );
 });
 
 test("readAgentOutput falls back to legacy <cwd>/.pi/agents records", async () => {
@@ -152,6 +170,37 @@ test("readAgentOutput with unknown id lists available agents", async () => {
       && err.message.includes('No persisted teammate output for "nope"')
       && err.message.includes("run-abc-1"),
   );
+});
+
+test("readAgentOutput resolves a unique correlation-id prefix", async () => {
+  await persistAgentOutput("shortprefix-alpha-9", "prefix-unique", "explorer", { ok: "yes" }, root);
+  const record = await readAgentOutput("shortprefix-al", root);
+  assert.equal(record.correlationId, "shortprefix-alpha-9");
+});
+
+test("readAgentOutput resolves an immutable publication id by its prefix", async () => {
+  const publicationId = "pub-prefix-0001";
+  await persistAgentOutputChecked("short-pub-corr", "prefix-pub", "explorer", { ok: true }, root, publicationId);
+  const record = await readAgentOutput(publicationId.slice(0, 6), root);
+  assert.equal(record.publicationId, publicationId);
+  assert.equal(record.correlationId, "short-pub-corr");
+});
+
+test("ambiguous id prefix lists matches instead of guessing", async () => {
+  await persistAgentOutput("dup-prefix-alpha-1", "dup-a", "explorer", { n: 1 }, root);
+  await persistAgentOutput("dup-prefix-beta-2", "dup-b", "explorer", { n: 2 }, root);
+  const resolved = await resolveAgentOutput("dup-prefix", root);
+  assert.equal(resolved.kind, "ambiguous");
+  if (resolved.kind === "ambiguous") {
+    assert.deepEqual(resolved.matches.map((match) => match.correlationId).sort(), [
+      "dup-prefix-alpha-1",
+      "dup-prefix-beta-2",
+    ]);
+  }
+});
+
+test("a sub-4-character id is never treated as a prefix query", async () => {
+  await assert.rejects(() => readAgentOutput("run", root), /No persisted teammate output for "run"/);
 });
 
 test("getAgentOutputPath traverses objects and arrays", () => {
@@ -556,11 +605,12 @@ test("resolveAgentOutput falls back to descendant workspace buckets", async () =
   const byName = await readAgentOutput("audit", parent);
   assert.equal(byName.correlationId, "descendant-cid-1");
 
-  // 兄弟目录不可见（子树发现不破坏横向隔离）。
+  // 精确 id 是全局能力引用；任务名仍保持工作区/子树隔离。
   const sibling = join(root, "sibling-proj");
   await mkdir(sibling, { recursive: true });
+  assert.equal((await readAgentOutput("descendant-cid-1", sibling)).correlationId, "descendant-cid-1");
   await assert.rejects(
-    () => readAgentOutput("descendant-cid-1", sibling),
+    () => readAgentOutput("audit", sibling),
     /No persisted teammate output/,
   );
 });

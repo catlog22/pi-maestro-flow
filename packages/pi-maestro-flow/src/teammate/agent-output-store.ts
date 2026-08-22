@@ -11,9 +11,10 @@
  * 任务 name 可能跨多次派发重名：resolveAgentOutput 返回匹配列表（id + 时间 + 内容预览），
  * readAgentOutput 在重名时抛歧义错误，不再静默取最新；精确 id / correlationId alias 不受影响。
  *
- * 分桶按工作区隔离；桶创建时写入 .workspace 元数据（真实 cwd 路径），读取时若当前桶
- * miss，按元数据发现 cwd 子树内的子工作区桶（近 → 远，如 per-task cwd 派发的 teammate
- * 输出对父会话可见）；兄弟/无关工作区仍互相隔离，无元数据的旧桶不参与子树发现。
+ * 精确 publicationId / correlationId 作为不可猜测的能力引用，可跨工作区分桶读取；
+ * 任务 name 仍按工作区隔离。name 查找若当前桶 miss，只发现 cwd 子树内的子工作区桶
+ * （近 → 远，如 per-task cwd 派发的 teammate 输出对父会话可见）；兄弟/无关工作区的
+ * name 仍互相隔离，无元数据的旧桶不参与全局 ID 或子树发现。
  * 旧格式 <cwd>/.pi/agents/ 下的历史归档仍保留只读 fallback。
  * 只读消费方：src/tools/resource.ts；写入方：src/teammate/agent-output-capture.ts。
  * 测试可用环境变量 PI_AGENT_OUTPUT_ROOT 覆盖根目录。
@@ -233,6 +234,24 @@ async function readBucketWorkspaceMeta(bucket: string): Promise<BucketWorkspaceM
   } catch {
     return undefined;
   }
+}
+
+async function globalBucketDirs(): Promise<string[]> {
+  const root = outputRootResolved();
+  const rootInfo = await lstat(root).catch((error) => {
+    if (fileErrorCode(error) === "ENOENT") return undefined;
+    throw error;
+  });
+  if (!rootInfo || rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) return [];
+  const found: string[] = [];
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+    const bucket = join(root, entry.name);
+    if (!await readBucketWorkspaceMeta(bucket)) continue;
+    found.push(bucket);
+  }
+  found.sort();
+  return found;
 }
 
 /**
@@ -759,11 +778,79 @@ async function scanByName(
   return { records, available };
 }
 
+/** Resolve an exact publication/correlation id within an ordered bucket list. */
+async function resolveExactInDirs(
+  id: string,
+  dirs: Array<{ path: string; aliases: boolean }>,
+): Promise<AgentOutputRecord | undefined> {
+  for (const entry of dirs) {
+    if (entry.aliases) {
+      const alias = await loadAlias(aliasFile(entry.path, id), id);
+      if (alias) {
+        const target = await resolveAliasedRecord(entry.path, id, alias);
+        if (target) return target;
+      }
+    }
+    const direct = await loadRecord(recordFile(entry.path, id));
+    if (direct && (direct.publicationId === undefined || direct.publicationId === id)) {
+      return direct;
+    }
+  }
+  return undefined;
+}
+
+/** Resolve an exact publication/correlation id across every metadata-backed bucket. */
+async function resolveGlobalExactId(id: string): Promise<AgentOutputRecord[]> {
+  const records: AgentOutputRecord[] = [];
+  for (const dir of await globalBucketDirs()) {
+    const alias = await loadAlias(aliasFile(dir, id), id);
+    if (alias) {
+      const target = await resolveAliasedRecord(dir, id, alias);
+      if (target) records.push(target);
+      continue;
+    }
+    const direct = await loadRecord(recordFile(dir, id));
+    if (direct && (direct.publicationId === undefined || direct.publicationId === id)) {
+      records.push(direct);
+    }
+  }
+  return records;
+}
+
 /**
- * 按 correlationId latest alias 或任务 name 解析持久化输出。
+ * 唯一 id 前缀匹配（短 id 寻址）：列表/观测界面只展示截断 id，允许用唯一前缀读取。
+ * 可见范围与全局精确 id 一致（仅带元数据的桶）；0 或多个命中时不静默猜测，
+ * 多命中走既有歧义列表路径。下界 4 防误扫，上界 36（UUID 全长）避免无意义全扫。
+ */
+async function resolvePrefixMatchId(id: string): Promise<AgentOutputRecord[]> {
+  if (id.length < 4 || id.length >= 36) return [];
+  const records: AgentOutputRecord[] = [];
+  for (const dir of await globalBucketDirs()) {
+    let names: string[];
+    try {
+      names = (await readdir(dir, { withFileTypes: true }))
+        .filter((entry) => entry.isFile() && isCanonicalRecordName(entry.name))
+        .map((entry) => entry.name);
+    } catch {
+      continue;
+    }
+    for (const fileName of names) {
+      const record = await loadRecord(join(dir, fileName));
+      if (!record) continue;
+      if (record.correlationId.startsWith(id) || record.publicationId?.startsWith(id)) {
+        records.push(record);
+      }
+    }
+  }
+  return records;
+}
+
+/**
+ * 按全局精确 publicationId/correlationId，或 cwd 范围内任务 name 解析持久化输出。
  * 任务 name 命中多条记录时返回歧义列表（correlationId + 时间 + 预览），不静默取最新。
- * 查找顺序：当前工作区桶 → cwd 子树内子工作区桶（近 → 远）→ 旧版 <cwd>/.pi/agents。
- * 当前桶与子树桶均解析 alias；旧工作区目录只支持精确 legacy 记录和 name 扫描。
+ * 精确 id 未命中时尝试唯一 id 前缀（短 id 寻址：列表界面只展示截断 id）。
+ * name 查找顺序：当前工作区桶 → cwd 子树内子工作区桶（近 → 远）→ 旧版 <cwd>/.pi/agents。
+ * 精确/前缀全局 ID 不枚举 name；旧工作区目录只支持当前 cwd 的精确 legacy 记录和 name 扫描。
  */
 export async function resolveAgentOutput(id: string, cwd: string): Promise<AgentOutputResolution> {
   const dirs: Array<{ path: string; aliases: boolean }> = [];
@@ -782,18 +869,43 @@ export async function resolveAgentOutput(id: string, cwd: string): Promise<Agent
   }
 
   if (isRecordId(id)) {
-    for (const entry of dirs) {
-      if (entry.aliases) {
-        const alias = await loadAlias(aliasFile(entry.path, id), id);
-        if (alias) {
-          const target = await resolveAliasedRecord(entry.path, id, alias);
-          if (target) return { kind: "record", record: target };
-        }
-      }
-      const direct = await loadRecord(recordFile(entry.path, id));
-      if (direct && (direct.publicationId === undefined || direct.publicationId === id)) {
-        return { kind: "record", record: direct };
-      }
+    // Preserve the historical current → descendant → legacy precedence when
+    // duplicate ids exist, then fall back globally for parent/sibling results.
+    const scoped = await resolveExactInDirs(id, dirs);
+    if (scoped) return { kind: "record", record: scoped };
+    const exact = await resolveGlobalExactId(id);
+    if (exact.length === 1) return { kind: "record", record: exact[0]! };
+    if (exact.length > 1) {
+      exact.sort((a, b) => String(b.capturedAt).localeCompare(String(a.capturedAt))
+        || String(b.correlationId).localeCompare(String(a.correlationId)));
+      return {
+        kind: "ambiguous",
+        name: id,
+        matches: exact.map((record) => ({
+          id: record.publicationId ?? record.correlationId,
+          correlationId: record.correlationId,
+          ...(record.publicationId ? { publicationId: record.publicationId } : {}),
+          capturedAt: record.capturedAt,
+          preview: outputPreview(record.output),
+        })),
+      };
+    }
+    const prefixed = await resolvePrefixMatchId(id);
+    if (prefixed.length === 1) return { kind: "record", record: prefixed[0]! };
+    if (prefixed.length > 1) {
+      prefixed.sort((a, b) => String(b.capturedAt).localeCompare(String(a.capturedAt))
+        || String(b.correlationId).localeCompare(String(a.correlationId)));
+      return {
+        kind: "ambiguous",
+        name: id,
+        matches: prefixed.map((record) => ({
+          id: record.publicationId ?? record.correlationId,
+          correlationId: record.correlationId,
+          ...(record.publicationId ? { publicationId: record.publicationId } : {}),
+          capturedAt: record.capturedAt,
+          preview: outputPreview(record.output),
+        })),
+      };
     }
   }
 

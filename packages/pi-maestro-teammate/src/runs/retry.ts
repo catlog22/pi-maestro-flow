@@ -1,3 +1,5 @@
+import type { ModelHealthScope, ModelHealthTarget } from "../models/model-circuit-breaker.ts";
+
 export const NETWORK_RETRY_POLICY = Object.freeze({
   maxRetries: 5,
   initialDelayMs: 1_000,
@@ -36,6 +38,37 @@ export const RESOLVED_NETWORK_RETRY_POLICY = resolveNetworkRetryPolicy();
 
 export type RetryErrorKind = "network" | "provider" | "fallback-only" | "auth" | "non-retryable";
 
+export type ModelHealthFailureScope = ModelHealthScope | "none";
+
+export interface ModelHealthFailureInput {
+  message?: string;
+  status?: number;
+  /** Authoritative backend-aware override when the text cannot identify ownership. */
+  scope?: ModelHealthFailureScope;
+}
+
+export interface ModelHealthFailureFacts extends ModelHealthFailureInput {
+  retryKind: RetryErrorKind;
+}
+
+export interface ModelHealthFailureClassification {
+  retryKind: RetryErrorKind;
+  scope: ModelHealthFailureScope;
+  affectsCircuit: boolean;
+  suppressAuth: boolean;
+}
+
+/** Optional backend hook for assigning a failure to deployment or route health. */
+export type ModelHealthFailureScopeClassifier = (
+  failure: Readonly<ModelHealthFailureFacts>,
+) => ModelHealthFailureScope | undefined;
+
+export interface ModelHealthAttemptSnapshot {
+  projectionFingerprint?: string;
+  quarantinedDeployments: readonly string[];
+  authSuppressions: readonly string[];
+}
+
 /**
  * Authentication/permission failures: a bad key, expired/revoked token, or a
  * 401/403 response. Retrying the same model/credential cannot clear these, so
@@ -54,6 +87,13 @@ const AUTH_ERROR =
 // for an HTTP 401/403 response and wrongly classified as permanent.
 const NON_RETRYABLE_ERROR =
   /usage[_\s-]*limit|multi-auth rotation failed|bad request|invalid request|invalid model|unknown model|context[_\s-]*length[_\s-]*exceeded|input exceeds the context window|schema[-\s]*valid|validation (?:failed|error)/i;
+
+// Local teammate infrastructure failures are deterministic: re-dispatching a
+// whole run cannot fix a missing binary or a killed child process. They are
+// matched explicitly so the unknown-failure default below can stay retryable
+// without relaunching doomed runs.
+const LOCAL_INFRASTRUCTURE_ERROR =
+  /\b(?:failed to spawn pi subprocess|teammate runtime error|teammate child process exited abnormally)\b/i;
 
 // A configured model can exist in the local catalog while the upstream
 // account group does not actually serve it. This is candidate-specific: a
@@ -105,11 +145,14 @@ function classifyByStatus(status: number | undefined): RetryErrorKind | undefine
  * `status` (when known) normally short-circuits via {@link classifyByStatus};
  * an explicit upstream model-unavailable diagnostic is the narrow exception
  * because another configured candidate may still work. Otherwise the message
- * patterns apply, in order: auth → model availability → permanent →
- * quota/payment → transport → provider overload.
+ * patterns apply, in order: auth → model availability → permanent → local
+ * infrastructure → quota/payment → transport → provider overload. Anything
+ * unrecognized defaults to retryable (`provider`): at the provider boundary an
+ * unknown diagnostic is far more often transient than permanent, and the
+ * retry/fallback paths are bounded anyway.
  */
 export function classifyRetryError(message: string | undefined, status?: number): RetryErrorKind {
-  if (!message) return "non-retryable";
+  if (!message) return "provider";
   const effectiveStatus = status ?? extractHttpStatusFromMessage(message);
   if (effectiveStatus === 401) return "auth";
   if (MODEL_UNAVAILABLE_ERROR.test(message)) return "fallback-only";
@@ -118,11 +161,119 @@ export function classifyRetryError(message: string | undefined, status?: number)
   if (byStatus !== undefined) return byStatus;
   if (AUTH_ERROR.test(message)) return "auth";
   if (NON_RETRYABLE_ERROR.test(message)) return "non-retryable";
+  if (LOCAL_INFRASTRUCTURE_ERROR.test(message)) return "non-retryable";
   if (FALLBACK_ONLY_ERROR.test(message)) return "fallback-only";
   if (STREAM_READ_ERROR.test(message)) return "network";
   if (NETWORK_ERROR.test(message)) return "network";
   if (PROVIDER_ERROR.test(message)) return "provider";
-  return "non-retryable";
+  return "provider";
+}
+
+function defaultModelHealthFailureScope(retryKind: RetryErrorKind): ModelHealthFailureScope {
+  if (retryKind === "network" || retryKind === "auth") return "deployment";
+  if (retryKind === "provider" || retryKind === "fallback-only") return "route";
+  return "none";
+}
+
+/**
+ * Classify a registry-mode failure without coupling retry text parsing to a
+ * backend implementation. Backends may supply a scope directly or a hook for
+ * structured transport/provider errors; the retry kind remains the shared
+ * legacy classifier result.
+ */
+export function classifyModelHealthFailure(
+  failure: ModelHealthFailureInput,
+  classifyScope?: ModelHealthFailureScopeClassifier,
+): ModelHealthFailureClassification {
+  const retryKind = classifyRetryError(
+    failure.message ?? (failure.status === undefined ? undefined : `HTTP ${failure.status}`),
+    failure.status,
+  );
+  const facts = Object.freeze({ ...failure, retryKind });
+  const scope = failure.scope ?? classifyScope?.(facts) ?? defaultModelHealthFailureScope(retryKind);
+  return Object.freeze({
+    retryKind,
+    scope,
+    affectsCircuit: scope !== "none" && retryKind !== "non-retryable",
+    suppressAuth: retryKind === "auth" && scope !== "none",
+  });
+}
+
+/** Collision-safe key for an attempt-local, scope-specific auth suppression. */
+export function modelHealthAuthSuppressionKey(
+  scope: ModelHealthScope,
+  target: ModelHealthTarget,
+): string {
+  const value = scope === "deployment" ? target.deploymentId : target.modelRegistrationId;
+  if (!value) throw new TypeError(`Model health ${scope} key must not be empty`);
+  return `${scope}:${Buffer.byteLength(value, "utf8")}:${value}`;
+}
+
+export function isModelHealthAuthSuppressed(
+  suppressions: ReadonlySet<string>,
+  target: ModelHealthTarget,
+): boolean {
+  return suppressions.has(modelHealthAuthSuppressionKey("deployment", target))
+    || suppressions.has(modelHealthAuthSuppressionKey("route", target));
+}
+
+/** Candidate-sweep state; never survives the attempt that created it. */
+export class ModelHealthAttemptState {
+  private fingerprint: string | undefined;
+  private readonly quarantinedDeployments = new Set<string>();
+  private readonly authSuppressions = new Set<string>();
+
+  constructor(projectionFingerprint?: string) {
+    this.fingerprint = projectionFingerprint;
+  }
+
+  get projectionFingerprint(): string | undefined {
+    return this.fingerprint;
+  }
+
+  /** Clear attempt-local decisions when a new registry projection is observed. */
+  reconcileProjectionFingerprint(projectionFingerprint: string): boolean {
+    if (!projectionFingerprint) throw new TypeError("Model health projection fingerprint must not be empty");
+    if (projectionFingerprint === this.fingerprint) return false;
+    this.fingerprint = projectionFingerprint;
+    this.quarantinedDeployments.clear();
+    this.authSuppressions.clear();
+    return true;
+  }
+
+  quarantineDeployment(deploymentId: string): void {
+    if (!deploymentId) throw new TypeError("Model health deployment id must not be empty");
+    this.quarantinedDeployments.add(deploymentId);
+  }
+
+  isDeploymentQuarantined(deploymentId: string): boolean {
+    return this.quarantinedDeployments.has(deploymentId);
+  }
+
+  suppressAuth(scope: ModelHealthScope, target: ModelHealthTarget): void {
+    this.authSuppressions.add(modelHealthAuthSuppressionKey(scope, target));
+  }
+
+  isAuthSuppressed(target: ModelHealthTarget): boolean {
+    return isModelHealthAuthSuppressed(this.authSuppressions, target);
+  }
+
+  shouldSkip(target: ModelHealthTarget): boolean {
+    return this.isDeploymentQuarantined(target.deploymentId) || this.isAuthSuppressed(target);
+  }
+
+  noteFailure(target: ModelHealthTarget, failure: ModelHealthFailureClassification): void {
+    if (failure.scope === "deployment") this.quarantineDeployment(target.deploymentId);
+    if (failure.suppressAuth && failure.scope !== "none") this.suppressAuth(failure.scope, target);
+  }
+
+  snapshot(): ModelHealthAttemptSnapshot {
+    return Object.freeze({
+      ...(this.fingerprint === undefined ? {} : { projectionFingerprint: this.fingerprint }),
+      quarantinedDeployments: Object.freeze([...this.quarantinedDeployments].sort()),
+      authSuppressions: Object.freeze([...this.authSuppressions].sort()),
+    });
+  }
 }
 
 /**
