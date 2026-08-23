@@ -10,6 +10,8 @@ export interface ImageMetadata {
   channels: 1 | 3 | 4;
   pixelFormat?: ImagePixelFormat;
   sourceFormat?: ImageSourceFormat;
+  /** Coordinate origin of this image in its source space. */
+  origin?: { x: number; y: number };
   /** Scale from the input buffer's pixel coordinates to physical screenshot coordinates. */
   scaleX?: number;
   scaleY?: number;

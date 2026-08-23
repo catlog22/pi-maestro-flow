@@ -40,15 +40,17 @@ export function makeOcrResult(lines: readonly OcrLine[], width: number, height: 
 }
 
 
-/** Convert a raw RGB/RGBA image to RapidOCR's normalized NCHW float tensor. */
-export function imageToNchw(image: VisionImage): { data: Float32Array; dims: [1, 3, number, number] } {
+/** Convert a raw RGB/RGBA image to a normalized NCHW float tensor. */
+export function imageToNchw(image: VisionImage, normalization: { mean?: readonly [number, number, number]; std?: readonly [number, number, number] } = {}): { data: Float32Array; dims: [1, 3, number, number] } {
   const { width, height, channels } = image.metadata;
+  const mean = normalization.mean ?? [0.5, 0.5, 0.5];
+  const std = normalization.std ?? [0.5, 0.5, 0.5];
   const data = new Float32Array(3 * width * height);
   for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
     const source = (y * width + x) * channels;
     for (let channel = 0; channel < 3; channel++) {
-      const value = channels === 1 ? image.data[source] : image.data[source + channel];
-      data[channel * width * height + y * width + x] = (value / 255 - 0.5) / 0.5;
+      const value = channels === 1 ? image.data[source]! : image.data[source + channel]!;
+      data[channel * width * height + y * width + x] = (value / 255 - mean[channel]!) / std[channel]!;
     }
   }
   return { data, dims: [1, 3, height, width] };
@@ -87,10 +89,12 @@ export function normalizeClassifierResult(scores: ArrayLike<number>): { angle: 0
 export function decodeCtcGreedy(logits: ArrayLike<number>, timesteps: number, classes: number, dictionary: readonly string[], blank = 0): { text: string; confidence: number } {
   if (timesteps < 1 || classes < 1 || logits.length < timesteps * classes) return { text: "", confidence: 0 };
   let previous = blank; let confidenceSum = 0; let count = 0; const chars: string[] = [];
+  let bounded = true;
+  for (let index = 0; index < Math.min(logits.length, timesteps * classes); index++) { const value = Number(logits[index]); if (value < 0 || value > 1) { bounded = false; break; } }
   for (let step = 0; step < timesteps; step++) {
     let best = 0; let value = -Infinity;
     for (let klass = 0; klass < classes; klass++) { const candidate = Number(logits[step * classes + klass]); if (candidate > value) { value = candidate; best = klass; } }
-    const probability = 1 / (1 + Math.exp(-Math.max(-60, Math.min(60, value))));
+    const probability = bounded ? Math.max(0, Math.min(1, value)) : 1 / (1 + Math.exp(-Math.max(-60, Math.min(60, value))));
     if (best !== blank && best !== previous) { chars.push(dictionary[best - 1] ?? ""); confidenceSum += probability; count++; }
     previous = best;
   }

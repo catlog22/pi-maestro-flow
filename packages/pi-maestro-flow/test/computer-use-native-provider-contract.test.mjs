@@ -35,10 +35,16 @@ test("CU-0 manifest and optional dependency versions are locked together", () =>
     assert.equal(packageEntry(name)?.version, version, `${name} is missing from package-lock`);
   }
   assert.equal(manifest.fail_closed.diagnostic_code, "MODEL_PROVENANCE_UNVERIFIED");
-  const missing = manifest.model_artifacts.find((artifact) => artifact.id === "omniparser.v2.icon_detect");
-  assert.equal(missing.status, "unverified_missing");
-  assert.equal(missing.provenance, null);
-  assert.match(missing.diagnostic, /not found|unverified/i);
+  assert.equal(manifest.fail_closed.unverified_model_status, "unavailable");
+  const iconDetect = manifest.model_artifacts.find((artifact) => artifact.id === "omniparser.v2.icon_detect");
+  assert.ok(iconDetect.status === "verified_local" || iconDetect.status === "unverified_missing", "icon_detect status must be a known contract state");
+  if (iconDetect.status === "verified_local") {
+    assert.match(iconDetect.sha256, /^[a-f0-9]{64}$/, "verified icon_detect must carry a SHA-256 digest");
+    assert.ok(typeof iconDetect.provenance === "string" && iconDetect.provenance.length > 0, "verified icon_detect must record provenance");
+  } else {
+    assert.equal(iconDetect.provenance, null);
+    assert.match(iconDetect.diagnostic, /not found|unverified/i);
+  }
 });
 
 test("verified RapidOCR entries contain only locally measured digests", () => {
@@ -48,11 +54,12 @@ test("verified RapidOCR entries contain only locally measured digests", () => {
     ["ch_ppocr_mobile_v2.0_cls_infer.onnx", "e47acedf663230f8863ff1ab0e64dd2d82b838fceb5957146dab185a89d6215c"],
   ]);
   const rapidocrRoot = process.env.RAPIDOCR_ONNX_ROOT;
+  const rapidocrArtifacts = manifest.model_artifacts.filter((artifact) => artifact.kind !== "ui_detector" && artifact.status === "verified_local");
   if (!rapidocrRoot) {
-    assert.ok(manifest.model_artifacts.filter((artifact) => artifact.status === "verified_local").every((artifact) => /^[a-f0-9]{64}$/.test(artifact.sha256)));
+    assert.ok(rapidocrArtifacts.every((artifact) => /^[a-f0-9]{64}$/.test(artifact.sha256)));
     return;
   }
-  for (const artifact of manifest.model_artifacts.filter((entry) => entry.status === "verified_local")) {
+  for (const artifact of rapidocrArtifacts) {
     const fileName = artifact.path.split("/").at(-1);
     const path = join(rapidocrRoot, "models", fileName);
     assert.ok(existsSync(path), `RapidOCR model is missing: ${path}`);

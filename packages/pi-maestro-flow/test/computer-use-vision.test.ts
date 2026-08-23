@@ -65,9 +65,21 @@ test("OCR adapter honors abort and shutdown lifecycle", async () => {
 });
 
 test("OmniParser detection is explicitly unavailable when provenance is missing", async () => {
-  const result = await new OnnxVisionService().detect(image(), { mode: "crop" });
+  // Construct a temporary manifest with the icon_detect artifact explicitly
+  // unverified_missing to assert the fail-closed contract holds regardless of
+  // the default manifest's current verification state.
+  const tmp = mkdtempSync(join(tmpdir(), "omniparser-unverified-"));
+  const manifestPath = join(tmp, "manifest.json");
+  writeFileSync(manifestPath, JSON.stringify({
+    schema_version: "computer-use-manifest/0.1",
+    model_artifacts: [{ id: "omniparser.v2.icon_detect", kind: "ui_detector", status: "unverified_missing", path: "", package: null, package_version: null, provenance: null }],
+    fail_closed: { unverified_model_status: "unavailable", diagnostic_code: "MODEL_PROVENANCE_UNVERIFIED", allow_startup_without_optional_dependencies: true },
+  }));
+  clearModelAssetCache();
+  const result = await new OnnxVisionService({ model: { manifestPath } }).detect(image(), { mode: "crop" });
   assert.equal(result.ok, false);
   if (!result.ok) { assert.equal(result.code, "MODEL_PROVENANCE_UNVERIFIED"); assert.deepEqual(result.items, []); assert.equal(result.mode, "crop"); }
+  clearModelAssetCache();
 });
 
 test("vision modules remain browser and statically-native-import independent", async () => {
@@ -78,4 +90,28 @@ test("vision modules remain browser and statically-native-import independent", a
     assert.doesNotMatch(source, /from\s+["'](?:.*browser|onnxruntime-node)["']/);
     assert.doesNotMatch(source, /from\s+["'](?:puppeteer|electron|@nut-tree)/);
   }
+});
+
+test("OmniParser icon_detect returns real icon detections when the verified ONNX artifact is available", async (t) => {
+  const modelPath = "G:/github_lib/GenericAgent/temp/weights/icon_detect/model.onnx";
+  const { existsSync, readFileSync: readPng } = await import("node:fs");
+  let ortAvailable = false;
+  try { (await import("node:module")).createRequire(import.meta.url)("onnxruntime-node"); ortAvailable = true; } catch { /* optional dep */ }
+  if (!existsSync(modelPath) || !ortAvailable) { t.skip("Verified OmniParser ONNX artifact or onnxruntime-node is not configured."); return; }
+
+  const fixturePath = "G:/github_lib/GenericAgent/temp/weights/icon_detect/test_icons.png";
+  if (!existsSync(fixturePath)) { t.skip("icon_detect fixture image is not present."); return; }
+  const png = readPng(fixturePath);
+  const service = new OnnxVisionService({ model: { manifestPath: "optional/computer-use-manifest.json" } });
+  try {
+    const result = await service.detect({ data: png, metadata: { width: 640, height: 640, channels: 4, pixelFormat: "rgba", sourceFormat: "png" } }, { confidence: 0.4, iouThreshold: 0.45, mode: "match" });
+    assert.equal(result.ok, true, "verified icon_detect must produce detections, not fail-closed");
+    if (!result.ok) return;
+    const icons = result.items.filter((item) => item.type === "icon");
+    assert.ok(icons.length === 3, `expected three icons, got ${icons.length}`);
+    for (const icon of icons) {
+      assert.ok(icon.bbox[2] > icon.bbox[0] && icon.bbox[3] > icon.bbox[1], "icon bbox must be positive");
+      assert.ok(icon.confidence >= 0.4 && icon.confidence <= 1, "confidence must respect the threshold");
+    }
+  } finally { await service.shutdown(); }
 });
