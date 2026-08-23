@@ -259,3 +259,62 @@ test("transient EPERM on the store lock is retried, not crashed", async () => {
     }
   });
 });
+
+test("tryGc sweeps when idle, skips via marker, and returns busy when contended", async () => {
+  await withStore(async (store, advance) => {
+    const imported = seed("trygc");
+    await store.reserve(imported);
+    await store.importIntent(intent(imported));
+    advance(COMPLETION_OUTBOX_LIVE_TTL_MS + 1);
+
+    // First call: lock is free, marker is stale → real sweep runs.
+    const first = await store.tryGc(target.workspaceId);
+    assert.equal(first.busy, undefined);
+    assert.equal(first.skipped, undefined);
+    assert.equal(first.expired, 1);
+    assert.ok(first.releasedReservations >= 1);
+
+    // Second call immediately after: cross-process marker is fresh → skipped.
+    const second = await store.tryGc(target.workspaceId);
+    assert.equal(second.skipped, true);
+    assert.equal(second.busy, undefined);
+    assert.equal(second.expired, 0);
+
+    // After the marker interval elapses, another real sweep runs (and finds
+    // nothing left to expire, but completes without busy/skipped).
+    advance(31_000);
+    const third = await store.tryGc(target.workspaceId);
+    assert.equal(third.busy, undefined);
+    assert.equal(third.skipped, undefined);
+    assert.equal(third.expired, 0);
+  });
+});
+
+test("tryGc returns busy instead of throwing when the workspace lock is held", async () => {
+  // Hold the workspace lock by creating the .store.lock file exclusively before
+  // calling tryGc, simulating a concurrent writer. tryGc must return { busy } and
+  // must NOT throw — this is the core guarantee that stops the "periodic
+  // completion reconciliation failed" warning under contention.
+  const root = await mkdtemp(join(tmpdir(), "completion-trygc-busy-"));
+  try {
+    const store = new CompletionOutboxFileStore({ rootDir: root, now: () => 1_000, ownerId: "owner-a" });
+    // Prime the workspace directory so tryGc does not need to create it.
+    await store.reserve(seed("prime"), 4_096);
+    const { createHash } = await import("node:crypto");
+    const { open: openLock, rm: rmLock } = await import("node:fs/promises");
+    const workspaceDir = join(root, createHash("sha256").update(target.workspaceId, "utf8").digest("hex"));
+    const lockPath = join(workspaceDir, ".store.lock");
+    const holder = await openLock(lockPath, "wx", 0o600);
+    try {
+      const result = await store.tryGc(target.workspaceId);
+      assert.equal(result.busy, true);
+      assert.equal(result.skipped, undefined);
+      assert.equal(result.expired, 0);
+    } finally {
+      await holder.close();
+      await rmLock(lockPath, { force: true });
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

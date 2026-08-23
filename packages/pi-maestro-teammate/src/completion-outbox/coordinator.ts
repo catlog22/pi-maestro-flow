@@ -14,6 +14,10 @@ import { CompletionOutboxFileStore } from "./file-store.ts";
 import { COMPLETION_OUTBOX_MAX_ATTEMPTS, type CompletionOutboxRecord } from "./types.ts";
 
 const RECEIPT_DEADLINE_MS = 60_000;
+// Minimum gap between two store.gc() runs triggered by reconcile(). Expired
+// records are inert until swept, so a 60s gap trades promptness for far less
+// lock contention with concurrent reserve()/importIntent() writers.
+const RECONCILE_GC_MIN_INTERVAL_MS = 60_000;
 
 export interface CompletionDeliveryEnvelope {
   customType: "teammate-complete";
@@ -105,6 +109,16 @@ export class CompletionDeliveryCoordinator {
   #binding: CompletionSessionBinding | undefined;
   #unsubscribe: (() => void) | undefined;
   #disposed = false;
+  // Throttle store.gc() inside reconcile(): a full workspace GC under the lock
+  // competes with reserve()/importIntent() writers and is the main source of the
+  // "Timed out acquiring completion outbox lock" warnings. Expired records are
+  // inert (deliverDue/acquireClaim already reject expired entries), so skipping
+  // a sweep between two reconciles is safe; the next reconcile past this gap
+  // reclaims them. This is the only place store.gc() is called — bindSession()
+  // relies on this reconcile path for the initial sweep on a fresh binding.
+  // Seeded lazily on the first reconcile so the first sweep always runs (a zero
+  // seed under a small mocked clock would otherwise skip the first sweep).
+  #lastReconcileGcAt: number | undefined;
 
   constructor(options: CompletionCoordinatorOptions = {}) {
     this.store = options.store ?? new CompletionOutboxFileStore();
@@ -208,8 +222,19 @@ export class CompletionDeliveryCoordinator {
       await this.#importRecoverable(binding.target);
       await this.#rebuildReceipts(binding.target, binding.entries);
       await this.#deliverDue(binding.target, true);
-      await this.store.gc(binding.target.workspaceId);
-      await this.registry.current()?.prune(this.#now());
+      const now = this.#now();
+      // Use the non-blocking tryGc(): if a concurrent writer holds the workspace
+      // lock, the sweep returns { busy } / { skipped } instead of throwing, so a
+      // contended lock never produces a "periodic completion reconciliation
+      // failed" warning. The cross-process .gc-marker inside tryGc() also
+      // deduplicates sweeps across multiple Pi processes. Only update the
+      // in-process throttle timestamp when a real sweep ran, so the next
+      // reconcile retries on busy/skipped.
+      if (this.#lastReconcileGcAt === undefined || now - this.#lastReconcileGcAt >= RECONCILE_GC_MIN_INTERVAL_MS) {
+        const result = await this.store.tryGc(binding.target.workspaceId);
+        if (!result.busy && !result.skipped) this.#lastReconcileGcAt = now;
+      }
+      await this.registry.current()?.prune(now);
     });
   }
 

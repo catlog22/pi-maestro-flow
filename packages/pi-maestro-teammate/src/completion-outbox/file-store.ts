@@ -34,6 +34,7 @@ import {
   type CompletionOutboxGcResult,
   type CompletionOutboxRecord,
   type CompletionOutboxState,
+  type CompletionOutboxTryGcResult,
   type CompletionOutboxUsage,
   type CompletionReservationRecord,
   retryDelayForAttempt,
@@ -44,9 +45,27 @@ const LIVE_STATES = new Set<CompletionOutboxState>(["wal", "pending", "queued"])
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const HASH_ID = /^[a-f0-9]{64}$/;
 const LOCK_STALE_MS = 2 * 60_000;
-const LOCK_WAIT_MS = 15_000;
+// Raised from 15s to 45s: a full workspace GC scans every session × state dir
+// under the lock, which can hold the workspace lock long enough on slow disks
+// (Windows + antivirus) to starve concurrent writers past 15s. The lock is still
+// released after the critical section and stale locks are reclaimed after
+// LOCK_STALE_MS, so a longer wait only widens the transient-contention window
+// without risking a stuck holder. See #withWorkspaceLock.
+const LOCK_WAIT_MS = 45_000;
 const LOCK_RETRY_MS = 25;
 const RENAME_MAX_RETRIES = 5;
+// Throttle the *implicit* GC run inside reserve() so a high write rate does not
+// repeatedly take the workspace lock for a full scan on every reservation. A
+// reserve() capacity check only needs recently-accurate usage; an explicit
+// store.gc() call always runs a full GC regardless of this interval.
+const RESERVE_GC_MIN_INTERVAL_MS = 30_000;
+// Cross-process GC marker: tryGc() writes this after a sweep so concurrent Pi
+// processes sharing the same outbox directory can skip a redundant sweep within
+// the gap. A process-local throttle (like #lastReconcileGcAt) is invisible to
+// other processes; this marker is the cross-process equivalent. Short on purpose
+// so a crashed GC still lets the next process re-sweep soon.
+const TRY_GC_MARKER_MIN_INTERVAL_MS = 30_000;
+const GC_MARKER_NAME = ".gc-marker";
 
 interface StoreOptions {
   rootDir?: string;
@@ -248,6 +267,7 @@ export class CompletionOutboxFileStore {
   readonly #now: () => number;
   readonly #maxLiveRecords: number;
   readonly #maxLiveBytes: number;
+  #lastReserveGcAt: Map<string, number> = new Map();
 
   constructor(options: StoreOptions = {}) {
     this.rootDir = resolve(options.rootDir ?? process.env.PI_TEAMMATE_COMPLETION_OUTBOX_ROOT ?? join(homedir(), ".pi", "teammate", "completion-outbox", "v1"));
@@ -269,7 +289,7 @@ export class CompletionOutboxFileStore {
       throw new Error(`Invalid completion reservation size: ${reservedBytes}.`);
     }
     return this.#withWorkspaceLock(seed.target.workspaceId, async () => {
-      await this.#gcLocked(seed.target.workspaceId);
+      await this.#maybeReserveGc(seed.target.workspaceId);
       const usage = await this.#usageLocked(seed.target.workspaceId);
       if (usage.liveRecords + 1 > this.#maxLiveRecords
         || usage.liveBytes + reservedBytes > this.#maxLiveBytes) {
@@ -456,6 +476,48 @@ export class CompletionOutboxFileStore {
     return this.#withWorkspaceLock(workspaceId, () => this.#gcLocked(workspaceId));
   }
 
+  /**
+   * Non-blocking GC for the periodic reconcile path. If the workspace lock is
+   * already held by a concurrent writer, returns `{ busy: true }` instead of
+   * waiting or throwing — a maintenance sweep must never crash or warn on
+   * transient contention. Also honors a cross-process `.gc-marker` so that
+   * when multiple Pi processes share the outbox only one sweeps within
+   * TRY_GC_MARKER_MIN_INTERVAL_MS; the others return `{ skipped: true }`.
+   * Expired records are inert (acquireClaim/deliverDue reject them), so
+   * skipping a sweep is safe; the next reconcile reclaims them.
+   */
+  async tryGc(workspaceId: string): Promise<CompletionOutboxTryGcResult> {
+    const empty: CompletionOutboxTryGcResult = { expired: 0, removed: 0, releasedReservations: 0 };
+    if (!boundedString(workspaceId, 128)) return { ...empty, busy: true };
+    const workspaceDir = this.#workspaceDir(workspaceId);
+    const markerPath = join(workspaceDir, GC_MARKER_NAME);
+    const now = this.#now();
+    const marker = await readSafeJson(markerPath, 64);
+    if (marker && typeof marker === "object" && "at" in marker && typeof (marker as { at: unknown }).at === "number"
+      && now - (marker as { at: number }).at < TRY_GC_MARKER_MIN_INTERVAL_MS) {
+      return { ...empty, skipped: true };
+    }
+    const result = await this.#withWorkspaceLock<CompletionOutboxTryGcResult | undefined>(
+      workspaceId,
+      async () => {
+        // Re-check the marker inside the lock to close the TOCTOU window between
+        // the lock-free read above and acquisition: another process may have just
+        // finished a sweep and written the marker while we waited.
+        const fresh = await readSafeJson(markerPath, 64);
+        const freshAt = fresh && typeof fresh === "object" && "at" in fresh && typeof (fresh as { at: unknown }).at === "number"
+          ? (fresh as { at: number }).at : 0;
+        if (freshAt > 0 && now - freshAt < TRY_GC_MARKER_MIN_INTERVAL_MS) {
+          return { ...empty, skipped: true };
+        }
+        const swept = await this.#gcLocked(workspaceId);
+        await writeJsonAtomic(markerPath, { at: this.#now(), owner: this.ownerId }, 64);
+        return swept;
+      },
+      0,
+    );
+    return result ?? { ...empty, busy: true };
+  }
+
   async #transition(
     target: CompletionTarget,
     deliveryId: string,
@@ -591,6 +653,23 @@ export class CompletionOutboxFileStore {
     return result;
   }
 
+  // reserve() only needs usage that is recent enough for a capacity check; running a
+  // full workspace GC on every reservation takes the lock for too long under load.
+  // Throttle the implicit GC to once per RESERVE_GC_MIN_INTERVAL_MS per workspace.
+  //
+  // NOTE: #usageLocked() counts files in live state dirs without reading expiresAt,
+  // so skipping a sweep means expired-but-not-yet-swept records still count against
+  // the quota until the next explicit store.gc() (reconcile) reclaims them. This
+  // is intentionally conservative: it can only false-reject (never over-admit),
+  // and the next reconcile past RECONCILE_GC_MIN_INTERVAL_MS reclaims the slack.
+  async #maybeReserveGc(workspaceId: string): Promise<void> {
+    const now = this.#now();
+    const last = this.#lastReserveGcAt.get(workspaceId) ?? 0;
+    if (now - last < RESERVE_GC_MIN_INTERVAL_MS) return;
+    await this.#gcLocked(workspaceId);
+    this.#lastReserveGcAt.set(workspaceId, now);
+  }
+
   async #consumeReservation(reservation: CompletionReservationRecord, now: number): Promise<void> {
     await writeJsonAtomic(this.#reservationPath(reservation.target.workspaceId, reservation.reservationId), {
       ...reservation,
@@ -606,13 +685,13 @@ export class CompletionOutboxFileStore {
     return validReservation(raw) ? raw : undefined;
   }
 
-  async #withWorkspaceLock<T>(workspaceId: string, action: () => Promise<T>): Promise<T> {
+  async #withWorkspaceLock<T>(workspaceId: string, action: () => Promise<T>, waitMs: number = LOCK_WAIT_MS): Promise<T> {
     if (!boundedString(workspaceId, 128)) throw new Error("Invalid completion workspaceId.");
     const workspaceDir = this.#workspaceDir(workspaceId);
     await ensureRealDirectory(this.rootDir);
     await ensureRealDirectory(workspaceDir);
     const lockPath = join(workspaceDir, ".store.lock");
-    const deadline = Date.now() + LOCK_WAIT_MS;
+    const deadline = Date.now() + waitMs;
     let handle: Awaited<ReturnType<typeof open>> | undefined;
     while (!handle) {
       try {
@@ -623,7 +702,7 @@ export class CompletionOutboxFileStore {
         // Windows may transiently deny exclusive-create with EPERM/EACCES —
         // antivirus scan, a concurrent holder still releasing the lock, or a
         // racing rm that has not flushed yet. Treat it the same as EEXIST and
-        // retry within LOCK_WAIT_MS; never crash the process on a transient
+        // retry within the wait window; never crash the process on a transient
         // lock contention. Mirrors renameWithRetry's EPERM/EACCES/EEXIST set.
         if (code !== "EEXIST" && code !== "EPERM" && code !== "EACCES") throw error;
         const info = await stat(lockPath).catch(() => undefined);
@@ -631,7 +710,13 @@ export class CompletionOutboxFileStore {
           await rm(lockPath, { force: true });
           continue;
         }
-        if (Date.now() >= deadline) throw new Error(`Timed out acquiring completion outbox lock for ${workspaceId}.`);
+        if (waitMs <= 0 || Date.now() >= deadline) {
+          // Non-blocking callers (tryGc) treat a contended lock as "busy" rather
+          // than throwing — a maintenance sweep must never crash or warn on
+          // transient contention with concurrent writers.
+          if (waitMs <= 0) return undefined as T;
+          throw new Error(`Timed out acquiring completion outbox lock for ${workspaceId}.`);
+        }
         await new Promise((resolveDelay) => setTimeout(resolveDelay, LOCK_RETRY_MS));
       }
     }

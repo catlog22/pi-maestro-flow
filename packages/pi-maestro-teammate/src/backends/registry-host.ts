@@ -142,6 +142,21 @@ const modelRegistryPairs = new Map<string, CompiledModelRegistryPair>();
 /** Last successfully published identity survives invalidation to keep revisions monotonic. */
 const modelRegistryGenerations = new Map<string, ProjectionIdentity>();
 
+/**
+ * Drop every cached registration document for one workspace.
+ *
+ * `syncDocuments` keys entries by workspace and global document path, so no
+ * single delete covers it. The model-registry reader calls this whenever its
+ * authority moves — invalid input, or an observed switch away from v2 — so the
+ * read-once 2.0 reader can never serve a document that no longer exists on
+ * disk. Published pairs and generations are handled separately per call site.
+ */
+function forgetSyncDocumentsForWorkspace(workspaceRoot: string): void {
+  for (const key of syncDocuments.keys()) {
+    if (key === workspaceRoot || key.startsWith(`${workspaceRoot}\0`)) syncDocuments.delete(key);
+  }
+}
+
 function modeGenerationHash(mode: string): string {
   return createHash("sha256").update(`<mode:${mode}>`, "utf8").digest("hex");
 }
@@ -226,13 +241,13 @@ export function modelRegistryPairSync(
     return undefined;
   }
 
-  const path = join(workspaceRoot, REGISTRY_FILE);
+  const path = getProjectBackendRegistryPath(workspaceRoot);
   let raw: string;
   try {
     raw = readFileSync(path, "utf-8");
   } catch (cause) {
     modelRegistryPairs.delete(workspaceRoot);
-    syncDocuments.delete(workspaceRoot);
+    forgetSyncDocumentsForWorkspace(workspaceRoot);
     if ((cause as NodeJS.ErrnoException).code === "ENOENT") {
       const previous = modelRegistryGenerations.get(workspaceRoot);
       if (previous !== undefined) {
@@ -261,6 +276,10 @@ export function modelRegistryPairSync(
       // Preserve the exact legacy/backend-registry parser and validation path.
       const legacyConfig = parseBackendRegistryDocument(raw, path);
       modelRegistryPairs.delete(workspaceRoot);
+      // The keyed entries go so the 2.0 reader re-reads the rolled-back
+      // document instead of serving its cached model-registry view; the bare
+      // entry is then (re)set as the frozen-mode marker for catalog refreshes.
+      forgetSyncDocumentsForWorkspace(workspaceRoot);
       syncDocuments.set(workspaceRoot, legacyConfig);
       const previous = modelRegistryGenerations.get(workspaceRoot);
       const modeHash = modeGenerationHash(legacyConfig.mode ?? "legacy");
@@ -314,7 +333,7 @@ export function modelRegistryPairSync(
     return compiled;
   } catch (cause) {
     modelRegistryPairs.delete(workspaceRoot);
-    syncDocuments.delete(workspaceRoot);
+    forgetSyncDocumentsForWorkspace(workspaceRoot);
     throw cause;
   }
 }
@@ -415,17 +434,19 @@ function backendLoader(
   };
 }
 
-/** Forget cached documents and published pairs so an operator edit takes effect. */
+/**
+ * Forget cached documents and published pairs so an operator edit takes effect.
+ *
+ * Generations intentionally survive: they carry the last published identity,
+ * and dropping them would restart revisions at 1 across an invalidation
+ * boundary instead of advancing monotonically.
+ */
 export function forgetBackendRegistryConfigSync(workspaceRoot?: string): void {
   if (workspaceRoot === undefined) {
     syncDocuments.clear();
     modelRegistryPairs.clear();
-    modelRegistryGenerations.clear();
     return;
   }
-  for (const key of syncDocuments.keys()) {
-    if (key.startsWith(`${workspaceRoot}\0`)) syncDocuments.delete(key);
-  }
+  forgetSyncDocumentsForWorkspace(workspaceRoot);
   modelRegistryPairs.delete(workspaceRoot);
-  modelRegistryGenerations.delete(workspaceRoot);
 }

@@ -82,5 +82,11 @@ export declare function dispatchRegistryForProjectionSync(projection: CompiledMo
  * @returns the registry, or undefined when the document keeps the legacy path.
  */
 export declare function dispatchRegistrySync(workspaceRoot: string, extrasOf: (spec: TeammateRunSpec, options: BackendRunOptions) => PiSubprocessRunExtras, remoteManagerOf?: () => RemoteManagerPort, globalFilePath?: string): TeammateBackendRegistry | undefined;
-/** Forget cached documents and published pairs so an operator edit takes effect. */
+/**
+ * Forget cached documents and published pairs so an operator edit takes effect.
+ *
+ * Generations intentionally survive: they carry the last published identity,
+ * and dropping them would restart revisions at 1 across an invalidation
+ * boundary instead of advancing monotonically.
+ */
 export declare function forgetBackendRegistryConfigSync(workspaceRoot?: string): void;
