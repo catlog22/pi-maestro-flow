@@ -41,6 +41,20 @@ export interface McpxConfigChanges {
   registerWorkspace?: boolean;
   /** Public tunnel URL (Cloudflare or any reverse tunnel); enables the proxy flags. */
   tunnelUrl?: string;
+  /** server.disable_localhost_protection / trust_proxy_headers (inline editor). */
+  disableLocalhostProtection?: boolean;
+  trustProxyHeaders?: boolean;
+  /** security.commands allow/confirm/deny rule lists (inline editor). */
+  commandsAllow?: string[];
+  commandsConfirm?: string[];
+  commandsDeny?: string[];
+  commandsAutoReadonly?: boolean | null;
+  /** security.files permission limits and rule lists (inline editor). */
+  filesMaxReadBytes?: number;
+  filesMaxPatchFiles?: number;
+  filesAllow?: string[];
+  filesConfirm?: string[];
+  filesDeny?: string[];
 }
 
 type WizardStep =
@@ -111,6 +125,43 @@ function listBlock(items: string[], indent: string): string {
   return items.map((item) => `${indent}- ${item}`).join("\n");
 }
 
+/** Extract the `files:` sub-block (indented under security) as a standalone text
+ *  blob so its allow/confirm/deny lists can be parsed independently of the
+ *  sibling `commands:` lists that share the same list keys. */
+function extractFilesBlock(securityRaw: string): string {
+  const lines = securityRaw.split(/\r?\n/);
+  const start = lines.findIndex((line) => /^    files:\s*$/.test(line));
+  if (start < 0) return "";
+  let end = start + 1;
+  while (end < lines.length
+    && !/^    [A-Za-z_]/.test(lines[end])
+    && !/^[A-Za-z_]/.test(lines[end])) {
+    end++;
+  }
+  return lines.slice(start, end).join("\n");
+}
+
+/** Parse a `- item` list anchored under a given key inside a sub-block blob. */
+function parseSubList(block: string, key: string): string[] {
+  if (!block) return [];
+  const items: string[] = [];
+  const pattern = new RegExp(`^\\s*${key}:\\s*$`, "m");
+  const start = block.search(pattern);
+  if (start < 0) return [];
+  const rest = block.slice(start).split(/\r?\n/).slice(1);
+  for (const line of rest) {
+    const match = line.match(/^\s{2,}-\s+(.+?)\s*$/);
+    if (match) {
+      items.push(match[1]!.trim());
+    } else if (/^\s*[A-Za-z_][A-Za-z0-9_]*:\s*$/.test(line)) {
+      break;
+    } else if (/^\S/.test(line)) {
+      break;
+    }
+  }
+  return items;
+}
+
 function indentLines(text: string, indent: string): string {
   return text.split("\n").map((line) => (line === "" ? line : indent + line)).join("\n");
 }
@@ -143,7 +194,7 @@ function patchYamlScalar(section: string, key: string, value: string, fallbackIn
   return `${section}\n${childIndent}${key}: ${value}`;
 }
 
-function buildChangesYaml(existing: string, changes: McpxConfigChanges, cwd: string): { yaml: string; summary: string[] } {
+export function buildChangesYaml(existing: string, changes: McpxConfigChanges, cwd: string): { yaml: string; summary: string[] } {
   const sections = splitSections(existing);
   const summary: string[] = [];
   const get = (key: string) => sections.find((section) => section.key === key);
@@ -202,6 +253,19 @@ function buildChangesYaml(existing: string, changes: McpxConfigChanges, cwd: str
     patch("trust_proxy_headers", "true");
     summary.push("已启用隧道代理标志（disable_localhost_protection + trust_proxy_headers）");
   }
+  // Inline-editor overrides for the two server flags. These run AFTER the
+  // derived block above so an explicit inline edit wins over the tunnel-derived
+  // default (e.g. user can turn trust_proxy_headers back off while keeping oauth).
+  if (changes.disableLocalhostProtection !== undefined) {
+    const current = get("server")?.raw ?? "server:";
+    set("server", patchYamlScalar(current, "disable_localhost_protection", String(changes.disableLocalhostProtection)));
+    summary.push(`disable_localhost_protection: ${changes.disableLocalhostProtection}`);
+  }
+  if (changes.trustProxyHeaders !== undefined) {
+    const current = get("server")?.raw ?? "server:";
+    set("server", patchYamlScalar(current, "trust_proxy_headers", String(changes.trustProxyHeaders)));
+    summary.push(`trust_proxy_headers: ${changes.trustProxyHeaders}`);
+  }
 
   // A public tunnel with open auth would be exposed unauthenticated: upgrade to
   // oauth with the tunnel URL as server_url (password stays editable later).
@@ -257,7 +321,95 @@ function buildChangesYaml(existing: string, changes: McpxConfigChanges, cwd: str
     if (changes.allowPi) summary.push("已添加 Pi 白名单 ^pi\\b");
   }
 
-  // 4. skill discovery dirs
+  // 4. security.commands allow/confirm/deny lists + auto_allow_readonly (inline editor)
+  if (changes.commandsAllow !== undefined || changes.commandsConfirm !== undefined || changes.commandsDeny !== undefined || changes.commandsAutoReadonly !== undefined) {
+    const allow = changes.commandsAllow !== undefined ? changes.commandsAllow : parseListItems(get("security"), "allow");
+    const confirm = changes.commandsConfirm !== undefined ? changes.commandsConfirm : parseListItems(get("security"), "confirm");
+    const deny = changes.commandsDeny !== undefined ? changes.commandsDeny : parseListItems(get("security"), "deny");
+    const defaultLine = changes.commandsDefault
+      ?? (get("security")?.raw.match(/^\s{8}default:\s*(.+)$/m)?.[1]?.trim() ?? "allow");
+    // auto_allow_readonly: null/true/false all valid YAML; undefined = preserve existing.
+    const autoReadonly = changes.commandsAutoReadonly !== undefined
+      ? (changes.commandsAutoReadonly === null ? "null" : String(changes.commandsAutoReadonly))
+      : (get("security")?.raw.match(/^\s{8}auto_allow_readonly:\s*(.+)$/m)?.[1]?.trim() ?? "null");
+    const commands = [
+      "    commands:",
+      `        default: ${defaultLine}`,
+      allow.length > 0 ? `        allow:\n${listBlock(allow, "            ")}` : "        allow: []",
+      confirm.length > 0 ? `        confirm:\n${listBlock(confirm, "            ")}` : "        confirm: []",
+      deny.length > 0 ? `        deny:\n${listBlock(deny, "            ")}` : "        deny: []",
+      `        auto_allow_readonly: ${autoReadonly}`,
+    ].join("\n");
+    // Replace the commands block inside the security section, preserving other security children.
+    const securityLines = (get("security")?.raw ?? "security:").split(/\r?\n/);
+    const commandsStart = securityLines.findIndex((line) => /^    commands:\s*$/.test(line));
+    let restLines: string[];
+    let filesBlockLines: string[] = [];
+    if (commandsStart >= 0) {
+      let end = commandsStart + 1;
+      while (end < securityLines.length
+        && !/^    [A-Za-z_]/.test(securityLines[end])
+        && !/^[A-Za-z_]/.test(securityLines[end])) {
+        end++;
+      }
+      restLines = [...securityLines.slice(0, commandsStart), ...securityLines.slice(end)];
+    } else {
+      restLines = securityLines;
+    }
+    set("security", [...restLines.filter((line) => line.trim() !== ""), commands].join("\n"));
+    if (changes.commandsAllow !== undefined) summary.push(`commands.allow: ${changes.commandsAllow.length} 条`);
+    if (changes.commandsConfirm !== undefined) summary.push(`commands.confirm: ${changes.commandsConfirm.length} 条`);
+    if (changes.commandsDeny !== undefined) summary.push(`commands.deny: ${changes.commandsDeny.length} 条`);
+    if (changes.commandsAutoReadonly !== undefined) summary.push(`auto_allow_readonly: ${changes.commandsAutoReadonly === null ? "null" : changes.commandsAutoReadonly}`);
+  }
+
+  // 4b. security.files permission limits + rule lists (inline editor)
+  if (changes.filesMaxReadBytes !== undefined || changes.filesMaxPatchFiles !== undefined
+      || changes.filesAllow !== undefined || changes.filesConfirm !== undefined || changes.filesDeny !== undefined) {
+    const security = get("security")?.raw ?? "security:";
+    const existingMaxRead = security.match(/^\s{8}max_read_bytes:\s*(.+)$/m)?.[1]?.trim() ?? "1048576";
+    const existingMaxPatch = security.match(/^\s{8}max_patch_files:\s*(.+)$/m)?.[1]?.trim() ?? "20";
+    const filesAllow = changes.filesAllow !== undefined ? changes.filesAllow : parseListItems(get("security"), "allow");
+    // files allow/confirm/deny share the same list key shape as commands but live
+    // under security.files — parseListItems reads the first `allow:` in the section,
+    // so for files we re-parse the files sub-block directly.
+    const filesBlock = extractFilesBlock(security);
+    const fAllow = changes.filesAllow !== undefined ? changes.filesAllow : parseSubList(filesBlock, "allow");
+    const fConfirm = changes.filesConfirm !== undefined ? changes.filesConfirm : parseSubList(filesBlock, "confirm");
+    const fDeny = changes.filesDeny !== undefined ? changes.filesDeny : parseSubList(filesBlock, "deny");
+    const maxRead = changes.filesMaxReadBytes !== undefined ? String(changes.filesMaxReadBytes) : existingMaxRead;
+    const maxPatch = changes.filesMaxPatchFiles !== undefined ? String(changes.filesMaxPatchFiles) : existingMaxPatch;
+    const filesLines = [
+      "    files:",
+      `        max_read_bytes: ${maxRead}`,
+      `        max_patch_files: ${maxPatch}`,
+      fAllow.length > 0 ? `        allow:\n${listBlock(fAllow, "            ")}` : "        allow: []",
+      fConfirm.length > 0 ? `        confirm:\n${listBlock(fConfirm, "            ")}` : "        confirm: []",
+      fDeny.length > 0 ? `        deny:\n${listBlock(fDeny, "            ")}` : "        deny: []",
+    ].join("\n");
+    // Replace or append the files block within security, preserving commands + other children.
+    const securityLines = security.split(/\r?\n/);
+    const filesStart = securityLines.findIndex((line) => /^    files:\s*$/.test(line));
+    if (filesStart >= 0) {
+      let end = filesStart + 1;
+      while (end < securityLines.length
+        && !/^    [A-Za-z_]/.test(securityLines[end])
+        && !/^[A-Za-z_]/.test(securityLines[end])) {
+        end++;
+      }
+      const rebuilt = [...securityLines.slice(0, filesStart), filesLines, ...securityLines.slice(end)];
+      set("security", rebuilt.join("\n"));
+    } else {
+      set("security", [security.trimEnd(), filesLines].join("\n"));
+    }
+    if (changes.filesMaxReadBytes !== undefined) summary.push(`files.max_read_bytes: ${changes.filesMaxReadBytes}`);
+    if (changes.filesMaxPatchFiles !== undefined) summary.push(`files.max_patch_files: ${changes.filesMaxPatchFiles}`);
+    if (changes.filesAllow !== undefined) summary.push(`files.allow: ${changes.filesAllow.length} 条`);
+    if (changes.filesConfirm !== undefined) summary.push(`files.confirm: ${changes.filesConfirm.length} 条`);
+    if (changes.filesDeny !== undefined) summary.push(`files.deny: ${changes.filesDeny.length} 条`);
+  }
+
+  // 4c. skill discovery dirs
   if (changes.skillDirs && changes.skillDirs.length > 0) {
     const discoveryRaw = get("discovery")?.raw ?? "discovery:";
     const existingDirs = parseListItems(get("discovery"), "dirs");
@@ -992,6 +1144,8 @@ function resolveExecutable(command: string): string | undefined {
 export const _mcpxWizardInternals = {
   splitSections,
   parseListItems,
+  parseSubList,
+  extractFilesBlock,
   buildChangesYaml,
   resolveExecutable,
 };

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -578,4 +578,110 @@ test("fork install prompt covers not-installed, binary-without-fork, and install
   rows = overlay["renderForkRows"](100).join("\n");
   assert.match(rows, /mcpx-for-pmf 已安装/);
   assert.match(rows, /v0\.9\.7/);
+});
+
+test("C enters inline config mode and edits scalars + lists then saves", async (t) => {
+  const { McpxOverlay } = await import("../src/tui/mcpx-overlay.ts");
+  const dir = await mkdtemp(join(tmpdir(), "mcpx-cfg-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  // Isolate HOME so readMcpxConfigView/writeMcpxConfigChanges hit the temp config.
+  const prevHome = process.env.HOME;
+  const prevProfile = process.env.USERPROFILE;
+  process.env.HOME = dir;
+  process.env.USERPROFILE = dir;
+  t.after(() => {
+    if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
+    if (prevProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = prevProfile;
+  });
+  await mkdir(join(dir, ".mcpx"), { recursive: true });
+  await writeFile(join(dir, ".mcpx", "config.yaml"), [
+    "server:",
+    "    host: 127.0.0.1",
+    "    port: 9090",
+    "auth:",
+    "    mode: open",
+    '    token: ""',
+    "security:",
+    "    commands:",
+    "        default: allow",
+    "        allow:",
+    "            - ^ls\\b",
+    "        confirm: []",
+    "        deny: []",
+    "        auto_allow_readonly: null",
+    "    files:",
+    "        max_read_bytes: 1048576",
+    "        max_patch_files: 20",
+    "        allow: []",
+    "        confirm: []",
+    "        deny: []",
+    "",
+  ].join("\n"), "utf8");
+
+  const overlay = new McpxOverlay({ cwd: "D:/cfg-demo", requestRender: () => undefined, initialRefresh: false, close: () => undefined });
+  const renderText = () => overlay.render(100).join("\n");
+
+  // C (capital) enters inline config mode; c would open the wizard (no onOpenWizard wired).
+  overlay.handleInput("C");
+  assert.equal(overlay["mode"], "config");
+  let text = renderText();
+  assert.match(text, /MCPX 配置/);
+  assert.match(text, /「服务器监听」/);
+  assert.match(text, /host: 127\.0\.0\.1/);
+  assert.match(text, /port: 9090/);
+
+  // Navigate to port (down once) and edit it inline with a fresh value.
+  overlay.handleInput("\x1b[B"); // down -> port entry
+  overlay.handleInput("\r"); // enter edit (draft starts empty)
+  overlay.handleInput("9");
+  overlay.handleInput("0");
+  overlay.handleInput("9");
+  overlay.handleInput("1");
+  overlay.handleInput("\r"); // commit -> port 9091
+  text = renderText();
+  assert.match(text, /port: 9091/);
+
+  // Cycle commands.default via space: move down to commands.default and space.
+  // Order: host(0) port(1) disable_localhost(2) trust_proxy(3) mode(4) token(5)
+  // oauthPassword(6) oauthServerURL(7) default(8) autoAllowReadonly(9)
+  // allow(10) confirm(11) deny(12) max_read_bytes(13) max_patch_files(14) ...
+  for (let i = 0; i < 7; i++) overlay.handleInput("\x1b[B"); // port -> default (8)
+  overlay.handleInput(" "); // cycle allow -> confirm
+  text = renderText();
+  assert.match(text, /default: \x1b\[33mconfirm/);
+
+  // Open commands.allow list editor, add a rule, then return.
+  overlay.handleInput("\x1b[B"); // default -> autoAllowReadonly(9)
+  overlay.handleInput("\x1b[B"); // -> allow list(10)
+  overlay.handleInput("\r"); // enter list editor
+  text = renderText();
+  assert.match(text, /列表编辑/);
+  assert.match(text, /\^ls\\b/); // existing entry visible
+  // add a new rule
+  overlay.handleInput("a");
+  overlay.handleInput("^");
+  overlay.handleInput("p");
+  overlay.handleInput("i");
+  overlay.handleInput("\\");
+  overlay.handleInput("b");
+  overlay.handleInput("\r"); // commit add
+  text = renderText();
+  assert.match(text, /\^pi\\b/);
+  // Esc back to top menu
+  overlay.handleInput("\x1b");
+  assert.equal(overlay["configListKey"], undefined);
+
+  // Navigate to Save action and trigger it. The Save entry is near the bottom:
+  // entries 0..17 are scalars/lists, 18 = save, 19 = discard. From allow(10) go down 8.
+  for (let i = 0; i < 8; i++) overlay.handleInput("\x1b[B");
+  overlay.handleInput("\r"); // save
+  // write is synchronous (writeFileSync+rename) so the status is set immediately.
+  text = renderText();
+  assert.match(text, /已写入/);
+  // Verify the file on disk reflects port + default + the new allow rule.
+  const after = await readFile(join(dir, ".mcpx", "config.yaml"), "utf8");
+  assert.match(after, /port: 9091/);
+  assert.match(after, /default: confirm/);
+  assert.match(after, /\^pi\\b/);
+  assert.match(after, /\^ls\\b/); // existing allow preserved
 });

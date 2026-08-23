@@ -11,7 +11,8 @@ import { readdirSync, readFileSync, existsSync, statSync, rmSync, type Dirent } 
 import { homedir } from "node:os";
 import { join, dirname, basename } from "node:path";
 import { Key, type Component, type Focusable, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { locateMcpx, isProcessOwnedBy, killProcessWithEscalation, readMcpxBearerToken, readTunnelState, probeTunnelHealth, restartQuickTunnel, stopQuickTunnel, updateConfigServerURL, restoreMcpxConfig, stopMcpx, readOpsPassword, detectMcpxForPmf, removeWorkspaceByPath, readDelegatedTasks, type TunnelState, type DelegatedTask } from "../mcpx-bridge.ts";
+import { locateMcpx, isProcessOwnedBy, killProcessWithEscalation, readMcpxBearerToken, readTunnelState, probeTunnelHealth, restartQuickTunnel, stopQuickTunnel, updateConfigServerURL, restoreMcpxConfig, stopMcpx, readOpsPassword, detectMcpxForPmf, removeWorkspaceByPath, readDelegatedTasks, readMcpxConfigView, writeMcpxConfigChanges, type TunnelState, type DelegatedTask, type McpxConfigView } from "../mcpx-bridge.ts";
+import type { McpxConfigChanges } from "./mcpx-wizard.ts";
 import {
   McpxClientError,
   McpxStreamableHttpClient,
@@ -128,7 +129,7 @@ export interface McpxOverlayParams {
   endpointWaitMs?: number;
 }
 
-type OverlayMode = "list" | "detail" | "workspace" | "window-list" | "window-detail";
+type OverlayMode = "list" | "detail" | "workspace" | "window-list" | "window-detail" | "config";
 
 function normalizeWorkspacePath(value: string): string {
   let normalized = value.replace(/\\/g, "/");
@@ -497,6 +498,17 @@ export class McpxOverlay implements Component, Focusable {
   private wsSelected = 0;
   /** SEC-RV-001: ops password reveal state — masked by default, toggled by P. */
   private revealOpsPassword = false;
+  /** Inline config editor state (C key). `configView` is loaded lazily on
+   *  first entry into config mode; edits accumulate in `configChanges` and are
+   *  written atomically on save, so a user can change several fields then commit. */
+  private configView?: McpxConfigView;
+  private configChanges: McpxConfigChanges = {};
+  private configSelected = 0;
+  private configEditing = false;
+  private configDraft = "";
+  /** Sub-mode within config mode: top menu, or inside a list editor. */
+  private configListKey: "commandsAllow" | "commandsConfirm" | "commandsDeny" | "filesAllow" | "filesConfirm" | "filesDeny" | undefined;
+  private configListSelected = 0;
   private snapshot: McpxSnapshot = {
     refreshing: true, endpoint: "unknown", workspaces: [], cwdRegistered: false, windows: [], thread: [], mcpServers: [],
   };
@@ -1067,6 +1079,7 @@ export class McpxOverlay implements Component, Focusable {
     if (this.mode === "workspace") return this.renderWorkspace(safeWidth);
     if (this.mode === "window-list") return this.renderWindowList(safeWidth);
     if (this.mode === "window-detail") return this.renderWindowDetail(safeWidth);
+    if (this.mode === "config") return this.renderConfig(safeWidth);
     return this.renderList(safeWidth);
   }
 
@@ -1075,6 +1088,16 @@ export class McpxOverlay implements Component, Focusable {
       if (this.mode === "window-detail") {
         this.stopWindowObserve();
         this.mode = "window-list";
+      } else if (this.mode === "config") {
+        if (this.configEditing) {
+          this.configEditing = false;
+          this.configDraft = "";
+        } else if (this.configListKey) {
+          this.configListKey = undefined;
+          this.configListSelected = 0;
+        } else {
+          this.mode = "list";
+        }
       } else if (this.mode === "detail" || this.mode === "workspace" || this.mode === "window-list") {
         this.mode = "list";
       } else {
@@ -1142,6 +1165,10 @@ export class McpxOverlay implements Component, Focusable {
       }
       return;
     }
+    if (this.mode === "config") {
+      this.handleConfigInput(data);
+      return;
+    }
     if (matchesKey(data, Key.up) || matchesKey(data, "k")) {
       this.selected = Math.max(0, this.selected - 1);
       this.params.requestRender();
@@ -1182,7 +1209,11 @@ export class McpxOverlay implements Component, Focusable {
       return;
     }
     if (data === "c" || data === "C") {
-      if (this.params.onOpenWizard) this.params.onOpenWizard();
+      if (data === "C") {
+        this.enterConfigMode();
+      } else if (this.params.onOpenWizard) {
+        this.params.onOpenWizard();
+      }
       return;
     }
     if (data === "s" || data === "S") {
@@ -1260,6 +1291,303 @@ export class McpxOverlay implements Component, Focusable {
       this.workspaceToggleBusy = false;
     }
     await this.refresh();
+  }
+
+  // --- Inline config editor (C key) ---
+  // A flat, ordered list of editable config entries. Each entry binds a key
+  // path (server.host, auth.mode, commands.allow, …) to a renderer + editor.
+  // Scalar edits accumulate in configChanges; list edits are applied directly
+  // to configChanges so add/delete is immediately visible.
+  private configEntries(): ConfigEntry[] {
+    const v = this.configView;
+    const listLen = (arr: string[] | undefined) => arr?.length ?? 0;
+    return [
+      { group: "server", key: "server.host", label: "host", kind: "text", value: v?.server.host ?? "127.0.0.1" },
+      { group: "server", key: "server.port", label: "port", kind: "number", value: String(v?.server.port ?? 9090) },
+      { group: "server", key: "server.disable_localhost_protection", label: "disable_localhost_protection", kind: "bool", value: String(v?.server.disableLocalhostProtection ?? false) },
+      { group: "server", key: "server.trust_proxy_headers", label: "trust_proxy_headers", kind: "bool", value: String(v?.server.trustProxyHeaders ?? false) },
+      { group: "auth", key: "auth.mode", label: "mode", kind: "cycle", value: v?.auth.mode ?? "open", options: ["open", "bearer", "oauth"] },
+      { group: "auth", key: "auth.token", label: "token", kind: "text", value: v?.auth.token ?? "" },
+      { group: "auth", key: "auth.oauthPassword", label: "oauth password", kind: "text", value: v?.auth.oauthPassword ?? "" },
+      { group: "auth", key: "auth.oauthServerURL", label: "oauth server_url", kind: "text", value: v?.auth.oauthServerURL ?? "" },
+      { group: "commands", key: "commands.default", label: "default", kind: "cycle", value: v?.commands.default ?? "allow", options: ["allow", "confirm", "deny"] },
+      { group: "commands", key: "commands.autoAllowReadonly", label: "auto_allow_readonly", kind: "cycle", value: String(v?.commands.autoAllowReadonly ?? "null"), options: ["null", "true", "false"] },
+      { group: "commands", key: "commandsAllow", label: `allow (${listLen(this.configChanges.commandsAllow)}/${v?.commands.allow.length ?? 0})`, kind: "list", listKey: "commandsAllow" },
+      { group: "commands", key: "commandsConfirm", label: `confirm (${listLen(this.configChanges.commandsConfirm)}/${v?.commands.confirm.length ?? 0})`, kind: "list", listKey: "commandsConfirm" },
+      { group: "commands", key: "commandsDeny", label: `deny (${listLen(this.configChanges.commandsDeny)}/${v?.commands.deny.length ?? 0})`, kind: "list", listKey: "commandsDeny" },
+      { group: "files", key: "files.max_read_bytes", label: "max_read_bytes", kind: "number", value: String(v?.files.maxReadBytes ?? 1048576) },
+      { group: "files", key: "files.max_patch_files", label: "max_patch_files", kind: "number", value: String(v?.files.maxPatchFiles ?? 20) },
+      { group: "files", key: "filesAllow", label: `allow (${listLen(this.configChanges.filesAllow)}/${v?.files.allow.length ?? 0})`, kind: "list", listKey: "filesAllow" },
+      { group: "files", key: "filesConfirm", label: `confirm (${listLen(this.configChanges.filesConfirm)}/${v?.files.confirm.length ?? 0})`, kind: "list", listKey: "filesConfirm" },
+      { group: "files", key: "filesDeny", label: `deny (${listLen(this.configChanges.filesDeny)}/${v?.files.deny.length ?? 0})`, kind: "list", listKey: "filesDeny" },
+      { group: "write", key: "save", label: "保存写入 config.yaml", kind: "action", action: "save" },
+      { group: "write", key: "discard", label: "放弃修改", kind: "action", action: "discard" },
+    ];
+  }
+
+  private enterConfigMode(): void {
+    this.configView = readMcpxConfigView() ?? undefined;
+    this.configChanges = {};
+    this.configSelected = 0;
+    this.configEditing = false;
+    this.configDraft = "";
+    this.configListKey = undefined;
+    this.configListSelected = 0;
+    this.mode = "config";
+    this.params.requestRender();
+  }
+
+  private handleConfigInput(data: string): void {
+    // Inside a list editor: ↑↓ move, a add (inline), d delete selected, Esc back.
+    if (this.configListKey) {
+      const list = this.currentConfigList();
+      if (matchesKey(data, Key.up) || matchesKey(data, "k")) {
+        this.configListSelected = Math.max(0, this.configListSelected - 1);
+        this.params.requestRender();
+      } else if (matchesKey(data, Key.down) || matchesKey(data, "j")) {
+        this.configListSelected = Math.min(Math.max(0, list.length - 1), this.configListSelected + 1);
+        this.params.requestRender();
+      } else if ((data === "a" || data === "A") && !this.configEditing) {
+        this.configEditing = true;
+        this.configDraft = "";
+        this.params.requestRender();
+      } else if (data === "d" || data === "D") {
+        if (!this.configEditing && list.length > 0) {
+          list.splice(this.configListSelected, 1);
+          this.configListSelected = Math.min(this.configListSelected, Math.max(0, list.length - 1));
+          this.params.requestRender();
+        }
+      } else if (this.configEditing) {
+        if (isEnter(data)) {
+          const value = this.configDraft.trim();
+          if (value) list.push(value);
+          this.configEditing = false;
+          this.configDraft = "";
+          this.params.requestRender();
+        } else if (matchesKey(data, Key.backspace)) {
+          this.configDraft = this.configDraft.slice(0, -1);
+          this.params.requestRender();
+        } else if (data.length === 1 && data >= " " && data !== "\x7f") {
+          this.configDraft = (this.configDraft + data).slice(0, 200);
+          this.params.requestRender();
+        }
+      }
+      return;
+    }
+    const entries = this.configEntries();
+    if (this.configEditing) {
+      if (isEnter(data)) {
+        this.commitConfigDraft();
+        this.configEditing = false;
+        this.configDraft = "";
+        this.params.requestRender();
+      } else if (matchesKey(data, Key.backspace)) {
+        this.configDraft = this.configDraft.slice(0, -1);
+        this.params.requestRender();
+      } else if (data.length === 1 && data >= " " && data !== "\x7f") {
+        this.configDraft = (this.configDraft + data).slice(0, 200);
+        this.params.requestRender();
+      }
+      return;
+    }
+    if (matchesKey(data, Key.up) || matchesKey(data, "k")) {
+      this.configSelected = Math.max(0, this.configSelected - 1);
+      this.params.requestRender();
+      return;
+    }
+    if (matchesKey(data, Key.down) || matchesKey(data, "j")) {
+      this.configSelected = Math.min(entries.length - 1, this.configSelected + 1);
+      this.params.requestRender();
+      return;
+    }
+    if (isEnter(data)) {
+      this.activateConfigEntry(entries[this.configSelected]);
+      return;
+    }
+    // Space toggles bool/cycle entries without entering edit mode.
+    if (data === " ") {
+      const entry = entries[this.configSelected];
+      if (entry?.kind === "bool") this.setConfigScalar(entry.key, entry.value === "true" ? "false" : "true");
+      else if (entry?.kind === "cycle" && entry.options) {
+        const idx = entry.options.indexOf(entry.value ?? "");
+        this.setConfigScalar(entry.key, entry.options[(idx + 1) % entry.options.length]!);
+      }
+    }
+  }
+
+  private activateConfigEntry(entry: ConfigEntry | undefined): void {
+    if (!entry) return;
+    if (entry.kind === "list") {
+      this.configListKey = entry.listKey;
+      this.configListSelected = 0;
+      this.params.requestRender();
+      return;
+    }
+    if (entry.kind === "action") {
+      if (entry.action === "save") void this.saveConfig();
+      else if (entry.action === "discard") {
+        this.configChanges = {};
+        this.status = "已放弃未保存修改";
+        this.params.requestRender();
+      }
+      return;
+    }
+    if (entry.kind === "cycle" && entry.options) {
+      const idx = entry.options.indexOf(entry.value ?? "");
+      this.setConfigScalar(entry.key, entry.options[(idx + 1) % entry.options.length]!);
+      this.params.requestRender();
+      return;
+    }
+    if (entry.kind === "bool") {
+      this.setConfigScalar(entry.key, entry.value === "true" ? "false" : "true");
+      this.params.requestRender();
+      return;
+    }
+    // text / number: enter inline edit. Draft starts empty so the user types a
+    // fresh replacement value; the current value stays visible in the row label.
+    this.configEditing = true;
+    this.configDraft = "";
+    this.params.requestRender();
+  }
+
+  private commitConfigDraft(): void {
+    const entries = this.configEntries();
+    const entry = entries[this.configSelected];
+    if (!entry) return;
+    // An empty draft (Enter without typing) preserves the current value — a
+    // no-op edit, not a wipe. The user types a replacement value to change it.
+    if (this.configDraft.trim() === "") return;
+    this.setConfigScalar(entry.key, this.configDraft);
+  }
+
+  /** Apply a scalar change to the configChanges buffer and reflect it in configView
+   *  so the rendered value stays in sync before the save commits everything. */
+  private setConfigScalar(key: string, value: string): void {
+    const num = Number(value);
+    switch (key) {
+      case "server.host": this.configChanges.host = value; if (this.configView) this.configView.server.host = value; break;
+      case "server.port": if (Number.isInteger(num) && num > 0 && num < 65536) { this.configChanges.port = num; if (this.configView) this.configView.server.port = num; } break;
+      case "server.disable_localhost_protection": this.configChanges.disableLocalhostProtection = value === "true"; if (this.configView) this.configView.server.disableLocalhostProtection = value === "true"; break;
+      case "server.trust_proxy_headers": this.configChanges.trustProxyHeaders = value === "true"; if (this.configView) this.configView.server.trustProxyHeaders = value === "true"; break;
+      case "auth.mode": this.configChanges.authMode = value as McpxConfigChanges["authMode"]; if (this.configView) this.configView.auth.mode = value; break;
+      case "auth.token": this.configChanges.authToken = value; if (this.configView) this.configView.auth.token = value; break;
+      case "auth.oauthPassword": this.configChanges.oauthPassword = value; if (this.configView) this.configView.auth.oauthPassword = value; break;
+      case "auth.oauthServerURL": this.configChanges.oauthServerURL = value; if (this.configView) this.configView.auth.oauthServerURL = value; break;
+      case "commands.default": this.configChanges.commandsDefault = value as McpxConfigChanges["commandsDefault"]; if (this.configView) this.configView.commands.default = value; break;
+      case "commands.autoAllowReadonly": { const ar = value === "null" ? null : value === "true"; this.configChanges.commandsAutoReadonly = ar; if (this.configView) this.configView.commands.autoAllowReadonly = ar; break; }
+      case "files.max_read_bytes": if (Number.isInteger(num) && num > 0) { this.configChanges.filesMaxReadBytes = num; if (this.configView) this.configView.files.maxReadBytes = num; } break;
+      case "files.max_patch_files": if (Number.isInteger(num) && num > 0) { this.configChanges.filesMaxPatchFiles = num; if (this.configView) this.configView.files.maxPatchFiles = num; } break;
+    }
+  }
+
+  private currentConfigList(): string[] {
+    if (!this.configListKey) return [];
+    const existing = this.configView ? this.configListForView(this.configListKey) : [];
+    const buf = this.configChanges[this.configListKey];
+    // Once the user edits a list, the buffer is the source of truth; otherwise show the view's current list.
+    return buf ?? existing;
+  }
+
+  private configListForView(key: ConfigListKey): string[] {
+    const v = this.configView!;
+    switch (key) {
+      case "commandsAllow": return v.commands.allow;
+      case "commandsConfirm": return v.commands.confirm;
+      case "commandsDeny": return v.commands.deny;
+      case "filesAllow": return v.files.allow;
+      case "filesConfirm": return v.files.confirm;
+      case "filesDeny": return v.files.deny;
+    }
+  }
+
+  private async saveConfig(): Promise<void> {
+    if (!this.configView) return;
+    // Normalize the list buffers: if a list was opened but never edited, its
+    // buffer is undefined — carry the existing view list so the write is a no-op.
+    for (const key of ["commandsAllow", "commandsConfirm", "commandsDeny", "filesAllow", "filesConfirm", "filesDeny"] as const) {
+      if (this.configChanges[key] === undefined) this.configChanges[key] = this.configListForView(key);
+    }
+    this.status = "正在写入 config.yaml…";
+    this.params.requestRender();
+    try {
+      const { summary } = writeMcpxConfigChanges(this.configChanges);
+      this.status = summary.length > 0
+        ? `已写入 ${summary.length} 项 — 重启 mcpx 后生效（R 重启 · 或 /mcpx 重入）`
+        : "无修改需写入";
+      // Reload the view so the rendered values match what is now on disk.
+      this.configView = readMcpxConfigView() ?? undefined;
+      this.configChanges = {};
+      this.configListKey = undefined;
+      this.params.requestRender();
+    } catch (error) {
+      this.status = `写入失败: ${error instanceof Error ? error.message : String(error)}`;
+      this.params.requestRender();
+    }
+  }
+
+  private renderConfig(width: number): string[] {
+    const inner = width - 2;
+    const rows = [fitLine("MCPX 配置 · ↑↓ 选择 · Enter/space 编辑 · Esc 返回", inner), rule(inner)];
+    if (!this.configView) {
+      rows.push(fitLine(fg("33", "未读取到 config.yaml — 可先按 c 走向导生成，或保存后即生成"), inner));
+      rows.push(...fitSegments(inner, ["Esc back"]));
+      return frame(rows, width);
+    }
+    if (this.configListKey) {
+      rows.push(...this.renderConfigList(inner));
+      rows.push(...fitSegments(inner, ["a 添加", "d 删除", "Enter 确认输入", "Esc 返回"]));
+      if (this.status) rows.push(fitLine(this.status, inner));
+      return frame(rows, width);
+    }
+    const entries = this.configEntries();
+    let currentGroup = "";
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i]!;
+      if (entry.group !== currentGroup) {
+        currentGroup = entry.group;
+        rows.push(fitLine(fg("36", `「${groupLabel(currentGroup)}」`), inner));
+      }
+      const selected = i === this.configSelected && !this.configEditing;
+      const marker = selected ? "›" : " ";
+      let valueText: string;
+      if (entry.kind === "list") {
+        valueText = entry.label;
+      } else if (this.configEditing && i === this.configSelected) {
+        // Show the current value in parens so the user sees what they are replacing,
+        // followed by the new draft being typed.
+        valueText = `${entry.label} (${entry.value ?? ""}): ${this.configDraft}▌`;
+      } else if (entry.kind === "bool") {
+        valueText = `${entry.label}: ${entry.value === "true" ? fg("32", "true") : fg("31", "false")}`;
+      } else if (entry.kind === "cycle") {
+        valueText = `${entry.label}: ${fg("33", entry.value ?? "")}`;
+      } else {
+        valueText = `${entry.label}: ${entry.value ?? ""}`;
+      }
+      rows.push(fitLine(`${marker} ${valueText}`, inner));
+    }
+    rows.push(rule(inner));
+    rows.push(fitLine(fg("2", "  Enter/space 编辑标量 · 进入列表后 a 添加 d 删除 · 保存后按 R 重启 mcpx"), inner));
+    if (this.status) rows.push(fitLine(this.status, inner));
+    rows.push(...fitSegments(inner, ["Enter 编辑", "space 切换", "Esc 返回"]));
+    return frame(rows, width);
+  }
+
+  private renderConfigList(inner: number): string[] {
+    const list = this.currentConfigList();
+    const label = this.configListKey ? this.configEntries().find((e) => e.listKey === this.configListKey)?.label ?? this.configListKey : "";
+    const rows = [fitLine(`列表编辑 · ${label} · ↑↓ 选择 a 添加 d 删除`, inner), rule(inner)];
+    if (list.length === 0 && !this.configEditing) {
+      rows.push(fitLine("  ○ 空列表（按 a 添加正则/规则）", inner));
+    } else {
+      for (let i = 0; i < list.length; i++) {
+        const marker = i === this.configListSelected ? fg("36", "▶") : " ";
+        rows.push(fitLine(`${marker} ${list[i]}`, inner));
+      }
+    }
+    if (this.configEditing) {
+      rows.push(fitLine(fg("33", `  + 新增: ${this.configDraft}▌`), inner));
+    }
+    return rows;
   }
 
   private renderCompact(width: number): string {
@@ -1341,7 +1669,7 @@ export class McpxOverlay implements Component, Focusable {
     }
     if (this.status) rows.push(fitLine(this.status, inner));
     if (this.snapshot.error) rows.push(fitLine(fg("31", `! ${this.snapshot.error}`), inner));
-    rows.push(...fitSegments(inner, ["Enter message detail", "V windows", "r refresh", this.snapshot.endpoint === "online" ? "x stop" : "s start", "R restart", "T tunnel", "W workspaces", "e 注册(租约)", "E 注册(永久)", "c wizard", "P password", "Esc close"]));
+    rows.push(...fitSegments(inner, ["Enter message detail", "V windows", "r refresh", this.snapshot.endpoint === "online" ? "x stop" : "s start", "R restart", "T tunnel", "W workspaces", "e 注册(租约)", "E 注册(永久)", "c wizard", "C 配置", "P password", "Esc close"]));
     return frame(rows, width);
   }
 
@@ -1718,6 +2046,30 @@ function fg(code: string, text: string): string {
 
 function isEnter(data: string): boolean {
   return data === "\r" || data === "\n";
+}
+
+type ConfigListKey = "commandsAllow" | "commandsConfirm" | "commandsDeny" | "filesAllow" | "filesConfirm" | "filesDeny";
+
+interface ConfigEntry {
+  group: string;
+  key: string;
+  label: string;
+  kind: "text" | "number" | "bool" | "cycle" | "list" | "action";
+  value?: string;
+  options?: string[];
+  listKey?: ConfigListKey;
+  action?: "save" | "discard";
+}
+
+function groupLabel(group: string): string {
+  switch (group) {
+    case "server": return "服务器监听";
+    case "auth": return "认证";
+    case "commands": return "命令权限 security.commands";
+    case "files": return "文件权限 security.files";
+    case "write": return "写入";
+    default: return group;
+  }
 }
 
 export const _mcpxTuiInternals = {

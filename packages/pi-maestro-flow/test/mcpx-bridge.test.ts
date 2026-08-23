@@ -3,7 +3,7 @@ import { chmod, mkdtemp, readFile, rm, writeFile, mkdir } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ensureMcpxWorkspace, registerMcpxWorkspacePermanent, removeMcpxWorkspace, startWorkspaceLease, stopWorkspaceLease, _resetMcpxBridgeState, isMcpxConfigured, readTunnelState, readOpsPassword, readMcpxBearerToken, probeTunnelHealth, detectMcpxForPmf, removeWorkspaceByPath, readDelegatedTasks, isQuickTunnelCommandLine, isValidTunnelPort, setQuickTunnelDiscoveryForTest } from "../src/mcpx-bridge.ts";
+import { ensureMcpxWorkspace, registerMcpxWorkspacePermanent, removeMcpxWorkspace, startWorkspaceLease, stopWorkspaceLease, _resetMcpxBridgeState, isMcpxConfigured, readTunnelState, readOpsPassword, readMcpxBearerToken, probeTunnelHealth, detectMcpxForPmf, removeWorkspaceByPath, readDelegatedTasks, isQuickTunnelCommandLine, isValidTunnelPort, setQuickTunnelDiscoveryForTest, readMcpxConfigView, writeMcpxConfigChanges } from "../src/mcpx-bridge.ts";
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -537,4 +537,101 @@ test("Quick Tunnel port validation covers TCP bounds", () => {
   assert.equal(isValidTunnelPort(0), false);
   assert.equal(isValidTunnelPort(65_536), false);
   assert.equal(isValidTunnelPort(9090.5), false);
+});
+
+const FULL_CONFIG = [
+  "server:",
+  "    host: 127.0.0.1",
+  "    port: 9090",
+  "    disable_localhost_protection: true",
+  "    trust_proxy_headers: true",
+  "auth:",
+  "    mode: oauth",
+  '    token: ""',
+  "    oauth:",
+  '        password: "5G6unz"',
+  '        server_url: "https://abc.trycloudflare.com"',
+  "        token_ttl: 86400",
+  "security:",
+  "    commands:",
+  "        default: allow",
+  "        allow:",
+  "            - ^ls\\b",
+  "            - ^pi\\b",
+  "        confirm:",
+  "            - ^git push",
+  "        deny:",
+  "            - ^rm -rf /",
+  "        auto_allow_readonly: null",
+  "    files:",
+  "        max_read_bytes: 1048576",
+  "        max_patch_files: 20",
+  "        allow:",
+  "            - ^~/projects\\b",
+  "        confirm: []",
+  "        deny:",
+  "            - ^/etc",
+  "",
+].join("\n");
+
+test("readMcpxConfigView parses all editable fields", async (t) => {
+  t.after(_resetMcpxBridgeState);
+  await withIsolatedHome(async (home) => {
+    await mkdir(join(home, ".mcpx"), { recursive: true });
+    await writeFile(join(home, ".mcpx", "config.yaml"), FULL_CONFIG, "utf8");
+    const v = readMcpxConfigView();
+    assert.ok(v, "view must parse when config exists");
+    assert.equal(v!.server.host, "127.0.0.1");
+    assert.equal(v!.server.port, 9090);
+    assert.equal(v!.server.disableLocalhostProtection, true);
+    assert.equal(v!.server.trustProxyHeaders, true);
+    assert.equal(v!.auth.mode, "oauth");
+    assert.equal(v!.auth.oauthPassword, "5G6unz");
+    assert.equal(v!.auth.oauthServerURL, "https://abc.trycloudflare.com");
+    assert.equal(v!.commands.default, "allow");
+    assert.deepEqual(v!.commands.allow, ["^ls\\b", "^pi\\b"]);
+    assert.deepEqual(v!.commands.confirm, ["^git push"]);
+    assert.deepEqual(v!.commands.deny, ["^rm -rf /"]);
+    assert.equal(v!.commands.autoAllowReadonly, null);
+    assert.equal(v!.files.maxReadBytes, 1_048_576);
+    assert.equal(v!.files.maxPatchFiles, 20);
+    assert.deepEqual(v!.files.allow, ["^~/projects\\b"]);
+    assert.deepEqual(v!.files.deny, ["^/etc"]);
+  });
+});
+
+test("readMcpxConfigView returns undefined when config is missing", async (t) => {
+  t.after(_resetMcpxBridgeState);
+  await withIsolatedHome(async () => {
+    assert.equal(readMcpxConfigView(), undefined);
+  });
+});
+
+test("writeMcpxConfigChanges applies partial changes and preserves untouched sections", async (t) => {
+  t.after(_resetMcpxBridgeState);
+  await withIsolatedHome(async (home) => {
+    await mkdir(join(home, ".mcpx"), { recursive: true });
+    await writeFile(join(home, ".mcpx", "config.yaml"), FULL_CONFIG, "utf8");
+    const { summary } = writeMcpxConfigChanges({
+      port: 9091,
+      commandsDeny: ["^rm -rf /", "^mkfs"],
+      filesMaxReadBytes: 2_097_152,
+    });
+    const after = await readFile(join(home, ".mcpx", "config.yaml"), "utf8");
+    assert.match(after, /port: 9091/);
+    assert.match(after, /\^mkfs/); // new deny rule appended
+    assert.match(after, /\^rm -rf \/\s*$/m); // existing deny preserved (trailing slash)
+    assert.match(after, /max_read_bytes: 2097152/);
+    // untouched sections survive
+    assert.match(after, /mode: oauth/);
+    assert.match(after, /password: "5G6unz"/);
+    assert.match(after, /\^ls\\b/); // commands.allow preserved
+    assert.ok(summary.some((line) => line.includes("9091")));
+    assert.ok(summary.some((line) => line.includes("files.max_read_bytes: 2097152")));
+    // re-reading gives the updated values
+    const v = readMcpxConfigView()!;
+    assert.equal(v.server.port, 9091);
+    assert.deepEqual(v.commands.deny, ["^rm -rf /", "^mkfs"]);
+    assert.equal(v.files.maxReadBytes, 2_097_152);
+  });
 });

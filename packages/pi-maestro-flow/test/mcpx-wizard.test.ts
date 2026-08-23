@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { _mcpxWizardInternals, type McpxConfigChanges } from "../src/tui/mcpx-wizard.ts";
 
-const { splitSections, parseListItems, buildChangesYaml, resolveExecutable } = _mcpxWizardInternals;
+const { splitSections, parseListItems, buildChangesYaml, resolveExecutable, extractFilesBlock, parseSubList } = _mcpxWizardInternals;
 
 const SAMPLE_CONFIG = [
   "server:",
@@ -208,4 +208,95 @@ test("resolveExecutable respects PATH order (first match wins)", () => {
   const resolved = resolveExecutable("node");
   assert.ok(resolved);
   assert.ok(!resolved!.includes("\n"), "must be a single line, not all matches");
+});
+
+const FILES_CONFIG = [
+  "server:",
+  "    host: 127.0.0.1",
+  "    port: 9090",
+  "auth:",
+  "    mode: oauth",
+  "    token: \"\"",
+  "security:",
+  "    commands:",
+  "        default: allow",
+  "        allow:",
+  "            - ^ls\\b",
+  "        confirm: []",
+  "        deny: []",
+  "        auto_allow_readonly: null",
+  "    files:",
+  "        max_read_bytes: 1048576",
+  "        max_patch_files: 20",
+  "        allow:",
+  "            - ^~/projects\\b",
+  "        confirm:",
+  "            - ^~/secrets",
+  "        deny:",
+  "            - ^/etc",
+  "",
+].join("\n");
+
+test("buildChangesYaml writes security.files limits and rule lists", () => {
+  const changes: McpxConfigChanges = {
+    filesMaxReadBytes: 2097152,
+    filesMaxPatchFiles: 50,
+    filesAllow: ["^~/projects\\b", "^~/docs"],
+    filesConfirm: ["^~/secrets", "^~/tmp"],
+    filesDeny: ["^/etc", "^/root"],
+  };
+  const { yaml, summary } = buildChangesYaml(FILES_CONFIG, changes, "D:/demo");
+  assert.match(yaml, /max_read_bytes: 2097152/);
+  assert.match(yaml, /max_patch_files: 50/);
+  assert.match(yaml, /\^~\/docs/); // new allow entry added
+  assert.match(yaml, /\^~\/tmp/); // new confirm entry added
+  assert.match(yaml, /\^\/root/); // new deny entry added
+  assert.match(yaml, /\^~\/projects\\b/); // existing allow preserved
+  assert.ok(summary.some((line) => line.includes("files.max_read_bytes: 2097152")));
+  assert.ok(summary.some((line) => line.includes("files.allow: 2 条")));
+  assert.ok(summary.some((line) => line.includes("files.deny: 2 条")));
+  // commands block stays intact (not clobbered by the files rewrite).
+  assert.match(yaml, /^    commands:$/m);
+  assert.match(yaml, /default: allow/);
+});
+
+test("buildChangesYaml writes commands allow/confirm/deny lists and auto_allow_readonly", () => {
+  const changes: McpxConfigChanges = {
+    commandsAllow: ["^ls\\b", "^git status", "^pi\\b"],
+    commandsConfirm: ["^git push", "^npm install"],
+    commandsDeny: ["^rm -rf /", "^mkfs"],
+    commandsAutoReadonly: true,
+  };
+  const { yaml, summary } = buildChangesYaml(FILES_CONFIG, changes, "D:/demo");
+  assert.match(yaml, /\^pi\\b/);
+  assert.match(yaml, /\^git push/);
+  assert.match(yaml, /\^mkfs/);
+  assert.match(yaml, /auto_allow_readonly: true/);
+  assert.ok(summary.some((line) => line.includes("commands.allow: 3 条")));
+  assert.ok(summary.some((line) => line.includes("auto_allow_readonly: true")));
+});
+
+test("buildChangesYaml auto_allow_readonly accepts null", () => {
+  const changes: McpxConfigChanges = { commandsAutoReadonly: null };
+  const { yaml } = buildChangesYaml(FILES_CONFIG.replace("auto_allow_readonly: null", "auto_allow_readonly: true"), changes, "D:/demo");
+  assert.match(yaml, /auto_allow_readonly: null/);
+});
+
+test("buildChangesYaml explicitly sets disable_localhost_protection and trust_proxy_headers", () => {
+  const changes: McpxConfigChanges = { disableLocalhostProtection: false, trustProxyHeaders: true };
+  const { yaml, summary } = buildChangesYaml(FILES_CONFIG, changes, "D:/demo");
+  // Inline-editor override wins over the oauth-derived default (which would set both true).
+  assert.match(yaml, /disable_localhost_protection: false/);
+  assert.match(yaml, /trust_proxy_headers: true/);
+  assert.ok(summary.some((line) => line.includes("disable_localhost_protection: false")));
+  assert.ok(summary.some((line) => line.includes("trust_proxy_headers: true")));
+});
+
+test("parseSubList + extractFilesBlock isolate files lists from commands lists", () => {
+  const sections = splitSections(FILES_CONFIG);
+  const security = sections.find((s) => s.key === "security")!;
+  const filesBlock = extractFilesBlock(security.raw);
+  assert.deepEqual(parseSubList(filesBlock, "allow"), ["^~/projects\\b"]);
+  assert.deepEqual(parseSubList(filesBlock, "confirm"), ["^~/secrets"]);
+  assert.deepEqual(parseSubList(filesBlock, "deny"), ["^/etc"]);
 });

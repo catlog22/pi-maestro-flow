@@ -18,6 +18,10 @@ import { closeSync, existsSync, openSync, readFileSync, readdirSync, renameSync,
 import { isIP } from "node:net";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
+// buildChangesYaml lives in the wizard module and uses only pure YAML helpers
+// (splitSections/parseListItems/patchYamlScalar) with no bridge dependency at
+// call time, so the circular import is safe under ESM lazy binding.
+import { buildChangesYaml, type McpxConfigChanges } from "./tui/mcpx-wizard.ts";
 
 const bridgeDisabled = () => process.env.PI_MCPX_BRIDGE === "0";
 const registeredPaths = new Set<string>();
@@ -497,6 +501,125 @@ export function readMcpxBearerToken(): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** Structured view of the editable mcpx config fields, for the inline /mcpx
+ *  config editor. Reads ~/.mcpx/config.yaml once and surfaces every field the
+ *  overlay can edit; missing fields default to mcpx's documented defaults so
+ *  the editor shows a complete form even on a hand-trimmed config. */
+export interface McpxConfigView {
+  server: { host: string; port: number; disableLocalhostProtection: boolean; trustProxyHeaders: boolean };
+  auth: { mode: "open" | "bearer" | "oauth" | string; token: string; oauthPassword: string; oauthServerURL: string };
+  commands: {
+    default: "allow" | "confirm" | "deny" | string;
+    allow: string[];
+    confirm: string[];
+    deny: string[];
+    autoAllowReadonly: boolean | null;
+  };
+  files: {
+    maxReadBytes: number;
+    maxPatchFiles: number;
+    allow: string[];
+    confirm: string[];
+    deny: string[];
+  };
+}
+
+/** Read the editable fields of ~/.mcpx/config.yaml into a structured view. */
+export function readMcpxConfigView(): McpxConfigView | undefined {
+  let raw: string;
+  try {
+    raw = readFileSync(MCPX_CONFIG_PATH(), "utf8");
+  } catch {
+    return undefined;
+  }
+  const scalar = (re: RegExp) => raw.match(re)?.[1]?.trim();
+  const bool = (re: RegExp, fallback: boolean) => {
+    const v = scalar(re);
+    return v === undefined ? fallback : v === "true";
+  };
+  const listUnder = (parentKey: string, listKey: string): string[] => {
+    // Find the `parentKey:` line, capture its indent, then collect `- item`
+    // lines that sit under the matching `listKey:` child — stopping at any
+    // sibling key at the parent's indent (e.g. `files:` ends `commands.allow`)
+    // or a shallower/top-level key.
+    const parentMatch = raw.match(new RegExp(`^(\\s{2,})${parentKey}:\\s*$`, "m"));
+    if (!parentMatch) return [];
+    const parentIndent = parentMatch[1]!.length;
+    const childIndent = parentIndent + 4;
+    const start = parentMatch.index! + parentMatch[0].length;
+    const rest = raw.slice(start).split(/\r?\n/);
+    const items: string[] = [];
+    let inList = false;
+    const listKeyRe = new RegExp(`^\\s{${childIndent},}${listKey}:\\s*(\\[\\])?$`);
+    for (const line of rest) {
+      if (line === "") continue;
+      if (/^\S/.test(line)) break; // top-level key (column 0)
+      const indent = line.match(/^\s*/)?.[0].length ?? 0;
+      if (indent <= parentIndent) break; // sibling/parent-level key ends this block
+      if (indent >= childIndent && /[A-Za-z_][A-Za-z0-9_]*:\s*$/.test(line.trim())) {
+        inList = listKeyRe.test(line);
+        continue;
+      }
+      if (inList) {
+        const m = line.match(/^\s*-\s+(.+?)\s*$/);
+        if (m) items.push(m[1]!.trim());
+      }
+    }
+    return items;
+  };
+  const host = scalar(/^\s{2,}host:\s*"?([^"\n#]+)"?/m) ?? "127.0.0.1";
+  const portRaw = scalar(/^\s{2,}port:\s*(\d+)/m);
+  const port = Number.isInteger(Number(portRaw)) ? Number(portRaw) : 9090;
+  const mode = scalar(/^\s{2,}mode:\s*([A-Za-z]+)/m) ?? "open";
+  const token = scalar(/^\s{2,}token:\s*"?([^"\n#]+)"?/m) ?? "";
+  const oauthPassword = scalar(/^\s{8,}password:\s*"?([^"\n#]+)"?/m) ?? "";
+  const oauthServerURL = scalar(/^\s{2,}server_url:\s*"?([^"\n#]+)"?/m) ?? "";
+  const commandsDefault = scalar(/^\s{8}default:\s*([A-Za-z]+)/m) ?? "allow";
+  const autoReadonlyRaw = scalar(/^\s{8}auto_allow_readonly:\s*(\S+)/m);
+  const autoAllowReadonly = autoReadonlyRaw === undefined || autoReadonlyRaw === "null" ? null : autoReadonlyRaw === "true";
+  const maxReadRaw = scalar(/^\s{8}max_read_bytes:\s*(\d+)/m);
+  const maxPatchRaw = scalar(/^\s{8}max_patch_files:\s*(\d+)/m);
+  return {
+    server: {
+      host,
+      port,
+      disableLocalhostProtection: bool(/^\s{2,}disable_localhost_protection:\s*(\S+)/m, false),
+      trustProxyHeaders: bool(/^\s{2,}trust_proxy_headers:\s*(\S+)/m, false),
+    },
+    auth: { mode, token, oauthPassword, oauthServerURL },
+    commands: {
+      default: commandsDefault,
+      allow: listUnder("commands", "allow"),
+      confirm: listUnder("commands", "confirm"),
+      deny: listUnder("commands", "deny"),
+      autoAllowReadonly,
+    },
+    files: {
+      maxReadBytes: Number.isInteger(Number(maxReadRaw)) ? Number(maxReadRaw) : 1_048_576,
+      maxPatchFiles: Number.isInteger(Number(maxPatchRaw)) ? Number(maxPatchRaw) : 20,
+      allow: listUnder("files", "allow"),
+      confirm: listUnder("files", "confirm"),
+      deny: listUnder("files", "deny"),
+    },
+  };
+}
+
+/** Apply a partial set of config changes to ~/.mcpx/config.yaml using the
+ *  section-preserving merger from the wizard. Only the supplied fields are
+ *  rewritten; every other section is preserved verbatim. Returns the new YAML
+ *  text and a human-readable summary of what changed. */
+export function writeMcpxConfigChanges(changes: McpxConfigChanges): { yaml: string; summary: string[] } {
+  let existing = "";
+  try {
+    existing = readFileSync(MCPX_CONFIG_PATH(), "utf8");
+  } catch {
+    // first-run: buildChangesYaml handles an empty base.
+  }
+  const { yaml, summary } = buildChangesYaml(existing, changes, process.cwd());
+  replaceConfigAtomically(yaml);
+  return { yaml, summary };
 }
 
 /**
