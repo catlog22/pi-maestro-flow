@@ -5,7 +5,30 @@ icon: "🔄"
 
 这里记录 pi maestro flow 套件从上一稳定版本到当前版本的用户可见变化、行为调整、问题修复和升级要求。
 
-> **当前稳定版本：v0.22.0（2026-08-20）。** Teammate 2.0.0 后端注册表（破坏性大版本，首个 2.x 公开发布）、MCPX 看板、提示词增强、`/notify` 提醒、用量洞察；引擎同步 `maestro-flow@0.5.79`；搭配 Cockpit 0.17.0 与 Settings-Core 0.2.0。
+> **当前稳定版本：v0.22.0（2026-08-20）。** Teammate 2.0.0 后端注册表（破坏性大版本，首个 2.x 公开发布）、MCPX 看板、提示词增强、`/notify` 提醒、用量洞察；引擎同步 `maestro-flow@0.5.79`；搭配 Cockpit 0.17.0 与 Settings-Core 0.2.0。后续 0.22.1 / 0.22.2 为打包修复补丁（已发布到 npm，见下），不改动安装命令与公告 banner。
+
+## 未发布（下一版本，开发中）
+
+> 以下为 `v0.22.0` 之后已合入 `master` 但尚未发版的内容快照。条目随 commit 滚动积累，发版时转正为正式小节。
+
+- **已发布补丁 0.22.1 / 0.22.2（2026-08-21，仅打包修复，npm `latest`）**：0.22.1 补声明 flow 对 `pi-maestro-backends` 的运行时依赖（原经 teammate 传递依赖才装上，现显式声明）；0.22.2 把 `maestro-flow` 引擎约束由精确 pin `0.5.79` 改为 caret `^0.5.79`（引擎纯 patch 节奏、向后兼容，升引擎 patch 不必再改 flow pin；cockpit/teammate/settings-core 仍精确 pin，0.x 下 caret 对 minor 频跳的包是假放宽）。纯打包修复，故安装命令与公告 banner 维持 `@0.22.0`。
+- **Teammate 运行时核心升级——model-registry 模型注册**：以 canonical 模型注册 id + 部署拓扑 + 四道门（registered/resolvable/sessionAvailable/healthy）替代 backend-registry 的 v2 模式；DSH 部署用 adapter-model selector；远端路由仅在当前 root Monitor session 可用并给出确定性 `unavailableReason`；共享模型健康协调器与熔断策略（`model-circuit-breaker`）；`model-routing` 接入注册 id 解析与 circuit 策略同步；`registry-host` 读取 model-registry 模式并投影 pair 发布、mode 三态切换。新增 `pi-teammate-models` CLI（list/edit/add）与 connection TUI 向导（`connection-forms` / `connection-wizards` 复用 cli-edit/cli-add），`model-mapping-overlay` / `remote-config-pane` / `locale-catalog-model` 适配。
+- **completion-durability 投递（teammate 输出不再因中断/压缩丢失）**：`completion-outbox`（coordinator/file-store/registry/types）落盘 outbox + 重投；`public/v1/completion-durability` 注册表符号与 provider 契约；`runs/execution` + `extension/index` + `extension/teammate-proxy` 子会话绑定、`receiveMessageEnd` 回放、`reply_to`/`correlationId` 投递种子；flow 侧 `FlowCompletionDurabilityProvider` + `agent-output-capture`/`store` 元数据。后续多轮审查修复（崩溃一致性、向后兼容与 pin 语义、WAL 恢复与 caller 通知、聚合 import 路径）。
+- **briefing 装配**：`runs/briefing.assembleTaskPrompt` 将 `agent://` / `file:` 引用懒拼入子任务 prompt，`execution` 在使用 `params.task` 前统一装配。
+- **DSH 远程 ssh 启动模式**：`dsh/driver.composeDshLaunch` 支持 ssh 远程启动，local 子进程白名单补 `SSH_AUTH_SOCK`；`DSH_CONFIG_FIELDS` 导出供 models CLI edit 复用，新增 `mode`/`host`/`user`/`port` ssh 启动面字段；`resolveBackendConfig` 透出 backend 的 advisory warnings（避免风险提示在 resolution 边界被静默丢弃）。
+- **backend-core 契约暴露**：`TeammateExecutionMode` 新增 `model-registry`（teammate 先解析稳定模型注册到既有 v1 backend 注册）；新增 `TeammateExecutionTransport` 描述性传输元数据（local-process / acp-direct-ssh / dsh-direct-ssh / remote-worker），供 settled 结果安全暴露；`ResolveConfigResult` 新增可选 `warnings` 承载 advisory 风险提示。
+- **computer-use / 本地视觉（OCR）**：新增 computer-use 工具——平台抽象（windows/macos/linux bridge-process）、坐标转换、artifacts bound、manifest schema 与 optional notices；本地视觉 `local-vision` provider + `computer-use/vision` 模块（OCR/detect/worker/image/model-assets），`tesseract.js` 为可选依赖，缺失时返回 `{ok:false,hint}`。
+- **Browser stealth + attach + visible**：`stealth.ts` 注入 navigator.webdriver/plugins/chrome/permissions 反指纹补丁与 `--disable-blink-features=AutomationControlled` 启动参数；`BrowserOpenOptions` 新增 `visible` 与 `attachUserProfile`/`userProfileDir`，支持接管用户日常浏览器（保留登录态与真实指纹）；`browser-tool` 暴露 `visible`/`app.attach_user_profile`/`app.user_profile_dir` 参数与 CAPABILITY MAP 说明，明确纯 stealth 不足以通过 Cloudflare managed challenge。
+- **abort/cancel 语义修正**：`stopReason="error"` 但消息含 abort 字样时归为 cancelled/non-retryable，不消耗熔断、不切换模型，避免用户 ESC 后系统换模型重跑（`model-failover` 与 `retry-classifier` 新增 ABORT 诊断正则）。
+- **路由可观测性**：`model-routing` 新增 `unreachableRoutingTargets()` 与 `formatModelRoutingConfig(..., availableModels)`，task-type/role 映射指向当前 catalog 不可达的模型时在路由表输出警告；空 catalog 不报。
+- **manifest 写入前置校验**：cli-edit/connection-wizards 镜像 add 流程的 ssh host/user 必填校验；cli-write 解析后再跑 `compileModelRegistryManifest`，把拓扑/selector 失败提前到写入时。
+- **MCPX 面板增强**：`E` 键一键永久注册/注销工作空间（无租约，窗口关闭后保留；`e` 仍为 TTL 租约注册）；`collectWindows`/`collectThread` 扫描全部 peer 工作空间，oauth 模式 runtime 401 时回退列表也能看到其他工作空间的窗口与工具调用；quick tunnel 进程发现与 adopt（向导可接管既有隧道并校验端口）；修复 `sanitizeTerminalText` 误剥 ESC 致颜色码退化成乱码。
+- **Cockpit 跨平台快捷键显示**：`Alt` 快捷键在 macOS 显示为 `Option`——`key-labels.altLabel()` 返回平台显示名，渲染态显示 Option+X，匹配令牌全平台仍为 `alt+X`。
+- **Flow loop 状态行 + 终态回调**：loop 状态行改用状态字形与相对时间，新增终态 `onTerminal` 回调与 `loopId` 前缀解析。
+- **teammate 输出桶写入 `.workspace` 元数据并支持 cwd 子树发现**；**压缩后中断任务不再搁浅**——zombie 迟到完成补发续跑 + 统一恢复策略；**未知模型失败默认可重试** + agent 输出短 id 前缀寻址。
+- **plan 修复**：`teammate-send` 放行 steer/follow_up + planner 子派发边界澄清。
+- **ACP 接入完善（PR #18 合并）**：ACP-CLI backend 新增 catalog/snapshot/registry 刷新脚本，`acp-driver` 与 `acp-config-options` 增强；`registry-host` 叠加全局回退（workspace-root + global 复合键）兼容本地 model-registry 模式；`teammate-backends-settings-provider` 融合 PR catalog 文案与本地 deploymentDescriptors document-driven join，补全 DSH ssh 字段 catalog、新增 pi-subprocess backend catalog。
+- **文档与规范**：新增 `packages/pi-maestro-flow/AGENTS.md` 包级编码规范；teammate 2.0.0 发布文档（README/CHANGELOG + 包内 agents 角色重写 + adapter 契约补 model-registry）；`.pi/agents` 角色定义结构化重写 + `.pi/SYSTEM.md` 补 agent 结果复用规则；skills 中 `maestro-session-seal` 重命名为 `maestro-session-manage`；用户文档同步 `pi-teammate-models` CLI、DSH ssh、model-registry 模式与 macOS Alt/Option；浏览器控制能力差距分析与 attach/stealth 使用文档；Windows Git Bash 环境高频工具失败模式 tip。
 
 ## v0.22.0（2026-08-20）
 

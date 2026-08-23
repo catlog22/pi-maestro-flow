@@ -40,6 +40,8 @@ Self-evolve 是**薄 router**：把「run check 评审 → stage → run complet
 | `full-cycle` | `full` / `闭环` / `自进化` / `整条流水线` / `完整流程` | 执行下方「核心时序编排（full-cycle）」全链 |
 | `proposal` | `proposal` / `提案` / `skill 演化` / `改 skill` / `skill 变更` | Phase 5 独立 proposal 流程（见「Phase 5 skill 演化」）：`node scripts/self-evolve-phase5.mjs proposal <skill-path> --content <path> --reason "<why>"` → 静态检查/权限差异/签名 → `apply`（reason 非空=批准记录）→ `revert`（--reason 必填；sha256 冲突检测，不一致需 --force；写 skill-revert receipt） |
 | `canary` | `canary` / `shadow` / `在线验证` / `影子` / `试用` | Phase 5 高影响知识在线验证（见「Phase 5 在线验证」）：`node scripts/self-evolve-phase5.mjs canary <id> [--window N]` → shadow 观察窗口 → PROMOTE/ROLLBACK 建议 |
+| `trajectory` | `trajectory` / `轨迹` / `SOP 盲区` / `工具轨迹` / `phase 6` | Phase 6 工具轨迹深度分析（设计阶段，见「Phase 6 工具轨迹深度分析」）：`node scripts/self-evolve-phase6.mjs analyze <tool> [--window N]` → SOP 覆盖盲区报告 + 补丁候选草稿 + 内嵌/knowhow 差异（不自动写入，走 stage→promote） |
+| `hybrid` | `hybrid` / `语义` / `enrichment` / `review pending` / `wrap` / `phase 7` | Phase 7 语义采集与会话收尾（已落地）：`/self-evolve config captureMode=hybrid` 启用受预算语义 enrichment；`/self-evolve review pending [N]` 评审当前 session 未评审信号；`/self-evolve wrap` 手动出会话摘要 |
 | `auto` | `auto` / `自动` / `事实型` / `自动晋升` / `settle` | 事实型自动进化（T2）：seal 后 `promote --all` 自动晋升事实候选，review_required 留人工（见「事实型自动进化」） |
 
 规则：
@@ -349,6 +351,31 @@ maestro knowledge review <session-id> --json   # 收尾：剩余 review_required
   `apply` 需非空 `--reason`（= 显式批准记录，同时落 approvals 审计回执），应用后重校验失败**自动回滚**；
   `revert` 恢复快照（--reason 必填，写 skill-revert receipt；sha256 冲突检测，与快照不一致需 `--force`）。
   **遵守 `.pi/SYSTEM.md` 知识操作节治理规则（Review, resolution, promotion, supersession, conflict marking, and pruning require an explicit user request or confirmed governance step）：skill 变更必须有显式请求/确认的 governance step，绝不静默 apply。**
+
+### Phase 6 工具轨迹深度分析与 SOP 治理闭环（设计阶段，未实施）
+
+- **背景**：Phase 2C 已让 `agent_end` 信号携带结构化 `toolCalls` 证据（`buildToolCallEvidence`，覆盖 browser/computer_use 的 action/topic/outcome），`signalEvidenceContent` 在证据文件头部输出 SOP frontmatter hint（`tools`/`sop_topic`）。SopLoader/SopRegistry 已能从 `.workflow/knowhow/` 自动发现带 `tools`+`sop_topic` 字段的文档并合并内嵌基线。Phase 6 在此之上加一层「跨会话聚合某工具轨迹，发现 SOP 覆盖盲区与内嵌/外部漂移」的治理面。
+- **入口**（二选一）：`/self-evolve trajectory <tool> [--window N] [--since YYYY-MM-DD]`（TUI/命令），或 `node scripts/self-evolve-phase6.mjs analyze <tool> [--json]`（CI/脚本）。复用 `~/.maestro/self-evolve/` 下的 suggestions/reviews/deposits 聚合通道。
+- **输入**：从 suggestions（含 `toolCalls` 字段）+ reviews 聚合指定工具的信号，按 outcome 分桶统计失败率、按 action/topic 统计 SOP 命中与未命中、按 `sop_topic` 检查内嵌基线与 knowhow 外部是否存在对应文档。
+- **输出**（三种产物，全部只读/只建议，不自动写入）：
+  1. **SOP 覆盖盲区报告**：高频失败 outcome 但无对应 `sop_topic` 文档的盲区（如 `computer_use` 的 `near_zero` 在 coordinates/core 都未覆盖），附出现次数与示例信号 id。
+  2. **SOP 补丁候选**：每个盲区生成一份带 `tools`/`sop_topic` frontmatter 的 evidence 文件草稿 + 对应 `maestro knowledge stage knowhow --content-file` 命令模板（复用 Phase 2C `renderSopFrontmatterHint` 逻辑的批量版）。
+  3. **内嵌与 knowhow 差异**：对比 `sop/embedded/*.ts` 基线与 `.workflow/knowhow/` 外部文档的 topic 集合，标出「外部已覆盖但内嵌未同步」「内嵌有但外部无」「order 冲突」三类。
+- **治理**：产物仍走 `stage → review → promote`，不自动 stage/不自动 promote（与 Phase 2B 纪律一致）；`analyze` 只生成报告与草稿，用户显式执行 stage。与 Phase 5 canary 互补：Phase 5 验证已晋升知识，Phase 6 发现待晋升的 SOP 盲区。
+- **与 SopLoader 契约**：Phase 6 不直接读 `SopRegistry`，而是读 `.workflow/knowhow/` 目录与 `sop/embedded/*.ts` 导出的 baseline map（同 `sop-registry-singleton.ts` 的 `EMBEDDED_BASELINES`），保证盲区判定与运行时加载器使用同一份基线与外部来源。
+- **实施时机**：Phase 2C 信号累积≥50 条含 `toolCalls` 的信号后，作为独立 Run 启动；本节为设计阶段，不落代码。
+
+### Phase 7 语义采集、智能证据与会话收尾（已落地）
+
+解决 Phase 2A 的四个残余局限：关键词决定是否 evol、信息提取机械、工具轨迹覆盖窄、会话结束无收尾。
+
+- **P0 数据契约**（`src/self-evolve/enrichment.ts`）：`EnrichmentRecord` 独立 ledger（不回写 suggestions JSONL）；`resolveSignal(raw, enrichment)` 统一投影；完整 `traceHash+sessionId` join，12 位 id 碰撞 fail-closed；`evidenceIdFor` 为证据生成稳定内容哈希 id。
+- **P1 通用轨迹**（`src/self-evolve/trajectory.ts`）：`collectToolCallTimeline` 保序时间线 + 工具 adapter registry（bash/edit/grep/lsp/read/delegate/ask/sop）+ `buildTrajectoryEpisodes`（failure_recovery/repeated_failure/empty_then_refined/permission_block/success）+ `projectSopToolCalls`（SOP 兼容投影）。
+- **P2 受预算语义 enrichment**：`/self-evolve config captureMode=hybrid` 启用（默认 `heuristic`，现有用户无感）；fire-and-forget LLM 生成 title/summary/knowledge，受 per-session 预算约束（≤2 次/6 候选/每批 ≤3/30s）；证据先编号后供 LLM 选择，未知 evidence id → `heuristic_fallback`；失败永不阻塞收集。
+- **P3 接回治理链**：`/self-evolve review pending [N]` 评审当前 session 未评审且 terminal-resolved 的信号；`SelfEvolveReview` 加 `sessionId`/`signalIds`；rescued unknown 信号补写 evidence 后可 stage；review gate 不变。
+- **P4 会话收尾**（`src/self-evolve/session-summary.ts` + `session_shutdown` handler）：`reload` 写 checkpoint，`quit`/`new`/`resume`/`fork` 写 final summary；`/self-evolve wrap` 手动出摘要（幂等）；pending-review ≥3 时提示。shutdown 是 state-only，不启动 LLM/review/stage。
+- **治理纪律不变**：只 stage 不 promote；不新增采集事件；SopLoader 只读；旧信号无迁移。
+- **验证**：se-e2e 91、se-deep-sim 25、semantic 31、tool-trajectory 31、session-summary 17；tsc 0 错误。
 
 <success_criteria>
 - [ ] intent 正确分类并映射到对应 CLI 步骤，命令参数与 `maestro <cmd> --help` 一致

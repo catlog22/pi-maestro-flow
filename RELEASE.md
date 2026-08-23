@@ -1,5 +1,17 @@
 # v0.22.0 — Teammate 2.0 Backend Registry, MCPX Dashboard, Prompt Enhance & Usage Insights
 
+> **Post-release status (2026-08-21).** Two packaging-fix patches have been
+> published to npm on top of this release: **0.22.1** (declares flow's runtime
+> dependency on `pi-maestro-backends`, previously installed only transitively via
+> teammate) and **0.22.2** (switches the `maestro-flow` engine constraint from an
+> exact pin `0.5.79` to caret `^0.5.79`). Both are pure packaging fixes, so the
+> install command and announcement banner remain at `@0.22.0`. Development beyond
+> `v0.22.0` (model-registry, completion-durability, DSH ssh, browser
+> stealth/attach, computer-use/OCR, MCPX enhancements, …) is tracked in the
+> **Unreleased** section of `docs-site/src/content/docs/guides/changelog.md`
+> (and `changelog.en.md`) and will be promoted to a formal release section on
+> the next tagged version.
+
 ## Overview
 
 This release publishes **Teammate 2.0.0** (the committed breaking major, previously

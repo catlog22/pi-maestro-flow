@@ -178,6 +178,26 @@ harness 与 maestro 知识体系**控制方向相反**：
 - **Phase 3 — 知识健康闭环（v2 补的核心缺口）**：建立统一 `knowledge-health.json` sidecar（覆盖 spec/knowhow）：`last_validated_at`、证据根数量、contradiction 状态、freshness；Session seal 聚合 validated/contradicted 信号 → 达阈值自动创建 **contest/revalidation queue** → 人工执行 supersede/deprecate；候选 TTL 分诊（过期未 corroborate → expired/suppressed，保留审计不物理删）。
 - **Phase 4 — 受控自动化**：仅 exact duplicate 自动 suppress、低风险候选自动生成 promote 建议；**promotion 仍需用户请求或 confirmed governance step**（遵 `.pi/SYSTEM.md`）。
 - **Phase 5 — 在线验证与 skill 演化**：高影响知识 canary/shadow 对照；skill 修改走独立 proposal（签名、静态检查、权限差异审查、快照、显式批准），不复用普通 knowhow promotion。
+- **Phase 6 — 工具轨迹深度分析与 SOP 治理闭环**（Phase 2C 信号维度已落地后的长期治理面）：
+  - **动机**：Phase 2C 已让 `agent_end` 信号携带结构化 `toolCalls` 证据（`buildToolCallEvidence`，覆盖 browser/computer_use 的 action/topic/outcome），并 `signalEvidenceContent` 在证据文件头部输出 SOP frontmatter hint（`tools`/`sop_topic`）。但「单条信号→单个候选」是平面的；缺一层「聚合某工具跨会话的轨迹，发现 SOP 覆盖盲区与内嵌/外部漂移」的治理面。Phase 6 填这个缺口。
+  - **入口**：`/self-evolve trajectory <tool> [--window N] [--since YYYY-MM-DD]`（TUI/命令），或 `node scripts/self-evolve-phase6.mjs analyze <tool> [--json]`（CI/脚本）。复用 `self-evolve health` sidecar 的聚合通道（`~/.maestro/self-evolve/` 下的 suggestions/reviews/deposits）。
+  - **输入**：从 suggestions（含 `toolCalls` 字段）+ reviews 聚合指定工具的信号，按 outcome 分桶统计失败率、按 action/topic 统计 SOP 命中与未命中、按 `sop_topic` 检查内嵌基线与 knowhow 外部是否存在对应文档。
+  - **输出**（三种产物，全部只读/只建议，不自动写入）：
+    1. **SOP 覆盖盲区报告**：列出高频失败 outcome 但无对应 `sop_topic` 文档的盲区（如 `computer_use` 的 `near_zero` 在 coordinates/core 都未覆盖），附出现次数与示例信号 id。
+    2. **SOP 补丁候选**：对每个盲区生成一份带 `tools`/`sop_topic` frontmatter 的 evidence 文件草稿 + 对应 `maestro knowledge stage knowhow --content-file` 命令模板（复用 Phase 2C 的 `renderSopFrontmatterHint` 逻辑，批量版）。
+    3. **内嵌与 knowhow 差异**：对比 `sop/embedded/*.ts` 基线与 `.workflow/knowhow/` 外部文档的 topic 集合，标出「外部已覆盖但内嵌未同步」「内嵌有但外部无」「order 冲突」三类。
+  - **治理**：产物仍走 `stage → review → promote`，不自动 stage/不自动 promote（与 Phase 2B 纪律一致）；`analyze` 只生成报告与草稿，用户显式执行 stage。与 Phase 5 canary 互补：Phase 5 验证已晋升知识的正确性，Phase 6 发现待晋升的 SOP 盲区。
+  - **与 SopLoader 的契约**：Phase 6 不直接读 `SopRegistry`，而是读 `.workflow/knowhow/` 目录与 `sop/embedded/*.ts` 导出的 baseline map（同 `sop-registry-singleton.ts` 的 `EMBEDDED_BASELINES`），保证盲区判定与运行时加载器使用同一份基线与外部来源。
+  - **实施时机**：Phase 2C 信号在 `~/.maestro/self-evolve/suggestions/` 累积一定量（约≥50 条含 `toolCalls` 的信号）后，作为独立 Run 启动；本次仅出设计，不落代码。
+
+- **Phase 7 — 语义采集、智能证据与会话收尾**（P0–P5 已落地）解决了 Phase 2A 的四个残余局限：
+  - **P0 数据契约**：新增 `src/self-evolve/enrichment.ts` — `EnrichmentRecord`/`ResolvedSignal`/`resolveSignal`/`selectEnrichment`（完整 `traceHash+sessionId` join，12 位 id 碰撞 fail-closed）/`parseEnrichmentRecord` ledger 解析。原始信号 JSONL 不回写，enrichment 独立 ledger。`evidenceIdFor` 为每条证据生成稳定内容哈希 id。
+  - **P1 通用轨迹**：新增 `src/self-evolve/trajectory.ts` — `collectToolCallTimeline`（保序、callId、白名单参数、结构化结果）+ 工具 adapter registry（bash/edit/grep/lsp/read/delegate/ask/sop）+ `buildTrajectoryEpisodes`（`failure_recovery`/`repeated_failure`/`empty_then_refined`/`permission_block`/`success`）+ `projectSopToolCalls`（SOP 兼容投影）。轨迹覆盖从 browser/computer_use 扩展到所有 pi 工具。
+  - **P2 受预算语义 enrichment**：`captureMode=hybrid`（默认 `heuristic`，现有用户无感）时 fire-and-forget 调 LLM 生成 title/summary/knowledge/evidenceIds，受 per-session 预算约束（≤2 次/6 候选/每批 ≤3/30s）。证据先编号后供 LLM 选择，未知 evidence id → `heuristic_fallback`。失败永不阻塞收集。
+  - **P3 接回治理链**：`loadResolvedSignals` 把 raw+enrichment 投影成 resolved signal；`/self-evolve review pending [N]` 只评审当前 session 未评审且 terminal-resolved 的信号；`SelfEvolveReview` 加 `sessionId`/`signalIds`。rescued unknown 信号补写 evidence 文件后可 stage。review gate 不变。
+  - **P4 会话收尾**：新增 `src/self-evolve/session-summary.ts` + `session_shutdown` handler（reason-aware：`reload` 写 checkpoint，`quit`/`new`/`resume`/`fork` 写 final summary）+ `/self-evolve wrap`（幂等）+ pending-review 阈值 nudge（≥3 时提示）。shutdown 是 state-only，不启动 LLM/review/stage。
+  - **治理纪律不变**：只 stage 不 promote（静态扫描确认无可执行 promotion 路径）；不新增采集事件（无 `tool_execution_end`/`tool_call` 注册）；SopLoader 只读；旧信号无迁移。
+  - **验证**：se-e2e 91 PASS（含 enrichment fallback/session summary/wrap 断言）、se-deep-sim 25 PASS、semantic 31、tool-trajectory 31、session-summary 17；tsc 0 错误。
 
 ## 10. 风险与残余风险（v2 补强）
 
