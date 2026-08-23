@@ -8,6 +8,7 @@ import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import type { CompletionDeliveryEnvelope } from "../src/completion-outbox/coordinator.ts";
 import registerStructuredOutput from "../src/extension/structured-output.ts";
 import registerTeammateExtension, {
   applyAgentRetryState,
@@ -2249,7 +2250,7 @@ test("nested teammate-send republishes a running lifecycle when it wakes an agen
   assert.equal(messageEvent?.payload.correlationId, target.correlationId);
   assert.equal(messageEvent?.payload.mode, "prompt");
   assert.equal(messageEvent?.payload.lastActivityAt, target.lastActivityAt);
-  assert.match(JSON.stringify(reply), /queued after current turn/);
+  assert.match(JSON.stringify(reply), /queued until AgentSession would otherwise stop/);
 
   await handleProxyRequest(
     pi,
@@ -3409,6 +3410,50 @@ test("background completion renderer stays compact but expands to the full resul
   const expanded = renderer(message, { expanded: true }, theme).render(80).join("\n");
   assert.match(expanded, /background line 30/);
   assert.equal(message.content, content);
+});
+
+test("durable completion renderer handles outbox envelopes without raw fallback", () => {
+  type CompletionRenderer = (
+    message: { content: string; details: CompletionDeliveryEnvelope["details"] },
+    options: { expanded: boolean },
+    theme: { fg: (name: string, text: string) => string; bold: (text: string) => string },
+  ) => { render(width: number): string[] };
+
+  const renderers = new Map<string, CompletionRenderer>();
+  const events = { on: () => () => {}, emit() {} };
+  const pi = new Proxy({ events }, {
+    get(target, property) {
+      if (property in target) return target[property as keyof typeof target];
+      if (property === "registerMessageRenderer") {
+        return (type: string, renderer: CompletionRenderer) => renderers.set(type, renderer);
+      }
+      return () => {};
+    },
+  });
+
+  registerTeammateExtension(pi as unknown as ExtensionAPI);
+  const renderer = renderers.get("teammate-complete");
+  assert.ok(renderer);
+  const message = {
+    content: "Ralph step 35 completed successfully.\n\nResults: agent://publication",
+    details: {
+      source: "completion-outbox" as const,
+      deliveryId: "d".repeat(64),
+      contentRevision: "c".repeat(64),
+      targetSessionId: "session",
+      dispatchId: "dispatch",
+      mode: "single" as const,
+      resources: ["agent://publication"],
+      replayed: true,
+    },
+  };
+  const theme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
+
+  const collapsed = renderer(message, { expanded: false }, theme).render(80);
+  assert.equal(collapsed.length, 1);
+  assert.match(collapsed[0]!, /teammate-complete replayed · 1 publication/);
+  const expanded = renderer(message, { expanded: true }, theme).render(80).join("\n");
+  assert.match(expanded, /agent:\/\/publication/);
 });
 
 test("Alt+R opens the native agent view without injecting a slash command", async () => {

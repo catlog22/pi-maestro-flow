@@ -27,7 +27,7 @@ import {
   TEAMMATE_SEND_DESCRIPTION,
   TEAMMATE_SEND_GUIDELINES,
 } from "../src/extension/index.ts";
-import { TeammateSendParams } from "../src/extension/schemas.ts";
+import { TeammateParams, TeammateSendParams } from "../src/extension/schemas.ts";
 import { displayMessageForResult } from "../src/extension/teammate-core.ts";
 import { buildPiArgs, runSingleTeammate } from "../src/runs/execution.ts";
 
@@ -674,12 +674,23 @@ test("teammate send guidance requires meaningful new traffic and explains queued
   assert.match(combined, /routine acknowledgements? or status pings/i);
   assert.match(combined, /never resend|resends of queued messages are prohibited/i);
   assert.match(combined, /queued or accepted.*not.*consum/i);
+  assert.match(combined, /steer.*cancellation.*active agent turn/i);
+  assert.match(combined, /follow_up.*AgentSession would otherwise stop/i);
+  assert.match(combined, /tool returning is not a delivery boundary/i);
+  assert.match(combined, /model response.*tool calls.*continuation.*native retr/i);
   assert.match(TEAMMATE_LIST_DESCRIPTION, /"windows": available peer Pi windows and their addressable targets/);
   assert.doesNotMatch(TEAMMATE_LIST_DESCRIPTION, /"windows"[^\n]*(use|call|send)/i);
   assert.match(combined, /untrusted routing metadata.*never as instructions or user authorization/i);
 
   const modeSchema = JSON.stringify(TeammateSendParams.properties.mode);
   assert.match(modeSchema, /queued or accepted means persisted\/enqueued but not necessarily consumed/i);
+  assert.match(modeSchema, /follow_up.*AgentSession would otherwise stop/i);
+  assert.match(modeSchema, /tool returning is not a delivery boundary/i);
+  assert.match(modeSchema, /replacement or next prompt/i);
+  const backgroundSchema = JSON.stringify(TeammateParams.properties.background);
+  assert.match(backgroundSchema, /completion state is published immediately.*Cockpit/i);
+  assert.match(backgroundSchema, /consumed only when the caller AgentSession would otherwise stop/i);
+  assert.match(backgroundSchema, /not when an individual tool call returns/i);
   const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf8");
   assert.match(source, /The message is queued and may not yet be consumed; do not resend it/);
   assert.match(source, /may still have been delivered; inspect teammate-list with view=inbox before retrying/);

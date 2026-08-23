@@ -36,6 +36,7 @@ export {
   isAuthError,
   isModelHealthAuthSuppressed,
   isRetryableProviderError,
+  markPiRetryErrorCancelled,
   modelHealthAuthSuppressionKey,
   ModelHealthAttemptState,
   normalizePiRetryErrorMessage,

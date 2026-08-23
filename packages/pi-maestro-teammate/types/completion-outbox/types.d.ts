@@ -36,6 +36,8 @@ export interface CompletionOutboxRecord {
     updatedAt: number;
     expiresAt: number;
     lastError?: string;
+    /** Immutable provider intent revision echoed by model-consumption receipts. */
+    intentRevision?: string;
     contentRevision: string;
     providerAcknowledgedAt?: number;
 }

@@ -89,6 +89,7 @@ test("reservation and intent import are durable and idempotent", async () => {
     const pending = await store.importIntent(published);
     assert.equal(pending.state, "pending");
     assert.equal(pending.deliveryId, published.deliveryId);
+    assert.equal(pending.intentRevision, published.contentRevision);
     assert.equal((await store.importIntent(published)).deliveryId, published.deliveryId);
     assert.equal((await store.listForTarget(target)).length, 1);
     assert.equal((await store.listForTarget({ workspaceId: target.workspaceId, sessionId: "other" })).length, 0);

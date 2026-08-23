@@ -744,6 +744,27 @@ function qLine(theme: Theme, markedGlyph: string, name: string, rest: string): s
   return `  ${markedGlyph} ${parts.join(" ")}`;
 }
 
+export interface CompletionOutboxRenderDetails {
+  replayed: boolean;
+  resources: readonly string[];
+}
+
+export function renderCompletionOutboxMessage(
+  content: string,
+  details: CompletionOutboxRenderDetails,
+  expanded: boolean,
+  theme: Theme,
+): Component {
+  if (expanded) return new Text(theme.fg("toolOutput", content), 0, 0);
+  const firstLine = content.split("\n").find((line) => line.trim())?.trim() ?? "completed";
+  const publicationCount = details.resources.length;
+  const state = details.replayed ? "replayed" : "completed";
+  const rest = `${state} · ${publicationCount} publication${publicationCount === 1 ? "" : "s"} · ${firstLine}`;
+  const tone = details.replayed ? "warning" : "success";
+  const glyph = theme.fg(tone, details.replayed ? "↻" : "✓");
+  return dynamicComponent((width) => [truncateToWidth(qLine(theme, glyph, "teammate-complete", rest), Math.max(1, width), "…")]);
+}
+
 export function renderQuietTeammateAux(
   name: "teammate-send" | "teammate-wait" | "teammate-watch" | "teammate-started" | "teammate-monitor" | "observe",
   rest: string,

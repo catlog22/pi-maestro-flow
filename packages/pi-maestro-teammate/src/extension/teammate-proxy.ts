@@ -2708,7 +2708,7 @@ export async function handleProxyRequest(
         }
         const modeLabel = delivery.receipt?.wasSleeping
           ? "woken up + prompt"
-          : delivery.receipt?.mode === "steer" ? "interrupted + injected" : "queued after current turn";
+          : delivery.receipt?.mode === "steer" ? "active turn cancelled + prompt injected" : "queued until AgentSession would otherwise stop (tool return is not a delivery boundary)";
         reply({ type: "teammate_proxy_result", requestId, result: {
           content: [{ type: "text", text: `Message ${modeLabel} for "${to}".${delivery.receipt?.wasSleeping ? " Agent woken up." : ""}` }],
           isError: false, details: { delivered: true },
@@ -2878,7 +2878,7 @@ export async function handleProxyRequest(
         { triggerTurn: true },
       );
 
-      const modeLabel = mode === "steer" ? "interrupted + injected" : mode === "abort" ? "aborted" : "queued after current turn";
+      const modeLabel = mode === "steer" ? "active turn cancelled + prompt injected" : mode === "abort" ? "aborted" : "queued until AgentSession would otherwise stop (tool return is not a delivery boundary)";
       reply({ type: "teammate_proxy_result", requestId, result: {
         content: [{ type: "text", text: `Message ${modeLabel} for "${to}".` }],
         isError: false, details: { delivered: true },

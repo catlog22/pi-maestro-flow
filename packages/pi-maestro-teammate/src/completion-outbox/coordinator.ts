@@ -84,6 +84,10 @@ function targetEquals(left: CompletionTarget, right: CompletionTarget): boolean 
     && left.correlationId === right.correlationId;
 }
 
+function receiptRevision(record: CompletionOutboxRecord): string {
+  return record.intentRevision ?? record.contentRevision;
+}
+
 export function completionRedeliveryEnabled(): boolean {
   return process.env.PI_TEAMMATE_COMPLETION_REDELIVERY !== "0";
 }
@@ -95,6 +99,7 @@ export class CompletionDeliveryCoordinator {
   readonly #enabled: () => boolean;
   readonly #defer: (run: () => void) => void;
   readonly #dispatches = new Map<string, { handle: CompletionDispatchHandle; provider: CompletionDurabilityProvider }>();
+  readonly #acceptedByHost = new Set<string>();
   readonly #inflight = new Map<string, Promise<void>>();
   readonly #deferred = new Set<Promise<void>>();
   #binding: CompletionSessionBinding | undefined;
@@ -213,7 +218,7 @@ export class CompletionDeliveryCoordinator {
     if (!receipt || receipt.targetSessionId !== currentTarget.sessionId) return false;
     const records = await this.store.listForTarget(currentTarget);
     const record = records.find((entry) => entry.deliveryId === receipt.deliveryId);
-    if (!record || record.contentRevision !== receipt.contentRevision || !targetEquals(record.target, currentTarget)) return false;
+    if (!record || receiptRevision(record) !== receipt.contentRevision || !targetEquals(record.target, currentTarget)) return false;
     await this.#apply(record);
     return true;
   }
@@ -226,6 +231,7 @@ export class CompletionDeliveryCoordinator {
   dispose(): void {
     this.#disposed = true;
     this.#binding = undefined;
+    this.#acceptedByHost.clear();
     this.#unsubscribe?.();
     this.#unsubscribe = undefined;
   }
@@ -247,7 +253,7 @@ export class CompletionDeliveryCoordinator {
     const records = await this.store.listForTarget(target);
     for (const receipt of receipts) {
       const record = records.find((entry) => entry.deliveryId === receipt.deliveryId);
-      if (record && receipt.targetSessionId === target.sessionId && receipt.contentRevision === record.contentRevision) {
+      if (record && receipt.targetSessionId === target.sessionId && receipt.contentRevision === receiptRevision(record)) {
         await this.#apply(record);
       }
     }
@@ -260,6 +266,7 @@ export class CompletionDeliveryCoordinator {
     const records = await this.store.listForTarget(target);
     for (const candidate of records) {
       let record = candidate;
+      if (record.state === "queued" && this.#acceptedByHost.has(record.deliveryId)) continue;
       if (record.state === "queued" && (record.receiptDeadlineAt ?? Number.MAX_SAFE_INTEGER) <= now) {
         if (record.attempts >= COMPLETION_OUTBOX_MAX_ATTEMPTS) {
           await this.store.markDead(target, record.deliveryId, "completion receipt retries exhausted");
@@ -278,6 +285,7 @@ export class CompletionDeliveryCoordinator {
         continue;
       }
       if (accepted) {
+        this.#acceptedByHost.add(record.deliveryId);
         try {
           await this.store.markQueued(target, record.deliveryId, now + RECEIPT_DEADLINE_MS);
         } catch (error) {
@@ -297,6 +305,7 @@ export class CompletionDeliveryCoordinator {
     if (record.state === "applied" && record.providerAcknowledgedAt !== undefined) return;
     const applied = await this.store.markApplied(record.target, record.deliveryId);
     if (!applied || applied.providerAcknowledgedAt !== undefined) return;
+    this.#acceptedByHost.delete(applied.deliveryId);
     // Acknowledge through the provider that owns the dispatch, not whichever
     // provider happens to be current now — a registry replacement must not
     // strand the original manifest without a receipt.
@@ -305,7 +314,7 @@ export class CompletionDeliveryCoordinator {
       deliveryId: applied.deliveryId,
       dispatchId: applied.dispatchId,
       target: applied.target,
-      contentRevision: applied.contentRevision,
+      contentRevision: receiptRevision(applied),
       appliedAt: this.#now(),
     };
     try {
@@ -330,7 +339,7 @@ export class CompletionDeliveryCoordinator {
       details: {
         source: "completion-outbox",
         deliveryId: record.deliveryId,
-        contentRevision: record.contentRevision,
+        contentRevision: receiptRevision(record),
         targetSessionId: record.target.sessionId,
         dispatchId: record.dispatchId,
         mode: record.kind === "graph" ? "graph" : "single",

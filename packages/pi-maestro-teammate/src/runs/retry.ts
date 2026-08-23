@@ -319,6 +319,15 @@ export function normalizePiRetryErrorMessage(message: string | undefined): strin
   return `${message} (network error)`;
 }
 
+const USER_ABORT_RETRY_MARKER = "The user aborted a request";
+
+/** Preserve the provider diagnostic while making a raced user cancellation non-retryable to Pi core. */
+export function markPiRetryErrorCancelled(message: string | undefined): string {
+  if (!message) return USER_ABORT_RETRY_MARKER;
+  if (ABORT_ERROR.test(unwrapRuntimeDiagnostic(message))) return message;
+  return `${message} (${USER_ABORT_RETRY_MARKER})`;
+}
+
 /** True when the failure is an authentication/permission problem. */
 export function isAuthError(message: string | undefined, status?: number): boolean {
   return classifyRetryError(message, status) === "auth";

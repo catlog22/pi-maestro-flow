@@ -7,6 +7,7 @@ import {
   isAuthError,
   isFallbackProviderError,
   isRetryableProviderError,
+  markPiRetryErrorCancelled,
   normalizePiRetryErrorMessage,
 } from "../src/runs/retry.ts";
 
@@ -94,6 +95,34 @@ test("abort/cancellation diagnostics classify as non-retryable (never switch mod
   // Neither same-model retry nor fallback model switch should trigger.
   assert.equal(isRetryableProviderError("This operation was aborted"), false);
   assert.equal(isFallbackProviderError("This operation was aborted"), false);
+});
+
+test("a raced connect error can be marked as user-cancelled without losing its diagnostic", () => {
+  const raw = "connect ECONNREFUSED 127.0.0.1:401";
+  const cancelled = markPiRetryErrorCancelled(raw);
+  assert.equal(cancelled, `${raw} (The user aborted a request)`);
+  assert.equal(classifyRetryError(cancelled), "non-retryable");
+  assert.equal(isRetryableProviderError(cancelled), false);
+  assert.equal(markPiRetryErrorCancelled(cancelled), cancelled);
+  assert.equal(markPiRetryErrorCancelled(undefined), "The user aborted a request");
+  assert.equal(isRetryableAssistantError({
+    role: "assistant",
+    content: [],
+    api: "openai-responses",
+    provider: "openai",
+    model: "test-model",
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "error",
+    errorMessage: cancelled,
+    timestamp: 0,
+  }), false);
 });
 
 test("HTTP status short-circuits message text (authoritative)", () => {

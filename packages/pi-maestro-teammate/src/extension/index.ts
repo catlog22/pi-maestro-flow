@@ -220,6 +220,7 @@ import type {
 import {
   auxToolCallFallback,
   auxToolResultFallback,
+  renderCompletionOutboxMessage,
   renderQuietTeammateAux,
   renderTeammateCall,
   renderTeammateListCall,
@@ -504,10 +505,21 @@ export default function registerTeammateExtension(
     },
   );
 
-  pi.registerMessageRenderer<Details | { result?: SingleResult }>(
+  pi.registerMessageRenderer<Details | { result?: SingleResult } | CompletionDeliveryEnvelope["details"]>(
     "teammate-complete",
     (message, options, theme) => {
       const rawDetails = message.details;
+      const contentText = typeof message.content === "string"
+        ? message.content
+        : message.content.map((entry) => entry.type === "text" ? entry.text : "").filter(Boolean).join("\n");
+      if (rawDetails && "source" in rawDetails && rawDetails.source === "completion-outbox") {
+        return renderCompletionOutboxMessage(
+          contentText,
+          rawDetails,
+          options.expanded,
+          theme as ExtensionContext["ui"]["theme"],
+        );
+      }
       let details: Details | undefined;
       if (rawDetails && "results" in rawDetails && Array.isArray(rawDetails.results)) {
         details = rawDetails as Details;
@@ -4478,7 +4490,7 @@ export default function registerTeammateExtension(
 
       const modeLabel = delivery.receipt?.wasSleeping
         ? "woken up + prompt"
-        : delivery.receipt?.mode === "steer" ? "interrupted + injected" : "queued after current turn";
+        : delivery.receipt?.mode === "steer" ? "active turn cancelled + prompt injected" : "queued until AgentSession would otherwise stop (tool return is not a delivery boundary)";
       return {
         content: [{ type: "text", text: `Message ${modeLabel} for "${params.to}".${delivery.receipt?.wasSleeping ? " Agent woken up." : ""}` }],
         isError: false,

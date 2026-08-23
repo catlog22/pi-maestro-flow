@@ -353,7 +353,8 @@ A durable, per-workspace-isolated message queue backing cross-session delivery (
 
 - Foreground dispatch is the default and returns child results directly.
 - Background dispatch returns an acknowledgement and later emits `teammate-complete`.
-- Named agents can receive `steer`, `follow_up`, or `abort` messages through `teammate-send`.
+- Named agents can receive `steer`, `follow_up`, or `abort` messages through `teammate-send`. `steer` requests cancellation of the active turn, then injects the message as a replacement/next prompt. `follow_up` does not interrupt and is consumed only when the target AgentSession would otherwise stop; a tool returning is not a delivery boundary because the model/tool continuation, retries, compaction, and earlier queued input must finish first.
+- Agent completion state is published immediately through teammate lifecycle events for Cockpit and observers; the automatic `teammate-complete` model notification follows the same non-interrupting AgentSession-stop boundary.
 - Resident agents sleep after a completed turn and can be resumed by follow-up messages.
 - Nesting is capped at two layers and concurrent agents are globally bounded.
 - Timed-out foreground runs are automatically moved to background rather than killed.

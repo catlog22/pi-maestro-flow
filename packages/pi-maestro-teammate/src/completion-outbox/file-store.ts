@@ -100,6 +100,7 @@ function recordSemantic(record: Omit<CompletionOutboxRecord, "contentRevision">)
     resources: record.resources,
     outcome: record.outcome,
     createdAt: record.createdAt,
+    intentRevision: record.intentRevision,
   };
 }
 
@@ -139,6 +140,7 @@ function validRecord(value: unknown): value is CompletionOutboxRecord {
     || !Number.isSafeInteger(record.createdAt) || !Number.isSafeInteger(record.updatedAt)
     || !Number.isSafeInteger(record.expiresAt) || record.updatedAt! < record.createdAt! || record.expiresAt! < record.createdAt!
     || (record.lastError !== undefined && (typeof record.lastError !== "string" || Buffer.byteLength(record.lastError, "utf8") > COMPLETION_OUTBOX_MAX_ERROR_BYTES))
+    || (record.intentRevision !== undefined && (typeof record.intentRevision !== "string" || !HASH_ID.test(record.intentRevision)))
     || typeof record.contentRevision !== "string" || !HASH_ID.test(record.contentRevision)) return false;
   for (const resource of record.resources) {
     if (!resource || typeof resource !== "object"
@@ -326,9 +328,14 @@ export class CompletionOutboxFileStore {
       const existing = await this.#findRecord(intent.target, deliveryId);
       const reservation = await this.#readReservation(intent.target.workspaceId, intent.reservationId);
       if (existing) {
-        const recovered = existing.state === "wal"
+        let recovered = existing.state === "wal"
           ? await this.#replaceRecord(existing, { state: "pending", updatedAt: this.#now(), nextAttemptAt: this.#now() })
           : existing;
+        if (recovered.intentRevision === undefined) {
+          recovered = await this.#replaceRecord(recovered, { intentRevision: intent.contentRevision });
+        } else if (recovered.intentRevision !== intent.contentRevision) {
+          throw new Error(`Completion intent revision mismatch for ${intent.dispatchId}.`);
+        }
         if (reservation?.state === "reserved" && targetEquals(reservation.target, intent.target)) {
           await this.#consumeReservation(reservation, this.#now());
         }
@@ -355,6 +362,7 @@ export class CompletionOutboxFileStore {
         createdAt: intent.createdAt,
         updatedAt: now,
         expiresAt: now + COMPLETION_OUTBOX_LIVE_TTL_MS,
+        intentRevision: intent.contentRevision,
       };
       const wal = { ...base, contentRevision: computeCompletionContentRevision(base) };
       await writeJsonAtomic(this.#recordPath(intent.target, "wal", deliveryId), wal);

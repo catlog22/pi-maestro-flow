@@ -22,7 +22,6 @@ import {
   type CompletionDeliveryEnvelope,
 } from "../src/completion-outbox/coordinator.ts";
 import { CompletionOutboxFileStore } from "../src/completion-outbox/file-store.ts";
-import { COMPLETION_OUTBOX_MAX_ATTEMPTS } from "../src/completion-outbox/types.ts";
 
 class FakeProvider implements CompletionDurabilityProvider {
   readonly seeds = new Map<string, CompletionDispatchSeed>();
@@ -71,6 +70,10 @@ class FakeProvider implements CompletionDurabilityProvider {
     if (this.acknowledgeFailuresRemaining > 0) {
       this.acknowledgeFailuresRemaining -= 1;
       throw new Error("injected acknowledgement crash");
+    }
+    const intent = [...this.intents.values()].find((candidate) => candidate.dispatchId === receipt.dispatchId);
+    if (!intent || intent.deliveryId !== receipt.deliveryId || intent.contentRevision !== receipt.contentRevision) {
+      throw new Error(`Completion applied receipt mismatch for ${receipt.dispatchId}.`);
     }
     this.applied.push(receipt);
   }
@@ -169,6 +172,7 @@ test("queue acceptance remains queued until matching message_end receipt", async
     record = (await store.listForTarget(target))[0]!;
     assert.equal(record.state, "applied");
     assert.equal(provider.applied.length, 1);
+    assert.equal(provider.applied[0]?.contentRevision, provider.intents.get(sent[0]!.details.deliveryId)?.contentRevision);
     assert.equal(record.providerAcknowledgedAt, 2_000);
   });
 });
@@ -256,27 +260,36 @@ test("a rejected send stays pending without consuming an attempt", async () => {
   }
 });
 
-test("eight accepted sends without a receipt become dead", async () => {
-  const root = await mkdtemp(join(tmpdir(), "completion-attempts-"));
+test("an accepted follow-up is not enqueued again until its coordinator restarts", async () => {
+  const root = await mkdtemp(join(tmpdir(), "completion-accepted-host-"));
   let now = 2_000;
-  const store = new CompletionOutboxFileStore({ rootDir: root, now: () => now, ownerId: "attempts" });
+  const store = new CompletionOutboxFileStore({ rootDir: root, now: () => now, ownerId: "accepted-host" });
   const registry = new CompletionDurabilityRegistryImpl();
   registry.register(new FakeProvider());
+  const sent: CompletionDeliveryEnvelope[] = [];
   const coordinator = new CompletionDeliveryCoordinator({ store, registry, now: () => now, defer: (next) => queueMicrotask(next) });
   try {
-    await coordinator.bindSession({ target, entries: [], send() { return true; } });
+    await coordinator.bindSession({ target, entries: [], send(envelope) { sent.push(envelope); return true; } });
     await complete(coordinator);
-    for (let attempt = 1; attempt < COMPLETION_OUTBOX_MAX_ATTEMPTS; attempt += 1) {
-      now += 61_000;
-      await coordinator.redrive();
-    }
+    assert.equal(sent.length, 1);
+
     now += 61_000;
     await coordinator.redrive();
-    const record = (await store.listForTarget(target))[0]!;
-    assert.equal(record.attempts, COMPLETION_OUTBOX_MAX_ATTEMPTS);
-    assert.equal(record.state, "dead");
-  } finally {
+    assert.equal(sent.length, 1);
+    assert.equal((await store.listForTarget(target))[0]?.attempts, 1);
+
     await coordinator.drain();
+    coordinator.dispose();
+    const restarted = new CompletionDeliveryCoordinator({ store, registry, now: () => now, defer: (next) => queueMicrotask(next) });
+    try {
+      await restarted.bindSession({ target, entries: [], send(envelope) { sent.push(envelope); return true; } });
+      assert.equal(sent.length, 2);
+      assert.equal((await store.listForTarget(target))[0]?.attempts, 2);
+    } finally {
+      await restarted.drain();
+      restarted.dispose();
+    }
+  } finally {
     coordinator.dispose();
     await rm(root, { recursive: true, force: true });
   }

@@ -91,6 +91,8 @@ export declare class ModelHealthAttemptState {
  * understand without replacing the original diagnostic.
  */
 export declare function normalizePiRetryErrorMessage(message: string | undefined): string | undefined;
+/** Preserve the provider diagnostic while making a raced user cancellation non-retryable to Pi core. */
+export declare function markPiRetryErrorCancelled(message: string | undefined): string;
 /** True when the failure is an authentication/permission problem. */
 export declare function isAuthError(message: string | undefined, status?: number): boolean;
 /** Whether the same model/credential is worth retrying (transient transport or provider overload). */
