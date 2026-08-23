@@ -423,8 +423,10 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
   assert.ok(commands.includes("maestro-knowledge-record"));
   assert.ok(commands.includes("maestro-skills"));
   assert.ok(commands.includes("maestro-keybindings"));
+  assert.ok(commands.includes("export-session-info"));
   assert.equal(commands.includes("swarm"), false);
   assert.ok(renderers.includes("run-event"));
+  assert.ok(renderers.includes("maestro-session-info"));
 
   const runControl = tools.find((tool) => tool.name === "run-control");
   const runControlProperties = (runControl?.parameters as {

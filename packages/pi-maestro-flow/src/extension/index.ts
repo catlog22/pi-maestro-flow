@@ -2757,6 +2757,36 @@ Examples: { argv: ["session","status"] }, { argv: ["run","complete","run-abc","-
   };
   pi.registerCommand("sysprompt", systemPromptCommand);
 
+  interface SessionInfoMessageDetails {
+    sessionId?: string;
+    fileState: "exists" | "missing" | "unbound";
+    copied?: boolean;
+    exportedTo?: string;
+  }
+
+  pi.registerMessageRenderer<SessionInfoMessageDetails>("maestro-session-info", (message, options, theme) => {
+    const details = message.details;
+    if (!details) return undefined;
+    const content = typeof message.content === "string"
+      ? message.content
+      : message.content.map((entry) => entry.type === "text" ? entry.text : "").filter(Boolean).join("\n");
+    if (options.expanded) return new Text(theme.fg("toolOutput", content), 0, 0);
+    const shortId = details.sessionId ? details.sessionId.slice(0, 8) : "unknown";
+    const action = details.exportedTo
+      ? "exported"
+      : details.copied === true
+        ? "copied"
+        : details.copied === false
+          ? "clipboard unavailable"
+          : details.fileState;
+    const tone = details.fileState === "missing" ? "error" : "success";
+    return new Text(
+      `  ${theme.fg(tone, details.fileState === "missing" ? "!" : "✓")} ${theme.fg("toolTitle", theme.bold("session-info"))} ${theme.fg("muted", `${shortId} · ${action}`)}`,
+      0,
+      0,
+    );
+  });
+
   pi.registerCommand("export-session-info", {
     description:
       "Show the current session id and where its history (transcript) is stored, and copy it to the clipboard. Pass a destination path to also export a copy of the history file there.",
@@ -2774,7 +2804,16 @@ Examples: { argv: ["session","status"] }, { argv: ["run","complete","run-abc","-
         const report = formatSessionLocation(info, status);
         const copied = await tryCopyToClipboard(report, copyToClipboard);
         const suffix = copied ? "\nCopied to clipboard." : "\n(Clipboard unavailable.)";
-        ctx.ui.notify(`${report}${suffix}`, "info");
+        pi.sendMessage({
+          customType: "maestro-session-info",
+          content: `${report}${suffix}`,
+          display: true,
+          details: {
+            sessionId: info.sessionId,
+            fileState: !info.sessionFile ? "unbound" : status?.exists ? "exists" : "missing",
+            copied,
+          } satisfies SessionInfoMessageDetails,
+        }, { triggerTurn: false });
         return;
       }
       if (!info.sessionFile) {
@@ -2789,10 +2828,16 @@ Examples: { argv: ["session","status"] }, { argv: ["run","complete","run-abc","-
       try {
         const target = await resolveExportTarget(destination, info.sessionFile, ctx.cwd);
         const { written, bytes } = await exportSessionHistory(info.sessionFile, target);
-        ctx.ui.notify(
-          `${formatSessionLocation(info, status)}\nExported to : ${written} (${formatBytes(bytes)})`,
-          "info",
-        );
+        pi.sendMessage({
+          customType: "maestro-session-info",
+          content: `${formatSessionLocation(info, status)}\nExported to : ${written} (${formatBytes(bytes)})`,
+          display: true,
+          details: {
+            sessionId: info.sessionId,
+            fileState: "exists",
+            exportedTo: written,
+          } satisfies SessionInfoMessageDetails,
+        }, { triggerTurn: false });
       } catch (error) {
         ctx.ui.notify(`Export failed: ${error instanceof Error ? error.message : String(error)}`, "error");
       }

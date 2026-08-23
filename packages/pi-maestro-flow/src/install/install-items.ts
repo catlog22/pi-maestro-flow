@@ -55,6 +55,15 @@ export const INSTALL_ITEMS: readonly InstallItem[] = [
       "安装 Computer Use 视觉权重（OmniParser-v2 icon_detect）。按文档下载官方权重、转换为 ONNX、更新 manifest，最后运行验证。转换是必须的：vision service 是 onnxruntime-node，只能加载 ONNX。",
   },
   {
+    id: "self-evolve",
+    title: "自进化配置",
+    description: "配置 self-evolve 的启用/模式/评审门/语义 enrichment，自动采集可复用经验。",
+    docFile: "SELF-EVOLVE-SETUP.md",
+    category: "optional",
+    promptIntro:
+      "配置 self-evolve 自进化。按文档交互式确认启用、模式（dry-run/auto-deposit）、评审模型、captureMode（heuristic/hybrid），写入 .pi/self-evolve.json，最后验证采集与评审流程。",
+  },
+  {
     id: "smart-search",
     title: "Smart Search 配置",
     description: "配置 smart_search 的搜索 provider（Tavily/Exa/Jina 等）与凭证。",
@@ -143,6 +152,18 @@ export function probeInstallStatus(id: string): InstallStatus {
           return Boolean(cfg?.mcpServers && Object.keys(cfg.mcpServers ?? {}).length > 0);
         });
         return anyConfigured ? "installed" : "not-installed";
+      }
+      case "self-evolve": {
+        // Project-scoped config at .pi/self-evolve.json.
+        const configPath = join(process.cwd(), ".pi", "self-evolve.json");
+        if (!existsSync(configPath)) return "not-installed";
+        const cfg = readJson(configPath) as { enabled?: boolean; mode?: string; model?: string } | null;
+        if (!cfg || typeof cfg !== "object") return "partial";
+        if (!cfg.enabled) return "partial";
+        // enabled but no model configured (inherits main-session model) is
+        // acceptable for dry-run; auto-deposit needs a model for review.
+        const hasMode = cfg.mode === "dry-run" || cfg.mode === "auto-deposit";
+        return hasMode ? "installed" : "partial";
       }
       default:
         return "unknown";
