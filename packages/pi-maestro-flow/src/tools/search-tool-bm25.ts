@@ -49,6 +49,7 @@ export const DEFAULT_DEFERRED_TOOL_NAMES = new Set([
   "model-availability",
   "smart_search",
   "source_check",
+  "teammate-session-routing",
 ]);
 
 export const SearchToolBm25Params = Type.Object({

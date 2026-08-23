@@ -2634,6 +2634,7 @@ export default function registerTeammateExtension(
         refreshModelCatalog(ctx).modelIds,
         undefined,
         sessionModelId(ctx),
+        state.currentSessionId ?? undefined,
       );
 
       // --- Normalize to task list (shared with the child proxy path) ---

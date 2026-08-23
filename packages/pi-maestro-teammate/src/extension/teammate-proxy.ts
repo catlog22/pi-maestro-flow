@@ -1043,6 +1043,7 @@ export async function handleProxyRequest(
         effectiveModelCapabilities.map((model) => model.id),
         undefined,
         parentModel,
+        state.currentSessionId ?? undefined,
       );
 
       // Normalize (shared with the root tool execute path). The root process is

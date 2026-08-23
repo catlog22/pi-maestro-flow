@@ -145,6 +145,28 @@ export function getProjectModelRoutingPath(cwd: string): string {
   return path.join(cwd, ".pi", CONFIG_FILE);
 }
 
+/**
+ * Per-session routing overrides file path. The sessionId is sanitized to a
+ * filesystem-safe slug so an untrusted id cannot escape the `.pi/` directory.
+ * Session overrides stack on top of project overrides at the task-type mapping
+ * layer and are scoped to the single Pi session that wrote them.
+ */
+export function getSessionModelRoutingPath(cwd: string, sessionId: string): string {
+  // Strip everything except [a-zA-Z0-9_-] and collapse runs so an untrusted
+  // session id cannot smuggle path separators or traversal sequences into the
+  // `.pi/` directory. Dots are excluded on purpose: a slug like `..etcpasswd`
+  // would otherwise survive path.join and leak a traversal into the filename.
+  const safe = sessionId.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 64) || "unknown";
+  return path.join(cwd, ".pi", `teammate-models.session.${safe}.json`);
+}
+
+export interface SessionModelRoutingStore {
+  version: 3;
+  sessionId: string;
+  createdAtMs: number;
+  rules: ModelRoutingRules;
+}
+
 function emptyRules(): ModelRoutingRules {
   return { mappings: {}, thinkingLevels: {} };
 }
@@ -1089,9 +1111,49 @@ function writeGlobalAndProject(
   }
 }
 
+function readSessionStore(filePath: string): SessionModelRoutingStore | undefined {
+  const parsed = readJsonObject(filePath);
+  if (!parsed || parsed.version !== 3 || typeof parsed.sessionId !== "string") return undefined;
+  return {
+    version: 3,
+    sessionId: parsed.sessionId as string,
+    createdAtMs: typeof parsed.createdAtMs === "number" && Number.isFinite(parsed.createdAtMs)
+      ? parsed.createdAtMs
+      : Date.now(),
+    rules: normalizeRules(parsed.rules),
+  };
+}
+
+/**
+ * Persist a session-scoped routing override. Session overrides stack on top
+ * of project overrides (and the active profile) and apply only to the single
+ * Pi session identified by `sessionId`. The file is written atomically under
+ * the same lock protocol as the project config. A corrupted session file is
+ * ignored at read time, so a bad write never blocks dispatch.
+ */
+export function saveSessionModelRoutingOverrides(
+  cwd: string,
+  sessionId: string,
+  rules: ModelRoutingRules,
+  globalFilePath = getGlobalModelRoutingPath(),
+): ModelRoutingConfig {
+  const sessionFilePath = getSessionModelRoutingPath(cwd, sessionId);
+  return withConfigLock(sessionFilePath, () => {
+    const store: SessionModelRoutingStore = {
+      version: 3,
+      sessionId,
+      createdAtMs: Date.now(),
+      rules: normalizeRules(rules),
+    };
+    writeJson(sessionFilePath, store);
+    return loadModelRoutingConfig(cwd, globalFilePath, sessionId);
+  });
+}
+
 function resolvedState(
   cwd: string,
   globalFilePath = getGlobalModelRoutingPath(),
+  sessionId?: string,
 ): ModelRoutingState {
   const global = readGlobalStore(globalFilePath);
   const project = readProjectStore(getProjectModelRoutingPath(cwd));
@@ -1099,7 +1161,18 @@ function resolvedState(
   const missingProfile = hasOwn(global.profiles, requestedProfile) ? undefined : requestedProfile;
   const profileId = missingProfile ? global.defaultProfile : requestedProfile;
   const profile = global.profiles[profileId];
-  const rules = project.applyOverrides ? mergeRules(profile, project.overrides) : cloneRules(profile);
+  let rules = project.applyOverrides ? mergeRules(profile, project.overrides) : cloneRules(profile);
+  // Session overrides are the highest-priority layer of the task-type mapping
+  // stack. A missing or corrupted session file is silently ignored so a
+  // transient per-session config never blocks dispatch.
+  if (sessionId) {
+    try {
+      const sessionStore = readSessionStore(getSessionModelRoutingPath(cwd, sessionId));
+      if (sessionStore && hasRules(sessionStore.rules)) rules = mergeRules(rules, sessionStore.rules);
+    } catch {
+      // Ignore unreadable session overrides; the base config stays authoritative.
+    }
+  }
   return {
     global,
     project,
@@ -1160,15 +1233,15 @@ function fileSignature(filePath: string): string {
   }
 }
 
-function readConsistentState(cwd: string, globalFilePath: string): ModelRoutingState {
+function readConsistentState(cwd: string, globalFilePath: string, sessionId?: string): ModelRoutingState {
   const projectFilePath = getProjectModelRoutingPath(cwd);
   for (let attempt = 0; attempt < 3; attempt++) {
     if (fs.existsSync(transactionPath(globalFilePath))) {
-      return withGlobalConfigLock(globalFilePath, () => resolvedState(cwd, globalFilePath));
+      return withGlobalConfigLock(globalFilePath, () => resolvedState(cwd, globalFilePath, sessionId));
     }
     const globalBefore = fileSignature(globalFilePath);
     const projectBefore = fileSignature(projectFilePath);
-    const state = resolvedState(cwd, globalFilePath);
+    const state = resolvedState(cwd, globalFilePath, sessionId);
     const globalAfter = fileSignature(globalFilePath);
     const projectAfter = fileSignature(projectFilePath);
     if (
@@ -1177,21 +1250,23 @@ function readConsistentState(cwd: string, globalFilePath: string): ModelRoutingS
       && projectBefore === projectAfter
     ) return state;
   }
-  return withGlobalConfigLock(globalFilePath, () => resolvedState(cwd, globalFilePath));
+  return withGlobalConfigLock(globalFilePath, () => resolvedState(cwd, globalFilePath, sessionId));
 }
 
 export function loadModelRoutingState(
   cwd: string,
   globalFilePath = getGlobalModelRoutingPath(),
+  sessionId?: string,
 ): ModelRoutingState {
-  return readConsistentState(cwd, globalFilePath);
+  return readConsistentState(cwd, globalFilePath, sessionId);
 }
 
 export function loadModelRoutingConfig(
   cwd: string,
   globalFilePath = getGlobalModelRoutingPath(),
+  sessionId?: string,
 ): ModelRoutingConfig {
-  return readConsistentState(cwd, globalFilePath).config;
+  return readConsistentState(cwd, globalFilePath, sessionId).config;
 }
 
 export interface ModelRoutingStorePair {
@@ -1902,6 +1977,7 @@ export function applyModelRouting(
   availableModels: readonly string[] = [],
   globalFilePath = getGlobalModelRoutingPath(),
   inheritModel?: string,
+  sessionId?: string,
 ): RunTeammateParams {
   const topLevelModel = params.model;
   const topLevelThinking = parseTeammateThinkingLevel(params.thinking);
@@ -1917,7 +1993,7 @@ export function applyModelRouting(
 
   const tasks = params.tasks.map((task) => {
     const routingCwd = path.resolve(cwd, task.cwd ?? params.cwd ?? ".");
-    const config = loadModelRoutingConfig(routingCwd, globalFilePath);
+    const config = loadModelRoutingConfig(routingCwd, globalFilePath, sessionId);
     const agent = task.agent ?? params.agent ?? "general";
     const agentConfig = resolveAgent(routingCwd, agent);
     const explicitTaskType = task.taskType ?? params.taskType;

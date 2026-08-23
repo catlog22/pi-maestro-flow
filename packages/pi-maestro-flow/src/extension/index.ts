@@ -237,6 +237,7 @@ import { registerFff } from "../tools/fff.ts";
 import { registerBashBg } from "../tools/bash-bg.ts";
 import { registerLoop } from "../tools/loop.ts";
 import { registerModelAvailability } from "../tools/model-availability.ts";
+import { registerTeammateSessionRouting } from "../tools/teammate-session-routing.ts";
 import { registerResourceTool } from "../tools/resource.ts";
 import { registerConflictTool } from "../tools/conflict.ts";
 import {
@@ -314,6 +315,7 @@ import { registerInstallCommand } from "../install/install-command.ts";
 export const MAESTRO_CHILD_TOOL_NAMES = [
   "ask-user-question",
   "bash_bg",
+  "teammate-session-routing",
   "smart_search",
   "source_check",
   "resource",
@@ -1680,6 +1682,7 @@ Examples: { argv: ["session","status"] }, { argv: ["run","complete","run-abc","-
   registerBashBg(pi);
   registerLoop(pi);
   registerModelAvailability(pi);
+  registerTeammateSessionRouting(pi);
   registerResourceTool(pi);
   registerConflictTool(pi);
   registerDataManagerCommand(pi);
@@ -3952,6 +3955,7 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
 
   registerAskUserQuestionTool(pi);
   registerBashBg(pi);
+  registerTeammateSessionRouting(pi);
   registerSmartSearchTool(pi);
   pi.registerTool(createSourceCheckTool() as never);
   registerResourceTool(pi);

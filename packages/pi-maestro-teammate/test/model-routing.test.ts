@@ -17,6 +17,7 @@ import {
   deleteGlobalModelRoutingProfile,
   discoverRoutingTaskTypes,
   getGlobalAskBeforeDispatch,
+  getSessionModelRoutingPath,
   getProjectModelRoutingPath,
   inferTaskType,
   loadModelRoutingConfig,
@@ -39,6 +40,7 @@ import {
   saveProjectModelMapping,
   saveProjectRoleMapping,
   saveProjectThinkingLevel,
+  saveSessionModelRoutingOverrides,
   setDefaultGlobalModelRoutingProfile,
   setGlobalAskBeforeDispatch,
   setProjectActiveModelRoutingProfile,
@@ -1734,5 +1736,89 @@ test("ask-before-dispatch flag defaults off and persists on the global config", 
     assert.equal(loadModelRoutingState(cwd, globalPath).askBeforeDispatch, false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("session overrides stack on top of project overrides and route single tasks", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-session-routing-"));
+  const globalPath = path.join(root, "home", "teammate-models.json");
+  const cwd = path.join(root, "project");
+  fs.mkdirSync(cwd, { recursive: true });
+  try {
+    // Baseline: no project mapping, session override alone routes the task.
+    const sessionId = "pi-session-abc-123";
+    saveSessionModelRoutingOverrides(cwd, sessionId, {
+      mappings: { analysis: "openai/gpt-5" },
+      thinkingLevels: { analysis: "high" },
+    }, globalPath);
+
+    // The session file lives under .pi/ next to the project config and is
+    // slugged by the sanitized session id.
+    assert.equal(
+      fs.existsSync(getSessionModelRoutingPath(cwd, sessionId)),
+      true,
+    );
+
+    const sessionConfig = loadModelRoutingConfig(cwd, globalPath, sessionId);
+    assert.equal(sessionConfig.mappings.analysis, "openai/gpt-5");
+    assert.equal(sessionConfig.thinkingLevels.analysis, "high");
+
+    const routed = applyModelRouting({
+      agent: "general",
+      taskType: "analysis",
+      tasks: [{ prompt: "Trace the request" }],
+    }, cwd, ["openai/gpt-5"], globalPath, undefined, sessionId);
+    assert.equal(routed.tasks[0].model, "openai/gpt-5");
+    assert.equal(routed.tasks[0].thinking, "high");
+
+    // Session overrides outrank project overrides on the same task type.
+    saveProjectModelMapping(cwd, "analysis", "project/override-model", globalPath);
+    assert.equal(
+      loadModelRoutingConfig(cwd, globalPath, sessionId).mappings.analysis,
+      "openai/gpt-5",
+      "session override must outrank project override",
+    );
+
+    // Without a session id the routing falls back to the project override.
+    assert.equal(
+      loadModelRoutingConfig(cwd, globalPath).mappings.analysis,
+      "project/override-model",
+      "absent session id must use the project override",
+    );
+
+    // A different session id is isolated: it sees only the project override.
+    assert.equal(
+      loadModelRoutingConfig(cwd, globalPath, "pi-session-other-456").mappings.analysis,
+      "project/override-model",
+      "a different session id must not see the first session's overrides",
+    );
+
+    // A corrupted session file is ignored so dispatch never blocks on a bad write.
+    const sessionFilePath = getSessionModelRoutingPath(cwd, sessionId);
+    fs.writeFileSync(sessionFilePath, "{ not valid json ");
+    assert.equal(
+      loadModelRoutingConfig(cwd, globalPath, sessionId).mappings.analysis,
+      "project/override-model",
+      "corrupted session file must fall back to the project override",
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("session id is sanitized to a filesystem-safe slug in the override path", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-session-sanitize-"));
+  try {
+    const safe = getSessionModelRoutingPath(cwd, "pi-session.abc_123");
+    // Dots are stripped so neither a separator nor a traversal can survive.
+    assert.ok(safe.endsWith("teammate-models.session.pi-sessionabc_123.json"));
+    assert.ok(!safe.includes(".."));
+
+    // A hostile id with path separators and traversal dots is stripped to a safe slug.
+    const hostile = getSessionModelRoutingPath(cwd, "../../etc/passwd");
+    assert.ok(!hostile.includes(".."));
+    assert.ok(hostile.endsWith("teammate-models.session.etcpasswd.json"));
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
   }
 });

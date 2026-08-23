@@ -80,6 +80,27 @@ export interface TaskTypeInput {
 export declare function getGlobalModelRoutingPath(): string;
 export declare function getProjectModelRoutingPath(cwd: string): string;
 /**
+ * Per-session routing overrides file path. The sessionId is sanitized to a
+ * filesystem-safe slug so an untrusted id cannot escape the `.pi/` directory.
+ * Session overrides stack on top of project overrides at the task-type mapping
+ * layer and are scoped to the single Pi session that wrote them.
+ */
+export declare function getSessionModelRoutingPath(cwd: string, sessionId: string): string;
+export interface SessionModelRoutingStore {
+    version: 3;
+    sessionId: string;
+    createdAtMs: number;
+    rules: ModelRoutingRules;
+}
+/**
+ * Persist a session-scoped routing override. Session overrides stack on top
+ * of project overrides (and the active profile) and apply only to the single
+ * Pi session identified by `sessionId`. The file is written atomically under
+ * the same lock protocol as the project config. A corrupted session file is
+ * ignored at read time, so a bad write never blocks dispatch.
+ */
+export declare function saveSessionModelRoutingOverrides(cwd: string, sessionId: string, rules: ModelRoutingRules, globalFilePath?: string): ModelRoutingConfig;
+/**
  * Persist the ask-before-dispatch flag on the global teammate model config.
  * The flag is user-level (not per profile/project): it controls whether the
  * root teammate tool asks the user to confirm or pick model provider/thinking
@@ -88,8 +109,8 @@ export declare function getProjectModelRoutingPath(cwd: string): string;
 export declare function setGlobalAskBeforeDispatch(enabled: boolean, globalFilePath?: string): boolean;
 /** Effective ask-before-dispatch flag without a cwd (global store only). */
 export declare function getGlobalAskBeforeDispatch(globalFilePath?: string): boolean;
-export declare function loadModelRoutingState(cwd: string, globalFilePath?: string): ModelRoutingState;
-export declare function loadModelRoutingConfig(cwd: string, globalFilePath?: string): ModelRoutingConfig;
+export declare function loadModelRoutingState(cwd: string, globalFilePath?: string, sessionId?: string): ModelRoutingState;
+export declare function loadModelRoutingConfig(cwd: string, globalFilePath?: string, sessionId?: string): ModelRoutingConfig;
 export interface ModelRoutingStorePair {
     global: GlobalModelRoutingStore;
     project: ProjectModelRoutingStore;
@@ -141,7 +162,7 @@ export declare function inferTaskType(input: TaskTypeInput): TeammateTaskType | 
  * then custom types alphabetically). Keywords are lowercased at normalize.
  */
 export declare function inferTaskTypeByKeywords(config: ModelRoutingConfig, task: string | undefined): TeammateTaskType | undefined;
-export declare function applyModelRouting(params: RunTeammateParams, cwd: string, availableModels?: readonly string[], globalFilePath?: string, inheritModel?: string): RunTeammateParams;
+export declare function applyModelRouting(params: RunTeammateParams, cwd: string, availableModels?: readonly string[], globalFilePath?: string, inheritModel?: string, sessionId?: string): RunTeammateParams;
 /**
  * Sync per-role circuit policies from the routing config onto a circuit
  * breaker: each role rule with a `circuit` policy uses the assigned task
