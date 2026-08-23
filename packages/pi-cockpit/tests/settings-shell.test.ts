@@ -490,6 +490,24 @@ test("model settings use the host model catalog and retain a custom-entry path",
 	} finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
+test("model settings offer an Inherit default entry that clears a configured override", async () => {
+	const directory = withTempDir();
+	try {
+		const state = await createShell(makeProvider(), directory, ["provider/a", "provider/b"]);
+		openFirstGroup(state.shell);
+		moveDown(state.shell, 4);
+		state.shell.handleInput("\r");
+		const picker = state.shell.render(100).join("\n");
+		assert.match(picker, /Inherit default/, "the model picker leads with an Inherit default entry");
+		// Cursor parks on the configured value (provider/a); Up wraps to the first
+		// enabled option, which is the Inherit default entry.
+		state.shell.handleInput("\x1b[A");
+		state.shell.handleInput("\r");
+		const change = state.coordinator.changes("cockpit").find((entry) => entry.key === "model");
+		assert.equal((change as { operation?: string } | undefined)?.operation, "unset", "selecting Inherit default emits an unset, not a null write");
+	} finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("showMaestroSettingsShell closes its custom UI before opening a provider action", async () => {
 	const directory = withTempDir();
 	try {

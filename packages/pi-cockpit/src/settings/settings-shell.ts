@@ -81,7 +81,7 @@ interface EditingState {
 interface OptionEditingState {
 	providerId: string;
 	definition: SettingDefinition;
-	options: readonly { value: JsonValue; label: string; disabled?: boolean }[];
+	options: readonly { value: JsonValue; label: string; disabled?: boolean; clearsOverride?: boolean }[];
 	selected: number;
 }
 
@@ -708,15 +708,19 @@ export class MaestroSettingsShell implements Component, Focusable {
 		}
 		if (definition.editor.kind === "model" && (this.params.modelOptions?.length ?? 0) > 0) {
 			const current = this.currentValue(provider.providerId, definition);
-			const values = [...new Set([
+			// Lead with an "inherit/default" entry so a configured override can be
+			// cleared from the same picker that set it; selecting it emits an unset
+			// (every provider restores its declared default on unset).
+			const inherit = this.inheritModelOption(definition);
+			const modelRefs = [...new Set([
 				...(typeof current === "string" && current ? [current] : []),
 				...(this.params.modelOptions ?? []),
 			])];
-			this.beginOptionEditor(
-				provider.providerId,
-				definition,
-				values.map((value) => ({ value, label: value })),
-			);
+			const options = [
+				...(inherit ? [inherit] : []),
+				...modelRefs.map((value) => ({ value, label: value })),
+			];
+			this.beginOptionEditor(provider.providerId, definition, options);
 			return;
 		}
 		if (definition.editor.kind === "list-crud") {
@@ -885,6 +889,42 @@ export class MaestroSettingsShell implements Component, Focusable {
 		};
 		this.notice = "";
 		this.requestRender();
+	}
+
+	/**
+	 * The leading "inherit/default" entry for a `model` editor. Selecting it
+	 * emits `unset`, which every provider maps back to its declared default
+	 * (null for compaction/teammate routing, "" for vision, etc.). Omitted when
+	 * the definition is not reversible — a non-reversible model field cannot be
+	 * cleared, so a misleading "inherit" entry would only confuse.
+	 */
+	private inheritModelOption(definition: SettingDefinition): { value: JsonValue; label: string; clearsOverride: true } | undefined {
+		if (definition.reversibility !== "full") return undefined;
+		return { value: null, label: this.t("settings.modelInherit"), clearsOverride: true };
+	}
+
+	private commitOptionChoice(
+		providerId: string,
+		definition: SettingDefinition,
+		option: { value: JsonValue; clearsOverride?: boolean },
+	): void {
+		// The inherit/default entry clears the override instead of writing null:
+		// every provider restores its declared default on unset, and the
+		// shell renders an unset field as "Inherited".
+		if (option.clearsOverride) {
+			this.params.coordinator.setChange(providerId, {
+				operation: "unset",
+				key: definition.key,
+				scope: this.scope,
+			});
+			return;
+		}
+		this.params.coordinator.setChange(providerId, {
+			operation: "set",
+			key: definition.key,
+			scope: this.scope,
+			value: option.value,
+		});
 	}
 
 	private listCrudFields(): readonly SettingDefinition[] {
@@ -1058,12 +1098,7 @@ export class MaestroSettingsShell implements Component, Focusable {
 		if (matchesKey(data, Key.enter) || data === "\r" || matchesKey(data, Key.space) || data === " ") {
 			const selected = editing.options[editing.selected];
 			if (!selected || selected.disabled) return;
-			this.params.coordinator.setChange(editing.providerId, {
-				operation: "set",
-				key: editing.definition.key,
-				scope: this.scope,
-				value: selected.value,
-			});
+			this.commitOptionChoice(editing.providerId, editing.definition, selected);
 			this.optionEditing = undefined;
 			this.afterDraftChange();
 		}
@@ -1333,12 +1368,7 @@ export class MaestroSettingsShell implements Component, Focusable {
 				return true;
 			}
 			editing.selected = target.index;
-			this.params.coordinator.setChange(editing.providerId, {
-				operation: "set",
-				key: editing.definition.key,
-				scope: this.scope,
-				value: option.value,
-			});
+			this.commitOptionChoice(editing.providerId, editing.definition, option);
 			this.optionEditing = undefined;
 			this.afterDraftChange();
 			return true;
