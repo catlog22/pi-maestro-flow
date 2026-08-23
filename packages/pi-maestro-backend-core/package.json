@@ -1,6 +1,6 @@
 {
   "name": "pi-maestro-backend-core",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Versioned teammate execution-backend contracts shared by Pi Maestro plugins.",
   "type": "module",
   "engines": {
