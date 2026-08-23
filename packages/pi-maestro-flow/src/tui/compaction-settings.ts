@@ -1,6 +1,7 @@
 import { constants as fsConstants, existsSync } from "node:fs";
 import { access } from "node:fs/promises";
 import {
+  CURSOR_MARKER,
   Key,
   matchesKey,
   visibleWidth,
@@ -21,6 +22,7 @@ import {
   type FrameTheme,
 } from "pi-cockpit/src/settings/ui-primitives.ts";
 import { getTuiLocale } from "./locale.ts";
+import { sanitizeSingleLineInput } from "./input-text.ts";
 import {
   COMPACTION_FIELDS,
   readCompactionSettings,
@@ -134,6 +136,16 @@ const CATALOGS = {
     "notice.readonlyProject": "Project configuration is read-only",
     "notice.readonlyReason.writable": "workspace is not writable",
     "notice.discardConfirm": "Uncommitted changes · press Esc again to discard",
+    "confirm.title": "Confirm save",
+    "confirm.summary": "{count} change(s)",
+    "confirm.scope.project": "[project]",
+    "confirm.scope.user": "[user]",
+    "confirm.set": "{scope} {field} → {value}",
+    "confirm.clear": "{scope} {field} → inherit",
+    "confirm.toggleOn": "{scope} {field} → on",
+    "confirm.toggleOff": "{scope} {field} → off",
+    "confirm.footer": "Enter confirm save · Esc back",
+    "filter.hint": "/ filter model",
     "footer.close": "Esc close",
     "footer.closeNarrow": "Esc close",
     "footer.save": "Ctrl+S save",
@@ -273,6 +285,16 @@ const CATALOGS = {
     "notice.readonlyProject": "△ 项目配置只读",
     "notice.readonlyReason.writable": "工作区不可写",
     "notice.discardConfirm": "△ 有未保存的修改 · 再按一次 Esc 放弃修改",
+    "confirm.title": "确认保存",
+    "confirm.summary": "{count} 处变更",
+    "confirm.scope.project": "[项目]",
+    "confirm.scope.user": "[用户]",
+    "confirm.set": "{scope} {field} → {value}",
+    "confirm.clear": "{scope} {field} → 继承",
+    "confirm.toggleOn": "{scope} {field} → 开",
+    "confirm.toggleOff": "{scope} {field} → 关",
+    "confirm.footer": "Enter 确认保存 · Esc 返回",
+    "filter.hint": "/ 筛选模型",
     "notice.validation.reservePositive": "预留输出空间必须是大于 0 的整数",
     "notice.validation.keepPositive": "保留最近上下文必须是大于 0 的整数",
     "notice.validation.reserveCeiling": "预留输出空间 {value} 不得超过 {ceiling}",
@@ -442,7 +464,9 @@ export class CompactionSettingsOverlay implements Component, Focusable {
   private editing = false;
   private pickingModel = false;
   private modelCursor = 0;
+  private modelQuery = "";
   private editValue = "";
+  private confirming = false;
   private saveState: SaveState = "clean";
   private notice = "";
   private discardArmed = false;
@@ -472,6 +496,7 @@ export class CompactionSettingsOverlay implements Component, Focusable {
 
   render(width: number): string[] {
     const safeWidth = Math.max(1, Math.min(width, 140));
+    if (this.confirming) return this.renderConfirm(safeWidth);
     if (safeWidth < 20) return [this.renderTiny(safeWidth)];
     if (this.pickingModel) return this.renderModelPicker(safeWidth);
     if (this.editing) return this.renderEditor(safeWidth);
@@ -508,6 +533,17 @@ export class CompactionSettingsOverlay implements Component, Focusable {
 
   handleInput(data: string): void {
     if (this.saveState === "saving") return;
+    if (this.confirming) {
+      if (matchesKey(data, Key.enter) || data === "\r") {
+        void this.commitSave();
+        return;
+      }
+      if (matchesKey(data, Key.escape)) {
+        this.confirming = false;
+        this.requestRender();
+      }
+      return;
+    }
     if (this.pickingModel) {
       this.handleModelPickerInput(data);
       return;
@@ -517,7 +553,7 @@ export class CompactionSettingsOverlay implements Component, Focusable {
       return;
     }
     if (matchesKey(data, Key.ctrl("s")) || data === "\x13") {
-      void this.save();
+      this.openConfirm();
       return;
     }
     if (matchesKey(data, Key.escape)) {
@@ -747,7 +783,7 @@ export class CompactionSettingsOverlay implements Component, Focusable {
     this.requestRender();
   }
 
-  private async save(): Promise<void> {
+  private openConfirm(): void {
     if (!this.isDirty()) {
       this.notice = this.t("notice.nothingToSave");
       this.requestRender();
@@ -756,6 +792,26 @@ export class CompactionSettingsOverlay implements Component, Focusable {
     const validation = this.validation();
     if (validation.errors.length > 0) {
       this.saveState = "dirty";
+      this.notice = `${this.t("notice.cannotSave")} · ${this.localizeValidation(validation.errors[0]!)}`;
+      this.requestRender();
+      return;
+    }
+    this.confirming = true;
+    this.notice = "";
+    this.discardArmed = false;
+    this.requestRender();
+  }
+
+  private async commitSave(): Promise<void> {
+    if (!this.isDirty()) {
+      this.notice = this.t("notice.nothingToSave");
+      this.requestRender();
+      return;
+    }
+    const validation = this.validation();
+    if (validation.errors.length > 0) {
+      this.saveState = "dirty";
+      this.confirming = false;
       this.notice = `${this.t("notice.cannotSave")} · ${this.localizeValidation(validation.errors[0]!)}`;
       this.requestRender();
       return;
@@ -770,14 +826,93 @@ export class CompactionSettingsOverlay implements Component, Focusable {
             ?? ((targetScope: CompactionScope, values: CompactionConfigPatch) =>
               saveCompactionScope(targetScope, this.params.projectRoot, values));
           await save(scope, draftToPatch(this.drafts[scope]));
+          this.initialDrafts[scope] = { ...this.drafts[scope] };
         }
       }
+      this.saveState = "clean";
+      this.confirming = false;
       this.params.done({ saved: true });
     } catch (error) {
       this.saveState = "failed";
+      this.confirming = false;
       this.notice = `${this.t("notice.saveFailed")} · ${error instanceof Error ? error.message : String(error)}`;
       this.requestRender();
     }
+  }
+
+  private scopeKey(scope: CompactionScope): CatalogKey {
+    return scope === "project" ? "confirm.scope.project" : "confirm.scope.user";
+  }
+
+  private collectChanges(): string[] {
+    const changes: string[] = [];
+    const scopes: CompactionScope[] = ["user", "project"];
+    for (const scope of scopes) {
+      const before = this.initialDrafts[scope];
+      const after = this.drafts[scope];
+      const scopeTag = this.t(this.scopeKey(scope));
+      if (before.enabled !== after.enabled) {
+        changes.push(this.t(after.enabled ? "confirm.toggleOn" : "confirm.toggleOff", { scope: scopeTag, field: this.t("item.enabled") }));
+      }
+      const fields: Array<["reserveTokens" | "keepRecentTokens" | "model", MenuItem]> = [
+        ["reserveTokens", "threshold"],
+        ["keepRecentTokens", "keepRecentTokens"],
+        ["model", "compactModel"],
+      ];
+      for (const [field, item] of fields) {
+        if (before[field] !== after[field]) {
+          if (after[field] === undefined) {
+            changes.push(this.t("confirm.clear", { scope: scopeTag, field: this.t(itemLabel(item)) }));
+          } else {
+            const value = field === "model" ? (after[field] ?? "") : formatNumber(Number(after[field]));
+            changes.push(this.t("confirm.set", { scope: scopeTag, field: this.t(itemLabel(item)), value }));
+          }
+        }
+      }
+      for (const change of this.collectSoftChanges(scope, before.soft, after.soft)) changes.push(change);
+    }
+    return changes;
+  }
+
+  private collectSoftChanges(scope: CompactionScope, before: SoftCompactionConfigPatch | undefined, after: SoftCompactionConfigPatch | undefined): string[] {
+    const changes: string[] = [];
+    const scopeTag = this.t(this.scopeKey(scope));
+    const b = before ?? {};
+    const a = after ?? {};
+    if (b.enabled !== a.enabled) {
+      changes.push(this.t(a.enabled ? "confirm.toggleOn" : "confirm.toggleOff", { scope: scopeTag, field: this.t("item.softEnabled") }));
+    }
+    const mechanisms: Array<["lossless" | "cache" | "timeBased" | "relevance" | "crossTurnDedup", SoftMechanismItem]> = [
+      ["lossless", "softLossless"],
+      ["cache", "softCacheGate"],
+      ["timeBased", "softTimeBased"],
+      ["relevance", "softRelevance"],
+      ["crossTurnDedup", "softDedup"],
+    ];
+    for (const [key, item] of mechanisms) {
+      const beforeEnabled = b[key]?.enabled;
+      const afterEnabled = a[key]?.enabled;
+      if (beforeEnabled !== afterEnabled) {
+        changes.push(this.t(afterEnabled ? "confirm.toggleOn" : "confirm.toggleOff", { scope: scopeTag, field: this.t(itemLabel(item)) }));
+      }
+    }
+    return changes;
+  }
+
+  private renderConfirm(width: number): string[] {
+    const inner = Math.max(1, width - 2);
+    const changes = this.collectChanges();
+    const rows = [
+      headerLine(this.params.theme, this.t("confirm.title"), [this.t("confirm.summary", { count: changes.length })], inner),
+      rule(inner),
+    ];
+    if (changes.length === 0) {
+      rows.push(this.params.theme.fg("dim", fit(this.t("notice.nothingToSave"), inner)));
+    } else {
+      for (const change of changes) rows.push(fit(`${this.params.theme.fg("dim", "·")} ${change}`, inner));
+    }
+    rows.push(rule(inner), fit(this.t("confirm.footer"), inner));
+    return frame(rows, width, this.params.theme);
   }
 
   private effective() {
@@ -983,6 +1118,7 @@ export class CompactionSettingsOverlay implements Component, Focusable {
 
   private openModelPicker(): void {
     const effectiveModel = this.effective().model;
+    this.modelQuery = "";
     const options = this.modelPickerOptions();
     const index = options.findIndex((option) => option.reference === effectiveModel);
     this.modelCursor = index >= 0 ? index : 0;
@@ -999,14 +1135,35 @@ export class CompactionSettingsOverlay implements Component, Focusable {
     ];
   }
 
+  /** Filtered + prefix-first ranked options for the picker. The inherit entry always stays. */
+  private filteredModelPickerOptions(): CompactionModelOption[] {
+    const options = this.modelPickerOptions();
+    const query = this.modelQuery.trim().toLowerCase();
+    if (!query) return options;
+    const [inherit, ...rest] = options;
+    const matches = rest.filter((option) => option.reference.toLowerCase().includes(query));
+    const ranked = [...matches].sort((a, b) => {
+      const aPrefix = a.reference.toLowerCase().startsWith(query) ? 0 : 1;
+      const bPrefix = b.reference.toLowerCase().startsWith(query) ? 0 : 1;
+      return aPrefix - bPrefix;
+    });
+    return inherit ? [inherit, ...ranked] : ranked;
+  }
+
   private renderModelPicker(width: number): string[] {
     const inner = width - 2;
-    const options = this.modelPickerOptions();
+    const options = this.filteredModelPickerOptions();
     const effectiveModel = this.effective().model;
     const start = visibleStart(this.modelCursor, options.length, MODEL_PICKER_MAX_VISIBLE);
     const visible = options.slice(start, start + MODEL_PICKER_MAX_VISIBLE);
+    const marker = this.focused ? CURSOR_MARKER : "";
+    const queryText = this.modelQuery
+      ? `${this.modelQuery}${marker}`
+      : `${marker}${this.params.theme.fg("dim", this.t("filter.hint"))}`;
     const rows = [
       headerLine(this.params.theme, this.t("picker.title"), [this.scopeLabel(this.scope)], inner),
+      rule(inner),
+      fit(`${this.params.theme.fg("accent", "›")} ${queryText}`, inner),
       rule(inner),
       ...visible.map((option, index) => {
         const absolute = start + index;
@@ -1033,10 +1190,22 @@ export class CompactionSettingsOverlay implements Component, Focusable {
   }
 
   private handleModelPickerInput(data: string): void {
-    const options = this.modelPickerOptions();
+    const options = this.filteredModelPickerOptions();
     if (matchesKey(data, Key.escape)) {
+      if (this.modelQuery) {
+        this.modelQuery = "";
+        this.modelCursor = 0;
+        this.requestRender();
+        return;
+      }
       this.pickingModel = false;
       this.notice = "";
+      this.requestRender();
+      return;
+    }
+    if (matchesKey(data, Key.backspace) || data === "\b" || data === "\x7f") {
+      this.modelQuery = this.modelQuery.slice(0, -1);
+      this.modelCursor = 0;
       this.requestRender();
       return;
     }
@@ -1061,6 +1230,12 @@ export class CompactionSettingsOverlay implements Component, Focusable {
       this.pickingModel = false;
       this.markDirty();
       return;
+    }
+    const printable = sanitizeSingleLineInput(data);
+    if (printable) {
+      this.modelQuery += printable;
+      this.modelCursor = 0;
+      this.requestRender();
     }
   }
 

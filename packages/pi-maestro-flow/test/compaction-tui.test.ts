@@ -56,6 +56,7 @@ test("compaction TUI supports direct threshold editing, scope tabs, toggle, inhe
   overlay.handleInput("285000");
   overlay.handleInput("\r");
   overlay.handleInput("\x13");
+  overlay.handleInput("\r");
   await flushAsync();
 
   assert.deepEqual(saves, [{
@@ -81,6 +82,7 @@ test("compaction TUI keeps draft and selection after a failed save", async () =>
   overlay.handleInput("250000");
   overlay.handleInput("\r");
   overlay.handleInput("\x13");
+  overlay.handleInput("\r");
   await flushAsync();
 
   const rendered = overlay.render(80).join("\n");
@@ -180,7 +182,7 @@ test("/maestro-compaction reloads exactly once only after a successful save", as
               component.handleInput("\x1b[B");
               component.handleInput(" ");
               component.handleInput("\x13");
-            });
+              component.handleInput("\r");            });
           });
         },
       },
@@ -205,6 +207,7 @@ test("compaction TUI toggles the soft-compression switch independently and saves
   overlay.handleInput(" ");
   assert.match(overlay.render(80).join("\n"), /软压缩开关 · ○ 已关闭/);
   overlay.handleInput("\x13");
+  overlay.handleInput("\r");
   await flushAsync();
   const projectSave = saves.find((save) => save.scope === "project");
   assert.deepEqual(projectSave?.values, {
@@ -230,6 +233,7 @@ test("compaction TUI toggles soft mechanism switches and saves the soft group", 
   overlay.handleInput("u"); // inherit dedup again
   assert.match(overlay.render(80).join("\n"), /跨轮去重 · ○ 已关闭 · 继承自项目/);
   overlay.handleInput("\x13");
+  overlay.handleInput("\r");
   await flushAsync();
   const projectSave = saves.find((save) => save.scope === "project");
   assert.deepEqual(projectSave?.values, {
@@ -249,6 +253,7 @@ test("compaction TUI toggles soft mechanisms on the user scope and saves there",
   overlay.handleInput(" ");
   assert.match(overlay.render(80).join("\n"), /相关性排序 · ● 已开启 · 用户/);
   overlay.handleInput("\x13");
+  overlay.handleInput("\r");
   await flushAsync();
   const userSave = saves.find((save) => save.scope === "user");
   assert.deepEqual(userSave?.values, {
@@ -270,6 +275,7 @@ test("compaction TUI saves several mechanism toggles in one soft group", async (
   overlay.handleInput("\x1b[B"); // -> softDedup
   overlay.handleInput(" ");
   overlay.handleInput("\x13");
+  overlay.handleInput("\r");
   await flushAsync();
   const projectSave = saves.find((save) => save.scope === "project");
   assert.deepEqual(projectSave?.values, {
@@ -290,6 +296,7 @@ test("compaction TUI keeps a mechanism toggle draft after a failed save", async 
   for (let index = 0; index < 7; index++) overlay.handleInput("\x1b[B"); // -> softRelevance
   overlay.handleInput(" ");
   overlay.handleInput("\x13");
+  overlay.handleInput("\r");
   await flushAsync();
   const rendered = overlay.render(80).join("\n");
   assert.match(rendered, /相关性排序 · ● 已开启 · 项目/);
@@ -320,6 +327,7 @@ test("compaction TUI 'u' on the only mechanism toggle clears the whole soft grou
   overlay.handleInput("u");
   assert.match(overlay.render(80).join("\n"), /跨轮去重 · ○ 已关闭 · 继承自默认值/);
   overlay.handleInput("\x13");
+  overlay.handleInput("\r");
   await flushAsync();
   assert.equal(saves.length, 0, "fully reverting a mechanism toggle is clean, nothing to save");
 });
@@ -343,6 +351,7 @@ test("compaction TUI mechanism toggles stay on the user scope for a readonly pro
   overlay.handleInput(" ");
   assert.match(overlay.render(80).join("\n"), /相关性排序 · ● 已开启 · 用户/);
   overlay.handleInput("\x13");
+  overlay.handleInput("\r");
   await flushAsync();
   const userSave = saves.find((save) => save.scope === "user");
   assert.deepEqual(userSave?.values.soft, { relevance: { enabled: true } });
@@ -388,6 +397,7 @@ test("compaction TUI selects a compaction model from the catalog and saves it", 
   assert.match(overlay.render(80).join("\n"), /压缩模型 · maestro-qwen\/qwen3\.8-max · 项目/);
   assert.match(overlay.render(80).join("\n"), /实际 >47,904 \/ 120,000 \(39\.9%\)/);
   overlay.handleInput("\x13");
+  overlay.handleInput("\r");
   await flushAsync();
   const projectSave = saves.find((save) => save.scope === "project");
   assert.equal(projectSave?.values.model, "maestro-qwen/qwen3.8-max");
@@ -448,6 +458,45 @@ function createOverlay(overrides: Partial<ConstructorParameters<typeof Compactio
     ...overrides,
   });
 }
+
+test("compaction TUI shows a save confirmation listing the pending changes and cancels with Esc", async () => {
+  const saves: Array<{ scope: CompactionScope; values: Record<string, unknown> }> = [];
+  const overlay = createOverlay({
+    async saveScope(scope, values) { saves.push({ scope, values }); },
+  });
+  // Navigate to the enabled toggle and turn auto-compaction on, then open the confirm panel.
+  for (let index = 0; index < 1; index++) overlay.handleInput("\x1b[B");
+  overlay.handleInput(" ");
+  overlay.handleInput("\x13");
+  const confirmed = overlay.render(80).join("\n");
+  assert.match(confirmed, /确认保存/);
+  assert.match(confirmed, /\[项目\] 自动压缩 → 开/);
+  assert.match(confirmed, /Enter 确认保存 · Esc 返回/);
+  // Esc returns to the editor without persisting.
+  overlay.handleInput("\x1b");
+  assert.doesNotMatch(overlay.render(80).join("\n"), /确认保存/);
+  assert.equal(saves.length, 0);
+});
+
+test("compaction TUI model picker filters and ranks prefix matches before infix", () => {
+  const overlay = createOverlay({
+    availableModels: [
+      { reference: "extra/maestro-openai-other", contextWindow: 200_000, maxTokens: 16_000 },
+      { reference: "maestro-openai/gpt-5.6-sol", contextWindow: 300_000, maxTokens: 16_000 },
+      { reference: "maestro-qwen/qwen3.8-max", contextWindow: 120_000, maxTokens: 16_000 },
+    ],
+  });
+  for (let index = 0; index < 9; index++) overlay.handleInput("\x1b[B"); // -> compactModel
+  overlay.handleInput("\r"); // open picker
+  // `maestro-openai` is a prefix of gpt-5.6-sol but only an infix of the other entry.
+  overlay.handleInput("maestro-openai");
+  const rendered = overlay.render(80).join("\n");
+  const gptPos = rendered.indexOf("maestro-openai/gpt-5.6-sol");
+  const otherPos = rendered.indexOf("extra/maestro-openai-other");
+  assert.ok(gptPos > -1 && otherPos > -1, "both maestro-openai matches should be visible");
+  assert.ok(gptPos < otherPos, "prefix match maestro-openai/gpt-5.6-sol ranks before infix extra/maestro-openai-other");
+  assert.doesNotMatch(rendered, /maestro-qwen\/qwen3\.8-max/, "non-matching model should be filtered out");
+});
 
 async function flushAsync(): Promise<void> {
   await new Promise((resolve) => setImmediate(resolve));

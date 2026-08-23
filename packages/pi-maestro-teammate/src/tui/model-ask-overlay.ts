@@ -165,9 +165,14 @@ export class ModelAskOverlay implements Component, Focusable {
   private filteredModels(): readonly TeammateModelCapability[] {
     const query = this.modelQuery.toLowerCase();
     if (!query) return this.models;
-    return this.models.filter((model) =>
+    const matches = this.models.filter((model) =>
       `${model.id} ${providerOf(model.id)}`.toLowerCase().includes(query)
     );
+    return [...matches].sort((a, b) => {
+      const aPrefix = `${a.id} ${providerOf(a.id)}`.toLowerCase().startsWith(query) ? 0 : 1;
+      const bPrefix = `${b.id} ${providerOf(b.id)}`.toLowerCase().startsWith(query) ? 0 : 1;
+      return aPrefix - bPrefix;
+    });
   }
 
   private confirm(): void {

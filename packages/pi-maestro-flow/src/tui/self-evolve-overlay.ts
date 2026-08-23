@@ -108,6 +108,7 @@ export class SelfEvolveOverlay implements Component, Focusable {
   private saveState: SaveState = "clean";
   private notice = "";
   private discardArmed = false;
+  private confirming = false;
 
   constructor(params: SelfEvolveOverlayParams) {
     this.params = params;
@@ -138,6 +139,7 @@ export class SelfEvolveOverlay implements Component, Focusable {
 
   render(width: number): string[] {
     const safeWidth = Math.max(1, Math.min(width, 120));
+    if (this.confirming) return this.renderConfirm(safeWidth);
     if (safeWidth < NARROW_WIDTH) return [this.renderCompact(safeWidth)];
     const inner = safeWidth - 2;
     return frame(this.buildRows(inner), safeWidth, this.params.theme);
@@ -145,12 +147,23 @@ export class SelfEvolveOverlay implements Component, Focusable {
 
   handleInput(data: string): void {
     if (this.saveState === "saving") return;
+    if (this.confirming) {
+      if (matchesKey(data, Key.enter) || data === "\r") {
+        void this.save();
+        return;
+      }
+      if (matchesKey(data, Key.escape) || matchesKey(data, "q")) {
+        this.confirming = false;
+        this.requestRender();
+      }
+      return;
+    }
     if (this.editing) {
       this.handleEditInput(data);
       return;
     }
     if (matchesKey(data, Key.ctrl("s")) || data === "\x13") {
-      void this.save();
+      this.openConfirm();
       return;
     }
     if (matchesKey(data, Key.escape) || matchesKey(data, "q")) {
@@ -532,6 +545,64 @@ export class SelfEvolveOverlay implements Component, Focusable {
     this.requestRender();
   }
 
+  private openConfirm(): void {
+    if (!this.isDirty()) {
+      this.notice = "no changes to save";
+      this.requestRender();
+      return;
+    }
+    this.confirming = true;
+    this.notice = "";
+    this.discardArmed = false;
+    this.requestRender();
+  }
+
+  private collectChanges(): string[] {
+    const before = this.savedSnapshot;
+    const after = this.draft;
+    const changes: string[] = [];
+    for (const field of MENU_FIELDS) {
+      const prev = this.fieldRawValue(field, before);
+      const next = this.fieldRawValue(field, after);
+      if (prev !== next) changes.push(`${this.fieldLabel(field)}: ${prev} → ${next}`);
+    }
+    return changes;
+  }
+
+  private fieldRawValue(field: MenuField, config: SelfEvolveConfig): string {
+    switch (field) {
+      case "enabled": return config.enabled ? "on" : "off";
+      case "mode": return config.mode;
+      case "model": return config.model ?? "auto";
+      case "cooldownMs": return formatDurationMs(config.cooldownMs);
+      case "maxSignalsPerSession": return String(config.maxSignalsPerSession);
+      case "maxTraceChars": return String(config.maxTraceChars);
+      case "maxTraceMessages": return String(config.maxTraceMessages);
+      case "maxEvidence": return String(config.maxEvidence);
+      case "maxFiles": return String(config.maxFiles);
+      case "maxReviewFiles": return String(config.maxReviewFiles);
+      case "reviewScoreThreshold": return String(config.reviewScoreThreshold);
+    }
+  }
+
+  private renderConfirm(width: number): string[] {
+    const safeWidth = Math.max(1, Math.min(width, 120));
+    const inner = Math.max(1, safeWidth - 2);
+    const theme = this.params.theme;
+    const changes = this.collectChanges();
+    const rows = [
+      headerLine(theme, "Confirm save", [`${changes.length} change(s)`], inner),
+      rule(inner),
+    ];
+    if (changes.length === 0) {
+      rows.push(theme.fg("dim", fit("no changes to save", inner)));
+    } else {
+      for (const change of changes) rows.push(fit(`${theme.fg("dim", "·")} ${change}`, inner));
+    }
+    rows.push(rule(inner), fit("Enter confirm save · Esc back", inner));
+    return frame(rows, safeWidth, theme);
+  }
+
   private async save(): Promise<void> {
     if (!this.isDirty()) {
       this.notice = "no changes to save";
@@ -549,9 +620,11 @@ export class SelfEvolveOverlay implements Component, Focusable {
       this.saveState = "saved";
       this.notice = "✓ saved";
       this.discardArmed = false;
+      this.confirming = false;
       this.requestRender();
     } catch (error) {
       this.saveState = "failed";
+      this.confirming = false;
       this.notice = `! save failed · ${error instanceof Error ? error.message : String(error)}`;
       this.requestRender();
     }

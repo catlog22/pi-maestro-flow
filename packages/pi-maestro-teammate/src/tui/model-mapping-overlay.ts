@@ -263,6 +263,19 @@ function clampIndex(index: number, length: number): number {
   return length === 0 ? 0 : Math.max(0, Math.min(index, length - 1));
 }
 
+/** Stable prefix-first filter: matches whose `hay` starts with `query` rank before infix matches; original order is preserved within each group. */
+function rankByPrefix<T>(items: readonly T[], query: string, hay: (item: T) => string): T[] {
+  const lower = query.toLowerCase();
+  const matches = items.filter((item) => hay(item).toLowerCase().includes(lower));
+  const prefix: T[] = [];
+  const infix: T[] = [];
+  for (const item of matches) {
+    if (hay(item).toLowerCase().startsWith(lower)) prefix.push(item);
+    else infix.push(item);
+  }
+  return [...prefix, ...infix];
+}
+
 function activeStatus(
   status: ControlCenterActiveAgent["status"],
   t: TuiTranslator,
@@ -1993,7 +2006,7 @@ export class TeammateControlCenter implements Component, Focusable {
                 ? this.roleAssignmentItems(taskType as TeammateTaskType)
                 : (role ? this.roleModelItems(role) : this.modelItems(taskType as TeammateTaskType));
     const query = this.modelQuery.toLowerCase();
-    return query ? items.filter((item) => `${item.label} ${item.detail}`.toLowerCase().includes(query)) : items;
+    return query ? rankByPrefix(items, query, (item) => `${item.label} ${item.detail}`) : items;
   }
 
   private renderMain(width: number): string[] {

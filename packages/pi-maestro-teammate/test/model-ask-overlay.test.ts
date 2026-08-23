@@ -235,3 +235,20 @@ test("task rows show the resolved location badge", () => {
   const after = overlay.render(80);
   assert.ok(after.some((line) => line.includes("remote:")), "remote badge rendered after override");
 });
+
+test("model picker ranks prefix matches before infix matches", () => {
+  const models: readonly TeammateModelCapability[] = [
+    { id: "extra/maestro-openai-other", reasoning: false },
+    { id: "maestro-openai/gpt-5.6-sol", reasoning: true },
+  ];
+  const { overlay } = makeOverlay(TASKS, { availableModels: models });
+  // Open the model picker on the first task and type a query that prefixes gpt-5.6-sol
+  // but is only an infix of the other entry.
+  feed(overlay, ["m"]);
+  for (const ch of "maestro-openai") overlay.handleInput(ch);
+  const lines = overlay.render(100);
+  const gptPos = lines.findIndex((line) => line.includes("gpt-5.6-sol [maestro-openai]"));
+  const otherPos = lines.findIndex((line) => line.includes("maestro-openai-other [extra]"));
+  assert.ok(gptPos > -1 && otherPos > -1, "both matches should be visible");
+  assert.ok(gptPos < otherPos, "prefix match gpt-5.6-sol ranks before infix extra/maestro-openai-other");
+});
