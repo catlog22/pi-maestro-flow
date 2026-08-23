@@ -144,12 +144,17 @@ test("model failover TUI keeps the draft open when project save fails", async ()
   assert.match(overlay.render(100).join("\n"), /已启用/);
 });
 
-test("project failover save preserves unknown fields and empty-chain overrides", () => {
+test("project failover save preserves unknown fields and omits an empty default table", () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-tui-"));
   try {
     const filePath = getProjectModelFailoverPath(cwd);
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, JSON.stringify({ version: 7, future: { keep: true }, enabled: false }));
+    fs.writeFileSync(filePath, JSON.stringify({
+      version: 7,
+      future: { keep: true },
+      enabled: false,
+      defaultFallbackModels: ["provider/stale"],
+    }));
 
     saveProjectModelFailoverConfig(cwd, {
       enabled: true,
@@ -161,6 +166,9 @@ test("project failover save preserves unknown fields and empty-chain overrides",
     assert.equal(raw.version, 7);
     assert.deepEqual(raw.future, { keep: true });
     assert.deepEqual(raw.fallbackModels, { "provider/primary": [] });
+    // An empty default table is omitted (and clears any stale key) so the
+    // global default table keeps inheriting.
+    assert.equal(raw.defaultFallbackModels, undefined);
     assert.deepEqual(loadModelFailoverConfig(cwd), {
       enabled: true,
       fallbackModels: { "provider/primary": [] },

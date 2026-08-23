@@ -13,6 +13,7 @@ import {
   getProjectModelFailoverPath,
   loadModelFailoverConfig,
   registerModelFailover,
+  saveProjectModelFailoverConfig,
   snapshotModelFailoverSettlement,
 } from "../src/providers/model-failover.ts";
 
@@ -46,6 +47,7 @@ function harness(
   const commands: string[] = [];
   const selected: string[] = [];
   const notifications: string[] = [];
+  const terminalInputHandlers = new Set<(data: string) => unknown>();
   const sentMessages: Array<{ content: string; options?: { deliverAs?: string } }> = [];
   const handoffs: Array<{
     message: { customType: string; content: string; display: boolean; details?: unknown };
@@ -69,6 +71,10 @@ function harness(
     signal: options.signal,
     ui: {
       notify(message: string) { notifications.push(message); },
+      onTerminalInput(handler: (data: string) => unknown) {
+        terminalInputHandlers.add(handler);
+        return () => terminalInputHandlers.delete(handler);
+      },
     },
   } as unknown as ExtensionContext;
   const pi = {
@@ -131,7 +137,22 @@ function harness(
   const flushScheduledHandoff = async (): Promise<void> => {
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
   };
-  return { breaker, commands, ctx, emit, emittedEvents, flushScheduledHandoff, handoffs, notifications, selected, sentMessages };
+  const terminalInput = (data: string): void => {
+    for (const handler of terminalInputHandlers) handler(data);
+  };
+  return {
+    breaker,
+    commands,
+    ctx,
+    emit,
+    emittedEvents,
+    flushScheduledHandoff,
+    handoffs,
+    notifications,
+    selected,
+    sentMessages,
+    terminalInput,
+  };
 }
 
 function writeProjectConfig(cwd: string, value: unknown): void {
@@ -464,6 +485,47 @@ test("message_end rewrites stream_read_error so native same-model retries run be
     assert.equal(await runtime.emit("message_end", {
       message: { role: "assistant", stopReason: "stop", content: [] },
     }), undefined);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("Esc during an in-flight native retry makes a raced connection error terminal", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-"));
+  try {
+    const runtime = harness(cwd);
+    await runtime.emit("session_start");
+
+    const failure = "connect ECONNREFUSED 127.0.0.1:401";
+    assert.equal(await runtime.emit("message_end", {
+      message: { role: "assistant", stopReason: "error", errorMessage: failure, content: [] },
+    }), undefined);
+
+    runtime.terminalInput("\x1b");
+    const cancelled = await runtime.emit("message_end", {
+      message: { role: "assistant", stopReason: "error", errorMessage: failure, content: [] },
+    }) as { message?: { errorMessage?: string } } | undefined;
+
+    assert.equal(cancelled?.message?.errorMessage, `${failure} (The user aborted a request)`);
+    assert.equal(classifyRetryError(cancelled?.message?.errorMessage), "non-retryable");
+    assert.equal(isRetryableAssistantError({
+      role: "assistant",
+      content: [],
+      api: "openai-responses",
+      provider: "provider",
+      model: "primary",
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "error",
+      errorMessage: cancelled?.message?.errorMessage,
+      timestamp: 0,
+    }), false);
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }
@@ -1292,6 +1354,37 @@ test("loadModelFailoverConfig merges global and project default tables with proj
       fallbackModels: {},
       defaultFallbackModels: ["provider/backup"],
     });
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("an empty project default table inherits the global default table", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-default-empty-"));
+  const home = path.join(cwd, "home");
+  try {
+    fs.mkdirSync(path.dirname(getGlobalModelFailoverPath(home)), { recursive: true });
+    fs.writeFileSync(getGlobalModelFailoverPath(home), JSON.stringify({
+      enabled: true,
+      defaultFallbackModels: ["provider/global"],
+    }));
+    // An explicit empty array in the project file means "unset": it must not
+    // shadow the global default table.
+    writeProjectConfig(cwd, {
+      enabled: false,
+      fallbackModels: {},
+      defaultFallbackModels: [],
+    });
+    assert.deepEqual(loadModelFailoverConfig(cwd, home).defaultFallbackModels, ["provider/global"]);
+
+    // Saving an empty default table omits the key so inheritance keeps working.
+    saveProjectModelFailoverConfig(cwd, {
+      enabled: true,
+      fallbackModels: {},
+      defaultFallbackModels: [],
+    });
+    assert.deepEqual(loadModelFailoverConfig(cwd, home).defaultFallbackModels, ["provider/global"]);
+    assert.equal(JSON.parse(fs.readFileSync(getProjectModelFailoverPath(cwd), "utf8")).defaultFallbackModels, undefined);
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }

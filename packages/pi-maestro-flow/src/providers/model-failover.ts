@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { isKeyRelease, isKeyRepeat, matchesKey } from "@earendil-works/pi-tui";
 import { lockSettingsResourceSync } from "../settings/resource-lock.ts";
 import { getTuiLocale } from "../tui/locale.ts";
 import type { SupportedSettingsLocale } from "pi-maestro-settings-core/v1";
@@ -20,6 +21,8 @@ import {
 import {
   buildReplayFence,
   classifyRetryError,
+  isRetryableProviderError,
+  markPiRetryErrorCancelled,
   normalizePiRetryErrorMessage,
   rankModelsByHealth,
   RECOVERY_PROTOCOL_VERSION,
@@ -40,7 +43,8 @@ export interface ModelFailoverConfig {
 
 interface ActiveModelRun {
   chain: string[];
-  index: number;
+  /** Models already settled with an exhausted-retry failure in this logical run. */
+  exhausted: string[];
   model: string;
   acquisition: AcquiredModelCandidate;
   /** Monotonic run generation; isolates late events from older logical runs. */
@@ -244,10 +248,12 @@ function readConfig(filePath: string): Partial<ModelFailoverConfig> {
       }
     }
     const defaultFallbackModels = parseModelList(parsed.defaultFallbackModels);
+    // An empty default table means "unset": it must not shadow the global
+    // default table via the ?? merge in loadModelFailoverConfig.
     return {
       ...(typeof parsed.enabled === "boolean" ? { enabled: parsed.enabled } : {}),
       fallbackModels,
-      ...(defaultFallbackModels ? { defaultFallbackModels } : {}),
+      ...(defaultFallbackModels?.length ? { defaultFallbackModels } : {}),
     };
   } catch {
     return {};
@@ -298,12 +304,15 @@ export function saveProjectModelFailoverConfig(cwd: string, config: ModelFailove
       [...new Set(chain.filter((candidate) => candidate !== model))],
     ]));
     const defaultFallbackModels = parseModelList(config.defaultFallbackModels) ?? [];
-    const next = {
+    const next: Record<string, unknown> = {
       ...existing,
       enabled: config.enabled,
       fallbackModels,
-      defaultFallbackModels,
     };
+    // Omit (and clear any stale) empty default table so global defaults keep
+    // inheriting instead of being permanently shadowed by an explicit [].
+    if (defaultFallbackModels.length > 0) next.defaultFallbackModels = defaultFallbackModels;
+    else delete next.defaultFallbackModels;
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     writeFileDurableSync(filePath, `${JSON.stringify(next, null, 2)}\n`);
   } finally {
@@ -434,6 +443,14 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
   // A bare boolean would lose a suppressed event that lands on a later tick,
   // so it carries a count of in-flight guarded switches instead.
   let guardedModelSwitches = 0;
+  let nativeRetryErrorPending = false;
+  let nativeRetryCancellationRequested = false;
+  let retryCancellationInputDisposer: (() => void) | undefined;
+
+  const resetNativeRetryCancellation = (): void => {
+    nativeRetryErrorPending = false;
+    nativeRetryCancellationRequested = false;
+  };
 
   const resetRunEvidence = (): void => {
     finalObservation = undefined;
@@ -512,7 +529,7 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
       }
       return {
         chain,
-        index,
+        exhausted: [],
         model: candidate,
         acquisition,
         generation: ++runGeneration,
@@ -539,7 +556,7 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
     }
   });
 
-  pi.on("session_start", () => {
+  pi.on("session_start", (_event, ctx) => {
     // No config load here: nothing consumes `config` before the next
     // before_agent_start, which reloads unconditionally and remains the
     // external-edit visibility boundary. Loading at session start was always
@@ -547,6 +564,21 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
     active = undefined;
     pendingRecoveryId = undefined;
     resetRunEvidence();
+    resetNativeRetryCancellation();
+    retryCancellationInputDisposer?.();
+    retryCancellationInputDisposer = typeof ctx.ui.onTerminalInput === "function"
+      ? ctx.ui.onTerminalInput((data) => {
+          if (
+            nativeRetryErrorPending
+            && matchesKey(data, "escape")
+            && !isKeyRelease(data)
+            && !isKeyRepeat(data)
+          ) {
+            nativeRetryCancellationRequested = true;
+          }
+          return undefined;
+        })
+      : undefined;
     settlementArbitration = undefined;
   });
 
@@ -646,10 +678,9 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
       ? [...new Set([...baseChain, ...config.defaultFallbackModels, ...availableModels(ctx).keys()])]
       : baseChain;
     const chain = images.length > 0 ? prioritizeMultimodalChain(fallbackChain, availableModels(ctx)) : fallbackChain;
-    const currentIndex = chain.indexOf(current);
     const acquisition = breaker.acquireCandidate(current);
     if (acquisition.allowed) {
-      active = { chain, index: currentIndex >= 0 ? currentIndex : 0, model: current, acquisition, generation: ++runGeneration, used: false, failureRecorded: false };
+      active = { chain, exhausted: [], model: current, acquisition, generation: ++runGeneration, used: false, failureRecorded: false };
       return injectedMessage ?? (images.length > 0
         ? directImageRouteMessage(images, current, isMultimodalModel(ctx.model), visionEnabled ? "analysis_unavailable" : "vision_disabled")
         : undefined);
@@ -714,18 +745,23 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
     active.lastError = message.stopReason === "error" ? message.errorMessage : undefined;
   });
 
-  // Pi's native same-model retry classifier predates the machine-readable
-  // `stream_read_error` code and does not match it, so a single transient
-  // stream drop settles straight into this failover, which then mistakes the
-  // first occurrence for "native retries exhausted" and switches models
-  // immediately. Rewrite the persisted error once with a marker the native
-  // classifier understands so same-model retries run before any fallback.
-  // Registered after the lastError observer so the harness-visible result is
-  // the rewrite; the observer's classification is identical either way.
+  // A retry request can lose the abort race and still finish with its original
+  // connection error. Remember Esc only after a retryable provider failure and
+  // annotate that raced error as user cancellation, so Pi core cannot schedule
+  // the same retry chain again from the beginning.
   pi.on("message_end", (event) => {
-    if (event.message.role !== "assistant" || event.message.stopReason !== "error") return;
+    if (event.message.role !== "assistant") return;
+    if (event.message.stopReason !== "error") {
+      resetNativeRetryCancellation();
+      return;
+    }
     const message = event.message as unknown as { errorMessage?: string };
-    const errorMessage = normalizePiRetryErrorMessage(message.errorMessage);
+    const cancelled = nativeRetryCancellationRequested;
+    const errorMessage = cancelled
+      ? markPiRetryErrorCancelled(message.errorMessage)
+      : normalizePiRetryErrorMessage(message.errorMessage);
+    nativeRetryErrorPending = !cancelled && isRetryableProviderError(errorMessage);
+    nativeRetryCancellationRequested = false;
     if (!errorMessage || errorMessage === message.errorMessage) return;
     return { message: { ...event.message, errorMessage } };
   });
@@ -747,6 +783,7 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
   });
 
   pi.on("agent_settled", async (_event, ctx) => {
+    resetNativeRetryCancellation();
     // A fallback selected by this same handler belongs to the next logical run;
     // duplicate settlement delivery for the old run must not settle it early.
     if (pendingRecoveryId) return;
@@ -835,7 +872,11 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
     // The configured failover policy allows a fresh fallback replay even when
     // the failed attempt observed tool activity. Keep the replay fence in the
     // settlement and intent for diagnostics, but do not suppress recovery.
-    const fallback = await selectCandidate(ctx, activeRun.chain, activeRun.index + 1);
+    // Each settled failure permanently retires its model; the remaining chain
+    // is scanned in configured order and re-ranked by health each round.
+    const exhausted = [...activeRun.exhausted, activeRun.model];
+    const remaining = activeRun.chain.filter((candidate) => !exhausted.includes(candidate));
+    const fallback = await selectCandidate(ctx, remaining, 0);
     if (!fallback) {
       publish({ ...baseSnapshot, outcome: "failed" }, observation.failureKind);
       ctx.ui.notify(
@@ -845,6 +886,7 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
       await restoreImageModel();
       return;
     }
+    fallback.exhausted = exhausted;
     // Preserve image-switch provenance so the terminal settlement restores the
     // original text-only model even when the first multimodal candidate failed.
     if (activeRun.imageTriggered) {
@@ -902,6 +944,9 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
   });
 
   pi.on("session_shutdown", () => {
+    retryCancellationInputDisposer?.();
+    retryCancellationInputDisposer = undefined;
+    resetNativeRetryCancellation();
     if (active && !active.failureRecorded) breaker.releaseCandidate(active.acquisition);
     active = undefined;
     pendingRecoveryId = undefined;
