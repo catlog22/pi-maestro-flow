@@ -4,10 +4,9 @@ import * as fs from "node:fs/promises";
 import { BrowserManager } from "../src/tools/browser/manager.ts";
 import { runOcr, isLocalVisionError, resetLocalVisionCache, type OcrOutcome, type DetectOutcome } from "../src/providers/local-vision.ts";
 
-// Real-browser end-to-end tests for tab.ocr() / tab.detect() (Tier 1 on-page
-// visual localization, see EXTRA-FEATURES-OCR-COMPUTER-USE.md). These require
-// a local Chromium executable AND the optional tesseract.js dependency; both
-// are skipped when unavailable so CI without them stays green.
+// Real-browser end-to-end tests require a local Chromium executable and
+// manifest-listed RapidOCR assets. They are skipped when unavailable so CI
+// without model weights stays green.
 
 const CHROME_CANDIDATES = [
   process.env.PUPPETEER_EXECUTABLE_PATH,
@@ -27,11 +26,11 @@ async function findChrome(): Promise<string | null> {
   return null;
 }
 
-async function tesseractAvailable(): Promise<boolean> {
+async function rapidOcrAvailable(): Promise<boolean> {
+  if (!process.env.RAPIDOCR_ONNX_ROOT) return false;
   try {
     const require = (await import("node:module")).createRequire(import.meta.url);
-    const mod = require("tesseract.js") as { createWorker?: unknown };
-    return typeof mod.createWorker === "function";
+    return Boolean(require("onnxruntime-node"));
   } catch { return false; }
 }
 
@@ -43,7 +42,7 @@ async function tesseractAvailable(): Promise<boolean> {
 test("local-vision: runOcr over a rendered text page returns line-level text + bbox", async (t) => {
   const chrome = await findChrome();
   if (!chrome) { t.skip("No local Chromium executable available."); return; }
-  if (!(await tesseractAvailable())) { t.skip("tesseract.js optional dependency not installed."); return; }
+  if (!(await rapidOcrAvailable())) { t.skip("Verified RapidOCR model assets are not configured."); return; }
 
   await resetLocalVisionCache();
   const manager = new BrowserManager();
@@ -62,7 +61,7 @@ test("local-vision: runOcr over a rendered text page returns line-level text + b
       // Engine present but worker/wasm failed (e.g. traineddata download blocked).
       // Treat as a soft skip rather than a hard failure — the injection path is
       // proven, only the external asset fetch did not complete.
-      t.skip("tesseract.js worker reported an error: " + rv.error);
+      t.skip("RapidOCR shared service reported an error: " + rv.error);
       return;
     }
     assert.ok(rv.lines.length >= 1, "ocr must return at least one line for a text page");
@@ -73,7 +72,7 @@ test("local-vision: runOcr over a rendered text page returns line-level text + b
       assert.ok(line.confidence >= 0 && line.confidence <= 1, "confidence must be normalized to 0..1");
     }
     assert.ok(rv.width > 0 && rv.height > 0, "ocr must report screenshot dimensions");
-    assert.match(rv.engine, /tesseract\.js@/, "engine label must identify tesseract.js");
+    assert.match(rv.engine, /rapidocr/, "engine label must identify RapidOCR");
   } finally {
     await manager.close("ocr").catch(() => {});
     await resetLocalVisionCache();
@@ -83,7 +82,7 @@ test("local-vision: runOcr over a rendered text page returns line-level text + b
 test("local-vision: tab.detect() returns labeled regions; coordinates are clickable via tab.cdpClick()", async (t) => {
   const chrome = await findChrome();
   if (!chrome) { t.skip("No local Chromium executable available."); return; }
-  if (!(await tesseractAvailable())) { t.skip("tesseract.js optional dependency not installed."); return; }
+  if (!(await rapidOcrAvailable())) { t.skip("Verified RapidOCR model assets are not configured."); return; }
 
   await resetLocalVisionCache();
   const manager = new BrowserManager();
@@ -94,6 +93,7 @@ test("local-vision: tab.detect() returns labeled regions; coordinates are clicka
     await manager.open({ name: "detect", cwd: process.cwd(), url, viewport: { width: 500, height: 300 }, timeoutMs: 20_000, executablePath: chrome });
     const output = await manager.run("detect", `
       const detected = await tab.detect();
+      if (detected && detected.ok === false) return { detected, clicked: false, hadClickMe: false };
       // Find the 'ClickMe' label, click its center, set a flag the page reads.
       await tab.evaluate(() => { document.getElementById('target').addEventListener('click', () => { window.__hit = true; }, { once: true }); });
       let clicked = false;
@@ -108,7 +108,8 @@ test("local-vision: tab.detect() returns labeled regions; coordinates are clicka
     `, process.cwd(), undefined, 60_000);
     const rv = output.returnValue as { detected: DetectOutcome; clicked: boolean; hadClickMe: boolean };
     if (isLocalVisionError(rv.detected)) {
-      t.skip("tesseract.js worker reported an error: " + rv.detected.error);
+      assert.equal(rv.detected.engine, "omniparser");
+      assert.match(rv.detected.hint, /fail-closed|verified model/i);
       return;
     }
     assert.ok(rv.detected.items.length >= 1, "detect must return at least one item");
@@ -129,7 +130,7 @@ test("local-vision: tab.detect() returns labeled regions; coordinates are clicka
 test("local-vision: tab.ocr() with a region crops to the requested rectangle", async (t) => {
   const chrome = await findChrome();
   if (!chrome) { t.skip("No local Chromium executable available."); return; }
-  if (!(await tesseractAvailable())) { t.skip("tesseract.js optional dependency not installed."); return; }
+  if (!(await rapidOcrAvailable())) { t.skip("Verified RapidOCR model assets are not configured."); return; }
 
   await resetLocalVisionCache();
   const manager = new BrowserManager();
@@ -167,39 +168,19 @@ test("local-vision: tab.ocr() with a region crops to the requested rectangle", a
 test("local-vision: isLocalVisionError narrows the error outcome", () => {
   const err = { ok: false, error: "x", hint: "y", engine: "none" };
   assert.equal(isLocalVisionError(err), true);
-  const ok = { text: "a", lines: [], engine: "tesseract.js@7", width: 1, height: 1 };
+  const ok = { text: "a", lines: [], engine: "rapidocr", width: 1, height: 1 };
   assert.equal(isLocalVisionError(ok), false);
   assert.equal(isLocalVisionError(null), false);
   assert.equal(isLocalVisionError(undefined), false);
 });
 
-test("local-vision: runOcr returns a structured error (no crash) when the engine is missing", async () => {
+test("local-vision: runOcr returns a structured shared-service error when model assets are unavailable", async () => {
   await resetLocalVisionCache();
-  // Force tesseract.js resolution to fail so loadTesseract throws, then
-  // assert runOcr surfaces a LocalVisionError with an install hint rather
-  // than propagating the throw. Restore the resolver in finally. We obtain
-  // the CJS Module object via createRequire (the ESM `node:module` namespace
-  // is frozen and its `_resolveFilename` is non-writable).
-  const require = (await import("node:module")).createRequire(import.meta.url);
-  const Module = require("node:module");
-  const original = Module._resolveFilename;
-  Module._resolveFilename = function (request: unknown, ...rest: unknown[]): unknown {
-    if (typeof request === "string" && request === "tesseract.js") {
-      const err = new Error(`Cannot find module '${request}'`);
-      (err as Error & { code?: string }).code = "MODULE_NOT_FOUND";
-      throw err;
-    }
-    return original(request, ...rest);
-  };
-  try {
-    const outcome = await runOcr(Buffer.from([0x89, 0x50, 0x4e, 0x47]), 1, 1);
-    assert.equal(isLocalVisionError(outcome), true, "missing engine must yield a LocalVisionError, not a throw");
-    if (isLocalVisionError(outcome)) {
-      assert.match(outcome.hint, /npm i tesseract\.js/, "hint must include the install command");
-      assert.equal(outcome.engine, "none");
-    }
-  } finally {
-    Module._resolveFilename = original;
-    await resetLocalVisionCache();
+  const outcome = await runOcr(Buffer.from([0x89, 0x50, 0x4e, 0x47]), 1, 1);
+  assert.equal(isLocalVisionError(outcome), true, "missing model assets must yield a LocalVisionError, not a throw");
+  if (isLocalVisionError(outcome)) {
+    assert.match(outcome.hint, /RapidOCR|onnxruntime|model/i);
+    assert.equal(outcome.engine, "rapidocr");
   }
+  await resetLocalVisionCache();
 });

@@ -609,13 +609,9 @@ function createTabApi(
       }
       return results;
     },
-    // On-page OCR (Tier 1 visual localization): capture a PNG, run the local
-    // OCR engine (tesseract.js) over it, and return text + per-line bbox in
-    // screenshot-pixel coordinates. The caller follows with tab.cdpClick(cx, cy).
-    // region crops the OCR to {x,y,w,h} screenshot pixels. If the optional
-    // engine is missing or fails the outcome is a structured {ok:false,...}
-    // object with an install hint — never a thrown crash — so run code can
-    // branch and fall back to describe_image (text only, no coordinates).
+    // On-page OCR: capture a PNG and pass its bytes plus browser-origin metadata
+    // to the shared RapidOCR/ONNX service. Coordinates stay in screenshot
+    // pixels, rooted at (0, 0); the caller can follow with tab.cdpClick().
     async ocr(options?: { region?: { x: number; y: number; w: number; h: number }; fullPage?: boolean; silent?: boolean; langs?: string }) {
       const shot = await this.screenshot({ fullPage: options?.fullPage, silent: options?.silent ?? true });
       const buffer = await fs.readFile(shot.path);
@@ -623,11 +619,8 @@ function createTabApi(
       const outcome: OcrOutcome = await runOcr(buffer, dims.width, dims.height, options?.region, options?.langs);
       return outcome;
     },
-    // UI element detection: like ocr but emits a list of labeled regions
-    // ({bbox,type,label,confidence}) suitable for finding buttons/labels on
-    // canvas or non-DOM pages. mode 'match' (default) and 'crop' currently
-    // collapse to OCR-line output (a future YOLO-backed engine can diverge);
-    // the parameter is honored so call sites stay stable across upgrades.
+    // UI detection uses shared OmniParser/ONNX. Its manifest provenance gate
+    // intentionally fails closed when no verified model is available.
     async detect(options?: { mode?: "match" | "crop"; fullPage?: boolean; silent?: boolean; langs?: string }) {
       const shot = await this.screenshot({ fullPage: options?.fullPage, silent: options?.silent ?? true });
       const buffer = await fs.readFile(shot.path);
