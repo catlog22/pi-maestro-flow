@@ -23,7 +23,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 // Mock host
 // ---------------------------------------------------------------------------
 
-type EventName = "session_start" | "agent_end" | "session_before_compact" | "session_compact";
+type EventName = "session_start" | "agent_end" | "session_before_compact" | "session_compact" | "session_shutdown";
 type EventHandler = (event: unknown, ctx: ExtensionContext) => void;
 
 interface CommandSpec {
@@ -84,6 +84,7 @@ function makeMockPi(ctx: ExtensionContext): {
     agent_end: [],
     session_before_compact: [],
     session_compact: [],
+    session_shutdown: [],
   };
   const commands: Record<string, CommandSpec> = {};
   const pi = {
@@ -179,6 +180,11 @@ async function main(): Promise<void> {
   check("信号携带继承模型 provider/id", sig.model === "test-provider/test-model", String(sig.model));
   check("suggestion 为命令模板（不执行）", typeof sig.suggestion === "string" && sig.suggestion.startsWith("maestro knowledge stage"));
   check("suggestion 为可执行的 session 源模板（无死占位符）", sig.suggestion.includes("--session test-session-1") && sig.suggestion.includes("--content-file"), sig.suggestion);
+  // Phase 2C: writing a signal must push a lightweight notify so the user sees
+  // what self-evolve captured from the finished agent loop.
+  const signalNotify = ctx.notifications.find((n) => n.message.includes("Self-evolve") && n.message.includes("/self-evolve signals"));
+  check("写信号后发出轻量 notify（含 /self-evolve signals 指引）", signalNotify !== undefined, JSON.stringify(ctx.notifications));
+  check("notify 携带 candidateType 标签（knowhow）", signalNotify?.message.includes("knowhow"), signalNotify?.message);
   const evidencePath = join(outRoot, "evidence", `${sig.id}.md`);
   const evidenceContent = await readFile(evidencePath, "utf8");
   check("证据文件已生成（suggestion --content-file 指向真实文件）", evidenceContent.includes(sig.title) && evidenceContent.includes("session: test-session-1"), evidencePath);
@@ -559,6 +565,47 @@ async function main(): Promise<void> {
   registerSelfEvolve(piEnv);
   for (const h of handlersEnv.session_start) h({}, ctxEnv);
   check("env 覆盖：config off + PI_SELF_EVOLVE=1 时状态栏显示 EVOL ● 0·0·0", ctxEnv.status["self-evolve"] === "EVOL ● 0·0·0", ctxEnv.status["self-evolve"]);
+  delete process.env.PI_SELF_EVOLVE;
+
+  // ---- P5: session shutdown receipt + review pending + enrichment fallback ----
+  // Use a fresh ctx so session counters are clean.
+  const ctxP5 = makeCtx(cwd);
+  const { pi: piP5, handlers: handlersP5, commands: commandsP5 } = makeMockPi(ctxP5);
+  process.env.PI_SELF_EVOLVE = "1";
+  registerSelfEvolve(piP5);
+  for (const h of handlersP5.session_start) h({}, ctxP5);
+  // Toggle hybrid mode so canEnrich() returns true, but with no teammate
+  // runtime available the enrichment must fall back to heuristic_fallback and
+  // append a terminal record to the enrichment ledger.
+  await commandsP5["self-evolve"].handler("config captureMode=hybrid", ctxP5);
+  // Fire an agent_end so a signal + enrichment fallback land.
+  for (const h of handlersP5.agent_end) h(agentEndEvent(messages), ctxP5);
+  await sleep(300);
+  const enrichDir = join(outRoot, "enrichments");
+  let enrichFiles: string[] = [];
+  try { enrichFiles = (await readdir(enrichDir)).filter((f) => f.endsWith(".jsonl")); } catch { /* ok */ }
+  check("hybrid 模式下 enrichment ledger 已创建", enrichFiles.length > 0, `enrichFiles=${JSON.stringify(enrichFiles)}`);
+  if (enrichFiles.length > 0) {
+    const enrichContent = await readFile(join(enrichDir, enrichFiles[0]), "utf8");
+    const enrichLines = enrichContent.trim().split("\n").filter(Boolean);
+    check("enrichment ledger 含 terminal fallback 记录", enrichLines.length > 0 && enrichLines.some((l) => l.includes("heuristic_fallback")), enrichContent.slice(0, 200));
+  }
+  // session_shutdown(quit) must write a session summary and NOT start a
+  // review/deposit. Verify a session-summaries file appears with final=true.
+  for (const h of handlersP5.session_shutdown ?? []) h({ type: "session_shutdown", reason: "quit" }, ctxP5);
+  await sleep(100);
+  const summaryDir = join(outRoot, "session-summaries");
+  let summaryFiles: string[] = [];
+  try { summaryFiles = (await readdir(summaryDir)).filter((f) => f.endsWith(".jsonl")); } catch { /* ok */ }
+  check("session_shutdown(quit) 写入 session-summaries ledger", summaryFiles.length > 0, `summaryFiles=${JSON.stringify(summaryFiles)}`);
+  if (summaryFiles.length > 0) {
+    const summaryContent = await readFile(join(summaryDir, summaryFiles[0]), "utf8");
+    check("session summary final=true for quit", summaryContent.includes("\"final\":true") && summaryContent.includes("\"reason\":\"quit\""), summaryContent.slice(0, 200));
+  }
+  // /self-evolve wrap is idempotent: calling it twice is safe.
+  const wrapBefore = ctxP5.notifications.length;
+  await commandsP5["self-evolve"].handler("wrap", ctxP5).catch(() => undefined);
+  check("/self-evolve wrap 发出摘要通知", ctxP5.notifications.length > wrapBefore, `notifications=${ctxP5.notifications.length}`);
   delete process.env.PI_SELF_EVOLVE;
 
   // ---- cleanup ----

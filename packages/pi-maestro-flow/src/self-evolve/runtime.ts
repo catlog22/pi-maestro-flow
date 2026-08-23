@@ -260,6 +260,109 @@ export interface FileOpsLike {
   edited: Iterable<string>;
 }
 
+/**
+ * Structured evidence of one tool call in the transcript tail. Phase 2C adds
+ * this alongside the coarse `EvidenceRef` so self-evolve signals that touch
+ * a pi tool (browser / computer_use / ...) carry the call's action, guide
+ * topic, and outcome — letting the classifier tag the candidate with a
+ * `tools` + `sop_topic` hint for the SOP loader to discover.
+ */
+export interface ToolCallEvidence {
+  /** Pi tool name (`browser`, `computer_use`, ...). */
+  readonly tool: string;
+  /** Tool action if discernible from the call input (`guide`, `click`, `ocr`, ...). */
+  readonly action?: string;
+  /** `guide` topic when the call was `action: "guide"` (SOP hit). */
+  readonly topic?: string;
+  /** Outcome bucketed from the tool result envelope. */
+  readonly outcome: "ok" | "error" | "near_zero" | "timeout" | "permission_denied" | "unknown";
+  /** Short error code/message when outcome is not ok (truncated). */
+  readonly errorMessage?: string;
+}
+
+/** Tools whose trajectories Phase 2C classifies for SOP candidate hints. */
+export const SOP_TOOL_NAMES = new Set(["browser", "computer_use"]);
+
+/** Error fragments mapped to structured outcomes (failure-mode signals). */
+const OUTCOME_PATTERNS: ReadonlyArray<{ outcome: ToolCallEvidence["outcome"]; patterns: readonly RegExp[] }> = [
+  { outcome: "near_zero", patterns: [/near[-_ ]?zero/i, /NEAR_ZERO/] },
+  { outcome: "timeout", patterns: [/\btimeout\b/i, /TIMEOUT/, /aborted/i, /ABORTED/] },
+  {
+    outcome: "permission_denied",
+    patterns: [/permission/i, /denied/i, /EACCES/, /FOREGROUND_NOT_VERIFIED/i, /not permitted/i],
+  },
+];
+
+function classifyToolOutcome(text: string): ToolCallEvidence["outcome"] {
+  if (!text) return "unknown";
+  for (const { outcome, patterns } of OUTCOME_PATTERNS) {
+    if (patterns.some((p) => p.test(text))) return outcome;
+  }
+  return "error";
+}
+
+/**
+ * Extract structured tool-call evidence from the transcript tail. Pairs each
+ * assistant `tool_use` block (carrying the call input: action/topic) with the
+ * following `tool_result`/`toolResult` message (carrying isError + text) by
+ * `toolCallId`. Only tools in {@link SOP_TOOL_NAMES} are kept — generic tool
+ * evidence stays on the coarse `EvidenceRef` list. Bounded by `max`.
+ */
+export function buildToolCallEvidence(messages: AgentMessage[], max = 8): ToolCallEvidence[] {
+  const evidence: ToolCallEvidence[] = [];
+  const seen = new Set<string>();
+  const results = new Map<string, { isError?: boolean; text: string }>();
+
+  for (const message of messages.slice(-64)) {
+    const record = message as unknown as {
+      role?: string;
+      content?: unknown;
+      toolCallId?: string;
+      isError?: boolean;
+    };
+    if (record.role === "tool" || record.role === "toolResult") {
+      const id = record.toolCallId;
+      if (typeof id === "string" && id) {
+        results.set(id, { isError: record.isError, text: advisorMessageText(record) });
+      }
+    }
+  }
+
+  for (const message of messages.slice(-64)) {
+    if (evidence.length >= max) break;
+    const record = message as unknown as { role?: string; content?: unknown };
+    if (record.role !== "assistant") continue;
+    const blocks = Array.isArray(record.content) ? record.content : [record.content];
+    for (const block of blocks) {
+      if (evidence.length >= max) break;
+      const use = block as { type?: string; name?: string; input?: unknown; arguments?: unknown; id?: string; toolCallId?: string } | null;
+      if (!use) continue;
+      const isToolUse = use.type === "tool_use" || use.type === "toolCall";
+      if (!isToolUse) continue;
+      const tool = typeof use.name === "string" ? use.name : "";
+      if (!tool || !SOP_TOOL_NAMES.has(tool)) continue;
+      const input = (use.input ?? use.arguments ?? {}) as Record<string, unknown>;
+      const action = typeof input.action === "string" ? input.action : undefined;
+      const topic = typeof input.topic === "string" ? input.topic : undefined;
+      const id = typeof (use.id ?? use.toolCallId) === "string" ? (use.id ?? use.toolCallId) as string : "";
+      const result = id ? results.get(id) : undefined;
+      const isError = result?.isError === true;
+      let outcome: ToolCallEvidence["outcome"] = "ok";
+      let errorMessage: string | undefined;
+      if (isError) {
+        const text = result?.text ?? "";
+        outcome = classifyToolOutcome(text);
+        errorMessage = text.slice(0, 160) || undefined;
+      }
+      const key = `${tool}:${action ?? ""}:${topic ?? ""}:${outcome}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      evidence.push({ tool, action, topic, outcome, ...(errorMessage ? { errorMessage } : {}) });
+    }
+  }
+  return evidence;
+}
+
 const FILE_REFERENCE_PATTERN = /\b([\w./-]+\.(?:ts|tsx|mjs|cjs|js|jsx|json|md|mdx|py|go|rs|css|scss|html|sh|yml|yaml|toml|txt|sql|java|kt|c|cpp|h|hpp|rb|php|vue|svelte|graphql|lock))(?::(\d+))?\b/gi;
 
 /** Extract plausible file references (`path` or `path:line`) from text. */
@@ -443,6 +546,8 @@ export interface SelfEvolveSignal {
   title: string;
   summary: string;
   evidence: EvidenceRef[];
+  /** Phase 2C: structured tool-call trajectory from the transcript tail. */
+  toolCalls?: ToolCallEvidence[];
   /** Stage-command template for a human/Phase 2B consumer. Never executed. */
   suggestion?: string;
   trigger?: { reason?: string; turnIndex?: number };
@@ -460,6 +565,7 @@ export function buildSignal(params: {
   skill?: string;
   model?: string;
   runId?: string;
+  toolCalls?: ToolCallEvidence[];
   suggestion?: string;
   trigger?: { reason?: string; turnIndex?: number };
 }): SelfEvolveSignal {
@@ -480,6 +586,7 @@ export function buildSignal(params: {
     title: params.title,
     summary: params.summary,
     evidence: params.evidence,
+    ...(params.toolCalls && params.toolCalls.length > 0 ? { toolCalls: params.toolCalls } : {}),
     ...(params.suggestion ? { suggestion: params.suggestion } : {}),
     ...(params.trigger ? { trigger: params.trigger } : {}),
   };
@@ -499,7 +606,17 @@ export function signalEvidenceContent(signal: SelfEvolveSignal): string {
   const evidence = (signal.evidence ?? [])
     .map((entry) => `- ${entry.type}${entry.role ? `:${entry.role}` : ""} ${entry.ref}`)
     .join("\n");
+  const toolCalls = (signal.toolCalls ?? []).map((call) => {
+    const parts = [call.tool];
+    if (call.action) parts.push(`action=${call.action}`);
+    if (call.topic) parts.push(`topic=${call.topic}`);
+    parts.push(`outcome=${call.outcome}`);
+    if (call.errorMessage) parts.push(`err="${call.errorMessage.replace(/"/g, "'").slice(0, 120)}"`);
+    return `- ${parts.join(" ")}`;
+  }).join("\n");
+  const sopHint = renderSopFrontmatterHint(signal.toolCalls);
   const lines = [
+    ...(sopHint ? [sopHint, ""] : []),
     `# ${signal.title}`,
     "",
     signal.summary,
@@ -509,6 +626,36 @@ export function signalEvidenceContent(signal: SelfEvolveSignal): string {
     "evidence:",
     evidence || "- (none)",
   ];
+  if (toolCalls) {
+    lines.push("tool_trajectory:", toolCalls);
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Phase 2C: when a signal carries a structured tool trajectory, emit a
+ * frontmatter hint at the top of the evidence file so `maestro knowledge stage
+ * --content-file` deposits a knowhow entry the SopLoader can discover. The
+ * hint uses the first failing tool call's tool + guide topic (or the first
+ * call) so the candidate attaches to the right pi tool's SOP registry.
+ */
+function renderSopFrontmatterHint(toolCalls: ToolCallEvidence[] | undefined): string | undefined {
+  if (!toolCalls || toolCalls.length === 0) return undefined;
+  const failing = toolCalls.find((call) => call.outcome !== "ok") ?? toolCalls[0];
+  const tool = failing.tool;
+  const topic = failing.topic;
+  const lines = [
+    "---",
+    `title: <SOP title — summarize the ${tool} pitfall or recipe>`,
+    "type: recipe",
+    `tools: [${tool}]`,
+  ];
+  if (topic) {
+    lines.push(`sop_topic: ${topic}`);
+  } else {
+    lines.push("sop_topic: <kebab-case-topic>");
+  }
+  lines.push("sop_order: 0", `category: ${tool}-sop`, "---");
   return lines.join("\n");
 }
 
@@ -827,6 +974,10 @@ export interface SelfEvolveReview {
   nonActionableSkipped?: number;
   /** Auto-deposited stage executions attempted in `auto-deposit` mode (audit count). */
   deposited?: number;
+  /** Phase 3: session that ran the review (for `/self-evolve review pending`). */
+  sessionId?: string;
+  /** Phase 3: signal ids covered by this review (for `review pending` dedup). */
+  signalIds?: string[];
 }
 
 /** JSON schema for the review model output (per-signal verdicts). */

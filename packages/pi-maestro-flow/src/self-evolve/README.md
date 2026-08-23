@@ -224,14 +224,20 @@ TUI 面板（`ctx.ui.custom` overlay），展示：配置菜单（含来源）�
 
 ```
 src/self-evolve/
-  runtime.ts    纯逻辑（host-free、可单测）：config 归一化、轨迹 digest、hash、
-                file/tool 证据提取、候选类型启发式、信号记录构建、路径与修剪、
-                TUI/命令展示助手（setConfigValue / formatStatusText / 信号解析）
-  extension.ts  宿主接线：env/config 读取、agent_end / session_before_compact /
-                session_compact 事件、去重 LRU、预算/冷却、JSONL 追加 + 归档修剪、
-                /self-evolve 命令（status/on/off/config/signals/review/reviews/panel）、状态栏
-  se-e2e.mts    行为回归测试（mock 宿主，32 断言）
-  README.md     本文档
+  runtime.ts          纯逻辑（host-free、可单测）：config 归一化、轨迹 digest、hash、
+                      file/tool 证据提取、候选类型启发式、信号记录构建、路径与修剪、
+                      TUI/命令展示助手（setConfigValue / formatStatusText / 信号解析）
+  enrichment.ts       Phase 7 P0+P2：enrichment ledger（独立于 suggestions JSONL）、
+                      resolveSignal 投影、collision fail-closed、语义 prompt/schema/budget
+  trajectory.ts       Phase 7 P1：通用有序工具时间线 + 工具 adapter registry + episode 构建
+  session-summary.ts  Phase 7 P4：会话累计摘要 + reason-aware shutdown 收尾
+  extension.ts        宿主接线：env/config 读取、agent_end / session_before_compact /
+                      session_compact / session_shutdown 事件、去重 LRU、预算/冷却、
+                      JSONL 追加 + 归档修剪、/self-evolve 命令（status/on/off/config/signals/
+                      review[ pending]/reviews/deposits/wrap/panel）、状态栏、语义 enrichment 调度
+  se-e2e.mts          行为回归测试（mock 宿主，91 断言）
+  se-deep-sim.mts     深度模拟（mock 宿主，25 断言）
+  README.md           本文档
 src/tui/
   self-evolve-overlay.ts  /self-evolve（默认）/panel 只读面板（Component + Focusable）
 ```
@@ -244,10 +250,16 @@ node --experimental-strip-types <(cat <<'EOF'
 ...
 EOF
 )
-# 行为回归（mock 宿主，84 断言：默认禁用零副作用 / 启用持久化 / 信号生成 /
+# 行为回归（mock 宿主，91 断言：默认禁用零副作用 / 启用持久化 / 信号生成 /
 # 去重与冷却语义 / 状态栏 / 配置校验含 mode / dry-run 保证 / review 评审门 /
-# auto-deposit 自动 stage + deposit ledger / 幂等去重 / fail-closed / 跨项目守卫 / executor throw）
-cd packages/pi-maestro-flow && node --experimental-strip-types src/self-evolve/se-e2e.mts
+# auto-deposit 自动 stage + deposit ledger / 幂等去重 / fail-closed / 跨项目守卫 /
+# Phase 7：enrichment fallback ledger / session_shutdown summary / wrap）
+cd packages/pi-maestro-flow && node --experimental-transform-types src/self-evolve/se-e2e.mts
+# 深度模拟（25 断言）
+cd packages/pi-maestro-flow && npx tsx src/self-evolve/se-deep-sim.mts
+# Phase 7 单测（enrichment 契约 + 通用轨迹 + 会话摘要）
+cd packages/pi-maestro-flow && node --experimental-transform-types --test \
+  test/self-evolve-semantic.test.ts test/self-evolve-tool-trajectory.test.ts test/self-evolve-session-summary.test.ts
 ```
 
 风格与结构对齐 `src/advisor/`（第二入口先例），互不修改对方逻辑。

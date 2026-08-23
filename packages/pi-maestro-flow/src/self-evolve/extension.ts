@@ -42,6 +42,7 @@ import {
   buildSignal,
   buildStageCommandArgs,
   buildSuggestion,
+  buildToolCallEvidence,
   classifyCandidateType,
   compactDigest,
   dailySuggestionFileName,
@@ -92,6 +93,7 @@ import {
   type DepositRecord,
   type EvidenceRef,
   type FileOpsLike,
+  type ToolCallEvidence,
   type ReviewVerdict,
   type SelfEvolveConfig,
   type SelfEvolveCounters,
@@ -100,6 +102,39 @@ import {
   type SelfEvolveSource,
   type StageExecutionResult,
 } from "./runtime.ts";
+import {
+  buildEnrichmentInput,
+  buildEnrichmentPrompt,
+  canEnrich,
+  DEFAULT_ENRICHMENT_BUDGET,
+  ENRICHMENT_OUTPUT_SCHEMA,
+  evidenceIdFor,
+  formatEnrichmentLine,
+  freshBudgetState,
+  markSubmitted,
+  parseEnrichmentRecord,
+  parseEnrichmentResults,
+  recordAttempt,
+  resolveSignalCorpus,
+  resultToRecord,
+  selectEnrichment,
+  type EnrichmentBudget,
+  type EnrichmentBudgetState,
+  type EnrichmentRecord,
+  type EnrichmentResult,
+  type ResolvedSignal,
+} from "./enrichment.ts";
+import { buildTrajectoryEpisodes, collectToolCallTimeline } from "./trajectory.ts";
+import {
+  buildSessionSummary,
+  formatSessionSummaryLedgerLine as formatSummaryLedgerLine,
+  formatSessionSummaryLine as formatSummaryLine,
+  type SessionAccumulator,
+  type SessionSummary,
+  type ShutdownReason,
+  shouldNudgeReview,
+  reviewNudgeMessage,
+} from "./session-summary.ts";
 import crossSpawn from "cross-spawn";
 import type { ChildProcess } from "node:child_process";
 
@@ -448,6 +483,12 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
   let lastSignalBySource: Partial<Record<SelfEvolveSource, number>> = {};
   let compactPrepCount = 0;
   let pendingCompact: PendingCompactPrep | undefined;
+  // Phase 2: semantic enrichment budget state (per-session). Reset on reload.
+  let enrichmentBudget: EnrichmentBudget = DEFAULT_ENRICHMENT_BUDGET;
+  let enrichmentState: EnrichmentBudgetState = freshBudgetState();
+  // Phase 4: session wrap/nudge flags (per-session). Reset on reload.
+  let sessionWrapped = false;
+  let reviewNudgedThisSession = false;
 
   function effectiveEnabled(): boolean {
     return envOverride ?? config.enabled;
@@ -459,6 +500,72 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
     lastSignalBySource = {};
     compactPrepCount = 0;
     pendingCompact = undefined;
+    enrichmentState = freshBudgetState();
+    sessionWrapped = false;
+    reviewNudgedThisSession = false;
+  }
+
+  /** Build a session accumulator from in-memory counters. */
+  function currentSessionAccumulator(ctx: ExtensionContext): SessionAccumulator {
+    return {
+      sessionId: ctx.sessionManager.getSessionId(),
+      project: projectNameFor(ctx.cwd),
+      agentEndCount,
+      signalsWritten: sessionSignals,
+      deduped: state.deduped,
+      suppressed: state.suppressed,
+      failures: state.failures,
+      enrichmentCallsUsed: enrichmentState.callsUsed,
+      enrichmentCandidatesEnriched: enrichmentState.candidatesEnriched,
+      enrichmentRescued: 0, // populated lazily when enrichments are loaded
+    };
+  }
+
+  /** Write a session summary to the session-summaries ledger. */
+  async function writeSessionSummary(summary: SessionSummary): Promise<void> {
+    const outputRoot = resolvedOutputRoot();
+    const dir = resolve(outputRoot, "session-summaries");
+    if (!isPathInside(outputRoot, dir)) {
+      throw new Error(`Self-evolve session-summaries dir escaped the output root: ${dir}`);
+    }
+    await mkdir(dir, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
+    const filePath = join(dir, dailySuggestionFileName());
+    await writeFile(filePath, `${formatSummaryLedgerLine(summary)}\n`, {
+      encoding: "utf8",
+      flag: "a",
+      mode: PRIVATE_FILE_MODE,
+    });
+  }
+
+  /**
+   * Phase 4: informational pending-review nudge. Counts this session's
+   * unreviewed resolved signals and notifies once per session when the count
+   * crosses the threshold. Never starts a review.
+   */
+  async function maybeNudgeReview(ctx: ExtensionContext): Promise<void> {
+    if (reviewNudgedThisSession) return;
+    const currentSessionId = ctx.sessionManager.getSessionId();
+    const currentProject = projectNameFor(ctx.cwd);
+    const resolved = await loadResolvedSignals();
+    const reviewedIds = new Set<string>();
+    for (const review of (await loadRecentReviews(config.maxReviewFiles))) {
+      if (review.sessionId === currentSessionId && review.signalIds) {
+        for (const id of review.signalIds) reviewedIds.add(id);
+      }
+    }
+    const pending = resolved
+      .filter((s) => s.sessionId === currentSessionId && s.project === currentProject)
+      .filter(resolvedIsActionable)
+      .filter((s) => !reviewedIds.has(s.id))
+      .length;
+    if (shouldNudgeReview(pending)) {
+      reviewNudgedThisSession = true;
+      try {
+        ctx.ui.notify(reviewNudgeMessage(pending), "info");
+      } catch {
+        // best-effort
+      }
+    }
   }
 
   function recordFailure(error: unknown, ctx?: ExtensionContext): void {
@@ -534,6 +641,55 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
     return loadSignals({ limit });
   }
 
+  /** Load all enrichment ledger records across the retention window. */
+  async function loadEnrichmentRecords(): Promise<EnrichmentRecord[]> {
+    try {
+      const dir = resolve(resolvedOutputRoot(), "enrichments");
+      const names = (await readdir(dir))
+        .filter((name) => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(name))
+        .sort()
+        .slice(-config.maxFiles);
+      const lines: string[] = [];
+      for (const name of names) {
+        lines.push(...(await readFile(join(dir, name), "utf8")).split("\n"));
+      }
+      return parseEnrichmentLedgerLines(lines);
+    } catch {
+      return [];
+    }
+  }
+
+  /** Parse enrichment ledger lines (newline-delimited JSON) into records. */
+  function parseEnrichmentLedgerLines(lines: readonly string[]): EnrichmentRecord[] {
+    const records: EnrichmentRecord[] = [];
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const rec = (JSON.parse(trimmed) as unknown);
+        const parsed = parseEnrichmentRecord(rec);
+        if (parsed) records.push(parsed);
+      } catch {
+        // skip malformed
+      }
+    }
+    return records;
+  }
+
+  /**
+   * Load raw signals and project them against the enrichment ledger into
+   * resolved signals. Collisions (same id, different traceHash/sessionId) are
+   * forced to heuristic_fallback. Resolved signals that were rescued from
+   * `unknown` by a semantic enrichment become actionable (the enrichment
+   * supplied a candidateType + title + summary).
+   */
+  async function loadResolvedSignals(limit?: number): Promise<ResolvedSignal[]> {
+    const raw = await loadSignals({ limit });
+    const records = await loadEnrichmentRecords();
+    const selection = selectEnrichment(records);
+    return resolveSignalCorpus(raw, selection);
+  }
+
   /**
    * Load signals across daily suggestion files with optional range/project
    * filters. Without an explicit range the last `maxFiles` files are read
@@ -570,6 +726,41 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
     } catch {
       return [];
     }
+  }
+
+  /**
+   * True when a resolved signal is actionable: either it has a stage template
+   * (heuristic knowhow/spec) OR a semantic enrichment rescued it from
+   * `unknown` by supplying a candidateType + title + summary.
+   */
+  function resolvedIsActionable(signal: ResolvedSignal): boolean {
+    if (typeof signal.suggestion === "string" && signal.suggestion.length > 0) return true;
+    if (signal.enrichmentStatus === "semantic" && signal.candidateType !== "unknown") return true;
+    return false;
+  }
+
+  /**
+   * Build a stage-command argv for a resolved signal. For semantically
+   * rescued signals (no heuristic suggestion), synthesize the template from
+   * the resolved fields so the governance pipeline can stage them.
+   */
+  function resolvedStageArgs(
+    signal: ResolvedSignal,
+    evidenceFile: string,
+  ): string[] | undefined {
+    if (signal.candidateType === "unknown") return undefined;
+    // Reuse the existing heuristic suggestion when present.
+    if (typeof signal.suggestion === "string" && signal.suggestion.length > 0) {
+      return buildStageCommandArgs(signal, evidenceFile);
+    }
+    // Synthesize for rescued signals.
+    if (signal.enrichmentStatus !== "semantic") return undefined;
+    const type = signal.candidateType === "spec" ? "spec" : "knowhow";
+    const refs = (signal.evidence ?? []).map((e) => e.ref).slice(0, 8).join(", ");
+    const args = ["knowledge", "stage", type, signal.title, "--content-file", evidenceFile];
+    args.push("--session", signal.sessionId);
+    if (refs) args.push("--evidence", refs);
+    return args;
   }
 
   /** Load the most recent review records (reverse chronological). */
@@ -702,7 +893,12 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
     summary: string;
     evidence: EvidenceRef[];
     candidateType: CandidateType;
+    toolCalls?: ToolCallEvidence[];
     trigger?: { reason?: string; turnIndex?: number };
+    /** Redacted digest used for enrichment input (Phase 2). */
+    digest?: string;
+    /** Trajectory episodes for enrichment input (Phase 2). */
+    episodes?: Array<{ kind: string; tool: string; operation: string; outcomes: string[] }>;
   }): Promise<void> {
     if (sessionSignals >= config.maxSignalsPerSession) {
       state.suppressed++;
@@ -719,6 +915,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
       project: projectNameFor(params.ctx.cwd),
       skill: process.env[SELF_EVOLVE_SKILL_FLAG]?.trim() || "general",
       model: resolveSelfEvolveModel(params.ctx),
+      ...(params.toolCalls && params.toolCalls.length > 0 ? { toolCalls: params.toolCalls } : {}),
       trigger: params.trigger,
     });
     // Persist the evidence file first so the stage template below is
@@ -747,6 +944,168 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
     state.lastSource = params.source;
     await pruneSignalFiles(dir);
     updateStatusBar(params.ctx);
+    notifySignalWritten(params.ctx, params.title, params.candidateType, params.toolCalls);
+    // Phase 2: in hybrid mode, fire-and-forget semantic enrichment. The
+    // enrichment never blocks the signal write — it runs async and appends a
+    // terminal record to the enrichment ledger. On any failure it writes a
+    // `heuristic_fallback` so the raw signal stays usable.
+    if (canEnrich(record, enrichmentBudget, enrichmentState)) {
+      void enrichSignalAsync(record, params.digest, params.episodes, params.ctx).catch((error) =>
+        recordFailure(error, params.ctx),
+      );
+    }
+  }
+
+  /**
+   * Lightweight notify on every newly-written signal so the user sees what
+   * self-evolve captured from the just-finished agent loop. One notify per
+   * signal (no cross-signal throttle per the user choice "真写信号才弹");
+   * suppressed/deduped/noise-filtered turns stay silent.
+   */
+  function notifySignalWritten(
+    ctx: ExtensionContext,
+    title: string,
+    candidateType: CandidateType,
+    toolCalls: ToolCallEvidence[] | undefined,
+  ): void {
+    try {
+      const typeTag = candidateType === "unknown" ? "signal" : candidateType;
+      const toolSummary = (toolCalls ?? [])
+        .filter((call) => call.outcome !== "ok")
+        .slice(0, 3)
+        .map((call) => `${call.tool}:${call.outcome}${call.topic ? `(${call.topic})` : ""}`)
+        .join(" ");
+      const tail = toolSummary ? ` · ${toolSummary}` : "";
+      const truncated = title.length > 80 ? `${title.slice(0, 77)}...` : title;
+      ctx.ui.notify(`Self-evolve ${typeTag}: ${truncated}${tail} · /self-evolve signals`, "info");
+    } catch {
+      // Notification is best-effort — never fail the signal write path.
+    }
+  }
+
+  /**
+   * Phase 2: append an enrichment record (terminal) to the enrichment ledger.
+   * The ledger lives at `{outputRoot}/enrichments/<date>.jsonl`, separate from
+   * the suggestions JSONL so raw signals stay untouched.
+   */
+  async function appendEnrichmentRecord(record: EnrichmentRecord): Promise<void> {
+    const outputRoot = resolvedOutputRoot();
+    const dir = resolve(outputRoot, "enrichments");
+    if (!isPathInside(outputRoot, dir)) {
+      throw new Error(`Self-evolve enrichments dir escaped the output root: ${dir}`);
+    }
+    await mkdir(dir, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
+    const filePath = join(dir, dailySuggestionFileName());
+    await writeFile(filePath, `${formatEnrichmentLine(record)}\n`, {
+      encoding: "utf8",
+      flag: "a",
+      mode: PRIVATE_FILE_MODE,
+    });
+  }
+
+  /**
+   * Phase 2: fire-and-forget semantic enrichment of a freshly-written signal.
+   * Runs the LLM via the same teammate supervision path as review, bounded by
+   * the per-session enrichment budget and a hard timeout. On ANY failure
+   * (model unavailable / timeout / budget / invalid output / unknown
+   * evidence id) a `heuristic_fallback` record is appended so the raw signal
+   * remains usable.
+   */
+  async function enrichSignalAsync(
+    signal: SelfEvolveSignal,
+    digest: string | undefined,
+    episodes: Array<{ kind: string; tool: string; operation: string; outcomes: string[] }> | undefined,
+    ctx: ExtensionContext,
+  ): Promise<void> {
+    markSubmitted(signal.id, enrichmentState);
+    const model = resolveSelfEvolveModel(ctx);
+    const availableModels = ctx.modelRegistry.getAvailable().map((m) => `${m.provider}/${m.id}`);
+    const fallback = (error: string): EnrichmentRecord => ({
+      schemaVersion: 1,
+      kind: "enrichment",
+      signalId: signal.id,
+      traceHash: signal.traceHash,
+      sessionId: signal.sessionId,
+      attempt: enrichmentState.callsUsed + 1,
+      status: "heuristic_fallback",
+      model,
+      error,
+      completedAt: new Date().toISOString(),
+    });
+    let record: EnrichmentRecord;
+    if (!model || !availableModels.includes(model)) {
+      record = fallback("enrichment model unavailable");
+    } else {
+      const runtime = await loadReviewTeammate();
+      if (!runtime) {
+        record = fallback("teammate runtime unavailable");
+      } else {
+        try {
+          const input = buildEnrichmentInput(
+            signal,
+            digest ?? "",
+            episodes ?? [],
+          );
+          const prompt = buildEnrichmentPrompt([input]);
+          const availableIds = new Set(input.evidence.map((e) => e.id));
+          const { supervision, runTeammate } = runtime;
+          const evaluation = await supervision.runSupervisedEvaluation<EnrichmentResult[]>(
+            async (dispatchContext) => {
+              const results = await runTeammate(
+                {
+                  tasks: [{
+                    agent: "analyst",
+                    prompt: dispatchContext.task,
+                    taskType: "analysis",
+                    model,
+                    fallbackModels: [],
+                    thinking: "low",
+                    timeoutMs: dispatchContext.timeoutMs ?? enrichmentBudget.semanticTimeoutMs,
+                    outputSchema: dispatchContext.outputSchema,
+                  }],
+                },
+                { baseCwd: ctx.cwd, signal: dispatchContext.signal },
+              );
+              const single = Array.isArray(results) ? results[0] : results;
+              if (!single) throw new Error("enrichment returned no teammate result");
+              return single;
+            },
+            {
+              task: prompt,
+              timeoutMs: enrichmentBudget.semanticTimeoutMs,
+              deadlineMs: enrichmentBudget.semanticTimeoutMs * 2,
+              outputSchema: ENRICHMENT_OUTPUT_SCHEMA,
+              fallbackTextParser: (text) => ({ results: parseEnrichmentResults(text) } as { results: EnrichmentResult[] }),
+              maxFailures: 0,
+            },
+          );
+          if (!evaluation.ok || !evaluation.verdict || evaluation.verdict.length === 0) {
+            record = fallback(evaluation.reason ?? "enrichment produced no result");
+          } else {
+            const result = evaluation.verdict[0];
+            record = resultToRecord(result, signal, enrichmentState.callsUsed + 1, model, availableIds);
+          }
+        } catch (error) {
+          record = fallback(
+            error instanceof Error ? error.message : "enrichment failed",
+          );
+        }
+      }
+    }
+    await appendEnrichmentRecord(record);
+    recordAttempt(1, enrichmentState);
+    // If the enrichment rescued an unknown signal, surface one aggregate notify
+    // so the user knows a hybrid-mode capture happened.
+    if (record.status === "semantic" && signal.candidateType === "unknown") {
+      try {
+        ctx.ui.notify(
+          `Self-evolve hybrid: rescued ${record.candidateType ?? "signal"} · ${record.title?.slice(0, 80) ?? ""} · /self-evolve review`,
+          "info",
+        );
+      } catch {
+        // best-effort
+      }
+    }
   }
 
   /**
@@ -857,6 +1216,18 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
     signal: SelfEvolveSignal,
     ctx: ExtensionContext,
   ): Promise<{ path: string; exitCode: number } | undefined> {
+    return depositResolvedSignal(signal as ResolvedSignal, ctx);
+  }
+
+  /**
+   * Deposit a resolved signal. For semantically rescued signals (no heuristic
+   * evidence file because the raw type was `unknown`), write the evidence file
+   * from the resolved fields before staging.
+   */
+  async function depositResolvedSignal(
+    signal: ResolvedSignal,
+    ctx: ExtensionContext,
+  ): Promise<{ path: string; exitCode: number } | undefined> {
     // Idempotency: never re-stage a signal that already deposited successfully.
     if ((await seedDepositedSignalIds()).has(signal.id)) return undefined;
     if (!isValidSignalId(signal.id)) {
@@ -865,18 +1236,30 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
     }
     const outputRoot = resolvedOutputRoot();
     const evidenceFile = join(outputRoot, "evidence", `${signal.id}.md`);
-    const args = buildStageCommandArgs(signal, evidenceFile);
-    if (!args) return undefined;
-    // `--json` gives a reliable `candidate_id` for the audit record; the
-    // human-facing `suggestion` template stays as-is (execution detail only).
-    const execArgs = [...args, "--json"];
-    // Fail-closed: the evidence file must exist before executing the stage.
+    // For semantically rescued signals (raw candidateType was unknown), the
+    // heuristic collector never wrote an evidence file — write one now from
+    // the resolved projection so `maestro knowledge stage --content-file` has
+    // a real file to read.
     let evidenceMissing = false;
     try {
       await access(evidenceFile);
     } catch {
       evidenceMissing = true;
     }
+    if (evidenceMissing && signal.enrichmentStatus === "semantic" && signal.candidateType !== "unknown") {
+      try {
+        await writeSignalEvidence(signal as SelfEvolveSignal);
+        await access(evidenceFile);
+        evidenceMissing = false;
+      } catch {
+        // leave evidenceMissing=true to fail-closed below
+      }
+    }
+    const args = resolvedStageArgs(signal, evidenceFile);
+    if (!args) return undefined;
+    // `--json` gives a reliable `candidate_id` for the audit record; the
+    // human-facing `suggestion` template stays as-is (execution detail only).
+    const execArgs = [...args, "--json"];
     let exitCode: number;
     let stdout = "";
     let stderr = "";
@@ -1048,6 +1431,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
         return;
       }
       const evidence = buildEvidenceFromMessages(agentEnd.messages, config.maxEvidence);
+      const toolCalls = buildToolCallEvidence(agentEnd.messages, config.maxEvidence);
       const assistantText = lastAssistantLine(digest);
       const summary = summarizeText(assistantText || digest);
       const title = makeTitle(summary);
@@ -1058,7 +1442,22 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
         updateStatusBar(ctx);
         return;
       }
-      const candidateType = classifyCandidateType(`${summary}\n${title}`);
+      // Phase 2C: tool trajectory feeds the classifier so a browser/computer_use
+      // failure mode biases toward knowhow (pitfall) and carries a tools hint.
+      // Phase 1+2: generic ordered timeline + episodes (broader tool coverage)
+      // also feed the classifier hint and the semantic enrichment input.
+      const timeline = collectToolCallTimeline(agentEnd.messages, config.maxEvidence);
+      const episodes = buildTrajectoryEpisodes(timeline);
+      const toolCallHint = toolCalls
+        .filter((call) => call.outcome !== "ok")
+        .map((call) => `${call.tool} ${call.outcome} ${call.action ?? ""} ${call.topic ?? ""}`)
+        .join(" ");
+      const episodeHint = episodes
+        .filter((ep) => ep.kind !== "success")
+        .map((ep) => `${ep.tool} ${ep.kind} ${ep.operation}`)
+        .join(" ");
+      const toolHint = [toolCallHint, episodeHint].filter(Boolean).join(" ");
+      const candidateType = classifyCandidateType(`${summary}\n${title}${toolHint ? `\n${toolHint}` : ""}`);
       void writeSignal({
         source: "agent_end",
         ctx,
@@ -1067,6 +1466,9 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
         summary,
         evidence,
         candidateType,
+        ...(toolCalls.length > 0 ? { toolCalls } : {}),
+        digest,
+        episodes,
         trigger: { turnIndex: agentEndCount },
       }).catch((error) => recordFailure(error, ctx));
     } catch (error) {
@@ -1133,14 +1535,38 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
         candidateType,
         trigger: { reason: compact.reason },
       }).catch((error) => recordFailure(error, ctx));
+      // Phase 4: low-frequency pending-review nudge (informational — never
+      // auto-runs a review).
+      void maybeNudgeReview(ctx).catch(() => undefined);
     } catch (error) {
       recordFailure(error, ctx);
     }
   });
 
-  // -------------------------------------------------------------------------
-  // Command
-  // -------------------------------------------------------------------------
+  // Phase 4: session shutdown — reason-aware state-only receipt. Never
+  // starts an LLM, review, or stage; only snapshots counters, writes a
+  // session summary (or checkpoint for reload), and best-effort notifies.
+  pi.on("session_shutdown", (event, ctx) => {
+    if (!effectiveEnabled() || configCwd !== ctx.cwd) return;
+    try {
+      const shutdown = event as { type: string; reason: ShutdownReason };
+      if (shutdown.type !== "session_shutdown") return;
+      const reason = shutdown.reason;
+      const acc = currentSessionAccumulator(ctx);
+      const summary = buildSessionSummary(acc, reason, {
+        wrapped: sessionWrapped,
+      });
+      void writeSessionSummary(summary).catch(() => undefined);
+      sessionWrapped = true;
+      try {
+        ctx.ui.notify(formatSummaryLine(summary), "info");
+      } catch {
+        // best-effort
+      }
+    } catch (error) {
+      recordFailure(error, ctx);
+    }
+  });
 
   pi.registerCommand("self-evolve", {
     description: "Self-evolve: /self-evolve (editable panel, default) | status | on | off | config [k=v ...|reset] | signals [N|delete <id>|clear|export] | review [N] | reviews [N] | deposits [N]",
@@ -1208,13 +1634,26 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
         // Set one or more key=value pairs (all-or-nothing on validation).
         let next = config;
         const errors: string[] = [];
+        let nextCaptureMode = enrichmentBudget.captureMode;
         for (const pair of rest) {
           const eq = pair.indexOf("=");
           if (eq <= 0) {
             errors.push(`"${pair}" (expected key=value)`);
             continue;
           }
-          const result = setConfigValue(next, pair.slice(0, eq), pair.slice(eq + 1));
+          const key = pair.slice(0, eq);
+          const value = pair.slice(eq + 1);
+          // captureMode is an enrichment-budget setting (not persisted in
+          // SelfEvolveConfig) — handle it here so users toggle hybrid mode.
+          if (key === "captureMode") {
+            if (value !== "heuristic" && value !== "hybrid") {
+              errors.push(`captureMode must be "heuristic" or "hybrid" (got "${value}")`);
+            } else {
+              nextCaptureMode = value;
+            }
+            continue;
+          }
+          const result = setConfigValue(next, key, value);
           if (result.error) errors.push(result.error);
           else next = result.config;
         }
@@ -1229,6 +1668,12 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
           return;
         }
         config = next;
+        if (nextCaptureMode !== enrichmentBudget.captureMode) {
+          enrichmentBudget = { ...enrichmentBudget, captureMode: nextCaptureMode };
+          // Resetting the enrichment budget state on a mode switch gives a
+          // clean budget window for the new mode.
+          enrichmentState = freshBudgetState();
+        }
         resetSessionState();
         updateStatusBar(ctx);
         ctx.ui.notify(formatConfigSummary(config, source, { resolvedModel: resolveSelfEvolveModel(ctx), enabled: effectiveEnabled(), suggestionsDir: resolvedSuggestionsDir() }), "info");
@@ -1346,14 +1791,34 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
       }
 
       if (cmd === "review") {
-        const limit = rest[0]
-          ? Math.max(1, Math.min(10, Number.parseInt(rest[0], 10) || 5))
-          : 5;
-        const allSignals = await loadRecentSignals(limit * 3);
-        // Non-actionable signals (no stage template — e.g. unknown type) are
-        // excluded from the review set; they cannot be staged anyway.
-        const signals = allSignals.filter(signalIsActionable).slice(-limit);
-        const nonActionableSkipped = allSignals.length - signals.length;
+        // `/self-evolve review pending [N]` — session-scoped review of signals
+        // not yet reviewed in the current session. Falls back to the global
+        // `/self-evolve review [N]` behavior when `pending` is absent.
+        const pending = rest[0]?.toLowerCase() === "pending";
+        const limitNum = pending
+          ? (rest[1] ? Math.max(1, Math.min(10, Number.parseInt(rest[1], 10) || 5)) : 5)
+          : (rest[0] ? Math.max(1, Math.min(10, Number.parseInt(rest[0], 10) || 5)) : 5);
+        const allResolved = await loadResolvedSignals(limitNum * 3);
+        // Non-actionable signals (no stage template AND not semantically
+        // rescued) are excluded from the review set.
+        let signals = allResolved.filter(resolvedIsActionable);
+        let nonActionableSkipped = allResolved.length - signals.length;
+        const currentSessionId = ctx.sessionManager.getSessionId();
+        const currentProject = projectNameFor(ctx.cwd);
+        if (pending) {
+          // Exclude signals already covered by a prior review in this session.
+          const reviewedIds = new Set<string>();
+          for (const review of (await loadRecentReviews(config.maxReviewFiles))) {
+            if (review.sessionId === currentSessionId && review.signalIds) {
+              for (const id of review.signalIds) reviewedIds.add(id);
+            }
+          }
+          signals = signals
+            .filter((s) => s.sessionId === currentSessionId && s.project === currentProject)
+            .filter((s) => !reviewedIds.has(s.id));
+          nonActionableSkipped = allResolved.length - signals.length;
+        }
+        const reviewSignals = signals.slice(-limitNum);
         if (signals.length === 0) {
           ctx.ui.notify(
             nonActionableSkipped > 0
@@ -1402,7 +1867,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
               return single;
             },
             {
-              task: buildReviewPrompt(signals, config.reviewScoreThreshold),
+              task: buildReviewPrompt(reviewSignals, config.reviewScoreThreshold),
               timeoutMs: REVIEW_TIMEOUT_MS,
               deadlineMs: REVIEW_DEADLINE_MS,
               outputSchema: REVIEW_OUTPUT_SCHEMA,
@@ -1423,10 +1888,10 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
           }
           // Review-gate hardening: hallucinated ids dropped, low-score stages
           // downgraded to uncertain, non-actionable stages downgraded too.
-          const actionableIds = new Set(signals.map((s) => s.id));
+          const actionableIds = new Set(reviewSignals.map((s) => s.id));
           const gate = normalizeReviewVerdicts(
             evaluation.verdict.verdicts,
-            signals.map((s) => s.id),
+            reviewSignals.map((s) => s.id),
             config.reviewScoreThreshold,
             actionableIds,
           );
@@ -1438,11 +1903,13 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
             createdAt: new Date().toISOString(),
             project: projectNameFor(ctx.cwd),
             model: selectedModel,
-            signals: signals.length,
+            signals: reviewSignals.length,
             verdicts: gate.verdicts,
             droppedInvalid: gate.droppedInvalid,
             downgraded: gate.downgraded,
             nonActionableSkipped,
+            sessionId: currentSessionId,
+            signalIds: reviewSignals.map((s) => s.id),
           };
           // Phase 2B auto-deposit: in auto-deposit mode, stage every signal
           // that survived the review gate (`stage` verdict). Promotion stays
@@ -1457,7 +1924,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
             const stageVerdicts = gate.verdicts.filter((v) => v.action === "stage");
             const staged = new Set(stageVerdicts.map((v) => v.id));
             const currentProject = projectNameFor(ctx.cwd);
-            for (const signal of signals) {
+            for (const signal of reviewSignals) {
               if (!staged.has(signal.id)) continue;
               if (signal.project !== currentProject) continue; // cross-project guard
               try {
@@ -1570,6 +2037,23 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
         return;
       }
 
+      if (cmd === "wrap") {
+        // `/self-evolve wrap` — manual session summary. Idempotent: a second
+        // call in the same session refreshes the summary but stays marked
+        // `wrapped`. Never starts an LLM/review/stage.
+        const acc = currentSessionAccumulator(ctx);
+        const summary = buildSessionSummary(acc, "quit", { wrapped: sessionWrapped });
+        try {
+          await writeSessionSummary(summary);
+        } catch (error) {
+          ctx.ui.notify(`Self-evolve wrap failed — ${error instanceof Error ? error.message : String(error)}`, "warning");
+          return;
+        }
+        sessionWrapped = true;
+        ctx.ui.notify(formatSummaryLine(summary), "info");
+        return;
+      }
+
       if (cmd === "status") {
         const model = resolveSelfEvolveModel(ctx);
         const lines = [
@@ -1581,12 +2065,13 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
         `  review gate: stage below score ${config.reviewScoreThreshold} downgraded to uncertain`,
         `  retention: keep ${config.maxFiles} daily signal files · ${config.maxReviewFiles} daily review files (stale archived)`,
         `  output: ${resolvedSuggestionsDir()}`,
+        `  capture mode: ${enrichmentBudget.captureMode} · enrich budget: ${enrichmentState.callsUsed}/${enrichmentBudget.maxSemanticCallsPerSession} calls · ${enrichmentState.candidatesEnriched}/${enrichmentBudget.maxSemanticCandidatesPerSession} candidates`,
         `  signals: ${state.signals} written · deduped: ${state.deduped} · suppressed: ${state.suppressed} · deposits: ${state.deposits}`,
         `  failures: ${state.failures}${state.lastError ? ` · last: ${state.lastError.slice(0, 200)}` : ""}`,
         state.lastSource
           ? `  last: ${state.lastSource}${lastSignalBySource[state.lastSource] ? ` · ${new Date(lastSignalBySource[state.lastSource]!).toLocaleTimeString()}` : ""}`
           : "  last: (none yet)",
-        `  usage: /self-evolve panel (editable: ↑↓ Enter Ctrl+S) · config <key>=<value> (enabled, mode, model, reviewScoreThreshold, cooldownMs, maxSignalsPerSession, maxTraceChars, maxTraceMessages, maxEvidence, maxFiles, maxReviewFiles) · signals [N|--since d|--until d|--project p|delete <id>|clear|export] · review [N] · reviews [N] · deposits [N]`,
+        `  usage: /self-evolve panel (editable: ↑↓ Enter Ctrl+S) · config <key>=<value> (enabled, mode, model, reviewScoreThreshold, cooldownMs, maxSignalsPerSession, maxTraceChars, maxTraceMessages, maxEvidence, maxFiles, maxReviewFiles, captureMode) · signals [N|--since d|--until d|--project p|delete <id>|clear|export] · review [N|pending [N]] · reviews [N] · deposits [N] · wrap`,
       ];
       ctx.ui.notify(lines.join("\n"), "info");
       return;
@@ -1594,7 +2079,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
 
       // Unknown subcommand — surface usage instead of silently opening the panel.
       ctx.ui.notify(
-        "Usage: /self-evolve [panel (default)|status|on|off|config [k=v ...|reset]|signals [N|delete <id>|clear|export|--since d --until d --project p]|review [N]|reviews [N]|deposits [N]]",
+        "Usage: /self-evolve [panel (default)|status|on|off|config [k=v ...|reset]|signals [N|delete <id>|clear|export|--since d --until d --project p]|review [N|pending [N]]|reviews [N]|deposits [N]|wrap]",
         "info",
       );
     },
