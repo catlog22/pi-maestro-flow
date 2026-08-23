@@ -1,0 +1,184 @@
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { resolveOwnPackageJson, resolvePackageOrWorkspaceResource } from "../resources/maestro-package.ts";
+
+/** An optional install item surfaced by `/install`. Mirrors the `OptionalSkill` pattern. */
+export interface InstallItem {
+  id: string;
+  title: string;
+  description: string;
+  /** Path to the AI setup doc, relative to the package `optional/` dir. */
+  docFile: string;
+  category: "core" | "optional" | "external";
+  /** Short user-visible, AI-readable lead-in prepended to the injected doc. */
+  promptIntro: string;
+}
+
+export type InstallStatus = "not-installed" | "installed" | "partial" | "unknown";
+
+/** Resolved item with a probed status and absolute doc path. */
+export interface ResolvedInstallItem extends InstallItem {
+  status: InstallStatus;
+  docPath: string | undefined;
+}
+
+const AGENT_DIR = join(homedir(), ".pi", "agent");
+
+/** Built-in install registry. Ordered core → optional → external. */
+export const INSTALL_ITEMS: readonly InstallItem[] = [
+  {
+    id: "init",
+    title: "初始化安装（API / 模型回退 / cockpit）",
+    description: "配置 API 凭证、模型回退路由、cockpit 显示。首次安装后必做。",
+    docFile: "INIT-SETUP.md",
+    category: "core",
+    promptIntro:
+      "这是首次安装后的初始化配置。请交互式询问用户必要的输入（API provider、key、偏好模型、cockpit 主题等），按文档写入对应配置文件，最后验证。",
+  },
+  {
+    id: "teammate-models",
+    title: "Teammate 模型配置",
+    description: "配置 .pi/teammate-models.json 的模型映射、fallback、thinking level。",
+    docFile: "TEAMMATE-MODELS-SETUP.md",
+    category: "core",
+    promptIntro:
+      "配置 teammate 模型路由。请参考文档和当前可用模型清单，交互式确认每个 taskType 的主模型与 fallback，写入 .pi/teammate-models.json。",
+  },
+  {
+    id: "computer-use-weights",
+    title: "Computer Use 视觉权重",
+    description: "下载 OmniParser-v2 icon_detect 权重并转换为 ONNX，启用真实 UI 检测。",
+    docFile: "COMPUTER-USE-WEIGHTS-SETUP.md",
+    category: "optional",
+    promptIntro:
+      "安装 Computer Use 视觉权重（OmniParser-v2 icon_detect）。按文档下载官方权重、转换为 ONNX、更新 manifest，最后运行验证。转换是必须的：vision service 是 onnxruntime-node，只能加载 ONNX。",
+  },
+  {
+    id: "smart-search",
+    title: "Smart Search 配置",
+    description: "配置 smart_search 的搜索 provider（Tavily/Exa/Jina 等）与凭证。",
+    docFile: "SMART-SEARCH-SETUP.md",
+    category: "external",
+    promptIntro:
+      "配置 Smart Search 外部搜索 provider。请交互式询问用户选择的 provider 和 API key，按文档写入配置，最后用 route 诊断验证。",
+  },
+  {
+    id: "mcp",
+    title: "MCP 服务器配置",
+    description: "注册 MCP 服务器并完成 OAuth 认证流程。",
+    docFile: "MCP-SETUP.md",
+    category: "external",
+    promptIntro:
+      "配置 MCP 服务器。按文档交互式询问要注册的 server，写入配置后用 /mcp auth 完成 OAuth。",
+  },
+];
+
+function resolveDocPath(docFile: string): string | undefined {
+  return resolvePackageOrWorkspaceResource(["optional", docFile], resolveOwnPackageJson());
+}
+
+/** Probe an item's install status from its config files. */
+export function probeInstallStatus(id: string): InstallStatus {
+  try {
+    switch (id) {
+      case "init": {
+        const authPath = join(AGENT_DIR, "auth.json");
+        if (!existsSync(authPath)) return "not-installed";
+        const auth = readJson(authPath) as Record<string, { type?: string; key?: unknown; access?: unknown }> | null;
+        const hasProvider = auth && typeof auth === "object" && Object.values(auth).some((entry) =>
+          entry && typeof entry === "object"
+          && (entry.type === "oauth" ? Boolean(entry.access) : Boolean(entry.key)),
+        );
+        return hasProvider ? "installed" : "partial";
+      }
+      case "teammate-models": {
+        const projectPath = join(process.cwd(), ".pi", "teammate-models.json");
+        const globalPath = join(AGENT_DIR, "teammate-models.json");
+        const path = existsSync(projectPath) ? projectPath : existsSync(globalPath) ? globalPath : undefined;
+        if (!path) return "not-installed";
+        const cfg = readJson(path) as { mappings?: unknown; overrides?: { mappings?: unknown }; profiles?: Record<string, { mappings?: unknown }> } | null;
+        const mappings = cfg?.mappings ?? cfg?.overrides?.mappings;
+        const profileMappings = cfg?.profiles && typeof cfg.profiles === "object"
+          ? Object.values(cfg.profiles).some((p) => p && typeof p.mappings === "object" && Object.keys(p.mappings ?? {}).length > 0)
+          : false;
+        const hasMappings = (mappings && typeof mappings === "object" && Object.keys(mappings ?? {}).length > 0) || profileMappings;
+        return hasMappings ? "installed" : "partial";
+      }
+      case "computer-use-weights": {
+        const manifestPath = resolvePackageOrWorkspaceResource(["optional", "computer-use-manifest.json"], resolveOwnPackageJson());
+        if (!manifestPath || !existsSync(manifestPath)) return "not-installed";
+        const manifest = readJson(manifestPath) as { model_artifacts?: Array<{ id?: string; status?: string; path?: string; sha256?: string }> } | null;
+        const icon = manifest?.model_artifacts?.find((a) => a.id === "omniparser.v2.icon_detect");
+        if (!icon) return "not-installed";
+        if (icon.status !== "verified_local") return "partial";
+        return icon.path && icon.sha256 && existsSync(icon.path) ? "installed" : "partial";
+      }
+      case "smart-search": {
+        // SmartSearch config: %LOCALAPPDATA%/smart-search/config.json (Win) or
+        // ~/.config/smart-search/config.json (others); SMART_SEARCH_CONFIG_DIR
+        // overrides. NOT ~/.maestro/cli-tools.json (that's Maestro delegate CLI).
+        const dir = process.env.SMART_SEARCH_CONFIG_DIR
+          ?? (process.platform === "win32" && process.env.LOCALAPPDATA
+            ? join(process.env.LOCALAPPDATA, "smart-search")
+            : join(homedir(), ".config", "smart-search"));
+        const configFile = join(dir, "config.json");
+        if (!existsSync(configFile)) return "not-installed";
+        const cfg = readJson(configFile) as Record<string, unknown> | null;
+        const providerKeys = ["TAVILY_API_KEY", "EXA_API_KEY", "CONTEXT7_API_KEY", "JINA_API_KEY", "FIRECRAWL_API_KEY", "ZHIPU_API_KEY", "OPENAI_COMPATIBLE_API_KEY"];
+        const configured = providerKeys.filter((k) => typeof (cfg as Record<string, unknown>)?.[k] === "string" && String((cfg as Record<string, unknown>)[k]).length > 0);
+        return configured.length >= 3 ? "installed" : configured.length > 0 ? "partial" : "not-installed";
+      }
+      case "mcp": {
+        // MCP config is multi-source; check for mcpServers in any source.
+        const candidates = [
+          join(homedir(), ".config", "mcp", "mcp.json"),
+          join(AGENT_DIR, "mcp.json"),
+          join(process.cwd(), ".mcp.json"),
+          join(process.cwd(), ".pi", "mcp.json"),
+        ];
+        const anyConfigured = candidates.some((p) => {
+          if (!existsSync(p)) return false;
+          const cfg = readJson(p) as { mcpServers?: Record<string, unknown> } | null;
+          return Boolean(cfg?.mcpServers && Object.keys(cfg.mcpServers ?? {}).length > 0);
+        });
+        return anyConfigured ? "installed" : "not-installed";
+      }
+      default:
+        return "unknown";
+    }
+  } catch {
+    return "unknown";
+  }
+}
+
+/** Resolve all items with probed status and doc paths. */
+export function resolveInstallItems(): ResolvedInstallItem[] {
+  return INSTALL_ITEMS.map((item) => ({
+    ...item,
+    status: probeInstallStatus(item.id),
+    docPath: resolveDocPath(item.docFile),
+  }));
+}
+
+/** Read a setup doc; returns undefined when the doc is not shipped. */
+export function readInstallDoc(docFile: string): string | undefined {
+  const path = resolveDocPath(docFile);
+  if (!path || !existsSync(path)) return undefined;
+  return readFileSync(path, "utf8");
+}
+
+function readJson(path: string): unknown {
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+export const STATUS_GLYPH: Record<InstallStatus, string> = {
+  installed: "✓",
+  partial: "○",
+  "not-installed": "·",
+  unknown: "?",
+};
