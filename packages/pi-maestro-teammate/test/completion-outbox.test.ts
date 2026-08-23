@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -220,5 +221,40 @@ test("an expired pending record is never claimed for delivery", async () => {
     const records = await store.listForTarget(target);
     assert.equal(records.length, 1);
     assert.equal(records[0]?.state, "expired");
+  });
+});
+
+test("transient EPERM on the store lock is retried, not crashed", async () => {
+  const fsp = createRequire(import.meta.url)("node:fs/promises") as typeof import("node:fs/promises");
+  const originalOpen = fsp.open;
+  let epermHits = 0;
+  let allowThrough = false;
+  const replacementOpen: typeof originalOpen = ((...args: Parameters<typeof originalOpen>) => {
+    const pathish = String(args[0] ?? "");
+    if (!allowThrough && pathish.endsWith(".store.lock") && epermHits < 2) {
+      epermHits += 1;
+      throw Object.assign(new Error("injected transient lock denial"), { code: "EPERM" });
+    }
+    return originalOpen(...args);
+  }) as typeof originalOpen;
+  await withStore(async (store) => {
+    Reflect.set(fsp, "open", replacementOpen);
+    syncBuiltinESMExports();
+    try {
+      // This would previously throw EPERM straight out of #withWorkspaceLock and
+      // crash the pi process; it must now retry past the transient denials.
+      const dispatch = seed("eperm-retry");
+      const reservation = await store.reserve(dispatch, 4_096);
+      assert.equal(reservation.state, "reserved");
+      assert.ok(epermHits >= 2, "both injected EPERM denials were observed");
+      // Subsequent operations under the same lock must still succeed once the
+      // transient condition clears.
+      allowThrough = true;
+      const pending = await store.importIntent(intent(dispatch));
+      assert.equal(pending.state, "pending");
+    } finally {
+      Reflect.set(fsp, "open", originalOpen);
+      syncBuiltinESMExports();
+    }
   });
 });

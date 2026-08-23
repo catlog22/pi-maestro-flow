@@ -611,7 +611,13 @@ export class CompletionOutboxFileStore {
         handle = await open(lockPath, "wx", 0o600);
         await handle.writeFile(`${this.ownerId}\n`);
       } catch (error) {
-        if (fileCode(error) !== "EEXIST") throw error;
+        const code = fileCode(error);
+        // Windows may transiently deny exclusive-create with EPERM/EACCES —
+        // antivirus scan, a concurrent holder still releasing the lock, or a
+        // racing rm that has not flushed yet. Treat it the same as EEXIST and
+        // retry within LOCK_WAIT_MS; never crash the process on a transient
+        // lock contention. Mirrors renameWithRetry's EPERM/EACCES/EEXIST set.
+        if (code !== "EEXIST" && code !== "EPERM" && code !== "EACCES") throw error;
         const info = await stat(lockPath).catch(() => undefined);
         if (info && Date.now() - info.mtimeMs > LOCK_STALE_MS) {
           await rm(lockPath, { force: true });

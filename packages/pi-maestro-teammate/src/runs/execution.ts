@@ -687,6 +687,13 @@ export async function runSingleTeammate(
       result.publicationId ??= publicationAwaitingCompletion.publicationId;
       result.originCwd ??= publicationAwaitingCompletion.originCwd;
       publicationAwaitingCompletion = undefined;
+    } else {
+      // Pre-launch rejections (rejectAndPublish) and caller cancellations
+      // (cancelAtBoundary) never reach publishResult, so the result has no
+      // publicationId. Durable completion delivery requires one for every
+      // result; mint a fresh id here rather than letting durableResources
+      // throw "has no immutable publicationId".
+      result.publicationId ??= randomUUID();
     }
     const canonicalStatus = terminalStatus
       ?? result.terminalStatus
@@ -1747,6 +1754,11 @@ export async function runSingleTeammate(
       if (modelRegistryContext === undefined) settlePendingModelAcquisitions(false);
       candidateResult.attemptedModels = attemptedModels.length > 1 ? attemptedModels : undefined;
       commitCompletion();
+      // The final failed candidate may bypass publishResult when no completion
+      // observer armed the attempt options. Durable completion delivery
+      // requires a publicationId on every result, so mint one here if the
+      // attempt path never assigned one.
+      candidateResult.publicationId ??= randomUUID();
       return candidateResult;
     } finally {
       // Every half-open permit must settle exactly once. releasePermit is a
@@ -1808,6 +1820,10 @@ export async function runGraph(
       correlationId: taskCorrelationIds[index],
       durationMs: 0,
       terminalStatus: "failed",
+      // Graph-level rejections bypass runSingleTeammate's publishResult, so
+      // durable completion delivery would otherwise throw on the missing
+      // publicationId.
+      publicationId: randomUUID(),
     };
     const now = Date.now();
     try {
@@ -2152,6 +2168,9 @@ export async function runGraph(
       correlationId: taskCorrelationIds[taskIndex],
       durationMs: 0,
       terminalStatus: terminalStatus ?? "failed",
+      // Synthetic failures bypass runSingleTeammate's publishResult, so durable
+      // completion delivery would otherwise throw on the missing publicationId.
+      publicationId: randomUUID(),
     };
     results[taskIndex] = result;
     reportTaskFailure(task, taskIndex, message, terminalStatus);

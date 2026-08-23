@@ -743,6 +743,8 @@ export default function registerTeammateExtension(
         ...(process.env.PI_TEAMMATE_CORRELATION_ID
           ? { correlationId: process.env.PI_TEAMMATE_CORRELATION_ID }
           : {}),
+      }).catch((error) => {
+        console.warn("[pi-maestro-teammate] child completion message_end reconciliation failed:", error);
       });
       if (event.message.role !== "assistant" || event.message.stopReason !== "error") return;
       const errorMessage = normalizePiRetryErrorMessage(event.message.errorMessage);
@@ -8729,7 +8731,9 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     if (workspaceReceiptReconcileTimer) clearInterval(workspaceReceiptReconcileTimer);
     workspaceReceiptReconcileTimer = setInterval(() => {
       void reconcileWorkspacePeerReceipts();
-      void completionCoordinator.reconcile();
+      void completionCoordinator.reconcile().catch((error) => {
+        console.warn("[pi-maestro-teammate] periodic completion reconciliation failed:", error);
+      });
       try {
         redriveStaleIncomingRootMessages();
       } catch (error) {
@@ -8752,6 +8756,8 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
       void completionCoordinator.receiveMessageEnd(event.message, {
         workspaceId: workspaceIdForCwd(state.baseCwd),
         sessionId: state.currentSessionId,
+      }).catch((error) => {
+        console.warn("[pi-maestro-teammate] completion message_end reconciliation failed:", error);
       });
     }
     const assistantText = workspaceAssistantMessageText(event.message);

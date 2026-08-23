@@ -517,6 +517,26 @@ test("runGraph rejects a dependent prompt that resolves to empty text", async ()
   assert.equal(results[0].exitCode, 0);
   assert.equal(results[1].exitCode, 1);
   assert.match(results[1].messages[0].content, /Resolved task prompt requires non-empty text/);
+  // Regression: synthetic failures bypass publishResult, so durable completion
+  // delivery would throw "has no immutable publicationId" without the fallback.
+  assert.ok(results[1].publicationId, "synthetic failure must carry a publicationId");
+});
+
+test("runGraph graph-level rejections carry a publicationId for durable delivery", async () => {
+  // A circular dependency settles every task via publishGraphRejection, which
+  // bypasses runSingleTeammate entirely. Durable completion delivery requires
+  // a publicationId on every result.
+  const tasks: NormalizedTask[] = [
+    { agent: "general", name: "left", prompt: "left", dependsOn: ["right"] },
+    { agent: "general", name: "right", prompt: "right", dependsOn: ["left"] },
+  ];
+  const results = await runGraph(tasks, 1, { baseCwd: process.cwd() });
+  assert.equal(results.length, 2);
+  for (const result of results) {
+    assert.equal(result.exitCode, 1);
+    assert.ok(result.publicationId, "graph rejection must carry a publicationId");
+    assert.match(result.messages[0].content, /Circular dependency/);
+  }
 });
 
 test("direct failed runs retain the resolved task cwd without a completion observer", async () => {
@@ -538,6 +558,11 @@ test("direct failed runs retain the resolved task cwd without a completion obser
 
   assert.equal(result.exitCode, 1);
   assert.equal(result.originCwd, taskCwd);
+  // Regression: pre-launch rejections (rejectAndPublish) and cancellations
+  // (cancelAtBoundary) bypass publishResult, so durable completion delivery
+  // would throw "has no immutable publicationId" without the fallback in
+  // publishTurnComplete.
+  assert.ok(result.publicationId, "rejected run must carry a publicationId");
 });
 
 test("runGraph awaits result publication before releasing a dependent", async () => {
