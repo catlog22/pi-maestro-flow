@@ -8,6 +8,7 @@
  *   - todo: Task management with plain context, optional skills, and step tracking
  *   - lsp: Language-server diagnostics, navigation, refactors, and raw requests
  *   - browser: Named-tab Chromium control and screenshots
+ *   - computer_use: Serialized physical desktop observation and control
  *   - search_tool_bm25: Natural-language discovery across registered tools
  *
  * Also registers:
@@ -245,6 +246,10 @@ import {
 } from "../teammate/agent-output-capture.ts";
 import { registerDataManagerCommand } from "../tools/data-manager.ts";
 import {
+  createTeammateChildComputerUseTool,
+  TeammateComputerUseBroker,
+} from "../teammate/computer-use-broker.ts";
+import {
   createTeammateChildBrowserTool,
   TeammateBrowserBroker,
 } from "../teammate/browser-broker.ts";
@@ -304,6 +309,7 @@ import {
 import dshBackend, { DSH_SETTINGS_CATALOGS } from "pi-maestro-backends/dsh";
 import acpCliBackend, { ACP_CLI_SETTINGS_CATALOGS } from "pi-maestro-teammate/v1/acp-cli";
 import { PI_SUBPROCESS, PI_SUBPROCESS_CONFIG_FIELDS, PI_SUBPROCESS_SETTINGS_CATALOGS } from "pi-maestro-teammate/v1/backends";
+import { registerInstallCommand } from "../install/install-command.ts";
 
 export const MAESTRO_CHILD_TOOL_NAMES = [
   "ask-user-question",
@@ -313,6 +319,7 @@ export const MAESTRO_CHILD_TOOL_NAMES = [
   "resource",
   "lsp",
   "browser",
+  "computer_use",
   "todo",
 ] as const;
 
@@ -912,13 +919,23 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   const teammateExtensionPath = fileURLToPath(import.meta.url);
   const teammateAuthorityOwner = `pi-maestro-flow:${teammateExtensionPath}`;
   const childBrowserBroker = new TeammateBrowserBroker();
+  const childComputerUseBroker = new TeammateComputerUseBroker();
   const childBrowserCleanups = new Set<Promise<unknown>>();
+  const childComputerUseCleanups = new Set<Promise<unknown>>();
   const trackChildBrowserCleanup = (operation: Promise<unknown>): Promise<unknown> => {
     const contained = operation.catch((error) => {
       console.warn(`[pi-maestro-flow] teammate browser cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
     });
     childBrowserCleanups.add(contained);
     void contained.then(() => childBrowserCleanups.delete(contained));
+    return contained;
+  };
+  const trackChildComputerUseCleanup = (operation: Promise<unknown>): Promise<unknown> => {
+    const contained = operation.catch((error) => {
+      console.warn(`[pi-maestro-flow] teammate computer-use cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+    childComputerUseCleanups.add(contained);
+    void contained.then(() => childComputerUseCleanups.delete(contained));
     return contained;
   };
   let todoRootContext: ExtensionContext | undefined;
@@ -971,6 +988,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
     const cid = typeof record.correlationId === "string" ? record.correlationId.trim() : "";
     if (!cid || cid === "unknown") return;
     trackChildBrowserCleanup(childBrowserBroker.closeActor(cid));
+    trackChildComputerUseCleanup(childComputerUseBroker.closeActor(cid));
 
     if (!todoRootContext) return;
     const rootCtx = todoRootContext;
@@ -2781,6 +2799,8 @@ Examples: { argv: ["session","status"] }, { argv: ["run","complete","run-abc","-
     },
   });
 
+  registerInstallCommand(pi);
+
   // === Statusline ===
   installStatusline(pi, () => state, () =>
     workflowSnapshotForAttachedSession(workflowSnapshotForUi(), attachedWorkflowSessionId),
@@ -3688,6 +3708,16 @@ Examples: { argv: ["session","status"] }, { argv: ["run","complete","run-abc","-
         }
         return childBrowserBroker.execute(request, ctx);
       }, { owner: `${teammateAuthorityOwner}:browser` }));
+      nextDisposers.push(registerTeammateChildToolBroker("computer_use", async (request) => {
+        if (generation !== teammateRegistrationGeneration || todoRootContext !== ctx) {
+          return {
+            content: [{ type: "text", text: "Root computer-use authority belongs to a newer session generation." }],
+            isError: true,
+            details: {},
+          };
+        }
+        return childComputerUseBroker.execute(request, ctx);
+      }, { owner: `${teammateAuthorityOwner}:computer_use` }));
       const sessionPermissionBroker: TeammatePermissionBroker = async (call, requestCtx) => {
         if (generation !== teammateRegistrationGeneration) {
           return { action: "deny", reason: "Root permission authority belongs to a newer session generation." };
@@ -3712,7 +3742,8 @@ Examples: { argv: ["session","status"] }, { argv: ["run","complete","run-abc","-
     teammateRegistrationDisposers = [];
     for (const dispose of disposers.reverse()) dispose();
     trackChildBrowserCleanup(childBrowserBroker.closeAll());
-    await Promise.all([...childBrowserCleanups]);
+    trackChildComputerUseCleanup(childComputerUseBroker.closeAll());
+    await Promise.all([...childBrowserCleanups, ...childComputerUseCleanups]);
   }
 
   pi.on("tool_call", async (event, ctx) => permissionController.authorize(
@@ -3881,6 +3912,7 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
   registerResourceTool(pi);
   pi.registerTool(createLspTool() as never);
   pi.registerTool(createTeammateChildBrowserTool());
+  pi.registerTool(createTeammateChildComputerUseTool());
   const todoProxyTool: ToolDefinition<typeof TodoToolParams> = {
     name: "todo",
     label: "Todo",

@@ -53,12 +53,12 @@ export const RESTRICTED_WAYLAND_CAPABILITIES: readonly CapabilityName[] = Object
 ]);
 
 export function waylandCapabilities(overrides: CapabilityMap = {}): Capabilities {
-  const features: CapabilityMap = {};
+  const features: CapabilityMap = { ...overrides };
   for (const capability of RESTRICTED_WAYLAND_CAPABILITIES) features[capability] = { ...WAYLAND_RESTRICTED };
   // OCR/detect can still operate on an explicitly supplied image artifact.
-  features.ocr = { state: "available", provider: "image-only" };
-  features.detect = { state: "available", provider: "image-only" };
-  return createCapabilities("linux", "wayland", { ...features, ...overrides });
+  features.ocr = overrides.ocr ?? { state: "available", provider: "image-only" };
+  features.detect = overrides.detect ?? { state: "available", provider: "image-only" };
+  return createCapabilities("linux", "wayland", features);
 }
 
 export function createCapabilities(

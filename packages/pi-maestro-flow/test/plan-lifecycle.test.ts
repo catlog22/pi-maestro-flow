@@ -1022,6 +1022,8 @@ test("Plan hooks preserve read-only discovery and block mutations before approva
       toolName: "teammate-send",
       input: { to: "planner-1", message: "revise section 3" },
     }), undefined);
+    assert.match(onToolCallPlan({ toolName: "computer_use", input: { action: "guide" } })?.reason ?? "", /blocked/);
+    assert.match(onToolCallPlan({ toolName: "computer_use", input: { action: "capabilities" } })?.reason ?? "", /blocked/);
     assert.equal(onToolCallPlan({ toolName: "goal", input: { action: "get" } }), undefined);
     assert.match(onToolCallPlan({ toolName: "goal", input: { action: "create" } })?.reason ?? "", /blocked/);
     assert.match(onToolCallPlan({

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import type { ToolDefinition, ToolInfo } from "@earendil-works/pi-coding-agent";
 import { startGuiServer } from "../src/gui/gui-server.ts";
 import { registerToolRoutes } from "../src/gui/tool-routes.ts";
-import { registerGuiTool, getGuiTool, listGuiTools, clearGuiTools } from "../src/gui/gui-registry.ts";
+import { registerGuiTool, getGuiTool, listGuiTools, clearGuiTools, isGuiToolAllowed } from "../src/gui/gui-registry.ts";
 import { registerGuiTool as registerTeammateGuiTool } from "../../pi-maestro-teammate/src/shared/gui-registry.ts";
 
 function fakeTool(name: string, label = name): ToolDefinition {
@@ -33,6 +33,7 @@ test("gui-registry: registers, looks up, lists, and classifies tools", () => {
     registerGuiTool(fakeTool("todo"), "pi-maestro-flow");
     registerTeammateGuiTool(fakeTool("teammate-list"), "pi-maestro-teammate");
     registerGuiTool(fakeTool("fs_read", "MCP: fs"), "mcp");
+    assert.equal(isGuiToolAllowed("computer_use", "pi-maestro-flow"), false);
 
     const todo = getGuiTool("todo");
     assert.ok(todo);

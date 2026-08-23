@@ -407,9 +407,11 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
   const names = tools.map((tool) => tool.name);
   assert.ok(names.includes("lsp"));
   assert.ok(names.includes("browser"));
+  assert.ok(names.includes("computer_use"));
   assert.ok(names.includes("search_tool_bm25"));
   assert.equal(names.filter((name) => name === "lsp").length, 1);
   assert.equal(names.filter((name) => name === "browser").length, 1);
+  assert.equal(names.filter((name) => name === "computer_use").length, 1);
   assert.equal(names.filter((name) => name === "search_tool_bm25").length, 1);
   assert.ok(names.includes("run-control"));
   assert.equal(names.includes("swarm_runtime"), false);
@@ -879,8 +881,9 @@ test("intelligence shutdown awaits both managers and contains cleanup failures",
   await shutdownIntelligenceTools({
     lsp: { async shutdown() { await new Promise((resolve) => setTimeout(resolve, 10)); calls.push("lsp"); } },
     browser: { async closeAll() { calls.push("browser"); throw new Error("close failed"); } },
+    computerUse: { async shutdown() { calls.push("computer_use"); } },
   }, 100);
-  assert.deepEqual(calls.sort(), ["browser", "lsp"]);
+  assert.deepEqual(calls.sort(), ["browser", "computer_use", "lsp"]);
 });
 
 function statuslessWorkflowAttachSnapshot(
