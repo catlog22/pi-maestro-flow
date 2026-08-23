@@ -23,14 +23,14 @@ test("checks every Pi-required Maestro Run command", () => {
     packageRoot: fixture(),
     runner(_command, args) {
       calls.push(args);
-      return { status: 0 };
+      return { status: 0, stdout: `Usage: maestro run ${args[2]} [options]` };
     },
   });
   assert.deepEqual(result.commands, REQUIRED_RUN_COMMANDS);
   assert.deepEqual(calls.map((args) => args.slice(-3)), [
-    ["run", "start", "--help"],
-    ["run", "done", "--help"],
-    ["run", "edit", "--help"],
+    ["run", "next", "--help"],
+    ["run", "create", "--help"],
+    ["run", "complete", "--help"],
   ]);
 });
 
@@ -39,9 +39,21 @@ test("reports a precise failure for an unsupported Run command", () => {
     () => verifyMaestroRunCapabilities({
       packageRoot: fixture(),
       runner(_command, args) {
-        return args.includes("edit") ? { status: 1, stderr: "unknown command: edit" } : { status: 0 };
+        return args.includes("complete") ? { status: 1, stderr: "unknown command: complete" } : { status: 0, stdout: `Usage: maestro run ${args[2]} [options]` };
       },
     }),
-    /maestro run edit.*unknown command: edit.*Update maestro-flow/i,
+    /maestro run complete.*unknown command: complete.*Update maestro-flow/i,
+  );
+});
+
+test("rejects parent help when a required Run subcommand is missing", () => {
+  assert.throws(
+    () => verifyMaestroRunCapabilities({
+      packageRoot: fixture(),
+      runner() {
+        return { status: 0, stdout: "Usage: maestro run [options] [command]" };
+      },
+    }),
+    /maestro run next.*Usage: maestro run \[options\] \[command\].*Update maestro-flow/i,
   );
 });

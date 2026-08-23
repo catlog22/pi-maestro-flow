@@ -1,7 +1,7 @@
 ---
 name: maestro-ralph
 description: "Closed-loop policy over the canonical Session/Run chain Arguments: <intent> [-y] [-c] [--amend]"
-allowed-tools: Read Write Edit Bash Glob Grep teammate observe maestro
+allowed-tools: Read Write Edit Bash Glob Grep teammate observe maestro run-control
 disable-model-invocation: false
 session-mode: none
 ---
@@ -31,6 +31,18 @@ Pi mirrors canonical Session/Run state automatically:
 
 </host_mirror>
 
+<pi_run_control>
+
+Pi lifecycle routing:
+
+- Execute every Session/Run lifecycle read or mutation with the `run-control` tool by passing the displayed Maestro arguments as `argv` without the leading `maestro` executable. Never execute lifecycle mutation through Bash.
+- Fenced Maestro CLI examples below are human syntax references, not an alternate Pi execution path. Shorthand command-family mentions are not executable examples. Any executable human CLI example must show the complete v3 authority envelope: exact `--session`, identical `--participant` and `--actor`, a distinct `--request-id`, `--reason`, and the applicable entity revision fences.
+- For `session open`, the coordinator injects participant == actor, request ID, reason, and JSON output; a new Session has no `--session` or expected revision yet.
+- For operations on an active Session, the coordinator injects the exact `--session`, participant == actor, request ID, reason, and current `--expected-orchestration-revision`; Run mutations also receive `--expected-run-revision`. `session migrate` uses legacy identity/activity revision fences instead.
+- The coordinator must be available for every `run-control` call. Session opening does not require an already active Session; all other mutations target an exact active or explicitly named Session.
+
+</pi_run_control>
+
 If any required file above was not expanded into context by the host, or its content is no longer in context, Read it explicitly before executing the state machine.
 
 <deferred_reading>
@@ -50,19 +62,6 @@ Apply retry, confidence, drift, goal-audit and stopping policy over the exact cu
 - A completion hint with `suggest_only=true` is displayed and never executed implicitly.
 
 </pi_context_contract>
-
-<cli_surface>
-
-Human-facing orchestration should stay on one topic Session:
-
-- Start one step with `maestro run next --session {session_id} --participant {p} --actor {a} --request-id {r} --reason "<reason>" --expected-orchestration-revision {rev} --workflow-root .`
-- Start a simple chain with `maestro session open "<intent>" --id <slug> --chain analyze plan execute --participant {p} --actor {a} --request-id {r} --reason "<reason>" --workflow-root .`
-- Complete the active Run with `maestro run complete <run_id> --session {session_id} --verdict done|done_with_concerns --advance --expected-run-revision {run_rev} --expected-orchestration-revision {rev} --workflow-root .`
-- Add or change future simple steps with `maestro session chain insert|replace|skip --session {session_id} ... --workflow-root .`
-
-Advanced coordinator chains use `maestro session open "<intent>" --id <session-slug> --chain-file - --participant {p} --actor {a} --request-id {r} --reason "<reason>" --workflow-root .`. Ralph has no separate CLI driver or Session type.
-
-</cli_surface>
 
 <interface>
 Only these user flags are accepted:
@@ -258,7 +257,7 @@ Follow `orchestrator-run-loop.md` "4. Decision Step"; the VERDICT format is defi
 ### A_FAIL
 
 - Repairable failure → verdict `needs-retry`; re-dispatch only after Runtime returns the step to pending (via `run transition`/`run cancel`).
-- External or exhausted blocker → `maestro run transition {run_id} blocked ... --json` (or `run cancel`); the chain step stays pending for a later fenced `run next`. There is no Execution lease to release.
+- External or exhausted blocker → apply the receipt's structured `continuation` with the fully fenced `run transition ... blocked` or `run cancel` form from `orchestrator-run-loop.md`; the chain step stays pending for a later fenced `run next`. There is no Execution lease to release.
 - Never allocate a new Run while the previous Run is running or gate-blocked.
 
 ### A_RECOVER

@@ -49,7 +49,7 @@ The companion plugins are dependencies and **auto-register on postinstall** — 
 | **Maestro tool** | 1 | `maestro` (explore / delegate / moa) |
 | **Goal tool** | 1 | `goal` (`get` / `create` / `update` / `complete`; user-owned lifecycle commands) |
 | **Todo tool** | 1 | `todo` (create / update / list / get / delete / clear / next) |
-| **Run control** | 1 | `run-control` (status / brief / prepare / check / next / done / edit) |
+| **Run control** | 1 | `run-control` (`session status`; `run brief/check/next/complete`; `session chain insert/update`) |
 | **Shell tool** | 1 | `bash_bg` (adaptive foreground/background execution) |
 | **Intelligence tools** | 5 | `lsp`, `browser`, `search_tool_bm25`, `smart_search`, `source_check` |
 | **Search tools** | 2 | `ffgrep`, `fffind` (FFF-backed fast search) |
@@ -120,6 +120,22 @@ After installation:
 | `/sysprompt` | System prompt inspection |
 | `/export-session-info` | Export session identity and history snapshot |
 
+## Run Control
+
+`run-control` is the only LLM tool surface for Maestro Session/Run lifecycle commands. Pass canonical CLI arguments as an `argv` array without the leading `maestro`; do not issue lifecycle mutations through bash. It can open a new Session as well as operate on an active or explicitly named Session, but the Workflow Coordinator must be available for every call.
+
+Session/3.0 has no mutation lease. The coordinator injects the current Pi identity as identical `--participant` and `--actor` values, plus a request ID, reason, and JSON output. `session open` has no Session/CAS target yet. Active-Session mutations receive the exact `--session` and orchestration revision; Run mutations also receive the Run revision. Migration alone uses legacy identity/activity revision fences. Revision conflicts fail closed and require a fresh read; the coordinator does not silently retry with a replaced revision.
+
+```javascript
+run-control({ argv: ["session", "status", "--session", "session-123", "--json"] })
+run-control({ argv: ["run", "brief", "run-123", "--session", "session-123", "--json"] })
+run-control({ argv: ["run", "check", "run-123", "--session", "session-123", "--json"] })
+run-control({ argv: ["session", "chain", "insert", "--session", "session-123", "--step-id", "review-1", "--command", "review", "--arg", "src", "--json"] })
+run-control({ argv: ["session", "chain", "update", "--session", "session-123", "--step-id", "review-1", "--stage", "verification", "--json"] })
+run-control({ argv: ["run", "next", "--session", "session-123", "--json"] })
+run-control({ argv: ["run", "complete", "run-123", "--session", "session-123", "--verdict", "done", "--advance", "--json"] })
+```
+
 ## Pi Skill Conversion
 
 Pi skills are generated in two stages. `convert.mjs` performs the source-to-Pi
@@ -136,9 +152,7 @@ npm --prefix packages/pi-maestro-flow run test:conversion
 npm --prefix packages/pi-maestro-flow run check:maestro-run-cli
 ```
 
-Generated human-facing prompts use `maestro session start`, `maestro session done`,
-`maestro session chain edit`, and simple `--chain` commands. `session create --chain-file` is
-reserved for coordinator chains that require structured decision or decomposition data.
+Generated core Pi skills include `run-control` in `allowed-tools` and route lifecycle operations through that host tool. Their retained Maestro CLI lines are human syntax references copied from the canonical source, including the receipt-chained `session open` -> `session chain insert|update --arg` -> `run next` contract with participant equal to actor, distinct request IDs, reasons, and exact entity revisions. The converter does not synthesize `run start`, `run edit`, `run prepare`, or `session open --chain-file` as canonical v3 commands.
 
 ## Skills
 
@@ -189,7 +203,7 @@ An always-on, width-aware Goal panel is placed `aboveEditor` while a Goal exists
 
 Goal persistence is scoped to `sessionManager.getSessionId()`. New and forked sessions start without a Goal even if their conversation history exposes an older Goal entry. Resuming the same session restores its Goal in `WAITING`; unrelated prompts do not acquire Goal ownership or invoke the verifier. Run `/goal resume` to explicitly start the next Goal-owned agent loop.
 
-For a running canonical Workflow, `/new` and `/fork` also suppress automatic lease attachment and Goal projection. Explicit Resume from `/maestro-session` opts the new Pi session back into that Workflow.
+For a running canonical Workflow, `/new` and `/fork` suppress automatic active-Session and Goal projection. Explicit Resume from `/maestro-session` opts the new Pi session back into that Workflow; session/3.0 mutation authority remains participant identity plus entity-revision CAS, not a host lease.
 
 Pi reports ordinary process launches as `session_start(reason: "startup")`. The extension therefore checks for a Goal entry owned by the current sessionId before restoring or attaching; `startup` alone never recreates a Goal from a running project Workflow.
 

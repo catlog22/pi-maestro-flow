@@ -20,7 +20,7 @@ Initialize the skill-tuning session by collecting target skill information, crea
 
 ## Execution
 
-**Establish the Run first (see run-mode.md).** If an orchestrator injected `run_id` / `run_dir` in the birth packet, use them directly. Otherwise follow the complete self-start flow before collecting input: negotiate capabilities, create or resolve the explicit Session identity, start the bounded Execution, and create `skill-tuning` with the full locator, fence, private claim, intent, and `--json` option set.
+**Establish the Run first (see run-mode.md).** If an orchestrator injected a birth packet, use its exact locator, resolved `task`, and structured `continuation` directly. Otherwise follow the receipt-chained self-start flow before collecting input: negotiate capabilities, `session open`, fenced `session chain insert --command skill-tuning --arg "<task text>"`, then fenced `run next`, using one actor identity, distinct request IDs, and each preceding receipt's exact revision. Never pass raw task prose through `--input`; it accepts only sealed same-Session Artifact IDs.
 
 The Session slug is ASCII-only and <=64 chars. The `workDir` passed to `execute()` is `{run_dir}/outputs/skill-tuning-{ts}/`.
 

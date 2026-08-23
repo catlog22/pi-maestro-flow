@@ -112,7 +112,7 @@ After confirming the injection point, ask whether this overlay should recommend 
 
 Use [@ask] user prompt:
 - **"No chain"** — standard overlay, no skill handoff
-- **"Chain to skill"** → ask for the target skill name (e.g., a step like `review`, `execute`, `test` invoked via a v3 Session: `maestro session open "<goal>" --id YYYYMMDD-<step>-{topic} --chain <step> ... --json` → fenced `maestro run next --session {session_id} ... --json`)
+- **"Chain to skill"** → ask for the target step (`review`, `execute`, `test`); route it through `/maestro-next` or the canonical receipt-chained self-start flow, with domain text persisted by `session chain insert --arg`
 - **"Chain with alternatives"** → ask for primary skill + 1-2 alternative skills
 
 If chain is selected, record the skill name(s) for use in Step 3.
@@ -152,13 +152,13 @@ Build a slug from the user's intent (kebab-case, lowercase). Write to `~/.maestr
 **Skill Handoff** (overlay)
 
 After the above step completes, use [@ask] user prompt:
-- "Proceed to review" — Hand off to step `review` (open a v3 Session: `maestro session open "<goal>" --id YYYYMMDD-review-{topic} --chain review ... --json` → fenced `maestro run next`)
+- "Proceed to review" — Hand off to step `review` through `/maestro-next` or the canonical receipt-chained self-start flow
 - "Skip" — Continue with current command flow
 - "Alternative: execute" — Run step `execute` with built-in verification instead
 
 On user selection:
-- Proceed → run step `review` (open a v3 Session: `maestro session open "<goal>" --id YYYYMMDD-review-{topic} --chain review ... --json` → fenced `maestro run next`)
-- Alternative → run step `execute` (open a v3 Session: `maestro session open "<goal>" --id YYYYMMDD-execute-{topic} --chain execute ... --json` → fenced `maestro run next`)
+- Proceed → route step `review` through `/maestro-next`
+- Alternative → route step `execute` through `/maestro-next`
 - Skip → continue normally
 ```
 

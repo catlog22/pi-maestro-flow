@@ -52,7 +52,7 @@ Knowledge utilities (note/log/promote) are available via `/maestro-knowledge`.
 <invariants>
 1. Execute mode follows the exact Session identity -> bounded Run lifecycle in `run-mode.md`.
 2. Evidence is append-only, non-formal (never enters gates or artifact registry)
-3. No auto-orchestration — executes directly, never creates chains
+3. No automatic multi-step orchestration — the command owns exactly one explicit single-step Session chain
 </invariants>
 
 <flow>
@@ -63,7 +63,15 @@ Linear: resolve Session identity -> dispatch Run -> explore -> confirm -> do -> 
 
 ### 1. Create
 
-Follow the self-start flow in `run-mode.md`: negotiate capabilities, open or resolve the explicit Session identity (`maestro session open "<objective>" --id <slug> ... --json` / `maestro session status --session {session_id} --json`), then invoke the complete fenced `maestro run create companion` option set with `--intent "<intent>"` and `--arg "<intent>"`. Intent is Session metadata only; `--arg` supplies the required command arguments. Do not use a Session lifecycle alias or omit the Session locator, the `orchestration_revision`/Run `revision` fence, or the `--participant`/`--actor` identity.
+Follow the self-start flow in `run-mode.md`. Negotiate capabilities, then execute the three receipt-chained mutations below. `{open_request_id}`, `{insert_request_id}`, and `{next_request_id}` are distinct stable IDs; use the exact `session_id` and `orchestration_revision` returned by each preceding receipt. Participant and actor are the same authorized identity.
+
+```bash
+maestro session open "<intent>" --id <slug> --participant {actor_id} --actor {actor_id} --request-id {open_request_id} --reason "open self-started Companion Session" --json
+maestro session chain insert --session {session_id} --step-id {step_id} --command companion --arg "<intent>" --participant {actor_id} --actor {actor_id} --request-id {insert_request_id} --reason "add Companion task" --expected-orchestration-revision {open_orchestration_revision} --json
+maestro run next --session {session_id} --participant {actor_id} --actor {actor_id} --request-id {next_request_id} --reason "dispatch Companion task" --expected-orchestration-revision {insert_orchestration_revision} --json
+```
+
+The Session objective is metadata; `session chain insert --arg "<intent>"` supplies Companion's positional domain text. Never pass task prose through `--input`; that option accepts only sealed same-Session Artifact IDs. Consume the `run next` birth packet's `task` and structured `continuation`, and retain its exact Run locator and revisions.
 
 Init `{run_dir}/evidence/companion-log.md`:
 ```markdown
@@ -123,7 +131,7 @@ Append outcome:
 Before completion, put accepted decisions/locked constraints in `report.md`. If a reusable recipe or pitfall emerged, stage it now:
 
 ```bash
-maestro knowledge stage knowhow "<title>" "<content>" --run <run_id>
+maestro knowledge stage knowhow "<title>" --content-file <path|-> --run <run_id>
 # Then use the complete fenced `maestro run complete ... --advance` and, when the
 # chain is terminal, `maestro session complete` from run-mode.md with the current
 # locator, orchestration_revision, and identity.

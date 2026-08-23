@@ -79,7 +79,7 @@ User selects "记录经验" → prompt for title/insight, then recommend `/maest
 
 | Condition | Suggestion |
 |-----------|-----------|
-| Next dep-ready session | step `analyze` for session — open a v3 Session (`maestro session open "<goal>" --id YYYYMMDD-analyze-{next-dep-ready-slug} --chain analyze --participant {p} --actor {a} --request-id {r} --reason "<reason>" --json` → fenced `maestro run next --session {session_id} ... --json`), or route via `/maestro-next` |
+| Next dep-ready session | route step `analyze` through `/maestro-next` or the canonical receipt-chained `session open` -> `session chain insert --command analyze --arg "<goal>"` -> `run next` flow |
 </completion>
 
 <error_codes>

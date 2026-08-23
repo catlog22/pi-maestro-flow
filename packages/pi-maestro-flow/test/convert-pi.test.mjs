@@ -56,17 +56,33 @@ description: Example skill
     },
   },
   {
-    name: "passes v3 coordinator sources through without v2 re-introduction",
+    name: "preserves the canonical receipt-chained coordinator source",
     file: "D:/fixture/skills/maestro/SKILL.md",
-    input: `<purpose>Coordinator</purpose>
-5. required missing 依次尝试 known args、default、LLM 明确推断、AskUserQuestion；仍 missing 则 BLOCK。
-- \`ReuseAssessment=fresh\`：简单链使用 \`maestro session open "<intent>" --id <slug> --chain <cmd...>\`；高级链使用 \`maestro session open "<intent>" --id <session-slug> --chain-file -\`。
+    input: `---
+name: maestro
+allowed-tools: Read Bash Agent
+---
+<required_reading>
+~/.maestro/workflows/run-mode.md
+</required_reading>
+<purpose>Coordinator</purpose>
+\`\`\`bash
+maestro session open "<intent>" --id <slug> --participant {actor_id} --actor {actor_id} --request-id {open_request_id} --reason "open Session" --json
+maestro session chain insert --session {session_id} --step-id {step_id} --command analyze --arg "<intent>" --participant {actor_id} --actor {actor_id} --request-id {insert_request_id} --reason "add step" --expected-orchestration-revision {open_revision} --json
+maestro session chain update --session {session_id} --step-id {step_id} --stage analysis --arg "<scope>" --participant {actor_id} --actor {actor_id} --request-id {update_request_id} --reason "update step" --expected-orchestration-revision {insert_revision} --json
+maestro run next --session {session_id} --participant {actor_id} --actor {actor_id} --request-id {next_request_id} --reason "dispatch step" --expected-orchestration-revision {update_revision} --json
+\`\`\`
 `,
     verify(output) {
-      assert.match(output, /maestro session open/);
-      assert.match(output, /简单链使用/);
-      assert.match(output, /高级链/);
-      assert.doesNotMatch(output, /maestro run start|maestro run edit|maestro session create/);
+      assert.match(output, /^allowed-tools: Read Bash teammate observe maestro run-control$/m);
+      assert.match(output, /<pi_run_control>/);
+      assert.match(output, /Never execute lifecycle mutation through Bash/);
+      assert.match(output, /maestro session open "<intent>"/);
+      assert.match(output, /session chain insert[^\n]*--arg "<intent>"/);
+      assert.match(output, /session chain update[^\n]*--arg "<scope>"/);
+      assert.match(output, /maestro run next --session/);
+      assert.match(output, /--participant \{actor_id\} --actor \{actor_id\}/);
+      assert.doesNotMatch(output, /maestro run start|maestro run edit|maestro run prepare|session open[^\n]*--chain-file/);
     },
   },
   {
@@ -113,22 +129,34 @@ S_PARSE:
     },
   },
   {
-    name: "passes current generated lifecycle text through without v2 injection",
+    name: "preserves corrected maestro-next lifecycle text without synthesizing a dispatcher",
     file: "D:/fixture/skills/maestro-next/SKILL.md",
-    input: `- **Standard** (single run): recommend a step → confirm → execute via \`maestro run create <step> [args...] --session {session_id}\`
-maestro run create companion --session demo   # self-start entry
+    input: `---
+name: maestro-next
+allowed-tools: Read Bash
+---
+<required_reading>
+~/.maestro/workflows/run-mode.md
+</required_reading>
+<purpose>Router</purpose>
+maestro session open "goal" --id demo --participant actor-1 --actor actor-1 --request-id req-open --reason "open" --json
+maestro session chain insert --session demo --step-id companion --command companion --arg "goal" --participant actor-1 --actor actor-1 --request-id req-insert --reason "insert" --expected-orchestration-revision 0 --json
+maestro run next --session demo --participant actor-1 --actor actor-1 --request-id req-next --reason "next" --expected-orchestration-revision 1 --json
 `,
     verify(output) {
-      assert.match(output, /maestro run create companion --session demo/);
-      assert.doesNotMatch(output, /maestro run prepare|maestro run start --platform pi/);
+      assert.match(output, /^allowed-tools: Read Bash maestro run-control$/m);
+      assert.match(output, /maestro session open "goal"/);
+      assert.match(output, /session chain insert[^\n]*--arg "goal"/);
+      assert.match(output, /maestro run next --session demo/);
+      assert.doesNotMatch(output, /maestro run prepare|maestro run start|maestro run edit/);
     },
   },
   {
     name: "keeps v3 run create invocations intact",
     file: "D:/fixture/skills/maestro-fork/SKILL.md",
-    input: 'step `analyze` (`maestro run create analyze --session YYYYMMDD-analyze-{topic} --intent "{goal}" --arg "{goal}"`)',
+    input: 'step `analyze` (`maestro run create analyze "{goal}" --session YYYYMMDD-analyze-{topic} --goal "{goal}"`)',
     verify(output) {
-      assert.match(output, /maestro run create analyze --session YYYYMMDD-analyze-\{topic\}/);
+      assert.match(output, /maestro run create analyze "\{goal\}" --session YYYYMMDD-analyze-\{topic\} --goal "\{goal\}"/);
       assert.doesNotMatch(output, /maestro run prepare|maestro run start/);
     },
   },
@@ -204,11 +232,11 @@ maestro run brief run-1 --platform claude
   {
     name: "keeps v3 coordinator creation and completion commands intact",
     file: "D:/fixture/skills/team-review/roles/coordinator/role.md",
-    input: `Otherwise: \`maestro run create team-review --session <slug> --intent "<task summary>"\`
+    input: `Otherwise: \`maestro run create team-review "<task summary>" --session <slug> --goal "<task summary>"\`
 maestro run complete <run_id> --session <slug> --advance
 `,
     verify(output) {
-      assert.match(output, /maestro run create team-review --session <slug>/);
+      assert.match(output, /maestro run create team-review "<task summary>" --session <slug> --goal "<task summary>"/);
       assert.match(output, /maestro run complete <run_id> --session <slug> --advance/);
       assert.doesNotMatch(output, /maestro run start|maestro run done/);
     },
@@ -216,9 +244,9 @@ maestro run complete <run_id> --session <slug> --advance
   {
     name: "converts JSON catalog text without frontmatter corruption",
     file: "D:/fixture/agents/catalog.json",
-    input: '{"instruction":"Otherwise: `maestro run create execute --session <slug> --intent \\"<task summary>\\"`"}',
+    input: '{"instruction":"Otherwise: `maestro run create execute \\"<task summary>\\" --session <slug> --goal \\"<task summary>\\"`"}',
     verify(output) {
-      assert.match(output, /maestro run create execute --session <slug>/);
+      assert.match(output, /maestro run create execute \\"<task summary>\\" --session <slug> --goal/);
       assert.doesNotMatch(output, /maestro run start/);
       assert.doesNotThrow(() => JSON.parse(output));
     },
@@ -233,6 +261,9 @@ maestro run complete <run_id> --session <slug> --advance
 `,
     verify(output) {
       assert.match(output, /<host_mirror>/);
+      assert.match(output, /<pi_run_control>/);
+      assert.match(output, /run-control/);
+      assert.match(output, /human syntax references/);
       assert.match(output, /Topic Session resolution/);
       assert.match(output, /ReuseAssessment/);
       assert.match(output, /same-Session sealed outputs/);
@@ -391,6 +422,7 @@ test("convert-pi: does not duplicate generated blocks across CRLF input", () => 
   );
   const second = transformPiContent(first.replaceAll("\n", "\r\n"), file);
   assert.equal(second.match(/<host_mirror>/g)?.length, 1);
+  assert.equal(second.match(/<pi_run_control>/g)?.length, 1);
   assert.equal(second.match(/<pi_context_contract>/g)?.length, 1);
-  assert.equal(second.match(/<cli_surface>/g)?.length, 1);
+  assert.equal(second.match(/<cli_surface>/g)?.length ?? 0, 0);
 });

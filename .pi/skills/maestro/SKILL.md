@@ -1,7 +1,7 @@
 ---
 name: maestro
 description: "Intent-to-chain planner over the canonical Session/Run lifecycle Arguments: <intent> [-y] [-c] [--amend] [--dry-run]"
-allowed-tools: Read Write Edit Bash Glob Grep teammate observe maestro
+allowed-tools: Read Write Edit Bash Glob Grep teammate observe maestro run-control
 disable-model-invocation: false
 session-mode: none
 ---
@@ -31,6 +31,18 @@ Pi mirrors canonical Session/Run state automatically:
 
 </host_mirror>
 
+<pi_run_control>
+
+Pi lifecycle routing:
+
+- Execute every Session/Run lifecycle read or mutation with the `run-control` tool by passing the displayed Maestro arguments as `argv` without the leading `maestro` executable. Never execute lifecycle mutation through Bash.
+- Fenced Maestro CLI examples below are human syntax references, not an alternate Pi execution path. Shorthand command-family mentions are not executable examples. Any executable human CLI example must show the complete v3 authority envelope: exact `--session`, identical `--participant` and `--actor`, a distinct `--request-id`, `--reason`, and the applicable entity revision fences.
+- For `session open`, the coordinator injects participant == actor, request ID, reason, and JSON output; a new Session has no `--session` or expected revision yet.
+- For operations on an active Session, the coordinator injects the exact `--session`, participant == actor, request ID, reason, and current `--expected-orchestration-revision`; Run mutations also receive `--expected-run-revision`. `session migrate` uses legacy identity/activity revision fences instead.
+- The coordinator must be available for every `run-control` call. Session opening does not require an already active Session; all other mutations target an exact active or explicitly named Session.
+
+</pi_run_control>
+
 If any required file above was not expanded into context by the host, or its content is no longer in context, Read it explicitly before executing the state machine.
 
 <deferred_reading>
@@ -51,20 +63,6 @@ Turn a user intent into the initial Skill chain, create one canonical topic Sess
 - A completion hint with `suggest_only=true` is displayed and never executed implicitly.
 
 </pi_context_contract>
-
-<cli_surface>
-
-Human-facing orchestration uses the v3 Session/Run surface:
-
-- Single step: `maestro run next --session {session_id} --participant {p} --actor {a} --request-id {r} --reason "<reason>" --expected-orchestration-revision {rev} --workflow-root .` (birth packet carries run_id/run_dir/guidance/knowledge_context/brief.command)
-- Open a Session: `maestro session open "<intent>" --id <slug> [--chain <cmd...>] --participant {p} --actor {a} --request-id {r} --reason "<reason>" --workflow-root .`
-- Re-attach: `maestro run brief <run_id> --session {session_id} --workflow-root .` (brief-result/3.0 Resume Packet)
-- Complete a step: `maestro run complete <run_id> --session {session_id} --verdict done|done_with_concerns --advance --expected-run-revision {run_rev} --expected-orchestration-revision {rev} --workflow-root .`
-- Decide a gate: `maestro run decide <point-id> --session {session_id} --verdict proceed|fix|escalate --workflow-root .`
-- Seal the Session: `maestro session complete --session {session_id} --participant {p} --actor {a} --request-id {r} --reason "<reason>" --expected-orchestration-revision {rev} --workflow-root .`
-- Chain adjustments: `maestro session chain insert|replace|skip --session {session_id} ... --workflow-root .`
-
-</cli_surface>
 
 <interface>
 Only these user flags are accepted:

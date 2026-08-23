@@ -25,7 +25,7 @@ Meta-skill for creating new Claude Code skills with configurable execution modes
 
 ## Run Lifecycle
 
-Follow `~/.maestro/workflows/run-mode.md`. If an orchestrator injected `run_id` / `run_dir` in the birth packet, use them directly. Otherwise negotiate capabilities, create or resolve the explicit Session identity, start the bounded Execution with its complete audited option set, then create `skill-generator` with the complete fenced `maestro run create` option set. Retain the exact locator, revisions, private claim, `run_id`, and `run_dir`; all `{run_dir}/...` paths below refer to it. Close per Phase 5.
+Follow `~/.maestro/workflows/run-mode.md`. If an orchestrator injected a birth packet, use its exact locator, resolved `task`, and structured `continuation` directly. Otherwise negotiate capabilities and follow the receipt-chained self-start recipe: `session open`, fenced `session chain insert --command skill-generator --arg "<task text>"`, then fenced `run next`, using one actor identity, distinct request IDs, and the exact revision returned by each receipt. Never send raw task prose through `--input`; it accepts only sealed same-Session Artifact IDs. Retain the exact locator, revisions, `run_id`, and `run_dir`; all `{run_dir}/...` paths below refer to it. Close per Phase 5.
 
 ## Pre-load (before execution)
 

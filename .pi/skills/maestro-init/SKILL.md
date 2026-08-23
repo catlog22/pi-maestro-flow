@@ -118,24 +118,24 @@ Created:
 
 End the step through the v3 Run lifecycle (no text block output):
 ```
-maestro run complete {run_id} --session {session_id} --participant {participant_id} --actor {actor_id} --request-id {request_id} --reason "<reason>" --expected-orchestration-revision {orchestration_revision} --expected-run-revision {run_revision} --verdict {VERDICT} [--summary "<summary>"] --advance --json
+maestro run complete {run_id} --session {session_id} --participant {actor_id} --actor {actor_id} --request-id {complete_request_id} --reason "complete init Run" --expected-orchestration-revision {orchestration_revision} --expected-run-revision {run_revision} --verdict {VERDICT} [--summary "<summary>"] --advance --json
 ```
 (run-id 由 birth packet 提供 — 自动解析当前 running 步)
 
 Verdicts (v3 surface):
 - **done** — Normal completion
 - **done_with_concerns** — Completed with concerns; pass `--summary` and put concerns in `report.md` frontmatter
-- **needs-retry / blocked** — handled by `maestro run transition {run_id} failed|blocked ...` or `maestro run cancel {run_id} ...`; the orchestrator retries via a later fenced `run next`
+- **needs-retry / blocked** — apply the exact structured `continuation` using fully fenced `run transition` or `run cancel`; retry only through a later fenced `run next` after Runtime reports the step pending
 
 ### Next-step routing
 
 | Condition | Suggestion |
 |-----------|-----------|
-| Roadmap needed (default light) | step `roadmap` — open a v3 Session and dispatch: `maestro session open "<goal>" --id YYYYMMDD-roadmap-{topic} --chain roadmap --participant {p} --actor {a} --request-id {r} --reason "<reason>" --json` → fenced `maestro run next --session {session_id} ... --json` (or route via `/maestro-next`) |
+| Roadmap needed (default light) | route step `roadmap` through `/maestro-next` or the canonical receipt-chained `session open` -> `session chain insert --command roadmap --arg "<goal>"` -> `run next` flow |
 
 Note: roadmap step is responsible for creating `state.json.sessions[]` entries and setting the first `active_session_id`.
-| Full spec package | step `blueprint` — open a v3 Session (`maestro session open "<goal>" --id YYYYMMDD-blueprint-{topic} --chain blueprint ... --json` → fenced `maestro run next`), or route via `/maestro-next` |
-| Explore ideas first | step `brainstorm` — open a v3 Session (`maestro session open "<goal>" --id YYYYMMDD-brainstorm-{topic} --chain brainstorm ... --json` → fenced `maestro run next`), or route via `/maestro-next` |
+| Full spec package | route step `blueprint` through `/maestro-next` or the canonical receipt-chained self-start flow |
+| Explore ideas first | route step `brainstorm` through `/maestro-next` or the canonical receipt-chained self-start flow |
 | Quick ad-hoc task | `/maestro-companion "{goal}"` |
 </completion>
 

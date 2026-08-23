@@ -72,8 +72,8 @@ session-mode: {{session_mode}}
 ## Directory Setup
 
 \`\`\`javascript
-// run_dir comes from the birth packet (orchestrator-injected) or the
-// maestro run create return value when self-starting. See run-mode.md.
+// run_dir comes from the authoritative run next/create birth packet.
+// Consume its resolved task and structured continuation; see run-mode.md.
 const workDir = \`${runStart.run_dir}/outputs\`;
 {{additional_dirs}}
 \`\`\`

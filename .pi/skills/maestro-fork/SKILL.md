@@ -80,7 +80,7 @@ Fork and sync algorithm steps are defined in workflow `fork.md`.
 
 | Condition | Suggestion |
 |-----------|-----------|
-| Fork complete | `cd {wt.path}` then step `analyze` — open a v3 Session (`maestro session open "<goal>" --id YYYYMMDD-analyze-{topic} --chain analyze --participant {p} --actor {a} --request-id {r} --reason "<reason>" --json` → fenced `maestro run next --session {session_id} ... --json`), or route via `/maestro-next` |
+| Fork complete | `cd {wt.path}`, then route step `analyze` through `/maestro-next` or the canonical receipt-chained `session open` -> `session chain insert --command analyze --arg "<goal>"` -> `run next` flow |
 | Fork + automated | `teammate({ agent: "general", taskType: "development", tasks: [{ prompt: "run full lifecycle for session" }], cwd: "{wt.path}" }) |
 | Sync complete | Resume work in worktree |
 | Sync conflicts found | Resolve manually, then retry |
@@ -90,10 +90,10 @@ Fork and sync algorithm steps are defined in workflow `fork.md`.
 | Code | Severity | Condition | Recovery |
 |------|----------|-----------|----------|
 | E001 | error | Project not initialized | Run maestro-init first |
-| E002 | error | No roadmap found | Run step `roadmap` first — open a v3 Session (`maestro session open "<goal>" --id YYYYMMDD-roadmap-{topic} --chain roadmap ... --json` → fenced `maestro run next`) |
+| E002 | error | No roadmap found | Route step `roadmap` through `/maestro-next` or the canonical receipt-chained self-start flow |
 | E003 | error | Running inside a worktree | Run from main worktree |
 | E004 | error | No session ID provided | Provide `--session <session_id>` |
-| E005 | error | No sessions defined in state.json | Run step `roadmap` first — open a v3 Session (`maestro session open "<goal>" --id YYYYMMDD-roadmap-{topic} --chain roadmap ... --json` → fenced `maestro run next`) |
+| E005 | error | No sessions defined in state.json | Route step `roadmap` through `/maestro-next` or the canonical receipt-chained self-start flow |
 | E006 | error | Session not found in state.json.sessions[] | Check available sessions |
 | E007 | error | No active worktree for session (--sync) | Check worktrees.json |
 | E008 | error | Session already has active worktree | Merge or cleanup first |

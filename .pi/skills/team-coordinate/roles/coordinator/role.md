@@ -236,13 +236,18 @@ Regardless of complexity score or role count, coordinator MUST:
 
 After session folder creation and before role-spec generation:
 
-1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run create team-coordinate --session <slug> --intent "<task summary>"`
+1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip self-start — a second allocation mints a duplicate Run. Otherwise execute this receipt-chained self-start recipe; `{open_request_id}`, `{insert_request_id}`, and `{next_request_id}` are distinct stable IDs, and every revision comes from the immediately preceding receipt:
+   ```bash
+   maestro session open "<task summary>" --id <slug> --participant {actor_id} --actor {actor_id} --request-id {open_request_id} --reason "open self-started team-coordinate Session" --json
+   maestro session chain insert --session {session_id} --step-id {step_id} --command team-coordinate --arg "<task summary>" --participant {actor_id} --actor {actor_id} --request-id {insert_request_id} --reason "add team-coordinate task" --expected-orchestration-revision {open_orchestration_revision} --json
+   maestro run next --session {session_id} --participant {actor_id} --actor {actor_id} --request-id {next_request_id} --reason "dispatch team-coordinate task" --expected-orchestration-revision {insert_orchestration_revision} --json
+   ```
    - Slug format: `YYYYMMDD-team-coordinate-<topic>` (ASCII, ≤64 chars)
    - Store returned `run_id` and `run_dir` in `team-session.json`:
      ```json
      "run": { "run_id": "<id>", "run_dir": "<path>" }
      ```
-2. **Resume**: Resolve `run_dir` / `run_id` through the chain `birth-packet (dispatch prompt) > team-session.json.run > artifacts`. Take the first that resolves, then `maestro run check <run_id>` (idempotent); if status=sealed, create a new run and update `team-session.json`. If none resolves, fail closed — surface the missing run_dir to the user, do NOT glob/mtime-guess a path.
+2. **Resume**: Resolve `run_dir` / `run_id` through the chain `birth-packet (dispatch prompt) > team-session.json.run > artifacts`. Take the first that resolves, then `maestro run check <run_id>` (idempotent); if status=sealed, follow the receipt's structured `continuation` and allocate only through a freshly fenced `run next` when Runtime reports a pending step. If none resolves, fail closed — surface the missing run_dir to the user, do NOT glob/mtime-guess a path.
 
 6. **Read `specs/role-spec-template.md`** for Behavioral Traits + Reference Patterns
 

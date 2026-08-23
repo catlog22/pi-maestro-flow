@@ -132,14 +132,14 @@ Note: maestro-next suggests `--complete` when 'Tests green + active session'. Or
 
 1. Verify status is `completed` or `failed` (an `open` Session must `--complete` or fail first; `archived` is already archived)
 2. Call the fenced transition with the current `orchestration_revision`:
-   `maestro session archive --session {session_id} --participant {p} --actor {a} --request-id {r} --reason "<reason>" [--evidence <ref> ...] --expected-orchestration-revision {orchestration_revision} --json`
+   `maestro session archive --session {session_id} --participant {actor_id} --actor {actor_id} --request-id {archive_request_id} --reason "<reason>" [--evidence <ref> ...] --expected-orchestration-revision {orchestration_revision} --json`
 3. Verify the `run-response/1.2` receipt (`status: archived`, revision incremented). Archived Sessions reject all mutations (`create_run`/`advance_chain`/`transition_run`/`add_evidence`/`decide`) until `--unarchive`
 
 ### Step 4: Unarchive (`--unarchive`) — return to open
 
 1. Verify status is `archived`
 2. Call the fenced transition:
-   `maestro session unarchive --session {session_id} --participant {p} --actor {a} --request-id {r} --reason "<reason>" [--evidence <ref> ...] --expected-orchestration-revision {orchestration_revision} --json`
+   `maestro session unarchive --session {session_id} --participant {actor_id} --actor {actor_id} --request-id {unarchive_request_id} --reason "<reason>" [--evidence <ref> ...] --expected-orchestration-revision {orchestration_revision} --json`
 3. Verify the receipt (`status: open`). The Session accepts Runs and chain mutations again; extend it with `maestro session chain insert ...` and `maestro run next`
 
 ### Step 5: Knowledge only (`--knowledge`)
@@ -164,7 +164,7 @@ Status: DONE
 
 | Condition | Suggestion |
 |-----------|-----------|
-| Next session activated | step `analyze` — open a v3 Session (`maestro session open "<goal>" --id YYYYMMDD-analyze-{next-slug} --chain analyze --participant {p} --actor {a} --request-id {r} --reason "<reason>" --json` → fenced `maestro run next --session {session_id} ... --json`), or route via `/maestro-next` |
+| Next session activated | route step `analyze` through `/maestro-next` or the canonical receipt-chained `session open` -> `session chain insert --command analyze --arg "<goal>"` -> `run next` flow |
 | Session archived, later extension needed | `maestro-session-manage --session {session_id} --unarchive` |
 | Knowledge candidates pending | `maestro knowledge review {session_id}` |
 | Knowledge health review needed | `/maestro-knowledge audit` |

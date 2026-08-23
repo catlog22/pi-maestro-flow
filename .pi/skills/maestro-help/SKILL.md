@@ -179,7 +179,7 @@ $ARGUMENTS → Parse:
 
 ### 上游起源 + 核心 (core)
 
-> 裸名称为 first-tier step：经 `/maestro "<意图>"` 自动路由，或 `maestro run create <step> [args...] --session {session_id} ...` 直接执行（v3 无独立 `run prepare` 命令——prepare 指引内嵌于 birth packet 的 guidance）；`/` 前缀为独立命令。
+> 裸名称为 first-tier step：经 `/maestro "<意图>"` 自动路由，或按 v3 receipt chain 直接执行：`session open` → fenced `session chain insert --command <step> --arg "<domain text>"` → fenced `run next`。birth packet 内嵌 prepare guidance，并返回 resolved `task` 与 structured `continuation`；`--input` 仅接受 sealed same-Session Artifact ID。`/` 前缀为独立命令。
 
 | 命令 | 用途 |
 |------|------|

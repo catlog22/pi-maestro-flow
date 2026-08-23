@@ -16,7 +16,7 @@
 
 ### Step 1.0: Establish Run (see run-mode.md)
 
-If an orchestrator injected `run_id` / `run_dir` in the birth packet, use them directly. Otherwise follow the complete self-start flow in `run-mode.md`: negotiate capabilities, create or resolve the explicit Session identity, start the bounded Execution, and create `skill-iter-tune` with the full locator, fence, private claim, intent, and `--json` option set.
+If an orchestrator injected a birth packet, use its exact locator, resolved `task`, and structured `continuation` directly. Otherwise follow the complete receipt-chained self-start flow in `run-mode.md`: negotiate capabilities, `session open`, fenced `session chain insert --command skill-iter-tune --arg "<task text>"`, then fenced `run next`, using one actor identity, distinct request IDs, and each preceding receipt's exact revision. Never pass raw task prose through `--input`; it accepts only sealed same-Session Artifact IDs.
 
 The Session slug is ASCII-only and <=64 chars (topic derived from the target skill name). Retain the returned exact locator, `run_id`, and `run_dir`; the `{run_dir}/outputs/...` workspace below is created under it.
 

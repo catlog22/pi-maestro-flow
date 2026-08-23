@@ -317,19 +317,25 @@ todo({ action: "create", subject: "Explore codebase", assignee: "explorer-1" })
 
 ### 2.5 run-control — Maestro CLI passthrough shell
 
-Drive the canonical Maestro CLI through argv passthrough — the single LLM surface for the Session/Run lifecycle (no hand-written `maestro run/session` in bash):
+Drive the canonical Maestro CLI through argv passthrough. This is the single LLM surface for Session/Run lifecycle operations; do not hand-write `maestro run/session` mutations in bash. The Workflow Coordinator must be available for every call. `session open` may create a new Session when none is active; other mutations operate on an active or explicitly named Session.
 
-| Command class | Description |
-|---------------|-------------|
-| Read | `status`/`brief`/`prepare`/`check`/`recall`/`evidence`/`list`/`show`/`graph`/`skills`/`search`/`load`/`review` — no mutation lease needed |
-| Write | `next`/`done`/`decide`/`seal`/`edit`/`meta`/`recover`/`accept-reuse`/… — current Pi session must own the mutation lease; blocked in Plan mode |
-| Entry | `session/run create|start` — allowed without a held lease; refused when a lease is held for another Session |
+Session/3.0 uses no mutation lease. The coordinator supplies the current Pi host identity as identical `--participant` and `--actor` values, a distinct request ID, reason, and JSON output. It adds the exact `--session` and orchestration CAS revision for active-Session mutations, plus the Run revision for Run-entity mutations. `session open` has no Session/revision target yet; `session migrate` instead receives the legacy identity/activity revision fences. A CAS conflict is returned to the caller after a fresh authority read and is never silently replayed with a replacement revision.
+
+| Command class | Current v3 surface |
+|---------------|--------------------|
+| Read | `session status`; `run brief`; `run check`; lists/shows, resume view, Artifact inspect, and knowledge lookups |
+| Session mutation | `session open/complete/archive/unarchive`; `session chain insert/update/replace/skip`; `run next/create/decide` |
+| Run mutation | `run complete/transition/cancel/seal`; `run complete --advance` carries both Run and orchestration CAS |
+| Migration | `session migrate`, fenced by legacy identity/activity revisions rather than orchestration CAS |
 
 ```javascript
-run-control({ argv: ["session", "status"] })
-run-control({ argv: ["session", "next"] })
-run-control({ argv: ["run", "done", "run-123", "--verdict", "done", "--summary", "Complete"] })
-run-control({ argv: ["run", "edit", "quality-review", "--after", "current"] })
+run-control({ argv: ["session", "status", "--session", "session-123", "--json"] })
+run-control({ argv: ["run", "brief", "run-123", "--session", "session-123", "--json"] })
+run-control({ argv: ["run", "check", "run-123", "--session", "session-123", "--json"] })
+run-control({ argv: ["session", "chain", "insert", "--session", "session-123", "--step-id", "review-1", "--command", "review", "--arg", "src", "--json"] })
+run-control({ argv: ["session", "chain", "update", "--session", "session-123", "--step-id", "review-1", "--stage", "verification", "--json"] })
+run-control({ argv: ["run", "next", "--session", "session-123", "--json"] })
+run-control({ argv: ["run", "complete", "run-123", "--session", "session-123", "--verdict", "done", "--advance", "--json"] })
 ```
 
 ---

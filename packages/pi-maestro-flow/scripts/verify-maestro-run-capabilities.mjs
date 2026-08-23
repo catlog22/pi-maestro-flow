@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-export const REQUIRED_RUN_COMMANDS = ["start", "done", "edit"];
+export const REQUIRED_RUN_COMMANDS = ["next", "create", "complete"];
 
 export function resolveMaestroFlowRoot() {
   const require = createRequire(import.meta.url);
@@ -27,15 +27,20 @@ export function verifyMaestroRunCapabilities({
       stdio: "pipe",
       windowsHide: true,
     });
-    if (!result.error && result.status === 0) continue;
+    const output = `${result.stdout?.toString() ?? ""}\n${result.stderr?.toString() ?? ""}`;
+    if (!result.error && result.status === 0 && hasRunCommandUsage(output, command)) continue;
 
     const detail = result.error?.message
-      ?? result.stderr?.toString().trim()
-      ?? `exit status ${result.status}`;
+      ?? (output.trim() || `exit status ${result.status}`);
     throw new Error(`maestro-flow lacks required command \`maestro run ${command}\`: ${detail}. Update maestro-flow before generating Pi skills.`);
   }
 
   return { packageRoot, commands: [...REQUIRED_RUN_COMMANDS] };
+}
+
+function hasRunCommandUsage(output, command) {
+  const escaped = command.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`Usage:\\s+maestro\\s+run\\s+${escaped}(?:\\s|$)`, 'i').test(output);
 }
 
 function main() {

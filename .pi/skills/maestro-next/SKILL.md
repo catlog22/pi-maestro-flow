@@ -1,7 +1,7 @@
 ---
 name: maestro-next
 description: "Unified entry for all development intents — classify intent, assess complexity, route to the correct execution channel: /maestro-companion (lightweight), standard single run, or /maestro and /maestro-ralph (multi-step manual/orchestrated). Pure router, never runs execution loops itself Arguments: <intent> [-y]"
-allowed-tools: Read Write Edit Bash Glob Grep maestro
+allowed-tools: Read Write Edit Bash Glob Grep maestro run-control
 disable-model-invocation: false
 session-mode: none
 ---
@@ -19,6 +19,18 @@ Pi mirrors canonical Session/Run state automatically:
 - After compaction, reattach through the current Run's `brief.command`.
 
 </host_mirror>
+
+<pi_run_control>
+
+Pi lifecycle routing:
+
+- Execute every Session/Run lifecycle read or mutation with the `run-control` tool by passing the displayed Maestro arguments as `argv` without the leading `maestro` executable. Never execute lifecycle mutation through Bash.
+- Fenced Maestro CLI examples below are human syntax references, not an alternate Pi execution path. Shorthand command-family mentions are not executable examples. Any executable human CLI example must show the complete v3 authority envelope: exact `--session`, identical `--participant` and `--actor`, a distinct `--request-id`, `--reason`, and the applicable entity revision fences.
+- For `session open`, the coordinator injects participant == actor, request ID, reason, and JSON output; a new Session has no `--session` or expected revision yet.
+- For operations on an active Session, the coordinator injects the exact `--session`, participant == actor, request ID, reason, and current `--expected-orchestration-revision`; Run mutations also receive `--expected-run-revision`. `session migrate` uses legacy identity/activity revision fences instead.
+- The coordinator must be available for every `run-control` call. Session opening does not require an already active Session; all other mutations target an exact active or explicitly named Session.
+
+</pi_run_control>
 
 <purpose>
 Unified interactive entry for all development intents. Pure router: parse intent + project state → classify → assess complexity → route to the appropriate channel:
@@ -61,15 +73,13 @@ $ARGUMENTS — intent text + optional flags.
 2. **Pipeline orchestrators excluded** — only recommend registered steps as single-run targets
 3. **Lifecycle continuation** — "continue"/"next"/"go" are explicit continuation signals → lifecycle_position inference (S_STATE). Truly empty arguments (no text at all) → 1 clarify round via [@ask] user prompt; still empty → S_FALLBACK (E001)
 4. **Literal match priority** — keyword match takes precedence; lifecycle is tie-breaker
-5. **Argument pass-through** — the intent phrase is Session metadata only (the objective to `session open`); the selected step's domain payload becomes command input through repeatable `--arg <value>`. The user can modify command inputs at confirmation; `-y` only passes through when the user provided it
+5. **Argument pass-through** — the intent phrase is Session metadata only (the objective to `session open`); when a chain step needs domain inputs, store them with repeatable `--arg <value>` on `maestro session chain insert|replace`. A fully specified machine-protocol `run create` passes domain text positionally; `--input <ART-id>` is only for sealed same-Session Artifact IDs. The user can modify command inputs at confirmation; `-y` only passes through when the user provided it
 6. **Manual campaigns excluded** — `team-*` and `maestro-odyssey` never enter the executable candidate pool and are never executed in this turn; they may only be emitted as suggest-only invocations (see the odyssey campaign rows in the intent routing table)
 7. **Retained commands are suggest-only** — route retained commands to an exact slash command. Never execute them in this turn; `-y` applies only to first-tier steps
 8. **Companion routing is suggest-or-execute** — when complexity == lightweight, output `/maestro-companion "<intent>"` invocation. With `-y`, emit the invocation directly (`/maestro-companion "<intent>" -y`); the companion command owns its own execution. Without `-y`, present it as the recommended channel for user confirmation
 9. **Multi-step routes to the orchestrators** — when intent spans ≥2 steps or needs orchestration, output `/maestro "<intent>"` (manual stepwise) or `/maestro-ralph "<intent>"` (orchestrated closed-loop). This command never creates sessions or manages chains itself
 10. **Cross-category keyword priority** — when an intent keyword matches both a first-tier step and a retained command, the first-tier step wins for candidate selection; complexity assessment still applies independently. Auxiliary clusters are advisory grouping for display, never routing overrides
 11. **`-y` means skip-confirmation, not auto-execute** — for standard channel, skipping confirmation proceeds to S_EXECUTE (this command runs the step). For companion/multi-step channels, this command is a router: skipping confirmation means outputting the target invocation text directly. The target command owns its own execution semantics
-9. simple chain 只通过 `maestro session open --chain ...` 创建；不得为同一任务的每个 skill 新建独立 Session。
-10. 中途新增下一步用 `maestro session chain insert|replace|skip` 修改未来 chain，不调用新的 `session open` 制造第二个 Topic Session。
 </invariants>
 
 <state_machine>
@@ -122,27 +132,28 @@ S_FALLBACK:
 
 ### A_INFER_LIFECYCLE
 
-Read project state to infer `lifecycle_position`:
+Read canonical Session/Run state to infer `lifecycle_position`; never inspect `.workflow/state.json` or choose by mtime:
 
 ```bash
-maestro session list 2>/dev/null   # read-only: enumerate session/3.0 Sessions
-# Topic Session resolution and ReuseAssessment are injected read-only inputs
+maestro session list --json
+maestro session status --session {session_id} --json
+maestro session resume-view --session {session_id} --json
 ```
 
-**State → lifecycle_position → natural next step:**
+**Canonical state → lifecycle_position → natural next step:**
 
 | State | lifecycle_position | Natural next |
 |-------|-------------------|-------------|
 | No `.workflow/` + no source code | brainstorm | brainstorm |
 | No `.workflow/` + has source code | init | (maestro-init, not a step) |
-| state.json exists, no roadmap, no sessions | analyze-macro | analyze |
-| Has macro analysis, no roadmap | roadmap | roadmap |
-| Has roadmap, dep-ready session unstarted | analyze | analyze --session {slug} |
-| Latest artifact = analysis | plan | plan --session {active} |
-| Latest artifact = plan | execute | execute --session {active} |
-| Latest artifact = execution | review | review --session {active} |
-| Review verdict = PASS | auto-test | auto-test --session {active} |
-| Tests green + active session | session-manage --complete | (maestro-session-manage --complete, not a step) |
+| No compatible Session | analyze-macro | analyze |
+| Session objective spans multiple releases and has no roadmap Artifact | roadmap | roadmap |
+| Pending chain starts before feature analysis | analyze | analyze --session {session_id} |
+| Latest eligible same-Session Artifact = analysis | plan | plan --session {session_id} |
+| Latest eligible same-Session Artifact = plan | execute | execute --session {session_id} |
+| Latest eligible same-Session Artifact = execution | review | review --session {session_id} |
+| Review verdict = PASS | auto-test | auto-test --session {session_id} |
+| Tests green + chain terminal | session-manage --complete | (maestro-session-manage --complete, not a step) |
 | Any stage has gaps/failures | debug | debug {gap} |
 
 **Lifecycle main line:**
@@ -153,7 +164,7 @@ init → {brainstorm | blueprint | analyze-macro} → roadmap
   → session-manage --complete → next dep-ready session
 ```
 
-**Multi-session resolution:** "Latest artifact" refers to the `active_session_id` in state.json. If no active session is set, use the most recently modified session. If multiple sessions are active, lifecycle inference applies only to the active one; surface others as context in S_PRESENT.
+**Multi-Session resolution:** historical similarity is read-only evidence. Resolve an exact compatible Session from `session list` plus `session status`; multiple compatible Sessions require user selection. Use `resume-view` and same-Session sealed Artifacts for lifecycle inference. Never select a Session from a local projection, directory order, or modification time.
 
 ### A_SCORE_CANDIDATES
 
@@ -255,12 +266,22 @@ Single-run path only. Multi-step execution is handled by `/maestro` (manual) and
 For first-tier steps (those with prepare/ + workflows/ files):
 
 ```bash
-# Create one Run through the friendly unified entry.
-maestro session open "<short goal>" --id <slug> --chain <step> --participant {p} --actor {a} --request-id {r} --reason "<reason>" --workflow-root .
-# Returns run_id, run_dir, authoritative upstream refs, entry gates/blockers, and brief.command.
-```
+# 1. Open an empty Session; participant and actor are the same identity.
+maestro session open "<objective>" --id YYYYMMDD-<step>-<topic> --participant {actor_id} --actor {actor_id} --request-id {open_request_id} --reason "open single-step Session" --json
+#    Or attach an existing compatible Session read-only first: maestro session status --session {session_id} --json
 
-# Entry blocker degradation (execute-specific)
+# 2. Persist the selected step and each required positional command input.
+maestro session chain insert --session {session_id} --step-id {step_id} --command <step> --arg "<domain input>" --participant {actor_id} --actor {actor_id} --request-id {insert_request_id} --reason "add selected step" --expected-orchestration-revision {open_orchestration_revision} --json
+
+# 2a. LLM performs pre-task thinking using the prepare guidance embedded in the birth packet.
+
+# 3. Dispatch with the exact revision returned by chain insert.
+maestro run next --session {session_id} --participant {actor_id} --actor {actor_id} --request-id {next_request_id} --reason "dispatch selected step" --expected-orchestration-revision {insert_orchestration_revision} --json
+#    Direct machine-protocol alternative (only for an existing exact step):
+#    maestro run create <step> "<domain input>" --session {session_id} --run {run_id} --step {step_id} --goal "<goal>" --input <ART-id> --participant {actor_id} --actor {actor_id} --request-id {create_request_id} --reason "create selected Run" --expected-orchestration-revision {step_orchestration_revision} --json
+#    Returns: run_id, run_dir, upstream, resolved task, entry blockers, and structured executable continuation
+
+# 3a. Entry blocker degradation (execute-specific)
 #    IF step == execute AND entry_blockers is non-empty (missing current-plan):
 #      Inspect upstream for alternative artifacts (latest-review, latest-debug, latest-fix-directions).
 #      Route per the degradation table in prepare/execute.md:
@@ -285,7 +306,7 @@ maestro session open "<short goal>" --id <slug> --chain <step> --participant {p}
 
 # 6. Check and complete the run
 maestro run check {run_id} --session {session_id} --json
-maestro run complete {run_id} --session {session_id} --participant {participant_id} --actor {actor_id} --request-id {request_id} --reason "<reason>" --expected-orchestration-revision {orchestration_revision} --expected-run-revision {run_revision} --verdict done --advance --json
+maestro run complete {run_id} --session {session_id} --participant {actor_id} --actor {actor_id} --request-id {complete_request_id} --reason "complete selected step" --expected-orchestration-revision {orchestration_revision} --expected-run-revision {run_revision} --verdict done --advance --json
 ```
 
 After `run complete --advance`: re-infer lifecycle and surface the natural next step as a continuation hint — stepwise multi-step work proceeds by re-invoking `/maestro-next` or `/maestro -c`.

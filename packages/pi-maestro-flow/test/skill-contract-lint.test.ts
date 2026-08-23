@@ -5,6 +5,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { SKILL_SESSION_MODES } from "../src/skills/skill-loader.ts";
+import { transformPiContent } from "../../../convert-pi.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const skillsRoot = join(repoRoot, ".pi", "skills");
@@ -12,7 +13,6 @@ const coreSkills = new Set([
   "maestro-next",
   "maestro-ralph",
   "maestro",
-  "maestro-session-seal",
 ]);
 const piCoordinatorSkills = ["maestro-next", "maestro-ralph", "maestro"] as const;
 
@@ -46,12 +46,45 @@ test("Pi coordinators consume the read-only Topic Session reuse contract", () =>
     assert.match(content, /suggest_only=true|suggest_only === true/, `${name}: completion next must be suggest-only`);
 
     assert.doesNotMatch(content, /maestro\s+run\s+(?:recall-confirm|fork|import|new|rebind)\b/i, `${name}: legacy Run mutation is recommended`);
-    assert.doesNotMatch(content, /maestro\s+session\s+resume\b/i, `${name}: historical Session mutation is recommended`);
-    assert.doesNotMatch(content, /\.workflow[\\/]state\.json/i, `${name}: local projection must not drive Topic Session resolution`);
+    assert.doesNotMatch(content, /maestro\s+session\s+resume(?!-view)\b/i, `${name}: historical Session mutation is recommended`);
+    assert.doesNotMatch(
+      content,
+      /cat\s+\.workflow[\\/]state\.json|active_session_id[^\n]*state\.json|Latest artifact[^\n]*state\.json/i,
+      `${name}: local projection must not drive Topic Session resolution`,
+    );
   }
 
   const ralph = readFileSync(join(skillsRoot, "maestro-ralph", "SKILL.md"), "utf8");
   assert.doesNotMatch(ralph, /`--(?:from|dir)\b/i, "maestro-ralph must consume selected artifact refs instead of composing source/path args");
+});
+
+test("core Pi conversion routes lifecycle authority through run-control", () => {
+  const sourceBody = `<required_reading>
+~/.maestro/workflows/run-mode.md
+</required_reading>
+<purpose>Coordinator</purpose>
+maestro session open "goal" --id demo --participant actor-1 --actor actor-1 --request-id req-open --reason "open" --json
+maestro session chain insert --session demo --step-id analyze --command analyze --arg "goal" --participant actor-1 --actor actor-1 --request-id req-insert --reason "insert" --expected-orchestration-revision 0 --json
+maestro session chain update --session demo --step-id analyze --stage analysis --arg "scope" --participant actor-1 --actor actor-1 --request-id req-update --reason "update" --expected-orchestration-revision 1 --json
+maestro run next --session demo --participant actor-1 --actor actor-1 --request-id req-next --reason "next" --expected-orchestration-revision 2 --json
+`;
+
+  for (const name of piCoordinatorSkills) {
+    const source = `---\nname: ${name}\nallowed-tools: Read Bash\n---\n${sourceBody}`;
+    const output = transformPiContent(source, join("D:/fixture/skills", name, "SKILL.md"));
+    const { frontmatter } = parseFrontmatter<Record<string, unknown>>(output);
+    const tools = normalizeToolList(frontmatter["allowed-tools"]);
+
+    assert.ok(tools.includes("run-control"), `${name}: run-control missing from allowed-tools`);
+    assert.equal(output.match(/<pi_run_control>/g)?.length, 1, `${name}: Pi routing block must be unique`);
+    assert.match(output, /Never execute lifecycle mutation through Bash/, `${name}: bash mutation ban missing`);
+    assert.match(output, /human syntax references/, `${name}: CLI reference label missing`);
+    assert.match(output, /session chain insert[^\n]*--arg "goal"/, `${name}: insert args changed`);
+    assert.match(output, /session chain update[^\n]*--arg "scope"/, `${name}: update args changed`);
+    assert.ok(output.indexOf("maestro session open") < output.indexOf("maestro session chain insert"));
+    assert.ok(output.indexOf("maestro session chain update") < output.indexOf("maestro run next"));
+    assert.doesNotMatch(output, /maestro run start|maestro run edit|maestro run prepare|session open[^\n]*--chain-file/);
+  }
 });
 
 test("Pi skills using teammate expose observe and the wait contract", () => {
