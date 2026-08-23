@@ -55,6 +55,7 @@ import {
   MODEL_FALLBACK_RESUME_PROMPT,
   OUTPUT_LIMIT_RECOVERY_TIMEOUT_MS,
   RESULT_READY_GRACE_MS,
+  RESULT_READY_GRACE_EXTENDED_MS,
   STRUCTURED_OUTPUT_RECOVERY_PROMPT,
   STRUCTURED_OUTPUT_RECOVERY_TIMEOUT_MS,
   STRUCTURED_OUTPUT_SETTLEMENT_DIAGNOSTICS,
@@ -934,7 +935,13 @@ export async function runSingleAttempt(
      * streaming) is not killed while still producing output.
      */
     let lifecycleDeadlineActive = false;
-    const lifecycleDeadlineMs = (): number => options.resultReadyGraceMs ?? RESULT_READY_GRACE_MS;
+    const lifecycleDeadlineMs = (): number => {
+      // C2: runs that performed tool work get the extended grace window; the
+      // explicit `resultReadyGraceMs` option (tests) overrides both paths.
+      const base = options.resultReadyGraceMs
+        ?? (state.completedToolCount > 0 ? RESULT_READY_GRACE_EXTENDED_MS : RESULT_READY_GRACE_MS);
+      return base;
+    };
     const lifecycleDeadlineCallback = (): void => {
       timers.resultReadyGrace = undefined;
       lifecycleDeadlineActive = false;
@@ -944,7 +951,9 @@ export async function runSingleAttempt(
         content:
           `Teammate published a result but never confirmed its lifecycle within ${lifecycleDeadlineMs()}ms `
           + `(agent=${params.agent}, correlationId=${correlationId}, expected=agent_settled, `
-          + `tools=${progress.toolCount}, turnTools=${state.turnToolCount}); the child process was terminated.`,
+          + `tools=${progress.toolCount}, turnTools=${state.turnToolCount}, `
+          + `inFlightTools=${state.inFlightToolCount}, completedTools=${state.completedToolCount}, `
+          + `lastStopReason=${state.lastAssistantStopReason ?? "unknown"}); the child process was terminated.`,
       });
       completeTurn(readStructuredOutput(true), true, 0, "terminated");
     };
@@ -1421,7 +1430,10 @@ export async function runSingleAttempt(
       }
       recordResolvedModel(event, msg);
       recordRuntimeEventError(event, "turn_end");
-      if (isPiResultReadyTurn(event)) {
+      if (isPiResultReadyTurn(event, {
+        inFlightToolCount: state.inFlightToolCount,
+        completedToolCount: state.completedToolCount,
+      })) {
         progress.resultReadyAt = Date.now();
         options.onProgress?.(progress);
         if (!params.outputSchema) {

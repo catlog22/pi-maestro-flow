@@ -807,6 +807,60 @@ test("Pi result-ready marker accepts only a final assistant turn with no tool wo
   }), false);
 });
 
+test("C1: a text-only turn with tools in flight is interim, not result-ready", () => {
+  // A narration turn emitted while tool calls are still outstanding must not
+  // trip result-ready — the agent is still mid-task.
+  assert.equal(isPiResultReadyTurn({
+    type: "turn_end",
+    message: {
+      role: "assistant",
+      stopReason: "stop",
+      content: [{ type: "text", text: "starting the read-only scan..." }],
+    },
+    toolResults: [],
+  }, { inFlightToolCount: 2, completedToolCount: 2 }), false);
+});
+
+test("C1: a text-only turn with no tools in flight is still result-ready", () => {
+  // All previous tools completed; this text-only turn is the final answer.
+  assert.equal(isPiResultReadyTurn({
+    type: "turn_end",
+    message: {
+      role: "assistant",
+      stopReason: "stop",
+      content: [{ type: "text", text: "final analysis" }],
+    },
+    toolResults: [],
+  }, { inFlightToolCount: 0, completedToolCount: 4 }), true);
+});
+
+test("C1: a text-only turn with no prior tool work is still result-ready", () => {
+  // Pure Q&A: completedToolCount === 0, inFlightToolCount === 0.
+  assert.equal(isPiResultReadyTurn({
+    type: "turn_end",
+    message: {
+      role: "assistant",
+      stopReason: "stop",
+      content: [{ type: "text", text: "answer" }],
+    },
+    toolResults: [],
+  }, { inFlightToolCount: 0, completedToolCount: 0 }), true);
+});
+
+test("C1: omitting context preserves the original strict shape check", () => {
+  // Backward compatibility: callers that don't supply context get the legacy
+  // behavior (text-only turn with no tool results = result-ready).
+  assert.equal(isPiResultReadyTurn({
+    type: "turn_end",
+    message: {
+      role: "assistant",
+      stopReason: "stop",
+      content: [{ type: "text", text: "answer" }],
+    },
+    toolResults: [],
+  }), true);
+});
+
 test("final turn_end publishes a wakeable result before agent_end settles lifecycle", async () => {
   const completions: string[] = [];
   const progress: AgentProgress[] = [];

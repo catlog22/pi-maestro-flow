@@ -373,11 +373,29 @@ export declare const MODEL_FALLBACK_RESUME_PROMPT: string;
 export declare function correlationSessionDirectoryName(correlationId: string): string;
 export declare function extractTextContent(event: JsonLineEvent): string | undefined;
 /**
+ * Optional context for distinguishing a final assistant turn from an interim
+ * text-only turn emitted while tool calls are still in flight. Without this,
+ * an LLM that narrates progress mid-task ("starting the read-only scan...") can
+ * trip result-ready and publish a consumable result before its tool work is
+ * done, leaving the lifecycle waiting for an `agent_settled` that never comes.
+ */
+export interface ResultReadyTurnContext {
+    /** Tools that have started but not yet produced a result (in-flight). */
+    inFlightToolCount?: number;
+    /** Tools that have completed in this run so far. */
+    completedToolCount?: number;
+}
+/**
  * Pi's `agent_end` remains the authoritative terminal event. This stricter
  * `turn_end` shape means the model has supplied a usable final answer while
  * the child may still be waiting to publish its lifecycle confirmation.
+ *
+ * When `context` is supplied, a text-only turn is treated as interim (not
+ * result-ready) if tools are still in flight: the narration likely precedes
+ * the tool results rather than being the final answer. Without `context` the
+ * original strict shape check is preserved (backward compatible).
  */
-export declare function isPiResultReadyTurn(event: Record<string, unknown>): boolean;
+export declare function isPiResultReadyTurn(event: Record<string, unknown>, context?: ResultReadyTurnContext): boolean;
 export interface StructuredOutputCandidate {
     value: unknown;
     toolCallId?: string;
@@ -675,6 +693,7 @@ export declare function cleanupFile(filePath: string): void;
 export declare function createProgress(agent: string, startTime: number): AgentProgress;
 export declare const CHILD_TERMINATION_GRACE_MS = 5000;
 export declare const RESULT_READY_GRACE_MS = 60000;
+export declare const RESULT_READY_GRACE_EXTENDED_MS = 120000;
 export declare const STRUCTURED_OUTPUT_RECOVERY_TIMEOUT_MS = 60000;
 export declare const OUTPUT_LIMIT_RECOVERY_TIMEOUT_MS: number;
 export declare const FIRST_ACTIVITY_TIMEOUT_MS = 120000;

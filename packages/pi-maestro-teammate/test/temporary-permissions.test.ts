@@ -64,7 +64,8 @@ test("prompt schema and reserved result files are private on creation", () => {
   const promptFile = writeSystemPromptFile(promptAgent, correlationId);
   const { schemaFile, outputFile } = writeSchemaFile({ type: "object" }, correlationId);
   try {
-    assert.equal(fs.readFileSync(promptFile, "utf8"), "private prompt");
+    assert.match(fs.readFileSync(promptFile, "utf8"), /^private prompt/);
+    assert.match(fs.readFileSync(promptFile, "utf8"), /## Result publication discipline/);
     assert.deepEqual(JSON.parse(fs.readFileSync(schemaFile, "utf8")), { type: "object" });
     assert.equal(fs.readFileSync(outputFile, "utf8"), "");
     if (process.platform !== "win32") {
@@ -120,13 +121,15 @@ test("todo binding appends an assigned-task instruction to the child system prom
   const plain = writeSystemPromptFile(promptAgent, correlationId);
   const bound = writeSystemPromptFile(promptAgent, `todo-prompt-2-${randomUUID()}`, undefined, ["#12", "7"]);
   try {
-    assert.equal(fs.readFileSync(plain, "utf8"), "private prompt");
+    assert.match(fs.readFileSync(plain, "utf8"), /^private prompt/);
+    assert.match(fs.readFileSync(plain, "utf8"), /## Result publication discipline/);
     const boundText = fs.readFileSync(bound, "utf8");
     assert.match(boundText, /## Assigned Todo tasks/);
     assert.match(boundText, /#12, #7/);
     assert.match(boundText, /already active \(status=in_progress\)/);
     assert.match(boundText, /Drive your queue with \`todo update\` only/);
     assert.match(boundText, /private prompt/);
+    assert.match(boundText, /## Result publication discipline/);
   } finally {
     fs.rmSync(plain, { force: true });
     fs.rmSync(bound, { force: true });
@@ -137,7 +140,8 @@ test("child system prompt does not append taskType behavior instructions", () =>
   const promptFile = writeSystemPromptFile(promptAgent, `tasktype-prompt-${randomUUID()}`);
   try {
     const promptText = fs.readFileSync(promptFile, "utf8");
-    assert.equal(promptText, "private prompt");
+    assert.match(promptText, /^private prompt/);
+    assert.match(promptText, /## Result publication discipline/);
     assert.doesNotMatch(promptText, /Assigned taskType|routed as `explore`/);
   } finally {
     fs.rmSync(promptFile, { force: true });

@@ -510,11 +510,33 @@ export function extractTextContent(event: JsonLineEvent): string | undefined {
 }
 
 /**
+ * Optional context for distinguishing a final assistant turn from an interim
+ * text-only turn emitted while tool calls are still in flight. Without this,
+ * an LLM that narrates progress mid-task ("starting the read-only scan...") can
+ * trip result-ready and publish a consumable result before its tool work is
+ * done, leaving the lifecycle waiting for an `agent_settled` that never comes.
+ */
+export interface ResultReadyTurnContext {
+  /** Tools that have started but not yet produced a result (in-flight). */
+  inFlightToolCount?: number;
+  /** Tools that have completed in this run so far. */
+  completedToolCount?: number;
+}
+
+/**
  * Pi's `agent_end` remains the authoritative terminal event. This stricter
  * `turn_end` shape means the model has supplied a usable final answer while
  * the child may still be waiting to publish its lifecycle confirmation.
+ *
+ * When `context` is supplied, a text-only turn is treated as interim (not
+ * result-ready) if tools are still in flight: the narration likely precedes
+ * the tool results rather than being the final answer. Without `context` the
+ * original strict shape check is preserved (backward compatible).
  */
-export function isPiResultReadyTurn(event: Record<string, unknown>): boolean {
+export function isPiResultReadyTurn(
+  event: Record<string, unknown>,
+  context?: ResultReadyTurnContext,
+): boolean {
   if (event.type !== "turn_end") return false;
   const message = event.message as Record<string, unknown> | undefined;
   if (message?.role !== "assistant" || message.stopReason !== "stop") return false;
@@ -522,11 +544,20 @@ export function isPiResultReadyTurn(event: Record<string, unknown>): boolean {
   if (!Array.isArray(message.content) || !Array.isArray(event.toolResults) || event.toolResults.length !== 0) {
     return false;
   }
-  return !message.content.some((item) => (
+  if (message.content.some((item) => (
     item !== null
     && typeof item === "object"
     && (item as Record<string, unknown>).type === "toolCall"
-  ));
+  ))) {
+    return false;
+  }
+  // C1 guard: a text-only turn while tools are still in flight is interim
+  // narration, not a final answer. Suppress result-ready so the agent can
+  // continue its turn and converge naturally on agent_settled.
+  if (context && context.inFlightToolCount && context.inFlightToolCount > 0) {
+    return false;
+  }
+  return true;
 }
 
 export interface StructuredOutputCandidate {
@@ -2167,7 +2198,16 @@ export function writeSystemPromptFile(
   const todoInstruction = todos && todos.length > 0
     ? `\n\n## Assigned Todo tasks\nYour assigned Todo tasks, in priority order (you manage them yourself): ${todos.map((id) => `#${id.replace(/^#/, "")}`).join(", ")}.\nCheck \`todo list\` for their current states: the first runnable task (pending, not blocked, and no other active task for you) is already active (status=in_progress); if it is not active yet, activate it with \`todo update <id> status=in_progress\`.\nFinish each task with \`todo update <id> status=completed summary=<one-line result>\`, then activate the next one with \`todo update <id> status=in_progress\` and continue in order. Drive your queue with \`todo update\` only — \`todo next\` is root's self-drive channel.\nIf a task is blocked by a dependency or you cannot complete it, leave it pending and explain why in your final answer.`
     : "";
-  writePrivateTextFile(promptFile, `${agentConfig.systemPrompt}${structuredOutputInstruction}${todoInstruction}`);
+  // B1: result publication discipline. A text-only turn emitted while tool
+  // calls are still in flight can be misread as the final answer and publish
+  // a consumable result before the work is done. Keep narration inside the
+  // active turn; emit the final text answer only after tool work is complete.
+  const resultPublicationDiscipline =
+    "\n\n## Result publication discipline\n" +
+    "Do not emit a stop-terminated text-only turn while tool calls are still in flight. " +
+    "If you need to narrate progress mid-task, continue the turn (do not stop) or use a tool call. " +
+    "Emit your final text answer only after all tool calls have completed.";
+  writePrivateTextFile(promptFile, `${agentConfig.systemPrompt}${structuredOutputInstruction}${todoInstruction}${resultPublicationDiscipline}`);
   return promptFile;
 }
 
@@ -2216,6 +2256,13 @@ export const CHILD_TERMINATION_GRACE_MS = 5_000;
 // lifecycle confirmation (agent_settled/close) is this late, so aggregation never
 // blocks indefinitely on a missing terminal event.
 export const RESULT_READY_GRACE_MS = 60_000;
+
+// C2: when an agent performed tool work before publishing its result-ready turn,
+// the agent_settled confirmation may trail behind the last tool result by more
+// than the default grace (tool I/O latency, retry, compaction). Give those runs
+// a wider window so legitimate post-tool convergence is not misterminated.
+// Pure Q&A runs (no tool work) keep the default 60s.
+export const RESULT_READY_GRACE_EXTENDED_MS = 120_000;
 
 // A corrective structured-output continuation is one model round-trip, but
 // still bounded so a child that never responds settles as a failure instead of
