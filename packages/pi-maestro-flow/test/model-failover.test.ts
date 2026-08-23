@@ -177,6 +177,7 @@ test("model failover config merges global and project chains without accepting m
         "provider/cleared": [],
         "provider/other": ["provider/backup"],
       },
+      defaultFallbackModels: [],
     });
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
@@ -1239,6 +1240,58 @@ test("automatic failover setModel does not reset the target model's circuit", as
     assert.equal(breaker.snapshot().find((entry) => entry.model === "provider/backup")?.state, "CLOSED", "backup was acquired, never reset");
     assert.equal(breaker.snapshot().find((entry) => entry.model === "provider/primary")?.state, "OPEN");
     await runtime.emit("session_shutdown");
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("the default priority table leads the implicit fallback order when a model has no per-model chain", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-default-"));
+  try {
+    // No per-model chain for `provider/primary`; the default table declares
+    // `provider/last` ahead of `provider/backup`, which must outrank the
+    // registry order of [backup, last].
+    writeProjectConfig(cwd, {
+      enabled: true,
+      fallbackModels: {},
+      defaultFallbackModels: ["provider/last", "provider/backup"],
+    });
+    const runtime = harness(cwd);
+    await runtime.emit("session_start");
+    await runtime.emit("before_agent_start", { prompt: "work" });
+    await runtime.emit("turn_start", { turnIndex: 0 });
+    await runtime.emit("agent_end", {
+      messages: [{ role: "assistant", stopReason: "error", errorMessage: "Provider returned error: 500" }],
+    });
+
+    assert.deepEqual(runtime.selected, []);
+    await runtime.emit("agent_settled");
+    assert.deepEqual(runtime.selected, ["provider/last"], "default table leads the implicit order");
+    await runtime.flushScheduledHandoff();
+    assert.equal(runtime.handoffs.length, 1);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("loadModelFailoverConfig merges global and project default tables with project taking precedence", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-default-merge-"));
+  const home = path.join(cwd, "home");
+  try {
+    fs.mkdirSync(path.dirname(getGlobalModelFailoverPath(home)), { recursive: true });
+    fs.writeFileSync(getGlobalModelFailoverPath(home), JSON.stringify({
+      enabled: true,
+      defaultFallbackModels: ["provider/global", "invalid"],
+    }));
+    writeProjectConfig(cwd, {
+      defaultFallbackModels: ["provider/backup"],
+    });
+
+    assert.deepEqual(loadModelFailoverConfig(cwd, home), {
+      enabled: true,
+      fallbackModels: {},
+      defaultFallbackModels: ["provider/backup"],
+    });
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }

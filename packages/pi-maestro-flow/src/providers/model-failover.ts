@@ -34,6 +34,8 @@ import {
 export interface ModelFailoverConfig {
   enabled: boolean;
   fallbackModels: Record<string, string[]>;
+  /** Global default fallback order used when a model has no per-model chain. */
+  defaultFallbackModels: string[];
 }
 
 interface ActiveModelRun {
@@ -215,7 +217,16 @@ function recoveryPrompt(recoveryId: string): string {
 }
 
 function emptyConfig(): ModelFailoverConfig {
-  return { enabled: false, fallbackModels: {} };
+  return { enabled: false, fallbackModels: {}, defaultFallbackModels: [] };
+}
+
+/** Parse a list of `provider/id` model keys: keep valid keys, trim, de-duplicate. */
+function parseModelList(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  return [...new Set(raw
+    .filter((candidate): candidate is string => typeof candidate === "string" && candidate.includes("/"))
+    .map((candidate) => candidate.trim())
+    .filter((candidate) => candidate.length > 0))];
 }
 
 function readConfig(filePath: string): Partial<ModelFailoverConfig> {
@@ -232,9 +243,11 @@ function readConfig(filePath: string): Partial<ModelFailoverConfig> {
         fallbackModels[model] = fallbacks;
       }
     }
+    const defaultFallbackModels = parseModelList(parsed.defaultFallbackModels);
     return {
       ...(typeof parsed.enabled === "boolean" ? { enabled: parsed.enabled } : {}),
       fallbackModels,
+      ...(defaultFallbackModels ? { defaultFallbackModels } : {}),
     };
   } catch {
     return {};
@@ -258,6 +271,7 @@ export function loadModelFailoverConfig(cwd: string, homeDir = os.homedir()): Mo
       ...(globalConfig.fallbackModels ?? {}),
       ...(projectConfig.fallbackModels ?? {}),
     },
+    defaultFallbackModels: projectConfig.defaultFallbackModels ?? globalConfig.defaultFallbackModels ?? [],
   };
 }
 
@@ -283,10 +297,12 @@ export function saveProjectModelFailoverConfig(cwd: string, config: ModelFailove
       model,
       [...new Set(chain.filter((candidate) => candidate !== model))],
     ]));
+    const defaultFallbackModels = parseModelList(config.defaultFallbackModels) ?? [];
     const next = {
       ...existing,
       enabled: config.enabled,
       fallbackModels,
+      defaultFallbackModels,
     };
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     writeFileDurableSync(filePath, `${JSON.stringify(next, null, 2)}\n`);
@@ -623,11 +639,11 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
         : undefined);
     }
 
-    // Without an explicit fallback chain every other authenticated model is an
-    // implicit ordered fallback, mirroring teammate's implicit candidate sweep
-    // so a default install can still auto-recover from network/quota failures.
+    // Without a per-model chain, the global default priority table leads the
+    // implicit sweep, followed by every other authenticated model so a default
+    // install can still auto-recover from network/quota failures.
     const fallbackChain = configuredFallbacks.length === 0
-      ? [...new Set([...baseChain, ...availableModels(ctx).keys()])]
+      ? [...new Set([...baseChain, ...config.defaultFallbackModels, ...availableModels(ctx).keys()])]
       : baseChain;
     const chain = images.length > 0 ? prioritizeMultimodalChain(fallbackChain, availableModels(ctx)) : fallbackChain;
     const currentIndex = chain.indexOf(current);

@@ -26,8 +26,9 @@ import {
   type ModelFailoverConfig,
 } from "../providers/model-failover.ts";
 
-type Pane = "primary" | "fallback";
+type Pane = "primary" | "fallback" | "default";
 type SaveState = "clean" | "dirty" | "saving" | "failed";
+type Mode = "edit" | "confirming";
 
 interface FailoverTheme extends FrameTheme {}
 
@@ -38,13 +39,17 @@ const CATALOGS = {
     "state.disabled": "○ Disabled",
     "pane.primary": "Primary model",
     "pane.fallback": "Fallback priority",
+    "pane.default": "Default priority",
     "empty.primary": "No matching models",
     "empty.fallback": "No available fallback models",
+    "empty.default": "No default fallback models",
     "detail.source": "Source",
     "detail.noPrimary": "None",
     "detail.unobserved": "Unobserved",
     "detail.failures": "failures",
     "detail.fallbackCount": "{count} fallbacks",
+    "detail.defaultCount": "{count} defaults",
+    "detail.defaultHint": "used when a model has no per-model chain",
     "footer.main": "Esc close · E toggle · Tab/←→ panes · ↑↓ select · Space add/remove · Ctrl+↑↓ reorder · Ctrl+S save · {filter}",
     "filter.active": "filter {query} · Esc cancel",
     "filter.hint": "/ filter",
@@ -53,6 +58,7 @@ const CATALOGS = {
     "compact.off": "off",
     "compact.primary": "Primary",
     "compact.fallback": "Fallback",
+    "compact.default": "Default",
     "compact.fuse": "Esc · fuse",
     "notice.discardConfirm": "Uncommitted changes · press Esc again to discard",
     "notice.nothingToSave": "No changes to save",
@@ -60,6 +66,19 @@ const CATALOGS = {
     "notice.saved": "Saved project model failover configuration",
     "notice.saveFailed": "Save failed: {message}",
     "notice.dirty": "Uncommitted changes",
+    "confirm.title": "Confirm save",
+    "confirm.summary": "{count} change(s)",
+    "confirm.enabledOn": "Enable failover",
+    "confirm.enabledOff": "Disable failover",
+    "confirm.chain": "{primary} → {chain}",
+    "confirm.chainAdd": "{primary} → +{model}",
+    "confirm.chainRemove": "{primary} → -{model}",
+    "confirm.chainReorder": "{primary} → reordered",
+    "confirm.defaultChain": "default → {chain}",
+    "confirm.defaultAdd": "default → +{model}",
+    "confirm.defaultRemove": "default → -{model}",
+    "confirm.defaultReorder": "default → reordered",
+    "confirm.footer": "Enter confirm save · Esc back",
     "saveLabel.saving": "Saving…",
     "saveLabel.failed": "Save failed",
     "saveLabel.dirty": "Uncommitted changes",
@@ -71,13 +90,17 @@ const CATALOGS = {
     "state.disabled": "○ 已停用",
     "pane.primary": "主模型",
     "pane.fallback": "Fallback 优先级",
+    "pane.default": "默认优先级",
     "empty.primary": "没有匹配的模型",
     "empty.fallback": "没有可用 fallback 模型",
+    "empty.default": "没有默认回退模型",
     "detail.source": "源",
     "detail.noPrimary": "无",
     "detail.unobserved": "未观测",
     "detail.failures": "failures",
     "detail.fallbackCount": "{count} 个 fallback",
+    "detail.defaultCount": "{count} 个默认",
+    "detail.defaultHint": "模型无专属链时采用",
     "footer.main": "Esc 关闭 · E 启停 · Tab/←→ 分栏 · ↑↓ 选择 · Space 增删 · Ctrl+↑↓ 排序 · Ctrl+S 保存 · {filter}",
     "filter.active": "筛选 {query} · Esc 取消",
     "filter.hint": "/ 筛选",
@@ -86,6 +109,7 @@ const CATALOGS = {
     "compact.off": "关",
     "compact.primary": "主",
     "compact.fallback": "备",
+    "compact.default": "默",
     "compact.fuse": "Esc · 熔断",
     "notice.discardConfirm": "有未保存修改，再按 Esc 放弃",
     "notice.nothingToSave": "配置未变更",
@@ -93,6 +117,19 @@ const CATALOGS = {
     "notice.saved": "已保存项目模型故障转移配置",
     "notice.saveFailed": "保存失败：{message}",
     "notice.dirty": "未保存",
+    "confirm.title": "确认保存",
+    "confirm.summary": "{count} 处变更",
+    "confirm.enabledOn": "启用故障转移",
+    "confirm.enabledOff": "停用故障转移",
+    "confirm.chain": "{primary} → {chain}",
+    "confirm.chainAdd": "{primary} → +{model}",
+    "confirm.chainRemove": "{primary} → -{model}",
+    "confirm.chainReorder": "{primary} → 已重排",
+    "confirm.defaultChain": "默认 → {chain}",
+    "confirm.defaultAdd": "默认 → +{model}",
+    "confirm.defaultRemove": "默认 → -{model}",
+    "confirm.defaultReorder": "默认 → 已重排",
+    "confirm.footer": "Enter 确认保存 · Esc 返回",
     "saveLabel.saving": "保存中",
     "saveLabel.failed": "保存失败",
     "saveLabel.dirty": "未保存",
@@ -123,21 +160,32 @@ interface FallbackRow {
   priority?: number;
 }
 
+interface Change {
+  key: string;
+  label: string;
+}
+
 const MAX_VISIBLE = 10;
+/** Minimum width for the three-column wide layout; below this it stacks. */
+const WIDE_THRESHOLD = 90;
 
 export class ModelFailoverOverlay implements Component, Focusable {
   focused = false;
   private readonly locale: SupportedSettingsLocale;
+  private mode: Mode = "edit";
   private pane: Pane = "primary";
   private primarySelected = 0;
   private fallbackSelected = 0;
+  private defaultSelected = 0;
   private query = "";
   private filterActive = false;
   private filterOriginPrimary?: string;
   private filterOriginFallback?: string;
+  private filterOriginDefault?: string;
   private saveState: SaveState = "clean";
   private notice = "";
   private discardArmed = false;
+  private readonly initial: ModelFailoverConfig;
   private readonly config: ModelFailoverConfig;
   private readonly primaries: string[];
   private readonly health = new Map<string, ModelCircuitSnapshot>();
@@ -150,6 +198,14 @@ export class ModelFailoverOverlay implements Component, Focusable {
       fallbackModels: Object.fromEntries(
         Object.entries(params.config.fallbackModels).map(([model, fallbacks]) => [model, [...fallbacks]]),
       ),
+      defaultFallbackModels: [...(params.config.defaultFallbackModels ?? [])],
+    };
+    this.initial = {
+      enabled: this.config.enabled,
+      fallbackModels: Object.fromEntries(
+        Object.entries(this.config.fallbackModels).map(([model, fallbacks]) => [model, [...fallbacks]]),
+      ),
+      defaultFallbackModels: [...this.config.defaultFallbackModels],
     };
     this.primaries = [...new Set([
       ...(params.currentModel ? [params.currentModel] : []),
@@ -175,6 +231,10 @@ export class ModelFailoverOverlay implements Component, Focusable {
 
   render(width: number): string[] {
     const safeWidth = Math.max(1, Math.min(width, 140));
+    if (this.mode === "confirming") {
+      const inner = Math.max(1, safeWidth - 2);
+      return safeWidth < 20 ? this.confirmRows(inner) : frame(this.confirmRows(inner), safeWidth, this.params.theme);
+    }
     if (safeWidth < 20) return [this.renderCompact(safeWidth)];
     const inner = safeWidth - 2;
     const enabledState = this.config.enabled
@@ -185,7 +245,7 @@ export class ModelFailoverOverlay implements Component, Focusable {
       rule(inner),
     ];
 
-    if (safeWidth >= 80) rows.push(...this.renderWide(inner));
+    if (safeWidth >= WIDE_THRESHOLD) rows.push(...this.renderWide(inner));
     else rows.push(...this.renderStacked(inner));
 
     if (this.notice) rows.push(this.params.theme.fg(this.saveState === "failed" ? "error" : "warning", fit(this.notice, inner)));
@@ -195,8 +255,19 @@ export class ModelFailoverOverlay implements Component, Focusable {
 
   handleInput(data: string): void {
     if (this.saveState === "saving") return;
+    if (this.mode === "confirming") {
+      if (matchesKey(data, Key.enter) || data === "\r") {
+        void this.commitSave();
+        return;
+      }
+      if (matchesKey(data, Key.escape)) {
+        this.mode = "edit";
+        this.refresh();
+      }
+      return;
+    }
     if (matchesKey(data, Key.ctrl("s")) || data === "\x13") {
-      void this.save();
+      this.openConfirm();
       return;
     }
     if (this.filterActive) {
@@ -235,6 +306,7 @@ export class ModelFailoverOverlay implements Component, Focusable {
       this.query = "";
       this.filterOriginPrimary = this.selectedPrimary();
       this.filterOriginFallback = this.filteredFallbackRows()[this.fallbackSelected]?.model;
+      this.filterOriginDefault = this.filteredDefaultRows()[this.defaultSelected]?.model;
       return this.refresh();
     }
     if (data === "e" || data === "E") {
@@ -242,17 +314,17 @@ export class ModelFailoverOverlay implements Component, Focusable {
       return this.markDirty();
     }
     if (matchesKey(data, Key.tab)) {
-      this.pane = this.pane === "primary" ? "fallback" : "primary";
+      this.pane = this.nextPane(this.pane);
       this.notice = "";
       return this.refresh();
     }
     if (matchesKey(data, Key.left)) {
-      this.pane = "primary";
+      this.pane = this.prevPane(this.pane);
       this.notice = "";
       return this.refresh();
     }
     if (matchesKey(data, Key.right)) {
-      this.pane = "fallback";
+      this.pane = this.nextPane(this.pane);
       this.notice = "";
       return this.refresh();
     }
@@ -264,6 +336,7 @@ export class ModelFailoverOverlay implements Component, Focusable {
     if (matchesKey(data, Key.pageDown)) return this.move(MAX_VISIBLE);
     if (matchesKey(data, Key.space) || data === " ") {
       if (this.pane === "fallback") this.toggleFallback();
+      else if (this.pane === "default") this.toggleDefault();
       return;
     }
     if (matchesKey(data, Key.enter) || data === "\r") {
@@ -271,31 +344,62 @@ export class ModelFailoverOverlay implements Component, Focusable {
         this.pane = "fallback";
         this.fallbackSelected = 0;
         this.refresh();
-      } else this.toggleFallback();
+      } else if (this.pane === "fallback") {
+        this.toggleFallback();
+      } else {
+        this.toggleDefault();
+      }
     }
   }
 
+  private nextPane(pane: Pane): Pane {
+    if (pane === "primary") return "fallback";
+    if (pane === "fallback") return "default";
+    return "primary";
+  }
+
+  private prevPane(pane: Pane): Pane {
+    if (pane === "fallback") return "primary";
+    if (pane === "default") return "fallback";
+    return "default";
+  }
+
   private renderWide(width: number): string[] {
-    const leftWidth = Math.max(28, Math.floor(width * 0.45));
-    const rightWidth = Math.max(20, width - leftWidth - 1);
-    const left = this.primaryRows(leftWidth);
-    const right = this.fallbackRows(rightWidth);
-    const height = Math.max(left.length, right.length);
+    const colWidth = Math.max(20, Math.floor((width - 2) / 3));
+    const lastWidth = Math.max(20, width - colWidth * 2 - 2);
+    const cols = [this.primaryRows(colWidth), this.fallbackRows(colWidth), this.defaultRows(lastWidth)];
+    const height = Math.max(...cols.map((col) => col.length));
+    const panes: Pane[] = ["primary", "fallback", "default"];
+    const headerKeys: CatalogKey[] = ["pane.primary", "pane.fallback", "pane.default"];
+    const colWidths = [colWidth, colWidth, lastWidth];
     const rows = [
-      `${pad(this.pane === "primary" ? this.params.theme.bold(this.t("pane.primary")) : this.t("pane.primary"), leftWidth)}${this.params.theme.fg("dim", "│")}${pad(this.pane === "fallback" ? this.params.theme.bold(this.t("pane.fallback")) : this.t("pane.fallback"), rightWidth)}`,
+      headerKeys.map((key, index) => {
+        const label = this.pane === panes[index] ? this.params.theme.bold(this.t(key)) : this.t(key);
+        return pad(label, colWidths[index]);
+      }).join(this.params.theme.fg("dim", "│")),
     ];
     for (let index = 0; index < height; index += 1) {
-      rows.push(`${pad(left[index] ?? "", leftWidth)}${this.params.theme.fg("dim", "│")}${pad(right[index] ?? "", rightWidth)}`);
+      rows.push([
+        pad(cols[0][index] ?? "", colWidth),
+        pad(cols[1][index] ?? "", colWidth),
+        pad(cols[2][index] ?? "", lastWidth),
+      ].join(this.params.theme.fg("dim", "│")));
     }
-    rows.push(this.detail(width));
+    rows.push(...this.detail(width));
     return rows;
   }
 
   private renderStacked(width: number): string[] {
-    const title = this.params.theme.bold(this.pane === "primary" ? this.t("pane.primary") : this.t("pane.fallback"));
-    const rows = [title];
-    rows.push(...(this.pane === "primary" ? this.primaryRows(width) : this.fallbackRows(width)));
-    rows.push(rule(width), this.detail(width));
+    const titleMap: Record<Pane, CatalogKey> = {
+      primary: "pane.primary",
+      fallback: "pane.fallback",
+      default: "pane.default",
+    };
+    const rows = [this.params.theme.bold(this.t(titleMap[this.pane]))];
+    if (this.pane === "primary") rows.push(...this.primaryRows(width));
+    else if (this.pane === "fallback") rows.push(...this.fallbackRows(width));
+    else rows.push(...this.defaultRows(width));
+    rows.push(rule(width), ...this.detail(width));
     return rows;
   }
 
@@ -326,14 +430,48 @@ export class ModelFailoverOverlay implements Component, Focusable {
     });
   }
 
-  private detail(width: number): string {
+  private defaultRows(width: number): string[] {
+    const rows = this.filteredDefaultRows();
+    this.defaultSelected = clamp(this.defaultSelected, rows.length);
+    if (rows.length === 0) return [this.params.theme.fg("warning", fit(this.t("empty.default"), width))];
+    const start = visibleStart(this.defaultSelected, rows.length);
+    return rows.slice(start, start + MAX_VISIBLE).map((row, offset) => {
+      const selected = start + offset === this.defaultSelected;
+      const marker = selected && this.pane === "default" ? this.params.theme.fg("accent", "›") : " ";
+      const state = row.included
+        ? this.params.theme.fg("success", `${row.priority}.`)
+        : this.params.theme.fg("dim", "○");
+      return fit(`${marker} ${state} ${selected ? this.params.theme.bold(row.model) : row.model} ${this.capabilityBadge(row.model)} ${this.healthBadge(row.model)}`, width);
+    });
+  }
+
+  private detail(width: number): string[] {
+    if (this.pane === "default") {
+      const count = this.config.defaultFallbackModels.length;
+      return [fit(`${this.params.theme.fg("dim", this.t("pane.default"))} · ${this.t("detail.defaultCount", { count })} · ${this.t("detail.defaultHint")}`, width)];
+    }
     const primary = this.selectedPrimary();
     const chain = primary ? this.config.fallbackModels[primary] ?? [] : [];
     const health = primary ? this.health.get(primary) : undefined;
     const state = health
       ? `${health.state} · ${this.t("detail.failures")} ${health.consecutiveFailures}`
       : this.t("detail.unobserved");
-    return fit(`${this.params.theme.fg("dim", this.t("detail.source"))} ${primary ?? this.t("detail.noPrimary")} · ${state} · ${this.t("detail.fallbackCount", { count: chain.length })}`, width);
+    return [fit(`${this.params.theme.fg("dim", this.t("detail.source"))} ${primary ?? this.t("detail.noPrimary")} · ${state} · ${this.t("detail.fallbackCount", { count: chain.length })}`, width)];
+  }
+
+  private confirmRows(width: number): string[] {
+    const changes = this.collectChanges();
+    const rows = [
+      headerLine(this.params.theme, this.t("confirm.title"), [this.t("confirm.summary", { count: changes.length })], width),
+      rule(width),
+    ];
+    if (changes.length === 0) {
+      rows.push(this.params.theme.fg("dim", fit(this.t("notice.nothingToSave"), width)));
+    } else {
+      for (const change of changes) rows.push(`${this.params.theme.fg("dim", "·")} ${fit(change.label, width - 2)}`);
+    }
+    rows.push(rule(width), fit(this.t("confirm.footer"), width));
+    return rows;
   }
 
   private footer(width: number): string {
@@ -346,12 +484,20 @@ export class ModelFailoverOverlay implements Component, Focusable {
   private renderCompact(width: number): string {
     const primary = this.selectedPrimary() ?? this.t("compact.noModel");
     const enabled = this.config.enabled ? this.t("compact.on") : this.t("compact.off");
-    return fit(`${this.t("compact.fuse")}${enabled} · ${this.pane === "primary" ? this.t("compact.primary") : this.t("compact.fallback")} ${primary} · ${this.saveLabel()}`, width);
+    const paneLabel = this.pane === "primary"
+      ? this.t("compact.primary")
+      : this.pane === "fallback"
+        ? this.t("compact.fallback")
+        : this.t("compact.default");
+    const paneValue = this.pane === "default"
+      ? `${this.config.defaultFallbackModels.length}`
+      : primary;
+    return fit(`${this.t("compact.fuse")}${enabled} · ${paneLabel} ${paneValue} · ${this.saveLabel()}`, width);
   }
 
   private filteredPrimaries(): string[] {
     const query = this.pane === "primary" ? this.query.trim().toLowerCase() : "";
-    return query ? this.primaries.filter((model) => model.toLowerCase().includes(query)) : this.primaries;
+    return query ? rankByFilter(this.primaries, query) : this.primaries;
   }
 
   private fallbackRowsForPrimary(): FallbackRow[] {
@@ -368,7 +514,22 @@ export class ModelFailoverOverlay implements Component, Focusable {
   private filteredFallbackRows(): FallbackRow[] {
     const query = this.pane === "fallback" ? this.query.trim().toLowerCase() : "";
     const rows = this.fallbackRowsForPrimary();
-    return query ? rows.filter((row) => row.model.toLowerCase().includes(query)) : rows;
+    return query ? rankRowsByFilter(rows, query) : rows;
+  }
+
+  private defaultRowsAll(): FallbackRow[] {
+    const chain = this.config.defaultFallbackModels;
+    const available = this.primaries.filter((model) => !chain.includes(model));
+    return [
+      ...chain.map((model, index) => ({ model, included: true, priority: index + 1 })),
+      ...available.map((model) => ({ model, included: false })),
+    ];
+  }
+
+  private filteredDefaultRows(): FallbackRow[] {
+    const query = this.pane === "default" ? this.query.trim().toLowerCase() : "";
+    const rows = this.defaultRowsAll();
+    return query ? rankRowsByFilter(rows, query) : rows;
   }
 
   private selectedPrimary(): string | undefined {
@@ -379,8 +540,10 @@ export class ModelFailoverOverlay implements Component, Focusable {
     if (this.pane === "primary") {
       this.primarySelected = clamp(this.primarySelected + delta, this.filteredPrimaries().length);
       this.fallbackSelected = 0;
-    } else {
+    } else if (this.pane === "fallback") {
       this.fallbackSelected = clamp(this.fallbackSelected + delta, this.filteredFallbackRows().length);
+    } else {
+      this.defaultSelected = clamp(this.defaultSelected + delta, this.filteredDefaultRows().length);
     }
     this.notice = "";
     this.refresh();
@@ -399,27 +562,88 @@ export class ModelFailoverOverlay implements Component, Focusable {
     this.markDirty();
   }
 
-  private reorder(direction: -1 | 1): void {
-    if (this.pane !== "fallback") return;
-    const primary = this.selectedPrimary();
-    const row = this.filteredFallbackRows()[this.fallbackSelected];
-    if (!primary || !row?.included) return;
-    const chain = [...(this.config.fallbackModels[primary] ?? [])];
+  private toggleDefault(): void {
+    const row = this.filteredDefaultRows()[this.defaultSelected];
+    if (!row) return;
+    const chain = [...this.config.defaultFallbackModels];
     const index = chain.indexOf(row.model);
-    const target = index + direction;
-    if (index < 0 || target < 0 || target >= chain.length) return;
-    [chain[index], chain[target]] = [chain[target], chain[index]];
-    this.config.fallbackModels[primary] = chain;
-    this.query = "";
-    this.fallbackSelected = target;
+    if (index >= 0) chain.splice(index, 1);
+    else chain.push(row.model);
+    this.config.defaultFallbackModels = chain;
+    this.defaultSelected = clamp(this.defaultRowsAll().findIndex((item) => item.model === row.model), this.defaultRowsAll().length);
     this.markDirty();
   }
 
-  private async save(): Promise<void> {
+  private reorder(direction: -1 | 1): void {
+    if (this.pane === "fallback") {
+      const primary = this.selectedPrimary();
+      const row = this.filteredFallbackRows()[this.fallbackSelected];
+      if (!primary || !row?.included) return;
+      const chain = [...(this.config.fallbackModels[primary] ?? [])];
+      const index = chain.indexOf(row.model);
+      const target = index + direction;
+      if (index < 0 || target < 0 || target >= chain.length) return;
+      [chain[index], chain[target]] = [chain[target], chain[index]];
+      this.config.fallbackModels[primary] = chain;
+      this.query = "";
+      this.fallbackSelected = target;
+      this.markDirty();
+    } else if (this.pane === "default") {
+      const row = this.filteredDefaultRows()[this.defaultSelected];
+      if (!row?.included) return;
+      const chain = [...this.config.defaultFallbackModels];
+      const index = chain.indexOf(row.model);
+      const target = index + direction;
+      if (index < 0 || target < 0 || target >= chain.length) return;
+      [chain[index], chain[target]] = [chain[target], chain[index]];
+      this.config.defaultFallbackModels = chain;
+      this.query = "";
+      this.defaultSelected = target;
+      this.markDirty();
+    }
+  }
+
+  private collectChanges(): Change[] {
+    const changes: Change[] = [];
+    if (this.config.enabled !== this.initial.enabled) {
+      changes.push({ key: "enabled", label: this.t(this.config.enabled ? "confirm.enabledOn" : "confirm.enabledOff") });
+    }
+    const primaryModels = new Set([
+      ...Object.keys(this.config.fallbackModels),
+      ...Object.keys(this.initial.fallbackModels),
+    ]);
+    for (const primary of primaryModels) {
+      const next = this.config.fallbackModels[primary] ?? [];
+      const prev = this.initial.fallbackModels[primary] ?? [];
+      const added = next.filter((model) => !prev.includes(model));
+      const removed = prev.filter((model) => !next.includes(model));
+      const reordered = next.length === prev.length && next.some((model, index) => model !== prev[index]);
+      for (const model of added) changes.push({ key: `add:${primary}:${model}`, label: this.t("confirm.chainAdd", { primary, model }) });
+      for (const model of removed) changes.push({ key: `remove:${primary}:${model}`, label: this.t("confirm.chainRemove", { primary, model }) });
+      if (reordered && added.length === 0 && removed.length === 0) changes.push({ key: `reorder:${primary}`, label: this.t("confirm.chainReorder", { primary }) });
+    }
+    const defaultNext = this.config.defaultFallbackModels;
+    const defaultPrev = this.initial.defaultFallbackModels;
+    const defaultAdded = defaultNext.filter((model) => !defaultPrev.includes(model));
+    const defaultRemoved = defaultPrev.filter((model) => !defaultNext.includes(model));
+    const defaultReordered = defaultNext.length === defaultPrev.length && defaultNext.some((model, index) => model !== defaultPrev[index]);
+    for (const model of defaultAdded) changes.push({ key: `dadd:${model}`, label: this.t("confirm.defaultAdd", { model }) });
+    for (const model of defaultRemoved) changes.push({ key: `dremove:${model}`, label: this.t("confirm.defaultRemove", { model }) });
+    if (defaultReordered && defaultAdded.length === 0 && defaultRemoved.length === 0) changes.push({ key: "dreorder", label: this.t("confirm.defaultReorder") });
+    return changes;
+  }
+
+  private openConfirm(): void {
     if (!this.isDirty()) {
       this.notice = this.t("notice.nothingToSave");
       return this.refresh();
     }
+    this.mode = "confirming";
+    this.discardArmed = false;
+    this.refresh();
+  }
+
+  private async commitSave(): Promise<void> {
     this.saveState = "saving";
     this.notice = this.t("notice.saving");
     this.refresh();
@@ -427,13 +651,16 @@ export class ModelFailoverOverlay implements Component, Focusable {
       await this.params.saveConfig?.({
         enabled: this.config.enabled,
         fallbackModels: Object.fromEntries(Object.entries(this.config.fallbackModels).map(([model, chain]) => [model, [...chain]])),
+        defaultFallbackModels: [...this.config.defaultFallbackModels],
       });
       this.saveState = "clean";
+      this.mode = "edit";
       this.notice = this.t("notice.saved");
       this.discardArmed = false;
       this.params.done(true);
     } catch (error) {
       this.saveState = "failed";
+      this.mode = "edit";
       this.notice = this.t("notice.saveFailed", { message: error instanceof Error ? error.message : String(error) });
       this.refresh();
     }
@@ -471,7 +698,8 @@ export class ModelFailoverOverlay implements Component, Focusable {
 
   private resetActiveSelection(): void {
     if (this.pane === "primary") this.primarySelected = 0;
-    else this.fallbackSelected = 0;
+    else if (this.pane === "fallback") this.fallbackSelected = 0;
+    else this.defaultSelected = 0;
   }
 
   private exitFilter(commit: boolean): void {
@@ -479,6 +707,9 @@ export class ModelFailoverOverlay implements Component, Focusable {
     const selectedFallback = commit
       ? this.filteredFallbackRows()[this.fallbackSelected]?.model ?? this.filterOriginFallback
       : this.filterOriginFallback;
+    const selectedDefault = commit
+      ? this.filteredDefaultRows()[this.defaultSelected]?.model ?? this.filterOriginDefault
+      : this.filterOriginDefault;
     this.filterActive = false;
     this.query = "";
     if (selectedPrimary) {
@@ -489,8 +720,13 @@ export class ModelFailoverOverlay implements Component, Focusable {
       const fallbackIndex = this.fallbackRowsForPrimary().findIndex((row) => row.model === selectedFallback);
       if (fallbackIndex >= 0) this.fallbackSelected = fallbackIndex;
     }
+    if (selectedDefault) {
+      const defaultIndex = this.defaultRowsAll().findIndex((row) => row.model === selectedDefault);
+      if (defaultIndex >= 0) this.defaultSelected = defaultIndex;
+    }
     this.filterOriginPrimary = undefined;
     this.filterOriginFallback = undefined;
+    this.filterOriginDefault = undefined;
   }
 
   private refresh(): void {
@@ -542,4 +778,25 @@ function clamp(index: number, length: number): number {
 
 function visibleStart(selected: number, length: number): number {
   return Math.max(0, Math.min(Math.max(0, length - MAX_VISIBLE), selected - Math.floor(MAX_VISIBLE / 2)));
+}
+
+/** Stable sort: prefix matches before infix matches, preserving input order within each group. */
+function rankByFilter(models: readonly string[], query: string): string[] {
+  const lower = query.toLowerCase();
+  const matches = models.filter((model) => model.toLowerCase().includes(lower));
+  return [...matches].sort((a, b) => {
+    const aPrefix = a.toLowerCase().startsWith(lower) ? 0 : 1;
+    const bPrefix = b.toLowerCase().startsWith(lower) ? 0 : 1;
+    return aPrefix - bPrefix;
+  });
+}
+
+function rankRowsByFilter(rows: readonly FallbackRow[], query: string): FallbackRow[] {
+  const lower = query.toLowerCase();
+  const matches = rows.filter((row) => row.model.toLowerCase().includes(lower));
+  return [...matches].sort((a, b) => {
+    const aPrefix = a.model.toLowerCase().startsWith(lower) ? 0 : 1;
+    const bPrefix = b.model.toLowerCase().startsWith(lower) ? 0 : 1;
+    return aPrefix - bPrefix;
+  });
 }
