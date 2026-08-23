@@ -70,12 +70,17 @@ test("run-control classification covers reads, Session CAS, Execution acquisitio
     { argv: ["session", "create"], expected: writeClassification("session", "none", true) },
     { argv: ["session", "archive"], expected: writeClassification("session", "none") },
     { argv: ["session", "unarchive"], expected: writeClassification("session", "none") },
+    { argv: ["session", "migrate"], expected: writeClassification("session", "none") },
+    { argv: ["session", "chain", "insert"], expected: writeClassification("session", "none") },
+    { argv: ["session", "chain", "replace"], expected: writeClassification("session", "none") },
+    { argv: ["session", "chain", "update"], expected: writeClassification("session", "none") },
+    { argv: ["session", "chain", "skip"], expected: writeClassification("session", "none") },
     { argv: ["session", "start"], expected: writeClassification("compatibility-start", "command-aware", true) },
     { argv: ["run", "start"], expected: writeClassification("compatibility-start", "command-aware", true) },
-    { argv: ["run", "create"], expected: writeClassification("execution", "required", true) },
-    { argv: ["run", "next"], expected: writeClassification("execution", "required") },
-    { argv: ["run", "complete"], expected: writeClassification("execution", "required") },
-    { argv: ["run", "decide"], expected: writeClassification("execution", "required") },
+    { argv: ["run", "create"], expected: writeClassification("session", "none") },
+    { argv: ["run", "next"], expected: writeClassification("session", "none") },
+    { argv: ["run", "complete"], expected: writeClassification("run", "none") },
+    { argv: ["run", "decide"], expected: writeClassification("session", "none") },
     { argv: ["plan", "publish", "approved.md", "--handoff-key", "handoff-1"], expected: writeClassification("plan-publish", "required") },
     { argv: ["execution", "start"], expected: writeClassification("execution-acquire", "acquire") },
     { argv: ["execution", "attach"], expected: writeClassification("execution-acquire", "acquire") },
@@ -95,6 +100,42 @@ test("run-control classification covers reads, Session CAS, Execution acquisitio
 
   for (const fixture of cases) {
     assert.deepEqual(classifyRunControlArgv(fixture.argv), fixture.expected, fixture.argv.join(" "));
+  }
+});
+
+test("legacy-host mode restores lease fencing for shared commands reclassified for v3", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-legacy-classification-"));
+  const calls: string[][] = [];
+  const snapshot = v3SessionSnapshot("session-1");
+  const coordinator = testCoordinator(
+    fakeBridge(snapshot),
+    fakeAdapter(calls),
+    new WorkflowLeaseStore(root),
+  );
+  try {
+    await coordinator.selectMode("legacy-host");
+    await coordinator.attach("pi-owner");
+    for (const argv of [
+      ["session", "migrate"],
+      ["session", "chain", "update", "--step-id", "execute", "--stage", "review"],
+      ["run", "next"],
+      ["run", "complete", "run-1"],
+      ["run", "decide", "decision-1"],
+    ]) {
+      await assert.rejects(
+        coordinator.exec(argv, classifyRunControlArgv(argv), "pi-intruder"),
+        /lease belongs to Pi session pi-owner/,
+        argv.join(" "),
+      );
+    }
+    assert.equal(
+      calls.filter((call) => call[0] === "exec").length,
+      0,
+      "legacy shared writes remain fenced before CLI dispatch",
+    );
+  } finally {
+    await coordinator.release();
+    await rm(root, { recursive: true, force: true });
   }
 });
 
@@ -2275,7 +2316,7 @@ contract:
     // payload (same request-id, actor, reason, and expected revision).
     const replayRequestId = "req-real-v3-next-replay";
     const rawNext = await adapter.exec([
-      "run", "next",
+      "run", "next", "--session", "real-v3-shell",
       "--participant", host, "--actor", host,
       "--request-id", replayRequestId,
       "--reason", "Pi run-control v3 mutation",
@@ -2369,12 +2410,27 @@ contract:
     assert.equal(insertEnvelope.operation, "session-chain-insert");
     assert.equal(insertEnvelope.revision.revision, 2);
 
+    const updateArgv = [
+      "session", "chain", "update", "--step-id", "execute",
+      "--stage", "implementation", "--goal-ref", "goal-real-life",
+    ];
+    const update = await coordinator.exec(updateArgv, classifyRunControlArgv(updateArgv), host);
+    assert.equal(update.command.exitCode, 0);
+    const updateEnvelope = JSON.parse(update.command.stdout) as Record<string, any>;
+    assert.equal(updateEnvelope.operation, "session-chain-update");
+    assert.equal(updateEnvelope.revision.revision, 3);
+    const updateCall = calls.find(
+      (call) => call[0] === "session" && call[1] === "chain" && call[2] === "update",
+    )!;
+    assert.equal(flagValue(updateCall, "--session"), "real-v3-life");
+    assert.equal(flagValue(updateCall, "--expected-orchestration-revision"), "2");
+
     const nextArgv = ["run", "next"];
     const next = await coordinator.exec(nextArgv, classifyRunControlArgv(nextArgv), host);
     assert.equal(next.command.exitCode, 0);
     const nextEnvelope = JSON.parse(next.command.stdout) as Record<string, any>;
     assert.equal(nextEnvelope.operation, "next");
-    assert.equal(nextEnvelope.revision.revision, 3);
+    assert.equal(nextEnvelope.revision.revision, 4);
     const runId = nextEnvelope.result.run_id as string;
 
     const briefArgv = ["run", "brief", runId, "--json"];
@@ -2383,7 +2439,7 @@ contract:
     const briefEnvelope = JSON.parse(brief.command.stdout) as Record<string, any>;
     assert.equal(briefEnvelope.operation, "brief");
     assert.equal(briefEnvelope.result.schema_version, "brief-result/3.0");
-    assert.equal(briefEnvelope.result.session.orchestration_revision, 3);
+    assert.equal(briefEnvelope.result.session.orchestration_revision, 4);
     assert.equal(briefEnvelope.result.run.status, "running");
     assert.equal(briefEnvelope.result.run.run_id, runId);
     assert.equal(
@@ -2405,27 +2461,104 @@ contract:
     assert.equal(complete.command.exitCode, 0);
     const completeEnvelope = JSON.parse(complete.command.stdout) as Record<string, any>;
     assert.equal(completeEnvelope.operation, "complete");
-    assert.equal(completeEnvelope.revision.revision, 4);
+    assert.equal(completeEnvelope.revision.revision, 5);
     assert.equal(completeEnvelope.result.run_revision, 2);
     assert.equal(completeEnvelope.result.status, "sealed");
     const completeCall = calls.find((call) => call[0] === "run" && call[1] === "complete")!;
     assert.equal(flagValue(completeCall, "--expected-run-revision"), "1");
-    assert.equal(flagValue(completeCall, "--expected-orchestration-revision"), "3");
+    assert.equal(flagValue(completeCall, "--expected-orchestration-revision"), "4");
 
     const decideArgv = ["run", "decide", runId, "--verdict", "proceed"];
     const decide = await coordinator.exec(decideArgv, classifyRunControlArgv(decideArgv), host);
     assert.equal(decide.command.exitCode, 0);
     const decideEnvelope = JSON.parse(decide.command.stdout) as Record<string, any>;
     assert.equal(decideEnvelope.operation, "run-decide");
-    assert.equal(decideEnvelope.revision.revision, 5);
+    assert.equal(decideEnvelope.revision.revision, 6);
 
     const completeSessionArgv = ["session", "complete"];
     const completeSession = await coordinator.exec(completeSessionArgv, classifyRunControlArgv(completeSessionArgv), host);
     assert.equal(completeSession.command.exitCode, 0);
     const completeSessionEnvelope = JSON.parse(completeSession.command.stdout) as Record<string, any>;
     assert.equal(completeSessionEnvelope.operation, "session-complete");
-    assert.equal(completeSessionEnvelope.revision.revision, 6);
+    assert.equal(completeSessionEnvelope.revision.revision, 7);
     assert.equal(completeSessionEnvelope.result.status, "completed");
+  } finally {
+    await coordinator.release().catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("real Maestro v3 coordinator migrates one legacy Session with resolved revision fences", { timeout: 120_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-real-v3-migrate-"));
+  const maestroBin = "D:/maestro2/bin/maestro.js";
+  const calls: string[][] = [];
+  const runner = async (args: readonly string[], cwd: string): Promise<RunCliResult> => {
+    calls.push([...args]);
+    return defaultRunner([maestroBin, ...args], cwd, {
+      executable: process.execPath,
+      timeoutMs: 30_000,
+      maxOutputBytes: 1024 * 1024,
+    });
+  };
+  const adapter = new RunCliAdapter(root, runner);
+  const bridge = new WorkflowBridge(root);
+  const coordinator = new WorkflowCoordinator(bridge, adapter, new WorkflowLeaseStore(root));
+  try {
+    await mkdir(join(root, ".workflow"), { recursive: true });
+    await writeFile(join(root, ".workflow", "config.json"), JSON.stringify({
+      session_schema: {
+        schema_version: "session-schema-selection/1.0",
+        writer: "session/1.3",
+        features: { session_statusless: false },
+      },
+    }), "utf8");
+    const created = await adapter.exec([
+      "session", "create", "legacy migration fixture", "--id", "real-v3-migrate",
+      "--intent", "Legacy migration fixture", "--json",
+    ]);
+    assert.equal(created.exitCode, 0, created.stderr || created.stdout);
+    const createdEnvelope = JSON.parse(created.stdout) as { locator: { session_id: string } };
+    const legacySessionId = createdEnvelope.locator.session_id;
+    const legacySnapshot = await bridge.refreshSession(legacySessionId);
+    assert.ok(legacySnapshot.session, "the CLI-created legacy Session is projected");
+    assert.equal(legacySnapshot.session.identityRevision, 1);
+
+    await writeFile(join(root, ".workflow", "config.json"), JSON.stringify({
+      session_schema: {
+        schema_version: "session-schema-selection/1.0",
+        writer: "session/3.0",
+        features: { session_statusless: false },
+      },
+    }), "utf8");
+    assert.equal(await coordinator.selectMode(), "session-v3");
+
+    const argv = ["session", "migrate", "--session", legacySessionId, "--to-v3"];
+    const migrated = await coordinator.exec(argv, classifyRunControlArgv(argv), "pi-real-migrate");
+    assert.equal(migrated.command.exitCode, 0, migrated.command.stderr || migrated.command.stdout);
+    const envelope = JSON.parse(migrated.command.stdout) as Record<string, any>;
+    assert.equal(envelope.operation, "session-migrate");
+    assert.equal(envelope.ok, true);
+    const migrateCall = calls.find(
+      (call) => call[0] === "session" && call[1] === "migrate" && call.includes("--to-v3"),
+    )!;
+    assert.equal(flagValue(migrateCall, "--session"), legacySessionId);
+    assert.equal(flagValue(migrateCall, "--participant"), "pi-real-migrate");
+    assert.equal(flagValue(migrateCall, "--actor"), "pi-real-migrate");
+    assert.ok(flagValue(migrateCall, "--request-id"));
+    assert.equal(flagValue(migrateCall, "--reason"), "Pi run-control v3 mutation");
+    assert.equal(
+      flagValue(migrateCall, "--expected-identity-revision"),
+      String(legacySnapshot.session!.identityRevision ?? legacySnapshot.session!.revision),
+    );
+    assert.equal(
+      flagValue(migrateCall, "--expected-activity-revision"),
+      String(legacySnapshot.session!.activityRevision ?? legacySnapshot.session!.revision),
+    );
+    assert.equal(flagValue(migrateCall, "--expected-orchestration-revision"), undefined);
+    const migratedRecord = JSON.parse(
+      await readFile(join(root, ".workflow", "sessions", legacySessionId, "session.json"), "utf8"),
+    ) as Record<string, any>;
+    assert.equal(migratedRecord.schema_version, "session/3.0");
   } finally {
     await coordinator.release().catch(() => {});
     await rm(root, { recursive: true, force: true });
@@ -2772,11 +2905,12 @@ test("real Maestro v3 coordinator publishes into an existing Session and surface
     // orchestration revision goes stale, then verify a coordinator chain
     // insert surfaces ORCHESTRATION_REVISION_CONFLICT with next_actions and a
     // re-read hint instead of replaying with a replaced revision.
-    const status = await adapter.exec(["session", "status", "--json"]);
+    const status = await adapter.exec(["session", "status", "--session", "real-plan-current", "--json"]);
     const statusEnvelope = JSON.parse(status.stdout) as Record<string, any>;
     const currentRevision = statusEnvelope.result.orchestration_revision as number;
     const rawInsert = await adapter.exec([
-      "session", "chain", "insert", "--step-id", "conflict-probe", "--command", "probe",
+      "session", "chain", "insert", "--session", "real-plan-current",
+      "--step-id", "conflict-probe", "--command", "probe",
       "--participant", host, "--actor", host,
       "--request-id", "req-real-v3-conflict-raw",
       "--reason", "probe", "--expected-orchestration-revision", String(currentRevision), "--json",
@@ -3009,8 +3143,19 @@ test("session-v3 exec injects participant/actor/request-id/reason/json and expec
     );
     assert.equal(insert.command.exitCode, 0);
     const insertCall = calls.find((call) => call[0] === "exec" && call[1] === "session" && call[2] === "chain" && call[3] === "insert")!;
+    assert.equal(flagValue(insertCall, "--session"), "session-1");
     assert.equal(flagValue(insertCall, "--expected-orchestration-revision"), "4");
     assert.equal(flagValue(insertCall, "--expected-run-revision"), undefined, "orchestration targets carry no run revision");
+
+    const update = await coordinator.exec(
+      ["session", "chain", "update", "--step-id", "execute", "--stage", "review"],
+      classifyRunControlArgv(["session", "chain", "update"]),
+      "pi-v3",
+    );
+    assert.equal(update.command.exitCode, 0);
+    const updateCall = calls.find((call) => call[0] === "exec" && call[1] === "session" && call[2] === "chain" && call[3] === "update")!;
+    assert.equal(flagValue(updateCall, "--session"), "session-1");
+    assert.equal(flagValue(updateCall, "--expected-orchestration-revision"), "4");
 
     const complete = await coordinator.exec(
       ["run", "complete", "run-1", "--advance", "--verdict", "done"],
@@ -3019,6 +3164,7 @@ test("session-v3 exec injects participant/actor/request-id/reason/json and expec
     );
     assert.equal(complete.command.exitCode, 0);
     const completeCall = calls.find((call) => call[0] === "exec" && call[1] === "run" && call[2] === "complete")!;
+    assert.equal(flagValue(completeCall, "--session"), "session-1");
     assert.equal(flagValue(completeCall, "--expected-run-revision"), "2");
     assert.equal(flagValue(completeCall, "--expected-orchestration-revision"), "4");
   } finally {
@@ -3056,8 +3202,102 @@ test("session-v3 CAS derives from the explicit --session target, not the stale s
     // The CAS revision must come from the explicit target (4), not the stale
     // active Session (2) — a stale revision would be rejected by the core.
     assert.equal(flagValue(insertCall, "--expected-orchestration-revision"), "4");
+
+    await assert.rejects(
+      coordinator.exec(
+        ["session", "chain", "insert", "--session", "session-C", "--step-id", "s2", "--command", "execute"],
+        classifyRunControlArgv(["session", "chain", "insert"]),
+        "pi-target",
+      ),
+      /targets Session session-C, but resolved authority is session-A/,
+    );
+    assert.equal(
+      calls.filter((call) => call[0] === "exec" && call[1] === "session" && call[2] === "chain").length,
+      1,
+      "a mismatched explicit Session is rejected before CLI dispatch",
+    );
   } finally {
     await coordinator.release().catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("session-v3 migration injects legacy fences and requires caller batch manifests", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-v3-migrate-"));
+  const calls: string[][] = [];
+  const snapshot = v3SessionSnapshot("legacy-1");
+  snapshot.session = {
+    ...snapshot.session!,
+    schemaVersion: "session/1.3",
+    revision: 3,
+    orchestrationRevision: undefined,
+    activityRevision: 2,
+  };
+  const coordinator = testCoordinator(fakeBridge(snapshot), v3Adapter(calls, snapshot, {
+    applyMutations: false,
+    responses: (argv) => argv[0] === "session" && argv[1] === "migrate"
+      ? v3RunResponse("session-migrate", {
+          request_id: null,
+          locator: { session_id: flagValue(argv, "--session") ?? null, run_id: null },
+          revision: null,
+          result: { status: "applied" },
+          replay: null,
+        })
+      : defaultV3Envelope(argv, snapshot),
+  }), new WorkflowLeaseStore(root));
+  try {
+    await coordinator.selectMode("session-v3");
+    const migrated = await coordinator.exec(
+      ["session", "migrate", "--session", "legacy-1", "--to-v3"],
+      classifyRunControlArgv(["session", "migrate"]),
+      "pi-migrate",
+    );
+    assert.equal(migrated.command.exitCode, 0);
+    const migrateCall = calls.find((call) => call[0] === "exec" && call[1] === "session" && call[2] === "migrate")!;
+    assert.equal(flagValue(migrateCall, "--session"), "legacy-1");
+    assert.equal(flagValue(migrateCall, "--participant"), "pi-migrate");
+    assert.equal(flagValue(migrateCall, "--actor"), "pi-migrate");
+    assert.ok(flagValue(migrateCall, "--request-id"));
+    assert.equal(flagValue(migrateCall, "--reason"), "Pi run-control v3 mutation");
+    assert.equal(flagValue(migrateCall, "--expected-identity-revision"), "3");
+    assert.equal(flagValue(migrateCall, "--expected-activity-revision"), "2");
+    assert.equal(flagValue(migrateCall, "--expected-orchestration-revision"), undefined);
+    assert.equal(migrateCall.includes("--json"), true);
+
+    await assert.rejects(
+      coordinator.exec(
+        ["session", "migrate", "--session", "legacy-1", "--to-v3", "--expected-identity-revision", "99"],
+        classifyRunControlArgv(["session", "migrate"]),
+        "pi-migrate",
+      ),
+      /--expected-identity-revision conflicts with coordinator authority/,
+    );
+    await assert.rejects(
+      coordinator.exec(
+        ["session", "migrate", "--all", "--to-v3"],
+        classifyRunControlArgv(["session", "migrate"]),
+        "pi-migrate",
+      ),
+      /requires exactly one non-empty --expected-revisions/,
+    );
+
+    const manifest = JSON.stringify({
+      "legacy-1": { identity_revision: 3, activity_revision: 2 },
+    });
+    const batch = await coordinator.exec(
+      ["session", "migrate", "--all", "--to-v3", "--expected-revisions", manifest],
+      classifyRunControlArgv(["session", "migrate"]),
+      "pi-migrate",
+    );
+    assert.equal(batch.command.exitCode, 0);
+    const batchCall = calls.filter((call) => call[0] === "exec" && call[1] === "session" && call[2] === "migrate").at(-1)!;
+    assert.equal(flagValue(batchCall, "--expected-revisions"), manifest);
+    assert.equal(flagValue(batchCall, "--session"), undefined);
+    assert.equal(flagValue(batchCall, "--expected-identity-revision"), undefined);
+    assert.equal(flagValue(batchCall, "--expected-activity-revision"), undefined);
+    assert.equal(flagValue(batchCall, "--expected-orchestration-revision"), undefined);
+  } finally {
+    await coordinator.release();
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -3085,6 +3325,7 @@ test("session-v3 full lifecycle open -> chain insert -> run next -> check -> com
     );
     assert.equal(insert.command.exitCode, 0);
     const insertCall = calls.find((call) => call[0] === "exec" && call[1] === "session" && call[2] === "chain" && call[3] === "insert")!;
+    assert.equal(flagValue(insertCall, "--session"), "session-1");
     assert.equal(flagValue(insertCall, "--expected-orchestration-revision"), "0");
 
     const next = await coordinator.exec(
@@ -3094,6 +3335,7 @@ test("session-v3 full lifecycle open -> chain insert -> run next -> check -> com
     );
     assert.equal(next.command.exitCode, 0);
     const nextCall = calls.find((call) => call[0] === "exec" && call[1] === "run" && call[2] === "next")!;
+    assert.equal(flagValue(nextCall, "--session"), "session-1");
     assert.equal(flagValue(nextCall, "--expected-orchestration-revision"), "1");
 
     const check = await coordinator.exec(
@@ -3132,6 +3374,7 @@ test("session-v3 full lifecycle open -> chain insert -> run next -> check -> com
     );
     assert.equal(completeSession.command.exitCode, 0);
     const completeSessionCall = calls.find((call) => call[0] === "exec" && call[1] === "session" && call[2] === "complete")!;
+    assert.equal(flagValue(completeSessionCall, "--session"), "session-1");
     assert.equal(flagValue(completeSessionCall, "--expected-orchestration-revision"), "4");
   } finally {
     await coordinator.release();
@@ -3193,9 +3436,61 @@ test("session-v3 revision conflicts surface next_actions and a re-read hint with
       1,
       "a revision conflict must never be replayed with a replaced revision",
     );
-    assert.ok(
-      calls.some((call) => call[0] === "exec" && call[1] === "session" && call[2] === "status"),
-      "the coordinator re-reads session status after an orchestration conflict",
+    const statusReRead = calls.find(
+      (call) => call[0] === "exec" && call[1] === "session" && call[2] === "status",
+    );
+    assert.ok(statusReRead, "the coordinator re-reads session status after an orchestration conflict");
+    assert.equal(flagValue(statusReRead, "--session"), "session-1");
+  } finally {
+    await coordinator.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("session-v3 Run conflicts re-read the exact Session brief without replay", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-v3-run-conflict-"));
+  const calls: string[][] = [];
+  const snapshot = v3SessionSnapshot("session-1");
+  const coordinator = testCoordinator(fakeBridge(snapshot), v3Adapter(calls, snapshot, {
+    responses: (argv) => {
+      if (argv[0] === "run" && argv[1] === "complete") {
+        return v3RunErrorResponse("complete", "RUN_REVISION_CONFLICT", {
+          target_type: "run",
+          target_id: "run-1",
+          expected_revision: 2,
+          current_revision: 3,
+          changed_by: "participant-other",
+          next_actions: ["read-run-brief", "resubmit-with-current-revision"],
+        });
+      }
+      if (argv[0] === "run" && argv[1] === "brief") {
+        return v3RunResponse("brief", {
+          request_id: null,
+          locator: { session_id: "session-1", run_id: "run-1" },
+          revision: { target_type: "run", target_id: "run-1", revision: 3 },
+          result: { run_id: "run-1", revision: 3 },
+          replay: null,
+        });
+      }
+      return defaultV3Envelope(argv, snapshot);
+    },
+  }), new WorkflowLeaseStore(root));
+  try {
+    await coordinator.selectMode("session-v3");
+    const result = await coordinator.exec(
+      ["run", "complete", "run-1", "--advance", "--verdict", "done"],
+      classifyRunControlArgv(["run", "complete", "run-1"]),
+      "pi-v3",
+    );
+    const envelope = JSON.parse(result.command.stdout) as { error: { message: string } };
+    assert.match(envelope.error.message, /current Run revision 3/);
+    const briefReRead = calls.find(
+      (call) => call[0] === "exec" && call[1] === "run" && call[2] === "brief",
+    )!;
+    assert.equal(flagValue(briefReRead, "--session"), "session-1");
+    assert.equal(
+      calls.filter((call) => call[0] === "exec" && call[1] === "run" && call[2] === "complete").length,
+      1,
     );
   } finally {
     await coordinator.release();
@@ -3343,6 +3638,10 @@ test("session-v3 attach consumes the core resume-view ResumeMapV1 with fingerpri
       calls.some((call) => call[0] === "exec" && call[1] === "session" && call[2] === "resume-view"),
       "attach consumes session resume-view",
     );
+    const resumeViewCall = calls.find(
+      (call) => call[0] === "exec" && call[1] === "session" && call[2] === "resume-view",
+    )!;
+    assert.equal(flagValue(resumeViewCall, "--session"), "session-1");
   } finally {
     await coordinator.release();
     await rm(root, { recursive: true, force: true });
@@ -3512,7 +3811,7 @@ function readClassification(): ReturnType<typeof classifyRunControlArgv> {
 }
 
 function writeClassification(
-  mutation: "session" | "execution" | "execution-acquire" | "execution-lease"
+  mutation: "session" | "run" | "execution" | "execution-acquire" | "execution-lease"
     | "compatibility-start" | "plan-publish",
   lease: "none" | "required" | "acquire" | "command-aware",
   sessionless = false,

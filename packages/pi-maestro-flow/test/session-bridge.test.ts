@@ -768,6 +768,7 @@ test("bridge normalizes live Maestro 0.5.50 session/1.0 records", async () => {
     assert.equal(snapshot.source, "canonical");
     assert.equal(session.schemaVersion, "session/1.0");
     assert.equal(session.activityRevision, 17);
+    assert.equal(session.identityRevision, 11);
     assert.equal(session.revision, 17);
     assert.equal(snapshot.execution?.legacyProjection, true);
     assert.equal(snapshot.execution?.executionId, "legacy-execution-4");

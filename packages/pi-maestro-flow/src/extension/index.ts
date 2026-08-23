@@ -1591,18 +1591,19 @@ Contract: subject is the title; description is detail. status is update-only on 
   const runControlTool: ToolDefinition<typeof RunControlParams> = {
     name: "run-control",
     label: "Run Control",
-    description: `Transparent shell over the canonical Maestro CLI for the v3 Session/Run lifecycle and Artifact compatibility authority. Pass argv exactly as the CLI takes it (without the leading \`maestro\` executable), e.g. { argv: ["run","next","--json"] }, { argv: ["run","check","run-abc","--json"] }, { argv: ["session","chain","insert","step-3","--after","latest","--json"] }, or { argv: ["artifact","inspect","ART-1","--session","session-1","--consumer","review","--alias","current-review","--json"] }.
-Read-only query commands (status, brief, check, list, show, resume-view, artifact inspect, search, load, ...) need no workflow mutation lease; lifecycle writes require the current Pi session identity (participant/actor) and are blocked in Plan mode. Under session/3.0 workspaces the coordinator injects --actor/--request-id/--expected-orchestration-revision (run mutations also add --expected-run-revision) and no lease exists; legacy/execution workspaces are accepted for compatibility only. Entry commands (session open|create, run next) may mint a Session or Run without a held lease. Artifact republish is a capability-gated registry mutation: the coordinator injects the current Pi host identity and a fresh inspect-derived CAS fence for session/3.0 writers.
-This is the single LLM surface for the lifecycle and Artifact compatibility commands: do not hand-write \`maestro\` run/session/execution/artifact calls in bash. Read results report lifecycle ownership so a Pi session can distinguish its Run from another session's workspace-wide Run.
+    description: `Transparent argv shell over the canonical Maestro CLI for the v3 Session/Run lifecycle and Artifact compatibility authority. Pass arguments exactly as the CLI takes them, without the leading \`maestro\` executable.
+Valid reads include { argv: ["session","status","--session","session-123","--json"] }, { argv: ["run","brief","run-123","--session","session-123","--json"] }, and { argv: ["run","check","run-123","--session","session-123","--json"] }. Valid lifecycle writes include { argv: ["session","open","Build the release","--id","release-2026","--json"] }, { argv: ["session","chain","insert","--session","session-123","--step-id","review-1","--command","review","--arg","src","--json"] }, { argv: ["session","chain","update","--session","session-123","--step-id","review-1","--stage","verification","--json"] }, { argv: ["run","next","--session","session-123","--json"] }, and { argv: ["run","complete","run-123","--session","session-123","--verdict","done","--advance","--json"] }.
+Read-only queries need no mutation authority. Under session/3.0 there is no workflow mutation lease: the coordinator injects the current Pi host identity as identical --participant and --actor values, plus --request-id, --reason, and --json. Opening a new Session with \`session open\` has no target --session or CAS revision. Operations on an active or explicitly named Session receive the exact --session and the applicable --expected-orchestration-revision; Run-entity mutations also receive --expected-run-revision. \`session migrate\` is the exception and receives legacy --expected-identity-revision and --expected-activity-revision fences. Legacy/execution workspaces remain compatibility-only. Lifecycle writes are blocked in Plan mode.
+The Workflow Coordinator must be available for every call, including opening a Session. An already active Session is not required for \`session open\`; other lifecycle mutations operate on an active or explicitly named Session. This is the single LLM surface for lifecycle and Artifact compatibility commands: do not hand-write \`maestro\` run/session/execution/artifact calls in bash. Artifact republish is a capability-gated registry mutation and receives host identity plus a fresh inspect-derived CAS fence.
 
 When to use:
-- Inside an active Maestro Workflow Session: any session/run lifecycle operation.
+- Open a new Maestro Workflow Session.
+- Read or mutate an active or explicitly named Session/Run.
+- Inspect or republish a compatible Artifact through coordinator authority.
 
 When NOT to use:
-- No active workflow or coordinator not attached — the call errors; do not invoke it.
-- Knowledge writes (knowledge stage/record/promote) and explore/delegate/moa belong to the bash \`maestro\` CLI and the \`maestro\` tool respectively; read-only knowledge lookups (search/load/review) may pass through this shell (they are classified as read commands above).
-
-Examples: { argv: ["session","status"] }, { argv: ["run","complete","run-abc","--advance","--verdict","done"] }, { argv: ["session","chain","insert","step-3","--after","latest"] }.`,
+- The Workflow Coordinator is unavailable; the call errors.
+- Knowledge writes (knowledge stage/record/promote) and explore/delegate/moa belong to the bash \`maestro\` CLI and the \`maestro\` tool respectively; read-only knowledge lookups (search/load/review) may pass through this shell.`,
     promptSnippet: "Maestro CLI passthrough shell for Session/Run lifecycle and Artifact compatibility authority",
     parameters: RunControlParams,
     async execute(id, params, _signal, _onUpdate, ctx) {

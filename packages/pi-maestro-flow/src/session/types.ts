@@ -72,6 +72,8 @@ export interface WorkflowSession {
   status: WorkflowSessionStatus;
   lifecycleAuthority?: WorkflowLifecycleAuthority;
   revision: number;
+  /** Legacy session/1.x and session/2.0 identity fence, when projected separately from activity. */
+  identityRevision?: number;
   orchestrationRevision?: number;
   activityRevision?: number;
   /** session/2.0 Execution/history pointers. */

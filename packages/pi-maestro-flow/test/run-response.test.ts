@@ -129,6 +129,24 @@ test("run-response parser accepts and publicly projects artifact inspect run-res
   assert.equal(extractRunResponseLeaseClaim(parsed), null);
 });
 
+test("run-response parser accepts session chain update run-response/1.2", () => {
+  const parsed = parseRunResponse({
+    ...responseV12,
+    operation: "session-chain-update",
+    request_id: "request-chain-update",
+    locator: { session_id: "session-1", run_id: null },
+    revision: { target_type: "orchestration", target_id: "session-1", revision: 5 },
+    result: { step_id: "step-1", stage: "review" },
+    replay: { status: "applied", transition_id: "transition-chain-update" },
+  });
+  assert.equal(parsed.operation, "session-chain-update");
+  assert.deepEqual(parsed.revision, {
+    target_type: "orchestration",
+    target_id: "session-1",
+    revision: 5,
+  });
+});
+
 test("run-response parser accepts artifact republish success, domain error, and revision conflict", async (t) => {
   await t.test("success", () => {
     const parsed = parseRunResponse({

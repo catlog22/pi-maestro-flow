@@ -13,16 +13,27 @@ test("run-control classifies session/3.0-only commands", () => {
   }> = [
     // Session family: v3-only mutations (no v2 counterpart on the maestro CLI).
     { argv: ["session", "open", "migrate to session/3.0"], expected: writeClassification("session", "none", true) },
+    // Session family: v3 orchestration mutations carry no legacy lease semantics.
+    { argv: ["session", "migrate"], expected: writeClassification("session", "none") },
     { argv: ["session", "complete"], expected: writeClassification("session", "none") },
-    // Shared names keep v2 classification: the coordinator interprets scope/lease by mode
-    // (session migrate/resume also exist on the v2 CLI and must not lose their lease fence).
-    { argv: ["session", "migrate"], expected: writeClassification("execution", "required") },
-    { argv: ["session", "resume"], expected: writeClassification("execution-acquire", "acquire") },
     { argv: ["session", "archive"], expected: writeClassification("session", "none") },
+    { argv: ["session", "unarchive"], expected: writeClassification("session", "none") },
+    { argv: ["session", "chain", "insert", "--step-id", "s1", "--command", "execute"], expected: writeClassification("session", "none") },
+    { argv: ["session", "chain", "skip", "--step-id", "s1"], expected: writeClassification("session", "none") },
+    { argv: ["session", "chain", "replace", "--step-id", "s1", "--command", "plan"], expected: writeClassification("session", "none") },
+    { argv: ["session", "chain", "update", "--step-id", "s1", "--stage", "review"], expected: writeClassification("session", "none") },
+    // Shared legacy names are normalized back to their historical lease scope
+    // by WorkflowCoordinator after it selects a non-v3 mode.
+    { argv: ["session", "resume"], expected: writeClassification("execution-acquire", "acquire") },
     // Session family: v3-only reads.
     { argv: ["session", "resume-view"], expected: readClassification() },
     { argv: ["session", "resume-view", "--json"], expected: readClassification() },
-    // Run family: v3-only Run mutations carry the dedicated run scope and no lease.
+    // Run family: orchestration-like commands target the Session; entity
+    // lifecycle commands target a Run.
+    { argv: ["run", "next"], expected: writeClassification("session", "none") },
+    { argv: ["run", "create", "execute"], expected: writeClassification("session", "none") },
+    { argv: ["run", "decide", "decision-1"], expected: writeClassification("session", "none") },
+    { argv: ["run", "complete", "run-1"], expected: writeClassification("run", "none") },
     { argv: ["run", "transition", "run-1", "running"], expected: writeClassification("run", "none") },
     { argv: ["run", "cancel", "run-1"], expected: writeClassification("run", "none") },
     { argv: ["run", "seal", "run-1"], expected: writeClassification("run", "none") },
@@ -52,7 +63,7 @@ test("run-control read helpers recognize v3 read-only commands", () => {
   assert.equal(isRunControlReadArgv(["participant", "register", "win-1"]), false);
 });
 
-test("run-control keeps every v2 command classification unchanged", () => {
+test("run-control preserves unaffected v2 command classifications", () => {
   const cases: Array<{
     argv: string[];
     expected: RunControlClassification;
@@ -73,22 +84,14 @@ test("run-control keeps every v2 command classification unchanged", () => {
     { argv: ["artifact", "inspect", "ART-1"], expected: readClassification() },
     { argv: ["artifact", "list"], expected: readClassification() },
     { argv: ["artifact", "show", "ART-1"], expected: readClassification() },
-    // Session family writes (shared v2/v3 surface keeps its existing classification).
+    // Session family writes not reclassified for the v3 orchestration surface.
     { argv: ["session", "create", "topic"], expected: writeClassification("session", "none", true) },
-    { argv: ["session", "unarchive"], expected: writeClassification("session", "none") },
     { argv: ["session", "start"], expected: writeClassification("compatibility-start", "command-aware", true) },
     { argv: ["session", "attach"], expected: writeClassification("execution-acquire", "acquire") },
     { argv: ["session", "resolve"], expected: writeClassification("execution", "none") },
     { argv: ["session", "next"], expected: writeClassification("execution", "required") },
-    { argv: ["session", "chain", "insert", "--step-id", "s1", "--command", "execute"], expected: writeClassification("execution", "required") },
-    { argv: ["session", "chain", "skip", "--step-id", "s1"], expected: writeClassification("execution", "required") },
-    { argv: ["session", "chain", "replace", "--step-id", "s1", "--command", "plan"], expected: writeClassification("execution", "required") },
-    // Run family writes (shared v2/v3 surface keeps its existing classification).
+    // Run start and unrecognized Run mutations retain compatibility defaults.
     { argv: ["run", "start"], expected: writeClassification("compatibility-start", "command-aware", true) },
-    { argv: ["run", "create", "execute"], expected: writeClassification("execution", "required", true) },
-    { argv: ["run", "next"], expected: writeClassification("execution", "required") },
-    { argv: ["run", "complete", "run-1"], expected: writeClassification("execution", "required") },
-    { argv: ["run", "decide", "decision-1"], expected: writeClassification("execution", "required") },
     { argv: ["run", "seal-session", "session-1"], expected: writeClassification("execution", "required") },
     // Execution/artifact/plan families are untouched by the v3 additions.
     { argv: ["execution", "start"], expected: writeClassification("execution-acquire", "acquire") },

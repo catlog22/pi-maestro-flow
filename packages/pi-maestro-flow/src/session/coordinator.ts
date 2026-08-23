@@ -843,10 +843,10 @@ export class WorkflowCoordinator {
     if (mode === "fail-closed") throw this.failClosedMutationError("edit");
     if (mode === "session-v3") {
       // run edit is retired for session/3.0: chain editing is the explicit
-      // session chain insert|skip|replace command family (core v3). Refuse
+      // session chain insert|skip|replace|update command family (core v3). Refuse
       // loudly instead of falling into the v2 lease path.
       throw new Error(
-        "run edit is retired for session/3.0 workspaces; use session chain insert|skip|replace",
+        "run edit is retired for session/3.0 workspaces; use session chain insert|skip|replace|update",
       );
     }
     if (mode === "core-execution") {
@@ -890,16 +890,17 @@ export class WorkflowCoordinator {
     if (mode === "session-v3") {
       return this.execV3(argv, classification, hostSessionId);
     }
+    const selectedClassification = legacyModeClassification(argv, classification);
     if (mode === "core-execution") {
-      return this.execCore(argv, classification, hostSessionId);
+      return this.execCore(argv, selectedClassification, hostSessionId);
     }
-    if (classification.write && classification.mutation === "plan-publish") {
+    if (selectedClassification.write && selectedClassification.mutation === "plan-publish") {
       return this.execLegacyRawPlanPublish(argv, hostSessionId);
     }
-    if (classification.write) {
-      if (classification.sessionless) {
+    if (selectedClassification.write) {
+      if (selectedClassification.sessionless) {
         this.requireSessionlessWrite(argv);
-      } else if (classification.lease !== "none") {
+      } else if (selectedClassification.lease !== "none") {
         const snapshot = await this.bridge.refresh();
         const session = requireSession(snapshot);
         await this.fenceLease(session.sessionId, hostSessionId);
@@ -939,7 +940,7 @@ export class WorkflowCoordinator {
           `v3 envelope operation mismatch: expected ${expectedOperation}, got ${envelope.operation}`,
         );
       }
-      if (injectedRequestId && envelope.request_id !== injectedRequestId) {
+      if (injectedRequestId && !isV3MigrateCommand(argv) && envelope.request_id !== injectedRequestId) {
         throw new RunResponseParseError(
           `v3 envelope request_id mismatch: expected ${injectedRequestId}, got ${envelope.request_id}`,
         );
@@ -954,7 +955,7 @@ export class WorkflowCoordinator {
       // D3 constraint: a revision conflict is never replayed with a replaced
       // revision. Re-read authority so the hint can report the current CAS
       // revision, then surface the envelope's next_actions for the caller.
-      const reReadHint = await this.v3ConflictReReadHint(argv);
+      const reReadHint = await this.v3ConflictReReadHint(prepared);
       envelope = {
         ...envelope,
         error: { ...envelope.error, message: `${envelope.error.message} ${reReadHint}` },
@@ -975,17 +976,36 @@ export class WorkflowCoordinator {
     const prepared = [...argv];
     addFlag(prepared, "--participant", participantId);
     addFlag(prepared, "--actor", participantId);
-    // session migrate accepts participant/actor/json only (no request-id/reason).
-    if (!isV3MigrateCommand(argv)) {
-      addFlagIfMissing(prepared, "--request-id", randomUUID());
-      addFlagIfMissing(prepared, "--reason", "Pi run-control v3 mutation");
-    }
+    addRequiredFlagIfMissing(prepared, "--request-id", randomUUID());
+    addRequiredFlagIfMissing(prepared, "--reason", "Pi run-control v3 mutation");
     addBooleanFlag(prepared, "--json");
-    if (isV3OpenCommand(argv) || isV3MigrateCommand(argv)) {
-      // Entry/migration commands mint or convert a Session: no CAS expected.
+    if (isV3OpenCommand(argv)) {
+      // Entry commands mint a Session and therefore have no target Session or
+      // expected revision to inject.
+      return prepared;
+    }
+    if (isV3MigrateAllCommand(argv)) {
+      requireSingleFlag(prepared, "--expected-revisions");
       return prepared;
     }
     const session = await this.requireV3Session(prepared);
+    addFlag(prepared, "--session", session.sessionId);
+    if (isV3MigrateCommand(argv)) {
+      // Migration is fenced against the legacy Session source. It must not
+      // receive orchestration CAS because that authority does not exist until
+      // the conversion has committed.
+      addFlag(
+        prepared,
+        "--expected-identity-revision",
+        String(session.identityRevision ?? session.revision),
+      );
+      addFlag(
+        prepared,
+        "--expected-activity-revision",
+        String(session.activityRevision ?? session.revision),
+      );
+      return prepared;
+    }
     if (isV3OrchestrationTarget(argv)) {
       const revision = session.orchestrationRevision ?? this.v3ResumeRevisionCache;
       if (revision === undefined) {
@@ -1027,6 +1047,11 @@ export class WorkflowCoordinator {
     if (!session) {
       throw new Error("cannot determine expected orchestration revision; read session status first");
     }
+    if (explicitSessionId && session.sessionId !== explicitSessionId) {
+      throw new Error(
+        `v3 mutation targets Session ${explicitSessionId}, but resolved authority is ${session.sessionId}`,
+      );
+    }
     return session;
   }
 
@@ -1038,8 +1063,13 @@ export class WorkflowCoordinator {
   private async v3ConflictReReadHint(argv: readonly string[]): Promise<string> {
     if (isV3RunTarget(argv)) {
       const runId = v3TargetRunId(argv);
+      const sessionId = optionalSingleFlag(argv, "--session");
       try {
-        const command = await this.adapter.exec(["run", "brief", runId, "--json"]);
+        const command = await this.adapter.exec([
+          "run", "brief", runId,
+          ...(sessionId ? ["--session", sessionId] : []),
+          "--json",
+        ]);
         const envelope = parseRunResponse(command.stdout);
         const revision = v3ReReadRevision(envelope, true);
         return `Re-read authority via 'maestro run brief ${runId} --json' `
@@ -1051,8 +1081,13 @@ export class WorkflowCoordinator {
           + "the current --expected-run-revision.";
       }
     }
+    const sessionId = optionalSingleFlag(argv, "--session");
     try {
-      const command = await this.adapter.exec(["session", "status", "--json"]);
+      const command = await this.adapter.exec([
+        "session", "status",
+        ...(sessionId ? ["--session", sessionId] : []),
+        "--json",
+      ]);
       const envelope = parseRunResponse(command.stdout);
       const revision = v3ReReadRevision(envelope, false);
       return `Re-read authority via 'maestro session status --json' `
@@ -1082,7 +1117,7 @@ export class WorkflowCoordinator {
     // ResumeMapV1 (`session resume-view --json`) is the v3 restore entry
     // point; its orchestration revision is cached for CAS fallback. A failed
     // resume-map validation never blocks the attach.
-    const resumeMap = await this.v3ResumeMap();
+    const resumeMap = await this.v3ResumeMap(session.sessionId);
     if (resumeMap) {
       this.v3ResumeRevisionCache = resumeMap.orchestrationRevision;
     }
@@ -1101,10 +1136,12 @@ export class WorkflowCoordinator {
    * body hash, and the map fits RESUME_MAP_MAX_UTF8_BYTES. Any failure records
    * a diagnostic and returns null so recovery never blocks on a bad resume map.
    */
-  private async v3ResumeMap(): Promise<ResumeMapV1 | null> {
+  private async v3ResumeMap(sessionId: string): Promise<ResumeMapV1 | null> {
     this.v3ResumeMapDiagnostics.length = 0;
     try {
-      const command = await this.adapter.exec(["session", "resume-view", "--json"]);
+      const command = await this.adapter.exec([
+        "session", "resume-view", "--session", sessionId, "--json",
+      ]);
       const envelope = parseRunResponse(command.stdout);
       if (!envelope.ok || envelope.schema_version !== "run-response/1.2") {
         this.v3ResumeMapDiagnostics.push(
@@ -2643,9 +2680,13 @@ function isV3OpenCommand(argv: readonly string[]): boolean {
   return argv[0] === "session" && argv[1] === "open";
 }
 
-/** session migrate accepts participant/actor/json but not request-id/reason or CAS. */
+/** session migrate uses legacy identity/activity fences instead of orchestration CAS. */
 function isV3MigrateCommand(argv: readonly string[]): boolean {
   return argv[0] === "session" && argv[1] === "migrate";
+}
+
+function isV3MigrateAllCommand(argv: readonly string[]): boolean {
+  return isV3MigrateCommand(argv) && argv.includes("--all");
 }
 
 /** Run-target v3 mutations carry --expected-run-revision (run complete also needs orchestration). */
@@ -2655,7 +2696,7 @@ function isV3RunTarget(argv: readonly string[]): boolean {
 
 /**
  * Orchestration-target v3 mutations carry --expected-orchestration-revision:
- * session chain insert/skip/replace, run next/create/decide, session
+ * session chain insert/skip/replace/update, run next/create/decide, session
  * complete/archive, and run complete (which advances the chain).
  * session open is handled before this check (no CAS for a brand-new Session).
  */
@@ -2666,7 +2707,34 @@ function isV3OrchestrationTarget(argv: readonly string[]): boolean {
   if (argv[0] !== "session") return false;
   const command = argv[1] ?? "";
   if (["complete", "archive", "unarchive"].includes(command)) return true;
-  return command === "chain" && ["insert", "skip", "replace"].includes(argv[2] ?? "");
+  return command === "chain" && ["insert", "skip", "replace", "update"].includes(argv[2] ?? "");
+}
+
+/**
+ * Shared v2/v3 command names are classified by run-control according to the
+ * current v3 contract. Once a non-v3 mode is selected, restore the historical
+ * execution/lease semantics before dispatching them to the legacy authority.
+ */
+function legacyModeClassification(
+  argv: readonly string[],
+  classification: WorkflowRunControlClassification,
+): WorkflowRunControlClassification {
+  if (!classification.write) return classification;
+  if (argv[0] === "session") {
+    if (argv[1] === "migrate"
+      || argv[1] === "chain" && ["insert", "skip", "replace", "update"].includes(argv[2] ?? "")) {
+      return { write: true, sessionless: false, mutation: "execution", lease: "required" };
+    }
+  }
+  if (argv[0] === "run") {
+    if (argv[1] === "create") {
+      return { write: true, sessionless: true, mutation: "execution", lease: "required" };
+    }
+    if (["next", "complete", "decide"].includes(argv[1] ?? "")) {
+      return { write: true, sessionless: false, mutation: "execution", lease: "required" };
+    }
+  }
+  return classification;
 }
 
 function v3TargetRunId(argv: readonly string[]): string {
@@ -2747,6 +2815,11 @@ function addFlag(argv: string[], flag: string, value: string): void {
 
 function addFlagIfMissing(argv: string[], flag: string, value: string): void {
   if (argv.some((argument) => argument === flag || argument.startsWith(`${flag}=`))) return;
+  argv.push(flag, value);
+}
+
+function addRequiredFlagIfMissing(argv: string[], flag: string, value: string): void {
+  if (optionalSingleFlag(argv, flag) !== undefined) return;
   argv.push(flag, value);
 }
 

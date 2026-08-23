@@ -707,6 +707,7 @@ function normalizeSession(
     ?? {};
   const aliasesRecord = recordValue(artifactRegistry?.aliases) ?? {};
   const activityRevision = optionalNumber(raw.activity_revision);
+  const identityRevision = optionalNumber(raw.identity_revision) ?? optionalNumber(raw.revision);
   const revision = Math.max(numberValue(raw.revision), activityRevision ?? 0);
   return {
     ...(schemaVersion ? { schemaVersion } : {}),
@@ -720,6 +721,7 @@ function normalizeSession(
       ...statuslessFields,
     }),
     revision,
+    ...(identityRevision !== undefined ? { identityRevision } : {}),
     ...(activityRevision !== undefined ? { activityRevision } : {}),
     activeRunId: statusless ? null : nullableString(raw.active_run_id),
     definitionOfDone: stringValue(boundary?.definition_of_done) ?? "",

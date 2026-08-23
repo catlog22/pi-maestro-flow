@@ -103,16 +103,20 @@ export function classifyRunControlArgv(argv: readonly string[]): RunControlClass
     if (["status", "show", "list", "evidence", "graph"].includes(command)) {
       return { ...READ_CLASSIFICATION };
     }
-    // session/3.0-only Session commands (docs/session-run-minimal-state-architecture-20260812.md).
-    // Shared v2/v3 commands (create/start/attach/resume/migrate/resolve/next/chain insert|skip|replace/...)
-    // keep their existing classification below; the coordinator interprets scope/lease by mode.
+    // session/3.0 Session mutations use Session/orchestration CAS and no
+    // legacy lease. The coordinator restores the shared commands' historical
+    // lease classification after selecting a non-v3 authority mode.
     // v3 has no pause/chain-audit/participant surface (core batch A/B removed them), so those
     // argv fall through to the shared/default classifications below and fail closed at the core.
     if (command === "open") return writeClassification("session", "none", true);
-    if (command === "complete") return writeClassification("session", "none");
+    if (["complete", "archive", "unarchive", "migrate"].includes(command)) {
+      return writeClassification("session", "none");
+    }
+    if (command === "chain" && ["insert", "skip", "replace", "update"].includes(argv[2] ?? "")) {
+      return writeClassification("session", "none");
+    }
     if (command === "resume-view") return { ...READ_CLASSIFICATION };
     if (command === "create") return writeClassification("session", "none", true);
-    if (["archive", "unarchive"].includes(command)) return writeClassification("session", "none");
     if (["start", "attach", "resume"].includes(command)) {
       return command === "start"
         ? writeClassification("compatibility-start", "command-aware", true)
@@ -127,9 +131,12 @@ export function classifyRunControlArgv(argv: readonly string[]): RunControlClass
     if (command === "start") {
       return writeClassification("compatibility-start", "command-aware", true);
     }
-    if (command === "create") return writeClassification("execution", "required", true);
-    // session/3.0-only Run mutations; the v2 CLI surface has no run transition/cancel/seal.
-    if (["transition", "cancel", "seal"].includes(command)) {
+    if (["next", "create", "decide"].includes(command)) {
+      return writeClassification("session", "none");
+    }
+    // Run-entity mutations use Run CAS. run complete also advances the
+    // Session chain, which the coordinator adds as a second v3 fence.
+    if (["complete", "transition", "cancel", "seal"].includes(command)) {
       return writeClassification("run", "none");
     }
     return writeClassification("execution", "required");
@@ -163,8 +170,14 @@ export function isRunControlReadArgv(argv: readonly string[]): boolean {
 export const RunControlParams = Type.Object({
   argv: Type.Array(Type.String(), {
     description:
-      "Maestro CLI arguments without the leading executable, e.g. [\"session\",\"next\",\"--json\"] "
-      + "or [\"run\",\"check\",\"run-123\"].",
+      "Maestro CLI arguments without the leading executable. v3 examples: "
+      + "[\"session\",\"status\",\"--session\",\"session-123\",\"--json\"], "
+      + "[\"run\",\"brief\",\"run-123\",\"--session\",\"session-123\",\"--json\"], "
+      + "[\"run\",\"check\",\"run-123\",\"--session\",\"session-123\",\"--json\"], "
+      + "[\"run\",\"next\",\"--session\",\"session-123\",\"--json\"], "
+      + "[\"run\",\"complete\",\"run-123\",\"--session\",\"session-123\",\"--verdict\",\"done\",\"--advance\",\"--json\"], "
+      + "[\"session\",\"chain\",\"insert\",\"--session\",\"session-123\",\"--step-id\",\"review-1\",\"--command\",\"review\",\"--arg\",\"src\",\"--json\"], "
+      + "or [\"session\",\"chain\",\"update\",\"--session\",\"session-123\",\"--step-id\",\"review-1\",\"--stage\",\"verification\",\"--json\"].",
   }),
 }, { additionalProperties: false });
 
