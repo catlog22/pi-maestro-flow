@@ -734,7 +734,12 @@ export default function registerTeammateExtension(
           return bridge.ctx?.sessionManager.getSessionId() === childSessionId
             && bridge.ctx?.sessionManager.getSessionFile?.() === childSessionFile
             && completionWorkspaceId(bridge.ctx?.cwd ?? "") === childWorkspaceId
-            && safeSendMessage(pi, envelope, { triggerTurn: true, deliverAs: "followUp" });
+            // deliverAs: "steer" (not "followUp") so a replayed teammate-complete
+            // is drained at the next turn boundary (right after the current tool
+            // call finishes) instead of waiting for the agent to fully stop.
+            // pi-core drains the steer queue every turn_end (agent-loop.js),
+            // whereas followUp only drains when the agent would otherwise stop.
+            && safeSendMessage(pi, envelope, { triggerTurn: true, deliverAs: "steer" });
         },
       }).catch((error) => {
         console.warn("[pi-maestro-teammate] child completion replay bind failed:", error);
@@ -8713,7 +8718,12 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
           return state.currentSessionId === completionSessionId
             && state.sessionGeneration === completionGeneration
             && workspaceIdForCwd(state.baseCwd) === completionWorkspaceId
-            && safeSendMessage(pi, envelope, { triggerTurn: true, deliverAs: "followUp" });
+            // deliverAs: "steer" (not "followUp") so a replayed teammate-complete
+            // is drained at the next turn boundary (right after the current tool
+            // call finishes) instead of waiting for the agent to fully stop.
+            // pi-core drains the steer queue every turn_end (agent-loop.js),
+            // whereas followUp only drains when the agent would otherwise stop.
+            && safeSendMessage(pi, envelope, { triggerTurn: true, deliverAs: "steer" });
         },
       }).catch((error) => {
         console.warn("[pi-maestro-teammate] completion replay bind failed:", error);
