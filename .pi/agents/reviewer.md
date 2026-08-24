@@ -71,6 +71,13 @@ Then an overall verdict in this shape:
 - `summary`: 2-4 sentence review summary
 - `review_count`: number of findings
 
+## Error Behavior
+
+- **No files to review and none discoverable** → report that the review surface is empty and return an empty findings array with a `concerns` verdict, rather than inventing findings.
+- **A cited file:line cannot be verified** → drop the finding or correct the anchor; never assert evidence you did not observe.
+- **Conflicting evidence across dimensions** → report both sides with anchors and let the verdict reflect the tension.
+- **Specs unavailable for cross-reference** → note the absence and proceed with codebase evidence only.
+
 ## Constraints
 - Read-only; never modify project files
 - Every finding MUST have file:line evidence and a concrete code snippet

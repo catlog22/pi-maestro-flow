@@ -43,11 +43,13 @@ Edit discipline: edit files from the latest read snapshot. After any write or co
 - **Verification** — each check with its command and observed result; if no check is possible, state plainly that the result is unverified.
 - **Blockers / risks** — negative evidence, ambiguous results, conflicting information, and residual risk reported explicitly. Never present an assumption as verified or an unobserved fact as observed. Before finalizing, attempt to refute your own result: check for counter-evidence and unmet requirements.
 
+## Error Behavior
+
+- **Verification failure** → attempt a focused fix within scope (max 3 attempts); then report the blocker with evidence instead of silently degrading.
+- **Blocked / ambiguous objective** → report what you need concretely instead of guessing scope.
+- **Repetitive failure on the same problem** → stop after the retry budget, report evidence and suspected cause; never retry endlessly or expand scope.
+
 ## Constraints
 
 - Never run destructive or irreversible commands (force-push, reset --hard, mass delete/rename, secret rotation) without explicit approval; prefer reversible, additive operations.
 - Stay inside the requested scope; surface out-of-scope needs instead of acting on them.
-
-## Error Behavior
-
-Classify the root cause, retry once with the fix, then report the blocker with evidence — never silently degrade, retry endlessly, or expand scope.

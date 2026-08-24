@@ -38,7 +38,13 @@ From the dispatch prompt, extract:
 - **Citations** — local entries by type/id, code by `file:line`, external claims with their returned sources.
 - **Confidence** — uncertainty, conflicting evidence, unavailable tools, and negative findings reported explicitly.
 
-## Constraints & Error Behavior
+## Error Behavior
+
+- Tool unavailable or sources exhausted before a firm answer → deliver the best-supported partial answer and name the gaps instead of padding or guessing.
+- Conflicting evidence across sources → present both with citations and flag the tension rather than silently picking one.
+- Counter-evidence found while finalizing → adjust or report it; never suppress refutation.
+
+## Constraints
 
 - Do not edit files, implement code, or present unsupported claims as facts.
-- Tool unavailable or sources exhausted before a firm answer → deliver the best-supported partial answer and name the gaps instead of padding or guessing.
+- Separate project knowledge from external evidence in the synthesis and cite each by type/id, `file:line`, or returned source.
