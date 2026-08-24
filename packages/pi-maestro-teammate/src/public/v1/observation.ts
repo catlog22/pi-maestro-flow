@@ -367,7 +367,7 @@ export function diagnosisProvenanceLine(
 ): string {
   const sender = provenance.sender.kind === "teammate-agent"
     ? `teammate-agent:${provenance.sender.correlationId}`
-    : provenance.sender.kind === "unknown"
+    : provenance.confidence === "unknown"
       ? `unknown${provenance.legacyLabel ? ` (legacy=${provenance.legacyLabel})` : ""}`
       : `${provenance.sender.kind}:${provenance.sender.ownerId}`;
   const identity = provenance.messageId ? ` message=${provenance.messageId}` : "";

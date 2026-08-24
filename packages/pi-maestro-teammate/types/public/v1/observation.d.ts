@@ -1,4 +1,4 @@
-import type { AgentRuntimeDiagnosisV1 } from "../../shared/types.ts";
+import type { AgentRuntimeDiagnosisV1, MessageProvenanceV1 } from "../../shared/types.ts";
 export type ObservationAction = "status" | "diagnose" | "wait" | "watch";
 export type ObservationDetail = "summary" | "tail" | "full";
 export type ObservationView = "live" | "turns";
@@ -85,4 +85,6 @@ export declare function registerObservationProvider(provider: ObservationProvide
 export declare function getObservationProvider(kind: string): ObservationProvider | undefined;
 export declare function listObservationProviders(): ObservationProvider[];
 export declare function observeTargets(params: ObserveParams, signal?: AbortSignal): Promise<ObserveResult>;
+export declare function diagnosisProvenanceLine(label: "trigger" | "last-message", provenance: MessageProvenanceV1): string;
+export declare function diagnosisDetail(diagnosis: AgentRuntimeDiagnosisV1): string[];
 export declare function formatObserveResult(result: ObserveResult, verbose?: boolean): string[];
