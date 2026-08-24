@@ -286,9 +286,10 @@ test("terminal result request metadata is opt-in and legacy workspace commands s
 test("terminal publication lifecycle is wired through canonical completion before workspace disposal", async () => {
   const extensionSource = await readFile(new URL("../src/extension/index.ts", import.meta.url), "utf8");
   const canonicalHandler = extensionSource.indexOf("const publishWorkspaceTerminalCompletion = (");
+  const structuredPayload = extensionSource.indexOf("structuredOutput: terminal", canonicalHandler);
   const canonicalResource = extensionSource.indexOf("await emitTeammateResultPublished(pi, result, seed.originCwd);", canonicalHandler);
   const canonicalOutbox = extensionSource.indexOf("await completionCoordinator.publishCompletion({", canonicalResource);
-  assert.ok(canonicalHandler >= 0 && canonicalResource > canonicalHandler);
+  assert.ok(canonicalHandler >= 0 && structuredPayload > canonicalHandler && canonicalResource > structuredPayload);
   assert.ok(canonicalOutbox > canonicalResource, "immutable agent publication precedes canonical outbox finalization");
 
   const consumer = extensionSource.indexOf("const terminalPublication = consumeWorkspaceTerminalCommand(command);");
