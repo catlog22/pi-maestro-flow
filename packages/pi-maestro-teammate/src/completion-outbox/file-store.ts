@@ -66,6 +66,10 @@ const RESERVE_GC_MIN_INTERVAL_MS = 30_000;
 // so a crashed GC still lets the next process re-sweep soon.
 const TRY_GC_MARKER_MIN_INTERVAL_MS = 30_000;
 const GC_MARKER_NAME = ".gc-marker";
+// The marker holds { at, owner }. The default ownerId is `${pid}:${randomUUID()}`,
+// which is 42 characters, so a real marker is 74 bytes; a cap below that rejects
+// every production write and leaves the throttle permanently disarmed.
+const GC_MARKER_MAX_BYTES = 256;
 
 interface StoreOptions {
   rootDir?: string;
@@ -492,7 +496,7 @@ export class CompletionOutboxFileStore {
     const workspaceDir = this.#workspaceDir(workspaceId);
     const markerPath = join(workspaceDir, GC_MARKER_NAME);
     const now = this.#now();
-    const marker = await readSafeJson(markerPath, 64);
+    const marker = await readSafeJson(markerPath, GC_MARKER_MAX_BYTES);
     if (marker && typeof marker === "object" && "at" in marker && typeof (marker as { at: unknown }).at === "number"
       && now - (marker as { at: number }).at < TRY_GC_MARKER_MIN_INTERVAL_MS) {
       return { ...empty, skipped: true };
@@ -503,14 +507,14 @@ export class CompletionOutboxFileStore {
         // Re-check the marker inside the lock to close the TOCTOU window between
         // the lock-free read above and acquisition: another process may have just
         // finished a sweep and written the marker while we waited.
-        const fresh = await readSafeJson(markerPath, 64);
+        const fresh = await readSafeJson(markerPath, GC_MARKER_MAX_BYTES);
         const freshAt = fresh && typeof fresh === "object" && "at" in fresh && typeof (fresh as { at: unknown }).at === "number"
           ? (fresh as { at: number }).at : 0;
         if (freshAt > 0 && now - freshAt < TRY_GC_MARKER_MIN_INTERVAL_MS) {
           return { ...empty, skipped: true };
         }
         const swept = await this.#gcLocked(workspaceId);
-        await writeJsonAtomic(markerPath, { at: this.#now(), owner: this.ownerId }, 64);
+        await writeJsonAtomic(markerPath, { at: this.#now(), owner: this.ownerId }, GC_MARKER_MAX_BYTES);
         return swept;
       },
       0,

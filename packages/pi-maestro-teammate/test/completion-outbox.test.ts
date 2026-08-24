@@ -318,3 +318,30 @@ test("tryGc returns busy instead of throwing when the workspace lock is held", a
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("tryGc writes its marker under the default ownerId and real clock", async () => {
+  // Every other tryGc test injects a 7-character ownerId and a 4-digit clock, so
+  // the marker stays far below any cap. Production uses `${pid}:${randomUUID()}`
+  // with an epoch timestamp, which is 74 bytes: the marker write is the only
+  // production-shaped value in this store, and a cap below 74 disarms the
+  // cross-process throttle in every real process while the suite stays green.
+  const root = await mkdtemp(join(tmpdir(), "completion-trygc-default-owner-"));
+  try {
+    const store = new CompletionOutboxFileStore({ rootDir: root });
+    // Assert the property the cap is about rather than a character count: the
+    // pid is 2-7 digits, so a length threshold would pass or fail by luck.
+    const markerBytes = Buffer.byteLength(`${JSON.stringify({ at: Date.now(), owner: store.ownerId })}\n`);
+    assert.ok(markerBytes > 64, `a real marker must overflow the old cap, got ${markerBytes} bytes`);
+    await store.reserve(seed("prime"), 4_096);
+
+    const first = await store.tryGc(target.workspaceId);
+    assert.equal(first.busy, undefined);
+    assert.equal(first.skipped, undefined);
+
+    // The marker only throttles the next sweep if the first write succeeded.
+    const second = await store.tryGc(target.workspaceId);
+    assert.equal(second.skipped, true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
