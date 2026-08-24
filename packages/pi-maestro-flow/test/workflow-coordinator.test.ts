@@ -2710,11 +2710,11 @@ test("core new-Session Plan publication creates and replays one deterministic au
   }
 });
 
-test("real Maestro v3 coordinator publishes and replays a new statusless Plan Session after response loss", { timeout: 120_000 }, async () => {
+test("real Maestro v3 coordinator publishes and replays a Plan Session after response loss", { timeout: 120_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-workflow-real-v3-plan-"));
   const maestroBin = "D:/maestro2/bin/maestro.js";
   const calls: string[][] = [];
-  let discardFirstPlanInsert = true;
+  let discardFirstPublish = true;
   const runner = async (args: readonly string[], cwd: string): Promise<RunCliResult> => {
     calls.push([...args]);
     const completed = await defaultRunner([maestroBin, ...args], cwd, {
@@ -2722,12 +2722,14 @@ test("real Maestro v3 coordinator publishes and replays a new statusless Plan Se
       timeoutMs: 30_000,
       maxOutputBytes: 1024 * 1024,
     });
-    if (discardFirstPlanInsert
-      && args[0] === "session" && args[1] === "chain" && args[2] === "insert"
-      && flagValue(args, "--goal-ref")?.startsWith(join(root, ".workflow", "plans"))
+    // Simulate response loss after the first `plan publish` commits: the core
+    // sealed the producer Run and registered the plan/1.0 artifact, but the
+    // CLI response never reached the coordinator. The retry must replay.
+    if (discardFirstPublish
+      && args[0] === "plan" && args[1] === "publish"
       && completed.exitCode === 0) {
-      discardFirstPlanInsert = false;
-      throw new Error("injected response loss after the plan chain step committed");
+      discardFirstPublish = false;
+      throw new Error("injected response loss after the plan publish Run committed");
     }
     return completed;
   };
@@ -2757,18 +2759,10 @@ test("real Maestro v3 coordinator publishes and replays a new statusless Plan Se
       approvedAt: "2026-08-12T02:00:00.000Z",
     };
     const expectedRequestId = `req_plan_publish_${createHash("sha256").update(options.handoffKey).digest("hex").slice(0, 32)}`;
-    const deterministicSessionId = `plan-${createHash("sha256").update(expectedRequestId).digest("hex").slice(0, 12)}`;
 
     assert.equal(await coordinator.selectMode(), "session-v3");
     assert.equal(await coordinator.supportsNewPlanSession(), true);
-    // v3 workspaces carry no state.json: open the deterministic Plan Session
-    // through the coordinator and bind it on the bridge so publishPlanV3 can
-    // resolve the orchestration revision for its chain insert.
-    const preOpenArgv = ["session", "open", options.intent!, "--id", deterministicSessionId];
-    const preOpen = await coordinator.exec(preOpenArgv, classifyRunControlArgv(preOpenArgv), "pi-real-v3-plan");
-    assert.equal(preOpen.command.exitCode, 0);
-    assert.equal(JSON.parse(preOpen.command.stdout).operation, "session-open");
-    await bridge.refreshSession(deterministicSessionId);
+
     await assert.rejects(
       coordinator.publishPlan(options, { hostSessionId: "pi-real-v3-plan" }),
       (error: unknown) => {
@@ -2786,16 +2780,21 @@ test("real Maestro v3 coordinator publishes and replays a new statusless Plan Se
     assert.equal(recoveredEnvelope.operation, "plan-publish");
     assert.equal(recoveredEnvelope.ok, true);
     const sessionId = recoveredEnvelope.result.session_id as string;
-    assert.match(sessionId, /^plan-[a-f0-9]{12}$/);
     assert.equal(recoveredEnvelope.result.request_id, expectedRequestId);
     assert.equal(
       recoveredEnvelope.result.source_checksum,
       `sha256:${createHash("sha256").update(source, "utf8").digest("hex")}`,
     );
-    assert.equal(recoveredEnvelope.result.run_id, `plan-${sessionId}-1`);
-    assert.equal(recoveredEnvelope.result.artifact_id, `plan:${sessionId}:1`);
+    // v3 core produces a real sealed artifact: run_id and artifact_id are
+    // canonical identities, not synthetic plan:<session>:<rev> strings.
+    assert.equal(typeof recoveredEnvelope.result.run_id, "string");
+    assert.match(recoveredEnvelope.result.run_id, /^run-/);
+    assert.equal(typeof recoveredEnvelope.result.artifact_id, "string");
+    assert.notMatch(recoveredEnvelope.result.artifact_id, /^plan:/);
     assert.equal(replayEnvelope.ok, true);
     assert.equal(replayEnvelope.result.session_id, sessionId);
+    assert.equal(replayEnvelope.result.run_id, recoveredEnvelope.result.run_id);
+    assert.equal(replayEnvelope.result.artifact_id, recoveredEnvelope.result.artifact_id);
 
     const sessionsRoot = join(root, ".workflow", "sessions");
     const sessionDirectories = (await readdir(sessionsRoot, { withFileTypes: true }))
@@ -2807,23 +2806,30 @@ test("real Maestro v3 coordinator publishes and replays a new statusless Plan Se
     ) as Record<string, any>;
     assert.equal(recoveredIdentity.schema_version, "session/3.0");
     assert.equal(recoveredIdentity.session_id, sessionId);
-    const recoveredRevision = Number(recoveredIdentity.orchestration_revision);
-    const chainSteps = recoveredIdentity.chain as Array<{ step_id: string }>;
-    assert.equal(chainSteps.some((step) => step.step_id === "plan-1"), true, "the plan chain step is inserted");
+    const chainSteps = recoveredIdentity.chain as Array<{ command: string; status: string }>;
+    assert.equal(chainSteps.some((step) => step.command === "plan-publish"), true, "the plan-publish chain step exists");
+    assert.equal(chainSteps.every((step) => step.status === "completed"), true, "chain step is completed");
 
-    const planFile = join(root, ".workflow", "plans", `${sessionId}-1.md`);
-    assert.equal(await readFile(planFile, "utf8"), source);
+    // The sealed plan/1.0 artifact is in the Session Artifact Registry under
+    // the current-plan alias (no .workflow/plans/ file is written by the v3 path).
+    const artifacts = JSON.parse(
+      await readFile(join(sessionDir, "artifacts.json"), "utf8"),
+    ) as { artifacts: Record<string, { status: string; kind: string; schema_version?: string }>; aliases: Record<string, string> };
+    assert.equal(artifacts.aliases["current-plan"], recoveredEnvelope.result.artifact_id);
+    const artifact = artifacts.artifacts[recoveredEnvelope.result.artifact_id];
+    assert.equal(artifact.status, "sealed");
+    assert.equal(artifact.kind, "plan");
+    assert.equal(artifact.schema_version, "plan/1.0");
 
     const replayIdentity = JSON.parse(
       await readFile(join(sessionDir, "session.json"), "utf8"),
     ) as Record<string, any>;
     assert.equal(replayIdentity.session_id, sessionId, "replay does not recreate the Session");
     assert.equal(
-      Number(replayIdentity.orchestration_revision) > 1,
+      Number(replayIdentity.orchestration_revision) >= Number(recoveredIdentity.orchestration_revision),
       true,
       "replay does not reset the orchestration revision",
     );
-    assert.equal(Number(replayIdentity.orchestration_revision) >= recoveredRevision, true);
   } finally {
     await coordinator.release().catch(() => {});
     await rm(root, { recursive: true, force: true });
@@ -2881,25 +2887,28 @@ test("real Maestro v3 coordinator publishes into an existing Session and surface
     assert.equal(firstEnvelope.operation, "plan-publish");
     assert.equal(firstEnvelope.ok, true);
     assert.equal(firstEnvelope.result.session_id, "real-plan-current");
-    const planFile = join(root, ".workflow", "plans", "real-plan-current-1.md");
-    assert.equal(await readFile(planFile, "utf8"), source);
+    // v3 core seals a real plan/1.0 artifact under the current-plan alias.
+    assert.match(firstEnvelope.result.run_id, /^run-/);
+    assert.notMatch(firstEnvelope.result.artifact_id, /^plan:/);
+    const sessionDir = join(root, ".workflow", "sessions", "real-plan-current");
+    const artifacts = JSON.parse(
+      await readFile(join(sessionDir, "artifacts.json"), "utf8"),
+    ) as { artifacts: Record<string, { status: string; kind: string }>; aliases: Record<string, string> };
+    assert.equal(artifacts.aliases["current-plan"], firstEnvelope.result.artifact_id);
+    assert.equal(artifacts.artifacts[firstEnvelope.result.artifact_id].status, "sealed");
+    assert.equal(artifacts.artifacts[firstEnvelope.result.artifact_id].kind, "plan");
 
-    // Replay into the same Session: no new Session directory is created.
+    // Replay into the same Session: no new Session directory is created, and
+    // the same run_id / artifact_id are returned.
     const replay = await coordinator.publishPlan(publishOptions, { hostSessionId: host });
     const replayEnvelope = JSON.parse(replay.command.stdout) as Record<string, any>;
     assert.equal(replayEnvelope.ok, true);
+    assert.equal(replayEnvelope.result.run_id, firstEnvelope.result.run_id);
+    assert.equal(replayEnvelope.result.artifact_id, firstEnvelope.result.artifact_id);
     const sessionsRoot = join(root, ".workflow", "sessions");
     const sessionDirectories = (await readdir(sessionsRoot, { withFileTypes: true }))
       .filter((entry) => entry.isDirectory() && entry.name !== ".backups");
     assert.deepEqual(sessionDirectories.map((entry) => entry.name), ["real-plan-current"]);
-
-    // run next allocates the plan chain Run.
-    const nextArgv = ["run", "next"];
-    const next = await coordinator.exec(nextArgv, classifyRunControlArgv(nextArgv), host);
-    assert.equal(next.command.exitCode, 0);
-    const nextEnvelope = JSON.parse(next.command.stdout) as Record<string, any>;
-    assert.equal(nextEnvelope.operation, "next");
-    assert.equal(typeof nextEnvelope.result.run_id, "string");
 
     // Mutate authority through the raw shell so the coordinator's cached
     // orchestration revision goes stale, then verify a coordinator chain

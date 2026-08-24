@@ -118,16 +118,32 @@ export function assertPublishedPlanSnapshotV3(
       `Canonical Workflow Session does not match published Plan Session ${published.session_id}`,
     );
   }
-  // session/3.0 has no Execution producer Run or plan artifact: the Plan is
-  // represented by the persisted plan document (goal_ref) on the chain step
-  // published by publishPlanV3 (step id `plan-<revision>`).
+  // session/3.0 + run/3.0: the core `maestro plan publish` CLI drives a real
+  // producer Run that seals a plan/1.0 artifact under the current-plan alias.
+  // Assert the Artifact Registry actually holds that sealed artifact and the
+  // published identity matches it (no synthetic envelope, no goal_ref-only step).
   const session = snapshot.session;
-  const planStep = session.chain.find((step) => step.step.startsWith("plan-"));
-  if (!planStep) {
-    throw new Error(`Published Plan chain step is missing in Session ${published.session_id}`);
+  if (session.aliases["current-plan"] !== published.artifact_id) {
+    throw new Error(
+      `Published Plan artifact ${published.artifact_id} is not bound to the current-plan alias in Session ${published.session_id}`,
+    );
   }
-  if (!published.artifact_id.startsWith("plan:")) {
-    throw new Error(`Published Plan artifact identity ${published.artifact_id} is not a v3 plan publication`);
+  const artifact = session.artifacts.find((item) => item.artifactId === published.artifact_id);
+  if (!artifact) {
+    throw new Error(`Published Plan artifact ${published.artifact_id} is missing from Session ${published.session_id} registry`);
+  }
+  if (artifact.status !== "sealed") {
+    throw new Error(`Published Plan artifact ${published.artifact_id} is ${artifact.status}, expected sealed`);
+  }
+  if (artifact.runId !== published.run_id) {
+    throw new Error(
+      `Published Plan artifact ${published.artifact_id} producer Run ${artifact.runId} does not match published Run ${published.run_id}`,
+    );
+  }
+  if (artifact.kind !== "plan" || artifact.schemaVersion !== "plan/1.0") {
+    throw new Error(
+      `Published Plan artifact ${published.artifact_id} is ${artifact.kind}/${artifact.schemaVersion ?? "?"}, expected plan/1.0`,
+    );
   }
 }
 

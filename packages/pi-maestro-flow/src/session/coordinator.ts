@@ -1417,85 +1417,30 @@ export class WorkflowCoordinator {
   ): Promise<WorkflowTransitionResult> {
     requireHostSessionId(context.hostSessionId);
     const requestId = requiredPlanPublishRequestId(options);
-    const sessionId = options.sessionId?.trim()
-      || `plan-${createHash("sha256").update(requestId).digest("hex").slice(0, 12)}`;
-    // 1. Open the v3 Session with a stable derived request id. Idempotent: the
-    //    core replays the original receipt when the same request-id is retried,
-    //    and re-opening an existing Session is a no-op receipt.
-    const openResult = await this.execV3(
-      ["session", "open", options.intent ?? "Execute approved Plan", "--id", sessionId,
-        "--request-id", `req_plan_open_${createHash("sha256").update(requestId).digest("hex").slice(0, 32)}`,
-        "--json"],
-      { write: true, sessionless: false, mutation: "session", lease: "none" },
-      context.hostSessionId,
-    );
-    const openEnvelope = parseRunResponse(openResult.command.stdout);
-    const openAlreadyExists = !openEnvelope.ok
-      && (openEnvelope.error?.message?.includes("already exists") ?? false);
-    if (!openEnvelope.ok && !openAlreadyExists) {
-      throw new Error(`v3 Plan Session open failed: ${publicWorkflowErrorMessage(
-        new Error(openEnvelope.error?.message ?? "session open rejected"),
-      )}`);
-    }
-    // 2. Persist the approved Plan document under .workflow/plans/ (Pi-side
-    //    convention; the core v3 surface has no plan command).
-    const planDir = join(this.leases.root(), ".workflow", "plans");
-    await mkdir(planDir, { recursive: true });
-    const planFile = join(planDir, `${sessionId}-${options.planRevision}.md`);
-    const source = await readFile(options.sourcePath, "utf8");
-    await writeFile(planFile, source);
-    // 3. Insert the plan chain step with an explicit target: the bridge has no
-    //    state.json active Session under v3, so the CAS revision must resolve
-    //    through the explicit --session (target-aware refreshSession).
-    const insertResult = await this.execV3(
-      ["session", "chain", "insert", "--session", sessionId,
-        "--step-id", `plan-${options.planRevision}`,
-        "--command", "plan", "--goal-ref", planFile,
-        "--json"],
-      { write: true, sessionless: false, mutation: "session", lease: "none" },
-      context.hostSessionId,
-    );
-    const insertEnvelope = parseRunResponse(insertResult.command.stdout);
-    const insertAlreadyExists = !insertEnvelope.ok
-      && (insertEnvelope.error?.message?.includes("already exists") ?? false);
-    if (!insertEnvelope.ok && !insertAlreadyExists) {
-      throw new Error(`v3 Plan chain step insert failed: ${publicWorkflowErrorMessage(
-        new Error(insertEnvelope.error?.message ?? "chain insert rejected"),
-      )}`);
-    }
-    // 4. Synthetic plan-publish envelope for the Pi plan-workflow consumers
-    //    (PublishedPlanIdentity shape) backed by the persisted document.
-    const checksum = `sha256:${createHash("sha256").update(source).digest("hex")}`;
-    const envelope = {
-      schema_version: "run-response/1.2",
-      operation: "plan-publish",
-      request_id: requestId,
-      locator: { session_id: sessionId, run_id: null },
-      revision: null,
-      replay: null,
-      warnings: [],
-      ok: true,
-      exit_code: 0,
-      disposition: "success",
-      result: {
-        session_id: sessionId,
-        run_id: `plan-${sessionId}-${options.planRevision}`,
-        artifact_id: `plan:${sessionId}:${options.planRevision}`,
-        source_checksum: checksum,
-        handoff_key: options.handoffKey,
-        request_id: requestId,
-      },
-      error: null,
-      next: null,
-      continuation: null,
+    // v3: delegate to the core `maestro plan publish` CLI, which now drives a
+    // real session/3.0 + run/3.0 producer Run that seals a plan/1.0 artifact
+    // under the current-plan alias. The plugin no longer synthesizes an
+    // envelope or persists the Plan under .workflow/plans/; core owns the
+    // artifact registry and the plugin consumes the sealed identity.
+    const publishOptions: RunPlanPublishOptions = {
+      sourcePath: options.sourcePath,
+      sourceRoot: options.sourceRoot,
+      ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+      ...(options.intent ? { intent: options.intent } : {}),
+      ...(options.topic ? { topic: options.topic } : {}),
+      handoffKey: options.handoffKey,
+      sourcePiSession: options.sourcePiSession,
+      planRevision: options.planRevision,
+      approvedAt: options.approvedAt,
+      requestId,
+      ...(options.actor ? { actor: options.actor } : {}),
+      ...(options.reason ? { reason: options.reason } : {}),
+      ...(options.evidence ? { evidence: [...options.evidence] } : {}),
     };
+    const privateCommand = await this.adapter.publishPlan(publishOptions);
+    validatePlanPublishCommand(privateCommand, publishOptions);
     return {
-      command: {
-        argv: ["plan", "publish", "--json"],
-        stdout: JSON.stringify(envelope),
-        stderr: "",
-        exitCode: 0,
-      },
+      command: projectPublicRunCliResult(privateCommand),
       snapshot: await this.bridge.refresh(),
     };
   }

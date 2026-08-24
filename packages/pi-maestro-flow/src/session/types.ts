@@ -54,6 +54,7 @@ export interface WorkflowRun {
 }
 
 export interface WorkflowArtifact {
+  schemaVersion?: string;
   artifactId: string;
   kind: string;
   role: string;
