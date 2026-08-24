@@ -146,6 +146,10 @@ export interface AgentProgress {
   dependencies?: number[];
   status: AgentProgressStatus;
   phase?: AgentRunPhase;
+  /** Canonical orthogonal runtime state; absent from legacy progress payloads. */
+  runtime?: AgentRuntimeProjection;
+  /** Current turn state; absent until the runtime emits turn identity. */
+  turn?: AgentTurnSnapshot;
   recentTools: RecentToolInfo[];
   toolCount: number;
   tokens: number;
@@ -174,6 +178,10 @@ export interface AgentProgressSnapshot {
   dependencies: number[];
   status: AgentProgressStatus;
   phase?: AgentRunPhase;
+  /** Canonical orthogonal runtime state; absent from legacy snapshots. */
+  runtime?: AgentRuntimeProjection;
+  /** Current or preserved settled turn; absent from legacy snapshots. */
+  turn?: AgentTurnSnapshot;
   startedAt?: string;
   completedAt?: string;
   recentTools?: RecentToolInfo[];
@@ -202,6 +210,10 @@ export interface ChildAgentCallSnapshot {
   parentName?: string;
   status: "running" | "retrying" | "completed" | "failed" | "terminated";
   phase?: AgentRunPhase;
+  /** Canonical orthogonal runtime state; absent from legacy snapshots. */
+  runtime?: AgentRuntimeProjection;
+  /** Current or preserved settled turn; absent from legacy snapshots. */
+  turn?: AgentTurnSnapshot;
   startedAt?: number;
   durationMs?: number;
   lastActivityAt?: number;
@@ -225,6 +237,211 @@ export interface Details {
 
 export type MessageKind = "task" | "notification" | "result";
 
+export const MESSAGE_PROVENANCE_VERSION = 1 as const;
+export type MessageProvenanceConfidence = "verified" | "unknown";
+export type MessageProvenanceSource =
+  | "initial-task"
+  | "session-router"
+  | "mailbox"
+  | "workspace-peer"
+  | "completion-outbox"
+  | "monitor"
+  | "advisor"
+  | "recovery"
+  | "unknown";
+export type VerifiedMessageProvenanceSource = Exclude<MessageProvenanceSource, "unknown">;
+export type MessageProvenanceKind =
+  | MessageKind
+  | "message"
+  | "coordination"
+  | "request"
+  | "status"
+  | "supervision"
+  | "lifecycle"
+  | "control";
+export type MessageDeliveryModeV1 = "prompt" | "steer" | "follow_up" | "abort" | "notify";
+export type MessageSenderIdentityV1 =
+  | { kind: "human"; ownerId: string; label?: string }
+  | { kind: "root-agent"; ownerId: string; label?: string }
+  | { kind: "teammate-agent"; ownerId?: string; correlationId: string; label?: string }
+  | { kind: "system"; ownerId: string; label?: string }
+  | { kind: "unknown" };
+
+export interface VerifiedMessageProvenanceV1 {
+  version: typeof MESSAGE_PROVENANCE_VERSION;
+  messageId: string;
+  source: VerifiedMessageProvenanceSource;
+  messageKind: MessageProvenanceKind;
+  deliveryMode: MessageDeliveryModeV1;
+  confidence: "verified";
+  sender: Exclude<MessageSenderIdentityV1, { kind: "unknown" }>;
+}
+
+export interface UnknownMessageProvenanceV1 {
+  version: typeof MESSAGE_PROVENANCE_VERSION;
+  source: "unknown";
+  confidence: "unknown";
+  sender: Extract<MessageSenderIdentityV1, { kind: "unknown" }>;
+  messageId?: string;
+  messageKind?: MessageProvenanceKind;
+  deliveryMode?: MessageDeliveryModeV1;
+  /** Display-only label retained from legacy input; never an authoritative sender. */
+  legacyLabel?: string;
+}
+
+/** Deprecated persisted input shape. Normalization always downgrades it to unknown. */
+export interface LegacyMessageProvenanceV1 {
+  version: typeof MESSAGE_PROVENANCE_VERSION;
+  source: "legacy";
+  confidence: "legacy";
+  sender: { kind: "legacy"; label: string };
+  messageId?: string;
+  messageKind?: MessageProvenanceKind;
+  deliveryMode?: MessageDeliveryModeV1;
+}
+
+export interface LegacyMessageProvenanceInput {
+  from?: unknown;
+  messageId?: unknown;
+  messageKind?: unknown;
+  deliveryMode?: unknown;
+}
+
+export type MessageProvenanceV1 = VerifiedMessageProvenanceV1 | UnknownMessageProvenanceV1;
+
+function provenanceText(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim();
+  return normalized.length > 0 && normalized.length <= 512 && !/[\u0000-\u001f\u007f]/.test(normalized)
+    ? normalized
+    : undefined;
+}
+
+function provenanceIdentifier(value: unknown): string | undefined {
+  const normalized = provenanceText(value);
+  return normalized !== undefined && !/\s/.test(normalized) ? normalized : undefined;
+}
+
+function verifiedProvenanceSource(value: unknown): value is VerifiedMessageProvenanceSource {
+  return value === "initial-task" || value === "session-router" || value === "mailbox"
+    || value === "workspace-peer" || value === "completion-outbox" || value === "monitor" || value === "advisor"
+    || value === "recovery";
+}
+
+function provenanceKind(value: unknown): value is MessageProvenanceKind {
+  return value === "task" || value === "notification" || value === "result" || value === "message"
+    || value === "coordination" || value === "request" || value === "status"
+    || value === "supervision" || value === "lifecycle" || value === "control";
+}
+
+function provenanceDeliveryMode(value: unknown): value is MessageDeliveryModeV1 {
+  return value === "prompt" || value === "steer" || value === "follow_up"
+    || value === "abort" || value === "notify";
+}
+
+function provenanceSender(value: unknown): MessageSenderIdentityV1 | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const input = value as Record<string, unknown>;
+  const ownerId = provenanceIdentifier(input.ownerId);
+  const correlationId = provenanceIdentifier(input.correlationId);
+  const label = provenanceText(input.label);
+  switch (input.kind) {
+    case "human":
+    case "root-agent":
+    case "system":
+      return ownerId && correlationId === undefined
+        ? { kind: input.kind, ownerId, ...(label ? { label } : {}) }
+        : undefined;
+    case "teammate-agent":
+      return correlationId
+        ? { kind: "teammate-agent", ...(ownerId ? { ownerId } : {}), correlationId, ...(label ? { label } : {}) }
+        : undefined;
+    case "unknown":
+      return ownerId === undefined && correlationId === undefined && label === undefined ? { kind: "unknown" } : undefined;
+    default:
+      return undefined;
+  }
+}
+
+export function unknownMessageProvenanceV1(
+  input: LegacyMessageProvenanceInput = {},
+): UnknownMessageProvenanceV1 {
+  const messageId = provenanceIdentifier(input.messageId);
+  const messageKind = provenanceKind(input.messageKind) ? input.messageKind : undefined;
+  const deliveryMode = provenanceDeliveryMode(input.deliveryMode) ? input.deliveryMode : undefined;
+  const legacyLabel = provenanceText(input.from);
+  return {
+    version: MESSAGE_PROVENANCE_VERSION,
+    source: "unknown",
+    confidence: "unknown",
+    sender: { kind: "unknown" },
+    ...(messageId ? { messageId } : {}),
+    ...(messageKind ? { messageKind } : {}),
+    ...(deliveryMode ? { deliveryMode } : {}),
+    ...(legacyLabel ? { legacyLabel } : {}),
+  };
+}
+
+export function normalizeMessageProvenanceV1(
+  value: unknown,
+  legacy: LegacyMessageProvenanceInput = {},
+): MessageProvenanceV1 {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const input = value as Record<string, unknown>;
+    const sender = provenanceSender(input.sender);
+    const messageId = provenanceIdentifier(input.messageId);
+    if (input.version === MESSAGE_PROVENANCE_VERSION
+      && input.confidence === "verified"
+      && verifiedProvenanceSource(input.source)
+      && messageId
+      && provenanceKind(input.messageKind)
+      && provenanceDeliveryMode(input.deliveryMode)
+      && sender && sender.kind !== "unknown") {
+      return {
+        version: MESSAGE_PROVENANCE_VERSION,
+        messageId,
+        source: input.source,
+        messageKind: input.messageKind,
+        deliveryMode: input.deliveryMode,
+        confidence: "verified",
+        sender,
+      };
+    }
+    if (input.version === MESSAGE_PROVENANCE_VERSION
+      && input.source === "legacy"
+      && input.confidence === "legacy") {
+      const legacySender = input.sender && typeof input.sender === "object" && !Array.isArray(input.sender)
+        ? input.sender as Record<string, unknown>
+        : undefined;
+      return unknownMessageProvenanceV1({
+        from: legacySender?.kind === "legacy" ? legacySender.label : undefined,
+        messageId: input.messageId,
+        messageKind: input.messageKind,
+        deliveryMode: input.deliveryMode,
+      });
+    }
+    if (input.version === MESSAGE_PROVENANCE_VERSION
+      && input.source === "unknown"
+      && input.confidence === "unknown"
+      && sender?.kind === "unknown") {
+      return unknownMessageProvenanceV1({
+        from: input.legacyLabel,
+        messageId: input.messageId,
+        messageKind: input.messageKind,
+        deliveryMode: input.deliveryMode,
+      });
+    }
+    if (input.version === MESSAGE_PROVENANCE_VERSION) {
+      return unknownMessageProvenanceV1({
+        messageId: input.messageId,
+        messageKind: input.messageKind,
+        deliveryMode: input.deliveryMode,
+      });
+    }
+  }
+  return unknownMessageProvenanceV1(legacy);
+}
+
 export interface MessageEnvelope {
   id: string;
   from: string;
@@ -233,9 +450,107 @@ export interface MessageEnvelope {
   correlation_id?: string;
   payload: string;
   timestamp: number;
+  provenance?: MessageProvenanceV1;
 }
 
 export type AgentStatus = "pending" | "running" | "retrying" | "sleeping" | "completed" | "failed" | "terminated";
+export type AgentLifecycleState = AgentStatus;
+export type AgentHealthState = "healthy" | "delayed" | "stalled" | "unknown";
+export type AgentToolActivityState = "idle" | "active" | "unknown";
+
+export interface AgentRuntimeProjection {
+  lifecycle: AgentStatus;
+  health: AgentHealthState;
+  phase?: AgentRunPhase;
+  activity: AgentActivity;
+  toolActivity: AgentToolActivityState;
+  resultReady: boolean;
+}
+
+export interface AgentRuntimeDiagnosisV1 extends AgentRuntimeProjection {
+  version: 1;
+  reasonCode:
+    | "terminal"
+    | "result-ready"
+    | "pending-interaction"
+    | "waiting-dependency"
+    | "waiting-capacity"
+    | "awaiting-agent-settled"
+    | "inactive-timeout"
+    | "tool-active"
+    | "retrying"
+    | "compacting"
+    | "restoring"
+    | "prompting"
+    | "continuing"
+    | "expected-silence"
+    | "legacy-unknown"
+    | "active";
+  trigger: MessageProvenanceV1;
+  lastMessage?: AgentTurnMessageMetadataV1;
+  previousOutcome?: AgentRunOutcome;
+  fallbackDisposition: "eligible" | "ineligible" | "unknown";
+}
+
+export type AgentRuntimeReasonCode = AgentRuntimeDiagnosisV1["reasonCode"];
+export type AgentFallbackDisposition = AgentRuntimeDiagnosisV1["fallbackDisposition"];
+
+export const AGENT_TURN_VERSION = 1 as const;
+
+export interface AgentTurnTriggerContextV1 {
+  version: typeof AGENT_TURN_VERSION;
+  turnId: string;
+  correlationId: string;
+  runtimeGeneration: number;
+  promptSeq: number;
+  trigger: MessageProvenanceV1;
+}
+
+interface AgentTurnEventBase extends AgentTurnTriggerContextV1 {
+  loopSeq: number;
+  timestamp: number;
+}
+
+export type AgentTurnMessageRole = "user" | "assistant" | "tool" | "system" | "custom";
+
+export interface AgentTurnMessageMetadataV1 {
+  role: AgentTurnMessageRole;
+  timestamp: number;
+  provenance: MessageProvenanceV1;
+}
+
+export type AgentTurnEvent =
+  | (AgentTurnEventBase & { type: "trigger-enqueued" | "trigger-accepted" })
+  | (AgentTurnEventBase & { type: "turn-started"; phase?: AgentRunPhase })
+  | (AgentTurnEventBase & {
+      type: "progress";
+      phase?: AgentRunPhase;
+      toolActivity?: AgentToolActivityState;
+      lastMessage?: AgentTurnMessageMetadataV1;
+    })
+  | (AgentTurnEventBase & { type: "result-ready" | "turn-ended"; lastMessage: AgentTurnMessageMetadataV1 })
+  | (AgentTurnEventBase & { type: "agent-ended"; lastMessage?: AgentTurnMessageMetadataV1 })
+  | (AgentTurnEventBase & { type: "turn-settled"; outcome: "completed"; lastMessage?: AgentTurnMessageMetadataV1 })
+  | (AgentTurnEventBase & { type: "failed"; outcome: "failed"; error: string; lastMessage?: AgentTurnMessageMetadataV1 })
+  | (AgentTurnEventBase & { type: "terminated"; outcome: "terminated"; reason: string; lastMessage?: AgentTurnMessageMetadataV1 });
+
+interface AgentTurnSnapshotBase extends AgentTurnTriggerContextV1 {
+  loopSeq: number;
+  startedAt?: number;
+  lastActivityAt: number;
+  resultReadyAt?: number;
+  phase?: AgentRunPhase;
+  toolActivity?: AgentToolActivityState;
+  lastMessage?: AgentTurnMessageMetadataV1;
+}
+
+export type AgentTurnSnapshot =
+  | (AgentTurnSnapshotBase & { state: "active" })
+  | (AgentTurnSnapshotBase & { state: "result-ready"; resultReadyAt: number })
+  | (AgentTurnSnapshotBase & { state: "settling"; resultReadyAt?: number })
+  | (AgentTurnSnapshotBase & { state: "settled"; resultReadyAt?: number; settledAt: number; outcome: "completed" })
+  | (AgentTurnSnapshotBase & { state: "failed"; resultReadyAt?: number; settledAt: number; outcome: "failed"; error: string })
+  | (AgentTurnSnapshotBase & { state: "terminated"; resultReadyAt?: number; settledAt: number; outcome: "terminated"; reason: string });
 
 export interface AgentRetryState {
   attempt: number;
@@ -256,6 +571,10 @@ export interface DeferredContextMessage {
   /** Durable mailbox records acknowledged only after substantive delivery succeeds. */
   messageId?: string;
   messageIds?: string[];
+  /** Attribution for this deferred model context; absent on legacy records. */
+  provenance?: MessageProvenanceV1;
+  /** Attribution retained when older deferred records are collapsed. */
+  provenances?: MessageProvenanceV1[];
 }
 
 export interface ActiveAgent {
@@ -275,7 +594,7 @@ export interface ActiveAgent {
   /** Monotonic child-process owner; stale callbacks cannot mutate a replacement runtime. */
   runtimeGeneration?: number;
   /** Starts a cold runtime from the last persisted session and delivers one prompt. */
-  restart?: (message: string) => boolean;
+  restart?: (message: string, provenance?: MessageProvenanceV1) => boolean;
   /** Resolves when a cold-resume child accepts the initial substantive prompt. */
   restartDelivery?: Promise<boolean>;
   restartPending?: Promise<void>;
@@ -285,6 +604,8 @@ export interface ActiveAgent {
   /** Resolved working directory of the run (local path or remote:<targetId>). */
   cwd?: string;
   promptSeq?: number;
+  /** Monotonic low-level agent loop within the current prompt sequence. */
+  loopSeq?: number;
   lastParkNonce?: string;
   lease?: import("../runs/session-handoff.ts").SessionLease;
   pendingHandoff?: {
@@ -300,6 +621,8 @@ export interface ActiveAgent {
   };
   pendingCancel?: { nonce: string; fencedEpoch: number };
   pendingInteractions?: Map<string, TeammateInteractionRecord>;
+  /** Attribution for the original task prompt; absent on legacy dispatch records. */
+  initialMessageProvenance?: MessageProvenanceV1;
   inbox: MessageEnvelope[];
   /** Status-only peer context held until a substantive message starts the next turn. */
   deferredContextMessages?: DeferredContextMessage[];
@@ -347,6 +670,10 @@ export interface ActiveAgent {
   maxDispatchDepth?: number;
   status: AgentStatus;
   phase?: AgentRunPhase;
+  /** Canonical orthogonal projection shared with observation and Cockpit. */
+  runtime?: AgentRuntimeProjection;
+  /** Current or most recently settled conversation turn. */
+  turn?: AgentTurnSnapshot;
   lastOutcome?: AgentRunOutcome;
   retry?: AgentRetryState;
   /** Pi emitted a final no-tool assistant turn; agent_end has not necessarily arrived yet. */
@@ -425,6 +752,8 @@ export interface TeammateState {
   cancelledProxyDispatches?: Map<string, string>;
   /** Request-scoped cancellation for proxied observe/monitor/wait calls. */
   proxyObservationControllers?: Map<string, AbortController>;
+  /** Root-owned durable recorder shared by nested proxy dispatches. */
+  recordTurnEvent?: (event: AgentTurnEvent) => void;
 }
 
 export type AgentTerminalStatus = "completed" | "failed" | "terminated";

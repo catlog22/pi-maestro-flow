@@ -7,7 +7,7 @@
  * the state up in `STATUS_PRESENTATION` and derive transient display states
  * (`result-ready`, `stalled`) through `effectiveDisplayStatus`.
  */
-import type { ActiveAgent, AgentActivity, AgentRunPhase, AgentStatus } from "./types.ts";
+import { type ActiveAgent, type AgentActivity, type AgentHealthState, type AgentRunOutcome, type AgentRunPhase, type AgentRuntimeDiagnosisV1, type AgentRuntimeProjection, type AgentStatus, type AgentToolActivityState, type AgentTurnSnapshot } from "./types.ts";
 /**
  * Semantic color slot. The names match both the Pi theme foreground slots
  * (`theme.fg(tone, text)`) and the `ProgressPalette` tone mapping used by the
@@ -36,6 +36,20 @@ export interface AgentStallProjection {
     lastActivityAt?: number;
     pendingInteractions?: number;
 }
+export interface AgentRuntimeProjectionInput extends AgentStallProjection {
+    inFlightToolCount?: number;
+    turn?: AgentTurnSnapshot;
+    /** Opt-in warning threshold below the canonical stall ceiling. */
+    delayedThresholdMs?: number;
+}
+export declare function classifyAgentToolActivity(inFlightToolCount?: number, phase?: AgentRunPhase | string): AgentToolActivityState;
+export declare function classifyAgentHealth(input: AgentRuntimeProjectionInput, nowSnapshot?: number, defaultIdleCeilingMs?: number): AgentHealthState;
+export declare function projectAgentRuntime(input: AgentRuntimeProjectionInput, nowSnapshot?: number, defaultIdleCeilingMs?: number): AgentRuntimeProjection;
+export interface AgentRuntimeDiagnosisInput extends AgentRuntimeProjectionInput {
+    previousOutcome?: AgentRunOutcome;
+    fallbackEligible?: boolean;
+}
+export declare function diagnoseAgentRuntime(input: AgentRuntimeDiagnosisInput, nowSnapshot?: number, defaultIdleCeilingMs?: number): AgentRuntimeDiagnosisV1;
 export interface AgentPhaseProjection {
     status: string;
     phase?: AgentRunPhase | string;

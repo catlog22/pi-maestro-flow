@@ -4,9 +4,11 @@ import {
   DERIVED_STATUS_PRESENTATION,
   STATUS_PRESENTATION,
   aggregateAgentRunPhase,
+  diagnoseAgentRuntime,
   displayStatusPresentation,
   effectiveDisplayStatus,
   idleSeconds,
+  projectAgentRuntime,
 } from "../src/shared/agent-status.ts";
 import {
   TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS,
@@ -15,7 +17,14 @@ import {
 import { AttachOverlay } from "../src/tui/attach-overlay.ts";
 import { buildProgressTree } from "../src/tui/progress-tree.ts";
 import { renderTeammateResult } from "../src/tui/render.ts";
-import type { ActiveAgent, AgentProgressSnapshot } from "../src/shared/types.ts";
+import {
+  MESSAGE_PROVENANCE_VERSION,
+  normalizeMessageProvenanceV1,
+  type ActiveAgent,
+  type AgentProgressSnapshot,
+  type AgentTurnSnapshot,
+  type MessageProvenanceV1,
+} from "../src/shared/types.ts";
 
 const theme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
 const palette = {
@@ -58,6 +67,102 @@ test("status presentation covers every canonical status exactly once", () => {
   assert.match(STATUS_PRESENTATION.terminated.text, /^sleeping/);
   assert.equal(displayStatusPresentation("stalled"), DERIVED_STATUS_PRESENTATION.stalled);
   assert.equal(displayStatusPresentation("running"), STATUS_PRESENTATION.running);
+});
+
+test("canonical runtime diagnosis keeps lifecycle, health, activity, trigger, and author orthogonal", () => {
+  const now = 1_000_000;
+  const trigger: MessageProvenanceV1 = {
+    version: MESSAGE_PROVENANCE_VERSION,
+    messageId: "msg-human-1",
+    source: "session-router",
+    messageKind: "request",
+    deliveryMode: "follow_up",
+    confidence: "verified",
+    sender: { kind: "human", ownerId: "owner-main" },
+  };
+  const lastMessageProvenance: MessageProvenanceV1 = {
+    version: MESSAGE_PROVENANCE_VERSION,
+    messageId: "msg-agent-1",
+    source: "mailbox",
+    messageKind: "result",
+    deliveryMode: "notify",
+    confidence: "verified",
+    sender: { kind: "teammate-agent", correlationId: "child-1" },
+  };
+  const turn: AgentTurnSnapshot = {
+    version: 1,
+    state: "settling",
+    turnId: "turn-1",
+    correlationId: "agent-1",
+    runtimeGeneration: 2,
+    promptSeq: 3,
+    loopSeq: 4,
+    trigger,
+    startedAt: now - 400_000,
+    lastActivityAt: now - TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS,
+    phase: "settling",
+    lastMessage: { role: "assistant", timestamp: now - 1, provenance: lastMessageProvenance },
+  };
+
+  const diagnosis = diagnoseAgentRuntime({
+    status: "running",
+    phase: "settling",
+    lastActivityAt: turn.lastActivityAt,
+    inFlightToolCount: 1,
+    turn,
+    fallbackEligible: false,
+  }, now);
+
+  assert.equal(diagnosis.lifecycle, "running");
+  assert.equal(diagnosis.health, "stalled");
+  assert.equal(diagnosis.activity, "running");
+  assert.equal(diagnosis.toolActivity, "active");
+  assert.equal(diagnosis.reasonCode, "awaiting-agent-settled");
+  assert.deepEqual(diagnosis.trigger, trigger);
+  assert.deepEqual(diagnosis.lastMessage?.provenance, lastMessageProvenance);
+  assert.equal(diagnosis.fallbackDisposition, "ineligible");
+  assert.deepEqual(projectAgentRuntime({ status: "running", turn }), {
+    lifecycle: "running",
+    health: "healthy",
+    activity: "running",
+    toolActivity: "unknown",
+    resultReady: false,
+  });
+});
+
+test("legacy and malformed provenance fail closed without inventing a sender", () => {
+  const legacy = normalizeMessageProvenanceV1({
+    version: 1,
+    source: "legacy",
+    confidence: "legacy",
+    sender: { kind: "legacy", label: "@alice" },
+    messageId: "legacy-message-1",
+    messageKind: "request",
+    deliveryMode: "follow_up",
+  });
+  assert.deepEqual(legacy, {
+    version: 1,
+    source: "unknown",
+    confidence: "unknown",
+    sender: { kind: "unknown" },
+    messageId: "legacy-message-1",
+    messageKind: "request",
+    deliveryMode: "follow_up",
+    legacyLabel: "@alice",
+  });
+
+  const malformedVerified = normalizeMessageProvenanceV1({
+    version: 1,
+    source: "session-router",
+    confidence: "verified",
+    messageId: "with whitespace",
+    messageKind: "request",
+    deliveryMode: "follow_up",
+    sender: { kind: "human", ownerId: "owner" },
+  });
+  assert.equal(malformedVerified.source, "unknown");
+  assert.equal(malformedVerified.sender.kind, "unknown");
+  assert.ok(!("legacyLabel" in malformedVerified));
 });
 
 test("effective display status derives result-ready and stalled from the shared threshold", () => {

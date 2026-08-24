@@ -12,7 +12,19 @@ import {
   TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS,
   TEAMMATE_STALL_TIMEOUT_MS,
 } from "./limits.ts";
-import type { ActiveAgent, AgentActivity, AgentRunPhase, AgentStatus } from "./types.ts";
+import {
+  unknownMessageProvenanceV1,
+  type ActiveAgent,
+  type AgentActivity,
+  type AgentHealthState,
+  type AgentRunOutcome,
+  type AgentRunPhase,
+  type AgentRuntimeDiagnosisV1,
+  type AgentRuntimeProjection,
+  type AgentStatus,
+  type AgentToolActivityState,
+  type AgentTurnSnapshot,
+} from "./types.ts";
 
 /**
  * Semantic color slot. The names match both the Pi theme foreground slots
@@ -94,6 +106,95 @@ export interface AgentStallProjection {
   resultReadyAt?: number;
   lastActivityAt?: number;
   pendingInteractions?: number;
+}
+
+export interface AgentRuntimeProjectionInput extends AgentStallProjection {
+  inFlightToolCount?: number;
+  turn?: AgentTurnSnapshot;
+  /** Opt-in warning threshold below the canonical stall ceiling. */
+  delayedThresholdMs?: number;
+}
+
+export function classifyAgentToolActivity(
+  inFlightToolCount?: number,
+  phase?: AgentRunPhase | string,
+): AgentToolActivityState {
+  if (typeof inFlightToolCount === "number") return inFlightToolCount > 0 ? "active" : "idle";
+  if (phase === "tool-execution") return "active";
+  return phase === undefined ? "unknown" : "idle";
+}
+
+export function classifyAgentHealth(
+  input: AgentRuntimeProjectionInput,
+  nowSnapshot = Date.now(),
+  defaultIdleCeilingMs = TEAMMATE_STALL_TIMEOUT_MS,
+): AgentHealthState {
+  if (input.status === "completed" || input.status === "failed" || input.status === "terminated" || input.status === "sleeping") return "healthy";
+  if (input.status !== "running" && input.status !== "pending" && input.status !== "retrying") return "unknown";
+  if (input.resultReadyAt !== undefined || input.turn?.resultReadyAt !== undefined
+    || (input.pendingInteractions ?? 0) > 0
+    || input.phase === "waiting-dependency" || input.phase === "waiting-capacity") return "healthy";
+  if (isAgentStalled(input, nowSnapshot, defaultIdleCeilingMs)) return "stalled";
+  if (input.delayedThresholdMs !== undefined && input.lastActivityAt !== undefined
+    && nowSnapshot - input.lastActivityAt >= input.delayedThresholdMs) return "delayed";
+  return "healthy";
+}
+
+export function projectAgentRuntime(
+  input: AgentRuntimeProjectionInput,
+  nowSnapshot = Date.now(),
+  defaultIdleCeilingMs = TEAMMATE_STALL_TIMEOUT_MS,
+): AgentRuntimeProjection {
+  return {
+    lifecycle: input.status as AgentStatus,
+    health: classifyAgentHealth(input, nowSnapshot, defaultIdleCeilingMs),
+    ...(input.phase === undefined ? {} : { phase: input.phase as AgentRunPhase }),
+    activity: input.status === "pending" || input.status === "running" || input.status === "retrying" ? "running" : "sleeping",
+    toolActivity: classifyAgentToolActivity(input.inFlightToolCount, input.phase),
+    resultReady: input.resultReadyAt !== undefined || input.turn?.resultReadyAt !== undefined,
+  };
+}
+
+export interface AgentRuntimeDiagnosisInput extends AgentRuntimeProjectionInput {
+  previousOutcome?: AgentRunOutcome;
+  fallbackEligible?: boolean;
+}
+
+export function diagnoseAgentRuntime(
+  input: AgentRuntimeDiagnosisInput,
+  nowSnapshot = Date.now(),
+  defaultIdleCeilingMs = TEAMMATE_STALL_TIMEOUT_MS,
+): AgentRuntimeDiagnosisV1 {
+  const runtime = projectAgentRuntime(input, nowSnapshot, defaultIdleCeilingMs);
+  let reasonCode: AgentRuntimeDiagnosisV1["reasonCode"];
+  if (runtime.activity === "sleeping") reasonCode = "terminal";
+  else if (runtime.resultReady) reasonCode = "result-ready";
+  else if ((input.pendingInteractions ?? 0) > 0) reasonCode = "pending-interaction";
+  else if (runtime.phase === "waiting-dependency") reasonCode = "waiting-dependency";
+  else if (runtime.phase === "waiting-capacity") reasonCode = "waiting-capacity";
+  else if (runtime.health === "stalled" && runtime.phase === "settling") reasonCode = "awaiting-agent-settled";
+  else if (runtime.health === "stalled") reasonCode = "inactive-timeout";
+  else if (runtime.toolActivity === "active") reasonCode = "tool-active";
+  else if (runtime.lifecycle === "retrying" || runtime.phase === "retrying") reasonCode = "retrying";
+  else if (runtime.phase === "compacting") reasonCode = "compacting";
+  else if (runtime.phase === "restoring") reasonCode = "restoring";
+  else if (runtime.phase === "prompting") reasonCode = "prompting";
+  else if (runtime.phase === "continuing") reasonCode = "continuing";
+  else if (runtime.health === "delayed") reasonCode = "expected-silence";
+  else if (runtime.health === "unknown" && input.turn === undefined) reasonCode = "legacy-unknown";
+  else reasonCode = "active";
+  return {
+    version: 1,
+    ...runtime,
+    reasonCode,
+    trigger: input.turn?.trigger ?? unknownMessageProvenanceV1(),
+    ...(input.turn?.lastMessage ? { lastMessage: input.turn.lastMessage } : {}),
+    ...(input.previousOutcome ? { previousOutcome: { ...input.previousOutcome } } : {}),
+    fallbackDisposition: runtime.phase === "settling"
+      ? "ineligible"
+      : input.fallbackEligible === true ? "eligible"
+        : input.fallbackEligible === false ? "ineligible" : "unknown",
+  };
 }
 
 export interface AgentPhaseProjection {
