@@ -235,6 +235,7 @@ import { createSourceCheckTool } from "../tools/web-access/source-check-tool.ts"
 import { registerFff } from "../tools/fff.ts";
 import { registerBashBg } from "../tools/bash-bg.ts";
 import { registerLoop } from "../tools/loop.ts";
+import { registerFlowSchedule } from "../flow-schedule/register.ts";
 import { registerModelAvailability } from "../tools/model-availability.ts";
 import { registerTeammateSessionRouting } from "../tools/teammate-session-routing.ts";
 import { registerResourceTool } from "../tools/resource.ts";
@@ -256,6 +257,7 @@ import {
 import { registerMarkdownReviewCommand } from "../tools/markdown-review-command.ts";
 import {
   proxyTeammateChildTool,
+  isManagedWorkerWindow,
   registerTeammateChildExtension,
   registerTeammateChildToolBroker,
   registerTeammatePermissionBroker,
@@ -1680,6 +1682,7 @@ When NOT to use:
   registerFff(pi);
   registerBashBg(pi);
   registerLoop(pi);
+  registerFlowSchedule(pi, { managedWorker: isManagedWorkerWindow() });
   registerModelAvailability(pi);
   registerTeammateSessionRouting(pi);
   registerResourceTool(pi);

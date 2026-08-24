@@ -1,0 +1,241 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { Value } from "typebox/value";
+import {
+  ExactWindowIdentitySchema,
+  FlowScheduleActionSchema,
+  FlowScheduleDispatchEnvelopeSchema,
+  FlowScheduleRecordSchema,
+  FlowScheduleResultSchema,
+  FlowScheduleValidationError,
+  normalizeFlowSchedule,
+  parseFlowScheduleAction,
+  parseFlowScheduleCompletionRecord,
+  parseFlowScheduleDispatchEnvelope,
+  parseFlowScheduleRecord,
+  parseFlowScheduleResult,
+} from "../src/flow-schedule/schemas.ts";
+import {
+  FLOW_SCHEDULE_LIMITS,
+  FLOW_SCHEDULE_RESULT_TYPE,
+  FLOW_SCHEDULE_VERSION,
+} from "../src/flow-schedule/types.ts";
+
+const DISPATCH_ID = "123e4567-e89b-42d3-a456-426614174000";
+const OWNER_ID = "a".repeat(32);
+const OWNER_SELECTOR = `owner:${OWNER_ID}`;
+const REPLACEMENT_SELECTOR = `owner:${"b".repeat(32)}`;
+
+function steps(count: number): Array<{ stepId: string; prompt: string }> {
+  return Array.from({ length: count }, (_, index) => ({ stepId: `step-${index}`, prompt: `Run step ${index}` }));
+}
+
+function result(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    version: FLOW_SCHEDULE_VERSION,
+    type: FLOW_SCHEDULE_RESULT_TYPE,
+    scheduleId: "release",
+    stepId: "verify",
+    dispatchId: DISPATCH_ID,
+    outcome: "completed",
+    summary: "Verification passed",
+    resources: [],
+    ...overrides,
+  };
+}
+
+test("flow-schedule actions are strict discriminated branches", () => {
+  const valid = [
+    { action: "create", scheduleId: "release", target: OWNER_SELECTOR, steps: steps(1) },
+    { action: "start", scheduleId: "release" },
+    { action: "list" },
+    { action: "status", scheduleId: "release" },
+    { action: "append", scheduleId: "release", afterStepId: "step-0", steps: [{ stepId: "fix", prompt: "Fix" }] },
+    { action: "pause", scheduleId: "release" },
+    { action: "resume", scheduleId: "release", target: REPLACEMENT_SELECTOR },
+    { action: "retry", scheduleId: "release", stepId: "step-0", reason: "Target was replaced" },
+    { action: "cancel", scheduleId: "release", reason: "No longer needed" },
+    { action: "report", dispatchId: DISPATCH_ID, outcome: "completed", summary: "Done", resources: ["agent://publication"] },
+  ];
+  for (const action of valid) assert.deepEqual(parseFlowScheduleAction(action), action);
+
+  for (const invalid of [
+    { action: "list", scheduleId: "not-applicable" },
+    { action: "start", scheduleId: "release", target: "owner:x" },
+    { action: "append", scheduleId: "release", afterStepId: "step-0", steps: steps(1), afterCursor: 0 },
+    { action: "create", scheduleId: "release", target: OWNER_SELECTOR, steps: steps(1), cursor: 0 },
+    { action: "report", dispatchId: DISPATCH_ID, outcome: "completed", summary: "Done", replyTo: "owner:other" },
+    { action: "unknown" },
+  ]) {
+    assert.throws(() => parseFlowScheduleAction(invalid), FlowScheduleValidationError);
+  }
+});
+
+test("flow-schedule normalization rejects duplicate steps before producing a record", () => {
+  assert.throws(
+    () => normalizeFlowSchedule({
+      scheduleId: "release",
+      target: OWNER_SELECTOR,
+      steps: [
+        { stepId: "verify", prompt: "First" },
+        { stepId: "verify", prompt: "Second" },
+      ],
+    }, 1),
+    /duplicate stepId/,
+  );
+
+  const normalized = normalizeFlowSchedule({
+    scheduleId: "release",
+    target: OWNER_SELECTOR,
+    steps: [{ stepId: "verify", prompt: "Line one\r\nLine two" }],
+  }, 100);
+  assert.equal(normalized.steps.verify.prompt, "Line one\nLine two");
+  assert.deepEqual(normalized.stepIds, ["verify"]);
+  assert.equal(normalized.state, "draft");
+  assert.equal(normalized.steps.verify.state, "pending");
+});
+
+test("flow-schedule validates every stated input limit, including UTF-8 bytes", () => {
+  assert.equal(parseFlowScheduleAction({
+    action: "create",
+    scheduleId: "limit",
+    target: OWNER_SELECTOR,
+    steps: steps(FLOW_SCHEDULE_LIMITS.maxStepsPerSchedule),
+  }).action, "create");
+  assert.throws(() => parseFlowScheduleAction({
+    action: "create",
+    scheduleId: "limit",
+    target: OWNER_SELECTOR,
+    steps: steps(FLOW_SCHEDULE_LIMITS.maxStepsPerSchedule + 1),
+  }), FlowScheduleValidationError);
+
+  assert.equal(parseFlowScheduleAction({
+    action: "create",
+    scheduleId: "bytes",
+    target: OWNER_SELECTOR,
+    steps: [{ stepId: "max", prompt: "x".repeat(FLOW_SCHEDULE_LIMITS.maxPromptBytes) }],
+  }).action, "create");
+  assert.throws(() => parseFlowScheduleAction({
+    action: "create",
+    scheduleId: "bytes",
+    target: OWNER_SELECTOR,
+    steps: [{ stepId: "too-large", prompt: "x".repeat(FLOW_SCHEDULE_LIMITS.maxPromptBytes + 1) }],
+  }), FlowScheduleValidationError);
+  assert.throws(() => parseFlowScheduleAction({
+    action: "create",
+    scheduleId: "unicode",
+    target: OWNER_SELECTOR,
+    steps: [{ stepId: "too-many-bytes", prompt: "é".repeat(Math.floor(FLOW_SCHEDULE_LIMITS.maxPromptBytes / 2) + 1) }],
+  }), /byte limit/);
+
+  assert.equal(parseFlowScheduleAction({
+    action: "report",
+    dispatchId: DISPATCH_ID,
+    outcome: "completed",
+    summary: "x".repeat(FLOW_SCHEDULE_LIMITS.maxSummaryBytes),
+    resources: Array.from({ length: FLOW_SCHEDULE_LIMITS.maxResources }, (_, index) => `agent://p-${index}`),
+  }).action, "report");
+  assert.throws(() => parseFlowScheduleAction({
+    action: "report",
+    dispatchId: DISPATCH_ID,
+    outcome: "completed",
+    summary: "x".repeat(FLOW_SCHEDULE_LIMITS.maxSummaryBytes + 1),
+  }), FlowScheduleValidationError);
+  assert.throws(() => parseFlowScheduleAction({
+    action: "report",
+    dispatchId: DISPATCH_ID,
+    outcome: "completed",
+    summary: "Done",
+    resources: Array.from({ length: FLOW_SCHEDULE_LIMITS.maxResources + 1 }, (_, index) => `agent://p-${index}`),
+  }), FlowScheduleValidationError);
+});
+
+test("dispatch and result protocol envelopes are exact and versioned", () => {
+  const envelope = {
+    version: FLOW_SCHEDULE_VERSION,
+    type: "flow-schedule-dispatch",
+    scheduleId: "release",
+    stepId: "verify",
+    dispatchId: DISPATCH_ID,
+    instruction: "Run verification",
+    report: { tool: "flow-schedule", action: "report" },
+  };
+  assert.deepEqual(parseFlowScheduleDispatchEnvelope(envelope), envelope);
+  assert.deepEqual(parseFlowScheduleResult(result()), result());
+
+  assert.throws(() => parseFlowScheduleDispatchEnvelope({ ...envelope, version: 2 }), FlowScheduleValidationError);
+  assert.throws(() => parseFlowScheduleDispatchEnvelope({ ...envelope, dispatchId: "not-a-uuid" }), FlowScheduleValidationError);
+  assert.throws(() => parseFlowScheduleDispatchEnvelope({ ...envelope, messageId: DISPATCH_ID }), FlowScheduleValidationError);
+  assert.throws(() => parseFlowScheduleResult(result({ extra: true })), FlowScheduleValidationError);
+  assert.throws(() => parseFlowScheduleResult(result({ outcome: "ambiguous" })), FlowScheduleValidationError);
+});
+
+test("persistence schemas reject extra fields and inconsistent schedule projections", () => {
+  const schedule = normalizeFlowSchedule({
+    scheduleId: "release",
+    target: OWNER_SELECTOR,
+    steps: [{ stepId: "verify", prompt: "Run verification" }],
+  }, 1);
+  assert.deepEqual(parseFlowScheduleRecord(schedule), schedule);
+  assert.equal(Value.Check(FlowScheduleRecordSchema, { ...schedule, position: 1 }), false);
+  assert.equal(Value.Check(FlowScheduleActionSchema, { action: "list", extra: true }), false);
+  assert.equal(Value.Check(ExactWindowIdentitySchema, {
+    workspaceId: "workspace",
+    endpointId: "endpoint",
+    ownerId: OWNER_ID,
+    ownerNonce: "b".repeat(32),
+  }), true);
+  assert.equal(Value.Check(FlowScheduleDispatchEnvelopeSchema, {
+    version: 1,
+    type: "flow-schedule-dispatch",
+  }), false);
+  assert.equal(Value.Check(FlowScheduleResultSchema, result()), true);
+
+  assert.throws(() => parseFlowScheduleRecord({ ...schedule, stepIds: ["verify", "verify"] }), /unique/);
+  assert.throws(() => parseFlowScheduleRecord({ ...schedule, steps: { other: schedule.steps.verify } }), /match exactly/);
+  assert.throws(() => parseFlowScheduleRecord({
+    ...schedule,
+    activeStepId: "verify",
+  }), /only active step/);
+  assert.throws(() => parseFlowScheduleRecord({
+    ...schedule,
+    state: "completed",
+    steps: { verify: { ...schedule.steps.verify, state: "completed" } },
+  }), /require a result/);
+
+  const attemptIds = Array.from({ length: FLOW_SCHEDULE_LIMITS.maxAttemptsPerStep + 1 }, (_, index) =>
+    `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`);
+  assert.throws(() => parseFlowScheduleRecord({
+    ...schedule,
+    steps: {
+      verify: { ...schedule.steps.verify, attempts: attemptIds },
+    },
+  }), FlowScheduleValidationError);
+});
+
+test("completion persistence requires exact result identity and state", () => {
+  const identity = {
+    workspaceId: "workspace",
+    endpointId: "endpoint",
+    ownerId: OWNER_ID,
+    ownerNonce: "b".repeat(32),
+  };
+  const completion = {
+    version: 1,
+    type: "flow-schedule-completion",
+    dispatchId: DISPATCH_ID,
+    scheduleId: "release",
+    stepId: "verify",
+    targetIdentity: identity,
+    state: "completed",
+    result: result(),
+    completedAt: 10,
+  };
+  assert.deepEqual(parseFlowScheduleCompletionRecord(completion), completion);
+  assert.throws(() => parseFlowScheduleCompletionRecord({ ...completion, state: "ambiguous", result: undefined }), /reason/);
+  assert.throws(() => parseFlowScheduleCompletionRecord({ ...completion, state: "failed" }), /must be failed/);
+  assert.throws(() => parseFlowScheduleCompletionRecord({
+    ...completion,
+    result: result({ stepId: "other" }),
+  }), /identity/);
+});
