@@ -1,8 +1,31 @@
 import { cpSync, existsSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const repoRoot = resolve(packageRoot, "..", "..");
+
+// Restore the tracked package optional/skills tree from HEAD. cpSync from the
+// canonical source leaves a stale stat-cache "modified" state under
+// core.autocrlf; `git checkout HEAD --` rewrites the index entries cleanly so
+// the worktree matches the committed tree. Silent no-op when git is unavailable
+// or the path is untracked (e.g. fresh clone before first prepare).
+function restoreTrackedOptionalSkills() {
+  const rel = "packages/pi-maestro-flow/optional/skills";
+  const res = spawnSync("git", ["-C", repoRoot, "checkout", "HEAD", "--", rel], {
+    stdio: "ignore",
+  });
+  if (res.status !== 0) {
+    // Fall back to source re-sync so callers still get a populated tree.
+    const sourceDir = resolve(repoRoot, "optional", "skills");
+    const targetDir = join(packageRoot, "optional", "skills");
+    if (existsSync(sourceDir)) {
+      rmSync(targetDir, { recursive: true, force: true });
+      cpSync(sourceDir, targetDir, { recursive: true });
+    }
+  }
+}
 
 // Gitignored local-only entries in the canonical .pi directory; never packaged.
 const localOnlyEntries = new Set(["settings.local.json", "model-failover.json", "scratch"]);
@@ -51,14 +74,21 @@ export function cleanPackagedSkills({
   targetDir = join(packageRoot, ".pi"),
 } = {}) {
   rmSync(targetDir, { recursive: true, force: true });
-  const piDir = dirname(targetDir);
-  try { rmSync(piDir); } catch { /* keep non-empty or already removed directory */ }
   return { targetDir };
 }
 
+// Canonical optional skills live at <repo>/optional/skills and are a tracked
+// release asset mirrored into the package at <pkg>/optional/skills. Unlike the
+// gitignored .pi/ mirror, this tree is versioned, so clean() restores it from
+// HEAD instead of deleting it — otherwise the worktree diverges from the
+// committed tree. Only an explicit non-default targetDir (test fixtures) is
+// treated as disposable and removed.
+const canonicalOptionalSourceDir = resolve(packageRoot, "..", "..", "optional", "skills");
+const defaultOptionalTargetDir = join(packageRoot, "optional", "skills");
+
 export function preparePackagedOptionalSkills({
-  sourceDir = resolve(packageRoot, "..", "..", "optional"),
-  targetDir = join(packageRoot, "optional"),
+  sourceDir = canonicalOptionalSourceDir,
+  targetDir = defaultOptionalTargetDir,
 } = {}) {
   if (!existsSync(sourceDir)) {
     throw new Error(`Canonical optional skills directory not found: ${sourceDir}`);
@@ -69,9 +99,18 @@ export function preparePackagedOptionalSkills({
 }
 
 export function cleanPackagedOptionalSkills({
-  targetDir = join(packageRoot, "optional"),
+  sourceDir = canonicalOptionalSourceDir,
+  targetDir = defaultOptionalTargetDir,
 } = {}) {
-  rmSync(targetDir, { recursive: true, force: true });
+  if (resolve(targetDir) === resolve(defaultOptionalTargetDir)) {
+    // Tracked release asset: restore from HEAD via git so the worktree stays
+    // in sync (cpSync would leave a stale stat-cache "modified" state under
+    // core.autocrlf). Deleting it would diverge from the committed tree.
+    restoreTrackedOptionalSkills();
+  } else {
+    // Disposable fixture (tests): remove outright.
+    rmSync(targetDir, { recursive: true, force: true });
+  }
   return { targetDir };
 }
 
