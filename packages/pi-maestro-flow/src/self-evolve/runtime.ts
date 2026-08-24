@@ -19,6 +19,9 @@ import { homedir } from "node:os";
 import { isAbsolute, relative, resolve } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { redactAdvisorText } from "../advisor/runtime.ts";
+// type-only import: trajectory.ts runtime-imports SOP_TOOL_NAMES from this module,
+// so a value import here would form a runtime cycle. Type-only is erased.
+import type { TrajectoryEpisode } from "./trajectory.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -283,6 +286,17 @@ export interface ToolCallEvidence {
 /** Tools whose trajectories Phase 2C classifies for SOP candidate hints. */
 export const SOP_TOOL_NAMES = new Set(["browser", "computer_use"]);
 
+/**
+ * Common dev tools whose failed calls are worth capturing as ToolCallEvidence
+ * (alongside SOP tools). Lets buildKnowledgeTitle produce a precise failure
+ * title (e.g. `bash grep 失败:No matches`) for everyday dev tools, not just
+ * browser/computer_use. trajectory.ts already covers all tools via adapters;
+ * this closes the gap for the coarse ToolCallEvidence path.
+ */
+export const EVIDENCE_TOOL_NAMES = new Set([
+  "bash", "read", "edit", "write", "grep", "find", "ls", "glob", "ffgrep", "fffind",
+]);
+
 /** Error fragments mapped to structured outcomes (failure-mode signals). */
 const OUTCOME_PATTERNS: ReadonlyArray<{ outcome: ToolCallEvidence["outcome"]; patterns: readonly RegExp[] }> = [
   { outcome: "near_zero", patterns: [/near[-_ ]?zero/i, /NEAR_ZERO/] },
@@ -340,7 +354,7 @@ export function buildToolCallEvidence(messages: AgentMessage[], max = 8): ToolCa
       const isToolUse = use.type === "tool_use" || use.type === "toolCall";
       if (!isToolUse) continue;
       const tool = typeof use.name === "string" ? use.name : "";
-      if (!tool || !SOP_TOOL_NAMES.has(tool)) continue;
+      if (!tool || (!SOP_TOOL_NAMES.has(tool) && !EVIDENCE_TOOL_NAMES.has(tool))) continue;
       const input = (use.input ?? use.arguments ?? {}) as Record<string, unknown>;
       const action = typeof input.action === "string" ? input.action : undefined;
       const topic = typeof input.topic === "string" ? input.topic : undefined;
@@ -363,7 +377,7 @@ export function buildToolCallEvidence(messages: AgentMessage[], max = 8): ToolCa
   return evidence;
 }
 
-const FILE_REFERENCE_PATTERN = /\b([\w./-]+\.(?:ts|tsx|mjs|cjs|js|jsx|json|md|mdx|py|go|rs|css|scss|html|sh|yml|yaml|toml|txt|sql|java|kt|c|cpp|h|hpp|rb|php|vue|svelte|graphql|lock))(?::(\d+))?\b/gi;
+const FILE_REFERENCE_PATTERN = /\b((?:[A-Za-z]:)?[\w./-]+\.(?:ts|tsx|mjs|cjs|js|jsx|json|md|mdx|py|go|rs|css|scss|html|sh|yml|yaml|toml|txt|sql|java|kt|c|cpp|h|hpp|rb|php|vue|svelte|graphql|lock))(?::(\d+))?\b/gi;
 
 /** Extract plausible file references (`path` or `path:line`) from text. */
 export function extractFileReferences(text: string, max = 8): string[] {
@@ -383,7 +397,12 @@ export function extractFileReferences(text: string, max = 8): string[] {
 }
 
 /** Collect bounded tool/file evidence from the transcript tail. */
-export function buildEvidenceFromMessages(messages: AgentMessage[], max = 8): EvidenceRef[] {
+export function buildEvidenceFromMessages(
+  messages: AgentMessage[],
+  max = 8,
+  /** Optional per-file filter (e.g. cwd existence check) to drop cross-project refs. */
+  fileFilter?: (ref: string) => boolean,
+): EvidenceRef[] {
   const evidence: EvidenceRef[] = [];
   const seen = new Set<string>();
   const push = (ref: EvidenceRef): void => {
@@ -403,7 +422,10 @@ export function buildEvidenceFromMessages(messages: AgentMessage[], max = 8): Ev
       const toolName = record.name ?? record.toolName;
       if (toolName) push({ type: "tool", ref: toolName });
       const text = advisorMessageText(record);
-      for (const ref of extractFileReferences(text, max)) push({ type: "file", ref });
+      for (const ref of extractFileReferences(text, max)) {
+        if (fileFilter && !fileFilter(ref)) continue;
+        push({ type: "file", ref });
+      }
     }
   }
   return evidence;
@@ -475,15 +497,32 @@ export function classifyCandidateType(text: string): CandidateType {
   const lower = text.toLowerCase();
   const score = (hints: readonly string[]): number =>
     hints.reduce((total, hint) => total + (lower.includes(hint) ? 1 : 0), 0);
+  // Strong signals: a single hit classifies directly (no tie-break fallback).
+  // Chinese process narration rarely hits these; explicit knowledge markers do.
+  const KNOWHOW_STRONG = [
+    "pitfall", "gotcha", "lesson learned", "root cause",
+    "workaround", "mistake", "turns out", "ended up", "got stuck",
+    "breaks if", "tripped on", "surprised that",
+    "陷阱", "踩坑", "坑：", "坑:", "教训", "根因", "失败原因", "原因在于",
+  ];
+  const SPEC_STRONG = [
+    "design decision", "architectural decision",
+    "决策", "架构决定", "约束：", "约束:", "规则：", "规则:", "规范：", "规范:", "约定：", "约定:",
+  ];
+  if (score(KNOWHOW_STRONG) > 0) return "knowhow";
+  if (score(SPEC_STRONG) > 0) return "spec";
+  // Weak signals: frequency comparison with Chinese synonyms added.
   const knowhow = score([
     "pitfall", "gotcha", "workaround", "trick", "lesson", "learned", "debug",
     "bug", "error", "failed", "failure", "issue", "fix", "root cause",
     "unexpected", "caused by",
+    "失败", "出错", "报错", "重试", "修复", "问题", "异常", "排查", "调试",
   ]);
   const spec = score([
     "decision", "decided", "architecture", "architectural", "contract",
     "protocol", "design", "constraint", "requirement", "workflow", "schema",
     "interface", "api", "policy", "rule", "standard",
+    "设计", "架构", "接口", "协议", "流程", "规范", "方案", "约定",
   ]);
   if (knowhow > spec) return "knowhow";
   if (spec > knowhow) return "spec";
@@ -505,10 +544,13 @@ const NOISE_TITLE_PATTERNS: readonly RegExp[] = [
   /\bTOOL\s+[A-Za-z][\w.-]*\s*:/,
   /^[A-Za-z][\w.-]*\s*:\s*\d+\s*:\s*\?+/,
   /^\s*(?:grep|rg|find|ls|cat|head|tail|git|node|npm|npx)\b[^\n]{0,80}\bNo\s+matches?\b/i,
-  /No\s+matches?\s+found/i,
+  /^No\s+matches?\s+found/i,            // bare "No matches found" title (anchored to avoid killing "bash ... 失败:...No matches found")
   /^#+\s+[^\n]*$/,          // pure markdown heading
   /^(ok|done|finished|complete|progress|updated|wip|todo|n\/a|n\.a\.)$/i,
   /^#+\s*[✅✓✔️]/,            // pure progress checkmark heading
+  /^CUSTOM\s+maestro-model-failover\b/i, // model failover log (system noise, not a lesson)
+  /^USER:\s*\[?pi-maestro-teammate/i,   // teammate completion/delivery system notice (with or without [)
+  /^Error:\s*Completion\b/i,             // raw completion provider error header
 ];
 
 /** True when a candidate title is a trace fragment / progress report (never a candidate). */
@@ -516,6 +558,75 @@ export function isNoiseTitle(title: string): boolean {
   const trimmed = title.trim();
   if (!trimmed) return true;
   return NOISE_TITLE_PATTERNS.some((pattern) => pattern.test(trimmed));
+}
+
+// ---------------------------------------------------------------------------
+// Knowledge-moment gate + knowledge-focused title
+// ---------------------------------------------------------------------------
+
+/**
+ * Reflective/decisional lexicon — when the last assistant line carries one of
+ * these, the turn is a knowledge moment (a decision, lesson, or root-cause
+ * statement) even without a failed tool call. Chinese + English.
+ */
+const KNOWLEDGE_MOMENT_LEXICON: readonly string[] = [
+  "决定", "决策", "教训", "陷阱", "踩坑", "根因", "因为", "所以", "结论", "坑：", "坑:",
+  "pitfall", "gotcha", "lesson", "learned", "decided", "conclusion", "root cause", "because",
+];
+
+/**
+ * True when a turn carries a knowledge signal worth capturing. Any one of:
+ * - a failed tool call (outcome !== "ok") — failure is the strongest knowhow seed;
+ * - a non-success trajectory episode (failure_recovery/repeated_failure/...);
+ * - the last assistant line carries a reflective/decisional lexicon hit;
+ * - the heuristic classifier already tagged it knowhow/spec (non-unknown).
+ */
+export function isKnowledgeMoment(
+  toolCalls: readonly ToolCallEvidence[],
+  episodes: readonly TrajectoryEpisode[],
+  assistantText: string,
+  candidateType: CandidateType,
+): boolean {
+  if (toolCalls.some((c) => c.outcome !== "ok")) return true;
+  if (episodes.some((e) => e.kind !== "success")) return true;
+  if (candidateType !== "unknown") return true;
+  const lower = assistantText.toLowerCase();
+  return KNOWLEDGE_MOMENT_LEXICON.some((word) => lower.includes(word));
+}
+
+/**
+ * Build a knowledge-focused title. Priority:
+ * 1. Failed tool trajectory — `<tool> <operation> 失败:<err first sentence>` — the
+ *    strongest knowledge signal; beats process narration.
+ * 2. Reflective assistant text (lexicon hit) — the decision/lesson line itself.
+ * 3. Fallback — the first digest line (existing makeTitle behavior).
+ */
+export function buildKnowledgeTitle(
+  toolCalls: readonly ToolCallEvidence[],
+  episodes: readonly TrajectoryEpisode[],
+  assistantText: string,
+  fallback: string,
+  max = 120,
+): string {
+  const failedCall = toolCalls.find((c) => c.outcome !== "ok");
+  if (failedCall) {
+    const parts = [failedCall.tool];
+    if (failedCall.action) parts.push(failedCall.action);
+    const err = (failedCall.errorMessage ?? "").replace(/\s+/g, " ").trim().split(/[.。\n]/)[0] ?? "";
+    const head = parts.join(" ");
+    const title = err ? `${head} 失败:${err}` : `${head} 失败`;
+    return title.length <= max ? title : `${title.slice(0, Math.max(0, max - 1))}…`;
+  }
+  const failedEpisode = episodes.find((e) => e.kind !== "success");
+  if (failedEpisode) {
+    const title = `${failedEpisode.tool} ${failedEpisode.kind} (${failedEpisode.operation})`;
+    return title.length <= max ? title : `${title.slice(0, Math.max(0, max - 1))}…`;
+  }
+  const lower = assistantText.toLowerCase();
+  if (KNOWLEDGE_MOMENT_LEXICON.some((w) => lower.includes(w)) && assistantText.trim()) {
+    return makeTitle(assistantText, max);
+  }
+  return makeTitle(fallback, max);
 }
 
 // ---------------------------------------------------------------------------
@@ -566,6 +677,7 @@ export function buildSignal(params: {
   model?: string;
   runId?: string;
   toolCalls?: ToolCallEvidence[];
+  episodes?: TrajectoryEpisode[];
   suggestion?: string;
   trigger?: { reason?: string; turnIndex?: number };
 }): SelfEvolveSignal {
@@ -587,6 +699,7 @@ export function buildSignal(params: {
     summary: params.summary,
     evidence: params.evidence,
     ...(params.toolCalls && params.toolCalls.length > 0 ? { toolCalls: params.toolCalls } : {}),
+    ...(params.episodes && params.episodes.length > 0 ? { episodes: params.episodes } : {}),
     ...(params.suggestion ? { suggestion: params.suggestion } : {}),
     ...(params.trigger ? { trigger: params.trigger } : {}),
   };
@@ -628,6 +741,13 @@ export function signalEvidenceContent(signal: SelfEvolveSignal): string {
   ];
   if (toolCalls) {
     lines.push("tool_trajectory:", toolCalls);
+  }
+  const episodes = (signal.episodes ?? []).map((ep) => {
+    const outcomes = ep.outcomes.join(",");
+    return `- ${ep.kind} ${ep.tool} ${ep.operation} [${outcomes}]`;
+  }).join("\n");
+  if (episodes) {
+    lines.push("episodes:", episodes);
   }
   return lines.join("\n");
 }

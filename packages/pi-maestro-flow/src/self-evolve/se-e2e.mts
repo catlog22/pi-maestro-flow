@@ -214,15 +214,60 @@ async function main(): Promise<void> {
   check("噪音轨迹片段被源头丢弃（仍 1 条）", linesAfterNoise.length === 1, `got ${linesAfterNoise.length}`);
   check("状态栏 EVOL ● 1·1·2（噪音计入 suppressed）", ctx.status["self-evolve"] === "EVOL ● 1·1·2", ctx.status["self-evolve"]);
 
-  // ---- 5c. unknown type → signal written without stage suggestion (not actionable) ----
+  // ---- 5b2. system-log noise prefixes (model failover / teammate notice) → suppressed at source ----
+  const failoverMsg = [assistantMessage("CUSTOM maestro-model-failover: The previous model exhausted its native retries with a transient network error.")];
+  for (const h of handlers.agent_end) h(agentEndEvent(failoverMsg), ctx);
+  await sleep(200);
+  const linesAfterFailover = (await readFile(join(dir, files[0]), "utf8")).trim().split("\n").filter(Boolean);
+  check("系统日志前缀(maestro-model-failover)被源头丢弃（仍 1 条）", linesAfterFailover.length === 1, `got ${linesAfterFailover.length}`);
+  check("状态栏 EVOL ● 1·1·3（系统日志噪音计入 suppressed）", ctx.status["self-evolve"] === "EVOL ● 1·1·3", ctx.status["self-evolve"]);
+
+  // ---- 5c. unknown type without knowledge signal → suppressed at source ----
   const unknownMsg = [assistantMessage("A turn about general topic with no knowledge hints whatsoever.")];
   for (const h of handlers.agent_end) h(agentEndEvent(unknownMsg), ctx);
   await sleep(200);
   const linesAfterUnknown = (await readFile(join(dir, files[0]), "utf8")).trim().split("\n").filter(Boolean);
-  check("unknown 类型信号仍落盘（2 条）", linesAfterUnknown.length === 2, `got ${linesAfterUnknown.length}`);
-  const unknownSig = JSON.parse(linesAfterUnknown[1]!);
-  check("unknown 信号 candidateType=unknown 且无 suggestion", unknownSig.candidateType === "unknown" && unknownSig.suggestion === undefined, JSON.stringify(unknownSig));
-  check("状态栏 EVOL ● 2·1·2（unknown 写入不计 suppressed）", ctx.status["self-evolve"] === "EVOL ● 2·1·2", ctx.status["self-evolve"]);
+  check("无知识特征 unknown 在源头丢弃（仍 1 条）", linesAfterUnknown.length === 1, `got ${linesAfterUnknown.length}`);
+  check("状态栏 EVOL ● 1·1·4（无特征 unknown 计入 suppressed）", ctx.status["self-evolve"] === "EVOL ● 1·1·4", ctx.status["self-evolve"]);
+  await cmd.handler("config cooldownMs=10m", ctx);
+
+  // ---- 5d. unknown with failed toolCall → still written (gate does not kill real signals) ----
+  await cmd.handler("config cooldownMs=0", ctx);
+  const failToolMsg: AgentMessage[] = [
+    {
+      role: "assistant",
+      content: [
+        { type: "text", text: "查了一下没找到。" },
+        { type: "tool_use", id: "t-fail-1", name: "bash", input: { command: "grep missing /no/such" } },
+      ],
+    } as never as AgentMessage,
+    { role: "tool", toolCallId: "t-fail-1", name: "bash", content: "grep: No matches found", isError: true } as never as AgentMessage,
+  ];
+  for (const h of handlers.agent_end) h(agentEndEvent(failToolMsg), ctx);
+  await sleep(200);
+  const linesAfterFail = (await readFile(join(dir, files[0]), "utf8")).trim().split("\n").filter(Boolean);
+  check("带失败 toolCall 的 unknown 仍落盘（2 条）", linesAfterFail.length === 2, `got ${linesAfterFail.length}`);
+  const failUnknownSig = JSON.parse(linesAfterFail[1]!);
+  check("带失败 toolCall 的信号仍落盘且为 knowhow（失败轨迹偏向 knowhow）", failUnknownSig.candidateType === "knowhow", JSON.stringify(failUnknownSig));
+  check("带失败 toolCall 的 knowhow 信号有 suggestion（可 stage）", typeof failUnknownSig.suggestion === "string" && failUnknownSig.suggestion.length > 0, JSON.stringify(failUnknownSig));
+  check("带失败 toolCall 的信号 episodes 已持久化且含非 success kind", Array.isArray(failUnknownSig.episodes) && failUnknownSig.episodes.length > 0 && failUnknownSig.episodes.some((e: { kind: string }) => e.kind !== "success"), JSON.stringify(failUnknownSig.episodes ?? null));
+  check("带失败 bash toolCall 的信号 toolCalls 已持久化（EVIDENCE_TOOL_NAMES 放开后）", Array.isArray(failUnknownSig.toolCalls) && failUnknownSig.toolCalls.length > 0 && failUnknownSig.toolCalls.some((c: { tool: string; outcome: string }) => c.tool === "bash" && c.outcome !== "ok"), JSON.stringify(failUnknownSig.toolCalls ?? null));
+  check("带失败 bash toolCall 的信号标题含工具失败信息（buildKnowledgeTitle 失败轨迹优先）", /bash.*失败/.test(failUnknownSig.title), JSON.stringify(failUnknownSig.title));
+  check("状态栏 EVOL ● 2·1·4（带失败 toolCall 的 unknown 落盘，suppressed 不变）", ctx.status["self-evolve"] === "EVOL ● 2·1·4", ctx.status["self-evolve"]);
+
+  // ---- 5f. reflective lexicon (no failure) → written via knowledge-moment gate ----
+  // Tests the new isKnowledgeMoment path: a turn with no failed tool call and no
+  // non-success episode, BUT whose last assistant line carries a reflective/
+  // decisional lexicon hit ("决定 ... 因为 ..."), must still be captured.
+  await cmd.handler("config cooldownMs=0", ctx);
+  const reflectiveMsg = [assistantMessage("决定采用保守方案因为激进校验误杀 29% 本项目文件。")];
+  for (const h of handlers.agent_end) h(agentEndEvent(reflectiveMsg), ctx);
+  await sleep(200);
+  const linesAfterReflective = (await readFile(join(dir, files[0]), "utf8")).trim().split("\n").filter(Boolean);
+  check("含反思性词汇的轮次落盘（3 条）", linesAfterReflective.length === 3, `got ${linesAfterReflective.length}`);
+  const reflectiveSig = JSON.parse(linesAfterReflective[2]!);
+  check("反思性词汇信号标题含决策内容", /决定|因为/.test(reflectiveSig.title), JSON.stringify(reflectiveSig.title));
+  check("状态栏 EVOL ● 3·1·4（反思性词汇落盘，suppressed 不变）", ctx.status["self-evolve"] === "EVOL ● 3·1·4", ctx.status["self-evolve"]);
   await cmd.handler("config cooldownMs=10m", ctx);
 
   // ---- 6. session_compact signal with file-op evidence ----
@@ -239,11 +284,30 @@ async function main(): Promise<void> {
   }
   await sleep(200);
   const linesAfter3 = (await readFile(join(dir, files[0]), "utf8")).trim().split("\n").filter(Boolean);
-  check("session_compact 信号落盘（3 条）", linesAfter3.length === 3, `got ${linesAfter3.length}`);
-  const sig2 = JSON.parse(linesAfter3[2]!);
+  check("session_compact 信号落盘（4 条）", linesAfter3.length === 4, `got ${linesAfter3.length}`);
+  const sig2 = JSON.parse(linesAfter3[3]!);
   check("compact 信号 source=session_compact", sig2.source === "session_compact");
   check("compact 信号 evidence 含 modified 文件", sig2.evidence.some((e: { type: string; role?: string }) => e.type === "file" && e.role === "modified"), JSON.stringify(sig2.evidence));
-  check("状态栏 EVOL ● 3·1·2", ctx.status["self-evolve"] === "EVOL ● 3·1·2", ctx.status["self-evolve"]);
+  check("状态栏 EVOL ● 4·1·4", ctx.status["self-evolve"] === "EVOL ● 4·1·4", ctx.status["self-evolve"]);
+
+  // ---- 5e. cross-project absolute-path evidence filtered by cwd boundary ----
+  // 保守过滤：绝对路径在 cwd 外的被丢弃，相对路径全保留（无法可靠区分）。
+  await cmd.handler("config cooldownMs=0", ctx);
+  await writeFile(join(cwd, "local_evidence.ts"), "export const x = 1;\n", "utf8");
+  const foreignAbs = join(tmpdir(), "foreign_abs_routing.py").replace(/\\/g, "/");
+  // title 含知识信号词（陷阱）以过知识门控，聚焦验证 evidence 过滤
+  const xprojMsg: AgentMessage[] = [
+    assistantMessage("发现了路由编码的陷阱：本地模块与跨项目绝对路径文件混用"),
+    toolMessage("bash", `read ${foreignAbs} and local_evidence.ts`),
+  ];
+  for (const h of handlers.agent_end) h(agentEndEvent(xprojMsg), ctx);
+  await sleep(200);
+  const linesAfterXproj = (await readFile(join(dir, files[0]), "utf8")).trim().split("\n").filter(Boolean);
+  const xprojSig = JSON.parse(linesAfterXproj[linesAfterXproj.length - 1]!);
+  const fileRefs = (xprojSig.evidence ?? []).filter((e: { type: string }) => e.type === "file").map((e: { ref: string }) => e.ref);
+  check("跨项目绝对路径被过滤（不含 foreign_abs_routing.py）", !fileRefs.some((r: string) => r.includes("foreign_abs_routing.py")), JSON.stringify(fileRefs));
+  check("本项目相对路径保留（含 local_evidence.ts）", fileRefs.some((r: string) => r.includes("local_evidence.ts")), `fileRefs=${JSON.stringify(fileRefs)}`);
+  await cmd.handler("config cooldownMs=10m", ctx);
 
   // ---- 7. signals command lists records ----
   let signalsNotified = "";
@@ -258,7 +322,7 @@ async function main(): Promise<void> {
   await cmd.handler("signals export", ctx);
   const exportDir = join(outRoot, "exports");
   const exportFiles = await readdir(exportDir);
-  check("signals export 落盘 exports/ 目录", exportFiles.length === 1 && exportFiles[0]!.endsWith(".jsonl") && exportMsg.includes("exported 3"), exportMsg.slice(0, 120));
+  check("signals export 落盘 exports/ 目录", exportFiles.length === 1 && exportFiles[0]!.endsWith(".jsonl") && exportMsg.includes("exported 5"), exportMsg.slice(0, 120));
 
   // ---- 8. config set + validation ----
   await cmd.handler("config cooldownMs=10m maxSignalsPerSession=3", ctx);
@@ -354,7 +418,7 @@ async function main(): Promise<void> {
   const reviewRecord = JSON.parse((await readFile(join(reviewsDir, reviewFiles[0]), "utf8")).trim().split("\n").at(-1)!);
   check("review 记录 dryRun=true", reviewRecord.dryRun === true && reviewRecord.kind === "review");
   check("review 记录 project+model", reviewRecord.project === "ws" && reviewRecord.model === "test-provider/test-model", JSON.stringify(reviewRecord));
-  check("review 记录评审门统计", reviewRecord.droppedInvalid === 1 && reviewRecord.downgraded === 1 && reviewRecord.nonActionableSkipped === 1, JSON.stringify(reviewRecord));
+  check("review 记录评审门统计", reviewRecord.droppedInvalid === 1 && reviewRecord.downgraded === 1 && reviewRecord.nonActionableSkipped === 0, JSON.stringify(reviewRecord));
   // reviews history command
   let reviewsMsg = "";
   ctx.ui.notify = (message, level) => { if (message.includes("review history")) reviewsMsg = message; prevNotify(message, level); };

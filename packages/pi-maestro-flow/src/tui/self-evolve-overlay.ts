@@ -245,11 +245,15 @@ export class SelfEvolveOverlay implements Component, Focusable {
 
   private header(width: number): string {
     const theme = this.params.theme;
-    const { config, source } = this.view;
+    const { config, source, counters } = this.view;
     const state = config.enabled ? theme.fg("success", "● on") : theme.fg("dim", "○ off");
     const focus = this.focused ? theme.fg("accent", "· keys live") : theme.fg("dim", "· not focused");
     const save = this.saveLabel() ? theme.fg("dim", this.saveLabel()) : undefined;
-    return headerLine(theme, "SELF-EVOLVE PANEL", [state, theme.fg("dim", source), ...(save ? [save] : []), focus], width);
+    const yieldBase = counters.signals + counters.suppressed;
+    const yieldText = yieldBase > 0
+      ? theme.fg("accent", `yield ${Math.round((counters.signals / yieldBase) * 100)}%`)
+      : theme.fg("dim", "yield —");
+    return headerLine(theme, "SELF-EVOLVE PANEL", [state, theme.fg("dim", config.mode), yieldText, theme.fg("dim", source), ...(save ? [save] : []), focus], width);
   }
 
   // -------------------------------------------------------------------------
@@ -383,7 +387,7 @@ export class SelfEvolveOverlay implements Component, Focusable {
 
   private counterRows(width: number): string[] {
     const theme = this.params.theme;
-    const { counters } = this.view;
+    const { counters, recentSignals } = this.view;
     const failures = counters.failures > 0
       ? theme.fg("error", String(counters.failures))
       : theme.fg("success", String(counters.failures));
@@ -396,6 +400,28 @@ export class SelfEvolveOverlay implements Component, Focusable {
         width,
       ),
     ];
+    // Quality row: yield (capture efficiency) + candidate-type distribution +
+    // tool-failure coverage. Derived from recentSignals (no schema change).
+    const yieldBase = counters.signals + counters.suppressed;
+    const yieldText = yieldBase > 0
+      ? `${Math.round((counters.signals / yieldBase) * 100)}% (${counters.signals}/${yieldBase})`
+      : "—";
+    const typeCounts = { knowhow: 0, spec: 0, unknown: 0 } as Record<string, number>;
+    let toolFail = 0;
+    for (const s of recentSignals) {
+      const t = s.candidateType ?? "unknown";
+      if (t in typeCounts) typeCounts[t]++;
+      if ((s.toolCalls ?? []).some((c: { outcome: string }) => c.outcome !== "ok") ||
+          (s.episodes ?? []).some((e: { kind: string }) => e.kind !== "success")) toolFail++;
+    }
+    rows.push(fitLine(
+      `${theme.fg("dim", "yield")} ${theme.fg("accent", yieldText)} · ` +
+      `knowhow ${theme.fg("success", String(typeCounts.knowhow))} · ` +
+      `spec ${theme.fg("warning", String(typeCounts.spec))} · ` +
+      `unknown ${theme.fg("dim", String(typeCounts.unknown))} · ` +
+      `tool-fail ${toolFail > 0 ? theme.fg("error", String(toolFail)) : theme.fg("dim", String(toolFail))}`,
+      width,
+    ));
     const last = `${theme.fg("dim", "last")} ${counters.lastSource ?? "(none)"}` +
       (counters.lastSignalAt ? ` · ${new Date(counters.lastSignalAt).toLocaleTimeString()}` : "");
     rows.push(fitLine(last, width));
@@ -413,10 +439,15 @@ export class SelfEvolveOverlay implements Component, Focusable {
       ? createdAt.toLocaleTimeString()
       : createdAt.toLocaleString();
     const shortId = signal.id.startsWith("se-") ? signal.id.slice(0, 10) : signal.id;
-    const type = this.candidateTypeColor(signal.candidateType, signal.candidateType);
+    const hasFail = (signal.toolCalls ?? []).some((c: { outcome: string }) => c.outcome !== "ok") ||
+      (signal.episodes ?? []).some((e: { kind: string }) => e.kind !== "success");
+    const hasSuggestion = Boolean((signal as { suggestion?: unknown }).suggestion);
+    const failMark = hasFail ? theme.fg("error", "⚠ ") : "";
+    const typeSuffix = hasFail ? " ⚠" : (hasSuggestion ? " ✓" : "");
+    const type = this.candidateTypeColor(signal.candidateType, `${signal.candidateType}${typeSuffix}`);
     const project = signal.project ? theme.fg("dim", ` ${signal.project}`) : "";
-    const actionable = (signal as { suggestion?: unknown }).suggestion ? "" : theme.fg("dim", " · not-actionable");
-    return fitLine(`  [${theme.fg("dim", time)}] ${theme.fg("dim", shortId)}${project} ${signal.source} · ${type}: ${signal.title}${actionable}`, width);
+    const actionable = hasSuggestion ? "" : theme.fg("dim", " · not-actionable");
+    return fitLine(`  ${failMark}[${theme.fg("dim", time)}] ${theme.fg("dim", shortId)}${project} ${signal.source} · ${type}: ${signal.title}${actionable}`, width);
   }
 
   private candidateTypeColor(text: string, fallback: string): string {

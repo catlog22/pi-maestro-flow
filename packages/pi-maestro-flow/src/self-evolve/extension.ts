@@ -25,7 +25,7 @@
  */
 
 import { copyFile, access, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type {
   AgentEndEvent,
   ExtensionAPI,
@@ -42,6 +42,7 @@ import {
   buildSignal,
   buildStageCommandArgs,
   buildSuggestion,
+  buildKnowledgeTitle,
   buildToolCallEvidence,
   classifyCandidateType,
   compactDigest,
@@ -59,6 +60,7 @@ import {
   formatSignalLine,
   formatStageCommandLine,
   formatStatusText,
+  isKnowledgeMoment,
   isNoiseTitle,
   isPathInside,
   isValidSignalId,
@@ -916,6 +918,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
       skill: process.env[SELF_EVOLVE_SKILL_FLAG]?.trim() || "general",
       model: resolveSelfEvolveModel(params.ctx),
       ...(params.toolCalls && params.toolCalls.length > 0 ? { toolCalls: params.toolCalls } : {}),
+      ...(params.episodes && params.episodes.length > 0 ? { episodes: params.episodes } : {}),
       trigger: params.trigger,
     });
     // Persist the evidence file first so the stage template below is
@@ -1430,11 +1433,24 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
         updateStatusBar(ctx);
         return;
       }
-      const evidence = buildEvidenceFromMessages(agentEnd.messages, config.maxEvidence);
+      const evidence = buildEvidenceFromMessages(agentEnd.messages, config.maxEvidence, (ref) => {
+        // Conservative cross-project filter: drop only absolute paths outside cwd.
+        // Relative paths are kept (cannot reliably distinguish a deep in-project
+        // path like `packages/x/test/y.ts` from a foreign `routing.py` by shape
+        // alone — existence checks over-aggress and lose 29% of in-project refs
+        // in a monorepo). Review/stage remains the authoritative scope gate.
+        const path = ref.replace(/:\d+$/, "");
+        if (!isAbsolute(path)) return true;
+        return !relative(ctx.cwd, resolve(path)).startsWith("..");
+      });
       const toolCalls = buildToolCallEvidence(agentEnd.messages, config.maxEvidence);
       const assistantText = lastAssistantLine(digest);
+      // Phase 1+2: tool trajectory (generic timeline + episodes) is computed up
+      // front so the knowledge-focused title and the classifier both see it.
+      const timeline = collectToolCallTimeline(agentEnd.messages, config.maxEvidence);
+      const episodes = buildTrajectoryEpisodes(timeline);
       const summary = summarizeText(assistantText || digest);
-      const title = makeTitle(summary);
+      const title = buildKnowledgeTitle(toolCalls, episodes, assistantText, summary);
       // Collection-side quality filter: trace fragments / progress reports are
       // never candidates — drop at the source and count as suppressed.
       if (isNoiseTitle(title)) {
@@ -1444,10 +1460,6 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
       }
       // Phase 2C: tool trajectory feeds the classifier so a browser/computer_use
       // failure mode biases toward knowhow (pitfall) and carries a tools hint.
-      // Phase 1+2: generic ordered timeline + episodes (broader tool coverage)
-      // also feed the classifier hint and the semantic enrichment input.
-      const timeline = collectToolCallTimeline(agentEnd.messages, config.maxEvidence);
-      const episodes = buildTrajectoryEpisodes(timeline);
       const toolCallHint = toolCalls
         .filter((call) => call.outcome !== "ok")
         .map((call) => `${call.tool} ${call.outcome} ${call.action ?? ""} ${call.topic ?? ""}`)
@@ -1458,6 +1470,14 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
         .join(" ");
       const toolHint = [toolCallHint, episodeHint].filter(Boolean).join(" ");
       const candidateType = classifyCandidateType(`${summary}\n${title}${toolHint ? `\n${toolHint}` : ""}`);
+      // Knowledge-moment gate: drop turns with no knowledge signal (no failure,
+      // no reflective lexicon, no classifier hit) at the source. Replaces the
+      // prior unknown+failure gate with the lexicon-aware isKnowledgeMoment.
+      if (!isKnowledgeMoment(toolCalls, episodes, assistantText, candidateType)) {
+        state.suppressed++;
+        updateStatusBar(ctx);
+        return;
+      }
       void writeSignal({
         source: "agent_end",
         ctx,

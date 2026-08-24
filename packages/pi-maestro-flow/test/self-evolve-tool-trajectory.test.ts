@@ -76,10 +76,12 @@ test("buildToolCallEvidence classifies permission_denied outcome", async () => {
   assert.equal(evidence[0].outcome, "permission_denied");
 });
 
-test("buildToolCallEvidence skips non-SOP tools (bash, read, ...)", async () => {
+test("buildToolCallEvidence captures common development tools", async () => {
   const messages = toolMessages("bash", { command: "ls" });
   const evidence = buildToolCallEvidence(messages);
-  assert.equal(evidence.length, 0);
+  assert.equal(evidence.length, 1);
+  assert.equal(evidence[0]?.tool, "bash");
+  assert.equal(evidence[0]?.outcome, "ok");
 });
 
 test("buildToolCallEvidence dedupes identical tool+action+topic+outcome", async () => {

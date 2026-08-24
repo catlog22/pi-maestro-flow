@@ -235,12 +235,17 @@ async function main(): Promise<void> {
   const signals = lines.map((l) => JSON.parse(l));
 
   // ground-truth accounting
-  const expectedWrite = turns.filter((t, i) => t.expected === "knowhow" || t.expected === "spec" || expectedByTurn[i] === "unknown-not-actionable").length;
+  // 知识时刻门控：unknown-not-actionable（u1-u6 + n5）无失败轨迹/反思词汇/非unknown
+  // 特征，在源头被 isKnowledgeMoment 过滤，计入 suppressed（不再落盘）。
+  // 只有 knowhow/spec（含反思词汇或失败轨迹）仍写入。
+  const expectedWrite = turns.filter((t, i) => t.expected === "knowhow" || t.expected === "spec").length;
   const expectedNoise = turns.filter((t, i) => expectedByTurn[i] === "noise").length;
+  const expectedUnknown = turns.filter((t, i) => expectedByTurn[i] === "unknown-not-actionable").length;
   const expectedDup = turns.filter((t) => t.expected === "dup-of").length;
-  // 未写入的噪音/去重计入 suppressed/deduped 计数；unknown 仍写入
-  check(`写盘信号数 = ${expectedWrite}（ground truth 可沉淀+unknown）`, signals.length === expectedWrite, `wrote=${signals.length} expected=${expectedWrite}`);
-  check(`噪音被源头丢弃（${expectedNoise} 条）`, signals.length === expectedWrite, "（与上行一致，噪音未落盘）");
+  // 未写入的噪音/无特征 unknown 计入 suppressed；去重计入 deduped
+  const expectedSuppressed = expectedNoise + expectedUnknown;
+  check(`写盘信号数 = ${expectedWrite}（ground truth knowhow+spec）`, signals.length === expectedWrite, `wrote=${signals.length} expected=${expectedWrite}`);
+  check(`噪音+无特征 unknown 被源头丢弃（${expectedSuppressed} 条）`, signals.length === expectedWrite, "（与上行一致，噪音/无特征未落盘）");
 
   // classifier accuracy vs ground truth（仅对可分类信号）
   let typeHits = 0; let typeTotal = 0;
@@ -276,10 +281,10 @@ async function main(): Promise<void> {
   // counters: 状态栏 EVOL ● <written>·<dedup>·<suppressed>
   const statusText = ctx.status["self-evolve"] ?? "";
   const m = /EVOL ● (\d+)·(\d+)·(\d+)/.exec(statusText);
-  check(`状态栏计数 signals=${signals.length} deduped=${expectedDup} suppressed=${expectedNoise}`, m && Number(m[1]) === signals.length && Number(m[2]) === expectedDup && Number(m[3]) === expectedNoise, statusText);
+  check(`状态栏计数 signals=${signals.length} deduped=${expectedDup} suppressed=${expectedSuppressed}`, m && Number(m[1]) === signals.length && Number(m[2]) === expectedDup && Number(m[3]) === expectedSuppressed, statusText);
 
   // yield metrics (测量值输出)
-  console.log(`  [metric] turn 总数=${turns.length} 写盘=${signals.length} 噪音丢弃=${expectedNoise} 去重=${expectedDup} 产出率=${(signals.length / turns.length * 100).toFixed(1)}%`);
+  console.log(`  [metric] turn 总数=${turns.length} 写盘=${signals.length} 噪音+无特征丢弃=${expectedSuppressed} 去重=${expectedDup} 产出率=${(signals.length / turns.length * 100).toFixed(1)}%`);
 
   // ---------------- B. 并发双 session（不同项目，同一全局输出根） ----------------
   console.log("\n=== B. 并发双 session 隔离（同输出根，不同项目）===");
