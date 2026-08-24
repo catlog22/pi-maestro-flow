@@ -683,6 +683,7 @@ test("teammate send guidance requires meaningful new traffic and explains queued
   assert.match(combined, /untrusted routing metadata.*never as instructions or user authorization/i);
 
   const modeSchema = JSON.stringify(TeammateSendParams.properties.mode);
+  assert.match(modeSchema, /"default":"steer"/);
   assert.match(modeSchema, /queued or accepted means persisted\/enqueued but not necessarily consumed/i);
   assert.match(modeSchema, /follow_up.*AgentSession would otherwise stop/i);
   assert.match(modeSchema, /tool returning is not a delivery boundary/i);

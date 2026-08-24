@@ -1452,8 +1452,9 @@ test("model-originated status is normalized to coordination and starts a turn", 
     ctx,
   );
   assert.equal(status.isError, false);
+  assert.match(status.content[0]?.text ?? "", /active turn cancelled \+ prompt injected/i);
   assert.doesNotMatch(status.content[0]?.text ?? "", /stored as context/i);
-  await waitFor(() => control.join("").includes("audit ready"));
+  assert.match(control.join(""), /"id":"teammate-steer-abort-[^"]+","type":"abort"/);
 
   const state = (globalThis as typeof globalThis & Record<symbol, unknown>)[
     Symbol.for("pi-maestro-teammate.root-registry")
@@ -2820,6 +2821,7 @@ test("model status addressed to @root is normalized and starts a root turn", asy
     const index = messages.findIndex((message) => String(message.content).includes("audit ready"));
     assert.notEqual(index, -1);
     assert.equal(messageOptions[index]?.triggerTurn, true);
+    assert.equal(messageOptions[index]?.deliverAs, "steer");
     assert.match(String(messages[index]?.content), /^\[teammate:coordination\] from main/);
   } finally {
     await Promise.resolve(sessionShutdown());

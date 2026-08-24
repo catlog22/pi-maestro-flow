@@ -221,9 +221,9 @@ test("child proxy normalizes legacy status to coordination when routing to @root
         delivered: true,
         transport: "local-root",
         receipt: {
-          requestedMode: "follow_up",
-          effectiveMode: "follow_up",
-          deliveryStage: "queued",
+          requestedMode: "steer",
+          effectiveMode: "steer",
+          deliveryStage: "injected",
         },
       };
     },
@@ -231,10 +231,10 @@ test("child proxy normalizes legacy status to coordination when routing to @root
 
   assert.equal(captured?.selector, "@root");
   assert.equal(captured?.messageKind, "coordination");
-  assert.equal(captured?.mode, "follow_up");
+  assert.equal(captured?.mode, "steer");
   const result = routed.result as { isError?: boolean; content?: Array<{ text?: string }> };
   assert.equal(result.isError, false);
-  assert.match(result.content?.[0]?.text ?? "", /queued.*root session/i);
+  assert.match(result.content?.[0]?.text ?? "", /injected.*root session/i);
 });
 
 test("nested proxy dispatch preserves root session routing at deeper levels", async () => {

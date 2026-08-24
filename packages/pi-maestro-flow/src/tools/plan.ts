@@ -734,7 +734,7 @@ export function onToolCallPlan(event: {
     // Plan mode allows targeted revision of the same read-only planner/explorer
     // (steer/follow_up are message injections, not project mutations), but still
     // blocks abort, which terminates the agent and its subtree.
-    const mode = typeof event.input.mode === "string" ? event.input.mode : "follow_up";
+    const mode = typeof event.input.mode === "string" ? event.input.mode : "steer";
     return mode === "abort"
       ? planMutationBlock("teammate-send abort")
       : undefined;

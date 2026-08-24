@@ -80,11 +80,12 @@ test("schema accepts a dedicated positive concurrency wait window", () => {
 
 // ---------------------------------------------------------------------------
 // teammate-send message contract (P1/B4): message required unless mode is
-// explicitly "abort"; a missing mode defaults to follow_up and still demands
+// explicitly "abort"; a missing mode defaults to steer and still demands
 // a message.
 // ---------------------------------------------------------------------------
 
-test("teammate-send requires message for steer/follow_up and default mode", () => {
+test("teammate-send requires message for steer/follow_up and defaults to steer", () => {
+  assert.match(JSON.stringify(TeammateSendParams.properties.mode), /"default":"steer"/);
   assert.equal(Check(TeammateSendParams, { to: "a", mode: "steer", message: "hi" }), true);
   assert.equal(Check(TeammateSendParams, { to: "a", mode: "steer" }), false);
   assert.equal(Check(TeammateSendParams, { to: "a", message: "hi" }), true);

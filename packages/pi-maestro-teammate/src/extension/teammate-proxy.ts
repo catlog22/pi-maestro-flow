@@ -2740,7 +2740,7 @@ export async function handleProxyRequest(
     case "teammate-send": {
       const to = params.to as string;
       const message = (params.message as string | undefined) ?? "";
-      const requestedMode = (params.mode as RpcMessageMode) ?? "follow_up";
+      const requestedMode = (params.mode as RpcMessageMode) ?? "steer";
       const requestedMessageKind = (params.kind as WorkspacePeerMessageKind | undefined) ?? "coordination";
       const messageKind = normalizeSessionMessageKind(requestedMessageKind) ?? "coordination";
       const localRootTarget = to === "root" || to === "@root";

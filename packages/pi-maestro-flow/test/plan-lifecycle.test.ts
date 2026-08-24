@@ -1017,7 +1017,7 @@ test("Plan hooks preserve read-only discovery and block mutations before approva
       toolName: "teammate-send",
       input: { to: "planner-1", mode: "abort" },
     })?.reason ?? "", /blocked/);
-    // Default mode (omitted) is follow_up — allowed.
+    // Default mode (omitted) is steer — allowed.
     assert.equal(onToolCallPlan({
       toolName: "teammate-send",
       input: { to: "planner-1", message: "revise section 3" },

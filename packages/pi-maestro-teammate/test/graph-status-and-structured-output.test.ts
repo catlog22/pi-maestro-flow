@@ -2270,6 +2270,8 @@ test("nested teammate-send republishes a running lifecycle when it wakes an agen
     1,
     "messages to an already-running agent must not republish started",
   );
+  const latestMessageEvent = emitted.filter(({ event }) => event === "teammate:message").at(-1);
+  assert.equal(latestMessageEvent?.payload.mode, "steer");
 });
 
 test("session ownership handoff fences stale writers and requires reload before child resumes", () => {

@@ -4882,7 +4882,7 @@ export default function registerTeammateExtension(
       params: { to: string; message?: string; mode?: RpcMessageMode; kind?: SessionMessageKind },
       signal: AbortSignal,
     ): Promise<TeammateToolResult<{ delivered: boolean; provenance?: MessageProvenanceV1 }>> {
-      const requestedMode = params.mode ?? "follow_up";
+      const requestedMode = params.mode ?? "steer";
       const requestedMessageKind = params.kind ?? "coordination";
       const messageKind = normalizeSessionMessageKind(requestedMessageKind) ?? "coordination";
       const message = params.message ?? "";
@@ -5066,7 +5066,7 @@ export default function registerTeammateExtension(
 
     renderCall(args, theme, context) {
       if (context.isPartial === false) return new Text("", 0, 0);
-      const mode = typeof args.mode === "string" ? args.mode : "follow_up";
+      const mode = typeof args.mode === "string" ? args.mode : "steer";
       return renderQuietTeammateAux("teammate-send", `@${String(args.to ?? "?")} · ${mode}`, "running", theme)
         ?? auxToolCallFallback("teammate-send", theme);
     },
