@@ -37,6 +37,7 @@ import {
   terminateProcessTreeByPid,
   validateModelSpecifier,
 } from "../src/runs/execution.ts";
+import { resultReadyGraceMsFor } from "../src/runs/execution-infra.ts";
 import { ModelCircuitBreaker } from "../src/models/model-circuit-breaker.ts";
 import { NETWORK_RETRY_POLICY, classifyRetryError, retryDelayMs } from "../src/runs/retry.ts";
 import type {
@@ -859,6 +860,12 @@ test("C1: omitting context preserves the original strict shape check", () => {
     },
     toolResults: [],
   }), true);
+});
+
+test("C2: lifecycle grace expands after tool work and preserves explicit overrides", () => {
+  assert.equal(resultReadyGraceMsFor(0), 60_000);
+  assert.equal(resultReadyGraceMsFor(1), 120_000);
+  assert.equal(resultReadyGraceMsFor(4, 25), 25);
 });
 
 test("final turn_end publishes a wakeable result before agent_end settles lifecycle", async () => {
@@ -2633,6 +2640,10 @@ test("structured_output tool completion settles the child without waiting for ag
 
   assert.equal(result.exitCode, 0);
   assert.deepEqual(result.structuredOutput, payload);
+  assert.ok(
+    progress.some((entry) => entry.resultReadyAt !== undefined),
+    "schema-valid structured_output publishes the result-ready boundary",
+  );
   assert.equal(progress.at(-1)?.status, "completed");
   const completedIndex = progress.findIndex((entry) => entry.status === "completed");
   assert.ok(completedIndex >= 0);
@@ -2907,6 +2918,7 @@ test("outputSchema lane settles with its published result when agent_end never a
     () => { killed++; },
   );
 
+  const progress: AgentProgress[] = [];
   const result = await Promise.race([
     runSingleTeammate(
       {
@@ -2915,11 +2927,18 @@ test("outputSchema lane settles with its published result when agent_end never a
         context: "fresh",
         outputSchema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"] },
       },
-      { baseCwd: process.cwd(), spawnChildProcess, resultReadyGraceMs: 40, structuredOutputRecoveryTimeoutMs: 100 },
+      { baseCwd: process.cwd(), spawnChildProcess, resultReadyGraceMs: 40, structuredOutputRecoveryTimeoutMs: 100,
+        onProgress: (entry) => progress.push({ ...entry, recentTools: [...entry.recentTools] }),
+      },
     ),
     new Promise<never>((_, reject) => setTimeout(() => reject(new Error("outputSchema lane blocked past its grace period")), 1_000)),
   ]);
 
+  assert.equal(
+    progress.some((entry) => entry.resultReadyAt !== undefined),
+    false,
+    "a prose-only schema turn must stay hidden from result-ready observers",
+  );
   assert.equal(result.lifecyclePending ?? false, false, "grace settlement must not leave the lane lifecycle-pending");
   assert.equal(result.exitCode, 1, "missing schema-valid structured_output settles as failed");
   assert.ok(result.messages.some((m) => m.content.includes("ready answer")), "published transcript is preserved");

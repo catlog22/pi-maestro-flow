@@ -16,6 +16,8 @@ import {
   publishSessionHostRegistry,
   sessionAgentEndpointId,
   sessionRootEndpointId,
+  normalizeSessionMessageKind,
+  sessionMessageTriggersTurn,
   sessionSurfaceModeFromEnv,
   type LegacySessionAuthority,
   type SessionEndpoint,
@@ -100,6 +102,21 @@ test("session surface parsing is fail-closed to legacy", () => {
   assert.equal(sessionSurfaceModeFromEnv({ PI_TEAMMATE_SESSION_SURFACE: "invalid" }), "legacy");
 });
 
+test("status messages require a trusted host source to stay context-only", () => {
+  assert.equal(normalizeSessionMessageKind("status"), "coordination");
+  assert.equal(normalizeSessionMessageKind("status", false), "coordination");
+  assert.equal(normalizeSessionMessageKind("status", true), "status");
+  assert.equal(normalizeSessionMessageKind("request"), "request");
+  assert.equal(sessionMessageTriggersTurn(normalizeSessionMessageKind("status")), true);
+  assert.equal(sessionMessageTriggersTurn(normalizeSessionMessageKind("status", true)), false);
+});
+
+test("status messages never trigger a model turn by themselves", () => {
+  assert.equal(sessionMessageTriggersTurn("status"), false);
+  assert.equal(sessionMessageTriggersTurn("coordination"), true);
+  assert.equal(sessionMessageTriggersTurn(undefined), true);
+});
+
 test("canonical endpoint ids carry the complete owner fence", () => {
   const identity = { workspaceId: "workspace / one", ownerId: LOCAL_OWNER, ownerNonce: LOCAL_NONCE };
   const rootId = sessionRootEndpointId(identity);
@@ -159,8 +176,20 @@ test("directory resolves canonical ids, local names, owner selectors, and ambigu
   assert.equal(directory.resolve(`owner:${REMOTE_OWNER}`).endpoint?.kind, "root");
   assert.equal(directory.resolve(`owner:${REMOTE_OWNER}:remote-correlation`).endpoint?.correlationId, "remote-correlation");
   assert.equal(directory.resolve("review-window").endpoint?.ownerId, REMOTE_OWNER);
+  assert.equal(directory.resolve("root").endpoint?.scope, "local");
+  assert.equal(directory.resolve("@root").endpoint?.kind, "root");
   assert.equal(directory.resolve("remote-cor").endpoint?.correlationId, "remote-correlation");
   assert.equal(directory.resolve("reviewer", { localFirst: false }).code, "ambiguous");
+
+  const rootNamedAgentOwners = owners();
+  rootNamedAgentOwners[0] = {
+    ...rootNamedAgentOwners[0]!,
+    agents: rootNamedAgentOwners[0]!.agents.map((agent) => ({ ...agent, name: "root" })),
+  };
+  const reservedRootDirectory = new EndpointDirectory(projectSessionEndpoints(rootNamedAgentOwners));
+  assert.equal(reservedRootDirectory.resolve("root").endpoint?.kind, "root");
+  assert.equal(reservedRootDirectory.resolve("@root").endpoint?.kind, "root");
+  assert.equal(reservedRootDirectory.resolve("root#local").endpoint?.kind, "agent");
 
   const collisionOwners = owners();
   const collisionDirectory = new EndpointDirectory(projectSessionEndpoints([

@@ -1,6 +1,7 @@
 import { altKey } from "pi-maestro-settings-core/v1";
 import assert from "node:assert/strict";
 import test from "node:test";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { buildProgressTree, selectPriorityProgressRows } from "../src/tui/progress-tree.ts";
 import { renderTeammateCall, renderTeammateResult } from "../src/tui/render.ts";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
@@ -225,6 +226,36 @@ test("streaming progress shows live duration and split token usage", () => {
   assert.match(rendered, /in 1\.2k/);
   assert.match(rendered, /out 56/);
   assert.match(rendered, /stalled 4[45]s/);
+});
+
+test("streaming progress leaves the final terminal column empty", () => {
+  const now = Date.now();
+  const width = 80;
+  const lines = renderTeammateResult({
+    content: [{ type: "text", text: "working" }],
+    details: {
+      mode: "single",
+      results: [],
+      progress: [{
+        agent: "scholar-ralph-executor",
+        name: "scholar-ralph-executor",
+        correlationId: "125d198c-live",
+        taskIndex: 0,
+        dependencies: [],
+        status: "running",
+        startedAt: new Date(now - 65_000).toISOString(),
+        toolCount: 15,
+        inputTokens: 377_100,
+        outputTokens: 8_000,
+        cacheReadTokens: 128,
+        cacheWriteTokens: 0,
+        lastActivityAt: now,
+      }],
+    },
+  }, { expanded: false }, theme as never).render(width);
+
+  assert.equal(Math.max(...lines.map(visibleWidth)), width - 1);
+  for (const line of lines) assert.ok(visibleWidth(line) < width);
 });
 
 test("streaming progress memoizes by width and snapshot reference", () => {

@@ -41,6 +41,7 @@ export interface MailboxRolloutOptions {
     recipientCorrelationId: string;
     payload: string;
     mode: string;
+    kind: "lifecycle" | "result" | "steer" | "follow_up" | "task" | "control";
   }) => Promise<void>;
   now?: () => number;
 }
@@ -121,6 +122,7 @@ export class MailboxRollout {
           recipientCorrelationId: request.recipientCorrelationId,
           payload: request.payload,
           mode: request.mode,
+          kind: request.kind,
         });
         return {
           path: "v1",
@@ -137,6 +139,7 @@ export class MailboxRollout {
           recipientCorrelationId: request.recipientCorrelationId,
           payload: request.payload,
           mode: request.mode,
+          kind: request.kind,
         });
         return { path: "shadow", result: enqueueResult };
       }

@@ -7,7 +7,7 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { join } from "node:path";
-import { MailboxConsumer } from "./consumer.ts";
+import { MailboxConsumer, type MailboxDispatchDisposition } from "./consumer.ts";
 import { MailboxFileStore, createMailboxPaths, ensureMailboxDirectories } from "./file-store.ts";
 import { MailboxGC, QuotaAdmission } from "./gc.ts";
 import { type MailboxAuthority, type MailboxEnqueueRequest, MailboxRouter } from "./router.ts";
@@ -49,7 +49,7 @@ export interface MailboxServiceOptions {
   /** Owner ID of this service instance. */
   ownerId: string;
   /** Callback invoked when a message is ready for injection into the child. */
-  onDispatch: (envelope: MailboxEnvelope) => Promise<void>;
+  onDispatch: (envelope: MailboxEnvelope) => Promise<MailboxDispatchDisposition | void>;
   /** Poll interval for the consumer. */
   pollMs?: number;
   now?: () => number;

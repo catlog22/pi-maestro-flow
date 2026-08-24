@@ -272,6 +272,7 @@ import {
 import { createTeammateSettingsProvider, registerTeammateSettingsProvider } from "../settings/teammate-settings-provider.ts";
 import type {
   Details,
+  DeferredContextMessage,
   TeammateState,
   AgentProgress,
   AgentProgressSnapshot,
@@ -408,6 +409,11 @@ import {
   toStructuredResults,
   emitTeammateResultPublished,
   setAgentStructuredOutput,
+  deferAgentContextMessage,
+  takeDeferredAgentContext,
+  restoreDeferredAgentContext,
+  messageWithDeferredAgentContext,
+  shouldPublishAdditionalTurn,
   foregroundWaitWindowMs,
   concurrencyWaitWindowMs,
   createForegroundDeadline,
@@ -441,6 +447,8 @@ import {
   getSessionHostRegistry,
   publishSessionHostRegistry,
   sessionRootEndpointId,
+  normalizeSessionMessageKind,
+  sessionMessageTriggersTurn,
   windowThreadReplayReceipt,
   SESSION_HOST_REGISTRY_EVENT,
   WINDOW_THREAD_ENTRY_TYPE,
@@ -1376,11 +1384,13 @@ export default function registerTeammateExtension(
       if (replayCount >= QUEUED_ROOT_REDRIVE_MAX) continue;
       replayedIncoming.set(entry.messageId, replayCount + 1);
       const { envelope, effectiveAction } = workspaceRootMessageEnvelope(entry, { replayed: true });
+      const replayTriggerTurn = sessionMessageTriggersTurn(entry.messageKind);
       const delivered = safeSendMessage(pi, envelope, {
-        triggerTurn: true,
+        triggerTurn: replayTriggerTurn,
         deliverAs: "followUp",
       });
       if (!delivered) registry.thread.transition(entry.messageId, "incoming", "rejected", Date.now(), effectiveAction);
+      else if (!replayTriggerTurn) registry.thread.transition(entry.messageId, "incoming", "injected", Date.now(), effectiveAction);
     }
   };
 
@@ -1416,13 +1426,20 @@ export default function registerTeammateExtension(
         && (previous.count >= QUEUED_ROOT_REDRIVE_MAX
           || now - previous.at < QUEUED_ROOT_REDRIVE_COOLDOWN_MS)) continue;
       const { envelope, effectiveAction } = workspaceRootMessageEnvelope(entry, { redriven: true });
+      const redriveTriggerTurn = sessionMessageTriggersTurn(entry.messageKind);
       const delivered = safeSendMessage(pi, envelope, {
-        triggerTurn: true,
+        triggerTurn: redriveTriggerTurn,
         deliverAs: effectiveAction === "steer" ? "steer" : "followUp",
       });
       if (!delivered) continue;
       redrivenIncoming.set(entry.messageId, { count: (previous?.count ?? 0) + 1, at: now });
-      registry.thread.transition(entry.messageId, "incoming", "queued", now, effectiveAction);
+      registry.thread.transition(
+        entry.messageId,
+        "incoming",
+        redriveTriggerTurn ? "queued" : "injected",
+        now,
+        effectiveAction,
+      );
     }
   };
 
@@ -1809,9 +1826,7 @@ export default function registerTeammateExtension(
       }
       if (!ownsRootSessionFence(fence)) return staleRootSessionResult();
       const effectiveMode = response?.effectiveAction ?? mode;
-      const deliveryStage = target.agent.correlationId === WORKSPACE_MAIN_SESSION_MARKER
-        ? "queued"
-        : response?.deliveryStage ?? "queued";
+      const deliveryStage = response?.deliveryStage ?? "queued";
       const status: WindowThreadStatus = !response || response.status === "expired"
         ? "timeout"
         : response.status === "accepted" ? deliveryStage : "rejected";
@@ -1846,6 +1861,7 @@ export default function registerTeammateExtension(
           publicationStage,
           messageId: command.commandId,
           ...(command.traceId === undefined ? {} : { traceId: command.traceId }),
+          ...(request.messageKind === "status" ? { contextDeferred: true } : {}),
         },
       };
     } catch (error) {
@@ -1886,21 +1902,72 @@ export default function registerTeammateExtension(
     };
   };
 
+  const deferPreparedAgentContext = (
+    correlationId: string,
+    targetLabel: string,
+    prepared: { body: string; from: string },
+    messageId?: string,
+  ): void => {
+    const agent = state.activeRuns.get(correlationId);
+    if (!agent) throw new Error(`Agent "${targetLabel}" is no longer available.`);
+    deferAgentContextMessage(agent, prepared.body, messageId);
+    const now = Date.now();
+    agent.inbox.push({
+      id: randomUUID(),
+      from: prepared.from,
+      to: targetLabel,
+      kind: "notification",
+      payload: prepared.body,
+      timestamp: now,
+    });
+    agent.outputLog.push(`[${new Date(now).toISOString().slice(11, 19)}] ◀ status context deferred: ${prepared.body.slice(0, 100)}`);
+    trimAgentBuffers(agent);
+    agent.lastActivityAt = now;
+    pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
+      correlationId,
+      from: prepared.from,
+      to: targetLabel,
+      mode: "follow_up",
+      message: prepared.body,
+      lastActivityAt: now,
+      isSend: true,
+    });
+    markWorkspacePeerDirty();
+  };
+
+  function acknowledgeDeferredAgentContext(context: readonly DeferredContextMessage[]): void {
+    const host = mailboxHost;
+    if (!host) return;
+    for (const entry of context) {
+      if (!entry.messageId) continue;
+      void host.service.acknowledge(entry.messageId).then((acknowledged) => {
+        if (!acknowledged) {
+          console.warn(`[pi-maestro-teammate] deferred context acknowledgement was not applied: ${entry.messageId}`);
+        }
+      }).catch((error) => {
+        console.warn(`[pi-maestro-teammate] deferred context acknowledgement failed: ${entry.messageId}`, error);
+      });
+    }
+  }
+
   const injectLocalAgentMessage = (
     correlationId: string,
     targetLabel: string,
     delivery: { body: string; from: string },
     requestedMode: "steer" | "follow_up",
   ): { delivered: boolean; error?: string; mode?: RpcMessageMode; wasSleeping?: boolean } => {
-    const message = delivery.body;
     const messageFrom = delivery.from;
     const agent = state.activeRuns.get(correlationId);
     if (!agent) return { delivered: false, error: `Agent "${targetLabel}" is no longer available.` };
     if (!agent.stdin?.writable) {
+      const deferredContext = takeDeferredAgentContext(agent);
+      const message = messageWithDeferredAgentContext(deferredContext, delivery.body);
       const restarted = agent.status === "sleeping" && agent.restart?.(message) === true;
       if (!restarted) {
+        restoreDeferredAgentContext(agent, deferredContext);
         return { delivered: false, error: `Agent "${targetLabel}" has no restorable runtime.` };
       }
+      acknowledgeDeferredAgentContext(deferredContext);
       const now = Date.now();
       agent.promptSeq = (agent.promptSeq ?? 0) + 1;
       agent.inbox.push({
@@ -1930,13 +1997,19 @@ export default function registerTeammateExtension(
       const ownership = agent.lease ? `${agent.lease.owner} (${agent.lease.state})` : "an unavailable lease";
       return { delivered: false, error: `Agent "${targetLabel}" is currently owned by ${ownership}.` };
     }
+    const deferredContext = takeDeferredAgentContext(agent);
+    const message = messageWithDeferredAgentContext(deferredContext, delivery.body);
     const mode: RpcMessageMode = agent.status === "sleeping"
       ? "prompt"
       : requestedMode === "follow_up" && agent.resultReadyAt !== undefined
         ? "prompt"
         : requestedMode;
     const sent = sendRpcMessage(agent.stdin, message, mode, leaseToken(agent.lease));
-    if (!sent) return { delivered: false, error: `Failed to send message to "${targetLabel}".` };
+    if (!sent) {
+      restoreDeferredAgentContext(agent, deferredContext);
+      return { delivered: false, error: `Failed to send message to "${targetLabel}".` };
+    }
+    acknowledgeDeferredAgentContext(deferredContext);
 
     const now = Date.now();
     if (mode === "prompt") agent.promptSeq = (agent.promptSeq ?? 0) + 1;
@@ -1990,11 +2063,20 @@ export default function registerTeammateExtension(
         // Re-route the enqueued envelope back into the actual child stdin.
         const target = state.activeRuns.get(envelope.recipientCorrelationId);
         if (!target) throw new Error(`Agent "${envelope.recipientCorrelationId}" is no longer available.`);
-        const mode: "steer" | "follow_up" = envelope.mode === "steer" ? "steer" : "follow_up";
         const sender = resolveLocalAgentSenderContext(
           state,
           envelope.senderId === "caller" ? undefined : envelope.senderId,
         );
+        if (envelope.mode === "notify" && envelope.kind === "follow_up") {
+          deferPreparedAgentContext(
+            envelope.recipientCorrelationId,
+            target.name ?? target.correlationId,
+            { body: envelope.payload, from: sender.from },
+            envelope.messageId,
+          );
+          return "deferred";
+        }
+        const mode: "steer" | "follow_up" = envelope.mode === "steer" ? "steer" : "follow_up";
         const delivery = injectLocalAgentMessage(
           envelope.recipientCorrelationId,
           target.name ?? target.correlationId,
@@ -2002,6 +2084,7 @@ export default function registerTeammateExtension(
           mode,
         );
         if (!delivery.delivered) throw new Error(delivery.error ?? `Failed to inject message into "${target.name ?? target.correlationId}".`);
+        return "applied";
       },
       mode: mailboxMode,
     });
@@ -2065,17 +2148,51 @@ export default function registerTeammateExtension(
     targetLabel: string,
     message: string,
     requestedMode: "steer" | "follow_up",
-    options?: { senderCorrelationId?: string; messageKind?: SessionMessageKind },
-  ): Promise<{ delivered: boolean; error?: string; mode?: RpcMessageMode; wasSleeping?: boolean }> => {
+    options?: {
+      senderCorrelationId?: string;
+      messageKind?: SessionMessageKind;
+      preparedDelivery?: { body: string; from: string };
+    },
+  ): Promise<{ delivered: boolean; error?: string; mode?: RpcMessageMode; wasSleeping?: boolean; contextDeferred?: boolean }> => {
     const fence = captureRootSessionFence();
-    const prepared = prepareLocalAgentDelivery(message, options);
+    const prepared = options?.preparedDelivery ?? prepareLocalAgentDelivery(message, options);
     const senderId = options?.senderCorrelationId ?? "caller";
+    // Trusted host status is context-only and remains ACCEPTED in the durable
+    // mailbox until a substantive delivery consumes and acknowledges it.
+    const agent = state.activeRuns.get(correlationId);
+    if (options?.messageKind === "status" && agent) {
+      const host = mailboxHost;
+      if (!host) {
+        deferPreparedAgentContext(correlationId, targetLabel, prepared);
+        return { delivered: true, mode: "follow_up", contextDeferred: true };
+      }
+      try {
+        const enqueued = await host.rollout.deliver({
+          senderId,
+          recipientId: agent.name ?? targetLabel,
+          recipientCorrelationId: correlationId,
+          kind: "follow_up",
+          mode: "notify",
+          payload: prepared.body,
+        });
+        if (!enqueued.result.ok) {
+          const reason = "message" in enqueued.result ? enqueued.result.message : "unknown error";
+          return { delivered: false, error: reason, mode: "follow_up" };
+        }
+        return { delivered: true, mode: "follow_up", contextDeferred: true };
+      } catch (error) {
+        return {
+          delivered: false,
+          error: error instanceof Error ? error.message : String(error),
+          mode: "follow_up",
+        };
+      }
+    }
     // Durable mailbox authoritative path: enqueue and let the consumer inject.
     // Only for live agents with a writable stdin; sleeping agents needing
     // cold-resume (restart) keep the synchronous direct path so restart fires
     // before teammate-send returns (lifecycle contract).
     const host = mailboxHost;
-    const agent = state.activeRuns.get(correlationId);
     if (host && host.mode === "authoritative" && requestedMode !== "steer" && agent?.stdin?.writable) {
       try {
         const enqueued = await host.rollout.deliver({
@@ -2128,13 +2245,18 @@ export default function registerTeammateExtension(
     if (!state.currentSessionId || endpoint.sessionId !== state.currentSessionId) {
       return { delivered: false, endpointId: endpoint.id, transport: "local-root", error: "The local root session endpoint is stale." };
     }
+    const prepared = prepareLocalAgentDelivery(request.message, {
+      senderCorrelationId: request.senderCorrelationId,
+      messageKind: request.messageKind,
+    });
+    const contextDeferred = !sessionMessageTriggersTurn(request.messageKind);
     const delivered = safeSendMessage(pi, {
       customType: "teammate-message",
-      content: request.message,
+      content: prepared.body,
       display: true,
       details: { source: "session-router", endpointId: endpoint.id, mode: request.mode },
     }, {
-      triggerTurn: true,
+      triggerTurn: !contextDeferred,
       deliverAs: request.mode === "steer" ? "steer" : "followUp",
     });
     return {
@@ -2146,6 +2268,7 @@ export default function registerTeammateExtension(
           requestedMode: request.mode,
           effectiveMode: request.mode,
           deliveryStage: request.mode === "steer" ? "injected" : "queued",
+          ...(contextDeferred ? { contextDeferred: true } : {}),
           ...(request.traceId === undefined ? {} : { traceId: request.traceId }),
         },
       } : { error: "The local root session rejected the message." }),
@@ -2209,6 +2332,7 @@ export default function registerTeammateExtension(
         deliveryStage: effectiveMode === "steer" ? "injected" : "queued",
         ...(request.traceId === undefined ? {} : { traceId: request.traceId }),
         ...(result.wasSleeping ? { wasSleeping: true } : {}),
+        ...(result.contextDeferred ? { contextDeferred: true } : {}),
       },
     };
   };
@@ -2240,6 +2364,13 @@ export default function registerTeammateExtension(
         candidate.correlationId === request.targetCorrelationId
       );
       if (pinned) return { code: "resolved", selector, endpoint: pinned, candidates: [pinned] };
+    }
+    const normalizedSelector = selector.startsWith("@") ? selector.slice(1) : selector;
+    if (normalizedSelector === "root") {
+      const endpoint = sessionHostRegistry?.listEndpoints().find((candidate) =>
+        candidate.scope === "local" && candidate.kind === "root"
+      );
+      if (endpoint) return { code: "resolved", selector, selectorKind: "local-root", endpoint, candidates: [endpoint] };
     }
     const correlationId = resolveAgentCorrelationId(state, selector);
     if (correlationId) {
@@ -2328,7 +2459,11 @@ export default function registerTeammateExtension(
     refreshSessionEndpointDirectory(true);
     const registry = sessionHostRegistry;
     if (!registry) return { delivered: false, error: "Session delivery authority is unavailable." };
-    const result = await registry.send(request);
+    const normalizedKind = normalizeSessionMessageKind(request.messageKind, request.trustedStatus);
+    const normalizedRequest = normalizedKind === request.messageKind
+      ? request
+      : { ...request, messageKind: normalizedKind };
+    const result = await registry.send(normalizedRequest);
     if (!ownsRootSessionFence(fence)) return staleRootSessionResult();
     return result;
   };
@@ -2417,6 +2552,9 @@ export default function registerTeammateExtension(
           return;
         }
         workspacePeerPublisher = publisher;
+        // Events can arrive while the initial owner snapshot is being written.
+        // Publish the latest in-memory progress once the publisher is bound.
+        publisher.markDirty();
         const registry = sessionHostRegistry;
         if (!registry) {
           await publisher.stop().catch(() => undefined);
@@ -2430,6 +2568,10 @@ export default function registerTeammateExtension(
           const existing = registry.thread.get(command.commandId, "incoming");
           const replayReceipt = windowThreadReplayReceipt(existing);
           if (replayReceipt) return replayReceipt;
+          const effectiveMessageKind = normalizeSessionMessageKind(
+            command.messageKind,
+            command.source === "monitor",
+          ) ?? "message";
           const incoming = {
             messageId: command.commandId,
             workspaceId: command.workspaceId,
@@ -2437,7 +2579,7 @@ export default function registerTeammateExtension(
             peerOwnerNonce: command.fromOwnerNonce,
             direction: "incoming" as const,
             source: command.source ?? "system",
-            messageKind: command.messageKind ?? "message",
+            messageKind: effectiveMessageKind,
             traceId: command.traceId ?? command.commandId,
             replyTo: `owner:${command.fromOwnerId}`,
             ...(command.fromSessionName === undefined ? {} : { fromSessionName: command.fromSessionName }),
@@ -2463,11 +2605,11 @@ export default function registerTeammateExtension(
             const delivery = workspaceMainSessionDeliveryDecision(
               command.action,
               workspaceBackgroundJobs,
-              command.messageKind,
+              effectiveMessageKind,
             );
             const effectiveAction = delivery.action;
             const deferredFor = delivery.deferred
-              ? command.messageKind === "status" ? "status-policy" : "foreground-bash-bg"
+              ? effectiveMessageKind === "status" ? "status-policy" : "foreground-bash-bg"
               : undefined;
             const delivered = safeSendMessage(pi, {
               customType: "teammate-message",
@@ -2477,7 +2619,7 @@ export default function registerTeammateExtension(
                 message: command.message,
                 effectiveAction,
                 source: command.source,
-                messageKind: command.messageKind,
+                messageKind: effectiveMessageKind,
                 traceId: command.traceId,
                 replyTo: command.replyTo,
                 fromSessionName: command.fromSessionName,
@@ -2489,11 +2631,11 @@ export default function registerTeammateExtension(
                 fromOwnerId: command.fromOwnerId,
                 requestedMode: command.action,
                 mode: effectiveAction,
-                ...(command.messageKind === undefined ? {} : { messageKind: command.messageKind }),
+                ...(command.messageKind === undefined ? {} : { messageKind: effectiveMessageKind }),
                 ...(deferredFor ? { deferredFor } : {}),
               },
             }, {
-              triggerTurn: true,
+              triggerTurn: sessionMessageTriggersTurn(effectiveMessageKind),
               deliverAs: delivery.deliverAs,
             });
             result = delivered
@@ -2501,11 +2643,11 @@ export default function registerTeammateExtension(
                   status: "accepted",
                   message: effectiveAction === command.action
                     ? `${effectiveAction} accepted by main session`
-                    : command.messageKind === "status"
-                      ? "status queued as follow_up by message policy"
+                    : effectiveMessageKind === "status"
+                      ? "status stored as context by message policy"
                       : "steer deferred as follow_up while foreground bash_bg is active",
                   effectiveAction,
-                  deliveryStage: "queued",
+                  deliveryStage: effectiveMessageKind === "status" ? "injected" : "queued",
                 }
               : { status: "rejected", message: "main session rejected the message" };
             if (delivered && effectiveAction !== "steer" && foregroundToolRuns.size > 0) {
@@ -2528,7 +2670,7 @@ export default function registerTeammateExtension(
                 message: command.message,
                 effectiveAction: command.action,
                 source: command.source,
-                messageKind: command.messageKind,
+                messageKind: effectiveMessageKind,
                 traceId: command.traceId,
                 replyTo: command.replyTo,
                 fromSessionName: command.fromSessionName,
@@ -2538,6 +2680,13 @@ export default function registerTeammateExtension(
                 target.name ?? command.targetCorrelationId.slice(0, 8),
                 workspaceMessage,
                 command.action,
+                {
+                  messageKind: effectiveMessageKind,
+                  preparedDelivery: {
+                    body: workspaceMessage,
+                    from: command.fromSessionName ?? `owner-${command.fromOwnerId.slice(0, 8)}`,
+                  },
+                },
               );
               if (!ownsRootSessionFence(fence)) {
                 return { status: "rejected", message: "destination session changed during command delivery" };
@@ -2888,6 +3037,7 @@ export default function registerTeammateExtension(
       const activeAgent: ActiveAgent = {
         agent: agentLabel,
         name: isMultiTask ? undefined : singleTask.name,
+        ...(isMultiTask ? {} : { task: singleTask.prompt }),
         correlationId,
         startedAt: Date.now(),
         abortController,
@@ -2963,6 +3113,7 @@ export default function registerTeammateExtension(
           const childAgent: ActiveAgent = {
             agent: task.agent,
             name: task.name,
+            task: task.prompt,
             correlationId: childId,
             startedAt: Date.now(),
             abortController: taskAbortControllers[index],
@@ -3019,6 +3170,8 @@ export default function registerTeammateExtension(
       let singleCompletionDelivered = false;
       const coldRestarting = new Set<string>();
       const publicationCountByCorrelation = new Map<string, number>();
+      const knownWarningsByCorrelation = new Map<string, Set<string>>();
+      const additionalNotificationByResult = new WeakMap<SingleResult, boolean>();
       const additionalCompletionSeeds = new Map<string, CompletionDispatchSeed>();
       const isLogicallyWakeable = (result: SingleResult): boolean => {
         const target = state.activeRuns.get(result.correlationId);
@@ -3296,6 +3449,7 @@ export default function registerTeammateExtension(
       const publishAdditionalTurnCompletion = (
         result: SingleResult,
         terminalStatus: AgentTerminalStatus,
+        notifyModel: boolean,
       ): void => {
         if (!ownsDispatchGeneration() || coldRestarting.has(result.correlationId)) return;
         const target = state.activeRuns.get(result.correlationId);
@@ -3313,6 +3467,7 @@ export default function registerTeammateExtension(
           terminalStatus === "terminated",
           toStructuredResults([result], baseCwd),
         );
+        if (!notifyModel) return;
         const lastMessage = displayMessageForResult(result);
         const fallbackDelivery = (): void => {
           if (!safeSendMessage(
@@ -3442,9 +3597,21 @@ export default function registerTeammateExtension(
             : async (result, originCwd) => {
                 const publicationCount = (publicationCountByCorrelation.get(result.correlationId) ?? 0) + 1;
                 publicationCountByCorrelation.set(result.correlationId, publicationCount);
+                const knownWarnings = knownWarningsByCorrelation.get(result.correlationId) ?? new Set<string>();
+                knownWarningsByCorrelation.set(result.correlationId, knownWarnings);
+                const notifyAdditional = publicationCount === 1
+                  ? true
+                  : shouldPublishAdditionalTurn(result, knownWarnings);
+                if (publicationCount === 1) {
+                  for (const warning of result.warnings ?? []) {
+                    const normalized = warning.trim();
+                    if (normalized) knownWarnings.add(normalized);
+                  }
+                }
+                additionalNotificationByResult.set(result, notifyAdditional);
                 let resultCompletionSeed = publicationCount === 1 ? completionSeed : undefined;
                 let resultCompletionDurable = publicationCount === 1 ? completionDurable : false;
-                if (publicationCount > 1 && completionSeed && result.publicationId) {
+                if (publicationCount > 1 && notifyAdditional && completionSeed && result.publicationId) {
                   const additionalSeed: CompletionDispatchSeed = {
                     ...completionSeed,
                     dispatchId: result.publicationId,
@@ -3507,7 +3674,15 @@ export default function registerTeammateExtension(
               singleTerminalStatus = canonicalStatus;
               deliverSingleCompletion();
             }
-            if (repeatedTurn) publishAdditionalTurnCompletion(result, canonicalStatus);
+            if (repeatedTurn) publishAdditionalTurnCompletion(
+              result,
+              canonicalStatus,
+              additionalNotificationByResult.get(result)
+                ?? shouldPublishAdditionalTurn(
+                  result,
+                  knownWarningsByCorrelation.get(result.correlationId) ?? new Set<string>(),
+                ),
+            );
           },
           onProgress: (() => {
           const UPDATE_INTERVAL = 300; // ms — throttle TUI updates
@@ -4347,7 +4522,8 @@ export default function registerTeammateExtension(
       signal: AbortSignal,
     ): Promise<TeammateToolResult<{ delivered: boolean }>> {
       const requestedMode = params.mode ?? "follow_up";
-      const messageKind = params.kind ?? "coordination";
+      const requestedMessageKind = params.kind ?? "coordination";
+      const messageKind = normalizeSessionMessageKind(requestedMessageKind) ?? "coordination";
       const message = params.message ?? "";
       if (!message && requestedMode !== "abort") {
         return {
@@ -4358,7 +4534,8 @@ export default function registerTeammateExtension(
       }
 
       const mode = requestedMode === "steer" || requestedMode === "abort" ? requestedMode : "follow_up";
-      const cid = resolveAgentCorrelationId(state, params.to);
+      const localRootTarget = params.to === "root" || params.to === "@root";
+      const cid = localRootTarget ? undefined : resolveAgentCorrelationId(state, params.to);
       const monitorCapture = cid ? undefined : captureMonitorCommunication();
       if (!cid && params.to.startsWith("remote:")) {
         if (mode === "abort") {
@@ -4470,6 +4647,16 @@ export default function registerTeammateExtension(
       if (!cid) {
         const deliveryStage = delivery.receipt?.deliveryStage ?? "queued";
         const effectiveMode = delivery.receipt?.effectiveMode ?? mode;
+        if (delivery.transport === "local-root") {
+          const disposition = delivery.receipt?.contextDeferred
+            ? "stored as context without starting a root turn"
+            : deliveryStage;
+          return {
+            content: [{ type: "text", text: `Message ${disposition} for the root session (kind ${messageKind}, requested ${mode}, effective ${effectiveMode}).` }],
+            isError: false,
+            details: { delivered: true },
+          };
+        }
         const queuedHint = deliveryStage === "queued"
           ? " The message is queued and may not yet be consumed; do not resend it. The peer's reply will be injected after this turn ends; end the turn to receive it."
           : "";
@@ -4494,9 +4681,11 @@ export default function registerTeammateExtension(
         };
       }
 
-      const modeLabel = delivery.receipt?.wasSleeping
-        ? "woken up + prompt"
-        : delivery.receipt?.mode === "steer" ? "active turn cancelled + prompt injected" : "queued until AgentSession would otherwise stop (tool return is not a delivery boundary)";
+      const modeLabel = delivery.receipt?.contextDeferred
+        ? "stored as context for the next substantive turn"
+        : delivery.receipt?.wasSleeping
+          ? "woken up + prompt"
+          : delivery.receipt?.mode === "steer" ? "active turn cancelled + prompt injected" : "queued until AgentSession would otherwise stop (tool return is not a delivery boundary)";
       return {
         content: [{ type: "text", text: `Message ${modeLabel} for "${params.to}".${delivery.receipt?.wasSleeping ? " Agent woken up." : ""}` }],
         isError: false,
@@ -6467,6 +6656,27 @@ export default function registerTeammateExtension(
       ? liveAgent.structuredOutput
       : settledRecord?.structuredOutput;
     const lastResult = liveAgent?.lastResult ?? settledRecord?.lastResult;
+    let detailOutput = settledRecord?.task
+      ? ["--- task ---", ...settledRecord.task.split("\n").slice(0, lines), "--- activity ---", ...output]
+      : output;
+    const transcriptAgent = liveAgent ?? settledRecord;
+    if (detail === "full" && transcriptAgent) {
+      const load = await loadTranscript({
+        correlationId: transcriptAgent.correlationId,
+        sessionFile: transcriptAgent.sessionFile,
+        parentSessionFile: state.mainSessionFile ?? undefined,
+        lastResult: transcriptAgent.lastResult,
+        outputLog: transcriptAgent.outputLog,
+      });
+      const conversation = boundedTranscriptDetail(load.rows, lines, "tail");
+      if (conversation.length > 0) {
+        detailOutput = [
+          ...detailOutput,
+          `--- recent conversation${load.source === "memory" ? " (memory fallback)" : ""} ---`,
+          ...conversation,
+        ];
+      }
+    }
     return {
       target: { kind: "teammate", id },
       found: true,
@@ -6480,24 +6690,58 @@ export default function registerTeammateExtension(
         ? { structuredOutput: structuredClone(structuredOutput) }
         : {}),
       summary: monitored.summary || output.at(-1) || nativeStatus,
-      ...(includeResult ? { detail: output } : {}),
+      ...(includeResult ? { detail: detailOutput } : {}),
       updatedAt: Date.now(),
       capabilities: teammateObservationCapabilities,
     };
   }
 
-  /** One transcript row → one flat text line for observe view="turns". */
-  function formatTurnRow(row: TranscriptRow): string {
-    const text = row.text.replace(/\r?\n/g, " ");
+  const OBSERVE_TRANSCRIPT_LINE_CHARS = 4_000;
+
+  function transcriptRowLabel(row: TranscriptRow): string {
     switch (row.kind) {
-      case "user": return `[user] ${text}`;
-      case "assistant": return `[assistant] ${text}`;
-      case "thinking": return `[thinking] ${text}`;
-      case "tool": return `[tool] ${row.toolName ?? "?"} ${text.slice(0, 200)}`;
-      case "tool_result": return `[result]${row.isError ? " !" : ""} ${row.toolName ?? ""} ${text.slice(0, 300)}`;
-      case "meta": return `[meta] ${text}`;
-      default: return `[${row.role}] ${text}`;
+      case "user": return "[user]";
+      case "assistant": return "[assistant]";
+      case "thinking": return "[thinking]";
+      case "tool": return `[tool] ${row.toolName ?? "?"}`;
+      case "tool_result": return `[result]${row.isError ? " !" : ""}${row.toolName ? ` ${row.toolName}` : ""}`;
+      case "meta": return "[meta]";
+      default: return `[${row.role}]`;
     }
+  }
+
+  /** Preserve physical conversation lines while bounding any single unbroken line. */
+  function formatTurnRow(row: TranscriptRow): string[] {
+    const label = transcriptRowLabel(row);
+    const physical = row.text.replace(/\r\n/g, "\n").split("\n");
+    return (physical.length > 0 ? physical : [""]).map((line, index) => {
+      const clipped = line.length > OBSERVE_TRANSCRIPT_LINE_CHARS
+        ? `${line.slice(0, OBSERVE_TRANSCRIPT_LINE_CHARS - 1)}…`
+        : line;
+      return index === 0 ? `${label} ${clipped}`.trimEnd() : `  ${clipped}`;
+    });
+  }
+
+  function boundedTranscriptDetail(
+    rows: readonly TranscriptRow[],
+    maxLines: number,
+    mode: "head-tail" | "tail" = "head-tail",
+  ): string[] {
+    const all = rows.flatMap(formatTurnRow);
+    const budget = Math.max(1, maxLines);
+    if (all.length <= budget) return all;
+    if (mode === "tail") {
+      if (budget === 1) return [`… ${all.length} conversation line(s); increase lines to inspect`];
+      return [`… ${all.length - budget + 1} earlier conversation line(s) omitted`, ...all.slice(-(budget - 1))];
+    }
+    if (budget === 1) return [`… ${all.length} conversation line(s); increase lines to inspect`];
+    const head = Math.max(1, Math.floor((budget - 1) / 2));
+    const tail = Math.max(0, budget - head - 1);
+    return [
+      ...all.slice(0, head),
+      `… ${all.length - head - tail} conversation line(s) omitted; increase lines to inspect`,
+      ...(tail > 0 ? all.slice(-tail) : []),
+    ];
   }
 
   async function teammateTurnsSnapshot(
@@ -6525,10 +6769,10 @@ export default function registerTeammateExtension(
     }
     const load = await loadTranscript({
       correlationId: agent?.correlationId ?? id,
-      sessionFile: liveAgent?.sessionFile,
+      sessionFile: liveAgent?.sessionFile ?? settledRecord?.sessionFile,
       parentSessionFile: state.mainSessionFile ?? undefined,
       lastResult: agent?.lastResult,
-      outputLog: liveAgent?.outputLog,
+      outputLog: liveAgent?.outputLog ?? settledRecord?.outputLog,
     });
     const turns = groupTranscriptTurns(load.rows);
     const nativeStatus = monitored.agentStatus ?? monitored.waitStatus ?? agent?.status ?? "unknown";
@@ -6557,8 +6801,8 @@ export default function registerTeammateExtension(
         found: true,
         nativeStatus,
         phase: settled ? "settled" : "active",
-        summary: `Turn ${turn.index} · ${turn.userText.slice(0, 60)} · ${turn.rowCount} rows · ${turn.toolCallCount} tools`,
-        detail: turn.rows.map(formatTurnRow),
+        summary: `Turn ${turn.index} · ${turn.userText.slice(0, 100)} · ${turn.rowCount} rows · ${turn.toolCallCount} tools`,
+        detail: boundedTranscriptDetail(turn.rows, options.lines),
         updatedAt: Date.now(),
         capabilities: teammateObservationCapabilities,
       };
@@ -6568,7 +6812,7 @@ export default function registerTeammateExtension(
       : turns.map((turn) => {
           const tools = turn.toolCallCount > 0 ? ` · ${turn.toolCallCount} tools` : "";
           const chars = turn.textLength > 0 ? ` · ${turn.textLength} chars` : "";
-          return `Turn ${turn.index} · ${turn.userText.slice(0, 60)} · ${turn.rowCount} rows${tools}${chars}`;
+          return `Turn ${turn.index} · ${turn.userText.slice(0, 100)} · ${turn.rowCount} rows${tools}${chars}`;
         });
     return {
       target: { kind: "teammate", id },

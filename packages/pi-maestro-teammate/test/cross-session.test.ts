@@ -4,7 +4,7 @@ import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { handleProxyRequest } from "../src/extension/index.ts";
-import type { SessionMessageResult } from "../src/sessions/session-core.ts";
+import type { SessionMessageRequest, SessionMessageResult } from "../src/sessions/session-core.ts";
 import {
   formatWorkspacePeerWindowListings,
   type WorkspacePeerWindowListing,
@@ -143,7 +143,7 @@ async function proxyWorkspace(
   params: Record<string, unknown>,
   send?: (target: string, message: string, mode: "steer" | "follow_up") => Promise<boolean>,
   stateValue: TeammateState = proxyState(),
-  sessionSend?: (request: { selector: string; message: string; mode: "steer" | "follow_up" | "abort" }) => Promise<SessionMessageResult>,
+  sessionSend?: (request: SessionMessageRequest) => Promise<SessionMessageResult>,
   allowCrossSession = true,
 ): Promise<Record<string, unknown>> {
   let response: Record<string, unknown> | undefined;
@@ -208,6 +208,44 @@ test("regular child proxy rejects cross-window list and observe but allows send"
   assert.equal((deniedObserve.result as { isError?: boolean }).isError, true);
 });
 
+test("child proxy normalizes legacy status to coordination when routing to @root", async () => {
+  let captured: SessionMessageRequest | undefined;
+  const routed = await proxyWorkspace(
+    "teammate-send",
+    { to: "@root", message: "audit ready", kind: "status" },
+    undefined,
+    proxyState(),
+    async (request) => {
+      captured = request;
+      return {
+        delivered: true,
+        transport: "local-root",
+        receipt: {
+          requestedMode: "follow_up",
+          effectiveMode: "follow_up",
+          deliveryStage: "queued",
+        },
+      };
+    },
+  );
+
+  assert.equal(captured?.selector, "@root");
+  assert.equal(captured?.messageKind, "coordination");
+  assert.equal(captured?.mode, "follow_up");
+  const result = routed.result as { isError?: boolean; content?: Array<{ text?: string }> };
+  assert.equal(result.isError, false);
+  assert.match(result.content?.[0]?.text ?? "", /queued.*root session/i);
+});
+
+test("nested proxy dispatch preserves root session routing at deeper levels", async () => {
+  const source = await readFile(new URL("../src/extension/teammate-proxy.ts", import.meta.url), "utf8");
+  assert.match(
+    source,
+    /workspacePeerSend,\s*workspacePeerList,\s*sessionSend,\s*\);/,
+    "recursive handleProxyRequest must forward sessionSend so depth-3 children retain @root routing",
+  );
+});
+
 test("root and child proxy window views share bounded contextual formatting", async () => {
   const listed = await proxyWorkspace("teammate-list", { view: "windows" });
   const listResult = listed.result as { isError?: boolean; content?: Array<{ text?: string }> };
@@ -225,6 +263,8 @@ test("root and child proxy window views share bounded contextual formatting", as
   ]);
   assert.match(rootSource, /formatWorkspacePeerWindowListings\(entries\)/);
   assert.match(proxySource, /formatWorkspacePeerWindowListings\(entries\)/);
+  assert.match(rootSource, /triggerTurn: sessionMessageTriggersTurn\(effectiveMessageKind\)/);
+  assert.match(rootSource, /messageKind: effectiveMessageKind,\s*preparedDelivery:/);
 });
 
 test("child proxy preserves queued delivery receipts and timeout ambiguity", async () => {
@@ -235,12 +275,13 @@ test("child proxy preserves queued delivery receipts and timeout ambiguity", asy
     undefined,
     proxyState(),
     async (request) => {
-      assert.equal(request.mode, "follow_up");
+      assert.equal(request.mode, "steer");
+      assert.equal(request.messageKind, "coordination");
       return {
         delivered: true,
         receipt: {
-          requestedMode: "follow_up",
-          effectiveMode: "follow_up",
+          requestedMode: "steer",
+          effectiveMode: "steer",
           deliveryStage: "queued",
           publicationStage: "accepted",
           messageId: "queued-message",
@@ -254,7 +295,7 @@ test("child proxy preserves queued delivery receipts and timeout ambiguity", asy
     details?: { receipt?: { messageId?: string } };
   };
   assert.equal(queuedResult.isError, false);
-  assert.match(queuedResult.content?.[0]?.text ?? "", /requested steer, effective follow_up/);
+  assert.match(queuedResult.content?.[0]?.text ?? "", /requested steer, effective steer/);
   assert.match(queuedResult.content?.[0]?.text ?? "", /may not yet be consumed; do not resend/);
   assert.equal(queuedResult.details?.receipt?.messageId, "queued-message");
 

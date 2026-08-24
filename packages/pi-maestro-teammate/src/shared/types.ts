@@ -251,9 +251,17 @@ export interface TeammateInteractionRecord {
   payload: Record<string, unknown>;
 }
 
+export interface DeferredContextMessage {
+  content: string;
+  /** Durable mailbox record acknowledged only after substantive delivery succeeds. */
+  messageId?: string;
+}
+
 export interface ActiveAgent {
   agent: string;
   name?: string;
+  /** Original dispatch prompt, retained for observe and Cockpit work detail. */
+  task?: string;
   correlationId: string;
   startedAt: number;
   abortController: AbortController;
@@ -290,6 +298,8 @@ export interface ActiveAgent {
   pendingCancel?: { nonce: string; fencedEpoch: number };
   pendingInteractions?: Map<string, TeammateInteractionRecord>;
   inbox: MessageEnvelope[];
+  /** Status-only peer context held until a substantive message starts the next turn. */
+  deferredContextMessages?: DeferredContextMessage[];
   outputLog: string[];
   pendingResolve?: (result: SingleResult) => void;
   lastActivityAt: number;
@@ -426,9 +436,14 @@ export interface SettledAgentRecord {
   correlationId: string;
   agent: string;
   name?: string;
+  /** Original dispatch prompt retained after the live agent leaves the registry. */
+  task?: string;
   status: AgentTerminalStatus;
   settledAt: number;
   lastResult?: string;
+  sessionFile?: string;
+  /** Bounded activity fallback when the persisted session cannot be loaded. */
+  outputLog?: string[];
   /** Schema-valid structured output retained for observe full-detail reads after eviction. */
   structuredOutput?: unknown;
   requestedModel?: string;

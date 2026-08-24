@@ -8,6 +8,7 @@ import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { getObservationProvider } from "../src/public/v1/observation.ts";
 import type { CompletionDeliveryEnvelope } from "../src/completion-outbox/coordinator.ts";
 import registerStructuredOutput from "../src/extension/structured-output.ts";
 import registerTeammateExtension, {
@@ -2627,6 +2628,66 @@ test("teammate-list expands colliding short IDs until watch targets are unambigu
   assert.match(ambiguous.error ?? "", /ambiguous/);
   assert.deepEqual(ambiguous.available.sort(), ["aaaaaaaa-1", "aaaaaaaa-2"]);
   assert.equal(resolveWatchTarget(state, "aaaaaaaa-1").match?.kind, "agent");
+});
+
+test("observe full and expanded turns retain task and multiline conversation", async () => {
+  createRootTool({});
+  const state = (globalThis as typeof globalThis & Record<symbol, unknown>)[
+    Symbol.for("pi-maestro-teammate.root-registry")
+  ] as TeammateState;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "teammate-observe-rich-"));
+  const sessionFile = path.join(dir, "session.jsonl");
+  fs.writeFileSync(sessionFile, [
+    JSON.stringify({ type: "session", version: 3, id: "session", timestamp: "2026-08-01T00:00:00.000Z", cwd: dir }),
+    JSON.stringify({
+      type: "message", id: "u1", parentId: null, timestamp: "2026-08-01T00:00:01.000Z",
+      message: { role: "user", content: "Inspect the observe pipeline", timestamp: 1 },
+    }),
+    JSON.stringify({
+      type: "message", id: "a1", parentId: "u1", timestamp: "2026-08-01T00:00:02.000Z",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "line one\nline two\nline three\nline four\nline five" }],
+        timestamp: 2,
+      },
+    }),
+  ].join("\n"));
+  const correlationId = "observe-rich-agent";
+  state.activeRuns.set(correlationId, {
+    agent: "explorer",
+    name: "observe-rich",
+    task: "Trace observe without flattening dialogue.",
+    correlationId,
+    startedAt: Date.now(),
+    abortController: new AbortController(),
+    inbox: [],
+    outputLog: [],
+    lastActivityAt: Date.now(),
+    sessionFile,
+    status: "running",
+    depth: 0,
+    sleepMs: 0,
+  });
+
+  const provider = getObservationProvider("teammate");
+  assert.ok(provider);
+  const full = await provider.snapshot(correlationId, { detail: "full", lines: 20 });
+  const fullText = full.detail?.join("\n") ?? "";
+  assert.match(fullText, /--- task ---\nTrace observe without flattening dialogue\./);
+  assert.match(fullText, /--- recent conversation ---/);
+  assert.match(fullText, /\[user\] Inspect the observe pipeline/);
+  assert.match(fullText, /\[assistant\] line one\n  line two/);
+
+  const turn = await provider.snapshot(correlationId, { detail: "summary", lines: 4, view: "turns", turn: 1 });
+  assert.equal(turn.detail?.length, 4);
+  assert.match(turn.detail?.[0] ?? "", /\[user\] Inspect the observe pipeline/);
+  assert.match(turn.detail?.join("\n") ?? "", /conversation line\(s\) omitted/);
+  assert.match(turn.detail?.at(-1) ?? "", /line five/);
+
+  fs.rmSync(dir, { recursive: true, force: true });
+  delete (globalThis as typeof globalThis & Record<symbol, unknown>)[
+    Symbol.for("pi-maestro-teammate.root-registry")
+  ];
 });
 
 test("teammate-watch explains provider queueing before first activity", () => {

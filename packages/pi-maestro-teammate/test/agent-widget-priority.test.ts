@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS } from "../src/shared/limits.ts";
 import { renderAgentStatusWidget } from "../src/extension/index.ts";
 
@@ -32,6 +33,43 @@ test("agent widget keeps recent failed work and the latest live edge visible in 
   assert.match(compact, /worker-1.*failed/);
   assert.match(compact, /1 running/);
   assert.match(compact, /■ @worker-8/);
+});
+
+test("agent widget leaves the final terminal column empty during live updates", () => {
+  const now = Date.now();
+  const agent = {
+    agent: "scholar-ralph-executor",
+    name: "scholar-ralph-executor",
+    correlationId: "125d198c-live",
+    startedAt: now - 65_000,
+    abortController: new AbortController(),
+    inbox: [],
+    outputLog: [],
+    lastActivityAt: now,
+    status: "running" as const,
+    depth: 0,
+    sleepMs: 0,
+    progress: [{
+      agent: "scholar-ralph-executor",
+      name: "scholar-ralph-executor",
+      correlationId: "125d198c-live",
+      taskIndex: 0,
+      dependencies: [],
+      status: "running" as const,
+      toolCount: 15,
+      inputTokens: 377_100,
+      outputTokens: 8_000,
+      cacheReadTokens: 128,
+      cacheWriteTokens: 0,
+      lastActivityAt: now,
+    }],
+  };
+  const theme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
+  const width = 80;
+  const lines = renderAgentStatusWidget([agent], width, theme);
+
+  assert.equal(Math.max(...lines.map(visibleWidth)), width - 1);
+  for (const line of lines) assert.ok(visibleWidth(line) < width);
 });
 
 test("agent widget trusts a settled lifecycle over a lifecycle-pending progress snapshot", () => {

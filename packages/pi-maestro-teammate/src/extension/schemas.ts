@@ -299,7 +299,7 @@ export const LocalTeammateListParams = Type.Object({
 export const TeammateSendParams = Type.Object({
   to: Type.String({
     description:
-      "Target agent or peer session — name, @name, displayed name#correlation-id-prefix, correlation ID (or prefix), owner:<ownerId> for a window, or owner:<ownerId>:<correlationId> for a remote agent",
+      "Target teammate or root/peer session — root or @root for the dispatching root session; otherwise name, @name, displayed name#correlation-id-prefix, correlation ID (or prefix), owner:<ownerId> for a window, or owner:<ownerId>:<correlationId> for a remote agent",
   }),
   message: Type.Optional(
     Type.String({
@@ -317,12 +317,12 @@ export const TeammateSendParams = Type.Object({
     }),
   ),
   kind: Type.Optional(
-    Type.Unsafe<"coordination" | "request" | "status" | "supervision">({
+    Type.Unsafe<"coordination" | "request" | "supervision">({
       type: "string",
-      enum: ["coordination", "request", "status", "supervision"],
+      enum: ["coordination", "request", "supervision"],
       default: "coordination",
       description:
-        'Cross-session message semantics. "coordination" adds execution constraints without changing the user objective; "request" asks the peer to evaluate work without granting human authorization; "status" is informational and is always queued; "supervision" carries safety or lifecycle constraints. Local agent delivery preserves its existing direct-message behavior.',
+        'Message semantics. "coordination" adds execution constraints without changing the user objective; "request" asks the peer to evaluate work without granting human authorization; "supervision" carries safety or lifecycle constraints. Informational status is a trusted host channel and is not model-selectable.',
     }),
   ),
 }, {

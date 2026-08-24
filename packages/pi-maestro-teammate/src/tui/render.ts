@@ -44,6 +44,12 @@ function dynamicComponent(build: (width: number) => string[]): Component {
   return { render: (w: number) => build(w), invalidate() {} };
 }
 
+function liveRenderWidth(width: number): number {
+  // Writing the terminal's final column can arm auto-wrap. A later live update
+  // then lands on the next row even though the TUI is replacing one line.
+  return Math.max(1, width - 1);
+}
+
 /**
  * Result components live in the message stream forever, and every unrelated
  * `requestRender` re-runs their build callback. Memoize per width so an
@@ -420,7 +426,7 @@ function renderProgress(
     return dynamicComponent((w) => {
       const preview = truncateToWidth(content.split("\n")[0] ?? "", Math.max(1, w - 4), "…");
       const icon = (result as { isError?: boolean }).isError ? theme.fg("error", "✗") : theme.fg("success", "■");
-      return [truncateToWidth(`${icon} ${theme.fg("dim", preview)}`, Math.max(1, w), "…")];
+      return [truncateToWidth(`${icon} ${theme.fg("dim", preview)}`, liveRenderWidth(w), "…")];
     });
   }
 
@@ -446,7 +452,7 @@ function renderProgress(
         : failed > 0
           ? tuiT("progress.summary.failed", { count: failed, total: entries.length })
           : tuiT("progress.summary.running", { count: running, total: entries.length });
-      return [truncateToWidth(`${icon} ${label}`, Math.max(1, w), "…")];
+      return [truncateToWidth(`${icon} ${label}`, liveRenderWidth(w), "…")];
     }
 
     const palette: ProgressPalette = {
@@ -580,7 +586,7 @@ function renderProgress(
     if (entries.length > 1) {
       lines.push(theme.fg("dim", tuiT("progress.footer", { max: Math.min(9, entries.length) })));
     }
-    return lines.map((line) => truncateToWidth(line, Math.max(1, w), "…"));
+    return lines.map((line) => truncateToWidth(line, liveRenderWidth(w), "…"));
   });
 }
 
@@ -937,6 +943,6 @@ function renderQuietTeammateResult(result: AgentToolResult<Details>, theme: Them
   return dynamicComponent((w) => {
     const lines = [qLine(theme, glyph, "teammate", stateText)];
     appendQuietAgentTree(lines, entries, childCalls, theme);
-    return lines.map((line) => truncateToWidth(line, Math.max(1, w), "…"));
+    return lines.map((line) => truncateToWidth(line, liveRenderWidth(w), "…"));
   });
 }

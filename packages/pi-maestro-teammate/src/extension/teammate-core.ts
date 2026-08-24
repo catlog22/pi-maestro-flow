@@ -149,6 +149,7 @@ import type {
   AgentRunPhase,
   ChildAgentCallSnapshot,
   ActiveAgent,
+  DeferredContextMessage,
   AgentStatus,
   AgentTerminalStatus,
   MessageEnvelope,
@@ -241,6 +242,91 @@ export function terminalStatusForResult(
 
 export function resultIsError(result: SingleResult): boolean {
   return terminalStatusForResult(result) === "failed";
+}
+
+const DEFERRED_AGENT_CONTEXT_MAX_MESSAGES = 16;
+const DEFERRED_AGENT_CONTEXT_MAX_CHARS = 32_000;
+const DEFERRED_AGENT_CONTEXT_TRUNCATION = "\n[status context truncated]";
+
+function boundedDeferredContext(message: string, maxChars: number): string {
+  if (message.length <= maxChars) return message;
+  if (maxChars <= DEFERRED_AGENT_CONTEXT_TRUNCATION.length) {
+    return DEFERRED_AGENT_CONTEXT_TRUNCATION.slice(-maxChars);
+  }
+  return `${message.slice(0, maxChars - DEFERRED_AGENT_CONTEXT_TRUNCATION.length)}${DEFERRED_AGENT_CONTEXT_TRUNCATION}`;
+}
+
+function boundedDeferredContextMessages(
+  messages: readonly DeferredContextMessage[],
+): DeferredContextMessage[] {
+  const retained = messages.slice(-DEFERRED_AGENT_CONTEXT_MAX_MESSAGES);
+  if (retained.length === 0) return [];
+  const perMessage = Math.floor(DEFERRED_AGENT_CONTEXT_MAX_CHARS / retained.length);
+  return retained.map((message) => ({
+    ...message,
+    content: boundedDeferredContext(message.content, perMessage),
+  }));
+}
+
+/** Hold status-only context without starting an otherwise empty agent turn. */
+export function deferAgentContextMessage(agent: ActiveAgent, content: string, messageId?: string): void {
+  agent.deferredContextMessages = boundedDeferredContextMessages([
+    ...(agent.deferredContextMessages ?? []),
+    { content, ...(messageId === undefined ? {} : { messageId }) },
+  ]);
+}
+
+/** Atomically reserve deferred context for one substantive delivery. */
+export function takeDeferredAgentContext(agent: ActiveAgent): DeferredContextMessage[] {
+  const pending = agent.deferredContextMessages ?? [];
+  agent.deferredContextMessages = undefined;
+  return pending;
+}
+
+/** Restore a failed delivery ahead of status messages that arrived meanwhile. */
+export function restoreDeferredAgentContext(
+  agent: ActiveAgent,
+  messages: readonly DeferredContextMessage[],
+): void {
+  if (messages.length === 0) return;
+  agent.deferredContextMessages = boundedDeferredContextMessages([
+    ...messages,
+    ...(agent.deferredContextMessages ?? []),
+  ]);
+}
+
+/** Attach one reserved status-context snapshot to a substantive delivery. */
+export function messageWithDeferredAgentContext(
+  context: readonly DeferredContextMessage[],
+  message: string,
+): string {
+  if (context.length === 0) return message;
+  return [
+    "[deferred teammate status context]",
+    context.map((entry) => entry.content).join("\n\n"),
+    "[current teammate message]",
+    message,
+  ].join("\n\n");
+}
+
+/** Empty successful follow-up turns update lifecycle state but need no model notification. */
+export function shouldPublishAdditionalTurn(
+  result: SingleResult,
+  knownWarnings?: Set<string>,
+): boolean {
+  if (terminalStatusForResult(result) !== "completed" || result.exitCode !== 0) return true;
+  if (result.structuredOutput !== undefined) return true;
+  const newWarning = result.warnings?.some((warning) => {
+    const normalized = warning.trim();
+    if (normalized.length === 0) return false;
+    if (knownWarnings?.has(normalized)) return false;
+    knownWarnings?.add(normalized);
+    return true;
+  }) ?? false;
+  if (newWarning) return true;
+  return result.messages.some((message) =>
+    message.role !== "user" && message.content.trim().length > 0
+  );
 }
 
 export function aggregateTerminalStatus(results: readonly SingleResult[]): AgentTerminalStatus {
@@ -629,17 +715,18 @@ export const LOCAL_TEAMMATE_LIST_GUIDELINES = [
   'Use teammate-list with view="roles" when an available builtin, project, or user-defined agent name is needed; use active/named/all for local running work.',
 ];
 
-export const TEAMMATE_SEND_DESCRIPTION = `Send a typed message to a running or sleeping teammate agent, addressed by name, @name, displayed name#correlation-id-prefix, correlation ID (or prefix), or a cross-session target such as owner:<ownerId> for a window or owner:<ownerId>:<correlationId> for a remote agent. Cross-session targets do not require Monitor mode to send: discovering windows (and their agent correlation IDs) through teammate-list view=windows does, and an incoming workspace message carries its sender address, which is a valid reply target.
+export const TEAMMATE_SEND_DESCRIPTION = `Send a typed message to a running or sleeping teammate agent, addressed by name, @name, displayed name#correlation-id-prefix, correlation ID (or prefix), or a cross-session target such as owner:<ownerId> for a window or owner:<ownerId>:<correlationId> for a remote agent. A child agent may address its dispatching root session as root or @root. Cross-session targets do not require Monitor mode to send: discovering windows (and their agent correlation IDs) through teammate-list view=windows does, and an incoming workspace message carries its sender address, which is a valid reply target.
 
 Modes: "steer" | "follow_up" (default) | "abort". Steer requests cancellation of the active agent turn and, after cancellation is acknowledged, delivers the message as the replacement or next prompt; it is never inserted into the middle of a running tool call. Use it only when the target must see a correction or constraint before the active turn completes. Follow_up does not interrupt and is consumed only when the target AgentSession would otherwise stop: the active model response plus every tool call, continuation, native retry, and compaction in that turn must finish first. A tool returning is not a delivery boundary; earlier queued input is consumed first, and a session that never reaches its stop point can delay follow_up indefinitely. An unacknowledged steer degrades to queued follow_up. Cross-session targets support only "steer" and "follow_up".
 
-Cross-session kinds: "coordination" (default, execution constraints only), "request" (a peer request without human authorization), "status" (informational and always queued), or "supervision" (safety/lifecycle constraints). The kind does not alter local-agent direct-message behavior. A queued or accepted cross-session receipt confirms enqueueing only, not that the target model consumed the message; do not resend it without new evidence.`;
-export const TEAMMATE_SEND_SNIPPET = "Send a typed coordination, request, status, or supervision message to a teammate target.";
+Message kinds: "coordination" (default, execution constraints only), "request" (a peer request without human authorization), or "supervision" (safety/lifecycle constraints). Informational status is reserved for trusted host telemetry and is not model-selectable. A queued or accepted cross-session receipt confirms enqueueing only, not that the target model consumed the message; do not resend it without new evidence.`;
+export const TEAMMATE_SEND_SNIPPET = "Send a typed coordination, request, or supervision message to a teammate target.";
 export const TEAMMATE_SEND_GUIDELINES = [
   "Use teammate-send only for new information, a correction, an explicitly requested response, a safety/lifecycle constraint, or termination; use steer only when the target must see it before the active turn completes, follow_up when current work must not be interrupted, and abort only to terminate work.",
   "follow_up is consumed only when the target AgentSession would otherwise stop. A tool returning is not a delivery boundary: the active model response, all tool calls and continuations, native retries, compaction, and earlier queued input finish first.",
+  "Use root or @root from a child agent to report substantive findings to the dispatching root session. Informational status is a trusted host-only channel; model-originated legacy status is treated as coordination.",
   "Do not send routine acknowledgements or status pings. A queued or accepted receipt means persisted or enqueued, not consumed by the target model; never resend that message unless new evidence requires a correction.",
-  "For cross-session messages, use kind=coordination for execution constraints, request for work the peer must evaluate, status for explicitly requested information only, and supervision for safety/lifecycle constraints. Internal messages never replace the human user's active objective.",
+  "For cross-session messages, use kind=coordination for execution constraints, request for work the peer must evaluate, and supervision for safety/lifecycle constraints. Internal messages never replace the human user's active objective.",
   "For another Pi window, teammate-list view=windows (Monitor mode only) provides targets (owner:<ownerId> for the window or owner:<ownerId>:<correlationId> for one of its agents); use the correlation ID shown by the listing consistently across teammate-send, observe, and resource.",
   'To verify delivery or read the message later, use teammate-list with view="inbox"; persisted messages stay readable after the target window is closed.',
 ];
@@ -1408,6 +1495,7 @@ export function emitTeammateStarted(
     correlationId: agent.correlationId,
     agent: agent.agent,
     name: agent.name,
+    ...(agent.task ? { task: agent.task } : {}),
     spawnedBy: agent.spawnedBy,
     startedAt: agent.startedAt,
     lastActivityAt: agent.lastActivityAt,
@@ -1864,7 +1952,10 @@ export function renderAgentStatusWidget(
   width: number,
   theme: AgentWidgetTheme,
 ): string[] {
-  const safeWidth = Math.max(1, width);
+  const viewportWidth = Math.max(1, width);
+  // Keep the last terminal column empty so live row updates cannot trigger
+  // auto-wrap and move the differential renderer's hardware cursor.
+  const safeWidth = Math.max(1, viewportWidth - 1);
   const activityOrder = (a: AgentWidgetRow, b: AgentWidgetRow): number =>
     b.lastActivityAt - a.lastActivityAt || a.correlationId.localeCompare(b.correlationId);
   const unorderedRows = agentWidgetRows(agents);
@@ -1895,7 +1986,7 @@ export function renderAgentStatusWidget(
   for (const row of [...unorderedRows].sort(activityOrder)) append(row);
   if (rows.length === 0) return [];
 
-  const maxVisible = safeWidth < 20 ? 3 : safeWidth < 40 ? 4 : 6;
+  const maxVisible = viewportWidth < 20 ? 3 : viewportWidth < 40 ? 4 : 6;
   const selected = new Set<string>();
   const liveEdge = rows.find((row) => LIVE_AGENT_STATUSES.has(row.status));
   if (liveEdge) selected.add(liveEdge.correlationId);
@@ -1918,7 +2009,7 @@ export function renderAgentStatusWidget(
     return theme.fg("dim", "□");
   };
 
-  if (safeWidth < 20) {
+  if (viewportWidth < 20) {
     const compact = visible.map((row) => truncateToWidth(
       `${icon(row)} @${row.label} ${row.action}`,
       safeWidth,
@@ -1995,8 +2086,8 @@ export function renderAgentStatusWidget(
         : "",
     ].filter(Boolean).join(" · ");
     const relationshipText = relationship ? ` · ${relationship}` : "";
-    const agentText = safeWidth < 40 ? "" : ` ${theme.fg("muted", row.agent)}`;
-    const rowContent = safeWidth < 40
+    const agentText = viewportWidth < 40 ? "" : ` ${theme.fg("muted", row.agent)}`;
+    const rowContent = viewportWidth < 40
       ? `${theme.fg("accent", `@${row.label}`)} · ${state} · ${theme.fg("dim", duration)}`
       : `${theme.fg("accent", `@${row.label}`)}${agentText} · ${theme.fg("dim", metrics)} · ${state}${theme.fg("dim", relationshipText)}`;
     lines.push(truncateToWidth(

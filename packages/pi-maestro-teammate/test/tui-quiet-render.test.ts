@@ -2,6 +2,7 @@ import { altKey } from "pi-maestro-settings-core/v1";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test, { afterEach } from "node:test";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { isQuietMode, setQuietMode } from "../src/quiet-state.ts";
 import { auxToolCallFallback, auxToolResultFallback, renderQuietTeammateAux, renderTeammateCall, renderTeammateListCall, renderTeammateListResult, renderTeammateResult } from "../src/tui/render.ts";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
@@ -135,6 +136,38 @@ test("quiet streaming progress keeps agent and child trees but hides stream cont
   assert.match(rendered[2], /└─.*@review.*child agent/);
   assert.doesNotMatch(rendered.join("\n"), /using|streaming|SECRET_TAIL_TEXT|CHILD_SECRET_TAIL/);
   assert.doesNotMatch(rendered.join("\n"), new RegExp(`${altRe("R")}`));
+});
+
+test("quiet streaming progress leaves the final terminal column empty", () => {
+  setQuietMode(true, "dot");
+  const now = Date.now();
+  const width = 80;
+  const rendered = renderTeammateResult({
+    content: [{ type: "text", text: "working" }],
+    details: {
+      mode: "single",
+      results: [],
+      progress: [{
+        agent: "scholar-ralph-executor",
+        name: "scholar-ralph-executor",
+        correlationId: "125d198c-live",
+        taskIndex: 0,
+        dependencies: [],
+        status: "running",
+        startedAt: new Date(now - 65_000).toISOString(),
+        toolCount: 15,
+        inputTokens: 377_100,
+        outputTokens: 8_000,
+        cacheReadTokens: 128,
+        cacheWriteTokens: 0,
+        lastActivityAt: now,
+      }],
+    },
+  }, { expanded: false }, theme as never).render(width);
+
+  assert.equal(rendered.length, 2);
+  assert.equal(Math.max(...rendered.map(visibleWidth)), width - 1);
+  for (const line of rendered) assert.ok(visibleWidth(line) < width);
 });
 
 test("quiet streaming progress retains a structural row on a narrow viewport", () => {

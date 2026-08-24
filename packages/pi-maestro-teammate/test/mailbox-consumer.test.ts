@@ -242,6 +242,53 @@ test("consumer acknowledge transitions accepted to applied (IPC-ack path)", asyn
   assert.equal(await consumer.acknowledge("not-a-valid-message-id"), false);
 });
 
+test("deferred dispatch remains accepted until acknowledged and replays after restart", async () => {
+  const envelope = makeEnvelope("00000000-0000-4000-8000-000000000041", { mode: "notify" });
+  await store.writeStaging(envelope);
+  await store.promoteToReady(envelope.messageId);
+
+  const firstDispatches: string[] = [];
+  const first = new MailboxConsumer({
+    store,
+    router,
+    recipientCorrelationId: "corr-001",
+    workspaceId: "a".repeat(64),
+    onDispatch: async (message) => {
+      firstDispatches.push(message.messageId);
+      return "deferred";
+    },
+    pollMs: 10,
+    now: () => nowMs,
+  });
+  first.start();
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  await first.stop();
+
+  assert.deepEqual(firstDispatches, [envelope.messageId]);
+  assert.ok(await store.readEnvelope("accepted", envelope.messageId));
+  assert.equal(await store.readEnvelope("applied", envelope.messageId), undefined);
+
+  const replayedDispatches: string[] = [];
+  const restarted = new MailboxConsumer({
+    store,
+    router,
+    recipientCorrelationId: "corr-001",
+    workspaceId: "a".repeat(64),
+    onDispatch: async (message) => { replayedDispatches.push(message.messageId); },
+    pollMs: 10,
+    now: () => nowMs,
+  });
+  assert.equal(await restarted.replayAcceptedToReady(), 1);
+  assert.ok(await store.readEnvelope("ready", envelope.messageId));
+  restarted.start();
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  await restarted.stop();
+
+  assert.deepEqual(replayedDispatches, [envelope.messageId]);
+  assert.ok(await store.readEnvelope("applied", envelope.messageId));
+  assert.equal(await store.readEnvelope("accepted", envelope.messageId), undefined);
+});
+
 test("consumer skips messages for other recipients", async () => {
   const dispatched: string[] = [];
   const consumer = new MailboxConsumer({

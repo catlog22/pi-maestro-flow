@@ -25,6 +25,20 @@ export type SessionMessageMode = "steer" | "follow_up" | "abort";
 export type SessionMessageSource = "user" | "monitor" | "system";
 export type SessionMessageKind = "message" | "coordination" | "request" | "status" | "supervision";
 export type SessionDeliveryStage = "queued" | "injected";
+
+/** Model-originated status is coordination; only trusted host telemetry stays context-only. */
+export function normalizeSessionMessageKind(
+  kind: SessionMessageKind | undefined,
+  trustedStatus = false,
+): SessionMessageKind | undefined {
+  return kind === "status" && !trustedStatus ? "coordination" : kind;
+}
+
+/** Status messages update context but never start a model turn by themselves. */
+export function sessionMessageTriggersTurn(kind: SessionMessageKind | undefined): boolean {
+  return kind !== "status";
+}
+
 export type SessionEndpointCapability = "inspect" | "message" | "steer" | "follow_up" | "abort" | "wake";
 
 export interface SessionEndpointIdentity {
@@ -81,6 +95,7 @@ export interface SessionOwnerProjection extends Omit<SessionEndpointIdentity, "c
 
 export type SessionSelectorKind =
   | "endpoint-id"
+  | "local-root"
   | "owner-root"
   | "owner-agent"
   | "session-name"
@@ -309,8 +324,15 @@ export class EndpointDirectory {
     const localAgents = agents.filter((endpoint) => endpoint.scope === "local");
     const marker = requested.lastIndexOf("#");
 
-    // The established teammate-send contract always gives a local agent name
-    // or id precedence, even when it resembles an owner/window selector.
+    // root/@root is reserved for the dispatching root session. An agent named
+    // root remains reachable through its decorated name#id or correlation id.
+    if (requested === "root") {
+      const localRoots = endpoints.filter((endpoint) => endpoint.kind === "root" && endpoint.scope === "local");
+      if (localRoots.length > 0) return resolved(selector, "local-root", localRoots);
+    }
+
+    // The established teammate-send contract gives other local agent names or
+    // ids precedence when they resemble owner/window selectors.
     if (options.localFirst !== false) {
       const localNames = localAgents.filter((endpoint) => endpoint.name === requested);
       if (localNames.length > 0) return resolved(selector, "name", localNames);
@@ -363,6 +385,8 @@ export interface SessionMessageRequest {
   messageId?: string;
   source?: SessionMessageSource;
   messageKind?: SessionMessageKind;
+  /** Authorizes context-only status semantics; never serialized or model-controlled. */
+  trustedStatus?: boolean;
   traceId?: string;
   replyTo?: string;
   fromSessionName?: string;
@@ -708,6 +732,7 @@ export interface SessionMessageResult {
     messageId?: string;
     traceId?: string;
     wasSleeping?: boolean;
+    contextDeferred?: boolean;
     terminatedCount?: number;
   };
 }

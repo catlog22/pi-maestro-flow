@@ -12,6 +12,10 @@ import registerTeammateExtension, {
   enforceWakeableAgentBudget,
   handleProxyRequest,
   settleAgent,
+  deferAgentContextMessage,
+  takeDeferredAgentContext,
+  restoreDeferredAgentContext,
+  shouldPublishAdditionalTurn,
   switchConversationSession,
   waitForTeammate,
   type TeammateRuntimeOptions,
@@ -25,7 +29,7 @@ import {
   requestPark,
   transferToMain,
 } from "../src/runs/session-handoff.ts";
-import type { ActiveAgent, AgentProgress, Details, TeammateState } from "../src/shared/types.ts";
+import type { ActiveAgent, AgentProgress, Details, SingleResult, TeammateState } from "../src/shared/types.ts";
 
 type ToolResult = {
   content: Array<{ type: "text"; text: string }>;
@@ -79,6 +83,7 @@ function createHarness(runtimeOptions: TeammateRuntimeOptions = {}) {
   let observeTool: { execute(...args: unknown[]): Promise<Record<string, any>> } | undefined;
   const emitted: Array<{ event: string; payload: Record<string, unknown> }> = [];
   const messages: Array<Record<string, unknown>> = [];
+  const messageOptions: Array<Record<string, unknown> | undefined> = [];
   const hooks = new Map<string, Array<(...args: any[]) => unknown>>();
   const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> | void }>();
   let activeTools: string[] = [];
@@ -106,7 +111,10 @@ function createHarness(runtimeOptions: TeammateRuntimeOptions = {}) {
     registerCommand(name: string, command: { handler: (args: string, ctx: any) => Promise<void> | void }) {
       commands.set(name, command);
     },
-    sendMessage(message: Record<string, unknown>) { messages.push(message); },
+    sendMessage(message: Record<string, unknown>, options?: Record<string, unknown>) {
+      messages.push(message);
+      messageOptions.push(options);
+    },
   }, {
     get(target, property) {
       if (property in target) return target[property as keyof typeof target];
@@ -117,7 +125,7 @@ function createHarness(runtimeOptions: TeammateRuntimeOptions = {}) {
   assert.ok(teammate);
   assert.ok(teammateSend);
   assert.ok(observeTool);
-  return { teammate, teammateSend, observeTool, emitted, messages, hooks, commands };
+  return { teammate, teammateSend, observeTool, emitted, messages, messageOptions, hooks, commands };
 }
 
 function context(): Record<string, unknown> {
@@ -1058,6 +1066,159 @@ test("warm wake publishes every subsequent turn completion", async () => {
     ),
     `expected second-turn completion message, got ${JSON.stringify(messages)}`,
   );
+});
+
+test("empty warm turn emits lifecycle completion without another model notification", async () => {
+  let stdout: PassThrough | undefined;
+  const spawnChildProcess = (() => {
+    const child = new EventEmitter() as ChildProcess;
+    stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() { return true; },
+    });
+    queueMicrotask(() => {
+      stdout!.write(`${JSON.stringify(resultReadyTurn("first turn"))}\n`);
+      stdout!.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+    });
+    return child;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+  const { teammate, teammateSend, emitted, messages } = createHarness({ spawnChildProcess });
+  const ctx = context();
+
+  await teammate.execute(
+    "empty-warm-root",
+    { tasks: [{ agent: "workflow-nyquist-auditor", name: "empty-warm-worker", prompt: "first" }], background: false },
+    new AbortController().signal,
+    undefined,
+    ctx,
+  );
+  await waitFor(() => emitted.filter(({ event }) => event === "teammate:complete").length >= 1);
+
+  const sent = await teammateSend.execute(
+    "empty-warm-send",
+    { to: "empty-warm-worker", message: "record context", mode: "follow_up" },
+    new AbortController().signal,
+    undefined,
+    ctx,
+  );
+  assert.equal(sent.isError, false);
+  stdout!.write(`${JSON.stringify({ type: "turn_start" })}\n`);
+  stdout!.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+  await waitFor(() => emitted.filter(({ event }) => event === "teammate:complete").length >= 2);
+
+  assert.equal(emitted.filter(({ event }) => event === "teammate:complete").length, 2);
+  assert.equal(
+    messages.some((message) =>
+      message.customType === "teammate-complete"
+      && typeof message.content === "string"
+      && /\(no output\)$/.test(message.content)
+    ),
+    false,
+    JSON.stringify(messages),
+  );
+});
+
+test("model-originated status is normalized to coordination and starts a turn", async () => {
+  let stdin: PassThrough | undefined;
+  const control: string[] = [];
+  const spawnChildProcess = (() => {
+    const child = new EventEmitter() as ChildProcess;
+    stdin = new PassThrough();
+    stdin.on("data", (chunk) => control.push(String(chunk)));
+    Object.assign(child, {
+      stdin,
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() { return true; },
+    });
+    return child;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+  const { teammate, teammateSend } = createHarness({ spawnChildProcess });
+  const ctx = context();
+
+  await teammate.execute(
+    "status-context-root",
+    { tasks: [{ agent: "general", name: "status-worker", prompt: "wait" }], background: true },
+    new AbortController().signal,
+    undefined,
+    ctx,
+  );
+  const status = await teammateSend.execute(
+    "status-context",
+    { to: "status-worker", message: "audit ready", kind: "status" },
+    new AbortController().signal,
+    undefined,
+    ctx,
+  );
+  assert.equal(status.isError, false);
+  assert.doesNotMatch(status.content[0]?.text ?? "", /stored as context/i);
+  await waitFor(() => control.join("").includes("audit ready"));
+
+  const state = (globalThis as typeof globalThis & Record<symbol, unknown>)[
+    Symbol.for("pi-maestro-teammate.root-registry")
+  ] as TeammateState;
+  const correlationId = state.namedAgents.get("status-worker");
+  assert.ok(correlationId);
+  assert.equal(state.activeRuns.get(correlationId)?.deferredContextMessages, undefined);
+
+  await teammateSend.execute(
+    "status-context-abort",
+    { to: "status-worker", mode: "abort" },
+    new AbortController().signal,
+    undefined,
+    ctx,
+  );
+});
+
+test("deferred status context is bounded and reserved atomically", () => {
+  const agent = { deferredContextMessages: undefined } as unknown as ActiveAgent;
+  deferAgentContextMessage(agent, "x".repeat(40_000));
+  assert.equal(agent.deferredContextMessages?.length, 1);
+  assert.ok((agent.deferredContextMessages?.[0]?.content.length ?? 0) <= 32_000);
+  assert.match(agent.deferredContextMessages?.[0]?.content ?? "", /status context truncated/);
+
+  const firstDelivery = takeDeferredAgentContext(agent);
+  assert.equal(agent.deferredContextMessages, undefined);
+  assert.equal(takeDeferredAgentContext(agent).length, 0, "a concurrent delivery cannot reserve the same context twice");
+  deferAgentContextMessage(agent, "newer status");
+  restoreDeferredAgentContext(agent, firstDelivery);
+  const restored = ((value: ActiveAgent) => value.deferredContextMessages ?? [])(agent);
+  assert.equal(restored.length, 2);
+  assert.match(restored[0]?.content ?? "", /status context truncated/);
+  assert.equal(restored[1]?.content, "newer status");
+});
+
+test("empty successful additional turns do not need a model notification", () => {
+  const base = {
+    exitCode: 0,
+    terminalStatus: "completed",
+    messages: [],
+  } as unknown as SingleResult;
+  assert.equal(shouldPublishAdditionalTurn(base), false);
+  assert.equal(shouldPublishAdditionalTurn({
+    ...base,
+    messages: [{ role: "assistant", content: "updated" }],
+  }), true);
+  assert.equal(shouldPublishAdditionalTurn({
+    ...base,
+    messages: [{ role: "system", content: "diagnostic" }],
+  }), true);
+  const knownWarnings = new Set(["provider warning"]);
+  assert.equal(shouldPublishAdditionalTurn({ ...base, warnings: ["provider warning"] }, knownWarnings), false);
+  assert.equal(shouldPublishAdditionalTurn({ ...base, warnings: ["new warning"] }, knownWarnings), true);
+  assert.equal(shouldPublishAdditionalTurn({ ...base, warnings: ["new warning"] }, knownWarnings), false);
+  assert.equal(shouldPublishAdditionalTurn({ ...base, exitCode: 1, terminalStatus: "failed" }), true);
 });
 
 test("closed runtime cold-resumes the same logical agent from its persisted session", async () => {
@@ -2206,7 +2367,7 @@ test("workspace delivery paths retain the originating root session fence", () =>
     source.indexOf("const routeSessionMessage"),
     source.indexOf("const stopWorkspacePeers"),
   );
-  assert.match(route, /const result = await registry\.send\(request\);\s+if \(!ownsRootSessionFence\(fence\)\)/);
+  assert.match(route, /const result = await registry\.send\(normalizedRequest\);\s+if \(!ownsRootSessionFence\(fence\)\)/);
 
   const advisor = source.slice(
     source.indexOf("async function runAdvisorReview"),
@@ -2222,4 +2383,45 @@ test("workspace delivery paths retain the originating root session fence", () =>
   const shutdown = source.slice(source.lastIndexOf('pi.on("session_shutdown"'));
   assert.ok(shutdown.indexOf("state.sessionGeneration =") < shutdown.indexOf("await "));
   assert.ok(shutdown.indexOf("state.currentSessionId = null") < shutdown.indexOf("await "));
+});
+
+test("model status addressed to @root is normalized and starts a root turn", async () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-root-status-"));
+  const { teammateSend, messages, messageOptions, hooks } = createHarness();
+  const sessionStart = hooks.get("session_start")?.[0];
+  const sessionShutdown = hooks.get("session_shutdown")?.[0];
+  assert.ok(sessionStart);
+  assert.ok(sessionShutdown);
+  const ctx = {
+    ...context(),
+    cwd: project,
+    ui: { setWidget() {} },
+    modelRegistry: { getAvailable: () => [] },
+    sessionManager: {
+      getEntries: () => [],
+      getSessionFile: () => undefined,
+      getSessionId: () => "root-status-session",
+      getSessionName: () => "root-status",
+    },
+  };
+
+  try {
+    await Promise.resolve(sessionStart({ reason: "new" }, ctx));
+    const result = await teammateSend.execute(
+      "root-status",
+      { to: "@root", message: "audit ready", kind: "status" },
+      new AbortController().signal,
+      undefined,
+      ctx,
+    );
+    assert.equal(result.isError, false);
+    assert.match(result.content[0]?.text ?? "", /kind coordination/i);
+    const index = messages.findIndex((message) => String(message.content).includes("audit ready"));
+    assert.notEqual(index, -1);
+    assert.equal(messageOptions[index]?.triggerTurn, true);
+    assert.match(String(messages[index]?.content), /^\[teammate:coordination\] from main/);
+  } finally {
+    await Promise.resolve(sessionShutdown());
+    fs.rmSync(project, { recursive: true, force: true });
+  }
 });

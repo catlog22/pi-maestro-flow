@@ -19,7 +19,7 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Check } from "typebox/value";
 import { isGuiTeammateToolAllowed, registerGuiTool, unregisterGuiTool } from "../shared/gui-registry.ts";
 import { aggregateAgentRunPhase } from "../shared/agent-status.ts";
-import { resolveAgentCompletionTarget } from "../shared/routing.ts";
+import { formatLocalAgentMessage, resolveAgentCompletionTarget } from "../shared/routing.ts";
 import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchParams, TeammateWaitParams, TeammateMonitorParams, ObserveParams, LocalObserveParams } from "./schemas.ts";
 import {
@@ -220,7 +220,10 @@ import {
   resolveWindowInboxAnchor,
   type WindowInboxQuery,
 } from "../sessions/window-inbox.ts";
-import type { SessionMessageResult } from "../sessions/session-core.ts";
+import {
+  normalizeSessionMessageKind,
+  type SessionMessageResult,
+} from "../sessions/session-core.ts";
 
 import {
   AGENT_BUFFER_LIMITS,
@@ -258,6 +261,11 @@ import {
   toStructuredResults,
   emitTeammateResultPublished,
   setAgentStructuredOutput,
+  deferAgentContextMessage,
+  takeDeferredAgentContext,
+  restoreDeferredAgentContext,
+  messageWithDeferredAgentContext,
+  shouldPublishAdditionalTurn,
   trimAgentBuffers,
   wakeSleepingAgent,
 } from "./index.ts";
@@ -277,6 +285,7 @@ import {
   emitComplete, safeSendMessage, notifyBackgroundFailure, replyProxyFailure,
   deliverTeammateCompleteNotification,
   bindAgentName, removeAgentFromRegistry, resolveAgentCorrelationId,
+  resolveLocalAgentSenderContext,
   agentActiveMs, ts, buildAgentList, buildRoleList,
   handleChildInteractionRequest, handleChildRpcUiRequest,
   claimResultReadyNotice, watchTargetStalledAt,
@@ -1191,6 +1200,7 @@ export async function handleProxyRequest(
       const activeAgent: ActiveAgent = {
         agent: normalizedTasks ? `graph(${normalizedTasks.length})` : singleTask.agent,
         name: normalizedTasks ? undefined : singleTask.name,
+        ...(normalizedTasks ? {} : { task: singleTask.prompt }),
         correlationId: cid,
         startedAt: Date.now(),
         abortController: abortCtrl,
@@ -1303,6 +1313,8 @@ export async function handleProxyRequest(
       let nestedCompletionDelivered = false;
       const nestedColdRestarting = new Set<string>();
       const nestedPublicationCount = new Map<string, number>();
+      const nestedKnownWarnings = new Map<string, Set<string>>();
+      const nestedAdditionalNotification = new WeakMap<SingleResult, boolean>();
       const nestedAdditionalSeeds = new Map<string, CompletionDispatchSeed>();
       const finishProxyDispatchTracking = (): boolean => {
         const cancelled = state.cancelledProxyDispatches?.get(requestId) === cid;
@@ -1454,6 +1466,7 @@ export async function handleProxyRequest(
       const publishAdditionalNestedTurn = (
         result: SingleResult,
         terminalStatus: AgentTerminalStatus,
+        notifyModel: boolean,
       ): void => {
         if (!ownsDispatchGeneration() || nestedColdRestarting.has(result.correlationId)) return;
         const target = state.activeRuns.get(result.correlationId);
@@ -1469,6 +1482,7 @@ export async function handleProxyRequest(
           terminalStatus === "terminated",
           toStructuredResults([result], dispatchOriginCwd),
         );
+        if (!notifyModel) return;
         const lastMessage = displayMessageForResult(result);
         const fallbackDelivery = (): void => {
           if (!deliverTeammateCompleteNotification({
@@ -1525,6 +1539,7 @@ export async function handleProxyRequest(
         const childAgent: ActiveAgent = {
           agent: task.agent,
           name: task.name,
+          task: task.prompt,
           correlationId: childId,
           startedAt: Date.now(),
           abortController: taskAbortControllers[index],
@@ -1854,9 +1869,21 @@ export async function handleProxyRequest(
         onResultPublished: async (result, originCwd) => {
           const publicationCount = (nestedPublicationCount.get(result.correlationId) ?? 0) + 1;
           nestedPublicationCount.set(result.correlationId, publicationCount);
+          const knownWarnings = nestedKnownWarnings.get(result.correlationId) ?? new Set<string>();
+          nestedKnownWarnings.set(result.correlationId, knownWarnings);
+          const notifyAdditional = publicationCount === 1
+            ? true
+            : shouldPublishAdditionalTurn(result, knownWarnings);
+          if (publicationCount === 1) {
+            for (const warning of result.warnings ?? []) {
+              const normalized = warning.trim();
+              if (normalized) knownWarnings.add(normalized);
+            }
+          }
+          nestedAdditionalNotification.set(result, notifyAdditional);
           let resultSeed = publicationCount === 1 ? completionSeed : undefined;
           let resultDurable = publicationCount === 1 ? completionDurable : false;
-          if (publicationCount > 1 && completionSeed && authority.completion && result.publicationId) {
+          if (publicationCount > 1 && notifyAdditional && completionSeed && authority.completion && result.publicationId) {
             const additionalSeed: CompletionDispatchSeed = {
               ...completionSeed,
               dispatchId: result.publicationId,
@@ -1920,7 +1947,15 @@ export async function handleProxyRequest(
               : canonicalStatus === "failed" ? "failed" : "completed");
           }
           deliverNestedCompletion();
-          if (repeatedTurn) publishAdditionalNestedTurn(result, canonicalStatus);
+          if (repeatedTurn) publishAdditionalNestedTurn(
+            result,
+            canonicalStatus,
+            nestedAdditionalNotification.get(result)
+              ?? shouldPublishAdditionalTurn(
+                result,
+                nestedKnownWarnings.get(result.correlationId) ?? new Set<string>(),
+              ),
+          );
         },
         onProgress: (data) => {
           // Refreshed on every branch. This is the only input to every stall
@@ -1977,6 +2012,7 @@ export async function handleProxyRequest(
             undefined,
             workspacePeerSend,
             workspacePeerList,
+            sessionSend,
           );
         },
       };
@@ -2513,7 +2549,7 @@ export async function handleProxyRequest(
         reply(crossSessionError("observe"));
         return;
       }
-      const output = formatObserveResult(result, params.detail !== "summary");
+      const output = formatObserveResult(result, params.detail !== "summary" || params.view === "turns");
       const failed = result.reason === "timeout"
         || result.reason === "aborted"
         || result.observations.some((item) => !item.found || item.outcome === "failure" || item.outcome === "stalled");
@@ -2574,10 +2610,12 @@ export async function handleProxyRequest(
       const to = params.to as string;
       const message = (params.message as string | undefined) ?? "";
       const requestedMode = (params.mode as RpcMessageMode) ?? "follow_up";
-      const messageKind = (params.kind as WorkspacePeerMessageKind | undefined) ?? "coordination";
-      const localCid = resolveAgentCorrelationId(state, to);
+      const requestedMessageKind = (params.kind as WorkspacePeerMessageKind | undefined) ?? "coordination";
+      const messageKind = normalizeSessionMessageKind(requestedMessageKind) ?? "coordination";
+      const localRootTarget = to === "root" || to === "@root";
+      const localCid = localRootTarget ? undefined : resolveAgentCorrelationId(state, to);
 
-      if (to.startsWith("owner:") && (sessionSend || workspacePeerSend) && !localCid) {
+      if (((localRootTarget && sessionSend) || to.startsWith("owner:")) && (sessionSend || workspacePeerSend) && !localCid) {
         if (!message && requestedMode !== "abort") {
           reply({ type: "teammate_proxy_result", requestId, result: {
             content: [{ type: "text", text: `"message" is required for mode "${requestedMode}".` }],
@@ -2609,8 +2647,9 @@ export async function handleProxyRequest(
             messageKind,
           })
           : { delivered: await workspacePeerSend!(to, message, routedMode) };
+        const targetLabel = localRootTarget ? "root session" : `workspace target ${to}`;
         if (!delivery.delivered) {
-          const baseError = delivery.error ?? `Message rejected for workspace target ${to}.`;
+          const baseError = delivery.error ?? `Message rejected for ${targetLabel}.`;
           const ambiguous = delivery.receipt?.publicationStage === "published"
             && !/may still have been delivered/i.test(baseError)
             ? " The message may still have been delivered; inspect teammate-list with view=inbox before retrying."
@@ -2624,13 +2663,15 @@ export async function handleProxyRequest(
         }
         const deliveryStage = delivery.receipt?.deliveryStage ?? "queued";
         const effectiveMode = delivery.receipt?.effectiveMode ?? routedMode;
-        const queuedHint = deliveryStage === "queued"
+        const contextDeferred = delivery.receipt?.contextDeferred === true;
+        const queuedHint = deliveryStage === "queued" && !contextDeferred
           ? " The message may not yet be consumed; do not resend it."
           : "";
+        const disposition = contextDeferred ? "stored as context without starting a turn" : deliveryStage;
         reply({ type: "teammate_proxy_result", requestId, result: {
           content: [{
             type: "text",
-            text: `Message ${deliveryStage} for workspace target ${to} (kind ${messageKind}, requested ${requestedMode}, effective ${effectiveMode}).${queuedHint}`,
+            text: `Message ${disposition} for ${targetLabel} (kind ${messageKind}, requested ${requestedMode}, effective ${effectiveMode}).${queuedHint}`,
           }],
           isError: false,
           details: {
@@ -2707,12 +2748,51 @@ export async function handleProxyRequest(
           }});
           return;
         }
-        const modeLabel = delivery.receipt?.wasSleeping
-          ? "woken up + prompt"
-          : delivery.receipt?.mode === "steer" ? "active turn cancelled + prompt injected" : "queued until AgentSession would otherwise stop (tool return is not a delivery boundary)";
+        const modeLabel = delivery.receipt?.contextDeferred
+          ? "stored as context for the next substantive turn"
+          : delivery.receipt?.wasSleeping
+            ? "woken up + prompt"
+            : delivery.receipt?.mode === "steer" ? "active turn cancelled + prompt injected" : "queued until AgentSession would otherwise stop (tool return is not a delivery boundary)";
         reply({ type: "teammate_proxy_result", requestId, result: {
           content: [{ type: "text", text: `Message ${modeLabel} for "${to}".${delivery.receipt?.wasSleeping ? " Agent woken up." : ""}` }],
           isError: false, details: { delivered: true },
+        }});
+        return;
+      }
+      if (!sessionSend && agent && messageKind === "status" && requestedMode !== "abort") {
+        const sender = resolveLocalAgentSenderContext(state, parentCid);
+        const deferred = formatLocalAgentMessage({
+          message,
+          messageKind,
+          senderLabel: sender.label,
+          replyToSelector: sender.replyTo,
+        });
+        deferAgentContextMessage(agent, deferred);
+        const now = Date.now();
+        agent.inbox.push({
+          id: randomUUID(),
+          from: sender.from,
+          to,
+          kind: "notification",
+          payload: deferred,
+          timestamp: now,
+        });
+        agent.outputLog.push(`[${new Date(now).toISOString().slice(11, 19)}] ◀ status context deferred: ${deferred.slice(0, 100)}`);
+        trimAgentBuffers(agent);
+        agent.lastActivityAt = now;
+        pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
+          correlationId: cid,
+          from: sender.from,
+          to,
+          mode: "follow_up",
+          message: deferred,
+          lastActivityAt: now,
+          isSend: true,
+        });
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text: `Message stored as context for the next substantive turn for "${to}".` }],
+          isError: false,
+          details: { delivered: true },
         }});
         return;
       }
@@ -2735,13 +2815,15 @@ export async function handleProxyRequest(
       // Only for live agents with a writable stdin; sleeping agents needing
       // cold-resume keep the synchronous direct path (lifecycle contract).
       if (mailboxDeliver && requestedMode !== "abort" && requestedMode !== "steer" && agent?.stdin?.writable) {
+        const deferredContext = takeDeferredAgentContext(agent);
+        const deliveryMessage = messageWithDeferredAgentContext(deferredContext, message);
         void mailboxDeliver({
           senderId: parentCid ?? "caller",
           recipientId: to,
           recipientCorrelationId: cid,
           kind: "follow_up",
           mode: "follow_up",
-          payload: message,
+          payload: deliveryMessage,
         }).then((result) => {
           if (result.result.ok) {
             const now = Date.now();
@@ -2772,6 +2854,7 @@ export async function handleProxyRequest(
               isError: false, details: { delivered: true },
             }});
           } else {
+            restoreDeferredAgentContext(agent, deferredContext);
             // Surface the failure — never silently fall back to direct stdin.
             const reason = "message" in result.result ? (result.result as { message?: string }).message : "unknown error";
             console.error(`[pi-maestro-teammate] mailbox delivery failed for ${to}: ${reason}`);
@@ -2781,6 +2864,7 @@ export async function handleProxyRequest(
             }});
           }
         }).catch((error) => {
+          restoreDeferredAgentContext(agent, deferredContext);
           console.error(`[pi-maestro-teammate] mailbox delivery failed for ${to}:`, error);
           reply({ type: "teammate_proxy_result", requestId, result: {
             content: [{ type: "text", text: `Mailbox delivery failed for "${to}".` }],
@@ -2790,8 +2874,11 @@ export async function handleProxyRequest(
         return;
       }
       if (!agent?.stdin?.writable) {
-        const restarted = agent?.status === "sleeping" && agent.restart?.(message) === true;
+        const deferredContext = agent ? takeDeferredAgentContext(agent) : [];
+        const deliveryMessage = messageWithDeferredAgentContext(deferredContext, message);
+        const restarted = agent?.status === "sleeping" && agent.restart?.(deliveryMessage) === true;
         if (!restarted || !agent) {
+          if (agent) restoreDeferredAgentContext(agent, deferredContext);
           reply({ type: "teammate_proxy_result", requestId, result: {
             content: [{ type: "text", text: `Agent "${to}" has no restorable runtime.` }],
             isError: true, details: { delivered: false },
@@ -2837,11 +2924,14 @@ export async function handleProxyRequest(
         }});
         return;
       }
+      const deferredContext = takeDeferredAgentContext(agent);
+      const deliveryMessage = messageWithDeferredAgentContext(deferredContext, message);
       const mode: RpcMessageMode = agent.status === "sleeping" && requestedMode !== "abort"
         ? "prompt"
         : requestedMode;
-      const sent = sendRpcMessage(agent.stdin, message, mode, agent.lease ? leaseToken(agent.lease) : undefined);
+      const sent = sendRpcMessage(agent.stdin, deliveryMessage, mode, agent.lease ? leaseToken(agent.lease) : undefined);
       if (!sent) {
+        restoreDeferredAgentContext(agent, deferredContext);
         reply({ type: "teammate_proxy_result", requestId, result: {
           content: [{ type: "text", text: `Failed to send message to "${to}".` }],
           isError: true, details: { delivered: false },

@@ -54,8 +54,7 @@ import {
   FIRST_ACTIVITY_TIMEOUT_MS,
   MODEL_FALLBACK_RESUME_PROMPT,
   OUTPUT_LIMIT_RECOVERY_TIMEOUT_MS,
-  RESULT_READY_GRACE_MS,
-  RESULT_READY_GRACE_EXTENDED_MS,
+  resultReadyGraceMsFor,
   STRUCTURED_OUTPUT_RECOVERY_PROMPT,
   STRUCTURED_OUTPUT_RECOVERY_TIMEOUT_MS,
   STRUCTURED_OUTPUT_SETTLEMENT_DIAGNOSTICS,
@@ -833,7 +832,7 @@ export async function runSingleAttempt(
       state.turnLifecycleSettled = true;
       progress.status = terminalStatus;
       progress.phase = undefined;
-      progress.resultReadyAt = undefined;
+      progress.resultReadyAt = params.outputSchema && exitCode === 0 ? Date.now() : undefined;
       progress.durationMs = Date.now() - startTime;
       if (messages.length === 0 && state.lastContent) {
         appendBoundedTranscriptMessage(messages, { role: "assistant", content: state.lastContent });
@@ -935,13 +934,8 @@ export async function runSingleAttempt(
      * streaming) is not killed while still producing output.
      */
     let lifecycleDeadlineActive = false;
-    const lifecycleDeadlineMs = (): number => {
-      // C2: runs that performed tool work get the extended grace window; the
-      // explicit `resultReadyGraceMs` option (tests) overrides both paths.
-      const base = options.resultReadyGraceMs
-        ?? (state.completedToolCount > 0 ? RESULT_READY_GRACE_EXTENDED_MS : RESULT_READY_GRACE_MS);
-      return base;
-    };
+    const lifecycleDeadlineMs = (): number =>
+      resultReadyGraceMsFor(state.completedToolCount, options.resultReadyGraceMs);
     const lifecycleDeadlineCallback = (): void => {
       timers.resultReadyGrace = undefined;
       lifecycleDeadlineActive = false;
@@ -991,7 +985,7 @@ export async function runSingleAttempt(
           });
         }
         completeTurn(structuredOutput, true, structuredOutput === undefined ? 1 : 0);
-      }, options.resultReadyGraceMs ?? RESULT_READY_GRACE_MS);
+      }, lifecycleDeadlineMs());
       timers.resultReadyGrace.unref?.();
     }
 
@@ -1434,14 +1428,21 @@ export async function runSingleAttempt(
         inFlightToolCount: state.inFlightToolCount,
         completedToolCount: state.completedToolCount,
       })) {
-        progress.resultReadyAt = Date.now();
         options.onProgress?.(progress);
         if (!params.outputSchema) {
+          progress.resultReadyAt = Date.now();
+          options.onProgress?.(progress);
           publishResultReady();
           // Symmetric with the schema lane: the result is consumable, but
           // the lifecycle still needs a bounded confirmation window.
           armLifecycleConfirmationDeadline();
-        } else armResultReadyGrace();
+        } else {
+          // Text alone is not consumable for schema runs. Keep resultReadyAt
+          // hidden until structured_output is captured and bound recovery with
+          // the same completed-tool-aware lifecycle grace as the text lane.
+          progress.resultReadyAt = undefined;
+          armResultReadyGrace();
+        }
       }
     }
 

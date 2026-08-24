@@ -2264,6 +2264,15 @@ export const RESULT_READY_GRACE_MS = 60_000;
 // Pure Q&A runs (no tool work) keep the default 60s.
 export const RESULT_READY_GRACE_EXTENDED_MS = 120_000;
 
+/** Select one consistent lifecycle grace for text and structured-output lanes. */
+export function resultReadyGraceMsFor(
+  completedToolCount: number,
+  overrideMs?: number,
+): number {
+  return overrideMs
+    ?? (completedToolCount > 0 ? RESULT_READY_GRACE_EXTENDED_MS : RESULT_READY_GRACE_MS);
+}
+
 // A corrective structured-output continuation is one model round-trip, but
 // still bounded so a child that never responds settles as a failure instead of
 // holding the run open indefinitely.

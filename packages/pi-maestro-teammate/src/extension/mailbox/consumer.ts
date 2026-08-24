@@ -91,6 +91,8 @@ export interface ConsumerErrorEvent {
 
 // --- Consumer ---
 
+export type MailboxDispatchDisposition = "applied" | "deferred";
+
 export interface MailboxConsumerOptions {
   store: MailboxFileStore;
   router: MailboxRouter;
@@ -101,7 +103,7 @@ export interface MailboxConsumerOptions {
   /** Workspace ID the consumer serves; messages from other workspaces are skipped. */
   workspaceId: string;
   /** Callback invoked when a message is ready for injection. */
-  onDispatch: (envelope: MailboxEnvelope) => Promise<void>;
+  onDispatch: (envelope: MailboxEnvelope) => Promise<MailboxDispatchDisposition | void>;
   /** Poll interval override (default 50ms). */
   pollMs?: number;
   now?: () => number;
@@ -114,7 +116,7 @@ export class MailboxConsumer extends EventEmitter {
 
   readonly #store: MailboxFileStore;
   readonly #router: MailboxRouter;
-  readonly #onDispatch: (envelope: MailboxEnvelope) => Promise<void>;
+  readonly #onDispatch: (envelope: MailboxEnvelope) => Promise<MailboxDispatchDisposition | void>;
   readonly #pollMs: number;
   readonly #now: () => number;
 
@@ -345,11 +347,13 @@ export class MailboxConsumer extends EventEmitter {
 
       // Dispatch to the child
       this.emit("dispatch", { messageId: next.messageId, envelope: next } satisfies ConsumerDispatchEvent);
-      await this.#onDispatch(next);
+      const disposition = await this.#onDispatch(next);
 
-      // In-process dispatch success is the delivery confirmation: ACCEPTED → APPLIED.
+      // Deferred context remains ACCEPTED until a substantive turn consumes it
+      // and explicitly acknowledges the mailbox messageId. Crash recovery moves
+      // accepted records back to ready, preserving at-least-once delivery.
       this.#dispatchFailures.delete(next.messageId);
-      await this.#completeDispatch(next.messageId);
+      if (disposition !== "deferred") await this.#completeDispatch(next.messageId);
 
       // Track starvation bound
       if (isHighPriority(next.priority)) {

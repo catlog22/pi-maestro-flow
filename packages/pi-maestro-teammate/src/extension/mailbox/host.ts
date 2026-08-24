@@ -11,6 +11,7 @@
  * never silently falling back to direct stdin.
  */
 
+import type { MailboxDispatchDisposition } from "./consumer.ts";
 import { MailboxService } from "./service.ts";
 import { MailboxRollout, type RolloutMode } from "./rollout.ts";
 import type { MailboxAuthority } from "./router.ts";
@@ -106,11 +107,13 @@ export interface MailboxHostOptions {
   teamId: string;
   /** Convert a mailbox envelope back into an actual stdin injection. */
   inject: (envelope: {
+    messageId?: string;
     senderId: string;
     recipientCorrelationId: string;
     payload: string;
     mode: string;
-  }) => Promise<void>;
+    kind: "lifecycle" | "result" | "steer" | "follow_up" | "task" | "control";
+  }) => Promise<MailboxDispatchDisposition | void>;
   mode?: RolloutMode;
   pollMs?: number;
   /** GC sweep interval (default 10 minutes). */
@@ -147,14 +150,14 @@ export class MailboxHost {
       workspaceId: options.workspaceId,
       teamId: options.teamId,
       ownerId: options.ownerId,
-      onDispatch: async (envelope) => {
-        await options.inject({
-          senderId: envelope.senderId,
-          recipientCorrelationId: envelope.recipientCorrelationId,
-          payload: envelope.payload,
-          mode: envelope.mode,
-        });
-      },
+      onDispatch: async (envelope) => options.inject({
+        messageId: envelope.messageId,
+        senderId: envelope.senderId,
+        recipientCorrelationId: envelope.recipientCorrelationId,
+        payload: envelope.payload,
+        mode: envelope.mode,
+        kind: envelope.kind,
+      }),
       pollMs: options.pollMs,
       now: options.now,
     });
@@ -162,7 +165,9 @@ export class MailboxHost {
     this.rollout = new MailboxRollout({
       service: this.service,
       config: { mode, advertiseV2: mode === "shadow" || mode === "authoritative" },
-      directDeliver: options.inject,
+      directDeliver: async (envelope) => {
+        await options.inject(envelope);
+      },
       now: options.now,
     });
 
