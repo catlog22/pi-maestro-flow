@@ -2953,6 +2953,7 @@ export default function registerTeammateExtension(
           durationMs: Math.max(0, terminal.settledAt - request.createdAt),
           wakeable: false,
           terminalStatus,
+          structuredOutput: terminal,
           completionDispatchId: seed.dispatchId,
           completionReservationId: seed.reservationId,
           completionOutcome,
