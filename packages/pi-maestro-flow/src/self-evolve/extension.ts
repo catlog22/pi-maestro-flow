@@ -126,7 +126,7 @@ import {
   type EnrichmentResult,
   type ResolvedSignal,
 } from "./enrichment.ts";
-import { buildTrajectoryEpisodes, collectToolCallTimeline } from "./trajectory.ts";
+import { buildTrajectoryEpisodes, collectToolCallTimeline, type TrajectoryEpisode } from "./trajectory.ts";
 import {
   buildSessionSummary,
   formatSessionSummaryLedgerLine as formatSummaryLedgerLine,
@@ -900,7 +900,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
     /** Redacted digest used for enrichment input (Phase 2). */
     digest?: string;
     /** Trajectory episodes for enrichment input (Phase 2). */
-    episodes?: Array<{ kind: string; tool: string; operation: string; outcomes: string[] }>;
+    episodes?: TrajectoryEpisode[];
   }): Promise<void> {
     if (sessionSignals >= config.maxSignalsPerSession) {
       state.suppressed++;

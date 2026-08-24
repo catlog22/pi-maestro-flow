@@ -659,6 +659,8 @@ export interface SelfEvolveSignal {
   evidence: EvidenceRef[];
   /** Phase 2C: structured tool-call trajectory from the transcript tail. */
   toolCalls?: ToolCallEvidence[];
+  /** Deterministic grouped episodes derived from the tool-call trajectory. */
+  episodes?: TrajectoryEpisode[];
   /** Stage-command template for a human/Phase 2B consumer. Never executed. */
   suggestion?: string;
   trigger?: { reason?: string; turnIndex?: number };
