@@ -525,7 +525,8 @@ function validThreadEntry(value: unknown): WindowThreadEntry | undefined {
     || (entry.replyTo !== undefined && (typeof entry.replyTo !== "string" || entry.replyTo.length === 0 || entry.replyTo.length > 192 || /[\u0000-\u001f\u007f]/.test(entry.replyTo)))
     || (entry.terminalResultRequested !== undefined && entry.terminalResultRequested !== true)
     || (entry.terminalResultRequested === true
-      && (entry.messageKind !== "request"
+      && (!/^[a-f0-9]{32}$/.test(String(entry.messageId))
+        || entry.messageKind !== "request"
         || entry.targetCorrelationId !== "window-main-session"
         || entry.replyTo !== `owner:${entry.peerOwnerId}`))
     || (entry.fromSessionName !== undefined && (typeof entry.fromSessionName !== "string" || entry.fromSessionName.length === 0 || entry.fromSessionName.length > 256 || /[\u0000-\u001f\u007f]/.test(entry.fromSessionName)))
