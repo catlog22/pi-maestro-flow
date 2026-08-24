@@ -395,6 +395,7 @@ test("window thread transitions pending to queued to injected without losing rep
     messageKind: "supervision",
     traceId: "mon_trace-8",
     replyTo: `owner:${LOCAL_OWNER}`,
+    terminalResultRequested: true,
     fromSessionName: "control",
     targetSessionId: "session-a",
     targetCorrelationId: "window-main-session",
@@ -402,6 +403,7 @@ test("window thread transitions pending to queued to injected without losing rep
   const queued = store.transition(messageId, "incoming", "queued", 1_100, "follow_up");
   assert.equal(queued?.status, "queued");
   assert.equal(queued?.traceId, "mon_trace-8");
+  assert.equal(queued?.terminalResultRequested, true);
   assert.equal(queued?.targetSessionId, "session-a");
   assert.equal(store.transition(messageId, "incoming", "pending", 1_150), queued, "queued does not regress to pending");
   const injected = store.reconcileInjected(messageId, 1_200, "follow_up");

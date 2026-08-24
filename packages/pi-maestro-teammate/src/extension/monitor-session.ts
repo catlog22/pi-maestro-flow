@@ -58,6 +58,19 @@ export const MONITOR_EVALUATION_SCHEMA: Record<string, unknown> = {
           message: { type: "string" },
         },
         required: ["target", "status", "action"],
+        allOf: [
+          {
+            if: { properties: { status: { const: "on-track" } }, required: ["status"] },
+            then: { properties: { action: { const: "none" } }, required: ["action"] },
+          },
+          {
+            if: { properties: { action: { const: "send" } }, required: ["action"] },
+            then: {
+              properties: { message: { type: "string", minLength: 1 } },
+              required: ["message"],
+            },
+          },
+        ],
       },
     },
   },
@@ -81,7 +94,7 @@ export function buildMonitorEvaluationPrompt(request: MonitorEvaluationRequest):
     "The parent runtime owns scheduling, policy, cooldowns, delivery, and audit records.",
     "Evaluate only the supplied immutable snapshot. Do not call observe, teammate-send, or any other tool.",
     "Never send an intervention yourself. Return one structured verdict per target using the provided schema.",
-    "When action=send, message must be a concrete instruction for the target; routing and reply metadata are supplied automatically.",
+    "When action=send, status must be drift and message must be a concrete instruction for the target; routing and reply metadata are supplied automatically.",
     "For a status request, state the exact fields or evidence to return. Prefer time-sensitive corrective instructions; non-urgent coordination belongs in follow_up delivery.",
     "Do not treat queued or accepted delivery as model consumption or evidence that a prior intervention worked.",
     "Copy requestId and target keys exactly. Use action=send only when a short corrective message is warranted.",
@@ -181,6 +194,8 @@ export interface MonitorSessionHost {
     signal: AbortSignal,
     isCurrent: () => boolean,
   ): Promise<MonitorSessionTurnResult>;
+  /** Release an invocation when the caller's generation expires before result wait. */
+  cancel?(invocation: MonitorSessionInvocation, reason: Error): void;
   stop(signal: AbortSignal): Promise<void>;
 }
 
@@ -215,9 +230,15 @@ export class MonitorSessionEvaluator {
         MONITOR_EVALUATION_SCHEMA,
         signal,
       );
-      if (!isCurrent() || signal.aborted) return { status: "stale", reason: "Monitor evaluation generation changed after dispatch." };
+      if (!isCurrent() || signal.aborted) {
+        const reason = "Monitor evaluation generation changed after dispatch.";
+        this.host.cancel?.(invocation, new Error(reason));
+        return { status: "stale", reason };
+      }
       if (invocation.requestId !== request.requestId) {
-        return { status: "invalid", reason: "Monitor session invocation returned a mismatched requestId." };
+        const reason = "Monitor session invocation returned a mismatched requestId.";
+        this.host.cancel?.(invocation, new Error(reason));
+        return { status: "invalid", reason };
       }
       const turn = await this.host.waitForResult(invocation, signal, isCurrent);
       if (!isCurrent() || signal.aborted) return { status: "stale", reason: "Monitor evaluation generation changed after response wait." };

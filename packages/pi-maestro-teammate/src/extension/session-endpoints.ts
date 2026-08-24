@@ -4,8 +4,10 @@ import {
   projectSessionEndpoints,
   type SessionAgentProjection,
   type SessionEndpoint,
+  type SessionEndpointCapability,
   type SessionOwnerProjection,
 } from "../sessions/session-core.ts";
+import { getWorkspaceProjectionProvider } from "../public/v1/workspace-projections.ts";
 import type {
   WorkspaceOwnerSnapshot,
   WorkspacePeerIdentity,
@@ -99,6 +101,9 @@ export function projectTeammateSessionEndpoints(
     status: "running",
     ...(state.currentSessionId ? { sessionId: state.currentSessionId } : {}),
     ...(localSessionName ? { sessionName: localSessionName } : {}),
+    ...(getWorkspaceProjectionProvider("todo") !== undefined
+      ? { extraCapabilities: ["flow-schedule-todo-binding"] as SessionEndpointCapability[] }
+      : {}),
     agents: localAgents,
   }];
   for (const owner of remoteOwners) {
@@ -110,6 +115,7 @@ export function projectTeammateSessionEndpoints(
       status: owner.agents.some((agent) => agent.status === "running") ? "running" : "sleeping",
       ...(owner.sessionId ? { sessionId: owner.sessionId } : {}),
       ...(owner.sessionName ? { sessionName: owner.sessionName } : {}),
+      ...(owner.capabilities ? { extraCapabilities: [...owner.capabilities] as SessionEndpointCapability[] } : {}),
       ...(owner.contextPressure === undefined ? {} : { contextPressure: owner.contextPressure }),
       agents: [
         ...owner.agents.map((agent) => remoteAgentProjection(owner, agent, false)),

@@ -89,6 +89,7 @@ import {
   type MonitorSessionInvocation,
   type MonitorSessionTurnResult,
 } from "./monitor-session.ts";
+import { createMonitorSessionStartup } from "./monitor-session-startup.ts";
 import {
   appendMonitorLedgerRecord,
   deriveMonitorLedgerState,
@@ -140,7 +141,11 @@ import { SUPERVISION_EVENT, createSupervisionEvent } from "../supervision/types.
 import {
   createWorkspacePeerCommandConsumer,
   createWorkspacePeerRuntime,
+  createWorkspaceWindowTerminalResult,
+  decodeWorkspaceWindowTerminalResult,
+  deriveWorkspaceWindowTerminalResult,
   discoverWorkspacePeers,
+  encodeWorkspaceWindowTerminalResult,
   enqueueWorkspacePeerCommand,
   finalizeWorkspacePeerResponse,
   formatWorkspacePeerWindowListings,
@@ -155,6 +160,9 @@ import {
   waitForWorkspacePeerCommandResponse,
   workspaceMainSessionDeliveryDecision,
   workspaceWindowLifecycle,
+  workspaceWindowTerminalPublicationId,
+  workspaceWindowTerminalReservationId,
+  workspaceWindowTerminalResultMessageId,
   WORKSPACE_MAIN_SESSION_MARKER,
   MAIN_SESSION_PROGRESS_TEXT_BYTES,
   MAX_MAIN_SESSION_PROGRESS_EVENTS,
@@ -169,8 +177,17 @@ import {
   type WorkspacePeerWindowListing,
   type WorkspaceResolvedTarget,
   type WorkspaceSettledSnapshot,
+  type WorkspaceWindowTerminalResult,
+  type WorkspaceWindowTerminalResultDraft,
 } from "./workspace-peers.ts";
-import { workspaceSessionObservationSnapshot } from "./workspace-session-observation.ts";
+import {
+  registerWorkspaceProjectionDirtyListener,
+} from "../public/v1/workspace-projections.ts";
+import {
+  workspaceSessionObservationSnapshot,
+  workspaceTodosObservationSnapshot,
+} from "./workspace-session-observation.ts";
+import { workspaceTurnsSnapshot as workspaceTurnsSnapshotFn } from "./workspace-turns-observation.ts";
 import {
   runSingleTeammate,
   runGraph,
@@ -817,7 +834,7 @@ export default function registerTeammateExtension(
             && safeSendMessage(pi, envelope, { triggerTurn: true, deliverAs: "steer" });
         },
       }).catch((error) => {
-        console.warn("[pi-maestro-teammate] child completion replay bind failed:", error);
+        logDiagnosticWarn("[pi-maestro-teammate] child completion replay bind failed:", error);
       });
       void refreshModelCatalogSources(ctx);
       // Nested-context (proxy) tool: trimmed variant without the per-cwd routing
@@ -836,7 +853,7 @@ export default function registerTeammateExtension(
           ? { correlationId: process.env.PI_TEAMMATE_CORRELATION_ID }
           : {}),
       }).catch((error) => {
-        console.warn("[pi-maestro-teammate] child completion message_end reconciliation failed:", error);
+        logDiagnosticWarn("[pi-maestro-teammate] child completion message_end reconciliation failed:", error);
       });
       if (event.message.role !== "assistant" || event.message.stopReason !== "error") return;
       const errorMessage = normalizePiRetryErrorMessage(event.message.errorMessage);
@@ -1279,7 +1296,7 @@ export default function registerTeammateExtension(
     try {
       pi.appendEntry(AGENT_TURN_EVENT_CUSTOM_TYPE, event);
     } catch (error) {
-      console.error("[pi-maestro-teammate] failed to persist turn event:", error);
+      logDiagnosticError("[pi-maestro-teammate] failed to persist turn event:", error);
       return;
     }
     agentTurnLedger = applied.ledger;
@@ -1302,7 +1319,7 @@ export default function registerTeammateExtension(
     agentTurnLedger = rebuilt.ledger;
     for (const agent of state.activeRuns.values()) refreshAgentRuntimeProjection(agent);
     if (rebuilt.rejected > 0) {
-      console.warn(`[pi-maestro-teammate] ignored ${rebuilt.rejected} malformed persisted turn event(s).`);
+      logDiagnosticWarn(`[pi-maestro-teammate] ignored ${rebuilt.rejected} malformed persisted turn event(s).`);
     }
   };
 
@@ -1368,7 +1385,7 @@ export default function registerTeammateExtension(
         try {
           pi.appendEntry(REMOTE_HISTORY_ENTRY_TYPE, entry);
         } catch (error) {
-          console.error("[pi-maestro-teammate] failed to persist bounded remote Monitor history:", error);
+          logDiagnosticError("[pi-maestro-teammate] failed to persist bounded remote Monitor history:", error);
         }
       },
     });
@@ -1439,6 +1456,9 @@ export default function registerTeammateExtension(
   let workspaceMainSessionProgressRevision = 0;
   let workspaceMainAssistantText = "";
   let workspaceMainAssistantEventOpen = false;
+  let workspaceCurrentTurnAssistantMessage: unknown;
+  let workspaceTerminalResultDraft: WorkspaceWindowTerminalResultDraft | undefined;
+  const workspaceTerminalResultPublications = new Map<string, Promise<boolean>>();
   let workspaceReceiptReconcileTimer: ReturnType<typeof setInterval> | undefined;
   let workspacePeerRefresh: {
     publisher: WorkspacePeerPublisher;
@@ -1718,7 +1738,7 @@ export default function registerTeammateExtension(
       })
       .catch((error) => {
         if (workspacePeerPublisher === publisher && ownsRootSessionFence(fence)) {
-          console.error("[pi-maestro-teammate] workspace peer discovery failed:", error);
+          logDiagnosticError("[pi-maestro-teammate] workspace peer discovery failed:", error);
         }
         return workspacePeerOwners;
       })
@@ -1925,6 +1945,7 @@ export default function registerTeammateExtension(
         provenance: request.provenance,
         traceId: request.traceId,
         replyTo: request.replyTo ?? `owner:${publisher.identity.ownerId}`,
+        terminalResultRequested: request.terminalResultRequested,
         fromSessionName: request.fromSessionName ?? workspacePeerSessionName,
         beforePublish(prepared) {
           if (!authorized()) {
@@ -1944,6 +1965,7 @@ export default function registerTeammateExtension(
             ...(prepared.provenance === undefined ? {} : { provenance: prepared.provenance }),
             ...(prepared.traceId === undefined ? {} : { traceId: prepared.traceId }),
             ...(prepared.replyTo === undefined ? {} : { replyTo: prepared.replyTo }),
+            ...(prepared.terminalResultRequested === undefined ? {} : { terminalResultRequested: prepared.terminalResultRequested }),
             ...(prepared.fromSessionName === undefined ? {} : { fromSessionName: prepared.fromSessionName }),
             targetCorrelationId: prepared.targetCorrelationId,
             mode,
@@ -2126,10 +2148,10 @@ export default function registerTeammateExtension(
       for (const messageId of new Set(messageIds)) {
         void host.service.acknowledge(messageId).then((acknowledged) => {
           if (!acknowledged) {
-            console.warn(`[pi-maestro-teammate] deferred context acknowledgement was not applied: ${messageId}`);
+            logDiagnosticWarn(`[pi-maestro-teammate] deferred context acknowledgement was not applied: ${messageId}`);
           }
         }).catch((error) => {
-          console.warn(`[pi-maestro-teammate] deferred context acknowledgement failed: ${messageId}`, error);
+          logDiagnosticWarn(`[pi-maestro-teammate] deferred context acknowledgement failed: ${messageId}`, error);
         });
       }
     }
@@ -2364,7 +2386,7 @@ export default function registerTeammateExtension(
     mailboxHost = createMailboxHost();
     mailboxWorkspaceId = workspaceId;
     void previous?.stop().catch((error) => {
-      console.error(`[pi-maestro-teammate] mailbox host stop failed:`, error);
+      logDiagnosticError(`[pi-maestro-teammate] mailbox host stop failed:`, error);
     });
   };
 
@@ -2442,7 +2464,7 @@ export default function registerTeammateExtension(
         if (enqueued.result && !enqueued.result.ok) {
           // Surface the failure — never silently fall back to direct stdin.
           const reason = "message" in enqueued.result ? (enqueued.result as { message?: string }).message : "unknown error";
-          console.error(`[pi-maestro-teammate] mailbox delivery failed for ${targetLabel}: ${reason}`);
+          logDiagnosticError(`[pi-maestro-teammate] mailbox delivery failed for ${targetLabel}: ${reason}`);
           // Send-shaped failure: isSend must be true so progress consumers (e.g.
           // Cockpit's agent store) treat it as a send variant and ignore it
           // instead of mis-rendering it as agent progress (CS-1).
@@ -2465,7 +2487,7 @@ export default function registerTeammateExtension(
         if (!ownsRootSessionFence(fence)) {
           return { delivered: false, error: "The originating Pi session changed during local agent delivery.", mode: "follow_up" };
         }
-        console.error(`[pi-maestro-teammate] mailbox delivery failed for ${targetLabel}:`, error);
+        logDiagnosticError(`[pi-maestro-teammate] mailbox delivery failed for ${targetLabel}:`, error);
         return { delivered: false, error: error instanceof Error ? error.message : String(error), mode: "follow_up" };
       }
     }
@@ -2718,7 +2740,7 @@ export default function registerTeammateExtension(
     ],
     onShadowComparison(comparison) {
       if (!comparison.matches) {
-        console.warn("[pi-maestro-teammate] session route shadow mismatch:", JSON.stringify(comparison));
+        logDiagnosticWarn("[pi-maestro-teammate] session route shadow mismatch:", JSON.stringify(comparison));
       }
     },
   });
@@ -2745,6 +2767,73 @@ export default function registerTeammateExtension(
     const result = await registry.send(request);
     if (!ownsRootSessionFence(fence)) return staleRootSessionResult();
     return result;
+  };
+
+  const publishWorkspaceWindowTerminalResult = (
+    request: WindowThreadEntry,
+    draft: WorkspaceWindowTerminalResultDraft,
+  ): Promise<boolean> => {
+    const resultMessageId = workspaceWindowTerminalResultMessageId(request.messageId);
+    const existing = workspaceTerminalResultPublications.get(resultMessageId);
+    if (existing) return existing;
+    const registry = sessionHostRegistry;
+    const publisher = workspacePeerPublisher;
+    if (!registry || !publisher || registry.thread.get(resultMessageId, "outgoing")) return Promise.resolve(false);
+    const resolution = request.replyTo ? registry.resolve(request.replyTo) : undefined;
+    const endpoint = resolution?.code === "resolved" ? resolution.endpoint : undefined;
+    if (!endpoint
+      || endpoint.kind !== "root"
+      || endpoint.scope !== "workspace-peer"
+      || endpoint.workspaceId !== request.workspaceId
+      || endpoint.ownerId !== request.peerOwnerId
+      || endpoint.ownerNonce !== request.peerOwnerNonce) return Promise.resolve(false);
+    const fence = captureRootSessionFence();
+    const result = createWorkspaceWindowTerminalResult({
+      requestMessageId: request.messageId,
+      ...draft,
+    });
+    const publication = registry.send({
+      selector: endpoint.id,
+      message: encodeWorkspaceWindowTerminalResult(result),
+      mode: "follow_up",
+      messageId: resultMessageId,
+      traceId: request.messageId,
+      source: "system",
+      messageKind: "status",
+      trustedStatus: true,
+      authorize: () => workspacePeerPublisher === publisher
+        && ownsRootSessionFence(fence)
+        && sessionHostRegistry?.directory.get(endpoint.id)?.contentRevision === endpoint.contentRevision,
+    }).then((delivery) => {
+      const published = delivery.delivered || delivery.receipt?.publicationStage === "published";
+      if (!published) {
+        logDiagnosticError(
+          `[pi-maestro-teammate] workspace terminal result publication failed for ${request.messageId}: ${delivery.error ?? "unknown error"}`,
+        );
+      }
+      return published;
+    }).catch((error) => {
+      logDiagnosticError(
+        `[pi-maestro-teammate] workspace terminal result publication failed for ${request.messageId}:`,
+        error,
+      );
+      return false;
+    });
+    workspaceTerminalResultPublications.set(resultMessageId, publication);
+    return publication;
+  };
+
+  const publishWorkspaceWindowTerminalResults = async (
+    draft: WorkspaceWindowTerminalResultDraft,
+  ): Promise<void> => {
+    const requests = sessionHostRegistry?.thread.list().filter((entry) =>
+      entry.direction === "incoming"
+      && entry.terminalResultRequested === true
+      && entry.targetCorrelationId === WORKSPACE_MAIN_SESSION_MARKER
+      && (entry.status === "injected" || entry.status === "accepted")
+      && entry.replyTo === `owner:${entry.peerOwnerId}`
+    ) ?? [];
+    for (const request of requests) await publishWorkspaceWindowTerminalResult(request, draft);
   };
 
   const stopWorkspacePeers = async (): Promise<void> => {
@@ -2868,6 +2957,7 @@ export default function registerTeammateExtension(
             provenance: commandProvenance,
             traceId: command.traceId ?? command.commandId,
             replyTo: `owner:${command.fromOwnerId}`,
+            ...(command.terminalResultRequested === undefined ? {} : { terminalResultRequested: command.terminalResultRequested }),
             ...(command.fromSessionName === undefined ? {} : { fromSessionName: command.fromSessionName }),
             ...(fence.sessionId === null ? {} : { targetSessionId: fence.sessionId }),
             targetCorrelationId: command.targetCorrelationId,
@@ -3018,7 +3108,7 @@ export default function registerTeammateExtension(
           await publisher.stop().catch(() => undefined);
         }
       })
-      .catch((error) => console.error("[pi-maestro-teammate] workspace peer runtime failed:", error));
+      .catch((error) => logDiagnosticError("[pi-maestro-teammate] workspace peer runtime failed:", error));
   };
 
   const enqueueChildInteraction = (
@@ -3030,7 +3120,7 @@ export default function registerTeammateExtension(
     interactionQueue.enqueue(event, reply, ctx, fallbackCorrelationId);
   };
 
-  let bindMonitorSessionDispatch: ((toolCallId: string, agent: ActiveAgent) => void) | undefined;
+  let bindMonitorSessionDispatch: ((toolCallId: string, agent: ActiveAgent) => MonitorSessionInvocation | undefined) | undefined;
   let authorizeMonitorSessionDispatch: ((toolCallId: string) => boolean) | undefined;
   let ownsMonitorSessionAuthority: ((agent: ActiveAgent) => boolean) | undefined;
   let publishMonitorSessionTurn: ((agent: ActiveAgent, result: SingleResult) => void) | undefined;
@@ -3327,6 +3417,10 @@ export default function registerTeammateExtension(
         }
       }
 
+      if (signal.aborted || !ownsDispatchGeneration()) {
+        return cancelledBeforeStart();
+      }
+
       let detached = false;
       if (params.background === false) {
         foregroundToolRuns.add(correlationId);
@@ -3568,7 +3662,7 @@ export default function registerTeammateExtension(
         void publishDurableFailure(agent, error).then((durable) => {
           if (!durable) notifyBackgroundFailure(pi, id, agent, correlationId, error, state);
         }).catch((durabilityError) => {
-          console.warn("[pi-maestro-teammate] durable failure publication failed; using direct delivery:", durabilityError);
+          logDiagnosticWarn("[pi-maestro-teammate] durable failure publication failed; using direct delivery:", durabilityError);
           notifyBackgroundFailure(pi, id, agent, correlationId, error, state);
         });
       };
@@ -3637,7 +3731,7 @@ export default function registerTeammateExtension(
           ).then((durable) => {
             if (!durable) fallbackDelivery();
           }).catch((error) => {
-            console.warn("[pi-maestro-teammate] durable single completion failed; using direct delivery:", error);
+            logDiagnosticWarn("[pi-maestro-teammate] durable single completion failed; using direct delivery:", error);
             fallbackDelivery();
           });
         } else {
@@ -3737,7 +3831,7 @@ export default function registerTeammateExtension(
           ).then((durable) => {
             if (!durable) fallbackDelivery();
           }).catch((error) => {
-            console.warn("[pi-maestro-teammate] durable graph completion failed; using direct delivery:", error);
+            logDiagnosticWarn("[pi-maestro-teammate] durable graph completion failed; using direct delivery:", error);
             fallbackDelivery();
           });
         }
@@ -3803,7 +3897,7 @@ export default function registerTeammateExtension(
           resources: durableResources([result]),
           finalizedAt: Date.now(),
         }).catch((error) => {
-          console.warn("[pi-maestro-teammate] durable additional completion failed; using direct delivery:", error);
+          logDiagnosticWarn("[pi-maestro-teammate] durable additional completion failed; using direct delivery:", error);
           fallbackDelivery();
         });
       };
@@ -4839,7 +4933,7 @@ export default function registerTeammateExtension(
         foregroundUpdateOpen = false;
         if (completionDurable && completionSeed && !completionNotificationRequired) {
           await completionCoordinator.abandon(completionSeed, "dispatch ended without a notification requirement").catch((error) => {
-            console.warn("[pi-maestro-teammate] completion dispatch cleanup failed:", error);
+            logDiagnosticWarn("[pi-maestro-teammate] completion dispatch cleanup failed:", error);
           });
         }
         if (params.background === false && !detached) {
@@ -5392,7 +5486,7 @@ export default function registerTeammateExtension(
     const write = appendMonitorLedgerRecord(root, record)
       .then(() => { void refreshMonitorLedgerState(); })
       .catch((error) => {
-        console.error("[pi-maestro-teammate] monitor ledger append failed:", error);
+        logDiagnosticError("[pi-maestro-teammate] monitor ledger append failed:", error);
       })
       .finally(() => {
         const index = monitorLedgerWrites.indexOf(write);
@@ -5403,6 +5497,8 @@ export default function registerTeammateExtension(
 
   interface PendingMonitorTurn {
     requestId: string;
+    signal: AbortSignal;
+    rootFence: RootSessionFence;
     invocation?: MonitorSessionInvocation;
     invocationPromise: Promise<MonitorSessionInvocation>;
     resolveInvocation: (invocation: MonitorSessionInvocation) => void;
@@ -5410,6 +5506,14 @@ export default function registerTeammateExtension(
     resultPromise: Promise<MonitorSessionTurnResult>;
     resolveResult: (result: MonitorSessionTurnResult) => void;
     rejectResult: (error: Error) => void;
+    removeAbortListener?: () => void;
+    settled?: boolean;
+    startup?: {
+      promise: Promise<MonitorSessionInvocation>;
+      start(): void;
+      accept(invocation: MonitorSessionInvocation): boolean;
+      reject(error: Error): void;
+    };
   }
 
   interface MonitorSessionAuthority {
@@ -5421,9 +5525,17 @@ export default function registerTeammateExtension(
   const pendingMonitorTurns = new Map<string, PendingMonitorTurn>();
   const monitorSessionAuthorities = new WeakMap<ActiveAgent, MonitorSessionAuthority>();
 
+  const pendingCanAcceptMonitorDispatch = (pending: PendingMonitorTurn | undefined): pending is PendingMonitorTurn =>
+    pending !== undefined
+    && pendingMonitorTurns.get(pending.requestId) === pending
+    && pending.settled !== true
+    && pending.invocation === undefined
+    && !pending.signal.aborted
+    && ownsRootSessionFence(pending.rootFence);
+
   authorizeMonitorSessionDispatch = (toolCallId) => {
     const pending = pendingMonitorTurns.get(toolCallId);
-    return pending !== undefined && pending.invocation === undefined;
+    return pending !== undefined && pendingCanAcceptMonitorDispatch(pending);
   };
 
   ownsMonitorSessionAuthority = (agent) => {
@@ -5440,13 +5552,15 @@ export default function registerTeammateExtension(
       );
   };
 
-  const createPendingMonitorTurn = (requestId: string): PendingMonitorTurn => {
+  const createPendingMonitorTurn = (requestId: string, signal: AbortSignal): PendingMonitorTurn => {
     let resolveInvocation!: (invocation: MonitorSessionInvocation) => void;
     let rejectInvocation!: (error: Error) => void;
     let resolveResult!: (result: MonitorSessionTurnResult) => void;
     let rejectResult!: (error: Error) => void;
     const pending: PendingMonitorTurn = {
       requestId,
+      signal,
+      rootFence: captureRootSessionFence(),
       invocationPromise: new Promise((resolve, reject) => {
         resolveInvocation = resolve;
         rejectInvocation = reject;
@@ -5463,10 +5577,35 @@ export default function registerTeammateExtension(
     void pending.invocationPromise.catch(() => undefined);
     void pending.resultPromise.catch(() => undefined);
     pendingMonitorTurns.set(requestId, pending);
+    const onAbort = (): void => {
+      const reason = signal.reason instanceof Error
+        ? signal.reason
+        : new Error("Monitor evaluation was cancelled.");
+      rejectPendingMonitorTurn(pending, reason);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    pending.removeAbortListener = () => signal.removeEventListener("abort", onAbort);
+    if (signal.aborted) onAbort();
     return pending;
   };
 
+  const completePendingMonitorTurn = (pending: PendingMonitorTurn): void => {
+    if (pending.settled) return;
+    pending.settled = true;
+    pending.removeAbortListener?.();
+    pending.removeAbortListener = undefined;
+    pending.startup?.reject(new Error("Monitor evaluation completed."));
+    pending.startup = undefined;
+    if (pendingMonitorTurns.get(pending.requestId) === pending) pendingMonitorTurns.delete(pending.requestId);
+  };
+
   const rejectPendingMonitorTurn = (pending: PendingMonitorTurn, error: Error): void => {
+    if (pending.settled) return;
+    pending.settled = true;
+    pending.removeAbortListener?.();
+    pending.removeAbortListener = undefined;
+    pending.startup?.reject(error);
+    pending.startup = undefined;
     pending.rejectInvocation(error);
     pending.rejectResult(error);
     if (pendingMonitorTurns.get(pending.requestId) === pending) pendingMonitorTurns.delete(pending.requestId);
@@ -5474,11 +5613,12 @@ export default function registerTeammateExtension(
 
   bindMonitorSessionDispatch = (toolCallId, agent) => {
     const pending = pendingMonitorTurns.get(toolCallId);
-    if (!pending || pending.invocation) return;
+    if (!pendingCanAcceptMonitorDispatch(pending)
+      || state.activeRuns.get(agent.correlationId) !== agent) return undefined;
     monitorSessionAuthorities.set(agent, {
       correlationId: agent.correlationId,
       runtimeGeneration: agent.runtimeGeneration ?? 0,
-      rootFence: captureRootSessionFence(),
+      rootFence: pending.rootFence,
     });
     const invocation: MonitorSessionInvocation = {
       requestId: toolCallId,
@@ -5487,7 +5627,10 @@ export default function registerTeammateExtension(
       sessionIdentity: agent,
     };
     pending.invocation = invocation;
+    pending.startup?.accept(invocation);
+    pending.startup = undefined;
     pending.resolveInvocation(invocation);
+    return invocation;
   };
 
   publishMonitorSessionTurn = (agent, result) => {
@@ -5511,32 +5654,40 @@ export default function registerTeammateExtension(
       if (pendingMonitorTurns.has(request.requestId)) {
         throw new Error(`Monitor evaluation ${request.requestId} is already pending.`);
       }
-      const pending = createPendingMonitorTurn(request.requestId);
+      const pending = createPendingMonitorTurn(request.requestId, signal);
       const existing = monitorSessionAgent();
       if (existing) {
         if (existing.status !== "sleeping" && !existing.restart) {
           rejectPendingMonitorTurn(pending, new Error("Monitor evaluator session is not wakeable."));
           return pending.invocationPromise;
         }
-        const delivery = await routeSessionMessage({
-          selector: existing.correlationId,
-          message: prompt,
-          mode: "follow_up",
-          source: "monitor",
-          signal,
-        });
+        let delivery: SessionMessageResult;
+        try {
+          delivery = await routeSessionMessage({
+            selector: existing.correlationId,
+            message: prompt,
+            mode: "follow_up",
+            source: "monitor",
+            signal,
+          });
+        } catch (error) {
+          rejectPendingMonitorTurn(pending, error instanceof Error ? error : new Error(String(error)));
+          return pending.invocationPromise;
+        }
         if (!delivery.delivered) {
           rejectPendingMonitorTurn(pending, new Error(delivery.error ?? "Monitor evaluator could not be resumed."));
           return pending.invocationPromise;
         }
-        const invocation: MonitorSessionInvocation = {
-          requestId: request.requestId,
-          correlationId: existing.correlationId,
-          promptSequence: existing.promptSeq ?? 1,
-          sessionIdentity: existing,
-        };
-        pending.invocation = invocation;
-        pending.resolveInvocation(invocation);
+        const invocation = bindMonitorSessionDispatch?.(request.requestId, existing);
+        if (!invocation) {
+          const reason = signal.aborted
+            ? "Monitor evaluator was cancelled before its session identity was rebound."
+            : !ownsRootSessionFence(pending.rootFence)
+              ? "Monitor evaluator session changed before its session identity was rebound."
+              : "Monitor evaluator session identity changed before its session was rebound.";
+          rejectPendingMonitorTurn(pending, new Error(reason));
+          return pending.invocationPromise;
+        }
         return invocation;
       }
 
@@ -5545,37 +5696,50 @@ export default function registerTeammateExtension(
         rejectPendingMonitorTurn(pending, new Error("Monitor evaluator requires an active extension session."));
         return pending.invocationPromise;
       }
-      void tool.execute(
-        request.requestId,
-        {
-          tasks: [{
-            agent: "general",
-            name: MONITOR_SESSION_NAME,
-            prompt,
-            context: "fresh",
-            outputSchema,
-          }],
-          background: true,
-          cwd: ctx.cwd,
-          maxNestingDepth: 0,
-        },
-        signal,
-        undefined,
-        ctx,
-      ).then(() => {
-        if (!pending.invocation && pendingMonitorTurns.get(request.requestId) === pending) {
-          rejectPendingMonitorTurn(pending, new Error("Monitor evaluator did not publish a session identity."));
-        }
+      const startup = createMonitorSessionStartup<MonitorSessionInvocation>({
+        dispatch: () => tool.execute(
+          request.requestId,
+          {
+            tasks: [{
+              agent: "general",
+              name: MONITOR_SESSION_NAME,
+              prompt,
+              context: "fresh",
+              outputSchema,
+            }],
+            background: true,
+            cwd: ctx.cwd,
+            maxNestingDepth: 0,
+          },
+          signal,
+          undefined,
+          ctx,
+        ),
+        isRootFenceCurrent: () => ownsRootSessionFence(pending.rootFence),
+        timer: runtimeOptions.monitorSessionTimer,
+      });
+      pending.startup = startup;
+      void startup.promise.then((invocation) => {
+        if (pendingMonitorTurns.get(request.requestId) !== pending || pending.invocation) return;
+        pending.invocation = invocation;
+        pending.resolveInvocation(invocation);
       }).catch((error) => {
         rejectPendingMonitorTurn(pending, error instanceof Error ? error : new Error(String(error)));
       });
+      startup.start();
       return pending.invocationPromise;
     },
 
     async waitForResult(invocation, signal, isCurrent) {
       const pending = pendingMonitorTurns.get(invocation.requestId);
       if (!pending || pending.invocation !== invocation) throw new Error("Monitor evaluation invocation is no longer current.");
-      if (signal.aborted || !isCurrent()) throw new Error("Monitor evaluation was cancelled before result wait.");
+      if (signal.aborted || !isCurrent()) {
+        const error = signal.aborted
+          ? signal.reason instanceof Error ? signal.reason : new Error("Monitor evaluation was cancelled.")
+          : new Error("Monitor evaluation generation changed before result wait.");
+        rejectPendingMonitorTurn(pending, error);
+        throw error;
+      }
       let removeAbort: (() => void) | undefined;
       const aborted = new Promise<never>((_resolve, reject) => {
         const onAbort = () => reject(signal.reason instanceof Error ? signal.reason : new Error("Monitor evaluation was cancelled."));
@@ -5586,8 +5750,14 @@ export default function registerTeammateExtension(
         return await Promise.race([pending.resultPromise, aborted]);
       } finally {
         removeAbort?.();
-        if (pendingMonitorTurns.get(invocation.requestId) === pending) pendingMonitorTurns.delete(invocation.requestId);
+        completePendingMonitorTurn(pending);
       }
+    },
+
+    cancel(invocation, reason) {
+      const pending = pendingMonitorTurns.get(invocation.requestId);
+      if (!pending || pending.invocation !== invocation) return;
+      rejectPendingMonitorTurn(pending, reason);
     },
 
     async stop(signal) {
@@ -5605,6 +5775,7 @@ export default function registerTeammateExtension(
       for (const pending of [...pendingMonitorTurns.values()]) rejectPendingMonitorTurn(pending, error);
     },
   };
+  runtimeOptions.onMonitorSessionHostCreated?.(monitorSessionHost);
 
   const monitorLeases = new MonitorLeaseAdapter({
     getIdentity: () => workspacePeerPublisher?.identity,
@@ -5633,8 +5804,14 @@ export default function registerTeammateExtension(
   };
 
   const enterMonitorInteractionMode = (): void => {
-    monitorToolExposure?.enter();
+    const wasActive = monitorInteractionModeActive;
     monitorInteractionModeActive = true;
+    try {
+      monitorToolExposure?.enter();
+    } catch (error) {
+      monitorInteractionModeActive = wasActive;
+      throw error;
+    }
     if (widgetCtx) refreshModelCatalog(widgetCtx);
     syncMonitorInteractionStatus();
   };
@@ -5644,7 +5821,7 @@ export default function registerTeammateExtension(
     monitorToolExposure?.exit();
     if (widgetCtx) refreshModelCatalog(widgetCtx);
     void shutdownRemoteMonitorBinding().catch((error) => {
-      console.error("[pi-maestro-teammate] remote Monitor generation shutdown failed:", sanitizeRemoteMonitorError(error, "shutdown"));
+      logDiagnosticError("[pi-maestro-teammate] remote Monitor generation shutdown failed:", sanitizeRemoteMonitorError(error, "shutdown"));
     });
     monitorRegistry.setViewMode("agents");
     syncMonitorInteractionStatus();
@@ -5805,7 +5982,7 @@ export default function registerTeammateExtension(
         if (root) await appendPeerGoalObjection(root, goalId, { peerId, summary });
       },
       onEvaluationError(reason) {
-        console.error(`[pi-maestro-teammate] monitor evaluation rejected: ${reason}`);
+        logDiagnosticError(`[pi-maestro-teammate] monitor evaluation rejected: ${reason}`);
       },
     },
   });
@@ -5828,7 +6005,7 @@ export default function registerTeammateExtension(
         section = parsed?.monitor?.advisor ?? parsed?.advisor;
       }
     } catch (error) {
-      console.error("[pi-maestro-teammate] failed to read advisor settings:", error);
+      logDiagnosticError("[pi-maestro-teammate] failed to read advisor settings:", error);
     }
     return normalizeAdvisorConfig(section);
   }
@@ -5894,7 +6071,7 @@ export default function registerTeammateExtension(
         message: guidance,
         metadata: { source: "advisor" },
       }).then(() => { void refreshMonitorLedgerState(); }).catch((error) => {
-        console.error("[pi-maestro-teammate] advisor ledger append failed:", error);
+        logDiagnosticError("[pi-maestro-teammate] advisor ledger append failed:", error);
       });
     }
   }
@@ -6089,7 +6266,7 @@ export default function registerTeammateExtension(
       } else if (code !== 0 && managedWindows.get(name) === window && !window.ownerId) {
         window.launchError = `terminal launcher exited (code ${code ?? "?"}, signal ${signal ?? "none"})`;
       }
-      console.error(`[pi-maestro-teammate] managed window ${name} launcher exited (code ${code ?? "?"}, signal ${signal ?? "none"})`);
+      logDiagnosticError(`[pi-maestro-teammate] managed window ${name} launcher exited (code ${code ?? "?"}, signal ${signal ?? "none"})`);
     });
 
     try {
@@ -6187,8 +6364,7 @@ export default function registerTeammateExtension(
 
     const owner = exactManagedWindowOwner(window);
     if (!owner) throw new Error(`Interactive window "${window.name}" has no fresh authenticated owner; ownership record retained.`);
-    await terminateProcessTreeByPid(owner.pid);
-    return "stopped";
+    return terminateProcessTreeByPid(owner.pid);
   }
 
   function managedWindowPidIsAlive(pid: number): boolean {
@@ -6246,7 +6422,7 @@ export default function registerTeammateExtension(
         await refreshWorkspacePeerOwnersStrict();
         strictDiscoveryReady = true;
       } catch (error) {
-        console.error("[pi-maestro-teammate] managed-window shutdown discovery failed; interactive windows will not be killed from stale PID data:", error);
+        logDiagnosticError("[pi-maestro-teammate] managed-window shutdown discovery failed; interactive windows will not be killed from stale PID data:", error);
       }
     }
 
@@ -6263,7 +6439,7 @@ export default function registerTeammateExtension(
               window.ownerNonce = owner.ownerNonce;
               window.pid = owner.pid;
             } catch (error) {
-              console.error(`[pi-maestro-teammate] failed to reconcile delegation ${window.name} before shutdown:`, error);
+              logDiagnosticError(`[pi-maestro-teammate] failed to reconcile delegation ${window.name} before shutdown:`, error);
               if (!exactManagedWindowOwner(window)) return;
             }
           } else if (!exactManagedWindowOwner(window)) {
@@ -6274,7 +6450,7 @@ export default function registerTeammateExtension(
         await closeDelegationRecordAfterTermination(window);
         if (managedWindows.get(window.name) === window) managedWindows.delete(window.name);
       } catch (error) {
-        console.error(`[pi-maestro-teammate] managed window ${window.name} was not reclaimed during shutdown:`, error);
+        logDiagnosticError(`[pi-maestro-teammate] managed window ${window.name} was not reclaimed during shutdown:`, error);
       }
     }));
   }
@@ -6506,7 +6682,7 @@ export default function registerTeammateExtension(
       expectedRevision: record.revision,
       expectedStatuses: [record.status],
     }).catch((recordError) => {
-      console.error("[pi-maestro-teammate] failed to persist delegation rollback:", recordError);
+      logDiagnosticError("[pi-maestro-teammate] failed to persist delegation rollback:", recordError);
     });
     return cleanupText;
   }
@@ -6786,14 +6962,13 @@ export default function registerTeammateExtension(
       if (!stopped.ok) throw new Error(stopped.error ?? `Failed to stop ${record.id}.`);
       status = stopped.status ?? "stopped";
     } else if (owner) {
-      await terminateProcessTreeByPid(owner.pid);
+      status = await terminateProcessTreeByPid(owner.pid);
       try {
         await monitorControllerInstance.remove(`owner:${owner.ownerId}`, "delegation-window-close");
         syncMonitorRegistryBindings();
       } catch (error) {
-        console.error("[pi-maestro-teammate] delegated window monitor cleanup failed:", error);
+        logDiagnosticError("[pi-maestro-teammate] delegated window monitor cleanup failed:", error);
       }
-      status = "stopped";
     } else if (record.window && !managedWindowPidIsAlive(record.window.pid)) {
       status = "already-exited";
     } else {
@@ -6830,7 +7005,7 @@ export default function registerTeammateExtension(
         };
       });
     } catch (error) {
-      console.error(`[pi-maestro-teammate] failed to close delegation record ${window.name}:`, error);
+      logDiagnosticError(`[pi-maestro-teammate] failed to close delegation record ${window.name}:`, error);
     }
   }
 
@@ -6844,7 +7019,7 @@ export default function registerTeammateExtension(
         section = parsed?.monitor;
       }
     } catch (error) {
-      console.error("[pi-maestro-teammate] failed to read monitor settings:", error);
+      logDiagnosticError("[pi-maestro-teammate] failed to read monitor settings:", error);
     }
     return normalizeMonitorConfig(section);
   }
@@ -6861,7 +7036,7 @@ export default function registerTeammateExtension(
       monitorLedgerWarnings = loaded.warnings;
       monitorLedgerState = deriveMonitorLedgerState(loaded.records);
     } catch (error) {
-      console.error("[pi-maestro-teammate] monitor ledger load failed:", error);
+      logDiagnosticError("[pi-maestro-teammate] monitor ledger load failed:", error);
     }
   }
 
@@ -6891,7 +7066,7 @@ export default function registerTeammateExtension(
         await refreshMonitorLedgerState();
       }
     } catch (error) {
-      console.error("[pi-maestro-teammate] monitor ledger reconcile failed:", error);
+      logDiagnosticError("[pi-maestro-teammate] monitor ledger reconcile failed:", error);
     }
   }
 
@@ -6906,7 +7081,7 @@ export default function registerTeammateExtension(
     try {
       loaded = await loadMonitorLedger(root);
     } catch (error) {
-      console.error("[pi-maestro-teammate] monitor ledger load failed:", error);
+      logDiagnosticError("[pi-maestro-teammate] monitor ledger load failed:", error);
       return 0;
     }
     await refreshWorkspacePeerOwners();
@@ -6918,7 +7093,7 @@ export default function registerTeammateExtension(
       const ownerId = binding.target.slice("owner:".length);
       const owner = workspacePeerOwners.find((candidate) => candidate.ownerId === ownerId);
       if (!owner) {
-        console.error(`[pi-maestro-teammate] monitor resume skipped ${binding.target}: window not found`);
+        logDiagnosticError(`[pi-maestro-teammate] monitor resume skipped ${binding.target}: window not found`);
         continue;
       }
       const request = monitorBindingRequest(
@@ -6932,7 +7107,7 @@ export default function registerTeammateExtension(
     const result = await monitorControllerInstance.bind(requests);
     syncMonitorRegistryBindings();
     for (const failure of result.errors) {
-      console.error(`[pi-maestro-teammate] monitor resume skipped ${failure.key}: ${failure.error}`);
+      logDiagnosticError(`[pi-maestro-teammate] monitor resume skipped ${failure.key}: ${failure.error}`);
     }
     return result.bound.length;
   }
@@ -7216,7 +7391,15 @@ export default function registerTeammateExtension(
       };
     }
     const listLines = turns.length === 0
-      ? ["No session turns recorded."]
+      ? (load.source === "memory"
+        ? [
+          "No persisted session transcript found for this agent (memory fallback).",
+          "view=turns reads the agent's on-disk session file; when none is available it",
+          "falls back to the bounded in-memory output log, which is empty here.",
+          "Use view=live (or detail=full) for the live snapshot with recent output, or",
+          "wait for the agent to settle and retry to read its captured result.",
+        ]
+        : ["No session turns recorded."])
       : turns.map((turn) => {
           const tools = turn.toolCallCount > 0 ? ` · ${turn.toolCallCount} tools` : "";
           const chars = turn.textLength > 0 ? ` · ${turn.textLength} chars` : "";
@@ -7356,6 +7539,9 @@ export default function registerTeammateExtension(
     if (options.view === "session") {
       return workspaceSessionObservationSnapshot(owner, target, detail, lines, options.cursor);
     }
+    if (options.view === "todos") {
+      return workspaceTodosObservationSnapshot(owner, target, detail, lines);
+    }
     if (options.view === "turns") return workspaceTurnsSnapshot(owner, target, detail, lines, options);
     const backgroundJobs = owner.backgroundJobs ?? [];
     const foregroundJobs = backgroundJobs.filter((job) => !job.background);
@@ -7393,93 +7579,11 @@ export default function registerTeammateExtension(
       capabilities: { inspect: true, wait: true, cancel: false, message: true, supervise: true },
     };
   };
-
-  const workspaceTurnsSnapshot = (
-    owner: WorkspaceOwnerSnapshot,
-    target: ObservationTarget,
-    detail: "summary" | "tail" | "full",
-    lines: number,
-    options: ObservationReadOptions,
-  ): ObservationSnapshot => {
-    const runs: Array<{
-      index: number;
-      name: string;
-      status: string;
-      summary: string;
-      outputTail: readonly string[];
-      startedAt: number;
-      result?: string;
-    }> = [
-      ...owner.agents.map((agent, index) => ({
-        index: index + 1,
-        name: agent.name ?? agent.correlationId.slice(0, 8),
-        status: agent.status,
-        summary: agent.summary ?? "",
-        outputTail: agent.outputTail ?? [],
-        startedAt: agent.startedAt,
-      })),
-      ...owner.settled.map((record, index) => ({
-        index: owner.agents.length + index + 1,
-        name: record.name ?? record.correlationId.slice(0, 8),
-        status: record.status,
-        summary: record.summary ?? record.status,
-        outputTail: [],
-        startedAt: record.settledAt,
-        ...(record.result === undefined ? {} : { result: record.result }),
-      })),
-    ];
-    const windowName = owner.sessionName ?? `window:${owner.ownerId.slice(0, 8)}`;
-    if (options.turn !== undefined) {
-      const run = runs.find((candidate) => candidate.index === options.turn);
-      if (!run) {
-        return {
-          target,
-          found: true,
-          nativeStatus: "unknown",
-          phase: "unknown",
-          summary: `Run ${options.turn} not found (${runs.length} run${runs.length === 1 ? "" : "s"}).`,
-          detail: runs.map((candidate) =>
-            `Run ${candidate.index} · @${candidate.name} ${candidate.status}${candidate.summary ? ` · ${candidate.summary.slice(0, 60)}` : ""}`
-          ),
-          updatedAt: Date.now(),
-          capabilities: { inspect: true, wait: true, cancel: false, message: true, supervise: true },
-        };
-      }
-      const detailLines = [
-        `@${run.name} ${run.status} · started ${new Date(run.startedAt).toISOString()}`,
-        ...(run.summary ? [run.summary] : []),
-        ...(detail !== "summary" ? run.outputTail.slice(-lines) : []),
-        ...(detail !== "summary" && run.result
-          ? [`-- result --`, ...run.result.split("\n").slice(0, Math.max(lines, 1))]
-          : []),
-      ];
-      return {
-        target,
-        found: true,
-        nativeStatus: run.status,
-        phase: run.status === "completed" || run.status === "failed" ? "settled" : "active",
-        summary: `Run ${run.index} · @${run.name} ${run.status}`,
-        ...(detail !== "summary" && detailLines.length > 1 ? { detail: detailLines } : {}),
-        updatedAt: Date.now(),
-        capabilities: { inspect: true, wait: true, cancel: false, message: true, supervise: true },
-      };
-    }
-    const listLines = runs.length === 0
-      ? ["No window activity recorded in the peer snapshot."]
-      : runs.map((run) =>
-        `Run ${run.index} · @${run.name} ${run.status}${run.summary ? ` · ${run.summary.slice(0, 80)}` : ""}`
-      );
-    return {
-      target,
-      found: true,
-      nativeStatus: "unknown",
-      phase: "unknown",
-      summary: `${windowName} · ${runs.length} run${runs.length === 1 ? "" : "s"} · snapshot-limited (workspace peers do not publish full turns)`,
-      detail: listLines,
-      updatedAt: Date.now(),
-      capabilities: { inspect: true, wait: true, cancel: false, message: true, supervise: true },
-    };
-  };
+  // Workspace peer view="turns" projection is extracted to a testable module:
+  // it groups the peer's bounded mainProgress event ring into turns (assistant
+  // text, tool calls, tool results, lifecycle) and supports turn=<n> expansion.
+  // Falls back to a run-list view when the peer published no session progress.
+  const workspaceTurnsSnapshot = workspaceTurnsSnapshotFn;
 
   const waitForWorkspaceObservation = async (
     id: string,
@@ -9334,6 +9438,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
   if (!isChild) {
   // Dispose EventBus subscriptions on shutdown (defensive; framework may auto-dispose).
   const disposers: Array<() => void> = [];
+  disposers.push(registerWorkspaceProjectionDirtyListener(markWorkspacePeerDirty));
   const disposeTuiLocaleEvents = pi.events.on(SETTINGS_LOCALE_EVENT, (payload) => {
     if (!applySettingsLocaleEvent(payload)) return;
     updateAgentWidget();
@@ -9421,7 +9526,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
             && safeSendMessage(pi, envelope, { triggerTurn: true, deliverAs: "steer" });
         },
       }).catch((error) => {
-        console.warn("[pi-maestro-teammate] completion replay bind failed:", error);
+        logDiagnosticWarn("[pi-maestro-teammate] completion replay bind failed:", error);
       });
     }
     widgetCtx = ctx;
@@ -9445,18 +9550,21 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     workspaceMainSessionProgress = undefined;
     workspaceMainAssistantText = "";
     workspaceMainAssistantEventOpen = false;
+    workspaceCurrentTurnAssistantMessage = undefined;
+    workspaceTerminalResultDraft = undefined;
+    workspaceTerminalResultPublications.clear();
     startWorkspacePeers(ctx);
     if (workspaceReceiptReconcileTimer) clearInterval(workspaceReceiptReconcileTimer);
     workspaceReceiptReconcileTimer = setInterval(() => {
       void reconcileWorkspacePeerReceipts();
       void completionCoordinator.reconcile().catch((error) => {
-        console.warn("[pi-maestro-teammate] periodic completion reconciliation failed:", error);
+        logDiagnosticWarn("[pi-maestro-teammate] periodic completion reconciliation failed:", error);
       });
       try {
         redriveStaleIncomingRootMessages();
       } catch (error) {
         // A sweep failure must not crash the window via uncaughtException.
-        console.error("[pi-maestro-teammate] workspace message re-drive failed:", error);
+        logDiagnosticError("[pi-maestro-teammate] workspace message re-drive failed:", error);
       }
     }, RECONCILE_RECEIPT_INTERVAL_MS);
     workspaceReceiptReconcileTimer.unref?.();
@@ -9475,7 +9583,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
         workspaceId: workspaceIdForCwd(state.baseCwd),
         sessionId: state.currentSessionId,
       }).catch((error) => {
-        console.warn("[pi-maestro-teammate] completion message_end reconciliation failed:", error);
+        logDiagnosticWarn("[pi-maestro-teammate] completion message_end reconciliation failed:", error);
       });
     }
     const assistantText = workspaceAssistantMessageText(event.message);
@@ -9484,6 +9592,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
       updateWorkspaceMainAssistantText(workspaceMainAssistantText);
       workspaceMainAssistantEventOpen = false;
     }
+    if (event.message.role === "assistant") workspaceCurrentTurnAssistantMessage = event.message;
     if (event.message.role !== "custom" || event.message.customType !== "teammate-message") return;
     const details = event.message.details as Record<string, unknown> | undefined;
     if (details?.source !== "workspace-peer" || typeof details.messageId !== "string") return;
@@ -9523,11 +9632,13 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
   pi.on("before_agent_start", injectTeammateContext);
 
   pi.on("agent_start", () => {
+    workspaceTerminalResultDraft = undefined;
     appendWorkspaceMainProgressEvent({ kind: "lifecycle", at: Date.now(), phase: "agent_start" });
   });
 
   pi.on("turn_start", () => {
     workspaceMainAssistantText = "";
+    workspaceCurrentTurnAssistantMessage = undefined;
     appendWorkspaceMainProgressEvent({ kind: "lifecycle", at: Date.now(), phase: "turn_start" });
   });
 
@@ -9571,12 +9682,18 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
 
   // Turn-level advisor: low-frequency quality review of this session's turns.
   pi.on("agent_end", (event, ctx) => {
+    workspaceTerminalResultDraft = deriveWorkspaceWindowTerminalResult(
+      workspaceCurrentTurnAssistantMessage === undefined ? [] : [workspaceCurrentTurnAssistantMessage],
+    );
     appendWorkspaceMainProgressEvent({ kind: "lifecycle", at: Date.now(), phase: "agent_end" });
     void runAdvisorReview(event, ctx);
   });
 
-  pi.on("agent_settled", () => {
+  pi.on("agent_settled", async () => {
     appendWorkspaceMainProgressEvent({ kind: "lifecycle", at: Date.now(), phase: "agent_settled" });
+    await publishWorkspaceWindowTerminalResults(
+      workspaceTerminalResultDraft ?? { outcome: "no-final-text" },
+    );
   });
 
   pi.on("session_compact", (_event, ctx) => {
@@ -9595,10 +9712,16 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
   });
 
   pi.on("session_shutdown", async (event) => {
+    const shutdownReason = event?.reason ?? "quit";
+    await publishWorkspaceWindowTerminalResults(
+      workspaceTerminalResultDraft ?? {
+        outcome: "cancelled",
+        error: `Worker session shut down before publishing a final response (${shutdownReason}).`,
+      },
+    );
     completionCoordinator.unbindSession();
     state.sessionGeneration = (state.sessionGeneration ?? 0) + 1;
     state.currentSessionId = null;
-    const shutdownReason = event?.reason ?? "quit";
     if (shutdownReason === "quit" || shutdownReason === "reload") disposeTuiLocaleEvents();
     uninstallMonitorEscapeTap();
     disposeTeammateSettings();
@@ -9609,10 +9732,10 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
       shutdownRemoteMonitorBinding(),
     ]);
     if (localMonitorShutdown.status === "rejected") {
-      console.error("[pi-maestro-teammate] local Monitor shutdown failed:", localMonitorShutdown.reason);
+      logDiagnosticError("[pi-maestro-teammate] local Monitor shutdown failed:", localMonitorShutdown.reason);
     }
     if (remoteMonitorShutdown.status === "rejected") {
-      console.error("[pi-maestro-teammate] remote Monitor shutdown failed:", sanitizeRemoteMonitorError(remoteMonitorShutdown.reason, "shutdown"));
+      logDiagnosticError("[pi-maestro-teammate] remote Monitor shutdown failed:", sanitizeRemoteMonitorError(remoteMonitorShutdown.reason, "shutdown"));
     }
     workspaceBackgroundJobs = [];
     activePromptLoopIds = [];
@@ -9650,7 +9773,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
       sessionHostRegistry = undefined;
     }
     void stoppedMailbox?.stop().catch((error) => {
-      console.error(`[pi-maestro-teammate] mailbox host stop failed:`, error);
+      logDiagnosticError(`[pi-maestro-teammate] mailbox host stop failed:`, error);
     });
     teardownRootSession();
   });

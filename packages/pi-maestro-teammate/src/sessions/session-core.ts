@@ -45,7 +45,7 @@ export function sessionMessageTriggersTurn(kind: SessionMessageKind | undefined)
   return kind !== "status";
 }
 
-export type SessionEndpointCapability = "inspect" | "message" | "steer" | "follow_up" | "abort" | "wake";
+export type SessionEndpointCapability = "inspect" | "message" | "steer" | "follow_up" | "abort" | "wake" | "flow-schedule-todo-binding";
 
 export interface SessionEndpointIdentity {
   workspaceId: string;
@@ -96,6 +96,8 @@ export interface SessionOwnerProjection extends Omit<SessionEndpointIdentity, "c
   sessionId?: string;
   sessionName?: string;
   contextPressure?: number;
+  /** Extra root-endpoint capabilities this owner advertises (e.g. flow-schedule-todo-binding). */
+  extraCapabilities?: readonly SessionEndpointCapability[];
   agents: readonly SessionAgentProjection[];
 }
 
@@ -227,7 +229,11 @@ export function projectSessionEndpoints(owners: readonly SessionOwnerProjection[
       transport: owner.transport ?? (owner.scope === "local" ? "local-root" : "workspace-peer-v1"),
       ...identity,
       status: owner.status,
-      capabilities: Object.freeze(["inspect", "message", "steer", "follow_up"]),
+      capabilities: Object.freeze(
+        owner.extraCapabilities && owner.extraCapabilities.length > 0
+          ? ["inspect", "message", "steer", "follow_up", ...owner.extraCapabilities]
+          : ["inspect", "message", "steer", "follow_up"],
+      ),
       ...(owner.sessionId ? { sessionId: owner.sessionId } : {}),
       ...(owner.sessionName ? { sessionName: owner.sessionName } : {}),
       ...(owner.contextPressure === undefined ? {} : { contextPressure: owner.contextPressure }),
@@ -397,6 +403,8 @@ export interface SessionMessageRequest {
   trustedStatus?: boolean;
   traceId?: string;
   replyTo?: string;
+  /** Request one bounded terminal status reply from a root workspace worker. */
+  terminalResultRequested?: true;
   fromSessionName?: string;
   /** Pin delivery target; avoids TOCTOU when the selector is rebound between check and route. */
   targetCorrelationId?: string;
@@ -428,6 +436,8 @@ export interface WindowThreadEntry {
   provenance?: MessageProvenanceV1;
   traceId?: string;
   replyTo?: string;
+  /** Opt-in terminal-result contract; absent on legacy journal entries. */
+  terminalResultRequested?: true;
   fromSessionName?: string;
   /** Receiving Pi session; prevents inherited fork entries from replaying into the child. */
   targetSessionId?: string;
@@ -481,6 +491,7 @@ function semanticThreadEntry(entry: Omit<WindowThreadEntry, "contentRevision">):
     ...(entry.provenance === undefined ? {} : { provenance: entry.provenance }),
     ...(entry.traceId === undefined ? {} : { traceId: entry.traceId }),
     ...(entry.replyTo === undefined ? {} : { replyTo: entry.replyTo }),
+    ...(entry.terminalResultRequested === undefined ? {} : { terminalResultRequested: entry.terminalResultRequested }),
     ...(entry.fromSessionName === undefined ? {} : { fromSessionName: entry.fromSessionName }),
     ...(entry.targetSessionId === undefined ? {} : { targetSessionId: entry.targetSessionId }),
     ...(entry.targetCorrelationId === undefined ? {} : { targetCorrelationId: entry.targetCorrelationId }),
@@ -512,6 +523,7 @@ function validThreadEntry(value: unknown): WindowThreadEntry | undefined {
       && entry.messageKind !== "supervision")
     || (entry.traceId !== undefined && (typeof entry.traceId !== "string" || entry.traceId.length === 0 || entry.traceId.length > 128 || /[\u0000-\u001f\u007f]/.test(entry.traceId)))
     || (entry.replyTo !== undefined && (typeof entry.replyTo !== "string" || entry.replyTo.length === 0 || entry.replyTo.length > 192 || /[\u0000-\u001f\u007f]/.test(entry.replyTo)))
+    || (entry.terminalResultRequested !== undefined && entry.terminalResultRequested !== true)
     || (entry.fromSessionName !== undefined && (typeof entry.fromSessionName !== "string" || entry.fromSessionName.length === 0 || entry.fromSessionName.length > 256 || /[\u0000-\u001f\u007f]/.test(entry.fromSessionName)))
     || (entry.targetSessionId !== undefined && (typeof entry.targetSessionId !== "string" || entry.targetSessionId.length === 0 || entry.targetSessionId.length > 256 || /[\u0000-\u001f\u007f]/.test(entry.targetSessionId)))
     || (entry.targetCorrelationId !== undefined && (typeof entry.targetCorrelationId !== "string" || entry.targetCorrelationId.length === 0 || entry.targetCorrelationId.length > 128 || /[\u0000-\u001f\u007f]/.test(entry.targetCorrelationId)))
@@ -550,6 +562,7 @@ function validThreadEntry(value: unknown): WindowThreadEntry | undefined {
     ...(provenance === undefined ? {} : { provenance }),
     ...(entry.traceId === undefined ? {} : { traceId: entry.traceId as string }),
     ...(entry.replyTo === undefined ? {} : { replyTo: entry.replyTo as string }),
+    ...(entry.terminalResultRequested === undefined ? {} : { terminalResultRequested: true as const }),
     ...(entry.fromSessionName === undefined ? {} : { fromSessionName: entry.fromSessionName as string }),
     ...(entry.targetSessionId === undefined ? {} : { targetSessionId: entry.targetSessionId as string }),
     ...(entry.targetCorrelationId === undefined ? {} : { targetCorrelationId: entry.targetCorrelationId as string }),
@@ -666,6 +679,7 @@ export class WindowThreadStore {
       && JSON.stringify(previous.provenance) === JSON.stringify(input.provenance)
       && previous.traceId === input.traceId
       && previous.replyTo === input.replyTo
+      && previous.terminalResultRequested === input.terminalResultRequested
       && previous.fromSessionName === input.fromSessionName
       && previous.targetSessionId === input.targetSessionId
       && previous.targetCorrelationId === input.targetCorrelationId

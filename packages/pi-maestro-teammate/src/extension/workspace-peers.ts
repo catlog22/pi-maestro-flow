@@ -18,6 +18,13 @@ import {
   unknownMessageProvenanceV1,
   type MessageProvenanceV1,
 } from "../shared/types.ts";
+import {
+  collectWorkspaceProjections,
+  getWorkspaceProjectionProvider,
+  type WorkspaceProjectionItem,
+  type WorkspaceTodoSnapshot,
+} from "../public/v1/workspace-projections.ts";
+export type { WorkspaceTodoSnapshot } from "../public/v1/workspace-projections.ts";
 
 export const WORKSPACE_PEER_PROTOCOL_VERSION = 1 as const;
 /**
@@ -33,12 +40,27 @@ export const DEFAULT_COMMAND_TIMEOUT_MS = 5_000;
 export const MAX_OWNER_AGENTS = 256;
 export const MAX_OWNER_SETTLED = 256;
 export const MAX_OWNER_BACKGROUND_JOBS = 32;
+export const WORKSPACE_OWNER_CAPABILITIES = ["flow-schedule-todo-binding"] as const;
+export type WorkspaceOwnerCapability = typeof WORKSPACE_OWNER_CAPABILITIES[number];
+const WORKSPACE_OWNER_CAPABILITY_VALUES = new Set<string>(WORKSPACE_OWNER_CAPABILITIES);
+/** Maximum todo items in one owner snapshot. */
+export const MAX_OWNER_TODOS = 32;
+/** Maximum bytes for a single todo snapshot field (subject/assigneeLabel). */
+export const MAX_TODO_FIELD_BYTES = 4 * 1024;
 export const MAX_MAIN_SESSION_PROGRESS_EVENTS = 16;
 export const MAIN_SESSION_PROGRESS_TEXT_BYTES = 4 * 1024;
 export const MAX_OWNER_FILE_BYTES = 256 * 1024;
+/** Maximum projection items contributed across all providers in one owner snapshot. */
+export const MAX_OWNER_PROJECTION_ITEMS = 32;
+/** Maximum bytes for a single projection item's JSON encoding. */
+export const MAX_PROJECTION_ITEM_BYTES = 4 * 1024;
 export const MAX_COMMAND_FILE_BYTES = 96 * 1024;
 export const MAX_RESPONSE_FILE_BYTES = 32 * 1024;
 export const MAX_COMMAND_MESSAGE_BYTES = 64 * 1024;
+/** Maximum UTF-8 bytes retained from a worker's final assistant text. */
+export const MAX_WORKSPACE_WINDOW_FINAL_TEXT_BYTES = 48 * 1024;
+/** Maximum UTF-8 bytes retained from a worker terminal diagnostic. */
+export const MAX_WORKSPACE_WINDOW_ERROR_BYTES = 8 * 1024;
 export const MAX_WINDOW_LISTING_ACTIVE_AGENTS = 8;
 
 export const MONITOR_LEASE_STALE_MS = 60_000;
@@ -82,6 +104,24 @@ export type WorkspacePeerMessageKind =
   | "status"
   | "supervision";
 export type WorkspacePeerDeliveryStage = "queued" | "injected";
+export const WORKSPACE_WINDOW_TERMINAL_RESULT_TYPE = "workspace-window-terminal-result" as const;
+export type WorkspaceWindowTerminalOutcome = "completed" | "failed" | "cancelled" | "no-result";
+
+export interface WorkspaceWindowTerminalResult {
+  version: typeof WORKSPACE_PEER_PROTOCOL_VERSION;
+  type: typeof WORKSPACE_WINDOW_TERMINAL_RESULT_TYPE;
+  requestMessageId: string;
+  outcome: WorkspaceWindowTerminalOutcome;
+  settledAt: number;
+  finalText?: string;
+  error?: string;
+}
+
+export interface WorkspaceWindowTerminalResultDraft {
+  outcome: WorkspaceWindowTerminalOutcome;
+  finalText?: string;
+  error?: string;
+}
 
 export interface WorkspacePeerPaths {
   rootDir: string;
@@ -182,6 +222,8 @@ export interface WorkspaceOwnerState {
   mainActivityAt?: number;
   /** Optional assistant/tool/lifecycle projection for cross-process observers. */
   mainProgress?: WorkspaceMainSessionProgress;
+  /** Bounded Todo projection (worker root session). */
+  todos?: readonly WorkspaceTodoSnapshot[];
 }
 
 export interface WorkspaceOwnerSnapshot {
@@ -195,6 +237,8 @@ export interface WorkspaceOwnerSnapshot {
   publishedAt: number;
   sessionId?: string;
   sessionName?: string;
+  /** Optional capabilities advertised by this owner root session. */
+  capabilities?: WorkspaceOwnerCapability[];
   /** Context pressure as percentage of the window's context window (0-100). */
   contextPressure?: number;
   /** Last main-session activity timestamp — liveness signal when no sub-agents are running. */
@@ -204,6 +248,10 @@ export interface WorkspaceOwnerSnapshot {
   agents: WorkspaceAgentSnapshot[];
   settled: WorkspaceSettledSnapshot[];
   backgroundJobs?: WorkspaceBackgroundJobSnapshot[];
+  /** Bounded projections contributed by registered workspace projection providers. */
+  projections?: WorkspaceProjectionItem[];
+  /** Bounded Todo projection from the worker root session (when a todo provider is registered). */
+  todos?: WorkspaceTodoSnapshot[];
 }
 
 export interface WorkspacePeerWindowListing {
@@ -375,6 +423,8 @@ export interface WorkspacePeerCommand {
   provenance?: MessageProvenanceV1;
   traceId?: string;
   replyTo?: string;
+  /** Opt-in request for one terminal result status reply from a root worker window. */
+  terminalResultRequested?: true;
   fromSessionName?: string;
   createdAt: number;
   expiresAt: number;
@@ -482,6 +532,177 @@ function safeSessionName(value: unknown): value is string {
   return boundedString(value, 256)
     && value.length > 0
     && !/[\r\n\t\u0085\u2028\u2029]/.test(value);
+}
+
+function truncateWorkspaceTerminalText(value: string, maximumBytes: number): string {
+  const sanitized = value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "");
+  if (Buffer.byteLength(sanitized, "utf8") <= maximumBytes) return sanitized;
+  let end = sanitized.length;
+  while (end > 0 && Buffer.byteLength(sanitized.slice(0, end), "utf8") > maximumBytes) {
+    const bytes = Buffer.byteLength(sanitized.slice(0, end), "utf8");
+    end = Math.max(0, Math.floor(end * maximumBytes / bytes));
+  }
+  while (end > 0 && /[\uD800-\uDBFF]/.test(sanitized[end - 1]!)) end -= 1;
+  return sanitized.slice(0, end);
+}
+
+function assistantTextFromMessage(message: Record<string, unknown>): string | undefined {
+  if (message.role !== "assistant") return undefined;
+  if (typeof message.content === "string") return message.content;
+  if (!Array.isArray(message.content)) return undefined;
+  const text = message.content
+    .filter(isRecord)
+    .filter((item) => item.type === "text" && typeof item.text === "string")
+    .map((item) => item.text as string)
+    .join("\n");
+  return text || undefined;
+}
+
+/** Classify the authoritative final worker turn without treating empty output as success. */
+export function deriveWorkspaceWindowTerminalResult(
+  messages: readonly unknown[],
+): WorkspaceWindowTerminalResultDraft {
+  let assistant: Record<string, unknown> | undefined;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const candidate = messages[index];
+    if (isRecord(candidate) && candidate.role === "assistant") {
+      assistant = candidate;
+      break;
+    }
+  }
+  if (!assistant) return { outcome: "no-result" };
+
+  const text = assistantTextFromMessage(assistant)?.trim();
+  const finalText = text
+    ? truncateWorkspaceTerminalText(text, MAX_WORKSPACE_WINDOW_FINAL_TEXT_BYTES)
+    : undefined;
+  const stopReason = typeof assistant.stopReason === "string" ? assistant.stopReason : undefined;
+  const diagnostic = typeof assistant.errorMessage === "string" && assistant.errorMessage.trim()
+    ? truncateWorkspaceTerminalText(assistant.errorMessage.trim(), MAX_WORKSPACE_WINDOW_ERROR_BYTES)
+    : undefined;
+  const cancelled = stopReason === "aborted"
+    || Boolean(diagnostic && /\b(?:abort(?:ed)?|cancel(?:led|ed)?|request was aborted)\b/i.test(diagnostic));
+  if (cancelled) {
+    return {
+      outcome: "cancelled",
+      ...(finalText === undefined ? {} : { finalText }),
+      ...(diagnostic === undefined ? {} : { error: diagnostic }),
+    };
+  }
+  if (stopReason === "error" || stopReason === "length") {
+    return {
+      outcome: "failed",
+      ...(finalText === undefined ? {} : { finalText }),
+      error: diagnostic ?? (stopReason === "length"
+        ? "Worker stopped at the output token limit."
+        : "Worker terminated with an unspecified error."),
+    };
+  }
+  if (stopReason !== "stop") {
+    return {
+      outcome: "failed",
+      ...(finalText === undefined ? {} : { finalText }),
+      error: diagnostic ?? `Worker reported an invalid terminal stop reason (${stopReason ?? "missing"}).`,
+    };
+  }
+  if (finalText !== undefined) return { outcome: "completed", finalText };
+  return { outcome: "no-result" };
+}
+
+export function workspaceWindowTerminalResultMessageId(requestMessageId: string): string {
+  if (!OWNER_ID_PATTERN.test(requestMessageId)) throw new Error("terminal result requestMessageId must be 32 lowercase hexadecimal characters");
+  return createHash("sha256").update(`workspace-window-terminal-result\0${requestMessageId}`, "utf8").digest("hex").slice(0, 32);
+}
+
+/** Deterministic immutable resource identity for one opt-in workspace request. */
+export function workspaceWindowTerminalPublicationId(requestMessageId: string): string {
+  if (!OWNER_ID_PATTERN.test(requestMessageId)) throw new Error("terminal result requestMessageId must be 32 lowercase hexadecimal characters");
+  return createHash("sha256").update(`workspace-window-terminal-publication\0${requestMessageId}`, "utf8").digest("hex");
+}
+
+/** Deterministic completion reservation identity, stable across process recovery. */
+export function workspaceWindowTerminalReservationId(requestMessageId: string): string {
+  if (!OWNER_ID_PATTERN.test(requestMessageId)) throw new Error("terminal result requestMessageId must be 32 lowercase hexadecimal characters");
+  return createHash("sha256").update(`workspace-window-terminal-reservation\0${requestMessageId}`, "utf8").digest("hex");
+}
+
+export function createWorkspaceWindowTerminalResult(input: {
+  requestMessageId: string;
+  outcome: WorkspaceWindowTerminalOutcome;
+  settledAt?: number;
+  finalText?: string;
+  error?: string;
+}): WorkspaceWindowTerminalResult {
+  const result: WorkspaceWindowTerminalResult = {
+    version: WORKSPACE_PEER_PROTOCOL_VERSION,
+    type: WORKSPACE_WINDOW_TERMINAL_RESULT_TYPE,
+    requestMessageId: input.requestMessageId,
+    outcome: input.outcome,
+    settledAt: input.settledAt ?? Date.now(),
+    ...(input.finalText === undefined ? {} : {
+      finalText: truncateWorkspaceTerminalText(input.finalText, MAX_WORKSPACE_WINDOW_FINAL_TEXT_BYTES),
+    }),
+    ...(input.error === undefined ? {} : {
+      error: truncateWorkspaceTerminalText(input.error, MAX_WORKSPACE_WINDOW_ERROR_BYTES),
+    }),
+  };
+  const validated = validateWorkspaceWindowTerminalResult(result);
+  if (!validated) throw new Error("constructed workspace window terminal result failed protocol validation");
+  return validated;
+}
+
+export function validateWorkspaceWindowTerminalResult(value: unknown): WorkspaceWindowTerminalResult | undefined {
+  if (!isRecord(value)
+    || value.version !== WORKSPACE_PEER_PROTOCOL_VERSION
+    || value.type !== WORKSPACE_WINDOW_TERMINAL_RESULT_TYPE
+    || typeof value.requestMessageId !== "string"
+    || !OWNER_ID_PATTERN.test(value.requestMessageId)
+    || (value.outcome !== "completed"
+      && value.outcome !== "failed"
+      && value.outcome !== "cancelled"
+      && value.outcome !== "no-result")
+    || !boundedInteger(value.settledAt)
+    || (value.finalText !== undefined
+      && (typeof value.finalText !== "string"
+        || value.finalText.length === 0
+        || Buffer.byteLength(value.finalText, "utf8") > MAX_WORKSPACE_WINDOW_FINAL_TEXT_BYTES))
+    || (value.error !== undefined
+      && (typeof value.error !== "string"
+        || value.error.length === 0
+        || Buffer.byteLength(value.error, "utf8") > MAX_WORKSPACE_WINDOW_ERROR_BYTES))
+    || (value.outcome === "completed" && value.finalText === undefined)
+    || (value.outcome === "no-result" && (value.finalText !== undefined || value.error !== undefined))
+    || (value.outcome === "failed" && value.error === undefined)) return undefined;
+  const encoded = JSON.stringify(value);
+  if (Buffer.byteLength(encoded, "utf8") > MAX_COMMAND_MESSAGE_BYTES) return undefined;
+  return {
+    version: WORKSPACE_PEER_PROTOCOL_VERSION,
+    type: WORKSPACE_WINDOW_TERMINAL_RESULT_TYPE,
+    requestMessageId: value.requestMessageId,
+    outcome: value.outcome,
+    settledAt: value.settledAt,
+    ...(value.finalText === undefined ? {} : { finalText: value.finalText }),
+    ...(value.error === undefined ? {} : { error: value.error }),
+  };
+}
+
+export function encodeWorkspaceWindowTerminalResult(result: WorkspaceWindowTerminalResult): string {
+  const validated = validateWorkspaceWindowTerminalResult(result);
+  if (!validated) throw new Error("invalid workspace window terminal result");
+  return JSON.stringify(validated);
+}
+
+export function decodeWorkspaceWindowTerminalResult(text: string): WorkspaceWindowTerminalResult {
+  if (Buffer.byteLength(text, "utf8") > MAX_COMMAND_MESSAGE_BYTES) throw new Error("workspace window terminal result exceeds protocol bounds");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`invalid workspace window terminal result JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const result = validateWorkspaceWindowTerminalResult(parsed);
+  if (!result) throw new Error("invalid workspace window terminal result");
+  return result;
 }
 
 export function normalizeWorkspacePath(cwd: string, platform: NodeJS.Platform = process.platform): string {
@@ -966,6 +1187,81 @@ export function validateWorkspaceBackgroundJobSnapshot(value: unknown): Workspac
   };
 }
 
+/** Validate a single projection item: kind must be a bounded non-empty string, data must be JSON-serializable and within MAX_PROJECTION_ITEM_BYTES. */
+function validateWorkspaceProjectionItem(value: unknown): WorkspaceProjectionItem | undefined {
+  if (!isRecord(value)
+    || typeof value.kind !== "string"
+    || value.kind.length < 1
+    || value.kind.length > 64) return undefined;
+  if (value.data === undefined) return undefined;
+  let encoded: string;
+  try {
+    encoded = JSON.stringify(value.data);
+  } catch {
+    return undefined;
+  }
+  if (Buffer.byteLength(encoded, "utf8") > MAX_PROJECTION_ITEM_BYTES) return undefined;
+  // Re-parse to get a plain (non-classed) value, mirroring other snapshots.
+  let data: unknown;
+  try {
+    data = JSON.parse(encoded);
+  } catch {
+    return undefined;
+  }
+  return { kind: value.kind, data };
+}
+
+/** Strip CR/LF/ESC and other C0 control characters from text for safe cross-process display. */
+function sanitizeTextForProjection(value: unknown, maximumBytes: number): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const cleaned = value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").replace(/[\r\n]/g, " ");
+  if (Buffer.byteLength(cleaned, "utf8") <= maximumBytes) return cleaned;
+  const suffix = "...";
+  return `${truncateWorkspaceTerminalText(cleaned, maximumBytes - Buffer.byteLength(suffix, "utf8"))}${suffix}`;
+}
+
+const TODO_STATUS_VALUES = new Set(["pending", "in_progress", "completed", "blocked", "deleted"]);
+
+/** Validate a single WorkspaceTodoSnapshot: id/subject/status bounded, control chars sanitized. */
+function validateWorkspaceTodoSnapshot(value: unknown): WorkspaceTodoSnapshot | undefined {
+  if (!isRecord(value)) return undefined;
+  if (typeof value.id !== "string" || value.id.length < 1 || value.id.length > 256) return undefined;
+  const subject = sanitizeTextForProjection(value.subject, MAX_TODO_FIELD_BYTES);
+  if (subject === undefined) return undefined;
+  if (typeof value.status !== "string" || !TODO_STATUS_VALUES.has(value.status)) return undefined;
+  if (!boundedInteger(value.updatedAt)) return undefined;
+  const assigneeLabel = value.assigneeLabel === undefined ? undefined : sanitizeTextForProjection(value.assigneeLabel, 256);
+  if (value.assigneeLabel !== undefined && assigneeLabel === undefined) return undefined;
+  if (value.dispatchId !== undefined && (typeof value.dispatchId !== "string" || value.dispatchId.length > 64)) return undefined;
+  if (value.scheduleId !== undefined && (typeof value.scheduleId !== "string" || value.scheduleId.length > 64)) return undefined;
+  if (value.stepId !== undefined && (typeof value.stepId !== "string" || value.stepId.length > 64)) return undefined;
+  if (value.bindingActive !== undefined && typeof value.bindingActive !== "boolean") return undefined;
+  return {
+    id: value.id,
+    subject,
+    status: value.status as WorkspaceTodoSnapshot["status"],
+    ...(assigneeLabel === undefined ? {} : { assigneeLabel }),
+    ...(value.dispatchId === undefined ? {} : { dispatchId: value.dispatchId }),
+    ...(value.scheduleId === undefined ? {} : { scheduleId: value.scheduleId }),
+    ...(value.stepId === undefined ? {} : { stepId: value.stepId }),
+    ...(value.bindingActive === undefined ? {} : { bindingActive: value.bindingActive }),
+    updatedAt: value.updatedAt,
+  };
+}
+
+function workspaceOwnerPayloadBytes(value: unknown): number | undefined {
+  try {
+    return Buffer.byteLength(`${JSON.stringify(value)}\n`, "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
+function isActiveBindingTodo(todo: WorkspaceTodoSnapshot): boolean {
+  if (todo.bindingActive !== undefined) return todo.bindingActive;
+  return todo.dispatchId !== undefined && todo.status !== "completed" && todo.status !== "deleted";
+}
+
 export function validateWorkspaceMainSessionProgress(value: unknown): WorkspaceMainSessionProgress | undefined {
   if (!isRecord(value)
     || !boundedInteger(value.updatedAt)
@@ -1022,6 +1318,8 @@ export function validateWorkspaceOwnerSnapshot(
   value: unknown,
   expected?: { workspaceId?: string; ownerId?: string },
 ): WorkspaceOwnerSnapshot | undefined {
+  const payloadBytes = workspaceOwnerPayloadBytes(value);
+  if (payloadBytes === undefined || payloadBytes > MAX_OWNER_FILE_BYTES) return undefined;
   if (!isRecord(value)
     || value.version !== WORKSPACE_PEER_PROTOCOL_VERSION
     || value.kind !== "owner"
@@ -1037,6 +1335,11 @@ export function validateWorkspaceOwnerSnapshot(
     || !boundedInteger(value.publishedAt)
     || !optional(value.sessionId, (candidate): candidate is string => boundedString(candidate, 256))
     || !optional(value.sessionName, (candidate): candidate is string => boundedString(candidate, 256))
+    || (value.capabilities !== undefined
+      && (!Array.isArray(value.capabilities)
+        || value.capabilities.length > WORKSPACE_OWNER_CAPABILITIES.length
+        || value.capabilities.some((candidate) => typeof candidate !== "string" || !WORKSPACE_OWNER_CAPABILITY_VALUES.has(candidate))
+        || new Set(value.capabilities).size !== value.capabilities.length))
     || !optional(value.contextPressure, (candidate): candidate is number => boundedInteger(candidate) && candidate >= 0 && candidate <= 100)
     || !optional(value.mainActivityAt, boundedInteger)
     || !optional(value.mainProgress, (candidate): candidate is WorkspaceMainSessionProgress => validateWorkspaceMainSessionProgress(candidate) !== undefined)
@@ -1046,6 +1349,10 @@ export function validateWorkspaceOwnerSnapshot(
     || value.settled.length > MAX_OWNER_SETTLED
     || (value.backgroundJobs !== undefined
       && (!Array.isArray(value.backgroundJobs) || value.backgroundJobs.length > MAX_OWNER_BACKGROUND_JOBS))
+    || (value.projections !== undefined
+      && (!Array.isArray(value.projections) || value.projections.length > MAX_OWNER_PROJECTION_ITEMS))
+    || (value.todos !== undefined
+      && (!Array.isArray(value.todos) || value.todos.length > MAX_OWNER_TODOS))
     || (expected?.workspaceId !== undefined && value.workspaceId !== expected.workspaceId)
     || (expected?.ownerId !== undefined && value.ownerId !== expected.ownerId)) return undefined;
   const mainProgress = value.mainProgress === undefined
@@ -1056,9 +1363,17 @@ export function validateWorkspaceOwnerSnapshot(
   const backgroundJobs = value.backgroundJobs === undefined
     ? undefined
     : value.backgroundJobs.map(validateWorkspaceBackgroundJobSnapshot);
+  const projections = value.projections === undefined
+    ? undefined
+    : value.projections.map(validateWorkspaceProjectionItem);
+  const todos = value.todos === undefined
+    ? undefined
+    : value.todos.map(validateWorkspaceTodoSnapshot);
   if (agents.some((item) => item === undefined)
     || settled.some((item) => item === undefined)
-    || backgroundJobs?.some((item) => item === undefined)) return undefined;
+    || backgroundJobs?.some((item) => item === undefined)
+    || projections?.some((item) => item === undefined)
+    || todos?.some((item) => item === undefined)) return undefined;
   const ids = [...agents, ...settled].map((item) => item!.correlationId);
   if (new Set(ids).size !== ids.length) return undefined;
   return {
@@ -1072,12 +1387,15 @@ export function validateWorkspaceOwnerSnapshot(
     publishedAt: value.publishedAt,
     ...(value.sessionId === undefined ? {} : { sessionId: value.sessionId }),
     ...(value.sessionName === undefined ? {} : { sessionName: value.sessionName }),
+    ...(value.capabilities === undefined ? {} : { capabilities: [...value.capabilities] as WorkspaceOwnerCapability[] }),
     ...(value.contextPressure === undefined ? {} : { contextPressure: value.contextPressure }),
     ...(value.mainActivityAt === undefined ? {} : { mainActivityAt: value.mainActivityAt }),
     ...(mainProgress === undefined ? {} : { mainProgress }),
     agents: agents as WorkspaceAgentSnapshot[],
     settled: settled as WorkspaceSettledSnapshot[],
     ...(backgroundJobs === undefined ? {} : { backgroundJobs: backgroundJobs as WorkspaceBackgroundJobSnapshot[] }),
+    ...(projections === undefined ? {} : { projections: projections as WorkspaceProjectionItem[] }),
+    ...(todos === undefined ? {} : { todos: todos as WorkspaceTodoSnapshot[] }),
   };
 }
 
@@ -1097,6 +1415,9 @@ export function buildWorkspaceOwnerSnapshot(
     publishedAt,
     ...(state.sessionId === undefined ? {} : { sessionId: state.sessionId }),
     ...(state.sessionName === undefined ? {} : { sessionName: state.sessionName }),
+    ...(getWorkspaceProjectionProvider("todo") === undefined
+      ? {}
+      : { capabilities: ["flow-schedule-todo-binding"] }),
     // Protocol boundary: clamp/round pressure so publish never rejects.
     ...(state.contextPressure === undefined ? {} : { contextPressure: Math.max(0, Math.min(100, Math.round(state.contextPressure))) }),
     ...(state.mainActivityAt === undefined ? {} : { mainActivityAt: state.mainActivityAt }),
@@ -1110,6 +1431,49 @@ export function buildWorkspaceOwnerSnapshot(
     settled: [...(state.settled ?? [])],
     ...(state.backgroundJobs === undefined ? {} : { backgroundJobs: [...state.backgroundJobs] }),
   };
+  // Merge bounded projections from registered providers (Flow→Teammate,
+  // runtime-registered). Todo items have a typed owner field; other kinds stay
+  // in the generic projection collection.
+  const collected = collectWorkspaceProjections((message) => {
+    logDiagnosticError(`[pi-maestro-teammate] ${message}`);
+  });
+  const projections = collected
+    .filter((item) => item.kind !== "todo")
+    .slice(0, MAX_OWNER_PROJECTION_ITEMS);
+  if (projections.length > 0) raw.projections = projections;
+
+  const providerTodos = collected
+    .filter((item) => item.kind === "todo")
+    .map((item) => validateWorkspaceTodoSnapshot(item.data))
+    .filter((item): item is WorkspaceTodoSnapshot => item !== undefined);
+  const todoById = new Map<string, WorkspaceTodoSnapshot>();
+  for (const candidate of state.todos ?? []) {
+    const todo = validateWorkspaceTodoSnapshot(candidate);
+    if (!todo) throw new Error("workspace owner state contains an invalid Todo projection");
+    todoById.set(todo.id, todo);
+  }
+  for (const todo of providerTodos) todoById.set(todo.id, todo);
+  const todos = [...todoById.values()];
+  const active = todos.filter(isActiveBindingTodo);
+  if (active.length > MAX_OWNER_TODOS) {
+    throw new Error(`workspace owner state has more than ${MAX_OWNER_TODOS} active binding todos`);
+  }
+  if (active.length > 0) raw.todos = active;
+  const activeBytes = workspaceOwnerPayloadBytes(raw);
+  if (activeBytes === undefined || activeBytes > MAX_OWNER_FILE_BYTES) {
+    throw new Error("workspace owner active binding todos exceed the owner snapshot byte budget");
+  }
+  for (const todo of todos.filter((item) => !isActiveBindingTodo(item))) {
+    if ((raw.todos?.length ?? 0) >= MAX_OWNER_TODOS) break;
+    const candidate = [...(raw.todos ?? []), todo];
+    raw.todos = candidate;
+    const candidateBytes = workspaceOwnerPayloadBytes(raw);
+    if (candidateBytes === undefined || candidateBytes > MAX_OWNER_FILE_BYTES) {
+      raw.todos.pop();
+      continue;
+    }
+  }
+  if (raw.todos?.length === 0) delete raw.todos;
   const validated = validateWorkspaceOwnerSnapshot(raw, identity);
   if (!validated) throw new Error("workspace owner state is invalid or exceeds protocol bounds");
   return validated;
@@ -1395,7 +1759,7 @@ export class WorkspacePeerPublisher {
         try {
           await this.#cleanupMailboxes(this.identity, { now: publishedAt });
         } catch (error) {
-          console.error("[pi-maestro-teammate] workspace peer mailbox cleanup failed:", error);
+          logDiagnosticError("[pi-maestro-teammate] workspace peer mailbox cleanup failed:", error);
         }
       }
     });
@@ -1460,6 +1824,11 @@ function validateCommand(value: unknown, expectedWorkspaceId?: string): Workspac
     || !optional(value.traceId, safeMetadataToken)
     || !optional(value.replyTo, safeReplySelector)
     || (value.replyTo !== undefined && value.replyTo !== `owner:${value.fromOwnerId}`)
+    || (value.terminalResultRequested !== undefined && value.terminalResultRequested !== true)
+    || (value.terminalResultRequested === true
+      && (value.targetCorrelationId !== WORKSPACE_MAIN_SESSION_MARKER
+        || (value.messageKind ?? "message") !== "request"
+        || value.replyTo !== `owner:${value.fromOwnerId}`))
     || !optional(value.fromSessionName, safeSessionName)
     || !boundedInteger(value.createdAt)
     || !boundedInteger(value.expiresAt)
@@ -1551,6 +1920,7 @@ export async function enqueueWorkspacePeerCommand(
     provenance?: MessageProvenanceV1;
     traceId?: string;
     replyTo?: string;
+    terminalResultRequested?: true;
     fromSessionName?: string;
     beforePublish?: (command: WorkspacePeerCommand) => void | Promise<void>;
     /** Synchronous ownership check at the atomic rename boundary. */
@@ -1584,6 +1954,7 @@ export async function enqueueWorkspacePeerCommand(
     ...(options.provenance === undefined ? {} : { provenance: options.provenance }),
     ...(options.traceId === undefined ? {} : { traceId: options.traceId }),
     ...(options.replyTo === undefined ? {} : { replyTo: options.replyTo }),
+    ...(options.terminalResultRequested === undefined ? {} : { terminalResultRequested: options.terminalResultRequested }),
     ...(options.fromSessionName === undefined ? {} : { fromSessionName: options.fromSessionName }),
     createdAt,
     expiresAt: createdAt + ttlMs,
@@ -1708,6 +2079,7 @@ export async function sendWorkspacePeerCommand(
     provenance?: MessageProvenanceV1;
     traceId?: string;
     replyTo?: string;
+    terminalResultRequested?: true;
     fromSessionName?: string;
   } = {},
 ): Promise<{ command: WorkspacePeerCommand; response?: WorkspacePeerCommandResponse; timedOut: boolean }> {
@@ -1720,6 +2092,7 @@ export async function sendWorkspacePeerCommand(
     provenance: options.provenance,
     traceId: options.traceId,
     replyTo: options.replyTo,
+    terminalResultRequested: options.terminalResultRequested,
     fromSessionName: options.fromSessionName,
   });
   const response = await waitForWorkspacePeerCommandResponse(identity, command, options);

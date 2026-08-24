@@ -64,6 +64,7 @@ const LEAF_SUBPATHS = [
   "child-extensions.ts",
   "scheduler.ts",
   "sessions.ts",
+  "workspace-projections.ts",
 ];
 
 test("narrow v1 subpaths never load the extension entry point", () => {

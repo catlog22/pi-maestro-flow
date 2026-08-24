@@ -545,7 +545,7 @@ test("interactive terminal specs preserve Pi argv across supported platforms", (
 
 test("owned PID tree termination uses taskkill on Windows and a process group on POSIX", async () => {
   let windowsCall: { command: string; args: readonly string[] } | undefined;
-  await terminateProcessTreeByPid(4321, {
+  const windowsStatus = await terminateProcessTreeByPid(4321, {
     platform: "win32",
     spawnProcess: ((command: string, args: readonly string[]) => {
       windowsCall = { command, args };
@@ -554,10 +554,30 @@ test("owned PID tree termination uses taskkill on Windows and a process group on
       return child;
     }) as never,
   });
+  assert.equal(windowsStatus, "stopped");
   assert.deepEqual(windowsCall, {
     command: "taskkill",
     args: ["/PID", "4321", "/T", "/F"],
   });
+
+  const alreadyExited = await terminateProcessTreeByPid(4321, {
+    platform: "win32",
+    spawnProcess: (() => {
+      const child = createFakeProcess();
+      queueMicrotask(() => child.emit("close", 128, null));
+      return child;
+    }) as never,
+  });
+  assert.equal(alreadyExited, "already-exited");
+
+  await assert.rejects(() => terminateProcessTreeByPid(4321, {
+    platform: "win32",
+    spawnProcess: (() => {
+      const child = createFakeProcess();
+      queueMicrotask(() => child.emit("close", 5, null));
+      return child;
+    }) as never,
+  }), /taskkill exited with code 5/);
 
   const signals: Array<[number, NodeJS.Signals | number | undefined]> = [];
   await terminateProcessTreeByPid(77, {

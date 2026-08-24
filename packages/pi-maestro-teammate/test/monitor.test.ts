@@ -116,7 +116,8 @@ test("independent monitor session identity and command entry points stay stable"
   assert.match(source, /pi\.on\("session_start"[\s\S]*?exitMonitorInteractionMode\(\)/);
   assert.match(source, /pi\.on\("session_shutdown"[\s\S]*?exitMonitorInteractionMode\(\)/);
   assert.match(source, /pi\.on\("session_shutdown"[\s\S]*?Promise\.allSettled\(\[[\s\S]*?monitorControllerInstance\.shutdown\(\)[\s\S]*?shutdownRemoteMonitorBinding\(\)/);
-  assert.match(source, /workspaceObservationSnapshot[\s\S]*?const target = \{ kind: "workspace", id \};[\s\S]*?await refreshWorkspacePeerOwners\(\);[\s\S]*?if \(!ownsRootSessionFence\(fence\)\)/);
+  assert.match(source, /const target: ObservationTarget = \{\s*kind: "workspace",\s*id,\s*\.\.\.\(options\.cursor \? \{ cursor: options\.cursor \} : \{\}\),\s*\};/);
+  assert.match(source, /workspaceObservationSnapshot[\s\S]*?await refreshWorkspacePeerOwners\(\);[\s\S]*?if \(!ownsRootSessionFence\(fence\)\)[\s\S]*?error: "stale-root-session"/);
   assert.match(source, /waitForWorkspaceObservation[\s\S]*?options\.until !== "completed"[\s\S]*?last\.nativeStatus === "result-ready"/);
   assert.match(source, /event\.source !== "interactive"[\s\S]*?event\.text\.trim\(\) !== "monitor"/);
   assert.match(source, /if \(trimmed === "exit" \|\| trimmed === "stop"\)/);
@@ -256,6 +257,9 @@ test("monitor mode context is persistent, idempotent, and supervision-only", () 
   assert.match(injected, /remote:<runId>/);
   assert.match(injected, /Never attempt to close discovered external peer windows/);
   assert.match(injected, /observe local peers as kind=workspace and remote runs as kind=remote/);
+  assert.match(injected, /flow-schedule-todo-binding capability/);
+  assert.match(injected, /observe with view=todos on workspace targets/);
+  assert.match(injected, /display-only and never completion authority/);
   assert.match(injected, /view=inbox to read persisted cross-window and remote messages/);
   assert.match(injected, /objective is delivered by create/);
   assert.match(injected, /intervene only on new evidence of stall, drift, or failure/);
@@ -303,7 +307,7 @@ test("monitor communication uses tool-local capability gates without global inte
   assert.match(source, /local: \[sendTool, localListTool, localObserveTool\]/);
   assert.match(source, /monitor: \[sendTool, listTool, observeTool\]/);
   assert.match(source, /exclusiveNames: \["workspace-window", "remote-worker"\]/);
-  assert.match(source, /monitorToolExposure\?\.enter\(\)[\s\S]*?monitorInteractionModeActive = true/);
+  assert.match(source, /monitorInteractionModeActive = true[\s\S]*?monitorToolExposure\?\.enter\(\)/);
   assert.match(source, /monitorInteractionModeActive = false[\s\S]*?monitorToolExposure\?\.exit\(\)/);
   // Sending is not Monitor-gated; window discovery (teammate-list) is.
   assert.doesNotMatch(source, /before addressing another window/);

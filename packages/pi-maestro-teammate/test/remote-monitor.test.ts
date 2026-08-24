@@ -206,6 +206,95 @@ test("remote observation maps tail/full detail and terminal outcomes canonically
   assert.equal(persisted.some((entry) => entry.kind === "result" && entry.body.includes("release built") && entry.body.includes("dist.zip")), true);
 });
 
+test("remote observation view=turns groups driver events into turns and expands one turn", async () => {
+  const { manager, session } = harness();
+  const run = await session.create({ targetId: "linux/pi", name: "review", objective: "Review" });
+  const capture = session.capture(run.target)!;
+  session.recordEvent(capture, {
+    type: "run/event", workerId: capture.workerId, instanceNonce: capture.instanceNonce, runId: capture.runId, generation: capture.generation,
+    sequence: 1, updatedAt: 1_001, event: { type: "text", text: "reading the file now" },
+  });
+  session.recordEvent(capture, {
+    type: "run/event", workerId: capture.workerId, instanceNonce: capture.instanceNonce, runId: capture.runId, generation: capture.generation,
+    sequence: 2, updatedAt: 1_002, event: { type: "tool", tool: { toolCallId: "t1", toolName: "read", phase: "start" } },
+  });
+  session.recordEvent(capture, {
+    type: "run/event", workerId: capture.workerId, instanceNonce: capture.instanceNonce, runId: capture.runId, generation: capture.generation,
+    sequence: 3, updatedAt: 1_003, event: { type: "tool", tool: { toolCallId: "t1", toolName: "read", phase: "end", summary: "file contents" } },
+  });
+  session.recordEvent(capture, {
+    type: "run/event", workerId: capture.workerId, instanceNonce: capture.instanceNonce, runId: capture.runId, generation: capture.generation,
+    sequence: 4, updatedAt: 1_004, event: { type: "text", text: "editing now" },
+  });
+
+  const turns = session.observation(run.target, { detail: "full", lines: 20, view: "turns" });
+  assert.equal(turns.found, true);
+  assert.match(turns.summary ?? "", /review · running · 2 turns · last 4 events \(bounded ring\)/);
+  assert.ok(turns.detail?.some((line) => line.startsWith("Turn 1 · reading the file now")));
+  assert.ok(turns.detail?.some((line) => line.startsWith("Turn 2 · editing now")));
+
+  const turn1 = session.observation(run.target, { detail: "full", lines: 20, view: "turns", turn: 1 });
+  assert.match(turn1.summary ?? "", /Turn 1 · reading the file now · 3 rows · 1 tools/);
+  assert.ok(turn1.detail?.includes("[assistant] reading the file now"));
+  assert.ok(turn1.detail?.includes("[tool] read (running)"));
+  assert.ok(turn1.detail?.some((row) => row.startsWith("[result]") && row.includes("read") && row.includes("file contents")));
+
+  const missing = session.observation(run.target, { detail: "full", lines: 20, view: "turns", turn: 9 });
+  assert.match(missing.summary ?? "", /Turn 9 not found \(2 turns\)/);
+});
+
+test("remote observation view=turns coalesces streaming text chunks into one turn (RV-001)", async () => {
+  const { session } = harness();
+  const run = await session.create({ targetId: "linux/pi", name: "chat", objective: "Chat" });
+  const capture = session.capture(run.target)!;
+  // A single assistant message arrives as three agent_message_chunk deltas.
+  for (const [seq, chunk] of [["1", "Hello "], ["2", "world"], ["3", "!"]] as const) {
+    session.recordEvent(capture, {
+      type: "run/event", workerId: capture.workerId, instanceNonce: capture.instanceNonce, runId: capture.runId, generation: capture.generation,
+      sequence: Number(seq), updatedAt: 1_000 + Number(seq), event: { type: "text", text: chunk },
+    });
+  }
+
+  const turns = session.observation(run.target, { detail: "full", lines: 20, view: "turns" });
+  assert.match(turns.summary ?? "", /1 turn · last 3 events \(bounded ring\)/);
+  assert.ok(turns.detail?.some((line) => line.startsWith("Turn 1 · Hello")));
+});
+
+test("remote observation view=session paginates driver events with a cursor", async () => {
+  const { manager, session } = harness();
+  const run = await session.create({ targetId: "linux/pi", name: "build", objective: "Build" });
+  const capture = session.capture(run.target)!;
+  session.recordEvent(capture, {
+    type: "run/event", workerId: capture.workerId, instanceNonce: capture.instanceNonce, runId: capture.runId, generation: capture.generation,
+    sequence: 1, updatedAt: 1_001, event: { type: "text", text: "first" },
+  });
+  session.recordEvent(capture, {
+    type: "run/event", workerId: capture.workerId, instanceNonce: capture.instanceNonce, runId: capture.runId, generation: capture.generation,
+    sequence: 2, updatedAt: 1_002, event: { type: "tool", tool: { toolCallId: "t1", toolName: "bash", phase: "start" } },
+  });
+
+  const first = session.observation(run.target, { detail: "full", lines: 20, view: "session" });
+  assert.equal(first.page?.kind, "remote-session");
+  assert.equal(first.page?.items.length, 2);
+  const cursor = first.page?.nextCursor;
+  assert.ok(cursor);
+
+  // Grow the ring with two more events and continue from the cursor.
+  session.recordEvent(capture, {
+    type: "run/event", workerId: capture.workerId, instanceNonce: capture.instanceNonce, runId: capture.runId, generation: capture.generation,
+    sequence: 3, updatedAt: 1_003, event: { type: "tool", tool: { toolCallId: "t1", toolName: "bash", phase: "end" } },
+  });
+  session.recordEvent(capture, {
+    type: "run/event", workerId: capture.workerId, instanceNonce: capture.instanceNonce, runId: capture.runId, generation: capture.generation,
+    sequence: 4, updatedAt: 1_004, event: { type: "text", text: "second" },
+  });
+
+  const next = session.observation(run.target, { detail: "full", lines: 20, view: "session", cursor: cursor });
+  assert.equal(next.page?.items.length, 2);
+  assert.equal((next.page?.items[0] as { cursor: number }).cursor, 3);
+  assert.equal((next.page?.items[1] as { cursor: number }).cursor, 4);
+});
+
 test("remote send failures persist one terminal redacted receipt without a pending revision", async () => {
   const { manager, session, persisted } = harness();
   const run = await session.create({ targetId: "linux/pi", name: "send", objective: "Send safely" });

@@ -1,4 +1,6 @@
 import { type MessageProvenanceV1 } from "../shared/types.ts";
+import { type WorkspaceProjectionItem, type WorkspaceTodoSnapshot } from "../public/v1/workspace-projections.ts";
+export type { WorkspaceTodoSnapshot } from "../public/v1/workspace-projections.ts";
 export declare const WORKSPACE_PEER_PROTOCOL_VERSION: 1;
 /**
  * Reserved targetCorrelationId for commands addressed to a window's main
@@ -13,12 +15,26 @@ export declare const DEFAULT_COMMAND_TIMEOUT_MS = 5000;
 export declare const MAX_OWNER_AGENTS = 256;
 export declare const MAX_OWNER_SETTLED = 256;
 export declare const MAX_OWNER_BACKGROUND_JOBS = 32;
+export declare const WORKSPACE_OWNER_CAPABILITIES: readonly ["flow-schedule-todo-binding"];
+export type WorkspaceOwnerCapability = typeof WORKSPACE_OWNER_CAPABILITIES[number];
+/** Maximum todo items in one owner snapshot. */
+export declare const MAX_OWNER_TODOS = 32;
+/** Maximum bytes for a single todo snapshot field (subject/assigneeLabel). */
+export declare const MAX_TODO_FIELD_BYTES: number;
 export declare const MAX_MAIN_SESSION_PROGRESS_EVENTS = 16;
 export declare const MAIN_SESSION_PROGRESS_TEXT_BYTES: number;
 export declare const MAX_OWNER_FILE_BYTES: number;
+/** Maximum projection items contributed across all providers in one owner snapshot. */
+export declare const MAX_OWNER_PROJECTION_ITEMS = 32;
+/** Maximum bytes for a single projection item's JSON encoding. */
+export declare const MAX_PROJECTION_ITEM_BYTES: number;
 export declare const MAX_COMMAND_FILE_BYTES: number;
 export declare const MAX_RESPONSE_FILE_BYTES: number;
 export declare const MAX_COMMAND_MESSAGE_BYTES: number;
+/** Maximum UTF-8 bytes retained from a worker's final assistant text. */
+export declare const MAX_WORKSPACE_WINDOW_FINAL_TEXT_BYTES: number;
+/** Maximum UTF-8 bytes retained from a worker terminal diagnostic. */
+export declare const MAX_WORKSPACE_WINDOW_ERROR_BYTES: number;
 export declare const MAX_WINDOW_LISTING_ACTIVE_AGENTS = 8;
 export declare const MONITOR_LEASE_STALE_MS = 60000;
 /** A window whose main session was active within this window is busy even with zero sub-agents. */
@@ -42,6 +58,22 @@ export type WorkspacePeerMessageSource = "user" | "monitor" | "system";
  */
 export type WorkspacePeerMessageKind = "message" | "coordination" | "request" | "status" | "supervision";
 export type WorkspacePeerDeliveryStage = "queued" | "injected";
+export declare const WORKSPACE_WINDOW_TERMINAL_RESULT_TYPE: "workspace-window-terminal-result";
+export type WorkspaceWindowTerminalOutcome = "completed" | "failed" | "cancelled" | "no-final-text";
+export interface WorkspaceWindowTerminalResult {
+    version: typeof WORKSPACE_PEER_PROTOCOL_VERSION;
+    type: typeof WORKSPACE_WINDOW_TERMINAL_RESULT_TYPE;
+    requestMessageId: string;
+    outcome: WorkspaceWindowTerminalOutcome;
+    settledAt: number;
+    finalText?: string;
+    error?: string;
+}
+export interface WorkspaceWindowTerminalResultDraft {
+    outcome: WorkspaceWindowTerminalOutcome;
+    finalText?: string;
+    error?: string;
+}
 export interface WorkspacePeerPaths {
     rootDir: string;
     ownersDir: string;
@@ -136,6 +168,8 @@ export interface WorkspaceOwnerState {
     mainActivityAt?: number;
     /** Optional assistant/tool/lifecycle projection for cross-process observers. */
     mainProgress?: WorkspaceMainSessionProgress;
+    /** Bounded Todo projection (worker root session). */
+    todos?: readonly WorkspaceTodoSnapshot[];
 }
 export interface WorkspaceOwnerSnapshot {
     version: typeof WORKSPACE_PEER_PROTOCOL_VERSION;
@@ -148,6 +182,8 @@ export interface WorkspaceOwnerSnapshot {
     publishedAt: number;
     sessionId?: string;
     sessionName?: string;
+    /** Optional capabilities advertised by this owner root session. */
+    capabilities?: WorkspaceOwnerCapability[];
     /** Context pressure as percentage of the window's context window (0-100). */
     contextPressure?: number;
     /** Last main-session activity timestamp — liveness signal when no sub-agents are running. */
@@ -157,6 +193,10 @@ export interface WorkspaceOwnerSnapshot {
     agents: WorkspaceAgentSnapshot[];
     settled: WorkspaceSettledSnapshot[];
     backgroundJobs?: WorkspaceBackgroundJobSnapshot[];
+    /** Bounded projections contributed by registered workspace projection providers. */
+    projections?: WorkspaceProjectionItem[];
+    /** Bounded Todo projection from the worker root session (when a todo provider is registered). */
+    todos?: WorkspaceTodoSnapshot[];
 }
 export interface WorkspacePeerWindowListing {
     /** Selector accepted by teammate-send for the window's main session. */
@@ -234,6 +274,8 @@ export interface WorkspacePeerCommand {
     provenance?: MessageProvenanceV1;
     traceId?: string;
     replyTo?: string;
+    /** Opt-in request for one terminal result status reply from a root worker window. */
+    terminalResultRequested?: true;
     fromSessionName?: string;
     createdAt: number;
     expiresAt: number;
@@ -283,6 +325,19 @@ export interface WorkspacePeerRuntimeOptions {
 export interface StopWorkspacePeerRuntimeOptions {
     removeOwnerFile?: boolean;
 }
+/** Classify the authoritative final worker turn without treating empty output as success. */
+export declare function deriveWorkspaceWindowTerminalResult(messages: readonly unknown[]): WorkspaceWindowTerminalResultDraft;
+export declare function workspaceWindowTerminalResultMessageId(requestMessageId: string): string;
+export declare function createWorkspaceWindowTerminalResult(input: {
+    requestMessageId: string;
+    outcome: WorkspaceWindowTerminalOutcome;
+    settledAt?: number;
+    finalText?: string;
+    error?: string;
+}): WorkspaceWindowTerminalResult;
+export declare function validateWorkspaceWindowTerminalResult(value: unknown): WorkspaceWindowTerminalResult | undefined;
+export declare function encodeWorkspaceWindowTerminalResult(result: WorkspaceWindowTerminalResult): string;
+export declare function decodeWorkspaceWindowTerminalResult(text: string): WorkspaceWindowTerminalResult;
 export declare function normalizeWorkspacePath(cwd: string, platform?: NodeJS.Platform): string;
 export declare function workspaceIdForCwd(cwd: string, platform?: NodeJS.Platform): string;
 export declare function defaultWorkspacePeerRoot(cwd: string): string;
@@ -432,6 +487,7 @@ export declare function enqueueWorkspacePeerCommand(identity: WorkspacePeerIdent
     provenance?: MessageProvenanceV1;
     traceId?: string;
     replyTo?: string;
+    terminalResultRequested?: true;
     fromSessionName?: string;
     beforePublish?: (command: WorkspacePeerCommand) => void | Promise<void>;
     /** Synchronous ownership check at the atomic rename boundary. */
@@ -464,6 +520,7 @@ export declare function sendWorkspacePeerCommand(identity: WorkspacePeerIdentity
     provenance?: MessageProvenanceV1;
     traceId?: string;
     replyTo?: string;
+    terminalResultRequested?: true;
     fromSessionName?: string;
 }): Promise<{
     command: WorkspacePeerCommand;

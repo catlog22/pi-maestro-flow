@@ -8,6 +8,8 @@
 
 import { randomUUID } from "node:crypto";
 import { logDiagnosticError, logDiagnosticWarn } from "../shared/diagnostic-log.ts";
+import type { MonitorSessionHost } from "./monitor-session.ts";
+import type { MonitorSessionStartupTimer } from "./monitor-session-startup.ts";
 
 import { altKey } from "pi-maestro-settings-core/v1";
 import type {
@@ -667,7 +669,7 @@ export async function emitTeammateResultPublished(
   const outcomes = await Promise.allSettled(pending);
   for (const outcome of outcomes) {
     if (outcome.status === "rejected") {
-      console.warn(
+      logDiagnosticWarn(
         `[pi-maestro-teammate] result publication observer failed for ${result.correlationId}: `
         + `${outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason)}`,
       );
@@ -688,12 +690,17 @@ export function setAgentStructuredOutput(agent: ActiveAgent, output: unknown): v
   agent.structuredOutput = output === undefined ? undefined : structuredClone(output);
 }
 
+
 export type TeammateRuntimeOptions = Pick<
   RunTeammateOptions,
   "spawnChildProcess" | "resultReadyGraceMs" | "foregroundMaxRunMs"
 > & {
+  /** @internal Test seam for driving evaluator startup without waiting in real time. */
+  monitorSessionTimer?: MonitorSessionStartupTimer;
   /** @internal Observes the real runtime callbacks for public-path lifecycle tests. */
   onRunOptionsCreated?: (options: RunTeammateOptions) => void;
+  /** @internal Observes the host used by the Monitor evaluator lifecycle tests. */
+  onMonitorSessionHostCreated?: (host: MonitorSessionHost) => void;
 };
 
 export function buildTeammateToolDescription(
@@ -807,18 +814,21 @@ export const OBSERVE_DESCRIPTION = `Observe mixed teammate and background Bash t
 - "wait": block on an all/any/count barrier with one request-level timeout; set until="completed" to block until agents fully terminate instead of first result
 - "watch": poll every target until the bounded timeoutMs you provide, returning the full status-transition timeline (richer than status, no barrier required); omitted timeoutMs defaults to 600000 (10 minutes)
 - view="turns" (status only): list the target's session turn history instead of the live snapshot; add turn=<n> to expand one 1-based turn into its messages, tool calls, and results
-- view="session" (workspace status/watch): inspect sanitized root-session assistant, tool-status, and lifecycle activity; target.cursor continues after a prior page
+- view="session" (workspace/remote status/watch): inspect sanitized root-session or remote-run progress (assistant text, tool-status, and lifecycle activity); target.cursor continues after a prior page
+- view="todos" (workspace status/watch): inspect sanitized Todo projections from the worker root session; summary reports counts, while detail=full or tail includes structured items and rendered rows
 
-Targets use { kind, id, cursor? }, where kind is currently "teammate" or "bash_bg". Use detail=full (or tail) to include a settled teammate's captured result — including the structured_output value for schema tasks. kind="workspace" accepts owner:<ownerId> or a window name and returns the peer snapshot: view="turns" lists its agent runs, while view="session" exposes only the bounded sanitized root-session progress published by that peer. Persisted cross-window message bodies are not published by peers; read them with teammate-list view="inbox". Legacy teammate observation tools remain available internally but are hidden from the default LLM tool catalog.`;
-export const OBSERVE_SNIPPET = "Observe, wait for, or watch mixed teammate and background Bash targets; view='turns' lists session turn history.";
+Targets use { kind, id, cursor? }, where kind is currently "teammate", "bash_bg", "workspace", or "remote". Use detail=full (or tail) to include a settled teammate's captured result — including the structured_output value for schema tasks. kind="workspace" accepts owner:<ownerId> or a window name and returns the peer snapshot: view="turns" groups the peer's published root-session progress into turns (assistant text, tool calls, and tool results) with turn=<n> expansion, falling back to the bounded agent run list when the peer published no session progress; view="session" is the cursor-paginated stream view of the same progress; view="todos" reports the peer's bounded, sanitized worker-root Todo projection (summary counts only; detail=full or tail includes Todo rows). kind="remote" accepts a remote:<runId> id returned by remote-worker and returns the owned remote/ACP run: view="turns" groups the run's retained driver events (assistant text, tool calls/results, usage) into turns with turn=<n> expansion, and view="session" cursor-paginates the same event ring. Persisted cross-window message bodies are not published by peers; read them with teammate-list view="inbox". Legacy teammate observation tools remain available internally but are hidden from the default LLM tool catalog.`;
+export const OBSERVE_SNIPPET = "Observe, wait for, or watch mixed teammate and background Bash targets; view='turns' lists history and view='todos' shows workspace Todo projections.";
 export const OBSERVE_GUIDELINES = [
   "Use observe for mixed or multi-target status and waits; use one bounded wait instead of polling status.",
   "Use action=watch to follow status transitions over time; always pass a bounded timeoutMs — omitted defaults to 600000 (10 minutes). Use action=wait until=completed to block until agents fully terminate.",
   "Use detail=full only when recent output is required; summary is the compact default. detail=full includes a settled agent's captured result and structured_output value.",
   "Use view=turns with action=status to read a session's history: list all turns first, then repeat with turn=<n> to expand one turn. view=turns is not supported by wait or watch.",
-  "For a workspace window, use view=session with status or watch to inspect its sanitized root-session progress. Reuse the returned nextCursor as target.cursor for incremental reads; a gap means older bounded events were evicted.",
+  "For a workspace window or remote run, use view=session with status or watch to inspect its sanitized progress. Reuse the returned nextCursor as target.cursor for incremental reads; a gap means older bounded events were evicted.",
+  "For a workspace window, use view=todos with status or watch to inspect its worker-root Todo projection. summary reports total/active/bound counts; detail=full or tail includes the sanitized structured Todo items and rendered rows.",
   "Workspace session lifecycle events are telemetry only: agent_settled does not prove business-work completion.",
-  "For a workspace window use kind=workspace with owner:<ownerId> or its window name; view=turns remains snapshot-limited to the agent runs the peer publishes.",
+  "For a workspace window use kind=workspace with owner:<ownerId> or its window name; view=turns groups the peer's published root-session progress into turns (assistant text, tool calls, tool results) with turn=<n> expansion. The ring is bounded to the last few events, so older turns may be evicted; use view=session for the full cursor-paginated stream. When the peer published no session progress, view=turns falls back to the bounded agent run list.",
+  "For a remote/ACP run use kind=remote with the remote:<runId> id from remote-worker; view=turns groups the run's retained driver events (assistant text, tool calls/results, usage) into turns with turn=<n> expansion, and view=session cursor-paginates the same event ring. The ring is bounded; ACP carries no turn_start/turn_end, so turns open at each assistant text segment.",
   'For persisted cross-window message bodies, use teammate-list with view="inbox".',
 ];
 

@@ -107,7 +107,7 @@ export declare const ObserveParams: Type.TObject<{
     waitCount: Type.TOptional<Type.TInteger>;
     until: Type.TOptional<Type.TUnsafe<"completed" | "result-ready">>;
     timeoutMs: Type.TOptional<Type.TInteger>;
-    view: Type.TOptional<Type.TUnsafe<"turns" | "session" | "live">>;
+    view: Type.TOptional<Type.TUnsafe<"turns" | "todos" | "session" | "live">>;
     turn: Type.TOptional<Type.TInteger>;
 }>;
 type LocalObserveParamsInput = Omit<Static<typeof ObserveParams>, "targets" | "view"> & {

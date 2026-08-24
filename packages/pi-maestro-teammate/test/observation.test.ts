@@ -67,7 +67,7 @@ test("view=turns is forwarded to provider snapshots and restricted to status", a
     );
     await assert.rejects(
       observeTargets({ action: "status", targets: [{ kind: "test-turns", id: "w" }], view: "other" as never }),
-      /view must be "live", "turns", or "session"/,
+      /view must be "live", "turns", "session", or "todos"/,
     );
   } finally {
     dispose();
@@ -104,6 +104,41 @@ test("view=session forwards target cursors and restricts actions", async () => {
     await assert.rejects(
       observeTargets({ action: "status", targets: [{ kind: "test-session-view", id: "window", cursor: "cursor-1" }] }),
       /target cursor requires view="session"/,
+    );
+  } finally {
+    dispose();
+  }
+});
+
+test("view=todos forwards the view and restricts actions to workspace status/watch", async () => {
+  let received: ObservationReadOptions | undefined;
+  const dispose = registerObservationProvider({
+    kind: "workspace",
+    capabilities: { inspect: true, wait: true },
+    snapshot: (id, options) => {
+      received = options;
+      return snapshot("workspace", id);
+    },
+    wait: async (id) => snapshot("workspace", id, "completed"),
+  });
+  try {
+    await observeTargets({
+      action: "status",
+      targets: [{ kind: "workspace", id: "window" }],
+      view: "todos",
+    });
+    assert.equal(received?.view, "todos");
+    await assert.rejects(
+      observeTargets({ action: "wait", targets: [{ kind: "workspace", id: "window" }], view: "todos" }),
+      /view="todos" is supported only for status and watch actions/,
+    );
+    await assert.rejects(
+      observeTargets({ action: "diagnose", targets: [{ kind: "workspace", id: "window" }], view: "todos" }),
+      /view="todos" is supported only for status and watch actions/,
+    );
+    await assert.rejects(
+      observeTargets({ action: "status", targets: [{ kind: "teammate", id: "worker" }], view: "todos" }),
+      /view="todos" requires workspace targets/,
     );
   } finally {
     dispose();

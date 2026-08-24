@@ -28,7 +28,7 @@ export type SessionDeliveryStage = "queued" | "injected";
 export declare function normalizeSessionMessageKind(kind: SessionMessageKind | undefined, trustedStatus?: boolean): SessionMessageKind | undefined;
 /** Status messages update context but never start a model turn by themselves. */
 export declare function sessionMessageTriggersTurn(kind: SessionMessageKind | undefined): boolean;
-export type SessionEndpointCapability = "inspect" | "message" | "steer" | "follow_up" | "abort" | "wake";
+export type SessionEndpointCapability = "inspect" | "message" | "steer" | "follow_up" | "abort" | "wake" | "flow-schedule-todo-binding";
 export interface SessionEndpointIdentity {
     workspaceId: string;
     ownerId: string;
@@ -75,6 +75,8 @@ export interface SessionOwnerProjection extends Omit<SessionEndpointIdentity, "c
     sessionId?: string;
     sessionName?: string;
     contextPressure?: number;
+    /** Extra root-endpoint capabilities this owner advertises (e.g. flow-schedule-todo-binding). */
+    extraCapabilities?: readonly SessionEndpointCapability[];
     agents: readonly SessionAgentProjection[];
 }
 export type SessionSelectorKind = "endpoint-id" | "local-root" | "owner-root" | "owner-agent" | "session-name" | "window-owner-prefix" | "name" | "name-id-prefix" | "correlation-id" | "correlation-prefix";
@@ -128,6 +130,8 @@ export interface SessionMessageRequest {
     trustedStatus?: boolean;
     traceId?: string;
     replyTo?: string;
+    /** Request one bounded terminal status reply from a root workspace worker. */
+    terminalResultRequested?: true;
     fromSessionName?: string;
     /** Pin delivery target; avoids TOCTOU when the selector is rebound between check and route. */
     targetCorrelationId?: string;
@@ -156,6 +160,8 @@ export interface WindowThreadEntry {
     provenance?: MessageProvenanceV1;
     traceId?: string;
     replyTo?: string;
+    /** Opt-in terminal-result contract; absent on legacy journal entries. */
+    terminalResultRequested?: true;
     fromSessionName?: string;
     /** Receiving Pi session; prevents inherited fork entries from replaying into the child. */
     targetSessionId?: string;

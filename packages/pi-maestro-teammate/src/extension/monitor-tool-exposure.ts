@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { MONITOR_TOOL_EXPOSURE_EVENT, type MonitorToolExposureEventV1 } from "../public/v1/events.ts";
 
 export interface MonitorCommunicationCapture {
   generation: number;
@@ -72,6 +73,7 @@ export class MonitorToolExposureController {
     this.#restoreShared = restoreShared;
     this.#active = true;
     this.#generation++;
+    this.#publishState();
     return { generation: this.#generation };
   }
 
@@ -92,6 +94,7 @@ export class MonitorToolExposureController {
     }
     this.#pi.setActiveTools(activeTools);
     this.#restoreShared = undefined;
+    if (wasActive) this.#publishState();
   }
 
   syncInactive(): void {
@@ -107,6 +110,16 @@ export class MonitorToolExposureController {
     const definitions = variant === "local" ? this.#local : this.#monitor;
     for (const tool of definitions) this.#pi.registerTool(tool);
     this.#variant = variant;
+  }
+
+  #publishState(): void {
+    const events = (this.#pi as ExtensionAPI & {
+      events?: { emit?: (channel: string, data: unknown) => void };
+    }).events;
+    events?.emit?.(MONITOR_TOOL_EXPOSURE_EVENT, {
+      active: this.#active,
+      generation: this.#generation,
+    } satisfies MonitorToolExposureEventV1);
   }
 }
 

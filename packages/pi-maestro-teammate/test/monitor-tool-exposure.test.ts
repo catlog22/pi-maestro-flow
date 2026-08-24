@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -16,10 +17,16 @@ function definition(name: string, variant: string): ToolDefinition {
 
 function harness(initialActive: string[]) {
   const tools = new Map<string, ToolDefinition>();
+  const exposureEvents: Array<{ channel: string; data: unknown }> = [];
   let active = [...initialActive];
   const pi = {
     registerTool(tool: ToolDefinition) {
       tools.set(tool.name, tool);
+    },
+    events: {
+      emit(channel: string, data: unknown) {
+        exposureEvents.push({ channel, data });
+      },
     },
     getActiveTools() {
       return [...active];
@@ -38,9 +45,20 @@ function harness(initialActive: string[]) {
   return {
     controller,
     tools,
+    exposureEvents: () => [...exposureEvents],
     active: () => [...active],
   };
 }
+
+test("root Monitor authority is set before exposure notification", async () => {
+  const source = await readFile(new URL("../src/extension/index.ts", import.meta.url), "utf8");
+  const start = source.indexOf("const enterMonitorInteractionMode = (): void => {");
+  const end = source.indexOf("const exitMonitorInteractionMode", start);
+  assert.ok(start >= 0 && end > start);
+  const block = source.slice(start, end);
+  assert.ok(block.indexOf("monitorInteractionModeActive = true") < block.indexOf("monitorToolExposure?.enter()"));
+  assert.match(block, /catch \(error\)[\s\S]*?monitorInteractionModeActive = wasActive/);
+});
 
 test("Monitor tool exposure switches variants and restores shared active-tool preferences", () => {
   const state = harness(["teammate-list", "observe", "workspace-window", "other-tool"]);
@@ -65,6 +83,10 @@ test("Monitor tool exposure switches variants and restores shared active-tool pr
   assert.equal(state.controller.isCurrent(admitted), false);
   assert.equal(state.tools.get("teammate-send")?.description, "local:teammate-send");
   assert.deepEqual(state.active(), ["other-tool", "teammate-list", "observe"]);
+  assert.deepEqual(state.exposureEvents(), [
+    { channel: "teammate:monitor-tool-exposure", data: { active: true, generation: 1 } },
+    { channel: "teammate:monitor-tool-exposure", data: { active: false, generation: 2 } },
+  ]);
 });
 
 test("Monitor tool exposure is idempotent and a later generation fences stale captures", () => {

@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { workspaceSessionObservationSnapshot } from "../src/extension/workspace-session-observation.ts";
+import {
+  workspaceSessionObservationSnapshot,
+  workspaceTodosObservationSnapshot,
+} from "../src/extension/workspace-session-observation.ts";
 import {
   buildWorkspaceOwnerSnapshot,
   createWorkspacePeerIdentity,
   type WorkspaceMainSessionProgress,
+  type WorkspaceTodoSnapshot,
 } from "../src/extension/workspace-peers.ts";
 
 const OWNER_ID = "a".repeat(32);
@@ -12,7 +16,11 @@ const OWNER_NONCE = "b".repeat(32);
 const OTHER_NONCE = "c".repeat(32);
 const TARGET = { kind: "workspace", id: `owner:${OWNER_ID}` } as const;
 
-function owner(progress?: WorkspaceMainSessionProgress, ownerNonce = OWNER_NONCE) {
+function owner(
+  progress?: WorkspaceMainSessionProgress,
+  ownerNonce = OWNER_NONCE,
+  todos?: readonly WorkspaceTodoSnapshot[],
+) {
   const identity = createWorkspacePeerIdentity("D:/workspace-session-observation", {
     ownerId: OWNER_ID,
     ownerNonce,
@@ -22,6 +30,7 @@ function owner(progress?: WorkspaceMainSessionProgress, ownerNonce = OWNER_NONCE
     sessionName: "worker-window",
     mainActivityAt: 1_030,
     ...(progress ? { mainProgress: progress } : {}),
+    ...(todos ? { todos } : {}),
     agents: [],
     settled: [],
   }, 1_040);
@@ -148,4 +157,74 @@ test("workspace session summary with no progress remains bounded and cursorable"
   assert.deepEqual(snapshot.page?.items, []);
   assert.equal(typeof snapshot.page?.nextCursor, "string");
   assert.match(snapshot.revision ?? "", /:0$/);
+});
+
+test("workspace todos observation renders structured items and bounded detail", () => {
+  const todos: WorkspaceTodoSnapshot[] = [
+    {
+      id: "todo-1",
+      subject: "Build the release",
+      status: "in_progress",
+      assigneeLabel: "worker",
+      dispatchId: "dispatch-1",
+      scheduleId: "release",
+      stepId: "build",
+      updatedAt: 1_010,
+    },
+    {
+      id: "todo-2",
+      subject: "Verify artifacts",
+      status: "completed",
+      updatedAt: 1_020,
+    },
+  ];
+  const snapshot = workspaceTodosObservationSnapshot(owner(undefined, OWNER_NONCE, todos), TARGET, "full", 1);
+
+  assert.equal(snapshot.found, true);
+  assert.equal(snapshot.page?.kind, "workspace-todos");
+  assert.equal(snapshot.page?.items.length, 2);
+  assert.deepEqual(snapshot.page?.items[0], todos[0]);
+  assert.match(snapshot.summary, /2 total · 1 active · 1 bound/);
+  assert.equal(snapshot.detail?.length, 1);
+  assert.match(snapshot.detail?.[0] ?? "", /\[todo-2\] completed · Verify artifacts/);
+  assert.match(snapshot.revision ?? "", /^workspace-todos:1040:[a-f0-9]{16}$/);
+
+  const changed = workspaceTodosObservationSnapshot(owner(undefined, OWNER_NONCE, [
+    { ...todos[0], status: "completed", updatedAt: 1_030 },
+    todos[1],
+  ]), TARGET, "full", 1);
+  assert.notEqual(changed.revision, snapshot.revision);
+});
+
+test("workspace todos summary retains counts but omits structured items and detail", () => {
+  const todos: WorkspaceTodoSnapshot[] = [
+    { id: "todo-1", subject: "Queued", status: "pending", updatedAt: 1_010 },
+  ];
+  const snapshot = workspaceTodosObservationSnapshot(owner(undefined, OWNER_NONCE, todos), TARGET, "summary", 20);
+
+  assert.match(snapshot.summary, /1 total · 1 active · 0 bound/);
+  assert.deepEqual(snapshot.page?.items, []);
+  assert.equal(snapshot.detail, undefined);
+});
+
+test("workspace todos observation strips CR LF ESC from structured items and detail", () => {
+  const snapshotOwner = owner();
+  snapshotOwner.todos = [{
+    id: "todo\r\n1\x1b",
+    subject: "line\r\nbreak\x1b[31m",
+    status: "in_progress",
+    assigneeLabel: "worker\nname",
+    dispatchId: "dispatch\r\n1",
+    scheduleId: "release\x1b",
+    stepId: "step\n1",
+    updatedAt: 1_020,
+  }];
+  const snapshot = workspaceTodosObservationSnapshot(snapshotOwner, TARGET, "full", 20);
+  const rendered = JSON.stringify({ items: snapshot.page?.items, detail: snapshot.detail });
+
+  assert.ok(!rendered.includes("\\r"));
+  assert.ok(!rendered.includes("\\n"));
+  assert.ok(!rendered.includes("\\u001b"));
+  assert.match(snapshot.detail?.[0] ?? "", /todo  1/);
+  assert.match(snapshot.detail?.[0] ?? "", /line  break/);
 });

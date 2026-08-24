@@ -1662,12 +1662,12 @@ function processIsAlive(pid: number): boolean {
 export async function terminateProcessTreeByPid(
   pid: number,
   options: ProcessTreeByPidOptions = {},
-): Promise<void> {
+): Promise<"stopped" | "already-exited"> {
   if (!Number.isInteger(pid) || pid <= 0) throw new Error(`Invalid owned process pid: ${pid}`);
   const platform = options.platform ?? process.platform;
   if (platform === "win32") {
     const spawnProcess = options.spawnProcess ?? crossSpawn;
-    await new Promise<void>((resolve, reject) => {
+    return new Promise<"stopped" | "already-exited">((resolve, reject) => {
       const killer = spawnProcess(
         "taskkill",
         ["/PID", String(pid), "/T", "/F"],
@@ -1675,11 +1675,11 @@ export async function terminateProcessTreeByPid(
       );
       killer.once("error", reject);
       killer.once("close", (code) => {
-        if (code === 0) resolve();
+        if (code === 0) resolve("stopped");
+        else if (code === 128) resolve("already-exited");
         else reject(new Error(`taskkill exited with code ${code ?? "unknown"}`));
       });
     });
-    return;
   }
 
   const killProcess = options.killProcess ?? process.kill;
@@ -1729,9 +1729,10 @@ export async function terminateProcessTreeByPid(
   };
 
   signalTree("SIGTERM");
-  if (await waitForExit()) return;
+  if (signalTarget === undefined) return "already-exited";
+  if (await waitForExit()) return "stopped";
   signalTree("SIGKILL");
-  if (await waitForExit()) return;
+  if (await waitForExit()) return "stopped";
   throw new Error(`Owned process tree ${pid} did not exit after SIGKILL.`);
 }
 

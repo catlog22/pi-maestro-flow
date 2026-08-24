@@ -36,6 +36,13 @@ export {
   WINDOW_THREAD_EVENT,
 } from "../../sessions/session-core.ts";
 
+/** Monitor tool exposure lifecycle emitted after the active variant changes. */
+export const MONITOR_TOOL_EXPOSURE_EVENT = "teammate:monitor-tool-exposure" as const;
+export interface MonitorToolExposureEventV1 {
+  active: boolean;
+  generation: number;
+}
+
 /** Flow diagnostics query for current session/Monitor availability authority. */
 export const TEAMMATE_MODEL_SESSION_QUERY_EVENT = "teammate:model-session-query";
 /** Teammate response carrying only session topology gates, never route config. */

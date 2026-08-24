@@ -10,6 +10,12 @@ import type { SessionHostSnapshot, WindowThreadSnapshot } from "../../sessions/s
 export type { MessageProvenanceV1, StructuredResult, TeammateExecutionProvenance, TeammateResultPublishedEvent, } from "../../shared/types.ts";
 export { TEAMMATE_COMPLETE_EVENT, TEAMMATE_MESSAGE_EVENT, TEAMMATE_OPEN_AGENT_EVENT, TEAMMATE_RESULT_PUBLISHED_EVENT, TEAMMATE_STARTED_EVENT, TEAMMATE_VIEWING_EVENT, } from "../../shared/types.ts";
 export { SESSION_HOST_REGISTRY_EVENT, WINDOW_THREAD_EVENT, } from "../../sessions/session-core.ts";
+/** Monitor tool exposure lifecycle emitted after the active variant changes. */
+export declare const MONITOR_TOOL_EXPOSURE_EVENT: "teammate:monitor-tool-exposure";
+export interface MonitorToolExposureEventV1 {
+    active: boolean;
+    generation: number;
+}
 /** Flow diagnostics query for current session/Monitor availability authority. */
 export declare const TEAMMATE_MODEL_SESSION_QUERY_EVENT = "teammate:model-session-query";
 /** Teammate response carrying only session topology gates, never route config. */

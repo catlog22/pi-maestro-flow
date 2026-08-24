@@ -108,6 +108,10 @@
       "types": "./types/public/v1/supervision.d.ts",
       "default": "./src/public/v1/supervision.ts"
     },
+    "./v1/workspace-projections": {
+      "types": "./types/public/v1/workspace-projections.d.ts",
+      "default": "./src/public/v1/workspace-projections.ts"
+    },
     "./v1/types": {
       "types": "./types/public/v1/types.d.ts",
       "default": "./src/public/v1/types.ts"

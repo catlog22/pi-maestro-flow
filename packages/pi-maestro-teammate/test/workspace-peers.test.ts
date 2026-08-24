@@ -6,7 +6,12 @@ import test, { afterEach } from "node:test";
 import {
   MAX_OWNER_AGENTS,
   MAX_OWNER_FILE_BYTES,
+  MAX_OWNER_TODOS,
+  MAX_PROJECTION_ITEM_BYTES,
+  MAX_TODO_FIELD_BYTES,
   MAX_MAIN_SESSION_PROGRESS_EVENTS,
+  MAX_WORKSPACE_WINDOW_ERROR_BYTES,
+  MAX_WORKSPACE_WINDOW_FINAL_TEXT_BYTES,
   MAIN_SESSION_PROGRESS_TEXT_BYTES,
   WORKSPACE_MAIN_SESSION_MARKER,
   WORKSPACE_PEER_PROTOCOL_VERSION,
@@ -20,8 +25,12 @@ import {
   createWorkspacePeerCommandConsumer,
   createWorkspacePeerIdentity,
   createWorkspacePeerRuntime,
+  createWorkspaceWindowTerminalResult,
+  decodeWorkspaceWindowTerminalResult,
   defaultWorkspacePeerRoot,
+  deriveWorkspaceWindowTerminalResult,
   discoverWorkspacePeers,
+  encodeWorkspaceWindowTerminalResult,
   enqueueWorkspacePeerCommand,
   ensureWorkspacePeerDirectories,
   finalizeWorkspacePeerResponse,
@@ -50,12 +59,14 @@ import {
   workspaceMainSessionDeliveryAction,
   workspaceMainSessionDeliveryDecision,
   workspaceWindowLifecycle,
+  workspaceWindowTerminalResultMessageId,
   writePrivateJsonAtomic,
   SETTLED_RESULT_BYTES,
   type WorkspaceAgentSnapshot,
   type WorkspaceOwnerSnapshot,
   type WorkspaceOwnerState,
   type WorkspaceResolvedTarget,
+  type WorkspaceTodoSnapshot,
 } from "../src/extension/workspace-peers.ts";
 import { buildWorkspaceOwnerState } from "../src/extension/teammate-core.ts";
 import type { ActiveAgent, TeammateState } from "../src/shared/types.ts";
@@ -179,6 +190,279 @@ test("workspace peer protocol version and main-session selector stay stable", as
   assert.match(extensionSource, /const agentSelector = \/\^owner:/);
   assert.match(extensionSource, /target: `owner:\$\{owner\.ownerId\}:\$\{agent\.correlationId\}`/);
   assert.match(schemaSource, /enum: \["active", "named", "all", "roles", "windows", "inbox"\]/);
+});
+
+test("workspace terminal result protocol classifies terminal turns and stays bounded", () => {
+  assert.deepEqual(deriveWorkspaceWindowTerminalResult([{
+    role: "assistant",
+    stopReason: "stop",
+    content: [{ type: "text", text: "  final answer  " }],
+  }]), { outcome: "completed", finalText: "final answer" });
+  assert.deepEqual(deriveWorkspaceWindowTerminalResult([{
+    role: "assistant",
+    stopReason: "error",
+    errorMessage: "provider failed",
+    content: [{ type: "text", text: "partial" }],
+  }]), { outcome: "failed", finalText: "partial", error: "provider failed" });
+  assert.deepEqual(deriveWorkspaceWindowTerminalResult([{
+    role: "assistant",
+    stopReason: "aborted",
+    errorMessage: "The user aborted a request",
+  }]), { outcome: "cancelled", error: "The user aborted a request" });
+  assert.deepEqual(deriveWorkspaceWindowTerminalResult([{
+    role: "assistant",
+    stopReason: "stop",
+    content: [],
+  }]), { outcome: "no-final-text" });
+  assert.deepEqual(deriveWorkspaceWindowTerminalResult([]), { outcome: "no-final-text" });
+
+  const requestMessageId = "4".repeat(32);
+  const result = createWorkspaceWindowTerminalResult({
+    requestMessageId,
+    outcome: "completed",
+    finalText: "界".repeat(MAX_WORKSPACE_WINDOW_FINAL_TEXT_BYTES),
+    error: "ignored for completed",
+    settledAt: 1_000,
+  });
+  assert.ok(Buffer.byteLength(result.finalText!, "utf8") <= MAX_WORKSPACE_WINDOW_FINAL_TEXT_BYTES);
+  assert.ok(Buffer.byteLength(result.error!, "utf8") <= MAX_WORKSPACE_WINDOW_ERROR_BYTES);
+  assert.deepEqual(decodeWorkspaceWindowTerminalResult(encodeWorkspaceWindowTerminalResult(result)), result);
+  assert.equal(workspaceWindowTerminalResultMessageId(requestMessageId), workspaceWindowTerminalResultMessageId(requestMessageId));
+  assert.match(workspaceWindowTerminalResultMessageId(requestMessageId), /^[a-f0-9]{32}$/);
+  assert.throws(() => decodeWorkspaceWindowTerminalResult(JSON.stringify({
+    version: 1,
+    type: "workspace-window-terminal-result",
+    requestMessageId,
+    outcome: "completed",
+    settledAt: 1_000,
+  })), /invalid workspace window terminal result/);
+});
+
+test("terminal result request metadata is opt-in and legacy workspace commands still decode", async () => {
+  const { cwd, rootDir } = await temporaryWorkspace();
+  const sender = createWorkspacePeerIdentity(cwd, { rootDir, ownerId: OWNER_A, ownerNonce: NONCE_A });
+  const receiver = createWorkspacePeerIdentity(cwd, { rootDir, ownerId: OWNER_B, ownerNonce: NONCE_B });
+  const target = remoteTarget(receiver, {
+    ...agent(WORKSPACE_MAIN_SESSION_MARKER),
+    correlationId: WORKSPACE_MAIN_SESSION_MARKER,
+  });
+  const legacy = await enqueueWorkspacePeerCommand(sender, target, "follow_up", "legacy request", {
+    commandId: "5".repeat(32),
+    messageKind: "request",
+    replyTo: `owner:${OWNER_A}`,
+  });
+  assert.equal(legacy.terminalResultRequested, undefined);
+  assert.deepEqual(validateWorkspacePeerCommand(JSON.parse(JSON.stringify(legacy)), sender.workspaceId), legacy);
+
+  const requested = await enqueueWorkspacePeerCommand(sender, target, "follow_up", "terminal request", {
+    commandId: "6".repeat(32),
+    messageKind: "request",
+    replyTo: `owner:${OWNER_A}`,
+    terminalResultRequested: true,
+  });
+  assert.equal(requested.terminalResultRequested, true);
+  assert.deepEqual(validateWorkspacePeerCommand(JSON.parse(JSON.stringify(requested)), sender.workspaceId), requested);
+
+  assert.equal(validateWorkspacePeerCommand({ ...requested, messageKind: "coordination" }, sender.workspaceId), undefined);
+  assert.equal(validateWorkspacePeerCommand({ ...requested, targetCorrelationId: "agent-1" }, sender.workspaceId), undefined);
+});
+
+test("terminal publication lifecycle is wired before workspace disposal", async () => {
+  const extensionSource = await readFile(new URL("../src/extension/index.ts", import.meta.url), "utf8");
+  const settledHandler = extensionSource.indexOf('pi.on("agent_settled", async () => {');
+  const settledPublish = extensionSource.indexOf("await publishWorkspaceWindowTerminalResults(", settledHandler);
+  assert.ok(settledHandler >= 0 && settledPublish > settledHandler);
+
+  const shutdownHandler = extensionSource.indexOf('pi.on("session_shutdown", async (event) => {');
+  const shutdownPublish = extensionSource.indexOf("await publishWorkspaceWindowTerminalResults(", shutdownHandler);
+  const sessionFenceDispose = extensionSource.indexOf("completionCoordinator.unbindSession();", shutdownHandler);
+  const peerDispose = extensionSource.indexOf("await stopWorkspacePeers();", shutdownHandler);
+  assert.ok(shutdownHandler >= 0 && shutdownPublish > shutdownHandler);
+  assert.ok(shutdownPublish < sessionFenceDispose, "terminal result publishes before the session fence is disposed");
+  assert.ok(shutdownPublish < peerDispose, "terminal result publishes before the workspace peer runtime is disposed");
+});
+
+test("buildWorkspaceOwnerSnapshot maps todo providers to typed todos and keeps other projections generic", async () => {
+  const { cwd, rootDir } = await temporaryWorkspace();
+  const identity = createWorkspacePeerIdentity(cwd, { rootDir, ownerId: OWNER_A, ownerNonce: NONCE_A });
+  const snapshot = buildWorkspaceOwnerSnapshot(identity, state(agent("cid-proj", "protocol")), 1_000);
+  assert.equal(snapshot.projections, undefined);
+  assert.equal(snapshot.todos, undefined);
+
+  const { registerWorkspaceProjectionProvider } = await import("../src/public/v1/workspace-projections.ts");
+  const todoReg = registerWorkspaceProjectionProvider({
+    kind: "todo",
+    snapshot: () => [{
+      kind: "todo",
+      data: { id: "t1", subject: "Projected Todo", status: "in_progress", dispatchId: "d1", updatedAt: 1_500 },
+    }],
+  });
+  const goalReg = registerWorkspaceProjectionProvider({
+    kind: "goal",
+    snapshot: () => [{ kind: "goal", data: { id: "g1" } }],
+  });
+  try {
+    const withProjections = buildWorkspaceOwnerSnapshot(identity, state(agent("cid-proj", "protocol")), 2_000);
+    assert.deepEqual(withProjections.todos, [{
+      id: "t1",
+      subject: "Projected Todo",
+      status: "in_progress",
+      dispatchId: "d1",
+      updatedAt: 1_500,
+    }]);
+    assert.deepEqual(withProjections.projections, [{ kind: "goal", data: { id: "g1" } }]);
+    assert.deepEqual(withProjections.capabilities, ["flow-schedule-todo-binding"]);
+    const json = JSON.stringify(withProjections);
+    assert.ok(json.includes("\"todos\""));
+    assert.ok(json.includes("\"projections\""));
+  } finally {
+    todoReg.dispose();
+    goalReg.dispose();
+  }
+  const afterDispose = buildWorkspaceOwnerSnapshot(identity, state(agent("cid-proj", "protocol")), 3_000);
+  assert.equal(afterDispose.projections, undefined);
+  assert.equal(afterDispose.todos, undefined);
+  assert.equal(afterDispose.capabilities, undefined);
+});
+
+test("generic projection byte budget rejects oversized multibyte data", async () => {
+  const { cwd, rootDir } = await temporaryWorkspace();
+  const identity = createWorkspacePeerIdentity(cwd, { rootDir, ownerId: OWNER_A, ownerNonce: NONCE_A });
+  const { registerWorkspaceProjectionProvider } = await import("../src/public/v1/workspace-projections.ts");
+  const registration = registerWorkspaceProjectionProvider({
+    kind: "multibyte",
+    snapshot: () => [{ kind: "multibyte", data: "界".repeat(MAX_PROJECTION_ITEM_BYTES) }],
+  });
+  try {
+    assert.throws(
+      () => buildWorkspaceOwnerSnapshot(identity, state(agent("cid-multibyte", "protocol")), 1_000),
+      /invalid or exceeds protocol bounds/,
+    );
+  } finally {
+    registration.dispose();
+  }
+});
+
+function todo(
+  id: string,
+  overrides: Partial<WorkspaceTodoSnapshot> = {},
+): WorkspaceTodoSnapshot {
+  return {
+    id,
+    subject: `Todo ${id}`,
+    status: "in_progress",
+    updatedAt: 1_000,
+    ...overrides,
+  };
+}
+
+test("buildWorkspaceOwnerSnapshot passes through todos and round-trips them", async () => {
+  const { cwd, rootDir } = await temporaryWorkspace();
+  const identity = createWorkspacePeerIdentity(cwd, { rootDir, ownerId: OWNER_A, ownerNonce: NONCE_A });
+  const base = state(agent("cid-todo", "protocol"));
+  const withTodos = buildWorkspaceOwnerSnapshot(
+    identity,
+    { ...base, todos: [todo("t1", { dispatchId: "d1", scheduleId: "s1", stepId: "step-0", status: "in_progress" }), todo("t2", { status: "completed" })] },
+    1_000,
+  );
+  assert.ok(withTodos.todos !== undefined);
+  assert.equal(withTodos.todos!.length, 2);
+  assert.equal(withTodos.todos![0].id, "t1");
+  assert.equal(withTodos.todos![0].dispatchId, "d1");
+  assert.equal(withTodos.todos![1].status, "completed");
+  const reparsed = validateWorkspaceOwnerSnapshot(JSON.parse(JSON.stringify(withTodos)), identity);
+  assert.ok(reparsed !== undefined);
+  assert.equal(reparsed!.todos!.length, 2);
+  assert.equal(reparsed!.todos![0].dispatchId, "d1");
+  const none = buildWorkspaceOwnerSnapshot(identity, base, 2_000);
+  assert.equal(none.todos, undefined);
+});
+
+test("todos cap at MAX_OWNER_TODOS and keep earliest entries", async () => {
+  const { cwd, rootDir } = await temporaryWorkspace();
+  const identity = createWorkspacePeerIdentity(cwd, { rootDir, ownerId: OWNER_A, ownerNonce: NONCE_A });
+  const base = state(agent("cid-cap", "protocol"));
+  const many: WorkspaceTodoSnapshot[] = [];
+  for (let i = 0; i < MAX_OWNER_TODOS + 5; i += 1) many.push(todo(`t${i}`, { subject: `Todo ${i}` }));
+  const snapshot = buildWorkspaceOwnerSnapshot(identity, { ...base, todos: many }, 1_000);
+  assert.equal(snapshot.todos!.length, MAX_OWNER_TODOS);
+  assert.equal(snapshot.todos![0].id, "t0");
+  assert.equal(snapshot.todos![MAX_OWNER_TODOS - 1].id, `t${MAX_OWNER_TODOS - 1}`);
+});
+
+test("owner byte budget keeps active binding todos and evicts unrelated todos first", async () => {
+  const { cwd, rootDir } = await temporaryWorkspace();
+  const identity = createWorkspacePeerIdentity(cwd, { rootDir, ownerId: OWNER_A, ownerNonce: NONCE_A });
+  const settled = Array.from({ length: 4 }, (_, index) => ({
+    correlationId: `settled-${String(index).padStart(4, "0")}`,
+    agent: "general",
+    status: "completed" as const,
+    settledAt: 1_000 + index,
+    result: "r".repeat(SETTLED_RESULT_BYTES),
+  }));
+  const unrelated = Array.from({ length: MAX_OWNER_TODOS - 1 }, (_, index) => todo(`unrelated-${index}`, {
+    subject: "u".repeat(4 * 1024),
+    status: "completed",
+  }));
+  const historical = todo("historical", {
+    subject: "h".repeat(4 * 1024),
+    status: "in_progress",
+    dispatchId: "dispatch-historical",
+    bindingActive: false,
+  });
+  const active = todo("active", {
+    subject: "a".repeat(4 * 1024),
+    status: "in_progress",
+    dispatchId: "dispatch-active",
+    scheduleId: "release",
+    stepId: "build",
+    bindingActive: true,
+  });
+
+  const snapshot = buildWorkspaceOwnerSnapshot(identity, {
+    agents: [],
+    settled,
+    todos: [...unrelated, historical, active],
+  }, 1_000);
+  assert.equal(snapshot.todos?.[0]?.id, "active");
+  assert.ok(snapshot.todos?.some((item) => item.id === "active"));
+  assert.equal(snapshot.todos?.some((item) => item.id === "historical"), false);
+  assert.ok((snapshot.todos?.length ?? 0) < MAX_OWNER_TODOS);
+  assert.ok(Buffer.byteLength(`${JSON.stringify(snapshot)}\n`, "utf8") <= MAX_OWNER_FILE_BYTES);
+});
+
+test("validateWorkspaceOwnerSnapshot rejects malformed todos and sanitizes control chars", async () => {
+  const { cwd, rootDir } = await temporaryWorkspace();
+  const identity = createWorkspacePeerIdentity(cwd, { rootDir, ownerId: OWNER_A, ownerNonce: NONCE_A });
+  const base = buildWorkspaceOwnerSnapshot(identity, state(agent("cid-val", "protocol")), 1_000);
+  const good = JSON.parse(JSON.stringify(base));
+  good.todos = [{ id: "t1", subject: "x", status: "done", updatedAt: 1 }];
+  assert.equal(validateWorkspaceOwnerSnapshot(good, identity), undefined);
+  const noId = JSON.parse(JSON.stringify(base));
+  noId.todos = [{ subject: "x", status: "pending", updatedAt: 1 }];
+  assert.equal(validateWorkspaceOwnerSnapshot(noId, identity), undefined);
+  const dirty = JSON.parse(JSON.stringify(base));
+  dirty.todos = [{ id: "t1", subject: "line\r\nbreak\x1b[0m", status: "in_progress", updatedAt: 1 }];
+  const cleaned = validateWorkspaceOwnerSnapshot(dirty, identity);
+  assert.ok(cleaned !== undefined);
+  assert.ok(!cleaned!.todos![0].subject.includes("\r"));
+  assert.ok(!cleaned!.todos![0].subject.includes("\n"));
+  assert.ok(!cleaned!.todos![0].subject.includes("\x1b"));
+  assert.ok(cleaned!.todos![0].subject.includes("break"));
+  const unknownCapability = JSON.parse(JSON.stringify(base));
+  unknownCapability.capabilities = ["unknown-capability"];
+  assert.equal(validateWorkspaceOwnerSnapshot(unknownCapability, identity), undefined);
+  const huge = JSON.parse(JSON.stringify(base));
+  huge.todos = [{ id: "t1", subject: "x".repeat(10_000), status: "pending", updatedAt: 1 }];
+  const trunc = validateWorkspaceOwnerSnapshot(huge, identity);
+  assert.ok(trunc !== undefined);
+  assert.ok(trunc!.todos![0].subject.length <= 4 * 1024);
+  const multibyte = JSON.parse(JSON.stringify(base));
+  multibyte.todos = [{ id: "t1", subject: "界".repeat(MAX_TODO_FIELD_BYTES), status: "pending", updatedAt: 1 }];
+  const multibyteTrunc = validateWorkspaceOwnerSnapshot(multibyte, identity);
+  assert.ok(multibyteTrunc !== undefined);
+  assert.ok(Buffer.byteLength(multibyteTrunc!.todos![0].subject, "utf8") <= MAX_TODO_FIELD_BYTES);
+  assert.match(multibyteTrunc!.todos![0].subject, /\.\.\.$/);
 });
 
 test("workspace snapshots expose active bash jobs and protect foreground work from steer", async () => {

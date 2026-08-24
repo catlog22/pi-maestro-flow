@@ -20,6 +20,7 @@ import type {
 import type {
   ObservationReadOptions,
   ObservationSnapshot,
+  ObservationTarget,
   ObservationWaitOptions,
 } from "../public/v1/observation.ts";
 import {
@@ -28,6 +29,13 @@ import {
   type RemoteHistoryEntry,
   type RemoteHistoryMode,
 } from "../sessions/remote-history.ts";
+import {
+  appendRemoteProgressEvent,
+  createRemoteProgressRing,
+  remoteSessionSnapshot,
+  remoteTurnsSnapshot,
+  type RemoteProgressRing,
+} from "./remote-observation-projection.ts";
 import type { SessionMessageKind } from "../sessions/session-core.ts";
 
 const REMOTE_MONITOR_MAX_DETAIL_LINES = 200;
@@ -125,6 +133,8 @@ interface RemoteRunRecord {
   structuredOutput?: unknown;
   lastPersistedStatus?: RemoteStatus;
   lastPersistedSequence?: number;
+  /** Bounded structured event ring for view="turns" / view="session". */
+  progressRing: RemoteProgressRing;
 }
 
 function stableTarget(runId: string): string {
@@ -338,6 +348,7 @@ export class RemoteMonitorSession {
       } else if (driverEvent.type === "usage") {
         this.#appendDetail(record, `[usage] ${driverEvent.usage.totalTokens ?? "unknown"} tokens`);
       }
+      record.progressRing = appendRemoteProgressEvent(record.progressRing, driverEvent, event.updatedAt);
       return;
     }
     if (event.type === "run/result") this.#recordResult(record, event);
@@ -391,6 +402,7 @@ export class RemoteMonitorSession {
       createdAt: this.#now(),
       detail: [],
       detailBytes: 0,
+      progressRing: createRemoteProgressRing(),
     };
     this.#runs.set(capture.runId, record);
     return record;
@@ -535,12 +547,19 @@ export class RemoteMonitorSession {
       this.#persist(createRemoteHistoryEntry(input));
       this.#persistedEntries += 1;
     } catch (error) {
-      console.error("[pi-maestro-teammate] remote Monitor history persistence failed:", sanitizeRemoteMonitorError(error, "history persistence"));
+      logDiagnosticError("[pi-maestro-teammate] remote Monitor history persistence failed:", sanitizeRemoteMonitorError(error, "history persistence"));
     }
   }
 
   #observationFor(record: RemoteRunRecord, options: ObservationReadOptions): ObservationSnapshot {
     const snapshot = record.snapshot;
+    const target: ObservationTarget = { kind: "remote", id: stableTarget(snapshot.runId) };
+    if (options.view === "turns") {
+      return remoteTurnsSnapshot(snapshot, record.progressRing, record, target, options.detail, options.lines, options);
+    }
+    if (options.view === "session") {
+      return remoteSessionSnapshot(snapshot, record.progressRing, record, target, options.detail, options.lines, options);
+    }
     const state = observationState(snapshot.status);
     const metadata = `${record.name ?? stableTarget(snapshot.runId)} · ${snapshot.status} · ${record.capture.targetId}`;
     const detail = options.detail === "summary"
@@ -555,7 +574,7 @@ export class RemoteMonitorSession {
             ...record.detail.slice(-options.lines),
           ];
     return {
-      target: { kind: "remote", id: stableTarget(snapshot.runId) },
+      target,
       found: true,
       nativeStatus: snapshot.nativeStatus ?? snapshot.status,
       ...state,

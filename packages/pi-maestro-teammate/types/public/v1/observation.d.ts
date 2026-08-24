@@ -1,7 +1,7 @@
 import type { AgentRuntimeDiagnosisV1, MessageProvenanceV1 } from "../../shared/types.ts";
 export type ObservationAction = "status" | "diagnose" | "wait" | "watch";
 export type ObservationDetail = "summary" | "tail" | "full";
-export type ObservationView = "live" | "turns" | "session";
+export type ObservationView = "live" | "turns" | "session" | "todos";
 export type ObservationWaitMode = "all" | "any" | "count";
 export type ObservationPhase = "pending" | "active" | "settled" | "unknown";
 export type ObservationOutcome = "success" | "failure" | "stalled" | "aborted";
@@ -59,7 +59,7 @@ export interface ObservationReadOptions {
     lines: number;
     /** Request a canonical runtime diagnosis in addition to the ordinary snapshot. */
     diagnose?: boolean;
-    /** "turns" lists target history; "session" shows sanitized workspace root-session activity. */
+    /** "turns" lists target history; "session" shows sanitized workspace root-session activity; "todos" shows worker root-session Todo projections. */
     view?: ObservationView;
     /** Opaque provider cursor copied from the selected target. */
     cursor?: string;
@@ -88,7 +88,7 @@ export interface ObserveParams {
     timeoutMs?: number;
     /** Block until "result-ready" (default) or "completed" (terminal lifecycle). */
     until?: "result-ready" | "completed";
-    /** "turns" lists history; "session" shows sanitized root-session activity for workspace targets. */
+    /** "turns" lists history; "session" shows sanitized root-session activity; "todos" shows workspace Todo projections. */
     view?: ObservationView;
     /** 1-based turn index to expand when view="turns"; omitted lists all turns. */
     turn?: number;

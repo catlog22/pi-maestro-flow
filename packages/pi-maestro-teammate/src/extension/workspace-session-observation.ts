@@ -9,6 +9,7 @@ import {
   workspaceWindowLifecycle,
   type WorkspaceMainSessionProgressEvent,
   type WorkspaceOwnerSnapshot,
+  type WorkspaceTodoSnapshot,
 } from "./workspace-peers.ts";
 
 const CURSOR_VERSION = 1 as const;
@@ -121,6 +122,87 @@ export function workspaceSessionObservationSnapshot(
     updatedAt: progress?.updatedAt ?? owner.publishedAt,
     capabilities: SESSION_CAPABILITIES,
   };
+}
+
+export interface WorkspaceTodoObservationItem {
+  id: string;
+  subject: string;
+  status: WorkspaceTodoSnapshot["status"];
+  assigneeLabel?: string;
+  dispatchId?: string;
+  scheduleId?: string;
+  stepId?: string;
+  bindingActive?: boolean;
+  updatedAt: number;
+}
+
+/** Strip CR/LF/ESC and C0 control chars for safe terminal rendering (defense-in-depth over the projection layer). */
+function sanitizeTodoText(value: string, maximum: number): string {
+  const cleaned = value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").replace(/[\r\n]/g, " ").trim();
+  return cleaned.length > maximum ? `${cleaned.slice(0, maximum - 3)}...` : cleaned;
+}
+
+/**
+ * Render the worker root-session Todo projection (owner.todos) for observe view="todos".
+ * Each todo is projected as a structured item (already-validated by validateWorkspaceOwnerSnapshot)
+ * and re-sanitized at this render boundary as defense-in-depth against CR/LF/ESC terminal injection (P1-7).
+ */
+export function workspaceTodosObservationSnapshot(
+  owner: WorkspaceOwnerSnapshot,
+  target: ObservationTarget,
+  detail: ObservationDetail,
+  lines: number,
+): ObservationSnapshot {
+  const todos = owner.todos ?? [];
+  const lifecycle = workspaceWindowLifecycle(owner);
+  const windowName = owner.sessionName ?? `window:${owner.ownerId.slice(0, 8)}`;
+  const items: WorkspaceTodoObservationItem[] = todos.map((todo) => ({
+    id: sanitizeTodoText(todo.id, 256),
+    subject: sanitizeTodoText(todo.subject, 4096),
+    status: todo.status,
+    ...(todo.assigneeLabel !== undefined ? { assigneeLabel: sanitizeTodoText(todo.assigneeLabel, 256) } : {}),
+    ...(todo.dispatchId !== undefined ? { dispatchId: sanitizeTodoText(todo.dispatchId, 64) } : {}),
+    ...(todo.scheduleId !== undefined ? { scheduleId: sanitizeTodoText(todo.scheduleId, 64) } : {}),
+    ...(todo.stepId !== undefined ? { stepId: sanitizeTodoText(todo.stepId, 64) } : {}),
+    ...(todo.bindingActive === undefined ? {} : { bindingActive: todo.bindingActive }),
+    updatedAt: todo.updatedAt,
+  }));
+  const page: ObservationPage = {
+    kind: "workspace-todos",
+    items: detail === "summary" ? [] : items,
+  };
+  const active = items.filter((item) => item.status === "in_progress" || item.status === "pending").length;
+  const bound = items.filter((item) => item.dispatchId !== undefined).length;
+  const summary = `${windowName} todos · ${items.length} total · ${active} active · ${bound} bound · ${lifecycle.status}`;
+  const detailLines = detail === "summary"
+    ? undefined
+    : items.length === 0
+      ? [`${windowName} has no published todos.`]
+      : items.slice(-Math.max(1, lines)).map((item) => describeTodo(item));
+  const revisionHash = createHash("sha256")
+    .update(JSON.stringify(items))
+    .digest("hex")
+    .slice(0, 16);
+  return {
+    target,
+    found: true,
+    nativeStatus: lifecycle.status,
+    phase: lifecycle.settled ? "settled" : "active",
+    summary,
+    ...(detailLines ? { detail: detailLines } : {}),
+    revision: `workspace-todos:${owner.publishedAt}:${revisionHash}`,
+    page,
+    updatedAt: owner.publishedAt,
+    capabilities: SESSION_CAPABILITIES,
+  };
+}
+
+function describeTodo(item: WorkspaceTodoObservationItem): string {
+  const binding = item.dispatchId !== undefined
+    ? ` · bound ${item.dispatchId}${item.scheduleId !== undefined ? `@${item.scheduleId}` : ""}${item.stepId !== undefined ? `#${item.stepId}` : ""}`
+    : "";
+  const assignee = item.assigneeLabel !== undefined ? ` @${item.assigneeLabel}` : "";
+  return `[${item.id}] ${item.status}${assignee} · ${item.subject}${binding}`;
 }
 
 function cursorError(

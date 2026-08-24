@@ -468,12 +468,12 @@ export const ObserveParams = Type.Object({
       "Wait-only completion threshold: first result (default) or full terminal completion.",
   })),
   timeoutMs: Type.Optional(Type.Integer({ minimum: 1, default: 600_000, description: "Request-level wait/watch timeout in milliseconds (default: 600000, 10 minutes)." })),
-  view: Type.Optional(Type.Unsafe<"live" | "turns" | "session">({
+  view: Type.Optional(Type.Unsafe<"live" | "turns" | "session" | "todos">({
     type: "string",
-    enum: ["live", "turns", "session"],
+    enum: ["live", "turns", "session", "todos"],
     default: "live",
     description:
-      '"live" shows the current snapshot; "turns" lists target history; "session" shows sanitized workspace root-session activity.',
+      '"live" shows the current snapshot; "turns" lists target history; "session" shows sanitized workspace root-session activity; "todos" shows the worker root-session Todo projections.',
   })),
   turn: Type.Optional(Type.Integer({
     minimum: 1,
@@ -516,6 +516,23 @@ export const ObserveParams = Type.Object({
     {
       if: { properties: { view: { const: "session" } }, required: ["view"] },
       then: { properties: { action: { enum: ["status", "watch"] } }, required: ["action"] },
+    },
+    {
+      if: { properties: { view: { const: "todos" } }, required: ["view"] },
+      then: {
+        properties: {
+          action: { enum: ["status", "watch"] },
+          targets: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: { kind: { const: "workspace" } },
+              required: ["kind"],
+            },
+          },
+        },
+        required: ["action", "targets"],
+      },
     },
     {
       if: {

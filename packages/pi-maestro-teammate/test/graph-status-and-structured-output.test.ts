@@ -567,6 +567,44 @@ test("direct failed runs retain the resolved task cwd without a completion obser
   assert.ok(result.publicationId, "rejected run must carry a publicationId");
 });
 
+test("direct failed runs publish before terminal completion", async () => {
+  const taskCwd = path.join(process.cwd(), "packages", "pi-maestro-teammate");
+  const order: string[] = [];
+  let publishedResult: SingleResult | undefined;
+  let terminalResult: SingleResult | undefined;
+  const result = await runSingleTeammate({
+    agent: "general",
+    task: "fail after publication",
+    cwd: taskCwd,
+    outputSchema: {
+      type: "object",
+      properties: { value: { type: "integer" } },
+      required: ["value"],
+      additionalProperties: false,
+    },
+  }, {
+    baseCwd: process.cwd(),
+    spawnChildProcess: createScriptedSpawn("agentEnd", "provider failed"),
+    async onResultPublished(published, originCwd) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      assert.equal(originCwd, taskCwd);
+      publishedResult = published;
+      order.push("published");
+    },
+    onTurnComplete(terminal) {
+      terminalResult = terminal;
+      order.push("terminal");
+    },
+  });
+
+  assert.equal(result.exitCode, 1);
+  assert.deepEqual(order, ["published", "terminal"]);
+  assert.equal(publishedResult, result);
+  assert.equal(terminalResult, result);
+  assert.ok(result.publicationId);
+  assert.equal(result.originCwd, taskCwd);
+});
+
 test("runGraph awaits result publication before releasing a dependent", async () => {
   const taskCwd = path.join(process.cwd(), "packages", "pi-maestro-teammate");
   const tasks: NormalizedTask[] = [

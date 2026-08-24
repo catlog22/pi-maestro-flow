@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { Check } from "typebox/value";
 import {
   addBinding,
   createEngineState,
@@ -10,6 +11,7 @@ import {
 import { MonitorLeaseAdapter, type MonitorLeaseCapture } from "../src/extension/monitor-lease.ts";
 import { MonitorRuntime } from "../src/extension/monitor-runtime.ts";
 import {
+  MONITOR_EVALUATION_SCHEMA,
   MonitorSessionEvaluator,
   createMonitorEvaluationRequest,
   validateMonitorEvaluationResponse,
@@ -243,6 +245,109 @@ test("monitor evaluation validates request and target identity", () => {
   assert.equal(validateMonitorEvaluationResponse(verdict(request), request).ok, true);
   assert.equal(validateMonitorEvaluationResponse({ ...verdict(request), requestId: "wrong" }, request).ok, false);
   assert.equal(validateMonitorEvaluationResponse({ requestId: request.requestId, results: [] }, request).ok, false);
+
+  const invalidDelivery = {
+    requestId: request.requestId,
+    results: [{
+      target: KEY,
+      status: "on-track",
+      action: "send",
+      message: "Return a status update.",
+    }],
+  };
+  assert.equal(Check(MONITOR_EVALUATION_SCHEMA, verdict(request)), true);
+  assert.equal(Check(MONITOR_EVALUATION_SCHEMA, verdict(request, "send")), true);
+  assert.equal(Check(MONITOR_EVALUATION_SCHEMA, invalidDelivery), false);
+  assert.equal(validateMonitorEvaluationResponse(invalidDelivery, request).ok, false);
+});
+
+test("MonitorSessionEvaluator accepts a published identity before the evaluator result", async () => {
+  const request = createMonitorEvaluationRequest([], 1_000);
+  const sessionIdentity = {};
+  let waited = false;
+  const invocation: MonitorSessionInvocation = {
+    requestId: request.requestId,
+    correlationId: "monitor-correlation",
+    promptSequence: 1,
+    sessionIdentity,
+  };
+  const evaluator = new MonitorSessionEvaluator({
+    async invoke() {
+      return invocation;
+    },
+    async waitForResult(received) {
+      waited = true;
+      assert.equal(received.sessionIdentity, sessionIdentity);
+      return { ...received, structuredOutput: verdict(request) };
+    },
+    async stop() {},
+  });
+
+  const result = await evaluator.evaluate(request, new AbortController().signal, () => true);
+  assert.equal(waited, true);
+  assert.equal(result.status, "ok");
+});
+
+test("MonitorSessionEvaluator releases a published identity when its generation expires", async () => {
+  const request = createMonitorEvaluationRequest([], 1_000);
+  const sessionIdentity = {};
+  const invocation: MonitorSessionInvocation = {
+    requestId: request.requestId,
+    correlationId: "monitor-correlation",
+    promptSequence: 1,
+    sessionIdentity,
+  };
+  let cancelled = false;
+  let current = true;
+  const evaluator = new MonitorSessionEvaluator({
+    async invoke() {
+      current = false;
+      return invocation;
+    },
+    async waitForResult() {
+      throw new Error("waitForResult must not run after generation expiry");
+    },
+    cancel(received, reason) {
+      cancelled = received === invocation && reason.message === "Monitor evaluation generation changed after dispatch.";
+    },
+    async stop() {},
+  });
+
+  const result = await evaluator.evaluate(request, new AbortController().signal, () => current);
+  assert.equal(result.status, "stale");
+  assert.equal(cancelled, true);
+});
+
+test("MonitorSessionEvaluator treats cancellation during identity publication as stale", async () => {
+  const request = createMonitorEvaluationRequest([], 1_000);
+  const controller = new AbortController();
+  let invoked!: () => void;
+  const invocationStarted = new Promise<void>((resolve) => { invoked = resolve; });
+  let waited = false;
+  const evaluator = new MonitorSessionEvaluator({
+    async invoke(_request, _prompt, _schema, signal) {
+      invoked();
+      return new Promise<MonitorSessionInvocation>((_resolve, reject) => {
+        const onAbort = () => reject(signal.reason instanceof Error
+          ? signal.reason
+          : new Error("Monitor evaluation was cancelled."));
+        signal.addEventListener("abort", onAbort, { once: true });
+      });
+    },
+    async waitForResult() {
+      waited = true;
+      throw new Error("waitForResult must not run after cancellation");
+    },
+    async stop() {},
+  });
+
+  const evaluation = evaluator.evaluate(request, controller.signal, () => true);
+  await invocationStarted;
+  controller.abort(new Error("monitor generation expired"));
+  const result = await evaluation;
+  assert.equal(waited, false);
+  assert.equal(result.status, "stale");
+  assert.equal(result.reason, "monitor generation expired");
 });
 
 test("MonitorSessionEvaluator rejects a replaced session identity", async () => {
@@ -441,6 +546,10 @@ test("production extension instantiates the controller and routes evaluator turn
   assert.match(source, /new MonitorController\(/);
   assert.match(source, /new MonitorSessionEvaluator\(monitorSessionHost\)/);
   assert.match(source, /bindMonitorSessionDispatch =/);
+  assert.match(source, /pending\.rootFence/);
+  assert.match(source, /pending\.signal\.aborted/);
+  assert.match(source, /completePendingMonitorTurn\(pending\)/);
+  assert.match(source, /cancel\(invocation, reason\)/);
   assert.match(source, /publishMonitorSessionTurn =/);
   assert.match(source, /monitorControllerInstance\.bind\(/);
   assert.match(source, /await monitorControllerInstance\.exit\("user-exit"\)/);

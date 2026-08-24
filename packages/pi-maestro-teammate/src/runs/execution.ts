@@ -1833,12 +1833,8 @@ export async function runSingleTeammate(
       }
       if (modelRegistryContext === undefined) settlePendingModelAcquisitions(false);
       candidateResult.attemptedModels = attemptedModels.length > 1 ? attemptedModels : undefined;
+      await publishResult(candidateResult, cwd);
       commitCompletion();
-      // The final failed candidate may bypass publishResult when no completion
-      // observer armed the attempt options. Durable completion delivery
-      // requires a publicationId on every result, so mint one here if the
-      // attempt path never assigned one.
-      candidateResult.publicationId ??= randomUUID();
       return candidateResult;
     } finally {
       // Every half-open permit must settle exactly once. releasePermit is a

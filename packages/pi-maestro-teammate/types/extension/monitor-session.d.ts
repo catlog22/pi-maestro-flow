@@ -58,6 +58,8 @@ export interface MonitorSessionTurnResult extends MonitorSessionInvocation {
 export interface MonitorSessionHost {
     invoke(request: MonitorEvaluationRequest, prompt: string, outputSchema: Record<string, unknown>, signal: AbortSignal): Promise<MonitorSessionInvocation>;
     waitForResult(invocation: MonitorSessionInvocation, signal: AbortSignal, isCurrent: () => boolean): Promise<MonitorSessionTurnResult>;
+    /** Release an invocation when the caller's generation expires before result wait. */
+    cancel?(invocation: MonitorSessionInvocation, reason: Error): void;
     stop(signal: AbortSignal): Promise<void>;
 }
 export type MonitorSessionEvaluation = {
