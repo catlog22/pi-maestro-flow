@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -35,15 +35,18 @@ function owner(input: {
   ownerNonce: string;
   scope: "local" | "workspace-peer";
   sessionId: string;
+  status?: "running" | "completed";
+  extraCapabilities?: Array<"flow-schedule-todo-binding">;
 }) {
   return {
     workspaceId: "workspace",
     ownerId: input.ownerId,
     ownerNonce: input.ownerNonce,
     scope: input.scope,
-    status: "running" as const,
+    status: input.status ?? "running" as const,
     sessionId: input.sessionId,
     agents: [],
+    ...(input.extraCapabilities ? { extraCapabilities: input.extraCapabilities } : {}),
   };
 }
 
@@ -95,13 +98,28 @@ function outgoingTo(
   });
 }
 
-function registryPair(): RegistryPair {
+function registryPair(todoBinding = false): RegistryPair {
+  const bindingCapabilities = todoBinding
+    ? ["flow-schedule-todo-binding" as const]
+    : undefined;
   const coordinatorEndpoints = projectSessionEndpoints([
     owner({ ownerId: COORDINATOR_OWNER, ownerNonce: COORDINATOR_NONCE, scope: "local", sessionId: "coordinator-session" }),
-    owner({ ownerId: WORKER_OWNER, ownerNonce: WORKER_NONCE, scope: "workspace-peer", sessionId: "worker-session" }),
+    owner({
+      ownerId: WORKER_OWNER,
+      ownerNonce: WORKER_NONCE,
+      scope: "workspace-peer",
+      sessionId: "worker-session",
+      extraCapabilities: bindingCapabilities,
+    }),
   ]);
   const workerEndpoints = projectSessionEndpoints([
-    owner({ ownerId: WORKER_OWNER, ownerNonce: WORKER_NONCE, scope: "local", sessionId: "worker-session" }),
+    owner({
+      ownerId: WORKER_OWNER,
+      ownerNonce: WORKER_NONCE,
+      scope: "local",
+      sessionId: "worker-session",
+      extraCapabilities: bindingCapabilities,
+    }),
     owner({ ownerId: COORDINATOR_OWNER, ownerNonce: COORDINATOR_NONCE, scope: "workspace-peer", sessionId: "coordinator-session" }),
   ]);
   let coordinator!: SessionHostRegistry;
@@ -169,12 +187,18 @@ function liveObservation() {
   });
 }
 
-async function createActiveStore(root: string): Promise<FlowScheduleStore> {
+async function createActiveStore(root: string, todoBinding = false): Promise<FlowScheduleStore> {
   const store = new FlowScheduleStore(join(root, "workspace"), { getProcessIdentity: () => `test:${process.pid}` });
   await store.createSchedule({
     scheduleId: "release",
     target: TARGET,
-    steps: [{ stepId: "verify", prompt: "Run verification" }],
+    steps: [{
+      stepId: "verify",
+      prompt: "Run verification",
+      ...(todoBinding
+        ? { todoBinding: { label: "Verify release", requireCompleted: true, conflictCheck: true } }
+        : {}),
+    }],
   });
   await store.updateSchedule("release", (schedule) => ({ ...schedule, state: "active" }));
   return store;
@@ -205,6 +229,132 @@ function claimIntentInChild(projectRoot: string, identity: ExactWindowIdentity):
     child.on("close", (code) => code === 0 ? resolve() : reject(new Error(`intent child exited ${String(code)}: ${stderr}`)));
   });
 }
+
+interface ChildTodoReport {
+  request: SessionMessageRequest;
+  todo: { id: string; status: string };
+}
+
+async function reportCompletedTodoInChild(
+  root: string,
+  inbound: ReturnType<SessionHostRegistry["thread"]["get"]>,
+): Promise<ChildTodoReport> {
+  assert.ok(inbound);
+  const inputPath = join(root, "worker-input.json");
+  const outputPath = join(root, "worker-report.json");
+  await writeFile(inputPath, `${JSON.stringify({
+    cwd: join(root, "workspace"),
+    owners: [
+      owner({
+        ownerId: WORKER_OWNER,
+        ownerNonce: WORKER_NONCE,
+        scope: "local",
+        sessionId: "worker-session",
+        extraCapabilities: ["flow-schedule-todo-binding"],
+      }),
+      owner({
+        ownerId: COORDINATOR_OWNER,
+        ownerNonce: COORDINATOR_NONCE,
+        scope: "workspace-peer",
+        sessionId: "coordinator-session",
+      }),
+    ],
+    inbound,
+  })}\n`, "utf8");
+  const toolUrl = new URL("../src/flow-schedule/tool.ts", import.meta.url).href;
+  const todoUrl = new URL("../src/tools/todo.ts", import.meta.url).href;
+  const script = [
+    "const [toolUrl, todoUrl, inputPath, outputPath] = process.argv.slice(1);",
+    "const { readFile, writeFile } = await import('node:fs/promises');",
+    "const { createWorkerFlowScheduleTool } = await import(toolUrl);",
+    "const { executeTodo, getVisibleTasks } = await import(todoUrl);",
+    "const { createWorkspacePeerV1TransportAdapter, projectSessionEndpoints, SessionHostRegistry } = await import('pi-maestro-teammate/v1/sessions');",
+    "const input = JSON.parse(await readFile(inputPath, 'utf8'));",
+    "const endpoints = projectSessionEndpoints(input.owners);",
+    "let registry;",
+    "registry = new SessionHostRegistry({ surface: 'unified', endpoints, adapters: [createWorkspacePeerV1TransportAdapter(async (destination, request) => { await writeFile(outputPath, JSON.stringify({ request, todo: getVisibleTasks().find((task) => task.id === todoId) })); return { delivered: true, endpointId: destination.id, transport: destination.transport, receipt: { publicationStage: 'accepted', deliveryStage: 'injected', messageId: request.messageId } }; })] });",
+    "registry.thread.record(input.inbound);",
+    "const ctx = { cwd: input.cwd, ui: { setStatus() {} } };",
+    "const created = await executeTodo({ action: 'create', subject: 'Verify release in child worker' }, ctx);",
+    "if (created.isError) throw new Error('Todo create failed');",
+    "const todoId = created.details?.tasks[0]?.id;",
+    "if (!todoId) throw new Error('Todo id missing');",
+    "const completed = await executeTodo({ action: 'update', id: todoId, status: 'completed', summary: 'Verified', updateFields: ['status', 'summary'] }, ctx);",
+    "if (completed.isError || getVisibleTasks().find((task) => task.id === todoId)?.status !== 'completed') throw new Error('Todo completion failed');",
+    "const tool = createWorkerFlowScheduleTool({ getRegistry: () => registry });",
+    `const report = await tool.execute('report', { action: 'report', dispatchId: ${JSON.stringify(DISPATCH_A)}, outcome: 'completed', summary: 'Child worker verified and exited', todoOutcome: { todoId, todoStatus: 'completed' } });`,
+    "if (report.isError) throw new Error('Flow report failed');",
+  ].join("\n");
+  const child = spawn(process.execPath, [
+    "--experimental-transform-types",
+    "--no-warnings",
+    "--input-type=module",
+    "-e",
+    script,
+    toolUrl,
+    todoUrl,
+    inputPath,
+    outputPath,
+  ], { stdio: ["ignore", "ignore", "pipe"] });
+  await new Promise<void>((resolve, reject) => {
+    let stderr = "";
+    child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+    child.on("error", reject);
+    child.on("close", (code) => code === 0 ? resolve() : reject(new Error(`worker child exited ${String(code)}: ${stderr}`)));
+  });
+  return JSON.parse(await readFile(outputPath, "utf8")) as ChildTodoReport;
+}
+
+test("Todo-bound child worker completes Todo, reports, exits, and Monitor accepts the last-step result", async () => {
+  const root = await mkdtemp(join(tmpdir(), "flow-schedule-todo-child-e2e-"));
+  const pair = registryPair(true);
+  const store = await createActiveStore(root, true);
+  const runtime = new FlowScheduleRuntime({
+    store,
+    getRegistry: () => pair.coordinator,
+    observe: liveObservation,
+    createDispatchId: () => DISPATCH_A,
+  });
+  try {
+    await runtime.reconcileReady();
+    await runtime.reconcileReady();
+    assert.deepEqual((await store.readSchedule("release"))?.steps.verify.attempts, [DISPATCH_A]);
+    assert.equal((await store.listBindings()).length, 1);
+    assert.equal((await store.readBinding(DISPATCH_A))?.state, "pending");
+
+    const childReport = await reportCompletedTodoInChild(
+      root,
+      pair.worker.thread.get(DISPATCH_A, "incoming"),
+    );
+    assert.equal(childReport.todo.status, "completed");
+    const workerPeer = pair.coordinator.resolve(TARGET, { includeSettled: true, localFirst: false }).endpoint!;
+    const coordinatorLocal = pair.coordinator.snapshot().endpoints.find((endpoint) => endpoint.scope === "local")!;
+    incomingFrom(pair.coordinator, workerPeer, coordinatorLocal, childReport.request);
+    pair.coordinator.replaceEndpoints(projectSessionEndpoints([
+      owner({ ownerId: COORDINATOR_OWNER, ownerNonce: COORDINATOR_NONCE, scope: "local", sessionId: "coordinator-session" }),
+      owner({
+        ownerId: WORKER_OWNER,
+        ownerNonce: WORKER_NONCE,
+        scope: "workspace-peer",
+        sessionId: "worker-session",
+        status: "completed",
+        extraCapabilities: ["flow-schedule-todo-binding"],
+      }),
+    ]));
+
+    await runtime.reconcileReady();
+    const schedule = await store.readSchedule("release");
+    const binding = await store.readBinding(DISPATCH_A);
+    assert.equal(schedule?.state, "completed");
+    assert.equal(schedule?.steps.verify.result?.todoOutcome?.todoId, childReport.todo.id);
+    assert.equal(binding?.state, "completed");
+    assert.equal(binding?.todoId, childReport.todo.id);
+    assert.equal((await store.listBindings()).length, 1);
+  } finally {
+    runtime.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("child intent crash resumes the same dispatch and worker report completes after coordinator restart", async () => {
   const root = await mkdtemp(join(tmpdir(), "flow-schedule-e2e-"));

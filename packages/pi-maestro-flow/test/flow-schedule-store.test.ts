@@ -27,6 +27,7 @@ import {
   type ExactWindowIdentity,
   type FlowScheduleCompletionRecord,
   type FlowScheduleRecord,
+  type FlowScheduleTodoBinding,
 } from "../src/flow-schedule/types.ts";
 
 const DISPATCH_A = "123e4567-e89b-42d3-a456-426614174000";
@@ -752,6 +753,207 @@ test("terminal GC is owner-gated, bounded, contained, and preserves legacy data"
     await assert.rejects(store.collectGarbage({ retentionMs: 0 }), FlowScheduleCorruptionError);
     assert.equal((await readdir(store.schedulesDir)).length, 1);
     assert.equal(await readFile(legacyFile, "utf8"), "legacy bytes");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+async function createDispatchForBinding(store: FlowScheduleStore, dispatchId: string, scheduleId = "release", stepId = "build"): Promise<void> {
+  await store.createSchedule({
+    scheduleId,
+    target: OWNER_SELECTOR,
+    steps: [{ stepId, prompt: `Run ${stepId}` }],
+  });
+  await store.updateSchedule(scheduleId, (schedule) => ({ ...schedule, state: "active" }));
+  await store.createDispatchIntent({
+    dispatchId,
+    scheduleId,
+    stepId,
+    targetIdentity: identity,
+  });
+}
+
+function bindingRecord(dispatchId: string, overrides: Partial<FlowScheduleTodoBinding> = {}): FlowScheduleTodoBinding {
+  return {
+    version: FLOW_SCHEDULE_VERSION,
+    type: "flow-schedule-binding",
+    dispatchId,
+    scheduleId: "release",
+    stepId: "build",
+    state: "pending",
+    createdAt: 100,
+    updatedAt: 100,
+    ...overrides,
+  } satisfies FlowScheduleTodoBinding as FlowScheduleTodoBinding;
+}
+
+test("FlowScheduleStore records and reads an optional todo binding keyed by dispatchId", async () => {
+  const { root, store } = await temporaryStore({ now: () => 100 });
+  try {
+    await createDispatchForBinding(store, DISPATCH_A);
+    assert.equal(await store.readBinding(DISPATCH_A), undefined);
+    const pending = await store.recordBinding(bindingRecord(DISPATCH_A));
+    assert.equal(pending.state, "pending");
+    assert.equal((await store.readBinding(DISPATCH_A))?.state, "pending");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("FlowScheduleStore lists durable bindings in stable creation order", async () => {
+  const { root, store } = await temporaryStore({ now: () => 100 });
+  try {
+    await createDispatchForBinding(store, DISPATCH_A);
+    await store.recordBinding(bindingRecord(DISPATCH_A, { createdAt: 100, updatedAt: 100 }));
+    await store.recordCompletion({
+      version: FLOW_SCHEDULE_VERSION,
+      type: "flow-schedule-completion",
+      dispatchId: DISPATCH_A,
+      scheduleId: "release",
+      stepId: "build",
+      targetIdentity: identity,
+      state: "completed",
+      result: {
+        version: FLOW_SCHEDULE_VERSION,
+        type: FLOW_SCHEDULE_RESULT_TYPE,
+        dispatchId: DISPATCH_A,
+        scheduleId: "release",
+        stepId: "build",
+        outcome: "completed",
+        summary: "Build passed",
+        resources: [],
+      },
+      completedAt: 150,
+    });
+    await createDispatchForBinding(store, DISPATCH_B, "release-2", "verify");
+    await store.recordBinding(bindingRecord(DISPATCH_B, {
+      scheduleId: "release-2",
+      stepId: "verify",
+      createdAt: 200,
+      updatedAt: 200,
+    }));
+
+    const bindings = await store.listBindings();
+    assert.deepEqual(bindings.map((item) => item.dispatchId), [DISPATCH_A, DISPATCH_B]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("completion terminalizes binding only after exclusive completion validation", async () => {
+  const { root, store } = await temporaryStore({ now: () => 100 });
+  try {
+    await createDispatchForBinding(store, DISPATCH_A);
+    await store.recordBinding(bindingRecord(DISPATCH_A));
+    await store.recordCompletion({
+      version: FLOW_SCHEDULE_VERSION,
+      type: "flow-schedule-completion",
+      dispatchId: DISPATCH_A,
+      scheduleId: "release",
+      stepId: "build",
+      targetIdentity: identity,
+      state: "retired",
+      reason: "Schedule cancelled: operator",
+      completedAt: 200,
+    });
+    assert.equal((await store.readBinding(DISPATCH_A))?.state, "ambiguous");
+    assert.equal((await store.readBinding(DISPATCH_A))?.reason, "Schedule cancelled: operator");
+
+    await assert.rejects(store.recordCompletion({
+      version: FLOW_SCHEDULE_VERSION,
+      type: "flow-schedule-completion",
+      dispatchId: DISPATCH_A,
+      scheduleId: "release",
+      stepId: "build",
+      targetIdentity: identity,
+      state: "ambiguous",
+      reason: "Conflicting completion",
+      completedAt: 201,
+    }), /already exists with different content/);
+    assert.equal((await store.readBinding(DISPATCH_A))?.reason, "Schedule cancelled: operator");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("FlowScheduleStore binding upsert is idempotent on identical content replay", async () => {
+  const { root, store } = await temporaryStore({ now: () => 100 });
+  try {
+    await createDispatchForBinding(store, DISPATCH_A);
+    const first = await store.recordBinding(bindingRecord(DISPATCH_A));
+    const second = await store.recordBinding(bindingRecord(DISPATCH_A));
+    assert.deepEqual(first, second);
+    assert.deepEqual(await store.readBinding(DISPATCH_A), second);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("FlowScheduleStore binding progresses pending -> bound -> completed", async () => {
+  const { root, store } = await temporaryStore({ now: () => 100 });
+  try {
+    await createDispatchForBinding(store, DISPATCH_A);
+    await store.recordBinding(bindingRecord(DISPATCH_A, { state: "pending" }));
+    const bound = await store.recordBinding(bindingRecord(DISPATCH_A, { state: "bound", todoId: "todo-1", updatedAt: 200 }));
+    assert.equal(bound.state, "bound");
+    assert.equal(bound.todoId, "todo-1");
+    const completed = await store.recordBinding(bindingRecord(DISPATCH_A, { state: "completed", todoId: "todo-1", todoStatus: "completed", updatedAt: 300 }));
+    assert.equal(completed.state, "completed");
+    assert.equal(completed.todoStatus, "completed");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("FlowScheduleStore binding rejects divergent content at the same non-terminal state", async () => {
+  const { root, store } = await temporaryStore({ now: () => 100 });
+  try {
+    await createDispatchForBinding(store, DISPATCH_A);
+    await store.recordBinding(bindingRecord(DISPATCH_A, { state: "pending" }));
+    await assert.rejects(
+      store.recordBinding(bindingRecord(DISPATCH_A, { state: "pending", updatedAt: 150 })),
+      (error: unknown) => error instanceof FlowScheduleConflictError,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("FlowScheduleStore terminal binding state is immutable", async () => {
+  const { root, store } = await temporaryStore({ now: () => 100 });
+  try {
+    await createDispatchForBinding(store, DISPATCH_A);
+    await store.recordBinding(bindingRecord(DISPATCH_A, { state: "completed", todoId: "todo-1", todoStatus: "completed", updatedAt: 200 }));
+    await assert.rejects(
+      store.recordBinding(bindingRecord(DISPATCH_A, { state: "failed", todoId: "todo-1", todoStatus: "failed", updatedAt: 300 })),
+      (error: unknown) => error instanceof FlowScheduleConflictError,
+    );
+    assert.equal((await store.readBinding(DISPATCH_A))?.state, "completed");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("FlowScheduleStore binding requires an existing dispatch intent", async () => {
+  const { root, store } = await temporaryStore({ now: () => 100 });
+  try {
+    await assert.rejects(store.recordBinding(bindingRecord(DISPATCH_A)), /Unknown Flow schedule dispatch/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("FlowScheduleStore binding allows unbound ambiguity but requires a reason", async () => {
+  const { root, store } = await temporaryStore({ now: () => 100 });
+  try {
+    await createDispatchForBinding(store, DISPATCH_A);
+    await assert.rejects(
+      store.recordBinding(bindingRecord(DISPATCH_A, { state: "ambiguous", todoId: "todo-1" })),
+      /reason.*ambiguous/i,
+    );
+    const ambiguous = await store.recordBinding(bindingRecord(DISPATCH_A, { state: "ambiguous", reason: "Todo evidence timed out", updatedAt: 200 }));
+    assert.equal(ambiguous.state, "ambiguous");
+    assert.equal(ambiguous.todoId, undefined);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

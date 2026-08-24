@@ -15,17 +15,23 @@ import {
 import {
   createFlowScheduleDispatchEnvelope,
   createFlowScheduleResult,
+  decodeFlowScheduleDispatch,
   encodeFlowScheduleDispatch,
   encodeFlowScheduleResult,
   flowScheduleResultMessageId,
 } from "../src/flow-schedule/protocol.ts";
 import {
   FlowScheduleRuntime,
+  FLOW_SCHEDULE_TODO_BINDING_CAPABILITY,
   publishFlowScheduleReport,
   type FlowScheduleRuntimeStore,
 } from "../src/flow-schedule/runtime.ts";
 import { FlowScheduleStore } from "../src/flow-schedule/store.ts";
-import type { ExactWindowIdentity, FlowScheduleRecord } from "../src/flow-schedule/types.ts";
+import type {
+  ExactWindowIdentity,
+  FlowScheduleRecord,
+  FlowScheduleTodoBindingSpec,
+} from "../src/flow-schedule/types.ts";
 
 const LOCAL_OWNER = "1".repeat(32);
 const PEER_OWNER = "a".repeat(32);
@@ -35,7 +41,7 @@ const DISPATCH_A = "123e4567-e89b-42d3-a456-426614174000";
 const DISPATCH_B = "223e4567-e89b-42d3-a456-426614174000";
 const TARGET = `owner:${PEER_OWNER}`;
 
-function endpointOwners(peerNonce = PEER_NONCE) {
+function endpointOwners(peerNonce = PEER_NONCE, todoBinding = false) {
   return [
     {
       workspaceId: "workspace",
@@ -53,6 +59,7 @@ function endpointOwners(peerNonce = PEER_NONCE) {
       scope: "workspace-peer" as const,
       status: "running" as const,
       sessionId: peerNonce === PEER_NONCE ? "peer-session" : "replacement-session",
+      ...(todoBinding ? { extraCapabilities: [FLOW_SCHEDULE_TODO_BINDING_CAPABILITY] } : {}),
       agents: [],
     },
   ];
@@ -101,17 +108,18 @@ function recordOutgoing(
 
 function registryWithDelivery(
   deliver: (registry: SessionHostRegistry, endpoint: SessionEndpoint, request: SessionMessageRequest) => Promise<SessionMessageResult>,
+  todoBinding = false,
 ): SessionHostRegistry {
   let registry!: SessionHostRegistry;
   registry = new SessionHostRegistry({
     surface: "unified",
-    endpoints: projectSessionEndpoints(endpointOwners()),
+    endpoints: projectSessionEndpoints(endpointOwners(PEER_NONCE, todoBinding)),
     adapters: [createWorkspacePeerV1TransportAdapter((endpoint, request) => deliver(registry, endpoint, request))],
   });
   return registry;
 }
 
-async function storeHarness() {
+async function storeHarness(todoBinding?: FlowScheduleTodoBindingSpec) {
   const root = await mkdtemp(join(tmpdir(), "flow-schedule-runtime-"));
   let now = 100;
   const store = new FlowScheduleStore(join(root, "workspace"), {
@@ -121,7 +129,7 @@ async function storeHarness() {
   await store.createSchedule({
     scheduleId: "release",
     target: TARGET,
-    steps: [{ stepId: "verify", prompt: "Run verification" }],
+    steps: [{ stepId: "verify", prompt: "Run verification", ...(todoBinding ? { todoBinding } : {}) }],
   });
   await store.updateSchedule("release", (schedule) => ({ ...schedule, state: "active" }));
   return { root, store, now: () => now++ };
@@ -141,6 +149,7 @@ function tracedStore(store: FlowScheduleStore, events: string[]): FlowScheduleRu
     recordPublished: (record) => store.recordPublished(record),
     recordAccepted: (record) => store.recordAccepted(record),
     recordCompletion: (record) => store.recordCompletion(record),
+    recordBinding: (record) => store.recordBinding(record),
   };
 }
 
@@ -328,6 +337,225 @@ test("only an exact trusted result advances the current dispatch; stale and late
   }
 });
 
+test("capability mismatch silently degrades Todo binding to legacy gate-none dispatch", async () => {
+  const { root, store, now } = await storeHarness({ requireCompleted: true, conflictCheck: true });
+  let dispatchedTodoBinding: unknown;
+  let dispatchedInstruction = "";
+  const registry = registryWithDelivery(async (host, endpoint, request) => {
+    const envelope = decodeFlowScheduleDispatch(request.message);
+    dispatchedTodoBinding = envelope.todoBinding;
+    dispatchedInstruction = envelope.instruction;
+    recordOutgoing(host, endpoint, request, "queued");
+    return { delivered: true, endpointId: endpoint.id, receipt: { publicationStage: "accepted", deliveryStage: "queued" } };
+  });
+  const runtime = new FlowScheduleRuntime({ store, getRegistry: () => registry, observe: liveObservation, now, createDispatchId: () => DISPATCH_A });
+  try {
+    await runtime.reconcileReady();
+    const bundle = (await store.readDispatch(DISPATCH_A))!;
+    assert.equal(dispatchedTodoBinding, undefined);
+    assert.doesNotMatch(dispatchedInstruction, /todo binding/i);
+    assert.equal(bundle.binding, undefined);
+
+    registry.replaceEndpoints(projectSessionEndpoints(endpointOwners(PEER_NONCE, true)));
+    await runtime.reconcileReady();
+    assert.equal((await store.readDispatch(DISPATCH_A))?.binding, undefined, "legacy degradation stays frozen after publication");
+
+    recordIncomingResult(registry, bundle.intent.targetIdentity, createFlowScheduleResult({
+      scheduleId: "release",
+      stepId: "verify",
+      dispatchId: DISPATCH_A,
+      outcome: "completed",
+      summary: "Legacy worker completed",
+    }));
+    await runtime.reconcileReady();
+    assert.equal((await store.readSchedule("release"))?.state, "completed");
+  } finally {
+    runtime.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("supported Todo gate records pending before dispatch and completes only with completed evidence", async () => {
+  const { root, store, now } = await storeHarness({ requireCompleted: true, conflictCheck: true });
+  let dispatchedTodoBinding: unknown;
+  const registry = registryWithDelivery(async (host, endpoint, request) => {
+    dispatchedTodoBinding = decodeFlowScheduleDispatch(request.message).todoBinding;
+    recordOutgoing(host, endpoint, request, "injected");
+    return { delivered: true, endpointId: endpoint.id, receipt: { publicationStage: "accepted", deliveryStage: "injected" } };
+  }, true);
+  const runtime = new FlowScheduleRuntime({ store, getRegistry: () => registry, observe: liveObservation, now, createDispatchId: () => DISPATCH_A });
+  try {
+    await runtime.reconcileReady();
+    const bundle = (await store.readDispatch(DISPATCH_A))!;
+    assert.deepEqual(dispatchedTodoBinding, { requireCompleted: true, conflictCheck: true });
+    assert.equal(bundle.binding?.state, "pending");
+
+    recordIncomingResult(registry, bundle.intent.targetIdentity, createFlowScheduleResult({
+      scheduleId: "release",
+      stepId: "verify",
+      dispatchId: DISPATCH_A,
+      outcome: "completed",
+      summary: "Todo completed",
+      todoOutcome: { todoId: "todo-1", todoStatus: "completed" },
+    }));
+    await runtime.reconcileReady();
+    assert.equal((await store.readSchedule("release"))?.state, "completed");
+    assert.deepEqual(await store.readBinding(DISPATCH_A), {
+      ...bundle.binding,
+      todoId: "todo-1",
+      todoStatus: "completed",
+      state: "completed",
+      updatedAt: (await store.readBinding(DISPATCH_A))!.updatedAt,
+    });
+  } finally {
+    runtime.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("failed exact result with Todo evidence terminalizes binding failed", async () => {
+  const { root, store, now } = await storeHarness({ requireCompleted: true });
+  const registry = registryWithDelivery(async (host, endpoint, request) => {
+    recordOutgoing(host, endpoint, request, "injected");
+    return { delivered: true, endpointId: endpoint.id, receipt: { publicationStage: "accepted", deliveryStage: "injected" } };
+  }, true);
+  const runtime = new FlowScheduleRuntime({
+    store,
+    getRegistry: () => registry,
+    observe: liveObservation,
+    now,
+    createDispatchId: () => DISPATCH_A,
+  });
+  try {
+    await runtime.reconcileReady();
+    const bundle = (await store.readDispatch(DISPATCH_A))!;
+    recordIncomingResult(registry, bundle.intent.targetIdentity, createFlowScheduleResult({
+      scheduleId: "release",
+      stepId: "verify",
+      dispatchId: DISPATCH_A,
+      outcome: "failed",
+      summary: "Todo execution failed",
+      todoOutcome: { todoId: "todo-failed", todoStatus: "failed" },
+    }));
+    await runtime.reconcileReady();
+
+    assert.equal((await store.readSchedule("release"))?.steps.verify.state, "failed");
+    assert.equal((await store.readBinding(DISPATCH_A))?.state, "failed");
+    assert.equal((await store.readBinding(DISPATCH_A))?.todoId, "todo-failed");
+    assert.equal((await store.readBinding(DISPATCH_A))?.reason, "Todo execution failed");
+  } finally {
+    runtime.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("requireCompleted keeps missing or non-completed evidence awaiting until timeout", async () => {
+  const cases: Array<{ label: string; todoStatus?: "pending" | "in_progress" | "blocked" }> = [
+    { label: "missing" },
+    { label: "pending", todoStatus: "pending" },
+    { label: "in-progress", todoStatus: "in_progress" },
+    { label: "blocked", todoStatus: "blocked" },
+  ];
+  for (const testCase of cases) {
+    const { root, store } = await storeHarness({ requireCompleted: true });
+    let clock = 100;
+    const registry = registryWithDelivery(async (host, endpoint, request) => {
+      recordOutgoing(host, endpoint, request, "injected");
+      return { delivered: true, endpointId: endpoint.id, receipt: { publicationStage: "accepted", deliveryStage: "injected" } };
+    }, true);
+    const runtime = new FlowScheduleRuntime({
+      store,
+      getRegistry: () => registry,
+      observe: liveObservation,
+      now: () => clock,
+      todoGateTimeoutMs: 1_000,
+      createDispatchId: () => DISPATCH_A,
+    });
+    try {
+      await runtime.reconcileReady();
+      const bundle = (await store.readDispatch(DISPATCH_A))!;
+      recordIncomingResult(registry, bundle.intent.targetIdentity, createFlowScheduleResult({
+        scheduleId: "release",
+        stepId: "verify",
+        dispatchId: DISPATCH_A,
+        outcome: "completed",
+        summary: testCase.label,
+        ...(testCase.todoStatus ? { todoOutcome: { todoId: `todo-${testCase.label}`, todoStatus: testCase.todoStatus } } : {}),
+      }), { createdAt: 100, updatedAt: 100 });
+
+      await runtime.reconcileReady();
+      assert.equal((await store.readSchedule("release"))?.steps.verify.state, "awaiting-result", testCase.label);
+      assert.equal((await store.readDispatch(DISPATCH_A))?.completion, undefined, testCase.label);
+
+      clock = 1_100;
+      await runtime.reconcileReady();
+      assert.equal((await store.readSchedule("release"))?.steps.verify.state, "ambiguous", testCase.label);
+      assert.equal((await store.readBinding(DISPATCH_A))?.state, "ambiguous", testCase.label);
+    } finally {
+      runtime.dispose();
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("conflictCheck rejects explicit non-completed evidence immediately and stale todoId only after timeout", async () => {
+  for (const stale of [false, true]) {
+    const { root, store } = await storeHarness(stale
+      ? { requireCompleted: true, conflictCheck: true }
+      : { conflictCheck: true });
+    let clock = 100;
+    const registry = registryWithDelivery(async (host, endpoint, request) => {
+      recordOutgoing(host, endpoint, request, "injected");
+      return { delivered: true, endpointId: endpoint.id, receipt: { publicationStage: "accepted", deliveryStage: "injected" } };
+    }, true);
+    const runtime = new FlowScheduleRuntime({
+      store,
+      getRegistry: () => registry,
+      observe: liveObservation,
+      now: () => clock,
+      todoGateTimeoutMs: 1_000,
+      createDispatchId: () => DISPATCH_A,
+    });
+    try {
+      await runtime.reconcileReady();
+      let bundle = (await store.readDispatch(DISPATCH_A))!;
+      if (stale) {
+        await store.recordBinding({
+          ...bundle.binding!,
+          state: "bound",
+          todoId: "todo-current",
+          todoStatus: "in_progress",
+          updatedAt: 101,
+        });
+        bundle = (await store.readDispatch(DISPATCH_A))!;
+      }
+      recordIncomingResult(registry, bundle.intent.targetIdentity, createFlowScheduleResult({
+        scheduleId: "release",
+        stepId: "verify",
+        dispatchId: DISPATCH_A,
+        outcome: "completed",
+        summary: stale ? "Stale Todo" : "Todo still running",
+        todoOutcome: stale
+          ? { todoId: "todo-stale", todoStatus: "completed" }
+          : { todoId: "todo-current", todoStatus: "in_progress" },
+      }), { createdAt: 100, updatedAt: 100 });
+
+      await runtime.reconcileReady();
+      if (stale) {
+        assert.equal((await store.readSchedule("release"))?.steps.verify.state, "awaiting-result");
+        clock = 1_100;
+        await runtime.reconcileReady();
+      }
+      assert.equal((await store.readSchedule("release"))?.steps.verify.state, "ambiguous");
+      assert.equal((await store.readBinding(DISPATCH_A))?.state, "ambiguous");
+      if (stale) assert.equal((await store.readBinding(DISPATCH_A))?.todoId, "todo-current");
+    } finally {
+      runtime.dispose();
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("paused schedules admit no new work but reconcile an active attempt result", async () => {
   const first = await storeHarness();
   const idleRegistry = registryWithDelivery(async () => { throw new Error("paused schedule must not send"); });
@@ -378,14 +606,14 @@ test("paused schedules admit no new work but reconcile an active attempt result"
   }
 });
 
-test("cancelling an active attempt retires it without resending or reclaiming the window", async () => {
-  const { root, store, now } = await storeHarness();
+test("cancelling an active attempt retires it and terminalizes its binding without resending", async () => {
+  const { root, store, now } = await storeHarness({ requireCompleted: true });
   let sends = 0;
   const registry = registryWithDelivery(async (host, endpoint, request) => {
     sends += 1;
     recordOutgoing(host, endpoint, request, "queued");
     return { delivered: true, endpointId: endpoint.id, receipt: { publicationStage: "accepted", deliveryStage: "queued" } };
-  });
+  }, true);
   const runtime = new FlowScheduleRuntime({
     store,
     getRegistry: () => registry,
@@ -399,8 +627,81 @@ test("cancelling an active attempt retires it without resending or reclaiming th
     assert.equal(cancelled.state, "cancelled");
     assert.equal(cancelled.activeStepId, undefined);
     assert.equal((await store.readDispatch(DISPATCH_A))?.completion?.state, "retired");
+    assert.equal((await store.readBinding(DISPATCH_A))?.state, "ambiguous");
+    assert.match((await store.readBinding(DISPATCH_A))?.reason ?? "", /Schedule cancelled: Operator cancelled/);
     await runtime.reconcileReady();
     assert.equal(sends, 1);
+  } finally {
+    runtime.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Todo-bound dispatch with no exact report times out binding and step ambiguous", async () => {
+  const { root, store } = await storeHarness({ requireCompleted: true });
+  let clock = 100;
+  const registry = registryWithDelivery(async (host, endpoint, request) => {
+    recordOutgoing(host, endpoint, request, "injected");
+    return { delivered: true, endpointId: endpoint.id, receipt: { publicationStage: "accepted", deliveryStage: "injected" } };
+  }, true);
+  const runtime = new FlowScheduleRuntime({
+    store,
+    getRegistry: () => registry,
+    observe: liveObservation,
+    now: () => clock,
+    todoGateTimeoutMs: 1_000,
+    createDispatchId: () => DISPATCH_A,
+  });
+  try {
+    await runtime.reconcileReady();
+    assert.equal((await store.readBinding(DISPATCH_A))?.state, "pending");
+    assert.equal((await store.readSchedule("release"))?.steps.verify.state, "awaiting-result");
+
+    clock = 1_100;
+    await runtime.reconcileReady();
+    assert.equal((await store.readBinding(DISPATCH_A))?.state, "ambiguous");
+    assert.equal((await store.readDispatch(DISPATCH_A))?.completion?.state, "ambiguous");
+    assert.equal((await store.readSchedule("release"))?.steps.verify.state, "ambiguous");
+  } finally {
+    runtime.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("retry terminalizes a failed attempt binding before creating the next dispatch", async () => {
+  const { root, store, now } = await storeHarness({ requireCompleted: true });
+  const registry = registryWithDelivery(async (host, endpoint, request) => {
+    recordOutgoing(host, endpoint, request, "injected");
+    return { delivered: true, endpointId: endpoint.id, receipt: { publicationStage: "accepted", deliveryStage: "injected" } };
+  }, true);
+  let nextDispatch = 0;
+  const runtime = new FlowScheduleRuntime({
+    store,
+    getRegistry: () => registry,
+    observe: liveObservation,
+    now,
+    createDispatchId: () => [DISPATCH_A, DISPATCH_B][nextDispatch++] ?? DISPATCH_B,
+  });
+  try {
+    await runtime.reconcileReady();
+    const first = (await store.readDispatch(DISPATCH_A))!;
+    recordIncomingResult(registry, first.intent.targetIdentity, createFlowScheduleResult({
+      scheduleId: "release",
+      stepId: "verify",
+      dispatchId: DISPATCH_A,
+      outcome: "failed",
+      summary: "Worker failed before reporting Todo evidence",
+    }));
+    await runtime.reconcileReady();
+    assert.equal((await store.readSchedule("release"))?.steps.verify.state, "failed");
+    assert.equal((await store.readBinding(DISPATCH_A))?.state, "pending");
+
+    const prepared = await runtime.retrySchedule("release", "verify", "Retry partial failure");
+    assert.equal(prepared.steps.verify.state, "pending");
+    assert.equal((await store.readBinding(DISPATCH_A))?.state, "ambiguous");
+    assert.match((await store.readBinding(DISPATCH_A))?.reason ?? "", /Retry requested: Retry partial failure/);
+    assert.equal((await store.readDispatch(DISPATCH_B))?.binding?.state, "pending");
+    assert.deepEqual((await store.readSchedule("release"))?.steps.verify.attempts, [DISPATCH_A, DISPATCH_B]);
   } finally {
     runtime.dispose();
     await rm(root, { recursive: true, force: true });

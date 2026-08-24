@@ -121,6 +121,8 @@ export interface FlowScheduleToolDetails {
 export interface CoordinatorFlowScheduleToolOptions {
   resolve(cwd: string): FlowScheduleController;
   getRegistry?: () => SessionHostRegistry | undefined;
+  isMonitorActive?: () => boolean;
+  captureMonitor?: () => { generation: number } | undefined;
 }
 
 function scheduleLine(schedule: FlowScheduleRecord): string {
@@ -180,11 +182,45 @@ async function scheduleAndDispatch(
 ): Promise<{ schedule: FlowScheduleRecord; dispatch?: FlowScheduleDispatchBundle }> {
   const schedule = await controller.store.readSchedule(scheduleId);
   if (!schedule) throw new Error(`Unknown Flow schedule: ${scheduleId}`);
-  const step = schedule.activeStepId ? schedule.steps[schedule.activeStepId] : undefined;
-  const dispatch = step?.currentDispatchId
-    ? await controller.store.readDispatch(step.currentDispatchId)
+  const activeStep = schedule.activeStepId ? schedule.steps[schedule.activeStepId] : undefined;
+  const latestDispatchId = activeStep?.currentDispatchId ?? schedule.stepIds.reduce<string | undefined>(
+    (latest, stepId) => schedule.steps[stepId]?.attempts.at(-1) ?? latest,
+    undefined,
+  );
+  const dispatch = latestDispatchId
+    ? await controller.store.readDispatch(latestDispatchId)
     : undefined;
   return { schedule, ...(dispatch ? { dispatch } : {}) };
+}
+
+function statusText(
+  schedule: FlowScheduleRecord,
+  dispatch?: FlowScheduleDispatchBundle,
+): string {
+  if (!dispatch) return scheduleLine(schedule);
+  const dispatchState = dispatch.completion?.state
+    ?? (dispatch.accepted ? "accepted" : dispatch.published ? "published" : "prepared");
+  const step = schedule.steps[dispatch.intent.stepId];
+  const gate = step?.todoBinding
+    ? [
+      ...(step.todoBinding.requireCompleted ? ["require-completed"] : []),
+      ...(step.todoBinding.conflictCheck ? ["conflict-check"] : []),
+    ].join("+") || "none"
+    : "none";
+  const binding = dispatch.binding;
+  const bindingLine = binding
+    ? `Binding: state=${binding.state} gate=${gate} todoId=${binding.todoId ?? "-"} todoStatus=${binding.todoStatus ?? "-"}`
+    : `Binding: none gate=${step?.todoBinding ? "none (not negotiated)" : "none"}`;
+  const result = dispatch.completion?.result;
+  const todoOutcome = result?.todoOutcome
+    ? `${result.todoOutcome.todoId}/${result.todoOutcome.todoStatus}`
+    : "none";
+  return [
+    scheduleLine(schedule),
+    `Dispatch: id=${dispatch.intent.dispatchId} state=${dispatchState}`,
+    bindingLine,
+    `Result: outcome=${result?.outcome ?? "none"} todoOutcome=${todoOutcome}`,
+  ].join("\n");
 }
 
 export function createCoordinatorFlowScheduleTool(
@@ -200,7 +236,9 @@ export function createCoordinatorFlowScheduleTool(
     promptGuidelines: [
       "Use create then start; create never sends work.",
       "Use append with afterStepId. Cursor and wall-clock completion attribution are not supported.",
-      "Queued or accepted delivery is not step completion. Use status to inspect transport and lifecycle separately.",
+      "Queued or accepted delivery is not step completion. Use status to inspect transport, binding, and exact result evidence separately.",
+      "todoBinding.requireCompleted and conflictCheck are opt-in per step; workers without the flow-schedule-todo-binding capability silently run that dispatch as gate=none.",
+      "Use observe view=todos for cross-process Todo visibility only; Todo projection alone is not completion authority.",
       "Use retry only after failed or ambiguous attempts; retry is the only action that creates a new dispatch attempt.",
       "Cancel stops scheduling but does not close or reclaim the target window.",
     ],
@@ -208,17 +246,35 @@ export function createCoordinatorFlowScheduleTool(
     async execute(_id, raw, signal, _onUpdate, ctx): Promise<FlowToolResult<FlowScheduleToolDetails>> {
       try {
         signal?.throwIfAborted();
+        const monitorCapture = options.captureMonitor?.();
+        const assertMonitorCurrent = (): void => {
+          if (options.isMonitorActive && !options.isMonitorActive()) {
+            throw new Error("Flow schedule requires active Monitor mode.");
+          }
+          if (options.captureMonitor) {
+            const current = options.captureMonitor();
+            if (!monitorCapture || !current || current.generation !== monitorCapture.generation) {
+              throw new Error("Monitor mode changed during the Flow schedule action.");
+            }
+          }
+        };
+        const awaitMonitor = async <T>(operation: Promise<T>): Promise<T> => {
+          const result = await operation;
+          assertMonitorCurrent();
+          return result;
+        };
+        assertMonitorCurrent();
         const action = parseFlowScheduleAction(raw);
         if (action.action === "report") throw new Error("Coordinator Flow schedule does not expose report.");
         const controller = options.resolve(ctx.cwd);
         switch (action.action) {
           case "create": {
-            const schedule = await controller.store.createSchedule(action);
+            const schedule = await awaitMonitor(controller.store.createSchedule(action));
             return success(`Created ${scheduleLine(schedule)}.`, { schedules: [schedule] });
           }
           case "start": {
-            const schedule = await controller.runtime.startSchedule(action.scheduleId);
-            const current = await scheduleAndDispatch(controller, schedule.scheduleId);
+            const schedule = await awaitMonitor(controller.runtime.startSchedule(action.scheduleId));
+            const current = await awaitMonitor(scheduleAndDispatch(controller, schedule.scheduleId));
             return success(`Started ${scheduleLine(current.schedule)}.`, {
               schedules: [current.schedule],
               ...(current.dispatch ? { dispatch: current.dispatch } : {}),
@@ -226,8 +282,8 @@ export function createCoordinatorFlowScheduleTool(
             });
           }
           case "list": {
-            const schedules = (await controller.store.listSchedules()).slice(0, 100);
-            const legacy = await controller.store.detectLegacyFlowTrack();
+            const schedules = (await awaitMonitor(controller.store.listSchedules())).slice(0, 100);
+            const legacy = await awaitMonitor(controller.store.detectLegacyFlowTrack());
             const text = schedules.length ? schedules.map(scheduleLine).join("\n") : "No Flow schedules.";
             return success(`${text}${legacy.present ? `\nLegacy flow-track data detected at ${legacy.path}; it is read-only.` : ""}`, {
               schedules,
@@ -235,35 +291,35 @@ export function createCoordinatorFlowScheduleTool(
             });
           }
           case "status": {
-            const current = await scheduleAndDispatch(controller, action.scheduleId);
-            return success(scheduleLine(current.schedule), {
+            const current = await awaitMonitor(scheduleAndDispatch(controller, action.scheduleId));
+            return success(statusText(current.schedule, current.dispatch), {
               schedules: [current.schedule],
               ...(current.dispatch ? { dispatch: current.dispatch } : {}),
               lifecycle: lifecycleFor(getRegistry(), current.schedule),
             });
           }
           case "append": {
-            const before = await controller.store.readSchedule(action.scheduleId);
+            const before = await awaitMonitor(controller.store.readSchedule(action.scheduleId));
             if (!before) throw new Error(`Unknown Flow schedule: ${action.scheduleId}`);
             if (isTerminalScheduleState(before.state)) throw new Error(`Flow schedule ${action.scheduleId} is ${before.state}.`);
-            const schedule = await controller.store.appendSteps(action.scheduleId, action.afterStepId, action.steps);
-            await controller.runtime.reconcileReady();
+            const schedule = await awaitMonitor(controller.store.appendSteps(action.scheduleId, action.afterStepId, action.steps));
+            await awaitMonitor(controller.runtime.reconcileReady());
             return success(`Updated ${scheduleLine(schedule)}.`, { schedules: [schedule] });
           }
           case "pause": {
-            const schedule = await controller.runtime.pauseSchedule(action.scheduleId);
+            const schedule = await awaitMonitor(controller.runtime.pauseSchedule(action.scheduleId));
             return success(`Paused ${scheduleLine(schedule)}.`, { schedules: [schedule] });
           }
           case "resume": {
-            const schedule = await controller.runtime.resumeSchedule(action.scheduleId, action.target);
+            const schedule = await awaitMonitor(controller.runtime.resumeSchedule(action.scheduleId, action.target));
             return success(`Resumed ${scheduleLine(schedule)}.`, { schedules: [schedule] });
           }
           case "retry": {
-            const schedule = await controller.runtime.retrySchedule(action.scheduleId, action.stepId, action.reason);
+            const schedule = await awaitMonitor(controller.runtime.retrySchedule(action.scheduleId, action.stepId, action.reason));
             return success(`Retry admitted for ${action.scheduleId}/${action.stepId}.`, { schedules: [schedule] });
           }
           case "cancel": {
-            const schedule = await controller.runtime.cancelSchedule(action.scheduleId, action.reason);
+            const schedule = await awaitMonitor(controller.runtime.cancelSchedule(action.scheduleId, action.reason));
             return success(`Cancelled ${scheduleLine(schedule)}. Target lifecycle was not changed.`, { schedules: [schedule] });
           }
         }
@@ -291,6 +347,8 @@ export function createWorkerFlowScheduleTool(
     promptGuidelines: [
       "Call report only after completing the instruction associated with dispatchId.",
       "Do not invent or alter dispatchId and do not supply a reply target.",
+      "When the dispatch carries todoBinding, create one Todo for the work and include its exact todoId and todoStatus in report.todoOutcome.",
+      "For requireCompleted, report completed only with todoStatus=completed; conflictCheck treats explicit non-completed Todo evidence on a completed result as ambiguous.",
       "Reporting publishes a business result; it does not terminate or reclaim this window.",
     ],
     parameters: FlowScheduleReportActionSchema,
@@ -309,6 +367,7 @@ export function createWorkerFlowScheduleTool(
           outcome: action.outcome,
           summary: action.summary,
           resources: action.resources,
+          todoOutcome: action.todoOutcome,
         });
         signal?.throwIfAborted();
         return success(`Published Flow schedule result ${published.resultMessageId}.`, {

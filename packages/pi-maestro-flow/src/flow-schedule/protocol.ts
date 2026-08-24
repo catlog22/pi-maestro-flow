@@ -12,6 +12,8 @@ import {
   type FlowScheduleDispatchEnvelope,
   type FlowScheduleResult,
   type FlowScheduleResultOutcome,
+  type FlowScheduleTodoBindingSpec,
+  type FlowScheduleTodoOutcome,
 } from "./types.ts";
 
 export const FLOW_SCHEDULE_RESULT_MESSAGE_PREFIX = "flow-schedule-result/v1:" as const;
@@ -29,6 +31,7 @@ export function createFlowScheduleDispatchEnvelope(input: {
   stepId: string;
   dispatchId: string;
   instruction: string;
+  todoBinding?: FlowScheduleTodoBindingSpec;
 }): FlowScheduleDispatchEnvelope {
   return parseFlowScheduleDispatchEnvelope({
     version: FLOW_SCHEDULE_VERSION,
@@ -45,6 +48,7 @@ export function createFlowScheduleResult(input: {
   outcome: FlowScheduleResultOutcome;
   summary: string;
   resources?: string[];
+  todoOutcome?: FlowScheduleTodoOutcome;
 }): FlowScheduleResult {
   return parseFlowScheduleResult({
     version: FLOW_SCHEDULE_VERSION,

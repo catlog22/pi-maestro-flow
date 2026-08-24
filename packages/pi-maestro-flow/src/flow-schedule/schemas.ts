@@ -1,6 +1,7 @@
 import { Type, type Static, type TSchema } from "typebox";
 import { Value } from "typebox/value";
 import {
+  FLOW_SCHEDULE_BINDING_STATES,
   FLOW_SCHEDULE_COMPLETION_STATES,
   FLOW_SCHEDULE_DISPATCH_ID_PATTERN,
   FLOW_SCHEDULE_DISPATCH_STATES,
@@ -27,6 +28,10 @@ import {
   type FlowSchedulePublishedRecord,
   type FlowScheduleRecord,
   type FlowScheduleResult,
+  type FlowScheduleTodoBinding,
+  type FlowScheduleTodoBindingSpec,
+  type FlowScheduleTodoOutcome,
+  type FlowScheduleTodoStatus,
 } from "./types.ts";
 
 const strict = { additionalProperties: false } as const;
@@ -58,9 +63,21 @@ export const ExactWindowIdentitySchema = Type.Object({
   sessionId: Type.Optional(nonEmptyIdentity),
 }, strict);
 
+export const FlowScheduleTodoBindingSpecSchema = Type.Object({
+  label: Type.Optional(boundedText(256)),
+  requireCompleted: Type.Optional(Type.Boolean()),
+  conflictCheck: Type.Optional(Type.Boolean()),
+}, strict);
+
+export const FlowScheduleTodoOutcomeSchema = Type.Object({
+  todoId: id,
+  todoStatus: stringEnum(["pending", "in_progress", "completed", "blocked", "failed"] as const),
+}, strict);
+
 export const FlowScheduleCreateStepInputSchema = Type.Object({
   stepId: id,
   prompt,
+  todoBinding: Type.Optional(FlowScheduleTodoBindingSpecSchema),
 }, strict);
 
 const createSteps = Type.Array(FlowScheduleCreateStepInputSchema, {
@@ -126,6 +143,7 @@ export const FlowScheduleReportActionSchema = Type.Object({
   outcome: stringEnum(FLOW_SCHEDULE_RESULT_OUTCOMES),
   summary,
   resources: Type.Optional(Type.Array(resource, { maxItems: FLOW_SCHEDULE_LIMITS.maxResources })),
+  todoOutcome: Type.Optional(FlowScheduleTodoOutcomeSchema),
 }, strict);
 
 export const FlowScheduleActionSchema = Type.Union([
@@ -150,6 +168,7 @@ export const FlowScheduleResultSchema = Type.Object({
   outcome: stringEnum(FLOW_SCHEDULE_RESULT_OUTCOMES),
   summary,
   resources: Type.Array(resource, { maxItems: FLOW_SCHEDULE_LIMITS.maxResources }),
+  todoOutcome: Type.Optional(FlowScheduleTodoOutcomeSchema),
 }, strict);
 
 export const FlowScheduleDispatchEnvelopeSchema = Type.Object({
@@ -163,6 +182,7 @@ export const FlowScheduleDispatchEnvelopeSchema = Type.Object({
     tool: Type.Literal("flow-schedule"),
     action: Type.Literal("report"),
   }, strict),
+  todoBinding: Type.Optional(FlowScheduleTodoBindingSpecSchema),
 }, strict);
 
 export const FlowScheduleStepSchema = Type.Object({
@@ -172,6 +192,7 @@ export const FlowScheduleStepSchema = Type.Object({
   attempts: Type.Array(dispatchId, { maxItems: FLOW_SCHEDULE_LIMITS.maxAttemptsPerStep }),
   currentDispatchId: Type.Optional(dispatchId),
   result: Type.Optional(FlowScheduleResultSchema),
+  todoBinding: Type.Optional(FlowScheduleTodoBindingSpecSchema),
 }, strict);
 
 export const FlowScheduleRecordSchema = Type.Object({
@@ -255,6 +276,20 @@ export const FlowScheduleCompletionRecordSchema = Type.Object({
   completedAt: timestamp,
 }, strict);
 
+export const FlowScheduleTodoBindingSchema = Type.Object({
+  version: Type.Literal(FLOW_SCHEDULE_VERSION),
+  type: Type.Literal("flow-schedule-binding"),
+  dispatchId,
+  scheduleId: id,
+  stepId: id,
+  todoId: Type.Optional(id),
+  state: stringEnum(FLOW_SCHEDULE_BINDING_STATES),
+  todoStatus: Type.Optional(stringEnum(["pending", "in_progress", "completed", "blocked", "failed"] as const)),
+  reason: Type.Optional(reason),
+  createdAt: timestamp,
+  updatedAt: timestamp,
+}, strict);
+
 export type FlowScheduleActionValue = Static<typeof FlowScheduleActionSchema>;
 
 export class FlowScheduleValidationError extends Error {
@@ -287,7 +322,11 @@ function assertTextBytes(value: string, maximum: number, context: string): void 
 }
 
 function normalizeStepInputs(steps: readonly FlowScheduleCreateStepInput[], context: string): FlowScheduleCreateStepInput[] {
-  const normalized = steps.map((step) => ({ stepId: step.stepId, prompt: normalizedText(step.prompt) }));
+  const normalized = steps.map((step) => ({
+    stepId: step.stepId,
+    prompt: normalizedText(step.prompt),
+    ...(step.todoBinding ? { todoBinding: step.todoBinding } : {}),
+  }));
   const seen = new Set<string>();
   for (const [index, step] of normalized.entries()) {
     if (seen.has(step.stepId)) {
@@ -358,6 +397,7 @@ export function normalizeFlowSchedule(input: FlowScheduleCreateInput, now: numbe
       prompt: step.prompt,
       state: "pending",
       attempts: [],
+      ...(step.todoBinding ? { todoBinding: step.todoBinding } : {}),
     };
   }
   return parseFlowScheduleRecord({
@@ -526,6 +566,17 @@ export function parseFlowScheduleCompletionRecord(value: unknown): FlowScheduleC
   }
   if ((value.state === "ambiguous" || value.state === "retired") && value.reason === undefined) {
     throw new FlowScheduleValidationError("Flow schedule completion record", "/reason", "is required for ambiguous or retired state");
+  }
+  return value;
+}
+
+export function parseFlowScheduleTodoBinding(value: unknown): FlowScheduleTodoBinding {
+  assertSchema(FlowScheduleTodoBindingSchema, value, "Flow schedule todo binding");
+  if (value.state === "ambiguous" && value.reason === undefined) {
+    throw new FlowScheduleValidationError("Flow schedule todo binding", "/reason", "is required for ambiguous state");
+  }
+  if (value.todoId === undefined && value.state !== "pending" && value.state !== "ambiguous") {
+    throw new FlowScheduleValidationError("Flow schedule todo binding", "/todoId", "is required for bound, completed, or failed states");
   }
   return value;
 }

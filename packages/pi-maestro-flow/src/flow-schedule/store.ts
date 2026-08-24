@@ -27,6 +27,7 @@ import {
   parseFlowScheduleOwnerMarker,
   parseFlowSchedulePublishedRecord,
   parseFlowScheduleRecord,
+  parseFlowScheduleTodoBinding,
 } from "./schemas.ts";
 import {
   FLOW_SCHEDULE_DISPATCH_ID_PATTERN,
@@ -35,6 +36,7 @@ import {
   FLOW_SCHEDULE_STORE_TYPE,
   FLOW_SCHEDULE_VERSION,
   isTerminalScheduleState,
+  isTerminalBindingState,
   type ExactWindowIdentity,
   type FlowScheduleAcceptedRecord,
   type FlowScheduleCompletionRecord,
@@ -47,6 +49,7 @@ import {
   type FlowScheduleOwnerMarker,
   type FlowSchedulePublishedRecord,
   type FlowScheduleRecord,
+  type FlowScheduleTodoBinding,
 } from "./types.ts";
 
 const PRIVATE_DIRECTORY_MODE = 0o700;
@@ -58,6 +61,7 @@ const INTENT_FILE_NAME = "intent.json";
 const PUBLISHED_FILE_NAME = "published.json";
 const ACCEPTED_FILE_NAME = "accepted.json";
 const COMPLETION_FILE_NAME = "completion.json";
+const BINDING_FILE_NAME = "binding.json";
 
 export interface FlowScheduleStoreOptions {
   rootDir?: string;
@@ -88,6 +92,7 @@ export interface FlowScheduleDispatchBundle {
   published?: FlowSchedulePublishedRecord;
   accepted?: FlowScheduleAcceptedRecord;
   completion?: FlowScheduleCompletionRecord;
+  binding?: FlowScheduleTodoBinding;
 }
 
 export interface FlowScheduleGcOptions {
@@ -300,7 +305,7 @@ export class FlowScheduleStore {
       }
       const nextSteps = { ...current.steps };
       for (const step of action.steps) {
-        nextSteps[step.stepId] = { stepId: step.stepId, prompt: step.prompt, state: "pending", attempts: [] };
+        nextSteps[step.stepId] = { stepId: step.stepId, prompt: step.prompt, state: "pending", attempts: [], ...(step.todoBinding ? { todoBinding: step.todoBinding } : {}) };
       }
       const stepIds = [...current.stepIds];
       stepIds.splice(insertion + 1, 0, ...action.steps.map((step) => step.stepId));
@@ -323,6 +328,17 @@ export class FlowScheduleStore {
       }
       if (current.activeStepId !== undefined || step.currentDispatchId !== undefined) {
         throw new FlowScheduleConflictError("Flow schedule retry requires no active dispatch");
+      }
+      const previousDispatchId = step.attempts.at(-1);
+      const previousBundle = previousDispatchId
+        ? await this.readDispatchBundleUnlocked(previousDispatchId)
+        : undefined;
+      if (previousBundle) {
+        await this.terminalizeBindingAmbiguousUnlocked(
+          previousBundle,
+          `Retry requested: ${action.reason}`,
+          lock,
+        );
       }
       const nextStep: FlowScheduleRecord["steps"][string] = { ...step, state: "pending" };
       delete nextStep.result;
@@ -493,6 +509,7 @@ export class FlowScheduleStore {
             containedPath(this.dispatchPath(normalized.dispatchId), COMPLETION_FILE_NAME),
           );
         }
+        await this.terminalizeBindingForCompletionUnlocked(bundle, normalized, lock);
         if (normalized.state === "ignored") return bundle.completion;
         const projected = await this.requireScheduleUnlocked(normalized.scheduleId);
         const projectedStep = projected.steps[normalized.stepId];
@@ -509,9 +526,9 @@ export class FlowScheduleStore {
           parseFlowScheduleCompletionRecord,
         );
       }
-
       const schedule = await this.requireScheduleUnlocked(normalized.scheduleId);
       assertCurrentCompletion(schedule, normalized);
+      await this.terminalizeBindingForCompletionUnlocked(bundle, normalized, lock);
       const stored = await this.createIdempotentDispatchRecord(
         lock,
         normalized.dispatchId,
@@ -521,6 +538,70 @@ export class FlowScheduleStore {
       );
       await this.applyCompletionToScheduleUnlocked(schedule, normalized, lock);
       return stored;
+    });
+  }
+
+  /**
+   * Read the durable Todo binding for a dispatch, if any. Binding is optional;
+   * absence returns undefined (dispatch has no bound Todo yet).
+   */
+  async readBinding(dispatchId: string): Promise<FlowScheduleTodoBinding | undefined> {
+    const bundle = await this.readDispatch(dispatchId);
+    return bundle?.binding;
+  }
+
+  /** List every durable Todo binding in stable creation order. */
+  async listBindings(): Promise<FlowScheduleTodoBinding[]> {
+    if (!(await pathExists(this.rootDir))) return [];
+    await assertCanonicalDirectory(this.rootDir);
+    await this.readOwnerMarkerRequired();
+    const bindings: FlowScheduleTodoBinding[] = [];
+    for (const dispatchId of await this.listDispatchDirectoriesUnlocked()) {
+      const bundle = await this.readDispatchBundleUnlocked(dispatchId);
+      if (bundle?.binding) bindings.push(bundle.binding);
+    }
+    return bindings.sort((left, right) => left.createdAt - right.createdAt || left.dispatchId.localeCompare(right.dispatchId));
+  }
+
+  /**
+   * Record or update the durable Todo binding for a dispatch. Idempotent: the
+   * same dispatchId replays the same content without error. Allows state
+   * progression (pending -> bound -> completed|failed|ambiguous); terminal
+   * states are immutable. Conflicting content at the same non-terminal state
+   * raises FlowScheduleConflictError. The dispatch must already exist.
+   */
+  async recordBinding(record: FlowScheduleTodoBinding): Promise<FlowScheduleTodoBinding> {
+    const normalized = parseFlowScheduleTodoBinding(record);
+    return this.withStoreLock(async (lock) => {
+      const bundle = await this.requireDispatchBundleUnlocked(normalized.dispatchId);
+      assertDispatchRecordIdentity(bundle.intent, normalized);
+      const existing = bundle.binding;
+      if (existing) {
+        if (sameJson(existing, normalized)) return existing;
+        if (isTerminalBindingState(existing.state)) {
+          throw new FlowScheduleConflictError(
+            "Todo binding already in terminal state",
+            containedPath(this.dispatchPath(normalized.dispatchId), BINDING_FILE_NAME),
+          );
+        }
+        if (existing.state === normalized.state) {
+          throw new FlowScheduleConflictError(
+            "Todo binding already exists with different content at the same state",
+            containedPath(this.dispatchPath(normalized.dispatchId), BINDING_FILE_NAME),
+          );
+        }
+        await lock.assertOwned();
+        const path = containedPath(this.dispatchPath(normalized.dispatchId), BINDING_FILE_NAME);
+        await writeAtomicJson(path, normalized, FLOW_SCHEDULE_LIMITS.maxDispatchRecordBytes);
+        return normalized;
+      }
+      return this.createIdempotentDispatchRecord(
+        lock,
+        normalized.dispatchId,
+        BINDING_FILE_NAME,
+        normalized,
+        parseFlowScheduleTodoBinding,
+      );
     });
   }
 
@@ -748,6 +829,61 @@ export class FlowScheduleStore {
     return next;
   }
 
+  private async terminalizeBindingForCompletionUnlocked(
+    bundle: FlowScheduleDispatchBundle,
+    completion: FlowScheduleCompletionRecord,
+    lock: FlowScheduleStoreLock,
+  ): Promise<void> {
+    if ((completion.state === "ambiguous" || completion.state === "retired") && completion.reason) {
+      await this.terminalizeBindingAmbiguousUnlocked(bundle, completion.reason, lock);
+      return;
+    }
+    const outcome = completion.result?.todoOutcome;
+    const terminalState = completion.state === "failed"
+      ? "failed"
+      : completion.state === "completed" && outcome?.todoStatus === "completed"
+        ? "completed"
+        : undefined;
+    const binding = bundle.binding;
+    if (!terminalState || !outcome || !binding || isTerminalBindingState(binding.state)) return;
+    if (binding.todoId !== undefined && binding.todoId !== outcome.todoId) return;
+    const terminal = parseFlowScheduleTodoBinding({
+      ...binding,
+      todoId: outcome.todoId,
+      todoStatus: outcome.todoStatus,
+      state: terminalState,
+      ...(terminalState === "failed" ? { reason: completion.result?.summary } : {}),
+      updatedAt: this.now(),
+    });
+    await lock.assertOwned();
+    await writeAtomicJson(
+      containedPath(this.dispatchPath(bundle.intent.dispatchId), BINDING_FILE_NAME),
+      terminal,
+      FLOW_SCHEDULE_LIMITS.maxDispatchRecordBytes,
+    );
+  }
+
+  private async terminalizeBindingAmbiguousUnlocked(
+    bundle: FlowScheduleDispatchBundle,
+    reason: string,
+    lock: FlowScheduleStoreLock,
+  ): Promise<void> {
+    const binding = bundle.binding;
+    if (!binding || isTerminalBindingState(binding.state)) return;
+    const ambiguous = parseFlowScheduleTodoBinding({
+      ...binding,
+      state: "ambiguous",
+      reason,
+      updatedAt: this.now(),
+    });
+    await lock.assertOwned();
+    await writeAtomicJson(
+      containedPath(this.dispatchPath(bundle.intent.dispatchId), BINDING_FILE_NAME),
+      ambiguous,
+      FLOW_SCHEDULE_LIMITS.maxDispatchRecordBytes,
+    );
+  }
+
   private async applyCompletionToScheduleUnlocked(
     schedule: FlowScheduleRecord,
     completion: FlowScheduleCompletionRecord,
@@ -804,11 +940,15 @@ export class FlowScheduleStore {
       const published = await this.readOptionalDispatchRecord(directory, PUBLISHED_FILE_NAME, parseFlowSchedulePublishedRecord);
       const accepted = await this.readOptionalDispatchRecord(directory, ACCEPTED_FILE_NAME, parseFlowScheduleAcceptedRecord);
       const completion = await this.readOptionalDispatchRecord(directory, COMPLETION_FILE_NAME, parseFlowScheduleCompletionRecord);
+      const binding = await this.readOptionalDispatchRecord(directory, BINDING_FILE_NAME, parseFlowScheduleTodoBinding);
       for (const record of [published, accepted, completion]) {
         if (record) assertDispatchRecordIdentity(intent, record);
       }
+      if (binding && (binding.scheduleId !== intent.scheduleId || binding.stepId !== intent.stepId || binding.dispatchId !== intent.dispatchId)) {
+        throw new Error("binding identity does not match its dispatch intent");
+      }
       if (accepted && !published) throw new Error("accepted record exists without publication");
-      return { intent, ...(published ? { published } : {}), ...(accepted ? { accepted } : {}), ...(completion ? { completion } : {}) };
+      return { intent, ...(published ? { published } : {}), ...(accepted ? { accepted } : {}), ...(completion ? { completion } : {}), ...(binding ? { binding } : {}) };
     } catch (error) {
       if (error instanceof FlowScheduleCorruptionError) throw error;
       throw new FlowScheduleCorruptionError(directory, errorMessage(error));

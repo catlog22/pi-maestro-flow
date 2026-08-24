@@ -76,6 +76,8 @@ export interface FlowScheduleResult {
   outcome: FlowScheduleResultOutcome;
   summary: string;
   resources: string[];
+  /** Worker-reported Todo outcome. Required when the dispatch carried a todoBinding; absent otherwise. */
+  todoOutcome?: FlowScheduleTodoOutcome;
 }
 
 export interface FlowScheduleStep {
@@ -85,6 +87,8 @@ export interface FlowScheduleStep {
   attempts: string[];
   currentDispatchId?: string;
   result?: FlowScheduleResult;
+  /** Optional Todo binding request copied from the create/append input. */
+  todoBinding?: FlowScheduleTodoBindingSpec;
 }
 
 export interface FlowScheduleRecord {
@@ -125,6 +129,8 @@ export interface FlowScheduleDispatchEnvelope {
     tool: "flow-schedule";
     action: "report";
   };
+  /** Optional Todo binding request echoed from the step. */
+  todoBinding?: FlowScheduleTodoBindingSpec;
 }
 
 export interface FlowScheduleOwnerMarker {
@@ -191,9 +197,73 @@ export interface FlowScheduleCompletionRecord {
   completedAt: number;
 }
 
+/**
+ * Durable, dispatch-keyed binding between a Flow schedule dispatch and the
+ * worker-side Todo that executes it. Persisted as `binding.json` inside the
+ * dispatch directory; keyed by `dispatchId` (one binding per dispatch).
+ *
+ * State machine: pending -> bound -> (completed | failed | ambiguous).
+ * - pending: binding created, worker Todo not yet reported (todoId may be unset).
+ * - bound: worker reported a todoId; Todo is in-progress.
+ * - completed/failed/ambiguous: terminal, derived from the worker's exact report.
+ */
+export const FLOW_SCHEDULE_BINDING_STATES = [
+  "pending",
+  "bound",
+  "completed",
+  "failed",
+  "ambiguous",
+] as const;
+
+export type FlowScheduleBindingState = typeof FLOW_SCHEDULE_BINDING_STATES[number];
+
+export interface FlowScheduleTodoBinding {
+  version: typeof FLOW_SCHEDULE_VERSION;
+  type: "flow-schedule-binding";
+  dispatchId: string;
+  scheduleId: string;
+  stepId: string;
+  /** Worker-side Todo id once reported; unset until the worker binds. */
+  todoId?: string;
+  state: FlowScheduleBindingState;
+  /** Optional worker-reported Todo status snapshot at report time. */
+  todoStatus?: FlowScheduleTodoStatus;
+  reason?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export function isTerminalBindingState(state: FlowScheduleBindingState): boolean {
+  return state === "completed" || state === "failed" || state === "ambiguous";
+}
+
 export interface FlowScheduleCreateStepInput {
   stepId: string;
   prompt: string;
+  /** Optional worker-Todo binding request. When present and the target endpoint advertises the flow-schedule-todo-binding capability, the worker root session should create a Todo and report its id/status back in the result. */
+  todoBinding?: FlowScheduleTodoBindingSpec;
+}
+
+/**
+ * Worker-Todo binding request carried on a step and its dispatch envelope.
+ * - `label`: human-readable task name for the worker-created Todo.
+ * - `requireCompleted`: gate — the step is not completed until the worker reports a bound Todo with status "completed"; missing/non-terminal evidence keeps the step awaiting (timeout -> ambiguous).
+ * - `conflictCheck`: gate — when the report outcome is "completed" but the Todo status is not "completed", the step is judged ambiguous (triggering retry) instead of completed.
+ * The two gates are independent and composable (review P2-3). Default off = plain binding without gating.
+ */
+export interface FlowScheduleTodoBindingSpec {
+  label?: string;
+  requireCompleted?: boolean;
+  conflictCheck?: boolean;
+}
+
+/** Worker-reported final Todo status in a result. Mirrors TaskStatus plus a `failed` terminal (TaskStatus has no `failed`). */
+export type FlowScheduleTodoStatus = "pending" | "in_progress" | "completed" | "blocked" | "failed";
+
+/** Worker-reported Todo outcome carried on a result. `todoId` is required once a binding exists. */
+export interface FlowScheduleTodoOutcome {
+  todoId: string;
+  todoStatus: FlowScheduleTodoStatus;
 }
 
 export interface FlowScheduleCreateInput {
@@ -219,7 +289,7 @@ export type FlowScheduleAction =
   | { action: "resume"; scheduleId: string; target?: string }
   | { action: "retry"; scheduleId: string; stepId: string; reason: string }
   | { action: "cancel"; scheduleId: string; reason: string }
-  | { action: "report"; dispatchId: string; outcome: FlowScheduleResultOutcome; summary: string; resources?: string[] };
+  | { action: "report"; dispatchId: string; outcome: FlowScheduleResultOutcome; summary: string; resources?: string[]; todoOutcome?: FlowScheduleTodoOutcome };
 
 export interface FlowScheduleLegacyStatus {
   present: boolean;

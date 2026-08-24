@@ -7,6 +7,8 @@ import {
   FlowScheduleDispatchEnvelopeSchema,
   FlowScheduleRecordSchema,
   FlowScheduleResultSchema,
+  FlowScheduleTodoBindingSpecSchema,
+  FlowScheduleTodoOutcomeSchema,
   FlowScheduleValidationError,
   normalizeFlowSchedule,
   parseFlowScheduleAction,
@@ -15,6 +17,14 @@ import {
   parseFlowScheduleRecord,
   parseFlowScheduleResult,
 } from "../src/flow-schedule/schemas.ts";
+import {
+  createFlowScheduleDispatchEnvelope,
+  createFlowScheduleResult,
+  decodeFlowScheduleDispatch,
+  decodeFlowScheduleResult,
+  encodeFlowScheduleDispatch,
+  encodeFlowScheduleResult,
+} from "../src/flow-schedule/protocol.ts";
 import {
   FLOW_SCHEDULE_LIMITS,
   FLOW_SCHEDULE_RESULT_TYPE,
@@ -56,6 +66,7 @@ test("flow-schedule actions are strict discriminated branches", () => {
     { action: "retry", scheduleId: "release", stepId: "step-0", reason: "Target was replaced" },
     { action: "cancel", scheduleId: "release", reason: "No longer needed" },
     { action: "report", dispatchId: DISPATCH_ID, outcome: "completed", summary: "Done", resources: ["agent://publication"] },
+    { action: "report", dispatchId: DISPATCH_ID, outcome: "completed", summary: "Done", todoOutcome: { todoId: "t1", todoStatus: "completed" } },
   ];
   for (const action of valid) assert.deepEqual(parseFlowScheduleAction(action), action);
 
@@ -238,4 +249,78 @@ test("completion persistence requires exact result identity and state", () => {
     ...completion,
     result: result({ stepId: "other" }),
   }), /identity/);
+});
+
+test("FlowScheduleTodoBindingSpec schema accepts optional label and two independent gate flags", () => {
+  assert.ok(Value.Check(FlowScheduleTodoBindingSpecSchema, {}));
+  assert.ok(Value.Check(FlowScheduleTodoBindingSpecSchema, { label: "build" }));
+  assert.ok(Value.Check(FlowScheduleTodoBindingSpecSchema, { requireCompleted: true }));
+  assert.ok(Value.Check(FlowScheduleTodoBindingSpecSchema, { conflictCheck: true }));
+  assert.ok(Value.Check(FlowScheduleTodoBindingSpecSchema, { requireCompleted: true, conflictCheck: true }));
+});
+
+test("FlowScheduleTodoOutcome schema requires todoId and todoStatus", () => {
+  assert.ok(Value.Check(FlowScheduleTodoOutcomeSchema, { todoId: "t1", todoStatus: "completed" }));
+  assert.ok(!Value.Check(FlowScheduleTodoOutcomeSchema, { todoStatus: "completed" }));
+  assert.ok(!Value.Check(FlowScheduleTodoOutcomeSchema, { todoId: "t1", todoStatus: "unknown" }));
+});
+
+test("dispatch envelope round-trips an optional todoBinding through encode/decode", () => {
+  const envelope = createFlowScheduleDispatchEnvelope({
+    scheduleId: "release",
+    stepId: "build",
+    dispatchId: DISPATCH_ID,
+    instruction: "Build it",
+  });
+  assert.equal(envelope.todoBinding, undefined);
+  const withBinding = {
+    ...envelope,
+    todoBinding: { label: "build", requireCompleted: true, conflictCheck: true },
+  };
+  const encoded = encodeFlowScheduleDispatch(withBinding);
+  const decoded = decodeFlowScheduleDispatch(encoded);
+  assert.deepEqual(decoded, withBinding);
+  assert.equal(decoded.todoBinding?.requireCompleted, true);
+  assert.equal(decoded.todoBinding?.conflictCheck, true);
+  // Old-style envelope without todoBinding still decodes (backward compatible).
+  const legacy = JSON.stringify({ ...envelope });
+  assert.deepEqual(decodeFlowScheduleDispatch(legacy), envelope);
+});
+
+test("result round-trips an optional todoOutcome through encode/decode", () => {
+  const result = createFlowScheduleResult({
+    scheduleId: "release",
+    stepId: "build",
+    dispatchId: DISPATCH_ID,
+    outcome: "completed",
+    summary: "Done",
+  });
+  assert.equal(result.todoOutcome, undefined);
+  const withOutcome = {
+    ...result,
+    todoOutcome: { todoId: "t1", todoStatus: "completed" },
+  };
+  const encoded = encodeFlowScheduleResult(withOutcome);
+  const decoded = decodeFlowScheduleResult(encoded);
+  assert.deepEqual(decoded, withOutcome);
+  assert.equal(decoded.todoOutcome?.todoId, "t1");
+  // Old-style result without todoOutcome still decodes (backward compatible).
+  const legacy = JSON.stringify({ ...result });
+  assert.deepEqual(decodeFlowScheduleResult(legacy), result);
+});
+
+test("create/append persist step.todoBinding into the FlowScheduleStep record", () => {
+  const create = normalizeFlowSchedule({
+    scheduleId: "release",
+    target: OWNER_SELECTOR,
+    steps: [{ stepId: "build", prompt: "Build", todoBinding: { label: "build", requireCompleted: true, conflictCheck: true } }],
+  }, 100);
+  assert.deepEqual(create.steps["build"].todoBinding, { label: "build", requireCompleted: true, conflictCheck: true });
+  // Step without todoBinding stays unset.
+  const bare = normalizeFlowSchedule({
+    scheduleId: "bare",
+    target: OWNER_SELECTOR,
+    steps: [{ stepId: "build", prompt: "Build" }],
+  }, 100);
+  assert.equal(bare.steps["build"].todoBinding, undefined);
 });

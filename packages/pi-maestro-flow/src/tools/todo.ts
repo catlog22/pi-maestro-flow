@@ -166,6 +166,7 @@ let nextTaskId = 0;
 let knownActors: Map<string, TodoActorRef> = new Map([[ROOT_TODO_ACTOR.id, ROOT_TODO_ACTOR]]);
 let extensionApi: ExtensionAPI | undefined;
 let onTodoStateChanged: (() => void) | undefined;
+const todoStateChangeSubscribers = new Set<() => void>();
 let skillLoader: TodoSkillLoader | undefined;
 let skillRuntime: SkillRuntime | undefined;
 let activeSkillSnapshots: Map<string, SkillActivation> = new Map();
@@ -1243,6 +1244,13 @@ function buildPrevContext(currentId: string): string | null {
 
 function markTodoChanged(): void {
   todoRevision++;
+  for (const listener of todoStateChangeSubscribers) {
+    try {
+      listener();
+    } catch {
+      // Projection listeners are best-effort and must not break Todo mutations.
+    }
+  }
 }
 
 function cloneTodoTask(task: TodoTask): TodoTask {
@@ -1417,6 +1425,12 @@ function commitTodoState(
   tasks = nextTasks;
   markTodoChanged();
   onTodoStateChanged?.();
+}
+
+/** Subscribe to every Todo revision change without replacing the root UI listener. */
+export function subscribeTodoStateChanges(listener: () => void): () => void {
+  todoStateChangeSubscribers.add(listener);
+  return () => todoStateChangeSubscribers.delete(listener);
 }
 
 /** Bind the root UI/UCL to durable Todo state changes. */

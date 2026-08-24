@@ -11,6 +11,7 @@ import {
   delegateTodoTaskToAgent,
   delegateTodoTasksToAgent,
   sealTodoTasksOnAgentComplete,
+  subscribeTodoStateChanges,
   getTodoCompactionSnapshot,
   getVisibleTasks,
   initTodo,
@@ -76,6 +77,29 @@ test("todo schema uses non-negative integer indexes for batch dependencies", () 
     subject: "Legacy skill remains compatible",
     skill: { name: "demo" },
   }), true);
+});
+
+test("Todo revision subscribers receive mutations without replacing the root listener", async () => {
+  const root = await mkdtemp(join(tmpdir(), "todo-subscriber-"));
+  const loader = new TodoSkillLoader({ cwd: root });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+  let changes = 0;
+  const dispose = subscribeTodoStateChanges(() => {
+    changes += 1;
+  });
+  try {
+    await executeTodo({ action: "create", subject: "Projected" }, ctx);
+    assert.equal(changes, 1);
+    const id = getVisibleTasks()[0]!.id;
+    dispose();
+    await executeTodo({ action: "update", id, subject: "Updated" }, ctx);
+    assert.equal(changes, 1);
+  } finally {
+    dispose();
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("todo single create trims titles and rejects whitespace-only titles", async () => {
