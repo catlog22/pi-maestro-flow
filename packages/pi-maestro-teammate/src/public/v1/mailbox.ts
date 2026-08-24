@@ -32,6 +32,8 @@ export {
   priorityForKind,
 } from "../../extension/mailbox/types.ts";
 
+export type { MessageProvenanceV1 } from "../../shared/types.ts";
+
 export type { MailboxAuthority, MailboxEnqueueRequest } from "../../extension/mailbox/router.ts";
 
 // --- Host Registry Interface ---
@@ -47,6 +49,8 @@ export interface AgentMessageDeliveryRequest {
   recipientLabel?: string;
   message: string;
   mode?: AgentMessageMode;
+  /** Structured sender attribution; absent on legacy registry calls. */
+  provenance?: MessageProvenanceV1;
 }
 export interface AgentMessageDeliveryResult {
   delivered: boolean;
@@ -67,6 +71,8 @@ export interface MailboxHostRegistry {
     recipientCorrelationId: string;
     payload: string;
     taskId?: string;
+    /** Structured sender attribution; absent on legacy registry calls. */
+    provenance?: MessageProvenanceV1;
   }): Promise<MailboxEnqueueResult>;
 
   /** Deliver user input to a live or restorable agent by correlation id. */
@@ -82,6 +88,7 @@ export interface MailboxHostRegistry {
 import { negotiateCapability as _negotiateCapability } from "../../extension/mailbox/service.ts";
 import type { MailboxCapability, MailboxServiceOptions } from "../../extension/mailbox/service.ts";
 import type { MailboxEnqueueResult } from "../../extension/mailbox/types.ts";
+import type { MessageProvenanceV1 } from "../../shared/types.ts";
 
 export function createDirectAgentHostRegistry(
   deliverAgentMessage: (request: AgentMessageDeliveryRequest) => Promise<AgentMessageDeliveryResult>,
@@ -114,6 +121,7 @@ export function createMailboxHostRegistry(
         kind: "task",
         mode: "notify",
         payload: request.payload,
+        ...(request.provenance === undefined ? {} : { provenance: request.provenance }),
         correlationId: request.taskId,
       });
     },

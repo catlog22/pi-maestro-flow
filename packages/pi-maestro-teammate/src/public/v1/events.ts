@@ -11,12 +11,14 @@ import type {
   AgentProgressSnapshot,
   AgentRunOutcome,
   AgentStatus,
+  MessageProvenanceV1,
   StructuredResult,
   TeammateResultPublishedEvent,
 } from "../../shared/types.ts";
 import type { SessionHostSnapshot, WindowThreadSnapshot } from "../../sessions/session-core.ts";
 
 export type {
+  MessageProvenanceV1,
   StructuredResult,
   TeammateExecutionProvenance,
   TeammateResultPublishedEvent,
@@ -123,6 +125,8 @@ export interface TeammateCompleteEvent {
    * completed run produced structured output or a final assistant text.
    */
   structuredResults?: StructuredResult[];
+  /** Attribution for the automatic completion message, when one is published. */
+  provenance?: MessageProvenanceV1;
 }
 
 /**
@@ -154,6 +158,8 @@ export interface TeammateSendMessageEvent {
   message: string;
   /** Epoch milliseconds of the send operation. */
   lastActivityAt?: number;
+  /** Structured send attribution; absent on events from older emitters. */
+  provenance?: MessageProvenanceV1;
   isSend: true;
   isInteraction?: undefined;
 }

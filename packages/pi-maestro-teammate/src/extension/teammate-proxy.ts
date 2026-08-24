@@ -162,10 +162,13 @@ import type {
   AgentStatus,
   AgentTerminalStatus,
   MessageEnvelope,
+  MessageProvenanceV1,
+  MessageSenderIdentityV1,
   SettledAgentRecord,
   SingleResult,
   StructuredResult,
   TeammateInteractionRecord,
+  VerifiedMessageProvenanceV1,
 } from "../shared/types.ts";
 
 type TeammateToolResult<T> = AgentToolResult<T> & { isError?: boolean };
@@ -181,6 +184,9 @@ import {
   TEAMMATE_COMPLETE_EVENT,
   TEAMMATE_STARTED_EVENT,
   TEAMMATE_MESSAGE_EVENT,
+  MESSAGE_PROVENANCE_VERSION,
+  normalizeMessageProvenanceV1,
+  unknownMessageProvenanceV1,
 } from "../shared/types.ts";
 import {
   appendAgentCatalog,
@@ -717,6 +723,37 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+type VerifiedProvenanceInput = Omit<
+  VerifiedMessageProvenanceV1,
+  "version" | "confidence" | "messageId"
+> & { messageId?: string };
+
+function createVerifiedProvenance(input: VerifiedProvenanceInput): VerifiedMessageProvenanceV1 {
+  return {
+    version: MESSAGE_PROVENANCE_VERSION,
+    messageId: input.messageId ?? randomUUID(),
+    source: input.source,
+    messageKind: input.messageKind,
+    deliveryMode: input.deliveryMode,
+    confidence: "verified",
+    sender: input.sender,
+  };
+}
+
+function proxyProvenanceWithMode(
+  provenance: MessageProvenanceV1,
+  deliveryMode: VerifiedMessageProvenanceV1["deliveryMode"],
+): MessageProvenanceV1 {
+  return provenance.confidence === "verified"
+    ? { ...provenance, deliveryMode }
+    : unknownMessageProvenanceV1({
+        from: provenance.legacyLabel,
+        messageId: provenance.messageId,
+        messageKind: provenance.messageKind,
+        deliveryMode,
+      });
+}
+
 // ===========================================================================
 // Flat model: handle proxy requests from child processes
 // ===========================================================================
@@ -919,8 +956,14 @@ export async function handleProxyRequest(
     kind: "lifecycle" | "result" | "steer" | "follow_up" | "task" | "control";
     mode: "steer" | "follow_up" | "abort" | "notify";
     payload: string;
+    provenance?: MessageProvenanceV1;
   }) => Promise<{ path: string; result: { ok: boolean } }>,
-  workspacePeerSend?: (target: string, message: string, mode: "steer" | "follow_up") => Promise<boolean>,
+  workspacePeerSend?: (
+    target: string,
+    message: string,
+    mode: "steer" | "follow_up",
+    provenance?: MessageProvenanceV1,
+  ) => Promise<boolean>,
   workspacePeerList?: () => Promise<readonly WorkspacePeerWindowListing[]>,
   sessionSend?: (request: {
     selector: string;
@@ -929,6 +972,7 @@ export async function handleProxyRequest(
     message: string;
     mode: "steer" | "follow_up" | "abort";
     messageKind?: WorkspacePeerMessageKind;
+    provenance?: MessageProvenanceV1;
   }) => Promise<SessionMessageResult>,
   refreshModelCapabilities?: () => Promise<readonly TeammateModelCapability[]>,
   authority: TeammateProxyAuthority = {},
@@ -959,6 +1003,16 @@ export async function handleProxyRequest(
     (state.sessionGeneration ?? 0) === dispatchGeneration;
   const parentCid = resolveProxyParentCorrelationId(event, spawnedBy, state);
   const parentSessionId = parentCid ? state.activeRuns.get(parentCid)?.sessionId : undefined;
+  const rootOwnerId = state.currentSessionId ?? parentSessionId ?? `process-${process.pid}`;
+  const proxySender = (): Exclude<MessageSenderIdentityV1, { kind: "unknown" }> =>
+    parentCid
+      ? {
+          kind: "teammate-agent",
+          ownerId: rootOwnerId,
+          correlationId: parentCid,
+          label: state.activeRuns.get(parentCid)?.name ?? state.activeRuns.get(parentCid)?.agent ?? parentCid.slice(0, 8),
+        }
+      : { kind: "root-agent", ownerId: rootOwnerId, label: "main" };
   const reservesProxyDispatch = tool === "teammate" && typeof requestId === "string";
   if (reservesProxyDispatch) {
     const duplicate = state.pendingProxyDispatchRequests?.has(requestId)
@@ -1130,6 +1184,16 @@ export async function handleProxyRequest(
         if (task.name) taskIndexByName.set(task.name, index);
       });
       const taskCorrelationIds: string[] = normalizedTasks?.map(() => randomUUID()) ?? [];
+      const initialTaskProvenanceByCorrelationId = new Map<string, MessageProvenanceV1>();
+      for (const childId of normalizedTasks ? taskCorrelationIds : [cid]) {
+        initialTaskProvenanceByCorrelationId.set(childId, createVerifiedProvenance({
+          messageId: `${childId}:initial`,
+          source: "initial-task",
+          messageKind: "task",
+          deliveryMode: "prompt",
+          sender: proxySender(),
+        }));
+      }
       const completionReplyTarget = routedParams.reply_to ?? "caller";
       const completionSessionId = completionReplyTarget === "main"
         ? state.currentSessionId ?? undefined
@@ -1206,6 +1270,7 @@ export async function handleProxyRequest(
         abortController: abortCtrl,
         ...(normalizedTasks ? { graphAbortController: abortCtrl } : {}),
         ownsChildProcess: !normalizedTasks,
+        ...(normalizedTasks ? {} : { initialMessageProvenance: initialTaskProvenanceByCorrelationId.get(cid) }),
         inbox: [],
         outputLog: [],
         lastActivityAt: Date.now(),
@@ -1545,6 +1610,7 @@ export async function handleProxyRequest(
           abortController: taskAbortControllers[index],
           graphAbortController: abortCtrl,
           ownsChildProcess: true,
+          initialMessageProvenance: initialTaskProvenanceByCorrelationId.get(childId),
           inbox: [],
           outputLog: [],
           lastActivityAt: Date.now(),
@@ -2021,7 +2087,7 @@ export async function handleProxyRequest(
         target: ActiveAgent,
         task: NormalizedTask,
       ): void => {
-        target.restart = (message: string): boolean => {
+        target.restart = (message: string, provenance?: MessageProvenanceV1): boolean => {
           const checkpoint = target.sessionFile;
           if (
             target.restartPending
@@ -2042,6 +2108,11 @@ export async function handleProxyRequest(
           target.failedAt = undefined;
           target.resultReadyAt = undefined;
           target.lastActivityAt = Date.now();
+          target.initialMessageProvenance = normalizeMessageProvenanceV1(provenance, {
+            messageId: provenance?.messageId ?? randomUUID(),
+            messageKind: "message",
+            deliveryMode: "prompt",
+          });
           nestedColdRestarting.add(target.correlationId);
           let restartDeliverySettled = false;
           let settleRestartDelivery!: (accepted: boolean) => void;
@@ -2652,6 +2723,13 @@ export async function handleProxyRequest(
           return;
         }
         const routedMode = messageKind === "status" ? "follow_up" : requestedMode;
+        const provenance = createVerifiedProvenance({
+          messageId: requestId,
+          source: "session-router",
+          messageKind,
+          deliveryMode: routedMode,
+          sender: proxySender(),
+        });
         const delivery: SessionMessageResult = sessionSend
           ? await sessionSend({
             selector: to,
@@ -2659,8 +2737,9 @@ export async function handleProxyRequest(
             message,
             mode: routedMode,
             messageKind,
+            provenance,
           })
-          : { delivered: await workspacePeerSend!(to, message, routedMode) };
+          : { delivered: await workspacePeerSend!(to, message, routedMode, provenance) };
         const targetLabel = localRootTarget ? "root session" : `workspace target ${to}`;
         if (!delivery.delivered) {
           const baseError = delivery.error ?? `Message rejected for ${targetLabel}.`;
@@ -2671,7 +2750,7 @@ export async function handleProxyRequest(
           reply({ type: "teammate_proxy_result", requestId, result: {
             content: [{ type: "text", text: `${baseError}${ambiguous}` }],
             isError: true,
-            details: { delivered: false, ...(delivery.receipt ? { receipt: delivery.receipt } : {}) },
+            details: { delivered: false, provenance, ...(delivery.receipt ? { receipt: delivery.receipt } : {}) },
           }});
           return;
         }
@@ -2690,6 +2769,7 @@ export async function handleProxyRequest(
           isError: false,
           details: {
             delivered: true,
+            provenance,
             ...(delivery.receipt ? { receipt: delivery.receipt } : {}),
           },
         }});
@@ -2734,6 +2814,13 @@ export async function handleProxyRequest(
         }});
         return;
       }
+      const localProvenance = createVerifiedProvenance({
+        messageId: requestId,
+        source: "session-router",
+        messageKind,
+        deliveryMode: requestedMode,
+        sender: proxySender(),
+      });
       if (sessionSend) {
         const mode = requestedMode === "steer" || requestedMode === "abort" ? requestedMode : "follow_up";
         const delivery = await sessionSend({
@@ -2743,6 +2830,7 @@ export async function handleProxyRequest(
           message,
           mode,
           messageKind,
+          provenance: localProvenance,
         });
         if (!delivery.delivered) {
           reply({ type: "teammate_proxy_result", requestId, result: {
@@ -2781,16 +2869,22 @@ export async function handleProxyRequest(
           senderLabel: sender.label,
           replyToSelector: sender.replyTo,
         });
-        deferAgentContextMessage(agent, deferred);
+        const statusProvenance = proxyProvenanceWithMode(localProvenance, "notify");
+        deferAgentContextMessage(agent, deferred, statusProvenance.messageId);
+        const deferredEntry = agent.deferredContextMessages?.at(-1);
+        if (deferredEntry && deferredEntry.messageId === statusProvenance.messageId) {
+          deferredEntry.provenance = statusProvenance;
+        }
         const now = Date.now();
         agent.promptSeq = (agent.promptSeq ?? 0) + 1;
         agent.inbox.push({
-          id: randomUUID(),
+          id: statusProvenance.messageId ?? randomUUID(),
           from: sender.from,
           to,
           kind: "notification",
           payload: deferred,
           timestamp: now,
+          provenance: statusProvenance,
         });
         agent.outputLog.push(`[${new Date(now).toISOString().slice(11, 19)}] ◀ status context deferred: ${deferred.slice(0, 100)}`);
         trimAgentBuffers(agent);
@@ -2802,6 +2896,7 @@ export async function handleProxyRequest(
           mode: "follow_up",
           message: deferred,
           lastActivityAt: now,
+          provenance: statusProvenance,
           isSend: true,
         });
         reply({ type: "teammate_proxy_result", requestId, result: {
@@ -2839,16 +2934,18 @@ export async function handleProxyRequest(
           kind: "follow_up",
           mode: "follow_up",
           payload: deliveryMessage,
+          provenance: localProvenance,
         }).then((result) => {
           if (result.result.ok) {
             const now = Date.now();
             agent?.inbox.push({
-              id: randomUUID(),
+              id: localProvenance.messageId ?? randomUUID(),
               from: spawnedBy ?? "proxy",
               to,
               kind: "task",
               payload: message,
               timestamp: now,
+              provenance: localProvenance,
             });
             if (agent) {
               agent.outputLog.push(`[${new Date(now).toISOString().slice(11, 19)}] ◀ mailbox-follow-up: ${message.slice(0, 100)}`);
@@ -2862,6 +2959,7 @@ export async function handleProxyRequest(
               mode: "follow_up",
               message,
               lastActivityAt: now,
+              provenance: localProvenance,
               isSend: true,
             });
             reply({ type: "teammate_proxy_result", requestId, result: {
@@ -2891,7 +2989,8 @@ export async function handleProxyRequest(
       if (!agent?.stdin?.writable) {
         const deferredContext = agent ? takeDeferredAgentContext(agent) : [];
         const deliveryMessage = messageWithDeferredAgentContext(deferredContext, message);
-        const restarted = agent?.status === "sleeping" && agent.restart?.(deliveryMessage) === true;
+        const promptProvenance = proxyProvenanceWithMode(localProvenance, "prompt");
+        const restarted = agent?.status === "sleeping" && agent.restart?.(deliveryMessage, promptProvenance) === true;
         if (!restarted || !agent) {
           if (agent) restoreDeferredAgentContext(agent, deferredContext);
           reply({ type: "teammate_proxy_result", requestId, result: {
@@ -2908,12 +3007,13 @@ export async function handleProxyRequest(
         }
         const now = Date.now();
         agent.inbox.push({
-          id: randomUUID(),
+          id: promptProvenance.messageId ?? randomUUID(),
           from: spawnedBy ?? "proxy",
           to,
           kind: "task",
           payload: message,
           timestamp: now,
+          provenance: promptProvenance,
         });
         agent.outputLog.push(`[${new Date(now).toISOString().slice(11, 19)}] ◀ cold-resume prompt: ${message.slice(0, 100)}`);
         trimAgentBuffers(agent);
@@ -2925,6 +3025,7 @@ export async function handleProxyRequest(
           mode: "prompt",
           message,
           lastActivityAt: now,
+          provenance: promptProvenance,
           isSend: true,
         });
         reply({ type: "teammate_proxy_result", requestId, result: {
@@ -2949,6 +3050,7 @@ export async function handleProxyRequest(
       const mode: RpcMessageMode = agent.status === "sleeping" && requestedMode !== "abort"
         ? "prompt"
         : requestedMode;
+      const deliveredProvenance = proxyProvenanceWithMode(localProvenance, mode);
       const sent = sendRpcMessage(agent.stdin, deliveryMessage, mode, agent.lease ? leaseToken(agent.lease) : undefined);
       if (!sent) {
         restoreDeferredAgentContext(agent, deferredContext);
@@ -2961,7 +3063,15 @@ export async function handleProxyRequest(
       const now = Date.now();
       if (mode === "prompt") agent.promptSeq = (agent.promptSeq ?? 0) + 1;
       wakeSleepingAgent(pi, agent, now);
-      agent.inbox.push({ id: randomUUID(), from: spawnedBy ?? "proxy", to, kind: mode === "abort" ? "notification" : "task", payload: message, timestamp: now });
+      agent.inbox.push({
+        id: deliveredProvenance.messageId ?? randomUUID(),
+        from: spawnedBy ?? "proxy",
+        to,
+        kind: mode === "abort" ? "notification" : "task",
+        payload: message,
+        timestamp: now,
+        provenance: deliveredProvenance,
+      });
       agent.outputLog.push(`[${new Date(now).toISOString().slice(11, 19)}] ◀ ${mode}: ${message.slice(0, 100)}`);
       trimAgentBuffers(agent);
       agent.lastActivityAt = now;
@@ -2973,6 +3083,7 @@ export async function handleProxyRequest(
         mode,
         message,
         lastActivityAt: now,
+        provenance: deliveredProvenance,
         isSend: true,
       });
 
@@ -2985,6 +3096,7 @@ export async function handleProxyRequest(
           customType: "teammate-message",
           content: `● @${senderLabel} → @${to} (${mode}): ${message.slice(0, 120)}`,
           display: true,
+          details: { source: "session-router", provenance: deliveredProvenance },
         },
         { triggerTurn: true },
       );

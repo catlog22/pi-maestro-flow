@@ -8,6 +8,7 @@ import { MailboxConsumer, type MailboxDispatchDisposition } from "./consumer.ts"
 import { MailboxFileStore } from "./file-store.ts";
 import { MailboxGC, QuotaAdmission } from "./gc.ts";
 import { type MailboxAuthority, MailboxRouter } from "./router.ts";
+import type { MessageProvenanceV1 } from "../../shared/types.ts";
 import { type MailboxEnvelope, type MailboxEnqueueResult, type MailboxMessageKind, type MailboxDeliveryMode, type MailboxPaths } from "./types.ts";
 export type MailboxCapability = "v1" | "v2";
 export declare const MAILBOX_CAPABILITY_HEADER = "x-mailbox-capability";
@@ -65,6 +66,7 @@ export declare class MailboxService extends EventEmitter {
         kind: MailboxMessageKind;
         mode: MailboxDeliveryMode;
         payload: string;
+        provenance?: MessageProvenanceV1;
         requestId?: string;
         correlationId?: string;
     }): Promise<MailboxEnqueueResult>;

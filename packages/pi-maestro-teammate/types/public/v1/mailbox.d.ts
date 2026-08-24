@@ -8,6 +8,7 @@ export type { MailboxCapability, MailboxServiceOptions, } from "../../extension/
 export { MailboxService, negotiateCapability, MAILBOX_CAPABILITY_HEADER, } from "../../extension/mailbox/service.ts";
 export type { MailboxEnvelope, MailboxEnqueueResult, MailboxMessageKind, MailboxDeliveryMode, MailboxPriority, MailboxState, MailboxPaths, } from "../../extension/mailbox/types.ts";
 export { MAILBOX_SCHEMA_VERSION, priorityForKind, } from "../../extension/mailbox/types.ts";
+export type { MessageProvenanceV1 } from "../../shared/types.ts";
 export type { MailboxAuthority, MailboxEnqueueRequest } from "../../extension/mailbox/router.ts";
 /** Shared-process registry key published by the root teammate extension. */
 export declare const MAILBOX_REGISTRY_KEY: unique symbol;
@@ -19,6 +20,8 @@ export interface AgentMessageDeliveryRequest {
     recipientLabel?: string;
     message: string;
     mode?: AgentMessageMode;
+    /** Structured sender attribution; absent on legacy registry calls. */
+    provenance?: MessageProvenanceV1;
 }
 export interface AgentMessageDeliveryResult {
     delivered: boolean;
@@ -38,6 +41,8 @@ export interface MailboxHostRegistry {
         recipientCorrelationId: string;
         payload: string;
         taskId?: string;
+        /** Structured sender attribution; absent on legacy registry calls. */
+        provenance?: MessageProvenanceV1;
     }): Promise<MailboxEnqueueResult>;
     /** Deliver user input to a live or restorable agent by correlation id. */
     deliverAgentMessage(request: AgentMessageDeliveryRequest): Promise<AgentMessageDeliveryResult>;
@@ -48,6 +53,7 @@ export interface MailboxHostRegistry {
 }
 import type { MailboxCapability } from "../../extension/mailbox/service.ts";
 import type { MailboxEnqueueResult } from "../../extension/mailbox/types.ts";
+import type { MessageProvenanceV1 } from "../../shared/types.ts";
 export declare function createDirectAgentHostRegistry(deliverAgentMessage: (request: AgentMessageDeliveryRequest) => Promise<AgentMessageDeliveryResult>): MailboxHostRegistry;
 /**
  * Create a host registry backed by a MailboxService instance.

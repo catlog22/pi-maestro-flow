@@ -11,6 +11,7 @@ import { MailboxConsumer, type MailboxDispatchDisposition } from "./consumer.ts"
 import { MailboxFileStore, createMailboxPaths, ensureMailboxDirectories } from "./file-store.ts";
 import { MailboxGC, QuotaAdmission } from "./gc.ts";
 import { type MailboxAuthority, type MailboxEnqueueRequest, MailboxRouter } from "./router.ts";
+import type { MessageProvenanceV1 } from "../../shared/types.ts";
 import {
   type MailboxEnvelope,
   type MailboxEnqueueResult,
@@ -197,6 +198,7 @@ export class MailboxService extends EventEmitter {
     kind: MailboxMessageKind;
     mode: MailboxDeliveryMode;
     payload: string;
+    provenance?: MessageProvenanceV1;
     requestId?: string;
     correlationId?: string;
   }): Promise<MailboxEnqueueResult> {

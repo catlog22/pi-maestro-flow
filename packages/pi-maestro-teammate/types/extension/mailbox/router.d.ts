@@ -2,6 +2,7 @@
  * Mailbox router: route validation, authority revalidation, quota admission,
  * and fenced-queue semantics.
  */
+import { type MessageProvenanceV1 } from "../../shared/types.ts";
 import { MailboxFileStore } from "./file-store.ts";
 import { QuotaAdmission } from "./gc.ts";
 import { type MailboxDeliveryMode, type MailboxEnvelope, type MailboxEnqueueResult, type MailboxMessageKind } from "./types.ts";
@@ -34,6 +35,7 @@ export interface MailboxEnqueueRequest {
     kind: MailboxMessageKind;
     mode: MailboxDeliveryMode;
     payload: string;
+    provenance?: MessageProvenanceV1;
     requestId?: string;
     correlationId?: string;
 }

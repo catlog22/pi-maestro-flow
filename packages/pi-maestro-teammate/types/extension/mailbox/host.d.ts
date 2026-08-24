@@ -14,7 +14,7 @@ import type { MailboxDispatchDisposition } from "./consumer.ts";
 import { MailboxService } from "./service.ts";
 import { MailboxRollout, type RolloutMode } from "./rollout.ts";
 import type { MailboxAuthority } from "./router.ts";
-import type { TeammateState } from "../../shared/types.ts";
+import type { MessageProvenanceV1, TeammateState } from "../../shared/types.ts";
 export declare function mailboxModeFromEnv(env?: NodeJS.ProcessEnv): RolloutMode;
 export declare const MAILBOX_ENV_VAR = "PI_TEAMMATE_MAILBOX";
 export interface MailboxHostContext {
@@ -44,6 +44,7 @@ export interface MailboxHostOptions {
         senderId: string;
         recipientCorrelationId: string;
         payload: string;
+        provenance?: MessageProvenanceV1;
         mode: string;
         kind: "lifecycle" | "result" | "steer" | "follow_up" | "task" | "control";
     }) => Promise<MailboxDispatchDisposition | void>;

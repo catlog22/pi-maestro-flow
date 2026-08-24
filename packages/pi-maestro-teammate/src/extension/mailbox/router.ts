@@ -4,6 +4,13 @@
  */
 
 import { randomUUID } from "node:crypto";
+import {
+  MESSAGE_PROVENANCE_VERSION,
+  normalizeMessageProvenanceV1,
+  type MessageProvenanceKind,
+  type MessageProvenanceV1,
+  type VerifiedMessageProvenanceV1,
+} from "../../shared/types.ts";
 import { MailboxFileStore } from "./file-store.ts";
 import { QuotaAdmission } from "./gc.ts";
 import {
@@ -52,6 +59,7 @@ export interface MailboxEnqueueRequest {
   kind: MailboxMessageKind;
   mode: MailboxDeliveryMode;
   payload: string;
+  provenance?: MessageProvenanceV1;
   requestId?: string;
   correlationId?: string;
 }
@@ -65,6 +73,18 @@ function ttlForKind(kind: MailboxMessageKind): number {
       return TTL_STEER_MS;
     default:
       return TTL_NORMAL_MS;
+  }
+}
+
+function provenanceKindForMailbox(kind: MailboxMessageKind): MessageProvenanceKind {
+  switch (kind) {
+    case "task": return "task";
+    case "result": return "result";
+    case "lifecycle": return "lifecycle";
+    case "control": return "control";
+    case "steer":
+    case "follow_up":
+      return "message";
   }
 }
 
@@ -142,6 +162,20 @@ export class MailboxRouter {
 
     // 4. Build envelope
     const messageId = randomUUID();
+    const generatedProvenance: VerifiedMessageProvenanceV1 = {
+      version: MESSAGE_PROVENANCE_VERSION,
+      messageId,
+      source: "mailbox",
+      messageKind: provenanceKindForMailbox(request.kind),
+      deliveryMode: request.mode,
+      confidence: "verified",
+      sender: request.senderId === "caller"
+        ? { kind: "root-agent", ownerId: request.teamId, label: "caller" }
+        : { kind: "system", ownerId: request.senderId, label: request.senderId },
+    };
+    const provenance = request.provenance === undefined
+      ? generatedProvenance
+      : normalizeMessageProvenanceV1(request.provenance);
     const ttlMs = ttlForKind(request.kind);
     const senderSeq = (this.#senderSeqBySender.get(request.senderId) ?? 0) + 1;
     this.#senderSeqBySender.set(request.senderId, senderSeq);
@@ -164,6 +198,7 @@ export class MailboxRouter {
       leaseEpoch: this.#authority.currentLeaseEpoch(request.recipientCorrelationId),
       leaseNonce: this.#authority.currentLeaseNonce(request.recipientCorrelationId),
       payload: request.payload,
+      provenance,
       ...(request.requestId ? { requestId: request.requestId } : {}),
       ...(request.correlationId ? { correlationId: request.correlationId } : {}),
     };

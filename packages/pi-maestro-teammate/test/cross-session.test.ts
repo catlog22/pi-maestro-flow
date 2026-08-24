@@ -404,7 +404,7 @@ test("child proxy routes local teammate-send through the session host callback",
     status: "running",
     sleepMs: 0,
   } as never);
-  const routed: Array<{ selector: string; message: string; mode: string }> = [];
+  const routed: unknown[] = [];
 
   const envelope = await proxyWorkspace(
     "teammate-send",
@@ -426,5 +426,18 @@ test("child proxy routes local teammate-send through the session host callback",
     message: "use the registry",
     mode: "follow_up",
     messageKind: "coordination",
+    provenance: {
+      version: 1,
+      messageId: "teammate-send-workspace-request",
+      source: "session-router",
+      messageKind: "coordination",
+      deliveryMode: "follow_up",
+      confidence: "verified",
+      sender: {
+        kind: "root-agent",
+        ownerId: `process-${process.pid}`,
+        label: "main",
+      },
+    },
   }]);
 });

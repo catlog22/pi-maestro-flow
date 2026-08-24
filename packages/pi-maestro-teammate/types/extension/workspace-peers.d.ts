@@ -1,3 +1,4 @@
+import { type MessageProvenanceV1 } from "../shared/types.ts";
 export declare const WORKSPACE_PEER_PROTOCOL_VERSION: 1;
 /**
  * Reserved targetCorrelationId for commands addressed to a window's main
@@ -227,6 +228,8 @@ export interface WorkspacePeerCommand {
     message: string;
     source?: WorkspacePeerMessageSource;
     messageKind?: WorkspacePeerMessageKind;
+    /** Structured sender attribution; absent on legacy commands. */
+    provenance?: MessageProvenanceV1;
     traceId?: string;
     replyTo?: string;
     fromSessionName?: string;
@@ -424,6 +427,7 @@ export declare function enqueueWorkspacePeerCommand(identity: WorkspacePeerIdent
     commandId?: string;
     source?: WorkspacePeerMessageSource;
     messageKind?: WorkspacePeerMessageKind;
+    provenance?: MessageProvenanceV1;
     traceId?: string;
     replyTo?: string;
     fromSessionName?: string;
@@ -455,6 +459,7 @@ export declare function sendWorkspacePeerCommand(identity: WorkspacePeerIdentity
     signal?: AbortSignal;
     source?: WorkspacePeerMessageSource;
     messageKind?: WorkspacePeerMessageKind;
+    provenance?: MessageProvenanceV1;
     traceId?: string;
     replyTo?: string;
     fromSessionName?: string;

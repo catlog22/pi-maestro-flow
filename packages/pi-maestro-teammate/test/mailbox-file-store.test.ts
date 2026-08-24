@@ -248,11 +248,32 @@ test("computeEnvelopeHash is deterministic", () => {
   assert.equal(computeEnvelopeHash(rest), computeEnvelopeHash(rest));
 });
 
-test("verifyEnvelopeHash detects tampering", () => {
-  const envelope = makeEnvelope();
+test("verifyEnvelopeHash detects payload and nested provenance tampering", () => {
+  const envelope = makeEnvelope({
+    provenance: {
+      version: 1,
+      messageId: "00000000-0000-4000-8000-000000000001",
+      source: "mailbox",
+      messageKind: "coordination",
+      deliveryMode: "follow_up",
+      confidence: "verified",
+      sender: { kind: "root-agent", ownerId: "team-root", label: "caller" },
+    },
+  });
+  const tamperProvenance = (patch: Record<string, unknown>): MailboxEnvelope => ({
+    ...envelope,
+    provenance: {
+      ...(envelope.provenance as unknown as Record<string, unknown>),
+      ...patch,
+    },
+  }) as unknown as MailboxEnvelope;
   assert.equal(verifyEnvelopeHash(envelope), true);
-  const tampered = { ...envelope, payload: "tampered" };
-  assert.equal(verifyEnvelopeHash(tampered), false);
+  assert.equal(verifyEnvelopeHash({ ...envelope, payload: "tampered" }), false);
+  assert.equal(verifyEnvelopeHash(tamperProvenance({ source: "session-router" })), false);
+  assert.equal(verifyEnvelopeHash(tamperProvenance({ messageKind: "request" })), false);
+  assert.equal(verifyEnvelopeHash(tamperProvenance({
+    sender: { kind: "root-agent", ownerId: "other-owner", label: "caller" },
+  })), false);
 });
 
 // --- Deduplication ---

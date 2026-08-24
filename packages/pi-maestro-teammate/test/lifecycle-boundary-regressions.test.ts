@@ -2478,7 +2478,7 @@ test("workspace delivery paths retain the originating root session fence", () =>
     source.indexOf("const routeSessionMessage"),
     source.indexOf("const stopWorkspacePeers"),
   );
-  assert.match(route, /const result = await registry\.send\(normalizedRequest\);\s+if \(!ownsRootSessionFence\(fence\)\)/);
+  assert.match(route, /const result = await registry\.send\(request\);\s+if \(!ownsRootSessionFence\(fence\)\)/);
 
   const advisor = source.slice(
     source.indexOf("async function runAdvisorReview"),

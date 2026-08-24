@@ -9,7 +9,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { CompletionDeliveryCoordinator } from "../completion-outbox/coordinator.ts";
 import { type WorkspacePeerMessageKind, type WorkspacePeerWindowListing } from "./workspace-peers.ts";
 import type { RunTeammateParams } from "../runs/execution.ts";
-import type { TeammateState, ChildAgentCallSnapshot } from "../shared/types.ts";
+import type { TeammateState, ChildAgentCallSnapshot, MessageProvenanceV1 } from "../shared/types.ts";
 import { type TeammateModelCapability } from "../models/model-catalog.ts";
 import type { TeammateThinkingInput } from "../shared/thinking.ts";
 import { type SessionMessageResult } from "../sessions/session-core.ts";
@@ -71,16 +71,18 @@ export declare function handleProxyRequest(pi: ExtensionAPI, state: TeammateStat
     kind: "lifecycle" | "result" | "steer" | "follow_up" | "task" | "control";
     mode: "steer" | "follow_up" | "abort" | "notify";
     payload: string;
+    provenance?: MessageProvenanceV1;
 }) => Promise<{
     path: string;
     result: {
         ok: boolean;
     };
-}>, workspacePeerSend?: (target: string, message: string, mode: "steer" | "follow_up") => Promise<boolean>, workspacePeerList?: () => Promise<readonly WorkspacePeerWindowListing[]>, sessionSend?: (request: {
+}>, workspacePeerSend?: (target: string, message: string, mode: "steer" | "follow_up", provenance?: MessageProvenanceV1) => Promise<boolean>, workspacePeerList?: () => Promise<readonly WorkspacePeerWindowListing[]>, sessionSend?: (request: {
     selector: string;
     targetCorrelationId?: string;
     senderCorrelationId?: string;
     message: string;
     mode: "steer" | "follow_up" | "abort";
     messageKind?: WorkspacePeerMessageKind;
+    provenance?: MessageProvenanceV1;
 }) => Promise<SessionMessageResult>, refreshModelCapabilities?: () => Promise<readonly TeammateModelCapability[]>, authority?: TeammateProxyAuthority): Promise<void>;

@@ -1,6 +1,7 @@
 import { type CompletionDispatchHandle, type CompletionDispatchSeed, type CompletionDurabilityRegistry, type CompletionFinalizeInput, type CompletionIntent, type CompletionNotificationRequirement, type CompletionTarget } from "../public/v1/completion-durability.ts";
 import { CompletionOutboxFileStore } from "./file-store.ts";
 import { type CompletionOutboxRecord } from "./types.ts";
+import { type MessageProvenanceV1 } from "../shared/types.ts";
 export interface CompletionDeliveryEnvelope {
     customType: "teammate-complete";
     content: string;
@@ -14,6 +15,8 @@ export interface CompletionDeliveryEnvelope {
         mode: CompletionIntent["mode"];
         resources: readonly string[];
         replayed: boolean;
+        /** Structured system attribution; absent on envelopes from older coordinators. */
+        provenance?: MessageProvenanceV1;
     };
 }
 export interface CompletionSessionBinding {

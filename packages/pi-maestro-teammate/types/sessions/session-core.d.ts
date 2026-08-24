@@ -1,4 +1,5 @@
 /** Dependency-free canonical session discovery and message routing primitives. */
+import { type MessageProvenanceV1 } from "../shared/types.ts";
 export declare const SESSION_ENDPOINT_VERSION: 1;
 export declare const SESSION_ENDPOINT_ID_PREFIX: "pi-session/v1";
 export declare const SESSION_HOST_REGISTRY_KEY: unique symbol;
@@ -121,6 +122,8 @@ export interface SessionMessageRequest {
     messageId?: string;
     source?: SessionMessageSource;
     messageKind?: SessionMessageKind;
+    /** Structured host attribution; absent on legacy callers. */
+    provenance?: MessageProvenanceV1;
     /** Authorizes context-only status semantics; never serialized or model-controlled. */
     trustedStatus?: boolean;
     traceId?: string;
@@ -149,6 +152,8 @@ export interface WindowThreadEntry {
     direction: WindowThreadDirection;
     source: SessionMessageSource;
     messageKind?: SessionMessageKind;
+    /** Structured host attribution; absent on legacy journal entries. */
+    provenance?: MessageProvenanceV1;
     traceId?: string;
     replyTo?: string;
     fromSessionName?: string;
@@ -269,6 +274,8 @@ export interface SessionHostRegistryOptions extends Omit<MessageRouterOptions, "
     endpoints?: readonly SessionEndpoint[];
     thread?: WindowThreadStore;
     controls?: SessionHostControls;
+    /** Canonical host boundary applied to every public send entry point. */
+    prepareMessage?: (request: SessionMessageRequest) => SessionMessageRequest;
 }
 export interface SessionHostSnapshot {
     version: typeof SESSION_ENDPOINT_VERSION;

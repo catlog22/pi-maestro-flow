@@ -1,4 +1,5 @@
-export type ObservationAction = "status" | "wait" | "watch";
+import type { AgentRuntimeDiagnosisV1 } from "../../shared/types.ts";
+export type ObservationAction = "status" | "diagnose" | "wait" | "watch";
 export type ObservationDetail = "summary" | "tail" | "full";
 export type ObservationView = "live" | "turns";
 export type ObservationWaitMode = "all" | "any" | "count";
@@ -34,10 +35,14 @@ export interface ObservationSnapshot {
     lastResult?: string;
     /** Schema-valid structured output of a settled schema task (detail=full). */
     structuredOutput?: unknown;
+    /** Canonical orthogonal teammate diagnosis; present for supported diagnose snapshots. */
+    diagnosis?: AgentRuntimeDiagnosisV1;
 }
 export interface ObservationReadOptions {
     detail: ObservationDetail;
     lines: number;
+    /** Request a canonical runtime diagnosis in addition to the ordinary snapshot. */
+    diagnose?: boolean;
     /** "turns" lists the target session's turn history instead of the live snapshot (status only). */
     view?: ObservationView;
     /** 1-based turn index to expand when view="turns"; omitted lists all turns. */

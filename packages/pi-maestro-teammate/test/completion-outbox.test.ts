@@ -11,6 +11,7 @@ import {
   type CompletionTarget,
 } from "../src/public/v1/completion-durability.ts";
 import { CompletionOutboxFileStore } from "../src/completion-outbox/file-store.ts";
+import { CompletionDeliveryCoordinator } from "../src/completion-outbox/coordinator.ts";
 import {
   COMPLETION_OUTBOX_CLAIM_MS,
   COMPLETION_OUTBOX_LIVE_TTL_MS,
@@ -80,6 +81,29 @@ async function withStore(
     await rm(root, { recursive: true, force: true });
   }
 }
+
+test("completion delivery envelopes carry authoritative result provenance", async () => {
+  await withStore(async (store) => {
+    const dispatch = seed("provenance");
+    await store.reserve(dispatch);
+    const record = await store.importIntent(intent(dispatch));
+    const coordinator = new CompletionDeliveryCoordinator({ store, enabled: () => false });
+    try {
+      const envelope = coordinator.deliveryEnvelope(record, true);
+      assert.deepEqual(envelope.details.provenance, {
+        version: 1,
+        messageId: dispatch.dispatchId,
+        source: "completion-outbox",
+        messageKind: "result",
+        deliveryMode: "notify",
+        confidence: "verified",
+        sender: { kind: "system", ownerId: target.sessionId, label: "completion-outbox" },
+      });
+    } finally {
+      coordinator.dispose();
+    }
+  });
+});
 
 test("reservation and intent import are durable and idempotent", async () => {
   await withStore(async (store) => {

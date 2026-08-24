@@ -192,8 +192,17 @@ async function atomicTransition(
 
 // --- Envelope Hashing ---
 
+function canonicalEnvelopeValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalEnvelopeValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .filter(([, entry]) => entry !== undefined)
+    .sort(([left], [right]) => left.localeCompare(right, "en"))
+    .map(([key, entry]) => [key, canonicalEnvelopeValue(entry)]));
+}
+
 export function computeEnvelopeHash(envelope: Omit<MailboxEnvelope, "hash">): string {
-  const canonical = JSON.stringify(envelope, Object.keys(envelope).sort());
+  const canonical = JSON.stringify(canonicalEnvelopeValue(envelope));
   return createHash("sha256").update(canonical, "utf8").digest("hex");
 }
 

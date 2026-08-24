@@ -2,6 +2,7 @@
  * Durable mailbox envelope types and state machine definitions.
  * Schema: teammate-mailbox/v1
  */
+import type { MessageProvenanceV1 } from "../../shared/types.ts";
 export declare const MAILBOX_SCHEMA_VERSION: 1;
 /** Maximum payload size in bytes. */
 export declare const MAX_PAYLOAD_BYTES: number;
@@ -82,6 +83,8 @@ export interface MailboxEnvelope {
     leaseNonce: string;
     /** The message payload (text content). */
     payload: string;
+    /** Structured host attribution; absent on legacy mailbox records. */
+    provenance?: MessageProvenanceV1;
     /** SHA-256 hash of the canonical JSON envelope (excluding hash field). */
     hash: string;
     /** Optional request identifier for request-response correlation. */

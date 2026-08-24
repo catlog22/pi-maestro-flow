@@ -1,5 +1,11 @@
 /** Dependency-free canonical session discovery and message routing primitives. */
 
+import {
+  normalizeMessageProvenanceV1,
+  unknownMessageProvenanceV1,
+  type MessageProvenanceV1,
+} from "../shared/types.ts";
+
 export const SESSION_ENDPOINT_VERSION = 1 as const;
 export const SESSION_ENDPOINT_ID_PREFIX = "pi-session/v1" as const;
 export const SESSION_HOST_REGISTRY_KEY = Symbol.for("pi-maestro-teammate.session-host-registry.v1");
@@ -385,6 +391,8 @@ export interface SessionMessageRequest {
   messageId?: string;
   source?: SessionMessageSource;
   messageKind?: SessionMessageKind;
+  /** Structured host attribution; absent on legacy callers. */
+  provenance?: MessageProvenanceV1;
   /** Authorizes context-only status semantics; never serialized or model-controlled. */
   trustedStatus?: boolean;
   traceId?: string;
@@ -416,6 +424,8 @@ export interface WindowThreadEntry {
   direction: WindowThreadDirection;
   source: SessionMessageSource;
   messageKind?: SessionMessageKind;
+  /** Structured host attribution; absent on legacy journal entries. */
+  provenance?: MessageProvenanceV1;
   traceId?: string;
   replyTo?: string;
   fromSessionName?: string;
@@ -468,6 +478,7 @@ function semanticThreadEntry(entry: Omit<WindowThreadEntry, "contentRevision">):
     direction: entry.direction,
     source: entry.source,
     ...(entry.messageKind === undefined ? {} : { messageKind: entry.messageKind }),
+    ...(entry.provenance === undefined ? {} : { provenance: entry.provenance }),
     ...(entry.traceId === undefined ? {} : { traceId: entry.traceId }),
     ...(entry.replyTo === undefined ? {} : { replyTo: entry.replyTo }),
     ...(entry.fromSessionName === undefined ? {} : { fromSessionName: entry.fromSessionName }),
@@ -511,6 +522,22 @@ function validThreadEntry(value: unknown): WindowThreadEntry | undefined {
     || typeof entry.createdAt !== "number" || !Number.isSafeInteger(entry.createdAt) || entry.createdAt < 0
     || typeof entry.updatedAt !== "number" || !Number.isSafeInteger(entry.updatedAt) || entry.updatedAt < entry.createdAt
     || typeof entry.revision !== "number" || !Number.isSafeInteger(entry.revision) || entry.revision < 1) return undefined;
+  const normalizedProvenance = entry.provenance === undefined
+    ? undefined
+    : normalizeMessageProvenanceV1(entry.provenance);
+  const provenance = normalizedProvenance === undefined
+    ? undefined
+    : normalizedProvenance.confidence === "verified"
+      && normalizedProvenance.messageId === entry.messageId
+      && normalizedProvenance.messageKind === (entry.messageKind ?? "message")
+      && normalizedProvenance.deliveryMode === entry.mode
+      ? normalizedProvenance
+      : unknownMessageProvenanceV1({
+          from: normalizedProvenance.confidence === "unknown" ? normalizedProvenance.legacyLabel : undefined,
+          messageId: entry.messageId,
+          messageKind: entry.messageKind ?? "message",
+          deliveryMode: entry.mode,
+        });
   const base = {
     version: SESSION_ENDPOINT_VERSION,
     messageId: entry.messageId,
@@ -520,6 +547,7 @@ function validThreadEntry(value: unknown): WindowThreadEntry | undefined {
     direction: entry.direction,
     source: entry.source,
     ...(entry.messageKind === undefined ? {} : { messageKind: entry.messageKind as SessionMessageKind }),
+    ...(provenance === undefined ? {} : { provenance }),
     ...(entry.traceId === undefined ? {} : { traceId: entry.traceId as string }),
     ...(entry.replyTo === undefined ? {} : { replyTo: entry.replyTo as string }),
     ...(entry.fromSessionName === undefined ? {} : { fromSessionName: entry.fromSessionName as string }),
@@ -635,6 +663,7 @@ export class WindowThreadStore {
       && previous.peerOwnerNonce === input.peerOwnerNonce
       && previous.source === input.source
       && previous.messageKind === input.messageKind
+      && JSON.stringify(previous.provenance) === JSON.stringify(input.provenance)
       && previous.traceId === input.traceId
       && previous.replyTo === input.replyTo
       && previous.fromSessionName === input.fromSessionName
@@ -853,6 +882,8 @@ export interface SessionHostRegistryOptions extends Omit<MessageRouterOptions, "
   endpoints?: readonly SessionEndpoint[];
   thread?: WindowThreadStore;
   controls?: SessionHostControls;
+  /** Canonical host boundary applied to every public send entry point. */
+  prepareMessage?: (request: SessionMessageRequest) => SessionMessageRequest;
 }
 
 export interface SessionHostSnapshot {
@@ -873,6 +904,7 @@ export class SessionHostRegistry {
   readonly thread: WindowThreadStore;
   #subscribers = new Set<(snapshot: SessionHostSnapshot) => void>();
   #controls: SessionHostControls;
+  #prepareMessage: ((request: SessionMessageRequest) => SessionMessageRequest) | undefined;
   #viewMode: SessionViewMode = "agents";
   #monitoredEndpointIds: readonly string[] = Object.freeze([]);
 
@@ -881,6 +913,7 @@ export class SessionHostRegistry {
     this.thread = options.thread ?? new WindowThreadStore();
     this.router = new MessageRouter({ ...options, directory: this.directory });
     this.#controls = options.controls ?? {};
+    this.#prepareMessage = options.prepareMessage;
     this.directory.subscribe(() => this.#publish(), { emitCurrent: false });
     this.thread.subscribe(() => this.#publish(), { emitCurrent: false });
   }
@@ -891,7 +924,26 @@ export class SessionHostRegistry {
   replaceEndpoints(endpoints: readonly SessionEndpoint[]): void { this.directory.replace(endpoints); }
   listEndpoints(): readonly SessionEndpoint[] { return this.directory.list(); }
   resolve(selector: string, options?: SessionResolveOptions): SessionResolution { return this.directory.resolve(selector, options); }
-  send(request: SessionMessageRequest): Promise<SessionMessageResult> { return this.router.route(request); }
+  send(request: SessionMessageRequest): Promise<SessionMessageResult> {
+    const prepared = this.#prepareMessage?.(request) ?? request;
+    if (prepared.provenance === undefined) return this.router.route(prepared);
+    const normalized = normalizeMessageProvenanceV1(prepared.provenance);
+    const messageId = prepared.messageId ?? normalized.messageId;
+    const messageKind = prepared.messageKind ?? "message";
+    const bound = normalized.confidence === "verified"
+      && normalized.messageId === messageId
+      && normalized.messageKind === messageKind
+      && normalized.deliveryMode === prepared.mode;
+    const provenance = bound
+      ? normalized
+      : unknownMessageProvenanceV1({
+          from: normalized.confidence === "unknown" ? normalized.legacyLabel : undefined,
+          messageId,
+          messageKind,
+          deliveryMode: prepared.mode,
+        });
+    return this.router.route({ ...prepared, ...(messageId === undefined ? {} : { messageId }), provenance });
+  }
   setControls(controls: SessionHostControls): void { this.#controls = controls; }
   setViewMode(mode: SessionViewMode): void {
     if (mode === this.#viewMode) return;

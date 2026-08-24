@@ -12,6 +12,11 @@ import {
 } from "../public/v1/completion-durability.ts";
 import { CompletionOutboxFileStore } from "./file-store.ts";
 import { COMPLETION_OUTBOX_MAX_ATTEMPTS, type CompletionOutboxRecord } from "./types.ts";
+import {
+  MESSAGE_PROVENANCE_VERSION,
+  type MessageProvenanceV1,
+  type VerifiedMessageProvenanceV1,
+} from "../shared/types.ts";
 
 const RECEIPT_DEADLINE_MS = 60_000;
 // Minimum gap between two store.gc() runs triggered by reconcile(). Expired
@@ -32,6 +37,8 @@ export interface CompletionDeliveryEnvelope {
     mode: CompletionIntent["mode"];
     resources: readonly string[];
     replayed: boolean;
+    /** Structured system attribution; absent on envelopes from older coordinators. */
+    provenance?: MessageProvenanceV1;
   };
 }
 
@@ -357,6 +364,15 @@ export class CompletionDeliveryCoordinator {
   deliveryEnvelope(record: CompletionOutboxRecord, replayed: boolean): CompletionDeliveryEnvelope {
     const resources = record.resources.map((resource) => resource.uri);
     const suffix = resources.length > 0 ? `\n\nResults: ${resources.join(", ")}` : "";
+    const provenance: VerifiedMessageProvenanceV1 = {
+      version: MESSAGE_PROVENANCE_VERSION,
+      messageId: record.dispatchId,
+      source: "completion-outbox",
+      messageKind: "result",
+      deliveryMode: "notify",
+      confidence: "verified",
+      sender: { kind: "system", ownerId: record.target.sessionId, label: "completion-outbox" },
+    };
     return {
       customType: "teammate-complete",
       content: `${record.summary}${suffix}`,
@@ -370,6 +386,7 @@ export class CompletionDeliveryCoordinator {
         mode: record.kind === "graph" ? "graph" : "single",
         resources,
         replayed,
+        provenance,
       },
     };
   }

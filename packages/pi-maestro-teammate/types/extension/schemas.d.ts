@@ -95,7 +95,7 @@ export declare const TeammateWaitParams: Type.TObject<{
     waitMs: Type.TOptional<Type.TInteger>;
 }>;
 export declare const ObserveParams: Type.TObject<{
-    action: Type.TUnsafe<"status" | "wait" | "watch">;
+    action: Type.TUnsafe<"status" | "diagnose" | "wait" | "watch">;
     targets: Type.TArray<Type.TObject<{
         kind: Type.TString;
         id: Type.TString;
@@ -118,7 +118,7 @@ export declare const LocalObserveParams: Type.TUnsafe<{
     waitMode?: "count" | "all" | "any" | undefined;
     waitCount?: number | undefined;
     until?: "completed" | "result-ready" | undefined;
-    action: "status" | "wait" | "watch";
+    action: "status" | "diagnose" | "wait" | "watch";
     targets: {
         id: string;
         kind: string;

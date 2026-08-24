@@ -283,9 +283,12 @@ import type {
   AgentStatus,
   AgentTerminalStatus,
   MessageEnvelope,
+  MessageProvenanceV1,
+  MessageSenderIdentityV1,
   SettledAgentRecord,
   SingleResult,
   TeammateInteractionRecord,
+  VerifiedMessageProvenanceV1,
 } from "../shared/types.ts";
 
 type TeammateToolResult<T> = AgentToolResult<T> & { isError?: boolean };
@@ -298,10 +301,52 @@ function isTeammateToolResult(value: unknown): value is TeammateToolResult<unkno
     && (record.isError === undefined || typeof record.isError === "boolean");
 }
 
+type VerifiedProvenanceInput = Omit<
+  VerifiedMessageProvenanceV1,
+  "version" | "confidence" | "messageId"
+> & { messageId?: string };
+
+function createVerifiedProvenance(input: VerifiedProvenanceInput): VerifiedMessageProvenanceV1 {
+  return {
+    version: MESSAGE_PROVENANCE_VERSION,
+    messageId: input.messageId ?? randomUUID(),
+    source: input.source,
+    messageKind: input.messageKind,
+    deliveryMode: input.deliveryMode,
+    confidence: "verified",
+    sender: input.sender,
+  };
+}
+
+function provenanceWithDeliveryMode(
+  provenance: MessageProvenanceV1,
+  deliveryMode: VerifiedMessageProvenanceV1["deliveryMode"],
+): MessageProvenanceV1 {
+  return provenance.confidence === "verified"
+    ? { ...provenance, deliveryMode }
+    : unknownMessageProvenanceV1({
+        from: provenance.legacyLabel,
+        messageId: provenance.messageId,
+        messageKind: provenance.messageKind,
+        deliveryMode,
+      });
+}
+
+function sameMessageSender(left: MessageSenderIdentityV1, right: MessageSenderIdentityV1): boolean {
+  if (left.kind !== right.kind) return false;
+  if (left.kind === "unknown" || right.kind === "unknown") return left.kind === right.kind;
+  return ("ownerId" in left ? left.ownerId : undefined) === ("ownerId" in right ? right.ownerId : undefined)
+    && ("correlationId" in left ? left.correlationId : undefined) === ("correlationId" in right ? right.correlationId : undefined)
+    && left.label === right.label;
+}
+
 import {
   TEAMMATE_COMPLETE_EVENT,
   TEAMMATE_STARTED_EVENT,
   TEAMMATE_MESSAGE_EVENT,
+  MESSAGE_PROVENANCE_VERSION,
+  normalizeMessageProvenanceV1,
+  unknownMessageProvenanceV1,
 } from "../shared/types.ts";
 import {
   appendAgentCatalog,
@@ -1326,6 +1371,29 @@ export default function registerTeammateExtension(
   let workspacePeerLifecycle = Promise.resolve();
   let sessionHostRegistry: SessionHostRegistry | undefined;
 
+  const currentRootOwnerId = (): string =>
+    workspacePeerPublisher?.identity.ownerId
+      ?? state.currentSessionId
+      ?? `process-${process.pid}`;
+
+  const senderIdentityForSessionMessage = (
+    senderCorrelationId: string | undefined,
+    source: SessionMessageRequest["source"],
+  ): Exclude<MessageSenderIdentityV1, { kind: "unknown" }> => {
+    if (senderCorrelationId && senderCorrelationId !== "caller") {
+      const sender = state.activeRuns.get(senderCorrelationId);
+      return {
+        kind: "teammate-agent",
+        ownerId: currentRootOwnerId(),
+        correlationId: senderCorrelationId,
+        label: sender?.name ?? sender?.agent ?? senderCorrelationId.slice(0, 8),
+      };
+    }
+    if (source === "monitor") return { kind: "system", ownerId: currentRootOwnerId(), label: "monitor" };
+    if (source === "user") return { kind: "human", ownerId: currentRootOwnerId(), label: "user" };
+    return { kind: "root-agent", ownerId: currentRootOwnerId(), label: "main" };
+  };
+
   /**
    * Canonical envelope for re-injecting a persisted incoming root message
    * (session-start replay and stale-queued re-drive). `details.mode` must
@@ -1358,6 +1426,12 @@ export default function registerTeammateExtension(
           requestedMode: entry.mode,
           mode: effectiveAction,
           ...(entry.messageKind === undefined ? {} : { messageKind: entry.messageKind }),
+          provenance: normalizeMessageProvenanceV1(entry.provenance, {
+            from: entry.fromSessionName ?? `owner-${entry.peerOwnerId.slice(0, 8)}`,
+            messageId: entry.messageId,
+            messageKind: entry.messageKind ?? "message",
+            deliveryMode: effectiveAction,
+          }),
           ...(options.replayed ? { replayed: true } : {}),
           ...(options.redriven ? { redriven: true } : {}),
         },
@@ -1767,6 +1841,7 @@ export default function registerTeammateExtension(
         commandId: request.messageId,
         source,
         messageKind: request.messageKind,
+        provenance: request.provenance,
         traceId: request.traceId,
         replyTo: request.replyTo ?? `owner:${publisher.identity.ownerId}`,
         fromSessionName: request.fromSessionName ?? workspacePeerSessionName,
@@ -1785,6 +1860,7 @@ export default function registerTeammateExtension(
             direction: "outgoing",
             source,
             ...(prepared.messageKind === undefined ? {} : { messageKind: prepared.messageKind }),
+            ...(prepared.provenance === undefined ? {} : { provenance: prepared.provenance }),
             ...(prepared.traceId === undefined ? {} : { traceId: prepared.traceId }),
             ...(prepared.replyTo === undefined ? {} : { replyTo: prepared.replyTo }),
             ...(prepared.fromSessionName === undefined ? {} : { fromSessionName: prepared.fromSessionName }),
@@ -1890,9 +1966,23 @@ export default function registerTeammateExtension(
 
   const prepareLocalAgentDelivery = (
     rawMessage: string,
-    options?: { senderCorrelationId?: string; messageKind?: SessionMessageKind },
-  ): { body: string; from: string } => {
+    options?: {
+      senderCorrelationId?: string;
+      messageKind?: SessionMessageKind;
+      provenance?: MessageProvenanceV1;
+      source?: "session-router" | "mailbox" | "monitor";
+      deliveryMode?: VerifiedMessageProvenanceV1["deliveryMode"];
+    },
+  ): { body: string; from: string; provenance: MessageProvenanceV1 } => {
     const sender = resolveLocalAgentSenderContext(state, options?.senderCorrelationId);
+    const provenance = options?.provenance === undefined
+      ? createVerifiedProvenance({
+          source: options?.source ?? "session-router",
+          messageKind: options?.messageKind ?? "coordination",
+          deliveryMode: options?.deliveryMode ?? "follow_up",
+          sender: senderIdentityForSessionMessage(options?.senderCorrelationId, "system"),
+        })
+      : normalizeMessageProvenanceV1(options.provenance, { from: sender.label });
     return {
       body: formatLocalAgentMessage({
         message: rawMessage,
@@ -1901,26 +1991,32 @@ export default function registerTeammateExtension(
         replyToSelector: sender.replyTo,
       }),
       from: sender.from,
+      provenance,
     };
   };
 
   const deferPreparedAgentContext = (
     correlationId: string,
     targetLabel: string,
-    prepared: { body: string; from: string },
+    prepared: { body: string; from: string; provenance: MessageProvenanceV1 },
     messageId?: string,
   ): void => {
     const agent = state.activeRuns.get(correlationId);
     if (!agent) throw new Error(`Agent "${targetLabel}" is no longer available.`);
-    deferAgentContextMessage(agent, prepared.body, messageId);
+    const provenance = provenanceWithDeliveryMode(prepared.provenance, "notify");
+    const durableMessageId = provenance.messageId ?? messageId;
+    deferAgentContextMessage(agent, prepared.body, durableMessageId);
+    const deferred = agent.deferredContextMessages?.at(-1);
+    if (deferred && deferred.messageId === durableMessageId) deferred.provenance = provenance;
     const now = Date.now();
     agent.inbox.push({
-      id: randomUUID(),
+      id: durableMessageId ?? randomUUID(),
       from: prepared.from,
       to: targetLabel,
       kind: "notification",
       payload: prepared.body,
       timestamp: now,
+      provenance,
     });
     agent.outputLog.push(`[${new Date(now).toISOString().slice(11, 19)}] ◀ status context deferred: ${prepared.body.slice(0, 100)}`);
     trimAgentBuffers(agent);
@@ -1932,6 +2028,7 @@ export default function registerTeammateExtension(
       mode: "follow_up",
       message: prepared.body,
       lastActivityAt: now,
+      provenance,
       isSend: true,
     });
     markWorkspacePeerDirty();
@@ -1960,7 +2057,7 @@ export default function registerTeammateExtension(
   const injectLocalAgentMessage = (
     correlationId: string,
     targetLabel: string,
-    delivery: { body: string; from: string },
+    delivery: { body: string; from: string; provenance: MessageProvenanceV1 },
     requestedMode: "steer" | "follow_up",
   ): { delivered: boolean; error?: string; mode?: RpcMessageMode; wasSleeping?: boolean } => {
     const messageFrom = delivery.from;
@@ -1969,7 +2066,8 @@ export default function registerTeammateExtension(
     if (!agent.stdin?.writable) {
       const deferredContext = takeDeferredAgentContext(agent);
       const message = messageWithDeferredAgentContext(deferredContext, delivery.body);
-      const restarted = agent.status === "sleeping" && agent.restart?.(message) === true;
+      const provenance = provenanceWithDeliveryMode(delivery.provenance, "prompt");
+      const restarted = agent.status === "sleeping" && agent.restart?.(message, provenance) === true;
       if (!restarted) {
         restoreDeferredAgentContext(agent, deferredContext);
         return { delivered: false, error: `Agent "${targetLabel}" has no restorable runtime.` };
@@ -1989,12 +2087,13 @@ export default function registerTeammateExtension(
       const now = Date.now();
       agent.promptSeq = (agent.promptSeq ?? 0) + 1;
       agent.inbox.push({
-        id: randomUUID(),
+        id: provenance.messageId ?? randomUUID(),
         from: messageFrom,
         to: targetLabel,
         kind: "task",
         payload: message,
         timestamp: now,
+        provenance,
       });
       agent.outputLog.push(`[${new Date(now).toISOString().slice(11, 19)}] ◀ cold-resume prompt: ${message.slice(0, 100)}`);
       trimAgentBuffers(agent);
@@ -2006,6 +2105,7 @@ export default function registerTeammateExtension(
         mode: "prompt",
         message,
         lastActivityAt: now,
+        provenance,
         isSend: true,
       });
       markWorkspacePeerDirty();
@@ -2022,6 +2122,7 @@ export default function registerTeammateExtension(
       : requestedMode === "follow_up" && agent.resultReadyAt !== undefined
         ? "prompt"
         : requestedMode;
+    const provenance = provenanceWithDeliveryMode(delivery.provenance, mode);
     const sent = sendRpcMessage(agent.stdin, message, mode, leaseToken(agent.lease));
     if (!sent) {
       restoreDeferredAgentContext(agent, deferredContext);
@@ -2033,12 +2134,13 @@ export default function registerTeammateExtension(
     if (mode === "prompt") agent.promptSeq = (agent.promptSeq ?? 0) + 1;
     const wasSleeping = wakeSleepingAgent(pi, agent, now);
     agent.inbox.push({
-      id: randomUUID(),
+      id: provenance.messageId ?? randomUUID(),
       from: messageFrom,
       to: targetLabel,
       kind: "task",
       payload: message,
       timestamp: now,
+      provenance,
     });
     agent.outputLog.push(`[${new Date(now).toISOString().slice(11, 19)}] ◀ ${mode}: ${message.slice(0, 100)}`);
     trimAgentBuffers(agent);
@@ -2050,6 +2152,7 @@ export default function registerTeammateExtension(
       mode,
       message,
       lastActivityAt: now,
+      provenance,
       isSend: true,
     });
     markWorkspacePeerDirty();
@@ -2085,11 +2188,21 @@ export default function registerTeammateExtension(
           state,
           envelope.senderId === "caller" ? undefined : envelope.senderId,
         );
+        const prepared = {
+          body: envelope.payload,
+          from: sender.from,
+          provenance: normalizeMessageProvenanceV1(envelope.provenance, {
+            from: sender.label,
+            messageId: envelope.messageId,
+            messageKind: envelope.kind === "follow_up" || envelope.kind === "steer" ? "message" : envelope.kind,
+            deliveryMode: envelope.mode,
+          }),
+        };
         if (envelope.mode === "notify" && envelope.kind === "follow_up") {
           deferPreparedAgentContext(
             envelope.recipientCorrelationId,
             target.name ?? target.correlationId,
-            { body: envelope.payload, from: sender.from },
+            prepared,
             envelope.messageId,
           );
           return "deferred";
@@ -2098,7 +2211,7 @@ export default function registerTeammateExtension(
         const delivery = injectLocalAgentMessage(
           envelope.recipientCorrelationId,
           target.name ?? target.correlationId,
-          { body: envelope.payload, from: sender.from },
+          prepared,
           mode,
         );
         if (!delivery.delivered) throw new Error(delivery.error ?? `Failed to inject message into "${target.name ?? target.correlationId}".`);
@@ -2114,6 +2227,9 @@ export default function registerTeammateExtension(
       async (request) => {
         const prepared = prepareLocalAgentDelivery(request.message, {
           senderCorrelationId: request.senderId === "caller" ? undefined : request.senderId,
+          provenance: request.provenance,
+          source: "mailbox",
+          deliveryMode: request.mode ?? "follow_up",
         });
         const delivery = injectLocalAgentMessage(
           request.recipientCorrelationId,
@@ -2137,6 +2253,9 @@ export default function registerTeammateExtension(
       rootGlobals[MAILBOX_REGISTRY_KEY] = createDirectAgentHostRegistry(async (request) => {
         const prepared = prepareLocalAgentDelivery(request.message, {
           senderCorrelationId: request.senderId === "caller" ? undefined : request.senderId,
+          provenance: request.provenance,
+          source: "mailbox",
+          deliveryMode: request.mode ?? "follow_up",
         });
         const delivery = injectLocalAgentMessage(
           request.recipientCorrelationId,
@@ -2169,11 +2288,15 @@ export default function registerTeammateExtension(
     options?: {
       senderCorrelationId?: string;
       messageKind?: SessionMessageKind;
-      preparedDelivery?: { body: string; from: string };
+      provenance?: MessageProvenanceV1;
+      preparedDelivery?: { body: string; from: string; provenance: MessageProvenanceV1 };
     },
   ): Promise<{ delivered: boolean; error?: string; mode?: RpcMessageMode; wasSleeping?: boolean; contextDeferred?: boolean }> => {
     const fence = captureRootSessionFence();
-    const prepared = options?.preparedDelivery ?? prepareLocalAgentDelivery(message, options);
+    const prepared = options?.preparedDelivery ?? prepareLocalAgentDelivery(message, {
+      ...options,
+      deliveryMode: requestedMode,
+    });
     const senderId = options?.senderCorrelationId ?? "caller";
     // Trusted host status is context-only and remains ACCEPTED in the durable
     // mailbox until a substantive delivery consumes and acknowledges it.
@@ -2185,14 +2308,16 @@ export default function registerTeammateExtension(
         return { delivered: true, mode: "follow_up", contextDeferred: true };
       }
       try {
-        const enqueued = await host.rollout.deliver({
+        const mailboxRequest = {
           senderId,
           recipientId: agent.name ?? targetLabel,
           recipientCorrelationId: correlationId,
-          kind: "follow_up",
-          mode: "notify",
+          kind: "follow_up" as const,
+          mode: "notify" as const,
           payload: prepared.body,
-        });
+          provenance: provenanceWithDeliveryMode(prepared.provenance, "notify"),
+        };
+        const enqueued = await host.rollout.deliver(mailboxRequest);
         if (!enqueued.result.ok) {
           const reason = "message" in enqueued.result ? enqueued.result.message : "unknown error";
           return { delivered: false, error: reason, mode: "follow_up" };
@@ -2213,14 +2338,16 @@ export default function registerTeammateExtension(
     const host = mailboxHost;
     if (host && host.mode === "authoritative" && requestedMode !== "steer" && agent?.stdin?.writable) {
       try {
-        const enqueued = await host.rollout.deliver({
+        const mailboxRequest = {
           senderId,
           recipientId: agent?.name ?? targetLabel,
           recipientCorrelationId: correlationId,
-          kind: "follow_up",
-          mode: "follow_up",
+          kind: "follow_up" as const,
+          mode: "follow_up" as const,
           payload: prepared.body,
-        });
+          provenance: prepared.provenance,
+        };
+        const enqueued = await host.rollout.deliver(mailboxRequest);
         if (!ownsRootSessionFence(fence)) {
           return { delivered: false, error: "The originating Pi session changed during local agent delivery.", mode: "follow_up" };
         }
@@ -2238,6 +2365,7 @@ export default function registerTeammateExtension(
             mode: "follow_up",
             message: prepared.body,
             lastActivityAt: Date.now(),
+            provenance: prepared.provenance,
             isSend: true,
           });
           return { delivered: false, error: reason, mode: "follow_up" };
@@ -2266,13 +2394,20 @@ export default function registerTeammateExtension(
     const prepared = prepareLocalAgentDelivery(request.message, {
       senderCorrelationId: request.senderCorrelationId,
       messageKind: request.messageKind,
+      provenance: request.provenance,
+      deliveryMode: request.mode,
     });
     const contextDeferred = !sessionMessageTriggersTurn(request.messageKind);
     const delivered = safeSendMessage(pi, {
       customType: "teammate-message",
       content: prepared.body,
       display: true,
-      details: { source: "session-router", endpointId: endpoint.id, mode: request.mode },
+      details: {
+        source: "session-router",
+        endpointId: endpoint.id,
+        mode: request.mode,
+        provenance: prepared.provenance,
+      },
     }, {
       triggerTurn: !contextDeferred,
       deliverAs: request.mode === "steer" ? "steer" : "followUp",
@@ -2316,6 +2451,7 @@ export default function registerTeammateExtension(
         mode: "abort",
         message: request.message,
         lastActivityAt: now,
+        ...(request.provenance === undefined ? {} : { provenance: request.provenance }),
         isSend: true,
       });
       const terminated = killAgentTree(state, correlationId);
@@ -2335,6 +2471,7 @@ export default function registerTeammateExtension(
       {
         senderCorrelationId: request.senderCorrelationId,
         messageKind: request.messageKind,
+        provenance: request.provenance,
       },
     );
     const effectiveMode = result.mode === "steer" ? "steer" : "follow_up";
@@ -2437,6 +2574,45 @@ export default function registerTeammateExtension(
     },
   };
 
+  const prepareSessionMessage = (request: SessionMessageRequest): SessionMessageRequest => {
+    const messageKind = normalizeSessionMessageKind(request.messageKind, request.trustedStatus);
+    const supplied = request.provenance === undefined
+      ? undefined
+      : normalizeMessageProvenanceV1(request.provenance);
+    const messageId = request.messageId ?? supplied?.messageId ?? randomUUID();
+    const expectedKind = messageKind ?? "message";
+    const expectedSource = request.source === "monitor" ? "monitor" : "session-router";
+    const expectedSender = senderIdentityForSessionMessage(request.senderCorrelationId, request.source);
+    const bound = supplied?.confidence === "verified"
+      && supplied.messageId === messageId
+      && supplied.source === expectedSource
+      && supplied.messageKind === expectedKind
+      && supplied.deliveryMode === request.mode
+      && sameMessageSender(supplied.sender, expectedSender);
+    const provenance = supplied === undefined
+      ? createVerifiedProvenance({
+          messageId,
+          source: expectedSource,
+          messageKind: expectedKind,
+          deliveryMode: request.mode,
+          sender: expectedSender,
+        })
+      : bound
+        ? supplied
+        : unknownMessageProvenanceV1({
+            from: supplied.confidence === "unknown" ? supplied.legacyLabel : undefined,
+            messageId,
+            messageKind: expectedKind,
+            deliveryMode: request.mode,
+          });
+    return {
+      ...request,
+      messageId,
+      messageKind,
+      provenance,
+    };
+  };
+
   const windowThreadStore = new WindowThreadStore({
     persist(entry) {
       pi.appendEntry(WINDOW_THREAD_ENTRY_TYPE, entry);
@@ -2446,6 +2622,7 @@ export default function registerTeammateExtension(
     surface: sessionSurfaceModeFromEnv(),
     thread: windowThreadStore,
     legacy: legacySessionAuthority,
+    prepareMessage: prepareSessionMessage,
     adapters: [
       createLocalRootTransportAdapter(deliverLocalRootEndpoint),
       createLocalAgentMailboxTransportAdapter(deliverLocalAgentEndpoint),
@@ -2477,11 +2654,7 @@ export default function registerTeammateExtension(
     refreshSessionEndpointDirectory(true);
     const registry = sessionHostRegistry;
     if (!registry) return { delivered: false, error: "Session delivery authority is unavailable." };
-    const normalizedKind = normalizeSessionMessageKind(request.messageKind, request.trustedStatus);
-    const normalizedRequest = normalizedKind === request.messageKind
-      ? request
-      : { ...request, messageKind: normalizedKind };
-    const result = await registry.send(normalizedRequest);
+    const result = await registry.send(request);
     if (!ownsRootSessionFence(fence)) return staleRootSessionResult();
     return result;
   };
@@ -2590,6 +2763,12 @@ export default function registerTeammateExtension(
             command.messageKind,
             command.source === "monitor",
           ) ?? "message";
+          const commandProvenance = normalizeMessageProvenanceV1(command.provenance, {
+            from: command.fromSessionName ?? `owner-${command.fromOwnerId.slice(0, 8)}`,
+            messageId: command.commandId,
+            messageKind: effectiveMessageKind,
+            deliveryMode: command.action,
+          });
           const incoming = {
             messageId: command.commandId,
             workspaceId: command.workspaceId,
@@ -2598,6 +2777,7 @@ export default function registerTeammateExtension(
             direction: "incoming" as const,
             source: command.source ?? "system",
             messageKind: effectiveMessageKind,
+            provenance: commandProvenance,
             traceId: command.traceId ?? command.commandId,
             replyTo: `owner:${command.fromOwnerId}`,
             ...(command.fromSessionName === undefined ? {} : { fromSessionName: command.fromSessionName }),
@@ -2626,6 +2806,7 @@ export default function registerTeammateExtension(
               effectiveMessageKind,
             );
             const effectiveAction = delivery.action;
+            const effectiveProvenance = provenanceWithDeliveryMode(commandProvenance, effectiveAction);
             const deferredFor = delivery.deferred
               ? effectiveMessageKind === "status" ? "status-policy" : "foreground-bash-bg"
               : undefined;
@@ -2650,6 +2831,7 @@ export default function registerTeammateExtension(
                 requestedMode: command.action,
                 mode: effectiveAction,
                 ...(command.messageKind === undefined ? {} : { messageKind: effectiveMessageKind }),
+                provenance: effectiveProvenance,
                 ...(deferredFor ? { deferredFor } : {}),
               },
             }, {
@@ -2703,6 +2885,7 @@ export default function registerTeammateExtension(
                   preparedDelivery: {
                     body: workspaceMessage,
                     from: command.fromSessionName ?? `owner-${command.fromOwnerId.slice(0, 8)}`,
+                    provenance: commandProvenance,
                   },
                 },
               );
@@ -2990,6 +3173,18 @@ export default function registerTeammateExtension(
         [...progressState.values()].sort((a, b) => a.taskIndex - b.taskIndex);
 
       const correlationId = randomUUID();
+      const initialTaskProvenanceByCorrelationId = new Map<string, MessageProvenanceV1>();
+      for (const childId of isMultiTask ? taskCorrelationIds : [correlationId]) {
+        initialTaskProvenanceByCorrelationId.set(childId, createVerifiedProvenance({
+          messageId: `${childId}:initial`,
+          source: monitorSessionDispatch ? "monitor" : "initial-task",
+          messageKind: "task",
+          deliveryMode: "prompt",
+          sender: monitorSessionDispatch
+            ? { kind: "system", ownerId: currentRootOwnerId(), label: "monitor" }
+            : { kind: "root-agent", ownerId: currentRootOwnerId(), label: "main" },
+        }));
+      }
 
       const abortController = new AbortController();
       const taskAbortControllers = isMultiTask
@@ -3061,6 +3256,7 @@ export default function registerTeammateExtension(
         abortController,
         ...(isMultiTask ? { graphAbortController: abortController } : {}),
         ownsChildProcess: !isMultiTask,
+        ...(isMultiTask ? {} : { initialMessageProvenance: initialTaskProvenanceByCorrelationId.get(correlationId) }),
         inbox: [],
         outputLog: [],
         lastActivityAt: Date.now(),
@@ -3137,6 +3333,7 @@ export default function registerTeammateExtension(
             abortController: taskAbortControllers[index],
             graphAbortController: abortController,
             ownsChildProcess: true,
+            initialMessageProvenance: initialTaskProvenanceByCorrelationId.get(childId),
             inbox: [],
             outputLog: [],
             lastActivityAt: Date.now(),
@@ -3992,13 +4189,14 @@ export default function registerTeammateExtension(
                 ? (request) => activeMailboxHost.rollout.deliver(request).then((r) => ({ path: r.path, result: r.result }))
                 : undefined;
             })(),
-            async (target, message, mode) => {
+            async (target, message, mode, provenance) => {
               const monitorAuthority = proxyCanCrossSession();
               const delivered = await routeSessionMessage({
                 selector: target,
                 message,
                 mode,
                 source: monitorAuthority ? "monitor" : "system",
+                provenance,
                 signal: activeAgent.abortController.signal,
               });
               return delivered.delivered && (!monitorAuthority || proxyCanCrossSession());
@@ -4045,7 +4243,7 @@ export default function registerTeammateExtension(
         task: NormalizedTask,
         taskIndex?: number,
       ): void => {
-        target.restart = (message: string): boolean => {
+        target.restart = (message: string, provenance?: MessageProvenanceV1): boolean => {
           const checkpoint = target.sessionFile;
           if (
             target.restartPending
@@ -4065,6 +4263,11 @@ export default function registerTeammateExtension(
           target.failedAt = undefined;
           target.resultReadyAt = undefined;
           target.lastActivityAt = Date.now();
+          target.initialMessageProvenance = normalizeMessageProvenanceV1(provenance, {
+            messageId: provenance?.messageId ?? randomUUID(),
+            messageKind: "message",
+            deliveryMode: "prompt",
+          });
           coldRestarting.add(target.correlationId);
 
           let restartDeliverySettled = false;
@@ -4538,7 +4741,10 @@ export default function registerTeammateExtension(
   // Tool 2: teammate-send — send message to named agent
   // =========================================================================
 
-  const sendTool: ToolDefinition<typeof TeammateSendParams, { delivered: boolean }> = {
+  const sendTool: ToolDefinition<
+    typeof TeammateSendParams,
+    { delivered: boolean; provenance?: MessageProvenanceV1 }
+  > = {
     name: "teammate-send",
     label: "Teammate Send",
     renderShell: "self",
@@ -4552,7 +4758,7 @@ export default function registerTeammateExtension(
       id: string,
       params: { to: string; message?: string; mode?: RpcMessageMode; kind?: SessionMessageKind },
       signal: AbortSignal,
-    ): Promise<TeammateToolResult<{ delivered: boolean }>> {
+    ): Promise<TeammateToolResult<{ delivered: boolean; provenance?: MessageProvenanceV1 }>> {
       const requestedMode = params.mode ?? "follow_up";
       const requestedMessageKind = params.kind ?? "coordination";
       const messageKind = normalizeSessionMessageKind(requestedMessageKind) ?? "coordination";
@@ -4644,6 +4850,15 @@ export default function registerTeammateExtension(
       // discovered in Monitor mode or carried by an incoming workspace
       // message (the reply path for non-Monitor windows).
       const monitorAuthority = !cid && ownsMonitorCommunication(monitorCapture);
+      const provenance = createVerifiedProvenance({
+        messageId: id,
+        source: monitorAuthority ? "monitor" : "session-router",
+        messageKind,
+        deliveryMode: routedMode,
+        sender: monitorAuthority
+          ? { kind: "system", ownerId: currentRootOwnerId(), label: "monitor" }
+          : { kind: "root-agent", ownerId: currentRootOwnerId(), label: "main" },
+      });
       const delivery = await routeSessionMessage({
         selector: params.to,
         targetCorrelationId: cid,
@@ -4651,6 +4866,7 @@ export default function registerTeammateExtension(
         mode: routedMode,
         source: monitorAuthority ? "monitor" : "system",
         messageKind,
+        provenance,
         ...(!cid && monitorCapture ? { authorize: () => ownsMonitorCommunication(monitorCapture) } : {}),
         signal,
       });
@@ -4672,7 +4888,7 @@ export default function registerTeammateExtension(
         return {
           content: [{ type: "text", text: error ?? `Failed to send message to "${params.to}".` }],
           isError: true,
-          details: { delivered: false },
+          details: { delivered: false, provenance },
         };
       }
 
@@ -4686,7 +4902,7 @@ export default function registerTeammateExtension(
           return {
             content: [{ type: "text", text: `Message ${disposition} for the root session (kind ${messageKind}, requested ${mode}, effective ${effectiveMode}).` }],
             isError: false,
-            details: { delivered: true },
+            details: { delivered: true, provenance },
           };
         }
         const queuedHint = deliveryStage === "queued"
@@ -4698,7 +4914,7 @@ export default function registerTeammateExtension(
             text: `Message ${deliveryStage} for workspace target "${params.to}" (kind ${messageKind}, requested ${mode}, effective ${effectiveMode}).${queuedHint}`,
           }],
           isError: false,
-          details: { delivered: true },
+          details: { delivered: true, provenance },
         };
       }
       if (mode === "abort") {
@@ -4709,7 +4925,7 @@ export default function registerTeammateExtension(
             text: `Agent "${params.to}" aborted; terminated ${terminatedCount} agent${terminatedCount === 1 ? "" : "s"} in its subtree.`,
           }],
           isError: false,
-          details: { delivered: true },
+          details: { delivered: true, provenance },
         };
       }
 
@@ -4721,7 +4937,7 @@ export default function registerTeammateExtension(
       return {
         content: [{ type: "text", text: `Message ${modeLabel} for "${params.to}".${delivery.receipt?.wasSleeping ? " Agent woken up." : ""}` }],
         isError: false,
-        details: { delivered: true },
+        details: { delivered: true, provenance },
       };
     },
 
@@ -5445,11 +5661,17 @@ export default function registerTeammateExtension(
         syncMonitorInteractionStatus(status);
       },
       notifyMain(message, target) {
+        const provenance = createVerifiedProvenance({
+          source: "monitor",
+          messageKind: "status",
+          deliveryMode: "notify",
+          sender: { kind: "system", ownerId: currentRootOwnerId(), label: "monitor" },
+        });
         safeSendMessage(pi, {
           customType: "teammate-message",
           content: message,
           display: true,
-          details: { source: "monitor", ...(target ? { target } : {}) },
+          details: { source: "monitor", ...(target ? { target } : {}), provenance },
         }, { triggerTurn: false });
       },
       recordLedger: recordMonitorLedger,
@@ -5526,11 +5748,17 @@ export default function registerTeammateExtension(
     // as the fleet Monitor.
     const guidance = verdict.guidance ?? verdict.reason ?? "review the last turn";
     if (advisorState.gate.gate("advisor", guidance, "notify") === undefined) return;
+    const provenance = createVerifiedProvenance({
+      source: "advisor",
+      messageKind: "status",
+      deliveryMode: "notify",
+      sender: { kind: "system", ownerId: currentRootOwnerId(), label: "advisor" },
+    });
     safeSendMessage(pi, {
       customType: "teammate-message",
       content: `[advisor] ${verdict.status === "blocker" ? "⚠ " : ""}${guidance}`,
       display: true,
-      details: { source: "advisor", severity: verdict.status },
+      details: { source: "advisor", severity: verdict.status, provenance },
     }, { triggerTurn: false });
     if (monitorConfig.ledgerEnabled) {
       void appendMonitorLedgerRecord(root, {

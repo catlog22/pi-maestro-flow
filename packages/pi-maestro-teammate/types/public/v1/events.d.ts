@@ -5,9 +5,9 @@
  * updates on the shared `pi.events` bus. Consumers should import event names
  * and payload types from this leaf module instead of the extension entry point.
  */
-import type { AgentActivity, AgentProgressSnapshot, AgentRunOutcome, AgentStatus, StructuredResult, TeammateResultPublishedEvent } from "../../shared/types.ts";
+import type { AgentActivity, AgentProgressSnapshot, AgentRunOutcome, AgentStatus, MessageProvenanceV1, StructuredResult, TeammateResultPublishedEvent } from "../../shared/types.ts";
 import type { SessionHostSnapshot, WindowThreadSnapshot } from "../../sessions/session-core.ts";
-export type { StructuredResult, TeammateExecutionProvenance, TeammateResultPublishedEvent, } from "../../shared/types.ts";
+export type { MessageProvenanceV1, StructuredResult, TeammateExecutionProvenance, TeammateResultPublishedEvent, } from "../../shared/types.ts";
 export { TEAMMATE_COMPLETE_EVENT, TEAMMATE_MESSAGE_EVENT, TEAMMATE_OPEN_AGENT_EVENT, TEAMMATE_RESULT_PUBLISHED_EVENT, TEAMMATE_STARTED_EVENT, TEAMMATE_VIEWING_EVENT, } from "../../shared/types.ts";
 export { SESSION_HOST_REGISTRY_EVENT, WINDOW_THREAD_EVENT, } from "../../sessions/session-core.ts";
 /** Flow diagnostics query for current session/Monitor availability authority. */
@@ -94,6 +94,8 @@ export interface TeammateCompleteEvent {
      * completed run produced structured output or a final assistant text.
      */
     structuredResults?: StructuredResult[];
+    /** Attribution for the automatic completion message, when one is published. */
+    provenance?: MessageProvenanceV1;
 }
 /**
  * `teammate:message` progress variant — a child reported tool/token activity.
@@ -123,6 +125,8 @@ export interface TeammateSendMessageEvent {
     message: string;
     /** Epoch milliseconds of the send operation. */
     lastActivityAt?: number;
+    /** Structured send attribution; absent on events from older emitters. */
+    provenance?: MessageProvenanceV1;
     isSend: true;
     isInteraction?: undefined;
 }

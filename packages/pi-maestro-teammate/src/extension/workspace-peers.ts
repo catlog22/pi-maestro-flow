@@ -11,6 +11,11 @@ import {
 } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import {
+  normalizeMessageProvenanceV1,
+  unknownMessageProvenanceV1,
+  type MessageProvenanceV1,
+} from "../shared/types.ts";
 
 export const WORKSPACE_PEER_PROTOCOL_VERSION = 1 as const;
 /**
@@ -362,6 +367,8 @@ export interface WorkspacePeerCommand {
   message: string;
   source?: WorkspacePeerMessageSource;
   messageKind?: WorkspacePeerMessageKind;
+  /** Structured sender attribution; absent on legacy commands. */
+  provenance?: MessageProvenanceV1;
   traceId?: string;
   replyTo?: string;
   fromSessionName?: string;
@@ -1452,7 +1459,28 @@ function validateCommand(value: unknown, expectedWorkspaceId?: string): Workspac
     || !boundedInteger(value.expiresAt)
     || value.expiresAt < value.createdAt
     || value.expiresAt - value.createdAt > MAX_COMMAND_TTL_MS) return undefined;
-  return value as unknown as WorkspacePeerCommand;
+  if (value.provenance === undefined) return value as unknown as WorkspacePeerCommand;
+  const normalized = normalizeMessageProvenanceV1(value.provenance);
+  const expectedKind = value.messageKind ?? "message";
+  const senderOwnerId = normalized.confidence === "verified" && "ownerId" in normalized.sender
+    ? normalized.sender.ownerId
+    : undefined;
+  const expectedSource = value.source === "monitor" ? "monitor" : "session-router";
+  const bound = normalized.confidence === "verified"
+    && normalized.messageId === value.commandId
+    && normalized.source === expectedSource
+    && normalized.messageKind === expectedKind
+    && normalized.deliveryMode === value.action
+    && senderOwnerId === value.fromOwnerId;
+  const provenance = bound
+    ? normalized
+    : unknownMessageProvenanceV1({
+        from: normalized.confidence === "unknown" ? normalized.legacyLabel : undefined,
+        messageId: value.commandId,
+        messageKind: expectedKind,
+        deliveryMode: value.action,
+      });
+  return { ...value, provenance } as unknown as WorkspacePeerCommand;
 }
 
 export function validateWorkspacePeerCommand(value: unknown, workspaceId?: string): WorkspacePeerCommand | undefined {
@@ -1514,6 +1542,7 @@ export async function enqueueWorkspacePeerCommand(
     commandId?: string;
     source?: WorkspacePeerMessageSource;
     messageKind?: WorkspacePeerMessageKind;
+    provenance?: MessageProvenanceV1;
     traceId?: string;
     replyTo?: string;
     fromSessionName?: string;
@@ -1546,21 +1575,23 @@ export async function enqueueWorkspacePeerCommand(
     message,
     ...(options.source === undefined ? {} : { source: options.source }),
     ...(options.messageKind === undefined ? {} : { messageKind: options.messageKind }),
+    ...(options.provenance === undefined ? {} : { provenance: options.provenance }),
     ...(options.traceId === undefined ? {} : { traceId: options.traceId }),
     ...(options.replyTo === undefined ? {} : { replyTo: options.replyTo }),
     ...(options.fromSessionName === undefined ? {} : { fromSessionName: options.fromSessionName }),
     createdAt,
     expiresAt: createdAt + ttlMs,
   };
-  if (!validateCommand(command, identity.workspaceId)) throw new Error("constructed command failed protocol validation");
-  await options.beforePublish?.(command);
+  const validated = validateCommand(command, identity.workspaceId);
+  if (!validated) throw new Error("constructed command failed protocol validation");
+  await options.beforePublish?.(validated);
   await writePrivateJsonAtomic(
     commandPath(identity, target.ownerId, commandId),
-    command,
+    validated,
     MAX_COMMAND_FILE_BYTES,
-    { beforeCommit: () => options.beforeCommit?.(command) },
+    { beforeCommit: () => options.beforeCommit?.(validated) },
   );
-  return command;
+  return validated;
 }
 
 async function readResponse(
@@ -1668,6 +1699,7 @@ export async function sendWorkspacePeerCommand(
     signal?: AbortSignal;
     source?: WorkspacePeerMessageSource;
     messageKind?: WorkspacePeerMessageKind;
+    provenance?: MessageProvenanceV1;
     traceId?: string;
     replyTo?: string;
     fromSessionName?: string;
@@ -1679,6 +1711,7 @@ export async function sendWorkspacePeerCommand(
     ttlMs,
     source: options.source,
     messageKind: options.messageKind,
+    provenance: options.provenance,
     traceId: options.traceId,
     replyTo: options.replyTo,
     fromSessionName: options.fromSessionName,
