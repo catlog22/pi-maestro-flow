@@ -8,6 +8,7 @@ import {
   type ObservationProvider,
   type ObservationReadOptions,
   type ObservationSnapshot,
+  type ObserveResult,
   type ObservationWaitOptions,
 } from "../src/public/v1/observation.ts";
 
@@ -448,4 +449,65 @@ test("formatObserveResult renders structured output only in verbose detail", () 
   const compact = formatObserveResult(result, false).join("\n");
   assert.doesNotMatch(compact, /structured output/);
   assert.match(compact, /teammate:job/);
+});
+
+test("formatObserveResult always shows what the target said it finished", () => {
+  // nativeStatus and summary are inferred from agent counts and idle time, so a
+  // window that has not started the work yet and one that finished it both read
+  // as sleeping with zero agents. That ambiguity is what made Monitor re-dispatch
+  // work already in flight, so the target's own account cannot be verbose-only.
+  const observation: ObservationSnapshot = {
+    target: { kind: "workspace", id: "owner:4d680755" },
+    found: true,
+    nativeStatus: "sleeping",
+    phase: "settled",
+    outcome: "success",
+    waitStatus: "completed",
+    summary: "window:4d680755 · sleeping · 0 agents · 0 bash_bg",
+    updatedAt: 1_000,
+    lastResult: "WINDOW_FINISHED\nfound 3 blockers in the parser.",
+  };
+  const result: ObserveResult = {
+    action: "status",
+    reason: "snapshot",
+    durationMs: 1,
+    observations: [observation],
+  };
+
+  const plain = formatObserveResult(result);
+  assert.ok(
+    plain.some((line) => line === "  result: WINDOW_FINISHED found 3 blockers in the parser."),
+    `the non-verbose rendering must carry the result: ${JSON.stringify(plain)}`,
+  );
+
+  // Verbose keeps the text as the target wrote it, newlines included.
+  const detailed = formatObserveResult(result, true);
+  assert.ok(detailed.includes("  --- last result ---"));
+  assert.ok(detailed.includes("  WINDOW_FINISHED"));
+  assert.ok(detailed.includes("  found 3 blockers in the parser."));
+
+  // A target that has published no result says nothing rather than an empty line.
+  const silent = formatObserveResult({ ...result, observations: [{ ...observation, lastResult: undefined }] });
+  assert.equal(silent.some((line) => line.startsWith("  result:")), false);
+});
+
+test("a long result is cut for the summary rendering but kept whole under verbose", () => {
+  const long = "x".repeat(400);
+  const observation: ObservationSnapshot = {
+    target: { kind: "workspace", id: "owner:abc" },
+    found: true,
+    nativeStatus: "sleeping",
+    phase: "settled",
+    summary: "window · sleeping",
+    updatedAt: 1_000,
+    lastResult: long,
+  };
+  const result: ObserveResult = { action: "status", reason: "snapshot", durationMs: 1, observations: [observation] };
+
+  const line = formatObserveResult(result).find((candidate) => candidate.startsWith("  result:"));
+  assert.ok(line !== undefined);
+  assert.ok(line.endsWith("…"), "a cut result is marked as cut rather than reading as complete");
+  assert.ok(line.length < long.length);
+
+  assert.ok(formatObserveResult(result, true).includes(`  ${long}`), "verbose keeps the whole text");
 });

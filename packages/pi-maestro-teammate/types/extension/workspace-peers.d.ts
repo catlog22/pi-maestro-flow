@@ -112,6 +112,22 @@ export type WorkspaceMainSessionProgressEvent = {
     at: number;
     phase: "agent_start" | "turn_start" | "turn_end" | "agent_end" | "agent_settled";
 };
+/**
+ * The window's most recent root-session settle, kept until the next one replaces it.
+ *
+ * `mainProgress` already carries `agent_settled` and the assistant text, but it
+ * is a ring of `MAX_MAIN_SESSION_PROGRESS_EVENTS`: a single turn emits close to
+ * that many events, so an observer polling on a heartbeat rather than
+ * continuously reads a projection the settle has already scrolled out of. This
+ * field is one slot, overwritten in place, so the answer to "what did this
+ * window last finish, and what did it say" survives any polling interval.
+ */
+export interface WorkspaceMainSettle {
+    /** When the root session reached `agent_settled`. */
+    at: number;
+    /** Last assistant text of that run, bounded like the progress projection; absent when the run produced none. */
+    lastResult?: string;
+}
 /** Bounded, content-safe projection of the window's root Pi session. */
 export interface WorkspaceMainSessionProgress {
     updatedAt: number;
@@ -133,6 +149,8 @@ export interface WorkspaceOwnerState {
     mainActivityAt?: number;
     /** Optional assistant/tool/lifecycle projection for cross-process observers. */
     mainProgress?: WorkspaceMainSessionProgress;
+    /** Newest root-session settle, kept whole while `mainProgress` rotates past it. */
+    mainLastSettle?: WorkspaceMainSettle;
 }
 export interface WorkspaceOwnerSnapshot {
     version: typeof WORKSPACE_PEER_PROTOCOL_VERSION;
@@ -151,6 +169,8 @@ export interface WorkspaceOwnerSnapshot {
     mainActivityAt?: number;
     /** Optional assistant/tool/lifecycle projection for cross-process observers. */
     mainProgress?: WorkspaceMainSessionProgress;
+    /** Newest root-session settle, kept whole while `mainProgress` rotates past it. */
+    mainLastSettle?: WorkspaceMainSettle;
     agents: WorkspaceAgentSnapshot[];
     settled: WorkspaceSettledSnapshot[];
     backgroundJobs?: WorkspaceBackgroundJobSnapshot[];
@@ -356,6 +376,18 @@ export interface WorkspaceRemoteRootMessage {
 /** Canonical model-visible envelope for all remote root messages. */
 export declare function formatWorkspaceRemoteRootMessage(input: WorkspaceRemoteRootMessage): string;
 export declare function validateWorkspaceBackgroundJobSnapshot(value: unknown): WorkspaceBackgroundJobSnapshot | undefined;
+/**
+ * Validate one published settle record.
+ *
+ * A durable file written by another process, so the bounds are checked here
+ * rather than trusted: `lastResult` carries the same cap the progress
+ * projection puts on assistant text, and an over-long one is dropped rather
+ * than truncated, because a silently shortened result reads as a complete one.
+ *
+ * @param value candidate read from an owner snapshot
+ * @returns the validated record, or undefined when it is not one
+ */
+export declare function validateWorkspaceMainSettle(value: unknown): WorkspaceMainSettle | undefined;
 export declare function validateWorkspaceMainSessionProgress(value: unknown): WorkspaceMainSessionProgress | undefined;
 export declare function validateWorkspaceOwnerSnapshot(value: unknown, expected?: {
     workspaceId?: string;

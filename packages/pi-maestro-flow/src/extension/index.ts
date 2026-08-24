@@ -57,7 +57,7 @@ import { registerApiProviderConfigs } from "../providers/api-provider-config.ts"
 import { registerNextSuggest } from "../next-suggest/index.ts";
 import { registerPromptEnhance } from "../prompt-enhance/index.ts";
 import { registerExploreConfigManager } from "../providers/explore-config-manager.ts";
-import { registerModelFailover } from "../providers/model-failover.ts";
+import { registerModelFailover, snapshotModelFailoverSettlement } from "../providers/model-failover.ts";
 import { showModelFailoverOverlay } from "../tui/model-failover-settings.ts";
 import registerMcpAdapter from "../mcp/index.ts";
 import {
@@ -866,6 +866,7 @@ export function registerChineseResponseMode(
     toggle: (ctx) => setEnabled(!enabled, ctx),
   };
 }
+
 
 export default function registerMaestroExtension(pi: ExtensionAPI): void {
   const disposeCompletionDurabilityProvider = getCompletionDurabilityRegistry().register(
@@ -1682,6 +1683,13 @@ When NOT to use:
   registerFff(pi);
   registerBashBg(pi);
   registerLoop(pi);
+  // Both continuations start a further run for the work unit that just settled,
+  // from outside the loop whose settle the platform defers. Model failover
+  // publishes `fallback-scheduled` synchronously from its own `agent_settled`
+  // arbiter, registered above this line, and mid-turn auto-compaction reports
+  // the synthetic interruption it is about to resume from — the same predicate
+  // that already suppresses the `Stop` hook. Read, never consumed: the goal
+  // provider owns the one-shot claim on a failover settlement.
   registerModelAvailability(pi);
   registerTeammateSessionRouting(pi);
   registerResourceTool(pi);

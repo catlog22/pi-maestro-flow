@@ -1436,3 +1436,58 @@ test("buildWorkspaceOwnerState truncates oversized settled results to bytes", ()
   assert.ok(result !== undefined);
   assert.ok(Buffer.byteLength(result, "utf8") <= SETTLED_RESULT_BYTES);
 });
+
+test("the newest settle survives a progress ring that has already rotated past it", async () => {
+  // mainProgress keeps MAX_MAIN_SESSION_PROGRESS_EVENTS events and one turn emits
+  // close to that many, so an observer polling on a heartbeat rather than
+  // continuously reads a projection the settle has scrolled out of. That is the
+  // whole reason this is a separate slot instead of a scan over the ring: it
+  // answers "what did this window last finish, and what did it say" at any
+  // polling interval.
+  const rootDir = await mkdtemp(join(tmpdir(), "peer-settle-"));
+  temporaryDirectories.push(rootDir);
+  const cwd = join(rootDir, "workspace");
+  const identity = createWorkspacePeerIdentity(cwd, { rootDir, ownerId: OWNER_A, ownerNonce: NONCE_A });
+
+  // A ring holding only tool events: the settle and its assistant text are gone.
+  const events = Array.from({ length: MAX_MAIN_SESSION_PROGRESS_EVENTS }, (_unused, index) => ({
+    kind: "tool" as const,
+    at: 2_000 + index,
+    toolCallId: `call-${index}`,
+    toolName: "read",
+    status: "completed" as const,
+  }));
+  const snapshot = buildWorkspaceOwnerSnapshot(identity, {
+    agents: [],
+    settled: [],
+    mainProgress: { updatedAt: 2_100, sequence: 100, baseCursor: 100 - events.length, events },
+    mainLastSettle: { at: 1_500, lastResult: "parser has 2 blockers" },
+  }, 3_000);
+
+  assert.equal(snapshot.mainProgress?.events.some((event) => event.kind === "lifecycle"), false);
+  assert.deepEqual(snapshot.mainLastSettle, { at: 1_500, lastResult: "parser has 2 blockers" });
+
+  // It must also survive the durable round trip, since the reader is another process.
+  const validated = validateWorkspaceOwnerSnapshot(JSON.parse(JSON.stringify(snapshot)));
+  assert.deepEqual(validated?.mainLastSettle, { at: 1_500, lastResult: "parser has 2 blockers" });
+});
+
+test("a settle record is rejected rather than truncated when its result is over the cap", async () => {
+  // A silently shortened result reads as a complete one, which is the failure
+  // this whole field exists to prevent.
+  const rootDir = await mkdtemp(join(tmpdir(), "peer-settle-cap-"));
+  temporaryDirectories.push(rootDir);
+  const identity = createWorkspacePeerIdentity(join(rootDir, "workspace"), { rootDir, ownerId: OWNER_A, ownerNonce: NONCE_A });
+  const snapshot = buildWorkspaceOwnerSnapshot(identity, { agents: [], settled: [] }, 3_000);
+
+  const oversized = {
+    ...snapshot,
+    mainLastSettle: { at: 1_500, lastResult: "x".repeat(MAIN_SESSION_PROGRESS_TEXT_BYTES + 1) },
+  };
+  assert.equal(validateWorkspaceOwnerSnapshot(oversized), undefined);
+
+  // A settle with no result at all is valid: a turn that said nothing settled
+  // with nothing to report, and inventing a result would be worse.
+  const empty = { ...snapshot, mainLastSettle: { at: 1_500 } };
+  assert.deepEqual(validateWorkspaceOwnerSnapshot(empty)?.mainLastSettle, { at: 1_500 });
+});

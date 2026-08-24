@@ -161,6 +161,7 @@ import {
   type WorkspaceAgentSnapshot,
   type WorkspaceBackgroundJobSnapshot,
   type WorkspaceMainSessionProgress,
+  type WorkspaceMainSettle,
   type WorkspaceMainSessionProgressEvent,
   type WorkspaceOwnerSnapshot,
   type WorkspaceOwnerState,
@@ -239,6 +240,7 @@ import { showModelAskOverlay } from "../tui/model-ask-overlay.ts";
 import { sharedModelCircuitBreaker } from "../public/v1/retry.ts";
 import { normalizePiRetryErrorMessage } from "../runs/retry.ts";
 import {
+  buildManagedWindowPiArgs,
   createChildTerminationController,
   getInteractiveTerminalLaunchSpec,
   getPiSpawnCommand,
@@ -1307,6 +1309,11 @@ export default function registerTeammateExtension(
   let workspaceMainSessionProgressSequence = 0;
   let workspaceMainAssistantText = "";
   let workspaceMainAssistantEventOpen = false;
+  // Newest assistant text this window has published, held until a settle takes
+  // it. Distinct from `workspaceMainAssistantText`, which is the streaming
+  // accumulator and is reset at every turn boundary.
+  let workspaceMainSettledResult: string | undefined;
+  let workspaceMainLastSettle: WorkspaceMainSettle | undefined;
   let workspaceReceiptReconcileTimer: ReturnType<typeof setInterval> | undefined;
   let workspacePeerRefresh: {
     publisher: WorkspacePeerPublisher;
@@ -1487,7 +1494,21 @@ export default function registerTeammateExtension(
     };
     workspaceMainAssistantEventOpen = true;
     workspaceMainSessionActivityAt = at;
+    workspaceMainSettledResult = bounded;
     markWorkspacePeerDirty();
+  };
+
+  /**
+   * Record the settle an observer will read, and clear the text it consumed.
+   *
+   * Clearing is what stops one run's result from being reported as the next
+   * run's: a turn that produces no assistant text settles with no result at
+   * all, which is the honest answer, rather than inheriting the previous one.
+   */
+  const recordWorkspaceMainSettle = (at: number): void => {
+    const lastResult = workspaceMainSettledResult;
+    workspaceMainSettledResult = undefined;
+    workspaceMainLastSettle = { at, ...(lastResult === undefined ? {} : { lastResult }) };
   };
 
   const workspaceAssistantMessageText = (message: unknown): string | undefined => {
@@ -2409,6 +2430,7 @@ export default function registerTeammateExtension(
               workspaceMainSessionActivityAt,
             ),
             ...(workspaceMainSessionProgress === undefined ? {} : { mainProgress: workspaceMainSessionProgress }),
+            ...(workspaceMainLastSettle === undefined ? {} : { mainLastSettle: workspaceMainLastSettle }),
           }),
         });
         await publisher.start();
@@ -5477,11 +5499,9 @@ export default function registerTeammateExtension(
     if (!objective.trim()) return { ok: false, error: "window objective is required" };
 
     const cwd = monitorLedgerRoot ?? state.baseCwd ?? cwdFallback;
-    const forkArgs = forkSessionFile ? ["--fork", forkSessionFile] : [];
-    const piArgs = presentation === "interactive"
-      ? [...forkArgs, "--name", sessionName, objective]
-      : [...forkArgs, "-p", objective, "--name", sessionName];
-    const piCommand = getPiSpawnCommand(piArgs);
+    const piCommand = getPiSpawnCommand(
+      buildManagedWindowPiArgs({ objective, sessionName, presentation, forkSessionFile }),
+    );
     const launch = presentation === "interactive"
       ? getInteractiveTerminalLaunchSpec(piCommand, cwd, { title: `Pi worker · ${name}` })
       : { command: piCommand.command, args: piCommand.args, cwd };
@@ -6728,6 +6748,11 @@ export default function registerTeammateExtension(
         waitStatus: "completed" as const,
         terminalStatus: "completed",
       } : {}),
+      // The window's own account of its last finished run. `lifecycle.settled`
+      // is inferred from agent counts and idle time, so on its own it cannot
+      // distinguish "finished what it was asked" from "has not started yet";
+      // this is the run saying so, with what it said.
+      ...(owner.mainLastSettle?.lastResult === undefined ? {} : { lastResult: owner.mainLastSettle.lastResult }),
       summary: output[0] ?? observationStatus,
       ...(detail === "summary" ? {} : { detail: output.slice(-Math.max(lines, 1) * 4) }),
       updatedAt: Date.now(),
@@ -8750,6 +8775,11 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     workspaceMainSessionProgress = undefined;
     workspaceMainAssistantText = "";
     workspaceMainAssistantEventOpen = false;
+    // Same reason the progress projection is cleared: a settle belongs to the
+    // session that produced it, and carrying one across a switch would report
+    // the previous session's result as this one's.
+    workspaceMainSettledResult = undefined;
+    workspaceMainLastSettle = undefined;
     startWorkspacePeers(ctx);
     if (workspaceReceiptReconcileTimer) clearInterval(workspaceReceiptReconcileTimer);
     workspaceReceiptReconcileTimer = setInterval(() => {
@@ -8881,7 +8911,9 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
   });
 
   pi.on("agent_settled", () => {
-    appendWorkspaceMainProgressEvent({ kind: "lifecycle", at: Date.now(), phase: "agent_settled" });
+    const at = Date.now();
+    recordWorkspaceMainSettle(at);
+    appendWorkspaceMainProgressEvent({ kind: "lifecycle", at, phase: "agent_settled" });
   });
 
   pi.on("session_compact", (_event, ctx) => {
