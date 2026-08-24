@@ -1,6 +1,6 @@
 import { resolve as resolvePath } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { isManagedWorkerWindow } from "pi-maestro-teammate/v1/child-extensions";
+import { isManagedWorkerWindow, isMonitorSession } from "pi-maestro-teammate/v1/child-extensions";
 import { getSessionHostRegistry, type SessionHostRegistry } from "pi-maestro-teammate/v1/sessions";
 import { FlowScheduleRuntime, type FlowScheduleRuntimeOptions } from "./runtime.ts";
 import { FlowScheduleStore } from "./store.ts";
@@ -12,6 +12,7 @@ import {
 
 export interface RegisterFlowScheduleOptions {
   managedWorker?: boolean;
+  monitor?: boolean;
   getRegistry?: () => SessionHostRegistry | undefined;
   createStore?: (cwd: string) => FlowScheduleStore;
   createRuntime?: (store: FlowScheduleStore, cwd: string) => FlowScheduleRuntime;
@@ -21,6 +22,7 @@ export interface RegisterFlowScheduleOptions {
 
 export interface FlowScheduleRegistration {
   readonly managedWorker: boolean;
+  readonly monitor: boolean;
   current(): FlowScheduleController | undefined;
   dispose(): void;
 }
@@ -34,6 +36,7 @@ export function registerFlowSchedule(
   options: RegisterFlowScheduleOptions = {},
 ): FlowScheduleRegistration {
   const managedWorker = options.managedWorker ?? isManagedWorkerWindow();
+  const monitor = !managedWorker && (options.monitor ?? isMonitorSession());
   const getRegistry = options.getRegistry ?? (() => getSessionHostRegistry());
   let binding: ControllerBinding | undefined;
   let disposed = false;
@@ -66,7 +69,7 @@ export function registerFlowSchedule(
 
   if (managedWorker) {
     pi.registerTool(createWorkerFlowScheduleTool({ getRegistry }));
-  } else {
+  } else if (monitor) {
     pi.registerTool(createCoordinatorFlowScheduleTool({ resolve: ensureBinding, getRegistry }));
     pi.on("session_start", async (_event, ctx: ExtensionContext) => {
       const current = ensureBinding(ctx.cwd);
@@ -79,6 +82,7 @@ export function registerFlowSchedule(
 
   return {
     managedWorker,
+    monitor,
     current: () => binding,
     dispose() {
       if (disposed) return;

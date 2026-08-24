@@ -86,7 +86,7 @@ test("independent monitor session identity and command entry points stay stable"
   const sessionSource = await readFile(new URL("../src/extension/monitor-session.ts", import.meta.url), "utf8");
 
   assert.match(sessionSource, /export const MONITOR_SESSION_NAME = "monitor-session"/);
-  assert.match(sessionSource, /export const MONITOR_SESSION_ENV_VAR = "PI_TEAMMATE_MONITOR"/);
+  assert.match(sessionSource, /export \{ MONITOR_SESSION_ENV_VAR \} from "\.\.\/runs\/child-extensions\.ts"/);
   assert.match(sessionSource, /export const MONITOR_SESSION_RELATIVE_DIR = "\.pi\/monitor-sessions"/);
   assert.match(source, /name: MONITOR_SESSION_NAME,[\s\S]*?context: "fresh"/);
   assert.match(source, /background: true,[\s\S]*?maxNestingDepth: 0/);
@@ -319,7 +319,7 @@ test("monitor communication uses tool-local capability gates without global inte
   assert.match(source, /name: "workspace-window"/);
   assert.match(source, /const monitorCapture = captureMonitorCommunication\(\);[\s\S]*?workspace-window is available only after the user enters Monitor mode/);
   assert.match(source, /const sessionName = managedWindowSessionName\(name\)/);
-  assert.match(source, /presentation === "interactive"[\s\S]*?"--name", sessionName, objective\][\s\S]*?"-p", objective, "--name", sessionName\]/);
+  assert.match(source, /buildManagedWindowPiArgs\(\{ objective, sessionName, presentation, forkSessionFile \}\)/);
   assert.match(source, /owner\.sessionName === window\.sessionName/);
   assert.match(source, /managedWindows\.get\(name\) !== spawned\.window \|\| !exactManagedWindowOwner\(spawned\.window\)/);
   assert.match(source, /owner\.ownerId === window\.ownerId[\s\S]*?owner\.ownerNonce === window\.ownerNonce[\s\S]*?owner\.pid === window\.pid/);

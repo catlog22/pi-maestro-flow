@@ -195,7 +195,7 @@ export function createCoordinatorFlowScheduleTool(
     name: "flow-schedule",
     label: "Flow Schedule",
     description:
-      "Durably execute stable ordered steps in an already-managed workspace window. The coordinator creates and controls schedules; observe remains the lifecycle surface, teammate-send remains ad hoc messaging, workspace-window remains process ownership, and loop remains recurring work. A step advances only from an exact correlated worker report.",
+      "Monitor-only control surface for durably executing stable ordered steps in an already-managed workspace window. The Monitor creates and controls schedules; observe remains the lifecycle surface, teammate-send remains ad hoc messaging, workspace-window remains process ownership, and loop remains recurring work. A step advances only from an exact correlated worker report.",
     promptSnippet: "Create and control durable ordered work for an existing managed workspace window.",
     promptGuidelines: [
       "Use create then start; create never sends work.",

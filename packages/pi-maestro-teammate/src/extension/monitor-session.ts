@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type { AnalysisResult, MonitorSupervisionMode } from "./monitor.ts";
 
+export { MONITOR_SESSION_ENV_VAR } from "../runs/child-extensions.ts";
 export const MONITOR_SESSION_NAME = "monitor-session";
-export const MONITOR_SESSION_ENV_VAR = "PI_TEAMMATE_MONITOR";
 export const MONITOR_SESSION_RELATIVE_DIR = ".pi/monitor-sessions";
 
 export interface MonitorEvaluationTarget {

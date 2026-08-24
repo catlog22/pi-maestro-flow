@@ -201,29 +201,48 @@ function fakePi(): {
   return { pi, tools, handlers };
 }
 
-test("Flow extension wires the managed-aware registration once on the root surface", async () => {
+test("Flow extension wires the managed and Monitor-aware registration once", async () => {
   const source = await readFile(new URL("../src/extension/index.ts", import.meta.url), "utf8");
-  assert.match(source, /registerFlowSchedule\(pi, \{ managedWorker: isManagedWorkerWindow\(\) \}\)/);
+  assert.match(source, /registerFlowSchedule\(pi, \{\s*managedWorker: isManagedWorkerWindow\(\),\s*monitor: isMonitorSession\(\),\s*\}\)/);
   assert.equal(source.match(/registerFlowSchedule\(pi,/g)?.length, 1);
 });
 
-test("registration selects coordinator versus managed report-only surface and disposes session runtime", async () => {
+test("registration exposes Monitor control, managed report-only, and no ordinary root surface", async () => {
   const workerApi = fakePi();
-  const workerRegistration = registerFlowSchedule(workerApi.pi, { managedWorker: true, getRegistry: () => undefined });
+  const workerRegistration = registerFlowSchedule(workerApi.pi, {
+    managedWorker: true,
+    monitor: true,
+    getRegistry: () => undefined,
+  });
   assert.equal(workerRegistration.managedWorker, true);
+  assert.equal(workerRegistration.monitor, false);
   assert.equal(workerApi.tools.length, 1);
   assert.equal(Check(workerApi.tools[0]!.parameters, { action: "create", scheduleId: "x" }), false);
   workerRegistration.dispose();
+
+  const ordinaryApi = fakePi();
+  const ordinaryRegistration = registerFlowSchedule(ordinaryApi.pi, {
+    managedWorker: false,
+    monitor: false,
+    getRegistry: () => undefined,
+  });
+  assert.equal(ordinaryRegistration.managedWorker, false);
+  assert.equal(ordinaryRegistration.monitor, false);
+  assert.deepEqual(ordinaryApi.tools, []);
+  assert.equal(ordinaryApi.handlers.size, 0);
+  ordinaryRegistration.dispose();
 
   const root = await mkdtemp(join(tmpdir(), "flow-schedule-register-"));
   const coordinatorApi = fakePi();
   const coordinatorRegistration = registerFlowSchedule(coordinatorApi.pi, {
     managedWorker: false,
+    monitor: true,
     getRegistry: () => undefined,
     createStore: (cwd) => new FlowScheduleStore(cwd, { getProcessIdentity: () => `test:${process.pid}` }),
   });
   try {
     assert.equal(coordinatorRegistration.managedWorker, false);
+    assert.equal(coordinatorRegistration.monitor, true);
     assert.equal(Check(coordinatorApi.tools[0]!.parameters, { action: "list" }), true);
     const start = coordinatorApi.handlers.get("session_start")?.[0];
     const shutdown = coordinatorApi.handlers.get("session_shutdown")?.[0];
