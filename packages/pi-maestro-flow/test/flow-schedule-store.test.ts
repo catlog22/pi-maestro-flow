@@ -26,6 +26,7 @@ import {
   FLOW_SCHEDULE_VERSION,
   type ExactWindowIdentity,
   type FlowScheduleCompletionRecord,
+  type FlowScheduleRecord,
 } from "../src/flow-schedule/types.ts";
 
 const DISPATCH_A = "123e4567-e89b-42d3-a456-426614174000";
@@ -153,13 +154,28 @@ test("FlowScheduleStore normalizes the complete schedule before any persistence"
 test("FlowScheduleStore enforces the nonterminal schedule limit", async () => {
   const { root, store } = await temporaryStore();
   try {
-    for (let index = 0; index < FLOW_SCHEDULE_LIMITS.maxNonterminalSchedules; index += 1) {
-      await store.createSchedule({
-        scheduleId: `schedule-${index}`,
-        target: OWNER_SELECTOR,
-        steps: [{ stepId: "step", prompt: "Work" }],
-      });
-    }
+    await store.createSchedule({
+      scheduleId: "schedule-0",
+      target: OWNER_SELECTOR,
+      steps: [{ stepId: "step", prompt: "Work" }],
+    });
+    const seed = JSON.parse(
+      await readFile(join(store.schedulesDir, "schedule-0.json"), "utf8"),
+    ) as FlowScheduleRecord;
+    await Promise.all(
+      Array.from(
+        { length: FLOW_SCHEDULE_LIMITS.maxNonterminalSchedules - 1 },
+        async (_, offset) => {
+          const scheduleId = `schedule-${offset + 1}`;
+          const record = { ...seed, scheduleId };
+          await writeFile(
+            join(store.schedulesDir, `${scheduleId}.json`),
+            `${JSON.stringify(record, null, 2)}\n`,
+            "utf8",
+          );
+        },
+      ),
+    );
     await assert.rejects(
       store.createSchedule({
         scheduleId: "schedule-over-limit",
@@ -486,30 +502,17 @@ test("failed attempts can be explicitly retried without mutating their completio
 });
 
 test("dispatch admission enforces the per-step attempt limit", async () => {
-  let now = 100;
-  const { root, store } = await temporaryStore({ now: () => now++ });
+  const { root, store } = await temporaryStore();
   try {
     await createActiveSchedule(store, "release");
-    for (let index = 0; index < FLOW_SCHEDULE_LIMITS.maxAttemptsPerStep; index += 1) {
-      const dispatchId = attemptId(index);
-      await store.createDispatchIntent({
-        dispatchId,
-        scheduleId: "release",
-        stepId: "verify",
-        targetIdentity: identity,
-      });
-      await store.recordCompletion({
-        version: 1,
-        type: "flow-schedule-completion",
-        dispatchId,
-        scheduleId: "release",
-        stepId: "verify",
-        targetIdentity: identity,
-        state: "retired",
-        reason: `Explicit retry ${index}`,
-        completedAt: now++,
-      });
-    }
+    const schedulePath = join(store.schedulesDir, "release.json");
+    const seeded = JSON.parse(await readFile(schedulePath, "utf8")) as FlowScheduleRecord;
+    seeded.steps.verify.attempts = Array.from(
+      { length: FLOW_SCHEDULE_LIMITS.maxAttemptsPerStep },
+      (_, index) => attemptId(index),
+    );
+    await writeFile(schedulePath, `${JSON.stringify(seeded, null, 2)}\n`, "utf8");
+
     assert.equal((await store.readSchedule("release"))?.steps.verify.attempts.length, FLOW_SCHEDULE_LIMITS.maxAttemptsPerStep);
     await assert.rejects(
       store.createDispatchIntent({
