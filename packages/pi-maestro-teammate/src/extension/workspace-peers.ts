@@ -159,6 +159,8 @@ export type WorkspaceMainSessionProgressEvent =
 /** Bounded, content-safe projection of the window's root Pi session. */
 export interface WorkspaceMainSessionProgress {
   updatedAt: number;
+  /** Monotonic semantic mutation counter; unlike sequence, advances for streamed text replacement. */
+  revision?: number;
   /** Absolute cursor of the newest event ever appended by this window. */
   sequence: number;
   /** Absolute cursor immediately before events[0]; equals sequence when empty. */
@@ -965,6 +967,7 @@ export function validateWorkspaceBackgroundJobSnapshot(value: unknown): Workspac
 export function validateWorkspaceMainSessionProgress(value: unknown): WorkspaceMainSessionProgress | undefined {
   if (!isRecord(value)
     || !boundedInteger(value.updatedAt)
+    || !optional(value.revision, boundedInteger)
     || !boundedInteger(value.sequence)
     || !boundedInteger(value.baseCursor)
     || value.baseCursor > value.sequence
@@ -1006,6 +1009,7 @@ export function validateWorkspaceMainSessionProgress(value: unknown): WorkspaceM
   }
   return {
     updatedAt: value.updatedAt,
+    ...(value.revision === undefined ? {} : { revision: value.revision }),
     sequence: value.sequence,
     baseCursor: value.baseCursor,
     events,

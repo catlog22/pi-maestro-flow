@@ -21,7 +21,11 @@ import registerTeammateExtension, {
   type TeammateRuntimeOptions,
 } from "../src/extension/index.ts";
 import type { RunTeammateOptions } from "../src/runs/execution.ts";
-import { createWorkspacePeerPaths, createWorkspacePeerRuntime } from "../src/extension/workspace-peers.ts";
+import {
+  createWorkspacePeerPaths,
+  createWorkspacePeerRuntime,
+  type WorkspaceMainSessionProgress,
+} from "../src/extension/workspace-peers.ts";
 import { getObservationProvider, registerObservationProvider } from "../src/public/v1/observation.ts";
 import {
   confirmParked,
@@ -397,6 +401,11 @@ test("root session publishes bounded assistant, tool, and lifecycle progress", a
       message: { role: "assistant", content: [] },
       assistantMessageEvent: { type: "text_delta", delta: "working on the peer snapshot" },
     }, ctx);
+    hooks.get("message_update")?.[0]?.({
+      type: "message_update",
+      message: { role: "assistant", content: [] },
+      assistantMessageEvent: { type: "text_delta", delta: " update" },
+    }, ctx);
     hooks.get("tool_execution_start")?.[0]?.({
       type: "tool_execution_start",
       toolCallId: "tool-progress-1",
@@ -440,6 +449,10 @@ test("root session publishes bounded assistant, tool, and lifecycle progress", a
       "main progress publishes absolute cursor metadata for the retained ring",
     );
     assert.ok(snapshot?.mainProgress.sequence >= snapshot?.mainProgress.events.length);
+    assert.ok(
+      snapshot?.mainProgress.revision > snapshot?.mainProgress.sequence,
+      "streamed text replacement advances content revision without appending a ring event",
+    );
 
     const sequenceBeforeRollover = snapshot?.mainProgress.sequence as number;
     for (let index = 0; index < 20; index += 1) {
@@ -479,10 +492,22 @@ test("workspace observation wait honors result-ready, completion, timeout, abort
     lastActivityAt: now,
     resultReadyAt: undefined as number | undefined,
   };
+  let mainProgress: WorkspaceMainSessionProgress = {
+    updatedAt: now,
+    sequence: 1,
+    baseCursor: 0,
+    events: [{ kind: "assistant" as const, at: now, text: "workspace session activity" }],
+  };
   const peer = createWorkspacePeerRuntime({
     cwd: project,
     publishThrottleMs: 0,
-    getState: () => ({ sessionName: "workspace-observe-peer", agents: [worker], settled: [] }),
+    getState: () => ({
+      sessionId: "workspace-observe-peer-session",
+      sessionName: "workspace-observe-peer",
+      mainProgress,
+      agents: [worker],
+      settled: [],
+    }),
   });
   const ctx = {
     cwd: project,
@@ -518,6 +543,45 @@ test("workspace observation wait honors result-ready, completion, timeout, abort
       discovered = await provider.snapshot(`owner:${peer.identity.ownerId}`, { detail: "summary", lines: 20 });
     }
     assert.equal(discovered.found, true);
+
+    const session = await provider.snapshot(`owner:${peer.identity.ownerId}`, {
+      detail: "full",
+      lines: 20,
+      view: "session",
+    });
+    assert.equal(session.page?.kind, "workspace-session");
+    assert.deepEqual(session.page?.items, [{
+      cursor: 1,
+      kind: "assistant",
+      at: now,
+      text: "workspace session activity",
+    }]);
+    const sessionCursor = session.page?.nextCursor;
+    assert.ok(sessionCursor);
+    mainProgress = {
+      updatedAt: now + 1,
+      sequence: 2,
+      baseCursor: 0,
+      events: [
+        { kind: "assistant", at: now, text: "workspace session activity" },
+        { kind: "tool", at: now + 1, toolCallId: "tool-1", toolName: "read", status: "running" },
+      ],
+    };
+    await peer.publishNow();
+    const incremental = await provider.snapshot(`owner:${peer.identity.ownerId}`, {
+      detail: "full",
+      lines: 20,
+      view: "session",
+      cursor: sessionCursor,
+    });
+    assert.deepEqual(incremental.page?.items, [{
+      cursor: 2,
+      kind: "tool",
+      at: now + 1,
+      toolCallId: "tool-1",
+      toolName: "read",
+      status: "running",
+    }]);
 
     const readyWait = provider.wait(`owner:${peer.identity.ownerId}`, {
       detail: "summary",

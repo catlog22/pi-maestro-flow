@@ -116,6 +116,8 @@ export type WorkspaceMainSessionProgressEvent = {
 /** Bounded, content-safe projection of the window's root Pi session. */
 export interface WorkspaceMainSessionProgress {
     updatedAt: number;
+    /** Monotonic semantic mutation counter; unlike sequence, advances for streamed text replacement. */
+    revision?: number;
     /** Absolute cursor of the newest event ever appended by this window. */
     sequence: number;
     /** Absolute cursor immediately before events[0]; equals sequence when empty. */

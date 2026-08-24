@@ -143,11 +143,20 @@ test("observe schema scopes wait parameters to wait and requires count threshold
   assert.equal(Check(ObserveParams, { action: "wait", waitCount: 1, targets: target }), false);
 });
 
-test("observe schema accepts view=turns with turn and rejects misuse", () => {
+test("observe schema accepts turns and workspace session views with scoped cursors", () => {
   const target = [{ kind: "teammate", id: "worker" }];
+  const workspace = [{ kind: "workspace", id: "owner:abc" }];
+  const cursorTarget = [{ kind: "workspace", id: "owner:abc", cursor: "cursor-1" }];
   assert.equal(Check(ObserveParams, { action: "status", targets: target, view: "turns" }), true);
   assert.equal(Check(ObserveParams, { action: "status", targets: target, view: "turns", turn: 2 }), true);
   assert.equal(Check(ObserveParams, { action: "status", targets: target, view: "live" }), true);
+  assert.equal(Check(ObserveParams, { action: "status", targets: workspace, view: "session" }), true);
+  assert.equal(Check(ObserveParams, { action: "watch", targets: cursorTarget, view: "session", timeoutMs: 100 }), true);
+  assert.equal(Check(ObserveParams, { action: "status", targets: cursorTarget, view: "session" }), true);
+  assert.equal(Check(ObserveParams, { action: "status", targets: cursorTarget }), false);
+  assert.equal(Check(ObserveParams, { action: "wait", targets: workspace, view: "session" }), false);
+  assert.equal(Check(ObserveParams, { action: "diagnose", targets: workspace, view: "session" }), false);
+  assert.equal(Check(LocalObserveParams, { action: "status", targets: target, view: "session" }), false);
   assert.equal(Check(ObserveParams, { action: "wait", targets: target, view: "turns" }), false);
   assert.equal(Check(ObserveParams, { action: "watch", targets: target, view: "turns" }), false);
   assert.equal(Check(ObserveParams, { action: "status", targets: target, turn: 1 }), false);

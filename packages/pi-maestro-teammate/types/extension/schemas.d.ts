@@ -10,7 +10,7 @@
  *   - name: addressability + variable referencing
  *   - reply_to: result routing (caller | main)
  */
-import { Type } from "typebox";
+import { Type, type Static } from "typebox";
 export declare const TaskSpec: Type.TObject<{
     prompt: Type.TString;
     description: Type.TOptional<Type.TString>;
@@ -99,6 +99,7 @@ export declare const ObserveParams: Type.TObject<{
     targets: Type.TArray<Type.TObject<{
         kind: Type.TString;
         id: Type.TString;
+        cursor: Type.TOptional<Type.TString>;
     }>>;
     detail: Type.TOptional<Type.TUnsafe<"summary" | "tail" | "full">>;
     lines: Type.TOptional<Type.TInteger>;
@@ -106,24 +107,17 @@ export declare const ObserveParams: Type.TObject<{
     waitCount: Type.TOptional<Type.TInteger>;
     until: Type.TOptional<Type.TUnsafe<"completed" | "result-ready">>;
     timeoutMs: Type.TOptional<Type.TInteger>;
-    view: Type.TOptional<Type.TUnsafe<"turns" | "live">>;
+    view: Type.TOptional<Type.TUnsafe<"turns" | "session" | "live">>;
     turn: Type.TOptional<Type.TInteger>;
 }>;
-export declare const LocalObserveParams: Type.TUnsafe<{
-    timeoutMs?: number | undefined;
-    turn?: number | undefined;
-    view?: "turns" | "live" | undefined;
-    lines?: number | undefined;
-    detail?: "summary" | "tail" | "full" | undefined;
-    waitMode?: "count" | "all" | "any" | undefined;
-    waitCount?: number | undefined;
-    until?: "completed" | "result-ready" | undefined;
-    action: "status" | "diagnose" | "wait" | "watch";
-    targets: {
+type LocalObserveParamsInput = Omit<Static<typeof ObserveParams>, "targets" | "view"> & {
+    targets: Array<{
+        kind: "teammate" | "bash_bg";
         id: string;
-        kind: string;
-    }[];
-}>;
+    }>;
+    view?: "live" | "turns";
+};
+export declare const LocalObserveParams: Type.TUnsafe<LocalObserveParamsInput>;
 export declare const TeammateMonitorParams: Type.TObject<{
     action: Type.TUnsafe<"status" | "wait">;
     targets: Type.TArray<Type.TString>;
@@ -146,3 +140,4 @@ export declare const RemoteWorkerParams: Type.TObject<{
     objective: Type.TOptional<Type.TString>;
     runId: Type.TOptional<Type.TString>;
 }>;
+export {};

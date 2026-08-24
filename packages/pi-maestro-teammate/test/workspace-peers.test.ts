@@ -1286,6 +1286,7 @@ test("owner snapshots add optional bounded main-session progress without changin
     ...legacy,
     mainProgress: {
       updatedAt: 1_003,
+      revision: 4,
       sequence: 3,
       baseCursor: 0,
       events: [
@@ -1305,6 +1306,7 @@ test("owner snapshots add optional bounded main-session progress without changin
   });
   assert.deepEqual(projected?.mainProgress, {
     updatedAt: 1_003,
+    revision: 4,
     sequence: 3,
     baseCursor: 0,
     events: [
@@ -1323,6 +1325,13 @@ test("owner snapshots add optional bounded main-session progress without changin
   assert.deepEqual(empty, { updatedAt: 1_004, sequence: 9, baseCursor: 9, events: [] });
 
   const event = { kind: "lifecycle", at: 1_000, phase: "turn_start" };
+  assert.equal(validateWorkspaceMainSessionProgress({
+    updatedAt: 1_000,
+    revision: -1,
+    sequence: 1,
+    baseCursor: 0,
+    events: [event],
+  }), undefined, "content revision must be a non-negative integer");
   assert.equal(validateWorkspaceMainSessionProgress({
     updatedAt: 1_000,
     sequence: MAX_MAIN_SESSION_PROGRESS_EVENTS + 1,

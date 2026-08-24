@@ -438,6 +438,11 @@ export const ObserveParams = Type.Object({
     Type.Object({
       kind: Type.String({ minLength: 1, description: 'Observation provider kind, such as "teammate" or "bash_bg".' }),
       id: Type.String({ minLength: 1, description: "Teammate targets use the correlation ID shown by teammate-list; full provider ids remain compatible." }),
+      cursor: Type.Optional(Type.String({
+        minLength: 1,
+        maxLength: 2_048,
+        description: "Opaque provider cursor for incremental views such as workspace session activity.",
+      })),
     }, { additionalProperties: false }),
     { minItems: 1, maxItems: 15, description: "Mixed targets to observe in the requested order." },
   ),
@@ -463,12 +468,12 @@ export const ObserveParams = Type.Object({
       "Wait-only completion threshold: first result (default) or full terminal completion.",
   })),
   timeoutMs: Type.Optional(Type.Integer({ minimum: 1, default: 600_000, description: "Request-level wait/watch timeout in milliseconds (default: 600000, 10 minutes)." })),
-  view: Type.Optional(Type.Unsafe<"live" | "turns">({
+  view: Type.Optional(Type.Unsafe<"live" | "turns" | "session">({
     type: "string",
-    enum: ["live", "turns"],
+    enum: ["live", "turns", "session"],
     default: "live",
     description:
-      '"live" shows the current snapshot (default); "turns" lists the session turn history instead (status action only).',
+      '"live" shows the current snapshot; "turns" lists target history; "session" shows sanitized workspace root-session activity.',
   })),
   turn: Type.Optional(Type.Integer({
     minimum: 1,
@@ -509,6 +514,21 @@ export const ObserveParams = Type.Object({
       then: { properties: { action: { const: "status" } }, required: ["action"] },
     },
     {
+      if: { properties: { view: { const: "session" } }, required: ["view"] },
+      then: { properties: { action: { enum: ["status", "watch"] } }, required: ["action"] },
+    },
+    {
+      if: {
+        properties: {
+          targets: {
+            contains: { type: "object", required: ["cursor"] },
+          },
+        },
+        required: ["targets"],
+      },
+      then: { properties: { view: { const: "session" } }, required: ["view"] },
+    },
+    {
       if: { required: ["turn"] },
       then: { properties: { view: { const: "turns" } }, required: ["view"] },
     },
@@ -522,10 +542,21 @@ export const ObserveParams = Type.Object({
   ],
 });
 
-export const LocalObserveParams = Type.Unsafe<Static<typeof ObserveParams>>({
+type LocalObserveParamsInput = Omit<Static<typeof ObserveParams>, "targets" | "view"> & {
+  targets: Array<{ kind: "teammate" | "bash_bg"; id: string }>;
+  view?: "live" | "turns";
+};
+
+export const LocalObserveParams = Type.Unsafe<LocalObserveParamsInput>({
   ...ObserveParams,
   properties: {
     ...ObserveParams.properties,
+    view: Type.Optional(Type.Unsafe<"live" | "turns">({
+      type: "string",
+      enum: ["live", "turns"],
+      default: "live",
+      description: 'Local observation supports only "live" and "turns" views.',
+    })),
     targets: Type.Array(
       Type.Object({
         kind: Type.Unsafe<"teammate" | "bash_bg">({

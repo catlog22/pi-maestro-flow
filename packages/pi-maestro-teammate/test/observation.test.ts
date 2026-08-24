@@ -67,7 +67,43 @@ test("view=turns is forwarded to provider snapshots and restricted to status", a
     );
     await assert.rejects(
       observeTargets({ action: "status", targets: [{ kind: "test-turns", id: "w" }], view: "other" as never }),
-      /view must be "live" or "turns"/,
+      /view must be "live", "turns", or "session"/,
+    );
+  } finally {
+    dispose();
+  }
+});
+
+test("view=session forwards target cursors and restricts actions", async () => {
+  let received: ObservationReadOptions | undefined;
+  const dispose = registerObservationProvider({
+    kind: "test-session-view",
+    capabilities: { inspect: true, wait: true },
+    snapshot: (id, options) => {
+      received = options;
+      return snapshot("test-session-view", id);
+    },
+    wait: async (id) => snapshot("test-session-view", id, "completed"),
+  });
+  try {
+    await observeTargets({
+      action: "status",
+      targets: [{ kind: "test-session-view", id: "window", cursor: "cursor-1" }],
+      view: "session",
+    });
+    assert.equal(received?.view, "session");
+    assert.equal(received?.cursor, "cursor-1");
+    await assert.rejects(
+      observeTargets({ action: "wait", targets: [{ kind: "test-session-view", id: "window" }], view: "session" }),
+      /view="session" is supported only for status and watch actions/,
+    );
+    await assert.rejects(
+      observeTargets({ action: "diagnose", targets: [{ kind: "test-session-view", id: "window" }], view: "session" }),
+      /view="session" is supported only for status and watch actions/,
+    );
+    await assert.rejects(
+      observeTargets({ action: "status", targets: [{ kind: "test-session-view", id: "window", cursor: "cursor-1" }] }),
+      /target cursor requires view="session"/,
     );
   } finally {
     dispose();
@@ -431,6 +467,34 @@ test("watch polls targets and returns status transitions until deadline", async 
     assert.ok(result.observations.length >= 2, `expected >= 2 transitions, got ${result.observations.length}`);
     assert.equal(result.observations[0]?.nativeStatus, "running");
     assert.ok(result.observations.some((o) => o.nativeStatus === "completed"));
+  } finally {
+    dispose();
+  }
+});
+
+test("watch records revision changes while lifecycle status stays unchanged", async () => {
+  let calls = 0;
+  const dispose = registerObservationProvider({
+    kind: "test-watch-revision",
+    capabilities: { inspect: true, wait: true },
+    snapshot: (id, options) => {
+      calls += 1;
+      assert.equal(options.view, "session");
+      return {
+        ...snapshot("test-watch-revision", id),
+        revision: calls === 1 ? "revision-1" : "revision-2",
+      };
+    },
+    wait: async (id) => snapshot("test-watch-revision", id, "completed"),
+  });
+  try {
+    const result = await observeTargets({
+      action: "watch",
+      targets: [{ kind: "test-watch-revision", id: "window" }],
+      view: "session",
+      timeoutMs: 250,
+    });
+    assert.deepEqual(result.observations.map((item) => item.revision), ["revision-1", "revision-2"]);
   } finally {
     dispose();
   }

@@ -2,7 +2,7 @@ import type { AgentRuntimeDiagnosisV1, MessageProvenanceV1 } from "../../shared/
 
 export type ObservationAction = "status" | "diagnose" | "wait" | "watch";
 export type ObservationDetail = "summary" | "tail" | "full";
-export type ObservationView = "live" | "turns";
+export type ObservationView = "live" | "turns" | "session";
 export type ObservationWaitMode = "all" | "any" | "count";
 export type ObservationPhase = "pending" | "active" | "settled" | "unknown";
 export type ObservationOutcome = "success" | "failure" | "stalled" | "aborted";
@@ -19,6 +19,8 @@ export type ObservationWaitStatus =
 export interface ObservationTarget {
   kind: string;
   id: string;
+  /** Opaque provider cursor for incremental views such as workspace session activity. */
+  cursor?: string;
 }
 
 export interface ObservationCapabilities {
@@ -27,6 +29,17 @@ export interface ObservationCapabilities {
   cancel?: boolean;
   message?: boolean;
   supervise?: boolean;
+}
+
+export interface ObservationPage {
+  /** Provider-specific page kind. */
+  kind: string;
+  /** Cursor to continue after this page. */
+  nextCursor?: string;
+  /** True when events before this page were evicted from a bounded source. */
+  gap?: boolean;
+  /** Provider-specific structured items; text rendering remains in detail. */
+  items: unknown[];
 }
 
 export interface ObservationSnapshot {
@@ -47,6 +60,10 @@ export interface ObservationSnapshot {
   lastResult?: string;
   /** Schema-valid structured output of a settled schema task (detail=full). */
   structuredOutput?: unknown;
+  /** Provider content revision used by watch to detect changes without a status transition. */
+  revision?: string;
+  /** Optional structured page for cursor-based observation views. */
+  page?: ObservationPage;
   /** Canonical orthogonal teammate diagnosis; present for supported diagnose snapshots. */
   diagnosis?: AgentRuntimeDiagnosisV1;
 }
@@ -56,8 +73,10 @@ export interface ObservationReadOptions {
   lines: number;
   /** Request a canonical runtime diagnosis in addition to the ordinary snapshot. */
   diagnose?: boolean;
-  /** "turns" lists the target session's turn history instead of the live snapshot (status only). */
+  /** "turns" lists target history; "session" shows sanitized workspace root-session activity. */
   view?: ObservationView;
+  /** Opaque provider cursor copied from the selected target. */
+  cursor?: string;
   /** 1-based turn index to expand when view="turns"; omitted lists all turns. */
   turn?: number;
 }
@@ -86,7 +105,7 @@ export interface ObserveParams {
   timeoutMs?: number;
   /** Block until "result-ready" (default) or "completed" (terminal lifecycle). */
   until?: "result-ready" | "completed";
-  /** "turns" lists session turn history instead of the live snapshot (status only). */
+  /** "turns" lists history; "session" shows sanitized root-session activity for workspace targets. */
   view?: ObservationView;
   /** 1-based turn index to expand when view="turns"; omitted lists all turns. */
   turn?: number;
@@ -173,6 +192,13 @@ function validate(params: ObserveParams): void {
   if (params.targets.some((target) => !target.kind.trim() || !target.id.trim())) {
     throw new Error("Every observation target requires non-empty kind and id.");
   }
+  if (params.targets.some((target) => target.cursor !== undefined
+    && (typeof target.cursor !== "string" || target.cursor.length < 1 || target.cursor.length > 2_048))) {
+    throw new Error("Observe target cursor must be a string between 1 and 2048 characters.");
+  }
+  if (params.targets.some((target) => target.cursor !== undefined) && params.view !== "session") {
+    throw new Error('Observe target cursor requires view="session".');
+  }
   if (params.lines !== undefined && (!Number.isInteger(params.lines) || params.lines < 1 || params.lines > 500)) {
     throw new Error("Observe lines must be an integer between 1 and 500.");
   }
@@ -196,11 +222,14 @@ function validate(params: ObserveParams): void {
       throw new Error("Observe waitCount must be between 1 and the number of targets.");
     }
   }
-  if (params.view !== undefined && params.view !== "live" && params.view !== "turns") {
-    throw new Error('Observe view must be "live" or "turns".');
+  if (params.view !== undefined && params.view !== "live" && params.view !== "turns" && params.view !== "session") {
+    throw new Error('Observe view must be "live", "turns", or "session".');
   }
   if (params.view === "turns" && params.action !== "status") {
     throw new Error('Observe view="turns" is supported only for the status action.');
+  }
+  if (params.view === "session" && params.action !== "status" && params.action !== "watch") {
+    throw new Error('Observe view="session" is supported only for status and watch actions.');
   }
   if (params.turn !== undefined) {
     if (!Number.isInteger(params.turn) || params.turn < 1) throw new Error("Observe turn must be a positive integer.");
@@ -223,6 +252,7 @@ export async function observeTargets(params: ObserveParams, signal?: AbortSignal
           lines: options.lines,
           ...(params.action === "diagnose" ? { diagnose: true } : {}),
           ...(params.view ? { view: params.view } : {}),
+          ...(target.cursor ? { cursor: target.cursor } : {}),
           ...(params.turn !== undefined ? { turn: params.turn } : {}),
         });
       } catch (error) {
@@ -331,8 +361,13 @@ async function watchTargets(
         return;
       }
       try {
-        const observation = await provider.snapshot(target.id, { detail: options.detail, lines: options.lines });
-        const key = `${observation.nativeStatus}|${observation.phase}`;
+        const observation = await provider.snapshot(target.id, {
+          detail: options.detail,
+          lines: options.lines,
+          ...(params.view ? { view: params.view } : {}),
+          ...(target.cursor ? { cursor: target.cursor } : {}),
+        });
+        const key = `${observation.nativeStatus}|${observation.phase}|${observation.revision ?? ""}`;
         if (lastSeen.get(index) !== key) {
           transitions.push(observation);
           lastSeen.set(index, key);

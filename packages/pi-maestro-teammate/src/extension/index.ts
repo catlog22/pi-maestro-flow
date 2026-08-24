@@ -170,6 +170,7 @@ import {
   type WorkspaceResolvedTarget,
   type WorkspaceSettledSnapshot,
 } from "./workspace-peers.ts";
+import { workspaceSessionObservationSnapshot } from "./workspace-session-observation.ts";
 import {
   runSingleTeammate,
   runGraph,
@@ -1056,7 +1057,7 @@ export default function registerTeammateExtension(
       ): Promise<ObservationSnapshot> => {
         const response = await proxyCall<{ output: string[]; result: ObserveResult }>("observe", {
           action,
-          targets: [{ kind: "workspace", id }],
+          targets: [{ kind: "workspace", id, ...(options.cursor ? { cursor: options.cursor } : {}) }],
           detail: options.detail,
           lines: options.lines,
           ...(options.view ? { view: options.view } : {}),
@@ -1433,6 +1434,7 @@ export default function registerTeammateExtension(
   let workspaceMainSessionActivityAt: number | undefined;
   let workspaceMainSessionProgress: WorkspaceMainSessionProgress | undefined;
   let workspaceMainSessionProgressSequence = 0;
+  let workspaceMainSessionProgressRevision = 0;
   let workspaceMainAssistantText = "";
   let workspaceMainAssistantEventOpen = false;
   let workspaceReceiptReconcileTimer: ReturnType<typeof setInterval> | undefined;
@@ -1620,10 +1622,12 @@ export default function registerTeammateExtension(
 
   const appendWorkspaceMainProgressEvent = (event: WorkspaceMainSessionProgressEvent): void => {
     workspaceMainSessionProgressSequence += 1;
+    workspaceMainSessionProgressRevision += 1;
     const events = [...(workspaceMainSessionProgress?.events ?? []), event]
       .slice(-MAX_MAIN_SESSION_PROGRESS_EVENTS);
     workspaceMainSessionProgress = {
       updatedAt: event.at,
+      revision: workspaceMainSessionProgressRevision,
       sequence: workspaceMainSessionProgressSequence,
       baseCursor: workspaceMainSessionProgressSequence - events.length,
       events,
@@ -1636,6 +1640,7 @@ export default function registerTeammateExtension(
   const updateWorkspaceMainAssistantText = (text: string, at = Date.now()): void => {
     const bounded = truncateUtf8Tail(text, MAIN_SESSION_PROGRESS_TEXT_BYTES);
     if (!bounded) return;
+    workspaceMainSessionProgressRevision += 1;
     const events = [...(workspaceMainSessionProgress?.events ?? [])];
     const event: WorkspaceMainSessionProgressEvent = { kind: "assistant", at, text: bounded };
     if (workspaceMainAssistantEventOpen && events.at(-1)?.kind === "assistant") {
@@ -1647,6 +1652,7 @@ export default function registerTeammateExtension(
     const retainedEvents = events.slice(-MAX_MAIN_SESSION_PROGRESS_EVENTS);
     workspaceMainSessionProgress = {
       updatedAt: at,
+      revision: workspaceMainSessionProgressRevision,
       sequence: workspaceMainSessionProgressSequence,
       baseCursor: workspaceMainSessionProgressSequence - retainedEvents.length,
       events: retainedEvents,
@@ -7309,7 +7315,11 @@ export default function registerTeammateExtension(
     fence: RootSessionFence = captureRootSessionFence(),
     monitorCapture: MonitorCommunicationCapture | undefined = captureMonitorCommunication(),
   ): Promise<ObservationSnapshot> => {
-    const target = { kind: "workspace", id };
+    const target: ObservationTarget = {
+      kind: "workspace",
+      id,
+      ...(options.cursor ? { cursor: options.cursor } : {}),
+    };
     if (!ownsMonitorCommunication(monitorCapture)) return unavailableMonitorObservation("workspace", id);
     await refreshWorkspacePeerOwners();
     if (!ownsRootSessionFence(fence)) {
@@ -7340,6 +7350,9 @@ export default function registerTeammateExtension(
         updatedAt: Date.now(),
         error: "owner-unavailable",
       };
+    }
+    if (options.view === "session") {
+      return workspaceSessionObservationSnapshot(owner, target, detail, lines, options.cursor);
     }
     if (options.view === "turns") return workspaceTurnsSnapshot(owner, target, detail, lines, options);
     const backgroundJobs = owner.backgroundJobs ?? [];
@@ -7649,6 +7662,7 @@ export default function registerTeammateExtension(
 
   const localObserveTool: ToolDefinition<typeof LocalObserveParams, { output: string[]; result: ObserveResult }> = {
     ...observeTool,
+    prepareArguments: undefined,
     description: LOCAL_OBSERVE_DESCRIPTION,
     promptSnippet: LOCAL_OBSERVE_SNIPPET,
     promptGuidelines: LOCAL_OBSERVE_GUIDELINES,
