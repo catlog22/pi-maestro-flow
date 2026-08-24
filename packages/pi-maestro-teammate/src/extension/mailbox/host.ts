@@ -12,6 +12,8 @@
  */
 
 import type { MailboxDispatchDisposition } from "./consumer.ts";
+import { logDiagnosticError, logDiagnosticWarn } from "../../shared/diagnostic-log.ts";
+
 import { MailboxService } from "./service.ts";
 import { MailboxRollout, type RolloutMode } from "./rollout.ts";
 import type { MailboxAuthority } from "./router.ts";
@@ -24,7 +26,7 @@ import type { RpcMessageMode } from "../../runs/execution.ts";
 export function mailboxModeFromEnv(env: NodeJS.ProcessEnv = process.env): RolloutMode {
   const raw = (env.PI_TEAMMATE_MAILBOX ?? "authoritative").toLowerCase();
   if (raw === "shadow" || raw === "authoritative" || raw === "disabled") return raw;
-  console.warn(`[pi-maestro-teammate] unknown PI_TEAMMATE_MAILBOX="${raw}", falling back to authoritative`);
+  logDiagnosticWarn(`[pi-maestro-teammate] unknown PI_TEAMMATE_MAILBOX="${raw}", falling back to authoritative`);
   return "authoritative";
 }
 
@@ -180,13 +182,13 @@ export class MailboxHost {
     this.#startPromise = this.service.start(mode === "authoritative");
     void this.#startPromise.catch((error) => {
       // Surface — never silently fall back to direct stdin.
-      console.error(`[pi-maestro-teammate] mailbox startup failed:`, error);
+      logDiagnosticError(`[pi-maestro-teammate] mailbox startup failed:`, error);
     });
 
     // Periodic GC keeps applied/dead/expired receipts from accumulating.
     this.#gcTimer = setInterval(() => {
       void this.service.runGC().catch((error) => {
-        console.error(`[pi-maestro-teammate] mailbox GC failed:`, error);
+        logDiagnosticError(`[pi-maestro-teammate] mailbox GC failed:`, error);
       });
     }, options.gcIntervalMs ?? DEFAULT_GC_INTERVAL_MS);
     this.#gcTimer.unref?.();

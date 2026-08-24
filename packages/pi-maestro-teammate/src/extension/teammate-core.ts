@@ -7,6 +7,8 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { logDiagnosticError, logDiagnosticWarn } from "../shared/diagnostic-log.ts";
+
 import { altKey } from "pi-maestro-settings-core/v1";
 import type {
   ExtensionAPI,

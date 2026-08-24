@@ -1,4 +1,6 @@
 import { execFileSync } from "node:child_process";
+import { logDiagnosticError, logDiagnosticWarn } from "../shared/diagnostic-log.ts";
+
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -2241,7 +2243,7 @@ export async function refreshModelRegistry(ctx: ModelRegistryRefreshContext): Pr
       .then(() => undefined, (error) => {
         // A failed registry refresh must not block dispatch; the previous
         // snapshot stays authoritative until the next successful refresh.
-        console.error(
+        logDiagnosticError(
           `[pi-maestro-teammate] model registry refresh failed: ${error instanceof Error ? error.message : String(error)}`,
         );
       })

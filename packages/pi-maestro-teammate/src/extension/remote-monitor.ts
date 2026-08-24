@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { logDiagnosticError, logDiagnosticWarn } from "../shared/diagnostic-log.ts";
+
 import type { RemoteConfig } from "../remote/config.ts";
 import type {
   RemoteRunCancelResult,

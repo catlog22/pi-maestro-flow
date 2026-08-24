@@ -499,6 +499,8 @@ import {
   COCKPIT_SESSION_LIST_EVENT,
   TEAMMATE_AGENT_COMMAND_EVENT,
 } from "../shared/cockpit-events.ts";
+import { logDiagnosticError, logDiagnosticWarn } from "../shared/diagnostic-log.ts";
+import { bindDiagnosticUi, registerDiagnosticCommand } from "./diagnostic-status.ts";
 import type { TeammateRuntimeOptions, ProgressFlushGate, AgentWidgetTheme, AgentWidgetRow, AgentSelectorRow, PendingChildProxyRequest, ChildProxyPendingRequests, IpcSender } from "./teammate-core.ts";
 import { buildHistoryRows, historyRowKey } from "./teammate-core.ts";
 import { MailboxHost, mailboxModeFromEnv } from "./mailbox/host.ts";

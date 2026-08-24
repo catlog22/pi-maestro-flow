@@ -9,6 +9,8 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
+import { logDiagnosticError, logDiagnosticWarn } from "../shared/diagnostic-log.ts";
+
 import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -743,7 +745,7 @@ export async function runSingleTeammate(
     try {
       await options.onResultPublished?.(result, originCwd);
     } catch (error) {
-      console.warn(
+      logDiagnosticWarn(
         `[pi-maestro-teammate] result publication observer failed for ${result.correlationId}: `
         + `${error instanceof Error ? error.message : String(error)}`,
       );

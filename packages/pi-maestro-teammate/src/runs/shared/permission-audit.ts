@@ -7,6 +7,8 @@
  */
 
 import { constants as fsConstants } from "node:fs";
+import { logDiagnosticError, logDiagnosticWarn } from "../../shared/diagnostic-log.ts";
+
 import type { Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
@@ -385,7 +387,7 @@ function warnBounded(error: unknown): void {
   const suffix = suppressedWarnings > 0 ? ` (${suppressedWarnings} similar warnings suppressed)` : "";
   suppressedWarnings = 0;
   lastWarningAt = now;
-  console.warn(`[pi-maestro-teammate] permission audit write failed: ${flattenIdentifier(detail, WARNING_MAX_BYTES)}${suffix}`);
+  logDiagnosticWarn(`[pi-maestro-teammate] permission audit write failed: ${flattenIdentifier(detail, WARNING_MAX_BYTES)}${suffix}`);
 }
 
 /** Schedule an audit record without exposing filesystem work to the reply path. */

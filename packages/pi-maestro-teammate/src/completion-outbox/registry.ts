@@ -1,10 +1,12 @@
 import {
+
   COMPLETION_DURABILITY_REGISTRY_KEY,
   type CompletionDurabilityProvider,
   type CompletionDurabilityRegistry,
   type CompletionDurabilityRegistryListener,
   type CompletionDurabilityRegistrySnapshot,
 } from "../public/v1/completion-durability.ts";
+import { logDiagnosticError, logDiagnosticWarn } from "../shared/diagnostic-log.ts";
 
 interface RegistryHost {
   [key: symbol]: unknown;
@@ -56,7 +58,7 @@ export class CompletionDurabilityRegistryImpl implements CompletionDurabilityReg
       try {
         listener(snapshot);
       } catch (error) {
-        console.error("[pi-maestro-teammate] completion durability registry listener failed:", error);
+        logDiagnosticError("[pi-maestro-teammate] completion durability registry listener failed:", error);
       }
     }
   }

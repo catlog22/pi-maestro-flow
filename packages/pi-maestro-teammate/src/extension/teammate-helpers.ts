@@ -7,6 +7,8 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { logDiagnosticError, logDiagnosticWarn } from "../shared/diagnostic-log.ts";
+
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
@@ -1062,14 +1064,14 @@ export function safeSendMessage(
       // but nothing came back" case that misreads as a hang. The completion
       // event already fired and state is settled, so this is observability,
       // not a delivery retry.
-      console.warn(
+      logDiagnosticWarn(
         "[pi-maestro-teammate] deferred completion notification dropped: the extension "
         + "ctx became stale (session switched/reloaded). The result is settled and "
         + "inspectable via observe; it will not arrive as a new turn.",
       );
       return false;
     }
-    console.error("[pi-maestro-teammate] deferred sendMessage failed:", error);
+    logDiagnosticError("[pi-maestro-teammate] deferred sendMessage failed:", error);
     return false;
   }
 }
@@ -1192,7 +1194,7 @@ export function recordChildReclamationOutcome(
       AGENT_BUFFER_LIMITS.lastResultBytes,
     );
   }
-  console.error(`[pi-maestro-teammate] ${diagnostic}`);
+  logDiagnosticError(`[pi-maestro-teammate] ${diagnostic}`);
 }
 
 export function retireAgent(

@@ -16,9 +16,11 @@
  */
 
 import {
+
   spawn,
   type ChildProcess,
 } from "node:child_process";
+import { logDiagnosticError, logDiagnosticWarn } from "../shared/diagnostic-log.ts";
 import {
   randomUUID,
 } from "node:crypto";
@@ -2492,10 +2494,9 @@ export function sendChildIpcMessage(
   try {
     child.send(message as never, (error) => {
       if (!error) return;
-      console.error(
-        "[pi-maestro-teammate] child IPC send failed asynchronously",
+      logDiagnosticError(
+        `[pi-maestro-teammate] child IPC send failed asynchronously (type=${(message as { type?: string }).type ?? "unknown"})`,
         error,
-        "type", (message as { type?: string }).type,
       );
       try {
         if (child.connected) child.disconnect();

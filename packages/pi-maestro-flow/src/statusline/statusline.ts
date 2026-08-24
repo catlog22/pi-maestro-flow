@@ -289,6 +289,21 @@ export function renderKnowledgePendingMarker(value: string | undefined): string 
 	return colored("phase", `KNOW ?`);
 }
 
+/**
+ * Teammate diagnostic marker: surfaces unread pi-maestro-teammate errors.
+ *
+ * Reads the `pi-teammate-diagnostic` extension status written by the teammate
+ * package's diagnostic logger. The value is `⚠N` (N unread errors); shown in
+ * danger color so a spike is visible at a glance. Returns "" when there are no
+ * unread errors (the logger clears the status to undefined).
+ */
+export function renderTeammateDiagnosticMarker(value: string | undefined): string {
+	if (!value) return "";
+	const count = /⚠(\d+)/.exec(value)?.[1];
+	if (count) return colored("danger", `⚠${count}`);
+	return colored("danger", `⚠`);
+}
+
 function renderContextPressure(value: string | undefined, width: number): string {
 	if (!value) return "";
 	const normalized = value.replace(/^CTX\s+/i, "").trim();
@@ -406,6 +421,7 @@ function renderLine1(
 	effortStatus: string | undefined,
 	evolStatus: string | undefined,
 	knowledgeStatus: string | undefined,
+	teammateDiagnosticStatus: string | undefined,
 	usageSparkline: string,
 ): string {
 	const safeWidth = Math.max(1, width);
@@ -416,6 +432,7 @@ function renderLine1(
 	const autoCompactionCompact = renderAutoCompactionMode(compactionStatus, 48);
 	const evolText = renderEvolMarker(evolStatus);
 	const knowledgeText = renderKnowledgePendingMarker(knowledgeStatus);
+	const teammateDiagText = renderTeammateDiagnosticMarker(teammateDiagnosticStatus);
 	const autoCompactionNarrow = renderAutoCompactionMode(compactionStatus, 1);
 	const effort = formatEffortStatus(effortStatus);
 	const modelText = colored("model", `${ICONS.model} ${shortenModel(rs.model)}${effort ? ` · ${effort}` : ""}`);
@@ -439,17 +456,17 @@ function renderLine1(
 
 	const candidates = safeWidth >= 80
 		? [
-			[modeFull, modelText, contextFull, autoCompactionFull, evolText, knowledgeText, toolCallText, dirGitText, tokenText],
-			[modeCompact, modelText, contextCompact, autoCompactionCompact, evolText, toolCallText, dirGitText, tokenText],
-			[modeCompact, modelText, contextCompact, autoCompactionCompact, evolText, toolCallText, dirGitText],
-			[modeCompact, modelText, contextCompact, autoCompactionCompact, toolCallText, dirGitText],
+			[modeFull, modelText, contextFull, autoCompactionFull, evolText, knowledgeText, teammateDiagText, toolCallText, dirGitText, tokenText],
+			[modeCompact, modelText, contextCompact, autoCompactionCompact, evolText, teammateDiagText, toolCallText, dirGitText, tokenText],
+			[modeCompact, modelText, contextCompact, autoCompactionCompact, evolText, teammateDiagText, toolCallText, dirGitText],
+			[modeCompact, modelText, contextCompact, autoCompactionCompact, teammateDiagText, toolCallText, dirGitText],
 			[modeCompact, modelText, contextCompact, autoCompactionCompact, dirText],
 			[modeNarrow, autoCompactionNarrow, contextCompact, modelText],
 		]
 		: safeWidth >= 48
 			? [
-				[modeCompact, autoCompactionCompact, modelText, contextCompact, evolText, dirGitText],
-				[modeCompact, autoCompactionCompact, modelText, contextCompact, dirGitText],
+				[modeCompact, autoCompactionCompact, modelText, contextCompact, teammateDiagText, evolText, dirGitText],
+				[modeCompact, autoCompactionCompact, modelText, contextCompact, teammateDiagText, dirGitText],
 				[modeCompact, autoCompactionCompact, modelText, contextCompact],
 				[modeNarrow, autoCompactionNarrow, contextCompact, modelText],
 			]
@@ -673,8 +690,9 @@ export function installStatusline(
 					const swarmStatus = footerData.getExtensionStatuses().get("maestro-swarm");
 					const evolStatus = footerData.getExtensionStatuses().get("self-evolve");
 					const knowledgeStatus = footerData.getExtensionStatuses().get("maestro-knowledge-pending");
+					const teammateDiagnosticStatus = footerData.getExtensionStatuses().get("pi-teammate-diagnostic");
 					const usageSparkline = renderUsageSparklineSegment(usageSeries, statsFooterConfig, width);
-					lines.push(renderLine1(rs, activeToolCalls, cwd, width, modeStatus, approvalStatus, compactionModeStatus, effortStatus, evolStatus, knowledgeStatus, usageSparkline));
+					lines.push(renderLine1(rs, activeToolCalls, cwd, width, modeStatus, approvalStatus, compactionModeStatus, effortStatus, evolStatus, knowledgeStatus, teammateDiagnosticStatus, usageSparkline));
 
 					const pressureLine = renderPressureLine(pressureStatus, width);
 					if (pressureLine) lines.push(pressureLine);

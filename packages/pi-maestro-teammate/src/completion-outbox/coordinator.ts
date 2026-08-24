@@ -1,4 +1,5 @@
 import {
+
   getCompletionDurabilityRegistry,
   type CompletionAppliedReceipt,
   type CompletionDispatchHandle,
@@ -10,6 +11,7 @@ import {
   type CompletionNotificationRequirement,
   type CompletionTarget,
 } from "../public/v1/completion-durability.ts";
+import { logDiagnosticError, logDiagnosticWarn } from "../shared/diagnostic-log.ts";
 import { CompletionOutboxFileStore } from "./file-store.ts";
 import { COMPLETION_OUTBOX_MAX_ATTEMPTS, type CompletionOutboxRecord } from "./types.ts";
 import {
@@ -274,7 +276,7 @@ export class CompletionDeliveryCoordinator {
     for (const intent of await provider.listRecoverable(target)) {
       try { await this.store.importIntent(intent); }
       catch (error) {
-        console.warn(`[pi-maestro-teammate] completion intent import failed for ${intent.deliveryId}:`, error);
+        logDiagnosticWarn(`[pi-maestro-teammate] completion intent import failed for ${intent.deliveryId}:`, error);
       }
     }
   }
@@ -325,7 +327,7 @@ export class CompletionDeliveryCoordinator {
           // escape to the caller, which would trigger a second direct send.
           // The durable pending record remains replayable and identifiable by
           // the same deliveryId if the first envelope never reaches message_end.
-          console.warn(`[pi-maestro-teammate] accepted completion could not persist queued state for ${record.deliveryId}:`, error);
+          logDiagnosticWarn(`[pi-maestro-teammate] accepted completion could not persist queued state for ${record.deliveryId}:`, error);
         }
       } else {
         await this.store.returnToPending(target, record.deliveryId, "sendMessage rejected completion");
@@ -357,7 +359,7 @@ export class CompletionDeliveryCoordinator {
         this.#dispatches.delete(applied.dispatchId);
       }
     } catch (error) {
-      console.warn(`[pi-maestro-teammate] completion provider acknowledgement failed for ${applied.deliveryId}:`, error);
+      logDiagnosticWarn(`[pi-maestro-teammate] completion provider acknowledgement failed for ${applied.deliveryId}:`, error);
     }
   }
 
@@ -397,7 +399,7 @@ export class CompletionDeliveryCoordinator {
     this.#deferred.add(tracked);
     this.#defer(() => {
       void this.reconcile().catch((error) => {
-        console.warn("[pi-maestro-teammate] deferred completion reconciliation failed:", error);
+        logDiagnosticWarn("[pi-maestro-teammate] deferred completion reconciliation failed:", error);
       }).finally(() => {
         this.#deferred.delete(tracked);
         finish();

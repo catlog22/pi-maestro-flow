@@ -7,6 +7,8 @@
  */
 
 import { MONITOR_SESSION_NAME } from "./monitor-session.ts";
+import { logDiagnosticError, logDiagnosticWarn } from "../shared/diagnostic-log.ts";
+
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import type {
@@ -1528,7 +1530,7 @@ export async function handleProxyRequest(
             });
             if (!delivered) markSettledResultInspectable(state, cid);
           }).catch((error) => {
-            console.warn("[pi-maestro-teammate] durable nested completion failed; using passive delivery:", error);
+            logDiagnosticWarn("[pi-maestro-teammate] durable nested completion failed; using passive delivery:", error);
             fallbackDelivery();
           });
         }
@@ -1608,7 +1610,7 @@ export async function handleProxyRequest(
           });
           if (!delivered) markSettledResultInspectable(state, result.correlationId);
         }).catch((error) => {
-          console.warn("[pi-maestro-teammate] durable nested additional completion failed; using passive delivery:", error);
+          logDiagnosticWarn("[pi-maestro-teammate] durable nested additional completion failed; using passive delivery:", error);
           fallbackDelivery();
         });
       };
@@ -2483,7 +2485,7 @@ export async function handleProxyRequest(
           void publishNestedFailure(error).then((durable) => {
             if (!durable) notifyBackgroundFailure(pi, requestId, activeAgent.agent, cid, error, state);
           }).catch((durabilityError) => {
-            console.warn("[pi-maestro-teammate] durable nested failure failed; using direct delivery:", durabilityError);
+            logDiagnosticWarn("[pi-maestro-teammate] durable nested failure failed; using direct delivery:", durabilityError);
             notifyBackgroundFailure(pi, requestId, activeAgent.agent, cid, error, state);
           });
         });
@@ -3016,7 +3018,7 @@ export async function handleProxyRequest(
             restoreDeferredAgentContext(agent, deferredContext);
             // Surface the failure — never silently fall back to direct stdin.
             const reason = "message" in result.result ? (result.result as { message?: string }).message : "unknown error";
-            console.error(`[pi-maestro-teammate] mailbox delivery failed for ${to}: ${reason}`);
+            logDiagnosticError(`[pi-maestro-teammate] mailbox delivery failed for ${to}: ${reason}`);
             reply({ type: "teammate_proxy_result", requestId, result: {
               content: [{ type: "text", text: `Mailbox delivery failed for "${to}": ${reason}` }],
               isError: true, details: { delivered: false },
@@ -3024,7 +3026,7 @@ export async function handleProxyRequest(
           }
         }).catch((error) => {
           restoreDeferredAgentContext(agent, deferredContext);
-          console.error(`[pi-maestro-teammate] mailbox delivery failed for ${to}:`, error);
+          logDiagnosticError(`[pi-maestro-teammate] mailbox delivery failed for ${to}:`, error);
           reply({ type: "teammate_proxy_result", requestId, result: {
             content: [{ type: "text", text: `Mailbox delivery failed for "${to}".` }],
             isError: true, details: { delivered: false },
@@ -3254,7 +3256,7 @@ export async function handleProxyRequest(
     try {
       replyProxyFailure(event, reply, error);
     } catch (deliveryError) {
-      console.error("[pi-maestro-teammate] failed to deliver proxy error envelope", deliveryError);
+      logDiagnosticError("[pi-maestro-teammate] failed to deliver proxy error envelope", deliveryError);
     }
   }
 }

@@ -1,4 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
+import { logDiagnosticError, logDiagnosticWarn } from "../shared/diagnostic-log.ts";
+
 import {
   chmod,
   lstat,
