@@ -321,96 +321,15 @@ test("Plan editor ignores Esc while approval is in flight", async () => {
   assert.equal(result.action, "approved");
 });
 
-test("Plan confirmation exposes AI review as the sixth action", async () => {
+test("Plan confirmation exposes only the unified Review & Refine action", async () => {
   const harness = createHarness();
   const pending = openPlanConfirmation(harness.ctx, { markdown: "# Plan" });
   assert.ok(harness.component);
   const rendered = harness.component.render(80).join("\n");
-  assert.match(rendered, /6\. Review with AI subagent/);
-  harness.component.handleInput("6");
-  assert.deepEqual(await pending, { action: "review" });
-});
-
-test("Plan confirmation renders the attached review report with an apply-feedback action", async () => {
-  const harness = createHarness();
-  const pending = openPlanConfirmation(harness.ctx, {
-    markdown: "# Approved Plan\n\n- Preserve boundaries",
-    reviewReports: ["## 总体结论\n建议 修订。\n\n## 问题清单\n- P1 缺少验收标准"],
-  });
-  assert.ok(harness.component);
-  const rendered = harness.component.render(80).join("\n");
-  assert.match(rendered, /Review report \d+(?:-\d+)?(?:\/\d+)?/);
-  assert.match(rendered, /R: cycle preview|R: back to Plan/);
-  assert.match(rendered, /总体结论/);
-  assert.match(rendered, /6\. Review with AI subagent/);
-  assert.match(rendered, /7\. Apply review feedback/);
-  assert.match(rendered, /AI review report attached/);
-  harness.component.handleInput("7");
-  assert.deepEqual(await pending, { action: "apply-feedback" });
-});
-
-test("Plan confirmation report panel defaults to Report and toggles with R", async () => {
-  const harness = createHarness();
-  const pending = openPlanConfirmation(harness.ctx, {
-    markdown: "# Approved Plan\n\n- First step",
-    reviewReports: ["## 总体结论\n建议 修订。"],
-  });
-  assert.ok(harness.component);
-  let rendered = harness.component.render(80).join("\n");
-  assert.match(rendered, /Review report \d+(?:-\d+)?(?:\/\d+)?/);
-  assert.match(rendered, /R: cycle preview/);
-  assert.match(rendered, /总体结论/);
-  harness.component.handleInput("r");
-  rendered = harness.component.render(80).join("\n");
-  assert.match(rendered, /Plan \d+(?:-\d+)?(?:\/\d+)?/);
-  assert.match(rendered, /R: view review report/);
-  assert.doesNotMatch(rendered, /总体结论/);
-  harness.component.handleInput("R");
-  rendered = harness.component.render(80).join("\n");
-  assert.match(rendered, /Review report \d+(?:-\d+)?(?:\/\d+)?/);
-  harness.component.handleInput("\x1b");
-  assert.deepEqual(await pending, { action: "close" });
-});
-
-test("Plan confirmation cycles review history with [ and ]", async () => {
-  const harness = createHarness();
-  const pending = openPlanConfirmation(harness.ctx, {
-    markdown: "# Approved Plan\n\n- Step",
-    reviewReports: ["## 报告一\n第一份", "## 报告二\n第二份"],
-  });
-  assert.ok(harness.component);
-  let rendered = harness.component.render(80).join("\n");
-  // Defaults to the latest report (index 1).
-  assert.match(rendered, /Review report 2\/2/);
-  assert.match(rendered, /报告二/);
-  // [ cycles to the older report (index 0).
-  harness.component.handleInput("[");
-  rendered = harness.component.render(80).join("\n");
-  assert.match(rendered, /Review report 1\/2/);
-  assert.match(rendered, /报告一/);
-  // ] cycles back to the latest.
-  harness.component.handleInput("]");
-  rendered = harness.component.render(80).join("\n");
-  assert.match(rendered, /Review report 2\/2/);
-  assert.match(rendered, /报告二/);
-  harness.component.handleInput("\x1b");
-  assert.deepEqual(await pending, { action: "close" });
-});
-
-test("Plan confirmation keeps review rows within the overlay bounds", async () => {
-  const harness = createHarness();
-  const pending = openPlanConfirmation(harness.ctx, {
-    markdown: "# Plan\n\nBody",
-    reviewReports: [Array.from({ length: 30 }, (_, index) => `Finding ${index + 1}`).join("\n")],
-  });
-  assert.ok(harness.component);
-  for (const width of [40, 80, 120]) {
-    const lines = harness.component.render(width);
-    assert.ok(lines.length <= 28, `width ${width}: ${lines.length} lines`);
-    for (const line of lines) assert.ok(visibleWidth(line) <= width, `width ${width}: ${visibleWidth(line)} ${line}`);
-  }
-  harness.component.handleInput("\x1b");
-  assert.deepEqual(await pending, { action: "close" });
+  assert.match(rendered, /3\. Review & Refine/);
+  assert.doesNotMatch(rendered, /Review with AI subagent|Apply review feedback|Review report/);
+  harness.component.handleInput("3");
+  assert.deepEqual(await pending, { action: "refine" });
 });
 
 test("Plan confirmation shows the rollback action only when archived drafts exist", async () => {
