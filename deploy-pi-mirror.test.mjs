@@ -4,7 +4,25 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { deployMirrorSubdir, deployPackagedAgents, topLevelEntryNames } from './deploy-pi-mirror.mjs';
+import {
+  deployMirrorSubdir,
+  deployPackagedAgents,
+  removeRetiredPackageAgentsFile,
+  topLevelEntryNames,
+} from './deploy-pi-mirror.mjs';
+
+test('removeRetiredPackageAgentsFile removes stale package instructions idempotently', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pi-retired-agents-'));
+  try {
+    const target = join(root, 'AGENTS.md');
+    writeFileSync(target, '# Retired instructions\n');
+    assert.deepEqual(removeRetiredPackageAgentsFile(root), { target, removed: true });
+    assert.equal(existsSync(target), false);
+    assert.deepEqual(removeRetiredPackageAgentsFile(root), { target, removed: false });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test('deployPackagedAgents includes role definitions and schemas but excludes runtime captures', () => {
   const root = mkdtempSync(join(tmpdir(), 'pi-packaged-agents-'));

@@ -6,6 +6,13 @@ export function topLevelEntryNames(directory) {
   return readdirSync(directory).sort();
 }
 
+export function removeRetiredPackageAgentsFile(packageRoot) {
+  const target = join(packageRoot, 'AGENTS.md');
+  const removed = existsSync(target);
+  rmSync(target, { force: true });
+  return { target, removed };
+}
+
 export function deployPackagedAgents(canonicalAgentsDir, packageAgentsDir) {
   rmSync(packageAgentsDir, { recursive: true, force: true });
   mkdirSync(packageAgentsDir, { recursive: true });

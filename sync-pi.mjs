@@ -28,7 +28,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, statSync, rmSync, cpSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
-import { deployMirrorSubdir, deployPackagedAgents, topLevelEntryNames } from './deploy-pi-mirror.mjs';
+import { deployMirrorSubdir, deployPackagedAgents, removeRetiredPackageAgentsFile, topLevelEntryNames } from './deploy-pi-mirror.mjs';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = dirname(fileURLToPath(import.meta.url));
@@ -101,15 +101,13 @@ runPhase('Phase 2 (Claude → pi rewrite)', 'convert-pi.mjs', {
 });
 runPhase('Phase 3 (normalize Maestro paths)', 'convert-paths.mjs');
 
-// Package-level agent instructions are generated from the Core workflow source.
-const instructionsSource = join(SRC, '..', 'workflows', 'claude-instructions.md');
-const instructionsTarget = join(repoRoot, 'packages', 'pi-maestro-flow', 'AGENTS.md');
-if (!existsSync(instructionsSource)) {
-  log(`✗ agent instructions source not found: ${instructionsSource}`);
-  process.exit(1);
-}
-cpSync(instructionsSource, instructionsTarget);
-log(`  ✓ packages/pi-maestro-flow/AGENTS.md ← ${instructionsSource}`);
+// Package instructions live in the canonical .pi/SYSTEM.md. Remove the
+// retired root AGENTS.md if an older sync left one behind.
+const packageRoot = join(repoRoot, 'packages', 'pi-maestro-flow');
+const retiredInstructions = removeRetiredPackageAgentsFile(packageRoot);
+log(retiredInstructions.removed
+  ? `  ✓ removed retired ${retiredInstructions.target}`
+  : '  ✓ package instructions use .pi/SYSTEM.md (no retired AGENTS.md)');
 
 // ---------------------------------------------------------------------------
 // Optional skills (选装) — mirror <src>/optional/skills → <repo>/optional/skills
