@@ -394,7 +394,7 @@ test("window thread transitions pending to queued to injected without losing rep
     source: "monitor",
     messageKind: "request",
     traceId: "mon_trace-8",
-    replyTo: `owner:${LOCAL_OWNER}`,
+    replyTo: `owner:${REMOTE_OWNER}`,
     terminalResultRequested: true,
     fromSessionName: "control",
     targetSessionId: "session-a",
@@ -409,14 +409,14 @@ test("window thread transitions pending to queued to injected without losing rep
     messageId: "9".repeat(32),
     terminalResultRequested: true,
     messageKind: "coordination",
-    replyTo: `owner:${LOCAL_OWNER}`,
+    replyTo: `owner:${REMOTE_OWNER}`,
     targetCorrelationId: "window-main-session",
   })), /Invalid window thread entry/);
   assert.throws(() => store.record(threadInput({
     messageId: "a".repeat(32),
     terminalResultRequested: true,
     messageKind: "request",
-    replyTo: `owner:${LOCAL_OWNER}`,
+    replyTo: `owner:${REMOTE_OWNER}`,
     targetCorrelationId: "agent-1",
   })), /Invalid window thread entry/);
   assert.equal(store.transition(messageId, "incoming", "pending", 1_150), queued, "queued does not regress to pending");
