@@ -543,6 +543,7 @@ export interface InteractiveTerminalLaunchOptions {
     platform?: NodeJS.Platform;
     terminalCommand?: string;
     title?: string;
+    env?: NodeJS.ProcessEnv;
 }
 export interface InteractiveTerminalLaunchSpec {
     command: string;
@@ -666,6 +667,15 @@ export declare function validateModelSpecifier(model: string): string;
  */
 export declare function validateBackendModelSpecifier(model: string): string;
 export declare function resolveModelSpecifier(model: string, modelCapabilities?: readonly TeammateModelCapability[]): string;
+export declare function buildInheritedExtensionArgs(primaryExtensionPath: string): string[];
+export declare function managedWindowSpawnEnv(environment?: NodeJS.ProcessEnv): NodeJS.ProcessEnv;
+export interface ManagedWindowArgsOptions {
+    objective: string;
+    sessionName: string;
+    presentation: "headless" | "interactive";
+    forkSessionFile?: string;
+}
+export declare function buildManagedWindowPiArgs(options: ManagedWindowArgsOptions): string[];
 export declare function buildPiArgs(agentConfig: AgentConfig, params: RunSingleTeammateParams, systemPromptFile: string, modelOverride?: string, sessionDir?: string, forkSessionFile?: string, schemaFile?: string, modelCapabilities?: readonly TeammateModelCapability[], resumeSessionFile?: string): string[];
 export declare const PRIVATE_DIRECTORY_MODE = 448;
 export declare const PRIVATE_FILE_MODE = 384;

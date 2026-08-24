@@ -111,13 +111,13 @@ export declare const ObserveParams: Type.TObject<{
 }>;
 export declare const LocalObserveParams: Type.TUnsafe<{
     timeoutMs?: number | undefined;
+    turn?: number | undefined;
     view?: "turns" | "live" | undefined;
     lines?: number | undefined;
     detail?: "summary" | "tail" | "full" | undefined;
     waitMode?: "count" | "all" | "any" | undefined;
     waitCount?: number | undefined;
     until?: "completed" | "result-ready" | undefined;
-    turn?: number | undefined;
     action: "status" | "wait" | "watch";
     targets: {
         id: string;
@@ -137,7 +137,7 @@ export declare const WorkspaceWindowParams: Type.TObject<{
     action: Type.TUnsafe<"close" | "create" | "list">;
     name: Type.TOptional<Type.TString>;
     objective: Type.TOptional<Type.TString>;
-    presentation: Type.TOptional<Type.TUnsafe<"interactive" | "headless">>;
+    presentation: Type.TOptional<Type.TUnsafe<"headless" | "interactive">>;
 }>;
 export declare const RemoteWorkerParams: Type.TObject<{
     action: Type.TUnsafe<"close" | "targets" | "create" | "list">;
