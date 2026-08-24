@@ -648,6 +648,44 @@ export declare function validateModelSpecifier(model: string): string;
  */
 export declare function validateBackendModelSpecifier(model: string): string;
 export declare function resolveModelSpecifier(model: string, modelCapabilities?: readonly TeammateModelCapability[]): string;
+/**
+ * Builds the `--extension` argv run that every child Pi process needs: the
+ * primary extension first, then each parent-registered child extension exactly
+ * once.
+ *
+ * Both child argv paths (teammate RPC children and managed windows) share this
+ * builder so a registration that reaches one can never silently miss the other.
+ * Duplicate registrations of the primary path collapse into a single item, and
+ * Windows path comparison is case-insensitive because the same extension can be
+ * registered under differently-cased drive paths.
+ *
+ * @param primaryExtensionPath Extension loaded before any inherited one.
+ * @returns Flat argv items, starting with `--extension`.
+ */
+export declare function buildInheritedExtensionArgs(primaryExtensionPath: string): string[];
+export interface ManagedWindowArgsOptions {
+    /** Task text handed to the worker: the prompt in headless mode, the opening message otherwise. */
+    objective: string;
+    /** Pi session name the worker publishes under, used to correlate its owner snapshot. */
+    sessionName: string;
+    /** `headless` runs one non-interactive prompt; `interactive` opens a terminal window. */
+    presentation: "headless" | "interactive";
+    /** Session file to fork the worker's history from. */
+    forkSessionFile?: string;
+}
+/**
+ * Builds the Pi argv for a managed worker window.
+ *
+ * Starts with `--no-extensions` for the same reason {@link buildPiArgs} does:
+ * settings-based discovery would load a second, older copy of an already
+ * explicitly loaded package, registering the same tools twice. Without it, a
+ * managed window resolves extensions from the user's real agent directory
+ * instead of the extensions its parent actually registered.
+ *
+ * @param options Window presentation and session identity.
+ * @returns Complete argv for {@link getPiSpawnCommand}.
+ */
+export declare function buildManagedWindowPiArgs(options: ManagedWindowArgsOptions): string[];
 export declare function buildPiArgs(agentConfig: AgentConfig, params: RunSingleTeammateParams, systemPromptFile: string, modelOverride?: string, sessionDir?: string, forkSessionFile?: string, schemaFile?: string, modelCapabilities?: readonly TeammateModelCapability[], resumeSessionFile?: string): string[];
 export declare const PRIVATE_DIRECTORY_MODE = 448;
 export declare const PRIVATE_FILE_MODE = 384;

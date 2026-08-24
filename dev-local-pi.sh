@@ -7,13 +7,14 @@ HOST_HOME="${HOME:-}"
 
 SANDBOX="${PI_MAESTRO_DEV_SANDBOX:-$REPO_ROOT/.local/pi-dev}"
 WORKSPACE=""
-PI_BIN="${PI_MAESTRO_DEV_PI:-$REPO_ROOT/packages/pi-maestro-flow/node_modules/.bin/pi}"
+PI_BIN="${PI_MAESTRO_DEV_PI:-$REPO_ROOT/node_modules/.bin/pi}"
 OFFLINE=1
 NO_SESSION=1
 NO_CONTEXT_FILES=1
 NO_SKILLS=1
 FRESH=0
 CLEAN=0
+REQUIRE_PINNED_PI=0
 EXTRA_ARGS=()
 HAS_EXTRA_ARGS=0
 
@@ -34,6 +35,8 @@ Options:
   --sandbox <path>        Sandbox root (default: .local/pi-dev)
   --workspace <path>      Workspace used by Pi (default: <sandbox>/workspace)
   --pi <path>             Pi executable to use
+  --require-pinned-pi     Refuse to launch unless the Pi version matches the
+                          repository-pinned @earendil-works/pi-coding-agent
   -h, --help              Show this help
 
 Environment overrides:
@@ -67,13 +70,28 @@ normalize_dir() {
   (cd -- "$target" && pwd -P)
 }
 
+# Destroy one sandbox tree, and only something that is a sandbox tree.
+#
+# Four exact-string comparisons are not a guard: `--sandbox /Users --clean`
+# passes all of them, and so does any real project that happens not to be this
+# repository. The rule is positive instead — the target must be a directory this
+# script created and still recognises — because a deletion is the one operation
+# here that cannot be undone, and the marker is written by the only code path
+# that is allowed to produce one.
+SANDBOX_MARKER_NAME=".dev-local-pi-sandbox"
+
 safe_remove_sandbox() {
   local target="$1"
   [[ -n "$target" ]] || die "sandbox path is empty"
+  [[ -e "$target" ]] || return 0
+  [[ -d "$target" ]] || die "refusing to remove a sandbox path that is not a directory: $target"
   [[ "$target" != "/" ]] || die "refusing to remove /"
   [[ "$target" != "$REPO_ROOT" ]] || die "refusing to remove the repository"
   if [[ -n "$HOST_HOME" ]]; then
     [[ "$target" != "$HOST_HOME" ]] || die "refusing to remove HOME"
+  fi
+  if [[ ! -f "$target/$SANDBOX_MARKER_NAME" ]]; then
+    die "refusing to remove $target: it carries no $SANDBOX_MARKER_NAME marker, so this script did not create it"
   fi
   rm -rf -- "$target"
 }
@@ -86,6 +104,10 @@ while (($# > 0)); do
       ;;
     --clean)
       CLEAN=1
+      shift
+      ;;
+    --require-pinned-pi)
+      REQUIRE_PINNED_PI=1
       shift
       ;;
     --online)
@@ -160,6 +182,11 @@ mkdir -p -- \
   "$SANDBOX/npm-cache" \
   "$SANDBOX/maestro-home"
 
+# The only writer of the marker `--clean`/`--fresh` require. An existing sandbox
+# created before this marker existed gains it here, on its next ordinary run.
+printf 'Created by dev-local-pi.sh. Removing this file makes --clean/--fresh refuse to delete this tree.\n' \
+  >"$SANDBOX/$SANDBOX_MARKER_NAME"
+
 if [[ -z "$WORKSPACE" ]]; then
   WORKSPACE="$SANDBOX/workspace"
 fi
@@ -174,6 +201,33 @@ if [[ ! -x "$PI_BIN" ]]; then
   fi
 fi
 PI_BIN="$(cd -- "$(dirname -- "$PI_BIN")" && pwd -P)/$(basename -- "$PI_BIN")"
+
+# A Pi resolved outside the repository is a different build than the one the
+# sandbox's evidence was gathered against. Name both versions rather than
+# letting the sandbox silently swap the runtime under test.
+PINNED_PI_VERSION="$(node -p "require('$REPO_ROOT/node_modules/@earendil-works/pi-coding-agent/package.json').version" 2>/dev/null || printf 'unknown')"
+# Pi reads its agent dir on every invocation, `--version` included, so this
+# probe runs under the sandbox environment the run itself uses. Executing it
+# with the developer's real HOME would touch ~/.pi, which this script exists to
+# never do.
+ACTUAL_PI_VERSION="$(
+  HOME="$SANDBOX/home" \
+  USERPROFILE="$SANDBOX/home" \
+  PI_CODING_AGENT_DIR="$SANDBOX/home/.pi/agent" \
+  XDG_CONFIG_HOME="$SANDBOX/home/.config" \
+  XDG_CACHE_HOME="$SANDBOX/cache" \
+  XDG_DATA_HOME="$SANDBOX/data" \
+  TMPDIR="$SANDBOX/tmp" \
+  "$PI_BIN" --version 2>/dev/null | tr -d '\r\n' || printf 'unknown'
+)"
+if [[ "$ACTUAL_PI_VERSION" != "$PINNED_PI_VERSION" ]]; then
+  PI_VERSION_MESSAGE="$(printf 'sandbox pi %s differs from repo-pinned %s; G2/G4 evidence was gathered against %s' \
+    "$ACTUAL_PI_VERSION" "$PINNED_PI_VERSION" "$PINNED_PI_VERSION")"
+  if ((REQUIRE_PINNED_PI)); then
+    die "$PI_VERSION_MESSAGE"
+  fi
+  printf 'warning: %s\n' "$PI_VERSION_MESSAGE" >&2
+fi
 
 COCKPIT_EXTENSION="$REPO_ROOT/packages/pi-cockpit/src/index.ts"
 TEAMMATE_EXTENSION="$REPO_ROOT/packages/pi-maestro-teammate/src/extension/index.ts"
@@ -203,7 +257,7 @@ cat <<EOF
 Maestro local Pi development sandbox
   sandbox:   $SANDBOX
   workspace: $WORKSPACE
-  pi:        $PI_BIN
+  pi:        $PI_BIN ($ACTUAL_PI_VERSION, repo-pinned $PINNED_PI_VERSION)
   agent dir: $SANDBOX/home/.pi/agent
   maestro:   $SANDBOX/maestro-home
 

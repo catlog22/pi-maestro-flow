@@ -1541,6 +1541,7 @@ export function getInteractiveTerminalLaunchSpec(
   };
 }
 
+
 export interface ProcessTreeByPidOptions {
   platform?: NodeJS.Platform;
   spawnProcess?: typeof crossSpawn;
@@ -1944,6 +1945,77 @@ export function resolveModelSpecifier(
   throw new TypeError(`Unknown teammate model specifier ${JSON.stringify(model)}. Use an exact provider/model identifier.`);
 }
 
+/** Absolute path of this package's own extension entry, loaded by every child Pi process. */
+function teammateExtensionPath(): string {
+  return fileURLToPath(new URL("../extension/index.ts", import.meta.url));
+}
+
+/**
+ * Builds the `--extension` argv run that every child Pi process needs: the
+ * primary extension first, then each parent-registered child extension exactly
+ * once.
+ *
+ * Both child argv paths (teammate RPC children and managed windows) share this
+ * builder so a registration that reaches one can never silently miss the other.
+ * Duplicate registrations of the primary path collapse into a single item, and
+ * Windows path comparison is case-insensitive because the same extension can be
+ * registered under differently-cased drive paths.
+ *
+ * @param primaryExtensionPath Extension loaded before any inherited one.
+ * @returns Flat argv items, starting with `--extension`.
+ */
+export function buildInheritedExtensionArgs(primaryExtensionPath: string): string[] {
+  const args = ["--extension", primaryExtensionPath];
+  const loadedExtensionPaths = new Set([
+    process.platform === "win32" ? primaryExtensionPath.toLowerCase() : primaryExtensionPath,
+  ]);
+  for (const registration of getTeammateChildExtensions()) {
+    const key = process.platform === "win32"
+      ? registration.path.toLowerCase()
+      : registration.path;
+    if (loadedExtensionPaths.has(key)) continue;
+    loadedExtensionPaths.add(key);
+    args.push("--extension", registration.path);
+  }
+  return args;
+}
+
+
+
+export interface ManagedWindowArgsOptions {
+  /** Task text handed to the worker: the prompt in headless mode, the opening message otherwise. */
+  objective: string;
+  /** Pi session name the worker publishes under, used to correlate its owner snapshot. */
+  sessionName: string;
+  /** `headless` runs one non-interactive prompt; `interactive` opens a terminal window. */
+  presentation: "headless" | "interactive";
+  /** Session file to fork the worker's history from. */
+  forkSessionFile?: string;
+}
+
+/**
+ * Builds the Pi argv for a managed worker window.
+ *
+ * Starts with `--no-extensions` for the same reason {@link buildPiArgs} does:
+ * settings-based discovery would load a second, older copy of an already
+ * explicitly loaded package, registering the same tools twice. Without it, a
+ * managed window resolves extensions from the user's real agent directory
+ * instead of the extensions its parent actually registered.
+ *
+ * @param options Window presentation and session identity.
+ * @returns Complete argv for {@link getPiSpawnCommand}.
+ */
+export function buildManagedWindowPiArgs(options: ManagedWindowArgsOptions): string[] {
+  const args = ["--no-extensions", ...buildInheritedExtensionArgs(teammateExtensionPath())];
+  if (options.forkSessionFile) args.push("--fork", options.forkSessionFile);
+  if (options.presentation === "interactive") {
+    args.push("--name", options.sessionName, options.objective);
+  } else {
+    args.push("-p", options.objective, "--name", options.sessionName);
+  }
+  return args;
+}
+
 export function buildPiArgs(
   agentConfig: AgentConfig,
   params: RunSingleTeammateParams,
@@ -1962,23 +2034,7 @@ export function buildPiArgs(
 
   // Child mode owns session identity publication, lease fencing, and proxy tools.
   // Load it explicitly because the child cwd may not discover this package.
-  const teammateExtension = fileURLToPath(
-    new URL("../extension/index.ts", import.meta.url),
-  );
-  args.push("--extension", teammateExtension);
-
-  const inheritedExtensions = getTeammateChildExtensions();
-  const loadedExtensionPaths = new Set([
-    process.platform === "win32" ? teammateExtension.toLowerCase() : teammateExtension,
-  ]);
-  for (const registration of inheritedExtensions) {
-    const key = process.platform === "win32"
-      ? registration.path.toLowerCase()
-      : registration.path;
-    if (loadedExtensionPaths.has(key)) continue;
-    loadedExtensionPaths.add(key);
-    args.push("--extension", registration.path);
-  }
+  args.push(...buildInheritedExtensionArgs(teammateExtensionPath()));
 
   if (resumeSessionFile) {
     args.push("--session", resumeSessionFile);
@@ -2007,7 +2063,7 @@ export function buildPiArgs(
       : agentConfig.tools.filter((tool) => !hiddenLegacyObservationTools.includes(tool));
     const legacyObservationTools = exposeLegacyObservationTools ? hiddenLegacyObservationTools : [];
     const proxyTools = ["teammate", "teammate-send", "teammate-list", "observe", ...legacyObservationTools];
-    const inheritedTools = inheritedExtensions.flatMap((registration) => registration.tools);
+    const inheritedTools = getTeammateChildExtensions().flatMap((registration) => registration.tools);
     const toolSet = new Set([...configuredTools, ...proxyTools, ...inheritedTools]);
     if (schemaFile) toolSet.add("structured_output");
     args.push("--tools", [...toolSet].join(","));

@@ -319,7 +319,10 @@ test("monitor communication uses tool-local capability gates without global inte
   assert.match(source, /name: "workspace-window"/);
   assert.match(source, /const monitorCapture = captureMonitorCommunication\(\);[\s\S]*?workspace-window is available only after the user enters Monitor mode/);
   assert.match(source, /const sessionName = managedWindowSessionName\(name\)/);
-  assert.match(source, /presentation === "interactive"[\s\S]*?"--name", sessionName, objective\][\s\S]*?"-p", objective, "--name", sessionName\]/);
+  // Presentation-dependent argv moved into the shared builder, which also
+  // propagates inherited child extensions; its shape is pinned by
+  // test/managed-window-extensions.test.ts.
+  assert.match(source, /buildManagedWindowPiArgs\(\{ objective, sessionName, presentation, forkSessionFile \}\)/);
   assert.match(source, /owner\.sessionName === window\.sessionName/);
   assert.match(source, /managedWindows\.get\(name\) !== spawned\.window \|\| !exactManagedWindowOwner\(spawned\.window\)/);
   assert.match(source, /owner\.ownerId === window\.ownerId[\s\S]*?owner\.ownerNonce === window\.ownerNonce[\s\S]*?owner\.pid === window\.pid/);

@@ -425,7 +425,11 @@ test("window inbox applies a default 24h window and honors explicit since overri
     const byDefault = await loadWorkspaceWindowInbox(current, { session: "monitor" });
     assert.deepEqual(byDefault.entries.map((entry) => entry.messageId), ["fresh"]);
     assert.equal(byDefault.sinceWasDefault, true);
-    assert.ok(byDefault.since !== undefined && byDefault.since <= now && byDefault.since > now - 24 * 3_600_000);
+    // `>=`, not `>`: the implementation reads its own clock at or after `now`
+    // and subtracts the same 24h, so `since >= now - 24h` is the tight bound.
+    // A strict `>` demands a strictly later clock read, which two calls in the
+    // same millisecond do not provide — and that made this line fail at random.
+    assert.ok(byDefault.since !== undefined && byDefault.since <= now && byDefault.since >= now - 24 * 3_600_000);
 
     const widened = await loadWorkspaceWindowInbox(current, { session: "monitor", since: "7d" });
     assert.deepEqual(widened.entries.map((entry) => entry.messageId), ["fresh", "stale"]);

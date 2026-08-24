@@ -417,7 +417,15 @@ test("delegate command wiring keeps fork, confirmation, additive injection, and 
   assert.match(sourceText, /ctx\.ui\.confirm\(/);
   assert.match(sourceText, /return confirmed \? document : undefined/);
   assert.match(sourceText, /if \(confirmedDocument === undefined\)[\s\S]*?dispatchDelegation\(record, confirmedDocument, ctx\)/);
-  assert.match(sourceText, /forkArgs = forkSessionFile \? \["--fork", forkSessionFile\] : \[\]/);
+  // The fork argv now comes from the shared managed-window builder, which both
+  // this delegate path and teammate RPC children consume. The argument list is
+  // pinned literally: an unbounded `[\s\S]*?` span matches the token wherever
+  // it next appears in the file, so a call site that dropped `forkSessionFile`
+  // would still satisfy the assertion meant to catch exactly that.
+  assert.match(
+    sourceText,
+    /buildManagedWindowPiArgs\(\{ objective, sessionName, presentation, forkSessionFile \}\)/,
+  );
   assert.match(sourceText, /buildDelegationDelivery\(dispatching, confirmedDocument, replyTo\)/);
   assert.match(sourceText, /messageId: dispatchMessageId/);
   assert.match(sourceText, /commandId: request\.messageId/);

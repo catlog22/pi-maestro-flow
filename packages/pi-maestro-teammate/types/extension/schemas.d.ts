@@ -137,7 +137,7 @@ export declare const WorkspaceWindowParams: Type.TObject<{
     action: Type.TUnsafe<"close" | "create" | "list">;
     name: Type.TOptional<Type.TString>;
     objective: Type.TOptional<Type.TString>;
-    presentation: Type.TOptional<Type.TUnsafe<"interactive" | "headless">>;
+    presentation: Type.TOptional<Type.TUnsafe<"headless" | "interactive">>;
 }>;
 export declare const RemoteWorkerParams: Type.TObject<{
     action: Type.TUnsafe<"close" | "targets" | "create" | "list">;

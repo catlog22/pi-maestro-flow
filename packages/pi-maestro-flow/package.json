@@ -33,7 +33,8 @@
     "test:intelligence": "node --experimental-transform-types --test test/search-tool-bm25.test.ts test/smart-search.test.ts test/smart-search-config.test.ts test/web-storage.test.ts test/lsp-client.test.ts test/lsp-manager.test.ts test/lsp-lifecycle.test.ts test/lsp-tool.test.ts test/lsp-output.test.ts test/lsp-auto-diagnostics.test.ts test/workspace-edit.test.ts test/browser-tool.test.ts test/extension-tools.test.ts test/fff.test.ts test/quiet-render.test.ts",
     "check:mcp": "tsc -p tsconfig.mcp.json",
     "check:types": "tsc -p tsconfig.intelligence.json",
-    "typecheck": "tsc -p tsconfig.build.json"
+    "typecheck": "tsc -p tsconfig.build.json",
+    "test:sandbox": "node --experimental-transform-types --test test/sandbox-pi-binary.test.ts"
   },
   "keywords": [
     "pi-package",
