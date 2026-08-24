@@ -114,6 +114,10 @@ test("diagnose requests canonical provider detail without changing snapshot sema
     assert.equal(result.reason, "snapshot");
     assert.equal(received?.diagnose, true);
     assert.equal(result.observations[0]?.diagnosis?.reasonCode, "awaiting-agent-settled");
+    const formatted = formatObserveResult(result);
+    assert.match(formatted.join("\n"), /lifecycle=running phase=settling health=stalled activity=running tool=active/);
+    assert.match(formatted.join("\n"), /trigger: source=unknown confidence=unknown sender=unknown/);
+    assert.match(formatted.join("\n"), /last-message: unavailable/);
     await assert.rejects(
       observeTargets({ action: "diagnose", targets: [{ kind: "test-diagnose", id: "worker" }], timeoutMs: 1 }),
       /timeoutMs is supported only for wait and watch/,

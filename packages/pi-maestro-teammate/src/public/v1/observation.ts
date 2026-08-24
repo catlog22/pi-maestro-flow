@@ -1,4 +1,4 @@
-import type { AgentRuntimeDiagnosisV1 } from "../../shared/types.ts";
+import type { AgentRuntimeDiagnosisV1, MessageProvenanceV1 } from "../../shared/types.ts";
 
 export type ObservationAction = "status" | "diagnose" | "wait" | "watch";
 export type ObservationDetail = "summary" | "tail" | "full";
@@ -361,12 +361,43 @@ async function watchTargets(
   };
 }
 
+export function diagnosisProvenanceLine(
+  label: "trigger" | "last-message",
+  provenance: MessageProvenanceV1,
+): string {
+  const sender = provenance.sender.kind === "teammate-agent"
+    ? `teammate-agent:${provenance.sender.correlationId}`
+    : provenance.sender.kind === "unknown"
+      ? `unknown${provenance.legacyLabel ? ` (legacy=${provenance.legacyLabel})` : ""}`
+      : `${provenance.sender.kind}:${provenance.sender.ownerId}`;
+  const identity = provenance.messageId ? ` message=${provenance.messageId}` : "";
+  const semantics = `${provenance.messageKind ? ` kind=${provenance.messageKind}` : ""}${provenance.deliveryMode ? ` mode=${provenance.deliveryMode}` : ""}`;
+  return `${label}: source=${provenance.source} confidence=${provenance.confidence} sender=${sender}${identity}${semantics}`;
+}
+
+export function diagnosisDetail(diagnosis: AgentRuntimeDiagnosisV1): string[] {
+  return [
+    `lifecycle=${diagnosis.lifecycle}${diagnosis.phase ? ` phase=${diagnosis.phase}` : ""} health=${diagnosis.health} activity=${diagnosis.activity} tool=${diagnosis.toolActivity} resultReady=${diagnosis.resultReady}`,
+    `reason=${diagnosis.reasonCode} fallback=${diagnosis.fallbackDisposition}`,
+    diagnosisProvenanceLine("trigger", diagnosis.trigger),
+    ...(diagnosis.lastMessage
+      ? [`last-message-role=${diagnosis.lastMessage.role} timestamp=${diagnosis.lastMessage.timestamp}`, diagnosisProvenanceLine("last-message", diagnosis.lastMessage.provenance)]
+      : ["last-message: unavailable"]),
+    ...(diagnosis.previousOutcome
+      ? [`previous-outcome=${diagnosis.previousOutcome.status} settledAt=${diagnosis.previousOutcome.settledAt}${diagnosis.previousOutcome.message ? ` message=${diagnosis.previousOutcome.message}` : ""}`]
+      : []),
+  ];
+}
+
 export function formatObserveResult(result: ObserveResult, verbose = false): string[] {
   const header = `${result.observations.length} targets: ${result.reason} (${result.durationMs}ms)`;
   const lines = [header];
   for (const observation of result.observations) {
     const label = `${observation.target.kind}:${observation.target.id}`;
     lines.push(`${label}\t${observation.nativeStatus}\t${observation.summary}`.trimEnd());
+    if (observation.diagnosis) {
+      lines.push("  --- diagnosis ---", ...diagnosisDetail(observation.diagnosis).map((line) => `  ${line}`));
+    }
     if (verbose && observation.detail) {
       for (const detail of observation.detail) lines.push(`  ${detail}`);
     }
