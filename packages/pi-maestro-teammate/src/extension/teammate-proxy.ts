@@ -18,7 +18,7 @@ import type {
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Check } from "typebox/value";
 import { isGuiTeammateToolAllowed, registerGuiTool, unregisterGuiTool } from "../shared/gui-registry.ts";
-import { aggregateAgentRunPhase } from "../shared/agent-status.ts";
+import { aggregateAgentRunPhase, projectAgentRuntime } from "../shared/agent-status.ts";
 import { formatLocalAgentMessage, resolveAgentCompletionTarget } from "../shared/routing.ts";
 import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchParams, TeammateWaitParams, TeammateMonitorParams, ObserveParams, LocalObserveParams } from "./schemas.ts";
@@ -91,6 +91,7 @@ import {
   normalizeTeammateParams,
   inferGraphMode,
   taskDependencyNames,
+  hasRpcTurnSidecar,
   sendRpcMessage,
   truncateUtf8Tail,
   checkDepthGuard,
@@ -161,6 +162,7 @@ import type {
   ActiveAgent,
   AgentStatus,
   AgentTerminalStatus,
+  AgentTurnTriggerContextV1,
   MessageEnvelope,
   MessageProvenanceV1,
   MessageSenderIdentityV1,
@@ -184,6 +186,7 @@ import {
   TEAMMATE_COMPLETE_EVENT,
   TEAMMATE_STARTED_EVENT,
   TEAMMATE_MESSAGE_EVENT,
+  AGENT_TURN_VERSION,
   MESSAGE_PROVENANCE_VERSION,
   normalizeMessageProvenanceV1,
   unknownMessageProvenanceV1,
@@ -1251,6 +1254,16 @@ export async function handleProxyRequest(
       const progressSnapshot = (): AgentProgressSnapshot[] =>
         [...progressState.values()].sort((left, right) => left.taskIndex - right.taskIndex);
       const pendingProgressByTask = new Map<number, AgentProgress>();
+      const refreshProxyRuntimeProjection = (agent: ActiveAgent): void => {
+        agent.runtime = projectAgentRuntime({
+          status: agent.status,
+          phase: agent.phase,
+          resultReadyAt: agent.resultReadyAt,
+          lastActivityAt: agent.lastActivityAt,
+          pendingInteractions: agent.pendingInteractions?.size,
+          turn: agent.turn,
+        });
+      };
 
       const abortCtrl = new AbortController();
       const taskAbortControllers = normalizedTasks?.map(() => new AbortController()) ?? [];
@@ -1293,6 +1306,7 @@ export async function handleProxyRequest(
         ...(normalizedTasks ? { progress: progressSnapshot() } : {}),
       };
       state.activeRuns.set(cid, activeAgent);
+      refreshProxyRuntimeProjection(activeAgent);
       trackProxyDispatch(state, requestId, cid);
       if (!normalizedTasks && singleTask.name) bindAgentName(state, singleTask.name, cid);
 
@@ -1631,6 +1645,7 @@ export async function handleProxyRequest(
           ...(task.todos ? { todos: [...task.todos] } : {}),
         };
         state.activeRuns.set(childId, childAgent);
+        refreshProxyRuntimeProjection(childAgent);
         if (task.name) bindAgentName(state, task.name, childId);
       });
       // Same P4 ordering as the root path: the full graph is registered before
@@ -1748,6 +1763,11 @@ export async function handleProxyRequest(
             }
           }
         }
+        if (childAgent) {
+          refreshProxyRuntimeProjection(childAgent);
+          entry.runtime = childAgent.runtime;
+          entry.turn = childAgent.turn;
+        }
       };
 
       const publishProxyProgress = (data: AgentProgress): void => {
@@ -1814,6 +1834,7 @@ export async function handleProxyRequest(
         const running = runningTool ?? entries.find((entry) => entry.status === "running");
         const phase = aggregateAgentRunPhase(entries);
         activeAgent.phase = phase ?? activeAgent.phase;
+        refreshProxyRuntimeProjection(activeAgent);
         return {
           agent: activeAgent.agent,
           ...(!normalizedTasks && singleTask.name ? { name: singleTask.name } : {}),
@@ -1857,6 +1878,16 @@ export async function handleProxyRequest(
       });
 
       const nestedModelRegistryAuthority = publishedModelRegistryPairSync(state.baseCwd)?.dispatch;
+      const initialTurnContext: AgentTurnTriggerContextV1 | undefined = normalizedTasks
+        ? undefined
+        : {
+            version: AGENT_TURN_VERSION,
+            turnId: randomUUID(),
+            correlationId: activeAgent.correlationId,
+            runtimeGeneration: activeAgent.runtimeGeneration ?? 0,
+            promptSeq: activeAgent.promptSeq ?? 1,
+            trigger: normalizeMessageProvenanceV1(activeAgent.initialMessageProvenance),
+          };
       const runOpts: RunTeammateOptions = {
         ...runtimeOptions,
         baseCwd: state.baseCwd,
@@ -1869,6 +1900,10 @@ export async function handleProxyRequest(
         maxDispatchDepth: childMaxDispatchDepth,
         signal: abortCtrl.signal,
         runtimeGeneration: activeAgent.runtimeGeneration,
+        initialMessageProvenance: activeAgent.initialMessageProvenance,
+        initialMessageProvenanceOf: (childId) => state.activeRuns.get(childId)?.initialMessageProvenance,
+        ...(initialTurnContext ? { initialTurnContext } : {}),
+        ...(state.recordTurnEvent ? { recordTurnEvent: state.recordTurnEvent } : {}),
         ...(normalizedTasks ? { taskSignals: taskAbortControllers.map((controller) => controller.signal) } : {}),
         parentSessionFile: spawnerAgent?.sessionFile ?? state.mainSessionFile,
         initialLeaseToken: (childId: string) => {
@@ -2099,6 +2134,8 @@ export async function handleProxyRequest(
           const generation = (target.runtimeGeneration ?? 0) + 1;
           const controller = new AbortController();
           target.runtimeGeneration = generation;
+          target.promptSeq = (target.promptSeq ?? 0) + 1;
+          target.loopSeq = 0;
           target.abortController = controller;
           target.graphAbortController = controller;
           target.lease = createChildLease();
@@ -2136,6 +2173,15 @@ export async function handleProxyRequest(
             signal: controller.signal,
             resumeSessionFile: checkpoint,
             runtimeGeneration: generation,
+            initialMessageProvenance: target.initialMessageProvenance,
+            initialTurnContext: {
+              version: AGENT_TURN_VERSION,
+              turnId: randomUUID(),
+              correlationId: target.correlationId,
+              runtimeGeneration: generation,
+              promptSeq: target.promptSeq ?? 1,
+              trigger: normalizeMessageProvenanceV1(target.initialMessageProvenance),
+            },
           };
           const onChildSpawned = runOpts.onChildSpawned;
           restartOptions.onChildSpawned = (stdin, sendControl, sessionDir, childId, callbackGeneration) => {
@@ -3051,7 +3097,14 @@ export async function handleProxyRequest(
         ? "prompt"
         : requestedMode;
       const deliveredProvenance = proxyProvenanceWithMode(localProvenance, mode);
-      const sent = sendRpcMessage(agent.stdin, deliveryMessage, mode, agent.lease ? leaseToken(agent.lease) : undefined);
+      const turnTracked = hasRpcTurnSidecar(agent.stdin);
+      const sent = sendRpcMessage(
+        agent.stdin,
+        deliveryMessage,
+        mode,
+        agent.lease ? leaseToken(agent.lease) : undefined,
+        deliveredProvenance,
+      );
       if (!sent) {
         restoreDeferredAgentContext(agent, deferredContext);
         reply({ type: "teammate_proxy_result", requestId, result: {
@@ -3061,7 +3114,7 @@ export async function handleProxyRequest(
         return;
       }
       const now = Date.now();
-      if (mode === "prompt") agent.promptSeq = (agent.promptSeq ?? 0) + 1;
+      if (mode === "prompt" && !turnTracked) agent.promptSeq = (agent.promptSeq ?? 0) + 1;
       wakeSleepingAgent(pi, agent, now);
       agent.inbox.push({
         id: deliveredProvenance.messageId ?? randomUUID(),

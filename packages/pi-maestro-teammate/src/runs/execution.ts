@@ -35,6 +35,12 @@ import type {
   AgentRunPhase,
   RecentToolInfo,
   TeammateExecutionProvenance,
+  AgentTurnEvent,
+  AgentTurnTriggerContextV1,
+} from "../shared/types.ts";
+import {
+  AGENT_TURN_VERSION,
+  normalizeMessageProvenanceV1,
 } from "../shared/types.ts";
 import { wrapLeasedMessage, type LeaseToken } from "./session-handoff.ts";
 import {
@@ -173,6 +179,7 @@ import type { TeammateRunSpec } from "pi-maestro-backend-core/v1/spec";
 export {
   TOOL_EXECUTION_HEARTBEAT_MS,
   resolveAgentCacheRetention,
+  hasRpcTurnSidecar,
   sendRpcMessage,
   sendChildIpcMessage,
   dispatchChildIpcMessage,
@@ -660,6 +667,18 @@ export async function runSingleTeammate(
   }
   const startTime = Date.now();
   const correlationId = options.correlationId ?? randomUUID();
+  const initialTurnContext: AgentTurnTriggerContextV1 = options.initialTurnContext ?? {
+    version: AGENT_TURN_VERSION,
+    turnId: randomUUID(),
+    correlationId,
+    runtimeGeneration: options.runtimeGeneration ?? 0,
+    promptSeq: 1,
+    trigger: normalizeMessageProvenanceV1(
+      options.initialMessageProvenanceOf?.(correlationId) ?? options.initialMessageProvenance,
+    ),
+  };
+  let latestTurnEvent: AgentTurnEvent | undefined;
+  let cancellationTurnRecorded = false;
   let rejectionModel = params.model;
   let resolvedRunCwd: string | undefined;
   let publicationAwaitingCompletion: { publicationId: string; originCwd: string } | undefined;
@@ -963,12 +982,34 @@ export async function runSingleTeammate(
       hostRegistryProvenanceResults.set(result, structuredClone(trustedProvenance));
     }
     if (resolvedRunCwd) result.originCwd ??= resolvedRunCwd;
+    if (!cancellationTurnRecorded && latestTurnEvent && options.recordTurnEvent) {
+      cancellationTurnRecorded = true;
+      const timestamp = Math.max(Date.now(), latestTurnEvent.timestamp + 1);
+      options.recordTurnEvent({
+        version: latestTurnEvent.version,
+        turnId: latestTurnEvent.turnId,
+        correlationId: latestTurnEvent.correlationId,
+        runtimeGeneration: latestTurnEvent.runtimeGeneration,
+        promptSeq: latestTurnEvent.promptSeq,
+        loopSeq: latestTurnEvent.loopSeq,
+        trigger: latestTurnEvent.trigger,
+        timestamp,
+        type: "terminated",
+        outcome: "terminated",
+        reason: cancellationMessage,
+        ...("lastMessage" in latestTurnEvent && latestTurnEvent.lastMessage
+          ? { lastMessage: latestTurnEvent.lastMessage }
+          : {}),
+      });
+    }
     publishTurnComplete(result, "terminated");
     return result;
   };
 
   const waitForRetry = options.waitForRetry ?? waitForRetryDelay;
   let candidateIndex = 0;
+  let processCandidateCount = 0;
+  let nextCandidateLoopSeqOffset = 0;
   let failedCandidateCount = 0;
   // The provider heuristic remains legacy-only. Registry mode suppresses auth
   // by canonical deployment/route scope through ModelHealthAttemptState.
@@ -1137,6 +1178,9 @@ export async function runSingleTeammate(
       }
     }
     if (modelToUse) recordAttemptedModel(modelToUse);
+    processCandidateCount += 1;
+    const candidateLoopSeqOffset = nextCandidateLoopSeqOffset;
+    let candidateMaxLoopSeq = candidateLoopSeqOffset;
 
     let settled = false;
     let completionState: "buffering" | "forwarding" | "discarded" = "buffering";
@@ -1144,6 +1188,7 @@ export async function runSingleTeammate(
       result: SingleResult;
       terminalStatus?: AgentTerminalStatus;
     }> = [];
+    const pendingTerminalTurnEvents: AgentTurnEvent[] = [];
     // Capture the child's published session file so a mid-run failure under
     // this candidate can resume that checkpoint only on a compatible Pi route.
     const hostOnChildEvent = options.onChildEvent;
@@ -1222,6 +1267,9 @@ export async function runSingleTeammate(
     });
     const baseAttemptOptions: RunTeammateOptions = {
       ...options,
+      initialTurnContext,
+      turnLoopSeqOffset: candidateLoopSeqOffset,
+      emitInitialTurnTrigger: processCandidateCount === 1,
       ...(handoff === undefined ? {} : {
         resumeSessionFile: handoff,
         resumePrompt: MODEL_FALLBACK_RESUME_PROMPT,
@@ -1295,6 +1343,21 @@ export async function runSingleTeammate(
         }
         hostOnChildEvent?.(event);
       },
+      ...(options.recordTurnEvent === undefined ? {} : {
+        recordTurnEvent: (event: AgentTurnEvent): void => {
+          latestTurnEvent = event;
+          candidateMaxLoopSeq = Math.max(candidateMaxLoopSeq, event.loopSeq);
+          const terminal = event.type === "turn-settled"
+            || event.type === "failed"
+            || event.type === "terminated";
+          if (!terminal) {
+            if (completionState !== "discarded") options.recordTurnEvent?.(event);
+            return;
+          }
+          if (completionState === "forwarding") options.recordTurnEvent?.(event);
+          else if (completionState === "buffering") pendingTerminalTurnEvents.push(event);
+        },
+      }),
     };
     const attemptOptions: RunTeammateOptions = options.onTurnComplete || options.onResultPublished
       ? {
@@ -1331,6 +1394,9 @@ export async function runSingleTeammate(
       : baseAttemptOptions;
     const commitCompletion = (): void => {
       completionState = "forwarding";
+      for (const event of pendingTerminalTurnEvents.splice(0)) {
+        options.recordTurnEvent?.(event);
+      }
       for (const completion of pendingCompletions.splice(0)) {
         publishTurnComplete(completion.result, completion.terminalStatus);
       }
@@ -1338,6 +1404,7 @@ export async function runSingleTeammate(
     const discardCompletion = (): void => {
       completionState = "discarded";
       pendingCompletions.length = 0;
+      pendingTerminalTurnEvents.length = 0;
     };
 
     try {
@@ -1529,6 +1596,10 @@ export async function runSingleTeammate(
         throw error;
       }
       const candidateResult = attempt.result;
+      nextCandidateLoopSeqOffset = Math.max(
+        nextCandidateLoopSeqOffset + 1,
+        candidateMaxLoopSeq + 1,
+      );
       if (registrationCandidate === undefined) {
         removeUntrustedResultProvenance(candidateResult);
       } else {

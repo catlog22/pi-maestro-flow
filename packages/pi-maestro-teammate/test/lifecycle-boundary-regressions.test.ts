@@ -28,8 +28,16 @@ import {
   createChildLease,
   requestPark,
   transferToMain,
+  unwrapLeasedMessage,
 } from "../src/runs/session-handoff.ts";
-import type { ActiveAgent, AgentProgress, Details, SingleResult, TeammateState } from "../src/shared/types.ts";
+import type {
+  ActiveAgent,
+  AgentProgress,
+  AgentTurnEvent,
+  Details,
+  SingleResult,
+  TeammateState,
+} from "../src/shared/types.ts";
 
 type ToolResult = {
   content: Array<{ type: "text"; text: string }>;
@@ -84,6 +92,7 @@ function createHarness(runtimeOptions: TeammateRuntimeOptions = {}) {
   const emitted: Array<{ event: string; payload: Record<string, unknown> }> = [];
   const messages: Array<Record<string, unknown>> = [];
   const messageOptions: Array<Record<string, unknown> | undefined> = [];
+  const appendedEntries: Array<{ type: "custom"; customType: string; data: unknown }> = [];
   const hooks = new Map<string, Array<(...args: any[]) => unknown>>();
   const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> | void }>();
   let activeTools: string[] = [];
@@ -115,6 +124,9 @@ function createHarness(runtimeOptions: TeammateRuntimeOptions = {}) {
       messages.push(message);
       messageOptions.push(options);
     },
+    appendEntry(customType: string, data: unknown) {
+      appendedEntries.push({ type: "custom", customType, data });
+    },
   }, {
     get(target, property) {
       if (property in target) return target[property as keyof typeof target];
@@ -125,7 +137,17 @@ function createHarness(runtimeOptions: TeammateRuntimeOptions = {}) {
   assert.ok(teammate);
   assert.ok(teammateSend);
   assert.ok(observeTool);
-  return { teammate, teammateSend, observeTool, emitted, messages, messageOptions, hooks, commands };
+  return {
+    teammate,
+    teammateSend,
+    observeTool,
+    emitted,
+    messages,
+    messageOptions,
+    appendedEntries,
+    hooks,
+    commands,
+  };
 }
 
 function context(): Record<string, unknown> {
@@ -157,6 +179,129 @@ async function waitFor(condition: () => boolean, timeoutMs = 5_000): Promise<voi
     await delay(10);
   }
 }
+
+test("root persists accepted transport turns and diagnose reports the authoritative trigger", async () => {
+  let stdout: PassThrough | undefined;
+  const spawnChildProcess = (() => {
+    const child = new EventEmitter() as ChildProcess;
+    const stdin = new PassThrough();
+    stdout = new PassThrough();
+    Object.assign(child, {
+      stdin,
+      stdout,
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() { return true; },
+    });
+    let pending = "";
+    stdin.on("data", (chunk) => {
+      pending += chunk.toString();
+      const lines = pending.split("\n");
+      pending = lines.pop() ?? "";
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const command = JSON.parse(line) as { type?: string; message?: string };
+        if ((command.type !== "prompt" && command.type !== "follow_up")
+          || typeof command.message !== "string") continue;
+        const message = command.message;
+        queueMicrotask(() => {
+          stdout!.write(`${JSON.stringify({
+            type: "message_end",
+            message: {
+              role: "user",
+              content: [{ type: "text", text: unwrapLeasedMessage(message).message }],
+            },
+          })}\n`);
+          stdout!.write(`${JSON.stringify({ type: "turn_start" })}\n`);
+        });
+      }
+    });
+    return child;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+  const { teammate, teammateSend, observeTool, appendedEntries } = createHarness({ spawnChildProcess });
+
+  const dispatched = await teammate.execute(
+    "turn-ledger-root",
+    { tasks: [{ agent: "general", name: "turn-ledger-worker", prompt: "trace this turn" }], background: true },
+    new AbortController().signal,
+    undefined,
+    context(),
+  );
+  assert.equal(dispatched.isError, false);
+  await waitFor(() => appendedEntries.some((entry) =>
+    entry.customType === "teammate-turn-event"
+    && (entry.data as AgentTurnEvent).type === "turn-started"
+  ));
+
+  const turnEvents = appendedEntries
+    .filter((entry) => entry.customType === "teammate-turn-event")
+    .map((entry) => entry.data as AgentTurnEvent);
+  assert.deepEqual(turnEvents.slice(0, 3).map((event) => event.type), [
+    "trigger-enqueued",
+    "trigger-accepted",
+    "turn-started",
+  ]);
+  assert.equal(new Set(turnEvents.map((event) => event.turnId)).size, 1);
+  assert.equal(turnEvents[0].runtimeGeneration, 1);
+  assert.equal(turnEvents[0].promptSeq, 1);
+  assert.equal(turnEvents[0].trigger.source, "initial-task");
+  assert.equal(turnEvents[0].trigger.confidence, "verified");
+  assert.equal(turnEvents[0].trigger.sender.kind, "root-agent");
+
+  const observed = await observeTool.execute(
+    "diagnose-root-turn",
+    { action: "diagnose", targets: [{ kind: "teammate", id: "turn-ledger-worker" }] },
+    new AbortController().signal,
+    undefined,
+    context(),
+  );
+  const diagnosis = observed.details.result.observations[0]?.diagnosis;
+  assert.equal(diagnosis?.trigger.source, "initial-task");
+  assert.equal(diagnosis?.trigger.sender.kind, "root-agent");
+  assert.equal(diagnosis?.reasonCode, "prompting");
+
+  const followUp = await teammateSend.execute(
+    "follow-up-turn",
+    { to: "turn-ledger-worker", message: "second turn", mode: "follow_up" },
+    new AbortController().signal,
+    undefined,
+    context(),
+  );
+  assert.equal(followUp.isError, false);
+  await waitFor(() => appendedEntries.some((entry) => {
+    const event = entry.data as AgentTurnEvent;
+    return entry.customType === "teammate-turn-event"
+      && event.type === "trigger-accepted"
+      && event.promptSeq === 2;
+  }));
+  const state = (globalThis as typeof globalThis & Record<symbol, unknown>)[
+    Symbol.for("pi-maestro-teammate.root-registry")
+  ] as TeammateState;
+  const liveAgent = [...state.activeRuns.values()].find((agent) => agent.name === "turn-ledger-worker");
+  assert.equal(liveAgent?.promptSeq, 2, "the transport recorder is the only live prompt sequence owner");
+  assert.equal(liveAgent?.turn?.promptSeq, 2);
+  assert.equal(liveAgent?.turn?.trigger.confidence, "verified");
+  assert.equal(liveAgent?.turn?.trigger.sender.kind, "root-agent");
+
+  stdout!.write(`${JSON.stringify({
+    type: "message_end",
+    message: { role: "assistant", content: [{ type: "text", text: "done" }] },
+  })}\n`);
+  stdout!.write(`${JSON.stringify(resultReadyTurn("done"))}\n`);
+  stdout!.write(`${JSON.stringify({ type: "agent_end", willRetry: false })}\n`);
+  stdout!.write(`${JSON.stringify({ type: "agent_settled" })}\n`);
+  await waitFor(() => appendedEntries.some((entry) =>
+    entry.customType === "teammate-turn-event"
+    && (entry.data as AgentTurnEvent).type === "turn-settled"
+  ));
+  assert.equal(appendedEntries.some((entry) =>
+    entry.customType === "teammate-turn-event"
+    && (entry.data as AgentTurnEvent).type === "turn-settled"
+  ), true);
+});
 
 test("immediate reload waits for workspace peer startup before shutdown cleanup", async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-peer-reload-"));
@@ -472,6 +617,87 @@ function createProxyState(): TeammateState {
     namedAgents: new Map(),
   };
 }
+
+test("nested proxy dispatch forwards canonical turn events to the root-owned recorder", async () => {
+  const state = createProxyState();
+  const events: AgentTurnEvent[] = [];
+  state.recordTurnEvent = (event) => events.push(event);
+  const emitted: Array<{ event: string; payload: Record<string, unknown> }> = [];
+  const spawnChildProcess = (() => {
+    const child = new EventEmitter() as ChildProcess;
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    Object.assign(child, {
+      stdin,
+      stdout,
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() { return true; },
+    });
+    let pending = "";
+    stdin.on("data", (chunk) => {
+      pending += chunk.toString();
+      const lines = pending.split("\n");
+      pending = lines.pop() ?? "";
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const command = JSON.parse(line) as { type?: string; message?: string };
+        if (command.type !== "prompt" || typeof command.message !== "string") continue;
+        const accepted = unwrapLeasedMessage(command.message).message;
+        queueMicrotask(() => {
+          stdout.write(`${JSON.stringify({
+            type: "message_end",
+            message: { role: "user", content: [{ type: "text", text: accepted }] },
+          })}\n`);
+          stdout.write(`${JSON.stringify({ type: "turn_start" })}\n`);
+          stdout.write(`${JSON.stringify({
+            type: "message_end",
+            message: { role: "assistant", content: [{ type: "text", text: "nested done" }] },
+          })}\n`);
+          stdout.write(`${JSON.stringify(resultReadyTurn("nested done"))}\n`);
+          stdout.write(`${JSON.stringify({ type: "agent_end", willRetry: false })}\n`);
+          stdout.write(`${JSON.stringify({ type: "agent_settled" })}\n`);
+        });
+      }
+    });
+    return child;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+
+  await handleProxyRequest(
+    createProxyPi(emitted),
+    state,
+    {
+      type: "teammate_proxy_request",
+      tool: "teammate",
+      requestId: "nested-turn-recorder",
+      params: {
+        tasks: [{ agent: "general", name: "nested-turn-worker", prompt: "trace nested turn" }],
+        background: false,
+      },
+    },
+    () => {},
+    undefined,
+    [],
+    undefined,
+    undefined,
+    { spawnChildProcess, resultReadyGraceMs: 500 },
+  );
+  await delay(30);
+
+  assert.deepEqual(events.slice(0, 3).map((event) => event.type), [
+    "trigger-enqueued",
+    "trigger-accepted",
+    "turn-started",
+  ]);
+  assert.equal(events[0]?.trigger.source, "initial-task");
+  assert.equal(events[0]?.trigger.confidence, "verified");
+  assert.equal(events[0]?.trigger.sender.kind, "root-agent");
+  assert.equal(new Set(events.map((event) => event.turnId)).size, 1);
+  assert.equal(events.filter((event) => event.type === "turn-settled").length, 1);
+});
 
 test("a terminal requester reclaims nested dispatches and pending admissions", () => {
   const state = createProxyState();

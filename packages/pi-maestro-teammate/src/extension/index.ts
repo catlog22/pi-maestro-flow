@@ -177,6 +177,7 @@ import {
   normalizeTeammateParams,
   inferGraphMode,
   taskDependencyNames,
+  hasRpcTurnSidecar,
   sendRpcMessage,
   truncateUtf8Tail,
   checkDepthGuard,
@@ -282,6 +283,8 @@ import type {
   ActiveAgent,
   AgentStatus,
   AgentTerminalStatus,
+  AgentTurnEvent,
+  AgentTurnTriggerContextV1,
   MessageEnvelope,
   MessageProvenanceV1,
   MessageSenderIdentityV1,
@@ -344,6 +347,7 @@ import {
   TEAMMATE_COMPLETE_EVENT,
   TEAMMATE_STARTED_EVENT,
   TEAMMATE_MESSAGE_EVENT,
+  AGENT_TURN_VERSION,
   MESSAGE_PROVENANCE_VERSION,
   normalizeMessageProvenanceV1,
   unknownMessageProvenanceV1,
@@ -370,6 +374,7 @@ import {
   TEAMMATE_MODEL_SESSION_QUERY_EVENT,
   type TeammateModelSessionEventV1,
   type TeammateModelSessionQueryEventV1,
+  type TeammateProgressMessageEvent,
 } from "../public/v1/events.ts";
 import {
   modelRegistryPairSync,
@@ -395,7 +400,19 @@ import {
   registerTeammateChildProxyCaller,
 } from "../runs/child-extensions.ts";
 import { setQuietMode } from "../quiet-state.ts";
-import { aggregateAgentRunPhase } from "../shared/agent-status.ts";
+import {
+  aggregateAgentRunPhase,
+  diagnoseAgentRuntime,
+  projectAgentRuntime,
+} from "../shared/agent-status.ts";
+import {
+  AGENT_TURN_EVENT_CUSTOM_TYPE,
+  agentTurnLedgerAgent,
+  applyAgentTurnEvent,
+  createAgentTurnLedger,
+  rebuildAgentTurnLedger,
+  type AgentTurnLedger,
+} from "../shared/turn-ledger.ts";
 import { formatLocalAgentMessage } from "../shared/routing.ts";
 export * from "./teammate-core.ts";
 import {
@@ -1002,7 +1019,7 @@ export default function registerTeammateExtension(
     installChildProxyCaller();
 
     const proxyTeammateObservation = async (
-      action: "status" | "wait",
+      action: "status" | "diagnose" | "wait",
       id: string,
       options: ObservationReadOptions & { deadline?: number },
       signal?: AbortSignal,
@@ -1026,7 +1043,7 @@ export default function registerTeammateExtension(
     registerObservationProvider({
       kind: "teammate",
       capabilities: { inspect: true, wait: true, cancel: true, message: true, supervise: true },
-      snapshot: (id, options) => proxyTeammateObservation("status", id, options),
+      snapshot: (id, options) => proxyTeammateObservation(options.diagnose ? "diagnose" : "status", id, options),
       wait: (id, options) => proxyTeammateObservation("wait", id, options, options.signal),
     });
 
@@ -1229,6 +1246,62 @@ export default function registerTeammateExtension(
     delivered: false,
     error: "The originating Pi session changed before delivery completed.",
   });
+
+  let agentTurnLedger: AgentTurnLedger = createAgentTurnLedger();
+
+  const refreshAgentRuntimeProjection = (agent: ActiveAgent, now = Date.now()): void => {
+    const folded = agentTurnLedgerAgent(agentTurnLedger, agent.correlationId);
+    if (folded) {
+      agent.turn = folded.current;
+      agent.promptSeq = folded.current.promptSeq;
+      agent.loopSeq = folded.current.loopSeq;
+      agent.phase = folded.current.phase ?? agent.phase;
+    }
+    agent.runtime = projectAgentRuntime({
+      status: agent.status,
+      phase: agent.phase,
+      resultReadyAt: agent.resultReadyAt,
+      lastActivityAt: agent.lastActivityAt,
+      pendingInteractions: agent.pendingInteractions?.size,
+      turn: agent.turn,
+    }, now);
+  };
+
+  const recordAgentTurnEvent = (event: AgentTurnEvent, fence?: RootSessionFence): void => {
+    if (fence && !ownsRootSessionFence(fence)) return;
+    const agent = state.activeRuns.get(event.correlationId);
+    if (!agent || (agent.runtimeGeneration ?? 0) !== event.runtimeGeneration) return;
+    const applied = applyAgentTurnEvent(agentTurnLedger, event);
+    if (applied.status !== "applied") return;
+    try {
+      pi.appendEntry(AGENT_TURN_EVENT_CUSTOM_TYPE, event);
+    } catch (error) {
+      console.error("[pi-maestro-teammate] failed to persist turn event:", error);
+      return;
+    }
+    agentTurnLedger = applied.ledger;
+    agent.turn = applied.agent.current;
+    agent.promptSeq = applied.agent.current.promptSeq;
+    agent.loopSeq = applied.agent.current.loopSeq;
+    agent.phase = applied.agent.current.phase ?? agent.phase;
+    agent.lastActivityAt = Math.max(agent.lastActivityAt, applied.agent.current.lastActivityAt);
+    refreshAgentRuntimeProjection(agent, event.timestamp);
+  };
+
+  const bindStateTurnRecorder = (): void => {
+    const fence = captureRootSessionFence();
+    state.recordTurnEvent = (event) => recordAgentTurnEvent(event, fence);
+  };
+  bindStateTurnRecorder();
+
+  const rebuildTurnLedger = (entries: readonly unknown[]): void => {
+    const rebuilt = rebuildAgentTurnLedger(entries);
+    agentTurnLedger = rebuilt.ledger;
+    for (const agent of state.activeRuns.values()) refreshAgentRuntimeProjection(agent);
+    if (rebuilt.rejected > 0) {
+      console.warn(`[pi-maestro-teammate] ignored ${rebuilt.rejected} malformed persisted turn event(s).`);
+    }
+  };
 
   interface RootRemoteMonitorBinding {
     fence: RootSessionFence;
@@ -2085,7 +2158,7 @@ export default function registerTeammateExtension(
         acknowledgeDeferredAgentContext(deferredContext);
       }
       const now = Date.now();
-      agent.promptSeq = (agent.promptSeq ?? 0) + 1;
+      if (!restartDelivery) agent.promptSeq = (agent.promptSeq ?? 0) + 1;
       agent.inbox.push({
         id: provenance.messageId ?? randomUUID(),
         from: messageFrom,
@@ -2123,7 +2196,14 @@ export default function registerTeammateExtension(
         ? "prompt"
         : requestedMode;
     const provenance = provenanceWithDeliveryMode(delivery.provenance, mode);
-    const sent = sendRpcMessage(agent.stdin, message, mode, leaseToken(agent.lease));
+    const turnTracked = hasRpcTurnSidecar(agent.stdin);
+    const sent = sendRpcMessage(
+      agent.stdin,
+      message,
+      mode,
+      leaseToken(agent.lease),
+      provenance,
+    );
     if (!sent) {
       restoreDeferredAgentContext(agent, deferredContext);
       return { delivered: false, error: `Failed to send message to "${targetLabel}".` };
@@ -2131,7 +2211,7 @@ export default function registerTeammateExtension(
     acknowledgeDeferredAgentContext(deferredContext);
 
     const now = Date.now();
-    if (mode === "prompt") agent.promptSeq = (agent.promptSeq ?? 0) + 1;
+    if (mode === "prompt" && !turnTracked) agent.promptSeq = (agent.promptSeq ?? 0) + 1;
     const wasSleeping = wakeSleepingAgent(pi, agent, now);
     agent.inbox.push({
       id: provenance.messageId ?? randomUUID(),
@@ -3282,6 +3362,7 @@ export default function registerTeammateExtension(
           : { cwd: resolvedRunLocation(singleTask.cwd ?? params.cwd, state.baseCwd || ctx.cwd) }),
       };
       state.activeRuns.set(correlationId, activeAgent);
+      refreshAgentRuntimeProjection(activeAgent);
 
       // Background/detached dispatches promise a teammate-complete notification
       // on settle; mark them so a stall (which is not a terminal state and
@@ -3356,6 +3437,7 @@ export default function registerTeammateExtension(
             ...(task.todos ? { todos: [...task.todos] } : {}),
           };
           state.activeRuns.set(childId, childAgent);
+          refreshAgentRuntimeProjection(childAgent);
           if (task.name) bindAgentName(state, task.name, childId);
         });
         // Register the whole graph before emitting any started event: a
@@ -3722,6 +3804,18 @@ export default function registerTeammateExtension(
       let progressFlushGate: ProgressFlushGate | undefined;
 
       const makeOptions = (): RunTeammateOptions => {
+        const turnFence = captureRootSessionFence();
+        const turnTarget = state.activeRuns.get(correlationId) ?? activeAgent;
+        const initialTurnContext: AgentTurnTriggerContextV1 | undefined = isSingle
+          ? {
+              version: AGENT_TURN_VERSION,
+              turnId: randomUUID(),
+              correlationId: turnTarget.correlationId,
+              runtimeGeneration: turnTarget.runtimeGeneration ?? 0,
+              promptSeq: turnTarget.promptSeq ?? 1,
+              trigger: normalizeMessageProvenanceV1(turnTarget.initialMessageProvenance),
+            }
+          : undefined;
         const options: RunTeammateOptions = {
           baseCwd: state.baseCwd || ctx.cwd,
           // Lazy: taking the Monitor term throws when there is none, and a
@@ -3739,6 +3833,10 @@ export default function registerTeammateExtension(
           maxDispatchDepth: childMaxDispatchDepth,
           signal: abortController.signal,
           runtimeGeneration: activeAgent.runtimeGeneration,
+          initialMessageProvenance: activeAgent.initialMessageProvenance,
+          initialMessageProvenanceOf: (childId) => state.activeRuns.get(childId)?.initialMessageProvenance,
+          ...(initialTurnContext ? { initialTurnContext } : {}),
+          recordTurnEvent: (event) => recordAgentTurnEvent(event, turnFence),
           ...(isMultiTask ? { taskSignals: taskAbortControllers.map((controller) => controller.signal) } : {}),
           parentSessionFile,
           ...(monitorSessionDispatch ? {
@@ -3992,6 +4090,11 @@ export default function registerTeammateExtension(
                 if (entry.status === "running") childAgent.retry = undefined;
               }
             }
+            if (childAgent) {
+              refreshAgentRuntimeProjection(childAgent);
+              entry.runtime = childAgent.runtime;
+              entry.turn = childAgent.turn;
+            }
 
             const shortId = entry.correlationId.slice(0, 8);
             const logKey = entry.correlationId;
@@ -4085,6 +4188,7 @@ export default function registerTeammateExtension(
             const currentProgress = progressSnapshot();
             activeAgent.progress = currentProgress;
             activeAgent.phase = aggregateAgentRunPhase(currentProgress) ?? activeAgent.phase;
+            refreshAgentRuntimeProjection(activeAgent);
 
             // Broadcast the complete graph snapshot so overlays can switch views reliably.
             pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
@@ -4100,6 +4204,8 @@ export default function registerTeammateExtension(
               recentTools: data.recentTools,
               lastMessage: data.lastMessage,
               lastActivityAt: data.lastActivityAt,
+              runtime: entry.runtime,
+              turn: entry.turn,
               progress: currentProgress,
             });
 
@@ -4255,6 +4361,8 @@ export default function registerTeammateExtension(
           const generation = (target.runtimeGeneration ?? 0) + 1;
           const controller = new AbortController();
           target.runtimeGeneration = generation;
+          target.promptSeq = (target.promptSeq ?? 0) + 1;
+          target.loopSeq = 0;
           target.abortController = controller;
           target.lease = createChildLease();
           target.status = "running";
@@ -4291,6 +4399,15 @@ export default function registerTeammateExtension(
           options.signal = controller.signal;
           options.resumeSessionFile = checkpoint;
           options.runtimeGeneration = generation;
+          options.initialMessageProvenance = target.initialMessageProvenance;
+          options.initialTurnContext = {
+            version: AGENT_TURN_VERSION,
+            turnId: randomUUID(),
+            correlationId: target.correlationId,
+            runtimeGeneration: generation,
+            promptSeq: target.promptSeq ?? 1,
+            trigger: normalizeMessageProvenanceV1(target.initialMessageProvenance),
+          };
 
           const onChildSpawned = options.onChildSpawned;
           options.onChildSpawned = (stdin, sendControl, sessionDir, childId, callbackGeneration) => {
@@ -6901,6 +7018,7 @@ export default function registerTeammateExtension(
     // retained terminal outcome for outcome/terminalStatus so a failed run is
     // never masked as success by its sleeping activity state.
     const liveAgent = resolved.match?.kind === "agent" ? resolved.match.agent : undefined;
+    const graphTaskProgress = resolved.match?.kind === "graph-task" ? resolved.match.progress : undefined;
     const settledRecord = resolved.match ? undefined : findSettledAgent(state, id);
     const terminal = monitored.waitStatus
       ?? liveAgent?.lastOutcome?.status
@@ -6937,6 +7055,27 @@ export default function registerTeammateExtension(
         ];
       }
     }
+    const diagnosis = !options.diagnose
+      ? undefined
+      : liveAgent
+        ? diagnoseAgentRuntime({
+            status: liveAgent.status,
+            phase: liveAgent.phase,
+            resultReadyAt: liveAgent.resultReadyAt,
+            lastActivityAt: liveAgent.lastActivityAt,
+            pendingInteractions: liveAgent.pendingInteractions?.size,
+            turn: liveAgent.turn,
+            previousOutcome: liveAgent.lastOutcome,
+          })
+        : graphTaskProgress
+          ? diagnoseAgentRuntime({
+              status: graphTaskProgress.status,
+              phase: graphTaskProgress.phase,
+              resultReadyAt: graphTaskProgress.resultReadyAt,
+              lastActivityAt: graphTaskProgress.lastActivityAt,
+              turn: graphTaskProgress.turn,
+            })
+          : undefined;
     return {
       target: { kind: "teammate", id },
       found: true,
@@ -6949,6 +7088,7 @@ export default function registerTeammateExtension(
       ...(includeResult && structuredOutput !== undefined
         ? { structuredOutput: structuredClone(structuredOutput) }
         : {}),
+      ...(diagnosis ? { diagnosis } : {}),
       summary: monitored.summary || output.at(-1) || nativeStatus,
       ...(includeResult ? { detail: detailOutput } : {}),
       updatedAt: Date.now(),
@@ -9076,6 +9216,38 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
    * via observe/teammate-watch and safeSendMessage already logged the drop.
    */
   const notifyStalled = (message: string, agent: ActiveAgent): void => {
+    refreshAgentRuntimeProjection(agent);
+    const diagnosis = diagnoseAgentRuntime({
+      status: agent.status,
+      phase: agent.phase,
+      resultReadyAt: agent.resultReadyAt,
+      lastActivityAt: agent.lastActivityAt,
+      pendingInteractions: agent.pendingInteractions?.size,
+      turn: agent.turn,
+      previousOutcome: agent.lastOutcome,
+    });
+    const stallStatus = agent.status === "sleeping" ? "completed" : agent.status;
+    const stallProgress: AgentProgressSnapshot = {
+      agent: agent.agent,
+      ...(agent.name ? { name: agent.name } : {}),
+      correlationId: agent.correlationId,
+      taskIndex: 0,
+      dependencies: [],
+      status: stallStatus,
+      phase: agent.phase,
+      runtime: diagnosis,
+      turn: agent.turn,
+      startedAt: new Date(agent.startedAt).toISOString(),
+      lastActivityAt: agent.lastActivityAt,
+      resultReadyAt: agent.resultReadyAt,
+    };
+    const stallEvent = {
+      ...stallProgress,
+      correlationId: agent.correlationId,
+      taskCorrelationId: agent.correlationId,
+      progress: [stallProgress],
+    } satisfies TeammateProgressMessageEvent;
+    pi.events.emit(TEAMMATE_MESSAGE_EVENT, stallEvent);
     safeSendMessage(pi, {
       customType: "teammate-stalled",
       content: message,
@@ -9085,6 +9257,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
         correlationId: agent.correlationId,
         name: agent.name,
         agent: agent.agent,
+        diagnosis,
       },
     }, { triggerTurn: true });
   };
@@ -9208,6 +9381,8 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     state.sessionGeneration = (state.sessionGeneration ?? 0) + 1;
     state.currentSessionId = ctx.sessionManager?.getSessionId() ?? null;
     state.baseCwd = ctx.cwd;
+    bindStateTurnRecorder();
+    rebuildTurnLedger(ctx.sessionManager?.getEntries?.() ?? []);
     const completionSessionId = state.currentSessionId;
     const completionWorkspaceId = workspaceIdForCwd(ctx.cwd);
     const completionGeneration = state.sessionGeneration;

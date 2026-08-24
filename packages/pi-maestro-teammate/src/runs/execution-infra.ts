@@ -25,6 +25,9 @@ import type {
   Usage,
   AgentProgress,
   AgentTerminalStatus,
+  AgentTurnEvent,
+  AgentTurnTriggerContextV1,
+  MessageProvenanceV1,
 } from "../shared/types.ts";
 import { wrapLeasedMessage, type LeaseToken } from "./session-handoff.ts";
 import {
@@ -265,6 +268,18 @@ export interface RunTeammateOptions {
   sessionDir?: string;
   /** Additional child-only environment values (never applied to the host). */
   childEnvironment?: Record<string, string | undefined>;
+  /** Attribution for the original task prompt; malformed input is downgraded to strict unknown. */
+  initialMessageProvenance?: MessageProvenanceV1;
+  /** Per-task attribution for graph runs; takes precedence over the shared initial value. */
+  initialMessageProvenanceOf?: (correlationId: string) => MessageProvenanceV1 | undefined;
+  /** Stable logical identity reused by every physical model candidate in this run. */
+  initialTurnContext?: AgentTurnTriggerContextV1;
+  /** Low-level loop offset owned by this physical model-candidate process. */
+  turnLoopSeqOffset?: number;
+  /** Whether this attempt owns publication of the initial trigger-enqueued edge. */
+  emitInitialTurnTrigger?: boolean;
+  /** Transport-sidecar sink for canonical logical-turn lifecycle events. */
+  recordTurnEvent?: (event: AgentTurnEvent) => void;
   initialLeaseToken?: LeaseToken | ((correlationId: string) => LeaseToken | undefined);
   onChildSpawned?: (
     stdin: import("node:stream").Writable,

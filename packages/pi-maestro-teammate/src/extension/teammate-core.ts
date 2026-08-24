@@ -1525,6 +1525,8 @@ export function emitTeammateStarted(
     status: agent.status,
     activity: projectAgentActivity(agent),
     ...(agent.phase ? { phase: agent.phase } : {}),
+    ...(agent.runtime ? { runtime: agent.runtime } : {}),
+    ...(agent.turn ? { turn: agent.turn } : {}),
     ...(agent.lastOutcome ? { lastOutcome: { ...agent.lastOutcome } } : {}),
     ...(agent.todos && agent.todos.length > 0 ? { todos: [...agent.todos], todo: agent.todos[0] } : {}),
   });

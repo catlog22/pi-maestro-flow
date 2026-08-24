@@ -43,6 +43,15 @@ import {
 import type {
   SingleResult,
   AgentTerminalStatus,
+  AgentTurnEvent,
+  AgentTurnMessageMetadataV1,
+  AgentTurnTriggerContextV1,
+  MessageProvenanceV1,
+} from "../shared/types.ts";
+import {
+  AGENT_TURN_VERSION,
+  normalizeMessageProvenanceV1,
+  unknownMessageProvenanceV1,
 } from "../shared/types.ts";
 import {
   wrapLeasedMessage,
@@ -282,9 +291,23 @@ interface PendingInterruptingSteer {
   promptRequestId: string;
   message: string;
   token?: LeaseToken;
+  provenance?: MessageProvenanceV1;
   phase: "aborting" | "prompting";
   /** Set when the interrupted turn settles; a later turn_start means the steer missed its window. */
   turnSettledDuringAbort?: boolean;
+}
+
+interface PendingModelInput {
+  /** Exact leased string written on the Pi transport. */
+  transportMessage: string;
+  /** Exact user text after the child input hook validates and unwraps the lease. */
+  acceptedMessage: string;
+  context: AgentTurnTriggerContextV1;
+  loopSeq: number;
+  eventsEmitted: boolean;
+  initial: boolean;
+  committed: boolean;
+  lastMessage?: AgentTurnMessageMetadataV1;
 }
 
 /**
@@ -456,6 +479,142 @@ export async function runSingleAttempt(
   const progress = createProgress(params.agent, startTime);
   progress.requestedModel = modelOverride ?? params.model ?? agentConfig.model;
 
+  const initialTurnContext: AgentTurnTriggerContextV1 = options.initialTurnContext ?? {
+    version: AGENT_TURN_VERSION,
+    turnId: randomUUID(),
+    correlationId,
+    runtimeGeneration: options.runtimeGeneration ?? 0,
+    promptSeq: 1,
+    trigger: normalizeMessageProvenanceV1(options.initialMessageProvenance),
+  };
+  const turnLoopSeqOffset = Number.isSafeInteger(options.turnLoopSeqOffset)
+    ? Math.max(0, options.turnLoopSeqOffset ?? 0)
+    : 0;
+  const pendingModelInputs: PendingModelInput[] = [];
+  let currentModelInput: PendingModelInput | undefined;
+  let initialModelInputRegistered = false;
+  let nextExternalPromptSeq = initialTurnContext.promptSeq + 1;
+  let lastTurnEventTimestamp = 0;
+
+  const turnEventTimestamp = (): number => {
+    lastTurnEventTimestamp = Math.max(Date.now(), lastTurnEventTimestamp + 1);
+    return lastTurnEventTimestamp;
+  };
+
+  const recordCanonicalTurnEvent = (event: AgentTurnEvent): void => {
+    try {
+      options.recordTurnEvent?.(event);
+    } catch {
+      // Observational sidecar failures cannot change transport or settlement.
+    }
+  };
+
+  const turnEventBase = (input: PendingModelInput, timestamp: number) => ({
+    ...input.context,
+    loopSeq: input.loopSeq,
+    timestamp,
+  });
+
+  const enqueueTransportInput = (
+    transportMessage: string,
+    acceptedMessage: string,
+    mode: "prompt" | "steer" | "follow_up",
+    provenance?: MessageProvenanceV1,
+  ): TransportSidecarLease => {
+    const initial = !initialModelInputRegistered;
+    initialModelInputRegistered = true;
+    const context = initial
+      ? initialTurnContext
+      : {
+          version: AGENT_TURN_VERSION,
+          turnId: randomUUID(),
+          correlationId: initialTurnContext.correlationId,
+          runtimeGeneration: initialTurnContext.runtimeGeneration,
+          promptSeq: nextExternalPromptSeq++,
+          trigger: normalizeMessageProvenanceV1(provenance, {
+            deliveryMode: mode,
+            messageKind: "message",
+          }),
+        };
+    const pending: PendingModelInput = {
+      transportMessage,
+      acceptedMessage,
+      context,
+      loopSeq: initial ? turnLoopSeqOffset : 0,
+      eventsEmitted: false,
+      initial,
+      committed: false,
+    };
+    pendingModelInputs.push(pending);
+    return {
+      commit(): void {
+        if (pending.committed) return;
+        pending.committed = true;
+        if (!pending.initial || options.emitInitialTurnTrigger !== false) {
+          const timestamp = turnEventTimestamp();
+          recordCanonicalTurnEvent({
+            ...turnEventBase(pending, timestamp),
+            type: "trigger-enqueued",
+          });
+        }
+      },
+      cancel(): void {
+        const index = pendingModelInputs.indexOf(pending);
+        if (index >= 0) pendingModelInputs.splice(index, 1);
+      },
+    };
+  };
+
+  const hostOnProgress = options.onProgress;
+  const reportProgress = (): void => {
+    hostOnProgress?.(progress);
+    const input = currentModelInput;
+    if (!input) return;
+    const timestamp = turnEventTimestamp();
+    recordCanonicalTurnEvent({
+      ...turnEventBase(input, timestamp),
+      type: "progress",
+      ...(progress.phase === undefined ? {} : { phase: progress.phase }),
+      toolActivity: state.inFlightToolCount > 0 ? "active" : "idle",
+      ...(input.lastMessage === undefined ? {} : { lastMessage: input.lastMessage }),
+    });
+  };
+  options = { ...options, onProgress: reportProgress };
+
+  const recordTerminalTurnEvent = (
+    status: AgentTerminalStatus,
+    message?: string,
+  ): void => {
+    const input = currentModelInput;
+    if (!input) return;
+    const timestamp = turnEventTimestamp();
+    const base = turnEventBase(input, timestamp);
+    if (status === "completed") {
+      recordCanonicalTurnEvent({
+        ...base,
+        type: "turn-settled",
+        outcome: "completed",
+        ...(input.lastMessage === undefined ? {} : { lastMessage: input.lastMessage }),
+      });
+    } else if (status === "terminated") {
+      recordCanonicalTurnEvent({
+        ...base,
+        type: "terminated",
+        outcome: "terminated",
+        reason: message?.trim() || "Teammate turn terminated.",
+        ...(input.lastMessage === undefined ? {} : { lastMessage: input.lastMessage }),
+      });
+    } else {
+      recordCanonicalTurnEvent({
+        ...base,
+        type: "failed",
+        outcome: "failed",
+        error: message?.trim() || "Teammate turn failed.",
+        ...(input.lastMessage === undefined ? {} : { lastMessage: input.lastMessage }),
+      });
+    }
+  };
+
   const recordAttemptRecovery = (result: SingleResult): SingleResult => {
     attemptRecoveryFacts.set(result, {
       settlementCapability: state.settlementCapability,
@@ -539,7 +698,10 @@ export async function runSingleAttempt(
       return;
     }
 
-    if (child.stdin) guardChildStdin(child.stdin);
+    if (child.stdin) {
+      guardChildStdin(child.stdin);
+      transportSidecars.set(child.stdin, { enqueue: enqueueTransportInput });
+    }
 
     // Pi core keeps its in-process provider retry enabled. It handles
     // transient network/provider errors without restarting the child, so
@@ -721,10 +883,15 @@ export async function runSingleAttempt(
       appendBoundedTranscriptMessage(messages, { role: "system", content: diagnostic });
       progress.lastMessage = diagnostic;
       options.onProgress?.(progress);
-      if (!child.stdin || !writeChildStdinLine(child.stdin, JSON.stringify({
-        type: "follow_up",
-        message: wrapLeasedMessage(pending.message, pending.token),
-      }))) {
+      const leasedMessage = wrapLeasedMessage(pending.message, pending.token);
+      if (!child.stdin || !writeTransportModelInput(
+        child.stdin,
+        { type: "follow_up", message: leasedMessage },
+        leasedMessage,
+        pending.message,
+        "follow_up",
+        pending.provenance,
+      )) {
         const undelivered =
           `Steer follow_up could not be delivered (agent=${params.agent}, correlationId=${correlationId}): `
           + "the correction message was dropped; the task continues.";
@@ -759,7 +926,11 @@ export async function runSingleAttempt(
       timers.interruptingSteer.unref?.();
     };
 
-    const requestInterruptingSteer = (message: string, token?: LeaseToken): boolean => {
+    const requestInterruptingSteer = (
+      message: string,
+      token?: LeaseToken,
+      provenance?: MessageProvenanceV1,
+    ): boolean => {
       if (!child.stdin || pendingInterruptingSteer || state.modelSwitch || state.terminal || state.turnLifecycleSettled) return false;
       const nonce = randomUUID();
       steerSettlementSwallowed = false;
@@ -768,6 +939,7 @@ export async function runSingleAttempt(
         promptRequestId: `teammate-steer-prompt-${nonce}`,
         message,
         token,
+        provenance,
         phase: "aborting",
       };
       const sent = writeChildStdinLine(child.stdin, JSON.stringify({
@@ -861,6 +1033,10 @@ export async function runSingleAttempt(
       };
       recordAttemptRecovery(turnResult);
       if (terminateChild) attemptReclamations.set(turnResult, termination.outcome);
+      recordTerminalTurnEvent(
+        terminalStatus,
+        state.runtimeFailure ?? turnResult.messages.at(-1)?.content,
+      );
       if (!state.initialResultPublished) {
         state.initialResultPublished = true;
         resolve(turnResult);
@@ -902,6 +1078,14 @@ export async function runSingleAttempt(
       }
       clearAllTimers();
       progress.phase = "result-ready";
+      if (currentModelInput?.lastMessage) {
+        const timestamp = turnEventTimestamp();
+        recordCanonicalTurnEvent({
+          ...turnEventBase(currentModelInput, timestamp),
+          type: "result-ready",
+          lastMessage: currentModelInput.lastMessage,
+        });
+      }
       state.initialResultPublished = true;
       const result = recordAttemptRecovery({
         agent: params.agent,
@@ -1159,7 +1343,7 @@ export async function runSingleAttempt(
     // through EVENT_HANDLERS after applying the shared pre-dispatch bookkeeping.
 
     /** A new agent loop starts: the previous turn's settlement no longer applies. */
-    function onTurnBoundary(): void {
+    function onTurnBoundary(event: JsonLineEvent): void {
       if (pendingInterruptingSteer?.phase === "aborting" && pendingInterruptingSteer.turnSettledDuringAbort) {
         degradeInterruptingSteerToFollowUp("turn advanced before abort was acknowledged");
       }
@@ -1203,6 +1387,21 @@ export async function runSingleAttempt(
       state.capturedStructuredOutput = undefined;
       state.structuredOutputValidationFailure = undefined;
       state.structuredOutputAttemptFailed = false;
+      if (event.type === "agent_start" && currentModelInput?.eventsEmitted) {
+        currentModelInput.loopSeq += 1;
+        currentModelInput.eventsEmitted = false;
+      }
+      if ((event.type === "agent_start" || event.type === "turn_start")
+        && currentModelInput
+        && !currentModelInput.eventsEmitted) {
+        const timestamp = turnEventTimestamp();
+        recordCanonicalTurnEvent({
+          ...turnEventBase(currentModelInput, timestamp),
+          type: "turn-started",
+          phase: "prompting",
+        });
+        currentModelInput.eventsEmitted = true;
+      }
       options.onProgress?.(progress);
     }
 
@@ -1250,10 +1449,65 @@ export async function runSingleAttempt(
       progress.resolvedModel = reference;
     }
 
+    function onMessageEnd(event: JsonLineEvent): void {
+      const msg = event.message as Record<string, unknown> | undefined;
+      if (msg?.role !== "user") {
+        onAssistantMessage(event);
+        return;
+      }
+      const text = extractTextContent(event);
+      const pendingIndex = text === undefined
+        ? -1
+        : pendingModelInputs.findIndex((input) =>
+            input.committed && input.acceptedMessage === text
+          );
+      if (pendingIndex >= 0) {
+        const input = pendingModelInputs.splice(pendingIndex, 1)[0]!;
+        currentModelInput = input;
+        const timestamp = turnEventTimestamp();
+        input.lastMessage = {
+          role: "user",
+          timestamp,
+          provenance: input.context.trigger,
+        };
+        if (!input.initial || options.emitInitialTurnTrigger !== false) {
+          recordCanonicalTurnEvent({
+            ...turnEventBase(input, timestamp),
+            type: "trigger-accepted",
+          });
+        }
+        recordCanonicalTurnEvent({
+          ...turnEventBase(input, timestamp),
+          type: "turn-started",
+          phase: "prompting",
+        });
+        input.eventsEmitted = true;
+        options.onProgress?.(progress);
+        return;
+      }
+
+      // Pi-created inputs continue the accepted logical turn without acquiring
+      // sender identity. They can advance only its low-level loop sequence.
+      if (currentModelInput) {
+        currentModelInput.loopSeq += 1;
+        currentModelInput.eventsEmitted = false;
+      } else {
+        for (const pending of pendingModelInputs) pending.loopSeq += 1;
+      }
+    }
+
     /** A completed assistant message: transcript, usage and resolved model. */
     function onAssistantMessage(event: JsonLineEvent): void {
       const msg = event.message as Record<string, unknown> | undefined;
       if (event.type === "message_end" && msg?.role !== "assistant") return;
+      if (currentModelInput) {
+        const timestamp = turnEventTimestamp();
+        currentModelInput.lastMessage = {
+          role: "assistant",
+          timestamp,
+          provenance: unknownMessageProvenanceV1({ messageKind: "message" }),
+        };
+      }
       const text = extractTextContent(event) || state.streamingText || undefined;
       if (text) {
         state.lastContent = text;
@@ -1424,6 +1678,22 @@ export async function runSingleAttempt(
       }
       recordResolvedModel(event, msg);
       recordRuntimeEventError(event, "turn_end");
+      if (currentModelInput) {
+        if (!currentModelInput.lastMessage || currentModelInput.lastMessage.role !== "assistant") {
+          const timestamp = turnEventTimestamp();
+          currentModelInput.lastMessage = {
+            role: "assistant",
+            timestamp,
+            provenance: unknownMessageProvenanceV1({ messageKind: "message" }),
+          };
+        }
+        const timestamp = turnEventTimestamp();
+        recordCanonicalTurnEvent({
+          ...turnEventBase(currentModelInput, timestamp),
+          type: "turn-ended",
+          lastMessage: currentModelInput.lastMessage,
+        });
+      }
       if (isPiResultReadyTurn(event, {
         inFlightToolCount: state.inFlightToolCount,
         completedToolCount: state.completedToolCount,
@@ -1605,6 +1875,14 @@ export async function runSingleAttempt(
         break;
       }
       state.lastAssistantStopReason = stopReason;
+      if (currentModelInput) {
+        const timestamp = turnEventTimestamp();
+        recordCanonicalTurnEvent({
+          ...turnEventBase(currentModelInput, timestamp),
+          type: "agent-ended",
+          ...(currentModelInput.lastMessage === undefined ? {} : { lastMessage: currentModelInput.lastMessage }),
+        });
+      }
       if (stopReason === "length") {
         state.outputLimitRecoveryPending = true;
         progress.status = "running";
@@ -1780,11 +2058,19 @@ export async function runSingleAttempt(
         }
         pending.phase = "prompting";
         armInterruptingSteerTimeout();
-        if (!child.stdin || !writeChildStdinLine(child.stdin, JSON.stringify({
-          id: pending.promptRequestId,
-          type: "prompt",
-          message: wrapLeasedMessage(pending.message, pending.token),
-        }))) {
+        const leasedMessage = wrapLeasedMessage(pending.message, pending.token);
+        if (!child.stdin || !writeTransportModelInput(
+          child.stdin,
+          {
+            id: pending.promptRequestId,
+            type: "prompt",
+            message: leasedMessage,
+          },
+          leasedMessage,
+          pending.message,
+          "steer",
+          pending.provenance,
+        )) {
           failInterruptingSteer("the correction prompt could not be written");
         }
         return;
@@ -1806,7 +2092,7 @@ export async function runSingleAttempt(
       ["agent_start", onTurnBoundary],
       ["turn_start", onTurnBoundary],
       ["extension_ui_request", onExtensionUiRequest],
-      ["message_end", onAssistantMessage],
+      ["message_end", onMessageEnd],
       ["assistant", onAssistantMessage],
       ["message_update", onMessageUpdate],
       ["response", onResponse],
@@ -1869,6 +2155,10 @@ export async function runSingleAttempt(
 
     child.on("close", (code, signal) => {
       releaseRetryPersistenceGuard();
+      if (child.stdin) {
+        transportSidecars.delete(child.stdin);
+        interruptingSteerHandlers.delete(child.stdin);
+      }
       clearAllTimers();
       termination.cleanup();
       unbindTerminationSignal();
@@ -2009,6 +2299,10 @@ export async function runSingleAttempt(
         state.initialResultPublished = true;
         state.turnLifecycleSettled = true;
         state.terminal = true;
+        recordTerminalTurnEvent(
+          exitCode === 0 ? "completed" : "failed",
+          result.messages.at(-1)?.content,
+        );
         resolve(result);
         try {
           options.onTurnComplete?.(result);
@@ -2021,6 +2315,10 @@ export async function runSingleAttempt(
 
     child.on("error", (error) => {
       releaseRetryPersistenceGuard();
+      if (child.stdin) {
+        transportSidecars.delete(child.stdin);
+        interruptingSteerHandlers.delete(child.stdin);
+      }
       clearAllTimers();
       unbindTerminationSignal();
 
@@ -2065,6 +2363,7 @@ export async function runSingleAttempt(
         state.initialResultPublished = true;
         state.turnLifecycleSettled = true;
         state.terminal = true;
+        recordTerminalTurnEvent("failed", processError);
         resolve(result);
         try {
           options.onTurnComplete?.(result);
@@ -2083,10 +2382,29 @@ export async function runSingleAttempt(
 
 export type RpcMessageMode = "prompt" | "steer" | "follow_up" | "abort";
 
-type InterruptingSteerHandler = (message: string, token?: LeaseToken) => boolean;
+type InterruptingSteerHandler = (
+  message: string,
+  token?: LeaseToken,
+  provenance?: MessageProvenanceV1,
+) => boolean;
+
+interface TransportSidecarLease {
+  commit(): void;
+  cancel(): void;
+}
+
+interface TransportSidecar {
+  enqueue(
+    transportMessage: string,
+    acceptedMessage: string,
+    mode: "prompt" | "steer" | "follow_up",
+    provenance?: MessageProvenanceV1,
+  ): TransportSidecarLease;
+}
 
 const guardedChildStdinStreams = new WeakSet<Writable>();
 const interruptingSteerHandlers = new WeakMap<Writable, InterruptingSteerHandler>();
+const transportSidecars = new WeakMap<Writable, TransportSidecar>();
 
 function guardChildStdin(stdin: Writable): void {
   if (guardedChildStdinStreams.has(stdin)) return;
@@ -2107,24 +2425,63 @@ function writeChildStdinLine(stdin: Writable, line: string): boolean {
   }
 }
 
+function writeTransportModelInput(
+  stdin: Writable,
+  envelope: Record<string, unknown>,
+  transportMessage: string,
+  acceptedMessage: string,
+  mode: "prompt" | "steer" | "follow_up",
+  provenance?: MessageProvenanceV1,
+): boolean {
+  const lease = transportSidecars.get(stdin)?.enqueue(
+    transportMessage,
+    acceptedMessage,
+    mode,
+    provenance,
+  );
+  const sent = writeChildStdinLine(stdin, JSON.stringify(envelope));
+  if (sent) lease?.commit();
+  else lease?.cancel();
+  return sent;
+}
+
+export function hasRpcTurnSidecar(stdin: Writable): boolean {
+  return transportSidecars.has(stdin);
+}
+
 export function sendRpcMessage(
   stdin: Writable,
   message: string,
   mode: RpcMessageMode = "follow_up",
   token?: LeaseToken,
+  provenance?: MessageProvenanceV1,
 ): boolean {
   if (mode === "abort") {
     return writeChildStdinLine(stdin, JSON.stringify({ type: "abort" }));
   }
   const leasedMessage = wrapLeasedMessage(message, token);
   if (mode === "prompt") {
-    return writeChildStdinLine(stdin, JSON.stringify({ type: "prompt", message: leasedMessage }));
+    return writeTransportModelInput(
+      stdin,
+      { type: "prompt", message: leasedMessage },
+      leasedMessage,
+      message,
+      "prompt",
+      provenance,
+    );
   }
   if (mode === "steer") {
     const interrupt = interruptingSteerHandlers.get(stdin);
-    if (interrupt) return interrupt(message, token);
+    if (interrupt) return interrupt(message, token, provenance);
   }
-  return writeChildStdinLine(stdin, JSON.stringify({ type: mode, message: leasedMessage }));
+  return writeTransportModelInput(
+    stdin,
+    { type: mode, message: leasedMessage },
+    leasedMessage,
+    message,
+    mode,
+    provenance,
+  );
 }
 
 export function sendChildIpcMessage(

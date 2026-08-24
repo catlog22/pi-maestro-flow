@@ -10,7 +10,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import crossSpawn from "cross-spawn";
 import { type AgentConfig } from "../agents/agents.ts";
-import type { SingleResult, Usage, AgentProgress, AgentTerminalStatus } from "../shared/types.ts";
+import type { SingleResult, Usage, AgentProgress, AgentTerminalStatus, AgentTurnEvent, AgentTurnTriggerContextV1, MessageProvenanceV1 } from "../shared/types.ts";
 import { type LeaseToken } from "./session-handoff.ts";
 import { type ResolvedModelRegistrationRouting, type TeammateTaskType } from "../models/model-routing.ts";
 import type { DispatchAuthorityProjection } from "../models/model-registry.ts";
@@ -222,6 +222,18 @@ export interface RunTeammateOptions {
     sessionDir?: string;
     /** Additional child-only environment values (never applied to the host). */
     childEnvironment?: Record<string, string | undefined>;
+    /** Attribution for the original task prompt; malformed input is downgraded to strict unknown. */
+    initialMessageProvenance?: MessageProvenanceV1;
+    /** Per-task attribution for graph runs; takes precedence over the shared initial value. */
+    initialMessageProvenanceOf?: (correlationId: string) => MessageProvenanceV1 | undefined;
+    /** Stable logical identity reused by every physical model candidate in this run. */
+    initialTurnContext?: AgentTurnTriggerContextV1;
+    /** Low-level loop offset owned by this physical model-candidate process. */
+    turnLoopSeqOffset?: number;
+    /** Whether this attempt owns publication of the initial trigger-enqueued edge. */
+    emitInitialTurnTrigger?: boolean;
+    /** Transport-sidecar sink for canonical logical-turn lifecycle events. */
+    recordTurnEvent?: (event: AgentTurnEvent) => void;
     initialLeaseToken?: LeaseToken | ((correlationId: string) => LeaseToken | undefined);
     onChildSpawned?: (stdin: import("node:stream").Writable, sendControl: (message: Record<string, unknown>) => boolean, sessionDir?: string, correlationId?: string, 
     /** Runtime generation of the spawning run, mirroring onChildClosed. */
