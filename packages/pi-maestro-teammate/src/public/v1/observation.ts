@@ -363,6 +363,10 @@ export function formatObserveResult(result: ObserveResult, verbose = false): str
     if (verbose && observation.detail) {
       for (const detail of observation.detail) lines.push(`  ${detail}`);
     }
+    const detailHasLastResult = observation.detail?.includes("--- last result ---") === true;
+    if (verbose && observation.lastResult && !detailHasLastResult) {
+      lines.push("  --- last result ---", ...observation.lastResult.split("\n").map((line) => `  ${line}`));
+    }
     const detailHasStructuredOutput = observation.detail?.includes("--- structured output ---") === true;
     if (verbose && observation.structuredOutput !== undefined && !detailHasStructuredOutput) {
       let text: string;

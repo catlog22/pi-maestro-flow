@@ -67,6 +67,8 @@ export interface TeammateStartedEvent {
   /** Role name, or `graph(<n>)` for a DAG run. */
   agent: string;
   name?: string;
+  /** Original dispatch prompt for work-detail consumers. */
+  task?: string;
   /** `correlationId` of the dispatching agent; absent for a root dispatch. */
   spawnedBy?: string;
   /** Epoch milliseconds. */

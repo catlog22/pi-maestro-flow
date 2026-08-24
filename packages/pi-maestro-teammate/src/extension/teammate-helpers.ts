@@ -592,7 +592,8 @@ export function buildWatchOutput(target: WatchTarget, lineCount: number): string
     const activity = projectAgentActivity(agent);
     const output = [
       `[${agent.agent}/${label}] id=${agent.correlationId.slice(0, 8)} | ${activity}${agent.phase ? `/${agent.phase}` : ""} | up ${uptime}s | idle ${idle}s | log ${agent.outputLog.length} | inbox ${agent.inbox.length}`,
-      "---",
+      ...(agent.task ? ["--- task ---", ...agent.task.split("\n").slice(0, lineCount)] : []),
+      "--- activity ---",
       ...log,
     ];
     if (agent.resolvedModel || agent.requestedModel) {
@@ -1649,9 +1650,12 @@ export function recordSettledAgent(
     correlationId: agent.correlationId,
     agent: agent.agent,
     ...(agent.name ? { name: agent.name } : {}),
+    ...(agent.task ? { task: agent.task } : {}),
     status,
     settledAt: Date.now(),
     ...(agent.lastResult ? { lastResult: agent.lastResult } : {}),
+    ...(agent.sessionFile ? { sessionFile: agent.sessionFile } : {}),
+    ...(agent.outputLog.length > 0 ? { outputLog: [...agent.outputLog] } : {}),
     ...(agent.structuredOutput !== undefined
       ? { structuredOutput: structuredClone(agent.structuredOutput) }
       : {}),

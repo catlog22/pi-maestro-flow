@@ -421,6 +421,29 @@ test("until option is forwarded to providers", async () => {
   }
 });
 
+test("formatObserveResult preserves multiline last results only in verbose detail", () => {
+  const observation: ObservationSnapshot = {
+    target: { kind: "teammate", id: "job" },
+    found: true,
+    nativeStatus: "sleeping",
+    phase: "settled",
+    lastResult: "first line\nsecond line",
+    summary: "done",
+    updatedAt: Date.now(),
+  };
+  const result = {
+    action: "status" as const,
+    reason: "snapshot" as const,
+    observations: [observation],
+    durationMs: 1,
+  };
+
+  const verbose = formatObserveResult(result, true).join("\n");
+  assert.match(verbose, /--- last result ---/);
+  assert.match(verbose, /first line\n  second line/);
+  assert.doesNotMatch(formatObserveResult(result, false).join("\n"), /first line/);
+});
+
 test("formatObserveResult renders structured output only in verbose detail", () => {
   const observation: ObservationSnapshot = {
     target: { kind: "teammate", id: "job" },

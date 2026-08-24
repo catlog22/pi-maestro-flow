@@ -161,6 +161,23 @@ test("settled agents are recallable by name and by id prefix", () => {
   assert.equal(findSettledAgent(state, "someone-else"), undefined);
 });
 
+test("settled agents retain work and transcript recovery detail", () => {
+  const state = makeState();
+  const agent = addAgent(state, "scout", {
+    task: "Inspect the auth flow",
+    sessionFile: "C:/sessions/scout.jsonl",
+    outputLog: ["[00:00:01] ~ read", "assistant detail"],
+  });
+  recordSettledAgent(state, agent, "completed");
+
+  const settled = findSettledAgent(state, "scout");
+  assert.equal(settled?.task, "Inspect the auth flow");
+  assert.equal(settled?.sessionFile, "C:/sessions/scout.jsonl");
+  assert.deepEqual(settled?.outputLog, ["[00:00:01] ~ read", "assistant detail"]);
+  agent.outputLog.push("late mutation");
+  assert.equal(settled?.outputLog?.includes("late mutation"), false);
+});
+
 test("the settled memo is bounded and drops the oldest first", () => {
   const state = makeState();
   const first = addAgent(state, "first");
