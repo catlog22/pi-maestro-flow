@@ -110,12 +110,24 @@ export interface CliToolRunResult extends AcpToolObservation {
   selectedModel?: string;
 }
 
+export interface CliToolProgress {
+  status: "running";
+  phase: "starting" | "prompting" | "tool-execution";
+  recentTools: Array<{ name: string; status: "running" | "completed" | "failed" }>;
+  toolCount: number;
+  tokens: number;
+  lastActivityAt: number;
+  lastMessage?: string;
+}
+
 export interface RunLocalCliToolParams {
   tool: string;
   config: CliToolConfig;
   prompt: string;
   cwd: string;
   signal: AbortSignal;
+  /** Advisory live activity sink. Observer failures never interrupt the run. */
+  onProgress?: (progress: CliToolProgress) => void;
   /** Optional overall execution timeout applied on top of the caller's signal. */
   timeoutMs?: number;
   /**
@@ -428,8 +440,31 @@ export async function settleAcpRun(
   const startedToolIds = new Set<string>();
   const endedToolIds = new Set<string>();
   const completedTools: string[] = [];
+  const toolStates = new Map<string, { name: string; status: "running" | "completed" | "failed" }>();
+  let lastMessage: string | undefined;
   let sawActivity = false;
   let settled: RemoteRunResultEvent | undefined;
+
+  const reportProgress = (
+    phase: CliToolProgress["phase"],
+    lastActivityAt: number,
+  ): void => {
+    const tokens = usage.totalTokens
+      ?? (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0);
+    try {
+      params.onProgress?.({
+        status: "running",
+        phase,
+        recentTools: [...toolStates.values()].slice(-8),
+        toolCount: toolStates.size,
+        tokens,
+        lastActivityAt,
+        ...(lastMessage === undefined ? {} : { lastMessage }),
+      });
+    } catch {
+      // Progress is advisory; an observer cannot change execution.
+    }
+  };
 
   for await (const event of handle.events()) {
     if (event.type === "run/event") sawActivity = true;
@@ -442,14 +477,31 @@ export async function settleAcpRun(
         reason: "local-cli-aborted",
       });
     }
+    if (event.type === "run/state") {
+      if (event.summary) lastMessage = event.summary;
+      reportProgress(
+        event.status === "connecting" || event.status === "ready" ? "starting" : "prompting",
+        event.updatedAt,
+      );
+      continue;
+    }
     if (event.type === "run/event" && event.event.type === "tool") {
       const tool = event.event.tool;
       if (tool.phase === "start") {
         startedToolIds.add(tool.toolCallId);
-      } else if (!endedToolIds.has(tool.toolCallId)) {
-        endedToolIds.add(tool.toolCallId);
-        completedTools.push(tool.toolName);
+        toolStates.set(tool.toolCallId, { name: tool.toolName, status: "running" });
+      } else {
+        toolStates.set(tool.toolCallId, {
+          name: tool.toolName,
+          status: tool.isError ? "failed" : "completed",
+        });
+        if (!endedToolIds.has(tool.toolCallId)) {
+          endedToolIds.add(tool.toolCallId);
+          completedTools.push(tool.toolName);
+        }
       }
+      if (tool.summary) lastMessage = tool.summary;
+      reportProgress("tool-execution", event.updatedAt);
       continue;
     }
     if (event.type === "run/event" && event.event.type === "usage") {
@@ -458,6 +510,16 @@ export async function settleAcpRun(
       if (Number.isFinite(value.outputTokens)) usage.outputTokens = value.outputTokens;
       if (Number.isFinite(value.totalTokens)) usage.totalTokens = value.totalTokens;
       if (Number.isFinite(value.costUsd)) usage.costUsd = value.costUsd;
+      reportProgress(toolStates.size > endedToolIds.size ? "tool-execution" : "prompting", event.updatedAt);
+      continue;
+    }
+    if (event.type === "run/event" && event.event.type === "text") {
+      lastMessage = event.event.text;
+      reportProgress(toolStates.size > endedToolIds.size ? "tool-execution" : "prompting", event.updatedAt);
+      continue;
+    }
+    if (event.type === "run/event") {
+      reportProgress(toolStates.size > endedToolIds.size ? "tool-execution" : "prompting", event.updatedAt);
       continue;
     }
     if (event.type === "run/result") {

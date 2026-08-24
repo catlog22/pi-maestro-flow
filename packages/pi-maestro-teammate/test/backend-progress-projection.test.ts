@@ -61,12 +61,14 @@ test("recent tools keep only entries carrying both a name and a status", () => {
 
 test("optional string fields pass through only when they are strings", () => {
   const progress = projectBackendProgress(
-    { name: "task-1", correlationId: "c-1", lastMessage: "done", resolvedModel: 9 },
+    { name: "task-1", correlationId: "c-1", phase: "starting", lastMessage: "done", resolvedModel: 9 },
     AGENT,
     STARTED,
   );
   assert.equal(progress.name, "task-1");
   assert.equal(progress.correlationId, "c-1");
+  assert.equal(progress.phase, "starting");
+  assert.equal(projectBackendProgress({ phase: "invented" }, AGENT, STARTED).phase, undefined);
   assert.equal(progress.lastMessage, "done");
   assert.equal("resolvedModel" in progress, false);
 });

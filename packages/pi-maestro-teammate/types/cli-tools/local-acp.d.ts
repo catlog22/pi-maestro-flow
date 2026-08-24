@@ -74,12 +74,26 @@ export interface CliToolRunResult extends AcpToolObservation {
      */
     selectedModel?: string;
 }
+export interface CliToolProgress {
+    status: "running";
+    phase: "starting" | "prompting" | "tool-execution";
+    recentTools: Array<{
+        name: string;
+        status: "running" | "completed" | "failed";
+    }>;
+    toolCount: number;
+    tokens: number;
+    lastActivityAt: number;
+    lastMessage?: string;
+}
 export interface RunLocalCliToolParams {
     tool: string;
     config: CliToolConfig;
     prompt: string;
     cwd: string;
     signal: AbortSignal;
+    /** Advisory live activity sink. Observer failures never interrupt the run. */
+    onProgress?: (progress: CliToolProgress) => void;
     /** Optional overall execution timeout applied on top of the caller's signal. */
     timeoutMs?: number;
     /**

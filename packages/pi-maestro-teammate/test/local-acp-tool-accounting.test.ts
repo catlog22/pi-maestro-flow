@@ -77,15 +77,44 @@ function settledEvent(status: RemoteRunResultEvent["status"], result?: string): 
   };
 }
 
-function settle(events: readonly RemoteRunEvent[]) {
+function settle(
+  events: readonly RemoteRunEvent[],
+  onProgress?: NonNullable<Parameters<typeof settleAcpRun>[1]["onProgress"]>,
+) {
   return settleAcpRun(new ReplayHandle(events), {
     tool: "mock",
     config: TOOL_CONFIG,
     prompt: "do the thing",
     cwd: process.cwd(),
     signal: new AbortController().signal,
+    ...(onProgress === undefined ? {} : { onProgress }),
   });
 }
+
+test("settleAcpRun reports ACP text, tools, and usage as live progress", async () => {
+  const updates: Array<Parameters<NonNullable<Parameters<typeof settleAcpRun>[1]["onProgress"]>>[0]> = [];
+  await settle([
+    state("running"),
+    progress({ type: "text", text: "checking repository" }),
+    tool("call-1", "bash", "start"),
+    progress({ type: "usage", usage: { inputTokens: 10, outputTokens: 4 } }),
+    tool("call-1", "bash", "end"),
+    settledEvent("completed", "done"),
+  ], (update) => updates.push(update));
+
+  assert.ok(updates.some((update) => update.phase === "prompting" && update.lastMessage === "checking repository"));
+  assert.ok(updates.some((update) => update.phase === "tool-execution"
+    && update.recentTools.some((tool) => tool.name === "bash" && tool.status === "running")));
+  assert.ok(updates.some((update) => update.tokens === 14));
+  assert.ok(updates.some((update) => update.recentTools.some((tool) => tool.name === "bash" && tool.status === "completed")));
+});
+
+test("settleAcpRun isolates a throwing progress observer", async () => {
+  const run = await settle([state("running"), settledEvent("completed", "done")], () => {
+    throw new Error("observer failed");
+  });
+  assert.equal(run.status, "completed");
+});
 
 test("settleAcpRun counts a tool that reached phase end", async () => {
   const run = await settle([

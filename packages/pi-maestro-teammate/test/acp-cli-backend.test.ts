@@ -110,6 +110,36 @@ test("acp-cli reports a clean run as unfenced", async () => {
   assert.equal(fence.blocked, false);
 });
 
+test("acp-cli publishes a starting progress row before the runner settles", async () => {
+  const progress: Array<Record<string, unknown>> = [];
+  const backend = createAcpCliBackend(async () => CLEAN_RUN);
+  const run = await backend.start(specOf({ name: "agy-smoke" }), {
+    ...runOptionsOf(LOCAL_CONFIG),
+    onProgress: (data: Record<string, unknown>) => progress.push(data),
+  });
+
+  assert.equal(progress.length, 1);
+  assert.equal(progress[0]?.status, "running");
+  assert.equal(progress[0]?.phase, "starting");
+  assert.equal(progress[0]?.name, "agy-smoke");
+  assert.equal(progress[0]?.correlationId, "corr-1");
+  assert.deepEqual(progress[0]?.recentTools, []);
+  assert.equal(progress[0]?.toolCount, 0);
+  assert.equal(progress[0]?.tokens, 0);
+  assert.equal(typeof progress[0]?.startedAt, "number");
+  assert.equal(progress[0]?.lastActivityAt, progress[0]?.startedAt);
+  await run.outcome;
+});
+
+test("acp-cli isolates a throwing advisory progress observer", async () => {
+  const backend = createAcpCliBackend(async () => CLEAN_RUN);
+  const run = await backend.start(specOf(), {
+    ...runOptionsOf(LOCAL_CONFIG),
+    onProgress: () => { throw new Error("observer failed"); },
+  });
+  assert.equal((await run.outcome).result.exitCode, 0);
+});
+
 test("acp-cli treats an unfinished tool as an unknown effect", () => {
   const facts = recoveryFactsOf({
     ...CLEAN_RUN,

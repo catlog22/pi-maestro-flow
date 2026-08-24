@@ -687,6 +687,31 @@ export function createAcpCliBackend(
       }
       const tool = isCliToolModel(route) ? cliToolNameFromModel(route) : route;
       const aborter = new AbortController();
+      const startedAt = Date.now();
+      const publishProgress = (data: object): void => {
+        try {
+          options.onProgress?.({
+            ...data,
+            ...(spec.name === undefined ? {} : { name: spec.name }),
+            correlationId: options.correlationId,
+          });
+        } catch {
+          // Advisory observer failure is isolated from execution.
+        }
+      };
+      // ACP runners may spend seconds in install, launch, and handshake before
+      // their first protocol event. Publish the host-owned starting state now so
+      // foreground teammate calls and Cockpit never render as an empty tool.
+      publishProgress({
+        status: "running",
+        phase: "starting",
+        recentTools: [],
+        toolCount: 0,
+        tokens: 0,
+        startedAt,
+        durationMs: 0,
+        lastActivityAt: startedAt,
+      });
       // Installing is deferred to here because `resolveConfig` is synchronous
       // and runs whenever the document is read — including while the settings
       // shell renders. A registration stays launchable without it: this only
@@ -703,6 +728,7 @@ export function createAcpCliBackend(
           prompt: spec.task,
           cwd: spec.cwd ?? options.baseCwd,
           signal: cancellation.signal,
+          onProgress: publishProgress,
           ...(timeoutMs === undefined ? {} : { timeoutMs }),
           ...(startupTimeoutMs === undefined ? {} : { startupTimeoutMs }),
           ...(Object.keys(acpSelections).length === 0 ? {} : { acpSelections }),

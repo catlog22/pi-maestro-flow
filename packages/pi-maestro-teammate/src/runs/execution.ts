@@ -516,6 +516,11 @@ const PROGRESS_STATUSES: readonly AgentProgressStatus[] = [
   "pending", "running", "retrying", "completed", "failed", "terminated",
 ];
 
+const PROGRESS_PHASES: readonly AgentRunPhase[] = [
+  "waiting-dependency", "waiting-capacity", "starting", "restoring", "prompting",
+  "tool-execution", "result-ready", "retrying", "compacting", "continuing", "settling",
+];
+
 /**
  * Read one number out of an untyped backend payload.
  *
@@ -569,6 +574,7 @@ export function projectBackendProgress(
 ): AgentProgress {
   const now = Date.now();
   const status = PROGRESS_STATUSES.find((candidate) => candidate === data.status) ?? "running";
+  const phase = PROGRESS_PHASES.find((candidate) => candidate === data.phase);
   return {
     agent,
     status,
@@ -580,6 +586,7 @@ export function projectBackendProgress(
     lastActivityAt: progressNumber(data.lastActivityAt, now),
     ...(typeof data.name === "string" ? { name: data.name } : {}),
     ...(typeof data.correlationId === "string" ? { correlationId: data.correlationId } : {}),
+    ...(phase === undefined ? {} : { phase }),
     ...(typeof data.lastMessage === "string" ? { lastMessage: data.lastMessage } : {}),
     ...(typeof data.resolvedModel === "string" ? { resolvedModel: data.resolvedModel } : {}),
     ...(typeof data.requestedModel === "string" ? { requestedModel: data.requestedModel } : {}),
