@@ -510,7 +510,10 @@ export class CompletionOutboxFileStore {
           return { ...empty, skipped: true };
         }
         const swept = await this.#gcLocked(workspaceId);
-        await writeJsonAtomic(markerPath, { at: this.#now(), owner: this.ownerId }, 64);
+        // Marker carries only the sweep timestamp — the throttle readers compare
+        // `at` alone. Adding an owner field pushed the payload past the 64-byte
+        // read/write cap (a pid+uuid owner is ~74 bytes) and crashed reconcile.
+        await writeJsonAtomic(markerPath, { at: this.#now() }, 64);
         return swept;
       },
       0,

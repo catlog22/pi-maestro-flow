@@ -26,6 +26,17 @@ import {
   stateDirKey,
 } from "./types.ts";
 
+// The seen-marker payload is `{"key":<dedupKey>,"seenAt":<ms>}\n`, capped at
+// MAX_SEEN_MARK_BYTES by both the write (writeJsonAtomic / tryMarkSeen) and the
+// read (listSeen) paths. The dedup key is caller-supplied (requestId or
+// correlationId) and never length-validated at the enqueue boundary, so cap it
+// here — otherwise a large key overflows the write cap (markSeen throws) or, in
+// tryMarkSeen, writes a marker listSeen then cannot read back (it silently
+// skips it, defeating dedup). seenPath() already hashes the key, so this is a
+// pure byte-safety bound, not a path-safety bound.
+const MAX_SEEN_MARK_BYTES = 512;
+const MAX_DEDUP_KEY_BYTES = 256;
+
 // --- Path Construction ---
 
 export function createMailboxPaths(rootDir: string): MailboxPaths {
@@ -78,6 +89,17 @@ function seenPath(paths: MailboxPaths, key: string): string {
   // seen directory (a key containing separators must not become a path).
   const digest = createHash("sha256").update(key, "utf8").digest("hex");
   return join(paths.seenDir, `${digest}.seen`);
+}
+
+/** Build the seen-marker JSON object, bounding the caller-supplied dedup key
+ *  so the serialized payload always fits MAX_SEEN_MARK_BYTES (the read cap in
+ *  listSeen). A 13-digit ms + frame is ~34 bytes, leaving ~478 for the key; 256
+ *  keeps a wide margin and matches the order of magnitude of other id caps. */
+function buildSeenMark(key: string, seenAt: number): { key: string; seenAt: number } {
+  const boundedKey = Buffer.byteLength(key, "utf8") > MAX_DEDUP_KEY_BYTES
+    ? Buffer.from(key, "utf8").subarray(0, MAX_DEDUP_KEY_BYTES).toString("utf8")
+    : key;
+  return { key: boundedKey, seenAt };
 }
 
 // --- Fsync Helpers ---
@@ -459,7 +481,7 @@ export class MailboxFileStore {
   /** Mark a dedup key as seen for durable deduplication. */
   async markSeen(key: string): Promise<void> {
     const path = seenPath(this.paths, key);
-    await writeJsonAtomic(path, { key, seenAt: this.#now() }, 512);
+    await writeJsonAtomic(path, buildSeenMark(key, this.#now()), MAX_SEEN_MARK_BYTES);
   }
 
   /**
@@ -471,10 +493,14 @@ export class MailboxFileStore {
   async tryMarkSeen(key: string): Promise<boolean> {
     const path = seenPath(this.paths, key);
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    const payload = Buffer.from(`${JSON.stringify(buildSeenMark(key, this.#now()))}\n`, "utf8");
+    if (payload.byteLength > MAX_SEEN_MARK_BYTES) {
+      throw new Error(`dedup marker exceeds ${MAX_SEEN_MARK_BYTES} byte limit (${payload.byteLength} bytes)`);
+    }
     let handle: Awaited<ReturnType<typeof open>> | undefined;
     try {
       handle = await open(path, "wx", 0o600);
-      await handle.writeFile(`${JSON.stringify({ key, seenAt: this.#now() })}\n`);
+      await handle.writeFile(payload);
       await handle.sync();
       return true;
     } catch (error) {
@@ -498,7 +524,7 @@ export class MailboxFileStore {
       for (const file of files) {
         if (!file.endsWith(".seen")) continue;
         const path = join(this.paths.seenDir, file);
-        if (!(await isSafeRegularFile(path, 512))) continue;
+        if (!(await isSafeRegularFile(path, MAX_SEEN_MARK_BYTES))) continue;
         try {
           const parsed = JSON.parse((await readFile(path)).toString("utf8")) as { seenAt?: unknown };
           if (parsed && typeof parsed.seenAt === "number") {

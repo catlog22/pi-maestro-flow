@@ -62,4 +62,11 @@ export interface CompletionOutboxGcResult {
     removed: number;
     releasedReservations: number;
 }
+/** Result of a non-blocking {@link CompletionOutboxFileStore.tryGc} sweep. */
+export interface CompletionOutboxTryGcResult extends CompletionOutboxGcResult {
+    /** true if the workspace lock was held by another process and the sweep was skipped. */
+    busy?: boolean;
+    /** true if a cross-process GC marker indicated a recent sweep and this call skipped. */
+    skipped?: boolean;
+}
 export declare function retryDelayForAttempt(attempt: number): number;
