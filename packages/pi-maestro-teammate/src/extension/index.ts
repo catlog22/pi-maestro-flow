@@ -172,6 +172,7 @@ import {
   type WorkspaceMainSessionProgressEvent,
   type WorkspaceOwnerSnapshot,
   type WorkspaceOwnerState,
+  type WorkspacePeerCommand,
   type WorkspacePeerCommandConsumer,
   type WorkspacePeerPublisher,
   type WorkspacePeerWindowListing,
@@ -1459,6 +1460,7 @@ export default function registerTeammateExtension(
   let workspaceCurrentTurnAssistantMessage: unknown;
   let workspaceTerminalResultDraft: WorkspaceWindowTerminalResultDraft | undefined;
   const workspaceTerminalResultPublications = new Map<string, Promise<boolean>>();
+  const workspaceTerminalCompletionPublications = new Map<string, Promise<boolean>>();
   let workspaceReceiptReconcileTimer: ReturnType<typeof setInterval> | undefined;
   let workspacePeerRefresh: {
     publisher: WorkspacePeerPublisher;
@@ -1472,6 +1474,42 @@ export default function registerTeammateExtension(
     workspacePeerPublisher?.identity.ownerId
       ?? state.currentSessionId
       ?? `process-${process.pid}`;
+
+  const workspaceTerminalCompletionSeed = (
+    request: Pick<WindowThreadEntry, "messageId" | "workspaceId" | "createdAt">,
+  ): CompletionDispatchSeed | undefined => {
+    const sessionId = state.currentSessionId;
+    if (!sessionId) return undefined;
+    return {
+      dispatchId: request.messageId,
+      deliveryGroupId: request.messageId,
+      reservationId: workspaceWindowTerminalReservationId(request.messageId),
+      mode: "single",
+      target: { workspaceId: request.workspaceId, sessionId },
+      replyTarget: "main",
+      originCwd: state.baseCwd,
+      expectedTasks: [request.messageId],
+      createdAt: request.createdAt,
+    };
+  };
+
+  const reserveWorkspaceTerminalCompletion = async (
+    request: Pick<WindowThreadEntry, "messageId" | "workspaceId" | "createdAt">,
+  ): Promise<CompletionDispatchSeed> => {
+    const seed = workspaceTerminalCompletionSeed(request);
+    if (!seed) throw new Error("The parent session has no stable identity for terminal completion delivery.");
+    const reservation = await completionCoordinator.beginDispatch(seed);
+    if (!reservation.durable) {
+      throw new Error("Canonical completion durability is unavailable for this workspace request.");
+    }
+    await completionCoordinator.requireNotification({
+      dispatchId: seed.dispatchId,
+      reservationId: seed.reservationId,
+      kind: "single",
+      requiredAt: Date.now(),
+    });
+    return seed;
+  };
 
   const senderIdentityForSessionMessage = (
     senderCorrelationId: string | undefined,
@@ -1935,10 +1973,41 @@ export default function registerTeammateExtension(
     }
     const registry = sessionHostRegistry;
     if (!registry) return { delivered: false, error: "Session delivery journal is unavailable." };
+    const commandCreatedAt = Date.now();
+    let terminalCompletionSeed: CompletionDispatchSeed | undefined;
+    if (request.terminalResultRequested === true) {
+      if (!request.messageId) {
+        return { delivered: false, error: "Terminal result requests require a stable message identity." };
+      }
+      if (target.agent.correlationId !== WORKSPACE_MAIN_SESSION_MARKER
+        || request.messageKind !== "request") {
+        return { delivered: false, error: "Terminal results can only be requested from a workspace root using message kind request." };
+      }
+      try {
+        terminalCompletionSeed = await reserveWorkspaceTerminalCompletion({
+          messageId: request.messageId,
+          workspaceId: publisher.identity.workspaceId,
+          createdAt: commandCreatedAt,
+        });
+      } catch (error) {
+        return {
+          delivered: false,
+          error: `Terminal completion reservation failed: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+    }
+    const abandonTerminalCompletion = async (reason: string): Promise<void> => {
+      if (!terminalCompletionSeed) return;
+      await completionCoordinator.abandon(terminalCompletionSeed, reason).catch((error) => {
+        logDiagnosticWarn("[pi-maestro-teammate] terminal completion reservation cleanup failed:", error);
+      });
+      terminalCompletionSeed = undefined;
+    };
     let outgoing: WindowThreadEntryInput | undefined;
     let publicationStage: "published" | "accepted" | "rejected" | undefined;
     try {
       const command = await enqueueWorkspacePeerCommand(publisher.identity, target, mode, message, {
+        now: commandCreatedAt,
         commandId: request.messageId,
         source,
         messageKind: request.messageKind,
@@ -2027,6 +2096,7 @@ export default function registerTeammateExtension(
         };
       }
       if (response.status !== "accepted") {
+        await abandonTerminalCompletion("workspace target rejected the terminal result request");
         return {
           delivered: false,
           error: response.message ?? `Workspace target "${query}" rejected the message.`,
@@ -2046,6 +2116,9 @@ export default function registerTeammateExtension(
         },
       };
     } catch (error) {
+      if (publicationStage === undefined) {
+        await abandonTerminalCompletion("workspace terminal result request was not published");
+      }
       if (outgoing && publicationStage === undefined && ownsRootSessionFence(fence)) {
         try {
           registry.thread.record({
@@ -2836,6 +2909,119 @@ export default function registerTeammateExtension(
     for (const request of requests) await publishWorkspaceWindowTerminalResult(request, draft);
   };
 
+  const publishWorkspaceTerminalCompletion = (
+    request: WindowThreadEntry,
+    terminal: WorkspaceWindowTerminalResult,
+  ): Promise<boolean> => {
+    const publicationId = workspaceWindowTerminalPublicationId(request.messageId);
+    const existing = workspaceTerminalCompletionPublications.get(publicationId);
+    if (existing) return existing;
+    const publication = (async (): Promise<boolean> => {
+      try {
+        const seed = await reserveWorkspaceTerminalCompletion(request);
+        const terminalStatus: AgentTerminalStatus = terminal.outcome === "completed"
+          ? "completed"
+          : terminal.outcome === "cancelled" ? "terminated" : "failed";
+        const completionOutcome = terminalStatus === "completed"
+          ? "completed" as const
+          : terminalStatus === "terminated" ? "terminated" as const : "failed" as const;
+        const content = terminal.outcome === "completed"
+          ? terminal.finalText!
+          : terminal.outcome === "no-result"
+            ? "Workspace worker settled without a final result."
+            : [terminal.error ?? `Workspace worker ${terminal.outcome}.`, terminal.finalText]
+                .filter((part): part is string => Boolean(part))
+                .join("\n\n");
+        const summary = content.replace(/\s+/g, " ").trim().slice(0, 1_024);
+        const result: SingleResult = {
+          agent: "workspace-window",
+          task: request.body,
+          exitCode: terminalStatus === "completed" ? 0 : 1,
+          messages: [{ role: terminalStatus === "completed" ? "assistant" : "system", content }],
+          usage: {
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            cost: 0,
+            turns: 1,
+          },
+          model: "workspace-peer-v1",
+          correlationId: request.messageId,
+          publicationId,
+          originCwd: seed.originCwd,
+          durationMs: Math.max(0, terminal.settledAt - request.createdAt),
+          wakeable: false,
+          terminalStatus,
+          completionDispatchId: seed.dispatchId,
+          completionReservationId: seed.reservationId,
+          completionOutcome,
+        };
+        await emitTeammateResultPublished(pi, result, seed.originCwd);
+        const resource: CompletionResource = {
+          correlationId: result.correlationId,
+          publicationId,
+          uri: `agent://${publicationId}`,
+          originCwd: seed.originCwd,
+          agent: result.agent,
+          summary,
+          outcome: completionOutcome,
+        };
+        const record = await completionCoordinator.publishCompletion({
+          dispatchId: seed.dispatchId,
+          reservationId: seed.reservationId,
+          kind: terminalStatus === "completed" ? "single" : "failure",
+          outcome: completionOutcome,
+          summary,
+          resources: [resource],
+          finalizedAt: terminal.settledAt,
+        });
+        if (!record) throw new Error("canonical completion coordinator did not accept the terminal result");
+        return true;
+      } catch (error) {
+        logDiagnosticError(
+          `[pi-maestro-teammate] canonical workspace terminal completion failed for ${request.messageId}:`,
+          error,
+        );
+        return false;
+      }
+    })();
+    workspaceTerminalCompletionPublications.set(publicationId, publication);
+    return publication;
+  };
+
+  const consumeWorkspaceTerminalCommand = (
+    command: WorkspacePeerCommand,
+  ): Promise<boolean> | undefined => {
+    if (command.targetCorrelationId !== WORKSPACE_MAIN_SESSION_MARKER
+      || command.source !== "system"
+      || command.messageKind !== "status"
+      || !command.traceId) return undefined;
+    const request = sessionHostRegistry?.thread.get(command.traceId, "outgoing");
+    if (!request
+      || request.terminalResultRequested !== true
+      || request.messageKind !== "request"
+      || request.targetCorrelationId !== WORKSPACE_MAIN_SESSION_MARKER
+      || request.workspaceId !== command.workspaceId
+      || request.peerOwnerId !== command.fromOwnerId
+      || request.peerOwnerNonce !== command.fromOwnerNonce
+      || command.commandId !== workspaceWindowTerminalResultMessageId(request.messageId)) return undefined;
+    let terminal: WorkspaceWindowTerminalResult;
+    try {
+      terminal = decodeWorkspaceWindowTerminalResult(command.message);
+      if (terminal.requestMessageId !== request.messageId) {
+        throw new Error("terminal result request identity does not match its transport trace");
+      }
+    } catch (error) {
+      terminal = createWorkspaceWindowTerminalResult({
+        requestMessageId: request.messageId,
+        outcome: "failed",
+        error: `Workspace terminal result protocol failure: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+    return publishWorkspaceTerminalCompletion(request, terminal);
+  };
+
   const stopWorkspacePeers = async (): Promise<void> => {
     const consumer = workspacePeerConsumer;
     const publisher = workspacePeerPublisher;
@@ -2970,6 +3156,27 @@ export default function registerTeammateExtension(
             status: "pending",
             updatedAt: command.createdAt,
           });
+
+          const terminalPublication = consumeWorkspaceTerminalCommand(command);
+          if (terminalPublication) {
+            const published = await terminalPublication;
+            registry.thread.record({
+              ...incoming,
+              status: published ? "injected" : "rejected",
+              updatedAt: Math.max(command.createdAt, Date.now()),
+            });
+            return published
+              ? {
+                  status: "accepted",
+                  message: "terminal result committed to canonical completion",
+                  effectiveAction: command.action,
+                  deliveryStage: "injected",
+                }
+              : {
+                  status: "rejected",
+                  message: "terminal result could not be committed to canonical completion",
+                };
+          }
 
           let result: {
             status: "accepted" | "rejected";
@@ -9553,6 +9760,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     workspaceCurrentTurnAssistantMessage = undefined;
     workspaceTerminalResultDraft = undefined;
     workspaceTerminalResultPublications.clear();
+    workspaceTerminalCompletionPublications.clear();
     startWorkspacePeers(ctx);
     if (workspaceReceiptReconcileTimer) clearInterval(workspaceReceiptReconcileTimer);
     workspaceReceiptReconcileTimer = setInterval(() => {
@@ -9692,7 +9900,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
   pi.on("agent_settled", async () => {
     appendWorkspaceMainProgressEvent({ kind: "lifecycle", at: Date.now(), phase: "agent_settled" });
     await publishWorkspaceWindowTerminalResults(
-      workspaceTerminalResultDraft ?? { outcome: "no-final-text" },
+      workspaceTerminalResultDraft ?? { outcome: "no-result" },
     );
   });
 

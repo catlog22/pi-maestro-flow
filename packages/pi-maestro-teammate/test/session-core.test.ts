@@ -392,7 +392,7 @@ test("window thread transitions pending to queued to injected without losing rep
     messageId,
     direction: "incoming",
     source: "monitor",
-    messageKind: "supervision",
+    messageKind: "request",
     traceId: "mon_trace-8",
     replyTo: `owner:${LOCAL_OWNER}`,
     terminalResultRequested: true,
@@ -405,6 +405,20 @@ test("window thread transitions pending to queued to injected without losing rep
   assert.equal(queued?.traceId, "mon_trace-8");
   assert.equal(queued?.terminalResultRequested, true);
   assert.equal(queued?.targetSessionId, "session-a");
+  assert.throws(() => store.record(threadInput({
+    messageId: "9".repeat(32),
+    terminalResultRequested: true,
+    messageKind: "coordination",
+    replyTo: `owner:${LOCAL_OWNER}`,
+    targetCorrelationId: "window-main-session",
+  })), /Invalid window thread entry/);
+  assert.throws(() => store.record(threadInput({
+    messageId: "a".repeat(32),
+    terminalResultRequested: true,
+    messageKind: "request",
+    replyTo: `owner:${LOCAL_OWNER}`,
+    targetCorrelationId: "agent-1",
+  })), /Invalid window thread entry/);
   assert.equal(store.transition(messageId, "incoming", "pending", 1_150), queued, "queued does not regress to pending");
   const injected = store.reconcileInjected(messageId, 1_200, "follow_up");
   assert.equal(injected?.status, "injected");

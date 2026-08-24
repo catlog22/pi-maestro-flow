@@ -577,7 +577,7 @@ export interface ProcessTreeByPidOptions {
     sleep?: (ms: number) => Promise<void>;
 }
 /** Terminate an explicitly owned process tree; callers must revalidate PID ownership first. */
-export declare function terminateProcessTreeByPid(pid: number, options?: ProcessTreeByPidOptions): Promise<void>;
+export declare function terminateProcessTreeByPid(pid: number, options?: ProcessTreeByPidOptions): Promise<"stopped" | "already-exited">;
 /** Maximum number of teammate-agent levels below the main agent. */
 export declare const MAX_DEFAULT_DEPTH = 2;
 export declare const DEFAULT_MAX_AGENTS = 15;

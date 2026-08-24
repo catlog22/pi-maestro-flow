@@ -59,7 +59,7 @@ export type WorkspacePeerMessageSource = "user" | "monitor" | "system";
 export type WorkspacePeerMessageKind = "message" | "coordination" | "request" | "status" | "supervision";
 export type WorkspacePeerDeliveryStage = "queued" | "injected";
 export declare const WORKSPACE_WINDOW_TERMINAL_RESULT_TYPE: "workspace-window-terminal-result";
-export type WorkspaceWindowTerminalOutcome = "completed" | "failed" | "cancelled" | "no-final-text";
+export type WorkspaceWindowTerminalOutcome = "completed" | "failed" | "cancelled" | "no-result";
 export interface WorkspaceWindowTerminalResult {
     version: typeof WORKSPACE_PEER_PROTOCOL_VERSION;
     type: typeof WORKSPACE_WINDOW_TERMINAL_RESULT_TYPE;
@@ -328,6 +328,10 @@ export interface StopWorkspacePeerRuntimeOptions {
 /** Classify the authoritative final worker turn without treating empty output as success. */
 export declare function deriveWorkspaceWindowTerminalResult(messages: readonly unknown[]): WorkspaceWindowTerminalResultDraft;
 export declare function workspaceWindowTerminalResultMessageId(requestMessageId: string): string;
+/** Deterministic immutable resource identity for one opt-in workspace request. */
+export declare function workspaceWindowTerminalPublicationId(requestMessageId: string): string;
+/** Deterministic completion reservation identity, stable across process recovery. */
+export declare function workspaceWindowTerminalReservationId(requestMessageId: string): string;
 export declare function createWorkspaceWindowTerminalResult(input: {
     requestMessageId: string;
     outcome: WorkspaceWindowTerminalOutcome;

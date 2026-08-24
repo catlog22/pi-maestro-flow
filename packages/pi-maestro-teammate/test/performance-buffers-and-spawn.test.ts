@@ -580,7 +580,7 @@ test("owned PID tree termination uses taskkill on Windows and a process group on
   }), /taskkill exited with code 5/);
 
   const signals: Array<[number, NodeJS.Signals | number | undefined]> = [];
-  await terminateProcessTreeByPid(77, {
+  const linuxStatus = await terminateProcessTreeByPid(77, {
     platform: "linux",
     killProcess: ((pid: number, signal?: NodeJS.Signals | number) => {
       signals.push([pid, signal]);
@@ -588,10 +588,11 @@ test("owned PID tree termination uses taskkill on Windows and a process group on
     }) as typeof process.kill,
     isProcessAlive: () => false,
   });
+  assert.equal(linuxStatus, "stopped");
   assert.deepEqual(signals, [[-77, "SIGTERM"]]);
 
   const fallbackSignals: number[] = [];
-  await terminateProcessTreeByPid(88, {
+  const fallbackStatus = await terminateProcessTreeByPid(88, {
     platform: "linux",
     killProcess: ((pid: number) => {
       fallbackSignals.push(pid);
@@ -600,10 +601,22 @@ test("owned PID tree termination uses taskkill on Windows and a process group on
     }) as typeof process.kill,
     isProcessAlive: () => false,
   });
+  assert.equal(fallbackStatus, "stopped");
   assert.deepEqual(fallbackSignals, [-88, 88]);
 
+  const missingStatus = await terminateProcessTreeByPid(89, {
+    platform: "linux",
+    killProcess: (() => {
+      throw Object.assign(new Error("missing tree"), { code: "ESRCH" });
+    }) as typeof process.kill,
+    isProcessAlive: () => {
+      throw new Error("liveness must not be consulted after both signal targets are absent");
+    },
+  });
+  assert.equal(missingStatus, "already-exited");
+
   const escalated: NodeJS.Signals[] = [];
-  await terminateProcessTreeByPid(99, {
+  const escalatedStatus = await terminateProcessTreeByPid(99, {
     platform: "linux",
     graceMs: 1,
     pollMs: 1,
@@ -614,6 +627,7 @@ test("owned PID tree termination uses taskkill on Windows and a process group on
     }) as typeof process.kill,
     isProcessAlive: () => !escalated.includes("SIGKILL"),
   });
+  assert.equal(escalatedStatus, "stopped");
   assert.deepEqual(escalated, ["SIGTERM", "SIGKILL"]);
 });
 

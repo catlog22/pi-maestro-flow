@@ -332,7 +332,8 @@ test("monitor communication uses tool-local capability gates without global inte
   assert.match(source, /const status = await terminateManagedWindowProcess\(window\);[\s\S]*?await monitorControllerInstance\.remove/);
   assert.match(source, /if \(managedWindows\.get\(name\) === window\) managedWindows\.delete\(name\)/);
   assert.match(source, /termination\.outcome/);
-  assert.match(source, /terminateProcessTreeByPid\(owner\.pid\)/);
+  assert.match(source, /return terminateProcessTreeByPid\(owner\.pid\)/);
+  assert.match(source, /status = await terminateProcessTreeByPid\(owner\.pid\)/);
   assert.match(source, /pi\.registerTool\(workspaceWindowTool\)/);
   assert.match(source, /name: "remote-worker"/);
   assert.match(source, /pi\.registerTool\(remoteWorkerTool\)/);

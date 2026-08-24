@@ -524,6 +524,10 @@ function validThreadEntry(value: unknown): WindowThreadEntry | undefined {
     || (entry.traceId !== undefined && (typeof entry.traceId !== "string" || entry.traceId.length === 0 || entry.traceId.length > 128 || /[\u0000-\u001f\u007f]/.test(entry.traceId)))
     || (entry.replyTo !== undefined && (typeof entry.replyTo !== "string" || entry.replyTo.length === 0 || entry.replyTo.length > 192 || /[\u0000-\u001f\u007f]/.test(entry.replyTo)))
     || (entry.terminalResultRequested !== undefined && entry.terminalResultRequested !== true)
+    || (entry.terminalResultRequested === true
+      && (entry.messageKind !== "request"
+        || entry.targetCorrelationId !== "window-main-session"
+        || entry.replyTo !== `owner:${entry.peerOwnerId}`))
     || (entry.fromSessionName !== undefined && (typeof entry.fromSessionName !== "string" || entry.fromSessionName.length === 0 || entry.fromSessionName.length > 256 || /[\u0000-\u001f\u007f]/.test(entry.fromSessionName)))
     || (entry.targetSessionId !== undefined && (typeof entry.targetSessionId !== "string" || entry.targetSessionId.length === 0 || entry.targetSessionId.length > 256 || /[\u0000-\u001f\u007f]/.test(entry.targetSessionId)))
     || (entry.targetCorrelationId !== undefined && (typeof entry.targetCorrelationId !== "string" || entry.targetCorrelationId.length === 0 || entry.targetCorrelationId.length > 128 || /[\u0000-\u001f\u007f]/.test(entry.targetCorrelationId)))

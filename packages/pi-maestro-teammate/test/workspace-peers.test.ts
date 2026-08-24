@@ -59,6 +59,8 @@ import {
   workspaceMainSessionDeliveryAction,
   workspaceMainSessionDeliveryDecision,
   workspaceWindowLifecycle,
+  workspaceWindowTerminalPublicationId,
+  workspaceWindowTerminalReservationId,
   workspaceWindowTerminalResultMessageId,
   writePrivateJsonAtomic,
   SETTLED_RESULT_BYTES,
@@ -213,8 +215,17 @@ test("workspace terminal result protocol classifies terminal turns and stays bou
     role: "assistant",
     stopReason: "stop",
     content: [],
-  }]), { outcome: "no-final-text" });
-  assert.deepEqual(deriveWorkspaceWindowTerminalResult([]), { outcome: "no-final-text" });
+  }]), { outcome: "no-result" });
+  assert.deepEqual(deriveWorkspaceWindowTerminalResult([]), { outcome: "no-result" });
+  assert.deepEqual(deriveWorkspaceWindowTerminalResult([{
+    role: "assistant",
+    stopReason: "unexpected-runtime-state",
+    content: [{ type: "text", text: "must not be accepted as success" }],
+  }]), {
+    outcome: "failed",
+    finalText: "must not be accepted as success",
+    error: "Worker reported an invalid terminal stop reason (unexpected-runtime-state).",
+  });
 
   const requestMessageId = "4".repeat(32);
   const result = createWorkspaceWindowTerminalResult({
@@ -229,6 +240,11 @@ test("workspace terminal result protocol classifies terminal turns and stays bou
   assert.deepEqual(decodeWorkspaceWindowTerminalResult(encodeWorkspaceWindowTerminalResult(result)), result);
   assert.equal(workspaceWindowTerminalResultMessageId(requestMessageId), workspaceWindowTerminalResultMessageId(requestMessageId));
   assert.match(workspaceWindowTerminalResultMessageId(requestMessageId), /^[a-f0-9]{32}$/);
+  assert.equal(workspaceWindowTerminalPublicationId(requestMessageId), workspaceWindowTerminalPublicationId(requestMessageId));
+  assert.equal(workspaceWindowTerminalReservationId(requestMessageId), workspaceWindowTerminalReservationId(requestMessageId));
+  assert.match(workspaceWindowTerminalPublicationId(requestMessageId), /^[a-f0-9]{64}$/);
+  assert.match(workspaceWindowTerminalReservationId(requestMessageId), /^[a-f0-9]{64}$/);
+  assert.notEqual(workspaceWindowTerminalPublicationId(requestMessageId), workspaceWindowTerminalReservationId(requestMessageId));
   assert.throws(() => decodeWorkspaceWindowTerminalResult(JSON.stringify({
     version: 1,
     type: "workspace-window-terminal-result",
@@ -267,8 +283,18 @@ test("terminal result request metadata is opt-in and legacy workspace commands s
   assert.equal(validateWorkspacePeerCommand({ ...requested, targetCorrelationId: "agent-1" }, sender.workspaceId), undefined);
 });
 
-test("terminal publication lifecycle is wired before workspace disposal", async () => {
+test("terminal publication lifecycle is wired through canonical completion before workspace disposal", async () => {
   const extensionSource = await readFile(new URL("../src/extension/index.ts", import.meta.url), "utf8");
+  const canonicalHandler = extensionSource.indexOf("const publishWorkspaceTerminalCompletion = (");
+  const canonicalResource = extensionSource.indexOf("await emitTeammateResultPublished(pi, result, seed.originCwd);", canonicalHandler);
+  const canonicalOutbox = extensionSource.indexOf("await completionCoordinator.publishCompletion({", canonicalResource);
+  assert.ok(canonicalHandler >= 0 && canonicalResource > canonicalHandler);
+  assert.ok(canonicalOutbox > canonicalResource, "immutable agent publication precedes canonical outbox finalization");
+
+  const consumer = extensionSource.indexOf("const terminalPublication = consumeWorkspaceTerminalCommand(command);");
+  const ordinaryInjection = extensionSource.indexOf("if (command.targetCorrelationId === WORKSPACE_MAIN_SESSION_MARKER)", consumer);
+  assert.ok(consumer >= 0 && ordinaryInjection > consumer, "terminal envelopes are consumed before ordinary status injection");
+
   const settledHandler = extensionSource.indexOf('pi.on("agent_settled", async () => {');
   const settledPublish = extensionSource.indexOf("await publishWorkspaceWindowTerminalResults(", settledHandler);
   assert.ok(settledHandler >= 0 && settledPublish > settledHandler);
