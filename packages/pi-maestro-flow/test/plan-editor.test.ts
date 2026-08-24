@@ -334,9 +334,7 @@ test("Plan confirmation renders the attached review report with an apply-feedbac
   const harness = createHarness();
   const pending = openPlanConfirmation(harness.ctx, {
     markdown: "# Approved Plan\n\n- Preserve boundaries",
-    reviewReport: "## 总体结论\n建议 修订。\n\n## 问题清单\n- P1 缺少验收标准",
-    reviewModels: ["provider/reviewer"],
-    reviewModel: "provider/reviewer",
+    reviewReports: ["## 总体结论\n建议 修订。\n\n## 问题清单\n- P1 缺少验收标准"],
   });
   assert.ok(harness.component);
   const rendered = harness.component.render(80).join("\n");
@@ -344,7 +342,6 @@ test("Plan confirmation renders the attached review report with an apply-feedbac
   assert.match(rendered, /R: back to Plan/);
   assert.match(rendered, /总体结论/);
   assert.match(rendered, /5\. Review with AI subagent/);
-  assert.match(rendered, /Review model  \[provider\/reviewer\]/);
   assert.match(rendered, /6\. Apply review feedback/);
   assert.match(rendered, /AI review report attached/);
   harness.component.handleInput("6");
@@ -355,7 +352,7 @@ test("Plan confirmation report panel defaults to Report and toggles with R", asy
   const harness = createHarness();
   const pending = openPlanConfirmation(harness.ctx, {
     markdown: "# Approved Plan\n\n- First step",
-    reviewReport: "## 总体结论\n建议 修订。",
+    reviewReports: ["## 总体结论\n建议 修订。"],
   });
   assert.ok(harness.component);
   let rendered = harness.component.render(80).join("\n");
@@ -374,32 +371,36 @@ test("Plan confirmation report panel defaults to Report and toggles with R", asy
   assert.deepEqual(await pending, { action: "close" });
 });
 
-test("Plan confirmation cycles the review model row and carries it in the review decision", async () => {
+test("Plan confirmation cycles review history with [ and ]", async () => {
   const harness = createHarness();
   const pending = openPlanConfirmation(harness.ctx, {
-    markdown: "# Plan",
-    reviewModels: ["provider/a", "provider/b"],
+    markdown: "# Approved Plan\n\n- Step",
+    reviewReports: ["## 报告一\n第一份", "## 报告二\n第二份"],
   });
   assert.ok(harness.component);
   let rendered = harness.component.render(80).join("\n");
-  assert.match(rendered, /Review model  \[Follow session model\]/);
-  // navigate to the review-model row: backend(0), context(1), reviewModel(2)
-  harness.component.handleInput("\x1b[B");
-  harness.component.handleInput("\x1b[B");
-  harness.component.handleInput("\x1b[C");
+  // Defaults to the latest report (index 1).
+  assert.match(rendered, /Review report 2\/2/);
+  assert.match(rendered, /报告二/);
+  // [ cycles to the older report (index 0).
+  harness.component.handleInput("[");
   rendered = harness.component.render(80).join("\n");
-  assert.match(rendered, /Review model  \[provider\/a\]/);
-  harness.component.handleInput("5");
-  assert.deepEqual(await pending, { action: "review", reviewModel: "provider/a" });
+  assert.match(rendered, /Review report 1\/2/);
+  assert.match(rendered, /报告一/);
+  // ] cycles back to the latest.
+  harness.component.handleInput("]");
+  rendered = harness.component.render(80).join("\n");
+  assert.match(rendered, /Review report 2\/2/);
+  assert.match(rendered, /报告二/);
+  harness.component.handleInput("\x1b");
+  assert.deepEqual(await pending, { action: "close" });
 });
 
 test("Plan confirmation keeps review rows within the overlay bounds", async () => {
   const harness = createHarness();
   const pending = openPlanConfirmation(harness.ctx, {
     markdown: "# Plan\n\nBody",
-    reviewReport: Array.from({ length: 30 }, (_, index) => `Finding ${index + 1}`).join("\n"),
-    reviewModels: ["provider/a", "provider/b"],
-    reviewModel: "provider/a",
+    reviewReports: [Array.from({ length: 30 }, (_, index) => `Finding ${index + 1}`).join("\n")],
   });
   assert.ok(harness.component);
   for (const width of [40, 80, 120]) {

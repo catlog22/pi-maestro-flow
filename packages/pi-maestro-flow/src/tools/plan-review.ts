@@ -3,38 +3,36 @@
  *
  * The review action in plan-confirm spawns a teammate subagent to audit the
  * Plan draft (read-only analysis), reporting findings back so the main agent
- * can revise the Plan. The review model is user-configurable: the first
- * selection is persisted to `.pi/settings.local.json` under `plan.review.model`
- * (mirroring `plan.model` for the Plan-mode model), and `/plan-review-model`
- * changes it later.
+ * can revise the Plan. The review model is chosen per review via a one-shot
+ * search picker (`pickReviewModel`); the selection is never persisted. Prior
+ * review reports for the current Plan revision are kept in memory as history,
+ * injected into the next reviewer prompt and switchable in the confirm panel.
  */
 
-import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
-import { dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+  Input,
+  Key,
+  SelectList,
+  type SelectListTheme,
+  matchesKey,
+  truncateToWidth,
+  visibleWidth,
+} from "@earendil-works/pi-tui";
 import { runTeammate } from "pi-maestro-teammate/v1/execution";
 import { refreshModelRegistry } from "pi-maestro-teammate/v1/model-routing";
-import { lockSettingsResource } from "../settings/resource-lock.ts";
 import { createDirectTeammateRunOptions } from "./direct-teammate.ts";
-import { resolvePlanModelSettingsPaths } from "./plan-model.ts";
 
 const DEFAULT_REVIEW_TIMEOUT_MS = 180_000;
+/** Cap each prior review report injected into the next reviewer prompt. */
+const REVIEW_HISTORY_REPORT_BUDGET = 2000;
 
-/** Sentinel option shown in the confirm TUI review-model row. */
+/** Sentinel option shown in the review-model picker. */
 export const FOLLOW_SESSION_LABEL = "Follow session model";
 
-interface PlanReviewModelPatch {
-  present: boolean;
-  model?: string;
-}
-
-export interface PlanReviewModelResolution {
-  /** provider/model reference passed to the review subagent. */
-  model: string;
-  /** Display label for the confirmation TUI. */
-  label: string;
+export interface ReviewHistoryEntry {
+  report: string;
+  modelLabel: string;
 }
 
 export interface PlanReviewResult {
@@ -43,13 +41,11 @@ export interface PlanReviewResult {
   error?: string;
 }
 
-export interface PlanReviewModelRuntimeOptions {
-  loadModel?: (cwd: string, projectTrusted: boolean) => string | undefined;
-}
-
 export interface RunPlanReviewOptions {
   markdown: string;
   model: string;
+  /** Prior review reports for the current Plan revision, oldest first. */
+  history?: ReviewHistoryEntry[];
   signal?: AbortSignal;
   timeoutMs?: number;
 }
@@ -60,94 +56,21 @@ type PlanReviewContext = Pick<
   "cwd" | "hasUI" | "ui" | "model" | "modelRegistry" | "isProjectTrusted"
 >;
 
+interface ReviewModelChoice {
+  /** provider/model reference passed to the review subagent. */
+  model: string;
+  /** Display label for the progress overlay. */
+  label: string;
+}
+
 function modelKey(model: { provider: string; id: string } | undefined): string | undefined {
   return model ? `${model.provider}/${model.id}` : undefined;
 }
 
-function parseModelReference(reference: string): { provider: string; id: string } | undefined {
-  const separator = reference.indexOf("/");
-  if (separator <= 0 || separator === reference.length - 1) return undefined;
-  return { provider: reference.slice(0, separator), id: reference.slice(separator + 1) };
-}
-
-function readPlanReviewModelPatch(filePath: string): PlanReviewModelPatch {
-  if (!existsSync(filePath)) return { present: false };
-  try {
-    const root = JSON.parse(readFileSync(filePath, "utf8")) as { plan?: unknown };
-    if (!root.plan || typeof root.plan !== "object" || Array.isArray(root.plan)) return { present: false };
-    const review = (root.plan as Record<string, unknown>).review;
-    if (!review || typeof review !== "object" || Array.isArray(review)) return { present: false };
-    if (!Object.prototype.hasOwnProperty.call(review, "model")) return { present: false };
-    const model = (review as Record<string, unknown>).model;
-    if (model === null) return { present: true };
-    if (typeof model !== "string" || model.trim().length === 0) return { present: false };
-    return { present: true, model: model.trim() };
-  } catch {
-    return { present: false };
-  }
-}
-
-/** Read `plan.review.model` with the same user/project/local merge as `plan.model`. */
-export function loadPlanReviewModelSetting(cwd: string, projectTrusted = true): string | undefined {
-  let model: string | undefined;
-  const candidates = projectTrusted
-    ? resolvePlanModelSettingsPaths(cwd)
-    : resolvePlanModelSettingsPaths(cwd).slice(0, 1);
-  for (const filePath of candidates) {
-    const patch = readPlanReviewModelPatch(filePath);
-    if (patch.present) model = patch.model;
-  }
-  return model;
-}
-
-/** Persist `plan.review.model` into `.pi/settings.local.json`, preserving `plan.model`. */
-export async function saveLocalPlanReviewModelSetting(cwd: string, model: string | null): Promise<void> {
-  const filePath = join(cwd, ".pi", "settings.local.json");
-  const release = await lockSettingsResource(filePath);
-  let temporary: string | undefined;
-  let handle: Awaited<ReturnType<typeof open>> | undefined;
-  try {
-    let root: Record<string, unknown> = {};
-    if (existsSync(filePath)) {
-      const parsed = JSON.parse(await readFile(filePath, "utf8")) as unknown;
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        throw new Error("settings.local.json must contain a JSON object");
-      }
-      root = parsed as Record<string, unknown>;
-    }
-    const plan = root.plan && typeof root.plan === "object" && !Array.isArray(root.plan)
-      ? { ...(root.plan as Record<string, unknown>) }
-      : {};
-    const review = plan.review && typeof plan.review === "object" && !Array.isArray(plan.review)
-      ? { ...(plan.review as Record<string, unknown>) }
-      : {};
-    review.model = model;
-    plan.review = review;
-    root.plan = plan;
-    await mkdir(dirname(filePath), { recursive: true });
-    temporary = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
-    handle = await open(temporary, "wx", 0o600);
-    await handle.writeFile(`${JSON.stringify(root, null, 2)}\n`, "utf8");
-    await handle.sync();
-    await handle.close();
-    handle = undefined;
-    await rename(temporary, filePath);
-    temporary = undefined;
-  } finally {
-    if (handle) {
-      try { await handle.close(); } catch { /* best effort */ }
-    }
-    if (temporary) {
-      try { await rm(temporary, { force: true }); } catch { /* best effort */ }
-    }
-    await release();
-  }
-}
-
 /**
  * List available teammate model references (provider/model, sorted) for the
- * confirm TUI review-model row. Refreshes the registry only when the cached
- * snapshot is empty so opening the confirmation stays cheap.
+ * review-model picker. Refreshes the registry only when the cached snapshot
+ * is empty so opening the picker stays cheap.
  */
 export async function listAvailableReviewModels(
   ctx: Pick<ExtensionContext, "modelRegistry">,
@@ -164,37 +87,147 @@ export async function listAvailableReviewModels(
 }
 
 /**
- * Resolve the model used by the review subagent when the confirm TUI row is
- * unavailable: configured `plan.review.model` (validated, warned when stale)
- * falls back to the session model. Interactive selection lives in the confirm
- * TUI review-model row and `/plan-review-model`.
+ * Resolve the model used by the review subagent when the confirm TUI picker
+ * is unavailable (no UI): fall back to the session model. Interactive
+ * selection lives in `pickReviewModel`.
  */
-export async function resolvePlanReviewModel(
-  ctx: Pick<
-    ExtensionContext,
-    "cwd" | "ui" | "modelRegistry" | "model" | "isProjectTrusted"
-  >,
-  options: PlanReviewModelRuntimeOptions = {},
-): Promise<PlanReviewModelResolution> {
-  const loadModel = options.loadModel ?? loadPlanReviewModelSetting;
-  const sessionModel = modelKey(ctx.model) ?? "";
-  const configured = loadModel(ctx.cwd, ctx.isProjectTrusted());
-  if (configured) {
-    await refreshModelRegistry(ctx);
-    const parsed = parseModelReference(configured);
-    const target = parsed ? ctx.modelRegistry?.find?.(parsed.provider, parsed.id) : undefined;
-    if (target) return { model: configured, label: configured };
-    ctx.ui.notify(`Configured Plan review model ${configured} is unavailable; using the session model.`, "warning");
+function resolveReviewModelFallback(ctx: Pick<ExtensionContext, "model" | "ui">): ReviewModelChoice | undefined {
+  const sessionKey = modelKey(ctx.model);
+  if (!sessionKey) {
+    ctx.ui.notify("AI review unavailable: no session model is set.", "warning");
+    return undefined;
   }
-  return { model: sessionModel, label: sessionModel };
+  return { model: sessionKey, label: FOLLOW_SESSION_LABEL };
 }
 
-function buildReviewPrompt(markdown: string): string {
-  return [
+/**
+ * One-shot review-model picker with prefix search. Shows a search Input above
+ * a SelectList of [Follow session model, ...available provider/model refs];
+ * typing filters the list by prefix (case-insensitive). Enter confirms the
+ * highlighted option, Esc cancels. Returns the resolved model or undefined.
+ */
+export async function pickReviewModel(
+  ctx: Pick<ExtensionContext, "hasUI" | "ui" | "model">,
+  models: string[],
+): Promise<ReviewModelChoice | undefined> {
+  if (!ctx.hasUI) return resolveReviewModelFallback(ctx);
+  const options = [FOLLOW_SESSION_LABEL, ...models];
+  const items = options.map((value) => ({ value, label: value }));
+  const result = await ctx.ui.custom<string | undefined>(
+    (tui, theme, _keybindings, done) => {
+      const listTheme: SelectListTheme = {
+        selectedPrefix: (text) => theme.fg("accent", text),
+        selectedText: (text) => theme.fg("accent", text),
+        description: () => "",
+        scrollInfo: (text) => theme.fg("dim", text),
+        noMatch: (text) => theme.fg("warning", text),
+      };
+      const input = new Input();
+      const maxVisible = Math.min(options.length, 10);
+      const list = new SelectList(items, maxVisible, listTheme);
+      list.onSelect = (item) => done(item.value);
+      list.onCancel = () => done(undefined);
+      const syncFilter = () => list.setFilter(input.getValue());
+      syncFilter();
+      let settled = false;
+      const finish = (value: string | undefined): void => {
+        if (settled) return;
+        settled = true;
+        done(value);
+      };
+      return {
+        render(width: number): string[] {
+          const inner = Math.max(1, width - 2);
+          const border = (text: string) => theme.fg("dim", text);
+          const header = theme.bold("Plan review model");
+          const searchLabel = theme.fg("dim", "Search:");
+          const searchInputWidth = Math.max(1, inner - visibleWidth("Search: "));
+          const searchLine = `${searchLabel} ${input.render(searchInputWidth).join("")}`;
+          const renderedList = list.render(inner);
+          const footer = theme.fg("dim", "Type to filter (prefix) · ↑↓ navigate · Enter select · Esc cancel");
+          const rows = [header, "", searchLine, "", ...renderedList, "", footer];
+          return [
+            border(`╭${"─".repeat(inner)}╮`),
+            ...rows.map((row) => {
+              const content = truncateToWidth(row, inner, "…");
+              return `${border("│")}${content}${" ".repeat(Math.max(0, inner - visibleWidth(content)))}${border("│")}`;
+            }),
+            border(`╰${"─".repeat(inner)}╯`),
+          ];
+        },
+        handleInput(data: string): void {
+          if (matchesKey(data, Key.escape)) {
+            finish(undefined);
+            return;
+          }
+          if (matchesKey(data, Key.enter)) {
+            const selected = list.getSelectedItem();
+            finish(selected?.value);
+            return;
+          }
+          if (matchesKey(data, Key.up) || matchesKey(data, Key.down) || matchesKey(data, Key.pageUp) || matchesKey(data, Key.pageDown)) {
+            list.handleInput(data);
+            return;
+          }
+          // Printable characters and editing keys go to the search input.
+          input.handleInput(data);
+          syncFilter();
+        },
+        invalidate(): void {
+          input.invalidate();
+          list.invalidate();
+        },
+        dispose(): void {},
+      };
+    },
+    {
+      overlay: true,
+      overlayOptions: {
+        width: "60%",
+        minWidth: 40,
+        maxHeight: 20,
+        anchor: "center" as const,
+      },
+    },
+  );
+  if (result === undefined) return undefined;
+  if (result === FOLLOW_SESSION_LABEL) {
+    const sessionKey = modelKey(ctx.model);
+    if (!sessionKey) {
+      ctx.ui.notify("AI review unavailable: no session model is set.", "warning");
+      return undefined;
+    }
+    return { model: sessionKey, label: FOLLOW_SESSION_LABEL };
+  }
+  return { model: result, label: result };
+}
+
+function truncateReport(report: string, budget: number): string {
+  if (report.length <= budget) return report;
+  return `${report.slice(0, budget)}…`;
+}
+
+export function buildReviewPrompt(markdown: string, history: ReviewHistoryEntry[]): string {
+  const lines: string[] = [
     "MODE: analysis",
     "",
     "你是 Pi Plan 模式的独立 AI 审核官（reviewer）。审查下面的实施计划，找出可能导致执行失败、范围偏差或返工的问题。",
     "你可以只读浏览当前工作区以核实计划与仓库现状的一致性，但不得修改任何文件。",
+  ];
+  if (history.length > 0) {
+    lines.push(
+      "",
+      `## 前次 review 报告（共 ${history.length} 份，供参考，避免重复已指出的问题，聚焦新发现）`,
+    );
+    history.forEach((entry, index) => {
+      lines.push(
+        `### 前次报告 ${index + 1}（model: ${entry.modelLabel}）`,
+        truncateReport(entry.report, REVIEW_HISTORY_REPORT_BUDGET),
+        "",
+      );
+    });
+  }
+  lines.push(
     "",
     "请按以下维度审查，并输出一份 Markdown 审核报告：",
     "1. ## 总体结论 — 建议 批准 / 修订 / 重写，一句话说明理由。",
@@ -210,7 +243,8 @@ function buildReviewPrompt(markdown: string): string {
     "<plan>",
     markdown,
     "</plan>",
-  ].join("\n");
+  );
+  return lines.join("\n");
 }
 
 /**
@@ -227,7 +261,7 @@ export async function runPlanReview(
       {
         tasks: [{
           agent: "general",
-          prompt: buildReviewPrompt(options.markdown),
+          prompt: buildReviewPrompt(options.markdown, options.history ?? []),
           taskType: "analysis",
           model: options.model,
           context: "fresh",
@@ -253,62 +287,4 @@ export async function runPlanReview(
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
-}
-
-/**
- * `/plan-review-model [provider/model|off]` — set the Plan-confirm AI review
- * model, mirroring `/plan-model` semantics. `off`/`default`/`session` clears
- * the override so the session model is used.
- */
-export function registerPlanReviewModelCommand(
-  pi: ExtensionAPI,
-  options: PlanReviewModelRuntimeOptions = {},
-): void {
-  const loadModel = options.loadModel ?? loadPlanReviewModelSetting;
-  pi.registerCommand("plan-review-model", {
-    description: "Configure the model used by the Plan-confirm AI review subagent",
-    async handler(args, ctx) {
-      if (!ctx.isProjectTrusted()) {
-        ctx.ui.notify("Trust this workspace before saving a project-local Plan review model.", "warning");
-        return;
-      }
-      await refreshModelRegistry(ctx);
-      const references = ctx.modelRegistry
-        .getAvailable()
-        .map((entry) => modelKey(entry))
-        .filter((key): key is string => Boolean(key))
-        .sort();
-      const requested = args.trim();
-      let selected: string | null | undefined;
-      if (requested) {
-        selected = ["off", "default", "session", "follow"].includes(requested.toLowerCase())
-          ? null
-          : requested;
-      } else {
-        if (!ctx.hasUI) {
-          ctx.ui.notify("Usage: /plan-review-model provider/model or /plan-review-model off", "warning");
-          return;
-        }
-        const choice = await ctx.ui.select("Plan review model", [FOLLOW_SESSION_LABEL, ...references]);
-        if (!choice) return;
-        selected = choice === FOLLOW_SESSION_LABEL ? null : choice;
-      }
-      if (selected !== null && !references.includes(selected)) {
-        ctx.ui.notify(`Plan review model ${selected} is not available.`, "warning");
-        return;
-      }
-      try {
-        await saveLocalPlanReviewModelSetting(ctx.cwd, selected);
-        ctx.ui.notify(
-          selected ? `Plan review model: ${selected}` : "Plan review model follows the session model.",
-          "info",
-        );
-      } catch (error) {
-        ctx.ui.notify(
-          `Could not save Plan review model: ${error instanceof Error ? error.message : String(error)}`,
-          "warning",
-        );
-      }
-    },
-  });
 }

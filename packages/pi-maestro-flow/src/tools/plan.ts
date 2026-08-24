@@ -36,11 +36,10 @@ import {
 import {
   FOLLOW_SESSION_LABEL,
   listAvailableReviewModels,
-  loadPlanReviewModelSetting,
-  resolvePlanReviewModel,
+  pickReviewModel,
   runPlanReview,
-  saveLocalPlanReviewModelSetting,
   type PlanReviewResult,
+  type ReviewHistoryEntry,
 } from "./plan-review.ts";
 import { getVisibleTasks } from "./todo.ts";
 import {
@@ -202,13 +201,12 @@ let activePlanOperation: PlanOperationIdentity | undefined;
 let activePlanHandoffRequest: PlanHandoffRequestIdentity | undefined;
 let pendingCleanContextCompaction: PlanCleanContextCompactionRequest | undefined;
 let planContextReplacement: PlanContextReplacement | undefined;
-// AI review state: the report is attached to the confirmation preview only when
-// it still belongs to the current draft revision.
-let latestReviewReport: string | undefined;
-let latestReviewModel: string | undefined;
-let reviewReportRevision = -1;
-// Last review-model selection (provider/model or FOLLOW_SESSION_LABEL) to seed the next confirm UI.
-let latestReviewSelection: string | undefined;
+// AI review state: reports for the current draft revision are kept in memory as
+// history (oldest first). The latest entry feeds both the confirm preview and
+// the execution contract on approval. History is cleared when the revision
+// changes or the Plan is cleared.
+let reviewHistory: ReviewHistoryEntry[] = [];
+let reviewHistoryRevision = -1;
 // The handoff gate reads todos only. Goal state was decoupled from it in 39a5f2dc;
 // the getters that used to feed it are gone so they cannot be wired back by accident.
 let hasExecutableTodoForHandoff = (handoffKey: string) => getVisibleTasks().some((task) =>
@@ -260,10 +258,8 @@ export function clearPlan(): void {
   latestHandoffKey = undefined;
   latestExecution = undefined;
   latestWorkflowBinding = undefined;
-  latestReviewReport = undefined;
-  latestReviewModel = undefined;
-  reviewReportRevision = -1;
-  latestReviewSelection = undefined;
+  reviewHistory = [];
+  reviewHistoryRevision = -1;
   awaitingAction = false;
 }
 
@@ -572,6 +568,8 @@ function resetRuntimeState(): void {
   latestHandoffKey = undefined;
   latestExecution = undefined;
   latestWorkflowBinding = undefined;
+  reviewHistory = [];
+  reviewHistoryRevision = -1;
   awaitingAction = false;
   pendingPlanExitReminder = undefined;
   pendingPlanEnterNote = undefined;
@@ -939,21 +937,10 @@ async function reviewPlan(
     return { approved: false, exited: false };
   }
 
-  let reviewModels: string[] | undefined;
   while (isCurrentPlanOperation(ctx, operation)) {
     const workflow = await workflowConfirmation(ctx);
     if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
-    if (reviewModels === undefined && ctx.hasUI) {
-      reviewModels = await listAvailableReviewModels(ctx);
-      if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
-    }
-    const configuredReview = reviewModels?.length
-      ? loadPlanReviewModelSetting(ctx.cwd, ctx.isProjectTrusted())
-      : undefined;
-    const reviewSelection = reviewModels?.length
-      ? (latestReviewSelection
-        ?? (configuredReview && reviewModels.includes(configuredReview) ? configuredReview : FOLLOW_SESSION_LABEL))
-      : undefined;
+    const reviewReports = reviewHistoryRevision === latestRevision ? reviewHistory.map((entry) => entry.report) : [];
     const decision = await openPlanConfirmation(ctx, {
       markdown: latestPlan ?? "",
       pathLabel: store.currentPath,
@@ -961,15 +948,13 @@ async function reviewPlan(
       contextPercent: ctx.getContextUsage?.()?.percent ?? undefined,
       defaultExecution: latestExecution,
       workflow,
-      reviewReport: reviewReportRevision === latestRevision ? latestReviewReport : undefined,
-      reviewModel: reviewSelection,
-      reviewModels,
+      reviewReports,
     });
     if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
     const action = decision.action;
     if (action === "modify") {
-      latestReviewReport = undefined;
-      reviewReportRevision = -1;
+      reviewHistory = [];
+      reviewHistoryRevision = -1;
       await editPlan(ctx, store.currentPath, operation);
       if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
       continue;
@@ -979,35 +964,22 @@ async function reviewPlan(
         ctx.ui.notify("AI review is unavailable: extension API is not initialized.", "warning");
         continue;
       }
-      const chosen = decision.reviewModel;
-      let model: string;
-      let label: string;
-      if (chosen && chosen !== FOLLOW_SESSION_LABEL) {
-        model = chosen;
-        label = chosen;
-        latestReviewSelection = chosen;
-        try { await saveLocalPlanReviewModelSetting(ctx.cwd, chosen); } catch { /* best effort */ }
-      } else if (chosen === FOLLOW_SESSION_LABEL) {
-        const sessionKey = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
-        if (!sessionKey) {
-          ctx.ui.notify("AI review unavailable: no session model is set.", "warning");
-          continue;
-        }
-        model = sessionKey;
-        label = FOLLOW_SESSION_LABEL;
-        latestReviewSelection = FOLLOW_SESSION_LABEL;
-        try { await saveLocalPlanReviewModelSetting(ctx.cwd, null); } catch { /* best effort */ }
-      } else {
-        const resolution = await resolvePlanReviewModel(ctx);
-        if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
-        model = resolution.model;
-        label = resolution.label;
-        latestReviewSelection = FOLLOW_SESSION_LABEL;
+      if (reviewHistoryRevision !== latestRevision) {
+        reviewHistory = [];
+        reviewHistoryRevision = latestRevision;
+      }
+      const reviewModels = await listAvailableReviewModels(ctx);
+      if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
+      const picked = await pickReviewModel(ctx, reviewModels);
+      if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
+      if (!picked) {
+        continue;
       }
       const outcome = await runReviewWithProgress(ctx, extensionApi, {
         markdown: latestPlan ?? "",
-        model,
-        label,
+        model: picked.model,
+        label: picked.label,
+        history: reviewHistory,
         signal,
       });
       if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
@@ -1017,20 +989,19 @@ async function reviewPlan(
       }
       const review = outcome.review;
       if (review.ok && review.report) {
-        latestReviewReport = review.report;
-        latestReviewModel = label;
-        reviewReportRevision = latestRevision;
-        ctx.ui.notify("AI review complete; the confirmation panel shows the report (R toggles Plan/Report).", "info");
+        reviewHistory.push({ report: review.report, modelLabel: picked.label });
+        ctx.ui.notify("AI review complete; the confirmation panel shows the report (R toggles, [ ] cycles history).", "info");
       } else {
-        latestReviewReport = undefined;
-        reviewReportRevision = -1;
         ctx.ui.notify(`AI review failed: ${review.error ?? "unknown error"}`, "warning");
       }
       continue;
     }
     if (action === "apply-feedback") {
-      if (latestReviewReport && reviewReportRevision === latestRevision) {
-        queuePlanDiscussion(ctx, buildReviewFeedbackMessage(latestReviewReport));
+      const latestReport = reviewHistoryRevision === latestRevision && reviewHistory.length > 0
+        ? reviewHistory[reviewHistory.length - 1]!.report
+        : undefined;
+      if (latestReport) {
+        queuePlanDiscussion(ctx, buildReviewFeedbackMessage(latestReport));
       } else {
         ctx.ui.notify("No review report is attached to the current Plan revision.", "warning");
       }
@@ -1105,7 +1076,7 @@ const REVIEW_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", 
 async function runReviewWithProgress(
   ctx: PlanContext,
   pi: ExtensionAPI,
-  options: { markdown: string; model: string; label: string; signal?: AbortSignal },
+  options: { markdown: string; model: string; label: string; history?: ReviewHistoryEntry[]; signal?: AbortSignal },
 ): Promise<PlanReviewProgressOutcome> {
   const abort = new AbortController();
   const onExternalAbort = (): void => { if (!abort.signal.aborted) abort.abort(); };
@@ -1114,6 +1085,7 @@ async function runReviewWithProgress(
   const reviewPromise = runPlanReview(pi, ctx, {
     markdown: options.markdown,
     model: options.model,
+    history: options.history,
     signal: abort.signal,
   });
   let outcome: PlanReviewProgressOutcome;
@@ -1346,7 +1318,10 @@ async function startImplementation(
   latestPlan = markdown;
   latestStatus = "approved";
   ctx.ui.notify("Plan approved · Act mode active", "info");
-  const executionContract = buildPlanExecutionContract(planPath, latestHandoffKey);
+  const reviewReport = reviewHistoryRevision === approved.manifest.revision && reviewHistory.length > 0
+    ? reviewHistory[reviewHistory.length - 1]!.report
+    : undefined;
+  const executionContract = buildPlanExecutionContract(planPath, latestHandoffKey, reviewReport);
   let executionMessage = executionContract;
   let workflowDelivery: { handoffKey: string; binding: PlanWorkflowBinding } | undefined;
 
@@ -1420,8 +1395,8 @@ async function startImplementation(
   return isCurrentPlanOperation(ctx, operation) ? delivered : undefined;
 }
 
-function buildPlanExecutionContract(planPath: string, handoffKey?: string): string {
-  return [
+function buildPlanExecutionContract(planPath: string, handoffKey?: string, reviewReport?: string): string {
+  const base = [
     "The approved Plan is already in the current context.",
     `Plan source: ${planPath}`,
     "Before modifying the project:",
@@ -1437,7 +1412,16 @@ function buildPlanExecutionContract(planPath: string, handoffKey?: string): stri
     "4. Attach a Goal as the quality gate only to key Todos that carry verifiable acceptance criteria; do NOT create a Goal for every Todo. Goals are flat and time-ordered — put the overall acceptance Goal on the last Todo when an overall sign-off is needed.",
     "5. Prefer the teammate tool to delegate independent Todo work; use direct execution only when delegation would not help.",
     "6. Execute the Todo sequence; activating a Todo auto-switches to its quality-gate Goal, and a Todo completes only after its Goal verifies.",
-  ].join("\n");
+  ];
+  if (reviewReport) {
+    base.push(
+      "7. AI Review findings (latest report for this Plan revision): prioritize P0/P1 issues below during execution.",
+      "<review-report>",
+      reviewReport,
+      "</review-report>",
+    );
+  }
+  return base.join("\n");
 }
 
 async function deliverImplementation(

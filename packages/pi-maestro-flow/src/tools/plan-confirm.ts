@@ -13,7 +13,6 @@ import type {
   PlanExecutionContextMode,
   PlanWorkflowTarget,
 } from "./plan-store.ts";
-import { FOLLOW_SESSION_LABEL } from "./plan-review.ts";
 
 export type PlanConfirmationAction =
   | "execute"
@@ -27,8 +26,6 @@ export type PlanConfirmationAction =
 export interface PlanConfirmationDecision {
   action: PlanConfirmationAction;
   execution?: PlanExecutionChoice;
-  /** Selected review model (provider/model or FOLLOW_SESSION_LABEL) when review is triggered. */
-  reviewModel?: string;
 }
 
 export interface PlanWorkflowConfirmationTarget {
@@ -50,12 +47,8 @@ export interface PlanConfirmationOptions {
   contextPercent?: number;
   defaultExecution?: PlanExecutionChoice;
   workflow?: PlanWorkflowConfirmationOptions;
-  /** Markdown report from the AI review subagent; shown in its own preview panel, never in the Plan. */
-  reviewReport?: string;
-  /** Available review model references (provider/model); renders the Review model row. */
-  reviewModels?: string[];
-  /** Current review-model selection seed (provider/model or FOLLOW_SESSION_LABEL). */
-  reviewModel?: string;
+  /** Markdown review reports for the current Plan revision (oldest first); shown in their own preview panel, never in the Plan. */
+  reviewReports?: string[];
 }
 
 interface ActionItem {
@@ -68,7 +61,6 @@ type SelectionRow =
   | { kind: "backend" }
   | { kind: "target" }
   | { kind: "context" }
-  | { kind: "reviewModel" }
   | { kind: "action"; item: ActionItem };
 
 type PreviewMode = "plan" | "report";
@@ -103,39 +95,33 @@ export async function openPlanConfirmation(
         { action: "continue", label: "Continue discussion", description: "Enter feedback or a question" },
         { action: "exit-plan", label: "Exit Plan mode", description: "Keep the draft without approval" },
         { action: "review", label: "Review with AI subagent", description: "Spawn a read-only subagent to audit the Plan; the report opens in its own panel" },
-        ...(options.reviewReport
-          ? [{ action: "apply-feedback" as const, label: "Apply review feedback", description: "Send the AI review report back to the main agent to revise the Plan" }]
+        ...(options.reviewReports?.length
+          ? [{ action: "apply-feedback" as const, label: "Apply review feedback", description: "Send the latest AI review report back to the main agent to revise the Plan" }]
           : []),
       ];
-      const reviewModelOptions = options.reviewModels?.length
-        ? [FOLLOW_SESSION_LABEL, ...options.reviewModels]
-        : [];
-      let reviewSelection = reviewModelOptions.length
-        ? (options.reviewModel && reviewModelOptions.includes(options.reviewModel)
-          ? options.reviewModel
-          : FOLLOW_SESSION_LABEL)
-        : FOLLOW_SESSION_LABEL;
-      let previewMode: PreviewMode = options.reviewReport ? "report" : "plan";
+      const reportCount = options.reviewReports?.length ?? 0;
+      let reportIndex = reportCount > 0 ? reportCount - 1 : 0;
+      let previewMode: PreviewMode = reportCount > 0 ? "report" : "plan";
       let markdown = new Markdown(currentPreviewSource(), 0, 0, markdownTheme(theme));
       let selected = 0;
       let previewOffset = 0;
       let previewMaxOffset = 0;
-      let status = options.reviewReport
-        ? "AI review report attached — R switches Plan/Report, PgUp/PgDn scrolls"
+      let status = reportCount > 0
+        ? `AI review report attached — R switches Plan/Report${reportCount > 1 ? ", [ ] cycles history" : ""}, PgUp/PgDn scrolls`
         : "";
       let lastWidth = 80;
 
       function currentPreviewSource(): string {
-        return previewMode === "report" && options.reviewReport
-          ? options.reviewReport
-          : options.markdown;
+        if (previewMode === "report" && reportCount > 0) {
+          return options.reviewReports?.[reportIndex] ?? "";
+        }
+        return options.markdown;
       }
 
       const rows = (): SelectionRow[] => [
         { kind: "backend" },
         ...(backend === "workflow" ? [{ kind: "target" } as const] : []),
         { kind: "context" },
-        ...(reviewModelOptions.length ? [{ kind: "reviewModel" } as const] : []),
         ...actions.map((item): SelectionRow => ({ kind: "action", item })),
       ];
 
@@ -157,9 +143,7 @@ export async function openPlanConfirmation(
       function complete(action: PlanConfirmationAction): void {
         done(action === "execute"
           ? { action, execution: executionChoice() }
-          : action === "review" && reviewModelOptions.length > 0
-            ? { action, reviewModel: reviewSelection }
-            : { action });
+          : { action });
       }
 
       function changeControl(row: SelectionRow, direction: -1 | 1): void {
@@ -192,11 +176,6 @@ export async function openPlanConfirmation(
           contextMode = contextMode === "current" ? "compact" : "current";
           return;
         }
-        if (row.kind === "reviewModel") {
-          const index = reviewModelOptions.indexOf(reviewSelection);
-          reviewSelection = reviewModelOptions[(index + direction + reviewModelOptions.length) % reviewModelOptions.length]
-            ?? reviewModelOptions[0]!;
-        }
       }
 
       function choose(row = rows()[selected]): void {
@@ -218,7 +197,7 @@ export async function openPlanConfirmation(
           const selectedRow = selectionRows[selected] ?? selectionRows[0]!;
           if (safeWidth < 24) {
             return [
-              truncateToWidth(`Plan confirm · ${selected + 1}/${selectionRows.length} ${rowLabel(selectedRow, actions, reviewSelection, options, backend, workflowTarget, contextMode)}`, safeWidth, "…"),
+              truncateToWidth(`Plan confirm · ${selected + 1}/${selectionRows.length} ${rowLabel(selectedRow, actions, options, backend, workflowTarget, contextMode)}`, safeWidth, "…"),
               truncateToWidth(actionFooter(safeWidth, ["Esc exit", "Enter choose", "↑↓ navigate"]), safeWidth, "…"),
             ];
           }
@@ -245,7 +224,8 @@ export async function openPlanConfirmation(
             "←→ change mode",
             "↑↓ navigate",
             "Ctrl+Enter execute",
-            ...(options.reviewReport ? [previewMode === "report" ? "R: back to Plan" : "R: view report"] : []),
+            ...(reportCount > 0 ? [previewMode === "report" ? "R: back to Plan" : "R: view report"] : []),
+            ...(reportCount > 1 && previewMode === "report" ? ["[ ] history"] : []),
             "PgUp/PgDn scroll",
           ]);
           const rendered = [
@@ -254,8 +234,10 @@ export async function openPlanConfirmation(
             ...preview.map((line) => ` ${line}`),
           ];
           while (rendered.length < previewHeight + 2) rendered.push("");
-          const modeLabel = previewMode === "report" ? "Review report" : "Plan";
-          const toggleHint = options.reviewReport
+          const modeLabel = previewMode === "report" && reportCount > 0
+            ? (reportCount > 1 ? `Review report ${reportIndex + 1}/${reportCount}` : "Review report")
+            : "Plan";
+          const toggleHint = reportCount > 0
             ? `   R: ${previewMode === "report" ? "back to Plan" : "view review report"}`
             : "";
           rendered.push(theme.fg("dim", `${modeLabel} ${range}${toggleHint}`));
@@ -263,7 +245,7 @@ export async function openPlanConfirmation(
           for (let index = 0; index < selectionRows.length; index++) {
             const row = selectionRows[index]!;
             const marker = index === selected ? "›" : " ";
-            const label = rowLabel(row, actions, reviewSelection, options, backend, workflowTarget, contextMode);
+            const label = rowLabel(row, actions, options, backend, workflowTarget, contextMode);
             const description = innerWidth >= 76 ? `  ${theme.fg("dim", `— ${rowDescription(row, options)}`)}` : "";
             const line = `${marker} ${label}${description}`;
             rendered.push(index === selected
@@ -299,14 +281,22 @@ export async function openPlanConfirmation(
             previewOffset = Math.max(0, previewOffset - 5);
           } else if (matchesKey(data, Key.pageDown)) {
             previewOffset = Math.min(previewMaxOffset, previewOffset + 5);
-          } else if (options.reviewReport && /^[rR]$/.test(data)) {
+          } else if (reportCount > 0 && /^[rR]$/.test(data)) {
             previewMode = previewMode === "report" ? "plan" : "report";
+            if (previewMode === "report") reportIndex = reportCount - 1;
             markdown = new Markdown(currentPreviewSource(), 0, 0, markdownTheme(theme));
             previewOffset = 0;
             previewMaxOffset = 0;
             status = previewMode === "report"
-              ? "Viewing the review report — R returns to the Plan preview"
+              ? (reportCount > 1 ? `Viewing review report ${reportIndex + 1}/${reportCount} — R returns to Plan, [ ] cycles history` : "Viewing the review report — R returns to the Plan preview")
               : "Viewing the Plan — R opens the review report";
+          } else if (reportCount > 1 && previewMode === "report" && /^(\[|\])$/.test(data)) {
+            const direction = data === "]" ? 1 : -1;
+            reportIndex = (reportIndex + direction + reportCount) % reportCount;
+            markdown = new Markdown(currentPreviewSource(), 0, 0, markdownTheme(theme));
+            previewOffset = 0;
+            previewMaxOffset = 0;
+            status = `Viewing review report ${reportIndex + 1}/${reportCount} — [ ] cycles history`;
           } else if (/^[1-9]$/.test(data)) {
             const index = Number(data) - 1;
             if (index < actions.length) {
@@ -372,7 +362,6 @@ function workflowUnavailableMessage(options: PlanConfirmationOptions): string {
 function rowLabel(
   row: SelectionRow,
   actions: ActionItem[],
-  reviewSelection: string,
   options: PlanConfirmationOptions,
   backend: PlanExecutionBackend,
   target: PlanWorkflowTarget,
@@ -385,9 +374,6 @@ function rowLabel(
     return `Workflow target  [Current: ${id}]`;
   }
   if (row.kind === "context") return `Context  [${context === "compact" ? "Compact current" : "Current"}]`;
-  if (row.kind === "reviewModel") {
-    return `Review model  [${reviewSelection}]`;
-  }
   const number = actions.findIndex((item) => item.action === row.item.action);
   const prefix = number >= 0 ? `${number + 1}. ` : "";
   return `${prefix}${row.item.label}`;
@@ -401,7 +387,6 @@ function rowDescription(row: SelectionRow, options: PlanConfirmationOptions): st
       : "Select the canonical Workflow Session target";
   }
   if (row.kind === "context") return "Keep this Pi session; compaction only replaces model context";
-  if (row.kind === "reviewModel") return "Model used by the AI review subagent; ←→ to change, persisted on review";
   return row.item.description;
 }
 

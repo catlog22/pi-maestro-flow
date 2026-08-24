@@ -192,7 +192,6 @@ import {
 import type { PlanWorkflowConfirmationOptions } from "../tools/plan-confirm.ts";
 import type { LoadedPlan, PlanExecutionChoice, PlanWorkflowBinding } from "../tools/plan-store.ts";
 import { registerPlanModelSelection } from "../tools/plan-model.ts";
-import { registerPlanReviewModelCommand } from "../tools/plan-review.ts";
 import { installStatusline } from "../statusline/statusline.ts";
 import { registerCodexHookAdapter } from "../hooks/pi-adapter.ts";
 import { createPermissionController } from "../permissions/controller.ts";
@@ -1194,7 +1193,6 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   }
 
   registerPlanModelSelection(pi);
-  registerPlanReviewModelCommand(pi);
   try {
     registerModelFailover(pi);
   } catch (error) {
