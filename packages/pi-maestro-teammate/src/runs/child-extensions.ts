@@ -15,6 +15,13 @@
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
+/** Environment marker carried only by independently managed workspace windows. */
+export const MANAGED_WINDOW_ENV = "PI_TEAMMATE_MANAGED_WINDOW";
+
+export function isManagedWorkerWindow(): boolean {
+  return process.env[MANAGED_WINDOW_ENV] === "1";
+}
+
 export interface TeammateChildExtensionRegistration {
   path: string;
   tools: readonly string[];

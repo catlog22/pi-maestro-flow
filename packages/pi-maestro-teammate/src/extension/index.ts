@@ -239,9 +239,11 @@ import { showModelAskOverlay } from "../tui/model-ask-overlay.ts";
 import { sharedModelCircuitBreaker } from "../public/v1/retry.ts";
 import { normalizePiRetryErrorMessage } from "../runs/retry.ts";
 import {
+  buildManagedWindowPiArgs,
   createChildTerminationController,
   getInteractiveTerminalLaunchSpec,
   getPiSpawnCommand,
+  managedWindowSpawnEnv,
   singleRunParamsOf,
   terminateProcessTreeByPid,
   type ChildTerminationController,
@@ -5696,16 +5698,16 @@ export default function registerTeammateExtension(
     if (!objective.trim()) return { ok: false, error: "window objective is required" };
 
     const cwd = monitorLedgerRoot ?? state.baseCwd ?? cwdFallback;
-    const forkArgs = forkSessionFile ? ["--fork", forkSessionFile] : [];
-    const piArgs = presentation === "interactive"
-      ? [...forkArgs, "--name", sessionName, objective]
-      : [...forkArgs, "-p", objective, "--name", sessionName];
-    const piCommand = getPiSpawnCommand(piArgs);
+    const piCommand = getPiSpawnCommand(
+      buildManagedWindowPiArgs({ objective, sessionName, presentation, forkSessionFile }),
+    );
+    const env = managedWindowSpawnEnv();
     const launch = presentation === "interactive"
-      ? getInteractiveTerminalLaunchSpec(piCommand, cwd, { title: `Pi worker · ${name}` })
+      ? getInteractiveTerminalLaunchSpec(piCommand, cwd, { title: `Pi worker · ${name}`, env })
       : { command: piCommand.command, args: piCommand.args, cwd };
     const child = crossSpawn(launch.command, launch.args, {
       cwd: launch.cwd,
+      env,
       stdio: "ignore",
       shell: false,
       windowsHide: presentation === "interactive",

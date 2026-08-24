@@ -43,7 +43,7 @@ import {
   sharedModelCircuitBreaker,
   type ModelCircuitBreaker,
 } from "../models/model-circuit-breaker.ts";
-import { getTeammateChildExtensions } from "./child-extensions.ts";
+import { MANAGED_WINDOW_ENV, getTeammateChildExtensions } from "./child-extensions.ts";
 import {
   parseTeammateThinkingLevel,
   type TeammateThinkingInput,
@@ -1505,6 +1505,7 @@ export interface InteractiveTerminalLaunchOptions {
   platform?: NodeJS.Platform;
   terminalCommand?: string;
   title?: string;
+  env?: NodeJS.ProcessEnv;
 }
 
 export interface InteractiveTerminalLaunchSpec {
@@ -1519,6 +1520,51 @@ function quotePosixShellArg(value: string): string {
 
 function quoteAppleScriptString(value: string): string {
   return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+const MANAGED_TERMINAL_ENV_KEYS = [
+  MANAGED_WINDOW_ENV,
+  "HOME",
+  "USERPROFILE",
+  "PI_CODING_AGENT_DIR",
+  "MAESTRO_HOME",
+  "XDG_CONFIG_HOME",
+  "XDG_CACHE_HOME",
+  "XDG_DATA_HOME",
+  "XDG_STATE_HOME",
+  "TMPDIR",
+  "TMP",
+  "TEMP",
+  "npm_config_cache",
+  "NPM_CONFIG_CACHE",
+  "PATH",
+  "SHELL",
+  "LANG",
+  "LC_ALL",
+  "NODE_OPTIONS",
+  "NODE_PATH",
+] as const;
+
+function managedTerminalEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const selected: NodeJS.ProcessEnv = { [MANAGED_WINDOW_ENV]: "1" };
+  for (const name of MANAGED_TERMINAL_ENV_KEYS) {
+    const value = environment[name];
+    if (value !== undefined) selected[name] = value;
+  }
+  return selected;
+}
+
+function posixEnvironmentArgs(environment: NodeJS.ProcessEnv): string[] {
+  return Object.entries(environment).flatMap(([name, value]) => {
+    if (value === undefined) return [];
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+      throw new TypeError(`Cannot propagate environment variable ${JSON.stringify(name)} to Terminal.app.`);
+    }
+    if (value.includes("\0")) {
+      throw new TypeError(`Cannot propagate environment variable ${JSON.stringify(name)} to Terminal.app: value contains NUL.`);
+    }
+    return [`${name}=${value}`];
+  });
 }
 
 /** Build a shell-free terminal launcher where the platform supports argv forwarding. */
@@ -1549,10 +1595,16 @@ export function getInteractiveTerminalLaunchSpec(
   }
 
   if (platform === "darwin") {
-    const shellCommand = `cd ${quotePosixShellArg(cwd)} && exec ${[
-      piCommand.command,
-      ...piCommand.args,
-    ].map(quotePosixShellArg).join(" ")}`;
+    const command = options.env
+      ? [
+          "/usr/bin/env",
+          ...posixEnvironmentArgs(managedTerminalEnvironment(options.env)),
+          piCommand.command,
+          ...piCommand.args,
+        ]
+      : [piCommand.command, ...piCommand.args];
+    const shellCommand = `cd ${quotePosixShellArg(cwd)} && exec ${command
+      .map(quotePosixShellArg).join(" ")}`;
     return {
       command: options.terminalCommand ?? "/usr/bin/osascript",
       args: [
@@ -1975,6 +2027,47 @@ export function resolveModelSpecifier(
   throw new TypeError(`Unknown teammate model specifier ${JSON.stringify(model)}. Use an exact provider/model identifier.`);
 }
 
+function teammateExtensionPath(): string {
+  return fileURLToPath(new URL("../extension/index.ts", import.meta.url));
+}
+
+export function buildInheritedExtensionArgs(primaryExtensionPath: string): string[] {
+  const args = ["--extension", primaryExtensionPath];
+  const loaded = new Set([process.platform === "win32" ? primaryExtensionPath.toLowerCase() : primaryExtensionPath]);
+  for (const registration of getTeammateChildExtensions()) {
+    const key = process.platform === "win32" ? registration.path.toLowerCase() : registration.path;
+    if (loaded.has(key)) continue;
+    loaded.add(key);
+    args.push("--extension", registration.path);
+  }
+  return args;
+}
+
+export function managedWindowSpawnEnv(environment: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const spawnEnvironment = { ...environment, [MANAGED_WINDOW_ENV]: "1" };
+  for (const [name, value] of Object.entries(spawnEnvironment)) {
+    if (value?.includes("\0")) {
+      throw new TypeError(`Cannot propagate environment variable ${JSON.stringify(name)} to a managed window: value contains NUL.`);
+    }
+  }
+  return spawnEnvironment;
+}
+
+export interface ManagedWindowArgsOptions {
+  objective: string;
+  sessionName: string;
+  presentation: "headless" | "interactive";
+  forkSessionFile?: string;
+}
+
+export function buildManagedWindowPiArgs(options: ManagedWindowArgsOptions): string[] {
+  const args = ["--no-extensions", ...buildInheritedExtensionArgs(teammateExtensionPath())];
+  if (options.forkSessionFile) args.push("--fork", options.forkSessionFile);
+  if (options.presentation === "interactive") args.push("--name", options.sessionName, options.objective);
+  else args.push("-p", options.objective, "--name", options.sessionName);
+  return args;
+}
+
 export function buildPiArgs(
   agentConfig: AgentConfig,
   params: RunSingleTeammateParams,
@@ -1993,23 +2086,7 @@ export function buildPiArgs(
 
   // Child mode owns session identity publication, lease fencing, and proxy tools.
   // Load it explicitly because the child cwd may not discover this package.
-  const teammateExtension = fileURLToPath(
-    new URL("../extension/index.ts", import.meta.url),
-  );
-  args.push("--extension", teammateExtension);
-
-  const inheritedExtensions = getTeammateChildExtensions();
-  const loadedExtensionPaths = new Set([
-    process.platform === "win32" ? teammateExtension.toLowerCase() : teammateExtension,
-  ]);
-  for (const registration of inheritedExtensions) {
-    const key = process.platform === "win32"
-      ? registration.path.toLowerCase()
-      : registration.path;
-    if (loadedExtensionPaths.has(key)) continue;
-    loadedExtensionPaths.add(key);
-    args.push("--extension", registration.path);
-  }
+  args.push(...buildInheritedExtensionArgs(teammateExtensionPath()));
 
   if (resumeSessionFile) {
     args.push("--session", resumeSessionFile);
@@ -2038,7 +2115,7 @@ export function buildPiArgs(
       : agentConfig.tools.filter((tool) => !hiddenLegacyObservationTools.includes(tool));
     const legacyObservationTools = exposeLegacyObservationTools ? hiddenLegacyObservationTools : [];
     const proxyTools = ["teammate", "teammate-send", "teammate-list", "observe", ...legacyObservationTools];
-    const inheritedTools = inheritedExtensions.flatMap((registration) => registration.tools);
+    const inheritedTools = getTeammateChildExtensions().flatMap((registration) => registration.tools);
     const toolSet = new Set([...configuredTools, ...proxyTools, ...inheritedTools]);
     if (schemaFile) toolSet.add("structured_output");
     args.push("--tools", [...toolSet].join(","));
