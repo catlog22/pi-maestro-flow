@@ -26,7 +26,7 @@
     "test:goal": "node --experimental-transform-types --test test/goal.test.ts test/goal-verification-timeout.test.ts",
     "test:bash-bg": "node --experimental-transform-types --test test/bash-bg.test.ts",
     "test:plan": "node --experimental-transform-types --test test/plan-store.test.ts test/plan-editor.test.ts test/plan-lifecycle.test.ts test/plan-model.test.ts test/plan-todo-integration.test.ts test/statusline.test.ts",
-    "test:flow-schedule": "node --experimental-transform-types --test test/flow-schedule-schema.test.ts test/flow-schedule-store.test.ts test/flow-schedule-machine.test.ts test/flow-schedule-runtime.test.ts test/flow-schedule-tool.test.ts test/flow-schedule-legacy.test.ts test/flow-schedule-e2e.test.ts",
+    "test:flow-schedule": "node --experimental-transform-types --test --test-concurrency=1 test/flow-schedule-schema.test.ts test/flow-schedule-store.test.ts test/flow-schedule-machine.test.ts test/flow-schedule-runtime.test.ts test/flow-schedule-tool.test.ts test/flow-schedule-legacy.test.ts test/flow-schedule-e2e.test.ts",
     "test:session": "node --experimental-transform-types --test test/session-bridge.test.ts test/session-export.test.ts test/todo-projection.test.ts test/workflow-coordinator.test.ts test/run-recovery.test.ts test/session-tui.test.ts test/ui-projection.test.ts test/skill-contract-lint.test.ts",
     "test:swarm": "node --experimental-transform-types --test test/swarm-projection.test.ts test/swarm-tui.test.ts",
     "test:packed": "node --test test/packed-consumer-e2e.test.mjs",
