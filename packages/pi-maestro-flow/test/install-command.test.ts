@@ -15,9 +15,9 @@ import { composeInstallMessageForTest } from "../src/install/install-command.ts"
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-test("install registry declares six items with stable ids", () => {
+test("install registry declares seven items with stable ids", () => {
   const ids = INSTALL_ITEMS.map((item) => item.id);
-  assert.deepEqual(ids, ["init", "teammate-models", "computer-use-weights", "self-evolve", "smart-search", "mcp"]);
+  assert.deepEqual(ids, ["init", "teammate-models", "computer-use", "computer-use-weights", "self-evolve", "smart-search", "mcp"]);
   for (const item of INSTALL_ITEMS) {
     assert.ok(item.title.length > 0 && item.description.length > 0, `${item.id} needs title+description`);
     assert.ok(item.promptIntro.length > 0, `${item.id} needs promptIntro`);

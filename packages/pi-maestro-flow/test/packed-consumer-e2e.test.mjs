@@ -34,6 +34,7 @@ const teammatePublicSpecifiers = [
   "pi-maestro-teammate/v1/agents",
   "pi-maestro-teammate/v1/child-extensions",
   "pi-maestro-teammate/v1/events",
+  "pi-maestro-teammate/v1/workspace-projections",
   "pi-maestro-teammate/v1/execution",
   "pi-maestro-teammate/v1/extension",
   "pi-maestro-teammate/v1/model-routing",
@@ -105,8 +106,10 @@ test("packed consumer installs real tarballs and loads in a fresh Pi process", {
     assert.ok(settingsCorePacked[0].files.some(({ path }) => path === "src/public/v1/index.ts"));
     assert.ok(teammatePacked[0].files.some(({ path }) => path === "src/index.ts"));
     assert.ok(teammatePacked[0].files.some(({ path }) => path === "src/public/v1/execution.ts"));
+    assert.ok(teammatePacked[0].files.some(({ path }) => path === "src/public/v1/workspace-projections.ts"));
     assert.ok(teammatePacked[0].files.some(({ path }) => path === "types/index.d.ts"));
     assert.ok(teammatePacked[0].files.some(({ path }) => path === "types/public/v1/execution.d.ts"));
+    assert.ok(teammatePacked[0].files.some(({ path }) => path === "types/public/v1/workspace-projections.d.ts"));
 
     // pi loads packages with separate module roots, so the shared settings-core
     // protocol must be bundled inside each plugin tarball (packages.md). npm
@@ -323,6 +326,7 @@ void [${teammatePublicSpecifiers.map((_, index) => `publicApi${index}`).join(", 
     );
     const normalizedTypeResolution = typeResolution.stdout.replaceAll("\\", "/").toLowerCase();
     assert.match(normalizedTypeResolution, /pi-maestro-teammate\/types\/public\/v1\/execution\.d\.ts/);
+    assert.match(normalizedTypeResolution, /pi-maestro-teammate\/types\/public\/v1\/workspace-projections\.d\.ts/);
     assert.doesNotMatch(normalizedTypeResolution, /pi-maestro-teammate\/src\/.*\.ts/);
 
     const childToolsPath = join(consumer, "child-tools.json");
@@ -348,6 +352,7 @@ export default function register(pi) {
     const childTools = JSON.parse(readFileSync(childToolsPath, "utf8"));
     assert.ok(childTools.includes("ask-user-question"), childTools.join(","));
     assert.ok(childTools.includes("todo"), childTools.join(","));
+    assert.ok(childTools.includes("flow-schedule"), childTools.join(","));
     assert.equal(childTools.includes("goal"), false, childTools.join(","));
     assert.equal(childTools.includes("run-control"), false, childTools.join(","));
     const smoke = run(

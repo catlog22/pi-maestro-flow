@@ -1,4 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { resolveOwnPackageJson, resolvePackageOrWorkspaceResource } from "../resources/maestro-package.ts";
@@ -24,6 +26,7 @@ export interface ResolvedInstallItem extends InstallItem {
 }
 
 const AGENT_DIR = join(homedir(), ".pi", "agent");
+const optionalRequire = createRequire(import.meta.url);
 
 /** Built-in install registry. Ordered core → optional → external. */
 export const INSTALL_ITEMS: readonly InstallItem[] = [
@@ -44,6 +47,15 @@ export const INSTALL_ITEMS: readonly InstallItem[] = [
     category: "core",
     promptIntro:
       "配置 teammate 模型路由。请参考文档和当前可用模型清单，交互式确认每个 taskType 的主模型与 fallback，写入 .pi/teammate-models.json。",
+  },
+  {
+    id: "computer-use",
+    title: "Computer Use 原生桌面能力",
+    description: "配置 Windows、macOS 和 Linux X11 的窗口、截图、鼠标、键盘与剪贴板 provider。",
+    docFile: "COMPUTER-USE-SETUP.md",
+    category: "optional",
+    promptIntro:
+      "配置 Computer Use 原生桌面能力。必须先向用户确认系统级安装和权限授予，再按文档探测当前平台；不要绕过 Wayland、macOS 隐私设置或 Windows UIA 依赖缺失的 fail-closed 语义。",
   },
   {
     id: "computer-use-weights",
@@ -83,6 +95,45 @@ export const INSTALL_ITEMS: readonly InstallItem[] = [
   },
 ];
 
+function probeComputerUseStatus(): InstallStatus {
+  const nodeProviders = ["@nut-tree-fork/nut-js", "active-win", "screenshot-desktop"];
+  if (process.platform !== "linux") nodeProviders.push("node-window-manager");
+  const nodeReady = nodeProviders.filter((name) => {
+    try { optionalRequire.resolve(name); return true; } catch { return false; }
+  }).length;
+  if (nodeReady === 0) return "not-installed";
+  const bridgePath = resolvePackageOrWorkspaceResource(["optional", "computer-use-windows-bridge.py"], resolveOwnPackageJson());
+  if (process.platform === "win32") {
+    if (!bridgePath || !probePythonBridge(bridgePath)) return "partial";
+    return nodeReady === nodeProviders.length ? "installed" : "partial";
+  }
+  if (process.platform === "darwin") return nodeReady === nodeProviders.length ? "installed" : "partial";
+  if (process.platform === "linux") {
+    if ((process.env.XDG_SESSION_TYPE ?? "").toLowerCase() === "wayland" || process.env.WAYLAND_DISPLAY) return "partial";
+    return nodeReady === nodeProviders.length && probeExecutable("xdotool") ? "installed" : "partial";
+  }
+  return "partial";
+}
+
+function probePythonBridge(scriptPath: string): boolean {
+  try {
+    const executable = process.env.PI_COMPUTER_USE_PYTHON?.trim() || "python";
+    const result = spawnSync(executable, [scriptPath, "--action", "probe"], { encoding: "utf8", shell: false, windowsHide: true, timeout: 5_000, stdio: ["ignore", "pipe", "ignore"] });
+    if (result.status !== 0 || typeof result.stdout !== "string") return false;
+    const output = result.stdout.trim().split(/\r?\n/).filter(Boolean).at(-1);
+    return output ? (JSON.parse(output) as { ok?: unknown }).ok === true : false;
+  } catch {
+    return false;
+  }
+}
+
+function probeExecutable(executable: string): boolean {
+  try {
+    return spawnSync(executable, ["--version"], { encoding: "utf8", shell: false, timeout: 750, stdio: ["ignore", "ignore", "ignore"] }).status === 0;
+  } catch {
+    return false;
+  }
+}
 function resolveDocPath(docFile: string): string | undefined {
   return resolvePackageOrWorkspaceResource(["optional", docFile], resolveOwnPackageJson());
 }
@@ -114,6 +165,8 @@ export function probeInstallStatus(id: string): InstallStatus {
         const hasMappings = (mappings && typeof mappings === "object" && Object.keys(mappings ?? {}).length > 0) || profileMappings;
         return hasMappings ? "installed" : "partial";
       }
+      case "computer-use":
+        return probeComputerUseStatus();
       case "computer-use-weights": {
         const manifestPath = resolvePackageOrWorkspaceResource(["optional", "computer-use-manifest.json"], resolveOwnPackageJson());
         if (!manifestPath || !existsSync(manifestPath)) return "not-installed";

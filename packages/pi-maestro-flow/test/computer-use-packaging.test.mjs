@@ -21,6 +21,8 @@ test("computer-use package publishes contracts and excludes model/cache artifact
     "optional/computer-use-manifest.json",
     "optional/COMPUTER-USE-NOTICES.md",
     "schemas/computer-use-manifest.schema.json",
+    "optional/COMPUTER-USE-SETUP.md",
+    "optional/computer-use-windows-bridge.py",
     "optional/INIT-SETUP.md",
     "optional/TEAMMATE-MODELS-SETUP.md",
     "optional/SMART-SEARCH-SETUP.md",

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createDesktopAdapter, createLinuxAdapter, createMacOSAdapter, createWindowsAdapter } from "../src/tools/computer-use/platform/index.ts";
 import { ComputerUseError } from "../src/tools/computer-use/types.ts";
+import { cropPng, inspectPng } from "../src/tools/computer-use/artifacts.ts";
 import { runBridgeProcess } from "../src/tools/computer-use/platform/bridge-process.ts";
 
 function optionalPackage(name: string): unknown {
@@ -37,6 +38,7 @@ test("Wayland global operations fail with a structured restriction", async () =>
   const adapter = createLinuxAdapter({ session: "wayland", env: { XDG_SESSION_TYPE: "wayland", WAYLAND_DISPLAY: "wayland-0" }, requireOptional: () => undefined });
   assert.equal(adapter.capabilities.features.window_list?.errorCode, "WAYLAND_RESTRICTED");
   await assert.rejects(adapter.listWindows(), (error: unknown) => error instanceof ComputerUseError && error.code === "WAYLAND_RESTRICTED");
+  await assert.rejects(adapter.accessibility?.uiTree({ windowId: "1" }), (error: unknown) => error instanceof ComputerUseError && error.code === "WAYLAND_RESTRICTED");
 });
 
 test("bridge executes direct argv with bounded output", async () => {
@@ -49,4 +51,32 @@ test("bridge rejects output over its configured bound", async () => {
     runBridgeProcess({ executable: process.execPath, argv: ["-e", "process.stdout.write('0123456789')"] }, { timeoutMs: 2_000, maxStdoutBytes: 4 }),
     (error: unknown) => error instanceof ComputerUseError && error.code === "ARTIFACT_LIMIT_EXCEEDED",
   );
+});
+
+
+test("shared native providers are wired for macOS and X11 without enabling Wayland", () => {
+  const activeWin = { openWindows: async () => [], activeWindowSync: () => undefined };
+  const screenshot = Object.assign(async () => new Uint8Array([137, 80, 78, 71]), { listDisplays: async () => [{ id: "primary", width: 1, height: 1, offsetX: 0, offsetY: 0, primary: true }] });
+  const nut = {
+    mouse: { setPosition: async () => {}, getPosition: async () => ({ x: 0, y: 0 }), leftClick: async () => {} },
+    keyboard: { pressKey: async () => {}, releaseKey: async () => {}, type: async () => {} },
+    clipboard: { getContent: async () => "", setContent: async () => {} },
+    Key: { A: 1 },
+    Button: { LEFT: 0 },
+  };
+  const windowManager = { windowManager: { getWindows: () => [], getActiveWindow: () => undefined, getMonitors: () => [] } };
+  const load = (name: string) => name === "active-win" ? activeWin : name === "screenshot-desktop" ? screenshot : name === "@nut-tree-fork/nut-js" ? nut : name === "node-window-manager" ? windowManager : undefined;
+  const mac = createMacOSAdapter({ requireOptional: load });
+  const linux = createLinuxAdapter({ session: "x11", requireOptional: load });
+  assert.equal(mac.capabilities.features.input?.state, "available");
+  assert.equal(mac.capabilities.features.window_list?.state, "available");
+  assert.equal(linux.capabilities.features.input?.state, "available");
+  assert.equal(linux.capabilities.features.window_list?.state, "available");
+});
+
+test("bounded PNG crop preserves a physical region frame", () => {
+  const oneByOne = Uint8Array.from(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"));
+  const cropped = cropPng(oneByOne, { x: 0, y: 0, width: 1, height: 1 });
+  const metadata = inspectPng(cropped);
+  assert.deepEqual({ width: metadata.width, height: metadata.height }, { width: 1, height: 1 });
 });

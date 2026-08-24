@@ -158,6 +158,7 @@ export default function register(pi) {
     const tools = JSON.parse(readFileSync(evidencePath, "utf8"));
     assert.ok(tools.includes("ask-user-question"), tools.join(","));
     assert.ok(tools.includes("todo"), tools.join(","));
+    assert.ok(tools.includes("flow-schedule"), tools.join(","));
     assert.equal(tools.includes("goal"), false, tools.join(","));
     assert.equal(tools.includes("run-control"), false, tools.join(","));
   } finally {

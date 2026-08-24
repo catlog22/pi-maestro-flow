@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, mkdtemp, open, readFile, rm, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
-import { inflateSync } from "node:zlib";
+import { inflateSync, deflateSync } from "node:zlib";
 import { ComputerUseError, type PhysicalPoint } from "./types.ts";
 
 const PNG_SIGNATURE = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
@@ -242,6 +242,86 @@ function paeth(a: number, b: number, c: number): number {
   return pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
 }
 
+/** Crop a bounded, non-interlaced PNG to a physical screen rectangle. */
+export function cropPng(bytes: Uint8Array, region: { x: number; y: number; width: number; height: number }): Uint8Array {
+  const decoded = decodePng(bytes);
+  const x = Math.floor(region.x);
+  const y = Math.floor(region.y);
+  const right = Math.ceil(region.x + region.width);
+  const bottom = Math.ceil(region.y + region.height);
+  const width = right - x;
+  const height = bottom - y;
+  if (![x, y, width, height].every(Number.isSafeInteger) || width < 1 || height < 1 || x < 0 || y < 0 || right > decoded.metadata.width || bottom > decoded.metadata.height) {
+    throw artifactError("INVALID_IMAGE", "PNG crop rectangle is outside the captured frame", { region, width: decoded.metadata.width, height: decoded.metadata.height });
+  }
+
+  const rgba = new Uint8Array(width * height * 4);
+  const colorAt = (sourceIndex: number): [number, number, number, number] => {
+    const offset = sourceIndex * decoded.channels;
+    if (decoded.metadata.colorType === 3) {
+      const entry = decoded.pixels[offset];
+      const palette = decoded.palette;
+      if (!palette || entry * 3 + 2 >= palette.length) throw artifactError("INVALID_IMAGE", "PNG palette entry is out of range");
+      return [palette[entry * 3], palette[entry * 3 + 1], palette[entry * 3 + 2], decoded.transparency?.[entry] ?? 255];
+    }
+    if (decoded.metadata.colorType === 0) return [decoded.pixels[offset], decoded.pixels[offset], decoded.pixels[offset], 255];
+    if (decoded.metadata.colorType === 2) return [decoded.pixels[offset], decoded.pixels[offset + 1], decoded.pixels[offset + 2], 255];
+    if (decoded.metadata.colorType === 4) return [decoded.pixels[offset], decoded.pixels[offset], decoded.pixels[offset], decoded.pixels[offset + 1]];
+    return [decoded.pixels[offset], decoded.pixels[offset + 1], decoded.pixels[offset + 2], decoded.pixels[offset + 3]];
+  };
+  for (let row = 0; row < height; row++) {
+    for (let column = 0; column < width; column++) {
+      const color = colorAt((y + row) * decoded.metadata.width + x + column);
+      const output = (row * width + column) * 4;
+      rgba[output] = color[0];
+      rgba[output + 1] = color[1];
+      rgba[output + 2] = color[2];
+      rgba[output + 3] = color[3];
+    }
+  }
+  return encodeRgbaPng(width, height, rgba);
+}
+
+function encodeRgbaPng(width: number, height: number, pixels: Uint8Array): Uint8Array {
+  const scanlines = Buffer.alloc(height * (width * 4 + 1));
+  for (let row = 0; row < height; row++) {
+    const scanline = row * (width * 4 + 1);
+    scanlines[scanline] = 0;
+    Buffer.from(pixels.buffer, pixels.byteOffset + row * width * 4, width * 4).copy(scanlines, scanline + 1);
+  }
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header[8] = 8;
+  header[9] = 6;
+  const encoded = Buffer.concat([
+    Buffer.from(PNG_SIGNATURE),
+    pngChunk("IHDR", header),
+    pngChunk("IDAT", deflateSync(scanlines)),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
+  return new Uint8Array(encoded);
+}
+
+function pngChunk(type: string, data: Uint8Array): Buffer {
+  const typeBytes = Buffer.from(type, "ascii");
+  const body = Buffer.concat([typeBytes, Buffer.from(data)]);
+  const chunk = Buffer.alloc(12 + data.byteLength);
+  chunk.writeUInt32BE(data.byteLength, 0);
+  body.copy(chunk, 4);
+  chunk.writeUInt32BE(crc32(body), 8 + data.byteLength);
+  return chunk;
+}
+
+function crc32(bytes: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
 /** Detect all-transparent or uniform (black/white/flat) frames before vision/input. */
 export function detectBlankFrame(bytes: Uint8Array, bounds: PngBounds = {}): BlankFrameReport {
   const decoded = decodePng(bytes, bounds);
@@ -249,6 +329,7 @@ export function detectBlankFrame(bytes: Uint8Array, bounds: PngBounds = {}): Bla
   const colors = new Set<string>();
   let transparent = 0;
   const total = metadata.width * metadata.height;
+  const sampleStride = Math.max(1, Math.floor(total / 4096));
   const colorAt = (index: number): [number, number, number, number] => {
     const offset = index * channels;
     if (metadata.colorType === 3) {
@@ -266,7 +347,7 @@ export function detectBlankFrame(bytes: Uint8Array, bounds: PngBounds = {}): Bla
     const color = colorAt(index);
     if (!first) first = color;
     if (color[3] === 0) transparent++;
-    if (colors.size < 2) colors.add(color.join(","));
+    if (index % sampleStride === 0 && colors.size < 64) colors.add(color.join(","));
   }
   if (transparent === total) return { blank: true, reason: "transparent", width: metadata.width, height: metadata.height, sampledPixels: total, uniqueColors: colors.size };
   const uniform = colors.size === 1 || (first !== undefined && [...colors].every((value) => {

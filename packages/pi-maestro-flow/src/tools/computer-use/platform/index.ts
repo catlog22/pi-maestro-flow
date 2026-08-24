@@ -123,7 +123,7 @@ export function isWayland(platform: PlatformId, session: SessionType): boolean {
   return platform === "linux" && session === "wayland";
 }
 
-export { WindowsDesktopAdapter, createWindowsAdapter } from "./windows.ts";
+export { WindowsDesktopAdapter, NativeDesktopAdapter, createWindowsAdapter } from "./windows.ts";
 export { MacOSDesktopAdapter, MacDesktopAdapter, createMacOSAdapter, createMacosAdapter } from "./macos.ts";
 export { LinuxDesktopAdapter, createLinuxAdapter, createLinuxDesktopAdapter, detectLinuxSession } from "./linux.ts";
 export type { AdapterOptions as DesktopAdapterOptions } from "./base.ts";
