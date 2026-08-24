@@ -51,7 +51,9 @@ export interface RenderRefineOverlayResult {
 
 type PreviewMode = "plan" | "output";
 type Phase = "idle" | "running" | "input";
+type SelectionRow = "role" | "model" | "input" | "run" | "done";
 
+const SELECTION_ROWS: SelectionRow[] = ["role", "model", "input", "run", "done"];
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 type RefineOverlayContext = Pick<ExtensionContext, "hasUI" | "ui">;
@@ -76,6 +78,9 @@ export async function renderRefineOverlay(
       let status = "";
       let busyError = "";
       let frame = 0;
+      let selected = SELECTION_ROWS.indexOf("run");
+      let previewOffset = 0;
+      let previewMaxOffset = 0;
       let lastWidth = 80;
 
       const markdownTheme = refineMarkdownTheme(theme);
@@ -132,6 +137,8 @@ export async function renderRefineOverlay(
             session.turns.push(turn);
             selectedTurnIndex = session.turns.length - 1;
             previewMode = "output";
+            previewOffset = 0;
+            previewMaxOffset = 0;
             status = `${spec.label} done — R toggles Plan/Output, [ ] cycles history.`;
           } else {
             busyError = result.error ?? "unknown error";
@@ -159,6 +166,43 @@ export async function renderRefineOverlay(
         }
       }
 
+      function enterInput(): void {
+        selected = SELECTION_ROWS.indexOf("input");
+        phase = "input";
+        input.setValue(pendingInput);
+        status = "";
+        tui.requestRender();
+      }
+
+      function chooseSelection(): void {
+        const row = SELECTION_ROWS[selected];
+        if (row === "role") {
+          session.currentRole = cycleRoleLocal(session.currentRole, 1);
+          status = "";
+          tui.requestRender();
+          return;
+        }
+        if (row === "model") {
+          void pickModel();
+          return;
+        }
+        if (row === "input") {
+          enterInput();
+          return;
+        }
+        if (row === "run") {
+          void runRole();
+          return;
+        }
+        if (row === "done") doneAction("done");
+      }
+
+      function selectionLine(row: SelectionRow, label: string): string {
+        const active = phase === "input" ? row === "input" : SELECTION_ROWS[selected] === row;
+        const line = `${active ? "›" : " "} ${label}`;
+        return active ? theme.fg("accent", theme.bold(line)) : line;
+      }
+
       return {
         render(width: number): string[] {
           const safeWidth = Math.max(1, width);
@@ -168,14 +212,23 @@ export async function renderRefineOverlay(
           const previewHeight = Math.max(4, Math.min(16, terminalRows - 14));
           const md = new Markdown(currentPreviewSource(), 0, 0, markdownTheme);
           const rendered = md.render(Math.max(1, inner - 2));
-          const visible = rendered.slice(0, previewHeight);
+          previewMaxOffset = Math.max(0, rendered.length - previewHeight);
+          previewOffset = Math.min(previewOffset, previewMaxOffset);
+          const visible = rendered.slice(previewOffset, previewOffset + previewHeight);
 
           const spec = options.roles[session.currentRole];
-          const roleRow = `Role  [${spec.label}]`;
-          const modelRow = `Model [${session.currentModel.label || "— pick (m) —"}]`;
-          const inputRow = phase === "input"
-            ? `› ${input.render(Math.max(1, inner - 2)).join("")}`
-            : `Input ${pendingInput ? `“${truncateToWidth(pendingInput, inner - 14, "…")}”` : "(i to type, Enter to run)"}`;
+          const inputLabel = phase === "input"
+            ? input.render(Math.max(1, inner - 10)).join("")
+            : pendingInput
+              ? `“${truncateToWidth(pendingInput, Math.max(1, inner - 16), "…")}”`
+              : "(optional instruction)";
+          const controls: Array<[SelectionRow, string]> = [
+            ["role", `Role  [${spec.label}]`],
+            ["model", `Model [${session.currentModel.label || "— pick (m) —"}]`],
+            ["input", `Input ${inputLabel}`],
+            ["run", "Run review/refine"],
+            ["done", "Done"],
+          ];
           const turnCount = session.turns.length;
           const modeLabel = previewMode === "output" && turnCount > 0
             ? (turnCount > 1 ? `Output ${selectedTurnIndex + 1}/${turnCount} (${spec.role})` : `Output (${spec.role})`)
@@ -188,16 +241,17 @@ export async function renderRefineOverlay(
             ...visible.map((line) => ` ${line}`),
           ];
           while (rows.length < previewHeight + 2) rows.push("");
-          rows.push(theme.fg("dim", `${modeLabel}${turnCount > 1 && previewMode === "output" ? " · [ ] history" : ""}`));
+          const range = rendered.length > previewHeight
+            ? ` · ${previewOffset + 1}-${Math.min(rendered.length, previewOffset + previewHeight)}/${rendered.length}`
+            : "";
+          rows.push(theme.fg("dim", `${modeLabel}${range}${turnCount > 1 && previewMode === "output" ? " · [ ] history" : ""}`));
           rows.push(theme.fg("dim", "─".repeat(inner)));
-          rows.push(roleRow);
-          rows.push(modelRow);
-          rows.push(inputRow);
+          rows.push(...controls.map(([row, label]) => selectionLine(row, label)));
           const footer = phase === "running"
             ? `${SPINNER_FRAMES[frame]!} ${status}`
             : phase === "input"
-              ? "Enter run · Esc exit input"
-              : "←→ role · m model · i input · Enter run · R plan/output · [ ] history · d done · Esc cancel";
+              ? "Enter run · Esc keep input"
+              : "↑↓ select · ←→ change role · Enter choose · PgUp/PgDn scroll · m model · i input · R plan/output · [ ] history · d done · Esc cancel";
           rows.push(theme.fg("dim", truncateToWidth(footer, inner, "…")));
           if (status && phase !== "running") {
             rows.push(theme.fg(busyError ? "warning" : "dim", truncateToWidth(status, inner, "…")));
@@ -232,31 +286,51 @@ export async function renderRefineOverlay(
             doneAction("cancel");
             return;
           }
-          if (matchesKey(data, Key.left)) {
+          if (matchesKey(data, Key.up)) {
+            selected = Math.max(0, selected - 1);
+            status = "";
+            tui.requestRender();
+            return;
+          }
+          if (matchesKey(data, Key.down)) {
+            selected = Math.min(SELECTION_ROWS.length - 1, selected + 1);
+            status = "";
+            tui.requestRender();
+            return;
+          }
+          if (matchesKey(data, Key.pageUp)) {
+            previewOffset = Math.max(0, previewOffset - 5);
+            tui.requestRender();
+            return;
+          }
+          if (matchesKey(data, Key.pageDown)) {
+            previewOffset = Math.min(previewMaxOffset, previewOffset + 5);
+            tui.requestRender();
+            return;
+          }
+          if (matchesKey(data, Key.left) && SELECTION_ROWS[selected] === "role") {
             session.currentRole = cycleRoleLocal(session.currentRole, -1);
             status = "";
             tui.requestRender();
             return;
           }
-          if (matchesKey(data, Key.right)) {
+          if (matchesKey(data, Key.right) && SELECTION_ROWS[selected] === "role") {
             session.currentRole = cycleRoleLocal(session.currentRole, 1);
             status = "";
             tui.requestRender();
             return;
           }
           if (data === "m" || data === "M") {
+            selected = SELECTION_ROWS.indexOf("model");
             void pickModel();
             return;
           }
           if (data === "i" || data === "I") {
-            phase = "input";
-            input.setValue(pendingInput);
-            status = "";
-            tui.requestRender();
+            enterInput();
             return;
           }
           if (matchesKey(data, Key.enter)) {
-            void runRole();
+            chooseSelection();
             return;
           }
           if (data === "d" || data === "D") {
@@ -266,12 +340,16 @@ export async function renderRefineOverlay(
           if (/^[rR]$/.test(data) && session.turns.length > 0) {
             previewMode = previewMode === "output" ? "plan" : "output";
             if (previewMode === "output") selectedTurnIndex = session.turns.length - 1;
+            previewOffset = 0;
+            previewMaxOffset = 0;
             tui.requestRender();
             return;
           }
           if ((data === "[" || data === "]") && session.turns.length > 1 && previewMode === "output") {
             const direction = data === "]" ? 1 : -1;
             selectedTurnIndex = (selectedTurnIndex + direction + session.turns.length) % session.turns.length;
+            previewOffset = 0;
+            previewMaxOffset = 0;
             tui.requestRender();
             return;
           }
