@@ -34,13 +34,13 @@ import {
   type PlanWorkflowBinding,
 } from "./plan-store.ts";
 import {
-  FOLLOW_SESSION_LABEL,
-  listAvailableReviewModels,
-  pickReviewModel,
-  runPlanReview,
-  type PlanReviewResult,
-  type ReviewHistoryEntry,
-} from "./plan-review.ts";
+  REFINE_ROLES,
+  openRefinePanel,
+  type RefineAppliesAs,
+  type RefineRole,
+  type RefineSession,
+} from "./plan-refine.ts";
+import { renderRollbackOverlay } from "../tui/plan-rollback-overlay.ts";
 import { getVisibleTasks } from "./todo.ts";
 import {
   type CompactionArbiter,
@@ -62,7 +62,7 @@ interface PlanReviewOutcome {
   executionMessage?: string;
 }
 
-type PlanHandoffDelivery = "message" | "tool-result";
+type PlanHandoffDelivery = "message" | "follow-up";
 
 export interface PlanToolDetails {
   action: "enter" | "update" | "review" | "confirm" | "exit" | "status";
@@ -201,12 +201,14 @@ let activePlanOperation: PlanOperationIdentity | undefined;
 let activePlanHandoffRequest: PlanHandoffRequestIdentity | undefined;
 let pendingCleanContextCompaction: PlanCleanContextCompactionRequest | undefined;
 let planContextReplacement: PlanContextReplacement | undefined;
-// AI review state: reports for the current draft revision are kept in memory as
-// history (oldest first). The latest entry feeds both the confirm preview and
-// the execution contract on approval. History is cleared when the revision
-// changes or the Plan is cleared.
-let reviewHistory: ReviewHistoryEntry[] = [];
-let reviewHistoryRevision = -1;
+// Review & Refine state is scoped to the current draft revision and reset when
+// the revision changes or the Plan is cleared.
+let refineSession: RefineSession | undefined;
+let refineSessionRevision = -1;
+let refineLatestOutput: string | undefined;
+let refineLatestRole: RefineRole | undefined;
+let refineLatestAppliesAs: RefineAppliesAs | undefined;
+let refineLatestRoleLabel: string | undefined;
 // The handoff gate reads todos only. Goal state was decoupled from it in 39a5f2dc;
 // the getters that used to feed it are gone so they cannot be wired back by accident.
 let hasExecutableTodoForHandoff = (handoffKey: string) => getVisibleTasks().some((task) =>
@@ -258,8 +260,12 @@ export function clearPlan(): void {
   latestHandoffKey = undefined;
   latestExecution = undefined;
   latestWorkflowBinding = undefined;
-  reviewHistory = [];
-  reviewHistoryRevision = -1;
+  refineSession = undefined;
+  refineSessionRevision = -1;
+  refineLatestOutput = undefined;
+  refineLatestRole = undefined;
+  refineLatestAppliesAs = undefined;
+  refineLatestRoleLabel = undefined;
   awaitingAction = false;
 }
 
@@ -568,8 +574,12 @@ function resetRuntimeState(): void {
   latestHandoffKey = undefined;
   latestExecution = undefined;
   latestWorkflowBinding = undefined;
-  reviewHistory = [];
-  reviewHistoryRevision = -1;
+  refineSession = undefined;
+  refineSessionRevision = -1;
+  refineLatestOutput = undefined;
+  refineLatestRole = undefined;
+  refineLatestAppliesAs = undefined;
+  refineLatestRoleLabel = undefined;
   awaitingAction = false;
   pendingPlanExitReminder = undefined;
   pendingPlanEnterNote = undefined;
@@ -940,7 +950,17 @@ async function reviewPlan(
   while (isCurrentPlanOperation(ctx, operation)) {
     const workflow = await workflowConfirmation(ctx);
     if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
-    const reviewReports = reviewHistoryRevision === latestRevision ? reviewHistory.map((entry) => entry.report) : [];
+    let drafts: { revision: number; archivedAt: string; checksum: string }[];
+    try {
+      drafts = (await store.listDrafts()).map((entry) => ({
+        revision: entry.revision,
+        archivedAt: entry.archivedAt,
+        checksum: entry.checksum,
+      }));
+    } catch {
+      drafts = [];
+    }
+    if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
     const decision = await openPlanConfirmation(ctx, {
       markdown: latestPlan ?? "",
       pathLabel: store.currentPath,
@@ -948,64 +968,124 @@ async function reviewPlan(
       contextPercent: ctx.getContextUsage?.()?.percent ?? undefined,
       defaultExecution: latestExecution,
       workflow,
-      reviewReports,
+      refineOutput: refineSessionRevision === latestRevision ? refineLatestOutput : undefined,
+      refineRoleLabel: refineLatestRoleLabel,
+      drafts,
     });
     if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
     const action = decision.action;
     if (action === "modify") {
-      reviewHistory = [];
-      reviewHistoryRevision = -1;
+      refineSession = undefined;
+      refineSessionRevision = -1;
+      refineLatestOutput = undefined;
+      refineLatestRole = undefined;
+      refineLatestAppliesAs = undefined;
+      refineLatestRoleLabel = undefined;
       await editPlan(ctx, store.currentPath, operation);
       if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
       continue;
     }
-    if (action === "review") {
+    if (action === "refine") {
       if (!extensionApi) {
-        ctx.ui.notify("AI review is unavailable: extension API is not initialized.", "warning");
+        ctx.ui.notify("Review & Refine is unavailable: extension API is not initialized.", "warning");
         continue;
       }
-      if (reviewHistoryRevision !== latestRevision) {
-        reviewHistory = [];
-        reviewHistoryRevision = latestRevision;
+      if (refineSessionRevision !== latestRevision) {
+        refineSession = undefined;
+        refineSessionRevision = latestRevision;
+        refineLatestOutput = undefined;
+        refineLatestRole = undefined;
+        refineLatestAppliesAs = undefined;
+        refineLatestRoleLabel = undefined;
       }
-      const reviewModels = await listAvailableReviewModels(ctx);
-      if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
-      const picked = await pickReviewModel(ctx, reviewModels);
-      if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
-      if (!picked) {
-        continue;
-      }
-      const outcome = await runReviewWithProgress(ctx, extensionApi, {
+      const initialRole: RefineRole = refineSession?.currentRole ?? "reviewer";
+      const outcome = await openRefinePanel(extensionApi, ctx, {
         markdown: latestPlan ?? "",
-        model: picked.model,
-        label: picked.label,
-        history: reviewHistory,
+        initialRole,
+        session: refineSession,
         signal,
       });
       if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
-      if (outcome.cancelled) {
-        ctx.ui.notify("AI review cancelled; returning to Plan confirmation.", "info");
-        continue;
-      }
-      const review = outcome.review;
-      if (review.ok && review.report) {
-        reviewHistory.push({ report: review.report, modelLabel: picked.label });
-        ctx.ui.notify("AI review complete; the confirmation panel shows the report (R toggles, [ ] cycles history).", "info");
-      } else {
-        ctx.ui.notify(`AI review failed: ${review.error ?? "unknown error"}`, "warning");
+      refineSession = outcome.session;
+      refineSessionRevision = latestRevision;
+      refineLatestOutput = outcome.latestOutput;
+      refineLatestRole = outcome.latestRole;
+      refineLatestAppliesAs = outcome.latestAppliesAs;
+      refineLatestRoleLabel = outcome.latestRole ? REFINE_ROLES[outcome.latestRole].label : undefined;
+      if (outcome.action === "done" && outcome.latestOutput) {
+        ctx.ui.notify("Refine result attached — R toggles Plan/Refine, or Apply/Discard below.", "info");
+      } else if (outcome.action === "cancel") {
+        ctx.ui.notify("Refine cancelled; returning to Plan confirmation.", "info");
       }
       continue;
     }
-    if (action === "apply-feedback") {
-      const latestReport = reviewHistoryRevision === latestRevision && reviewHistory.length > 0
-        ? reviewHistory[reviewHistory.length - 1]!.report
-        : undefined;
-      if (latestReport) {
-        queuePlanDiscussion(ctx, buildReviewFeedbackMessage(latestReport));
+    if (action === "apply-refine") {
+      const output = refineSessionRevision === latestRevision ? refineLatestOutput : undefined;
+      if (!output) {
+        ctx.ui.notify("No refine result is attached to the current Plan revision.", "warning");
+        continue;
+      }
+      if (refineLatestAppliesAs === "draft") {
+        // Optimizer-style roles return a full draft: write it directly as the new current.md.
+        const saved = await savePlan(ctx, output, latestRevision, operation);
+        if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
+        if (saved) {
+          refineLatestOutput = undefined;
+          refineLatestRole = undefined;
+          refineLatestAppliesAs = undefined;
+          refineLatestRoleLabel = undefined;
+          refineSession = undefined;
+          refineSessionRevision = -1;
+          ctx.ui.notify("Refine result applied to the Plan draft.", "info");
+        }
       } else {
-        ctx.ui.notify("No review report is attached to the current Plan revision.", "warning");
+        // Reviewer/decomposer/brainstormer roles return suggestions: send them as feedback.
+        queuePlanDiscussion(ctx, buildRefineFeedbackMessage(output, refineLatestRoleLabel));
+        refineLatestOutput = undefined;
+        refineLatestRole = undefined;
+        refineLatestAppliesAs = undefined;
+        refineLatestRoleLabel = undefined;
       }
       return { approved: false, exited: false };
+    }
+    if (action === "cancel-refine") {
+      refineLatestOutput = undefined;
+      refineLatestRole = undefined;
+      refineLatestAppliesAs = undefined;
+      refineLatestRoleLabel = undefined;
+      ctx.ui.notify("Refine result discarded; returning to the Plan preview.", "info");
+      continue;
+    }
+    if (action === "rollback") {
+      const entries = await store.listDrafts();
+      if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
+      if (entries.length === 0) {
+        ctx.ui.notify("No archived drafts are available to roll back to.", "warning");
+        continue;
+      }
+      const rollback = await renderRollbackOverlay(ctx, {
+        drafts: entries,
+        readDraft: (path) => store.readDraft(path),
+      });
+      if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
+      if (rollback.action === "restore" && rollback.selected) {
+        try {
+          const restored = await store.restoreDraft(rollback.selected.revision, latestRevision);
+          if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
+          applyLoadedPlan(restored);
+          refineSession = undefined;
+          refineSessionRevision = -1;
+          refineLatestOutput = undefined;
+          refineLatestRole = undefined;
+          refineLatestAppliesAs = undefined;
+          refineLatestRoleLabel = undefined;
+          syncModeStatus(ctx);
+          ctx.ui.notify(`Restored Plan draft revision ${rollback.selected.revision} as r${restored.manifest.revision}.`, "info");
+        } catch (error) {
+          ctx.ui.notify(`Rollback failed: ${errorMessage(error)}`, "warning");
+        }
+      }
+      continue;
     }
     if (action === "continue") {
       const discussion = await ctx.ui.input(
@@ -1060,115 +1140,12 @@ async function reviewPlan(
   return { approved: false, exited: false };
 }
 
-interface PlanReviewProgressOutcome {
-  review: PlanReviewResult;
-  /** True when the user (Esc) or the turn aborted the review before it finished. */
-  cancelled: boolean;
-}
-
-const REVIEW_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
-/**
- * Run the AI review while a modal progress overlay shows the model, a spinner
- * and a ticking elapsed clock. Esc cancels the subagent (via AbortSignal) and
- * returns to the confirmation panel without a report.
- */
-async function runReviewWithProgress(
-  ctx: PlanContext,
-  pi: ExtensionAPI,
-  options: { markdown: string; model: string; label: string; history?: ReviewHistoryEntry[]; signal?: AbortSignal },
-): Promise<PlanReviewProgressOutcome> {
-  const abort = new AbortController();
-  const onExternalAbort = (): void => { if (!abort.signal.aborted) abort.abort(); };
-  if (options.signal?.aborted) abort.abort();
-  options.signal?.addEventListener("abort", onExternalAbort, { once: true });
-  const reviewPromise = runPlanReview(pi, ctx, {
-    markdown: options.markdown,
-    model: options.model,
-    history: options.history,
-    signal: abort.signal,
-  });
-  let outcome: PlanReviewProgressOutcome;
-  try {
-    outcome = await ctx.ui.custom<PlanReviewProgressOutcome>(
-      (tui, theme, _keybindings, done) => {
-        let settled = false;
-        const startedAt = Date.now();
-        let frame = 0;
-        const timer = setInterval(() => {
-          frame = (frame + 1) % REVIEW_SPINNER_FRAMES.length;
-          tui.requestRender();
-        }, 120);
-        const settle = (value: PlanReviewProgressOutcome): void => {
-          if (settled) return;
-          settled = true;
-          clearInterval(timer);
-          done(value);
-        };
-        abort.signal.addEventListener("abort", () => {
-          settle({ review: { ok: false, error: "cancelled" }, cancelled: true });
-        }, { once: true });
-        reviewPromise.then(
-          (review) => settle({ review, cancelled: false }),
-          (error) => settle({ review: { ok: false, error: errorMessage(error) }, cancelled: true }),
-        );
-        return {
-          render(width: number): string[] {
-            const inner = Math.max(1, width - 2);
-            const rows = [
-              `${REVIEW_SPINNER_FRAMES[frame]!}  AI review in progress`,
-              "",
-              `  Model: ${options.label}`,
-              `  Elapsed: ${formatElapsed(Date.now() - startedAt)}`,
-              "",
-              "  Esc cancel · returns to Plan confirmation",
-            ];
-            const border = (text: string) => theme.fg("dim", text);
-            return [
-              border(`╭${"─".repeat(inner)}╮`),
-              ...rows.map((row) => {
-                const content = truncateToWidth(row, inner, "…");
-                return `${border("│")}${content}${' '.repeat(Math.max(0, inner - visibleWidth(content)))}${border("│")}`;
-              }),
-              border(`╰${"─".repeat(inner)}╯`),
-            ];
-          },
-          handleInput(data: string): void {
-            if (matchesKey(data, Key.escape)) abort.abort();
-          },
-          invalidate(): void {},
-          dispose(): void { clearInterval(timer); },
-        };
-      },
-      {
-        overlay: true,
-        overlayOptions: {
-          width: "70%",
-          minWidth: 48,
-          maxHeight: 12,
-          anchor: "center" as const,
-        },
-      },
-    );
-  } catch {
-    outcome = { review: { ok: false, error: "interrupted" }, cancelled: true };
-  }
-  return outcome ?? { review: { ok: false, error: "interrupted" }, cancelled: true };
-}
-
-function formatElapsed(milliseconds: number): string {
-  const total = Math.max(0, Math.round(milliseconds / 1000));
-  const minutes = Math.floor(total / 60);
-  const seconds = total % 60;
-  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-}
-
-function buildReviewFeedbackMessage(report: string): string {
+function buildRefineFeedbackMessage(output: string, roleLabel?: string): string {
   return [
-    "## AI Review Feedback (Plan)",
-    "The following is the AI review report for the current Plan draft. Revise the Plan with plan-update to address the valid findings (especially P0/P1), then present it again with plan-confirm. If you disagree with a finding, explain why in the discussion.",
+    "## Refine Feedback (Plan)",
+    `The following is the Review & Refine output${roleLabel ? ` from ${roleLabel}` : ""} for the current Plan draft. Revise the Plan with plan-update to incorporate the valid findings, then present it again with plan-confirm. If you disagree with a point, explain why in the discussion.`,
     "",
-    report,
+    output,
   ].join("\n");
 }
 
@@ -1318,10 +1295,16 @@ async function startImplementation(
   latestPlan = markdown;
   latestStatus = "approved";
   ctx.ui.notify("Plan approved · Act mode active", "info");
-  const reviewReport = reviewHistoryRevision === approved.manifest.revision && reviewHistory.length > 0
-    ? reviewHistory[reviewHistory.length - 1]!.report
+  const refineFeedback = refineSessionRevision === approved.manifest.revision
+    && refineLatestAppliesAs === "feedback"
+    ? refineLatestOutput
     : undefined;
-  const executionContract = buildPlanExecutionContract(planPath, latestHandoffKey, reviewReport);
+  const executionContract = buildPlanExecutionContract(
+    planPath,
+    latestHandoffKey,
+    refineFeedback,
+    refineLatestRoleLabel,
+  );
   let executionMessage = executionContract;
   let workflowDelivery: { handoffKey: string; binding: PlanWorkflowBinding } | undefined;
 
@@ -1395,8 +1378,15 @@ async function startImplementation(
   return isCurrentPlanOperation(ctx, operation) ? delivered : undefined;
 }
 
-function buildPlanExecutionContract(planPath: string, handoffKey?: string, reviewReport?: string): string {
+function buildPlanExecutionContract(
+  planPath: string,
+  handoffKey?: string,
+  refineFeedback?: string,
+  refineRoleLabel?: string,
+): string {
   const base = [
+    "The user selected Execute and explicitly authorized immediate implementation of the approved Plan.",
+    "Begin execution now. Do not ask the user to trigger implementation again.",
     "The approved Plan is already in the current context.",
     `Plan source: ${planPath}`,
     "Before modifying the project:",
@@ -1413,12 +1403,12 @@ function buildPlanExecutionContract(planPath: string, handoffKey?: string, revie
     "5. Prefer the teammate tool to delegate independent Todo work; use direct execution only when delegation would not help.",
     "6. Execute the Todo sequence; activating a Todo auto-switches to its quality-gate Goal, and a Todo completes only after its Goal verifies.",
   ];
-  if (reviewReport) {
+  if (refineFeedback) {
     base.push(
-      "7. AI Review findings (latest report for this Plan revision): prioritize P0/P1 issues below during execution.",
-      "<review-report>",
-      reviewReport,
-      "</review-report>",
+      `7. Review & Refine feedback${refineRoleLabel ? ` from ${refineRoleLabel}` : ""}: incorporate valid findings during execution.`,
+      "<refine-feedback>",
+      refineFeedback,
+      "</refine-feedback>",
     );
   }
   return base.join("\n");
@@ -1442,7 +1432,7 @@ async function deliverImplementation(
     });
     if (compactionArbiter && !lease) {
       ctx.ui.notify("Compaction is already in progress; executing with the current context.", "warning");
-      sendImplementationMessage(ctx, executionMessage);
+      sendImplementationMessage(ctx, executionMessage, handoffDelivery === "follow-up");
       await onDelivered?.();
       if (!isCurrentPlanOperation(ctx, operation)) return undefined;
       return;
@@ -1456,7 +1446,7 @@ async function deliverImplementation(
       const currentOperation = isCurrentPlanOperation(ctx, operation);
       const currentHandoff = finishPlanHandoff(handoffRequest);
       if (!currentOperation || !currentHandoff) return false;
-      sendImplementationMessage(ctx, executionMessage);
+      sendImplementationMessage(ctx, executionMessage, handoffDelivery === "follow-up");
       void onDelivered?.();
       return true;
     };
@@ -1489,18 +1479,15 @@ async function deliverImplementation(
     return;
   }
 
-  if (handoffDelivery === "tool-result") {
-    await onDelivered?.();
-    if (!isCurrentPlanOperation(ctx, operation)) return undefined;
-    return executionMessage;
-  }
-  sendImplementationMessage(ctx, executionMessage);
+  sendImplementationMessage(ctx, executionMessage, handoffDelivery === "follow-up");
   await onDelivered?.();
   if (!isCurrentPlanOperation(ctx, operation)) return undefined;
 }
 
-function sendImplementationMessage(ctx: PlanContext, message: string): void {
-  const opts = ctx.isIdle?.() ? undefined : { deliverAs: "followUp" as const };
+function sendImplementationMessage(ctx: PlanContext, message: string, forceFollowUp = false): void {
+  const opts = forceFollowUp || ctx.isIdle?.() === false
+    ? { deliverAs: "followUp" as const }
+    : undefined;
   extensionApi?.sendUserMessage(message, opts);
 }
 
@@ -1636,8 +1623,8 @@ export function registerPlanTools(pi: ExtensionAPI): void {
 
   const reviewTool: ToolDefinition<typeof EmptyPlanParams, PlanToolDetails> = {
     name: "plan-review",
-    label: "Plan Review",
-    description: "Open the full-screen editable Markdown draft in an interactive UI. Save or cancel without entering Act mode.",
+    label: "Plan Draft Editor",
+    description: "Open the full-screen editable Markdown draft in an interactive UI. Save or cancel without entering Act mode. Use plan-confirm for Review & Refine (role-based AI review and refinement).",
     parameters: EmptyPlanParams,
     async execute(_id, _params, _signal, _onUpdate, ctx) {
       const operation = beginPlanOperation(ctx);
@@ -1664,20 +1651,20 @@ export function registerPlanTools(pi: ExtensionAPI): void {
   const confirmTool: ToolDefinition<typeof EmptyPlanParams, PlanToolDetails> = {
     name: "plan-confirm",
     label: "Plan Confirm",
-    description: "Present the Markdown Plan in an interactive UI with choices to execute, modify, discuss, review with an AI subagent, or exit. The user always decides. Call in the same turn as plan-update when the draft is decision-complete.",
-    promptSnippet: "Standard presentation step after plan-update. Renders the plan and gives the user full control over next steps, including an optional AI review subagent.",
+    description: "Present the Markdown Plan in an interactive UI with choices to execute, modify, discuss, run role-based Review & Refine, or exit. Execute queues one explicit follow-up that starts implementation without another user prompt.",
+    promptSnippet: "Standard presentation step after plan-update. The user controls approval and may run role-based Review & Refine; choosing Execute authorizes immediate implementation via one queued follow-up.",
     parameters: EmptyPlanParams,
     async execute(_id, _params, signal, _onUpdate, ctx) {
       const operation = beginPlanOperation(ctx);
       const blocked = requirePlanMode("confirm");
       if (blocked) return blocked;
-      const outcome = await reviewPlan(ctx, true, "tool-result", operation, signal);
+      const outcome = await reviewPlan(ctx, true, "follow-up", operation, signal);
       if (!isCurrentPlanOperation(ctx, operation)) return supersededResult("confirm");
       onPlanModeChanged?.(ctx);
       const summary = outcome.approved
         ? outcome.executionChoice?.backend === "workflow" && latestWorkflowBinding?.status === "failed"
           ? "Plan approved; Workflow binding failed and execution was not started."
-          : `Plan approved; Act mode restored (${outcome.executionMode ?? "current"} context, ${outcome.executionChoice?.backend ?? "standalone"}).`
+          : `Plan approved; Act mode restored (${outcome.executionMode ?? "current"} context, ${outcome.executionChoice?.backend ?? "standalone"}). Execution handoff queued; the follow-up starts implementation without another user prompt.`
         : outcome.exited
           ? buildPlanExitMessage()
         : "Plan not approved; Plan mode remains active.";

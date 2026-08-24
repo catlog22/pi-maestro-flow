@@ -103,8 +103,9 @@ test("Plan confirmation renders execution controls without a New Pi session opti
       assert.match(rendered, /Context\s+\[Current\]/);
       assert.match(rendered, /1\. Execute/);
       assert.match(rendered, /2\. View \/ modify Plan/);
-      assert.match(rendered, /3\. Continue discussion/);
-      assert.match(rendered, /4\. Exit Plan mode/);
+      assert.match(rendered, /3\. Review & Refine/);
+      assert.match(rendered, /4\. Continue discussion/);
+      assert.match(rendered, /5\. Exit Plan mode/);
       assert.ok(lines.length <= 28);
     }
     for (const line of lines) assert.ok(visibleWidth(line) <= width, `width ${width}: ${visibleWidth(line)} ${line}`);
@@ -233,19 +234,19 @@ test("Plan confirmation returns to Plan scrolling when Up leaves the first contr
   assert.deepEqual(await pending, { action: "close" });
 });
 
-test("Plan confirmation exposes continue discussion as the third action", async () => {
-  const harness = createHarness();
-  const pending = openPlanConfirmation(harness.ctx, { markdown: "# Plan" });
-  assert.ok(harness.component);
-  harness.component.handleInput("3");
-  assert.deepEqual(await pending, { action: "continue" });
-});
-
-test("Plan confirmation exposes exiting Plan mode as the fourth action", async () => {
+test("Plan confirmation exposes continue discussion as the fourth action", async () => {
   const harness = createHarness();
   const pending = openPlanConfirmation(harness.ctx, { markdown: "# Plan" });
   assert.ok(harness.component);
   harness.component.handleInput("4");
+  assert.deepEqual(await pending, { action: "continue" });
+});
+
+test("Plan confirmation exposes exiting Plan mode as the fifth action", async () => {
+  const harness = createHarness();
+  const pending = openPlanConfirmation(harness.ctx, { markdown: "# Plan" });
+  assert.ok(harness.component);
+  harness.component.handleInput("5");
   assert.deepEqual(await pending, { action: "exit-plan" });
 });
 
@@ -320,13 +321,13 @@ test("Plan editor ignores Esc while approval is in flight", async () => {
   assert.equal(result.action, "approved");
 });
 
-test("Plan confirmation exposes AI review as the fifth action", async () => {
+test("Plan confirmation exposes AI review as the sixth action", async () => {
   const harness = createHarness();
   const pending = openPlanConfirmation(harness.ctx, { markdown: "# Plan" });
   assert.ok(harness.component);
   const rendered = harness.component.render(80).join("\n");
-  assert.match(rendered, /5\. Review with AI subagent/);
-  harness.component.handleInput("5");
+  assert.match(rendered, /6\. Review with AI subagent/);
+  harness.component.handleInput("6");
   assert.deepEqual(await pending, { action: "review" });
 });
 
@@ -339,12 +340,12 @@ test("Plan confirmation renders the attached review report with an apply-feedbac
   assert.ok(harness.component);
   const rendered = harness.component.render(80).join("\n");
   assert.match(rendered, /Review report \d+(?:-\d+)?(?:\/\d+)?/);
-  assert.match(rendered, /R: back to Plan/);
+  assert.match(rendered, /R: cycle preview|R: back to Plan/);
   assert.match(rendered, /总体结论/);
-  assert.match(rendered, /5\. Review with AI subagent/);
-  assert.match(rendered, /6\. Apply review feedback/);
+  assert.match(rendered, /6\. Review with AI subagent/);
+  assert.match(rendered, /7\. Apply review feedback/);
   assert.match(rendered, /AI review report attached/);
-  harness.component.handleInput("6");
+  harness.component.handleInput("7");
   assert.deepEqual(await pending, { action: "apply-feedback" });
 });
 
@@ -357,7 +358,7 @@ test("Plan confirmation report panel defaults to Report and toggles with R", asy
   assert.ok(harness.component);
   let rendered = harness.component.render(80).join("\n");
   assert.match(rendered, /Review report \d+(?:-\d+)?(?:\/\d+)?/);
-  assert.match(rendered, /R: back to Plan/);
+  assert.match(rendered, /R: cycle preview/);
   assert.match(rendered, /总体结论/);
   harness.component.handleInput("r");
   rendered = harness.component.render(80).join("\n");
@@ -408,6 +409,78 @@ test("Plan confirmation keeps review rows within the overlay bounds", async () =
     assert.ok(lines.length <= 28, `width ${width}: ${lines.length} lines`);
     for (const line of lines) assert.ok(visibleWidth(line) <= width, `width ${width}: ${visibleWidth(line)} ${line}`);
   }
+  harness.component.handleInput("\x1b");
+  assert.deepEqual(await pending, { action: "close" });
+});
+
+test("Plan confirmation shows the rollback action only when archived drafts exist", async () => {
+  const harness = createHarness();
+  const pending = openPlanConfirmation(harness.ctx, { markdown: "# Plan" });
+  assert.ok(harness.component);
+  let rendered = harness.component.render(80).join("\n");
+  assert.doesNotMatch(rendered, /Rollback to draft version/);
+  harness.component.handleInput("\x1b");
+  await pending;
+
+  const harness2 = createHarness();
+  const pending2 = openPlanConfirmation(harness2.ctx, {
+    markdown: "# Plan",
+    drafts: [{ revision: 2, archivedAt: "20260824T100000Z", checksum: "ab12cd34" }],
+  });
+  assert.ok(harness2.component);
+  rendered = harness2.component.render(80).join("\n");
+  assert.match(rendered, /Rollback to draft version/);
+  harness2.component.handleInput("\x1b");
+  await pending2;
+});
+
+test("Plan confirmation shows refine and apply/cancel refine actions", async () => {
+  const harness = createHarness();
+  const pending = openPlanConfirmation(harness.ctx, { markdown: "# Plan" });
+  assert.ok(harness.component);
+  const rendered = harness.component.render(80).join("\n");
+  assert.match(rendered, /3\. Review & Refine/);
+  // Without a refine output, apply/cancel refine are hidden.
+  assert.doesNotMatch(rendered, /Apply refine result/);
+  assert.doesNotMatch(rendered, /Discard refine result/);
+  harness.component.handleInput("\x1b");
+  await pending;
+
+  const harness2 = createHarness();
+  const pending2 = openPlanConfirmation(harness2.ctx, {
+    markdown: "# Plan",
+    refineOutput: "## 总体结论\n建议修订。",
+    refineRoleLabel: "审核官 Reviewer",
+  });
+  assert.ok(harness2.component);
+  const rendered2 = harness2.component.render(80).join("\n");
+  assert.match(rendered2, /Refine \(审核官 Reviewer\)/);
+  assert.match(rendered2, /Apply refine result/);
+  assert.match(rendered2, /Discard refine result/);
+  harness2.component.handleInput("\x1b");
+  await pending2;
+});
+
+test("Plan confirmation R cycles plan to refine preview when a refine output is attached", async () => {
+  const harness = createHarness();
+  const pending = openPlanConfirmation(harness.ctx, {
+    markdown: "# Approved Plan\n\n- Step",
+    refineOutput: "## 总体结论\n建议修订。",
+    refineRoleLabel: "审核官 Reviewer",
+  });
+  assert.ok(harness.component);
+  let rendered = harness.component.render(80).join("\n");
+  // Defaults to the refine preview.
+  assert.match(rendered, /Refine \(审核官 Reviewer\)/);
+  assert.match(rendered, /建议修订/);
+  harness.component.handleInput("R");
+  rendered = harness.component.render(80).join("\n");
+  assert.match(rendered, /Plan \d+(?:-\d+)?(?:\/\d+)?/);
+  assert.match(rendered, /R: view refine/);
+  assert.doesNotMatch(rendered, /建议修订/);
+  harness.component.handleInput("R");
+  rendered = harness.component.render(80).join("\n");
+  assert.match(rendered, /Refine \(审核官 Reviewer\)/);
   harness.component.handleInput("\x1b");
   assert.deepEqual(await pending, { action: "close" });
 });

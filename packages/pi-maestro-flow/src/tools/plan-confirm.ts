@@ -18,8 +18,10 @@ export type PlanConfirmationAction =
   | "execute"
   | "modify"
   | "continue"
-  | "review"
-  | "apply-feedback"
+  | "refine"
+  | "apply-refine"
+  | "cancel-refine"
+  | "rollback"
   | "exit-plan"
   | "close";
 
@@ -47,8 +49,12 @@ export interface PlanConfirmationOptions {
   contextPercent?: number;
   defaultExecution?: PlanExecutionChoice;
   workflow?: PlanWorkflowConfirmationOptions;
-  /** Markdown review reports for the current Plan revision (oldest first); shown in their own preview panel, never in the Plan. */
-  reviewReports?: string[];
+  /** Latest refine-panel output for the current Plan revision, shown in its own preview panel. */
+  refineOutput?: string;
+  /** Display label of the role that produced refineOutput. */
+  refineRoleLabel?: string;
+  /** Archived draft revisions available for rollback. */
+  drafts?: { revision: number; archivedAt: string; checksum: string }[];
 }
 
 interface ActionItem {
@@ -63,7 +69,7 @@ type SelectionRow =
   | { kind: "context" }
   | { kind: "action"; item: ActionItem };
 
-type PreviewMode = "plan" | "report";
+type PreviewMode = "plan" | "refine";
 
 const CTRL_ENTER_SEQUENCES = new Set([
   "\x1b[13;5u",
@@ -92,28 +98,32 @@ export async function openPlanConfirmation(
       const actions: ActionItem[] = [
         { action: "execute", label: "Execute", description: "Approve with the selected execution settings" },
         { action: "modify", label: "View / modify Plan", description: "Open the full-screen Markdown editor" },
+        { action: "refine", label: "Review & Refine", description: "Open the role-based review & refine panel (reviewer / decomposer / optimizer / brainstormer)" },
+        ...(options.drafts?.length
+          ? [{ action: "rollback" as const, label: "Rollback to draft version", description: "Restore a previous Plan draft from the archived history" }]
+          : []),
         { action: "continue", label: "Continue discussion", description: "Enter feedback or a question" },
         { action: "exit-plan", label: "Exit Plan mode", description: "Keep the draft without approval" },
-        { action: "review", label: "Review with AI subagent", description: "Spawn a read-only subagent to audit the Plan; the report opens in its own panel" },
-        ...(options.reviewReports?.length
-          ? [{ action: "apply-feedback" as const, label: "Apply review feedback", description: "Send the latest AI review report back to the main agent to revise the Plan" }]
+        ...(options.refineOutput
+          ? [
+              { action: "apply-refine" as const, label: "Apply refine result", description: "Write the refine output back into the Plan draft" },
+              { action: "cancel-refine" as const, label: "Discard refine result", description: "Drop the refine output and return to the Plan preview" },
+            ]
           : []),
       ];
-      const reportCount = options.reviewReports?.length ?? 0;
-      let reportIndex = reportCount > 0 ? reportCount - 1 : 0;
-      let previewMode: PreviewMode = reportCount > 0 ? "report" : "plan";
+      let previewMode: PreviewMode = options.refineOutput ? "refine" : "plan";
       let markdown = new Markdown(currentPreviewSource(), 0, 0, markdownTheme(theme));
       let selected = 0;
       let previewOffset = 0;
       let previewMaxOffset = 0;
-      let status = reportCount > 0
-        ? `AI review report attached — R switches Plan/Report${reportCount > 1 ? ", [ ] cycles history" : ""}, PgUp/PgDn scrolls`
+      let status = options.refineOutput
+        ? `Refine result attached (${options.refineRoleLabel ?? "refine"}) — R switches Plan/Refine, PgUp/PgDn scrolls`
         : "";
       let lastWidth = 80;
 
       function currentPreviewSource(): string {
-        if (previewMode === "report" && reportCount > 0) {
-          return options.reviewReports?.[reportIndex] ?? "";
+        if (previewMode === "refine") {
+          return options.refineOutput ?? "";
         }
         return options.markdown;
       }
@@ -224,8 +234,7 @@ export async function openPlanConfirmation(
             "←→ change mode",
             "↑↓ navigate",
             "Ctrl+Enter execute",
-            ...(reportCount > 0 ? [previewMode === "report" ? "R: back to Plan" : "R: view report"] : []),
-            ...(reportCount > 1 && previewMode === "report" ? ["[ ] history"] : []),
+            ...(options.refineOutput ? [previewMode === "plan" ? "R: view refine" : "R: back to Plan"] : []),
             "PgUp/PgDn scroll",
           ]);
           const rendered = [
@@ -234,11 +243,11 @@ export async function openPlanConfirmation(
             ...preview.map((line) => ` ${line}`),
           ];
           while (rendered.length < previewHeight + 2) rendered.push("");
-          const modeLabel = previewMode === "report" && reportCount > 0
-            ? (reportCount > 1 ? `Review report ${reportIndex + 1}/${reportCount}` : "Review report")
+          const modeLabel = previewMode === "refine"
+            ? `Refine (${options.refineRoleLabel ?? "refine"})`
             : "Plan";
-          const toggleHint = reportCount > 0
-            ? `   R: ${previewMode === "report" ? "back to Plan" : "view review report"}`
+          const toggleHint = options.refineOutput
+            ? `   R: ${previewMode === "plan" ? "view refine" : "back to Plan"}`
             : "";
           rendered.push(theme.fg("dim", `${modeLabel} ${range}${toggleHint}`));
           rendered.push(theme.fg("dim", "─".repeat(innerWidth)));
@@ -281,22 +290,14 @@ export async function openPlanConfirmation(
             previewOffset = Math.max(0, previewOffset - 5);
           } else if (matchesKey(data, Key.pageDown)) {
             previewOffset = Math.min(previewMaxOffset, previewOffset + 5);
-          } else if (reportCount > 0 && /^[rR]$/.test(data)) {
-            previewMode = previewMode === "report" ? "plan" : "report";
-            if (previewMode === "report") reportIndex = reportCount - 1;
+          } else if (/^[rR]$/.test(data) && options.refineOutput) {
+            previewMode = previewMode === "plan" ? "refine" : "plan";
             markdown = new Markdown(currentPreviewSource(), 0, 0, markdownTheme(theme));
             previewOffset = 0;
             previewMaxOffset = 0;
-            status = previewMode === "report"
-              ? (reportCount > 1 ? `Viewing review report ${reportIndex + 1}/${reportCount} — R returns to Plan, [ ] cycles history` : "Viewing the review report — R returns to the Plan preview")
-              : "Viewing the Plan — R opens the review report";
-          } else if (reportCount > 1 && previewMode === "report" && /^(\[|\])$/.test(data)) {
-            const direction = data === "]" ? 1 : -1;
-            reportIndex = (reportIndex + direction + reportCount) % reportCount;
-            markdown = new Markdown(currentPreviewSource(), 0, 0, markdownTheme(theme));
-            previewOffset = 0;
-            previewMaxOffset = 0;
-            status = `Viewing review report ${reportIndex + 1}/${reportCount} — [ ] cycles history`;
+            status = previewMode === "refine"
+              ? `Viewing refine result (${options.refineRoleLabel ?? "refine"}) — R returns to Plan`
+              : "Viewing the Plan — R opens refine";
           } else if (/^[1-9]$/.test(data)) {
             const index = Number(data) - 1;
             if (index < actions.length) {

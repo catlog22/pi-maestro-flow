@@ -810,3 +810,101 @@ async function waitForCondition(predicate: () => Promise<boolean>): Promise<void
   }
   throw new Error("Timed out waiting for deterministic PlanStore test condition");
 }
+
+test("PlanStore archives the previous draft on saveDraft when content changes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-draft-archive-"));
+  let now = new Date("2026-08-24T10:00:00.000Z");
+  try {
+    const store = new PlanStore(join(root, "workspace"), { rootDir: join(root, "global"), now: () => now });
+
+    const first = await store.saveDraft("# v1", 0);
+    assert.equal(first.manifest.revision, 1);
+    let drafts = await store.listDrafts();
+    assert.equal(drafts.length, 0, "first save has nothing to archive");
+
+    now = new Date("2026-08-24T10:00:01.000Z");
+    const second = await store.saveDraft("# v2", 1);
+    assert.equal(second.manifest.revision, 2);
+    drafts = await store.listDrafts();
+    assert.equal(drafts.length, 1);
+    assert.equal(drafts[0]!.revision, 1);
+    assert.equal(await store.readDraft(drafts[0]!.path), "# v1");
+    assert.equal(checksumText("# v1"), drafts[0]!.checksum);
+
+    // Saving identical content does not create another archive.
+    now = new Date("2026-08-24T10:00:02.000Z");
+    const same = await store.saveDraft("# v2", 2);
+    assert.equal(same.manifest.revision, 3);
+    drafts = await store.listDrafts();
+    assert.equal(drafts.length, 1, "identical content is not re-archived");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("PlanStore restores an archived draft as a new revision", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-draft-restore-"));
+  let now = new Date("2026-08-24T11:00:00.000Z");
+  try {
+    const store = new PlanStore(join(root, "workspace"), { rootDir: join(root, "global"), now: () => now });
+    await store.saveDraft("# r1", 0);
+    now = new Date("2026-08-24T11:00:01.000Z");
+    await store.saveDraft("# r2", 1);
+    now = new Date("2026-08-24T11:00:02.000Z");
+    const latest = await store.saveDraft("# r3", 2);
+    assert.equal(latest.manifest.revision, 3);
+    assert.equal(await readFile(store.currentPath, "utf8"), "# r3");
+
+    now = new Date("2026-08-24T11:00:03.000Z");
+    const restored = await store.restoreDraft(1, 3);
+    assert.equal(restored.manifest.revision, 4);
+    assert.equal(await readFile(store.currentPath, "utf8"), "# r1");
+    assert.equal(restored.manifest.status, "draft");
+
+    // Restoring also archives the superseded current draft (r3) so it remains reachable.
+    const drafts = await store.listDrafts();
+    const revisions = drafts.map((entry) => entry.revision).sort((a, b) => a - b);
+    assert.deepEqual(revisions, [1, 2, 3]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("PlanStore restoreDraft rejects an unknown revision", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-draft-unknown-"));
+  try {
+    const store = new PlanStore(join(root, "workspace"), { rootDir: join(root, "global") });
+    await store.saveDraft("# only", 0);
+    await assert.rejects(() => store.restoreDraft(99, 1), /revision 99 was not found/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("PlanStore readDraft rejects path traversal and malformed paths", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-draft-traversal-"));
+  try {
+    const store = new PlanStore(join(root, "workspace"), { rootDir: join(root, "global") });
+    await store.saveDraft("# safe", 0);
+    await assert.rejects(() => store.readDraft("../current.md"), /Invalid draft archive path/);
+    await assert.rejects(() => store.readDraft("drafts/not-an-archive.md"), /Invalid draft archive path/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("PlanStore prunes the draft history to the configured limit", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-draft-prune-"));
+  try {
+    const store = new PlanStore(join(root, "workspace"), { rootDir: join(root, "global"), draftHistoryLimit: 3 });
+    for (let i = 0; i < 6; i += 1) {
+      await store.saveDraft(`# v${i + 1}`, i);
+    }
+    const drafts = await store.listDrafts();
+    assert.equal(drafts.length, 3, "only the newest 3 archives are kept");
+    // Newest first → revisions 5, 4, 3 survive; 1 and 2 pruned.
+    assert.deepEqual(drafts.map((entry) => entry.revision), [5, 4, 3]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

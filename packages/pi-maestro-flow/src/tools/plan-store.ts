@@ -88,12 +88,28 @@ export interface PlanStoreOptions {
   lockNow?: () => number;
   isProcessAlive?: (pid: number) => boolean;
   getProcessIdentity?: (pid: number) => string | null | Promise<string | null>;
+  /** Max number of archived draft revisions kept in drafts/. Older are pruned. Default 20. */
+  draftHistoryLimit?: number;
 }
 
 export interface PlanSessionIdentity {
   id: string;
   file?: string;
   name?: string;
+}
+
+/** A historical draft snapshot archived under drafts/, available for rollback. */
+export interface PlanDraftArchiveEntry {
+  revision: number;
+  checksum: string;
+  archivedAt: string;
+  /** Path relative to plansDir, e.g. "drafts/20260824T120000Z-r0003-ab12cd34.md". */
+  path: string;
+}
+
+/** A draft archive entry together with its restored Markdown content. */
+export interface PlanDraftArchive extends PlanDraftArchiveEntry {
+  markdown: string;
 }
 
 interface LockOwner {
@@ -146,6 +162,7 @@ export class PlanStore {
   readonly plansDir: string;
   readonly approvalsDir: string;
   readonly recoveryDir: string;
+  readonly draftsDir: string;
   readonly currentPath: string;
   readonly manifestPath: string;
   readonly pendingPath: string;
@@ -166,6 +183,7 @@ export class PlanStore {
   private readonly lockNow: () => number;
   private readonly isProcessAlive: (pid: number) => boolean;
   private readonly getProcessIdentity: (pid: number) => string | null | Promise<string | null>;
+  private readonly draftHistoryLimit: number;
 
   constructor(cwd: string, options: PlanStoreOptions = {}) {
     this.workspacePath = normalizeWorkspacePath(cwd);
@@ -182,6 +200,7 @@ export class PlanStore {
       : this.legacyPlansDir;
     this.approvalsDir = join(this.plansDir, "approvals");
     this.recoveryDir = join(this.plansDir, "recovery");
+    this.draftsDir = join(this.plansDir, "drafts");
     this.currentPath = join(this.plansDir, "current.md");
     this.manifestPath = join(this.plansDir, "manifest.json");
     this.pendingPath = join(this.plansDir, "approval.pending.json");
@@ -197,6 +216,7 @@ export class PlanStore {
     this.lockNow = options.lockNow ?? (() => Date.now());
     this.isProcessAlive = options.isProcessAlive ?? processIsAlive;
     this.getProcessIdentity = options.getProcessIdentity ?? processIdentity;
+    this.draftHistoryLimit = Math.max(0, options.draftHistoryLimit ?? 20);
   }
 
   async load(): Promise<LoadedPlan> {
@@ -222,6 +242,92 @@ export class PlanStore {
 
   async saveDraft(markdown: string, expectedRevision?: number): Promise<LoadedPlan> {
     return this.withWorkspaceLock((token) => this.saveDraftUnlocked(markdown, expectedRevision, token));
+  }
+
+  /** List archived draft snapshots (newest revision first), available for rollback. */
+  async listDrafts(): Promise<PlanDraftArchiveEntry[]> {
+    await ensurePrivateDirectory(this.draftsDir);
+    let entries: string[];
+    try {
+      entries = await readdir(this.draftsDir);
+    } catch (error) {
+      if (isMissingFile(error)) return [];
+      throw error;
+    }
+    const recovered: PlanDraftArchiveEntry[] = [];
+    for (const entry of entries) {
+      const parsed = parseDraftArchiveName(entry);
+      if (!parsed) continue;
+      try {
+        const markdown = await readFile(join(this.draftsDir, entry), "utf8");
+        const checksum = checksumText(markdown);
+        if (!checksum.startsWith(parsed.checksumPrefix)) continue;
+        recovered.push({
+          revision: parsed.revision,
+          checksum,
+          archivedAt: parsed.archivedAt,
+          path: join("drafts", entry),
+        });
+      } catch {
+        // Unreadable archive is skipped, not fatal.
+      }
+    }
+    return recovered.sort((left, right) => right.revision - left.revision || right.path.localeCompare(left.path));
+  }
+
+  /** Read the Markdown of an archived draft by its plansDir-relative path. */
+  async readDraft(path: string): Promise<string> {
+    return readFile(this.resolveDraftPath(path), "utf8");
+  }
+
+  /** Restore a previously archived draft as the current draft (new revision). */
+  async restoreDraft(revision: number, expectedCurrentRevision?: number): Promise<LoadedPlan> {
+    const drafts = await this.listDrafts();
+    const target = drafts.find((entry) => entry.revision === revision);
+    if (!target) {
+      throw new Error(`Plan draft archive for revision ${revision} was not found`);
+    }
+    const markdown = await this.readDraft(target.path);
+    return this.saveDraft(markdown, expectedCurrentRevision);
+  }
+
+  /** Validate and resolve a drafts-relative path, rejecting traversal. */
+  private resolveDraftPath(path: string): string {
+    const entry = basename(path);
+    if (path !== join("drafts", entry) || !parseDraftArchiveName(entry)) {
+      throw new Error("Invalid draft archive path");
+    }
+    return join(this.draftsDir, entry);
+  }
+
+  /** Archive the current draft content before it is overwritten, pruning old entries. */
+  private async archiveDraft(markdown: string, manifest: PlanManifest, ownerToken: string): Promise<void> {
+    await ensurePrivateDirectory(this.draftsDir);
+    const checksum = checksumText(markdown);
+    const archiveName = `${archiveTimestamp(this.now().toISOString())}-r${String(manifest.revision).padStart(4, "0")}-${checksum.slice(0, 8)}.md`;
+    const archivePath = join(this.draftsDir, archiveName);
+    await this.assertLockOwnership(ownerToken);
+    await atomicWriteText(archivePath, markdown);
+    await this.pruneDrafts();
+  }
+
+  /** Keep only the newest draftHistoryLimit archive entries. */
+  private async pruneDrafts(): Promise<void> {
+    if (this.draftHistoryLimit <= 0) return;
+    let entries: string[];
+    try {
+      entries = await readdir(this.draftsDir);
+    } catch (error) {
+      if (isMissingFile(error)) return;
+      throw error;
+    }
+    const parsed = entries
+      .map((entry) => ({ entry, info: parseDraftArchiveName(entry) }))
+      .filter((item): item is { entry: string; info: { revision: number; checksumPrefix: string; archivedAt: string } } => item.info !== null)
+      .sort((left, right) => right.info.revision - left.info.revision || right.info.archivedAt.localeCompare(left.info.archivedAt));
+    for (const item of parsed.slice(this.draftHistoryLimit)) {
+      await rm(join(this.draftsDir, item.entry), { force: true }).catch(() => { /* best effort */ });
+    }
   }
 
   async approve(
@@ -394,6 +500,10 @@ export class PlanStore {
   private async saveDraftUnlocked(markdown: string, expectedRevision: number | undefined, ownerToken: string): Promise<LoadedPlan> {
     const current = await this.loadUnlocked(ownerToken);
     assertRevision(expectedRevision, current.manifest.revision);
+    // Archive the soon-to-be-overwritten draft so the user can roll back to it.
+    if (current.markdown && checksumText(current.markdown) !== checksumText(markdown)) {
+      await this.archiveDraft(current.markdown, current.manifest, ownerToken);
+    }
     const updatedAt = this.now().toISOString();
     const manifest: PlanManifest = {
       ...this.manifestIdentity(),
@@ -415,6 +525,7 @@ export class PlanStore {
     await Promise.all([
       ensurePrivateDirectory(this.approvalsDir),
       ensurePrivateDirectory(this.recoveryDir),
+      ensurePrivateDirectory(this.draftsDir),
     ]);
   }
 
@@ -1105,6 +1216,15 @@ function parseArchiveName(value: string): { revision: number; checksumPrefix: st
     checksumPrefix: match[2].toLowerCase(),
     ...(match[3] ? { handoffKey: match[3].toLowerCase() } : {}),
   };
+}
+
+/** Parse a drafts/ archive name: {timestamp}Z-r{revision}-{checksum8}.md (no handoff suffix). */
+function parseDraftArchiveName(value: string): { revision: number; checksumPrefix: string; archivedAt: string } | null {
+  const match = /^(\d{8}T\d{6,9}Z)-r(\d+)-([a-f0-9]{8})\.md$/i.exec(value);
+  if (!match) return null;
+  const revision = Number(match[2]);
+  if (!Number.isSafeInteger(revision) || revision < 1) return null;
+  return { revision, checksumPrefix: match[3].toLowerCase(), archivedAt: match[1] };
 }
 
 function isChecksum(value: unknown): value is string {
