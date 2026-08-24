@@ -3,26 +3,16 @@ import type {
 	TeammateProgressMessageEvent,
 	TeammateStartedEvent,
 } from "pi-maestro-teammate/v1/events";
-import type { AgentProgressSnapshot } from "pi-maestro-teammate/v1/types";
+import {
+	TEAMMATE_STALL_TIMEOUT_MS,
+	type AgentProgressSnapshot,
+	type AgentRuntimeProjection,
+	type AgentTurnSnapshot,
+} from "pi-maestro-teammate/v1/types";
 import { sanitizeExtensionStatusText } from "./extension-status.ts";
 import { EXPERT_LEADER_NAME, type AgentRow, type AgentStatus } from "./types.ts";
 
 const STATUS_TEXT_MAX = 48;
-const TEAMMATE_STALL_TIMEOUT_MS = 30_000;
-const TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS = 5 * 60_000;
-const EXPECTED_SILENCE_PHASES = new Set(["starting", "restoring", "prompting", "compacting", "continuing", "settling"]);
-
-function isAgentStalled(
-	projection: { status: string; phase?: string; resultReadyAt?: number; lastActivityAt?: number; pendingInteractions?: number },
-	now: number,
-): boolean {
-	if ((projection.status !== "running" && projection.status !== "pending") || projection.resultReadyAt !== undefined) return false;
-	if ((projection.pendingInteractions ?? 0) > 0 || projection.lastActivityAt === undefined) return false;
-	const idleCeiling = projection.status === "pending" || projection.phase === "retrying" || (projection.phase !== undefined && EXPECTED_SILENCE_PHASES.has(projection.phase))
-		? TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS
-		: TEAMMATE_STALL_TIMEOUT_MS;
-	return now - projection.lastActivityAt >= idleCeiling;
-}
 /** Selected-session output kept for the expandable fixed detail region. */
 export const SESSION_CONTENT_MAX = 2_048;
 export const CONVERSATION_ENTRY_MAX = 8_192;
@@ -101,7 +91,7 @@ function normalizedRecentTools(
 // optional fields let older teammate versions continue to feed the same store.
 export type StartedPayload = Pick<TeammateStartedEvent, "correlationId" | "agent">
 	& Partial<Omit<TeammateStartedEvent, "correlationId" | "agent" | "startedAt">>
-	& { startedAt?: number | string; task?: string };
+	& { startedAt?: number | string; task?: string; runtime?: AgentRuntimeProjection; turn?: AgentTurnSnapshot };
 export type ProgressPayload = Pick<AgentProgressSnapshot, "correlationId" | "agent" | "taskIndex">
 	& Partial<Omit<AgentProgressSnapshot, "correlationId" | "agent" | "taskIndex" | "startedAt" | "completedAt">>
 	& { startedAt?: number | string; completedAt?: number | string };
@@ -116,6 +106,8 @@ export type MessagePayload = Partial<Omit<
 	sendError?: boolean;
 	/** Compatibility with pre-v1 progress deltas; discriminated send events are retained as user conversation. */
 	message?: string;
+	runtime?: AgentRuntimeProjection;
+	turn?: AgentTurnSnapshot;
 };
 export type CompletePayload = Pick<TeammateCompleteEvent, "correlationId" | "exitCode">
 	& Partial<Pick<TeammateCompleteEvent, "durationMs" | "wakeable" | "cancelled">>;
@@ -189,14 +181,11 @@ function activityFromProgressStatus(status: unknown): "running" | "sleeping" | u
 export const AGENT_STALL_TIMEOUT_MS = TEAMMATE_STALL_TIMEOUT_MS;
 export type AgentDisplayStatus = AgentStatus | "result-ready" | "stalled";
 
-export function effectiveAgentStatus(row: AgentRow, now: number = Date.now()): AgentDisplayStatus {
+export function effectiveAgentStatus(row: AgentRow, _now: number = Date.now()): AgentDisplayStatus {
 	if (row.status !== "running" && row.status !== "pending") return row.status;
-	if (row.resultReadyAt !== undefined) return "result-ready";
-	return isAgentStalled({
-		status: row.status,
-		phase: row.phase,
-		lastActivityAt: row.lastActivityAt,
-	}, now) ? "stalled" : row.status;
+	if (row.runtime?.resultReady === true || row.resultReadyAt !== undefined) return "result-ready";
+	if (row.runtime?.health === "stalled") return "stalled";
+	return row.status;
 }
 
 function normalizeStartedAt(value: number | string | undefined, fallback: number): number {
@@ -317,6 +306,8 @@ export class AgentsStore {
 				: prev?.task ?? clean(p.name),
 			status: nextStatus,
 			phase: typeof p.phase === "string" ? clean(p.phase) : prev?.phase,
+			runtime: p.runtime ?? prev?.runtime,
+			turn: p.turn ?? prev?.turn,
 			lastOutcome: p.lastOutcome
 				? {
 					status: p.lastOutcome.status,
@@ -441,6 +432,8 @@ export class AgentsStore {
 		}
 		if (typeof p.phase === "string") row.phase = clean(p.phase);
 		else if (row.status === "sleeping") delete row.phase;
+		if (p.runtime !== undefined) row.runtime = p.runtime;
+		if (p.turn !== undefined) row.turn = p.turn;
 		if (typeof p.taskIndex === "number") row.taskIndex = p.taskIndex;
 		if (Array.isArray(p.dependencies)) row.dependencies = [...p.dependencies];
 	}
@@ -601,6 +594,8 @@ export class AgentsStore {
 		}
 		if (typeof p.phase === "string") row.phase = clean(p.phase);
 		else if (row.status === "sleeping") delete row.phase;
+		row.runtime = p.runtime;
+		row.turn = p.turn;
 		row.resultReadyAt = p.resultReadyAt === undefined
 			? undefined
 			: normalizeStartedAt(p.resultReadyAt, now);

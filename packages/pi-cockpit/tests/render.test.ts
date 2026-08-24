@@ -217,15 +217,35 @@ test("renderAgents falls back to compact aggregate tokens", () => {
 	assert.match(line, /0.9k tok/);
 });
 
-test("renderAgents derives stalled and result-ready display states without mutating lifecycle status", () => {
+test("renderAgents consumes canonical stalled and result-ready states without mutating lifecycle", () => {
 	const stalled = renderAgents([
-		agent({ task: "silent task", status: "running", lastActivityAt: 1 }),
+		agent({
+			task: "silent task",
+			status: "running",
+			runtime: {
+				lifecycle: "running",
+				health: "stalled",
+				activity: "running",
+				toolActivity: "active",
+				resultReady: false,
+			},
+		}),
 	], "list", 120, theme, utils, { ...opts, now: 30_001 })[0];
 	assert.match(stalled, /stalled/);
 	assert.doesNotMatch(stalled, /⠋/);
 
 	const ready = renderAgents([
-		agent({ task: "returned task", status: "running", lastActivityAt: 1, resultReadyAt: 20_000 }),
+		agent({
+			task: "returned task",
+			status: "running",
+			runtime: {
+				lifecycle: "running",
+				health: "healthy",
+				activity: "running",
+				toolActivity: "idle",
+				resultReady: true,
+			},
+		}),
 	], "list", 120, theme, utils, { ...opts, now: 30_001 })[0];
 	assert.match(ready, /result ready/);
 	assert.doesNotMatch(ready, /stalled|⠋/);

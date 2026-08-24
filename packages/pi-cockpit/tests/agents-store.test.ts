@@ -1,6 +1,5 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS, TEAMMATE_STALL_TIMEOUT_MS } from "pi-maestro-teammate/v1/types";
 import { AgentsStore, AGENT_LINGER_MS, COMPLETED_TOMBSTONE_MS, FAILED_LINGER_MS, SESSION_CONTENT_MAX, SLEEPING_LINGER_MS, TERMINATED_LINGER_MS, effectiveAgentStatus, isExpertLeader, mapAgentStatus } from "../src/agents-store.ts";
 import { EXPERT_LEADER_NAME } from "../src/types.ts";
 
@@ -40,25 +39,36 @@ test("started prefers the original dispatch task over the display name", () => {
 	assert.equal(s.snapshot()[0].task, "Inspect authentication middleware and report every caller.");
 });
 
-test("expected-silence phases use the shared bounded stall deadline", () => {
+test("canonical runtime drives stalled while legacy rows fail closed", () => {
 	const s = new AgentsStore();
 	const startedAt = 1_000;
-	s.applyStarted({ correlationId: "thinking", agent: "analyst", status: "running", phase: "prompting" }, startedAt);
-	const row = s.snapshot()[0];
+	s.applyStarted({ correlationId: "legacy", agent: "analyst", status: "running", phase: "prompting" }, startedAt);
+	const legacy = s.snapshot()[0];
+	assert.equal(effectiveAgentStatus(legacy, Number.MAX_SAFE_INTEGER), "running");
 
-	assert.equal(effectiveAgentStatus(row, startedAt + TEAMMATE_STALL_TIMEOUT_MS), "running");
-	assert.equal(effectiveAgentStatus(row, startedAt + TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS), "stalled");
-
-	s.applyStarted({ correlationId: "queued", agent: "worker", status: "pending", phase: "starting" }, startedAt);
-	s.applyMessage({
-		correlationId: "queued",
-		status: "pending",
-		phase: "starting",
-		lastActivityAt: startedAt,
+	s.applyStarted({
+		correlationId: "canonical",
+		agent: "worker",
+		status: "running",
+		phase: "settling",
+		runtime: {
+			lifecycle: "running",
+			health: "stalled",
+			phase: "settling",
+			activity: "running",
+			toolActivity: "active",
+			resultReady: false,
+		},
 	}, startedAt);
-	const queued = s.snapshot().find((entry) => entry.correlationId === "queued")!;
-	assert.equal(effectiveAgentStatus(queued, startedAt + TEAMMATE_STALL_TIMEOUT_MS), "pending");
-	assert.equal(effectiveAgentStatus(queued, startedAt + TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS), "stalled");
+	const canonical = s.snapshot().find((entry) => entry.correlationId === "canonical")!;
+	assert.equal(canonical.runtime?.toolActivity, "active");
+	assert.equal(effectiveAgentStatus(canonical, startedAt), "stalled");
+
+	s.applyMessage({
+		correlationId: "canonical",
+		runtime: { ...canonical.runtime!, health: "healthy", resultReady: true },
+	}, startedAt + 1);
+	assert.equal(effectiveAgentStatus(canonical, startedAt + 1), "result-ready");
 });
 
 test("started preserves parent, source status and source start time", () => {

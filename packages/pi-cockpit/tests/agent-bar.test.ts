@@ -241,10 +241,22 @@ test("Agent Bar does not show a tool suffix on a sleeping agent", () => {
 	assert.doesNotMatch(plain, /· bash/);
 });
 
-test("Agent Bar marks stalled chips with a leading error bang", () => {
-	// stalled: derived from a stale lastActivityAt, no terminal outcome yet.
+test("Agent Bar marks canonically stalled chips with a leading error bang", () => {
 	const stalled = endpoints.map((endpoint) => endpoint.kind === "agent"
-		? { ...endpoint, agentRow: { ...row, status: "running" as const, lastActivityAt: -30_000 } }
+		? {
+			...endpoint,
+			agentRow: {
+				...row,
+				status: "running" as const,
+				runtime: {
+					lifecycle: "running" as const,
+					health: "stalled" as const,
+					activity: "running" as const,
+					toolActivity: "active" as const,
+					resultReady: false,
+				},
+			},
+		}
 		: endpoint);
 	const state = new SessionUiState();
 	state.reconcile("agent", stalled, "root");

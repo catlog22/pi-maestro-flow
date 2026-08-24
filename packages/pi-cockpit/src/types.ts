@@ -57,6 +57,10 @@ export interface AgentRow {
 	conversation?: AgentConversationEntry[];
 	status: AgentStatus;
 	phase?: string;
+	/** Canonical teammate runtime projection; absent on legacy event streams. */
+	runtime?: import("pi-maestro-teammate/v1/types").AgentRuntimeProjection;
+	/** Current or preserved conversation turn; absent on legacy event streams. */
+	turn?: import("pi-maestro-teammate/v1/types").AgentTurnSnapshot;
 	lastOutcome?: AgentLastOutcome;
 	tail: string;
 	startedAt: number;

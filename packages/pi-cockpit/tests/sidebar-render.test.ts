@@ -216,7 +216,17 @@ test("agent sidebar distinguishes stalled and terminated states", () => {
 		todos: [],
 		jobs: [],
 		agents: [
-			{ ...agents[0], correlationId: "stalled", lastActivityAt: 1 },
+			{
+				...agents[0],
+				correlationId: "stalled",
+				runtime: {
+					lifecycle: "running",
+					health: "stalled",
+					activity: "running",
+					toolActivity: "active",
+					resultReady: false,
+				},
+			},
 			{ ...agents[0], correlationId: "terminated", status: "terminated", finishedAt: 5_000 },
 		],
 		width: 64,
