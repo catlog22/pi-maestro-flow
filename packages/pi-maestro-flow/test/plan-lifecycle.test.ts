@@ -100,6 +100,7 @@ function createHarness(
   const tools = new Map<string, ToolLike>();
   const commands = new Map<string, CommandLike>();
   const messages: string[] = [];
+  const messageOptions: Array<{ deliverAs?: string } | undefined> = [];
   const notifications: string[] = [];
   const statuses: Array<string | undefined> = [];
   const compactions: Array<{
@@ -142,7 +143,10 @@ function createHarness(
     registerCommand(name: string, command: CommandLike) { commands.set(name, command); },
     getActiveTools() { return [...active]; },
     setActiveTools(names: string[]) { active = [...names]; },
-    sendUserMessage(message: string) { messages.push(message); },
+    sendUserMessage(message: string, options?: { deliverAs?: string }) {
+      messages.push(message);
+      messageOptions.push(options);
+    },
   } as unknown as ExtensionAPI;
   const ctx = {
     cwd: join(root, "workspace"),
@@ -243,6 +247,7 @@ function createHarness(
     tools,
     commands,
     messages,
+    messageOptions,
     notifications,
     statuses,
     compactions,
@@ -373,17 +378,23 @@ test("Plan confirmation archives the exact draft before restoring Act and inject
     assert.equal(getMode(), "act");
     assert.equal(harness.statuses.at(-1), "ACT");
     assert.deepEqual(harness.active, actSnapshot);
-    assert.equal(harness.messages.length, 0);
+    assert.equal(harness.messages.length, 1);
+    assert.deepEqual(harness.messageOptions, [{ deliverAs: "followUp" }]);
     const toolText = confirmed.content[0]?.text ?? "";
-    assert.match(toolText, /Prefer the teammate tool/);
-    assert.doesNotMatch(toolText, /# Approved/);
-    assert.match(toolText, /already in the current context/);
-    assert.match(toolText, /Knowledge Gate/);
-    assert.match(toolText, /maestro search/);
-    assert.match(toolText, /maestro load/);
-    assert.match(toolText, /Todo dependency graph/);
-    assert.match(toolText, /quality gate/);
-    assert.match(toolText, /acceptance criteria/);
+    assert.match(toolText, /Execution handoff queued/);
+    assert.doesNotMatch(toolText, /Knowledge Gate|Todo dependency graph|Prefer the teammate tool/);
+    const executionMessage = harness.messages[0] ?? "";
+    assert.match(executionMessage, /selected Execute/);
+    assert.match(executionMessage, /without another user prompt|Do not ask the user/);
+    assert.match(executionMessage, /Prefer the teammate tool/);
+    assert.doesNotMatch(executionMessage, /# Approved/);
+    assert.match(executionMessage, /already in the current context/);
+    assert.match(executionMessage, /Knowledge Gate/);
+    assert.match(executionMessage, /maestro search/);
+    assert.match(executionMessage, /maestro load/);
+    assert.match(executionMessage, /Todo dependency graph/);
+    assert.match(executionMessage, /quality gate/);
+    assert.match(executionMessage, /acceptance criteria/);
 
     const store = new PlanStore(harness.ctx.cwd, {
       rootDir: join(root, "global"),
@@ -643,9 +654,12 @@ test("Workflow-backed approval persists a bound result before delivering the Run
     assert.equal(confirmed.details.approved, true);
     assert.equal(confirmed.details.workflowBinding?.status, "bound");
     assert.equal(confirmed.details.workflowBinding?.deliveryStatus, "delivered");
-    assert.match(text, /WORKFLOW RUN BRIEF/);
+    assert.doesNotMatch(text, /WORKFLOW RUN BRIEF/);
     assert.match(text, /workflow/);
-    assert.equal(harness.messages.length, 0, "tool-result delivery must not enqueue a duplicate implementation prompt");
+    assert.equal(harness.messages.length, 1);
+    assert.match(harness.messages[0] ?? "", /WORKFLOW RUN BRIEF/);
+    assert.match(harness.messages[0] ?? "", /selected Execute/);
+    assert.deepEqual(harness.messageOptions, [{ deliverAs: "followUp" }]);
   } finally {
     onSessionShutdownPlan(harness.ctx);
     await rm(root, { recursive: true, force: true });

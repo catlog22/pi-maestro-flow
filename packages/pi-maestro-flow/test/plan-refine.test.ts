@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import {
   REFINE_ROLES,
   buildDecomposerPrompt,
@@ -12,8 +14,131 @@ import {
   type RefineTurn,
 } from "../src/tools/plan-refine.ts";
 import { buildReviewPrompt } from "../src/tools/plan-review.ts";
+import { renderRefineOverlay } from "../src/tui/plan-refine-overlay.ts";
 
 const PLAN = "# Plan\n\n- Step one\n- Step two";
+
+function createOverlayHarness() {
+  let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
+  let doneResolve: ((value: unknown) => void) | undefined;
+  const donePromise = new Promise<unknown>((resolve) => { doneResolve = resolve; });
+  const tui = { requestRender() {} };
+  const theme = {
+    fg: (_name: string, text: string) => text,
+    bg: (_name: string, text: string) => text,
+    bold: (text: string) => text,
+  };
+  const ui = {
+    async custom(factory: Function) {
+      component = factory(tui, theme, {}, (value: unknown) => doneResolve?.(value));
+      return donePromise;
+    },
+  };
+  return {
+    ctx: { hasUI: true, ui } as unknown as ExtensionContext,
+    get component() { return component; },
+  };
+}
+
+function overlaySession(): RefineSession {
+  const session = createRefineSession("reviewer", "provider/session");
+  session.currentModel.model = "provider/session";
+  return session;
+}
+
+test("Review & Refine overlay renders a bounded cursor and changes Role with arrows", async () => {
+  const harness = createOverlayHarness();
+  const session = overlaySession();
+  const pending = renderRefineOverlay(harness.ctx, {
+    markdown: PLAN,
+    session,
+    roles: REFINE_ROLES,
+    async pickModel() { return undefined; },
+    async run() { return { ok: true, output: "reviewed" }; },
+  });
+  assert.ok(harness.component);
+  for (const width of [40, 80, 120]) {
+    const lines = harness.component.render(width);
+    assert.match(lines.join("\n"), /› Run review\/refine/);
+    assert.ok(lines.length <= 32, `width ${width}: ${lines.length} lines`);
+    for (const line of lines) assert.ok(visibleWidth(line) <= width, `width ${width}: ${visibleWidth(line)} ${line}`);
+  }
+
+  harness.component.handleInput("\x1b[A");
+  harness.component.handleInput("\x1b[A");
+  harness.component.handleInput("\x1b[A");
+  assert.match(harness.component.render(80).join("\n"), /› Role/);
+  harness.component.handleInput("\x1b[C");
+  assert.equal(session.currentRole, "decomposer");
+  harness.component.handleInput("\x1b");
+  const result = await pending;
+  assert.equal(result.action, "cancel");
+});
+
+test("Review & Refine cursor activates model, input, run, and done rows", async () => {
+  const harness = createOverlayHarness();
+  const session = overlaySession();
+  const runs: Array<{ role: RefineRole; model: string; input: string }> = [];
+  const pending = renderRefineOverlay(harness.ctx, {
+    markdown: PLAN,
+    session,
+    roles: REFINE_ROLES,
+    async pickModel() { return { model: "provider/picked", label: "Picked model" }; },
+    async run(role, model, _label, userInput) {
+      runs.push({ role, model, input: userInput });
+      return { ok: true, output: "## Result\naccepted" };
+    },
+  });
+  assert.ok(harness.component);
+  harness.component.render(80);
+
+  harness.component.handleInput("\x1b[A");
+  harness.component.handleInput("\x1b[A");
+  harness.component.handleInput("\r");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(session.currentModel.model, "provider/picked");
+
+  harness.component.handleInput("\x1b[B");
+  harness.component.handleInput("\r");
+  harness.component.handleInput("focus acceptance");
+  harness.component.handleInput("\r");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(runs, [{ role: "reviewer", model: "provider/picked", input: "focus acceptance" }]);
+
+  harness.component.handleInput("\x1b[B");
+  harness.component.handleInput("\x1b[B");
+  harness.component.handleInput("\r");
+  const result = await pending;
+  assert.equal(result.action, "done");
+  assert.equal(result.latestOutput, "## Result\naccepted");
+});
+
+test("Review & Refine overlay scrolls long previews and keeps shortcut compatibility", async () => {
+  const harness = createOverlayHarness();
+  const session = overlaySession();
+  const pending = renderRefineOverlay(harness.ctx, {
+    markdown: Array.from({ length: 50 }, (_, index) => `Plan line ${index + 1}`).join("\n\n"),
+    session,
+    roles: REFINE_ROLES,
+    async pickModel() { return { model: "provider/shortcut", label: "Shortcut model" }; },
+    async run() { return { ok: true, output: "shortcut output" }; },
+  });
+  assert.ok(harness.component);
+  let rendered = harness.component.render(80).join("\n");
+  assert.match(rendered, /Plan · 1-/);
+  harness.component.handleInput("\x1b[6~");
+  rendered = harness.component.render(80).join("\n");
+  assert.match(rendered, /Plan · 6-/);
+
+  harness.component.handleInput("m");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(session.currentModel.model, "provider/shortcut");
+  harness.component.handleInput("i");
+  harness.component.handleInput("\x1b");
+  harness.component.handleInput("d");
+  const result = await pending;
+  assert.equal(result.action, "done");
+});
 
 test("REFINE_ROLES defines four roles with distinct labels and appliesAs", () => {
   const roles = Object.keys(REFINE_ROLES) as RefineRole[];
