@@ -41,6 +41,11 @@ export interface AgentLastOutcome {
 	settledAt: number;
 }
 
+export interface AgentConversationEntry {
+	role: "user" | "assistant";
+	text: string;
+}
+
 export interface AgentRow {
 	correlationId: string;
 	parentCorrelationId?: string;
@@ -48,6 +53,8 @@ export interface AgentRow {
 	name: string | undefined;
 	role: string;
 	task: string;
+	/** Bounded turn-aware conversation reconstructed from lifecycle events. */
+	conversation?: AgentConversationEntry[];
 	status: AgentStatus;
 	phase?: string;
 	lastOutcome?: AgentLastOutcome;
@@ -72,6 +79,8 @@ export interface AgentRow {
 	error?: string;
 	/** Current tool name while running, from the progress snapshot's recent tools. */
 	activeTool?: string;
+	/** Recent tool history for the current turn. */
+	recentTools?: Array<{ name: string; status: string; argsPreview?: string }>;
 	/** Redacted one-line argument summary of the current tool call. */
 	activeToolArgs?: string;
 	requestedModel?: string;

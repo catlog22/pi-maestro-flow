@@ -64,9 +64,20 @@ export function sessionDetailBodyLength(
 ): number {
 	const row = rows.find((candidate) => candidate.correlationId === viewingId);
 	if (!row) return 0;
-	let total = row.tail?.trim()
-		? wrapTextWithAnsi(row.tail.trim(), Math.max(1, width - 2)).length
-		: row.status === "running" || row.status === "retrying" ? 1 : 0;
+	const bodyWidth = Math.max(1, width - 4);
+	let total = 0;
+	if (row.task?.trim()) total += wrapTextWithAnsi(row.task.trim(), bodyWidth).length;
+	if (row.conversation?.length) {
+		for (const entry of row.conversation) {
+			total += wrapTextWithAnsi(entry.text, bodyWidth).length;
+		}
+	} else if (row.tail?.trim()) {
+		total += wrapTextWithAnsi(row.tail.trim(), Math.max(1, width - 2)).length;
+	} else if (row.status === "running" || row.status === "retrying") {
+		total += 1;
+	}
+	total += (row.recentTools ?? []).filter((tool) => tool.status !== "running").slice(-3).length;
+	if (row.dependencies?.length) total += 1;
 	if (row.activeTool) total += 1;
 	if (row.error) total += 1;
 	return total;
@@ -91,7 +102,10 @@ export function renderSessionDetail(
 	const label = row.name || row.role || row.agent || "agent";
 	const role = row.role && row.role !== label ? `(${row.role})` : "";
 	const duration = formatDuration(Math.max(0, (row.finishedAt ?? now) - row.startedAt));
+	const model = row.resolvedModel ?? row.requestedModel;
 	const meta = [
+		row.phase ? row.phase : "",
+		model ? model : "",
 		row.toolCount !== undefined ? tuiT("common.tools", { count: row.toolCount }) : "",
 		row.inputTokens !== undefined || row.outputTokens !== undefined
 			? tuiT("widget.agent.inputOutput", {
@@ -120,27 +134,53 @@ export function renderSessionDetail(
 	const lines: string[] = [header];
 
 	const body: string[] = [];
-	const tail = row.tail?.trim();
-	if (tail) {
-		for (const line of wrapTextWithAnsi(tail, Math.max(1, w - 2))) {
-			body.push(theme.fg("dim", `  ${line}`));
+	const pushWrapped = (text: string, prefix: string, color: ThemeColor): void => {
+		const available = Math.max(1, w - visibleWidth(prefix));
+		const wrapped = wrapTextWithAnsi(text.trim(), available);
+		for (let index = 0; index < wrapped.length; index++) {
+			const marker = index === 0 ? prefix : " ".repeat(visibleWidth(prefix));
+			body.push(theme.fg(color, `${marker}${wrapped[index] ?? ""}`));
 		}
-	} else if (status === "running" || status === "retrying") {
-		if (status === "running" && !row.activeTool) {
-			// No text has streamed yet: the model is producing its first response
-			// (thinking deltas never reach lastMessage). A bare "working…" can sit
-			// unchanged for minutes there, so name the state and show how long the
-			// silence has lasted — a live agent stays distinguishable from a stuck one.
-			const idleMs = Math.max(0, now - row.lastActivityAt);
-			const idle = idleMs >= 5_000 ? ` · ${formatDuration(idleMs)}` : "";
-			body.push(theme.fg("dim", `  ${tuiT("session.thinking")}${idle}`));
-		} else {
-			body.push(theme.fg("dim", `  ${tuiT("session.working")}`));
+	};
+
+	if (row.task?.trim()) pushWrapped(row.task, `  ${theme.fg("accent", "›")} `, "muted");
+	if (row.conversation?.length) {
+		for (const entry of row.conversation) {
+			const marker = entry.role === "user" ? "›" : "│";
+			const color: ThemeColor = entry.role === "user" ? "accent" : "dim";
+			pushWrapped(entry.text, `  ${theme.fg(color, marker)} `, color);
 		}
-	} else if (status === "stalled") {
-		body.push(theme.fg("error", `  ${tuiT("session.noActivity", {
-			duration: formatDuration(Math.max(0, now - row.lastActivityAt)),
-		})}`));
+	} else {
+		const tail = row.tail?.trim();
+		if (tail) {
+			for (const line of wrapTextWithAnsi(tail, Math.max(1, w - 2))) {
+				body.push(theme.fg("dim", `  ${line}`));
+			}
+		} else if (status === "running" || status === "retrying") {
+			if (status === "running" && !row.activeTool) {
+				// No text has streamed yet: the model is producing its first response
+				// (thinking deltas never reach lastMessage). A bare "working…" can sit
+				// unchanged for minutes there, so name the state and show how long the
+				// silence has lasted — a live agent stays distinguishable from a stuck one.
+				const idleMs = Math.max(0, now - row.lastActivityAt);
+				const idle = idleMs >= 5_000 ? ` · ${formatDuration(idleMs)}` : "";
+				body.push(theme.fg("dim", `  ${tuiT("session.thinking")}${idle}`));
+			} else {
+				body.push(theme.fg("dim", `  ${tuiT("session.working")}`));
+			}
+		} else if (status === "stalled") {
+			body.push(theme.fg("error", `  ${tuiT("session.noActivity", {
+				duration: formatDuration(Math.max(0, now - row.lastActivityAt)),
+			})}`));
+		}
+	}
+	for (const tool of (row.recentTools ?? []).filter((candidate) => candidate.status !== "running").slice(-3)) {
+		const statusGlyph = tool.status === "failed" || tool.status === "error" ? "✗" : "✓";
+		const args = tool.argsPreview ? ` ${tool.argsPreview}` : "";
+		body.push(truncateToWidth(theme.fg(tool.status === "failed" || tool.status === "error" ? "error" : "muted", `  ${statusGlyph} ${tool.name}${args}`), w, "…"));
+	}
+	if (row.dependencies?.length) {
+		body.push(theme.fg("dim", `  ↳ #${row.dependencies.map((dependency) => dependency + 1).join(", #")}`));
 	}
 	if (row.activeTool) {
 		const toolLine = row.activeToolArgs

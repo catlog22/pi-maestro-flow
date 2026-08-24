@@ -29,6 +29,17 @@ test("started adds a running row with derived role and label", () => {
 	assert.equal(row.lastActivityAt, 1000);
 });
 
+test("started prefers the original dispatch task over the display name", () => {
+	const s = new AgentsStore();
+	s.applyStarted({
+		correlationId: "c1",
+		agent: "explorer",
+		name: "scan",
+		task: "Inspect authentication middleware and report every caller.",
+	}, 1);
+	assert.equal(s.snapshot()[0].task, "Inspect authentication middleware and report every caller.");
+});
+
 test("expected-silence phases use the shared bounded stall deadline", () => {
 	const s = new AgentsStore();
 	const startedAt = 1_000;
@@ -108,6 +119,45 @@ test("progress message projects teammate tools, tokens, status and last message"
 	assert.equal(row.inputTokens, 1_000);
 	assert.equal(row.outputTokens, 200);
 	assert.equal(row.taskStatus, "running");
+});
+
+test("conversation retains user follow-ups and replaces cumulative assistant streaming", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "c1", agent: "executor", task: "Implement the footer" }, 1);
+	s.applyMessage({
+		correlationId: "c1",
+		isSend: true,
+		message: "Keep the mobile layout dense.",
+		lastActivityAt: 2,
+	}, 2);
+	s.applyMessage({ correlationId: "c1", lastMessage: "Reading layout" }, 3);
+	s.applyMessage({ correlationId: "c1", lastMessage: "Reading layout\nand tests" }, 4);
+	s.applyMessage({ correlationId: "c1", lastMessage: "Reading layout" }, 4);
+	s.applyMessage({
+		correlationId: "c1",
+		recentTools: [
+			{ name: "read", status: "completed", argsPreview: "src/footer.ts" },
+			{ name: "edit", status: "running", argsPreview: "src/footer.ts" },
+		],
+	}, 5);
+
+	const row = s.snapshot()[0];
+	assert.equal(row.task, "Implement the footer");
+	assert.deepEqual(row.conversation, [
+		{ role: "user", text: "Keep the mobile layout dense." },
+		{ role: "assistant", text: "Reading layout\nand tests" },
+	]);
+	assert.deepEqual(row.recentTools, [
+		{ name: "read", status: "completed", argsPreview: "src/footer.ts" },
+		{ name: "edit", status: "running", argsPreview: "src/footer.ts" },
+	]);
+});
+
+test("failed send feedback is not recorded as user conversation", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "c1", agent: "executor" }, 1);
+	s.applyMessage({ correlationId: "c1", isSend: true, sendError: true, message: "delivery failed" }, 2);
+	assert.equal(s.snapshot()[0].conversation, undefined);
 });
 
 test("graph progress updates the task row instead of flattening child state onto parent", () => {

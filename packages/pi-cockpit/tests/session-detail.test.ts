@@ -133,6 +133,36 @@ test("renderSessionDetail: explicit session view keeps content and actionable st
 	assert.equal(sessionDetailBodyLength(rows, "c1", 120), 3);
 });
 
+test("renderSessionDetail: work detail includes task, conversation, model and recent tools", () => {
+	const rows = [agent({
+		status: "running",
+		task: "Inspect the observe pipeline",
+		conversation: [
+			{ role: "user", text: "Preserve multiline output." },
+			{ role: "assistant", text: "Tracing snapshots\nand transcript rows." },
+		],
+		resolvedModel: "provider/model",
+		phase: "tool-execution",
+		recentTools: [
+			{ name: "read", status: "completed", argsPreview: "src/observe.ts" },
+			{ name: "edit", status: "running", argsPreview: "src/observe.ts" },
+		],
+		activeTool: "edit",
+		activeToolArgs: "src/observe.ts",
+	})];
+	const lines = renderSessionDetail(rows, "c1", 120, theme as Theme, 20);
+	const text = lines.join("\n");
+	assert.match(lines[0], /tool-execution/);
+	assert.match(lines[0], /provider\/model/);
+	assert.match(text, /Inspect the observe pipeline/);
+	assert.match(text, /Preserve multiline output/);
+	assert.match(text, /Tracing snapshots/);
+	assert.match(text, /and transcript rows/);
+	assert.match(text, /✓ read src\/observe\.ts/);
+	assert.match(text, /edit/);
+	assert.equal(sessionDetailBodyLength(rows, "c1", 120), 6);
+});
+
 test("renderSessionDetail: active tool and error lines render", () => {
 	const lines = renderSessionDetail(
 		[agent({ status: "running", activeTool: "read", error: "boom" })],

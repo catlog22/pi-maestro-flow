@@ -25,6 +25,9 @@ function isAgentStalled(
 }
 /** Selected-session output kept for the expandable fixed detail region. */
 export const SESSION_CONTENT_MAX = 2_048;
+export const CONVERSATION_ENTRY_MAX = 8_192;
+export const CONVERSATION_MAX_ENTRIES = 16;
+export const RECENT_TOOL_MAX = 8;
 
 // Every string here originates in an LLM-authored teammate event. A raw newline
 // would split one widget row into several physical terminal rows and a raw escape
@@ -49,12 +52,56 @@ function truncateSessionContent(raw: string): string {
 	return truncateText(raw, SESSION_CONTENT_MAX);
 }
 
+function conversationText(raw: string): string {
+	const lines = raw
+		.replace(/\r\n/g, "\n")
+		.split("\n")
+		.map((line) => clean(line))
+		.filter(Boolean);
+	const text = lines.join("\n");
+	return text.length > CONVERSATION_ENTRY_MAX
+		? text.slice(0, CONVERSATION_ENTRY_MAX - 1) + "…"
+		: text;
+}
+
+function appendConversation(row: AgentRow, role: "user" | "assistant", raw: string): void {
+	const text = conversationText(raw);
+	if (!text) return;
+	const entries = [...(row.conversation ?? [])];
+	const last = entries.at(-1);
+	if (last?.role === role && last.text === text) return;
+	if (role === "assistant" && last?.role === "assistant") {
+		if (text.startsWith(last.text)) last.text = text;
+		else if (last.text.startsWith(text)) return;
+		else entries.push({ role, text });
+	} else {
+		entries.push({ role, text });
+	}
+	row.conversation = entries.slice(-CONVERSATION_MAX_ENTRIES);
+}
+
+function normalizedRecentTools(
+	tools: Array<string | { name?: string; status?: string; argsPreview?: string }>,
+): NonNullable<AgentRow["recentTools"]> {
+	return tools.flatMap((tool) => {
+		if (typeof tool === "string") {
+			const name = truncateStatusText(tool);
+			return name ? [{ name, status: "unknown" }] : [];
+		}
+		const name = truncateStatusText(tool.name ?? "");
+		if (!name) return [];
+		const status = truncateStatusText(tool.status ?? "unknown") || "unknown";
+		const argsPreview = typeof tool.argsPreview === "string" ? truncateText(tool.argsPreview, 140) : "";
+		return [{ name, status, ...(argsPreview ? { argsPreview } : {}) }];
+	}).slice(-RECENT_TOOL_MAX);
+}
+
 // Store inputs are compatibility-relaxed projections of the versioned public
 // contract. The event boundary validates discriminators and identifiers; the
 // optional fields let older teammate versions continue to feed the same store.
 export type StartedPayload = Pick<TeammateStartedEvent, "correlationId" | "agent">
 	& Partial<Omit<TeammateStartedEvent, "correlationId" | "agent" | "startedAt">>
-	& { startedAt?: number | string };
+	& { startedAt?: number | string; task?: string };
 export type ProgressPayload = Pick<AgentProgressSnapshot, "correlationId" | "agent" | "taskIndex">
 	& Partial<Omit<AgentProgressSnapshot, "correlationId" | "agent" | "taskIndex" | "startedAt" | "completedAt">>
 	& { startedAt?: number | string; completedAt?: number | string };
@@ -66,7 +113,8 @@ export type MessagePayload = Partial<Omit<
 	recentTools?: Array<string | { name?: string; status?: string; argsPreview?: string }>;
 	isSend?: boolean;
 	isInteraction?: boolean;
-	/** Compatibility with pre-v1 progress deltas; discriminated send events are ignored. */
+	sendError?: boolean;
+	/** Compatibility with pre-v1 progress deltas; discriminated send events are retained as user conversation. */
 	message?: string;
 };
 export type CompletePayload = Pick<TeammateCompleteEvent, "correlationId" | "exitCode">
@@ -264,7 +312,9 @@ export class AgentsStore {
 			agent: clean(p.agent) || prev?.agent || "",
 			name: p.name === undefined ? prev?.name : clean(p.name),
 			role: deriveRole(p.agent, p.name),
-			task: prev?.task ?? clean(p.name),
+			task: typeof p.task === "string"
+				? conversationText(p.task)
+				: prev?.task ?? clean(p.name),
 			status: nextStatus,
 			phase: typeof p.phase === "string" ? clean(p.phase) : prev?.phase,
 			lastOutcome: p.lastOutcome
@@ -300,8 +350,14 @@ export class AgentsStore {
 	}
 
 	applyMessage(p: MessagePayload, now = Date.now()): void {
-		if (p.isSend === true || p.isInteraction === true) return;
+		if (p.isInteraction === true) return;
 		if (typeof p.correlationId !== "string" || p.correlationId.length === 0) return;
+		if (p.isSend === true) {
+			const row = this.roster.get(p.correlationId);
+			if (!row || p.sendError === true || typeof p.message !== "string") return;
+			appendConversation(row, "user", p.message);
+			return;
+		}
 		if (p.progress) {
 			for (const progress of p.progress) {
 				if (typeof progress.correlationId !== "string" || progress.correlationId.length === 0) continue;
@@ -342,8 +398,12 @@ export class AgentsStore {
 		const progressActivity = p.progress?.find((progress) => progress.correlationId === targetId)?.lastActivityAt;
 		row.lastActivityAt = normalizeStartedAt(p.lastActivityAt ?? progressActivity, now);
 		const tail = p.lastMessage ?? p.message;
-		if (typeof tail === "string" && tail.length > 0) row.tail = truncateSessionContent(tail);
+		if (typeof tail === "string" && tail.length > 0) {
+			row.tail = truncateSessionContent(tail);
+			appendConversation(row, "assistant", tail);
+		}
 		if (p.recentTools) {
+			row.recentTools = normalizedRecentTools(p.recentTools);
 			const tool = latestTool(p.recentTools);
 			if (tool) {
 				row.activeTool = tool.name;
@@ -548,6 +608,7 @@ export class AgentsStore {
 		row.dependencies = Array.isArray(p.dependencies) ? [...p.dependencies] : [];
 		row.lastActivityAt = normalizeStartedAt(p.lastActivityAt, now);
 		if (p.recentTools) {
+			row.recentTools = normalizedRecentTools(p.recentTools);
 			const tool = latestTool(p.recentTools);
 			if (tool) {
 				row.activeTool = tool.name;
@@ -574,6 +635,7 @@ export class AgentsStore {
 		else row.attemptedModels = p.attemptedModels.map((model) => clean(model)).filter(Boolean);
 		if (typeof p.lastMessage === "string" && p.lastMessage.length > 0) {
 			row.tail = truncateSessionContent(p.lastMessage);
+			appendConversation(row, "assistant", p.lastMessage);
 		}
 	}
 

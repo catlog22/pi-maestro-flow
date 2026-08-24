@@ -287,8 +287,6 @@ function isStartedPayload(value: unknown): value is StartedPayload {
 
 function isProgressPayload(value: unknown): value is MessagePayload {
 	return isRecord(value)
-		&& value.isSend !== true
-		&& value.isInteraction !== true
 		&& typeof value.correlationId === "string"
 		&& value.correlationId.length > 0;
 }
