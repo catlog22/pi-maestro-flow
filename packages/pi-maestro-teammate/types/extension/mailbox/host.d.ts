@@ -10,6 +10,7 @@
  * mailbox; steer/abort keep the legacy direct path. Disk errors are surfaced,
  * never silently falling back to direct stdin.
  */
+import type { MailboxDispatchDisposition } from "./consumer.ts";
 import { MailboxService } from "./service.ts";
 import { MailboxRollout, type RolloutMode } from "./rollout.ts";
 import type { MailboxAuthority } from "./router.ts";
@@ -39,11 +40,13 @@ export interface MailboxHostOptions {
     teamId: string;
     /** Convert a mailbox envelope back into an actual stdin injection. */
     inject: (envelope: {
+        messageId?: string;
         senderId: string;
         recipientCorrelationId: string;
         payload: string;
         mode: string;
-    }) => Promise<void>;
+        kind: "lifecycle" | "result" | "steer" | "follow_up" | "task" | "control";
+    }) => Promise<MailboxDispatchDisposition | void>;
     mode?: RolloutMode;
     pollMs?: number;
     /** GC sweep interval (default 10 minutes). */

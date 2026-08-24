@@ -256,10 +256,31 @@ function boundedDeferredContext(message: string, maxChars: number): string {
   return `${message.slice(0, maxChars - DEFERRED_AGENT_CONTEXT_TRUNCATION.length)}${DEFERRED_AGENT_CONTEXT_TRUNCATION}`;
 }
 
+function deferredContextMessageIds(message: DeferredContextMessage): string[] {
+  return [
+    ...(message.messageId === undefined ? [] : [message.messageId]),
+    ...(message.messageIds ?? []),
+  ];
+}
+
 function boundedDeferredContextMessages(
   messages: readonly DeferredContextMessage[],
 ): DeferredContextMessage[] {
-  const retained = messages.slice(-DEFERRED_AGENT_CONTEXT_MAX_MESSAGES);
+  let retained: DeferredContextMessage[];
+  if (messages.length <= DEFERRED_AGENT_CONTEXT_MAX_MESSAGES) {
+    retained = [...messages];
+  } else {
+    const recentCount = DEFERRED_AGENT_CONTEXT_MAX_MESSAGES - 1;
+    const collapsed = messages.slice(0, -recentCount);
+    const collapsedIds = [...new Set(collapsed.flatMap(deferredContextMessageIds))];
+    retained = [
+      {
+        content: `[${collapsed.length} older status update${collapsed.length === 1 ? "" : "s"} omitted]`,
+        ...(collapsedIds.length === 0 ? {} : { messageIds: collapsedIds }),
+      },
+      ...messages.slice(-recentCount),
+    ];
+  }
   if (retained.length === 0) return [];
   const perMessage = Math.floor(DEFERRED_AGENT_CONTEXT_MAX_CHARS / retained.length);
   return retained.map((message) => ({
@@ -316,13 +337,13 @@ export function shouldPublishAdditionalTurn(
 ): boolean {
   if (terminalStatusForResult(result) !== "completed" || result.exitCode !== 0) return true;
   if (result.structuredOutput !== undefined) return true;
-  const newWarning = result.warnings?.some((warning) => {
+  let newWarning = false;
+  for (const warning of result.warnings ?? []) {
     const normalized = warning.trim();
-    if (normalized.length === 0) return false;
-    if (knownWarnings?.has(normalized)) return false;
+    if (normalized.length === 0) continue;
+    if (!knownWarnings?.has(normalized)) newWarning = true;
     knownWarnings?.add(normalized);
-    return true;
-  }) ?? false;
+  }
   if (newWarning) return true;
   return result.messages.some((message) =>
     message.role !== "user" && message.content.trim().length > 0

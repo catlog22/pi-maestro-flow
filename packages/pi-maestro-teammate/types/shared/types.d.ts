@@ -230,6 +230,12 @@ export interface TeammateInteractionRecord {
     createdAt: number;
     payload: Record<string, unknown>;
 }
+export interface DeferredContextMessage {
+    content: string;
+    /** Durable mailbox records acknowledged only after substantive delivery succeeds. */
+    messageId?: string;
+    messageIds?: string[];
+}
 export interface ActiveAgent {
     agent: string;
     name?: string;
@@ -248,6 +254,8 @@ export interface ActiveAgent {
     runtimeGeneration?: number;
     /** Starts a cold runtime from the last persisted session and delivers one prompt. */
     restart?: (message: string) => boolean;
+    /** Resolves when a cold-resume child accepts the initial substantive prompt. */
+    restartDelivery?: Promise<boolean>;
     restartPending?: Promise<void>;
     sessionId?: string;
     sessionFile?: string;
@@ -275,7 +283,7 @@ export interface ActiveAgent {
     pendingInteractions?: Map<string, TeammateInteractionRecord>;
     inbox: MessageEnvelope[];
     /** Status-only peer context held until a substantive message starts the next turn. */
-    deferredContextMessages?: string[];
+    deferredContextMessages?: DeferredContextMessage[];
     outputLog: string[];
     pendingResolve?: (result: SingleResult) => void;
     lastActivityAt: number;

@@ -28,6 +28,7 @@ export interface MailboxRolloutOptions {
         recipientCorrelationId: string;
         payload: string;
         mode: string;
+        kind: "lifecycle" | "result" | "steer" | "follow_up" | "task" | "control";
     }) => Promise<void>;
     now?: () => number;
 }

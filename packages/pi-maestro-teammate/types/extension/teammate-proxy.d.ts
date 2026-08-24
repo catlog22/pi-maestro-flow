@@ -12,7 +12,7 @@ import type { RunTeammateParams } from "../runs/execution.ts";
 import type { TeammateState, ChildAgentCallSnapshot } from "../shared/types.ts";
 import { type TeammateModelCapability } from "../models/model-catalog.ts";
 import type { TeammateThinkingInput } from "../shared/thinking.ts";
-import type { SessionMessageResult } from "../sessions/session-core.ts";
+import { type SessionMessageResult } from "../sessions/session-core.ts";
 import type { TeammateRuntimeOptions } from "./index.ts";
 import type { RelayedQuestion, RelayedQuestionOption, TeammateInteractionQueue } from "./teammate-helpers.ts";
 /**

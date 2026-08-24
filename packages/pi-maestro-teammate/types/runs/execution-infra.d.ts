@@ -694,6 +694,8 @@ export declare function createProgress(agent: string, startTime: number): AgentP
 export declare const CHILD_TERMINATION_GRACE_MS = 5000;
 export declare const RESULT_READY_GRACE_MS = 60000;
 export declare const RESULT_READY_GRACE_EXTENDED_MS = 120000;
+/** Select one consistent lifecycle grace for text and structured-output lanes. */
+export declare function resultReadyGraceMsFor(completedToolCount: number, overrideMs?: number): number;
 export declare const STRUCTURED_OUTPUT_RECOVERY_TIMEOUT_MS = 60000;
 export declare const OUTPUT_LIMIT_RECOVERY_TIMEOUT_MS: number;
 export declare const FIRST_ACTIVITY_TIMEOUT_MS = 120000;

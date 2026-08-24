@@ -25,6 +25,7 @@ export interface ConsumerErrorEvent {
     messageId: string;
     error: string;
 }
+export type MailboxDispatchDisposition = "applied" | "deferred";
 export interface MailboxConsumerOptions {
     store: MailboxFileStore;
     router: MailboxRouter;
@@ -35,7 +36,7 @@ export interface MailboxConsumerOptions {
     /** Workspace ID the consumer serves; messages from other workspaces are skipped. */
     workspaceId: string;
     /** Callback invoked when a message is ready for injection. */
-    onDispatch: (envelope: MailboxEnvelope) => Promise<void>;
+    onDispatch: (envelope: MailboxEnvelope) => Promise<MailboxDispatchDisposition | void>;
     /** Poll interval override (default 50ms). */
     pollMs?: number;
     now?: () => number;

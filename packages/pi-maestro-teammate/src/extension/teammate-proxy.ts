@@ -2043,6 +2043,16 @@ export async function handleProxyRequest(
           target.resultReadyAt = undefined;
           target.lastActivityAt = Date.now();
           nestedColdRestarting.add(target.correlationId);
+          let restartDeliverySettled = false;
+          let settleRestartDelivery!: (accepted: boolean) => void;
+          const restartDelivery = new Promise<boolean>((resolve) => {
+            settleRestartDelivery = (accepted) => {
+              if (restartDeliverySettled) return;
+              restartDeliverySettled = true;
+              resolve(accepted);
+            };
+          });
+          target.restartDelivery = restartDelivery;
           const ownsRuntime = (): boolean =>
             state.activeRuns.get(target.correlationId) === target
             && target.runtimeGeneration === generation;
@@ -2058,7 +2068,9 @@ export async function handleProxyRequest(
           };
           const onChildSpawned = runOpts.onChildSpawned;
           restartOptions.onChildSpawned = (stdin, sendControl, sessionDir, childId, callbackGeneration) => {
-            if (ownsRuntime()) onChildSpawned?.(stdin, sendControl, sessionDir, childId ?? target.correlationId, callbackGeneration);
+            if (!ownsRuntime()) return;
+            onChildSpawned?.(stdin, sendControl, sessionDir, childId ?? target.correlationId, callbackGeneration);
+            settleRestartDelivery(true);
           };
           const onChildEvent = runOpts.onChildEvent;
           restartOptions.onChildEvent = (event) => {
@@ -2150,7 +2162,9 @@ export async function handleProxyRequest(
             target.outputLog.push(`[${new Date().toISOString().slice(11, 19)}] ! cold resume failed: ${text}`);
             trimAgentBuffers(target, true);
           }).finally(() => {
+            settleRestartDelivery(false);
             nestedColdRestarting.delete(target.correlationId);
+            if (target.restartDelivery === restartDelivery) target.restartDelivery = undefined;
             if (!ownsRuntime()) return;
             if (target.status === "failed" && existsSync(checkpoint)) {
               target.status = "sleeping";
@@ -2769,6 +2783,7 @@ export async function handleProxyRequest(
         });
         deferAgentContextMessage(agent, deferred);
         const now = Date.now();
+        agent.promptSeq = (agent.promptSeq ?? 0) + 1;
         agent.inbox.push({
           id: randomUUID(),
           from: sender.from,
@@ -2885,8 +2900,13 @@ export async function handleProxyRequest(
           }});
           return;
         }
+        const restartDelivery = agent.restartDelivery;
+        if (restartDelivery) {
+          void restartDelivery.then((accepted) => {
+            if (!accepted) restoreDeferredAgentContext(agent, deferredContext);
+          }).catch(() => restoreDeferredAgentContext(agent, deferredContext));
+        }
         const now = Date.now();
-        agent.promptSeq = (agent.promptSeq ?? 0) + 1;
         agent.inbox.push({
           id: randomUUID(),
           from: spawnedBy ?? "proxy",

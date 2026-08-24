@@ -74,7 +74,7 @@ export declare const TeammateSendParams: Type.TObject<{
     to: Type.TString;
     message: Type.TOptional<Type.TString>;
     mode: Type.TOptional<Type.TUnsafe<"follow_up" | "steer" | "abort">>;
-    kind: Type.TOptional<Type.TUnsafe<"status" | "coordination" | "request" | "supervision">>;
+    kind: Type.TOptional<Type.TUnsafe<"coordination" | "request" | "supervision">>;
 }>;
 export declare const TeammateListParams: Type.TObject<{
     view: Type.TOptional<Type.TUnsafe<"active" | "windows" | "named" | "all" | "roles" | "inbox">>;

@@ -253,8 +253,9 @@ export interface TeammateInteractionRecord {
 
 export interface DeferredContextMessage {
   content: string;
-  /** Durable mailbox record acknowledged only after substantive delivery succeeds. */
+  /** Durable mailbox records acknowledged only after substantive delivery succeeds. */
   messageId?: string;
+  messageIds?: string[];
 }
 
 export interface ActiveAgent {
@@ -275,6 +276,8 @@ export interface ActiveAgent {
   runtimeGeneration?: number;
   /** Starts a cold runtime from the last persisted session and delivers one prompt. */
   restart?: (message: string) => boolean;
+  /** Resolves when a cold-resume child accepts the initial substantive prompt. */
+  restartDelivery?: Promise<boolean>;
   restartPending?: Promise<void>;
   sessionId?: string;
   sessionFile?: string;

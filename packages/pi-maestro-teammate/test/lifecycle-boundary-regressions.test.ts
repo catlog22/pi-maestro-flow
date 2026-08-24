@@ -1197,6 +1197,20 @@ test("deferred status context is bounded and reserved atomically", () => {
   assert.equal(restored.length, 2);
   assert.match(restored[0]?.content ?? "", /status context truncated/);
   assert.equal(restored[1]?.content, "newer status");
+
+  const durableAgent = { deferredContextMessages: undefined } as unknown as ActiveAgent;
+  const expectedIds = Array.from({ length: 17 }, (_, index) =>
+    `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`
+  );
+  expectedIds.forEach((messageId, index) => {
+    deferAgentContextMessage(durableAgent, `status ${index}`, messageId);
+  });
+  assert.equal(durableAgent.deferredContextMessages?.length, 16);
+  const retainedIds = (durableAgent.deferredContextMessages ?? []).flatMap((entry) => [
+    ...(entry.messageId === undefined ? [] : [entry.messageId]),
+    ...(entry.messageIds ?? []),
+  ]);
+  assert.deepEqual(new Set(retainedIds), new Set(expectedIds));
 });
 
 test("empty successful additional turns do not need a model notification", () => {
@@ -1218,6 +1232,10 @@ test("empty successful additional turns do not need a model notification", () =>
   assert.equal(shouldPublishAdditionalTurn({ ...base, warnings: ["provider warning"] }, knownWarnings), false);
   assert.equal(shouldPublishAdditionalTurn({ ...base, warnings: ["new warning"] }, knownWarnings), true);
   assert.equal(shouldPublishAdditionalTurn({ ...base, warnings: ["new warning"] }, knownWarnings), false);
+  const multiWarningSet = new Set<string>();
+  assert.equal(shouldPublishAdditionalTurn({ ...base, warnings: ["warning A", "warning B"] }, multiWarningSet), true);
+  assert.deepEqual(multiWarningSet, new Set(["warning A", "warning B"]));
+  assert.equal(shouldPublishAdditionalTurn({ ...base, warnings: ["warning A", "warning B"] }, multiWarningSet), false);
   assert.equal(shouldPublishAdditionalTurn({ ...base, exitCode: 1, terminalStatus: "failed" }), true);
 });
 
@@ -1318,6 +1336,99 @@ test("closed runtime cold-resumes the same logical agent from its persisted sess
     runOptions[0].onChildClosed?.(logicalId, 1, { code: 1, signal: null, settled: true });
     assert.equal(state.activeRuns.get(logicalId)?.runtimeGeneration, 2);
     assert.equal(state.activeRuns.get(logicalId)?.stdin, replacementStdin, "stale close cannot detach replacement runtime");
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("cold-resume failure restores deferred durable context", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "teammate-cold-resume-failure-"));
+  const parentSession = path.join(tempDir, "parent.jsonl");
+  fs.writeFileSync(parentSession, "{}\n");
+  let child: ChildProcess | undefined;
+  let spawnCount = 0;
+  let checkpoint = "";
+  const spawnChildProcess = ((_command: string, args: string[]) => {
+    spawnCount += 1;
+    if (spawnCount > 1) throw new Error("resume spawn failed");
+    child = new EventEmitter() as ChildProcess;
+    const stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      connected: true,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      send(_message: unknown, callback?: (error: Error | null) => void) {
+        callback?.(null);
+        return true;
+      },
+      kill() { return true; },
+    });
+    queueMicrotask(() => {
+      const sessionDir = args[args.indexOf("--session-dir") + 1];
+      fs.mkdirSync(sessionDir, { recursive: true });
+      checkpoint = path.join(sessionDir, "child.jsonl");
+      fs.writeFileSync(checkpoint, "{}\n");
+      child!.emit("message", {
+        type: "teammate_session_ready",
+        sessionId: "cold-failure-child",
+        sessionFile: checkpoint,
+      });
+      stdout.write(`${JSON.stringify(resultReadyTurn("first"))}\n`);
+      stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+    });
+    return child;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+
+  try {
+    const { teammate, teammateSend } = createHarness({
+      spawnChildProcess,
+      resultReadyGraceMs: 500,
+      onRunOptionsCreated(options) { options.waitForRetry = async () => false; },
+    });
+    const ctx = {
+      ...context(),
+      sessionManager: {
+        getSessionFile: () => parentSession,
+        getSessionId: () => "parent-session",
+      },
+    };
+    const first = await teammate.execute(
+      "cold-failure-root",
+      { tasks: [{ agent: "general", name: "cold-failure-worker", prompt: "first" }], background: false },
+      new AbortController().signal,
+      undefined,
+      ctx,
+    );
+    const logicalId = first.details.results[0].correlationId;
+    Object.assign(child!, { exitCode: 0 });
+    child!.emit("exit", 0, null);
+    child!.emit("close", 0, null);
+
+    const state = (globalThis as typeof globalThis & Record<symbol, unknown>)[
+      Symbol.for("pi-maestro-teammate.root-registry")
+    ] as TeammateState;
+    await waitFor(() => state.activeRuns.get(logicalId)?.status === "sleeping");
+    const sleeping = state.activeRuns.get(logicalId);
+    assert.ok(sleeping);
+    sleeping.deferredContextMessages = [{
+      content: "trusted status",
+      messageId: "00000000-0000-4000-8000-000000000099",
+    }];
+
+    const delivery = await teammateSend.execute(
+      "cold-failure-send",
+      { to: "cold-failure-worker", message: "continue", mode: "follow_up" },
+      new AbortController().signal,
+      undefined,
+      ctx,
+    );
+    assert.equal(delivery.isError, false);
+    await waitFor(() => sleeping.deferredContextMessages?.[0]?.messageId === "00000000-0000-4000-8000-000000000099");
+    assert.equal(spawnCount, 2);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

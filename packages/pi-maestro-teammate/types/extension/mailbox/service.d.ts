@@ -4,7 +4,7 @@
  * that root, proxy, and workspace agents share.
  */
 import { EventEmitter } from "node:events";
-import { MailboxConsumer } from "./consumer.ts";
+import { MailboxConsumer, type MailboxDispatchDisposition } from "./consumer.ts";
 import { MailboxFileStore } from "./file-store.ts";
 import { MailboxGC, QuotaAdmission } from "./gc.ts";
 import { type MailboxAuthority, MailboxRouter } from "./router.ts";
@@ -27,7 +27,7 @@ export interface MailboxServiceOptions {
     /** Owner ID of this service instance. */
     ownerId: string;
     /** Callback invoked when a message is ready for injection into the child. */
-    onDispatch: (envelope: MailboxEnvelope) => Promise<void>;
+    onDispatch: (envelope: MailboxEnvelope) => Promise<MailboxDispatchDisposition | void>;
     /** Poll interval for the consumer. */
     pollMs?: number;
     now?: () => number;

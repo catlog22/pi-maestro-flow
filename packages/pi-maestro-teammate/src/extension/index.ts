@@ -1939,14 +1939,19 @@ export default function registerTeammateExtension(
     const host = mailboxHost;
     if (!host) return;
     for (const entry of context) {
-      if (!entry.messageId) continue;
-      void host.service.acknowledge(entry.messageId).then((acknowledged) => {
-        if (!acknowledged) {
-          console.warn(`[pi-maestro-teammate] deferred context acknowledgement was not applied: ${entry.messageId}`);
-        }
-      }).catch((error) => {
-        console.warn(`[pi-maestro-teammate] deferred context acknowledgement failed: ${entry.messageId}`, error);
-      });
+      const messageIds = [
+        ...(entry.messageId === undefined ? [] : [entry.messageId]),
+        ...(entry.messageIds ?? []),
+      ];
+      for (const messageId of new Set(messageIds)) {
+        void host.service.acknowledge(messageId).then((acknowledged) => {
+          if (!acknowledged) {
+            console.warn(`[pi-maestro-teammate] deferred context acknowledgement was not applied: ${messageId}`);
+          }
+        }).catch((error) => {
+          console.warn(`[pi-maestro-teammate] deferred context acknowledgement failed: ${messageId}`, error);
+        });
+      }
     }
   }
 
@@ -1967,7 +1972,18 @@ export default function registerTeammateExtension(
         restoreDeferredAgentContext(agent, deferredContext);
         return { delivered: false, error: `Agent "${targetLabel}" has no restorable runtime.` };
       }
-      acknowledgeDeferredAgentContext(deferredContext);
+      const restartDelivery = agent.restartDelivery;
+      if (restartDelivery) {
+        void restartDelivery.then((accepted) => {
+          if (accepted) acknowledgeDeferredAgentContext(deferredContext);
+          else restoreDeferredAgentContext(agent, deferredContext);
+        }).catch(() => restoreDeferredAgentContext(agent, deferredContext));
+      } else {
+        // Custom synchronous restart implementations return true only after
+        // accepting the prompt; the built-in asynchronous path always exposes
+        // restartDelivery above.
+        acknowledgeDeferredAgentContext(deferredContext);
+      }
       const now = Date.now();
       agent.promptSeq = (agent.promptSeq ?? 0) + 1;
       agent.inbox.push({
@@ -4049,6 +4065,17 @@ export default function registerTeammateExtension(
           target.lastActivityAt = Date.now();
           coldRestarting.add(target.correlationId);
 
+          let restartDeliverySettled = false;
+          let settleRestartDelivery!: (accepted: boolean) => void;
+          const restartDelivery = new Promise<boolean>((resolve) => {
+            settleRestartDelivery = (accepted) => {
+              if (restartDeliverySettled) return;
+              restartDeliverySettled = true;
+              resolve(accepted);
+            };
+          });
+          target.restartDelivery = restartDelivery;
+
           const ownsRuntime = (): boolean =>
             state.activeRuns.get(target.correlationId) === target
             && target.runtimeGeneration === generation;
@@ -4064,6 +4091,7 @@ export default function registerTeammateExtension(
           options.onChildSpawned = (stdin, sendControl, sessionDir, childId, callbackGeneration) => {
             if (!ownsRuntime()) return;
             onChildSpawned?.(stdin, sendControl, sessionDir, childId ?? target.correlationId, callbackGeneration);
+            settleRestartDelivery(true);
           };
           const onChildEvent = options.onChildEvent;
           options.onChildEvent = (event) => {
@@ -4158,7 +4186,9 @@ export default function registerTeammateExtension(
             target.outputLog.push(`[${new Date().toISOString().slice(11, 19)}] ! cold resume failed: ${text}`);
             trimAgentBuffers(target, true);
           }).finally(() => {
+            settleRestartDelivery(false);
             coldRestarting.delete(target.correlationId);
+            if (target.restartDelivery === restartDelivery) target.restartDelivery = undefined;
             if (!ownsRuntime()) return;
             if (target.status === "failed" && existsSync(checkpoint)) {
               target.status = "sleeping";
