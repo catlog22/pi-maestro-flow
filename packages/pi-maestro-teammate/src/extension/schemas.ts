@@ -428,11 +428,11 @@ export const TeammateWaitParams = Type.Object({
 // ---------------------------------------------------------------------------
 
 export const ObserveParams = Type.Object({
-  action: Type.Unsafe<"status" | "wait" | "watch">({
+  action: Type.Unsafe<"status" | "diagnose" | "wait" | "watch">({
     type: "string",
-    enum: ["status", "wait", "watch"],
+    enum: ["status", "diagnose", "wait", "watch"],
     description:
-      '"status" takes a one-shot snapshot; "wait" blocks on a multi-target barrier; "watch" polls until timeoutMs and returns the full status-transition timeline.',
+      '"status" takes a one-shot snapshot; "diagnose" adds canonical runtime diagnosis; "wait" blocks on a multi-target barrier; "watch" polls until timeoutMs and returns the full status-transition timeline.',
   }),
   targets: Type.Array(
     Type.Object({
@@ -478,7 +478,10 @@ export const ObserveParams = Type.Object({
   additionalProperties: false,
   allOf: [
     {
-      if: { properties: { action: { const: "status" } }, required: ["action"] },
+      if: {
+        properties: { action: { enum: ["status", "diagnose"] } },
+        required: ["action"],
+      },
       then: { not: { anyOf: [
         { required: ["waitMode"] },
         { required: ["waitCount"] },

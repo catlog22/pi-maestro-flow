@@ -74,6 +74,59 @@ test("view=turns is forwarded to provider snapshots and restricted to status", a
   }
 });
 
+test("diagnose requests canonical provider detail without changing snapshot semantics", async () => {
+  let received: ObservationReadOptions | undefined;
+  const dispose = registerObservationProvider({
+    kind: "test-diagnose",
+    capabilities: { inspect: true, wait: true },
+    snapshot: (id, options) => {
+      received = options;
+      return {
+        ...snapshot("test-diagnose", id),
+        diagnosis: {
+          version: 1,
+          lifecycle: "running",
+          health: "stalled",
+          phase: "settling",
+          activity: "running",
+          toolActivity: "active",
+          resultReady: false,
+          reasonCode: "awaiting-agent-settled",
+          trigger: {
+            version: 1,
+            source: "unknown",
+            confidence: "unknown",
+            sender: { kind: "unknown" },
+          },
+          fallbackDisposition: "ineligible",
+        },
+      };
+    },
+    wait: async (id) => snapshot("test-diagnose", id, "completed"),
+  });
+  try {
+    const result = await observeTargets({
+      action: "diagnose",
+      targets: [{ kind: "test-diagnose", id: "worker" }],
+      detail: "full",
+    });
+    assert.equal(result.action, "diagnose");
+    assert.equal(result.reason, "snapshot");
+    assert.equal(received?.diagnose, true);
+    assert.equal(result.observations[0]?.diagnosis?.reasonCode, "awaiting-agent-settled");
+    await assert.rejects(
+      observeTargets({ action: "diagnose", targets: [{ kind: "test-diagnose", id: "worker" }], timeoutMs: 1 }),
+      /timeoutMs is supported only for wait and watch/,
+    );
+    await assert.rejects(
+      observeTargets({ action: "diagnose", targets: [{ kind: "test-diagnose", id: "worker" }], view: "turns" }),
+      /view="turns" is supported only for the status action/,
+    );
+  } finally {
+    dispose();
+  }
+});
+
 test("status observes mixed providers in target order", async () => {
   const disposeAgent = registerObservationProvider(provider("test-agent", async (id) => snapshot("test-agent", id, "completed")));
   const disposeJob = registerObservationProvider(provider("test-job", async (id) => snapshot("test-job", id, "completed")));

@@ -1,4 +1,6 @@
-export type ObservationAction = "status" | "wait" | "watch";
+import type { AgentRuntimeDiagnosisV1 } from "../../shared/types.ts";
+
+export type ObservationAction = "status" | "diagnose" | "wait" | "watch";
 export type ObservationDetail = "summary" | "tail" | "full";
 export type ObservationView = "live" | "turns";
 export type ObservationWaitMode = "all" | "any" | "count";
@@ -45,11 +47,15 @@ export interface ObservationSnapshot {
   lastResult?: string;
   /** Schema-valid structured output of a settled schema task (detail=full). */
   structuredOutput?: unknown;
+  /** Canonical orthogonal teammate diagnosis; present for supported diagnose snapshots. */
+  diagnosis?: AgentRuntimeDiagnosisV1;
 }
 
 export interface ObservationReadOptions {
   detail: ObservationDetail;
   lines: number;
+  /** Request a canonical runtime diagnosis in addition to the ordinary snapshot. */
+  diagnose?: boolean;
   /** "turns" lists the target session's turn history instead of the live snapshot (status only). */
   view?: ObservationView;
   /** 1-based turn index to expand when view="turns"; omitted lists all turns. */
@@ -173,7 +179,7 @@ function validate(params: ObserveParams): void {
   if (params.timeoutMs !== undefined && (!Number.isInteger(params.timeoutMs) || params.timeoutMs < 1)) {
     throw new Error("Observe timeoutMs must be a positive integer.");
   }
-  if (params.action === "status" && params.timeoutMs !== undefined) {
+  if ((params.action === "status" || params.action === "diagnose") && params.timeoutMs !== undefined) {
     throw new Error("Observe timeoutMs is supported only for wait and watch actions.");
   }
   if (
@@ -207,7 +213,7 @@ export async function observeTargets(params: ObserveParams, signal?: AbortSignal
   const startedAt = Date.now();
   const options = normalizedParams(params);
 
-  if (params.action === "status") {
+  if (params.action === "status" || params.action === "diagnose") {
     const observations = await Promise.all(params.targets.map(async (target) => {
       const provider = getObservationProvider(target.kind);
       if (!provider) return unavailable(target, "not-found", `No observation provider for kind \"${target.kind}\".`);
@@ -215,6 +221,7 @@ export async function observeTargets(params: ObserveParams, signal?: AbortSignal
         return await provider.snapshot(target.id, {
           detail: options.detail,
           lines: options.lines,
+          ...(params.action === "diagnose" ? { diagnose: true } : {}),
           ...(params.view ? { view: params.view } : {}),
           ...(params.turn !== undefined ? { turn: params.turn } : {}),
         });
@@ -222,7 +229,7 @@ export async function observeTargets(params: ObserveParams, signal?: AbortSignal
         return failedObservation(target, error);
       }
     }));
-    return { action: "status", reason: "snapshot", observations, durationMs: Date.now() - startedAt };
+    return { action: params.action, reason: "snapshot", observations, durationMs: Date.now() - startedAt };
   }
 
   if (params.action === "watch") {
