@@ -39,23 +39,8 @@ import {
   MONITOR_STATUS_KEY,
   MONITOR_DEFAULT_TIMEOUT_MS,
   MONITOR_DEFAULT_LINES,
-  createEngineState,
-  startEngine,
-  stopEngine,
-  addBinding,
-  removeBinding,
-  clearBindings,
-  formatEngineStatusBar,
-  buildAutoAnalysisPrompt,
-  buildCustomAnalysisPrompt,
-  parseAnalysisResult,
-  ENGINE_TICK_MS,
   type MonitorTargetSnapshot,
   type MonitorParams,
-  type MonitorEngineState,
-  type MonitorSupervisionMode,
-  type EngineAgentInfo,
-  type AnalysisResult,
 } from "./monitor.ts";
 import {
   createWorkspacePeerCommandConsumer,
@@ -133,7 +118,6 @@ import {
   type DecodedInputToken,
 } from "../tui/input-text.ts";
 import { showModelMappingOverlay } from "../tui/model-mapping-overlay.ts";
-import { showMonitorOverlay, type MonitorSessionRow } from "../tui/monitor-overlay.ts";
 import type {
   Details,
   TeammateState,

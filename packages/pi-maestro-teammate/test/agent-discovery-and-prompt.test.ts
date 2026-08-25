@@ -945,7 +945,7 @@ Proxy specialist prompt.
   }
 });
 
-test("controlled Monitor child receives cross-window tool contracts", () => {
+test("controlled terminal child receives cross-window tool contracts", () => {
   const tools = new Map<string, Record<string, unknown>>();
   const pi = new Proxy({
     events: { on: () => () => {}, emit() {} },
@@ -962,10 +962,8 @@ test("controlled Monitor child receives cross-window tool contracts", () => {
 
   const previousChild = process.env.PI_TEAMMATE_CHILD;
   const previousDepth = process.env.PI_TEAMMATE_DEPTH;
-  const previousMonitor = process.env.PI_TEAMMATE_MONITOR;
   process.env.PI_TEAMMATE_CHILD = "1";
   process.env.PI_TEAMMATE_DEPTH = "2";
-  process.env.PI_TEAMMATE_MONITOR = "1";
   try {
     registerTeammateExtension(pi as unknown as ExtensionAPI);
     assert.match(String(tools.get("teammate-send")?.description), /cross-session target/);
@@ -976,8 +974,6 @@ test("controlled Monitor child receives cross-window tool contracts", () => {
     else process.env.PI_TEAMMATE_CHILD = previousChild;
     if (previousDepth === undefined) delete process.env.PI_TEAMMATE_DEPTH;
     else process.env.PI_TEAMMATE_DEPTH = previousDepth;
-    if (previousMonitor === undefined) delete process.env.PI_TEAMMATE_MONITOR;
-    else process.env.PI_TEAMMATE_MONITOR = previousMonitor;
   }
 });
 

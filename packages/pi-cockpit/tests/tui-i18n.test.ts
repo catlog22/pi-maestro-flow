@@ -72,21 +72,21 @@ test("representative session surfaces rerender bilingually after a live locale e
 	};
 
 	cockpitTuiLocale.setLocale("en");
-	assert.match(renderWindowBar([], state, [], 80, theme)[0] ?? "", /Windows · no peer sessions/);
+	assert.match(renderWindowBar([], state, 80, theme)[0] ?? "", /Windows · no peer sessions/);
 	let detail = renderSessionDetail([agent], agent.correlationId, 100, theme).join("\n");
 	assert.match(detail, /@builder/);
 	assert.match(detail, /sleeping/);
 	assert.match(detail, new RegExp(`${altRe("R")} preview`));
 
 	events.emit(SETTINGS_LOCALE_EVENT, { version: 1, locale: "zh-CN", generation: "live-toggle" });
-	assert.match(renderWindowBar([], state, [], 80, theme)[0] ?? "", /窗口 · 没有对等会话/);
+	assert.match(renderWindowBar([], state, 80, theme)[0] ?? "", /窗口 · 没有对等会话/);
 	detail = renderSessionDetail([agent], agent.correlationId, 100, theme).join("\n");
 	assert.match(detail, /@builder/, "agent identifiers are not translated");
 	assert.match(detail, /休眠中/);
 	assert.match(detail, new RegExp(`${altRe("R")} 预览`));
 	for (let width = 1; width <= 120; width++) {
 		const lines = [
-			...renderWindowBar([], state, [], width, theme),
+			...renderWindowBar([], state, width, theme),
 			...renderSessionDetail([agent], agent.correlationId, width, theme),
 		];
 		for (const line of lines) {

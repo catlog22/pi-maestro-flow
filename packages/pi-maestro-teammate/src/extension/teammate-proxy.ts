@@ -6,7 +6,6 @@
  * Mode: RPC subprocess — stdin open for steer/follow_up/abort
  */
 
-import { MONITOR_SESSION_NAME } from "./monitor-session.ts";
 import { logDiagnosticError, logDiagnosticWarn } from "../shared/diagnostic-log.ts";
 
 import { randomUUID } from "node:crypto";
@@ -51,23 +50,8 @@ import {
   MONITOR_STATUS_KEY,
   MONITOR_DEFAULT_TIMEOUT_MS,
   MONITOR_DEFAULT_LINES,
-  createEngineState,
-  startEngine,
-  stopEngine,
-  addBinding,
-  removeBinding,
-  clearBindings,
-  formatEngineStatusBar,
-  buildAutoAnalysisPrompt,
-  buildCustomAnalysisPrompt,
-  parseAnalysisResult,
-  ENGINE_TICK_MS,
   type MonitorTargetSnapshot,
   type MonitorParams,
-  type MonitorEngineState,
-  type MonitorSupervisionMode,
-  type EngineAgentInfo,
-  type AnalysisResult,
 } from "./monitor.ts";
 import {
   createWorkspacePeerCommandConsumer,
@@ -154,7 +138,6 @@ import {
   type DecodedInputToken,
 } from "../tui/input-text.ts";
 import { showModelMappingOverlay } from "../tui/model-mapping-overlay.ts";
-import { showMonitorOverlay, type MonitorSessionRow } from "../tui/monitor-overlay.ts";
 import type {
   Details,
   TeammateState,
@@ -1126,15 +1109,6 @@ export async function handleProxyRequest(
         return;
       }
       const allTasks = normalization.tasks;
-      if (allTasks.some((task) => task.name === MONITOR_SESSION_NAME)) {
-        abandonPendingProxyDispatch();
-        reply({ type: "teammate_proxy_result", requestId, result: {
-          content: [{ type: "text", text: `Task name "${MONITOR_SESSION_NAME}" is reserved for the host-owned Monitor evaluator.` }],
-          isError: true,
-          details: { mode: normalization.isMultiTask ? inferGraphMode(allTasks) : "single", results: [] },
-        }});
-        return;
-      }
       const budget = checkActiveAgentBudget(state, allTasks.length);
       if (!budget.allowed) {
         abandonPendingProxyDispatch();

@@ -313,9 +313,9 @@ function fakePi(): {
   return { pi, tools, handlers, active: () => [...active], emit };
 }
 
-test("Flow extension wires the managed and Monitor-aware registration once", async () => {
+test("Flow extension wires managed-worker registration and defers root authority to Monitor exposure", async () => {
   const source = await readFile(new URL("../src/extension/index.ts", import.meta.url), "utf8");
-  assert.match(source, /registerFlowSchedule\(pi, \{\s*managedWorker: isManagedWorkerWindow\(\),\s*monitor: isMonitorSession\(\),\s*\}\)/);
+  assert.match(source, /registerFlowSchedule\(pi, \{\s*managedWorker: isManagedWorkerWindow\(\),\s*\}\)/);
   assert.equal(source.match(/registerFlowSchedule\(pi,/g)?.length, 1);
 });
 
@@ -340,7 +340,6 @@ test("root coordinator registration follows Monitor exposure enter and exit", as
   });
   const registration = registerFlowSchedule(api.pi, {
     managedWorker: false,
-    monitor: false,
     getRegistry: () => undefined,
   });
   try {
@@ -405,7 +404,6 @@ test("registration exposes Monitor control, managed report-only, and no ordinary
   const workerApi = fakePi();
   const workerRegistration = registerFlowSchedule(workerApi.pi, {
     managedWorker: true,
-    monitor: true,
     getRegistry: () => undefined,
   });
   assert.equal(workerRegistration.managedWorker, true);
@@ -429,20 +427,19 @@ test("registration exposes Monitor control, managed report-only, and no ordinary
   const ordinaryApi = fakePi();
   const ordinaryRegistration = registerFlowSchedule(ordinaryApi.pi, {
     managedWorker: false,
-    monitor: false,
     getRegistry: () => undefined,
   });
   assert.equal(ordinaryRegistration.managedWorker, false);
   assert.equal(ordinaryRegistration.monitor, false);
   assert.deepEqual(ordinaryApi.tools, []);
-  assert.equal(ordinaryApi.handlers.size, 0);
+  assert.equal(ordinaryApi.handlers.get("session_start")?.length, 1);
+  assert.equal(ordinaryApi.handlers.get("session_shutdown")?.length, 1);
   ordinaryRegistration.dispose();
 
   const root = await mkdtemp(join(tmpdir(), "flow-schedule-register-"));
   const coordinatorApi = fakePi();
   const coordinatorRegistration = registerFlowSchedule(coordinatorApi.pi, {
     managedWorker: false,
-    monitor: true,
     getRegistry: () => undefined,
     createStore: (cwd) => new FlowScheduleStore(cwd, { getProcessIdentity: () => `test:${process.pid}` }),
   });
@@ -462,3 +459,9 @@ test("registration exposes Monitor control, managed report-only, and no ordinary
     await rm(root, { recursive: true, force: true });
   }
 });
+    assert.equal(registration.monitor, false);
+    assert.equal(registration.monitor, true);
+    assert.equal(registration.monitor, false);
+    assert.equal(coordinatorRegistration.monitor, false);
+    assert.deepEqual(coordinatorApi.tools, []);
+    coordinatorApi.emit(MONITOR_TOOL_EXPOSURE_EVENT, { active: true, generation: 1 });

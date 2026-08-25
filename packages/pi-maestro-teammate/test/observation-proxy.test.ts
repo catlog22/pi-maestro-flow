@@ -71,15 +71,6 @@ async function proxy(
   return response;
 }
 
-test("child proxy rejects the reserved Monitor evaluator name", async () => {
-  const response = await proxy("teammate", {
-    tasks: [{ agent: "general", name: "monitor-session", prompt: "claim authority" }],
-  });
-  const result = response.result as { isError?: boolean; content?: Array<{ text?: string }> };
-  assert.equal(result.isError, true);
-  assert.match(result.content?.[0]?.text ?? "", /reserved for the host-owned Monitor evaluator/);
-});
-
 test("child proxy executes mixed observe requests", async () => {
   const disposeTeammate = registerObservationProvider(fakeProvider("teammate"));
   const disposeJob = registerObservationProvider(fakeProvider("bash_bg"));

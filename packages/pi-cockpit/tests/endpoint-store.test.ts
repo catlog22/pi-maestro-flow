@@ -166,30 +166,9 @@ test("EndpointStore output revision ignores status-only churn and changes with n
 	assert.notEqual(store.snapshot().endpoints[1]?.outputRevision, before);
 });
 
-test("EndpointStore hides internal monitor-session agents from registry projections", () => {
-	const projections = owners();
-	projections[0] = {
-		...projections[0]!,
-		agents: [...projections[0]!.agents, {
-			workspaceId: WORKSPACE,
-			ownerId: OWNER,
-			ownerNonce: NONCE,
-			correlationId: "monitor-internal",
-			status: "settled",
-			name: "monitor-session",
-			agent: "general",
-		}],
-	};
-	const registry = new SessionHostRegistry({ endpoints: projectSessionEndpoints(projections) });
-	const store = new EndpointStore({ getLegacyAgents: () => [] });
-	store.connect({ registry });
-	assert.deepEqual(store.snapshot().endpoints.map((endpoint) => endpoint.label), ["main", "builder"]);
-});
-
-test("EndpointStore numbers visible duplicate agent labels and hides legacy monitor-session rows", () => {
+test("EndpointStore numbers visible duplicate agent labels", () => {
 	const rows = [
 		agent({ correlationId: "builder-a", name: "builder", startedAt: 10 }),
-		agent({ correlationId: "monitor-internal", name: "monitor-session", startedAt: 15 }),
 		agent({ correlationId: "builder-b", name: "builder", startedAt: 20 }),
 	];
 	const store = new EndpointStore({ getLegacyAgents: () => rows });

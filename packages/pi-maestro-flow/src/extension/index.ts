@@ -258,7 +258,6 @@ import { registerMarkdownReviewCommand } from "../tools/markdown-review-command.
 import {
   proxyTeammateChildTool,
   isManagedWorkerWindow,
-  isMonitorSession,
   registerTeammateChildExtension,
   registerTeammateChildToolBroker,
   registerTeammatePermissionBroker,
@@ -1685,7 +1684,6 @@ When NOT to use:
   registerLoop(pi);
   registerFlowSchedule(pi, {
     managedWorker: isManagedWorkerWindow(),
-    monitor: isMonitorSession(),
   });
   registerModelAvailability(pi);
   registerTeammateSessionRouting(pi);

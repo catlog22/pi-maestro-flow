@@ -18,11 +18,6 @@ export const DEFAULT_WINDOW_THREAD_LIMIT = 512;
 export type SessionSurfaceMode = "legacy" | "shadow" | "unified";
 export type SessionViewMode = "agents" | "windows";
 export type SessionWindowModeAction = "enter" | "exit";
-export interface SessionMonitorOptions {
-  mode?: "auto" | "custom";
-  customPrompt?: string;
-  goalId?: string;
-}
 export type SessionEndpointKind = "root" | "agent";
 export type SessionEndpointScope = "local" | "workspace-peer";
 export type SessionEndpointTransport = "local-root" | "local-agent-mailbox" | "workspace-peer-v1" | "child-ipc";
@@ -894,7 +889,6 @@ export class MessageRouter {
 
 export interface SessionHostControls {
   requestWindowMode?: (action: SessionWindowModeAction) => void | Promise<void>;
-  setMonitored?: (endpointId: string, enabled: boolean, options?: SessionMonitorOptions) => void | Promise<void>;
 }
 
 export interface SessionHostRegistryOptions extends Omit<MessageRouterOptions, "directory"> {
@@ -911,7 +905,6 @@ export interface SessionHostSnapshot {
   endpointContentRevision: string;
   threadContentRevision: string;
   viewMode: SessionViewMode;
-  monitoredEndpointIds: readonly string[];
   endpoints: readonly SessionEndpoint[];
   thread: readonly WindowThreadEntry[];
 }
@@ -925,7 +918,6 @@ export class SessionHostRegistry {
   #controls: SessionHostControls;
   #prepareMessage: ((request: SessionMessageRequest) => SessionMessageRequest) | undefined;
   #viewMode: SessionViewMode = "agents";
-  #monitoredEndpointIds: readonly string[] = Object.freeze([]);
 
   constructor(options: SessionHostRegistryOptions = {}) {
     this.directory = new EndpointDirectory(options.endpoints);
@@ -939,7 +931,6 @@ export class SessionHostRegistry {
 
   get contentRevision(): string { return this.snapshot().contentRevision; }
   get viewMode(): SessionViewMode { return this.#viewMode; }
-  get monitoredEndpointIds(): readonly string[] { return this.#monitoredEndpointIds; }
   replaceEndpoints(endpoints: readonly SessionEndpoint[]): void { this.directory.replace(endpoints); }
   listEndpoints(): readonly SessionEndpoint[] { return this.directory.list(); }
   resolve(selector: string, options?: SessionResolveOptions): SessionResolution { return this.directory.resolve(selector, options); }
@@ -969,20 +960,9 @@ export class SessionHostRegistry {
     this.#viewMode = mode;
     this.#publish();
   }
-  setMonitoredEndpointIds(endpointIds: readonly string[]): void {
-    const next = Object.freeze([...new Set(endpointIds)].sort((left, right) => left.localeCompare(right, "en")));
-    if (next.length === this.#monitoredEndpointIds.length
-      && next.every((id, index) => id === this.#monitoredEndpointIds[index])) return;
-    this.#monitoredEndpointIds = next;
-    this.#publish();
-  }
   async requestWindowMode(action: SessionWindowModeAction): Promise<void> {
     if (this.#controls.requestWindowMode) await this.#controls.requestWindowMode(action);
     else this.setViewMode(action === "enter" ? "windows" : "agents");
-  }
-  async setMonitored(endpointId: string, enabled: boolean, options?: SessionMonitorOptions): Promise<void> {
-    if (!this.#controls.setMonitored) throw new Error("Monitor controls are unavailable in this session.");
-    await this.#controls.setMonitored(endpointId, enabled, options);
   }
   snapshot(): SessionHostSnapshot {
     const endpointContentRevision = this.directory.contentRevision;
@@ -993,12 +973,10 @@ export class SessionHostRegistry {
         endpointContentRevision,
         threadContentRevision,
         this.#viewMode,
-        this.#monitoredEndpointIds,
       ]),
       endpointContentRevision,
       threadContentRevision,
       viewMode: this.#viewMode,
-      monitoredEndpointIds: this.#monitoredEndpointIds,
       endpoints: this.directory.list(),
       thread: this.thread.list(),
     });

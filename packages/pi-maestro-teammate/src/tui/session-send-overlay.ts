@@ -1,6 +1,5 @@
 import { Key, decodeKittyPrintable, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { statusIcon } from "../extension/monitor.ts";
-import type { MonitorSessionRow } from "./monitor-overlay.ts";
 import {
   createTuiTranslator,
   onTuiLocaleChange,
@@ -9,13 +8,27 @@ import {
   type TuiTranslator,
 } from "./locale.ts";
 
+export interface SessionSelectionRow {
+  correlationId: string;
+  displayName: string;
+  agentRole: string;
+  status: string;
+  idleSeconds: number;
+  source?: string;
+  kind?: "agent" | "window" | "remote";
+  bindable?: boolean;
+  ownerId?: string;
+  depth?: number;
+  parentCorrelationId?: string;
+}
+
 export interface SessionSendOverlayResult {
   target: string;
   message: string;
 }
 
 interface SessionSendOverlayCallbacks {
-  getSessions: () => MonitorSessionRow[];
+  getSessions: () => SessionSelectionRow[];
   close: (result: SessionSendOverlayResult | null) => void;
 }
 
@@ -23,7 +36,7 @@ const MAX_MESSAGE_LENGTH = 64 * 1024;
 
 /** Small session picker used by /teammate-send. */
 export class SessionSendOverlay {
-  private sessions: MonitorSessionRow[] = [];
+  private sessions: SessionSelectionRow[] = [];
   private cursor = 0;
   private selected?: string;
   private message = "";
@@ -179,7 +192,7 @@ export class SessionSendOverlay {
 }
 
 export interface SessionSendOverlayDeps {
-  getSessions: () => MonitorSessionRow[];
+  getSessions: () => SessionSelectionRow[];
   locale?: SupportedSettingsLocale;
 }
 

@@ -11,11 +11,6 @@ export declare const DEFAULT_WINDOW_THREAD_LIMIT = 512;
 export type SessionSurfaceMode = "legacy" | "shadow" | "unified";
 export type SessionViewMode = "agents" | "windows";
 export type SessionWindowModeAction = "enter" | "exit";
-export interface SessionMonitorOptions {
-    mode?: "auto" | "custom";
-    customPrompt?: string;
-    goalId?: string;
-}
 export type SessionEndpointKind = "root" | "agent";
 export type SessionEndpointScope = "local" | "workspace-peer";
 export type SessionEndpointTransport = "local-root" | "local-agent-mailbox" | "workspace-peer-v1" | "child-ipc";
@@ -274,7 +269,6 @@ export declare class MessageRouter {
 }
 export interface SessionHostControls {
     requestWindowMode?: (action: SessionWindowModeAction) => void | Promise<void>;
-    setMonitored?: (endpointId: string, enabled: boolean, options?: SessionMonitorOptions) => void | Promise<void>;
 }
 export interface SessionHostRegistryOptions extends Omit<MessageRouterOptions, "directory"> {
     endpoints?: readonly SessionEndpoint[];
@@ -289,7 +283,6 @@ export interface SessionHostSnapshot {
     endpointContentRevision: string;
     threadContentRevision: string;
     viewMode: SessionViewMode;
-    monitoredEndpointIds: readonly string[];
     endpoints: readonly SessionEndpoint[];
     thread: readonly WindowThreadEntry[];
 }
@@ -302,16 +295,13 @@ export declare class SessionHostRegistry {
     constructor(options?: SessionHostRegistryOptions);
     get contentRevision(): string;
     get viewMode(): SessionViewMode;
-    get monitoredEndpointIds(): readonly string[];
     replaceEndpoints(endpoints: readonly SessionEndpoint[]): void;
     listEndpoints(): readonly SessionEndpoint[];
     resolve(selector: string, options?: SessionResolveOptions): SessionResolution;
     send(request: SessionMessageRequest): Promise<SessionMessageResult>;
     setControls(controls: SessionHostControls): void;
     setViewMode(mode: SessionViewMode): void;
-    setMonitoredEndpointIds(endpointIds: readonly string[]): void;
     requestWindowMode(action: SessionWindowModeAction): Promise<void>;
-    setMonitored(endpointId: string, enabled: boolean, options?: SessionMonitorOptions): Promise<void>;
     snapshot(): SessionHostSnapshot;
     subscribe(subscriber: (snapshot: SessionHostSnapshot) => void, options?: {
         emitCurrent?: boolean;

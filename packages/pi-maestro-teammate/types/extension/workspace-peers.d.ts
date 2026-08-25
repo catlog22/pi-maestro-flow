@@ -36,7 +36,6 @@ export declare const MAX_WORKSPACE_WINDOW_FINAL_TEXT_BYTES: number;
 /** Maximum UTF-8 bytes retained from a worker terminal diagnostic. */
 export declare const MAX_WORKSPACE_WINDOW_ERROR_BYTES: number;
 export declare const MAX_WINDOW_LISTING_ACTIVE_AGENTS = 8;
-export declare const MONITOR_LEASE_STALE_MS = 60000;
 /** A window whose main session was active within this window is busy even with zero sub-agents. */
 export declare const MAIN_SESSION_ACTIVE_MS = 60000;
 /** Per-settled-agent result payload cap (keeps owner snapshots under MAX_OWNER_FILE_BYTES). */
@@ -358,45 +357,6 @@ export declare function ensureWorkspacePeerDirectories(identity: WorkspacePeerId
 export declare function writePrivateJsonAtomic(path: string, value: unknown, maximumBytes: number, options?: {
     beforeCommit?: () => void;
 }): Promise<void>;
-/**
- * Lease file declaring that `monitorOwnerId` supervises `targetOwnerId`.
- * Lives next to the target's owner snapshot in the shared workspace root, so
- * any Pi root session can see who is monitoring a window before binding.
- */
-export interface MonitorLease {
-    version: typeof WORKSPACE_PEER_PROTOCOL_VERSION;
-    monitorOwnerId: string;
-    targetOwnerId: string;
-    sessionName?: string;
-    pid: number;
-    since: number;
-}
-export declare function monitorLeasePath(identity: WorkspacePeerIdentity, targetOwnerId: string): string;
-export declare function validateMonitorLease(value: unknown): MonitorLease | undefined;
-/** Read the current physical lease without changing the workspace-peer protocol. */
-export declare function readMonitorLease(identity: WorkspacePeerIdentity, targetOwnerId: string): Promise<MonitorLease | undefined>;
-export interface AcquireMonitorLeaseResult {
-    ok: boolean;
-    error?: string;
-    lease?: MonitorLease;
-}
-export interface AcquireMonitorLeaseOptions {
-    sessionName?: string;
-    /** Lease staleness: an offline holder's lease may be taken over. */
-    staleMs?: number;
-    now?: number;
-}
-/**
- * Acquire the supervision lease for a peer window. Refuses when another
- * live monitor already holds it (double-monitoring prevention); a stale
- * lease whose holder has gone offline is taken over silently.
- */
-export declare function acquireMonitorLease(identity: WorkspacePeerIdentity, targetOwnerId: string, options?: AcquireMonitorLeaseOptions): Promise<AcquireMonitorLeaseResult>;
-/**
- * Release the supervision lease. Only the lease holder may release it;
- * returns false when the lease belongs to someone else.
- */
-export declare function releaseMonitorLease(identity: WorkspacePeerIdentity, targetOwnerId: string, monitorOwnerId?: string): Promise<boolean>;
 export declare function activeWorkspaceBackgroundJobsFromPayload(payload: unknown): WorkspaceBackgroundJobSnapshot[] | undefined;
 export interface WorkspaceMainSessionDeliveryDecision {
     action: WorkspacePeerCommandAction;

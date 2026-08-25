@@ -15,10 +15,9 @@ import {
   onTuiLocaleChange,
 } from "../src/tui/locale.ts";
 import { TeammateControlCenter } from "../src/tui/model-mapping-overlay.ts";
-import { MonitorOverlay, type MonitorSessionRow } from "../src/tui/monitor-overlay.ts";
 import { buildProgressTree } from "../src/tui/progress-tree.ts";
 import { renderTeammateResult } from "../src/tui/render.ts";
-import { SessionSendOverlay } from "../src/tui/session-send-overlay.ts";
+import { SessionSendOverlay, type SessionSelectionRow } from "../src/tui/session-send-overlay.ts";
 
 /** `altKey` escaped for use inside a regular expression: `+` is a metacharacter. */
 const altRe = (key: string): string => altKey(key).replaceAll("+", "\\+");
@@ -28,7 +27,7 @@ const theme = {
   bold: (text: string) => text,
 };
 
-function row(): MonitorSessionRow {
+function row(): SessionSelectionRow {
   return {
     correlationId: "owner:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     displayName: "review-window",
@@ -36,7 +35,6 @@ function row(): MonitorSessionRow {
     status: "running",
     idleSeconds: 0,
     source: "remote:aaaaaa",
-    bound: false,
     kind: "window",
     ownerId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     bindable: true,
@@ -105,16 +103,16 @@ test("valid v1 locale events update runtime listeners and invalid events are ign
 test("default overlays follow locale events while an explicit constructor locale wins", () => {
   initializeTuiLocale("en");
   let repaintCount = 0;
-  const dynamic = new MonitorOverlay({ getSessions: () => [row()], close: () => {} });
+  const dynamic = new SessionSendOverlay({ getSessions: () => [row()], close: () => {} });
   dynamic.setRequestRender(() => { repaintCount += 1; });
-  const fixedEnglish = new MonitorOverlay({ getSessions: () => [row()], close: () => {} }, "en");
+  const fixedEnglish = new SessionSendOverlay({ getSessions: () => [row()], close: () => {} }, "en");
   try {
-    assert.match(stripAnsi(dynamic.render(72).join("\n")), /Select Sessions/);
+    assert.match(stripAnsi(dynamic.render(72).join("\n")), /Send to another session/);
     assert.equal(applySettingsLocaleEvent({ version: 1, locale: "zh-CN", generation: "live" }), true);
     assert.equal(repaintCount, 1);
-    assert.match(stripAnsi(dynamic.render(72).join("\n")), /选择会话/);
-    assert.match(stripAnsi(fixedEnglish.render(72).join("\n")), /Select Sessions/);
-    assert.doesNotMatch(stripAnsi(fixedEnglish.render(72).join("\n")), /选择会话/);
+    assert.match(stripAnsi(dynamic.render(72).join("\n")), /发送到其他会话/);
+    assert.match(stripAnsi(fixedEnglish.render(72).join("\n")), /Send to another session/);
+    assert.doesNotMatch(stripAnsi(fixedEnglish.render(72).join("\n")), /发送到其他会话/);
   } finally {
     dynamic.dispose();
     fixedEnglish.dispose();
@@ -122,8 +120,7 @@ test("default overlays follow locale events while an explicit constructor locale
   }
 });
 
-test("representative monitor, session-send, attach, and control-center renders are bilingual", () => {
-  const monitorZh = new MonitorOverlay({ getSessions: () => [row()], close: () => {} }, "zh-CN");
+test("representative session-send, attach, and control-center renders are bilingual", () => {
   const sendZh = new SessionSendOverlay({ getSessions: () => [row()], close: () => {} }, "zh-CN");
   const attachZh = new AttachOverlay(activeAgent(), () => {}, undefined, undefined, undefined, false, "zh-CN");
   const centerZh = new TeammateControlCenter({
@@ -139,20 +136,16 @@ test("representative monitor, session-send, attach, and control-center renders a
     close: () => {},
   });
   try {
-    const monitor = stripAnsi(monitorZh.render(72).join("\n"));
     const send = stripAnsi(sendZh.render(72).join("\n"));
     const attach = stripAnsi(attachZh.render(80, 18).join("\n"));
     const center = stripAnsi(centerZh.render(90).join("\n"));
-    assert.match(monitor, /选择会话/);
     assert.match(send, /发送到其他会话/);
     assert.match(attach, /主对话/);
     assert.match(center, /Teammate 控制中心/);
-    assert.ok(monitorZh.render(48).every((line) => visibleWidth(line) <= 48));
     assert.ok(sendZh.render(48).every((line) => visibleWidth(line) <= 48));
     assert.ok(attachZh.render(48, 18).every((line) => visibleWidth(line) <= 48));
     assert.ok(centerZh.render(48).every((line) => visibleWidth(line) <= 48));
   } finally {
-    monitorZh.dispose();
     sendZh.dispose();
     attachZh.dispose();
     centerZh.dispose();

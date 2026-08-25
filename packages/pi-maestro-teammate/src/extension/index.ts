@@ -61,48 +61,13 @@ import {
   MONITOR_STATUS_KEY,
   MONITOR_DEFAULT_TIMEOUT_MS,
   MONITOR_DEFAULT_LINES,
-  createEngineState,
-  DEFAULT_MONITOR_CONFIG,
-  normalizeMonitorConfig,
-  flushPendingMonitorLedger,
-  deriveMonitorMetrics,
-  formatMonitorMetrics,
-  type EngineAgentInfo,
-  type MonitorEngineConfig,
   type MonitorTargetSnapshot,
   type MonitorParams,
-  type MonitorSupervisionMode,
 } from "./monitor.ts";
-import { MonitorController, type MonitorControllerBindingRequest } from "./monitor-controller.ts";
 import {
   MonitorToolExposureController,
   type MonitorCommunicationCapture,
 } from "./monitor-tool-exposure.ts";
-import { MonitorLeaseAdapter } from "./monitor-lease.ts";
-import {
-  MONITOR_SESSION_ENV_VAR,
-  MONITOR_SESSION_NAME,
-  MONITOR_SESSION_RELATIVE_DIR,
-  MonitorSessionEvaluator,
-  type MonitorEvaluationRequest,
-  type MonitorSessionHost,
-  type MonitorSessionInvocation,
-  type MonitorSessionTurnResult,
-} from "./monitor-session.ts";
-import { createMonitorSessionStartup } from "./monitor-session-startup.ts";
-import {
-  appendMonitorLedgerRecord,
-  deriveMonitorLedgerState,
-  loadMonitorLedger,
-  reconcileMonitorLedger,
-  type MonitorLedgerRecord,
-  type MonitorLedgerState,
-} from "./monitor-ledger.ts";
-import {
-  appendPeerGoalObjection,
-  buildGoalContextBlock,
-  loadPeerGoalContext,
-} from "./monitor-goals.ts";
 import {
   buildDelegatedWorkerBootstrap,
   buildDelegationDelivery,
@@ -268,7 +233,7 @@ import {
   terminateProcessTreeByPid,
   type ChildTerminationController,
 } from "../runs/execution-infra.ts";
-import { showMonitorOverlay, type MonitorSessionRow } from "../tui/monitor-overlay.ts";
+import type { SessionSelectionRow } from "../tui/session-send-overlay.ts";
 import { loadRemoteConfig, loadRemoteConfigState } from "../remote/config.ts";
 import { SshRemoteConnectionFactory } from "../remote/ssh.ts";
 import { RemoteWorkerManager } from "../remote/worker-manager.ts";
@@ -632,7 +597,6 @@ export default function registerTeammateExtension(
   );
 
   const isChild = process.env.PI_TEAMMATE_CHILD === "1";
-  const isMonitorChild = isChild && process.env[MONITOR_SESSION_ENV_VAR] === "1";
   const currentDepth = isChild ? getTeammateDepth() : 0;
   // Child env depth is record depth + 1; the child may dispatch iff its record
   // depth stays under its budget, i.e. envDepth <= maxDispatchDepth. A budget
@@ -669,7 +633,6 @@ export default function registerTeammateExtension(
   }
   let modelCatalog: ModelCatalogSnapshot = createModelCatalogSnapshot([]);
   let monitorInteractionModeActive = false;
-  let monitorInteractionExitInProgress = false;
   let monitorToolExposure: MonitorToolExposureController | undefined;
 
   const captureMonitorCommunication = (): MonitorCommunicationCapture | undefined =>
@@ -1068,37 +1031,6 @@ export default function registerTeammateExtension(
       wait: (id, options) => proxyTeammateObservation("wait", id, options, options.signal),
     });
 
-    if (isMonitorChild) {
-      const proxyWorkspaceObservation = async (
-        action: "status" | "wait",
-        id: string,
-        options: ObservationReadOptions & { deadline?: number },
-        signal?: AbortSignal,
-      ): Promise<ObservationSnapshot> => {
-        const response = await proxyCall<{ output: string[]; result: ObserveResult }>("observe", {
-          action,
-          targets: [{ kind: "workspace", id, ...(options.cursor ? { cursor: options.cursor } : {}) }],
-          detail: options.detail,
-          lines: options.lines,
-          ...(options.view ? { view: options.view } : {}),
-          ...(options.turn !== undefined ? { turn: options.turn } : {}),
-          ...(action === "wait" ? {
-            waitMode: "all",
-            timeoutMs: Math.max(1, (options.deadline ?? Date.now() + MONITOR_DEFAULT_TIMEOUT_MS) - Date.now()),
-          } : {}),
-        }, signal);
-        const observation = response.details?.result.observations[0];
-        if (!observation) throw new Error(`Parent observe returned no workspace observation for "${id}".`);
-        return observation;
-      };
-      registerObservationProvider({
-        kind: "workspace",
-        capabilities: { inspect: true, wait: true, cancel: true, message: true, supervise: true },
-        snapshot: (id, options) => proxyWorkspaceObservation("status", id, options),
-        wait: (id, options) => proxyWorkspaceObservation("wait", id, options, options.signal),
-      });
-    }
-
     const proxyTeammateTool: ToolDefinition<typeof TeammateParams, Details> = {
       name: "teammate",
       label: "Teammate",
@@ -1142,10 +1074,10 @@ export default function registerTeammateExtension(
       name: "teammate-list",
       label: "Teammate List",
       renderShell: "self",
-      description: isMonitorChild ? TEAMMATE_LIST_DESCRIPTION : LOCAL_TEAMMATE_LIST_DESCRIPTION,
-      promptSnippet: isMonitorChild ? TEAMMATE_LIST_SNIPPET : LOCAL_TEAMMATE_LIST_SNIPPET,
-      promptGuidelines: isMonitorChild ? TEAMMATE_LIST_GUIDELINES : LOCAL_TEAMMATE_LIST_GUIDELINES,
-      parameters: isMonitorChild ? TeammateListParams : LocalTeammateListParams,
+      description: LOCAL_TEAMMATE_LIST_DESCRIPTION,
+      promptSnippet: LOCAL_TEAMMATE_LIST_SNIPPET,
+      promptGuidelines: LOCAL_TEAMMATE_LIST_GUIDELINES,
+      parameters: LocalTeammateListParams,
       async execute(_id: string, params: WindowInboxQuery & { view?: TeammateListView }, signal: AbortSignal) {
         return proxyCall<{ agents: unknown[] }>("teammate-list", params, signal);
       },
@@ -1189,12 +1121,12 @@ export default function registerTeammateExtension(
       name: "observe",
       label: "Observe",
       renderShell: "self",
-      description: isMonitorChild ? OBSERVE_DESCRIPTION : LOCAL_OBSERVE_DESCRIPTION,
-      promptSnippet: isMonitorChild ? OBSERVE_SNIPPET : LOCAL_OBSERVE_SNIPPET,
-      promptGuidelines: isMonitorChild ? OBSERVE_GUIDELINES : LOCAL_OBSERVE_GUIDELINES,
-      parameters: isMonitorChild ? ObserveParams : LocalObserveParams,
+      description: LOCAL_OBSERVE_DESCRIPTION,
+      promptSnippet: LOCAL_OBSERVE_SNIPPET,
+      promptGuidelines: LOCAL_OBSERVE_GUIDELINES,
+      parameters: LocalObserveParams,
       async execute(_id: string, params: UnifiedObserveParams, signal: AbortSignal) {
-        if (!isMonitorChild && params.targets.some((target) => target.kind !== "teammate" && target.kind !== "bash_bg")) {
+        if (params.targets.some((target) => target.kind !== "teammate" && target.kind !== "bash_bg")) {
           const message = "Non-Monitor observe accepts only local teammate and bash_bg targets.";
           const denied: ObserveResult = {
             action: params.action,
@@ -3328,11 +3260,6 @@ export default function registerTeammateExtension(
     interactionQueue.enqueue(event, reply, ctx, fallbackCorrelationId);
   };
 
-  let bindMonitorSessionDispatch: ((toolCallId: string, agent: ActiveAgent) => MonitorSessionInvocation | undefined) | undefined;
-  let authorizeMonitorSessionDispatch: ((toolCallId: string) => boolean) | undefined;
-  let ownsMonitorSessionAuthority: ((agent: ActiveAgent) => boolean) | undefined;
-  let publishMonitorSessionTurn: ((agent: ActiveAgent, result: SingleResult) => void) | undefined;
-
   // =========================================================================
   // Tool 1: teammate — dispatch
   // =========================================================================
@@ -3389,16 +3316,6 @@ export default function registerTeammateExtension(
       }
       const { isMultiTask } = normalization;
       const normalizedTasks = normalization.tasks;
-      const monitorSessionDispatch = !isMultiTask
-        && normalizedTasks[0]?.name === MONITOR_SESSION_NAME
-        && authorizeMonitorSessionDispatch?.(id) === true;
-      if (normalizedTasks.some((task) => task.name === MONITOR_SESSION_NAME) && !monitorSessionDispatch) {
-        return {
-          content: [{ type: "text", text: `Task name "${MONITOR_SESSION_NAME}" is reserved for the host-owned Monitor evaluator.` }],
-          isError: true,
-          details: { mode: isMultiTask ? inferGraphMode(normalizedTasks) : "single", results: [] },
-        };
-      }
 
       // Ask-before-dispatch (configurable in /teammate-models · Ctrl+A): when
       // enabled, the root tool call pauses for the user to confirm or pick the
@@ -3563,12 +3480,10 @@ export default function registerTeammateExtension(
       for (const childId of isMultiTask ? taskCorrelationIds : [correlationId]) {
         initialTaskProvenanceByCorrelationId.set(childId, createVerifiedProvenance({
           messageId: `${childId}:initial`,
-          source: monitorSessionDispatch ? "monitor" : "initial-task",
+          source: "initial-task",
           messageKind: "task",
           deliveryMode: "prompt",
-          sender: monitorSessionDispatch
-            ? { kind: "system", ownerId: currentRootOwnerId(), label: "monitor" }
-            : { kind: "root-agent", ownerId: currentRootOwnerId(), label: "main" },
+          sender: { kind: "root-agent", ownerId: currentRootOwnerId(), label: "main" },
         }));
       }
 
@@ -3763,10 +3678,6 @@ export default function registerTeammateExtension(
       if (!isMultiTask && singleTask.name) {
         bindAgentName(state, singleTask.name, correlationId);
       }
-      if (monitorSessionDispatch) {
-        bindMonitorSessionDispatch?.(id, activeAgent);
-      }
-
       emitTeammateStarted(pi, activeAgent, { id });
 
       let dispatchLifecyclePending = false;
@@ -3880,11 +3791,6 @@ export default function registerTeammateExtension(
           return;
         }
         if (singleCompletionDelivered) return;
-        if (activeAgent.name === MONITOR_SESSION_NAME) {
-          if (!singlePublishedResult && !singleTerminalResult) return;
-          singleCompletionDelivered = true;
-          return;
-        }
         // DEL-001: For background/detached tasks (notification requested), the
         // published result is the consumable boundary — deliver immediately
         // instead of gating on lifecycle settlement (agent_settled / close /
@@ -4060,8 +3966,6 @@ export default function registerTeammateExtension(
       ): void => {
         if (!ownsDispatchGeneration() || coldRestarting.has(result.correlationId)) return;
         const target = state.activeRuns.get(result.correlationId);
-        if (target?.name === MONITOR_SESSION_NAME
-          || (result.correlationId === activeAgent.correlationId && activeAgent.name === MONITOR_SESSION_NAME)) return;
         const wakeable = isLogicallyWakeable(result);
         emitComplete(
           pi,
@@ -4149,10 +4053,6 @@ export default function registerTeammateExtension(
           recordTurnEvent: (event) => recordAgentTurnEvent(event, turnFence),
           ...(isMultiTask ? { taskSignals: taskAbortControllers.map((controller) => controller.signal) } : {}),
           parentSessionFile,
-          ...(monitorSessionDispatch ? {
-            sessionDir: join(state.baseCwd || ctx.cwd, MONITOR_SESSION_RELATIVE_DIR, correlationId),
-            childEnvironment: { [MONITOR_SESSION_ENV_VAR]: "1" },
-          } : {}),
           initialLeaseToken: (childId: string) => {
           const target = state.activeRuns.get(childId) ?? activeAgent;
           return target.lease ? leaseToken(target.lease) : undefined;
@@ -4215,9 +4115,7 @@ export default function registerTeammateExtension(
           onReclamationOutcome: (childId, outcome) => {
             recordChildReclamationOutcome(state, childId, outcome);
           },
-          onResultPublished: activeAgent.name === MONITOR_SESSION_NAME
-            ? undefined
-            : async (result, originCwd) => {
+          onResultPublished: async (result, originCwd) => {
                 const publicationCount = (publicationCountByCorrelation.get(result.correlationId) ?? 0) + 1;
                 publicationCountByCorrelation.set(result.correlationId, publicationCount);
                 const knownWarnings = knownWarningsByCorrelation.get(result.correlationId) ?? new Set<string>();
@@ -4272,9 +4170,6 @@ export default function registerTeammateExtension(
             target.resolvedModel = target.resolvedModel ?? displayResolvedModel(result);
             if (result.attemptedModels) target.attemptedModels = [...result.attemptedModels];
             setAgentStructuredOutput(target, result.structuredOutput);
-            if (!isMultiTask && target.name === MONITOR_SESSION_NAME) {
-              publishMonitorSessionTurn?.(target, result);
-            }
             const lastMessage = displayMessageForResult(result);
             const settle = isMultiTask ? settleGraphTaskAgent : settleAgent;
             settle(
@@ -4581,14 +4476,7 @@ export default function registerTeammateExtension(
             cancelProxyDispatch(state, event.requestId);
             return;
           }
-          const proxyMonitorIdentityCurrent = (): boolean =>
-            ownsMonitorSessionAuthority?.(activeAgent) === true;
-          const proxyMonitorCapture = proxyMonitorIdentityCurrent()
-            ? captureMonitorCommunication()
-            : undefined;
-          const proxyCanCrossSession = (): boolean =>
-            proxyMonitorIdentityCurrent()
-            && ownsMonitorCommunication(proxyMonitorCapture);
+          const proxyCanCrossSession = (): boolean => false;
           void handleProxyRequest(
             pi,
             state,
@@ -4757,10 +4645,6 @@ export default function registerTeammateExtension(
           let delivered = false;
           const deliverRestartCompletion = (): void => {
             if (delivered || !ownsRuntime() || !publishedResult || !terminalResult) return;
-            if (target.name === MONITOR_SESSION_NAME) {
-              delivered = true;
-              return;
-            }
             delivered = true;
             const status = terminalStatusForResult(terminalResult, terminalStatus);
             emitComplete(
@@ -5665,331 +5549,6 @@ export default function registerTeammateExtension(
   // Monitor — persistent observation mode (user-entered) + LLM query tools
   // ---------------------------------------------------------------------------
 
-  const monitorEngine = createEngineState();
-  let monitorController: MonitorController | undefined;
-  /** Effective monitor configuration (`.pi/settings.json` `monitor` + env). */
-  let monitorConfig: MonitorEngineConfig = { ...DEFAULT_MONITOR_CONFIG };
-  /** Ledger root — the real session cwd once known. */
-  let monitorLedgerRoot: string | undefined;
-  /** In-memory ledger read-model cache for status/doctor output. */
-  let monitorLedgerState: MonitorLedgerState | undefined;
-  let monitorLedgerWarnings: string[] = [];
-  /** In-flight ledger appends (flushed before binding exits release leases). */
-  const monitorLedgerWrites: Promise<unknown>[] = [];
-
-  const monitorSessionAgent = (): ActiveAgent | undefined => {
-    const correlationId = state.namedAgents.get(MONITOR_SESSION_NAME);
-    return correlationId ? state.activeRuns.get(correlationId) : undefined;
-  };
-
-  function monitorSessionStatus(): string {
-    const agent = monitorSessionAgent();
-    if (!agent) return monitorController?.running ? "starting" : "stopped";
-    return agent.status;
-  }
-
-  function recordMonitorLedger(record: MonitorLedgerRecord): void {
-    const root = monitorLedgerRoot ?? state.baseCwd;
-    if (!root || !monitorConfig.ledgerEnabled) return;
-    const write = appendMonitorLedgerRecord(root, record)
-      .then(() => { void refreshMonitorLedgerState(); })
-      .catch((error) => {
-        logDiagnosticError("[pi-maestro-teammate] monitor ledger append failed:", error);
-      })
-      .finally(() => {
-        const index = monitorLedgerWrites.indexOf(write);
-        if (index >= 0) monitorLedgerWrites.splice(index, 1);
-      });
-    monitorLedgerWrites.push(write);
-  }
-
-  interface PendingMonitorTurn {
-    requestId: string;
-    signal: AbortSignal;
-    rootFence: RootSessionFence;
-    invocation?: MonitorSessionInvocation;
-    invocationPromise: Promise<MonitorSessionInvocation>;
-    resolveInvocation: (invocation: MonitorSessionInvocation) => void;
-    rejectInvocation: (error: Error) => void;
-    resultPromise: Promise<MonitorSessionTurnResult>;
-    resolveResult: (result: MonitorSessionTurnResult) => void;
-    rejectResult: (error: Error) => void;
-    removeAbortListener?: () => void;
-    settled?: boolean;
-    startup?: {
-      promise: Promise<MonitorSessionInvocation>;
-      start(): void;
-      accept(invocation: MonitorSessionInvocation): boolean;
-      reject(error: Error): void;
-    };
-  }
-
-  interface MonitorSessionAuthority {
-    correlationId: string;
-    runtimeGeneration: number;
-    rootFence: RootSessionFence;
-  }
-
-  const pendingMonitorTurns = new Map<string, PendingMonitorTurn>();
-  const monitorSessionAuthorities = new WeakMap<ActiveAgent, MonitorSessionAuthority>();
-
-  const pendingCanAcceptMonitorDispatch = (pending: PendingMonitorTurn | undefined): pending is PendingMonitorTurn =>
-    pending !== undefined
-    && pendingMonitorTurns.get(pending.requestId) === pending
-    && pending.settled !== true
-    && pending.invocation === undefined
-    && !pending.signal.aborted
-    && ownsRootSessionFence(pending.rootFence);
-
-  authorizeMonitorSessionDispatch = (toolCallId) => {
-    const pending = pendingMonitorTurns.get(toolCallId);
-    return pending !== undefined && pendingCanAcceptMonitorDispatch(pending);
-  };
-
-  ownsMonitorSessionAuthority = (agent) => {
-    const authority = monitorSessionAuthorities.get(agent);
-    return authority !== undefined
-      && authority.correlationId === agent.correlationId
-      && authority.runtimeGeneration === (agent.runtimeGeneration ?? 0)
-      && authority.rootFence.sessionId !== null
-      && ownsRootSessionFence(authority.rootFence)
-      && state.activeRuns.get(agent.correlationId) === agent
-      && [...pendingMonitorTurns.values()].some((pending) =>
-        pending.invocation?.correlationId === authority.correlationId
-        && pending.invocation.sessionIdentity === agent,
-      );
-  };
-
-  const createPendingMonitorTurn = (requestId: string, signal: AbortSignal): PendingMonitorTurn => {
-    let resolveInvocation!: (invocation: MonitorSessionInvocation) => void;
-    let rejectInvocation!: (error: Error) => void;
-    let resolveResult!: (result: MonitorSessionTurnResult) => void;
-    let rejectResult!: (error: Error) => void;
-    const pending: PendingMonitorTurn = {
-      requestId,
-      signal,
-      rootFence: captureRootSessionFence(),
-      invocationPromise: new Promise((resolve, reject) => {
-        resolveInvocation = resolve;
-        rejectInvocation = reject;
-      }),
-      resolveInvocation: (invocation) => resolveInvocation(invocation),
-      rejectInvocation: (error) => rejectInvocation(error),
-      resultPromise: new Promise((resolve, reject) => {
-        resolveResult = resolve;
-        rejectResult = reject;
-      }),
-      resolveResult: (result) => resolveResult(result),
-      rejectResult: (error) => rejectResult(error),
-    };
-    void pending.invocationPromise.catch(() => undefined);
-    void pending.resultPromise.catch(() => undefined);
-    pendingMonitorTurns.set(requestId, pending);
-    const onAbort = (): void => {
-      const reason = signal.reason instanceof Error
-        ? signal.reason
-        : new Error("Monitor evaluation was cancelled.");
-      rejectPendingMonitorTurn(pending, reason);
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-    pending.removeAbortListener = () => signal.removeEventListener("abort", onAbort);
-    if (signal.aborted) onAbort();
-    return pending;
-  };
-
-  const completePendingMonitorTurn = (pending: PendingMonitorTurn): void => {
-    if (pending.settled) return;
-    pending.settled = true;
-    pending.removeAbortListener?.();
-    pending.removeAbortListener = undefined;
-    pending.startup?.reject(new Error("Monitor evaluation completed."));
-    pending.startup = undefined;
-    if (pendingMonitorTurns.get(pending.requestId) === pending) pendingMonitorTurns.delete(pending.requestId);
-  };
-
-  const rejectPendingMonitorTurn = (pending: PendingMonitorTurn, error: Error): void => {
-    if (pending.settled) return;
-    pending.settled = true;
-    pending.removeAbortListener?.();
-    pending.removeAbortListener = undefined;
-    pending.startup?.reject(error);
-    pending.startup = undefined;
-    pending.rejectInvocation(error);
-    pending.rejectResult(error);
-    if (pendingMonitorTurns.get(pending.requestId) === pending) pendingMonitorTurns.delete(pending.requestId);
-  };
-
-  bindMonitorSessionDispatch = (toolCallId, agent) => {
-    const pending = pendingMonitorTurns.get(toolCallId);
-    if (!pendingCanAcceptMonitorDispatch(pending)
-      || state.activeRuns.get(agent.correlationId) !== agent) return undefined;
-    monitorSessionAuthorities.set(agent, {
-      correlationId: agent.correlationId,
-      runtimeGeneration: agent.runtimeGeneration ?? 0,
-      rootFence: pending.rootFence,
-    });
-    const invocation: MonitorSessionInvocation = {
-      requestId: toolCallId,
-      correlationId: agent.correlationId,
-      promptSequence: agent.promptSeq ?? 1,
-      sessionIdentity: agent,
-    };
-    pending.invocation = invocation;
-    pending.startup?.accept(invocation);
-    pending.startup = undefined;
-    pending.resolveInvocation(invocation);
-    return invocation;
-  };
-
-  publishMonitorSessionTurn = (agent, result) => {
-    for (const pending of pendingMonitorTurns.values()) {
-      const invocation = pending.invocation;
-      if (!invocation
-        || invocation.sessionIdentity !== agent
-        || invocation.correlationId !== result.correlationId
-        || invocation.promptSequence !== (agent.promptSeq ?? invocation.promptSequence)) continue;
-      pending.resolveResult({
-        ...invocation,
-        structuredOutput: result.structuredOutput,
-        text: displayMessageForResult(result),
-      });
-      return;
-    }
-  };
-
-  const monitorSessionHost: MonitorSessionHost = {
-    async invoke(request, prompt, outputSchema, signal) {
-      if (pendingMonitorTurns.has(request.requestId)) {
-        throw new Error(`Monitor evaluation ${request.requestId} is already pending.`);
-      }
-      const pending = createPendingMonitorTurn(request.requestId, signal);
-      const existing = monitorSessionAgent();
-      if (existing) {
-        if (existing.status !== "sleeping" && !existing.restart) {
-          rejectPendingMonitorTurn(pending, new Error("Monitor evaluator session is not wakeable."));
-          return pending.invocationPromise;
-        }
-        let delivery: SessionMessageResult;
-        try {
-          delivery = await routeSessionMessage({
-            selector: existing.correlationId,
-            message: prompt,
-            mode: "follow_up",
-            source: "monitor",
-            signal,
-          });
-        } catch (error) {
-          rejectPendingMonitorTurn(pending, error instanceof Error ? error : new Error(String(error)));
-          return pending.invocationPromise;
-        }
-        if (!delivery.delivered) {
-          rejectPendingMonitorTurn(pending, new Error(delivery.error ?? "Monitor evaluator could not be resumed."));
-          return pending.invocationPromise;
-        }
-        const invocation = bindMonitorSessionDispatch?.(request.requestId, existing);
-        if (!invocation) {
-          const reason = signal.aborted
-            ? "Monitor evaluator was cancelled before its session identity was rebound."
-            : !ownsRootSessionFence(pending.rootFence)
-              ? "Monitor evaluator session changed before its session identity was rebound."
-              : "Monitor evaluator session identity changed before its session was rebound.";
-          rejectPendingMonitorTurn(pending, new Error(reason));
-          return pending.invocationPromise;
-        }
-        return invocation;
-      }
-
-      const ctx = widgetCtx;
-      if (!ctx) {
-        rejectPendingMonitorTurn(pending, new Error("Monitor evaluator requires an active extension session."));
-        return pending.invocationPromise;
-      }
-      const startup = createMonitorSessionStartup<MonitorSessionInvocation>({
-        dispatch: () => tool.execute(
-          request.requestId,
-          {
-            tasks: [{
-              agent: "general",
-              name: MONITOR_SESSION_NAME,
-              prompt,
-              context: "fresh",
-              outputSchema,
-            }],
-            background: true,
-            cwd: ctx.cwd,
-            maxNestingDepth: 0,
-          },
-          signal,
-          undefined,
-          ctx,
-        ),
-        isRootFenceCurrent: () => ownsRootSessionFence(pending.rootFence),
-        timer: runtimeOptions.monitorSessionTimer,
-      });
-      pending.startup = startup;
-      void startup.promise.then((invocation) => {
-        if (pendingMonitorTurns.get(request.requestId) !== pending || pending.invocation) return;
-        pending.invocation = invocation;
-        pending.resolveInvocation(invocation);
-      }).catch((error) => {
-        rejectPendingMonitorTurn(pending, error instanceof Error ? error : new Error(String(error)));
-      });
-      startup.start();
-      return pending.invocationPromise;
-    },
-
-    async waitForResult(invocation, signal, isCurrent) {
-      const pending = pendingMonitorTurns.get(invocation.requestId);
-      if (!pending || pending.invocation !== invocation) throw new Error("Monitor evaluation invocation is no longer current.");
-      if (signal.aborted || !isCurrent()) {
-        const error = signal.aborted
-          ? signal.reason instanceof Error ? signal.reason : new Error("Monitor evaluation was cancelled.")
-          : new Error("Monitor evaluation generation changed before result wait.");
-        rejectPendingMonitorTurn(pending, error);
-        throw error;
-      }
-      let removeAbort: (() => void) | undefined;
-      const aborted = new Promise<never>((_resolve, reject) => {
-        const onAbort = () => reject(signal.reason instanceof Error ? signal.reason : new Error("Monitor evaluation was cancelled."));
-        signal.addEventListener("abort", onAbort, { once: true });
-        removeAbort = () => signal.removeEventListener("abort", onAbort);
-      });
-      try {
-        return await Promise.race([pending.resultPromise, aborted]);
-      } finally {
-        removeAbort?.();
-        completePendingMonitorTurn(pending);
-      }
-    },
-
-    cancel(invocation, reason) {
-      const pending = pendingMonitorTurns.get(invocation.requestId);
-      if (!pending || pending.invocation !== invocation) return;
-      rejectPendingMonitorTurn(pending, reason);
-    },
-
-    async stop(signal) {
-      const agent = monitorSessionAgent();
-      if (agent && !signal.aborted) {
-        await routeSessionMessage({
-          selector: agent.correlationId,
-          message: "",
-          mode: "abort",
-          source: "monitor",
-          signal,
-        });
-      }
-      const error = new Error("Monitor evaluator stopped.");
-      for (const pending of [...pendingMonitorTurns.values()]) rejectPendingMonitorTurn(pending, error);
-    },
-  };
-  runtimeOptions.onMonitorSessionHostCreated?.(monitorSessionHost);
-
-  const monitorLeases = new MonitorLeaseAdapter({
-    getIdentity: () => workspacePeerPublisher?.identity,
-    getSessionName: () => workspacePeerSessionName,
-  });
-  const monitorEvaluator = new MonitorSessionEvaluator(monitorSessionHost);
   const monitorRegistry = sessionHostRegistry;
   if (!monitorRegistry) throw new Error("Session host registry must exist before Monitor initialization.");
 
@@ -6000,13 +5559,13 @@ export default function registerTeammateExtension(
     return binding.session.list();
   };
 
-  const syncMonitorInteractionStatus = (runtimeStatus?: string): void => {
+  const syncMonitorInteractionStatus = (): void => {
     if (!widgetCtx?.ui || typeof widgetCtx.ui.setStatus !== "function") return;
     const remoteCount = currentRemoteMonitorRuns().length;
     widgetCtx.ui.setStatus(
       MONITOR_STATUS_KEY,
       monitorInteractionModeActive
-        ? runtimeStatus ?? `MONITOR · ${monitorEngine.bindings.size} window${monitorEngine.bindings.size === 1 ? "" : "s"} · ${remoteCount} remote`
+        ? `MONITOR · root control · ${remoteCount} remote`
         : undefined,
     );
   };
@@ -6087,115 +5646,6 @@ export default function registerTeammateExtension(
     disposer?.();
   };
 
-  const currentMonitorEndpoint = (endpoint: SessionEndpoint): boolean => {
-    const current = monitorRegistry.directory.get(endpoint.id);
-    return current?.kind === "root"
-      && current.scope === "workspace-peer"
-      && current.ownerId === endpoint.ownerId
-      && current.ownerNonce === endpoint.ownerNonce;
-  };
-
-  const syncMonitorRegistryBindings = (): void => {
-    const endpointIds = [...monitorEngine.bindings.keys()].flatMap((key) => {
-      const resolution = monitorRegistry.resolve(key);
-      return resolution.code === "resolved" && resolution.endpoint?.kind === "root"
-        ? [resolution.endpoint.id]
-        : [];
-    });
-    monitorRegistry.setMonitoredEndpointIds(endpointIds);
-    if (endpointIds.length > 0 && !monitorInteractionExitInProgress) enterMonitorInteractionMode();
-    syncMonitorInteractionStatus();
-  };
-
-  const monitorControllerInstance = new MonitorController({
-    engine: monitorEngine,
-    leases: monitorLeases,
-    endpointIsCurrent: currentMonitorEndpoint,
-    flushLedger: (emit) => flushPendingMonitorLedger(monitorEngine, emit),
-    awaitLedger: async () => {
-      await Promise.allSettled([...monitorLedgerWrites]);
-      monitorLedgerWrites.splice(0, monitorLedgerWrites.length);
-    },
-    onBindingsChanged: syncMonitorRegistryBindings,
-    runtime: {
-      config: () => monitorConfig,
-      registry: monitorRegistry,
-      evaluator: monitorEvaluator,
-      captureTarget(key, binding) {
-        const resolution = monitorRegistry.resolve(key);
-        const endpoint = resolution.endpoint;
-        if (resolution.code !== "resolved" || !endpoint || !currentMonitorEndpoint(endpoint)) return undefined;
-        const owner = workspacePeerOwners.find((candidate) =>
-          candidate.ownerId === endpoint.ownerId && candidate.ownerNonce === endpoint.ownerNonce
-        );
-        if (!owner) return undefined;
-        const latestActivityAt = owner.agents.reduce(
-          (latest, agent) => Math.max(latest, agent.lastActivityAt),
-          owner.publishedAt,
-        );
-        const outputTail = owner.agents.flatMap((agent) =>
-          agent.outputTail?.length ? agent.outputTail : agent.summary ? [agent.summary] : []
-        ).slice(-20);
-        const objective = owner.agents.map((agent) => agent.objective).find((value): value is string => Boolean(value))
-          ?? owner.sessionName
-          ?? binding.displayName;
-        const activeBackgroundJobs = (owner.backgroundJobs ?? [])
-          .filter((job) => job.status === "running" || job.status === "stopping")
-          .map((job) => `${job.id}: ${job.command}`);
-        return {
-          endpoint,
-          info: {
-            correlationId: key,
-            name: binding.displayName,
-            status: owner.agents.some((agent) => agent.status === "running")
-              ? "running"
-              : "sleeping",
-            idleSeconds: Math.max(0, Math.round((Date.now() - latestActivityAt) / 1000)),
-            outputTail,
-            objective,
-            hasPendingInteractions: owner.agents.some((agent) => (agent.pendingInteractions ?? 0) > 0),
-            ...(owner.contextPressure === undefined ? {} : { contextPressure: owner.contextPressure }),
-            kind: "window",
-          },
-          ...(activeBackgroundJobs.length ? { activeBackgroundJobs } : {}),
-        };
-      },
-      async loadGoalContext(binding) {
-        if (!binding.goalId) return "";
-        const root = monitorLedgerRoot ?? state.baseCwd;
-        if (!root) return "";
-        const context = await loadPeerGoalContext(root, binding.goalId);
-        return context ? buildGoalContextBlock(context) : "";
-      },
-      onStatusUpdate(status) {
-        syncMonitorInteractionStatus(status);
-      },
-      notifyMain(message, target) {
-        const provenance = createVerifiedProvenance({
-          source: "monitor",
-          messageKind: "status",
-          deliveryMode: "notify",
-          sender: { kind: "system", ownerId: currentRootOwnerId(), label: "monitor" },
-        });
-        safeSendMessage(pi, {
-          customType: "teammate-message",
-          content: message,
-          display: true,
-          details: { source: "monitor", ...(target ? { target } : {}), provenance },
-        }, { triggerTurn: false });
-      },
-      recordLedger: recordMonitorLedger,
-      async postGoalObjection(goalId, summary, peerId) {
-        const root = monitorLedgerRoot ?? state.baseCwd;
-        if (root) await appendPeerGoalObjection(root, goalId, { peerId, summary });
-      },
-      onEvaluationError(reason) {
-        logDiagnosticError(`[pi-maestro-teammate] monitor evaluation rejected: ${reason}`);
-      },
-    },
-  });
-  monitorController = monitorControllerInstance;
-
   // ---------------------------------------------------------------------------
   // Turn-level advisor (quality review of THIS session on agent_end)
   // ---------------------------------------------------------------------------
@@ -6221,7 +5671,7 @@ export default function registerTeammateExtension(
   /** Low-frequency turn review on agent_end (best-effort, never blocks). */
   async function runAdvisorReview(event: { messages?: unknown[] }, ctx: ExtensionContext): Promise<void> {
     const fence = captureRootSessionFence();
-    const root = monitorLedgerRoot ?? state.baseCwd ?? ctx.cwd;
+    const root = state.baseCwd ?? ctx.cwd;
     advisorConfig = loadAdvisorConfigForRoot(root);
     if (!shouldReview(advisorState, advisorConfig, Date.now())) return;
     const messages = Array.isArray(event.messages) ? event.messages as AdvisorMessageSlice[] : [];
@@ -6270,43 +5720,6 @@ export default function registerTeammateExtension(
       display: true,
       details: { source: "advisor", severity: verdict.status, provenance },
     }, { triggerTurn: false });
-    if (monitorConfig.ledgerEnabled) {
-      void appendMonitorLedgerRecord(root, {
-        kind: "review",
-        action: "verdict",
-        status: verdict.status,
-        reason: verdict.reason,
-        message: guidance,
-        metadata: { source: "advisor" },
-      }).then(() => { void refreshMonitorLedgerState(); }).catch((error) => {
-        logDiagnosticError("[pi-maestro-teammate] advisor ledger append failed:", error);
-      });
-    }
-  }
-
-  const monitorBindingRequest = (
-    owner: WorkspaceOwnerSnapshot,
-    mode: MonitorSupervisionMode,
-    customPrompt?: string,
-    options: { goalId?: string; resumed?: boolean } = {},
-  ): MonitorControllerBindingRequest | undefined => {
-    const resolution = monitorRegistry.resolve(`owner:${owner.ownerId}`);
-    const endpoint = resolution.endpoint;
-    if (resolution.code !== "resolved" || !endpoint || !currentMonitorEndpoint(endpoint)) return undefined;
-    return {
-      key: `owner:${owner.ownerId}`,
-      endpoint,
-      displayName: owner.sessionName ?? `window:${owner.ownerId.slice(0, 6)}`,
-      mode,
-      ...(customPrompt ? { customPrompt } : {}),
-      ...(options.goalId ? { goalId: options.goalId } : {}),
-      ...(options.resumed ? { resumed: true } : {}),
-    };
-  };
-
-  /** Release every supervision lease held by this session. */
-  async function releaseAllMonitorLeases(): Promise<void> {
-    await monitorControllerInstance.leases.releaseAll();
   }
 
   monitorRegistry.setControls({
@@ -6318,41 +5731,7 @@ export default function registerTeammateExtension(
         monitorRegistry.setViewMode("windows");
         return;
       }
-      monitorInteractionExitInProgress = true;
       exitMonitorInteractionMode();
-      try {
-        await monitorControllerInstance.exit("user-exit");
-        syncMonitorRegistryBindings();
-      } finally {
-        monitorInteractionExitInProgress = false;
-      }
-    },
-    async setMonitored(endpointId, enabled, options = {}) {
-      await refreshWorkspacePeerOwners();
-      refreshSessionEndpointDirectory(true);
-      const endpoint = monitorRegistry.directory.get(endpointId);
-      if (!endpoint || !currentMonitorEndpoint(endpoint)) throw new Error("Window endpoint is no longer current.");
-      const key = `owner:${endpoint.ownerId}`;
-      if (!enabled) {
-        await monitorControllerInstance.remove(key, "user-removed");
-        syncMonitorRegistryBindings();
-        return;
-      }
-      const owner = workspacePeerOwners.find((candidate) =>
-        candidate.ownerId === endpoint.ownerId && candidate.ownerNonce === endpoint.ownerNonce
-      );
-      if (!owner) throw new Error("Window endpoint is no longer discoverable.");
-      const request = monitorBindingRequest(
-        owner,
-        options.mode === "custom" ? "custom" : "auto",
-        options.customPrompt,
-        { ...(options.goalId ? { goalId: options.goalId } : {}) },
-      );
-      if (!request) throw new Error("Window endpoint changed before monitor binding.");
-      const result = await monitorControllerInstance.bind([request]);
-      if (result.bound.length === 0) throw new Error(result.errors[0]?.error ?? "Monitor binding failed.");
-      syncMonitorRegistryBindings();
-      monitorRegistry.setViewMode("windows");
     },
   });
 
@@ -6435,7 +5814,7 @@ export default function registerTeammateExtension(
     }
     if (!objective.trim()) return { ok: false, error: "window objective is required" };
 
-    const cwd = monitorLedgerRoot ?? state.baseCwd ?? cwdFallback;
+    const cwd = state.baseCwd ?? cwdFallback;
     const piCommand = getPiSpawnCommand(
       buildManagedWindowPiArgs({ objective, sessionName, presentation, forkSessionFile }),
     );
@@ -6596,10 +5975,6 @@ export default function registerTeammateExtension(
         if (!owner) {
           const exited = window.pid !== undefined && !managedWindowPidIsAlive(window.pid);
           if (window.launchError || exited) {
-            if (window.ownerId) {
-              await monitorControllerInstance.remove(`owner:${window.ownerId}`, "managed-window-gone");
-              syncMonitorRegistryBindings();
-            }
             if (managedWindows.get(name) === window) managedWindows.delete(name);
             return { ok: true, status: "already-exited" };
           }
@@ -6607,13 +5982,7 @@ export default function registerTeammateExtension(
         }
       }
 
-      // Reclamation happens while the binding is still active. This avoids a
-      // retained-but-unsupervised record if the exact-owner kill fails.
       const status = await terminateManagedWindowProcess(window);
-      if (window.ownerId) {
-        await monitorControllerInstance.remove(`owner:${window.ownerId}`, "managed-window-close");
-        syncMonitorRegistryBindings();
-      }
       if (managedWindows.get(name) === window) managedWindows.delete(name);
       return { ok: true, status };
     } catch (error) {
@@ -7171,12 +6540,6 @@ export default function registerTeammateExtension(
       status = stopped.status ?? "stopped";
     } else if (owner) {
       status = await terminateProcessTreeByPid(owner.pid);
-      try {
-        await monitorControllerInstance.remove(`owner:${owner.ownerId}`, "delegation-window-close");
-        syncMonitorRegistryBindings();
-      } catch (error) {
-        logDiagnosticError("[pi-maestro-teammate] delegated window monitor cleanup failed:", error);
-      }
     } else if (record.window && !managedWindowPidIsAlive(record.window.pid)) {
       status = "already-exited";
     } else {
@@ -7215,109 +6578,6 @@ export default function registerTeammateExtension(
     } catch (error) {
       logDiagnosticError(`[pi-maestro-teammate] failed to close delegation record ${window.name}:`, error);
     }
-  }
-
-  /** Load `.pi/settings.json` → `monitor` section, merged with env. */
-  function loadMonitorConfigForRoot(root: string): MonitorEngineConfig {
-    let section: unknown;
-    try {
-      const settingsPath = join(root, ".pi", "settings.json");
-      if (existsSync(settingsPath)) {
-        const parsed = JSON.parse(readFileSync(settingsPath, "utf8")) as { monitor?: unknown };
-        section = parsed?.monitor;
-      }
-    } catch (error) {
-      logDiagnosticError("[pi-maestro-teammate] failed to read monitor settings:", error);
-    }
-    return normalizeMonitorConfig(section);
-  }
-
-  /** Refresh the in-memory ledger read-model (best-effort). */
-  async function refreshMonitorLedgerState(): Promise<void> {
-    const root = monitorLedgerRoot;
-    if (!root || !monitorConfig.ledgerEnabled) {
-      monitorLedgerState = undefined;
-      return;
-    }
-    try {
-      const loaded = await loadMonitorLedger(root);
-      monitorLedgerWarnings = loaded.warnings;
-      monitorLedgerState = deriveMonitorLedgerState(loaded.records);
-    } catch (error) {
-      logDiagnosticError("[pi-maestro-teammate] monitor ledger load failed:", error);
-    }
-  }
-
-  /**
-   * Session-start reconciliation: restore active ledger bindings when
-   * autoResume is enabled, then mark ledger-active bindings without a live
-   * in-process owner as disconnected (pi-peer reconcile semantics).
-   */
-  async function reconcileMonitorLedgerAtStart(ctx: ExtensionContext): Promise<void> {
-    const root = monitorLedgerRoot;
-    if (!root) return;
-    try {
-      const loaded = await loadMonitorLedger(root);
-      const state = deriveMonitorLedgerState(loaded.records);
-      if (state.activeBindings.length === 0) {
-        monitorLedgerWarnings = loaded.warnings;
-        return;
-      }
-      if (monitorConfig.autoResume) {
-        const restored = await resumeMonitorBindings(ctx);
-        if (restored > 0) monitorRegistry.setViewMode("windows");
-      }
-      const live = new Set([...monitorEngine.bindings.keys()]);
-      const reconciled = await reconcileMonitorLedger(root, { liveTargets: [...live], nowMs: Date.now() });
-      if (reconciled.records.length > 0 || reconciled.warnings.length > 0) {
-        monitorLedgerWarnings = reconciled.warnings;
-        await refreshMonitorLedgerState();
-      }
-    } catch (error) {
-      logDiagnosticError("[pi-maestro-teammate] monitor ledger reconcile failed:", error);
-    }
-  }
-
-  /**
-   * Restore active bindings from the durable ledger (auto-resume / /monitor
-   * resume). Returns the number of restored bindings.
-   */
-  async function resumeMonitorBindings(_ctx: ExtensionContext): Promise<number> {
-    const root = monitorLedgerRoot;
-    if (!root || !monitorConfig.ledgerEnabled) return 0;
-    let loaded;
-    try {
-      loaded = await loadMonitorLedger(root);
-    } catch (error) {
-      logDiagnosticError("[pi-maestro-teammate] monitor ledger load failed:", error);
-      return 0;
-    }
-    await refreshWorkspacePeerOwners();
-    refreshSessionEndpointDirectory(true);
-    const ledgerState = deriveMonitorLedgerState(loaded.records);
-    const requests: MonitorControllerBindingRequest[] = [];
-    for (const binding of ledgerState.activeBindings) {
-      if (!binding.target.startsWith("owner:") || monitorEngine.bindings.has(binding.target)) continue;
-      const ownerId = binding.target.slice("owner:".length);
-      const owner = workspacePeerOwners.find((candidate) => candidate.ownerId === ownerId);
-      if (!owner) {
-        logDiagnosticError(`[pi-maestro-teammate] monitor resume skipped ${binding.target}: window not found`);
-        continue;
-      }
-      const request = monitorBindingRequest(
-        owner,
-        binding.mode === "custom" ? "custom" : "auto",
-        binding.customPrompt,
-        { ...(binding.goalId ? { goalId: binding.goalId } : {}), resumed: true },
-      );
-      if (request) requests.push(request);
-    }
-    const result = await monitorControllerInstance.bind(requests);
-    syncMonitorRegistryBindings();
-    for (const failure of result.errors) {
-      logDiagnosticError(`[pi-maestro-teammate] monitor resume skipped ${failure.key}: ${failure.error}`);
-    }
-    return result.bound.length;
   }
 
   /** Resolve a single target name into a compact MonitorTargetSnapshot. */
@@ -8128,7 +7388,7 @@ export default function registerTeammateExtension(
     renderShell: "self",
     description: `Create, list, or close Pi worker windows owned by the active Monitor coordinator.
 
-This lifecycle tool is available only after the user enters Monitor mode with /monitor. Create opens an interactive terminal by default, waits for exact workspace-peer registration, and automatically binds the new window for supervision. Close is restricted to windows created by this Monitor session; discovered external peer windows can be messaged or observed but cannot be closed. Closed windows keep their persisted messages readable through teammate-list view=inbox.`,
+This lifecycle tool is available only after the user enters Monitor mode with /monitor. Create opens an interactive terminal by default, waits for exact workspace-peer registration, returns the exact owner target for direct observation and messaging, and delivers the objective once. Close is restricted to windows created by this Monitor session; discovered external peer windows can be messaged or observed but cannot be closed. Closed windows keep their persisted messages readable through teammate-list view=inbox.`,
     promptSnippet: "Create, list, or close Monitor-owned Pi worker windows.",
     promptGuidelines: [
       "Use create only when the user's monitoring or coordination request requires a new worker window; do not create speculative workers.",
@@ -8208,28 +7468,32 @@ This lifecycle tool is available only after the user enters Monitor mode with /m
           throw new Error(`Monitor mode ended before window "${name}" could be admitted.`);
         }
         if (managedWindows.get(name) !== spawned.window || !exactManagedWindowOwner(spawned.window)) {
-          throw new Error(`window "${name}" changed owner before Monitor binding.`);
-        }
-
-        const request = monitorBindingRequest(owner, "auto");
-        if (!request) throw new Error(`window "${name}" changed endpoint before Monitor binding.`);
-        const bound = await monitorControllerInstance.bind([request]);
-        if (!ownsMonitorCommunication(monitorCapture)) {
-          throw new Error(`Monitor mode ended while window "${name}" was being bound.`);
-        }
-        syncMonitorRegistryBindings();
-        if (bound.bound.length === 0) {
-          throw new Error(bound.errors[0]?.error ?? `Failed to bind managed window "${name}".`);
+          throw new Error(`window "${name}" changed owner before Monitor admission.`);
         }
 
         await refreshWorkspacePeerOwnersStrict();
         if (!ownsMonitorCommunication(monitorCapture)) {
-          throw new Error(`Monitor mode ended before window "${name}" binding was published.`);
+          throw new Error(`Monitor mode ended before window "${name}" admission was published.`);
         }
         if (managedWindows.get(name) !== spawned.window || !exactManagedWindowOwner(spawned.window)) {
-          throw new Error(`window "${name}" changed owner after Monitor binding.`);
+          throw new Error(`window "${name}" changed owner after Monitor admission.`);
         }
-        return result(`Created and bound ${presentation} worker window ${name} as owner:${owner.ownerId}.`);
+
+        const delivery = await routeSessionMessage({
+          selector: `owner:${owner.ownerId}`,
+          message: objective,
+          mode: "follow_up",
+          messageId: randomUUID().replace(/-/g, ""),
+          source: "monitor",
+          messageKind: "request",
+          targetCorrelationId: WORKSPACE_MAIN_SESSION_MARKER,
+          authorize: () => ownsMonitorCommunication(monitorCapture),
+          signal,
+        });
+        if (!delivery.delivered || delivery.receipt?.publicationStage !== "accepted") {
+          throw new Error(delivery.error ?? `Managed window objective for "${name}" was not accepted.`);
+        }
+        return result(`Created ${presentation} worker window ${name} as owner:${owner.ownerId}.`);
       } catch (error) {
         const failure = error instanceof Error ? error.message : String(error);
         const cleanup = await stopManagedWindow(name);
@@ -8894,14 +8158,13 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     return "sleeping";
   }
 
-  function monitorSessionRows(): MonitorSessionRow[] {
-    const localAgents: MonitorSessionRow[] = [...state.activeRuns.values()].map((agent) => ({
+  function sessionSelectionRows(): SessionSelectionRow[] {
+    const localAgents: SessionSelectionRow[] = [...state.activeRuns.values()].map((agent) => ({
       correlationId: agent.correlationId,
       displayName: agent.name ?? agent.correlationId.slice(0, 8),
       agentRole: agent.agent,
       status: agent.status,
       idleSeconds: Math.round((Date.now() - agent.lastActivityAt) / 1000),
-      bound: monitorEngine.bindings.has(agent.correlationId),
       source: "local",
       kind: "agent",
       ownerId: "local",
@@ -8909,8 +8172,8 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
       depth: agent.depth,
       ...(agent.spawnedBy ? { parentCorrelationId: agent.spawnedBy } : {}),
     }));
-    const remoteRows = workspacePeerOwners.flatMap((owner): MonitorSessionRow[] => {
-      const windowRow: MonitorSessionRow = {
+    const remoteRows = workspacePeerOwners.flatMap((owner): SessionSelectionRow[] => {
+      const windowRow: SessionSelectionRow = {
         correlationId: `owner:${owner.ownerId}`,
         displayName: owner.sessionName ?? `window:${owner.ownerId.slice(0, 6)}`,
         agentRole: tuiT("extension.windowSummaryJobs", {
@@ -8919,13 +8182,12 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
         }),
         status: workspaceWindowLifecycle(owner).busy ? "running" : "sleeping",
         idleSeconds: 0,
-        bound: false,
-        source: owner.sessionName ?? `remote:${owner.ownerId.slice(0, 6)}`,
+          source: owner.sessionName ?? `remote:${owner.ownerId.slice(0, 6)}`,
         kind: "window",
         ownerId: owner.ownerId,
         bindable: true,
       };
-      const agentRows: MonitorSessionRow[] = owner.agents.map((agent) => {
+      const agentRows: SessionSelectionRow[] = owner.agents.map((agent) => {
         const key = `${owner.ownerId}:${agent.correlationId}`;
         return {
           correlationId: key,
@@ -8933,36 +8195,33 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
           agentRole: agent.agent,
           status: agent.status,
           idleSeconds: Math.round((Date.now() - agent.lastActivityAt) / 1000),
-          bound: monitorEngine.bindings.has(key),
-          source: owner.sessionName ?? `remote:${owner.ownerId.slice(0, 6)}`,
+              source: owner.sessionName ?? `remote:${owner.ownerId.slice(0, 6)}`,
           kind: "agent",
           ownerId: owner.ownerId,
           bindable: false,
           ...(agent.depth === undefined ? {} : { depth: agent.depth }),
           ...(agent.parentCorrelationId ? { parentCorrelationId: agent.parentCorrelationId } : {}),
-        } satisfies MonitorSessionRow;
+        } satisfies SessionSelectionRow;
       });
       return [windowRow, ...agentRows];
     });
-    const remoteWorkerRows: MonitorSessionRow[] = currentRemoteMonitorRuns().map((run) => ({
+    const remoteWorkerRows: SessionSelectionRow[] = currentRemoteMonitorRuns().map((run) => ({
       correlationId: run.target,
       displayName: run.name ?? run.target,
       agentRole: `remote worker · ${run.targetId}`,
       status: run.status,
       idleSeconds: Math.max(0, Math.round((Date.now() - run.updatedAt) / 1000)),
-      bound: false,
       source: run.target,
       kind: "remote",
       ownerId: run.target,
       bindable: false,
     }));
-    const localWindowRow: MonitorSessionRow = {
+    const localWindowRow: SessionSelectionRow = {
       correlationId: "local",
       displayName: workspacePeerSessionName ?? tuiT("extension.currentWindow"),
       agentRole: tuiT("extension.windowSummary", { agents: localAgents.length }),
       status: windowRowStatus(localAgents.map((agent) => agent.status)),
       idleSeconds: 0,
-      bound: false,
       source: "local",
       kind: "window",
       ownerId: "local",
@@ -8980,7 +8239,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     getArgumentCompletions(prefix: string) {
       if (!ownsMonitorCommunication(captureMonitorCommunication())) return null;
       void refreshWorkspacePeerOwners();
-      const matches = monitorSessionRows()
+      const matches = sessionSelectionRows()
         .filter((row) => row.kind === "window" && row.bindable === true)
         .map((row) => ({
           value: row.correlationId,
@@ -9021,7 +8280,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
       } else {
         preemptCockpitResize();
         const result = await showSessionSendOverlay(ctx, {
-          getSessions: () => monitorSessionRows().filter((row) => row.kind === "window" && row.bindable === true),
+          getSessions: () => sessionSelectionRows().filter((row) => row.kind === "window" && row.bindable === true),
         });
         if (!result) return;
         target = result.target;
@@ -9170,24 +8429,15 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
   });
 
   pi.registerCommand("monitor", {
-    description: "Monitor: /monitor <targets...> [auto|custom:<prompt>] | /monitor exit | /monitor [status]",
+    description: "Monitor: /monitor | /monitor status | /monitor doctor | /monitor exit | /monitor spawn ...",
     getArgumentCompletions(prefix: string) {
-      void refreshWorkspacePeerOwners();
-      const agents = monitorSessionRows()
-        .filter((row) => row.bindable === true)
-        .map((agent) => ({
-          value: agent.displayName,
-          label: agent.displayName,
-          description: `${agent.agentRole} · ${translateStatusIdentifier(agent.status)}${agent.source === "local" ? "" : ` · ${agent.source}`}`,
-        }));
       const commands = [
-        { value: "exit", label: "exit", description: "Stop monitoring and clear bindings" },
-        { value: "status", label: "status", description: "Show bindings and snapshot" },
-        { value: "auto", label: "auto", description: "Auto supervision mode" },
-        { value: "custom:", label: "custom:<prompt>", description: "Custom prompt supervision" },
+        { value: "exit", label: "exit", description: "Exit Monitor mode" },
+        { value: "status", label: "status", description: "Show root Monitor state" },
+        { value: "doctor", label: "doctor", description: "Show root Monitor health" },
+        { value: "spawn", label: "spawn", description: "Manage local worker windows" },
       ];
-      const all = [...commands, ...agents];
-      const matches = all.filter((c) => c.value.startsWith(prefix.trimStart()));
+      const matches = commands.filter((command) => command.value.startsWith(prefix.trimStart()));
       return matches.length > 0 ? matches : null;
     },
     async handler(args: string, ctx) {
@@ -9201,43 +8451,9 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
         return;
       }
 
-      // /monitor ui — legacy binding overlay retained for compatibility.
-      if (trimmed === "ui") {
-        preemptCockpitResize();
-        await refreshWorkspacePeerOwners();
-        const sessions = monitorSessionRows();
-
-        const result = await showMonitorOverlay(ctx, {
-          getSessions: () => sessions,
-        });
-
-        if (!result) return; // cancelled
-
-        const requests: MonitorControllerBindingRequest[] = [];
-        for (const bindingKey of result.selected) {
-          const ownerId = bindingKey.startsWith("owner:") ? bindingKey.slice("owner:".length) : undefined;
-          const owner = ownerId ? workspacePeerOwners.find((candidate) => candidate.ownerId === ownerId) : undefined;
-          if (!owner) continue;
-          const request = monitorBindingRequest(owner, result.mode, result.customPrompt);
-          if (request) requests.push(request);
-        }
-        const bound = await monitorControllerInstance.bind(requests);
-        syncMonitorRegistryBindings();
-        if (bound.bound.length > 0) {
-          await monitorRegistry.requestWindowMode("enter");
-          ctx.ui.notify(
-            `Monitor session started for ${bound.bound.length} window${bound.bound.length === 1 ? "" : "s"} (${result.mode})${bound.errors.length ? ` · ${bound.errors.length} errors` : ""}`,
-            "info",
-          );
-        } else {
-          ctx.ui.notify(bound.errors.map((entry) => entry.error).join("; ") || "No new bindings created.", "warning");
-        }
-        return;
-      }
-
-      // /monitor exit — stop the independent monitor session and clear bindings
+      // /monitor exit — leave the root Monitor control mode.
       if (trimmed === "exit" || trimmed === "stop") {
-        if (!monitorInteractionModeActive && !monitorSessionAgent() && monitorEngine.bindings.size === 0) {
+        if (!monitorInteractionModeActive) {
           ctx.ui.notify("Monitor session is not active.", "warning");
           return;
         }
@@ -9301,148 +8517,67 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
           ctx.ui.notify(`${failure}; ${cleanupText}.`, "warning");
           return;
         }
+        const delivery = await routeSessionMessage({
+          selector: `owner:${owner.ownerId}`,
+          message: objective,
+          mode: "follow_up",
+          messageId: randomUUID().replace(/-/g, ""),
+          source: "monitor",
+          messageKind: "request",
+          targetCorrelationId: WORKSPACE_MAIN_SESSION_MARKER,
+          authorize: () => monitorInteractionModeActive,
+        });
+        if (!delivery.delivered || delivery.receipt?.publicationStage !== "accepted") {
+          const cleanup = await stopManagedWindow(name);
+          const cleanupText = cleanup.ok
+            ? `setup was rolled back (${cleanup.status ?? "stopped"})`
+            : `ownership record retained: ${cleanup.error ?? "reclamation not proven"}`;
+          ctx.ui.notify(`${delivery.error ?? "Managed window objective was not accepted."}; ${cleanupText}.`, "warning");
+          return;
+        }
         ctx.ui.notify(
-          `Spawned managed window ${name} as owner:${owner.ownerId}. Bind with /monitor owner:${owner.ownerId} [--goal <id>].`,
+          `Spawned managed window ${name} as owner:${owner.ownerId}. Observe or message it with owner:${owner.ownerId}.`,
           "info",
         );
         return;
       }
 
-      // /monitor resume — restore active bindings from the durable ledger
-      if (trimmed === "resume") {
-        monitorConfig = loadMonitorConfigForRoot(monitorLedgerRoot ?? state.baseCwd ?? ctx.cwd);
-        if (monitorEngine.bindings.size > 0 && await monitorControllerInstance.resume()) {
-          await monitorRegistry.requestWindowMode("enter");
-          ctx.ui.notify("Resumed the independent Monitor session.", "info");
-          return;
-        }
-        const restored = await resumeMonitorBindings(ctx);
-        if (restored > 0) await monitorRegistry.requestWindowMode("enter");
-        ctx.ui.notify(
-          restored > 0 ? `Resumed the independent Monitor session with ${restored} binding${restored === 1 ? "" : "s"}.` : "No active Monitor session or bindings in the monitor ledger to resume.",
-          restored > 0 ? "info" : "warning",
-        );
-        return;
-      }
-
-      // /monitor metrics — derived supervision metrics from the ledger
-      if (trimmed === "metrics") {
-        await refreshMonitorLedgerState();
-        if (!monitorLedgerState) {
-          ctx.ui.notify("Monitor ledger is not loaded. Start the monitor first.", "warning");
-          return;
-        }
-        const lines = formatMonitorMetrics(deriveMonitorMetrics(monitorLedgerState));
-        ctx.ui.notify(lines.join("\n"), "info");
-        return;
-      }
-
-      // /monitor doctor — read-only health check
+      // /monitor doctor — read-only root-mode health check.
       if (trimmed === "doctor") {
-        monitorConfig = loadMonitorConfigForRoot(monitorLedgerRoot ?? state.baseCwd ?? ctx.cwd);
-        await refreshMonitorLedgerState();
-        const root = monitorLedgerRoot ?? state.baseCwd ?? ctx.cwd;
-        const ledgerLines = monitorLedgerState
-          ? [
-              `  ledger: ${monitorLedgerState.records} records · ${monitorLedgerState.activeBindings.length} active · ${monitorLedgerState.disconnectedBindings.length} disconnected`,
-              `  interventions: ${monitorLedgerState.interventions.length} · outcomes: ${monitorLedgerState.outcomes.length} · dead-letter: ${monitorLedgerState.deadLetters.length}`,
-            ]
-          : [`  ledger: not loaded${monitorConfig.ledgerEnabled ? "" : " (disabled)"}`];
+        const exposureActive = monitorToolExposure?.active === true;
         const lines = [
-          `MONITOR doctor · session ${monitorSessionStatus()} · ${monitorEngine.bindings.size} bindings`,
-          `  config: tick ${monitorConfig.tickMs}ms · stall ${monitorConfig.stallIdleSeconds}s · cooldown ${monitorConfig.interventionCooldownMs}ms · retries ${monitorConfig.maxRetries} · escalate ×${monitorConfig.escalationThreshold} · autoResume ${monitorConfig.autoResume ? "on" : "off"}`,
-          `  ledger: ${monitorConfig.ledgerEnabled ? "enabled" : "disabled"} @ ${join(root, ".pi", "monitor-ledger.jsonl")}`,
-          ...ledgerLines,
-          ...(monitorLedgerWarnings.length ? [`  warnings: ${monitorLedgerWarnings.join("; ")}`] : []),
+          `MONITOR doctor · mode ${monitorInteractionModeActive ? "active" : "inactive"}`,
+          `  exposure: ${exposureActive ? "active" : "inactive"}`,
+          `  workspace: ${workspacePeerOwners.length} peer window${workspacePeerOwners.length === 1 ? "" : "s"}`,
+          `  managed: ${managedWindows.size} window${managedWindows.size === 1 ? "" : "s"}`,
+          `  remote: ${currentRemoteMonitorRuns().length} run${currentRemoteMonitorRuns().length === 1 ? "" : "s"}`,
         ];
         ctx.ui.notify(lines.join("\n"), "info");
         return;
       }
 
-      // /monitor status — show the independent monitor session and its bindings
+      // /monitor status — show the root Monitor mode and owned resources.
       if (trimmed === "status") {
-        const agent = monitorSessionAgent();
         const remoteRuns = currentRemoteMonitorRuns();
-        if (!monitorInteractionModeActive && !agent && monitorEngine.bindings.size === 0 && remoteRuns.length === 0) {
-          ctx.ui.notify("Monitor session is not active. Use /monitor <targets...> to start.", "warning");
+        if (!monitorInteractionModeActive) {
+          ctx.ui.notify("Monitor mode is not active. Use /monitor to enter.", "warning");
           return;
         }
-        const targetLines = [...monitorEngine.bindings.values()].map((binding) =>
-          `  ✓ ${binding.displayName} ${binding.mode}${binding.resumed ? " · resumed" : ""}`,
+        const managedLines = workspaceWindowSnapshots().map((window) =>
+          `  ${window.status === "running" ? "■" : window.status === "launching" ? "□" : "✗"} owner=${window.owner ?? "pending"} ${window.name} · ${window.status}`,
         );
         const remoteLines = remoteRuns.map((run) =>
           `  ${run.status === "completed" ? "✓" : run.status === "failed" || run.status === "lost" ? "✗" : "■"} ${run.target} ${run.status} · ${run.targetId}`,
         );
-        const outputTail = agent?.outputLog.slice(-3) ?? [];
-        const ledgerLine = monitorLedgerState
-          ? `ledger: ${monitorLedgerState.activeBindings.length} active · ${monitorLedgerState.disconnectedBindings.length} disconnected · ${monitorLedgerState.deadLetters.length} dead-letter`
-          : "ledger: not loaded";
-        const lines = [
-          `MONITOR SESSION ${monitorSessionStatus()} · ${monitorEngine.bindings.size} windows · ${remoteRuns.length} remote · ${ledgerLine}`,
-          ...targetLines,
+        ctx.ui.notify([
+          `MONITOR active · ${managedLines.length} managed · ${remoteRuns.length} remote`,
+          ...managedLines,
           ...remoteLines,
-          ...(outputTail.length ? ["  recent:", ...outputTail.map((line) => `    ${line}`)] : []),
-        ];
-        ctx.ui.notify(lines.join("\n"), "info");
+        ].join("\n"), "info");
         return;
       }
 
-      // /monitor <targets...> [auto|custom:<prompt>] — create bindings and start a monitor session
-      // Split at custom: boundary to support multi-word prompts
-      let mode: MonitorSupervisionMode = "auto";
-      let customPrompt: string | undefined;
-      let targetPart = trimmed;
-      let goalId: string | undefined;
-
-      const customIdx = trimmed.indexOf("custom:");
-      if (customIdx >= 0) {
-        mode = "custom";
-        customPrompt = trimmed.slice(customIdx + 7).trim();
-        targetPart = trimmed.slice(0, customIdx).trim();
-      } else if (trimmed.endsWith(" auto") || trimmed === "auto") {
-        targetPart = trimmed.replace(/\s*auto$/, "").trim();
-      }
-
-      // Optional --goal <id> links the binding to a pi-peer goal board.
-      const goalMatch = /--goal\s+(\S+)/.exec(targetPart);
-      if (goalMatch) {
-        goalId = goalMatch[1];
-        targetPart = targetPart.replace(/--goal\s+\S+/, "").trim();
-      }
-
-      const targets = targetPart.split(/\s+/).filter((t) => t && t !== "auto");
-
-      if (targets.length === 0) {
-        ctx.ui.notify("Usage: /monitor <target1> [target2 ...] [auto|custom:<prompt>] [--goal <goalId>]", "warning");
-        return;
-      }
-
-      await refreshWorkspacePeerOwners();
-      refreshSessionEndpointDirectory(true);
-      const requests: MonitorControllerBindingRequest[] = [];
-      const errors: string[] = [];
-      for (const name of targets) {
-        const owner = resolveWorkspaceMonitorTarget(name);
-        if (!owner) {
-          errors.push(`${name}: window not found`);
-          continue;
-        }
-        const request = monitorBindingRequest(owner, mode, customPrompt, { ...(goalId ? { goalId } : {}) });
-        if (request) requests.push(request);
-        else errors.push(`${name}: endpoint changed before binding`);
-      }
-
-      const result = await monitorControllerInstance.bind(requests);
-      syncMonitorRegistryBindings();
-      errors.push(...result.errors.map((entry) => `${entry.key}: ${entry.error}`));
-      if (result.bound.length === 0) {
-        ctx.ui.notify(`No bindings created. ${errors.join("; ")}`, "warning");
-        return;
-      }
-
-      const modeLabel = mode === "custom" ? `custom: ${customPrompt?.slice(0, 40)}` : "auto";
-      await monitorRegistry.requestWindowMode("enter");
-      ctx.ui.notify(`Monitor session started for ${result.bound.length} window${result.bound.length === 1 ? "" : "s"} (${modeLabel})${errors.length ? ` · ${errors.length} errors` : ""}`, "info");
+      ctx.ui.notify("Usage: /monitor | /monitor status | /monitor doctor | /monitor exit | /monitor spawn ...", "warning");
     },
   });
 
@@ -9450,7 +8585,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     description: "Turn-level advisor: /advisor on|off|status",
     async handler(args: string, ctx: ExtensionCommandContext) {
       const trimmed = args.trim().toLowerCase();
-      advisorConfig = loadAdvisorConfigForRoot(monitorLedgerRoot ?? state.baseCwd ?? ctx.cwd);
+      advisorConfig = loadAdvisorConfigForRoot(state.baseCwd ?? ctx.cwd);
       if (trimmed === "on") {
         advisorConfig.enabled = true;
         advisorState.enabled = true;
@@ -9741,9 +8876,6 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     exitMonitorInteractionMode();
     installMonitorEscapeTap(ctx.ui);
     setPersistentUi(ctx.ui, true);
-    // Monitor ledger + config bind to the real session cwd.
-    monitorLedgerRoot = ctx.cwd;
-    monitorConfig = loadMonitorConfigForRoot(ctx.cwd);
     // Mailbox is bound to the real session cwd (workspace isolation).
     rebindMailboxHostForSession();
     void refreshModelCatalogSources(ctx);
@@ -9777,7 +8909,6 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
       }
     }, RECONCILE_RECEIPT_INTERVAL_MS);
     workspaceReceiptReconcileTimer.unref?.();
-    void workspacePeerLifecycle.then(() => reconcileMonitorLedgerAtStart(ctx));
     // Query after all extensions have registered their event listeners. The
     // update is cached even if the async workspace publisher is still starting.
     pi.events.emit("bash-bg:query", undefined);
@@ -9936,15 +9067,10 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     disposeTeammateSettings();
     stopWidgetTimer();
     stopWakeableEvictionTimer();
-    const [localMonitorShutdown, remoteMonitorShutdown] = await Promise.allSettled([
-      monitorControllerInstance.shutdown(),
-      shutdownRemoteMonitorBinding(),
-    ]);
-    if (localMonitorShutdown.status === "rejected") {
-      logDiagnosticError("[pi-maestro-teammate] local Monitor shutdown failed:", localMonitorShutdown.reason);
-    }
-    if (remoteMonitorShutdown.status === "rejected") {
-      logDiagnosticError("[pi-maestro-teammate] remote Monitor shutdown failed:", sanitizeRemoteMonitorError(remoteMonitorShutdown.reason, "shutdown"));
+    try {
+      await shutdownRemoteMonitorBinding();
+    } catch (error) {
+      logDiagnosticError("[pi-maestro-teammate] remote Monitor shutdown failed:", sanitizeRemoteMonitorError(error, "shutdown"));
     }
     workspaceBackgroundJobs = [];
     activePromptLoopIds = [];
@@ -9973,7 +9099,6 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     rootGlobals[MAILBOX_REGISTRY_KEY] = undefined;
     monitorRegistry.replaceEndpoints([]);
     monitorRegistry.thread.rebuild([]);
-    monitorRegistry.setMonitoredEndpointIds([]);
     exitMonitorInteractionMode();
     if (shutdownReason === "quit" || shutdownReason === "reload") {
       if (getSessionHostRegistry(rootGlobals) === sessionHostRegistry) {

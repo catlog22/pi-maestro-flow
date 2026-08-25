@@ -1,11 +1,23 @@
-import type { MonitorSessionRow } from "./monitor-overlay.ts";
 import { type SupportedSettingsLocale } from "./locale.ts";
+export interface SessionSelectionRow {
+    correlationId: string;
+    displayName: string;
+    agentRole: string;
+    status: string;
+    idleSeconds: number;
+    source?: string;
+    kind?: "agent" | "window" | "remote";
+    bindable?: boolean;
+    ownerId?: string;
+    depth?: number;
+    parentCorrelationId?: string;
+}
 export interface SessionSendOverlayResult {
     target: string;
     message: string;
 }
 interface SessionSendOverlayCallbacks {
-    getSessions: () => MonitorSessionRow[];
+    getSessions: () => SessionSelectionRow[];
     close: (result: SessionSendOverlayResult | null) => void;
 }
 /** Small session picker used by /teammate-send. */
@@ -31,7 +43,7 @@ export declare class SessionSendOverlay {
     dispose(): void;
 }
 export interface SessionSendOverlayDeps {
-    getSessions: () => MonitorSessionRow[];
+    getSessions: () => SessionSelectionRow[];
     locale?: SupportedSettingsLocale;
 }
 export declare function showSessionSendOverlay(ctx: {

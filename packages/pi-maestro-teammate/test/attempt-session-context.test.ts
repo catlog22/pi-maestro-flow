@@ -179,26 +179,6 @@ test("no parent session means no session directory and no fork", async () => {
   });
 });
 
-test("an independent monitor child keeps its explicit session directory and marker env", async () => {
-  await withoutAmbientParentSession(() =>
-    withTempSession(async (parentSessionFile) => {
-      const explicitSessionDir = path.join(path.dirname(parentSessionFile), "monitor-session");
-      const { capture } = await runWithCapture(
-        { agent: "general", task: "observe the workspace", context: "fresh" },
-        parentSessionFile,
-        {
-          sessionDir: explicitSessionDir,
-          childEnvironment: { PI_TEAMMATE_MONITOR: "1" },
-        },
-      );
-
-      assert.equal(capture.sessionDir, explicitSessionDir);
-      assert.equal(capture.spawnEnv.PI_TEAMMATE_MONITOR, "1");
-      assert.equal(fs.existsSync(explicitSessionDir), true);
-    })
-  );
-});
-
 // ---------------------------------------------------------------------------
 // Turn-scoped buffers must not leak into the next turn of a wakeable agent
 // ---------------------------------------------------------------------------

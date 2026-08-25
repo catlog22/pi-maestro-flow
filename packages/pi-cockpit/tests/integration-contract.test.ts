@@ -60,19 +60,18 @@ test("Cockpit session bar, command, and shortcut contracts stay stable", () => {
   );
 
   const shortcutConstants = Object.fromEntries(
-    [...source.matchAll(/const (BASH_BG_OVERLAY_KEY|WINDOW_MONITOR_TOGGLE_KEY|SIDEBAR_RESIZE_KEY|SIDEBAR_FOCUS_KEY|SESSION_DETAIL_TOGGLE_KEY) = "([^"]+)"/g)]
+    [...source.matchAll(/const (BASH_BG_OVERLAY_KEY|SIDEBAR_RESIZE_KEY|SIDEBAR_FOCUS_KEY|SESSION_DETAIL_TOGGLE_KEY) = "([^"]+)"/g)]
       .map((match) => [match[1], match[2]]),
   );
   assert.deepEqual(shortcutConstants, {
     BASH_BG_OVERLAY_KEY: "alt+j",
-    WINDOW_MONITOR_TOGGLE_KEY: "alt+w",
     SIDEBAR_RESIZE_KEY: "ctrl+shift+r",
     SIDEBAR_FOCUS_KEY: "alt+l",
     SESSION_DETAIL_TOGGLE_KEY: "alt+e",
   });
   assert.deepEqual(
     [...source.matchAll(/pi\.registerShortcut\(([^,]+),/g)].map((match) => match[1]),
-    ["WINDOW_MONITOR_TOGGLE_KEY", "BASH_BG_OVERLAY_KEY", "TODO_OVERLAY_KEY", "SIDEBAR_RESIZE_KEY", "SESSION_DETAIL_TOGGLE_KEY", "SIDEBAR_FOCUS_KEY"],
+    ["BASH_BG_OVERLAY_KEY", "TODO_OVERLAY_KEY", "SIDEBAR_RESIZE_KEY", "SESSION_DETAIL_TOGGLE_KEY", "SIDEBAR_FOCUS_KEY"],
   );
 
   assert.match(source, /windowPrevious = sessionUi\.mode === "window" && matchesKey\(data, "alt\+left"\)/);

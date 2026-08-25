@@ -1,6 +1,6 @@
 import { resolve as resolvePath } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { isManagedWorkerWindow, isMonitorSession } from "pi-maestro-teammate/v1/child-extensions";
+import { isManagedWorkerWindow } from "pi-maestro-teammate/v1/child-extensions";
 import { getSessionHostRegistry, type SessionHostRegistry } from "pi-maestro-teammate/v1/sessions";
 import { MONITOR_TOOL_EXPOSURE_EVENT, type MonitorToolExposureEventV1 } from "pi-maestro-teammate/v1/events";
 import { FlowScheduleRuntime, type FlowScheduleRuntimeOptions } from "./runtime.ts";
@@ -17,7 +17,6 @@ import {
 
 export interface RegisterFlowScheduleOptions {
   managedWorker?: boolean;
-  monitor?: boolean;
   getRegistry?: () => SessionHostRegistry | undefined;
   createStore?: (cwd: string) => FlowScheduleStore;
   createRuntime?: (store: FlowScheduleStore, cwd: string) => FlowScheduleRuntime;
@@ -41,7 +40,6 @@ export function registerFlowSchedule(
   options: RegisterFlowScheduleOptions = {},
 ): FlowScheduleRegistration {
   const managedWorker = options.managedWorker ?? isManagedWorkerWindow();
-  const monitor = !managedWorker && (options.monitor ?? isMonitorSession());
   const getRegistry = options.getRegistry ?? (() => getSessionHostRegistry());
   let monitorActive = false;
   let monitorGeneration = 0;
@@ -139,21 +137,20 @@ export function registerFlowSchedule(
       monitorGeneration = generation;
       exposeCoordinator(event.active);
     });
-    exposeCoordinator(monitor || getRegistry()?.viewMode === "windows");
-    if (monitor) {
-      pi.on("session_start", async (_event, ctx: ExtensionContext) => {
-        const current = ensureBinding(ctx.cwd);
-        await current.runtime.start().catch(reportError);
-      });
-      pi.on("session_shutdown", () => {
-        disposeBinding();
-      });
-    }
+    exposeCoordinator(getRegistry()?.viewMode === "windows");
+    pi.on("session_start", async (_event, ctx: ExtensionContext) => {
+      if (!monitorActive) return;
+      const current = ensureBinding(ctx.cwd);
+      await current.runtime.start().catch(reportError);
+    });
+    pi.on("session_shutdown", () => {
+      disposeBinding();
+    });
   }
 
   return {
     managedWorker,
-    monitor,
+    get monitor() { return monitorActive; },
     current: () => binding,
     dispose() {
       if (disposed) return;

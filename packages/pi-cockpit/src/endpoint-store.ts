@@ -3,7 +3,6 @@ import type {
 	SessionHostSnapshot,
 	SessionMessageRequest,
 	SessionMessageResult,
-	SessionMonitorOptions,
 	SessionViewMode,
 	WindowThreadEntry,
 } from "pi-maestro-teammate/v1/sessions";
@@ -28,7 +27,6 @@ export interface SessionHostRegistryLike {
 	): () => void;
 	send?(request: SessionMessageRequest): Promise<SessionMessageResult>;
 	requestWindowMode?(action: "enter" | "exit"): Promise<void>;
-	setMonitored?(endpointId: string, enabled: boolean, options?: SessionMonitorOptions): Promise<void>;
 	router?: SessionMessageRouterLike;
 }
 
@@ -63,7 +61,6 @@ export interface EndpointStoreSnapshot {
 	contentRevision: string;
 	mainEndpointId: string;
 	viewMode: SessionViewMode;
-	monitoredEndpointIds: readonly string[];
 	endpoints: readonly CockpitEndpoint[];
 	windows: readonly CockpitEndpoint[];
 	thread: readonly WindowThreadEntry[];
@@ -143,11 +140,9 @@ function sameOwner(left: SessionEndpoint, right: SessionEndpoint): boolean {
 		&& left.ownerNonce === right.ownerNonce;
 }
 
-const INTERNAL_MONITOR_SESSION_NAME = "monitor-session";
-
 function visibleLegacyRows(rows: readonly AgentRow[]): AgentRow[] {
 	return rows
-		.filter((row) => !row.agent.startsWith("graph(") && row.name !== INTERNAL_MONITOR_SESSION_NAME)
+		.filter((row) => !row.agent.startsWith("graph("))
 		.sort((left, right) => left.startedAt - right.startedAt || left.correlationId.localeCompare(right.correlationId, "en"));
 }
 
@@ -187,7 +182,6 @@ export class EndpointStore {
 		contentRevision: revisionOf([]),
 		mainEndpointId: LEGACY_MAIN_ENDPOINT_ID,
 		viewMode: "agents",
-		monitoredEndpointIds: Object.freeze([]),
 		endpoints: Object.freeze([]),
 		windows: Object.freeze([]),
 		thread: Object.freeze([]),
@@ -315,7 +309,7 @@ export class EndpointStore {
 
 		const usedRows = new Set<string>();
 		for (const endpoint of registryAgents) {
-			if (!endpoint.correlationId || endpoint.name === INTERNAL_MONITOR_SESSION_NAME) continue;
+			if (!endpoint.correlationId) continue;
 			const row = rowsById.get(endpoint.correlationId);
 			if ((row?.agent ?? endpoint.agent ?? "").startsWith("graph(")) continue;
 			if (row) usedRows.add(row.correlationId);
@@ -408,7 +402,7 @@ export class EndpointStore {
 		});
 		if (viewMode === "windows" && root) {
 			const controlAgents = registryAgents.filter((endpoint) =>
-				endpoint.name !== INTERNAL_MONITOR_SESSION_NAME && !(endpoint.agent ?? "").startsWith("graph(")
+				!(endpoint.agent ?? "").startsWith("graph(")
 			);
 			const controlActivityRevision = revisionOf([
 				this.#mainOutputRevision,
@@ -430,10 +424,8 @@ export class EndpointStore {
 				remoteAgents: Object.freeze(controlAgents),
 			});
 		}
-		const monitoredEndpointIds = Object.freeze([...(registrySnapshot?.monitoredEndpointIds ?? [])]);
 		const contentRevision = revisionOf([
 			viewMode,
-			monitoredEndpointIds,
 			endpoints.map((endpoint) => [
 				endpoint.id,
 				endpoint.logicalKey,
@@ -448,7 +440,6 @@ export class EndpointStore {
 			contentRevision,
 			mainEndpointId,
 			viewMode,
-			monitoredEndpointIds,
 			endpoints: Object.freeze(endpoints),
 			windows: Object.freeze(windows),
 			thread: Object.freeze([...thread]),

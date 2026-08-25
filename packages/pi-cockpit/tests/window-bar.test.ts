@@ -38,7 +38,6 @@ function snapshot(viewMode: "agents" | "windows" = "agents"): SessionHostSnapsho
 		endpointContentRevision: "endpoints",
 		threadContentRevision: "thread",
 		viewMode,
-		monitoredEndpointIds: viewMode === "windows" ? [ROOT_ID] : [],
 		endpoints: [
 			{
 				version: 1,
@@ -125,9 +124,6 @@ function withSecondWindow(value: SessionHostSnapshot, sessionName = "review"): S
 		...value,
 		contentRevision: `${value.contentRevision}-second`,
 		endpointContentRevision: `${value.endpointContentRevision}-second`,
-		monitoredEndpointIds: value.viewMode === "windows"
-			? [...value.monitoredEndpointIds, SECOND_ROOT_ID]
-			: value.monitoredEndpointIds,
 		endpoints: [...value.endpoints, {
 			version: 1,
 			id: SECOND_ROOT_ID,
@@ -159,8 +155,7 @@ test("Cockpit intercepts exact monitor before agent routing and hides windows by
 	assert.match(source, /isMonitorControlEndpoint\(target\)[\s\S]*?action: "continue"/);
 	assert.match(source, /tuiT\("notice\.imagePeer"\)/);
 	assert.match(source, /sessionUi\.mode === "window"[\s\S]*?renderWindowBar/);
-	assert.match(source, /WINDOW_MONITOR_TOGGLE_KEY = "alt\+w"/);
-	assert.match(source, /registry\.setMonitored\(window\.id, enabled\)/);
+	assert.doesNotMatch(source, /WINDOW_MONITOR_TOGGLE_KEY|registry\.setMonitored/);
 	assert.match(source, /sessionUi\.mode === "window" \? selectedWindowInputTarget\(\) : selectedAgentTarget\(\)/);
 	assert.match(source, /!endpoint \|\| isMonitorControlEndpoint\(endpoint\)\) return undefined;/);
 	assert.match(source, /sigil: "#"/);
@@ -204,11 +199,11 @@ test("Window Bar renders explicit control and peer windows and fits every width"
 	const state = new SessionUiState();
 	state.reconcile("window", value.windows, value.windows[0]?.id);
 	for (let width = 1; width <= 120; width++) {
-		const lines = renderWindowBar(value.windows, state, value.monitoredEndpointIds, width, theme as Theme);
+		const lines = renderWindowBar(value.windows, state, width, theme as Theme);
 		assert.equal(lines.length, 1);
 		assert.ok(visibleWidth(lines[0]!) <= width, `width ${width}: ${lines[0]}`);
 	}
-	const line = renderWindowBar(value.windows, state, value.monitoredEndpointIds, 80, theme as Theme)[0]!;
+	const line = renderWindowBar(value.windows, state, 80, theme as Theme)[0]!;
 	assert.match(line, /#control/);
 	assert.match(line, /#build/);
 	assert.doesNotMatch(line, /■|mon 1/);
@@ -229,7 +224,7 @@ test("Window Bar keeps a selected sleeping peer in the accent color", () => {
 		fg: (color, text) => `<${color}>${text}</${color}>`,
 		bold: (text) => text,
 	};
-	const rendered = renderWindowBar(sleeping, state, value.monitoredEndpointIds, 120, taggedTheme as Theme)[0]!;
+	const rendered = renderWindowBar(sleeping, state, 120, taggedTheme as Theme)[0]!;
 	assert.match(rendered, /<accent>▸ #build<\/accent>/);
 	assert.doesNotMatch(rendered, /■ #build/);
 });
@@ -243,12 +238,11 @@ test("Window Bar shows the Alt+R list hint only outside a capturing overlay", ()
 	const visible = renderWindowBar(
 		value.windows,
 		state,
-		value.monitoredEndpointIds,
 		100,
 		theme as Theme,
 		{ shortcutHint: `${altKey("R")} list` },
 	)[0]!;
-	const hidden = renderWindowBar(value.windows, state, value.monitoredEndpointIds, 100, theme as Theme)[0]!;
+	const hidden = renderWindowBar(value.windows, state, 100, theme as Theme)[0]!;
 	assert.match(visible, new RegExp(`${altRe("R")} list$`));
 	assert.doesNotMatch(hidden, new RegExp(`${altRe("R")}`));
 });
@@ -256,7 +250,7 @@ test("Window Bar shows the Alt+R list hint only outside a capturing overlay", ()
 test("Window Bar empty state is width bounded", () => {
 	const state = new SessionUiState();
 	for (let width = 1; width <= 30; width++) {
-		const line = renderWindowBar([], state, [], width, theme as Theme)[0]!;
+		const line = renderWindowBar([], state, width, theme as Theme)[0]!;
 		assert.ok(visibleWidth(line) <= width, `width ${width}: ${visibleWidth(line)}`);
 	}
 });
@@ -315,7 +309,7 @@ test("duplicate window names gain a non-color owner suffix", () => {
 	]);
 	const state = new SessionUiState();
 	state.reconcile("window", value.windows, ROOT_ID);
-	const line = renderWindowBar(value.windows, state, value.monitoredEndpointIds, 80, theme as Theme)[0]!;
+	const line = renderWindowBar(value.windows, state, 80, theme as Theme)[0]!;
 	assert.doesNotMatch(line, /■|mon 2/);
 });
 

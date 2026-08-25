@@ -4,9 +4,7 @@ import test from "node:test";
 import type { AgentConfig } from "../src/agents/agents.ts";
 import {
   MANAGED_WINDOW_ENV,
-  MONITOR_SESSION_ENV_VAR,
   isManagedWorkerWindow,
-  isMonitorSession,
   registerTeammateChildExtension,
 } from "../src/public/v1/child-extensions.ts";
 import {
@@ -35,27 +33,6 @@ test("the public child-extension contract exposes stable managed-window identity
   } finally {
     if (previous === undefined) delete process.env[MANAGED_WINDOW_ENV];
     else process.env[MANAGED_WINDOW_ENV] = previous;
-  }
-});
-
-test("the public child-extension contract exposes exact Monitor session identity", () => {
-  const previousChild = process.env.PI_TEAMMATE_CHILD;
-  const previousMonitor = process.env[MONITOR_SESSION_ENV_VAR];
-  try {
-    delete process.env.PI_TEAMMATE_CHILD;
-    delete process.env[MONITOR_SESSION_ENV_VAR];
-    assert.equal(isMonitorSession(), false);
-    process.env[MONITOR_SESSION_ENV_VAR] = "1";
-    assert.equal(isMonitorSession(), false);
-    process.env.PI_TEAMMATE_CHILD = "1";
-    assert.equal(isMonitorSession(), true);
-    process.env[MONITOR_SESSION_ENV_VAR] = "true";
-    assert.equal(isMonitorSession(), false);
-  } finally {
-    if (previousChild === undefined) delete process.env.PI_TEAMMATE_CHILD;
-    else process.env.PI_TEAMMATE_CHILD = previousChild;
-    if (previousMonitor === undefined) delete process.env[MONITOR_SESSION_ENV_VAR];
-    else process.env[MONITOR_SESSION_ENV_VAR] = previousMonitor;
   }
 });
 

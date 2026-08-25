@@ -137,7 +137,6 @@ const FOOTER_UTILS: WidthUtils = { measure: visibleWidth, clip: truncateToWidth 
 const BASH_BG_OVERLAY_KEY = "alt+j";
 const TODO_OVERLAY_KEY = "alt+shift+t";
 const SIDEBAR_RESIZE_KEY = "ctrl+shift+r";
-const WINDOW_MONITOR_TOGGLE_KEY = "alt+w";
 const SIDEBAR_FOCUS_KEY = "alt+l";
 const SESSION_DETAIL_TOGGLE_KEY = "alt+e";
 const COCKPIT_STATUS_KEY = "cockpit";
@@ -1067,7 +1066,6 @@ export default function (pi: ExtensionAPI): void {
 							? renderWindowBar(
 								snapshot.windows,
 								sessionUi,
-								snapshot.monitoredEndpointIds,
 								width,
 								theme,
 								{ shortcutHint: sessionListOverlayActive() ? undefined : tuiT("session.listHint") },
@@ -2122,13 +2120,10 @@ export default function (pi: ExtensionAPI): void {
 			: allEntries;
 		const choices = entries.map((endpoint) => {
 			const current = endpoint.id === selectedId ? tuiStatus("selected") : "";
-			const monitored = mode === "window" && snapshot.monitoredEndpointIds.includes(endpoint.id)
-				? tuiStatus("monitored")
-				: "";
 			const agentCount = mode === "window" && endpoint.agentCount !== undefined
 				? tuiT("common.agents", { count: endpoint.agentCount })
 				: "";
-			const detail = [current, tuiStatus(endpoint.status), monitored, agentCount].filter(Boolean).join(" · ");
+			const detail = [current, tuiStatus(endpoint.status), agentCount].filter(Boolean).join(" · ");
 			const sigil = mode === "window" ? "#" : "@";
 			return `${sigil}${endpoint.label}${detail ? ` · ${detail}` : ""}`;
 		});
@@ -2405,33 +2400,6 @@ export default function (pi: ExtensionAPI): void {
 
 	const nativePiSettingsProvider = createNativePiSettingsProvider({
 		getThemes: () => (lastCtx?.ui.getAllThemes?.() ?? []).map((theme) => theme.name),
-	});
-
-	pi.registerShortcut(WINDOW_MONITOR_TOGGLE_KEY, {
-		description: "Toggle supervision for the selected Window Bar session",
-		async handler(ctx) {
-			if (sessionUi.mode !== "window") return;
-			const window = selectedWindowEndpoint();
-			const registry = sessionRegistry() ?? endpoints.registry;
-			if (!window || !registry?.setMonitored || isMonitorControlEndpoint(window)) {
-				ctx.ui.notify(
-					isMonitorControlEndpoint(window)
-						? tuiT("notice.selectedControl")
-						: tuiT("notice.noMonitorableWindow"),
-					"warning",
-				);
-				return;
-			}
-			const enabled = !endpoints.snapshot().monitoredEndpointIds.includes(window.id);
-			try {
-				await registry.setMonitored(window.id, enabled);
-				ctx.ui.notify(tuiT(enabled ? "notice.monitoring" : "notice.monitoringStopped", {
-					label: window.label,
-				}), "info");
-			} catch (error) {
-				ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
-			}
-		},
 	});
 
 	pi.registerShortcut(BASH_BG_OVERLAY_KEY, {

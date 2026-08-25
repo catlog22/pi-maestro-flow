@@ -16,7 +16,6 @@ import {
   WORKSPACE_MAIN_SESSION_MARKER,
   WORKSPACE_PEER_PROTOCOL_VERSION,
   WorkspaceTargetResolutionError,
-  acquireMonitorLease,
   activeWorkspaceBackgroundJobsFromPayload,
   buildWorkspaceOwnerSnapshot,
   cleanupWorkspacePeerMailboxes,
@@ -42,7 +41,6 @@ import {
   projectWorkspacePeerWindow,
   publishWorkspaceOwner,
   readWorkspacePeerResponse,
-  releaseMonitorLease,
   requireRoutableWorkspaceTarget,
   resolveWorkspaceOwnerIdentity,
   resolveWorkspaceTarget,
@@ -1248,98 +1246,6 @@ test("protocol ids and generated mailbox paths reject traversal", async () => {
       /not a private real directory/,
     );
   }
-});
-
-// ===========================================================================
-// Supervision lease — one monitor per peer window
-// ===========================================================================
-
-test("acquireMonitorLease grants a fresh lease and releases it", async () => {
-  const { rootDir } = await temporaryWorkspace();
-  const monitor = createWorkspacePeerIdentity(join(rootDir, "project"), { rootDir: join(rootDir, "runtime"), ownerId: OWNER_A, ownerNonce: NONCE_A });
-  await ensureWorkspacePeerDirectories(monitor);
-
-  const acquired = await acquireMonitorLease(monitor, OWNER_B, { sessionName: "coordinator" });
-  assert.equal(acquired.ok, true);
-  assert.equal(acquired.lease?.monitorOwnerId, OWNER_A);
-  assert.equal(acquired.lease?.targetOwnerId, OWNER_B);
-  assert.equal(acquired.lease?.sessionName, "coordinator");
-  assert.ok(acquired.lease!.since > 0);
-
-  assert.equal(await releaseMonitorLease(monitor, OWNER_B), true);
-  assert.equal(await releaseMonitorLease(monitor, OWNER_B), true, "double release is a no-op");
-});
-
-test("acquireMonitorLease refuses its own window", async () => {
-  const { rootDir } = await temporaryWorkspace();
-  const identity = createWorkspacePeerIdentity(join(rootDir, "project"), { rootDir: join(rootDir, "runtime"), ownerId: OWNER_A, ownerNonce: NONCE_A });
-  await ensureWorkspacePeerDirectories(identity);
-  const result = await acquireMonitorLease(identity, OWNER_A);
-  assert.equal(result.ok, false);
-  assert.match(result.error ?? "", /own session/);
-});
-
-test("acquireMonitorLease blocks a second live monitor", async () => {
-  const { rootDir } = await temporaryWorkspace();
-  const runtime = join(rootDir, "runtime");
-  const project = join(rootDir, "project");
-  const first = createWorkspacePeerIdentity(project, { rootDir: runtime, ownerId: OWNER_A, ownerNonce: NONCE_A });
-  const second = createWorkspacePeerIdentity(project, { rootDir: runtime, ownerId: OWNER_B, ownerNonce: NONCE_B });
-  await ensureWorkspacePeerDirectories(first);
-  await ensureWorkspacePeerDirectories(second);
-
-  // First monitor acquires the lease.
-  const acquired = await acquireMonitorLease(first, OWNER_C, { sessionName: "coordinator" });
-  assert.equal(acquired.ok, true);
-
-  // A second monitor sees the live holder (publish a fresh snapshot for A).
-  await publishWorkspaceOwner(first, { agents: [], settled: [], sessionId: "s1" }, Date.now());
-  const blocked = await acquireMonitorLease(second, OWNER_C);
-  assert.equal(blocked.ok, false);
-  assert.match(blocked.error ?? "", /already monitored by/);
-});
-
-test("acquireMonitorLease takes over a stale lease from an offline holder", async () => {
-  const { rootDir } = await temporaryWorkspace();
-  const runtime = join(rootDir, "runtime");
-  const project = join(rootDir, "project");
-  const first = createWorkspacePeerIdentity(project, { rootDir: runtime, ownerId: OWNER_A, ownerNonce: NONCE_A });
-  const second = createWorkspacePeerIdentity(project, { rootDir: runtime, ownerId: OWNER_B, ownerNonce: NONCE_B });
-  await ensureWorkspacePeerDirectories(first);
-  await ensureWorkspacePeerDirectories(second);
-
-  await acquireMonitorLease(first, OWNER_C, { sessionName: "dead-coordinator" });
-
-  // Holder A never published a fresh snapshot → its lease is stale and the
-  // second monitor may take over.
-  const taken = await acquireMonitorLease(second, OWNER_C);
-  assert.equal(taken.ok, true);
-  assert.equal(taken.lease?.monitorOwnerId, OWNER_B);
-
-  // Original holder can no longer release (lease belongs to B).
-  assert.equal(await releaseMonitorLease(first, OWNER_C), false);
-  assert.equal(await releaseMonitorLease(second, OWNER_C), true);
-});
-
-test("acquireMonitorLease honors explicit staleness window", async () => {
-  const { rootDir } = await temporaryWorkspace();
-  const runtime = join(rootDir, "runtime");
-  const project = join(rootDir, "project");
-  const first = createWorkspacePeerIdentity(project, { rootDir: runtime, ownerId: OWNER_A, ownerNonce: NONCE_A });
-  const second = createWorkspacePeerIdentity(project, { rootDir: runtime, ownerId: OWNER_B, ownerNonce: NONCE_B });
-  await ensureWorkspacePeerDirectories(first);
-  await ensureWorkspacePeerDirectories(second);
-
-  await acquireMonitorLease(first, OWNER_C, { sessionName: "h", now: 1_000 });
-  // A publishes a snapshot that is still fresh within the window.
-  await publishWorkspaceOwner(first, { agents: [], settled: [], sessionId: "s1" }, 1_000);
-
-  const blocked = await acquireMonitorLease(second, OWNER_C, { now: 1_500, staleMs: 1_000 });
-  assert.equal(blocked.ok, false, "fresh snapshot blocks takeover");
-
-  // After the window elapses the same lease is stale.
-  const taken = await acquireMonitorLease(second, OWNER_C, { now: 2_500, staleMs: 1_000 });
-  assert.equal(taken.ok, true);
 });
 
 // ===========================================================================

@@ -16,29 +16,11 @@ import {
   stopMonitorMode,
   stripMonitorModeContext,
   validateMonitorParams,
-  // Engine
-  createEngineState,
-  addBinding,
-  removeBinding,
-  clearBindings,
-  heuristicCheck,
-  canIntervene,
-  recordIntervention,
-  engineTick,
-  stopEngine,
-  formatEngineStatusBar,
-  buildAutoAnalysisPrompt,
-  buildCustomAnalysisPrompt,
-  parseAnalysisResult,
-  INTERVENTION_COOLDOWN_MS,
   MONITOR_MAX_TARGETS,
   MONITOR_STATUS_REFRESH_MS,
   type BarrierEntry,
   type MonitorTargetSnapshot,
   type MonitorParams,
-  type EngineAgentInfo,
-  type MonitorBinding,
-  type EngineCallbacks,
 } from "../src/extension/monitor.ts";
 
 // ---------------------------------------------------------------------------
@@ -81,22 +63,11 @@ test("validateMonitorParams accepts valid params", () => {
   assert.equal(validateMonitorParams({ action: "wait", targets: ["a"], waitMode: "count", waitCount: 1 }), undefined);
 });
 
-test("independent monitor session identity and command entry points stay stable", async () => {
+test("root Monitor command entry points exclude the legacy evaluator runtime", async () => {
   const source = await readFile(new URL("../src/extension/index.ts", import.meta.url), "utf8");
-  const sessionSource = await readFile(new URL("../src/extension/monitor-session.ts", import.meta.url), "utf8");
 
-  assert.match(sessionSource, /export const MONITOR_SESSION_NAME = "monitor-session"/);
-  assert.match(sessionSource, /export \{ MONITOR_SESSION_ENV_VAR \} from "\.\.\/runs\/child-extensions\.ts"/);
-  assert.match(sessionSource, /export const MONITOR_SESSION_RELATIVE_DIR = "\.pi\/monitor-sessions"/);
-  assert.match(source, /name: MONITOR_SESSION_NAME,[\s\S]*?context: "fresh"/);
-  assert.match(source, /background: true,[\s\S]*?maxNestingDepth: 0/);
-  assert.match(source, /const monitorSessionDispatch = !isMultiTask[\s\S]*?authorizeMonitorSessionDispatch\?\.\(id\) === true/);
-  assert.match(source, /normalizedTasks\.some\(\(task\) => task\.name === MONITOR_SESSION_NAME\)[\s\S]*?reserved for the host-owned Monitor evaluator/);
-  assert.match(source, /monitorSessionDispatch \? \{[\s\S]*?MONITOR_SESSION_RELATIVE_DIR, correlationId/);
-  assert.match(source, /const monitorSessionAuthorities = new WeakMap<ActiveAgent, MonitorSessionAuthority>\(\)/);
-  assert.match(source, /authority\.runtimeGeneration === \(agent\.runtimeGeneration \?\? 0\)[\s\S]*?ownsRootSessionFence\(authority\.rootFence\)[\s\S]*?state\.activeRuns\.get\(agent\.correlationId\) === agent/);
-  assert.match(source, /proxyMonitorIdentityCurrent\(\)[\s\S]*?ownsMonitorCommunication\(proxyMonitorCapture\)/);
-  assert.match(source, /childEnvironment: \{ \[MONITOR_SESSION_ENV_VAR\]: "1" \}/);
+  assert.doesNotMatch(source, /MONITOR_SESSION|PI_TEAMMATE_MONITOR|monitorSessionAgent|MonitorSessionEvaluator/);
+  assert.doesNotMatch(source, /MonitorController|monitorController|monitorEngine|monitorLedger/);
   assert.equal(source.match(/pi\.registerCommand\("monitor"/g)?.length, 1);
   assert.equal(source.match(/pi\.registerCommand\("teammate-send"/g)?.length, 1);
   assert.match(source, /kind: "workspace",[\s\S]*?capabilities: \{ inspect: true, wait: true, cancel: false, message: true, supervise: true \}/);
@@ -104,7 +75,6 @@ test("independent monitor session identity and command entry points stay stable"
   assert.match(source, /workspaceMainSessionDeliveryDecision\(\s*command\.action,\s*workspaceBackgroundJobs/);
   assert.match(source, /deliverAs: delivery\.deliverAs/);
   assert.match(source, /steer deferred as follow_up while foreground bash_bg is active/);
-  assert.match(sessionSource, /foreground background-job entry/);
   assert.match(source, /if \(trimmed === ""\)[\s\S]*?requestWindowMode\("enter"\)/);
   assert.match(source, /applyMonitorModeContext\(withDepth, monitorInteractionModeActive\)/);
   assert.doesNotMatch(source, /guardMonitorModeToolCall/);
@@ -112,16 +82,16 @@ test("independent monitor session identity and command entry points stay stable"
   assert.match(source, /options\.view === "turns"\) return workspaceTurnsSnapshot\(owner, target, detail, lines, options\);/);
   assert.match(source, /\.\.\.\(options\.view \? \{ view: options\.view \} : \{\}\)/);
   assert.match(source, /async requestWindowMode\(action\)[\s\S]*?enterMonitorInteractionMode\(\)[\s\S]*?setViewMode\("windows"\)/);
-  assert.match(source, /monitorConfig\.autoResume[\s\S]*?restored > 0\) monitorRegistry\.setViewMode\("windows"\)/);
+  assert.doesNotMatch(source, /autoResume|setMonitored|monitoredEndpointIds/);
   assert.match(source, /pi\.on\("session_start"[\s\S]*?exitMonitorInteractionMode\(\)/);
   assert.match(source, /pi\.on\("session_shutdown"[\s\S]*?exitMonitorInteractionMode\(\)/);
-  assert.match(source, /pi\.on\("session_shutdown"[\s\S]*?Promise\.allSettled\(\[[\s\S]*?monitorControllerInstance\.shutdown\(\)[\s\S]*?shutdownRemoteMonitorBinding\(\)/);
+  assert.doesNotMatch(source, /monitorControllerInstance\.shutdown/);
   assert.match(source, /const target: ObservationTarget = \{\s*kind: "workspace",\s*id,\s*\.\.\.\(options\.cursor \? \{ cursor: options\.cursor \} : \{\}\),\s*\};/);
   assert.match(source, /workspaceObservationSnapshot[\s\S]*?await refreshWorkspacePeerOwners\(\);[\s\S]*?if \(!ownsRootSessionFence\(fence\)\)[\s\S]*?error: "stale-root-session"/);
   assert.match(source, /waitForWorkspaceObservation[\s\S]*?options\.until !== "completed"[\s\S]*?last\.nativeStatus === "result-ready"/);
   assert.match(source, /event\.source !== "interactive"[\s\S]*?event\.text\.trim\(\) !== "monitor"/);
   assert.match(source, /if \(trimmed === "exit" \|\| trimmed === "stop"\)/);
-  assert.match(source, /if \(trimmed === "resume"\)/);
+  assert.doesNotMatch(source, /trimmed === "resume"|trimmed === "metrics"|custom:<prompt>/);
   assert.match(source, /if \(trimmed === "status"\)/);
 });
 
@@ -297,7 +267,6 @@ test("activePromptLoopIdsFromPayload keeps only active prompt loops", () => {
 test("monitor communication uses tool-local capability gates without global interception", async () => {
   const source = await readFile(new URL("../src/extension/index.ts", import.meta.url), "utf8");
   const monitorSource = await readFile(new URL("../src/extension/monitor.ts", import.meta.url), "utf8");
-  const runtimeSource = await readFile(new URL("../src/extension/monitor-runtime.ts", import.meta.url), "utf8");
   const coreSource = await readFile(new URL("../src/extension/teammate-core.ts", import.meta.url), "utf8");
   const proxySource = await readFile(new URL("../src/extension/teammate-proxy.ts", import.meta.url), "utf8");
   const peerSource = await readFile(new URL("../src/extension/workspace-peers.ts", import.meta.url), "utf8");
@@ -329,7 +298,8 @@ test("monitor communication uses tool-local capability gates without global inte
   assert.match(source, /owner\.ownerId === window\.ownerId[\s\S]*?owner\.ownerNonce === window\.ownerNonce[\s\S]*?owner\.pid === window\.pid/);
   assert.match(source, /await refreshWorkspacePeerOwnersStrict\(\)[\s\S]*?terminateManagedWindowProcess\(window\)/);
   assert.match(source, /const exited = window\.pid !== undefined && !managedWindowPidIsAlive\(window\.pid\)/);
-  assert.match(source, /const status = await terminateManagedWindowProcess\(window\);[\s\S]*?await monitorControllerInstance\.remove/);
+  assert.match(source, /const status = await terminateManagedWindowProcess\(window\)/);
+  assert.doesNotMatch(source, /monitorController/);
   assert.match(source, /if \(managedWindows\.get\(name\) === window\) managedWindows\.delete\(name\)/);
   assert.match(source, /termination\.outcome/);
   assert.match(source, /return terminateProcessTreeByPid\(owner\.pid\)/);
@@ -359,7 +329,7 @@ test("monitor communication uses tool-local capability gates without global inte
   assert.match(source, /Closed windows keep their persisted messages readable through teammate-list view=inbox/);
   assert.match(source, /use teammate-list with view="inbox" to read the window/);
   assert.match(monitorSource, /appendMonitorModeContext/);
-  assert.match(runtimeSource, /@deprecated Legacy compatibility runtime/);
+  assert.doesNotMatch(source, /MonitorRuntime|MonitorController/);
   assert.match(coreSource, /view="turns"/);
   assert.match(source, /pi\.events\.on\("loop:update", applyLoopSnapshot\)/);
   assert.match(source, /pi\.events\.emit\("loop:query", undefined\)/);
@@ -450,373 +420,4 @@ test("startMonitorMode replaces previous monitor", () => {
   assert.deepEqual(ms.targets, ["b"]);
 
   stopMonitorMode(ms);
-});
-
-// ===========================================================================
-// Engine: binding management
-// ===========================================================================
-
-function engineInfo(name: string, status: string, idle = 5): EngineAgentInfo {
-  return {
-    correlationId: `cid-${name}`,
-    name,
-    status,
-    idleSeconds: idle,
-    outputTail: ["working on stuff"],
-    objective: "Build the API",
-    hasPendingInteractions: false,
-  };
-}
-
-test("addBinding creates a 1:1 binding", () => {
-  const engine = createEngineState();
-  const r1 = addBinding(engine, "cid-1", "dev-api", "auto");
-  assert.equal(r1.ok, true);
-  assert.equal(engine.bindings.size, 1);
-
-  // Duplicate rejected
-  const r2 = addBinding(engine, "cid-1", "dev-api", "auto");
-  assert.equal(r2.ok, false);
-  assert.match(r2.error ?? "", /already has a monitor/);
-});
-
-test("removeBinding and clearBindings work", () => {
-  const engine = createEngineState();
-  addBinding(engine, "cid-1", "a", "auto");
-  addBinding(engine, "cid-2", "b", "custom", "check coverage");
-  assert.equal(engine.bindings.size, 2);
-
-  assert.equal(removeBinding(engine, "cid-1"), true);
-  assert.equal(engine.bindings.size, 1);
-
-  clearBindings(engine);
-  assert.equal(engine.bindings.size, 0);
-});
-
-test("binding stores custom prompt", () => {
-  const engine = createEngineState();
-  addBinding(engine, "cid-1", "a", "custom", "Ensure tests pass");
-  const binding = engine.bindings.get("cid-1");
-  assert.equal(binding?.mode, "custom");
-  assert.equal(binding?.customPrompt, "Ensure tests pass");
-});
-
-// ===========================================================================
-// Engine: heuristic checks
-// ===========================================================================
-
-test("heuristicCheck detects stalled agent", () => {
-  const result = heuristicCheck(engineInfo("a", "running", 120));
-  assert.equal(result.needsIntervention, true);
-  assert.equal(result.reason, "stalled");
-});
-
-test("heuristicCheck detects failed agent (notify only)", () => {
-  const result = heuristicCheck(engineInfo("a", "failed"));
-  assert.equal(result.needsIntervention, false);
-  assert.equal(result.notifyOnly, true);
-  assert.equal(result.reason, "failed");
-});
-
-test("heuristicCheck detects interaction needed (notify only)", () => {
-  const info = { ...engineInfo("a", "running"), hasPendingInteractions: true };
-  const result = heuristicCheck(info);
-  assert.equal(result.notifyOnly, true);
-  assert.equal(result.reason, "interaction-needed");
-});
-
-test("heuristicCheck passes healthy agent", () => {
-  const result = heuristicCheck(engineInfo("a", "running", 5));
-  assert.equal(result.needsIntervention, false);
-  assert.equal(result.notifyOnly, undefined);
-});
-
-test("heuristicCheck stall threshold follows configured stallIdleSeconds", () => {
-  // Raised threshold: 120s idle is no longer stalled at 300s.
-  const relaxed = heuristicCheck(engineInfo("a", "running", 120), 80, 300);
-  assert.equal(relaxed.needsIntervention, false);
-
-  // Lowered threshold: 40s idle stalls at 30s even though it is below the
-  // 60s built-in default (regression: config was ignored by the heuristic).
-  const strict = heuristicCheck(engineInfo("a", "running", 40), 80, 30);
-  assert.equal(strict.needsIntervention, true);
-  assert.equal(strict.reason, "stalled");
-});
-
-// ===========================================================================
-// Engine: intervention cooldown
-// ===========================================================================
-
-test("canIntervene respects cooldown", () => {
-  const engine = createEngineState();
-  addBinding(engine, "cid-1", "a", "auto");
-  const binding = engine.bindings.get("cid-1")!;
-
-  // Fresh binding — can intervene
-  assert.equal(canIntervene(binding, Date.now()), true);
-
-  // Record intervention
-  recordIntervention(binding, "stalled", "continue", "steer");
-  assert.equal(binding.interventions.length, 1);
-
-  // Immediately after — cannot intervene
-  assert.equal(canIntervene(binding, Date.now()), false);
-
-  // After cooldown — can intervene
-  assert.equal(canIntervene(binding, Date.now() + INTERVENTION_COOLDOWN_MS + 1), true);
-});
-
-test("canIntervene honors a configured cooldown", () => {
-  const engine = createEngineState();
-  addBinding(engine, "cid-1", "a", "auto");
-  const binding = engine.bindings.get("cid-1")!;
-  recordIntervention(binding, "stalled", "continue", "steer");
-
-  // Custom 5s cooldown: blocked within, allowed after.
-  assert.equal(canIntervene(binding, Date.now(), 5_000), false);
-  assert.equal(canIntervene(binding, Date.now() + 5_001, 5_000), true);
-  // Default constant still applies when no cooldown is given.
-  assert.equal(canIntervene(binding, Date.now() + 5_001), false);
-});
-
-test("intervention log is trimmed", () => {
-  const engine = createEngineState();
-  addBinding(engine, "cid-1", "a", "auto");
-  const binding = engine.bindings.get("cid-1")!;
-
-  for (let i = 0; i < 25; i++) {
-    recordIntervention(binding, "stalled", `msg ${i}`, "steer");
-  }
-  assert.ok(binding.interventions.length <= 20);
-});
-
-// ===========================================================================
-// Engine: tick
-// ===========================================================================
-
-test("engineTick removes gone agents and intervenes on stalled", async () => {
-  const engine = createEngineState();
-  const sent: Array<{ cid: string; msg: string }> = [];
-  const notified: string[] = [];
-
-  addBinding(engine, "cid-gone", "ghost", "auto");
-  addBinding(engine, "cid-stalled", "slow", "auto");
-
-  engine.callbacks = {
-    getAgentInfo: (cid) => {
-      if (cid === "cid-stalled") return engineInfo("slow", "running", 120);
-      return undefined; // gone
-    },
-    sendIntervention: (cid, msg) => { sent.push({ cid, msg }); return true; },
-    onStatusUpdate: () => {},
-    notifyMain: (msg) => { notified.push(msg); },
-  };
-
-  const count = await engineTick(engine);
-
-  // Gone agent removed
-  assert.equal(engine.bindings.has("cid-gone"), false);
-  // Stalled agent got intervention
-  assert.equal(count, 1);
-  assert.equal(sent.length, 1);
-  assert.match(sent[0].msg, /stalled/);
-});
-
-test("engineTick stall intervention honors configured stallIdleSeconds", async () => {
-  const engine = createEngineState();
-  engine.config.stallIdleSeconds = 300;
-  const sent: string[] = [];
-
-  addBinding(engine, "cid-slow", "slow", "auto");
-  engine.callbacks = {
-    getAgentInfo: () => engineInfo("slow", "running", 120),
-    sendIntervention: (_cid, msg) => { sent.push(msg); return true; },
-    onStatusUpdate: () => {},
-    notifyMain: () => {},
-  };
-
-  // 120s idle < configured 300s threshold — no stall intervention
-  // (regression: heuristic used the 60s built-in constant instead of config).
-  assert.equal(await engineTick(engine), 0);
-  assert.equal(sent.length, 0);
-
-  engine.config.stallIdleSeconds = 90;
-  assert.equal(await engineTick(engine), 1);
-  assert.equal(sent.length, 1);
-  assert.match(sent[0], /stalled/);
-});
-
-test("engineTick awaits asynchronous intervention acknowledgement", async () => {
-  const engine = createEngineState();
-  let acknowledged = false;
-  addBinding(engine, "remote-owner:cid", "remote", "auto");
-  engine.callbacks = {
-    getAgentInfo: () => engineInfo("remote", "running", 120),
-    sendIntervention: async () => {
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      acknowledged = true;
-      return true;
-    },
-    onStatusUpdate: () => {},
-    notifyMain: () => {},
-  };
-
-  const count = await engineTick(engine);
-  assert.equal(acknowledged, true);
-  assert.equal(count, 1);
-  assert.equal(engine.bindings.get("remote-owner:cid")?.interventions.length, 1);
-});
-
-test("engineTick drops an analysis result after its binding is replaced", async () => {
-  const engine = createEngineState();
-  const sent: string[] = [];
-  let signalAnalysisStarted!: () => void;
-  const analysisStarted = new Promise<void>((resolve) => { signalAnalysisStarted = resolve; });
-  let resolveAnalysis!: (result: { status: "drift"; action: "send"; message: string }) => void;
-  const analysis = new Promise<{ status: "drift"; action: "send"; message: string }>(
-    (resolve) => { resolveAnalysis = resolve; },
-  );
-  addBinding(engine, "cid-reused", "original", "auto");
-  const original = engine.bindings.get("cid-reused")!;
-  engine.callbacks = {
-    getAgentInfo: () => engineInfo("original", "running", 0),
-    sendIntervention: (_cid, message) => { sent.push(message); return true; },
-    onStatusUpdate: () => {},
-    notifyMain: () => {},
-    analyze: async () => {
-      signalAnalysisStarted();
-      return analysis;
-    },
-  };
-
-  const tick = engineTick(engine);
-  await analysisStarted;
-  removeBinding(engine, "cid-reused");
-  addBinding(engine, "cid-reused", "replacement", "auto");
-  resolveAnalysis({ status: "drift", action: "send", message: "stale steer" });
-
-  assert.equal(await tick, 0);
-  assert.deepEqual(sent, []);
-  assert.equal(original.driftDetected, false);
-  assert.equal(engine.bindings.get("cid-reused")?.driftDetected, false);
-});
-
-test("engineTick drops an analysis result after the engine stops", async () => {
-  const engine = createEngineState();
-  const sent: string[] = [];
-  let signalAnalysisStarted!: () => void;
-  const analysisStarted = new Promise<void>((resolve) => { signalAnalysisStarted = resolve; });
-  let resolveAnalysis!: (result: { status: "drift"; action: "send"; message: string }) => void;
-  const analysis = new Promise<{ status: "drift"; action: "send"; message: string }>(
-    (resolve) => { resolveAnalysis = resolve; },
-  );
-  addBinding(engine, "cid-stop", "stopping", "auto");
-  engine.callbacks = {
-    getAgentInfo: () => engineInfo("stopping", "running", 0),
-    sendIntervention: (_cid, message) => { sent.push(message); return true; },
-    onStatusUpdate: () => {},
-    notifyMain: () => {},
-    analyze: async () => {
-      signalAnalysisStarted();
-      return analysis;
-    },
-  };
-
-  const tick = engineTick(engine);
-  await analysisStarted;
-  stopEngine(engine);
-  resolveAnalysis({ status: "drift", action: "send", message: "stale after stop" });
-
-  assert.equal(await tick, 0);
-  assert.deepEqual(sent, []);
-});
-
-test("engineTick notifies main for failed agents", async () => {
-  const engine = createEngineState();
-  const notified: string[] = [];
-
-  addBinding(engine, "cid-fail", "broken", "auto");
-  engine.callbacks = {
-    getAgentInfo: () => engineInfo("broken", "failed"),
-    sendIntervention: () => true,
-    onStatusUpdate: () => {},
-    notifyMain: (msg) => { notified.push(msg); },
-  };
-
-  await engineTick(engine);
-  assert.equal(notified.length, 1);
-  assert.match(notified[0], /failed/);
-});
-
-// ===========================================================================
-// Engine: status bar
-// ===========================================================================
-
-test("formatEngineStatusBar shows bindings and fixes", () => {
-  const engine = createEngineState();
-  engine.startedAt = Date.now() - 30_000;
-  addBinding(engine, "cid-1", "a", "auto");
-  const binding = engine.bindings.get("cid-1")!;
-  recordIntervention(binding, "drift", "fix it", "steer");
-
-  const bar = formatEngineStatusBar(engine);
-  assert.match(bar, /MON 1/);
-  assert.match(bar, /30s/);
-  assert.match(bar, /1 fix/);
-});
-
-test("formatEngineStatusBar shows drift indicator", () => {
-  const engine = createEngineState();
-  engine.startedAt = Date.now();
-  addBinding(engine, "cid-1", "a", "auto");
-  engine.bindings.get("cid-1")!.driftDetected = true;
-
-  const bar = formatEngineStatusBar(engine);
-  assert.match(bar, /drift/);
-});
-
-// ===========================================================================
-// Analysis prompts and parsing
-// ===========================================================================
-
-test("buildAutoAnalysisPrompt includes objective and fenced untrusted output", () => {
-  const prompt = buildAutoAnalysisPrompt("Build API", ["line 1", "line 2"]);
-  assert.match(prompt, /Build API/);
-  assert.match(prompt, /line 1/);
-  assert.match(prompt, /JSON/);
-  assert.match(prompt, /UNTRUSTED DATA/);
-  assert.match(prompt, /<monitored_output>\nline 1\nline 2\n<\/monitored_output>/);
-});
-
-test("buildCustomAnalysisPrompt includes custom requirements and fenced untrusted output", () => {
-  const prompt = buildCustomAnalysisPrompt("Check coverage > 80%", "Build API", ["output"]);
-  assert.match(prompt, /Check coverage/);
-  assert.match(prompt, /Build API/);
-  assert.match(prompt, /JSON/);
-  assert.match(prompt, /UNTRUSTED DATA/);
-  assert.match(prompt, /<monitored_output>\noutput\n<\/monitored_output>/);
-});
-
-test("parseAnalysisResult handles valid JSON", () => {
-  const result = parseAnalysisResult('{"status": "drift", "reason": "off track", "action": "send", "message": "fix it"}');
-  assert.equal(result?.status, "drift");
-  assert.equal(result?.action, "send");
-  assert.equal(result?.message, "fix it");
-});
-
-test("parseAnalysisResult handles JSON in markdown", () => {
-  const result = parseAnalysisResult('```json\n{"status": "on-track", "action": "none"}\n```');
-  assert.equal(result?.status, "on-track");
-  assert.equal(result?.action, "none");
-});
-
-test("parseAnalysisResult returns undefined for garbage", () => {
-  assert.equal(parseAnalysisResult("not json at all"), undefined);
-  assert.equal(parseAnalysisResult(""), undefined);
-  assert.equal(parseAnalysisResult("{broken"), undefined);
-});
-
-test("parseAnalysisResult defaults unknown status to on-track", () => {
-  const result = parseAnalysisResult('{"status": "unknown"}');
-  assert.equal(result?.status, "on-track");
 });

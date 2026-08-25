@@ -36,18 +36,17 @@ test("session registry defaults to agents mode and publishes semantic mode chang
   const registry = new SessionHostRegistry({ endpoints: [root] });
   registry.subscribe((snapshot) => snapshots.push(snapshot.contentRevision));
   assert.equal(registry.snapshot().viewMode, "agents");
-  assert.deepEqual(registry.snapshot().monitoredEndpointIds, []);
 
   await registry.requestWindowMode("enter");
   assert.equal(registry.snapshot().viewMode, "windows");
-  registry.setMonitoredEndpointIds([root.id, root.id]);
-  assert.deepEqual(registry.snapshot().monitoredEndpointIds, [root.id]);
   await registry.requestWindowMode("exit");
   assert.equal(registry.snapshot().viewMode, "agents");
-  assert.equal(new Set(snapshots).size, snapshots.length);
+  assert.equal(snapshots.length, 3);
+  assert.equal(new Set(snapshots).size, 2);
+  assert.equal(snapshots[0], snapshots[2]);
 });
 
-test("session registry delegates window and monitored controls", async () => {
+test("session registry delegates window mode controls", async () => {
   const root = endpoint();
   const calls: string[] = [];
   const registry = new SessionHostRegistry({
@@ -57,18 +56,11 @@ test("session registry delegates window and monitored controls", async () => {
         calls.push(`mode:${action}`);
         registry.setViewMode(action === "enter" ? "windows" : "agents");
       },
-      setMonitored(endpointId, enabled) {
-        calls.push(`monitor:${endpointId}:${enabled}`);
-        registry.setMonitoredEndpointIds(enabled ? [endpointId] : []);
-      },
     },
   });
   await registry.requestWindowMode("enter");
-  await registry.setMonitored(root.id, true);
-  await registry.setMonitored(root.id, false);
-  assert.deepEqual(calls, [`mode:enter`, `monitor:${root.id}:true`, `monitor:${root.id}:false`]);
+  assert.deepEqual(calls, ["mode:enter"]);
   assert.equal(registry.viewMode, "windows");
-  assert.deepEqual(registry.monitoredEndpointIds, []);
 });
 
 test("pending incoming thread entries retry while terminal entries return receipts", () => {

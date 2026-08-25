@@ -9,11 +9,10 @@ import {
   formatWorkspacePeerWindowListings,
   type WorkspacePeerWindowListing,
 } from "../src/extension/workspace-peers.ts";
-import { SessionSendOverlay, type SessionSendOverlayResult } from "../src/tui/session-send-overlay.ts";
-import type { MonitorSessionRow } from "../src/tui/monitor-overlay.ts";
+import { SessionSendOverlay, type SessionSelectionRow, type SessionSendOverlayResult } from "../src/tui/session-send-overlay.ts";
 import type { TeammateState } from "../src/shared/types.ts";
 
-function row(overrides: Partial<MonitorSessionRow> = {}): MonitorSessionRow {
+function row(overrides: Partial<SessionSelectionRow> = {}): SessionSelectionRow {
   return {
     correlationId: "owner:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     displayName: "remote-window",
@@ -21,7 +20,6 @@ function row(overrides: Partial<MonitorSessionRow> = {}): MonitorSessionRow {
     status: "running",
     idleSeconds: 0,
     source: "remote:aaaaaa",
-    bound: false,
     kind: "window",
     ownerId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     bindable: true,

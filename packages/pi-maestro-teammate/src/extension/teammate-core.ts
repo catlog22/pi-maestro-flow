@@ -8,8 +8,6 @@
 
 import { randomUUID } from "node:crypto";
 import { logDiagnosticError, logDiagnosticWarn } from "../shared/diagnostic-log.ts";
-import type { MonitorSessionHost } from "./monitor-session.ts";
-import type { MonitorSessionStartupTimer } from "./monitor-session-startup.ts";
 
 import { altKey } from "pi-maestro-settings-core/v1";
 import type {
@@ -46,23 +44,8 @@ import {
   MONITOR_STATUS_KEY,
   MONITOR_DEFAULT_TIMEOUT_MS,
   MONITOR_DEFAULT_LINES,
-  createEngineState,
-  startEngine,
-  stopEngine,
-  addBinding,
-  removeBinding,
-  clearBindings,
-  formatEngineStatusBar,
-  buildAutoAnalysisPrompt,
-  buildCustomAnalysisPrompt,
-  parseAnalysisResult,
-  ENGINE_TICK_MS,
   type MonitorTargetSnapshot,
   type MonitorParams,
-  type MonitorEngineState,
-  type MonitorSupervisionMode,
-  type EngineAgentInfo,
-  type AnalysisResult,
 } from "./monitor.ts";
 import {
   createWorkspacePeerCommandConsumer,
@@ -143,7 +126,6 @@ import {
   type DecodedInputToken,
 } from "../tui/input-text.ts";
 import { showModelMappingOverlay } from "../tui/model-mapping-overlay.ts";
-import { showMonitorOverlay, type MonitorSessionRow } from "../tui/monitor-overlay.ts";
 import { tuiT } from "../tui/locale.ts";
 import type {
   Details,
@@ -695,12 +677,8 @@ export type TeammateRuntimeOptions = Pick<
   RunTeammateOptions,
   "spawnChildProcess" | "resultReadyGraceMs" | "foregroundMaxRunMs"
 > & {
-  /** @internal Test seam for driving evaluator startup without waiting in real time. */
-  monitorSessionTimer?: MonitorSessionStartupTimer;
   /** @internal Observes the real runtime callbacks for public-path lifecycle tests. */
   onRunOptionsCreated?: (options: RunTeammateOptions) => void;
-  /** @internal Observes the host used by the Monitor evaluator lifecycle tests. */
-  onMonitorSessionHostCreated?: (host: MonitorSessionHost) => void;
 };
 
 export function buildTeammateToolDescription(

@@ -18,16 +18,8 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 /** Environment marker carried only by independently managed workspace windows. */
 export const MANAGED_WINDOW_ENV = "PI_TEAMMATE_MANAGED_WINDOW";
 
-/** Environment marker carried only by the host-owned Monitor evaluator session. */
-export const MONITOR_SESSION_ENV_VAR = "PI_TEAMMATE_MONITOR";
-
 export function isManagedWorkerWindow(): boolean {
   return process.env[MANAGED_WINDOW_ENV] === "1";
-}
-
-export function isMonitorSession(): boolean {
-  return process.env.PI_TEAMMATE_CHILD === "1"
-    && process.env[MONITOR_SESSION_ENV_VAR] === "1";
 }
 
 export interface TeammateChildExtensionRegistration {

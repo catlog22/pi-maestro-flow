@@ -1,312 +1,186 @@
 ---
-title: "Monitor Cross-Session Supervision"
+title: "Monitor Cross-Session Coordination"
 icon: "📊"
 ---
 
-Monitor continuously supervises and coordinates **other Pi sessions or windows in the same workspace**. It can bind an existing peer window or create a new interactive worker window, enroll it in supervision automatically, and close Monitor-owned workers after their results have been collected. On each tick it checks whether a target has failed, is waiting for input, has stalled, or has drifted from its objective. It can send a controlled `steer` intervention, record the outcome in a durable ledger, and restore valid bindings after reload.
+Monitor is a root agent-operated control mode for coordinating **other Pi sessions and workers**. Entering `/monitor` turns the current root session into the control window: the agent discovers targets, observes their current state, sends instructions, and manages workers in response to the policy you provide in `#control`.
 
-Use Monitor for long-running parallel work, multi-window development, background migrations, and workflows that need closed-loop correction. For a one-time read-only status check, use `observe`; use `/monitor` when supervision should continue and may intervene.
+Monitor mode does not run a background evaluator. It has no target-bound supervision modes, automatic analysis cycle, or persisted evaluator state. Use `observe` directly for a one-time check; use `/monitor` when a root agent should coordinate several local or remote workers and may need to intervene.
 
-> **Version availability:** v0.17.0, which contained the cross-session Scheduler, Window Bar handoff, and durable supervision enhancements, was withdrawn. The current npm stable release is 0.16.0. This page retains current-source behavior for review before a fixed release; do not install 0.17.0 to obtain these enhancements.
+Existing `.pi` artifacts left by the removed Monitor runtime are inert. Monitor does not read them, and it does not delete them automatically.
 
 ---
 
 ## 1. Quick Start
 
-Enter Monitor mode and describe the work to coordinate in `#control`. You do not need to open worker windows manually or invoke a window-creation command:
+Open the control window and describe the coordination task in natural language:
 
 ```text
-# Open the Monitor control window
 /monitor
 
-# Then enter a natural-language instruction in #control
 Create interactive backend, frontend, and tests worker windows.
 Assign the API, UI, and integration-test work, coordinate them until all finish,
 collect their results, and close windows that are no longer needed.
 ```
 
-The Monitor Agent decomposes the objective, creates workers, waits for exact workspace-peer registration, binds supervision automatically, and coordinates execution with `observe` and `teammate-send`. Each successful interactive worker is an independent Pi TUI window.
+The root Monitor agent uses the available coordination tools. It delegates project implementation to workers rather than editing the project from the control window.
 
-Existing windows in the same workspace can still be bound explicitly:
-
-```text
-/monitor backend auto          # bind an existing backend window
-/monitor status                # bindings, recent output, ledger summary
-/monitor metrics               # supervision effectiveness metrics
-```
-
-Type `/monitor ` and use completion to see bindable window names. A bare `/monitor` opens the control window; use `#control` for supervision policy and coordination instructions, or select a peer window to message it.
-
-> Monitor binds workspace window endpoints. A stale binding is not reused after a target closes, changes workspace, or publishes a replacement endpoint. Monitor can close only workers created and ownership-verified by the current Monitor session. Manually opened peers and windows created by another session can be observed, bound, and messaged, but not closed.
-
-## 2. Targets and Modes
-
-### Auto Mode
+For existing Pi windows in the same workspace, give the agent a direct instruction:
 
 ```text
-/monitor backend auto
-/monitor backend frontend tests auto
+Find the backend and tests windows in this workspace, inspect their progress,
+and ask tests to begin integration verification after backend reports completion.
 ```
 
-`auto` is the default. Monitor combines deterministic checks with LLM drift analysis:
+The agent discovers windows with `teammate-list({ view: "windows" })`, observes them, and sends `follow_up` or `steer` messages as needed. A queued or accepted send receipt proves enqueueing only; the agent waits for target-side or state evidence before repeating a request.
 
-- failed targets and pending user interactions notify the supervising window;
-- a running target idle beyond the threshold receives a recovery or blocker-report request;
-- active work is checked against the objective, recent output, and verdict trend;
-- intervention outcomes are recorded as recovered, repeated, escalated, or failed;
-- repeated unresolved issues escalate for user review.
+## 2. Root Control Mode
 
-### Custom Mode
+A bare `/monitor` enters the root control mode and exposes the cross-window coordination surfaces. Messages in `#control` are monitoring policy, priorities, or intervention instructions.
 
-```text
-/monitor backend custom:protect database migration backward compatibility
-/monitor release custom:intervene if tests are skipped or publication order changes
-```
+The control agent can:
 
-Everything after `custom:` becomes the continuing supervision requirement. Base failure, interaction, and stall checks remain active; drift analysis focuses on the custom requirement.
+- inspect one or several local workspace windows with bounded `observe` calls;
+- send non-urgent work with `follow_up` and time-sensitive corrections with `steer`;
+- create and close local workers owned by this Monitor session;
+- create and cancel configured SSH-backed remote runs;
+- arrange ordered work in an existing managed window with Flow Schedule;
+- create a bounded prompt `loop` when recurring supervision is explicitly required.
 
-Good custom prompts state a durable constraint:
+The control agent should not implement project work itself. Exit Monitor mode before using the root session for unrelated implementation.
 
-- “Do not change the public API; ask the target to revert signature changes.”
-- “Every implementation phase must run focused tests; no skips or suppressions.”
-- “Publication order must remain settings-core, teammate, cockpit, flow.”
-
-### Link a Goal
-
-```text
-/monitor backend --goal goal-123 auto
-/monitor release --goal goal-123 custom:do not declare completion with blocked acceptance items
-```
-
-`--goal <id>` links a binding to a pi-peer Goal board. Goal closure standards become analysis context, and repeated stall or drift escalation can append a blocking objection to the Goal board.
-
-## 3. Cockpit Workflow
-
-With Pi Cockpit installed:
-
-1. switch Cockpit to the Window view and select a target session;
-2. press `Alt+W` to enable supervision;
-3. press `Alt+W` again to remove the binding;
-4. run `/monitor status` for the full binding and ledger view.
-
-The Monitor control endpoint cannot supervise itself. `Alt+R` opens the teammate session list for handoff while preserving routing, monitor, and turns context.
-
-Exit Monitor interaction mode with `/monitor exit`, or press bare `Esc` twice within 500 ms. The first Escape keeps native cancel/clear behavior; the second exits Monitor mode.
-
-## 4. Command Reference
+## 3. Command Reference
 
 | Command | Purpose |
 |---------|---------|
-| `/monitor` | open the control window without binding every peer |
-| `/monitor <targets...> [auto]` | bind one or more windows in auto mode |
-| `/monitor <targets...> custom:<prompt>` | supervise against a continuing custom constraint |
-| `/monitor <targets...> --goal <id>` | link bindings to a Goal board |
-| `/monitor status` | session status, bindings, recent output, ledger summary |
-| `/monitor metrics` | resolution, recovery, escalation, and drift rates |
-| `/monitor doctor` | read-only health check for config, bindings, ledger, and warnings |
-| `/monitor resume` | restore valid active bindings from the ledger |
-| `/monitor exit` / `/monitor stop` | stop the Monitor session and clear bindings |
-| `/monitor spawn <name> <objective>` | compatibility/debug entry: launch a managed headless Pi worker |
-| `/monitor spawn status` | compatibility entry: list managed windows |
-| `/monitor spawn stop <name>` | compatibility entry: stop a managed window |
-| `/monitor ui` | legacy binding overlay, retained for compatibility |
+| `/monitor` | enter the root Monitor control mode |
+| `/monitor status` | show whether the mode is active plus Monitor-owned local and remote workers |
+| `/monitor doctor` | read-only health summary for mode/tool exposure and visible local, managed, and remote resources |
+| `/monitor exit` / `/monitor stop` | leave Monitor mode |
+| `/monitor spawn <name> <objective>` | compatibility/debug command that starts a managed headless Pi worker and returns its exact owner target |
+| `/monitor spawn status` | list managed windows |
+| `/monitor spawn stop <name>` | stop a named managed window |
 
-## 5. Monitor-Managed Worker Windows
+`/monitor exit` ends the control mode, but it does not cancel generic `loop` jobs. List and cancel monitoring loops first when recurring supervision is no longer needed.
 
-The primary workflow is Agent-operated; users do not need to run `/monitor spawn`. After entering `/monitor`, describe the task split, desired parallelism, interactive-window preference, and cleanup condition in natural language:
+## 4. Local Workspace Windows
 
-```text
-Create migration and verification worker windows.
-Have migration implement the database change and verification independently check compatibility.
-Coordinate both, preserve their final results, and close the windows when done.
-```
+The agent uses two different local-window paths.
 
-The Monitor Agent uses the internal `workspace-window` lifecycle tool:
+### Existing Windows
 
-1. `create` opens a new interactive terminal by default and supplies the objective as Pi's initial message; it can select `headless` when the user explicitly does not need a terminal UI;
-2. each creation receives an unguessable internal session name and is not admitted as owned until its exact workspace owner registers;
-3. successful registration creates an `auto` supervision binding, after which Monitor coordinates the worker through `observe` and `teammate-send`;
-4. `list` reports only windows created by the current Monitor session;
-5. `close` proves process-tree reclamation before releasing the binding and ownership record. If reclamation cannot be proven, the record is retained and the operation reports an error instead of acting on a stale PID.
+`teammate-list({ view: "windows" })` discovers Pi root sessions in the same workspace. Each window is addressed by its exact `owner:<ownerId>` identity. The agent observes that owner as a workspace target and sends messages to the same exact owner.
 
-Names must begin with an alphanumeric character, contain only `A-Z`, `a-z`, `0-9`, `.`, `_`, or `-`, and be at most 64 characters. One Monitor session can hold at most eight managed windows.
+Owner identity is the safety boundary. If a window closes or is replaced, the agent must rediscover it; a same-named window is not assumed to be the previous owner. Existing windows can be observed and messaged, but Monitor cannot close windows it did not create.
 
-### Terminal Support
+### Monitor-Owned Windows
 
-Interactive workers use the platform terminal:
+For natural-language requests to create a worker, the agent uses `workspace-window`:
 
-- Windows: Windows Terminal (`wt.exe`), opened as a new window and tab;
-- macOS: Terminal through `osascript`;
-- Linux: `PI_TEAMMATE_TERMINAL` when set, otherwise `x-terminal-emulator`; a custom terminal must accept `-e <command> <args...>`.
+1. `create` opens an interactive terminal by default and delivers the objective once;
+2. the call waits for exact workspace-owner registration before returning `owner:<ownerId>`;
+3. the returned owner is used directly with `observe` and `teammate-send`;
+4. `close` is restricted to windows created by the current Monitor session and verifies process reclamation.
 
-Creation fails and attempts rollback if the terminal executable is unavailable or the worker does not register within 15 seconds. When physical reclamation cannot be confirmed, Monitor retains the window record for later discovery or cleanup.
+Do not resend the initial objective after `create`; send only new constraints, corrections, or explicit response requests.
 
-### Close and Exit
+Monitor can never close a manually opened peer or a worker owned by another Monitor session. If ownership or process reclamation cannot be proven, the close operation reports an error instead of acting on a stale process identity.
 
-Monitor can close only workers it created. Existing peers, manually opened windows, and workers owned by another Monitor are outside its close authority.
+Worker names must start with an alphanumeric character, may contain only `A-Z`, `a-z`, `0-9`, `.`, `_`, or `-`, and are limited to 64 characters. One Monitor session can own at most eight managed windows.
 
-Before `/monitor exit`, ask the coordinator to collect results and close workers that are no longer needed:
+Interactive workers use Windows Terminal (`wt.exe`) on Windows, Terminal through `osascript` on macOS, and `PI_TEAMMATE_TERMINAL` or `x-terminal-emulator` on Linux. Creation fails and attempts cleanup if the terminal is unavailable or exact owner registration does not complete within 15 seconds. Root-session shutdown or reload also attempts to reclaim windows still owned by that session.
+
+### Headless Compatibility Command
+
+`/monitor spawn` remains available for compatibility and debugging:
 
 ```text
-Summarize every worker result, close completed windows, and report any remaining blockers.
-```
-
-`/monitor exit` stops supervision and clears bindings; it is not equivalent to closing every worker. If Monitor mode has already been exited, enter `/monitor` again and ask the coordinator to reclaim its workers. A full Pi root-session shutdown or reload also attempts to reclaim managed windows still owned by that session.
-
-### Compatibility Entry
-
-`/monitor spawn <name> <objective>` remains available for headless compatibility and debugging. It does not replace the natural-language coordination workflow, and the old path still requires discovery and explicit binding:
-
-```text
-/monitor spawn migration complete the database migration and run integration tests
-/monitor migration auto
+/monitor spawn migration Complete the database migration and run focused tests
+/monitor spawn status
 /monitor spawn stop migration
 ```
 
-## 6. Detection and Intervention
+The command waits for exact owner registration and reports the `owner:<ownerId>` target. Natural-language coordination through `workspace-window` remains the primary workflow.
 
-Each tick uses a start-of-tick endpoint snapshot and revalidates the exact owner and endpoint after asynchronous analysis. A restarted or rotated window cannot accidentally receive an intervention intended for its predecessor.
+## 5. Recurring Supervision with Loop
 
-Processing order:
+A one-shot status request or bounded wait does not need a loop. When the user explicitly needs supervision to continue without further messages, the Monitor agent can create one bounded prompt `loop` for the complete target set.
 
-1. **Failed:** notify the supervising window; do not repeatedly message a failed target.
-2. **Interaction needed:** notify the supervising window so a user can answer.
-3. **Stalled:** if running but idle beyond the current built-in 60-second heuristic, send `steer`; high context pressure changes the guidance to compact first.
-4. **Drift:** for active non-stalled work, analyze the objective, output tail, and recent verdict trend.
-5. **Closed-loop outcome:** after `pendingOutcomeEvalMs`, record recovery, repetition, failure, or escalation.
-6. **Escalation:** after `escalationThreshold` unresolved interventions, notify the supervising window and append a Goal objection when linked.
+Before creating it, the agent lists current loops and reuses or cancels an existing monitoring loop to avoid duplicates. Each recurrence should:
 
-Cooldown, deduplication, and per-window delivery limits apply per target. Failed delivery retries are bounded; exhaustion writes a dead-letter record and reports the unreachable target.
+1. rediscover the named workspace windows;
+2. observe all targets in one call;
+3. compare the new evidence with the prior observation;
+4. intervene only when new evidence shows failure, a blocker, loss of progress, or departure from the stated task;
+5. send at most one intervention per target;
+6. cancel the loop when all targets settle or continuous supervision is no longer requested.
 
-## 7. Project Configuration
+Use a prompt loop, not a shell loop, for Monitor supervision. `/monitor exit` does not own or stop these generic loop jobs.
 
-Monitor reads the `monitor` section of `.pi/settings.json`:
+## 6. Remote Workers
 
-```json
-{
-  "monitor": {
-    "tickMs": 15000,
-    "stallIdleSeconds": 60,
-    "interventionCooldownMs": 60000,
-    "maxRetries": 2,
-    "retryBackoffMs": 1000,
-    "maxInterventionLog": 20,
-    "analysisTailLines": 20,
-    "escalationThreshold": 2,
-    "pendingOutcomeEvalMs": 30000,
-    "contextCompactThresholdPercent": 80,
-    "ledgerEnabled": true,
-    "autoResume": true
-  }
-}
-```
+In Monitor mode, `remote-worker` manages configured SSH-backed runs without exposing SSH credentials or trusted commands.
 
-| Field | Default | Meaning |
-|-------|---------|---------|
-| `tickMs` | `15000` | delay between supervision ticks in milliseconds |
-| `stallIdleSeconds` | `60` | idle boundary for LLM drift analysis; the deterministic stall heuristic currently remains fixed at 60 seconds |
-| `interventionCooldownMs` | `60000` | minimum time between interventions for one target |
-| `maxRetries` | `2` | retries after the first delivery failure |
-| `retryBackoffMs` | `1000` | linear retry backoff base in milliseconds |
-| `maxInterventionLog` | `20` | accepted reserved setting; runtime retention is currently fixed at 20 records |
-| `analysisTailLines` | `20` | accepted reserved setting; runtime analysis currently reads a fixed 20 lines |
-| `escalationThreshold` | `2` | unresolved interventions before escalation |
-| `pendingOutcomeEvalMs` | `30000` | minimum delay before evaluating an intervention outcome |
-| `contextCompactThresholdPercent` | `80` | context pressure that changes stall guidance to compact |
-| `ledgerEnabled` | `true` | append the durable Monitor ledger |
-| `autoResume` | `true` | restore valid active bindings on session start |
+- `targets` lists configured target IDs;
+- `create` returns only after the SSH handshake, capability negotiation, remote start, and local ownership admission succeed;
+- `list` shows remote runs owned by the current Monitor session;
+- `close` performs owner-checked lifecycle cancellation.
 
-> **Current v0.17.0 limitation:** `stallIdleSeconds` affects the LLM analysis branch, while the deterministic stall check still uses the built-in 60 seconds. `maxInterventionLog` and `analysisTailLines` are accepted by the config loader, but runtime behavior remains fixed at 20. `/monitor doctor` reports loaded config and does not imply that these three override values are fully applied to the heuristic.
+Remote runs use stable `remote:<runId>` targets. Observe them as `kind: "remote"` and send later corrections with `teammate-send`. Do not treat a remote run as a workspace owner or pass it to `workspace-window`. Cross-target abort is unavailable; use `remote-worker close` for cancellation after collecting required results.
 
-Numeric values must be positive integers. Environment overrides:
+## 7. Flow Schedule
 
-| Environment variable | Config field |
-|----------------------|--------------|
-| `PI_MONITOR_TICK_MS` | `tickMs` |
-| `PI_MONITOR_STALL_IDLE_SECONDS` | `stallIdleSeconds` |
-| `PI_MONITOR_COOLDOWN_MS` | `interventionCooldownMs` |
-| `PI_MONITOR_MAX_RETRIES` | `maxRetries` |
-| `PI_MONITOR_RETRY_BACKOFF_MS` | `retryBackoffMs` |
-| `PI_MONITOR_ESCALATION_THRESHOLD` | `escalationThreshold` |
-| `PI_MONITOR_LEDGER` | `ledgerEnabled` |
-| `PI_MONITOR_AUTO_RESUME` | `autoResume` |
+Flow Schedule is the Monitor-only surface for durable, ordered steps in an **already managed local workspace window**. Use it when work has a stable sequence that must advance from an exact correlated worker report.
 
-Environment values take precedence over `.pi/settings.json`. Boolean values accept `1/true/on/yes/enabled` and `0/false/off/no/disabled`.
+Flow Schedule does not replace the other surfaces:
 
-## 8. Ledger, Status, and Metrics
+- `workspace-window` owns the worker process;
+- `observe` reports current state;
+- `teammate-send` handles ad hoc instructions;
+- `loop` handles recurring checks;
+- Flow Schedule controls ordered dispatch and exact result correlation.
 
-The durable record is:
+Creating a schedule does not send work; the agent creates it, starts it, and uses schedule status to distinguish transport acceptance from exact completion evidence. Optional Todo completion and conflict gates apply only when the worker advertises the required capability. Without that capability, those gates are not negotiated and the exact correlated report remains the completion authority.
 
-```text
-.pi/monitor-ledger.jsonl
-```
+## 8. Monitor vs Advisor vs Observe
 
-| Kind | Content |
-|------|---------|
-| `binding` | binding creation, removal, disconnect, exit, shutdown |
-| `analysis` | `on-track` / `drift` verdict changes |
-| `intervention` | delivered correction and trace ID |
-| `outcome` | recovered, repeated, escalated, failed |
-| `delivery` | delivery failure and dead-letter |
-| `review` | Advisor concern/blocker verdict |
-| `checkpoint` | Monitor start, stop, and resume boundaries |
+| Capability | Target | Trigger | Active action | Best for |
+|------------|--------|---------|---------------|----------|
+| Monitor | other workspace windows and Monitor-owned local or remote workers | root agent actions, optionally a bounded prompt loop | observe, message, create, coordinate, and reclaim owned workers | multi-window execution and cross-session coordination |
+| Advisor | current main session | turn/tool checkpoints | quality guidance to the current agent | reasoning and constraint review |
+| `observe` | an agent, command, workspace window, or remote run | one-shot or bounded wait/watch | none | status and completion checks |
+| Goal verifier | Goal completion result | completion | independent verification | acceptance audit |
 
-Use `/monitor status` routinely, `/monitor metrics` to assess outcomes, and `/monitor doctor` for diagnosis. The ledger may contain target names, custom requirements, and corrective messages; do not commit it or place credentials in prompts.
+Advisor and Monitor can run together. Advisor reviews the current agent's reasoning quality; Monitor gives the root agent a control surface for coordinating other workers. Monitor does not independently judge worker quality in the background.
 
-## 9. Monitor vs Advisor vs observe
+## 9. Troubleshooting
 
-| Capability | Target | Continuous | Active intervention | Best for |
-|------------|--------|------------|---------------------|----------|
-| Monitor | other workspace windows/sessions and workers it creates | yes, periodic ticks | controlled `steer`; create and reclaim owned workers | multi-window work, background execution, long-running supervision and coordination |
-| Advisor | current main session | turn/tool checkpoints | quality guidance only | reasoning and constraint review |
-| `observe` | Agent, background command, or workspace | one-shot or bounded wait | no | status, completion wait, turns |
-| Goal verifier | Goal completion result | at completion | no | acceptance and completion audit |
+### A Local Worker Was Not Created
 
-Monitor and Advisor can run together. Monitor watches whether other windows have stalled or drifted; Advisor reviews the current main session's reasoning quality. See [Advisor Turn-Level Supervision](/guides/advisor).
+1. confirm `/monitor` is active; `workspace-window` is unavailable outside Monitor mode;
+2. verify the platform terminal is available: Windows Terminal on Windows, Terminal on macOS, or `PI_TEAMMATE_TERMINAL`/`x-terminal-emulator` on Linux;
+3. confirm the worker name is valid and the managed-window limit has not been reached;
+4. if registration times out, confirm the new Pi window opened the same workspace and loaded the current extension;
+5. ask the agent to list Monitor-owned windows and inspect their lifecycle state.
 
-Agents should discover windows with `teammate-list({ view: "windows" })` and inspect them with `observe`. Legacy `teammate-watch`, `teammate-wait`, and standalone observation tools are hidden by default and should not be used for new workflows.
+### An Existing Window Is Missing
 
-## 10. Troubleshooting
+1. confirm it is a Pi root window in the same workspace;
+2. ask the agent to run `teammate-list({ view: "windows" })` again;
+3. after a restart, use the newly published exact owner identity;
+4. use `observe` for liveness; inbox history alone does not prove that a window is still live.
 
-### Interactive Worker Was Not Created
+### A Message Has No Visible Effect
 
-1. confirm that `/monitor` has opened `#control`; `workspace-window` rejects calls outside Monitor mode;
-2. on Windows check `wt.exe`, on macOS check Terminal, and on Linux check `PI_TEAMMATE_TERMINAL` or `x-terminal-emulator`;
-3. verify the worker name and confirm that the eight-window limit has not been reached;
-4. if a terminal opens but registration times out, confirm that it uses the same workspace and loads the current extension version;
-5. ask Monitor to “list the worker windows you created” and inspect whether each is `launching`, `running`, `disconnected`, or `failed`.
+An accepted receipt is not proof that the target model consumed the message. Observe the target and allow the next turn boundary to inject queued messages. Send another message only when new evidence requires a correction or constraint.
 
-If close reports that ownership or physical reclamation cannot be confirmed, Monitor intentionally retains the record. Do not substitute a same-named external peer; restore workspace-peer publication for the target or ask Monitor to close it again.
+### Old Monitor Files Still Exist
 
-### Target Not Found
+Artifacts from the deleted evaluator runtime may remain under `.pi`. They are not loaded by root Monitor mode and have no effect. Remove them manually only when normal repository housekeeping calls for it; Monitor intentionally does not delete them.
 
-1. confirm the target is a Pi window in the same workspace;
-2. type `/monitor ` and check completions;
-3. inspect Cockpit Window Bar or `teammate-list({ view: "windows" })`;
-4. after a target restart, wait for its new endpoint and bind again.
+## 10. Related Guides
 
-### Binding Did Not Resume
-
-```text
-/monitor doctor
-/monitor resume
-/monitor status
-```
-
-Check `ledgerEnabled` and `autoResume`. The target must still be discoverable; an old ledger owner is never forced onto a replacement endpoint.
-
-### Intervention Was Not Delivered
-
-Run `/monitor doctor` and inspect dead-letter counts and warnings, then confirm the target is alive. Delivery retries follow `maxRetries` and `retryBackoffMs` and never continue indefinitely.
-
-### Too Many Notifications
-
-Increase `interventionCooldownMs` or `escalationThreshold`, and use a more precise `custom:` requirement. In v0.17.0, the deterministic stall check is fixed at 60 seconds, so changing `stallIdleSeconds` does not move that trigger. Disabling the ledger does not disable interventions and should not be used to hide the signal.
-
-## 11. Related Guides
-
-- [Advisor Turn-Level Supervision](/guides/advisor) — low-frequency second-model review for the current session
-- [Pi Cockpit Visualization](/guides/cockpit) — Window Bar, session tabs, and `Alt+W`
+- [Advisor Turn-Level Supervision](/guides/advisor) — quality review for the current session
+- [Pi Cockpit Visualization](/guides/cockpit) — workspace and session views
 - [Parallel Multi-Agent Dispatch](/guides/teammate-dispatch) — dispatch, cross-session messages, and `observe`
-- [Goals · Plans · Tasks](/guides/goal-plan-todo) — Goal links and completion verification
-- [Compaction Capacity Management](/guides/compaction-config) — compaction behavior under high context pressure
+- [Goals · Plans · Tasks](/guides/goal-plan-todo) — completion and acceptance workflows

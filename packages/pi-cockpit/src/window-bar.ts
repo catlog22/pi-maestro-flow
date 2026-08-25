@@ -10,7 +10,6 @@ import { formatUnreadCount, renderSessionTabLine, type SessionTab } from "./sess
 export interface WindowBarDeps {
 	getWindows: () => readonly CockpitEndpoint[];
 	getState: () => SessionUiState;
-	getMonitoredEndpointIds: () => readonly string[];
 	getShortcutHint?: () => string | undefined;
 }
 
@@ -20,7 +19,6 @@ export interface WindowBarRenderOptions {
 
 interface WindowTab extends SessionTab {
 	endpoint: CockpitEndpoint;
-	monitored: boolean;
 }
 
 export function windowSessionColor(endpoint: CockpitEndpoint): ThemeColor {
@@ -36,7 +34,7 @@ function renderTab(tab: WindowTab, selected: boolean, theme: Theme): string {
 	const color = selected ? "accent" : windowSessionColor(tab.endpoint);
 	const marker = isMonitorControlEndpoint(tab.endpoint)
 		? theme.fg("accent", "◆")
-		: tab.monitored ? theme.fg("success", "●") : theme.fg("muted", "○");
+		: theme.fg("muted", "○");
 	const unread = (tab.unread ?? 0) > 0 ? theme.fg("warning", ` ${formatUnreadCount(tab.unread ?? 0)}`) : "";
 	const label = `#${tab.label}`;
 	return selected
@@ -47,19 +45,16 @@ function renderTab(tab: WindowTab, selected: boolean, theme: Theme): string {
 export function renderWindowBar(
 	windows: readonly CockpitEndpoint[],
 	state: SessionUiState,
-	monitoredEndpointIds: readonly string[],
 	width: number,
 	theme: Theme,
 	options: WindowBarRenderOptions = {},
 ): string[] {
-	const monitored = new Set(monitoredEndpointIds);
 	const tabs: WindowTab[] = windows.map((endpoint) => ({
 		id: endpoint.id,
 		label: endpoint.label,
 		ordinal: endpoint.ordinal,
 		unread: state.endpoint(endpoint.id).unread,
 		endpoint,
-		monitored: monitored.has(endpoint.id),
 	}));
 	if (tabs.length === 0) {
 		return [truncateToWidth(theme.fg("muted", tuiT("window.empty")), Math.max(1, width), "…")];
@@ -82,7 +77,6 @@ export function makeWindowBarWidget(deps: WindowBarDeps) {
 			return renderWindowBar(
 				deps.getWindows(),
 				deps.getState(),
-				deps.getMonitoredEndpointIds(),
 				width,
 				theme,
 				{ shortcutHint: deps.getShortcutHint?.() },

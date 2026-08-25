@@ -5,8 +5,6 @@
  * TUI: Alt+R mode-aware session list, widget above editor, Alt+B foreground→background detach
  * Mode: RPC subprocess — stdin open for steer/follow_up/abort
  */
-import type { MonitorSessionHost } from "./monitor-session.ts";
-import type { MonitorSessionStartupTimer } from "./monitor-session-startup.ts";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import type { WorkspaceSessionScan } from "../transcript/session-transcript.ts";
 import type { RecentToolInfo } from "../shared/types.ts";
@@ -84,12 +82,8 @@ export declare function emitTeammateResultPublished(pi: ExtensionAPI, result: Si
 /** Replace the retained turn value; undefined intentionally clears stale data. */
 export declare function setAgentStructuredOutput(agent: ActiveAgent, output: unknown): void;
 export type TeammateRuntimeOptions = Pick<RunTeammateOptions, "spawnChildProcess" | "resultReadyGraceMs" | "foregroundMaxRunMs"> & {
-    /** @internal Test seam for driving evaluator startup without waiting in real time. */
-    monitorSessionTimer?: MonitorSessionStartupTimer;
     /** @internal Observes the real runtime callbacks for public-path lifecycle tests. */
     onRunOptionsCreated?: (options: RunTeammateOptions) => void;
-    /** @internal Observes the host used by the Monitor evaluator lifecycle tests. */
-    onMonitorSessionHostCreated?: (host: MonitorSessionHost) => void;
 };
 export declare function buildTeammateToolDescription(cwd: string, options?: {
     nested?: boolean;

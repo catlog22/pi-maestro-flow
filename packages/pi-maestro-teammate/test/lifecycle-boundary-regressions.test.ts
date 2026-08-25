@@ -866,37 +866,6 @@ test("graph tasks reject remote working locations", async () => {
   assert.equal(spawns, 0);
 });
 
-test("generic teammate dispatch rejects the reserved Monitor evaluator name", async () => {
-  let spawns = 0;
-  const { teammate } = createHarness({
-    spawnChildProcess: (() => { spawns += 1; throw new Error("must not spawn"); }) as never,
-  });
-
-  const direct = await teammate.execute(
-    "ordinary-monitor-name",
-    { tasks: [{ agent: "general", name: "monitor-session", prompt: "claim authority" }] },
-    new AbortController().signal,
-    undefined,
-    context(),
-  );
-  assert.equal(direct.isError, true);
-  assert.match(direct.content[0].text, /reserved for the host-owned Monitor evaluator/);
-
-  const graph = await teammate.execute(
-    "graph-monitor-name",
-    { tasks: [
-      { agent: "general", name: "worker", prompt: "ordinary" },
-      { agent: "general", name: "monitor-session", prompt: "claim authority" },
-    ] },
-    new AbortController().signal,
-    undefined,
-    context(),
-  );
-  assert.equal(graph.isError, true);
-  assert.match(graph.content[0].text, /reserved for the host-owned Monitor evaluator/);
-  assert.equal(spawns, 0);
-});
-
 test("non-Monitor observe rejects aliased providers before provider execution", async () => {
   let calls = 0;
   const unregister = registerObservationProvider({
