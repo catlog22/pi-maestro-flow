@@ -1449,6 +1449,7 @@ export function buildWorkspaceOwnerSnapshot(
         events: [...state.mainProgress.events],
       },
     }),
+    ...(state.mainLastSettle === undefined ? {} : { mainLastSettle: state.mainLastSettle }),
     agents: [...state.agents],
     settled: (state.settled ?? []).map(({ result: _legacyResult, ...record }) => record),
     ...(state.backgroundJobs === undefined ? {} : { backgroundJobs: [...state.backgroundJobs] }),

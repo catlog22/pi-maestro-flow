@@ -51,6 +51,7 @@ import {
   validateWorkspaceOwnerSnapshot,
   validateWorkspaceBackgroundJobSnapshot,
   validateWorkspaceMainSessionProgress,
+  validateWorkspaceMainSettle,
   validateWorkspacePeerCommand,
   validateWorkspacePeerCommandResponse,
   waitForWorkspacePeerCommandResponse,
@@ -515,6 +516,37 @@ test("validateWorkspaceOwnerSnapshot rejects malformed todos and sanitizes contr
   assert.ok(multibyteTrunc !== undefined);
   assert.ok(Buffer.byteLength(multibyteTrunc!.todos![0].subject, "utf8") <= MAX_TODO_FIELD_BYTES);
   assert.match(multibyteTrunc!.todos![0].subject, /\.\.\.$/);
+});
+
+test("buildWorkspaceOwnerSnapshot round-trips mainLastSettle and validateWorkspaceMainSettle bounds it", async () => {
+  const { cwd, rootDir } = await temporaryWorkspace();
+  const identity = createWorkspacePeerIdentity(cwd, { rootDir, ownerId: OWNER_A, ownerNonce: NONCE_A });
+  const base = buildWorkspaceOwnerSnapshot(identity, state(agent("cid-settle", "protocol")), 1_000);
+  const withSettle = JSON.parse(JSON.stringify(base));
+  withSettle.mainLastSettle = { at: 1_234, lastResult: "finished the report" };
+  const reparsed = validateWorkspaceOwnerSnapshot(withSettle, identity);
+  assert.ok(reparsed !== undefined);
+  assert.deepEqual(reparsed!.mainLastSettle, { at: 1_234, lastResult: "finished the report" });
+
+  // A settle with no assistant text is valid and carries no lastResult.
+  const noResult = JSON.parse(JSON.stringify(base));
+  noResult.mainLastSettle = { at: 2_000 };
+  const reparsedNoResult = validateWorkspaceOwnerSnapshot(noResult, identity);
+  assert.ok(reparsedNoResult !== undefined);
+  assert.deepEqual(reparsedNoResult!.mainLastSettle, { at: 2_000 });
+
+  // Missing/invalid `at` is rejected, not silently repaired.
+  assert.equal(validateWorkspaceMainSettle(undefined), undefined);
+  assert.equal(validateWorkspaceMainSettle({ lastResult: "x" }), undefined);
+  assert.equal(validateWorkspaceMainSettle({ at: "later" }), undefined);
+  // An over-long lastResult makes the whole settle invalid (dropped, not truncated):
+  // a silently shortened result would read as a complete one.
+  assert.equal(validateWorkspaceMainSettle({ at: 3_000, lastResult: "x".repeat(MAIN_SESSION_PROGRESS_TEXT_BYTES + 1) }), undefined);
+  // At the exact byte cap the settle is still accepted.
+  assert.deepEqual(
+    validateWorkspaceMainSettle({ at: 3_001, lastResult: "x".repeat(MAIN_SESSION_PROGRESS_TEXT_BYTES) }),
+    { at: 3_001, lastResult: "x".repeat(MAIN_SESSION_PROGRESS_TEXT_BYTES) },
+  );
 });
 
 test("workspace snapshots expose active bash jobs and protect foreground work from steer", async () => {
