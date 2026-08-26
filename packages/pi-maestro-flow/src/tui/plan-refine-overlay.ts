@@ -43,7 +43,7 @@ export interface RenderRefineOverlayOptions {
 }
 
 export interface RenderRefineOverlayResult {
-  action: "done" | "cancel";
+  action: "apply" | "discard" | "cancel";
   session: RefineSession;
   latestOutput?: string;
   latestRole?: RefineRole;
@@ -52,9 +52,9 @@ export interface RenderRefineOverlayResult {
 
 type PreviewMode = "plan" | "output";
 type Phase = "idle" | "running" | "input";
-type SelectionRow = "role" | "model" | "input" | "run" | "done";
+type SelectionRow = "role" | "model" | "input" | "run" | "apply" | "discard";
 
-const SELECTION_ROWS: SelectionRow[] = ["role", "model", "input", "run", "done"];
+const SELECTION_ROWS: SelectionRow[] = ["role", "model", "input", "run", "apply", "discard"];
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 type RefineOverlayContext = Pick<ExtensionContext, "hasUI" | "ui">;
@@ -107,7 +107,7 @@ export async function renderRefineOverlay(
         return session.turns.at(-1)?.output;
       }
 
-      function doneAction(action: "done" | "cancel"): void {
+      function doneAction(action: "apply" | "discard" | "cancel"): void {
         if (settled) return;
         settled = true;
         if (onParentAbort) options.signal?.removeEventListener("abort", onParentAbort);
@@ -254,7 +254,16 @@ export async function renderRefineOverlay(
           void runRole();
           return;
         }
-        if (row === "done") doneAction("done");
+        if (row === "apply") {
+          if (session.turns.length === 0) {
+            status = "No refine result to apply — run review/refine first.";
+            tui.requestRender();
+            return;
+          }
+          doneAction("apply");
+          return;
+        }
+        if (row === "discard") doneAction("discard");
       }
 
       function selectionLine(row: SelectionRow, label: string): string {
@@ -286,8 +295,9 @@ export async function renderRefineOverlay(
             ["role", `Role  [${spec.label}]`],
             ["model", `Model [${session.currentModel.label || "— pick (m) —"}]`],
             ["input", `Input ${inputLabel}`],
-            ["run", "Run review/refine"],
-            ["done", "Done"],
+            ["run", session.turns.length > 0 ? "Re-run review/refine" : "Run review/refine"],
+            ["apply", "Apply refine result"],
+            ["discard", "Discard (return to Plan)"],
           ];
           const turnCount = session.turns.length;
           const modeLabel = previewMode === "output" && turnCount > 0
@@ -306,12 +316,12 @@ export async function renderRefineOverlay(
             : "";
           rows.push(theme.fg("dim", `${modeLabel}${range}${turnCount > 1 && previewMode === "output" ? " · [ ] history" : ""}`));
           rows.push(theme.fg("dim", "─".repeat(inner)));
-          rows.push(...controls.map(([row, label]) => selectionLine(row, label)));
+          rows.push(...controls.map(([row, label], index) => selectionLine(row, `${index + 1}. ${label}`)));
           const footer = phase === "running"
             ? `${SPINNER_FRAMES[frame]!} ${status} ${formatElapsed(activeRun ? now() - activeRun.startedAt : 0)} · Esc cancel`
             : phase === "input"
               ? "Enter run · Esc keep input"
-              : "↑↓ scroll/select · ←→ change role · Enter choose · PgUp/PgDn scroll · m model · i input · R plan/output · [ ] history · d done · Esc cancel";
+              : "1-6 select · ↑↓ scroll/select · ←→ change role · Enter choose · PgUp/PgDn scroll · m model · i input · R plan/output · [ ] history · a apply · d discard · Esc cancel";
           rows.push(theme.fg("dim", truncateToWidth(footer, inner, "…")));
           if (status && phase !== "running") {
             rows.push(theme.fg(busyError ? "warning" : "dim", truncateToWidth(status, inner, "…")));
@@ -393,12 +403,26 @@ export async function renderRefineOverlay(
             enterInput();
             return;
           }
+          if (/^[1-6]$/.test(data)) {
+            selected = Number(data) - 1;
+            chooseSelection();
+            return;
+          }
           if (matchesKey(data, Key.enter)) {
             chooseSelection();
             return;
           }
+          if (data === "a" || data === "A") {
+            if (session.turns.length === 0) {
+              status = "No refine result to apply — run review/refine first.";
+              tui.requestRender();
+              return;
+            }
+            doneAction("apply");
+            return;
+          }
           if (data === "d" || data === "D") {
-            doneAction("done");
+            doneAction("discard");
             return;
           }
           if (/^[rR]$/.test(data) && session.turns.length > 0) {

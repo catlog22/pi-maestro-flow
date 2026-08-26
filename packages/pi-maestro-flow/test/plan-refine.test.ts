@@ -59,7 +59,7 @@ test("Review & Refine overlay renders a bounded cursor and changes Role with arr
   assert.ok(harness.component);
   for (const width of [40, 80, 120]) {
     const lines = harness.component.render(width);
-    assert.match(lines.join("\n"), /› Run review\/refine/);
+    assert.match(lines.join("\n"), /› 4\. Run review\/refine/);
     assert.ok(lines.length <= 32, `width ${width}: ${lines.length} lines`);
     for (const line of lines) assert.ok(visibleWidth(line) <= width, `width ${width}: ${visibleWidth(line)} ${line}`);
   }
@@ -67,7 +67,7 @@ test("Review & Refine overlay renders a bounded cursor and changes Role with arr
   harness.component.handleInput("\x1b[A");
   harness.component.handleInput("\x1b[A");
   harness.component.handleInput("\x1b[A");
-  assert.match(harness.component.render(80).join("\n"), /› Role/);
+  assert.match(harness.component.render(80).join("\n"), /› 1\. Role/);
   harness.component.handleInput("\x1b[C");
   assert.equal(session.currentRole, "decomposer");
   harness.component.handleInput("\x1b");
@@ -75,7 +75,7 @@ test("Review & Refine overlay renders a bounded cursor and changes Role with arr
   assert.equal(result.action, "cancel");
 });
 
-test("Review & Refine cursor activates model, input, run, and done rows", async () => {
+test("Review & Refine cursor activates model, input, run, apply, and discard rows", async () => {
   const harness = createOverlayHarness();
   const session = overlaySession();
   const runs: Array<{ role: RefineRole; model: string; input: string }> = [];
@@ -105,11 +105,10 @@ test("Review & Refine cursor activates model, input, run, and done rows", async 
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(runs, [{ role: "reviewer", model: "provider/picked", input: "focus acceptance" }]);
 
-  harness.component.handleInput("\x1b[B");
-  harness.component.handleInput("\x1b[B");
-  harness.component.handleInput("\r");
+  assert.match(harness.component.render(80).join("\n"), /4\. Re-run review\/refine/);
+  harness.component.handleInput("5");
   const result = await pending;
-  assert.equal(result.action, "done");
+  assert.equal(result.action, "apply");
   assert.equal(result.latestOutput, "## Result\naccepted");
 });
 
@@ -137,7 +136,7 @@ test("Review & Refine overlay scrolls long previews and keeps shortcut compatibi
   harness.component.handleInput("\x1b");
   harness.component.handleInput("d");
   const result = await pending;
-  assert.equal(result.action, "done");
+  assert.equal(result.action, "discard");
 });
 
 test("Review & Refine Up/Down browses the preview before moving between controls", async () => {
@@ -156,18 +155,19 @@ test("Review & Refine Up/Down browses the preview before moving between controls
   harness.component.handleInput("\x1b[B");
   let rendered = harness.component.render(80).join("\n");
   assert.match(rendered, /Plan · 2-/);
-  assert.match(rendered, /› Run review\/refine/);
+  assert.match(rendered, /› 4\. Run review\/refine/);
   harness.component.handleInput("\x1b[A");
   rendered = harness.component.render(80).join("\n");
   assert.match(rendered, /Plan · 1-/);
-  assert.match(rendered, /› Run review\/refine/);
+  assert.match(rendered, /› 4\. Run review\/refine/);
 
   for (let index = 0; index < 30; index++) harness.component.handleInput("\x1b[6~");
   harness.component.handleInput("\x1b[B");
-  assert.match(harness.component.render(80).join("\n"), /› Done/);
+  harness.component.handleInput("\x1b[B");
+  assert.match(harness.component.render(80).join("\n"), /› 6\. Discard \(return to Plan\)/);
   harness.component.handleInput("d");
   const result = await pending;
-  assert.equal(result.action, "done");
+  assert.equal(result.action, "discard");
 });
 
 test("Review & Refine shows elapsed time and Esc aborts only the active run", async () => {
@@ -208,7 +208,7 @@ test("Review & Refine shows elapsed time and Esc aborts only the active run", as
   assert.equal(session.turns.length, 0, "a cancelled run must discard late output");
   harness.component.handleInput("d");
   const result = await pending;
-  assert.equal(result.action, "done");
+  assert.equal(result.action, "discard");
   assert.equal(result.latestOutput, undefined);
 });
 

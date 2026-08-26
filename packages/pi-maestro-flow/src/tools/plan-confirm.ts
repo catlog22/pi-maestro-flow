@@ -19,8 +19,6 @@ export type PlanConfirmationAction =
   | "modify"
   | "continue"
   | "refine"
-  | "apply-refine"
-  | "cancel-refine"
   | "rollback"
   | "exit-plan"
   | "close";
@@ -49,8 +47,6 @@ export interface PlanConfirmationOptions {
   contextPercent?: number;
   defaultExecution?: PlanExecutionChoice;
   workflow?: PlanWorkflowConfirmationOptions;
-  /** Metadata indicating that the current Plan revision has an attached refine result. */
-  refine?: { roleLabel?: string };
   /** Archived draft revisions available for rollback. */
   drafts?: { revision: number; archivedAt: string; checksum: string }[];
 }
@@ -100,20 +96,12 @@ export async function openPlanConfirmation(
           : []),
         { action: "continue", label: "Continue discussion", description: "Enter feedback or a question" },
         { action: "exit-plan", label: "Exit Plan mode", description: "Keep the draft without approval" },
-        ...(options.refine
-          ? [
-              { action: "apply-refine" as const, label: "Apply refine result", description: "Write the refine output back into the Plan draft" },
-              { action: "cancel-refine" as const, label: "Discard refine result", description: "Drop the refine output and return to the Plan preview" },
-            ]
-          : []),
       ];
       const markdown = new Markdown(options.markdown, 0, 0, markdownTheme(theme));
       let selected = 0;
       let previewOffset = 0;
       let previewMaxOffset = 0;
-      let status = options.refine
-        ? `Refine result attached (${options.refine.roleLabel ?? "refine"}); Apply or Discard it below`
-        : "";
+      let status = "";
       let lastWidth = 80;
 
       const rows = (): SelectionRow[] => [

@@ -4,8 +4,8 @@
  * Replaces the single-purpose AI review with a multi-role panel: each role
  * (reviewer / decomposer / optimizer / brainstormer) runs a read-only teammate
  * subagent over the current Plan draft, and the user can iterate with free-form
- * input and switch roles/models in one continuous session. The latest output is
- * returned to plan-confirm for Apply / Cancel against the Plan draft.
+ * input and switch roles/models in one continuous session. Apply and Discard
+ * are handled in this panel before returning to Plan confirmation.
  *
  * `plan-review.ts` remains the home of the reviewer prompt and the reusable
  * model picker (`pickReviewModel`, `listAvailableReviewModels`,
@@ -79,7 +79,7 @@ export interface OpenRefinePanelOptions {
 }
 
 export interface RefinePanelResult {
-  action: "done" | "cancel";
+  action: "apply" | "discard" | "cancel";
   session: RefineSession;
   latestOutput?: string;
   latestRole?: RefineRole;
@@ -294,7 +294,7 @@ export function cycleRole(role: RefineRole, direction: 1 | -1): RefineRole {
 /**
  * Drive the Review & Refine panel. Delegates the TUI rendering/interaction to
  * `tui/plan-refine-overlay.ts` while owning the model picker and the run loop.
- * Returns the final session plus the latest output for confirm preview/apply.
+ * Returns the final session, selected action, and latest output metadata.
  */
 export async function openRefinePanel(
   pi: ExtensionAPI,

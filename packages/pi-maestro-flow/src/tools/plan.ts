@@ -982,9 +982,6 @@ async function reviewPlan(
       contextPercent: ctx.getContextUsage?.()?.percent ?? undefined,
       defaultExecution: latestExecution,
       workflow,
-      refine: refineSessionRevision === latestRevision && refineLatestOutput
-        ? { ...(refineLatestRoleLabel ? { roleLabel: refineLatestRoleLabel } : {}) }
-        : undefined,
       drafts,
     });
     if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
@@ -1027,33 +1024,27 @@ async function reviewPlan(
       refineLatestRole = outcome.latestRole;
       refineLatestAppliesAs = outcome.latestAppliesAs;
       refineLatestRoleLabel = outcome.latestRole ? REFINE_ROLES[outcome.latestRole].label : undefined;
-      if (outcome.action === "done" && outcome.latestOutput) {
-        ctx.ui.notify("Refine result attached; Apply or Discard it from Plan confirmation.", "info");
-      } else if (outcome.action === "cancel") {
-        ctx.ui.notify("Refine cancelled; returning to Plan confirmation.", "info");
-      }
-      continue;
-    }
-    if (action === "apply-refine") {
-      const output = refineSessionRevision === latestRevision ? refineLatestOutput : undefined;
-      if (!output) {
-        ctx.ui.notify("No refine result is attached to the current Plan revision.", "warning");
-        continue;
-      }
-      if (refineLatestAppliesAs === "draft") {
-        // Optimizer-style roles return a full draft: write it directly as the new current.md.
-        const saved = await savePlan(ctx, output, latestRevision, operation);
-        if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
-        if (saved) {
-          refineLatestOutput = undefined;
-          refineLatestRole = undefined;
-          refineLatestAppliesAs = undefined;
-          refineLatestRoleLabel = undefined;
-          refineSession = undefined;
-          refineSessionRevision = -1;
-          ctx.ui.notify("Refine result applied to the Plan draft.", "info");
+      if (outcome.action === "apply") {
+        const output = refineSessionRevision === latestRevision ? refineLatestOutput : undefined;
+        if (!output) {
+          ctx.ui.notify("No refine result is available to apply; run review/refine first.", "warning");
+          continue;
         }
-      } else {
+        if (refineLatestAppliesAs === "draft") {
+          // Optimizer-style roles return a full draft: write it directly as the new current.md.
+          const saved = await savePlan(ctx, output, latestRevision, operation);
+          if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
+          if (saved) {
+            refineLatestOutput = undefined;
+            refineLatestRole = undefined;
+            refineLatestAppliesAs = undefined;
+            refineLatestRoleLabel = undefined;
+            refineSession = undefined;
+            refineSessionRevision = -1;
+            ctx.ui.notify("Refine result applied to the Plan draft.", "info");
+          }
+          continue;
+        }
         // Reviewer/decomposer/brainstormer output continues the Plan discussion.
         const feedback = buildRefineFeedbackMessage(output, refineLatestRoleLabel);
         refineLatestOutput = undefined;
@@ -1062,14 +1053,15 @@ async function reviewPlan(
         refineLatestRoleLabel = undefined;
         return deliverPlanDiscussion(ctx, handoffDelivery, feedback);
       }
-      return { approved: false, exited: false };
-    }
-    if (action === "cancel-refine") {
-      refineLatestOutput = undefined;
-      refineLatestRole = undefined;
-      refineLatestAppliesAs = undefined;
-      refineLatestRoleLabel = undefined;
-      ctx.ui.notify("Refine result discarded; returning to the Plan preview.", "info");
+      if (outcome.action === "discard" || outcome.action === "cancel") {
+        refineLatestOutput = undefined;
+        refineLatestRole = undefined;
+        refineLatestAppliesAs = undefined;
+        refineLatestRoleLabel = undefined;
+        if (outcome.action === "discard") {
+          ctx.ui.notify("Refine result discarded; returning to the Plan preview.", "info");
+        }
+      }
       continue;
     }
     if (action === "rollback") {
