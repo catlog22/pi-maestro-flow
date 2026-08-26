@@ -70,6 +70,7 @@ icon: "🌿"
 | 变量 | 说明 |
 |------|------|
 | `CHROME_PATH` / `PUPPETEER_EXECUTABLE_PATH` | Chromium/Chrome/Edge 可执行文件路径（browser 工具 `app.path` 的备用来源） |
+| `PI_BROWSER_BRIDGE_PORT` | 浏览器扩展桥 WebSocket 端口（默认 `19222`；扩展未安装时自动回退 CDP，无需设置） |
 | `BROWSER` | 默认浏览器提示 |
 
 ## 说明

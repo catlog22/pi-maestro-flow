@@ -70,6 +70,21 @@ plan-exit()                  // 放弃并返回
 
 > Plan 模式支持独立 Plan 模型：规划与执行可分别使用不同模型，见[模型路由与思考深度](/guides/model-routing)。
 
+### plan-decompose — 批准后的分解（v0.22+）
+
+批准后对复杂工作，调用 `plan-decompose` 把已批准 Plan 转成执行计划。给定批准时的 handoff key，它返回一份自包含分解 prompt，由**当前主流程**（不委托子智能体）转成一份完整、拓扑有序的 Todo batch——这份 batch 本身就是执行计划与权威持久记录（简化版的 Maestro `decomposition.goals`，不另写 plan.json）。
+
+```javascript
+plan-decompose({ planHandoffKey: "<approved-handoff-key>" })
+// 返回分解 prompt → 主流程据此调用 todo({ action: "create", tasks: [...] }) 铺开 DAG
+```
+
+要点：
+
+- `planHandoffKey` 必须是批准时返回的精确 key；
+- 分解步骤不委托给 planner/decomposer/teammate，只由主流程自己产出；
+- 每条 task 的 `subject` 是结果标题（动词+对象），`blockedBy` 用同批下标表达依赖、形成 DAG。
+
 ## 3. todo — 任务管理
 
 7 个操作，支持纯文本上下文和可选的 Pi Skill 执行。

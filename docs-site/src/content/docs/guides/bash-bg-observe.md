@@ -113,6 +113,12 @@ observe({
 
 后台任务的完成状态通过事件驱动（bash-bg-complete / teammate-complete 通知），**不要轮询**；若当前回合必须等待，调用一次 `observe wait` 即可。
 
+### lastResult 摘要（区分“完成”与“未开始”）
+
+observe 输出会无条件渲染 target 的 `lastResult`：非 verbose 显示一行扁平摘要（`result: <截断文本…>`），verbose 仍显示 `--- last result ---` 完整多行块。这样轮询观察者无需请求 detail 即可区分“已完成所请”与“尚未开始”——`nativeStatus`/`summary` 由 agent 计数与空闲时间推断，单独不足以分辨这两种状态，`lastResult` 是 run 自己的陈述。
+
+工作区窗口侧同步保留一个 `mainLastSettle` 单槽投影，跨轮次保存最近一次 `agent_settled` 的结果，避免心跳轮询错过被 progress 环冲掉的 settle 事件。
+
 ## 下一步
 
 - [并行多智能体调度](/guides/teammate-dispatch) — teammate 后台执行

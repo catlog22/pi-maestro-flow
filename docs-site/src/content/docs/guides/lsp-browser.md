@@ -95,6 +95,16 @@ attach 模式连接用户日常浏览器（已保留登录态、cookie、扩展�
 
 若探测不到调试端口，open 会报错并附带启动命令提示。pi 不会自动启动或复制用户 profile。
 
+### 浏览器扩展桥（Browser Bridge）—— 可选真实浏览器接管
+
+扩展桥安装一个 Chrome MV3 扩展，经 WebSocket 接管你日常的 Chrome（保留登录态、CAPTCHA 能力、真实指纹，以及 puppeteer CDP 路线无法触达的扩展级能力：partition cookies、`chrome.debugger`、`chrome.management`、contentSettings、CSP 头剥离）。它是**可选**的——未安装时 `browser` 工具自动回退既有 CDP attach/launch 路径，行为不变，不破坏任何现有功能。
+
+**安装**：`/install` 运行 `browser-bridge` 项，按引导在 `chrome://extensions` 开启开发者模式并加载 `optional/browser-bridge/` 目录（扩展随包发布）。安装后页面右下角徽章显示 `pi-bridge: 已连接` 或 `重连中`。
+
+**端口**：默认 `19222`；端口被占用或需自定义时，在扩展弹窗里改端口并在 pi 侧设置 `PI_BROWSER_BRIDGE_PORT` 匹配。
+
+> ⚠️ **安全提示**：扩展安装后默认剥离**所有站点**的 CSP 响应头（`declarativeNetRequest` 规则），以便在页面 MAIN 世界执行 agent 注入脚本。这是扩展通道的核心能力，但也意味着你浏览的所有页面的 CSP 防护被关闭。需要时用扩展 `dnr` 命令 `disable` 关闭。详见包内 `optional/BROWSER-BRIDGE-SETUP.md`。
+
 ### run code 中的高级能力
 
 run code 接收 `page`（puppeteer Page）、`browser`（puppeteer Browser）和 `tab`（高层 helper）。除 `tab.observe/click/extract/screenshot` 等基础能力外：

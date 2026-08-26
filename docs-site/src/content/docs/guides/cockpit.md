@@ -10,13 +10,14 @@ pi-cockpit 提供编辑器上方实时状态堆栈 + Starship 风格 Footer，�
 ## 功能总览
 
 - **状态堆栈**：实时呈现运行中的 teammate 与 todo 计划
-- **Starship 风格 Footer**：当前模式、压缩状态、MCP 连接状态等
+- **Starship 风格 Footer**：当前模式、压缩状态、MCP 连接状态、Provider 用量条等
 - **9 套主题**：内置主题切换，`/theme` 实时预览
 - **Quiet 模式**：压缩内置工具输出、折叠思考块
 - **终端标题**：Claude Code 风格 Tab 标题 + 可选 LLM 生成会话摘要
 - **Sidebar Dock**：编辑器侧边停靠栏（模式/宽度/密度可配）
 - **背景任务覆盖层**：`Alt+J` 查看 bash_bg 任务实时状态
 - **跨会话监督**：Window Bar 中按 `Alt+W` 切换目标窗口的 Monitor 绑定
+- **CLI agent 徽章**：外部 CLI 后端（`cli/*` 模型）的 agent 行渲染专用 `⌘ cli` 徽章
 
 ## 配置文件
 
@@ -45,6 +46,13 @@ pi-cockpit 提供编辑器上方实时状态堆栈 + Starship 风格 Footer，�
     "showGit": false,
     "showMaestro": false,
     "maxLength": 80
+  },
+  "usage": {
+    "enabled": true,
+    "footer": true,
+    "pollIntervalMs": 120000,
+    "barWidth": 8,
+    "commandKey": ""
   },
   "theme": ""
 }
@@ -92,6 +100,18 @@ pi-cockpit 提供编辑器上方实时状态堆栈 + Starship 风格 Footer，�
 | `title.generationModel` | `""` | LLM 生成标题的模型（`provider/model`，需在 `/api-manager` 注册）；空则用规则提取器 |
 
 标题优先级：`/session name` > LLM 生成 > 规则提取 > 短会话 ID。LLM 生成于首个完整回合后进行，10 秒超时，`thinking` 关闭控成本；失败自动回退规则提取。
+
+### 用量条（Usage）
+
+轮询各 Provider 的配额 / 余额 / 消费，在 Footer 专用一行渲染进度条。需要时在 `/maestro-settings` 或 `/cockpit` 里切换。
+
+| 键 | 默认 | 说明 |
+|----|------|------|
+| `usage.enabled` | `true` | 用量模块总开关 |
+| `usage.footer` | `true` | 在 Footer 专用行渲染用量条（`false` 时仅计算不显示） |
+| `usage.pollIntervalMs` | `120000` | 轮询间隔，钳制 `30000..1800000`（30s–30min） |
+| `usage.barWidth` | `8` | 进度条宽度，钳制 `4..16` |
+| `usage.commandKey` | `""` | 仅显示指定 command key 的用量条（空则显示全部） |
 
 ### 图标
 
