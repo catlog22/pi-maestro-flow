@@ -24,7 +24,6 @@ import { constants as fsConstants } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import {
-  chmod,
   lstat,
   mkdir,
   open,
@@ -36,6 +35,11 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { lockSettingsResource } from "../settings/resource-lock.ts";
+import {
+  COMPLETION_MANIFEST_DIR,
+  completionManifestCanonicalNames,
+  readCompletionManifestFile,
+} from "./completion-manifest.ts";
 
 const GLOBAL_OUTPUT_DIR_NAME = "teammate-output";
 const LEGACY_AGENTS_DIR_NAME = ".pi/agents";
@@ -147,6 +151,14 @@ function fileErrorCode(error: unknown): string | undefined {
   return error instanceof Error && "code" in error
     ? String((error as NodeJS.ErrnoException).code)
     : undefined;
+}
+
+function publicationPersistenceBoundary(boundary: string): void {
+  const expected = `publication:${boundary}`;
+  if (process.env.PI_TEST_COMPLETION_FAIL_AT !== expected) return;
+  delete process.env.PI_TEST_COMPLETION_FAIL_AT;
+  if (process.env.PI_TEST_COMPLETION_CRASH === "1") process.exit(86);
+  throw Object.assign(new Error(`Injected completion persistence failure at ${expected}`), { code: "EIO" });
 }
 
 async function assertDirectoryNotLinked(path: string, label: string): Promise<void> {
@@ -334,18 +346,103 @@ async function readPrivateText(filePath: string): Promise<string | undefined> {
   }
 }
 
-/** Create an immutable private record, accepting only byte-identical retries. */
-async function writeImmutablePrivateFile(filePath: string, content: string): Promise<void> {
+/** Sync a directory entry after an immutable publication is created. */
+async function fsyncDirectory(path: string): Promise<void> {
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
-    await writeFile(filePath, content, { encoding: "utf8", flag: "wx", mode: 0o600 });
-    await chmod(filePath, 0o600);
-    return;
+    handle = await open(path, "r");
+    await handle.sync();
   } catch (error) {
-    if (fileErrorCode(error) !== "EEXIST") throw error;
+    if (!new Set(["EPERM", "EINVAL", "ENOSYS", "EBADF"]).has(fileErrorCode(error) ?? "")) throw error;
+  } finally {
+    await handle?.close().catch(() => undefined);
   }
-  const existing = await readPrivateText(filePath);
-  if (existing !== content) {
-    throw new Error(`Immutable agent output already exists with different content: ${filePath}`);
+}
+
+/**
+ * Revalidate an existing immutable publication without following links. A
+ * semantically identical retry must fsync the already-visible file and its
+ * directory: visibility alone does not prove that an interrupted first write
+ * reached stable storage. Invalid regular-file contents are treated as a
+ * partial pre-sync creation and removed only when the opened inode is still the
+ * canonical inode, allowing the exclusive create to be retried safely.
+ */
+async function syncOrRepairImmutablePrivateFile(
+  filePath: string,
+  content: string,
+): Promise<"synced" | "removed-partial"> {
+  const expected = parseRecord(content);
+  if (!expected?.publicationId) throw new Error(`Invalid immutable agent output payload: ${filePath}`);
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(filePath, fsConstants.O_RDWR | (fsConstants.O_NOFOLLOW ?? 0));
+    const opened = await handle.stat();
+    if (!opened.isFile()) throw new Error(`Agent output path must be a regular file: ${filePath}`);
+    const existing = await handle.readFile("utf8");
+    if (samePublishedRecord(existing, {
+      correlationId: expected.correlationId,
+      publicationId: expected.publicationId,
+      name: expected.name,
+      agent: expected.agent,
+      output: expected.output,
+    })) {
+      await handle.sync();
+      await handle.close();
+      handle = undefined;
+      await fsyncDirectory(dirname(filePath));
+      return "synced";
+    }
+    if (parseRecord(existing)) {
+      throw new Error(`Immutable agent output already exists with different content: ${filePath}`);
+    }
+    await handle.close();
+    handle = undefined;
+    const current = await lstat(filePath);
+    if (current.isSymbolicLink() || !current.isFile()
+      || current.dev !== opened.dev || current.ino !== opened.ino) {
+      throw new Error(`Immutable agent output changed during partial recovery: ${filePath}`);
+    }
+    await unlink(filePath);
+    await fsyncDirectory(dirname(filePath));
+    return "removed-partial";
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+/** Create an immutable private record, accepting only identical retries. */
+async function writeImmutablePrivateFile(filePath: string, content: string): Promise<void> {
+  for (;;) {
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    let created = false;
+    try {
+      // The canonical publication itself is opened with wx: no temporary alias
+      // or replace operation can overwrite an immutable agent:// capability.
+      handle = await open(filePath, "wx", 0o600);
+      created = true;
+      await handle.writeFile(content, "utf8");
+      publicationPersistenceBoundary("after-write");
+      await handle.chmod(0o600);
+      await handle.sync();
+      publicationPersistenceBoundary("after-file-sync");
+      await handle.close();
+      handle = undefined;
+      publicationPersistenceBoundary("after-close");
+      await fsyncDirectory(dirname(filePath));
+      publicationPersistenceBoundary("after-directory-sync");
+      return;
+    } catch (error) {
+      await handle?.close().catch(() => undefined);
+      if (fileErrorCode(error) === "EEXIST") {
+        if (await syncOrRepairImmutablePrivateFile(filePath, content) === "synced") return;
+        continue;
+      }
+      if (created) {
+        await unlink(filePath).catch(() => undefined);
+        await fsyncDirectory(dirname(filePath)).catch(() => undefined);
+      }
+      throw error;
+    }
   }
 }
 
@@ -394,13 +491,10 @@ async function evictOldestRecords(dir: string, count: number): Promise<void> {
   }
 }
 
-const COMPLETION_INTENT_DIR = ".completion-intents";
-const MAX_MANIFEST_SCAN_BYTES = 256 * 1024;
-
 /**
  * 未结算（open/finalized）完成清单引用的 publication 在投递完成前不可淘汰。
- * publication 可能落在与 manifest 不同的分桶（如子工作区），因此扫描共享根下
- * 的全部分桶；单文件超过 manifest 大小上限时跳过解析。
+ * Recovery, pruning, and pinning all use the same strict manifest parser; an
+ * invalid record is quarantined and therefore cannot pin arbitrary ids.
  */
 async function manifestPinnedPublicationIds(dir: string): Promise<Set<string>> {
   const pinned = new Set<string>();
@@ -414,33 +508,19 @@ async function manifestPinnedPublicationIds(dir: string): Promise<Set<string>> {
     if (fileErrorCode(error) !== "ENOENT") throw error;
   }
   for (const bucket of buckets) {
+    const manifestDir = join(bucket, COMPLETION_MANIFEST_DIR);
     let names: string[];
     try {
-      const entries = await readdir(join(bucket, COMPLETION_INTENT_DIR), { withFileTypes: true });
-      names = entries.filter((entry) => entry.isFile() && entry.name.endsWith(".json")).map((entry) => entry.name);
+      names = await readdir(manifestDir);
     } catch (error) {
       if (fileErrorCode(error) === "ENOENT") continue;
       throw error;
     }
-    for (const fileName of names) {
-      const filePath = join(bucket, COMPLETION_INTENT_DIR, fileName);
-      const raw = await readPrivateText(filePath);
-      if (raw === undefined || raw.length > MAX_MANIFEST_SCAN_BYTES) continue;
-      let parsed: { state?: unknown; published?: unknown; intent?: { resources?: unknown } };
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        continue;
-      }
-      if (parsed.state !== "open" && parsed.state !== "finalized") continue;
-      for (const published of Array.isArray(parsed.published) ? parsed.published : []) {
-        const publicationId = (published as { publicationId?: unknown } | null)?.publicationId;
-        if (typeof publicationId === "string") pinned.add(publicationId);
-      }
-      for (const resource of Array.isArray(parsed.intent?.resources) ? parsed.intent!.resources : []) {
-        const publicationId = (resource as { publicationId?: unknown } | null)?.publicationId;
-        if (typeof publicationId === "string") pinned.add(publicationId);
-      }
+    for (const fileName of completionManifestCanonicalNames(names)) {
+      const manifest = await readCompletionManifestFile(join(manifestDir, fileName));
+      if (!manifest || manifest.state !== "open" && manifest.state !== "finalized") continue;
+      for (const published of manifest.published) pinned.add(published.publicationId);
+      for (const resource of manifest.intent?.resources ?? []) pinned.add(resource.publicationId);
     }
   }
   return pinned;
@@ -522,19 +602,6 @@ async function persistAgentOutputNow(
     const recordId = publicationId ?? correlationId;
     const filePath = recordFile(dir, recordId);
     const existing = await readPrivateText(filePath);
-    if (publicationId && existing !== undefined) {
-      if (!samePublishedRecord(existing, { correlationId, publicationId, name, agent, output })) {
-        throw new Error(`Immutable agent output already exists with different content: ${filePath}`);
-      }
-      if (!await loadAlias(aliasFile(dir, correlationId), correlationId)) {
-        await writePrivateFile(aliasFile(dir, correlationId), JSON.stringify({
-          kind: "agent-output-alias",
-          correlationId,
-          publicationId,
-        } satisfies AgentOutputAlias));
-      }
-      return "stored";
-    }
     if (existing === undefined) {
       const count = await canonicalRecordCount(dir);
       if (count >= MAX_AGENT_FILES) {
@@ -552,15 +619,17 @@ async function persistAgentOutputNow(
     });
     if (publicationId) {
       const currentAlias = await loadAlias(aliasFile(dir, correlationId), correlationId);
-      const fallbackPublicationId = currentAlias
-        ? (await resolveAliasedRecord(dir, correlationId, currentAlias))?.publicationId
-        : undefined;
-      await writePrivateFile(aliasFile(dir, correlationId), JSON.stringify({
-        kind: "agent-output-alias",
-        correlationId,
-        publicationId,
-        ...(fallbackPublicationId ? { fallbackPublicationId } : {}),
-      } satisfies AgentOutputAlias));
+      if (existing === undefined || !currentAlias) {
+        const fallbackPublicationId = currentAlias
+          ? (await resolveAliasedRecord(dir, correlationId, currentAlias))?.publicationId
+          : undefined;
+        await writePrivateFile(aliasFile(dir, correlationId), JSON.stringify({
+          kind: "agent-output-alias",
+          correlationId,
+          publicationId,
+          ...(fallbackPublicationId && fallbackPublicationId !== publicationId ? { fallbackPublicationId } : {}),
+        } satisfies AgentOutputAlias));
+      }
       await writeImmutablePrivateFile(filePath, content);
     } else {
       await writePrivateFile(filePath, content);

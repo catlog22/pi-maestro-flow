@@ -56,6 +56,11 @@ import {
 import { detectContentType } from "./content-detector.ts";
 import { scoreRelevanceBatch, tokenizeRelevance, RELEVANCE_MAX_QUERY_TOKENS, type RelevanceMode } from "./relevance.ts";
 import { dedupBlocks, type DedupBlock } from "./dedup.ts";
+import {
+  isTeammateForkStartup,
+  publishTeammateCompactionState,
+  type TeammateCompactionPhase,
+} from "./teammate-compaction-relay.ts";
 
 const PROTECTED_THRESHOLD_CHARS = 500;
 // `resource` is URI-addressable (pr://, issue://, skill://, rule://, agent://):
@@ -524,6 +529,22 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
   function loopCriticalForReplacement(intent: PendingCompactionIntent | undefined): true | undefined {
     return state.loopCriticalBlocked || intent?.loopCritical === true ? true : undefined;
   }
+  function recoveryIdFor(intent: PendingCompactionIntent): string {
+    return `${state.sessionId ?? "unknown"}:${intent.triggerKey}`;
+  }
+  function publishRecoveryState(
+    intent: PendingCompactionIntent,
+    phase: TeammateCompactionPhase,
+    reason?: string,
+  ): void {
+    if (!intent.requestBlocked && !intent.contextExhausted && !intent.loopCritical) return;
+    publishTeammateCompactionState({
+      recoveryId: recoveryIdFor(intent),
+      phase,
+      generation: intent.generation,
+      ...(reason ? { reason } : {}),
+    });
+  }
   async function linkedThresholdFor(
     ctx: ExtensionContext,
     settings: CompactionSettings,
@@ -953,24 +974,32 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
           state.breakerNotified = false;
           if (ctx.hasPendingMessages?.()) return;
           try {
+            publishRecoveryState(intent, "completed");
+            publishRecoveryState(intent, "continuation");
             pi.sendUserMessage(CONTINUE_PROMPT, { deliverAs: "followUp" });
           } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            publishRecoveryState(intent, "failed", message);
             ctx.ui.notify(
-              `Native fallback continuation failed: ${error instanceof Error ? error.message : String(error)}`,
+              `Native fallback continuation failed: ${message}`,
               "error",
             );
           }
         },
         onError: (error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          publishRecoveryState(intent, "failed", message);
           ctx.ui.notify(
-            `Native fallback compaction failed: ${error instanceof Error ? error.message : String(error)}`,
+            `Native fallback compaction failed: ${message}`,
             "error",
           );
         },
       });
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      publishRecoveryState(intent, "failed", message);
       ctx.ui.notify(
-        `Native fallback compaction could not start: ${error instanceof Error ? error.message : String(error)}`,
+        `Native fallback compaction could not start: ${message}`,
         "error",
       );
     }
@@ -1005,12 +1034,14 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
           "Request stopped because compaction settings changed while provider-pressure recovery was pending. Retry the request with the new settings.",
           "error",
         );
+        publishRecoveryState(intent, "failed", "compaction settings changed before recovery ran");
       } else if (intent.contextExhausted || intent.loopCritical) {
         // An interrupted task must never lose its settlement silently.
         ctx.ui.notify(
           "Interrupted task paused: compaction settings changed before the queued compaction ran. Send any message to continue the task.",
           "warning",
         );
+        publishRecoveryState(intent, "failed", "compaction settings changed before recovery ran");
       }
       return;
     }
@@ -1046,9 +1077,12 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         if (intent.loopCritical) {
           state.loopCriticalBlocked = false;
           try {
+            publishRecoveryState(intent, "continuation");
             pi.sendUserMessage(CONTINUE_PROMPT, { deliverAs: "followUp" });
           } catch (recoveryError) {
-            ctx.ui.notify(`Mid-turn compaction recovery failed: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`, "error");
+            const message = recoveryError instanceof Error ? recoveryError.message : String(recoveryError);
+            publishRecoveryState(intent, "failed", message);
+            ctx.ui.notify(`Mid-turn compaction recovery failed: ${message}`, "error");
           }
         } else if (options.allowNativeFallback !== false) {
           fallbackToNativeCompaction(ctx, intent);
@@ -1057,9 +1091,12 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       }
       state.loopCriticalBlocked = false;
       try {
+        publishRecoveryState(intent, "continuation");
         pi.sendUserMessage(COMPACTION_RETRY_PROMPT, { deliverAs: "followUp" });
       } catch (recoveryError) {
-        ctx.ui.notify(`Mid-turn compaction recovery failed: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`, "error");
+        const message = recoveryError instanceof Error ? recoveryError.message : String(recoveryError);
+        publishRecoveryState(intent, "failed", message);
+        ctx.ui.notify(`Mid-turn compaction recovery failed: ${message}`, "error");
       }
     };
     const breakerCheck = compactionBreakerAllows(state.breaker, state.turnCount);
@@ -1076,6 +1113,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       } else {
         notifyBreakerPaused();
       }
+      publishRecoveryState(intent, "failed", "compaction circuit breaker is open");
       clearPending();
       return;
     }
@@ -1171,6 +1209,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
           );
         }
       }
+      publishRecoveryState(intent, "failed", "Pi reported no compactable history");
       clearPending();
       return;
     }
@@ -1319,9 +1358,13 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
               clearPressureStatus(ctx);
               if ((!intent.contextExhausted && !intent.requestBlocked && !intent.loopCritical) || ctx.hasPendingMessages?.()) return;
               try {
+                publishRecoveryState(intent, "completed");
+                publishRecoveryState(intent, "continuation");
                 pi.sendUserMessage(CONTINUE_PROMPT, { deliverAs: "followUp" });
               } catch (error) {
-                ctx.ui.notify(`Mid-turn continuation failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+                const message = error instanceof Error ? error.message : String(error);
+                publishRecoveryState(intent, "failed", message);
+                ctx.ui.notify(`Mid-turn continuation failed: ${message}`, "error");
               }
               return;
             }
@@ -1338,9 +1381,13 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
           clearPressureStatus(ctx);
           if ((!intent.contextExhausted && !intent.requestBlocked && !intent.loopCritical) || ctx.hasPendingMessages?.()) return;
           try {
+            publishRecoveryState(intent, "completed");
+            publishRecoveryState(intent, "continuation");
             pi.sendUserMessage(CONTINUE_PROMPT, { deliverAs: "followUp" });
           } catch (error) {
-            ctx.ui.notify(`Mid-turn continuation failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+            const message = error instanceof Error ? error.message : String(error);
+            publishRecoveryState(intent, "failed", message);
+            ctx.ui.notify(`Mid-turn continuation failed: ${message}`, "error");
           }
         },
         onError: failCompaction,
@@ -1564,7 +1611,11 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       releaseInFlight();
       state.pruneManifest.clear();
       state.sessionId = nextSessionId;
-      const loadedPrunes = loadPersistedPrunes(ctx, state.sessionId, event?.reason === "fork");
+      const loadedPrunes = loadPersistedPrunes(
+        ctx,
+        state.sessionId,
+        isTeammateForkStartup(event?.reason),
+      );
       state.restoredPrunes = loadedPrunes.prunes;
       state.restoredPruneAges.clear();
       state.persistedPrunes = new Map(loadedPrunes.byCallId);
@@ -1677,6 +1728,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       intent.loopCritical = true;
       state.loopCriticalBlocked = true;
       persistPendingIntent(pi, state);
+      publishRecoveryState(intent, "pending");
       notifyPressureOnce(
         ctx,
         `tool-call-hard-threshold:${intent.linkedThreshold.thresholdTokens}`,
@@ -1841,6 +1893,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
             "Request stopped before provider dispatch because the reactive compaction intent could not be persisted safely.",
           );
         }
+        publishRecoveryState(state.pendingIntent, "pending");
         if (!isCurrentLifecycle()) return undefined;
         notifyPressureOnce(
           ctx,
@@ -1951,7 +2004,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         threshold: settings.soft?.pruneRatio ?? DEFAULT_OUTPUT_LIMIT_RATIO,
       };
     },
-    onCompact(completedOwner, _ctx) {
+    onCompact(completedOwner, ctx) {
       state.generation += 1;
       // A completed compaction proves any hung submission settled.
       state.zombieOwner = undefined;
@@ -1963,6 +2016,19 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       const preserveOutputLimitBreaker = !wasPreempted && activeRequestOwner === "output-limit";
       const outputLimitCompactions = state.outputLimitCompactions;
       const outputLimitBreakerNotified = state.outputLimitBreakerNotified;
+      // A native/foreign compaction (no matching extension-owned request) has
+      // no onComplete callback to resume an interrupted task. The mid-turn
+      // CONTINUE_PROMPT path only fires from settlePendingCompaction's own
+      // ctx.compact(), and a native threshold compaction reaching session_compact
+      // here clears pendingIntent/generation before settlePendingCompaction runs,
+      // so a loop-critical/context-exhausted task would strand with no owned
+      // callback to resume it. Capture the intent and send the continuation
+      // ourselves before clearing it, mirroring onComplete's guard exactly
+      // (minus requestBlocked, which provider-pressure owns fail-closed).
+      const settledIntent = wasPreempted
+        || activeRequestOwner === undefined
+          ? state.pendingIntent
+        : undefined;
       if (wasPreempted) releaseInFlight();
       if (state.sessionId) void cleanupSpillDir(state.sessionId, state.writerId);
       state.pruneManifest.clear();
@@ -1987,6 +2053,23 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       // was the only clear-path that skipped it.
       persistPruneManifest(pi, state);
       persistPendingIntent(pi, state);
+      if (
+        settledIntent
+        && !settledIntent.requestBlocked
+        && (settledIntent.contextExhausted || settledIntent.loopCritical)
+        && ctx
+        && !ctx.hasPendingMessages?.()
+      ) {
+        try {
+          publishRecoveryState(settledIntent, "completed");
+          publishRecoveryState(settledIntent, "continuation");
+          pi.sendUserMessage(CONTINUE_PROMPT, { deliverAs: "followUp" });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          publishRecoveryState(settledIntent, "failed", message);
+          ctx.ui.notify(`Mid-turn continuation failed: ${message}`, "error");
+        }
+      }
     },
     onSessionShutdown(ctx) {
       // Non-destructive: a normal shutdown must not tombstone the prune

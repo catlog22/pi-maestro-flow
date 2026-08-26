@@ -85,6 +85,7 @@ import {
   runObservedCompaction,
 } from "../src/compaction/compaction-arbiter.ts";
 import { DEFAULT_SOFT_COMPACTION } from "../src/compaction/compaction-settings.ts";
+import { isTeammateForkStartup } from "../src/compaction/teammate-compaction-relay.ts";
 import { cleanupSpillDir, spillDir, spillPath } from "../src/compaction/tool-result-spill.ts";
 import {
   initTodo,
@@ -4112,6 +4113,47 @@ test("sustained critical-band pressure inside a tool loop aborts once and settle
   assert.equal(fx.aborted(), 1, "a fresh run counts the critical streak from zero");
 });
 
+test("tool-boundary compaction publishes typed teammate recovery phases", async () => {
+  const previousChild = process.env.PI_TEAMMATE_CHILD;
+  const previousCorrelation = process.env.PI_TEAMMATE_CORRELATION_ID;
+  const originalSend = process.send;
+  const events: Array<Record<string, unknown>> = [];
+  process.env.PI_TEAMMATE_CHILD = "1";
+  process.env.PI_TEAMMATE_CORRELATION_ID = "typed-compaction-test";
+  Object.defineProperty(process, "send", {
+    configurable: true,
+    writable: true,
+    value: (message: Record<string, unknown>) => {
+      events.push(message);
+      return true;
+    },
+  });
+
+  try {
+    const fx = loopCriticalFixture();
+    await fx.guard.evaluate(highUsageToolBatch(365_000), fx.ctx);
+    assert.equal(fx.guard.onToolCall(fx.ctx)?.block, true);
+    await fx.guard.onAgentEnd(fx.ctx);
+    assert.equal(fx.compactCalls.length, 1);
+    fx.compactCalls[0].onComplete();
+
+    assert.deepEqual(
+      events.map((event) => event.phase),
+      ["pending", "completed", "continuation"],
+    );
+    assert.ok(events.every((event) => event.type === "teammate_compaction_state"));
+    assert.ok(events.every((event) => event.correlationId === "typed-compaction-test"));
+    assert.equal(new Set(events.map((event) => event.recoveryId)).size, 1);
+  } finally {
+    if (previousChild === undefined) delete process.env.PI_TEAMMATE_CHILD;
+    else process.env.PI_TEAMMATE_CHILD = previousChild;
+    if (previousCorrelation === undefined) delete process.env.PI_TEAMMATE_CORRELATION_ID;
+    else process.env.PI_TEAMMATE_CORRELATION_ID = previousCorrelation;
+    if (originalSend === undefined) delete (process as { send?: typeof process.send }).send;
+    else Object.defineProperty(process, "send", { configurable: true, writable: true, value: originalSend });
+  }
+});
+
 test("a brief critical spike defers to the ordinary completed-turn path", async () => {
   const fx = loopCriticalFixture();
   await fx.guard.evaluate(highUsageToolBatch(385_000), fx.ctx);
@@ -4294,6 +4336,73 @@ test("queued user messages suppress the loop interruption", async () => {
   }
   assert.equal(fx.aborted(), 0, "an imminent natural settlement is never preempted");
   assert.equal(fx.guard.describeState().pendingIntent?.loopCritical, false);
+});
+
+test("native threshold compaction resumes a loop-critical task when no extension compaction owns it", async () => {
+  const fx = loopCriticalFixture();
+  // Drive the tool loop into a loop-critical interruption, exactly as a
+  // sustained critical band would mid-run.
+  for (let evaluation = 0; evaluation < LOOP_CRITICAL_PERSIST_EVALUATIONS; evaluation++) {
+    await fx.guard.evaluate(highUsageToolBatch(385_000), fx.ctx);
+  }
+  assert.equal(fx.aborted(), 1, "the persistent critical loop is interrupted exactly once");
+  assert.equal(fx.guard.describeState().pendingIntent?.loopCritical, true);
+
+  // The Pi-native threshold compaction (case 3) reaches session_compact before
+  // the extension's settlePendingCompaction submits its own ctx.compact(): the
+  // native completion has no owned onComplete, so onCompact must send the
+  // continuation itself instead of stranding the interrupted task.
+  fx.guard.onCompact("native", fx.ctx);
+  assert.match(fx.sent.at(-1) ?? "", /Continue the interrupted task/, "the interrupted loop resumes after a native compaction");
+});
+
+test("native threshold compaction does not resume a loop-critical task when a user message is queued", async () => {
+  let pending = false;
+  const fx = loopCriticalFixture({ hasPendingMessages: () => pending });
+  for (let evaluation = 0; evaluation < LOOP_CRITICAL_PERSIST_EVALUATIONS; evaluation++) {
+    await fx.guard.evaluate(highUsageToolBatch(385_000), fx.ctx);
+  }
+  assert.equal(fx.aborted(), 1);
+  assert.equal(fx.guard.describeState().pendingIntent?.loopCritical, true);
+  // A queued user message arrives between the interruption and the native
+  // compaction completion: the host's own queued message resumes the run, so
+  // onCompact must not also inject a duplicate continuation.
+  pending = true;
+  fx.guard.onCompact("native", fx.ctx);
+  assert.deepEqual(fx.sent, [], "the host's queued message resumes the run without an injected continuation");
+});
+
+test("session_compact never starts a provider-pressure continuation", async () => {
+  // A requestBlocked (provider-pressure) intent is fail-closed by design;
+  // onCompact must keep mirroring that even after a native completion.
+  const arbiter = new CompactionArbiter();
+  const sent: string[] = [];
+  const guard = createMidTurnAutoCompaction({
+    sendUserMessage(message: string) { sent.push(message); },
+  } as never, {
+    arbiter,
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 10_000, maxTokens: 4_000 },
+    abort() {},
+    compact() {},
+    hasPendingMessages: () => false,
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+  await guard.evaluate([{ role: "user", content: [{ type: "text", text: "finish" }] }] as never, ctx);
+  await guard.beforeProviderRequest({
+    max_tokens: 1,
+    thinking: { type: "enabled", budget_tokens: 1_024 },
+  }, ctx);
+  const native = arbiter.observeStart();
+  await guard.onAgentEnd(ctx);
+  native.finalize("success");
+  guard.onCompact("native", ctx);
+  assert.deepEqual(sent, [], "a provider-pressure intent stays fail-closed under a native completion");
 });
 
 test("window exhaustion keeps priority over the loop-critical interruption", async () => {
@@ -7107,6 +7216,78 @@ test("cache stability: a dead persisted spill path downgrades to a stable plain 
   } finally {
     guard.reset(ctx);
     await cleanupSpillDir(sessionId);
+  }
+});
+
+test("fork startup restores inherited prune state under the child provenance marker", async () => {
+  const parentSessionId = `fork-parent-${Date.now()}`;
+  const childSessionId = `fork-child-${Date.now()}`;
+  const callId = "fork-inherited-call";
+  const appended: Array<{ type: string; data: unknown }> = [];
+  const messages = [{
+    role: "assistant",
+    content: [{ type: "toolCall", id: callId, name: "read", arguments: {} }],
+  }, {
+    role: "toolResult",
+    toolCallId: callId,
+    toolName: "read",
+    content: [{ type: "text", text: "x".repeat(16_000) }],
+    isError: false,
+  }, {
+    role: "user",
+    content: [{ type: "text", text: "review the inherited context" }],
+  }];
+  const persisted = {
+    version: 6,
+    sessionId: parentSessionId,
+    checkpointId: "parent-checkpoint",
+    mode: "checkpoint",
+    prunes: [{ callId, level: "pruned", checkpointId: "parent-checkpoint" }],
+  };
+  const guard = createMidTurnAutoCompaction({
+    appendEntry(type: string, data: unknown) { appended.push({ type, data }); },
+    sendUserMessage() {},
+  } as never, {
+    readSettings: () => ({ enabled: true, reserveTokens: 1_000, keepRecentTokens: 1_000 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 100_000 },
+    sessionManager: {
+      getSessionId: () => childSessionId,
+      getBranch: () => [{
+        type: "message",
+        id: "parent-checkpoint",
+      }, {
+        type: "custom",
+        id: "parent-prune-entry",
+        customType: "maestro-auto-prune-state",
+        data: persisted,
+      }],
+    },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+  const previousChild = process.env.PI_TEAMMATE_CHILD;
+  const previousMode = process.env.PI_TEAMMATE_CONTEXT_MODE;
+  process.env.PI_TEAMMATE_CHILD = "1";
+  process.env.PI_TEAMMATE_CONTEXT_MODE = "fork";
+
+  try {
+    assert.equal(isTeammateForkStartup("startup"), true);
+    guard.onSessionStart(ctx, { reason: "startup" });
+    const restored = await guard.evaluate(messages as never, ctx);
+    assert.match(JSON.stringify(restored?.[1]), /stale large output/);
+    const checkpoint = appended
+      .filter((entry) => entry.type === "maestro-auto-prune-state")
+      .at(-1)?.data as { sessionId?: string; mode?: string } | undefined;
+    assert.equal(checkpoint?.sessionId, childSessionId);
+    assert.equal(checkpoint?.mode, "checkpoint");
+  } finally {
+    guard.reset(ctx);
+    if (previousChild === undefined) delete process.env.PI_TEAMMATE_CHILD;
+    else process.env.PI_TEAMMATE_CHILD = previousChild;
+    if (previousMode === undefined) delete process.env.PI_TEAMMATE_CONTEXT_MODE;
+    else process.env.PI_TEAMMATE_CONTEXT_MODE = previousMode;
   }
 });
 

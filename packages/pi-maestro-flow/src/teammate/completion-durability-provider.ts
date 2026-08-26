@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { lstat, mkdir, open, readFile, readdir, rename, rm } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { lstat, mkdir, open, readdir, rename, rm } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 import {
   COMPLETION_DURABILITY_VERSION,
   computeCompletionDeliveryId,
@@ -20,93 +20,49 @@ import {
   type CompletionTarget,
 } from "pi-maestro-teammate/v1";
 import { ensureAgentOutputBucket, readExactAgentPublication } from "./agent-output-store.ts";
+import {
+  COMPLETION_MANIFEST_DIR,
+  COMPLETION_MANIFEST_VERSION,
+  MAX_COMPLETION_MANIFEST_BYTES,
+  completionManifestCanonicalNames,
+  parseCompletionManifest,
+  readCompletionManifestFile,
+  truncateCompletionSummary,
+  withCompletionManifestRevision,
+  type CompletionDispatchManifest,
+} from "./completion-manifest.ts";
 import { lockSettingsResource } from "../settings/resource-lock.ts";
 
-const MANIFEST_VERSION = 1 as const;
-const MANIFEST_DIR = ".completion-intents";
-const MAX_MANIFEST_BYTES = 256 * 1024;
 const OPEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const APPLIED_TTL_MS = 24 * 60 * 60 * 1000;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
-
-interface PublishedEntry extends CompletionResource {
-  state: "staged" | "committed";
-  stagedAt: number;
-  committedAt?: number;
-}
-
-interface DispatchManifest {
-  version: typeof MANIFEST_VERSION;
-  dispatchId: string;
-  reservationId: string;
-  deliveryGroupId: string;
-  mode: CompletionDispatchSeed["mode"];
-  target: CompletionTarget;
-  replyTarget: CompletionDispatchSeed["replyTarget"];
-  originCwd: string;
-  expectedTasks: readonly string[];
-  notificationRequired: boolean;
-  notificationKind?: CompletionNotificationRequirement["kind"];
-  published: readonly PublishedEntry[];
-  state: "open" | "finalized" | "applied" | "abandoned";
-  deliveryId?: string;
-  intent?: CompletionIntent;
-  createdAt: number;
-  updatedAt: number;
-  expiresAt: number;
-  contentRevision: string;
-}
+const REPLACE_ERRORS = new Set(["EPERM", "EACCES", "EEXIST"]);
+const RENAME_RETRIES = 5;
+const RENAME_RETRY_MS = 25;
+const ORDERED_REPLACEMENT_PATTERN = /^.*\.json\.replace-(\d{20})-[A-Za-z0-9-]+\.(?:new|bak)$/;
 
 function fileCode(error: unknown): string | undefined {
   return error instanceof Error && "code" in error ? String((error as NodeJS.ErrnoException).code) : undefined;
+}
+
+function persistenceBoundary(boundary: string): void {
+  const expected = `manifest:${boundary}`;
+  if (process.env.PI_TEST_COMPLETION_FAIL_AT !== expected) return;
+  delete process.env.PI_TEST_COMPLETION_FAIL_AT;
+  if (process.env.PI_TEST_COMPLETION_CRASH === "1") process.exit(86);
+  throw Object.assign(new Error(`Injected completion persistence failure at ${expected}`), { code: "EIO" });
 }
 
 function hash(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
-function semantic(manifest: Omit<DispatchManifest, "contentRevision">): unknown {
-  return manifest;
-}
-
-function revision(manifest: Omit<DispatchManifest, "contentRevision">): string {
-  return createHash("sha256").update(JSON.stringify(semantic(manifest)), "utf8").digest("hex");
-}
-
-function withRevision(manifest: Omit<DispatchManifest, "contentRevision">): DispatchManifest {
-  return { ...manifest, contentRevision: revision(manifest) };
-}
-
-function validTarget(value: unknown): value is CompletionTarget {
-  if (!value || typeof value !== "object") return false;
-  const target = value as Partial<CompletionTarget>;
-  return typeof target.workspaceId === "string" && target.workspaceId.length > 0
-    && typeof target.sessionId === "string" && target.sessionId.length > 0
-    && (target.correlationId === undefined || typeof target.correlationId === "string");
-}
-
-function validManifest(value: unknown): value is DispatchManifest {
-  if (!value || typeof value !== "object") return false;
-  const manifest = value as Partial<DispatchManifest>;
-  if (manifest.version !== MANIFEST_VERSION
-    || typeof manifest.dispatchId !== "string" || !SAFE_ID.test(manifest.dispatchId)
-    || typeof manifest.reservationId !== "string" || !SAFE_ID.test(manifest.reservationId)
-    || typeof manifest.deliveryGroupId !== "string"
-    || !validTarget(manifest.target)
-    || typeof manifest.originCwd !== "string" || manifest.originCwd.length === 0
-    || !Array.isArray(manifest.expectedTasks) || !Array.isArray(manifest.published)
-    || !["open", "finalized", "applied", "abandoned"].includes(String(manifest.state))
-    || !Number.isSafeInteger(manifest.createdAt) || !Number.isSafeInteger(manifest.updatedAt)
-    || !Number.isSafeInteger(manifest.expiresAt)
-    || typeof manifest.contentRevision !== "string") return false;
-  const { contentRevision, ...withoutRevision } = manifest as DispatchManifest;
-  return revision(withoutRevision) === contentRevision;
-}
-
 async function ensureRealDirectory(path: string): Promise<void> {
   await mkdir(path, { recursive: true, mode: 0o700 });
   const info = await lstat(path);
-  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`Completion manifest directory must be a real directory: ${path}`);
+  if (!info.isDirectory() || info.isSymbolicLink()) {
+    throw new Error(`Completion manifest directory must be a real directory: ${path}`);
+  }
 }
 
 async function fsyncDirectory(path: string): Promise<void> {
@@ -116,45 +72,130 @@ async function fsyncDirectory(path: string): Promise<void> {
     await handle.sync();
   } catch (error) {
     if (!new Set(["EPERM", "EINVAL", "ENOSYS", "EBADF"]).has(fileCode(error) ?? "")) throw error;
-  } finally { await handle?.close().catch(() => undefined); }
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
 }
 
-async function writeAtomic(path: string, value: unknown): Promise<void> {
+async function renameWithRetry(source: string, target: string): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rename(source, target);
+      return;
+    } catch (error) {
+      if (!REPLACE_ERRORS.has(fileCode(error) ?? "") || attempt >= RENAME_RETRIES) throw error;
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, RENAME_RETRY_MS * (attempt + 1)));
+    }
+  }
+}
+
+async function nextReplacementGeneration(path: string): Promise<string> {
+  const dir = dirname(path);
+  const canonical = basename(path);
+  let highest = 0n;
+  for (const name of await readdir(dir).catch((error) => {
+    if (fileCode(error) === "ENOENT") return [] as string[];
+    throw error;
+  })) {
+    if (!name.startsWith(`${canonical}.replace-`)) continue;
+    const match = ORDERED_REPLACEMENT_PATTERN.exec(name);
+    if (match?.[1]) highest = highest > BigInt(match[1]) ? highest : BigInt(match[1]);
+  }
+  return (highest + 1n).toString().padStart(20, "0");
+}
+
+async function cleanupReplacementRemnants(path: string): Promise<void> {
+  const dir = dirname(path);
+  const canonical = basename(path);
+  const names = await readdir(dir).catch((error) => {
+    if (fileCode(error) === "ENOENT") return [] as string[];
+    throw error;
+  });
+  for (const name of names) {
+    if (name.startsWith(`${canonical}.replace-`) && (name.endsWith(".new") || name.endsWith(".bak"))) {
+      await rm(join(dir, name), { force: true });
+    }
+  }
+  await fsyncDirectory(dir);
+}
+
+/**
+ * Publish a replacement without ever unlinking the sole committed destination.
+ * If Windows refuses rename-over-existing, the old file is first moved to a
+ * recoverable .bak name and directory-synced. A crash then leaves either the
+ * canonical old/new record or a parser-visible .new/.bak candidate.
+ */
+async function writeRecoverableAtomic(path: string, value: unknown): Promise<void> {
   const payload = Buffer.from(`${JSON.stringify(value)}\n`, "utf8");
-  if (payload.byteLength > MAX_MANIFEST_BYTES) throw new Error(`Completion manifest exceeds ${MAX_MANIFEST_BYTES} bytes.`);
-  await ensureRealDirectory(dirname(path));
-  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  if (payload.byteLength > MAX_COMPLETION_MANIFEST_BYTES) {
+    throw new Error(`Completion manifest exceeds ${MAX_COMPLETION_MANIFEST_BYTES} bytes.`);
+  }
+  const dir = dirname(path);
+  await ensureRealDirectory(dir);
+  const generation = await nextReplacementGeneration(path);
+  const token = `${generation}-${randomUUID()}`;
+  const replacement = `${path}.replace-${token}.new`;
+  const backup = `${path}.replace-${token}.bak`;
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
-    handle = await open(temporary, "wx", 0o600);
+    handle = await open(replacement, "wx", 0o600);
     await handle.writeFile(payload);
+    persistenceBoundary("after-write");
     await handle.sync();
+    persistenceBoundary("after-file-sync");
     await handle.close();
     handle = undefined;
-    try { await rename(temporary, path); }
-    catch (error) {
-      if (!new Set(["EPERM", "EACCES", "EEXIST"]).has(fileCode(error) ?? "")) throw error;
-      await rm(path, { force: true });
-      await rename(temporary, path);
+    persistenceBoundary("after-close");
+    const current = await lstat(path).catch((error) => {
+      if (fileCode(error) === "ENOENT") return undefined;
+      throw error;
+    });
+    if (!current) {
+      await renameWithRetry(replacement, path);
+      persistenceBoundary("after-new-to-canonical");
+      await fsyncDirectory(dir);
+      persistenceBoundary("after-directory-sync");
+      await cleanupReplacementRemnants(path);
+      return;
     }
-    await fsyncDirectory(dirname(path));
+    if (!current.isFile() || current.isSymbolicLink()) {
+      throw new Error(`Completion manifest path must be a regular file: ${path}`);
+    }
+    await renameWithRetry(path, backup);
+    persistenceBoundary("after-canonical-to-backup");
+    await fsyncDirectory(dir);
+    await renameWithRetry(replacement, path);
+    persistenceBoundary("after-new-to-canonical");
+    await fsyncDirectory(dir);
+    persistenceBoundary("after-directory-sync");
+    await rm(backup, { force: true });
+    persistenceBoundary("after-backup-cleanup");
+    await fsyncDirectory(dir);
+    await cleanupReplacementRemnants(path);
   } catch (error) {
     await handle?.close().catch(() => undefined);
-    await rm(temporary, { force: true }).catch(() => undefined);
+    // Do not delete replacement/backup remnants: the shared parser can recover
+    // a byte-valid old or new record after interruption.
     throw error;
   }
 }
 
-async function readManifest(path: string): Promise<DispatchManifest | undefined> {
+async function removeManifestFamily(path: string): Promise<void> {
+  const dir = dirname(path);
+  const canonical = basename(path);
+  let names: string[];
   try {
-    const info = await lstat(path);
-    if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_MANIFEST_BYTES) return undefined;
-    const value = JSON.parse(await readFile(path, "utf8"));
-    return validManifest(value) ? value : undefined;
+    names = await readdir(dir);
   } catch (error) {
-    if (fileCode(error) === "ENOENT" || error instanceof SyntaxError) return undefined;
+    if (fileCode(error) === "ENOENT") return;
     throw error;
   }
+  for (const name of names) {
+    if (name === canonical || name.startsWith(`${canonical}.replace-`)) {
+      await rm(join(dir, name), { force: true });
+    }
+  }
+  await fsyncDirectory(dir);
 }
 
 export class FlowCompletionDurabilityProvider implements CompletionDurabilityProvider {
@@ -169,12 +210,9 @@ export class FlowCompletionDurabilityProvider implements CompletionDurabilityPro
     if (!SAFE_ID.test(seed.dispatchId) || !SAFE_ID.test(seed.reservationId) || !seed.originCwd) {
       throw new Error("Invalid completion dispatch seed.");
     }
-    // A reused dispatchId must resolve its existing manifest across ALL
-    // buckets before a new path is chosen, otherwise a relocated originCwd
-    // would silently create a second manifest for the same dispatch.
     const existingPath = await this.#locate(seed.dispatchId);
     const bucket = await ensureAgentOutputBucket(seed.originCwd);
-    const path = existingPath ?? join(bucket, MANIFEST_DIR, `${hash(seed.dispatchId)}.json`);
+    const path = existingPath ?? join(bucket, COMPLETION_MANIFEST_DIR, `${hash(seed.dispatchId)}.json`);
     this.#manifestPaths.set(seed.dispatchId, path);
     await this.#mutate(path, seed.dispatchId, (current, now) => {
       if (current) {
@@ -185,13 +223,14 @@ export class FlowCompletionDurabilityProvider implements CompletionDurabilityPro
           || current.originCwd !== seed.originCwd
           || current.target.workspaceId !== seed.target.workspaceId
           || current.target.sessionId !== seed.target.sessionId
+          || current.target.correlationId !== seed.target.correlationId
           || current.expectedTasks.join("\n") !== [...seed.expectedTasks].join("\n")) {
           throw new Error(`Completion dispatch ${seed.dispatchId} already belongs to another target.`);
         }
         return current;
       }
-      return withRevision({
-        version: MANIFEST_VERSION,
+      return withCompletionManifestRevision({
+        version: COMPLETION_MANIFEST_VERSION,
         dispatchId: seed.dispatchId,
         reservationId: seed.reservationId,
         deliveryGroupId: seed.deliveryGroupId,
@@ -212,12 +251,16 @@ export class FlowCompletionDurabilityProvider implements CompletionDurabilityPro
   }
 
   async requireNotification(input: CompletionNotificationRequirement): Promise<void> {
-    await this.#mutateDispatch(input.dispatchId, (current, now) => withRevision({
-      ...this.#withoutRevision(current),
-      notificationRequired: true,
-      notificationKind: input.kind,
-      updatedAt: now,
-    }));
+    await this.#mutateDispatch(input.dispatchId, (current, now) => {
+      this.#assertReservation(current, input.reservationId);
+      return withCompletionManifestRevision({
+        ...this.#withoutRevision(current),
+        notificationRequired: true,
+        notificationKind: input.kind,
+        notificationRequiredAt: input.requiredAt,
+        updatedAt: now,
+      });
+    });
   }
 
   async stagePublication(input: CompletionPublicationInput): Promise<void> {
@@ -229,8 +272,14 @@ export class FlowCompletionDurabilityProvider implements CompletionDurabilityPro
         throw new Error(`Publication ${input.resource.publicationId} already staged from a different origin.`);
       }
       const published = current.published.filter((entry) => entry.publicationId !== input.resource.publicationId);
-      published.push({ ...input.resource, state: "staged", stagedAt: input.stagedAt });
-      return withRevision({ ...this.#withoutRevision(current), published, updatedAt: now });
+      // Byte-cap the summary at the persistence boundary so an oversized summary
+      // can never be written and then silently quarantined on the next read
+      // (the strict validator caps by UTF-8 bytes, not characters).
+      const resource = input.resource.summary === undefined
+        ? input.resource
+        : { ...input.resource, summary: truncateCompletionSummary(input.resource.summary) };
+      published.push({ ...resource, state: "staged", stagedAt: input.stagedAt });
+      return withCompletionManifestRevision({ ...this.#withoutRevision(current), published, updatedAt: now });
     });
   }
 
@@ -239,14 +288,14 @@ export class FlowCompletionDurabilityProvider implements CompletionDurabilityPro
       this.#assertReservation(current, input.reservationId);
       const staged = current.published.find((entry) => entry.publicationId === input.publicationId);
       if (!staged) throw new Error(`Publication ${input.publicationId} was not staged.`);
-      // Legacy manifests may lack per-resource originCwd; the dispatch origin
-      // is then the only known location.
       const record = await readExactAgentPublication(input.publicationId, staged.originCwd ?? current.originCwd);
-      if (!record) throw new Error(`Immutable agent://${input.publicationId} is not readable.`);
+      if (!record || record.correlationId !== staged.correlationId) {
+        throw new Error(`Immutable agent://${input.publicationId} is not readable.`);
+      }
       const published = current.published.map((entry) => entry.publicationId === input.publicationId
         ? { ...entry, state: "committed" as const, committedAt: input.committedAt }
         : entry);
-      return withRevision({ ...this.#withoutRevision(current), published, updatedAt: now });
+      return withCompletionManifestRevision({ ...this.#withoutRevision(current), published, updatedAt: now });
     });
   }
 
@@ -255,18 +304,29 @@ export class FlowCompletionDurabilityProvider implements CompletionDurabilityPro
     await this.#mutateDispatch(input.dispatchId, async (current, now) => {
       this.#assertReservation(current, input.reservationId);
       if (current.intent) { intent = current.intent; return current; }
-      if (!current.notificationRequired) throw new Error(`Completion dispatch ${input.dispatchId} does not require notification.`);
-      const committed = new Map(current.published.filter((entry) => entry.state === "committed").map((entry) => [entry.publicationId, entry]));
+      if (!current.notificationRequired) {
+        throw new Error(`Completion dispatch ${input.dispatchId} does not require notification.`);
+      }
+      const published = [...current.published];
       const resolvedResources: CompletionResource[] = [];
       for (const resource of input.resources) {
-        // The committed entry owns the publication's location and identity;
-        // caller-supplied metadata never overrides it.
-        const entry = committed.get(resource.publicationId);
+        const index = published.findIndex((entry) => entry.publicationId === resource.publicationId);
+        const entry = index < 0 ? undefined : published[index];
         const origin = entry?.originCwd ?? current.originCwd;
-        if (!entry || !await readExactAgentPublication(resource.publicationId, origin)) {
+        const record = entry
+          ? await readExactAgentPublication(resource.publicationId, origin)
+          : undefined;
+        if (!entry
+          || entry.state !== "staged" && entry.state !== "committed"
+          || !record
+          || record.correlationId !== entry.correlationId) {
           throw new Error(`Completion publication ${resource.publicationId} is not durably committed.`);
         }
-        resolvedResources.push({ ...resource, originCwd: origin });
+        if (entry.state === "staged") {
+          published[index] = { ...entry, state: "committed", committedAt: input.finalizedAt };
+        }
+        const { state: _state, stagedAt: _stagedAt, committedAt: _committedAt, ...canonicalResource } = entry;
+        resolvedResources.push({ ...canonicalResource, originCwd: origin });
       }
       const base: Omit<CompletionIntent, "contentRevision"> = {
         version: COMPLETION_DURABILITY_VERSION,
@@ -278,15 +338,16 @@ export class FlowCompletionDurabilityProvider implements CompletionDurabilityPro
         target: current.target,
         replyTarget: current.replyTarget,
         outcome: input.outcome,
-        summary: Buffer.from(input.summary, "utf8").subarray(0, 4096).toString("utf8"),
+        summary: truncateCompletionSummary(input.summary),
         resources: resolvedResources,
         createdAt: current.createdAt,
         finalizedAt: input.finalizedAt,
       };
       const withId = { ...base, deliveryId: computeCompletionDeliveryId(base) };
       intent = { ...withId, contentRevision: computeCompletionIntentRevision(withId) };
-      return withRevision({
+      return withCompletionManifestRevision({
         ...this.#withoutRevision(current),
+        published,
         state: "finalized",
         intent,
         deliveryId: intent.deliveryId,
@@ -303,11 +364,20 @@ export class FlowCompletionDurabilityProvider implements CompletionDurabilityPro
     const intents: CompletionIntent[] = [];
     for (const { path, manifest } of manifests) {
       this.#manifestPaths.set(manifest.dispatchId, path);
-      if (manifest.state !== "finalized" || !manifest.intent || manifest.expiresAt <= Date.now()) continue;
-      if (manifest.target.workspaceId !== target.workspaceId || manifest.target.sessionId !== target.sessionId
+      if (manifest.expiresAt <= Date.now()) continue;
+      if (manifest.target.workspaceId !== target.workspaceId
+        || manifest.target.sessionId !== target.sessionId
         || manifest.target.correlationId !== target.correlationId) continue;
-      const complete = await Promise.all(manifest.intent.resources.map((resource) => readExactAgentPublication(resource.publicationId, resource.originCwd ?? manifest.originCwd)));
-      if (complete.every(Boolean)) intents.push(manifest.intent);
+      let candidate = manifest;
+      if (candidate.state === "open") {
+        const recovered = await this.#recoverFullyCommittedOpen(candidate);
+        if (!recovered) continue;
+        candidate = recovered;
+      }
+      if (candidate.state !== "finalized" || !candidate.intent) continue;
+      const complete = await Promise.all(candidate.intent.resources.map((resource) =>
+        readExactAgentPublication(resource.publicationId, resource.originCwd ?? candidate.originCwd)));
+      if (complete.every(Boolean)) intents.push(candidate.intent);
     }
     return intents.sort((left, right) => left.createdAt - right.createdAt || left.deliveryId.localeCompare(right.deliveryId));
   }
@@ -317,26 +387,87 @@ export class FlowCompletionDurabilityProvider implements CompletionDurabilityPro
       if (current.deliveryId !== receipt.deliveryId || current.intent?.contentRevision !== receipt.contentRevision) {
         throw new Error(`Completion applied receipt mismatch for ${receipt.dispatchId}.`);
       }
-      return withRevision({ ...this.#withoutRevision(current), state: "applied", updatedAt: now, expiresAt: now + APPLIED_TTL_MS });
+      return withCompletionManifestRevision({
+        ...this.#withoutRevision(current),
+        state: "applied",
+        updatedAt: now,
+        expiresAt: now + APPLIED_TTL_MS,
+      });
     });
   }
 
   async abandonDispatch(input: CompletionAbandonInput): Promise<void> {
     await this.#mutateDispatch(input.dispatchId, (current, now) => {
       this.#assertReservation(current, input.reservationId);
-      return withRevision({ ...this.#withoutRevision(current), state: "abandoned", updatedAt: now, expiresAt: now + APPLIED_TTL_MS });
+      // Finalized is the irreversible commit point. A late foreground settle or
+      // racing cancellation may observe finalized/applied state, but it must
+      // never erase the intent or roll the manifest back to abandoned.
+      if (current.state !== "open") return current;
+      return withCompletionManifestRevision({
+        ...this.#withoutRevision(current),
+        state: "abandoned",
+        intent: undefined,
+        deliveryId: undefined,
+        updatedAt: now,
+        expiresAt: now + APPLIED_TTL_MS,
+      });
     });
   }
 
   async prune(now: number): Promise<void> {
     for (const { path, manifest } of await this.#scanManifests()) {
-      if (manifest.expiresAt <= now) await rm(path, { force: true });
+      if (manifest.expiresAt <= now) await removeManifestFamily(path);
     }
+  }
+
+  async #recoverFullyCommittedOpen(manifest: CompletionDispatchManifest): Promise<CompletionDispatchManifest | undefined> {
+    if (!manifest.notificationRequired || !manifest.notificationKind || manifest.expectedTasks.length === 0) return undefined;
+    if (new Set(manifest.expectedTasks).size !== manifest.expectedTasks.length) return undefined;
+    if (manifest.published.length !== manifest.expectedTasks.length
+      || manifest.published.some((entry) => entry.state !== "committed")) return undefined;
+    const byCorrelation = new Map<string, typeof manifest.published[number][]>();
+    for (const entry of manifest.published) {
+      const current = byCorrelation.get(entry.correlationId) ?? [];
+      current.push(entry);
+      byCorrelation.set(entry.correlationId, current);
+    }
+    const ordered = manifest.expectedTasks.map((correlationId) => byCorrelation.get(correlationId));
+    if (ordered.some((entries) => entries?.length !== 1)) return undefined;
+    const resources: CompletionResource[] = ordered.map((entries) => {
+      const { state: _state, stagedAt: _stagedAt, committedAt: _committedAt, ...resource } = entries![0]!;
+      return resource;
+    });
+    for (const resource of resources) {
+      const exact = await readExactAgentPublication(resource.publicationId, resource.originCwd ?? manifest.originCwd);
+      if (!exact || exact.correlationId !== resource.correlationId) return undefined;
+    }
+    const outcome = resources.some((resource) => resource.outcome === "failed")
+      ? "failed" as const
+      : resources.some((resource) => resource.outcome === "terminated")
+        ? "terminated" as const
+        : "completed" as const;
+    const finalizedAt = Math.max(
+      manifest.notificationRequiredAt ?? manifest.updatedAt,
+      ...manifest.published.map((entry) => entry.committedAt ?? entry.stagedAt),
+    );
+    const summary = resources.map((resource) => resource.summary).filter(Boolean).join("\n")
+      || `${resources.length} teammate result${resources.length === 1 ? "" : "s"} completed.`;
+    await this.finalizeDelivery({
+      dispatchId: manifest.dispatchId,
+      reservationId: manifest.reservationId,
+      kind: manifest.notificationKind,
+      outcome,
+      summary,
+      resources,
+      finalizedAt,
+    });
+    const path = await this.#locate(manifest.dispatchId);
+    return path ? readCompletionManifestFile(path) : undefined;
   }
 
   async #mutateDispatch(
     dispatchId: string,
-    update: (current: DispatchManifest, now: number) => DispatchManifest | Promise<DispatchManifest>,
+    update: (current: CompletionDispatchManifest, now: number) => CompletionDispatchManifest | Promise<CompletionDispatchManifest>,
   ): Promise<void> {
     const path = await this.#locate(dispatchId);
     if (!path) throw new Error(`Completion dispatch manifest not found: ${dispatchId}.`);
@@ -349,22 +480,24 @@ export class FlowCompletionDurabilityProvider implements CompletionDurabilityPro
   async #mutate(
     path: string,
     dispatchId: string,
-    update: (current: DispatchManifest | undefined, now: number) => DispatchManifest | Promise<DispatchManifest>,
+    update: (current: CompletionDispatchManifest | undefined, now: number) => CompletionDispatchManifest | Promise<CompletionDispatchManifest>,
   ): Promise<void> {
     await ensureRealDirectory(dirname(path));
     const release = await lockSettingsResource(join(dirname(path), `.manifest-${hash(dispatchId)}`));
     try {
-      const current = await readManifest(path);
+      const current = await readCompletionManifestFile(path);
       const next = await update(current, Date.now());
-      if (!validManifest(next)) throw new Error(`Invalid completion manifest transition: ${dispatchId}.`);
-      await writeAtomic(path, next);
+      if (!parseCompletionManifest(next)) throw new Error(`Invalid completion manifest transition: ${dispatchId}.`);
+      await writeRecoverableAtomic(path, next);
       this.#manifestPaths.set(dispatchId, path);
-    } finally { await release(); }
+    } finally {
+      await release();
+    }
   }
 
   async #locate(dispatchId: string): Promise<string | undefined> {
     const cached = this.#manifestPaths.get(dispatchId);
-    if (cached && await readManifest(cached)) return cached;
+    if (cached && await readCompletionManifestFile(cached)) return cached;
     const fileName = `${hash(dispatchId)}.json`;
     for (const { path, manifest } of await this.#scanManifests()) {
       if (manifest.dispatchId === dispatchId || path.endsWith(fileName)) return path;
@@ -372,30 +505,44 @@ export class FlowCompletionDurabilityProvider implements CompletionDurabilityPro
     return undefined;
   }
 
-  async #scanManifests(): Promise<Array<{ path: string; manifest: DispatchManifest }>> {
+  async #scanManifests(): Promise<Array<{ path: string; manifest: CompletionDispatchManifest }>> {
     let buckets: string[];
-    try { buckets = (await readdir(this.#outputRoot, { withFileTypes: true })).filter((entry) => entry.isDirectory() && !entry.isSymbolicLink()).map((entry) => join(this.#outputRoot, entry.name)); }
-    catch (error) { if (fileCode(error) === "ENOENT") return []; throw error; }
-    const found: Array<{ path: string; manifest: DispatchManifest }> = [];
+    try {
+      buckets = (await readdir(this.#outputRoot, { withFileTypes: true }))
+        .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
+        .map((entry) => join(this.#outputRoot, entry.name));
+    } catch (error) {
+      if (fileCode(error) === "ENOENT") return [];
+      throw error;
+    }
+    const found: Array<{ path: string; manifest: CompletionDispatchManifest }> = [];
     for (const bucket of buckets) {
-      const dir = join(bucket, MANIFEST_DIR);
+      const dir = join(bucket, COMPLETION_MANIFEST_DIR);
       let names: string[];
-      try { names = await readdir(dir); } catch (error) { if (fileCode(error) === "ENOENT") continue; throw error; }
-      for (const name of names) {
-        if (!name.endsWith(".json")) continue;
+      try {
+        names = await readdir(dir);
+      } catch (error) {
+        if (fileCode(error) === "ENOENT") continue;
+        throw error;
+      }
+      for (const name of completionManifestCanonicalNames(names)) {
         const path = join(dir, name);
-        const manifest = await readManifest(path);
+        const manifest = await readCompletionManifestFile(path);
         if (manifest) found.push({ path, manifest });
       }
     }
     return found;
   }
 
-  #assertReservation(manifest: DispatchManifest, reservationId: string): void {
-    if (manifest.reservationId !== reservationId) throw new Error(`Completion reservation mismatch for ${manifest.dispatchId}.`);
+  #assertReservation(manifest: CompletionDispatchManifest, reservationId: string): void {
+    if (manifest.reservationId !== reservationId) {
+      throw new Error(`Completion reservation mismatch for ${manifest.dispatchId}.`);
+    }
   }
 
-  #withoutRevision(manifest: DispatchManifest): Omit<DispatchManifest, "contentRevision"> {
+  #withoutRevision(
+    manifest: CompletionDispatchManifest,
+  ): Omit<CompletionDispatchManifest, "contentRevision"> {
     const { contentRevision: _revision, ...withoutRevision } = manifest;
     return withoutRevision;
   }

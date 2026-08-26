@@ -405,12 +405,59 @@ test("published capture stages before persistence and commits only after immutab
   } finally { dispose(); }
 });
 
-test("stage failure prevents immutable result persistence and acknowledgement", async () => {
-  const publicationId = "capture-stage-failure-publication";
+test("provider reload cannot redirect staged or committed publication ownership", async () => {
+  const dispatchId = `dispatch-pinned-${Date.now()}`;
+  const publicationId = `publication-pinned-${Date.now()}`;
+  const calls: string[] = [];
   const registry = getCompletionDurabilityRegistry();
-  const dispose = registry.register(durabilityProvider({
-    async stagePublication() { throw new Error("injected stage failure"); },
-  }));
+  const first = durabilityProvider({
+    async stagePublication() { calls.push("first-stage"); },
+    async commitPublication() { calls.push("first-commit"); },
+  });
+  const second = durabilityProvider({
+    async stagePublication() { calls.push("second-stage"); },
+    async commitPublication() { calls.push("second-commit"); },
+  });
+  const disposeFirst = registry.register(first);
+  const releasePin = registry.pinDispatch(dispatchId, first);
+  const disposeSecond = registry.register(second);
+  let persistence: Promise<unknown> | undefined;
+  try {
+    capturePublishedAgentResult({
+      result: {
+        correlationId: "pinned-correlation",
+        publicationId,
+        originCwd: root,
+        agent: "general",
+        output: "pinned result",
+        completionDispatchId: dispatchId,
+        completionReservationId: "pinned-reservation",
+      },
+      waitUntil(promise: Promise<unknown>) { persistence = promise; },
+    });
+    assert.ok(persistence);
+    await persistence;
+    assert.deepEqual(calls, ["first-stage", "first-commit"]);
+  } finally {
+    releasePin();
+    disposeSecond();
+    disposeFirst();
+  }
+});
+
+test("stage failure prevents immutable result persistence and acknowledgement", async () => {
+  const publicationId = `capture-stage-failure-publication-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const registry = getCompletionDurabilityRegistry();
+  let stageCalled = 0;
+  const failingProvider = durabilityProvider({
+    async stagePublication() {
+      stageCalled += 1;
+      throw new Error("injected stage failure");
+    },
+  });
+  const dispose = registry.register(failingProvider);
+  const releasePin = registry.pinDispatch("dispatch-stage-failure", failingProvider);
+  assert.equal(registry.providerForDispatch("dispatch-stage-failure"), failingProvider);
   let persistence: Promise<unknown> | undefined;
   let acknowledged = false;
   try {
@@ -429,7 +476,11 @@ test("stage failure prevents immutable result persistence and acknowledgement", 
     });
     assert.ok(persistence);
     await assert.rejects(persistence, /injected stage failure/);
+    assert.equal(stageCalled, 1);
     await assert.rejects(() => readAgentOutput(publicationId, root), /No persisted teammate output/);
     assert.equal(acknowledged, false);
-  } finally { dispose(); }
+  } finally {
+    releasePin();
+    dispose();
+  }
 });

@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import { mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import test, { after, before } from "node:test";
+
+const { withCompletionManifestRevision } = await import("../src/teammate/completion-manifest.ts");
 
 const {
   MAX_AGENT_FILES,
@@ -13,6 +18,7 @@ const {
   readAgentOutput,
   resolveAgentOutput,
   getAgentOutputPath,
+  readExactAgentPublication,
 } = await import("../src/teammate/agent-output-store.ts");
 
 /** 注入的全局输出根（PI_AGENT_OUTPUT_ROOT）下的分桶目录。 */
@@ -239,6 +245,149 @@ test("persistAgentOutput replaces a repeated correlation id with the latest turn
   await persistAgentOutput("repeat-agent", "repeat", "general", { turn: 1 }, root);
   await persistAgentOutput("repeat-agent", "repeat", "general", { turn: 2 }, root);
   assert.deepEqual((await readAgentOutput("repeat-agent", root)).output, { turn: 2 });
+});
+
+test("immutable publication fsyncs file before close and directory before acknowledgement", async () => {
+  const fsp = createRequire(import.meta.url)("node:fs/promises") as typeof import("node:fs/promises");
+  const originalOpen = fsp.open;
+  const publicationId = `fsync-publication-${Date.now()}`;
+  const events: string[] = [];
+  let publicationDir: string | undefined;
+  const replacementOpen: typeof originalOpen = (async (...args: Parameters<typeof originalOpen>) => {
+    const handle = await originalOpen(...args);
+    const pathish = String(args[0] ?? "");
+    const isPublication = pathish.endsWith(`${publicationId}.json`);
+    if (isPublication) publicationDir = dirname(pathish);
+    const isDirectorySync = !isPublication && args[1] === "r" && pathish === publicationDir;
+    if (!isPublication && !isDirectorySync) return handle;
+    events.push(isPublication ? "file-open" : "dir-open");
+    const originalWriteFile = handle.writeFile.bind(handle);
+    const originalSync = handle.sync.bind(handle);
+    const originalClose = handle.close.bind(handle);
+    Reflect.set(handle, "writeFile", async (...writeArgs: Parameters<typeof handle.writeFile>) => {
+      events.push("file-write");
+      return originalWriteFile(...writeArgs);
+    });
+    Reflect.set(handle, "sync", async () => {
+      events.push(isPublication ? "file-sync" : "dir-sync");
+      return originalSync();
+    });
+    Reflect.set(handle, "close", async () => {
+      events.push(isPublication ? "file-close" : "dir-close");
+      return originalClose();
+    });
+    return handle;
+  }) as typeof originalOpen;
+  let firstEvents: string[] = [];
+  let retryEvents: string[] = [];
+  try {
+    Reflect.set(fsp, "open", replacementOpen);
+    syncBuiltinESMExports();
+    assert.equal(
+      await persistAgentOutputChecked("fsync-correlation", "fsync", "general", { ordered: true }, root, publicationId),
+      "stored",
+    );
+    firstEvents = [...events];
+    events.length = 0;
+    assert.equal(
+      await persistAgentOutputChecked("fsync-correlation", "fsync", "general", { ordered: true }, root, publicationId),
+      "stored",
+    );
+    retryEvents = [...events];
+  } finally {
+    Reflect.set(fsp, "open", originalOpen);
+    syncBuiltinESMExports();
+  }
+  const firstPositions = Object.fromEntries(firstEvents.map((event, index) => [event, index]));
+  assert.ok(firstPositions["file-open"] < firstPositions["file-write"]);
+  assert.ok(firstPositions["file-write"] < firstPositions["file-sync"]);
+  assert.ok(firstPositions["file-sync"] < firstPositions["file-close"]);
+  assert.ok(firstPositions["file-close"] < firstPositions["dir-sync"]);
+  assert.ok(firstPositions["dir-sync"] < firstPositions["dir-close"]);
+  const retryPositions = Object.fromEntries(retryEvents.map((event, index) => [event, index]));
+  assert.equal(retryEvents.includes("file-write"), false, "identical retry does not rewrite immutable bytes");
+  assert.ok(retryPositions["file-open"] < retryPositions["file-sync"]);
+  assert.ok(retryPositions["file-sync"] < retryPositions["file-close"]);
+  assert.ok(retryPositions["file-close"] < retryPositions["dir-sync"]);
+  assert.ok(retryPositions["dir-sync"] < retryPositions["dir-close"]);
+});
+
+test("immutable publication retry repairs a partial pre-sync canonical file", async () => {
+  const workspace = join(root, "partial-publication-workspace");
+  const publicationId = `partial-publication-${Date.now()}`;
+  await persistAgentOutputChecked("partial-correlation", "partial", "general", { complete: true }, workspace, publicationId);
+  const entries = await readdir(outRoot(), { recursive: true, withFileTypes: true });
+  const publication = entries.find((entry) => entry.isFile() && entry.name === `${publicationId}.json`);
+  assert.ok(publication);
+  const path = join(publication.parentPath, publication.name);
+  await writeFile(path, '{"correlationId":"partial-correlation"');
+
+  assert.equal(
+    await persistAgentOutputChecked("partial-correlation", "partial", "general", { complete: true }, workspace, publicationId),
+    "stored",
+  );
+  assert.deepEqual((await readExactAgentPublication(publicationId, workspace))?.output, { complete: true });
+});
+
+test("fresh-process publication recovery covers every persistence boundary", () => {
+  const moduleUrl = pathToFileURL(resolve("src/teammate/agent-output-store.ts")).href;
+  for (const boundary of ["after-write", "after-file-sync", "after-close", "after-directory-sync"] as const) {
+    const workspace = join(root, `publication-crash-${boundary}`);
+    const publicationId = `publication-crash-${boundary}-${Date.now()}`;
+    const persistScript = [
+      `const store = await import(${JSON.stringify(moduleUrl)});`,
+      `await store.persistAgentOutputChecked("crash-correlation", "crash", "general", { boundary: ${JSON.stringify(boundary)} }, ${JSON.stringify(workspace)}, ${JSON.stringify(publicationId)});`,
+    ].join("\n");
+    const crashed = spawnSync(process.execPath, ["--experimental-transform-types", "--input-type=module", "-e", persistScript], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        PI_AGENT_OUTPUT_ROOT: outRoot(),
+        PI_TEST_COMPLETION_FAIL_AT: `publication:${boundary}`,
+        PI_TEST_COMPLETION_CRASH: "1",
+      },
+      encoding: "utf8",
+    });
+    assert.equal(crashed.status, 86, `${boundary}: ${crashed.stderr}`);
+
+    const recoverScript = [
+      `const store = await import(${JSON.stringify(moduleUrl)});`,
+      `await store.persistAgentOutputChecked("crash-correlation", "crash", "general", { boundary: ${JSON.stringify(boundary)} }, ${JSON.stringify(workspace)}, ${JSON.stringify(publicationId)});`,
+      `const record = await store.readExactAgentPublication(${JSON.stringify(publicationId)}, ${JSON.stringify(workspace)});`,
+      `if (record?.publicationId !== ${JSON.stringify(publicationId)}) process.exit(2);`,
+    ].join("\n");
+    const recovered = spawnSync(process.execPath, ["--experimental-transform-types", "--input-type=module", "-e", recoverScript], {
+      cwd: process.cwd(),
+      env: { ...process.env, PI_AGENT_OUTPUT_ROOT: outRoot() },
+      encoding: "utf8",
+    });
+    assert.equal(recovered.status, 0, `${boundary}: ${recovered.stderr}`);
+  }
+});
+
+test("immutable publication survives a fresh process exact read", async () => {
+  const workspace = join(root, "fresh-process-workspace");
+  const publicationId = `fresh-publication-${Date.now()}`;
+  assert.equal(
+    await persistAgentOutputChecked("fresh-correlation", "fresh", "general", { durable: true }, workspace, publicationId),
+    "stored",
+  );
+  assert.equal((await readExactAgentPublication(publicationId, workspace))?.publicationId, publicationId);
+
+  const moduleUrl = pathToFileURL(resolve("src/teammate/agent-output-store.ts")).href;
+  const script = [
+    `const store = await import(${JSON.stringify(moduleUrl)});`,
+    `const record = await store.readExactAgentPublication(${JSON.stringify(publicationId)}, ${JSON.stringify(workspace)});`,
+    `if (!record || record.publicationId !== ${JSON.stringify(publicationId)}) process.exit(2);`,
+    `process.stdout.write(JSON.stringify(record.output));`,
+  ].join("\n");
+  const child = spawnSync(process.execPath, ["--experimental-transform-types", "--input-type=module", "-e", script], {
+    cwd: process.cwd(),
+    env: { ...process.env, PI_AGENT_OUTPUT_ROOT: outRoot() },
+    encoding: "utf8",
+  });
+  assert.equal(child.status, 0, child.stderr);
+  assert.deepEqual(JSON.parse(child.stdout), { durable: true });
 });
 
 test("publication records remain immutable while correlation id resolves the latest turn", async () => {
@@ -644,15 +793,46 @@ test("current workspace bucket takes priority over descendant buckets", async ()
   assert.deepEqual(fromChild.output, { from: "child" });
 });
 
-/** Write an open completion manifest pinning the given publication ids. */
+/** Write a strictly valid open completion manifest pinning publication ids. */
 async function writeOpenManifest(bucket: string, publicationIds: string[]): Promise<void> {
   const dir = join(bucket, ".completion-intents");
   await mkdir(dir, { recursive: true });
-  await writeFile(join(dir, "manifest-pin.json"), JSON.stringify({
+  const now = Date.now();
+  await writeFile(join(dir, "manifest-pin.json"), JSON.stringify(withCompletionManifestRevision({
+    version: 1,
+    dispatchId: `pin-dispatch-${publicationIds[0]}`,
+    reservationId: `pin-reservation-${publicationIds[0]}`,
+    deliveryGroupId: "pin-group",
+    mode: "single",
+    target: { workspaceId: "pin-workspace", sessionId: "pin-session" },
+    replyTarget: "main",
+    originCwd: root,
+    expectedTasks: [],
+    notificationRequired: false,
+    published: publicationIds.map((publicationId) => ({
+      correlationId: `pin-${publicationId}`,
+      publicationId,
+      uri: `agent://${publicationId}` as const,
+      originCwd: root,
+      summary: "pinned",
+      outcome: "completed" as const,
+      state: "committed" as const,
+      stagedAt: now,
+      committedAt: now,
+    })),
     state: "open",
-    published: publicationIds.map((publicationId) => ({ publicationId })),
-    intent: { resources: publicationIds.map((publicationId) => ({ publicationId })) },
-  }));
+    createdAt: now,
+    updatedAt: now,
+    expiresAt: now + 60_000,
+  })));
+}
+
+async function writeInvalidOpenManifest(bucket: string, publicationId: string): Promise<string> {
+  const dir = join(bucket, ".completion-intents");
+  await mkdir(dir, { recursive: true });
+  const path = join(dir, "manifest-invalid.json");
+  await writeFile(path, JSON.stringify({ state: "open", published: [{ publicationId }] }));
+  return path;
 }
 
 test("pinned publications are never evicted even at capacity", async () => {
@@ -668,6 +848,22 @@ test("pinned publications are never evicted even at capacity", async () => {
   await persistAgentOutput("spillover-1", "spill", "general", { n: 1 }, project);
   await persistAgentOutput("spillover-2", "spill", "general", { n: 2 }, project);
   assert.equal((await readAgentOutput("pinned-publication-1", project)).correlationId, "pinned-corr");
+});
+
+test("invalid manifest is quarantined by pin scanning and cannot pin a publication", async () => {
+  const project = join(root, "invalid-pin-proj");
+  await mkdir(project, { recursive: true });
+  await persistAgentOutputChecked("invalid-pin-corr", "invalid-pin", "general", { old: true }, project, "invalid-pin-publication");
+  const bucket = await bucketContaining("invalid-pin-publication.json");
+  await writeInvalidOpenManifest(bucket, "invalid-pin-publication");
+  // A store-capacity scan invokes the same strict parser used by provider
+  // recovery/prune. The invalid record is compare-before-renamed out of trust.
+  for (let index = 0; index < MAX_AGENT_FILES; index += 1) {
+    await persistAgentOutput(`invalid-pin-filler-${index}`, "invalid-pin-filler", "general", { index }, project);
+  }
+  const manifestNames = await readdir(join(bucket, ".completion-intents"));
+  assert.equal(manifestNames.some((name) => name === "manifest-invalid.json"), false);
+  assert.equal(manifestNames.some((name) => name.includes(".quarantine")), true);
 });
 
 test("a manifest in another bucket pins publications across buckets", async () => {

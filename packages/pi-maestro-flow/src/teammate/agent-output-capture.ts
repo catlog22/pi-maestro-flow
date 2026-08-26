@@ -161,9 +161,14 @@ export function capturePublishedAgentResult(
   const publicationId = typeof result.publicationId === "string" ? result.publicationId : undefined;
   const resourceId = correlationId;
   const persistence = (async () => {
-    const durableProvider = getCompletionDurabilityRegistry().current();
+    const registry = getCompletionDurabilityRegistry();
     const raw = payload.result as StructuredResultLike;
     const dispatchId = typeof raw.completionDispatchId === "string" ? raw.completionDispatchId : undefined;
+    // A result belongs to the provider generation that accepted beginDispatch;
+    // registry reloads must never redirect stage/commit to the new current one.
+    const durableProvider = dispatchId
+      ? registry.providerForDispatch(dispatchId) ?? registry.current()
+      : undefined;
     const reservationId = typeof raw.completionReservationId === "string" ? raw.completionReservationId : undefined;
     const originCwd = typeof raw.originCwd === "string" && raw.originCwd.length > 0 ? raw.originCwd : undefined;
     const outcome: CompletionOutcome = raw.completionOutcome === "failed" || raw.completionOutcome === "terminated"
