@@ -604,13 +604,14 @@ test("report outbox mutations are monotonic across fresh processes", async () =>
   }
 });
 
-test("Flow V2 defaults on with broker authority and preserves explicit v1 rollback", () => {
+test("Flow V2 follows broker authority (default off) and preserves explicit opt-in/rollback", () => {
   assert.equal(parseFlowScheduleV2(undefined), 1);
   assert.equal(parseFlowScheduleV2("0"), 0);
   assert.equal(parseFlowScheduleV2("invalid"), 0);
-  assert.equal(flowScheduleV2FromEnv({}), 1);
+  assert.equal(flowScheduleV2FromEnv({}), 0);
   assert.equal(flowScheduleV2FromEnv({ PI_RUNTIME_BROKER: "off" }), 0);
   assert.equal(flowScheduleV2FromEnv({ PI_RUNTIME_BROKER: "invalid" }), 0);
+  assert.equal(flowScheduleV2FromEnv({ PI_RUNTIME_BROKER: "sqlite" }), 1);
   assert.equal(flowScheduleV2FromEnv({ PI_FLOW_SCHEDULE_V2: "0" }), 0);
   assert.equal(flowScheduleV2FromEnv({ PI_FLOW_SCHEDULE_V2: "1" }), 1);
   const runtime = new FlowScheduleBrokerRuntime({ projectRoot: process.cwd(), env: { PI_FLOW_SCHEDULE_V2: "1", PI_RUNTIME_BROKER: "off" } });

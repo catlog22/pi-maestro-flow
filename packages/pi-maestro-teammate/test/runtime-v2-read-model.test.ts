@@ -202,11 +202,12 @@ test("broker replay rejects source revision gaps and duplicate generations", () 
   assert.equal(duplicate.discarded, 1);
 });
 
-test("PI_RUNTIME_V2_READ defaults on with SQLite and preserves explicit v1 rollback", () => {
-  assert.equal(runtimeV2ReadEnabled({}), true);
-  assert.equal(runtimeV2ReadEnabled({ PI_RUNTIME_V2_READ: "0" }), false);
-  assert.equal(runtimeV2ReadEnabled({ PI_RUNTIME_V2_READ: "true" }), false);
-  assert.equal(runtimeV2ReadEnabled({ PI_RUNTIME_V2_READ: "1" }), true);
+test("PI_RUNTIME_V2_READ follows SQLite broker authority (default off) and preserves explicit opt-in/rollback", () => {
+  assert.equal(runtimeV2ReadEnabled({}), false);
+  assert.equal(runtimeV2ReadEnabled({ PI_RUNTIME_BROKER: "sqlite" }), true);
+  assert.equal(runtimeV2ReadEnabled({ PI_RUNTIME_BROKER: "sqlite", PI_RUNTIME_V2_READ: "0" }), false);
+  assert.equal(runtimeV2ReadEnabled({ PI_RUNTIME_BROKER: "sqlite", PI_RUNTIME_V2_READ: "true" }), false);
+  assert.equal(runtimeV2ReadEnabled({ PI_RUNTIME_BROKER: "sqlite", PI_RUNTIME_V2_READ: "1" }), true);
   assert.equal(runtimeV2ReadEnabled({ PI_RUNTIME_BROKER: "off" }), false);
   assert.equal(runtimeV2ReadEnabled({ PI_RUNTIME_BROKER: "file" }), false);
   assert.equal(runtimeV2ReadEnabled({ PI_RUNTIME_BROKER: "invalid" }), false);

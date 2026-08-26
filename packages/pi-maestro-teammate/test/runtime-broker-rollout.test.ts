@@ -25,11 +25,13 @@ function fakeTransport<TDriver extends RuntimeTransportDriver>(
   };
 }
 
-test("PI_RUNTIME_BROKER defaults to sqlite and invalid values fail closed to off", () => {
-  assert.equal(runtimeBrokerModeFromEnv({}), "sqlite");
-  assert.equal(parseRuntimeBrokerMode(undefined), "sqlite");
+test("PI_RUNTIME_BROKER defaults to off (sqlite opt-in) and invalid values fail closed to off", () => {
+  assert.equal(runtimeBrokerModeFromEnv({}), "off");
+  assert.equal(parseRuntimeBrokerMode(undefined), "off");
   assert.equal(parseRuntimeBrokerMode(""), "off");
   assert.equal(parseRuntimeBrokerMode("invalid"), "off");
+  assert.equal(parseRuntimeBrokerMode("sqlite"), "sqlite");
+  assert.equal(parseRuntimeBrokerMode("file"), "file");
 
   let constructed = 0;
   const sqlite = fakeTransport("sqlite");
@@ -37,8 +39,15 @@ test("PI_RUNTIME_BROKER defaults to sqlite and invalid values fail closed to off
     env: {},
     sqliteFactory: () => { constructed += 1; return sqlite; },
   });
-  assert.equal(defaultSelection.mode, "sqlite");
-  assert.equal(defaultSelection.transport, sqlite);
+  assert.deepEqual(defaultSelection, { mode: "off", transport: undefined });
+  assert.equal(constructed, 0);
+
+  const optIn = createRuntimeTransport({
+    env: { PI_RUNTIME_BROKER: "sqlite" },
+    sqliteFactory: () => { constructed += 1; return sqlite; },
+  });
+  assert.equal(optIn.mode, "sqlite");
+  assert.equal(optIn.transport, sqlite);
   assert.equal(constructed, 1);
 
   const selection = createRuntimeTransport({

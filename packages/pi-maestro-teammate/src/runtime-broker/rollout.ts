@@ -3,9 +3,9 @@ import type { RuntimeTransport, RuntimeTransportFactory } from "./transport.ts";
 export const RUNTIME_BROKER_ENV_VAR = "PI_RUNTIME_BROKER" as const;
 export type RuntimeBrokerMode = "off" | "file" | "sqlite";
 
-/** Default to the canonical SQLite broker; explicit or invalid overrides fail closed to off. */
+/** Default off: the SQLite broker causes intermittent startup hangs (see debug-notes). Opt in explicitly via PI_RUNTIME_BROKER=sqlite|file. */
 export function parseRuntimeBrokerMode(value: string | undefined): RuntimeBrokerMode {
-  if (value === undefined) return "sqlite";
+  if (value === undefined) return "off";
   const normalized = value.trim().toLowerCase();
   if (normalized === "file" || normalized === "sqlite") return normalized;
   return "off";
