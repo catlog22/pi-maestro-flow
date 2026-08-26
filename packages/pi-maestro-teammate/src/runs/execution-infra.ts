@@ -29,6 +29,7 @@ import type {
   AgentTurnTriggerContextV1,
   MessageProvenanceV1,
 } from "../shared/types.ts";
+import type { RuntimeActorHostClient } from "../runtime-broker/actor-host.ts";
 import { wrapLeasedMessage, type LeaseToken } from "./session-handoff.ts";
 import {
   applyModelRouting,
@@ -252,6 +253,8 @@ export interface RunTeammateOptions {
    */
   maxDispatchDepth?: number;
   signal?: AbortSignal;
+  /** Optional shared Runtime Broker actor host; omitted creates a run-scoped host from PI_RUNTIME_BROKER. */
+  runtimeActorHost?: RuntimeActorHostClient;
   onProgress?: (data: AgentProgress) => void;
   onRetry?: (retry: {
     correlationId: string;
@@ -2070,17 +2073,19 @@ export function managedWindowSpawnEnv(environment: NodeJS.ProcessEnv = process.e
 }
 
 export interface ManagedWindowArgsOptions {
-  objective: string;
   sessionName: string;
   presentation: "headless" | "interactive";
   forkSessionFile?: string;
 }
 
 export function buildManagedWindowPiArgs(options: ManagedWindowArgsOptions): string[] {
-  const args = ["--no-extensions", ...buildInheritedExtensionArgs(teammateExtensionPath())];
+  const args = [
+    ...(options.presentation === "headless" ? ["--mode", "rpc"] : []),
+    "--no-extensions",
+    ...buildInheritedExtensionArgs(teammateExtensionPath()),
+  ];
   if (options.forkSessionFile) args.push("--fork", options.forkSessionFile);
-  if (options.presentation === "interactive") args.push("--name", options.sessionName, options.objective);
-  else args.push("-p", options.objective, "--name", options.sessionName);
+  args.push("--name", options.sessionName);
   return args;
 }
 

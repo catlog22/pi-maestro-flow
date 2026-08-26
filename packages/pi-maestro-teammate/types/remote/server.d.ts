@@ -2,6 +2,7 @@ import * as net from "node:net";
 import type { RemoteDriver } from "./driver.ts";
 import { RemoteRunJournal } from "./journal.ts";
 import { type ResolvedRemoteTarget } from "./types.ts";
+import { type RuntimeV2ShadowSink } from "../runtime-v2/shadow.ts";
 export declare const REMOTE_SOCKET_FILE = "bridge.sock";
 export declare const REMOTE_DAEMON_LOCK_FILE = "daemon.lock";
 export declare const REMOTE_HEARTBEAT_MS = 15000;
@@ -14,6 +15,7 @@ export interface RemoteBridgeServerOptions {
     concurrency?: number;
     heartbeatMs?: number;
     clientEgressBytes?: number;
+    runtimeV2ShadowSink?: RuntimeV2ShadowSink;
     /**
      * Where a quarantined run is reported, for a journal this server constructs itself.
      * Defaults to one line on the daemon's stderr; ignored when `journal` is supplied, since that

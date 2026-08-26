@@ -195,6 +195,13 @@ test("workspace-window schema scopes lifecycle fields to their actions", () => {
   assert.equal(Check(WorkspaceWindowParams, { action: "close", presentation: "interactive", name: "backend" }), false);
   assert.equal(Check(WorkspaceWindowParams, { action: "create", name: "bad name", objective: "Build API" }), false);
   assert.equal(Check(WorkspaceWindowParams, { action: "create", name: "backend", objective: "Build API", presentation: "other" }), false);
+  assert.equal(Check(WorkspaceWindowParams, {
+    action: "create",
+    name: "backend",
+    objective: "Build API",
+    handle: { correlationId: "not-an-input" },
+  }), false);
+  assert.match((WorkspaceWindowParams.properties.action as { description?: string }).description ?? "", /agent:\/\/ resource/);
 });
 
 test("remote-worker schema scopes configured targets, creation, and owner-fenced close", () => {

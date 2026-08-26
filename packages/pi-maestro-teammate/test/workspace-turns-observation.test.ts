@@ -282,9 +282,11 @@ test("workspaceTurnsSnapshot falls back to run list when peer published no mainP
   assert.ok(snapshot.detail?.some((line) => /Run 2 · @cid-2 completed/.test(line)));
 });
 
-test("workspaceTurnsSnapshot run-list fallback expands a run with output tail and result on turn=<n>", () => {
+test("workspaceTurnsSnapshot run-list fallback never exposes a legacy settled result body", () => {
+  const legacyOwner = owner({ agents: [], settled: [] });
+  legacyOwner.settled = [settled("cid-2", "completed", "final\nresult")];
   const snapshot = workspaceTurnsSnapshot(
-    owner({ agents: [], settled: [settled("cid-2", "completed", "final\nresult")] }),
+    legacyOwner,
     TARGET,
     "full",
     20,
@@ -293,8 +295,8 @@ test("workspaceTurnsSnapshot run-list fallback expands a run with output tail an
   assert.equal(snapshot.found, true);
   assert.match(snapshot.summary ?? "", /Run 1 · @cid-2 completed/);
   assert.ok(snapshot.detail?.some((line) => line.includes("settled summary")));
-  assert.ok(snapshot.detail?.some((line) => line === "-- result --"));
-  assert.ok(snapshot.detail?.some((line) => line === "final"));
+  assert.equal(snapshot.detail?.some((line) => line === "-- result --"), false);
+  assert.equal(snapshot.detail?.some((line) => line === "final"), false);
 });
 
 test("workspaceTurnsSnapshot run-list fallback reports run not found", () => {

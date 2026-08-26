@@ -2,8 +2,10 @@ import { resolve as resolvePath } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isManagedWorkerWindow } from "pi-maestro-teammate/v1/child-extensions";
 import { getSessionHostRegistry, type SessionHostRegistry } from "pi-maestro-teammate/v1/sessions";
+import { registerWorkspaceProjectionProvider } from "pi-maestro-teammate/v1/workspace-projections";
 import { MONITOR_TOOL_EXPOSURE_EVENT, type MonitorToolExposureEventV1 } from "pi-maestro-teammate/v1/events";
-import { FlowScheduleRuntime, type FlowScheduleRuntimeOptions } from "./runtime.ts";
+import { FlowScheduleBrokerRuntime } from "./broker-runtime.ts";
+import { FlowScheduleRuntime, replayFlowScheduleReportOutbox, type FlowScheduleRuntimeOptions } from "./runtime.ts";
 import { FlowScheduleStore } from "./store.ts";
 import {
   registerFlowScheduleTodoProjection,
@@ -21,6 +23,8 @@ export interface RegisterFlowScheduleOptions {
   createStore?: (cwd: string) => FlowScheduleStore;
   createRuntime?: (store: FlowScheduleStore, cwd: string) => FlowScheduleRuntime;
   runtimeOptions?: Omit<FlowScheduleRuntimeOptions, "store" | "getRegistry">;
+  /** Whether this managed execution path can mutate Todo state. ACP callers set false. */
+  todoMutationSupported?: boolean;
   onError?: (error: unknown) => void;
 }
 
@@ -33,6 +37,7 @@ export interface FlowScheduleRegistration {
 
 interface ControllerBinding extends FlowScheduleController {
   cwd: string;
+  brokerRuntime?: FlowScheduleBrokerRuntime;
 }
 
 export function registerFlowSchedule(
@@ -47,6 +52,11 @@ export function registerFlowSchedule(
   let monitorExposureDisposer: (() => void) | undefined;
   let binding: ControllerBinding | undefined;
   let todoProjection: FlowScheduleTodoProjection | undefined;
+  let workerBrokerRuntime: FlowScheduleBrokerRuntime | undefined;
+  let workerOutboxTimer: ReturnType<typeof setInterval> | undefined;
+  let workerRegistryUnsubscribe: (() => void) | undefined;
+  let workerOutboxTail: Promise<void> = Promise.resolve();
+  const capabilityDisposers: Array<() => void> = [];
   let disposed = false;
 
   const reportError = (error: unknown): void => {
@@ -57,6 +67,32 @@ export function registerFlowSchedule(
   const disposeBinding = (): void => {
     binding?.runtime.dispose();
     binding = undefined;
+  };
+
+  const disposeWorkerBroker = (): void => {
+    if (workerOutboxTimer) clearInterval(workerOutboxTimer);
+    workerOutboxTimer = undefined;
+    workerRegistryUnsubscribe?.();
+    workerRegistryUnsubscribe = undefined;
+    const runtime = workerBrokerRuntime;
+    workerBrokerRuntime = undefined;
+    if (runtime) void workerOutboxTail.finally(() => runtime.stop()).catch(reportError);
+  };
+
+  const startWorkerOutboxPump = (): void => {
+    const pump = (): void => {
+      const runtime = workerBrokerRuntime;
+      if (!runtime) return;
+      workerOutboxTail = workerOutboxTail
+        .catch(() => undefined)
+        .then(() => replayFlowScheduleReportOutbox(runtime, getRegistry))
+        .then(() => undefined)
+        .catch(reportError);
+    };
+    workerRegistryUnsubscribe = getRegistry()?.subscribe(pump, { emitCurrent: false });
+    workerOutboxTimer = setInterval(pump, 2_000);
+    workerOutboxTimer.unref?.();
+    pump();
   };
 
   const disposeTodoProjection = (): void => {
@@ -79,12 +115,19 @@ export function registerFlowSchedule(
     if (binding?.cwd === root) return binding;
     disposeBinding();
     const store = options.createStore?.(root) ?? new FlowScheduleStore(root);
+    const brokerRuntime = options.runtimeOptions?.brokerRuntime ?? new FlowScheduleBrokerRuntime({ projectRoot: root });
     const runtime = options.createRuntime?.(store, root) ?? new FlowScheduleRuntime({
       ...options.runtimeOptions,
       store,
       getRegistry,
+      ...(brokerRuntime.enabled ? { brokerRuntime } : {}),
     });
-    binding = { cwd: root, store, runtime };
+    binding = {
+      cwd: root,
+      store,
+      runtime,
+      ...(brokerRuntime.enabled && !options.createRuntime ? { brokerRuntime } : {}),
+    };
     void runtime.start().catch(reportError);
     return binding;
   };
@@ -115,12 +158,30 @@ export function registerFlowSchedule(
   };
 
   if (managedWorker) {
-    pi.registerTool(createWorkerFlowScheduleTool({ getRegistry }));
+    capabilityDisposers.push(registerWorkspaceProjectionProvider({
+      kind: "flow-schedule-report-capability",
+      snapshot: () => [],
+    }).dispose);
+    if (options.todoMutationSupported === true) {
+      capabilityDisposers.push(registerWorkspaceProjectionProvider({
+        kind: "flow-schedule-todo-mutation-capability",
+        snapshot: () => [],
+      }).dispose);
+    }
+    pi.registerTool(createWorkerFlowScheduleTool({
+      getRegistry,
+      getBrokerRuntime: () => workerBrokerRuntime,
+    }));
     pi.on("session_start", async (_event, ctx: ExtensionContext) => {
       await startTodoProjection(ctx.cwd).catch(reportError);
+      disposeWorkerBroker();
+      const broker = new FlowScheduleBrokerRuntime({ projectRoot: resolvePath(ctx.cwd) });
+      workerBrokerRuntime = broker.enabled ? broker : undefined;
+      if (workerBrokerRuntime) startWorkerOutboxPump();
     });
     pi.on("session_shutdown", () => {
       disposeTodoProjection();
+      disposeWorkerBroker();
     });
   } else {
     const events = (pi as ExtensionAPI & {
@@ -139,12 +200,13 @@ export function registerFlowSchedule(
     });
     exposeCoordinator(getRegistry()?.viewMode === "windows");
     pi.on("session_start", async (_event, ctx: ExtensionContext) => {
-      if (!monitorActive) return;
       const current = ensureBinding(ctx.cwd);
       await current.runtime.start().catch(reportError);
     });
-    pi.on("session_shutdown", () => {
-      disposeBinding();
+    pi.on("session_shutdown", async () => {
+      const current = binding;
+      binding = undefined;
+      await current?.runtime.shutdown().catch(reportError);
     });
   }
 
@@ -161,6 +223,8 @@ export function registerFlowSchedule(
       }
       disposed = true;
       disposeTodoProjection();
+      disposeWorkerBroker();
+      for (const dispose of capabilityDisposers.splice(0)) dispose();
       disposeBinding();
     },
   };

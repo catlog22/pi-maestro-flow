@@ -41,15 +41,15 @@ test("managed windows explicitly load the primary and inherited extensions", () 
   const dispose = registerTeammateChildExtension(inheritedPath, { tools: ["ask-user-question"] });
   try {
     for (const presentation of ["headless", "interactive"] as const) {
-      const args = buildManagedWindowPiArgs({ objective: "ship it", sessionName: `mw-${presentation}`, presentation });
-      assert.equal(args[0], "--no-extensions");
+      const args = buildManagedWindowPiArgs({ sessionName: `mw-${presentation}`, presentation });
+      assert.equal(args.includes("--no-extensions"), true);
       const paths = extensionPathsOf(args);
       assert.ok(paths[0].endsWith("packages/pi-maestro-teammate/src/extension/index.ts"));
       assert.equal(paths.filter((path) => path === inheritedPath).length, 1);
     }
 
     const managedPaths = extensionPathsOf(
-      buildManagedWindowPiArgs({ objective: "o", sessionName: "mw-x", presentation: "headless" }),
+      buildManagedWindowPiArgs({ sessionName: "mw-x", presentation: "headless" }),
     );
     const rpcChildPaths = extensionPathsOf(
       buildPiArgs(baseAgentConfig, { agent: "general" }, "prompt.md"),
@@ -66,19 +66,22 @@ test("managed windows explicitly load the primary and inherited extensions", () 
 
 test("managed-window argv preserves presentation and fork semantics", () => {
   const headless = buildManagedWindowPiArgs({
-    objective: "ship it",
     sessionName: "mw-headless",
     presentation: "headless",
     forkSessionFile: "/tmp/prior-session.jsonl",
   });
-  assert.deepEqual(headless.slice(-6), ["--fork", "/tmp/prior-session.jsonl", "-p", "ship it", "--name", "mw-headless"]);
+  assert.deepEqual(headless.slice(0, 2), ["--mode", "rpc"]);
+  assert.deepEqual(headless.slice(-4), ["--fork", "/tmp/prior-session.jsonl", "--name", "mw-headless"]);
+  assert.equal(headless.includes("ship it"), false);
+  assert.equal(headless.includes("-p"), false);
 
   const interactive = buildManagedWindowPiArgs({
-    objective: "ship it",
     sessionName: "mw-interactive",
     presentation: "interactive",
   });
-  assert.deepEqual(interactive.slice(-3), ["--name", "mw-interactive", "ship it"]);
+  assert.deepEqual(interactive.slice(-2), ["--name", "mw-interactive"]);
+  assert.equal(interactive.includes("--mode"), false);
+  assert.equal(interactive.includes("ship it"), false);
 });
 
 test("managed-window spawn environment preserves isolation and runtime values", async () => {
@@ -97,8 +100,11 @@ test("managed-window spawn environment preserves isolation and runtime values", 
 
   const sourceText = await readFile(new URL("../src/extension/index.ts", import.meta.url), "utf8");
   assert.match(sourceText, /const env = managedWindowSpawnEnv\(\);/);
+  assert.doesNotMatch(sourceText, /reconcileMonitorLedgerAtStart/);
   assert.match(sourceText, /getInteractiveTerminalLaunchSpec\(piCommand, cwd, \{ title: `Pi worker .*?\$\{name\}`, env \}\)/);
-  assert.match(sourceText, /const child = crossSpawn\(launch\.command, launch\.args, \{\r?\n {6}cwd: launch\.cwd,\r?\n {6}env,/);
+  assert.match(sourceText, /stdio: presentation === "headless" \? \["pipe", "ignore", "ignore"\] : "ignore"/);
+  assert.match(sourceText, /managed-window-bootstrap-[\s\S]*?type: "get_state"/);
+  assert.match(sourceText, /!window\.terminationRequested && \(code !== 0 \|\| signal !== null\)/);
 });
 
 test("Terminal.app quotes allowed hostile values and excludes arbitrary environment entries", () => {

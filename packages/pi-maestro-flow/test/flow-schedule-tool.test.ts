@@ -3,6 +3,10 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import {
+  WORKSPACE_MAIN_SESSION_MARKER,
+  workspaceWindowCompletionHandle,
+} from "pi-maestro-teammate/v1/workspace-completion";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Check } from "typebox/value";
 import { Type } from "typebox";
@@ -22,7 +26,9 @@ import { MonitorToolExposureController } from "../../pi-maestro-teammate/src/ext
 import {
   createFlowScheduleDispatchEnvelope,
   encodeFlowScheduleDispatch,
+  flowScheduleDispatchMessageId,
   flowScheduleResultMessageId,
+  flowScheduleResultTransportMessageId,
 } from "../src/flow-schedule/protocol.ts";
 import { registerFlowSchedule } from "../src/flow-schedule/register.ts";
 import { FlowScheduleRuntime } from "../src/flow-schedule/runtime.ts";
@@ -36,13 +42,15 @@ import {
 const LOCAL_OWNER = "1".repeat(32);
 const PEER_OWNER = "a".repeat(32);
 const PEER_NONCE = "b".repeat(32);
+const WORKSPACE_ID = "f".repeat(64);
+const GENERIC_MESSAGE_ID = "9".repeat(32);
 const DISPATCH_ID = "123e4567-e89b-42d3-a456-426614174000";
 const TARGET = `owner:${PEER_OWNER}`;
 
 function endpoints() {
   return projectSessionEndpoints([
     {
-      workspaceId: "workspace",
+      workspaceId: WORKSPACE_ID,
       ownerId: LOCAL_OWNER,
       ownerNonce: "2".repeat(32),
       scope: "local" as const,
@@ -51,7 +59,7 @@ function endpoints() {
       agents: [],
     },
     {
-      workspaceId: "workspace",
+      workspaceId: WORKSPACE_ID,
       ownerId: PEER_OWNER,
       ownerNonce: PEER_NONCE,
       scope: "workspace-peer" as const,
@@ -63,7 +71,7 @@ function endpoints() {
 }
 
 function registryWithCapture(capture: (request: SessionMessageRequest) => void): SessionHostRegistry {
-  return new SessionHostRegistry({
+  const registry = new SessionHostRegistry({
     surface: "unified",
     endpoints: endpoints(),
     adapters: [createWorkspacePeerV1TransportAdapter(async (endpoint, request) => {
@@ -76,6 +84,27 @@ function registryWithCapture(capture: (request: SessionMessageRequest) => void):
       };
     })],
   });
+  const peer = registry.resolve(TARGET, { includeSettled: true, localFirst: false }).endpoint!;
+  registry.thread.record({
+    messageId: GENERIC_MESSAGE_ID,
+    workspaceId: peer.workspaceId,
+    peerOwnerId: peer.ownerId,
+    peerOwnerNonce: peer.ownerNonce,
+    direction: "incoming",
+    source: "monitor",
+    messageKind: "request",
+    traceId: GENERIC_MESSAGE_ID,
+    replyTo: TARGET,
+    targetSessionId: "local-session",
+    targetCorrelationId: WORKSPACE_MAIN_SESSION_MARKER,
+    terminalResultRequested: true,
+    mode: "follow_up",
+    body: "Managed objective",
+    status: "injected",
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  return registry;
 }
 
 async function controllerHarness() {
@@ -91,6 +120,7 @@ async function controllerHarness() {
 }
 
 const context = (cwd: string): ExtensionContext => ({ cwd } as ExtensionContext);
+
 
 test("coordinator tool schema is object-root and rejects action-inapplicable fields", () => {
   assert.equal(Check(FlowScheduleCoordinatorParams, { action: "list" }), true);
@@ -137,6 +167,27 @@ test("coordinator tool controls schedule state without owning target lifecycle",
 
     const status = await tool.execute("status", { action: "status", scheduleId: "release" }, undefined, undefined, context(harness.cwd));
     assert.equal(status.details?.lifecycle?.found, false);
+  } finally {
+    runtimeDispose(harness.runtime);
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("status shows lastAdmitReason and deferral attempts when a schedule has not dispatched", async () => {
+  const harness = await controllerHarness();
+  const tool = createCoordinatorFlowScheduleTool({ resolve: () => harness, getRegistry: () => undefined });
+  try {
+    await harness.store.createSchedule({
+      scheduleId: "release",
+      target: TARGET,
+      steps: [{ stepId: "verify", prompt: "Verify" }],
+    });
+    await harness.store.updateSchedule("release", (schedule) => ({
+      ...schedule, state: "active", admitAttempts: 2, lastAdmitReason: "target endpoint is not resolvable", lastAdmitAt: 1000 }));
+    const status = await tool.execute("status", { action: "status", scheduleId: "release" }, undefined, undefined, context(harness.cwd));
+    const text = (status.content[0] as { text: string }).text;
+    assert.match(text, /Admit: deferred attempts=2 at=1000/);
+    assert.match(text, /target endpoint is not resolvable/);
   } finally {
     runtimeDispose(harness.runtime);
     await rm(harness.root, { recursive: true, force: true });
@@ -215,10 +266,16 @@ test("status shows the latest dispatch binding and exact Todo outcome after comp
     }, undefined, undefined, context(harness.cwd));
     const text = status.content[0] && "text" in status.content[0] ? status.content[0].text : "";
     assert.match(text, new RegExp(`Dispatch: id=${DISPATCH_ID} state=completed`));
+    assert.match(text, /Transport: preparedAt=\d+ publishedAt=- acceptedAt=-/);
     assert.match(text, /Binding: state=completed gate=require-completed\+conflict-check todoId=todo-verify todoStatus=completed/);
-    assert.match(text, /Result: outcome=completed todoOutcome=todo-verify\/completed/);
+    assert.match(text, /Result: state=completed at=20 outcome=completed todoOutcome=todo-verify\/completed/);
     assert.equal(status.details?.dispatch?.completion?.result?.todoOutcome?.todoId, "todo-verify");
-    assert.match(tool.promptGuidelines?.join("\n") ?? "", /flow-schedule-todo-binding capability/);
+    assert.match(tool.description ?? "", /Todo evidence is additional only for a negotiated Todo gate/);
+    const coordinatorGuidelines = tool.promptGuidelines?.join("\n") ?? "";
+    assert.match(coordinatorGuidelines, /flow-schedule-todo-binding capability/);
+    assert.match(coordinatorGuidelines, /no Todo instruction or binding is created/);
+    assert.match(coordinatorGuidelines, /Todo gate waits up to 30 seconds/);
+    assert.match(coordinatorGuidelines, /retry can duplicate work/);
   } finally {
     runtimeDispose(harness.runtime);
     await rm(harness.root, { recursive: true, force: true });
@@ -240,7 +297,7 @@ test("managed-worker tool exposes report only and derives transport destination 
     instruction: "Verify",
   });
   registry.thread.record({
-    messageId: DISPATCH_ID,
+    messageId: flowScheduleDispatchMessageId(DISPATCH_ID),
     workspaceId: peer.workspaceId,
     peerOwnerId: peer.ownerId,
     peerOwnerNonce: peer.ownerNonce,
@@ -258,7 +315,10 @@ test("managed-worker tool exposes report only and derives transport destination 
   });
 
   const tool = createWorkerFlowScheduleTool({ getRegistry: () => registry });
-  assert.match(tool.promptGuidelines?.join("\n") ?? "", /exact todoId and todoStatus in report\.todoOutcome/);
+  const workerGuidelines = tool.promptGuidelines?.join("\n") ?? "";
+  assert.match(workerGuidelines, /exact todoId and todoStatus in report\.todoOutcome/);
+  assert.match(workerGuidelines, /always call report with outcome=completed or outcome=failed/);
+  assert.match(workerGuidelines, /do not omit a failure report/);
   assert.equal(Check(tool.parameters, { action: "report", dispatchId: DISPATCH_ID, outcome: "completed", summary: "Done" }), true);
   assert.equal(Check(tool.parameters, { action: "create", scheduleId: "release" }), false);
   const result = await tool.execute("report", {
@@ -269,7 +329,9 @@ test("managed-worker tool exposes report only and derives transport destination 
   });
   assert.equal(result.isError, undefined);
   assert.equal(result.details?.resultMessageId, flowScheduleResultMessageId(DISPATCH_ID));
+  assert.equal(result.details?.completionResource, workspaceWindowCompletionHandle(GENERIC_MESSAGE_ID).resource);
   assert.equal(published?.selector, peer.id);
+  assert.equal(published?.messageId, flowScheduleResultTransportMessageId(DISPATCH_ID));
   assert.equal(published?.messageKind, "status");
   assert.equal(published?.trustedStatus, true);
 });
@@ -315,7 +377,7 @@ function fakePi(): {
 
 test("Flow extension wires managed-worker registration and defers root authority to Monitor exposure", async () => {
   const source = await readFile(new URL("../src/extension/index.ts", import.meta.url), "utf8");
-  assert.match(source, /registerFlowSchedule\(pi, \{\s*managedWorker: isManagedWorkerWindow\(\),\s*\}\)/);
+  assert.match(source, /registerFlowSchedule\(pi, \{\s*managedWorker: isManagedWorkerWindow\(\),\s*todoMutationSupported: isManagedWorkerWindow\(\),\s*\}\)/);
   assert.equal(source.match(/registerFlowSchedule\(pi,/g)?.length, 1);
 });
 
@@ -343,14 +405,17 @@ test("root coordinator registration follows Monitor exposure enter and exit", as
     getRegistry: () => undefined,
   });
   try {
+    assert.equal(registration.monitor, false);
     assert.equal(api.tools.some((tool) => tool.name === "flow-schedule"), false);
     assert.deepEqual(api.active(), []);
 
     exposure.enter();
+    assert.equal(registration.monitor, true);
     assert.equal(api.tools.filter((tool) => tool.name === "flow-schedule").length, 1);
     assert.equal(api.active().includes("flow-schedule"), true);
 
     exposure.exit();
+    assert.equal(registration.monitor, false);
     assert.equal(api.active().includes("flow-schedule"), false);
     api.emit(MONITOR_TOOL_EXPOSURE_EVENT, { active: true, generation: 1 });
     assert.equal(api.active().includes("flow-schedule"), false, "stale exposure events must not re-enable the coordinator");
@@ -400,6 +465,50 @@ test("coordinator fences Monitor exit during an awaited action", async () => {
   assert.match(result.content[0] && "text" in result.content[0] ? result.content[0].text : "", /Monitor mode changed/);
 });
 
+test("inactive Monitor exposure still starts and retains root runtime reconciliation", async () => {
+  const api = fakePi();
+  let starts = 0;
+  let disposals = 0;
+  const runtime = {
+    async start() { starts += 1; },
+    dispose() { disposals += 1; },
+  } as unknown as FlowScheduleRuntime;
+  const registration = registerFlowSchedule(api.pi, {
+    managedWorker: false,
+    getRegistry: () => undefined,
+    createStore: () => ({} as FlowScheduleStore),
+    createRuntime: () => runtime,
+  });
+  try {
+    const start = api.handlers.get("session_start")?.[0];
+    assert.ok(start);
+    await start({}, context("/tmp/flow-schedule-inactive-runtime"));
+    assert.equal(registration.monitor, false);
+    assert.equal(registration.current()?.runtime, runtime);
+    assert.ok(starts >= 1, "persistent reconcile starts independently of Monitor exposure");
+    assert.equal(api.active().includes("flow-schedule"), false);
+
+    api.emit(MONITOR_TOOL_EXPOSURE_EVENT, { active: true, generation: 1 });
+    api.emit(MONITOR_TOOL_EXPOSURE_EVENT, { active: false, generation: 2 });
+    assert.equal(registration.current()?.runtime, runtime);
+    assert.equal(disposals, 0, "leaving Monitor only removes tool exposure");
+    assert.equal(api.active().includes("flow-schedule"), false);
+
+    const startsBeforeReentry = starts;
+    api.emit(MONITOR_TOOL_EXPOSURE_EVENT, { active: true, generation: 3 });
+    assert.equal(registration.current()?.runtime, runtime, "Monitor re-entry must not replace the schedule owner runtime");
+    assert.equal(starts, startsBeforeReentry, "Monitor re-entry must not restart reconciliation");
+    assert.equal(disposals, 0);
+    assert.equal(api.active().includes("flow-schedule"), true);
+    api.emit(MONITOR_TOOL_EXPOSURE_EVENT, { active: false, generation: 4 });
+    assert.equal(registration.current()?.runtime, runtime);
+    assert.equal(api.active().includes("flow-schedule"), false);
+  } finally {
+    registration.dispose();
+  }
+  assert.equal(disposals, 1);
+});
+
 test("registration exposes Monitor control, managed report-only, and no ordinary root surface", async () => {
   const workerApi = fakePi();
   const workerRegistration = registerFlowSchedule(workerApi.pi, {
@@ -445,6 +554,9 @@ test("registration exposes Monitor control, managed report-only, and no ordinary
   });
   try {
     assert.equal(coordinatorRegistration.managedWorker, false);
+    assert.equal(coordinatorRegistration.monitor, false);
+    assert.deepEqual(coordinatorApi.tools, []);
+    coordinatorApi.emit(MONITOR_TOOL_EXPOSURE_EVENT, { active: true, generation: 1 });
     assert.equal(coordinatorRegistration.monitor, true);
     assert.equal(Check(coordinatorApi.tools[0]!.parameters, { action: "list" }), true);
     const start = coordinatorApi.handlers.get("session_start")?.[0];
@@ -459,9 +571,3 @@ test("registration exposes Monitor control, managed report-only, and no ordinary
     await rm(root, { recursive: true, force: true });
   }
 });
-    assert.equal(registration.monitor, false);
-    assert.equal(registration.monitor, true);
-    assert.equal(registration.monitor, false);
-    assert.equal(coordinatorRegistration.monitor, false);
-    assert.deepEqual(coordinatorApi.tools, []);
-    coordinatorApi.emit(MONITOR_TOOL_EXPOSURE_EVENT, { active: true, generation: 1 });

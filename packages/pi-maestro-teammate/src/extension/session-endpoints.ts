@@ -102,7 +102,14 @@ export function projectTeammateSessionEndpoints(
     ...(state.currentSessionId ? { sessionId: state.currentSessionId } : {}),
     ...(localSessionName ? { sessionName: localSessionName } : {}),
     ...(getWorkspaceProjectionProvider("todo") !== undefined
-      ? { extraCapabilities: ["flow-schedule-todo-binding"] as SessionEndpointCapability[] }
+      ? {
+        extraCapabilities: [
+          "flow-schedule-todo-binding",
+          "flow-schedule-todo-projection",
+          ...(getWorkspaceProjectionProvider("flow-schedule-todo-mutation-capability") ? ["flow-schedule-todo-mutation" as const] : []),
+          ...(getWorkspaceProjectionProvider("flow-schedule-report-capability") ? ["flow-schedule-report" as const] : []),
+        ] as SessionEndpointCapability[],
+      }
       : {}),
     agents: localAgents,
   }];

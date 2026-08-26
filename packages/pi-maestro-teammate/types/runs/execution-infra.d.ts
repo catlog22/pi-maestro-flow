@@ -11,6 +11,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import crossSpawn from "cross-spawn";
 import { type AgentConfig } from "../agents/agents.ts";
 import type { SingleResult, Usage, AgentProgress, AgentTerminalStatus, AgentTurnEvent, AgentTurnTriggerContextV1, MessageProvenanceV1 } from "../shared/types.ts";
+import type { RuntimeActorHostClient } from "../runtime-broker/actor-host.ts";
 import { type LeaseToken } from "./session-handoff.ts";
 import { type ResolvedModelRegistrationRouting, type TeammateTaskType } from "../models/model-routing.ts";
 import type { DispatchAuthorityProjection } from "../models/model-registry.ts";
@@ -206,6 +207,8 @@ export interface RunTeammateOptions {
      */
     maxDispatchDepth?: number;
     signal?: AbortSignal;
+    /** Optional shared Runtime Broker actor host; omitted creates a run-scoped host from PI_RUNTIME_BROKER. */
+    runtimeActorHost?: RuntimeActorHostClient;
     onProgress?: (data: AgentProgress) => void;
     onRetry?: (retry: {
         correlationId: string;
@@ -682,7 +685,6 @@ export declare function resolveModelSpecifier(model: string, modelCapabilities?:
 export declare function buildInheritedExtensionArgs(primaryExtensionPath: string): string[];
 export declare function managedWindowSpawnEnv(environment?: NodeJS.ProcessEnv): NodeJS.ProcessEnv;
 export interface ManagedWindowArgsOptions {
-    objective: string;
     sessionName: string;
     presentation: "headless" | "interactive";
     forkSessionFile?: string;

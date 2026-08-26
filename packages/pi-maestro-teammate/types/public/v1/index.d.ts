@@ -26,4 +26,5 @@ export * from "./scheduler.ts";
 export * from "./sessions.ts";
 export * from "./supervision.ts";
 export * from "./types.ts";
+export * from "./workspace-completion.ts";
 export * from "./workspace-projections.ts";

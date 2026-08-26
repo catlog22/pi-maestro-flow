@@ -384,6 +384,68 @@ test("window thread store deduplicates retries and advances pending to terminal"
   assert.equal(revisions.length, 3, "initial snapshot plus two mutations");
 });
 
+test("persistent session journal accepts direction-bound terminal requests and rebuilds them", () => {
+  const journal: unknown[] = [];
+  const store = new WindowThreadStore({
+    persist: (entry) => journal.push({ type: "custom", customType: "teammate-window-thread", data: entry }),
+  });
+  const messageId = "7".repeat(32);
+  const provenance = {
+    version: 1 as const,
+    messageId,
+    source: "monitor" as const,
+    messageKind: "request" as const,
+    deliveryMode: "follow_up" as const,
+    confidence: "verified" as const,
+    sender: { kind: "system" as const, ownerId: LOCAL_OWNER, label: "monitor" },
+  };
+  const outgoing = store.record(threadInput({
+    messageId,
+    source: "monitor",
+    messageKind: "request",
+    provenance,
+    replyTo: `owner:${LOCAL_OWNER}`,
+    terminalResultRequested: true,
+    targetSessionId: "persistent-session",
+    targetCorrelationId: "window-main-session",
+  }));
+
+  assert.equal(outgoing.peerOwnerId, REMOTE_OWNER, "outgoing peer remains the worker owner");
+  assert.equal(outgoing.replyTo, `owner:${LOCAL_OWNER}`, "terminal replies return to the Monitor owner");
+  assert.equal(journal.length, 1, "the terminal request is committed through the persistent store callback");
+
+  const resumed = new WindowThreadStore();
+  resumed.rebuild(journal);
+  assert.deepEqual(resumed.get(messageId, "outgoing"), outgoing);
+
+  const invalid = (overrides: Partial<WindowThreadEntryInput>): void => {
+    assert.throws(
+      () => new WindowThreadStore().record(threadInput({
+        messageId,
+        source: "monitor",
+        messageKind: "request",
+        provenance,
+        replyTo: `owner:${LOCAL_OWNER}`,
+        terminalResultRequested: true,
+        targetCorrelationId: "window-main-session",
+        ...overrides,
+      })),
+      /Invalid window thread entry/,
+    );
+  };
+  invalid({ messageId: "not-32hex" });
+  invalid({ messageKind: "coordination" });
+  invalid({ targetCorrelationId: "worker-agent" });
+  invalid({ replyTo: `owner:${REMOTE_OWNER}` });
+  invalid({ provenance: { ...provenance, sender: { ...provenance.sender, ownerId: REMOTE_OWNER } } });
+
+  const legacy = store.record(threadInput({
+    messageId: "6".repeat(32),
+    replyTo: "legacy-root-selector",
+  }));
+  assert.equal(legacy.terminalResultRequested, undefined, "legacy entries remain valid without terminal opt-in");
+});
+
 test("window thread transitions pending to queued to injected without losing replay metadata", () => {
   const persisted: unknown[] = [];
   const store = new WindowThreadStore({ persist: (entry) => persisted.push(entry) });

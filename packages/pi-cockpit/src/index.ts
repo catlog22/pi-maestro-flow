@@ -4,7 +4,7 @@ import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type Exte
 import type { TUI } from "@earendil-works/pi-tui";
 import { ambientKeysShouldYield, capturingOverlayVisible } from "./capturing-overlay.ts";
 import { Key, decodeKittyPrintable, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { AgentsStore, effectiveAgentStatus, type CompletePayload, type MessagePayload, type StartedPayload } from "./agents-store.ts";
+import { AgentReadStoreRouter, effectiveAgentStatus, type CompletePayload, type MessagePayload, type StartedPayload } from "./agents-store.ts";
 import { statusText, titleFor, workingMessage, type AmbientState } from "./ambient.ts";
 import { generateTitleWithModel } from "./title-llm.ts";
 import { suggestTitle } from "./title-gen.ts";
@@ -111,6 +111,13 @@ import {
 	type CockpitConfig,
 } from "./types.ts";
 import type { MailboxHostRegistry } from "pi-maestro-teammate/v1/mailbox";
+import {
+	RUNTIME_READ_MODEL_DELTA_EVENT,
+	RUNTIME_READ_MODEL_QUERY_EVENT,
+	RUNTIME_READ_MODEL_SNAPSHOT_EVENT,
+	RUNTIME_READ_MODEL_UNAVAILABLE_EVENT,
+	runtimeV2ReadEnabled,
+} from "pi-maestro-teammate/v2/runtime";
 
 export {
 	EndpointStore,
@@ -300,7 +307,8 @@ function isCompletePayload(value: unknown): value is CompletePayload {
 }
 
 export default function (pi: ExtensionAPI): void {
-	const agents = new AgentsStore();
+	const agentReads = new AgentReadStoreRouter();
+	let agents = agentReads.current;
 	const endpoints = new EndpointStore({ getLegacyAgents: () => visibleAgentRows(agents.snapshot()) });
 	const sessionUi = new SessionUiState();
 	const bashBg = new BashBgStore();
@@ -390,6 +398,12 @@ export default function (pi: ExtensionAPI): void {
 	let titleRequested = false;
 	let titleFrameIndex = 0;
 	let mainOutputRevision = 0;
+	const v2ReadRequested = runtimeV2ReadEnabled();
+	let usingRuntimeV2 = false;
+	const requestRuntimeSnapshot = (): void => {
+		if (!v2ReadRequested) return;
+		pi.events.emit(RUNTIME_READ_MODEL_QUERY_EVENT, { version: 2 });
+	};
 	// Session fence for async title generation: bumped on session start/shutdown
 	// so a stale request can never write into a newer session (MW-3).
 	let titleGeneration = 0;
@@ -1594,7 +1608,9 @@ export default function (pi: ExtensionAPI): void {
 			}),
 			pi.events.on(TEAMMATE_STARTED_EVENT, (payload) => {
 				if (!isStartedPayload(payload)) return;
-				agents.applyStarted(payload);
+				agentReads.applyLegacyStarted(payload);
+				if (usingRuntimeV2) return;
+				agents = agentReads.current;
 				endpoints.refreshLegacy();
 				// A background agent needs the loop to keep its elapsed/stall repaints
 				// alive even after the foreground turn ended (SB-4).
@@ -1603,17 +1619,53 @@ export default function (pi: ExtensionAPI): void {
 			}),
 			pi.events.on(TEAMMATE_MESSAGE_EVENT, (payload) => {
 				if (!isProgressPayload(payload)) return;
-				agents.applyMessage(payload);
+				agentReads.applyLegacyMessage(payload);
+				if (usingRuntimeV2) return;
+				agents = agentReads.current;
 				endpoints.refreshLegacy();
 				syncTick();
 				req();
 			}),
 			pi.events.on(TEAMMATE_COMPLETE_EVENT, (payload) => {
 				if (!isCompletePayload(payload)) return;
-				agents.applyComplete(payload);
+				agentReads.applyLegacyComplete(payload);
+				if (usingRuntimeV2) return;
+				agents = agentReads.current;
 				endpoints.refreshLegacy();
 				// A failure that arrives after the session went idle still needs a loop to
 				// expire it, so the tick is re-evaluated rather than assumed to be running.
+				syncTick();
+				req();
+			}),
+			pi.events.on(RUNTIME_READ_MODEL_SNAPSHOT_EVENT, (payload) => {
+				if (!v2ReadRequested) return;
+				usingRuntimeV2 = agentReads.applyRuntimeSnapshot(payload);
+				if (!usingRuntimeV2) return;
+				agents = agentReads.current;
+				endpoints.refreshLegacy();
+				syncTick();
+				req();
+			}),
+			pi.events.on(RUNTIME_READ_MODEL_DELTA_EVENT, (payload) => {
+				if (!v2ReadRequested) return;
+				if (!usingRuntimeV2 || !agentReads.applyRuntimeDelta(payload)) {
+					usingRuntimeV2 = false;
+					agentReads.fallback();
+					agents = agentReads.current;
+					requestRuntimeSnapshot();
+					return;
+				}
+				agents = agentReads.current;
+				endpoints.refreshLegacy();
+				syncTick();
+				req();
+			}),
+			pi.events.on(RUNTIME_READ_MODEL_UNAVAILABLE_EVENT, () => {
+				if (!v2ReadRequested) return;
+				usingRuntimeV2 = false;
+				agentReads.fallback();
+				agents = agentReads.current;
+				endpoints.refreshLegacy();
 				syncTick();
 				req();
 			}),
@@ -1748,6 +1800,7 @@ export default function (pi: ExtensionAPI): void {
 		// reachable already; a no-op when cockpit is disabled or non-TUI.
 		if (config.quietMode) ensureThinkingFolded(capturedTui, ctx.cwd, true);
 		pi.events.emit(BASH_BG_QUERY_EVENT, undefined);
+		requestRuntimeSnapshot();
 		emitMaestroQuery();
 		req();
 	});
@@ -1810,7 +1863,9 @@ export default function (pi: ExtensionAPI): void {
 		thinkingTimer.reset();
 		invalidateUsageCache();
 		sessionUi.reset();
-		agents.clear();
+		agentReads.clear();
+		agents = agentReads.current;
+		usingRuntimeV2 = false;
 		agentListScroll = { offset: 0, following: true };
 		agentPriorityActive = false;
 		todoExpandedOverAgents = false;

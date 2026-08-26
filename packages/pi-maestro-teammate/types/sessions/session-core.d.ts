@@ -3,6 +3,8 @@ import { type MessageProvenanceV1 } from "../shared/types.ts";
 export declare const SESSION_ENDPOINT_VERSION: 1;
 export declare const SESSION_ENDPOINT_ID_PREFIX: "pi-session/v1";
 export declare const SESSION_HOST_REGISTRY_KEY: unique symbol;
+/** Process-global workspace-peer directory refresh hook; used by sibling packages (e.g. Flow schedule admission) to pull fresh peer state before concluding a target is unreachable. */
+export declare const SESSION_HOST_DIRECTORY_REFRESH_KEY: unique symbol;
 export declare const SESSION_SURFACE_ENV_VAR: "PI_TEAMMATE_SESSION_SURFACE";
 export declare const SESSION_HOST_REGISTRY_EVENT: "teammate:sessions";
 export declare const WINDOW_THREAD_EVENT: "teammate:window-thread";
@@ -23,7 +25,7 @@ export type SessionDeliveryStage = "queued" | "injected";
 export declare function normalizeSessionMessageKind(kind: SessionMessageKind | undefined, trustedStatus?: boolean): SessionMessageKind | undefined;
 /** Status messages update context but never start a model turn by themselves. */
 export declare function sessionMessageTriggersTurn(kind: SessionMessageKind | undefined): boolean;
-export type SessionEndpointCapability = "inspect" | "message" | "steer" | "follow_up" | "abort" | "wake" | "flow-schedule-todo-binding";
+export type SessionEndpointCapability = "inspect" | "message" | "steer" | "follow_up" | "abort" | "wake" | "flow-schedule-todo-binding" | "flow-schedule-todo-projection" | "flow-schedule-todo-mutation" | "flow-schedule-report";
 export interface SessionEndpointIdentity {
     workspaceId: string;
     ownerId: string;
@@ -309,6 +311,10 @@ export declare class SessionHostRegistry {
 }
 export declare function getSessionHostRegistry(host?: typeof globalThis & Record<symbol, unknown>): SessionHostRegistry | undefined;
 export declare function publishSessionHostRegistry(registry: SessionHostRegistry | undefined, host?: typeof globalThis & Record<symbol, unknown>): void;
+/** Refreshes workspace-peer discovery and rebuilds the endpoint directory of the published session host registry. */
+export type SessionHostDirectoryRefresh = () => Promise<void>;
+export declare function getSessionHostDirectoryRefresh(host?: typeof globalThis & Record<symbol, unknown>): SessionHostDirectoryRefresh | undefined;
+export declare function publishSessionHostDirectoryRefresh(refresh: SessionHostDirectoryRefresh | undefined, host?: typeof globalThis & Record<symbol, unknown>): void;
 export type SessionTransportDelivery = (endpoint: SessionEndpoint, request: SessionMessageRequest) => Promise<SessionMessageResult>;
 export declare function createLocalRootTransportAdapter(deliver: SessionTransportDelivery): SessionTransportAdapter;
 export declare function createLocalAgentMailboxTransportAdapter(deliver: SessionTransportDelivery): SessionTransportAdapter;

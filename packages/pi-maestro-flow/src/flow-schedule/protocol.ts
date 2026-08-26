@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { WorkspaceCompletionCorrelation } from "pi-maestro-teammate/v1/workspace-completion";
 import {
   parseFlowScheduleDispatchEnvelope,
   parseFlowScheduleResult,
@@ -17,6 +18,22 @@ import {
 } from "./types.ts";
 
 export const FLOW_SCHEDULE_RESULT_MESSAGE_PREFIX = "flow-schedule-result/v1:" as const;
+
+/** Workspace-peer v1 transport identity for a Flow dispatch UUID. */
+export function flowScheduleDispatchMessageId(dispatchId: string): string {
+  if (!FLOW_SCHEDULE_DISPATCH_ID_PATTERN.test(dispatchId)) {
+    throw new FlowScheduleValidationError("Flow schedule dispatch message ID", "", "dispatchId must be a UUID v4");
+  }
+  return dispatchId.replaceAll("-", "");
+}
+
+/** Workspace-peer v1 transport identity for a Flow result. */
+export function flowScheduleResultTransportMessageId(dispatchId: string): string {
+  if (!FLOW_SCHEDULE_DISPATCH_ID_PATTERN.test(dispatchId)) {
+    throw new FlowScheduleValidationError("Flow schedule result transport ID", "", "dispatchId must be a UUID v4");
+  }
+  return createHash("sha256").update(`flow-schedule-result-transport\0${dispatchId}`).digest("hex").slice(0, 32);
+}
 
 export function flowScheduleResultMessageId(dispatchId: string): string {
   if (!FLOW_SCHEDULE_DISPATCH_ID_PATTERN.test(dispatchId)) {
@@ -48,13 +65,18 @@ export function createFlowScheduleResult(input: {
   outcome: FlowScheduleResultOutcome;
   summary: string;
   resources?: string[];
+  completionCorrelation?: WorkspaceCompletionCorrelation;
   todoOutcome?: FlowScheduleTodoOutcome;
 }): FlowScheduleResult {
+  const resources = [...new Set([
+    ...(input.resources ?? []),
+    ...(input.completionCorrelation ? [input.completionCorrelation.resource] : []),
+  ])];
   return parseFlowScheduleResult({
     version: FLOW_SCHEDULE_VERSION,
     type: FLOW_SCHEDULE_RESULT_TYPE,
     ...input,
-    resources: input.resources ?? [],
+    resources,
   });
 }
 

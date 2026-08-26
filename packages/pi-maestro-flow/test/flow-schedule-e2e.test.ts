@@ -5,12 +5,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  bindWorkspaceCompletionHandle,
+  WORKSPACE_MAIN_SESSION_MARKER,
+} from "pi-maestro-teammate/v1/workspace-completion";
+import {
   createWorkspacePeerV1TransportAdapter,
   projectSessionEndpoints,
   SessionHostRegistry,
   type SessionEndpoint,
   type SessionMessageRequest,
 } from "pi-maestro-teammate/v1/sessions";
+import { flowScheduleDispatchMessageId } from "../src/flow-schedule/protocol.ts";
 import { createWorkerFlowScheduleTool } from "../src/flow-schedule/tool.ts";
 import { FlowScheduleRuntime } from "../src/flow-schedule/runtime.ts";
 import { FlowScheduleStore } from "../src/flow-schedule/store.ts";
@@ -20,6 +25,8 @@ const COORDINATOR_OWNER = "1".repeat(32);
 const COORDINATOR_NONCE = "2".repeat(32);
 const WORKER_OWNER = "a".repeat(32);
 const WORKER_NONCE = "b".repeat(32);
+const WORKSPACE_ID = "f".repeat(64);
+const GENERIC_MESSAGE_ID = "9".repeat(32);
 const DISPATCH_A = "123e4567-e89b-42d3-a456-426614174000";
 const DISPATCH_B = "223e4567-e89b-42d3-a456-426614174000";
 const TARGET = `owner:${WORKER_OWNER}`;
@@ -39,7 +46,7 @@ function owner(input: {
   extraCapabilities?: Array<"flow-schedule-todo-binding">;
 }) {
   return {
-    workspaceId: "workspace",
+    workspaceId: WORKSPACE_ID,
     ownerId: input.ownerId,
     ownerNonce: input.ownerNonce,
     scope: input.scope,
@@ -64,8 +71,11 @@ function incomingFrom(
     direction: "incoming",
     source: request.source ?? "system",
     ...(request.messageKind === undefined ? {} : { messageKind: request.messageKind }),
+    ...(request.provenance === undefined ? {} : { provenance: request.provenance }),
     ...(request.traceId === undefined ? {} : { traceId: request.traceId }),
     ...(request.replyTo === undefined ? {} : { replyTo: request.replyTo }),
+    ...(request.targetCorrelationId === undefined ? {} : { targetCorrelationId: request.targetCorrelationId }),
+    ...(request.terminalResultRequested === undefined ? {} : { terminalResultRequested: request.terminalResultRequested }),
     targetSessionId: destination.sessionId,
     mode: "follow_up",
     body: request.message,
@@ -88,8 +98,11 @@ function outgoingTo(
     direction: "outgoing",
     source: request.source ?? "system",
     ...(request.messageKind === undefined ? {} : { messageKind: request.messageKind }),
+    ...(request.provenance === undefined ? {} : { provenance: request.provenance }),
     ...(request.traceId === undefined ? {} : { traceId: request.traceId }),
     ...(request.replyTo === undefined ? {} : { replyTo: request.replyTo }),
+    ...(request.targetCorrelationId === undefined ? {} : { targetCorrelationId: request.targetCorrelationId }),
+    ...(request.terminalResultRequested === undefined ? {} : { terminalResultRequested: request.terminalResultRequested }),
     mode: "follow_up",
     body: request.message,
     status: "injected",
@@ -98,7 +111,7 @@ function outgoingTo(
   });
 }
 
-function registryPair(todoBinding = false): RegistryPair {
+function registryPair(todoBinding = false, includeCompletionRequest = true): RegistryPair {
   const bindingCapabilities = todoBinding
     ? ["flow-schedule-todo-binding" as const]
     : undefined;
@@ -156,6 +169,39 @@ function registryPair(todoBinding = false): RegistryPair {
       };
     })],
   });
+  const coordinatorLocal = coordinatorEndpoints.find((endpoint) => endpoint.scope === "local")!;
+  const workerLocal = workerEndpoints.find((endpoint) => endpoint.scope === "local")!;
+  if (includeCompletionRequest) {
+    const genericRequest: SessionMessageRequest = {
+      messageId: GENERIC_MESSAGE_ID,
+      message: "Managed objective",
+      mode: "follow_up",
+      source: "monitor",
+      messageKind: "request",
+      provenance: {
+        version: 1,
+        messageId: GENERIC_MESSAGE_ID,
+        source: "monitor",
+        messageKind: "request",
+        deliveryMode: "follow_up",
+        confidence: "verified",
+        sender: { kind: "system", ownerId: COORDINATOR_OWNER, label: "monitor" },
+      },
+      traceId: GENERIC_MESSAGE_ID,
+      replyTo: `owner:${COORDINATOR_OWNER}`,
+      targetCorrelationId: WORKSPACE_MAIN_SESSION_MARKER,
+      terminalResultRequested: true,
+    };
+    outgoingTo(coordinator, workerLocal, genericRequest);
+    coordinator.thread.record({
+      ...coordinator.thread.get(GENERIC_MESSAGE_ID, "outgoing")!,
+      targetSessionId: coordinatorLocal.sessionId,
+    });
+    incomingFrom(worker, coordinatorLocal, workerLocal, {
+      ...genericRequest,
+      replyTo: `owner:${COORDINATOR_OWNER}`,
+    });
+  }
   const workerEndpoint = coordinator.resolve(TARGET, { includeSettled: true, localFirst: false }).endpoint!;
   return {
     coordinator,
@@ -207,10 +253,10 @@ async function createActiveStore(root: string, todoBinding = false): Promise<Flo
 function claimIntentInChild(projectRoot: string, identity: ExactWindowIdentity): Promise<void> {
   const storeUrl = new URL("../src/flow-schedule/store.ts", import.meta.url).href;
   const script = [
-    "const [storeUrl, projectRoot, identityJson] = process.argv.slice(1);",
+    "const [storeUrl, projectRoot, identityJson, correlationJson] = process.argv.slice(1);",
     "const { FlowScheduleStore } = await import(storeUrl);",
     "const store = new FlowScheduleStore(projectRoot, { getProcessIdentity: () => `child:${process.pid}` });",
-    `await store.createDispatchIntent({ dispatchId: ${JSON.stringify(DISPATCH_A)}, scheduleId: 'release', stepId: 'verify', targetIdentity: JSON.parse(identityJson) });`,
+    `await store.createDispatchIntent({ dispatchId: ${JSON.stringify(DISPATCH_A)}, scheduleId: 'release', stepId: 'verify', targetIdentity: JSON.parse(identityJson), completionCorrelation: JSON.parse(correlationJson) });`,
   ].join("\n");
   const child = spawn(process.execPath, [
     "--experimental-transform-types",
@@ -221,6 +267,11 @@ function claimIntentInChild(projectRoot: string, identity: ExactWindowIdentity):
     storeUrl,
     projectRoot,
     JSON.stringify(identity),
+    JSON.stringify(bindWorkspaceCompletionHandle(GENERIC_MESSAGE_ID, {
+      workspaceId: identity.workspaceId,
+      ownerId: COORDINATOR_OWNER,
+      ownerNonce: COORDINATOR_NONCE,
+    })),
   ], { stdio: ["ignore", "ignore", "pipe"] });
   return new Promise((resolve, reject) => {
     let stderr = "";
@@ -259,6 +310,25 @@ async function reportCompletedTodoInChild(
         sessionId: "coordinator-session",
       }),
     ],
+    completionInbound: {
+      messageId: GENERIC_MESSAGE_ID,
+      workspaceId: inbound.workspaceId,
+      peerOwnerId: COORDINATOR_OWNER,
+      peerOwnerNonce: COORDINATOR_NONCE,
+      direction: "incoming",
+      source: "monitor",
+      messageKind: "request",
+      traceId: GENERIC_MESSAGE_ID,
+      replyTo: `owner:${COORDINATOR_OWNER}`,
+      targetSessionId: "worker-session",
+      targetCorrelationId: WORKSPACE_MAIN_SESSION_MARKER,
+      terminalResultRequested: true,
+      mode: "follow_up",
+      body: "Managed objective",
+      status: "injected",
+      createdAt: 1,
+      updatedAt: 1,
+    },
     inbound,
   })}\n`, "utf8");
   const toolUrl = new URL("../src/flow-schedule/tool.ts", import.meta.url).href;
@@ -273,6 +343,7 @@ async function reportCompletedTodoInChild(
     "const endpoints = projectSessionEndpoints(input.owners);",
     "let registry;",
     "registry = new SessionHostRegistry({ surface: 'unified', endpoints, adapters: [createWorkspacePeerV1TransportAdapter(async (destination, request) => { await writeFile(outputPath, JSON.stringify({ request, todo: getVisibleTasks().find((task) => task.id === todoId) })); return { delivered: true, endpointId: destination.id, transport: destination.transport, receipt: { publicationStage: 'accepted', deliveryStage: 'injected', messageId: request.messageId } }; })] });",
+    "registry.thread.record(input.completionInbound);",
     "registry.thread.record(input.inbound);",
     "const ctx = { cwd: input.cwd, ui: { setStatus() {} } };",
     "const created = await executeTodo({ action: 'create', subject: 'Verify release in child worker' }, ctx);",
@@ -324,7 +395,7 @@ test("Todo-bound child worker completes Todo, reports, exits, and Monitor accept
 
     const childReport = await reportCompletedTodoInChild(
       root,
-      pair.worker.thread.get(DISPATCH_A, "incoming"),
+      pair.worker.thread.get(flowScheduleDispatchMessageId(DISPATCH_A), "incoming"),
     );
     assert.equal(childReport.todo.status, "completed");
     const workerPeer = pair.coordinator.resolve(TARGET, { includeSettled: true, localFirst: false }).endpoint!;
@@ -356,6 +427,42 @@ test("Todo-bound child worker completes Todo, reports, exits, and Monitor accept
   }
 });
 
+test("existing managed worker without a completion handle receives a dispatch and advances from an exact report", async () => {
+  const root = await mkdtemp(join(tmpdir(), "flow-schedule-unbound-worker-e2e-"));
+  const pair = registryPair(false, false);
+  const store = await createActiveStore(root);
+  const runtime = new FlowScheduleRuntime({
+    store,
+    getRegistry: () => pair.coordinator,
+    observe: liveObservation,
+    createDispatchId: () => DISPATCH_A,
+  });
+  try {
+    await runtime.reconcileReady();
+    assert.ok(pair.worker.thread.get(flowScheduleDispatchMessageId(DISPATCH_A), "incoming"));
+    assert.equal((await store.readDispatch(DISPATCH_A))?.intent.completionCorrelation, undefined);
+
+    const workerTool = createWorkerFlowScheduleTool({ getRegistry: () => pair.worker });
+    const report = await workerTool.execute("report", {
+      action: "report",
+      dispatchId: DISPATCH_A,
+      outcome: "completed",
+      summary: "Existing worker verified",
+    });
+    assert.equal(report.isError, undefined);
+    assert.equal(report.details?.completionResource, undefined);
+
+    await runtime.reconcileReady();
+    const schedule = await store.readSchedule("release");
+    assert.equal(schedule?.state, "completed");
+    assert.equal(schedule?.steps.verify.result?.summary, "Existing worker verified");
+    assert.deepEqual(schedule?.steps.verify.attempts, [DISPATCH_A]);
+  } finally {
+    runtime.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("child intent crash resumes the same dispatch and worker report completes after coordinator restart", async () => {
   const root = await mkdtemp(join(tmpdir(), "flow-schedule-e2e-"));
   const pair = registryPair();
@@ -371,7 +478,7 @@ test("child intent crash resumes the same dispatch and worker report completes a
   });
   try {
     await first.reconcileReady();
-    assert.ok(pair.worker.thread.get(DISPATCH_A, "incoming"));
+    assert.ok(pair.worker.thread.get(flowScheduleDispatchMessageId(DISPATCH_A), "incoming"));
     assert.equal((await store.readSchedule("release"))?.steps.verify.attempts.length, 1);
     assert.ok((await store.readDispatch(DISPATCH_A))?.accepted);
     first.dispose();

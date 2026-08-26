@@ -1,12 +1,10 @@
 import { type MessageProvenanceV1 } from "../shared/types.ts";
+import { type WorkspaceWindowTerminalResultDraft } from "../public/v1/workspace-completion.ts";
 import { type WorkspaceProjectionItem, type WorkspaceTodoSnapshot } from "../public/v1/workspace-projections.ts";
+export { createWorkspaceWindowTerminalResult, decodeWorkspaceWindowTerminalResult, encodeWorkspaceWindowTerminalResult, validateWorkspaceWindowTerminalResult, WORKSPACE_MAIN_SESSION_MARKER, WORKSPACE_WINDOW_TERMINAL_RESULT_TYPE, workspaceWindowCompletionHandle, workspaceWindowTerminalPublicationId, workspaceWindowTerminalReservationId, workspaceWindowTerminalResultMessageId, } from "../public/v1/workspace-completion.ts";
+export type { WorkspaceWindowCompletionHandle, WorkspaceWindowTerminalOutcome, WorkspaceWindowTerminalResult, WorkspaceWindowTerminalResultDraft, } from "../public/v1/workspace-completion.ts";
 export type { WorkspaceTodoSnapshot } from "../public/v1/workspace-projections.ts";
 export declare const WORKSPACE_PEER_PROTOCOL_VERSION: 1;
-/**
- * Reserved targetCorrelationId for commands addressed to a window's main
- * session (window-level monitor interventions) instead of a sub-agent.
- */
-export declare const WORKSPACE_MAIN_SESSION_MARKER: "window-main-session";
 export declare const DEFAULT_PEER_STALE_MS = 20000;
 export declare const DEFAULT_PEER_HEARTBEAT_MS = 5000;
 export declare const DEFAULT_PEER_PUBLISH_THROTTLE_MS = 200;
@@ -15,7 +13,7 @@ export declare const DEFAULT_COMMAND_TIMEOUT_MS = 5000;
 export declare const MAX_OWNER_AGENTS = 256;
 export declare const MAX_OWNER_SETTLED = 256;
 export declare const MAX_OWNER_BACKGROUND_JOBS = 32;
-export declare const WORKSPACE_OWNER_CAPABILITIES: readonly ["flow-schedule-todo-binding"];
+export declare const WORKSPACE_OWNER_CAPABILITIES: readonly ["flow-schedule-todo-binding", "flow-schedule-todo-projection", "flow-schedule-todo-mutation", "flow-schedule-report"];
 export type WorkspaceOwnerCapability = typeof WORKSPACE_OWNER_CAPABILITIES[number];
 /** Maximum todo items in one owner snapshot. */
 export declare const MAX_OWNER_TODOS = 32;
@@ -38,9 +36,9 @@ export declare const MAX_WORKSPACE_WINDOW_ERROR_BYTES: number;
 export declare const MAX_WINDOW_LISTING_ACTIVE_AGENTS = 8;
 /** A window whose main session was active within this window is busy even with zero sub-agents. */
 export declare const MAIN_SESSION_ACTIVE_MS = 60000;
-/** Per-settled-agent result payload cap (keeps owner snapshots under MAX_OWNER_FILE_BYTES). */
+/** Legacy settled-result payload bound retained for v1 snapshot decoding compatibility. */
 export declare const SETTLED_RESULT_BYTES: number;
-/** Max settled records that carry a result body in the owner snapshot. */
+/** Legacy public limit retained for consumers of the v1 snapshot contract. */
 export declare const SETTLED_RESULT_MAX = 8;
 /** Owner snapshot deletion threshold for stale cleanup (listing staleness stays at DEFAULT_PEER_STALE_MS). */
 export declare const CLEANUP_STALE_DEFAULT_MS = 120000;
@@ -57,22 +55,6 @@ export type WorkspacePeerMessageSource = "user" | "monitor" | "system";
  */
 export type WorkspacePeerMessageKind = "message" | "coordination" | "request" | "status" | "supervision";
 export type WorkspacePeerDeliveryStage = "queued" | "injected";
-export declare const WORKSPACE_WINDOW_TERMINAL_RESULT_TYPE: "workspace-window-terminal-result";
-export type WorkspaceWindowTerminalOutcome = "completed" | "failed" | "cancelled" | "no-result";
-export interface WorkspaceWindowTerminalResult {
-    version: typeof WORKSPACE_PEER_PROTOCOL_VERSION;
-    type: typeof WORKSPACE_WINDOW_TERMINAL_RESULT_TYPE;
-    requestMessageId: string;
-    outcome: WorkspaceWindowTerminalOutcome;
-    settledAt: number;
-    finalText?: string;
-    error?: string;
-}
-export interface WorkspaceWindowTerminalResultDraft {
-    outcome: WorkspaceWindowTerminalOutcome;
-    finalText?: string;
-    error?: string;
-}
 export interface WorkspacePeerPaths {
     rootDir: string;
     ownersDir: string;
@@ -117,7 +99,7 @@ export interface WorkspaceSettledSnapshot {
     status: WorkspaceSettledStatus;
     settledAt: number;
     summary?: string;
-    /** Final result body of the settled agent (bounded, most-recent SETTLED_RESULT_MAX only). */
+    /** Legacy v1 field accepted when decoding old snapshots; new publications omit result bodies. */
     result?: string;
 }
 export interface WorkspaceBackgroundJobSnapshot {
@@ -324,23 +306,9 @@ export interface WorkspacePeerRuntimeOptions {
 export interface StopWorkspacePeerRuntimeOptions {
     removeOwnerFile?: boolean;
 }
+export declare function workspaceProtocolCommandId(messageId: string | undefined): string | undefined;
 /** Classify the authoritative final worker turn without treating empty output as success. */
 export declare function deriveWorkspaceWindowTerminalResult(messages: readonly unknown[]): WorkspaceWindowTerminalResultDraft;
-export declare function workspaceWindowTerminalResultMessageId(requestMessageId: string): string;
-/** Deterministic immutable resource identity for one opt-in workspace request. */
-export declare function workspaceWindowTerminalPublicationId(requestMessageId: string): string;
-/** Deterministic completion reservation identity, stable across process recovery. */
-export declare function workspaceWindowTerminalReservationId(requestMessageId: string): string;
-export declare function createWorkspaceWindowTerminalResult(input: {
-    requestMessageId: string;
-    outcome: WorkspaceWindowTerminalOutcome;
-    settledAt?: number;
-    finalText?: string;
-    error?: string;
-}): WorkspaceWindowTerminalResult;
-export declare function validateWorkspaceWindowTerminalResult(value: unknown): WorkspaceWindowTerminalResult | undefined;
-export declare function encodeWorkspaceWindowTerminalResult(result: WorkspaceWindowTerminalResult): string;
-export declare function decodeWorkspaceWindowTerminalResult(text: string): WorkspaceWindowTerminalResult;
 export declare function normalizeWorkspacePath(cwd: string, platform?: NodeJS.Platform): string;
 export declare function workspaceIdForCwd(cwd: string, platform?: NodeJS.Platform): string;
 export declare function defaultWorkspacePeerRoot(cwd: string): string;

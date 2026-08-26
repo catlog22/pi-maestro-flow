@@ -9,6 +9,8 @@ import {
 export const SESSION_ENDPOINT_VERSION = 1 as const;
 export const SESSION_ENDPOINT_ID_PREFIX = "pi-session/v1" as const;
 export const SESSION_HOST_REGISTRY_KEY = Symbol.for("pi-maestro-teammate.session-host-registry.v1");
+/** Process-global workspace-peer directory refresh hook; used by sibling packages (e.g. Flow schedule admission) to pull fresh peer state before concluding a target is unreachable. */
+export const SESSION_HOST_DIRECTORY_REFRESH_KEY = Symbol.for("pi-maestro-teammate.session-host-directory-refresh.v1");
 export const SESSION_SURFACE_ENV_VAR = "PI_TEAMMATE_SESSION_SURFACE" as const;
 export const SESSION_HOST_REGISTRY_EVENT = "teammate:sessions" as const;
 export const WINDOW_THREAD_EVENT = "teammate:window-thread" as const;
@@ -40,7 +42,8 @@ export function sessionMessageTriggersTurn(kind: SessionMessageKind | undefined)
   return kind !== "status";
 }
 
-export type SessionEndpointCapability = "inspect" | "message" | "steer" | "follow_up" | "abort" | "wake" | "flow-schedule-todo-binding";
+export type SessionEndpointCapability = "inspect" | "message" | "steer" | "follow_up" | "abort" | "wake"
+  | "flow-schedule-todo-binding" | "flow-schedule-todo-projection" | "flow-schedule-todo-mutation" | "flow-schedule-report";
 
 export interface SessionEndpointIdentity {
   workspaceId: string;
@@ -503,6 +506,16 @@ function semanticThreadEntry(entry: Omit<WindowThreadEntry, "contentRevision">):
 function validThreadEntry(value: unknown): WindowThreadEntry | undefined {
   if (!value || typeof value !== "object") return undefined;
   const entry = value as Record<string, unknown>;
+  const normalizedProvenance = entry.provenance === undefined
+    ? undefined
+    : normalizeMessageProvenanceV1(entry.provenance);
+  const replyOwnerMatch = typeof entry.replyTo === "string"
+    ? /^owner:([a-f0-9]{32})$/.exec(entry.replyTo)
+    : undefined;
+  const provenanceOwnerId = normalizedProvenance?.confidence === "verified"
+    && "ownerId" in normalizedProvenance.sender
+    ? normalizedProvenance.sender.ownerId
+    : undefined;
   if (entry.version !== SESSION_ENDPOINT_VERSION
     || typeof entry.messageId !== "string" || entry.messageId.length === 0 || entry.messageId.length > 128
     || typeof entry.workspaceId !== "string" || entry.workspaceId.length === 0 || entry.workspaceId.length > 128
@@ -523,7 +536,10 @@ function validThreadEntry(value: unknown): WindowThreadEntry | undefined {
       && (!/^[a-f0-9]{32}$/.test(String(entry.messageId))
         || entry.messageKind !== "request"
         || entry.targetCorrelationId !== "window-main-session"
-        || entry.replyTo !== `owner:${entry.peerOwnerId}`))
+        || !replyOwnerMatch
+        || (entry.direction === "incoming"
+          ? replyOwnerMatch[1] !== entry.peerOwnerId
+          : provenanceOwnerId !== replyOwnerMatch[1])))
     || (entry.fromSessionName !== undefined && (typeof entry.fromSessionName !== "string" || entry.fromSessionName.length === 0 || entry.fromSessionName.length > 256 || /[\u0000-\u001f\u007f]/.test(entry.fromSessionName)))
     || (entry.targetSessionId !== undefined && (typeof entry.targetSessionId !== "string" || entry.targetSessionId.length === 0 || entry.targetSessionId.length > 256 || /[\u0000-\u001f\u007f]/.test(entry.targetSessionId)))
     || (entry.targetCorrelationId !== undefined && (typeof entry.targetCorrelationId !== "string" || entry.targetCorrelationId.length === 0 || entry.targetCorrelationId.length > 128 || /[\u0000-\u001f\u007f]/.test(entry.targetCorrelationId)))
@@ -534,9 +550,6 @@ function validThreadEntry(value: unknown): WindowThreadEntry | undefined {
     || typeof entry.createdAt !== "number" || !Number.isSafeInteger(entry.createdAt) || entry.createdAt < 0
     || typeof entry.updatedAt !== "number" || !Number.isSafeInteger(entry.updatedAt) || entry.updatedAt < entry.createdAt
     || typeof entry.revision !== "number" || !Number.isSafeInteger(entry.revision) || entry.revision < 1) return undefined;
-  const normalizedProvenance = entry.provenance === undefined
-    ? undefined
-    : normalizeMessageProvenanceV1(entry.provenance);
   const provenance = normalizedProvenance === undefined
     ? undefined
     : normalizedProvenance.confidence === "verified"
@@ -1004,6 +1017,23 @@ export function publishSessionHostRegistry(
   host: typeof globalThis & Record<symbol, unknown> = globalThis as typeof globalThis & Record<symbol, unknown>,
 ): void {
   host[SESSION_HOST_REGISTRY_KEY] = registry;
+}
+
+/** Refreshes workspace-peer discovery and rebuilds the endpoint directory of the published session host registry. */
+export type SessionHostDirectoryRefresh = () => Promise<void>;
+
+export function getSessionHostDirectoryRefresh(
+  host: typeof globalThis & Record<symbol, unknown> = globalThis as typeof globalThis & Record<symbol, unknown>,
+): SessionHostDirectoryRefresh | undefined {
+  const candidate = host[SESSION_HOST_DIRECTORY_REFRESH_KEY];
+  return typeof candidate === "function" ? candidate as SessionHostDirectoryRefresh : undefined;
+}
+
+export function publishSessionHostDirectoryRefresh(
+  refresh: SessionHostDirectoryRefresh | undefined,
+  host: typeof globalThis & Record<symbol, unknown> = globalThis as typeof globalThis & Record<symbol, unknown>,
+): void {
+  host[SESSION_HOST_DIRECTORY_REFRESH_KEY] = refresh;
 }
 
 export type SessionTransportDelivery = (endpoint: SessionEndpoint, request: SessionMessageRequest) => Promise<SessionMessageResult>;

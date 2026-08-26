@@ -11,6 +11,7 @@ import { parseProxyTeammateParams } from "../src/extension/index.ts";
 import { normalizeTeammateParams } from "../src/runs/execution.ts";
 
 const PUBLIC_DIR = fileURLToPath(new URL("../src/public/v1/", import.meta.url));
+const PUBLIC_V2_DIR = fileURLToPath(new URL("../src/public/v2/", import.meta.url));
 const SRC_DIR = fileURLToPath(new URL("../src/", import.meta.url));
 const PACKAGE_JSON = fileURLToPath(new URL("../package.json", import.meta.url));
 
@@ -131,6 +132,22 @@ test("every v1 module is reachable through a declared package export", () => {
       `src/public/v1/${file} has no "exports" entry in package.json, so consumers cannot import it`,
     );
   }
+});
+
+test("the Phase2 runtime broker facade has a stable package export and bounded runtime graph", () => {
+  const packageJson: {
+    exports?: Record<string, string | { types?: string; default?: string }>;
+  } = JSON.parse(fs.readFileSync(PACKAGE_JSON, "utf8"));
+  assert.deepEqual(packageJson.exports?.["./v2/runtime-broker"], {
+    types: "./types/public/v2/runtime-broker.d.ts",
+    default: "./src/public/v2/runtime-broker.ts",
+  });
+
+  const { modules, externals } = runtimeGraph(path.join(PUBLIC_V2_DIR, "runtime-broker.ts"));
+  assert.deepEqual([...externals].filter((specifier) => !specifier.startsWith("node:")), []);
+  assert.equal(modules.has(path.resolve(SRC_DIR, "extension/index.ts")), false);
+  assert.equal(modules.has(path.resolve(SRC_DIR, "runtime-broker/server.ts")), false);
+  assert.equal(modules.has(path.resolve(SRC_DIR, "runtime-broker/sqlite-store.ts")), false);
 });
 
 test("v1 event names match the strings the extension actually emits", async () => {

@@ -102,6 +102,8 @@ export interface MailboxConsumerOptions {
   recipientCorrelationId: string;
   /** Workspace ID the consumer serves; messages from other workspaces are skipped. */
   workspaceId: string;
+  /** Persist the authoritative applied effect before child injection or acknowledgement. */
+  commitApplied?: (envelope: MailboxEnvelope) => Promise<void>;
   /** Callback invoked when a message is ready for injection. */
   onDispatch: (envelope: MailboxEnvelope) => Promise<MailboxDispatchDisposition | void>;
   /** Poll interval override (default 50ms). */
@@ -116,6 +118,7 @@ export class MailboxConsumer extends EventEmitter {
 
   readonly #store: MailboxFileStore;
   readonly #router: MailboxRouter;
+  readonly #commitApplied: ((envelope: MailboxEnvelope) => Promise<void>) | undefined;
   readonly #onDispatch: (envelope: MailboxEnvelope) => Promise<MailboxDispatchDisposition | void>;
   readonly #pollMs: number;
   readonly #now: () => number;
@@ -134,6 +137,7 @@ export class MailboxConsumer extends EventEmitter {
     this.workspaceId = options.workspaceId;
     this.#store = options.store;
     this.#router = options.router;
+    this.#commitApplied = options.commitApplied;
     this.#onDispatch = options.onDispatch;
     this.#pollMs = options.pollMs ?? POLL_INTERVAL_MS;
     this.#now = options.now ?? Date.now;
@@ -187,6 +191,9 @@ export class MailboxConsumer extends EventEmitter {
    */
   async acknowledge(messageId: string): Promise<boolean> {
     if (!MESSAGE_ID_PATTERN.test(messageId)) return false;
+    const accepted = await this.#store.readEnvelope("accepted", messageId);
+    if (!accepted) return false;
+    await this.#commitApplied?.(accepted);
     const applied = await this.#store.apply(messageId);
     if (applied) {
       this.emit("ack", { messageId } satisfies ConsumerAckEvent);
@@ -344,6 +351,13 @@ export class MailboxConsumer extends EventEmitter {
         this.#stopRenewTimer();
         return;
       }
+
+      // The broker inbox receipt and mailbox.applied domain event commit before
+      // any child-visible injection. The file ACCEPTED/APPLIED states below are
+      // compatibility projections of that authoritative transaction.
+      if (this.#stopped) return;
+      if (next.mode !== "notify") await this.#commitApplied?.(next);
+      if (this.#stopped) return;
 
       // Dispatch to the child
       this.emit("dispatch", { messageId: next.messageId, envelope: next } satisfies ConsumerDispatchEvent);

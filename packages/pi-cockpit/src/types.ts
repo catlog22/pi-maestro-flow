@@ -48,7 +48,11 @@ export interface AgentConversationEntry {
 
 export interface AgentRow {
 	correlationId: string;
+	/** Spawn attribution is distinct from the visible hierarchy edge. */
+	spawnedBy?: string;
 	parentCorrelationId?: string;
+	/** Runtime incarnation used to fence late V2 tombstones. */
+	runtimeGeneration?: number;
 	agent: string;
 	name: string | undefined;
 	role: string;

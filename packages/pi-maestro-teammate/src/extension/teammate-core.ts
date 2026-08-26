@@ -53,8 +53,6 @@ import {
   discoverWorkspacePeers,
   resolveWorkspaceTarget,
   sendWorkspacePeerCommand,
-  SETTLED_RESULT_BYTES,
-  SETTLED_RESULT_MAX,
   type WorkspaceAgentSnapshot,
   type WorkspaceBackgroundJobSnapshot,
   type WorkspaceOwnerSnapshot,
@@ -770,25 +768,28 @@ export const TEAMMATE_WAIT_GUIDELINES = [
   "Treat result-ready as a usable teammate result; do not continue waiting only for agent_end lifecycle confirmation.",
 ];
 
-export const LOCAL_OBSERVE_DESCRIPTION = `Observe local teammate and background Bash targets through one status/wait/watch interface.
+export const LOCAL_OBSERVE_DESCRIPTION = `Observe local teammate and background Bash targets through one status/diagnose/wait/watch interface.
 
 - "status": one-shot snapshot of every target
+- "diagnose": one-shot canonical runtime diagnosis for supported teammate targets; it does not wait
 - "wait": block on an all/any/count barrier with one request-level timeout
 - "watch": poll targets until a bounded timeout and return status transitions
 - view="turns" with status lists local teammate session turns
 
 Targets use { kind, id }, where the supported local kinds are "teammate" and "bash_bg". Use detail=full only when recent output or a settled result is required.`;
-export const LOCAL_OBSERVE_SNIPPET = "Observe, wait for, or watch local teammate and background Bash targets.";
+export const LOCAL_OBSERVE_SNIPPET = "Observe, diagnose, wait for, or watch local teammate and background Bash targets.";
 export const LOCAL_OBSERVE_GUIDELINES = [
   "Use observe for mixed or multi-target local status and waits; use one bounded wait instead of polling status.",
+  "Use action=diagnose for a one-shot teammate runtime diagnosis; it is not a wait.",
   "Use action=watch only with a bounded timeoutMs, and action=wait until=completed only when full termination is required.",
   "Use detail=full only when recent output is required; summary is the compact default.",
   "Use view=turns with action=status to inspect a local teammate session history.",
 ];
 
-export const OBSERVE_DESCRIPTION = `Observe mixed teammate and background Bash targets through one status/wait/watch interface.
+export const OBSERVE_DESCRIPTION = `Observe mixed teammate and background Bash targets through one status/diagnose/wait/watch interface.
 
 - "status": one-shot snapshot of every target
+- "diagnose": one-shot canonical runtime diagnosis for supported teammate targets; it does not wait
 - "wait": block on an all/any/count barrier with one request-level timeout; set until="completed" to block until agents fully terminate instead of first result
 - "watch": poll every target until the bounded timeoutMs you provide, returning the full status-transition timeline (richer than status, no barrier required); omitted timeoutMs defaults to 600000 (10 minutes)
 - view="turns" (status only): list the target's session turn history instead of the live snapshot; add turn=<n> to expand one 1-based turn into its messages, tool calls, and results
@@ -796,9 +797,10 @@ export const OBSERVE_DESCRIPTION = `Observe mixed teammate and background Bash t
 - view="todos" (workspace status/watch): inspect sanitized Todo projections from the worker root session; summary reports counts, while detail=full or tail includes structured items and rendered rows
 
 Targets use { kind, id, cursor? }, where kind is currently "teammate", "bash_bg", "workspace", or "remote". Use detail=full (or tail) to include a settled teammate's captured result — including the structured_output value for schema tasks. kind="workspace" accepts owner:<ownerId> or a window name and returns the peer snapshot: view="turns" groups the peer's published root-session progress into turns (assistant text, tool calls, and tool results) with turn=<n> expansion, falling back to the bounded agent run list when the peer published no session progress; view="session" is the cursor-paginated stream view of the same progress; view="todos" reports the peer's bounded, sanitized worker-root Todo projection (summary counts only; detail=full or tail includes Todo rows). kind="remote" accepts a remote:<runId> id returned by remote-worker and returns the owned remote/ACP run: view="turns" groups the run's retained driver events (assistant text, tool calls/results, usage) into turns with turn=<n> expansion, and view="session" cursor-paginates the same event ring. Persisted cross-window message bodies are not published by peers; read them with teammate-list view="inbox". Legacy teammate observation tools remain available internally but are hidden from the default LLM tool catalog.`;
-export const OBSERVE_SNIPPET = "Observe, wait for, or watch mixed teammate and background Bash targets; view='turns' lists history and view='todos' shows workspace Todo projections.";
+export const OBSERVE_SNIPPET = "Observe, diagnose, wait for, or watch mixed teammate and background Bash targets; view='turns' lists history and view='todos' shows workspace Todo projections.";
 export const OBSERVE_GUIDELINES = [
   "Use observe for mixed or multi-target status and waits; use one bounded wait instead of polling status.",
+  "Use action=diagnose for a one-shot canonical runtime diagnosis on supported teammate targets; it is not a wait. The workspace projection does not add diagnosis; use status/session/todos for workspace supervision.",
   "Use action=watch to follow status transitions over time; always pass a bounded timeoutMs — omitted defaults to 600000 (10 minutes). Use action=wait until=completed to block until agents fully terminate.",
   "Use detail=full only when recent output is required; summary is the compact default. detail=full includes a settled agent's captured result and structured_output value.",
   "Use view=turns with action=status to read a session's history: list all turns first, then repeat with turn=<n> to expand one turn. view=turns is not supported by wait or watch.",
@@ -1100,7 +1102,6 @@ export function buildWorkspaceOwnerState(
 ): WorkspaceOwnerState {
   const agents: WorkspaceAgentSnapshot[] = [];
   const settledById = new Map<string, WorkspaceSettledSnapshot>();
-  const resultCandidates: Array<{ correlationId: string; settledAt: number; result: string }> = [];
   for (const agent of state.activeRuns.values()) {
     const summary = agent.lastResult?.split("\n", 1)[0]
       ?? [...agent.outputLog].reverse().find((line) => typeof line === "string" && line.trim().length > 0);
@@ -1114,9 +1115,6 @@ export function buildWorkspaceOwnerState(
         settledAt,
         ...(summary ? { summary: truncateUtf8Tail(summary, 8_192) } : {}),
       });
-      if (agent.lastResult) {
-        resultCandidates.push({ correlationId: agent.correlationId, settledAt, result: agent.lastResult });
-      }
       continue;
     }
     agents.push({
@@ -1148,18 +1146,6 @@ export function buildWorkspaceOwnerState(
       settledAt: record.settledAt,
       ...(record.lastResult ? { summary: truncateUtf8Tail(record.lastResult.split("\n", 1)[0], 8_192) } : {}),
     });
-    if (record.lastResult) {
-      resultCandidates.push({ correlationId: record.correlationId, settledAt: record.settledAt, result: record.lastResult });
-    }
-  }
-  // Bound the result bodies: most recent SETTLED_RESULT_MAX records, each
-  // truncated to SETTLED_RESULT_BYTES (byte-based) so a CJK-heavy payload
-  // cannot push the owner snapshot past MAX_OWNER_FILE_BYTES.
-  for (const candidate of resultCandidates
-    .sort((left, right) => right.settledAt - left.settledAt)
-    .slice(0, SETTLED_RESULT_MAX)) {
-    const record = settledById.get(candidate.correlationId);
-    if (record) settledById.set(candidate.correlationId, { ...record, result: truncateUtf8Tail(candidate.result, SETTLED_RESULT_BYTES) });
   }
   return {
     agents,

@@ -15,6 +15,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { bindWorkspaceCompletionHandle } from "pi-maestro-teammate/v1/workspace-completion";
 import {
   FlowScheduleConflictError,
   FlowScheduleCorruptionError,
@@ -34,6 +35,11 @@ const DISPATCH_A = "123e4567-e89b-42d3-a456-426614174000";
 const DISPATCH_B = "223e4567-e89b-42d3-a456-426614174000";
 const OWNER_ID = "a".repeat(32);
 const OWNER_SELECTOR = `owner:${OWNER_ID}`;
+const COMPLETION_CORRELATION = bindWorkspaceCompletionHandle("9".repeat(32), {
+  workspaceId: "f".repeat(64),
+  ownerId: "1".repeat(32),
+  ownerNonce: "2".repeat(32),
+});
 const identity: ExactWindowIdentity = {
   workspaceId: "workspace",
   endpointId: "endpoint",
@@ -147,6 +153,78 @@ test("FlowScheduleStore normalizes the complete schedule before any persistence"
     );
     await assert.rejects(readFile(join(store.schedulesDir, "duplicate.json"), "utf8"), /ENOENT/);
     await assert.rejects(readFile(join(store.schedulesDir, "too-many.json"), "utf8"), /ENOENT/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("V2 pre-persist callbacks fence admission, acceptance, and completion compatibility writes", async () => {
+  const { root, store } = await temporaryStore({ now: (() => { let now = 100; return () => now++; })() });
+  const injected = new Error("journal committed, compatibility write interrupted");
+  try {
+    await createActiveSchedule(store, "release");
+
+    await assert.rejects(
+      store.createDispatchIntent({
+        dispatchId: DISPATCH_A,
+        scheduleId: "release",
+        stepId: "verify",
+        targetIdentity: identity,
+      }, undefined, (projection) => {
+        assert.equal(projection.activeStepId, "verify");
+        throw injected;
+      }),
+      injected,
+    );
+    assert.equal(await store.readDispatch(DISPATCH_A), undefined);
+    assert.equal((await store.readSchedule("release"))?.activeStepId, undefined);
+
+    await store.createDispatchIntent({
+      dispatchId: DISPATCH_A,
+      scheduleId: "release",
+      stepId: "verify",
+      targetIdentity: identity,
+    });
+    await store.recordPublished({
+      version: FLOW_SCHEDULE_VERSION,
+      type: "flow-schedule-published",
+      dispatchId: DISPATCH_A,
+      scheduleId: "release",
+      stepId: "verify",
+      messageId: DISPATCH_A,
+      traceId: DISPATCH_A,
+      publishedAt: 150,
+    });
+    const accepted = {
+      version: FLOW_SCHEDULE_VERSION,
+      type: "flow-schedule-accepted" as const,
+      dispatchId: DISPATCH_A,
+      scheduleId: "release",
+      stepId: "verify",
+      messageId: DISPATCH_A,
+      acceptedAt: 160,
+      deliveryState: "injected" as const,
+    };
+    await assert.rejects(
+      store.recordAccepted(accepted, (projection) => {
+        assert.equal(projection.steps.verify.state, "awaiting-result");
+        throw injected;
+      }),
+      injected,
+    );
+    assert.equal((await store.readDispatch(DISPATCH_A))?.accepted, undefined);
+    assert.equal((await store.readSchedule("release"))?.steps.verify.state, "dispatching");
+
+    await store.recordAccepted(accepted);
+    await assert.rejects(
+      store.recordCompletion(completion(), (projection) => {
+        assert.equal(projection.state, "completed");
+        throw injected;
+      }),
+      injected,
+    );
+    assert.equal((await store.readDispatch(DISPATCH_A))?.completion, undefined);
+    assert.equal((await store.readSchedule("release"))?.state, "active");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -443,6 +521,79 @@ test("intent replay and completion projection are idempotent and exclusive", asy
       FlowScheduleConflictError,
     );
     assert.equal((await store.readDispatch(DISPATCH_A))?.completion?.result?.summary, "Verification passed");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("accepted projection replay repairs a dispatching step without changing the v1 durable layout", async () => {
+  let now = 100;
+  const { root, store } = await temporaryStore({ now: () => now++ });
+  try {
+    await createActiveSchedule(store, "release");
+    await store.createDispatchIntent({
+      dispatchId: DISPATCH_A,
+      scheduleId: "release",
+      stepId: "verify",
+      targetIdentity: identity,
+    });
+    await store.recordPublished({
+      version: 1,
+      type: "flow-schedule-published",
+      dispatchId: DISPATCH_A,
+      scheduleId: "release",
+      stepId: "verify",
+      messageId: DISPATCH_A,
+      traceId: DISPATCH_A,
+      publishedAt: 150,
+    });
+    const accepted = {
+      version: 1 as const,
+      type: "flow-schedule-accepted" as const,
+      dispatchId: DISPATCH_A,
+      scheduleId: "release",
+      stepId: "verify",
+      messageId: DISPATCH_A,
+      acceptedAt: 160,
+      deliveryState: "accepted" as const,
+    };
+    await store.recordAccepted(accepted);
+
+    const schedulePath = join(store.schedulesDir, "release.json");
+    const interrupted = JSON.parse(await readFile(schedulePath, "utf8")) as FlowScheduleRecord;
+    interrupted.steps.verify.state = "dispatching";
+    await writeFile(schedulePath, `${JSON.stringify(interrupted, null, 2)}\n`, "utf8");
+
+    await store.recordAccepted(accepted);
+    const repaired = await store.readSchedule("release");
+    assert.equal(repaired?.steps.verify.state, "awaiting-result");
+    const repairedAt = repaired?.updatedAt;
+    await store.recordAccepted(accepted);
+    assert.equal((await store.readSchedule("release"))?.updatedAt, repairedAt, "an already-projected replay does not rewrite the schedule");
+    await store.recordCompletion(completion());
+    assert.deepEqual(await store.recordAccepted(accepted), accepted, "a late accepted receipt remains idempotent after completion");
+    assert.equal((await store.readSchedule("release"))?.state, "completed");
+    assert.deepEqual(Object.keys(JSON.parse(await readFile(join(store.dispatchesDir, DISPATCH_A, "accepted.json"), "utf8"))).sort(), [
+      "acceptedAt", "deliveryState", "dispatchId", "messageId", "scheduleId", "stepId", "type", "version",
+    ]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("completion correlation is optional only when both legacy intent and result omit it", async () => {
+  const { root, store } = await temporaryStore({ now: () => 100 });
+  try {
+    await createActiveSchedule(store, "release");
+    await store.createDispatchIntent({
+      dispatchId: DISPATCH_A,
+      scheduleId: "release",
+      stepId: "verify",
+      targetIdentity: identity,
+      completionCorrelation: COMPLETION_CORRELATION,
+    });
+    await assert.rejects(store.recordCompletion(completion()), /correlation does not match/);
+    assert.equal((await store.readDispatch(DISPATCH_A))?.completion, undefined);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

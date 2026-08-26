@@ -35,6 +35,17 @@ export function resumeFlowSchedule(schedule: FlowScheduleRecord, target?: string
   return parseFlowScheduleRecord(next);
 }
 
+export function failFlowSchedule(schedule: FlowScheduleRecord, reason: string): FlowScheduleRecord {
+  if (schedule.state === "completed" || schedule.state === "failed" || schedule.state === "cancelled") {
+    conflict(schedule, "fail");
+  }
+  if (schedule.state !== "active") conflict(schedule, "fail");
+  if (schedule.activeStepId !== undefined) {
+    throw new FlowScheduleConflictError("Flow schedule fail requires no active dispatch");
+  }
+  return parseFlowScheduleRecord({ ...schedule, state: "failed", reason });
+}
+
 export function cancelFlowSchedule(schedule: FlowScheduleRecord, reason: string): FlowScheduleRecord {
   const action = parseFlowScheduleAction({ action: "cancel", scheduleId: schedule.scheduleId, reason });
   if (action.action !== "cancel") throw new Error("Flow schedule cancel normalization failed");

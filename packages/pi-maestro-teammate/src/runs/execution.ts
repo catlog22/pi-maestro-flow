@@ -138,7 +138,14 @@ import {
   writeSchemaFile,
   writeSystemPromptFile,
 } from "./execution-infra.ts";
+import { runtimeBrokerModeFromEnv } from "../runtime-broker/rollout.ts";
+import { AgentRunRuntimeActor } from "./runtime-actor.ts";
 import { assembleTaskPrompt } from "./briefing.ts";
+import {
+  appendTodoPromptContext,
+  resolveTodoPromptContext,
+  type ResolvedTodoPromptContext,
+} from "../public/v1/todo-context.ts";
 import type {
   JsonLineEvent,
   ModelRegistryDispatchContext,
@@ -662,6 +669,25 @@ export async function runSingleTeammate(
   params: RunSingleTeammateParams,
   options: RunTeammateOptions,
 ): Promise<SingleResult> {
+  const correlationId = options.correlationId ?? randomUUID();
+  const admittedOptions = { ...options, correlationId };
+  const actorMode = options.runtimeActorHost?.mode ?? runtimeBrokerModeFromEnv();
+  if (actorMode === "off") return runSingleTeammateV1(params, admittedOptions);
+  const runtimeActor = await AgentRunRuntimeActor.start(correlationId, params, admittedOptions);
+  try {
+    const result = await runSingleTeammateV1(params, runtimeActor.wrap(admittedOptions));
+    await runtimeActor.finish();
+    return result;
+  } catch (error) {
+    await runtimeActor.abort();
+    throw error;
+  }
+}
+
+async function runSingleTeammateV1(
+  params: RunSingleTeammateParams,
+  options: RunTeammateOptions,
+): Promise<SingleResult> {
   // Briefing assembly before any use of params.task so every downstream path
   // (spawn stdin, resume prompt, rejection echo) sees the same final text.
   if (params.briefing && params.briefing.length > 0) {
@@ -669,6 +695,33 @@ export async function runSingleTeammate(
   }
   const startTime = Date.now();
   const correlationId = options.correlationId ?? randomUUID();
+  const publicTaskPrompt = params.task ?? "";
+  let latestTurnEvent: AgentTurnEvent | undefined;
+  let cancellationTurnRecorded = false;
+  let rejectionModel = params.model;
+  let resolvedRunCwd: string | undefined;
+  let publicationAwaitingCompletion: { publicationId: string; originCwd: string } | undefined;
+  let agentDiscoveryWarning: string | undefined;
+  let todoPromptContext: ResolvedTodoPromptContext | undefined;
+  let todoPromptContextApplied = false;
+  let todoPromptContextWarnings: readonly string[] = [];
+
+  const applyTodoPromptContext = async (): Promise<void> => {
+    if (todoPromptContextApplied || !params.todos || params.todos.length === 0) return;
+    todoPromptContext ??= await resolveTodoPromptContext({
+      correlationId,
+      cwd: resolvedRunCwd ?? options.baseCwd,
+      todoIds: params.todos,
+      signal: options.signal,
+    });
+    todoPromptContextWarnings = todoPromptContext.warnings;
+    params = {
+      ...params,
+      task: appendTodoPromptContext(publicTaskPrompt, todoPromptContext),
+    };
+    todoPromptContextApplied = true;
+  };
+
   const initialTurnContext: AgentTurnTriggerContextV1 = options.initialTurnContext ?? {
     version: AGENT_TURN_VERSION,
     turnId: randomUUID(),
@@ -679,16 +732,17 @@ export async function runSingleTeammate(
       options.initialMessageProvenanceOf?.(correlationId) ?? options.initialMessageProvenance,
     ),
   };
-  let latestTurnEvent: AgentTurnEvent | undefined;
-  let cancellationTurnRecorded = false;
-  let rejectionModel = params.model;
-  let resolvedRunCwd: string | undefined;
-  let publicationAwaitingCompletion: { publicationId: string; originCwd: string } | undefined;
-  let agentDiscoveryWarning: string | undefined;
 
-  const attachDiscoveryWarning = (result: SingleResult): SingleResult => {
-    if (agentDiscoveryWarning && !result.warnings?.includes(agentDiscoveryWarning)) {
-      result.warnings = [...(result.warnings ?? []), agentDiscoveryWarning];
+  const attachPublicResultContext = (result: SingleResult): SingleResult => {
+    result.task = publicTaskPrompt;
+    const warnings = [
+      ...(agentDiscoveryWarning ? [agentDiscoveryWarning] : []),
+      ...todoPromptContextWarnings,
+    ];
+    for (const warning of warnings) {
+      if (!result.warnings?.includes(warning)) {
+        result.warnings = [...(result.warnings ?? []), warning];
+      }
     }
     return result;
   };
@@ -696,7 +750,7 @@ export async function runSingleTeammate(
   const rejectWith = (content: string): SingleResult => ({
     agent: params.agent,
     name: params.name,
-    task: params.task ?? "",
+    task: publicTaskPrompt,
     exitCode: 1,
     messages: [{ role: "system", content }],
     usage: emptyUsage(),
@@ -709,7 +763,7 @@ export async function runSingleTeammate(
     result: SingleResult,
     terminalStatus?: AgentTerminalStatus,
   ): void => {
-    attachDiscoveryWarning(result);
+    attachPublicResultContext(result);
     if (resolvedRunCwd) result.originCwd ??= resolvedRunCwd;
     if (publicationAwaitingCompletion) {
       result.publicationId ??= publicationAwaitingCompletion.publicationId;
@@ -735,7 +789,7 @@ export async function runSingleTeammate(
   };
 
   const publishResult = async (result: SingleResult, originCwd: string): Promise<void> => {
-    attachDiscoveryWarning(result);
+    attachPublicResultContext(result);
     result.publicationId ??= randomUUID();
     result.originCwd ??= originCwd;
     publicationAwaitingCompletion = {
@@ -1455,11 +1509,13 @@ export async function runSingleTeammate(
               + "— refusing to run a backend-selected task on the pi subprocess path",
             );
           }
+          await applyTodoPromptContext();
+          if (options.signal?.aborted) return cancelAtBoundary("while Todo prompt context resolved");
           attempt = outcomeOf(await runSingleAttempt(
             params, agentConfig, cwd, correlationId, replyTo, startTime, modelToUse, attemptOptions,
           ));
         } else {
-          const spec = registrationCandidate === undefined
+          let spec = registrationCandidate === undefined
             ? backendSpecOf(params, cwd, modelToUse, remoteRouting)
             : modelRegistrationBackendSpecOf(params, cwd, registrationCandidate);
           if (registrationCandidate !== undefined
@@ -1499,6 +1555,11 @@ export async function runSingleTeammate(
             // match the task was charging a model's health for it.
             return rejectAndPublish(capabilityErrors.join("\n"));
           }
+          await applyTodoPromptContext();
+          if (options.signal?.aborted) return cancelAtBoundary("while Todo prompt context resolved");
+          spec = registrationCandidate === undefined
+            ? backendSpecOf(params, cwd, modelToUse, remoteRouting)
+            : modelRegistrationBackendSpecOf(params, cwd, registrationCandidate);
           // Whether the backend published a channel of its own. Tracked rather
           // than decided by backend name: a backend that spawns a child hands
           // the host a real pipe carrying lease control and a session dir, and
@@ -1558,6 +1619,20 @@ export async function runSingleTeammate(
           }
           try {
             attempt = await run.outcome;
+            if (backend.name !== PI_SUBPROCESS) {
+              void attempt.reclamation.then((outcome) => {
+                try {
+                  options.onReclamationOutcome?.(
+                    correlationId,
+                    outcome.status === "reclaimed"
+                      ? { status: "reclaimed", forced: false }
+                      : { status: "unreaped", forced: false, reason: "exit-unconfirmed" },
+                  );
+                } catch {
+                  // Reclamation observers are advisory after the backend has released its process.
+                }
+              });
+            }
           } finally {
             options.signal?.removeEventListener("abort", abortRun);
             bindings?.delete(correlationId);
@@ -1612,7 +1687,7 @@ export async function runSingleTeammate(
           registrationCandidate,
         );
       }
-      attachDiscoveryWarning(candidateResult);
+      attachPublicResultContext(candidateResult);
       lastResult = candidateResult;
       candidateResult.originCwd ??= cwd;
       if (modelToUse === undefined) {

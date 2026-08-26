@@ -8,7 +8,7 @@
 
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import type { ChildProcess } from "node:child_process";
 import crossSpawn from "cross-spawn";
 import { homedir } from "node:os";
@@ -124,6 +124,8 @@ import {
   activeWorkspaceBackgroundJobsFromPayload,
   waitForWorkspacePeerCommandResponse,
   workspaceMainSessionDeliveryDecision,
+  workspaceProtocolCommandId,
+  workspaceWindowCompletionHandle,
   workspaceWindowLifecycle,
   workspaceWindowTerminalPublicationId,
   workspaceWindowTerminalReservationId,
@@ -143,9 +145,14 @@ import {
   type WorkspacePeerWindowListing,
   type WorkspaceResolvedTarget,
   type WorkspaceSettledSnapshot,
+  type WorkspaceWindowCompletionHandle,
   type WorkspaceWindowTerminalResult,
   type WorkspaceWindowTerminalResultDraft,
 } from "./workspace-peers.ts";
+import {
+  createWindowSupervisorRuntimeActor,
+  type WindowSupervisorRuntimeActor,
+} from "./runtime-actor-host.ts";
 import {
   registerWorkspaceProjectionDirtyListener,
 } from "../public/v1/workspace-projections.ts";
@@ -202,6 +209,7 @@ import type {
   RpcMessageMode,
   NormalizedTask,
 } from "../runs/execution.ts";
+import { createForkSnapshot } from "../runs/fork-snapshot.ts";
 import {
   auxToolCallFallback,
   auxToolResultFallback,
@@ -233,6 +241,7 @@ import {
   terminateProcessTreeByPid,
   type ChildTerminationController,
 } from "../runs/execution-infra.ts";
+import { isManagedWorkerWindow } from "../runs/child-extensions.ts";
 import type { SessionSelectionRow } from "../tui/session-send-overlay.ts";
 import { loadRemoteConfig, loadRemoteConfigState } from "../remote/config.ts";
 import { SshRemoteConnectionFactory } from "../remote/ssh.ts";
@@ -397,6 +406,18 @@ import {
   rebuildAgentTurnLedger,
   type AgentTurnLedger,
 } from "../shared/turn-ledger.ts";
+import {
+  RUNTIME_READ_MODEL_DELTA_EVENT,
+  RUNTIME_READ_MODEL_QUERY_EVENT,
+  RUNTIME_READ_MODEL_SNAPSHOT_EVENT,
+  RUNTIME_READ_MODEL_UNAVAILABLE_EVENT,
+  RuntimeReadModelProjectionV2,
+  createRuntimeReadModelDeltaV2,
+  runtimeV2ReadEnabled,
+  type RuntimeAgentReadEntityV2,
+  type RuntimeReadModelSnapshotV2,
+} from "../runtime-v2/read-model.ts";
+import { RuntimeReadModelBrokerBridge } from "../runtime-v2/broker-read-model.ts";
 import { formatLocalAgentMessage } from "../shared/routing.ts";
 export * from "./teammate-core.ts";
 import {
@@ -487,6 +508,9 @@ import { bindDiagnosticUi, registerDiagnosticCommand } from "./diagnostic-status
 import type { TeammateRuntimeOptions, ProgressFlushGate, AgentWidgetTheme, AgentWidgetRow, AgentSelectorRow, PendingChildProxyRequest, ChildProxyPendingRequests, IpcSender } from "./teammate-core.ts";
 import { buildHistoryRows, historyRowKey } from "./teammate-core.ts";
 import { MailboxHost, mailboxModeFromEnv } from "./mailbox/host.ts";
+import { RuntimeBrokerMailboxCommitter } from "../runtime-broker/mailbox-commit.ts";
+import { getRuntimeBrokerStateDirectory } from "../runtime-broker/private-state.ts";
+import { runtimeBrokerModeFromEnv } from "../runtime-broker/rollout.ts";
 import { createDirectAgentHostRegistry, createMailboxHostRegistry, MAILBOX_REGISTRY_KEY } from "../public/v1/mailbox.ts";
 import {
   SessionHostRegistry,
@@ -495,6 +519,7 @@ import {
   createLocalRootTransportAdapter,
   createWorkspacePeerV1TransportAdapter,
   getSessionHostRegistry,
+  publishSessionHostDirectoryRefresh,
   publishSessionHostRegistry,
   sessionRootEndpointId,
   normalizeSessionMessageKind,
@@ -962,6 +987,7 @@ export default function registerTeammateExtension(
       tool: string,
       params: unknown,
       signal?: AbortSignal,
+      spawningToolCallId?: string,
     ): Promise<TeammateToolResult<T>> {
       const send = createIpcSender();
       if (!send) {
@@ -977,6 +1003,7 @@ export default function registerTeammateExtension(
           requestId,
           params,
           correlationId: process.env.PI_TEAMMATE_CORRELATION_ID,
+          ...(spawningToolCallId ? { spawningToolCallId } : {}),
         },
         send,
         CHILD_PROXY_TIMEOUT_MS,
@@ -1041,8 +1068,8 @@ export default function registerTeammateExtension(
       promptSnippet: TEAMMATE_PROMPT_SNIPPET,
       promptGuidelines: TEAMMATE_PROMPT_GUIDELINES,
       parameters: TeammateParams,
-      async execute(_id: string, params: RunTeammateParams, signal: AbortSignal) {
-        return proxyCall<Details>("teammate", params, signal);
+      async execute(id: string, params: RunTeammateParams, signal: AbortSignal) {
+        return proxyCall<Details>("teammate", params, signal, id);
       },
       renderCall(args, theme, context) {
         return renderTeammateCall(args, theme, context);
@@ -1220,6 +1247,166 @@ export default function registerTeammateExtension(
     }, now);
   };
 
+  let runtimeReadProjection = new RuntimeReadModelProjectionV2();
+  let runtimeReadReady = false;
+  let runtimeReadBridge: RuntimeReadModelBrokerBridge | undefined;
+  let runtimeReadRefreshTimer: ReturnType<typeof setInterval> | undefined;
+
+  const progressForRuntimeReadAgent = (agent: ActiveAgent): AgentProgressSnapshot | undefined => {
+    const direct = agent.progress?.find((entry) => entry.correlationId === agent.correlationId);
+    if (direct) return direct;
+    for (const owner of state.activeRuns.values()) {
+      const projected = owner.progress?.find((entry) => entry.correlationId === agent.correlationId);
+      if (projected) return projected;
+    }
+    return undefined;
+  };
+
+  const runtimeReadEntity = (agent: ActiveAgent): RuntimeAgentReadEntityV2 => {
+    refreshAgentRuntimeProjection(agent);
+    const progress = progressForRuntimeReadAgent(agent);
+    const generation = Math.max(1, agent.runtimeGeneration ?? 1);
+    const lastMessage = progress?.lastMessage ?? agent.lastResult ?? agent.outputLog.at(-1);
+    return {
+      correlationId: agent.correlationId,
+      generation,
+      agent: agent.agent,
+      ...(agent.name ? { name: agent.name } : {}),
+      ...(agent.task ? { task: agent.task } : {}),
+      ...(agent.spawnedBy ? {
+        spawnedBy: agent.spawnedBy,
+        parentCorrelationId: agent.spawnedBy,
+      } : {}),
+      status: agent.status,
+      ...(agent.phase ? { phase: agent.phase } : {}),
+      startedAt: agent.startedAt,
+      lastActivityAt: agent.lastActivityAt,
+      ...(agent.resultReadyAt === undefined ? {} : { resultReadyAt: agent.resultReadyAt }),
+      ...(agent.runtime ? { runtime: structuredClone(agent.runtime) } : {}),
+      ...(agent.turn ? { turn: structuredClone(agent.turn) } : {}),
+      ...(agent.lastOutcome ? { lastOutcome: structuredClone(agent.lastOutcome) } : {}),
+      ...(progress?.taskIndex === undefined ? {} : { taskIndex: progress.taskIndex }),
+      ...(progress?.dependencies === undefined ? {} : { dependencies: [...progress.dependencies] }),
+      ...(progress?.recentTools === undefined ? {} : { recentTools: structuredClone(progress.recentTools) }),
+      ...(progress?.toolCount === undefined ? {} : { toolCount: progress.toolCount }),
+      ...(progress?.tokens === undefined ? {} : { tokens: progress.tokens }),
+      ...(progress?.inputTokens === undefined ? {} : { inputTokens: progress.inputTokens }),
+      ...(progress?.outputTokens === undefined ? {} : { outputTokens: progress.outputTokens }),
+      ...(progress?.cacheReadTokens === undefined ? {} : { cacheReadTokens: progress.cacheReadTokens }),
+      ...(progress?.cacheWriteTokens === undefined ? {} : { cacheWriteTokens: progress.cacheWriteTokens }),
+      ...(agent.requestedModel === undefined ? {} : { requestedModel: agent.requestedModel }),
+      ...(agent.resolvedModel === undefined ? {} : { resolvedModel: agent.resolvedModel }),
+      ...(agent.attemptedModels === undefined ? {} : { attemptedModels: [...agent.attemptedModels] }),
+      ...(lastMessage ? { lastMessage } : {}),
+      ...(progress?.error ? { error: progress.error } : {}),
+    };
+  };
+
+  const currentRuntimeReadAgents = (): RuntimeAgentReadEntityV2[] =>
+    [...state.activeRuns.values()].map(runtimeReadEntity);
+
+  const applyRuntimeReadSnapshot = (snapshot: RuntimeReadModelSnapshotV2): void => {
+    const previous = runtimeReadProjection.snapshot();
+    if (!runtimeReadReady) {
+      if (!runtimeReadProjection.applySnapshot(snapshot)) return;
+      runtimeReadReady = true;
+      pi.events.emit(RUNTIME_READ_MODEL_SNAPSHOT_EVENT, runtimeReadProjection.snapshot());
+      return;
+    }
+    if (snapshot.cursor === previous.cursor) {
+      if (JSON.stringify(snapshot.agents) === JSON.stringify(previous.agents)) return;
+      if (runtimeReadProjection.applySnapshot(snapshot)) {
+        pi.events.emit(RUNTIME_READ_MODEL_SNAPSHOT_EVENT, runtimeReadProjection.snapshot());
+      }
+      return;
+    }
+    const delta = createRuntimeReadModelDeltaV2({
+      previous,
+      agents: snapshot.agents,
+      source: snapshot.source,
+      nextCursor: snapshot.cursor,
+    });
+    if (runtimeReadProjection.applyDelta(delta)) {
+      pi.events.emit(RUNTIME_READ_MODEL_DELTA_EVENT, delta);
+      return;
+    }
+    if (runtimeReadProjection.applySnapshot(snapshot)) {
+      pi.events.emit(RUNTIME_READ_MODEL_SNAPSHOT_EVENT, runtimeReadProjection.snapshot());
+    }
+  };
+
+  const failRuntimeReadModel = (error: unknown): void => {
+    runtimeReadReady = false;
+    runtimeReadProjection = new RuntimeReadModelProjectionV2();
+    pi.events.emit(RUNTIME_READ_MODEL_UNAVAILABLE_EVENT, { version: 2 });
+    logDiagnosticWarn("[pi-maestro-teammate] Runtime V2 canonical read failed; v1 bridge remains active:", error);
+  };
+
+  const refreshRuntimeReadModel = async (): Promise<void> => {
+    const bridge = runtimeReadBridge;
+    if (!bridge) return;
+    try {
+      const snapshot = await bridge.snapshot();
+      if (runtimeReadBridge === bridge) applyRuntimeReadSnapshot(snapshot);
+    } catch (error) {
+      if (runtimeReadBridge === bridge) failRuntimeReadModel(error);
+    }
+  };
+
+  const publishRuntimeReadSnapshot = (): void => {
+    if (runtimeReadReady) pi.events.emit(RUNTIME_READ_MODEL_SNAPSHOT_EVENT, runtimeReadProjection.snapshot());
+    void refreshRuntimeReadModel();
+  };
+
+  const publishRuntimeReadDelta = (): void => {
+    const bridge = runtimeReadBridge;
+    if (!bridge) return;
+    void bridge.publish(currentRuntimeReadAgents()).then((snapshot) => {
+      if (runtimeReadBridge === bridge) applyRuntimeReadSnapshot(snapshot);
+    }).catch((error) => {
+      if (runtimeReadBridge === bridge) failRuntimeReadModel(error);
+    });
+  };
+
+  const initializeRuntimeReadModel = async (cwd: string, sourceId: string): Promise<void> => {
+    if (runtimeReadRefreshTimer) clearInterval(runtimeReadRefreshTimer);
+    runtimeReadRefreshTimer = undefined;
+    const previous = runtimeReadBridge;
+    runtimeReadBridge = undefined;
+    runtimeReadReady = false;
+    runtimeReadProjection = new RuntimeReadModelProjectionV2();
+    await previous?.close().catch(() => undefined);
+    if (!runtimeV2ReadEnabled()) return;
+    try {
+      const bridge = await RuntimeReadModelBrokerBridge.connect({ cwd, sourceId });
+      if (state.currentSessionId !== sourceId) {
+        await bridge.close();
+        return;
+      }
+      runtimeReadBridge = bridge;
+      const snapshot = await bridge.publish(currentRuntimeReadAgents(), { reset: true });
+      if (runtimeReadBridge !== bridge) {
+        await bridge.close();
+        return;
+      }
+      applyRuntimeReadSnapshot(snapshot);
+      runtimeReadRefreshTimer = setInterval(() => void refreshRuntimeReadModel(), 500);
+      runtimeReadRefreshTimer.unref?.();
+    } catch (error) {
+      failRuntimeReadModel(error);
+    }
+  };
+
+  const resolveRuntimeReadAgent = (selector: string): RuntimeAgentReadEntityV2 | undefined => {
+    if (!runtimeReadReady || !runtimeV2ReadEnabled()) return undefined;
+    const snapshot = runtimeReadProjection.snapshot();
+    const exact = snapshot.agents.find((agent) => agent.correlationId === selector);
+    if (exact) return exact;
+    const normalized = selector.replace(/^@/, "").split("#", 1)[0];
+    const named = snapshot.agents.filter((agent) => agent.name === normalized);
+    return named.length === 1 ? named[0] : undefined;
+  };
+
   const recordAgentTurnEvent = (event: AgentTurnEvent, fence?: RootSessionFence): void => {
     if (fence && !ownsRootSessionFence(fence)) return;
     const agent = state.activeRuns.get(event.correlationId);
@@ -1379,6 +1566,8 @@ export default function registerTeammateExtension(
 
   let workspacePeerPublisher: WorkspacePeerPublisher | undefined;
   let workspacePeerConsumer: WorkspacePeerCommandConsumer | undefined;
+  let workspaceWindowRuntimeActor: WindowSupervisorRuntimeActor | undefined;
+  let workspacePeerGeneration = 0;
   let workspacePeerSessionName: string | undefined;
   let workspacePeerOwners: WorkspaceOwnerSnapshot[] = [];
   let workspaceBackgroundJobs: WorkspaceBackgroundJobSnapshot[] = [];
@@ -1391,6 +1580,7 @@ export default function registerTeammateExtension(
   let workspaceMainAssistantEventOpen = false;
   let workspaceCurrentTurnAssistantMessage: unknown;
   let workspaceTerminalResultDraft: WorkspaceWindowTerminalResultDraft | undefined;
+  let workspaceTerminalResultState = { settled: false, terminalPublished: false };
   const workspaceTerminalResultPublications = new Map<string, Promise<boolean>>();
   const workspaceTerminalCompletionPublications = new Map<string, Promise<boolean>>();
   let workspaceReceiptReconcileTimer: ReturnType<typeof setInterval> | undefined;
@@ -1408,10 +1598,10 @@ export default function registerTeammateExtension(
       ?? `process-${process.pid}`;
 
   const workspaceTerminalCompletionSeed = (
-    request: Pick<WindowThreadEntry, "messageId" | "workspaceId" | "createdAt">,
+    request: Pick<WindowThreadEntry, "messageId" | "workspaceId" | "createdAt" | "targetSessionId">,
   ): CompletionDispatchSeed | undefined => {
-    const sessionId = state.currentSessionId;
-    if (!sessionId) return undefined;
+    const sessionId = request.targetSessionId ?? state.currentSessionId;
+    if (!sessionId || (state.currentSessionId !== null && state.currentSessionId !== sessionId)) return undefined;
     return {
       dispatchId: request.messageId,
       deliveryGroupId: request.messageId,
@@ -1425,14 +1615,22 @@ export default function registerTeammateExtension(
     };
   };
 
+  /**
+   * Thrown when no completion durability provider is registered in this
+   * process. Callers must degrade to passive delivery (journal + mailbox +
+   * deadline sweep), never fail the user operation — same convention as
+   * teammate-proxy's "durable failed; using passive delivery" path.
+   */
+  class WorkspaceTerminalDurabilityUnavailableError extends Error {}
+
   const reserveWorkspaceTerminalCompletion = async (
-    request: Pick<WindowThreadEntry, "messageId" | "workspaceId" | "createdAt">,
+    request: Pick<WindowThreadEntry, "messageId" | "workspaceId" | "createdAt" | "targetSessionId">,
   ): Promise<CompletionDispatchSeed> => {
     const seed = workspaceTerminalCompletionSeed(request);
     if (!seed) throw new Error("The parent session has no stable identity for terminal completion delivery.");
     const reservation = await completionCoordinator.beginDispatch(seed);
     if (!reservation.durable) {
-      throw new Error("Canonical completion durability is unavailable for this workspace request.");
+      throw new WorkspaceTerminalDurabilityUnavailableError("Canonical completion durability is unavailable for this workspace request.");
     }
     await completionCoordinator.requireNotification({
       dispatchId: seed.dispatchId,
@@ -1859,7 +2057,9 @@ export default function registerTeammateExtension(
       : request.authorize?.() !== false;
     const authorityRevoked = (): SessionMessageResult => ({
       delivered: false,
-      error: "Monitor communication authority was revoked before workspace publication.",
+      error: source === "monitor"
+        ? "Monitor communication authority was revoked before workspace publication."
+        : "Session delivery authority was revoked before workspace publication.",
     });
     if (!authorized()) return authorityRevoked();
     if (mode === "abort") return { delivered: false, error: "Cross-session abort is not supported." };
@@ -1920,12 +2120,20 @@ export default function registerTeammateExtension(
           messageId: request.messageId,
           workspaceId: publisher.identity.workspaceId,
           createdAt: commandCreatedAt,
+          ...(fence.sessionId === null ? {} : { targetSessionId: fence.sessionId }),
         });
       } catch (error) {
-        return {
-          delivered: false,
-          error: `Terminal completion reservation failed: ${error instanceof Error ? error.message : String(error)}`,
-        };
+        if (!(error instanceof WorkspaceTerminalDurabilityUnavailableError)) {
+          return {
+            delivered: false,
+            error: `Terminal completion reservation failed: ${error instanceof Error ? error.message : String(error)}`,
+          };
+        }
+        // No durability provider in this process (e.g. Flow extension not
+        // loaded): deliver anyway. The worker still publishes its terminal
+        // envelope to the mailbox and the deadline/pid sweep finalizes
+        // best-effort; only canonical outbox notification is lost.
+        logDiagnosticWarn(`[pi-maestro-teammate] ${error.message} Delivering ${request.messageId} without canonical completion tracking.`);
       }
     }
     const abandonTerminalCompletion = async (reason: string): Promise<void> => {
@@ -1940,7 +2148,7 @@ export default function registerTeammateExtension(
     try {
       const command = await enqueueWorkspacePeerCommand(publisher.identity, target, mode, message, {
         now: commandCreatedAt,
-        commandId: request.messageId,
+        commandId: workspaceProtocolCommandId(request.messageId),
         source,
         messageKind: request.messageKind,
         provenance: request.provenance,
@@ -1950,7 +2158,9 @@ export default function registerTeammateExtension(
         fromSessionName: request.fromSessionName ?? workspacePeerSessionName,
         beforePublish(prepared) {
           if (!authorized()) {
-            throw new Error("Monitor communication authority was revoked before command publication.");
+            throw new Error(source === "monitor"
+              ? "Monitor communication authority was revoked before command publication."
+              : "Session delivery authority was revoked before command publication.");
           }
           if (!ownsRootSessionFence(fence)) {
             throw new Error("The originating Pi session changed before command publication.");
@@ -1968,6 +2178,7 @@ export default function registerTeammateExtension(
             ...(prepared.replyTo === undefined ? {} : { replyTo: prepared.replyTo }),
             ...(prepared.terminalResultRequested === undefined ? {} : { terminalResultRequested: prepared.terminalResultRequested }),
             ...(prepared.fromSessionName === undefined ? {} : { fromSessionName: prepared.fromSessionName }),
+            ...(fence.sessionId === null ? {} : { targetSessionId: fence.sessionId }),
             targetCorrelationId: prepared.targetCorrelationId,
             mode,
             body: message,
@@ -1979,7 +2190,9 @@ export default function registerTeammateExtension(
         },
         beforeCommit() {
           if (!authorized()) {
-            throw new Error("Monitor communication authority was revoked before command commit.");
+            throw new Error(source === "monitor"
+              ? "Monitor communication authority was revoked before command commit."
+              : "Session delivery authority was revoked before command commit.");
           }
           if (!ownsRootSessionFence(fence)) {
             throw new Error("The originating Pi session changed before command commit.");
@@ -2287,14 +2500,27 @@ export default function registerTeammateExtension(
   const createMailboxHost = (): MailboxHost => {
     const rootCorrelationId = state.activeRuns.values().next().value?.correlationId;
     const workspaceId = workspaceIdForCwd(state.baseCwd);
+    const ownerId = `host-${process.pid}`;
+    const brokerCommitter = runtimeBrokerModeFromEnv() === "sqlite"
+      ? new RuntimeBrokerMailboxCommitter({
+          stateDirectory: getRuntimeBrokerStateDirectory(state.baseCwd),
+          holderId: ownerId,
+        })
+      : undefined;
     mailboxWorkspaceId = workspaceId;
     const host = new MailboxHost({
       rootDir: join(homedir(), ".pi", "teammate", "mailbox"),
       state,
       rootCorrelationId,
-      ownerId: `host-${process.pid}`,
+      ownerId,
       workspaceId,
       teamId: rootCorrelationId ?? "team-root",
+      commitApplied: brokerCommitter === undefined
+        ? undefined
+        : async (envelope) => { await brokerCommitter.commit(envelope); },
+      closeDispatchAuthority: brokerCommitter === undefined
+        ? undefined
+        : () => brokerCommitter.close(),
       inject: async (envelope) => {
         // Re-route the enqueued envelope back into the actual child stdin.
         const target = state.activeRuns.get(envelope.recipientCorrelationId);
@@ -2750,6 +2976,14 @@ export default function registerTeammateExtension(
     },
   });
   publishSessionHostRegistry(sessionHostRegistry, rootGlobals);
+  publishSessionHostDirectoryRefresh(async () => {
+    const fence = captureRootSessionFence();
+    await workspacePeerLifecycle;
+    if (!ownsRootSessionFence(fence)) return;
+    await refreshWorkspacePeerOwners();
+    if (!ownsRootSessionFence(fence)) return;
+    refreshSessionEndpointDirectory(true);
+  }, rootGlobals);
   sessionHostRegistry.subscribe(
     (snapshot) => pi.events.emit(SESSION_HOST_REGISTRY_EVENT, snapshot),
     { emitCurrent: false },
@@ -2806,9 +3040,16 @@ export default function registerTeammateExtension(
       source: "system",
       messageKind: "status",
       trustedStatus: true,
-      authorize: () => workspacePeerPublisher === publisher
-        && ownsRootSessionFence(fence)
-        && sessionHostRegistry?.directory.get(endpoint.id)?.contentRevision === endpoint.contentRevision,
+      authorize: () => {
+        const current = sessionHostRegistry?.directory.get(endpoint.id);
+        return workspacePeerPublisher === publisher
+          && ownsRootSessionFence(fence)
+          && current?.kind === "root"
+          && current.scope === "workspace-peer"
+          && current.workspaceId === endpoint.workspaceId
+          && current.ownerId === endpoint.ownerId
+          && current.ownerNonce === endpoint.ownerNonce;
+      },
     }).then((delivery) => {
       const published = delivery.delivered || delivery.receipt?.publicationStage === "published";
       if (!published) {
@@ -2825,12 +3066,17 @@ export default function registerTeammateExtension(
       return false;
     });
     workspaceTerminalResultPublications.set(resultMessageId, publication);
+    void publication.then((published) => {
+      if (!published && workspaceTerminalResultPublications.get(resultMessageId) === publication) {
+        workspaceTerminalResultPublications.delete(resultMessageId);
+      }
+    });
     return publication;
   };
 
   const publishWorkspaceWindowTerminalResults = async (
     draft: WorkspaceWindowTerminalResultDraft,
-  ): Promise<void> => {
+  ): Promise<boolean> => {
     const requests = sessionHostRegistry?.thread.list().filter((entry) =>
       entry.direction === "incoming"
       && entry.terminalResultRequested === true
@@ -2838,7 +3084,17 @@ export default function registerTeammateExtension(
       && (entry.status === "injected" || entry.status === "accepted")
       && entry.replyTo === `owner:${entry.peerOwnerId}`
     ) ?? [];
-    for (const request of requests) await publishWorkspaceWindowTerminalResult(request, draft);
+    const publications: boolean[] = [];
+    for (const request of requests) {
+      publications.push(await publishWorkspaceWindowTerminalResult(request, draft));
+    }
+    return publications.every(Boolean);
+  };
+
+  const flushWorkspaceTerminalResultPublications = async (): Promise<boolean> => {
+    const publications = [...workspaceTerminalResultPublications.values()];
+    if (publications.length === 0) return true;
+    return (await Promise.all(publications)).every(Boolean);
   };
 
   const publishWorkspaceTerminalCompletion = (
@@ -2864,7 +3120,13 @@ export default function registerTeammateExtension(
             : [terminal.error ?? `Workspace worker ${terminal.outcome}.`, terminal.finalText]
                 .filter((part): part is string => Boolean(part))
                 .join("\n\n");
-        const summary = content.replace(/\s+/g, " ").trim().slice(0, 1_024);
+        const summary = terminal.outcome === "completed"
+          ? "Workspace worker completed."
+          : terminal.outcome === "cancelled"
+            ? "Workspace worker was cancelled."
+            : terminal.outcome === "no-result"
+              ? "Workspace worker failed without a final result."
+              : `Workspace worker failed${terminal.error ? `: ${terminal.error.replace(/\s+/g, " ").trim().slice(0, 512)}` : "."}`;
         const result: SingleResult = {
           agent: "workspace-window",
           task: request.body,
@@ -2920,6 +3182,11 @@ export default function registerTeammateExtension(
       }
     })();
     workspaceTerminalCompletionPublications.set(publicationId, publication);
+    void publication.then((published) => {
+      if (!published && workspaceTerminalCompletionPublications.get(publicationId) === publication) {
+        workspaceTerminalCompletionPublications.delete(publicationId);
+      }
+    });
     return publication;
   };
 
@@ -2952,19 +3219,23 @@ export default function registerTeammateExtension(
         error: `Workspace terminal result protocol failure: ${error instanceof Error ? error.message : String(error)}`,
       });
     }
-    return publishWorkspaceTerminalCompletion(request, terminal);
+    return completeManagedWindowTerminalCommand(request, terminal);
   };
 
   const stopWorkspacePeers = async (): Promise<void> => {
     const consumer = workspacePeerConsumer;
     const publisher = workspacePeerPublisher;
+    const runtimeActor = workspaceWindowRuntimeActor;
     if (workspacePeerRefresh?.publisher === publisher) workspacePeerRefresh = undefined;
     workspacePeerConsumer = undefined;
     workspacePeerPublisher = undefined;
+    workspaceWindowRuntimeActor = undefined;
     workspacePeerOwners = [];
     refreshSessionEndpointDirectory();
+    // v1 remains authoritative: stop its consumer/publication before releasing the advisory actor lease.
     await consumer?.stop().catch(() => undefined);
     await publisher?.stop().catch(() => undefined);
+    await runtimeActor?.stop().catch(() => undefined);
   };
 
   const RECONCILE_RECEIPT_INTERVAL_MS = 5_000;
@@ -3007,18 +3278,21 @@ export default function registerTeammateExtension(
   const startWorkspacePeers = (ctx: ExtensionContext): void => {
     const cwd = ctx.cwd;
     const fence = captureRootSessionFence();
+    const generation = ++workspacePeerGeneration;
+    const ownsWorkspacePeerGeneration = (): boolean =>
+      workspacePeerGeneration === generation && ownsRootSessionFence(fence);
     const sessionName = ctx.sessionManager?.getSessionName?.() ?? undefined;
     workspacePeerSessionName = sessionName;
     workspacePeerLifecycle = workspacePeerLifecycle
       .then(async () => {
         await stopWorkspacePeers();
-        if (!ownsRootSessionFence(fence)) return;
+        if (!ownsWorkspacePeerGeneration()) return;
         // Stable per-session ownerId across process restarts: response files
         // keep their mailbox key and in-flight receipts stay readable.
         const ownerId = await resolveWorkspaceOwnerIdentity(cwd, {
           sessionKey: ctx.sessionManager?.getSessionFile?.(),
         });
-        if (!ownsRootSessionFence(fence)) return;
+        if (!ownsWorkspacePeerGeneration()) return;
         const publisher = createWorkspacePeerRuntime({
           cwd,
           ownerId,
@@ -3034,22 +3308,41 @@ export default function registerTeammateExtension(
           }),
         });
         await publisher.start();
-        if (!ownsRootSessionFence(fence)) {
+        if (!ownsWorkspacePeerGeneration()) {
           await publisher.stop().catch(() => undefined);
           return;
         }
+        const runtimeActor = createWindowSupervisorRuntimeActor({
+          cwd,
+          workspaceId: publisher.identity.workspaceId,
+          ownerId: publisher.identity.ownerId,
+          ownerNonce: publisher.identity.ownerNonce,
+          generation,
+        });
+        await runtimeActor.start();
+        if (!ownsWorkspacePeerGeneration()) {
+          await publisher.stop().catch(() => undefined);
+          await runtimeActor.stop().catch(() => undefined);
+          return;
+        }
         workspacePeerPublisher = publisher;
+        workspaceWindowRuntimeActor = runtimeActor;
         // Events can arrive while the initial owner snapshot is being written.
         // Publish the latest in-memory progress once the publisher is bound.
         publisher.markDirty();
         const registry = sessionHostRegistry;
         if (!registry) {
           await publisher.stop().catch(() => undefined);
+          await runtimeActor.stop().catch(() => undefined);
           workspacePeerPublisher = undefined;
+          workspaceWindowRuntimeActor = undefined;
           return;
         }
         const consumer = createWorkspacePeerCommandConsumer(publisher.identity, async (command) => {
           if (!ownsRootSessionFence(fence)) {
+            return { status: "rejected", message: "destination session changed before command delivery" };
+          }
+          if (!ownsWorkspacePeerGeneration()) {
             return { status: "rejected", message: "destination session changed before command delivery" };
           }
           const existing = registry.thread.get(command.commandId, "incoming");
@@ -3210,6 +3503,9 @@ export default function registerTeammateExtension(
               if (!ownsRootSessionFence(fence)) {
                 return { status: "rejected", message: "destination session changed during command delivery" };
               }
+              if (!ownsWorkspacePeerGeneration()) {
+                return { status: "rejected", message: "destination session changed during command delivery" };
+              }
               const effectiveAction = delivered.mode === "steer" ? "steer" : "follow_up";
               result = delivered.delivered
                 ? {
@@ -3224,6 +3520,9 @@ export default function registerTeammateExtension(
           if (!ownsRootSessionFence(fence)) {
             return { status: "rejected", message: "destination session changed before command acknowledgement" };
           }
+          if (!ownsWorkspacePeerGeneration()) {
+            return { status: "rejected", message: "destination session changed before command acknowledgement" };
+          }
           registry.thread.record({
             ...incoming,
             ...(result.effectiveAction === undefined ? {} : { effectiveMode: result.effectiveAction }),
@@ -3233,19 +3532,23 @@ export default function registerTeammateExtension(
           return result;
         });
         consumer.start();
-        if (!ownsRootSessionFence(fence)) {
+        if (!ownsWorkspacePeerGeneration()) {
           await consumer.stop().catch(() => undefined);
           if (workspacePeerPublisher === publisher) workspacePeerPublisher = undefined;
+          if (workspaceWindowRuntimeActor === runtimeActor) workspaceWindowRuntimeActor = undefined;
           await publisher.stop().catch(() => undefined);
+          await runtimeActor.stop().catch(() => undefined);
           return;
         }
         workspacePeerConsumer = consumer;
         await refreshWorkspacePeerOwners();
-        if (!ownsRootSessionFence(fence)) {
+        if (!ownsWorkspacePeerGeneration()) {
           if (workspacePeerConsumer === consumer) workspacePeerConsumer = undefined;
           if (workspacePeerPublisher === publisher) workspacePeerPublisher = undefined;
+          if (workspaceWindowRuntimeActor === runtimeActor) workspaceWindowRuntimeActor = undefined;
           await consumer.stop().catch(() => undefined);
           await publisher.stop().catch(() => undefined);
+          await runtimeActor.stop().catch(() => undefined);
         }
       })
       .catch((error) => logDiagnosticError("[pi-maestro-teammate] workspace peer runtime failed:", error));
@@ -4015,6 +4318,40 @@ export default function registerTeammateExtension(
       };
 
       const parentSessionFile = ctx.sessionManager?.getSessionFile?.() ?? undefined;
+      const forkRequested = normalizedTasks.some((task) => task.context === "fork");
+      let forkSnapshotPath: string | undefined;
+      let forkSnapshotDirectory: string | undefined;
+      let forkSnapshotCleaned = false;
+      const cleanupForkSnapshot = (): void => {
+        if (forkSnapshotCleaned) return;
+        forkSnapshotCleaned = true;
+        if (forkSnapshotDirectory) rmSync(forkSnapshotDirectory, { recursive: true, force: true });
+      };
+      const dispatchParentSessionFile = (): string | undefined => {
+        if (!forkRequested) return parentSessionFile;
+        if (forkSnapshotPath) return forkSnapshotPath;
+        if (!parentSessionFile) {
+          throw new Error("fork-snapshot-invalid (source-read-failed): parent session file is unavailable");
+        }
+        const snapshot = createForkSnapshot({
+          sourcePath: parentSessionFile,
+          spawningToolCallId: id,
+          destination: { kind: "temp" },
+        });
+        if (!snapshot.ok) {
+          throw new Error(
+            `${snapshot.diagnostic.kind} (${snapshot.diagnostic.code}): ${snapshot.diagnostic.message}`,
+          );
+        }
+        forkSnapshotPath = snapshot.snapshotPath;
+        forkSnapshotDirectory = snapshot.temporaryDirectory;
+        if (snapshot.injectedCompactionBoundary) {
+          logDiagnosticWarn(
+            "[pi-maestro-teammate] fork context truncated: injected a compaction boundary into the fork snapshot because the parent session history exceeded the fork compaction threshold; the child sees only recent retained context plus a summary instead of the full fork-parent history.",
+          );
+        }
+        return forkSnapshotPath;
+      };
       let progressFlushGate: ProgressFlushGate | undefined;
 
       const makeOptions = (): RunTeammateOptions => {
@@ -4052,7 +4389,7 @@ export default function registerTeammateExtension(
           ...(initialTurnContext ? { initialTurnContext } : {}),
           recordTurnEvent: (event) => recordAgentTurnEvent(event, turnFence),
           ...(isMultiTask ? { taskSignals: taskAbortControllers.map((controller) => controller.signal) } : {}),
-          parentSessionFile,
+          parentSessionFile: dispatchParentSessionFile(),
           initialLeaseToken: (childId: string) => {
           const target = state.activeRuns.get(childId) ?? activeAgent;
           return target.lease ? leaseToken(target.lease) : undefined;
@@ -4733,7 +5070,7 @@ export default function registerTeammateExtension(
             const results = await runWithProgressFlushCleanup(
               () => runGraph(normalizedTasks, params.concurrency ?? 4, options),
               progressFlushGate,
-            );
+            ).finally(cleanupForkSnapshot);
 
             const hasError = results.some(resultIsError);
             const totalDur = activeGraphMode === "chain"
@@ -4924,7 +5261,7 @@ export default function registerTeammateExtension(
             runPromise = runWithProgressFlushCleanup(
               () => runSingleTeammate(singleRunParams, options),
               progressFlushGate,
-            );
+            ).finally(cleanupForkSnapshot);
             race = await Promise.race([
               runPromise.then((result) => ({ done: true as const, result, reason: undefined })),
               detachPromise.then((reason) => ({ done: false as const, result: null, reason })),
@@ -4996,7 +5333,7 @@ export default function registerTeammateExtension(
         const bgPromise = runWithProgressFlushCleanup(
           () => runSingleTeammate(singleRunParams, options),
           progressFlushGate,
-        );
+        ).finally(cleanupForkSnapshot);
 
         bgPromise.then((result) => {
           if (!ownsDispatchGeneration()) return;
@@ -5765,9 +6102,20 @@ export default function registerTeammateExtension(
     ownerNonce?: string;
     pid?: number;
     launchError?: string;
+    terminationRequested?: boolean;
+    completionHandle?: WorkspaceWindowCompletionHandle;
+    settled: boolean;
+    terminalPublished: boolean;
+    terminalDeadlineAt?: number;
+    terminalCloseRequested?: boolean;
+    terminalFallbackTimer?: ReturnType<typeof setTimeout>;
+    runtimeDeathObservedAt?: number;
   }
 
   const MAX_MANAGED_WINDOWS = 8;
+  /** Terminal requests remain bounded without imposing an ordinary tool-call timeout on worker work. */
+  const MANAGED_WINDOW_TERMINAL_DEADLINE_MS = 24 * 60 * 60_000;
+  const MANAGED_WINDOW_TERMINAL_ENVELOPE_GRACE_MS = 5_000;
   /** Headless admission window — a cold pi process usually publishes within this. */
   const MANAGED_WINDOW_HANDSHAKE_TIMEOUT_MS = 30_000;
   /** Interactive admission window — terminal launch + cold start regularly exceeds 15s. */
@@ -5816,7 +6164,7 @@ export default function registerTeammateExtension(
 
     const cwd = state.baseCwd ?? cwdFallback;
     const piCommand = getPiSpawnCommand(
-      buildManagedWindowPiArgs({ objective, sessionName, presentation, forkSessionFile }),
+      buildManagedWindowPiArgs({ sessionName, presentation, forkSessionFile }),
     );
     const env = managedWindowSpawnEnv();
     const launch = presentation === "interactive"
@@ -5825,7 +6173,7 @@ export default function registerTeammateExtension(
     const child = crossSpawn(launch.command, launch.args, {
       cwd: launch.cwd,
       env,
-      stdio: "ignore",
+      stdio: presentation === "headless" ? ["pipe", "ignore", "ignore"] : "ignore",
       shell: false,
       windowsHide: presentation === "interactive",
     });
@@ -5839,27 +6187,68 @@ export default function registerTeammateExtension(
       objective,
       presentation,
       management,
+      settled: false,
+      terminalPublished: false,
     };
     managedWindows.set(name, window);
 
     const setup = new Promise<void>((resolve, reject) => {
-      child.once("spawn", resolve);
+      child.once("spawn", () => {
+        if (presentation === "headless") {
+          const stdin = child.stdin;
+          if (!stdin || stdin.destroyed || !stdin.writable) {
+            reject(new Error(`Headless window "${name}" has no writable RPC input.`));
+            return;
+          }
+          try {
+            stdin.write(`${JSON.stringify({
+              id: `managed-window-bootstrap-${randomUUID().replace(/-/g, "")}`,
+              type: "get_state",
+            })}\n`);
+          } catch (error) {
+            reject(error);
+            return;
+          }
+        }
+        resolve();
+      });
       child.once("error", reject);
     });
     child.once("exit", (code, signal) => {
       if (presentation === "headless") {
         window.termination?.cleanup();
+        if (window.management === "monitor"
+          && window.completionHandle
+          && window.terminalDeadlineAt !== undefined
+          && !window.terminalPublished) {
+          armManagedWindowTerminalFallback(window, window.terminalCloseRequested
+            ? {
+                outcome: "cancelled",
+                error: `Workspace window ${name} was closed by its Monitor owner.`,
+              }
+            : {
+                outcome: "failed",
+                error: `Workspace worker runtime exited without a canonical terminal envelope (code ${code ?? "?"}, signal ${signal ?? "none"}).`,
+              });
+        }
         if (managedWindows.get(name) === window) managedWindows.delete(name);
       } else if (code !== 0 && managedWindows.get(name) === window && !window.ownerId) {
         window.launchError = `terminal launcher exited (code ${code ?? "?"}, signal ${signal ?? "none"})`;
       }
-      logDiagnosticError(`[pi-maestro-teammate] managed window ${name} launcher exited (code ${code ?? "?"}, signal ${signal ?? "none"})`);
+      if (!window.terminationRequested && (code !== 0 || signal !== null)) {
+        logDiagnosticError(`[pi-maestro-teammate] managed window ${name} launcher exited unexpectedly (code ${code ?? "?"}, signal ${signal ?? "none"})`);
+      }
     });
 
     try {
       await setup;
       return { ok: true, window };
     } catch (error) {
+      if (presentation === "headless" && child.exitCode === null && child.signalCode === null) {
+        window.terminationRequested = true;
+        window.termination?.terminate();
+        await window.termination?.outcome;
+      }
       window.termination?.cleanup();
       if (managedWindows.get(name) === window) managedWindows.delete(name);
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -5940,6 +6329,7 @@ export default function registerTeammateExtension(
     if (window.presentation === "headless") {
       const termination = window.termination;
       if (!termination) throw new Error(`Headless window "${window.name}" has no termination controller.`);
+      window.terminationRequested = true;
       termination.terminate();
       const outcome = await termination.outcome;
       termination.cleanup();
@@ -5951,6 +6341,7 @@ export default function registerTeammateExtension(
 
     const owner = exactManagedWindowOwner(window);
     if (!owner) throw new Error(`Interactive window "${window.name}" has no fresh authenticated owner; ownership record retained.`);
+    window.terminationRequested = true;
     return terminateProcessTreeByPid(owner.pid);
   }
 
@@ -5960,6 +6351,94 @@ export default function registerTeammateExtension(
       return true;
     } catch (error) {
       return (error as NodeJS.ErrnoException).code === "EPERM";
+    }
+  }
+
+  async function finalizeManagedWindowTerminal(
+    window: ManagedWindow,
+    draft: WorkspaceWindowTerminalResultDraft,
+  ): Promise<boolean> {
+    const handle = window.completionHandle;
+    if (!handle) return false;
+    if (window.terminalPublished) return true;
+    const inflight = workspaceTerminalCompletionPublications.get(handle.publicationId);
+    if (inflight) return inflight;
+    const request = sessionHostRegistry?.thread.get(handle.requestMessageId, "outgoing");
+    if (!request || request.terminalResultRequested !== true) {
+      logDiagnosticWarn(
+        `[pi-maestro-teammate] terminal fallback for ${window.name} has no session-scoped outgoing request ${handle.requestMessageId}.`,
+      );
+      return false;
+    }
+    if (window.terminalFallbackTimer) {
+      clearTimeout(window.terminalFallbackTimer);
+      window.terminalFallbackTimer = undefined;
+    }
+    const published = await publishWorkspaceTerminalCompletion(
+      request,
+      createWorkspaceWindowTerminalResult({
+        requestMessageId: handle.requestMessageId,
+        ...draft,
+      }),
+    );
+    if (published) {
+      window.settled = true;
+      window.terminalPublished = true;
+    }
+    return published;
+  }
+
+  function armManagedWindowTerminalFallback(
+    window: ManagedWindow,
+    draft: WorkspaceWindowTerminalResultDraft,
+  ): void {
+    if (window.management !== "monitor"
+      || !window.completionHandle
+      || window.terminalDeadlineAt === undefined
+      || window.terminalPublished
+      || window.terminalFallbackTimer) return;
+    window.runtimeDeathObservedAt = Date.now();
+    window.terminalFallbackTimer = setTimeout(() => {
+      void finalizeManagedWindowTerminal(window, draft);
+    }, MANAGED_WINDOW_TERMINAL_ENVELOPE_GRACE_MS);
+    window.terminalFallbackTimer.unref?.();
+  }
+
+  async function reconcileWorkspaceWindowTerminalRequests(): Promise<void> {
+    const now = Date.now();
+    const requests = sessionHostRegistry?.thread.list().filter((entry) =>
+      entry.direction === "outgoing"
+      && entry.terminalResultRequested === true
+      && entry.messageKind === "request"
+      && entry.targetCorrelationId === WORKSPACE_MAIN_SESSION_MARKER
+    ) ?? [];
+    for (const request of requests) {
+      const publicationId = workspaceWindowTerminalPublicationId(request.messageId);
+      if (workspaceTerminalCompletionPublications.has(publicationId)) continue;
+      const window = [...managedWindows.values()].find((candidate) =>
+        candidate.completionHandle?.requestMessageId === request.messageId
+      );
+      if (now >= request.createdAt + MANAGED_WINDOW_TERMINAL_DEADLINE_MS) {
+        await publishWorkspaceTerminalCompletion(request, createWorkspaceWindowTerminalResult({
+          requestMessageId: request.messageId,
+          outcome: "failed",
+          error: `Workspace worker did not publish a canonical terminal envelope within ${MANAGED_WINDOW_TERMINAL_DEADLINE_MS}ms.`,
+          settledAt: now,
+        }));
+        continue;
+      }
+      if (!window?.pid || managedWindowPidIsAlive(window.pid)) {
+        if (window) window.runtimeDeathObservedAt = undefined;
+        continue;
+      }
+      window.runtimeDeathObservedAt ??= now;
+      if (now - window.runtimeDeathObservedAt < MANAGED_WINDOW_TERMINAL_ENVELOPE_GRACE_MS) continue;
+      await finalizeManagedWindowTerminal(window, {
+        outcome: window.terminalCloseRequested ? "cancelled" : "failed",
+        error: window.terminalCloseRequested
+          ? `Workspace window ${window.name} was closed by its Monitor owner.`
+          : `Workspace worker runtime died without publishing a canonical terminal envelope (pid ${window.pid}).`,
+      });
     }
   }
 
@@ -5988,6 +6467,36 @@ export default function registerTeammateExtension(
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
+  }
+
+  async function completeManagedWindowTerminalCommand(
+    request: WindowThreadEntry,
+    terminal: WorkspaceWindowTerminalResult,
+  ): Promise<boolean> {
+    const window = [...managedWindows.values()].find((candidate) =>
+      candidate.completionHandle?.requestMessageId === request.messageId
+    );
+    if (window) window.settled = true;
+
+    const published = await publishWorkspaceTerminalCompletion(request, terminal);
+    if (!published) return false;
+    if (!window) return true;
+
+    window.terminalPublished = true;
+    window.runtimeDeathObservedAt = undefined;
+    if (window.terminalFallbackTimer) {
+      clearTimeout(window.terminalFallbackTimer);
+      window.terminalFallbackTimer = undefined;
+    }
+    if (window.presentation === "headless" && managedWindows.get(window.name) === window) {
+      const stopped = await stopManagedWindow(window.name);
+      if (!stopped.ok) {
+        logDiagnosticError(
+          `[pi-maestro-teammate] canonical terminal completion published but headless window ${window.name} was not reclaimed: ${stopped.error ?? "unknown error"}`,
+        );
+      }
+    }
+    return true;
   }
 
   async function stopAllManagedWindows(): Promise<void> {
@@ -6641,7 +7150,8 @@ export default function registerTeammateExtension(
     const detail = options.detail;
     const lines = options.lines;
     const monitored = resolveMonitorTarget(id, lines, detail !== "summary");
-    if (!monitored.found) {
+    const canonicalAgent = resolveRuntimeReadAgent(id);
+    if (!monitored.found && !canonicalAgent) {
       return {
         target: { kind: "teammate", id },
         found: false,
@@ -6659,7 +7169,7 @@ export default function registerTeammateExtension(
     const output = resolved.match
       ? buildWatchOutput(resolved.match, lines)
       : monitored.summary ? [monitored.summary] : [];
-    const nativeStatus = monitored.agentStatus ?? monitored.waitStatus ?? "unknown";
+    const nativeStatus = canonicalAgent?.status ?? monitored.agentStatus ?? monitored.waitStatus ?? "unknown";
     const settled = nativeStatus === "completed"
       || nativeStatus === "failed"
       || nativeStatus === "terminated"
@@ -6671,7 +7181,11 @@ export default function registerTeammateExtension(
     const liveAgent = resolved.match?.kind === "agent" ? resolved.match.agent : undefined;
     const graphTaskProgress = resolved.match?.kind === "graph-task" ? resolved.match.progress : undefined;
     const settledRecord = resolved.match ? undefined : findSettledAgent(state, id);
-    const terminal = monitored.waitStatus
+    const terminal = canonicalAgent?.lastOutcome?.status
+      ?? (canonicalAgent?.status === "failed" || canonicalAgent?.status === "terminated" || canonicalAgent?.status === "completed"
+        ? canonicalAgent.status
+        : undefined)
+      ?? monitored.waitStatus
       ?? liveAgent?.lastOutcome?.status
       ?? settledRecord?.status;
     const outcome = terminal === "failed"
@@ -6708,7 +7222,16 @@ export default function registerTeammateExtension(
     }
     const diagnosis = !options.diagnose
       ? undefined
-      : liveAgent
+      : canonicalAgent
+        ? diagnoseAgentRuntime({
+            status: canonicalAgent.status,
+            phase: canonicalAgent.phase,
+            resultReadyAt: canonicalAgent.resultReadyAt,
+            lastActivityAt: canonicalAgent.lastActivityAt,
+            turn: canonicalAgent.turn,
+            previousOutcome: canonicalAgent.lastOutcome,
+          })
+        : liveAgent
         ? diagnoseAgentRuntime({
             status: liveAgent.status,
             phase: liveAgent.phase,
@@ -6740,7 +7263,7 @@ export default function registerTeammateExtension(
         ? { structuredOutput: structuredClone(structuredOutput) }
         : {}),
       ...(diagnosis ? { diagnosis } : {}),
-      summary: monitored.summary || output.at(-1) || nativeStatus,
+      summary: (canonicalAgent?.lastMessage ?? monitored.summary) || output.at(-1) || nativeStatus,
       ...(includeResult ? { detail: detailOutput } : {}),
       updatedAt: Date.now(),
       capabilities: teammateObservationCapabilities,
@@ -7355,11 +7878,13 @@ export default function registerTeammateExtension(
     objective: string;
     owner?: string;
     pid?: number;
+    handle?: WorkspaceWindowCompletionHandle;
   }
 
   interface WorkspaceWindowToolDetails {
     action: WorkspaceWindowToolParams["action"];
     windows: WorkspaceWindowToolWindow[];
+    handle?: WorkspaceWindowCompletionHandle;
   }
 
   function workspaceWindowSnapshots(): WorkspaceWindowToolWindow[] {
@@ -7378,6 +7903,7 @@ export default function registerTeammateExtension(
         status,
         objective: window.objective,
         ...(owner ? { owner: `owner:${owner.ownerId}`, pid: owner.pid } : {}),
+        ...(window.completionHandle ? { handle: window.completionHandle } : {}),
       };
     });
   }
@@ -7388,13 +7914,13 @@ export default function registerTeammateExtension(
     renderShell: "self",
     description: `Create, list, or close Pi worker windows owned by the active Monitor coordinator.
 
-This lifecycle tool is available only after the user enters Monitor mode with /monitor. Create opens an interactive terminal by default, waits for exact workspace-peer registration, returns the exact owner target for direct observation and messaging, and delivers the objective once. Close is restricted to windows created by this Monitor session; discovered external peer windows can be messaged or observed but cannot be closed. Closed windows keep their persisted messages readable through teammate-list view=inbox.`,
+This lifecycle tool is available only after the user enters Monitor mode with /monitor. Create opens an interactive terminal by default, waits for exact workspace-peer registration, returns the exact owner target for direct observation and messaging, and provides an optional canonical completion handle. Close is restricted to windows created by this Monitor session; discovered external peer windows can be messaged or observed but cannot be closed. Terminal results remain retrievable after process exit through the handle's immutable agent:// resource; result bodies are not inlined into completion notices.`,
     promptSnippet: "Create, list, or close Monitor-owned Pi worker windows.",
     promptGuidelines: [
       "Use create only when the user's monitoring or coordination request requires a new worker window; do not create speculative workers.",
       "The create call already delivers its objective to the worker. After create, do not resend that objective; use the returned owner target only for later corrections, new constraints, explicit response requests, or safety/lifecycle instructions.",
-      "Before close, collect needed results and close only Monitor-owned windows that no longer need to run.",
-      'After close, use teammate-list with view="inbox" to read the window\'s persisted messages if they are needed.',
+      "Before close, retain the returned completion handle. Closing pending work forms a canonical cancelled completion at the same immutable agent:// resource.",
+      "Read a settled result with the resource tool using the returned agent:// URI; completion notices contain only a status summary and that URI.",
     ],
     parameters: WorkspaceWindowParams,
     async execute(
@@ -7405,10 +7931,15 @@ This lifecycle tool is available only after the user enters Monitor mode with /m
       const result = (
         text: string,
         isError = false,
+        handle?: WorkspaceWindowCompletionHandle,
       ): TeammateToolResult<WorkspaceWindowToolDetails> => ({
         content: [{ type: "text", text }],
         ...(isError ? { isError: true } : {}),
-        details: { action: params.action, windows: workspaceWindowSnapshots() },
+        details: {
+          action: params.action,
+          windows: workspaceWindowSnapshots(),
+          ...(handle ? { handle } : {}),
+        },
       });
 
       const monitorCapture = captureMonitorCommunication();
@@ -7440,12 +7971,31 @@ This lifecycle tool is available only after the user enters Monitor mode with /m
       if (!name) return result(`name is required for workspace-window ${params.action}.`, true);
 
       if (params.action === "close") {
+        const window = managedWindows.get(name);
+        const handle = window?.completionHandle;
+        if (window?.management === "monitor" && handle) window.terminalCloseRequested = true;
         const stopped = await stopManagedWindow(name);
         if (!ownsMonitorCommunication(monitorCapture)) {
-          return result("Monitor mode ended during workspace-window close.", true);
+          return result("Monitor mode ended during workspace-window close.", true, handle);
         }
-        if (!stopped.ok) return result(stopped.error ?? `Failed to close ${name}.`, true);
-        return result(`Closed Monitor-owned window ${name} (${stopped.status ?? "stopped"}).`);
+        if (!stopped.ok) {
+          if (window) window.terminalCloseRequested = false;
+          return result(stopped.error ?? `Failed to close ${name}.`, true, handle);
+        }
+        if (window?.management === "monitor" && handle) {
+          const completed = await finalizeManagedWindowTerminal(window, {
+            outcome: "cancelled",
+            error: `Workspace window ${name} was closed by its Monitor owner.`,
+          });
+          if (!completed) {
+            return result(
+              `Closed Monitor-owned window ${name} (${stopped.status ?? "stopped"}), but canonical cancelled completion could not be persisted.`,
+              true,
+              handle,
+            );
+          }
+        }
+        return result(`Closed Monitor-owned window ${name} (${stopped.status ?? "stopped"}).`, false, handle);
       }
 
       const objective = params.objective?.trim();
@@ -7453,6 +8003,7 @@ This lifecycle tool is available only after the user enters Monitor mode with /m
 
       const presentation = params.presentation ?? "interactive";
       const sessionName = managedWindowSessionName(name);
+      const completionHandle = workspaceWindowCompletionHandle(randomUUID().replace(/-/g, ""));
       const spawned = await spawnManagedWindow(
         name,
         objective,
@@ -7461,6 +8012,7 @@ This lifecycle tool is available only after the user enters Monitor mode with /m
         sessionName,
       );
       if (!spawned.ok || !spawned.window) return result(spawned.error ?? `Failed to create ${name}.`, true);
+      let terminalRequestPublished = false;
 
       try {
         const owner = await waitForManagedWindowOwner(spawned.window, signal);
@@ -7479,28 +8031,68 @@ This lifecycle tool is available only after the user enters Monitor mode with /m
           throw new Error(`window "${name}" changed owner after Monitor admission.`);
         }
 
+        spawned.window.completionHandle = completionHandle;
         const delivery = await routeSessionMessage({
           selector: `owner:${owner.ownerId}`,
           message: objective,
           mode: "follow_up",
-          messageId: randomUUID().replace(/-/g, ""),
+          messageId: completionHandle.requestMessageId,
+          traceId: completionHandle.correlationId,
           source: "monitor",
           messageKind: "request",
+          terminalResultRequested: true,
           targetCorrelationId: WORKSPACE_MAIN_SESSION_MARKER,
           authorize: () => ownsMonitorCommunication(monitorCapture),
           signal,
         });
-        if (!delivery.delivered || delivery.receipt?.publicationStage !== "accepted") {
-          throw new Error(delivery.error ?? `Managed window objective for "${name}" was not accepted.`);
+        terminalRequestPublished = delivery.receipt?.publicationStage === "published"
+          || delivery.receipt?.publicationStage === "accepted";
+        if (terminalRequestPublished) {
+          // Only a committed outgoing journal entry may participate in process
+          // exit fallback. The handle is bound before delivery so an extremely
+          // fast terminal response can still reclaim this exact window.
+          const requestEntry = sessionHostRegistry?.thread.get(completionHandle.requestMessageId, "outgoing");
+          if (!requestEntry || requestEntry.terminalResultRequested !== true) {
+            throw new Error(`Terminal result request for window "${name}" was published without its outgoing journal entry.`);
+          }
+          spawned.window.terminalDeadlineAt = requestEntry.createdAt + MANAGED_WINDOW_TERMINAL_DEADLINE_MS;
+          if (spawned.window.child.exitCode !== null || spawned.window.child.signalCode !== null) {
+            armManagedWindowTerminalFallback(spawned.window, {
+              outcome: "failed",
+              error: `Workspace worker runtime exited before terminal setup acknowledgement (code ${spawned.window.child.exitCode ?? "?"}, signal ${spawned.window.child.signalCode ?? "none"}).`,
+            });
+          }
         }
-        return result(`Created ${presentation} worker window ${name} as owner:${owner.ownerId}.`);
+        if (!delivery.delivered || delivery.receipt?.publicationStage !== "accepted") {
+          throw new Error(delivery.error ?? `Terminal result request for window "${name}" was not accepted.`);
+        }
+        return result(
+          `Created ${presentation} worker window ${name} as owner:${owner.ownerId}. Result: ${completionHandle.resource}`,
+          false,
+          completionHandle,
+        );
       } catch (error) {
         const failure = error instanceof Error ? error.message : String(error);
+        if (terminalRequestPublished) spawned.window.terminalCloseRequested = true;
         const cleanup = await stopManagedWindow(name);
+        let completionPersisted = true;
+        if (terminalRequestPublished && cleanup.ok) {
+          completionPersisted = await finalizeManagedWindowTerminal(spawned.window, {
+            outcome: "cancelled",
+            error: `Workspace window ${name} setup was rolled back before terminal work completed.`,
+          });
+        }
         const cleanupText = cleanup.ok
           ? `setup was rolled back (${cleanup.status ?? "stopped"})`
           : `ownership record retained: ${cleanup.error ?? "reclamation not proven"}`;
-        return result(`${failure}; ${cleanupText}.`, true);
+        const completionText = terminalRequestPublished && !completionPersisted
+          ? " canonical cancelled completion could not be persisted"
+          : "";
+        return result(
+          `${failure}; ${cleanupText}.${completionText}`,
+          true,
+          terminalRequestPublished ? completionHandle : undefined,
+        );
       }
     },
     renderCall(_args, theme, context) {
@@ -8732,12 +9324,15 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
       // A result-ready zombie keeps hasTeammateWidgetWork true, so this tick is
       // exactly where it stays reachable until reclaimed. Publishing the
       // retirement keeps delta-only consumers (cockpit roster) in sync.
-      reclaimResultReadyAgents(state, pi);
-      sweepFailedAgents(state);
+      const retired = [
+        ...reclaimResultReadyAgents(state, pi),
+        ...sweepFailedAgents(state),
+      ];
       // Before the wakeable budget can retire a silent agent, surface the stall
       // to the caller that is waiting on a notification that will never fire.
       sweepStalledAgents(state, notifyStalled);
-      enforceWakeableAgentBudget(state);
+      retired.push(...enforceWakeableAgentBudget(state));
+      if (retired.length > 0) publishRuntimeReadDelta();
       if (!hasTeammateWidgetWork(state)) {
         stopWidgetTimer();
         updateAgentWidget();
@@ -8770,8 +9365,11 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
       // Also swept here: once the widget timer stops, this is the only tick
       // left, and a tombstone that outlives its window would otherwise sit in
       // activeRuns forever — blocking its whole cohort from ever retiring.
-      sweepFailedAgents(state);
-      enforceWakeableAgentBudget(state);
+      const retired = [
+        ...sweepFailedAgents(state),
+        ...enforceWakeableAgentBudget(state),
+      ];
+      if (retired.length > 0) publishRuntimeReadDelta();
       updateAgentWidget();
       scheduleWakeableEvictionTimer();
     }, delay);
@@ -8818,15 +9416,19 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
       payload,
     );
   }));
+  disposers.push(pi.events.on(RUNTIME_READ_MODEL_QUERY_EVENT, publishRuntimeReadSnapshot));
   disposers.push(pi.events.on(TEAMMATE_STARTED_EVENT, () => {
     markWorkspacePeerDirty();
+    publishRuntimeReadDelta();
     updateAgentWidget();
     startWidgetTimer();
   }));
   disposers.push(pi.events.on(TEAMMATE_COMPLETE_EVENT, () => {
     markWorkspacePeerDirty();
+    publishRuntimeReadDelta();
     setTimeout(() => {
-      enforceWakeableAgentBudget(state);
+      const retired = enforceWakeableAgentBudget(state);
+      if (retired.length > 0) publishRuntimeReadDelta();
       updateAgentWidget();
       if (!hasTeammateWidgetWork(state)) {
         stopWidgetTimer();
@@ -8834,7 +9436,10 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
       }
     }, 100);
   }));
-  disposers.push(pi.events.on(TEAMMATE_MESSAGE_EVENT, markWorkspacePeerDirty));
+  disposers.push(pi.events.on(TEAMMATE_MESSAGE_EVENT, () => {
+    markWorkspacePeerDirty();
+    publishRuntimeReadDelta();
+  }));
 
   // =========================================================================
   // Session lifecycle — agents live until session ends
@@ -8847,6 +9452,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     state.baseCwd = ctx.cwd;
     bindStateTurnRecorder();
     rebuildTurnLedger(ctx.sessionManager?.getEntries?.() ?? []);
+    if (state.currentSessionId) void initializeRuntimeReadModel(ctx.cwd, state.currentSessionId);
     const completionSessionId = state.currentSessionId;
     const completionWorkspaceId = workspaceIdForCwd(ctx.cwd);
     const completionGeneration = state.sessionGeneration;
@@ -8892,12 +9498,23 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     workspaceMainAssistantEventOpen = false;
     workspaceCurrentTurnAssistantMessage = undefined;
     workspaceTerminalResultDraft = undefined;
+    workspaceTerminalResultState = { settled: false, terminalPublished: false };
     workspaceTerminalResultPublications.clear();
     workspaceTerminalCompletionPublications.clear();
     startWorkspacePeers(ctx);
     if (workspaceReceiptReconcileTimer) clearInterval(workspaceReceiptReconcileTimer);
     workspaceReceiptReconcileTimer = setInterval(() => {
       void reconcileWorkspacePeerReceipts();
+      if (workspaceTerminalResultState.settled && !workspaceTerminalResultState.terminalPublished) {
+        void publishWorkspaceWindowTerminalResults(
+          workspaceTerminalResultDraft ?? { outcome: "no-result" },
+        ).then((published) => {
+          workspaceTerminalResultState.terminalPublished = published;
+        });
+      }
+      void reconcileWorkspaceWindowTerminalRequests().catch((error) => {
+        logDiagnosticWarn("[pi-maestro-teammate] workspace terminal request reconciliation failed:", error);
+      });
       void completionCoordinator.reconcile().catch((error) => {
         logDiagnosticWarn("[pi-maestro-teammate] periodic completion reconciliation failed:", error);
       });
@@ -8972,7 +9589,10 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
   pi.on("before_agent_start", injectTeammateContext);
 
   pi.on("agent_start", () => {
-    workspaceTerminalResultDraft = undefined;
+    if (!workspaceTerminalResultState.settled || workspaceTerminalResultState.terminalPublished) {
+      workspaceTerminalResultDraft = undefined;
+      workspaceTerminalResultState = { settled: false, terminalPublished: false };
+    }
     appendWorkspaceMainProgressEvent({ kind: "lifecycle", at: Date.now(), phase: "agent_start" });
   });
 
@@ -9031,9 +9651,14 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
 
   pi.on("agent_settled", async () => {
     appendWorkspaceMainProgressEvent({ kind: "lifecycle", at: Date.now(), phase: "agent_settled" });
-    await publishWorkspaceWindowTerminalResults(
+    workspaceTerminalResultState.settled = true;
+    const terminalPublished = await publishWorkspaceWindowTerminalResults(
       workspaceTerminalResultDraft ?? { outcome: "no-result" },
     );
+    workspaceTerminalResultState.terminalPublished = terminalPublished;
+    if (!terminalPublished) {
+      logDiagnosticError("[pi-maestro-teammate] settled workspace terminal result was not published; keeping the resident worker available for reconciliation.");
+    }
   });
 
   pi.on("session_compact", (_event, ctx) => {
@@ -9046,27 +9671,47 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     void refreshModelCatalogSources(ctx);
     state.currentSessionId = ctx.sessionManager?.getSessionId() ?? null;
     workspacePeerSessionName = ctx.sessionManager?.getSessionName?.() ?? undefined;
-    markWorkspacePeerDirty();
+    // Compaction/rebind rotates ownerNonce and the WindowSupervisor actor generation.
+    startWorkspacePeers(ctx);
     syncMonitorInteractionStatus();
     updateAgentWidget();
   });
 
   pi.on("session_shutdown", async (event) => {
     const shutdownReason = event?.reason ?? "quit";
-    await publishWorkspaceWindowTerminalResults(
+    state.sessionGeneration = (state.sessionGeneration ?? 0) + 1;
+    state.currentSessionId = null;
+    workspaceTerminalResultState.settled = true;
+    const terminalPublished = await publishWorkspaceWindowTerminalResults(
       workspaceTerminalResultDraft ?? {
         outcome: "cancelled",
         error: `Worker session shut down before publishing a final response (${shutdownReason}).`,
       },
     );
+    workspaceTerminalResultState.terminalPublished = terminalPublished;
+    const terminalFlushed = await flushWorkspaceTerminalResultPublications();
+    if (!terminalPublished || !terminalFlushed) {
+      logDiagnosticError("[pi-maestro-teammate] workspace terminal publication did not flush before peer shutdown.");
+    }
     completionCoordinator.unbindSession();
-    state.sessionGeneration = (state.sessionGeneration ?? 0) + 1;
-    state.currentSessionId = null;
     if (shutdownReason === "quit" || shutdownReason === "reload") disposeTuiLocaleEvents();
     uninstallMonitorEscapeTap();
     disposeTeammateSettings();
     stopWidgetTimer();
     stopWakeableEvictionTimer();
+    if (runtimeReadRefreshTimer) clearInterval(runtimeReadRefreshTimer);
+    runtimeReadRefreshTimer = undefined;
+    const closingRuntimeReadBridge = runtimeReadBridge;
+    runtimeReadBridge = undefined;
+    runtimeReadReady = false;
+    if (closingRuntimeReadBridge) {
+      await closingRuntimeReadBridge.publish([]).catch((error) => {
+        logDiagnosticWarn("[pi-maestro-teammate] Runtime V2 terminal tombstone publish failed:", error);
+      });
+      await closingRuntimeReadBridge.close().catch((error) => {
+        logDiagnosticWarn("[pi-maestro-teammate] Runtime V2 read bridge shutdown failed:", error);
+      });
+    }
     try {
       await shutdownRemoteMonitorBinding();
     } catch (error) {
@@ -9103,6 +9748,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     if (shutdownReason === "quit" || shutdownReason === "reload") {
       if (getSessionHostRegistry(rootGlobals) === sessionHostRegistry) {
         publishSessionHostRegistry(undefined, rootGlobals);
+        publishSessionHostDirectoryRefresh(undefined, rootGlobals);
       }
       sessionHostRegistry = undefined;
     }

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { AgentsStore, AGENT_LINGER_MS, COMPLETED_TOMBSTONE_MS, FAILED_LINGER_MS, SESSION_CONTENT_MAX, SLEEPING_LINGER_MS, TERMINATED_LINGER_MS, effectiveAgentStatus, isExpertLeader, mapAgentStatus } from "../src/agents-store.ts";
+import { AgentReadStoreRouter, AgentsStore, AGENT_LINGER_MS, COMPLETED_TOMBSTONE_MS, FAILED_LINGER_MS, SESSION_CONTENT_MAX, SLEEPING_LINGER_MS, TERMINATED_LINGER_MS, effectiveAgentStatus, isExpertLeader, mapAgentStatus } from "../src/agents-store.ts";
 import { EXPERT_LEADER_NAME } from "../src/types.ts";
 
 test("expert leader name literal matches the teammate extension constant", () => {
@@ -991,4 +991,114 @@ test("argsPreview is bounded to the display budget", () => {
 	const preview = s.snapshot()[0].activeToolArgs;
 	assert.ok(preview);
 	assert.ok(preview.length <= 140, `bounded to 140 chars, got ${preview.length}`);
+});
+
+test("V2 snapshot keeps hierarchy separate from graph dependencies and surfaces missing parents", () => {
+	const s = new AgentsStore();
+	assert.equal(s.applyRuntimeSnapshot({
+		version: 2,
+		revision: 1,
+		kind: "agent-runs-snapshot",
+		cursor: 4,
+		source: { streamId: "workspace:w", revision: 4, generation: 1 },
+		agents: [{
+			correlationId: "child",
+			generation: 2,
+			agent: "general",
+			spawnedBy: "missing",
+			parentCorrelationId: "missing",
+			taskIndex: 1,
+			dependencies: [0],
+			status: "running",
+			startedAt: 10,
+			lastActivityAt: 20,
+		}],
+	}), true);
+	const row = s.snapshot()[0]!;
+	assert.equal(row.spawnedBy, "missing");
+	assert.equal(row.parentCorrelationId, undefined, "a missing display parent becomes a visible root");
+	assert.deepEqual(row.dependencies, [0], "graph dependency edges are retained independently");
+});
+
+test("V2 cycles become visible roots and old-generation tombstones cannot delete replacements", () => {
+	const s = new AgentsStore();
+	assert.equal(s.applyRuntimeSnapshot({
+		version: 2,
+		revision: 1,
+		kind: "agent-runs-snapshot",
+		cursor: 2,
+		source: { streamId: "workspace:w", revision: 2, generation: 1 },
+		agents: [
+			{ correlationId: "a", generation: 2, agent: "general", parentCorrelationId: "b", status: "running", startedAt: 1, lastActivityAt: 2 },
+			{ correlationId: "b", generation: 2, agent: "general", parentCorrelationId: "a", status: "running", startedAt: 1, lastActivityAt: 2 },
+		],
+	}), true);
+	assert.equal(s.snapshot().every((row) => row.parentCorrelationId === undefined), true);
+	assert.equal(s.applyRuntimeDelta({
+		version: 2,
+		revision: 1,
+		kind: "agent-runs-delta",
+		baseCursor: 2,
+		nextCursor: 3,
+		source: { streamId: "workspace:w", revision: 3, generation: 1 },
+		changes: [{ kind: "tombstone", correlationId: "a", generation: 1 }],
+	}), false);
+	assert.equal(s.snapshot().some((row) => row.correlationId === "a"), true);
+});
+
+test("V2 unavailable falls back to the continuously folded v1 shadow roster", () => {
+	const router = new AgentReadStoreRouter();
+	router.applyLegacyStarted({ correlationId: "legacy", agent: "explorer", name: "legacy" }, 1);
+	assert.equal(router.applyRuntimeSnapshot({
+		version: 2,
+		revision: 1,
+		kind: "agent-runs-snapshot",
+		cursor: 1,
+		source: { streamId: "workspace:w", revision: 1, generation: 1 },
+		agents: [{
+			correlationId: "canonical",
+			generation: 1,
+			agent: "general",
+			status: "running",
+			startedAt: 1,
+			lastActivityAt: 2,
+		}],
+	}), true);
+	assert.deepEqual(router.current.snapshot().map((row) => row.correlationId), ["canonical"]);
+
+	router.applyLegacyMessage({
+		correlationId: "legacy",
+		message: "progress retained while V2 renders",
+		status: "running",
+	}, 3);
+	router.fallback();
+	const legacy = router.current.snapshot().find((row) => row.correlationId === "legacy");
+	assert.equal(legacy?.tail, "progress retained while V2 renders");
+	assert.equal(router.current.snapshot().some((row) => row.correlationId === "canonical"), false);
+});
+
+test("V2 unavailable falls back to the v1 bridge and canonical strings remain sanitized", () => {
+	const s = new AgentsStore();
+	assert.equal(s.applyRuntimeSnapshot({
+		version: 2,
+		revision: 1,
+		kind: "agent-runs-snapshot",
+		cursor: 1,
+		source: { streamId: "workspace:w", revision: 1, generation: 1 },
+		agents: [{
+			correlationId: "canonical",
+			generation: 1,
+			agent: "gen\u001b[2Jeral",
+			lastMessage: "line one\nline two\u001b[31m",
+			status: "running",
+			startedAt: 1,
+			lastActivityAt: 2,
+		}],
+	}), true);
+	const canonical = s.snapshot()[0]!;
+	assert.doesNotMatch(canonical.agent + canonical.tail, /\u001b|\n/);
+	s.disableRuntimeProjection();
+	assert.equal(s.runtimeCursor(), undefined);
+	s.applyStarted({ correlationId: "legacy", agent: "explorer" }, 3);
+	assert.equal(s.snapshot().some((row) => row.correlationId === "legacy"), true);
 });

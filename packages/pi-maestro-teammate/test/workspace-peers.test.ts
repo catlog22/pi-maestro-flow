@@ -56,6 +56,8 @@ import {
   workspaceIdForCwd,
   workspaceMainSessionDeliveryAction,
   workspaceMainSessionDeliveryDecision,
+  workspaceProtocolCommandId,
+  workspaceWindowCompletionHandle,
   workspaceWindowLifecycle,
   workspaceWindowTerminalPublicationId,
   workspaceWindowTerminalReservationId,
@@ -152,6 +154,16 @@ function remoteTarget(
   };
 }
 
+test("workspace protocol command ids preserve native ids and normalize arbitrary caller ids", () => {
+  assert.equal(workspaceProtocolCommandId(undefined), undefined);
+  assert.equal(workspaceProtocolCommandId(COMMAND_ID), COMMAND_ID);
+  const uuid = "123e4567-e89b-42d3-a456-426614174000";
+  const normalized = workspaceProtocolCommandId(uuid);
+  assert.match(normalized ?? "", /^[a-f0-9]{32}$/);
+  assert.equal(workspaceProtocolCommandId(uuid), normalized, "normalization is deterministic");
+  assert.notEqual(workspaceProtocolCommandId("different-tool-call-id"), normalized);
+});
+
 test("workspace identity is normalized, hashed, and isolated by cwd", async () => {
   const { cwd, rootDir } = await temporaryWorkspace();
   const equivalent = join(cwd, "nested", "..");
@@ -243,6 +255,16 @@ test("workspace terminal result protocol classifies terminal turns and stays bou
   assert.match(workspaceWindowTerminalPublicationId(requestMessageId), /^[a-f0-9]{64}$/);
   assert.match(workspaceWindowTerminalReservationId(requestMessageId), /^[a-f0-9]{64}$/);
   assert.notEqual(workspaceWindowTerminalPublicationId(requestMessageId), workspaceWindowTerminalReservationId(requestMessageId));
+  assert.deepEqual(workspaceWindowCompletionHandle(requestMessageId), {
+    messageId: requestMessageId,
+    requestMessageId,
+    correlationId: requestMessageId,
+    dispatchId: requestMessageId,
+    deliveryGroupId: requestMessageId,
+    reservationId: workspaceWindowTerminalReservationId(requestMessageId),
+    publicationId: workspaceWindowTerminalPublicationId(requestMessageId),
+    resource: `agent://${workspaceWindowTerminalPublicationId(requestMessageId)}`,
+  });
   assert.throws(() => decodeWorkspaceWindowTerminalResult(JSON.stringify({
     version: 1,
     type: "workspace-window-terminal-result",
@@ -285,26 +307,35 @@ test("terminal publication lifecycle is wired through canonical completion befor
   const extensionSource = await readFile(new URL("../src/extension/index.ts", import.meta.url), "utf8");
   const canonicalHandler = extensionSource.indexOf("const publishWorkspaceTerminalCompletion = (");
   const structuredPayload = extensionSource.indexOf("structuredOutput: terminal", canonicalHandler);
+  const nonInlineSummary = extensionSource.indexOf('? "Workspace worker completed."', canonicalHandler);
   const canonicalResource = extensionSource.indexOf("await emitTeammateResultPublished(pi, result, seed.originCwd);", canonicalHandler);
   const canonicalOutbox = extensionSource.indexOf("await completionCoordinator.publishCompletion({", canonicalResource);
-  assert.ok(canonicalHandler >= 0 && structuredPayload > canonicalHandler && canonicalResource > structuredPayload);
+  assert.ok(canonicalHandler >= 0 && nonInlineSummary > canonicalHandler && structuredPayload > nonInlineSummary);
   assert.ok(canonicalOutbox > canonicalResource, "immutable agent publication precedes canonical outbox finalization");
+  assert.ok(canonicalResource > nonInlineSummary, "completion notices summarize instead of inlining the terminal body");
 
   const consumer = extensionSource.indexOf("const terminalPublication = consumeWorkspaceTerminalCommand(command);");
   const ordinaryInjection = extensionSource.indexOf("if (command.targetCorrelationId === WORKSPACE_MAIN_SESSION_MARKER)", consumer);
-  assert.ok(consumer >= 0 && ordinaryInjection > consumer, "terminal envelopes are consumed before ordinary status injection");
+  assert.ok(consumer >= 0 && ordinaryInjection > consumer,
+    "terminal envelopes are consumed first and terminal requests continue through ordinary model injection");
+  assert.doesNotMatch(extensionSource, /terminal result request registered for the launched root task/);
 
   const settledHandler = extensionSource.indexOf('pi.on("agent_settled", async () => {');
+  const settledState = extensionSource.indexOf("workspaceTerminalResultState.settled = true;", settledHandler);
   const settledPublish = extensionSource.indexOf("await publishWorkspaceWindowTerminalResults(", settledHandler);
-  assert.ok(settledHandler >= 0 && settledPublish > settledHandler);
+  const retryGate = extensionSource.indexOf("workspaceTerminalResultState.settled && !workspaceTerminalResultState.terminalPublished");
+  assert.ok(settledHandler >= 0 && settledState > settledHandler && settledPublish > settledState);
+  assert.ok(retryGate >= 0, "a failed terminal publication remains resident and is retried by reconciliation");
 
   const shutdownHandler = extensionSource.indexOf('pi.on("session_shutdown", async (event) => {');
   const shutdownPublish = extensionSource.indexOf("await publishWorkspaceWindowTerminalResults(", shutdownHandler);
   const sessionFenceDispose = extensionSource.indexOf("completionCoordinator.unbindSession();", shutdownHandler);
+  const terminalFlush = extensionSource.indexOf("await flushWorkspaceTerminalResultPublications();", shutdownHandler);
   const peerDispose = extensionSource.indexOf("await stopWorkspacePeers();", shutdownHandler);
   assert.ok(shutdownHandler >= 0 && shutdownPublish > shutdownHandler);
   assert.ok(shutdownPublish < sessionFenceDispose, "terminal result publishes before the session fence is disposed");
-  assert.ok(shutdownPublish < peerDispose, "terminal result publishes before the workspace peer runtime is disposed");
+  assert.ok(shutdownPublish < terminalFlush && terminalFlush < peerDispose,
+    "terminal commands flush before the workspace peer runtime is disposed");
 });
 
 test("buildWorkspaceOwnerSnapshot maps todo providers to typed todos and keeps other projections generic", async () => {
@@ -336,7 +367,7 @@ test("buildWorkspaceOwnerSnapshot maps todo providers to typed todos and keeps o
       updatedAt: 1_500,
     }]);
     assert.deepEqual(withProjections.projections, [{ kind: "goal", data: { id: "g1" } }]);
-    assert.deepEqual(withProjections.capabilities, ["flow-schedule-todo-binding"]);
+    assert.deepEqual(withProjections.capabilities, ["flow-schedule-todo-binding", "flow-schedule-todo-projection"]);
     const json = JSON.stringify(withProjections);
     assert.ok(json.includes("\"todos\""));
     assert.ok(json.includes("\"projections\""));
@@ -418,13 +449,7 @@ test("todos cap at MAX_OWNER_TODOS and keep earliest entries", async () => {
 test("owner byte budget keeps active binding todos and evicts unrelated todos first", async () => {
   const { cwd, rootDir } = await temporaryWorkspace();
   const identity = createWorkspacePeerIdentity(cwd, { rootDir, ownerId: OWNER_A, ownerNonce: NONCE_A });
-  const settled = Array.from({ length: 4 }, (_, index) => ({
-    correlationId: `settled-${String(index).padStart(4, "0")}`,
-    agent: "general",
-    status: "completed" as const,
-    settledAt: 1_000 + index,
-    result: "r".repeat(SETTLED_RESULT_BYTES),
-  }));
+  const outputTail = Array.from({ length: 20 }, (_, index) => `${index}:${"r".repeat(8_000)}`);
   const unrelated = Array.from({ length: MAX_OWNER_TODOS - 1 }, (_, index) => todo(`unrelated-${index}`, {
     subject: "u".repeat(4 * 1024),
     status: "completed",
@@ -445,8 +470,8 @@ test("owner byte budget keeps active binding todos and evicts unrelated todos fi
   });
 
   const snapshot = buildWorkspaceOwnerSnapshot(identity, {
-    agents: [],
-    settled,
+    agents: [{ ...agent("cid-budget", "budget"), outputTail }],
+    settled: [],
     todos: [...unrelated, historical, active],
   }, 1_000);
   assert.equal(snapshot.todos?.[0]?.id, "active");
@@ -1460,7 +1485,7 @@ test("window listings report a main-session-active window as running", async () 
 // Owner snapshot new fields (mainActivityAt + settled results)
 // ===========================================================================
 
-test("owner snapshots validate mainActivityAt and settled results", async () => {
+test("new owner snapshots omit settled result bodies while legacy snapshots still decode them", async () => {
   const { rootDir } = await temporaryWorkspace();
   const identity = createWorkspacePeerIdentity(join(rootDir, "project"), {
     rootDir: join(rootDir, "runtime"),
@@ -1480,7 +1505,14 @@ test("owner snapshots validate mainActivityAt and settled results", async () => 
     mainActivityAt: 1_500,
   });
   assert.equal(published.mainActivityAt, 1_500);
-  assert.equal(published.settled[0]?.result, "the final result body");
+  assert.equal(published.settled[0]?.result, undefined);
+  assert.doesNotMatch(JSON.stringify(published), /the final result body/);
+
+  const legacy = validateWorkspaceOwnerSnapshot({
+    ...published,
+    settled: [{ ...published.settled[0]!, result: "the final result body" }],
+  });
+  assert.equal(legacy?.settled[0]?.result, "the final result body");
   const oversized = {
     ...published,
     settled: [{ ...published.settled[0]!, result: "x".repeat(SETTLED_RESULT_BYTES + 1) }],
@@ -1596,10 +1628,10 @@ test("stale cleanup respects a longer deletion threshold than listing staleness"
 });
 
 // ===========================================================================
-// Settled result bodies (bounded, most-recent-only)
+// Settled result bodies stay out of workspace snapshots
 // ===========================================================================
 
-test("buildWorkspaceOwnerState attaches bounded results to the most recent settled agents", () => {
+test("buildWorkspaceOwnerState keeps settled summaries but omits result bodies", () => {
   const activeRuns = new Map<string, ActiveAgent>();
   const now = Date.now();
   for (let index = 0; index < 12; index += 1) {
@@ -1627,38 +1659,7 @@ test("buildWorkspaceOwnerState attaches bounded results to the most recent settl
   const built = buildWorkspaceOwnerState(state, "window", undefined, undefined, 5_000);
   assert.equal(built.mainActivityAt, 5_000);
   const settled = built.settled ?? [];
-  const withResult = settled.filter((record) => record.result !== undefined);
-  assert.equal(withResult.length, 8, "only the most recent 8 settled records carry results");
-  // The settled array keeps map insertion order; the newest 8 (0011..0004) carry results.
-  assert.equal(withResult[0]!.correlationId, "settled-0004");
-  assert.equal(withResult[7]!.correlationId, "settled-0011", "newest settled record keeps its result");
-  assert.equal(settled.find((record) => record.correlationId === "settled-0001")?.result, undefined);
-});
-
-test("buildWorkspaceOwnerState truncates oversized settled results to bytes", () => {
-  const correlationId = "settled-0001";
-  const activeRuns = new Map<string, ActiveAgent>();
-  activeRuns.set(correlationId, {
-    agent: "general",
-    correlationId,
-    startedAt: 1_000,
-    abortController: new AbortController(),
-    inbox: [],
-    outputLog: [],
-    lastActivityAt: 2_000,
-    lastResult: "好".repeat(50_000),
-    status: "completed" as const,
-    depth: 0,
-    sleepMs: 0,
-  });
-  const state: TeammateState = {
-    baseCwd: "d:/project",
-    currentSessionId: "session-1",
-    activeRuns,
-    namedAgents: new Map(),
-  };
-  const built = buildWorkspaceOwnerState(state);
-  const result = (built.settled ?? [])[0]!.result;
-  assert.ok(result !== undefined);
-  assert.ok(Buffer.byteLength(result, "utf8") <= SETTLED_RESULT_BYTES);
+  assert.equal(settled.length, 12);
+  assert.equal(settled.every((record) => record.result === undefined), true);
+  assert.equal(settled.at(-1)?.summary, "result body 11");
 });

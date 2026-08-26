@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { bindWorkspaceCompletionHandle } from "pi-maestro-teammate/v1/workspace-completion";
 import { Value } from "typebox/value";
 import {
   ExactWindowIdentitySchema,
@@ -35,6 +36,11 @@ const DISPATCH_ID = "123e4567-e89b-42d3-a456-426614174000";
 const OWNER_ID = "a".repeat(32);
 const OWNER_SELECTOR = `owner:${OWNER_ID}`;
 const REPLACEMENT_SELECTOR = `owner:${"b".repeat(32)}`;
+const COMPLETION_CORRELATION = bindWorkspaceCompletionHandle("9".repeat(32), {
+  workspaceId: "f".repeat(64),
+  ownerId: "1".repeat(32),
+  ownerNonce: "2".repeat(32),
+});
 
 function steps(count: number): Array<{ stepId: string; prompt: string }> {
   return Array.from({ length: count }, (_, index) => ({ stepId: `step-${index}`, prompt: `Run step ${index}` }));
@@ -181,6 +187,49 @@ test("dispatch and result protocol envelopes are exact and versioned", () => {
   assert.throws(() => parseFlowScheduleResult(result({ outcome: "ambiguous" })), FlowScheduleValidationError);
 });
 
+test("typed results carry and validate the owner-bound canonical terminal resource", () => {
+  const correlated = createFlowScheduleResult({
+    scheduleId: "release",
+    stepId: "verify",
+    dispatchId: DISPATCH_ID,
+    outcome: "completed",
+    summary: "Done",
+    completionCorrelation: COMPLETION_CORRELATION,
+  });
+  assert.deepEqual(correlated.completionCorrelation, COMPLETION_CORRELATION);
+  assert.deepEqual(correlated.resources, [COMPLETION_CORRELATION.resource]);
+  assert.deepEqual(decodeFlowScheduleResult(encodeFlowScheduleResult(correlated)), correlated);
+
+  const legacyResources = Array.from(
+    { length: FLOW_SCHEDULE_LIMITS.maxResources },
+    (_, index) => `agent://legacy-${index}`,
+  );
+  const outputSafe = createFlowScheduleResult({
+    scheduleId: "release",
+    stepId: "verify",
+    dispatchId: DISPATCH_ID,
+    outcome: "completed",
+    summary: "Done",
+    resources: legacyResources,
+    completionCorrelation: COMPLETION_CORRELATION,
+  });
+  assert.equal(outputSafe.resources.length, FLOW_SCHEDULE_LIMITS.maxResources + 1);
+  assert.deepEqual(outputSafe.resources.slice(0, -1), legacyResources);
+  assert.equal(outputSafe.resources.at(-1), COMPLETION_CORRELATION.resource);
+  assert.throws(() => parseFlowScheduleResult(result({
+    resources: [...legacyResources, "agent://legacy-overflow"],
+  })), /at most/);
+
+  assert.throws(() => parseFlowScheduleResult({
+    ...correlated,
+    resources: [],
+  }), /canonical workspace terminal resource/);
+  assert.throws(() => parseFlowScheduleResult({
+    ...correlated,
+    completionCorrelation: { ...COMPLETION_CORRELATION, dispatchId: "8".repeat(32) },
+  }), /canonical workspace completion correlation/);
+});
+
 test("persistence schemas reject extra fields and inconsistent schedule projections", () => {
   const schedule = normalizeFlowSchedule({
     scheduleId: "release",
@@ -203,6 +252,10 @@ test("persistence schemas reject extra fields and inconsistent schedule projecti
   assert.equal(Value.Check(FlowScheduleResultSchema, result()), true);
 
   assert.throws(() => parseFlowScheduleRecord({ ...schedule, stepIds: ["verify", "verify"] }), /unique/);
+  assert.throws(
+    () => parseFlowScheduleRecord({ ...schedule, futureField: 1 }),
+    /must not have additional properties \("futureField"\)/,
+  );
   assert.throws(() => parseFlowScheduleRecord({ ...schedule, steps: { other: schedule.steps.verify } }), /match exactly/);
   assert.throws(() => parseFlowScheduleRecord({
     ...schedule,

@@ -3,7 +3,11 @@
   "version": "2.1.0",
   "description": "Pi extension — teammate agent dispatch with DAG task graphs, RPC messaging, and compact TUI",
   "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "bin": {
+    "pi-teammate-broker": "./bin/pi-teammate-broker.mjs",
     "pi-teammate-models": "./bin/pi-teammate-models.mjs",
     "pi-teammate-remote": "./bin/pi-teammate-remote.mjs"
   },
@@ -112,9 +116,21 @@
       "types": "./types/public/v1/workspace-projections.d.ts",
       "default": "./src/public/v1/workspace-projections.ts"
     },
+    "./v1/workspace-completion": {
+      "types": "./types/public/v1/workspace-completion.d.ts",
+      "default": "./src/public/v1/workspace-completion.ts"
+    },
     "./v1/types": {
       "types": "./types/public/v1/types.d.ts",
       "default": "./src/public/v1/types.ts"
+    },
+    "./v2/runtime": {
+      "types": "./types/public/v2/runtime.d.ts",
+      "default": "./src/public/v2/runtime.ts"
+    },
+    "./v2/runtime-broker": {
+      "types": "./types/public/v2/runtime-broker.d.ts",
+      "default": "./src/public/v2/runtime-broker.ts"
     },
     "./src/*": "./src/*"
   },

@@ -1,3 +1,5 @@
+import type { WorkspaceCompletionCorrelation } from "pi-maestro-teammate/v1/workspace-completion";
+
 export const FLOW_SCHEDULE_VERSION = 1 as const;
 export const FLOW_SCHEDULE_STORE_TYPE = "flow-schedule-store" as const;
 export const FLOW_SCHEDULE_DISPATCH_TYPE = "flow-schedule-dispatch" as const;
@@ -76,6 +78,8 @@ export interface FlowScheduleResult {
   outcome: FlowScheduleResultOutcome;
   summary: string;
   resources: string[];
+  /** Canonical generic workspace-child terminal resource, owner-fenced to the dispatch coordinator. */
+  completionCorrelation?: WorkspaceCompletionCorrelation;
   /** Worker-reported Todo outcome. Required when the dispatch carried a todoBinding; absent otherwise. */
   todoOutcome?: FlowScheduleTodoOutcome;
 }
@@ -103,6 +107,12 @@ export interface FlowScheduleRecord {
   reason?: string;
   createdAt: number;
   updatedAt: number;
+  /** Human-readable reason the last admitNext deferred without creating a dispatch. Cleared on successful dispatch. */
+  lastAdmitReason?: string;
+  /** Epoch ms when lastAdmitReason was recorded. */
+  lastAdmitAt?: number;
+  /** Number of consecutive admitNext deferrals without a dispatch; reset to 0 on success. Drives the admit-failure threshold. */
+  admitAttempts?: number;
 }
 
 export interface FlowScheduleDispatch {
@@ -111,6 +121,8 @@ export interface FlowScheduleDispatch {
   scheduleId: string;
   stepId: string;
   targetIdentity: ExactWindowIdentity;
+  /** Generic workspace-child completion identity captured before the dispatch is published. */
+  completionCorrelation?: WorkspaceCompletionCorrelation;
   state: FlowScheduleDispatchState;
   createdAt: number;
   publishedAt?: number;
@@ -277,6 +289,9 @@ export interface FlowScheduleDispatchIntentInput {
   scheduleId: string;
   stepId: string;
   targetIdentity: ExactWindowIdentity;
+  completionCorrelation?: WorkspaceCompletionCorrelation;
+  /** Authority-selected creation time used to make journal and v1 intent records identical. */
+  createdAt?: number;
 }
 
 export type FlowScheduleAction =

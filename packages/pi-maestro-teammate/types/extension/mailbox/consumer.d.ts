@@ -35,6 +35,8 @@ export interface MailboxConsumerOptions {
     recipientCorrelationId: string;
     /** Workspace ID the consumer serves; messages from other workspaces are skipped. */
     workspaceId: string;
+    /** Persist the authoritative applied effect before child injection or acknowledgement. */
+    commitApplied?: (envelope: MailboxEnvelope) => Promise<void>;
     /** Callback invoked when a message is ready for injection. */
     onDispatch: (envelope: MailboxEnvelope) => Promise<MailboxDispatchDisposition | void>;
     /** Poll interval override (default 50ms). */

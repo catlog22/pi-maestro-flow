@@ -19,19 +19,48 @@ import {
   type MessageProvenanceV1,
 } from "../shared/types.ts";
 import {
+  createWorkspaceWindowTerminalResult,
+  decodeWorkspaceWindowTerminalResult,
+  encodeWorkspaceWindowTerminalResult,
+  validateWorkspaceWindowTerminalResult,
+  WORKSPACE_MAIN_SESSION_MARKER,
+  WORKSPACE_WINDOW_TERMINAL_RESULT_TYPE,
+  workspaceWindowCompletionHandle,
+  workspaceWindowTerminalPublicationId,
+  workspaceWindowTerminalReservationId,
+  workspaceWindowTerminalResultMessageId,
+  type WorkspaceWindowCompletionHandle,
+  type WorkspaceWindowTerminalOutcome,
+  type WorkspaceWindowTerminalResult,
+  type WorkspaceWindowTerminalResultDraft,
+} from "../public/v1/workspace-completion.ts";
+import {
   collectWorkspaceProjections,
   getWorkspaceProjectionProvider,
   type WorkspaceProjectionItem,
   type WorkspaceTodoSnapshot,
 } from "../public/v1/workspace-projections.ts";
+export {
+  createWorkspaceWindowTerminalResult,
+  decodeWorkspaceWindowTerminalResult,
+  encodeWorkspaceWindowTerminalResult,
+  validateWorkspaceWindowTerminalResult,
+  WORKSPACE_MAIN_SESSION_MARKER,
+  WORKSPACE_WINDOW_TERMINAL_RESULT_TYPE,
+  workspaceWindowCompletionHandle,
+  workspaceWindowTerminalPublicationId,
+  workspaceWindowTerminalReservationId,
+  workspaceWindowTerminalResultMessageId,
+} from "../public/v1/workspace-completion.ts";
+export type {
+  WorkspaceWindowCompletionHandle,
+  WorkspaceWindowTerminalOutcome,
+  WorkspaceWindowTerminalResult,
+  WorkspaceWindowTerminalResultDraft,
+} from "../public/v1/workspace-completion.ts";
 export type { WorkspaceTodoSnapshot } from "../public/v1/workspace-projections.ts";
 
 export const WORKSPACE_PEER_PROTOCOL_VERSION = 1 as const;
-/**
- * Reserved targetCorrelationId for commands addressed to a window's main
- * session (window-level monitor interventions) instead of a sub-agent.
- */
-export const WORKSPACE_MAIN_SESSION_MARKER = "window-main-session" as const;
 export const DEFAULT_PEER_STALE_MS = 20_000;
 export const DEFAULT_PEER_HEARTBEAT_MS = 5_000;
 export const DEFAULT_PEER_PUBLISH_THROTTLE_MS = 200;
@@ -40,7 +69,12 @@ export const DEFAULT_COMMAND_TIMEOUT_MS = 5_000;
 export const MAX_OWNER_AGENTS = 256;
 export const MAX_OWNER_SETTLED = 256;
 export const MAX_OWNER_BACKGROUND_JOBS = 32;
-export const WORKSPACE_OWNER_CAPABILITIES = ["flow-schedule-todo-binding"] as const;
+export const WORKSPACE_OWNER_CAPABILITIES = [
+  "flow-schedule-todo-binding",
+  "flow-schedule-todo-projection",
+  "flow-schedule-todo-mutation",
+  "flow-schedule-report",
+] as const;
 export type WorkspaceOwnerCapability = typeof WORKSPACE_OWNER_CAPABILITIES[number];
 const WORKSPACE_OWNER_CAPABILITY_VALUES = new Set<string>(WORKSPACE_OWNER_CAPABILITIES);
 /** Maximum todo items in one owner snapshot. */
@@ -65,9 +99,9 @@ export const MAX_WINDOW_LISTING_ACTIVE_AGENTS = 8;
 
 /** A window whose main session was active within this window is busy even with zero sub-agents. */
 export const MAIN_SESSION_ACTIVE_MS = 60_000;
-/** Per-settled-agent result payload cap (keeps owner snapshots under MAX_OWNER_FILE_BYTES). */
+/** Legacy settled-result payload bound retained for v1 snapshot decoding compatibility. */
 export const SETTLED_RESULT_BYTES = 32 * 1024;
-/** Max settled records that carry a result body in the owner snapshot. */
+/** Legacy public limit retained for consumers of the v1 snapshot contract. */
 export const SETTLED_RESULT_MAX = 8;
 /** Owner snapshot deletion threshold for stale cleanup (listing staleness stays at DEFAULT_PEER_STALE_MS). */
 export const CLEANUP_STALE_DEFAULT_MS = 120_000;
@@ -102,24 +136,6 @@ export type WorkspacePeerMessageKind =
   | "status"
   | "supervision";
 export type WorkspacePeerDeliveryStage = "queued" | "injected";
-export const WORKSPACE_WINDOW_TERMINAL_RESULT_TYPE = "workspace-window-terminal-result" as const;
-export type WorkspaceWindowTerminalOutcome = "completed" | "failed" | "cancelled" | "no-result";
-
-export interface WorkspaceWindowTerminalResult {
-  version: typeof WORKSPACE_PEER_PROTOCOL_VERSION;
-  type: typeof WORKSPACE_WINDOW_TERMINAL_RESULT_TYPE;
-  requestMessageId: string;
-  outcome: WorkspaceWindowTerminalOutcome;
-  settledAt: number;
-  finalText?: string;
-  error?: string;
-}
-
-export interface WorkspaceWindowTerminalResultDraft {
-  outcome: WorkspaceWindowTerminalOutcome;
-  finalText?: string;
-  error?: string;
-}
 
 export interface WorkspacePeerPaths {
   rootDir: string;
@@ -167,7 +183,7 @@ export interface WorkspaceSettledSnapshot {
   status: WorkspaceSettledStatus;
   settledAt: number;
   summary?: string;
-  /** Final result body of the settled agent (bounded, most-recent SETTLED_RESULT_MAX only). */
+  /** Legacy v1 field accepted when decoding old snapshots; new publications omit result bodies. */
   result?: string;
 }
 
@@ -478,6 +494,11 @@ export interface StopWorkspacePeerRuntimeOptions {
   removeOwnerFile?: boolean;
 }
 
+export function workspaceProtocolCommandId(messageId: string | undefined): string | undefined {
+  if (messageId === undefined || OWNER_ID_PATTERN.test(messageId)) return messageId;
+  return createHash("sha256").update(`workspace-peer-command\0${messageId}`, "utf8").digest("hex").slice(0, 32);
+}
+
 function randomProtocolId(): string {
   return randomBytes(16).toString("hex");
 }
@@ -605,102 +626,6 @@ export function deriveWorkspaceWindowTerminalResult(
   }
   if (finalText !== undefined) return { outcome: "completed", finalText };
   return { outcome: "no-result" };
-}
-
-export function workspaceWindowTerminalResultMessageId(requestMessageId: string): string {
-  if (!OWNER_ID_PATTERN.test(requestMessageId)) throw new Error("terminal result requestMessageId must be 32 lowercase hexadecimal characters");
-  return createHash("sha256").update(`workspace-window-terminal-result\0${requestMessageId}`, "utf8").digest("hex").slice(0, 32);
-}
-
-/** Deterministic immutable resource identity for one opt-in workspace request. */
-export function workspaceWindowTerminalPublicationId(requestMessageId: string): string {
-  if (!OWNER_ID_PATTERN.test(requestMessageId)) throw new Error("terminal result requestMessageId must be 32 lowercase hexadecimal characters");
-  return createHash("sha256").update(`workspace-window-terminal-publication\0${requestMessageId}`, "utf8").digest("hex");
-}
-
-/** Deterministic completion reservation identity, stable across process recovery. */
-export function workspaceWindowTerminalReservationId(requestMessageId: string): string {
-  if (!OWNER_ID_PATTERN.test(requestMessageId)) throw new Error("terminal result requestMessageId must be 32 lowercase hexadecimal characters");
-  return createHash("sha256").update(`workspace-window-terminal-reservation\0${requestMessageId}`, "utf8").digest("hex");
-}
-
-export function createWorkspaceWindowTerminalResult(input: {
-  requestMessageId: string;
-  outcome: WorkspaceWindowTerminalOutcome;
-  settledAt?: number;
-  finalText?: string;
-  error?: string;
-}): WorkspaceWindowTerminalResult {
-  const result: WorkspaceWindowTerminalResult = {
-    version: WORKSPACE_PEER_PROTOCOL_VERSION,
-    type: WORKSPACE_WINDOW_TERMINAL_RESULT_TYPE,
-    requestMessageId: input.requestMessageId,
-    outcome: input.outcome,
-    settledAt: input.settledAt ?? Date.now(),
-    ...(input.finalText === undefined ? {} : {
-      finalText: truncateWorkspaceTerminalText(input.finalText, MAX_WORKSPACE_WINDOW_FINAL_TEXT_BYTES),
-    }),
-    ...(input.error === undefined ? {} : {
-      error: truncateWorkspaceTerminalText(input.error, MAX_WORKSPACE_WINDOW_ERROR_BYTES),
-    }),
-  };
-  const validated = validateWorkspaceWindowTerminalResult(result);
-  if (!validated) throw new Error("constructed workspace window terminal result failed protocol validation");
-  return validated;
-}
-
-export function validateWorkspaceWindowTerminalResult(value: unknown): WorkspaceWindowTerminalResult | undefined {
-  if (!isRecord(value)
-    || value.version !== WORKSPACE_PEER_PROTOCOL_VERSION
-    || value.type !== WORKSPACE_WINDOW_TERMINAL_RESULT_TYPE
-    || typeof value.requestMessageId !== "string"
-    || !OWNER_ID_PATTERN.test(value.requestMessageId)
-    || (value.outcome !== "completed"
-      && value.outcome !== "failed"
-      && value.outcome !== "cancelled"
-      && value.outcome !== "no-result")
-    || !boundedInteger(value.settledAt)
-    || (value.finalText !== undefined
-      && (typeof value.finalText !== "string"
-        || value.finalText.length === 0
-        || Buffer.byteLength(value.finalText, "utf8") > MAX_WORKSPACE_WINDOW_FINAL_TEXT_BYTES))
-    || (value.error !== undefined
-      && (typeof value.error !== "string"
-        || value.error.length === 0
-        || Buffer.byteLength(value.error, "utf8") > MAX_WORKSPACE_WINDOW_ERROR_BYTES))
-    || (value.outcome === "completed" && value.finalText === undefined)
-    || (value.outcome === "no-result" && (value.finalText !== undefined || value.error !== undefined))
-    || (value.outcome === "failed" && value.error === undefined)) return undefined;
-  const encoded = JSON.stringify(value);
-  if (Buffer.byteLength(encoded, "utf8") > MAX_COMMAND_MESSAGE_BYTES) return undefined;
-  return {
-    version: WORKSPACE_PEER_PROTOCOL_VERSION,
-    type: WORKSPACE_WINDOW_TERMINAL_RESULT_TYPE,
-    requestMessageId: value.requestMessageId,
-    outcome: value.outcome,
-    settledAt: value.settledAt,
-    ...(value.finalText === undefined ? {} : { finalText: value.finalText }),
-    ...(value.error === undefined ? {} : { error: value.error }),
-  };
-}
-
-export function encodeWorkspaceWindowTerminalResult(result: WorkspaceWindowTerminalResult): string {
-  const validated = validateWorkspaceWindowTerminalResult(result);
-  if (!validated) throw new Error("invalid workspace window terminal result");
-  return JSON.stringify(validated);
-}
-
-export function decodeWorkspaceWindowTerminalResult(text: string): WorkspaceWindowTerminalResult {
-  if (Buffer.byteLength(text, "utf8") > MAX_COMMAND_MESSAGE_BYTES) throw new Error("workspace window terminal result exceeds protocol bounds");
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch (error) {
-    throw new Error(`invalid workspace window terminal result JSON: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  const result = validateWorkspaceWindowTerminalResult(parsed);
-  if (!result) throw new Error("invalid workspace window terminal result");
-  return result;
 }
 
 export function normalizeWorkspacePath(cwd: string, platform: NodeJS.Platform = process.platform): string {
@@ -1281,7 +1206,14 @@ export function buildWorkspaceOwnerSnapshot(
     ...(state.sessionName === undefined ? {} : { sessionName: state.sessionName }),
     ...(getWorkspaceProjectionProvider("todo") === undefined
       ? {}
-      : { capabilities: ["flow-schedule-todo-binding"] }),
+      : {
+        capabilities: [
+          "flow-schedule-todo-binding",
+          "flow-schedule-todo-projection",
+          ...(getWorkspaceProjectionProvider("flow-schedule-todo-mutation-capability") ? ["flow-schedule-todo-mutation" as const] : []),
+          ...(getWorkspaceProjectionProvider("flow-schedule-report-capability") ? ["flow-schedule-report" as const] : []),
+        ],
+      }),
     // Protocol boundary: clamp/round pressure so publish never rejects.
     ...(state.contextPressure === undefined ? {} : { contextPressure: Math.max(0, Math.min(100, Math.round(state.contextPressure))) }),
     ...(state.mainActivityAt === undefined ? {} : { mainActivityAt: state.mainActivityAt }),
@@ -1292,7 +1224,7 @@ export function buildWorkspaceOwnerSnapshot(
       },
     }),
     agents: [...state.agents],
-    settled: [...(state.settled ?? [])],
+    settled: (state.settled ?? []).map(({ result: _legacyResult, ...record }) => record),
     ...(state.backgroundJobs === undefined ? {} : { backgroundJobs: [...state.backgroundJobs] }),
   };
   // Merge bounded projections from registered providers (Flow→Teammate,

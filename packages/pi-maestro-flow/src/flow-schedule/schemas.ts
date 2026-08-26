@@ -1,5 +1,6 @@
 import { Type, type Static, type TSchema } from "typebox";
 import { Value } from "typebox/value";
+import { validateWorkspaceCompletionCorrelation } from "pi-maestro-teammate/v1/workspace-completion";
 import {
   FLOW_SCHEDULE_BINDING_STATES,
   FLOW_SCHEDULE_COMPLETION_STATES,
@@ -46,6 +47,29 @@ const summary = boundedText(FLOW_SCHEDULE_LIMITS.maxSummaryBytes);
 const resource = boundedText(FLOW_SCHEDULE_LIMITS.maxResourceBytes);
 const nonEmptyIdentity = boundedText(256);
 const ownerIdentity = Type.String({ pattern: "^[a-f0-9]{32}$", minLength: 32, maxLength: 32 });
+const completionPublicationId = Type.String({ pattern: "^[a-f0-9]{64}$", minLength: 64, maxLength: 64 });
+const completionResource = Type.Unsafe<`agent://${string}`>({
+  type: "string",
+  pattern: "^agent://[a-f0-9]{64}$",
+  minLength: 72,
+  maxLength: 72,
+});
+
+export const WorkspaceCompletionCorrelationSchema = Type.Object({
+  messageId: ownerIdentity,
+  requestMessageId: ownerIdentity,
+  correlationId: ownerIdentity,
+  dispatchId: ownerIdentity,
+  deliveryGroupId: ownerIdentity,
+  reservationId: completionPublicationId,
+  publicationId: completionPublicationId,
+  resource: completionResource,
+  owner: Type.Object({
+    workspaceId: Type.String({ pattern: "^[a-f0-9]{64}$", minLength: 64, maxLength: 64 }),
+    ownerId: ownerIdentity,
+    ownerNonce: ownerIdentity,
+  }, strict),
+}, strict);
 
 function stringEnum<const T extends readonly string[]>(values: T) {
   return Type.Unsafe<T[number]>({ type: "string", enum: [...values] });
@@ -167,7 +191,8 @@ export const FlowScheduleResultSchema = Type.Object({
   dispatchId,
   outcome: stringEnum(FLOW_SCHEDULE_RESULT_OUTCOMES),
   summary,
-  resources: Type.Array(resource, { maxItems: FLOW_SCHEDULE_LIMITS.maxResources }),
+  resources: Type.Array(resource, { maxItems: FLOW_SCHEDULE_LIMITS.maxResources + 1 }),
+  completionCorrelation: Type.Optional(WorkspaceCompletionCorrelationSchema),
   todoOutcome: Type.Optional(FlowScheduleTodoOutcomeSchema),
 }, strict);
 
@@ -197,7 +222,7 @@ export const FlowScheduleStepSchema = Type.Object({
 
 export const FlowScheduleRecordSchema = Type.Object({
   version: Type.Literal(FLOW_SCHEDULE_VERSION),
-  scheduleId: id,
+ scheduleId: id,
   targetSelector,
   targetIdentity: Type.Optional(ExactWindowIdentitySchema),
   state: stringEnum(FLOW_SCHEDULE_STATES),
@@ -205,6 +230,9 @@ export const FlowScheduleRecordSchema = Type.Object({
   steps: Type.Record(id, FlowScheduleStepSchema),
   activeStepId: Type.Optional(id),
   reason: Type.Optional(reason),
+  lastAdmitReason: Type.Optional(reason),
+  lastAdmitAt: Type.Optional(timestamp),
+  admitAttempts: Type.Optional(Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER })),
   createdAt: timestamp,
   updatedAt: timestamp,
 }, strict);
@@ -215,6 +243,7 @@ export const FlowScheduleDispatchSchema = Type.Object({
   scheduleId: id,
   stepId: id,
   targetIdentity: ExactWindowIdentitySchema,
+  completionCorrelation: Type.Optional(WorkspaceCompletionCorrelationSchema),
   state: stringEnum(FLOW_SCHEDULE_DISPATCH_STATES),
   createdAt: timestamp,
   publishedAt: Type.Optional(timestamp),
@@ -247,7 +276,7 @@ export const FlowSchedulePublishedRecordSchema = Type.Object({
   dispatchId,
   scheduleId: id,
   stepId: id,
-  messageId: dispatchId,
+  messageId: Type.Union([dispatchId, ownerIdentity]),
   traceId: dispatchId,
   publishedAt: timestamp,
 }, strict);
@@ -258,7 +287,7 @@ export const FlowScheduleAcceptedRecordSchema = Type.Object({
   dispatchId,
   scheduleId: id,
   stepId: id,
-  messageId: dispatchId,
+  messageId: Type.Union([dispatchId, ownerIdentity]),
   acceptedAt: timestamp,
   deliveryState: stringEnum(["accepted", "injected", "replayed"] as const),
 }, strict);
@@ -302,7 +331,13 @@ export class FlowScheduleValidationError extends Error {
 function assertSchema<T extends TSchema>(schema: T, value: unknown, context: string): asserts value is Static<T> {
   if (Value.Check(schema, value)) return;
   const first = [...Value.Errors(schema, value)][0];
-  throw new FlowScheduleValidationError(context, first?.instancePath ?? "", first?.message ?? "schema mismatch");
+  const extra = first?.params && Array.isArray((first.params as { additionalProperties?: unknown }).additionalProperties)
+    ? (first.params as { additionalProperties: unknown[] }).additionalProperties.map((name) => JSON.stringify(String(name))).join(", ")
+    : undefined;
+  // Naming the unexpected keys turns version-skew (a file written by a newer
+  // build read by a stale long-running window) into an immediately obvious
+  // diagnosis instead of an opaque strict-schema failure.
+  throw new FlowScheduleValidationError(context, first?.instancePath ?? "", `${first?.message ?? "schema mismatch"}${extra ? ` (${extra})` : ""}`);
 }
 
 function normalizedText(value: string): string {
@@ -482,6 +517,10 @@ export function parseFlowScheduleRecord(value: unknown): FlowScheduleRecord {
 }
 
 function assertDispatchSemantics(value: FlowScheduleDispatch): void {
+  if (value.completionCorrelation !== undefined
+    && !validateWorkspaceCompletionCorrelation(value.completionCorrelation)) {
+    throw new FlowScheduleValidationError("Flow schedule dispatch", "/completionCorrelation", "must be an exact canonical workspace completion correlation");
+  }
   if (value.state === "prepared" && (value.publishedAt !== undefined || value.acceptedAt !== undefined || value.settledAt !== undefined)) {
     throw new FlowScheduleValidationError("Flow schedule dispatch", "/state", "prepared dispatch cannot contain later stage timestamps");
   }
@@ -504,6 +543,23 @@ export function parseFlowScheduleDispatch(value: unknown): FlowScheduleDispatch 
 
 function assertResultSemantics(value: FlowScheduleResult): void {
   assertTextBytes(value.summary, FLOW_SCHEDULE_LIMITS.maxSummaryBytes, "Flow schedule result summary");
+  const correlation = value.completionCorrelation === undefined
+    ? undefined
+    : validateWorkspaceCompletionCorrelation(value.completionCorrelation);
+  if (value.completionCorrelation !== undefined && !correlation) {
+    throw new FlowScheduleValidationError("Flow schedule result", "/completionCorrelation", "must be an exact canonical workspace completion correlation");
+  }
+  if (correlation && !value.resources.includes(correlation.resource)) {
+    throw new FlowScheduleValidationError("Flow schedule result", "/resources", "must include the canonical workspace terminal resource");
+  }
+  const maximumResources = FLOW_SCHEDULE_LIMITS.maxResources + (correlation ? 1 : 0);
+  if (value.resources.length > maximumResources) {
+    throw new FlowScheduleValidationError(
+      "Flow schedule result",
+      "/resources",
+      `must contain at most ${maximumResources} resources`,
+    );
+  }
   for (const entry of value.resources) {
     assertTextBytes(entry, FLOW_SCHEDULE_LIMITS.maxResourceBytes, "Flow schedule result resource");
   }
@@ -533,16 +589,18 @@ export function parseFlowScheduleLockOwner(value: unknown): FlowScheduleLockOwne
 
 export function parseFlowSchedulePublishedRecord(value: unknown): FlowSchedulePublishedRecord {
   assertSchema(FlowSchedulePublishedRecordSchema, value, "Flow schedule published record");
-  if (value.messageId !== value.dispatchId || value.traceId !== value.dispatchId) {
-    throw new FlowScheduleValidationError("Flow schedule published record", "/messageId", "messageId and traceId must equal dispatchId");
+  const transportMessageId = value.dispatchId.replaceAll("-", "");
+  if ((value.messageId !== value.dispatchId && value.messageId !== transportMessageId) || value.traceId !== value.dispatchId) {
+    throw new FlowScheduleValidationError("Flow schedule published record", "/messageId", "messageId must be the legacy dispatchId or its workspace transport ID, and traceId must equal dispatchId");
   }
   return value;
 }
 
 export function parseFlowScheduleAcceptedRecord(value: unknown): FlowScheduleAcceptedRecord {
   assertSchema(FlowScheduleAcceptedRecordSchema, value, "Flow schedule accepted record");
-  if (value.messageId !== value.dispatchId) {
-    throw new FlowScheduleValidationError("Flow schedule accepted record", "/messageId", "messageId must equal dispatchId");
+  const transportMessageId = value.dispatchId.replaceAll("-", "");
+  if (value.messageId !== value.dispatchId && value.messageId !== transportMessageId) {
+    throw new FlowScheduleValidationError("Flow schedule accepted record", "/messageId", "messageId must be the legacy dispatchId or its workspace transport ID");
   }
   return value;
 }

@@ -204,12 +204,50 @@ test("consumer dispatches a ready message and transitions to applied", async () 
   assert.equal(await store.readEnvelope("accepted", envelope.messageId), undefined);
 });
 
+test("consumer does not publish child dispatch until the authoritative commit resolves", async () => {
+  const order: string[] = [];
+  let commitEntered!: () => void;
+  let releaseCommit!: () => void;
+  const entered = new Promise<void>((resolve) => { commitEntered = resolve; });
+  const pendingCommit = new Promise<void>((resolve) => { releaseCommit = resolve; });
+  const consumer = new MailboxConsumer({
+    store,
+    router,
+    recipientCorrelationId: "corr-001",
+    workspaceId: "a".repeat(64),
+    commitApplied: async () => {
+      order.push("commit-started");
+      commitEntered();
+      await pendingCommit;
+      order.push("commit-finished");
+    },
+    onDispatch: async () => { order.push("dispatch"); },
+    pollMs: 10,
+    now: () => nowMs,
+  });
+  const envelope = makeEnvelope("00000000-0000-4000-8000-000000000042");
+  await store.writeStaging(envelope);
+  await store.promoteToReady(envelope.messageId);
+
+  consumer.start();
+  await entered;
+  assert.deepEqual(order, ["commit-started"]);
+  releaseCommit();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  await consumer.stop();
+
+  assert.deepEqual(order, ["commit-started", "commit-finished", "dispatch"]);
+  assert.ok(await store.readEnvelope("applied", envelope.messageId));
+});
+
 test("consumer acknowledge transitions accepted to applied (IPC-ack path)", async () => {
+  const committed: string[] = [];
   const consumer = new MailboxConsumer({
     store,
     router,
     recipientCorrelationId: "corr-001",
       workspaceId: "a".repeat(64),
+    commitApplied: async (envelope) => { committed.push(envelope.messageId); },
     onDispatch: async () => {},
     pollMs: 10,
     now: () => nowMs,
@@ -233,6 +271,7 @@ test("consumer acknowledge transitions accepted to applied (IPC-ack path)", asyn
   // Acknowledge via IPC
   const acked = await consumer.acknowledge(envelope.messageId);
   assert.equal(acked, true);
+  assert.deepEqual(committed, [envelope.messageId]);
 
   const applied = await store.readEnvelope("applied", envelope.messageId);
   assert.ok(applied);
@@ -240,6 +279,7 @@ test("consumer acknowledge transitions accepted to applied (IPC-ack path)", asyn
   // Idempotent: acknowledging an already-applied message is a no-op.
   assert.equal(await consumer.acknowledge(envelope.messageId), false);
   assert.equal(await consumer.acknowledge("not-a-valid-message-id"), false);
+  assert.deepEqual(committed, [envelope.messageId]);
 });
 
 test("deferred dispatch remains accepted until acknowledged and replays after restart", async () => {

@@ -136,7 +136,6 @@ interface WorkspaceRunRow {
   summary: string;
   outputTail: readonly string[];
   startedAt: number;
-  result?: string;
 }
 
 /** Build the bounded run list from live agents and settled records. */
@@ -157,14 +156,14 @@ function collectWorkspaceRuns(owner: WorkspaceOwnerSnapshot): WorkspaceRunRow[] 
       summary: record.summary ?? record.status,
       outputTail: [],
       startedAt: record.settledAt,
-      ...(record.result === undefined ? {} : { result: record.result }),
     })),
   ];
 }
 
 /**
  * Run-list fallback for peers that published no session progress. Returns a
- * bounded snapshot of agent summaries, output tails, and settled results.
+ * bounded snapshot of agent summaries and output tails. Settled result bodies
+ * remain available only through their canonical agent:// resources.
  */
 function workspaceRunListSnapshot(
   owner: WorkspaceOwnerSnapshot,
@@ -195,9 +194,6 @@ function workspaceRunListSnapshot(
       `@${run.name} ${run.status} · started ${new Date(run.startedAt).toISOString()}`,
       ...(run.summary ? [run.summary] : []),
       ...(detail !== "summary" ? run.outputTail.slice(-lines) : []),
-      ...(detail !== "summary" && run.result
-        ? [`-- result --`, ...run.result.split("\n").slice(0, Math.max(lines, 1))]
-        : []),
     ];
     return {
       target,

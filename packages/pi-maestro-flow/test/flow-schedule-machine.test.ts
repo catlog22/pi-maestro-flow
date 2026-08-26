@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   cancelFlowSchedule,
+  failFlowSchedule,
   pauseFlowSchedule,
   resumeFlowSchedule,
   selectNextFlowScheduleStep,
@@ -14,7 +15,9 @@ import {
   decodeFlowScheduleResult,
   encodeFlowScheduleDispatch,
   encodeFlowScheduleResult,
+  flowScheduleDispatchMessageId,
   flowScheduleResultMessageId,
+  flowScheduleResultTransportMessageId,
 } from "../src/flow-schedule/protocol.ts";
 import { FlowScheduleValidationError, normalizeFlowSchedule, parseFlowScheduleRecord } from "../src/flow-schedule/schemas.ts";
 
@@ -50,6 +53,24 @@ test("machine start, pause, resume, cancel, and next-step selection are pure pro
   assert.equal(cancelled.reason, "No longer needed");
   assert.deepEqual(cancelled.stepIds.map((id) => cancelled.steps[id].state), ["cancelled", "cancelled"]);
   assert.equal(active.steps.build.state, "pending");
+});
+
+test("fail transitions an active schedule with no active dispatch to failed", () => {
+  const active = startFlowSchedule(draft());
+  const failed = failFlowSchedule(active, "target not reachable");
+  assert.equal(failed.state, "failed");
+  assert.equal(failed.reason, "target not reachable");
+  assert.throws(() => failFlowSchedule(failed, "x"), /cannot fail/);
+  const paused = pauseFlowSchedule(active);
+  assert.throws(() => failFlowSchedule(paused, "x"), /cannot fail/);
+  const draftSchedule = draft();
+  assert.throws(() => failFlowSchedule(draftSchedule, "x"), /cannot fail/);
+  const activeDispatch = parseFlowScheduleRecord({
+    ...active,
+    activeStepId: "build",
+    steps: { ...active.steps, build: { ...active.steps.build, state: "dispatching", attempts: [DISPATCH_ID], currentDispatchId: DISPATCH_ID } },
+  });
+  assert.throws(() => failFlowSchedule(activeDispatch, "x"), /no active dispatch/);
 });
 
 test("retarget requires a paused schedule with no active attempt", () => {
@@ -107,9 +128,14 @@ test("protocol JSON and deterministic result IDs are exact and versioned", () =>
     summary: "Done",
   });
   assert.deepEqual(decodeFlowScheduleResult(encodeFlowScheduleResult(result)), result);
+  assert.equal(flowScheduleDispatchMessageId(DISPATCH_ID), "123e4567e89b42d3a456426614174000");
+  assert.match(flowScheduleResultTransportMessageId(DISPATCH_ID), /^[a-f0-9]{32}$/);
+  assert.notEqual(flowScheduleResultTransportMessageId(DISPATCH_ID), flowScheduleDispatchMessageId(DISPATCH_ID));
   assert.equal(flowScheduleResultMessageId(DISPATCH_ID), flowScheduleResultMessageId(DISPATCH_ID));
   assert.notEqual(flowScheduleResultMessageId(DISPATCH_ID), flowScheduleResultMessageId("223e4567-e89b-42d3-a456-426614174000"));
   assert.throws(() => flowScheduleResultMessageId("not-a-dispatch"), FlowScheduleValidationError);
+  assert.throws(() => flowScheduleDispatchMessageId("not-a-dispatch"), FlowScheduleValidationError);
+  assert.throws(() => flowScheduleResultTransportMessageId("not-a-dispatch"), FlowScheduleValidationError);
 });
 
 test("next-step selection never skips a failed or ambiguous sequential step", () => {

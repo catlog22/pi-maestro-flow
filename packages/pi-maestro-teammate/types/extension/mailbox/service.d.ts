@@ -27,6 +27,8 @@ export interface MailboxServiceOptions {
     teamId: string;
     /** Owner ID of this service instance. */
     ownerId: string;
+    /** Persist the authoritative applied effect before child injection or acknowledgement. */
+    commitApplied?: (envelope: MailboxEnvelope) => Promise<void>;
     /** Callback invoked when a message is ready for injection into the child. */
     onDispatch: (envelope: MailboxEnvelope) => Promise<MailboxDispatchDisposition | void>;
     /** Poll interval for the consumer. */

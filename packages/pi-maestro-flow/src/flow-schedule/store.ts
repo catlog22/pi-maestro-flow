@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
+import { isDeepStrictEqual } from "node:util";
 import {
   chmod,
   lstat,
@@ -86,6 +87,8 @@ export interface FlowScheduleDispatchIntentOutcome {
   dispatch: FlowScheduleDispatch;
   schedule: FlowScheduleRecord;
 }
+
+export type FlowSchedulePrePersist = (projection: FlowScheduleRecord) => void | Promise<void>;
 
 export interface FlowScheduleDispatchBundle {
   intent: FlowScheduleDispatch;
@@ -230,7 +233,10 @@ export class FlowScheduleStore {
     return this.listSchedulesUnlocked();
   }
 
-  async createSchedule(input: FlowScheduleCreateInput): Promise<FlowScheduleRecord> {
+  async createSchedule(
+    input: FlowScheduleCreateInput,
+    beforePersist?: FlowSchedulePrePersist,
+  ): Promise<FlowScheduleRecord> {
     const schedule = normalizeFlowSchedule(input, this.now());
     return this.withStoreLock(async (lock) => {
       await lock.assertOwned();
@@ -242,6 +248,7 @@ export class FlowScheduleStore {
         );
       }
       const path = this.schedulePath(schedule.scheduleId);
+      await beforePersist?.(structuredClone(schedule));
       await lock.assertOwned();
       if (!await createExclusiveJson(path, schedule, FLOW_SCHEDULE_LIMITS.maxScheduleRecordBytes)) {
         throw new FlowScheduleConflictError(`Flow schedule already exists: ${schedule.scheduleId}`, path);
@@ -253,6 +260,7 @@ export class FlowScheduleStore {
   async updateSchedule(
     scheduleId: string,
     update: (current: FlowScheduleRecord) => FlowScheduleRecord | Promise<FlowScheduleRecord>,
+    beforePersist?: FlowSchedulePrePersist,
   ): Promise<FlowScheduleRecord> {
     assertScheduleId(scheduleId);
     return this.withStoreLock(async (lock) => {
@@ -266,9 +274,64 @@ export class FlowScheduleStore {
         updatedAt: this.now(),
       });
       assertScheduleEvolution(current, next);
+      await beforePersist?.(structuredClone(next));
       await lock.assertOwned();
       await writeAtomicJson(this.schedulePath(scheduleId), next, FLOW_SCHEDULE_LIMITS.maxScheduleRecordBytes);
       return next;
+    });
+  }
+
+  async repairScheduleProjection(projection: FlowScheduleRecord): Promise<FlowScheduleRecord> {
+    const authoritative = parseFlowScheduleRecord(structuredClone(projection));
+    return this.withStoreLock(async (lock) => {
+      const current = await this.readScheduleUnlocked(authoritative.scheduleId);
+      if (current && current.createdAt !== authoritative.createdAt) {
+        throw new FlowScheduleConflictError("Flow schedule projection repair identity does not match v1");
+      }
+      await this.persistScheduleProjectionUnlocked(authoritative, lock);
+      return authoritative;
+    });
+  }
+
+  async repairDispatchProjection(projection: FlowScheduleDispatchBundle): Promise<FlowScheduleDispatchBundle> {
+    const intent = parseFlowScheduleDispatch(structuredClone(projection.intent));
+    if (intent.state !== "prepared") throw new FlowScheduleConflictError("Dispatch intent projection is not prepared");
+    const published = projection.published && parseFlowSchedulePublishedRecord(structuredClone(projection.published));
+    const accepted = projection.accepted && parseFlowScheduleAcceptedRecord(structuredClone(projection.accepted));
+    const completion = projection.completion && parseFlowScheduleCompletionRecord(structuredClone(projection.completion));
+    const binding = projection.binding && parseFlowScheduleTodoBinding(structuredClone(projection.binding));
+    for (const record of [published, accepted, completion]) {
+      if (record) assertDispatchRecordIdentity(intent, record);
+    }
+    if (accepted && !published) throw new FlowScheduleConflictError("Accepted projection has no publication");
+    if (binding && (binding.dispatchId !== intent.dispatchId
+      || binding.scheduleId !== intent.scheduleId
+      || binding.stepId !== intent.stepId)) {
+      throw new FlowScheduleConflictError("Binding projection identity does not match its dispatch intent");
+    }
+    return this.withStoreLock(async (lock) => {
+      const directory = this.dispatchPath(intent.dispatchId);
+      await lock.assertOwned();
+      await ensureRealDirectory(directory);
+      await this.createIdempotentDispatchRecord(lock, intent.dispatchId, INTENT_FILE_NAME, intent, parseFlowScheduleDispatch);
+      if (published) await this.createIdempotentDispatchRecord(lock, intent.dispatchId, PUBLISHED_FILE_NAME, published, parseFlowSchedulePublishedRecord);
+      if (accepted) await this.createIdempotentDispatchRecord(lock, intent.dispatchId, ACCEPTED_FILE_NAME, accepted, parseFlowScheduleAcceptedRecord);
+      if (completion) await this.createIdempotentDispatchRecord(lock, intent.dispatchId, COMPLETION_FILE_NAME, completion, parseFlowScheduleCompletionRecord);
+      if (binding) {
+        await lock.assertOwned();
+        await writeAtomicJson(
+          containedPath(directory, BINDING_FILE_NAME),
+          binding,
+          FLOW_SCHEDULE_LIMITS.maxDispatchRecordBytes,
+        );
+      }
+      return {
+        intent,
+        ...(published ? { published } : {}),
+        ...(accepted ? { accepted } : {}),
+        ...(completion ? { completion } : {}),
+        ...(binding ? { binding } : {}),
+      };
     });
   }
 
@@ -276,6 +339,7 @@ export class FlowScheduleStore {
     scheduleId: string,
     afterStepId: string,
     steps: FlowScheduleCreateStepInput[],
+    beforePersist?: FlowSchedulePrePersist,
   ): Promise<FlowScheduleRecord> {
     const action = parseFlowScheduleAction({ action: "append", scheduleId, afterStepId, steps });
     if (action.action !== "append") throw new Error("Flow schedule append normalization failed");
@@ -310,10 +374,15 @@ export class FlowScheduleStore {
       const stepIds = [...current.stepIds];
       stepIds.splice(insertion + 1, 0, ...action.steps.map((step) => step.stepId));
       return { ...current, stepIds, steps: nextSteps };
-    });
+    }, beforePersist);
   }
 
-  async prepareRetry(scheduleId: string, stepId: string, reason: string): Promise<FlowScheduleRecord> {
+  async prepareRetry(
+    scheduleId: string,
+    stepId: string,
+    reason: string,
+    beforePersist?: FlowSchedulePrePersist,
+  ): Promise<FlowScheduleRecord> {
     const action = parseFlowScheduleAction({ action: "retry", scheduleId, stepId, reason });
     if (action.action !== "retry") throw new Error("Flow schedule retry normalization failed");
     return this.withStoreLock(async (lock) => {
@@ -333,13 +402,6 @@ export class FlowScheduleStore {
       const previousBundle = previousDispatchId
         ? await this.readDispatchBundleUnlocked(previousDispatchId)
         : undefined;
-      if (previousBundle) {
-        await this.terminalizeBindingAmbiguousUnlocked(
-          previousBundle,
-          `Retry requested: ${action.reason}`,
-          lock,
-        );
-      }
       const nextStep: FlowScheduleRecord["steps"][string] = { ...step, state: "pending" };
       delete nextStep.result;
       const next = parseFlowScheduleRecord({
@@ -348,8 +410,15 @@ export class FlowScheduleStore {
         steps: { ...current.steps, [action.stepId]: nextStep },
         updatedAt: this.now(),
       });
-      await lock.assertOwned();
-      await writeAtomicJson(this.schedulePath(current.scheduleId), next, FLOW_SCHEDULE_LIMITS.maxScheduleRecordBytes);
+      await beforePersist?.(structuredClone(next));
+      if (previousBundle) {
+        await this.terminalizeBindingAmbiguousUnlocked(
+          previousBundle,
+          `Retry requested: ${action.reason}`,
+          lock,
+        );
+      }
+      await this.persistScheduleProjectionUnlocked(next, lock);
       return next;
     });
   }
@@ -357,12 +426,13 @@ export class FlowScheduleStore {
   async createDispatchIntent(
     input: FlowScheduleDispatchIntentInput,
     authorize?: () => boolean,
+    beforePersist?: FlowSchedulePrePersist,
   ): Promise<FlowScheduleDispatchIntentOutcome> {
     const dispatch = parseFlowScheduleDispatch({
       version: FLOW_SCHEDULE_VERSION,
       ...input,
       state: "prepared",
-      createdAt: this.now(),
+      createdAt: input.createdAt ?? this.now(),
     });
     return this.withStoreLock(async (lock) => {
       const schedule = await this.requireScheduleUnlocked(dispatch.scheduleId);
@@ -376,7 +446,9 @@ export class FlowScheduleStore {
         if (step.attempts.includes(dispatch.dispatchId)) {
           return { created: false, dispatch: existing.intent, schedule };
         }
-        const repaired = await this.applyIntentToScheduleUnlocked(schedule, existing.intent, lock);
+        const repaired = this.projectIntentToSchedule(schedule, existing.intent);
+        await beforePersist?.(structuredClone(repaired));
+        await this.persistScheduleProjectionUnlocked(repaired, lock);
         return { created: false, dispatch: existing.intent, schedule: repaired };
       }
 
@@ -413,10 +485,12 @@ export class FlowScheduleStore {
         throw new FlowScheduleConflictError("Exact target incarnation already has an active Flow schedule dispatch");
       }
 
-      const directory = this.dispatchPath(dispatch.dispatchId);
+      const updated = this.projectIntentToSchedule(schedule, dispatch);
+      await beforePersist?.(structuredClone(updated));
       if (authorize && !authorize()) {
         throw new FlowScheduleConflictError("Flow schedule dispatch authority fence is stale");
       }
+      const directory = this.dispatchPath(dispatch.dispatchId);
       await lock.assertOwned();
       await ensureRealDirectory(directory);
       if (authorize && !authorize()) {
@@ -434,11 +508,11 @@ export class FlowScheduleStore {
         if (!sameDispatchIntent(raced.intent, dispatch)) {
           throw new FlowScheduleConflictError(`Dispatch ID already belongs to another intent: ${dispatch.dispatchId}`);
         }
-        const repaired = await this.applyIntentToScheduleUnlocked(schedule, raced.intent, lock);
-        return { created: false, dispatch: raced.intent, schedule: repaired };
+        await this.persistScheduleProjectionUnlocked(updated, lock);
+        return { created: false, dispatch: raced.intent, schedule: updated };
       }
 
-      const updated = await this.applyIntentToScheduleUnlocked(schedule, dispatch, lock);
+      await this.persistScheduleProjectionUnlocked(updated, lock);
       return { created: true, dispatch, schedule: updated };
     });
   }
@@ -466,12 +540,22 @@ export class FlowScheduleStore {
     });
   }
 
-  async recordAccepted(record: FlowScheduleAcceptedRecord): Promise<FlowScheduleAcceptedRecord> {
+  async recordAccepted(
+    record: FlowScheduleAcceptedRecord,
+    beforePersist?: FlowSchedulePrePersist,
+  ): Promise<FlowScheduleAcceptedRecord> {
     const normalized = parseFlowScheduleAcceptedRecord(record);
     return this.withStoreLock(async (lock) => {
       const bundle = await this.requireDispatchBundleUnlocked(normalized.dispatchId);
       assertDispatchRecordIdentity(bundle.intent, normalized);
       if (!bundle.published) throw new FlowScheduleConflictError("Dispatch cannot be accepted before publication");
+      const schedule = bundle.completion
+        ? undefined
+        : await this.requireScheduleUnlocked(normalized.scheduleId);
+      const projection = schedule
+        ? this.projectAcceptedToSchedule(schedule, normalized)
+        : undefined;
+      if (projection) await beforePersist?.(structuredClone(projection));
       const stored = await this.createIdempotentDispatchRecord(
         lock,
         normalized.dispatchId,
@@ -479,28 +563,27 @@ export class FlowScheduleStore {
         normalized,
         parseFlowScheduleAcceptedRecord,
       );
-      const schedule = await this.requireScheduleUnlocked(normalized.scheduleId);
-      const step = schedule.steps[normalized.stepId];
-      if (schedule.activeStepId === normalized.stepId && step?.currentDispatchId === normalized.dispatchId) {
-        const next = parseFlowScheduleRecord({
-          ...schedule,
-          steps: { ...schedule.steps, [normalized.stepId]: { ...step, state: "awaiting-result" } },
-          updatedAt: this.now(),
-        });
-        await lock.assertOwned();
-        await writeAtomicJson(this.schedulePath(schedule.scheduleId), next, FLOW_SCHEDULE_LIMITS.maxScheduleRecordBytes);
-      }
+      if (projection) await this.persistScheduleProjectionUnlocked(projection, lock);
       return stored;
     });
   }
 
-  async recordCompletion(record: FlowScheduleCompletionRecord): Promise<FlowScheduleCompletionRecord> {
+  async recordCompletion(
+    record: FlowScheduleCompletionRecord,
+    beforePersist?: FlowSchedulePrePersist,
+  ): Promise<FlowScheduleCompletionRecord> {
     const normalized = parseFlowScheduleCompletionRecord(record);
     return this.withStoreLock(async (lock) => {
       const bundle = await this.requireDispatchBundleUnlocked(normalized.dispatchId);
       assertDispatchRecordIdentity(bundle.intent, normalized);
       if (!sameTargetIdentity(bundle.intent.targetIdentity, normalized.targetIdentity)) {
         throw new FlowScheduleConflictError("Completion target identity does not match its dispatch intent");
+      }
+      if (normalized.result !== undefined
+        && (bundle.intent.completionCorrelation !== undefined
+          || normalized.result.completionCorrelation !== undefined)
+        && !sameJson(bundle.intent.completionCorrelation, normalized.result.completionCorrelation)) {
+        throw new FlowScheduleConflictError("Completion correlation does not match its dispatch intent");
       }
       if (bundle.completion) {
         if (!sameJson(bundle.completion, normalized)) {
@@ -509,12 +592,17 @@ export class FlowScheduleStore {
             containedPath(this.dispatchPath(normalized.dispatchId), COMPLETION_FILE_NAME),
           );
         }
-        await this.terminalizeBindingForCompletionUnlocked(bundle, normalized, lock);
-        if (normalized.state === "ignored") return bundle.completion;
+        if (normalized.state === "ignored") {
+          await this.terminalizeBindingForCompletionUnlocked(bundle, normalized, lock);
+          return bundle.completion;
+        }
         const projected = await this.requireScheduleUnlocked(normalized.scheduleId);
         const projectedStep = projected.steps[normalized.stepId];
         if (completionAlreadyProjected(projectedStep, normalized)) return bundle.completion;
-        await this.applyCompletionToScheduleUnlocked(projected, normalized, lock);
+        const next = this.projectCompletionToSchedule(projected, normalized);
+        await beforePersist?.(structuredClone(next));
+        await this.terminalizeBindingForCompletionUnlocked(bundle, normalized, lock);
+        await this.persistScheduleProjectionUnlocked(next, lock);
         return bundle.completion;
       }
       if (normalized.state === "ignored") {
@@ -528,6 +616,8 @@ export class FlowScheduleStore {
       }
       const schedule = await this.requireScheduleUnlocked(normalized.scheduleId);
       assertCurrentCompletion(schedule, normalized);
+      const projection = this.projectCompletionToSchedule(schedule, normalized);
+      await beforePersist?.(structuredClone(projection));
       await this.terminalizeBindingForCompletionUnlocked(bundle, normalized, lock);
       const stored = await this.createIdempotentDispatchRecord(
         lock,
@@ -536,7 +626,7 @@ export class FlowScheduleStore {
         normalized,
         parseFlowScheduleCompletionRecord,
       );
-      await this.applyCompletionToScheduleUnlocked(schedule, normalized, lock);
+      await this.persistScheduleProjectionUnlocked(projection, lock);
       return stored;
     });
   }
@@ -793,11 +883,10 @@ export class FlowScheduleStore {
     return records.sort((left, right) => left.scheduleId.localeCompare(right.scheduleId));
   }
 
-  private async applyIntentToScheduleUnlocked(
+  private projectIntentToSchedule(
     schedule: FlowScheduleRecord,
     dispatch: FlowScheduleDispatch,
-    lock: FlowScheduleStoreLock,
-  ): Promise<FlowScheduleRecord> {
+  ): FlowScheduleRecord {
     const step = schedule.steps[dispatch.stepId];
     if (!step) throw new FlowScheduleConflictError(`Unknown Flow schedule step: ${dispatch.stepId}`);
     if (step.currentDispatchId === dispatch.dispatchId
@@ -809,6 +898,9 @@ export class FlowScheduleStore {
     if (step.attempts.length >= FLOW_SCHEDULE_LIMITS.maxAttemptsPerStep) {
       throw new FlowScheduleConflictError(`Flow schedule step ${dispatch.stepId} reached its attempt limit`);
     }
+    const hadAdmissionDeferral = schedule.lastAdmitReason !== undefined
+      || schedule.lastAdmitAt !== undefined
+      || schedule.admitAttempts !== undefined;
     const next = parseFlowScheduleRecord({
       ...schedule,
       targetIdentity: dispatch.targetIdentity,
@@ -824,9 +916,12 @@ export class FlowScheduleStore {
       },
       updatedAt: this.now(),
     });
-    await lock.assertOwned();
-    await writeAtomicJson(this.schedulePath(schedule.scheduleId), next, FLOW_SCHEDULE_LIMITS.maxScheduleRecordBytes);
-    return next;
+    if (hadAdmissionDeferral) {
+      delete next.lastAdmitReason;
+      delete next.lastAdmitAt;
+      next.admitAttempts = 0;
+    }
+    return parseFlowScheduleRecord(next);
   }
 
   private async terminalizeBindingForCompletionUnlocked(
@@ -884,11 +979,10 @@ export class FlowScheduleStore {
     );
   }
 
-  private async applyCompletionToScheduleUnlocked(
+  private projectCompletionToSchedule(
     schedule: FlowScheduleRecord,
     completion: FlowScheduleCompletionRecord,
-    lock: FlowScheduleStoreLock,
-  ): Promise<FlowScheduleRecord> {
+  ): FlowScheduleRecord {
     assertCurrentCompletion(schedule, completion);
     const step = schedule.steps[completion.stepId];
     const nextStep = {
@@ -900,16 +994,46 @@ export class FlowScheduleStore {
     if (completion.state === "retired") delete nextStep.result;
     const steps = { ...schedule.steps, [completion.stepId]: nextStep };
     const allCompleted = schedule.stepIds.every((stepId) => steps[stepId].state === "completed");
-    const next = parseFlowScheduleRecord({
+    return parseFlowScheduleRecord({
       ...schedule,
       steps,
       activeStepId: undefined,
       state: allCompleted ? "completed" : schedule.state,
       updatedAt: this.now(),
     });
+  }
+
+  private projectAcceptedToSchedule(
+    schedule: FlowScheduleRecord,
+    accepted: FlowScheduleAcceptedRecord,
+  ): FlowScheduleRecord {
+    const step = schedule.steps[accepted.stepId];
+    if (!step
+      || schedule.activeStepId !== accepted.stepId
+      || step.currentDispatchId !== accepted.dispatchId) {
+      throw new FlowScheduleConflictError("Accepted dispatch does not name the current Flow schedule dispatch");
+    }
+    if (step.state === "awaiting-result") return schedule;
+    if (step.state !== "dispatching") {
+      throw new FlowScheduleConflictError("Accepted dispatch cannot be projected from the current step state");
+    }
+    return parseFlowScheduleRecord({
+      ...schedule,
+      steps: { ...schedule.steps, [accepted.stepId]: { ...step, state: "awaiting-result" } },
+      updatedAt: this.now(),
+    });
+  }
+
+  private async persistScheduleProjectionUnlocked(
+    projection: FlowScheduleRecord,
+    lock: FlowScheduleStoreLock,
+  ): Promise<void> {
     await lock.assertOwned();
-    await writeAtomicJson(this.schedulePath(schedule.scheduleId), next, FLOW_SCHEDULE_LIMITS.maxScheduleRecordBytes);
-    return next;
+    await writeAtomicJson(
+      this.schedulePath(projection.scheduleId),
+      projection,
+      FLOW_SCHEDULE_LIMITS.maxScheduleRecordBytes,
+    );
   }
 
   private async readDispatchBundleUnlocked(dispatchId: string): Promise<FlowScheduleDispatchBundle | undefined> {
@@ -1236,7 +1360,8 @@ function sameDispatchIntent(left: FlowScheduleDispatch, right: FlowScheduleDispa
     && left.scheduleId === right.scheduleId
     && left.stepId === right.stepId
     && left.state === right.state
-    && sameTargetIdentity(left.targetIdentity, right.targetIdentity);
+    && sameTargetIdentity(left.targetIdentity, right.targetIdentity)
+    && sameJson(left.completionCorrelation, right.completionCorrelation);
 }
 
 function completionStepState(state: FlowScheduleCompletionRecord["state"]): FlowScheduleRecord["steps"][string]["state"] {
@@ -1267,7 +1392,7 @@ function sameTargetIdentity(left: ExactWindowIdentity, right: ExactWindowIdentit
 }
 
 function sameJson(left: unknown, right: unknown): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+  return isDeepStrictEqual(left, right);
 }
 
 async function readJsonOptional(path: string, maximumBytes: number): Promise<unknown | undefined> {

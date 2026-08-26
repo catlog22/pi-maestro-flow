@@ -653,7 +653,7 @@ export const WorkspaceWindowParams = Type.Object({
   action: Type.Unsafe<"create" | "list" | "close">({
     type: "string",
     enum: ["create", "list", "close"],
-    description: "Create, list, or close worker windows owned by the active Monitor session.",
+    description: "Create, list, or close worker windows owned by the active Monitor session. Create returns an optional canonical completion handle whose agent:// resource remains readable after exit; close finalizes pending work as cancelled.",
   }),
   name: Type.Optional(Type.String({
     minLength: 1,

@@ -5,10 +5,16 @@ import type {
 } from "pi-maestro-teammate/v1/events";
 import {
 	TEAMMATE_STALL_TIMEOUT_MS,
-	type AgentProgressSnapshot,
-	type AgentRuntimeProjection,
-	type AgentTurnSnapshot,
+	AgentProgressSnapshot,
+	AgentRuntimeProjection,
+	AgentTurnSnapshot,
 } from "pi-maestro-teammate/v1/types";
+import type {
+	RuntimeAgentReadEntityV2,
+	RuntimeReadModelDeltaV2,
+	RuntimeReadModelSnapshotV2,
+} from "pi-maestro-teammate/v2/runtime";
+import { RuntimeReadModelProjectionV2 } from "pi-maestro-teammate/v2/runtime";
 import { sanitizeExtensionStatusText } from "./extension-status.ts";
 import { EXPERT_LEADER_NAME, type AgentRow, type AgentStatus } from "./types.ts";
 
@@ -237,6 +243,52 @@ function latestTool(tools: Array<string | { name?: string; status?: string; args
 	};
 }
 
+function runtimeEntityToRow(entity: RuntimeAgentReadEntityV2): AgentRow {
+	const status = mapAgentStatus(entity.status);
+	const recentTools = entity.recentTools ? normalizedRecentTools(entity.recentTools) : undefined;
+	const activeTool = latestTool(entity.recentTools);
+	const finishedAt = status === "done" || status === "failed" || status === "terminated" || status === "sleeping"
+		? entity.lastOutcome?.settledAt ?? entity.lastActivityAt
+		: undefined;
+	return {
+		correlationId: entity.correlationId,
+		runtimeGeneration: entity.generation,
+		agent: clean(entity.agent),
+		name: entity.name === undefined ? undefined : clean(entity.name),
+		role: deriveRole(entity.agent, entity.name),
+		task: entity.task === undefined ? clean(entity.name) : conversationText(entity.task),
+		status,
+		...(entity.spawnedBy ? { spawnedBy: entity.spawnedBy } : {}),
+		...(entity.parentCorrelationId ? { parentCorrelationId: entity.parentCorrelationId } : {}),
+		...(entity.phase ? { phase: clean(entity.phase) } : {}),
+		...(entity.runtime ? { runtime: structuredClone(entity.runtime) } : {}),
+		...(entity.turn ? { turn: structuredClone(entity.turn) } : {}),
+		...(entity.lastOutcome ? { lastOutcome: structuredClone(entity.lastOutcome) } : {}),
+		tail: entity.lastMessage ? truncateSessionContent(entity.lastMessage) : "",
+		startedAt: entity.startedAt,
+		lastActivityAt: entity.lastActivityAt,
+		...(finishedAt === undefined ? {} : { finishedAt }),
+		...(entity.resultReadyAt === undefined ? {} : { resultReadyAt: entity.resultReadyAt }),
+		...(entity.taskIndex === undefined ? {} : { taskIndex: entity.taskIndex }),
+		...(entity.dependencies === undefined ? {} : { dependencies: [...entity.dependencies] }),
+		...(recentTools === undefined ? {} : { recentTools }),
+		...(activeTool ? {
+			activeTool: activeTool.name,
+			...(activeTool.argsPreview ? { activeToolArgs: activeTool.argsPreview } : {}),
+		} : {}),
+		...(entity.toolCount === undefined ? {} : { toolCount: entity.toolCount }),
+		...(entity.tokens === undefined ? {} : { tokens: entity.tokens }),
+		...(entity.inputTokens === undefined ? {} : { inputTokens: entity.inputTokens }),
+		...(entity.outputTokens === undefined ? {} : { outputTokens: entity.outputTokens }),
+		...(entity.cacheReadTokens === undefined ? {} : { cacheReadTokens: entity.cacheReadTokens }),
+		...(entity.cacheWriteTokens === undefined ? {} : { cacheWriteTokens: entity.cacheWriteTokens }),
+		...(entity.requestedModel === undefined ? {} : { requestedModel: clean(entity.requestedModel) }),
+		...(entity.resolvedModel === undefined ? {} : { resolvedModel: clean(entity.resolvedModel) }),
+		...(entity.attemptedModels === undefined ? {} : { attemptedModels: entity.attemptedModels.map(clean).filter(Boolean) }),
+		...(entity.error === undefined ? {} : { error: truncateStatusText(entity.error) }),
+	};
+}
+
 // Self-accumulating roster. The teammate extension only broadcasts deltas
 // (started/message/complete), never a full snapshot, so we rebuild the list here.
 // Cold start is empty by design — we only reflect activity observed after load.
@@ -245,6 +297,8 @@ function latestTool(tools: Array<string | { name?: string; status?: string; args
 // always represented as long as it keeps emitting activity.
 export class AgentsStore {
 	private readonly roster = new Map<string, AgentRow>();
+	private readonly runtimeProjection = new RuntimeReadModelProjectionV2();
+	private canonicalRoster = false;
 	/** correlationId -> completion time; suppresses post-complete self-healing. */
 	private readonly completedAt = new Map<string, number>();
 	/** correlationId of the agent currently shown in teammate's viewing view. */
@@ -265,6 +319,7 @@ export class AgentsStore {
 	}
 
 	applyStarted(p: StartedPayload, now: number = Date.now()): void {
+		this.canonicalRoster = false;
 		if (typeof p.correlationId !== "string" || p.correlationId.length === 0) return;
 		const id = p.correlationId;
 		// An explicit start is authoritative: a woken or re-dispatched agent
@@ -319,7 +374,7 @@ export class AgentsStore {
 			startedAt: prev?.startedAt ?? normalizeStartedAt(p.startedAt, now),
 			lastActivityAt: normalizeStartedAt(p.lastActivityAt, now),
 			...(p.spawnedBy && p.spawnedBy !== id
-				? { parentCorrelationId: p.spawnedBy }
+				? { spawnedBy: p.spawnedBy, parentCorrelationId: p.spawnedBy }
 				: prev?.parentCorrelationId
 					? { parentCorrelationId: prev.parentCorrelationId }
 					: {}),
@@ -341,6 +396,7 @@ export class AgentsStore {
 	}
 
 	applyMessage(p: MessagePayload, now = Date.now()): void {
+		this.canonicalRoster = false;
 		if (p.isInteraction === true) return;
 		if (typeof p.correlationId !== "string" || p.correlationId.length === 0) return;
 		if (p.isSend === true) {
@@ -439,6 +495,7 @@ export class AgentsStore {
 	}
 
 	applyComplete(p: CompletePayload, now = Date.now()): void {
+		this.canonicalRoster = false;
 		if (typeof p.correlationId !== "string" || p.correlationId.length === 0) return;
 		const pending = [p.correlationId];
 		const visited = new Set<string>();
@@ -573,7 +630,10 @@ export class AgentsStore {
 		if (
 			parentCorrelationId !== p.correlationId
 			&& row.parentCorrelationId === undefined
-		) row.parentCorrelationId = parentCorrelationId;
+		) {
+			row.spawnedBy ??= parentCorrelationId;
+			row.parentCorrelationId = parentCorrelationId;
+		}
 		row.agent = clean(p.agent) || row.agent;
 		row.name = p.name === undefined ? row.name : clean(p.name);
 		row.role = deriveRole(p.agent, p.name);
@@ -634,6 +694,55 @@ export class AgentsStore {
 		}
 	}
 
+	private replaceFromRuntimeProjection(): void {
+		const viewingId = this.viewingId;
+		this.roster.clear();
+		this.completedAt.clear();
+		for (const entity of this.runtimeProjection.snapshot().agents) {
+			const row = runtimeEntityToRow(entity);
+			this.roster.set(row.correlationId, row);
+			if (row.status === "done" || row.status === "failed" || row.status === "terminated" || row.status === "sleeping") {
+				this.completedAt.set(row.correlationId, row.finishedAt ?? row.lastActivityAt);
+			}
+		}
+		this.viewingId = viewingId && this.roster.has(viewingId) ? viewingId : undefined;
+		this.canonicalRoster = true;
+	}
+
+	applyRuntimeSnapshot(snapshot: RuntimeReadModelSnapshotV2 | unknown): boolean {
+		if (!this.runtimeProjection.applySnapshot(snapshot)) return false;
+		this.replaceFromRuntimeProjection();
+		return true;
+	}
+
+	applyRuntimeDelta(delta: RuntimeReadModelDeltaV2 | unknown): boolean {
+		if (!this.canonicalRoster || !this.runtimeProjection.applyDelta(delta)) return false;
+		this.replaceFromRuntimeProjection();
+		return true;
+	}
+
+	runtimeCursor(): number | undefined {
+		return this.canonicalRoster ? this.runtimeProjection.cursor : undefined;
+	}
+
+	disableRuntimeProjection(): void {
+		this.canonicalRoster = false;
+	}
+
+	private visibleCanonicalRow(row: AgentRow): AgentRow {
+		if (!this.canonicalRoster || !row.parentCorrelationId) return row;
+		const visited = new Set<string>([row.correlationId]);
+		let parentId: string | undefined = row.parentCorrelationId;
+		while (parentId) {
+			if (visited.has(parentId)) return { ...row, parentCorrelationId: undefined };
+			visited.add(parentId);
+			const parent = this.roster.get(parentId);
+			if (!parent) return { ...row, parentCorrelationId: undefined };
+			parentId = parent.parentCorrelationId;
+		}
+		return row;
+	}
+
 	snapshot(now = Date.now()): AgentRow[] {
 		// Expiry is driven by reads rather than a dedicated timer: the panel is
 		// already redrawn while anything is lingering, and nothing else has to know.
@@ -641,9 +750,10 @@ export class AgentsStore {
 		return [...this.roster.values()].sort((a, b) => {
 			const activity = b.lastActivityAt - a.lastActivityAt;
 			return activity || a.correlationId.localeCompare(b.correlationId);
-		}).map((row) =>
-			row.correlationId === this.viewingId ? { ...row, viewing: true } : row,
-		);
+		}).map((row) => {
+			const visible = this.visibleCanonicalRow(row);
+			return visible.correlationId === this.viewingId ? { ...visible, viewing: true } : visible;
+		});
 	}
 
 	/** Mark which agent the teammate viewing view currently shows. */
@@ -667,6 +777,54 @@ export class AgentsStore {
 	clear(): void {
 		this.roster.clear();
 		this.completedAt.clear();
+		this.canonicalRoster = false;
 		this.viewingId = undefined;
+	}
+}
+
+/** Keeps the compatibility V1 fold warm while V2 is the rendered source. */
+export class AgentReadStoreRouter {
+	readonly legacy = new AgentsStore();
+	readonly runtime = new AgentsStore();
+	private active = this.legacy;
+
+	get current(): AgentsStore {
+		return this.active;
+	}
+
+	applyLegacyStarted(payload: StartedPayload, now?: number): void {
+		this.legacy.applyStarted(payload, now);
+	}
+
+	applyLegacyMessage(payload: MessagePayload, now?: number): void {
+		this.legacy.applyMessage(payload, now);
+	}
+
+	applyLegacyComplete(payload: CompletePayload, now?: number): void {
+		this.legacy.applyComplete(payload, now);
+	}
+
+	applyRuntimeSnapshot(payload: unknown): boolean {
+		if (!this.runtime.applyRuntimeSnapshot(payload)) return false;
+		this.active = this.runtime;
+		return true;
+	}
+
+	applyRuntimeDelta(payload: unknown): boolean {
+		if (this.active !== this.runtime || !this.runtime.applyRuntimeDelta(payload)) {
+			this.active = this.legacy;
+			return false;
+		}
+		return true;
+	}
+
+	fallback(): void {
+		this.active = this.legacy;
+	}
+
+	clear(): void {
+		this.legacy.clear();
+		this.runtime.clear();
+		this.active = this.legacy;
 	}
 }

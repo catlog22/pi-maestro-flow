@@ -39,6 +39,8 @@ import {
   type ResolvedRemoteTarget,
 } from "./types.ts";
 import { redactRemoteError } from "./child-security.ts";
+import { adaptRemoteRunEventV2 } from "../runtime-v2/adapters.ts";
+import { createRuntimeV2ShadowSink, type RuntimeV2ShadowSink } from "../runtime-v2/shadow.ts";
 
 export const REMOTE_SOCKET_FILE = "bridge.sock";
 export const REMOTE_DAEMON_LOCK_FILE = "daemon.lock";
@@ -74,6 +76,7 @@ export interface RemoteBridgeServerOptions {
   concurrency?: number;
   heartbeatMs?: number;
   clientEgressBytes?: number;
+  runtimeV2ShadowSink?: RuntimeV2ShadowSink;
   /**
    * Where a quarantined run is reported, for a journal this server constructs itself.
    * Defaults to one line on the daemon's stderr; ignored when `journal` is supplied, since that
@@ -196,6 +199,7 @@ export class RemoteBridgeServer {
   readonly #concurrency: number;
   readonly #heartbeatMs: number;
   readonly #clientEgressBytes: number;
+  readonly #runtimeV2ShadowSink: RuntimeV2ShadowSink;
   #startingRuns = 0;
   #server?: net.Server;
   #heartbeat?: NodeJS.Timeout;
@@ -214,6 +218,12 @@ export class RemoteBridgeServer {
     this.#concurrency = options.concurrency ?? 4;
     this.#heartbeatMs = options.heartbeatMs ?? REMOTE_HEARTBEAT_MS;
     this.#clientEgressBytes = options.clientEgressBytes ?? REMOTE_CLIENT_EGRESS_BYTES;
+    this.#runtimeV2ShadowSink = options.runtimeV2ShadowSink ?? createRuntimeV2ShadowSink({
+      stateDirectory: this.journal.stateDirectory,
+      onError: (error) => {
+        process.stderr.write(`pi-teammate-remote: Runtime V2 shadow append failed: ${redactRemoteError(error)}\n`);
+      },
+    });
     if (!Number.isInteger(this.#concurrency) || this.#concurrency < 1 || this.#concurrency > 128) {
       throw new Error("Remote daemon concurrency must be between 1 and 128");
     }
@@ -456,7 +466,24 @@ export class RemoteBridgeServer {
   async #pump(handle: RemoteRunHandle): Promise<void> {
     try {
       for await (const event of handle.events()) {
-        this.journal.appendEvent(handle.capture, event);
+        const current = this.journal.getRun(handle.capture.runId);
+        const protocol = current?.request.driver;
+        this.#runtimeV2ShadowSink.appendAfterV1(
+          () => this.journal.appendEvent(handle.capture, event),
+          () => protocol
+            ? adaptRemoteRunEventV2(event, protocol, {
+                streamId: event.runId,
+                actor: {
+                  version: 2,
+                  revision: 1,
+                  workspaceId: current.capture.targetId,
+                  actorKind: "remote",
+                  actorId: event.runId,
+                  generation: event.generation,
+                },
+              })
+            : [],
+        );
         for (const client of this.#clients) this.#sendRunEvent(client, event);
       }
     } catch (error) {

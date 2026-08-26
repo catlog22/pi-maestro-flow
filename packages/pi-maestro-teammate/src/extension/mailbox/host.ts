@@ -17,6 +17,7 @@ import { logDiagnosticError, logDiagnosticWarn } from "../../shared/diagnostic-l
 import { MailboxService } from "./service.ts";
 import { MailboxRollout, type RolloutMode } from "./rollout.ts";
 import type { MailboxAuthority } from "./router.ts";
+import type { MailboxEnvelope } from "./types.ts";
 import type { MessageProvenanceV1, TeammateState } from "../../shared/types.ts";
 import { canProxySendTo, LIVE_AGENT_STATUSES } from "../teammate-core.ts";
 import type { RpcMessageMode } from "../../runs/execution.ts";
@@ -107,6 +108,10 @@ export interface MailboxHostOptions {
   ownerId: string;
   workspaceId: string;
   teamId: string;
+  /** Persist the authoritative mailbox applied effect. */
+  commitApplied?: (envelope: MailboxEnvelope) => Promise<void>;
+  /** Release the optional broker transaction owner after consumption stops. */
+  closeDispatchAuthority?: () => Promise<void>;
   /** Convert a mailbox envelope back into an actual stdin injection. */
   inject: (envelope: {
     messageId?: string;
@@ -134,10 +139,12 @@ export class MailboxHost {
     return this.rollout.mode;
   }
   readonly #startPromise: Promise<void>;
+  readonly #closeDispatchAuthority: (() => Promise<void>) | undefined;
   #gcTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor(options: MailboxHostOptions) {
     const mode = options.mode ?? mailboxModeFromEnv();
+    this.#closeDispatchAuthority = options.closeDispatchAuthority;
 
     const authority = createMailboxAuthority({
       state: options.state,
@@ -153,6 +160,7 @@ export class MailboxHost {
       workspaceId: options.workspaceId,
       teamId: options.teamId,
       ownerId: options.ownerId,
+      commitApplied: options.commitApplied,
       onDispatch: async (envelope) => options.inject({
         messageId: envelope.messageId,
         senderId: envelope.senderId,
@@ -201,6 +209,10 @@ export class MailboxHost {
     }
     // Barrier on the in-flight start before stopping the consumer.
     await this.#startPromise.catch(() => undefined);
-    await this.service.stop();
+    try {
+      await this.service.stop();
+    } finally {
+      await this.#closeDispatchAuthority?.();
+    }
   }
 }

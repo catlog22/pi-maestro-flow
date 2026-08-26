@@ -18,3 +18,8 @@ initializeTuiLocale("en");
 // directory rather than by code. Runs before every test module, so a file
 // needing a populated directory sets its own at module scope and wins.
 process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "teammate-test-agent-"));
+
+// Legacy-focused tests opt out explicitly; rollout tests pass their own env and
+// sidecar tests exercise the default-on broker bootstrap in isolation.
+process.env.PI_RUNTIME_BROKER = "off";
+process.env.PI_RUNTIME_V2_READ = "0";

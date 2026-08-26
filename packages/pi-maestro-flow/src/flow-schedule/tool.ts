@@ -15,6 +15,9 @@ import {
   FlowScheduleTargetSelectorSchema,
   parseFlowScheduleAction,
 } from "./schemas.ts";
+import type { FlowScheduleActorStatus } from "./actor.ts";
+import type { FlowScheduleBrokerRuntime } from "./broker-runtime.ts";
+import { flowScheduleDispatchMessageId, flowScheduleResultTransportMessageId } from "./protocol.ts";
 import { publishFlowScheduleReport, type FlowScheduleRuntime } from "./runtime.ts";
 import type { FlowScheduleDispatchBundle, FlowScheduleStore } from "./store.ts";
 import {
@@ -97,6 +100,7 @@ export type FlowScheduleWorkerParamsInput = Static<typeof FlowScheduleReportActi
 export interface FlowScheduleController {
   store: FlowScheduleStore;
   runtime: FlowScheduleRuntime;
+  brokerRuntime?: FlowScheduleBrokerRuntime;
 }
 
 export interface FlowScheduleLifecycleStatus {
@@ -115,7 +119,12 @@ export interface FlowScheduleToolDetails {
   legacy?: FlowScheduleLegacyStatus;
   lifecycle?: FlowScheduleLifecycleStatus;
   resultMessageId?: string;
+  completionResource?: string;
   delivery?: SessionMessageResult;
+  actor?: {
+    schedule?: FlowScheduleActorStatus;
+    dispatch?: FlowScheduleActorStatus;
+  };
 }
 
 export interface CoordinatorFlowScheduleToolOptions {
@@ -129,6 +138,12 @@ function scheduleLine(schedule: FlowScheduleRecord): string {
   const completed = schedule.stepIds.filter((stepId) => schedule.steps[stepId].state === "completed").length;
   const active = schedule.activeStepId ? ` active=${schedule.activeStepId}` : "";
   return `${schedule.scheduleId} ${schedule.state} steps=${completed}/${schedule.stepIds.length}${active} target=${schedule.targetSelector}`;
+}
+
+function compactFlowText(value: string, maxLength = 120): string {
+  const text = value.replace(/\s+/g, " ").trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength - 1)}…`;
 }
 
 function lifecycleFor(
@@ -179,7 +194,11 @@ function failure(error: unknown): FlowToolResult<FlowScheduleToolDetails> {
 async function scheduleAndDispatch(
   controller: FlowScheduleController,
   scheduleId: string,
-): Promise<{ schedule: FlowScheduleRecord; dispatch?: FlowScheduleDispatchBundle }> {
+): Promise<{
+  schedule: FlowScheduleRecord;
+  dispatch?: FlowScheduleDispatchBundle;
+  actor?: { schedule?: FlowScheduleActorStatus; dispatch?: FlowScheduleActorStatus };
+}> {
   const schedule = await controller.store.readSchedule(scheduleId);
   if (!schedule) throw new Error(`Unknown Flow schedule: ${scheduleId}`);
   const activeStep = schedule.activeStepId ? schedule.steps[schedule.activeStepId] : undefined;
@@ -190,14 +209,35 @@ async function scheduleAndDispatch(
   const dispatch = latestDispatchId
     ? await controller.store.readDispatch(latestDispatchId)
     : undefined;
-  return { schedule, ...(dispatch ? { dispatch } : {}) };
+  const actor = controller.brokerRuntime?.enabled ? {
+    schedule: await controller.brokerRuntime.actorStatus("schedule", schedule.scheduleId),
+    ...(latestDispatchId ? {
+      dispatch: await controller.brokerRuntime.actorStatus("dispatch", latestDispatchId).then(async (status) => {
+        const outbox = await controller.brokerRuntime!.outbox!.read(flowScheduleResultTransportMessageId(latestDispatchId));
+        return status ? {
+          ...status,
+          ...(outbox ? { outboxState: outbox.state, outboxMessageId: outbox.messageId } : {}),
+        } : status;
+      }),
+    } : {}),
+  } : undefined;
+  return { schedule, ...(dispatch ? { dispatch } : {}), ...(actor ? { actor } : {}) };
 }
 
 function statusText(
   schedule: FlowScheduleRecord,
   dispatch?: FlowScheduleDispatchBundle,
+  actor?: { schedule?: FlowScheduleActorStatus; dispatch?: FlowScheduleActorStatus },
 ): string {
-  if (!dispatch) return scheduleLine(schedule);
+  const admitLine = schedule.lastAdmitReason
+    ? [`Admit: deferred attempts=${schedule.admitAttempts ?? 0} at=${schedule.lastAdmitAt ?? "-"}`, `  ${compactFlowText(schedule.lastAdmitReason, 96)}`]
+    : [];
+  if (!dispatch) {
+    const actorLine = actor?.schedule
+      ? `\nActor: scheduleRevision=${actor.schedule.revision} brokerRevision=${actor.schedule.brokerRevision} lease=${actor.schedule.leaseEpoch ?? "-"}/${actor.schedule.leaseNonce ?? "-"}\nProjection: migration=${actor.schedule.migration ?? "none"} repair=${actor.schedule.projectionState ?? "none"}`
+      : "";
+    return [scheduleLine(schedule), ...admitLine].join("\n") + actorLine;
+  }
   const dispatchState = dispatch.completion?.state
     ?? (dispatch.accepted ? "accepted" : dispatch.published ? "published" : "prepared");
   const step = schedule.steps[dispatch.intent.stepId];
@@ -215,11 +255,34 @@ function statusText(
   const todoOutcome = result?.todoOutcome
     ? `${result.todoOutcome.todoId}/${result.todoOutcome.todoStatus}`
     : "none";
+  const transportTimes = [
+    `preparedAt=${dispatch.intent.createdAt}`,
+    `publishedAt=${dispatch.published?.publishedAt ?? "-"}`,
+    `acceptedAt=${dispatch.accepted?.acceptedAt ?? "-"}`,
+  ].join(" ");
+  const resultLine = [
+    `state=${dispatch.completion?.state ?? "none"}`,
+    `at=${dispatch.completion?.completedAt ?? "-"}`,
+    `outcome=${result?.outcome ?? "none"}`,
+    `todoOutcome=${todoOutcome}`,
+  ].join(" ");
+  const actorLines = actor ? [
+    `Actor: scheduleRevision=${actor.schedule?.revision ?? "-"} brokerRevision=${actor.schedule?.brokerRevision ?? "-"} lease=${actor.schedule?.leaseEpoch ?? "-"}/${actor.schedule?.leaseNonce ?? "-"}`,
+    `DispatchActor: revision=${actor.dispatch?.revision ?? "-"} brokerRevision=${actor.dispatch?.brokerRevision ?? "-"} lease=${actor.dispatch?.leaseEpoch ?? "-"}/${actor.dispatch?.leaseNonce ?? "-"}`,
+    `Evidence: exactAt=${actor.dispatch?.exactReportedAt ?? "-"} genericAt=${actor.dispatch?.genericTerminalAt ?? "-"} graceDeadline=${actor.dispatch?.genericGraceDeadline ?? "-"}`,
+    `Outbox: state=${actor.dispatch?.outboxState ?? "none"} messageId=${actor.dispatch?.outboxMessageId ?? "-"}`,
+    `Projection: migration=${actor.schedule?.migration ?? "none"} repair=${actor.schedule?.projectionState ?? "none"}`,
+  ] : [];
   return [
     scheduleLine(schedule),
+    ...actorLines,
     `Dispatch: id=${dispatch.intent.dispatchId} state=${dispatchState}`,
+    `Transport: ${transportTimes}`,
     bindingLine,
-    `Result: outcome=${result?.outcome ?? "none"} todoOutcome=${todoOutcome}`,
+    `Result: ${resultLine}`,
+    ...(dispatch.completion?.reason ? [`Diagnostic: ${compactFlowText(dispatch.completion.reason, 160)}`] : []),
+    `Canonical: ${result?.completionCorrelation?.resource ?? dispatch.intent.completionCorrelation?.resource ?? "none"}`,
+    ...admitLine,
   ].join("\n");
 }
 
@@ -231,16 +294,18 @@ export function createCoordinatorFlowScheduleTool(
     name: "flow-schedule",
     label: "Flow Schedule",
     description:
-      "Monitor-only control surface for durably executing stable ordered steps in an already-managed workspace window. The Monitor creates and controls schedules; observe remains the lifecycle surface, teammate-send remains ad hoc messaging, workspace-window remains process ownership, and loop remains recurring work. A step advances only from an exact correlated worker report.",
+      "Monitor-only control surface for durably executing stable ordered steps in an already-managed workspace window. The Monitor creates and controls schedules; observe remains the lifecycle surface, teammate-send remains ad hoc messaging, workspace-window remains process ownership, and loop remains recurring work. A step advances only from an exact correlated worker report; Todo evidence is additional only for a negotiated Todo gate.",
     promptSnippet: "Create and control durable ordered work for an existing managed workspace window.",
     promptGuidelines: [
       "Use create then start; create never sends work.",
       "Use append with afterStepId. Cursor and wall-clock completion attribution are not supported.",
       "Queued or accepted delivery is not step completion. Use status to inspect transport, binding, and exact result evidence separately.",
-      "todoBinding.requireCompleted and conflictCheck are opt-in per step; workers without the flow-schedule-todo-binding capability silently run that dispatch as gate=none.",
+      "todoBinding.requireCompleted and conflictCheck are opt-in per step and require the worker's flow-schedule-todo-binding capability. A capability mismatch intentionally degrades the dispatch: no Todo instruction or binding is created, and those gates are not enforced; status reports gate=none (not negotiated).",
+      "A Todo gate waits up to 30 seconds by default; missing or mismatched Todo evidence, target replacement, or terminal-without-report settles the dispatch as ambiguous. Inspect status before retrying; retry can duplicate work and is only safe when that risk is accepted.",
       "Use observe view=todos for cross-process Todo visibility only; Todo projection alone is not completion authority.",
       "Use retry only after failed or ambiguous attempts; retry is the only action that creates a new dispatch attempt.",
       "Cancel stops scheduling but does not close or reclaim the target window.",
+      "If the target workspace worker is unreachable (window exited, peer discovery stale, or Monitor observation authority lost), admission defers: no dispatch is created and status reports an `Admit: deferred` line with the reason and attempt count. After several consecutive deferrals the schedule transitions to failed automatically; use status to diagnose, then resume with a live target.",
     ],
     parameters: FlowScheduleCoordinatorParams,
     async execute(_id, raw, signal, _onUpdate, ctx): Promise<FlowToolResult<FlowScheduleToolDetails>> {
@@ -269,7 +334,7 @@ export function createCoordinatorFlowScheduleTool(
         const controller = options.resolve(ctx.cwd);
         switch (action.action) {
           case "create": {
-            const schedule = await awaitMonitor(controller.store.createSchedule(action));
+            const schedule = await awaitMonitor(controller.runtime.createSchedule(action));
             return success(`Created ${scheduleLine(schedule)}.`, { schedules: [schedule] });
           }
           case "start": {
@@ -292,9 +357,10 @@ export function createCoordinatorFlowScheduleTool(
           }
           case "status": {
             const current = await awaitMonitor(scheduleAndDispatch(controller, action.scheduleId));
-            return success(statusText(current.schedule, current.dispatch), {
+            return success(statusText(current.schedule, current.dispatch, current.actor), {
               schedules: [current.schedule],
               ...(current.dispatch ? { dispatch: current.dispatch } : {}),
+              ...(current.actor ? { actor: current.actor } : {}),
               lifecycle: lifecycleFor(getRegistry(), current.schedule),
             });
           }
@@ -302,8 +368,7 @@ export function createCoordinatorFlowScheduleTool(
             const before = await awaitMonitor(controller.store.readSchedule(action.scheduleId));
             if (!before) throw new Error(`Unknown Flow schedule: ${action.scheduleId}`);
             if (isTerminalScheduleState(before.state)) throw new Error(`Flow schedule ${action.scheduleId} is ${before.state}.`);
-            const schedule = await awaitMonitor(controller.store.appendSteps(action.scheduleId, action.afterStepId, action.steps));
-            await awaitMonitor(controller.runtime.reconcileReady());
+            const schedule = await awaitMonitor(controller.runtime.appendSchedule(action.scheduleId, action.afterStepId, action.steps));
             return success(`Updated ${scheduleLine(schedule)}.`, { schedules: [schedule] });
           }
           case "pause": {
@@ -332,6 +397,7 @@ export function createCoordinatorFlowScheduleTool(
 
 export interface WorkerFlowScheduleToolOptions {
   getRegistry?: () => SessionHostRegistry | undefined;
+  getBrokerRuntime?: () => FlowScheduleBrokerRuntime | undefined;
 }
 
 export function createWorkerFlowScheduleTool(
@@ -345,11 +411,11 @@ export function createWorkerFlowScheduleTool(
       "Report the result of the current durable Flow schedule dispatch. This managed-worker surface cannot create, start, modify, retry, cancel, or reclaim schedules/windows. The host verifies the exact inbound dispatch and derives the reply target from trusted session metadata.",
     promptSnippet: "Report completion or failure for a received Flow schedule dispatch.",
     promptGuidelines: [
-      "Call report only after completing the instruction associated with dispatchId.",
+      "Finish the instruction as one attempt, then always call report with outcome=completed or outcome=failed; do not omit a failure report, because a missing exact report becomes ambiguous.",
       "Do not invent or alter dispatchId and do not supply a reply target.",
       "When the dispatch carries todoBinding, create one Todo for the work and include its exact todoId and todoStatus in report.todoOutcome.",
-      "For requireCompleted, report completed only with todoStatus=completed; conflictCheck treats explicit non-completed Todo evidence on a completed result as ambiguous.",
-      "Reporting publishes a business result; it does not terminate or reclaim this window.",
+      "For requireCompleted, report completed only with todoStatus=completed; conflictCheck treats explicit non-completed Todo evidence on a completed result as ambiguous. If the work fails, report outcome=failed rather than omitting the result.",
+      "Reporting links the business result to the managed window's canonical agent:// terminal resource when the dispatch provides one; it does not terminate or reclaim this window.",
     ],
     parameters: FlowScheduleReportActionSchema,
     async execute(_id, raw, signal): Promise<FlowToolResult<FlowScheduleToolDetails>> {
@@ -359,7 +425,7 @@ export function createWorkerFlowScheduleTool(
         if (action.action !== "report") throw new Error("Managed worker Flow schedule exposes report only.");
         const registry = getRegistry();
         if (!registry) throw new Error("Session host registry is unavailable.");
-        const inbound = registry.thread.get(action.dispatchId, "incoming");
+        const inbound = registry.thread.get(flowScheduleDispatchMessageId(action.dispatchId), "incoming");
         if (!inbound) throw new Error(`Trusted Flow schedule dispatch not found: ${action.dispatchId}`);
         const published = await publishFlowScheduleReport({
           registry,
@@ -368,11 +434,15 @@ export function createWorkerFlowScheduleTool(
           summary: action.summary,
           resources: action.resources,
           todoOutcome: action.todoOutcome,
+          brokerRuntime: options.getBrokerRuntime?.(),
         });
         signal?.throwIfAborted();
         return success(`Published Flow schedule result ${published.resultMessageId}.`, {
           schedules: [],
           resultMessageId: published.resultMessageId,
+          ...(published.completionCorrelation
+            ? { completionResource: published.completionCorrelation.resource }
+            : {}),
           delivery: published.delivery,
         });
       } catch (error) {

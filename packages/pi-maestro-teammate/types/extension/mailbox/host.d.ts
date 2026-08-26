@@ -14,6 +14,7 @@ import type { MailboxDispatchDisposition } from "./consumer.ts";
 import { MailboxService } from "./service.ts";
 import { MailboxRollout, type RolloutMode } from "./rollout.ts";
 import type { MailboxAuthority } from "./router.ts";
+import type { MailboxEnvelope } from "./types.ts";
 import type { MessageProvenanceV1, TeammateState } from "../../shared/types.ts";
 export declare function mailboxModeFromEnv(env?: NodeJS.ProcessEnv): RolloutMode;
 export declare const MAILBOX_ENV_VAR = "PI_TEAMMATE_MAILBOX";
@@ -38,6 +39,10 @@ export interface MailboxHostOptions {
     ownerId: string;
     workspaceId: string;
     teamId: string;
+    /** Persist the authoritative mailbox applied effect. */
+    commitApplied?: (envelope: MailboxEnvelope) => Promise<void>;
+    /** Release the optional broker transaction owner after consumption stops. */
+    closeDispatchAuthority?: () => Promise<void>;
     /** Convert a mailbox envelope back into an actual stdin injection. */
     inject: (envelope: {
         messageId?: string;
