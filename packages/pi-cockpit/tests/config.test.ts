@@ -164,3 +164,39 @@ test("invalid or partial title fields fall back independently", () => {
 	assert.equal(merged.title.maxLength, DEFAULT_CONFIG.title.maxLength);
 	assert.deepEqual(mergeConfig(DEFAULT_CONFIG, { title: null }).title, DEFAULT_CONFIG.title);
 });
+
+test("legacy config without usage keeps usage defaults", () => {
+	const config = mergeConfig(DEFAULT_CONFIG, { enabled: false, todoMode: "compact" });
+	assert.deepEqual(config.usage, {
+		enabled: true,
+		footer: true,
+		pollIntervalMs: 120_000,
+		barWidth: 8,
+		commandKey: "usage",
+	});
+	assert.notEqual(config.usage, DEFAULT_CONFIG.usage);
+});
+
+test("usage merges supported fields and clamps poll/bar bounds", () => {
+	assert.deepEqual(
+		mergeConfig(DEFAULT_CONFIG, { usage: { enabled: false, footer: false, pollIntervalMs: 60_000, barWidth: 12, commandKey: "quota" } }).usage,
+		{ enabled: false, footer: false, pollIntervalMs: 60_000, barWidth: 12, commandKey: "quota" },
+	);
+	assert.equal(mergeConfig(DEFAULT_CONFIG, { usage: { pollIntervalMs: 1_000 } }).usage.pollIntervalMs, 30_000);
+	assert.equal(mergeConfig(DEFAULT_CONFIG, { usage: { pollIntervalMs: 99_999_999 } }).usage.pollIntervalMs, 1_800_000);
+	assert.equal(mergeConfig(DEFAULT_CONFIG, { usage: { barWidth: 2 } }).usage.barWidth, 4);
+	assert.equal(mergeConfig(DEFAULT_CONFIG, { usage: { barWidth: 99 } }).usage.barWidth, 16);
+	assert.equal(mergeConfig(DEFAULT_CONFIG, { usage: { barWidth: 41.6 } }).usage.barWidth, 8);
+});
+
+test("invalid or partial usage fields fall back independently", () => {
+	const merged = mergeConfig(DEFAULT_CONFIG, {
+		usage: { enabled: "yes", footer: null, pollIntervalMs: Number.NaN, barWidth: 3.2, commandKey: "   " },
+	});
+	assert.equal(merged.usage.enabled, true);
+	assert.equal(merged.usage.footer, true);
+	assert.equal(merged.usage.pollIntervalMs, 120_000);
+	assert.equal(merged.usage.barWidth, 8);
+	assert.equal(merged.usage.commandKey, "usage");
+	assert.deepEqual(mergeConfig(DEFAULT_CONFIG, { usage: null }).usage, DEFAULT_CONFIG.usage);
+});

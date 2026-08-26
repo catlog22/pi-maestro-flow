@@ -73,7 +73,7 @@ export function renderWindowBar(
 
 export function makeWindowBarWidget(deps: WindowBarDeps) {
 	return (_tui: TUI, theme: Theme) => ({
-		render(width: number): string[] {
+			render(width: number): string[] {
 			return renderWindowBar(
 				deps.getWindows(),
 				deps.getState(),

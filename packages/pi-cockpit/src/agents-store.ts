@@ -1,10 +1,10 @@
 import type {
+	SessionProjectionIdentity,
 	TeammateCompleteEvent,
 	TeammateProgressMessageEvent,
 	TeammateStartedEvent,
 } from "pi-maestro-teammate/v1/events";
-import {
-	TEAMMATE_STALL_TIMEOUT_MS,
+import type {
 	AgentProgressSnapshot,
 	AgentRuntimeProjection,
 	AgentTurnSnapshot,
@@ -12,9 +12,15 @@ import {
 import type {
 	RuntimeAgentReadEntityV2,
 	RuntimeReadModelDeltaV2,
+	RuntimeReadModelOwnershipV2,
 	RuntimeReadModelSnapshotV2,
 } from "pi-maestro-teammate/v2/runtime";
-import { RuntimeReadModelProjectionV2 } from "pi-maestro-teammate/v2/runtime";
+import {
+	RuntimeReadModelProjectionV2,
+	parseRuntimeReadModelDeltaV2,
+	parseRuntimeReadModelOwnershipV2,
+	parseRuntimeReadModelSnapshotV2,
+} from "pi-maestro-teammate/v2/runtime";
 import { sanitizeExtensionStatusText } from "./extension-status.ts";
 import { EXPERT_LEADER_NAME, type AgentRow, type AgentStatus } from "./types.ts";
 
@@ -116,7 +122,7 @@ export type MessagePayload = Partial<Omit<
 	turn?: AgentTurnSnapshot;
 };
 export type CompletePayload = Pick<TeammateCompleteEvent, "correlationId" | "exitCode">
-	& Partial<Pick<TeammateCompleteEvent, "durationMs" | "wakeable" | "cancelled">>;
+	& Partial<Pick<TeammateCompleteEvent, "durationMs" | "wakeable" | "cancelled" | "projection">>;
 
 export const AGENT_LINGER_MS = 60_000;
 /** Compatibility exports: every terminal state now uses one visible window. */
@@ -155,6 +161,16 @@ export function isExpertLeader(row: { name: string | undefined }): boolean {
 	return row.name === EXPERT_LEADER_NAME;
 }
 
+/**
+ * True when the row runs on an external CLI backend. ACP-CLI registrations
+ * enter the model catalog under the `cli/<tool>` route (acp-cli.ts), so the
+ * requested/resolved model prefix is the identity signal already carried by
+ * every started/message event — no new event field is needed.
+ */
+export function isCliAgent(row: { requestedModel?: string; resolvedModel?: string }): boolean {
+	return (row.resolvedModel ?? row.requestedModel ?? "").startsWith("cli/");
+}
+
 export function mapAgentStatus(status: unknown): AgentStatus {
 	switch (status) {
 		case "pending":
@@ -184,7 +200,7 @@ function activityFromProgressStatus(status: unknown): "running" | "sleeping" | u
 		: "running";
 }
 
-export const AGENT_STALL_TIMEOUT_MS = TEAMMATE_STALL_TIMEOUT_MS;
+export const AGENT_STALL_TIMEOUT_MS = 30_000;
 export type AgentDisplayStatus = AgentStatus | "result-ready" | "stalled";
 
 export function effectiveAgentStatus(row: AgentRow, _now: number = Date.now()): AgentDisplayStatus {
@@ -252,6 +268,12 @@ function runtimeEntityToRow(entity: RuntimeAgentReadEntityV2): AgentRow {
 		: undefined;
 	return {
 		correlationId: entity.correlationId,
+		...(entity.projection ? {
+			workspaceId: entity.projection.workspaceId,
+			sessionId: entity.projection.sessionId,
+			sourceId: entity.projection.sourceId,
+			sessionGeneration: entity.projection.generation,
+		} : {}),
 		runtimeGeneration: entity.generation,
 		agent: clean(entity.agent),
 		name: entity.name === undefined ? undefined : clean(entity.name),
@@ -353,6 +375,12 @@ export class AgentsStore {
 		const row: AgentRow = {
 			...prev,
 			correlationId: id,
+			...(p.projection ? {
+				workspaceId: p.projection.workspaceId,
+				sessionId: p.projection.sessionId,
+				sourceId: p.projection.sourceId,
+				sessionGeneration: p.projection.generation,
+			} : {}),
 			agent: clean(p.agent) || prev?.agent || "",
 			name: p.name === undefined ? prev?.name : clean(p.name),
 			role: deriveRole(p.agent, p.name),
@@ -408,7 +436,7 @@ export class AgentsStore {
 		if (p.progress) {
 			for (const progress of p.progress) {
 				if (typeof progress.correlationId !== "string" || progress.correlationId.length === 0) continue;
-				this.applyProgress(p.correlationId, progress, now);
+				this.applyProgress(p.correlationId, progress, now, p.projection);
 			}
 		}
 		const targetId = typeof p.taskCorrelationId === "string" && p.taskCorrelationId.length > 0
@@ -435,6 +463,7 @@ export class AgentsStore {
 				...(p.taskCorrelationId && p.taskCorrelationId !== p.correlationId
 					? { spawnedBy: p.correlationId }
 					: {}),
+				...(p.projection ? { projection: p.projection } : {}),
 			}, now);
 			// This same delta is the authoritative content for the self-healed row;
 			// a provisional sleeping seed must not tombstone itself before ingestion.
@@ -605,7 +634,12 @@ export class AgentsStore {
 		return false;
 	}
 
-	private applyProgress(parentCorrelationId: string, p: ProgressPayload, now: number): void {
+	private applyProgress(
+		parentCorrelationId: string,
+		p: ProgressPayload,
+		now: number,
+		projection?: SessionProjectionIdentity,
+	): void {
 		if (this.isTombstoned(p.correlationId, now)) return;
 		if (!this.roster.has(p.correlationId)
 			&& this.canMaterialize(p.correlationId, parentCorrelationId, now)) {
@@ -623,10 +657,17 @@ export class AgentsStore {
 				...(parentCorrelationId !== p.correlationId
 					? { spawnedBy: parentCorrelationId }
 					: {}),
+				...(projection ? { projection } : {}),
 			}, now);
 		}
 		const row = this.roster.get(p.correlationId);
 		if (!row) return;
+		if (projection) {
+			row.workspaceId = projection.workspaceId;
+			row.sessionId = projection.sessionId;
+			row.sourceId = projection.sourceId;
+			row.sessionGeneration = projection.generation;
+		}
 		if (
 			parentCorrelationId !== p.correlationId
 			&& row.parentCorrelationId === undefined
@@ -782,40 +823,122 @@ export class AgentsStore {
 	}
 }
 
+export type RuntimeProjectionApplyResult = "applied" | "stale" | "invalid";
+
+type ProjectionAdmission = "current" | "switched" | "stale";
+
+function sameProjection(
+	left: RuntimeReadModelOwnershipV2,
+	right: RuntimeReadModelOwnershipV2,
+): boolean {
+	return left.workspaceId === right.workspaceId
+		&& left.sessionId === right.sessionId
+		&& left.sourceId === right.sourceId
+		&& left.generation === right.generation;
+}
+
 /** Keeps the compatibility V1 fold warm while V2 is the rendered source. */
 export class AgentReadStoreRouter {
 	readonly legacy = new AgentsStore();
 	readonly runtime = new AgentsStore();
 	private active = this.legacy;
+	private expectedSessionId: string | undefined;
+	private projection: RuntimeReadModelOwnershipV2 | undefined;
 
 	get current(): AgentsStore {
 		return this.active;
 	}
 
-	applyLegacyStarted(payload: StartedPayload, now?: number): void {
+	bindSession(sessionId: string | undefined): void {
+		this.clear();
+		this.expectedSessionId = sessionId;
+	}
+
+	private admitProjection(value: unknown, allowLegacy: boolean): ProjectionAdmission {
+		if (value === undefined) {
+			// Ownerless lifecycle compatibility is safe only before Cockpit binds a
+			// concrete Pi session. Once bound, even the startup window before the
+			// first owned event must reject prior-session starts/completions so they
+			// cannot materialize rows or install tombstones for the new session.
+			return allowLegacy && this.expectedSessionId === undefined && !this.projection
+				? "current"
+				: "stale";
+		}
+		const next = parseRuntimeReadModelOwnershipV2(value);
+		if (!next || (this.expectedSessionId !== undefined && next.sessionId !== this.expectedSessionId)) return "stale";
+		const current = this.projection;
+		if (!current) {
+			this.legacy.clear();
+			this.runtime.clear();
+			this.active = this.legacy;
+			this.projection = next;
+			return "switched";
+		}
+		if (sameProjection(current, next)) return "current";
+		if (next.generation <= current.generation) return "stale";
+		this.legacy.clear();
+		this.runtime.clear();
+		this.active = this.legacy;
+		this.projection = next;
+		return "switched";
+	}
+
+	acceptProjectionPayload(payload: unknown, allowLegacy = false): boolean {
+		if (!payload || typeof payload !== "object") return false;
+		return this.admitProjection((payload as { projection?: unknown }).projection, allowLegacy) !== "stale";
+	}
+
+	applyLegacyStarted(payload: StartedPayload, now?: number): boolean {
+		if (this.admitProjection(payload.projection, true) === "stale") return false;
 		this.legacy.applyStarted(payload, now);
+		return true;
 	}
 
-	applyLegacyMessage(payload: MessagePayload, now?: number): void {
+	applyLegacyMessage(payload: MessagePayload, now?: number): boolean {
+		const unownedNonLifecycle = payload.projection === undefined
+			&& (payload.isSend === true || payload.isInteraction === true)
+			&& payload.progress === undefined
+			&& payload.status === undefined
+			&& payload.taskCorrelationId === undefined;
+		if (!unownedNonLifecycle && this.admitProjection(payload.projection, true) === "stale") return false;
 		this.legacy.applyMessage(payload, now);
+		return true;
 	}
 
-	applyLegacyComplete(payload: CompletePayload, now?: number): void {
+	applyLegacyComplete(payload: CompletePayload, now?: number): boolean {
+		if (this.admitProjection(payload.projection, true) === "stale") return false;
 		this.legacy.applyComplete(payload, now);
+		return true;
+	}
+
+	applyRuntimeSnapshotResult(payload: unknown): RuntimeProjectionApplyResult {
+		const snapshot = parseRuntimeReadModelSnapshotV2(payload);
+		if (!snapshot) return "invalid";
+		const admission = this.admitProjection(snapshot.source.projection, this.expectedSessionId === undefined);
+		if (admission === "stale") return "stale";
+		if (!this.runtime.applyRuntimeSnapshot(snapshot)) return "invalid";
+		this.active = this.runtime;
+		return "applied";
 	}
 
 	applyRuntimeSnapshot(payload: unknown): boolean {
-		if (!this.runtime.applyRuntimeSnapshot(payload)) return false;
-		this.active = this.runtime;
-		return true;
+		return this.applyRuntimeSnapshotResult(payload) === "applied";
+	}
+
+	applyRuntimeDeltaResult(payload: unknown): RuntimeProjectionApplyResult {
+		const delta = parseRuntimeReadModelDeltaV2(payload);
+		if (!delta) return "invalid";
+		const admission = this.admitProjection(delta.source.projection, this.expectedSessionId === undefined);
+		if (admission === "stale") return "stale";
+		if (this.active !== this.runtime || !this.runtime.applyRuntimeDelta(delta)) {
+			this.active = this.legacy;
+			return "invalid";
+		}
+		return "applied";
 	}
 
 	applyRuntimeDelta(payload: unknown): boolean {
-		if (this.active !== this.runtime || !this.runtime.applyRuntimeDelta(payload)) {
-			this.active = this.legacy;
-			return false;
-		}
-		return true;
+		return this.applyRuntimeDeltaResult(payload) === "applied";
 	}
 
 	fallback(): void {
@@ -826,5 +949,7 @@ export class AgentReadStoreRouter {
 		this.legacy.clear();
 		this.runtime.clear();
 		this.active = this.legacy;
+		this.projection = undefined;
+		this.expectedSessionId = undefined;
 	}
 }

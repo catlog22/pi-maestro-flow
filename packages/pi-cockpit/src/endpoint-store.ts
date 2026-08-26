@@ -77,6 +77,8 @@ export function isMonitorControlEndpoint(endpoint: CockpitEndpoint | undefined):
 export interface EndpointStoreConnectOptions {
 	registry?: SessionHostRegistryLike;
 	events?: SessionEventSource;
+	/** Current Cockpit Pi session; stale registry generations are rejected. */
+	sessionId?: string;
 }
 
 function legacyAgentEndpointId(correlationId: string): string {
@@ -128,6 +130,54 @@ function sessionSnapshot(value: unknown): SessionHostSnapshot | undefined {
 	return snapshot as SessionHostSnapshot;
 }
 
+interface LocalSessionProjection {
+	workspaceId: string;
+	sessionId: string;
+	sourceId: string;
+	generation: number;
+}
+
+function localSessionProjection(endpoint: SessionEndpoint | undefined): LocalSessionProjection | undefined {
+	if (!endpoint
+		|| endpoint.scope !== "local"
+		|| endpoint.kind !== "root"
+		|| endpoint.workspaceId.length === 0
+		|| typeof endpoint.sessionId !== "string"
+		|| endpoint.sessionId.length === 0
+		|| typeof endpoint.sourceId !== "string"
+		|| endpoint.sourceId.length === 0
+		|| !Number.isSafeInteger(endpoint.generation)
+		|| (endpoint.generation ?? 0) < 1) return undefined;
+	return {
+		workspaceId: endpoint.workspaceId,
+		sessionId: endpoint.sessionId,
+		sourceId: endpoint.sourceId,
+		generation: endpoint.generation!,
+	};
+}
+
+function sameLocalSessionProjection(
+	left: LocalSessionProjection,
+	right: LocalSessionProjection,
+): boolean {
+	return left.workspaceId === right.workspaceId
+		&& left.sessionId === right.sessionId
+		&& left.sourceId === right.sourceId
+		&& left.generation === right.generation;
+}
+
+function localEndpointsMatchProjection(
+	endpoints: readonly SessionEndpoint[],
+	projection: LocalSessionProjection,
+): boolean {
+	return endpoints.every((endpoint) => endpoint.scope !== "local" || (
+		endpoint.workspaceId === projection.workspaceId
+		&& endpoint.sessionId === projection.sessionId
+		&& endpoint.sourceId === projection.sourceId
+		&& endpoint.generation === projection.generation
+	));
+}
+
 export function isSessionHostRegistryLike(value: unknown): value is SessionHostRegistryLike {
 	if (!value || typeof value !== "object") return false;
 	const registry = value as Partial<SessionHostRegistryLike>;
@@ -138,6 +188,13 @@ function sameOwner(left: SessionEndpoint, right: SessionEndpoint): boolean {
 	return left.workspaceId === right.workspaceId
 		&& left.ownerId === right.ownerId
 		&& left.ownerNonce === right.ownerNonce;
+}
+
+function rowOwnedByRoot(row: AgentRow, root: SessionEndpoint): boolean {
+	return row.workspaceId === root.workspaceId
+		&& row.sessionId === root.sessionId
+		&& row.sourceId === root.sourceId
+		&& row.sessionGeneration === root.generation;
 }
 
 function visibleLegacyRows(rows: readonly AgentRow[]): AgentRow[] {
@@ -175,6 +232,8 @@ export class EndpointStore {
 	readonly #getLegacyAgents: EndpointStoreOptions["getLegacyAgents"];
 	#registry: SessionHostRegistryLike | undefined;
 	#registrySnapshot: SessionHostSnapshot | undefined;
+	#expectedSessionId: string | undefined;
+	#acceptedLocalProjection: LocalSessionProjection | undefined;
 	#registryDisposer: (() => void) | undefined;
 	#eventDisposer: (() => void) | undefined;
 	#mainOutputRevision: string | undefined;
@@ -195,13 +254,14 @@ export class EndpointStore {
 
 	connect(options: EndpointStoreConnectOptions = {}): void {
 		this.disconnect();
-		this.#registrySnapshot = undefined;
+		this.#expectedSessionId = options.sessionId;
 		this.#registry = options.registry;
 		if (options.registry) {
 			try {
 				this.applyRegistrySnapshot(options.registry.snapshot());
 			} catch {
 				this.#registrySnapshot = undefined;
+				this.#acceptedLocalProjection = undefined;
 			}
 			try {
 				this.#registryDisposer = options.registry.subscribe(
@@ -227,6 +287,10 @@ export class EndpointStore {
 		this.#registryDisposer = undefined;
 		this.#eventDisposer = undefined;
 		this.#registry = undefined;
+		this.#registrySnapshot = undefined;
+		this.#expectedSessionId = undefined;
+		this.#acceptedLocalProjection = undefined;
+		this.#rebuild();
 	}
 
 	get registry(): SessionHostRegistryLike | undefined {
@@ -236,6 +300,34 @@ export class EndpointStore {
 	applyRegistrySnapshot(value: unknown): boolean {
 		const next = sessionSnapshot(value);
 		if (!next) return false;
+		const localRoot = next.endpoints.find((endpoint) => endpoint.scope === "local" && endpoint.kind === "root");
+		const nextProjection = localSessionProjection(localRoot);
+		const sessionBound = this.#expectedSessionId !== undefined;
+
+		// A session-bound Cockpit has no ownerless canonical compatibility mode:
+		// the local root and every local endpoint must carry the full tuple.
+		if (sessionBound && (!nextProjection
+			|| nextProjection.sessionId !== this.#expectedSessionId
+			|| !localEndpointsMatchProjection(next.endpoints, nextProjection))) return false;
+
+		const accepted = this.#acceptedLocalProjection;
+		if (accepted) {
+			// Once a canonical local tuple is accepted, an incomplete snapshot cannot
+			// erase it. Rebinding to a different workspace/session/source is explicit
+			// through connect/disconnect, never inferred from an arriving snapshot.
+			if (!nextProjection
+				|| nextProjection.workspaceId !== accepted.workspaceId
+				|| nextProjection.sessionId !== accepted.sessionId
+				|| nextProjection.sourceId !== accepted.sourceId
+				|| nextProjection.generation < accepted.generation
+				|| !localEndpointsMatchProjection(next.endpoints, nextProjection)) return false;
+		} else if (nextProjection && !localEndpointsMatchProjection(next.endpoints, nextProjection)) {
+			return false;
+		}
+
+		if (nextProjection && (!accepted || !sameLocalSessionProjection(accepted, nextProjection))) {
+			this.#acceptedLocalProjection = nextProjection;
+		}
 		this.#registrySnapshot = next;
 		return this.#rebuild();
 	}
@@ -310,7 +402,8 @@ export class EndpointStore {
 		const usedRows = new Set<string>();
 		for (const endpoint of registryAgents) {
 			if (!endpoint.correlationId) continue;
-			const row = rowsById.get(endpoint.correlationId);
+			const candidateRow = rowsById.get(endpoint.correlationId);
+			const row = candidateRow && root && rowOwnedByRoot(candidateRow, root) ? candidateRow : undefined;
 			if ((row?.agent ?? endpoint.agent ?? "").startsWith("graph(")) continue;
 			if (row) usedRows.add(row.correlationId);
 			const output = row?.tail?.trim() || endpoint.summary?.trim();
@@ -333,7 +426,7 @@ export class EndpointStore {
 
 		let ordinal = endpoints.reduce((highest, endpoint) => Math.max(highest, endpoint.ordinal), 0) + 1;
 		for (const row of rows) {
-			if (usedRows.has(row.correlationId)) continue;
+			if (usedRows.has(row.correlationId) || root) continue;
 			const output = row.tail.trim();
 			endpoints.push({
 				id: legacyAgentEndpointId(row.correlationId),
@@ -368,7 +461,9 @@ export class EndpointStore {
 			const key = label.toLocaleLowerCase("en");
 			windowLabelCounts.set(key, (windowLabelCounts.get(key) ?? 0) + 1);
 		}
-		const windows: CockpitEndpoint[] = remoteRoots.map((endpoint) => {
+		const monitorAggregationEnabled = viewMode === "windows"
+			&& root?.capabilities.includes("monitor-workspace-aggregation") === true;
+		const windows: CockpitEndpoint[] = (viewMode === "agents" || monitorAggregationEnabled ? remoteRoots : []).map((endpoint) => {
 			const remoteAgents = remote.filter((candidate) =>
 				candidate.kind === "agent" && sameOwner(endpoint, candidate)
 			);
@@ -400,7 +495,7 @@ export class EndpointStore {
 				remoteAgents: Object.freeze(remoteAgents),
 			};
 		});
-		if (viewMode === "windows" && root) {
+		if (monitorAggregationEnabled && root) {
 			const controlAgents = registryAgents.filter((endpoint) =>
 				!(endpoint.agent ?? "").startsWith("graph(")
 			);

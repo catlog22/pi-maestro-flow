@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { AgentReadStoreRouter, AgentsStore, AGENT_LINGER_MS, COMPLETED_TOMBSTONE_MS, FAILED_LINGER_MS, SESSION_CONTENT_MAX, SLEEPING_LINGER_MS, TERMINATED_LINGER_MS, effectiveAgentStatus, isExpertLeader, mapAgentStatus } from "../src/agents-store.ts";
+import { AgentReadStoreRouter, AgentsStore, AGENT_LINGER_MS, COMPLETED_TOMBSTONE_MS, FAILED_LINGER_MS, SESSION_CONTENT_MAX, SLEEPING_LINGER_MS, TERMINATED_LINGER_MS, effectiveAgentStatus, isCliAgent, isExpertLeader, mapAgentStatus } from "../src/agents-store.ts";
 import { EXPERT_LEADER_NAME } from "../src/types.ts";
 
 test("expert leader name literal matches the teammate extension constant", () => {
@@ -13,6 +13,13 @@ test("expert leader name literal matches the teammate extension constant", () =>
 	assert.equal(isExpertLeader(s.snapshot()[0]), true);
 	s.applyStarted({ correlationId: "plain", agent: "explorer", name: "scan" }, 2);
 	assert.equal(isExpertLeader(s.snapshot().find((entry) => entry.correlationId === "plain")!), false);
+});
+
+test("cli agent identity derives from the cli/<tool> model route", () => {
+	assert.equal(isCliAgent({ requestedModel: "cli/agy" }), true);
+	assert.equal(isCliAgent({ requestedModel: "kimi-coding/k3", resolvedModel: "cli/codex" }), true);
+	assert.equal(isCliAgent({ requestedModel: "kimi-coding/k3" }), false);
+	assert.equal(isCliAgent({}), false);
 });
 
 test("started adds a running row with derived role and label", () => {
@@ -1101,4 +1108,148 @@ test("V2 unavailable falls back to the v1 bridge and canonical strings remain sa
 	assert.equal(s.runtimeCursor(), undefined);
 	s.applyStarted({ correlationId: "legacy", agent: "explorer" }, 3);
 	assert.equal(s.snapshot().some((row) => row.correlationId === "legacy"), true);
+});
+
+function projection(
+	generation: number,
+	sessionId = "session-b",
+	sourceId = "source-b",
+) {
+	return {
+		workspaceId: "w".repeat(64),
+		sessionId,
+		sourceId,
+		generation,
+	};
+}
+
+function ownedRuntimeSnapshot(
+	owner: ReturnType<typeof projection>,
+	brokerGeneration: number,
+	cursor: number,
+	correlationId: string,
+) {
+	return {
+		version: 2 as const,
+		revision: 1 as const,
+		kind: "agent-runs-snapshot" as const,
+		cursor,
+		source: {
+			streamId: `runtime-read-model:${owner.sourceId}`,
+			revision: Math.max(1, cursor),
+			generation: brokerGeneration,
+			projection: owner,
+		},
+		agents: [{
+			correlationId,
+			projection: owner,
+			generation: owner.generation,
+			agent: "general",
+			status: "running" as const,
+			startedAt: cursor,
+			lastActivityAt: cursor,
+		}],
+	};
+}
+
+test("session-bound Cockpit rejects ownerless prior-session starts and tombstones", () => {
+	const router = new AgentReadStoreRouter();
+	router.bindSession("session-b");
+
+	assert.equal(router.applyLegacyStarted({
+		correlationId: "reused",
+		agent: "general",
+	}), false);
+	assert.equal(router.applyLegacyComplete({
+		correlationId: "reused",
+		exitCode: 0,
+	}), false);
+
+	const current = projection(1);
+	assert.equal(router.applyLegacyStarted({
+		correlationId: "reused",
+		agent: "general",
+		projection: current,
+	}), true);
+	assert.equal(router.applyLegacyComplete({
+		correlationId: "reused",
+		exitCode: 0,
+	}), false, "a prior-session ownerless completion cannot tombstone the current row");
+	assert.deepEqual(router.current.snapshot().map((row) => [row.correlationId, row.status]), [["reused", "running"]]);
+
+	const unbound = new AgentReadStoreRouter();
+	assert.equal(unbound.applyLegacyStarted({ correlationId: "legacy", agent: "general" }), true);
+	assert.equal(unbound.applyLegacyComplete({ correlationId: "legacy", exitCode: 0, wakeable: true }), true);
+	assert.equal(unbound.current.snapshot().find((row) => row.correlationId === "legacy")?.status, "sleeping");
+});
+
+test("owned start followed by a reclaim-style completion converges to sleeping", () => {
+	const router = new AgentReadStoreRouter();
+	router.bindSession("session-b");
+	const owner = projection(4);
+	assert.equal(router.applyLegacyStarted({
+		correlationId: "reclaimed",
+		agent: "general",
+		projection: owner,
+	}), true);
+	assert.equal(router.applyLegacyComplete({
+		correlationId: "reclaimed",
+		exitCode: 0,
+		wakeable: true,
+		projection: owner,
+	}), true);
+	assert.equal(router.current.snapshot().find((row) => row.correlationId === "reclaimed")?.status, "sleeping");
+});
+
+test("Cockpit rejects prior-session progress and direct source switches clear the local roster", () => {
+	const router = new AgentReadStoreRouter();
+	router.bindSession("session-b");
+	const current = projection(2);
+	assert.equal(router.applyLegacyStarted({
+		correlationId: "current",
+		agent: "general",
+		projection: current,
+	}), true);
+	assert.equal(router.applyLegacyMessage({
+		correlationId: "stale",
+		agent: "general",
+		status: "running",
+		projection: projection(1, "session-a", "source-a"),
+	}), false);
+	assert.deepEqual(router.current.snapshot().map((row) => row.correlationId), ["current"]);
+
+	const switched = projection(3, "session-b", "source-c");
+	assert.equal(router.applyLegacyStarted({
+		correlationId: "switched",
+		agent: "general",
+		projection: switched,
+	}), true);
+	assert.deepEqual(router.current.snapshot().map((row) => row.correlationId), ["switched"]);
+});
+
+test("same-stream new generation owns Cockpit and a late tombstone cannot erase it", () => {
+	const router = new AgentReadStoreRouter();
+	router.bindSession("session-b");
+	const first = projection(1);
+	assert.equal(router.applyRuntimeSnapshotResult(ownedRuntimeSnapshot(first, 1, 1, "old")), "applied");
+
+	const replacement = projection(2);
+	assert.equal(router.applyRuntimeSnapshotResult(ownedRuntimeSnapshot(replacement, 2, 2, "current")), "applied");
+	assert.deepEqual(router.current.snapshot().map((row) => row.correlationId), ["current"]);
+
+	assert.equal(router.applyRuntimeDeltaResult({
+		version: 2,
+		revision: 1,
+		kind: "agent-runs-delta",
+		baseCursor: 1,
+		nextCursor: 2,
+		source: {
+			streamId: "runtime-read-model:source-b",
+			revision: 2,
+			generation: 1,
+			projection: first,
+		},
+		changes: [{ kind: "tombstone", correlationId: "current", generation: 2 }],
+	}), "stale");
+	assert.deepEqual(router.current.snapshot().map((row) => row.correlationId), ["current"]);
 });

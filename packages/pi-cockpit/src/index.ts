@@ -73,6 +73,7 @@ import { activeThemeName, ThemePicker } from "./theme-picker.ts";
 import { ModelPicker, type ModelPickerEntry } from "./model-picker.ts";
 import { getUsageTotals, invalidateUsageCache, renderFooter, setUsageThrottle, type PaintTheme, type WidthUtils } from "./footer.ts";
 import { collectExtensionStatuses } from "./extension-status.ts";
+import { createUsageSubsystem, type UsageSubsystem } from "./usage/extension.ts";
 import { ANIMATION_PERIOD_MS, resolveGlyphs, spinFrame } from "./icons.ts";
 import { ensureConfigExists, loadConfig, saveConfig } from "./config.ts";
 import { applyRow, buildRows, rowKeyForAccel, type SaveState } from "./settings-view.ts";
@@ -315,6 +316,7 @@ export default function (pi: ExtensionAPI): void {
 	const todos = new TodoStore();
 	const maestro = new MaestroStore();
 	const supervision = new SupervisionStore();
+	let usageSubsystem: UsageSubsystem | undefined;
 	const settingsRegistry = new SettingsProviderRegistry({
 		on: (event, handler) => pi.events.on(event, handler),
 		emit: (event, payload) => pi.events.emit(event, payload),
@@ -591,6 +593,15 @@ export default function (pi: ExtensionAPI): void {
 			}
 		});
 	};
+	// The usage-bars subsystem is created once `req` exists; its onStatusChange
+	// callback re-renders the footer so the quota bar updates after each poll.
+	// Guarded by config.usage.enabled at every call site so the subsystem is
+	// inert when disabled (its poller/overlay simply never run).
+	usageSubsystem = createUsageSubsystem({
+		pi,
+		getConfig: () => config,
+		onStatusChange: () => req(),
+	});
 	const policy = (): TickPolicyState => ({
 		staticMode: config.staticMode,
 		running,
@@ -1403,6 +1414,9 @@ export default function (pi: ExtensionAPI): void {
 						currencyRate: config.currencyRate,
 						git: branch ?? undefined,
 						bashBgStatus,
+						usageStatus: config.usage.enabled && config.usage.footer
+							? usageSubsystem?.getStatus(theme, config.usage.barWidth)
+							: undefined,
 						workflowStatus: extensionStatuses.find((status) => status.key === WORKFLOW_STATUS_KEY)?.text,
 						extensionStatuses: extensionStatuses.filter((status) => status.key !== WORKFLOW_STATUS_KEY),
 						glyphs,
@@ -1607,8 +1621,7 @@ export default function (pi: ExtensionAPI): void {
 				on: (event, handler) => pi.events.on(event, handler),
 			}),
 			pi.events.on(TEAMMATE_STARTED_EVENT, (payload) => {
-				if (!isStartedPayload(payload)) return;
-				agentReads.applyLegacyStarted(payload);
+				if (!isStartedPayload(payload) || !agentReads.applyLegacyStarted(payload)) return;
 				if (usingRuntimeV2) return;
 				agents = agentReads.current;
 				endpoints.refreshLegacy();
@@ -1618,8 +1631,7 @@ export default function (pi: ExtensionAPI): void {
 				req();
 			}),
 			pi.events.on(TEAMMATE_MESSAGE_EVENT, (payload) => {
-				if (!isProgressPayload(payload)) return;
-				agentReads.applyLegacyMessage(payload);
+				if (!isProgressPayload(payload) || !agentReads.applyLegacyMessage(payload)) return;
 				if (usingRuntimeV2) return;
 				agents = agentReads.current;
 				endpoints.refreshLegacy();
@@ -1627,8 +1639,7 @@ export default function (pi: ExtensionAPI): void {
 				req();
 			}),
 			pi.events.on(TEAMMATE_COMPLETE_EVENT, (payload) => {
-				if (!isCompletePayload(payload)) return;
-				agentReads.applyLegacyComplete(payload);
+				if (!isCompletePayload(payload) || !agentReads.applyLegacyComplete(payload)) return;
 				if (usingRuntimeV2) return;
 				agents = agentReads.current;
 				endpoints.refreshLegacy();
@@ -1639,7 +1650,9 @@ export default function (pi: ExtensionAPI): void {
 			}),
 			pi.events.on(RUNTIME_READ_MODEL_SNAPSHOT_EVENT, (payload) => {
 				if (!v2ReadRequested) return;
-				usingRuntimeV2 = agentReads.applyRuntimeSnapshot(payload);
+				const applied = agentReads.applyRuntimeSnapshotResult(payload);
+				if (applied === "stale") return;
+				usingRuntimeV2 = applied === "applied";
 				if (!usingRuntimeV2) return;
 				agents = agentReads.current;
 				endpoints.refreshLegacy();
@@ -1648,7 +1661,9 @@ export default function (pi: ExtensionAPI): void {
 			}),
 			pi.events.on(RUNTIME_READ_MODEL_DELTA_EVENT, (payload) => {
 				if (!v2ReadRequested) return;
-				if (!usingRuntimeV2 || !agentReads.applyRuntimeDelta(payload)) {
+				const applied = agentReads.applyRuntimeDeltaResult(payload);
+				if (applied === "stale") return;
+				if (!usingRuntimeV2 || applied !== "applied") {
 					usingRuntimeV2 = false;
 					agentReads.fallback();
 					agents = agentReads.current;
@@ -1660,8 +1675,8 @@ export default function (pi: ExtensionAPI): void {
 				syncTick();
 				req();
 			}),
-			pi.events.on(RUNTIME_READ_MODEL_UNAVAILABLE_EVENT, () => {
-				if (!v2ReadRequested) return;
+			pi.events.on(RUNTIME_READ_MODEL_UNAVAILABLE_EVENT, (payload) => {
+				if (!v2ReadRequested || !agentReads.acceptProjectionPayload(payload)) return;
 				usingRuntimeV2 = false;
 				agentReads.fallback();
 				agents = agentReads.current;
@@ -1733,6 +1748,9 @@ export default function (pi: ExtensionAPI): void {
 	// --- session + agent lifecycle ---
 	pi.on("session_start", (_e, ctx) => {
 		lastCtx = ctx;
+		agentReads.bindSession(ctx.sessionManager.getSessionId());
+		agents = agentReads.current;
+		usingRuntimeV2 = false;
 		lastPublishedInputTarget = undefined;
 		sessionUi.reset();
 		mainOutputRevision = 0;
@@ -1740,6 +1758,7 @@ export default function (pi: ExtensionAPI): void {
 		endpoints.connect({
 			registry: sessionRegistry(),
 			events: { on: (event, handler) => pi.events.on(event, handler) },
+			sessionId: ctx.sessionManager.getSessionId(),
 		});
 		subscribeBusEvents();
 		settingsRegistry.start();
@@ -1802,6 +1821,7 @@ export default function (pi: ExtensionAPI): void {
 		pi.events.emit(BASH_BG_QUERY_EVENT, undefined);
 		requestRuntimeSnapshot();
 		emitMaestroQuery();
+		if (config.usage.enabled) void usageSubsystem?.start(ctx);
 		req();
 	});
 
@@ -1871,6 +1891,7 @@ export default function (pi: ExtensionAPI): void {
 		todoExpandedOverAgents = false;
 		bashBg.clear();
 		maestro.clear();
+		usageSubsystem?.stop(ctx);
 	});
 
 	pi.on("agent_start", () => {
@@ -1909,6 +1930,7 @@ export default function (pi: ExtensionAPI): void {
 		if (isTuiContext(ctx)) req();
 	});
 	pi.on("model_select", (_e, ctx) => {
+		if (config.usage.enabled) usageSubsystem?.onModelSelect(ctx, ctx.model);
 		if (isTuiContext(ctx)) req();
 	});
 	pi.on("session_compact", (_e, ctx) => {
@@ -2436,6 +2458,19 @@ export default function (pi: ExtensionAPI): void {
 				zenBrowseController?.end();
 				zenNavRows = [];
 			}
+			if (changedKeys.some((key) => key.startsWith("usage."))) {
+				// Master switch: stop the poller when disabled, (re)start when enabled.
+				if (previous.usage.enabled !== nextConfig.usage.enabled) {
+					if (nextConfig.usage.enabled) void usageSubsystem?.start(ctx);
+					else usageSubsystem?.stop(ctx);
+			}
+				// footer/footer-toggle/barWidth change only the rendered string (the
+				// next render reads them fresh); pollIntervalMs change restarts the poller.
+				if (previous.usage.pollIntervalMs !== nextConfig.usage.pollIntervalMs && nextConfig.usage.enabled) {
+					usageSubsystem?.rescheduleTimer();
+					usageSubsystem?.refresh();
+				}
+			}
 			publishUiOwnership();
 			req();
 		},
@@ -2638,6 +2673,23 @@ export default function (pi: ExtensionAPI): void {
 			await openSettings(ctx);
 		},
 	});
+
+	// /usage (command key is configurable via config.usage.commandKey; registered
+	// at session_start so a commandKey change takes effect after /reload).
+	const registerUsageCommand = (): void => {
+		const key = config.usage.commandKey || "usage";
+		pi.registerCommand(key, {
+			description: "Show quota, balance, and spend for configured usage providers",
+			handler: async (_args, ctx) => {
+				if (!config.usage.enabled) {
+					if (ctx.hasUI) ctx.ui.notify(tuiT("notice.usageDisabled"), "warning");
+					return;
+				}
+				await usageSubsystem?.openCommand(ctx);
+			},
+		});
+	};
+	registerUsageCommand();
 
 	pi.registerCommand("supervision", {
 		description: "Supervision: /supervision [events] — unified goal/monitor/advisor telemetry",

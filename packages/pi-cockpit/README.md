@@ -35,7 +35,7 @@ pi -e ./packages/pi-cockpit
 - **SIDEBAR** — Workflow Session/Run progress, Goal state and budget, Todo tasks, Teammate roster, background jobs, and read-only Team Swarm progress. Empty sections disappear and constrained heights retain current or failed work before secondary detail.
 - **AGENTS** — every running teammate as a table row (status spinner · role · id · label · live tail), sorted running-first. Completed/failed agents show their total duration. On narrow terminals this returns to the below-editor widget.
 - **TODO** — the active plan as numbered rows with four states (done ✓ / in-progress spinner / blocked ! / pending ·). On narrow terminals this returns to the above-editor widget.
-- **Footer** — `provider/model · context gauge · ↑in ↓out · $cost · elapsed · git branch`. `bash_bg` background-job state lives on a **dedicated second footer row** so it no longer competes with the primary line.
+- **Footer** — `provider/model · context gauge · ↑in ↓out · $cost · elapsed · git branch`. `bash_bg` background-job state lives on a **dedicated second footer row** so it no longer competes with the primary line. **Usage bars** (quota/balance/spend for the active provider, ported from `hknet/pi-usage-bars`) live on their own footer line when `usage.footer` is on — e.g. `Codex 5h [████░░░░] 42% · W [██░░░░░░] 25% · $20.00`.
 - **Thinking timer** — while the model is thinking, the folded thinking row shows a spinner and running elapsed time; when the run ends, it settles to the actual duration (e.g. `thoughts · 8.4s`).
 - **Quiet mode** — compresses the seven built-in tool calls (read/bash/edit/write/grep/find/ls) into single-line ✓/✗/⋯ summaries and folds thinking blocks. Two glyph sets available: `check` (✓/✗/⋯) and `dot` (●/○/◌). Toggle with `/cockpit quiet`; turning off requires `/reload` to restore native tool renderers.
 
@@ -49,6 +49,7 @@ Toggle each block between list and compact with `/cockpit`.
 | AGENTS | `pi.events` channels `teammate:started` / `teammate:message` / `teammate:complete`, broadcast by **pi-maestro-teammate** | **No** — without that extension no events fire, the block stays hidden |
 | TODO | the `todo-state` snapshot the **pi-maestro-flow** `todo` tool persists after every mutation (re-read on each `tool_execution_end` and on `session_start`) | **No** — without the `todo` tool the block stays hidden |
 | Footer | `ctx.model`, `ctx.getContextUsage()`, session usage totals, `footerData.getGitBranch()` | **Yes** |
+| Usage bars | the active provider's quota/balance/spend fetched directly from each provider's usage API, resolved through `ctx.modelRegistry.getProviderAuth`/`getProviderAuthStatus` (Codex, Claude, ZAI×2, Kimi, MiniMax×2, OpenRouter, DeepSeek, Moonshot×2) | **Yes** — on a stock Pi with no configured providers the block loads, finds no credentials, and renders nothing |
 
 So on a stock Pi the extension loads without error, the Maestro sections stay empty, and the footer remains available. The roster is **self-accumulated from event deltas**; Todo is back-filled from the latest durable `todo-state`. Workflow, Goal, and Swarm use a versioned full-replacement snapshot with generation fencing and a query path for cold-start recovery.
 
@@ -84,7 +85,14 @@ Cockpit has no package dependency on `pi-maestro-flow`. It observes optional pro
     "showMaestro": false,
     "maxLength": 80
   },
-  "theme": ""
+  "theme": "",
+  "usage": {
+    "enabled": true,
+    "footer": true,
+    "pollIntervalMs": 120000,
+    "barWidth": 8,
+    "commandKey": "usage"
+  }
 }
 ```
 
@@ -110,6 +118,11 @@ Cockpit has no package dependency on `pi-maestro-flow`. It observes optional pro
 
 The tab title is `frame + pi - <session> - <working state>`. The session part follows Claude Code's chain (`sessionTitle ?? agentTitle ?? haikuTitle ?? default`): the `/session name` title wins, otherwise the generated title, otherwise a short session id. The frame is Claude Code's title chrome: `⠂`/`⠐` braille spinner while a turn runs, static `✳` when idle; failure replaces it with `✗`. On quit, Cockpit clears the title so no stale tab label lingers (Claude Code's `CLEAR_TERMINAL_TITLE`).
 - `theme`: named theme override; empty string follows the Pi session theme.
+- `usage.enabled`: master switch for the usage bars (quota, balance, spend). On by default; off hides the footer segment and disables the `/usage` command. Ports the [`hknet/pi-usage-bars`](https://github.com/hknet/pi-usage-bars) extension.
+- `usage.footer`: when `true`, render the live quota bar on a dedicated footer line. The `/usage` command works regardless of this toggle. On by default.
+- `usage.pollIntervalMs`: how often to refresh usage data, in milliseconds. Clamped to `30000`..`1800000` (30s..30min). Default `120000` (2min). Lower values hit provider APIs more often.
+- `usage.barWidth`: characters per quota bar in the footer. Clamped to `4`..`16`. Default `8`.
+- `usage.commandKey`: the `/`-command that opens the usage selector overlay. Default `"usage"`. Requires `/reload` to take effect (commands register at session start).
 
 ## Commands
 
@@ -123,6 +136,7 @@ The tab title is `frame + pi - <session> - <working state>`. The session part fo
 - `/cockpit sidebar auto|on|off` — selects dock behavior.
 - `/cockpit sidebar resize` or `Ctrl+Shift+R` — enters temporary Resize mode. Left/Right adjusts one column, Shift+Left/Shift+Right adjusts four, Enter accepts, and Escape rolls back. Mouse reporting is active only during Resize mode.
 - `/cockpit quiet` — toggles quiet mode; `/cockpit bg` shows background jobs.
+- `/usage` — opens the usage selector overlay: quota, balance, and spend for every configured provider, with the active one marked `✓`. Search filters by name; arrows/`j`/`k` move, Enter expands the selected provider, Esc closes. The command key is configurable via `usage.commandKey` (default `"usage"`, requires `/reload`). Disabled while `usage.enabled` is off.
 - `/theme` — switch theme with live preview; `/theme <name>` applies directly. `cockpit-zen` is the restrained warm-gold theme designed for the Zen stack; selecting it does not change `stackStyle`. Pi ships no standalone theme command; cockpit provides one.
 
 ## Sidebar compatibility

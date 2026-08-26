@@ -162,6 +162,48 @@ test("title.* and toolPalette are editable through the provider (P3 gap closure)
 	} finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
+test("usage.* settings are described, persisted, and validate bounds", async () => {
+	const { directory, path } = tempConfig();
+	try {
+		writeFileSync(path, JSON.stringify(DEFAULT_CONFIG));
+		const { provider } = providerAt(path);
+		const description = await provider.describe({ context });
+		assert.ok(description.settings.some((setting) => setting.key === "usage.enabled" && setting.editor.kind === "boolean"), "usage.enabled is boolean");
+		assert.ok(description.settings.some((setting) => setting.key === "usage.footer" && setting.editor.kind === "boolean"), "usage.footer is boolean");
+		assert.ok(description.settings.some((setting) => setting.key === "usage.pollIntervalMs" && setting.editor.kind === "integer"), "usage.pollIntervalMs is integer");
+		assert.ok(description.settings.some((setting) => setting.key === "usage.barWidth" && setting.editor.kind === "integer"), "usage.barWidth is integer");
+		assert.ok(description.settings.some((setting) => setting.key === "usage.commandKey" && setting.editor.kind === "text"), "usage.commandKey is text");
+		const commandKeyDef = description.settings.find((setting) => setting.key === "usage.commandKey");
+		assert.equal(commandKeyDef?.activation, "extension-reload");
+
+		const before = await provider.read({ context });
+		const changes = [
+			{ operation: "set" as const, key: "usage.enabled", scope: "global" as const, value: false },
+			{ operation: "set" as const, key: "usage.footer", scope: "global" as const, value: false },
+			{ operation: "set" as const, key: "usage.pollIntervalMs", scope: "global" as const, value: 60_000 },
+			{ operation: "set" as const, key: "usage.barWidth", scope: "global" as const, value: 12 },
+			{ operation: "set" as const, key: "usage.commandKey", scope: "global" as const, value: "quota" },
+		];
+		const prepared = await provider.prepare!({ context, transactionId: "tx-usage", changes, expectedRevisions: before.configured.resources });
+		assert.equal(prepared.prepared, true);
+		await provider.commit!({ context, transactionId: "tx-usage", prepareToken: prepared.prepareToken! });
+		const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+		assert.deepEqual(raw.usage, { enabled: false, footer: false, pollIntervalMs: 60_000, barWidth: 12, commandKey: "quota" });
+		const snapshot = await provider.read({ context });
+		assert.equal(snapshot.effective.values.find((entry) => entry.key === "usage.enabled")?.value, false);
+		assert.equal(snapshot.effective.values.find((entry) => entry.key === "usage.pollIntervalMs")?.value, 60_000);
+
+		// out-of-range poll interval is rejected at validation time
+		const badPrepared = await provider.prepare!({
+			context,
+			transactionId: "tx-usage-bad",
+			changes: [{ operation: "set" as const, key: "usage.pollIntervalMs", scope: "global" as const, value: 1_000 }],
+			expectedRevisions: (await provider.read({ context })).configured.resources,
+		});
+		assert.equal(badPrepared.prepared, false);
+	} finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("stackStyle persists, applies live and rejects unsupported projections", async () => {
 	const { directory, path } = tempConfig();
 	try {

@@ -1,6 +1,6 @@
 import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { altKey } from "pi-maestro-settings-core/v1";
-import { effectiveAgentStatus, isExpertLeader, type AgentDisplayStatus } from "./agents-store.ts";
+import { effectiveAgentStatus, isCliAgent, isExpertLeader, type AgentDisplayStatus } from "./agents-store.ts";
 import type { AgentRow, TodoItem, ViewMode } from "./types.ts";
 import type { IconGlyphs } from "./icons.ts";
 import { composeByPriority, fitLineByPriority, type PriorityGroup, type PrioritizedSegment, type WidthUtils } from "./layout.ts";
@@ -238,9 +238,14 @@ export function renderAgents(
 			+ (stalled ? theme.fg("error", `${g.separator}${tuiT("common.stalled", { count: stalled })}`) : "");
 		const tails = rows
 			.filter((r) => r.tail)
-			.map((r) => isExpertLeader(r)
-				? `${theme.fg("accent", tuiT("widget.agent.expert"))}${theme.fg("dim", ":")} ${theme.fg("dim", r.tail)}`
-				: `${theme.fg(roleColor(r.role), r.role)}${theme.fg("dim", ":")} ${theme.fg("dim", r.tail)}`);
+			.map((r) => {
+				const badge = isExpertLeader(r)
+					? theme.fg("accent", tuiT("widget.agent.expert"))
+					: isCliAgent(r)
+						? theme.fg("accent", tuiT("widget.agent.cli"))
+						: theme.fg(roleColor(r.role), r.role);
+				return `${badge}${theme.fg("dim", ":")} ${theme.fg("dim", r.tail)}`;
+			});
 		const parts = opts.withHead === false ? tails : [head, ...tails];
 		if (parts.length === 0) return [];
 		return [utils.clip(parts.join(theme.fg("dim", g.separator)), width, ell)];
@@ -299,6 +304,9 @@ export function renderAgents(
 		// tree/dependency presentation as parallel and DAG dispatches.
 		if (isExpertLeader(r)) {
 			segs.push({ text: theme.fg("accent", tuiT("widget.agent.expert")), priority: 93, clippable: false });
+		}
+		if (isCliAgent(r)) {
+			segs.push({ text: theme.fg("accent", tuiT("widget.agent.cli")), priority: 93, clippable: false });
 		}
 		if (r.phase && !(r.phase === "tool-execution" && r.activeTool)) {
 			segs.push({ text: theme.fg("dim", r.phase), priority: 92, minWidth: 6 });

@@ -48,6 +48,11 @@ export interface AgentConversationEntry {
 
 export interface AgentRow {
 	correlationId: string;
+	/** Exact session/source projection owner; absent only for legacy event rows. */
+	workspaceId?: string;
+	sessionId?: string;
+	sourceId?: string;
+	sessionGeneration?: number;
 	/** Spawn attribution is distinct from the visible hierarchy edge. */
 	spawnedBy?: string;
 	parentCorrelationId?: string;
@@ -204,6 +209,26 @@ export interface TitleConfig {
 	maxLength: number;
 }
 
+/**
+ * Provider usage bars (quota, balance, spend). Ports the
+ * hknet/pi-usage-bars extension's 11-provider fetching into the Cockpit
+ * footer and a `/usage` selector overlay. Off by default keeps the footer
+ * clean; the `/usage` command still works while `footer` alone toggles the
+ * footer segment.
+ */
+export interface UsageConfig {
+	/** Master switch. Off hides the footer segment and unregisters the command. */
+	enabled: boolean;
+	/** Show the live quota bar in the Cockpit footer (a dedicated footer line). */
+	footer: boolean;
+	/** Poll interval in milliseconds; clamped 30s..30min. Default 2min. */
+	pollIntervalMs: number;
+	/** Characters per quota bar in the footer; clamped 4..16. Default 8. */
+	barWidth: number;
+	/** `/`-command key that opens the usage selector overlay. Default "usage". Requires /reload. */
+	commandKey: string;
+}
+
 export interface CockpitConfig {
 	enabled: boolean;
 	/**
@@ -275,6 +300,8 @@ export interface CockpitConfig {
 	sidebar: SidebarConfig;
 	/** Terminal tab title surface (session summary + working state + optional tags). */
 	title: TitleConfig;
+	/** Provider usage bars (quota, balance, spend) in the footer + `/usage` overlay. */
+	usage: UsageConfig;
 	/**
 	 * Theme to apply at session start. Empty means "leave whatever pi is using",
 	 * so cockpit never overrides a theme the user picked elsewhere.
@@ -312,6 +339,13 @@ export const DEFAULT_CONFIG: CockpitConfig = {
 		showMaestro: false,
 		generationModel: "",
 		maxLength: 80,
+	},
+	usage: {
+		enabled: true,
+		footer: true,
+		pollIntervalMs: 120_000,
+		barWidth: 8,
+		commandKey: "usage",
 	},
 	theme: "",
 };

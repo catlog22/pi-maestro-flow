@@ -31,6 +31,9 @@ function agent(overrides: Partial<AgentRow> = {}): AgentRow {
 const WORKSPACE = "w".repeat(64);
 const OWNER = "a".repeat(32);
 const NONCE = "1".repeat(32);
+const SESSION = "main-session";
+const SOURCE = "main-source";
+const GENERATION = 7;
 
 function owners(name = "builder"): SessionOwnerProjection[] {
 	return [{
@@ -39,6 +42,9 @@ function owners(name = "builder"): SessionOwnerProjection[] {
 		ownerNonce: NONCE,
 		scope: "local",
 		status: "running",
+		sessionId: SESSION,
+		sourceId: SOURCE,
+		generation: GENERATION,
 		sessionName: "main-window",
 		agents: [{
 			workspaceId: WORKSPACE,
@@ -58,6 +64,14 @@ function owners(name = "builder"): SessionOwnerProjection[] {
 		sessionName: "other-window",
 		agents: [],
 	}];
+}
+
+function snapshotWithLocalProjection(
+	overrides: Partial<Pick<SessionOwnerProjection, "workspaceId" | "sessionId" | "sourceId" | "generation">> = {},
+) {
+	const projectedOwners = owners();
+	projectedOwners[0] = { ...projectedOwners[0]!, ...overrides };
+	return new SessionHostRegistry({ endpoints: projectSessionEndpoints(projectedOwners) }).snapshot();
 }
 
 class Events implements SessionEventSource {
@@ -91,7 +105,12 @@ test("EndpointStore falls back to stable main/start-order agent ids and hides gr
 });
 
 test("EndpointStore subscribes to SessionHostRegistry and projects canonical local endpoints only", () => {
-	let rows = [agent()];
+	let rows = [agent({
+		workspaceId: WORKSPACE,
+		sessionId: SESSION,
+		sourceId: SOURCE,
+		sessionGeneration: GENERATION,
+	})];
 	const registry = new SessionHostRegistry({ endpoints: projectSessionEndpoints(owners()) });
 	const store = new EndpointStore({ getLegacyAgents: () => rows });
 	const revisions: string[] = [];
@@ -140,7 +159,53 @@ test("EndpointStore excludes local agents outside the current root owner fence",
 	assert.equal(store.snapshot().endpoints.some((endpoint) => endpoint.correlationId === "foreign-agent"), false);
 });
 
-test("EndpointStore accepts versioned session events and keeps legacy agents during registry lag", () => {
+test("EndpointStore rejects a late canonical snapshot from the previous Cockpit session", () => {
+	const store = new EndpointStore({ getLegacyAgents: () => [] });
+	store.connect({ sessionId: SESSION });
+	const stale = new SessionHostRegistry({ endpoints: projectSessionEndpoints(owners()) }).snapshot();
+	assert.equal(store.applyRegistrySnapshot({
+		...stale,
+		contentRevision: "stale-session",
+		endpoints: stale.endpoints.map((endpoint) => endpoint.scope === "local"
+			? { ...endpoint, sessionId: "previous-session" }
+			: endpoint),
+	}), false);
+	assert.equal(store.snapshot().endpoints.length, 1);
+	store.disconnect();
+});
+
+test("EndpointStore rejects lower-generation and incompatible same-session local snapshots", () => {
+	const store = new EndpointStore({ getLegacyAgents: () => [] });
+	store.connect({ sessionId: SESSION });
+	assert.equal(store.applyRegistrySnapshot(snapshotWithLocalProjection()), true);
+
+	assert.equal(store.applyRegistrySnapshot(snapshotWithLocalProjection({
+		generation: GENERATION - 1,
+	})), false, "a late lower generation cannot regress the accepted projection");
+	assert.equal(store.applyRegistrySnapshot(snapshotWithLocalProjection({
+		sourceId: "other-source",
+		generation: GENERATION + 1,
+	})), false, "a higher generation cannot silently switch canonical sources");
+	assert.equal(store.applyRegistrySnapshot(snapshotWithLocalProjection({
+		workspaceId: "x".repeat(64),
+		generation: GENERATION + 1,
+	})), false, "a higher generation cannot silently switch workspaces");
+	assert.equal(store.applyRegistrySnapshot(snapshotWithLocalProjection({
+		sourceId: undefined,
+	})), false, "session-bound snapshots require the complete local tuple");
+	assert.equal(store.snapshot().endpoints[0]?.registryEndpoint?.generation, GENERATION);
+
+	store.disconnect();
+	store.connect({ sessionId: SESSION });
+	assert.equal(store.applyRegistrySnapshot(snapshotWithLocalProjection({
+		workspaceId: "x".repeat(64),
+		sourceId: "replacement-source",
+		generation: 1,
+	})), true, "an explicit reconnect resets the accepted workspace/source/generation tuple");
+	store.disconnect();
+});
+
+test("EndpointStore accepts versioned session events and hides unknown legacy agents once a canonical registry exists", () => {
 	const rows = [agent({ correlationId: "legacy-extra", name: "extra", startedAt: 2_000 })];
 	const events = new Events();
 	const store = new EndpointStore({ getLegacyAgents: () => rows });
@@ -148,7 +213,7 @@ test("EndpointStore accepts versioned session events and keeps legacy agents dur
 	const registry = new SessionHostRegistry({ endpoints: projectSessionEndpoints(owners()) });
 	events.emit(SESSION_HOST_REGISTRY_EVENT, registry.snapshot());
 
-	assert.deepEqual(store.snapshot().endpoints.map((endpoint) => endpoint.label), ["main", "builder", "extra"]);
+	assert.deepEqual(store.snapshot().endpoints.map((endpoint) => endpoint.label), ["main", "builder"]);
 	assert.equal(events.handlers.get(SESSION_HOST_REGISTRY_EVENT)?.size, 1);
 	store.disconnect();
 	assert.equal(events.handlers.get(SESSION_HOST_REGISTRY_EVENT)?.size, 0);

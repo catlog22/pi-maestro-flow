@@ -9,7 +9,7 @@
 import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi, type TUI } from "@earendil-works/pi-tui";
 import type { AgentRow } from "./types.ts";
-import { effectiveAgentStatus, type AgentDisplayStatus } from "./agents-store.ts";
+import { effectiveAgentStatus, isCliAgent, type AgentDisplayStatus } from "./agents-store.ts";
 import { scrollWindowStart } from "./agent-scroll.ts";
 import { agentDetailRows } from "./viewport.ts";
 import { formatAgentMetric, formatDuration } from "./render.ts";
@@ -118,6 +118,7 @@ export function renderSessionDetail(
 	const identity = [
 		theme.fg(color, "■"),
 		theme.fg(color, theme.bold(`@${label}`)),
+		isCliAgent(row) ? theme.fg("accent", tuiT("widget.agent.cli")) : "",
 		role ? theme.fg("dim", role) : "",
 		theme.fg(color, tuiStatus(status)),
 		theme.fg("dim", duration),

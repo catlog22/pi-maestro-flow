@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { type CockpitConfig, type CurrencyMode, DEFAULT_CONFIG, type StackStyle } from "./types.ts";
+import { type CockpitConfig, type CurrencyMode, DEFAULT_CONFIG, type StackStyle, type UsageConfig } from "./types.ts";
 
 const SIDEBAR_MIN_WIDTH = 32;
 const SIDEBAR_MAX_WIDTH = 56;
@@ -11,6 +11,32 @@ export function getConfigPath(): string {
 }
 
 // Flat, field-by-field merge: type-safe and forward-compatible (unknown keys ignored).
+const USAGE_POLL_MIN_MS = 30_000;
+const USAGE_POLL_MAX_MS = 30 * 60_000;
+const USAGE_BAR_MIN_WIDTH = 4;
+const USAGE_BAR_MAX_WIDTH = 16;
+
+function mergeUsageConfig(base: UsageConfig, raw: unknown): UsageConfig {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ...base };
+	const o = raw as Record<string, unknown>;
+	const isBool = (v: unknown): v is boolean => typeof v === "boolean";
+	const isFiniteInt = (v: unknown): v is number =>
+		typeof v === "number" && Number.isFinite(v) && Number.isSafeInteger(v);
+	const pollIntervalMs = isFiniteInt(o.pollIntervalMs)
+		? Math.min(USAGE_POLL_MAX_MS, Math.max(USAGE_POLL_MIN_MS, o.pollIntervalMs))
+		: base.pollIntervalMs;
+	const barWidth = isFiniteInt(o.barWidth)
+		? Math.min(USAGE_BAR_MAX_WIDTH, Math.max(USAGE_BAR_MIN_WIDTH, o.barWidth))
+		: base.barWidth;
+	return {
+		enabled: isBool(o.enabled) ? o.enabled : base.enabled,
+		footer: isBool(o.footer) ? o.footer : base.footer,
+		pollIntervalMs,
+		barWidth,
+		commandKey: typeof o.commandKey === "string" && o.commandKey.trim() ? o.commandKey : base.commandKey,
+	};
+}
+
 export function mergeConfig(base: CockpitConfig, over: unknown): CockpitConfig {
 	if (!over || typeof over !== "object" || Array.isArray(over)) return base;
 	const o = over as Record<string, unknown>;
@@ -79,6 +105,7 @@ const isCurrencyMode = (v: unknown): v is CurrencyMode => v === "usd" || v === "
 			maxLength: titleMaxLength,
 		},
 		theme: typeof o.theme === "string" ? o.theme : base.theme,
+		usage: mergeUsageConfig(base.usage, o.usage),
 	};
 }
 
@@ -126,6 +153,9 @@ export function mergeConfigDocument(raw: unknown, config: CockpitConfig): Record
 	const title = root.title && typeof root.title === "object" && !Array.isArray(root.title)
 		? { ...(root.title as Record<string, unknown>), ...config.title }
 		: { ...config.title };
+	const usage = root.usage && typeof root.usage === "object" && !Array.isArray(root.usage)
+		? { ...(root.usage as Record<string, unknown>), ...config.usage }
+		: { ...config.usage };
 	return {
 		...root,
 		enabled: config.enabled,
@@ -148,6 +178,7 @@ export function mergeConfigDocument(raw: unknown, config: CockpitConfig): Record
 		icons,
 		sidebar,
 		title,
+		usage,
 		theme: config.theme,
 	};
 }

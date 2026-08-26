@@ -12,7 +12,7 @@ import { formatAgentMetric } from "./render.ts";
 import type { SessionUiState } from "./session-ui-state.ts";
 import { formatUnreadCount, type SessionTab } from "./session-tabs.ts";
 import type { AgentRow } from "./types.ts";
-import { effectiveAgentStatus, type AgentDisplayStatus } from "./agents-store.ts";
+import { effectiveAgentStatus, isCliAgent, type AgentDisplayStatus } from "./agents-store.ts";
 import { visibleAgentRows } from "./stack-widget.ts";
 import { tuiT } from "./tui-i18n.ts";
 
@@ -99,8 +99,10 @@ function chip(
 	activity?: string,
 	attention = false,
 	outcome?: { status: "completed" | "failed" | "terminated"; message?: string },
+	cli = false,
 ): string {
 	const text = `@${label}`;
+	const cliBadge = cli ? theme.fg("accent", ` ${tuiT("widget.agent.cli")}`) : "";
 	const badge = unread > 0 ? theme.fg("warning", ` •${formatUnreadCount(unread)}`) : "";
 	const activitySuffix = activity ? theme.fg("dim", ` · ${activity}`) : "";
 	const attentionPrefix = attention ? theme.fg("error", "!") : "";
@@ -112,8 +114,8 @@ function chip(
 				: theme.fg("success", " ✓")
 		: "";
 	return active
-		? `${attentionPrefix}${theme.fg(color, "▸")} ${theme.fg(color, theme.bold(text))}${outcomeSuffix}${activitySuffix}${badge}`
-		: `${attentionPrefix}${theme.fg(color, text)}${outcomeSuffix}${activitySuffix}${badge}`;
+		? `${attentionPrefix}${theme.fg(color, "▸")} ${theme.fg(color, theme.bold(text))}${cliBadge}${outcomeSuffix}${activitySuffix}${badge}`
+		: `${attentionPrefix}${theme.fg(color, text)}${cliBadge}${outcomeSuffix}${activitySuffix}${badge}`;
 }
 
 export type AgentBarStatus = AgentDisplayStatus | "idle";
@@ -128,6 +130,8 @@ interface AgentBarTab extends SessionTab {
 	attention?: boolean;
 	/** Terminal outcome badge: ✓ completed, ✗ failed (with reason) or terminated. */
 	outcome?: { status: "completed" | "failed" | "terminated"; message?: string };
+	/** External CLI backend (ACP `cli/<tool>` route): shown as an accent badge after the label. */
+	cli?: boolean;
 }
 
 function endpointStatus(endpoint: CockpitEndpoint, now: number, mainRunning: boolean): AgentBarStatus {
@@ -177,6 +181,7 @@ function renderAgentChipLine(tabs: AgentBarTab[], selectedId: string, width: num
 		tab.outcome
 			? { status: tab.outcome.status, message: tab.outcome.message ? truncateToWidth(tab.outcome.message, 24, "…") : undefined }
 			: undefined,
+		tab.cli,
 	));
 	const chipWidths = chips.map((text) => visibleWidth(text));
 	const sepWidth = visibleWidth(CHIP_SEPARATOR);
@@ -281,6 +286,7 @@ export function renderAgentBar(
 				: {}),
 			...(status === "stalled" ? { attention: true } : {}),
 			...(outcome ? { outcome } : {}),
+			...(endpoint.agentRow && isCliAgent(endpoint.agentRow) ? { cli: true } : {}),
 		};
 	});
 	// Selected-session metrics summary, appended only when the chip line leaves

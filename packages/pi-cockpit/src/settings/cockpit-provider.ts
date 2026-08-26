@@ -84,6 +84,11 @@ const CONFIG_KEYS = [
 	"title.showMaestro",
 	"title.generationModel",
 	"title.maxLength",
+	"usage.enabled",
+	"usage.footer",
+	"usage.pollIntervalMs",
+	"usage.barWidth",
+	"usage.commandKey",
 ] as const;
 
 type CockpitSettingKey = (typeof CONFIG_KEYS)[number];
@@ -200,6 +205,17 @@ const CATALOGS = {
 		"cockpit.option.comfortable": "Comfortable",
 		"cockpit.runtime.reloadQuiet": "Turning Quiet off requires /reload to restore native tool renderers",
 		"cockpit.runtime.reloadInteractions": "Editor interaction settings require /reload to take effect",
+		"cockpit.group.usage": "Usage bars",
+		"cockpit.usage.enabled": "Usage bars",
+		"cockpit.usage.enabled.description": "Show provider quota, balance, and spend indicators in the footer and a /usage selector. Ports the hknet/pi-usage-bars extension.",
+		"cockpit.usage.footer": "Show in footer",
+		"cockpit.usage.footer.description": "Render the live quota bar on a dedicated footer line. The /usage command works regardless of this toggle.",
+		"cockpit.usage.pollIntervalMs": "Poll interval (ms)",
+		"cockpit.usage.pollIntervalMs.description": "How often to refresh usage data. Clamped to 30s..30min. Lower values hit provider APIs more often.",
+		"cockpit.usage.barWidth": "Bar width",
+		"cockpit.usage.barWidth.description": "Characters per quota bar in the footer. Clamped to 4..16.",
+		"cockpit.usage.commandKey": "Command key",
+		"cockpit.usage.commandKey.description": "The /-command that opens the usage selector overlay. Requires /reload.",
 	},
 	"zh-CN": {
 		"cockpit.provider": "驾驶舱",
@@ -274,6 +290,17 @@ const CATALOGS = {
 		"cockpit.option.comfortable": "舒适",
 		"cockpit.runtime.reloadQuiet": "关闭紧凑渲染后需执行 /reload 才能恢复原生工具界面",
 		"cockpit.runtime.reloadInteractions": "编辑器交互设置需执行 /reload 才能生效",
+		"cockpit.group.usage": "用量条",
+		"cockpit.usage.enabled": "用量条",
+		"cockpit.usage.enabled.description": "在状态栏和 /usage 选择器中显示各供应商的配额、余额与花费。移植自 hknet/pi-usage-bars 扩展。",
+		"cockpit.usage.footer": "在状态栏显示",
+		"cockpit.usage.footer.description": "在专属状态栏行渲染实时配额条。/usage 命令不受此开关影响。",
+		"cockpit.usage.pollIntervalMs": "轮询间隔（毫秒）",
+		"cockpit.usage.pollIntervalMs.description": "刷新用量数据的频率，钳制在 30 秒..30 分钟。值越小调用供应商 API 越频繁。",
+		"cockpit.usage.barWidth": "进度条宽度",
+		"cockpit.usage.barWidth.description": "状态栏中每条配额条的字符宽度，钳制在 4..16。",
+		"cockpit.usage.commandKey": "命令键",
+		"cockpit.usage.commandKey.description": "打开用量选择器浮层的 /-命令。需执行 /reload 生效。",
 	},
 } as const;
 
@@ -382,6 +409,50 @@ const DEFINITIONS: readonly SettingDefinition[] = [
 		editor: { kind: "integer", min: 20, max: 200, step: 1 },
 	},
 	actionDefinition("thinkingFold", "cockpit.group.appearance", 2, "cockpit.thinkingFold", "cockpit.thinkingFold"),
+	booleanDefinition("usage.enabled", "cockpit.group.usage", 0, "cockpit.usage.enabled", "live", "cockpit.usage.enabled.description"),
+	booleanDefinition("usage.footer", "cockpit.group.usage", 1, "cockpit.usage.footer", "live", "cockpit.usage.footer.description"),
+	{
+		key: "usage.pollIntervalMs",
+		group: "cockpit.group.usage",
+		order: 2,
+		labelKey: "cockpit.usage.pollIntervalMs",
+		descriptionKey: "cockpit.usage.pollIntervalMs.description",
+		defaultValue: DEFAULT_CONFIG.usage.pollIntervalMs,
+		scopes: ["global"],
+		merge: "override",
+		activation: "live",
+		sensitivity: "public",
+		reversibility: "full",
+		editor: { kind: "integer", min: 30_000, max: 1_800_000, step: 1000 },
+	},
+	{
+		key: "usage.barWidth",
+		group: "cockpit.group.usage",
+		order: 3,
+		labelKey: "cockpit.usage.barWidth",
+		descriptionKey: "cockpit.usage.barWidth.description",
+		defaultValue: DEFAULT_CONFIG.usage.barWidth,
+		scopes: ["global"],
+		merge: "override",
+		activation: "live",
+		sensitivity: "public",
+		reversibility: "full",
+		editor: { kind: "integer", min: 4, max: 16, step: 1 },
+	},
+	{
+		key: "usage.commandKey",
+		group: "cockpit.group.usage",
+		order: 4,
+		labelKey: "cockpit.usage.commandKey",
+		descriptionKey: "cockpit.usage.commandKey.description",
+		defaultValue: DEFAULT_CONFIG.usage.commandKey,
+		scopes: ["global"],
+		merge: "override",
+		activation: "extension-reload",
+		sensitivity: "public",
+		reversibility: "reload-required",
+		editor: { kind: "text" },
+	},
 ];
 
 export function createCockpitSettingsProvider(options: CockpitSettingsProviderOptions): CockpitSettingsProvider {
@@ -669,6 +740,7 @@ function getConfigValue(config: CockpitConfig, key: CockpitSettingKey): JsonValu
 	if (key === "sidebar.width") return config.sidebar.width;
 	if (key === "sidebar.density") return config.sidebar.density;
 	if (key.startsWith("title.")) return getTitleValue(config.title, key.slice("title.".length));
+	if (key.startsWith("usage.")) return getUsageValue(config.usage, key.slice("usage.".length));
 	return config[key as keyof CockpitConfig] as JsonValue;
 }
 
@@ -687,17 +759,33 @@ function getTitleValue(title: CockpitConfig["title"], field: string): JsonValue 
 	}
 }
 
+function getUsageValue(usage: CockpitConfig["usage"], field: string): JsonValue {
+	switch (field) {
+		case "enabled": return usage.enabled;
+		case "footer": return usage.footer;
+		case "pollIntervalMs": return usage.pollIntervalMs;
+		case "barWidth": return usage.barWidth;
+		case "commandKey": return usage.commandKey;
+		default: return "";
+	}
+}
+
 function setConfigValue(config: CockpitConfig, key: CockpitSettingKey, value: JsonValue): CockpitConfig {
 	if (key === "icons.mode") return { ...config, icons: { mode: value as CockpitConfig["icons"]["mode"] } };
 	if (key === "sidebar.mode") return { ...config, sidebar: { ...config.sidebar, mode: value as CockpitConfig["sidebar"]["mode"] } };
 	if (key === "sidebar.width") return { ...config, sidebar: { ...config.sidebar, width: value as number } };
 	if (key === "sidebar.density") return { ...config, sidebar: { ...config.sidebar, density: value as CockpitConfig["sidebar"]["density"] } };
 	if (key.startsWith("title.")) return { ...config, title: setTitleValue(config.title, key.slice("title.".length), value) };
+	if (key.startsWith("usage.")) return { ...config, usage: setUsageValue(config.usage, key.slice("usage.".length), value) };
 	return { ...config, [key]: value } as CockpitConfig;
 }
 
 function setTitleValue(title: CockpitConfig["title"], field: string, value: JsonValue): CockpitConfig["title"] {
 	return { ...title, [field]: value } as CockpitConfig["title"];
+}
+
+function setUsageValue(usage: CockpitConfig["usage"], field: string, value: JsonValue): CockpitConfig["usage"] {
+	return { ...usage, [field]: value } as CockpitConfig["usage"];
 }
 
 function validValue(key: CockpitSettingKey, value: JsonValue): boolean {
@@ -706,6 +794,10 @@ function validValue(key: CockpitSettingKey, value: JsonValue): boolean {
 	if (key === "title.maxLength") return typeof value === "number" && Number.isSafeInteger(value) && value >= 20 && value <= 200;
 	if (key === "title.generationModel") return typeof value === "string";
 	if (key.startsWith("title.")) return typeof value === "boolean";
+	if (key === "usage.enabled" || key === "usage.footer") return typeof value === "boolean";
+	if (key === "usage.pollIntervalMs") return typeof value === "number" && Number.isSafeInteger(value) && value >= 30_000 && value <= 1_800_000;
+	if (key === "usage.barWidth") return typeof value === "number" && Number.isSafeInteger(value) && value >= 4 && value <= 16;
+	if (key === "usage.commandKey") return typeof value === "string" && value.trim().length > 0;
 	if (key === "quietSymbols") return value === "check" || value === "dot";
 	if (key === "stackStyle") return value === "classic" || value === "zen";
 	if (key === "toolPalette") return ["classic", "family", "readwrite", "search", "mono"].includes(String(value));

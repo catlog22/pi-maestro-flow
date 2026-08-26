@@ -49,7 +49,13 @@ function snapshot(viewMode: "agents" | "windows" = "agents"): SessionHostSnapsho
 				ownerId: LOCAL_OWNER,
 				ownerNonce: LOCAL_NONCE,
 				status: "running",
-				capabilities: ["inspect", "message", "steer", "follow_up"],
+				capabilities: [
+					"inspect",
+					"message",
+					"steer",
+					"follow_up",
+					...(viewMode === "windows" ? ["monitor-workspace-aggregation" as const] : []),
+				],
 				ordinal: 0,
 				contentRevision: "local",
 			},
@@ -178,6 +184,18 @@ test("EndpointStore keeps remote windows out of the Agent Bar projection", () =>
 	assert.equal(value.windows[0]?.contextPressure, 73);
 	assert.equal(value.windows[0]?.remoteAgents?.length, 1);
 	assert.equal(value.windows[0]?.logicalKey, `window:${REMOTE_OWNER}:${REMOTE_NONCE}`);
+});
+
+test("Window aggregation fails closed when windows mode lacks the Monitor capability", () => {
+	const store = new EndpointStore({ getLegacyAgents: () => [] });
+	const unprivileged = snapshot("windows");
+	assert.equal(store.applyRegistrySnapshot({
+		...unprivileged,
+		endpoints: unprivileged.endpoints.map((endpoint) => endpoint.scope === "local" && endpoint.kind === "root"
+			? { ...endpoint, capabilities: endpoint.capabilities.filter((capability) => capability !== "monitor-workspace-aggregation") }
+			: endpoint),
+	}), true);
+	assert.deepEqual(store.snapshot().windows, []);
 });
 
 test("Window Bar includes a local Monitor control entry only while active", () => {

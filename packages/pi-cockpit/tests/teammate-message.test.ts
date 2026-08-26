@@ -55,6 +55,31 @@ test("teammate-message renderer presents receipt direction and keeps protocol gu
 	assert.match(expanded, /Avoid editing the same file/);
 });
 
+test("teammate-message renderer abbreviates long bodies only while collapsed", () => {
+	const body = Array.from({ length: 6 }, (_, index) =>
+		`Finding ${index}: provider listRecoverable scans workspace manifests and filters the exact target identity.`,
+	).join("\n");
+	const message = {
+		content: `[teammate:coordination] from @ws-id-investigator\n---\n${body}`,
+	};
+
+	const collapsed = renderIncomingTeammateMessage(
+		message,
+		{ expanded: false, outputPad: 0 },
+		theme,
+	).render(50).join("\n");
+	assert.match(collapsed, /Finding 0/);
+	assert.match(collapsed, /…/);
+	assert.doesNotMatch(collapsed, /Finding 5/);
+
+	const expanded = renderIncomingTeammateMessage(
+		message,
+		{ expanded: true, outputPad: 0 },
+		theme,
+	).render(50).join("\n");
+	assert.match(expanded, /Finding 5/);
+});
+
 test("teammate-message renderer falls back to verified provenance and strips terminal controls", () => {
 	const parsed = parseTeammateMessageEnvelope("\u001b[31mreview complete\u001b[0m", {
 		provenance: {

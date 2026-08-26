@@ -36,6 +36,8 @@ export interface FooterParts {
 	bashBgStatus?: string;
 	workflowStatus?: string;
 	supervisionStatus?: string;
+	/** Provider usage bars (quota/balance/spend) on a dedicated footer line. */
+	usageStatus?: string;
 	extensionStatuses?: readonly ExtensionStatusSegment[];
 	width: number;
 	glyphs: IconGlyphs;
@@ -385,6 +387,9 @@ export function renderFooter(p: FooterParts): string[] {
 	const lines = [utils.clip(line1, width, ell)];
 	if (p.bashBgStatus) {
 		lines.push(utils.clip(p.bashBgStatus, width, ell));
+	}
+	if (p.usageStatus) {
+		lines.push(utils.clip(p.usageStatus, width, ell));
 	}
 	if (p.workflowStatus) {
 		lines.push(utils.clip(theme.fg("muted", p.workflowStatus), width, ell));
