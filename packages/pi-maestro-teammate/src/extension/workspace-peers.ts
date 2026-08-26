@@ -242,6 +242,23 @@ export type WorkspaceMainSessionProgressEvent =
     phase: "agent_start" | "turn_start" | "turn_end" | "agent_end" | "agent_settled";
   };
 
+/**
+ * The window's most recent root-session settle, kept until the next one replaces it.
+ *
+ * `mainProgress` already carries `agent_settled` and the assistant text, but it
+ * is a ring of `MAX_MAIN_SESSION_PROGRESS_EVENTS`: a single turn emits close to
+ * that many events, so an observer polling on a heartbeat rather than
+ * continuously reads a projection the settle has already scrolled out of. This
+ * field is one slot, overwritten in place, so the answer to "what did this
+ * window last finish, and what did it say" survives any polling interval.
+ */
+export interface WorkspaceMainSettle {
+  /** When the root session reached `agent_settled`. */
+  at: number;
+  /** Last assistant text of that run, bounded like the progress projection; absent when the run produced none. */
+  lastResult?: string;
+}
+
 /** Bounded, content-safe projection of the window's root Pi session. */
 export interface WorkspaceMainSessionProgress {
   updatedAt: number;
@@ -266,6 +283,8 @@ export interface WorkspaceOwnerState {
   mainActivityAt?: number;
   /** Optional assistant/tool/lifecycle projection for cross-process observers. */
   mainProgress?: WorkspaceMainSessionProgress;
+  /** Newest root-session settle, kept whole while `mainProgress` rotates past it. */
+  mainLastSettle?: WorkspaceMainSettle;
   /** Bounded Todo projection (worker root session). */
   todos?: readonly WorkspaceTodoSnapshot[];
 }
@@ -293,6 +312,8 @@ export interface WorkspaceOwnerSnapshot {
   mainActivityAt?: number;
   /** Optional assistant/tool/lifecycle projection for cross-process observers. */
   mainProgress?: WorkspaceMainSessionProgress;
+  /** Newest root-session settle, kept whole while `mainProgress` rotates past it. */
+  mainLastSettle?: WorkspaceMainSettle;
   agents: WorkspaceAgentSnapshot[];
   settled: WorkspaceSettledSnapshot[];
   backgroundJobs?: WorkspaceBackgroundJobSnapshot[];
@@ -1223,6 +1244,27 @@ function isActiveBindingTodo(todo: WorkspaceTodoSnapshot): boolean {
   return todo.dispatchId !== undefined && todo.status !== "completed" && todo.status !== "deleted";
 }
 
+/**
+ * Validate one published settle record.
+ *
+ * A durable file written by another process, so the bounds are checked here
+ * rather than trusted: `lastResult` carries the same cap the progress
+ * projection puts on assistant text, and an over-long one is dropped rather
+ * than truncated, because a silently shortened result reads as a complete one.
+ *
+ * @param value candidate read from an owner snapshot
+ * @returns the validated record, or undefined when it is not one
+ */
+export function validateWorkspaceMainSettle(value: unknown): WorkspaceMainSettle | undefined {
+  if (!isRecord(value)
+    || !boundedInteger(value.at)
+    || !optional(value.lastResult, (candidate): candidate is string => boundedString(candidate, MAIN_SESSION_PROGRESS_TEXT_BYTES))) return undefined;
+  return {
+    at: value.at,
+    ...(value.lastResult === undefined ? {} : { lastResult: value.lastResult }),
+  };
+}
+
 export function validateWorkspaceMainSessionProgress(value: unknown): WorkspaceMainSessionProgress | undefined {
   if (!isRecord(value)
     || !boundedInteger(value.updatedAt)
@@ -1305,6 +1347,7 @@ export function validateWorkspaceOwnerSnapshot(
     || !optional(value.contextPressure, (candidate): candidate is number => boundedInteger(candidate) && candidate >= 0 && candidate <= 100)
     || !optional(value.mainActivityAt, boundedInteger)
     || !optional(value.mainProgress, (candidate): candidate is WorkspaceMainSessionProgress => validateWorkspaceMainSessionProgress(candidate) !== undefined)
+    || !optional(value.mainLastSettle, (candidate): candidate is WorkspaceMainSettle => validateWorkspaceMainSettle(candidate) !== undefined)
     || !Array.isArray(value.agents)
     || value.agents.length > MAX_OWNER_AGENTS
     || !Array.isArray(value.settled)
@@ -1320,6 +1363,9 @@ export function validateWorkspaceOwnerSnapshot(
   const mainProgress = value.mainProgress === undefined
     ? undefined
     : validateWorkspaceMainSessionProgress(value.mainProgress);
+  const mainLastSettle = value.mainLastSettle === undefined
+    ? undefined
+    : validateWorkspaceMainSettle(value.mainLastSettle);
   const agents = value.agents.map(validateAgent);
   const settled = value.settled.map(validateSettled);
   const backgroundJobs = value.backgroundJobs === undefined
@@ -1356,6 +1402,7 @@ export function validateWorkspaceOwnerSnapshot(
     ...(value.contextPressure === undefined ? {} : { contextPressure: value.contextPressure }),
     ...(value.mainActivityAt === undefined ? {} : { mainActivityAt: value.mainActivityAt }),
     ...(mainProgress === undefined ? {} : { mainProgress }),
+    ...(mainLastSettle === undefined ? {} : { mainLastSettle }),
     agents: agents as WorkspaceAgentSnapshot[],
     settled: settled as WorkspaceSettledSnapshot[],
     ...(backgroundJobs === undefined ? {} : { backgroundJobs: backgroundJobs as WorkspaceBackgroundJobSnapshot[] }),
