@@ -1,12 +1,11 @@
 /**
- * Model turn notification mode — surfaces a Pi `notify` toast when a model
- * turn ends in error or completes, so long-running agent runs no longer need
- * the user to watch the terminal.
+ * Desktop notification mode for model settlement, errors, and interaction
+ * points that block waiting for user input.
  *
  * Mirrors `registerChineseResponseMode`'s lifecycle: a global persistent
  * switch in `~/.pi/maestro-notify-mode.json` (workspace-independent), a
- * `/notify` slash command (on|off|status), and lightweight event listeners
- * registered by the extension entry point. Pure public API — no patches.
+ * `/notify` slash command, and lightweight event listeners registered by the
+ * extension entry point. Pure public API — no patches.
  */
 
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -18,11 +17,12 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 const NOTIFY_STATE_ENTRY = "maestro-notify-mode";
 const NOTIFY_GLOBAL_STATE_FILE = "maestro-notify-mode.json";
 
-/** Default config: enabled, notify on both error and completion. */
+/** Default config: all notification categories enabled. */
 export const DEFAULT_NOTIFY_CONFIG: NotifyConfig = {
   enabled: true,
   onError: true,
   onComplete: true,
+  onInput: true,
 };
 
 export interface NotifyConfig {
@@ -31,6 +31,8 @@ export interface NotifyConfig {
   onError: boolean;
   /** Notify when an agent turn fully settles (no retry/compaction/continuation pending). */
   onComplete: boolean;
+  /** Notify when Pi is blocked waiting for a user decision or answer. */
+  onInput: boolean;
 }
 
 export function notifyGlobalStatePath(homeDir: string): string {
@@ -47,6 +49,7 @@ export function loadNotifyGlobalState(homeDir: string): Partial<NotifyConfig> | 
       if (typeof record.enabled === "boolean") config.enabled = record.enabled;
       if (typeof record.onError === "boolean") config.onError = record.onError;
       if (typeof record.onComplete === "boolean") config.onComplete = record.onComplete;
+      if (typeof record.onInput === "boolean") config.onInput = record.onInput;
       if (Object.keys(config).length > 0) return config;
     }
   } catch {
@@ -79,6 +82,7 @@ export function applyNotifyPatch(current: NotifyConfig, patch: Partial<NotifyCon
     enabled: patch.enabled ?? current.enabled,
     onError: patch.onError ?? current.onError,
     onComplete: patch.onComplete ?? current.onComplete,
+    onInput: patch.onInput ?? current.onInput,
   };
 }
 
@@ -88,7 +92,7 @@ export interface NotifyModeHandle {
   toggle(ctx: ExtensionContext): void;
 }
 
-const USAGE = "用法：/notify [on|off|error|complete|status]";
+const USAGE = "用法：/notify [on|off|error|complete|input|status]";
 
 /**
  * Register the `/notify` slash command and resolve the initial config from
@@ -115,10 +119,10 @@ export function registerNotifyMode(
 
   const describe = (cfg: NotifyConfig): string =>
     `模型通知：${cfg.enabled ? "已开启" : "已关闭"}`
-    + `（报错${cfg.onError ? "✓" : "✕"} / 完成${cfg.onComplete ? "✓" : "✕"}）`;
+    + `（报错${cfg.onError ? "✓" : "✕"} / 完成${cfg.onComplete ? "✓" : "✕"} / 等待输入${cfg.onInput ? "✓" : "✕"}）`;
 
   pi.registerCommand("notify", {
-    description: "切换模型完成/报错提醒，支持 on、off、error、complete、status",
+    description: "切换模型完成/报错/等待输入提醒，支持 on、off、error、complete、input、status",
     async handler(args, ctx) {
       const action = args.trim().toLowerCase();
       if (action === "status") {
@@ -145,6 +149,11 @@ export function registerNotifyMode(
       }
       if (action === "complete") {
         const next = { ...config, enabled: true, onComplete: !config.onComplete };
+        persist(next, ctx, describe(next));
+        return;
+      }
+      if (action === "input") {
+        const next = { ...config, enabled: true, onInput: !config.onInput };
         persist(next, ctx, describe(next));
         return;
       }

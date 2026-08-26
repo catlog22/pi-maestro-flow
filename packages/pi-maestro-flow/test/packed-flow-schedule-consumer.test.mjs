@@ -14,6 +14,8 @@ const flowPackage = JSON.parse(readFileSync(join(packageRoot, "package.json"), "
 const piSdkVersion = flowPackage.devDependencies["@earendil-works/pi-coding-agent"];
 const require = createRequire(import.meta.url);
 const npmCommand = [process.execPath, process.env.npm_execpath ?? require.resolve("npm/bin/npm-cli.js")];
+const ffiPackage = JSON.parse(readFileSync(require.resolve("ffi-rs/package.json"), "utf8"));
+const nativeRuntimePackages = currentNativeRuntimePackages();
 
 const packTimeout = 360_000;
 const installTimeout = 600_000;
@@ -75,6 +77,8 @@ test("packed Flow worker loads Todo projection capability through the public Tea
       `@earendil-works/pi-ai@${piSdkVersion}`,
       `@earendil-works/pi-coding-agent@${piSdkVersion}`,
       `@earendil-works/pi-tui@${piSdkVersion}`,
+      ...nativeRuntimePackages,
+      "--omit=optional",
       "--no-audit",
       "--no-fund",
     ], consumer, env, installTimeout);
@@ -102,16 +106,18 @@ export default function register(pi) {
       process.execPath,
       join(consumer, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js"),
     ];
+    const runtimeEnv = {
+      ...env,
+      PI_TEAMMATE_MANAGED_WINDOW: "1",
+      PATH: `${join(consumer, "node_modules", ".bin")}${delimiter}${process.env.PATH ?? ""}`,
+    };
+    delete runtimeEnv.PI_TEAMMATE_CHILD;
     run(piCommand, [
       "--offline", "--mode", "rpc", "--no-session", "--no-extensions", "--no-skills",
       "--no-context-files",
       "--extension", join(installedFlow, "src", "extension", "index.ts"),
       "--extension", verifierPath,
-    ], workspace, {
-      ...env,
-      PI_TEAMMATE_CHILD: "1",
-      PATH: `${join(consumer, "node_modules", ".bin")}${delimiter}${process.env.PATH ?? ""}`,
-    }, 90_000, `${JSON.stringify({ id: "state", type: "get_state" })}\n`);
+    ], workspace, runtimeEnv, 90_000, `${JSON.stringify({ id: "state", type: "get_state" })}\n`);
 
     const evidence = JSON.parse(readFileSync(evidencePath, "utf8"));
     assert.ok(evidence.tools.includes("todo"), evidence.tools.join(","));
@@ -121,6 +127,33 @@ export default function register(pi) {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+function currentNativeRuntimePackages() {
+  const fffVersion = flowPackage.dependencies["@ff-labs/fff-node"];
+  const arch = process.arch;
+  let ffiSuffix;
+  let fffSuffix;
+  if (process.platform === "win32" && ["x64", "arm64"].includes(arch)) {
+    ffiSuffix = `win32-${arch}-msvc`;
+    fffSuffix = `win32-${arch}`;
+  } else if (process.platform === "darwin" && ["x64", "arm64"].includes(arch)) {
+    ffiSuffix = `darwin-${arch}`;
+    fffSuffix = `darwin-${arch}`;
+  } else if (process.platform === "linux" && ["x64", "arm64"].includes(arch)) {
+    const libc = process.report?.getReport().header.glibcVersionRuntime ? "gnu" : "musl";
+    ffiSuffix = `linux-${arch}-${libc}`;
+    fffSuffix = `linux-${arch}-${libc}`;
+  } else if (process.platform === "android" && arch === "arm64") {
+    ffiSuffix = "android-arm64";
+    fffSuffix = "android-arm64";
+  } else {
+    throw new Error(`packed Flow test does not support ${process.platform}/${arch}`);
+  }
+  return [
+    `@yuuang/ffi-rs-${ffiSuffix}@${ffiPackage.version}`,
+    `@ff-labs/fff-bin-${fffSuffix}@${fffVersion}`,
+  ];
+}
 
 function parseTrailingJson(stdout) {
   const arrayStart = stdout.lastIndexOf("\n[");

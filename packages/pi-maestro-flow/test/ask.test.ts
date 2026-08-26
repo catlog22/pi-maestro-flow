@@ -480,3 +480,21 @@ test("RPC mode uses official dialog methods instead of terminal widgets", async 
     { question: "Constraints?", selected: [], text: "Nearest region" },
   ]);
 });
+
+test("questionnaire requests user attention exactly once before opening the UI", async () => {
+  const harness = createHarness();
+  const attention: string[] = [];
+  const pending = executeAsk(
+    { questions: [{ question: "Choose", options: [{ label: "A" }] }] },
+    harness.ctx,
+    {
+      requestId: "question:tool-1",
+      onUserAttention(request) { attention.push(`${request.id}:${request.kind}`); },
+    },
+  );
+
+  assert.deepEqual(attention, ["question:tool-1:question"]);
+  harness.handler?.("\x1b");
+  await pending;
+  assert.deepEqual(attention, ["question:tool-1:question"]);
+});

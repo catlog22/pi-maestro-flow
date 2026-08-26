@@ -28,6 +28,9 @@ test("computer-use package publishes contracts and excludes model/cache artifact
     "optional/SMART-SEARCH-SETUP.md",
     "optional/MCP-SETUP.md",
     "optional/COMPUTER-USE-WEIGHTS-SETUP.md",
+    "optional/BROWSER-BRIDGE-SETUP.md",
+    "optional/browser-bridge/manifest.json",
+    "optional/browser-bridge/background.js",
   ]) assert.ok(files.includes(required), `${required} must be published`);
   const forbidden = files.filter((path) => /\.(onnx|pt|bin|safetensors|traineddata)$/i.test(path) || /(^|\/)(cache|models|\.part)(\/|$)/i.test(path));
   assert.deepEqual(forbidden, [], "model weights and runtime caches must not be published");

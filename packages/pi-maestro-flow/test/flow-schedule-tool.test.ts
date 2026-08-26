@@ -8,6 +8,7 @@ import {
   workspaceWindowCompletionHandle,
 } from "pi-maestro-teammate/v1/workspace-completion";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { Check } from "typebox/value";
 import { Type } from "typebox";
 import {
@@ -121,6 +122,81 @@ async function controllerHarness() {
 
 const context = (cwd: string): ExtensionContext => ({ cwd } as ExtensionContext);
 
+const renderTheme = {
+  fg: (_color: string, text: string) => text,
+  bold: (text: string) => text,
+};
+
+function rendered(component: { render(width: number): string[] } | undefined, width = 160): string[] {
+  assert.ok(component, "renderer must return a TUI component");
+  return component.render(width);
+}
+
+test("flow-schedule renderers stream step relationships and preserve status without color", () => {
+  const tool = createCoordinatorFlowScheduleTool({
+    resolve: () => { throw new Error("not used"); },
+    getRegistry: () => undefined,
+  });
+  const args = {
+    action: "create",
+    scheduleId: "release",
+    target: TARGET,
+    steps: [
+      { stepId: "prepare", prompt: "Prepare" },
+      { stepId: "verify", prompt: "Verify" },
+    ],
+  };
+  const renderCall = tool.renderCall as NonNullable<typeof tool.renderCall>;
+  const call = renderCall(args, renderTheme as never, { args, isPartial: true } as never);
+  assert.deepEqual(rendered(call), ["  … flow-schedule create release prepare -> verify"]);
+  const expandedCall = renderCall(args, renderTheme as never, { args, isPartial: true, expanded: true } as never);
+  assert.deepEqual(rendered(expandedCall), [
+    "  … flow-schedule create release",
+    `  target: ${TARGET}`,
+    "  prepare",
+    "      Prepare",
+    "  -> verify",
+    "      Verify",
+  ]);
+  assert.ok(rendered(call, 32).every((line) => visibleWidth(line) <= 32), "streaming call is width bounded");
+
+  const schedule = {
+    version: 1 as const,
+    scheduleId: "release",
+    targetSelector: TARGET,
+    state: "active" as const,
+    stepIds: ["prepare", "verify"],
+    steps: {
+      prepare: { stepId: "prepare", prompt: "Prepare", state: "completed" as const, attempts: [] },
+      verify: { stepId: "verify", prompt: "Verify", state: "awaiting-result" as const, attempts: [DISPATCH_ID], currentDispatchId: DISPATCH_ID },
+    },
+    activeStepId: "verify",
+    createdAt: 1,
+    updatedAt: 2,
+  };
+  const result = {
+    content: [{ type: "text" as const, text: "Started release." }],
+    details: { schedules: [schedule] },
+  };
+  const renderResult = tool.renderResult as NonNullable<typeof tool.renderResult>;
+  const compact = rendered(renderResult(result, { expanded: false, isPartial: false } as never, renderTheme as never, { args, isPartial: false } as never));
+  assert.match(compact[0] ?? "", /release active 1\/2 · \[done\] prepare -> \[run\] verify/);
+
+  const expanded = rendered(renderResult(result, { expanded: true, isPartial: false } as never, renderTheme as never, { args, isPartial: false } as never));
+  assert.ok(expanded.some((line) => line.includes("  [done] prepare")));
+  assert.ok(expanded.some((line) => line.includes("      Prepare")));
+  assert.ok(expanded.some((line) => line.includes("  -> [run] verify")));
+  assert.ok(expanded.some((line) => line.includes("      Verify")));
+  assert.ok(expanded.every((line) => line.length <= 160));
+});
+
+test("worker flow-schedule report renderer exposes outcome and dispatch", () => {
+  const tool = createWorkerFlowScheduleTool();
+  const args = { action: "report", dispatchId: DISPATCH_ID, outcome: "completed", summary: "Done" };
+  const renderCall = tool.renderCall as NonNullable<typeof tool.renderCall>;
+  const call = rendered(renderCall(args, renderTheme as never, { args, isPartial: true } as never));
+  assert.deepEqual(call, ["  … flow-schedule report completed 123e4567"]);
+});
 
 test("coordinator tool schema is object-root and rejects action-inapplicable fields", () => {
   assert.equal(Check(FlowScheduleCoordinatorParams, { action: "list" }), true);

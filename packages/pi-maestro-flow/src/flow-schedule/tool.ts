@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import {
   getSessionHostRegistry,
@@ -7,6 +8,7 @@ import {
   type SessionMessageResult,
 } from "pi-maestro-teammate/v1/sessions";
 import type { FlowToolResult } from "../tools/tool-result.ts";
+import { resultSummary, toolCallLine, toolResultLine } from "../quiet-render.ts";
 import {
   FlowScheduleCreateStepInputSchema,
   FlowScheduleDispatchIdSchema,
@@ -140,10 +142,112 @@ function scheduleLine(schedule: FlowScheduleRecord): string {
   return `${schedule.scheduleId} ${schedule.state} steps=${completed}/${schedule.stepIds.length}${active} target=${schedule.targetSelector}`;
 }
 
+const STEP_STATE_LABELS: Record<FlowScheduleRecord["steps"][string]["state"], string> = {
+  pending: "wait",
+  dispatching: "send",
+  "awaiting-result": "run",
+  completed: "done",
+  failed: "fail",
+  ambiguous: "check",
+  cancelled: "stop",
+};
+
 function compactFlowText(value: string, maxLength = 120): string {
   const text = value.replace(/\s+/g, " ").trim();
   if (text.length <= maxLength) return text;
   return `${text.slice(0, maxLength - 1)}…`;
+}
+
+function todoBindingDetail(binding: FlowScheduleRecord["steps"][string]["todoBinding"]): string {
+  if (!binding) return "";
+  const gates = [
+    ...(binding.requireCompleted ? ["require-completed"] : []),
+    ...(binding.conflictCheck ? ["conflict-check"] : []),
+  ];
+  const label = binding.label ? ` ${compactFlowText(binding.label, 72)}` : "";
+  return `todo:${label}${gates.length > 0 ? ` [${gates.join("+")}]` : ""}`;
+}
+
+function stepDetailLines(
+  step: FlowScheduleRecord["steps"][string],
+  index: number,
+): string[] {
+  const edge = index === 0 ? "  " : "  -> ";
+  const lines = [`${edge}[${STEP_STATE_LABELS[step.state]}] ${step.stepId}`];
+  const prompt = compactFlowText(step.prompt);
+  if (prompt) lines.push(`      ${prompt}`);
+  const todo = todoBindingDetail(step.todoBinding);
+  if (todo) lines.push(`      ${todo}`);
+  if (step.currentDispatchId) lines.push(`      dispatch: ${step.currentDispatchId}`);
+  if (step.result) {
+    const todoOutcome = step.result.todoOutcome
+      ? ` todo=${step.result.todoOutcome.todoId}/${step.result.todoOutcome.todoStatus}`
+      : "";
+    lines.push(`      result: ${step.result.outcome} ${compactFlowText(step.result.summary, 96)}${todoOutcome}`);
+  }
+  return lines;
+}
+
+function stepRelationship(schedule: FlowScheduleRecord): string {
+  return schedule.stepIds
+    .map((stepId) => `[${STEP_STATE_LABELS[schedule.steps[stepId].state]}] ${stepId}`)
+    .join(" -> ");
+}
+
+function scheduleRelationshipSummary(schedule: FlowScheduleRecord): string {
+  const completed = schedule.stepIds.filter((stepId) => schedule.steps[stepId].state === "completed").length;
+  const relationship = stepRelationship(schedule);
+  return `${schedule.scheduleId} ${schedule.state} ${completed}/${schedule.stepIds.length}${relationship ? ` · ${relationship}` : ""}`;
+}
+
+function scheduleRelationshipDetail(schedules: readonly FlowScheduleRecord[], text: string): string {
+  const relationships = schedules.flatMap((schedule) => [
+    scheduleLine(schedule),
+    ...schedule.stepIds.flatMap((stepId, index) => stepDetailLines(schedule.steps[stepId], index)),
+  ]);
+  return [...relationships, ...(text.trim() ? [text] : [])].join("\n");
+}
+
+function flowScheduleCallArg(args: Record<string, unknown>, expanded = false): string {
+  const action = typeof args.action === "string" ? args.action : "?";
+  const scheduleId = typeof args.scheduleId === "string" ? args.scheduleId : "";
+  if (action === "report") {
+    const outcome = typeof args.outcome === "string" ? args.outcome : "";
+    const dispatchId = typeof args.dispatchId === "string" ? args.dispatchId.slice(0, 8) : "";
+    return [action, outcome, dispatchId].filter(Boolean).join(" ");
+  }
+  const steps = Array.isArray(args.steps)
+    ? args.steps
+      .map((step) => step && typeof step === "object" ? {
+        stepId: "stepId" in step ? String(step.stepId) : "",
+        prompt: "prompt" in step && typeof step.prompt === "string" ? step.prompt : "",
+      } : undefined)
+      .filter((step): step is { stepId: string; prompt: string } => Boolean(step?.stepId))
+    : [];
+  const relationship = steps.map((step) => step.stepId).join(" -> ");
+  if (expanded && steps.length > 0) {
+    const target = typeof args.target === "string" ? args.target : "";
+    return [
+      [action, scheduleId].filter(Boolean).join(" "),
+      target ? `  target: ${target}` : "",
+      ...steps.flatMap((step, index) => [
+        `${index === 0 ? "  " : "  -> "}${step.stepId}`,
+        ...(compactFlowText(step.prompt) ? [`      ${compactFlowText(step.prompt)}`] : []),
+      ]),
+    ].filter(Boolean).join("\n");
+  }
+  return [action, scheduleId, relationship].filter(Boolean).join(" ");
+}
+
+function flowScheduleResultSummary(
+  details: FlowScheduleToolDetails | undefined,
+  result: { content: Array<{ type: string; text?: string }> },
+): string {
+  const schedules = details?.schedules ?? [];
+  if (schedules.length === 1) return scheduleRelationshipSummary(schedules[0]);
+  if (schedules.length > 1) return `${schedules.length} schedules`;
+  if (details?.resultMessageId) return `published ${details.resultMessageId.slice(0, 12)}`;
+  return resultSummary(result);
 }
 
 function lifecycleFor(
@@ -392,6 +496,27 @@ export function createCoordinatorFlowScheduleTool(
         return failure(error);
       }
     },
+    renderShell: "self",
+    renderCall(args, theme, ctx) {
+      if (ctx?.isPartial === false) return new Text("", 0, 0);
+      const input = args as Record<string, unknown>;
+      const expanded = ctx?.expanded === true;
+      return toolCallLine(theme, "flow-schedule", flowScheduleCallArg(input, expanded));
+    },
+    renderResult(result, opts, theme, ctx) {
+      if (opts.isPartial) return new Text("", 0, 0);
+      const details = result.details as FlowScheduleToolDetails | undefined;
+      const text = result.content.find((item) => item.type === "text");
+      const message = text && "text" in text ? text.text : "";
+      return toolResultLine(theme, {
+        name: "flow-schedule",
+        ok: (result as { isError?: boolean }).isError !== true,
+        arg: flowScheduleCallArg(ctx.args as Record<string, unknown>),
+        summary: flowScheduleResultSummary(details, result),
+        expanded: opts.expanded,
+        detail: scheduleRelationshipDetail(details?.schedules ?? [], message),
+      });
+    },
   };
 }
 
@@ -448,6 +573,27 @@ export function createWorkerFlowScheduleTool(
       } catch (error) {
         return failure(error);
       }
+    },
+    renderShell: "self",
+    renderCall(args, theme, ctx) {
+      if (ctx?.isPartial === false) return new Text("", 0, 0);
+      const input = args as Record<string, unknown>;
+      const expanded = ctx?.expanded === true;
+      return toolCallLine(theme, "flow-schedule", flowScheduleCallArg(input, expanded));
+    },
+    renderResult(result, opts, theme, ctx) {
+      if (opts.isPartial) return new Text("", 0, 0);
+      const details = result.details as FlowScheduleToolDetails | undefined;
+      const text = result.content.find((item) => item.type === "text");
+      const message = text && "text" in text ? text.text : "";
+      return toolResultLine(theme, {
+        name: "flow-schedule",
+        ok: (result as { isError?: boolean }).isError !== true,
+        arg: flowScheduleCallArg(ctx.args as Record<string, unknown>),
+        summary: flowScheduleResultSummary(details, result),
+        expanded: opts.expanded,
+        detail: scheduleRelationshipDetail(details?.schedules ?? [], message),
+      });
     },
   };
 }

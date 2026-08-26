@@ -3,11 +3,12 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { Browser, CDPSession, CookieParam, ElementHandle, Frame, HTTPRequest, HTTPResponse, KeyInput, Page, Target, WaitForOptions } from "puppeteer-core";
+import type { Browser, CDPSession, CookieParam, Cookie, ElementHandle, Frame, HTTPRequest, HTTPResponse, KeyInput, Page, Target, WaitForOptions } from "puppeteer-core";
 import puppeteer from "puppeteer-core";
 import { PROBE_JS, FIND_LISTS_JS, foldListsJs, monitorStartJs, MONITOR_STOP_JS, optimizeHtmlForTokens, smartTruncate, diffHtml, type HtmlDiff } from "./simplify.ts";
 import { STEALTH_INIT_JS, STEALTH_LAUNCH_ARGS } from "./stealth.ts";
 import { runOcr, runDetect, isLocalVisionError, type OcrOutcome, type DetectOutcome } from "../../providers/local-vision.ts";
+import { browserBridge } from "./bridge-server.ts";
 
 export type WaitUntil = "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
 
@@ -31,7 +32,7 @@ export interface BrowserOpenOptions {
 
 export interface BrowserTabInfo {
   name: string;
-  kind: "headless" | "headed" | "connected";
+  kind: "headless" | "headed" | "connected" | "extension";
   url: string;
   title: string;
   reused: boolean;
@@ -64,7 +65,7 @@ interface RequestListenerScope {
 interface TabEntry {
   name: string;
   key: string;
-  kind: "headless" | "headed" | "connected";
+  kind: "headless" | "headed" | "connected" | "extension";
   browser: Browser;
   page: Page;
   owned: boolean;
@@ -301,7 +302,9 @@ export class BrowserManager implements BrowserManagerLike {
   }
 
   async #configurePage(entry: TabEntry, options: BrowserOpenOptions): Promise<void> {
-    if (entry.kind !== "connected") await entry.page.evaluateOnNewDocument(STEALTH_INIT_JS);
+    // The extension channel drives the user's real browser; stealth is not
+    // injected (it would fight the real fingerprint). Same as `connected`.
+    if (entry.kind !== "connected" && entry.kind !== "extension") await entry.page.evaluateOnNewDocument(STEALTH_INIT_JS);
     if (options.viewport) {
       await entry.page.setViewport({
         width: options.viewport.width,
@@ -500,12 +503,33 @@ function createTabApi(
       await handle.uploadFile(...filePaths.map((file) => path.resolve(cwd, file)));
     },
     async cdp(method: string, params?: Record<string, unknown>) {
+      // Extension channel route (active only when an entry has kind==="extension";
+      // connectBrowser does not produce such entries yet — see the TODO there and
+      // optional/BROWSER-BRIDGE-SETUP.md NOTES). Dormant until open-channel activation.
+      if (entry.kind === "extension") {
+        // Extension channel: route to chrome.debugger via the bridge instead of a
+        // puppeteer CDPSession (the user's browser has no persistent debug port here).
+        const tabId = browserBridge.resolveTabId();
+        const res = await browserBridge.cdp(tabId, method, params, timeoutMs);
+        if (!res.ok) throw new Error(res.error ?? "browser-bridge cdp failed");
+        return res.data as Record<string, unknown>;
+      }
       if (!entry.cdpSession || entry.cdpSession.connection() === null) entry.cdpSession = await page.target().createCDPSession();
       return entry.cdpSession.send(method as never, params as never) as Promise<Record<string, unknown>>;
     },
     cookies: {
       async get(filter?: { domain?: string; name?: string }) {
-        const all = await page.cookies();
+        let all;
+        if (entry.kind === "extension") {
+          // Extension channel includes partition cookies (chrome.cookies.getAll
+          // with partitionKey) that puppeteer's page.cookies() cannot reach.
+          const tabId = browserBridge.resolveTabId();
+          const res = await browserBridge.cookies({ tabId }, timeoutMs);
+          if (!res.ok) throw new Error(res.error ?? "browser-bridge cookies failed");
+          all = res.data as Cookie[];
+        } else {
+          all = await page.cookies();
+        }
         if (!filter) return all;
         return all.filter((cookie) =>
           (!filter.domain || cookie.domain.includes(filter.domain)) &&
@@ -594,6 +618,12 @@ function createTabApi(
     // in one round-trip; later commands may reference earlier results via
     // "$<index>.<dotted.path>" strings (recursively resolved from results so far).
     async cdpBatch(commands: Array<{ method: string; params?: Record<string, unknown> }>) {
+      if (entry.kind === "extension") {
+        // Extension channel: the extension resolves $N references server-side.
+        const tabId = browserBridge.resolveTabId();
+        const res = await browserBridge.batch(commands as Array<Record<string, unknown>>, tabId, timeoutMs);
+        return (res.results ?? []) as unknown[];
+      }
       if (!entry.cdpSession || entry.cdpSession.connection() === null) entry.cdpSession = await page.target().createCDPSession();
       const session = entry.cdpSession;
       const results: unknown[] = [];
@@ -696,6 +726,15 @@ function profileDirFor(key: string): string {
 }
 
 async function connectBrowser(options: BrowserOpenOptions, key: string): Promise<{ browser: Browser; owned: boolean; kind: "headless" | "headed" | "connected"; reused: boolean; profileDir?: string }> {
+  // TODO(future): the optional browser-bridge extension (installed via
+  // /install browser-bridge) exposes extension-level capabilities over WS.
+  // BrowserBridgeServer is wired and the cdp/cookies.get/cdpBatch helpers in
+  // createTabApi route to it when an entry has kind==="extension" — but this
+  // function never produces such an entry yet (all open flows still go through
+  // CDP attach/launch). Full open-channel activation (a Proxy-Page translating
+  // the ~28 puppeteer Page methods to the extension protocol) is a follow-up;
+  // see optional/BROWSER-BRIDGE-SETUP.md NOTES. Without it the extension
+  // branch helpers are dormant, and browser behavior is unchanged.
   if (options.attachUserProfile) {
     if (!options.userProfileDir) throw new Error("attach_user_profile requires app.user_profile_dir pointing at a Chrome user-data-dir whose browser runs with --remote-debugging-port.");
     let port = await devToolsPortFor(options.userProfileDir);

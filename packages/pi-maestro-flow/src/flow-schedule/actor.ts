@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import {
   createRuntimeActorHost,
+  getRuntimeWorkspaceIdentity,
   type RuntimeActorHostClient,
   type RuntimeActorLease,
 } from "pi-maestro-teammate/v2/runtime-broker";
@@ -73,16 +74,22 @@ export class FlowScheduleActorRuntime {
   readonly rootDir: string;
   readonly host: RuntimeActorHostClient;
   readonly workspaceId: string;
+  readonly legacyWorkspaceIds: readonly string[];
   private readonly holderId: string;
   private readonly now: () => number;
   private readonly actors = new Map<string, DurableFlowActor>();
+  private readonly acquisitions = new Map<string, Promise<DurableFlowActor>>();
+  private readonly retirements = new Map<string, Promise<void>>();
   private stopped = false;
+  private stopPromise: Promise<void> | undefined;
 
   constructor(options: FlowScheduleActorRuntimeOptions) {
-    this.projectRoot = resolve(options.projectRoot);
+    const workspaceIdentity = getRuntimeWorkspaceIdentity(options.projectRoot);
+    this.projectRoot = workspaceIdentity.canonicalPath;
     this.rootDir = join(this.projectRoot, ".pi", "flow-schedule", "v2");
     this.host = options.actorHost ?? createRuntimeActorHost({ cwd: this.projectRoot, env: options.env });
-    this.workspaceId = createHash("sha256").update(this.projectRoot).digest("hex");
+    this.workspaceId = workspaceIdentity.workspaceId;
+    this.legacyWorkspaceIds = workspaceIdentity.legacyWorkspaceIds;
     this.holderId = options.holderId ?? `flow-schedule:${process.pid}:${randomUUID()}`;
     this.now = options.now ?? Date.now;
   }
@@ -109,7 +116,13 @@ export class FlowScheduleActorRuntime {
   }
 
   hasScheduleLease(scheduleId: string): boolean {
-    return this.actors.has(`schedule:${scheduleId}`);
+    const key = `schedule:${scheduleId}`;
+    const actor = this.actors.get(key);
+    if (!actor) return false;
+    if (actor.active) return true;
+    this.actors.delete(key);
+    void this.retire(key, actor).catch(() => undefined);
+    return false;
   }
 
   async discoverScheduleIds(): Promise<string[]> {
@@ -156,22 +169,37 @@ export class FlowScheduleActorRuntime {
   async releaseDispatch(dispatchId: string): Promise<void> {
     const key = `dispatch:${dispatchId}`;
     const actor = this.actors.get(key);
-    if (!actor) return;
+    if (!actor) {
+      await this.retirements.get(key);
+      return;
+    }
     this.actors.delete(key);
-    await actor.release();
+    await this.retire(key, actor);
   }
 
   async status(kind: "schedule" | "dispatch", id: string): Promise<FlowScheduleActorStatus | undefined> {
-    const actor = this.actors.get(`${kind}:${id}`);
-    return actor?.status(id);
+    const key = `${kind}:${id}`;
+    const actor = this.actors.get(key);
+    if (!actor) return undefined;
+    if (actor.active) return actor.status(id);
+    this.actors.delete(key);
+    await this.retire(key, actor).catch(() => undefined);
+    return undefined;
   }
 
-  async stop(): Promise<void> {
-    if (this.stopped) return;
+  stop(): Promise<void> {
+    if (this.stopPromise) return this.stopPromise;
     this.stopped = true;
-    const actors = [...this.actors.values()];
+    this.stopPromise = this.drainAndStop();
+    return this.stopPromise;
+  }
+
+  private async drainAndStop(): Promise<void> {
+    await Promise.allSettled([...this.acquisitions.values()]);
+    const actors = [...this.actors.entries()];
     this.actors.clear();
-    await Promise.allSettled(actors.map((actor) => actor.release()));
+    await Promise.allSettled(actors.map(([key, actor]) => this.retire(key, actor)));
+    await Promise.allSettled([...this.retirements.values()]);
     await this.host.stop();
   }
 
@@ -182,29 +210,32 @@ export class FlowScheduleActorRuntime {
   private async discoverIds(kind: "schedule" | "dispatch"): Promise<string[]> {
     if (!this.host.listStreams) return [];
     const prefix = `flow-schedule/${kind}/`;
-    const ids: string[] = [];
-    let afterStreamId = "";
-    for (;;) {
-      const page = await this.host.listStreams({
-        workspaceId: this.workspaceId,
-        prefix,
-        afterStreamId,
-        limit: 128,
-      });
-      for (const streamId of page) {
-        if (!streamId.startsWith(prefix) || streamId <= afterStreamId) {
-          throw new Error("Runtime actor host returned an invalid stream page");
+    const ids = new Set<string>();
+    for (const workspaceId of [this.workspaceId, ...this.legacyWorkspaceIds]) {
+      let afterStreamId = "";
+      for (;;) {
+        const page = await this.host.listStreams({
+          workspaceId,
+          prefix,
+          afterStreamId,
+          limit: 128,
+        });
+        for (const streamId of page) {
+          if (!streamId.startsWith(prefix) || streamId <= afterStreamId) {
+            throw new Error("Runtime actor host returned an invalid stream page");
+          }
+          const id = streamId.slice(prefix.length);
+          const valid = kind === "schedule"
+            ? FLOW_SCHEDULE_ID_PATTERN.test(id)
+            : FLOW_SCHEDULE_DISPATCH_ID_PATTERN.test(id);
+          if (!valid) throw new Error(`Invalid discovered Flow ${kind} stream: ${streamId}`);
+          ids.add(id);
         }
-        const id = streamId.slice(prefix.length);
-        const valid = kind === "schedule"
-          ? FLOW_SCHEDULE_ID_PATTERN.test(id)
-          : FLOW_SCHEDULE_DISPATCH_ID_PATTERN.test(id);
-        if (!valid) throw new Error(`Invalid discovered Flow ${kind} stream: ${streamId}`);
-        ids.push(id);
+        if (page.length < 128) break;
+        afterStreamId = page.at(-1)!;
       }
-      if (page.length < 128) return ids;
-      afterStreamId = page.at(-1)!;
     }
+    return [...ids].sort();
   }
 
   private dispatchActor(dispatchId: string): Promise<DurableFlowActor> {
@@ -220,9 +251,32 @@ export class FlowScheduleActorRuntime {
     if (!this.enabled) throw new Error("PI_FLOW_SCHEDULE_V2 requires PI_RUNTIME_BROKER=file|sqlite");
     const key = `${kind}:${id}`;
     const existing = this.actors.get(key);
-    if (existing) return existing;
+    if (existing?.active) return existing;
+    if (existing) {
+      this.actors.delete(key);
+      await this.retire(key, existing).catch(() => undefined);
+    } else {
+      await this.retirements.get(key)?.catch(() => undefined);
+    }
     const streamId = kind === "schedule" ? scheduleStreamId(id) : dispatchStreamId(id);
     if (!allowAcquire) throw new FlowScheduleLeaseUnavailableError(streamId);
+    const pending = this.acquisitions.get(key);
+    if (pending) return pending;
+    const acquisition = this.acquireActor(key, kind, id, streamId);
+    this.acquisitions.set(key, acquisition);
+    try {
+      return await acquisition;
+    } finally {
+      if (this.acquisitions.get(key) === acquisition) this.acquisitions.delete(key);
+    }
+  }
+
+  private async acquireActor(
+    key: string,
+    kind: "schedule" | "dispatch",
+    id: string,
+    streamId: string,
+  ): Promise<DurableFlowActor> {
     const actorAddress: ActorAddressV2 = {
       version: RUNTIME_V2_VERSION,
       revision: RUNTIME_V2_REVISION,
@@ -236,14 +290,35 @@ export class FlowScheduleActorRuntime {
       holderId: this.holderId,
       streamId,
       actor: actorAddress,
+      workspaceAliases: this.legacyWorkspaceIds,
       correlationId: id,
     });
     if (!lease) throw new FlowScheduleLeaseUnavailableError(streamId);
-    const events = flowEventsFromRuntime(await lease.replay());
-    const state = kind === "schedule" ? replaySchedule(id, events) : replayDispatch(id, events);
-    const actor = new DurableFlowActor(kind, state, lease, this.now);
-    this.actors.set(key, actor);
-    return actor;
+    try {
+      if (this.stopped) throw new Error("Flow schedule actor runtime stopped during lease acquisition");
+      const runtimeEvents = await lease.replay();
+      if (this.stopped) throw new Error("Flow schedule actor runtime stopped during replay");
+      const events = flowEventsFromRuntime(runtimeEvents);
+      const state = kind === "schedule" ? replaySchedule(id, events) : replayDispatch(id, events);
+      const streamWorkspaceId = runtimeEvents[0]?.actor.workspaceId ?? this.workspaceId;
+      const actor = new DurableFlowActor(kind, state, lease, this.now, streamWorkspaceId);
+      if (this.stopped) throw new Error("Flow schedule actor runtime stopped during construction");
+      this.actors.set(key, actor);
+      return actor;
+    } catch (error) {
+      await lease.release().catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private retire(key: string, actor: DurableFlowActor): Promise<void> {
+    const existing = this.retirements.get(key);
+    if (existing) return existing;
+    const retirement = actor.release().finally(() => {
+      if (this.retirements.get(key) === retirement) this.retirements.delete(key);
+    });
+    this.retirements.set(key, retirement);
+    return retirement;
   }
 }
 
@@ -252,6 +327,7 @@ class DurableFlowActor {
   private current: ActorState;
   private readonly lease: RuntimeActorLease;
   private readonly now: () => number;
+  private readonly streamWorkspaceId: string;
   private tail: Promise<void> = Promise.resolve();
 
   constructor(
@@ -259,11 +335,17 @@ class DurableFlowActor {
     state: ActorState,
     lease: RuntimeActorLease,
     now: () => number,
+    streamWorkspaceId: string,
   ) {
     this.kind = kind;
     this.current = state;
     this.lease = lease;
     this.now = now;
+    this.streamWorkspaceId = streamWorkspaceId;
+  }
+
+  get active(): boolean {
+    return this.lease.active;
   }
 
   get state(): ActorState {
@@ -277,38 +359,50 @@ class DurableFlowActor {
       const revision = this.current.revision + 1;
       const occurredAt = this.now();
       const eventId = suppliedEventId ?? deterministicEventId(this.current.streamId, revision, eventType, payload);
-      const draft: RuntimeEventDraftV2 = {
-        version: RUNTIME_V2_VERSION,
-        revision: RUNTIME_V2_REVISION,
-        streamId: this.current.streamId,
-        actor: this.lease.registration.actor,
-        occurredAt,
-        kind: "domain.event",
-        eventType,
-        eventId,
-        payload,
-      } satisfies Omit<RuntimeDomainEventV2, "sequence">;
-      const committed = await this.lease.append([draft]);
-      const brokerRevision = committed[0]?.sequence;
-      if (!Number.isSafeInteger(brokerRevision) || (brokerRevision as number) < 1) {
-        throw new Error("Runtime Broker returned an invalid Flow actor revision");
-      }
+      const credential = this.lease.credential;
+      const brokerRevision = this.current.brokerRevision + 1;
       const event: FlowScheduleActorEvent = {
         version: FLOW_SCHEDULE_ACTOR_VERSION,
         eventId,
         streamId: this.current.streamId,
         revision,
         brokerRevision,
-        producerEpoch: this.lease.credential.epoch,
+        producerEpoch: credential.epoch,
         eventType,
         occurredAt,
         payload,
       };
-      const next = this.kind === "schedule"
+      const prevalidated = this.kind === "schedule"
         ? reduceSchedule(this.current as ScheduleActorState, event)
         : reduceDispatch(this.current as DispatchActorState, event);
-      this.current = next;
-      return structuredClone(next);
+      const draft: RuntimeEventDraftV2 = {
+        version: RUNTIME_V2_VERSION,
+        revision: RUNTIME_V2_REVISION,
+        streamId: event.streamId,
+        actor: { ...this.lease.registration.actor, workspaceId: this.streamWorkspaceId },
+        occurredAt: event.occurredAt,
+        kind: "domain.event",
+        eventType: event.eventType,
+        eventId: event.eventId,
+        payload: event.payload,
+      } satisfies Omit<RuntimeDomainEventV2, "sequence">;
+      const committed = await this.lease.append([draft]);
+      const persisted = committed[0];
+      if (committed.length !== 1
+        || !persisted
+        || persisted.kind !== "domain.event"
+        || persisted.streamId !== draft.streamId
+        || persisted.eventId !== eventId
+        || persisted.actor.workspaceId !== this.streamWorkspaceId
+        || persisted.actor.actorId !== draft.actor.actorId
+        || persisted.actor.actorKind !== draft.actor.actorKind
+        || persisted.actor.generation !== draft.actor.generation
+        || persisted.producerEpoch !== credential.epoch
+        || persisted.sequence !== brokerRevision) {
+        throw new Error("Runtime Broker returned an invalid or stale Flow actor commit receipt");
+      }
+      this.current = prevalidated;
+      return structuredClone(prevalidated);
     });
     result = run;
     this.tail = run.then(() => undefined, () => undefined);

@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promisify } from "node:util";
-import { mkdtemp, readFile, readdir, rename, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rename, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import {
@@ -15,6 +16,7 @@ import {
 import type { RuntimeEventDraftV2, RuntimeEventV2 } from "pi-maestro-teammate/v2/runtime";
 import { createRuntimeActorHost } from "../../pi-maestro-teammate/src/runtime-broker/actor-host.ts";
 import { RuntimeBrokerServer } from "../../pi-maestro-teammate/src/runtime-broker/server.ts";
+import { RuntimeV2ShadowJournal } from "../../pi-maestro-teammate/src/runtime-v2/journal.ts";
 import { FlowScheduleActorRuntime } from "../src/flow-schedule/actor.ts";
 import { FlowScheduleRuntime } from "../src/flow-schedule/runtime.ts";
 import {
@@ -194,6 +196,299 @@ class FakeActorHost implements RuntimeActorHostClient {
 
   async stop() { this.active = false; }
 }
+
+test("invalid schedule payload is rejected before append and a restart can replay and commit", async () => {
+  const root = await mkdtemp(join(tmpdir(), "flow-actor-invalid-schedule-"));
+  const store = new FlowScheduleStore(root, { now: () => 100 });
+  const host = new FakeActorHost();
+  const first = new FlowScheduleActorRuntime({ projectRoot: root, actorHost: host, now: () => 200 });
+  let restarted: FlowScheduleActorRuntime | undefined;
+  try {
+    const schedule = await store.createSchedule({
+      scheduleId: "release",
+      target: `owner:${"a".repeat(32)}`,
+      steps: [{ stepId: "verify", prompt: "Verify" }],
+    });
+    const migrated = await first.ensureSchedule(schedule);
+    const brokerRevision = host.revision;
+
+    await assert.rejects(
+      first.commitSchedule("release", "schedule.paused", { ...schedule, scheduleId: "other" }),
+      /Schedule projection identity mismatch/,
+    );
+    assert.equal(host.revision, brokerRevision, "invalid schedule payload must not advance the broker revision");
+    assert.equal(host.events.length, 1, "invalid schedule payload must not enter the journal");
+    assert.equal((await first.scheduleState("release")).revision, migrated.revision);
+
+    await first.stop();
+    host.active = true;
+    host.epoch = 2;
+    restarted = new FlowScheduleActorRuntime({ projectRoot: root, actorHost: host, now: () => 300 });
+    assert.equal((await restarted.scheduleState("release")).revision, migrated.revision);
+    const committed = await restarted.commitSchedule("release", "schedule.paused", {
+      ...schedule,
+      reason: "valid after restart",
+      updatedAt: schedule.updatedAt + 1,
+    });
+    assert.equal(committed.revision, migrated.revision + 1);
+    assert.equal(host.revision, brokerRevision + 1);
+    assert.deepEqual(host.events.map((event) => event.eventType), ["schedule.migrated.v1", "schedule.paused"]);
+  } finally {
+    await restarted?.stop();
+    await first.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("invalid dispatch payload is rejected before append and a restart can replay and commit", async () => {
+  const root = await mkdtemp(join(tmpdir(), "flow-actor-invalid-dispatch-"));
+  const host = new FakeActorHost();
+  const first = new FlowScheduleActorRuntime({ projectRoot: root, actorHost: host, now: () => 100 });
+  let restarted: FlowScheduleActorRuntime | undefined;
+  try {
+    const preparedState = await first.commitDispatch(DISPATCH_A, "dispatch.prepared", {
+      scheduleId: "release",
+      stepId: "verify",
+      targetIdentity: identity,
+    });
+    const brokerRevision = host.revision;
+
+    await assert.rejects(
+      first.commitDispatch(DISPATCH_A, "work.generic_terminal_observed", {
+        terminalAt: 50,
+        graceDeadline: 49,
+      }),
+      /Generic terminal grace deadline precedes evidence/,
+    );
+    assert.equal(host.revision, brokerRevision, "invalid dispatch payload must not advance the broker revision");
+    assert.equal(host.events.length, 1, "invalid dispatch payload must not enter the journal");
+    assert.equal((await first.dispatchState(DISPATCH_A)).revision, preparedState.revision);
+
+    await first.stop();
+    host.active = true;
+    host.epoch = 2;
+    restarted = new FlowScheduleActorRuntime({ projectRoot: root, actorHost: host, now: () => 200 });
+    assert.equal((await restarted.dispatchState(DISPATCH_A)).revision, preparedState.revision);
+    const committed = await restarted.commitDispatch(DISPATCH_A, "dispatch.published", {});
+    assert.equal(committed.revision, preparedState.revision + 1);
+    assert.equal(host.revision, brokerRevision + 1);
+    assert.deepEqual(host.events.map((event) => event.eventType), ["dispatch.prepared", "dispatch.published"]);
+  } finally {
+    await restarted?.stop();
+    await first.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+class RecoveringActorHost implements RuntimeActorHostClient {
+  readonly mode = "file" as const;
+  readonly registrations: RuntimeActorRegistration[] = [];
+  readonly events = new Map<string, RuntimeEventV2[]>();
+  readonly leaseActivity: Array<{ active: boolean }> = [];
+  acquireGate: Promise<void> | undefined;
+  failReplays = 0;
+  releases = 0;
+
+  async acquire(registration: RuntimeActorRegistration): Promise<RuntimeActorLease> {
+    this.registrations.push(registration);
+    await this.acquireGate;
+    const activity = { active: true };
+    this.leaseActivity.push(activity);
+    const epoch = this.registrations.length;
+    const streamEvents = this.events.get(registration.streamId) ?? [];
+    this.events.set(registration.streamId, streamEvents);
+    const host = this;
+    return {
+      mode: "file",
+      registration,
+      credential: { epoch, nonce: `nonce-${epoch}` },
+      get revision() { return streamEvents.length; },
+      get active() { return activity.active; },
+      async heartbeat() {
+        if (!activity.active) throw new Error("stale lease");
+      },
+      async replay(afterSequence = 0) {
+        if (host.failReplays > 0) {
+          host.failReplays -= 1;
+          throw new Error("injected replay failure");
+        }
+        return streamEvents.filter((event) => event.sequence > afterSequence);
+      },
+      async append(events) {
+        if (!activity.active) throw new Error("stale lease");
+        const appended = events.map((event, index) => ({
+          ...event,
+          sequence: streamEvents.length + index + 1,
+          producerEpoch: epoch,
+        })) as RuntimeEventV2[];
+        streamEvents.push(...appended);
+        return appended;
+      },
+      async release() {
+        if (!activity.active) return;
+        activity.active = false;
+        host.releases += 1;
+      },
+    };
+  }
+
+  async stop() {
+    for (const activity of this.leaseActivity) activity.active = false;
+  }
+}
+
+test("Flow acquisition is per-key single-flight and replay failure releases before retry", async () => {
+  const root = await mkdtemp(join(tmpdir(), "flow-actor-single-flight-"));
+  const host = new RecoveringActorHost();
+  let openGate!: () => void;
+  host.acquireGate = new Promise((resolveGate) => { openGate = resolveGate; });
+  const runtime = new FlowScheduleActorRuntime({ projectRoot: root, actorHost: host });
+  try {
+    const first = runtime.dispatchState(DISPATCH_A);
+    const joined = runtime.dispatchState(DISPATCH_A);
+    await new Promise((resolveImmediate) => setImmediate(resolveImmediate));
+    assert.equal(host.registrations.length, 1);
+    openGate();
+    assert.deepEqual(await Promise.all([first, joined]).then((states) => states.map((state) => state.revision)), [0, 0]);
+
+    host.leaseActivity.at(-1)!.active = false;
+    assert.equal((await runtime.status("dispatch", DISPATCH_A)), undefined);
+    host.acquireGate = undefined;
+    host.failReplays = 1;
+    const failed = await Promise.allSettled([
+      runtime.dispatchState(DISPATCH_A),
+      runtime.dispatchState(DISPATCH_A),
+    ]);
+    assert.ok(failed.every((result) => result.status === "rejected" && /injected replay failure/.test(String(result.reason))));
+    assert.equal(host.registrations.length, 2, "concurrent replay callers join one acquisition");
+    assert.equal(host.releases, 1, "failed replay releases the acquired hidden lease");
+
+    assert.equal((await runtime.dispatchState(DISPATCH_A)).revision, 0);
+    assert.equal(host.registrations.length, 3, "a clean acquisition can retry after failed replay cleanup");
+  } finally {
+    await runtime.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Flow evicts an inactive cached actor and replays canonical binding state under a new lease", async () => {
+  const root = await mkdtemp(join(tmpdir(), "flow-actor-self-heal-"));
+  const host = new RecoveringActorHost();
+  const runtime = new FlowScheduleActorRuntime({ projectRoot: root, actorHost: host });
+  try {
+    await runtime.commitDispatch(DISPATCH_A, "dispatch.prepared", {
+      scheduleId: "release",
+      stepId: "verify",
+      targetIdentity: identity,
+    });
+    const binding = {
+      version: 1,
+      type: "flow-schedule-binding",
+      dispatchId: DISPATCH_A,
+      scheduleId: "release",
+      stepId: "verify",
+      state: "pending",
+      createdAt: 10,
+      updatedAt: 10,
+    };
+    await runtime.commitDispatch(DISPATCH_A, "dispatch.binding_recorded", { binding });
+    host.leaseActivity.at(-1)!.active = false;
+
+    const recovered = await runtime.dispatchState(DISPATCH_A);
+    assert.deepEqual(recovered.binding, binding);
+    assert.equal(host.registrations.length, 2);
+    assert.equal((await runtime.status("dispatch", DISPATCH_A))?.leaseEpoch, 2);
+  } finally {
+    await runtime.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Flow actor aliases share the canonical Runtime workspace identity", async () => {
+  const root = await mkdtemp(join(tmpdir(), "flow-actor-workspace-alias-"));
+  const workspace = join(root, "Workspace");
+  const alias = join(root, "workspace-link");
+  await mkdir(workspace);
+  await symlink(workspace, alias, process.platform === "win32" ? "junction" : "dir");
+  const first = new FlowScheduleActorRuntime({ projectRoot: workspace, actorHost: new FakeActorHost() });
+  const second = new FlowScheduleActorRuntime({ projectRoot: alias, actorHost: new FakeActorHost() });
+  try {
+    assert.equal(second.workspaceId, first.workspaceId);
+    assert.equal(second.projectRoot, first.projectRoot);
+    assert.ok(second.legacyWorkspaceIds.length > 0);
+  } finally {
+    await second.stop();
+    await first.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("fresh-process alias replay extends a legacy workspace-owned Flow stream without resetting it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "flow-actor-fresh-alias-"));
+  const workspace = join(root, "Workspace");
+  const alias = join(root, "workspace-link");
+  const stateDirectory = join(root, "broker");
+  await mkdir(workspace);
+  await symlink(workspace, alias, process.platform === "win32" ? "junction" : "dir");
+  const streamId = dispatchStreamId(DISPATCH_A);
+  const legacyWorkspaceId = createHash("sha256").update(resolve(alias), "utf8").digest("hex");
+  const journal = new RuntimeV2ShadowJournal(join(stateDirectory, "actor-journal"));
+  journal.append({
+    version: 2,
+    revision: 1,
+    streamId,
+    actor: {
+      version: 2,
+      revision: 1,
+      workspaceId: legacyWorkspaceId,
+      actorKind: "dispatch",
+      actorId: streamId,
+      generation: 1,
+    },
+    occurredAt: 10,
+    kind: "domain.event",
+    eventType: "dispatch.prepared",
+    eventId: "legacy-prepared",
+    payload: {
+      scheduleId: "release",
+      stepId: "verify",
+      targetIdentity: identity,
+    },
+  });
+  const moduleUrl = new URL("../src/flow-schedule/actor.ts", import.meta.url).href;
+  const childScript = [
+    "const [moduleUrl, projectRoot, stateDirectory, dispatchId] = process.argv.slice(1);",
+    "process.env.PI_RUNTIME_BROKER = 'file';",
+    "process.env.PI_TEAMMATE_BROKER_STATE_DIR = stateDirectory;",
+    "const { FlowScheduleActorRuntime } = await import(moduleUrl);",
+    "const runtime = new FlowScheduleActorRuntime({ projectRoot });",
+    "try {",
+    "  const replayed = await runtime.dispatchState(dispatchId);",
+    "  const committed = await runtime.commitDispatch(dispatchId, 'dispatch.published', {});",
+    "  console.log(JSON.stringify({ before: replayed.revision, after: committed.revision, workspaceId: runtime.workspaceId }));",
+    "} finally { await runtime.stop(); }",
+  ].join("\n");
+  try {
+    const { stdout } = await execFileAsync(process.execPath, [
+      "--experimental-transform-types",
+      "--input-type=module",
+      "--eval",
+      childScript,
+      moduleUrl,
+      alias,
+      stateDirectory,
+      DISPATCH_A,
+    ]);
+    const result = JSON.parse(stdout.trim()) as { before: number; after: number; workspaceId: string };
+    assert.deepEqual({ before: result.before, after: result.after }, { before: 1, after: 2 });
+    assert.notEqual(result.workspaceId, legacyWorkspaceId, "the process uses canonical identity while retaining the legacy stream owner");
+    const persisted = new RuntimeV2ShadowJournal(join(stateDirectory, "actor-journal")).replay(streamId);
+    assert.deepEqual(persisted.map((event) => event.sequence), [1, 2]);
+    assert.ok(persisted.every((event) => event.actor.workspaceId === legacyWorkspaceId));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("actor replay consumes broker producerEpoch and falls back to actor generation only for legacy events", async () => {
   const root = await mkdtemp(join(tmpdir(), "flow-actor-epoch-"));
@@ -504,7 +799,7 @@ test("four windows run independent schedules and recover accepted work through f
         completionCorrelationMatches: true,
         reportedAt: 500,
       }),
-      /lease is stale|stale lease/i,
+      /lease is stale|stale lease|owned elsewhere|client is closed/i,
     );
     const completed = await takeoverRuntime.commitDispatch(DISPATCH_A, "work.reported.completed", {
       exact: true,

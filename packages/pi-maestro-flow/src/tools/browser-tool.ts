@@ -61,7 +61,7 @@ export interface BrowserToolDetails {
   action: "open" | "close" | "run" | "guide";
   name?: string;
   url?: string;
-  browser?: "headless" | "headed" | "connected";
+  browser?: "headless" | "headed" | "connected" | "extension";
   viewport?: { width: number; height: number; deviceScaleFactor?: number };
   screenshots?: Array<{ path?: string; mimeType: string; bytes: number }>;
   result?: string;
@@ -105,6 +105,7 @@ export function createBrowserTool(manager: BrowserManagerLike = browserManager):
       "Release Chrome autofill-protected values with tab.autofillRelease(selector): it brings the tab to the front (Chrome only releases protected values in the foreground), physically clicks the field, then re-dispatches input/change events so the framework picks up the value.",
       "Bypass the \"download multiple files\" dialog with tab.setDownloadBehavior(dirPath) (relative to cwd) — sets CDP Browser.setDownloadBehavior to allow so Chrome does not block JS on the prompt.",
       "Chain multiple CDP commands in one round-trip with tab.cdpBatch([{method, params}, ...]); later params may reference earlier results via \"$N.dotted.path\" strings (0-indexed). Check each result's ok flag — a failed prior command makes $N references undefined.",
+      "Optional browser-bridge extension: install with /install browser-bridge to drive your real daily Chrome (login state, CAPTCHA, fingerprint) over WebSocket. When connected, the extension channel exposes extension-level capabilities the CDP path cannot reach: tab.cookies.get returns partition cookies, tab.cdp routes through chrome.debugger, and on strict-CSP sites MAIN-world JS execution is more robust. The extension is optional — without it, all browser operations fall back to the puppeteer CDP attach/launch path unchanged.",
     ],
     parameters: BrowserParams,
     executionMode: "sequential",

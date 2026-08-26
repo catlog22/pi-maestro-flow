@@ -352,7 +352,11 @@ export default function register(pi) {
     const childTools = JSON.parse(readFileSync(childToolsPath, "utf8"));
     assert.ok(childTools.includes("ask-user-question"), childTools.join(","));
     assert.ok(childTools.includes("todo"), childTools.join(","));
-    assert.ok(childTools.includes("flow-schedule"), childTools.join(","));
+    assert.equal(
+      childTools.includes("flow-schedule"),
+      false,
+      `ordinary PI_TEAMMATE_CHILD subprocesses do not own managed-window Flow reporting: ${childTools.join(",")}`,
+    );
     assert.equal(childTools.includes("goal"), false, childTools.join(","));
     assert.equal(childTools.includes("run-control"), false, childTools.join(","));
     const smoke = run(
@@ -386,14 +390,53 @@ export default function register(pi) {
     const maestroCommand = [process.execPath, join(installedMaestro, "bin", "maestro.js")];
     const cliEnv = { ...process.env, MAESTRO_HOME: maestroHome };
     assert.match(run(maestroCommand, ["run", "create", "--help"], workflowRoot, cliEnv).stdout, /--workflow-root/);
-    let sessionId = "";
+    const stages = ["analyze", "plan", "execute", "verify"];
+    const sessionId = `packed-consumer-${process.pid}-${Date.now()}`;
+    const participant = "packed-consumer-test";
+    const opened = JSON.parse(run(
+      maestroCommand,
+      [
+        "session", "open", "packed consumer lifecycle",
+        "--id", sessionId,
+        "--chain", ...stages,
+        "--participant", participant,
+        "--actor", participant,
+        "--request-id", "packed-session-open",
+        "--reason", "packed consumer lifecycle test",
+        "--workflow-root", workflowRoot,
+        "--json",
+      ],
+      workflowRoot,
+      cliEnv,
+    ).stdout);
+    assert.equal(opened.ok, true);
+    assert.equal(opened.locator.session_id, sessionId);
+    let orchestrationRevision = opened.revision.revision;
     const createStage = (stage) => {
-      const args = ["run", "create", stage, "--workflow-root", workflowRoot];
-      if (sessionId) args.push("--session", sessionId);
-      else args.push("--intent", "packed consumer lifecycle");
-      const created = JSON.parse(run(maestroCommand, args, workflowRoot, cliEnv).stdout);
-      sessionId ||= created.session_id;
-      const runDir = resolve(workflowRoot, created.run_dir);
+      const stageIndex = stages.indexOf(stage);
+      assert.notEqual(stageIndex, -1, stage);
+      const created = JSON.parse(run(
+        maestroCommand,
+        [
+          "run", "create", stage,
+          "--session", sessionId,
+          "--participant", participant,
+          "--actor", participant,
+          "--request-id", `packed-create-${stage}`,
+          "--reason", `packed ${stage} lifecycle test`,
+          "--expected-orchestration-revision", String(orchestrationRevision),
+          "--run", `packed-run-${stage}`,
+          "--step", `s-${stageIndex + 1}`,
+          "--goal", stage,
+          "--workflow-root", workflowRoot,
+          "--json",
+        ],
+        workflowRoot,
+        cliEnv,
+      ).stdout);
+      assert.equal(created.ok, true, JSON.stringify(created));
+      orchestrationRevision = created.revision.revision;
+      const runDir = resolve(created.result.run_dir);
       mkdirSync(join(runDir, "outputs"), { recursive: true });
       writeFileSync(join(runDir, "outputs", `${stage}.json`), `${JSON.stringify({ stage, status: "passed" })}\n`);
       return created;
@@ -401,12 +444,26 @@ export default function register(pi) {
     const completeStage = (stage, created) => {
       const completed = JSON.parse(run(
         maestroCommand,
-        ["run", "complete", created.run_id, "--session", sessionId, "--workflow-root", workflowRoot],
+        [
+          "run", "complete", created.locator.run_id,
+          "--session", sessionId,
+          "--participant", participant,
+          "--actor", participant,
+          "--request-id", `packed-complete-${stage}`,
+          "--reason", `packed ${stage} lifecycle test`,
+          "--expected-run-revision", "1",
+          "--expected-orchestration-revision", String(orchestrationRevision),
+          "--summary", `${stage} passed`,
+          "--advance",
+          "--workflow-root", workflowRoot,
+          "--json",
+        ],
         workflowRoot,
         cliEnv,
       ).stdout);
-      assert.equal(completed.status, "sealed", stage);
-      assert.equal(completed.sealed, true, stage);
+      assert.equal(completed.ok, true, JSON.stringify(completed));
+      assert.equal(completed.result.status, "sealed", stage);
+      orchestrationRevision = completed.revision.revision;
     };
     for (const stage of ["analyze", "plan"]) {
       completeStage(stage, createStage(stage));
@@ -436,16 +493,26 @@ export default function register(pi) {
 
     completeStage("execute", executeRun);
     completeStage("verify", createStage("verify"));
-    const sealed = JSON.parse(run(
+    const completedSession = JSON.parse(run(
       maestroCommand,
-      ["run", "seal-session", sessionId, "--summary", "packed E2E", "--workflow-root", workflowRoot],
+      [
+        "session", "complete",
+        "--session", sessionId,
+        "--participant", participant,
+        "--actor", participant,
+        "--request-id", "packed-session-complete",
+        "--reason", "packed consumer lifecycle complete",
+        "--expected-orchestration-revision", String(orchestrationRevision),
+        "--workflow-root", workflowRoot,
+        "--json",
+      ],
       workflowRoot,
       cliEnv,
     ).stdout);
-    assert.equal(sealed.status, "sealed");
+    assert.equal(completedSession.ok, true, JSON.stringify(completedSession));
     const session = JSON.parse(readFileSync(join(workflowRoot, ".workflow", "sessions", sessionId, "session.json"), "utf8"));
-    assert.equal(session.status, "sealed");
-    assert.equal(session.latest_completed_run_id.endsWith("verify"), true);
+    assert.equal(session.status, "completed");
+    assert.deepEqual(session.chain.map((step) => step.status), ["completed", "completed", "completed", "completed"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { getAgentDir, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { evaluatePermission, suggestedAllowRule } from "./policy.ts";
 import { isTeammateChild, requestTeammateInteraction } from "./teammate-relay.ts";
+import type { UserAttentionHandler } from "../notify/user-attention.ts";
 import {
   addPermissionRule,
   loadPermissionSettings,
@@ -52,9 +53,11 @@ export interface PermissionController {
 export function createPermissionController(options: {
   userSettingsPath?: string;
   setMode?: (mode: PermissionMode, ctx: ExtensionContext) => void | Promise<void>;
+  onUserAttention?: UserAttentionHandler;
 } = {}): PermissionController {
   const userSettingsPath = options.userSettingsPath ?? join(getAgentDir(), "settings.json");
   let loaded: LoadedPermissionSettings | undefined;
+  let nextPromptId = 0;
   const sessionRules: Record<PermissionBehavior, string[]> = { allow: [], ask: [], deny: [] };
 
   return {
@@ -160,6 +163,11 @@ export function createPermissionController(options: {
         return { block: true, reason: `Permission required for ${suggestion}, but no interactive UI is available.` };
       }
 
+      options.onUserAttention?.({
+        id: `permission:${++nextPromptId}`,
+        kind: "permission",
+        subject: call.toolName,
+      }, ctx);
       const choice = await ctx.ui.select(permissionPrompt(call, decision.reason), [
         "Allow once",
         "Always allow",

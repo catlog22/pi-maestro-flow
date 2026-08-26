@@ -644,3 +644,40 @@ test("Permission overview exposes mode, rules and sources structurally", async (
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("permission prompts request user attention before blocking without exposing input", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-permissions-attention-"));
+  const userPath = join(root, "user-settings.json");
+  await writeFile(userPath, JSON.stringify({ permissions: { ask: ["Bash(*)"] } }));
+  const calls: string[] = [];
+  const ctx = {
+    cwd: root,
+    hasUI: true,
+    ui: {
+      notify() {},
+      async select() {
+        calls.push("select");
+        return "Allow once";
+      },
+    },
+  } as unknown as ExtensionContext;
+  const controller = createPermissionController({
+    userSettingsPath: userPath,
+    onUserAttention(request) {
+      calls.push(`attention:${request.kind}:${request.subject ?? ""}`);
+      assert.doesNotMatch(JSON.stringify(request), /secret-value/);
+    },
+  });
+  try {
+    await controller.reload(ctx);
+    const result = await controller.authorize(
+      { toolName: "bash", input: { command: "echo secret-value" } },
+      ctx,
+      "default",
+    );
+    assert.equal(result, undefined);
+    assert.deepEqual(calls, ["attention:permission:bash", "select"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

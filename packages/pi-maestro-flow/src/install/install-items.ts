@@ -76,6 +76,15 @@ export const INSTALL_ITEMS: readonly InstallItem[] = [
       "配置 self-evolve 自进化。按文档交互式确认启用、模式（dry-run/auto-deposit）、评审模型、captureMode（heuristic/hybrid），写入 .pi/self-evolve.json，最后验证采集与评审流程。",
   },
   {
+    id: "browser-bridge",
+    title: "浏览器扩展桥（真实浏览器接管）",
+    description: "安装 Chrome 扩展，让 browser 工具零启动接管你的日常浏览器，保留登录态/CAPTCHA 能力。",
+    docFile: "BROWSER-BRIDGE-SETUP.md",
+    category: "optional",
+    promptIntro:
+      "安装浏览器扩展桥。按文档交互式确认 WS 端口与当前 Chrome 状态，引导用户在 chrome://extensions 加载 optional/browser-bridge 目录，最后验证 pi 侧扩展连接与扩展徽章状态。未装时 browser 工具自动回退 CDP，无破坏。",
+  },
+  {
     id: "smart-search",
     title: "Smart Search 配置",
     description: "配置 smart_search 的搜索 provider（Tavily/Exa/Jina 等）与凭证。",
@@ -217,6 +226,19 @@ export function probeInstallStatus(id: string): InstallStatus {
         // acceptable for dry-run; auto-deposit needs a model for review.
         const hasMode = cfg.mode === "dry-run" || cfg.mode === "auto-deposit";
         return hasMode ? "installed" : "partial";
+      }
+      case "browser-bridge": {
+        // Port file is written by BrowserBridgeServer.start() once the WS
+        // server binds. Its presence means the bridge server has been started
+        // (by a prior browser open / install run); the extension's live
+        // connection is only confirmable at runtime via the bridge status, so
+        // "installed" = port file present + valid port, "partial" = file stale.
+        // This probe stays synchronous and side-effect free so /install list is
+        // a pure read.
+        const portFile = join(homedir(), ".pi", "browser-bridge.port");
+        if (!existsSync(portFile)) return "not-installed";
+        const port = Number(readFileSync(portFile, "utf8").trim());
+        return Number.isInteger(port) && port > 0 ? "installed" : "partial";
       }
       default:
         return "unknown";

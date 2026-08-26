@@ -132,7 +132,9 @@ export default function register(pi) {
       "--extension", discoveryVerifierPath,
     ], workspace, { ...env, PATH: `${join(consumer, "node_modules", ".bin")}${delimiter}${process.env.PATH ?? ""}` }, 45_000, `${JSON.stringify({ id: "state", type: "get_state" })}\n`);
     const discoveredTools = JSON.parse(readFileSync(discoveryEvidencePath, "utf8"));
-    assert.ok(discoveredTools.includes("teammate"), discoveredTools.join(","));
+    for (const toolName of ["teammate-send", "teammate-list", "observe"]) {
+      assert.ok(discoveredTools.includes(toolName), `${toolName}: ${discoveredTools.join(",")}`);
+    }
 
     const evidencePath = join(consumer, "child-tools.json");
     const verifierPath = join(consumer, "verify-child-tools.mjs");
@@ -158,7 +160,11 @@ export default function register(pi) {
     const tools = JSON.parse(readFileSync(evidencePath, "utf8"));
     assert.ok(tools.includes("ask-user-question"), tools.join(","));
     assert.ok(tools.includes("todo"), tools.join(","));
-    assert.ok(tools.includes("flow-schedule"), tools.join(","));
+    assert.equal(
+      tools.includes("flow-schedule"),
+      false,
+      `ordinary PI_TEAMMATE_CHILD subprocesses do not own managed-window Flow reporting: ${tools.join(",")}`,
+    );
     assert.equal(tools.includes("goal"), false, tools.join(","));
     assert.equal(tools.includes("run-control"), false, tools.join(","));
   } finally {

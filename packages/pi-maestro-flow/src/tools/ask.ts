@@ -2,6 +2,7 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { isTeammateChild, requestTeammateInteraction } from "../permissions/teammate-relay.ts";
+import type { UserAttentionHandler } from "../notify/user-attention.ts";
 import {
   BracketedPasteDecoder,
   removeLastGrapheme,
@@ -18,6 +19,7 @@ const NONE_OPTION_LABEL = "以上都不是";
 
 const TWO_COL_MIN_WIDTH = 84;
 const TWO_COL_MIN_ROWS = 16;
+let nextQuestionAttentionId = 0;
 
 interface QuestionSpec {
   question: string;
@@ -50,6 +52,7 @@ type AskToolResult = AgentToolResult<AskResultDetails> & { isError?: boolean };
 export async function executeAsk(
   params: AskParams,
   ctx: ExtensionContext,
+  options: { onUserAttention?: UserAttentionHandler; requestId?: string } = {},
 ): Promise<AskToolResult> {
   const questions = params.questions?.slice(0, 4) ?? [];
   if (questions.length === 0) {
@@ -76,6 +79,11 @@ export async function executeAsk(
   if (!ctx.hasUI) {
     return askError("Interactive questions require a dialog-capable Pi mode.");
   }
+
+  options.onUserAttention?.({
+    id: options.requestId ?? `question:${++nextQuestionAttentionId}`,
+    kind: "question",
+  }, ctx);
 
   const mode = (ctx as ExtensionContext & { mode?: string }).mode;
   const terminalUi = mode === "tui"

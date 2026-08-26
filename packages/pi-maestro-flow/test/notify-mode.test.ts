@@ -5,6 +5,12 @@ import { join } from "node:path";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
+  buildOscNotification,
+  buildWindowsToastScript,
+  detectDesktopNotificationTarget,
+  sanitizeNotificationText,
+} from "../src/notify/desktop-notifier.ts";
+import {
   DEFAULT_NOTIFY_CONFIG,
   applyNotifyPatch,
   loadNotifyGlobalState,
@@ -38,6 +44,7 @@ function createHarness(entries: NotifyEntry[], cwd: string, homeDir: string) {
   } as unknown as ExtensionAPI;
   const ctx = {
     cwd,
+    hasUI: true,
     sessionManager: { getBranch: () => entries },
     ui: { notify(message: string, type: string) { notifications.push({ message, type }); } },
   } as unknown as ExtensionContext;
@@ -81,6 +88,10 @@ test("/notify on|off|error|complete|status toggles and persists globally", async
   await h.commands.get("notify")?.handler("complete", h.ctx);
   assert.equal(h.mode.getConfig().onComplete, false);
 
+  // /notify input independently controls prompts that need user attention.
+  await h.commands.get("notify")?.handler("input", h.ctx);
+  assert.equal(h.mode.getConfig().onInput, false);
+
   // /notify status reports without mutating.
   const before = h.notifications.length;
   await h.commands.get("notify")?.handler("status", h.ctx);
@@ -118,28 +129,29 @@ test("global state restores across workspaces; session branch is the fallback", 
   const entries: NotifyEntry[] = [{
     type: "custom",
     customType: "maestro-notify-mode",
-    data: { enabled: true, onError: false, onComplete: true },
+    data: { enabled: true, onError: false, onComplete: true, onInput: false },
   }];
   const h3 = createHarness(entries, workspaceA, home);
   await h3.handlers.session_start[0]?.({}, h3.ctx);
   assert.equal(h3.mode.getConfig().enabled, true);
   assert.equal(h3.mode.getConfig().onError, false);
+  assert.equal(h3.mode.getConfig().onInput, false);
 
   rmSync(home, { recursive: true, force: true });
 });
 
 test("applyNotifyPatch merges partial patches without losing keys", () => {
-  const base: typeof DEFAULT_NOTIFY_CONFIG = { enabled: true, onError: true, onComplete: true };
-  assert.deepEqual(applyNotifyPatch(base, { onError: false }), { enabled: true, onError: false, onComplete: true });
-  assert.deepEqual(applyNotifyPatch(base, { enabled: false }), { enabled: false, onError: true, onComplete: true });
+  const base: typeof DEFAULT_NOTIFY_CONFIG = { enabled: true, onError: true, onComplete: true, onInput: true };
+  assert.deepEqual(applyNotifyPatch(base, { onError: false }), { enabled: true, onError: false, onComplete: true, onInput: true });
+  assert.deepEqual(applyNotifyPatch(base, { enabled: false }), { enabled: false, onError: true, onComplete: true, onInput: true });
   assert.deepEqual(applyNotifyPatch(base, {}), base);
 });
 
 test("saveNotifyGlobalState writes an atomic versioned file", () => {
   const home = mkdtempSync(join(tmpdir(), "notify-save-"));
-  saveNotifyGlobalState({ enabled: false, onError: true, onComplete: false }, home);
+  saveNotifyGlobalState({ enabled: false, onError: true, onComplete: false, onInput: true }, home);
   const parsed = JSON.parse(readFileSync(notifyGlobalStatePath(home), "utf8"));
-  assert.deepEqual(parsed, { version: 1, enabled: false, onError: true, onComplete: false });
+  assert.deepEqual(parsed, { version: 1, enabled: false, onError: true, onComplete: false, onInput: true });
   rmSync(home, { recursive: true, force: true });
 });
 
@@ -153,6 +165,7 @@ test("listeners fire error toast on message_end stopReason=error and suppress th
       return api;
     })(),
     h.mode,
+    { sendDesktopNotification: () => false },
   );
 
   // Turn reset at start.
@@ -189,6 +202,7 @@ test("listeners fire complete toast on agent_settled when the turn had no error"
       return api;
     })(),
     h.mode,
+    { sendDesktopNotification: () => false },
   );
 
   controller.reset();
@@ -223,6 +237,7 @@ test("disabled mode fires nothing", async () => {
       return api;
     })(),
     h.mode,
+    { sendDesktopNotification: () => false },
   );
 
   await h.handlers.after_provider_response[0]?.({ status: 500 }, h.ctx);
@@ -236,4 +251,53 @@ test("disabled mode fires nothing", async () => {
   assert.equal(eventToasts.length, 0);
 
   rmSync(home, { recursive: true, force: true });
+});
+
+test("user-attention notifications are native-first, deduplicated, and configurable", async () => {
+  const home = mkdtempSync(join(tmpdir(), "notify-attention-"));
+  const h = createHarness([], process.cwd(), home);
+  const systemNotifications: Array<{ title: string; body: string }> = [];
+  const controller = registerNotifyListeners(
+    (() => {
+      const api = { on: (event: string, handler: unknown) => (h.handlers[event] ??= []).push(handler as (event: unknown, ctx: ExtensionContext) => unknown) } as unknown as ExtensionAPI;
+      return api;
+    })(),
+    h.mode,
+    {
+      sendDesktopNotification(title, body) {
+        systemNotifications.push({ title, body });
+        return true;
+      },
+    },
+  );
+
+  controller.requestInput({ id: "plan:1", kind: "plan-confirm" }, h.ctx);
+  controller.requestInput({ id: "plan:1", kind: "plan-confirm" }, h.ctx);
+  controller.requestInput({ id: "permission:1", kind: "permission", subject: "bash" }, h.ctx);
+
+  assert.deepEqual(systemNotifications.map(({ body }) => body), ["Plan 等待确认", "权限等待确认：bash"]);
+  assert.match(systemNotifications[0]?.title ?? "", /Pi/);
+  assert.equal(h.notifications.length, 0, "successful native notifications do not duplicate as TUI toasts");
+
+  await h.commands.get("notify")?.handler("input", h.ctx);
+  controller.requestInput({ id: "question:1", kind: "question" }, h.ctx);
+  assert.equal(systemNotifications.length, 2, "input notifications honor the independent config toggle");
+
+  rmSync(home, { recursive: true, force: true });
+});
+
+test("desktop notification protocols sanitize untrusted text", () => {
+  assert.equal(detectDesktopNotificationTarget({ WT_SESSION: "1" }, "linux"), "windows");
+  assert.equal(detectDesktopNotificationTarget({ KITTY_WINDOW_ID: "1" }, "linux"), "osc99");
+  assert.equal(detectDesktopNotificationTarget({ TERM_PROGRAM: "iTerm.app" }, "darwin"), "osc9");
+  assert.equal(detectDesktopNotificationTarget({}, "linux"), "osc777");
+
+  assert.equal(sanitizeNotificationText("a\n\x1b[2Jb"), "a [2Jb");
+  const osc = buildOscNotification("osc777", "Pi;title", "line\nbody");
+  assert.doesNotMatch(osc.slice(2), /[\n\r]/);
+  assert.match(osc, /Pi:title/);
+
+  const powershell = buildWindowsToastScript("Pi's task", "line\nbody");
+  assert.match(powershell, /Pi''s task/);
+  assert.doesNotMatch(powershell, /[\n\r]/);
 });

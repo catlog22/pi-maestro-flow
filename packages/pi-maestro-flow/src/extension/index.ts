@@ -225,6 +225,7 @@ import { flowTuiText, registerTuiLocaleEvents } from "../tui/locale.ts";
 import { registerMaestroPackageResources } from "../resources/maestro-package.ts";
 import { registerNotifyMode } from "../notify/notify-mode.ts";
 import { registerNotifyListeners } from "../notify/notify-listeners.ts";
+import type { UserAttentionHandler } from "../notify/user-attention.ts";
 import { registerSkillManager, runSkillManager } from "../skills/skill-manager.ts";
 import { SkillManagerStore } from "../skills/skill-manager-store.ts";
 import { registerIntelligenceTools, shutdownIntelligenceTools } from "../tools/intelligence.ts";
@@ -263,6 +264,7 @@ import {
   registerTeammatePermissionBroker,
   type TeammatePermissionBroker,
 } from "pi-maestro-teammate/v1/child-extensions";
+import { registerFlowTodoPromptContextProvider } from "../teammate/todo-prompt-context.ts";
 import {
   TEAMMATE_STARTED_EVENT,
   TEAMMATE_MESSAGE_EVENT,
@@ -1460,7 +1462,7 @@ Only request completion after all work is done; the extension verifies it indepe
   pi.registerTool(goalTool);
 
   // === Ask User Question Tool ===
-  registerAskUserQuestionTool(pi);
+  registerAskUserQuestionTool(pi, notifyController.requestInput);
 
   // === Todo Tool ===
   initTodo(pi);
@@ -1668,7 +1670,7 @@ When NOT to use:
     workflowConfirmation: planWorkflowConfirmation,
     publishWorkflowPlan: publishApprovedPlanToWorkflow,
   });
-  registerPlanTools(pi);
+  registerPlanTools(pi, { onUserAttention: notifyController.requestInput });
   registerPlanCommand(pi);
   registerSwarmDisplay(pi, {
     onProjectionChange(projection) {
@@ -1684,6 +1686,7 @@ When NOT to use:
   registerLoop(pi);
   registerFlowSchedule(pi, {
     managedWorker: isManagedWorkerWindow(),
+    todoMutationSupported: isManagedWorkerWindow(),
   });
   registerModelAvailability(pi);
   registerTeammateSessionRouting(pi);
@@ -1707,6 +1710,7 @@ When NOT to use:
     publishMaestroUi();
   });
   const permissionController = createPermissionController({
+    onUserAttention: notifyController.requestInput,
     async setMode(mode, ctx) {
       if (mode === "plan" && !isPlanMode()) await planToggleMode(ctx);
       if (mode !== "plan" && isPlanMode()) planExitMode(ctx);
@@ -3736,8 +3740,11 @@ When NOT to use:
     const generation = ++teammateRegistrationGeneration;
     const nextDisposers: Array<() => void> = [];
     try {
-      // Teammates run in separate Pi processes. This registration is scoped to
-      // the live root session so a reload cannot retain a stale child surface.
+      // Teammates run in separate Pi processes. These registrations are scoped
+      // to the live root session so a reload cannot retain stale child or Todo
+      // projection authority. Projection reads only immutable prompt fields;
+      // teammate:started continues to own reassignment and activation.
+      nextDisposers.push(registerFlowTodoPromptContextProvider());
       nextDisposers.push(registerTeammateChildExtension(teammateExtensionPath, {
         tools: MAESTRO_CHILD_TOOL_NAMES,
       }));
@@ -4013,7 +4020,10 @@ If root delegated a task to you (spawned with todo: "<id>"), it is usually alrea
   });
 }
 
-function registerAskUserQuestionTool(pi: ExtensionAPI): void {
+function registerAskUserQuestionTool(
+  pi: ExtensionAPI,
+  onUserAttention?: UserAttentionHandler,
+): void {
   const askTool: ToolDefinition<typeof AskUserQuestionParams> = {
     name: "ask-user-question",
     label: "Ask User",
@@ -4049,7 +4059,10 @@ When NOT to use:
       _onUpdate: ((result: FlowToolResult) => void) | undefined,
       ctx: ExtensionContext,
     ): Promise<FlowToolResult> {
-      return executeAsk(params as unknown as AskParams, ctx);
+      return executeAsk(params as unknown as AskParams, ctx, {
+        onUserAttention,
+        requestId: `question:${_id}`,
+      });
     },
 
     renderShell: "self",
