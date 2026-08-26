@@ -16,7 +16,9 @@ import type { AgentMessage, AgentToolResult } from "@earendil-works/pi-agent-cor
 import { Key, Text, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { altKey } from "../key-labels.ts";
+import type { UserAttentionHandler } from "../notify/user-attention.ts";
 import { toolCallLine, toolResultLine, resultSummary } from "../quiet-render.ts";
+import { buildPlanDecomposeContract, PlanDecomposeParams } from "./plan-decompose.ts";
 import { isRunControlReadAction, isRunControlReadArgv } from "./run-control.ts";
 import {
   openPlanConfirmation,
@@ -60,12 +62,13 @@ interface PlanReviewOutcome {
   executionMode?: PlanExecutionMode;
   executionChoice?: PlanExecutionChoice;
   executionMessage?: string;
+  discussionMessage?: string;
 }
 
-type PlanHandoffDelivery = "message" | "follow-up";
+type PlanHandoffDelivery = "message" | "tool-result";
 
 export interface PlanToolDetails {
-  action: "enter" | "update" | "review" | "confirm" | "exit" | "status";
+  action: "enter" | "update" | "review" | "confirm" | "decompose" | "exit" | "status";
   mode: Mode;
   revision: number;
   path: string;
@@ -113,6 +116,7 @@ export const PLAN_TOGGLE_LABEL = altKey("Shift+P");
 const PROPOSED_PLAN_PATTERN = /<proposed_plan>\s*([\s\S]*?)\s*<\/proposed_plan>/i;
 
 const PLAN_ENTER_TOOL = "plan-enter";
+const PLAN_DECOMPOSE_TOOL = "plan-decompose";
 const PLAN_MODE_TOOL_NAMES = [
   "plan-update",
   "plan-review",
@@ -120,7 +124,7 @@ const PLAN_MODE_TOOL_NAMES = [
   "plan-exit",
   "plan-status",
 ] as const;
-const ALL_PLAN_TOOL_NAMES = new Set([PLAN_ENTER_TOOL, ...PLAN_MODE_TOOL_NAMES]);
+const ALL_PLAN_TOOL_NAMES = new Set([PLAN_ENTER_TOOL, PLAN_DECOMPOSE_TOOL, ...PLAN_MODE_TOOL_NAMES]);
 
 const PlanUpdateParams = Type.Object({
   markdown: Type.String({ description: "Complete Markdown text for current.md" }),
@@ -928,6 +932,7 @@ async function reviewPlan(
   handoffDelivery: PlanHandoffDelivery,
   operation: PlanOperationIdentity,
   signal?: AbortSignal,
+  onUserAttention?: UserAttentionHandler,
 ): Promise<PlanReviewOutcome> {
   if (!ctx.hasUI) {
     if (isCurrentPlanOperation(ctx, operation, false)) {
@@ -942,11 +947,16 @@ async function reviewPlan(
     if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
   }
   if (!allowConfirm) {
+    onUserAttention?.({
+      id: `plan-review:${operation.sessionId}:${operation.operationId}`,
+      kind: "plan-review",
+    }, ctx);
     await editPlan(ctx, store.currentPath, operation);
     if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
     return { approved: false, exited: false };
   }
 
+  let attentionIndex = 0;
   while (isCurrentPlanOperation(ctx, operation)) {
     const workflow = await workflowConfirmation(ctx);
     if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
@@ -961,6 +971,10 @@ async function reviewPlan(
       drafts = [];
     }
     if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
+    onUserAttention?.({
+      id: `plan-confirm:${operation.sessionId}:${operation.operationId}:${++attentionIndex}`,
+      kind: "plan-confirm",
+    }, ctx);
     const decision = await openPlanConfirmation(ctx, {
       markdown: latestPlan ?? "",
       pathLabel: store.currentPath,
@@ -968,8 +982,9 @@ async function reviewPlan(
       contextPercent: ctx.getContextUsage?.()?.percent ?? undefined,
       defaultExecution: latestExecution,
       workflow,
-      refineOutput: refineSessionRevision === latestRevision ? refineLatestOutput : undefined,
-      refineRoleLabel: refineLatestRoleLabel,
+      refine: refineSessionRevision === latestRevision && refineLatestOutput
+        ? { ...(refineLatestRoleLabel ? { roleLabel: refineLatestRoleLabel } : {}) }
+        : undefined,
       drafts,
     });
     if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
@@ -1013,7 +1028,7 @@ async function reviewPlan(
       refineLatestAppliesAs = outcome.latestAppliesAs;
       refineLatestRoleLabel = outcome.latestRole ? REFINE_ROLES[outcome.latestRole].label : undefined;
       if (outcome.action === "done" && outcome.latestOutput) {
-        ctx.ui.notify("Refine result attached — R toggles Plan/Refine, or Apply/Discard below.", "info");
+        ctx.ui.notify("Refine result attached; Apply or Discard it from Plan confirmation.", "info");
       } else if (outcome.action === "cancel") {
         ctx.ui.notify("Refine cancelled; returning to Plan confirmation.", "info");
       }
@@ -1039,12 +1054,13 @@ async function reviewPlan(
           ctx.ui.notify("Refine result applied to the Plan draft.", "info");
         }
       } else {
-        // Reviewer/decomposer/brainstormer roles return suggestions: send them as feedback.
-        queuePlanDiscussion(ctx, buildRefineFeedbackMessage(output, refineLatestRoleLabel));
+        // Reviewer/decomposer/brainstormer output continues the Plan discussion.
+        const feedback = buildRefineFeedbackMessage(output, refineLatestRoleLabel);
         refineLatestOutput = undefined;
         refineLatestRole = undefined;
         refineLatestAppliesAs = undefined;
         refineLatestRoleLabel = undefined;
+        return deliverPlanDiscussion(ctx, handoffDelivery, feedback);
       }
       return { approved: false, exited: false };
     }
@@ -1094,8 +1110,7 @@ async function reviewPlan(
       );
       if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
       if (!discussion?.trim()) continue;
-      queuePlanDiscussion(ctx, discussion.trim());
-      return { approved: false, exited: false };
+      return deliverPlanDiscussion(ctx, handoffDelivery, discussion.trim());
     }
     if (action === "close") {
       abortPlanTurn(ctx);
@@ -1147,6 +1162,18 @@ function buildRefineFeedbackMessage(output: string, roleLabel?: string): string 
     "",
     output,
   ].join("\n");
+}
+
+function deliverPlanDiscussion(
+  ctx: PlanContext,
+  handoffDelivery: PlanHandoffDelivery,
+  discussion: string,
+): PlanReviewOutcome {
+  if (handoffDelivery === "tool-result") {
+    return { approved: false, exited: false, discussionMessage: discussion };
+  }
+  queuePlanDiscussion(ctx, discussion);
+  return { approved: false, exited: false };
 }
 
 function queuePlanDiscussion(ctx: PlanContext, discussion: string): void {
@@ -1397,8 +1424,11 @@ function buildPlanExecutionContract(
     "2. Reconcile the Plan with every user requirement; do not shrink or reinterpret the approved scope.",
     "3. Decompose the Plan into an ordered Todo dependency graph before implementation.",
     ...(handoffKey
-      ? [`   Pass planHandoffKey: "${handoffKey}" on those todo create calls so they are bound to this approval.`]
-      : []),
+      ? [
+          `   - For complex approved work, call plan-decompose with planHandoffKey: "${handoffKey}"; follow the returned decomposition prompt in the current main flow, then create the Todo batch it specifies.`,
+          `   - For simple work, create the Todo directly with planHandoffKey: "${handoffKey}".`,
+        ]
+      : ["   - For complex approved work, use plan-decompose before creating Todos."]),
     "4. Attach a Goal as the quality gate only to key Todos that carry verifiable acceptance criteria; do NOT create a Goal for every Todo. Goals are flat and time-ordered — put the overall acceptance Goal on the last Todo when an overall sign-off is needed.",
     "5. Prefer the teammate tool to delegate independent Todo work; use direct execution only when delegation would not help.",
     "6. Execute the Todo sequence; activating a Todo auto-switches to its quality-gate Goal, and a Todo completes only after its Goal verifies.",
@@ -1432,22 +1462,40 @@ async function deliverImplementation(
     });
     if (compactionArbiter && !lease) {
       ctx.ui.notify("Compaction is already in progress; executing with the current context.", "warning");
-      sendImplementationMessage(ctx, executionMessage, handoffDelivery === "follow-up");
+      if (handoffDelivery === "tool-result") {
+        await onDelivered?.();
+        return isCurrentPlanOperation(ctx, operation) ? executionMessage : undefined;
+      }
+      sendImplementationMessage(ctx, executionMessage);
       await onDelivered?.();
       if (!isCurrentPlanOperation(ctx, operation)) return undefined;
       return;
     }
     const handoffRequest = beginPlanHandoff();
     let delivered = false;
+    let resolveToolResult: ((message: string | undefined) => void) | undefined;
+    const toolResult = handoffDelivery === "tool-result"
+      ? new Promise<string | undefined>((resolve) => { resolveToolResult = resolve; })
+      : undefined;
     const deliver = () => {
       if (delivered) return false;
       delivered = true;
       lease?.release();
       const currentOperation = isCurrentPlanOperation(ctx, operation);
       const currentHandoff = finishPlanHandoff(handoffRequest);
-      if (!currentOperation || !currentHandoff) return false;
-      sendImplementationMessage(ctx, executionMessage, handoffDelivery === "follow-up");
-      void onDelivered?.();
+      if (!currentOperation || !currentHandoff) {
+        resolveToolResult?.(undefined);
+        return false;
+      }
+      if (handoffDelivery === "tool-result") {
+        void (async () => {
+          await onDelivered?.();
+          resolveToolResult?.(isCurrentPlanOperation(ctx, operation) ? executionMessage : undefined);
+        })();
+      } else {
+        sendImplementationMessage(ctx, executionMessage);
+        void onDelivered?.();
+      }
       return true;
     };
     const compactionInstructions = [
@@ -1476,16 +1524,20 @@ async function deliverImplementation(
       }
       deliver();
     }
-    return;
+    return toolResult;
   }
 
-  sendImplementationMessage(ctx, executionMessage, handoffDelivery === "follow-up");
+  if (handoffDelivery === "tool-result") {
+    await onDelivered?.();
+    return isCurrentPlanOperation(ctx, operation) ? executionMessage : undefined;
+  }
+  sendImplementationMessage(ctx, executionMessage);
   await onDelivered?.();
   if (!isCurrentPlanOperation(ctx, operation)) return undefined;
 }
 
-function sendImplementationMessage(ctx: PlanContext, message: string, forceFollowUp = false): void {
-  const opts = forceFollowUp || ctx.isIdle?.() === false
+function sendImplementationMessage(ctx: PlanContext, message: string): void {
+  const opts = ctx.isIdle?.() === false
     ? { deliverAs: "followUp" as const }
     : undefined;
   extensionApi?.sendUserMessage(message, opts);
@@ -1561,7 +1613,10 @@ function supersededResult(action: PlanToolDetails["action"]): AgentToolResult<Pl
   }, true);
 }
 
-export function registerPlanTools(pi: ExtensionAPI): void {
+export function registerPlanTools(
+  pi: ExtensionAPI,
+  options: { onUserAttention?: UserAttentionHandler } = {},
+): void {
   const enterTool: ToolDefinition<typeof EmptyPlanParams, PlanToolDetails> = {
     name: PLAN_ENTER_TOOL,
     label: "Plan Enter",
@@ -1630,7 +1685,7 @@ export function registerPlanTools(pi: ExtensionAPI): void {
       const operation = beginPlanOperation(ctx);
       const blocked = requirePlanMode("review");
       if (blocked) return blocked;
-      await reviewPlan(ctx, false, "message", operation);
+      await reviewPlan(ctx, false, "message", operation, undefined, options.onUserAttention);
       if (!isCurrentPlanOperation(ctx, operation)) return supersededResult("review");
       return result("Plan review closed; Plan mode remains active.", currentDetails("review"));
     },
@@ -1651,25 +1706,28 @@ export function registerPlanTools(pi: ExtensionAPI): void {
   const confirmTool: ToolDefinition<typeof EmptyPlanParams, PlanToolDetails> = {
     name: "plan-confirm",
     label: "Plan Confirm",
-    description: "Present the Markdown Plan in an interactive UI with choices to execute, modify, discuss, run role-based Review & Refine, or exit. Execute queues one explicit follow-up that starts implementation without another user prompt.",
-    promptSnippet: "Standard presentation step after plan-update. The user controls approval and may run role-based Review & Refine; choosing Execute authorizes immediate implementation via one queued follow-up.",
+    description: "Present the Markdown Plan in an interactive UI with choices to execute, modify, discuss, run role-based Review & Refine, or exit. Execute and discussion feedback return through the tool result without injecting another message.",
+    promptSnippet: "Standard presentation step after plan-update. The user controls approval and may run role-based Review & Refine; choosing Execute authorizes immediate implementation through the returned tool result.",
     parameters: EmptyPlanParams,
     async execute(_id, _params, signal, _onUpdate, ctx) {
       const operation = beginPlanOperation(ctx);
       const blocked = requirePlanMode("confirm");
       if (blocked) return blocked;
-      const outcome = await reviewPlan(ctx, true, "follow-up", operation, signal);
+      const outcome = await reviewPlan(ctx, true, "tool-result", operation, signal, options.onUserAttention);
       if (!isCurrentPlanOperation(ctx, operation)) return supersededResult("confirm");
       onPlanModeChanged?.(ctx);
       const summary = outcome.approved
         ? outcome.executionChoice?.backend === "workflow" && latestWorkflowBinding?.status === "failed"
           ? "Plan approved; Workflow binding failed and execution was not started."
-          : `Plan approved; Act mode restored (${outcome.executionMode ?? "current"} context, ${outcome.executionChoice?.backend ?? "standalone"}). Execution handoff queued; the follow-up starts implementation without another user prompt.`
+          : `Plan approved; Act mode restored (${outcome.executionMode ?? "current"} context, ${outcome.executionChoice?.backend ?? "standalone"}).`
         : outcome.exited
           ? buildPlanExitMessage()
-        : "Plan not approved; Plan mode remains active.";
-      const text = outcome.executionMessage
-        ? `${summary}\n\n${outcome.executionMessage}`
+          : outcome.discussionMessage
+            ? "Plan feedback returned; Plan mode remains active."
+            : "Plan not approved; Plan mode remains active.";
+      const toolMessage = outcome.executionMessage ?? outcome.discussionMessage;
+      const text = toolMessage
+        ? `${summary}\n\n${toolMessage}`
         : summary;
       return result(text, {
         ...currentDetails("confirm"),
@@ -1687,6 +1745,78 @@ export function registerPlanTools(pi: ExtensionAPI): void {
       const text = block && "text" in block ? block.text : "";
       const isError = (result as { isError?: boolean }).isError === true;
       return toolResultLine(theme, { name: "plan", ok: !isError, arg: "confirm", summary: resultSummary(result), expanded: opts.expanded, detail: text });
+    },
+  };
+
+  const decomposeTool: ToolDefinition<typeof PlanDecomposeParams, PlanToolDetails> = {
+    name: PLAN_DECOMPOSE_TOOL,
+    label: "Plan Decompose",
+    description: "Inject the main-flow decomposition prompt for the currently approved Plan. Requires Act mode and the exact approved handoff key; creates no files, Todos, messages, or agents.",
+    promptSnippet: "For complex approved work, call plan-decompose with the exact planHandoffKey, then let the current main flow build the complete Todo graph from its returned prompt.",
+    parameters: PlanDecomposeParams,
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const operation = beginPlanOperation(ctx);
+      if (mode !== "act") {
+        return result("plan-decompose requires Act mode after Plan approval.", {
+          ...currentDetails("decompose"),
+          error: "E_PLAN_ACT_MODE_REQUIRED",
+        }, true);
+      }
+      try {
+        const store = await ensureStore(ctx);
+        if (!bindPlanOperation(ctx, operation, store)) return supersededResult("decompose");
+        const loaded = await store.loadApprovedSnapshotReadOnly();
+        if (!isCurrentPlanOperation(ctx, operation)) return supersededResult("decompose");
+        const manifest = loaded.manifest;
+        if (
+          manifest.status !== "approved"
+          || !manifest.handoffKey
+          || !manifest.approvedPath
+          || !manifest.approvedChecksum
+        ) {
+          return result("plan-decompose requires a currently approved Plan with complete approval identity.", {
+            ...currentDetails("decompose"),
+            error: "E_PLAN_APPROVAL_REQUIRED",
+          }, true);
+        }
+        if (params.planHandoffKey !== manifest.handoffKey) {
+          return result("plan-decompose requires the exact handoff key of the currently approved Plan.", {
+            ...currentDetails("decompose"),
+            error: "E_PLAN_HANDOFF_KEY_MISMATCH",
+          }, true);
+        }
+        const contract = buildPlanDecomposeContract({
+          planHandoffKey: params.planHandoffKey,
+          approvedPlanPath: loaded.approvedPath,
+          approvedChecksum: manifest.approvedChecksum,
+        });
+        if (!isCurrentPlanOperation(ctx, operation)) return supersededResult("decompose");
+        return result(contract, currentDetails("decompose"));
+      } catch (error) {
+        if (!isCurrentPlanOperation(ctx, operation, operation.store !== undefined)) return supersededResult("decompose");
+        if (errorMessage(error) === "Plan has no complete approved snapshot") {
+          return result("plan-decompose requires a currently approved Plan with complete approval identity.", {
+            ...currentDetails("decompose"),
+            error: "E_PLAN_APPROVAL_REQUIRED",
+          }, true);
+        }
+        return result(errorMessage(error), {
+          ...currentDetails("decompose"),
+          error: "E_PLAN_DECOMPOSE_INVALID",
+        }, true);
+      }
+    },
+    renderShell: "self",
+    renderCall(_args, theme, ctx) {
+      if (ctx?.isPartial === false) return new Text("", 0, 0);
+      return toolCallLine(theme, "plan", "decompose");
+    },
+    renderResult(result, opts, theme) {
+      if (opts.isPartial) return new Text("", 0, 0);
+      const block = result.content.find((c) => c.type === "text");
+      const text = block && "text" in block ? block.text : "";
+      const isError = (result as { isError?: boolean }).isError === true;
+      return toolResultLine(theme, { name: "plan", ok: !isError, arg: "decompose", summary: resultSummary(result), expanded: opts.expanded, detail: text });
     },
   };
 
@@ -1742,7 +1872,7 @@ export function registerPlanTools(pi: ExtensionAPI): void {
     },
   };
 
-  for (const tool of [enterTool, updateTool, reviewTool, confirmTool, exitTool, statusTool]) {
+  for (const tool of [enterTool, updateTool, reviewTool, confirmTool, decomposeTool, exitTool, statusTool]) {
     pi.registerTool(tool as ToolDefinition);
   }
 }

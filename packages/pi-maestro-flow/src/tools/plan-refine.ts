@@ -319,10 +319,10 @@ export async function openRefinePanel(
       if (!picked) return undefined;
       return picked;
     },
-    run: async (role, model, label, userInput) => {
+    run: async (role, model, label, userInput, signal) => {
       const spec = REFINE_ROLES[role];
       const prompt = spec.buildPrompt(options.markdown, session.turns, userInput);
-      return runRefineSubagent(pi, ctx, { prompt, model, taskType: spec.taskType, signal: options.signal });
+      return runRefineSubagent(pi, ctx, { prompt, model, taskType: spec.taskType, signal });
     },
     signal: options.signal,
   });

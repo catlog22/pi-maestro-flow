@@ -37,8 +37,9 @@ export interface RenderRefineOverlayOptions {
   session: RefineSession;
   roles: Record<RefineRole, RefineRoleSpec>;
   pickModel: () => Promise<{ model: string; label: string } | undefined>;
-  run: (role: RefineRole, model: string, label: string, userInput: string) => Promise<RefineRunResult>;
+  run: (role: RefineRole, model: string, label: string, userInput: string, signal: AbortSignal) => Promise<RefineRunResult>;
   signal?: AbortSignal;
+  now?: () => number;
 }
 
 export interface RenderRefineOverlayResult {
@@ -82,8 +83,18 @@ export async function renderRefineOverlay(
       let previewOffset = 0;
       let previewMaxOffset = 0;
       let lastWidth = 80;
+      let activeRun: {
+        controller: AbortController;
+        signal: AbortSignal;
+        timer: ReturnType<typeof setInterval>;
+        startedAt: number;
+        onAbort: () => void;
+      } | undefined;
+      let settled = false;
+      let onParentAbort: (() => void) | undefined;
 
       const markdownTheme = refineMarkdownTheme(theme);
+      const now = options.now ?? Date.now;
 
       function currentPreviewSource(): string {
         if (previewMode === "output" && session.turns.length > 0) {
@@ -97,6 +108,9 @@ export async function renderRefineOverlay(
       }
 
       function doneAction(action: "done" | "cancel"): void {
+        if (settled) return;
+        settled = true;
+        if (onParentAbort) options.signal?.removeEventListener("abort", onParentAbort);
         const last = session.turns.at(-1);
         done({
           action,
@@ -105,6 +119,29 @@ export async function renderRefineOverlay(
           latestRole: last?.role,
           latestAppliesAs: last ? options.roles[last.role].appliesAs : undefined,
         });
+      }
+
+      function cancelActiveRun(run = activeRun, render = true): void {
+        if (!run || activeRun !== run) return;
+        activeRun = undefined;
+        clearInterval(run.timer);
+        run.signal.removeEventListener("abort", run.onAbort);
+        run.controller.abort();
+        pendingInput = "";
+        input.setValue("");
+        phase = "idle";
+        busyError = "";
+        status = `${options.roles[session.currentRole].label} cancelled.`;
+        if (render) tui.requestRender();
+      }
+
+      if (options.signal) {
+        onParentAbort = () => {
+          cancelActiveRun(activeRun, false);
+          doneAction("cancel");
+        };
+        options.signal.addEventListener("abort", onParentAbort, { once: true });
+        if (options.signal.aborted) onParentAbort();
       }
 
       async function runRole(): Promise<void> {
@@ -119,13 +156,32 @@ export async function renderRefineOverlay(
         phase = "running";
         busyError = "";
         status = `Running ${spec.label}…`;
+        const controller = new AbortController();
+        const signal = options.signal
+          ? AbortSignal.any([options.signal, controller.signal])
+          : controller.signal;
         const timer = setInterval(() => {
           frame = (frame + 1) % SPINNER_FRAMES.length;
           tui.requestRender();
         }, 120);
+        const run = {
+          controller,
+          signal,
+          timer,
+          startedAt: now(),
+          onAbort: () => {},
+        };
+        run.onAbort = () => cancelActiveRun(run);
+        activeRun = run;
+        signal.addEventListener("abort", run.onAbort, { once: true });
+        if (signal.aborted) {
+          cancelActiveRun(run);
+          return;
+        }
         tui.requestRender();
         try {
-          const result = await options.run(session.currentRole, model, label, pendingInput);
+          const result = await options.run(session.currentRole, model, label, pendingInput, signal);
+          if (activeRun !== run || signal.aborted) return;
           if (result.ok && result.output) {
             const turn: RefineTurn = {
               role: session.currentRole,
@@ -145,10 +201,14 @@ export async function renderRefineOverlay(
             status = `${spec.label} failed: ${busyError}`;
           }
         } catch (error) {
+          if (activeRun !== run || signal.aborted) return;
           busyError = error instanceof Error ? error.message : String(error);
           status = `${spec.label} failed: ${busyError}`;
         } finally {
-          clearInterval(timer);
+          if (activeRun !== run) return;
+          activeRun = undefined;
+          clearInterval(run.timer);
+          run.signal.removeEventListener("abort", run.onAbort);
           pendingInput = "";
           input.setValue("");
           phase = "idle";
@@ -248,10 +308,10 @@ export async function renderRefineOverlay(
           rows.push(theme.fg("dim", "─".repeat(inner)));
           rows.push(...controls.map(([row, label]) => selectionLine(row, label)));
           const footer = phase === "running"
-            ? `${SPINNER_FRAMES[frame]!} ${status}`
+            ? `${SPINNER_FRAMES[frame]!} ${status} ${formatElapsed(activeRun ? now() - activeRun.startedAt : 0)} · Esc cancel`
             : phase === "input"
               ? "Enter run · Esc keep input"
-              : "↑↓ select · ←→ change role · Enter choose · PgUp/PgDn scroll · m model · i input · R plan/output · [ ] history · d done · Esc cancel";
+              : "↑↓ scroll/select · ←→ change role · Enter choose · PgUp/PgDn scroll · m model · i input · R plan/output · [ ] history · d done · Esc cancel";
           rows.push(theme.fg("dim", truncateToWidth(footer, inner, "…")));
           if (status && phase !== "running") {
             rows.push(theme.fg(busyError ? "warning" : "dim", truncateToWidth(status, inner, "…")));
@@ -261,7 +321,7 @@ export async function renderRefineOverlay(
 
         handleInput(data: string): void {
           if (phase === "running") {
-            if (matchesKey(data, Key.escape) && options.signal) options.signal.dispatchEvent(new Event("abort"));
+            if (matchesKey(data, Key.escape)) cancelActiveRun();
             return;
           }
           if (phase === "input") {
@@ -287,13 +347,17 @@ export async function renderRefineOverlay(
             return;
           }
           if (matchesKey(data, Key.up)) {
-            selected = Math.max(0, selected - 1);
+            if (previewOffset >= previewMaxOffset) {
+              if (selected > 0) selected -= 1;
+              else previewOffset = Math.max(0, previewOffset - 1);
+            } else previewOffset = Math.max(0, previewOffset - 1);
             status = "";
             tui.requestRender();
             return;
           }
           if (matchesKey(data, Key.down)) {
-            selected = Math.min(SELECTION_ROWS.length - 1, selected + 1);
+            if (previewOffset >= previewMaxOffset) selected = Math.min(SELECTION_ROWS.length - 1, selected + 1);
+            else previewOffset = Math.min(previewMaxOffset, previewOffset + 1);
             status = "";
             tui.requestRender();
             return;
@@ -360,7 +424,10 @@ export async function renderRefineOverlay(
           input.invalidate();
         },
 
-        dispose(): void {},
+        dispose(): void {
+          cancelActiveRun(activeRun, false);
+          doneAction("cancel");
+        },
       };
     },
     {
@@ -375,6 +442,12 @@ export async function renderRefineOverlay(
   );
 
   return result ?? { action: "cancel", session: options.session };
+}
+
+function formatElapsed(elapsedMs: number): string {
+  const seconds = Math.max(0, Math.floor(elapsedMs / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 }
 
 function cycleRoleLocal(role: RefineRole, direction: 1 | -1): RefineRole {

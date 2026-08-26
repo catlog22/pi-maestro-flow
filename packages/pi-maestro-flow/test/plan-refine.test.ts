@@ -19,7 +19,7 @@ import { renderRefineOverlay } from "../src/tui/plan-refine-overlay.ts";
 const PLAN = "# Plan\n\n- Step one\n- Step two";
 
 function createOverlayHarness() {
-  let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
+  let component: { render(width: number): string[]; handleInput(data: string): void; dispose(): void } | undefined;
   let doneResolve: ((value: unknown) => void) | undefined;
   const donePromise = new Promise<unknown>((resolve) => { doneResolve = resolve; });
   const tui = { requestRender() {} };
@@ -138,6 +138,147 @@ test("Review & Refine overlay scrolls long previews and keeps shortcut compatibi
   harness.component.handleInput("d");
   const result = await pending;
   assert.equal(result.action, "done");
+});
+
+test("Review & Refine Up/Down browses the preview before moving between controls", async () => {
+  const harness = createOverlayHarness();
+  const session = overlaySession();
+  const pending = renderRefineOverlay(harness.ctx, {
+    markdown: Array.from({ length: 50 }, (_, index) => `Plan line ${index + 1}`).join("\n\n"),
+    session,
+    roles: REFINE_ROLES,
+    async pickModel() { return undefined; },
+    async run() { return { ok: true, output: "reviewed" }; },
+  });
+  assert.ok(harness.component);
+  assert.match(harness.component.render(80).join("\n"), /Plan · 1-/);
+
+  harness.component.handleInput("\x1b[B");
+  let rendered = harness.component.render(80).join("\n");
+  assert.match(rendered, /Plan · 2-/);
+  assert.match(rendered, /› Run review\/refine/);
+  harness.component.handleInput("\x1b[A");
+  rendered = harness.component.render(80).join("\n");
+  assert.match(rendered, /Plan · 1-/);
+  assert.match(rendered, /› Run review\/refine/);
+
+  for (let index = 0; index < 30; index++) harness.component.handleInput("\x1b[6~");
+  harness.component.handleInput("\x1b[B");
+  assert.match(harness.component.render(80).join("\n"), /› Done/);
+  harness.component.handleInput("d");
+  const result = await pending;
+  assert.equal(result.action, "done");
+});
+
+test("Review & Refine shows elapsed time and Esc aborts only the active run", async () => {
+  const harness = createOverlayHarness();
+  const session = overlaySession();
+  const parent = new AbortController();
+  let clock = 10_000;
+  let runSignal: AbortSignal | undefined;
+  let resolveRun: ((result: { ok: true; output: string }) => void) | undefined;
+  const pending = renderRefineOverlay(harness.ctx, {
+    markdown: PLAN,
+    session,
+    roles: REFINE_ROLES,
+    signal: parent.signal,
+    now: () => clock,
+    async pickModel() { return undefined; },
+    async run(_role, _model, _label, _userInput, signal) {
+      runSignal = signal;
+      return new Promise((resolve) => { resolveRun = resolve; });
+    },
+  });
+  assert.ok(harness.component);
+  harness.component.handleInput("\r");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(runSignal);
+  assert.notEqual(runSignal, parent.signal);
+  assert.equal(runSignal.aborted, false);
+
+  clock = 22_345;
+  assert.match(harness.component.render(80).join("\n"), /Running .* 12s · Esc cancel/);
+  harness.component.handleInput("\x1b");
+  assert.equal(runSignal.aborted, true);
+  assert.equal(parent.signal.aborted, false);
+  assert.match(harness.component.render(80).join("\n"), /cancelled/);
+
+  resolveRun?.({ ok: true, output: "late output" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(session.turns.length, 0, "a cancelled run must discard late output");
+  harness.component.handleInput("d");
+  const result = await pending;
+  assert.equal(result.action, "done");
+  assert.equal(result.latestOutput, undefined);
+});
+
+test("Review & Refine composes the parent abort signal into each run", async () => {
+  const harness = createOverlayHarness();
+  const session = overlaySession();
+  const parent = new AbortController();
+  let runSignal: AbortSignal | undefined;
+  const pending = renderRefineOverlay(harness.ctx, {
+    markdown: PLAN,
+    session,
+    roles: REFINE_ROLES,
+    signal: parent.signal,
+    async pickModel() { return undefined; },
+    async run(_role, _model, _label, _userInput, signal) {
+      runSignal = signal;
+      return new Promise(() => {});
+    },
+  });
+  assert.ok(harness.component);
+  harness.component.handleInput("\r");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(runSignal);
+
+  parent.abort();
+  assert.equal(runSignal.aborted, true);
+  const result = await pending;
+  assert.equal(result.action, "cancel");
+});
+
+test("Review & Refine settles as cancelled when the parent aborts while idle", async () => {
+  const harness = createOverlayHarness();
+  const parent = new AbortController();
+  const pending = renderRefineOverlay(harness.ctx, {
+    markdown: PLAN,
+    session: overlaySession(),
+    roles: REFINE_ROLES,
+    signal: parent.signal,
+    async pickModel() { return undefined; },
+    async run() { return { ok: true, output: "unused" }; },
+  });
+  parent.abort();
+  assert.equal((await pending).action, "cancel");
+});
+
+test("Review & Refine disposal aborts the run and settles the overlay", async () => {
+  const harness = createOverlayHarness();
+  const session = overlaySession();
+  let runSignal: AbortSignal | undefined;
+  let resolveRun: ((result: { ok: true; output: string }) => void) | undefined;
+  const pending = renderRefineOverlay(harness.ctx, {
+    markdown: PLAN,
+    session,
+    roles: REFINE_ROLES,
+    async pickModel() { return undefined; },
+    async run(_role, _model, _label, _userInput, signal) {
+      runSignal = signal;
+      return new Promise((resolve) => { resolveRun = resolve; });
+    },
+  });
+  assert.ok(harness.component);
+  harness.component.handleInput("\r");
+  await new Promise((resolve) => setImmediate(resolve));
+  harness.component.dispose();
+
+  assert.equal(runSignal?.aborted, true);
+  assert.equal((await pending).action, "cancel");
+  resolveRun?.({ ok: true, output: "late output" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(session.turns.length, 0);
 });
 
 test("REFINE_ROLES defines four roles with distinct labels and appliesAs", () => {

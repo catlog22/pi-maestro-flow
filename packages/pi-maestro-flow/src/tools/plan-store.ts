@@ -70,6 +70,13 @@ export interface LoadedPlan {
   plansDir: string;
 }
 
+export interface LoadedApprovedPlan {
+  markdown: string;
+  manifest: PlanManifest;
+  approvedPath: string;
+  plansDir: string;
+}
+
 export interface PlanApprovalOptions {
   inheritedHandoffKey?: string;
   execution?: PlanExecutionChoice;
@@ -238,6 +245,38 @@ export class PlanStore {
       };
     }
     return this.load();
+  }
+
+  /**
+   * Read and validate the immutable approved archive without recovery, locking,
+   * chmod, or any other storage mutation.
+   */
+  async loadApprovedSnapshotReadOnly(): Promise<LoadedApprovedPlan> {
+    const manifestDetails = await lstat(this.manifestPath);
+    if (manifestDetails.isSymbolicLink() || !manifestDetails.isFile()) {
+      throw new Error(`Plan manifest path must be a regular file: ${this.manifestPath}`);
+    }
+    const raw: unknown = JSON.parse(await readFile(this.manifestPath, "utf8"));
+    const manifest = validateManifest(raw, this.workspaceId, this.workspacePath, this.sessionId);
+    if (
+      manifest.status !== "approved"
+      || !manifest.approvedPath
+      || !manifest.approvedChecksum
+      || !manifest.handoffKey
+    ) {
+      throw new Error("Plan has no complete approved snapshot");
+    }
+
+    const approvedPath = join(this.plansDir, manifest.approvedPath);
+    const archiveDetails = await lstat(approvedPath);
+    if (archiveDetails.isSymbolicLink() || !archiveDetails.isFile()) {
+      throw new Error(`Approved Plan path must be a regular file: ${approvedPath}`);
+    }
+    const markdown = await readFile(approvedPath, "utf8");
+    if (checksumText(markdown) !== manifest.approvedChecksum) {
+      throw new Error("Approved Plan archive checksum does not match its manifest");
+    }
+    return { markdown, manifest, approvedPath, plansDir: this.plansDir };
   }
 
   async saveDraft(markdown: string, expectedRevision?: number): Promise<LoadedPlan> {

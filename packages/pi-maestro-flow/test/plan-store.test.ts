@@ -908,3 +908,36 @@ test("PlanStore prunes the draft history to the configured limit", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("read-only approved snapshot validates the archive without repairing storage", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-approved-readonly-"));
+  try {
+    const missingStore = new PlanStore(join(root, "missing-workspace"), { rootDir: join(root, "global") });
+    const missingApproved = await missingStore.approve("# Missing archive", 0);
+    const missingManifestBefore = await readFile(missingStore.manifestPath, "utf8");
+    await rm(join(missingStore.plansDir, missingApproved.manifest.approvedPath!), { force: true });
+    const missingEntriesBefore = (await readdir(missingStore.plansDir, { recursive: true })).sort();
+
+    await assert.rejects(
+      () => missingStore.loadApprovedSnapshotReadOnly(),
+      /ENOENT|no such file|cannot find/i,
+    );
+    assert.equal(await readFile(missingStore.manifestPath, "utf8"), missingManifestBefore);
+    assert.deepEqual((await readdir(missingStore.plansDir, { recursive: true })).sort(), missingEntriesBefore);
+
+    const tamperedStore = new PlanStore(join(root, "tampered-workspace"), { rootDir: join(root, "global") });
+    const tamperedApproved = await tamperedStore.approve("# Original archive", 0);
+    const tamperedManifestBefore = await readFile(tamperedStore.manifestPath, "utf8");
+    await writeFile(join(tamperedStore.plansDir, tamperedApproved.manifest.approvedPath!), "# Tampered archive", "utf8");
+    const tamperedEntriesBefore = (await readdir(tamperedStore.plansDir, { recursive: true })).sort();
+
+    await assert.rejects(
+      () => tamperedStore.loadApprovedSnapshotReadOnly(),
+      /checksum does not match/,
+    );
+    assert.equal(await readFile(tamperedStore.manifestPath, "utf8"), tamperedManifestBefore);
+    assert.deepEqual((await readdir(tamperedStore.plansDir, { recursive: true })).sort(), tamperedEntriesBefore);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

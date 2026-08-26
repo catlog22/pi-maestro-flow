@@ -49,10 +49,8 @@ export interface PlanConfirmationOptions {
   contextPercent?: number;
   defaultExecution?: PlanExecutionChoice;
   workflow?: PlanWorkflowConfirmationOptions;
-  /** Latest refine-panel output for the current Plan revision, shown in its own preview panel. */
-  refineOutput?: string;
-  /** Display label of the role that produced refineOutput. */
-  refineRoleLabel?: string;
+  /** Metadata indicating that the current Plan revision has an attached refine result. */
+  refine?: { roleLabel?: string };
   /** Archived draft revisions available for rollback. */
   drafts?: { revision: number; archivedAt: string; checksum: string }[];
 }
@@ -68,8 +66,6 @@ type SelectionRow =
   | { kind: "target" }
   | { kind: "context" }
   | { kind: "action"; item: ActionItem };
-
-type PreviewMode = "plan" | "refine";
 
 const CTRL_ENTER_SEQUENCES = new Set([
   "\x1b[13;5u",
@@ -104,29 +100,21 @@ export async function openPlanConfirmation(
           : []),
         { action: "continue", label: "Continue discussion", description: "Enter feedback or a question" },
         { action: "exit-plan", label: "Exit Plan mode", description: "Keep the draft without approval" },
-        ...(options.refineOutput
+        ...(options.refine
           ? [
               { action: "apply-refine" as const, label: "Apply refine result", description: "Write the refine output back into the Plan draft" },
               { action: "cancel-refine" as const, label: "Discard refine result", description: "Drop the refine output and return to the Plan preview" },
             ]
           : []),
       ];
-      let previewMode: PreviewMode = options.refineOutput ? "refine" : "plan";
-      let markdown = new Markdown(currentPreviewSource(), 0, 0, markdownTheme(theme));
+      const markdown = new Markdown(options.markdown, 0, 0, markdownTheme(theme));
       let selected = 0;
       let previewOffset = 0;
       let previewMaxOffset = 0;
-      let status = options.refineOutput
-        ? `Refine result attached (${options.refineRoleLabel ?? "refine"}) — R switches Plan/Refine, PgUp/PgDn scrolls`
+      let status = options.refine
+        ? `Refine result attached (${options.refine.roleLabel ?? "refine"}); Apply or Discard it below`
         : "";
       let lastWidth = 80;
-
-      function currentPreviewSource(): string {
-        if (previewMode === "refine") {
-          return options.refineOutput ?? "";
-        }
-        return options.markdown;
-      }
 
       const rows = (): SelectionRow[] => [
         { kind: "backend" },
@@ -234,7 +222,6 @@ export async function openPlanConfirmation(
             "←→ change mode",
             "↑↓ navigate",
             "Ctrl+Enter execute",
-            ...(options.refineOutput ? [previewMode === "plan" ? "R: view refine" : "R: back to Plan"] : []),
             "PgUp/PgDn scroll",
           ]);
           const rendered = [
@@ -243,13 +230,7 @@ export async function openPlanConfirmation(
             ...preview.map((line) => ` ${line}`),
           ];
           while (rendered.length < previewHeight + 2) rendered.push("");
-          const modeLabel = previewMode === "refine"
-            ? `Refine (${options.refineRoleLabel ?? "refine"})`
-            : "Plan";
-          const toggleHint = options.refineOutput
-            ? `   R: ${previewMode === "plan" ? "view refine" : "back to Plan"}`
-            : "";
-          rendered.push(theme.fg("dim", `${modeLabel} ${range}${toggleHint}`));
+          rendered.push(theme.fg("dim", `Plan ${range}`));
           rendered.push(theme.fg("dim", "─".repeat(innerWidth)));
           for (let index = 0; index < selectionRows.length; index++) {
             const row = selectionRows[index]!;
@@ -290,14 +271,6 @@ export async function openPlanConfirmation(
             previewOffset = Math.max(0, previewOffset - 5);
           } else if (matchesKey(data, Key.pageDown)) {
             previewOffset = Math.min(previewMaxOffset, previewOffset + 5);
-          } else if (/^[rR]$/.test(data) && options.refineOutput) {
-            previewMode = previewMode === "plan" ? "refine" : "plan";
-            markdown = new Markdown(currentPreviewSource(), 0, 0, markdownTheme(theme));
-            previewOffset = 0;
-            previewMaxOffset = 0;
-            status = previewMode === "refine"
-              ? `Viewing refine result (${options.refineRoleLabel ?? "refine"}) — R returns to Plan`
-              : "Viewing the Plan — R opens refine";
           } else if (/^[1-9]$/.test(data)) {
             const index = Number(data) - 1;
             if (index < actions.length) {

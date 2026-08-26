@@ -82,6 +82,7 @@ function createHarness(
     idle?: boolean;
     arbiter?: CompactionArbiter;
     deferCompactionComplete?: boolean;
+    onCompactionRequested?: () => void;
     workflowConfirmation?: () => {
       current?: { sessionId: string; intent: string; available: boolean; reason?: string };
       allowNew: boolean;
@@ -102,6 +103,7 @@ function createHarness(
   const messages: string[] = [];
   const messageOptions: Array<{ deliverAs?: string } | undefined> = [];
   const notifications: string[] = [];
+  const attentionRequests: Array<{ id: string; kind: string; subject?: string }> = [];
   const statuses: Array<string | undefined> = [];
   const compactions: Array<{
     customInstructions?: string;
@@ -160,6 +162,7 @@ function createHarness(
       onError?: (error: Error) => void;
     }) {
       compactions.push(options);
+      runtime.onCompactionRequested?.();
       if (!runtime.deferCompactionComplete) setImmediate(() => options.onComplete?.({}));
     },
     sessionManager: {
@@ -239,7 +242,9 @@ function createHarness(
       ? { publishWorkflowPlan: (_ctx, approved, execution) => runtime.publishWorkflowPlan!(approved, execution) }
       : {}),
   });
-  registerPlanTools(pi);
+  registerPlanTools(pi, {
+    onUserAttention(request) { attentionRequests.push(request); },
+  });
   registerPlanCommand(pi);
   return {
     pi,
@@ -249,6 +254,7 @@ function createHarness(
     messages,
     messageOptions,
     notifications,
+    attentionRequests,
     statuses,
     compactions,
     get aborts() { return aborts; },
@@ -280,9 +286,97 @@ test("Plan tool descriptions match the prompt-only mode lifecycle", async () => 
     assert.doesNotMatch(harness.tools.get("plan-exit")?.description ?? "", /restore the exact prior active tool set/);
     assert.match(harness.tools.get("plan-status")?.description ?? "", /while Plan mode is active/);
     assert.match(harness.tools.get("plan-review")?.description ?? "", /interactive UI/);
+    assert.match(harness.tools.get("plan-decompose")?.description ?? "", /main-flow decomposition prompt/);
+    assert.match(harness.tools.get("plan-decompose")?.description ?? "", /exact approved handoff key/);
+    assert.match(harness.tools.get("plan-decompose")?.description ?? "", /creates no files, Todos, messages, or agents/);
     const updateParams = harness.tools.get("plan-update")?.parameters as { properties?: Record<string, { description?: string }> };
     assert.match(updateParams?.properties?.expectedRevision?.description ?? "", /optimistic concurrency/);
     assert.match(updateParams?.properties?.expectedRevision?.description ?? "", /currently loaded revision/);
+  } finally {
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("plan-decompose requires Act plus exact approval and returns a side-effect-free main-flow prompt", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-decompose-contract-"));
+  const harness = createHarness(root, true);
+  try {
+    await onSessionStartPlan(harness.ctx);
+    const beforeApproval = await execute(harness, "plan-decompose", {
+      planHandoffKey: "not-approved",
+    });
+    assert.equal(beforeApproval.details.error, "E_PLAN_APPROVAL_REQUIRED");
+
+    await execute(harness, "plan-enter");
+    const whilePlanning = await execute(harness, "plan-decompose", {
+      planHandoffKey: "not-approved",
+    });
+    assert.equal(whilePlanning.details.error, "E_PLAN_ACT_MODE_REQUIRED");
+
+    await execute(harness, "plan-update", { markdown: "# Approved decomposition\n\nTwo ordered steps" });
+    const confirmed = await execute(harness, "plan-confirm");
+    const handoffKey = confirmed.details.handoffKey as string;
+    assert.ok(handoffKey);
+    assert.equal(getMode(), "act");
+
+    const wrongKey = await execute(harness, "plan-decompose", {
+      planHandoffKey: `${handoffKey}-wrong`,
+    });
+    assert.equal(wrongKey.details.error, "E_PLAN_HANDOFF_KEY_MISMATCH");
+
+    const activeBefore = [...harness.active];
+    const statusesBefore = [...harness.statuses];
+    const decomposed = await execute(harness, "plan-decompose", {
+      planHandoffKey: handoffKey,
+    });
+    const text = decomposed.content[0]?.text ?? "";
+    assert.equal(decomposed.details.error, undefined);
+    assert.equal(decomposed.details.mode, "act");
+    assert.equal(decomposed.details.status, "approved");
+    assert.equal(decomposed.details.handoffKey, handoffKey);
+    assert.match(text, /converts it into the execution plan/);
+    assert.match(text, /Approved Plan source:/);
+    assert.match(text, /Approved checksum:/);
+    assert.match(text, new RegExp(handoffKey));
+    assert.match(text, /this batch IS the execution plan and the authoritative persisted record/);
+    assert.match(text, /executing agent's independent work document/);
+    assert.match(text, /do not delegate the decomposition step to a planner, decomposer, teammate/);
+    assert.match(text, /has not created files, Todos, messages, or agents/);
+    assert.deepEqual(harness.messages, []);
+    assert.deepEqual(harness.active, activeBefore);
+    assert.deepEqual(harness.statuses, statusesBefore);
+    assert.equal(getPlanHandoffStatus(), "todo-required");
+  } finally {
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("plan-decompose fences a contract superseded by a newer Plan operation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-decompose-fence-"));
+  const harness = createHarness(root, true);
+  try {
+    await onSessionStartPlan(harness.ctx);
+    await execute(harness, "plan-enter");
+    await execute(harness, "plan-update", { markdown: "# Approved decomposition" });
+    const confirmed = await execute(harness, "plan-confirm");
+    const handoffKey = confirmed.details.handoffKey as string;
+
+    let reads = 0;
+    let supersedingOperation: Promise<unknown> | undefined;
+    const stale = await execute(harness, "plan-decompose", {
+      get planHandoffKey() {
+        reads++;
+        if (reads === 2) supersedingOperation = execute(harness, "plan-enter");
+        return handoffKey;
+      },
+    });
+    await supersedingOperation;
+
+    assert.equal(stale.details.error, "E_PLAN_OPERATION_SUPERSEDED");
+    assert.equal(getMode(), "plan");
+    assert.deepEqual(harness.messages, []);
   } finally {
     onSessionShutdownPlan(harness.ctx);
     await rm(root, { recursive: true, force: true });
@@ -297,8 +391,8 @@ test("Plan lifecycle leaves the tool surface untouched across every transition",
     assert.equal(harness.statuses.at(-1), "ACT");
     const actSnapshot = [...harness.active];
     // Session start is the one point that touches the surface, and it only tops
-    // up the Plan tools so all six stay callable in both modes.
-    for (const tool of ["plan-enter", "plan-update", "plan-review", "plan-confirm", "plan-exit", "plan-status"]) {
+    // up the Plan tools so all seven stay callable on the stable surface.
+    for (const tool of ["plan-enter", "plan-update", "plan-review", "plan-confirm", "plan-decompose", "plan-exit", "plan-status"]) {
       assert.ok(actSnapshot.includes(tool), `expected ${tool} on the Act surface`);
     }
     assert.ok(actSnapshot.includes("Write"));
@@ -373,28 +467,29 @@ test("Plan confirmation archives the exact draft before restoring Act and inject
     await execute(harness, "plan-enter");
     await execute(harness, "plan-update", { markdown: "# Approved\n\nImplement safely" });
     const confirmed = await execute(harness, "plan-confirm");
+    assert.equal(harness.attentionRequests.length, 1);
+    assert.equal(harness.attentionRequests[0]?.kind, "plan-confirm");
+    assert.match(harness.attentionRequests[0]?.id ?? "", /plan-confirm:session-main/);
     assert.equal(confirmed.details.approved, true);
     assert.equal(confirmed.details.handoffStatus, "todo-required");
     assert.equal(getMode(), "act");
     assert.equal(harness.statuses.at(-1), "ACT");
     assert.deepEqual(harness.active, actSnapshot);
-    assert.equal(harness.messages.length, 1);
-    assert.deepEqual(harness.messageOptions, [{ deliverAs: "followUp" }]);
+    assert.equal(harness.messages.length, 0);
+    assert.deepEqual(harness.messageOptions, []);
     const toolText = confirmed.content[0]?.text ?? "";
-    assert.match(toolText, /Execution handoff queued/);
-    assert.doesNotMatch(toolText, /Knowledge Gate|Todo dependency graph|Prefer the teammate tool/);
-    const executionMessage = harness.messages[0] ?? "";
-    assert.match(executionMessage, /selected Execute/);
-    assert.match(executionMessage, /without another user prompt|Do not ask the user/);
-    assert.match(executionMessage, /Prefer the teammate tool/);
-    assert.doesNotMatch(executionMessage, /# Approved/);
-    assert.match(executionMessage, /already in the current context/);
-    assert.match(executionMessage, /Knowledge Gate/);
-    assert.match(executionMessage, /maestro search/);
-    assert.match(executionMessage, /maestro load/);
-    assert.match(executionMessage, /Todo dependency graph/);
-    assert.match(executionMessage, /quality gate/);
-    assert.match(executionMessage, /acceptance criteria/);
+    assert.doesNotMatch(toolText, /Execution handoff queued/);
+    assert.match(toolText, /selected Execute/);
+    assert.match(toolText, /without another user prompt|Do not ask the user/);
+    assert.match(toolText, /Prefer the teammate tool/);
+    assert.doesNotMatch(toolText, /# Approved/);
+    assert.match(toolText, /already in the current context/);
+    assert.match(toolText, /Knowledge Gate/);
+    assert.match(toolText, /maestro search/);
+    assert.match(toolText, /maestro load/);
+    assert.match(toolText, /Todo dependency graph/);
+    assert.match(toolText, /quality gate/);
+    assert.match(toolText, /acceptance criteria/);
 
     const store = new PlanStore(harness.ctx.cwd, {
       rootDir: join(root, "global"),
@@ -565,12 +660,14 @@ test("plan-confirm tool compacts the current Pi session without replacing it", a
     await execute(harness, "plan-enter");
     await execute(harness, "plan-update", { markdown: "# Compact Tool Plan" });
     const confirmed = await execute(harness, "plan-confirm");
+    const toolText = confirmed.content[0]?.text ?? "";
     assert.equal(confirmed.details.approved, true);
     assert.equal(harness.compactions.length, 1);
     assert.match(harness.compactions[0]?.customInstructions ?? "", /authoritative execution contract/);
     assert.doesNotMatch(harness.compactions[0]?.customInstructions ?? "", /maestro-plan-clean-context/);
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(harness.messages.length, 1);
+    assert.equal(harness.messages.length, 0);
+    assert.match(toolText, /selected Execute/);
+    assert.match(toolText, /Knowledge Gate/);
     assert.equal(getMode(), "act");
     assert.equal(harness.aborts, 0);
   } finally {
@@ -654,12 +751,11 @@ test("Workflow-backed approval persists a bound result before delivering the Run
     assert.equal(confirmed.details.approved, true);
     assert.equal(confirmed.details.workflowBinding?.status, "bound");
     assert.equal(confirmed.details.workflowBinding?.deliveryStatus, "delivered");
-    assert.doesNotMatch(text, /WORKFLOW RUN BRIEF/);
+    assert.match(text, /WORKFLOW RUN BRIEF/);
     assert.match(text, /workflow/);
-    assert.equal(harness.messages.length, 1);
-    assert.match(harness.messages[0] ?? "", /WORKFLOW RUN BRIEF/);
-    assert.match(harness.messages[0] ?? "", /selected Execute/);
-    assert.deepEqual(harness.messageOptions, [{ deliverAs: "followUp" }]);
+    assert.match(text, /selected Execute/);
+    assert.equal(harness.messages.length, 0);
+    assert.deepEqual(harness.messageOptions, []);
   } finally {
     onSessionShutdownPlan(harness.ctx);
     await rm(root, { recursive: true, force: true });
@@ -816,7 +912,7 @@ test("Plan confirmation exits intentionally and injects the Act transition once 
   }
 });
 
-test("Continue discussion opens text input, queues the response, and interrupts the turn", async () => {
+test("Continue discussion returns feedback through the tool result without injection", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-confirm-discuss-"));
   const harness = createHarness(
     root,
@@ -838,8 +934,10 @@ test("Continue discussion opens text input, queues the response, and interrupts 
     const confirmed = await execute(harness, "plan-confirm");
     assert.equal(confirmed.details.approved, false);
     assert.equal(getMode(), "plan");
-    assert.deepEqual(harness.messages, ["Keep the API compatible"]);
-    assert.equal(harness.aborts, 1);
+    assert.deepEqual(harness.messages, []);
+    assert.equal(harness.aborts, 0);
+    assert.match(confirmed.content[0]?.text ?? "", /Plan feedback returned/);
+    assert.match(confirmed.content[0]?.text ?? "", /Keep the API compatible/);
   } finally {
     onSessionShutdownPlan(harness.ctx);
     await rm(root, { recursive: true, force: true });
@@ -1651,24 +1749,32 @@ test("reverse-order Workflow publication cannot bind or deliver after a newer Pl
 
 test("newer Plan operation fences a delayed compact delivery callback", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-reverse-delivery-"));
+  let signalCompactionStarted: (() => void) | undefined;
+  const compactionStarted = new Promise<void>((resolve) => { signalCompactionStarted = resolve; });
   const harness = createHarness(
     root, false, false, false, false, "reverse-delivery-chat", COMPACT_EXECUTION_INPUTS,
     false, { todoKeys: [] }, undefined,
-    { arbiter: new CompactionArbiter(), deferCompactionComplete: true },
+    {
+      arbiter: new CompactionArbiter(),
+      deferCompactionComplete: true,
+      onCompactionRequested: () => signalCompactionStarted?.(),
+    },
   );
 
   try {
     await onSessionStartPlan(harness.ctx);
     await execute(harness, "plan-enter");
     await execute(harness, "plan-update", { markdown: "# Compact delivery candidate" });
-    const approved = await execute(harness, "plan-confirm");
-    assert.equal(approved.details.approved, true);
+    const staleApproval = execute(harness, "plan-confirm");
+    await compactionStarted;
     assert.equal(harness.compactions.length, 1);
 
     await execute(harness, "plan-enter");
     await execute(harness, "plan-update", { markdown: "# Newer draft before delivery" });
     harness.compactions[0]?.onComplete?.({});
+    const approved = await staleApproval;
 
+    assert.equal(approved.details.error, "E_PLAN_OPERATION_SUPERSEDED");
     assert.equal(harness.messages.length, 0);
     assert.equal(getMode(), "plan");
     assert.equal(getPlanText(), "# Newer draft before delivery");
@@ -1694,7 +1800,7 @@ test("Session restart stays in Act and resumes the persisted draft only after pl
     // A restart tops the Plan tools up onto whatever surface the host declares; it
     // never removes anything, so Write survives here exactly as it does in Plan mode.
     assert.ok(second.active.includes("Write"));
-    for (const tool of ["plan-enter", "plan-update", "plan-review", "plan-confirm", "plan-exit", "plan-status"]) {
+    for (const tool of ["plan-enter", "plan-update", "plan-review", "plan-confirm", "plan-decompose", "plan-exit", "plan-status"]) {
       assert.ok(second.active.includes(tool), `expected ${tool} after restart`);
     }
     await execute(second, "plan-enter");
@@ -1778,6 +1884,8 @@ test("Reinitializing Plan restores a leaked tool snapshot and resets module stat
 
 test("Plan compact execution keeps the current Pi session and creates no clean-context replacement", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-compact-current-session-"));
+  let signalCompactionStarted: (() => void) | undefined;
+  const compactionStarted = new Promise<void>((resolve) => { signalCompactionStarted = resolve; });
   const harness = createHarness(
     root,
     false,
@@ -1789,15 +1897,19 @@ test("Plan compact execution keeps the current Pi session and creates no clean-c
     true,
     { todoKeys: [] },
     undefined,
-    { arbiter: new CompactionArbiter(), deferCompactionComplete: true },
+    {
+      arbiter: new CompactionArbiter(),
+      deferCompactionComplete: true,
+      onCompactionRequested: () => signalCompactionStarted?.(),
+    },
   );
   try {
     await onSessionStartPlan(harness.ctx);
     await execute(harness, "plan-enter");
     await execute(harness, "plan-update", { markdown: "# Compact Current Session Plan" });
-    const confirmed = await execute(harness, "plan-confirm");
+    const confirmation = execute(harness, "plan-confirm");
+    await compactionStarted;
 
-    assert.equal(confirmed.details.approved, true);
     assert.equal(harness.newSessions, 0);
     assert.equal(harness.compactions.length, 1);
     assert.match(harness.compactions[0]?.customInstructions ?? "", /maestro-compaction-owner:plan-handoff/);
@@ -1805,16 +1917,20 @@ test("Plan compact execution keeps the current Pi session and creates no clean-c
     assert.equal(consumePlanCleanContextCompaction(), undefined);
 
     harness.compactions[0]?.onComplete?.({});
-    assert.equal(harness.messages.length, 1);
-    assert.match(harness.messages[0] ?? "", /approved Plan/i);
+    const confirmed = await confirmation;
+    assert.equal(confirmed.details.approved, true);
+    assert.equal(harness.messages.length, 0);
+    assert.match(confirmed.content[0]?.text ?? "", /selected Execute/);
   } finally {
     onSessionShutdownPlan(harness.ctx);
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("Nothing to compact falls back to execution in the current Pi context", async () => {
+test("Nothing to compact returns execution in the plan-confirm tool result", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-small-context-"));
+  let signalCompactionStarted: (() => void) | undefined;
+  const compactionStarted = new Promise<void>((resolve) => { signalCompactionStarted = resolve; });
   const harness = createHarness(
     root,
     false,
@@ -1826,16 +1942,23 @@ test("Nothing to compact falls back to execution in the current Pi context", asy
     false,
     { todoKeys: [] },
     undefined,
-    { arbiter: new CompactionArbiter(), deferCompactionComplete: true },
+    {
+      arbiter: new CompactionArbiter(),
+      deferCompactionComplete: true,
+      onCompactionRequested: () => signalCompactionStarted?.(),
+    },
   );
   try {
     await onSessionStartPlan(harness.ctx);
     await execute(harness, "plan-enter");
     await execute(harness, "plan-update", { markdown: "# Small Session Plan" });
-    await execute(harness, "plan-confirm");
+    const confirmation = execute(harness, "plan-confirm");
+    await compactionStarted;
     harness.compactions[0]?.onError?.(new Error("Nothing to compact (session too small)"));
+    const confirmed = await confirmation;
 
-    assert.equal(harness.messages.length, 1);
+    assert.equal(harness.messages.length, 0);
+    assert.match(confirmed.content[0]?.text ?? "", /selected Execute/);
     assert.match(harness.notifications.join("\n"), /executing with the current context/);
     assert.equal(onContextPlan([{ role: "user", content: "old", timestamp: 1 }] as never), undefined);
     assert.equal(consumePlanCleanContextCompaction(), undefined);
