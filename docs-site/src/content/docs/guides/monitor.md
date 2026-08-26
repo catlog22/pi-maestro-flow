@@ -80,9 +80,10 @@ Owner 身份是安全边界。窗口关闭或被替换后，Agent 必须重新�
 1. `create` 默认打开可交互终端，并且只投递一次任务目标；
 2. 调用等待精确 workspace owner 注册成功后，返回 `owner:<ownerId>`；
 3. 返回的 owner 可直接用于 `observe` 和 `teammate-send`；
-4. `close` 仅能操作当前 Monitor 会话创建的窗口，并验证进程确实已经回收。
+4. 可选 completion handle 指向不可变的 `agent://` 结果，worker 退出后仍可读取；
+5. `close` 仅能操作当前 Monitor 会话创建的窗口，并验证进程确实已经回收。
 
-`create` 后不要重复发送初始目标；后续消息只应携带新约束、纠正或明确的回复请求。
+`create` 后不要重复发送初始目标；后续消息只应携带新约束、纠正或明确的回复请求。完成结果尚未收集或工作尚未取消时，应保留 completion handle。
 
 Monitor 不能关闭用户手工打开的 peer，也不能关闭其他 Monitor 会话拥有的 worker。无法证明所有权或进程回收时，关闭操作会报告错误，不会对陈旧的进程身份执行操作。
 

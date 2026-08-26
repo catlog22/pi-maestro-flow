@@ -80,9 +80,10 @@ For natural-language requests to create a worker, the agent uses `workspace-wind
 1. `create` opens an interactive terminal by default and delivers the objective once;
 2. the call waits for exact workspace-owner registration before returning `owner:<ownerId>`;
 3. the returned owner is used directly with `observe` and `teammate-send`;
-4. `close` is restricted to windows created by the current Monitor session and verifies process reclamation.
+4. the optional completion handle identifies an immutable `agent://` result that remains readable after the worker exits;
+5. `close` is restricted to windows created by the current Monitor session and verifies process reclamation.
 
-Do not resend the initial objective after `create`; send only new constraints, corrections, or explicit response requests.
+Do not resend the initial objective after `create`; send only new constraints, corrections, or explicit response requests. Keep the completion handle until the result has been collected or the work has been cancelled.
 
 Monitor can never close a manually opened peer or a worker owned by another Monitor session. If ownership or process reclamation cannot be proven, the close operation reports an error instead of acting on a stale process identity.
 

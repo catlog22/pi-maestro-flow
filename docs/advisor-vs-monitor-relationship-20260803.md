@@ -38,7 +38,7 @@ kind: analysis
 - **形态**：`/monitor` 是用户控制的根模式，具有 enter/exit 生命周期和 `#control` 控制页。进入后，系统提示要求根 Agent 专注于协调，不在控制窗口中实现项目工作。
 - **命令面**：保留 `/monitor`、`/monitor status`、`/monitor doctor`、`/monitor exit|stop` 和 `/monitor spawn ...`。`status` 显示当前会话拥有的本地/远端资源；`doctor` 只读报告模式、工具开放和可见资源。
 - **已有本地窗口**：根 Agent 通过 `teammate-list({ view: "windows" })` 发现同工作区 Pi 根会话，以精确的 `owner:<ownerId>` 身份直接 `observe` 和 `teammate-send`。窗口被替换后必须重新发现，不能凭名称沿用旧身份。
-- **新建本地窗口**：`workspace-window create` 默认打开交互终端，投递一次任务目标，并等待精确 workspace owner 注册。返回的 owner 可直接观察和发消息。
+- **新建本地窗口**：`workspace-window create` 默认打开交互终端，投递一次任务目标，并等待精确 workspace owner 注册。返回的 owner 可直接观察和发消息；completion handle 指向 worker 退出后仍可读取的不可变 `agent://` 结果。
 - **所有权边界**：`workspace-window close` 只能回收当前 Monitor 会话创建的窗口。手工打开或由其他 Monitor 创建的 peer 只能观察和发消息，不能关闭。
 - **远端任务**：`remote-worker` 在 SSH 握手、能力协商和所有权接纳成功后创建 `remote:<runId>`。远端任务以 `kind: "remote"` 观察，并由 `remote-worker close` 执行生命周期取消。
 - **消息语义**：非紧急工作使用 `follow_up`，时效性纠正使用 `steer`。消息进入队列或被接收不代表模型已经消费；重复发送前要等待目标侧或状态变化证据。
