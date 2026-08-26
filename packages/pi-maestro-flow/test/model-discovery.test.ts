@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
-import { discoverModels, modelsUrlForProvider } from "../src/providers/model-discovery.ts";
+import {
+  discoverModels,
+  loadModelSpecs,
+  lookupModelSpec,
+  modelsUrlForProvider,
+  normalizeModelId,
+} from "../src/providers/model-discovery.ts";
 
 /** Start an ephemeral HTTP server that records the last request and replies with `body`. */
 async function startServer(
@@ -158,5 +167,142 @@ test("discoverModels deduplicates repeated model ids", async () => {
     assert.deepEqual(models.map((m) => m.id), ["dup", "uniq"]);
   } finally {
     await srv.close();
+  }
+});
+
+// ============================================================================
+// Reference specs from models.dev
+// ============================================================================
+
+const SPECS_PAYLOAD = {
+  openai: { models: { "gpt-5.6-sol": { limit: { context: 400_000, output: 128_000 } } } },
+  anthropic: { models: { "anthropic/claude-opus-5": { limit: { context: 200_000, output: 64_000 } } } },
+};
+
+function startSpecsServer(payload: unknown, status = 200): Promise<{ server: Server; url: string; close: () => Promise<void>; hits: () => number }> {
+  let hits = 0;
+  return new Promise((resolve) => {
+    const server = createServer((req, res) => {
+      hits += 1;
+      res.writeHead(status, { "content-type": "application/json" });
+      res.end(JSON.stringify(payload));
+    });
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("server did not bind");
+      resolve({
+        server,
+        url: `http://127.0.0.1:${address.port}/api.json`,
+        close: () => new Promise((done) => server.close(() => done())),
+        hits: () => hits,
+      });
+    });
+  });
+}
+
+function specsTestDir(): { dir: string; cachePath: string; cleanup: () => void } {
+  const dir = mkdtempSync(join(tmpdir(), "pi-model-specs-"));
+  return { dir, cachePath: join(dir, "model-specs-cache.json"), cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+test("normalizeModelId strips prefixes, date suffixes and separator variants", () => {
+  assert.equal(normalizeModelId("gpt-5.5"), "gpt-5.5");
+  assert.equal(normalizeModelId("openai/gpt-5.5"), "gpt-5.5");
+  assert.equal(normalizeModelId("gpt-5.5-2026-06-01"), "gpt-5.5");
+  assert.equal(normalizeModelId("GLM:5_5"), "glm-5-5");
+});
+
+test("lookupModelSpec matches exact, normalized and longest-prefix ids", () => {
+  const specs = new Map(Object.entries(SPECS_PAYLOAD).flatMap(([provider, entry]) =>
+    Object.entries(entry.models ?? {}).map(([id, model]) => [id, { context: model.limit?.context, output: model.limit?.output } as const]),
+  ));
+  assert.deepEqual(lookupModelSpec(specs, "gpt-5.6-sol"), { context: 400_000, output: 128_000 });
+  assert.deepEqual(lookupModelSpec(specs, "claude-opus-5"), { context: 200_000, output: 64_000 });
+  // Longest bidirectional prefix match keeps "gpt-5" from matching "gpt-50".
+  assert.deepEqual(
+    lookupModelSpec(new Map([["gpt-5", { context: 1, output: 2 }], ["gpt-50", { context: 3, output: 4 }]]), "gpt-5"),
+    { context: 1, output: 2 },
+  );
+  assert.equal(lookupModelSpec(specs, "totally-unknown-model"), undefined);
+});
+
+test("loadModelSpecs fetches once and serves subsequent reads from the fresh disk cache", async () => {
+  const specsSrv = await startSpecsServer(SPECS_PAYLOAD);
+  const { cachePath, cleanup } = specsTestDir();
+  try {
+    const first = await loadModelSpecs({ cachePath, ttlMs: 60_000, url: specsSrv.url });
+    const second = await loadModelSpecs({ cachePath, ttlMs: 60_000, url: specsSrv.url });
+    assert.equal(first.get("gpt-5.6-sol")?.context, 400_000);
+    assert.deepEqual(second, first);
+    assert.equal(specsSrv.hits(), 1); // TTL-fresh cache must suppress the second network fetch
+    assert.ok(JSON.parse(readFileSync(cachePath, "utf8")).fetchedAt > 0);
+  } finally {
+    await specsSrv.close();
+    cleanup();
+  }
+});;
+test("loadModelSpecs falls back to a stale snapshot when the spec service is down", async () => {
+  const { cachePath, cleanup } = specsTestDir();
+  try {
+    writeFileSync(cachePath, JSON.stringify({ fetchedAt: Date.now() - 48 * 60 * 60 * 1000, specs: { "gpt-4o": { context: 128_000, output: 16_384 } } }));
+    const down = await startSpecsServer({ error: "boom" }, 500);
+    try {
+      const specs = await loadModelSpecs({ cachePath, ttlMs: 1000, url: down.url });
+      assert.equal(specs.get("gpt-4o")?.context, 128_000);
+    } finally {
+      await down.close();
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test("loadModelSpecs rejects when there is no usable snapshot at all", async () => {
+  const { cachePath, cleanup } = specsTestDir();
+  try {
+    const down = await startSpecsServer({ error: "boom" }, 500);
+    try {
+      await assert.rejects(loadModelSpecs({ cachePath, ttlMs: 60_000, url: down.url }));
+    } finally {
+      await down.close();
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test("discoverModels enriches missing limits from models.dev but keeps gateway-advertised values", async () => {
+  const specsSrv = await startSpecsServer(SPECS_PAYLOAD);
+  const { cachePath, cleanup } = specsTestDir();
+  const srv = await startServer(() => ({
+    body: {
+      data: [
+        { id: "openai/gpt-5.6-sol-2026-01-01" }, // no limits → enriched via normalized + prefix match
+        { id: "anthropic/claude-opus-5", context_window: 999_999 }, // gateway value wins over the reference spec
+      ],
+    },
+  }));
+  try {
+    const models = await discoverModels({ baseUrl: srv.base, apiKey: "k", specs: { url: specsSrv.url, cachePath } });
+    assert.equal(models[0]!.contextWindow, 400_000);
+    assert.equal(models[0]!.maxTokens, 128_000);
+    assert.equal(models[1]!.contextWindow, 999_999);
+  } finally {
+    await srv.close();
+    await specsSrv.close();
+    cleanup();
+  }
+});
+
+test("discoverModels still returns results when the spec service is unreachable", async () => {
+  const { cachePath, cleanup } = specsTestDir();
+  const srv = await startServer(() => ({ body: { data: [{ id: "mystery-model" }] } }));
+  try {
+    const models = await discoverModels({ baseUrl: srv.base, apiKey: "k", specs: { url: "http://127.0.0.1:1/api.json", cachePath } });
+    assert.deepEqual(models.map((m) => m.id), ["mystery-model"]);
+    assert.equal(models[0]!.contextWindow, undefined); // no specs available → plain discovery result
+  } finally {
+    await srv.close();
+    cleanup();
   }
 });

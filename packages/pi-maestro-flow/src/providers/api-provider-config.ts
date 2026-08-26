@@ -2064,14 +2064,18 @@ async function discoverAndInjectModels(
     return "manual";
   }
 
+  const specById = new Map(discovered.map((model) => [model.id, model]));
   let result: SaveApiProviderResult | undefined;
   for (const modelId of selected) {
+    // Discovered models carry reference specs (gateway-advertised or models.dev);
+    // only fall back to the conservative defaults when a model has neither.
+    const enriched = specById.get(modelId);
     const next: ApiProviderSettings = {
       provider: providerId,
       baseUrl,
       modelId,
-      contextWindow: 128_000,
-      maxTokens: 16_384,
+      contextWindow: enriched?.contextWindow ?? 128_000,
+      maxTokens: enriched?.maxTokens ?? 16_384,
       reasoning: true,
       apiKey,
       api,
@@ -2093,6 +2097,8 @@ async function discoverAndInjectModels(
 /**
  * Form-level discovery: probe /models using the form's current Base URL/API key
  * (falling back to saved values) and exclude already-configured model ids.
+ * The enriched results (with reference specs) are remembered so the form can
+ * prefill context/max-output fields when a discovered model is picked.
  */
 async function discoverFormModelIds(
   values: ApiModelFormValues,
@@ -2105,8 +2111,21 @@ async function discoverFormModelIds(
   const baseUrl = normalizeBaseUrl(rawBaseUrl);
   const apiKey = formText(values, "apiKey") || current.apiKey;
   const discovered = await discoverModels({ baseUrl, apiKey: apiKey || undefined });
+  lastDiscoveredSpecs = new Map(discovered.map((model) => [model.id, model]));
   const configured = new Set(await configuredModelIds(providerId, modelsPath));
   return discovered.map((model) => model.id).filter((id) => !configured.has(id));
+}
+
+/**
+ * Enriched results from the most recent form-level discovery, used to prefill
+ * context/max-output fields when a discovered model is picked. Module-level
+ * because the editor overlay params are plain callbacks; only the latest
+ * discovery per open form is kept.
+ */
+let lastDiscoveredSpecs: Map<string, DiscoveredModel> = new Map();
+
+function resolveFormModelSpec(modelId: string): { contextWindow?: number; maxTokens?: number } | undefined {
+  return lastDiscoveredSpecs.get(modelId);
 }
 
 /** Legacy step-by-step fallback for hosts without the custom form overlay. */
@@ -2411,6 +2430,7 @@ async function configurePresetModelWithForm(
       !adding,
     ),
     discoverModels: (values) => discoverFormModelIds(values, provider.id, current, modelsPath),
+    resolveModelSpecs: resolveFormModelSpec,
   });
   if (!result) return;
 
@@ -2640,6 +2660,7 @@ async function configureCustomModelWithForm(
       return errors;
     },
     discoverModels: (values) => discoverFormModelIds(values, providerId, current, modelsPath),
+    resolveModelSpecs: resolveFormModelSpec,
   });
   if (!result) return;
 

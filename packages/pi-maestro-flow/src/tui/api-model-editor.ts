@@ -62,6 +62,8 @@ export interface ApiModelEditorOverlayParams {
   validate?: (values: ApiModelFormValues) => string[];
   /** Enables Ctrl+D on discoverable fields; resolves selectable gateway model ids, throws on failure. */
   discoverModels?: (values: ApiModelFormValues) => Promise<string[]>;
+  /** Resolves reference specs (context/max output) for a discovered model id, used to prefill number fields on pick. */
+  resolveModelSpecs?: (modelId: string) => { contextWindow?: number; maxTokens?: number } | undefined;
 }
 
 const CATALOGS = {
@@ -377,10 +379,31 @@ export class ApiModelEditorOverlay implements Component, Focusable {
       if (pick.checked.size > 0) {
         const field = this.currentField();
         if (field) field.value = pick.ids.filter((id) => pick.checked.has(id)).join(",");
+        this.prefillSpecFields(pick);
         this.markChanged();
       }
       this.picking = null;
     }
+  }
+
+  /** Prefill contextWindow/maxTokens from reference specs when exactly one discovered model was picked. */
+  private prefillSpecFields(pick: { ids: string[]; checked: Set<string> }): void {
+    const picked = pick.ids.filter((id) => pick.checked.has(id));
+    if (picked.length !== 1 || !this.params.resolveModelSpecs) return;
+    const spec = this.params.resolveModelSpecs(picked[0]!);
+    if (!spec) return;
+    for (const [fieldId, value] of [
+      ["contextWindow", spec.contextWindow],
+      ["maxTokens", spec.maxTokens],
+    ] as const) {
+      if (typeof value !== "number") continue;
+      const field = this.fields.find((entry) => entry.id === fieldId);
+      if (field?.kind === "number" && !this.isFieldTouchedByUser(field.id)) field.value = String(value);
+    }
+  }
+
+  private isFieldTouchedByUser(fieldId: string): boolean {
+    return this.originalValues[fieldId] !== undefined && this.values()[fieldId] !== this.originalValues[fieldId];
   }
 
   private renderPick(width: number): string[] {
