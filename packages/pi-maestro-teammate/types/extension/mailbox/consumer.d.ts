@@ -5,7 +5,7 @@
 import { EventEmitter } from "node:events";
 import { MailboxFileStore } from "./file-store.ts";
 import { type MailboxRouter } from "./router.ts";
-import { type MailboxEnvelope, type MailboxPriority } from "./types.ts";
+import { type MailboxEnvelope, type MailboxOwnerFence, type MailboxPriority } from "./types.ts";
 /**
  * Select the next message to dispatch from a sorted candidate list.
  * Enforces starvation bound: after STARVATION_BOUND consecutive high-priority
@@ -31,6 +31,10 @@ export interface MailboxConsumerOptions {
     router: MailboxRouter;
     /** Unique nonce identifying this consumer instance. */
     consumerNonce?: string;
+    /** Stable host owner id used with the per-consumer nonce. */
+    ownerId?: string;
+    /** Session generation captured by this consumer incarnation. */
+    sessionGeneration?: number;
     /** Recipient correlation ID this consumer serves. */
     recipientCorrelationId: string;
     /** Workspace ID the consumer serves; messages from other workspaces are skipped. */
@@ -48,9 +52,12 @@ export declare class MailboxConsumer extends EventEmitter {
     readonly consumerNonce: string;
     readonly recipientCorrelationId: string;
     readonly workspaceId: string;
+    readonly ownerFence: MailboxOwnerFence;
     constructor(options: MailboxConsumerOptions);
     start(): void;
     stop(): Promise<void>;
+    /** True only while this incarnation owns mutation/GC authority. */
+    ownsMutationAuthority(): boolean;
     /** Notify the consumer that same-process messages may be available. */
     notify(): void;
     /**

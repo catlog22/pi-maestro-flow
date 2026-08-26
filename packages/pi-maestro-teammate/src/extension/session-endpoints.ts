@@ -1,4 +1,4 @@
-import type { TeammateState } from "../shared/types.ts";
+import type { SettledAgentRecord, TeammateState } from "../shared/types.ts";
 import { projectAgentActivity } from "../shared/agent-status.ts";
 import {
   projectSessionEndpoints,
@@ -17,6 +17,19 @@ import type {
 function firstLine(value: string | undefined): string | undefined {
   const line = value?.split("\n", 1)[0]?.trim();
   return line || undefined;
+}
+
+function settledBelongsToCurrentProjection(
+  state: TeammateState,
+  settled: SettledAgentRecord,
+): boolean {
+  if (!state.currentWorkspaceId || !state.currentSessionId || !state.currentSourceId || !state.sessionGeneration) {
+    return true;
+  }
+  return settled.workspaceId === state.currentWorkspaceId
+    && settled.sessionId === state.currentSessionId
+    && settled.sourceId === state.currentSourceId
+    && settled.sessionGeneration === state.sessionGeneration;
 }
 
 function localAgentProjections(state: TeammateState): SessionAgentProjection[] {
@@ -43,7 +56,7 @@ function localAgentProjections(state: TeammateState): SessionAgentProjection[] {
     });
   }
   for (const settled of state.recentlySettled?.values() ?? []) {
-    if (agents.has(settled.correlationId)) continue;
+    if (!settledBelongsToCurrentProjection(state, settled) || agents.has(settled.correlationId)) continue;
     agents.set(settled.correlationId, {
       workspaceId: "",
       ownerId: "",
@@ -86,6 +99,7 @@ export function projectTeammateSessionEndpoints(
   localIdentity: Pick<WorkspacePeerIdentity, "workspaceId" | "ownerId" | "ownerNonce">,
   remoteOwners: readonly WorkspaceOwnerSnapshot[],
   localSessionName?: string,
+  monitorAggregation = false,
 ): readonly SessionEndpoint[] {
   const localAgents = localAgentProjections(state).map((agent) => ({
     ...agent,
@@ -100,14 +114,21 @@ export function projectTeammateSessionEndpoints(
     scope: "local",
     status: "running",
     ...(state.currentSessionId ? { sessionId: state.currentSessionId } : {}),
+    ...(state.currentSourceId ? { sourceId: state.currentSourceId } : {}),
+    ...(state.sessionGeneration === undefined ? {} : { generation: state.sessionGeneration }),
     ...(localSessionName ? { sessionName: localSessionName } : {}),
-    ...(getWorkspaceProjectionProvider("todo") !== undefined
+    ...(getWorkspaceProjectionProvider("todo") !== undefined || monitorAggregation
       ? {
         extraCapabilities: [
-          "flow-schedule-todo-binding",
-          "flow-schedule-todo-projection",
-          ...(getWorkspaceProjectionProvider("flow-schedule-todo-mutation-capability") ? ["flow-schedule-todo-mutation" as const] : []),
-          ...(getWorkspaceProjectionProvider("flow-schedule-report-capability") ? ["flow-schedule-report" as const] : []),
+          ...(monitorAggregation ? ["monitor-workspace-aggregation" as const] : []),
+          ...(getWorkspaceProjectionProvider("todo") !== undefined
+            ? [
+              "flow-schedule-todo-binding" as const,
+              "flow-schedule-todo-projection" as const,
+              ...(getWorkspaceProjectionProvider("flow-schedule-todo-mutation-capability") ? ["flow-schedule-todo-mutation" as const] : []),
+              ...(getWorkspaceProjectionProvider("flow-schedule-report-capability") ? ["flow-schedule-report" as const] : []),
+            ]
+            : []),
         ] as SessionEndpointCapability[],
       }
       : {}),
@@ -121,6 +142,8 @@ export function projectTeammateSessionEndpoints(
       scope: "workspace-peer",
       status: owner.agents.some((agent) => agent.status === "running") ? "running" : "sleeping",
       ...(owner.sessionId ? { sessionId: owner.sessionId } : {}),
+      ...(owner.sessionId ? { sourceId: owner.sessionId } : {}),
+      ...(owner.ownerGeneration === undefined ? {} : { generation: owner.ownerGeneration }),
       ...(owner.sessionName ? { sessionName: owner.sessionName } : {}),
       ...(owner.capabilities ? { extraCapabilities: [...owner.capabilities] as SessionEndpointCapability[] } : {}),
       ...(owner.contextPressure === undefined ? {} : { contextPressure: owner.contextPressure }),

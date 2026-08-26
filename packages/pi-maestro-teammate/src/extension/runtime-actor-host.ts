@@ -49,7 +49,7 @@ export class WindowSupervisorRuntimeActor {
       const lease = await host.acquire({
         leaseActorId: `window-supervisor:${this.#options.workspaceId}:${this.#options.ownerId}`,
         holderId: `${this.#options.ownerId}:${this.#options.ownerNonce}`,
-        streamId: `window-supervisor:${this.#options.workspaceId}:${this.#options.generation}`,
+        streamId: `window-supervisor:${this.#options.workspaceId}:${this.#options.ownerId}:${this.#options.generation}`,
         actor,
       });
       if (this.#stopped) {

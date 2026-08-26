@@ -5,6 +5,7 @@ import type {
   AgentRuntimeProjection,
   AgentStatus,
   AgentTurnSnapshot,
+  SessionProjectionIdentity,
 } from "../shared/types.ts";
 
 export const RUNTIME_READ_MODEL_VERSION = 2 as const;
@@ -16,14 +17,20 @@ export const RUNTIME_READ_MODEL_SNAPSHOT_EVENT = "teammate:runtime-read-model-sn
 export const RUNTIME_READ_MODEL_DELTA_EVENT = "teammate:runtime-read-model-delta-v2";
 export const RUNTIME_READ_MODEL_UNAVAILABLE_EVENT = "teammate:runtime-read-model-unavailable-v2";
 
+export interface RuntimeReadModelOwnershipV2 extends SessionProjectionIdentity {}
+
 export interface RuntimeReadModelSourceV2 {
   streamId: string;
   revision: number;
   generation: number;
+  /** Exact producer owner. Absent only on pre-isolation V2 records. */
+  projection?: RuntimeReadModelOwnershipV2;
 }
 
 export interface RuntimeAgentReadEntityV2 {
   correlationId: string;
+  /** Exact producer owner. The broker bridge installs this on every new row. */
+  projection?: RuntimeReadModelOwnershipV2;
   generation: number;
   agent: string;
   name?: string;
@@ -118,12 +125,35 @@ function cloneEntity(entity: RuntimeAgentReadEntityV2): RuntimeAgentReadEntityV2
   return structuredClone(entity);
 }
 
+export function parseRuntimeReadModelOwnershipV2(value: unknown): RuntimeReadModelOwnershipV2 | undefined {
+  if (!plainObject(value)
+    || !identifier(value.workspaceId)
+    || !identifier(value.sessionId)
+    || !identifier(value.sourceId)
+    || !safeInteger(value.generation, 1)) return undefined;
+  return {
+    workspaceId: value.workspaceId,
+    sessionId: value.sessionId,
+    sourceId: value.sourceId,
+    generation: value.generation,
+  };
+}
+
 function parseSource(value: unknown): RuntimeReadModelSourceV2 | undefined {
   if (!plainObject(value)
     || !identifier(value.streamId)
     || !safeInteger(value.revision, 1)
     || !safeInteger(value.generation, 1)) return undefined;
-  return { streamId: value.streamId, revision: value.revision, generation: value.generation };
+  const projection = value.projection === undefined
+    ? undefined
+    : parseRuntimeReadModelOwnershipV2(value.projection);
+  if (value.projection !== undefined && !projection) return undefined;
+  return {
+    streamId: value.streamId,
+    revision: value.revision,
+    generation: value.generation,
+    ...(projection ? { projection } : {}),
+  };
 }
 
 const AGENT_STATUSES = new Set<AgentStatus>([
@@ -151,6 +181,7 @@ function parseEntity(value: unknown): RuntimeAgentReadEntityV2 | undefined {
     && (!Array.isArray(value.dependencies) || value.dependencies.some((item) => !safeInteger(item)))) return undefined;
   if (value.attemptedModels !== undefined
     && (!Array.isArray(value.attemptedModels) || value.attemptedModels.some((item) => typeof item !== "string"))) return undefined;
+  if (value.projection !== undefined && !parseRuntimeReadModelOwnershipV2(value.projection)) return undefined;
   return structuredClone(value) as unknown as RuntimeAgentReadEntityV2;
 }
 
@@ -259,6 +290,7 @@ export class RuntimeReadModelProjectionV2 {
   readonly #agents = new Map<string, RuntimeAgentReadEntityV2>();
   #cursor = 0;
   #source: RuntimeReadModelSourceV2 = { streamId: "uninitialized", revision: 1, generation: 1 };
+  #initialized = false;
 
   get cursor(): number { return this.#cursor; }
   get source(): RuntimeReadModelSourceV2 { return { ...this.#source }; }
@@ -266,6 +298,10 @@ export class RuntimeReadModelProjectionV2 {
   applySnapshot(input: unknown): boolean {
     const snapshot = parseRuntimeReadModelSnapshotV2(input);
     if (!snapshot) return false;
+    if (this.#initialized && snapshot.source.streamId === this.#source.streamId) {
+      if (snapshot.source.generation < this.#source.generation) return false;
+      if (snapshot.source.generation === this.#source.generation && snapshot.cursor < this.#cursor) return false;
+    }
     const next = new Map<string, RuntimeAgentReadEntityV2>();
     for (const agent of snapshot.agents) {
       const existing = next.get(agent.correlationId);
@@ -276,6 +312,7 @@ export class RuntimeReadModelProjectionV2 {
     for (const [id, agent] of next) this.#agents.set(id, agent);
     this.#cursor = snapshot.cursor;
     this.#source = { ...snapshot.source };
+    this.#initialized = true;
     return true;
   }
 
@@ -286,6 +323,7 @@ export class RuntimeReadModelProjectionV2 {
       || delta.nextCursor <= this.#cursor
       || delta.source.streamId !== this.#source.streamId
       || delta.source.generation !== this.#source.generation
+      || JSON.stringify(delta.source.projection) !== JSON.stringify(this.#source.projection)
       || delta.source.revision !== delta.nextCursor) return false;
     const next = new Map([...this.#agents].map(([id, agent]) => [id, cloneEntity(agent)]));
     for (const change of delta.changes) {
@@ -328,6 +366,7 @@ export class RuntimeReadModelProjectionV2 {
 interface RuntimeReadModelBrokerSourceStateV2 {
   generation: number;
   revision: number;
+  projection?: RuntimeReadModelOwnershipV2;
   ids: Set<string>;
 }
 
@@ -336,6 +375,10 @@ interface RuntimeReadModelPendingBatchV2 {
   generation: number;
   batchCount: number;
   frames: RuntimeReadModelSourceFrameV2[];
+}
+
+function sourceEntityKey(sourceId: string, correlationId: string): string {
+  return `${sourceId}\0${correlationId}`;
 }
 
 export class RuntimeReadModelBrokerAccumulatorV2 {
@@ -360,6 +403,8 @@ export class RuntimeReadModelBrokerAccumulatorV2 {
       this.#accepted += 1;
       return true;
     }
+    if (previousSource && frame.source.generation === previousSource.generation
+      && JSON.stringify(frame.source.projection) !== JSON.stringify(previousSource.projection)) return false;
 
     let batch = pending;
     if (batch && frame.source.generation > batch.generation) {
@@ -383,6 +428,7 @@ export class RuntimeReadModelBrokerAccumulatorV2 {
       const previousFrame = batch.frames.at(-1)!;
       if (frame.batchId !== batch.batchId
         || frame.source.generation !== batch.generation
+        || JSON.stringify(frame.source.projection) !== JSON.stringify(previousFrame.source.projection)
         || frame.batchCount !== batch.batchCount
         || frame.batchIndex !== batch.frames.length
         || frame.source.revision !== previousFrame.source.revision + 1
@@ -408,24 +454,23 @@ export class RuntimeReadModelBrokerAccumulatorV2 {
     const nextAgents = new Map(this.#agents);
     const nextIds = generationReset ? new Set<string>() : new Set(previousSource!.ids);
     if (generationReset && previousSource) {
-      for (const id of previousSource.ids) {
-        if (nextAgents.get(id)?.sourceId === sourceId) nextAgents.delete(id);
-      }
+      for (const id of previousSource.ids) nextAgents.delete(sourceEntityKey(sourceId, id));
     }
     for (const change of frames.flatMap((frame) => frame.changes)) {
       if (change.kind === "upsert") {
-        const current = nextAgents.get(change.entity.correlationId);
+        const key = sourceEntityKey(sourceId, change.entity.correlationId);
+        const current = nextAgents.get(key);
         if (current && change.entity.generation < current.entity.generation) return false;
-        nextAgents.set(change.entity.correlationId, {
-          entity: cloneEntity(change.entity),
-          sourceId,
-        });
+        const entity = cloneEntity(change.entity);
+        if (first.source.projection) entity.projection = { ...first.source.projection };
+        nextAgents.set(key, { entity, sourceId });
         nextIds.add(change.entity.correlationId);
         continue;
       }
-      const current = nextAgents.get(change.correlationId);
-      if (current && (current.sourceId !== sourceId || change.generation !== current.entity.generation)) return false;
-      if (current) nextAgents.delete(change.correlationId);
+      const key = sourceEntityKey(sourceId, change.correlationId);
+      const current = nextAgents.get(key);
+      if (current && change.generation !== current.entity.generation) return false;
+      if (current) nextAgents.delete(key);
       nextIds.delete(change.correlationId);
     }
     this.#agents.clear();
@@ -433,6 +478,7 @@ export class RuntimeReadModelBrokerAccumulatorV2 {
     this.#sources.set(sourceId, {
       generation: last.source.generation,
       revision: last.source.revision,
+      ...(last.source.projection ? { projection: { ...last.source.projection } } : {}),
       ids: nextIds,
     });
     return true;
@@ -441,25 +487,37 @@ export class RuntimeReadModelBrokerAccumulatorV2 {
   snapshot(
     workspaceId: string,
     activeSources?: ReadonlyMap<string, number>,
+    projectionSource?: RuntimeReadModelSourceV2,
   ): RuntimeReadModelSnapshotV2 {
-    const agents = [...this.#agents.values()]
-      .filter(({ sourceId }) => {
-        if (!activeSources) return true;
+    const collapsed = new Map<string, RuntimeAgentReadEntityV2>();
+    for (const { entity, sourceId } of this.#agents.values()) {
+      if (activeSources) {
         const source = this.#sources.get(sourceId);
-        return source !== undefined && activeSources.get(sourceId) === source.generation;
-      })
-      .map(({ entity }) => cloneEntity(entity))
+        if (!source || activeSources.get(sourceId) !== source.generation) continue;
+      }
+      if (collapsed.has(entity.correlationId)) {
+        throw new Error(`Runtime read-model correlationId is ambiguous across active sources: ${entity.correlationId}`);
+      }
+      collapsed.set(entity.correlationId, cloneEntity(entity));
+    }
+    const agents = [...collapsed.values()]
       .sort((left, right) => left.correlationId.localeCompare(right.correlationId));
     return {
       version: RUNTIME_READ_MODEL_VERSION,
       revision: RUNTIME_READ_MODEL_REVISION,
       kind: "agent-runs-snapshot",
       cursor: this.#cursor,
-      source: {
-        streamId: `workspace:${workspaceId}`,
-        revision: Math.max(1, this.#cursor),
-        generation: 1,
-      },
+      source: projectionSource
+        ? {
+          ...projectionSource,
+          revision: Math.max(1, this.#cursor),
+          ...(projectionSource.projection ? { projection: { ...projectionSource.projection } } : {}),
+        }
+        : {
+          streamId: `workspace:${workspaceId}`,
+          revision: Math.max(1, this.#cursor),
+          generation: 1,
+        },
       agents,
     };
   }

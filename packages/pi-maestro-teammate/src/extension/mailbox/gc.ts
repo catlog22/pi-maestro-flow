@@ -1,4 +1,4 @@
-import type { MailboxFileStore } from "./file-store.ts";
+import type { MailboxFileStore, MailboxMutationAuthority } from "./file-store.ts";
 import {
   type MailboxPriority,
   type MailboxState,
@@ -23,7 +23,15 @@ export interface GCCandidate {
 export interface MailboxGCOptions {
   store: MailboxFileStore;
   now?: () => number;
+  /** Mutation-authority preflight; false makes a sweep a no-op. */
+  canMutate?: () => boolean | Promise<boolean>;
+  /** Revalidated from inside every destructive store commit. */
+  mutationAuthority?: MailboxMutationAuthority;
+  /** Maximum records inspected/mutated by one sweep. */
+  maxSweep?: number;
 }
+
+const DEFAULT_GC_MAX_SWEEP = 128;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -32,59 +40,55 @@ function errorMessage(error: unknown): string {
 export class MailboxGC {
   readonly #store: MailboxFileStore;
   readonly #now: () => number;
+  readonly #canMutate: () => boolean | Promise<boolean>;
+  readonly #mutationAuthority: MailboxMutationAuthority | undefined;
+  readonly #maxSweep: number;
 
   constructor(options: MailboxGCOptions) {
     this.#store = options.store;
     this.#now = options.now ?? Date.now;
+    this.#canMutate = options.canMutate ?? (() => true);
+    this.#mutationAuthority = options.mutationAuthority;
+    this.#maxSweep = Math.max(1, Math.min(options.maxSweep ?? DEFAULT_GC_MAX_SWEEP, DEFAULT_GC_MAX_SWEEP));
   }
 
   async collectEligible(): Promise<GCCandidate[]> {
-    return this.#collectEligible();
+    return (await this.#collectEligible()).candidates;
   }
 
   async run(): Promise<GCResult> {
+    if (!await this.#canMutate()) return { removed: 0, errors: [] };
     const errors: string[] = [];
-    const candidates = await this.#collectEligible(errors);
+    const collected = await this.#collectEligible(errors, this.#maxSweep);
+    const candidates = collected.candidates;
     let removed = 0;
+    let inspected = collected.inspected;
 
     for (const candidate of candidates) {
+      if (!await this.#canMutate()) break;
       try {
         if (candidate.state === "ready") {
-          await this.#store.expire(candidate.messageId);
+          await this.#store.expire(candidate.messageId, this.#mutationAuthority);
           continue;
         }
-
-        await this.#store.remove(candidate.state, candidate.messageId);
-        removed += 1;
+        if (await this.#store.remove(candidate.state, candidate.messageId, this.#mutationAuthority)) removed += 1;
       } catch (error) {
-        errors.push(
-          `${candidate.state}/${candidate.messageId}: ${errorMessage(error)}`,
-        );
+        errors.push(`${candidate.state}/${candidate.messageId}: ${errorMessage(error)}`);
       }
     }
 
-    // Clean orphaned state records (state.json without an envelope) across all
-    // live and terminal directories. These accumulate from interrupted
-    // transitions or manual envelope removal and would otherwise block a
-    // future writeJsonAtomic rename on Windows (EPERM) or count toward quota
-    // scans.
     const orphanStates: MailboxState[] = [
-      "staging",
-      "ready",
-      "claimed",
-      "accepted",
-      "applied",
-      "rejected",
-      "expired",
-      "dead",
+      "staging", "ready", "claimed", "accepted", "applied", "rejected", "expired", "dead",
     ];
     for (const state of orphanStates) {
+      if (inspected >= this.#maxSweep || !await this.#canMutate()) break;
       try {
-        const orphans = await this.#store.listOrphanStateRecords(state);
+        const orphans = await this.#store.listOrphanStateRecords(state, this.#maxSweep - inspected);
+        inspected += orphans.length;
         for (const messageId of orphans) {
+          if (!await this.#canMutate()) break;
           try {
-            await this.#store.removeStateRecordOnly(state, messageId);
-            removed += 1;
+            if (await this.#store.removeStateRecordOnly(state, messageId, this.#mutationAuthority)) removed += 1;
           } catch (error) {
             errors.push(`${state}/${messageId}: ${errorMessage(error)}`);
           }
@@ -94,16 +98,14 @@ export class MailboxGC {
       }
     }
 
-    // Sweep stale dedup markers (seen/*.seen) older than the receipt retention
-    // so the seen-set cannot grow without bound.
     const nowSeen = this.#now();
     try {
-      const seen = await this.#store.listSeen();
+      const seen = inspected >= this.#maxSweep ? [] : await this.#store.listSeen(this.#maxSweep - inspected);
       for (const record of seen) {
+        if (!await this.#canMutate()) break;
         if (nowSeen - record.seenAt > TTL_RECEIPT_MS) {
           try {
-            await this.#store.removeSeen(record.file);
-            removed += 1;
+            if (await this.#store.removeSeen(record.file, this.#mutationAuthority)) removed += 1;
           } catch (error) {
             errors.push(`seen/${record.file}: ${errorMessage(error)}`);
           }
@@ -116,58 +118,40 @@ export class MailboxGC {
     return { removed, errors };
   }
 
-  async #collectEligible(errors?: string[]): Promise<GCCandidate[]> {
+  async #collectEligible(
+    errors?: string[],
+    limit?: number,
+  ): Promise<{ candidates: GCCandidate[]; inspected: number }> {
     const candidates: GCCandidate[] = [];
     const now = this.#now();
+    let inspected = 0;
+    const remaining = (): number | undefined => limit === undefined ? undefined : Math.max(0, limit - inspected);
 
-    await this.#scanState("staging", errors, async (messageId) => {
+    inspected += await this.#scanState("staging", errors, async (messageId) => {
       const envelope = await this.#store.readEnvelope("staging", messageId);
       if (envelope && now - envelope.createdAt > TTL_STAGING_MS) {
-        candidates.push({
-          state: "staging",
-          messageId,
-          reason: "staging orphan exceeded retention",
-        });
+        candidates.push({ state: "staging", messageId, reason: "staging orphan exceeded retention" });
       }
-    });
+    }, remaining());
 
-    await this.#scanState("ready", errors, async (messageId) => {
+    inspected += await this.#scanState("ready", errors, async (messageId) => {
       const envelope = await this.#store.readEnvelope("ready", messageId);
       if (envelope && now > envelope.expiresAt) {
-        candidates.push({
-          state: "ready",
-          messageId,
-          reason: "message expired",
-        });
+        candidates.push({ state: "ready", messageId, reason: "message expired" });
       }
-    });
+    }, remaining());
 
-    await this.#scanTerminalState(
-      "applied",
-      TTL_RECEIPT_MS,
-      "applied receipt exceeded retention",
-      now,
-      candidates,
-      errors,
+    inspected += await this.#scanTerminalState(
+      "applied", TTL_RECEIPT_MS, "applied receipt exceeded retention", now, candidates, errors, remaining(),
     );
-    await this.#scanTerminalState(
-      "expired",
-      TTL_DEAD_MS,
-      "expired message exceeded retention",
-      now,
-      candidates,
-      errors,
+    inspected += await this.#scanTerminalState(
+      "expired", TTL_DEAD_MS, "expired message exceeded retention", now, candidates, errors, remaining(),
     );
-    await this.#scanTerminalState(
-      "dead",
-      TTL_DEAD_MS,
-      "dead message exceeded retention",
-      now,
-      candidates,
-      errors,
+    inspected += await this.#scanTerminalState(
+      "dead", TTL_DEAD_MS, "dead message exceeded retention", now, candidates, errors, remaining(),
     );
 
-    return candidates;
+    return { candidates, inspected };
   }
 
   async #scanTerminalState(
@@ -177,22 +161,23 @@ export class MailboxGC {
     now: number,
     candidates: GCCandidate[],
     errors?: string[],
-  ): Promise<void> {
-    await this.#scanState(state, errors, async (messageId) => {
+    limit?: number,
+  ): Promise<number> {
+    return this.#scanState(state, errors, async (messageId) => {
       const record = await this.#store.readStateRecord(state, messageId);
-      if (record && now - record.transitionedAt > retentionMs) {
-        candidates.push({ state, messageId, reason });
-      }
-    });
+      if (record && now - record.transitionedAt > retentionMs) candidates.push({ state, messageId, reason });
+    }, limit);
   }
 
   async #scanState(
     state: MailboxState,
     errors: string[] | undefined,
     inspect: (messageId: string) => Promise<void>,
-  ): Promise<void> {
+    limit?: number,
+  ): Promise<number> {
+    if (limit !== undefined && limit <= 0) return 0;
     try {
-      const messageIds = await this.#store.listMessages(state);
+      const messageIds = await this.#store.listMessages(state, limit);
       for (const messageId of messageIds) {
         try {
           await inspect(messageId);
@@ -201,11 +186,14 @@ export class MailboxGC {
           errors.push(`${state}/${messageId}: ${errorMessage(error)}`);
         }
       }
+      return messageIds.length;
     } catch (error) {
       if (!errors) throw error;
       errors.push(`${state}: ${errorMessage(error)}`);
+      return 0;
     }
   }
+
 }
 
 export interface QuotaAdmissionOptions {

@@ -46,6 +46,8 @@ export interface CompletionDeliveryEnvelope {
 
 export interface CompletionSessionBinding {
   target: CompletionTarget;
+  /** Read-only aliases from pre-canonical workspace hashing. New writes use target.workspaceId. */
+  legacyWorkspaceIds?: readonly string[];
   entries: readonly unknown[];
   send(envelope: CompletionDeliveryEnvelope): boolean;
 }
@@ -54,6 +56,11 @@ export interface CompletionDispatchDurability {
   durable: boolean;
   handle?: CompletionDispatchHandle;
 }
+
+/** Distinguishes a pre-commit miss from post-finalize reconciliation work. */
+export type CompletionPublishResult =
+  | { finalized: false }
+  | { finalized: true; record?: CompletionOutboxRecord };
 
 export interface CompletionCoordinatorOptions {
   store?: CompletionOutboxFileStore;
@@ -97,6 +104,17 @@ function targetEquals(left: CompletionTarget, right: CompletionTarget): boolean 
     && left.correlationId === right.correlationId;
 }
 
+function bindingTargets(binding: CompletionSessionBinding): CompletionTarget[] {
+  return [...new Set([binding.target.workspaceId, ...(binding.legacyWorkspaceIds ?? [])])]
+    .map((workspaceId) => ({ ...binding.target, workspaceId }));
+}
+
+function bindingAcceptsTarget(binding: CompletionSessionBinding, target: CompletionTarget): boolean {
+  return binding.target.sessionId === target.sessionId
+    && binding.target.correlationId === target.correlationId
+    && bindingTargets(binding).some((candidate) => candidate.workspaceId === target.workspaceId);
+}
+
 function receiptRevision(record: CompletionOutboxRecord): string {
   return record.intentRevision ?? record.contentRevision;
 }
@@ -111,10 +129,25 @@ export class CompletionDeliveryCoordinator {
   readonly #now: () => number;
   readonly #enabled: () => boolean;
   readonly #defer: (run: () => void) => void;
-  readonly #dispatches = new Map<string, { handle: CompletionDispatchHandle; provider: CompletionDurabilityProvider }>();
+  readonly #dispatches = new Map<string, {
+    handle: CompletionDispatchHandle;
+    seed: CompletionDispatchSeed;
+    provider: CompletionDurabilityProvider;
+    releaseProviderPin: () => void;
+  }>();
   readonly #acceptedByHost = new Set<string>();
+  readonly #deliveryInProgress = new Set<string>();
+  readonly #finalizedRecovery = new Map<string, {
+    intent: CompletionIntent;
+    provider: CompletionDurabilityProvider;
+  }>();
+  readonly #recoveredProviderPins = new Map<string, {
+    provider: CompletionDurabilityProvider;
+    release: () => void;
+  }>();
   readonly #inflight = new Map<string, Promise<void>>();
   readonly #deferred = new Set<Promise<void>>();
+  readonly #operations = new Set<Promise<unknown>>();
   #binding: CompletionSessionBinding | undefined;
   #unsubscribe: (() => void) | undefined;
   #disposed = false;
@@ -143,14 +176,24 @@ export class CompletionDeliveryCoordinator {
 
   async beginDispatch(seed: CompletionDispatchSeed): Promise<CompletionDispatchDurability> {
     if (!this.#enabled()) return { durable: false };
+    const existing = this.#dispatches.get(seed.dispatchId);
+    if (existing) {
+      if (existing.handle.reservationId !== seed.reservationId
+        || existing.handle.deliveryGroupId !== seed.deliveryGroupId) {
+        throw new Error(`Completion dispatch ${seed.dispatchId} is already pinned to another reservation.`);
+      }
+      return { durable: true, handle: existing.handle };
+    }
     const provider = this.registry.current();
     if (!provider) return { durable: false };
     await this.store.reserve(seed);
     try {
       const handle = await provider.beginDispatch(seed);
-      // Pin the provider instance for this dispatch so a later registry
-      // replacement/unload cannot redirect or fail finalization mid-flight.
-      this.#dispatches.set(seed.dispatchId, { handle, provider });
+      // Pin the provider instance in the shared registry as well as this
+      // coordinator. Flow publication capture resolves stage/commit through
+      // this dispatch ownership fence even after a provider reload.
+      const releaseProviderPin = this.registry.pinDispatch(seed.dispatchId, provider);
+      this.#dispatches.set(seed.dispatchId, { handle, seed, provider, releaseProviderPin });
       return { durable: true, handle };
     } catch (error) {
       await this.store.releaseReservation(seed.target, seed.reservationId).catch(() => undefined);
@@ -176,16 +219,55 @@ export class CompletionDeliveryCoordinator {
       });
     } finally {
       await this.store.releaseReservation(seed.target, seed.reservationId);
-      this.#dispatches.delete(seed.dispatchId);
+      this.#releaseDispatch(seed.dispatchId);
     }
   }
 
-  async publishCompletion(input: CompletionFinalizeInput): Promise<CompletionOutboxRecord | undefined> {
-    if (!this.#dispatches.has(input.dispatchId)) return undefined;
-    const intent = await this.#pinnedProvider(input.dispatchId).finalizeDelivery(input);
-    const record = await this.store.importIntent(intent);
-    await this.#deliverDue(record.target, true);
-    return record;
+  publishCompletion(input: CompletionFinalizeInput): Promise<CompletionPublishResult> {
+    return this.#track(this.#publishCompletion(input));
+  }
+
+  async #publishCompletion(input: CompletionFinalizeInput): Promise<CompletionPublishResult> {
+    const dispatch = this.#dispatches.get(input.dispatchId);
+    if (!dispatch) return { finalized: false };
+    const provider = dispatch.provider;
+    let intent: CompletionIntent;
+    try {
+      intent = await provider.finalizeDelivery(input);
+    } catch (finalizeError) {
+      // A provider writer can throw while releasing its lock or cleaning a
+      // replacement backup after the finalized manifest and its directory are
+      // already durable. Re-read only through the dispatch-pinned provider: a
+      // recoverable intent with the exact dispatch/reservation proves that the
+      // irreversible commit point was crossed, so direct fallback is forbidden.
+      let recovered: readonly CompletionIntent[];
+      try {
+        recovered = await provider.listRecoverable(dispatch.seed.target);
+      } catch {
+        throw finalizeError;
+      }
+      const committed = recovered.find((candidate) =>
+        candidate.dispatchId === input.dispatchId
+        && candidate.reservationId === input.reservationId);
+      if (!committed) throw finalizeError;
+      intent = committed;
+      logDiagnosticWarn(`[pi-maestro-teammate] completion finalize returned an error after durable commit for ${intent.deliveryId}; continuing with pinned recovery:`, finalizeError);
+    }
+    // finalizeDelivery (or the exact pinned re-read above) is the durable commit
+    // point. Everything after it is reconciliatory work: contain import/delivery
+    // failures so callers never fall back to an untagged direct notification
+    // that would later duplicate the recoverable intent.
+    try {
+      const record = await this.store.importIntent(intent);
+      this.#finalizedRecovery.delete(intent.deliveryId);
+      await this.#deliverDue(record.target, true);
+      return { finalized: true, record };
+    } catch (error) {
+      this.#finalizedRecovery.set(intent.deliveryId, { intent, provider });
+      logDiagnosticWarn(`[pi-maestro-teammate] finalized completion will be reconciled for ${intent.deliveryId}:`, error);
+      this.#scheduleReconcile();
+      return { finalized: true };
+    }
   }
 
   async settleForeground(seed: CompletionDispatchSeed): Promise<void> {
@@ -199,23 +281,31 @@ export class CompletionDeliveryCoordinator {
       });
     } finally {
       await this.store.releaseReservation(seed.target, seed.reservationId);
-      this.#dispatches.delete(seed.dispatchId);
+      this.#releaseDispatch(seed.dispatchId);
     }
   }
 
   async bindSession(binding: CompletionSessionBinding): Promise<void> {
     this.#binding = binding;
     await this.#runOnce(binding.target, async () => {
-      await this.#importRecoverable(binding.target);
-      await this.#rebuildReceipts(binding.target, binding.entries);
-      await this.#deliverDue(binding.target, true);
+      for (const target of bindingTargets(binding)) {
+        await this.#importRecoverable(target);
+        await this.#rebuildReceipts(target, binding.entries);
+        await this.#deliverDue(target, true);
+      }
     });
     this.#scheduleReconcile();
   }
 
   async drain(): Promise<void> {
-    while (this.#deferred.size > 0 || this.#inflight.size > 0) {
-      await Promise.allSettled([...this.#deferred, ...this.#inflight.values()]);
+    // Publication calls may be fire-and-forget at their call site. Keep looping
+    // because a settled import can enqueue delivery/ack/reconcile work.
+    while (this.#deferred.size > 0 || this.#inflight.size > 0 || this.#operations.size > 0) {
+      await Promise.allSettled([
+        ...this.#deferred,
+        ...this.#inflight.values(),
+        ...this.#operations,
+      ]);
     }
   }
 
@@ -228,55 +318,125 @@ export class CompletionDeliveryCoordinator {
     const binding = this.#binding;
     if (!binding || this.#disposed) return;
     await this.#runOnce(binding.target, async () => {
-      await this.#importRecoverable(binding.target);
-      await this.#rebuildReceipts(binding.target, binding.entries);
-      await this.#deliverDue(binding.target, true);
+      const targets = bindingTargets(binding);
+      for (const target of targets) {
+        await this.#importRecoverable(target);
+        await this.#rebuildReceipts(target, binding.entries);
+        await this.#deliverDue(target, true);
+      }
       const now = this.#now();
       // Use the non-blocking tryGc(): if a concurrent writer holds the workspace
       // lock, the sweep returns { busy } / { skipped } instead of throwing, so a
       // contended lock never produces a "periodic completion reconciliation
-      // failed" warning. The cross-process .gc-marker inside tryGc() also
-      // deduplicates sweeps across multiple Pi processes. Only update the
-      // in-process throttle timestamp when a real sweep ran, so the next
-      // reconcile retries on busy/skipped.
+      // failed" warning. Canonical and legacy roots remain isolated and are
+      // swept independently; no alias root is merged or deleted.
       if (this.#lastReconcileGcAt === undefined || now - this.#lastReconcileGcAt >= RECONCILE_GC_MIN_INTERVAL_MS) {
-        const result = await this.store.tryGc(binding.target.workspaceId);
-        if (!result.busy && !result.skipped) this.#lastReconcileGcAt = now;
+        let swept = false;
+        for (const target of targets) {
+          const result = await this.store.tryGc(target.workspaceId);
+          if (!result.busy && !result.skipped && !result.hasMore) swept = true;
+        }
+        if (swept) this.#lastReconcileGcAt = now;
       }
-      await this.registry.current()?.prune(now);
+      const providers = new Set<CompletionDurabilityProvider>();
+      const currentProvider = this.registry.current();
+      if (currentProvider) providers.add(currentProvider);
+      for (const pinned of this.#dispatches.values()) providers.add(pinned.provider);
+      for (const pinned of this.#recoveredProviderPins.values()) providers.add(pinned.provider);
+      await Promise.all([...providers].map((provider) => provider.prune(now)));
     });
   }
 
-  async receiveMessageEnd(message: unknown, currentTarget: CompletionTarget): Promise<boolean> {
+  receiveMessageEnd(message: unknown, currentTarget: CompletionTarget): Promise<boolean> {
+    return this.#track(this.#receiveMessageEnd(message, currentTarget));
+  }
+
+  async #receiveMessageEnd(message: unknown, currentTarget: CompletionTarget): Promise<boolean> {
     const receipt = completionReceipt(message);
     if (!receipt || receipt.targetSessionId !== currentTarget.sessionId) return false;
-    const records = await this.store.listForTarget(currentTarget);
-    const record = records.find((entry) => entry.deliveryId === receipt.deliveryId);
-    if (!record || receiptRevision(record) !== receipt.contentRevision || !targetEquals(record.target, currentTarget)) return false;
-    await this.#apply(record);
-    return true;
+    const binding = this.#binding && targetEquals(this.#binding.target, currentTarget)
+      ? this.#binding
+      : { target: currentTarget, entries: [], send: () => false } satisfies CompletionSessionBinding;
+    for (const target of bindingTargets(binding)) {
+      const records = await this.store.listForTarget(target);
+      const record = records.find((entry) => entry.deliveryId === receipt.deliveryId);
+      if (!record || receiptRevision(record) !== receipt.contentRevision || !targetEquals(record.target, target)) continue;
+      await this.#apply(record);
+      return true;
+    }
+    return false;
   }
 
   async redrive(): Promise<void> {
     if (!this.#binding) return;
-    await this.#deliverDue(this.#binding.target, true);
+    for (const target of bindingTargets(this.#binding)) await this.#deliverDue(target, true);
   }
 
   dispose(): void {
     this.#disposed = true;
     this.#binding = undefined;
     this.#acceptedByHost.clear();
+    this.#deliveryInProgress.clear();
+    for (const dispatchId of new Set([
+      ...this.#dispatches.keys(),
+      ...this.#recoveredProviderPins.keys(),
+    ])) this.#releaseDispatch(dispatchId);
+    this.#finalizedRecovery.clear();
     this.#unsubscribe?.();
     this.#unsubscribe = undefined;
   }
 
   async #importRecoverable(target: CompletionTarget): Promise<void> {
-    const provider = this.registry.current();
-    if (!provider) return;
-    for (const intent of await provider.listRecoverable(target)) {
-      try { await this.store.importIntent(intent); }
-      catch (error) {
-        logDiagnosticWarn(`[pi-maestro-teammate] completion intent import failed for ${intent.deliveryId}:`, error);
+    // First retry captured commit-point intents directly. This path cannot be
+    // redirected by a later registry generation and does not depend on the new
+    // provider being able to enumerate the old provider's storage root.
+    for (const [deliveryId, recovery] of [...this.#finalizedRecovery]) {
+      if (!targetEquals(recovery.intent.target, target)) continue;
+      this.#ensureRecoveredProviderPin(recovery.intent.dispatchId, recovery.provider);
+      try {
+        await this.store.recoverFinalizedIntent(recovery.intent);
+        this.#finalizedRecovery.delete(deliveryId);
+      } catch (error) {
+        logDiagnosticWarn(`[pi-maestro-teammate] finalized completion recovery retained for ${deliveryId}:`, error);
+      }
+    }
+
+    // Generation-owned providers are authoritative for their dispatches. Query
+    // them before the replaceable current provider, and contain enumeration per
+    // provider so one unhealthy generation cannot silence another generation's
+    // finalized intents or skip the delivery pass that follows this method.
+    const providers = new Set<CompletionDurabilityProvider>();
+    for (const pinned of this.#dispatches.values()) providers.add(pinned.provider);
+    for (const pinned of this.#recoveredProviderPins.values()) providers.add(pinned.provider);
+    const current = this.registry.current();
+    if (current) providers.add(current);
+    for (const provider of providers) {
+      let recoverable: readonly CompletionIntent[];
+      try {
+        recoverable = await provider.listRecoverable(target);
+      } catch (error) {
+        logDiagnosticWarn("[pi-maestro-teammate] completion provider enumeration failed; continuing pinned reconciliation:", error);
+        continue;
+      }
+      for (const intent of recoverable) {
+        try {
+          this.#ensureRecoveredProviderPin(intent.dispatchId, provider);
+          await this.store.importIntent(intent);
+        } catch (error) {
+          if (error instanceof Error && /No live completion reservation/.test(error.message)) {
+            try {
+              await this.store.recoverFinalizedIntent(intent);
+              continue;
+            } catch (recoveryError) {
+              // Finalization is irreversible. Keep the provider manifest and
+              // its provider pin observable/retryable instead of abandoning it.
+              this.#finalizedRecovery.set(intent.deliveryId, { intent, provider });
+              logDiagnosticWarn(`[pi-maestro-teammate] finalized completion reservation recovery failed for ${intent.deliveryId}:`, recoveryError);
+              continue;
+            }
+          }
+          logDiagnosticWarn(`[pi-maestro-teammate] completion intent import failed for ${intent.deliveryId}:`, error);
+        }
       }
     }
   }
@@ -295,7 +455,7 @@ export class CompletionDeliveryCoordinator {
 
   async #deliverDue(target: CompletionTarget, replayed: boolean): Promise<void> {
     const binding = this.#binding;
-    if (!binding || !targetEquals(binding.target, target)) return;
+    if (!binding || !bindingAcceptsTarget(binding, target)) return;
     const now = this.#now();
     const records = await this.store.listForTarget(target);
     for (const candidate of records) {
@@ -309,28 +469,37 @@ export class CompletionDeliveryCoordinator {
         record = await this.store.returnToPending(target, record.deliveryId, "completion receipt deadline elapsed") ?? record;
       }
       if (record.state !== "pending" || record.nextAttemptAt > now) continue;
-      const claimed = await this.store.acquireClaim(target, record.deliveryId);
-      if (!claimed) continue;
-      const envelope = this.deliveryEnvelope(claimed, replayed);
-      let accepted = false;
-      try { accepted = binding.send(envelope); }
-      catch (error) {
-        await this.store.returnToPending(target, record.deliveryId, error instanceof Error ? error.message : String(error));
-        continue;
-      }
-      if (accepted) {
-        this.#acceptedByHost.add(record.deliveryId);
-        try {
-          await this.store.markQueued(target, record.deliveryId, now + RECEIPT_DEADLINE_MS);
-        } catch (error) {
-          // The model may already have the accepted envelope. Do not let this
-          // escape to the caller, which would trigger a second direct send.
-          // The durable pending record remains replayable and identifiable by
-          // the same deliveryId if the first envelope never reaches message_end.
-          logDiagnosticWarn(`[pi-maestro-teammate] accepted completion could not persist queued state for ${record.deliveryId}:`, error);
+      // Reconciles from two provider generations may overlap. Fence delivery
+      // before the first await so both passes cannot observe pending/queued on
+      // opposite sides of markQueued and inject the same envelope twice.
+      if (this.#acceptedByHost.has(record.deliveryId) || this.#deliveryInProgress.has(record.deliveryId)) continue;
+      this.#deliveryInProgress.add(record.deliveryId);
+      try {
+        const claimed = await this.store.acquireClaim(target, record.deliveryId);
+        if (!claimed) continue;
+        const envelope = this.deliveryEnvelope(claimed, replayed);
+        let accepted = false;
+        try { accepted = binding.send(envelope); }
+        catch (error) {
+          await this.store.returnToPending(target, record.deliveryId, error instanceof Error ? error.message : String(error));
+          continue;
         }
-      } else {
-        await this.store.returnToPending(target, record.deliveryId, "sendMessage rejected completion");
+        if (accepted) {
+          this.#acceptedByHost.add(record.deliveryId);
+          try {
+            await this.store.markQueued(target, record.deliveryId, now + RECEIPT_DEADLINE_MS);
+          } catch (error) {
+            // The model may already have the accepted envelope. Do not let this
+            // escape to the caller, which would trigger a second direct send.
+            // The durable pending record remains replayable and identifiable by
+            // the same deliveryId if the first envelope never reaches message_end.
+            logDiagnosticWarn(`[pi-maestro-teammate] accepted completion could not persist queued state for ${record.deliveryId}:`, error);
+          }
+        } else {
+          await this.store.returnToPending(target, record.deliveryId, "sendMessage rejected completion");
+        }
+      } finally {
+        this.#deliveryInProgress.delete(record.deliveryId);
       }
     }
   }
@@ -355,8 +524,9 @@ export class CompletionDeliveryCoordinator {
       await provider.acknowledgeApplied(receipt);
       await this.store.markProviderAcknowledged(applied.target, applied.deliveryId);
       // Delivery fully settled: release the pinned provider reference.
-      if (this.#dispatches.get(applied.dispatchId)?.provider === provider) {
-        this.#dispatches.delete(applied.dispatchId);
+      if (this.#dispatches.get(applied.dispatchId)?.provider === provider
+        || this.#recoveredProviderPins.get(applied.dispatchId)?.provider === provider) {
+        this.#releaseDispatch(applied.dispatchId);
       }
     } catch (error) {
       logDiagnosticWarn(`[pi-maestro-teammate] completion provider acknowledgement failed for ${applied.deliveryId}:`, error);
@@ -407,12 +577,51 @@ export class CompletionDeliveryCoordinator {
     });
   }
 
+  #ensureRecoveredProviderPin(
+    dispatchId: string,
+    provider: CompletionDurabilityProvider,
+  ): void {
+    if (this.#dispatches.has(dispatchId)) return;
+    const current = this.#recoveredProviderPins.get(dispatchId);
+    if (current) {
+      if (current.provider !== provider) {
+        throw new Error(`Completion dispatch ${dispatchId} recovery changed provider ownership.`);
+      }
+      return;
+    }
+    this.#recoveredProviderPins.set(dispatchId, {
+      provider,
+      release: this.registry.pinDispatch(dispatchId, provider),
+    });
+  }
+
   #pinnedProvider(dispatchId: string): CompletionDurabilityProvider {
     const pinned = this.#dispatches.get(dispatchId);
     if (pinned) return pinned.provider;
-    const provider = this.registry.current();
+    const recovered = this.#recoveredProviderPins.get(dispatchId);
+    if (recovered) return recovered.provider;
+    const provider = this.registry.providerForDispatch(dispatchId) ?? this.registry.current();
     if (!provider) throw new Error("Completion durability provider became unavailable.");
     return provider;
+  }
+
+  #releaseDispatch(dispatchId: string): void {
+    const pinned = this.#dispatches.get(dispatchId);
+    if (pinned) {
+      this.#dispatches.delete(dispatchId);
+      pinned.releaseProviderPin();
+    }
+    const recovered = this.#recoveredProviderPins.get(dispatchId);
+    if (recovered) {
+      this.#recoveredProviderPins.delete(dispatchId);
+      recovered.release();
+    }
+  }
+
+  #track<T>(operation: Promise<T>): Promise<T> {
+    this.#operations.add(operation);
+    void operation.finally(() => this.#operations.delete(operation)).catch(() => undefined);
+    return operation;
   }
 
   async #runOnce(target: CompletionTarget, run: () => Promise<void>): Promise<void> {

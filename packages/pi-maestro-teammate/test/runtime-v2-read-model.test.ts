@@ -121,6 +121,32 @@ test("late old-generation tombstone is ignored during snapshot rebuild", () => {
   assert.equal(rebuilt.projection.agent("same")?.generation, 2);
 });
 
+test("source-qualified collisions stay isolated and tombstones cannot erase another source", () => {
+  const accumulator = new RuntimeReadModelBrokerAccumulatorV2();
+  assert.equal(accumulator.apply(frame(1, "window:a", 1, 1, [{
+    kind: "upsert",
+    entity: agent("same", 1, { task: "from-a" }),
+  }])), true);
+  assert.equal(accumulator.apply(frame(2, "window:b", 1, 1, [{
+    kind: "upsert",
+    entity: agent("same", 1, { task: "from-b" }),
+  }])), true);
+  assert.equal(accumulator.snapshot("w1", new Map([["window:a", 1]])).agents[0]?.task, "from-a");
+  assert.equal(accumulator.snapshot("w1", new Map([["window:b", 1]])).agents[0]?.task, "from-b");
+  assert.throws(
+    () => accumulator.snapshot("w1", new Map([["window:a", 1], ["window:b", 1]])),
+    /ambiguous across active sources/,
+  );
+
+  assert.equal(accumulator.apply(frame(3, "window:a", 2, 1, [{
+    kind: "tombstone",
+    correlationId: "same",
+    generation: 1,
+  }], false)), true);
+  assert.deepEqual(accumulator.snapshot("w1", new Map([["window:a", 1]])).agents, []);
+  assert.equal(accumulator.snapshot("w1", new Map([["window:b", 1]])).agents[0]?.task, "from-b");
+});
+
 test("deleting every read projection and replaying broker frames produces the same snapshot", () => {
   const records = [
     frame(2, "window:a", 1, 1, [{ kind: "upsert", entity: agent("a") }]),

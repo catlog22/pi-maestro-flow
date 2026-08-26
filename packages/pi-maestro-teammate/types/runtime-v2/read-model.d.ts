@@ -1,4 +1,4 @@
-import type { AgentProgressSnapshot, AgentRunOutcome, AgentRuntimeProjection, AgentStatus, AgentTurnSnapshot } from "../shared/types.ts";
+import type { AgentProgressSnapshot, AgentRunOutcome, AgentRuntimeProjection, AgentStatus, AgentTurnSnapshot, SessionProjectionIdentity } from "../shared/types.ts";
 export declare const RUNTIME_READ_MODEL_VERSION: 2;
 export declare const RUNTIME_READ_MODEL_REVISION: 1;
 /** Broker domain event carrying a discardable per-window read-model frame. */
@@ -7,13 +7,19 @@ export declare const RUNTIME_READ_MODEL_QUERY_EVENT = "teammate:runtime-read-mod
 export declare const RUNTIME_READ_MODEL_SNAPSHOT_EVENT = "teammate:runtime-read-model-snapshot-v2";
 export declare const RUNTIME_READ_MODEL_DELTA_EVENT = "teammate:runtime-read-model-delta-v2";
 export declare const RUNTIME_READ_MODEL_UNAVAILABLE_EVENT = "teammate:runtime-read-model-unavailable-v2";
+export interface RuntimeReadModelOwnershipV2 extends SessionProjectionIdentity {
+}
 export interface RuntimeReadModelSourceV2 {
     streamId: string;
     revision: number;
     generation: number;
+    /** Exact producer owner. Absent only on pre-isolation V2 records. */
+    projection?: RuntimeReadModelOwnershipV2;
 }
 export interface RuntimeAgentReadEntityV2 {
     correlationId: string;
+    /** Exact producer owner. The broker bridge installs this on every new row. */
+    projection?: RuntimeReadModelOwnershipV2;
     generation: number;
     agent: string;
     name?: string;
@@ -90,6 +96,7 @@ export interface RuntimeReadModelFoldResultV2 {
     accepted: number;
     discarded: number;
 }
+export declare function parseRuntimeReadModelOwnershipV2(value: unknown): RuntimeReadModelOwnershipV2 | undefined;
 export declare function parseRuntimeReadModelDeltaV2(value: unknown): RuntimeReadModelDeltaV2 | undefined;
 export declare function parseRuntimeReadModelSourceFrameV2(value: unknown): RuntimeReadModelSourceFrameV2 | undefined;
 export declare function parseRuntimeReadModelSnapshotV2(value: unknown): RuntimeReadModelSnapshotV2 | undefined;
@@ -111,7 +118,7 @@ export declare class RuntimeReadModelBrokerAccumulatorV2 {
     get cursor(): number;
     get accepted(): number;
     apply(record: RuntimeReadModelBrokerFrameV2): boolean;
-    snapshot(workspaceId: string, activeSources?: ReadonlyMap<string, number>): RuntimeReadModelSnapshotV2;
+    snapshot(workspaceId: string, activeSources?: ReadonlyMap<string, number>, projectionSource?: RuntimeReadModelSourceV2): RuntimeReadModelSnapshotV2;
 }
 export declare function rebuildRuntimeReadModelFromBrokerFramesV2(workspaceId: string, records: readonly RuntimeReadModelBrokerFrameV2[], activeSources?: ReadonlyMap<string, number>): RuntimeReadModelFoldResultV2;
 export declare function createRuntimeReadModelDeltaV2(input: {

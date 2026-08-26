@@ -2,23 +2,38 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
+  isRuntimeBrokerTransportError,
+  probeRuntimeBrokerAuthority,
+} from "./client.ts";
+import {
   RUNTIME_BROKER_DAEMON_LOCK_FILE,
   RUNTIME_BROKER_PRIVATE_FILE_MODE,
   ensurePrivateRuntimeBrokerDirectory,
 } from "./private-state.ts";
 
 const MAX_LOCK_BYTES = 4096;
-const MAX_TOKEN_BYTES = 256;
+const MAX_IDENTITY_BYTES = 256;
 const MAX_ACQUIRE_ATTEMPTS = 6;
 const INCOMPLETE_LOCK_STALE_MS = 1_000;
 const INCOMPLETE_LOCK_RETRY_MS = 25;
+export const RUNTIME_BROKER_DAEMON_STARTUP_GRACE_MS = 1_000;
 
-interface DaemonLockRecord {
+interface DaemonLockRecordV1 {
   version: 1;
   pid: number;
   token: string;
   startedAt: number;
 }
+
+interface DaemonLockRecordV2 {
+  version: 2;
+  pid: number;
+  token: string;
+  generation: string;
+  startedAt: number;
+}
+
+type DaemonLockRecord = DaemonLockRecordV1 | DaemonLockRecordV2;
 
 interface DaemonLockSnapshot {
   record: DaemonLockRecord;
@@ -35,14 +50,26 @@ interface IncompleteLockSnapshot {
   content: string;
 }
 
+interface DaemonLeaseReleaseCleanup {
+  path: string;
+  dev: number;
+  ino: number;
+}
+
 type DaemonLockInspection =
   | { kind: "complete"; snapshot: DaemonLockSnapshot }
   | { kind: "incomplete"; snapshot: IncompleteLockSnapshot };
 
-export interface RuntimeBrokerDaemonLease {
-  readonly lockPath: string;
+export interface RuntimeBrokerDaemonIdentity {
   readonly pid: number;
   readonly token: string;
+  readonly generation: string;
+  readonly startedAt: number;
+}
+
+export interface RuntimeBrokerDaemonLease extends RuntimeBrokerDaemonIdentity {
+  readonly lockPath: string;
+  assertOwned(): void;
   release(): void;
 }
 
@@ -50,7 +77,10 @@ export interface RuntimeBrokerDaemonLeaseOptions {
   pid?: number;
   now?: () => number;
   token?: () => string;
+  generation?: () => string;
   processExists?: (pid: number) => boolean;
+  proveAuthority?: (identity: RuntimeBrokerDaemonIdentity) => boolean | Promise<boolean>;
+  startupGraceMs?: number;
 }
 
 export function runtimeBrokerProcessExists(pid: number): boolean {
@@ -62,24 +92,31 @@ export function runtimeBrokerProcessExists(pid: number): boolean {
   }
 }
 
-export function acquireRuntimeBrokerDaemonLease(
+export async function acquireRuntimeBrokerDaemonLease(
   stateDirectory: string,
   options: RuntimeBrokerDaemonLeaseOptions = {},
-): RuntimeBrokerDaemonLease {
+): Promise<RuntimeBrokerDaemonLease> {
   ensurePrivateRuntimeBrokerDirectory(stateDirectory);
   const lockPath = path.join(stateDirectory, RUNTIME_BROKER_DAEMON_LOCK_FILE);
   const pid = options.pid ?? process.pid;
   const token = (options.token ?? randomUUID)();
+  const generation = (options.generation ?? randomUUID)();
   const now = options.now ?? Date.now;
   const startedAt = now();
   const processExists = options.processExists ?? runtimeBrokerProcessExists;
+  const proveAuthority = options.proveAuthority ?? ((identity) => defaultProveAuthority(stateDirectory, identity));
+  const startupGraceMs = options.startupGraceMs ?? RUNTIME_BROKER_DAEMON_STARTUP_GRACE_MS;
   if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("Runtime broker daemon PID must be a positive integer");
-  if (!isDaemonToken(token)) throw new Error("Runtime broker daemon token must be a bounded non-empty string");
+  if (!isDaemonIdentityPart(token)) throw new Error("Runtime broker daemon token must be a bounded non-empty string");
+  if (!isDaemonIdentityPart(generation)) throw new Error("Runtime broker daemon generation must be a bounded non-empty string");
   if (!Number.isSafeInteger(startedAt) || startedAt < 0) {
     throw new Error("Runtime broker daemon start time must be a non-negative safe integer");
   }
+  if (!Number.isSafeInteger(startupGraceMs) || startupGraceMs < 0) {
+    throw new Error("Runtime broker daemon startup grace must be a non-negative safe integer");
+  }
 
-  const record: DaemonLockRecord = { version: 1, pid, token, startedAt };
+  const record: DaemonLockRecordV2 = { version: 2, pid, token, generation, startedAt };
   const candidatePath = `${lockPath}.candidate-${pid}-${randomUUID()}`;
   const candidate = writeLockCandidate(candidatePath, record);
   let published = false;
@@ -103,9 +140,18 @@ export function acquireRuntimeBrokerDaemonLease(
           throw readError;
         }
         if (inspection.kind === "complete") {
-          if (processExists(inspection.snapshot.record.pid)) {
-            throw new Error("Runtime broker daemon is already running");
+          const existing = lockIdentity(inspection.snapshot.record);
+          const observedAt = now();
+          if (!Number.isSafeInteger(observedAt) || observedAt < 0) {
+            throw new Error("Runtime broker daemon observation time must be a non-negative safe integer");
           }
+          const age = observedAt - existing.startedAt;
+          const pidIsLive = processExists(existing.pid);
+          if (pidIsLive && age >= 0 && age < startupGraceMs) {
+            throw new Error("Runtime broker daemon is already starting");
+          }
+          const authorityProven = await proveAuthority(existing);
+          if (authorityProven) throw new Error("Runtime broker daemon is already running");
           removeStaleLock(lockPath, inspection.snapshot);
           continue;
         }
@@ -118,24 +164,80 @@ export function acquireRuntimeBrokerDaemonLease(
     quarantineAndRemove(candidatePath, candidate.dev, candidate.ino, "daemon lock candidate");
   }
 
+  const identity = { pid, token, generation, startedAt };
   let released = false;
+  let pendingCleanup: DaemonLeaseReleaseCleanup | undefined;
   return {
     lockPath,
-    pid,
-    token,
-    release() {
-      if (released) return;
-      released = true;
-      try {
-        const current = readLockSnapshot(lockPath);
-        if (current.record.token === token && current.record.pid === pid) {
-          quarantineAndRemove(lockPath, current.dev, current.ino, "daemon lock");
-        }
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    ...identity,
+    assertOwned() {
+      const current = readLockSnapshot(lockPath);
+      if (!isOwnedLock(current.record, identity)) {
+        throw new Error("Runtime broker daemon lease authority was lost");
       }
     },
+    release() {
+      if (released) return;
+      if (pendingCleanup) {
+        finishDaemonLeaseReleaseCleanup(pendingCleanup);
+        pendingCleanup = undefined;
+        released = true;
+        return;
+      }
+
+      let current: DaemonLockSnapshot;
+      try {
+        current = readLockSnapshot(lockPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          released = true;
+          return;
+        }
+        throw error;
+      }
+      if (!isOwnedLock(current.record, identity)) {
+        released = true;
+        return;
+      }
+
+      const cleanup: DaemonLeaseReleaseCleanup = {
+        path: `${lockPath}.quarantine-${process.pid}-${randomUUID()}`,
+        dev: current.dev,
+        ino: current.ino,
+      };
+      try {
+        fs.renameSync(lockPath, cleanup.path);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          released = true;
+          return;
+        }
+        throw error;
+      }
+      pendingCleanup = cleanup;
+      finishDaemonLeaseReleaseCleanup(cleanup);
+      pendingCleanup = undefined;
+      released = true;
+    },
   };
+}
+
+async function defaultProveAuthority(
+  stateDirectory: string,
+  identity: RuntimeBrokerDaemonIdentity,
+): Promise<boolean> {
+  try {
+    await probeRuntimeBrokerAuthority({
+      stateDirectory,
+      timeoutMs: 500,
+      daemonToken: identity.token,
+      generation: identity.generation,
+    });
+    return true;
+  } catch (error) {
+    if (isRuntimeBrokerTransportError(error)) return false;
+    throw error;
+  }
 }
 
 function writeLockCandidate(candidatePath: string, record: DaemonLockRecord): DaemonLockSnapshot {
@@ -219,34 +321,75 @@ function isLockRecord(value: unknown): value is DaemonLockRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
   const keys = Object.keys(record).sort();
-  return keys.length === 4
-    && keys[0] === "pid"
-    && keys[1] === "startedAt"
-    && keys[2] === "token"
-    && keys[3] === "version"
-    && record.version === 1
-    && typeof record.pid === "number"
+  const common = typeof record.pid === "number"
     && Number.isSafeInteger(record.pid)
     && record.pid > 0
-    && isDaemonToken(record.token)
+    && isDaemonIdentityPart(record.token)
     && typeof record.startedAt === "number"
     && Number.isSafeInteger(record.startedAt)
     && record.startedAt >= 0;
+  if (!common) return false;
+  if (record.version === 1) {
+    return keys.length === 4
+      && keys[0] === "pid"
+      && keys[1] === "startedAt"
+      && keys[2] === "token"
+      && keys[3] === "version";
+  }
+  return record.version === 2
+    && keys.length === 5
+    && keys[0] === "generation"
+    && keys[1] === "pid"
+    && keys[2] === "startedAt"
+    && keys[3] === "token"
+    && keys[4] === "version"
+    && isDaemonIdentityPart(record.generation);
 }
 
-function isDaemonToken(value: unknown): value is string {
+function lockIdentity(record: DaemonLockRecord): RuntimeBrokerDaemonIdentity {
+  return {
+    pid: record.pid,
+    token: record.token,
+    generation: record.version === 2 ? record.generation : record.token,
+    startedAt: record.startedAt,
+  };
+}
+
+function isOwnedLock(record: DaemonLockRecord, identity: RuntimeBrokerDaemonIdentity): boolean {
+  return record.version === 2
+    && record.pid === identity.pid
+    && record.token === identity.token
+    && record.generation === identity.generation;
+}
+
+function finishDaemonLeaseReleaseCleanup(cleanup: DaemonLeaseReleaseCleanup): void {
+  let moved: fs.Stats;
+  try {
+    moved = fs.lstatSync(cleanup.path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  if (!moved.isFile() || moved.isSymbolicLink()
+    || moved.dev !== cleanup.dev || moved.ino !== cleanup.ino) {
+    // The canonical lock is already gone and this is no longer our inode.
+    // Preserve the unexpected quarantine entry and treat ownership as lost.
+    return;
+  }
+  fs.rmSync(cleanup.path);
+}
+
+function isDaemonIdentityPart(value: unknown): value is string {
   return typeof value === "string"
     && value.length > 0
-    && Buffer.byteLength(value, "utf8") <= MAX_TOKEN_BYTES
+    && Buffer.byteLength(value, "utf8") <= MAX_IDENTITY_BYTES
     && !value.includes("\0");
 }
 
 function removeStaleLock(lockPath: string, expected: DaemonLockSnapshot): void {
   const current = readLockSnapshot(lockPath);
   if (current.dev !== expected.dev || current.ino !== expected.ino
-    || current.record.pid !== expected.record.pid
-    || current.record.token !== expected.record.token
-    || current.record.startedAt !== expected.record.startedAt) {
+    || JSON.stringify(current.record) !== JSON.stringify(expected.record)) {
     throw new Error("Runtime broker daemon lock changed during stale recovery");
   }
   quarantineAndRemove(lockPath, current.dev, current.ino, "stale daemon lock");

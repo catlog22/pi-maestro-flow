@@ -19,7 +19,10 @@ import {
   type RuntimeBrokerCommitRequest,
 } from "../src/runtime-broker/contracts.ts";
 import type { RuntimeEventDraftV2, RuntimeEventV2 } from "../src/runtime-v2/contracts.ts";
-import { RuntimeV2ShadowJournal } from "../src/runtime-v2/journal.ts";
+import {
+  RuntimeV2JournalCorruptionError,
+  RuntimeV2ShadowJournal,
+} from "../src/runtime-v2/journal.ts";
 import { WindowSupervisorRuntimeActor } from "../src/extension/runtime-actor-host.ts";
 import { AgentRunRuntimeActor } from "../src/runs/runtime-actor.ts";
 import { runSingleTeammate } from "../src/runs/execution.ts";
@@ -102,8 +105,7 @@ test("file actor host heartbeats, releases, and fences stale generations", async
   const firstRegistration = registration(1);
   const first = await host.acquire(firstRegistration);
   assert.ok(first);
-  await assert.rejects(competingHost.acquire(firstRegistration), (error) =>
-    error instanceof RuntimeBrokerError && error.code === "lease_unavailable");
+  assert.equal(await competingHost.acquire(firstRegistration), undefined);
   await first.heartbeat();
   assert.equal((await first.append([event(firstRegistration) as RuntimeEventDraftV2]))[0]?.sequence, 1);
   await first.release();
@@ -122,7 +124,59 @@ test("file actor host heartbeats, releases, and fences stale generations", async
   assert.equal(next.active, false);
 });
 
-test("sqlite actor host rejects a commit that becomes stale while awaited", async () => {
+test("file actor host persists one stream authority across distinct lease actor IDs", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-actor-stream-authority-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const firstInput = {
+    ...registration(),
+    leaseActorId: "actor-lease-a",
+    holderId: "holder-a",
+    streamId: "shared-stream",
+  };
+  const secondInput = {
+    ...firstInput,
+    leaseActorId: "actor-lease-b",
+    holderId: "holder-b",
+  };
+  const firstHost = createRuntimeActorHost({ mode: "file", stateDirectory: root });
+  const secondHost = createRuntimeActorHost({ mode: "file", stateDirectory: root });
+  const first = await firstHost.acquire(firstInput);
+  assert.ok(first);
+  assert.equal(first.credential.epoch, 1);
+  assert.equal(await secondHost.acquire(secondInput), undefined, "a distinct actor ID cannot split stream authority");
+  const firstEvent = (await first.append([event(firstInput)]))[0];
+  assert.equal(firstEvent?.sequence, 1);
+  assert.equal(firstEvent?.producerEpoch, 1);
+  await first.release();
+
+  const second = await secondHost.acquire(secondInput);
+  assert.ok(second);
+  assert.equal(second.credential.epoch, 2, "stream takeover continues the persisted stream epoch lineage");
+  assert.equal(second.revision, 1);
+  const secondEvent = (await second.append([event(secondInput)]))[0];
+  assert.equal(secondEvent?.sequence, 2);
+  assert.equal(secondEvent?.producerEpoch, 2);
+  await Promise.all([firstHost.stop(), secondHost.stop()]);
+});
+
+test("file actor acquisition fails closed repeatedly after authoritative journal corruption", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-actor-corrupt-file-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const input = registration();
+  const journalRoot = path.join(root, "actor-journal");
+  const journal = new RuntimeV2ShadowJournal(journalRoot);
+  journal.append(event(input));
+  const streamDirectory = path.join(journalRoot, "streams", fs.readdirSync(path.join(journalRoot, "streams"))[0]!);
+  fs.writeFileSync(path.join(streamDirectory, "events.jsonl"), "{malformed}\n", "utf8");
+  const host = createRuntimeActorHost({ mode: "file", stateDirectory: root });
+  await assert.rejects(host.acquire(input), (error) => error instanceof RuntimeV2JournalCorruptionError);
+  await assert.rejects(host.acquire(input), (error) => error instanceof RuntimeV2JournalCorruptionError);
+  const leases = fs.readdirSync(path.join(journalRoot, "leases")).filter((name) => name.endsWith(".json"));
+  assert.deepEqual(leases, [], "failed replay cannot publish or heartbeat a hidden revision-zero lease");
+  await host.stop();
+});
+
+test("sqlite actor host drains an admitted commit before closing and rejects new work", async () => {
   let resolveCommit!: (value: {
     messageId: string;
     streamId: string;
@@ -162,7 +216,7 @@ test("sqlite actor host rejects a commit that becomes stale while awaited", asyn
   assert.ok(actor);
   const pending = actor.append([event(input)]);
   await new Promise((resolve) => setImmediate(resolve));
-  const releasing = actor.release();
+  const stopping = host.stop();
   resolveCommit({
     messageId: committed!.messageId,
     streamId: committed!.streamId,
@@ -173,10 +227,13 @@ test("sqlite actor host rejects a commit that becomes stale while awaited", asyn
     appliedAt: 10,
     recovered: false,
   });
-  await assert.rejects(pending, (error) => error instanceof RuntimeBrokerError && error.code === "stale_lease");
-  await releasing;
+  const persisted = await pending;
+  assert.equal(persisted[0]?.sequence, 1, "an admitted durable commit returns its exact result during close");
+  await assert.rejects(actor.append([event(input)]), (error) =>
+    error instanceof RuntimeBrokerError && error.code === "stale_lease");
+  await stopping;
+  assert.equal(actor.revision, 1);
   assert.equal(actor.active, false);
-  await host.stop();
 });
 
 class FakeActorHost implements RuntimeActorHostClient {
@@ -186,10 +243,12 @@ class FakeActorHost implements RuntimeActorHostClient {
   readonly trace: string[] = [];
   released = 0;
   failAcquire = false;
+  unavailable = false;
   failAppend = false;
 
   async acquire(input: RuntimeActorRegistration): Promise<RuntimeActorLease | undefined> {
     if (this.failAcquire) throw new Error("broker unavailable");
+    if (this.unavailable) return undefined;
     this.registrations.push(input);
     const host = this;
     let active = true;
@@ -218,6 +277,344 @@ class FakeActorHost implements RuntimeActorHostClient {
 
   async stop(): Promise<void> {}
 }
+
+test("sqlite actor reconnects and replays a lost acquire with the exact stable requestId", async () => {
+  const lease: ActorLease = {
+    actorId: "actor-lease",
+    streamId: "stream-1",
+    holderId: "holder-1",
+    epoch: 4,
+    nonce: "nonce-4",
+    acquiredAt: 1,
+    heartbeatAt: 1,
+    expiresAt: 10_000,
+  };
+  const acquireCalls: Array<{ params: unknown; requestId?: string }> = [];
+  let firstClosed = 0;
+  const firstClient: RuntimeActorBrokerClient = {
+    acquireLease: async (params, requestId) => {
+      acquireCalls.push({ params, requestId });
+      throw Object.assign(new Error("acquire response was lost"), { code: "ECONNRESET" });
+    },
+    heartbeatLease: async () => { throw new Error("not used"); },
+    commit: async () => { throw new Error("not used"); },
+    releaseLease: async () => {},
+    getStreamRevision: async () => 0,
+    readEvents: async () => [],
+    close: async () => { firstClosed += 1; },
+  };
+  const secondClient: RuntimeActorBrokerClient = {
+    acquireLease: async (params, requestId) => {
+      acquireCalls.push({ params, requestId });
+      return lease;
+    },
+    heartbeatLease: async () => lease,
+    commit: async () => { throw new Error("not used"); },
+    releaseLease: async () => {},
+    getStreamRevision: async () => 0,
+    readEvents: async () => [],
+    close: async () => {},
+  };
+  const clients = [firstClient, secondClient];
+  let connections = 0;
+  const host = createRuntimeActorHost({
+    mode: "sqlite",
+    sqliteClientFactory: async () => clients[connections++]!,
+  });
+  const actor = await host.acquire(registration());
+  assert.ok(actor);
+  assert.equal(connections, 2);
+  assert.equal(firstClosed, 1);
+  assert.deepEqual(acquireCalls[1]?.params, acquireCalls[0]?.params);
+  assert.equal(typeof acquireCalls[0]?.requestId, "string");
+  assert.equal(acquireCalls[1]?.requestId, acquireCalls[0]?.requestId);
+  await host.stop();
+});
+
+test("actor host stop waits for an in-flight acquisition and releases its lease", async () => {
+  const lease: ActorLease = {
+    actorId: "actor-lease",
+    streamId: "stream-1",
+    holderId: "holder-1",
+    epoch: 1,
+    nonce: "nonce-1",
+    acquiredAt: 1,
+    heartbeatAt: 1,
+    expiresAt: 10_000,
+  };
+  let resolveAcquire!: () => void;
+  const acquireGate = new Promise<void>((resolve) => { resolveAcquire = resolve; });
+  let releases = 0;
+  let closed = false;
+  const client: RuntimeActorBrokerClient = {
+    acquireLease: async () => { await acquireGate; return lease; },
+    heartbeatLease: async () => lease,
+    getStreamRevision: async () => 0,
+    readEvents: async () => [],
+    commit: async () => { throw new Error("not used"); },
+    releaseLease: async () => {
+      assert.equal(closed, false, "lease cleanup precedes driver shutdown");
+      releases += 1;
+    },
+    close: async () => { closed = true; },
+  };
+  const host = createRuntimeActorHost({ mode: "sqlite", sqliteClientFactory: async () => client });
+  const acquiring = host.acquire(registration());
+  await new Promise((resolve) => setImmediate(resolve));
+  const stopping = host.stop();
+  resolveAcquire();
+  await assert.rejects(acquiring, /stopped during lease acquisition/);
+  await stopping;
+  assert.equal(releases, 1);
+  assert.equal(closed, true);
+});
+
+test("actor host drains blocked listStreams across stop without reconnecting after close begins", async () => {
+  let releaseList!: () => void;
+  const listGate = new Promise<void>((resolve) => { releaseList = resolve; });
+  let connections = 0;
+  let closes = 0;
+  const firstClient: RuntimeActorBrokerClient = {
+    acquireLease: async () => { throw new Error("not used"); },
+    heartbeatLease: async () => { throw new Error("not used"); },
+    commit: async () => { throw new Error("not used"); },
+    releaseLease: async () => { throw new Error("not used"); },
+    getStreamRevision: async () => { throw new Error("not used"); },
+    readEvents: async () => { throw new Error("not used"); },
+    listStreams: async () => {
+      await listGate;
+      throw Object.assign(new Error("list transport was interrupted"), { code: "ECONNRESET" });
+    },
+    close: async () => { closes += 1; },
+  };
+  const reconnectClient: RuntimeActorBrokerClient = {
+    ...firstClient,
+    listStreams: async () => ["must-not-reconnect"],
+  };
+  const clients = [firstClient, reconnectClient];
+  const host = createRuntimeActorHost({
+    mode: "sqlite",
+    sqliteClientFactory: async () => {
+      const client = clients[connections];
+      connections += 1;
+      if (!client) throw new Error("unexpected Runtime actor reconnect");
+      return client;
+    },
+  });
+  const listing = host.listStreams!({ workspaceId: "workspace-a", prefix: "stream-", limit: 10 });
+  await new Promise((resolve) => setImmediate(resolve));
+  let stopSettled = false;
+  const stopping = host.stop().then(() => { stopSettled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(stopSettled, false, "stop must wait for the admitted stream listing");
+  assert.equal(closes, 0, "the admitted listing keeps its existing client until it settles");
+  releaseList();
+  await assert.rejects(listing, /list transport was interrupted/);
+  await stopping;
+  assert.equal(connections, 1, "closing forbids transport retry from opening a replacement client");
+  assert.equal(closes, 1);
+  await assert.rejects(
+    host.listStreams!({ workspaceId: "workspace-a", prefix: "stream-", limit: 10 }),
+    /host is stopped/,
+  );
+  assert.equal(connections, 1);
+});
+
+test("actor host stop discards a late blocked reconnect without issuing a post-close request", async () => {
+  let resolveReconnect!: (client: RuntimeActorBrokerClient) => void;
+  const reconnectGate = new Promise<RuntimeActorBrokerClient>((resolve) => { resolveReconnect = resolve; });
+  let markReconnectStarted!: () => void;
+  const reconnectStarted = new Promise<void>((resolve) => { markReconnectStarted = resolve; });
+  let resolveLateClose!: () => void;
+  const lateCloseGate = new Promise<void>((resolve) => { resolveLateClose = resolve; });
+  let markLateCloseStarted!: () => void;
+  const lateCloseStarted = new Promise<void>((resolve) => { markLateCloseStarted = resolve; });
+  let connections = 0;
+  let liveSockets = 1;
+  let firstCloses = 0;
+  let lateCloses = 0;
+  let lateRequests = 0;
+  const firstClient: RuntimeActorBrokerClient = {
+    acquireLease: async () => { throw new Error("not used"); },
+    heartbeatLease: async () => { throw new Error("not used"); },
+    commit: async () => { throw new Error("not used"); },
+    releaseLease: async () => { throw new Error("not used"); },
+    getStreamRevision: async () => { throw new Error("not used"); },
+    readEvents: async () => { throw new Error("not used"); },
+    listStreams: async () => {
+      throw Object.assign(new Error("list response was lost"), { code: "ECONNRESET" });
+    },
+    close: async () => {
+      firstCloses += 1;
+      liveSockets -= 1;
+    },
+  };
+  const lateClient: RuntimeActorBrokerClient = {
+    acquireLease: async () => { throw new Error("not used"); },
+    heartbeatLease: async () => { throw new Error("not used"); },
+    commit: async () => { throw new Error("not used"); },
+    releaseLease: async () => { throw new Error("not used"); },
+    getStreamRevision: async () => { throw new Error("not used"); },
+    readEvents: async () => { throw new Error("not used"); },
+    listStreams: async () => {
+      lateRequests += 1;
+      return ["must-not-run-after-close"];
+    },
+    close: async () => {
+      lateCloses += 1;
+      markLateCloseStarted();
+      await lateCloseGate;
+      liveSockets -= 1;
+    },
+  };
+  const host = createRuntimeActorHost({
+    mode: "sqlite",
+    sqliteClientFactory: async () => {
+      connections += 1;
+      if (connections === 1) return firstClient;
+      if (connections === 2) {
+        markReconnectStarted();
+        return reconnectGate;
+      }
+      throw new Error("unexpected Runtime actor reconnect");
+    },
+  });
+
+  const listing = host.listStreams!({ workspaceId: "workspace-a", prefix: "stream-", limit: 10 });
+  await reconnectStarted;
+  assert.equal(firstCloses, 1);
+  assert.equal(liveSockets, 0);
+
+  let stopSettled = false;
+  const stopping = host.stop().then(() => { stopSettled = true; });
+  liveSockets += 1;
+  resolveReconnect(lateClient);
+  await lateCloseStarted;
+  assert.equal(lateRequests, 0, "a reconnect resolved after close must not receive the retry");
+  assert.equal(stopSettled, false, "stop must await late-client socket cleanup");
+  assert.equal(liveSockets, 1);
+
+  resolveLateClose();
+  await assert.rejects(listing, /list response was lost/);
+  await stopping;
+  assert.equal(connections, 2);
+  assert.equal(firstCloses, 1);
+  assert.equal(lateCloses, 1);
+  assert.equal(liveSockets, 0, "stop returns only after every connected socket is closed");
+});
+
+test("sqlite actor recovers a lost commit response with the exact message, event, and request IDs", async () => {
+  const lease: ActorLease = {
+    actorId: "actor-lease",
+    streamId: "stream-1",
+    holderId: "holder-1",
+    epoch: 3,
+    nonce: "nonce-3",
+    acquiredAt: 1,
+    heartbeatAt: 1,
+    expiresAt: 10_000,
+  };
+  const calls: Array<{ request: RuntimeBrokerCommitRequest; requestId?: string }> = [];
+  let firstClosed = 0;
+  const receipt = (request: RuntimeBrokerCommitRequest, recovered: boolean) => ({
+    messageId: request.messageId,
+    streamId: request.streamId,
+    previousRevision: request.expectedRevision,
+    revision: request.expectedRevision + request.events.length,
+    eventIds: request.events.map((entry) => entry.eventId),
+    outboxIds: [],
+    appliedAt: 10,
+    recovered,
+  });
+  const firstClient: RuntimeActorBrokerClient = {
+    acquireLease: async () => lease,
+    heartbeatLease: async () => lease,
+    getStreamRevision: async () => 0,
+    readEvents: async () => [],
+    commit: async (request, requestId) => {
+      calls.push({ request, requestId });
+      throw Object.assign(new Error("commit response was lost"), { code: "ECONNRESET" });
+    },
+    releaseLease: async () => {},
+    close: async () => { firstClosed += 1; },
+  };
+  const secondClient: RuntimeActorBrokerClient = {
+    acquireLease: async () => { throw new Error("not used"); },
+    heartbeatLease: async () => lease,
+    getStreamRevision: async () => 0,
+    readEvents: async () => [],
+    commit: async (request, requestId) => {
+      calls.push({ request, requestId });
+      return receipt(request, true);
+    },
+    releaseLease: async () => {},
+    close: async () => {},
+  };
+  const clients = [firstClient, secondClient];
+  let connections = 0;
+  const host = createRuntimeActorHost({
+    mode: "sqlite",
+    sqliteClientFactory: async () => clients[connections++]!,
+  });
+  const input = registration();
+  const actor = await host.acquire(input);
+  assert.ok(actor);
+  const persisted = await actor.append([event(input)]);
+  assert.equal(persisted[0]?.sequence, 1);
+  assert.equal(actor.revision, 1);
+  assert.equal(firstClosed, 1);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[1]?.request, calls[0]?.request);
+  assert.equal(calls[1]?.request.messageId, calls[0]?.request.messageId);
+  assert.deepEqual(calls[1]?.request.events.map((entry) => entry.eventId), calls[0]?.request.events.map((entry) => entry.eventId));
+  assert.equal(calls[1]?.requestId, calls[0]?.requestId);
+  await host.stop();
+});
+
+test("sqlite actor renew failure closes authority, rejects work, and attempts lease cleanup", async () => {
+  const lease: ActorLease = {
+    actorId: "actor-lease",
+    streamId: "stream-1",
+    holderId: "holder-1",
+    epoch: 1,
+    nonce: "nonce-1",
+    acquiredAt: 1,
+    heartbeatAt: 1,
+    expiresAt: 10_000,
+  };
+  let heartbeats = 0;
+  let releases = 0;
+  let commits = 0;
+  const client: RuntimeActorBrokerClient = {
+    acquireLease: async () => lease,
+    heartbeatLease: async () => {
+      heartbeats += 1;
+      if (heartbeats > 1) throw new RuntimeBrokerError("stale_lease", "renew denied");
+      return lease;
+    },
+    getStreamRevision: async () => 0,
+    readEvents: async () => [],
+    commit: async () => { commits += 1; throw new Error("must not commit after renew failure"); },
+    releaseLease: async () => { releases += 1; },
+    close: async () => {},
+  };
+  const host = createRuntimeActorHost({ mode: "sqlite", sqliteClientFactory: async () => client });
+  const input = { ...registration(), ttlMs: 80, heartbeatMs: 5 };
+  const actor = await host.acquire(input);
+  assert.ok(actor);
+  for (let attempt = 0; attempt < 50 && actor.active; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+  assert.equal(actor.active, false);
+  await assert.rejects(actor.append([event(input)]), (error) =>
+    error instanceof RuntimeBrokerError && error.code === "stale_lease");
+  for (let attempt = 0; attempt < 50 && releases === 0; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+  assert.equal(commits, 0);
+  assert.equal(releases, 1);
+  await host.stop();
+});
 
 test("sqlite actor resumes from the broker stream revision", async () => {
   const lease: ActorLease = {
@@ -395,7 +792,7 @@ test("WindowSupervisor binds canonical identity and releases after v1 stop", asy
   assert.deepEqual(host.registrations[0], {
     leaseActorId: "window-supervisor:workspace-a:owner-a",
     holderId: "owner-a:nonce-a",
-    streamId: "window-supervisor:workspace-a:7",
+    streamId: "window-supervisor:workspace-a:owner-a:7",
     actor: {
       version: 2,
       revision: 1,
@@ -436,8 +833,8 @@ test("WindowSupervisor rotates canonical owner identity and generation", async (
     streamId: item.streamId,
     generation: item.actor.generation,
   })), [
-    { holderId: "owner-a:nonce-a", streamId: "window-supervisor:workspace-a:1", generation: 1 },
-    { holderId: "owner-a:nonce-b", streamId: "window-supervisor:workspace-a:2", generation: 2 },
+    { holderId: "owner-a:nonce-a", streamId: "window-supervisor:workspace-a:owner-a:1", generation: 1 },
+    { holderId: "owner-a:nonce-b", streamId: "window-supervisor:workspace-a:owner-a:2", generation: 2 },
   ]);
   await second.stop();
 });
@@ -701,4 +1098,15 @@ test("AgentRun maps Pi progress without inferring settlement and broker acquisit
     /broker unavailable/,
   );
   assert.equal(unavailable.batches.length, 0);
+
+  const contended = new FakeActorHost();
+  contended.unavailable = true;
+  await assert.rejects(
+    AgentRunRuntimeActor.start("run-contended", {}, {
+      baseCwd: process.cwd(),
+      runtimeActorHost: contended,
+    }),
+    (error) => error instanceof RuntimeBrokerError && error.code === "lease_unavailable",
+  );
+  assert.equal(contended.batches.length, 0, "enabled contention must never execute through unwrapped V1 callbacks");
 });

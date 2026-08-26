@@ -1,7 +1,7 @@
 import type { RuntimeTransport, RuntimeTransportFactory } from "./transport.ts";
 export declare const RUNTIME_BROKER_ENV_VAR: "PI_RUNTIME_BROKER";
 export type RuntimeBrokerMode = "off" | "file" | "sqlite";
-/** Default to the canonical SQLite broker; explicit or invalid overrides fail closed to off. */
+/** Default off: the SQLite broker causes intermittent startup hangs (see debug-notes). Opt in explicitly via PI_RUNTIME_BROKER=sqlite|file. */
 export declare function parseRuntimeBrokerMode(value: string | undefined): RuntimeBrokerMode;
 export declare function runtimeBrokerModeFromEnv(env?: NodeJS.ProcessEnv): RuntimeBrokerMode;
 export interface RuntimeTransportRolloutOptions {

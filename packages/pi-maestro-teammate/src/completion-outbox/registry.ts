@@ -16,6 +16,10 @@ export class CompletionDurabilityRegistryImpl implements CompletionDurabilityReg
   #provider: CompletionDurabilityProvider | undefined;
   #generation = 0;
   readonly #listeners = new Set<CompletionDurabilityRegistryListener>();
+  readonly #dispatchPins = new Map<string, {
+    provider: CompletionDurabilityProvider;
+    owners: Set<symbol>;
+  }>();
 
   current(): CompletionDurabilityProvider | undefined {
     return this.#provider;
@@ -26,6 +30,30 @@ export class CompletionDurabilityRegistryImpl implements CompletionDurabilityReg
       generation: this.#generation,
       ...(this.#provider ? { provider: this.#provider } : {}),
     });
+  }
+
+  providerForDispatch(dispatchId: string): CompletionDurabilityProvider | undefined {
+    return this.#dispatchPins.get(dispatchId)?.provider;
+  }
+
+  pinDispatch(dispatchId: string, provider: CompletionDurabilityProvider): () => void {
+    if (!dispatchId) throw new TypeError("Completion dispatchId must be non-empty.");
+    const owner = Symbol(dispatchId);
+    const current = this.#dispatchPins.get(dispatchId);
+    if (current && current.provider !== provider) {
+      throw new Error(`Completion dispatch ${dispatchId} is already pinned to another provider generation.`);
+    }
+    const pin = current ?? { provider, owners: new Set<symbol>() };
+    pin.owners.add(owner);
+    this.#dispatchPins.set(dispatchId, pin);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const active = this.#dispatchPins.get(dispatchId);
+      if (!active || active.provider !== provider || !active.owners.delete(owner)) return;
+      if (active.owners.size === 0) this.#dispatchPins.delete(dispatchId);
+    };
   }
 
   register(provider: CompletionDurabilityProvider): () => void {
@@ -71,6 +99,8 @@ export function getCompletionDurabilityRegistry(
   const existing = host[COMPLETION_DURABILITY_REGISTRY_KEY];
   if (existing && typeof existing === "object"
     && "current" in existing
+    && "providerForDispatch" in existing
+    && "pinDispatch" in existing
     && "register" in existing
     && "subscribe" in existing) {
     return existing as CompletionDurabilityRegistry;

@@ -440,6 +440,7 @@ export declare const EXECUTION_BUFFER_LIMITS: Readonly<{
     transcriptBytes: number;
 }>;
 export declare function truncateUtf8Tail(value: string, maxBytes: number): string;
+export declare function truncateUtf8Head(value: string, maxBytes: number): string;
 export declare function appendUtf8Tail(current: string, addition: string, maxBytes: number): string;
 export type TranscriptEntry = {
     role: string;

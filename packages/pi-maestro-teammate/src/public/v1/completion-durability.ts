@@ -150,6 +150,10 @@ export type CompletionDurabilityRegistryListener = (
 export interface CompletionDurabilityRegistry {
   current(): CompletionDurabilityProvider | undefined;
   snapshot(): CompletionDurabilityRegistrySnapshot;
+  /** Provider generation pinned when the dispatch crossed beginDispatch. */
+  providerForDispatch(dispatchId: string): CompletionDurabilityProvider | undefined;
+  /** Pin a dispatch to one provider until its delivery is settled or abandoned. */
+  pinDispatch(dispatchId: string, provider: CompletionDurabilityProvider): () => void;
   register(provider: CompletionDurabilityProvider): () => void;
   subscribe(listener: CompletionDurabilityRegistryListener): () => void;
 }

@@ -1,6 +1,6 @@
 export const RUNTIME_BROKER_PROTOCOL = "pi.runtime-broker" as const;
 export const RUNTIME_BROKER_PROTOCOL_VERSION = 1 as const;
-export const RUNTIME_BROKER_SCHEMA_VERSION = 2 as const;
+export const RUNTIME_BROKER_SCHEMA_VERSION = 3 as const;
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
@@ -118,6 +118,36 @@ export interface RuntimeBrokerListStreamsRequest {
   limit: number;
 }
 
+export interface RuntimeBrokerReadEventsPageRequest extends RuntimeBrokerStreamAuthorization {
+  streamId: string;
+  afterRevision: number;
+  /** Stable upper bound returned by the first page, preserving a finite replay snapshot. */
+  throughRevision?: number;
+  limit: number;
+}
+
+export interface RuntimeBrokerReadEventsPage {
+  events: StoredRuntimeBrokerEvent[];
+  nextRevision: number;
+  throughRevision: number;
+  done: boolean;
+}
+
+export interface RuntimeBrokerProbeRequest {
+  challenge: string;
+}
+
+export interface RuntimeBrokerProbeResult {
+  protocol: typeof RUNTIME_BROKER_PROTOCOL;
+  version: typeof RUNTIME_BROKER_PROTOCOL_VERSION;
+  schemaVersion: typeof RUNTIME_BROKER_SCHEMA_VERSION;
+  workspaceId: string;
+  daemonToken: string;
+  generation: string;
+  readiness: "ready";
+  challenge: string;
+}
+
 export interface StoredRuntimeBrokerEvent {
   eventId: string;
   messageId: string;
@@ -156,6 +186,7 @@ export interface StoredRuntimeBrokerOutboxMessage {
 }
 
 export type RuntimeBrokerMethod =
+  | "broker.probe"
   | "commit"
   | "lease.acquire"
   | "lease.heartbeat"
@@ -164,6 +195,7 @@ export type RuntimeBrokerMethod =
   | "lease.release"
   | "stream.revision"
   | "stream.events"
+  | "stream.events.page"
   | "stream.list"
   | "read-model.events"
   | "read-model.sources";

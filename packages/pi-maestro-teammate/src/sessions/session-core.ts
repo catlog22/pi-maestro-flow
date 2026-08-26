@@ -43,6 +43,7 @@ export function sessionMessageTriggersTurn(kind: SessionMessageKind | undefined)
 }
 
 export type SessionEndpointCapability = "inspect" | "message" | "steer" | "follow_up" | "abort" | "wake"
+  | "monitor-workspace-aggregation"
   | "flow-schedule-todo-binding" | "flow-schedule-todo-projection" | "flow-schedule-todo-mutation" | "flow-schedule-report";
 
 export interface SessionEndpointIdentity {
@@ -65,6 +66,9 @@ export interface SessionEndpoint extends SessionEndpointIdentity {
   /** Hash of semantic content; heartbeat-only timestamps are not projected. */
   contentRevision: string;
   sessionId?: string;
+  /** Projection producer and monotonic incarnation for local isolation. */
+  sourceId?: string;
+  generation?: number;
   sessionName?: string;
   name?: string;
   agent?: string;
@@ -92,6 +96,9 @@ export interface SessionOwnerProjection extends Omit<SessionEndpointIdentity, "c
   /** Optional caller-side proxy transport; root hosts use the scope defaults. */
   transport?: SessionEndpointTransport;
   sessionId?: string;
+  /** Projection producer and monotonic incarnation for local isolation. */
+  sourceId?: string;
+  generation?: number;
   sessionName?: string;
   contextPressure?: number;
   /** Extra root-endpoint capabilities this owner advertises (e.g. flow-schedule-todo-binding). */
@@ -179,6 +186,8 @@ function semanticEndpoint(endpoint: Omit<SessionEndpoint, "ordinal" | "contentRe
     status: endpoint.status,
     capabilities: endpoint.capabilities,
     sessionId: endpoint.sessionId,
+    sourceId: endpoint.sourceId,
+    generation: endpoint.generation,
     sessionName: endpoint.sessionName,
     name: endpoint.name,
     agent: endpoint.agent,
@@ -233,6 +242,8 @@ export function projectSessionEndpoints(owners: readonly SessionOwnerProjection[
           : ["inspect", "message", "steer", "follow_up"],
       ),
       ...(owner.sessionId ? { sessionId: owner.sessionId } : {}),
+      ...(owner.sourceId ? { sourceId: owner.sourceId } : {}),
+      ...(owner.generation === undefined ? {} : { generation: owner.generation }),
       ...(owner.sessionName ? { sessionName: owner.sessionName } : {}),
       ...(owner.contextPressure === undefined ? {} : { contextPressure: owner.contextPressure }),
       agentCount: owner.agents.filter((agent) => agent.status !== "settled").length,
@@ -251,6 +262,8 @@ export function projectSessionEndpoints(owners: readonly SessionOwnerProjection[
         status: agent.status,
         capabilities: agentCapabilities(owner, agent),
         ...(owner.sessionId ? { sessionId: owner.sessionId } : {}),
+        ...(owner.sourceId ? { sourceId: owner.sourceId } : {}),
+        ...(owner.generation === undefined ? {} : { generation: owner.generation }),
         ...(owner.sessionName ? { sessionName: owner.sessionName } : {}),
         ...(agent.name ? { name: agent.name } : {}),
         ...(agent.agent ? { agent: agent.agent } : {}),

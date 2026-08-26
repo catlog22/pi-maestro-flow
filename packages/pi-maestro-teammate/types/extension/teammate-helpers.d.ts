@@ -8,7 +8,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type ChildReclamationOutcome } from "../runs/execution.ts";
 import type { RunTeammateOptions } from "../runs/execution.ts";
-import type { TeammateState, AgentActivity, AgentProgressSnapshot, AgentRunOutcome, AgentRunPhase, ActiveAgent, AgentTerminalStatus, SettledAgentRecord, StructuredResult } from "../shared/types.ts";
+import type { TeammateState, AgentActivity, AgentProgressSnapshot, AgentRunOutcome, AgentRunPhase, ActiveAgent, AgentTerminalStatus, SessionProjectionIdentity, SettledAgentRecord, StructuredResult } from "../shared/types.ts";
 import { type AgentSummary } from "../agents/agents.ts";
 import { type ReplyTarget } from "../shared/routing.ts";
 export type AgentListView = "active" | "named" | "all";
@@ -130,7 +130,7 @@ export declare function waitForTeammate(state: TeammateState, params: {
     waitMs?: number;
     until?: "result-ready" | "completed";
 }, signal?: AbortSignal): Promise<TeammateWaitResult>;
-export declare function emitComplete(pi: ExtensionAPI, id: string | undefined, agent: string, correlationId: string, exitCode: number, durationMs: number, wakeable?: boolean, cancelled?: boolean, structuredResults?: StructuredResult[]): void;
+export declare function emitComplete(pi: ExtensionAPI, id: string | undefined, agent: string, correlationId: string, exitCode: number, durationMs: number, wakeable?: boolean, cancelled?: boolean, structuredResults?: StructuredResult[], projection?: SessionProjectionIdentity): void;
 /**
  * Deferred background and IPC callbacks routinely outlive session replacement:
  * after ctx.newSession()/fork()/switchSession()/reload() the host invalidates
@@ -161,7 +161,20 @@ export declare function deliverTeammateCompleteNotification(options: {
     parentSessionId?: string;
     sessionGeneration?: number;
 }): boolean;
-export declare function notifyBackgroundFailure(pi: ExtensionAPI, id: string, agent: string, correlationId: string, error: unknown, state?: TeammateState): void;
+export interface DurableFailureFallbackOptions {
+    publishDurableFailure(): Promise<boolean>;
+    ownsDispatchGeneration(): boolean;
+    fallback(): void;
+    onDurabilityError?(error: unknown): void;
+}
+/**
+ * Resolves a durable failure publication without letting either continuation
+ * escape the session fence captured by the dispatch. The isolated rejection
+ * path is intentional: an exception from fallback itself must not enter a
+ * branch that invokes the same fallback a second time.
+ */
+export declare function deliverDurableFailureWithFallback(options: DurableFailureFallbackOptions): Promise<void>;
+export declare function notifyBackgroundFailure(pi: ExtensionAPI, id: string, agent: string, correlationId: string, error: unknown, state?: TeammateState, projection?: SessionProjectionIdentity): void;
 /**
  * When a deferred completion notification cannot reach the model (stale
  * extension ctx after session switch/reload), the result must stay findable
@@ -211,7 +224,7 @@ export declare const RESULT_READY_RECLAIM_MS: number;
  * neither live nor settled: it never reaches a `sleeping` cohort, so the
  * wakeable budget cannot evict it, and it holds an active-agent slot forever.
  */
-export declare function reclaimResultReadyAgents(state: TeammateState, pi?: ExtensionAPI, now?: number): string[];
+export declare function reclaimResultReadyAgents(state: TeammateState, pi?: ExtensionAPI, now?: number, projection?: SessionProjectionIdentity | undefined): string[];
 export declare function enforceWakeableAgentBudget(state: TeammateState, now?: number): string[];
 export declare function nextWakeableAgentExpiryDelay(state: TeammateState, now?: number): number | undefined;
 export declare function hasTeammateWidgetWork(state: TeammateState, now?: number): boolean;
@@ -230,6 +243,12 @@ export declare function resolveLocalAgentSenderContext(state: TeammateState, sen
 };
 /** How many settled agents stay recallable after leaving `activeRuns`. */
 export declare const SETTLED_AGENT_MEMO_LIMIT = 32;
+export declare function currentSessionProjectionIdentity(state: TeammateState): SessionProjectionIdentity | undefined;
+export declare function settledAgentBelongsToCurrentSession(state: TeammateState, record: SettledAgentRecord): boolean;
+/** Rebind exact resume history and discard every record owned by another session/source. */
+export declare function reconcileSettledAgentsForSession(state: TeammateState, options: {
+    preserveExact: boolean;
+}): void;
 export declare function recordSettledAgent(state: TeammateState, agent: ActiveAgent, status: SettledAgentRecord["status"]): void;
 /** Finds a settled agent by correlationId, name, or correlationId prefix. */
 export declare function findSettledAgent(state: TeammateState, target: string): SettledAgentRecord | undefined;

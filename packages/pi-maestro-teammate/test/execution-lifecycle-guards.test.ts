@@ -1000,6 +1000,145 @@ test("output-limit: a child exit during recovery is not a success", async () => 
   assert.equal(handle!.killed(), false, "an already-exited child needs no kill");
 });
 
+test("compaction recovery: agent_settled waits for the continuation turn", async () => {
+  const parentSession = path.join(os.tmpdir(), `teammate-compaction-parent-${Date.now()}.jsonl`);
+  fs.writeFileSync(parentSession, "{}\n");
+  let handle: FakeChildHandle | undefined;
+  const completions: SingleResult[] = [];
+  const spawnChildProcess = (() => {
+    handle = createFakeChild();
+    queueMicrotask(() => {
+      handle!.child.emit("message", {
+        type: "teammate_compaction_state",
+        recoveryId: "session:loop-critical",
+        generation: 2,
+        phase: "pending",
+      });
+      handle!.stdout.write(line({ type: "agent_end", willRetry: false }));
+      handle!.stdout.write(line({ type: "agent_settled" }));
+      setTimeout(() => {
+        handle!.child.emit("message", {
+          type: "teammate_compaction_state",
+          recoveryId: "session:loop-critical",
+          generation: 2,
+          phase: "completed",
+        });
+        handle!.child.emit("message", {
+          type: "teammate_compaction_state",
+          recoveryId: "session:loop-critical",
+          generation: 2,
+          phase: "continuation",
+        });
+        handle!.stdout.write(line({ type: "agent_start" }));
+        handle!.stdout.write(line({ type: "turn_start" }));
+        handle!.child.emit("message", {
+          type: "teammate_compaction_state",
+          recoveryId: "session:loop-critical",
+          generation: 2,
+          phase: "pending",
+        });
+        handle!.child.emit("message", {
+          type: "teammate_compaction_state",
+          recoveryId: "session:older-recovery",
+          generation: 1,
+          phase: "pending",
+        });
+        handle!.stdout.write(line(resultReadyTurnEnd("continued after compaction")));
+        handle!.stdout.write(line({ type: "agent_end", willRetry: false }));
+        handle!.stdout.write(line({ type: "agent_settled" }));
+      }, 10);
+    });
+    return handle!.child;
+  }) as unknown as SpawnSeam;
+
+  try {
+    const result = await runSingleTeammate(
+      { agent: "general", task: "recover context", context: "fork" },
+      {
+        baseCwd: process.cwd(),
+        parentSessionFile: parentSession,
+        spawnChildProcess,
+        outputLimitRecoveryTimeoutMs: 100,
+        onTurnComplete: (entry) => completions.push(entry),
+      },
+    );
+
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.messages.at(-1)?.content, "continued after compaction");
+    assert.equal(completions.length, 1, "the interrupted empty boundary must not publish a result");
+    assert.equal(handle!.killed(), true, "the non-wakeable fork is reclaimed only after the continuation settles");
+  } finally {
+    fs.rmSync(parentSession, { force: true });
+  }
+});
+
+test("compaction recovery: a failed phase settles without a lifecycle boundary", async () => {
+  let handle: FakeChildHandle | undefined;
+  let spawnCount = 0;
+  const spawnChildProcess = (() => {
+    spawnCount += 1;
+    handle = createFakeChild();
+    queueMicrotask(() => {
+      handle!.child.emit("message", {
+        type: "teammate_compaction_state",
+        recoveryId: "session:failed-compaction",
+        generation: 1,
+        phase: "pending",
+      });
+      handle!.child.emit("message", {
+        type: "teammate_compaction_state",
+        recoveryId: "session:failed-compaction",
+        generation: 1,
+        phase: "failed",
+        reason: "compaction prompt rejected",
+      });
+    });
+    return handle!.child;
+  }) as unknown as SpawnSeam;
+
+  const result = await runSingleTeammate(
+    { agent: "general", task: "recover context", context: "fresh" },
+    { baseCwd: process.cwd(), spawnChildProcess, outputLimitRecoveryTimeoutMs: 2_000 },
+  );
+
+  assert.equal(result.exitCode, 1);
+  const diagnostic = result.messages.find((message) => /compaction recovery failed/.test(message.content));
+  assert.ok(diagnostic, "the prompt failure diagnostic must be preserved in the transcript");
+  assert.match(diagnostic.content, /compaction prompt rejected/);
+  assert.equal(spawnCount, 1, "a terminal compaction failure must not replay the task in a fresh child");
+  assert.equal(handle!.killed(), true, "the child must be reclaimed after terminal compaction failure");
+});
+
+test("compaction recovery: a missing continuation fails instead of publishing empty success", async () => {
+  let handle: FakeChildHandle | undefined;
+  let spawnCount = 0;
+  const spawnChildProcess = (() => {
+    spawnCount += 1;
+    handle = createFakeChild();
+    queueMicrotask(() => {
+      handle!.child.emit("message", {
+        type: "teammate_compaction_state",
+        recoveryId: "session:stalled-compaction",
+        generation: 1,
+        phase: "pending",
+      });
+      handle!.stdout.write(line({ type: "agent_end", willRetry: false }));
+      handle!.stdout.write(line({ type: "agent_settled" }));
+    });
+    return handle!.child;
+  }) as unknown as SpawnSeam;
+
+  const result = await runSingleTeammate(
+    { agent: "general", task: "recover context", context: "fresh" },
+    { baseCwd: process.cwd(), spawnChildProcess, outputLimitRecoveryTimeoutMs: 40 },
+  );
+
+  assert.equal(result.exitCode, 1);
+  assert.match(result.messages.at(-1)?.content ?? "", /compaction recovery did not continue/);
+  assert.equal(spawnCount, 1, "a lifecycle recovery timeout must not replay the task in a fresh child");
+  assert.equal(handle!.killed(), true);
+});
+
 // ---------------------------------------------------------------------------
 // OBS-6 / OBS-7 — terminal conditions must leave evidence
 // ---------------------------------------------------------------------------

@@ -20,6 +20,11 @@ import registerTeammateExtension, {
   waitForTeammate,
   type TeammateRuntimeOptions,
 } from "../src/extension/index.ts";
+import {
+  acquireRuntimeBrokerDaemonLease,
+  type RuntimeBrokerDaemonLease,
+} from "../src/runtime-broker/daemon-lease.ts";
+import { RuntimeBrokerServer } from "../src/runtime-broker/server.ts";
 import type { RunTeammateOptions } from "../src/runs/execution.ts";
 import {
   createWorkspacePeerPaths,
@@ -183,6 +188,89 @@ async function waitFor(condition: () => boolean, timeoutMs = 5_000): Promise<voi
     await delay(10);
   }
 }
+
+test("root fork dispatch snapshots before its exact tool call and cleans up after background settlement", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-root-fork-"));
+  const sourcePath = path.join(root, "parent.jsonl");
+  const spawningToolCallId = "root-fork-call";
+  fs.writeFileSync(sourcePath, [
+    { type: "session", version: 3, id: "root-parent", timestamp: new Date().toISOString(), cwd: root },
+    {
+      type: "message",
+      id: "retained-user",
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      message: { role: "user", content: "delegate from root" },
+    },
+    {
+      type: "message",
+      id: "spawning-assistant",
+      parentId: "retained-user",
+      timestamp: new Date().toISOString(),
+      message: {
+        role: "assistant",
+        content: [{ type: "toolCall", id: spawningToolCallId, name: "teammate", arguments: {} }],
+      },
+    },
+  ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+
+  let stdout: PassThrough | undefined;
+  let snapshotPath: string | undefined;
+  const spawnChildProcess = ((_command: string, _args: readonly string[], options: { env?: Record<string, string> }) => {
+    const child = new EventEmitter() as ChildProcess;
+    stdout = new PassThrough();
+    snapshotPath = options.env?.PI_TEAMMATE_PARENT_SESSION;
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() { return true; },
+    });
+    return child;
+  }) as unknown as SpawnChildProcess;
+  const { teammate } = createHarness({ spawnChildProcess });
+  const forkContext = {
+    cwd: root,
+    hasUI: false,
+    sessionManager: {
+      getSessionFile: () => sourcePath,
+      getSessionId: () => "root-parent",
+    },
+  };
+
+  try {
+    const acknowledgement = await teammate.execute(
+      spawningToolCallId,
+      { tasks: [{ agent: "general", prompt: "nested work", context: "fork" }], background: true },
+      new AbortController().signal,
+      undefined,
+      forkContext,
+    );
+
+    assert.equal(acknowledgement.isError, false);
+    await waitFor(() => snapshotPath !== undefined);
+    assert.notEqual(snapshotPath, sourcePath);
+    assert.equal(fs.existsSync(snapshotPath!), true, "background execution retains the shared snapshot");
+    const snapshotContent = fs.readFileSync(snapshotPath!, "utf8");
+    assert.match(snapshotContent, /retained-user/);
+    assert.doesNotMatch(snapshotContent, /spawning-assistant|root-fork-call/);
+
+    stdout!.write(`${JSON.stringify({
+      type: "message_end",
+      message: { role: "assistant", content: [{ type: "text", text: "root fork done" }] },
+    })}\n`);
+    stdout!.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+    await waitFor(() => !fs.existsSync(snapshotPath!));
+    assert.equal(fs.existsSync(snapshotPath!), false, "snapshot cleanup follows child settlement, not detach");
+  } finally {
+    stdout?.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("root persists accepted transport turns and diagnose reports the authoritative trigger", async () => {
   let stdout: PassThrough | undefined;
@@ -2794,6 +2882,100 @@ test("model status addressed to @root is normalized and starts a root turn", asy
     assert.match(String(messages[index]?.content), /^\[teammate:coordination\] from main/);
   } finally {
     await Promise.resolve(sessionShutdown());
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test("observe status and diagnose use the current window broker read model", async () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-canonical-observe-"));
+  const stateDirectory = path.join(project, "broker");
+  const previousRead = process.env.PI_RUNTIME_V2_READ;
+  const previousBroker = process.env.PI_RUNTIME_BROKER;
+  const previousState = process.env.PI_TEAMMATE_BROKER_STATE_DIR;
+  process.env.PI_RUNTIME_V2_READ = "1";
+  process.env.PI_RUNTIME_BROKER = "sqlite";
+  process.env.PI_TEAMMATE_BROKER_STATE_DIR = stateDirectory;
+  let daemonLease: RuntimeBrokerDaemonLease | undefined;
+  let server: RuntimeBrokerServer | undefined;
+  let sessionShutdown: (() => unknown) | undefined;
+  try {
+    daemonLease = await acquireRuntimeBrokerDaemonLease(stateDirectory);
+    server = new RuntimeBrokerServer({
+      stateDirectory,
+      daemonToken: daemonLease.token,
+      daemonGeneration: daemonLease.generation,
+    });
+    await server.listen();
+    const { hooks, observeTool, emitted } = createHarness();
+    const sessionStart = hooks.get("session_start")?.[0];
+    sessionShutdown = hooks.get("session_shutdown")?.[0];
+    assert.ok(sessionStart);
+    assert.ok(sessionShutdown);
+    const state = (globalThis as typeof globalThis & Record<symbol, unknown>)[
+      Symbol.for("pi-maestro-teammate.root-registry")
+    ] as TeammateState;
+    state.activeRuns.set("canonical-observe", {
+      correlationId: "canonical-observe",
+      agent: "general",
+      name: "canonical-worker",
+      task: "Verify canonical observe.",
+      startedAt: 10,
+      lastActivityAt: 20,
+      runtimeGeneration: 2,
+      depth: 0,
+      status: "running",
+      phase: "prompting",
+      inbox: [],
+      outputLog: ["canonical broker status"],
+      sleepMs: 0,
+      abortController: new AbortController(),
+    });
+    const ctx = {
+      ...context(),
+      cwd: project,
+      ui: { setWidget() {} },
+      sessionManager: {
+        getEntries: () => [],
+        getSessionFile: () => undefined,
+        getSessionId: () => "canonical-observe-session",
+        getSessionName: () => "canonical-observe-session",
+      },
+    };
+    await Promise.resolve(sessionStart({ reason: "new" }, ctx));
+    await waitFor(() => emitted.some(({ event, payload }) =>
+      event === "teammate:runtime-read-model-snapshot-v2"
+      && Array.isArray(payload.agents)
+      && payload.agents.some((agent: { correlationId?: string }) => agent.correlationId === "canonical-observe")
+    ));
+
+    const result = await observeTool.execute(
+      "canonical-observe-call",
+      { action: "diagnose", targets: [{ kind: "teammate", id: "canonical-worker" }] },
+      new AbortController().signal,
+      undefined,
+      ctx,
+    );
+    const observation = result.details.result.observations[0];
+    assert.equal(observation.found, true);
+    assert.equal(observation.nativeStatus, "running");
+    assert.equal(observation.diagnosis.phase, "prompting");
+    assert.match(observation.summary, /canonical broker status/);
+  } finally {
+    try {
+      if (sessionShutdown) await Promise.resolve(sessionShutdown());
+    } finally {
+      try {
+        await server?.close();
+      } finally {
+        daemonLease?.release();
+      }
+    }
+    if (previousRead === undefined) delete process.env.PI_RUNTIME_V2_READ;
+    else process.env.PI_RUNTIME_V2_READ = previousRead;
+    if (previousBroker === undefined) delete process.env.PI_RUNTIME_BROKER;
+    else process.env.PI_RUNTIME_BROKER = previousBroker;
+    if (previousState === undefined) delete process.env.PI_TEAMMATE_BROKER_STATE_DIR;
+    else process.env.PI_TEAMMATE_BROKER_STATE_DIR = previousState;
     fs.rmSync(project, { recursive: true, force: true });
   }
 });

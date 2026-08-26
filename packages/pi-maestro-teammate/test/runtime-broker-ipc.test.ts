@@ -4,14 +4,22 @@ import * as net from "node:net";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import test from "node:test";
-import { RuntimeBrokerClient } from "../src/runtime-broker/client.ts";
+import {
+  RuntimeBrokerClient,
+  isRuntimeBrokerTransportError,
+} from "../src/runtime-broker/client.ts";
 import {
   RUNTIME_BROKER_PROTOCOL,
   RUNTIME_BROKER_PROTOCOL_VERSION,
+  RUNTIME_BROKER_SCHEMA_VERSION,
   RuntimeBrokerError,
   type RuntimeBrokerFailureEnvelope,
 } from "../src/runtime-broker/contracts.ts";
-import { getRuntimeBrokerEndpoint } from "../src/runtime-broker/private-state.ts";
+import {
+  RUNTIME_BROKER_DAEMON_LOCK_FILE,
+  getRuntimeBrokerEndpoint,
+  getRuntimeBrokerEndpointWorkspaceId,
+} from "../src/runtime-broker/private-state.ts";
 import { RuntimeBrokerServer } from "../src/runtime-broker/server.ts";
 
 function makeStateDirectory(prefix: string): string {
@@ -45,6 +53,30 @@ async function readOneLine(endpoint: string, line: string | Buffer): Promise<unk
   });
 }
 
+async function sendAndDrop(endpoint: string, request: unknown): Promise<void> {
+  const socket = net.createConnection(endpoint);
+  await new Promise<void>((resolve, reject) => {
+    socket.once("error", reject);
+    socket.once("connect", () => {
+      socket.write(`${JSON.stringify(request)}\n`, (error) => {
+        if (error) reject(error);
+        else setTimeout(resolve, 25);
+      });
+    });
+  });
+  socket.destroy();
+}
+
+function requestEnvelope(requestId: string, method: string, params: unknown): unknown {
+  return {
+    protocol: RUNTIME_BROKER_PROTOCOL,
+    version: RUNTIME_BROKER_PROTOCOL_VERSION,
+    requestId,
+    method,
+    params,
+  };
+}
+
 async function listen(server: net.Server, endpoint: string): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -58,6 +90,24 @@ async function closeNetServer(server: net.Server): Promise<void> {
   });
 }
 
+function probeResult(
+  endpoint: string,
+  challenge: string,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    protocol: RUNTIME_BROKER_PROTOCOL,
+    version: RUNTIME_BROKER_PROTOCOL_VERSION,
+    schemaVersion: RUNTIME_BROKER_SCHEMA_VERSION,
+    workspaceId: getRuntimeBrokerEndpointWorkspaceId(endpoint),
+    daemonToken: "fake-daemon-token",
+    generation: "fake-daemon-generation",
+    readiness: "ready",
+    challenge,
+    ...overrides,
+  };
+}
+
 test("runtime broker dispatches core lease and commit operations over real JSONL IPC", async () => {
   const stateDirectory = makeStateDirectory("runtime-broker-ipc-");
   const server = new RuntimeBrokerServer({ stateDirectory });
@@ -65,6 +115,13 @@ test("runtime broker dispatches core lease and commit operations over real JSONL
   try {
     await server.listen();
     client = await RuntimeBrokerClient.connect({ stateDirectory, timeoutMs: 2_000 });
+    assert.equal(client.readiness.protocol, RUNTIME_BROKER_PROTOCOL);
+    assert.equal(client.readiness.version, RUNTIME_BROKER_PROTOCOL_VERSION);
+    assert.equal(client.readiness.schemaVersion, RUNTIME_BROKER_SCHEMA_VERSION);
+    assert.equal(client.readiness.workspaceId, getRuntimeBrokerEndpointWorkspaceId(server.endpoint));
+    assert.equal(client.readiness.readiness, "ready");
+    assert.equal(typeof client.readiness.daemonToken, "string");
+    assert.equal(typeof client.readiness.generation, "string");
     const lease = await client.acquireLease({
       actorId: "actor-ipc",
       streamId: "stream-ipc",
@@ -140,6 +197,187 @@ test("runtime broker dispatches core lease and commit operations over real JSONL
     fs.rmSync(stateDirectory, { recursive: true, force: true });
   }
   await assert.rejects(RuntimeBrokerClient.connect({ stateDirectory, timeoutMs: 100 }));
+});
+
+test("daemon authority wraps every dispatch and fences an established client before mutation", async () => {
+  const stateDirectory = makeStateDirectory("runtime-broker-daemon-fence-");
+  let authoritative = true;
+  let authorityChecks = 0;
+  const server = new RuntimeBrokerServer({
+    stateDirectory,
+    assertDaemonAuthority: () => {
+      authorityChecks += 1;
+      return authoritative;
+    },
+  });
+  let oldClient: RuntimeBrokerClient | undefined;
+  let verification: RuntimeBrokerClient | undefined;
+  try {
+    await server.listen();
+    oldClient = await RuntimeBrokerClient.connect({ endpoint: server.endpoint, timeoutMs: 2_000 });
+    assert.equal(authorityChecks, 2, "the readiness dispatch is fenced before and after");
+    const lease = await oldClient.acquireLease({
+      actorId: "actor-daemon-fence",
+      streamId: "stream-daemon-fence",
+      holderId: "holder-daemon-fence",
+      ttlMs: 60_000,
+    }, "daemon-fence-acquire");
+    assert.equal(authorityChecks, 4, "a mutating dispatch is fenced before and after");
+
+    authoritative = false;
+    await assert.rejects(oldClient.commit({
+      messageId: "message-daemon-fence",
+      actorId: "actor-daemon-fence",
+      lease,
+      streamId: "stream-daemon-fence",
+      expectedRevision: 0,
+      events: [{
+        eventId: "event-daemon-fence",
+        eventType: "daemon.fence",
+        payload: { mustNotCommit: true },
+      }],
+    }, "daemon-fence-commit"));
+    assert.equal(authorityChecks, 5, "lost authority rejects at preflight without dispatching");
+
+    authoritative = true;
+    verification = await RuntimeBrokerClient.connect({ endpoint: server.endpoint, timeoutMs: 2_000 });
+    assert.equal(await verification.getStreamRevision("stream-daemon-fence"), 0);
+    assert.equal(authorityChecks, 9, "the verification probe and read are each fenced twice");
+  } finally {
+    await oldClient?.close();
+    await verification?.close();
+    await server.close();
+    fs.rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test("lost lease mutation responses replay exact durable requestId receipts over IPC", async () => {
+  const stateDirectory = makeStateDirectory("runtime-broker-lost-response-");
+  const server = new RuntimeBrokerServer({ stateDirectory });
+  let client: RuntimeBrokerClient | undefined;
+  try {
+    await server.listen();
+    const acquireRequest = { actorId: "actor-lost", streamId: "stream-lost", holderId: "holder-a", ttlMs: 10_000 };
+    await sendAndDrop(server.endpoint, requestEnvelope("lost-acquire", "lease.acquire", acquireRequest));
+    client = await RuntimeBrokerClient.connect({ stateDirectory, timeoutMs: 2_000 });
+    const acquired = await client.acquireLease(acquireRequest, "lost-acquire");
+    assert.equal(acquired.holderId, "holder-a");
+    await assert.rejects(
+      client.acquireLease({ ...acquireRequest, holderId: "different" }, "lost-acquire"),
+      (error: unknown) => error instanceof RuntimeBrokerError && error.code === "idempotency_conflict",
+    );
+
+    const casRequest = { actorId: "actor-lost", lease: acquired, nextHolderId: "holder-b", ttlMs: 10_000 };
+    await sendAndDrop(server.endpoint, requestEnvelope("lost-cas", "lease.compare-and-swap", casRequest));
+    const swapped = await client.compareAndSwapLease(casRequest, "lost-cas");
+    assert.equal(swapped.holderId, "holder-b");
+    assert.equal(swapped.epoch, acquired.epoch + 1);
+
+    await client.releaseLease({ actorId: "actor-lost", lease: swapped }, "release-for-takeover");
+    const takeoverRequest = { actorId: "actor-lost", streamId: "stream-lost", holderId: "holder-c", ttlMs: 10_000 };
+    await sendAndDrop(server.endpoint, requestEnvelope("lost-takeover", "lease.takeover", takeoverRequest));
+    const taken = await client.takeoverLease(takeoverRequest, "lost-takeover");
+    assert.equal(taken.holderId, "holder-c");
+    assert.equal(taken.epoch, swapped.epoch + 1);
+  } finally {
+    await client?.close();
+    await server.close();
+    fs.rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test("paged stream replay preserves the complete-array client API beyond one MiB", async () => {
+  const stateDirectory = makeStateDirectory("runtime-broker-pagination-");
+  const server = new RuntimeBrokerServer({ stateDirectory });
+  let client: RuntimeBrokerClient | undefined;
+  try {
+    await server.listen();
+    client = await RuntimeBrokerClient.connect({ stateDirectory, timeoutMs: 10_000 });
+    const lease = await client.acquireLease({
+      actorId: "actor-large",
+      streamId: "stream-large",
+      holderId: "holder-large",
+      ttlMs: 60_000,
+    }, "large-acquire");
+    const payload = "x".repeat(80 * 1024);
+    for (let index = 0; index < 12; index += 1) {
+      const eventPayload = index === 0 ? "x".repeat(700 * 1024) : payload;
+      await client.commit({
+        messageId: `large-message-${index}`,
+        actorId: "actor-large",
+        lease,
+        streamId: "stream-large",
+        expectedRevision: index,
+        events: [{
+          eventId: `large-event-${index}`,
+          eventType: "large.event",
+          payload: { index, payload: eventPayload },
+        }],
+      }, `large-commit-${index}`);
+    }
+    await assert.rejects(
+      client.request("stream.events", {
+        streamId: "stream-large",
+        afterRevision: 0,
+        actorId: "actor-large",
+        lease: { epoch: lease.epoch, nonce: lease.nonce },
+      }, "legacy-large-replay"),
+      (error: unknown) => error instanceof RuntimeBrokerError && error.code === "invalid_request",
+    );
+    const replayed = await client.readEvents(
+      "stream-large",
+      0,
+      { actorId: "actor-large", lease },
+      "paged-large-replay",
+    );
+    assert.equal(replayed.length, 12);
+    assert.ok(Buffer.byteLength(JSON.stringify(replayed), "utf8") > 1024 * 1024);
+    assert.deepEqual(replayed.map((event) => event.revision), Array.from({ length: 12 }, (_, index) => index + 1));
+  } finally {
+    await client?.close();
+    await server.close();
+    fs.rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test("legacy stream.events replays complete transport-safe histories beyond 128 events", async () => {
+  const stateDirectory = makeStateDirectory("runtime-broker-legacy-history-");
+  const server = new RuntimeBrokerServer({ stateDirectory });
+  let client: RuntimeBrokerClient | undefined;
+  try {
+    await server.listen();
+    client = await RuntimeBrokerClient.connect({ stateDirectory, timeoutMs: 5_000 });
+    const lease = await client.acquireLease({
+      actorId: "actor-legacy-history",
+      streamId: "stream-legacy-history",
+      holderId: "holder-legacy-history",
+      ttlMs: 60_000,
+    });
+    await client.commit({
+      messageId: "message-legacy-history",
+      actorId: "actor-legacy-history",
+      lease,
+      streamId: "stream-legacy-history",
+      expectedRevision: 0,
+      events: Array.from({ length: 129 }, (_, index) => ({
+        eventId: `event-legacy-history-${index}`,
+        eventType: "small.event",
+        payload: { index },
+      })),
+    });
+    const replayed = await client.request<Array<{ revision: number }>>("stream.events", {
+      streamId: "stream-legacy-history",
+      afterRevision: 0,
+      actorId: "actor-legacy-history",
+      lease: { epoch: lease.epoch, nonce: lease.nonce },
+    }, "legacy-history-replay");
+    assert.equal(replayed.length, 129);
+    assert.deepEqual(replayed.map((event) => event.revision), Array.from({ length: 129 }, (_, index) => index + 1));
+  } finally {
+    await client?.close();
+    await server.close();
+    fs.rmSync(stateDirectory, { recursive: true, force: true });
+  }
 });
 
 test("runtime broker stream listing preserves workspace and prefix scope over IPC", async () => {
@@ -308,19 +546,100 @@ test("runtime broker client rejects invalid options before opening a socket", as
   }
 });
 
+test("new client replays against a protocol-v1 daemon without paging capability", async () => {
+  const stateDirectory = makeStateDirectory("runtime-broker-client-v1-compat-");
+  const endpoint = getRuntimeBrokerEndpoint(stateDirectory);
+  const methods: string[] = [];
+  const legacyEvent = {
+    eventId: "legacy-event-1",
+    messageId: "legacy-message-1",
+    streamId: "legacy-stream",
+    revision: 1,
+    eventType: "legacy.event",
+    payload: { legacy: true },
+    producerEpoch: 1,
+    occurredAt: 1,
+  };
+  const fakeServer = net.createServer((socket) => {
+    let buffer = "";
+    socket.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString("utf8");
+      while (true) {
+        const newline = buffer.indexOf("\n");
+        if (newline < 0) return;
+        const request = JSON.parse(buffer.slice(0, newline)) as {
+          requestId: string;
+          method: string;
+          params: { challenge?: string };
+        };
+        buffer = buffer.slice(newline + 1);
+        methods.push(request.method);
+        socket.write(`${JSON.stringify({
+          protocol: RUNTIME_BROKER_PROTOCOL,
+          version: RUNTIME_BROKER_PROTOCOL_VERSION,
+          requestId: request.requestId,
+          ok: true,
+          result: request.method === "broker.probe"
+            ? probeResult(endpoint, request.params.challenge ?? "")
+            : request.method === "stream.events" ? [legacyEvent] : null,
+        })}\n`);
+      }
+    });
+  });
+  let client: RuntimeBrokerClient | undefined;
+  try {
+    await listen(fakeServer, endpoint);
+    client = await RuntimeBrokerClient.connect({ endpoint, timeoutMs: 2_000 });
+    const replayed = await client.readEvents(
+      "legacy-stream",
+      0,
+      { actorId: "legacy-actor", lease: { epoch: 1, nonce: "legacy-nonce" } },
+      "legacy-v1-replay",
+    );
+    assert.deepEqual(replayed, [legacyEvent]);
+    assert.deepEqual(methods, ["broker.probe", "stream.events"]);
+  } finally {
+    await client?.close();
+    await closeNetServer(fakeServer);
+    fs.rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
 test("runtime broker client rejects response envelopes with untrusted extra fields", async () => {
   const stateDirectory = makeStateDirectory("runtime-broker-client-protocol-");
   const endpoint = getRuntimeBrokerEndpoint(stateDirectory);
   const fakeServer = net.createServer((socket) => {
-    socket.once("data", () => {
-      socket.write(`${JSON.stringify({
-        protocol: RUNTIME_BROKER_PROTOCOL,
-        version: RUNTIME_BROKER_PROTOCOL_VERSION,
-        requestId: "response-1",
-        ok: true,
-        result: null,
-        extra: "untrusted",
-      })}\n`);
+    let buffer = "";
+    socket.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString("utf8");
+      while (true) {
+        const newline = buffer.indexOf("\n");
+        if (newline < 0) return;
+        const request = JSON.parse(buffer.slice(0, newline)) as {
+          requestId: string;
+          method: string;
+          params: { challenge?: string };
+        };
+        buffer = buffer.slice(newline + 1);
+        if (request.method === "broker.probe") {
+          socket.write(`${JSON.stringify({
+            protocol: RUNTIME_BROKER_PROTOCOL,
+            version: RUNTIME_BROKER_PROTOCOL_VERSION,
+            requestId: request.requestId,
+            ok: true,
+            result: probeResult(endpoint, request.params.challenge ?? ""),
+          })}\n`);
+        } else {
+          socket.write(`${JSON.stringify({
+            protocol: RUNTIME_BROKER_PROTOCOL,
+            version: RUNTIME_BROKER_PROTOCOL_VERSION,
+            requestId: request.requestId,
+            ok: true,
+            result: null,
+            extra: "untrusted",
+          })}\n`);
+        }
+      }
     });
   });
   let client: RuntimeBrokerClient | undefined;
@@ -329,11 +648,164 @@ test("runtime broker client rejects response envelopes with untrusted extra fiel
     client = await RuntimeBrokerClient.connect({ endpoint, timeoutMs: 2_000 });
     await assert.rejects(
       client.request("lease.acquire", { actorId: "actor", holderId: "holder", ttlMs: 100 }, "response-1"),
-      /invalid response envelope/,
+      (error) => error instanceof Error
+        && /invalid response envelope/.test(error.message)
+        && !isRuntimeBrokerTransportError(error),
     );
   } finally {
     await client?.close();
     await closeNetServer(fakeServer);
+    fs.rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test("connectOrStart fails closed on a readiness mismatch without launching over a foreign listener", async () => {
+  const stateDirectory = makeStateDirectory("runtime-broker-mismatch-");
+  const endpoint = getRuntimeBrokerEndpoint(stateDirectory);
+  let connections = 0;
+  const fakeServer = net.createServer((socket) => {
+    connections += 1;
+    let buffer = "";
+    socket.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString("utf8");
+      const newline = buffer.indexOf("\n");
+      if (newline < 0) return;
+      const request = JSON.parse(buffer.slice(0, newline)) as {
+        requestId: string;
+        params: { challenge: string };
+      };
+      socket.write(`${JSON.stringify({
+        protocol: RUNTIME_BROKER_PROTOCOL,
+        version: RUNTIME_BROKER_PROTOCOL_VERSION,
+        requestId: request.requestId,
+        ok: true,
+        result: probeResult(endpoint, request.params.challenge, { schemaVersion: 999 }),
+      })}\n`);
+    });
+  });
+  try {
+    await listen(fakeServer, endpoint);
+    await assert.rejects(
+      RuntimeBrokerClient.connectOrStart({ stateDirectory, timeoutMs: 2_000 }),
+      (error: unknown) => error instanceof Error
+        && /readiness handshake mismatch/.test(error.message)
+        && !isRuntimeBrokerTransportError(error),
+    );
+    assert.equal(connections, 1);
+    assert.equal(fs.existsSync(path.join(stateDirectory, RUNTIME_BROKER_DAEMON_LOCK_FILE)), false);
+  } finally {
+    await closeNetServer(fakeServer);
+    fs.rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test("canonical connectOrStart rejects an unleased listener while direct explicit endpoint remains available", async () => {
+  const stateDirectory = makeStateDirectory("runtime-broker-unleased-canonical-");
+  const server = new RuntimeBrokerServer({ stateDirectory });
+  let direct: RuntimeBrokerClient | undefined;
+  try {
+    await server.listen();
+    direct = await RuntimeBrokerClient.connect({ endpoint: server.endpoint, timeoutMs: 2_000 });
+    assert.equal(direct.readiness.daemonToken, server.daemonToken);
+    await assert.rejects(
+      RuntimeBrokerClient.connectOrStart({ stateDirectory, timeoutMs: 2_000 }),
+      /daemon lock authority mismatch/,
+    );
+    assert.equal(fs.existsSync(path.join(stateDirectory, RUNTIME_BROKER_DAEMON_LOCK_FILE)), false);
+  } finally {
+    await direct?.close();
+    await server.close();
+    fs.rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test("runtime broker server close is idempotent and releases listener and database handles", async () => {
+  const stateDirectory = makeStateDirectory("runtime-broker-double-close-");
+  const server = new RuntimeBrokerServer({ stateDirectory });
+  let client: RuntimeBrokerClient | undefined;
+  let replacement: RuntimeBrokerServer | undefined;
+  try {
+    await server.listen();
+    client = await RuntimeBrokerClient.connect({ endpoint: server.endpoint, timeoutMs: 2_000 });
+    const firstClose = server.close();
+    const secondClose = server.close();
+    assert.equal(firstClose, secondClose);
+    await firstClose;
+    await client.close();
+    client = undefined;
+    replacement = new RuntimeBrokerServer({ stateDirectory });
+    await replacement.listen();
+    const replacementClient = await RuntimeBrokerClient.connect({ stateDirectory, timeoutMs: 2_000 });
+    await replacementClient.close();
+    await Promise.all([replacement.close(), replacement.close()]);
+    replacement = undefined;
+  } finally {
+    await client?.close();
+    await replacement?.close();
+    await server.close();
+    fs.rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test("Unix shutdown errors still close the listener and SQLite store", {
+  skip: process.platform === "win32" ? "Unix-domain socket quarantine behavior" : false,
+}, async () => {
+  const stateDirectory = makeStateDirectory("runtime-broker-close-error-");
+  const endpoint = getRuntimeBrokerEndpoint(stateDirectory);
+  const displaced = `${endpoint}.displaced`;
+  const server = new RuntimeBrokerServer({ stateDirectory });
+  try {
+    await server.listen();
+    fs.renameSync(endpoint, displaced);
+    fs.mkdirSync(endpoint);
+    fs.writeFileSync(path.join(endpoint, "non-empty"), "force endpoint cleanup failure", "utf8");
+    await assert.rejects(server.close(), AggregateError);
+    await assert.rejects(RuntimeBrokerClient.connect({ endpoint: displaced, timeoutMs: 100 }));
+
+    const replacement = new RuntimeBrokerServer({ stateDirectory });
+    fs.rmSync(endpoint, { recursive: true, force: true });
+    fs.rmSync(displaced, { force: true });
+    await replacement.listen();
+    await replacement.close();
+  } finally {
+    await server.close().catch(() => undefined);
+    fs.rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test("Unix stale-endpoint probe preserves and rejects an incompatible foreign listener", {
+  skip: process.platform === "win32" ? "Unix-domain socket stale endpoint behavior" : false,
+}, async () => {
+  const stateDirectory = makeStateDirectory("runtime-broker-foreign-endpoint-");
+  const endpoint = getRuntimeBrokerEndpoint(stateDirectory);
+  const foreign = net.createServer((socket) => {
+    let buffer = "";
+    socket.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString("utf8");
+      const newline = buffer.indexOf("\n");
+      if (newline < 0) return;
+      const request = JSON.parse(buffer.slice(0, newline)) as {
+        requestId: string;
+        params: { challenge: string };
+      };
+      socket.write(`${JSON.stringify({
+        protocol: RUNTIME_BROKER_PROTOCOL,
+        version: RUNTIME_BROKER_PROTOCOL_VERSION,
+        requestId: request.requestId,
+        ok: true,
+        result: probeResult(endpoint, request.params.challenge, { workspaceId: "foreign-workspace" }),
+      })}\n`);
+    });
+  });
+  const server = new RuntimeBrokerServer({ stateDirectory });
+  try {
+    await listen(foreign, endpoint);
+    await assert.rejects(server.listen(), /readiness handshake mismatch/);
+    assert.equal(fs.lstatSync(endpoint).isSocket(), true);
+    await assert.rejects(RuntimeBrokerClient.connect({ endpoint, timeoutMs: 500 }), /readiness handshake mismatch/);
+  } finally {
+    await server.close();
+    await closeNetServer(foreign);
     fs.rmSync(stateDirectory, { recursive: true, force: true });
   }
 });

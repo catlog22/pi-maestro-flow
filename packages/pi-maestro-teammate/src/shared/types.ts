@@ -695,11 +695,28 @@ export interface ActiveAgent {
   progress?: AgentProgressSnapshot[];
 }
 
+export interface SessionProjectionIdentity {
+  /** Canonical Runtime workspace identity for the owning cwd. */
+  workspaceId: string;
+  /** Pi session identity. */
+  sessionId: string;
+  /** Projection producer identity within the workspace. */
+  sourceId: string;
+  /** Monotonic incarnation of this session/source projection. */
+  generation: number;
+}
+
 export interface TeammateState {
   baseCwd: string;
   currentSessionId: string | null;
+  /** Canonical identity of baseCwd for the current root session. */
+  currentWorkspaceId?: string;
+  /** Current Runtime/Cockpit projection producer. */
+  currentSourceId?: string;
   /** Monotonic owner token for async work admitted by the current session. */
   sessionGeneration?: number;
+  /** @internal Outgoing owner retained while fenced shutdown records settled agents. */
+  settlementOwner?: SessionProjectionIdentity;
   mainSessionFile?: string;
   handoffSwitching?: boolean;
   activeRuns: Map<string, ActiveAgent>;
@@ -767,6 +784,11 @@ export interface AgentRunOutcome {
 export interface SettledAgentRecord {
   correlationId: string;
   agent: string;
+  /** Exact projection owner; absent only on legacy/in-memory test records. */
+  workspaceId?: string;
+  sessionId?: string;
+  sourceId?: string;
+  sessionGeneration?: number;
   name?: string;
   /** Original dispatch prompt retained after the live agent leaves the registry. */
   task?: string;

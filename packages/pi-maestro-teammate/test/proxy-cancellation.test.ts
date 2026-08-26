@@ -1,5 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import type { ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { PassThrough } from "node:stream";
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
@@ -11,6 +17,7 @@ import {
   resolveChildProxyRequest,
   waitForTeammate,
   type ChildProxyPendingRequests,
+  type TeammateRuntimeOptions,
 } from "../src/extension/index.ts";
 import type { ActiveAgent, TeammateState } from "../src/shared/types.ts";
 
@@ -43,6 +50,14 @@ function addAgent(state: TeammateState, name: string, overrides: Partial<ActiveA
   state.activeRuns.set(correlationId, agent);
   state.namedAgents.set(name, correlationId);
   return agent;
+}
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("Timed out waiting for proxy test condition");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 
 // --- child side: giving up must be announced, not just local ---------------
@@ -236,6 +251,150 @@ test("cancelling during proxy admission prevents registration and spawn", async 
   assert.equal(state.proxyDispatchByRequest?.has(requestId) ?? false, false);
   assert.equal(state.pendingProxyDispatchRequests?.has(requestId) ?? false, false);
   assert.match(JSON.stringify(replies), /cancelled before launch/i);
+});
+
+test("nested fork proxy propagates a protocol-closed snapshot until background settlement", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-proxy-fork-"));
+  const sourcePath = path.join(root, "parent.jsonl");
+  const spawningToolCallId = "nested-spawn-call";
+  fs.writeFileSync(sourcePath, [
+    { type: "session", version: 3, id: "parent-session", timestamp: new Date().toISOString(), cwd: root },
+    {
+      type: "message",
+      id: "user-entry",
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      message: { role: "user", content: [{ type: "text", text: "delegate" }] },
+    },
+    {
+      type: "message",
+      id: "spawning-entry",
+      parentId: "user-entry",
+      timestamp: new Date().toISOString(),
+      message: {
+        role: "assistant",
+        content: [{ type: "toolCall", id: spawningToolCallId, name: "teammate", arguments: {} }],
+      },
+    },
+  ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+
+  const state = makeState();
+  const parent = addAgent(state, "parent", {
+    correlationId: "parent-id",
+    sessionFile: sourcePath,
+    sessionId: "parent-session",
+  });
+  let stdout: PassThrough | undefined;
+  let spawnedChild: ChildProcess | undefined;
+  let propagatedParentSession: string | undefined;
+  const spawnChildProcess = ((_command: string, _args: readonly string[], options: { env?: Record<string, string> }) => {
+    const child = new EventEmitter() as ChildProcess;
+    spawnedChild = child;
+    stdout = new PassThrough();
+    propagatedParentSession = options.env?.PI_TEAMMATE_PARENT_SESSION;
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() { return true; },
+    });
+    return child;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+  let response: { result?: { isError?: boolean } } | undefined;
+
+  try {
+    await handleProxyRequest(
+      new Proxy({ events: { on: () => () => {}, emit() {} }, sendMessage() {} }, {
+        get(target, property) {
+          if (property in target) return target[property as keyof typeof target];
+          return () => {};
+        },
+      }) as unknown as ExtensionAPI,
+      state,
+      {
+        type: "teammate_proxy_request",
+        tool: "teammate",
+        requestId: "fork-background",
+        spawningToolCallId,
+        params: {
+          tasks: [{ agent: "general", prompt: "nested work", context: "fork" }],
+          background: true,
+        },
+      },
+      (message) => { response = message as typeof response; },
+      parent.correlationId,
+      [],
+      undefined,
+      undefined,
+      { spawnChildProcess },
+    );
+
+    await waitUntil(() => propagatedParentSession !== undefined);
+    assert.equal(response?.result?.isError, false);
+    assert.notEqual(propagatedParentSession, sourcePath);
+    assert.equal(fs.existsSync(propagatedParentSession!), true, "background execution must retain its snapshot");
+    const snapshotContent = fs.readFileSync(propagatedParentSession!, "utf8");
+    assert.match(snapshotContent, /user-entry/);
+    assert.doesNotMatch(snapshotContent, /spawning-entry|nested-spawn-call/);
+
+    stdout!.write(`${JSON.stringify({
+      type: "message_end",
+      message: { role: "assistant", content: [{ type: "text", text: "nested done" }] },
+    })}\n`);
+    stdout!.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+    stdout!.end();
+    spawnedChild!.emit("exit", 0, null);
+    spawnedChild!.emit("close", 0, null);
+    await waitUntil(() => !fs.existsSync(propagatedParentSession!));
+  } finally {
+    stdout?.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("nested fork proxy fails closed without a spawning tool-call id", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-proxy-fork-invalid-"));
+  const sourcePath = path.join(root, "parent.jsonl");
+  fs.writeFileSync(sourcePath, `${JSON.stringify({
+    type: "session",
+    version: 3,
+    id: "parent-session",
+    timestamp: new Date().toISOString(),
+    cwd: root,
+  })}\n`);
+  const state = makeState();
+  const parent = addAgent(state, "parent", { correlationId: "parent-id", sessionFile: sourcePath });
+  const replies: Array<{ result?: { isError?: boolean; content?: Array<{ text?: string }> } }> = [];
+  let spawns = 0;
+
+  try {
+    await handleProxyRequest(
+      {} as ExtensionAPI,
+      state,
+      {
+        type: "teammate_proxy_request",
+        tool: "teammate",
+        requestId: "fork-invalid",
+        params: { tasks: [{ agent: "general", prompt: "nested work", context: "fork" }] },
+      },
+      (message) => replies.push(message as typeof replies[number]),
+      parent.correlationId,
+      [],
+      undefined,
+      undefined,
+      { spawnChildProcess: (() => { spawns += 1; throw new Error("must not spawn"); }) as never },
+    );
+    assert.equal(spawns, 0);
+    assert.equal(state.activeRuns.size, 1, "invalid fork admission must not mutate the agent registry");
+    assert.equal(replies[0]?.result?.isError, true);
+    assert.match(replies[0]?.result?.content?.[0]?.text ?? "", /fork-snapshot-invalid \(invalid-options\)/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 // --- REL-5: a proxied wait must be interruptible ---------------------------

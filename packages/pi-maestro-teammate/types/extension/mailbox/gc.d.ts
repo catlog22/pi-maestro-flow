@@ -1,4 +1,4 @@
-import type { MailboxFileStore } from "./file-store.ts";
+import type { MailboxFileStore, MailboxMutationAuthority } from "./file-store.ts";
 import { type MailboxPriority, type MailboxState } from "./types.ts";
 export interface GCResult {
     removed: number;
@@ -12,6 +12,12 @@ export interface GCCandidate {
 export interface MailboxGCOptions {
     store: MailboxFileStore;
     now?: () => number;
+    /** Mutation-authority preflight; false makes a sweep a no-op. */
+    canMutate?: () => boolean | Promise<boolean>;
+    /** Revalidated from inside every destructive store commit. */
+    mutationAuthority?: MailboxMutationAuthority;
+    /** Maximum records inspected/mutated by one sweep. */
+    maxSweep?: number;
 }
 export declare class MailboxGC {
     #private;

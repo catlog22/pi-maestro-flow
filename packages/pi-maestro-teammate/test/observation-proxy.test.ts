@@ -3,7 +3,7 @@ import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { cancelProxyDispatch, handleProxyRequest } from "../src/extension/index.ts";
 import { registerObservationProvider, type ObservationProvider } from "../src/public/v1/observation.ts";
-import type { TeammateState } from "../src/shared/types.ts";
+import type { ActiveAgent, TeammateState } from "../src/shared/types.ts";
 
 function state(): TeammateState {
   return {
@@ -12,6 +12,32 @@ function state(): TeammateState {
     activeRuns: new Map(),
     namedAgents: new Map(),
   };
+}
+
+function addAgent(
+  proxyState: TeammateState,
+  correlationId: string,
+  name: string,
+  spawnedBy?: string,
+): ActiveAgent {
+  const now = Date.now();
+  const agent: ActiveAgent = {
+    agent: "general",
+    name,
+    correlationId,
+    startedAt: now,
+    abortController: new AbortController(),
+    inbox: [],
+    outputLog: [],
+    lastActivityAt: now,
+    ...(spawnedBy ? { spawnedBy } : {}),
+    depth: spawnedBy ? 1 : 0,
+    status: "running",
+    sleepMs: 0,
+  };
+  proxyState.activeRuns.set(correlationId, agent);
+  proxyState.namedAgents.set(name, correlationId);
+  return agent;
 }
 
 const pi = new Proxy({
@@ -48,14 +74,16 @@ async function proxy(
   tool: string,
   params: Record<string, unknown>,
   allowCrossSession = false,
+  proxyState: TeammateState = state(),
+  spawnedBy?: string,
 ): Promise<Record<string, unknown>> {
   let response: Record<string, unknown> | undefined;
   await handleProxyRequest(
     pi,
-    state(),
+    proxyState,
     { tool, requestId: `${tool}-request`, params },
     (message) => { response = message as Record<string, unknown>; },
-    undefined,
+    spawnedBy,
     [],
     undefined,
     undefined,
@@ -165,6 +193,91 @@ test("child proxy cancellation aborts an in-flight observe wait", async () => {
     const result = response?.result as { isError?: boolean; details?: { result?: { reason?: string } } } | undefined;
     assert.equal(result?.isError, true);
     assert.equal(result?.details?.result?.reason, "aborted");
+  } finally {
+    dispose();
+  }
+});
+
+test("proxy wait surfaces reject necessary self and ancestor barriers", async () => {
+  let providerCalls = 0;
+  const dispose = registerObservationProvider({
+    ...fakeProvider("teammate"),
+    snapshot(id, options) {
+      providerCalls += 1;
+      return fakeProvider("teammate").snapshot(id, options);
+    },
+    async wait(id, options) {
+      providerCalls += 1;
+      return fakeProvider("teammate").wait(id, options);
+    },
+  });
+  const proxyState = state();
+  addAgent(proxyState, "container-id", "container");
+  addAgent(proxyState, "caller-id", "caller", "container-id");
+  addAgent(proxyState, "sibling-id", "sibling", "container-id");
+  addAgent(proxyState, "sibling-2-id", "sibling-2", "container-id");
+
+  try {
+    const observeSelf = await proxy("observe", {
+      action: "wait",
+      targets: [{ kind: "teammate", id: "caller" }],
+      timeoutMs: 1_000,
+    }, false, proxyState, "caller-id");
+    const observeDetails = (observeSelf.result as { details?: Record<string, unknown> }).details;
+    assert.equal(observeDetails?.code, "self-wait-deadlock");
+    assert.deepEqual(observeDetails?.cyclicIds, ["caller-id"]);
+    assert.equal(providerCalls, 0, "rejected barriers must not reach observation providers");
+
+    const legacySelf = await proxy("teammate-wait", {
+      name: "caller",
+      timeoutMs: 1_000,
+    }, false, proxyState, "caller-id");
+    assert.equal((legacySelf.result as { details?: { code?: string } }).details?.code, "self-wait-deadlock");
+    assert.equal(providerCalls, 0);
+
+    const monitorAncestor = await proxy("teammate-monitor", {
+      action: "wait",
+      targets: ["container"],
+      waitMode: "all",
+      timeoutMs: 1_000,
+    }, false, proxyState, "caller-id");
+    const monitorDetails = (monitorAncestor.result as { details?: Record<string, unknown> }).details;
+    assert.equal(monitorDetails?.code, "self-wait-deadlock");
+    assert.deepEqual(monitorDetails?.cyclicIds, ["container-id"]);
+    assert.equal(providerCalls, 0);
+
+    const statusSelf = await proxy("observe", {
+      action: "status",
+      targets: [{ kind: "teammate", id: "caller" }],
+    }, false, proxyState, "caller-id");
+    assert.equal((statusSelf.result as { isError?: boolean }).isError, false);
+
+    const satisfiableAny = await proxy("observe", {
+      action: "wait",
+      waitMode: "any",
+      targets: [
+        { kind: "teammate", id: "caller" },
+        { kind: "teammate", id: "sibling" },
+      ],
+      timeoutMs: 1_000,
+    }, false, proxyState, "caller-id");
+    assert.notEqual(
+      (satisfiableAny.result as { details?: { code?: string } }).details?.code,
+      "self-wait-deadlock",
+    );
+    assert.ok(providerCalls > 0, "satisfiable any barriers must reach observation providers");
+
+    const satisfiableCount = await proxy("teammate-monitor", {
+      action: "wait",
+      targets: ["caller", "sibling", "sibling-2"],
+      waitMode: "count",
+      waitCount: 2,
+      timeoutMs: 1_000,
+    }, false, proxyState, "caller-id");
+    assert.notEqual(
+      (satisfiableCount.result as { details?: { code?: string } }).details?.code,
+      "self-wait-deadlock",
+    );
   } finally {
     dispose();
   }

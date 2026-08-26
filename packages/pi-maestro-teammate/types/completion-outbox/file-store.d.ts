@@ -16,6 +16,12 @@ export declare class CompletionOutboxFileStore {
     reserve(seed: CompletionDispatchSeed, reservedBytes?: number): Promise<CompletionReservationRecord>;
     releaseReservation(target: CompletionTarget, reservationId: string): Promise<boolean>;
     importIntent(intent: CompletionIntent): Promise<CompletionOutboxRecord>;
+    /**
+     * Import an already-finalized provider intent after its original capacity
+     * reservation was lost or expired. Finalization is irreversible: recreate
+     * only the same dispatch/target fence and never abandon committed intent.
+     */
+    recoverFinalizedIntent(intent: CompletionIntent): Promise<CompletionOutboxRecord>;
     listForTarget(target: CompletionTarget): Promise<CompletionOutboxRecord[]>;
     acquireClaim(target: CompletionTarget, deliveryId: string): Promise<CompletionOutboxRecord | undefined>;
     markQueued(target: CompletionTarget, deliveryId: string, receiptDeadlineAt: number): Promise<CompletionOutboxRecord | undefined>;

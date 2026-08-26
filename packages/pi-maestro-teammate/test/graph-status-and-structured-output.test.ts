@@ -3676,3 +3676,73 @@ test("P0a: foreground wait window always resolves to a bounded deadline", () => 
     "every foreground path must construct its deadline from the resolved waitMs",
   );
 });
+
+test("foreground timeout-detach unbinds the caller signal so the background run survives its teardown", async () => {
+  // Regression: on timeout-detach the extension returned to the caller but left
+  // abortForward bound to the tool-call signal. When the framework tore that
+  // signal down, the abort forwarded into the now-background run and cancelled
+  // an in-flight model candidate (settled `unknown`/externalReplayRisk,
+  // frozen by the replay fence). The fix removes the abortForward listener at
+  // detach, so a background run that has not yet settled keeps running.
+  const stdouts: PassThrough[] = [];
+  let killed = 0;
+  const sentMessages: Array<{ customType?: string; content?: string }> = [];
+  const spawnChildProcess = (() => {
+    const child = new EventEmitter() as ChildProcess;
+    const stdout = new PassThrough();
+    stdouts.push(stdout);
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() { killed += 1; return true; },
+    });
+    // The child stays silent past the 30ms deadline so the dispatch detaches.
+    return child;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+
+  const caller = new AbortController();
+  const tasks = [{ agent: "general", name: "long-runner", prompt: "work" }];
+  const result = await createRootTool({ spawnChildProcess }, sentMessages).execute(
+    "detach-abort-isolation",
+    { tasks, background: false, timeoutMs: 30 },
+    caller.signal,
+    undefined,
+    {
+      ...rootToolContext(),
+      hasUI: true,
+      ui: { onTerminalInput() { return () => {}; } },
+    },
+  );
+
+  assert.match(result.content[0]?.text ?? "", /moved to background after 30ms/);
+  assert.equal(result.isError, false);
+  assert.equal(killed, 0, "detach must not terminate the child");
+
+  // The tool call has returned; the framework now tears down its per-call
+  // AbortController. Before the fix this forwarded into the background run.
+  caller.abort();
+
+  // Let the background run finish cleanly on its own. The child must NOT be
+  // killed by the signal teardown, and the completion notification must still
+  // fire from a normally-settled run.
+  for (const stdout of stdouts) {
+    stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+  }
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(killed, 0, "caller signal teardown after detach must not kill the background child");
+  assert.equal(
+    sentMessages.filter((message) => message.customType === "teammate-complete").length,
+    1,
+    "background run must settle normally after the caller signal teardown",
+  );
+
+  setPersistentUi(undefined);
+  delete (globalThis as typeof globalThis & Record<symbol, unknown>)[
+    Symbol.for("pi-maestro-teammate.root-registry")
+  ];
+});

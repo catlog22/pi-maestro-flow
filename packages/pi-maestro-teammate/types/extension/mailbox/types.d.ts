@@ -4,6 +4,12 @@
  */
 import type { MessageProvenanceV1 } from "../../shared/types.ts";
 export declare const MAILBOX_SCHEMA_VERSION: 1;
+/** Version for durable state/transition metadata. */
+export declare const MAILBOX_STATE_RECORD_VERSION: 2;
+/** Version for recoverable requestId-to-envelope dedup transactions. */
+export declare const MAILBOX_DEDUP_RECORD_VERSION: 2;
+/** Version for durable cross-directory transition journals. */
+export declare const MAILBOX_TRANSITION_RECORD_VERSION: 1;
 /** Maximum payload size in bytes. */
 export declare const MAX_PAYLOAD_BYTES: number;
 /** Maximum total envelope size in bytes. */
@@ -92,11 +98,29 @@ export interface MailboxEnvelope {
     /** Optional correlation identifier for threading. */
     correlationId?: string;
 }
+export interface MailboxOwnerFence {
+    /** Stable logical owner id for the host. */
+    ownerId: string;
+    /** Per-consumer incarnation token. */
+    ownerNonce: string;
+    /** Session generation captured when this consumer was created. */
+    sessionGeneration: number;
+    /** OS process that owns the incarnation. */
+    ownerPid: number;
+}
 export interface MailboxClaim {
     /** The message being claimed. */
     messageId: string;
-    /** Owner nonce of the claimer. */
+    /** Legacy owner nonce retained for v1 state-record compatibility. */
     claimerNonce: string;
+    /** Stable logical owner id. Absent only on legacy records. */
+    ownerId?: string;
+    /** Per-consumer incarnation token. Absent only on legacy records. */
+    ownerNonce?: string;
+    /** Session generation of the owner. Absent only on legacy records. */
+    sessionGeneration?: number;
+    /** OS process of the owner. Absent only on legacy records. */
+    ownerPid?: number;
     /** Unix ms when the claim was acquired. */
     claimedAt: number;
     /** Unix ms when the claim lease expires. */
@@ -105,15 +129,42 @@ export interface MailboxClaim {
     lastHeartbeatAt: number;
 }
 export interface MailboxStateRecord {
+    /** Absent only on recognized legacy v1 records. */
+    recordVersion?: typeof MAILBOX_STATE_RECORD_VERSION;
     messageId: string;
     state: MailboxState;
     transitionedAt: number;
     /** Previous state for audit trail. */
     previousState: MailboxState | null;
-    /** Claim metadata when state is claimed/accepted. */
+    /** Immutable envelope hash bound to this state. */
+    envelopeHash?: string;
+    /** Claim/accepted owner metadata. */
     claim?: MailboxClaim;
     /** Reason for terminal states. */
     reason?: string;
+}
+export interface MailboxTransitionRecord {
+    recordVersion: typeof MAILBOX_TRANSITION_RECORD_VERSION;
+    transitionId: string;
+    messageId: string;
+    envelopeHash: string;
+    fromState: MailboxState;
+    toState: MailboxState;
+    preparedAt: number;
+    /** Quarantine transition for an unreadable/tampered source envelope. */
+    unreadable?: true;
+    destinationRecord: MailboxStateRecord;
+}
+export interface MailboxDedupRecord {
+    recordVersion: typeof MAILBOX_DEDUP_RECORD_VERSION;
+    requestKeyHash: string;
+    requestHash: string;
+    messageId: string;
+    envelopeHash: string;
+    envelope: MailboxEnvelope;
+    /** Prepared may recreate a missing envelope; published never resurrects a GC'd terminal receipt. */
+    phase: "prepared" | "published";
+    preparedAt: number;
 }
 export type MailboxEnqueueResult = {
     ok: true;
@@ -143,11 +194,13 @@ export interface MailboxPaths {
     expiredDir: string;
     /** Dead-letter messages. */
     deadDir: string;
-    /** Durable deduplication seen-set. */
+    /** Durable deduplication transactions / legacy seen-set. */
     seenDir: string;
+    /** Durable transition journals and per-message mutation locks. */
+    transitionDir: string;
 }
 /** Maps a MailboxState to its directory key within MailboxPaths. */
-export declare function stateDirKey(state: MailboxState): keyof Omit<MailboxPaths, "rootDir" | "seenDir">;
+export declare function stateDirKey(state: MailboxState): keyof Omit<MailboxPaths, "rootDir" | "seenDir" | "transitionDir">;
 export declare const MESSAGE_ID_PATTERN: RegExp;
 export declare const OWNER_ID_PATTERN: RegExp;
 export declare const WORKSPACE_ID_PATTERN: RegExp;

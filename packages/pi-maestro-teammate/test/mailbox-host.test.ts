@@ -219,6 +219,76 @@ test("MailboxHost shadow mode enqueues but does not consume", async () => {
   await host.stop();
 });
 
+test("startup canonical/legacy conflict persistently rejects raced enqueue and consumer activation", async () => {
+  const state = makeState();
+  const rootDir = join(baseDir, "conflicted-mb");
+  const canonicalWorkspaceId = "a".repeat(64);
+  const legacyWorkspaceId = "b".repeat(64);
+  const authority = createMailboxAuthority({ state, ownerId: "seed-owner" });
+  const createSeeder = (workspaceId: string) => new MailboxService({
+    rootDir,
+    authority,
+    recipientCorrelationId: "*",
+    workspaceId,
+    teamId: "team-root",
+    ownerId: `seed-${workspaceId[0]}`,
+    onDispatch: async () => {},
+  });
+  const canonical = createSeeder(canonicalWorkspaceId);
+  const legacy = createSeeder(legacyWorkspaceId);
+  await Promise.all([canonical.start(false), legacy.start(false)]);
+  const seeded = await canonical.enqueue({
+    senderId: "caller",
+    recipientId: "target",
+    recipientCorrelationId: "corr-1",
+    kind: "follow_up",
+    mode: "follow_up",
+    payload: "pre-existing canonical state",
+  });
+  assert.ok(seeded.ok);
+  const existing = await canonical.store.readEnvelope("ready", seeded.messageId);
+  assert.ok(existing);
+  await legacy.store.writeStaging(existing);
+  await Promise.all([canonical.stop(), legacy.stop()]);
+
+  const injected: string[] = [];
+  const host = new MailboxHost({
+    rootDir,
+    state,
+    ownerId: "owner-conflict",
+    workspaceId: canonicalWorkspaceId,
+    legacyWorkspaceIds: [legacyWorkspaceId],
+    teamId: "team-root",
+    inject: async (envelope) => { injected.push(envelope.payload); },
+    mode: "authoritative",
+    pollMs: 5,
+  });
+  try {
+    const racedDelivery = host.rollout.deliver({
+      senderId: "caller",
+      recipientId: "target",
+      recipientCorrelationId: "corr-1",
+      kind: "follow_up",
+      mode: "follow_up",
+      payload: "must not be stranded",
+    });
+    await assert.rejects(racedDelivery, /Conflicting canonical and legacy mailbox state/);
+    await assert.rejects(host.service.startConsumer(), /Conflicting canonical and legacy mailbox state/);
+    await assert.rejects(host.service.enqueue({
+      senderId: "caller",
+      recipientId: "target",
+      recipientCorrelationId: "corr-1",
+      kind: "follow_up",
+      mode: "follow_up",
+      payload: "persistent retry must reject",
+    }), /Conflicting canonical and legacy mailbox state/);
+    assert.deepEqual(injected, []);
+    assert.equal((await host.service.store.listMessages("ready")).length, 1);
+  } finally {
+    await host.stop();
+  }
+});
+
 test("MailboxHost authoritative mode enqueues and consumer injects", async () => {
   const state = makeState();
   registerMailboxRecipient(state, "corr-1");

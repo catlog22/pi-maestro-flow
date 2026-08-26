@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { notifyBackgroundFailure, safeSendMessage } from "../src/extension/index.ts";
+import {
+  deliverDurableFailureWithFallback,
+  notifyBackgroundFailure,
+  safeSendMessage,
+} from "../src/extension/index.ts";
 
 const STALE_CTX_MESSAGE = "This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload().";
 
@@ -21,6 +25,73 @@ test("background promise failures emit completion and trigger a turn", () => {
   assert.match(String(sent[0].message.content), /correlationId=cid/);
   assert.match(String(sent[0].message.content), /phase=background-promise/);
   assert.equal(sent[0].options.triggerTurn, true);
+});
+
+test("background failure fallback completion retains its dispatch projection", async () => {
+  const emitted: unknown[][] = [];
+  const projection = {
+    workspaceId: "w".repeat(64),
+    sessionId: "session-a",
+    sourceId: "source-a",
+    generation: 3,
+  };
+  const pi = {
+    events: { emit: (...args: unknown[]) => emitted.push(args) },
+    sendMessage() {},
+  };
+
+  await deliverDurableFailureWithFallback({
+    publishDurableFailure: async () => false,
+    ownsDispatchGeneration: () => true,
+    fallback: () => notifyBackgroundFailure(
+      pi as never,
+      "tool-id",
+      "general",
+      "cid",
+      new Error("boom"),
+      undefined,
+      projection,
+    ),
+  });
+
+  assert.deepEqual((emitted[0]?.[1] as { projection?: unknown }).projection, projection);
+});
+
+test("late durable-failure resolve is fenced before direct fallback", async () => {
+  let resolvePublication!: (durable: boolean) => void;
+  const publication = new Promise<boolean>((resolve) => { resolvePublication = resolve; });
+  let current = true;
+  let fallbacks = 0;
+  const delivery = deliverDurableFailureWithFallback({
+    publishDurableFailure: () => publication,
+    ownsDispatchGeneration: () => current,
+    fallback: () => { fallbacks += 1; },
+  });
+
+  current = false;
+  resolvePublication(false);
+  await delivery;
+  assert.equal(fallbacks, 0);
+});
+
+test("late durable-failure rejection is fenced before logging or direct fallback", async () => {
+  let rejectPublication!: (error: unknown) => void;
+  const publication = new Promise<boolean>((_resolve, reject) => { rejectPublication = reject; });
+  let current = true;
+  let fallbacks = 0;
+  let reported = 0;
+  const delivery = deliverDurableFailureWithFallback({
+    publishDurableFailure: () => publication,
+    ownsDispatchGeneration: () => current,
+    fallback: () => { fallbacks += 1; },
+    onDurabilityError: () => { reported += 1; },
+  });
+
+  current = false;
+  rejectPublication(new Error("late failure"));
+  await delivery;
+  assert.equal(fallbacks, 0);
+  assert.equal(reported, 0);
 });
 
 test("background failure notification survives a stale extension ctx", () => {

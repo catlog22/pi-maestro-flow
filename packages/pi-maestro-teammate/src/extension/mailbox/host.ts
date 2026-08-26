@@ -107,6 +107,8 @@ export interface MailboxHostOptions {
   rootCorrelationId?: string;
   ownerId: string;
   workspaceId: string;
+  /** Read-only pre-canonical workspace aliases. New enqueues always use workspaceId. */
+  legacyWorkspaceIds?: readonly string[];
   teamId: string;
   /** Persist the authoritative mailbox applied effect. */
   commitApplied?: (envelope: MailboxEnvelope) => Promise<void>;
@@ -134,6 +136,7 @@ const DEFAULT_GC_INTERVAL_MS = 10 * 60_000;
 export class MailboxHost {
   readonly service: MailboxService;
   readonly rollout: MailboxRollout;
+  readonly #legacyServices: readonly MailboxService[];
   /** Live mode — proxies the rollout controller so runtime setMode stays the single source of truth. */
   get mode(): RolloutMode {
     return this.rollout.mode;
@@ -151,13 +154,22 @@ export class MailboxHost {
       rootCorrelationId: options.rootCorrelationId,
       ownerId: options.ownerId,
     });
+    let resolveStartup!: () => void;
+    let rejectStartup!: (error: unknown) => void;
+    const startupBarrier = new Promise<void>((resolve, reject) => {
+      resolveStartup = resolve;
+      rejectStartup = reject;
+    });
+    // The host start promise owns diagnostics; operational callers observe the
+    // same persistent rejection without producing an unhandled rejection.
+    void startupBarrier.catch(() => undefined);
 
-    this.service = new MailboxService({
+    const createService = (workspaceId: string): MailboxService => new MailboxService({
       rootDir: options.rootDir,
       authority,
       // Root host serves every agent — the consumer matches all recipients.
       recipientCorrelationId: "*",
-      workspaceId: options.workspaceId,
+      workspaceId,
       teamId: options.teamId,
       ownerId: options.ownerId,
       commitApplied: options.commitApplied,
@@ -171,11 +183,18 @@ export class MailboxHost {
         kind: envelope.kind,
       }),
       pollMs: options.pollMs,
+      startupBarrier,
       now: options.now,
     });
+    const service = createService(options.workspaceId);
+    const legacyServices = [...new Set(options.legacyWorkspaceIds ?? [])]
+      .filter((workspaceId) => workspaceId !== options.workspaceId)
+      .map(createService);
+    this.service = service;
+    this.#legacyServices = legacyServices;
 
     this.rollout = new MailboxRollout({
-      service: this.service,
+      service,
       config: { mode, advertiseV2: mode === "shadow" || mode === "authoritative" },
       directDeliver: async (envelope) => {
         await options.inject(envelope);
@@ -183,11 +202,49 @@ export class MailboxHost {
       now: options.now,
     });
 
-    // Authoritative: init dirs + start consumer. Shadow: init dirs only — the
-    // shadow contract is "enqueue + validate but NEVER consume/inject". The
-    // start promise is retained so stop() can barrier on it; a late start
-    // continuation can never republish a consumer after stop (ISS-20260803-003).
-    this.#startPromise = this.service.start(mode === "authoritative");
+    // Authoritative: init dirs + start consumers. Alias services are read-only:
+    // only the canonical service is exposed through rollout/registry for new
+    // writes. Before any consumer starts, reject duplicate message ids across
+    // canonical/legacy roots so durable state is never silently merged/deleted.
+    this.#startPromise = (async () => {
+      try {
+        const services = [service, ...legacyServices];
+        for (const service of services) await service.start(false);
+        const states = ["staging", "ready", "claimed", "accepted", "applied", "rejected", "expired", "dead"] as const;
+        const owners = new Map<string, string>();
+        const dedupOwners = new Map<string, { rootDir: string; signature: string }>();
+        for (const service of services) {
+          for (const state of states) {
+            for (const messageId of await service.store.listMessages(state)) {
+              const previous = owners.get(messageId);
+              if (previous && previous !== service.paths.rootDir) {
+                throw new Error(`Conflicting canonical and legacy mailbox state requires explicit reconciliation: ${messageId}`);
+              }
+              owners.set(messageId, service.paths.rootDir);
+            }
+          }
+          for (const record of await service.store.listDedupRecords()) {
+            const signature = `${record.requestHash}:${record.messageId}:${record.envelopeHash}`;
+            const previous = dedupOwners.get(record.requestKeyHash);
+            if (previous && (previous.rootDir !== service.paths.rootDir || previous.signature !== signature)) {
+              throw new Error(`Conflicting canonical and legacy mailbox dedup state requires explicit reconciliation: ${record.requestKeyHash}`);
+            }
+            dedupOwners.set(record.requestKeyHash, { rootDir: service.paths.rootDir, signature });
+          }
+        }
+        // Publish reconciliation success before activating consumers. Every
+        // enqueue/startConsumer that raced construction was awaiting this gate.
+        resolveStartup();
+        if (mode === "authoritative") {
+          for (const service of services) await service.startConsumer();
+        }
+      } catch (error) {
+        // Promise rejection is immutable: later enqueue/startConsumer calls
+        // observe the same startup failure and cannot strand new messages.
+        rejectStartup(error);
+        throw error;
+      }
+    })();
     void this.#startPromise.catch((error) => {
       // Surface — never silently fall back to direct stdin.
       logDiagnosticError(`[pi-maestro-teammate] mailbox startup failed:`, error);
@@ -195,9 +252,11 @@ export class MailboxHost {
 
     // Periodic GC keeps applied/dead/expired receipts from accumulating.
     this.#gcTimer = setInterval(() => {
-      void this.service.runGC().catch((error) => {
-        logDiagnosticError(`[pi-maestro-teammate] mailbox GC failed:`, error);
-      });
+      for (const mailboxService of [service, ...legacyServices]) {
+        void mailboxService.runGC().catch((error) => {
+          logDiagnosticError(`[pi-maestro-teammate] mailbox GC failed:`, error);
+        });
+      }
     }, options.gcIntervalMs ?? DEFAULT_GC_INTERVAL_MS);
     this.#gcTimer.unref?.();
   }
@@ -210,7 +269,7 @@ export class MailboxHost {
     // Barrier on the in-flight start before stopping the consumer.
     await this.#startPromise.catch(() => undefined);
     try {
-      await this.service.stop();
+      await Promise.all([this.service, ...this.#legacyServices].map((service) => service.stop()));
     } finally {
       await this.#closeDispatchAuthority?.();
     }

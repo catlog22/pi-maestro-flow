@@ -3,6 +3,7 @@ import { logDiagnosticError, logDiagnosticWarn } from "../shared/diagnostic-log.
 
 import {
   chmod,
+  link,
   lstat,
   mkdir,
   open,
@@ -13,6 +14,10 @@ import {
 } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import {
+  getRuntimeWorkspaceIdentity,
+  type RuntimeWorkspaceIdentity,
+} from "../runtime-broker/private-state.ts";
 import {
   normalizeMessageProvenanceV1,
   unknownMessageProvenanceV1,
@@ -107,8 +112,17 @@ export const SETTLED_RESULT_MAX = 8;
 export const CLEANUP_STALE_DEFAULT_MS = 120_000;
 /** Version of the per-session owner identity file. */
 export const IDENTITY_FILE_VERSION = 1 as const;
+/** Version of the immutable per-session owner claim file. */
+export const OWNER_CLAIM_FILE_VERSION = 1 as const;
 
 const IDENTITY_FILE_MAX_BYTES = 8 * 1024;
+const OWNER_CLAIM_FILE_MAX_BYTES = 8 * 1024;
+const OWNER_CLAIM_HEARTBEAT_FILE_MAX_BYTES = 4 * 1024;
+const OWNER_CLAIM_LOCK_FILE_MAX_BYTES = 4 * 1024;
+const OWNER_CLAIM_ACQUIRE_ATTEMPTS = 4;
+const OWNER_CLAIM_LOCK_WAIT_MS = 5_000;
+const OWNER_CLAIM_LOCK_RETRY_MS = 10;
+const OWNER_CLAIM_LOCK_STALE_MS = 120_000;
 
 const MAX_STRING = 4_096;
 const MAX_SUMMARY = 8_192;
@@ -143,15 +157,31 @@ export interface WorkspacePeerPaths {
   commandsDir: string;
   responsesDir: string;
   identitiesDir: string;
+  claimsDir?: string;
 }
 
 export interface WorkspacePeerIdentity {
   version: typeof WORKSPACE_PEER_PROTOCOL_VERSION;
   normalizedCwd: string;
   workspaceId: string;
+  legacyWorkspaceIds?: readonly string[];
   ownerId: string;
   ownerNonce: string;
+  ownerToken?: string;
+  ownerGeneration?: number;
+  sessionClaimKey?: string;
   paths: WorkspacePeerPaths;
+  legacyPaths?: readonly WorkspacePeerPaths[];
+}
+
+export interface WorkspaceOwnerClaim {
+  readonly identity: WorkspacePeerIdentity;
+  readonly claimPath: string;
+  readonly token: string;
+  readonly generation: number;
+  assertOwned(): Promise<void>;
+  heartbeat(publishedAt?: number): Promise<void>;
+  release(): Promise<void>;
 }
 export interface WorkspaceAgentSnapshot {
   correlationId: string;
@@ -247,6 +277,10 @@ export interface WorkspaceOwnerSnapshot {
   normalizedCwd: string;
   ownerId: string;
   ownerNonce: string;
+  /** Additive token/generation fence for claimed session owners. */
+  ownerToken?: string;
+  ownerGeneration?: number;
+  sessionClaimKey?: string;
   pid: number;
   publishedAt: number;
   sessionId?: string;
@@ -481,6 +515,7 @@ export interface WorkspacePeerRuntimeOptions {
   rootDir?: string;
   ownerId?: string;
   ownerNonce?: string;
+  ownerClaim?: WorkspaceOwnerClaim;
   heartbeatMs?: number;
   publishThrottleMs?: number;
   mailboxCleanupIntervalMs?: number;
@@ -629,48 +664,80 @@ export function deriveWorkspaceWindowTerminalResult(
 }
 
 export function normalizeWorkspacePath(cwd: string, platform: NodeJS.Platform = process.platform): string {
-  if (typeof cwd !== "string" || cwd.length === 0 || cwd.includes("\0")) throw new Error("cwd must be a non-empty path");
-  let normalized = resolve(cwd).replace(/\\/g, "/");
-  if (normalized.length > 1 && /^[A-Za-z]:\/$/.test(normalized) === false) normalized = normalized.replace(/\/+$/, "");
-  if (platform === "win32") normalized = normalized.toLowerCase();
-  return normalized;
+  return getRuntimeWorkspaceIdentity(cwd, platform).canonicalPath;
 }
 
 export function workspaceIdForCwd(cwd: string, platform: NodeJS.Platform = process.platform): string {
-  return createHash("sha256").update(normalizeWorkspacePath(cwd, platform), "utf8").digest("hex");
+  return getRuntimeWorkspaceIdentity(cwd, platform).workspaceId;
+}
+
+function defaultWorkspacePeerRootForId(workspaceId: string): string {
+  return join(homedir(), ".pi", "teammate", "workspaces", workspaceId, "runtime");
 }
 
 export function defaultWorkspacePeerRoot(cwd: string): string {
-  return join(homedir(), ".pi", "teammate", "workspaces", workspaceIdForCwd(cwd), "runtime");
+  return defaultWorkspacePeerRootForId(workspaceIdForCwd(cwd));
 }
 
-export function createWorkspacePeerPaths(cwd: string, rootDir?: string): WorkspacePeerPaths {
-  const root = resolve(rootDir ?? defaultWorkspacePeerRoot(cwd));
+function workspacePeerPathsForRoot(rootDir: string): WorkspacePeerPaths {
+  const root = resolve(rootDir);
+  const identitiesDir = join(root, "identities");
   return {
     rootDir: root,
     ownersDir: join(root, "owners"),
     commandsDir: join(root, "commands"),
     responsesDir: join(root, "responses"),
-    identitiesDir: join(root, "identities"),
+    identitiesDir,
+    claimsDir: join(identitiesDir, "claims"),
   };
+}
+
+export function createWorkspacePeerPaths(cwd: string, rootDir?: string): WorkspacePeerPaths {
+  return workspacePeerPathsForRoot(rootDir ?? defaultWorkspacePeerRoot(cwd));
 }
 
 export function createWorkspacePeerIdentity(
   cwd: string,
-  options: { rootDir?: string; ownerId?: string; ownerNonce?: string } = {},
+  options: {
+    rootDir?: string;
+    ownerId?: string;
+    ownerNonce?: string;
+    ownerToken?: string;
+    ownerGeneration?: number;
+    sessionClaimKey?: string;
+  } = {},
 ): WorkspacePeerIdentity {
   const ownerId = options.ownerId ?? randomProtocolId();
   const ownerNonce = options.ownerNonce ?? randomProtocolId();
   assertOwnerId(ownerId, "ownerId");
   assertOwnerId(ownerNonce, "ownerNonce");
-  const normalizedCwd = normalizeWorkspacePath(cwd);
+  const claimFields = [options.ownerToken, options.ownerGeneration, options.sessionClaimKey];
+  if (claimFields.some((value) => value !== undefined) && claimFields.some((value) => value === undefined)) {
+    throw new Error("ownerToken, ownerGeneration, and sessionClaimKey must be supplied together");
+  }
+  if (options.ownerToken !== undefined) assertOwnerId(options.ownerToken, "ownerToken");
+  if (options.ownerGeneration !== undefined && !boundedInteger(options.ownerGeneration, 1)) {
+    throw new Error("ownerGeneration must be a positive safe integer");
+  }
+  if (options.sessionClaimKey !== undefined && !WORKSPACE_ID_PATTERN.test(options.sessionClaimKey)) {
+    throw new Error("sessionClaimKey must be 64 lowercase hexadecimal characters");
+  }
+  const workspaceIdentity: RuntimeWorkspaceIdentity = getRuntimeWorkspaceIdentity(cwd);
+  const legacyPaths = options.rootDir === undefined
+    ? workspaceIdentity.legacyWorkspaceIds.map((workspaceId) => workspacePeerPathsForRoot(defaultWorkspacePeerRootForId(workspaceId)))
+    : [];
   return {
     version: WORKSPACE_PEER_PROTOCOL_VERSION,
-    normalizedCwd,
-    workspaceId: createHash("sha256").update(normalizedCwd, "utf8").digest("hex"),
+    normalizedCwd: workspaceIdentity.canonicalPath,
+    workspaceId: workspaceIdentity.workspaceId,
+    legacyWorkspaceIds: workspaceIdentity.legacyWorkspaceIds,
     ownerId,
     ownerNonce,
+    ...(options.ownerToken === undefined ? {} : { ownerToken: options.ownerToken }),
+    ...(options.ownerGeneration === undefined ? {} : { ownerGeneration: options.ownerGeneration }),
+    ...(options.sessionClaimKey === undefined ? {} : { sessionClaimKey: options.sessionClaimKey }),
     paths: createWorkspacePeerPaths(cwd, options.rootDir),
+    legacyPaths,
   };
 }
 
@@ -727,6 +794,7 @@ export async function ensureWorkspacePeerDirectories(identity: WorkspacePeerIden
     makePrivateDirectory(identity.paths.commandsDir),
     makePrivateDirectory(identity.paths.responsesDir),
     makePrivateDirectory(identity.paths.identitiesDir),
+    makePrivateDirectory(identity.paths.claimsDir ?? join(identity.paths.identitiesDir, "claims")),
     makePrivateDirectory(commandMailboxPath(identity, identity.ownerId)),
     makePrivateDirectory(responseMailboxPath(identity, identity.ownerId)),
   ]);
@@ -736,7 +804,11 @@ export async function writePrivateJsonAtomic(
   path: string,
   value: unknown,
   maximumBytes: number,
-  options: { beforeCommit?: () => void } = {},
+  options: {
+    beforeCommit?: () => void | Promise<void>;
+    /** Wrap the atomic rename in an ownership/lease critical section. */
+    commit?: (renameCommit: () => Promise<void>) => Promise<void>;
+  } = {},
 ): Promise<void> {
   const payload = Buffer.from(`${JSON.stringify(value)}\n`, "utf8");
   if (payload.byteLength > maximumBytes) throw new Error(`JSON payload exceeds ${maximumBytes} bytes`);
@@ -749,8 +821,10 @@ export async function writePrivateJsonAtomic(
     await handle.sync();
     await handle.close();
     handle = undefined;
-    options.beforeCommit?.();
-    await rename(temporary, path);
+    await options.beforeCommit?.();
+    const renameCommit = async (): Promise<void> => { await rename(temporary, path); };
+    if (options.commit) await options.commit(renameCommit);
+    else await renameCommit();
     try {
       await chmod(path, 0o600);
     } catch (error) {
@@ -766,22 +840,120 @@ export async function writePrivateJsonAtomic(
   }
 }
 
-async function readBoundedJson(path: string, maximumBytes: number): Promise<unknown | undefined> {
+async function writePrivateJsonExclusive(path: string, value: unknown, maximumBytes: number): Promise<boolean> {
+  const payload = Buffer.from(`${JSON.stringify(value)}\n`, "utf8");
+  if (payload.byteLength > maximumBytes) throw new Error(`JSON payload exceeds ${maximumBytes} bytes`);
+  await makePrivateDirectory(dirname(path));
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
-    const metadata = await lstat(path);
-    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > maximumBytes) return undefined;
-    const bytes = await readFile(path);
-    if (bytes.byteLength > maximumBytes) return undefined;
-    return JSON.parse(bytes.toString("utf8")) as unknown;
+    handle = await open(path, "wx", 0o600);
+    await handle.writeFile(payload);
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    return true;
   } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT" || error instanceof SyntaxError) return undefined;
-    return undefined;
+    await handle?.close().catch(() => undefined);
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+    await rm(path, { force: true }).catch(() => undefined);
+    throw error;
   }
+}
+
+interface PrivateJsonInspection {
+  value: unknown | undefined;
+  dev: number;
+  ino: number;
+  size: number;
+  mtimeMs: number;
+  ctimeMs: number;
+}
+
+async function inspectBoundedJson(path: string, maximumBytes: number): Promise<PrivateJsonInspection | undefined> {
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    const before = await lstat(path);
+    if (!before.isFile() || before.isSymbolicLink() || before.size > maximumBytes) return undefined;
+    handle = await open(path, "r");
+    const opened = await handle.stat();
+    if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino || opened.size > maximumBytes) {
+      return undefined;
+    }
+    const bytes = await handle.readFile();
+    const after = await lstat(path);
+    if (!after.isFile() || after.isSymbolicLink()
+      || after.dev !== opened.dev || after.ino !== opened.ino
+      || after.size !== opened.size || after.mtimeMs !== opened.mtimeMs
+      || bytes.byteLength > maximumBytes) return undefined;
+    let value: unknown | undefined;
+    try {
+      value = JSON.parse(bytes.toString("utf8")) as unknown;
+    } catch {
+      value = undefined;
+    }
+    return {
+      value,
+      dev: after.dev,
+      ino: after.ino,
+      size: after.size,
+      mtimeMs: after.mtimeMs,
+      ctimeMs: after.ctimeMs,
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    return undefined;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function readBoundedJson(path: string, maximumBytes: number): Promise<unknown | undefined> {
+  return (await inspectBoundedJson(path, maximumBytes))?.value;
+}
+
+async function quarantinePrivateFileIfUnchanged(
+  path: string,
+  expected: PrivateJsonInspection,
+  maximumBytes: number,
+): Promise<boolean> {
+  const current = await inspectBoundedJson(path, maximumBytes);
+  if (!current
+    || current.dev !== expected.dev || current.ino !== expected.ino
+    || current.size !== expected.size || current.mtimeMs !== expected.mtimeMs
+    || current.ctimeMs !== expected.ctimeMs) return false;
+  const quarantinePath = `${path}.quarantine-${process.pid}-${randomProtocolId()}`;
+  try {
+    await rename(path, quarantinePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+  const moved = await lstat(quarantinePath);
+  if (!moved.isFile() || moved.isSymbolicLink()
+    || moved.dev !== expected.dev || moved.ino !== expected.ino
+    || moved.size !== expected.size) {
+    try {
+      await link(quarantinePath, path);
+    } catch {
+      // Preserve an unexpected replacement in quarantine rather than deleting it.
+    }
+    throw new Error("workspace peer file changed before quarantine");
+  }
+  await rm(quarantinePath);
+  return true;
 }
 
 function assertOwnerIdSafe(value: unknown): value is string {
   return typeof value === "string" && OWNER_ID_PATTERN.test(value);
+}
+
+function validOwnerClaimFields(value: Record<string, unknown>): boolean {
+  const fields = [value.ownerToken, value.ownerGeneration, value.sessionClaimKey];
+  if (fields.every((candidate) => candidate === undefined)) return true;
+  return assertOwnerIdSafe(value.ownerToken)
+    && boundedInteger(value.ownerGeneration, 1)
+    && typeof value.sessionClaimKey === "string"
+    && WORKSPACE_ID_PATTERN.test(value.sessionClaimKey);
 }
 
 function validateAgent(value: unknown): WorkspaceAgentSnapshot | undefined {
@@ -1120,6 +1292,7 @@ export function validateWorkspaceOwnerSnapshot(
     || !OWNER_ID_PATTERN.test(value.ownerId)
     || typeof value.ownerNonce !== "string"
     || !OWNER_ID_PATTERN.test(value.ownerNonce)
+    || !validOwnerClaimFields(value)
     || !boundedInteger(value.pid)
     || !boundedInteger(value.publishedAt)
     || !optional(value.sessionId, (candidate): candidate is string => boundedString(candidate, 256))
@@ -1172,6 +1345,9 @@ export function validateWorkspaceOwnerSnapshot(
     normalizedCwd: value.normalizedCwd,
     ownerId: value.ownerId,
     ownerNonce: value.ownerNonce,
+    ...(value.ownerToken === undefined ? {} : { ownerToken: value.ownerToken as string }),
+    ...(value.ownerGeneration === undefined ? {} : { ownerGeneration: value.ownerGeneration as number }),
+    ...(value.sessionClaimKey === undefined ? {} : { sessionClaimKey: value.sessionClaimKey as string }),
     pid: value.pid,
     publishedAt: value.publishedAt,
     ...(value.sessionId === undefined ? {} : { sessionId: value.sessionId }),
@@ -1200,6 +1376,9 @@ export function buildWorkspaceOwnerSnapshot(
     normalizedCwd: identity.normalizedCwd,
     ownerId: identity.ownerId,
     ownerNonce: identity.ownerNonce,
+    ...(identity.ownerToken === undefined ? {} : { ownerToken: identity.ownerToken }),
+    ...(identity.ownerGeneration === undefined ? {} : { ownerGeneration: identity.ownerGeneration }),
+    ...(identity.sessionClaimKey === undefined ? {} : { sessionClaimKey: identity.sessionClaimKey }),
     pid: process.pid,
     publishedAt,
     ...(state.sessionId === undefined ? {} : { sessionId: state.sessionId }),
@@ -1279,10 +1458,19 @@ export async function publishWorkspaceOwner(
   identity: WorkspacePeerIdentity,
   state: WorkspaceOwnerState,
   publishedAt = Date.now(),
+  options: {
+    /** @internal Test hook that runs after temp-file fsync and before the fenced rename. */
+    beforeCommit?: () => void | Promise<void>;
+  } = {},
 ): Promise<WorkspaceOwnerSnapshot> {
   await ensureWorkspacePeerDirectories(identity);
+  await assertWorkspaceOwnerClaimOwned(identity);
   const snapshot = buildWorkspaceOwnerSnapshot(identity, state, publishedAt);
-  await writePrivateJsonAtomic(ownerSnapshotPath(identity), snapshot, MAX_OWNER_FILE_BYTES);
+  await writePrivateJsonAtomic(ownerSnapshotPath(identity), snapshot, MAX_OWNER_FILE_BYTES, {
+    beforeCommit: options.beforeCommit,
+    commit: (renameCommit) => commitWorkspaceOwnerMutation(identity, renameCommit),
+  });
+  await assertWorkspaceOwnerClaimOwned(identity);
   return snapshot;
 }
 
@@ -1304,7 +1492,15 @@ async function listJsonFiles(path: string): Promise<string[]> {
 
 export async function discoverWorkspacePeers(
   identity: WorkspacePeerIdentity,
-  options: { now?: number; staleAfterMs?: number; cleanupStale?: boolean; cleanupStaleAfterMs?: number; includeSelf?: boolean } = {},
+  options: {
+    now?: number;
+    staleAfterMs?: number;
+    cleanupStale?: boolean;
+    cleanupStaleAfterMs?: number;
+    includeSelf?: boolean;
+    /** @internal Test hook for reverse stale-cleanup interleavings. */
+    beforeCleanupStale?: (path: string, snapshot: WorkspaceOwnerSnapshot) => void | Promise<void>;
+  } = {},
 ): Promise<WorkspacePeerDiscovery> {
   const now = options.now ?? Date.now();
   const staleAfterMs = options.staleAfterMs ?? DEFAULT_PEER_STALE_MS;
@@ -1317,19 +1513,36 @@ export async function discoverWorkspacePeers(
   for (const file of await listJsonFiles(identity.paths.ownersDir)) {
     const ownerId = file.slice(0, -5);
     const path = containedPath(identity.paths.ownersDir, file);
+    const inspected = await inspectBoundedJson(path, MAX_OWNER_FILE_BYTES);
     const snapshot = validateWorkspaceOwnerSnapshot(
-      await readBoundedJson(path, MAX_OWNER_FILE_BYTES),
+      inspected?.value,
       { workspaceId: identity.workspaceId, ownerId },
     );
-    if (!snapshot) {
+    if (!snapshot || !inspected) {
       corruptFiles.push(file);
       continue;
+    }
+    if (snapshot.ownerToken !== undefined) {
+      try {
+        await assertWorkspaceOwnerClaimOwned({
+          ...identity,
+          ownerId: snapshot.ownerId,
+          ownerNonce: snapshot.ownerNonce,
+          ownerToken: snapshot.ownerToken,
+          ownerGeneration: snapshot.ownerGeneration,
+          sessionClaimKey: snapshot.sessionClaimKey,
+        });
+      } catch {
+        corruptFiles.push(file);
+        continue;
+      }
     }
     if (snapshot.publishedAt > now + staleAfterMs || now - snapshot.publishedAt > staleAfterMs) {
       staleOwnerIds.push(ownerId);
       if (options.cleanupStale
         && (snapshot.publishedAt > now + cleanupStaleAfterMs || now - snapshot.publishedAt > cleanupStaleAfterMs)) {
-        await rm(path, { force: true }).catch(() => undefined);
+        await options.beforeCleanupStale?.(path, snapshot);
+        await quarantinePrivateFileIfUnchanged(path, inspected, MAX_OWNER_FILE_BYTES).catch(() => false);
       }
       continue;
     }
@@ -1347,18 +1560,146 @@ export interface PersistedOwnerIdentity {
   ownerId: string;
 }
 
+function sessionIdentity(identityKey: string): RuntimeWorkspaceIdentity {
+  return getRuntimeWorkspaceIdentity(identityKey);
+}
+
 export function workspacePeerIdentityPath(identity: WorkspacePeerIdentity, sessionKey: string): string {
-  const key = createHash("sha256").update(normalizeWorkspacePath(sessionKey), "utf8").digest("hex");
+  const key = sessionIdentity(sessionKey).workspaceId;
   return containedPath(identity.paths.identitiesDir, `${key}.json`);
+}
+
+function workspacePeerIdentityCandidatePaths(identity: WorkspacePeerIdentity, sessionKey: string): string[] {
+  const session = sessionIdentity(sessionKey);
+  const keys = [session.workspaceId, ...session.legacyWorkspaceIds];
+  const roots = [identity.paths, ...(identity.legacyPaths ?? [])];
+  return [...new Set(roots.flatMap((paths) => keys.map((key) => containedPath(paths.identitiesDir, `${key}.json`))))];
+}
+
+function workspacePeerClaimPathForKey(identity: WorkspacePeerIdentity, sessionClaimKey: string): string {
+  if (!WORKSPACE_ID_PATTERN.test(sessionClaimKey)) {
+    throw new Error("sessionClaimKey must be 64 lowercase hexadecimal characters");
+  }
+  return containedPath(identity.paths.claimsDir ?? join(identity.paths.identitiesDir, "claims"), `${sessionClaimKey}.claim.json`);
+}
+
+export function workspacePeerClaimPath(identity: WorkspacePeerIdentity, sessionKey: string): string {
+  return workspacePeerClaimPathForKey(identity, sessionIdentity(sessionKey).workspaceId);
+}
+
+function workspacePeerClaimHeartbeatPath(identity: WorkspacePeerIdentity, sessionClaimKey: string, token: string): string {
+  assertOwnerId(token, "ownerToken");
+  return containedPath(
+    identity.paths.claimsDir ?? join(identity.paths.identitiesDir, "claims"),
+    `${sessionClaimKey}.${token}.heartbeat.json`,
+  );
+}
+
+function workspacePeerClaimLockPath(identity: WorkspacePeerIdentity, sessionClaimKey: string): string {
+  if (!WORKSPACE_ID_PATTERN.test(sessionClaimKey)) {
+    throw new Error("sessionClaimKey must be 64 lowercase hexadecimal characters");
+  }
+  return containedPath(
+    identity.paths.claimsDir ?? join(identity.paths.identitiesDir, "claims"),
+    `${sessionClaimKey}.lock.json`,
+  );
+}
+
+interface WorkspaceOwnerClaimLockRecord {
+  version: typeof OWNER_CLAIM_FILE_VERSION;
+  token: string;
+  pid: number;
+  acquiredAt: number;
+}
+
+function validateWorkspaceOwnerClaimLockRecord(value: unknown): WorkspaceOwnerClaimLockRecord | undefined {
+  if (!isRecord(value)
+    || value.version !== OWNER_CLAIM_FILE_VERSION
+    || !assertOwnerIdSafe(value.token)
+    || !boundedInteger(value.pid, 1)
+    || !boundedInteger(value.acquiredAt)) return undefined;
+  return value as unknown as WorkspaceOwnerClaimLockRecord;
+}
+
+function processIsAlive(pid: number): boolean {
+  if (pid === process.pid) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+async function withWorkspaceOwnerClaimMutex<T>(
+  identity: WorkspacePeerIdentity,
+  sessionClaimKey: string,
+  action: () => Promise<T>,
+): Promise<T> {
+  const lockPath = workspacePeerClaimLockPath(identity, sessionClaimKey);
+  const lockToken = randomProtocolId();
+  const deadline = Date.now() + OWNER_CLAIM_LOCK_WAIT_MS;
+  let ownedInspection: PrivateJsonInspection | undefined;
+  for (;;) {
+    const acquiredAt = Date.now();
+    const created = await writePrivateJsonExclusive(lockPath, {
+      version: OWNER_CLAIM_FILE_VERSION,
+      token: lockToken,
+      pid: process.pid,
+      acquiredAt,
+    } satisfies WorkspaceOwnerClaimLockRecord, OWNER_CLAIM_LOCK_FILE_MAX_BYTES);
+    if (created) {
+      ownedInspection = await inspectBoundedJson(lockPath, OWNER_CLAIM_LOCK_FILE_MAX_BYTES);
+      const owned = validateWorkspaceOwnerClaimLockRecord(ownedInspection?.value);
+      if (!ownedInspection || owned?.token !== lockToken) {
+        throw new Error("Workspace owner claim mutex could not verify its lock token");
+      }
+      break;
+    }
+
+    const current = await inspectBoundedJson(lockPath, OWNER_CLAIM_LOCK_FILE_MAX_BYTES);
+    const record = validateWorkspaceOwnerClaimLockRecord(current?.value);
+    const changedAt = current ? Math.max(current.mtimeMs, current.ctimeMs) : acquiredAt;
+    const malformedStale = current !== undefined
+      && record === undefined
+      && Math.abs(acquiredAt - changedAt) > OWNER_CLAIM_LOCK_STALE_MS;
+    if (current && (record && !processIsAlive(record.pid) || malformedStale)) {
+      await quarantinePrivateFileIfUnchanged(lockPath, current, OWNER_CLAIM_LOCK_FILE_MAX_BYTES).catch(() => false);
+      continue;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error("Timed out acquiring the workspace owner claim mutex");
+    }
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, OWNER_CLAIM_LOCK_RETRY_MS));
+  }
+
+  try {
+    return await action();
+  } finally {
+    const current = await inspectBoundedJson(lockPath, OWNER_CLAIM_LOCK_FILE_MAX_BYTES);
+    const record = validateWorkspaceOwnerClaimLockRecord(current?.value);
+    if (current && record?.token === lockToken) {
+      await quarantinePrivateFileIfUnchanged(lockPath, current, OWNER_CLAIM_LOCK_FILE_MAX_BYTES).catch(() => false);
+    }
+  }
 }
 
 export async function loadPersistedOwnerIdentity(
   identity: WorkspacePeerIdentity,
   sessionKey: string,
 ): Promise<PersistedOwnerIdentity | undefined> {
-  const raw = await readBoundedJson(workspacePeerIdentityPath(identity, sessionKey), IDENTITY_FILE_MAX_BYTES);
-  if (!isRecord(raw) || raw.version !== IDENTITY_FILE_VERSION || !assertOwnerIdSafe(raw.ownerId)) return undefined;
-  return { version: IDENTITY_FILE_VERSION, ownerId: raw.ownerId as string };
+  const ownerIds = new Set<string>();
+  for (const path of workspacePeerIdentityCandidatePaths(identity, sessionKey)) {
+    const raw = await readBoundedJson(path, IDENTITY_FILE_MAX_BYTES);
+    if (isRecord(raw) && raw.version === IDENTITY_FILE_VERSION && assertOwnerIdSafe(raw.ownerId)) {
+      ownerIds.add(raw.ownerId);
+    }
+  }
+  if (ownerIds.size > 1) {
+    throw new Error("Conflicting canonical and legacy workspace owner identities require explicit reconciliation");
+  }
+  const ownerId = ownerIds.values().next().value as string | undefined;
+  return ownerId === undefined ? undefined : { version: IDENTITY_FILE_VERSION, ownerId };
 }
 
 export async function persistOwnerIdentity(
@@ -1372,6 +1713,281 @@ export async function persistOwnerIdentity(
     { version: IDENTITY_FILE_VERSION, ownerId },
     IDENTITY_FILE_MAX_BYTES,
   );
+}
+
+interface WorkspaceOwnerClaimRecord {
+  version: typeof OWNER_CLAIM_FILE_VERSION;
+  workspaceId: string;
+  sessionClaimKey: string;
+  ownerId: string;
+  ownerNonce: string;
+  token: string;
+  generation: number;
+  pid: number;
+  claimedAt: number;
+}
+
+interface WorkspaceOwnerClaimHeartbeat {
+  version: typeof OWNER_CLAIM_FILE_VERSION;
+  token: string;
+  generation: number;
+  heartbeatAt: number;
+}
+
+function validateWorkspaceOwnerClaimRecord(value: unknown): WorkspaceOwnerClaimRecord | undefined {
+  if (!isRecord(value)
+    || value.version !== OWNER_CLAIM_FILE_VERSION
+    || typeof value.workspaceId !== "string" || !WORKSPACE_ID_PATTERN.test(value.workspaceId)
+    || typeof value.sessionClaimKey !== "string" || !WORKSPACE_ID_PATTERN.test(value.sessionClaimKey)
+    || !assertOwnerIdSafe(value.ownerId)
+    || !assertOwnerIdSafe(value.ownerNonce)
+    || !assertOwnerIdSafe(value.token)
+    || !boundedInteger(value.generation, 1)
+    || !boundedInteger(value.pid, 1)
+    || !boundedInteger(value.claimedAt)) return undefined;
+  return value as unknown as WorkspaceOwnerClaimRecord;
+}
+
+function validateWorkspaceOwnerClaimHeartbeat(value: unknown): WorkspaceOwnerClaimHeartbeat | undefined {
+  if (!isRecord(value)
+    || value.version !== OWNER_CLAIM_FILE_VERSION
+    || !assertOwnerIdSafe(value.token)
+    || !boundedInteger(value.generation, 1)
+    || !boundedInteger(value.heartbeatAt)) return undefined;
+  return value as unknown as WorkspaceOwnerClaimHeartbeat;
+}
+
+async function assertNoLiveLegacyWorkspaceOwners(
+  identity: WorkspacePeerIdentity,
+  now: number,
+  staleMs: number,
+): Promise<void> {
+  for (const paths of identity.legacyPaths ?? []) {
+    for (const file of await listJsonFiles(paths.ownersDir)) {
+      const snapshot = validateWorkspaceOwnerSnapshot(
+        await readBoundedJson(containedPath(paths.ownersDir, file), MAX_OWNER_FILE_BYTES),
+      );
+      if (snapshot && snapshot.publishedAt <= now + staleMs && now - snapshot.publishedAt <= staleMs) {
+        throw new Error(`Live legacy workspace peer state conflicts with canonical root: ${paths.rootDir}`);
+      }
+    }
+  }
+}
+
+class WorkspaceOwnerClaimLostError extends Error {
+  constructor(message = "Workspace owner claim is stale or owned by another generation") {
+    super(message);
+    this.name = "WorkspaceOwnerClaimLostError";
+  }
+}
+
+function workspaceOwnerClaimFields(identity: WorkspacePeerIdentity): identity is WorkspacePeerIdentity & {
+  ownerToken: string;
+  ownerGeneration: number;
+  sessionClaimKey: string;
+} {
+  return identity.ownerToken !== undefined
+    && identity.ownerGeneration !== undefined
+    && identity.sessionClaimKey !== undefined;
+}
+
+async function assertWorkspaceOwnerClaimOwned(identity: WorkspacePeerIdentity): Promise<void> {
+  if (!workspaceOwnerClaimFields(identity)) return;
+  const record = validateWorkspaceOwnerClaimRecord(
+    await readBoundedJson(
+      workspacePeerClaimPathForKey(identity, identity.sessionClaimKey),
+      OWNER_CLAIM_FILE_MAX_BYTES,
+    ),
+  );
+  if (!record
+    || record.workspaceId !== identity.workspaceId
+    || record.sessionClaimKey !== identity.sessionClaimKey
+    || record.ownerId !== identity.ownerId
+    || record.ownerNonce !== identity.ownerNonce
+    || record.token !== identity.ownerToken
+    || record.generation !== identity.ownerGeneration) {
+    throw new WorkspaceOwnerClaimLostError();
+  }
+}
+
+async function commitWorkspaceOwnerMutation<T>(
+  identity: WorkspacePeerIdentity,
+  mutation: () => Promise<T>,
+): Promise<T> {
+  if (!workspaceOwnerClaimFields(identity)) return mutation();
+  return withWorkspaceOwnerClaimMutex(identity, identity.sessionClaimKey, async () => {
+    await assertWorkspaceOwnerClaimOwned(identity);
+    const result = await mutation();
+    await assertWorkspaceOwnerClaimOwned(identity);
+    return result;
+  });
+}
+
+export async function claimWorkspaceOwnerIdentity(
+  cwd: string,
+  options: {
+    rootDir?: string;
+    sessionKey?: string;
+    pid?: number;
+    generation?: number;
+    staleMs?: number;
+    now?: () => number;
+    /** @internal Test hook for canonical/legacy root conflict coverage. */
+    legacyRootDirs?: readonly string[];
+    /** @internal Runs after observing contention but before the takeover mutex. */
+    beforeTakeover?: () => void | Promise<void>;
+  } = {},
+): Promise<WorkspaceOwnerClaim> {
+  const now = options.now ?? Date.now;
+  const observedAt = now();
+  const staleMs = options.staleMs ?? DEFAULT_PEER_STALE_MS;
+  const pid = options.pid ?? process.pid;
+  const generation = options.generation ?? 1;
+  if (!boundedInteger(observedAt) || !boundedInteger(staleMs, 1)
+    || !boundedInteger(pid, 1) || !boundedInteger(generation, 1)) {
+    throw new Error("Workspace owner claim options must be bounded positive integers");
+  }
+  const provisionalBase = createWorkspacePeerIdentity(cwd, { rootDir: options.rootDir });
+  const provisional: WorkspacePeerIdentity = options.legacyRootDirs === undefined
+    ? provisionalBase
+    : { ...provisionalBase, legacyPaths: options.legacyRootDirs.map(workspacePeerPathsForRoot) };
+  await ensureWorkspacePeerDirectories(provisional);
+  await assertNoLiveLegacyWorkspaceOwners(provisional, observedAt, staleMs);
+  const sessionClaimKey = options.sessionKey
+    ? sessionIdentity(options.sessionKey).workspaceId
+    : createHash("sha256").update(`ephemeral\0${pid}\0${randomProtocolId()}`, "utf8").digest("hex");
+  const persisted = options.sessionKey
+    ? await loadPersistedOwnerIdentity(provisional, options.sessionKey)
+    : undefined;
+  const ownerId = persisted?.ownerId ?? randomProtocolId();
+  const ownerNonce = randomProtocolId();
+  const token = randomProtocolId();
+  const identityBase = createWorkspacePeerIdentity(cwd, {
+    rootDir: options.rootDir,
+    ownerId,
+    ownerNonce,
+    ownerToken: token,
+    ownerGeneration: generation,
+    sessionClaimKey,
+  });
+  const identity: WorkspacePeerIdentity = {
+    ...identityBase,
+    legacyPaths: provisional.legacyPaths,
+    legacyWorkspaceIds: provisional.legacyWorkspaceIds,
+  };
+  const claimPath = workspacePeerClaimPathForKey(identity, sessionClaimKey);
+  const heartbeatPath = workspacePeerClaimHeartbeatPath(identity, sessionClaimKey, token);
+  const record: WorkspaceOwnerClaimRecord = {
+    version: OWNER_CLAIM_FILE_VERSION,
+    workspaceId: identity.workspaceId,
+    sessionClaimKey,
+    ownerId,
+    ownerNonce,
+    token,
+    generation,
+    pid,
+    claimedAt: observedAt,
+  };
+
+  let takeoverHookRan = false;
+  let acquired = false;
+  for (let attempt = 0; attempt < OWNER_CLAIM_ACQUIRE_ATTEMPTS && !acquired; attempt += 1) {
+    if (!takeoverHookRan && options.beforeTakeover && await inspectBoundedJson(claimPath, OWNER_CLAIM_FILE_MAX_BYTES)) {
+      takeoverHookRan = true;
+      await options.beforeTakeover();
+    }
+    acquired = await withWorkspaceOwnerClaimMutex(identity, sessionClaimKey, async () => {
+      if (await writePrivateJsonExclusive(claimPath, record, OWNER_CLAIM_FILE_MAX_BYTES)) return true;
+
+      const current = await inspectBoundedJson(claimPath, OWNER_CLAIM_FILE_MAX_BYTES);
+      if (!current) return false;
+      const currentRecord = validateWorkspaceOwnerClaimRecord(current.value);
+      if (!currentRecord) {
+        const lastChange = Math.max(current.mtimeMs, current.ctimeMs);
+        if (Math.abs(observedAt - lastChange) <= staleMs) {
+          throw new Error("Workspace owner claim is contended or still being initialized");
+        }
+        await quarantinePrivateFileIfUnchanged(claimPath, current, OWNER_CLAIM_FILE_MAX_BYTES);
+        return writePrivateJsonExclusive(claimPath, record, OWNER_CLAIM_FILE_MAX_BYTES);
+      }
+      const heartbeat = validateWorkspaceOwnerClaimHeartbeat(
+        await readBoundedJson(
+          workspacePeerClaimHeartbeatPath(identity, currentRecord.sessionClaimKey, currentRecord.token),
+          OWNER_CLAIM_HEARTBEAT_FILE_MAX_BYTES,
+        ),
+      );
+      const heartbeatAt = heartbeat?.token === currentRecord.token && heartbeat.generation === currentRecord.generation
+        ? Math.max(currentRecord.claimedAt, heartbeat.heartbeatAt)
+        : currentRecord.claimedAt;
+      if (Math.abs(observedAt - heartbeatAt) <= staleMs) {
+        throw new Error("Workspace owner claim is already held by a live generation");
+      }
+      if (!await quarantinePrivateFileIfUnchanged(claimPath, current, OWNER_CLAIM_FILE_MAX_BYTES)) return false;
+      return writePrivateJsonExclusive(claimPath, record, OWNER_CLAIM_FILE_MAX_BYTES);
+    });
+  }
+  if (!acquired) throw new Error("Workspace owner claim remained contended after bounded recovery");
+
+  let released = false;
+  const assertOwned = async (): Promise<void> => {
+    if (released) throw new WorkspaceOwnerClaimLostError("Workspace owner claim is released");
+    await assertWorkspaceOwnerClaimOwned(identity);
+  };
+  const release = async (): Promise<void> => {
+    if (released) return;
+    released = true;
+    await withWorkspaceOwnerClaimMutex(identity, sessionClaimKey, async () => {
+      const current = await inspectBoundedJson(claimPath, OWNER_CLAIM_FILE_MAX_BYTES);
+      const currentRecord = validateWorkspaceOwnerClaimRecord(current?.value);
+      if (current && currentRecord
+        && currentRecord.token === token
+        && currentRecord.generation === generation
+        && currentRecord.ownerNonce === ownerNonce) {
+        await quarantinePrivateFileIfUnchanged(claimPath, current, OWNER_CLAIM_FILE_MAX_BYTES).catch(() => false);
+      }
+      await rm(heartbeatPath, { force: true }).catch(() => undefined);
+    });
+  };
+  const heartbeat = async (publishedAt = now()): Promise<void> => {
+    if (!boundedInteger(publishedAt)) throw new Error("Workspace owner heartbeat time must be a non-negative safe integer");
+    if (released) throw new WorkspaceOwnerClaimLostError("Workspace owner claim is released");
+    await withWorkspaceOwnerClaimMutex(identity, sessionClaimKey, async () => {
+      await assertWorkspaceOwnerClaimOwned(identity);
+      await writePrivateJsonAtomic(heartbeatPath, {
+        version: OWNER_CLAIM_FILE_VERSION,
+        token,
+        generation,
+        heartbeatAt: publishedAt,
+      } satisfies WorkspaceOwnerClaimHeartbeat, OWNER_CLAIM_HEARTBEAT_FILE_MAX_BYTES);
+      await assertWorkspaceOwnerClaimOwned(identity);
+    });
+  };
+  try {
+    await heartbeat(observedAt);
+    if (options.sessionKey) await persistOwnerIdentity(identity, options.sessionKey, ownerId);
+  } catch (error) {
+    await release();
+    throw error;
+  }
+  return { identity, claimPath, token, generation, assertOwned, heartbeat, release };
+}
+
+async function removeWorkspaceOwnerSnapshotIfOwned(identity: WorkspacePeerIdentity): Promise<boolean> {
+  return commitWorkspaceOwnerMutation(identity, async () => {
+    const path = ownerSnapshotPath(identity);
+    const inspected = await inspectBoundedJson(path, MAX_OWNER_FILE_BYTES);
+    if (!inspected) return false;
+    const snapshot = validateWorkspaceOwnerSnapshot(inspected.value, {
+      workspaceId: identity.workspaceId,
+      ownerId: identity.ownerId,
+    });
+    if (!snapshot
+      || snapshot.ownerNonce !== identity.ownerNonce
+      || snapshot.ownerToken !== identity.ownerToken
+      || snapshot.ownerGeneration !== identity.ownerGeneration
+      || snapshot.sessionClaimKey !== identity.sessionClaimKey) return false;
+    return quarantinePrivateFileIfUnchanged(path, inspected, MAX_OWNER_FILE_BYTES);
+  });
 }
 
 /**
@@ -1503,6 +2119,7 @@ export class WorkspacePeerPublisher {
   readonly #getState: () => WorkspaceOwnerState;
   readonly #now: () => number;
   readonly #cleanupMailboxes: typeof cleanupWorkspacePeerMailboxes;
+  readonly #ownerClaim: WorkspaceOwnerClaim | undefined;
   #heartbeat: ReturnType<typeof setInterval> | undefined;
   #scheduled: ReturnType<typeof setTimeout> | undefined;
   #publishing: Promise<void> = Promise.resolve();
@@ -1512,7 +2129,8 @@ export class WorkspacePeerPublisher {
   #stopped = true;
 
   constructor(options: WorkspacePeerRuntimeOptions) {
-    this.identity = createWorkspacePeerIdentity(options.cwd, options);
+    this.#ownerClaim = options.ownerClaim;
+    this.identity = options.ownerClaim?.identity ?? createWorkspacePeerIdentity(options.cwd, options);
     this.heartbeatMs = options.heartbeatMs ?? DEFAULT_PEER_HEARTBEAT_MS;
     this.publishThrottleMs = options.publishThrottleMs ?? DEFAULT_PEER_PUBLISH_THROTTLE_MS;
     this.mailboxCleanupIntervalMs = options.mailboxCleanupIntervalMs ?? DEFAULT_PEER_MAILBOX_CLEANUP_INTERVAL_MS;
@@ -1530,9 +2148,15 @@ export class WorkspacePeerPublisher {
     if (!this.#stopped) return;
     this.#stopped = false;
     this.#dirty = true;
-    await this.publishNow();
-    this.#heartbeat = setInterval(() => this.#schedule(true), this.heartbeatMs);
-    this.#heartbeat.unref?.();
+    try {
+      await this.publishNow();
+      this.#heartbeat = setInterval(() => this.#schedule(true), this.heartbeatMs);
+      this.#heartbeat.unref?.();
+    } catch (error) {
+      this.#stopped = true;
+      await this.#ownerClaim?.release().catch(() => undefined);
+      throw error;
+    }
   }
 
   markDirty(): void {
@@ -1546,7 +2170,9 @@ export class WorkspacePeerPublisher {
     this.#dirty = false;
     const publishedAt = this.#now();
     this.#publishing = this.#publishing.catch(() => undefined).then(async () => {
+      await this.#ownerClaim?.heartbeat(publishedAt);
       await publishWorkspaceOwner(this.identity, this.#getState(), publishedAt);
+      await this.#ownerClaim?.assertOwned();
       this.#lastPublishedAt = publishedAt;
       if (this.#lastMailboxCleanupAt === undefined
         || publishedAt < this.#lastMailboxCleanupAt
@@ -1570,7 +2196,8 @@ export class WorkspacePeerPublisher {
     this.#heartbeat = undefined;
     this.#scheduled = undefined;
     await this.#publishing.catch(() => undefined);
-    if (options.removeOwnerFile !== false) await rm(ownerSnapshotPath(this.identity), { force: true }).catch(() => undefined);
+    if (options.removeOwnerFile !== false) await removeWorkspaceOwnerSnapshotIfOwned(this.identity).catch(() => undefined);
+    await this.#ownerClaim?.release().catch(() => undefined);
   }
 
   #schedule(heartbeat: boolean): void {
@@ -1928,65 +2555,143 @@ function makeResponse(
   };
 }
 
+async function listWorkspacePeerProcessingFiles(mailbox: string): Promise<string[]> {
+  try {
+    const metadata = await lstat(mailbox);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) return [];
+    return (await readdir(mailbox, { withFileTypes: true }))
+      .filter((entry) => entry.isFile()
+        && !entry.isSymbolicLink()
+        && /^[a-f0-9]{32}\.[a-f0-9]{32}\.processing$/.test(entry.name))
+      .map((entry) => entry.name)
+      .sort()
+      .slice(0, MAX_MAILBOX_ENTRIES);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+}
+
+async function recoverWorkspacePeerProcessingFiles(
+  identity: WorkspacePeerIdentity,
+  mailbox: string,
+  limit: number,
+): Promise<void> {
+  if (!workspaceOwnerClaimFields(identity)) return;
+  await commitWorkspaceOwnerMutation(identity, async () => {
+    for (const file of (await listWorkspacePeerProcessingFiles(mailbox)).slice(0, limit)) {
+      const commandId = file.slice(0, 32);
+      const processingPath = containedPath(mailbox, file);
+      const command = validateCommand(
+        await readBoundedJson(processingPath, MAX_COMMAND_FILE_BYTES),
+        identity.workspaceId,
+      );
+      if (!command || command.commandId !== commandId || command.toOwnerId !== identity.ownerId) continue;
+      const sourcePath = containedPath(mailbox, `${commandId}.json`);
+      try {
+        await link(processingPath, sourcePath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+          throw new Error(`Conflicting queued and processing workspace commands require explicit reconciliation: ${commandId}`);
+        }
+        throw error;
+      }
+      await rm(processingPath);
+    }
+  });
+}
+
 export async function consumeWorkspacePeerCommands(
   identity: WorkspacePeerIdentity,
   handler: (command: WorkspacePeerCommand) => WorkspaceCommandHandlerResult | void | Promise<WorkspaceCommandHandlerResult | void>,
-  options: { now?: number; limit?: number } = {},
+  options: {
+    now?: number;
+    limit?: number;
+    /** @internal Test hook after claiming/reading a command but before handler fencing. */
+    beforeHandle?: (command: WorkspacePeerCommand) => void | Promise<void>;
+  } = {},
 ): Promise<WorkspaceConsumedCommand[]> {
   const now = options.now ?? Date.now();
   const limit = options.limit ?? 64;
   if (!boundedInteger(limit, 1) || limit > MAX_MAILBOX_ENTRIES) throw new Error("command consume limit is outside protocol bounds");
   const mailbox = commandMailboxPath(identity, identity.ownerId);
+  await assertWorkspaceOwnerClaimOwned(identity);
+  await recoverWorkspacePeerProcessingFiles(identity, mailbox, limit);
   const results: WorkspaceConsumedCommand[] = [];
   for (const file of (await listJsonFiles(mailbox)).slice(0, limit)) {
+    await assertWorkspaceOwnerClaimOwned(identity);
     const commandId = file.slice(0, -5);
     const sourcePath = containedPath(mailbox, file);
     const claimPath = containedPath(mailbox, `${commandId}.${identity.ownerNonce}.processing`);
     try {
-      await rename(sourcePath, claimPath);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-      throw error;
-    }
-    try {
+      await commitWorkspaceOwnerMutation(identity, async () => {
+        try {
+          await rename(sourcePath, claimPath);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+          throw error;
+        }
+      });
       const command = validateCommand(await readBoundedJson(claimPath, MAX_COMMAND_FILE_BYTES), identity.workspaceId);
-      if (!command || command.commandId !== commandId || command.toOwnerId !== identity.ownerId) continue;
-      const existing = await readResponse(identity, command.fromOwnerId, command);
-      if (existing) {
-        results.push({ commandId, replayed: true, response: existing });
+      await assertWorkspaceOwnerClaimOwned(identity);
+      if (!command || command.commandId !== commandId || command.toOwnerId !== identity.ownerId) {
+        await commitWorkspaceOwnerMutation(identity, async () => { await rm(claimPath, { force: true }); });
         continue;
       }
-      let response: WorkspacePeerCommandResponse;
-      if (command.toOwnerNonce !== identity.ownerNonce) {
-        response = makeResponse(identity, command, "rejected", "destination owner instance has changed", now);
-      } else if (command.expiresAt < now) {
-        response = makeResponse(identity, command, "expired", "command expired before consumption", now);
-      } else {
-        try {
-          const handled = await handler(command);
-          response = makeResponse(
-            identity,
-            command,
-            handled?.status ?? "accepted",
-            handled?.message,
-            now,
-            handled ? {
-              effectiveAction: handled.effectiveAction,
-              deliveryStage: handled.deliveryStage,
-            } : {},
-          );
-        } catch (error) {
-          response = makeResponse(identity, command, "error", error instanceof Error ? error.message : String(error), now);
-        }
+      const existing = await readResponse(identity, command.fromOwnerId, command);
+      await assertWorkspaceOwnerClaimOwned(identity);
+      if (existing) {
+        results.push({ commandId, replayed: true, response: existing });
+        await commitWorkspaceOwnerMutation(identity, async () => { await rm(claimPath, { force: true }); });
+        continue;
       }
-      await writePrivateJsonAtomic(
-        responsePath(identity, command.fromOwnerId, command.commandId),
-        response,
-        MAX_RESPONSE_FILE_BYTES,
-      );
+      if (command.toOwnerNonce === identity.ownerNonce && command.expiresAt >= now) {
+        await options.beforeHandle?.(command);
+        await assertWorkspaceOwnerClaimOwned(identity);
+      }
+      const response = await commitWorkspaceOwnerMutation(identity, async () => {
+        let next: WorkspacePeerCommandResponse;
+        if (command.toOwnerNonce !== identity.ownerNonce) {
+          next = makeResponse(identity, command, "rejected", "destination owner instance has changed", now);
+        } else if (command.expiresAt < now) {
+          next = makeResponse(identity, command, "expired", "command expired before consumption", now);
+        } else {
+          try {
+            const handled = await handler(command);
+            await assertWorkspaceOwnerClaimOwned(identity);
+            next = makeResponse(
+              identity,
+              command,
+              handled?.status ?? "accepted",
+              handled?.message,
+              now,
+              handled ? {
+                effectiveAction: handled.effectiveAction,
+                deliveryStage: handled.deliveryStage,
+              } : {},
+            );
+          } catch (error) {
+            if (error instanceof WorkspaceOwnerClaimLostError) throw error;
+            next = makeResponse(identity, command, "error", error instanceof Error ? error.message : String(error), now);
+          }
+        }
+        await writePrivateJsonAtomic(
+          responsePath(identity, command.fromOwnerId, command.commandId),
+          next,
+          MAX_RESPONSE_FILE_BYTES,
+        );
+        return next;
+      });
       results.push({ commandId, replayed: false, response });
-    } finally {
-      await rm(claimPath, { force: true }).catch(() => undefined);
+      await commitWorkspaceOwnerMutation(identity, async () => { await rm(claimPath, { force: true }); });
+    } catch (error) {
+      if (error instanceof WorkspaceOwnerClaimLostError) throw error;
+      try {
+        await commitWorkspaceOwnerMutation(identity, async () => { await rm(claimPath, { force: true }); });
+      } catch (cleanupError) {
+        if (cleanupError instanceof WorkspaceOwnerClaimLostError) throw cleanupError;
+      }
+      throw error;
     }
   }
   return results;
@@ -1998,6 +2703,7 @@ export class WorkspacePeerCommandConsumer {
   readonly #handler: (command: WorkspacePeerCommand) => WorkspaceCommandHandlerResult | void | Promise<WorkspaceCommandHandlerResult | void>;
   #timer: ReturnType<typeof setInterval> | undefined;
   #polling: Promise<WorkspaceConsumedCommand[]> | undefined;
+  #claimLost = false;
 
   constructor(
     identity: WorkspacePeerIdentity,
@@ -2011,17 +2717,25 @@ export class WorkspacePeerCommandConsumer {
   }
 
   start(): void {
-    if (this.#timer) return;
-    void this.#pollSafe();
+    if (this.#timer || this.#claimLost) return;
     this.#timer = setInterval(() => void this.#pollSafe(), this.pollMs);
     this.#timer.unref?.();
+    void this.#pollSafe();
   }
 
   async poll(): Promise<WorkspaceConsumedCommand[]> {
+    if (this.#claimLost) throw new WorkspaceOwnerClaimLostError();
     if (this.#polling) return this.#polling;
     this.#polling = consumeWorkspacePeerCommands(this.identity, this.#handler);
     try {
       return await this.#polling;
+    } catch (error) {
+      if (error instanceof WorkspaceOwnerClaimLostError) {
+        this.#claimLost = true;
+        if (this.#timer) clearInterval(this.#timer);
+        this.#timer = undefined;
+      }
+      throw error;
     } finally {
       this.#polling = undefined;
     }

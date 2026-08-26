@@ -64,6 +64,35 @@ function createMetadata(database: DatabaseSync, value: string, userVersion: numb
   database.exec(`PRAGMA user_version = ${userVersion}`);
 }
 
+function downgradeSchemaV3ToV2(database: DatabaseSync): void {
+  database.exec(`
+    DROP TRIGGER streams_workspace_immutable;
+    DROP INDEX streams_workspace_stream_idx;
+    DROP INDEX actor_leases_stream_id_uq;
+    DROP INDEX mutation_receipts_created_idx;
+    DROP TABLE mutation_receipts;
+    ALTER TABLE streams DROP COLUMN workspace_id;
+    UPDATE metadata SET value = '2' WHERE key = 'schema_version';
+    PRAGMA user_version = 2;
+  `);
+}
+
+function runtimePayload(streamId: string, workspaceId: string, sequence: number, eventId: string) {
+  return {
+    version: 2,
+    revision: 1,
+    streamId,
+    actor: { version: 2, revision: 1, workspaceId, actorKind: "schedule", actorId: streamId, generation: 1 },
+    sequence,
+    producerEpoch: 1,
+    occurredAt: sequence,
+    kind: "domain.event",
+    eventType: "schedule.created",
+    eventId,
+    payload: {},
+  } as const;
+}
+
 function requestFor(lease: { epoch: number; nonce: string }): RuntimeBrokerCommitRequest {
   return {
     messageId: "message-1",
@@ -92,7 +121,7 @@ function requestFor(lease: { epoch: number; nonce: string }): RuntimeBrokerCommi
   };
 }
 
-test("SQLite store enables WAL and explicitly migrates an empty database to schema v2", () => {
+test("SQLite store enables WAL and explicitly migrates an empty database to schema v3", () => {
   withDatabase((store, path) => {
     assert.equal(store.journalMode.toLowerCase(), "wal");
     assert.deepEqual(store.tableNames(), [
@@ -100,16 +129,21 @@ test("SQLite store enables WAL and explicitly migrates an empty database to sche
       "events",
       "inbox",
       "metadata",
+      "mutation_receipts",
       "outbox",
       "projections",
       "streams",
     ]);
     const inspection = new DatabaseSync(path);
     try {
-      assert.equal(inspection.prepare("PRAGMA user_version").get()!.user_version, 2);
+      assert.equal(inspection.prepare("PRAGMA user_version").get()!.user_version, 3);
       assert.equal(
         inspection.prepare("SELECT value FROM metadata WHERE key = 'schema_version'").get()!.value,
-        "2",
+        "3",
+      );
+      assert.deepEqual(
+        inspection.prepare("PRAGMA index_info(streams_workspace_stream_idx)").all().map((row) => row.name),
+        ["workspace_id", "stream_id"],
       );
     } finally {
       inspection.close();
@@ -136,8 +170,8 @@ test("SQLite store rejects malformed, inconsistent, newer, and structurally inco
     /does not match user_version/,
   );
   expectSchemaRejected(
-    (database) => createMetadata(database, "3", 3),
-    /version 3 is newer than supported 2/,
+    (database) => createMetadata(database, "4", 4),
+    /version 4 is newer than supported 3/,
   );
   expectSchemaRejected((database) => {
     createMetadata(database, "1", 1);
@@ -145,8 +179,8 @@ test("SQLite store rejects malformed, inconsistent, newer, and structurally inco
   }, /table actor_leases has incompatible columns/);
 });
 
-test("stream listing is workspace-scoped, prefix-bounded, and keyset-paged", () => {
-  withDatabase((store) => {
+test("stream listing is workspace-scoped, prefix-bounded, keyset-paged, and ownership is immutable", () => {
+  withDatabase((store, path) => {
     const append = (streamId: string, workspaceId: string, suffix: string) => {
       const lease = store.acquireLease({ actorId: streamId, streamId, holderId: "holder", ttlMs: 1_000 });
       store.commit({
@@ -190,6 +224,15 @@ test("stream listing is workspace-scoped, prefix-bounded, and keyset-paged", () 
     assert.deepEqual(store.listStreams({ workspaceId: "workspace-b", prefix: "flow-schedule/schedule/", limit: 10 }), [
       "flow-schedule/schedule/c",
     ]);
+    const inspection = new DatabaseSync(path);
+    try {
+      assert.throws(
+        () => inspection.prepare("UPDATE streams SET workspace_id = 'workspace-b' WHERE stream_id = 'flow-schedule/schedule/a'").run(),
+        /workspace ownership is immutable/,
+      );
+    } finally {
+      inspection.close();
+    }
   });
 });
 
@@ -233,6 +276,19 @@ test("SQLite stream owner ignores mailbox events and rejects mixed Runtime works
       events: [{ eventId: "runtime-event-a", eventType: "domain.event", payload: runtimePayload("workspace-a", 2) }],
     });
     assert.deepEqual(store.listStreams({ workspaceId: "workspace-a", prefix: "flow-schedule/schedule/", limit: 10 }), [streamId]);
+
+    assert.throws(() => store.commit({
+      messageId: "runtime-message-wrong-stream",
+      actorId: streamId,
+      lease,
+      streamId,
+      expectedRevision: 2,
+      events: [{
+        eventId: "runtime-event-wrong-stream",
+        eventType: "domain.event",
+        payload: { ...runtimePayload("workspace-a", 99), streamId: "flow-schedule/schedule/other" },
+      }],
+    }), hasCode("invalid_request"));
 
     assert.throws(() => store.commit({
       messageId: "runtime-message-b",
@@ -313,7 +369,7 @@ test("commit atomically applies event, outbox, projection, stream, and inbox usi
   }, { now: () => now });
 });
 
-test("schema v1 migrates forward to v2 without losing durable broker state", () => {
+test("schema v1 migrates transactionally to v3 without losing durable broker state", () => {
   const directory = mkdtempSync(join(tmpdir(), "runtime-broker-migrate-v1-"));
   const path = join(directory, "broker.sqlite");
   let store = new RuntimeBrokerSqliteStore(path, { now: () => 10 });
@@ -329,6 +385,7 @@ test("schema v1 migrates forward to v2 without losing durable broker state", () 
 
     const v1 = new DatabaseSync(path);
     try {
+      downgradeSchemaV3ToV2(v1);
       v1.exec(`
         ALTER TABLE actor_leases RENAME TO actor_leases_v2;
         CREATE TABLE actor_leases (
@@ -353,6 +410,12 @@ test("schema v1 migrates forward to v2 without losing durable broker state", () 
 
     store = new RuntimeBrokerSqliteStore(path, { now: () => 20 });
     assert.equal(store.getLease("actor-1"), undefined);
+    const replacement = store.acquireLease({
+      actorId: "actor-1",
+      holderId: "broker-2",
+      ttlMs: 1_000,
+    });
+    assert.equal(replacement.epoch, lease.epoch + 1);
     assert.equal(store.getStreamRevision("stream-1"), 1);
     assert.equal(store.readEvents("stream-1").length, 1);
     assert.equal(store.listPendingOutbox(10, 20).length, 1);
@@ -360,16 +423,133 @@ test("schema v1 migrates forward to v2 without losing durable broker state", () 
     const inspection = new DatabaseSync(path, { readOnly: true });
     try {
       assert.equal(inspection.prepare("SELECT COUNT(*) AS count FROM inbox").get()!.count, 1);
-      assert.equal(inspection.prepare("PRAGMA user_version").get()!.user_version, 2);
+      assert.equal(inspection.prepare("PRAGMA user_version").get()!.user_version, 3);
       assert.equal(
         inspection.prepare("SELECT value FROM metadata WHERE key = 'schema_version'").get()!.value,
-        "2",
+        "3",
       );
     } finally {
       inspection.close();
     }
   } finally {
     store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("schema v2 migration invalidates every duplicate stream lease and backfills indexed workspace ownership", () => {
+  const directory = mkdtempSync(join(tmpdir(), "runtime-broker-migrate-v2-"));
+  const path = join(directory, "broker.sqlite");
+  let store = new RuntimeBrokerSqliteStore(path, { now: () => 10 });
+  try {
+    const streamId = "flow-schedule/schedule/shared";
+    const lease = store.acquireLease({ actorId: "actor-a", streamId, holderId: "holder-a", ttlMs: 1_000 });
+    store.commit({
+      messageId: "message-a",
+      actorId: "actor-a",
+      lease,
+      streamId,
+      expectedRevision: 0,
+      events: [{ eventId: "event-a", eventType: "domain.event", payload: runtimePayload(streamId, "workspace-a", 1, "domain-a") }],
+    });
+    store.close();
+
+    const v2 = new DatabaseSync(path);
+    try {
+      downgradeSchemaV3ToV2(v2);
+      v2.prepare(`
+        INSERT INTO actor_leases
+          (actor_id, stream_id, holder_id, epoch, nonce, acquired_at, heartbeat_at, expires_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run("actor-b", streamId, "holder-b", 7, "nonce-b", 10, 10, 1_010);
+    } finally {
+      v2.close();
+    }
+
+    store = new RuntimeBrokerSqliteStore(path, { now: () => 20 });
+    assert.equal(store.getLease("actor-a"), undefined);
+    assert.equal(store.getLease("actor-b"), undefined);
+    assert.throws(
+      () => store.heartbeatLease({ actorId: "actor-a", lease, ttlMs: 100 }),
+      hasCode("stale_lease"),
+    );
+    assert.throws(
+      () => store.heartbeatLease({ actorId: "actor-b", lease: { epoch: 7, nonce: "nonce-b" }, ttlMs: 100 }),
+      hasCode("stale_lease"),
+    );
+    assert.deepEqual(store.listStreams({
+      workspaceId: "workspace-a",
+      prefix: "flow-schedule/schedule/",
+      limit: 10,
+    }), [streamId]);
+    const replacement = store.acquireLease({ actorId: "actor-c", streamId, holderId: "holder-c", ttlMs: 100 });
+    assert.equal(replacement.actorId, "actor-c");
+    assert.equal(replacement.epoch, 8);
+    const inspection = new DatabaseSync(path, { readOnly: true });
+    try {
+      assert.equal(inspection.prepare("SELECT COUNT(*) AS count FROM actor_leases WHERE stream_id = ?").get(streamId)!.count, 1);
+      assert.equal(inspection.prepare("SELECT workspace_id FROM streams WHERE stream_id = ?").get(streamId)!.workspace_id, "workspace-a");
+    } finally {
+      inspection.close();
+    }
+  } finally {
+    store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("schema v2 ownership conflicts abort and roll back the entire v3 migration", () => {
+  const directory = mkdtempSync(join(tmpdir(), "runtime-broker-migrate-conflict-"));
+  const path = join(directory, "broker.sqlite");
+  const streamId = "flow-schedule/schedule/conflict";
+  const store = new RuntimeBrokerSqliteStore(path, { now: () => 10 });
+  try {
+    const lease = store.acquireLease({ actorId: "actor", streamId, holderId: "holder", ttlMs: 1_000 });
+    store.commit({
+      messageId: "message-a",
+      actorId: "actor",
+      lease,
+      streamId,
+      expectedRevision: 0,
+      events: [{ eventId: "event-a", eventType: "domain.event", payload: runtimePayload(streamId, "workspace-a", 1, "domain-a") }],
+    });
+    store.commit({
+      messageId: "message-b",
+      actorId: "actor",
+      lease,
+      streamId,
+      expectedRevision: 1,
+      events: [{ eventId: "event-b", eventType: "mailbox.applied", payload: { kind: "mailbox.applied" } }],
+    });
+  } finally {
+    store.close();
+  }
+  const v2 = new DatabaseSync(path);
+  try {
+    downgradeSchemaV3ToV2(v2);
+    v2.prepare("UPDATE events SET event_type = 'domain.event', payload_json = ? WHERE event_id = 'event-b'")
+      .run(JSON.stringify(runtimePayload(streamId, "workspace-b", 2, "domain-b")));
+  } finally {
+    v2.close();
+  }
+
+  try {
+    assert.throws(
+      () => new RuntimeBrokerSqliteStore(path, { now: () => 20 }),
+      /conflicting workspace ownership/,
+    );
+    const inspection = new DatabaseSync(path, { readOnly: true });
+    try {
+      assert.equal(inspection.prepare("PRAGMA user_version").get()!.user_version, 2);
+      assert.equal(
+        inspection.prepare("PRAGMA table_info(streams)").all().some((row) => row.name === "workspace_id"),
+        false,
+      );
+      assert.equal(inspection.prepare("SELECT 1 FROM sqlite_schema WHERE name = 'mutation_receipts'").get(), undefined);
+    } finally {
+      inspection.close();
+    }
+  } finally {
     rmSync(directory, { recursive: true, force: true });
   }
 });
@@ -395,6 +575,39 @@ test("lease stream binding fences commits and authorized replay", () => {
       store.readAuthorizedEvents("stream-1", 0, { actorId: "actor-1", lease }).length,
       1,
     );
+  }, { now: () => 10 });
+});
+
+test("projection ownership is fenced to its original stream", () => {
+  withDatabase((store) => {
+    const firstLease = store.acquireLease({ actorId: "actor-a", streamId: "stream-a", holderId: "holder-a", ttlMs: 1_000 });
+    const secondLease = store.acquireLease({ actorId: "actor-b", streamId: "stream-b", holderId: "holder-b", ttlMs: 1_000 });
+    store.commit({
+      messageId: "message-a",
+      actorId: "actor-a",
+      lease: firstLease,
+      streamId: "stream-a",
+      expectedRevision: 0,
+      events: [{ eventId: "event-a", eventType: "state.changed", payload: {} }],
+      projections: [{ projectionId: "shared-projection", value: { owner: "a" } }],
+    });
+    assert.throws(() => store.commit({
+      messageId: "message-b",
+      actorId: "actor-b",
+      lease: secondLease,
+      streamId: "stream-b",
+      expectedRevision: 0,
+      events: [{ eventId: "event-b", eventType: "state.changed", payload: {} }],
+      projections: [{ projectionId: "shared-projection", value: { owner: "b" } }],
+    }), hasCode("idempotency_conflict"));
+    assert.deepEqual(store.readProjection("shared-projection"), {
+      streamId: "stream-a",
+      revision: 1,
+      value: { owner: "a" },
+      updatedAt: 10,
+    });
+    assert.equal(store.getStreamRevision("stream-b"), 0);
+    assert.deepEqual(store.readEvents("stream-b"), []);
   }, { now: () => 10 });
 });
 
@@ -441,8 +654,12 @@ test("commit-before-reply is recovered by messageId after restart and lease chan
       ttlMs: 100,
       now: 5_000,
     });
-    const recovered = restarted.commit({ ...request, lease: nextLease, committedAt: 5_000 });
+    const recovered = restarted.commit(request);
     assert.deepEqual(recovered, { ...committed, recovered: true });
+    assert.deepEqual(
+      restarted.commit({ ...request, lease: nextLease, committedAt: 5_000 }),
+      { ...committed, recovered: true },
+    );
     assert.equal(nextLease.epoch, lease.epoch + 1);
     assert.equal(restarted.getStreamRevision("stream-1"), 1);
     assert.equal(restarted.readEvents("stream-1").length, 1);
@@ -454,7 +671,7 @@ test("commit-before-reply is recovered by messageId after restart and lease chan
 
 test("read-model journal query returns workspace-filtered global monotonic cursors", () => {
   let now = 10;
-  withDatabase((store) => {
+  withDatabase((store, path) => {
     const leaseA = store.acquireLease({ actorId: "window-a", holderId: "broker-a", ttlMs: 1_000 });
     const leaseB = store.acquireLease({ actorId: "window-b", holderId: "broker-b", ttlMs: 1_000 });
     const readEvent = (workspaceId: string, streamId: string, sequence: number, eventId: string) => ({
@@ -521,6 +738,17 @@ test("read-model journal query returns workspace-filtered global monotonic curso
       generation: leaseA.epoch,
       active: true,
     }]);
+
+    const inspection = new DatabaseSync(path);
+    try {
+      inspection.prepare("UPDATE events SET payload_json = ? WHERE event_id = ?")
+        .run(JSON.stringify({ ...first, actor: { ...first.actor, workspaceId: "workspace-b" } }), first.eventId);
+    } finally {
+      inspection.close();
+    }
+    assert.deepEqual(store.readRuntimeReadModelEvents("workspace-b").map((event) => event.cursor), [2]);
+    assert.deepEqual(store.readRuntimeReadModelEvents("workspace-a").map((event) => event.cursor), [3]);
+
     now = 2_000;
     assert.equal(store.readRuntimeReadModelSources("workspace-a")[0]?.active, false);
   }, { now: () => now });

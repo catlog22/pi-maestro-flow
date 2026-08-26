@@ -6,6 +6,7 @@ import * as path from "node:path";
 import {
   RUNTIME_BROKER_PROTOCOL,
   RUNTIME_BROKER_PROTOCOL_VERSION,
+  RUNTIME_BROKER_SCHEMA_VERSION,
   RuntimeBrokerError,
   assertJsonValue,
   type AcquireLeaseRequest,
@@ -18,20 +19,31 @@ import {
   type RuntimeBrokerFailureEnvelope,
   type RuntimeBrokerListStreamsRequest,
   type RuntimeBrokerMethod,
+  type RuntimeBrokerProbeRequest,
+  type RuntimeBrokerProbeResult,
+  type RuntimeBrokerReadEventsPageRequest,
   type RuntimeBrokerRequestEnvelope,
   type RuntimeBrokerSuccessEnvelope,
   type TakeoverLeaseRequest,
 } from "./contracts.ts";
+import {
+  RuntimeBrokerClient,
+  isRuntimeBrokerTransportError,
+} from "./client.ts";
 import { RuntimeBrokerLeaseManager } from "./lease-manager.ts";
 import {
   assertSecureRuntimeBrokerFile,
   ensurePrivateRuntimeBrokerDirectory,
   getRuntimeBrokerDatabasePath,
   getRuntimeBrokerEndpoint,
+  getRuntimeBrokerEndpointWorkspaceId,
   getRuntimeBrokerStateDirectory,
   secureRuntimeBrokerFile,
 } from "./private-state.ts";
-import { RuntimeBrokerSqliteStore } from "./sqlite-store.ts";
+import {
+  RUNTIME_STREAM_EVENTS_PAGE_MAX_BYTES,
+  RuntimeBrokerSqliteStore,
+} from "./sqlite-store.ts";
 
 export const RUNTIME_BROKER_MAX_LINE_BYTES = 1024 * 1024;
 export const RUNTIME_BROKER_MAX_REQUEST_ID_BYTES = 256;
@@ -48,23 +60,39 @@ interface QuarantinedUnixEndpoint {
   owned: boolean;
 }
 
+class RuntimeBrokerDaemonAuthorityError extends Error {
+  constructor(cause: unknown) {
+    super("Runtime broker daemon authority was lost", { cause });
+    this.name = "RuntimeBrokerDaemonAuthorityError";
+  }
+}
+
 export interface RuntimeBrokerServerOptions {
   stateDirectory?: string;
   databasePath?: string;
   maxLineBytes?: number;
+  daemonToken?: string;
+  daemonGeneration?: string;
+  /** Production daemon fence; direct embedded servers may omit it. */
+  assertDaemonAuthority?: () => boolean | void;
 }
 
 export class RuntimeBrokerServer {
   readonly stateDirectory: string;
   readonly databasePath: string;
   readonly endpoint: string;
+  readonly daemonToken: string;
+  readonly daemonGeneration: string;
+  readonly workspaceId: string;
   readonly #maxLineBytes: number;
+  readonly #assertDaemonAuthority?: () => boolean | void;
   readonly #clients = new Set<ClientState>();
   #server?: net.Server;
   #store?: RuntimeBrokerSqliteStore;
   #leases?: RuntimeBrokerLeaseManager;
   #socketIdentity?: { dev: number; ino: number };
   #closing?: Promise<void>;
+  #closed = false;
 
   constructor(options: RuntimeBrokerServerOptions = {}) {
     this.stateDirectory = options.stateDirectory ?? getRuntimeBrokerStateDirectory();
@@ -73,6 +101,12 @@ export class RuntimeBrokerServer {
       throw new Error("Runtime broker database must be inside its private state directory");
     }
     this.endpoint = getRuntimeBrokerEndpoint(this.stateDirectory);
+    this.workspaceId = getRuntimeBrokerEndpointWorkspaceId(this.endpoint);
+    this.daemonToken = options.daemonToken ?? randomUUID();
+    this.daemonGeneration = options.daemonGeneration ?? randomUUID();
+    assertDaemonIdentityPart(this.daemonToken, "token");
+    assertDaemonIdentityPart(this.daemonGeneration, "generation");
+    this.#assertDaemonAuthority = options.assertDaemonAuthority;
     this.#maxLineBytes = options.maxLineBytes ?? RUNTIME_BROKER_MAX_LINE_BYTES;
     if (!Number.isSafeInteger(this.#maxLineBytes) || this.#maxLineBytes < 1024) {
       throw new Error("Runtime broker line limit must be at least 1024 bytes");
@@ -80,6 +114,7 @@ export class RuntimeBrokerServer {
   }
 
   async listen(): Promise<void> {
+    if (this.#closed) throw new Error("Runtime broker server is closed");
     if (this.#server || this.#store) throw new Error("Runtime broker server is already listening");
     ensurePrivateRuntimeBrokerDirectory(this.stateDirectory);
     assertSecureRuntimeBrokerFile(this.databasePath, "database");
@@ -87,15 +122,15 @@ export class RuntimeBrokerServer {
     assertSecureRuntimeBrokerFile(`${this.databasePath}-shm`, "shared memory");
     if (process.platform !== "win32") await removeStaleUnixSocket(this.endpoint);
 
-    const store = new RuntimeBrokerSqliteStore(this.databasePath);
-    this.#store = store;
-    this.#leases = new RuntimeBrokerLeaseManager(store);
-    secureRuntimeBrokerFile(this.databasePath);
-    secureSqliteCompanionFiles(this.databasePath);
-
-    const server = net.createServer((socket) => this.#accept(socket));
-    this.#server = server;
     try {
+      const store = new RuntimeBrokerSqliteStore(this.databasePath);
+      this.#store = store;
+      this.#leases = new RuntimeBrokerLeaseManager(store);
+      secureRuntimeBrokerFile(this.databasePath);
+      secureSqliteCompanionFiles(this.databasePath);
+
+      const server = net.createServer((socket) => this.#accept(socket));
+      this.#server = server;
       await new Promise<void>((resolve, reject) => {
         const onError = (error: Error) => {
           server.off("listening", onListening);
@@ -116,44 +151,64 @@ export class RuntimeBrokerServer {
         this.#socketIdentity = { dev: stat.dev, ino: stat.ino };
       }
     } catch (error) {
-      await this.close();
+      try {
+        await this.close();
+      } catch (cleanupError) {
+        throw new AggregateError([error, cleanupError], "Runtime broker startup and cleanup failed");
+      }
       throw error;
     }
   }
 
   close(): Promise<void> {
     if (this.#closing) return this.#closing;
+    this.#closed = true;
     this.#closing = this.#close();
     return this.#closing;
   }
 
   async #close(): Promise<void> {
-    for (const client of this.#clients) this.#disconnect(client);
-    this.#clients.clear();
-    const server = this.#server;
-    this.#server = undefined;
-    const store = this.#store;
-    this.#store = undefined;
-    const quarantinedEndpoint = this.#quarantineCurrentUnixEndpoint();
-    try {
-      if (server) {
-        await new Promise<void>((resolve) => {
-          try {
-            server.close(() => resolve());
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code === "ERR_SERVER_NOT_RUNNING") resolve();
-            else throw error;
-          }
-        });
-      }
-    } finally {
+    const errors: unknown[] = [];
+    for (const client of this.#clients) {
       try {
-        this.#finishUnixEndpointCleanup(quarantinedEndpoint);
-      } finally {
-        this.#leases = undefined;
-        store?.close();
+        this.#disconnect(client);
+      } catch (error) {
+        errors.push(error);
       }
     }
+    this.#clients.clear();
+    const server = this.#server;
+    const store = this.#store;
+    this.#server = undefined;
+    this.#store = undefined;
+    this.#leases = undefined;
+
+    let quarantinedEndpoint: QuarantinedUnixEndpoint | undefined;
+    try {
+      quarantinedEndpoint = this.#quarantineCurrentUnixEndpoint();
+    } catch (error) {
+      errors.push(error);
+    }
+    if (server) {
+      try {
+        await closeServer(server);
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    try {
+      this.#finishUnixEndpointCleanup(quarantinedEndpoint);
+    } catch (error) {
+      errors.push(error);
+    } finally {
+      this.#socketIdentity = undefined;
+    }
+    try {
+      store?.close();
+    } catch (error) {
+      errors.push(error);
+    }
+    if (errors.length > 0) throw new AggregateError(errors, "Runtime broker server shutdown failed");
   }
 
   #accept(socket: net.Socket): void {
@@ -183,6 +238,7 @@ export class RuntimeBrokerServer {
   }
 
   #handleLine(client: ClientState, line: string): void {
+    if (client.closed) return;
     let request: RuntimeBrokerRequestEnvelope;
     try {
       request = parseRequest(line);
@@ -191,7 +247,13 @@ export class RuntimeBrokerServer {
       return;
     }
     try {
-      const result = this.#dispatch(request.method, request.params);
+      this.#assertCurrentDaemonAuthority();
+      let result: JsonValue;
+      try {
+        result = this.#dispatch(request.requestId, request.method, request.params);
+      } finally {
+        this.#assertCurrentDaemonAuthority();
+      }
       this.#send(client, {
         protocol: RUNTIME_BROKER_PROTOCOL,
         version: RUNTIME_BROKER_PROTOCOL_VERSION,
@@ -200,12 +262,27 @@ export class RuntimeBrokerServer {
         result,
       });
     } catch (error) {
+      if (error instanceof RuntimeBrokerDaemonAuthorityError) {
+        this.#rejectAndClose(client, request.requestId, invalidRequest(error));
+        return;
+      }
       const brokerError = error instanceof RuntimeBrokerError ? error : invalidRequest(error);
       this.#sendFailure(client, request.requestId, brokerError);
     }
   }
 
-  #dispatch(method: RuntimeBrokerMethod, params: JsonValue): JsonValue {
+  #assertCurrentDaemonAuthority(): void {
+    if (!this.#assertDaemonAuthority) return;
+    try {
+      if (this.#assertDaemonAuthority() === false) {
+        throw new Error("Runtime broker daemon authority check failed");
+      }
+    } catch (error) {
+      throw new RuntimeBrokerDaemonAuthorityError(error);
+    }
+  }
+
+  #dispatch(requestId: string, method: RuntimeBrokerMethod, params: JsonValue): JsonValue {
     if (!params || typeof params !== "object" || Array.isArray(params)) {
       throw new RuntimeBrokerError("invalid_request", "params must be an object", { field: "params" });
     }
@@ -213,22 +290,61 @@ export class RuntimeBrokerServer {
     const leases = this.#leases;
     if (!store || !leases) throw new Error("Runtime broker server is not listening");
     switch (method) {
+      case "broker.probe": {
+        const request = params as unknown as RuntimeBrokerProbeRequest;
+        if (!hasExactKeys(params as unknown as Record<string, unknown>, ["challenge"])
+          || typeof request.challenge !== "string"
+          || request.challenge.length === 0
+          || Buffer.byteLength(request.challenge, "utf8") > RUNTIME_BROKER_MAX_REQUEST_ID_BYTES
+          || request.challenge.includes("\0")) {
+          throw new RuntimeBrokerError("invalid_request", "broker probe challenge must be bounded", { field: "challenge" });
+        }
+        return {
+          protocol: RUNTIME_BROKER_PROTOCOL,
+          version: RUNTIME_BROKER_PROTOCOL_VERSION,
+          schemaVersion: RUNTIME_BROKER_SCHEMA_VERSION,
+          workspaceId: this.workspaceId,
+          daemonToken: this.daemonToken,
+          generation: this.daemonGeneration,
+          readiness: "ready",
+          challenge: request.challenge,
+        } satisfies RuntimeBrokerProbeResult as unknown as JsonValue;
+      }
       case "commit": return store.commit(params as unknown as RuntimeBrokerCommitRequest) as unknown as JsonValue;
-      case "lease.acquire": return leases.acquire(params as unknown as AcquireLeaseRequest) as unknown as JsonValue;
-      case "lease.heartbeat": return leases.heartbeat(params as unknown as HeartbeatLeaseRequest) as unknown as JsonValue;
-      case "lease.compare-and-swap": return leases.compareAndSwap(params as unknown as CompareAndSwapLeaseRequest) as unknown as JsonValue;
-      case "lease.takeover": return leases.takeover(params as unknown as TakeoverLeaseRequest) as unknown as JsonValue;
+      case "lease.acquire": return leases.acquire(params as unknown as AcquireLeaseRequest, requestId) as unknown as JsonValue;
+      case "lease.heartbeat": return leases.heartbeat(params as unknown as HeartbeatLeaseRequest, requestId) as unknown as JsonValue;
+      case "lease.compare-and-swap": return leases.compareAndSwap(params as unknown as CompareAndSwapLeaseRequest, requestId) as unknown as JsonValue;
+      case "lease.takeover": return leases.takeover(params as unknown as TakeoverLeaseRequest, requestId) as unknown as JsonValue;
       case "lease.release":
-        leases.release(params as unknown as ReleaseLeaseRequest);
+        leases.release(params as unknown as ReleaseLeaseRequest, requestId);
         return null;
       case "stream.revision": return store.getStreamRevision((params as { streamId?: string }).streamId ?? "");
       case "stream.events": {
         const request = params as { streamId?: string; afterRevision?: number; actorId?: string; lease?: LeaseCredential };
-        return store.readAuthorizedEvents(
-          request.streamId ?? "",
-          request.afterRevision ?? 0,
-          { actorId: request.actorId ?? "", lease: request.lease as LeaseCredential },
-        ) as unknown as JsonValue;
+        const streamId = request.streamId ?? "";
+        const events = store.readAuthorizedEvents(streamId, request.afterRevision ?? 0, {
+          actorId: request.actorId ?? "",
+          lease: request.lease as LeaseCredential,
+        });
+        const encoded = `${JSON.stringify({
+          protocol: RUNTIME_BROKER_PROTOCOL,
+          version: RUNTIME_BROKER_PROTOCOL_VERSION,
+          requestId,
+          ok: true,
+          result: events,
+        })}\n`;
+        if (Buffer.byteLength(encoded, "utf8") > this.#maxLineBytes) {
+          throw new RuntimeBrokerError(
+            "invalid_request",
+            "stream.events requires pagination; use stream.events.page",
+            { requiredMethod: "stream.events.page" },
+          );
+        }
+        return events as unknown as JsonValue;
+      }
+      case "stream.events.page": {
+        const request = params as unknown as RuntimeBrokerReadEventsPageRequest;
+        return store.readAuthorizedEventsPage(request, this.#streamEventsPageByteBudget()) as unknown as JsonValue;
       }
       case "stream.list": return store.listStreams(params as unknown as RuntimeBrokerListStreamsRequest) as unknown as JsonValue;
       case "read-model.events": {
@@ -248,6 +364,10 @@ export class RuntimeBrokerServer {
         ) as unknown as JsonValue;
       }
     }
+  }
+
+  #streamEventsPageByteBudget(): number {
+    return Math.min(RUNTIME_STREAM_EVENTS_PAGE_MAX_BYTES, Math.max(256, this.#maxLineBytes - 4 * 1024));
   }
 
   #send(client: ClientState, envelope: RuntimeBrokerSuccessEnvelope | RuntimeBrokerFailureEnvelope): void {
@@ -323,27 +443,17 @@ export async function removeStaleUnixSocket(endpoint: string): Promise<void> {
     throw new Error(`Refusing to replace non-socket runtime broker endpoint: ${endpoint}`);
   }
   const staleIdentity = { dev: stat.dev, ino: stat.ino };
-  const live = await new Promise<boolean>((resolve, reject) => {
-    const socket = net.createConnection(endpoint);
-    const timer = setTimeout(() => finish(new Error("Timed out probing existing runtime broker socket")), 500);
-    timer.unref?.();
-    let settled = false;
-    const finish = (error?: Error, value?: boolean) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      socket.destroy();
-      socket.removeAllListeners();
-      if (error) reject(error);
-      else resolve(value!);
-    };
-    socket.once("connect", () => finish(undefined, true));
-    socket.once("error", (error: NodeJS.ErrnoException) => {
-      if (error.code === "ECONNREFUSED" || error.code === "ENOENT") finish(undefined, false);
-      else finish(error);
-    });
-  });
-  if (live) throw new Error("Runtime broker daemon is already running");
+  let client: RuntimeBrokerClient | undefined;
+  try {
+    client = await RuntimeBrokerClient.connect({ endpoint, timeoutMs: 500 });
+    throw new Error(
+      `Runtime broker daemon is already running (generation ${client.readiness.generation})`,
+    );
+  } catch (error) {
+    if (!isRuntimeBrokerTransportError(error)) throw error;
+  } finally {
+    await client?.close();
+  }
   let quarantined: { path: string; identity: { dev: number; ino: number } };
   try {
     quarantined = quarantineUnixPath(
@@ -485,7 +595,8 @@ function hasExactKeys(record: Record<string, unknown>, expected: readonly string
 }
 
 function isRuntimeBrokerMethod(value: unknown): value is RuntimeBrokerMethod {
-  return value === "commit"
+  return value === "broker.probe"
+    || value === "commit"
     || value === "lease.acquire"
     || value === "lease.heartbeat"
     || value === "lease.compare-and-swap"
@@ -493,6 +604,7 @@ function isRuntimeBrokerMethod(value: unknown): value is RuntimeBrokerMethod {
     || value === "lease.release"
     || value === "stream.revision"
     || value === "stream.events"
+    || value === "stream.events.page"
     || value === "stream.list"
     || value === "read-model.events"
     || value === "read-model.sources";
@@ -522,6 +634,26 @@ function failureEnvelope(requestId: string, error: RuntimeBrokerError): RuntimeB
     ok: false,
     error: error.toJSON(),
   };
+}
+
+async function closeServer(server: net.Server): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    try {
+      server.close((error?: Error) => {
+        if (error && (error as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING") reject(error);
+        else resolve();
+      });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ERR_SERVER_NOT_RUNNING") resolve();
+      else reject(error);
+    }
+  });
+}
+
+function assertDaemonIdentityPart(value: string, label: string): void {
+  if (!value || Buffer.byteLength(value, "utf8") > 256 || value.includes("\0")) {
+    throw new Error(`Runtime broker daemon ${label} must be a bounded non-empty string`);
+  }
 }
 
 function secureSqliteCompanionFiles(databasePath: string): void {

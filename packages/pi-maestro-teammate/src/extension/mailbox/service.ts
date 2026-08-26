@@ -9,7 +9,7 @@ import { EventEmitter } from "node:events";
 import { join } from "node:path";
 import { MailboxConsumer, type MailboxDispatchDisposition } from "./consumer.ts";
 import { MailboxFileStore, createMailboxPaths, ensureMailboxDirectories } from "./file-store.ts";
-import { MailboxGC, QuotaAdmission } from "./gc.ts";
+import { MailboxGC, QuotaAdmission, type GCResult } from "./gc.ts";
 import { type MailboxAuthority, type MailboxEnqueueRequest, MailboxRouter } from "./router.ts";
 import type { MessageProvenanceV1 } from "../../shared/types.ts";
 import {
@@ -55,6 +55,8 @@ export interface MailboxServiceOptions {
   onDispatch: (envelope: MailboxEnvelope) => Promise<MailboxDispatchDisposition | void>;
   /** Poll interval for the consumer. */
   pollMs?: number;
+  /** Host reconciliation must settle before enqueues or consumer activation. */
+  startupBarrier?: Promise<void>;
   now?: () => number;
 }
 
@@ -73,10 +75,13 @@ export class MailboxService extends EventEmitter {
   readonly #teamId: string;
   readonly #ownerId: string;
   readonly #recipientCorrelationId: string;
+  readonly #startupBarrier: Promise<void> | undefined;
 
   #started = false;
   #stopped = true;
   #startPromise: Promise<void> | undefined;
+  #gcClosing = false;
+  readonly #gcSweeps = new Set<Promise<GCResult>>();
 
   constructor(options: MailboxServiceOptions) {
     super();
@@ -101,6 +106,8 @@ export class MailboxService extends EventEmitter {
     this.consumer = new MailboxConsumer({
       store: this.store,
       router: this.router,
+      ownerId: options.ownerId,
+      sessionGeneration: options.authority.currentGeneration(),
       recipientCorrelationId: options.recipientCorrelationId,
       workspaceId: options.workspaceId,
       commitApplied: options.commitApplied,
@@ -108,12 +115,23 @@ export class MailboxService extends EventEmitter {
       pollMs: options.pollMs,
       now: options.now,
     });
-    this.gc = new MailboxGC({ store: this.store, now: options.now });
+    const mutationAuthority = {
+      owner: this.consumer.ownerFence,
+      isCurrent: () => this.consumer.ownsMutationAuthority()
+        && options.authority.currentGeneration() === this.consumer.ownerFence.sessionGeneration,
+    };
+    this.gc = new MailboxGC({
+      store: this.store,
+      now: options.now,
+      canMutate: mutationAuthority.isCurrent,
+      mutationAuthority,
+    });
 
     this.#workspaceId = options.workspaceId;
     this.#teamId = options.teamId;
     this.#ownerId = options.ownerId;
     this.#recipientCorrelationId = options.recipientCorrelationId;
+    this.#startupBarrier = options.startupBarrier;
 
     // Forward consumer events (use "dispatch-error" to avoid Node's special "error" semantics)
     this.consumer.on("dispatch", (event) => this.emit("dispatch", event));
@@ -127,6 +145,8 @@ export class MailboxService extends EventEmitter {
    * shadow contract is "enqueue + validate but NEVER consume/inject".
    */
   async start(startConsumer = true): Promise<void> {
+    if (startConsumer && this.#startupBarrier) await this.#startupBarrier;
+    this.#gcClosing = false;
     await this.#runStart(async () => {
       if (!startConsumer) return;
       // Crash recovery: replay accepted-without-ack back to ready before polling.
@@ -138,6 +158,8 @@ export class MailboxService extends EventEmitter {
 
   /** Start just the consumer (rollout upgrade to authoritative). */
   async startConsumer(): Promise<void> {
+    if (this.#startupBarrier) await this.#startupBarrier;
+    this.#gcClosing = false;
     await this.#runStart(async () => {
       await this.consumer.replayAcceptedToReady();
       this.consumer.start();
@@ -171,6 +193,7 @@ export class MailboxService extends EventEmitter {
     this.#stopped = false;
     const promise = (async () => {
       await ensureMailboxDirectories(this.paths);
+      await this.store.recover();
       if (this.#stopped) return;
       await body();
     })();
@@ -184,10 +207,18 @@ export class MailboxService extends EventEmitter {
 
   async #stopInternal(): Promise<void> {
     this.#stopped = true;
+    this.#gcClosing = true;
     if (this.#startPromise) await this.#startPromise.catch(() => undefined);
+    await this.#drainGC();
     if (!this.#started) return;
     await this.consumer.stop();
     this.#started = false;
+  }
+
+  async #drainGC(): Promise<void> {
+    while (this.#gcSweeps.size > 0) {
+      await Promise.allSettled([...this.#gcSweeps]);
+    }
   }
 
   /**
@@ -205,6 +236,7 @@ export class MailboxService extends EventEmitter {
     requestId?: string;
     correlationId?: string;
   }): Promise<MailboxEnqueueResult> {
+    if (this.#startupBarrier) await this.#startupBarrier;
     return this.router.enqueue({
       workspaceId: this.#workspaceId,
       teamId: this.#teamId,
@@ -220,9 +252,16 @@ export class MailboxService extends EventEmitter {
     return this.consumer.acknowledge(messageId);
   }
 
-  /** Run garbage collection. */
-  async runGC(): Promise<{ removed: number; errors: string[] }> {
-    return this.gc.run();
+  /** Run garbage collection. Every admitted sweep is drained by stop(). */
+  async runGC(): Promise<GCResult> {
+    if (this.#gcClosing) return { removed: 0, errors: [] };
+    const sweep = this.gc.run();
+    this.#gcSweeps.add(sweep);
+    sweep.then(
+      () => this.#gcSweeps.delete(sweep),
+      () => this.#gcSweeps.delete(sweep),
+    );
+    return sweep;
   }
 
   /** Check if there is pending mail for the recipient (blocks eviction). */

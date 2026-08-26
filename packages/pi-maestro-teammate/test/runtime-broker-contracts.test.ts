@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   RUNTIME_BROKER_PROTOCOL,
   RUNTIME_BROKER_PROTOCOL_VERSION,
+  RUNTIME_BROKER_SCHEMA_VERSION,
   RuntimeBrokerError,
   assertJsonValue,
   assertNonNegativeInteger,
@@ -20,6 +21,15 @@ test("runtime broker contracts are driver-neutral JSONL envelopes", () => {
   assert.deepEqual(JSON.parse(JSON.stringify(request)), request);
   assert.equal(RUNTIME_BROKER_PROTOCOL, "pi.runtime-broker");
   assert.equal(RUNTIME_BROKER_PROTOCOL_VERSION, 1);
+  assert.equal(RUNTIME_BROKER_SCHEMA_VERSION, 3);
+  const pageRequest: RuntimeBrokerRequestEnvelope = {
+    protocol: RUNTIME_BROKER_PROTOCOL,
+    version: RUNTIME_BROKER_PROTOCOL_VERSION,
+    requestId: "request-page",
+    method: "stream.events.page",
+    params: { streamId: "stream", afterRevision: 0, limit: 128 },
+  };
+  assert.equal(pageRequest.method, "stream.events.page");
 });
 
 test("runtime broker errors have stable serializable codes", () => {

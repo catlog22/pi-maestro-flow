@@ -727,6 +727,21 @@ test("child Pi arguments honor prompt mode and resource inheritance", () => {
   assert.equal(appendArgs.includes("--system-prompt"), false);
   assert.equal(appendArgs.includes("--no-context-files"), false);
   assert.equal(appendArgs.includes("--no-skills"), false);
+
+  const forkArgs = buildPiArgs(
+    agentConfig({ systemPromptMode: "replace" }),
+    { agent: "test-agent", context: "fork" },
+    "prompt.md",
+    undefined,
+    undefined,
+    "snapshot.jsonl",
+  );
+  assert.equal(forkArgs[forkArgs.indexOf("--fork") + 1], "snapshot.jsonl");
+  assert.deepEqual(
+    forkArgs.filter((arg) => arg === "--system-prompt" || arg === "--append-system-prompt"),
+    ["--system-prompt"],
+    "forking must not duplicate the child role system prompt",
+  );
 });
 
 test("child Pi arguments hide legacy observation tools unless explicitly enabled", () => {
@@ -969,6 +984,8 @@ test("controlled terminal child receives cross-window tool contracts", () => {
     assert.match(String(tools.get("teammate-send")?.description), /cross-session target/);
     assert.match(String(tools.get("teammate-list")?.description), /cross-session windows/);
     assert.match(String(tools.get("observe")?.description), /kind="workspace"/);
+    assert.match(String(tools.get("observe")?.description), /"diagnose": one-shot canonical runtime diagnosis/);
+    assert.match(String(tools.get("observe")?.promptGuidelines), /workspace projection does not add diagnosis/);
   } finally {
     if (previousChild === undefined) delete process.env.PI_TEAMMATE_CHILD;
     else process.env.PI_TEAMMATE_CHILD = previousChild;

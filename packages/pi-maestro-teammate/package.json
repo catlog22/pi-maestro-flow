@@ -120,6 +120,10 @@
       "types": "./types/public/v1/workspace-completion.d.ts",
       "default": "./src/public/v1/workspace-completion.ts"
     },
+    "./v1/todo-context": {
+      "types": "./types/public/v1/todo-context.d.ts",
+      "default": "./src/public/v1/todo-context.ts"
+    },
     "./v1/types": {
       "types": "./types/public/v1/types.d.ts",
       "default": "./src/public/v1/types.ts"

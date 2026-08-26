@@ -46,6 +46,17 @@ export interface RuntimeV2JournalListOptions {
   limit: number;
 }
 
+export class RuntimeV2JournalCorruptionError extends Error {
+  constructor(
+    readonly streamId: string,
+    readonly directory: string,
+    options?: { cause?: unknown },
+  ) {
+    super(`Runtime V2 journal stream is quarantined as corrupt: ${streamId}`, options);
+    this.name = "RuntimeV2JournalCorruptionError";
+  }
+}
+
 function isMissing(error: unknown): boolean {
   return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT";
 }
@@ -148,13 +159,13 @@ export class RuntimeV2ShadowJournal {
     const streamId = typeof draft.streamId === "string" ? draft.streamId : "";
     if (!streamId) throw new Error("Runtime V2 event streamId is required");
     const directory = this.#streamDirectory(streamId);
+    this.#throwIfQuarantined(streamId, directory);
     let stream: RuntimeV2JournalStream;
     if (fs.existsSync(directory)) {
       try {
         stream = this.#load(directory, streamId, true);
       } catch (error) {
-        this.#quarantine(directory, error);
-        throw error;
+        throw this.#quarantine(streamId, directory, error);
       }
     } else {
       ensureDirectory(directory);
@@ -218,12 +229,12 @@ export class RuntimeV2ShadowJournal {
 
   read(streamId: string): RuntimeV2JournalStream | undefined {
     const directory = this.#streamDirectory(streamId);
+    this.#throwIfQuarantined(streamId, directory);
     if (!fs.existsSync(directory)) return undefined;
     try {
       return this.#load(directory, streamId, true);
     } catch (error) {
-      this.#quarantine(directory, error);
-      return undefined;
+      throw this.#quarantine(streamId, directory, error);
     }
   }
 
@@ -240,6 +251,7 @@ export class RuntimeV2ShadowJournal {
     if (afterStreamId.includes("\0") || !Number.isSafeInteger(options.limit) || options.limit < 1 || options.limit > 512) {
       throw new Error("Invalid Runtime V2 journal stream page");
     }
+    this.#throwOnQuarantinedList(options.prefix);
     const streamIds: string[] = [];
     const directory = fs.opendirSync(this.#streamsDirectory);
     let scanned = 0;
@@ -249,16 +261,20 @@ export class RuntimeV2ShadowJournal {
         if (scanned > RUNTIME_V2_MAX_EVENTS) throw new Error("Runtime V2 journal stream listing limit exceeded");
         if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
         const streamDirectory = path.join(this.#streamsDirectory, entry.name);
+        let streamId = `corrupt:${entry.name}`;
         try {
           const metadataPath = path.join(streamDirectory, "metadata.json");
           const stat = fs.lstatSync(metadataPath);
-          if (!stat.isFile() || stat.isSymbolicLink() || stat.size > this.#maxLineBytes) continue;
+          if (!stat.isFile() || stat.isSymbolicLink() || stat.size > this.#maxLineBytes) {
+            throw new Error("Invalid Runtime V2 metadata file");
+          }
           const metadata = parseMetadata(JSON.parse(fs.readFileSync(metadataPath, "utf8")));
+          streamId = metadata.streamId;
           if (metadata.streamId <= afterStreamId || !metadata.streamId.startsWith(options.prefix)) continue;
           const stream = this.#load(streamDirectory, metadata.streamId, true);
           if (stream.metadata.workspaceId === options.workspaceId) streamIds.push(metadata.streamId);
         } catch (error) {
-          this.#quarantine(streamDirectory, error);
+          throw this.#quarantine(streamId, streamDirectory, error);
         }
       }
     } finally {
@@ -330,17 +346,96 @@ export class RuntimeV2ShadowJournal {
     return { metadata: reconciled, events };
   }
 
-  #quarantine(directory: string, error: unknown): void {
-    let stat: fs.Stats;
-    try { stat = fs.lstatSync(directory); } catch (statError) {
-      if (isMissing(statError)) return;
-      throw statError;
+  #throwOnQuarantinedList(prefix: string): void {
+    const directory = fs.opendirSync(this.#corruptDirectory);
+    let scanned = 0;
+    try {
+      for (let entry = directory.readSync(); entry; entry = directory.readSync()) {
+        if (!entry.name.endsWith(".json")) continue;
+        scanned += 1;
+        if (scanned > RUNTIME_V2_MAX_EVENTS) throw new Error("Runtime V2 corruption marker listing limit exceeded");
+        const marker = path.join(this.#corruptDirectory, entry.name);
+        const streamDirectory = path.join(this.#streamsDirectory, entry.name.slice(0, -".json".length));
+        try {
+          const stat = fs.lstatSync(marker);
+          if (!stat.isFile() || stat.isSymbolicLink() || stat.size > this.#maxLineBytes) {
+            throw new Error("Invalid Runtime V2 corruption marker");
+          }
+          const value = JSON.parse(fs.readFileSync(marker, "utf8")) as { streamId?: unknown };
+          if (typeof value.streamId !== "string" || !value.streamId) {
+            throw new Error("Invalid Runtime V2 corruption marker identity");
+          }
+          if (entry.name !== `${storageKey(value.streamId)}.json`) {
+            throw new Error("Runtime V2 corruption marker filename identity mismatch");
+          }
+          if (value.streamId.startsWith("corrupt:") || value.streamId.startsWith(prefix)) {
+            throw new RuntimeV2JournalCorruptionError(value.streamId, streamDirectory);
+          }
+        } catch (error) {
+          if (error instanceof RuntimeV2JournalCorruptionError) throw error;
+          throw new RuntimeV2JournalCorruptionError(`corrupt:${entry.name}`, streamDirectory, { cause: error });
+        }
+      }
+    } finally {
+      directory.closeSync();
     }
-    if (!stat.isDirectory() || stat.isSymbolicLink()) return;
-    const destination = path.join(this.#corruptDirectory, `${path.basename(directory)}.${Date.now()}.${randomUUID()}`);
-    fs.renameSync(directory, destination);
-    fsyncDirectory(this.#streamsDirectory);
-    fsyncDirectory(this.#corruptDirectory);
-    try { this.#onQuarantine?.(directory, error); } catch {}
   }
+
+  #throwIfQuarantined(streamId: string, directory: string): void {
+    const marker = this.#quarantineMarker(directory);
+    let stat: fs.Stats;
+    try {
+      stat = fs.lstatSync(marker);
+    } catch (error) {
+      if (isMissing(error)) return;
+      throw error;
+    }
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > this.#maxLineBytes) {
+      throw new RuntimeV2JournalCorruptionError(streamId, directory, {
+        cause: new Error("Invalid Runtime V2 corruption marker"),
+      });
+    }
+    try {
+      const value = JSON.parse(fs.readFileSync(marker, "utf8")) as { streamId?: unknown };
+      if (value.streamId !== streamId) throw new Error("Runtime V2 corruption marker identity mismatch");
+    } catch (error) {
+      throw new RuntimeV2JournalCorruptionError(streamId, directory, { cause: error });
+    }
+    throw new RuntimeV2JournalCorruptionError(streamId, directory);
+  }
+
+  #quarantine(streamId: string, directory: string, error: unknown): RuntimeV2JournalCorruptionError {
+    const marker = this.#quarantineMarker(directory);
+    try {
+      atomicWriteJson(marker, {
+        version: RUNTIME_V2_VERSION,
+        revision: RUNTIME_V2_REVISION,
+        streamId,
+        quarantinedAt: Date.now(),
+      });
+      let stat: fs.Stats;
+      try {
+        stat = fs.lstatSync(directory);
+      } catch (statError) {
+        if (!isMissing(statError)) throw statError;
+        return new RuntimeV2JournalCorruptionError(streamId, directory, { cause: error });
+      }
+      if (!stat.isDirectory() || stat.isSymbolicLink()) {
+        return new RuntimeV2JournalCorruptionError(streamId, directory, { cause: error });
+      }
+      const destination = path.join(this.#corruptDirectory, `${path.basename(directory)}.${Date.now()}.${randomUUID()}`);
+      fs.renameSync(directory, destination);
+      fsyncDirectory(this.#streamsDirectory);
+      fsyncDirectory(this.#corruptDirectory);
+      try { this.#onQuarantine?.(directory, error); } catch {}
+      return new RuntimeV2JournalCorruptionError(streamId, destination, { cause: error });
+    } catch (quarantineError) {
+      return new RuntimeV2JournalCorruptionError(streamId, directory, { cause: quarantineError });
+    }
+  }
+
+  #quarantineMarker(directory: string): string {
+    return path.join(this.#corruptDirectory, `${path.basename(directory)}.json`);
+  }
+
 }

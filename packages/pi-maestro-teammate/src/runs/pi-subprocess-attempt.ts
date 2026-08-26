@@ -216,6 +216,12 @@ interface AttemptState {
   lastAssistantStopReason?: string;
   /** A length-truncated turn is waiting for child-local compaction and continuation. */
   outputLimitRecoveryPending: boolean;
+  /** A Flow synthetic compaction interruption must continue before this turn can settle. */
+  compactionRecovery?: {
+    recoveryId: string;
+    generation: number;
+    phase: "pending" | "continuation" | "completed";
+  };
 
   // --- Attempt-scoped: survive turns for the lifetime of a wakeable child. ---
   resolvedModel: string;
@@ -282,6 +288,7 @@ interface AttemptTimers {
   firstActivity?: ReturnType<typeof setTimeout>;
   resultReadyGrace?: ReturnType<typeof setTimeout>;
   outputLimitRecovery?: ReturnType<typeof setTimeout>;
+  compactionRecovery?: ReturnType<typeof setTimeout>;
   interruptingSteer?: ReturnType<typeof setTimeout>;
   structuredOutputRecovery?: ReturnType<typeof setTimeout>;
   toolHeartbeat?: ReturnType<typeof setInterval>;
@@ -332,6 +339,7 @@ function buildChildSpawnEnv(
   options: RunTeammateOptions,
   schemaFile: string | undefined,
   outputFile: string | undefined,
+  forkSessionFile: string | undefined,
 ): Record<string, string | undefined> {
   const spawnEnv: Record<string, string | undefined> = {
     ...process.env,
@@ -347,6 +355,7 @@ function buildChildSpawnEnv(
     // agents from inheriting the main process's long retention.
     PI_CACHE_RETENTION: resolveAgentCacheRetention(process.env),
     ...options.childEnvironment,
+    PI_TEAMMATE_CONTEXT_MODE: forkSessionFile ? "fork" : undefined,
   };
   if (options.maxDispatchDepth !== undefined) {
     spawnEnv.PI_TEAMMATE_MAX_DISPATCH_DEPTH = String(options.maxDispatchDepth);
@@ -361,9 +370,35 @@ function buildChildSpawnEnv(
   return spawnEnv;
 }
 
-/** Child IPC events that only publish identity and cannot cause external work. */
+/** Child IPC events that only publish identity or in-process recovery state. */
 function isReplayNeutralChildIpcMessage(message: Record<string, unknown>): boolean {
-  return message.type === "teammate_session_ready";
+  return message.type === "teammate_session_ready"
+    || message.type === "teammate_compaction_state";
+}
+
+interface ChildCompactionStateEvent {
+  type: "teammate_compaction_state";
+  recoveryId: string;
+  generation: number;
+  phase: "pending" | "continuation" | "completed" | "failed";
+  reason?: string;
+}
+
+function childCompactionStateEvent(message: Record<string, unknown>): ChildCompactionStateEvent | undefined {
+  if (message.type !== "teammate_compaction_state"
+    || typeof message.recoveryId !== "string"
+    || !Number.isSafeInteger(message.generation)
+    || (message.phase !== "pending"
+      && message.phase !== "continuation"
+      && message.phase !== "completed"
+      && message.phase !== "failed")) return undefined;
+  return {
+    type: "teammate_compaction_state",
+    recoveryId: message.recoveryId,
+    generation: message.generation as number,
+    phase: message.phase,
+    ...(typeof message.reason === "string" ? { reason: message.reason } : {}),
+  };
 }
 
 /** Proxy requests and lifecycle events raised by extensions inside the child. */
@@ -460,6 +495,7 @@ export async function runSingleAttempt(
     turnLifecycleSettled: false,
     lastAssistantStopReason: undefined,
     outputLimitRecoveryPending: false,
+    compactionRecovery: undefined,
     structuredOutputAttemptFailed: false,
     resolvedModel: modelOverride ?? params.model ?? agentConfig.model ?? "unknown",
     completedInputTokens: 0,
@@ -651,9 +687,26 @@ export async function runSingleAttempt(
      * turn strands with no deadline armed.
      */
     let steerSettlementSwallowed = false;
+    let compactionSettlementSwallowed = false;
+    let latestCompactionGeneration = -1;
+    const closedCompactionRecoveries = new Set<string>();
+    const compactionRecoveryKey = (recovery: { recoveryId: string; generation: number }): string =>
+      `${recovery.generation}:${recovery.recoveryId}`;
+    const closeActiveCompactionRecovery = (): void => {
+      if (state.compactionRecovery) {
+        closedCompactionRecoveries.add(compactionRecoveryKey(state.compactionRecovery));
+      }
+    };
     const interruptingSteerTimeoutMs = options.interruptingSteerTimeoutMs ?? INTERRUPTING_STEER_TIMEOUT_MS;
 
-    const spawnEnv = buildChildSpawnEnv(correlationId, replyTo, options, schemaFile, outputFile);
+    const spawnEnv = buildChildSpawnEnv(
+      correlationId,
+      replyTo,
+      options,
+      schemaFile,
+      outputFile,
+      forkSessionFile,
+    );
 
     let useIpc = false;
     try {
@@ -732,6 +785,11 @@ export async function runSingleAttempt(
     if (useIpc) {
       bindChildIpcRelay(child, correlationId, options, (message) => {
         state.receivedFirstActivity = true;
+        const compactionEvent = childCompactionStateEvent(message);
+        if (compactionEvent) {
+          handleChildCompactionState(compactionEvent);
+          return;
+        }
         if (!isReplayNeutralChildIpcMessage(message)) state.externalReplayRisk = true;
       });
     }
@@ -755,6 +813,7 @@ export async function runSingleAttempt(
       if (timers.firstActivity) clearTimeout(timers.firstActivity);
       if (timers.resultReadyGrace) clearTimeout(timers.resultReadyGrace);
       if (timers.outputLimitRecovery) clearTimeout(timers.outputLimitRecovery);
+      if (timers.compactionRecovery) clearTimeout(timers.compactionRecovery);
       if (timers.interruptingSteer) clearTimeout(timers.interruptingSteer);
       if (timers.structuredOutputRecovery) clearTimeout(timers.structuredOutputRecovery);
       if (timers.modelSwitch) clearTimeout(timers.modelSwitch);
@@ -1065,6 +1124,9 @@ export async function runSingleAttempt(
         state.runtimeFailure = undefined;
         state.lastAssistantStopReason = undefined;
         state.outputLimitRecoveryPending = false;
+        closeActiveCompactionRecovery();
+        state.compactionRecovery = undefined;
+        compactionSettlementSwallowed = false;
         resetUsage(pendingMessageUsage);
         if (terminateChild) {
           state.terminal = true;
@@ -1173,6 +1235,82 @@ export async function runSingleAttempt(
         completeTurn(structuredOutput, true, structuredOutput === undefined ? 1 : 0);
       }, lifecycleDeadlineMs());
       timers.resultReadyGrace.unref?.();
+    }
+
+    function armCompactionRecoveryDeadline(): void {
+      if (state.terminal || state.turnLifecycleSettled || timers.compactionRecovery || !state.compactionRecovery) return;
+      const deadlineMs = options.outputLimitRecoveryTimeoutMs ?? OUTPUT_LIMIT_RECOVERY_TIMEOUT_MS;
+      timers.compactionRecovery = setTimeout(() => {
+        timers.compactionRecovery = undefined;
+        const recovery = state.compactionRecovery;
+        if (!recovery || state.terminal || state.turnLifecycleSettled) return;
+        closedCompactionRecoveries.add(compactionRecoveryKey(recovery));
+        state.compactionRecovery = undefined;
+        compactionSettlementSwallowed = false;
+        const diagnostic =
+          `Teammate compaction recovery did not continue within ${deadlineMs}ms `
+          + `(agent=${params.agent}, correlationId=${correlationId}, recoveryId=${recovery.recoveryId}, phase=${recovery.phase}); `
+          + "the stalled recovery was aborted.";
+        state.runtimeFailure = diagnostic;
+        appendBoundedTranscriptMessage(messages, { role: "system", content: diagnostic });
+        completeTurn(readStructuredOutput(true), true, 1);
+      }, deadlineMs);
+    }
+
+    function handleChildCompactionState(event: ChildCompactionStateEvent): void {
+      if (state.terminal || state.turnLifecycleSettled) return;
+      if (event.generation < latestCompactionGeneration) return;
+      if (event.generation > latestCompactionGeneration) {
+        latestCompactionGeneration = event.generation;
+        closedCompactionRecoveries.clear();
+        if (state.compactionRecovery) {
+          state.compactionRecovery = undefined;
+          compactionSettlementSwallowed = false;
+          if (timers.compactionRecovery) {
+            clearTimeout(timers.compactionRecovery);
+            timers.compactionRecovery = undefined;
+          }
+        }
+      }
+
+      const eventKey = compactionRecoveryKey(event);
+      if (closedCompactionRecoveries.has(eventKey)) return;
+      const active = state.compactionRecovery;
+      if (active) {
+        if (active.generation !== event.generation || active.recoveryId !== event.recoveryId) return;
+        const phaseRank = { pending: 0, completed: 1, continuation: 2 } as const;
+        if (event.phase !== "failed" && phaseRank[event.phase] < phaseRank[active.phase]) return;
+      }
+      if (event.phase === "failed") {
+        closedCompactionRecoveries.add(eventKey);
+        state.compactionRecovery = undefined;
+        if (timers.compactionRecovery) {
+          clearTimeout(timers.compactionRecovery);
+          timers.compactionRecovery = undefined;
+        }
+        const diagnostic =
+          `Teammate compaction recovery failed (agent=${params.agent}, correlationId=${correlationId}, `
+          + `recoveryId=${event.recoveryId}): ${event.reason ?? "unknown recovery failure"}`;
+        state.runtimeFailure = diagnostic;
+        appendBoundedTranscriptMessage(messages, { role: "system", content: diagnostic });
+        progress.lastMessage = diagnostic;
+        progress.status = "failed";
+        progress.phase = "settling";
+        options.onProgress?.(progress);
+        compactionSettlementSwallowed = false;
+        completeTurn(readStructuredOutput(true), true, 1);
+        return;
+      }
+      state.compactionRecovery = {
+        recoveryId: event.recoveryId,
+        generation: event.generation,
+        phase: event.phase,
+      };
+      progress.status = "running";
+      progress.phase = event.phase === "pending" ? "compacting" : "continuing";
+      progress.resultReadyAt = undefined;
+      options.onProgress?.(progress);
+      armCompactionRecoveryDeadline();
     }
 
     function armOutputLimitRecoveryDeadline(): void {
@@ -1361,6 +1499,15 @@ export async function runSingleAttempt(
         if (timers.outputLimitRecovery) {
           clearTimeout(timers.outputLimitRecovery);
           timers.outputLimitRecovery = undefined;
+        }
+      }
+      if (state.compactionRecovery) {
+        closeActiveCompactionRecovery();
+        state.compactionRecovery = undefined;
+        compactionSettlementSwallowed = false;
+        if (timers.compactionRecovery) {
+          clearTimeout(timers.compactionRecovery);
+          timers.compactionRecovery = undefined;
         }
       }
       if (timers.resultReadyGrace) {
@@ -1809,6 +1956,15 @@ export async function runSingleAttempt(
 
     /** Finalize the current run after Pi confirms no retry, compaction, or queued continuation remains. */
     function settleAgentSession(): void {
+      if (state.compactionRecovery) {
+        compactionSettlementSwallowed = true;
+        progress.status = "running";
+        progress.phase = state.compactionRecovery.phase === "pending" ? "compacting" : "continuing";
+        progress.resultReadyAt = undefined;
+        options.onProgress?.(progress);
+        armCompactionRecoveryDeadline();
+        return;
+      }
       const structuredOutput = readStructuredOutput(false);
       if (params.outputSchema && structuredOutput === undefined) {
         // A corrective continuation is already in flight; wait for the resumed
@@ -2252,6 +2408,14 @@ export async function runSingleAttempt(
       const structuredOutput = readStructuredOutput(true);
       if (schemaFile) cleanupFile(schemaFile);
 
+      if (state.compactionRecovery && !state.runtimeFailure) {
+        const recovery = state.compactionRecovery;
+        const diagnostic =
+          `Teammate runtime closed before compaction recovery continued `
+          + `(agent=${params.agent}, correlationId=${correlationId}, recoveryId=${recovery.recoveryId}, phase=${recovery.phase}).`;
+        state.runtimeFailure = diagnostic;
+        appendBoundedTranscriptMessage(messages, { role: "system", content: diagnostic });
+      }
       const processExitCode = state.runtimeFailure ? 1 : code ?? 1;
       // Non-JSON stdout attributed as assistant content is a protocol violation;
       // a child that emits it must not settle as a clean success (exitCode 0)

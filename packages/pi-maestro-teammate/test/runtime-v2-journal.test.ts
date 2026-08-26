@@ -4,7 +4,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { RUNTIME_V2_REVISION, RUNTIME_V2_VERSION, type ActorAddressV2, type RuntimeEventDraftV2 } from "../src/runtime-v2/contracts.ts";
-import { RuntimeV2ShadowJournal } from "../src/runtime-v2/journal.ts";
+import {
+  RuntimeV2JournalCorruptionError,
+  RuntimeV2ShadowJournal,
+} from "../src/runtime-v2/journal.ts";
 
 const actor: ActorAddressV2 = {
   version: RUNTIME_V2_VERSION,
@@ -146,6 +149,36 @@ test("Runtime V2 journal normalizes legacy V2 records only while reading", () =>
   }
 });
 
+test("Runtime V2 journal fails closed when a corruption marker filename does not bind its stream ID", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-v2-marker-identity-"));
+  try {
+    const journal = new RuntimeV2ShadowJournal(root);
+    const streamId = "flow-schedule/dispatch/original";
+    journal.append(draft(streamId, 10));
+    fs.writeFileSync(path.join(onlyStreamDirectory(root), "events.jsonl"), "{malformed}\n", "utf8");
+    assert.throws(() => journal.read(streamId), (error) => error instanceof RuntimeV2JournalCorruptionError);
+    const markersDirectory = path.join(root, "corrupt-streams");
+    const markerName = fs.readdirSync(markersDirectory).find((name) => name.endsWith(".json"));
+    assert.ok(markerName);
+    const markerPath = path.join(markersDirectory, markerName);
+    const marker = JSON.parse(fs.readFileSync(markerPath, "utf8")) as { streamId: string };
+    marker.streamId = "flow-schedule/schedule/forged";
+    fs.writeFileSync(markerPath, `${JSON.stringify(marker)}\n`, "utf8");
+
+    assert.throws(
+      () => journal.listStreams({
+        workspaceId: "workspace-a",
+        prefix: "flow-schedule/dispatch/",
+        limit: 10,
+      }),
+      (error) => error instanceof RuntimeV2JournalCorruptionError,
+      "marker identity validation must run before an unrelated embedded prefix can hide quarantine",
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("Runtime V2 journal quarantines corruption and enforces stream bounds", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-v2-corrupt-"));
   try {
@@ -154,9 +187,28 @@ test("Runtime V2 journal quarantines corruption and enforces stream bounds", () 
     journal.append(draft("stream-a", 10));
     assert.throws(() => journal.append(draft("stream-a", 20)), /limit exceeded/);
     fs.writeFileSync(path.join(onlyStreamDirectory(root), "events.jsonl"), "{malformed}\n", "utf8");
-    assert.equal(journal.read("stream-a"), undefined);
+    assert.throws(
+      () => journal.read("stream-a"),
+      (error) => error instanceof RuntimeV2JournalCorruptionError && error.streamId === "stream-a",
+    );
+    assert.throws(
+      () => journal.read("stream-a"),
+      (error) => error instanceof RuntimeV2JournalCorruptionError,
+      "quarantine remains a durable fail-closed tombstone",
+    );
+    assert.throws(
+      () => journal.append(draft("stream-a", 30)),
+      (error) => error instanceof RuntimeV2JournalCorruptionError,
+      "corrupt history cannot silently restart at revision zero",
+    );
+    assert.throws(
+      () => journal.listStreams({ workspaceId: "workspace-a", prefix: "stream-", limit: 10 }),
+      (error) => error instanceof RuntimeV2JournalCorruptionError,
+      "discovery cannot forget a quarantined authoritative stream",
+    );
+    assert.equal(journal.read("missing-stream"), undefined, "only genuine absence returns undefined");
     assert.equal(quarantined.length, 1);
-    assert.equal(fs.readdirSync(path.join(root, "corrupt-streams")).length, 1);
+    assert.equal(fs.readdirSync(path.join(root, "corrupt-streams")).length, 2);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

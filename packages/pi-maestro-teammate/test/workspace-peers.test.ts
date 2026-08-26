@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { afterEach } from "node:test";
@@ -18,6 +18,7 @@ import {
   WorkspaceTargetResolutionError,
   activeWorkspaceBackgroundJobsFromPayload,
   buildWorkspaceOwnerSnapshot,
+  claimWorkspaceOwnerIdentity,
   cleanupWorkspacePeerMailboxes,
   commandMailboxPath,
   consumeWorkspacePeerCommands,
@@ -54,6 +55,7 @@ import {
   validateWorkspacePeerCommandResponse,
   waitForWorkspacePeerCommandResponse,
   workspaceIdForCwd,
+  workspacePeerClaimPath,
   workspaceMainSessionDeliveryAction,
   workspaceMainSessionDeliveryDecision,
   workspaceProtocolCommandId,
@@ -659,6 +661,28 @@ test("stale and implausibly future owners are filtered and stale files can be cl
   assert.deepEqual(discovery.staleOwnerIds.sort(), [OWNER_B, OWNER_C]);
   await assert.rejects(readFile(ownerSnapshotPath(stale)), { code: "ENOENT" });
   await assert.rejects(readFile(ownerSnapshotPath(future)), { code: "ENOENT" });
+});
+
+test("stale cleanup cannot delete a replacement owner snapshot", async () => {
+  const { cwd, rootDir } = await temporaryWorkspace();
+  const local = createWorkspacePeerIdentity(cwd, { rootDir, ownerId: OWNER_A, ownerNonce: NONCE_A });
+  const stale = createWorkspacePeerIdentity(cwd, { rootDir, ownerId: OWNER_B, ownerNonce: NONCE_B });
+  const replacement = createWorkspacePeerIdentity(cwd, { rootDir, ownerId: OWNER_B, ownerNonce: NONCE_C });
+  await publishWorkspaceOwner(stale, state(agent("cid-stale")), 1_000);
+
+  const discovery = await discoverWorkspacePeers(local, {
+    now: 10_000,
+    staleAfterMs: 2_000,
+    cleanupStale: true,
+    cleanupStaleAfterMs: 2_000,
+    async beforeCleanupStale() {
+      await publishWorkspaceOwner(replacement, state(agent("cid-replacement")), 10_000);
+    },
+  });
+  assert.deepEqual(discovery.staleOwnerIds, [OWNER_B]);
+  const retained = JSON.parse(await readFile(ownerSnapshotPath(replacement), "utf8"));
+  assert.equal(retained.ownerNonce, NONCE_C);
+  assert.equal(retained.agents[0].correlationId, "cid-replacement");
 });
 
 test("global target resolution supports exact ids, names, name#prefix, and unique prefixes", async () => {
@@ -1348,6 +1372,221 @@ test("per-session owner identity persists and is reused across starts", async ()
     sessionKey: join(rootDir, "sessions", "other.jsonl"),
   });
   assert.notEqual(other, first, "different session keys mint distinct ownerIds");
+});
+
+test("canonical owner claim fails closed when a legacy root has live state", async () => {
+  const { rootDir } = await temporaryWorkspace();
+  const project = join(rootDir, "project");
+  const canonicalRoot = join(rootDir, "canonical-runtime");
+  const legacyRoot = join(rootDir, "legacy-runtime");
+  const legacy = createWorkspacePeerIdentity(project, {
+    rootDir: legacyRoot,
+    ownerId: OWNER_B,
+    ownerNonce: NONCE_B,
+  });
+  await publishWorkspaceOwner(legacy, state(agent("cid-legacy")), 1_000);
+  await assert.rejects(
+    claimWorkspaceOwnerIdentity(project, {
+      rootDir: canonicalRoot,
+      legacyRootDirs: [legacyRoot],
+      sessionKey: join(rootDir, "sessions", "legacy.jsonl"),
+      staleMs: 100,
+      now: () => 1_000,
+    }),
+    /Live legacy workspace peer state conflicts/,
+  );
+  assert.equal(await fileExists(ownerSnapshotPath(legacy)), true, "conflict detection never deletes legacy live state");
+});
+
+test("concurrent session owner claims are token-owned and former owners cannot release replacements", async () => {
+  const { rootDir } = await temporaryWorkspace();
+  const project = join(rootDir, "project");
+  const sessionKey = join(rootDir, "sessions", "claimed.jsonl");
+  const first = await claimWorkspaceOwnerIdentity(project, {
+    rootDir,
+    sessionKey,
+    generation: 1,
+    staleMs: 100,
+    now: () => 1_000,
+  });
+  assert.equal(first.claimPath, workspacePeerClaimPath(first.identity, sessionKey));
+  await assert.rejects(
+    claimWorkspaceOwnerIdentity(project, {
+      rootDir,
+      sessionKey,
+      generation: 2,
+      staleMs: 100,
+      now: () => 1_050,
+    }),
+    /already held|contended/,
+  );
+
+  const second = await claimWorkspaceOwnerIdentity(project, {
+    rootDir,
+    sessionKey,
+    generation: 2,
+    staleMs: 100,
+    now: () => 1_500,
+  });
+  assert.equal(second.identity.ownerId, first.identity.ownerId, "takeover preserves the stable session owner id");
+  await assert.rejects(first.assertOwned(), /stale|another generation/);
+  await first.release();
+  await second.assertOwned();
+
+  const runtime = createWorkspacePeerRuntime({
+    cwd: project,
+    rootDir,
+    ownerClaim: second,
+    heartbeatMs: 60_000,
+    getState: () => state(agent("cid-claimed")),
+  });
+  await runtime.start();
+  const snapshot = JSON.parse(await readFile(ownerSnapshotPath(runtime.identity), "utf8"));
+  assert.equal(snapshot.ownerToken, second.token);
+  assert.equal(snapshot.ownerGeneration, 2);
+  await runtime.stop();
+  await assert.rejects(readFile(ownerSnapshotPath(runtime.identity)), { code: "ENOENT" });
+  await assert.rejects(readFile(second.claimPath), { code: "ENOENT" });
+});
+
+test("stale takeover cannot win after the current owner renews its heartbeat", async () => {
+  const { rootDir } = await temporaryWorkspace();
+  const project = join(rootDir, "project");
+  const sessionKey = join(rootDir, "sessions", "renewed.jsonl");
+  let clock = 1_000;
+  const first = await claimWorkspaceOwnerIdentity(project, {
+    rootDir,
+    sessionKey,
+    generation: 1,
+    staleMs: 100,
+    now: () => clock,
+  });
+  clock = 1_200;
+  await assert.rejects(
+    claimWorkspaceOwnerIdentity(project, {
+      rootDir,
+      sessionKey,
+      generation: 2,
+      staleMs: 100,
+      now: () => clock,
+      beforeTakeover: () => first.heartbeat(clock),
+    }),
+    /already held|contended/,
+  );
+  await first.assertOwned();
+  await first.release();
+});
+
+test("owner snapshot rename is fenced against a concurrent claim takeover", async () => {
+  const { rootDir } = await temporaryWorkspace();
+  const project = join(rootDir, "project");
+  const sessionKey = join(rootDir, "sessions", "snapshot-fence.jsonl");
+  let clock = 1_000;
+  const first = await claimWorkspaceOwnerIdentity(project, {
+    rootDir,
+    sessionKey,
+    generation: 1,
+    staleMs: 100,
+    now: () => clock,
+  });
+  let replacement: Awaited<ReturnType<typeof claimWorkspaceOwnerIdentity>> | undefined;
+  await assert.rejects(
+    publishWorkspaceOwner(first.identity, state(agent("cid-stale-owner")), clock, {
+      beforeCommit: async () => {
+        await first.release();
+        clock = 1_500;
+        replacement = await claimWorkspaceOwnerIdentity(project, {
+          rootDir,
+          sessionKey,
+          generation: 2,
+          staleMs: 100,
+          now: () => clock,
+        });
+      },
+    }),
+    /stale|another generation/,
+  );
+  assert.ok(replacement);
+  await publishWorkspaceOwner(replacement.identity, state(agent("cid-current-owner")), clock);
+  const snapshot = JSON.parse(await readFile(ownerSnapshotPath(replacement.identity), "utf8"));
+  assert.equal(snapshot.agents[0]?.correlationId, "cid-current-owner");
+  await replacement.release();
+});
+
+test("mailbox consumer stops before handling after its owner claim is replaced", async () => {
+  const { rootDir } = await temporaryWorkspace();
+  const project = join(rootDir, "project");
+  const sessionKey = join(rootDir, "sessions", "consumer-fence.jsonl");
+  let clock = 1_000;
+  const receiver = await claimWorkspaceOwnerIdentity(project, {
+    rootDir,
+    sessionKey,
+    generation: 1,
+    staleMs: 100,
+    now: () => clock,
+  });
+  const sender = createWorkspacePeerIdentity(project, { rootDir, ownerId: OWNER_B, ownerNonce: NONCE_B });
+  await enqueueWorkspacePeerCommand(sender, remoteTarget(receiver.identity), "follow_up", "fenced", {
+    commandId: "9".repeat(32),
+    now: clock,
+  });
+  let replacement: Awaited<ReturnType<typeof claimWorkspaceOwnerIdentity>> | undefined;
+  let handled = 0;
+  await assert.rejects(
+    consumeWorkspacePeerCommands(receiver.identity, () => {
+      handled += 1;
+      return { status: "accepted" };
+    }, {
+      now: clock,
+      beforeHandle: async () => {
+        await receiver.release();
+        clock = 1_500;
+        replacement = await claimWorkspaceOwnerIdentity(project, {
+          rootDir,
+          sessionKey,
+          generation: 2,
+          staleMs: 100,
+          now: () => clock,
+        });
+      },
+    }),
+    /stale|another generation/,
+  );
+  assert.equal(handled, 0);
+  assert.ok(replacement);
+  const consumed = await consumeWorkspacePeerCommands(replacement.identity, () => {
+    handled += 1;
+    return { status: "accepted" };
+  }, { now: clock });
+  assert.equal(handled, 0, "the replacement rejects a command addressed to the former nonce");
+  assert.equal(consumed[0]?.response.status, "rejected");
+  await replacement.release();
+});
+
+test("clock rollback does not leave a malformed owner claim permanently contended", async () => {
+  const { rootDir } = await temporaryWorkspace();
+  const project = join(rootDir, "project");
+  const sessionKey = join(rootDir, "sessions", "rollback.jsonl");
+  const first = await claimWorkspaceOwnerIdentity(project, {
+    rootDir,
+    sessionKey,
+    generation: 1,
+    staleMs: 100,
+    now: () => 1_000,
+  });
+  const claimPath = first.claimPath;
+  await first.release();
+  await writeFile(claimPath, "{not-json", { mode: 0o600 });
+  await utimes(claimPath, new Date(5_000), new Date(5_000));
+  const recovered = await claimWorkspaceOwnerIdentity(project, {
+    rootDir,
+    sessionKey,
+    generation: 2,
+    staleMs: 100,
+    now: () => 1_000,
+  });
+  await recovered.assertOwned();
+  await recovered.release();
 });
 
 test("a live foreign process holding the persisted ownerId forces a new identity", async () => {

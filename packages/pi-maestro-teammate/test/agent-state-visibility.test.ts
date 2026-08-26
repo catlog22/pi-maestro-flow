@@ -12,6 +12,7 @@ import {
   renderAgentSelectorPanel,
   renderAgentStatusWidget,
   recordSettledAgent,
+  reconcileSettledAgentsForSession,
   reclaimResultReadyAgents,
   settleAgent,
   statusForWatchTarget,
@@ -161,6 +162,30 @@ test("settled agents are recallable by name and by id prefix", () => {
   assert.equal(findSettledAgent(state, "someone-else"), undefined);
 });
 
+test("settled history preserves exact resume and clears source/session mismatches", () => {
+  const state = makeState();
+  state.currentWorkspaceId = "workspace-a";
+  state.currentSessionId = "session-a";
+  state.currentSourceId = "source-a";
+  state.sessionGeneration = 1;
+  const agent = addAgent(state, "owned");
+  recordSettledAgent(state, agent, "completed");
+  assert.equal(state.recentlySettled?.get(agent.correlationId)?.sessionGeneration, 1);
+
+  state.sessionGeneration = 2;
+  reconcileSettledAgentsForSession(state, { preserveExact: true });
+  assert.equal(state.recentlySettled?.get(agent.correlationId)?.sessionGeneration, 2);
+  assert.equal(findSettledAgent(state, "owned")?.correlationId, agent.correlationId);
+
+  state.currentSourceId = "source-b";
+  reconcileSettledAgentsForSession(state, { preserveExact: true });
+  assert.equal(state.recentlySettled?.has(agent.correlationId), false);
+
+  recordSettledAgent(state, agent, "completed");
+  reconcileSettledAgentsForSession(state, { preserveExact: false });
+  assert.equal(state.recentlySettled?.has(agent.correlationId), false);
+});
+
 test("settled agents retain work and transcript recovery detail", () => {
   const state = makeState();
   const agent = addAgent(state, "scout", {
@@ -252,8 +277,12 @@ test("an agent stuck running with a published result is eventually retired", () 
   assert.equal(state.activeRuns.get(cid)?.lastResult, "the answer");
 });
 
-test("retiring a reclaimed agent publishes a complete event so cockpit rows converge", () => {
+test("retiring an owned reclaimed agent publishes the exact completion projection", () => {
   const state = makeState();
+  state.currentWorkspaceId = "w".repeat(64);
+  state.currentSessionId = "session-current";
+  state.currentSourceId = "source-current";
+  state.sessionGeneration = 9;
   const startedAt = Date.now();
   const cid = addAgent(state, "orphan", {
     startedAt,
@@ -277,6 +306,12 @@ test("retiring a reclaimed agent publishes a complete event so cockpit rows conv
   assert.equal(payload.exitCode, 0);
   assert.equal(payload.wakeable, true, "wakeable=true keeps the row visible as sleeping in the cockpit");
   assert.equal(payload.cancelled, undefined);
+  assert.deepEqual(payload.projection, {
+    workspaceId: state.currentWorkspaceId,
+    sessionId: state.currentSessionId,
+    sourceId: state.currentSourceId,
+    generation: state.sessionGeneration,
+  });
 });
 
 test("an agent whose result was just published is left alone", () => {

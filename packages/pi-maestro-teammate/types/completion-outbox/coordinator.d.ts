@@ -21,6 +21,8 @@ export interface CompletionDeliveryEnvelope {
 }
 export interface CompletionSessionBinding {
     target: CompletionTarget;
+    /** Read-only aliases from pre-canonical workspace hashing. New writes use target.workspaceId. */
+    legacyWorkspaceIds?: readonly string[];
     entries: readonly unknown[];
     send(envelope: CompletionDeliveryEnvelope): boolean;
 }
@@ -28,6 +30,13 @@ export interface CompletionDispatchDurability {
     durable: boolean;
     handle?: CompletionDispatchHandle;
 }
+/** Distinguishes a pre-commit miss from post-finalize reconciliation work. */
+export type CompletionPublishResult = {
+    finalized: false;
+} | {
+    finalized: true;
+    record?: CompletionOutboxRecord;
+};
 export interface CompletionCoordinatorOptions {
     store?: CompletionOutboxFileStore;
     registry?: CompletionDurabilityRegistry;
@@ -44,7 +53,7 @@ export declare class CompletionDeliveryCoordinator {
     beginDispatch(seed: CompletionDispatchSeed): Promise<CompletionDispatchDurability>;
     requireNotification(input: CompletionNotificationRequirement): Promise<void>;
     abandon(seed: CompletionDispatchSeed, reason: string): Promise<void>;
-    publishCompletion(input: CompletionFinalizeInput): Promise<CompletionOutboxRecord | undefined>;
+    publishCompletion(input: CompletionFinalizeInput): Promise<CompletionPublishResult>;
     settleForeground(seed: CompletionDispatchSeed): Promise<void>;
     bindSession(binding: CompletionSessionBinding): Promise<void>;
     drain(): Promise<void>;

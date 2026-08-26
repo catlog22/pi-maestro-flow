@@ -7,6 +7,7 @@ import {
   type RuntimeActorHostClient,
   type RuntimeActorLease,
 } from "../runtime-broker/actor-host.ts";
+import { RuntimeBrokerError } from "../runtime-broker/contracts.ts";
 import { canonicalizeRuntimeBrokerWorkspace } from "../runtime-broker/private-state.ts";
 import { adaptAcpRuntimeSignalV2, adaptPiRuntimeSignalV2 } from "../runtime-v2/adapters.ts";
 import {
@@ -86,6 +87,13 @@ export class AgentRunRuntimeActor {
         actor,
         correlationId,
       });
+      if (host.mode !== "off" && !runtime.#lease) {
+        throw new RuntimeBrokerError("lease_unavailable", "AgentRun Runtime actor lease is owned elsewhere", {
+          actorId: `agent-run:${workspaceId}:${correlationId}`,
+          streamId,
+          generation,
+        });
+      }
       return runtime;
     } catch (error) {
       if (ownsHost) await host.stop().catch(() => undefined);

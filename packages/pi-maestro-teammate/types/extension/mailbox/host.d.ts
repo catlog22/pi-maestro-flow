@@ -38,6 +38,8 @@ export interface MailboxHostOptions {
     rootCorrelationId?: string;
     ownerId: string;
     workspaceId: string;
+    /** Read-only pre-canonical workspace aliases. New enqueues always use workspaceId. */
+    legacyWorkspaceIds?: readonly string[];
     teamId: string;
     /** Persist the authoritative mailbox applied effect. */
     commitApplied?: (envelope: MailboxEnvelope) => Promise<void>;

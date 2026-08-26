@@ -7,7 +7,6 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import type { ChildProcess } from "node:child_process";
 import crossSpawn from "cross-spawn";
@@ -104,6 +103,7 @@ import {
 import { runSupervisedEvaluation } from "../supervision/evaluator.ts";
 import { SUPERVISION_EVENT, createSupervisionEvent } from "../supervision/types.ts";
 import {
+  claimWorkspaceOwnerIdentity,
   createWorkspacePeerCommandConsumer,
   createWorkspacePeerRuntime,
   createWorkspaceWindowTerminalResult,
@@ -118,7 +118,6 @@ import {
   projectWorkspacePeerWindow,
   readWorkspacePeerResponse,
   resolveWorkspaceOwnerByName,
-  resolveWorkspaceOwnerIdentity,
   resolveWorkspaceTarget,
   shouldReplayWorkspaceRootQueue,
   activeWorkspaceBackgroundJobsFromPayload,
@@ -171,6 +170,7 @@ import {
   hasRpcTurnSidecar,
   sendRpcMessage,
   truncateUtf8Tail,
+  truncateUtf8Head,
   checkDepthGuard,
   getTeammateDepth,
   getTeammateMaxDispatchDepth,
@@ -281,6 +281,7 @@ import type {
   MessageEnvelope,
   MessageProvenanceV1,
   MessageSenderIdentityV1,
+  SessionProjectionIdentity,
   SettledAgentRecord,
   SingleResult,
   TeammateInteractionRecord,
@@ -509,7 +510,11 @@ import type { TeammateRuntimeOptions, ProgressFlushGate, AgentWidgetTheme, Agent
 import { buildHistoryRows, historyRowKey } from "./teammate-core.ts";
 import { MailboxHost, mailboxModeFromEnv } from "./mailbox/host.ts";
 import { RuntimeBrokerMailboxCommitter } from "../runtime-broker/mailbox-commit.ts";
-import { getRuntimeBrokerStateDirectory } from "../runtime-broker/private-state.ts";
+import {
+  getRuntimeBrokerStateDirectory,
+  getRuntimeWorkspaceIdentity,
+  type RuntimeWorkspaceIdentity,
+} from "../runtime-broker/private-state.ts";
 import { runtimeBrokerModeFromEnv } from "../runtime-broker/rollout.ts";
 import { createDirectAgentHostRegistry, createMailboxHostRegistry, MAILBOX_REGISTRY_KEY } from "../public/v1/mailbox.ts";
 import {
@@ -559,8 +564,19 @@ import type {
 export { MAILBOX_REGISTRY_KEY } from "../public/v1/mailbox.ts";
 
 
+function completionWorkspaceIdentity(cwd: string): RuntimeWorkspaceIdentity {
+  return cwd
+    ? getRuntimeWorkspaceIdentity(cwd)
+    : { canonicalPath: "", workspaceId: "0".repeat(64), legacyWorkspaceIds: [] };
+}
+
 function completionWorkspaceId(cwd: string): string {
-  return createHash("sha256").update(cwd, "utf8").digest("hex");
+  return completionWorkspaceIdentity(cwd).workspaceId;
+}
+
+function workspaceIdentityMatchesCwd(workspaceId: string, cwd: string): boolean {
+  const identity = completionWorkspaceIdentity(cwd);
+  return workspaceId === identity.workspaceId || identity.legacyWorkspaceIds.includes(workspaceId);
 }
 
 function resolvedRunLocation(requested: string | undefined, base: string): string {
@@ -800,7 +816,8 @@ export default function registerTeammateExtension(
       const childSessionId = ctx.sessionManager.getSessionId();
       // Fence deliveries to the exact workspace + session identity captured at
       // bind time; compaction may keep the session id while changing cwd.
-      const childWorkspaceId = completionWorkspaceId(ctx.cwd);
+      const childWorkspaceIdentity = completionWorkspaceIdentity(ctx.cwd);
+      const childWorkspaceId = childWorkspaceIdentity.workspaceId;
       const childSessionFile = ctx.sessionManager.getSessionFile?.();
       void childCompletionCoordinator.bindSession({
         target: {
@@ -810,6 +827,7 @@ export default function registerTeammateExtension(
             ? { correlationId: process.env.PI_TEAMMATE_CORRELATION_ID }
             : {}),
         },
+        legacyWorkspaceIds: childWorkspaceIdentity.legacyWorkspaceIds,
         entries: ctx.sessionManager.getEntries?.() ?? [],
         send(envelope: CompletionDeliveryEnvelope) {
           return bridge.ctx?.sessionManager.getSessionId() === childSessionId
@@ -854,9 +872,13 @@ export default function registerTeammateExtension(
       bridge.completedPromptSeq = bridge.acceptedPromptSeq;
       bridge.idleStableTicks = 0;
     });
-    pi.on("session_shutdown", () => {
+    pi.on("session_shutdown", async () => {
       childCompletionCoordinator.unbindSession();
-      void childCompletionCoordinator.drain().finally(() => childCompletionCoordinator.dispose());
+      try {
+        await childCompletionCoordinator.drain();
+      } finally {
+        childCompletionCoordinator.dispose();
+      }
       disposeChildProxyCaller();
       if (bridge.pollTimer) clearInterval(bridge.pollTimer);
       bridge.pollTimer = undefined;
@@ -1214,18 +1236,46 @@ export default function registerTeammateExtension(
   rootGlobals[registryKey] = state;
   const completionCoordinator = new CompletionDeliveryCoordinator();
 
-  type RootSessionFence = Readonly<{ generation: number; sessionId: string | null }>;
+  type RootSessionFence = Readonly<{
+    generation: number;
+    sessionId: string | null;
+    workspaceId: string | undefined;
+    sourceId: string | undefined;
+  }>;
   const captureRootSessionFence = (): RootSessionFence => Object.freeze({
     generation: state.sessionGeneration ?? 0,
     sessionId: state.currentSessionId,
+    workspaceId: state.currentWorkspaceId,
+    sourceId: state.currentSourceId,
   });
   const ownsRootSessionFence = (fence: RootSessionFence): boolean =>
     (state.sessionGeneration ?? 0) === fence.generation
-    && state.currentSessionId === fence.sessionId;
+    && state.currentSessionId === fence.sessionId
+    && state.currentWorkspaceId === fence.workspaceId
+    && state.currentSourceId === fence.sourceId;
+  const projectionForRootFence = (fence: RootSessionFence): SessionProjectionIdentity | undefined =>
+    fence.sessionId && fence.workspaceId && fence.sourceId && fence.generation > 0
+      ? {
+        workspaceId: fence.workspaceId,
+        sessionId: fence.sessionId,
+        sourceId: fence.sourceId,
+        generation: fence.generation,
+      }
+      : undefined;
   const staleRootSessionResult = (): SessionMessageResult => ({
     delivered: false,
     error: "The originating Pi session changed before delivery completed.",
   });
+  const emitCurrentTeammateStarted = (
+    agent: ActiveAgent,
+    extra: Record<string, unknown> = {},
+  ): void => {
+    const projection = projectionForRootFence(captureRootSessionFence());
+    emitTeammateStarted(pi, agent, {
+      ...extra,
+      ...(projection ? { projection } : {}),
+    });
+  };
 
   let agentTurnLedger: AgentTurnLedger = createAgentTurnLedger();
 
@@ -1249,8 +1299,29 @@ export default function registerTeammateExtension(
 
   let runtimeReadProjection = new RuntimeReadModelProjectionV2();
   let runtimeReadReady = false;
-  let runtimeReadBridge: RuntimeReadModelBrokerBridge | undefined;
-  let runtimeReadRefreshTimer: ReturnType<typeof setInterval> | undefined;
+  let runtimeReadToken = 0;
+  interface RuntimeReadHandle {
+    readonly token: number;
+    readonly fence: RootSessionFence;
+    readonly cwd: string;
+    readonly projection: SessionProjectionIdentity;
+    bridge?: RuntimeReadModelBrokerBridge;
+    refreshTimer?: ReturnType<typeof setInterval>;
+    cancelled: boolean;
+  }
+  let runtimeReadHandle: RuntimeReadHandle | undefined;
+  const ownsRuntimeReadHandle = (handle: RuntimeReadHandle): boolean =>
+    runtimeReadHandle === handle
+    && runtimeReadToken === handle.token
+    && !handle.cancelled
+    && ownsRootSessionFence(handle.fence)
+    && completionWorkspaceId(handle.cwd) === handle.projection.workspaceId;
+  const cancelRuntimeReadHandle = (handle: RuntimeReadHandle | undefined): void => {
+    if (!handle || handle.cancelled) return;
+    handle.cancelled = true;
+    if (handle.refreshTimer) clearInterval(handle.refreshTimer);
+    handle.refreshTimer = undefined;
+  };
 
   const progressForRuntimeReadAgent = (agent: ActiveAgent): AgentProgressSnapshot | undefined => {
     const direct = agent.progress?.find((entry) => entry.correlationId === agent.correlationId);
@@ -1267,9 +1338,11 @@ export default function registerTeammateExtension(
     const progress = progressForRuntimeReadAgent(agent);
     const generation = Math.max(1, agent.runtimeGeneration ?? 1);
     const lastMessage = progress?.lastMessage ?? agent.lastResult ?? agent.outputLog.at(-1);
+    const projection = projectionForRootFence(captureRootSessionFence());
     return {
       correlationId: agent.correlationId,
       generation,
+      ...(projection ? { projection } : {}),
       agent: agent.agent,
       ...(agent.name ? { name: agent.name } : {}),
       ...(agent.task ? { task: agent.task } : {}),
@@ -1305,17 +1378,18 @@ export default function registerTeammateExtension(
   const currentRuntimeReadAgents = (): RuntimeAgentReadEntityV2[] =>
     [...state.activeRuns.values()].map(runtimeReadEntity);
 
-  const applyRuntimeReadSnapshot = (snapshot: RuntimeReadModelSnapshotV2): void => {
+  const applyRuntimeReadSnapshot = (handle: RuntimeReadHandle, snapshot: RuntimeReadModelSnapshotV2): void => {
+    if (!ownsRuntimeReadHandle(handle)) return;
     const previous = runtimeReadProjection.snapshot();
     if (!runtimeReadReady) {
-      if (!runtimeReadProjection.applySnapshot(snapshot)) return;
+      if (!runtimeReadProjection.applySnapshot(snapshot) || !ownsRuntimeReadHandle(handle)) return;
       runtimeReadReady = true;
       pi.events.emit(RUNTIME_READ_MODEL_SNAPSHOT_EVENT, runtimeReadProjection.snapshot());
       return;
     }
     if (snapshot.cursor === previous.cursor) {
       if (JSON.stringify(snapshot.agents) === JSON.stringify(previous.agents)) return;
-      if (runtimeReadProjection.applySnapshot(snapshot)) {
+      if (runtimeReadProjection.applySnapshot(snapshot) && ownsRuntimeReadHandle(handle)) {
         pi.events.emit(RUNTIME_READ_MODEL_SNAPSHOT_EVENT, runtimeReadProjection.snapshot());
       }
       return;
@@ -1327,73 +1401,107 @@ export default function registerTeammateExtension(
       nextCursor: snapshot.cursor,
     });
     if (runtimeReadProjection.applyDelta(delta)) {
-      pi.events.emit(RUNTIME_READ_MODEL_DELTA_EVENT, delta);
+      if (ownsRuntimeReadHandle(handle)) pi.events.emit(RUNTIME_READ_MODEL_DELTA_EVENT, delta);
       return;
     }
-    if (runtimeReadProjection.applySnapshot(snapshot)) {
+    if (runtimeReadProjection.applySnapshot(snapshot) && ownsRuntimeReadHandle(handle)) {
       pi.events.emit(RUNTIME_READ_MODEL_SNAPSHOT_EVENT, runtimeReadProjection.snapshot());
     }
   };
 
-  const failRuntimeReadModel = (error: unknown): void => {
+  const failRuntimeReadModel = (handle: RuntimeReadHandle, error: unknown): void => {
+    if (!ownsRuntimeReadHandle(handle)) return;
     runtimeReadReady = false;
     runtimeReadProjection = new RuntimeReadModelProjectionV2();
-    pi.events.emit(RUNTIME_READ_MODEL_UNAVAILABLE_EVENT, { version: 2 });
+    pi.events.emit(RUNTIME_READ_MODEL_UNAVAILABLE_EVENT, {
+      version: 2,
+      projection: { ...handle.projection },
+    });
     logDiagnosticWarn("[pi-maestro-teammate] Runtime V2 canonical read failed; v1 bridge remains active:", error);
   };
 
-  const refreshRuntimeReadModel = async (): Promise<void> => {
-    const bridge = runtimeReadBridge;
-    if (!bridge) return;
+  const refreshRuntimeReadModel = async (handle = runtimeReadHandle): Promise<void> => {
+    const bridge = handle?.bridge;
+    if (!handle || !bridge || !ownsRuntimeReadHandle(handle)) return;
     try {
       const snapshot = await bridge.snapshot();
-      if (runtimeReadBridge === bridge) applyRuntimeReadSnapshot(snapshot);
+      if (ownsRuntimeReadHandle(handle) && handle.bridge === bridge) applyRuntimeReadSnapshot(handle, snapshot);
     } catch (error) {
-      if (runtimeReadBridge === bridge) failRuntimeReadModel(error);
+      if (ownsRuntimeReadHandle(handle) && handle.bridge === bridge) failRuntimeReadModel(handle, error);
     }
   };
 
   const publishRuntimeReadSnapshot = (): void => {
-    if (runtimeReadReady) pi.events.emit(RUNTIME_READ_MODEL_SNAPSHOT_EVENT, runtimeReadProjection.snapshot());
-    void refreshRuntimeReadModel();
+    const handle = runtimeReadHandle;
+    if (handle && ownsRuntimeReadHandle(handle) && runtimeReadReady) {
+      pi.events.emit(RUNTIME_READ_MODEL_SNAPSHOT_EVENT, runtimeReadProjection.snapshot());
+    }
+    void refreshRuntimeReadModel(handle);
   };
 
   const publishRuntimeReadDelta = (): void => {
-    const bridge = runtimeReadBridge;
-    if (!bridge) return;
+    const handle = runtimeReadHandle;
+    const bridge = handle?.bridge;
+    if (!handle || !bridge || !ownsRuntimeReadHandle(handle)) return;
     void bridge.publish(currentRuntimeReadAgents()).then((snapshot) => {
-      if (runtimeReadBridge === bridge) applyRuntimeReadSnapshot(snapshot);
+      if (ownsRuntimeReadHandle(handle) && handle.bridge === bridge) applyRuntimeReadSnapshot(handle, snapshot);
     }).catch((error) => {
-      if (runtimeReadBridge === bridge) failRuntimeReadModel(error);
+      if (ownsRuntimeReadHandle(handle) && handle.bridge === bridge) failRuntimeReadModel(handle, error);
     });
   };
 
   const initializeRuntimeReadModel = async (cwd: string, sourceId: string): Promise<void> => {
-    if (runtimeReadRefreshTimer) clearInterval(runtimeReadRefreshTimer);
-    runtimeReadRefreshTimer = undefined;
-    const previous = runtimeReadBridge;
-    runtimeReadBridge = undefined;
+    const fence = captureRootSessionFence();
+    const projection = projectionForRootFence(fence);
+    const token = ++runtimeReadToken;
+    const previous = runtimeReadHandle;
+    cancelRuntimeReadHandle(previous);
     runtimeReadReady = false;
     runtimeReadProjection = new RuntimeReadModelProjectionV2();
-    await previous?.close().catch(() => undefined);
-    if (!runtimeV2ReadEnabled()) return;
+    if (!projection || projection.sourceId !== sourceId || completionWorkspaceId(cwd) !== projection.workspaceId) {
+      runtimeReadHandle = undefined;
+      await previous?.bridge?.close().catch(() => undefined);
+      return;
+    }
+    const handle: RuntimeReadHandle = {
+      token,
+      fence,
+      cwd,
+      projection,
+      cancelled: false,
+    };
+    runtimeReadHandle = handle;
+    await previous?.bridge?.close().catch(() => undefined);
+    if (!ownsRuntimeReadHandle(handle) || !runtimeV2ReadEnabled()) return;
+    let bridge: RuntimeReadModelBrokerBridge | undefined;
     try {
-      const bridge = await RuntimeReadModelBrokerBridge.connect({ cwd, sourceId });
-      if (state.currentSessionId !== sourceId) {
+      bridge = await RuntimeReadModelBrokerBridge.connect({
+        cwd,
+        sourceId,
+        sessionId: projection.sessionId,
+        sessionGeneration: projection.generation,
+        readScope: "source",
+      });
+      if (!ownsRuntimeReadHandle(handle)) {
         await bridge.close();
         return;
       }
-      runtimeReadBridge = bridge;
+      handle.bridge = bridge;
       const snapshot = await bridge.publish(currentRuntimeReadAgents(), { reset: true });
-      if (runtimeReadBridge !== bridge) {
+      if (!ownsRuntimeReadHandle(handle) || handle.bridge !== bridge) {
         await bridge.close();
         return;
       }
-      applyRuntimeReadSnapshot(snapshot);
-      runtimeReadRefreshTimer = setInterval(() => void refreshRuntimeReadModel(), 500);
-      runtimeReadRefreshTimer.unref?.();
+      applyRuntimeReadSnapshot(handle, snapshot);
+      if (!ownsRuntimeReadHandle(handle)) return;
+      handle.refreshTimer = setInterval(() => void refreshRuntimeReadModel(handle), 500);
+      handle.refreshTimer.unref?.();
     } catch (error) {
-      failRuntimeReadModel(error);
+      if (!ownsRuntimeReadHandle(handle)) {
+        await bridge?.close().catch(() => undefined);
+        return;
+      }
+      failRuntimeReadModel(handle, error);
     }
   };
 
@@ -1802,6 +1910,7 @@ export default function registerTeammateExtension(
       localIdentity,
       publisher ? workspacePeerOwners : [],
       workspacePeerSessionName,
+      monitorInteractionModeActive,
     ));
   };
 
@@ -1893,7 +2002,9 @@ export default function registerTeammateExtension(
     if (existing
       && existing.publisher === publisher
       && existing.fence.generation === fence.generation
-      && existing.fence.sessionId === fence.sessionId) return existing.promise;
+      && existing.fence.sessionId === fence.sessionId
+      && existing.fence.workspaceId === fence.workspaceId
+      && existing.fence.sourceId === fence.sourceId) return existing.promise;
 
     let reservation!: NonNullable<typeof workspacePeerRefresh>;
     const promise = discoverWorkspacePeers(publisher.identity, { cleanupStale: true })
@@ -1926,7 +2037,9 @@ export default function registerTeammateExtension(
     const pending = workspacePeerRefresh;
     if (pending?.publisher === publisher
       && pending.fence.generation === fence.generation
-      && pending.fence.sessionId === fence.sessionId) await pending.promise;
+      && pending.fence.sessionId === fence.sessionId
+      && pending.fence.workspaceId === fence.workspaceId
+      && pending.fence.sourceId === fence.sourceId) await pending.promise;
     if (workspacePeerPublisher !== publisher || !ownsRootSessionFence(fence)) {
       throw new Error("Workspace peer discovery session changed before refresh.");
     }
@@ -2418,7 +2531,7 @@ export default function registerTeammateExtension(
       });
       agent.outputLog.push(`[${new Date(now).toISOString().slice(11, 19)}] ◀ cold-resume prompt: ${message.slice(0, 100)}`);
       trimAgentBuffers(agent);
-      emitTeammateStarted(pi, agent);
+      emitCurrentTeammateStarted(agent);
       pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
         correlationId,
         from: messageFrom,
@@ -2460,7 +2573,12 @@ export default function registerTeammateExtension(
 
     const now = Date.now();
     if (mode === "prompt" && !turnTracked) agent.promptSeq = (agent.promptSeq ?? 0) + 1;
-    const wasSleeping = wakeSleepingAgent(pi, agent, now);
+    const wasSleeping = wakeSleepingAgent(
+      pi,
+      agent,
+      now,
+      projectionForRootFence(captureRootSessionFence()),
+    );
     agent.inbox.push({
       id: provenance.messageId ?? randomUUID(),
       from: messageFrom,
@@ -2494,8 +2612,7 @@ export default function registerTeammateExtension(
   let mailboxHost: MailboxHost | undefined;
   let mailboxWorkspaceId: string | undefined;
 
-  const workspaceIdForCwd = (cwd: string | undefined): string =>
-    cwd ? createHash("sha256").update(cwd, "utf8").digest("hex") : "0".repeat(64);
+  const workspaceIdForCwd = (cwd: string | undefined): string => completionWorkspaceId(cwd ?? "");
 
   const createMailboxHost = (): MailboxHost => {
     const rootCorrelationId = state.activeRuns.values().next().value?.correlationId;
@@ -2507,6 +2624,7 @@ export default function registerTeammateExtension(
           holderId: ownerId,
         })
       : undefined;
+    brokerCommitter?.prewarm();
     mailboxWorkspaceId = workspaceId;
     const host = new MailboxHost({
       rootDir: join(homedir(), ".pi", "teammate", "mailbox"),
@@ -2514,10 +2632,11 @@ export default function registerTeammateExtension(
       rootCorrelationId,
       ownerId,
       workspaceId,
+      legacyWorkspaceIds: completionWorkspaceIdentity(state.baseCwd).legacyWorkspaceIds,
       teamId: rootCorrelationId ?? "team-root",
       commitApplied: brokerCommitter === undefined
         ? undefined
-        : async (envelope) => { await brokerCommitter.commit(envelope); },
+        : async (envelope) => { await brokerCommitter.commitIfReady(envelope); },
       closeDispatchAuthority: brokerCommitter === undefined
         ? undefined
         : () => brokerCommitter.close(),
@@ -3162,7 +3281,7 @@ export default function registerTeammateExtension(
           summary,
           outcome: completionOutcome,
         };
-        const record = await completionCoordinator.publishCompletion({
+        const publishResult = await completionCoordinator.publishCompletion({
           dispatchId: seed.dispatchId,
           reservationId: seed.reservationId,
           kind: terminalStatus === "completed" ? "single" : "failure",
@@ -3171,8 +3290,10 @@ export default function registerTeammateExtension(
           resources: [resource],
           finalizedAt: terminal.settledAt,
         });
-        if (!record) throw new Error("canonical completion coordinator did not accept the terminal result");
-        return true;
+        // Once finalization commits, a temporary outbox import failure is owned
+        // by coordinator reconciliation and must not trigger passive/direct
+        // duplicate delivery. A fulfilled pre-finalize miss remains retryable.
+        return publishResult.finalized;
       } catch (error) {
         logDiagnosticError(
           `[pi-maestro-teammate] canonical workspace terminal completion failed for ${request.messageId}:`,
@@ -3289,13 +3410,17 @@ export default function registerTeammateExtension(
         if (!ownsWorkspacePeerGeneration()) return;
         // Stable per-session ownerId across process restarts: response files
         // keep their mailbox key and in-flight receipts stay readable.
-        const ownerId = await resolveWorkspaceOwnerIdentity(cwd, {
+        const ownerClaim = await claimWorkspaceOwnerIdentity(cwd, {
           sessionKey: ctx.sessionManager?.getSessionFile?.(),
+          generation,
         });
-        if (!ownsWorkspacePeerGeneration()) return;
+        if (!ownsWorkspacePeerGeneration()) {
+          await ownerClaim.release().catch(() => undefined);
+          return;
+        }
         const publisher = createWorkspacePeerRuntime({
           cwd,
-          ownerId,
+          ownerClaim,
           getState: () => ({
             ...buildWorkspaceOwnerState(
               state,
@@ -3319,7 +3444,13 @@ export default function registerTeammateExtension(
           ownerNonce: publisher.identity.ownerNonce,
           generation,
         });
-        await runtimeActor.start();
+        try {
+          await runtimeActor.start();
+        } catch (error) {
+          await publisher.stop().catch(() => undefined);
+          await runtimeActor.stop().catch(() => undefined);
+          throw error;
+        }
         if (!ownsWorkspacePeerGeneration()) {
           await publisher.stop().catch(() => undefined);
           await runtimeActor.stop().catch(() => undefined);
@@ -3592,9 +3723,9 @@ export default function registerTeammateExtension(
         details: { mode: "single", results: [] },
       });
       if (signal.aborted) return cancelledBeforeStart();
-      const dispatchGeneration = state.sessionGeneration ?? 0;
-      const ownsDispatchGeneration = (): boolean =>
-        (state.sessionGeneration ?? 0) === dispatchGeneration;
+      const dispatchFence = captureRootSessionFence();
+      const ownsDispatchGeneration = (): boolean => ownsRootSessionFence(dispatchFence);
+      const dispatchProjection = projectionForRootFence(dispatchFence);
 
       const baseCwd = (params.cwd ?? state.baseCwd) || ctx.cwd;
       await refreshModelRegistry(ctx);
@@ -3974,14 +4105,14 @@ export default function registerTeammateExtension(
         // the active-agent budget against a partial tally (P4).
         normalizedTasks.forEach((task, index) => {
           const childAgent = state.activeRuns.get(taskCorrelationIds[index]);
-          if (childAgent) emitTeammateStarted(pi, childAgent);
+          if (childAgent) emitCurrentTeammateStarted(childAgent);
         });
       }
 
       if (!isMultiTask && singleTask.name) {
         bindAgentName(state, singleTask.name, correlationId);
       }
-      emitTeammateStarted(pi, activeAgent, { id });
+      emitCurrentTeammateStarted(activeAgent, { id });
 
       let dispatchLifecyclePending = false;
       let singlePublishedResult: SingleResult | undefined;
@@ -4013,7 +4144,7 @@ export default function registerTeammateExtension(
             originCwd: result.originCwd ?? baseCwd,
             ...(result.name ? { name: result.name } : {}),
             agent: result.agent,
-            summary: displayMessageForResult(result).replace(/\s+/g, " ").trim().slice(0, 4_096),
+            summary: truncateUtf8Head(displayMessageForResult(result).replace(/\s+/g, " ").trim(), 4_096),
             outcome,
           };
         });
@@ -4036,16 +4167,16 @@ export default function registerTeammateExtension(
         results: readonly SingleResult[],
       ): Promise<boolean> => {
         if (!completionDurable || !completionSeed) return false;
-        await completionCoordinator.publishCompletion({
+        const publishResult = await completionCoordinator.publishCompletion({
           dispatchId: completionSeed.dispatchId,
           reservationId: completionSeed.reservationId,
           kind,
           outcome,
-          summary: summary.slice(0, 4_096),
+          summary: truncateUtf8Head(summary, 4_096),
           resources: durableResources(results),
           finalizedAt: Date.now(),
         });
-        return true;
+        return publishResult.finalized;
       };
       const publishDurableFailure = async (
         agent: string,
@@ -4081,11 +4212,23 @@ export default function registerTeammateExtension(
         return publishDurableCompletion("failure", "failed", message, [result]);
       };
       const notifyFailureWithFallback = (agent: string, error: unknown): void => {
-        void publishDurableFailure(agent, error).then((durable) => {
-          if (!durable) notifyBackgroundFailure(pi, id, agent, correlationId, error, state);
-        }).catch((durabilityError) => {
-          logDiagnosticWarn("[pi-maestro-teammate] durable failure publication failed; using direct delivery:", durabilityError);
-          notifyBackgroundFailure(pi, id, agent, correlationId, error, state);
+        void deliverDurableFailureWithFallback({
+          publishDurableFailure: () => publishDurableFailure(agent, error),
+          ownsDispatchGeneration,
+          fallback: () => notifyBackgroundFailure(
+            pi,
+            id,
+            agent,
+            correlationId,
+            error,
+            state,
+            dispatchProjection,
+          ),
+          onDurabilityError: (durabilityError) => {
+            logDiagnosticWarn("[pi-maestro-teammate] durable failure publication failed; using direct delivery:", durabilityError);
+          },
+        }).catch((deliveryError) => {
+          logDiagnosticWarn("[pi-maestro-teammate] direct failure delivery failed:", deliveryError);
         });
       };
       const deliverSingleCompletion = (): void => {
@@ -4117,6 +4260,7 @@ export default function registerTeammateExtension(
             isLogicallyWakeable(terminal),
             status === "terminated",
             toStructuredResults([terminal], baseCwd),
+            dispatchProjection,
           );
           // DEL-002: Use the published result for the notification content.
           // The terminal result may carry lifecycle diagnostics (e.g. "never
@@ -4165,6 +4309,7 @@ export default function registerTeammateExtension(
             isLogicallyWakeable(singleTerminalResult),
             singleTerminalStatus === "terminated",
             toStructuredResults([singleTerminalResult], baseCwd),
+            dispatchProjection,
           );
         }
       };
@@ -4220,6 +4365,7 @@ export default function registerTeammateExtension(
           graphPublication.wakeable,
           terminalStatus === "terminated",
           toStructuredResults(graphPublication.results, baseCwd),
+          dispatchProjection,
         );
         if (graphCompletionNotificationRequested) {
           const fallbackDelivery = (): void => {
@@ -4280,6 +4426,7 @@ export default function registerTeammateExtension(
           wakeable,
           terminalStatus === "terminated",
           toStructuredResults([result], baseCwd),
+          dispatchProjection,
         );
         if (!notifyModel) return;
         const lastMessage = displayMessageForResult(result);
@@ -4308,12 +4455,16 @@ export default function registerTeammateExtension(
           reservationId: additionalSeed.reservationId,
           kind: "additional",
           outcome: terminalStatus === "terminated" ? "terminated" : result.exitCode === 0 ? "completed" : "failed",
-          summary: lastMessage,
+          summary: truncateUtf8Head(lastMessage, 4_096),
           resources: durableResources([result]),
           finalizedAt: Date.now(),
-        }).catch((error) => {
-          logDiagnosticWarn("[pi-maestro-teammate] durable additional completion failed; using direct delivery:", error);
+        }).then((publishResult) => {
+          if (!publishResult.finalized) fallbackDelivery();
+        }, (error) => {
+          logDiagnosticWarn("[pi-maestro-teammate] durable additional completion failed before finalization; using direct delivery:", error);
           fallbackDelivery();
+        }).catch((error) => {
+          logDiagnosticWarn("[pi-maestro-teammate] post-finalize additional delivery handler failed; durable recovery retained:", error);
         });
       };
 
@@ -4557,6 +4708,7 @@ export default function registerTeammateExtension(
           let latestPendingProgress: AgentProgress | undefined;
 
           const processProgress = (data: AgentProgress) => {
+            if (!ownsDispatchGeneration()) return;
             activeAgent.lastActivityAt = Date.now();
             const progressKey = data.taskIndex ?? 0;
             const existing = progressState.get(progressKey);
@@ -4724,6 +4876,7 @@ export default function registerTeammateExtension(
           };
 
           const publishProgress = (data: AgentProgress) => {
+            if (!ownsDispatchGeneration()) return;
             const progressKey = data.taskIndex ?? 0;
             const entry = progressState.get(progressKey);
             if (!entry) return;
@@ -4735,6 +4888,7 @@ export default function registerTeammateExtension(
             // Broadcast the complete graph snapshot so overlays can switch views reliably.
             pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
               correlationId,
+              ...(dispatchProjection ? { projection: dispatchProjection } : {}),
               agent: data.agent,
               name: data.name,
               taskCorrelationId: entry.correlationId,
@@ -4768,13 +4922,19 @@ export default function registerTeammateExtension(
           };
 
           const flushGate = createProgressFlushGate(() => {
+            if (!ownsDispatchGeneration()) {
+              pendingByTask.clear();
+              latestPendingProgress = undefined;
+              return;
+            }
             const latest = latestPendingProgress;
             latestPendingProgress = undefined;
             flushProgressBatch(pendingByTask, latest, processProgress, publishProgress);
-          }, UPDATE_INTERVAL);
+          }, UPDATE_INTERVAL, ownsDispatchGeneration);
           progressFlushGate = flushGate;
 
           return (data: AgentProgress) => {
+            if (!ownsDispatchGeneration()) return;
             activeAgent.lastActivityAt = Date.now();
             const targetId = data.correlationId ?? taskCorrelationIds[data.taskIndex ?? 0] ?? correlationId;
             if (data.resultReadyAt !== undefined) {
@@ -4994,6 +5154,7 @@ export default function registerTeammateExtension(
               true,
               status === "terminated",
               toStructuredResults([terminalResult], baseCwd),
+              dispatchProjection,
             );
             const content = displayMessageForResult(terminalResult);
             if (!safeSendMessage(
@@ -5213,6 +5374,9 @@ export default function registerTeammateExtension(
             // Manual and timed detach share the same background completion path.
             await requireDurableNotification("graph");
             detached = true;
+            // Stop forwarding the caller tool-call signal abort into the graph
+            // run so background model candidates survive the tool-call teardown.
+            signal.removeEventListener("abort", abortForward);
             completeGraphInBackground(graphPromise);
             const detachText = race.reason === "timeout"
               ? `${normalizedTasks.length} tasks (${activeGraphMode}) moved to background after ${waitMs}ms.`
@@ -5299,6 +5463,12 @@ export default function registerTeammateExtension(
           await requireDurableNotification("single");
           markStallNotification();
           detached = true;
+          // Detaching hands the run to background. The caller's tool-call signal
+          // is about to be torn down when this tool call returns; stop forwarding
+          // its abort into the run so a still-in-flight model candidate in the
+          // background run is not cancelled (which would settle as `unknown` /
+          // externalReplayRisk and freeze the result behind the replay fence).
+          signal.removeEventListener("abort", abortForward);
           runPromise.then((result) => {
             if (!ownsDispatchGeneration()) return;
             publishSingleResult(result, true);
@@ -6061,14 +6231,18 @@ export default function registerTeammateExtension(
 
   monitorRegistry.setControls({
     async requestWindowMode(action) {
+      const fence = captureRootSessionFence();
+      if (!ownsRootSessionFence(fence)) throw new Error("Monitor session changed before window-mode request.");
       if (action === "enter") {
         await refreshWorkspacePeerOwners();
-        refreshSessionEndpointDirectory(true);
+        if (!ownsRootSessionFence(fence)) throw new Error("Monitor session changed during window discovery.");
         enterMonitorInteractionMode();
+        refreshSessionEndpointDirectory(true);
         monitorRegistry.setViewMode("windows");
         return;
       }
       exitMonitorInteractionMode();
+      refreshSessionEndpointDirectory(true);
     },
   });
 
@@ -6554,7 +6728,7 @@ export default function registerTeammateExtension(
       || state.currentSessionId !== ctx.sessionManager.getSessionId()) {
       throw new Error("Current Pi session changed during delegation setup.");
     }
-    if (source.workspaceId !== workspaceIdForCwd(ctx.cwd)) {
+    if (!workspaceIdentityMatchesCwd(source.workspaceId, ctx.cwd)) {
       throw new Error("Delegation source belongs to a different workspace.");
     }
     const currentSessionFile = ctx.sessionManager.getSessionFile();
@@ -6815,7 +6989,7 @@ export default function registerTeammateExtension(
       throw new Error(`Delegation ${initialRecord.id} is ${initialRecord.status} and cannot be sent.`);
     }
     const generation = state.sessionGeneration;
-    if (initialRecord.source.workspaceId !== workspaceIdForCwd(ctx.cwd)) {
+    if (!workspaceIdentityMatchesCwd(initialRecord.source.workspaceId, ctx.cwd)) {
       throw new Error("Delegation source belongs to a different workspace.");
     }
     if (initialRecord.workerContext === "fork") {
@@ -8643,6 +8817,9 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     }
     state.namedAgents.clear();
     state.currentSessionId = null;
+    state.currentWorkspaceId = undefined;
+    state.currentSourceId = undefined;
+    state.settlementOwner = undefined;
     widgetCtx?.ui.setWidget("teammate-agents", undefined);
     widgetCtx = null;
     setPersistentUi(undefined);
@@ -9271,6 +9448,9 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
    * via observe/teammate-watch and safeSendMessage already logged the drop.
    */
   const notifyStalled = (message: string, agent: ActiveAgent): void => {
+    const fence = captureRootSessionFence();
+    const projection = projectionForRootFence(fence);
+    if (!projection || !ownsRootSessionFence(fence)) return;
     refreshAgentRuntimeProjection(agent);
     const diagnosis = diagnoseAgentRuntime({
       status: agent.status,
@@ -9298,6 +9478,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     };
     const stallEvent = {
       ...stallProgress,
+      projection,
       correlationId: agent.correlationId,
       taskCorrelationId: agent.correlationId,
       progress: [stallProgress],
@@ -9323,9 +9504,16 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     widgetTimer = setInterval(() => {
       // A result-ready zombie keeps hasTeammateWidgetWork true, so this tick is
       // exactly where it stays reachable until reclaimed. Publishing the
-      // retirement keeps delta-only consumers (cockpit roster) in sync.
+      // retirement keeps delta-only consumers (cockpit roster) in sync. Capture
+      // the projection once so every completion in this sweep carries the exact
+      // session/source/generation owned by the tick that admitted reclamation.
+      const reclaimFence = captureRootSessionFence();
+      const reclaimProjection = projectionForRootFence(reclaimFence);
+      const resultReadyRetired = reclaimProjection && ownsRootSessionFence(reclaimFence)
+        ? reclaimResultReadyAgents(state, pi, Date.now(), reclaimProjection)
+        : [];
       const retired = [
-        ...reclaimResultReadyAgents(state, pi),
+        ...resultReadyRetired,
         ...sweepFailedAgents(state),
       ];
       // Before the wakeable budget can retire a silent agent, surface the stall
@@ -9424,9 +9612,11 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     startWidgetTimer();
   }));
   disposers.push(pi.events.on(TEAMMATE_COMPLETE_EVENT, () => {
+    const fence = captureRootSessionFence();
     markWorkspacePeerDirty();
     publishRuntimeReadDelta();
     setTimeout(() => {
+      if (!ownsRootSessionFence(fence)) return;
       const retired = enforceWakeableAgentBudget(state);
       if (retired.length > 0) publishRuntimeReadDelta();
       updateAgentWidget();
@@ -9447,26 +9637,34 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
 
   pi.on("session_start", (event, ctx) => {
     registerTeammateSettings();
+    state.settlementOwner = undefined;
     state.sessionGeneration = (state.sessionGeneration ?? 0) + 1;
     state.currentSessionId = ctx.sessionManager?.getSessionId() ?? null;
     state.baseCwd = ctx.cwd;
+    state.currentWorkspaceId = completionWorkspaceId(ctx.cwd);
+    state.currentSourceId = state.currentSessionId ?? undefined;
+    reconcileSettledAgentsForSession(state, {
+      preserveExact: event?.reason === "resume" || event?.reason === "reload",
+    });
     bindStateTurnRecorder();
     rebuildTurnLedger(ctx.sessionManager?.getEntries?.() ?? []);
-    if (state.currentSessionId) void initializeRuntimeReadModel(ctx.cwd, state.currentSessionId);
+    if (state.currentSourceId) void initializeRuntimeReadModel(ctx.cwd, state.currentSourceId);
     const completionSessionId = state.currentSessionId;
-    const completionWorkspaceId = workspaceIdForCwd(ctx.cwd);
+    const boundCompletionWorkspace = completionWorkspaceIdentity(ctx.cwd);
+    const boundCompletionWorkspaceId = boundCompletionWorkspace.workspaceId;
     const completionGeneration = state.sessionGeneration;
     if (completionSessionId) {
       void completionCoordinator.bindSession({
         target: {
-          workspaceId: completionWorkspaceId,
+          workspaceId: boundCompletionWorkspaceId,
           sessionId: completionSessionId,
         },
+        legacyWorkspaceIds: boundCompletionWorkspace.legacyWorkspaceIds,
         entries: ctx.sessionManager?.getEntries?.() ?? [],
         send(envelope: CompletionDeliveryEnvelope) {
           return state.currentSessionId === completionSessionId
             && state.sessionGeneration === completionGeneration
-            && workspaceIdForCwd(state.baseCwd) === completionWorkspaceId
+            && workspaceIdForCwd(state.baseCwd) === boundCompletionWorkspaceId
             // deliverAs: "steer" (not "followUp") so a replayed teammate-complete
             // is drained at the next turn boundary (right after the current tool
             // call finishes) instead of waiting for the agent to fully stop.
@@ -9665,11 +9863,20 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     widgetCtx = ctx;
     installMonitorEscapeTap(ctx.ui);
     setPersistentUi(ctx.ui);
+    const previousFence = captureRootSessionFence();
     state.baseCwd = ctx.cwd;
+    state.currentSessionId = ctx.sessionManager?.getSessionId() ?? null;
+    state.currentWorkspaceId = completionWorkspaceId(ctx.cwd);
+    state.currentSourceId = state.currentSessionId ?? undefined;
+    const projectionChanged = !ownsRootSessionFence(previousFence);
+    if (projectionChanged) {
+      reconcileSettledAgentsForSession(state, { preserveExact: true });
+      bindStateTurnRecorder();
+      void initializeRuntimeReadModel(ctx.cwd, state.currentSourceId ?? "");
+    }
     // Rebind if compaction moved to a different workspace.
     rebindMailboxHostForSession();
     void refreshModelCatalogSources(ctx);
-    state.currentSessionId = ctx.sessionManager?.getSessionId() ?? null;
     workspacePeerSessionName = ctx.sessionManager?.getSessionName?.() ?? undefined;
     // Compaction/rebind rotates ownerNonce and the WindowSupervisor actor generation.
     startWorkspacePeers(ctx);
@@ -9679,6 +9886,12 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
 
   pi.on("session_shutdown", async (event) => {
     const shutdownReason = event?.reason ?? "quit";
+    const outgoingFence = captureRootSessionFence();
+    state.settlementOwner = projectionForRootFence(outgoingFence);
+    const closingRuntimeReadHandle = runtimeReadHandle;
+    runtimeReadHandle = undefined;
+    runtimeReadToken += 1;
+    cancelRuntimeReadHandle(closingRuntimeReadHandle);
     state.sessionGeneration = (state.sessionGeneration ?? 0) + 1;
     state.currentSessionId = null;
     workspaceTerminalResultState.settled = true;
@@ -9699,11 +9912,8 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     disposeTeammateSettings();
     stopWidgetTimer();
     stopWakeableEvictionTimer();
-    if (runtimeReadRefreshTimer) clearInterval(runtimeReadRefreshTimer);
-    runtimeReadRefreshTimer = undefined;
-    const closingRuntimeReadBridge = runtimeReadBridge;
-    runtimeReadBridge = undefined;
     runtimeReadReady = false;
+    const closingRuntimeReadBridge = closingRuntimeReadHandle?.bridge;
     if (closingRuntimeReadBridge) {
       await closingRuntimeReadBridge.publish([]).catch((error) => {
         logDiagnosticWarn("[pi-maestro-teammate] Runtime V2 terminal tombstone publish failed:", error);
@@ -9752,7 +9962,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
       }
       sessionHostRegistry = undefined;
     }
-    void stoppedMailbox?.stop().catch((error) => {
+    await stoppedMailbox?.stop().catch((error) => {
       logDiagnosticError(`[pi-maestro-teammate] mailbox host stop failed:`, error);
     });
     teardownRootSession();
@@ -9771,6 +9981,7 @@ import {
   cancelProxyDispatch,
   clearAgentResultReadyState,
   createTeammateInteractionQueue,
+  deliverDurableFailureWithFallback,
   emitComplete,
   enforceWakeableAgentBudget,
   findSettledAgent,
@@ -9784,6 +9995,7 @@ import {
   notifyBackgroundFailure,
   progressDurationMs,
   reclaimResultReadyAgents,
+  reconcileSettledAgentsForSession,
   resolveAgentCorrelationId,
   resolveLocalAgentSenderContext,
   resolveWatchTarget,

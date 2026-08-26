@@ -239,7 +239,7 @@ export interface ProgressFlushGate {
     flush(): void;
     dispose(): void;
 }
-export declare function createProgressFlushGate(onFlush: () => void, intervalMs?: number): ProgressFlushGate;
+export declare function createProgressFlushGate(onFlush: () => void, intervalMs?: number, ownsGeneration?: () => boolean): ProgressFlushGate;
 export declare function flushProgressBatch<T>(pending: Map<number, T>, latest: T | undefined, apply: (value: T) => void, publish: (latestValue: T) => void): void;
 export declare function runWithProgressFlushCleanup<T>(run: () => Promise<T>, gate: ProgressFlushGate | undefined): Promise<T>;
 export interface AgentWidgetTheme {
@@ -354,7 +354,7 @@ export declare function applyTeammateAgentCommand(state: TeammateState, pi: Agen
     error?: string;
 }, payload: unknown): Promise<void>;
 /** Reactivate a wakeable child and republish it to lifecycle-only consumers. */
-export declare function wakeSleepingAgent(pi: ExtensionAPI, agent: ActiveAgent, now?: number): boolean;
+export declare function wakeSleepingAgent(pi: ExtensionAPI, agent: ActiveAgent, now?: number, projection?: import("../shared/types.ts").SessionProjectionIdentity): boolean;
 export declare function buildAgentSelectorRows(agents: ActiveAgent[]): AgentSelectorRow[];
 /**
  * Rows for completed teammate sessions recovered from disk after a restart.

@@ -32,6 +32,10 @@ export {
   type RuntimeBrokerClientOptions,
 } from "../../runtime-broker/client.ts";
 export {
+  getRuntimeWorkspaceIdentity,
+  type RuntimeWorkspaceIdentity,
+} from "../../runtime-broker/private-state.ts";
+export {
   probeRuntimeBrokerCapability,
   type RuntimeBrokerCapability,
 } from "../../runtime-broker/capability.ts";

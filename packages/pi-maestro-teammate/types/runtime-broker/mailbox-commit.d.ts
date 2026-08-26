@@ -1,5 +1,5 @@
 import { RuntimeBrokerClient, type RuntimeBrokerClientOptions } from "./client.ts";
-import type { RuntimeBrokerCommitResult } from "./contracts.ts";
+import { type RuntimeBrokerCommitResult } from "./contracts.ts";
 import type { MailboxEnvelope } from "../extension/mailbox/types.ts";
 export interface RuntimeBrokerMailboxCommitterOptions {
     stateDirectory: string;
@@ -12,6 +12,8 @@ export declare function runtimeBrokerMailboxStreamId(messageId: string): string;
 export declare class RuntimeBrokerMailboxCommitter {
     #private;
     constructor(options: RuntimeBrokerMailboxCommitterOptions);
+    prewarm(): void;
     commit(envelope: MailboxEnvelope): Promise<RuntimeBrokerCommitResult>;
+    commitIfReady(envelope: MailboxEnvelope): Promise<RuntimeBrokerCommitResult | undefined>;
     close(): Promise<void>;
 }

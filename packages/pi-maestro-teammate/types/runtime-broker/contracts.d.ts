@@ -1,6 +1,6 @@
 export declare const RUNTIME_BROKER_PROTOCOL: "pi.runtime-broker";
 export declare const RUNTIME_BROKER_PROTOCOL_VERSION: 1;
-export declare const RUNTIME_BROKER_SCHEMA_VERSION: 2;
+export declare const RUNTIME_BROKER_SCHEMA_VERSION: 3;
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | {
     [key: string]: JsonValue;
@@ -105,6 +105,32 @@ export interface RuntimeBrokerListStreamsRequest {
     afterStreamId?: string;
     limit: number;
 }
+export interface RuntimeBrokerReadEventsPageRequest extends RuntimeBrokerStreamAuthorization {
+    streamId: string;
+    afterRevision: number;
+    /** Stable upper bound returned by the first page, preserving a finite replay snapshot. */
+    throughRevision?: number;
+    limit: number;
+}
+export interface RuntimeBrokerReadEventsPage {
+    events: StoredRuntimeBrokerEvent[];
+    nextRevision: number;
+    throughRevision: number;
+    done: boolean;
+}
+export interface RuntimeBrokerProbeRequest {
+    challenge: string;
+}
+export interface RuntimeBrokerProbeResult {
+    protocol: typeof RUNTIME_BROKER_PROTOCOL;
+    version: typeof RUNTIME_BROKER_PROTOCOL_VERSION;
+    schemaVersion: typeof RUNTIME_BROKER_SCHEMA_VERSION;
+    workspaceId: string;
+    daemonToken: string;
+    generation: string;
+    readiness: "ready";
+    challenge: string;
+}
 export interface StoredRuntimeBrokerEvent {
     eventId: string;
     messageId: string;
@@ -138,7 +164,7 @@ export interface StoredRuntimeBrokerOutboxMessage {
     deliveredAt?: number;
     attempts: number;
 }
-export type RuntimeBrokerMethod = "commit" | "lease.acquire" | "lease.heartbeat" | "lease.compare-and-swap" | "lease.takeover" | "lease.release" | "stream.revision" | "stream.events" | "stream.list" | "read-model.events" | "read-model.sources";
+export type RuntimeBrokerMethod = "broker.probe" | "commit" | "lease.acquire" | "lease.heartbeat" | "lease.compare-and-swap" | "lease.takeover" | "lease.release" | "stream.revision" | "stream.events" | "stream.events.page" | "stream.list" | "read-model.events" | "read-model.sources";
 export interface RuntimeBrokerRequestEnvelope<TParams = JsonValue> {
     protocol: typeof RUNTIME_BROKER_PROTOCOL;
     version: typeof RUNTIME_BROKER_PROTOCOL_VERSION;

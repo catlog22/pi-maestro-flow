@@ -6,7 +6,10 @@ import {
 } from "../runtime-broker/actor-host.ts";
 import { RuntimeBrokerClient } from "../runtime-broker/client.ts";
 import { assertJsonValue, type ActorLease, type JsonValue } from "../runtime-broker/contracts.ts";
-import { canonicalizeRuntimeBrokerWorkspace } from "../runtime-broker/private-state.ts";
+import {
+  getRuntimeBrokerStateDirectory,
+  getRuntimeWorkspaceIdentity,
+} from "../runtime-broker/private-state.ts";
 import { runtimeBrokerModeFromEnv } from "../runtime-broker/rollout.ts";
 import {
   RUNTIME_V2_REVISION,
@@ -22,6 +25,7 @@ import {
   parseRuntimeReadModelSourceFrameV2,
   type RuntimeAgentReadEntityV2,
   type RuntimeReadModelChangeV2,
+  type RuntimeReadModelOwnershipV2,
   type RuntimeReadModelSnapshotV2,
   type RuntimeReadModelSourceFrameV2,
 } from "./read-model.ts";
@@ -32,8 +36,13 @@ const RUNTIME_READ_MODEL_FRAME_MAX_BYTES = 128 * 1024;
 export interface RuntimeReadModelBrokerBridgeOptions {
   cwd: string;
   sourceId: string;
+  /** Pi session projected by this source; defaults to sourceId for compatibility. */
+  sessionId?: string;
+  /** Monotonic session/source incarnation; defaults to 1 for compatibility. */
+  sessionGeneration?: number;
   mode?: "sqlite";
   client?: RuntimeBrokerClient;
+  readScope?: "workspace" | "source";
 }
 
 /**
@@ -44,10 +53,12 @@ export interface RuntimeReadModelBrokerBridgeOptions {
 export class RuntimeReadModelBrokerBridge {
   readonly workspaceId: string;
   readonly sourceStreamId: string;
+  readonly projection: RuntimeReadModelOwnershipV2;
   readonly #actor: ActorAddressV2;
   readonly #client: RuntimeBrokerClient;
   readonly #ownsClient: boolean;
   readonly #lease: ActorLease;
+  readonly #readScope: "workspace" | "source";
   #streamRevision: number;
   #sourceRevision = 0;
   #previousAgents = new Map<string, RuntimeAgentReadEntityV2>();
@@ -67,14 +78,18 @@ export class RuntimeReadModelBrokerBridge {
     ownsClient: boolean;
     lease: ActorLease;
     streamRevision: number;
+    readScope: "workspace" | "source";
+    projection: RuntimeReadModelOwnershipV2;
   }) {
     this.workspaceId = input.workspaceId;
     this.sourceStreamId = input.sourceStreamId;
+    this.projection = { ...input.projection };
     this.#actor = input.actor;
     this.#client = input.client;
     this.#ownsClient = input.ownsClient;
     this.#lease = input.lease;
     this.#streamRevision = input.streamRevision;
+    this.#readScope = input.readScope;
     this.#heartbeatTimer = setInterval(() => {
       void this.#client.heartbeatLease({
         actorId: this.#lease.actorId,
@@ -91,9 +106,23 @@ export class RuntimeReadModelBrokerBridge {
     if ((options.mode ?? runtimeBrokerModeFromEnv()) !== "sqlite") {
       throw new Error("Runtime V2 canonical reads require the sqlite Runtime Broker");
     }
-    const workspaceId = createHash("sha256")
-      .update(canonicalizeRuntimeBrokerWorkspace(options.cwd), "utf8")
-      .digest("hex");
+    const readScope = options.readScope ?? "workspace";
+    if (readScope !== "workspace" && readScope !== "source") {
+      throw new Error("Runtime V2 read scope must be workspace or source");
+    }
+    const workspaceIdentity = getRuntimeWorkspaceIdentity(options.cwd);
+    const workspaceId = workspaceIdentity.workspaceId;
+    const sessionId = options.sessionId ?? options.sourceId;
+    const sessionGeneration = options.sessionGeneration ?? 1;
+    if (!sessionId || !Number.isSafeInteger(sessionGeneration) || sessionGeneration < 1) {
+      throw new Error("Runtime V2 projection session identity is invalid");
+    }
+    const projection: RuntimeReadModelOwnershipV2 = {
+      workspaceId,
+      sessionId,
+      sourceId: options.sourceId,
+      generation: sessionGeneration,
+    };
     const sourceKey = createHash("sha256").update(options.sourceId, "utf8").digest("hex").slice(0, 24);
     const sourceStreamId = `runtime-read-model:${workspaceId}:${sourceKey}`;
     const actor: ActorAddressV2 = {
@@ -104,7 +133,9 @@ export class RuntimeReadModelBrokerBridge {
       actorId: `runtime-read-model:${sourceKey}`,
       generation: 1,
     };
-    const client = options.client ?? await RuntimeBrokerClient.connectOrStart();
+    const client = options.client ?? await RuntimeBrokerClient.connectOrStart({
+      stateDirectory: getRuntimeBrokerStateDirectory(options.cwd),
+    });
     const ownsClient = options.client === undefined;
     try {
       const lease = await client.acquireLease({
@@ -122,6 +153,8 @@ export class RuntimeReadModelBrokerBridge {
         ownsClient,
         lease,
         streamRevision,
+        readScope,
+        projection,
       });
     } catch (error) {
       if (ownsClient) await client.close().catch(() => undefined);
@@ -179,7 +212,10 @@ export class RuntimeReadModelBrokerBridge {
           this.#streamRevision = result.revision;
           this.#sourceRevision = frame.source.revision;
         }
-        this.#previousAgents = new Map(agents.map((agent) => [agent.correlationId, structuredClone(agent)]));
+        this.#previousAgents = new Map(agents.map((agent) => [agent.correlationId, {
+          ...structuredClone(agent),
+          projection: { ...this.projection },
+        }]));
         snapshot = await this.#loadSnapshot();
       });
     } catch (error) {
@@ -219,7 +255,10 @@ export class RuntimeReadModelBrokerBridge {
     agents: readonly RuntimeAgentReadEntityV2[],
     reset: boolean,
   ): RuntimeReadModelSourceFrameV2[] {
-    const next = new Map(agents.map((agent) => [agent.correlationId, agent]));
+    const next = new Map(agents.map((agent) => [agent.correlationId, {
+      ...structuredClone(agent),
+      projection: { ...this.projection },
+    }]));
     const changes: RuntimeReadModelChangeV2[] = [];
     for (const entity of next.values()) {
       const previous = reset ? undefined : this.#previousAgents.get(entity.correlationId);
@@ -253,6 +292,7 @@ export class RuntimeReadModelBrokerBridge {
         streamId: this.sourceStreamId,
         revision: this.#sourceRevision + index + 1,
         generation: this.#lease.epoch,
+        projection: { ...this.projection },
       },
       batchId,
       batchIndex: index,
@@ -319,8 +359,26 @@ export class RuntimeReadModelBrokerBridge {
         .filter((source) => source.active)
         .map((source) => [source.streamId, source.generation]),
     );
+    const visibleSources = this.#readScope === "source"
+      ? new Map(
+        activeSources.has(this.sourceStreamId)
+          ? [[this.sourceStreamId, activeSources.get(this.sourceStreamId)!]]
+          : [],
+      )
+      : activeSources;
     this.#sourceStateSignature = sourceStateSignature;
-    this.#cachedSnapshot = this.#accumulator.snapshot(this.workspaceId, activeSources);
+    this.#cachedSnapshot = this.#accumulator.snapshot(
+      this.workspaceId,
+      visibleSources,
+      this.#readScope === "source"
+        ? {
+          streamId: this.sourceStreamId,
+          revision: Math.max(1, this.#accumulator.cursor),
+          generation: this.#lease.epoch,
+          projection: { ...this.projection },
+        }
+        : undefined,
+    );
     return structuredClone(this.#cachedSnapshot);
   }
 

@@ -1,11 +1,16 @@
 import type { AgentStatus } from "../shared/types.ts";
 import { RuntimeBrokerClient } from "../runtime-broker/client.ts";
-import { type RuntimeAgentReadEntityV2, type RuntimeReadModelSnapshotV2 } from "./read-model.ts";
+import { type RuntimeAgentReadEntityV2, type RuntimeReadModelOwnershipV2, type RuntimeReadModelSnapshotV2 } from "./read-model.ts";
 export interface RuntimeReadModelBrokerBridgeOptions {
     cwd: string;
     sourceId: string;
+    /** Pi session projected by this source; defaults to sourceId for compatibility. */
+    sessionId?: string;
+    /** Monotonic session/source incarnation; defaults to 1 for compatibility. */
+    sessionGeneration?: number;
     mode?: "sqlite";
     client?: RuntimeBrokerClient;
+    readScope?: "workspace" | "source";
 }
 /**
  * V1 lifecycle events are admitted through this bridge, but only the broker
@@ -16,6 +21,7 @@ export declare class RuntimeReadModelBrokerBridge {
     #private;
     readonly workspaceId: string;
     readonly sourceStreamId: string;
+    readonly projection: RuntimeReadModelOwnershipV2;
     private constructor();
     static connect(options: RuntimeReadModelBrokerBridgeOptions): Promise<RuntimeReadModelBrokerBridge>;
     get generation(): number;

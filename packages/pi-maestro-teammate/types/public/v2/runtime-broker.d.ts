@@ -14,6 +14,7 @@ export interface RuntimeActorHostClientOptions {
 export declare function createRuntimeActorHost(options?: RuntimeActorHostClientOptions): RuntimeActorHostClient;
 export * from "../../runtime-broker/contracts.ts";
 export { RuntimeBrokerClient, type RuntimeBrokerClientOptions, } from "../../runtime-broker/client.ts";
+export { getRuntimeWorkspaceIdentity, type RuntimeWorkspaceIdentity, } from "../../runtime-broker/private-state.ts";
 export { probeRuntimeBrokerCapability, type RuntimeBrokerCapability, } from "../../runtime-broker/capability.ts";
 export { RUNTIME_BROKER_ENV_VAR, createRuntimeTransport, parseRuntimeBrokerMode, runtimeBrokerModeFromEnv, selectRuntimeTransport, type RuntimeBrokerMode, type RuntimeTransportRolloutOptions, type RuntimeTransportSelection, } from "../../runtime-broker/rollout.ts";
 export type { RuntimeTransport, RuntimeTransportDeliveryMode, RuntimeTransportDeliveryState, RuntimeTransportDispatch, RuntimeTransportDriver, RuntimeTransportEnqueueFailureCode, RuntimeTransportEnqueueRequest, RuntimeTransportEnqueueResult, RuntimeTransportFactory, RuntimeTransportMessage, RuntimeTransportMessageKind, RuntimeTransportPriority, SqliteRuntimeTransportClient, } from "../../runtime-broker/transport.ts";

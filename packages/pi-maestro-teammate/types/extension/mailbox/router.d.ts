@@ -68,3 +68,5 @@ export declare class MailboxRouter {
         reason?: string;
     }>;
 }
+/** Hash only caller-controlled logical request data, never generated timestamps/messageIds. */
+export declare function computeMailboxRequestHash(request: MailboxEnqueueRequest): string;

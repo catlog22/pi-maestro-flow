@@ -16,24 +16,24 @@ export class RuntimeBrokerLeaseManager {
     this.#store = store;
   }
 
-  acquire(request: AcquireLeaseRequest): ActorLease {
-    return this.#store.acquireLease(request);
+  acquire(request: AcquireLeaseRequest, requestId?: string): ActorLease {
+    return this.#store.acquireLease(request, requestId);
   }
 
-  heartbeat(request: HeartbeatLeaseRequest): ActorLease {
-    return this.#store.heartbeatLease(request);
+  heartbeat(request: HeartbeatLeaseRequest, requestId?: string): ActorLease {
+    return this.#store.heartbeatLease(request, requestId);
   }
 
-  compareAndSwap(request: CompareAndSwapLeaseRequest): ActorLease {
-    return this.#store.compareAndSwapLease(request);
+  compareAndSwap(request: CompareAndSwapLeaseRequest, requestId?: string): ActorLease {
+    return this.#store.compareAndSwapLease(request, requestId);
   }
 
-  takeover(request: TakeoverLeaseRequest): ActorLease {
-    return this.#store.takeoverLease(request);
+  takeover(request: TakeoverLeaseRequest, requestId?: string): ActorLease {
+    return this.#store.takeoverLease(request, requestId);
   }
 
-  release(request: ReleaseLeaseRequest): void {
-    this.#store.releaseLease(request);
+  release(request: ReleaseLeaseRequest, requestId?: string): void {
+    this.#store.releaseLease(request, requestId);
   }
 
   current(actorId: string): ActorLease | undefined {

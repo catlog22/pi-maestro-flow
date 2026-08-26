@@ -4,10 +4,10 @@ import { RuntimeBrokerSqliteStore } from "./sqlite-store.ts";
 export declare class RuntimeBrokerLeaseManager {
     #private;
     constructor(store: RuntimeBrokerSqliteStore);
-    acquire(request: AcquireLeaseRequest): ActorLease;
-    heartbeat(request: HeartbeatLeaseRequest): ActorLease;
-    compareAndSwap(request: CompareAndSwapLeaseRequest): ActorLease;
-    takeover(request: TakeoverLeaseRequest): ActorLease;
-    release(request: ReleaseLeaseRequest): void;
+    acquire(request: AcquireLeaseRequest, requestId?: string): ActorLease;
+    heartbeat(request: HeartbeatLeaseRequest, requestId?: string): ActorLease;
+    compareAndSwap(request: CompareAndSwapLeaseRequest, requestId?: string): ActorLease;
+    takeover(request: TakeoverLeaseRequest, requestId?: string): ActorLease;
+    release(request: ReleaseLeaseRequest, requestId?: string): void;
     current(actorId: string): ActorLease | undefined;
 }

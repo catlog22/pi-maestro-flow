@@ -25,7 +25,7 @@ export type SessionDeliveryStage = "queued" | "injected";
 export declare function normalizeSessionMessageKind(kind: SessionMessageKind | undefined, trustedStatus?: boolean): SessionMessageKind | undefined;
 /** Status messages update context but never start a model turn by themselves. */
 export declare function sessionMessageTriggersTurn(kind: SessionMessageKind | undefined): boolean;
-export type SessionEndpointCapability = "inspect" | "message" | "steer" | "follow_up" | "abort" | "wake" | "flow-schedule-todo-binding" | "flow-schedule-todo-projection" | "flow-schedule-todo-mutation" | "flow-schedule-report";
+export type SessionEndpointCapability = "inspect" | "message" | "steer" | "follow_up" | "abort" | "wake" | "monitor-workspace-aggregation" | "flow-schedule-todo-binding" | "flow-schedule-todo-projection" | "flow-schedule-todo-mutation" | "flow-schedule-report";
 export interface SessionEndpointIdentity {
     workspaceId: string;
     ownerId: string;
@@ -45,6 +45,9 @@ export interface SessionEndpoint extends SessionEndpointIdentity {
     /** Hash of semantic content; heartbeat-only timestamps are not projected. */
     contentRevision: string;
     sessionId?: string;
+    /** Projection producer and monotonic incarnation for local isolation. */
+    sourceId?: string;
+    generation?: number;
     sessionName?: string;
     name?: string;
     agent?: string;
@@ -70,6 +73,9 @@ export interface SessionOwnerProjection extends Omit<SessionEndpointIdentity, "c
     /** Optional caller-side proxy transport; root hosts use the scope defaults. */
     transport?: SessionEndpointTransport;
     sessionId?: string;
+    /** Projection producer and monotonic incarnation for local isolation. */
+    sourceId?: string;
+    generation?: number;
     sessionName?: string;
     contextPressure?: number;
     /** Extra root-endpoint capabilities this owner advertises (e.g. flow-schedule-todo-binding). */

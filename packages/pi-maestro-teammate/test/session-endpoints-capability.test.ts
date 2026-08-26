@@ -92,7 +92,7 @@ test("worker owner snapshot propagates Todo-binding capability to the Monitor pe
     settled: [],
     sessionId: "worker-session",
   }, 100);
-  assert.deepEqual(remote.capabilities, ["flow-schedule-todo-binding"]);
+  assert.deepEqual(remote.capabilities, ["flow-schedule-todo-binding", "flow-schedule-todo-projection"]);
 
   registration.dispose();
   const endpoints = projectTeammateSessionEndpoints(
@@ -118,4 +118,64 @@ test("root endpoint without extraCapabilities has only the base 4 capabilities",
   const projected = projectSessionEndpoints([localOwner()]);
   const root = projected.find((e) => e.kind === "root")!;
   assert.deepEqual([...root.capabilities].sort(), ["follow_up", "inspect", "message", "steer"]);
+});
+
+test("local settled projection excludes prior sessions and carries current source generation", () => {
+  const state = {
+    activeRuns: new Map(),
+    currentWorkspaceId: "workspace-current",
+    currentSessionId: "session-current",
+    currentSourceId: "source-current",
+    sessionGeneration: 4,
+    recentlySettled: new Map([
+      ["stale", {
+        correlationId: "stale",
+        agent: "general",
+        status: "completed",
+        settledAt: 1,
+        workspaceId: "workspace-old",
+        sessionId: "session-old",
+        sourceId: "source-old",
+        sessionGeneration: 3,
+      }],
+      ["current", {
+        correlationId: "current",
+        agent: "general",
+        status: "completed",
+        settledAt: 2,
+        workspaceId: "workspace-current",
+        sessionId: "session-current",
+        sourceId: "source-current",
+        sessionGeneration: 4,
+      }],
+    ]),
+  } as unknown as TeammateState;
+  const endpoints = projectTeammateSessionEndpoints(
+    state,
+    { workspaceId: "workspace-current", ownerId: "a".repeat(32), ownerNonce: "b".repeat(32) },
+    [],
+  );
+  assert.deepEqual(
+    endpoints.filter((endpoint) => endpoint.kind === "agent").map((endpoint) => endpoint.correlationId),
+    ["current"],
+  );
+  const current = endpoints.find((endpoint) => endpoint.correlationId === "current");
+  assert.equal(current?.sessionId, "session-current");
+  assert.equal(current?.sourceId, "source-current");
+  assert.equal(current?.generation, 4);
+});
+
+test("workspace aggregation is advertised only for explicit Monitor projection", () => {
+  const state = {
+    activeRuns: new Map(),
+    currentWorkspaceId: "workspace-current",
+    currentSessionId: "session-current",
+    currentSourceId: "source-current",
+    sessionGeneration: 4,
+  } as unknown as TeammateState;
+  const identity = { workspaceId: "workspace-current", ownerId: "a".repeat(32), ownerNonce: "b".repeat(32) };
+  const local = projectTeammateSessionEndpoints(state, identity, [], undefined, false);
+  const monitor = projectTeammateSessionEndpoints(state, identity, [], undefined, true);
+  assert.equal(local[0]?.capabilities.includes("monitor-workspace-aggregation"), false);
+  assert.equal(monitor[0]?.capabilities.includes("monitor-workspace-aggregation"), true);
 });

@@ -6,7 +6,7 @@
 import { EventEmitter } from "node:events";
 import { MailboxConsumer, type MailboxDispatchDisposition } from "./consumer.ts";
 import { MailboxFileStore } from "./file-store.ts";
-import { MailboxGC, QuotaAdmission } from "./gc.ts";
+import { MailboxGC, QuotaAdmission, type GCResult } from "./gc.ts";
 import { type MailboxAuthority, MailboxRouter } from "./router.ts";
 import type { MessageProvenanceV1 } from "../../shared/types.ts";
 import { type MailboxEnvelope, type MailboxEnqueueResult, type MailboxMessageKind, type MailboxDeliveryMode, type MailboxPaths } from "./types.ts";
@@ -33,6 +33,8 @@ export interface MailboxServiceOptions {
     onDispatch: (envelope: MailboxEnvelope) => Promise<MailboxDispatchDisposition | void>;
     /** Poll interval for the consumer. */
     pollMs?: number;
+    /** Host reconciliation must settle before enqueues or consumer activation. */
+    startupBarrier?: Promise<void>;
     now?: () => number;
 }
 export declare class MailboxService extends EventEmitter {
@@ -77,11 +79,8 @@ export declare class MailboxService extends EventEmitter {
      * Transitions ACCEPTED → APPLIED.
      */
     acknowledge(messageId: string): Promise<boolean>;
-    /** Run garbage collection. */
-    runGC(): Promise<{
-        removed: number;
-        errors: string[];
-    }>;
+    /** Run garbage collection. Every admitted sweep is drained by stop(). */
+    runGC(): Promise<GCResult>;
     /** Check if there is pending mail for the recipient (blocks eviction). */
     hasPendingMail(): Promise<boolean>;
     /** Get pending mail count for observability. */

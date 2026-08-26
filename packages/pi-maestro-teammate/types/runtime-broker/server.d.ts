@@ -4,12 +4,19 @@ export interface RuntimeBrokerServerOptions {
     stateDirectory?: string;
     databasePath?: string;
     maxLineBytes?: number;
+    daemonToken?: string;
+    daemonGeneration?: string;
+    /** Production daemon fence; direct embedded servers may omit it. */
+    assertDaemonAuthority?: () => boolean | void;
 }
 export declare class RuntimeBrokerServer {
     #private;
     readonly stateDirectory: string;
     readonly databasePath: string;
     readonly endpoint: string;
+    readonly daemonToken: string;
+    readonly daemonGeneration: string;
+    readonly workspaceId: string;
     constructor(options?: RuntimeBrokerServerOptions);
     listen(): Promise<void>;
     close(): Promise<void>;

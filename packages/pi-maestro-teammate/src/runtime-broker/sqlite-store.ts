@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { performance } from "node:perf_hooks";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import {
   RUNTIME_BROKER_SCHEMA_VERSION,
@@ -20,6 +21,8 @@ import {
   type RuntimeBrokerCommitRequest,
   type RuntimeBrokerCommitResult,
   type RuntimeBrokerListStreamsRequest,
+  type RuntimeBrokerReadEventsPage,
+  type RuntimeBrokerReadEventsPageRequest,
   type RuntimeBrokerReadModelSourceState,
   type StoredRuntimeBrokerCursorEvent,
   type StoredRuntimeBrokerEvent,
@@ -31,7 +34,12 @@ import { normalizePersistedRuntimeEventV2 } from "../runtime-v2/validation.ts";
 type SqliteRow = Record<string, unknown>;
 
 const RUNTIME_READ_MODEL_PAGE_MAX_BYTES = 512 * 1024;
-const RUNTIME_STREAM_DISCOVERY_SCAN_MAX = 50_000;
+export const RUNTIME_STREAM_EVENTS_PAGE_MAX_BYTES = 1024 * 1024 - 4 * 1024;
+export const RUNTIME_STREAM_EVENTS_PAGE_MAX_ROWS = 128;
+const DEFAULT_LEASE_RECEIPT_CAPACITY = 4_096;
+const MAX_LEASE_RECEIPT_CAPACITY = 65_536;
+const MAX_REQUEST_ID_BYTES = 256;
+const LOGICAL_TIME_FLOOR_KEY = "logical_time_floor";
 
 interface SchemaColumn {
   name: string;
@@ -57,12 +65,26 @@ const SCHEMA_SQL = `
     expires_at INTEGER NOT NULL
   ) STRICT;
 
+  CREATE UNIQUE INDEX IF NOT EXISTS actor_leases_stream_id_uq
+    ON actor_leases(stream_id);
+
   CREATE TABLE IF NOT EXISTS streams (
     stream_id TEXT PRIMARY KEY,
     revision INTEGER NOT NULL CHECK (revision >= 0),
     created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL,
+    workspace_id TEXT
   ) STRICT;
+
+  CREATE INDEX IF NOT EXISTS streams_workspace_stream_idx
+    ON streams(workspace_id, stream_id);
+
+  CREATE TRIGGER IF NOT EXISTS streams_workspace_immutable
+  BEFORE UPDATE OF workspace_id ON streams
+  WHEN OLD.workspace_id IS NOT NULL AND OLD.workspace_id IS NOT NEW.workspace_id
+  BEGIN
+    SELECT RAISE(ABORT, 'runtime broker stream workspace ownership is immutable');
+  END;
 
   CREATE TABLE IF NOT EXISTS inbox (
     message_id TEXT PRIMARY KEY,
@@ -72,6 +94,17 @@ const SCHEMA_SQL = `
     result_json TEXT NOT NULL,
     applied_at INTEGER NOT NULL
   ) STRICT;
+
+  CREATE TABLE IF NOT EXISTS mutation_receipts (
+    request_id TEXT PRIMARY KEY,
+    method TEXT NOT NULL,
+    params_hash TEXT NOT NULL,
+    response_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  ) STRICT;
+
+  CREATE INDEX IF NOT EXISTS mutation_receipts_created_idx
+    ON mutation_receipts(created_at, request_id);
 
   CREATE TABLE IF NOT EXISTS events (
     event_id TEXT PRIMARY KEY,
@@ -192,10 +225,27 @@ const SCHEMA_V2_COLUMNS: Record<string, readonly SchemaColumn[]> = {
   ],
 };
 
+const SCHEMA_V3_COLUMNS: Record<string, readonly SchemaColumn[]> = {
+  ...SCHEMA_V2_COLUMNS,
+  streams: [
+    ...SCHEMA_V2_COLUMNS.streams!,
+    { name: "workspace_id", type: "TEXT", notNull: false, primaryKey: false },
+  ],
+  mutation_receipts: [
+    { name: "request_id", type: "TEXT", notNull: true, primaryKey: true },
+    { name: "method", type: "TEXT", notNull: true, primaryKey: false },
+    { name: "params_hash", type: "TEXT", notNull: true, primaryKey: false },
+    { name: "response_json", type: "TEXT", notNull: true, primaryKey: false },
+    { name: "created_at", type: "INTEGER", notNull: true, primaryKey: false },
+  ],
+};
+
 export interface RuntimeBrokerSqliteStoreOptions {
   busyTimeoutMs?: number;
   now?: () => number;
+  monotonicNow?: () => number;
   nonce?: () => string;
+  receiptCapacity?: number;
 }
 
 /** Own this store in the broker sidecar; host windows communicate with it over IPC. */
@@ -205,16 +255,28 @@ export class RuntimeBrokerSqliteStore {
   #db: DatabaseSync;
   #closed = false;
   #now: () => number;
+  #monotonicNow: () => number;
   #nonce: () => string;
+  #receiptCapacity: number;
+  #bootMonotonic = 0;
+  #bootLogicalTime = 0;
+  #lastLogicalTime = 0;
 
   constructor(path: string, options: RuntimeBrokerSqliteStoreOptions = {}) {
     assertNonEmptyString(path, "path");
     const busyTimeoutMs = options.busyTimeoutMs ?? 5_000;
     assertNonNegativeInteger(busyTimeoutMs, "busyTimeoutMs");
+    const receiptCapacity = options.receiptCapacity ?? DEFAULT_LEASE_RECEIPT_CAPACITY;
+    assertPositiveInteger(receiptCapacity, "receiptCapacity");
+    if (receiptCapacity > MAX_LEASE_RECEIPT_CAPACITY) {
+      throw invalid(`receiptCapacity must not exceed ${MAX_LEASE_RECEIPT_CAPACITY}`, "receiptCapacity");
+    }
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     this.path = path;
     this.#now = options.now ?? Date.now;
+    this.#monotonicNow = options.monotonicNow ?? (options.now ? (() => 0) : (() => performance.now()));
     this.#nonce = options.nonce ?? randomUUID;
+    this.#receiptCapacity = receiptCapacity;
     this.#db = new DatabaseSync(path);
     try {
       this.#db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}`);
@@ -224,6 +286,7 @@ export class RuntimeBrokerSqliteStore {
       );
       this.#db.exec("PRAGMA synchronous = FULL");
       this.#migrate();
+      this.#initializeLogicalClock();
     } catch (error) {
       this.#closed = true;
       this.#db.close();
@@ -241,14 +304,16 @@ export class RuntimeBrokerSqliteStore {
     this.#assertOpen();
     validateCommitRequest(request);
     const requestHash = hashCommitRequest(request);
+    const alreadyCommitted = this.#recoverCommit(request.messageId, requestHash);
+    if (alreadyCommitted) return alreadyCommitted;
     const appliedAt = this.#readNow();
 
     return this.#transaction(() => {
-      const currentLease = this.#requireCurrentLease(request.actorId, request.lease, appliedAt);
-      this.#requireAuthorizedStream(currentLease, request.streamId);
       const recovered = this.#recoverCommit(request.messageId, requestHash);
       if (recovered) return recovered;
 
+      const currentLease = this.#requireCurrentLease(request.actorId, request.lease, appliedAt);
+      this.#requireAuthorizedStream(currentLease, request.streamId);
       const currentRevision = this.getStreamRevision(request.streamId);
       if (currentRevision !== request.expectedRevision) {
         throw new RuntimeBrokerError("revision_conflict", "stream revision did not match expectedRevision", {
@@ -258,10 +323,10 @@ export class RuntimeBrokerSqliteStore {
         });
       }
 
-      this.#assertRuntimeWorkspaceOwnership(request);
+      const workspaceId = this.#assertRuntimeWorkspaceOwnership(request);
       this.#assertUnusedIds(request);
       const revision = currentRevision + request.events.length;
-      this.#upsertStream(request.streamId, currentRevision, revision, appliedAt);
+      this.#upsertStream(request.streamId, currentRevision, revision, appliedAt, workspaceId);
 
       const insertEvent = this.#db.prepare(`
         INSERT INTO events (
@@ -309,19 +374,25 @@ export class RuntimeBrokerSqliteStore {
         INSERT INTO projections (projection_id, stream_id, revision, value_json, updated_at)
         VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(projection_id) DO UPDATE SET
-          stream_id = excluded.stream_id,
           revision = excluded.revision,
           value_json = excluded.value_json,
           updated_at = excluded.updated_at
+        WHERE projections.stream_id = excluded.stream_id
       `);
       for (const projection of request.projections ?? []) {
-        upsertProjection.run(
+        const result = upsertProjection.run(
           projection.projectionId,
           request.streamId,
           revision,
           JSON.stringify(projection.value),
           appliedAt,
         );
+        if (Number(result.changes) !== 1) {
+          throw new RuntimeBrokerError("idempotency_conflict", "projectionId belongs to another stream", {
+            projectionId: projection.projectionId,
+            streamId: request.streamId,
+          });
+        }
       }
 
       const result: RuntimeBrokerCommitResult = {
@@ -344,28 +415,40 @@ export class RuntimeBrokerSqliteStore {
     });
   }
 
-  acquireLease(request: AcquireLeaseRequest): ActorLease {
+  acquireLease(request: AcquireLeaseRequest, requestId?: string): ActorLease {
     this.#assertOpen();
     validateLeaseRequest(request);
-    const now = this.#readNow();
-    validateLeaseDeadline(now, request.ttlMs);
-    return this.#transaction(() => {
+    return this.#withLeaseReceipt(requestId, "lease.acquire", request, (now) => {
+      validateLeaseDeadline(now, request.ttlMs);
       const streamId = request.streamId ?? request.actorId;
-      const current = this.getLease(request.actorId);
-      if (current && current.expiresAt > now) {
-        throw leaseUnavailable(request.actorId, current.expiresAt);
+      const actorLease = this.getLease(request.actorId);
+      const streamLease = this.#getLeaseForStream(streamId);
+      if (actorLease && actorLease.expiresAt > now) {
+        throw leaseUnavailable(request.actorId, actorLease.expiresAt);
       }
-      return this.#writeLease(request.actorId, streamId, request.holderId, (current?.epoch ?? 0) + 1, now, request.ttlMs, current);
+      if (streamLease && streamLease.actorId !== request.actorId && streamLease.expiresAt > now) {
+        throw leaseUnavailable(request.actorId, streamLease.expiresAt, streamId);
+      }
+      const lineage = streamLease ?? (actorLease?.streamId === streamId ? actorLease : undefined);
+      this.#deleteExpiredLease(actorLease, now);
+      if (streamLease?.actorId !== actorLease?.actorId) this.#deleteExpiredLease(streamLease, now);
+      return this.#insertLease(
+        request.actorId,
+        streamId,
+        request.holderId,
+        (lineage?.epoch ?? 0) + 1,
+        now,
+        request.ttlMs,
+      );
     });
   }
 
-  heartbeatLease(request: HeartbeatLeaseRequest): ActorLease {
+  heartbeatLease(request: HeartbeatLeaseRequest, requestId?: string): ActorLease {
     this.#assertOpen();
     assertRecord(request, "request");
     validateCredentialRequest(request.actorId, request.lease, request.ttlMs, request.now);
-    const now = this.#readNow();
-    validateLeaseDeadline(now, request.ttlMs);
-    return this.#transaction(() => {
+    return this.#withLeaseReceipt(requestId, "lease.heartbeat", request, (now) => {
+      validateLeaseDeadline(now, request.ttlMs);
       const current = this.#requireCurrentLease(request.actorId, request.lease, now);
       const expiresAt = now + request.ttlMs;
       const result = this.#db.prepare(`
@@ -377,14 +460,13 @@ export class RuntimeBrokerSqliteStore {
     });
   }
 
-  compareAndSwapLease(request: CompareAndSwapLeaseRequest): ActorLease {
+  compareAndSwapLease(request: CompareAndSwapLeaseRequest, requestId?: string): ActorLease {
     this.#assertOpen();
     assertRecord(request, "request");
     validateCredentialRequest(request.actorId, request.lease, request.ttlMs, request.now);
     assertNonEmptyString(request.nextHolderId, "nextHolderId");
-    const now = this.#readNow();
-    validateLeaseDeadline(now, request.ttlMs);
-    return this.#transaction(() => {
+    return this.#withLeaseReceipt(requestId, "lease.compare-and-swap", request, (now) => {
+      validateLeaseDeadline(now, request.ttlMs);
       const current = this.#requireCurrentLease(request.actorId, request.lease, now);
       const next = makeLease(
         request.actorId,
@@ -416,47 +498,53 @@ export class RuntimeBrokerSqliteStore {
     });
   }
 
-  takeoverLease(request: TakeoverLeaseRequest): ActorLease {
+  takeoverLease(request: TakeoverLeaseRequest, requestId?: string): ActorLease {
     this.#assertOpen();
     validateLeaseRequest(request);
-    const now = this.#readNow();
-    validateLeaseDeadline(now, request.ttlMs);
-    return this.#transaction(() => {
-      const current = this.getLease(request.actorId);
-      if (!current || current.expiresAt > now) {
-        throw leaseUnavailable(request.actorId, current?.expiresAt);
+    return this.#withLeaseReceipt(requestId, "lease.takeover", request, (now) => {
+      validateLeaseDeadline(now, request.ttlMs);
+      const streamId = request.streamId ?? request.actorId;
+      const actorLease = this.getLease(request.actorId);
+      const streamLease = this.#getLeaseForStream(streamId);
+      const lineage = streamLease ?? (actorLease?.streamId === streamId ? actorLease : undefined);
+      if (!lineage || lineage.expiresAt > now) {
+        throw leaseUnavailable(request.actorId, lineage?.expiresAt, streamId);
       }
-      return this.#writeLease(
+      if (actorLease && actorLease.actorId !== lineage.actorId && actorLease.expiresAt > now) {
+        throw leaseUnavailable(request.actorId, actorLease.expiresAt, actorLease.streamId);
+      }
+      this.#deleteExpiredLease(actorLease, now);
+      if (streamLease?.actorId !== actorLease?.actorId) this.#deleteExpiredLease(streamLease, now);
+      return this.#insertLease(
         request.actorId,
-        request.streamId ?? request.actorId,
+        streamId,
         request.holderId,
-        current.epoch + 1,
+        lineage.epoch + 1,
         now,
         request.ttlMs,
-        current,
       );
     });
   }
 
-  releaseLease(request: ReleaseLeaseRequest): void {
+  releaseLease(request: ReleaseLeaseRequest, requestId?: string): void {
     this.#assertOpen();
     assertRecord(request, "request");
     validateCredential(request.actorId, request.lease);
     if (request.now !== undefined) assertNonNegativeInteger(request.now, "now");
-    const now = this.#readNow();
-    this.#transaction(() => {
+    this.#withLeaseReceipt(requestId, "lease.release", request, (now) => {
       this.#requireCurrentLease(request.actorId, request.lease, now);
       const result = this.#db.prepare(`
         UPDATE actor_leases SET heartbeat_at = ?, expires_at = ?
         WHERE actor_id = ? AND epoch = ? AND nonce = ? AND expires_at > ?
       `).run(now, now, request.actorId, request.lease.epoch, request.lease.nonce, now);
       if (Number(result.changes) !== 1) throw staleLease(request.actorId);
+      return null;
     });
   }
 
   getLease(actorId: string): ActorLease | undefined {
     this.#assertOpen();
-    assertNonEmptyString(actorId, "actorId");
+    validateActorId(actorId);
     const row = this.#db.prepare("SELECT * FROM actor_leases WHERE actor_id = ?").get(actorId) as SqliteRow | undefined;
     return row ? leaseFromRow(row) : undefined;
   }
@@ -491,6 +579,48 @@ export class RuntimeBrokerSqliteStore {
     return this.readEvents(streamId, afterRevision);
   }
 
+  readAuthorizedEventsPage(
+    request: RuntimeBrokerReadEventsPageRequest,
+    maxBytes = RUNTIME_STREAM_EVENTS_PAGE_MAX_BYTES,
+  ): RuntimeBrokerReadEventsPage {
+    this.#assertOpen();
+    validateReadEventsPageRequest(request);
+    assertPositiveInteger(maxBytes, "maxBytes");
+    const current = this.#requireCurrentLease(request.actorId, request.lease, this.#readNow());
+    this.#requireAuthorizedStream(current, request.streamId);
+    const streamRevision = this.getStreamRevision(request.streamId);
+    const throughRevision = request.throughRevision ?? streamRevision;
+    if (throughRevision > streamRevision) {
+      throw new RuntimeBrokerError("invalid_request", "throughRevision is ahead of the stream", {
+        streamId: request.streamId,
+        throughRevision,
+        streamRevision,
+      });
+    }
+    const rows = this.#db.prepare(`
+      SELECT * FROM events
+      WHERE stream_id = ? AND revision > ? AND revision <= ?
+      ORDER BY revision ASC LIMIT ?
+    `).all(request.streamId, request.afterRevision, throughRevision, request.limit + 1) as SqliteRow[];
+    const events: StoredRuntimeBrokerEvent[] = [];
+    let bytes = 2;
+    for (const row of rows.slice(0, request.limit)) {
+      const event = eventFromRow(row);
+      const candidateBytes = Buffer.byteLength(JSON.stringify(event), "utf8") + (events.length === 0 ? 0 : 1);
+      if (bytes + candidateBytes > maxBytes) {
+        if (events.length === 0) {
+          throw new RuntimeBrokerError("invalid_request", "Runtime stream event exceeds the page byte budget");
+        }
+        break;
+      }
+      events.push(event);
+      bytes += candidateBytes;
+    }
+    const nextRevision = events.at(-1)?.revision ?? request.afterRevision;
+    const done = rows.length === events.length && nextRevision >= throughRevision;
+    return { events, nextRevision, throughRevision, done };
+  }
+
   listStreams(request: RuntimeBrokerListStreamsRequest): string[] {
     this.#assertOpen();
     assertRecord(request, "request");
@@ -504,35 +634,14 @@ export class RuntimeBrokerSqliteStore {
     if (request.limit > 512) {
       throw new RuntimeBrokerError("invalid_request", "limit must not exceed 512", { limit: request.limit });
     }
-    const streamIds: string[] = [];
-    let cursor = afterStreamId;
-    let scanned = 0;
-    const page = this.#db.prepare(`
-      SELECT s.stream_id FROM streams s
-      WHERE s.stream_id > ?
-        AND substr(s.stream_id, 1, length(?)) = ?
-      ORDER BY s.stream_id ASC LIMIT ?
-    `);
-    while (streamIds.length < request.limit && scanned < RUNTIME_STREAM_DISCOVERY_SCAN_MAX) {
-      const batchSize = Math.min(512, RUNTIME_STREAM_DISCOVERY_SCAN_MAX - scanned);
-      const rows = page.all(cursor, request.prefix, request.prefix, batchSize) as SqliteRow[];
-      if (rows.length === 0) break;
-      for (const row of rows) {
-        const streamId = String(row.stream_id);
-        cursor = streamId;
-        scanned += 1;
-        if (this.#runtimeWorkspaceOwner(streamId) === request.workspaceId) streamIds.push(streamId);
-        if (streamIds.length === request.limit) break;
-      }
-      if (rows.length < batchSize) break;
-    }
-    if (scanned === RUNTIME_STREAM_DISCOVERY_SCAN_MAX && streamIds.length < request.limit) {
-      const overflow = page.all(cursor, request.prefix, request.prefix, 1) as SqliteRow[];
-      if (overflow.length > 0) {
-        throw new RuntimeBrokerError("invalid_request", "Runtime stream discovery scan limit exceeded");
-      }
-    }
-    return streamIds;
+    const rows = this.#db.prepare(`
+      SELECT stream_id FROM streams
+      WHERE workspace_id = ?
+        AND stream_id > ?
+        AND substr(stream_id, 1, length(?)) = ?
+      ORDER BY stream_id ASC LIMIT ?
+    `).all(request.workspaceId, afterStreamId, request.prefix, request.prefix, request.limit) as SqliteRow[];
+    return rows.map((row) => String(row.stream_id));
   }
 
   readRuntimeReadModelEvents(
@@ -546,14 +655,17 @@ export class RuntimeBrokerSqliteStore {
     assertPositiveInteger(limit, "limit");
     if (limit > 512) throw new RuntimeBrokerError("invalid_request", "limit must not exceed 512", { limit });
     const rows = this.#db.prepare(`
-      SELECT rowid AS global_cursor, * FROM events
-      WHERE rowid > ?
-        AND event_type = 'domain.event'
-        AND json_extract(payload_json, '$.actor.workspaceId') = ?
-        AND json_extract(payload_json, '$.kind') = 'domain.event'
-        AND json_extract(payload_json, '$.eventType') = 'teammate.runtime-read-model.frame.v2'
-      ORDER BY rowid ASC LIMIT ?
-    `).all(afterCursor, workspaceId, limit) as SqliteRow[];
+      SELECT e.rowid AS global_cursor, e.*
+      FROM events e
+      JOIN streams s ON s.stream_id = e.stream_id
+      WHERE e.rowid > ?
+        AND s.workspace_id = ?
+        AND e.event_type = 'domain.event'
+        AND json_extract(e.payload_json, '$.actor.workspaceId') = ?
+        AND json_extract(e.payload_json, '$.kind') = 'domain.event'
+        AND json_extract(e.payload_json, '$.eventType') = 'teammate.runtime-read-model.frame.v2'
+      ORDER BY e.rowid ASC LIMIT ?
+    `).all(afterCursor, workspaceId, workspaceId, limit) as SqliteRow[];
     const page: StoredRuntimeBrokerCursorEvent[] = [];
     let bytes = 2;
     for (const row of rows) {
@@ -588,16 +700,20 @@ export class RuntimeBrokerSqliteStore {
     if (limit > 512) throw new RuntimeBrokerError("invalid_request", "limit must not exceed 512", { limit });
     const now = this.#readNow();
     const rows = this.#db.prepare(`
-      SELECT DISTINCT e.stream_id, l.epoch, l.expires_at
-      FROM events e
-      JOIN actor_leases l ON l.actor_id = e.stream_id
-      WHERE e.stream_id > ?
-        AND e.event_type = 'domain.event'
-        AND json_extract(e.payload_json, '$.actor.workspaceId') = ?
-        AND json_extract(e.payload_json, '$.kind') = 'domain.event'
-        AND json_extract(e.payload_json, '$.eventType') = 'teammate.runtime-read-model.frame.v2'
-      ORDER BY e.stream_id ASC LIMIT ?
-    `).all(afterStreamId, workspaceId, limit) as SqliteRow[];
+      SELECT s.stream_id, l.epoch, l.expires_at
+      FROM streams s
+      JOIN actor_leases l ON l.stream_id = s.stream_id
+      WHERE s.workspace_id = ?
+        AND s.stream_id > ?
+        AND EXISTS (
+          SELECT 1 FROM events e
+          WHERE e.stream_id = s.stream_id
+            AND e.event_type = 'domain.event'
+            AND json_extract(e.payload_json, '$.kind') = 'domain.event'
+            AND json_extract(e.payload_json, '$.eventType') = 'teammate.runtime-read-model.frame.v2'
+        )
+      ORDER BY s.stream_id ASC LIMIT ?
+    `).all(workspaceId, afterStreamId, limit) as SqliteRow[];
     return rows.map((row) => ({
       streamId: String(row.stream_id),
       generation: Number(row.epoch),
@@ -657,18 +773,22 @@ export class RuntimeBrokerSqliteStore {
       while (version < RUNTIME_BROKER_SCHEMA_VERSION) {
         switch (version) {
           case 0:
-            this.#migrateSchema0To2();
-            version = 2;
+            this.#migrateSchema0To3();
+            version = 3;
             break;
           case 1:
             this.#migrateSchema1To2();
             version = 2;
             break;
+          case 2:
+            this.#migrateSchema2To3();
+            version = 3;
+            break;
           default:
             throw schemaError(`no migration path from version ${version}`);
         }
       }
-      this.#validateSchemaV2();
+      this.#validateSchemaV3();
     });
   }
 
@@ -699,9 +819,9 @@ export class RuntimeBrokerSqliteStore {
     return metadataVersion;
   }
 
-  #migrateSchema0To2(): void {
+  #migrateSchema0To3(): void {
     this.#db.exec(SCHEMA_SQL);
-    this.#writeSchemaVersion(2);
+    this.#writeSchemaVersion(3);
   }
 
   #migrateSchema1To2(): void {
@@ -718,9 +838,92 @@ export class RuntimeBrokerSqliteStore {
         heartbeat_at INTEGER NOT NULL,
         expires_at INTEGER NOT NULL
       ) STRICT;
+      INSERT INTO actor_leases (
+        actor_id, stream_id, holder_id, epoch, nonce, acquired_at, heartbeat_at, expires_at
+      )
+        SELECT
+          char(0) || 'runtime-broker-lineage:' || hex(actor_id),
+          actor_id,
+          char(0) || 'runtime-broker-migration',
+          epoch,
+          lower(hex(randomblob(16))),
+          0,
+          0,
+          0
+        FROM actor_leases_v1;
       DROP TABLE actor_leases_v1;
     `);
     this.#writeSchemaVersion(2);
+  }
+
+  #migrateSchema2To3(): void {
+    this.#validateSchemaV2();
+    this.#db.exec(`
+      ALTER TABLE streams ADD COLUMN workspace_id TEXT;
+      CREATE INDEX streams_workspace_stream_idx ON streams(workspace_id, stream_id);
+      CREATE TRIGGER streams_workspace_immutable
+      BEFORE UPDATE OF workspace_id ON streams
+      WHEN OLD.workspace_id IS NOT NULL AND OLD.workspace_id IS NOT NEW.workspace_id
+      BEGIN
+        SELECT RAISE(ABORT, 'runtime broker stream workspace ownership is immutable');
+      END;
+      CREATE TEMP TABLE runtime_broker_duplicate_lease_lineage (
+        stream_id TEXT PRIMARY KEY,
+        epoch INTEGER NOT NULL CHECK (epoch > 0)
+      ) STRICT;
+      INSERT INTO runtime_broker_duplicate_lease_lineage (stream_id, epoch)
+        SELECT stream_id, MAX(epoch)
+        FROM actor_leases
+        GROUP BY stream_id
+        HAVING COUNT(*) > 1;
+      DELETE FROM actor_leases
+      WHERE stream_id IN (SELECT stream_id FROM runtime_broker_duplicate_lease_lineage);
+      INSERT INTO actor_leases (
+        actor_id, stream_id, holder_id, epoch, nonce, acquired_at, heartbeat_at, expires_at
+      )
+        SELECT
+          char(0) || 'runtime-broker-lineage:' || hex(stream_id),
+          stream_id,
+          char(0) || 'runtime-broker-migration',
+          epoch,
+          lower(hex(randomblob(16))),
+          0,
+          0,
+          0
+        FROM runtime_broker_duplicate_lease_lineage;
+      DROP TABLE runtime_broker_duplicate_lease_lineage;
+      CREATE UNIQUE INDEX actor_leases_stream_id_uq ON actor_leases(stream_id);
+      CREATE TABLE mutation_receipts (
+        request_id TEXT PRIMARY KEY,
+        method TEXT NOT NULL,
+        params_hash TEXT NOT NULL,
+        response_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      ) STRICT;
+      CREATE INDEX mutation_receipts_created_idx
+        ON mutation_receipts(created_at, request_id);
+    `);
+    this.#backfillWorkspaceOwnership();
+    this.#writeSchemaVersion(3);
+  }
+
+  #backfillWorkspaceOwnership(): void {
+    const owners = new Map<string, string>();
+    const rows = this.#db.prepare(`
+      SELECT stream_id, payload_json FROM events ORDER BY stream_id ASC, revision ASC
+    `).all() as SqliteRow[];
+    for (const row of rows) {
+      const streamId = String(row.stream_id);
+      const workspaceId = runtimeEventWorkspaceId(parseJson(row.payload_json), streamId);
+      if (workspaceId === undefined) continue;
+      const owner = owners.get(streamId);
+      if (owner !== undefined && owner !== workspaceId) {
+        throw schemaError(`stream ${streamId} has conflicting workspace ownership`);
+      }
+      owners.set(streamId, workspaceId);
+    }
+    const update = this.#db.prepare("UPDATE streams SET workspace_id = ? WHERE stream_id = ? AND workspace_id IS NULL");
+    for (const [streamId, workspaceId] of owners) update.run(workspaceId, streamId);
   }
 
   #writeSchemaVersion(version: number): void {
@@ -740,6 +943,32 @@ export class RuntimeBrokerSqliteStore {
   #validateSchemaV2(): void {
     for (const [table, columns] of Object.entries(SCHEMA_V2_COLUMNS)) {
       this.#validateTable(table, columns);
+    }
+  }
+
+  #validateSchemaV3(): void {
+    for (const [table, columns] of Object.entries(SCHEMA_V3_COLUMNS)) {
+      this.#validateTable(table, columns);
+    }
+    this.#validateIndex("actor_leases", "actor_leases_stream_id_uq", ["stream_id"], true);
+    this.#validateIndex("streams", "streams_workspace_stream_idx", ["workspace_id", "stream_id"], false);
+    this.#validateIndex("mutation_receipts", "mutation_receipts_created_idx", ["created_at", "request_id"], false);
+    const trigger = this.#db.prepare(`
+      SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name = 'streams_workspace_immutable'
+    `).get() as SqliteRow | undefined;
+    if (!trigger || !String(trigger.sql).includes("OLD.workspace_id IS NOT NULL")) {
+      throw schemaError("streams_workspace_immutable trigger is missing or incompatible");
+    }
+  }
+
+  #validateIndex(table: string, index: string, expectedColumns: readonly string[], unique: boolean): void {
+    const row = (this.#db.prepare(`PRAGMA index_list(${table})`).all() as SqliteRow[])
+      .find((candidate) => candidate.name === index);
+    if (!row || Boolean(row.unique) !== unique) throw schemaError(`index ${index} is missing or incompatible`);
+    const columns = (this.#db.prepare(`PRAGMA index_info(${index})`).all() as SqliteRow[])
+      .map((candidate) => String(candidate.name));
+    if (columns.length !== expectedColumns.length || columns.some((column, offset) => column !== expectedColumns[offset])) {
+      throw schemaError(`index ${index} has incompatible columns`);
     }
   }
 
@@ -811,8 +1040,12 @@ export class RuntimeBrokerSqliteStore {
     }
   }
 
-  #assertRuntimeWorkspaceOwnership(request: RuntimeBrokerCommitRequest): void {
-    let owner = this.#runtimeWorkspaceOwner(request.streamId);
+  #assertRuntimeWorkspaceOwnership(request: RuntimeBrokerCommitRequest): string | undefined {
+    const row = this.#db.prepare("SELECT workspace_id FROM streams WHERE stream_id = ?")
+      .get(request.streamId) as SqliteRow | undefined;
+    let owner = row?.workspace_id === null || row?.workspace_id === undefined
+      ? undefined
+      : String(row.workspace_id);
     for (const event of request.events) {
       const workspaceId = runtimeEventWorkspaceId(event.payload, request.streamId);
       if (workspaceId === undefined) continue;
@@ -825,17 +1058,7 @@ export class RuntimeBrokerSqliteStore {
         });
       }
     }
-  }
-
-  #runtimeWorkspaceOwner(streamId: string): string | undefined {
-    const rows = this.#db.prepare(`
-      SELECT payload_json FROM events WHERE stream_id = ? ORDER BY revision ASC
-    `).all(streamId) as SqliteRow[];
-    for (const row of rows) {
-      const workspaceId = runtimeEventWorkspaceId(parseJson(row.payload_json), streamId);
-      if (workspaceId !== undefined) return workspaceId;
-    }
-    return undefined;
+    return owner;
   }
 
   #assertUnusedIds(request: RuntimeBrokerCommitRequest): void {
@@ -855,54 +1078,171 @@ export class RuntimeBrokerSqliteStore {
     }
   }
 
-  #upsertStream(streamId: string, currentRevision: number, revision: number, now: number): void {
+  #upsertStream(
+    streamId: string,
+    currentRevision: number,
+    revision: number,
+    now: number,
+    workspaceId?: string,
+  ): void {
     if (currentRevision === 0) {
       const existing = this.#db.prepare("SELECT 1 AS present FROM streams WHERE stream_id = ?").get(streamId);
       if (!existing) {
         this.#db.prepare(`
-          INSERT INTO streams (stream_id, revision, created_at, updated_at) VALUES (?, ?, ?, ?)
-        `).run(streamId, revision, now, now);
+          INSERT INTO streams (stream_id, revision, created_at, updated_at, workspace_id)
+          VALUES (?, ?, ?, ?, ?)
+        `).run(streamId, revision, now, now, workspaceId ?? null);
         return;
       }
     }
     const result = this.#db.prepare(`
-      UPDATE streams SET revision = ?, updated_at = ? WHERE stream_id = ? AND revision = ?
-    `).run(revision, now, streamId, currentRevision);
+      UPDATE streams
+      SET revision = ?, updated_at = ?, workspace_id = COALESCE(workspace_id, ?)
+      WHERE stream_id = ? AND revision = ?
+    `).run(revision, now, workspaceId ?? null, streamId, currentRevision);
     if (Number(result.changes) !== 1) {
       throw new RuntimeBrokerError("revision_conflict", "stream changed during commit", { streamId });
     }
   }
 
-  #writeLease(
+  #withLeaseReceipt<T>(
+    requestId: string | undefined,
+    method: string,
+    params: unknown,
+    operation: (now: number) => T,
+  ): T {
+    if (requestId !== undefined) validateRequestId(requestId);
+    const paramsHash = hashCanonical(params);
+    if (requestId !== undefined) {
+      const recovered = this.#recoverLeaseReceipt<T>(requestId, method, paramsHash);
+      if (recovered.found) return recovered.result;
+    }
+    const now = this.#readNow();
+    return this.#transaction(() => {
+      if (requestId !== undefined) {
+        const recovered = this.#recoverLeaseReceipt<T>(requestId, method, paramsHash);
+        if (recovered.found) return recovered.result;
+      }
+
+      const result = operation(now);
+      if (requestId !== undefined) {
+        this.#pruneLeaseReceipts();
+        assertJsonValue(result, "lease response");
+        this.#db.prepare(`
+          INSERT INTO mutation_receipts (request_id, method, params_hash, response_json, created_at)
+          VALUES (?, ?, ?, ?, ?)
+        `).run(requestId, method, paramsHash, JSON.stringify(result), now);
+      }
+      return result;
+    });
+  }
+
+  #recoverLeaseReceipt<T>(
+    requestId: string,
+    method: string,
+    paramsHash: string,
+  ): { found: true; result: T } | { found: false } {
+    const receipt = this.#db.prepare(`
+      SELECT method, params_hash, response_json FROM mutation_receipts WHERE request_id = ?
+    `).get(requestId) as SqliteRow | undefined;
+    if (!receipt) return { found: false };
+    if (receipt.method !== method || receipt.params_hash !== paramsHash) {
+      throw new RuntimeBrokerError("idempotency_conflict", "requestId was already applied with different lease parameters", {
+        requestId,
+        method,
+      });
+    }
+    return { found: true, result: JSON.parse(String(receipt.response_json)) as T };
+  }
+
+  #pruneLeaseReceipts(): void {
+    const row = this.#db.prepare("SELECT COUNT(*) AS count FROM mutation_receipts").get() as SqliteRow;
+    const removeCount = Number(row.count) - this.#receiptCapacity + 1;
+    if (removeCount <= 0) return;
+    this.#db.prepare(`
+      DELETE FROM mutation_receipts WHERE request_id IN (
+        SELECT request_id FROM mutation_receipts
+        ORDER BY created_at ASC, request_id ASC LIMIT ?
+      )
+    `).run(removeCount);
+  }
+
+  #getLeaseForStream(streamId: string): ActorLease | undefined {
+    const row = this.#db.prepare("SELECT * FROM actor_leases WHERE stream_id = ?").get(streamId) as SqliteRow | undefined;
+    return row ? leaseFromRow(row) : undefined;
+  }
+
+  #deleteExpiredLease(lease: ActorLease | undefined, now: number): void {
+    if (!lease) return;
+    if (lease.expiresAt > now) throw leaseUnavailable(lease.actorId, lease.expiresAt, lease.streamId);
+    const result = this.#db.prepare(`
+      DELETE FROM actor_leases
+      WHERE stream_id = ? AND epoch = ? AND nonce = ? AND expires_at <= ?
+    `).run(lease.streamId, lease.epoch, lease.nonce, now);
+    if (Number(result.changes) !== 1) throw staleLease(lease.actorId);
+  }
+
+  #insertLease(
     actorId: string,
     streamId: string,
     holderId: string,
     epoch: number,
     now: number,
     ttlMs: number,
-    expected?: ActorLease,
   ): ActorLease {
     const lease = makeLease(actorId, streamId, holderId, epoch, this.#nonce(), now, ttlMs);
-    if (!expected) {
-      this.#db.prepare(`
-        INSERT INTO actor_leases (actor_id, stream_id, holder_id, epoch, nonce, acquired_at, heartbeat_at, expires_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(actorId, streamId, holderId, epoch, lease.nonce, now, now, lease.expiresAt);
-      return lease;
-    }
-    const result = this.#db.prepare(`
-      UPDATE actor_leases
-      SET stream_id = ?, holder_id = ?, epoch = ?, nonce = ?, acquired_at = ?, heartbeat_at = ?, expires_at = ?
-      WHERE actor_id = ? AND epoch = ? AND nonce = ? AND expires_at <= ?
-    `).run(streamId, holderId, epoch, lease.nonce, now, now, lease.expiresAt, actorId, expected.epoch, expected.nonce, now);
-    if (Number(result.changes) !== 1) throw leaseUnavailable(actorId, expected.expiresAt);
+    this.#db.prepare(`
+      INSERT INTO actor_leases (actor_id, stream_id, holder_id, epoch, nonce, acquired_at, heartbeat_at, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(actorId, streamId, holderId, epoch, lease.nonce, now, now, lease.expiresAt);
     return lease;
   }
 
+  #initializeLogicalClock(): void {
+    const wallNow = this.#readWallClock();
+    const monotonicNow = this.#readMonotonicClock();
+    const row = this.#db.prepare("SELECT value FROM metadata WHERE key = ?").get(LOGICAL_TIME_FLOOR_KEY) as SqliteRow | undefined;
+    const persistedFloor = row ? parseLogicalTime(row.value) : 0;
+    const logicalNow = Math.max(wallNow, persistedFloor);
+    this.#bootMonotonic = monotonicNow;
+    this.#bootLogicalTime = logicalNow;
+    this.#lastLogicalTime = logicalNow;
+    this.#persistLogicalTime(logicalNow);
+  }
+
   #readNow(): number {
+    const wallNow = this.#readWallClock();
+    const monotonicNow = this.#readMonotonicClock();
+    const elapsed = Math.max(0, Math.floor(monotonicNow - this.#bootMonotonic));
+    const elapsedLogicalTime = this.#bootLogicalTime + elapsed;
+    if (!Number.isSafeInteger(elapsedLogicalTime)) {
+      throw invalid("logical broker time exceeds the safe integer range", "brokerNow");
+    }
+    const logicalNow = Math.max(wallNow, this.#lastLogicalTime, elapsedLogicalTime);
+    this.#lastLogicalTime = logicalNow;
+    this.#persistLogicalTime(logicalNow);
+    return logicalNow;
+  }
+
+  #readWallClock(): number {
     const now = this.#now();
     assertNonNegativeInteger(now, "brokerNow");
     return now;
+  }
+
+  #readMonotonicClock(): number {
+    const now = this.#monotonicNow();
+    if (typeof now !== "number" || !Number.isFinite(now) || now < 0) {
+      throw invalid("broker monotonic clock must be a finite non-negative number", "monotonicNow");
+    }
+    return now;
+  }
+
+  #persistLogicalTime(now: number): void {
+    this.#db.prepare(`
+      INSERT INTO metadata (key, value) VALUES (?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(LOGICAL_TIME_FLOOR_KEY, String(now));
   }
 
   #assertOpen(): void {
@@ -929,6 +1269,17 @@ function parseSchemaVersion(value: unknown): number {
   return version;
 }
 
+function parseLogicalTime(value: unknown): number {
+  if (typeof value !== "string" || !/^(?:0|[1-9]\d*)$/.test(value)) {
+    throw schemaError("metadata.logical_time_floor must be a canonical non-negative integer");
+  }
+  const logicalTime = Number(value);
+  if (!Number.isSafeInteger(logicalTime)) {
+    throw schemaError("metadata.logical_time_floor must be a non-negative safe integer");
+  }
+  return logicalTime;
+}
+
 function schemaError(message: string): Error {
   return new Error(`invalid runtime broker SQLite schema: ${message}`);
 }
@@ -936,7 +1287,7 @@ function schemaError(message: string): Error {
 function validateCommitRequest(request: RuntimeBrokerCommitRequest): void {
   assertRecord(request, "request");
   assertNonEmptyString(request.messageId, "messageId");
-  assertNonEmptyString(request.actorId, "actorId");
+  validateActorId(request.actorId);
   validateCredential(request.actorId, request.lease);
   assertNonEmptyString(request.streamId, "streamId");
   assertNonNegativeInteger(request.expectedRevision, "expectedRevision");
@@ -972,7 +1323,7 @@ function validateCommitRequest(request: RuntimeBrokerCommitRequest): void {
 
 function validateLeaseRequest(request: AcquireLeaseRequest): void {
   assertRecord(request, "request");
-  assertNonEmptyString(request.actorId, "actorId");
+  validateActorId(request.actorId);
   if (request.streamId !== undefined) assertNonEmptyString(request.streamId, "streamId");
   assertNonEmptyString(request.holderId, "holderId");
   assertPositiveInteger(request.ttlMs, "ttlMs");
@@ -986,15 +1337,48 @@ function validateCredentialRequest(actorId: string, lease: LeaseCredential, ttlM
 }
 
 function validateCredential(actorId: string, lease: LeaseCredential): void {
-  assertNonEmptyString(actorId, "actorId");
+  validateActorId(actorId);
   assertRecord(lease, "lease");
   assertPositiveInteger(lease.epoch, "lease.epoch");
   assertNonEmptyString(lease.nonce, "lease.nonce");
 }
 
+function validateReadEventsPageRequest(request: RuntimeBrokerReadEventsPageRequest): void {
+  assertRecord(request, "request");
+  assertNonEmptyString(request.streamId, "streamId");
+  assertNonNegativeInteger(request.afterRevision, "afterRevision");
+  if (request.throughRevision !== undefined) {
+    assertNonNegativeInteger(request.throughRevision, "throughRevision");
+    if (request.throughRevision < request.afterRevision) {
+      throw invalid("throughRevision must not precede afterRevision", "throughRevision");
+    }
+  }
+  assertPositiveInteger(request.limit, "limit");
+  if (request.limit > RUNTIME_STREAM_EVENTS_PAGE_MAX_ROWS) {
+    throw invalid(`limit must not exceed ${RUNTIME_STREAM_EVENTS_PAGE_MAX_ROWS}`, "limit");
+  }
+  validateCredential(request.actorId, request.lease);
+}
+
+function validateActorId(actorId: unknown): asserts actorId is string {
+  assertNonEmptyString(actorId, "actorId");
+  if (actorId.includes("\0")) throw invalid("actorId must not contain NUL", "actorId");
+}
+
+function validateRequestId(requestId: string): void {
+  assertNonEmptyString(requestId, "requestId");
+  if (Buffer.byteLength(requestId, "utf8") > MAX_REQUEST_ID_BYTES || requestId.includes("\0")) {
+    throw invalid("requestId must be a bounded non-empty string", "requestId");
+  }
+}
+
 function hashCommitRequest(request: RuntimeBrokerCommitRequest): string {
   const { committedAt: _committedAt, lease: _lease, ...semanticRequest } = request;
-  return createHash("sha256").update(canonicalJson(semanticRequest)).digest("hex");
+  return hashCanonical(semanticRequest);
+}
+
+function hashCanonical(value: unknown): string {
+  return createHash("sha256").update(canonicalJson(value)).digest("hex");
 }
 
 function canonicalJson(value: unknown): string {
@@ -1100,22 +1484,30 @@ function parseJson(value: unknown): JsonValue {
 }
 
 function runtimeEventWorkspaceId(payload: JsonValue, streamId: string): string | undefined {
+  let event;
   try {
-    const event = normalizePersistedRuntimeEventV2(payload);
-    return event.streamId === streamId ? event.actor.workspaceId : undefined;
+    event = normalizePersistedRuntimeEventV2(payload);
   } catch {
     return undefined;
   }
+  if (event.streamId !== streamId) {
+    throw new RuntimeBrokerError("invalid_request", "Runtime event streamId does not match its leased stream", {
+      streamId,
+      payloadStreamId: event.streamId,
+    });
+  }
+  return event.actor.workspaceId;
 }
 
 function staleLease(actorId: string): RuntimeBrokerError {
   return new RuntimeBrokerError("stale_lease", "lease epoch, nonce, or expiry is not current", { actorId });
 }
 
-function leaseUnavailable(actorId: string, expiresAt?: number): RuntimeBrokerError {
+function leaseUnavailable(actorId: string, expiresAt?: number, streamId?: string): RuntimeBrokerError {
   return new RuntimeBrokerError("lease_unavailable", "actor lease cannot be acquired", {
     actorId,
     ...(expiresAt === undefined ? {} : { expiresAt }),
+    ...(streamId === undefined ? {} : { streamId }),
   });
 }
 

@@ -1,6 +1,8 @@
+import { constants as fsConstants } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import {
+  copyFile,
   lstat,
   mkdir,
   open,
@@ -8,9 +10,8 @@ import {
   readdir,
   rename,
   rm,
-  stat,
 } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import {
   computeCompletionDeliveryId,
   type CompletionDispatchSeed,
@@ -45,6 +46,10 @@ const LIVE_STATES = new Set<CompletionOutboxState>(["wal", "pending", "queued"])
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const HASH_ID = /^[a-f0-9]{64}$/;
 const LOCK_STALE_MS = 2 * 60_000;
+// A crash at lock:after-create leaves no PID/token record to probe. Give an
+// active creator a short bounded setup window, then reclaim the unchanged inode.
+const LOCK_SETUP_STALE_MS = 1_000;
+const LOCK_HEARTBEAT_MS = 10_000;
 // Raised from 15s to 45s: a full workspace GC scans every session × state dir
 // under the lock, which can hold the workspace lock long enough on slow disks
 // (Windows + antivirus) to starve concurrent writers past 15s. The lock is still
@@ -66,6 +71,82 @@ const RESERVE_GC_MIN_INTERVAL_MS = 30_000;
 // so a crashed GC still lets the next process re-sweep soon.
 const TRY_GC_MARKER_MIN_INTERVAL_MS = 30_000;
 const GC_MARKER_NAME = ".gc-marker";
+const GC_INDEX_DIR = ".gc-index";
+const GC_INDEX_STATE_NAME = "state.json";
+const GC_PAGE_SIZE = 128;
+const REPLACE_ERRORS = new Set(["EPERM", "EACCES", "EEXIST"]);
+const ORDERED_REPLACEMENT_PATTERN = /^(.*\.json)\.replace-(\d{20})-([A-Za-z0-9-]+)\.(new|committed|bak)$/;
+const LEGACY_REPLACEMENT_PATTERN = /^(.*\.json)\.replace-([A-Za-z0-9-]+)\.(new|committed|bak)$/;
+const REPLACEMENT_TRANSACTION = /^\d{20}-[A-Za-z0-9-]{1,128}$/;
+const WORKSPACE_GENERATION = /^\d{20}$/;
+const FENCED_JSON_OVERHEAD_BYTES = 1024;
+const ACTIVE_WORKSPACE_LOCK_TOKENS = new Set<string>();
+
+interface WorkspaceLockMutation {
+  version: 1;
+  path: string;
+  transaction: string;
+}
+
+interface WorkspaceLockRecord {
+  version?: 2;
+  ownerId: string;
+  token: string;
+  pid: number;
+  heartbeatAt: number;
+  generation?: string;
+  mutation?: WorkspaceLockMutation;
+}
+
+interface WorkspaceLockLease {
+  path: string;
+  token: string;
+  generation: string;
+  assertOwned(): Promise<void>;
+  beginMutation(path: string, transaction: string): Promise<void>;
+  finishMutation(transaction: string): Promise<void>;
+}
+
+interface GcIndexEntry {
+  path: string;
+  kind: "record" | "reservation";
+}
+
+interface GcIndexState {
+  version: 1;
+  head: number;
+  tail: number;
+  sweepEnd?: number;
+}
+
+interface GcIndexSegment {
+  version: 1;
+  base: number;
+  entries: Array<GcIndexEntry | null>;
+}
+
+interface ReplacementName {
+  name: string;
+  canonical: string;
+  transaction: string;
+  generation?: string;
+  kind: "new" | "committed" | "bak";
+}
+
+interface FencedJsonEnvelope {
+  $completionOutbox: {
+    version: 2;
+    generation: string;
+    transaction: string;
+  };
+  value: unknown;
+}
+
+interface WorkspaceGenerationSlot {
+  version: 1;
+  generation: bigint;
+  token: string;
+}
 
 interface StoreOptions {
   rootDir?: string;
@@ -79,6 +160,14 @@ function fileCode(error: unknown): string | undefined {
   return error instanceof Error && "code" in error
     ? String((error as NodeJS.ErrnoException).code)
     : undefined;
+}
+
+function persistenceBoundary(scope: "outbox" | "lock", boundary: string): void {
+  const expected = `${scope}:${boundary}`;
+  if (process.env.PI_TEST_COMPLETION_FAIL_AT !== expected) return;
+  delete process.env.PI_TEST_COMPLETION_FAIL_AT;
+  if (process.env.PI_TEST_COMPLETION_CRASH === "1") process.exit(86);
+  throw Object.assign(new Error(`Injected completion persistence failure at ${expected}`), { code: "EIO" });
 }
 
 function hashPath(value: string): string {
@@ -214,7 +303,7 @@ async function renameWithRetry(source: string, target: string): Promise<void> {
       return;
     } catch (error) {
       const code = fileCode(error);
-      if ((code === "EPERM" || code === "EACCES" || code === "EEXIST") && attempt < RENAME_MAX_RETRIES) {
+      if (REPLACE_ERRORS.has(code ?? "") && attempt < RENAME_MAX_RETRIES) {
         await new Promise((resolveDelay) => setTimeout(resolveDelay, LOCK_RETRY_MS * (attempt + 1)));
         continue;
       }
@@ -223,42 +312,557 @@ async function renameWithRetry(source: string, target: string): Promise<void> {
   }
 }
 
-async function writeJsonAtomic(path: string, value: unknown, maxBytes = COMPLETION_OUTBOX_MAX_RECORD_BYTES): Promise<void> {
-  const payload = Buffer.from(`${JSON.stringify(value)}\n`, "utf8");
-  if (payload.byteLength > maxBytes) throw new Error(`Completion outbox record exceeds ${maxBytes} bytes (${payload.byteLength}).`);
-  await ensureRealDirectory(dirname(path));
-  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+function parseReplacementName(name: string): ReplacementName | undefined {
+  const ordered = ORDERED_REPLACEMENT_PATTERN.exec(name);
+  if (ordered?.[1] && ordered[2] && ordered[3] && ordered[4]) {
+    return {
+      name,
+      canonical: ordered[1],
+      transaction: `${ordered[2]}-${ordered[3]}`,
+      generation: ordered[2],
+      kind: ordered[4] as "new" | "committed" | "bak",
+    };
+  }
+  const legacy = LEGACY_REPLACEMENT_PATTERN.exec(name);
+  if (!legacy?.[1] || !legacy[2] || !legacy[3]) return undefined;
+  return {
+    name,
+    canonical: legacy[1],
+    transaction: legacy[2],
+    kind: legacy[3] as "new" | "committed" | "bak",
+  };
+}
+
+function canonicalJsonNames(names: readonly string[]): string[] {
+  const found = new Set<string>();
+  for (const name of names) {
+    if (name.endsWith(".json")) found.add(name);
+    else {
+      const replacement = parseReplacementName(name);
+      if (replacement) found.add(replacement.canonical);
+    }
+  }
+  return [...found].sort();
+}
+
+function workspaceGenerationSlot(workspaceDir: string, slot: "a" | "b"): string {
+  return join(workspaceDir, `.store-generation-${slot}`);
+}
+
+async function readWorkspaceGenerationSlot(
+  workspaceDir: string,
+  slot: "a" | "b",
+): Promise<WorkspaceGenerationSlot | undefined> {
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
-    handle = await open(temporary, "wx", 0o600);
-    await handle.writeFile(payload);
+    handle = await open(
+      workspaceGenerationSlot(workspaceDir, slot),
+      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
+    );
+    const info = await handle.stat();
+    if (!info.isFile() || info.size > 256) return undefined;
+    const parsed = JSON.parse(await handle.readFile("utf8")) as {
+      version?: unknown;
+      generation?: unknown;
+      token?: unknown;
+    };
+    if (parsed.version !== 1 || typeof parsed.generation !== "string"
+      || !WORKSPACE_GENERATION.test(parsed.generation)
+      || typeof parsed.token !== "string" || !/^[A-Za-z0-9-]{1,128}$/.test(parsed.token)) return undefined;
+    return { version: 1, generation: BigInt(parsed.generation), token: parsed.token };
+  } catch (error) {
+    if (fileCode(error) === "ENOENT" || error instanceof SyntaxError) return undefined;
+    throw error;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function nextWorkspaceGeneration(workspaceDir: string, token: string): Promise<string> {
+  const [a, b] = await Promise.all([
+    readWorkspaceGenerationSlot(workspaceDir, "a"),
+    readWorkspaceGenerationSlot(workspaceDir, "b"),
+  ]);
+  const latest = a === undefined ? b : b === undefined ? a
+    : a.generation >= b.generation ? a : b;
+  const generationValue = (latest?.generation ?? 0n) + 1n;
+  if (generationValue > 99_999_999_999_999_999_999n) {
+    throw new Error(`Completion workspace generation exhausted: ${workspaceDir}.`);
+  }
+  const generation = generationValue.toString().padStart(20, "0");
+  const slot: "a" | "b" = a === undefined || a.generation <= (b?.generation ?? -1n) ? "a" : "b";
+  const slotPath = workspaceGenerationSlot(workspaceDir, slot);
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(
+      slotPath,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | (fsConstants.O_NOFOLLOW ?? 0),
+      0o600,
+    );
+    if (!(await handle.stat()).isFile()) throw new Error(`Workspace generation marker must be a regular file: ${slotPath}`);
+    await handle.writeFile(`${JSON.stringify({ version: 1, generation, token })}\n`, "utf8");
     await handle.sync();
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+  await fsyncDirectory(workspaceDir);
+  return generation;
+}
+
+function resolveLockMutationPath(
+  workspaceDir: string,
+  mutation: WorkspaceLockMutation,
+): string | undefined {
+  const path = resolve(workspaceDir, mutation.path);
+  const contained = relative(workspaceDir, path);
+  if (!contained || contained.startsWith("..") || resolve(path) !== path) return undefined;
+  return path;
+}
+
+function mutationRevocationPath(path: string, transaction: string): string {
+  return `${path}.replace-revoked-${transaction}`;
+}
+
+async function writeMutationRevocation(
+  path: string,
+  generation: string,
+  transaction: string,
+): Promise<boolean> {
+  const revocation = mutationRevocationPath(path, transaction);
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(
+      revocation,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0),
+      0o600,
+    );
+    if (!(await handle.stat()).isFile()) throw new Error(`Completion mutation fence must be a regular file: ${revocation}`);
+    await handle.writeFile(`${JSON.stringify({ version: 1, generation, transaction })}\n`, "utf8");
+    await handle.sync();
+  } catch (error) {
+    if (fileCode(error) === "EEXIST") return false;
+    throw error;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+  await fsyncDirectory(dirname(path));
+  return true;
+}
+
+async function rollbackMutationRevocation(path: string, transaction: string, created: boolean): Promise<void> {
+  if (!created) return;
+  await rm(mutationRevocationPath(path, transaction), { force: true });
+  await fsyncDirectory(dirname(path));
+}
+
+async function mutationIsRevoked(path: string, transaction: string): Promise<boolean> {
+  try {
+    await lstat(mutationRevocationPath(path, transaction));
+    // Fail closed for an exact, durable transaction fence, even if a crash left
+    // its small payload incomplete. The unguessable transaction name is itself
+    // the authority; the payload is diagnostic/versioning metadata.
+    return true;
+  } catch (error) {
+    if (fileCode(error) === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function fencedJsonEnvelope(value: unknown, lease: WorkspaceLockLease, transaction: string): FencedJsonEnvelope {
+  return {
+    $completionOutbox: {
+      version: 2,
+      generation: lease.generation,
+      transaction,
+    },
+    value,
+  };
+}
+
+async function unwrapFencedJson(value: unknown, path: string): Promise<unknown | undefined> {
+  if (!value || typeof value !== "object" || !("$completionOutbox" in value)) return value;
+  const envelope = value as Partial<FencedJsonEnvelope>;
+  const fence = envelope.$completionOutbox;
+  if (!fence || fence.version !== 2 || !WORKSPACE_GENERATION.test(fence.generation)
+    || !REPLACEMENT_TRANSACTION.test(fence.transaction) || !("value" in envelope)) return undefined;
+  if (await mutationIsRevoked(path, fence.transaction)) return undefined;
+  return envelope.value;
+}
+
+function replacementGenerationSlot(path: string, slot: "a" | "b"): string {
+  return `${path}.replace-generation-${slot}`;
+}
+
+interface ReplacementGenerationSlot {
+  generation: bigint;
+  clean: boolean;
+  /** Exact replacement transaction for bounded recovery without readdir. */
+  transaction?: string;
+}
+
+async function readReplacementGenerationSlot(path: string, slot: "a" | "b"): Promise<ReplacementGenerationSlot | undefined> {
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(
+      replacementGenerationSlot(path, slot),
+      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
+    );
+    const info = await handle.stat();
+    if (!info.isFile() || info.size > 256) return undefined;
+    const parsed = JSON.parse(await handle.readFile("utf8")) as {
+      generation?: unknown;
+      clean?: unknown;
+      transaction?: unknown;
+    };
+    if (typeof parsed.generation !== "string" || !WORKSPACE_GENERATION.test(parsed.generation)
+      || typeof parsed.clean !== "boolean"
+      || parsed.transaction !== undefined && (typeof parsed.transaction !== "string"
+        || !REPLACEMENT_TRANSACTION.test(parsed.transaction))) return undefined;
+    return {
+      generation: BigInt(parsed.generation),
+      clean: parsed.clean,
+      ...(typeof parsed.transaction === "string" ? { transaction: parsed.transaction } : {}),
+    };
+  } catch (error) {
+    if (fileCode(error) === "ENOENT" || error instanceof SyntaxError) return undefined;
+    throw error;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+function latestReplacementGeneration(
+  a: ReplacementGenerationSlot | undefined,
+  b: ReplacementGenerationSlot | undefined,
+): ReplacementGenerationSlot | undefined {
+  return a === undefined ? b : b === undefined ? a
+    : a.generation > b.generation ? a
+      : b.generation > a.generation ? b
+        : a.clean ? a : b;
+}
+
+async function writeReplacementGenerationSlot(
+  path: string,
+  slot: "a" | "b",
+  generation: string,
+  clean: boolean,
+  transaction?: string,
+): Promise<void> {
+  const slotPath = replacementGenerationSlot(path, slot);
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(
+      slotPath,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | (fsConstants.O_NOFOLLOW ?? 0),
+      0o600,
+    );
+    if (!(await handle.stat()).isFile()) throw new Error(`Replacement generation marker must be a regular file: ${slotPath}`);
+    await handle.writeFile(`${JSON.stringify({ generation, clean, ...(transaction ? { transaction } : {}) })}\n`, "utf8");
+    await handle.sync();
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+  await fsyncDirectory(dirname(path));
+}
+
+async function nextReplacementGeneration(path: string): Promise<{
+  generation: string;
+  transaction: string;
+  cleanSlot: "a" | "b";
+}> {
+  const [a, b] = await Promise.all([
+    readReplacementGenerationSlot(path, "a"),
+    readReplacementGenerationSlot(path, "b"),
+  ]);
+  const latest = latestReplacementGeneration(a, b);
+  const nextValue = (latest?.generation ?? 0n) + 1n;
+  if (nextValue > 99_999_999_999_999_999_999n) {
+    throw new Error(`Completion replacement generation exhausted: ${path}.`);
+  }
+  const next = nextValue.toString().padStart(20, "0");
+  const transaction = `${next}-${randomUUID()}`;
+  const slot: "a" | "b" = a === undefined || a.generation <= (b?.generation ?? -1n) ? "a" : "b";
+  await writeReplacementGenerationSlot(path, slot, next, false, transaction);
+  return { generation: next, transaction, cleanSlot: slot === "a" ? "b" : "a" };
+}
+
+async function replacementRemnantsForCleanup(
+  path: string,
+  preserveTransaction: string,
+): Promise<string[]> {
+  const dir = dirname(path);
+  const canonical = basename(path);
+  const names = await readdir(dir).catch((error) => {
+    if (fileCode(error) === "ENOENT") return [] as string[];
+    throw error;
+  });
+  return names.flatMap((name) => {
+    const replacement = parseReplacementName(name);
+    if (replacement?.canonical !== canonical
+      || replacement.transaction === preserveTransaction && replacement.kind === "committed") return [];
+    return [join(dir, name)];
+  });
+}
+
+async function cleanupReplacementRemnants(paths: readonly string[], dir: string): Promise<void> {
+  // Paths are captured while the mutation still owns the lock. Once its active
+  // transaction is durably cleared, deleting only this immutable snapshot is
+  // safe even if takeover happens: a successor's newer names cannot be swept.
+  for (const path of paths) await rm(path, { force: true });
+  await fsyncDirectory(dir);
+}
+
+async function latestReplacementNames(
+  dir: string,
+  canonical: string,
+  names: readonly string[],
+): Promise<string[]> {
+  const replacements = names
+    .map(parseReplacementName)
+    .filter((entry): entry is ReplacementName => entry?.canonical === canonical);
+  if (replacements.length === 0) return [];
+  const ordered = replacements.filter((entry) => entry.generation !== undefined);
+  if (ordered.length > 0) {
+    const latestGeneration = ordered.map((entry) => entry.generation!).sort().at(-1)!;
+    return ordered
+      .filter((entry) => entry.generation === latestGeneration)
+      .sort((left, right) => {
+        const order = { new: 0, committed: 1, bak: 2 } as const;
+        return order[left.kind] - order[right.kind] || left.name.localeCompare(right.name);
+      })
+      .map((entry) => entry.name);
+  }
+  const transactions = new Map<string, { names: ReplacementName[]; newest: number }>();
+  for (const entry of replacements) {
+    const mtimeMs = (await lstat(join(dir, entry.name)).catch(() => undefined))?.mtimeMs ?? 0;
+    const transaction = transactions.get(entry.transaction) ?? { names: [], newest: 0 };
+    transaction.names.push(entry);
+    transaction.newest = Math.max(transaction.newest, mtimeMs);
+    transactions.set(entry.transaction, transaction);
+  }
+  const latest = [...transactions.values()].sort((left, right) => right.newest - left.newest)[0];
+  return (latest?.names ?? [])
+    .sort((left, right) => {
+      const order = { new: 0, committed: 1, bak: 2 } as const;
+      return order[left.kind] - order[right.kind] || left.name.localeCompare(right.name);
+    })
+    .map((entry) => entry.name);
+}
+
+function removalTombstonePath(path: string): string {
+  return `${path}.removed`;
+}
+
+async function clearRemovalTombstone(path: string): Promise<void> {
+  await rm(removalTombstonePath(path), { force: true });
+  await fsyncDirectory(dirname(path));
+}
+
+async function writeRemovalTombstone(path: string): Promise<void> {
+  const tombstone = removalTombstonePath(path);
+  await ensureRealDirectory(dirname(path));
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(
+      tombstone,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | (fsConstants.O_NOFOLLOW ?? 0),
+      0o600,
+    );
+    if (!(await handle.stat()).isFile()) throw new Error(`Completion removal tombstone must be a regular file: ${tombstone}`);
+    await handle.writeFile("removed\n", "utf8");
+    await handle.sync();
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+  await fsyncDirectory(dirname(path));
+}
+
+async function removeDurableBounded(path: string, lease?: WorkspaceLockLease): Promise<void> {
+  await lease?.assertOwned();
+  await writeRemovalTombstone(path);
+  await rm(path, { force: true });
+  await fsyncDirectory(dirname(path));
+}
+
+async function writeJsonAtomic(
+  path: string,
+  value: unknown,
+  maxBytes = COMPLETION_OUTBOX_MAX_RECORD_BYTES,
+  lease?: WorkspaceLockLease,
+  injectBoundaries = false,
+): Promise<void> {
+  const semanticPayload = Buffer.from(`${JSON.stringify(value)}\n`, "utf8");
+  if (semanticPayload.byteLength > maxBytes) {
+    throw new Error(`Completion outbox record exceeds ${maxBytes} bytes (${semanticPayload.byteLength}).`);
+  }
+  await lease?.assertOwned();
+  const dir = dirname(path);
+  await ensureRealDirectory(dir);
+  const transaction = await nextReplacementGeneration(path);
+  const { generation, transaction: token } = transaction;
+  await lease?.beginMutation(path, token);
+  const payload = lease
+    ? Buffer.from(`${JSON.stringify(fencedJsonEnvelope(value, lease, token))}\n`, "utf8")
+    : semanticPayload;
+  if (payload.byteLength > maxBytes + FENCED_JSON_OVERHEAD_BYTES) {
+    throw new Error(`Completion outbox fenced record exceeds ${maxBytes + FENCED_JSON_OVERHEAD_BYTES} bytes (${payload.byteLength}).`);
+  }
+  const replacement = `${path}.replace-${token}.new`;
+  const committed = `${path}.replace-${token}.committed`;
+  const backup = `${path}.replace-${token}.bak`;
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(replacement, "wx", 0o600);
+    await handle.writeFile(payload);
+    if (injectBoundaries) persistenceBoundary("outbox", "after-write");
+    await handle.sync();
+    if (injectBoundaries) persistenceBoundary("outbox", "after-file-sync");
     await handle.close();
     handle = undefined;
-    try {
-      await renameWithRetry(temporary, path);
-    } catch (error) {
-      if (fileCode(error) !== "EEXIST" && fileCode(error) !== "EPERM") throw error;
-      await rm(path, { force: true });
-      await renameWithRetry(temporary, path);
+    if (injectBoundaries) persistenceBoundary("outbox", "after-close");
+    // Retain one immutable authoritative snapshot. If a revoked former owner
+    // later clobbers the compatibility canonical name, readers recover this
+    // higher-generation snapshot and reject the revoked payload.
+    await copyFile(replacement, committed, fsConstants.COPYFILE_EXCL);
+    const committedHandle = await open(committed, "r+");
+    try { await committedHandle.sync(); } finally { await committedHandle.close(); }
+    await fsyncDirectory(dir);
+    await lease?.assertOwned();
+    // A prior bounded deletion may have left crash remnants hidden by a
+    // tombstone. Once the new generation is file-synced it is safe to reveal:
+    // recovery will select either the old canonical or this latest .new.
+    await clearRemovalTombstone(path);
+    const current = await lstat(path).catch((error) => {
+      if (fileCode(error) === "ENOENT") return undefined;
+      throw error;
+    });
+    if (!current) {
+      await lease?.assertOwned();
+      await renameWithRetry(replacement, path);
+      if (injectBoundaries) persistenceBoundary("outbox", "after-new-to-canonical");
+      await fsyncDirectory(dir);
+      if (injectBoundaries) persistenceBoundary("outbox", "after-directory-sync");
+      const cleanupPaths = await replacementRemnantsForCleanup(path, token);
+      await writeReplacementGenerationSlot(path, transaction.cleanSlot, generation, true, token);
+      await lease?.finishMutation(token);
+      await cleanupReplacementRemnants(cleanupPaths, dir);
+      return;
     }
-    await fsyncDirectory(dirname(path));
+    if (!current.isFile() || current.isSymbolicLink()) {
+      throw new Error(`Completion outbox path must be a regular file: ${path}`);
+    }
+    await lease?.assertOwned();
+    await renameWithRetry(path, backup);
+    if (injectBoundaries) persistenceBoundary("outbox", "after-canonical-to-backup");
+    await fsyncDirectory(dir);
+    await lease?.assertOwned();
+    await renameWithRetry(replacement, path);
+    if (injectBoundaries) persistenceBoundary("outbox", "after-new-to-canonical");
+    await fsyncDirectory(dir);
+    if (injectBoundaries) persistenceBoundary("outbox", "after-directory-sync");
+    const cleanupPaths = await replacementRemnantsForCleanup(path, token);
+    await writeReplacementGenerationSlot(path, transaction.cleanSlot, generation, true, token);
+    await lease?.finishMutation(token);
+    await cleanupReplacementRemnants(cleanupPaths, dir);
+    if (injectBoundaries) persistenceBoundary("outbox", "after-backup-cleanup");
   } catch (error) {
     await handle?.close().catch(() => undefined);
-    await rm(temporary, { force: true }).catch(() => undefined);
+    // Preserve .new/.committed/.bak remnants. Fenced recovery rejects any
+    // transaction durably superseded by takeover while retaining older data.
+    throw error;
+  }
+}
+
+async function removeDurable(path: string, lease?: WorkspaceLockLease): Promise<void> {
+  await lease?.assertOwned();
+  const dir = dirname(path);
+  const canonical = path.slice(dir.length + 1);
+  let names: string[];
+  try {
+    names = await readdir(dir);
+  } catch (error) {
+    if (fileCode(error) === "ENOENT") return;
+    throw error;
+  }
+  for (const name of names) {
+    const replacement = parseReplacementName(name);
+    if (name === canonical || replacement?.canonical === canonical
+      || name === `${canonical}.replace-generation-a` || name === `${canonical}.replace-generation-b`) {
+      await lease?.assertOwned();
+      await rm(join(dir, name), { force: true });
+    }
+  }
+  await fsyncDirectory(dir);
+}
+
+async function parseSafeJsonCandidate(
+  candidate: string,
+  maxBytes: number,
+  canonicalPath: string,
+): Promise<unknown | undefined> {
+  try {
+    const info = await lstat(candidate);
+    if (!info.isFile() || info.isSymbolicLink() || info.size > maxBytes + FENCED_JSON_OVERHEAD_BYTES) return undefined;
+    return unwrapFencedJson(JSON.parse(await readFile(candidate, "utf8")), canonicalPath);
+  } catch (error) {
+    if (fileCode(error) === "ENOENT" || error instanceof SyntaxError) return undefined;
     throw error;
   }
 }
 
 async function readSafeJson(path: string, maxBytes = COMPLETION_OUTBOX_MAX_RECORD_BYTES): Promise<unknown | undefined> {
+  if (await lstat(removalTombstonePath(path)).then(() => true, (error) => {
+    if (fileCode(error) === "ENOENT") return false;
+    throw error;
+  })) return undefined;
+  // The overwhelmingly common path reads the exact canonical file directly.
+  // Directory enumeration is reserved for an actually missing, invalid, or
+  // durably fenced canonical that needs general replacement recovery.
+  const canonicalValue = await parseSafeJsonCandidate(path, maxBytes, path);
+  if (canonicalValue !== undefined) return canonicalValue;
+  const dir = dirname(path);
+  const canonical = basename(path);
+  let names: string[];
   try {
-    const info = await lstat(path);
-    if (!info.isFile() || info.isSymbolicLink() || info.size > maxBytes) return undefined;
-    return JSON.parse(await readFile(path, "utf8"));
+    names = await readdir(dir);
   } catch (error) {
-    if (fileCode(error) === "ENOENT" || error instanceof SyntaxError) return undefined;
+    if (fileCode(error) === "ENOENT") return undefined;
     throw error;
   }
+  const replacements = await latestReplacementNames(dir, canonical, names);
+  for (const name of replacements) {
+    const value = await parseSafeJsonCandidate(join(dir, name), maxBytes, path);
+    if (value !== undefined) return value;
+  }
+  return undefined;
+}
+
+/**
+ * GC must remain bounded even when an index path is stale. Consult only the
+ * exact canonical plus the latest transaction recorded in the two fixed
+ * generation slots; never enumerate the record/reservation directory.
+ */
+async function readSafeJsonExactRecovery(
+  path: string,
+  maxBytes = COMPLETION_OUTBOX_MAX_RECORD_BYTES,
+): Promise<unknown | undefined> {
+  if (await lstat(removalTombstonePath(path)).then(() => true, (error) => {
+    if (fileCode(error) === "ENOENT") return false;
+    throw error;
+  })) return undefined;
+  const canonicalValue = await parseSafeJsonCandidate(path, maxBytes, path);
+  if (canonicalValue !== undefined) return canonicalValue;
+  const [a, b] = await Promise.all([
+    readReplacementGenerationSlot(path, "a"),
+    readReplacementGenerationSlot(path, "b"),
+  ]);
+  const latest = latestReplacementGeneration(a, b);
+  if (!latest?.transaction) return undefined;
+  for (const suffix of ["new", "committed", "bak"] as const) {
+    const value = await parseSafeJsonCandidate(`${path}.replace-${latest.transaction}.${suffix}`, maxBytes, path);
+    if (value !== undefined) return value;
+  }
+  return undefined;
 }
 
 export class CompletionOutboxFileStore {
@@ -288,8 +892,8 @@ export class CompletionOutboxFileStore {
     if (!Number.isSafeInteger(reservedBytes) || reservedBytes < 1 || reservedBytes > COMPLETION_OUTBOX_MAX_RECORD_BYTES) {
       throw new Error(`Invalid completion reservation size: ${reservedBytes}.`);
     }
-    return this.#withWorkspaceLock(seed.target.workspaceId, async () => {
-      await this.#maybeReserveGc(seed.target.workspaceId);
+    return this.#withWorkspaceLock(seed.target.workspaceId, async (lease) => {
+      await this.#maybeReserveGc(seed.target.workspaceId, lease);
       const usage = await this.#usageLocked(seed.target.workspaceId);
       if (usage.liveRecords + 1 > this.#maxLiveRecords
         || usage.liveBytes + reservedBytes > this.#maxLiveBytes) {
@@ -319,50 +923,99 @@ export class CompletionOutboxFileStore {
         updatedAt: now,
         expiresAt: now + COMPLETION_OUTBOX_LIVE_TTL_MS,
       };
-      await writeJsonAtomic(this.#reservationPath(seed.target.workspaceId, seed.reservationId), record);
+      await this.#writeTrackedJson(
+        seed.target.workspaceId,
+        this.#reservationPath(seed.target.workspaceId, seed.reservationId),
+        record,
+        "reservation",
+        lease,
+      );
       return record;
     });
   }
 
   async releaseReservation(target: CompletionTarget, reservationId: string): Promise<boolean> {
-    return this.#withWorkspaceLock(target.workspaceId, async () => {
+    return this.#withWorkspaceLock(target.workspaceId, async (lease) => {
       const current = await this.#readReservation(target.workspaceId, reservationId);
       if (!current || !targetEquals(current.target, target)) return false;
       if (current.state === "released") return true;
       const now = this.#now();
-      await writeJsonAtomic(this.#reservationPath(target.workspaceId, reservationId), {
-        ...current,
-        state: "released",
-        updatedAt: now,
-        expiresAt: now + COMPLETION_OUTBOX_RESERVATION_TERMINAL_TTL_MS,
-      } satisfies CompletionReservationRecord);
+      await this.#writeTrackedJson(
+        target.workspaceId,
+        this.#reservationPath(target.workspaceId, reservationId),
+        {
+          ...current,
+          state: "released",
+          updatedAt: now,
+          expiresAt: now + COMPLETION_OUTBOX_RESERVATION_TERMINAL_TTL_MS,
+        } satisfies CompletionReservationRecord,
+        "reservation",
+        lease,
+      );
       return true;
     });
   }
 
   async importIntent(intent: CompletionIntent): Promise<CompletionOutboxRecord> {
+    return this.#importIntent(intent, false);
+  }
+
+  /**
+   * Import an already-finalized provider intent after its original capacity
+   * reservation was lost or expired. Finalization is irreversible: recreate
+   * only the same dispatch/target fence and never abandon committed intent.
+   */
+  async recoverFinalizedIntent(intent: CompletionIntent): Promise<CompletionOutboxRecord> {
+    return this.#importIntent(intent, true);
+  }
+
+  async #importIntent(intent: CompletionIntent, recoverReservation: boolean): Promise<CompletionOutboxRecord> {
     this.#assertIntent(intent);
     const deliveryId = computeCompletionDeliveryId(intent);
     if (deliveryId !== intent.deliveryId) throw new Error(`Completion intent deliveryId mismatch for ${intent.dispatchId}.`);
-    return this.#withWorkspaceLock(intent.target.workspaceId, async () => {
+    return this.#withWorkspaceLock(intent.target.workspaceId, async (lease) => {
       const existing = await this.#findRecord(intent.target, deliveryId);
-      const reservation = await this.#readReservation(intent.target.workspaceId, intent.reservationId);
+      let reservation = await this.#readReservation(intent.target.workspaceId, intent.reservationId);
       if (existing) {
         let recovered = existing.state === "wal"
-          ? await this.#replaceRecord(existing, { state: "pending", updatedAt: this.#now(), nextAttemptAt: this.#now() })
+          ? await this.#replaceRecord(existing, { state: "pending", updatedAt: this.#now(), nextAttemptAt: this.#now() }, lease)
           : existing;
         if (recovered.intentRevision === undefined) {
-          recovered = await this.#replaceRecord(recovered, { intentRevision: intent.contentRevision });
+          recovered = await this.#replaceRecord(recovered, { intentRevision: intent.contentRevision }, lease);
         } else if (recovered.intentRevision !== intent.contentRevision) {
           throw new Error(`Completion intent revision mismatch for ${intent.dispatchId}.`);
         }
         if (reservation?.state === "reserved" && targetEquals(reservation.target, intent.target)) {
-          await this.#consumeReservation(reservation, this.#now());
+          await this.#consumeReservation(reservation, this.#now(), lease);
         }
         return recovered;
       }
       if (!reservation || reservation.state !== "reserved" || !targetEquals(reservation.target, intent.target)) {
-        throw new Error(`No live completion reservation ${intent.reservationId} for ${deliveryId}.`);
+        if (!recoverReservation) {
+          throw new Error(`No live completion reservation ${intent.reservationId} for ${deliveryId}.`);
+        }
+        if (reservation && (reservation.dispatchId !== intent.dispatchId || !targetEquals(reservation.target, intent.target))) {
+          throw new Error(`Completion reservation ${intent.reservationId} belongs to another finalized dispatch.`);
+        }
+        const recoveredAt = this.#now();
+        reservation = {
+          version: COMPLETION_OUTBOX_SCHEMA_VERSION,
+          reservationId: intent.reservationId,
+          dispatchId: intent.dispatchId,
+          target: intent.target,
+          reservedBytes: reservation?.reservedBytes ?? COMPLETION_OUTBOX_MAX_RECORD_BYTES,
+          state: "reserved",
+          createdAt: reservation?.createdAt ?? intent.createdAt,
+          updatedAt: recoveredAt,
+          expiresAt: recoveredAt + COMPLETION_OUTBOX_LIVE_TTL_MS,
+        };
+        await this.#writeTrackedJson(
+          intent.target.workspaceId,
+          this.#reservationPath(intent.target.workspaceId, intent.reservationId),
+          reservation,
+          "reservation",
+          lease,
+        );
       }
       const now = this.#now();
       const base: Omit<CompletionOutboxRecord, "contentRevision"> = {
@@ -385,12 +1038,24 @@ export class CompletionOutboxFileStore {
         intentRevision: intent.contentRevision,
       };
       const wal = { ...base, contentRevision: computeCompletionContentRevision(base) };
-      await writeJsonAtomic(this.#recordPath(intent.target, "wal", deliveryId), wal);
+      await this.#writeTrackedJson(
+        intent.target.workspaceId,
+        this.#recordPath(intent.target, "wal", deliveryId),
+        wal,
+        "record",
+        lease,
+      );
       const pendingBase = { ...base, state: "pending" as const };
       const pending = { ...pendingBase, contentRevision: computeCompletionContentRevision(pendingBase) };
-      await writeJsonAtomic(this.#recordPath(intent.target, "pending", deliveryId), pending);
-      await rm(this.#recordPath(intent.target, "wal", deliveryId), { force: true });
-      await this.#consumeReservation(reservation, now);
+      await this.#writeTrackedJson(
+        intent.target.workspaceId,
+        this.#recordPath(intent.target, "pending", deliveryId),
+        pending,
+        "record",
+        lease,
+      );
+      await removeDurable(this.#recordPath(intent.target, "wal", deliveryId), lease);
+      await this.#consumeReservation(reservation, now, lease);
       return pending;
     });
   }
@@ -408,21 +1073,21 @@ export class CompletionOutboxFileStore {
   }
 
   async acquireClaim(target: CompletionTarget, deliveryId: string): Promise<CompletionOutboxRecord | undefined> {
-    return this.#withWorkspaceLock(target.workspaceId, async () => {
+    return this.#withWorkspaceLock(target.workspaceId, async (lease) => {
       const current = await this.#findRecord(target, deliveryId);
       if (!current || (current.state !== "pending" && current.state !== "queued")) return undefined;
       const now = this.#now();
       // Expired records must never be delivered even before GC reaches them.
       if (current.expiresAt <= now) {
-        await this.#replaceRecord(current, { state: "expired", updatedAt: now });
+        await this.#replaceRecord(current, { state: "expired", updatedAt: now }, lease);
         return undefined;
       }
-      if (current.claimOwnerId && current.claimOwnerId !== this.ownerId && (current.claimExpiresAt ?? 0) > now) return undefined;
+      if (current.claimOwnerId && (current.claimExpiresAt ?? 0) > now) return undefined;
       return this.#replaceRecord(current, {
         claimOwnerId: this.ownerId,
         claimExpiresAt: now + COMPLETION_OUTBOX_CLAIM_MS,
         updatedAt: now,
-      });
+      }, lease);
     });
   }
 
@@ -473,7 +1138,7 @@ export class CompletionOutboxFileStore {
   }
 
   async gc(workspaceId: string): Promise<CompletionOutboxGcResult> {
-    return this.#withWorkspaceLock(workspaceId, () => this.#gcLocked(workspaceId));
+    return this.#withWorkspaceLock(workspaceId, (lease) => this.#gcLocked(workspaceId, lease));
   }
 
   /**
@@ -499,7 +1164,7 @@ export class CompletionOutboxFileStore {
     }
     const result = await this.#withWorkspaceLock<CompletionOutboxTryGcResult | undefined>(
       workspaceId,
-      async () => {
+      async (lease) => {
         // Re-check the marker inside the lock to close the TOCTOU window between
         // the lock-free read above and acquisition: another process may have just
         // finished a sweep and written the marker while we waited.
@@ -509,16 +1174,107 @@ export class CompletionOutboxFileStore {
         if (freshAt > 0 && now - freshAt < TRY_GC_MARKER_MIN_INTERVAL_MS) {
           return { ...empty, skipped: true };
         }
-        const swept = await this.#gcLocked(workspaceId);
-        // Marker carries only the sweep timestamp — the throttle readers compare
-        // `at` alone. Adding an owner field pushed the payload past the 64-byte
-        // read/write cap (a pid+uuid owner is ~74 bytes) and crashed reconcile.
-        await writeJsonAtomic(markerPath, { at: this.#now() }, 64);
+        const swept = await this.#gcLocked(workspaceId, lease);
+        // A page with remaining work deliberately leaves the marker stale so a
+        // later reconcile can continue the bounded cursor instead of waiting.
+        if (!swept.hasMore) await writeJsonAtomic(markerPath, { at: this.#now() }, 64, lease);
         return swept;
       },
       0,
     );
     return result ?? { ...empty, busy: true };
+  }
+
+  #gcIndexStatePath(workspaceId: string): string {
+    return join(this.#workspaceDir(workspaceId), GC_INDEX_DIR, GC_INDEX_STATE_NAME);
+  }
+
+  #gcIndexSegmentPath(workspaceId: string, segment: number): string {
+    return join(
+      this.#workspaceDir(workspaceId),
+      GC_INDEX_DIR,
+      "segments",
+      `${String(segment).padStart(20, "0")}.json`,
+    );
+  }
+
+  async #readGcIndexState(workspaceId: string): Promise<GcIndexState> {
+    const raw = await readSafeJson(this.#gcIndexStatePath(workspaceId), 512);
+    if (!raw || typeof raw !== "object") return { version: 1, head: 0, tail: 0 };
+    const state = raw as Partial<GcIndexState>;
+    if (state.version !== 1 || !Number.isSafeInteger(state.head) || state.head! < 0
+      || !Number.isSafeInteger(state.tail) || state.tail! < state.head!
+      || state.sweepEnd !== undefined && (!Number.isSafeInteger(state.sweepEnd)
+        || state.sweepEnd! < state.head! || state.sweepEnd! > state.tail!)) {
+      throw new Error(`Invalid completion GC index for workspace ${workspaceId}.`);
+    }
+    return state as GcIndexState;
+  }
+
+  async #readGcIndexSegment(workspaceId: string, segmentNumber: number): Promise<GcIndexSegment> {
+    const base = segmentNumber * GC_PAGE_SIZE;
+    const raw = await readSafeJson(
+      this.#gcIndexSegmentPath(workspaceId, segmentNumber),
+      COMPLETION_OUTBOX_MAX_RECORD_BYTES,
+    );
+    if (!raw || typeof raw !== "object") return { version: 1, base, entries: [] };
+    const segment = raw as Partial<GcIndexSegment>;
+    if (segment.version !== 1 || segment.base !== base || !Array.isArray(segment.entries)
+      || segment.entries.length > GC_PAGE_SIZE) {
+      throw new Error(`Invalid completion GC index segment ${segmentNumber} for workspace ${workspaceId}.`);
+    }
+    return { version: 1, base, entries: [...segment.entries] as Array<GcIndexEntry | null> };
+  }
+
+  async #appendGcIndex(
+    workspaceId: string,
+    entry: GcIndexEntry,
+    lease: WorkspaceLockLease,
+  ): Promise<void> {
+    const workspaceDir = this.#workspaceDir(workspaceId);
+    const entryPath = resolve(workspaceDir, entry.path);
+    const contained = relative(workspaceDir, entryPath);
+    if (!contained || contained.startsWith("..") || resolve(entryPath) !== entryPath) {
+      throw new Error(`Completion GC index path escapes workspace ${workspaceId}.`);
+    }
+    const state = await this.#readGcIndexState(workspaceId);
+    if (state.tail >= Number.MAX_SAFE_INTEGER - 1) {
+      throw new Error(`Completion GC index exhausted for workspace ${workspaceId}.`);
+    }
+    const sequence = state.tail;
+    const segmentNumber = Math.floor(sequence / GC_PAGE_SIZE);
+    const slot = sequence % GC_PAGE_SIZE;
+    const segment = await this.#readGcIndexSegment(workspaceId, segmentNumber);
+    while (segment.entries.length <= slot) segment.entries.push(null);
+    segment.entries[slot] = { path: contained, kind: entry.kind };
+    await writeJsonAtomic(
+      this.#gcIndexSegmentPath(workspaceId, segmentNumber),
+      segment,
+      COMPLETION_OUTBOX_MAX_RECORD_BYTES,
+      lease,
+    );
+    await writeJsonAtomic(
+      this.#gcIndexStatePath(workspaceId),
+      { ...state, tail: sequence + 1 } satisfies GcIndexState,
+      512,
+      lease,
+    );
+  }
+
+  async #writeTrackedJson(
+    workspaceId: string,
+    path: string,
+    value: unknown,
+    kind: GcIndexEntry["kind"],
+    lease: WorkspaceLockLease,
+  ): Promise<void> {
+    // Index first: an interrupted append creates only a harmless stale entry;
+    // the reverse order could leave a durable canonical record invisible to GC.
+    await this.#appendGcIndex(workspaceId, {
+      path: relative(this.#workspaceDir(workspaceId), path),
+      kind,
+    }, lease);
+    await writeJsonAtomic(path, value, COMPLETION_OUTBOX_MAX_RECORD_BYTES, lease, true);
   }
 
   async #transition(
@@ -528,14 +1284,18 @@ export class CompletionOutboxFileStore {
     nextState: CompletionOutboxState,
     patch: (current: CompletionOutboxRecord, now: number) => Partial<CompletionOutboxRecord>,
   ): Promise<CompletionOutboxRecord | undefined> {
-    return this.#withWorkspaceLock(target.workspaceId, async () => {
+    return this.#withWorkspaceLock(target.workspaceId, async (lease) => {
       const current = await this.#findRecord(target, deliveryId);
       if (!current || !allowed.includes(current.state)) return undefined;
-      return this.#replaceRecord(current, { ...patch(current, this.#now()), state: nextState, updatedAt: this.#now() });
+      return this.#replaceRecord(current, { ...patch(current, this.#now()), state: nextState, updatedAt: this.#now() }, lease);
     });
   }
 
-  async #replaceRecord(current: CompletionOutboxRecord, patch: Partial<CompletionOutboxRecord>): Promise<CompletionOutboxRecord> {
+  async #replaceRecord(
+    current: CompletionOutboxRecord,
+    patch: Partial<CompletionOutboxRecord>,
+    lease: WorkspaceLockLease,
+  ): Promise<CompletionOutboxRecord> {
     const monotonicPatch = {
       ...patch,
       updatedAt: Math.max(patch.updatedAt ?? current.updatedAt + 1, current.updatedAt + 1),
@@ -543,8 +1303,16 @@ export class CompletionOutboxFileStore {
     const { contentRevision: _revision, ...base } = { ...current, ...monotonicPatch };
     const next = { ...base, contentRevision: computeCompletionContentRevision(base) };
     if (!validRecord(next)) throw new Error(`Invalid completion outbox transition for ${current.deliveryId}.`);
-    await writeJsonAtomic(this.#recordPath(current.target, next.state, next.deliveryId), next);
-    if (current.state !== next.state) await rm(this.#recordPath(current.target, current.state, current.deliveryId), { force: true });
+    await this.#writeTrackedJson(
+      current.target.workspaceId,
+      this.#recordPath(current.target, next.state, next.deliveryId),
+      next,
+      "record",
+      lease,
+    );
+    if (current.state !== next.state) {
+      await removeDurable(this.#recordPath(current.target, current.state, current.deliveryId), lease);
+    }
     return next;
   }
 
@@ -567,8 +1335,7 @@ export class CompletionOutboxFileStore {
       throw error;
     }
     const records: CompletionOutboxRecord[] = [];
-    for (const name of names) {
-      if (!name.endsWith(".json")) continue;
+    for (const name of canonicalJsonNames(names)) {
       const raw = await readSafeJson(join(dir, name));
       if (validRecord(raw) && targetEquals(raw.target, target) && raw.state === state) records.push(raw);
     }
@@ -578,7 +1345,11 @@ export class CompletionOutboxFileStore {
   async #usageLocked(workspaceId: string): Promise<CompletionOutboxUsage> {
     const workspaceDir = this.#workspaceDir(workspaceId);
     let sessionNames: string[] = [];
-    try { sessionNames = (await readdir(workspaceDir, { withFileTypes: true })).filter((entry) => entry.isDirectory() && entry.name !== "reservations").map((entry) => entry.name); } catch (error) {
+    try {
+      sessionNames = (await readdir(workspaceDir, { withFileTypes: true }))
+        .filter((entry) => entry.isDirectory() && entry.name !== "reservations")
+        .map((entry) => entry.name);
+    } catch (error) {
       if (fileCode(error) !== "ENOENT") throw error;
     }
     let liveRecords = 0;
@@ -586,20 +1357,22 @@ export class CompletionOutboxFileStore {
     for (const sessionName of sessionNames) {
       for (const state of LIVE_STATES) {
         const dir = join(workspaceDir, sessionName, state);
-        try {
-          for (const entry of await readdir(dir, { withFileTypes: true })) {
-            if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
-            liveRecords += 1;
-            liveBytes += (await stat(join(dir, entry.name))).size;
-          }
-        } catch (error) { if (fileCode(error) !== "ENOENT") throw error; }
+        let names: string[] = [];
+        try { names = await readdir(dir); } catch (error) { if (fileCode(error) !== "ENOENT") throw error; }
+        for (const name of canonicalJsonNames(names)) {
+          const raw = await readSafeJson(join(dir, name));
+          if (!validRecord(raw) || raw.state !== state) continue;
+          liveRecords += 1;
+          liveBytes += Buffer.byteLength(JSON.stringify(raw), "utf8");
+        }
       }
     }
     let reservations = 0;
+    const reservationsDir = join(workspaceDir, "reservations");
     try {
-      for (const entry of await readdir(join(workspaceDir, "reservations"), { withFileTypes: true })) {
-        if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
-        const raw = await readSafeJson(join(workspaceDir, "reservations", entry.name));
+      const names = canonicalJsonNames(await readdir(reservationsDir));
+      for (const name of names) {
+        const raw = await readSafeJson(join(reservationsDir, name));
         if (!validReservation(raw) || raw.state !== "reserved") continue;
         reservations += 1;
         liveRecords += 1;
@@ -609,50 +1382,88 @@ export class CompletionOutboxFileStore {
     return { liveRecords, liveBytes, reservations };
   }
 
-  async #gcLocked(workspaceId: string): Promise<CompletionOutboxGcResult> {
+  async #gcLocked(workspaceId: string, lease: WorkspaceLockLease): Promise<CompletionOutboxGcResult> {
     const now = this.#now();
     const result: CompletionOutboxGcResult = { expired: 0, removed: 0, releasedReservations: 0 };
-    const workspaceDir = this.#workspaceDir(workspaceId);
-    let sessionNames: string[] = [];
-    try { sessionNames = (await readdir(workspaceDir, { withFileTypes: true })).filter((entry) => entry.isDirectory() && entry.name !== "reservations").map((entry) => entry.name); } catch (error) {
-      if (fileCode(error) === "ENOENT") return result;
-      throw error;
+    let state = await this.#readGcIndexState(workspaceId);
+    if (state.head >= state.tail) return result;
+
+    // Freeze the current tail as this sweep's boundary. Survivors are appended
+    // behind it, so a sweep visits every indexed record exactly once without
+    // enumerating or sorting any unbounded state/session directory.
+    const sweepEnd = state.sweepEnd ?? state.tail;
+    if (state.sweepEnd === undefined) {
+      state = { ...state, sweepEnd };
+      await writeJsonAtomic(this.#gcIndexStatePath(workspaceId), state, 512, lease);
     }
-    for (const sessionName of sessionNames) {
-      for (const state of STATE_DIRS) {
-        const dir = join(workspaceDir, sessionName, state);
-        let names: string[] = [];
-        try { names = await readdir(dir); } catch (error) { if (fileCode(error) !== "ENOENT") throw error; }
-        for (const name of names) {
-          if (!name.endsWith(".json")) continue;
-          const path = join(dir, name);
-          const raw = await readSafeJson(path);
-          if (!validRecord(raw)) continue;
-          if (LIVE_STATES.has(raw.state) && raw.expiresAt <= now) {
-            const base = { ...raw, state: "expired" as const, updatedAt: now, expiresAt: now + COMPLETION_OUTBOX_TERMINAL_TTL_MS };
-            const { contentRevision: _revision, ...semantic } = base;
-            const expired = { ...semantic, contentRevision: computeCompletionContentRevision(semantic) };
-            await writeJsonAtomic(join(workspaceDir, sessionName, "expired", `${raw.deliveryId}.json`), expired);
-            await rm(path, { force: true });
-            result.expired += 1;
-          } else if (!LIVE_STATES.has(raw.state) && raw.expiresAt <= now) {
-            await rm(path, { force: true });
-            result.removed += 1;
-          }
+    const pageEnd = Math.min(state.head + GC_PAGE_SIZE, sweepEnd);
+    for (let sequence = state.head; sequence < pageEnd; sequence += 1) {
+      await lease.assertOwned();
+      const segmentNumber = Math.floor(sequence / GC_PAGE_SIZE);
+      const segment = await this.#readGcIndexSegment(workspaceId, segmentNumber);
+      const entry = segment.entries[sequence - segment.base];
+      if (!entry || (entry.kind !== "record" && entry.kind !== "reservation")) continue;
+      const candidatePath = resolve(this.#workspaceDir(workspaceId), entry.path);
+      const contained = relative(this.#workspaceDir(workspaceId), candidatePath);
+      if (!contained || contained.startsWith("..")) continue;
+      const raw = await readSafeJsonExactRecovery(candidatePath);
+      let retain = false;
+      if (entry.kind === "record") {
+        if (!validRecord(raw)) continue;
+        if (LIVE_STATES.has(raw.state) && raw.expiresAt <= now) {
+          const base = {
+            ...raw,
+            state: "expired" as const,
+            updatedAt: now,
+            expiresAt: now + COMPLETION_OUTBOX_TERMINAL_TTL_MS,
+          };
+          const { contentRevision: _revision, ...semantic } = base;
+          const expired = { ...semantic, contentRevision: computeCompletionContentRevision(semantic) };
+          await this.#writeTrackedJson(
+            workspaceId,
+            this.#recordPath(raw.target, "expired", raw.deliveryId),
+            expired,
+            "record",
+            lease,
+          );
+          await removeDurableBounded(candidatePath, lease);
+          result.expired += 1;
+        } else if (!LIVE_STATES.has(raw.state) && raw.expiresAt <= now) {
+          await removeDurableBounded(candidatePath, lease);
+          result.removed += 1;
+        } else {
+          retain = true;
+        }
+      } else if (validReservation(raw)) {
+        if (raw.expiresAt <= now) {
+          await removeDurableBounded(candidatePath, lease);
+          result.releasedReservations += 1;
+        } else {
+          retain = true;
         }
       }
+      if (retain) await this.#appendGcIndex(workspaceId, { path: contained, kind: entry.kind }, lease);
     }
-    const reservationsDir = join(workspaceDir, "reservations");
-    let reservationNames: string[] = [];
-    try { reservationNames = await readdir(reservationsDir); } catch (error) { if (fileCode(error) !== "ENOENT") throw error; }
-    for (const name of reservationNames) {
-      if (!name.endsWith(".json")) continue;
-      const path = join(reservationsDir, name);
-      const raw = await readSafeJson(path);
-      if (!validReservation(raw) || raw.expiresAt > now) continue;
-      await rm(path, { force: true });
-      result.releasedReservations += 1;
+
+    // Preserve appends performed while processing this page, then advance the
+    // durable head. Fully consumed index segments are removed after the state
+    // update; replay after a crash is idempotent and may only add stale entries.
+    const latest = await this.#readGcIndexState(workspaceId);
+    const completedSweep = pageEnd >= sweepEnd;
+    let next: GcIndexState = {
+      ...latest,
+      head: pageEnd,
+      ...(completedSweep ? { sweepEnd: undefined } : { sweepEnd }),
+    };
+    if (next.head >= next.tail) next = { version: 1, head: 0, tail: 0 };
+    await writeJsonAtomic(this.#gcIndexStatePath(workspaceId), next, 512, lease);
+    const firstRetainedSegment = next.head === 0
+      ? Math.ceil(pageEnd / GC_PAGE_SIZE)
+      : Math.floor(next.head / GC_PAGE_SIZE);
+    for (let segment = Math.floor(state.head / GC_PAGE_SIZE); segment < firstRetainedSegment; segment += 1) {
+      await removeDurable(this.#gcIndexSegmentPath(workspaceId, segment), lease);
     }
+    if (!completedSweep) result.hasMore = true;
     return result;
   }
 
@@ -665,21 +1476,31 @@ export class CompletionOutboxFileStore {
   // the quota until the next explicit store.gc() (reconcile) reclaims them. This
   // is intentionally conservative: it can only false-reject (never over-admit),
   // and the next reconcile past RECONCILE_GC_MIN_INTERVAL_MS reclaims the slack.
-  async #maybeReserveGc(workspaceId: string): Promise<void> {
+  async #maybeReserveGc(workspaceId: string, lease: WorkspaceLockLease): Promise<void> {
     const now = this.#now();
     const last = this.#lastReserveGcAt.get(workspaceId) ?? 0;
     if (now - last < RESERVE_GC_MIN_INTERVAL_MS) return;
-    await this.#gcLocked(workspaceId);
+    await this.#gcLocked(workspaceId, lease);
     this.#lastReserveGcAt.set(workspaceId, now);
   }
 
-  async #consumeReservation(reservation: CompletionReservationRecord, now: number): Promise<void> {
-    await writeJsonAtomic(this.#reservationPath(reservation.target.workspaceId, reservation.reservationId), {
-      ...reservation,
-      state: "consumed",
-      updatedAt: now,
-      expiresAt: now + COMPLETION_OUTBOX_RESERVATION_TERMINAL_TTL_MS,
-    } satisfies CompletionReservationRecord);
+  async #consumeReservation(
+    reservation: CompletionReservationRecord,
+    now: number,
+    lease: WorkspaceLockLease,
+  ): Promise<void> {
+    await this.#writeTrackedJson(
+      reservation.target.workspaceId,
+      this.#reservationPath(reservation.target.workspaceId, reservation.reservationId),
+      {
+        ...reservation,
+        state: "consumed",
+        updatedAt: now,
+        expiresAt: now + COMPLETION_OUTBOX_RESERVATION_TERMINAL_TTL_MS,
+      } satisfies CompletionReservationRecord,
+      "reservation",
+      lease,
+    );
   }
 
   async #readReservation(workspaceId: string, reservationId: string): Promise<CompletionReservationRecord | undefined> {
@@ -688,46 +1509,296 @@ export class CompletionOutboxFileStore {
     return validReservation(raw) ? raw : undefined;
   }
 
-  async #withWorkspaceLock<T>(workspaceId: string, action: () => Promise<T>, waitMs: number = LOCK_WAIT_MS): Promise<T> {
+  async #withWorkspaceLock<T>(
+    workspaceId: string,
+    action: (lease: WorkspaceLockLease) => Promise<T>,
+    waitMs: number = LOCK_WAIT_MS,
+  ): Promise<T> {
     if (!boundedString(workspaceId, 128)) throw new Error("Invalid completion workspaceId.");
     const workspaceDir = this.#workspaceDir(workspaceId);
     await ensureRealDirectory(this.rootDir);
     await ensureRealDirectory(workspaceDir);
     const lockPath = join(workspaceDir, ".store.lock");
     const deadline = Date.now() + waitMs;
+    const token = randomUUID();
+    let generation: string | undefined;
     let handle: Awaited<ReturnType<typeof open>> | undefined;
     while (!handle) {
+      let createdIdentity: { dev: number | bigint; ino: number | bigint } | undefined;
       try {
         handle = await open(lockPath, "wx", 0o600);
-        await handle.writeFile(`${this.ownerId}\n`);
+        const created = await handle.stat();
+        createdIdentity = { dev: created.dev, ino: created.ino };
+        ACTIVE_WORKSPACE_LOCK_TOKENS.add(token);
+        persistenceBoundary("lock", "after-create");
+        generation = await nextWorkspaceGeneration(workspaceDir, token);
+        const initial: WorkspaceLockRecord = {
+          version: 2,
+          ownerId: this.ownerId,
+          token,
+          pid: process.pid,
+          heartbeatAt: Date.now(),
+          generation,
+        };
+        await handle.writeFile(`${JSON.stringify(initial)}\n`);
+        persistenceBoundary("lock", "after-write");
+        await handle.sync();
+        persistenceBoundary("lock", "after-file-sync");
+        await fsyncDirectory(workspaceDir);
+        persistenceBoundary("lock", "after-directory-sync");
       } catch (error) {
+        const createdByThisAttempt = Boolean(handle);
+        if (createdByThisAttempt) ACTIVE_WORKSPACE_LOCK_TOKENS.delete(token);
+        await handle?.close().catch(() => undefined);
+        handle = undefined;
+        if (createdByThisAttempt) {
+          // Setup failed after wx created the canonical entry. Remove only the
+          // inode/token created by this attempt before propagating the error.
+          const snapshot = await this.#readLockSnapshot(lockPath).catch(() => undefined);
+          const info = await lstat(lockPath).catch(() => undefined);
+          const ownsEntry = snapshot?.record?.token === token && snapshot.record.ownerId === this.ownerId
+            || Boolean(info && createdIdentity && info.dev === createdIdentity.dev && info.ino === createdIdentity.ino);
+          if (ownsEntry) {
+            const failedPath = `${lockPath}.setup-failed-${token}`;
+            await rename(lockPath, failedPath).catch(async (cleanupError) => {
+              if (fileCode(cleanupError) !== "ENOENT") throw cleanupError;
+            });
+            await fsyncDirectory(workspaceDir);
+            await rm(failedPath, { force: true });
+            await fsyncDirectory(workspaceDir);
+          }
+        }
         const code = fileCode(error);
-        // Windows may transiently deny exclusive-create with EPERM/EACCES —
-        // antivirus scan, a concurrent holder still releasing the lock, or a
-        // racing rm that has not flushed yet. Treat it the same as EEXIST and
-        // retry within the wait window; never crash the process on a transient
-        // lock contention. Mirrors renameWithRetry's EPERM/EACCES/EEXIST set.
-        if (code !== "EEXIST" && code !== "EPERM" && code !== "EACCES") throw error;
-        const info = await stat(lockPath).catch(() => undefined);
-        if (info && Date.now() - info.mtimeMs > LOCK_STALE_MS) {
-          await rm(lockPath, { force: true });
-          continue;
+        if (!REPLACE_ERRORS.has(code ?? "")) throw error;
+        const snapshot = await this.#readLockSnapshot(lockPath);
+        const now = Date.now();
+        const heartbeatAt = snapshot?.record?.heartbeatAt ?? snapshot?.mtimeMs ?? now;
+        const stale = now - heartbeatAt > LOCK_STALE_MS;
+        const holderState = snapshot?.record ? this.#processState(snapshot.record.pid) : "unknown";
+        const definitivelyDead = holderState === "dead";
+        const endedSameProcess = Boolean(snapshot?.record
+          && snapshot.record.pid === process.pid
+          && !ACTIVE_WORKSPACE_LOCK_TOKENS.has(snapshot.record.token));
+        const abandonedSetup = Boolean(snapshot && !snapshot.record
+          && now - Math.max(snapshot.mtimeMs, snapshot.ctimeMs) >= LOCK_SETUP_STALE_MS);
+        if (snapshot && (definitivelyDead || endedSameProcess || stale && holderState !== "alive" || abandonedSetup)) {
+          const mutation = snapshot.record?.mutation;
+          const mutationPath = mutation ? resolveLockMutationPath(workspaceDir, mutation) : undefined;
+          const revocationCreated = mutation && mutationPath && snapshot.record?.generation
+            ? await writeMutationRevocation(mutationPath, snapshot.record.generation, mutation.transaction)
+            : false;
+          const fresh = await this.#readLockSnapshot(lockPath);
+          const unchanged = Boolean(fresh
+            && fresh.raw === snapshot.raw
+            && fresh.dev === snapshot.dev
+            && fresh.ino === snapshot.ino
+            && fresh.mtimeMs === snapshot.mtimeMs
+            && fresh.ctimeMs === snapshot.ctimeMs
+            && fresh.record?.token === snapshot.record?.token);
+          if (unchanged) {
+            const stalePath = `${lockPath}.stale-${snapshot.record?.token ?? `setup-${randomUUID()}`}`;
+            try {
+              // The exact active transaction is durably revoked before the
+              // canonical lock entry changes. A delayed former owner may still
+              // rename bytes, but fenced readers will reject that generation.
+              await rename(lockPath, stalePath);
+              await fsyncDirectory(workspaceDir);
+              await rm(stalePath, { force: true });
+              await fsyncDirectory(workspaceDir);
+              continue;
+            } catch (takeoverError) {
+              await rollbackMutationRevocation(mutationPath ?? "", mutation?.transaction ?? "", Boolean(revocationCreated));
+              if (!REPLACE_ERRORS.has(fileCode(takeoverError) ?? "") && fileCode(takeoverError) !== "ENOENT") throw takeoverError;
+            }
+          } else {
+            await rollbackMutationRevocation(mutationPath ?? "", mutation?.transaction ?? "", Boolean(revocationCreated));
+          }
         }
         if (waitMs <= 0 || Date.now() >= deadline) {
-          // Non-blocking callers (tryGc) treat a contended lock as "busy" rather
-          // than throwing — a maintenance sweep must never crash or warn on
-          // transient contention with concurrent writers.
           if (waitMs <= 0) return undefined as T;
           throw new Error(`Timed out acquiring completion outbox lock for ${workspaceId}.`);
         }
         await new Promise((resolveDelay) => setTimeout(resolveDelay, LOCK_RETRY_MS));
       }
     }
+    ACTIVE_WORKSPACE_LOCK_TOKENS.add(token);
+    if (!generation || !WORKSPACE_GENERATION.test(generation)) {
+      throw new Error(`Completion outbox lock generation was not initialized for ${workspaceId}.`);
+    }
+
+    let heartbeat: Promise<void> | undefined;
+    let heartbeatError: unknown;
+    const assertOwned = async (): Promise<void> => {
+      await heartbeat?.catch(() => undefined);
+      if (heartbeatError) throw new Error(`Completion outbox lock ownership lost for ${workspaceId}.`, { cause: heartbeatError });
+      const snapshot = await this.#readLockSnapshot(lockPath);
+      if (!snapshot?.record || snapshot.record.token !== token || snapshot.record.ownerId !== this.ownerId
+        || snapshot.record.generation !== generation) {
+        throw new Error(`Completion outbox lock ownership lost for ${workspaceId}.`);
+      }
+    };
+    const writeLeaseRecord = async (mutation: WorkspaceLockMutation | undefined): Promise<void> => {
+      const snapshot = await this.#readLockSnapshot(lockPath);
+      if (!snapshot?.record || snapshot.record.token !== token || snapshot.record.ownerId !== this.ownerId
+        || snapshot.record.generation !== generation) {
+        throw new Error(`Completion outbox lock ownership lost for ${workspaceId}.`);
+      }
+      const next: WorkspaceLockRecord = { ...snapshot.record, heartbeatAt: Date.now(), mutation };
+      const payload = Buffer.from(`${JSON.stringify(next)}\n`, "utf8");
+      await handle!.truncate(0);
+      await handle!.write(payload, 0, payload.byteLength, 0);
+      await handle!.truncate(payload.byteLength);
+      await handle!.sync();
+      const confirmed = await this.#readLockSnapshot(lockPath);
+      const confirmedMutation = confirmed?.record?.mutation;
+      if (confirmed?.record?.token !== token || confirmed.record.generation !== generation
+        || confirmedMutation?.transaction !== mutation?.transaction
+        || confirmedMutation?.path !== mutation?.path) {
+        throw new Error(`Completion outbox lock ownership lost for ${workspaceId}.`);
+      }
+    };
+    const runLeaseUpdate = async (operation: () => Promise<void>): Promise<void> => {
+      await heartbeat?.catch(() => undefined);
+      if (heartbeatError) throw new Error(`Completion outbox lock ownership lost for ${workspaceId}.`, { cause: heartbeatError });
+      let current!: Promise<void>;
+      current = operation()
+        .catch((error) => { heartbeatError = error; throw error; })
+        .finally(() => { if (heartbeat === current) heartbeat = undefined; });
+      heartbeat = current;
+      await current;
+    };
+    const beginMutation = async (path: string, transaction: string): Promise<void> => {
+      if (!REPLACEMENT_TRANSACTION.test(transaction)) throw new Error("Invalid completion mutation transaction.");
+      const contained = relative(workspaceDir, resolve(path));
+      if (!contained || contained.startsWith("..") || resolve(workspaceDir, contained) !== resolve(path)) {
+        throw new Error(`Completion mutation path escapes workspace ${workspaceId}.`);
+      }
+      const snapshot = await this.#readLockSnapshot(lockPath);
+      if (snapshot?.record?.mutation) throw new Error(`Completion outbox lock already has an active mutation for ${workspaceId}.`);
+      await runLeaseUpdate(() => writeLeaseRecord({ version: 1, path: contained, transaction }));
+    };
+    const finishMutation = async (transaction: string): Promise<void> => {
+      const snapshot = await this.#readLockSnapshot(lockPath);
+      if (snapshot?.record?.mutation?.transaction !== transaction) {
+        throw new Error(`Completion outbox lock ownership lost for ${workspaceId}.`);
+      }
+      await runLeaseUpdate(() => writeLeaseRecord(undefined));
+    };
+    const timer = setInterval(() => {
+      if (heartbeat) return;
+      void runLeaseUpdate(async () => {
+        const snapshot = await this.#readLockSnapshot(lockPath);
+        await writeLeaseRecord(snapshot?.record?.mutation);
+      }).catch(() => undefined);
+    }, LOCK_HEARTBEAT_MS);
+    timer.unref?.();
+    const lease: WorkspaceLockLease = { path: lockPath, token, generation, assertOwned, beginMutation, finishMutation };
     try {
-      return await action();
+      await assertOwned();
+      return await action(lease);
     } finally {
+      clearInterval(timer);
+      await heartbeat?.catch(() => undefined);
+      // The lease has ended before release I/O begins. A canonical lock left by
+      // a failed release is therefore reclaimable even though its pid is this
+      // still-running process; active tokens from other in-process stores remain
+      // fenced by the shared set.
+      ACTIVE_WORKSPACE_LOCK_TOKENS.delete(token);
       await handle.close().catch(() => undefined);
-      await rm(lockPath, { force: true }).catch(() => undefined);
+      const current = await this.#readLockSnapshot(lockPath).catch(() => undefined);
+      if (current?.record?.token === token && current.record.ownerId === this.ownerId) {
+        const releasePath = `${lockPath}.release-${token}`;
+        try {
+          await renameWithRetry(lockPath, releasePath);
+          persistenceBoundary("lock", "after-release-rename");
+          await fsyncDirectory(workspaceDir);
+          await rm(releasePath, { force: true });
+          persistenceBoundary("lock", "after-release-remove");
+          await fsyncDirectory(workspaceDir);
+        } catch (error) {
+          const remaining = await this.#readLockSnapshot(lockPath).catch(() => undefined);
+          if (remaining?.record?.token === token && remaining.record.ownerId === this.ownerId) {
+            try {
+              await rm(lockPath, { force: true });
+              await fsyncDirectory(workspaceDir);
+            } catch (cleanupError) {
+              throw new Error(`Completion outbox lock release failed for ${workspaceId}; ended token remains reclaimable.`, {
+                cause: cleanupError,
+              });
+            }
+            const afterCleanup = await this.#readLockSnapshot(lockPath).catch(() => undefined);
+            if (afterCleanup?.record?.token === token) {
+              throw new Error(`Completion outbox lock release failed for ${workspaceId}; ended token remains reclaimable.`, {
+                cause: error,
+              });
+            }
+          } else if (!REPLACE_ERRORS.has(fileCode(error) ?? "") && fileCode(error) !== "ENOENT") {
+            throw error;
+          }
+        }
+      }
+    }
+  }
+
+  async #readLockSnapshot(path: string): Promise<{
+    raw: string;
+    record?: WorkspaceLockRecord;
+    dev: number | bigint;
+    ino: number | bigint;
+    mtimeMs: number;
+    ctimeMs: number;
+  } | undefined> {
+    try {
+      const info = await lstat(path);
+      if (!info.isFile() || info.isSymbolicLink() || info.size > 4096) return undefined;
+      const raw = await readFile(path, "utf8");
+      let record: WorkspaceLockRecord | undefined;
+      try {
+        const parsed = JSON.parse(raw) as Partial<WorkspaceLockRecord>;
+        const validLegacy = parsed.version === undefined
+          && parsed.generation === undefined && parsed.mutation === undefined;
+        const validMutation = parsed.mutation === undefined || Boolean(
+          parsed.mutation.version === 1
+          && boundedString(parsed.mutation.path, 4096)
+          && REPLACEMENT_TRANSACTION.test(parsed.mutation.transaction),
+        );
+        const validV2 = parsed.version === 2 && typeof parsed.generation === "string"
+          && WORKSPACE_GENERATION.test(parsed.generation) && validMutation;
+        if ((validLegacy || validV2)
+          && boundedString(parsed.ownerId, 512)
+          && boundedString(parsed.token, 128)
+          && Number.isSafeInteger(parsed.pid) && parsed.pid! > 0
+          && Number.isSafeInteger(parsed.heartbeatAt) && parsed.heartbeatAt! >= 0) {
+          record = parsed as WorkspaceLockRecord;
+        }
+      } catch {
+        // Invalid setup locks are fenced by inode/content metadata after a
+        // bounded grace period; they never require unbounded stale waiting.
+      }
+      return {
+        raw,
+        ...(record ? { record } : {}),
+        dev: info.dev,
+        ino: info.ino,
+        mtimeMs: info.mtimeMs,
+        ctimeMs: info.ctimeMs,
+      };
+    } catch (error) {
+      if (fileCode(error) === "ENOENT") return undefined;
+      throw error;
+    }
+  }
+
+  #processState(pid: number): "alive" | "dead" | "unknown" {
+    if (pid === process.pid) return "alive";
+    try {
+      process.kill(pid, 0);
+      return "alive";
+    } catch (error) {
+      const code = fileCode(error);
+      if (code === "ESRCH") return "dead";
+      if (code === "EPERM") return "alive";
+      return "unknown";
     }
   }
 

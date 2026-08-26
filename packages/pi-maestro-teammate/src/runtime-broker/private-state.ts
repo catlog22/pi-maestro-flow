@@ -9,6 +9,12 @@ export const RUNTIME_BROKER_SOCKET_FILE = "broker.sock";
 export const RUNTIME_BROKER_DATABASE_FILE = "broker.sqlite";
 export const RUNTIME_BROKER_DAEMON_LOCK_FILE = "daemon.lock";
 
+export interface RuntimeWorkspaceIdentity {
+  canonicalPath: string;
+  workspaceId: string;
+  legacyWorkspaceIds: readonly string[];
+}
+
 export function canonicalizeRuntimeBrokerWorkspace(
   workspaceDirectory: string,
   platform: NodeJS.Platform = process.platform,
@@ -28,17 +34,39 @@ export function canonicalizeRuntimeBrokerWorkspace(
   return platform === "win32" ? canonical.toLowerCase() : canonical;
 }
 
+export function getRuntimeWorkspaceIdentity(
+  workspaceDirectory: string,
+  platform: NodeJS.Platform = process.platform,
+): RuntimeWorkspaceIdentity {
+  const canonicalPath = canonicalizeRuntimeBrokerWorkspace(workspaceDirectory, platform);
+  const workspaceId = workspaceHash(canonicalPath);
+  const resolved = path.resolve(workspaceDirectory);
+  let peerNormalized = resolved.replace(/\\/g, "/");
+  if (peerNormalized.length > 1 && !/^[A-Za-z]:\/$/.test(peerNormalized)) {
+    peerNormalized = peerNormalized.replace(/\/+$/, "");
+  }
+  if (platform === "win32") peerNormalized = peerNormalized.toLowerCase();
+  const legacyWorkspaceIds = [...new Set([
+    workspaceDirectory,
+    resolved,
+    platform === "win32" ? resolved.toLowerCase() : resolved,
+    peerNormalized,
+  ].map(workspaceHash))].filter((candidate) => candidate !== workspaceId);
+  return { canonicalPath, workspaceId, legacyWorkspaceIds };
+}
+
 export function getRuntimeBrokerStateDirectory(
   workspaceDirectory = process.cwd(),
   platform: NodeJS.Platform = process.platform,
 ): string {
   const configured = process.env.PI_TEAMMATE_BROKER_STATE_DIR;
   if (configured) return path.resolve(configured);
-  const workspaceKey = createHash("sha256")
-    .update(canonicalizeRuntimeBrokerWorkspace(workspaceDirectory, platform), "utf8")
-    .digest("hex")
-    .slice(0, 24);
+  const workspaceKey = getRuntimeWorkspaceIdentity(workspaceDirectory, platform).workspaceId.slice(0, 24);
   return path.join(os.homedir(), ".pi", "agent", "runtime-broker", workspaceKey);
+}
+
+function workspaceHash(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
 export function getRuntimeBrokerEndpoint(
@@ -55,6 +83,18 @@ export function getRuntimeBrokerEndpoint(
     throw new Error("Runtime broker state directory is too long for a Unix-domain socket");
   }
   return endpoint;
+}
+
+/** Stable authority scope used by the readiness handshake for a broker endpoint. */
+export function getRuntimeBrokerEndpointWorkspaceId(
+  endpoint: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  if (typeof endpoint !== "string" || endpoint.length === 0 || endpoint.includes("\0")) {
+    throw new Error("Runtime broker endpoint must be a non-empty path");
+  }
+  const normalized = platform === "win32" ? endpoint.toLowerCase() : endpoint;
+  return createHash("sha256").update(normalized, "utf8").digest("hex");
 }
 
 export function getRuntimeBrokerDatabasePath(stateDirectory = getRuntimeBrokerStateDirectory()): string {

@@ -81,7 +81,7 @@ export declare const TeammateListParams: Type.TObject<{
     session: Type.TOptional<Type.TString>;
     peer: Type.TOptional<Type.TString>;
     direction: Type.TOptional<Type.TUnsafe<"outgoing" | "incoming">>;
-    status: Type.TOptional<Type.TUnsafe<"queued" | "accepted" | "injected" | "pending" | "rejected" | "timeout">>;
+    status: Type.TOptional<Type.TUnsafe<"queued" | "accepted" | "injected" | "pending" | "timeout" | "rejected">>;
     since: Type.TOptional<Type.TString>;
     limit: Type.TOptional<Type.TInteger>;
 }>;

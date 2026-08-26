@@ -52,6 +52,20 @@ test("register publishes generations and disposal only clears its own provider",
   assert.equal(snapshots[3]?.current, undefined);
 });
 
+test("dispatch pin survives current-provider reload until its owner releases", () => {
+  const registry = getCompletionDurabilityRegistry({});
+  const first = provider("first");
+  const second = provider("second");
+  registry.register(first);
+  const release = registry.pinDispatch("dispatch-pinned", first);
+  registry.register(second);
+  assert.equal(registry.current(), second);
+  assert.equal(registry.providerForDispatch("dispatch-pinned"), first);
+  assert.throws(() => registry.pinDispatch("dispatch-pinned", second), /another provider generation/);
+  release();
+  assert.equal(registry.providerForDispatch("dispatch-pinned"), undefined);
+});
+
 test("late subscribers immediately observe the current provider", () => {
   const registry = getCompletionDurabilityRegistry({});
   const current = provider("current");

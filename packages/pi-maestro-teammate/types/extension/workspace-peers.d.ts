@@ -44,6 +44,8 @@ export declare const SETTLED_RESULT_MAX = 8;
 export declare const CLEANUP_STALE_DEFAULT_MS = 120000;
 /** Version of the per-session owner identity file. */
 export declare const IDENTITY_FILE_VERSION: 1;
+/** Version of the immutable per-session owner claim file. */
+export declare const OWNER_CLAIM_FILE_VERSION: 1;
 export type WorkspaceAgentStatus = "running" | "sleeping";
 export type WorkspaceSettledStatus = "completed" | "failed" | "terminated";
 export type WorkspacePeerCommandAction = "steer" | "follow_up";
@@ -61,14 +63,29 @@ export interface WorkspacePeerPaths {
     commandsDir: string;
     responsesDir: string;
     identitiesDir: string;
+    claimsDir?: string;
 }
 export interface WorkspacePeerIdentity {
     version: typeof WORKSPACE_PEER_PROTOCOL_VERSION;
     normalizedCwd: string;
     workspaceId: string;
+    legacyWorkspaceIds?: readonly string[];
     ownerId: string;
     ownerNonce: string;
+    ownerToken?: string;
+    ownerGeneration?: number;
+    sessionClaimKey?: string;
     paths: WorkspacePeerPaths;
+    legacyPaths?: readonly WorkspacePeerPaths[];
+}
+export interface WorkspaceOwnerClaim {
+    readonly identity: WorkspacePeerIdentity;
+    readonly claimPath: string;
+    readonly token: string;
+    readonly generation: number;
+    assertOwned(): Promise<void>;
+    heartbeat(publishedAt?: number): Promise<void>;
+    release(): Promise<void>;
 }
 export interface WorkspaceAgentSnapshot {
     correlationId: string;
@@ -159,6 +176,10 @@ export interface WorkspaceOwnerSnapshot {
     normalizedCwd: string;
     ownerId: string;
     ownerNonce: string;
+    /** Additive token/generation fence for claimed session owners. */
+    ownerToken?: string;
+    ownerGeneration?: number;
+    sessionClaimKey?: string;
     pid: number;
     publishedAt: number;
     sessionId?: string;
@@ -295,6 +316,7 @@ export interface WorkspacePeerRuntimeOptions {
     rootDir?: string;
     ownerId?: string;
     ownerNonce?: string;
+    ownerClaim?: WorkspaceOwnerClaim;
     heartbeatMs?: number;
     publishThrottleMs?: number;
     mailboxCleanupIntervalMs?: number;
@@ -317,13 +339,18 @@ export declare function createWorkspacePeerIdentity(cwd: string, options?: {
     rootDir?: string;
     ownerId?: string;
     ownerNonce?: string;
+    ownerToken?: string;
+    ownerGeneration?: number;
+    sessionClaimKey?: string;
 }): WorkspacePeerIdentity;
 export declare function ownerSnapshotPath(identity: WorkspacePeerIdentity, ownerId?: string): string;
 export declare function commandMailboxPath(identity: WorkspacePeerIdentity, ownerId: string): string;
 export declare function responseMailboxPath(identity: WorkspacePeerIdentity, ownerId: string): string;
 export declare function ensureWorkspacePeerDirectories(identity: WorkspacePeerIdentity): Promise<void>;
 export declare function writePrivateJsonAtomic(path: string, value: unknown, maximumBytes: number, options?: {
-    beforeCommit?: () => void;
+    beforeCommit?: () => void | Promise<void>;
+    /** Wrap the atomic rename in an ownership/lease critical section. */
+    commit?: (renameCommit: () => Promise<void>) => Promise<void>;
 }): Promise<void>;
 export declare function activeWorkspaceBackgroundJobsFromPayload(payload: unknown): WorkspaceBackgroundJobSnapshot[] | undefined;
 export interface WorkspaceMainSessionDeliveryDecision {
@@ -354,21 +381,39 @@ export declare function validateWorkspaceOwnerSnapshot(value: unknown, expected?
     ownerId?: string;
 }): WorkspaceOwnerSnapshot | undefined;
 export declare function buildWorkspaceOwnerSnapshot(identity: WorkspacePeerIdentity, state: WorkspaceOwnerState, publishedAt?: number): WorkspaceOwnerSnapshot;
-export declare function publishWorkspaceOwner(identity: WorkspacePeerIdentity, state: WorkspaceOwnerState, publishedAt?: number): Promise<WorkspaceOwnerSnapshot>;
+export declare function publishWorkspaceOwner(identity: WorkspacePeerIdentity, state: WorkspaceOwnerState, publishedAt?: number, options?: {
+    /** @internal Test hook that runs after temp-file fsync and before the fenced rename. */
+    beforeCommit?: () => void | Promise<void>;
+}): Promise<WorkspaceOwnerSnapshot>;
 export declare function discoverWorkspacePeers(identity: WorkspacePeerIdentity, options?: {
     now?: number;
     staleAfterMs?: number;
     cleanupStale?: boolean;
     cleanupStaleAfterMs?: number;
     includeSelf?: boolean;
+    /** @internal Test hook for reverse stale-cleanup interleavings. */
+    beforeCleanupStale?: (path: string, snapshot: WorkspaceOwnerSnapshot) => void | Promise<void>;
 }): Promise<WorkspacePeerDiscovery>;
 export interface PersistedOwnerIdentity {
     version: typeof IDENTITY_FILE_VERSION;
     ownerId: string;
 }
 export declare function workspacePeerIdentityPath(identity: WorkspacePeerIdentity, sessionKey: string): string;
+export declare function workspacePeerClaimPath(identity: WorkspacePeerIdentity, sessionKey: string): string;
 export declare function loadPersistedOwnerIdentity(identity: WorkspacePeerIdentity, sessionKey: string): Promise<PersistedOwnerIdentity | undefined>;
 export declare function persistOwnerIdentity(identity: WorkspacePeerIdentity, sessionKey: string, ownerId: string): Promise<void>;
+export declare function claimWorkspaceOwnerIdentity(cwd: string, options?: {
+    rootDir?: string;
+    sessionKey?: string;
+    pid?: number;
+    generation?: number;
+    staleMs?: number;
+    now?: () => number;
+    /** @internal Test hook for canonical/legacy root conflict coverage. */
+    legacyRootDirs?: readonly string[];
+    /** @internal Runs after observing contention but before the takeover mutex. */
+    beforeTakeover?: () => void | Promise<void>;
+}): Promise<WorkspaceOwnerClaim>;
 /**
  * Resolve the ownerId for a window's workspace-peer incarnation. Reuses the
  * persisted per-session ownerId unless a live foreign process already holds it
@@ -462,6 +507,8 @@ export declare function sendWorkspacePeerCommand(identity: WorkspacePeerIdentity
 export declare function consumeWorkspacePeerCommands(identity: WorkspacePeerIdentity, handler: (command: WorkspacePeerCommand) => WorkspaceCommandHandlerResult | void | Promise<WorkspaceCommandHandlerResult | void>, options?: {
     now?: number;
     limit?: number;
+    /** @internal Test hook after claiming/reading a command but before handler fencing. */
+    beforeHandle?: (command: WorkspacePeerCommand) => void | Promise<void>;
 }): Promise<WorkspaceConsumedCommand[]>;
 export declare class WorkspacePeerCommandConsumer {
     #private;

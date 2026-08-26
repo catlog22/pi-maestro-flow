@@ -9,7 +9,7 @@
 import { logDiagnosticError, logDiagnosticWarn } from "../shared/diagnostic-log.ts";
 
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
@@ -35,8 +35,8 @@ import {
 } from "../public/v1/observation.ts";
 import {
   CompletionDeliveryCoordinator,
+  type CompletionPublishResult,
 } from "../completion-outbox/coordinator.ts";
-import type { CompletionOutboxRecord } from "../completion-outbox/types.ts";
 import type {
   CompletionDispatchSeed,
   CompletionResource,
@@ -80,6 +80,7 @@ import {
   hasRpcTurnSidecar,
   sendRpcMessage,
   truncateUtf8Tail,
+  truncateUtf8Head,
   checkDepthGuard,
   dispatchAllowed,
   agentDispatchBudget,
@@ -90,6 +91,8 @@ import {
   isStructuredOutputSettlementDiagnostic,
   singleRunParamsOf,
 } from "../runs/execution.ts";
+import { createForkSnapshot } from "../runs/fork-snapshot.ts";
+import { validateWaitCycle, type WaitCycleAction, type WaitCycleDiagnostic } from "./wait-cycle.ts";
 import { publishedModelRegistryPairSync } from "../backends/registry-host.ts";
 import {
   confirmChildReloaded,
@@ -276,7 +279,9 @@ import {
   terminateAndRemoveWakeableCohort, wakeableAgentCohorts,
   applyAgentRetryState, applyAgentResultReadyState, clearAgentResultReadyState,
   markSettledResultInspectable, recordChildReclamationOutcome, hasTeammateWidgetWork,
+  deliverDurableFailureWithFallback,
   emitComplete, safeSendMessage, notifyBackgroundFailure, replyProxyFailure,
+  currentSessionProjectionIdentity,
   deliverTeammateCompleteNotification,
   bindAgentName, removeAgentFromRegistry, resolveAgentCorrelationId,
   resolveLocalAgentSenderContext,
@@ -923,6 +928,57 @@ export interface TeammateProxyAuthority {
   };
 }
 
+function proxyCallerDependentIds(state: TeammateState, callerCorrelationId: string): Set<string> {
+  const dependentIds = new Set<string>();
+  const visited = new Set<string>([callerCorrelationId]);
+  let currentId = state.activeRuns.get(callerCorrelationId)?.spawnedBy;
+  while (currentId && !visited.has(currentId)) {
+    visited.add(currentId);
+    dependentIds.add(currentId);
+    currentId = state.activeRuns.get(currentId)?.spawnedBy;
+  }
+  return dependentIds;
+}
+
+function proxyWaitCycleDiagnostic(
+  state: TeammateState,
+  callerCorrelationId: string | undefined,
+  action: WaitCycleAction,
+  targets: readonly { kind: string; id: string }[],
+  waitMode?: "all" | "any" | "count",
+  waitCount?: number,
+): WaitCycleDiagnostic | undefined {
+  if (!callerCorrelationId) return undefined;
+  const resolvedTargetIds = targets.map((target, index) => {
+    if (target.kind !== "teammate") return `provider:${target.kind}:${index}`;
+    return resolveAgentCorrelationId(state, target.id) ?? `unresolved:teammate:${index}`;
+  });
+  return validateWaitCycle({
+    callerCorrelationId,
+    action,
+    waitMode,
+    waitCount,
+    resolvedTargetIds,
+    callerDependentIds: proxyCallerDependentIds(state, callerCorrelationId),
+  });
+}
+
+function proxyWaitCycleResult(
+  requestId: string,
+  diagnostic: WaitCycleDiagnostic,
+): Record<string, unknown> {
+  const text = `Wait rejected because the barrier necessarily includes the caller or its ancestor/container: ${diagnostic.cyclicIds.join(", ")}.`;
+  return {
+    type: "teammate_proxy_result",
+    requestId,
+    result: {
+      content: [{ type: "text", text }],
+      isError: true,
+      details: { ...diagnostic, output: [text] },
+    },
+  };
+}
+
 export async function handleProxyRequest(
   pi: ExtensionAPI,
   state: TeammateState,
@@ -965,6 +1021,14 @@ export async function handleProxyRequest(
   refreshModelCapabilities?: () => Promise<readonly TeammateModelCapability[]>,
   authority: TeammateProxyAuthority = {},
 ): Promise<void> {
+  let forkSnapshotDirectory: string | undefined;
+  let forkSnapshotExecutionStarted = false;
+  let forkSnapshotCleaned = false;
+  const cleanupForkSnapshot = (): void => {
+    if (forkSnapshotCleaned) return;
+    forkSnapshotCleaned = true;
+    if (forkSnapshotDirectory) rmSync(forkSnapshotDirectory, { recursive: true, force: true });
+  };
   let replied = false;
   const reply = (message: unknown): void => {
     if (replied) return;
@@ -987,8 +1051,12 @@ export async function handleProxyRequest(
     },
   });
   const dispatchGeneration = state.sessionGeneration ?? 0;
+  const dispatchProjection = currentSessionProjectionIdentity(state);
   const ownsDispatchGeneration = (): boolean =>
-    (state.sessionGeneration ?? 0) === dispatchGeneration;
+    (state.sessionGeneration ?? 0) === dispatchGeneration
+    && (!dispatchProjection || (state.currentWorkspaceId === dispatchProjection.workspaceId
+      && state.currentSessionId === dispatchProjection.sessionId
+      && state.currentSourceId === dispatchProjection.sourceId));
   const parentCid = resolveProxyParentCorrelationId(event, spawnedBy, state);
   const parentSessionId = parentCid ? state.activeRuns.get(parentCid)?.sessionId : undefined;
   const rootOwnerId = state.currentSessionId ?? parentSessionId ?? `process-${process.pid}`;
@@ -1156,6 +1224,34 @@ export async function handleProxyRequest(
         return;
       }
       state.pendingProxyDispatchParents?.delete(requestId);
+
+      const spawnerAgent = parentCid ? state.activeRuns.get(parentCid) : undefined;
+      const forkRequested = allTasks.some((task) => task.context === "fork");
+      let nestedParentSessionFile = spawnerAgent?.sessionFile ?? state.mainSessionFile;
+      if (forkRequested) {
+        if (!parentCid || !spawnerAgent?.sessionFile) {
+          throw new Error("fork-snapshot-invalid (source-read-failed): spawning agent session file is unavailable");
+        }
+        const snapshot = createForkSnapshot({
+          sourcePath: spawnerAgent.sessionFile,
+          spawningToolCallId: typeof event.spawningToolCallId === "string"
+            ? event.spawningToolCallId
+            : "",
+          destination: { kind: "temp" },
+        });
+        if (!snapshot.ok) {
+          throw new Error(
+            `${snapshot.diagnostic.kind} (${snapshot.diagnostic.code}): ${snapshot.diagnostic.message}`,
+          );
+        }
+        nestedParentSessionFile = snapshot.snapshotPath;
+        forkSnapshotDirectory = snapshot.temporaryDirectory;
+        if (snapshot.injectedCompactionBoundary) {
+          logDiagnosticWarn(
+            "[pi-maestro-teammate] nested fork context truncated: injected a compaction boundary into the fork snapshot because the spawning agent history exceeded the fork compaction threshold; the child sees only recent retained context plus a summary instead of the full fork-parent history.",
+          );
+        }
+      }
 
       const taskNames = new Set(normalizedTasks?.filter((task) => task.name).map((task) => task.name!) ?? []);
       const taskIndexByName = new Map<string, number>();
@@ -1347,6 +1443,7 @@ export async function handleProxyRequest(
           wakeable,
           terminalStatus === "terminated",
           structuredResults,
+          dispatchProjection,
         );
       };
 
@@ -1395,7 +1492,7 @@ export async function handleProxyRequest(
             originCwd: result.originCwd ?? dispatchOriginCwd,
             ...(result.name ? { name: result.name } : {}),
             agent: result.agent,
-            summary: displayMessageForResult(result).replace(/\s+/g, " ").trim().slice(0, 4_096),
+            summary: truncateUtf8Head(displayMessageForResult(result).replace(/\s+/g, " ").trim(), 4_096),
             outcome,
           };
         });
@@ -1412,14 +1509,14 @@ export async function handleProxyRequest(
       const publishNestedDurableCompletion = async (
         publication: NestedCompletion,
         terminalStatus: AgentTerminalStatus,
-      ): Promise<CompletionOutboxRecord | undefined> => {
-        if (!completionDurable || !completionSeed || !authority.completion) return undefined;
+      ): Promise<CompletionPublishResult> => {
+        if (!completionDurable || !completionSeed || !authority.completion) return { finalized: false };
         return authority.completion.coordinator.publishCompletion({
           dispatchId: completionSeed.dispatchId,
           reservationId: completionSeed.reservationId,
           kind: normalizedTasks ? "graph" : "single",
           outcome: terminalStatus === "terminated" ? "terminated" : publication.exitCode === 0 ? "completed" : "failed",
-          summary: publication.summary.slice(0, 4_096),
+          summary: truncateUtf8Head(publication.summary, 4_096),
           resources: nestedResources(publication.results),
           finalizedAt: Date.now(),
         });
@@ -1487,12 +1584,13 @@ export async function handleProxyRequest(
             });
             if (!delivered) markSettledResultInspectable(state, cid);
           };
-          void publishNestedDurableCompletion(nestedPublication, terminalStatus).then((record) => {
-            if (!record) {
+          void publishNestedDurableCompletion(nestedPublication, terminalStatus).then((result) => {
+            if (!result.finalized) {
               fallbackDelivery();
               return;
             }
-            if (record.replyTarget !== "caller" || !authority.completion) return;
+            const record = result.record;
+            if (!record || record.replyTarget !== "caller" || !authority.completion) return;
             const delivered = deliverTeammateCompleteNotification({
               pi,
               state,
@@ -1503,9 +1601,14 @@ export async function handleProxyRequest(
               sessionGeneration: state.sessionGeneration ?? 0,
             });
             if (!delivered) markSettledResultInspectable(state, cid);
-          }).catch((error) => {
-            logDiagnosticWarn("[pi-maestro-teammate] durable nested completion failed; using passive delivery:", error);
+          }, (error) => {
+            // publishCompletion rejects only before finalizeDelivery crosses the
+            // commit point. Errors from the fulfilled delivery handler below
+            // must never route into this direct fallback.
+            logDiagnosticWarn("[pi-maestro-teammate] durable nested completion failed before finalization; using passive delivery:", error);
             fallbackDelivery();
+          }).catch((error) => {
+            logDiagnosticWarn("[pi-maestro-teammate] post-finalize nested delivery handler failed; durable recovery retained:", error);
           });
         }
         finishProxyDispatchTracking();
@@ -1536,6 +1639,7 @@ export async function handleProxyRequest(
           wakeable,
           terminalStatus === "terminated",
           toStructuredResults([result], dispatchOriginCwd),
+          dispatchProjection,
         );
         if (!notifyModel) return;
         const lastMessage = displayMessageForResult(result);
@@ -1568,10 +1672,15 @@ export async function handleProxyRequest(
           reservationId: additionalSeed.reservationId,
           kind: "additional",
           outcome: terminalStatus === "terminated" ? "terminated" : result.exitCode === 0 ? "completed" : "failed",
-          summary: lastMessage,
+          summary: truncateUtf8Head(lastMessage, 4_096),
           resources: nestedResources([result]),
           finalizedAt: Date.now(),
-        }).then((record) => {
+        }).then((publishResult) => {
+          if (!publishResult.finalized) {
+            fallbackDelivery();
+            return;
+          }
+          const record = publishResult.record;
           if (!record || record.replyTarget !== "caller") return;
           const delivered = deliverTeammateCompleteNotification({
             pi,
@@ -1583,9 +1692,11 @@ export async function handleProxyRequest(
             sessionGeneration: state.sessionGeneration ?? 0,
           });
           if (!delivered) markSettledResultInspectable(state, result.correlationId);
-        }).catch((error) => {
-          logDiagnosticWarn("[pi-maestro-teammate] durable nested additional completion failed; using passive delivery:", error);
+        }, (error) => {
+          logDiagnosticWarn("[pi-maestro-teammate] durable nested additional completion failed before finalization; using passive delivery:", error);
           fallbackDelivery();
+        }).catch((error) => {
+          logDiagnosticWarn("[pi-maestro-teammate] post-finalize nested additional delivery handler failed; durable recovery retained:", error);
         });
       };
 
@@ -1628,14 +1739,13 @@ export async function handleProxyRequest(
       // any started event can re-enter admission synchronously.
       normalizedTasks?.forEach((task, index) => {
         const childAgent = state.activeRuns.get(taskCorrelationIds[index]);
-        if (childAgent) emitTeammateStarted(pi, childAgent);
+        if (childAgent) emitTeammateStarted(pi, childAgent, dispatchProjection ? { projection: dispatchProjection } : {});
       });
       // After the whole graph is registered: an onChildStatus callback can
       // synchronously trigger further dispatches, which must see the complete
       // live tally rather than an empty registry (P4).
       reportChildStatus("running");
 
-      const spawnerAgent = parentCid ? state.activeRuns.get(parentCid) : undefined;
       const spawnerLabel = spawnerAgent?.name ?? spawnerAgent?.agent ?? "proxy";
       safeSendMessage(
         pi,
@@ -1646,9 +1756,10 @@ export async function handleProxyRequest(
         },
         { triggerTurn: true },
       );
-      emitTeammateStarted(pi, activeAgent);
+      emitTeammateStarted(pi, activeAgent, dispatchProjection ? { projection: dispatchProjection } : {});
 
       const processProxyProgress = (data: AgentProgress) => {
+        if (!ownsDispatchGeneration()) return;
         const taskIndex = data.taskIndex ?? taskCorrelationIds.indexOf(data.correlationId ?? "");
         if (taskIndex < 0) return;
         const existing = progressState.get(taskIndex);
@@ -1747,6 +1858,7 @@ export async function handleProxyRequest(
       };
 
       const publishProxyProgress = (data: AgentProgress): void => {
+        if (!ownsDispatchGeneration()) return;
         const taskIndex = data.taskIndex ?? taskCorrelationIds.indexOf(data.correlationId ?? "");
         const existing = taskIndex >= 0 ? progressState.get(taskIndex) : undefined;
         const taskCorrelationId = data.correlationId ?? existing?.correlationId ?? cid;
@@ -1785,6 +1897,7 @@ export async function handleProxyRequest(
         const currentProgress = normalizedTasks ? progressSnapshot() : [task];
         pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
           ...task,
+          ...(dispatchProjection ? { projection: dispatchProjection } : {}),
           correlationId: cid,
           taskCorrelationId,
           progress: currentProgress,
@@ -1838,6 +1951,10 @@ export async function handleProxyRequest(
       // and publish on every streaming token, which drove a full parent-side
       // re-render per delta — the dominant cost of nested dispatches.
       const proxyProgressFlushGate = createProgressFlushGate(() => {
+        if (!ownsDispatchGeneration()) {
+          pendingProgressByTask.clear();
+          return;
+        }
         const pending = [...pendingProgressByTask.values()];
         pendingProgressByTask.clear();
         const latest = pending[pending.length - 1];
@@ -1851,7 +1968,7 @@ export async function handleProxyRequest(
         }
         publishProxyProgress(latest);
         reportChildStatus(childCallStatusForProgress(latest.status), latest);
-      });
+      }, 300, ownsDispatchGeneration);
 
       const nestedModelRegistryAuthority = publishedModelRegistryPairSync(state.baseCwd)?.dispatch;
       const initialTurnContext: AgentTurnTriggerContextV1 | undefined = normalizedTasks
@@ -1881,7 +1998,7 @@ export async function handleProxyRequest(
         ...(initialTurnContext ? { initialTurnContext } : {}),
         ...(state.recordTurnEvent ? { recordTurnEvent: state.recordTurnEvent } : {}),
         ...(normalizedTasks ? { taskSignals: taskAbortControllers.map((controller) => controller.signal) } : {}),
-        parentSessionFile: spawnerAgent?.sessionFile ?? state.mainSessionFile,
+        parentSessionFile: nestedParentSessionFile,
         initialLeaseToken: (childId: string) => {
           const target = state.activeRuns.get(childId) ?? activeAgent;
           return target.lease ? leaseToken(target.lease) : undefined;
@@ -2035,6 +2152,7 @@ export async function handleProxyRequest(
           );
         },
         onProgress: (data) => {
+          if (!ownsDispatchGeneration()) return;
           // Refreshed on every branch. This is the only input to every stall
           // verdict (the status widget, teammate-wait, teammate-list), and the
           // single-task path never wrote it — so the most common nested shape
@@ -2209,6 +2327,7 @@ export async function handleProxyRequest(
               true,
               status === "terminated",
               toStructuredResults([terminalResult], dispatchOriginCwd),
+              dispatchProjection,
             );
             deliverTeammateCompleteNotification({
               pi,
@@ -2277,7 +2396,7 @@ export async function handleProxyRequest(
       });
       else installNestedColdRestart(activeAgent, singleTask);
 
-      const executeNested = async () => {
+      const executeNestedCore = async () => {
         if (normalizedTasks) {
           const mode = inferGraphMode(normalizedTasks);
           let results: SingleResult[] | undefined;
@@ -2374,6 +2493,10 @@ export async function handleProxyRequest(
           lifecyclePending: result.lifecyclePending === true,
         };
       };
+      const executeNested = (): ReturnType<typeof executeNestedCore> => {
+        forkSnapshotExecutionStarted = true;
+        return executeNestedCore().finally(cleanupForkSnapshot);
+      };
 
       const settleNestedExecutionFailure = (error: unknown): string => {
         const message = error instanceof Error ? error.message : String(error);
@@ -2414,16 +2537,16 @@ export async function handleProxyRequest(
           completionOutcome: "failed",
         };
         await emitTeammateResultPublished(pi, result, dispatchOriginCwd);
-        await authority.completion.coordinator.publishCompletion({
+        const published = await authority.completion.coordinator.publishCompletion({
           dispatchId: completionSeed.dispatchId,
           reservationId: completionSeed.reservationId,
           kind: "failure",
           outcome: "failed",
-          summary: message,
+          summary: truncateUtf8Head(message, 4_096),
           resources: nestedResources([result]),
           finalizedAt: Date.now(),
         });
-        return true;
+        return published.finalized;
       };
 
       const mode = normalizedTasks ? inferGraphMode(normalizedTasks) : "single";
@@ -2456,11 +2579,23 @@ export async function handleProxyRequest(
           const cancelled = finishProxyDispatchTracking();
           if (cancelled || !ownsDispatchGeneration()) return;
           settleNestedExecutionFailure(error);
-          void publishNestedFailure(error).then((durable) => {
-            if (!durable) notifyBackgroundFailure(pi, requestId, activeAgent.agent, cid, error, state);
-          }).catch((durabilityError) => {
-            logDiagnosticWarn("[pi-maestro-teammate] durable nested failure failed; using direct delivery:", durabilityError);
-            notifyBackgroundFailure(pi, requestId, activeAgent.agent, cid, error, state);
+          void deliverDurableFailureWithFallback({
+            publishDurableFailure: () => publishNestedFailure(error),
+            ownsDispatchGeneration,
+            fallback: () => notifyBackgroundFailure(
+              pi,
+              requestId,
+              activeAgent.agent,
+              cid,
+              error,
+              state,
+              dispatchProjection,
+            ),
+            onDurabilityError: (durabilityError) => {
+              logDiagnosticWarn("[pi-maestro-teammate] durable nested failure failed before finalization; using direct delivery:", durabilityError);
+            },
+          }).catch((deliveryError) => {
+            logDiagnosticWarn("[pi-maestro-teammate] post-finalize nested failure handler failed; durable recovery retained:", deliveryError);
           });
         });
       };
@@ -2590,6 +2725,13 @@ export async function handleProxyRequest(
     case "teammate-wait": {
       const parentSignal = parentCid ? state.activeRuns.get(parentCid)?.abortController.signal : undefined;
       const name = typeof params.name === "string" ? params.name : undefined;
+      const waitCycle = name
+        ? proxyWaitCycleDiagnostic(state, parentCid, "wait", [{ kind: "teammate", id: name }])
+        : undefined;
+      if (waitCycle) {
+        reply(proxyWaitCycleResult(requestId, waitCycle));
+        return;
+      }
       const result = await withProxyObservation(state, requestId, parentSignal, async (proxySignal) => name
         ? observeTargets({
             action: "wait",
@@ -2646,6 +2788,18 @@ export async function handleProxyRequest(
         reply(crossSessionError("observe"));
         return;
       }
+      const waitCycle = proxyWaitCycleDiagnostic(
+        state,
+        parentCid,
+        observeParams.action,
+        observeParams.targets,
+        observeParams.waitMode,
+        observeParams.waitCount,
+      );
+      if (waitCycle) {
+        reply(proxyWaitCycleResult(requestId, waitCycle));
+        return;
+      }
       const result = await withProxyObservation(
         state,
         requestId,
@@ -2685,6 +2839,18 @@ export async function handleProxyRequest(
           isError: true,
           details: { output: [validationError] },
         }});
+        return;
+      }
+      const waitCycle = proxyWaitCycleDiagnostic(
+        state,
+        parentCid,
+        monitorParams.action,
+        monitorParams.targets.map((id) => ({ kind: "teammate", id })),
+        monitorParams.waitMode,
+        monitorParams.waitCount,
+      );
+      if (waitCycle) {
+        reply(proxyWaitCycleResult(requestId, waitCycle));
         return;
       }
       const observed = await withProxyObservation(
@@ -3039,7 +3205,8 @@ export async function handleProxyRequest(
         });
         agent.outputLog.push(`[${new Date(now).toISOString().slice(11, 19)}] ◀ cold-resume prompt: ${message.slice(0, 100)}`);
         trimAgentBuffers(agent);
-        emitTeammateStarted(pi, agent);
+        const projection = currentSessionProjectionIdentity(state);
+        emitTeammateStarted(pi, agent, projection ? { projection } : {});
         pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
           correlationId: cid,
           from: "caller",
@@ -3091,7 +3258,7 @@ export async function handleProxyRequest(
       }
       const now = Date.now();
       if (mode === "prompt" && !turnTracked) agent.promptSeq = (agent.promptSeq ?? 0) + 1;
-      wakeSleepingAgent(pi, agent, now);
+      wakeSleepingAgent(pi, agent, now, currentSessionProjectionIdentity(state));
       agent.inbox.push({
         id: deliveredProvenance.messageId ?? randomUUID(),
         from: spawnedBy ?? "proxy",
@@ -3226,12 +3393,15 @@ export async function handleProxyRequest(
     });
   } catch (error) {
     abandonPendingProxyDispatch();
+    if (!forkSnapshotExecutionStarted) cleanupForkSnapshot();
     if (replied) return;
     try {
       replyProxyFailure(event, reply, error);
     } catch (deliveryError) {
       logDiagnosticError("[pi-maestro-teammate] failed to deliver proxy error envelope", deliveryError);
     }
+  } finally {
+    if (!forkSnapshotExecutionStarted) cleanupForkSnapshot();
   }
 }
 

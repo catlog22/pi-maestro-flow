@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { RuntimeBrokerClient } from "../src/runtime-broker/client.ts";
 import { RuntimeBrokerServer } from "../src/runtime-broker/server.ts";
+import { getRuntimeBrokerStateDirectory } from "../src/runtime-broker/private-state.ts";
 import { RuntimeReadModelBrokerBridge } from "../src/runtime-v2/broker-read-model.ts";
 import type { RuntimeAgentReadEntityV2 } from "../src/runtime-v2/read-model.ts";
 
@@ -20,6 +21,43 @@ function entity(correlationId: string, generation = 1): RuntimeAgentReadEntityV2
     ...(correlationId.startsWith("acp") ? { resolvedModel: "cli/acp" } : {}),
   };
 }
+
+test("broker bridge without an injected client selects state from the requested cwd", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-read-model-cwd-"));
+  const workspace = path.join(root, "requested-workspace");
+  const stateDirectory = path.join(root, "actual-broker");
+  fs.mkdirSync(workspace);
+  const server = new RuntimeBrokerServer({ stateDirectory });
+  const originalConnectOrStart = RuntimeBrokerClient.connectOrStart;
+  const previousOverride = process.env.PI_TEAMMATE_BROKER_STATE_DIR;
+  let client: RuntimeBrokerClient | undefined;
+  let bridge: RuntimeReadModelBrokerBridge | undefined;
+  let requestedStateDirectory: string | undefined;
+  try {
+    delete process.env.PI_TEAMMATE_BROKER_STATE_DIR;
+    await server.listen();
+    client = await RuntimeBrokerClient.connect({ stateDirectory });
+    RuntimeBrokerClient.connectOrStart = async (options = {}) => {
+      requestedStateDirectory = options.stateDirectory;
+      return client!;
+    };
+    bridge = await RuntimeReadModelBrokerBridge.connect({
+      cwd: workspace,
+      sourceId: "requested-cwd-window",
+      mode: "sqlite",
+    });
+    assert.equal(requestedStateDirectory, getRuntimeBrokerStateDirectory(workspace));
+    assert.notEqual(requestedStateDirectory, getRuntimeBrokerStateDirectory(process.cwd()));
+  } finally {
+    RuntimeBrokerClient.connectOrStart = originalConnectOrStart;
+    if (previousOverride === undefined) delete process.env.PI_TEAMMATE_BROKER_STATE_DIR;
+    else process.env.PI_TEAMMATE_BROKER_STATE_DIR = previousOverride;
+    await bridge?.close();
+    await client?.close();
+    await server.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("broker bridge cold-start replay covers Pi, ACP, and multiple windows", async () => {
   const stateDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-read-model-bridge-"));
@@ -87,6 +125,53 @@ test("broker bridge cold-start replay covers Pi, ACP, and multiple windows", asy
   }
 });
 
+test("source-scoped bridge keeps another window's agents out of the local read model", async () => {
+  const stateDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-read-model-source-scope-"));
+  const server = new RuntimeBrokerServer({ stateDirectory });
+  let firstClient: RuntimeBrokerClient | undefined;
+  let secondClient: RuntimeBrokerClient | undefined;
+  let first: RuntimeReadModelBrokerBridge | undefined;
+  let second: RuntimeReadModelBrokerBridge | undefined;
+  try {
+    await server.listen();
+    firstClient = await RuntimeBrokerClient.connect({ stateDirectory });
+    secondClient = await RuntimeBrokerClient.connect({ stateDirectory });
+    first = await RuntimeReadModelBrokerBridge.connect({
+      cwd: stateDirectory,
+      sourceId: "first-window",
+      mode: "sqlite",
+      client: firstClient,
+      readScope: "source",
+    });
+    second = await RuntimeReadModelBrokerBridge.connect({
+      cwd: stateDirectory,
+      sourceId: "second-window",
+      mode: "sqlite",
+      client: secondClient,
+      readScope: "source",
+    });
+    assert.deepEqual(
+      (await first.publish([entity("first-agent")], { reset: true })).agents.map((agent) => agent.correlationId),
+      ["first-agent"],
+    );
+    assert.deepEqual(
+      (await second.publish([entity("second-agent")], { reset: true })).agents.map((agent) => agent.correlationId),
+      ["second-agent"],
+    );
+    assert.deepEqual(
+      (await first.snapshot()).agents.map((agent) => agent.correlationId),
+      ["first-agent"],
+    );
+  } finally {
+    await second?.close();
+    await first?.close();
+    await secondClient?.close();
+    await firstClient?.close();
+    await server.close();
+    fs.rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
 test("a restarted source generation tombstones only its own older entities", async () => {
   const stateDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-read-model-generation-"));
   const server = new RuntimeBrokerServer({ stateDirectory });
@@ -99,8 +184,11 @@ test("a restarted source generation tombstones only its own older entities", asy
     first = await RuntimeReadModelBrokerBridge.connect({
       cwd: stateDirectory,
       sourceId: "same-window",
+      sessionId: "same-session",
+      sessionGeneration: 1,
       mode: "sqlite",
       client,
+      readScope: "source",
     });
     await first.publish([entity("old")], { reset: true });
     const firstGeneration = first.generation;
@@ -110,12 +198,18 @@ test("a restarted source generation tombstones only its own older entities", asy
     replacement = await RuntimeReadModelBrokerBridge.connect({
       cwd: stateDirectory,
       sourceId: "same-window",
+      sessionId: "same-session",
+      sessionGeneration: 2,
       mode: "sqlite",
       client,
+      readScope: "source",
     });
     assert.ok(replacement.generation > firstGeneration);
     const rebuilt = await replacement.publish([entity("new", 2)], { reset: true });
     assert.deepEqual(rebuilt.agents.map((agent) => agent.correlationId), ["new"]);
+    assert.equal(rebuilt.source.projection?.generation, 2);
+    assert.equal(rebuilt.source.projection?.sessionId, "same-session");
+    assert.equal(rebuilt.agents[0]?.projection?.generation, 2);
   } finally {
     await replacement?.close();
     await first?.close();

@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 import {
   computeCompletionDeliveryId,
@@ -122,6 +124,126 @@ test("reservation and intent import are durable and idempotent", async () => {
     assert.equal(usage.reservations, 0);
     assert.ok(usage.liveBytes > 0);
   });
+});
+
+test("two real fresh-process outbox writer failures recover the latest generation and later success cleans remnants", async () => {
+  await withStore(async (store, _advance, root) => {
+    const dispatch = seed("replacement-backup");
+    await store.reserve(dispatch);
+    const pending = await store.importIntent(intent(dispatch));
+    const pendingDir = await findStateDir(root, "pending");
+    const moduleUrl = pathToFileURL(resolve("src/completion-outbox/file-store.ts")).href;
+    const runInterruptedWriter = (ownerId: string, now: number, operation: string) => spawnSync(
+      process.execPath,
+      ["--experimental-transform-types", "--input-type=module", "-e", [
+        `const { CompletionOutboxFileStore } = await import(${JSON.stringify(moduleUrl)});`,
+        `const store = new CompletionOutboxFileStore({ rootDir: ${JSON.stringify(root)}, ownerId: ${JSON.stringify(ownerId)}, now: () => ${now} });`,
+        "try {",
+        `  ${operation}`,
+        "  process.exitCode = 2;",
+        "} catch (error) {",
+        "  if (!String(error).includes('Injected completion persistence failure')) { console.error(error); process.exitCode = 3; }",
+        "  else process.exitCode = 86;",
+        "}",
+      ].join("\n")],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, PI_TEST_COMPLETION_FAIL_AT: "outbox:after-new-to-canonical" },
+        encoding: "utf8",
+      },
+    );
+
+    const first = runInterruptedWriter(
+      "generation-one",
+      1_100,
+      `await store.acquireClaim(${JSON.stringify(target)}, ${JSON.stringify(pending.deliveryId)});`,
+    );
+    assert.equal(first.status, 86, first.stderr);
+    const second = runInterruptedWriter(
+      "generation-two",
+      1_200,
+      `await store.returnToPending(${JSON.stringify(target)}, ${JSON.stringify(pending.deliveryId)}, "generation-two");`,
+    );
+    assert.equal(second.status, 86, second.stderr);
+
+    const interruptedRemnants = (await readdir(pendingDir)).filter((name) =>
+      name.startsWith(`${pending.deliveryId}.json.replace-`)
+      && (name.endsWith(".new") || name.endsWith(".bak")));
+    assert.ok(interruptedRemnants.length >= 2, "both real interrupted generations left recoverable remnants");
+
+    const recovered = await new CompletionOutboxFileStore({ rootDir: root, ownerId: "reader", now: () => 1_250 })
+      .listForTarget(target);
+    assert.equal(recovered.length, 1);
+    assert.equal(recovered[0]?.deliveryId, pending.deliveryId);
+    assert.equal(recovered[0]?.lastError, "generation-two", "the second real writer generation wins");
+    assert.equal(recovered[0]?.claimOwnerId, undefined);
+
+    const successScript = [
+      `const { CompletionOutboxFileStore } = await import(${JSON.stringify(moduleUrl)});`,
+      `const store = new CompletionOutboxFileStore({ rootDir: ${JSON.stringify(root)}, ownerId: "success-owner", now: () => 1300 });`,
+      `const record = await store.acquireClaim(${JSON.stringify(target)}, ${JSON.stringify(pending.deliveryId)});`,
+      "if (record?.claimOwnerId !== 'success-owner') process.exitCode = 4;",
+    ].join("\n");
+    const succeeded = spawnSync(process.execPath, ["--experimental-transform-types", "--input-type=module", "-e", successScript], {
+      cwd: process.cwd(),
+      env: { ...process.env },
+      encoding: "utf8",
+    });
+    assert.equal(succeeded.status, 0, succeeded.stderr);
+    assert.deepEqual(
+      (await readdir(pendingDir)).filter((name) => name.startsWith(`${pending.deliveryId}.json.replace-`)
+        && (name.endsWith(".new") || name.endsWith(".bak"))),
+      [],
+      "a later successful public mutation removes all older replacement remnants",
+    );
+  });
+});
+
+test("fresh-process outbox recovery is table-driven across every replacement boundary", async () => {
+  for (const boundary of [
+    "after-write",
+    "after-file-sync",
+    "after-close",
+    "after-canonical-to-backup",
+    "after-new-to-canonical",
+    "after-directory-sync",
+    "after-backup-cleanup",
+  ] as const) {
+    await withStore(async (store, _advance, root) => {
+      const dispatch = seed(`boundary-${boundary}`);
+      await store.reserve(dispatch);
+      const pending = await store.importIntent(intent(dispatch));
+      const moduleUrl = pathToFileURL(resolve("src/completion-outbox/file-store.ts")).href;
+      const crashScript = [
+        `const { CompletionOutboxFileStore } = await import(${JSON.stringify(moduleUrl)});`,
+        `const store = new CompletionOutboxFileStore({ rootDir: ${JSON.stringify(root)}, ownerId: "crash-owner", now: () => 1000 });`,
+        `await store.acquireClaim(${JSON.stringify(target)}, ${JSON.stringify(pending.deliveryId)});`,
+      ].join("\n");
+      const crashed = spawnSync(process.execPath, ["--experimental-transform-types", "--input-type=module", "-e", crashScript], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          PI_TEST_COMPLETION_FAIL_AT: `outbox:${boundary}`,
+          PI_TEST_COMPLETION_CRASH: "1",
+        },
+        encoding: "utf8",
+      });
+      assert.equal(crashed.status, 86, `${boundary}: ${crashed.stderr}`);
+
+      const readScript = [
+        `const { CompletionOutboxFileStore } = await import(${JSON.stringify(moduleUrl)});`,
+        `const store = new CompletionOutboxFileStore({ rootDir: ${JSON.stringify(root)}, ownerId: "reader" });`,
+        `const records = await store.listForTarget(${JSON.stringify(target)});`,
+        `if (records.length !== 1 || records[0].deliveryId !== ${JSON.stringify(pending.deliveryId)}) process.exit(2);`,
+      ].join("\n");
+      const reader = spawnSync(process.execPath, ["--experimental-transform-types", "--input-type=module", "-e", readScript], {
+        cwd: process.cwd(),
+        env: { ...process.env },
+        encoding: "utf8",
+      });
+      assert.equal(reader.status, 0, `${boundary}: ${reader.stderr}`);
+    });
+  }
 });
 
 test("claim, queue, receipt and provider acknowledgement follow explicit states", async () => {
@@ -312,6 +434,322 @@ test("tryGc sweeps when idle, skips via marker, and returns busy when contended"
     assert.equal(third.skipped, undefined);
     assert.equal(third.expired, 0);
   });
+});
+
+test("gc consumes bounded stale duplicate index pages without enumerating the large data directory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "completion-gc-pages-"));
+  let now = 1;
+  try {
+    const store = new CompletionOutboxFileStore({ rootDir: root, now: () => now, ownerId: "gc-pages" });
+    for (let index = 0; index < 140; index += 1) {
+      const dispatch = seed(`paged-${String(index).padStart(3, "0")}`);
+      await store.reserve(dispatch, 1);
+      await store.releaseReservation(dispatch.target, dispatch.reservationId);
+    }
+    now = COMPLETION_OUTBOX_LIVE_TTL_MS + 10;
+    const fsp = createRequire(import.meta.url)("node:fs/promises") as typeof import("node:fs/promises");
+    const originalReaddir = fsp.readdir;
+    let reservationEnumerations = 0;
+    const boundedReaddir: typeof originalReaddir = (async (...args: Parameters<typeof originalReaddir>) => {
+      if (String(args[0] ?? "").endsWith("reservations")) reservationEnumerations += 1;
+      return originalReaddir(...args as Parameters<typeof originalReaddir>);
+    }) as typeof originalReaddir;
+    Reflect.set(fsp, "readdir", boundedReaddir);
+    syncBuiltinESMExports();
+    try {
+      let released = 0;
+      let pages = 0;
+      let hasMore = true;
+      while (hasMore) {
+        const page = await store.gc(target.workspaceId);
+        released += page.releasedReservations;
+        pages += 1;
+        hasMore = page.hasMore === true;
+      }
+      assert.ok(pages >= 3, "the 280-entry stale/duplicate index is consumed only in bounded pages");
+      assert.equal(released, 140);
+      assert.equal(reservationEnumerations, 0, "stale exact lookups never enumerate the arbitrarily large reservation directory");
+    } finally {
+      Reflect.set(fsp, "readdir", originalReaddir);
+      syncBuiltinESMExports();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a fresh definitively dead-owner lock is taken over immediately through a token fence", async () => {
+  const root = await mkdtemp(join(tmpdir(), "completion-stale-lock-"));
+  const { createHash } = await import("node:crypto");
+  const workspaceDir = join(root, createHash("sha256").update(target.workspaceId, "utf8").digest("hex"));
+  await mkdir(workspaceDir, { recursive: true });
+  const lockPath = join(workspaceDir, ".store.lock");
+  await writeFile(lockPath, JSON.stringify({
+    ownerId: "dead",
+    token: "dead-token",
+    pid: 2_147_483_647,
+    heartbeatAt: Date.now(),
+  }));
+  try {
+    const startedAt = Date.now();
+    const store = new CompletionOutboxFileStore({ rootDir: root, ownerId: "takeover" });
+    assert.equal((await store.reserve(seed("stale-takeover"), 4_096)).state, "reserved");
+    assert.ok(Date.now() - startedAt < 5_000, "dead PID takeover does not wait for heartbeat staleness or the 45s timeout");
+    await assert.rejects(() => readFile(lockPath, "utf8"), /ENOENT/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("fresh processes recover every lock setup/release crash boundary, including pre-record setup", async () => {
+  for (const boundary of [
+    "after-create",
+    "after-write",
+    "after-file-sync",
+    "after-directory-sync",
+    "after-release-rename",
+    "after-release-remove",
+  ] as const) {
+    const root = await mkdtemp(join(tmpdir(), `completion-lock-crash-${boundary}-`));
+    const moduleUrl = pathToFileURL(resolve("src/completion-outbox/file-store.ts")).href;
+    try {
+      const crashScript = [
+        `const { CompletionOutboxFileStore } = await import(${JSON.stringify(moduleUrl)});`,
+        `const store = new CompletionOutboxFileStore({ rootDir: ${JSON.stringify(root)}, ownerId: "crash-owner" });`,
+        `await store.reserve(${JSON.stringify(seed(`lock-crash-${boundary}`))}, 4096);`,
+      ].join("\n");
+      const crashed = spawnSync(process.execPath, ["--experimental-transform-types", "--input-type=module", "-e", crashScript], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          PI_TEST_COMPLETION_FAIL_AT: `lock:${boundary}`,
+          PI_TEST_COMPLETION_CRASH: "1",
+        },
+        encoding: "utf8",
+        timeout: 10_000,
+      });
+      assert.equal(crashed.status, 86, `${boundary}: ${crashed.stderr}`);
+
+      const recoveryScript = [
+        `const { CompletionOutboxFileStore } = await import(${JSON.stringify(moduleUrl)});`,
+        `const store = new CompletionOutboxFileStore({ rootDir: ${JSON.stringify(root)}, ownerId: "recovery-owner" });`,
+        `const reservation = await store.reserve(${JSON.stringify(seed(`lock-recovery-${boundary}`))}, 4096);`,
+        "if (reservation.state !== 'reserved') process.exitCode = 2;",
+      ].join("\n");
+      const startedAt = Date.now();
+      const recovered = spawnSync(process.execPath, ["--experimental-transform-types", "--input-type=module", "-e", recoveryScript], {
+        cwd: process.cwd(),
+        env: { ...process.env },
+        encoding: "utf8",
+        timeout: 10_000,
+      });
+      assert.equal(recovered.status, 0, `${boundary}: ${recovered.stderr}`);
+      assert.ok(Date.now() - startedAt < 5_000, `${boundary}: recovery must finish well before the 45s acquisition timeout`);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("failed lock setup removes its partial token before the next acquisition", async () => {
+  const root = await mkdtemp(join(tmpdir(), "completion-lock-setup-failure-"));
+  const fsp = createRequire(import.meta.url)("node:fs/promises") as typeof import("node:fs/promises");
+  const originalOpen = fsp.open;
+  let injected = false;
+  const replacementOpen: typeof originalOpen = (async (...args: Parameters<typeof originalOpen>) => {
+    const handle = await originalOpen(...args);
+    if (!injected && String(args[0] ?? "").endsWith(".store.lock")) {
+      injected = true;
+      Reflect.set(handle, "sync", async () => {
+        throw Object.assign(new Error("injected lock setup sync failure"), { code: "EIO" });
+      });
+    }
+    return handle;
+  }) as typeof originalOpen;
+  try {
+    const store = new CompletionOutboxFileStore({ rootDir: root, ownerId: "setup-failure" });
+    Reflect.set(fsp, "open", replacementOpen);
+    syncBuiltinESMExports();
+    await assert.rejects(() => store.reserve(seed("setup-failure"), 4_096), /injected lock setup sync failure/);
+    Reflect.set(fsp, "open", originalOpen);
+    syncBuiltinESMExports();
+    assert.equal((await store.reserve(seed("setup-retry"), 4_096)).state, "reserved");
+  } finally {
+    Reflect.set(fsp, "open", originalOpen);
+    syncBuiltinESMExports();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("failed lock release leaves an ended same-pid token that the next operation reclaims", async () => {
+  const root = await mkdtemp(join(tmpdir(), "completion-lock-release-failure-"));
+  const fsp = createRequire(import.meta.url)("node:fs/promises") as typeof import("node:fs/promises");
+  const originalRename = fsp.rename;
+  const originalRm = fsp.rm;
+  let inject = true;
+  const replacementRename: typeof originalRename = (async (...args: Parameters<typeof originalRename>) => {
+    if (inject && String(args[0] ?? "").endsWith(".store.lock")) {
+      throw Object.assign(new Error("injected lock release rename failure"), { code: "EPERM" });
+    }
+    return originalRename(...args);
+  }) as typeof originalRename;
+  const replacementRm: typeof originalRm = (async (...args: Parameters<typeof originalRm>) => {
+    if (inject && String(args[0] ?? "").endsWith(".store.lock")) {
+      throw Object.assign(new Error("injected lock release remove failure"), { code: "EPERM" });
+    }
+    return originalRm(...args);
+  }) as typeof originalRm;
+  try {
+    const store = new CompletionOutboxFileStore({ rootDir: root, ownerId: "release-failure" });
+    Reflect.set(fsp, "rename", replacementRename);
+    Reflect.set(fsp, "rm", replacementRm);
+    syncBuiltinESMExports();
+    await assert.rejects(() => store.reserve(seed("release-failure"), 4_096), /ended token remains reclaimable/);
+    inject = false;
+    Reflect.set(fsp, "rename", originalRename);
+    Reflect.set(fsp, "rm", originalRm);
+    syncBuiltinESMExports();
+    assert.equal((await store.reserve(seed("release-retry"), 4_096)).state, "reserved");
+  } finally {
+    Reflect.set(fsp, "rename", originalRename);
+    Reflect.set(fsp, "rm", originalRm);
+    syncBuiltinESMExports();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("former lock owner cannot mutate or release a replacement owner token", async () => {
+  const root = await mkdtemp(join(tmpdir(), "completion-lock-fence-"));
+  const store = new CompletionOutboxFileStore({ rootDir: root, ownerId: "former-owner" });
+  const dispatch = seed("lock-fence");
+  await store.reserve(dispatch, 4_096);
+  const { createHash } = await import("node:crypto");
+  const workspaceDir = join(root, createHash("sha256").update(target.workspaceId, "utf8").digest("hex"));
+  const lockPath = join(workspaceDir, ".store.lock");
+  const fsp = createRequire(import.meta.url)("node:fs/promises") as typeof import("node:fs/promises");
+  const originalOpen = fsp.open;
+  let replaced = false;
+  const replacementOpen: typeof originalOpen = (async (...args: Parameters<typeof originalOpen>) => {
+    const pathish = String(args[0] ?? "");
+    if (!replaced && pathish.includes("reservations") && pathish.endsWith(".new")) {
+      replaced = true;
+      await writeFile(lockPath, JSON.stringify({
+        ownerId: "replacement-owner",
+        token: "replacement-token",
+        pid: process.pid,
+        heartbeatAt: Date.now(),
+      }));
+    }
+    return originalOpen(...args);
+  }) as typeof originalOpen;
+  try {
+    Reflect.set(fsp, "open", replacementOpen);
+    syncBuiltinESMExports();
+    await assert.rejects(
+      () => store.releaseReservation(target, dispatch.reservationId),
+      /lock ownership lost/,
+    );
+    assert.equal(replaced, true);
+    const replacement = JSON.parse(await readFile(lockPath, "utf8"));
+    assert.equal(replacement.token, "replacement-token", "former owner must not remove the new lock");
+    Reflect.set(fsp, "open", originalOpen);
+    syncBuiltinESMExports();
+    await rm(lockPath, { force: true });
+    const reservations = await new CompletionOutboxFileStore({ rootDir: root, ownerId: "reader" }).usage(target.workspaceId);
+    assert.equal(reservations.reservations, 1, "former owner did not mutate the reservation");
+  } finally {
+    Reflect.set(fsp, "open", originalOpen);
+    syncBuiltinESMExports();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("takeover after the final ownership check fences a former canonical rename", async () => {
+  const root = await mkdtemp(join(tmpdir(), "completion-generation-fence-"));
+  const former = new CompletionOutboxFileStore({ rootDir: root, ownerId: "former-owner", now: () => 1_100 });
+  const dispatch = seed("post-precheck-takeover");
+  const fsp = createRequire(import.meta.url)("node:fs/promises") as typeof import("node:fs/promises");
+  const originalRename = fsp.rename;
+  const originalRm = fsp.rm;
+  let formerReplacementPath: string | undefined;
+  let hookTriggered = false;
+  try {
+    await former.reserve(dispatch, 4_096);
+    const pending = await former.importIntent(intent(dispatch));
+    const pendingDir = await findStateDir(root, "pending");
+    const canonicalPath = join(pendingDir, `${pending.deliveryId}.json`);
+    const { createHash } = await import("node:crypto");
+    const workspaceDir = join(root, createHash("sha256").update(target.workspaceId, "utf8").digest("hex"));
+    const lockPath = join(workspaceDir, ".store.lock");
+
+    const replacementRm: typeof originalRm = (async (...args: Parameters<typeof originalRm>) => {
+      if (formerReplacementPath && String(args[0] ?? "") === formerReplacementPath) return;
+      return originalRm(...args);
+    }) as typeof originalRm;
+    const replacementRename: typeof originalRename = (async (...args: Parameters<typeof originalRename>) => {
+      const source = String(args[0] ?? "");
+      const destination = String(args[1] ?? "");
+      if (!hookTriggered && destination === canonicalPath
+        && source.startsWith(`${canonicalPath}.replace-`) && source.endsWith(".new")) {
+        hookTriggered = true;
+        formerReplacementPath = source;
+        const active = JSON.parse(await readFile(lockPath, "utf8")) as Record<string, unknown>;
+        assert.equal(typeof active.generation, "string");
+        assert.equal(typeof (active.mutation as { transaction?: unknown } | undefined)?.transaction, "string");
+        // Make the holder definitively dead to drive the real takeover path at
+        // the exact reverse hook: after assertOwned(), before canonical rename.
+        await writeFile(lockPath, `${JSON.stringify({
+          ...active,
+          pid: 2_147_483_647,
+          heartbeatAt: Date.now(),
+        })}\n`);
+        const replacement = new CompletionOutboxFileStore({
+          rootDir: root,
+          ownerId: "replacement-owner",
+          now: () => 1_200,
+        });
+        const authoritative = await replacement.returnToPending(
+          target,
+          pending.deliveryId,
+          "replacement-authoritative",
+        );
+        assert.equal(authoritative?.lastError, "replacement-authoritative");
+        // Preserve the delayed former .new just long enough to prove that its
+        // actual canonical rename can happen after takeover. The replacement's
+        // committed snapshot must remain authoritative even after these bytes
+        // clobber the compatibility canonical name.
+        await originalRm(canonicalPath, { force: true });
+      }
+      return originalRename(...args);
+    }) as typeof originalRename;
+
+    Reflect.set(fsp, "rm", replacementRm);
+    Reflect.set(fsp, "rename", replacementRename);
+    syncBuiltinESMExports();
+    await assert.rejects(
+      () => former.acquireClaim(target, pending.deliveryId),
+      /lock ownership lost/,
+    );
+    assert.equal(hookTriggered, true, "takeover hook ran immediately before the former canonical rename");
+
+    Reflect.set(fsp, "rename", originalRename);
+    Reflect.set(fsp, "rm", originalRm);
+    syncBuiltinESMExports();
+    const canonicalEnvelope = JSON.parse(await readFile(canonicalPath, "utf8")) as {
+      value?: { claimOwnerId?: string; lastError?: string };
+    };
+    assert.equal(canonicalEnvelope.value?.claimOwnerId, "former-owner", "former bytes reached the canonical filename");
+    const reader = new CompletionOutboxFileStore({ rootDir: root, ownerId: "reader", now: () => 1_300 });
+    const visible = await reader.listForTarget(target);
+    assert.equal(visible.length, 1);
+    assert.equal(visible[0]?.lastError, "replacement-authoritative");
+    assert.equal(visible[0]?.claimOwnerId, undefined, "readers reject the superseded former generation");
+  } finally {
+    Reflect.set(fsp, "rename", originalRename);
+    Reflect.set(fsp, "rm", originalRm);
+    syncBuiltinESMExports();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("tryGc returns busy instead of throwing when the workspace lock is held", async () => {

@@ -29,6 +29,13 @@ export interface RuntimeV2JournalListOptions {
     afterStreamId?: string;
     limit: number;
 }
+export declare class RuntimeV2JournalCorruptionError extends Error {
+    readonly streamId: string;
+    readonly directory: string;
+    constructor(streamId: string, directory: string, options?: {
+        cause?: unknown;
+    });
+}
 export declare class RuntimeV2ShadowJournal {
     #private;
     readonly rootDirectory: string;

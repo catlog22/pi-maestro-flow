@@ -722,6 +722,21 @@ export function truncateUtf8Tail(value: string, maxBytes: number): string {
   return encoded.subarray(start).toString("utf8");
 }
 
+export function truncateUtf8Head(value: string, maxBytes: number): string {
+  if (maxBytes <= 0) return "";
+  // A UTF-16 code unit never expands past 3 UTF-8 bytes, so this bound is safe
+  // and O(1) for the common "still well under the cap" case.
+  if (value.length * 3 <= maxBytes) return value;
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
+  const encoded = Buffer.from(value, "utf8");
+  if (encoded.length <= maxBytes) return value;
+  let end = maxBytes;
+  // Back up over any trailing continuation bytes so we never split a
+  // multi-byte character (or a surrogate pair) at the cut point.
+  while (end > 0 && (encoded[end] & 0xc0) === 0x80) end -= 1;
+  return encoded.subarray(0, end).toString("utf8");
+}
+
 export function appendUtf8Tail(current: string, addition: string, maxBytes: number): string {
   return truncateUtf8Tail(current + addition, maxBytes);
 }

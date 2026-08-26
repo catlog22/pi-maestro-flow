@@ -5,16 +5,22 @@
 
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { MailboxFileStore } from "./file-store.ts";
+import {
+  activateMailboxOwner,
+  deactivateMailboxOwner,
+  isMailboxClaimOwnerLive,
+  MailboxFileStore,
+} from "./file-store.ts";
 import { type MailboxRouter } from "./router.ts";
+import { RuntimeBrokerError } from "../../runtime-broker/contracts.ts";
 import {
   type MailboxClaim,
   type MailboxEnvelope,
+  type MailboxOwnerFence,
   type MailboxPriority,
   CLAIM_HEARTBEAT_MS,
   CLAIM_LEASE_MS,
   CLAIM_RENEW_MS,
-  CLAIM_STALE_MS,
   MAX_DISPATCH_RETRIES,
   MESSAGE_ID_PATTERN,
   POLL_INTERVAL_MS,
@@ -98,6 +104,10 @@ export interface MailboxConsumerOptions {
   router: MailboxRouter;
   /** Unique nonce identifying this consumer instance. */
   consumerNonce?: string;
+  /** Stable host owner id used with the per-consumer nonce. */
+  ownerId?: string;
+  /** Session generation captured by this consumer incarnation. */
+  sessionGeneration?: number;
   /** Recipient correlation ID this consumer serves. */
   recipientCorrelationId: string;
   /** Workspace ID the consumer serves; messages from other workspaces are skipped. */
@@ -115,6 +125,7 @@ export class MailboxConsumer extends EventEmitter {
   readonly consumerNonce: string;
   readonly recipientCorrelationId: string;
   readonly workspaceId: string;
+  readonly ownerFence: MailboxOwnerFence;
 
   readonly #store: MailboxFileStore;
   readonly #router: MailboxRouter;
@@ -127,7 +138,11 @@ export class MailboxConsumer extends EventEmitter {
   #polling: Promise<void> | undefined;
   #consecutiveHigh = 0;
   #dispatchFailures = new Map<string, number>();
+  #commitDeferredUntil = new Map<string, number>();
   #activeClaim: { messageId: string; claim: MailboxClaim; renewTimer: ReturnType<typeof setInterval> } | undefined;
+  #acceptedHeartbeats = new Map<string, { claim: MailboxClaim; timer: ReturnType<typeof setInterval> }>();
+  #acknowledgements = new Map<string, Promise<boolean>>();
+  #ownerActive = false;
   #stopped = false;
 
   constructor(options: MailboxConsumerOptions) {
@@ -135,6 +150,12 @@ export class MailboxConsumer extends EventEmitter {
     this.consumerNonce = options.consumerNonce ?? randomUUID();
     this.recipientCorrelationId = options.recipientCorrelationId;
     this.workspaceId = options.workspaceId;
+    this.ownerFence = {
+      ownerId: options.ownerId ?? this.consumerNonce,
+      ownerNonce: this.consumerNonce,
+      sessionGeneration: options.sessionGeneration ?? 0,
+      ownerPid: process.pid,
+    };
     this.#store = options.store;
     this.#router = options.router;
     this.#commitApplied = options.commitApplied;
@@ -146,6 +167,7 @@ export class MailboxConsumer extends EventEmitter {
   start(): void {
     if (this.#timer) return;
     this.#stopped = false;
+    this.#activateOwner();
     void this.#pollSafe();
     this.#timer = setInterval(() => void this.#pollSafe(), this.#pollMs);
     this.#timer.unref?.();
@@ -155,8 +177,21 @@ export class MailboxConsumer extends EventEmitter {
     this.#stopped = true;
     if (this.#timer) clearInterval(this.#timer);
     this.#timer = undefined;
-    this.#stopRenewTimer();
     await this.#polling?.catch(() => undefined);
+    // Ack work is allowed to finish while this incarnation still owns its
+    // ACCEPTED records. Only then are heartbeat/owner authority released.
+    await Promise.allSettled([...this.#acknowledgements.values()]);
+    this.#stopRenewTimer();
+    for (const messageId of [...this.#acceptedHeartbeats.keys()]) this.#stopAcceptedHeartbeat(messageId);
+    if (this.#ownerActive) {
+      deactivateMailboxOwner(this.ownerFence);
+      this.#ownerActive = false;
+    }
+  }
+
+  /** True only while this incarnation owns mutation/GC authority. */
+  ownsMutationAuthority(): boolean {
+    return this.#ownerActive && !this.#stopped;
   }
 
   /** Notify the consumer that same-process messages may be available. */
@@ -190,15 +225,47 @@ export class MailboxConsumer extends EventEmitter {
    * this entry point serves external IPC-ack consumers and is idempotent.
    */
   async acknowledge(messageId: string): Promise<boolean> {
-    if (!MESSAGE_ID_PATTERN.test(messageId)) return false;
-    const accepted = await this.#store.readEnvelope("accepted", messageId);
-    if (!accepted) return false;
-    await this.#commitApplied?.(accepted);
-    const applied = await this.#store.apply(messageId);
-    if (applied) {
-      this.emit("ack", { messageId } satisfies ConsumerAckEvent);
+    if (this.#stopped || !MESSAGE_ID_PATTERN.test(messageId)) return false;
+    this.#activateOwner();
+    const existing = this.#acknowledgements.get(messageId);
+    if (existing) return existing;
+    const operation = this.#acknowledgeWithRetry(messageId).finally(() => {
+      if (this.#acknowledgements.get(messageId) === operation) this.#acknowledgements.delete(messageId);
+    });
+    this.#acknowledgements.set(messageId, operation);
+    return operation;
+  }
+
+  async #acknowledgeWithRetry(messageId: string): Promise<boolean> {
+    const delays = [0, 25, 50, 100, 200, 400];
+    for (let attempt = 0; attempt < delays.length; attempt += 1) {
+      if (delays[attempt]! > 0) await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+      try {
+        const accepted = await this.#store.readEnvelope("accepted", messageId);
+        if (!accepted) return false;
+        const record = await this.#store.readStateRecord("accepted", messageId);
+        if (record?.claim && !this.#ownsClaim(record.claim)) return false;
+        await this.#commitApplied?.(accepted);
+        const applied = await this.#store.apply(messageId, this.ownerFence);
+        if (applied) {
+          this.#stopAcceptedHeartbeat(messageId);
+          this.emit("ack", { messageId } satisfies ConsumerAckEvent);
+          return true;
+        }
+        return false;
+      } catch (error) {
+        if (attempt === delays.length - 1) {
+          if (this.listenerCount("error") > 0) {
+            this.emit("error", {
+              messageId,
+              error: error instanceof Error ? error.message : String(error),
+            } satisfies ConsumerErrorEvent);
+          }
+          return false; // ACCEPTED is retained for later retry/recovery.
+        }
+      }
     }
-    return applied;
+    return false;
   }
 
   /**
@@ -206,19 +273,20 @@ export class MailboxConsumer extends EventEmitter {
    * to ready so they are re-dispatched after a restart. At-least-once delivery.
    */
   async replayAcceptedToReady(): Promise<number> {
-    if (this.#stopped) return 0;
     let replayed = 0;
     const acceptedIds = await this.#store.listMessages("accepted");
     for (const messageId of acceptedIds) {
-      if (this.#stopped) break;
       const envelope = await this.#store.readEnvelope("accepted", messageId);
       if (!envelope) continue;
       // Workspace isolation: only replay messages this consumer serves.
       if (envelope.workspaceId !== this.workspaceId) continue;
-      await this.#store.remove("accepted", messageId);
-      await this.#store.writeStaging(envelope);
-      await this.#store.promoteToReady(messageId);
-      replayed += 1;
+      const record = await this.#store.readStateRecord("accepted", messageId);
+      // Modern records carry a process/incarnation fence. Legacy ACCEPTED
+      // records cannot prove a live owner and are conservatively migrated back
+      // to ready during startup.
+      if (record?.claim?.ownerId !== undefined && isMailboxClaimOwnerLive(record.claim, this.#now())) continue;
+      const moved = await this.#store.requeue(messageId, "accepted", { allowTakeover: true });
+      if (moved) replayed += 1;
     }
     return replayed;
   }
@@ -234,19 +302,12 @@ export class MailboxConsumer extends EventEmitter {
 
     for (const messageId of claimedIds) {
       const record = await this.#store.readStateRecord("claimed", messageId);
-      if (!record?.claim) continue;
-      const staleThreshold = record.claim.lastHeartbeatAt + CLAIM_STALE_MS;
-      if (now >= staleThreshold) {
-        // Move back to ready by reversing the claim transition
-        const envelope = await this.#store.readEnvelope("claimed", messageId);
-        if (!envelope) continue;
-        // Remove from claimed, write back to ready
-        await this.#store.remove("claimed", messageId);
-        await this.#store.removeClaimLock(messageId);
-        await this.#store.writeStaging(envelope);
-        await this.#store.promoteToReady(messageId);
-        reclaimed.push(messageId);
-      }
+      // Recordless claimed entries are recognized incomplete legacy
+      // transitions. A valid live owner remains authoritative; otherwise the
+      // journalled reverse transition preserves the sole envelope.
+      if (record?.claim && isMailboxClaimOwnerLive(record.claim, now)) continue;
+      const moved = await this.#store.requeue(messageId, "claimed", { allowTakeover: true });
+      if (moved) reclaimed.push(messageId);
     }
     return reclaimed;
   }
@@ -292,9 +353,20 @@ export class MailboxConsumer extends EventEmitter {
       if (this.recipientCorrelationId === "*"
         && !this.#router.managesRecipient(envelope.recipientCorrelationId)) continue;
       // Check expiry
-      if (this.#now() > envelope.expiresAt) {
+      const now = this.#now();
+      if (now > envelope.expiresAt) {
+        this.#commitDeferredUntil.delete(messageId);
         await this.#store.expire(messageId);
         continue;
+      }
+      // A live broker lease is authority contention, not a failed child
+      // dispatch. Leave the envelope ready and do not reacquire it until the
+      // broker-provided deadline; otherwise a quick restart burns the ordinary
+      // retry budget long before the orphaned lease can expire.
+      const commitDeferredUntil = this.#commitDeferredUntil.get(messageId);
+      if (commitDeferredUntil !== undefined) {
+        if (now < commitDeferredUntil) continue;
+        this.#commitDeferredUntil.delete(messageId);
       }
       candidates.push(envelope);
     }
@@ -333,6 +405,10 @@ export class MailboxConsumer extends EventEmitter {
     const claim: MailboxClaim = {
       messageId: next.messageId,
       claimerNonce: this.consumerNonce,
+      ownerId: this.ownerFence.ownerId,
+      ownerNonce: this.ownerFence.ownerNonce,
+      sessionGeneration: this.ownerFence.sessionGeneration,
+      ownerPid: this.ownerFence.ownerPid,
       claimedAt: now,
       leaseExpiresAt: now + CLAIM_LEASE_MS,
       lastHeartbeatAt: now,
@@ -344,6 +420,7 @@ export class MailboxConsumer extends EventEmitter {
     // Start heartbeat renewal
     this.#startRenewTimer(next.messageId, claim);
 
+    let failurePhase: "commit" | "dispatch" = "commit";
     try {
       // Transition to accepted (injection dispatched)
       const accepted = await this.#store.accept(next.messageId, claim);
@@ -351,21 +428,25 @@ export class MailboxConsumer extends EventEmitter {
         this.#stopRenewTimer();
         return;
       }
+      this.#stopRenewTimer();
+      this.#startAcceptedHeartbeat(next.messageId, claim);
 
       // The broker inbox receipt and mailbox.applied domain event commit before
       // any child-visible injection. The file ACCEPTED/APPLIED states below are
       // compatibility projections of that authoritative transaction.
-      if (this.#stopped) return;
+      // Once a claim is accepted, stop() drains this active unit instead of
+      // abandoning it half-way through adoption/ack publication.
       if (next.mode !== "notify") await this.#commitApplied?.(next);
-      if (this.#stopped) return;
 
       // Dispatch to the child
+      failurePhase = "dispatch";
       this.emit("dispatch", { messageId: next.messageId, envelope: next } satisfies ConsumerDispatchEvent);
       const disposition = await this.#onDispatch(next);
 
       // Deferred context remains ACCEPTED until a substantive turn consumes it
       // and explicitly acknowledges the mailbox messageId. Crash recovery moves
       // accepted records back to ready, preserving at-least-once delivery.
+      this.#commitDeferredUntil.delete(next.messageId);
       this.#dispatchFailures.delete(next.messageId);
       if (disposition !== "deferred") await this.#completeDispatch(next.messageId);
 
@@ -380,26 +461,49 @@ export class MailboxConsumer extends EventEmitter {
         messageId: next.messageId,
         error: error instanceof Error ? error.message : String(error),
       } satisfies ConsumerErrorEvent);
-      const failures = (this.#dispatchFailures.get(next.messageId) ?? 0) + 1;
-      if (failures >= MAX_DISPATCH_RETRIES) {
-        // Bounded retries: dead-letter instead of hot-looping every poll.
-        this.#dispatchFailures.delete(next.messageId);
-        await this.#store.dead(next.messageId, "accepted", "dispatch retries exceeded").catch(() => undefined);
+      const commitDeferredUntil = failurePhase === "commit"
+        ? leaseUnavailableExpiresAt(error)
+        : undefined;
+      if (commitDeferredUntil !== undefined) {
+        // lease_unavailable remains fail-closed: do not publish to the child.
+        // Requeue without consuming the child-dispatch retry budget, and use
+        // the broker's authority clock deadline to avoid a 50ms hot loop.
+        this.#commitDeferredUntil.set(next.messageId, commitDeferredUntil);
+        await this.#requeueAccepted(next);
       } else {
-        // On dispatch failure, move back to ready for retry
-        this.#dispatchFailures.set(next.messageId, failures);
-        await this.#store.remove("accepted", next.messageId);
-        await this.#store.writeStaging(next);
-        await this.#store.promoteToReady(next.messageId);
+        const failures = (this.#dispatchFailures.get(next.messageId) ?? 0) + 1;
+        if (failures >= MAX_DISPATCH_RETRIES) {
+          // Bounded retries: dead-letter instead of hot-looping every poll.
+          this.#commitDeferredUntil.delete(next.messageId);
+          this.#dispatchFailures.delete(next.messageId);
+          this.#stopAcceptedHeartbeat(next.messageId);
+          await this.#store.dead(
+            next.messageId,
+            "accepted",
+            "dispatch retries exceeded",
+            this.ownerFence,
+          ).catch(() => undefined);
+        } else {
+          // On dispatch failure, move back to ready for retry
+          this.#dispatchFailures.set(next.messageId, failures);
+          await this.#requeueAccepted(next);
+        }
       }
     } finally {
       this.#stopRenewTimer();
     }
   }
 
+  async #requeueAccepted(envelope: MailboxEnvelope): Promise<void> {
+    const requeued = await this.#store.requeue(envelope.messageId, "accepted", { owner: this.ownerFence });
+    if (requeued) this.#stopAcceptedHeartbeat(envelope.messageId);
+  }
+
   /** Transition ACCEPTED → APPLIED and emit the ack event. */
   async #completeDispatch(messageId: string): Promise<void> {
-    await this.#store.apply(messageId);
+    const applied = await this.#store.apply(messageId, this.ownerFence);
+    if (!applied) return;
+    this.#stopAcceptedHeartbeat(messageId);
     this.emit("ack", { messageId } satisfies ConsumerAckEvent);
   }
 
@@ -418,10 +522,59 @@ export class MailboxConsumer extends EventEmitter {
     this.#activeClaim = { messageId, claim: baseClaim, renewTimer };
   }
 
+  #startAcceptedHeartbeat(messageId: string, baseClaim: MailboxClaim): void {
+    this.#stopAcceptedHeartbeat(messageId);
+    const timer = setInterval(() => {
+      const now = this.#now();
+      const current = this.#acceptedHeartbeats.get(messageId);
+      if (!current) return;
+      const renewed: MailboxClaim = {
+        ...current.claim,
+        lastHeartbeatAt: now,
+        leaseExpiresAt: now + CLAIM_LEASE_MS,
+      };
+      current.claim = renewed;
+      void this.#store.renewAccepted(messageId, renewed).then((owned) => {
+        if (!owned) this.#stopAcceptedHeartbeat(messageId);
+      }).catch(() => undefined);
+    }, CLAIM_HEARTBEAT_MS);
+    timer.unref?.();
+    this.#acceptedHeartbeats.set(messageId, { claim: baseClaim, timer });
+  }
+
+  #stopAcceptedHeartbeat(messageId: string): void {
+    const current = this.#acceptedHeartbeats.get(messageId);
+    if (!current) return;
+    clearInterval(current.timer);
+    this.#acceptedHeartbeats.delete(messageId);
+  }
+
+  #ownsClaim(claim: MailboxClaim): boolean {
+    if (claim.ownerId === undefined) return true; // legacy records have no stronger fence.
+    return claim.ownerId === this.ownerFence.ownerId
+      && claim.ownerNonce === this.ownerFence.ownerNonce
+      && claim.sessionGeneration === this.ownerFence.sessionGeneration
+      && claim.ownerPid === this.ownerFence.ownerPid;
+  }
+
+  #activateOwner(): void {
+    if (this.#ownerActive) return;
+    activateMailboxOwner(this.ownerFence);
+    this.#ownerActive = true;
+  }
+
   #stopRenewTimer(): void {
     if (this.#activeClaim) {
       clearInterval(this.#activeClaim.renewTimer);
       this.#activeClaim = undefined;
     }
   }
+}
+
+function leaseUnavailableExpiresAt(error: unknown): number | undefined {
+  if (!(error instanceof RuntimeBrokerError) || error.code !== "lease_unavailable") return undefined;
+  const expiresAt = error.details?.expiresAt;
+  return typeof expiresAt === "number" && Number.isSafeInteger(expiresAt) && expiresAt >= 0
+    ? expiresAt
+    : undefined;
 }

@@ -11,6 +11,8 @@ export interface RuntimeActorRegistration {
     holderId: string;
     streamId: string;
     actor: ActorAddressV2;
+    /** Explicit legacy workspace identities accepted while replaying or extending this stream. */
+    workspaceAliases?: readonly string[];
     correlationId?: string;
     ttlMs?: number;
     heartbeatMs?: number;
@@ -67,6 +69,7 @@ interface DriverLeaseState {
     revision: number;
 }
 interface ActorDriver {
+    beginClose(): void;
     listStreams(request: RuntimeBrokerListStreamsRequest): Promise<readonly string[]>;
     acquire(registration: RuntimeActorRegistration): Promise<DriverLeaseState>;
     heartbeat(registration: RuntimeActorRegistration, state: DriverLeaseState): Promise<DriverLeaseState>;

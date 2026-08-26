@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { afterEach, beforeEach } from "node:test";
 import {
+  activateMailboxOwner,
+  deactivateMailboxOwner,
   MailboxFileStore,
   computeEnvelopeHash,
   createMailboxPaths,
@@ -13,6 +15,7 @@ import { MailboxGC, QuotaAdmission } from "../src/extension/mailbox/gc.ts";
 import {
   type MailboxClaim,
   type MailboxEnvelope,
+  type MailboxOwnerFence,
   type MailboxPaths,
   type MailboxState,
   MAILBOX_SCHEMA_VERSION,
@@ -183,6 +186,68 @@ test("run removes stale staging and only applied receipts older than 24h", async
   assert.ok(await store.readEnvelope("applied", messageId(13)));
 });
 
+test("in-flight GC commit is fenced when ownership reverses before the store mutation", async () => {
+  await putInState("applied", makeEnvelope(14));
+  nowMs += TTL_RECEIPT_MS + 1;
+  const former: MailboxOwnerFence = {
+    ownerId: "host-a",
+    ownerNonce: "generation-a",
+    sessionGeneration: 1,
+    ownerPid: process.pid,
+  };
+  const replacement: MailboxOwnerFence = {
+    ownerId: "host-b",
+    ownerNonce: "generation-b",
+    sessionGeneration: 2,
+    ownerPid: process.pid,
+  };
+  let current = former;
+  let entered!: () => void;
+  let release!: () => void;
+  const commitEntered = new Promise<void>((resolve) => { entered = resolve; });
+  const commitRelease = new Promise<void>((resolve) => { release = resolve; });
+  activateMailboxOwner(former);
+  try {
+    const formerSweep = new MailboxGC({
+      store,
+      now: () => nowMs,
+      canMutate: () => true,
+      mutationAuthority: {
+        owner: former,
+        isCurrent: async () => {
+          entered();
+          await commitRelease;
+          return current === former;
+        },
+      },
+    }).run();
+    await commitEntered;
+    deactivateMailboxOwner(former);
+    activateMailboxOwner(replacement);
+    current = replacement;
+    release();
+
+    assert.deepEqual(await formerSweep, { removed: 0, errors: [] });
+    assert.ok(await store.readEnvelope("applied", messageId(14)), "former owner cannot delete after takeover");
+
+    const replacementSweep = await new MailboxGC({
+      store,
+      now: () => nowMs,
+      canMutate: () => true,
+      mutationAuthority: {
+        owner: replacement,
+        isCurrent: () => current === replacement,
+      },
+    }).run();
+    assert.equal(replacementSweep.removed, 1);
+    assert.equal(await store.readEnvelope("applied", messageId(14)), undefined);
+  } finally {
+    release?.();
+    deactivateMailboxOwner(former);
+    deactivateMailboxOwner(replacement);
+  }
+});
+
 test("run retains expired and dead messages for seven days", async () => {
   await putInState("expired", makeEnvelope(20));
   await putInState("dead", makeEnvelope(21));
@@ -224,9 +289,9 @@ test("run records a removal error and continues with other candidates", async ()
   }));
 
   const originalRemove = store.remove.bind(store);
-  store.remove = async (state, id) => {
+  store.remove = async (state, id, mutationAuthority) => {
     if (id === messageId(40)) throw new Error("remove failed");
-    await originalRemove(state, id);
+    return originalRemove(state, id, mutationAuthority);
   };
 
   const result = await new MailboxGC({ store, now: () => nowMs }).run();

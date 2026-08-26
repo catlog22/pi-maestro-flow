@@ -3,6 +3,8 @@ export declare class CompletionDurabilityRegistryImpl implements CompletionDurab
     #private;
     current(): CompletionDurabilityProvider | undefined;
     snapshot(): CompletionDurabilityRegistrySnapshot;
+    providerForDispatch(dispatchId: string): CompletionDurabilityProvider | undefined;
+    pinDispatch(dispatchId: string, provider: CompletionDurabilityProvider): () => void;
     register(provider: CompletionDurabilityProvider): () => void;
     subscribe(listener: CompletionDurabilityRegistryListener): () => void;
 }

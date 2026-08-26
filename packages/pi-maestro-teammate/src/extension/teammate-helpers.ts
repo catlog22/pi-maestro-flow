@@ -131,6 +131,7 @@ import type {
   AgentStatus,
   AgentTerminalStatus,
   MessageEnvelope,
+  SessionProjectionIdentity,
   SettledAgentRecord,
   SingleResult,
   StructuredResult,
@@ -1009,9 +1010,11 @@ export function emitComplete(
   wakeable?: boolean,
   cancelled?: boolean,
   structuredResults?: StructuredResult[],
+  projection?: SessionProjectionIdentity,
 ): void {
   pi.events.emit(TEAMMATE_COMPLETE_EVENT, {
     ...(id ? { id } : {}),
+    ...(projection ? { projection } : {}),
     agent, correlationId, exitCode, durationMs,
     ...(wakeable !== undefined ? { wakeable } : {}),
     ...(cancelled !== undefined ? { cancelled } : {}),
@@ -1106,6 +1109,35 @@ export function deliverTeammateCompleteNotification(options: {
   return false;
 }
 
+export interface DurableFailureFallbackOptions {
+  publishDurableFailure(): Promise<boolean>;
+  ownsDispatchGeneration(): boolean;
+  fallback(): void;
+  onDurabilityError?(error: unknown): void;
+}
+
+/**
+ * Resolves a durable failure publication without letting either continuation
+ * escape the session fence captured by the dispatch. The isolated rejection
+ * path is intentional: an exception from fallback itself must not enter a
+ * branch that invokes the same fallback a second time.
+ */
+export async function deliverDurableFailureWithFallback(
+  options: DurableFailureFallbackOptions,
+): Promise<void> {
+  let durable: boolean;
+  try {
+    durable = await options.publishDurableFailure();
+  } catch (error) {
+    if (!options.ownsDispatchGeneration()) return;
+    options.onDurabilityError?.(error);
+    options.fallback();
+    return;
+  }
+  if (!options.ownsDispatchGeneration()) return;
+  if (!durable) options.fallback();
+}
+
 export function notifyBackgroundFailure(
   pi: ExtensionAPI,
   id: string,
@@ -1113,6 +1145,7 @@ export function notifyBackgroundFailure(
   correlationId: string,
   error: unknown,
   state?: TeammateState,
+  projection?: SessionProjectionIdentity,
 ): void {
   const message =
     `Background teammate failed (agent=${agent}, correlationId=${correlationId}, phase=background-promise): `
@@ -1124,6 +1157,10 @@ export function notifyBackgroundFailure(
     correlationId,
     1,
     0,
+    undefined,
+    undefined,
+    undefined,
+    projection,
   );
   const delivered = safeSendMessage(
     pi,
@@ -1347,6 +1384,7 @@ export function reclaimResultReadyAgents(
   state: TeammateState,
   pi?: ExtensionAPI,
   now = Date.now(),
+  projection: SessionProjectionIdentity | undefined = currentSessionProjectionIdentity(state),
 ): string[] {
   const reclaimed: string[] = [];
   for (const [correlationId, agent] of [...state.activeRuns]) {
@@ -1370,6 +1408,9 @@ export function reclaimResultReadyAgents(
         0,
         Math.max(0, now - agent.startedAt),
         true,
+        undefined,
+        undefined,
+        projection,
       );
     }
     reclaimed.push(correlationId);
@@ -1624,6 +1665,52 @@ export function resolveLocalAgentSenderContext(
 /** How many settled agents stay recallable after leaving `activeRuns`. */
 export const SETTLED_AGENT_MEMO_LIMIT = 32;
 
+export function currentSessionProjectionIdentity(
+  state: TeammateState,
+): SessionProjectionIdentity | undefined {
+  if (state.settlementOwner) return { ...state.settlementOwner };
+  if (!state.currentWorkspaceId || !state.currentSessionId || !state.currentSourceId
+    || !Number.isSafeInteger(state.sessionGeneration) || (state.sessionGeneration ?? 0) < 1) return undefined;
+  return {
+    workspaceId: state.currentWorkspaceId,
+    sessionId: state.currentSessionId,
+    sourceId: state.currentSourceId,
+    generation: state.sessionGeneration!,
+  };
+}
+
+export function settledAgentBelongsToCurrentSession(
+  state: TeammateState,
+  record: SettledAgentRecord,
+): boolean {
+  const owner = currentSessionProjectionIdentity(state);
+  if (!owner) return true;
+  return record.workspaceId === owner.workspaceId
+    && record.sessionId === owner.sessionId
+    && record.sourceId === owner.sourceId
+    && record.sessionGeneration === owner.generation;
+}
+
+/** Rebind exact resume history and discard every record owned by another session/source. */
+export function reconcileSettledAgentsForSession(
+  state: TeammateState,
+  options: { preserveExact: boolean },
+): void {
+  const memo = state.recentlySettled;
+  const owner = currentSessionProjectionIdentity(state);
+  if (!memo || !owner) return;
+  for (const [correlationId, record] of memo) {
+    const exact = record.workspaceId === owner.workspaceId
+      && record.sessionId === owner.sessionId
+      && record.sourceId === owner.sourceId;
+    if (!options.preserveExact || !exact) {
+      memo.delete(correlationId);
+      continue;
+    }
+    record.sessionGeneration = owner.generation;
+  }
+}
+
 export function recordSettledAgent(
   state: TeammateState,
   agent: ActiveAgent,
@@ -1632,9 +1719,16 @@ export function recordSettledAgent(
   const memo = state.recentlySettled ??= new Map<string, SettledAgentRecord>();
   // Re-insert so a repeat settle moves to the back of the eviction order.
   memo.delete(agent.correlationId);
+  const projection = currentSessionProjectionIdentity(state);
   memo.set(agent.correlationId, {
     correlationId: agent.correlationId,
     agent: agent.agent,
+    ...(projection ? {
+      workspaceId: projection.workspaceId,
+      sessionId: projection.sessionId,
+      sourceId: projection.sourceId,
+      sessionGeneration: projection.generation,
+    } : {}),
     ...(agent.name ? { name: agent.name } : {}),
     ...(agent.task ? { task: agent.task } : {}),
     status,
@@ -1666,9 +1760,10 @@ export function findSettledAgent(
   const value = target.trim().replace(/^@/, "");
   const bare = value.includes("#") ? value.slice(0, value.lastIndexOf("#")) : value;
   const direct = memo.get(value);
-  if (direct) return direct;
+  if (direct && settledAgentBelongsToCurrentSession(state, direct)) return direct;
   let prefixMatch: SettledAgentRecord | undefined;
   for (const record of memo.values()) {
+    if (!settledAgentBelongsToCurrentSession(state, record)) continue;
     if (record.name === bare) return record;
     if (record.correlationId.startsWith(value)) prefixMatch ??= record;
   }
@@ -1716,7 +1811,7 @@ function correctSettledStatus(
 ): void {
   if (waitStatus === "completed") return;
   const record = state.recentlySettled?.get(correlationId);
-  if (!record || record.status !== "completed") return;
+  if (!record || !settledAgentBelongsToCurrentSession(state, record) || record.status !== "completed") return;
   record.status = waitStatus;
 }
 

@@ -147,6 +147,23 @@ function teammateState(agents: ActiveAgent[]): TeammateState {
   };
 }
 
+test("progress generation fencing drops late timer flushes and dispose clears pending work", () => {
+  let owns = true;
+  let flushes = 0;
+  const gate = createProgressFlushGate(() => { flushes += 1; }, 60_000, () => owns);
+  gate.mark();
+  assert.equal(flushes, 1);
+  gate.mark();
+  owns = false;
+  gate.flush();
+  assert.equal(flushes, 1, "a late callback from the outgoing generation is discarded");
+  owns = true;
+  gate.mark();
+  gate.dispose();
+  gate.flush();
+  assert.equal(flushes, 1, "teardown disposal cancels and clears pending progress");
+});
+
 test("progress bursts coalesce before expensive flush and terminal state flushes immediately", () => {
   let expensiveFlushes = 0;
   const gate = createProgressFlushGate(() => { expensiveFlushes += 1; }, 10_000);

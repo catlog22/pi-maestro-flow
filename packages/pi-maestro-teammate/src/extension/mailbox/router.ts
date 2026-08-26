@@ -3,7 +3,7 @@
  * and fenced-queue semantics.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   MESSAGE_PROVENANCE_VERSION,
   normalizeMessageProvenanceV1,
@@ -208,33 +208,27 @@ export class MailboxRouter {
     const hash = computeEnvelopeHash(envelopeBase);
     const envelope: MailboxEnvelope = { ...envelopeBase, hash };
 
-    // 5. Deduplication — keyed on the caller-provided request id so a retried
-    // logical message (e.g. taskId via the v1 registry) is not injected twice.
-    // The key is claimed atomically (exclusive create) BEFORE any file write:
-    // a check-then-mark-after-promote sequence would let two concurrent
-    // enqueues with the same request id both pass and double-deliver. Without
-    // a request id there is nothing meaningful to deduplicate against, so no
-    // marker is written (the messageId is a fresh UUID every time and would
-    // make the seen-set both unbounded and useless).
+    // 5. Deduplication is a durable prepare transaction containing the request
+    // hash, immutable messageId and full envelope. A crash after prepare but
+    // before publication is repaired from that record by this call or startup
+    // recovery; the prepare is never unmarked merely because the caller lost a
+    // response.
     const dedupKey = request.requestId ?? request.correlationId;
     if (dedupKey) {
-      const claimed = await this.#store.tryMarkSeen(dedupKey);
-      if (!claimed) {
-        return { ok: false, code: "duplicate", message: `message ${dedupKey} already processed` };
+      const requestHash = computeMailboxRequestHash(request);
+      const prepared = await this.#store.prepareEnqueue(dedupKey, requestHash, envelope);
+      if (prepared.status !== "prepared") {
+        const detail = prepared.status === "conflict" ? " with conflicting immutable request data" : "";
+        return { ok: false, code: "duplicate", message: `message ${dedupKey} already processed${detail}` };
       }
+      return { ok: true, messageId: prepared.messageId, state: "ready" };
     }
 
-    // Failed enqueues must release the dedup claim, or a legitimate retry of
-    // the same logical message would be rejected as a duplicate.
-    const releaseDedup = async (): Promise<void> => {
-      if (dedupKey) await this.#store.unmarkSeen(dedupKey);
-    };
-
-    // 6. Write to staging
+    // 6. Requests without a stable caller id still publish through an immutable
+    // staging file and the journalled staging→ready transition.
     try {
       await this.#store.writeStaging(envelope);
     } catch (error) {
-      await releaseDedup();
       const message = error instanceof Error ? error.message : String(error);
       if (message.includes("payload exceeds")) {
         return { ok: false, code: "payload_too_large", message };
@@ -245,13 +239,8 @@ export class MailboxRouter {
       throw error;
     }
 
-    // 7. Promote to ready
     const promoted = await this.#store.promoteToReady(messageId);
-    if (!promoted) {
-      await releaseDedup();
-      return { ok: false, code: "route_invalid", message: "failed to promote staging to ready" };
-    }
-
+    if (!promoted) return { ok: false, code: "route_invalid", message: "failed to promote staging to ready" };
     return { ok: true, messageId, state: "ready" };
   }
 
@@ -302,4 +291,31 @@ export class MailboxRouter {
 
     return { allowed: true, action: "dispatch" };
   }
+}
+
+/** Hash only caller-controlled logical request data, never generated timestamps/messageIds. */
+export function computeMailboxRequestHash(request: MailboxEnqueueRequest): string {
+  const canonical = canonicalRequestValue({
+    workspaceId: request.workspaceId,
+    teamId: request.teamId,
+    senderId: request.senderId,
+    recipientId: request.recipientId,
+    recipientCorrelationId: request.recipientCorrelationId,
+    kind: request.kind,
+    mode: request.mode,
+    payload: request.payload,
+    provenance: request.provenance,
+    requestId: request.requestId,
+    correlationId: request.correlationId,
+  });
+  return createHash("sha256").update(JSON.stringify(canonical), "utf8").digest("hex");
+}
+
+function canonicalRequestValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalRequestValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .filter(([, entry]) => entry !== undefined)
+    .sort(([left], [right]) => left.localeCompare(right, "en"))
+    .map(([key, entry]) => [key, canonicalRequestValue(entry)]));
 }

@@ -12,6 +12,7 @@ import type {
   AgentRunOutcome,
   AgentStatus,
   MessageProvenanceV1,
+  SessionProjectionIdentity,
   StructuredResult,
   TeammateResultPublishedEvent,
 } from "../../shared/types.ts";
@@ -19,6 +20,7 @@ import type { SessionHostSnapshot, WindowThreadSnapshot } from "../../sessions/s
 
 export type {
   MessageProvenanceV1,
+  SessionProjectionIdentity,
   StructuredResult,
   TeammateExecutionProvenance,
   TeammateResultPublishedEvent,
@@ -73,6 +75,8 @@ export interface TeammateEventTool {
  */
 export interface TeammateStartedEvent {
   correlationId: string;
+  /** Exact session/source incarnation that owns this lifecycle projection. */
+  projection?: SessionProjectionIdentity;
   /** Role name, or `graph(<n>)` for a DAG run. */
   agent: string;
   name?: string;
@@ -117,6 +121,8 @@ export interface TeammateStartedEvent {
  * classifying it as failure; cancellation is a distinct outcome.
  */
 export interface TeammateCompleteEvent {
+  /** Exact session/source incarnation that owns this lifecycle projection. */
+  projection?: SessionProjectionIdentity;
   /** Tool-call id when a root tool call owns the dispatch; absent for nested IPC. */
   id?: string;
   agent: string;
@@ -142,6 +148,8 @@ export interface TeammateCompleteEvent {
  * can rebuild an entire graph view from a single event.
  */
 export interface TeammateProgressMessageEvent extends Omit<AgentProgressSnapshot, "correlationId"> {
+  /** Exact session/source incarnation that owns this progress snapshot. */
+  projection?: SessionProjectionIdentity;
   /** `correlationId` of the run that owns the graph. */
   correlationId: string;
   /** `correlationId` of the individual task the delta belongs to. */

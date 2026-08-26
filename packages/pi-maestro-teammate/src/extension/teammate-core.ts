@@ -1137,6 +1137,18 @@ export function buildWorkspaceOwnerState(
     });
   }
   for (const record of state.recentlySettled?.values() ?? []) {
+    const currentProjection = state.currentWorkspaceId && state.currentSessionId && state.currentSourceId && state.sessionGeneration
+      ? {
+        workspaceId: state.currentWorkspaceId,
+        sessionId: state.currentSessionId,
+        sourceId: state.currentSourceId,
+        generation: state.sessionGeneration,
+      }
+      : undefined;
+    if (currentProjection && (record.workspaceId !== currentProjection.workspaceId
+      || record.sessionId !== currentProjection.sessionId
+      || record.sourceId !== currentProjection.sourceId
+      || record.sessionGeneration !== currentProjection.generation)) continue;
     if (agents.some((agent) => agent.correlationId === record.correlationId)) continue;
     settledById.set(record.correlationId, {
       correlationId: record.correlationId,
@@ -1267,6 +1279,7 @@ export interface ProgressFlushGate {
 export function createProgressFlushGate(
   onFlush: () => void,
   intervalMs = 300,
+  ownsGeneration: () => boolean = () => true,
 ): ProgressFlushGate {
   let dirty = false;
   let lastFlushAt = Number.NEGATIVE_INFINITY;
@@ -1280,10 +1293,12 @@ export function createProgressFlushGate(
     cancelTimer();
     if (!dirty) return;
     dirty = false;
+    if (!ownsGeneration()) return;
     lastFlushAt = Date.now();
     onFlush();
   };
   const mark = (terminal = false) => {
+    if (!ownsGeneration()) return;
     dirty = true;
     if (terminal || Date.now() - lastFlushAt >= intervalMs) {
       flush();
@@ -1294,7 +1309,14 @@ export function createProgressFlushGate(
       timer.unref?.();
     }
   };
-  return { mark, flush, dispose: cancelTimer };
+  return {
+    mark,
+    flush,
+    dispose() {
+      dirty = false;
+      cancelTimer();
+    },
+  };
 }
 
 export function flushProgressBatch<T>(
@@ -1595,6 +1617,7 @@ export function wakeSleepingAgent(
   pi: ExtensionAPI,
   agent: ActiveAgent,
   now = Date.now(),
+  projection?: import("../shared/types.ts").SessionProjectionIdentity,
 ): boolean {
   if (agent.status !== "sleeping") return false;
   agent.status = "running";
@@ -1604,7 +1627,7 @@ export function wakeSleepingAgent(
     agent.sleptAt = undefined;
   }
   agent.lastActivityAt = now;
-  emitTeammateStarted(pi, agent);
+  emitTeammateStarted(pi, agent, projection ? { projection } : {});
   return true;
 }
 
