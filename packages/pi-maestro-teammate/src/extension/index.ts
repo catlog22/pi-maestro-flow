@@ -136,6 +136,7 @@ import {
   type WorkspaceBackgroundJobSnapshot,
   type WorkspaceMainSessionProgress,
   type WorkspaceMainSessionProgressEvent,
+  type WorkspaceMainSettle,
   type WorkspaceOwnerSnapshot,
   type WorkspaceOwnerState,
   type WorkspacePeerCommand,
@@ -1686,6 +1687,11 @@ export default function registerTeammateExtension(
   let workspaceMainSessionProgressRevision = 0;
   let workspaceMainAssistantText = "";
   let workspaceMainAssistantEventOpen = false;
+  // Newest assistant text this window has published, held until a settle takes
+  // it. Distinct from `workspaceMainAssistantText`, which is the streaming
+  // accumulator and is reset at every turn boundary.
+  let workspaceMainSettledResult: string | undefined;
+  let workspaceMainLastSettle: WorkspaceMainSettle | undefined;
   let workspaceCurrentTurnAssistantMessage: unknown;
   let workspaceTerminalResultDraft: WorkspaceWindowTerminalResultDraft | undefined;
   let workspaceTerminalResultState = { settled: false, terminalPublished: false };
@@ -1958,7 +1964,21 @@ export default function registerTeammateExtension(
     };
     workspaceMainAssistantEventOpen = true;
     workspaceMainSessionActivityAt = at;
+    workspaceMainSettledResult = bounded;
     markWorkspacePeerDirty();
+  };
+
+  /**
+   * Record the settle an observer will read, and clear the text it consumed.
+   *
+   * Clearing is what stops one run's result from being reported as the next
+   * run's: a turn that produces no assistant text settles with no result at
+   * all, which is the honest answer, rather than inheriting the previous one.
+   */
+  const recordWorkspaceMainSettle = (at: number): void => {
+    const lastResult = workspaceMainSettledResult;
+    workspaceMainSettledResult = undefined;
+    workspaceMainLastSettle = { at, ...(lastResult === undefined ? {} : { lastResult }) };
   };
 
   const workspaceAssistantMessageText = (message: unknown): string | undefined => {
@@ -3430,6 +3450,7 @@ export default function registerTeammateExtension(
               workspaceMainSessionActivityAt,
             ),
             ...(workspaceMainSessionProgress === undefined ? {} : { mainProgress: workspaceMainSessionProgress }),
+            ...(workspaceMainLastSettle === undefined ? {} : { mainLastSettle: workspaceMainLastSettle }),
           }),
         });
         await publisher.start();
@@ -7738,6 +7759,11 @@ export default function registerTeammateExtension(
         waitStatus: "completed" as const,
         terminalStatus: "completed",
       } : {}),
+      // The window's own account of its last finished run. `lifecycle.settled`
+      // is inferred from agent counts and idle time, so on its own it cannot
+      // distinguish "finished what it was asked" from "has not started yet";
+      // this is the run saying so, with what it said.
+      ...(owner.mainLastSettle?.lastResult === undefined ? {} : { lastResult: owner.mainLastSettle.lastResult }),
       summary: output[0] ?? observationStatus,
       ...(detail === "summary" ? {} : { detail: output.slice(-Math.max(lines, 1) * 4) }),
       updatedAt: Date.now(),
@@ -9694,6 +9720,11 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     workspaceMainSessionProgress = undefined;
     workspaceMainAssistantText = "";
     workspaceMainAssistantEventOpen = false;
+    // Same reason the progress projection is cleared: a settle belongs to the
+    // session that produced it, and carrying one across a switch would report
+    // the previous session's result as this one's.
+    workspaceMainSettledResult = undefined;
+    workspaceMainLastSettle = undefined;
     workspaceCurrentTurnAssistantMessage = undefined;
     workspaceTerminalResultDraft = undefined;
     workspaceTerminalResultState = { settled: false, terminalPublished: false };
@@ -9848,7 +9879,9 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
   });
 
   pi.on("agent_settled", async () => {
-    appendWorkspaceMainProgressEvent({ kind: "lifecycle", at: Date.now(), phase: "agent_settled" });
+    const at = Date.now();
+    recordWorkspaceMainSettle(at);
+    appendWorkspaceMainProgressEvent({ kind: "lifecycle", at, phase: "agent_settled" });
     workspaceTerminalResultState.settled = true;
     const terminalPublished = await publishWorkspaceWindowTerminalResults(
       workspaceTerminalResultDraft ?? { outcome: "no-result" },

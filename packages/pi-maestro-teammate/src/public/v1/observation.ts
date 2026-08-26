@@ -430,6 +430,24 @@ export function diagnosisDetail(diagnosis: AgentRuntimeDiagnosisV1): string[] {
   ];
 }
 
+/**
+ * Longest `lastResult` excerpt rendered without `verbose`.
+ *
+ * The excerpt exists so an observer learns what a target finished saying
+ * without having to ask for detail — that is the reading a heartbeat needs to
+ * tell "done what I asked" apart from "not started". The full text is available
+ * under `verbose`, so this is a display bound and not a data bound.
+ */
+const LAST_RESULT_EXCERPT_CHARS = 240;
+
+/** One line of a result, whitespace flattened and cut to the excerpt bound. */
+function lastResultExcerpt(text: string): string {
+  const flattened = text.replaceAll(/\s+/gu, " ").trim();
+  return flattened.length <= LAST_RESULT_EXCERPT_CHARS
+    ? flattened
+    : `${flattened.slice(0, LAST_RESULT_EXCERPT_CHARS)}…`;
+}
+
 export function formatObserveResult(result: ObserveResult, verbose = false): string[] {
   const header = `${result.observations.length} targets: ${result.reason} (${result.durationMs}ms)`;
   const lines = [header];
@@ -443,8 +461,17 @@ export function formatObserveResult(result: ObserveResult, verbose = false): str
       for (const detail of observation.detail) lines.push(`  ${detail}`);
     }
     const detailHasLastResult = observation.detail?.includes("--- last result ---") === true;
-    if (verbose && observation.lastResult && !detailHasLastResult) {
-      lines.push("  --- last result ---", ...observation.lastResult.split("\n").map((line) => `  ${line}`));
+    // The target's own account of what it finished. `nativeStatus` and `summary`
+    // are inferred from agent counts and idle time, so on their own they cannot
+    // separate "finished the work" from "has not started it"; this is the run
+    // saying so. Rendered unconditionally because that distinction is the whole
+    // reading a polling observer takes.
+    if (observation.lastResult && !detailHasLastResult) {
+      if (verbose) {
+        lines.push("  --- last result ---", ...observation.lastResult.split("\n").map((line) => `  ${line}`));
+      } else {
+        lines.push(`  result: ${lastResultExcerpt(observation.lastResult)}`);
+      }
     }
     const detailHasStructuredOutput = observation.detail?.includes("--- structured output ---") === true;
     if (verbose && observation.structuredOutput !== undefined && !detailHasStructuredOutput) {
