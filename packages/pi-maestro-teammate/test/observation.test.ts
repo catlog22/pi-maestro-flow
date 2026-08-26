@@ -577,7 +577,7 @@ test("until option is forwarded to providers", async () => {
   }
 });
 
-test("formatObserveResult preserves multiline last results only in verbose detail", () => {
+test("formatObserveResult renders last results unconditionally; verbose keeps the multiline text", () => {
   const observation: ObservationSnapshot = {
     target: { kind: "teammate", id: "job" },
     found: true,
@@ -597,7 +597,45 @@ test("formatObserveResult preserves multiline last results only in verbose detai
   const verbose = formatObserveResult(result, true).join("\n");
   assert.match(verbose, /--- last result ---/);
   assert.match(verbose, /first line\n  second line/);
-  assert.doesNotMatch(formatObserveResult(result, false).join("\n"), /first line/);
+  // Non-verbose still surfaces the result, flattened to one excerpt line so a
+  // polling observer can tell "finished" from "not started" without asking for
+  // detail. The full multiline text is reserved for verbose.
+  const nonVerbose = formatObserveResult(result, false).join("\n");
+  assert.match(nonVerbose, /result: first line second line/);
+  assert.doesNotMatch(nonVerbose, /--- last result ---/);
+});
+
+test("formatObserveResult excerpts a long non-verbose last result and keeps it whole in verbose", () => {
+  const longText = "word ".repeat(60).trim(); // 299 chars, past the 240-char excerpt bound
+  const observation: ObservationSnapshot = {
+    target: { kind: "teammate", id: "job" },
+    found: true,
+    nativeStatus: "sleeping",
+    phase: "settled",
+    lastResult: longText,
+    summary: "done",
+    updatedAt: Date.now(),
+  };
+  const result = {
+    action: "status" as const,
+    reason: "snapshot" as const,
+    observations: [observation],
+    durationMs: 1,
+  };
+
+  // Non-verbose flattens whitespace and truncates to the excerpt bound, ending
+  // with an ellipsis so a shortened result never reads as a complete one.
+  const nonVerbose = formatObserveResult(result, false).join("\n");
+  assert.match(nonVerbose, /result: word word/);
+  assert.match(nonVerbose, /…$/m);
+  const excerptLine = nonVerbose.split("\n").find((line) => line.startsWith("  result: ")) ?? "";
+  // Excerpt body (minus "  result: " prefix and trailing ellipsis) is the bound.
+  assert.ok(excerptLine.length - "  result: ".length - 1 <= 240);
+
+  // Verbose keeps the full text, untruncated and on its own block.
+  const verbose = formatObserveResult(result, true).join("\n");
+  assert.match(verbose, /--- last result ---/);
+  assert.ok(verbose.includes(longText));
 });
 
 test("formatObserveResult renders structured output only in verbose detail", () => {
