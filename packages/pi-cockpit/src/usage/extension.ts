@@ -57,6 +57,8 @@ import {
 	type UsageByProvider,
 	type UsageTokens,
 } from "./core.ts";
+import { buildTrend, readUsageHistory, type TrendSummary, type UsageRecord } from "./history.ts";
+import { renderThemeSparkline } from "./sparkline.ts";
 import type { CockpitConfig } from "../types.ts";
 
 const EXTENSION_ID = "pi-cockpit:usage-bars";
@@ -123,6 +125,8 @@ interface SubscriptionItem {
 	provider: ProviderKey;
 	data: UsageDataLike;
 	isActive: boolean;
+	/** Per-provider 7-day token trend from the api-manager usage-history store. */
+	trend?: TrendSummary;
 }
 
 interface CredentialResolution {
@@ -221,11 +225,14 @@ class UsageSelectorComponent extends Container implements Focusable {
 
 	private async load(): Promise<void> {
 		try {
-			const results = await this.fetchAllFn(this.requestController.signal);
+			const [results, historyByProvider] = await Promise.all([
+				this.fetchAllFn(this.requestController.signal),
+				readUsageHistory().then((records) => this.groupHistoryByProvider(records)),
+			]);
 			if (this.disposed || this.requestController.signal.aborted) return;
 			this.loading = false;
 			this.hint = "ready";
-			this.buildItems(results);
+			this.buildItems(results, historyByProvider);
 		} catch {
 			if (this.disposed || this.requestController.signal.aborted) return;
 			this.loading = false;
@@ -249,7 +256,24 @@ class UsageSelectorComponent extends Container implements Focusable {
 		}
 	}
 
-	private buildItems(results: UsageByProvider): void {
+	private groupHistoryByProvider(records: UsageRecord[]): Partial<Record<ProviderKey, TrendSummary>> {
+		const byPiProviderId = new Map<string, UsageRecord[]>();
+		for (const record of records) {
+			const bucket = byPiProviderId.get(record.provider) ?? [];
+			bucket.push(record);
+			byPiProviderId.set(record.provider, bucket);
+		}
+		const trends: Partial<Record<ProviderKey, TrendSummary>> = {};
+		for (const provider of PROVIDERS) {
+			const piId = providerToPiProviderId(provider);
+			const providerRecords = byPiProviderId.get(piId) ?? [];
+			const trend = buildTrend(providerRecords, 7);
+			if (trend) trends[provider] = trend;
+		}
+		return trends;
+	}
+
+	private buildItems(results: UsageByProvider, trends?: Partial<Record<ProviderKey, TrendSummary>>): void {
 		this.allItems = PROVIDERS.flatMap((provider) => {
 			const data = results[provider];
 			return data
@@ -258,6 +282,7 @@ class UsageSelectorComponent extends Container implements Focusable {
 					provider,
 					data: data as unknown as UsageDataLike,
 					isActive: this.activeProvider === provider,
+					trend: trends?.[provider],
 				}]
 				: [];
 		});
@@ -381,8 +406,49 @@ class UsageSelectorComponent extends Container implements Focusable {
 			if (item.data.warning) {
 				this.listContainer.addChild(new Text(indent + theme.fg("warning", `⚠ ${item.data.warning}`), 0, 0));
 			}
+			this.renderTrend(item);
 		}
 		this.listContainer.addChild(new Spacer(1));
+	}
+
+	/** Format a token count compactly (1.4m / 3.2k / 890). */
+	private formatTokens(n: number): string {
+		if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}m`;
+		if (n >= 1_000) return `${(n / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
+		return String(n);
+	}
+
+	/**
+	 * Render the per-provider 7-day token trend section (sparkline + summary +
+	 * top models) sourced from the api-manager usage-history store. Omitted
+	 * entirely when there is no history for the provider in the window.
+	 */
+	private renderTrend(item: SubscriptionItem): void {
+		const trend = item.trend;
+		if (!trend) return;
+		const theme = this.theme;
+		const indent = "    ";
+		const series = trend.daily.map((bucket) => bucket.tokens);
+		const sparkline = renderThemeSparkline(series, theme, { width: 12, color: "accent" });
+		if (!sparkline) return;
+		const avgTurns = trend.avgTurnsPerDay > 0 ? Math.round(trend.avgTurnsPerDay * 10) / 10 : 0;
+		this.listContainer.addChild(new Text(
+			indent + theme.fg("muted", "Last 7d  ") + sparkline + "  " +
+				theme.fg("text", `${this.formatTokens(trend.totalTokens)} tok`) +
+				theme.fg("dim", " · ") +
+				theme.fg("warning", `$${trend.totalCost.toFixed(2)}`) +
+				theme.fg("dim", " · ") +
+				theme.fg("dim", `${avgTurns} turns/day`),
+			0, 0,
+		));
+		if (trend.topModels.length > 0) {
+			const parts = trend.topModels.map((m) =>
+				`${theme.fg("text", m.model)} ${theme.fg("muted", `${Math.round(m.share * 100)}%`)}`);
+			this.listContainer.addChild(new Text(
+				indent + theme.fg("muted", "Top model  ") + parts.join(theme.fg("dim", " · ")),
+				0, 0,
+			));
+		}
 	}
 
 	private updateList(): void {
