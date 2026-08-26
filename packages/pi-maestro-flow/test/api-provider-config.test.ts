@@ -26,16 +26,21 @@ import {
 } from "../src/compaction/compaction-settings.ts";
 import {
   ALLOW_INSECURE_PROVIDER_HTTP_ENV,
+  applyModelFilters,
+  applyProviderModelFilter,
   configureCustomModelTarget,
   deleteApiProviderModelSettings,
   ensureApiRetryDefaults,
   loadApiProviderSettings,
   loadApiRetrySettings,
+  loadModelFilters,
+  modelMatchesFilterPattern,
   normalizeBaseUrl,
   registerApiProviderConfigs,
   renameDefaultModelRef,
   renameModelThinkingDefault,
   saveApiProviderSettings,
+  saveProviderModelFilter,
   saveApiRetrySettings,
   saveModelThinkingDefault,
   setApiProviderEnabled,
@@ -3905,4 +3910,101 @@ test("/api-manager import rejects invalid files without touching models.json", a
   for (const message of notifications) {
     assert.ok(!/导入 \d+ 个 Provider/.test(message));
   }
+});
+
+test("model filter persist/load round-trips and supports allow/block", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-model-filter-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const defaultsPath = join(tempDir, "api-manager.json");
+
+  const filters = await loadModelFilters(defaultsPath);
+  assert.deepEqual(filters, {});
+
+  await saveProviderModelFilter("openai-codex", { mode: "block", patterns: ["gpt-5.4", "gpt-5.4-mini"] }, defaultsPath);
+  await saveProviderModelFilter("kimi-coding", { mode: "allow", patterns: ["kimi-for-coding*"] }, defaultsPath);
+
+  const reloaded = await loadModelFilters(defaultsPath);
+  assert.deepEqual(reloaded["openai-codex"], { mode: "block", patterns: ["gpt-5.4", "gpt-5.4-mini"] });
+  assert.deepEqual(reloaded["kimi-coding"], { mode: "allow", patterns: ["kimi-for-coding*"] });
+
+  // block mode removes matching, keeps the rest
+  const blockResult = applyProviderModelFilter("openai-codex", ["gpt-5.4", "gpt-5.4-mini", "gpt-5.5"], reloaded["openai-codex"]);
+  assert.deepEqual(blockResult, ["gpt-5.5"]);
+
+  // allow mode keeps only matching
+  const allowResult = applyProviderModelFilter("kimi-coding", ["kimi-for-coding", "kimi-for-coding-highspeed", "k3-256k"], reloaded["kimi-coding"]);
+  assert.deepEqual(allowResult, ["kimi-for-coding", "kimi-for-coding-highspeed"]);
+
+  // undefined filter passes everything through
+  assert.deepEqual(applyProviderModelFilter("any", ["a", "b"], undefined), ["a", "b"]);
+
+  // clearing a filter removes it from the map
+  await saveProviderModelFilter("openai-codex", undefined, defaultsPath);
+  const afterClear = await loadModelFilters(defaultsPath);
+  assert.ok(!("openai-codex" in afterClear));
+  assert.ok("kimi-coding" in afterClear);
+
+  // empty patterns also clear
+  await saveProviderModelFilter("kimi-coding", { mode: "allow", patterns: [] }, defaultsPath);
+  assert.deepEqual(await loadModelFilters(defaultsPath), {});
+});
+
+test("model filter glob matches provider/id and bare id", () => {
+  // exact id match, bare or qualified
+  assert.equal(modelMatchesFilterPattern("openai-codex", "gpt-5.4", "gpt-5.4"), true);
+  assert.equal(modelMatchesFilterPattern("openai-codex", "gpt-5.4", "openai-codex/gpt-5.4"), true);
+  assert.equal(modelMatchesFilterPattern("openai-codex", "gpt-5.4", "gpt-5.5"), false);
+  // wildcard across full id
+  assert.equal(modelMatchesFilterPattern("openai-codex", "gpt-5.4-mini", "gpt-5*"), true);
+  assert.equal(modelMatchesFilterPattern("openai-codex", "gpt-5.4-mini", "openai-codex/gpt-5*"), true);
+  // wildcard matches bare id without provider prefix
+  assert.equal(modelMatchesFilterPattern("anthropic", "claude-sonnet-4", "*sonnet*"), true);
+  assert.equal(modelMatchesFilterPattern("anthropic", "claude-opus-4", "*sonnet*"), false);
+  // empty pattern never matches
+  assert.equal(modelMatchesFilterPattern("any", "x", ""), false);
+  assert.equal(modelMatchesFilterPattern("any", "x", "  "), false);
+});
+
+test("applyModelFilters re-registers providers with curated models", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-apply-filters-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const defaultsPath = join(tempDir, "api-manager.json");
+  await saveProviderModelFilter("openai-codex", { mode: "block", patterns: ["gpt-5.4-mini"] }, defaultsPath);
+
+  const registered: Array<{ name: string; config: any }> = [];
+  const notifications: string[] = [];
+  const fakeModels = [
+    { provider: "openai-codex", id: "gpt-5.4", name: "GPT 5.4", api: "openai-codex-responses", baseUrl: "https://api.openai.com/v1", reasoning: true, input: ["text", "image"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200_000, maxTokens: 16_384 },
+    { provider: "openai-codex", id: "gpt-5.4-mini", name: "GPT 5.4 Mini", api: "openai-codex-responses", baseUrl: "https://api.openai.com/v1", reasoning: true, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128_000, maxTokens: 16_384 },
+    { provider: "openai-codex", id: "gpt-5.5", name: "GPT 5.5", api: "openai-codex-responses", baseUrl: "https://api.openai.com/v1", reasoning: true, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200_000, maxTokens: 16_384 },
+  ];
+  const pi = {
+    registerProvider(name: string, config: any) { registered.push({ name, config }); },
+    unregisterProvider() {},
+  } as any;
+  const ctx = {
+    modelRegistry: { getAvailable: () => fakeModels },
+    ui: { notify: (msg: string) => notifications.push(msg) },
+  } as any;
+
+  await applyModelFilters(pi, ctx, defaultsPath);
+
+  assert.equal(registered.length, 1);
+  assert.equal(registered[0].name, "openai-codex");
+  // gpt-5.4-mini is blocked; gpt-5.4 and gpt-5.5 survive
+  assert.deepEqual(registered[0].config.models.map((m: any) => m.id), ["gpt-5.4", "gpt-5.5"]);
+  assert.equal(registered[0].config.api, "openai-codex-responses");
+  assert.equal(registered[0].config.baseUrl, "https://api.openai.com/v1");
+  assert.equal(registered[0].config.oauth, undefined);
+});
+
+test("applyModelFilters is a no-op when no filters are configured", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-apply-empty-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const defaultsPath = join(tempDir, "api-manager.json");
+  const registered: any[] = [];
+  const pi = { registerProvider: (name: string, config: any) => registered.push({ name, config }) } as any;
+  const ctx = { modelRegistry: { getAvailable: () => [] }, ui: { notify() {} } } as any;
+  await applyModelFilters(pi, ctx, defaultsPath);
+  assert.equal(registered.length, 0);
 });

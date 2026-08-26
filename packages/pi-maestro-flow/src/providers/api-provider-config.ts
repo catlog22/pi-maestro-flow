@@ -14,6 +14,7 @@ import {
   SettingsManager,
   type ExtensionAPI,
   type ExtensionCommandContext,
+  type ExtensionContext,
   type ProviderConfig,
   type ProviderModelConfig,
 } from "@earendil-works/pi-coding-agent";
@@ -425,7 +426,7 @@ export interface ApiRetrySettings {
   maxDelayMs?: number;
 }
 
-export type ApiProviderAction = "cache" | "cache-agent" | "configure" | "delete" | "disable" | "effort" | "enable" | "enhance" | "export" | "import" | "list" | "logout" | "nextsuggest" | "price" | "provider" | "reset" | "retry" | "show" | "stats" | "toggle" | "vision";
+export type ApiProviderAction = "cache" | "cache-agent" | "configure" | "delete" | "disable" | "effort" | "enable" | "enhance" | "export" | "filter" | "import" | "list" | "logout" | "nextsuggest" | "price" | "provider" | "reset" | "retry" | "show" | "stats" | "toggle" | "vision";
 export type ApiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export const DEFAULT_THINKING_LEVEL: ApiThinkingLevel = "medium";
@@ -683,6 +684,11 @@ export function registerApiProviderConfigs(
         await ensureApiRetryDefaults(settingsPath);
       } catch (error) {
         ctx.ui.notify(t("retry.initFailed", { message: errorMessage(error) }), "warning");
+      }
+      try {
+        await applyModelFilters(pi, ctx, defaultsPath);
+      } catch (error) {
+        ctx.ui.notify(`Model filter init failed: ${errorMessage(error)}`, "warning");
       }
       syncEffortStatus(ctx, pi.getThinkingLevel());
     });
@@ -1737,6 +1743,19 @@ async function showApiProviderManager(
     const pick = await chooseModelGlobally(ctx, action, modelsPath, defaultsPath);
     if (!pick) return;
     await dispatchGlobalModelPick(pi, pick, action, ctx, modelsPath, defaultsPath, settingsPath);
+    return;
+  }
+  if (action === "filter") {
+    if (!ctx.hasUI) {
+      ctx.ui.notify(t("manager.actionNeedTui", { action }), "warning");
+      return;
+    }
+    let targetProviderId: string | undefined;
+    if (parsed.target) {
+      const ref = await resolveChannelRef(parsed.target, ctx, modelsPath);
+      targetProviderId = ref?.id;
+    }
+    await manageModelFilter(pi, ctx, defaultsPath, targetProviderId);
     return;
   }
   // logout / reset 是 Provider（URL/key）级操作。
@@ -2937,6 +2956,7 @@ import {
   migrateLegacyProviderThinkingMaps,
   normalizeChannelId,
   notifySaved,
+  numberedOptionLabel,
   parseManagerArgs,
   positiveInteger,
   providerIdsInModels,
@@ -2988,6 +3008,173 @@ interface StatsFooterConfig {
   points: number;
 }
 
+// modelFilters section (api-manager.json) — per-provider model allow/block lists.
+// Built-in OAuth providers (openai-codex, kimi-coding, …) load every model
+// their remote catalog advertises once the account logs in, which pollutes the
+// teammate model selector. A filter overrides that by re-registering the
+// provider with a curated model list, so the teammate catalog only sees the
+// models the user wants. Stored outside models.json because these providers
+// have no models.json entry (they are pi-agent-core builtins).
+// ---------------------------------------------------------------------------
+
+export type ModelFilterMode = "allow" | "block";
+
+export interface ProviderModelFilter {
+  /** "allow" = only these models are visible; "block" = these are hidden. */
+  mode: ModelFilterMode;
+  /** Glob patterns matched against `${provider}/${modelId}` and bare `modelId`. */
+  patterns: string[];
+}
+
+export type ProviderModelFilterMap = Record<string, ProviderModelFilter>;
+
+function isModelFilterMode(value: unknown): value is ModelFilterMode {
+  return value === "allow" || value === "block";
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+
+export async function loadModelFilters(defaultsPath: string): Promise<ProviderModelFilterMap> {
+  if (!await fileExists(defaultsPath)) return {};
+  const root = await readModelsRoot(defaultsPath);
+  const section = root.modelFilters;
+  if (!section || typeof section !== "object" || Array.isArray(section)) return {};
+  const entries = section as Record<string, unknown>;
+  const result: ProviderModelFilterMap = {};
+  for (const [providerId, raw] of Object.entries(entries)) {
+    if (!isRecord(raw)) continue;
+    const mode = isModelFilterMode(raw.mode) ? raw.mode : undefined;
+    const patterns = isStringArray(raw.patterns) ? raw.patterns.filter((pattern) => pattern.trim()) : [];
+    if (!mode || patterns.length === 0) continue;
+    result[providerId] = { mode, patterns };
+  }
+  return result;
+}
+
+export async function saveProviderModelFilter(
+  providerId: string,
+  filter: ProviderModelFilter | undefined,
+  defaultsPath: string,
+): Promise<void> {
+  await serializeMutation(defaultsPath, async () => {
+    const exists = await fileExists(defaultsPath);
+    const root = await readModelsRoot(defaultsPath);
+    const current = (isRecord(root.modelFilters) ? { ...root.modelFilters } : {}) as ProviderModelFilterMap;
+    if (filter === undefined || filter.patterns.length === 0) {
+      delete current[providerId];
+    } else {
+      current[providerId] = { mode: filter.mode, patterns: [...filter.patterns] };
+    }
+    const next = { ...root, modelFilters: current } as Record<string, unknown>;
+    if (Object.keys(current).length === 0) delete next.modelFilters;
+    await writeModelsRoot(next, defaultsPath, exists);
+  });
+}
+
+function filterGlobToRegExp(pattern: string): RegExp {
+  let source = "^";
+  for (const char of pattern) {
+    if (char === "*") source += ".*";
+    else if (char === "?") source += ".";
+    else source += char.replace(/[|\\{}()\[\]^$+?.]/g, "\\$&");
+  }
+  return new RegExp(`${source}$`, "i");
+}
+
+/**
+ * Match a model against a single glob pattern. Matches both `${provider}/${id}`
+ * (e.g. `openai-codex/gpt-5.4`) and the bare `id`, mirroring pi's model scope
+ * resolver so a `*sonnet*` pattern works without a provider prefix.
+ */
+export function modelMatchesFilterPattern(providerId: string, modelId: string, pattern: string): boolean {
+  const normalized = pattern.trim().toLowerCase();
+  if (!normalized) return false;
+  const fullId = `${providerId}/${modelId}`.toLowerCase();
+  const id = modelId.toLowerCase();
+  if (normalized.includes("*") || normalized.includes("?")) {
+    const regex = filterGlobToRegExp(normalized);
+    return regex.test(fullId) || regex.test(id);
+  }
+  return normalized === fullId || normalized === id;
+}
+
+/**
+ * Apply a provider's model filter to a list of model ids, returning the ids
+ * that survive. `allow` keeps only matching models; `block` removes matching ones.
+ */
+export function applyProviderModelFilter(
+  providerId: string,
+  modelIds: readonly string[],
+  filter: ProviderModelFilter | undefined,
+): string[] {
+  if (!filter || filter.patterns.length === 0) return [...modelIds];
+  return modelIds.filter((modelId) => {
+    const matched = filter.patterns.some((pattern) => modelMatchesFilterPattern(providerId, modelId, pattern));
+    return filter.mode === "allow" ? matched : !matched;
+  });
+}
+
+/**
+ * Re-register every provider that has a model filter so the teammate model
+ * catalog only sees the surviving models. Built-in OAuth providers (openai-
+ * codex, kimi-coding, …) are not in models.json, so the filter layer is the
+ * only way to curate their catalog. Uses extension.models replacement, which
+ * composes over the builtin provider while keeping its OAuth login intact.
+ */
+export async function applyModelFilters(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  defaultsPath: string,
+): Promise<void> {
+  if (typeof pi.registerProvider !== "function") return;
+  const filters = await loadModelFilters(defaultsPath);
+  if (Object.keys(filters).length === 0) return;
+  const available = ctx.modelRegistry?.getAvailable?.() ?? [];
+  if (available.length === 0) return;
+  const byProvider = new Map<string, typeof available>();
+  for (const model of available) {
+    const list = byProvider.get(model.provider) ?? [];
+    list.push(model);
+    byProvider.set(model.provider, list);
+  }
+  for (const [providerId, filter] of Object.entries(filters)) {
+    const providerModels = byProvider.get(providerId);
+    if (!providerModels || providerModels.length === 0) continue;
+    const survivorIds = new Set(applyProviderModelFilter(providerId, providerModels.map((m) => m.id), filter));
+    if (survivorIds.size === 0) continue;
+    const survivors = providerModels.filter((m) => survivorIds.has(m.id));
+    const base = providerModels[0];
+    const models: ProviderModelConfig[] = survivors.map((m) => ({
+      id: m.id,
+      name: m.name,
+      reasoning: m.reasoning,
+      input: [...m.input],
+      cost: { ...m.cost },
+      contextWindow: m.contextWindow,
+      maxTokens: m.maxTokens,
+      api: m.api,
+      baseUrl: m.baseUrl,
+      ...(m.thinkingLevelMap ? { thinkingLevelMap: m.thinkingLevelMap } : {}),
+      ...(m.headers ? { headers: m.headers } : {}),
+      ...(m.compat ? { compat: m.compat as ProviderModelConfig["compat"] } : {}),
+    }));
+    try {
+      pi.registerProvider(providerId, {
+        api: base.api,
+        baseUrl: base.baseUrl,
+        models,
+      });
+    } catch (error) {
+      ctx.ui.notify(
+        `Failed to apply model filter for ${providerId}: ${error instanceof Error ? error.message : String(error)}`,
+        "warning",
+      );
+    }
+  }
+}
+
 const DEFAULT_STATS_FOOTER: StatsFooterConfig = { enabled: false, metric: "tokens", points: 12 };
 
 async function loadStatsFooterConfig(defaultsPath: string): Promise<StatsFooterConfig> {
@@ -3030,6 +3217,138 @@ async function manageStatsFooter(
     `Footer 用量 sparkline 已${mode === "on" ? "开启" : "关闭"}。${mode === "on" ? "下个会话起生效，宽度≥100 列时显示。" : ""}`,
     "info",
   );
+}
+
+// modelFilters management (api-manager.json) — curate the teammate model catalog.
+// Built-in OAuth providers dump every model their remote catalog advertises
+// into getAvailable(), which the teammate selector then shows in full. A
+// filter re-registers the provider with a curated model list so only the
+// survivors reach teammates. This is the only way to hide models for an
+// account-scoped provider without taking over its OAuth login flow.
+// ---------------------------------------------------------------------------
+
+/** Enumerate providers that currently advertise models via getAvailable(). */
+async function chooseFilterableProvider(
+  ctx: ExtensionCommandContext,
+  defaultsPath: string,
+): Promise<string | undefined> {
+  const available = ctx.modelRegistry?.getAvailable?.() ?? [];
+  const counts = new Map<string, number>();
+  for (const model of available) {
+    counts.set(model.provider, (counts.get(model.provider) ?? 0) + 1);
+  }
+  if (counts.size === 0) {
+    ctx.ui.notify("没有可配置的 Provider（尚未登录任何账号）。", "info");
+    return undefined;
+  }
+  const filters = await loadModelFilters(defaultsPath);
+  const options: Array<{ label: string; id: string }> = [];
+  for (const [providerId, count] of [...counts.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    const filter = filters[providerId];
+    const marker = filter ? ` · ${filter.mode === "allow" ? "白名单" : "黑名单"}${filter.patterns.length} 条` : " · 无过滤";
+    const display = ctx.modelRegistry?.getProviderDisplayName?.(providerId) ?? providerId;
+    options.push({ label: `${display}（${providerId}）· ${count} model${marker}`, id: providerId });
+  }
+  const choice = await ctx.ui.select("选择要配置模型过滤的 Provider", options.map((entry) => entry.label));
+  return options.find((entry) => entry.label === choice)?.id;
+}
+
+/**
+ * Interactive model-filter editor. Lists the provider's full model catalog,
+ * lets the user pick a mode and curate patterns (exact ids or globs), then
+ * re-registers the provider so the teammate catalog updates immediately.
+ */
+export async function manageModelFilter(
+  pi: ExtensionAPI,
+  ctx: ExtensionCommandContext,
+  defaultsPath: string,
+  providerId?: string,
+): Promise<void> {
+  const id = providerId ?? await chooseFilterableProvider(ctx, defaultsPath);
+  if (!id) return;
+  const available = ctx.modelRegistry?.getAvailable?.() ?? [];
+  const providerModels = available.filter((m) => m.provider === id).map((m) => m.id);
+  if (providerModels.length === 0) {
+    ctx.ui.notify(`${id} 当前没有可用模型。`, "warning");
+    return;
+  }
+  const filters = await loadModelFilters(defaultsPath);
+  const current = filters[id];
+  const display = ctx.modelRegistry?.getProviderDisplayName?.(id) ?? id;
+
+  // Step 1: choose mode (or clear).
+  const modeOptions = [
+    `黑名单（屏蔽选定模型，其余可见）${current?.mode === "block" ? " · 当前" : ""}`,
+    `白名单（只留选定模型，其余隐藏）${current?.mode === "allow" ? " · 当前" : ""}`,
+    "清除过滤（恢复全部模型）",
+  ];
+  const modeChoice = await ctx.ui.select(`${display} 模型过滤模式`, modeOptions);
+  if (modeChoice === undefined) return;
+
+  if (modeChoice === modeOptions[2]) {
+    await saveProviderModelFilter(id, undefined, defaultsPath);
+    pi.unregisterProvider(id);
+    await applyModelFilters(pi, ctx, defaultsPath);
+    ctx.ui.notify(`已清除 ${display} 的模型过滤。`, "info");
+    return;
+  }
+
+  const mode: ModelFilterMode = modeChoice === modeOptions[1] ? "allow" : "block";
+
+  // Step 2: show the full model list and let the user toggle membership.
+  // For block mode, `working` = the set of models to HIDE (starts empty).
+  // For allow mode, `working` = the set of models to KEEP (starts with everything).
+  let working = new Set<string>(mode === "allow" ? providerModels : []);
+  while (true) {
+    const lines = providerModels.map((modelId, index) => {
+      const checked = working.has(modelId);
+      const mark = checked ? (mode === "block" ? "🚫" : "✅") : "⬜";
+      return numberedOptionLabel(index, `${mark} ${modelId}`);
+    });
+    const summary = mode === "block"
+      ? `已屏蔽 ${working.size} / ${providerModels.length}（剩余 ${providerModels.length - working.size} 可见）`
+      : `已保留 ${working.size} / ${providerModels.length}（屏蔽 ${providerModels.length - working.size}）`;
+    const title = `${display} 模型过滤（${mode === "block" ? "黑名单" : "白名单"}）· ${summary}\n选择模型切换${mode === "block" ? "屏蔽" : "保留"}，或选“完成”结束`;
+    const choice = await ctx.ui.select(title, [...lines, numberedOptionLabel(lines.length, "✓ 完成编辑")]);
+    if (choice === undefined) return;
+    if (choice.endsWith("✓ 完成编辑")) break;
+    const selectedIndex = lines.findIndex((line) => line === choice);
+    if (selectedIndex < 0) continue;
+    const modelId = providerModels[selectedIndex];
+    if (working.has(modelId)) working.delete(modelId);
+    else working.add(modelId);
+  }
+
+  // Step 3 (optional): add glob patterns for models not in the static list.
+  const addPatterns = await ctx.ui.confirm(
+    "添加通配模式？",
+    "可用 * 匹配任意字符串，如 gpt-5* 或 *sonnet*。留空结束。适合屏蔽未来新增的同类模型。",
+  );
+  if (!addPatterns) return;
+  const extraPatterns: string[] = [];
+  while (true) {
+    const patternInput = await ctx.ui.input("通配模式（留空结束）", "");
+    if (patternInput === undefined) return;
+    const pattern = patternInput.trim();
+    if (!pattern) break;
+    extraPatterns.push(pattern);
+  }
+
+  const patterns = [...working, ...extraPatterns];
+  if (patterns.length === 0) {
+    ctx.ui.notify("未选择任何模型，过滤未保存。", "info");
+    return;
+  }
+
+  const filter: ProviderModelFilter = { mode, patterns };
+  const confirmed = await ctx.ui.confirm(
+    `保存 ${display} 模型过滤？`,
+    `模式：${mode === "block" ? "黑名单" : "白名单"}\n规则：${patterns.length} 条\n效果：${mode === "block" ? "屏蔽选中的模型" : "仅保留选中的模型"}`,
+  );
+  if (!confirmed) return;
+  await saveProviderModelFilter(id, filter, defaultsPath);
+  await applyModelFilters(pi, ctx, defaultsPath);
+  ctx.ui.notify(`${display} 模型过滤已保存并生效。`, "info");
 }
 
 

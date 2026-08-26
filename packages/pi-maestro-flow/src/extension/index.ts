@@ -3548,6 +3548,7 @@ When NOT to use:
       "api.nextsuggest": () => openApiManager("nextsuggest", "Next-step suggestion settings"),
       "api.enhance": () => openApiManager("enhance", "Prompt enhance settings"),
       "api.list": () => openApiManager("list", "API provider overview"),
+      "api.filter": () => openApiManager("filter", "Teammate model filter"),
     },
   });
   let apiManagerSettingsDisposer: (() => void) | undefined;

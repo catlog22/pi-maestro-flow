@@ -47,6 +47,7 @@ import {
   KNOWN_APIS,
   loadApiProviderSettings,
   loadApiRetrySettings,
+  loadModelFilters,
   mutationQueues,
   normalizeBaseUrl,
   PROVIDERS,
@@ -88,6 +89,7 @@ const OPS_CATALOGS = {
     "menu.cacheAgent": "Agent cache tier (current: {value})",
     "menu.price": "Backfill model pricing (built-in table + OpenRouter)",
     "menu.logout": "Sign out a Provider",
+    "menu.filter": "Filter models (hide from teammate)",
     "menu.reset": "Reset a Provider",
     "menu.export": "Export API configuration to a file",
     "menu.import": "Import API configuration from a file",
@@ -130,6 +132,7 @@ const OPS_CATALOGS = {
     "menu.cacheAgent": "Agent 缓存档位（当前：{value}）",
     "menu.price": "回填模型价格（内置表 + OpenRouter 在线）",
     "menu.logout": "注销 Provider",
+    "menu.filter": "模型过滤（屏蔽 teammate 可见模型）",
     "menu.reset": "重置 Provider",
     "menu.export": "导出 API 配置到文件",
     "menu.import": "从文件导入 API 配置",
@@ -373,6 +376,7 @@ export async function listProviders(
     ...(modelLines.length > 0 ? modelLines : ["（尚未配置任何模型）"]),
     "Providers（URL / API key 级配置）：",
     ...providerLines,
+    ...(await renderModelFilterSummary(defaultsPath)),
     `Pi 全局默认思考强度：${currentDefaultThinkingLevel(ctx, modelsPath)}`,
     `Provider 自动重试：${retry.enabled ? "开启" : "关闭"} · 最大 ${retry.maxRetries} 次 · 退避上限 ${retry.maxDelayMs ?? NETWORK_RETRY_POLICY.maxDelayMs}ms`,
     `文件：${modelsPath}`,
@@ -1133,7 +1137,7 @@ export function resolveTargetToken(value: string): ChannelTarget | undefined {
 
 export function usageError(): Error {
   return new Error(
-    `用法：/api-manager list | retry [show|on [1-${API_RETRY_MAX_RETRIES_LIMIT}]|off] | cache [show|auto|off|on] | cache agent [show|short|long|none] | price [openai|qwen|anthropic|<Provider ID>] | stats | stats footer [on|off|show] | show|set|delete|enable|disable|logout|reset [openai|qwen|anthropic|<Provider ID>|new] | export [path] | import [path]`,
+    `用法：/api-manager list | retry [show|on [1-${API_RETRY_MAX_RETRIES_LIMIT}]|off] | cache [show|auto|off|on] | cache agent [show|short|long|none] | price [openai|qwen|anthropic|<Provider ID>] | stats | stats footer [on|off|show] | show|set|delete|enable|disable|logout|filter|reset [openai|qwen|anthropic|<Provider ID>|new] | export [path] | import [path]`,
   );
 }
 
@@ -1369,6 +1373,20 @@ export async function channelDisplayName(providerId: string, modelsPath: string)
   return typeof config?.name === "string" && config.name ? config.name : providerId;
 }
 
+/** One-line summary of configured model filters, for listProviders output. */
+export async function renderModelFilterSummary(defaultsPath: string): Promise<string[]> {
+  const filters = await loadModelFilters(defaultsPath);
+  const ids = Object.keys(filters).sort();
+  if (ids.length === 0) return [];
+  return [
+    "模型过滤（屏蔽 teammate 可见模型）：",
+    ...ids.map((id) => {
+      const filter = filters[id];
+      return `- ${id} · ${filter.mode === "allow" ? "白名单" : "黑名单"} · ${filter.patterns.length} 条规则`;
+    }),
+  ];
+}
+
 export function normalizeChannelId(value: string): string {
   const id = required(value, "Provider ID").trim();
   if (/\s/.test(id)) throw new Error("Provider ID cannot contain whitespace");
@@ -1402,6 +1420,7 @@ export async function chooseAction(
     { action: "export", label: opsText("menu.export") },
     { action: "import", label: opsText("menu.import") },
     { action: "logout", label: opsText("menu.logout") },
+    { action: "filter", label: opsText("menu.filter") },
     { action: "reset", label: opsText("menu.reset") },
   ];
   const choice = await ctx.ui.select(opsText("menu.title"), choices.map((entry) => entry.label));
@@ -1446,6 +1465,7 @@ export function actionFromArg(value: string): ApiProviderAction | undefined {
   if (value === "price" || value === "pricing" || value === "cost") return "price";
   if (value === "stats" || value === "usage" || value === "statistics") return "stats";
   if (value === "reset") return "reset";
+  if (value === "filter" || value === "model-filter" || value === "modelfilter") return "filter";
   return undefined;
 }
 
