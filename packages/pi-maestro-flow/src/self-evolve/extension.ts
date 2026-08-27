@@ -138,7 +138,7 @@ import {
   reviewNudgeMessage,
 } from "./session-summary.ts";
 import crossSpawn from "cross-spawn";
-import type { ChildProcess } from "node:child_process";
+import { reclaimOwnedProcessTree } from "../process/owned-process-tree.ts";
 
 // ---------------------------------------------------------------------------
 // State
@@ -301,7 +301,6 @@ async function loadReviewTeammate(): Promise<ReviewTeammateRuntime | undefined> 
 
 const STAGE_TIMEOUT_MS = 60_000;
 const STAGE_MAX_OUTPUT_BYTES = 1_000_000;
-const STAGE_TERMINATION_GRACE_MS = 1_000;
 
 /** Executes `maestro knowledge stage <args>` and returns the raw result. */
 type DepositExecutor = (
@@ -331,12 +330,22 @@ function defaultStageExecutor(
   args: readonly string[],
   opts: { cwd: string },
 ): Promise<StageExecutionResult> {
+  return executeStageProcess(args, opts);
+}
+
+function executeStageProcess(
+  args: readonly string[],
+  opts: { cwd: string; executable?: string; timeoutMs?: number },
+): Promise<StageExecutionResult> {
+  const timeoutMs = opts.timeoutMs ?? STAGE_TIMEOUT_MS;
   return new Promise((resolve) => {
     const child = crossSpawn(
-      process.platform === "win32" ? "maestro.cmd" : "maestro",
+      opts.executable ?? (process.platform === "win32" ? "maestro.cmd" : "maestro"),
       [...args],
       {
         cwd: opts.cwd,
+        // POSIX group isolation only: stage remains owned and the group is
+        // reclaimed before success or failure is reported.
         detached: process.platform !== "win32",
         windowsHide: true,
         stdio: ["ignore", "pipe", "pipe"],
@@ -347,6 +356,10 @@ function defaultStageExecutor(
     let outputBytes = 0;
     let settled = false;
     let failure: string | undefined;
+    let reclamationStarted = false;
+    let closeSeen = false;
+    let normalExitCode: number | null = null;
+    let normalReclamationComplete = false;
 
     const cleanup = (): void => {
       clearTimeout(timer);
@@ -355,6 +368,7 @@ function defaultStageExecutor(
       child.stderr?.removeListener("data", onStderr);
       child.stderr?.removeListener("error", onStreamError);
       child.removeListener("error", onError);
+      child.removeListener("exit", onExit);
       child.removeListener("close", onClose);
     };
     const finish = (exitCode: number, message?: string): void => {
@@ -369,12 +383,15 @@ function defaultStageExecutor(
       });
     };
     const stopWith = (message: string): void => {
-      if (failure !== undefined || settled) return;
+      if (failure !== undefined || settled || reclamationStarted) return;
       failure = message;
+      reclamationStarted = true;
       clearTimeout(timer);
-      void terminateStageTree(child).then(
+      child.stdout?.removeListener("data", onStdout);
+      child.stderr?.removeListener("data", onStderr);
+      void reclaimOwnedProcessTree(child, { label: "self-evolve stage CLI" }).then(
         () => finish(1, message),
-        () => finish(1, message),
+        (error) => finish(1, `${message}; stage process-tree cleanup failed: ${error instanceof Error ? error.message : String(error)}`),
       );
     };
     const collect = (target: Buffer[], chunk: Buffer | string): void => {
@@ -387,6 +404,23 @@ function defaultStageExecutor(
       outputBytes += buffer.byteLength;
       target.push(buffer);
     };
+    const finishNormalClose = (): void => {
+      if (!closeSeen || !normalReclamationComplete || failure !== undefined || settled) return;
+      finish(normalExitCode ?? 1);
+    };
+    const startNormalReclamation = (code: number | null): void => {
+      if (failure !== undefined || settled || reclamationStarted) return;
+      reclamationStarted = true;
+      normalExitCode = code;
+      clearTimeout(timer);
+      void reclaimOwnedProcessTree(child, { label: "self-evolve stage CLI" }).then(
+        () => {
+          normalReclamationComplete = true;
+          finishNormalClose();
+        },
+        (error) => finish(1, `stage command exited but process-tree cleanup was unconfirmed: ${error instanceof Error ? error.message : String(error)}`),
+      );
+    };
     const onStdout = (chunk: Buffer | string): void => collect(stdout, chunk);
     const onStderr = (chunk: Buffer | string): void => collect(stderr, chunk);
     const onStreamError = (error: Error): void => stopWith(`stage stream failed: ${error.message}`);
@@ -394,12 +428,15 @@ function defaultStageExecutor(
       if (child.pid) stopWith(error.message);
       else finish(1, error.message);
     };
+    const onExit = (code: number | null): void => startNormalReclamation(code);
     const onClose = (code: number | null): void => {
-      if (failure === undefined) finish(code ?? 1);
+      closeSeen = true;
+      startNormalReclamation(code);
+      finishNormalClose();
     };
     const timer = setTimeout(
-      () => stopWith(`stage command timed out after ${STAGE_TIMEOUT_MS}ms`),
-      STAGE_TIMEOUT_MS,
+      () => stopWith(`stage command timed out after ${timeoutMs}ms`),
+      timeoutMs,
     );
     timer.unref?.();
 
@@ -408,55 +445,18 @@ function defaultStageExecutor(
     child.stderr?.on("data", onStderr);
     child.stderr?.on("error", onStreamError);
     child.once("error", onError);
+    child.once("exit", onExit);
     child.once("close", onClose);
   });
 }
 
-/** Terminate the stage CLI and its whole process tree (taskkill /T on win32). */
-async function terminateStageTree(child: ChildProcess): Promise<void> {
-  if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
-  if (process.platform === "win32") {
-    const killer = crossSpawn(
-      "taskkill",
-      ["/pid", String(child.pid), "/T", "/F"],
-      { windowsHide: true, stdio: "ignore" },
-    );
-    await waitForStageExit(killer);
-    if (child.exitCode === null) {
-      try { child.kill("SIGKILL"); } catch { /* best-effort */ }
-    }
-    return;
-  }
-  try {
-    process.kill(-child.pid, "SIGTERM");
-  } catch {
-    try { child.kill("SIGTERM"); } catch { /* best-effort */ }
-  }
-  if (await waitForStageExit(child)) return;
-  try {
-    process.kill(-child.pid, "SIGKILL");
-  } catch {
-    try { child.kill("SIGKILL"); } catch { /* best-effort */ }
-  }
-}
-
-function waitForStageExit(child: ChildProcess, graceMs = STAGE_TERMINATION_GRACE_MS): Promise<boolean> {
-  return new Promise((resolve) => {
-    if (child.exitCode !== null || child.signalCode !== null) {
-      resolve(true);
-      return;
-    }
-    const timer = setTimeout(() => {
-      child.removeListener("exit", onExit);
-      resolve(false);
-    }, graceMs);
-    timer.unref?.();
-    const onExit = (): void => {
-      clearTimeout(timer);
-      resolve(true);
-    };
-    child.once("exit", onExit);
-  });
+/** @internal Focused process-lifecycle seam; production deposits use the same executor. */
+export function executeSelfEvolveStageProcessForTest(
+  executable: string,
+  args: readonly string[],
+  options: { cwd: string; timeoutMs?: number },
+): Promise<StageExecutionResult> {
+  return executeStageProcess(args, { ...options, executable });
 }
 
 function resolveDepositExecutor(): DepositExecutor {

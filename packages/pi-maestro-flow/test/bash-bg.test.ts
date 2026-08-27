@@ -13,6 +13,7 @@ import {
 	type BashBgSnapshotPayload,
 	type RegisterBashBgOptions,
 	registerBashBg,
+	windowsTaskkillFailure,
 } from "../src/tools/bash-bg.ts";
 import { setQuietMode } from "../src/quiet-state.ts";
 import {
@@ -23,8 +24,33 @@ import {
 
 test("bash_bg action description recommends run without implying an omitted default", () => {
 	const action = BashBgParams.properties.action as unknown as { description?: string };
+	const timeout = BashBgParams.properties.timeout as unknown as { description?: string };
 	assert.match(action.description ?? "", /recommended for uncertain-duration commands/);
 	assert.doesNotMatch(action.description ?? "", /recommended default/);
+	assert.match(timeout.description ?? "", /run: foreground seconds.*wait: max seconds to block/);
+	assert.doesNotMatch(timeout.description ?? "", /start|max(?:imum)? runtime/i, "background jobs remain intentionally unbounded");
+});
+
+test("bash_bg classifies Windows taskkill outcomes instead of trusting direct process exit", () => {
+	assert.equal(windowsTaskkillFailure({ status: 0, signal: null }), undefined);
+	assert.equal(windowsTaskkillFailure({ status: 5, signal: null }), "taskkill failed (exit 5)");
+	assert.equal(windowsTaskkillFailure({ status: null, signal: "SIGKILL" }), "taskkill failed (signal SIGKILL)");
+	assert.equal(
+		windowsTaskkillFailure({
+			status: null,
+			signal: null,
+			error: Object.assign(new Error("spawn taskkill ENOENT"), { code: "ENOENT" }),
+		}),
+		"taskkill failed to start: spawn taskkill ENOENT",
+	);
+	assert.equal(
+		windowsTaskkillFailure({
+			status: null,
+			signal: "SIGKILL",
+			error: Object.assign(new Error("timed out"), { code: "ETIMEDOUT" }),
+		}),
+		"taskkill timed out",
+	);
 });
 
 interface ToolLike {
@@ -213,6 +239,40 @@ test("bash_bg treats process exit as completion when a descendant keeps stdio op
 	}
 });
 
+test("bash_bg Windows kill never reports confirmed cleanup after the direct shell already exited", { skip: process.platform !== "win32" }, async () => {
+	const harness = createHarness();
+	let descendantPid: number | undefined;
+	try {
+		const script = [
+			"const {spawn}=require('node:child_process')",
+			"const child=spawn(process.execPath,['-e','setTimeout(()=>{},30000)'],{detached:true,stdio:'ignore'})",
+			"child.unref()",
+			"console.log(child.pid)",
+		].join(";");
+		const started = await harness.tool.execute("detached-descendant", {
+			action: "start",
+			command: `node -e ${JSON.stringify(script)}`,
+		});
+		const jobId = started.details?.jobId;
+		assert.ok(jobId);
+		const completed = await waitForStatus(harness.snapshots, jobId, "completed");
+		descendantPid = Number(completed.outputTail.match(/^(\d+)/)?.[1]);
+		assert.ok(descendantPid);
+		assert.equal(isProcessRunning(descendantPid), true);
+
+		await assert.rejects(
+			harness.tool.execute("kill-after-shell-exit", { action: "kill", jobId }),
+			/Windows process-tree cleanup is unconfirmed/,
+		);
+		assert.equal(isProcessRunning(descendantPid), true, "an unconfirmed tree must not be reported as reclaimed");
+	} finally {
+		if (descendantPid && isProcessRunning(descendantPid)) {
+			try { process.kill(descendantPid, "SIGKILL"); } catch { /* already gone */ }
+		}
+		await harness.shutdown();
+	}
+});
+
 test("bash_bg start queues one completion turn after returning control", async () => {
 	const harness = createHarness();
 	try {
@@ -386,6 +446,43 @@ test("bash_bg shutdown escalates and retains POSIX process ownership through the
 	}
 });
 
+test("bash_bg shutdown reclaims remaining POSIX jobs when one process group cannot be killed", { skip: process.platform === "win32" }, async () => {
+	const harness = createHarness();
+	const originalKill = process.kill;
+	let blockedPid: number | undefined;
+	let otherPid: number | undefined;
+	let processKillPatched = false;
+	try {
+		const command = 'node -e "console.log(\'ready\');setInterval(()=>{},1000)"';
+		const blocked = await harness.tool.execute("shutdown-blocked", { action: "start", command });
+		const other = await harness.tool.execute("shutdown-other", { action: "start", command });
+		const blockedId = blocked.details?.jobId;
+		const otherId = other.details?.jobId;
+		assert.ok(blockedId);
+		assert.ok(otherId);
+		blockedPid = (await waitForOutput(harness.snapshots, blockedId, /ready/)).pid;
+		otherPid = (await waitForOutput(harness.snapshots, otherId, /ready/)).pid;
+
+		process.kill = ((targetPid: number, signal?: string | number) => {
+			if (targetPid === -blockedPid) return true;
+			return originalKill(targetPid, signal);
+		}) as typeof process.kill;
+		processKillPatched = true;
+
+		await assert.rejects(
+			harness.shutdown(),
+			/Failed to fully reclaim 1 bash background resource during session shutdown/,
+		);
+		assert.equal(isProcessGroupRunning(otherPid), false, "one failed termination must not skip the other job");
+	} finally {
+		if (processKillPatched) process.kill = originalKill;
+		if (blockedPid && isProcessGroupRunning(blockedPid)) {
+			try { originalKill(-blockedPid, "SIGKILL"); } catch { /* already gone */ }
+		}
+		await harness.shutdown();
+	}
+});
+
 test("bash_bg keeps a completed shell active and retained while its same-group POSIX descendant lives", { skip: process.platform === "win32" }, async () => {
 	const harness = createHarness({ maxActiveJobs: 1, maxRetainedCompletedJobs: 0 });
 	try {
@@ -526,12 +623,14 @@ test("bash_bg records terminal failure when the final POSIX group boundary remai
 	}
 });
 
-test("bash_bg Windows taskkill has a source-enforced timeout", () => {
+test("bash_bg Windows taskkill has a source-enforced cleanup timeout and validates its result", () => {
 	const source = fs.readFileSync(new URL("../src/tools/bash-bg.ts", import.meta.url), "utf8");
 	assert.match(
 		source,
 		/spawnSync\("taskkill"[\s\S]{0,500}timeout: WINDOWS_TASKKILL_TIMEOUT_MS[\s\S]{0,100}killSignal: "SIGKILL"/,
 	);
+	assert.match(source, /taskkillFailure = windowsTaskkillFailure\(result\)/);
+	assert.match(source, /const terminationTargets = retiringJobs\.filter\(jobIsActive\);[\s\S]{0,200}Promise\.allSettled/);
 });
 
 test("bash_bg Windows taskkill termination behavior is bounded", { skip: process.platform !== "win32" }, async () => {

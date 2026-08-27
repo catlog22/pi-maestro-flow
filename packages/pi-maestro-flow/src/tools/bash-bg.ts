@@ -100,6 +100,7 @@ interface Job {
   completionNotified: boolean;
   outputFinalized: boolean;
   terminationInProgress: boolean;
+  treeCleanupConfirmed: boolean;
   terminationFailure?: string;
   termination?: Promise<void>;
   terminal: Promise<void>;
@@ -223,6 +224,25 @@ function processGroupRunning(pid: number): boolean {
   } catch (error) {
     return (error as NodeJS.ErrnoException).code !== "ESRCH";
   }
+}
+
+/** @internal Exported for process-reclamation regression tests. */
+export interface WindowsTaskkillResult {
+  error?: Error;
+  signal: NodeJS.Signals | null;
+  status: number | null;
+}
+
+/** @internal Exported for process-reclamation regression tests. */
+export function windowsTaskkillFailure(result: WindowsTaskkillResult): string | undefined {
+  const error = result.error as NodeJS.ErrnoException | undefined;
+  if (error?.code === "ETIMEDOUT") return "taskkill timed out";
+  if (error) return `taskkill failed to start: ${error.message}`;
+  if (result.status === 0) return undefined;
+  const outcome = result.status === null
+    ? result.signal ? `signal ${result.signal}` : "unknown status"
+    : `exit ${result.status}`;
+  return `taskkill failed (${outcome})`;
 }
 
 function jobOwnsLiveProcessGroup(job: Job): boolean {
@@ -427,7 +447,9 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
   const terminateJob = (job: Job): Promise<void> => {
     if (job.termination) return job.termination;
     const includeProcessGroup = process.platform !== "win32";
-    const boundaryReached = job.done && (!includeProcessGroup || !processGroupRunning(job.pid));
+    const boundaryReached = job.done && (includeProcessGroup
+      ? !processGroupRunning(job.pid)
+      : job.treeCleanupConfirmed);
     if (boundaryReached) {
       if (job.stopRequested) job.finishTermination?.();
       return Promise.resolve();
@@ -442,7 +464,7 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
 
     const termination = (async () => {
       let terminated = false;
-      let taskkillTimedOut = false;
+      let taskkillFailure: string | undefined;
       if (process.platform === "win32") {
         // spawnSync: async spawn of taskkill silently fails to complete under pi's jiti loader on Windows.
         if (job.pid > 0) {
@@ -452,7 +474,7 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
             timeout: WINDOWS_TASKKILL_TIMEOUT_MS,
             killSignal: "SIGKILL",
           });
-          taskkillTimedOut = (result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT";
+          taskkillFailure = windowsTaskkillFailure(result);
         }
         terminated = await waitForTerminationBoundary(job, false, TERMINATION_GRACE_MS);
       } else {
@@ -464,11 +486,14 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
         }
       }
 
+      if (taskkillFailure) {
+        throw new Error(`Failed to terminate bash job ${job.id}: ${taskkillFailure}; Windows process-tree cleanup is unconfirmed.`);
+      }
       if (!terminated) {
         const boundary = includeProcessGroup ? `POSIX process group ${job.pid}` : `process ${job.pid}`;
-        const timeout = taskkillTimedOut ? " (taskkill timed out)" : "";
-        throw new Error(`Failed to terminate bash job ${job.id}: ${boundary} is still alive${timeout}.`);
+        throw new Error(`Failed to terminate bash job ${job.id}: ${boundary} is still alive.`);
       }
+      job.treeCleanupConfirmed = true;
       job.finishTermination?.();
     })().catch((error: unknown) => {
       const failure = error instanceof Error ? error : new Error(String(error));
@@ -535,6 +560,7 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
       completionNotified: false,
       outputFinalized: false,
       terminationInProgress: false,
+      treeCleanupConfirmed: false,
       terminal,
       resolveTerminal,
     };
@@ -865,19 +891,33 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
     const retiringBaseDir = baseDir;
     const retiringJobs = [...jobs.values()];
     for (const job of retiringJobs) job.background = false;
-    await Promise.all(retiringJobs.map((job) => terminateJob(job)));
+    const terminationTargets = retiringJobs.filter(jobIsActive);
+    const terminationResults = await Promise.allSettled(terminationTargets.map((job) => terminateJob(job)));
+    const shutdownFailures: unknown[] = terminationResults.flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : []
+    );
 
     for (const job of retiringJobs) {
       if (job.outputDrainTimer) {
         clearTimeout(job.outputDrainTimer);
         job.outputDrainTimer = undefined;
       }
-      job.releaseProcess?.();
+      try {
+        job.releaseProcess?.();
+      } catch (error) {
+        shutdownFailures.push(error);
+      }
       job.releaseProcess = undefined;
       job.finishTermination = undefined;
       job.outputFinalized = true;
       job.cachedSnapshot = undefined;
-      for (const settle of [...(observationWaiters.get(job.id) ?? [])]) settle();
+      for (const settle of [...(observationWaiters.get(job.id) ?? [])]) {
+        try {
+          settle();
+        } catch (error) {
+          shutdownFailures.push(error);
+        }
+      }
     }
     publishSnapshot();
 
@@ -891,5 +931,12 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
     observationWaiters.clear();
     baseDir = "";
     try { fs.rmSync(retiringBaseDir, { recursive: true, force: true }); } catch { /* open Windows handles may finish after shutdown */ }
+    if (shutdownFailures.length > 0) {
+      const reasons = shutdownFailures.map((failure) => failure instanceof Error ? failure.message : String(failure));
+      throw new AggregateError(
+        shutdownFailures,
+        `Failed to fully reclaim ${shutdownFailures.length} bash background resource${shutdownFailures.length === 1 ? "" : "s"} during session shutdown: ${reasons.join("; ")}`,
+      );
+    }
   });
 }
