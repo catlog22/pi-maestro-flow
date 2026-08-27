@@ -802,13 +802,28 @@ export function isValidTunnelPort(port: number): boolean {
 const WINDOWS_QUICK_TUNNEL_QUERY =
   "$ErrorActionPreference = 'Stop'; @(Get-CimInstance Win32_Process -Filter \"Name = 'cloudflared.exe'\" | Select-Object Name,ProcessId,CommandLine) | ConvertTo-Json -Compress";
 
+export function quickTunnelArgs(port: number): string[] {
+  // HTTP/2 uses ordinary TCP egress; QUIC can remain alive but disconnected
+  // indefinitely on networks that block UDP/7844.
+  return ["tunnel", "--protocol", "http2", "--url", `http://127.0.0.1:${port}`];
+}
+
 function quickTunnelCommandMatches(argv: string[], port: number): boolean {
-  if (argv.length !== 4) return false;
-  const executable = argv[0]!.split(/[\\/]/).pop()!.toLowerCase();
-  return (executable === "cloudflared" || executable === "cloudflared.exe")
-    && argv[1] === "tunnel"
-    && argv[2] === "--url"
-    && argv[3] === `http://127.0.0.1:${port}`;
+  const executable = argv[0]?.split(/[\\/]/).pop()?.toLowerCase();
+  if (executable !== "cloudflared" && executable !== "cloudflared.exe") return false;
+  const args = argv.slice(1);
+  const localUrl = `http://127.0.0.1:${port}`;
+  const legacy = args.length === 3
+    && args[0] === "tunnel"
+    && args[1] === "--url"
+    && args[2] === localUrl;
+  const http2 = args.length === 5
+    && args[0] === "tunnel"
+    && args[1] === "--protocol"
+    && args[2] === "http2"
+    && args[3] === "--url"
+    && args[4] === localUrl;
+  return legacy || http2;
 }
 
 function quickTunnelCommandLine(argv: string[]): string {
@@ -1067,7 +1082,7 @@ export async function restartQuickTunnel(localPort: number, timeoutMs = 30_000):
   const logPath = `${MCPX_TUNNEL_PID_FILE()}.log`;
   let logFd: number | undefined;
   try { logFd = openSync(logPath, "w"); } catch { /* no capture — URL parse will time out */ }
-  const child = spawn(binary, ["tunnel", "--url", `http://127.0.0.1:${localPort}`], {
+  const child = spawn(binary, quickTunnelArgs(localPort), {
     detached: !isShim,
     stdio: ["ignore", logFd ?? "ignore", logFd ?? "ignore"],
     shell: isShim,

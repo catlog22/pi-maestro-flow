@@ -3,7 +3,7 @@ import { chmod, mkdtemp, readFile, rm, writeFile, mkdir } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ensureMcpxWorkspace, registerMcpxWorkspacePermanent, removeMcpxWorkspace, startWorkspaceLease, stopWorkspaceLease, _resetMcpxBridgeState, isMcpxConfigured, readTunnelState, readOpsPassword, readMcpxBearerToken, probeTunnelHealth, detectMcpxForPmf, removeWorkspaceByPath, readDelegatedTasks, isQuickTunnelCommandLine, isValidTunnelPort, setQuickTunnelDiscoveryForTest, readMcpxConfigView, writeMcpxConfigChanges } from "../src/mcpx-bridge.ts";
+import { ensureMcpxWorkspace, registerMcpxWorkspacePermanent, removeMcpxWorkspace, startWorkspaceLease, stopWorkspaceLease, _resetMcpxBridgeState, isMcpxConfigured, readTunnelState, readOpsPassword, readMcpxBearerToken, probeTunnelHealth, detectMcpxForPmf, removeWorkspaceByPath, readDelegatedTasks, isQuickTunnelCommandLine, isValidTunnelPort, setQuickTunnelDiscoveryForTest, readMcpxConfigView, writeMcpxConfigChanges, quickTunnelArgs } from "../src/mcpx-bridge.ts";
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -523,12 +523,15 @@ test("readTunnelState alive matches the real process table (tasklist CSV fix)", 
 });
 
 test("Quick Tunnel matching requires the exact local URL command", () => {
-  assert.equal(isQuickTunnelCommandLine("cloudflared tunnel --url http://127.0.0.1:19090", 19090), true);
-  assert.equal(isQuickTunnelCommandLine('"C:\\\\Program Files\\\\cloudflared\\\\cloudflared.exe" tunnel --url http://127.0.0.1:19090', 19090), true);
+  assert.deepEqual(quickTunnelArgs(19090), ["tunnel", "--protocol", "http2", "--url", "http://127.0.0.1:19090"]);
+  assert.equal(isQuickTunnelCommandLine("cloudflared tunnel --protocol http2 --url http://127.0.0.1:19090", 19090), true);
+  assert.equal(isQuickTunnelCommandLine('"C:\\\\Program Files\\\\cloudflared\\\\cloudflared.exe" tunnel --protocol http2 --url http://127.0.0.1:19090', 19090), true);
+  assert.equal(isQuickTunnelCommandLine("cloudflared tunnel --url http://127.0.0.1:19090", 19090), true, "legacy quick tunnels remain discoverable for cleanup");
   assert.equal(isQuickTunnelCommandLine("cloudflared tunnel run named-tunnel", 19090), false);
-  assert.equal(isQuickTunnelCommandLine("cloudflared tunnel --url http://127.0.0.1:19091", 19090), false);
-  assert.equal(isQuickTunnelCommandLine("cloudflared tunnel --url http://localhost:19090", 19090), false);
-  assert.equal(isQuickTunnelCommandLine("cloudflared tunnel --url http://127.0.0.1:19090 --no-autoupdate", 19090), false);
+  assert.equal(isQuickTunnelCommandLine("cloudflared tunnel --protocol http2 --url http://127.0.0.1:19091", 19090), false);
+  assert.equal(isQuickTunnelCommandLine("cloudflared tunnel --protocol quic --url http://127.0.0.1:19090", 19090), false);
+  assert.equal(isQuickTunnelCommandLine("cloudflared tunnel --protocol http2 --url http://localhost:19090", 19090), false);
+  assert.equal(isQuickTunnelCommandLine("cloudflared tunnel --protocol http2 --url http://127.0.0.1:19090 --no-autoupdate", 19090), false);
 });
 
 test("Quick Tunnel port validation covers TCP bounds", () => {

@@ -20,7 +20,7 @@ import { existsSync, readFileSync, writeFileSync, renameSync, rmSync } from "nod
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Key, type Component, type Focusable, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
-import { locateMcpx, discoverQuickTunnelProcesses, isProcessOwnedBy, isValidTunnelPort, killProcessWithEscalation } from "../mcpx-bridge.ts";
+import { locateMcpx, discoverQuickTunnelProcesses, isProcessOwnedBy, isValidTunnelPort, killProcessWithEscalation, quickTunnelArgs } from "../mcpx-bridge.ts";
 
 export interface McpxWizardParams {
   cwd: string;
@@ -837,7 +837,7 @@ export class McpxWizardOverlay implements Component, Focusable {
     this.params.requestRender();
     try {
       const isShim = process.platform === "win32" && /\.(cmd|bat)$/i.test(resolved);
-      const child = spawn(resolved, ["tunnel", "--url", `http://127.0.0.1:${port}`], {
+      const child = spawn(resolved, quickTunnelArgs(port), {
         detached: !isShim,
         stdio: ["ignore", "pipe", "pipe"],
         shell: isShim,
