@@ -942,9 +942,9 @@ export async function runSingleAttempt(
      * where the turn was already interrupted (acknowledged abort) or the
      * child is gone, so the original work cannot continue either way.
      */
-    const failInterruptingSteer = (reason: string): void => {
-      if (!pendingInterruptingSteer || state.terminal || state.turnLifecycleSettled) return;
-      clearInterruptingSteer();
+    const failInterrupt = (reason: string): void => {
+      if (!pendingInterrupt || state.terminal || state.turnLifecycleSettled) return;
+      clearInterrupt();
       const diagnostic =
         `Failed to interrupt and steer teammate (agent=${params.agent}, correlationId=${correlationId}): ${reason}`;
       state.runtimeFailure = diagnostic;
@@ -961,12 +961,12 @@ export async function runSingleAttempt(
      * Requeue the correction as a non-interrupting follow_up, surface the
      * control error in the transcript and progress, and let the task run on.
      */
-    const degradeInterruptingSteerToFollowUp = (reason: string): void => {
-      if (!pendingInterruptingSteer || state.terminal || state.turnLifecycleSettled) return;
-      const pending = clearInterruptingSteer();
+    const degradeInterruptToFollowUp = (reason: string): void => {
+      if (!pendingInterrupt || state.terminal || state.turnLifecycleSettled) return;
+      const pending = clearInterrupt();
       if (!pending) return;
       const diagnostic =
-        `Steer degraded to follow_up (agent=${params.agent}, correlationId=${correlationId}): ${reason}. `
+        `Interrupt degraded to follow_up (agent=${params.agent}, correlationId=${correlationId}): ${reason}. `
         + "The turn was not interrupted; the correction message was queued and the task continues.";
       appendBoundedTranscriptMessage(messages, { role: "system", content: diagnostic });
       progress.lastMessage = diagnostic;
@@ -981,7 +981,7 @@ export async function runSingleAttempt(
         pending.provenance,
       )) {
         const undelivered =
-          `Steer follow_up could not be delivered (agent=${params.agent}, correlationId=${correlationId}): `
+          `Interrupt follow_up could not be delivered (agent=${params.agent}, correlationId=${correlationId}): `
           + "the correction message was dropped; the task continues.";
         appendBoundedTranscriptMessage(messages, { role: "system", content: undelivered });
         progress.lastMessage = undelivered;
@@ -993,20 +993,20 @@ export async function runSingleAttempt(
       if (steerSettlementSwallowed) settleAgentSession();
     };
 
-    const armInterruptingSteerTimeout = (): void => {
+    const armInterruptTimeout = (): void => {
       if (timers.interruptingSteer) clearTimeout(timers.interruptingSteer);
-      if (!pendingInterruptingSteer) {
+      if (!pendingInterrupt) {
         timers.interruptingSteer = undefined;
         return;
       }
       timers.interruptingSteer = setTimeout(() => {
-        const phase = pendingInterruptingSteer?.phase;
+        const phase = pendingInterrupt?.phase;
         if (phase === "prompting") {
-          failInterruptingSteer(
+          failInterrupt(
             `Pi did not start the correction prompt within ${interruptingSteerTimeoutMs}ms`,
           );
         } else {
-          degradeInterruptingSteerToFollowUp(
+          degradeInterruptToFollowUp(
             `Pi did not acknowledge the turn abort within ${interruptingSteerTimeoutMs}ms`,
           );
         }
@@ -1014,15 +1014,15 @@ export async function runSingleAttempt(
       timers.interruptingSteer.unref?.();
     };
 
-    const requestInterruptingSteer = (
+    const requestInterrupt = (
       message: string,
       token?: LeaseToken,
       provenance?: MessageProvenanceV1,
     ): boolean => {
-      if (!child.stdin || pendingInterruptingSteer || state.modelSwitch || state.terminal || state.turnLifecycleSettled) return false;
+      if (!child.stdin || pendingInterrupt || state.modelSwitch || state.terminal || state.turnLifecycleSettled) return false;
       const nonce = randomUUID();
       steerSettlementSwallowed = false;
-      pendingInterruptingSteer = {
+      pendingInterrupt = {
         abortRequestId: `teammate-steer-abort-${nonce}`,
         promptRequestId: `teammate-steer-prompt-${nonce}`,
         message,
@@ -1031,22 +1031,22 @@ export async function runSingleAttempt(
         phase: "aborting",
       };
       const sent = writeChildStdinLine(child.stdin, JSON.stringify({
-        id: pendingInterruptingSteer.abortRequestId,
+        id: pendingInterrupt.abortRequestId,
         type: "abort",
       }));
       if (!sent) {
-        pendingInterruptingSteer = undefined;
+        pendingInterrupt = undefined;
         return false;
       }
       progress.phase = "continuing";
       progress.resultReadyAt = undefined;
       options.onProgress?.(progress);
-      armInterruptingSteerTimeout();
+      armInterruptTimeout();
       return true;
     };
 
     if (child.stdin) {
-      interruptingSteerHandlers.set(child.stdin, requestInterruptingSteer);
+      interruptHandlers.set(child.stdin, requestInterrupt);
       options.onChildSpawned?.(child.stdin, (message) => {
         return sendChildIpcMessage(child, message);
       }, sessionDir, correlationId, options.runtimeGeneration);
@@ -1214,7 +1214,7 @@ export async function runSingleAttempt(
     const lifecycleDeadlineCallback = (): void => {
       timers.resultReadyGrace = undefined;
       lifecycleDeadlineActive = false;
-      if (state.terminal || state.turnLifecycleSettled || pendingInterruptingSteer) return;
+      if (state.terminal || state.turnLifecycleSettled || pendingInterrupt) return;
       appendBoundedTranscriptMessage(messages, {
         role: "system",
         content:
@@ -1227,24 +1227,24 @@ export async function runSingleAttempt(
       completeTurn(readStructuredOutput(true), true, 0, "terminated");
     };
     function armLifecycleConfirmationDeadline(): void {
-      if (state.terminal || state.turnLifecycleSettled || pendingInterruptingSteer || timers.resultReadyGrace) return;
+      if (state.terminal || state.turnLifecycleSettled || pendingInterrupt || timers.resultReadyGrace) return;
       lifecycleDeadlineActive = true;
       timers.resultReadyGrace = setTimeout(lifecycleDeadlineCallback, lifecycleDeadlineMs());
       timers.resultReadyGrace.unref?.();
     }
     /** Reset the lifecycle deadline window on observed child activity. */
     function pokeLifecycleDeadline(): void {
-      if (!lifecycleDeadlineActive || state.terminal || state.turnLifecycleSettled || pendingInterruptingSteer) return;
+      if (!lifecycleDeadlineActive || state.terminal || state.turnLifecycleSettled || pendingInterrupt) return;
       if (timers.resultReadyGrace) clearTimeout(timers.resultReadyGrace);
       timers.resultReadyGrace = setTimeout(lifecycleDeadlineCallback, lifecycleDeadlineMs());
       timers.resultReadyGrace.unref?.();
     }
 
     function armResultReadyGrace(): void {
-      if (pendingInterruptingSteer || timers.resultReadyGrace) return;
+      if (pendingInterrupt || timers.resultReadyGrace) return;
       timers.resultReadyGrace = setTimeout(() => {
         timers.resultReadyGrace = undefined;
-        if (state.terminal || state.turnLifecycleSettled || pendingInterruptingSteer) return;
+        if (state.terminal || state.turnLifecycleSettled || pendingInterrupt) return;
         // The result is already consumable; settle with whatever structured
         // output was captured instead of blocking on a missing agent_settled/close.
         const structuredOutput = readStructuredOutput(true);
@@ -1341,14 +1341,14 @@ export async function runSingleAttempt(
     }
 
     function armOutputLimitRecoveryDeadline(): void {
-      if (state.terminal || state.turnLifecycleSettled || pendingInterruptingSteer || timers.outputLimitRecovery) return;
+      if (state.terminal || state.turnLifecycleSettled || pendingInterrupt || timers.outputLimitRecovery) return;
       const deadlineMs = options.outputLimitRecoveryTimeoutMs ?? OUTPUT_LIMIT_RECOVERY_TIMEOUT_MS;
       timers.outputLimitRecovery = setTimeout(() => {
         timers.outputLimitRecovery = undefined;
         if (
           state.terminal
           || state.turnLifecycleSettled
-          || pendingInterruptingSteer
+          || pendingInterrupt
           || !state.outputLimitRecoveryPending
         ) return;
         state.outputLimitRecoveryPending = false;
@@ -1382,7 +1382,7 @@ export async function runSingleAttempt(
         || !wakeable
         || state.terminal
         || state.turnLifecycleSettled
-        || pendingInterruptingSteer
+        || pendingInterrupt
         || structuredOutputRecoveryActive
         || state.runtimeFailure
         // An invalid submission already failed the documented reject-and-correct
@@ -1465,7 +1465,7 @@ export async function runSingleAttempt(
     function recordRuntimeEventError(event: JsonLineEvent, phase: string): void {
       const error = extractPiEventError(event);
       if (!error) return;
-      if (pendingInterruptingSteer && /\babort(?:ed)?\b/i.test(error)) return;
+      if (pendingInterrupt && /\babort(?:ed)?\b/i.test(error)) return;
       // A recurring runtime error that survived a turn boundary (runtimeFailure
       // was cleared by onTurnBoundary but the error text persists in
       // reportedRuntimeErrors across the settled turn) must re-set the failure —
@@ -1511,11 +1511,11 @@ export async function runSingleAttempt(
 
     /** A new agent loop starts: the previous turn's settlement no longer applies. */
     function onTurnBoundary(event: JsonLineEvent): void {
-      if (pendingInterruptingSteer?.phase === "aborting" && pendingInterruptingSteer.turnSettledDuringAbort) {
-        degradeInterruptingSteerToFollowUp("turn advanced before abort was acknowledged");
+      if (pendingInterrupt?.phase === "aborting" && pendingInterrupt.turnSettledDuringAbort) {
+        degradeInterruptToFollowUp("turn advanced before abort was acknowledged");
       }
-      if (pendingInterruptingSteer?.phase === "prompting") {
-        pendingInterruptingSteer = undefined;
+      if (pendingInterrupt?.phase === "prompting") {
+        pendingInterrupt = undefined;
         if (timers.interruptingSteer) {
           clearTimeout(timers.interruptingSteer);
           timers.interruptingSteer = undefined;
@@ -1786,7 +1786,7 @@ export async function runSingleAttempt(
         lastTool.status = "completed";
       }
       syncToolHeartbeat();
-      if (pendingInterruptingSteer) {
+      if (pendingInterrupt) {
         state.pendingStructuredOutput = undefined;
         progress.phase = "continuing";
         progress.resultReadyAt = undefined;
@@ -1837,7 +1837,7 @@ export async function runSingleAttempt(
      * close, error or the armed deadline may converge the lifecycle.
      */
     function onTurnEnd(event: JsonLineEvent): void {
-      if (pendingInterruptingSteer) {
+      if (pendingInterrupt) {
         progress.phase = "continuing";
         progress.resultReadyAt = undefined;
         options.onProgress?.(progress);
@@ -2018,7 +2018,7 @@ export async function runSingleAttempt(
         && state.runtimeFailure !== undefined
         && !state.terminal
         && !state.modelSwitch
-        && !pendingInterruptingSteer
+        && !pendingInterrupt
         && child.stdin !== null
         && child.stdin.writable
         && options.onModelFailover !== undefined
@@ -2040,7 +2040,7 @@ export async function runSingleAttempt(
      */
     function onAgentEnd(event: JsonLineEvent): void {
       recordRuntimeEventError(event, "agent_end");
-      if (pendingInterruptingSteer) {
+      if (pendingInterrupt) {
         // Legacy streams without willRetry settle here; remember the boundary
         // so a degraded steer can converge the turn it would have settled.
         if (typeof event.willRetry !== "boolean") steerSettlementSwallowed = true;
@@ -2088,7 +2088,7 @@ export async function runSingleAttempt(
     /** Pi's authoritative AgentSession idle boundary. */
     function onAgentSettled(): void {
       state.settlementCapability = "agent_settled";
-      if (pendingInterruptingSteer) {
+      if (pendingInterrupt) {
         markSteerTurnSettledDuringAbort();
         steerSettlementSwallowed = true;
         progress.status = "running";
@@ -2232,17 +2232,17 @@ export async function runSingleAttempt(
         settleAsFailed();
         return;
       }
-      const pending = pendingInterruptingSteer;
+      const pending = pendingInterrupt;
       if (!pending || typeof event.id !== "string") return;
       if (pending.phase === "aborting" && event.id === pending.abortRequestId) {
         if (event.success !== true || event.command !== "abort") {
           // A rejected abort leaves the turn intact; never fail the task for
           // an interruption Pi declined to perform.
-          degradeInterruptingSteerToFollowUp("Pi rejected the turn abort command");
+          degradeInterruptToFollowUp("Pi rejected the turn abort command");
           return;
         }
         pending.phase = "prompting";
-        armInterruptingSteerTimeout();
+        armInterruptTimeout();
         const leasedMessage = wrapLeasedMessage(pending.message, pending.token);
         if (!child.stdin || !writeTransportModelInput(
           child.stdin,
@@ -2256,12 +2256,12 @@ export async function runSingleAttempt(
           "steer",
           pending.provenance,
         )) {
-          failInterruptingSteer("the correction prompt could not be written");
+          failInterrupt("the correction prompt could not be written");
         }
         return;
       }
       if (pending.phase === "prompting" && event.id === pending.promptRequestId && event.success !== true) {
-        failInterruptingSteer("Pi rejected the correction prompt");
+        failInterrupt("Pi rejected the correction prompt");
       }
     }
 
@@ -2342,7 +2342,7 @@ export async function runSingleAttempt(
       releaseRetryPersistenceGuard();
       if (child.stdin) {
         transportSidecars.delete(child.stdin);
-        interruptingSteerHandlers.delete(child.stdin);
+        interruptHandlers.delete(child.stdin);
       }
       clearAllTimers();
       termination.cleanup();
@@ -2364,9 +2364,9 @@ export async function runSingleAttempt(
         return;
       }
 
-      if (pendingInterruptingSteer) {
-        const phase = pendingInterruptingSteer.phase;
-        pendingInterruptingSteer = undefined;
+      if (pendingInterrupt) {
+        const phase = pendingInterrupt.phase;
+        pendingInterrupt = undefined;
         const diagnostic =
           `Failed to interrupt and steer teammate (agent=${params.agent}, correlationId=${correlationId}): `
           + (phase === "prompting"
@@ -2510,7 +2510,7 @@ export async function runSingleAttempt(
       releaseRetryPersistenceGuard();
       if (child.stdin) {
         transportSidecars.delete(child.stdin);
-        interruptingSteerHandlers.delete(child.stdin);
+        interruptHandlers.delete(child.stdin);
       }
       clearAllTimers();
       unbindTerminationSignal();
@@ -2573,9 +2573,12 @@ export async function runSingleAttempt(
   });
 }
 
-export type RpcMessageMode = "prompt" | "steer" | "follow_up" | "abort";
+export type RpcMessageMode = "prompt" | "steer" | "follow_up" | "abort" | "interrupt";
 
-type InterruptingSteerHandler = (
+// `interrupt` is the soft-interrupt transaction (abort + prompt). `steer` is
+// the native Pi steer queue (no interruption, injected at the turn boundary).
+// The handler below owns the interrupt path only.
+type InterruptHandler = (
   message: string,
   token?: LeaseToken,
   provenance?: MessageProvenanceV1,
@@ -2596,7 +2599,7 @@ interface TransportSidecar {
 }
 
 const guardedChildStdinStreams = new WeakSet<Writable>();
-const interruptingSteerHandlers = new WeakMap<Writable, InterruptingSteerHandler>();
+const interruptHandlers = new WeakMap<Writable, InterruptHandler>();
 const transportSidecars = new WeakMap<Writable, TransportSidecar>();
 
 function guardChildStdin(stdin: Writable): void {
@@ -2663,9 +2666,37 @@ export function sendRpcMessage(
       provenance,
     );
   }
+  // `steer` is the native Pi steer queue: it is never an interruption. It is
+  // pushed onto Pi's steerQueue and injected at the turn boundary, so multiple
+  // steers can be queued (and, with steeringMode "all", co-injected in one
+  // assistant turn). It does not touch the interrupt transaction state.
   if (mode === "steer") {
-    const interrupt = interruptingSteerHandlers.get(stdin);
+    return writeTransportModelInput(
+      stdin,
+      { type: "steer", message: leasedMessage },
+      leasedMessage,
+      message,
+      "steer",
+      provenance,
+    );
+  }
+  // `interrupt` is the soft-interrupt transaction: abort the active turn, then
+  // inject the message as the replacement prompt. It is a single in-flight
+  // transaction per subprocess; a second interrupt while one is pending is
+  // rejected (returns false) so the caller can fall back to steer/follow_up.
+  if (mode === "interrupt") {
+    const interrupt = interruptHandlers.get(stdin);
     if (interrupt) return interrupt(message, token, provenance);
+    // No registered handler (e.g. child stdin not wired): degrade to a native
+    // steer so the message is still queued rather than dropped.
+    return writeTransportModelInput(
+      stdin,
+      { type: "steer", message: leasedMessage },
+      leasedMessage,
+      message,
+      "steer",
+      provenance,
+    );
   }
   return writeTransportModelInput(
     stdin,

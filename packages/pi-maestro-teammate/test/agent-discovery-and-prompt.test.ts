@@ -674,7 +674,8 @@ test("teammate send guidance requires meaningful new traffic and explains queued
   assert.match(combined, /routine acknowledgements? or status pings/i);
   assert.match(combined, /never resend|resends of queued messages are prohibited/i);
   assert.match(combined, /queued or accepted.*not.*consum/i);
-  assert.match(combined, /steer.*cancellation.*active agent turn/i);
+  assert.match(combined, /steer.*does NOT interrupt|steer.*queued.*non-interrupt/i);
+  assert.match(combined, /interrupt.*cancellation.*active agent turn/i);
   assert.match(combined, /follow_up.*AgentSession would otherwise stop/i);
   assert.match(combined, /tool returning is not a delivery boundary/i);
   assert.match(combined, /model response.*tool calls.*continuation.*native retr/i);

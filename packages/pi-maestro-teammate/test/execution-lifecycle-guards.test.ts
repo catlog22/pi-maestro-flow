@@ -66,7 +66,7 @@ const resultReadyTurnEnd = (text: string): Record<string, unknown> => ({
 // REL-4 — a published result must still confirm its lifecycle
 // ---------------------------------------------------------------------------
 
-test("interrupting steer waits for Pi abort acknowledgement and restarts the same session", async () => {
+test("interrupt waits for Pi abort acknowledgement and restarts the same session", async () => {
   let handle: FakeChildHandle | undefined;
   const commands: Array<Record<string, unknown>> = [];
   let stdinBuffer = "";
@@ -143,7 +143,7 @@ test("interrupting steer waits for Pi abort acknowledgement and restarts the sam
       onProgress: (progress) => {
         if (steerSent || progress.phase !== "tool-execution" || !stdin) return;
         steerSent = true;
-        assert.equal(sendRpcMessage(stdin, "replace the current work", "steer"), true);
+        assert.equal(sendRpcMessage(stdin, "replace the current work", "interrupt"), true);
       },
     },
   );
@@ -158,7 +158,7 @@ test("interrupting steer waits for Pi abort acknowledgement and restarts the sam
   assert.equal(commands[2].message, "replace the current work");
 });
 
-test("late structured output from the aborted turn cannot settle an accepted steer", async () => {
+test("late structured output from the aborted turn cannot settle an accepted interrupt", async () => {
   let handle: FakeChildHandle | undefined;
   const commandTypes: string[] = [];
   let stdinBuffer = "";
@@ -257,7 +257,7 @@ test("late structured output from the aborted turn cannot settle an accepted ste
       onProgress: (progress) => {
         if (steerSent || progress.phase !== "tool-execution" || !stdin) return;
         steerSent = true;
-        assert.equal(sendRpcMessage(stdin, "replace the structured result", "steer"), true);
+        assert.equal(sendRpcMessage(stdin, "replace the structured result", "interrupt"), true);
       },
     },
   );
@@ -268,7 +268,7 @@ test("late structured output from the aborted turn cannot settle an accepted ste
   assert.deepEqual(commandTypes, ["prompt", "abort", "prompt"]);
 });
 
-test("managed steer fails when the child exits before the correction starts", async () => {
+test("managed interrupt fails when the child exits before the correction starts", async () => {
   let handle: FakeChildHandle | undefined;
   const commandTypes: string[] = [];
   let stdinBuffer = "";
@@ -319,7 +319,7 @@ test("managed steer fails when the child exits before the correction starts", as
       onProgress: (progress) => {
         if (steerSent || progress.phase !== "tool-execution" || !stdin) return;
         steerSent = true;
-        assert.equal(sendRpcMessage(stdin, "replace the current work", "steer"), true);
+        assert.equal(sendRpcMessage(stdin, "replace the current work", "interrupt"), true);
       },
     },
   );
@@ -330,7 +330,7 @@ test("managed steer fails when the child exits before the correction starts", as
   assert.deepEqual(commandTypes, ["prompt", "abort", "prompt"]);
 });
 
-test("unacknowledged steer abort degrades to follow_up and the task continues", async () => {
+test("unacknowledged interrupt degrades to follow_up and the task continues", async () => {
   let handle: FakeChildHandle | undefined;
   const commands: Array<Record<string, unknown>> = [];
   let stdinBuffer = "";
@@ -391,7 +391,7 @@ test("unacknowledged steer abort degrades to follow_up and the task continues", 
         onProgress: (progress) => {
           if (steerSent || progress.phase !== "tool-execution" || !stdin) return;
           steerSent = true;
-          assert.equal(sendRpcMessage(stdin, "scope correction", "steer"), true);
+          assert.equal(sendRpcMessage(stdin, "scope correction", "interrupt"), true);
         },
       },
     );
@@ -406,12 +406,12 @@ test("unacknowledged steer abort degrades to follow_up and the task continues", 
   assert.equal(commands[2].message, "scope correction");
   assert.equal(result.messages.at(-1)?.content, "TASK_CONTINUED");
   assert.ok(
-    result.messages.some((entry) => entry.role === "system" && /Steer degraded to follow_up/.test(entry.content)),
+    result.messages.some((entry) => entry.role === "system" && /Interrupt degraded to follow_up/.test(entry.content)),
     "the control error must stay visible in the transcript",
   );
 });
 
-test("rejected steer abort degrades to follow_up instead of failing the task", async () => {
+test("rejected interrupt degrades to follow_up instead of failing the task", async () => {
   let handle: FakeChildHandle | undefined;
   const commands: Array<Record<string, unknown>> = [];
   let stdinBuffer = "";
@@ -478,7 +478,7 @@ test("rejected steer abort degrades to follow_up instead of failing the task", a
         onProgress: (progress) => {
           if (steerSent || progress.phase !== "tool-execution" || !stdin) return;
           steerSent = true;
-          assert.equal(sendRpcMessage(stdin, "scope correction", "steer"), true);
+          assert.equal(sendRpcMessage(stdin, "scope correction", "interrupt"), true);
         },
       },
     );
@@ -498,7 +498,7 @@ test("rejected steer abort degrades to follow_up instead of failing the task", a
   );
 });
 
-test("steer degrades when a new turn starts before abort acknowledgement", async () => {
+test("interrupt degrades when a new turn starts before abort acknowledgement", async () => {
   let handle: FakeChildHandle | undefined;
   const commands: Array<Record<string, unknown>> = [];
   let stdinBuffer = "";
@@ -564,7 +564,7 @@ test("steer degrades when a new turn starts before abort acknowledgement", async
       onProgress: (progress) => {
         if (steerSent || progress.phase !== "tool-execution" || !stdin) return;
         steerSent = true;
-        assert.equal(sendRpcMessage(stdin, "scope correction", "steer"), true);
+        assert.equal(sendRpcMessage(stdin, "scope correction", "interrupt"), true);
       },
     },
   );
@@ -581,7 +581,7 @@ test("steer degrades when a new turn starts before abort acknowledgement", async
   );
 });
 
-test("swallowed settlement during an unacknowledged steer converges on degrade", async () => {
+test("swallowed settlement during an unacknowledged interrupt converges on degrade", async () => {
   let handle: FakeChildHandle | undefined;
   const commands: Array<Record<string, unknown>> = [];
   let stdinBuffer = "";
@@ -641,7 +641,7 @@ test("swallowed settlement during an unacknowledged steer converges on degrade",
         onProgress: (progress) => {
           if (steerSent || progress.phase !== "tool-execution" || !stdin) return;
           steerSent = true;
-          assert.equal(sendRpcMessage(stdin, "scope correction", "steer"), true);
+          assert.equal(sendRpcMessage(stdin, "scope correction", "interrupt"), true);
         },
       },
     );
@@ -655,7 +655,7 @@ test("swallowed settlement during an unacknowledged steer converges on degrade",
   assert.deepEqual(commands.map((command) => command.type), ["prompt", "abort", "follow_up"]);
   assert.ok(result.messages.some((entry) => entry.content === "NATURAL_COMPLETION"));
   assert.ok(
-    result.messages.some((entry) => entry.role === "system" && /Steer degraded to follow_up/.test(entry.content)),
+    result.messages.some((entry) => entry.role === "system" && /Interrupt degraded to follow_up/.test(entry.content)),
   );
 });
 
