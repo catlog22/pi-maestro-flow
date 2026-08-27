@@ -111,7 +111,7 @@ test("the v1 sessions API is dependency-free", () => {
   assert.deepEqual([...externals], []);
   assert.deepEqual(
     [...modules].map((file) => path.relative(SRC_DIR, file).replaceAll(path.sep, "/")).sort(),
-    ["public/v1/sessions.ts", "sessions/session-core.ts"],
+    ["public/v1/sessions.ts", "sessions/session-core.ts", "shared/types.ts"],
   );
 });
 

@@ -220,13 +220,18 @@ test("P4: root and proxy graphs register every task before emitting started even
   // Both registration loops must finish the full graph before any synchronous
   // TEAMMATE_STARTED_EVENT emit, so a listener re-entering admission sees the
   // complete live tally and cannot pass the budget against a partial count.
+  // The registration loop now refreshes each child's runtime projection
+  // (refreshAgentRuntimeProjection) between activeRuns.set and bindAgentName —
+  // a projection-state update, not a started event. The P4 invariant (whole
+  // graph registered before any started emit) is unchanged; allow that line.
   const rootRegister = source.match(
-    /if \(isMultiTask\) \{\s*\n\s*normalizedTasks\.forEach\(\(task, index\) => \{\s*\n[\s\S]*?state\.activeRuns\.set\(childId, childAgent\);\s*\n\s*if \(task\.name\) bindAgentName\(state, task\.name, childId\);\s*\n\s*\}\);\s*\n\s*\/\/ Register the whole graph before emitting any started event/,
+    /if \(isMultiTask\) \{\s*\n\s*normalizedTasks\.forEach\(\(task, index\) => \{\s*\n[\s\S]*?state\.activeRuns\.set\(childId, childAgent\);\s*\n\s*refreshAgentRuntimeProjection\(childAgent\);\s*\n\s*if \(task\.name\) bindAgentName\(state, task\.name, childId\);\s*\n\s*\}\);\s*\n\s*\/\/ Register the whole graph before emitting any started event/,
   );
   assert.ok(rootRegister, "root graph registration must be separated from started-event emission");
 
+  // Same projection-refresh insertion on the proxy path (refreshProxyRuntimeProjection).
   const proxyRegister = source.match(
-    /normalizedTasks\?\.forEach\(\(task, index\) => \{\s*\n[\s\S]*?state\.activeRuns\.set\(childId, childAgent\);\s*\n\s*if \(task\.name\) bindAgentName\(state, task\.name, childId\);\s*\n\s*\}\);\s*\n\s*\/\/ Same P4 ordering/,
+    /normalizedTasks\?\.forEach\(\(task, index\) => \{\s*\n[\s\S]*?state\.activeRuns\.set\(childId, childAgent\);\s*\n\s*refreshProxyRuntimeProjection\(childAgent\);\s*\n\s*if \(task\.name\) bindAgentName\(state, task\.name, childId\);\s*\n\s*\}\);\s*\n\s*\/\/ Same P4 ordering/,
   );
   assert.ok(proxyRegister, "proxy graph registration must be separated from started-event emission");
 

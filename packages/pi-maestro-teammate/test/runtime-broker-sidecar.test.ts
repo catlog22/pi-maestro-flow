@@ -584,7 +584,10 @@ test("connectOrStart preserves each concurrent caller's timeout", { timeout: 15_
   } finally {
     await client?.close();
     await stopDetachedBroker(stateDirectory);
-    fs.rmSync(stateDirectory, { recursive: true, force: true });
+    // The detached broker may still release broker.sqlite on Windows when this
+    // runs under --test-concurrency; rmSync's built-in maxRetries/retryDelay
+    // tolerates the transient EBUSY/EPERM the way other suite cleanups do.
+    fs.rmSync(stateDirectory, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
   }
 });
 

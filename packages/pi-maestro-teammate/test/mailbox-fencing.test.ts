@@ -606,13 +606,27 @@ test("MailboxHost schedules periodic GC that sweeps applied receipts", async () 
   });
   assert.ok(result.result.ok);
   const messageId = (result.result as { messageId: string }).messageId;
-  await new Promise((resolve) => setTimeout(resolve, 150));
+  // Wait deterministically for the consumer to claim→accept→apply the
+  // message. A fixed sleep raced the async dispatch chain under load; poll
+  // for the applied state instead so the GC assertion below tests the sweep,
+  // not consumer timing.
+  const appliedDeadline = Date.now() + 2_000;
+  while (Date.now() < appliedDeadline) {
+    if (await host.service.store.readEnvelope("applied", messageId)) break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
   assert.ok(await host.service.store.readEnvelope("applied", messageId), "dispatched message is applied");
 
   // Advance the injected clock past the receipt retention; the next GC tick
   // must sweep the applied receipt.
   clock += TTL_RECEIPT_MS + 1000;
-  await new Promise((resolve) => setTimeout(resolve, 200));
+  // Poll for the GC sweep (gcIntervalMs=30) to clear the applied receipt
+  // after the clock advanced past TTL, instead of a fixed sleep.
+  const sweepDeadline = Date.now() + 2_000;
+  while (Date.now() < sweepDeadline) {
+    if (await host.service.store.readEnvelope("applied", messageId) === undefined) break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
   assert.equal(await host.service.store.readEnvelope("applied", messageId), undefined, "GC sweeps applied receipts");
 
   await host.stop();

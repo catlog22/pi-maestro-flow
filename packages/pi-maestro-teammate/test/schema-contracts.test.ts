@@ -99,10 +99,13 @@ test("teammate-send allows omitting message only for explicit abort", () => {
 });
 
 test("teammate-send accepts typed cross-session message kinds", () => {
-  for (const kind of ["coordination", "request", "status", "supervision"] as const) {
+  // "status" is a trusted host channel, not model-selectable, so it is not in the kind enum.
+  for (const kind of ["coordination", "request", "supervision"] as const) {
     assert.equal(Check(TeammateSendParams, { to: "owner:abc", message: "hi", kind }), true);
   }
-  assert.equal(Check(TeammateSendParams, { to: "owner:abc", message: "hi", kind: "instruction" }), false);
+  for (const kind of ["status", "instruction"] as const) {
+    assert.equal(Check(TeammateSendParams, { to: "owner:abc", message: "hi", kind }), false);
+  }
 });
 
 test("local teammate list schema excludes cross-window views", () => {

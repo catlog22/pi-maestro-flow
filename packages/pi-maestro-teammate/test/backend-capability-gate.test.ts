@@ -133,7 +133,15 @@ test("a single dispatch needing todos runs on a backend that binds them", async 
   const { result, started } = await dispatch("native", ["#12"]);
 
   assert.equal(result.exitCode, 0);
-  assert.deepEqual(started, ["work the queue"], "a capable backend was gated anyway");
+  // A capable (native todoBinding) backend now receives the untrusted todo
+  // context appended to the task prompt (appendTodoPromptContext), so the
+  // started task carries the <untrusted_todo_context> block after the base
+  // prompt. The gate still let it through; assert the task reached the backend
+  // with the todo context rather than the bare prompt.
+  assert.equal(started.length, 1, "a capable backend was gated anyway");
+  assert.ok(started[0].startsWith("work the queue"), "base prompt preserved before todo context");
+  assert.match(started[0], /<untrusted_todo_context>/);
+  assert.match(started[0], /"todoId":"12"/);
 });
 
 test("a single dispatch asking for no todos runs on a backend that cannot bind them", async () => {
@@ -180,7 +188,12 @@ test("a graph task needing todos runs on a registry backend that binds them", as
   });
 
   assert.equal(results[0].exitCode, 0);
-  assert.deepEqual(started, ["work the queue"], "a capable backend was gated anyway");
+  // Same todo-context injection as the single-dispatch path: a capable graph
+  // backend receives <untrusted_todo_context> appended to the task prompt.
+  assert.equal(started.length, 1, "a capable backend was gated anyway");
+  assert.ok(started[0].startsWith("work the queue"), "base prompt preserved before todo context");
+  assert.match(started[0], /<untrusted_todo_context>/);
+  assert.match(started[0], /"todoId":"12"/);
   assert.deepEqual(requests[0], { task: "work the queue", selector: undefined });
 });
 

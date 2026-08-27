@@ -400,6 +400,10 @@ test("tampered delegation records fail closed", async () => {
 test("delegate command wiring keeps fork, confirmation, additive injection, and rollback boundaries", async () => {
   const sourceText = await readFile(new URL("../src/extension/index.ts", import.meta.url), "utf8");
   const delegationText = await readFile(new URL("../src/extension/task-delegation.ts", import.meta.url), "utf8");
+  // The fork-arg wiring moved out of index.ts into buildManagedWindowPiArgs /
+  // buildPiArgs in execution-infra.ts (args.push("--fork", <file>)), so read that
+  // module to keep asserting the fork-session file reaches the spawn args.
+  const executionInfraText = await readFile(new URL("../src/runs/execution-infra.ts", import.meta.url), "utf8");
   const gitignore = await readFile(new URL("../../../.gitignore", import.meta.url), "utf8");
 
   assert.equal(sourceText.match(/pi\.registerCommand\("delegate"/g)?.length, 1);
@@ -417,10 +421,15 @@ test("delegate command wiring keeps fork, confirmation, additive injection, and 
   assert.match(sourceText, /ctx\.ui\.confirm\(/);
   assert.match(sourceText, /return confirmed \? document : undefined/);
   assert.match(sourceText, /if \(confirmedDocument === undefined\)[\s\S]*?dispatchDelegation\(record, confirmedDocument, ctx\)/);
-  assert.match(sourceText, /forkArgs = forkSessionFile \? \["--fork", forkSessionFile\] : \[\]/);
+  // Fork-arg wiring now lives in execution-infra.ts: buildManagedWindowPiArgs
+  // pushes "--fork" only when a forkSessionFile is present (the delegation
+  // path passes workerForkSessionFile through spawnManagedWindow → here).
+  assert.match(executionInfraText, /if \(options\.forkSessionFile\) args\.push\("--fork", options\.forkSessionFile\)/);
   assert.match(sourceText, /buildDelegationDelivery\(dispatching, confirmedDocument, replyTo\)/);
   assert.match(sourceText, /messageId: dispatchMessageId/);
-  assert.match(sourceText, /commandId: request\.messageId/);
+  // commandId now routes through workspaceProtocolCommandId(request.messageId)
+  // (workspace-protocol command id derivation) rather than the raw messageId.
+  assert.match(sourceText, /commandId: workspaceProtocolCommandId\(request\.messageId\)/);
   assert.match(sourceText, /publicationStage === "accepted"/);
   assert.match(sourceText, /status: "dispatching"[\s\S]*?dispatchMessageId/);
   assert.match(sourceText, /status: "delivery_unknown"/);

@@ -597,7 +597,9 @@ test("multi-task routing applies per phase while explicit defaults win", () => {
 
 test("nested teammate routing is deferred to the authoritative root proxy", () => {
   const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf8") + fs.readFileSync(new URL("../src/extension/teammate-helpers.ts", import.meta.url), "utf8") + fs.readFileSync(new URL("../src/extension/teammate-proxy.ts", import.meta.url), "utf8") + fs.readFileSync(new URL("../src/extension/teammate-core.ts", import.meta.url), "utf8");
-  assert.match(source, /execute\(_id: string, params: RunTeammateParams[\s\S]*?proxyCall<Details>\("teammate", params, signal\)/);
+  // The child proxy execute signature dropped the leading underscore on id
+  // and now passes id as a fourth proxyCall arg (root-session routing identity).
+  assert.match(source, /execute\(id: string, params: RunTeammateParams, signal: AbortSignal\)[\s\S]*?proxyCall<Details>\("teammate", params, signal, id\)/);
   assert.match(source, /const routedParams = applyModelRouting\([\s\S]*?effectiveModelCapabilities\.map[\s\S]*?normalizeTeammateParams\(routedParams\)/);
 });
 

@@ -2893,7 +2893,13 @@ test("retrying agents remain distinct from sleeping and expose retry metadata", 
 
 test("nested proxy preserves parentage, graph children, and explicit background semantics", () => {
   const source = fs.readFileSync(new URL("../src/extension/teammate-core.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-helpers.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-proxy.ts", import.meta.url), "utf-8");
-  assert.equal(source.match(/emitTeammateStarted\(pi, childAgent\)/g)?.length, 2);
+  // The root and proxy graph paths each emit exactly one started event per
+  // graph child. The root path now routes through the emitCurrentTeammateStarted
+  // wrapper (which folds in the root-session projection), while the proxy path
+  // calls emitTeammateStarted directly with the dispatch projection; both forms
+  // were refactored to carry projection metadata, so count the current forms.
+  assert.equal(source.match(/emitCurrentTeammateStarted\(childAgent\)/g)?.length, 1);
+  assert.equal(source.match(/emitTeammateStarted\(pi, childAgent, dispatchProjection \? \{ projection: dispatchProjection \} : \{\}\)/g)?.length, 1);
   // A graph task child names itself so its siblings stay distinguishable, and
   // that claim is honoured because it resolves inside the spawner's subtree.
   const graphState: TeammateState = {

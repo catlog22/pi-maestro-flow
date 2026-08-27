@@ -960,7 +960,7 @@ Proxy specialist prompt.
   }
 });
 
-test("controlled terminal child receives cross-window tool contracts", () => {
+test("controlled terminal child receives local tool contracts (cross-session send stays ungated)", () => {
   const tools = new Map<string, Record<string, unknown>>();
   const pi = new Proxy({
     events: { on: () => () => {}, emit() {} },
@@ -981,11 +981,19 @@ test("controlled terminal child receives cross-window tool contracts", () => {
   process.env.PI_TEAMMATE_DEPTH = "2";
   try {
     registerTeammateExtension(pi as unknown as ExtensionAPI);
+    // PI_TEAMMATE_CHILD=1 (without Monitor mode) intentionally registers the
+    // LOCAL tool descriptions: teammate-list/observe are local-only here, so
+    // the child sees the local contract rather than the cross-session windows /
+    // workspace-projection contract. teammate-send keeps its cross-session
+    // target contract because window targets are sender-address reachable.
     assert.match(String(tools.get("teammate-send")?.description), /cross-session target/);
-    assert.match(String(tools.get("teammate-list")?.description), /cross-session windows/);
-    assert.match(String(tools.get("observe")?.description), /kind="workspace"/);
+    assert.match(String(tools.get("teammate-list")?.description), /owned by this Pi process/);
+    assert.doesNotMatch(String(tools.get("teammate-list")?.description), /cross-session windows/);
+    assert.match(String(tools.get("observe")?.description), /local teammate and background Bash/);
+    assert.doesNotMatch(String(tools.get("observe")?.description), /kind="workspace"/);
     assert.match(String(tools.get("observe")?.description), /"diagnose": one-shot canonical runtime diagnosis/);
-    assert.match(String(tools.get("observe")?.promptGuidelines), /workspace projection does not add diagnosis/);
+    assert.match(String(tools.get("observe")?.promptGuidelines), /one-shot teammate runtime diagnosis/);
+    assert.doesNotMatch(String(tools.get("observe")?.promptGuidelines), /workspace projection/);
   } finally {
     if (previousChild === undefined) delete process.env.PI_TEAMMATE_CHILD;
     else process.env.PI_TEAMMATE_CHILD = previousChild;
