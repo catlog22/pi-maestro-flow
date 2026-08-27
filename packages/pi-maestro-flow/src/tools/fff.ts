@@ -13,6 +13,11 @@ const SCAN_TIMEOUT_MS = 15_000;
 // scan storm for another.
 const MAX_CACHED_FINDERS = 4;
 
+export interface RegisterFffOptions {
+  createFinder?: typeof FileFinder.create;
+  scanTimeoutMs?: number;
+}
+
 /**
  * Returns a human-readable reason when `dir` is a filesystem root or the user's
  * home directory. fff-node already refuses these at the native layer unless
@@ -50,13 +55,18 @@ const FffFindParams = Type.Object({
  * Adds FFF's native index only to the root Pi session. The tools stay separate
  * from Pi's built-ins, so existing grep/find calls remain backward compatible.
  */
-export function registerFff(pi: ExtensionAPI): void {
+export function registerFff(pi: ExtensionAPI, options: RegisterFffOptions = {}): void {
   const finders = new Map<string, FileFinderApi>();
+  const initializingFinders = new Map<string, FileFinderApi>();
   const failedCwds = new Set<string>();
   const initializing = new Map<string, Promise<FileFinderApi>>();
+  const createFinder = options.createFinder ?? FileFinder.create;
+  const scanTimeoutMs = options.scanTimeoutMs ?? SCAN_TIMEOUT_MS;
+  let lifecycleGeneration = 0;
 
   const ensureFinder = async (cwd: string): Promise<FileFinderApi> => {
     const key = resolve(cwd);
+    const generation = lifecycleGeneration;
     const denied = unsafeBasePathReason(key);
     if (denied) {
       throw new Error(`FFF does not index ${denied}; start Pi from a specific project directory or use the built-in find/grep tools`);
@@ -68,33 +78,51 @@ export function registerFff(pi: ExtensionAPI): void {
     if (cached && !cached.isDestroyed) return cached;
     const pending = initializing.get(key);
     if (pending) return pending;
-    const task = (async (): Promise<FileFinderApi> => {
-      const created = FileFinder.create({ basePath: key, aiMode: true });
+    let ownedFinder: FileFinderApi | undefined;
+    let task!: Promise<FileFinderApi>;
+    task = (async (): Promise<FileFinderApi> => {
+      const created = createFinder({ basePath: key, aiMode: true });
       if (!created.ok) {
         failedCwds.add(key);
         throw new Error(`FFF initialization failed: ${created.error}`);
       }
       const finder = created.value;
-      const scanned = await finder.waitForScan(SCAN_TIMEOUT_MS);
+      ownedFinder = finder;
+      initializingFinders.set(key, finder);
+      const scanned = await finder.waitForScan(scanTimeoutMs);
+      if (generation !== lifecycleGeneration || finder.isDestroyed) {
+        finder.destroy();
+        throw new Error("FFF initialization was cancelled because the session ended.");
+      }
       // waitForScan returns { ok: true, value: false } on timeout; destroying
       // the finder here stops the runaway background index of large trees.
       if (!scanned.ok || !scanned.value) {
         const reason = scanned.ok
-          ? `FFF initial scan timed out after ${SCAN_TIMEOUT_MS}ms`
+          ? `FFF initial scan timed out after ${scanTimeoutMs}ms`
           : `FFF initial scan failed: ${scanned.error}`;
         finder.destroy();
         failedCwds.add(key);
         throw new Error(reason);
       }
+      if (initializingFinders.get(key) === finder) initializingFinders.delete(key);
       finders.set(key, finder);
       evictOldestFinder(finders);
       return finder;
-    })().finally(() => { initializing.delete(key); });
+    })().finally(() => {
+      if (initializing.get(key) === task) initializing.delete(key);
+      if (ownedFinder && initializingFinders.get(key) === ownedFinder) {
+        initializingFinders.delete(key);
+      }
+    });
     initializing.set(key, task);
     return task;
   };
 
   pi.on("session_shutdown", () => {
+    lifecycleGeneration += 1;
+    for (const finder of initializingFinders.values()) finder.destroy();
+    initializingFinders.clear();
+    initializing.clear();
     for (const finder of finders.values()) finder.destroy();
     finders.clear();
     failedCwds.clear();
