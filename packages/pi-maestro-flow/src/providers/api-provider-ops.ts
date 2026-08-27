@@ -93,6 +93,7 @@ const OPS_CATALOGS = {
     "menu.reset": "Reset a Provider",
     "menu.export": "Export API configuration to a file",
     "menu.import": "Import API configuration from a file",
+    "provider.emptyGuide": "No manageable Provider connection yet. Create one via /api-manager configure (Add or edit a model) → add a model and enter a new Provider ID; it becomes manageable here after saving.",
     "export.empty": "No API Manager managed Provider is configured; nothing to export.",
     "export.done": "Exported {providers} Providers ({models} models)",
     "export.saved": "Export file: {path}",
@@ -136,6 +137,7 @@ const OPS_CATALOGS = {
     "menu.reset": "重置 Provider",
     "menu.export": "导出 API 配置到文件",
     "menu.import": "从文件导入 API 配置",
+    "provider.emptyGuide": "暂无可管理的 Provider 连接。请通过 /api-manager configure（新增或修改模型）→ 新增模型时输入新的 Provider ID 来创建连接，保存后即可在此管理。",
     "export.empty": "尚未配置 API Manager 管理的 Provider，无可导出内容。",
     "export.done": "已导出 {providers} 个 Provider（{models} 个模型）",
     "export.saved": "导出文件：{path}",
@@ -354,7 +356,7 @@ export async function listProviders(
       defaultsPath,
     );
   }
-  for (const id of managedProviderIdsSync(defaultsPath)) {
+  for (const id of managedProviderIdsSync(defaultsPath, modelsPath)) {
     if (findPreset(id) || !isRecord(providers[id])) continue;
     const config = providers[id];
     const name = typeof config.name === "string" && config.name ? config.name : id;
@@ -1175,7 +1177,7 @@ export async function chooseProvider(
       target: { kind: "preset", preset },
     });
   }
-  for (const id of managedProviderIdsSync(defaultsPath)) {
+  for (const id of managedProviderIdsSync(defaultsPath, modelsPath)) {
     if (findPreset(id) || !await isProviderConfigured(id, modelsPath)) continue;
     const name = await channelDisplayName(id, modelsPath);
     options.push({
@@ -1186,7 +1188,10 @@ export async function chooseProvider(
       target: { kind: "custom", id },
     });
   }
-  if (options.length === 0) return undefined;
+  if (options.length === 0) {
+    ctx.ui.notify(opsText("provider.emptyGuide"), "info");
+    return undefined;
+  }
   const choice = await ctx.ui.select("选择 Provider（连接级操作）", options.map((entry) => entry.label));
   return options.find((entry) => entry.label === choice)?.target;
 }
@@ -1229,7 +1234,7 @@ export async function buildGlobalModelOptions(
   const root = await readModelsRoot(modelsPath);
   const providers = isRecord(root.providers) ? root.providers : {};
   const options: GlobalModelOption[] = [];
-  for (const providerId of modelCentricProviderOrder(defaultsPath)) {
+  for (const providerId of modelCentricProviderOrder(defaultsPath, modelsPath)) {
     const config = providers[providerId];
     if (!isRecord(config)) continue;
     const models = Array.isArray(config.models) ? config.models.filter(isRecord) : [];
@@ -1250,10 +1255,10 @@ export async function buildGlobalModelOptions(
 }
 
 /** Presets first, then managed user-defined Providers; models remain a flat list. */
-export function modelCentricProviderOrder(defaultsPath: string): string[] {
+export function modelCentricProviderOrder(defaultsPath: string, modelsPath?: string): string[] {
   return [
     ...PROVIDERS.map((preset) => preset.id),
-    ...managedProviderIdsSync(defaultsPath).filter((id) => !findPreset(id)),
+    ...managedProviderIdsSync(defaultsPath, modelsPath).filter((id) => !findPreset(id)),
   ];
 }
 
@@ -1274,7 +1279,7 @@ export async function configureNewModel(
       target: { kind: "preset", preset },
     });
   }
-  for (const id of managedProviderIdsSync(defaultsPath)) {
+  for (const id of managedProviderIdsSync(defaultsPath, modelsPath)) {
     if (findPreset(id) || !await isProviderConfigured(id, modelsPath)) continue;
     const name = await channelDisplayName(id, modelsPath);
     options.push({
@@ -1748,10 +1753,37 @@ export async function deleteProviderThinkingDefaults(
   });
 }
 
-export function managedProviderIdsSync(defaultsPath: string): string[] {
+export function managedProviderIdsSync(defaultsPath: string, modelsPath?: string): string[] {
   try {
     const root = JSON.parse(readFileSync(defaultsPath, "utf8")) as unknown;
-    return isRecord(root) ? managedProviderIds(root) : [];
+    if (!isRecord(root)) return [];
+    if (!("managedProviders" in root) && !("managedChannels" in root)) {
+      // api-manager.json lost its managed section (e.g. an external edit or a
+      // migration that rewrote the file). Fall back to every enabled custom
+      // provider already present in models.json so /api-manager does not
+      // silently forget them; an explicit (even empty) list is honored as-is.
+      if (modelsPath) return inferredManagedProviderIds(modelsPath);
+      return [];
+    }
+    return managedProviderIds(root);
+  } catch {
+    return [];
+  }
+}
+
+/** Enabled non-preset providers present in models.json, as a fallback managed list. */
+export function inferredManagedProviderIds(modelsPath: string): string[] {
+  try {
+    const parsed = JSON.parse(readFileSync(modelsPath, "utf8")) as unknown;
+    if (!isRecord(parsed) || !isRecord(parsed.providers)) return [];
+    return Object.entries(parsed.providers)
+      .filter(([id, config]) =>
+        !findPreset(id)
+        && isRecord(config)
+        && providerEnabled(config),
+      )
+      .map(([id]) => id)
+      .sort();
   } catch {
     return [];
   }
@@ -2033,13 +2065,13 @@ export function defaultApiManagerExportPath(modelsPath: string): string {
 }
 
 /** Provider ids owned by the API Manager: configured presets plus managed user-defined Providers. */
-function apiManagerOwnedIds(modelsRoot: Record<string, unknown>, defaultsPath: string): string[] {
+function apiManagerOwnedIds(modelsRoot: Record<string, unknown>, defaultsPath: string, modelsPath: string): string[] {
   const providers = isRecord(modelsRoot.providers) ? modelsRoot.providers : {};
   const ids: string[] = [];
   for (const preset of PROVIDERS) {
     if (isRecord(providers[preset.id])) ids.push(preset.id);
   }
-  for (const id of managedProviderIdsSync(defaultsPath)) {
+  for (const id of managedProviderIdsSync(defaultsPath, modelsPath)) {
     if (!findPreset(id) && !ids.includes(id) && isRecord(providers[id])) ids.push(id);
   }
   return ids;
@@ -2060,7 +2092,7 @@ export async function buildApiManagerExport(
 ): Promise<Record<string, unknown>> {
   const root = await readModelsRoot(modelsPath);
   const providers = isRecord(root.providers) ? root.providers : {};
-  const ids = apiManagerOwnedIds(root, defaultsPath);
+  const ids = apiManagerOwnedIds(root, defaultsPath, modelsPath);
   const exported: Record<string, Record<string, unknown>> = {};
   for (const id of ids) {
     const entry = providers[id];

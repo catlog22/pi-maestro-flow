@@ -646,7 +646,7 @@ export function registerApiProviderConfigs(
         pi.registerProvider(provider.id, configuredProviderRegistration(provider.id, modelsPath));
       }
     }
-    for (const id of managedProviderIdsSync(defaultsPath)) {
+    for (const id of managedProviderIdsSync(defaultsPath, modelsPath)) {
       if (findPreset(id) || !hasEnabledProviderSync(id, modelsPath)) continue;
       pi.registerProvider(id, configuredProviderRegistration(id, modelsPath));
     }

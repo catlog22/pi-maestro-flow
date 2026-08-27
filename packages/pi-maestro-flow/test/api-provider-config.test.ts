@@ -46,6 +46,12 @@ import {
   setApiProviderEnabled,
 } from "../src/providers/api-provider-config.ts";
 import {
+  chooseProvider,
+  inferredManagedProviderIds,
+  managedProviderIdsSync,
+  modelCentricProviderOrder,
+} from "../src/providers/api-provider-ops.ts";
+import {
   applyCacheRetentionEnv,
   loadAgentCacheRetention,
   loadCacheRetentionSetting,
@@ -2937,7 +2943,9 @@ test("startup keeps multiple models under one Provider and preserves model defau
   assert.deepEqual(JSON.parse(readFileSync(modelsPath, "utf8")), JSON.parse(modelsBytes));
   assert.equal(readFileSync(defaultsPath, "utf8"), defaultsBytes);
   assert.equal(readFileSync(settingsPath, "utf8"), settingsBytes);
-  assert.deepEqual([...registrations.keys()], ["maestro-qwen"]);
+  // maestro-qwen is a configured preset; “untouched” is an enabled custom provider
+  // that api-manager.json does not list, so the managed fallback picks it up.
+  assert.deepEqual([...registrations.keys()], ["maestro-qwen", "untouched"]);
   assert.deepEqual(
     registrations.get("maestro-qwen")?.models.map((m: any) => m.id),
     ["qwen3.8-max", "deepseek-v4-flash"],
@@ -4007,4 +4015,65 @@ test("applyModelFilters is a no-op when no filters are configured", async (t) =>
   const ctx = { modelRegistry: { getAvailable: () => [] }, ui: { notify() {} } } as any;
   await applyModelFilters(pi, ctx, defaultsPath);
   assert.equal(registered.length, 0);
+});
+test("managedProviderIdsSync falls back to enabled custom providers when api-manager.json lost its managed section", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-managed-fallback-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  const defaultsPath = join(tempDir, "api-manager.json");
+  writeFileSync(modelsPath, JSON.stringify({
+    version: 1,
+    providers: {
+      "maestro-openai": { baseUrl: "https://api.openai.com/v1", api: "openai-responses", enabled: true, models: [{ id: "gpt-5.6" }] },
+      "custom-a": { baseUrl: "https://a.example.com/v1", api: "openai-responses", enabled: true, models: [{ id: "m1" }] },
+      "custom-b": { baseUrl: "https://b.example.com/v1", api: "openai-responses", enabled: false, models: [{ id: "m2" }] },
+    },
+  }, null, 2));
+  // api-manager.json exists but has no managedProviders section (the breakage being fixed)
+  writeFileSync(defaultsPath, JSON.stringify({ version: 1, modelDefaults: {} }, null, 2));
+
+  assert.deepEqual(managedProviderIdsSync(defaultsPath, modelsPath), ["custom-a"]);
+  assert.deepEqual(inferredManagedProviderIds(modelsPath), ["custom-a"]);
+  assert.deepEqual(modelCentricProviderOrder(defaultsPath, modelsPath).filter((id) => !id.startsWith("maestro-")), ["custom-a"]);
+});
+
+test("managedProviderIdsSync honors an explicit empty managed list instead of falling back", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-managed-explicit-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  const defaultsPath = join(tempDir, "api-manager.json");
+  writeFileSync(modelsPath, JSON.stringify({
+    version: 1,
+    providers: {
+      "custom-a": { baseUrl: "https://a.example.com/v1", api: "openai-responses", enabled: true, models: [{ id: "m1" }] },
+    },
+  }, null, 2));
+  writeFileSync(defaultsPath, JSON.stringify({ version: 1, managedProviders: [], modelDefaults: {} }, null, 2));
+
+  assert.deepEqual(managedProviderIdsSync(defaultsPath, modelsPath), []);
+  assert.deepEqual(managedProviderIdsSync(defaultsPath), []);
+});
+
+test("chooseProvider guides the user to the add-model entry when no provider connection exists", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-choose-empty-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  const defaultsPath = join(tempDir, "api-manager.json");
+  writeFileSync(modelsPath, JSON.stringify({ version: 1, providers: {} }, null, 2));
+  writeFileSync(defaultsPath, JSON.stringify({ version: 1 }, null, 2));
+  const notices: string[] = [];
+  const ctx = {
+    hasUI: true,
+    ui: {
+      notify(message: string) { notices.push(message); },
+      select: async () => undefined,
+    },
+    modelRegistry: { getAvailable: () => [], getAll: () => [] },
+  } as any;
+  const target = await chooseProvider(ctx, modelsPath, defaultsPath);
+  assert.equal(target, undefined);
+  assert.equal(notices.length, 1);
+  // Guide message exists in both catalogs; en is the test-default locale.
+  assert.match(notices[0], /Add or edit a model|新增或修改模型/);
+  assert.match(notices[0], /new Provider ID|新的 Provider ID/);
 });
