@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Text } from "@earendil-works/pi-tui";
@@ -10,9 +10,11 @@ import { getTuiLocale } from "../tui/locale.ts";
 import type { SupportedSettingsLocale } from "pi-maestro-settings-core/v1";
 import { nativeSearch } from "./web-access/search-router.ts";
 import { nativeFetch } from "./web-access/fetch-router.ts";
+import { reclaimOwnedProcessTree } from "../process/owned-process-tree.ts";
 
 const require = createRequire(import.meta.url);
 const DEFAULT_MAX_OUTPUT_BYTES = 1_000_000;
+const DEFAULT_HOST_TIMEOUT_MS = 90_000;
 
 const SMART_SEARCH_UI = {
   en: {
@@ -80,7 +82,7 @@ export const SmartSearchParams = Type.Object({
   validation: Type.Optional(Validation),
   fallback: Type.Optional(Fallback),
   providers: Type.Optional(Type.String({ minLength: 1, description: "Comma-separated search providers" })),
-  timeout: Type.Optional(Type.Integer({ minimum: 1, maximum: 600, description: "SmartSearch provider timeout in seconds" })),
+  timeout: Type.Optional(Type.Integer({ minimum: 1, maximum: 600, description: "Host wall-clock deadline in seconds (also forwarded to search providers)" })),
   budget: Type.Optional(Budget),
   evidence_dir: Type.Optional(Type.String({ minLength: 1, description: "Directory to write research evidence artifacts" })),
   router_mode: Type.Optional(RouterMode),
@@ -92,6 +94,8 @@ export interface SmartSearchRunOptions {
   cwd: string;
   signal?: AbortSignal;
   maxOutputBytes: number;
+  /** Optional for injected-runner compatibility; the built-in runner defaults to 90 seconds. */
+  timeoutMs?: number;
 }
 
 export interface SmartSearchRunResult {
@@ -118,10 +122,14 @@ export function createSmartSearchRunner(
   return {
     run(args, options) {
       if (options.signal?.aborted) return Promise.reject(abortError());
+      const timeoutMs = positiveInteger(options.timeoutMs ?? DEFAULT_HOST_TIMEOUT_MS, "timeoutMs");
       const wrapperPath = resolveWrapper();
       return new Promise((resolve, reject) => {
         const child = spawn(process.execPath, [wrapperPath, ...args], {
           cwd: options.cwd,
+          // POSIX group isolation only: the child remains referenced and every
+          // terminal path reclaims the group before this runner settles.
+          detached: process.platform !== "win32",
           env: process.env,
           stdio: ["ignore", "pipe", "pipe"],
           windowsHide: true,
@@ -131,44 +139,108 @@ export function createSmartSearchRunner(
         let outputBytes = 0;
         let settled = false;
         let failure: Error | undefined;
+        let reclamationStarted = false;
+        let closeSeen = false;
+        let normalExitCode: number | null = null;
+        let normalReclamationComplete = false;
 
+        const cleanup = (): void => {
+          clearTimeout(timer);
+          options.signal?.removeEventListener("abort", onAbort);
+          child.removeListener("error", onError);
+          child.removeListener("exit", onExit);
+          child.removeListener("close", onClose);
+          child.stdout.removeListener("data", onStdout);
+          child.stdout.removeListener("error", onStdoutError);
+          child.stderr.removeListener("data", onStderr);
+          child.stderr.removeListener("error", onStderrError);
+        };
         const finish = (callback: () => void): void => {
           if (settled) return;
           settled = true;
-          options.signal?.removeEventListener("abort", onAbort);
+          cleanup();
           callback();
         };
         const stopWith = (error: Error): void => {
-          if (failure) return;
+          if (failure || settled || reclamationStarted) return;
           failure = error;
-          terminateProcessTree(child);
+          reclamationStarted = true;
+          clearTimeout(timer);
+          options.signal?.removeEventListener("abort", onAbort);
+          child.stdout.removeListener("data", onStdout);
+          child.stderr.removeListener("data", onStderr);
+          void reclaimOwnedProcessTree(child, { label: "SmartSearch CLI" }).then(
+            () => finish(() => reject(error)),
+            (cleanupError) => {
+              error.message = `${error.message} Process-tree cleanup failed: ${errorMessage(cleanupError)}`;
+              finish(() => reject(error));
+            },
+          );
         };
         const collect = (target: Buffer[], chunk: Buffer | string): void => {
+          if (failure || settled) return;
           const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-          outputBytes += buffer.byteLength;
-          if (outputBytes > options.maxOutputBytes) {
+          if (outputBytes + buffer.byteLength > options.maxOutputBytes) {
             stopWith(new Error(`SmartSearch output exceeded ${options.maxOutputBytes} bytes.`));
             return;
           }
+          outputBytes += buffer.byteLength;
           target.push(buffer);
         };
-        const onAbort = (): void => stopWith(abortError());
-
-        options.signal?.addEventListener("abort", onAbort, { once: true });
-        child.stdout.on("data", (chunk: Buffer | string) => collect(stdout, chunk));
-        child.stderr.on("data", (chunk: Buffer | string) => collect(stderr, chunk));
-        child.on("error", (error) => finish(() => reject(error)));
-        child.on("close", (code) => finish(() => {
-          if (failure) {
-            reject(failure);
-            return;
-          }
-          resolve({
+        const finishNormalClose = (): void => {
+          if (!closeSeen || !normalReclamationComplete || failure || settled) return;
+          finish(() => resolve({
             stdout: Buffer.concat(stdout).toString("utf8"),
             stderr: Buffer.concat(stderr).toString("utf8"),
-            exitCode: code ?? 5,
-          });
-        }));
+            exitCode: normalExitCode ?? 5,
+          }));
+        };
+        const startNormalReclamation = (code: number | null): void => {
+          if (failure || settled || reclamationStarted) return;
+          reclamationStarted = true;
+          normalExitCode = code;
+          clearTimeout(timer);
+          options.signal?.removeEventListener("abort", onAbort);
+          void reclaimOwnedProcessTree(child, { label: "SmartSearch CLI" }).then(
+            () => {
+              normalReclamationComplete = true;
+              finishNormalClose();
+            },
+            (cleanupError) => finish(() => reject(new Error(
+              `SmartSearch CLI exited but process-tree cleanup was unconfirmed: ${errorMessage(cleanupError)}`,
+            ))),
+          );
+        };
+        const onStdout = (chunk: Buffer | string): void => collect(stdout, chunk);
+        const onStderr = (chunk: Buffer | string): void => collect(stderr, chunk);
+        const onStdoutError = (error: Error): void => stopWith(new Error(`SmartSearch stdout failed: ${errorMessage(error)}`));
+        const onStderrError = (error: Error): void => stopWith(new Error(`SmartSearch stderr failed: ${errorMessage(error)}`));
+        const onAbort = (): void => stopWith(signalError(options.signal));
+        const onError = (error: Error): void => {
+          if (child.pid) stopWith(error);
+          else finish(() => reject(error));
+        };
+        const onExit = (code: number | null): void => startNormalReclamation(code);
+        const onClose = (code: number | null): void => {
+          closeSeen = true;
+          startNormalReclamation(code);
+          finishNormalClose();
+        };
+        const timer = setTimeout(
+          () => stopWith(new Error(`SmartSearch timed out after ${timeoutMs}ms.`)),
+          timeoutMs,
+        );
+        timer.unref?.();
+
+        child.stdout.on("data", onStdout);
+        child.stdout.on("error", onStdoutError);
+        child.stderr.on("data", onStderr);
+        child.stderr.on("error", onStderrError);
+        child.once("error", onError);
+        child.once("exit", onExit);
+        child.once("close", onClose);
+        if (options.signal?.aborted) onAbort();
+        else options.signal?.addEventListener("abort", onAbort, { once: true });
       });
     },
   };
@@ -176,7 +248,17 @@ export function createSmartSearchRunner(
 
 const defaultRunner = createSmartSearchRunner();
 
-export function createSmartSearchTool(runner: SmartSearchRunner = defaultRunner): ToolDefinition<typeof SmartSearchParams, SmartSearchDetails> {
+export interface SmartSearchExecutors {
+  nativeSearch?: typeof nativeSearch;
+  nativeFetch?: typeof nativeFetch;
+}
+
+export function createSmartSearchTool(
+  runner: SmartSearchRunner = defaultRunner,
+  executors: SmartSearchExecutors = {},
+): ToolDefinition<typeof SmartSearchParams, SmartSearchDetails> {
+  const executeSearch = executors.nativeSearch ?? nativeSearch;
+  const executeFetch = executors.nativeFetch ?? nativeFetch;
   return {
     name: "smart_search",
     label: "Smart Search",
@@ -184,69 +266,76 @@ export function createSmartSearchTool(runner: SmartSearchRunner = defaultRunner)
       "Example: { mode: \"search\", query: \"TypeBox schema validation\" } or { mode: \"fetch\", query: \"https://example.com/api\" }.",
     promptSnippet: "Use smart_search for web search, evidence-first research, URL fetching, and provider route diagnostics.",
     parameters: SmartSearchParams,
-    async execute(_id, params, signal, _onUpdate, ctx): Promise<AgentToolResult<SmartSearchDetails>> {
-      if (signal?.aborted) throw abortError();
+    async execute(_id, params, callerSignal, _onUpdate, ctx): Promise<AgentToolResult<SmartSearchDetails>> {
       const query = params.query.trim();
       if (!query) throw new Error("SmartSearch query is required and must not be empty.");
       const mode = parseSmartSearchMode(params.mode);
+      const timeoutMs = (params.timeout ?? DEFAULT_HOST_TIMEOUT_MS / 1_000) * 1_000;
+      const operation = composeCallerAndDeadlineSignal(callerSignal, timeoutMs);
 
-      if (params.native && mode === "search") {
-        return executeNativeSearch(query, params, signal);
-      }
-
-      if (params.native && mode === "fetch") {
-        return executeNativeFetch(query, signal);
-      }
-
-      const { validation: rawValidation, fallback: rawFallback, budget: rawBudget, router_mode: rawRouterMode, native: _native, ...restParams } = params;
-      const commandArgs = buildSmartSearchArgs({
-        ...restParams,
-        mode,
-        query,
-        validation: parseValidation(rawValidation),
-        fallback: parseFallback(rawFallback),
-        budget: parseBudget(rawBudget),
-        router_mode: parseRouterMode(rawRouterMode),
-      } as SmartSearchInput);
       try {
-        const execution = await runner.run(commandArgs, {
-          cwd: ctx.cwd,
-          signal,
-          maxOutputBytes: params.max_output_bytes ?? DEFAULT_MAX_OUTPUT_BYTES,
-        });
-        if (execution.exitCode !== 0) {
-          const reason = execution.stderr.trim() || execution.stdout.trim() || `exit code ${execution.exitCode}`;
-          if (isConfigError(reason) && (mode === "search" || mode === "fetch")) {
-            return mode === "search"
-              ? executeNativeSearch(query, params, signal)
-              : executeNativeFetch(query, signal);
-          }
-          throw new Error(`SmartSearch failed with exit code ${execution.exitCode}: ${reason}`);
+        if (operation.signal.aborted) throw signalError(operation.signal);
+        if (params.native && mode === "search") {
+          return await executeNativeSearch(query, params, operation.signal, executeSearch);
         }
-        const result = parseJsonOutput(execution.stdout);
-        const details: SmartSearchDetails = {
+
+        if (params.native && mode === "fetch") {
+          return await executeNativeFetch(query, operation.signal, executeFetch);
+        }
+
+        const { validation: rawValidation, fallback: rawFallback, budget: rawBudget, router_mode: rawRouterMode, native: _native, ...restParams } = params;
+        const commandArgs = buildSmartSearchArgs({
+          ...restParams,
           mode,
           query,
-          command_args: commandArgs,
-          result,
-          ...(execution.stderr.trim() ? { stderr: execution.stderr.trim() } : {}),
-        };
-        return {
-          content: [{ type: "text", text: JSON.stringify(result) }],
-          details,
-        } as AgentToolResult<SmartSearchDetails>;
-      } catch (error) {
-        if (signal?.aborted || isAbortError(error)) throw abortError();
-        if (isOptionalPackageMissing(error)) {
-          if (mode === "search") return executeNativeSearch(query, params, signal);
-          if (mode === "fetch") return executeNativeFetch(query, signal);
-          throw new Error(
-            `SmartSearch mode "${mode}" requires the optional Python CLI package @konbakuyomu/smart-search, which is not installed. ` +
-            "Install it with: npm install @konbakuyomu/smart-search (requires Python 3.10+). " +
-            'Alternatively, use { native: true } for search/fetch modes.',
-          );
+          validation: parseValidation(rawValidation),
+          fallback: parseFallback(rawFallback),
+          budget: parseBudget(rawBudget),
+          router_mode: parseRouterMode(rawRouterMode),
+        } as SmartSearchInput);
+        try {
+          const execution = await runner.run(commandArgs, {
+            cwd: ctx.cwd,
+            signal: operation.signal,
+            maxOutputBytes: params.max_output_bytes ?? DEFAULT_MAX_OUTPUT_BYTES,
+            timeoutMs,
+          });
+          if (execution.exitCode !== 0) {
+            const reason = execution.stderr.trim() || execution.stdout.trim() || `exit code ${execution.exitCode}`;
+            if (isConfigError(reason) && (mode === "search" || mode === "fetch")) {
+              return mode === "search"
+                ? await executeNativeSearch(query, params, operation.signal, executeSearch)
+                : await executeNativeFetch(query, operation.signal, executeFetch);
+            }
+            throw new Error(`SmartSearch failed with exit code ${execution.exitCode}: ${reason}`);
+          }
+          const result = parseJsonOutput(execution.stdout);
+          const details: SmartSearchDetails = {
+            mode,
+            query,
+            command_args: commandArgs,
+            result,
+            ...(execution.stderr.trim() ? { stderr: execution.stderr.trim() } : {}),
+          };
+          return {
+            content: [{ type: "text", text: JSON.stringify(result) }],
+            details,
+          } as AgentToolResult<SmartSearchDetails>;
+        } catch (error) {
+          if (operation.signal.aborted || isAbortError(error)) throw signalError(operation.signal, error);
+          if (isOptionalPackageMissing(error)) {
+            if (mode === "search") return await executeNativeSearch(query, params, operation.signal, executeSearch);
+            if (mode === "fetch") return await executeNativeFetch(query, operation.signal, executeFetch);
+            throw new Error(
+              `SmartSearch mode "${mode}" requires the optional Python CLI package @konbakuyomu/smart-search, which is not installed. ` +
+              "Install it with: npm install @konbakuyomu/smart-search (requires Python 3.10+). " +
+              'Alternatively, use { native: true } for search/fetch modes.',
+            );
+          }
+          throw error instanceof Error ? error : new Error(String(error));
         }
-        throw error instanceof Error ? error : new Error(String(error));
+      } finally {
+        operation.dispose();
       }
     },
     renderShell: "self",
@@ -310,10 +399,12 @@ export function registerSmartSearch(
 
 async function executeNativeFetch(
   url: string,
-  signal?: AbortSignal,
+  signal: AbortSignal,
+  fetchExecutor: typeof nativeFetch,
 ): Promise<AgentToolResult<SmartSearchDetails>> {
   try {
-    const result = await nativeFetch({ urls: [url], signal });
+    if (signal.aborted) throw signalError(signal);
+    const result = await fetchExecutor({ urls: [url], signal });
     const details: SmartSearchDetails = {
       mode: "fetch",
       query: url,
@@ -325,7 +416,7 @@ async function executeNativeFetch(
       details,
     } as AgentToolResult<SmartSearchDetails>;
   } catch (error) {
-    if (signal?.aborted || isAbortError(error)) throw abortError();
+    if (signal.aborted || isAbortError(error)) throw signalError(signal, error);
     throw error instanceof Error ? error : new Error(String(error));
   }
 }
@@ -333,10 +424,12 @@ async function executeNativeFetch(
 async function executeNativeSearch(
   query: string,
   params: { providers?: string; extra_sources?: number },
-  signal?: AbortSignal,
+  signal: AbortSignal,
+  searchExecutor: typeof nativeSearch,
 ): Promise<AgentToolResult<SmartSearchDetails>> {
   try {
-    const result = await nativeSearch({
+    if (signal.aborted) throw signalError(signal);
+    const result = await searchExecutor({
       query,
       provider: params.providers?.split(",")[0]?.trim(),
       numResults: params.extra_sources ? params.extra_sources + 5 : undefined,
@@ -354,7 +447,7 @@ async function executeNativeSearch(
       details,
     } as AgentToolResult<SmartSearchDetails>;
   } catch (error) {
-    if (signal?.aborted || isAbortError(error)) throw abortError();
+    if (signal.aborted || isAbortError(error)) throw signalError(signal, error);
     throw error instanceof Error ? error : new Error(String(error));
   }
 }
@@ -438,6 +531,38 @@ function abortError(): Error {
   return error;
 }
 
+function timeoutError(timeoutMs: number): Error {
+  const error = new Error(`SmartSearch timed out after ${timeoutMs}ms.`);
+  error.name = "TimeoutError";
+  return error;
+}
+
+function signalError(signal?: AbortSignal, fallback?: unknown): Error {
+  if (signal?.aborted && signal.reason instanceof Error) return signal.reason;
+  if (fallback instanceof Error && isAbortError(fallback)) return fallback;
+  return abortError();
+}
+
+function composeCallerAndDeadlineSignal(
+  callerSignal: AbortSignal | undefined,
+  timeoutMs: number,
+): { signal: AbortSignal; dispose(): void } {
+  const controller = new AbortController();
+  const onCallerAbort = (): void => controller.abort(abortError());
+  if (callerSignal?.aborted) onCallerAbort();
+  else callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
+  const timer = controller.signal.aborted
+    ? undefined
+    : setTimeout(() => controller.abort(timeoutError(timeoutMs)), timeoutMs);
+  return {
+    signal: controller.signal,
+    dispose() {
+      if (timer) clearTimeout(timer);
+      callerSignal?.removeEventListener("abort", onCallerAbort);
+    },
+  };
+}
+
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
 }
@@ -458,16 +583,9 @@ function isOptionalPackageMissing(error: unknown): boolean {
     && error.message.includes("@konbakuyomu/smart-search");
 }
 
-function terminateProcessTree(child: { pid?: number; kill(): boolean }): void {
-  if (process.platform === "win32" && child.pid) {
-    // spawnSync: 与 bash-bg/hooks-runner 一致，异步 taskkill 在 pi 的 jiti loader 下会静默失败。
-    spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
-      windowsHide: true,
-      stdio: "ignore",
-    });
-    return;
-  }
-  child.kill();
+function positiveInteger(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value <= 0) throw new RangeError(`${label} must be a positive integer`);
+  return value;
 }
 
 function errorMessage(error: unknown): string {

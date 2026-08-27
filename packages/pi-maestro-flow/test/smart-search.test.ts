@@ -80,26 +80,83 @@ test("smart_search executes an injected runner and returns parsed JSON", async (
   assert.deepEqual(runner.calls[0]?.args, ["search", "evidence query", "--format", "json"]);
   assert.equal(runner.calls[0]?.options.cwd, "D:/workspace");
   assert.equal(runner.calls[0]?.options.maxOutputBytes, 4_096);
+  assert.equal(runner.calls[0]?.options.timeoutMs, 90_000);
+
+  await tool.execute(
+    "route",
+    { mode: "route", query: "route query", timeout: 7 },
+    undefined,
+    undefined,
+    { cwd: "D:/workspace" } as never,
+  );
+  assert.equal(runner.calls[1]?.options.timeoutMs, 7_000);
 });
 
-test("smart_search forwards AbortSignal and normalizes abort failures", async () => {
+test("smart_search composes caller cancellation into the one dispatch signal", async () => {
   const controller = new AbortController();
+  let dispatchSignal: AbortSignal | undefined;
   const runner: SmartSearchRunner = {
     run(_args, options) {
+      dispatchSignal = options.signal;
       return new Promise((_resolve, reject) => {
-        options.signal?.addEventListener("abort", () => {
-          const error = new Error("cancelled");
-          error.name = "AbortError";
-          reject(error);
-        }, { once: true });
+        options.signal?.addEventListener("abort", () => reject(options.signal?.reason), { once: true });
       });
     },
   };
   const execution = createSmartSearchTool(runner).execute(
     "research", { mode: "research", query: "topic" }, controller.signal, undefined, { cwd: "D:/workspace" } as never,
   );
+  assert.notEqual(dispatchSignal, controller.signal);
   controller.abort();
   await assert.rejects(() => execution, { name: "AbortError" });
+  assert.equal(dispatchSignal?.aborted, true);
+});
+
+test("smart_search reuses its caller/deadline signal for CLI config fallback", async () => {
+  let cliSignal: AbortSignal | undefined;
+  let nativeSignal: AbortSignal | undefined;
+  const runner: SmartSearchRunner = {
+    async run(_args, options) {
+      cliSignal = options.signal;
+      return { stdout: "", stderr: JSON.stringify({ error_type: "config_error" }), exitCode: 2 };
+    },
+  };
+  const tool = createSmartSearchTool(runner, {
+    nativeSearch: (async (options: { signal?: AbortSignal }) => {
+      nativeSignal = options.signal;
+      return { results: [] } as never;
+    }) as never,
+  });
+
+  const result = await tool.execute(
+    "fallback", { mode: "search", query: "topic" }, undefined, undefined, { cwd: "D:/workspace" } as never,
+  );
+  assert.ok(cliSignal);
+  assert.equal(nativeSignal, cliSignal);
+  assert.deepEqual(result.details?.result, { results: [] });
+});
+
+test("smart_search host deadline covers an injected native dispatch", async () => {
+  let nativeSignal: AbortSignal | undefined;
+  const tool = createSmartSearchTool(new FakeRunner(), {
+    nativeSearch: (async (options: { signal?: AbortSignal }) => {
+      nativeSignal = options.signal;
+      return await new Promise((_resolve, reject) => {
+        options.signal?.addEventListener("abort", () => reject(options.signal?.reason), { once: true });
+      });
+    }) as never,
+  });
+
+  await assert.rejects(
+    () => tool.execute(
+      "deadline", { mode: "search", query: "topic", native: true, timeout: 1 },
+      undefined, undefined, { cwd: "D:/workspace" } as never,
+    ),
+    (error: unknown) => error instanceof Error
+      && error.name === "TimeoutError"
+      && /timed out after 1000ms/.test(error.message),
+  );
+  assert.equal(nativeSignal?.aborted, true);
 });
 
 test("smart_search rejects non-zero exits and invalid JSON", async () => {
@@ -116,10 +173,23 @@ test("SmartSearch node runner uses an injected wrapper, caps output, and aborts"
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "pi-smart-search-"));
   const wrapperPath = path.join(directory, "wrapper.cjs");
   await fs.writeFile(wrapperPath, `
+    const fs = require("node:fs");
+    const { spawn } = require("node:child_process");
     const mode = process.argv[2];
     if (mode === "large") process.stdout.write("x".repeat(4096));
     else if (mode === "wait") setTimeout(() => process.stdout.write("{}"), 30000);
-    else process.stdout.write(JSON.stringify({ argv: process.argv.slice(2) }));
+    else if (mode === "tree" || mode === "exit-tree") {
+      const descendant = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      fs.writeFileSync(process.argv[3], String(descendant.pid));
+      if (mode === "tree") setInterval(() => {}, 1000);
+      else {
+        descendant.unref();
+        process.stdout.write("{}");
+      }
+    } else process.stdout.write(JSON.stringify({ argv: process.argv.slice(2) }));
   `);
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
 
@@ -128,8 +198,85 @@ test("SmartSearch node runner uses an injected wrapper, caps output, and aborts"
   assert.deepEqual(JSON.parse(completed.stdout), { argv: ["search", "query"] });
   await assert.rejects(() => runner.run(["large"], { cwd: directory, maxOutputBytes: 1_024 }), /exceeded 1024 bytes/);
 
+  await assert.rejects(
+    () => runner.run(["wait"], { cwd: directory, maxOutputBytes: 4_096, timeoutMs: 30 }),
+    /timed out after 30ms/,
+  );
+
+  const normalPidFile = path.join(directory, "normal-descendant.pid");
+  let normalDescendantPid: number | undefined;
+  try {
+    const normal = await runner.run(["exit-tree", normalPidFile], {
+      cwd: directory,
+      maxOutputBytes: 4_096,
+      timeoutMs: 5_000,
+    });
+    normalDescendantPid = Number(await waitForFile(normalPidFile));
+    assert.equal(normal.exitCode, 0, normal.stderr);
+    assert.equal(isProcessRunning(normalDescendantPid), false, "normal success must reclaim a parent-first-exit descendant");
+  } finally {
+    if (normalDescendantPid && isProcessRunning(normalDescendantPid)) {
+      try { process.kill(normalDescendantPid, "SIGKILL"); } catch { /* already gone */ }
+    }
+  }
+
   const controller = new AbortController();
   const pending = runner.run(["wait"], { cwd: directory, signal: controller.signal, maxOutputBytes: 4_096 });
   controller.abort();
   await assert.rejects(() => pending, { name: "AbortError" });
+
+  const pidFile = path.join(directory, "descendant.pid");
+  let descendantPid: number | undefined;
+  try {
+    const treeController = new AbortController();
+    const tree = runner.run(["tree", pidFile], {
+      cwd: directory,
+      signal: treeController.signal,
+      maxOutputBytes: 4_096,
+      timeoutMs: 5_000,
+    });
+    descendantPid = Number(await waitForFile(pidFile));
+    assert.equal(isProcessRunning(descendantPid), true);
+    treeController.abort();
+    await assert.rejects(() => tree, { name: "AbortError" });
+    assert.equal(await waitForProcessExit(descendantPid, 2_000), true, "descendant must be gone before abort settles");
+  } finally {
+    if (descendantPid && isProcessRunning(descendantPid)) {
+      try { process.kill(descendantPid, "SIGKILL"); } catch { /* already gone */ }
+    }
+  }
 });
+
+async function waitForFile(filePath: string): Promise<string> {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    try {
+      return await fs.readFile(filePath, "utf8");
+    } catch {
+      await delay(20);
+    }
+  }
+  throw new Error(`Timed out waiting for ${filePath}`);
+}
+
+async function waitForProcessExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (isProcessRunning(pid)) {
+    if (Date.now() >= deadline) return false;
+    await delay(20);
+  }
+  return true;
+}
+
+function isProcessRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
