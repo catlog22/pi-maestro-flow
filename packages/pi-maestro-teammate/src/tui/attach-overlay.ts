@@ -60,7 +60,7 @@ const INBOX_PREVIEW_CHARS = 400;
 const INBOX_PREVIEW_LINES = 4;
 const GRAPH_LIST_MAX_ROWS = 7;
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const SPINNER_MS = 120;
+const SPINNER_MS = 500;
 
 /** Tab identity for the main conversation — a switching target, not a log. */
 export const MAIN_TAB = "__main__";
@@ -276,15 +276,6 @@ export class AttachOverlay implements Component, Focusable {
         this.ensureTranscript(log);
       }
     }
-
-    this.timer = setInterval(() => {
-      const nextFrame = (this.frame + 1) % SPINNER.length;
-      const nextSignature = this.tickSignature(Date.now(), nextFrame);
-      if (nextSignature === this.renderedTickSignature) return;
-      this.frame = nextFrame;
-      this.renderedTickSignature = nextSignature;
-      this.requestRender?.();
-    }, SPINNER_MS);
   }
 
   setRequestRender(fn: () => void): void {
@@ -316,8 +307,29 @@ export class AttachOverlay implements Component, Focusable {
     return parts.join("|");
   }
 
+  private startTimer(): void {
+    if (this.timer) return;
+    this.timer = setInterval(() => {
+      const nextFrame = (this.frame + 1) % SPINNER.length;
+      const nextSignature = this.tickSignature(Date.now(), nextFrame);
+      if (nextSignature === this.renderedTickSignature) return;
+      this.frame = nextFrame;
+      this.renderedTickSignature = nextSignature;
+      this.requestRender?.();
+    }, SPINNER_MS);
+    this.timer.unref?.();
+  }
+
+  private stopTimer(): void {
+    if (!this.timer) return;
+    clearInterval(this.timer);
+    this.timer = null;
+  }
+
   private setTickVisibility(visibility: "hidden" | "tools" | "full", now: number): void {
     this.tickVisibility = visibility;
+    if (visibility === "hidden") this.stopTimer();
+    else this.startTimer();
     this.renderedTickSignature = this.tickSignature(now, this.frame);
   }
 
@@ -1362,10 +1374,7 @@ export class AttachOverlay implements Component, Focusable {
   dispose(): void {
     this.localeDisposer();
     if (this.pasteFlushTimer) clearTimeout(this.pasteFlushTimer);
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = null;
-    }
+    this.stopTimer();
     for (const log of this.agents.values()) {
       if (log.transcriptRefreshTimer) clearTimeout(log.transcriptRefreshTimer);
     }

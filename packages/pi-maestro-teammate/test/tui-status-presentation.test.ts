@@ -424,11 +424,11 @@ test("attach overlay ticks only for visible spinner frames and elapsed seconds",
     overlay.setActiveTools(agent.correlationId, [{ name: "read", status: "running", startedAt: now }]);
     overlay.render(10, 24);
     renders = 0;
-    await new Promise((resolve) => setTimeout(resolve, 280));
+    await new Promise((resolve) => setTimeout(resolve, 550));
     assert.equal(renders, 0, "a spinner hidden by compact layout must not repaint");
 
     overlay.render(80, 24);
-    await new Promise((resolve) => setTimeout(resolve, 280));
+    await new Promise((resolve) => setTimeout(resolve, 550));
     assert.ok(renders >= 1, "a visible running tool must animate its spinner");
 
     overlay.setActiveTools(agent.correlationId, []);

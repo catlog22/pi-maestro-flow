@@ -30,6 +30,39 @@ function tick(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 5));
 }
 
+test("animation timer runs only while an animated agent surface is visible", (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const agent = fakeAgent();
+  const overlay = new AttachOverlay(agent, () => {}, () => new Map([[agent.correlationId, agent]]));
+  let renders = 0;
+  overlay.setRequestRender(() => {
+    renders += 1;
+  });
+
+  try {
+    t.mock.timers.tick(1_000);
+    assert.equal(renders, 0, "construction alone must not start the animation timer");
+
+    overlay.render(80, 24);
+    overlay.applyProgressEvent(agent.correlationId, {
+      activeTools: [{ name: "grep", status: "running", startedAt: Date.now() }],
+    });
+    const afterProgress = renders;
+    t.mock.timers.tick(499);
+    assert.equal(renders, afterProgress, "animation cadence stays below the 500ms frame boundary");
+    t.mock.timers.tick(1);
+    assert.equal(renders, afterProgress + 1, "visible running work advances one frame at 500ms");
+
+    overlay.handleInput("\x1b[D");
+    overlay.render(80, 24);
+    const afterHide = renders;
+    t.mock.timers.tick(1_000);
+    assert.equal(renders, afterHide, "switching to the non-animated main tab stops the timer");
+  } finally {
+    overlay.dispose();
+  }
+});
+
 test("t toggles transcript view; rows render with kind prefixes", async () => {
   const agent = fakeAgent();
   const runs = new Map([[agent.correlationId, agent]]);
