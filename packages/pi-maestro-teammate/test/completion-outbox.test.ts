@@ -478,6 +478,62 @@ test("gc consumes bounded stale duplicate index pages without enumerating the la
   }
 });
 
+test("a corrupt GC index state self-heals instead of throwing on every reconcile", async () => {
+  const root = await mkdtemp(join(tmpdir(), "completion-gc-corrupt-"));
+  try {
+    let now = 1_000;
+    const store = new CompletionOutboxFileStore({ rootDir: root, now: () => now, ownerId: "corrupt-gc" });
+    // Populate the GC index with one real expired reservation so a sweep exists.
+    const dispatch = seed("corrupt-state");
+    await store.reserve(dispatch, 1);
+    await store.releaseReservation(dispatch.target, dispatch.reservationId);
+    now = COMPLETION_OUTBOX_LIVE_TTL_MS + 10;
+    const result = await store.gc(target.workspaceId);
+    assert.ok(result.releasedReservations >= 1, "baseline sweep populates the GC index");
+
+    // Corrupt state.json so the validation must reject it.
+    const workspaceHash = (await import("node:crypto")).createHash("sha256").update(target.workspaceId).digest("hex");
+    const indexPath = join(root, workspaceHash, ".gc-index", "state.json");
+    await writeFile(indexPath, JSON.stringify({ version: 2, head: 5, tail: 1 }));
+
+    // Before: this threw "Invalid completion GC index" on every reconcile.
+    // After self-heal: the sweep returns normally and the index dir is gone.
+    const healed = await store.gc(target.workspaceId);
+    assert.equal(healed.expired, 0);
+    assert.equal(healed.releasedReservations, 0);
+    await assert.rejects(() => readdir(join(root, workspaceHash, ".gc-index")), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
+
+    // A fresh append rebuilds the index from scratch.
+    const next = seed("rebuild");
+    await store.reserve(next, 1);
+    const rebuilt = await readdir(join(root, (await import("node:crypto")).createHash("sha256").update(target.workspaceId).digest("hex"), ".gc-index"));
+    assert.ok(rebuilt.includes("state.json"), "GC index is rebuilt by the next append");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a corrupt GC index segment self-heals instead of poisoning the sweep", async () => {
+  const root = await mkdtemp(join(tmpdir(), "completion-gc-seg-"));
+  try {
+    let now = 1_000;
+    const store = new CompletionOutboxFileStore({ rootDir: root, now: () => now, ownerId: "corrupt-seg" });
+    const workspaceHash = (await import("node:crypto")).createHash("sha256").update(target.workspaceId).digest("hex");
+    // Hand-write a state pointing at segment 0 and corrupt that segment file.
+    await mkdir(join(root, workspaceHash, ".gc-index", "segments"), { recursive: true });
+    await writeFile(join(root, workspaceHash, ".gc-index", "state.json"), JSON.stringify({ version: 1, head: 0, tail: 1 }));
+    await writeFile(join(root, workspaceHash, ".gc-index", "segments", "00000000000000000000.json"), "not-json");
+    now = COMPLETION_OUTBOX_LIVE_TTL_MS + 10;
+    // Previously this threw "Invalid completion GC index segment 0". Now the
+    // corrupt segment is dropped and the empty slot is skipped, not fatal.
+    const healed = await store.gc(target.workspaceId);
+    assert.equal(healed.expired, 0);
+    assert.equal(healed.releasedReservations, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a fresh definitively dead-owner lock is taken over immediately through a token fence", async () => {
   const root = await mkdtemp(join(tmpdir(), "completion-stale-lock-"));
   const { createHash } = await import("node:crypto");

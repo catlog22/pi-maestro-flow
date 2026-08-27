@@ -40,6 +40,7 @@ import {
   type CompletionReservationRecord,
   retryDelayForAttempt,
 } from "./types.ts";
+import { logDiagnosticWarn } from "../shared/diagnostic-log.ts";
 
 const STATE_DIRS: readonly CompletionOutboxState[] = ["wal", "pending", "queued", "applied", "dead", "expired"];
 const LIVE_STATES = new Set<CompletionOutboxState>(["wal", "pending", "queued"]);
@@ -1206,7 +1207,13 @@ export class CompletionOutboxFileStore {
       || !Number.isSafeInteger(state.tail) || state.tail! < state.head!
       || state.sweepEnd !== undefined && (!Number.isSafeInteger(state.sweepEnd)
         || state.sweepEnd! < state.head! || state.sweepEnd! > state.tail!)) {
-      throw new Error(`Invalid completion GC index for workspace ${workspaceId}.`);
+      // The GC index is an optimization over the authoritative record/reservation
+      // files: expired records are inert (acquireClaim/deliverDue reject them),
+      // so dropping a corrupt index only defers a maintenance sweep. A corrupt
+      // state.json would otherwise throw on every reconcile and spam forever.
+      // Self-heal by removing the whole index dir so the next append rebuilds it.
+      await this.#resetGcIndex(workspaceId, "state");
+      return { version: 1, head: 0, tail: 0 };
     }
     return state as GcIndexState;
   }
@@ -1221,9 +1228,31 @@ export class CompletionOutboxFileStore {
     const segment = raw as Partial<GcIndexSegment>;
     if (segment.version !== 1 || segment.base !== base || !Array.isArray(segment.entries)
       || segment.entries.length > GC_PAGE_SIZE) {
-      throw new Error(`Invalid completion GC index segment ${segmentNumber} for workspace ${workspaceId}.`);
+      // A single corrupt segment poisons the sweep cursor. Drop just that file
+      // (entries there are stale at worst) and let the empty slot be skipped.
+      await this.#resetGcIndexSegment(workspaceId, segmentNumber, "segment");
+      return { version: 1, base, entries: [] };
     }
     return { version: 1, base, entries: [...segment.entries] as Array<GcIndexEntry | null> };
+  }
+
+  // Remove the entire GC index directory (state.json + all segments) and fsync
+  // the workspace dir so the reset is durable. Callers already hold the workspace
+  // lock; the index holds no authoritative data, only stale GC entries.
+  async #resetGcIndex(workspaceId: string, reason: "state"): Promise<void> {
+    const workspaceDir = this.#workspaceDir(workspaceId);
+    const indexDir = join(workspaceDir, GC_INDEX_DIR);
+    await rm(indexDir, { recursive: true, force: true });
+    await fsyncDirectory(workspaceDir);
+    logDiagnosticWarn(`[pi-maestro-teammate] corrupt completion GC index ${reason} reset for workspace ${workspaceId}; GC will rebuild it on next append.`);
+  }
+
+  // Remove a single corrupt segment file and fsync its dir. The state.json cursor
+  // still references the sequence; the now-missing entry is treated as a stale slot.
+  async #resetGcIndexSegment(workspaceId: string, segmentNumber: number, reason: "segment"): Promise<void> {
+    await rm(this.#gcIndexSegmentPath(workspaceId, segmentNumber), { force: true });
+    await fsyncDirectory(dirname(join(this.#workspaceDir(workspaceId), GC_INDEX_DIR, "segments")));
+    logDiagnosticWarn(`[pi-maestro-teammate] corrupt completion GC index ${reason} ${segmentNumber} dropped for workspace ${workspaceId}; slot treated as stale.`);
   }
 
   async #appendGcIndex(
