@@ -506,7 +506,7 @@ function foldValues(
   initialLedger: AgentTurnLedger,
   select: (value: unknown) => { matched: false } | { matched: true; data: unknown },
 ): AgentTurnLedgerFoldResult {
-  let ledger = initialLedger;
+  let ledger: AgentTurnLedger = createTransientLedger(initialLedger);
   let appliedCount = 0;
   let duplicateCount = 0;
   let ignoredCount = 0;
@@ -525,8 +525,12 @@ function foldValues(
       if (result.status === "rejected") rejectedCount += 1;
     }
   }
+  const foldedLedger = appliedCount === 0
+    ? initialLedger
+    : freezeLedger(ledger.agents, ledger.turnOwners, ledger.eventFingerprints);
+  transientLedgers.delete(ledger as object);
   return Object.freeze({
-    ledger,
+    ledger: foldedLedger,
     diagnostics: Object.freeze(diagnostics),
     applied: appliedCount,
     duplicates: duplicateCount,
@@ -555,9 +559,14 @@ function applied(
   event: AgentTurnEvent,
   fingerprint: string,
 ): AgentTurnLedgerApplyResult {
-  const agents = new Map(ledger.agents);
+  const transient = transientLedgers.has(ledger as object);
+  const agents = transient
+    ? ledger.agents as Map<string, AgentTurnLedgerAgentState>
+    : new Map(ledger.agents);
   agents.set(agent.correlationId, agent);
-  const turnOwners = new Map(ledger.turnOwners);
+  const turnOwners = transient
+    ? ledger.turnOwners as Map<string, AgentTurnLedgerOwner>
+    : new Map(ledger.turnOwners);
   if (!turnOwners.has(event.turnId)) {
     turnOwners.set(event.turnId, Object.freeze({
       correlationId: event.correlationId,
@@ -565,11 +574,13 @@ function applied(
       promptSeq: event.promptSeq,
     }));
   }
-  const eventFingerprints = new Map(ledger.eventFingerprints);
+  const eventFingerprints = transient
+    ? ledger.eventFingerprints as Map<string, string>
+    : new Map(ledger.eventFingerprints);
   eventFingerprints.set(turnEventSlot(event), fingerprint);
   return Object.freeze({
     status: "applied",
-    ledger: freezeLedger(agents, turnOwners, eventFingerprints),
+    ledger: transient ? ledger : freezeLedger(agents, turnOwners, eventFingerprints),
     agent,
   });
 }
@@ -715,6 +726,19 @@ function withSnapshotState(base: SnapshotBase, current: AgentTurnSnapshot): Agen
       reason: current.reason,
     });
   }
+}
+
+const transientLedgers = new WeakSet<object>();
+
+function createTransientLedger(ledger: AgentTurnLedger): AgentTurnLedger {
+  const transient: AgentTurnLedger = {
+    version: AGENT_TURN_LEDGER_VERSION,
+    agents: new Map(ledger.agents),
+    turnOwners: new Map(ledger.turnOwners),
+    eventFingerprints: new Map(ledger.eventFingerprints),
+  };
+  transientLedgers.add(transient);
+  return transient;
 }
 
 function freezeLedger(

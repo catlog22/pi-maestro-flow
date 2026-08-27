@@ -156,6 +156,63 @@ test("transport sidecar correlates the exact lease-unwrapped user text and keeps
   }
 });
 
+test("streaming text deltas do not persist one progress event per token", async () => {
+  const correlationId = "phase-3-stream-progress";
+  const events: AgentTurnEvent[] = [];
+  const spawnChildProcess = (() => createFakeChild((command, handle) => {
+    if (command.type !== "prompt") return;
+    queueMicrotask(() => {
+      handle.stdout.write(line({
+        type: "message_end",
+        message: { role: "user", content: [{ type: "text", text: acceptedInput(command) }] },
+      }));
+      handle.stdout.write(line({ type: "turn_start" }));
+      for (let index = 0; index < 200; index += 1) {
+        handle.stdout.write(line({
+          type: "message_update",
+          assistantMessageEvent: { type: "text_delta", delta: "x" },
+        }));
+      }
+      handle.stdout.write(line({
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text: "done" }] },
+      }));
+      handle.stdout.write(line({
+        type: "turn_end",
+        message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] },
+        toolResults: [],
+      }));
+      handle.stdout.write(line({ type: "agent_end", willRetry: false }));
+      handle.stdout.write(line({ type: "agent_settled" }));
+    });
+  }).child) as unknown as SpawnSeam;
+
+  const result = await runSingleTeammate(
+    { agent: "general", task: "stream task", context: "fork" },
+    {
+      baseCwd: process.cwd(),
+      correlationId,
+      initialTurnContext: stableContext(correlationId),
+      recordTurnEvent: (event) => events.push(event),
+      spawnChildProcess,
+    },
+  );
+  await delay(20);
+
+  assert.equal(result.exitCode, 0);
+  const repeatedStreamingState = events.filter((event) =>
+    event.type === "progress"
+    && event.phase === "prompting"
+    && event.toolActivity === "idle"
+  );
+  assert.ok(
+    repeatedStreamingState.length <= 3,
+    `expected bounded lifecycle progress, got ${repeatedStreamingState.length} entries for 200 text deltas`,
+  );
+  assert.equal(events.some((event) => event.type === "turn-settled"), true);
+  assert.equal(foldAgentTurnEvents(events).rejected, 0);
+});
+
 test("raw turn_start and an unmatched user message never create logical identity", async () => {
   const events: AgentTurnEvent[] = [];
   const spawnChildProcess = (() => createFakeChild((command, handle) => {

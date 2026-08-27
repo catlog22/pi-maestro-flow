@@ -533,6 +533,7 @@ export async function runSingleAttempt(
   let initialModelInputRegistered = false;
   let nextExternalPromptSeq = initialTurnContext.promptSeq + 1;
   let lastTurnEventTimestamp = 0;
+  let lastProgressFingerprint: string | undefined;
 
   const turnEventTimestamp = (): number => {
     lastTurnEventTimestamp = Math.max(Date.now(), lastTurnEventTimestamp + 1);
@@ -540,6 +541,20 @@ export async function runSingleAttempt(
   };
 
   const recordCanonicalTurnEvent = (event: AgentTurnEvent): void => {
+    if (event.type === "progress") {
+      const fingerprint = JSON.stringify([
+        event.turnId,
+        event.correlationId,
+        event.runtimeGeneration,
+        event.promptSeq,
+        event.loopSeq,
+        event.phase ?? null,
+        event.toolActivity ?? null,
+        event.lastMessage ?? null,
+      ]);
+      if (fingerprint === lastProgressFingerprint) return;
+      lastProgressFingerprint = fingerprint;
+    }
     try {
       options.recordTurnEvent?.(event);
     } catch {

@@ -406,3 +406,31 @@ test("cold rebuild skips unrelated entries and diagnoses malformed legacy turn e
   assert.equal(agentTurnLedgerAgent(rebuilt.ledger, "legacy-agent"), undefined);
   assert.equal(validateAgentTurnEvent(legacy).valid, false);
 });
+
+test("cold rebuild folds large progress histories without quadratic map copying", { timeout: 3_000 }, () => {
+  const entries: unknown[] = [{
+    type: "custom",
+    customType: AGENT_TURN_EVENT_CUSTOM_TYPE,
+    data: { ...eventBase(2_000, { turnId: "turn-large" }), type: "turn-started", phase: "prompting" },
+  }];
+  for (let index = 1; index <= 5_000; index += 1) {
+    entries.push({
+      type: "custom",
+      customType: AGENT_TURN_EVENT_CUSTOM_TYPE,
+      data: {
+        ...eventBase(2_000 + index, { turnId: "turn-large" }),
+        type: "progress",
+        phase: "prompting",
+        toolActivity: "idle",
+      },
+    });
+  }
+
+  const rebuilt = rebuildAgentTurnLedger(entries);
+
+  assert.equal(rebuilt.applied, 5_001);
+  assert.equal(rebuilt.rejected, 0);
+  assert.equal(rebuilt.ignored, 0);
+  assert.equal(agentTurnLedgerAgent(rebuilt.ledger, "agent-1")?.current.lastActivityAt, 7_000);
+  assert.equal(Object.isFrozen(rebuilt.ledger), true);
+});
