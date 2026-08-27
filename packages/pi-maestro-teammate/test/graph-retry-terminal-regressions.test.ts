@@ -248,11 +248,13 @@ test("provider failure returns directly without an outer retry cancellation phas
   assert.doesNotMatch(result.messages.map((message) => message.content).join("\n"), /retry backoff/i);
 });
 
-test("cancelling between fallback candidates returns terminated cancellation", async () => {
+test("cancelling between fallback candidates publishes before terminated completion", async () => {
   const breaker = new ModelCircuitBreaker({ threshold: 1, cooldownMs: 60_000 });
   const controller = new AbortController();
   const launchedModels: string[] = [];
+  const publications: SingleResult[] = [];
   const completions: Array<{ result: SingleResult; status?: AgentTerminalStatus }> = [];
+  const lifecycle: string[] = [];
   const originalRecordFailure = breaker.recordRetryableFailure.bind(breaker);
   breaker.recordRetryableFailure = (acquisition) => {
     originalRecordFailure(acquisition);
@@ -280,14 +282,27 @@ test("cancelling between fallback candidates returns terminated cancellation", a
     modelCircuitBreaker: breaker,
     modelCapabilities: [{ id: "provider/primary" }, { id: "provider/backup" }],
     spawnChildProcess,
-    onTurnComplete(entry, status) { completions.push({ result: entry, status }); },
+    async onResultPublished(entry) {
+      lifecycle.push("publication-started");
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      publications.push(entry);
+      lifecycle.push("publication-finished");
+    },
+    onTurnComplete(entry, status) {
+      lifecycle.push("terminal");
+      completions.push({ result: entry, status });
+    },
   });
 
   assert.deepEqual(launchedModels, ["provider/primary"]);
   assert.match(result.messages[0].content, /cancelled by its caller/i);
   assert.match(result.messages[0].content, /parent tool deadline exceeded/i);
+  assert.equal(publications.length, 1);
+  assert.equal(publications[0]?.publicationId, result.publicationId);
+  assert.deepEqual(lifecycle, ["publication-started", "publication-finished", "terminal"]);
   assert.equal(completions.length, 1);
   assert.equal(completions[0].status, "terminated");
+  assert.equal(completions[0].result.publicationId, result.publicationId);
 });
 
 test("unprintable cancellation reasons still produce a terminated result", async () => {

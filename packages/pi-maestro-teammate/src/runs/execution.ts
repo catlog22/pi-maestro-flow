@@ -770,11 +770,8 @@ async function runSingleTeammateV1(
       result.originCwd ??= publicationAwaitingCompletion.originCwd;
       publicationAwaitingCompletion = undefined;
     } else {
-      // Pre-launch rejections (rejectAndPublish) and caller cancellations
-      // (cancelAtBoundary) never reach publishResult, so the result has no
-      // publicationId. Durable completion delivery requires one for every
-      // result; mint a fresh id here rather than letting durableResources
-      // throw "has no immutable publicationId".
+      // Compatibility for completion callbacks from third-party backends that
+      // do not expose a result-publication boundary.
       result.publicationId ??= randomUUID();
     }
     const canonicalStatus = terminalStatus
@@ -807,14 +804,21 @@ async function runSingleTeammateV1(
     }
   };
 
-  const rejectAndPublish = (
-    content: string,
+  const publishTerminalResult = async (
+    result: SingleResult,
     terminalStatus?: AgentTerminalStatus,
-  ): SingleResult => {
-    const result = rejectWith(content);
+  ): Promise<SingleResult> => {
+    if (!publicationAwaitingCompletion) {
+      await publishResult(result, resolvedRunCwd ?? options.baseCwd);
+    }
     publishTurnComplete(result, terminalStatus);
     return result;
   };
+
+  const rejectAndPublish = (
+    content: string,
+    terminalStatus?: AgentTerminalStatus,
+  ): Promise<SingleResult> => publishTerminalResult(rejectWith(content), terminalStatus);
 
   if (options.signal?.aborted) {
     return rejectAndPublish("Teammate run aborted before launch.", "terminated");
@@ -1017,7 +1021,7 @@ async function runSingleTeammateV1(
     }
   };
 
-  const cancelAtBoundary = (phase: string): SingleResult => {
+  const cancelAtBoundary = async (phase: string): Promise<SingleResult> => {
     const cancellationMessage = `Teammate run cancelled by its caller ${phase} (reason: ${formatCancellationReason()}).`;
     const previousMessages = lastResult?.messages ?? [];
     const result: SingleResult = {
@@ -1058,8 +1062,7 @@ async function runSingleTeammateV1(
           : {}),
       });
     }
-    publishTurnComplete(result, "terminated");
-    return result;
+    return publishTerminalResult(result, "terminated");
   };
 
   const waitForRetry = options.waitForRetry ?? waitForRetryDelay;
