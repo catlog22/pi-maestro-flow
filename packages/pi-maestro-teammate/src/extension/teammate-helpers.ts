@@ -1198,13 +1198,18 @@ export function recordChildReclamationOutcome(
   correlationId: string,
   outcome: ChildReclamationOutcome,
 ): void {
-  if (outcome.status === "reclaimed") return;
-  const diagnostic =
-    `Child process reclamation ended unreaped (correlationId=${correlationId}, `
-    + `forced=${outcome.forced}, reason=${outcome.reason}).`;
+  const treeConfirmationMissing = outcome.status === "reclaimed"
+    && outcome.treeCleanupConfirmed === false;
+  if (outcome.status === "reclaimed" && !treeConfirmationMissing) return;
+  const diagnostic = outcome.status === "unreaped"
+    ? `Child process reclamation ended unreaped (correlationId=${correlationId}, `
+      + `forced=${outcome.forced}, reason=${outcome.reason}).`
+    : `Child process exited before Windows tree cleanup confirmation `
+      + `(correlationId=${correlationId}, forced=${outcome.forced}).`;
   const agent = state.activeRuns.get(correlationId);
   if (agent) {
-    agent.outputLog.push(`[${new Date().toISOString().slice(11, 19)}] ! ${diagnostic}`);
+    const marker = outcome.status === "unreaped" ? "!" : "~";
+    agent.outputLog.push(`[${new Date().toISOString().slice(11, 19)}] ${marker} ${diagnostic}`);
     agent.lastActivityAt = Date.now();
     trimAgentBuffers(agent);
   }
@@ -1215,7 +1220,9 @@ export function recordChildReclamationOutcome(
       AGENT_BUFFER_LIMITS.lastResultBytes,
     );
   }
-  logDiagnosticError(`[pi-maestro-teammate] ${diagnostic}`);
+  if (outcome.status === "unreaped") {
+    logDiagnosticError(`[pi-maestro-teammate] ${diagnostic}`);
+  }
 }
 
 export function retireAgent(

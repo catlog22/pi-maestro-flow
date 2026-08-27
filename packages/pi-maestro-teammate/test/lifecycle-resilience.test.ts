@@ -113,19 +113,16 @@ test("child close cleanup cancels the pending grace timer", async () => {
   assert.deepEqual(child.signals, ["SIGTERM"]);
 });
 
-test("Windows force tree cleanup survives root exit before graceful taskkill completes", async () => {
+test("Windows exited roots avoid redundant forced taskkill when graceful tree confirmation stalls", async () => {
   const child = new FakeChild();
   const calls: Array<{ command: string; args: string[]; shell: boolean | undefined }> = [];
-  const killers: EventEmitter[] = [];
   const spawnProcess = ((command: string, args: string[], options: { shell?: boolean }) => {
     calls.push({ command, args, shell: options.shell });
-    const killer = new EventEmitter();
-    killers.push(killer);
-    return killer;
+    return new EventEmitter();
   }) as unknown as typeof import("node:child_process").spawn;
   const termination = createChildTerminationController(child as unknown as ChildProcess, {
     graceMs: 5,
-    reclamationTimeoutMs: 50,
+    reclamationTimeoutMs: 10,
     platform: "win32",
     spawnProcess,
   });
@@ -139,14 +136,16 @@ test("Windows force tree cleanup survives root exit before graceful taskkill com
   child.signalCode = "SIGTERM";
   child.emit("exit", null, "SIGTERM");
   termination.cleanup();
-  await delay(15);
-  assert.deepEqual(calls[1], {
-    command: "taskkill",
-    args: ["/PID", "4321", "/T", "/F"],
-    shell: false,
+  const outcome = await Promise.race([
+    termination.outcome,
+    delay(100).then(() => { throw new Error("Windows exited-root outcome timed out"); }),
+  ]);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(outcome, {
+    status: "reclaimed",
+    forced: false,
+    treeCleanupConfirmed: false,
   });
-  killers[1].emit("close", 0);
-  assert.deepEqual(await termination.outcome, { status: "reclaimed", forced: true });
   assert.deepEqual(child.signals, []);
   termination.cleanup();
 });
@@ -176,6 +175,38 @@ test("Windows forced taskkill timeout reports an unreaped outcome", async () => 
     status: "unreaped",
     forced: true,
     reason: "exit-unconfirmed",
+  });
+  termination.cleanup();
+});
+
+test("Windows forced child exit is reclaimed when taskkill confirmation stalls", async () => {
+  const child = new FakeChild();
+  const killers: EventEmitter[] = [];
+  const spawnProcess = (() => {
+    const killer = new EventEmitter();
+    killers.push(killer);
+    return killer;
+  }) as unknown as typeof import("node:child_process").spawn;
+  const termination = createChildTerminationController(child as unknown as ChildProcess, {
+    graceMs: 5,
+    reclamationTimeoutMs: 15,
+    platform: "win32",
+    spawnProcess,
+  });
+
+  termination.terminate();
+  await delay(8);
+  assert.equal(killers.length, 2);
+  child.signalCode = "SIGKILL";
+  child.emit("exit", null, "SIGKILL");
+  const outcome = await Promise.race([
+    termination.outcome,
+    delay(100).then(() => { throw new Error("Windows forced-exit outcome timed out"); }),
+  ]);
+  assert.deepEqual(outcome, {
+    status: "reclaimed",
+    forced: true,
+    treeCleanupConfirmed: false,
   });
   termination.cleanup();
 });

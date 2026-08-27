@@ -2665,7 +2665,12 @@ export function findStructuredOutputSchemaHazard(
 }
 
 export type ChildReclamationOutcome =
-  | { status: "reclaimed"; forced: boolean }
+  | {
+      status: "reclaimed";
+      forced: boolean;
+      /** False when the direct child exited but Windows taskkill never confirmed its tree sweep. */
+      treeCleanupConfirmed?: false;
+    }
   | {
       status: "unreaped";
       forced: boolean;
@@ -2725,10 +2730,14 @@ export function createChildTerminationController(
   };
   const isAlive = (): boolean =>
     !exitObserved && child.exitCode === null && child.signalCode === null;
-  const markReclaimed = (): void => {
+  const markReclaimed = (treeCleanupConfirmed = true): void => {
     clearForceTimer();
     clearConfirmationTimer();
-    settleOutcome({ status: "reclaimed", forced });
+    settleOutcome({
+      status: "reclaimed",
+      forced,
+      ...(treeCleanupConfirmed ? {} : { treeCleanupConfirmed: false as const }),
+    });
   };
   const onExit = (): void => {
     exitObserved = true;
@@ -2741,7 +2750,8 @@ export function createChildTerminationController(
     confirmationTimer = setTimeout(() => {
       confirmationTimer = undefined;
       if (platform === "win32" && terminationStarted && !windowsTreeCleanupConfirmed) {
-        settleOutcome({ status: "unreaped", forced: true, reason: "exit-unconfirmed" });
+        if (!isAlive()) markReclaimed(false);
+        else settleOutcome({ status: "unreaped", forced: true, reason: "exit-unconfirmed" });
       } else if (!isAlive()) markReclaimed();
       else settleOutcome({ status: "unreaped", forced: true, reason: "exit-unconfirmed" });
     }, reclamationTimeoutMs);
@@ -2824,11 +2834,18 @@ export function createChildTerminationController(
       if (platform !== "win32" && !isAlive()) return;
       forceTimer = setTimeout(() => {
         forceTimer = undefined;
-        forced = true;
         if (platform === "win32") {
-          if (!windowsTreeCleanupConfirmed) killWindowsTree(true);
+          if (!windowsTreeCleanupConfirmed) {
+            // Once the root PID has exited, a second taskkill by that PID cannot
+            // discover descendants that the in-flight graceful tree sweep did
+            // not already capture. Avoid doubling a concurrent graph's taskkill
+            // fan-out; retain a bounded confirmation window for that first sweep.
+            if (!isAlive()) armExitConfirmation();
+            else killWindowsTree(true);
+          }
           return;
         }
+        forced = true;
         if (!isAlive()) {
           markReclaimed();
           return;
