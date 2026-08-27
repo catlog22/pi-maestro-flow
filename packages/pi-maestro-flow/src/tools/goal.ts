@@ -618,7 +618,10 @@ export function onProviderPressureSettled(ctx: GoalContext) {
   updateStatusLine(ctx, activeGoal);
 }
 
-export async function onAgentSettled(ctx: GoalContext) {
+export async function onAgentSettled(
+  ctx: GoalContext,
+  options: { suppressContinuation?: boolean } = {},
+) {
   if (!activeGoal || activeGoal.status !== "active") return;
   if (goalLoopOwner?.goalId !== activeGoal.id || goalLoopOwner.epoch !== goalLifecycleEpoch) return;
 
@@ -700,7 +703,7 @@ export async function onAgentSettled(ctx: GoalContext) {
   }
 
   if (!activeGoal || activeGoal.id !== goalId || activeGoal.status !== "active") return;
-  if (hasPending(ctx)) return;
+  if (options.suppressContinuation || hasPending(ctx)) return;
 
   const tokenDelta = activeGoal.tokensUsed - (activeGoal.prevTokensUsed ?? 0);
   const lowProgressCount = tokenDelta < LOW_PROGRESS_TOKEN_DELTA

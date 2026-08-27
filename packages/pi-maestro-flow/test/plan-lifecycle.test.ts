@@ -15,6 +15,7 @@ import {
   onAgentEndPlan,
   onBeforeAgentStartPlan,
   onContextPlan,
+  onAgentSettledPlan,
   onSessionShutdownPlan,
   onSessionStartPlan,
   onToolCallPlan,
@@ -52,6 +53,14 @@ interface CommandLike {
 
 const COMPACT_EXECUTION_INPUTS = ["\x1b[B", "\x1b[C", "\x1b[13;5u"];
 const WORKFLOW_CURRENT_EXECUTION_INPUTS = ["\x1b[C", "\x1b[13;5u"];
+const WORKFLOW_NEW_COMPACT_EXECUTION_INPUTS = [
+  "\x1b[C",
+  "\x1b[B",
+  "\x1b[C",
+  "\x1b[B",
+  "\x1b[C",
+  "\x1b[13;5u",
+];
 
 test("clean-context compaction marker is recognized only as a leading instruction token", () => {
   assert.equal(isPlanCleanContextCompactionInstructions(PLAN_CLEAN_CONTEXT_COMPACTION_MARKER), true);
@@ -81,8 +90,10 @@ function createHarness(
     discussionInput?: string;
     idle?: boolean;
     arbiter?: CompactionArbiter;
+    compactionHandoffTimeoutMs?: number;
     deferCompactionComplete?: boolean;
     onCompactionRequested?: () => void;
+    sendUserMessageError?: string;
     workflowConfirmation?: () => {
       current?: { sessionId: string; intent: string; available: boolean; reason?: string };
       allowNew: boolean;
@@ -146,6 +157,7 @@ function createHarness(
     getActiveTools() { return [...active]; },
     setActiveTools(names: string[]) { active = [...names]; },
     sendUserMessage(message: string, options?: { deliverAs?: string }) {
+      if (runtime.sendUserMessageError) throw new Error(runtime.sendUserMessageError);
       messages.push(message);
       messageOptions.push(options);
     },
@@ -235,6 +247,9 @@ function createHarness(
     }),
     hasExecutableTodo: (handoffKey) => handoff.todoKeys.includes(handoffKey),
     compactionArbiter: runtime.arbiter,
+    ...(runtime.compactionHandoffTimeoutMs !== undefined
+      ? { compactionHandoffTimeoutMs: runtime.compactionHandoffTimeoutMs }
+      : {}),
     ...(runtime.workflowConfirmation
       ? { workflowConfirmation: () => runtime.workflowConfirmation!() }
       : {}),
@@ -643,7 +658,7 @@ test("/plan approve compacts with an explicit approved-Plan link before executio
   }
 });
 
-test("plan-confirm tool compacts the current Pi session without replacing it", async () => {
+test("plan-confirm tool defers compact until the current Pi turn settles", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-confirm-tool-compact-"));
   const harness = createHarness(
     root,
@@ -662,14 +677,23 @@ test("plan-confirm tool compacts the current Pi session without replacing it", a
     const confirmed = await execute(harness, "plan-confirm");
     const toolText = confirmed.content[0]?.text ?? "";
     assert.equal(confirmed.details.approved, true);
+    assert.equal(confirmed.terminate, true);
+    assert.equal(harness.compactions.length, 0, "the active plan-confirm tool must return before compact starts");
+    assert.equal(harness.messages.length, 0);
+    assert.match(toolText, /after this turn settles/);
+    assert.match(toolText, /resumes automatically/);
+
+    harness.ctx.isIdle = () => true;
+    onAgentSettledPlan(harness.ctx);
     assert.equal(harness.compactions.length, 1);
     assert.match(harness.compactions[0]?.customInstructions ?? "", /authoritative execution contract/);
     assert.doesNotMatch(harness.compactions[0]?.customInstructions ?? "", /maestro-plan-clean-context/);
-    assert.equal(harness.messages.length, 0);
-    assert.match(toolText, /selected Execute/);
-    assert.match(toolText, /Knowledge Gate/);
+    harness.compactions[0]?.onComplete?.({});
+    assert.equal(harness.messages.length, 1);
+    assert.match(harness.messages[0] ?? "", /selected Execute/);
+    assert.match(harness.messages[0] ?? "", /Knowledge Gate/);
     assert.equal(getMode(), "act");
-    assert.equal(harness.aborts, 0);
+    assert.equal(harness.aborts, 1, "compact approval aborts the remaining mixed tool batch");
   } finally {
     onSessionShutdownPlan(harness.ctx);
     await rm(root, { recursive: true, force: true });
@@ -756,6 +780,75 @@ test("Workflow-backed approval persists a bound result before delivering the Run
     assert.match(text, /selected Execute/);
     assert.equal(harness.messages.length, 0);
     assert.deepEqual(harness.messageOptions, []);
+  } finally {
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Workflow new-session compact returns before settlement and resumes after compaction", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-workflow-new-compact-"));
+  let signalCompactionStarted: (() => void) | undefined;
+  const compactionStarted = new Promise<void>((resolve) => { signalCompactionStarted = resolve; });
+  const harness = createHarness(
+    root,
+    false,
+    false,
+    false,
+    false,
+    "workflow-new-compact-chat",
+    WORKFLOW_NEW_COMPACT_EXECUTION_INPUTS,
+    false,
+    { todoKeys: [] },
+    undefined,
+    {
+      arbiter: new CompactionArbiter(),
+      deferCompactionComplete: true,
+      onCompactionRequested: () => signalCompactionStarted?.(),
+      workflowConfirmation: () => ({
+        current: { sessionId: "workflow-current", intent: "Current work", available: true },
+        allowNew: true,
+      }),
+      async publishWorkflowPlan(approved, execution) {
+        assert.deepEqual(execution, { backend: "workflow", context: "compact", workflowTarget: "new" });
+        return {
+          binding: {
+            status: "bound",
+            handoffKey: approved.manifest.handoffKey!,
+            sourceChecksum: approved.manifest.approvedChecksum!,
+            workflowSessionId: "workflow-new",
+            workflowSessionGeneration: "canonical:valid:workflow-new:1",
+            artifactId: "ART-001-001",
+            producerRunId: "run-plan-publish",
+            executionRunId: "run-execute",
+            requestId: "req-plan-new-compact",
+            updatedAt: "2026-08-27T12:00:00.000Z",
+          },
+          executionMessage: "WORKFLOW NEW SESSION RUN BRIEF",
+        };
+      },
+    },
+  );
+  try {
+    await onSessionStartPlan(harness.ctx);
+    await execute(harness, "plan-enter");
+    await execute(harness, "plan-update", { markdown: "# Workflow New Compact Plan" });
+    const confirmed = await execute(harness, "plan-confirm");
+
+    assert.equal(confirmed.details.approved, true);
+    assert.equal(confirmed.terminate, true);
+    assert.equal(confirmed.details.workflowBinding?.workflowSessionId, "workflow-new");
+    assert.equal(confirmed.details.workflowBinding?.deliveryStatus, "pending");
+    assert.equal(harness.compactions.length, 0);
+    assert.equal(harness.messages.length, 0);
+
+    onAgentSettledPlan(harness.ctx);
+    await compactionStarted;
+    assert.equal(harness.compactions.length, 1);
+    harness.compactions[0]?.onComplete?.({});
+    assert.equal(harness.messages.length, 1);
+    assert.match(harness.messages[0] ?? "", /WORKFLOW NEW SESSION RUN BRIEF/);
+    assert.match(harness.messages[0] ?? "", /selected Execute/);
   } finally {
     onSessionShutdownPlan(harness.ctx);
     await rm(root, { recursive: true, force: true });
@@ -1747,7 +1840,7 @@ test("reverse-order Workflow publication cannot bind or deliver after a newer Pl
   }
 });
 
-test("newer Plan operation fences a delayed compact delivery callback", async () => {
+test("newer Plan operation fences a deferred compact delivery callback", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-reverse-delivery-"));
   let signalCompactionStarted: (() => void) | undefined;
   const compactionStarted = new Promise<void>((resolve) => { signalCompactionStarted = resolve; });
@@ -1765,16 +1858,19 @@ test("newer Plan operation fences a delayed compact delivery callback", async ()
     await onSessionStartPlan(harness.ctx);
     await execute(harness, "plan-enter");
     await execute(harness, "plan-update", { markdown: "# Compact delivery candidate" });
-    const staleApproval = execute(harness, "plan-confirm");
+    const approved = await execute(harness, "plan-confirm");
+    assert.equal(approved.details.approved, true);
+    assert.equal(approved.terminate, true);
+    assert.equal(harness.compactions.length, 0);
+
+    onAgentSettledPlan(harness.ctx);
     await compactionStarted;
     assert.equal(harness.compactions.length, 1);
 
     await execute(harness, "plan-enter");
     await execute(harness, "plan-update", { markdown: "# Newer draft before delivery" });
     harness.compactions[0]?.onComplete?.({});
-    const approved = await staleApproval;
 
-    assert.equal(approved.details.error, "E_PLAN_OPERATION_SUPERSEDED");
     assert.equal(harness.messages.length, 0);
     assert.equal(getMode(), "plan");
     assert.equal(getPlanText(), "# Newer draft before delivery");
@@ -1907,27 +2003,30 @@ test("Plan compact execution keeps the current Pi session and creates no clean-c
     await onSessionStartPlan(harness.ctx);
     await execute(harness, "plan-enter");
     await execute(harness, "plan-update", { markdown: "# Compact Current Session Plan" });
-    const confirmation = execute(harness, "plan-confirm");
+    const confirmed = await execute(harness, "plan-confirm");
+
+    assert.equal(confirmed.details.approved, true);
+    assert.equal(confirmed.terminate, true);
+    assert.equal(harness.newSessions, 0);
+    assert.equal(harness.compactions.length, 0);
+    onAgentSettledPlan(harness.ctx);
     await compactionStarted;
 
-    assert.equal(harness.newSessions, 0);
     assert.equal(harness.compactions.length, 1);
     assert.match(harness.compactions[0]?.customInstructions ?? "", /maestro-compaction-owner:plan-handoff/);
     assert.match(harness.compactions[0]?.customInstructions ?? "", /authoritative execution contract/);
     assert.equal(consumePlanCleanContextCompaction(), undefined);
 
     harness.compactions[0]?.onComplete?.({});
-    const confirmed = await confirmation;
-    assert.equal(confirmed.details.approved, true);
-    assert.equal(harness.messages.length, 0);
-    assert.match(confirmed.content[0]?.text ?? "", /selected Execute/);
+    assert.equal(harness.messages.length, 1);
+    assert.match(harness.messages[0] ?? "", /selected Execute/);
   } finally {
     onSessionShutdownPlan(harness.ctx);
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("Nothing to compact returns execution in the plan-confirm tool result", async () => {
+test("Nothing to compact resumes execution after the settled Plan handoff", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-small-context-"));
   let signalCompactionStarted: (() => void) | undefined;
   const compactionStarted = new Promise<void>((resolve) => { signalCompactionStarted = resolve; });
@@ -1952,16 +2051,134 @@ test("Nothing to compact returns execution in the plan-confirm tool result", asy
     await onSessionStartPlan(harness.ctx);
     await execute(harness, "plan-enter");
     await execute(harness, "plan-update", { markdown: "# Small Session Plan" });
-    const confirmation = execute(harness, "plan-confirm");
+    const confirmed = await execute(harness, "plan-confirm");
+    assert.equal(confirmed.terminate, true);
+    assert.equal(harness.compactions.length, 0);
+
+    onAgentSettledPlan(harness.ctx);
     await compactionStarted;
     harness.compactions[0]?.onError?.(new Error("Nothing to compact (session too small)"));
-    const confirmed = await confirmation;
 
-    assert.equal(harness.messages.length, 0);
-    assert.match(confirmed.content[0]?.text ?? "", /selected Execute/);
+    assert.equal(harness.messages.length, 1);
+    assert.match(harness.messages[0] ?? "", /selected Execute/);
     assert.match(harness.notifications.join("\n"), /executing with the current context/);
     assert.equal(onContextPlan([{ role: "user", content: "old", timestamp: 1 }] as never), undefined);
     assert.equal(consumePlanCleanContextCompaction(), undefined);
+  } finally {
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a stale settlement context cannot consume the current Plan compact handoff", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-stale-settlement-"));
+  const harness = createHarness(
+    root,
+    false,
+    false,
+    false,
+    false,
+    "current-settlement-chat",
+    COMPACT_EXECUTION_INPUTS,
+    false,
+    { todoKeys: [] },
+    undefined,
+    { arbiter: new CompactionArbiter(), deferCompactionComplete: true },
+  );
+  try {
+    await onSessionStartPlan(harness.ctx);
+    await execute(harness, "plan-enter");
+    await execute(harness, "plan-update", { markdown: "# Current Settlement Plan" });
+    await execute(harness, "plan-confirm");
+
+    const staleCtx = {
+      ...harness.ctx,
+      sessionManager: {
+        getSessionId: () => "stale-settlement-chat",
+        getSessionFile: () => join(root, "stale-settlement-chat.jsonl"),
+        getSessionName: () => "stale-settlement-chat",
+      },
+    } as ExtensionContext;
+    onAgentSettledPlan(staleCtx);
+    assert.equal(harness.compactions.length, 0);
+
+    onAgentSettledPlan(harness.ctx);
+    assert.equal(harness.compactions.length, 1);
+    harness.compactions[0]?.onComplete?.({});
+    assert.equal(harness.messages.length, 1);
+  } finally {
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a hung Plan compaction falls back once and ignores its late callback", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-compact-watchdog-"));
+  const harness = createHarness(
+    root,
+    false,
+    false,
+    false,
+    false,
+    "compact-watchdog-chat",
+    COMPACT_EXECUTION_INPUTS,
+    false,
+    { todoKeys: [] },
+    undefined,
+    {
+      arbiter: new CompactionArbiter(),
+      compactionHandoffTimeoutMs: 10,
+      deferCompactionComplete: true,
+    },
+  );
+  try {
+    await onSessionStartPlan(harness.ctx);
+    await execute(harness, "plan-enter");
+    await execute(harness, "plan-update", { markdown: "# Compact Watchdog Plan" });
+    await execute(harness, "plan-confirm");
+    onAgentSettledPlan(harness.ctx);
+    assert.equal(harness.compactions.length, 1);
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(harness.messages.length, 1);
+    assert.match(harness.notifications.join("\n"), /did not finish in time/);
+    harness.compactions[0]?.onComplete?.({});
+    assert.equal(harness.messages.length, 1, "a late compaction callback cannot duplicate execution");
+  } finally {
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a synchronous Plan execution enqueue failure is reported without escaping the callback", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-compact-send-failure-"));
+  const harness = createHarness(
+    root,
+    false,
+    false,
+    false,
+    false,
+    "compact-send-failure-chat",
+    COMPACT_EXECUTION_INPUTS,
+    false,
+    { todoKeys: [] },
+    undefined,
+    {
+      arbiter: new CompactionArbiter(),
+      deferCompactionComplete: true,
+      sendUserMessageError: "enqueue unavailable",
+    },
+  );
+  try {
+    await onSessionStartPlan(harness.ctx);
+    await execute(harness, "plan-enter");
+    await execute(harness, "plan-update", { markdown: "# Compact Send Failure Plan" });
+    await execute(harness, "plan-confirm");
+    onAgentSettledPlan(harness.ctx);
+    harness.compactions[0]?.onComplete?.({});
+
+    assert.equal(harness.messages.length, 0);
+    assert.match(harness.notifications.join("\n"), /could not be queued: enqueue unavailable/);
   } finally {
     onSessionShutdownPlan(harness.ctx);
     await rm(root, { recursive: true, force: true });

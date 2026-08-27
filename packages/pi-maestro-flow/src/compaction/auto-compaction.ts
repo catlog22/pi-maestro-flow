@@ -2006,9 +2006,8 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     },
     onCompact(completedOwner, ctx) {
       state.generation += 1;
-      // A completed compaction proves any hung submission settled.
-      state.zombieOwner = undefined;
-      state.zombieDeadlineMs = undefined;
+      // session_compact fires before ctx.compact() invokes onComplete/onError.
+      // Keep zombie ownership until that callback can reconcile a late result.
       const activeRequestOwner = state.activeRequestOwner;
       const wasPreempted = activeRequestOwner !== undefined
         && completedOwner !== undefined

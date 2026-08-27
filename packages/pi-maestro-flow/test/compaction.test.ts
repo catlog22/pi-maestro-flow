@@ -4226,6 +4226,29 @@ test("a tool-boundary gate survives post-block pressure relief and resumes after
   assert.match(fx.sent.at(-1) ?? "", /Continue the interrupted task/);
 });
 
+test("a late tool-boundary compaction resumes when session_compact precedes onComplete", async () => {
+  const fx = loopCriticalFixture();
+  await fx.guard.evaluate(highUsageToolBatch(365_000), fx.ctx);
+  assert.equal(fx.guard.onToolCall(fx.ctx)?.block, true);
+  await fx.guard.onAgentEnd(fx.ctx);
+  assert.equal(fx.compactCalls.length, 1);
+
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.notEqual(fx.guard.describeState().zombieOwner, undefined, "the slow compaction becomes a zombie");
+
+  // Pi emits session_compact before the ctx.compact onComplete callback.
+  fx.guard.onCompact(undefined, fx.ctx);
+  assert.notEqual(
+    fx.guard.describeState().zombieOwner,
+    undefined,
+    "session_compact preserves late-completion ownership for the callback",
+  );
+  fx.compactCalls[0].onComplete();
+
+  assert.equal(fx.guard.describeState().zombieOwner, undefined);
+  assert.match(fx.sent.at(-1) ?? "", /Continue the interrupted task/);
+});
+
 test("tool-call usage creates a hard-threshold intent when the context frame could not", async () => {
   const fx = loopCriticalFixture();
   Object.assign(fx.ctx, {

@@ -3575,6 +3575,32 @@ test("native retry success overwrites the intermediate failure and settles once"
   }
 });
 
+test("Goal settlement can persist progress without racing a Plan continuation", async () => {
+  const sent: string[] = [];
+  initGoal({
+    appendEntry() {},
+    sendMessage(message: { content: string }) { sent.push(message.content); },
+  } as never);
+  const ctx = createContext({
+    isIdle: () => false,
+    hasPendingMessages: () => false,
+  });
+  onSessionStart(ctx);
+
+  try {
+    await executeGoal({ action: "create", objective: "Yield continuation to an approved Plan" }, ctx);
+    await onAgentEnd({ messages: [{ role: "assistant", stopReason: "stop", content: [] }] }, ctx);
+    await onAgentSettled(ctx, { suppressContinuation: true });
+
+    assert.equal(getActiveGoal()?.status, "active");
+    assert.equal(getActiveGoal()?.iteration, 1);
+    assert.equal(sent.length, 0, "Plan settlement owns the next continuation");
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+  }
+});
+
 test("a queued continuation retains Goal ownership without adding another continuation", async () => {
   const sent: string[] = [];
   let pending = true;

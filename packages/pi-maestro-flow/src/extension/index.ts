@@ -182,6 +182,8 @@ import {
   onBeforeAgentStartPlan,
   onToolCallPlan,
   onAgentEndPlan,
+  hasPendingPlanCompactHandoff,
+  onAgentSettledPlan,
   consumePlanCleanContextCompaction,
   applyPlanContextToCompaction,
   isPlanCleanContextCompactionInstructions,
@@ -3399,13 +3401,15 @@ When NOT to use:
   });
 
   // Model failover registered its agent_settled arbiter before this consolidated
-  // root handler. Goal therefore consumes the authoritative settlement first,
-  // then compaction can safely act on the resulting continuation state.
+  // root handler. Goal consumes the authoritative settlement first; an explicit
+  // Plan handoff suppresses only Goal's next continuation, then takes compaction
+  // ownership before the automatic pressure policy runs.
   pi.on("agent_settled", async (_event, ctx) => {
     const syntheticInterruption = midTurnAutoCompaction.isSyntheticCompactionInterruptionActive();
+    const planCompactPending = hasPendingPlanCompactHandoff(ctx);
     try {
       if (syntheticInterruption) goalProviderPressureSettled(ctx);
-      else await goalAgentSettled(ctx);
+      else await goalAgentSettled(ctx, { suppressContinuation: planCompactPending });
     } catch (error) {
       ctx.ui.notify(
         `Goal settlement failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -3417,6 +3421,14 @@ When NOT to use:
     } catch (error) {
       ctx.ui.notify(
         `Goal change event failed after settlement: ${error instanceof Error ? error.message : String(error)}`,
+        "warning",
+      );
+    }
+    try {
+      onAgentSettledPlan(ctx);
+    } catch (error) {
+      ctx.ui.notify(
+        `Plan settlement failed: ${error instanceof Error ? error.message : String(error)}`,
         "warning",
       );
     }

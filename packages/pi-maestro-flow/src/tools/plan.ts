@@ -45,6 +45,7 @@ import {
 import { renderRollbackOverlay } from "../tui/plan-rollback-overlay.ts";
 import { getVisibleTasks } from "./todo.ts";
 import {
+  COMPACTION_LEASE_TIMEOUT_MS,
   type CompactionArbiter,
 } from "../compaction/compaction-arbiter.ts";
 
@@ -63,6 +64,7 @@ interface PlanReviewOutcome {
   executionChoice?: PlanExecutionChoice;
   executionMessage?: string;
   discussionMessage?: string;
+  compactDeferred?: boolean;
 }
 
 type PlanHandoffDelivery = "message" | "tool-result";
@@ -95,6 +97,7 @@ interface PlanRuntimeOptions {
   storeFactory?: (cwd: string, session: PlanSessionIdentity) => PlanStore;
   hasExecutableTodo?: (handoffKey: string) => boolean;
   compactionArbiter?: CompactionArbiter;
+  compactionHandoffTimeoutMs?: number;
   workflowConfirmation?: (
     ctx: PlanContext,
   ) => PlanWorkflowConfirmationOptions | Promise<PlanWorkflowConfirmationOptions>;
@@ -154,6 +157,7 @@ let awaitingAction = false;
 let pendingPlanExitReminder: string | undefined;
 let pendingPlanEnterNote: string | undefined;
 let compactionArbiter: CompactionArbiter | undefined;
+let planCompactionHandoffTimeoutMs = COMPACTION_LEASE_TIMEOUT_MS;
 let workflowConfirmation = async (_ctx: PlanContext): Promise<PlanWorkflowConfirmationOptions> => ({ allowNew: false });
 let publishWorkflowPlan: (
   ctx: PlanContext,
@@ -192,6 +196,15 @@ interface PlanOperationIdentity {
   store?: PlanStore;
 }
 
+interface PlanCompactHandoff {
+  request: PlanHandoffRequestIdentity;
+  operation: PlanOperationIdentity;
+  planPath: string;
+  markdown: string;
+  executionMessage: string;
+  onDelivered?: () => Promise<void>;
+}
+
 interface PlanContextReplacement {
   lifecycleGeneration: number;
   replacement: AgentMessage;
@@ -203,6 +216,7 @@ let nextPlanHandoffRequestId = 0;
 let nextPlanOperationId = 0;
 let activePlanOperation: PlanOperationIdentity | undefined;
 let activePlanHandoffRequest: PlanHandoffRequestIdentity | undefined;
+let pendingPlanCompactHandoff: PlanCompactHandoff | undefined;
 let pendingCleanContextCompaction: PlanCleanContextCompactionRequest | undefined;
 let planContextReplacement: PlanContextReplacement | undefined;
 // Review & Refine state is scoped to the current draft revision and reset when
@@ -235,6 +249,7 @@ export function initPlan(pi: ExtensionAPI, options: PlanRuntimeOptions = {}): vo
     && task.blockedBy.length === 0
   ));
   compactionArbiter = options.compactionArbiter;
+  planCompactionHandoffTimeoutMs = Math.max(1, options.compactionHandoffTimeoutMs ?? COMPACTION_LEASE_TIMEOUT_MS);
   workflowConfirmation = async (ctx) => options.workflowConfirmation?.(ctx) ?? { allowNew: false };
   publishWorkflowPlan = options.publishWorkflowPlan ?? (async () => {
     throw new Error("Workflow-backed Plan execution is unavailable");
@@ -431,16 +446,20 @@ function bindPlanOperation(
   return isCurrentPlanOperation(ctx, operation);
 }
 
+function planOperationMatchesContext(ctx: PlanContext, operation: PlanOperationIdentity): boolean {
+  const session = currentPlanSession(ctx);
+  return session.id === operation.sessionId
+    && `${ctx.cwd}\0${session.id}` === operation.storeKey;
+}
+
 function isCurrentPlanOperation(
   ctx: PlanContext,
   operation: PlanOperationIdentity,
   requireStore = true,
 ): boolean {
-  const session = currentPlanSession(ctx);
   return activePlanOperation === operation
     && planLifecycleGeneration === operation.lifecycleGeneration
-    && session.id === operation.sessionId
-    && `${ctx.cwd}\0${session.id}` === operation.storeKey
+    && planOperationMatchesContext(ctx, operation)
     && (!requireStore || (
       operation.store !== undefined
       && currentStore === operation.store
@@ -587,6 +606,7 @@ function resetRuntimeState(): void {
   awaitingAction = false;
   pendingPlanExitReminder = undefined;
   pendingPlanEnterNote = undefined;
+  pendingPlanCompactHandoff = undefined;
   pendingCleanContextCompaction = undefined;
   planContextReplacement = undefined;
 }
@@ -1142,7 +1162,8 @@ async function reviewPlan(
       operation,
     );
     if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
-    return { approved: true, exited: true, executionMode, executionChoice, executionMessage };
+    const compactDeferred = pendingPlanCompactHandoff?.operation === operation;
+    return { approved: true, exited: true, executionMode, executionChoice, executionMessage, compactDeferred };
   }
   return { approved: false, exited: false };
 }
@@ -1448,75 +1469,21 @@ async function deliverImplementation(
 ): Promise<string | undefined> {
   if (!isCurrentPlanOperation(ctx, operation)) return undefined;
   if (executionMode === "compact") {
-    const lease = compactionArbiter?.request("plan-handoff", {
-      owner: "plan-handoff",
-      reason: "preserve-approved-plan",
-    });
-    if (compactionArbiter && !lease) {
-      ctx.ui.notify("Compaction is already in progress; executing with the current context.", "warning");
-      if (handoffDelivery === "tool-result") {
-        await onDelivered?.();
-        return isCurrentPlanOperation(ctx, operation) ? executionMessage : undefined;
-      }
-      sendImplementationMessage(ctx, executionMessage);
-      await onDelivered?.();
-      if (!isCurrentPlanOperation(ctx, operation)) return undefined;
-      return;
-    }
-    const handoffRequest = beginPlanHandoff();
-    let delivered = false;
-    let resolveToolResult: ((message: string | undefined) => void) | undefined;
-    const toolResult = handoffDelivery === "tool-result"
-      ? new Promise<string | undefined>((resolve) => { resolveToolResult = resolve; })
-      : undefined;
-    const deliver = () => {
-      if (delivered) return false;
-      delivered = true;
-      lease?.release();
-      const currentOperation = isCurrentPlanOperation(ctx, operation);
-      const currentHandoff = finishPlanHandoff(handoffRequest);
-      if (!currentOperation || !currentHandoff) {
-        resolveToolResult?.(undefined);
-        return false;
-      }
-      if (handoffDelivery === "tool-result") {
-        void (async () => {
-          await onDelivered?.();
-          resolveToolResult?.(isCurrentPlanOperation(ctx, operation) ? executionMessage : undefined);
-        })();
-      } else {
-        sendImplementationMessage(ctx, executionMessage);
-        void onDelivered?.();
-      }
-      return true;
-    };
-    const compactionInstructions = [
-      "Treat the following approved Plan as the authoritative execution contract.",
-      `Preserve its source path, locked boundaries, risks, acceptance checks, and current execution position: ${planPath}`,
-      "",
+    const handoff: PlanCompactHandoff = {
+      request: beginPlanHandoff(),
+      operation,
+      planPath,
       markdown,
-    ].join("\n");
-    ctx.ui.notify("Compacting context with the approved Plan preserved…", "info");
-    try {
-      ctx.compact({
-        customInstructions: lease?.tagInstructions(compactionInstructions) ?? compactionInstructions,
-        onComplete() {
-          deliver();
-        },
-        onError(error) {
-          if (isCurrentPlanOperation(ctx, operation) && isCurrentPlanHandoff(handoffRequest)) {
-            ctx.ui.notify(`Compaction failed; executing with the current context: ${error.message}`, "warning");
-          }
-          deliver();
-        },
-      });
-    } catch (error) {
-      if (isCurrentPlanOperation(ctx, operation) && isCurrentPlanHandoff(handoffRequest)) {
-        ctx.ui.notify(`Compaction failed; executing with the current context: ${errorMessage(error)}`, "warning");
-      }
-      deliver();
+      executionMessage,
+      ...(onDelivered ? { onDelivered } : {}),
+    };
+    if (handoffDelivery === "tool-result") {
+      pendingPlanCompactHandoff = handoff;
+      ctx.ui.notify("Plan compaction queued for the end of the current turn…", "info");
+      return undefined;
     }
-    return toolResult;
+    startPlanCompaction(ctx, handoff);
+    return undefined;
   }
 
   if (handoffDelivery === "tool-result") {
@@ -1528,11 +1495,97 @@ async function deliverImplementation(
   if (!isCurrentPlanOperation(ctx, operation)) return undefined;
 }
 
+export function hasPendingPlanCompactHandoff(ctx: PlanContext): boolean {
+  const handoff = pendingPlanCompactHandoff;
+  return Boolean(handoff
+    && planOperationMatchesContext(ctx, handoff.operation)
+    && isCurrentPlanOperation(ctx, handoff.operation));
+}
+
+export function onAgentSettledPlan(ctx: PlanContext): void {
+  const handoff = pendingPlanCompactHandoff;
+  if (!handoff || !planOperationMatchesContext(ctx, handoff.operation)) return;
+  pendingPlanCompactHandoff = undefined;
+  if (!isCurrentPlanOperation(ctx, handoff.operation)) {
+    finishPlanHandoff(handoff.request);
+    return;
+  }
+  startPlanCompaction(ctx, handoff);
+}
+
+function startPlanCompaction(ctx: PlanContext, handoff: PlanCompactHandoff): void {
+  const { request, operation, planPath, markdown, executionMessage, onDelivered } = handoff;
+  const lease = compactionArbiter?.request("plan-handoff", {
+    owner: "plan-handoff",
+    reason: "preserve-approved-plan",
+  });
+  let delivered = false;
+  let watchdog: ReturnType<typeof setTimeout> | undefined;
+  const deliver = (releaseLease = true) => {
+    if (delivered) return false;
+    delivered = true;
+    if (watchdog) clearTimeout(watchdog);
+    if (releaseLease) lease?.release();
+    if (!isCurrentPlanOperation(ctx, operation) || !isCurrentPlanHandoff(request)) return false;
+    try {
+      sendImplementationMessage(ctx, executionMessage);
+    } catch (error) {
+      finishPlanHandoff(request);
+      ctx.ui.notify(`Plan execution handoff could not be queued: ${errorMessage(error)}`, "error");
+      return false;
+    }
+    if (!finishPlanHandoff(request)) return false;
+    void onDelivered?.();
+    return true;
+  };
+
+  if (compactionArbiter && !lease) {
+    ctx.ui.notify("Compaction is already in progress; executing with the current context.", "warning");
+    deliver();
+    return;
+  }
+
+  const compactionInstructions = [
+    "Treat the following approved Plan as the authoritative execution contract.",
+    `Preserve its source path, locked boundaries, risks, acceptance checks, and current execution position: ${planPath}`,
+    "",
+    markdown,
+  ].join("\n");
+  ctx.ui.notify("Compacting context with the approved Plan preserved…", "info");
+  watchdog = setTimeout(() => {
+    if (isCurrentPlanOperation(ctx, operation) && isCurrentPlanHandoff(request)) {
+      ctx.ui.notify("Plan compaction did not finish in time; executing with the current context.", "warning");
+    }
+    deliver(false);
+  }, planCompactionHandoffTimeoutMs);
+  watchdog.unref?.();
+  try {
+    ctx.compact({
+      customInstructions: lease?.tagInstructions(compactionInstructions) ?? compactionInstructions,
+      onComplete() {
+        deliver();
+      },
+      onError(error) {
+        if (isCurrentPlanOperation(ctx, operation) && isCurrentPlanHandoff(request)) {
+          ctx.ui.notify(`Compaction failed; executing with the current context: ${error.message}`, "warning");
+        }
+        deliver();
+      },
+    });
+  } catch (error) {
+    if (isCurrentPlanOperation(ctx, operation) && isCurrentPlanHandoff(request)) {
+      ctx.ui.notify(`Compaction failed; executing with the current context: ${errorMessage(error)}`, "warning");
+    }
+    deliver();
+  }
+}
+
 function sendImplementationMessage(ctx: PlanContext, message: string): void {
+  if (!extensionApi) throw new Error("Plan extension API is not initialized");
   const opts = ctx.isIdle?.() === false
     ? { deliverAs: "followUp" as const }
     : undefined;
-  extensionApi?.sendUserMessage(message, opts);
+  extensionApi.sendUserMessage(message, opts);
 }
 
 function currentDetails(action: PlanToolDetails["action"]): PlanToolDetails {
@@ -1582,11 +1635,13 @@ function result(
   text: string,
   details: PlanToolDetails,
   isError = false,
+  terminate = false,
 ): AgentToolResult<PlanToolDetails> {
   return {
     content: [{ type: "text", text }],
     details,
     ...(isError ? { isError: true } : {}),
+    ...(terminate ? { terminate: true } : {}),
   } as unknown as AgentToolResult<PlanToolDetails>;
 }
 
@@ -1698,8 +1753,8 @@ export function registerPlanTools(
   const confirmTool: ToolDefinition<typeof EmptyPlanParams, PlanToolDetails> = {
     name: "plan-confirm",
     label: "Plan Confirm",
-    description: "Present the Markdown Plan in an interactive UI with choices to execute, modify, discuss, run role-based Review & Refine, or exit. Execute and discussion feedback return through the tool result without injecting another message.",
-    promptSnippet: "Standard presentation step after plan-update. The user controls approval and may run role-based Review & Refine; choosing Execute authorizes immediate implementation through the returned tool result.",
+    description: "Present the Markdown Plan in an interactive UI with choices to execute, modify, discuss, run role-based Review & Refine, or exit. Current-context execution returns through the tool result; compact execution settles the turn, compacts, then resumes automatically.",
+    promptSnippet: "Standard presentation step after plan-update. The user controls approval and may run role-based Review & Refine; choosing Execute authorizes immediate implementation, with compact execution resuming automatically after turn settlement.",
     parameters: EmptyPlanParams,
     async execute(_id, _params, signal, _onUpdate, ctx) {
       const operation = beginPlanOperation(ctx);
@@ -1708,10 +1763,19 @@ export function registerPlanTools(
       const outcome = await reviewPlan(ctx, true, "tool-result", operation, signal, options.onUserAttention);
       if (!isCurrentPlanOperation(ctx, operation)) return supersededResult("confirm");
       onPlanModeChanged?.(ctx);
+      if (outcome.compactDeferred) {
+        try {
+          ctx.abort?.();
+        } catch (error) {
+          ctx.ui.notify(`Plan could not stop the current tool batch before compaction: ${errorMessage(error)}`, "warning");
+        }
+      }
       const summary = outcome.approved
         ? outcome.executionChoice?.backend === "workflow" && latestWorkflowBinding?.status === "failed"
           ? "Plan approved; Workflow binding failed and execution was not started."
-          : `Plan approved; Act mode restored (${outcome.executionMode ?? "current"} context, ${outcome.executionChoice?.backend ?? "standalone"}).`
+          : outcome.compactDeferred
+            ? `Plan approved; Act mode restored (${outcome.executionMode ?? "compact"} context, ${outcome.executionChoice?.backend ?? "standalone"}). Compaction will start after this turn settles, then execution resumes automatically.`
+            : `Plan approved; Act mode restored (${outcome.executionMode ?? "current"} context, ${outcome.executionChoice?.backend ?? "standalone"}).`
         : outcome.exited
           ? buildPlanExitMessage()
           : outcome.discussionMessage
@@ -1724,7 +1788,7 @@ export function registerPlanTools(
       return result(text, {
         ...currentDetails("confirm"),
         approved: outcome.approved,
-      });
+      }, false, outcome.compactDeferred === true);
     },
     renderShell: "self",
     renderCall(_args, theme, ctx) {
