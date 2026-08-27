@@ -7,7 +7,7 @@ import {
   KnowledgeCliAdapter,
   resolveLatestSessionId,
 } from "../src/knowledge/cli-adapter.ts";
-import type { RunCliResult } from "../src/session/cli-adapter.ts";
+import type { RunCliResult, RunCliRunner } from "../src/session/cli-adapter.ts";
 
 test("knowledge stage assembles the full CLI argv", async () => {
   const adapter = new KnowledgeCliAdapter("/proj", fakeRunner((args) => {
@@ -254,6 +254,70 @@ test("knowledge record surfaces CLI failures", async () => {
     adapter.recordInputs({ knowledgeIds: ["spec:S-1"] }),
     /failed \(1\): Error: No unique active Run found/,
   );
+});
+
+test("knowledge resolveMany prefers its batch signal and otherwise preserves each item signal", async () => {
+  const itemController = new AbortController();
+  const batchController = new AbortController();
+  const received: Array<AbortSignal | undefined> = [];
+  const runner: RunCliRunner = async (args, _cwd, options) => {
+    received.push(options?.signal);
+    return jsonResult([...args], { candidates: [] });
+  };
+  const adapter = new KnowledgeCliAdapter("/proj", runner);
+  const item = {
+    candidateId: "candidate-1",
+    as: "unique" as const,
+    reason: "reviewed",
+    signal: itemController.signal,
+  };
+
+  assert.deepEqual(await adapter.resolveMany("session-1", [item]), { resolved: 1, failed: [] });
+  assert.deepEqual(
+    await adapter.resolveMany("session-1", [item], { signal: batchController.signal }),
+    { resolved: 1, failed: [] },
+  );
+  assert.deepEqual(received, [itemController.signal, batchController.signal]);
+});
+
+test("knowledge resolveMany rethrows aborts instead of recording a per-item failure", async () => {
+  let calls = 0;
+  const runner: RunCliRunner = async () => {
+    calls += 1;
+    const error = new Error("cancelled");
+    error.name = "AbortError";
+    throw error;
+  };
+  const adapter = new KnowledgeCliAdapter("/proj", runner);
+
+  await assert.rejects(
+    () => adapter.resolveMany("session-1", [
+      { candidateId: "candidate-1", as: "unique", reason: "reviewed" },
+      { candidateId: "candidate-2", as: "unique", reason: "reviewed" },
+    ]),
+    { name: "AbortError" },
+  );
+  assert.equal(calls, 1);
+});
+
+test("knowledge adapter forwards AbortSignal without changing existing domain options", async () => {
+  const controller = new AbortController();
+  const received: Array<AbortSignal | undefined> = [];
+  const runner: RunCliRunner = async (args, _cwd, options) => {
+    received.push(options?.signal);
+    return jsonResult([...args], args[1] === "record"
+      ? { session_id: "session-1", run_id: "run-1", recorded: 1 }
+      : { schema_version: "knowledge-review/1.0", session_id: "session-1", candidates: [] });
+  };
+  const adapter = new KnowledgeCliAdapter("/proj", runner);
+
+  await adapter.review("session-1", { refresh: true, signal: controller.signal });
+  await adapter.recordInputs(
+    { knowledgeIds: ["spec:S-1"], signal: "validated" },
+    { signal: controller.signal },
+  );
+
+  assert.deepEqual(received, [controller.signal, controller.signal]);
 });
 
 type FakeRunner = (args: string[]) => Promise<RunCliResult>;

@@ -230,6 +230,8 @@ export interface KnowledgeResolveOptions {
   as: KnowledgeResolutionChoice;
   target?: string;
   reason: string;
+  /** Cancels the owned Maestro CLI process tree. */
+  signal?: AbortSignal;
 }
 
 export interface ResolveManyItem extends KnowledgeResolveOptions {
@@ -247,22 +249,28 @@ export class KnowledgeCliAdapter {
     private readonly runner: RunCliRunner = defaultRunner,
   ) {}
 
-  async review(sessionId: string, options: { refresh?: boolean } = {}): Promise<KnowledgeReviewView> {
+  async review(
+    sessionId: string,
+    options: { refresh?: boolean; signal?: AbortSignal } = {},
+  ): Promise<KnowledgeReviewView> {
     return this.invokeJson<KnowledgeReviewView>([
       "knowledge", "review", required(sessionId, "sessionId"),
       ...(options.refresh ? ["--refresh"] : []),
       "--json",
       "--workflow-root", this.workflowRoot,
-    ]);
+    ], options.signal);
   }
 
-  async audit(scope: "spec" | "knowhow" | "all" = "all"): Promise<KnowledgeAudit> {
+  async audit(
+    scope: "spec" | "knowhow" | "all" = "all",
+    options: { signal?: AbortSignal } = {},
+  ): Promise<KnowledgeAudit> {
     return this.invokeJson<KnowledgeAudit>([
       "knowledge", "audit",
       "--scope", scope,
       "--json",
       "--workflow-root", this.workflowRoot,
-    ]);
+    ], options.signal);
   }
 
   async resolve(sessionId: string, candidateId: string, options: KnowledgeResolveOptions): Promise<KnowledgeReviewView> {
@@ -274,24 +282,38 @@ export class KnowledgeCliAdapter {
       "--reason", required(options.reason, "reason"),
       "--json",
       "--workflow-root", this.workflowRoot,
-    ]);
+    ], options.signal);
   }
 
-  async resolveMany(sessionId: string, items: readonly ResolveManyItem[]): Promise<ResolveManyResult> {
+  async resolveMany(
+    sessionId: string,
+    items: readonly ResolveManyItem[],
+    options: { signal?: AbortSignal } = {},
+  ): Promise<ResolveManyResult> {
     const failed: Array<{ candidateId: string; error: string }> = [];
     let resolved = 0;
     for (const item of items) {
+      const signal = options.signal ?? item.signal;
       try {
-        await this.resolve(sessionId, item.candidateId, { as: item.as, target: item.target, reason: item.reason });
+        await this.resolve(sessionId, item.candidateId, {
+          as: item.as,
+          target: item.target,
+          reason: item.reason,
+          signal,
+        });
         resolved += 1;
       } catch (error) {
+        if (signal?.aborted || isAbortError(error)) throw error;
         failed.push({ candidateId: item.candidateId, error: errorMessage(error) });
       }
     }
     return { resolved, failed };
   }
 
-  async promote(sessionId: string, options: { candidates?: readonly string[]; all?: boolean }): Promise<KnowledgePromoteResult> {
+  async promote(
+    sessionId: string,
+    options: { candidates?: readonly string[]; all?: boolean; signal?: AbortSignal },
+  ): Promise<KnowledgePromoteResult> {
     const candidates = options.candidates ?? [];
     if (!options.all && candidates.length === 0) {
       throw new Error("promote requires at least one candidate id or --all");
@@ -302,10 +324,13 @@ export class KnowledgeCliAdapter {
       ...(options.all ? ["--all"] : []),
       "--json",
       "--workflow-root", this.workflowRoot,
-    ]);
+    ], options.signal);
   }
 
-  async recordInputs(options: KnowledgeRecordOptions): Promise<KnowledgeRecordResult> {
+  async recordInputs(
+    options: KnowledgeRecordOptions,
+    invocation: { signal?: AbortSignal } = {},
+  ): Promise<KnowledgeRecordResult> {
     const ids = options.knowledgeIds.map((id) => id.trim()).filter(Boolean);
     if (ids.length === 0) throw new Error("knowledgeIds must be non-empty");
     return this.invokeJson<KnowledgeRecordResult>([
@@ -317,10 +342,13 @@ export class KnowledgeCliAdapter {
       ...(options.sessionId ? ["--session", required(options.sessionId, "sessionId")] : []),
       "--json",
       "--workflow-root", this.workflowRoot,
-    ]);
+    ], invocation.signal);
   }
 
-  async stage(options: KnowledgeStageOptions): Promise<KnowledgeStageResult> {
+  async stage(
+    options: KnowledgeStageOptions,
+    invocation: { signal?: AbortSignal } = {},
+  ): Promise<KnowledgeStageResult> {
     const target = required(options.target, "target");
     const title = required(options.title, "title");
     const content = required(options.content, "content");
@@ -357,7 +385,7 @@ export class KnowledgeCliAdapter {
         transcriptQuotePath = required(options.transcriptQuoteFile, "transcriptQuoteFile");
       }
       if (transcriptQuotePath) args.push("--transcript-quote", transcriptQuotePath);
-      return await this.invokeJson<KnowledgeStageResult>(args);
+      return await this.invokeJson<KnowledgeStageResult>(args, invocation.signal);
     } finally {
       if (transcriptQuoteTmpDir) {
         try {
@@ -374,8 +402,8 @@ export class KnowledgeCliAdapter {
     }
   }
 
-  private async invokeJson<T>(args: readonly string[]): Promise<T> {
-    const result = await this.runner(args, this.workflowRoot);
+  private async invokeJson<T>(args: readonly string[], signal?: AbortSignal): Promise<T> {
+    const result = await this.runner(args, this.workflowRoot, { signal });
     if (result.exitCode !== 0) {
       throw new Error(`maestro ${args.join(" ")} failed (${result.exitCode}): ${result.stderr || result.stdout}`);
     }
@@ -421,6 +449,10 @@ function required(value: string, label: string): string {
   const normalized = value.trim();
   if (!normalized) throw new Error(`${label} must be non-empty`);
   return normalized;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
 }
 
 function errorMessage(error: unknown): string {

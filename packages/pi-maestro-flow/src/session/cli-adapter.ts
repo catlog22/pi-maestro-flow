@@ -1,14 +1,13 @@
-import type { ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import crossSpawn from "cross-spawn";
 import { z } from "zod";
 import { parseRunResponse, projectPublicRunResponse } from "./run-response.ts";
+import { reclaimOwnedProcessTree } from "../process/owned-process-tree.ts";
 
 const DEFAULT_RUN_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024;
-const TERMINATION_GRACE_MS = 1_000;
 const PI_PACKAGE_ROOT = resolvePath(dirname(fileURLToPath(import.meta.url)), "../..");
 
 function advertisedPiPackageRoot(): string {
@@ -155,7 +154,16 @@ export interface RunEditOptions {
   insertedBy?: string;
 }
 
-export type RunCliRunner = (args: readonly string[], cwd: string) => Promise<RunCliResult>;
+export interface RunCliRunnerOptions {
+  /** Cancels the owned CLI process tree. Existing two-argument runners remain compatible. */
+  signal?: AbortSignal;
+}
+
+export type RunCliRunner = (
+  args: readonly string[],
+  cwd: string,
+  options?: RunCliRunnerOptions,
+) => Promise<RunCliResult>;
 
 export class UnsupportedRunCapabilityError extends Error {
   constructor(readonly capability: string) {
@@ -604,23 +612,35 @@ function issueText(issue: { path: PropertyKey[]; message: string }): string {
   return `${path}: ${issue.message}`;
 }
 
+export interface DefaultRunCliOptions extends RunCliRunnerOptions {
+  timeoutMs?: number;
+  maxOutputBytes?: number;
+  executable?: string;
+  spawnProcess?: typeof crossSpawn;
+}
+
 export async function defaultRunner(
   args: readonly string[],
   cwd: string,
-  options: {
-    timeoutMs?: number;
-    maxOutputBytes?: number;
-    executable?: string;
-    spawnProcess?: typeof crossSpawn;
-  } = {},
+  options: DefaultRunCliOptions = {},
 ): Promise<RunCliResult> {
   const timeoutMs = positiveInteger(options.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS, "timeoutMs");
   const maxOutputBytes = positiveInteger(options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES, "maxOutputBytes");
   const executable = options.executable ?? (process.platform === "win32" ? "maestro.cmd" : "maestro");
   const spawnProcess = options.spawnProcess ?? crossSpawn;
+  if (options.signal?.aborted) {
+    return {
+      argv: [...args],
+      stdout: "",
+      stderr: "maestro CLI aborted",
+      exitCode: 1,
+    };
+  }
   return new Promise((resolve) => {
     const child = spawnProcess(executable, [...args], {
       cwd,
+      // POSIX group isolation only: the CLI remains referenced and its group
+      // is reclaimed on normal exit as well as abort/timeout/failure.
       detached: process.platform !== "win32",
       env: {
         ...process.env,
@@ -634,10 +654,16 @@ export async function defaultRunner(
     let outputBytes = 0;
     let settled = false;
     let failure: string | undefined;
+    let reclamationStarted = false;
+    let closeSeen = false;
+    let normalExitCode: number | null = null;
+    let normalReclamationComplete = false;
 
     const cleanup = (): void => {
       clearTimeout(timer);
+      options.signal?.removeEventListener("abort", onAbort);
       child.removeListener("error", onError);
+      child.removeListener("exit", onExit);
       child.removeListener("close", onClose);
       child.stdout?.removeListener("data", onStdout);
       child.stdout?.removeListener("error", onStdoutError);
@@ -657,12 +683,16 @@ export async function defaultRunner(
       });
     };
     const stopWith = (message: string): void => {
-      if (failure !== undefined || settled) return;
+      if (failure !== undefined || settled || reclamationStarted) return;
       failure = message;
+      reclamationStarted = true;
       clearTimeout(timer);
-      void terminateProcessTree(child).then(
+      options.signal?.removeEventListener("abort", onAbort);
+      child.stdout?.removeListener("data", onStdout);
+      child.stderr?.removeListener("data", onStderr);
+      void reclaimOwnedProcessTree(child, { label: "maestro CLI" }).then(
         () => finish(1, message),
-        () => finish(1, message),
+        (error) => finish(1, `${message}; process-tree cleanup failed: ${errorMessage(error)}`),
       );
     };
     const collect = (target: Buffer[], chunk: Buffer | string): void => {
@@ -675,6 +705,24 @@ export async function defaultRunner(
       outputBytes += buffer.byteLength;
       target.push(buffer);
     };
+    const finishNormalClose = (): void => {
+      if (!closeSeen || !normalReclamationComplete || failure !== undefined || settled) return;
+      finish(normalExitCode ?? 1);
+    };
+    const startNormalReclamation = (code: number | null): void => {
+      if (failure !== undefined || settled || reclamationStarted) return;
+      reclamationStarted = true;
+      normalExitCode = code;
+      clearTimeout(timer);
+      options.signal?.removeEventListener("abort", onAbort);
+      void reclaimOwnedProcessTree(child, { label: "maestro CLI" }).then(
+        () => {
+          normalReclamationComplete = true;
+          finishNormalClose();
+        },
+        (error) => finish(1, `maestro CLI exited but process-tree cleanup was unconfirmed: ${errorMessage(error)}`),
+      );
+    };
     const onStdout = (chunk: Buffer | string): void => collect(stdout, chunk);
     const onStderr = (chunk: Buffer | string): void => collect(stderr, chunk);
     const onStdoutError = (error: Error): void => stopWith(`maestro CLI stdout failed: ${errorMessage(error)}`);
@@ -684,9 +732,13 @@ export async function defaultRunner(
       if (child.pid) stopWith(message);
       else finish(1, message);
     };
+    const onExit = (code: number | null): void => startNormalReclamation(code);
     const onClose = (code: number | null): void => {
-      if (failure === undefined) finish(code ?? 1);
+      closeSeen = true;
+      startNormalReclamation(code);
+      finishNormalClose();
     };
+    const onAbort = (): void => stopWith("maestro CLI aborted");
     const timer = setTimeout(
       () => stopWith(`maestro CLI timed out after ${timeoutMs}ms`),
       timeoutMs,
@@ -698,64 +750,11 @@ export async function defaultRunner(
     child.stderr?.on("data", onStderr);
     child.stderr?.on("error", onStderrError);
     child.once("error", onError);
+    child.once("exit", onExit);
     child.once("close", onClose);
+    if (options.signal?.aborted) onAbort();
+    else options.signal?.addEventListener("abort", onAbort, { once: true });
   });
-}
-
-async function terminateProcessTree(child: ChildProcess): Promise<void> {
-  if (!isRunning(child)) return;
-  if (process.platform === "win32" && child.pid) {
-    const killer = crossSpawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
-      windowsHide: true,
-      stdio: "ignore",
-    });
-    await waitForExit(killer, TERMINATION_GRACE_MS);
-    if (isRunning(child)) {
-      try { child.kill("SIGKILL"); } catch {}
-      await waitForExit(child, TERMINATION_GRACE_MS);
-    }
-    return;
-  }
-
-  signalProcessGroup(child, "SIGTERM");
-  if (await waitForExit(child, TERMINATION_GRACE_MS)) return;
-  signalProcessGroup(child, "SIGKILL");
-  await waitForExit(child, TERMINATION_GRACE_MS);
-}
-
-function signalProcessGroup(child: ChildProcess, signal: NodeJS.Signals): void {
-  if (child.pid) {
-    try {
-      process.kill(-child.pid, signal);
-      return;
-    } catch {}
-  }
-  try { child.kill(signal); } catch {}
-}
-
-function waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
-  if (!isRunning(child)) return Promise.resolve(true);
-  return new Promise((resolve) => {
-    const cleanup = (): void => {
-      clearTimeout(timer);
-      child.removeListener("close", onExit);
-      child.removeListener("error", onError);
-    };
-    const settle = (exited: boolean): void => {
-      cleanup();
-      resolve(exited);
-    };
-    const onExit = (): void => settle(true);
-    const onError = (): void => settle(false);
-    const timer = setTimeout(() => settle(false), timeoutMs);
-    timer.unref?.();
-    child.once("close", onExit);
-    child.once("error", onError);
-  });
-}
-
-function isRunning(child: ChildProcess): boolean {
-  return child.exitCode === null && child.signalCode === null;
 }
 
 function boundedDiagnostic(stderr: string, message: string, maxBytes: number): string {
