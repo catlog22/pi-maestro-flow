@@ -1,126 +1,152 @@
-# v0.22.0 — Teammate 2.0 Backend Registry, MCPX Dashboard, Prompt Enhance & Usage Insights
-
-> **Post-release status (2026-08-21).** Two packaging-fix patches have been
-> published to npm on top of this release: **0.22.1** (declares flow's runtime
-> dependency on `pi-maestro-backends`, previously installed only transitively via
-> teammate) and **0.22.2** (switches the `maestro-flow` engine constraint from an
-> exact pin `0.5.79` to caret `^0.5.79`). Both are pure packaging fixes, so the
-> install command and announcement banner remain at `@0.22.0`. Development beyond
-> `v0.22.0` (model-registry, completion-durability, DSH ssh, browser
-> stealth/attach, computer-use/OCR, MCPX enhancements, …) is tracked in the
-> **Unreleased** section of `docs-site/src/content/docs/guides/changelog.md`
-> (and `changelog.en.md`) and will be promoted to a formal release section on
-> the next tagged version.
+# v0.23.0 — Runtime Broker & Completion Durability, Computer Use/OCR, Plan Refine, Usage Trends
 
 ## Overview
 
-This release publishes **Teammate 2.0.0** (the committed breaking major, previously
-unpublished), **Flow 0.22.0**, **Cockpit 0.17.0**, and **Settings-Core 0.2.0**,
-built on 138 commits since v0.21.6 (288 files, +40,490/−3,520). Core engine pin
-synced `maestro-flow@0.5.75 → 0.5.79` (upstream latest).
+This release publishes **Flow 0.23.0**, **Teammate 2.1.0**, **Cockpit 0.18.0**,
+**Settings-Core 0.2.1**, **Backend-Core 0.1.1**, and **Backends 0.1.1**, built on
+**121 commits** since v0.22.0 (789 files, +135,044/−12,784). Core engine pin
+synced `maestro-flow@0.5.79 → 0.5.82` (upstream latest, caret range).
+
+The headline themes are: a **persistent workspace runtime broker** with
+canonical turn lifecycle and **completion-durability** (crash-consistent
+redelivery of teammate results); **native Computer Use** with an ONNX OCR
+vision pipeline; the **Review & Refine** Plan panel (Apply/Discard in-panel);
+**MCPX dashboard** enhancements; **durable flow schedule** controller; and a
+**per-provider 7-day token trend** in the Cockpit `/usage` overlay.
 
 ## Highlights
 
-### Teammate 2.0.0 — Backend Registry (breaking major)
+### Flow 0.23.0
 
-- **Breaking**: remote journal format `REMOTE_JOURNAL_VERSION` 1 → 2 with **no
-  migration path** — old v1 journals hard-fail at parse time and must be deleted
-  and rebuilt; remote protocol vocabulary `RemoteCapability` removed, protocol
-  bumped to `remote/2`.
-- Inline `cli/<tool>` dispatch removed — routing now goes through the **backend
-  registry**; third-party adapters must implement the backend contract.
-- New pure-contract package `pi-maestro-backend-core` (capability table expanded
-  to 12 entries; credentials modeled as references, not masked values) plus the
-  Pi subprocess backend adapter and the dsh backend (per-run hosted loopback MCP
-  todo endpoint; `outputSchema` host-side compensation upgraded from unsupported
-  to emulated).
-- Generic **ACP-CLI TeammateBackend**: facts returned via `outcome.recovery`,
-  `settleAcpRun` observes tool events with done/in-flight counts, ACP handshake
-  timeout configurable (no longer hardcoded 15s), failover gate driven by
-  observed activity.
-- **In-process model failover** via `set_model` RPC — hot-swap models without
-  restarting the run; manual model switch resets that model's circuit breaker.
-- Cross-window workspace peers and cross-window replies; lifecycle-boundary
-  regression hardening; task-delegation refinements.
+- **Session/3.0 + chain update** — migrated to the v3 Session/Run chain surface:
+  `session/3.0 chain insert/update` with migrate fences and legacy-mode
+  classification; flow consumes the core v3 plan-publish producer instead of
+  synthesizing the envelope, so Run handoffs are authoritative.
+- **Durable flow schedule controller** — Todo-bound schedule projections with a
+  serialized, concurrency-balanced suite; schedule control restricted to the
+  monitor role; flow-schedule runtime state directory git-ignored.
+- **Review & Refine Plan panel** — a multi-role (reviewer/decomposer/optimizer/
+  brainstormer) read-only subagent panel with Plan refine + rollback; the Apply
+  and Discard actions now live **inside** the refine panel (numbered 1–6 rows +
+  `a`/`d` shortcuts) instead of on the Plan confirmation screen, so the refine
+  lifecycle is self-contained. `plan-decompose` injects the main-flow
+  decomposition prompt for an approved Plan.
+- **Native Computer Use** — desktop control tool with manager + broker and
+  packaging tests; ONNX RapidOCR vision pipeline with bundled tesseract language
+  packs; expanded native Computer Use support.
+- **Browser bridge** — stealth anti-fingerprint patches + attach-to-user-browser
+  and visible launch modes; per-run request-interception scoping; desktop notify
+  + user-attention prompts + schedule identity.
+- **API Manager model discovery** enriched with `models.dev` reference specs;
+  teammate-visible models filtered for OAuth providers; model-failover
+  default-table inheritance + raced-cancel terminality; global default fallback
+  priority table.
+- **Unified `/install` command** with AI-driven setup docs; self-evolve
+  knowledge-moment gating (collection 87→17, −80%) + Phase 7 semantic enrichment,
+  tool trajectory, and session wrap; session-info message renderer + self-evolve
+  install item.
+- Robustness: post-compaction interrupted tasks no longer strand — zombie
+  late-completions replay and resume via a unified recovery strategy; loop
+  statusline uses status glyphs + relative time; teammate output buckets write
+  `.workspace` metadata with cwd-subtree discovery; tracked optional skills
+  preserved during cleanup; trajectory episodes typed in self-evolve signals.
 
-### Flow 0.22.0
+### Teammate 2.1.0
 
-- **MCPX dashboard (看板)** — full dashboard on top of the config wizard and
-  connection monitor: tunnel health monitoring with anomaly key guidance,
-  one-key tunnel restart (T) with automatic URL sync to config + mcpx restart,
-  OAuth ops-password display + persistence, workspace management sub-mode (W —
-  list/select/remove any workspace), delegated-task status and result display
-  (task-orchestration Phase 4), mcpx-for-pmf fork detection, auth-mode 401
-  online-detection fix, tunnel URL shown with `/mcp` suffix + client hints, and
-  dashboard client-ification (`mcpx-client.ts`).
-- **prompt-enhance** — new prompt-enhancement feature on `Alt+Shift+E`
-  (Ctrl+Shift+E removed to avoid conflict with Pi `app.thinking.cycle`).
-- **`/notify` toast toggle** — `/notify [on|off|error|complete|status]` for
-  model-error / turn-complete toasts; error turns suppress the complete toast,
-  at most one toast per turn; state persisted.
-- **next-suggest** — next-step suggestion widget under the editor after each
-  turn; F2 (configurable) fills the editor; configured via API Manager
-  (`/api-manager nextsuggest`), persisted under `nextSuggest` in
-  `api-manager.json`.
-- **Dynamic model discovery** — API Manager queries the provider for a live
-  model list, gated behind a saved API key.
-- **API Manager config import/export**; teammate CLI tool availability surfaced;
-  blocked knowledge candidates shown.
-- **submit-gate** — new submit-gate extension (pre-submit gate).
-- **Usage insights** — statusline usage history, usage chart, and history
-  backfill.
-- **`.pi/SYSTEM.md` single-authority migration** — project system instructions
-  come only from `.pi/SYSTEM.md`; inline packaged `AGENTS.md` injection retired.
-- **Browser** — GenericAgent DOM probe, list folding, navigation detection.
-- **Hardening waves** (odyssey-review): lock retries raised to 64 for
-  high-contention trust, unified `serializeMutation` lock, event-bus cleanup,
-  replay cap, usage-history perf + index atomicity, mcpx tunnel/pid/yaml
-  hardening, ops-password masking, backup mode/cap, PID identity verify.
+- **Workspace runtime broker** (persistent actor architecture) — a sidecar
+  broker with a persistent actor model; `PI_RUNTIME_BROKER` defaults to **off**
+  to stop intermittent startup hangs (opt-in). Canonical workspace identity
+  hardened and the runtime broker hardened.
+- **Canonical turn lifecycle + completion durability** — teammate persists the
+  canonical turn lifecycle and a **crash-consistent completion outbox** that
+  redelivers settled results to the right session (WAL recovery + caller
+  notification), with two-channel completion delivery and an `intentRevision`
+  fence on the outbox. Completion durability passed two review rounds
+  (backward-compat + pin semantics; crash-consistency).
+- **Workspace observation & peers** — workspace session observation +
+  projection, identify managed workspace windows, cross-window workspace peers
+  and replies, authoritative message provenance threaded throughout, and a
+  centralized diagnostic logger with a statusline badge. `observe` gains a
+  `diagnose` contract and renders the canonical diagnosis; non-verbose observe
+  renders the last-result excerpt; the root-session settle is persisted for
+  polling observers and **included in the workspace owner snapshot**
+  (`mainLastSettle`).
+- **Session-scoped model routing overrides** via an LLM tool; session-scoped
+  routing overrides are hot-swappable without a restart.
+- **Terminal & lifecycle fixes** — structured terminal result inclusion +
+  publication validation + owner fixture correction; terminal request identity
+  validated; ACP CLI progress streamed to Cockpit; interim text turns
+  distinguished from result-ready with an extended lifecycle grace window;
+  replayed teammate-complete drained at the next turn boundary; deferred
+  context restored after cold-resume failure; unknown-model failure defaults
+  to retryable; agent output short-id prefix addressing.
+- **Backend contract** — legacy monitor evaluator removed; `mainLastSettle`
+  round-trips through `validateWorkspaceMainSettle` (bounds-checked, over-long
+  `lastResult` rejected not truncated). Companion contracts published:
+  `backend-core` exposes the model-registry contract (`TeammateExecutionMode`
+  three-state, transport metadata, `resolveConfig` warnings); `backends` adds
+  the DSH remote ssh launch mode + advisory warnings.
 
-### Cockpit 0.17.0
+### Cockpit 0.18.0
 
-- **Alt+Shift+T Todo overlay**; blocked-todo priority demoted; visible cap
-  raised.
-- Same-file edits batched; identical edits rejected atomically.
-- `optionsSource` adopted for the model selector (filled by the executor).
+- **Per-provider 7-day token trend** in the `/usage` overlay — a sparkline of
+  daily token usage plus a `total tok · $cost · turns/day` summary and the top 2
+  models by token share, read from the optional `pi-maestro-flow`
+  usage-history store (`~/.pi/agent/usage-history`); omitted on bare Pi when
+  that extension hasn't recorded turns. A tiny theme-aware sparkline
+  reimplementation uses the same `▁▂▃▄▅▆▇█` glyphs and even-stride downsample as
+  the statusline version.
+- **Session projection fences, CLI agent badge, and usage bars** — canonical
+  teammate runtime status consumed; teammate messages rendered as incoming;
+  teammate conversation and work detail shown.
+- **Model settings picker** gains an `inherit/default` option; macOS Alt keys
+  display as **Option** (unified cross-platform key labels); save confirmation
+  with change display + prefix-first model search.
 
-### Settings-Core 0.2.0
+### Settings-Core 0.2.1, Backend-Core 0.1.1, Backends 0.1.1
 
-- `optionsSource` upgraded from a declared field to a working mechanism; the
-  model namespace is owned by the executor; `backendOptionsOf` delivers the real
-  `host.proxyToolCall`.
+- **Settings-Core 0.2.1** — `altModifierLabel` (macOS Alt → Option display).
+- **Backend-Core 0.1.1** — model-registry contract: `TeammateExecutionMode`
+  three-state, transport metadata, `resolveConfig` warnings.
+- **Backends 0.1.1** — DSH remote ssh launch mode + `resolveConfig` advisory
+  warnings.
 
-## Package Versions
+### MCPX
 
-| Package | Version | Change |
-|---------|---------|--------|
-| pi-maestro-flow | 0.22.0 | minor — MCPX dashboard, prompt-enhance, /notify, model discovery, submit-gate, usage insights |
-| pi-maestro-teammate | 2.0.0 | major — backend registry, remote journal v2 (breaking, no migration) |
-| pi-cockpit | 0.17.0 | minor — Todo overlay, atomic edit batching, optionsSource |
-| pi-maestro-settings-core | 0.2.0 | minor — optionsSource mechanism |
-| maestro-flow (engine pin) | 0.5.79 | sync 0.5.75 → 0.5.79 (upstream latest) |
+- **Inline config editor** in the `/mcpx` TUI (server/auth/commands/files
+  permissions); **E key** permanently registers a workspace; the panel
+  recognizes windows and tool calls across workspaces; **quick tunnel** process
+  discovery + adopt (the wizard can take over an existing tunnel and verify its
+  port); `sanitizeTerminalText` fix so ESC-stripping no longer corrupts color
+  codes into `[31` garbage.
 
-## Upgrade Notes
+## Package version table
 
-- **Teammate 2.0.0 is breaking**: old v1 remote journals are unreadable and must
-  be deleted and rebuilt; third-party backends must implement the backend
-  contract instead of inline `cli/<tool>` dispatch.
-- Cockpit's peer range for `pi-maestro-teammate` is now `^2.0.0` — upgrade the
-  two together.
-- `maestro-flow` is exact-pinned and bumped to 0.5.79 for this release.
-- Users relying on the retired inline `AGENTS.md` injection must migrate content
-  to `.pi/SYSTEM.md`.
+| Package | Previous | New |
+|---|---|---|
+| pi-maestro-flow | 0.22.2 | 0.23.0 |
+| pi-maestro-teammate | 2.0.0 | 2.1.0 |
+| pi-cockpit | 0.17.0 | 0.18.0 |
+| pi-maestro-settings-core | 0.2.0 | 0.2.1 |
+| pi-maestro-backend-core | 0.1.0 | 0.1.1 |
+| pi-maestro-backends | 0.1.0 | 0.1.1 |
+| maestro-flow (engine pin) | ^0.5.79 | ^0.5.82 |
 
-## Install
+## Stats
+
+- **121 commits** since v0.22.0
+- **789 files** changed, **+135,044 / −12,784**
+- Core engine: `maestro-flow 0.5.79 → 0.5.82`
+
+## Install / Upgrade
 
 ```bash
-pi install npm:pi-maestro-flow@0.22.0
+pi install npm:pi-maestro-flow@0.23.0
 ```
 
-## Verification
+This also pulls the exact companions: `pi-maestro-teammate@2.1.0`,
+`pi-cockpit@0.18.0`, `pi-maestro-settings-core@0.2.1`,
+`pi-maestro-backend-core@0.1.1`, `pi-maestro-backends@0.1.1`.
 
-- All four packages typecheck clean; teammate `build:declarations` +
-  `check:declarations` pass.
-- Focused tests for changed areas: flow 164 pass, teammate 113 pass / 2 skipped
-  / 0 fail.
-- Published artifacts verified by registry install + smoke after release.
+`PI_RUNTIME_BROKER` defaults to **off** in this release; enable it explicitly
+to opt into the persistent workspace broker sidecar.

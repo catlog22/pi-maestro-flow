@@ -100,7 +100,7 @@
     "@types/turndown": "^5.0.6",
     "cross-spawn": "7.0.6",
     "linkedom": "^0.18.13",
-    "maestro-flow": "^0.5.79",
+    "maestro-flow": "^0.5.82",
     "open": "10.2.0",
     "p-limit": "^7.3.1",
     "pi-cockpit": "0.18.0",
