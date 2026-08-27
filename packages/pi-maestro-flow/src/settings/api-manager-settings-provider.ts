@@ -22,7 +22,7 @@ import {
 import { SETTINGS_SECRET_SET_PLACEHOLDER } from "pi-maestro-settings-core/v1/schema";
 import { loadApiRetrySettings, saveApiRetrySettings } from "../providers/api-provider-config.ts";
 import { NETWORK_RETRY_POLICY } from "pi-maestro-teammate/v1/retry";
-import { readModelsRoot, writeModelsRoot } from "../providers/api-provider-ops.ts";
+import { addManagedProvider, readModelsRoot, writeModelsRoot } from "../providers/api-provider-ops.ts";
 import {
   AGENT_CACHE_RETENTION_DEFAULT,
   applyCacheRetentionEnv,
@@ -125,6 +125,7 @@ export interface ApiManagerSettingsProviderOptions {
   actions?: Readonly<Record<string, ApiManagerAction>>;
   getModelsPath?: () => string;
   getSettingsPath?: () => string;
+  getDefaultsPath?: () => string;
   getAgentDir?: () => string;
 }
 
@@ -642,6 +643,7 @@ export function createApiManagerSettingsProvider(
   const instanceId = randomUUID();
   const getModelsPath = options.getModelsPath ?? (() => `${getAgentDir()}/models.json`);
   const getSettingsPath = options.getSettingsPath ?? (() => `${getAgentDir()}/settings.json`);
+  const getDefaultsPath = options.getDefaultsPath ?? (() => `${getAgentDir()}/api-manager.json`);
   const originals = new Map<string, { models: string; settings: string }>();
   const preparedChanges = new Map<string, readonly SettingsChange[]>();
 
@@ -970,6 +972,13 @@ export function createApiManagerSettingsProvider(
           }
           const nextRoot = { ...data.modelsRoot, providers: nextProviders };
           await writeModelsRoot(nextRoot, modelsPath, await existsFile(modelsPath));
+          // The settings shell only writes models.json; /api-manager's provider
+          // registry is keyed off api-manager.json `managedProviders`. Mirror new
+          // custom provider ids there so both surfaces stay in sync (a provider
+          // added here would otherwise be invisible to /api-manager list/show).
+          for (const id of Object.keys(nextProviders)) {
+            await addManagedProvider(getDefaultsPath(), id);
+          }
           modelsWritten = true;
         }
         const retryBase = changes.find((change) => change.key === "api.retry.baseDelayMs");
