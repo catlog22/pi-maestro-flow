@@ -11,20 +11,24 @@ interface Harness {
   provider: ReturnType<typeof createApiManagerSettingsProvider>;
   modelsPath: string;
   settingsPath: string;
+  defaultsPath: string;
   context: SettingsContextV1;
 }
 
-function harness(initialModels: Record<string, unknown> = {}, initialSettings: Record<string, unknown> = {}): Harness {
+function harness(initialModels: Record<string, unknown> = {}, initialSettings: Record<string, unknown> = {}, initialDefaults: Record<string, unknown> | null = null): Harness {
   const directory = mkdtempSync(join(tmpdir(), "api-settings-e2e-"));
   const modelsPath = join(directory, "models.json");
   const settingsPath = join(directory, "settings.json");
+  const defaultsPath = join(directory, "api-manager.json");
   writeFileSync(modelsPath, JSON.stringify(initialModels, null, 2));
   writeFileSync(settingsPath, JSON.stringify(initialSettings, null, 2));
+  if (initialDefaults !== null) writeFileSync(defaultsPath, JSON.stringify(initialDefaults, null, 2));
   const provider = createApiManagerSettingsProvider({
     getModelsPath: () => modelsPath,
     getSettingsPath: () => settingsPath,
+    getDefaultsPath: () => defaultsPath,
   });
-  return { provider, modelsPath, settingsPath, context: { cwd: "/project", locale: "en" } };
+  return { provider, modelsPath, settingsPath, defaultsPath, context: { cwd: "/project", locale: "en" } };
 }
 
 test("api manager read surfaces providers with a masked apiKey placeholder", async () => {
@@ -456,4 +460,64 @@ test("agent header presets cover all sub2api agent identities", () => {
   assert.match(AGENT_HEADER_PRESETS["codex"]["User-Agent"], /^codex-tui\//);
   assert.match(AGENT_HEADER_PRESETS["grok"]["User-Agent"], /^xai-grok-workspace\//);
   assert.match(AGENT_HEADER_PRESETS["antigravity"]["User-Agent"], /^antigravity\//);
+});
+
+test("api manager commit syncs new custom providers into api-manager.json managedProviders", async () => {
+  const { provider, modelsPath, defaultsPath, context } = harness(
+    { providers: {} },
+    { retry: {} },
+    { version: 1, modelDefaults: {} },
+  );
+  const transactionId = "tx-managed";
+  const prepared = await provider.prepare!({
+    context,
+    transactionId,
+    changes: [
+      {
+        operation: "set",
+        key: "api.providers",
+        scope: "global",
+        value: [
+          { id: "new-vendor", baseUrl: "https://n.example.com/v1", api: "anthropic-messages", enabled: true, apiKey: "sk-new" },
+        ],
+      },
+    ],
+    expectedRevisions: [],
+  });
+  assert.equal(prepared.prepared, true);
+  await provider.commit!({ context, transactionId, prepareToken: transactionId });
+
+  const models = JSON.parse(readFileSync(modelsPath, "utf8")) as { providers: Record<string, unknown> };
+  assert.ok(models.providers["new-vendor"], "provider written to models.json");
+  const defaults = JSON.parse(readFileSync(defaultsPath, "utf8")) as { managedProviders?: string[] };
+  assert.ok(defaults.managedProviders?.includes("new-vendor"), "new custom provider synced into api-manager.json managedProviders");
+});
+
+test("api manager commit appends to existing managedProviders without duplicating preset ids", async () => {
+  const { provider, defaultsPath, context } = harness(
+    { providers: { "maestro-openai": { baseUrl: "https://g.example.com/v1", api: "openai-responses", enabled: true, apiKey: "sk" } } },
+    { retry: {} },
+    { version: 1, managedProviders: ["existing-vendor"], modelDefaults: {} },
+  );
+  const transactionId = "tx-managed-2";
+  const prepared = await provider.prepare!({
+    context,
+    transactionId,
+    changes: [
+      {
+        operation: "set",
+        key: "api.providers",
+        scope: "global",
+        value: [
+          { id: "existing-vendor", baseUrl: "https://n.example.com/v1", api: "openai-responses", enabled: true, apiKey: "sk2" },
+        ],
+      },
+    ],
+    expectedRevisions: [],
+  });
+  assert.equal(prepared.prepared, true);
+  await provider.commit!({ context, transactionId, prepareToken: transactionId });
+
+  const defaults = JSON.parse(readFileSync(defaultsPath, "utf8")) as { managedProviders?: string[] };
+  assert.deepEqual(defaults.managedProviders, ["existing-vendor"], "existing managed id kept without duplication");
 });
