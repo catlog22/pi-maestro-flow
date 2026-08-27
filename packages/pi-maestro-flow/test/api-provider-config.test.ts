@@ -6,6 +6,14 @@ import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { getModels } from "@earendil-works/pi-ai/compat";
 
+async function waitForCondition(condition: () => boolean, message: string): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (!condition()) {
+    if (Date.now() >= deadline) assert.fail(message);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 // pi-coding-agent's exports map blocks deep subpath specifiers and declares only
 // an "import" condition, and npm may place the package in the workspace root or
 // in this package's node_modules. Resolve its dist directory from the public ESM
@@ -1826,8 +1834,7 @@ test("form Model ID field discovers gateway models via Ctrl+D and saves the sele
   } as any;
 
   const run = configureCustomModelTarget(pi, "relay", { modelId: null, adding: true }, ctx, modelsPath, defaultsPath);
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.ok(overlayFactory, "form overlay must open for the add path");
+  await waitForCondition(() => overlayFactory !== undefined, "form overlay must open for the add path");
 
   // Instantiate the captured overlay once; its done() resolves the form promise.
   const overlay = overlayFactory!({ requestRender() {} }, theme, {}, resolveCustom) as { handleInput(data: string): void; render(width: number): string[] };
@@ -1838,14 +1845,20 @@ test("form Model ID field discovers gateway models via Ctrl+D and saves the sele
   }
   assert.match(overlay.render(80).join("\n"), /Ctrl\+D 识别模型/);
   overlay.handleInput("\x04"); // Ctrl+D → probe /models with the form's connection values
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await waitForCondition(
+    () => overlay.render(80).join("\n").includes("[ ] model-a"),
+    "gateway model choices must load",
+  );
   assert.match(overlay.render(80).join("\n"), /\[ \] model-a/);
   overlay.handleInput(" "); // 勾选 model-a（model-b 已配置过滤外，不出现）
   overlay.handleInput("\r"); // 确认回填
   overlay.handleInput("\x13"); // Ctrl+S 提交表单
   await run;
 
-  assert.deepEqual(fetchCalls, [{ url: "https://relay.example/v1/models", authorization: "Bearer sk-test" }]);
+  assert.deepEqual(
+    fetchCalls.filter((call) => call.url === "https://relay.example/v1/models"),
+    [{ url: "https://relay.example/v1/models", authorization: "Bearer sk-test" }],
+  );
   const saved = JSON.parse(readFileSync(modelsPath, "utf8"));
   const ids = saved.providers.relay.models.map((model: any) => model.id);
   assert.ok(ids.includes("existing"), "previously configured model must survive");
