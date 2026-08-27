@@ -20,6 +20,7 @@ import {
 	COCKPIT_MAESTRO_QUERY_EVENT,
 	COCKPIT_SESSION_LIST_EVENT,
 	COCKPIT_TODO_TOGGLE_EVENT,
+	MAESTRO_TODO_STATE_CHANGED_EVENT,
 	MAESTRO_UI_SNAPSHOT_EVENT,
 	MAESTRO_UI_SNAPSHOT_VERSION,
 } from "../src/public/v1/events.ts";
@@ -201,6 +202,14 @@ test("Cockpit consumes Maestro snapshots and emits versioned queries at session 
 	assert.match(source, /pi\.events\.emit\(COCKPIT_MAESTRO_QUERY_EVENT, \{ version: MAESTRO_UI_SNAPSHOT_VERSION \}\)/);
 	assert.match(source, /if \(visible\) emitMaestroQuery\(\)/);
 	assert.match(source, /session_start[\s\S]*?emitMaestroQuery\(\)/);
+});
+
+test("Flow notifies Cockpit after every durable Todo mutation", () => {
+	const cockpitSource = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+	const flowSource = readFileSync(new URL("../../pi-maestro-flow/src/extension/index.ts", import.meta.url), "utf8");
+	assert.equal(MAESTRO_TODO_STATE_CHANGED_EVENT, "maestro:todo-state-changed");
+	assert.match(flowSource, /setTodoStateChangeListener\(\(\) => \{[\s\S]*?pi\.events\.emit\(MAESTRO_TODO_STATE_CHANGED_EVENT, \{ version: 1 \}\)/);
+	assert.match(cockpitSource, /pi\.events\.on\(MAESTRO_TODO_STATE_CHANGED_EVENT[\s\S]*?todos\.hydrateFromEntries\(ctx\.sessionManager\.getEntries\(\)\)/);
 });
 
 test("selected Cockpit sessions publish editor targets and route input through teammate registry", () => {

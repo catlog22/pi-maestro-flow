@@ -89,6 +89,7 @@ import {
 	COCKPIT_PREEMPT_RESIZE_EVENT,
 	COCKPIT_SESSION_LIST_EVENT,
 	COCKPIT_TODO_TOGGLE_EVENT,
+	MAESTRO_TODO_STATE_CHANGED_EVENT,
 	MAESTRO_UI_SNAPSHOT_EVENT,
 	MAESTRO_UI_SNAPSHOT_VERSION,
 	SUPERVISION_EVENT,
@@ -1703,6 +1704,12 @@ export default function (pi: ExtensionAPI): void {
 			}),
 			pi.events.on(MAESTRO_UI_SNAPSHOT_EVENT, (payload) => {
 				if (!maestro.applySnapshot(payload)) return;
+				req();
+			}),
+			pi.events.on(MAESTRO_TODO_STATE_CHANGED_EVENT, (payload) => {
+				if (!payload || typeof payload !== "object" || (payload as { version?: unknown }).version !== 1) return;
+				const ctx = lastCtx;
+				if (!ctx || !todos.hydrateFromEntries(ctx.sessionManager.getEntries())) return;
 				req();
 			}),
 			pi.events.on(SUPERVISION_EVENT, (payload) => {

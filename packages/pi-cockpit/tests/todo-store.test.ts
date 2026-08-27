@@ -129,6 +129,29 @@ test("hydrate reports changes and preserves the map on identical display content
 	})]), true, "id order changes are visible");
 });
 
+test("hydrate reports teammate reassignment even when Todo status is already in progress", () => {
+	const s = new TodoStore();
+	const rootTask = todoEntry({
+		a: {
+			subject: "A",
+			status: "in_progress",
+			assignee: { id: "root", label: "root" },
+			updatedAt: 1,
+		},
+	});
+	assert.equal(s.hydrateFromEntries([rootTask]), true);
+
+	assert.equal(s.hydrateFromEntries([todoEntry({
+		a: {
+			subject: "A",
+			status: "in_progress",
+			assignee: { id: "native-at", label: "native-at" },
+			updatedAt: 2,
+		},
+	})]), true);
+	assert.deepEqual(s.snapshot()[0]?.assignee, { id: "native-at", label: "native-at" });
+});
+
 // The todo snapshot is LLM-authored; same zero-width injection risk as teammate events.
 test("todo snapshot strings are stripped of control characters on hydrate", () => {
 	const store = new TodoStore();

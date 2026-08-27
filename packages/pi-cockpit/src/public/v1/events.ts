@@ -3,6 +3,10 @@
 export const COCKPIT_MAESTRO_QUERY_EVENT = "cockpit:maestro-query";
 export const MAESTRO_UI_SNAPSHOT_EVENT = "maestro:ui-snapshot";
 export const MAESTRO_UI_SNAPSHOT_VERSION = 1 as const;
+export const MAESTRO_TODO_STATE_CHANGED_EVENT = "maestro:todo-state-changed";
+export interface MaestroTodoStateChangedV1 {
+	version: 1;
+}
 
 /**
  * Unified supervision telemetry emitted by the shared supervision layer
@@ -190,6 +194,7 @@ export interface CockpitUiOwnershipV1 {
 export interface MaestroEventMapV1 {
 	"cockpit:maestro-query": MaestroQueryV1;
 	"maestro:ui-snapshot": MaestroUiSnapshotV1;
+	"maestro:todo-state-changed": MaestroTodoStateChangedV1;
 	"cockpit:ui-ownership": CockpitUiOwnershipV1;
 	"cockpit:open-session-list": CockpitSessionListRequestV1;
 	"cockpit:preempt-resize": undefined;

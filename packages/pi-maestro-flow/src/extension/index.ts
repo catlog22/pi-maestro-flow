@@ -34,7 +34,11 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { buildSessionContext, copyToClipboard, getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { COCKPIT_TODO_TOGGLE_EVENT, type CockpitUiOwnershipV1 } from "pi-cockpit/v1/events";
+import {
+  COCKPIT_TODO_TOGGLE_EVENT,
+  MAESTRO_TODO_STATE_CHANGED_EVENT,
+  type CockpitUiOwnershipV1,
+} from "pi-cockpit/v1/events";
 import type { FlowToolResult } from "../tools/tool-result.ts";
 import { Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
@@ -1023,7 +1027,10 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
     const goal = getActiveGoal();
     guiEvents.emitDeduped(GUI_EVENTS.goalChanged, JSON.stringify(goal ?? null), goal);
   };
-  setTodoStateChangeListener(updateTodoWidget);
+  setTodoStateChangeListener(() => {
+    updateTodoWidget();
+    pi.events.emit(MAESTRO_TODO_STATE_CHANGED_EVENT, { version: 1 });
+  });
   setGoalStateChangeListener(() => {
     emitGoalChanged();
     publishMaestroUi();

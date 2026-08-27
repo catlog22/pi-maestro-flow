@@ -4,6 +4,7 @@ import {
 	COCKPIT_INPUT_TARGET_EVENT,
 	COCKPIT_MAESTRO_QUERY_EVENT,
 	COCKPIT_SESSION_LIST_EVENT,
+	MAESTRO_TODO_STATE_CHANGED_EVENT,
 	MAESTRO_UI_SNAPSHOT_EVENT,
 	MAESTRO_UI_SNAPSHOT_VERSION,
 	type CockpitInputTargetV1,
@@ -38,6 +39,7 @@ const clear: MaestroUiClearSnapshotV1 = {
 test("public v1 event subpath resolves constants and tombstone types", () => {
 	assert.equal(COCKPIT_MAESTRO_QUERY_EVENT, "cockpit:maestro-query");
 	assert.equal(MAESTRO_UI_SNAPSHOT_EVENT, "maestro:ui-snapshot");
+	assert.equal(MAESTRO_TODO_STATE_CHANGED_EVENT, "maestro:todo-state-changed");
 	assert.equal(COCKPIT_INPUT_TARGET_EVENT, "cockpit:input-target");
 	assert.equal(COCKPIT_SESSION_LIST_EVENT, "cockpit:open-session-list");
 	assert.deepEqual(inputTarget, { version: 1, label: "builder", color: "warning" });

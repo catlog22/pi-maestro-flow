@@ -48,6 +48,17 @@ function asSkills(value: unknown): TodoSkill[] {
 	return skills;
 }
 
+function sameActor(left: TodoActor | undefined, right: TodoActor | undefined): boolean {
+	return left?.id === right?.id && left?.label === right?.label;
+}
+
+function sameSkills(left: readonly TodoSkill[], right: readonly TodoSkill[]): boolean {
+	return left.length === right.length && left.every((skill, index) => {
+		const candidate = right[index];
+		return candidate !== undefined && skill.name === candidate.name && skill.role === candidate.role;
+	});
+}
+
 // Map the todo tool's status strings onto our four display states.
 // "deleted" is returned verbatim so the caller can drop the task.
 export function mapStatus(raw: unknown): TodoState | "deleted" {
@@ -115,7 +126,11 @@ export class TodoStore {
 				|| item.status !== candidate.status
 				|| item.subject !== candidate.subject
 				|| item.blockedBy.length !== candidate.blockedBy.length
-				|| item.blockedBy.some((id, blockedIndex) => id !== candidate.blockedBy[blockedIndex]);
+				|| item.blockedBy.some((id, blockedIndex) => id !== candidate.blockedBy[blockedIndex])
+				|| !sameActor(item.createdBy, candidate.createdBy)
+				|| !sameActor(item.assignee, candidate.assignee)
+				|| !sameSkills(item.skills, candidate.skills)
+				|| item.updatedAt !== candidate.updatedAt;
 		});
 		if (!changed) return false;
 		this.items = next;
