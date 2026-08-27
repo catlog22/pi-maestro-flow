@@ -6,7 +6,8 @@
  * of the upstream core.ts). This module owns:
  *
  *   - the active-provider quota/balance/spend snapshot (polled at
- *     config.usage.pollIntervalMs),
+ *     config.usage.pollIntervalMs; 0 switches to manual refresh — no
+ *     background polling, no footer bar, /usage fetches on open and on `r`),
  *   - the synchronous `getStatus(theme, barWidth)` string the Cockpit footer
  *     renders on a dedicated line (the upstream wrote this through
  *     ctx.ui.setStatus; Cockpit renders it inline so the bar is themed and
@@ -59,7 +60,7 @@ import {
 } from "./core.ts";
 import { buildTrend, readUsageHistory, type TrendSummary, type UsageRecord } from "./history.ts";
 import { renderThemeSparkline } from "./sparkline.ts";
-import type { CockpitConfig } from "../types.ts";
+import { type CockpitConfig, DEFAULT_CONFIG } from "../types.ts";
 
 const EXTENSION_ID = "pi-cockpit:usage-bars";
 const USAGE_UPDATE_EVENT = `${EXTENSION_ID}:update`;
@@ -169,6 +170,8 @@ class UsageSelectorComponent extends Container implements Focusable {
 	private readonly theme: Theme;
 	private readonly keybindings: KeybindingsManager;
 	private readonly onCancelCallback: () => void;
+	private readonly onTogglePolling: () => boolean;
+	private pollingEnabled: boolean;
 	private readonly activeProvider: ProviderKey | null;
 	private readonly fetchAllFn: (signal: AbortSignal) => Promise<UsageByProvider>;
 	private allItems: SubscriptionItem[] = [];
@@ -179,6 +182,11 @@ class UsageSelectorComponent extends Container implements Focusable {
 	private hint: "loading" | "ready" | "error" = "loading";
 	private disposed = false;
 	private _focused = false;
+
+	/** Whether an initial or `r`-triggered refetch is still in flight. */
+	isLoading(): boolean {
+		return this.loading;
+	}
 
 	get focused(): boolean {
 		return this._focused;
@@ -196,6 +204,8 @@ class UsageSelectorComponent extends Container implements Focusable {
 		activeProvider: ProviderKey | null,
 		fetchAll: (signal: AbortSignal) => Promise<UsageByProvider>,
 		onCancel: () => void,
+		onTogglePolling: () => boolean,
+		pollingEnabled: boolean,
 	) {
 		super();
 		this.tui = tui;
@@ -204,6 +214,8 @@ class UsageSelectorComponent extends Container implements Focusable {
 		this.activeProvider = activeProvider;
 		this.fetchAllFn = fetchAll;
 		this.onCancelCallback = onCancel;
+		this.onTogglePolling = onTogglePolling;
+		this.pollingEnabled = pollingEnabled;
 
 		this.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
 		this.addChild(new Spacer(1));
@@ -249,9 +261,12 @@ class UsageSelectorComponent extends Container implements Focusable {
 		} else if (this.hint === "error") {
 			this.hintText.setText(this.theme.fg("error", "Failed to fetch usage data"));
 		} else {
+			const pollState = this.pollingEnabled
+				? this.theme.fg("success", "polling on")
+				: this.theme.fg("warning", "polling off");
 			this.hintText.setText(
 				this.theme.fg("muted", "Only showing configured usage providers. ") +
-					this.theme.fg("dim", "✓ = active provider"),
+					this.theme.fg("dim", "✓ = active provider · r = refresh · p = poll: ") + pollState,
 			);
 		}
 	}
@@ -520,6 +535,27 @@ class UsageSelectorComponent extends Container implements Focusable {
 			return;
 		}
 
+		// Toggle background polling (persisted to cockpit.json). `p` only acts
+		// when the search box is empty, mirroring the `r` refresh convention.
+		if (keyData === "p" && this.searchInput.getValue() === "") {
+			this.pollingEnabled = this.onTogglePolling();
+			this.updateHint();
+			this.tui.requestRender();
+			return;
+		}
+
+		// Manual refetch: plain `r` with an empty search box re-runs load();
+		// once the filter has text, `r` stays an ordinary search character.
+		if (keyData === "r" && this.searchInput.getValue() === "" && !this.loading) {
+			this.loading = true;
+			this.hint = "loading";
+			this.updateHint();
+			this.updateList();
+			this.tui.requestRender();
+			void this.load();
+			return;
+		}
+
 		this.searchInput.handleInput(keyData);
 		this.filterItems(this.searchInput.getValue());
 		this.refresh();
@@ -557,6 +593,8 @@ export interface UsageSubsystem {
 	refresh(): void;
 	/** Reschedule the periodic poll timer with the current pollIntervalMs. */
 	rescheduleTimer(): void;
+	/** Toggle background polling on/off (persisted via setPollIntervalMs). Returns true when polling is now on. */
+	togglePolling(): boolean;
 	/** Abort everything and drop timers. */
 	dispose(): void;
 }
@@ -567,10 +605,16 @@ export interface CreateUsageSubsystemOptions {
 	getConfig: () => CockpitConfig;
 	/** Invoked when the footer snapshot may have changed, so Cockpit re-renders. */
 	onStatusChange: () => void;
+	/**
+	 * Persist a pollIntervalMs change to cockpit.json (0 = manual refresh).
+	 * Return true on success. Optional: when omitted, the overlay's `p` toggle
+	 * only affects the in-memory config for the current session.
+	 */
+	setPollIntervalMs?: (ms: number) => boolean;
 }
 
 export function createUsageSubsystem(options: CreateUsageSubsystemOptions): UsageSubsystem {
-	const { pi, getConfig, onStatusChange } = options;
+	const { pi, getConfig, onStatusChange, setPollIntervalMs } = options;
 
 	pi.registerFlag("usage", {
 		description: "Print one-line usage for the active provider and exit",
@@ -594,6 +638,8 @@ export function createUsageSubsystem(options: CreateUsageSubsystemOptions): Usag
 		activeProvider: null,
 		available: {},
 	};
+
+	const isManualRefresh = () => getConfig().usage.pollIntervalMs <= 0;
 
 	let pollTimer: ReturnType<typeof setInterval> | undefined;
 	let pollInFlight: Promise<void> | undefined;
@@ -621,6 +667,8 @@ export function createUsageSubsystem(options: CreateUsageSubsystemOptions): Usag
 	 * should render (active provider unconfigured/unsupported).
 	 */
 	function buildStatus(theme: Theme, barWidth: number): string | undefined {
+		// Manual refresh mode: nothing is polled, so the footer bar stays hidden.
+		if (isManualRefresh()) return undefined;
 		const provider = state.activeProvider;
 		if (!provider || state.available[provider] === false) return undefined;
 
@@ -812,8 +860,26 @@ export function createUsageSubsystem(options: CreateUsageSubsystemOptions): Usag
 		return results;
 	}
 
+	/**
+	 * Toggle background polling on/off and persist it via setPollIntervalMs.
+	 * On → default interval; off → 0 (manual refresh only). Returns the new
+	 * polling state so the overlay can re-render its hint.
+	 */
+	function togglePolling(): boolean {
+		const next = isManualRefresh() ? DEFAULT_CONFIG.usage.pollIntervalMs : 0;
+		const ok = setPollIntervalMs ? setPollIntervalMs(next) : true;
+		if (ok) {
+			schedulePollTimer();
+			if (next > 0) void poll();
+			onStatusChange();
+		}
+		return next > 0;
+	}
+
 	function schedulePollTimer(): void {
 		if (pollTimer) clearInterval(pollTimer);
+		pollTimer = undefined;
+		if (isManualRefresh()) return;
 		pollTimer = setInterval(() => void poll(), getConfig().usage.pollIntervalMs);
 		// Don't keep the process alive solely for the usage poll (matches the
 		// footer's width timer). A live poll still triggers onStatusChange → req().
@@ -851,6 +917,7 @@ export function createUsageSubsystem(options: CreateUsageSubsystemOptions): Usag
 			if (ctx.mode !== "tui") return;
 
 			onStatusChange();
+			if (isManualRefresh()) return;
 			void poll();
 			schedulePollTimer();
 		},
@@ -874,7 +941,7 @@ export function createUsageSubsystem(options: CreateUsageSubsystemOptions): Usag
 			currentContext = ctx;
 			const changed = updateProviderFrom(model);
 			if (changed) onStatusChange();
-			void poll();
+			if (!isManualRefresh()) void poll();
 		},
 
 		async openCommand(ctx) {
@@ -893,8 +960,10 @@ export function createUsageSubsystem(options: CreateUsageSubsystemOptions): Usag
 					state.activeProvider,
 					(signal) => fetchAllForContext(ctx, signal),
 					() => done(),
+					togglePolling,
+					!isManualRefresh(),
 				));
-			void poll();
+			if (!isManualRefresh()) void poll();
 		},
 
 		getStatus(theme, barWidth) {
@@ -902,11 +971,15 @@ export function createUsageSubsystem(options: CreateUsageSubsystemOptions): Usag
 		},
 
 		refresh() {
-			void poll();
+			if (!isManualRefresh()) void poll();
 		},
 
 		rescheduleTimer() {
 			if (currentContext && currentContext.mode === "tui") schedulePollTimer();
+		},
+
+		togglePolling() {
+			return togglePolling();
 		},
 
 		dispose() {

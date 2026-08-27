@@ -94,7 +94,7 @@ function containsEqual(list: Array<{ name: string; data: unknown }>, expected: {
 	return list.some((entry) => entry.name === expected.name && matchObject(entry.data, expected.data));
 }
 
-function createHarness(options: { usageFlag?: boolean } = {}): Harness {
+function createHarness(options: { usageFlag?: boolean; setPollIntervalMs?: (ms: number) => boolean } = {}): Harness {
 	const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
 	const commands = new Map<string, { handler: (args: string, ctx: ExtensionCommandContext) => Promise<void> }>();
 	const emitted: Array<{ name: string; data: unknown }> = [];
@@ -121,6 +121,7 @@ function createHarness(options: { usageFlag?: boolean } = {}): Harness {
 		pi,
 		getConfig: () => config,
 		onStatusChange: () => { statusChanges += 1; },
+		...(options.setPollIntervalMs ? { setPollIntervalMs: options.setPollIntervalMs } : {}),
 	});
 	// The cockpit registers the command itself; expose it here as "usage" so the
 	// upstream command tests keep working against the default commandKey.
@@ -601,6 +602,105 @@ describe("usage-bars subsystem lifecycle", () => {
 		harness.subsystem.stop(mock.context);
 	});
 
+	it("manual refresh mode (pollIntervalMs 0) skips polling, timers, and the footer bar", async () => {
+		const realSetInterval = globalThis.setInterval;
+		const activeIntervals = new Set<number>();
+		let nextInterval = 1;
+		globalThis.setInterval = ((_handler: TimerHandler, _timeout?: number) => {
+			const id = nextInterval++;
+			activeIntervals.add(id);
+			return id;
+		}) as unknown as typeof setInterval;
+		let fetchCalls = 0;
+		globalThis.fetch = (async () => {
+			fetchCalls += 1;
+			return new Response(JSON.stringify({
+				rate_limit: {
+					primary_window: { used_percent: 10 },
+					secondary_window: { used_percent: 20 },
+				},
+			}), { status: 200, headers: { "content-type": "application/json" } });
+		}) as unknown as typeof fetch;
+
+		try {
+			const harness = createHarness();
+			harness.setConfig({ pollIntervalMs: 0 });
+			const mock = createContext("tui", "openai-codex", { configured: true, source: "OAuth", token: "t" });
+			await harness.subsystem.start(mock.context);
+			await new Promise((resolve) => setTimeout(resolve, 25));
+
+			expect(activeIntervals.size).toBe(0);
+			expect(fetchCalls).toBe(0);
+			expect(harness.subsystem.getStatus(mock.context.ui.theme, 8)).toBeUndefined();
+
+			// rescheduleTimer / refresh stay inert in manual mode.
+			harness.subsystem.rescheduleTimer();
+			harness.subsystem.refresh();
+			await new Promise((resolve) => setTimeout(resolve, 25));
+			expect(activeIntervals.size).toBe(0);
+			expect(fetchCalls).toBe(0);
+
+			// model_select still does not fetch in manual mode.
+			harness.subsystem.onModelSelect(mock.context, { provider: "openai-codex", id: "test-model" } as unknown as ExtensionContext["model"]);
+			await new Promise((resolve) => setTimeout(resolve, 25));
+			expect(fetchCalls).toBe(0);
+			harness.subsystem.stop(mock.context);
+		} finally {
+			globalThis.setInterval = realSetInterval;
+		}
+	});
+
+	it("/usage overlay re-fetches all providers on `r` with an empty search box", async () => {
+		let fetchCalls = 0;
+		globalThis.fetch = (async () => {
+			fetchCalls += 1;
+			return new Response(JSON.stringify({
+				rate_limit: {
+					primary_window: { used_percent: 10 },
+					secondary_window: { used_percent: 20 },
+				},
+			}), { status: 200, headers: { "content-type": "application/json" } });
+		}) as unknown as typeof fetch;
+
+		const harness = createHarness();
+		const mock = createContext("tui", "openai-codex", { configured: true, source: "OAuth", token: "t" });
+		const context = mock.context as unknown as {
+			ui: { theme: unknown; custom: (factory: (...args: unknown[]) => unknown) => Promise<void> };
+		};
+		let component: { handleInput?(data: string): void; dispose?(): void; isLoading?(): boolean } | undefined;
+		context.ui.custom = async (factory: (...args: unknown[]) => unknown) => {
+			await new Promise<void>((resolve) => {
+				void Promise.resolve(factory(
+					{ terminal: { rows: 24 }, requestRender() {} },
+					mock.context.ui.theme,
+					{ matches: (data: string, binding: string) => data === "escape" && binding === "tui.select.cancel" },
+					resolve,
+				)).then(async (created) => {
+					component = created as { handleInput?(data: string): void; dispose?(): void; isLoading?(): boolean };
+					// Wait for the initial load() to settle (it also scans the real
+					// usage-history dir, which can be slow), then press `r`.
+					while (component?.isLoading?.()) {
+						await new Promise((r) => setTimeout(r, 50));
+					}
+					const afterOpen = fetchCalls;
+					expect(afterOpen).toBeGreaterThan(0);
+					// `r` only refetches once loading is false; keep poking until it takes.
+					let attempts = 0;
+					while (fetchCalls <= afterOpen && attempts < 80) {
+						component?.handleInput?.("r");
+						await new Promise((r) => setTimeout(r, 50));
+						attempts++;
+					}
+					expect(fetchCalls).toBeGreaterThan(afterOpen);
+					component?.handleInput?.("escape");
+				});
+			});
+		};
+
+		await harness.subsystem.openCommand(mock.context);
+		component?.dispose?.();
+	});
+
 	it("rescheduleTimer reaps the old interval and applies the new pollIntervalMs", () => {
 		const realSetInterval = globalThis.setInterval;
 		const realClearInterval = globalThis.clearInterval;
@@ -635,5 +735,75 @@ describe("usage-bars subsystem lifecycle", () => {
 			globalThis.setInterval = realSetInterval;
 			globalThis.clearInterval = realClearInterval;
 		}
+	});
+
+	it("togglePolling flips pollIntervalMs between 0 and the default, persisting via setPollIntervalMs", () => {
+		const persisted: number[] = [];
+		const harness = createHarness({
+			setPollIntervalMs: (ms) => {
+				persisted.push(ms);
+				harness.setConfig({ pollIntervalMs: ms });
+				return true;
+			},
+		});
+		const mock = createContext("tui", "openai-codex", { configured: true, source: "OAuth", token: "t" });
+		void harness.subsystem.start(mock.context);
+
+		// Default config has polling on (120s); first toggle turns it off.
+		expect(harness.subsystem.togglePolling()).toBe(false);
+		expect(harness.getConfig().usage.pollIntervalMs).toBe(0);
+		expect(persisted).toEqual([0]);
+
+		// Second toggle restores the default interval and re-enables polling.
+		expect(harness.subsystem.togglePolling()).toBe(true);
+		expect(harness.getConfig().usage.pollIntervalMs).toBe(120_000);
+		expect(persisted).toEqual([0, 120_000]);
+
+		harness.subsystem.stop(mock.context);
+	});
+
+	it("/usage overlay `p` toggles polling and re-renders its hint", async () => {
+		let pollToggles = 0;
+		const harness = createHarness({
+			setPollIntervalMs: (ms) => {
+				pollToggles += 1;
+				harness.setConfig({ pollIntervalMs: ms });
+				return true;
+			},
+		});
+		const mock = createContext("tui", "openai-codex", { configured: true, source: "OAuth", token: "t" });
+		const context = mock.context as unknown as {
+			ui: { theme: unknown; custom: (factory: (...args: unknown[]) => unknown) => Promise<void> };
+		};
+		let component: { handleInput?(data: string): void; dispose?(): void; isLoading?(): boolean } | undefined;
+		context.ui.custom = async (factory: (...args: unknown[]) => unknown) => {
+			await new Promise<void>((resolve) => {
+				void Promise.resolve(factory(
+					{ terminal: { rows: 24 }, requestRender() {} },
+					mock.context.ui.theme,
+					{ matches: (data: string, binding: string) => data === "escape" && binding === "tui.select.cancel" },
+					resolve,
+				)).then(async (created) => {
+					component = created as { handleInput?(data: string): void; dispose?(): void; isLoading?(): boolean };
+					while (component?.isLoading?.()) {
+						await new Promise((r) => setTimeout(r, 50));
+					}
+					// Start from the default (polling on); `p` turns it off.
+					expect(harness.getConfig().usage.pollIntervalMs).toBe(120_000);
+					component?.handleInput?.("p");
+					await new Promise((r) => setTimeout(r, 20));
+					expect(harness.getConfig().usage.pollIntervalMs).toBe(0);
+					// `p` again restores polling.
+					component?.handleInput?.("p");
+					await new Promise((r) => setTimeout(r, 20));
+					expect(harness.getConfig().usage.pollIntervalMs).toBe(120_000);
+					component?.handleInput?.("escape");
+				});
+			});
+		};
+
+		await harness.subsystem.openCommand(mock.context);
+		component?.dispose?.();
+		expect(pollToggles).toBe(2);
 	});
 });

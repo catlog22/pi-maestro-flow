@@ -23,7 +23,9 @@ function mergeUsageConfig(base: UsageConfig, raw: unknown): UsageConfig {
 	const isFiniteInt = (v: unknown): v is number =>
 		typeof v === "number" && Number.isFinite(v) && Number.isSafeInteger(v);
 	const pollIntervalMs = isFiniteInt(o.pollIntervalMs)
-		? Math.min(USAGE_POLL_MAX_MS, Math.max(USAGE_POLL_MIN_MS, o.pollIntervalMs))
+		? o.pollIntervalMs <= 0
+			? 0 // 0 = manual refresh: no background poll, /usage fetches on open and on `r`
+			: Math.min(USAGE_POLL_MAX_MS, Math.max(USAGE_POLL_MIN_MS, o.pollIntervalMs))
 		: base.pollIntervalMs;
 	const barWidth = isFiniteInt(o.barWidth)
 		? Math.min(USAGE_BAR_MAX_WIDTH, Math.max(USAGE_BAR_MIN_WIDTH, o.barWidth))

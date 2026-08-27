@@ -184,6 +184,9 @@ test("usage merges supported fields and clamps poll/bar bounds", () => {
 	);
 	assert.equal(mergeConfig(DEFAULT_CONFIG, { usage: { pollIntervalMs: 1_000 } }).usage.pollIntervalMs, 30_000);
 	assert.equal(mergeConfig(DEFAULT_CONFIG, { usage: { pollIntervalMs: 99_999_999 } }).usage.pollIntervalMs, 1_800_000);
+	// 0 (and negatives) select manual refresh mode instead of clamping to the floor.
+	assert.equal(mergeConfig(DEFAULT_CONFIG, { usage: { pollIntervalMs: 0 } }).usage.pollIntervalMs, 0);
+	assert.equal(mergeConfig(DEFAULT_CONFIG, { usage: { pollIntervalMs: -5_000 } }).usage.pollIntervalMs, 0);
 	assert.equal(mergeConfig(DEFAULT_CONFIG, { usage: { barWidth: 2 } }).usage.barWidth, 4);
 	assert.equal(mergeConfig(DEFAULT_CONFIG, { usage: { barWidth: 99 } }).usage.barWidth, 16);
 	assert.equal(mergeConfig(DEFAULT_CONFIG, { usage: { barWidth: 41.6 } }).usage.barWidth, 8);

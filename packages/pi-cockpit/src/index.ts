@@ -601,6 +601,12 @@ export default function (pi: ExtensionAPI): void {
 		pi,
 		getConfig: () => config,
 		onStatusChange: () => req(),
+		setPollIntervalMs: (ms: number) => {
+			config = { ...config, usage: { ...config.usage, pollIntervalMs: ms } };
+			const result = saveConfig(config);
+			req();
+			return result.ok;
+		},
 	});
 	const policy = (): TickPolicyState => ({
 		staticMode: config.staticMode,
@@ -2465,7 +2471,8 @@ export default function (pi: ExtensionAPI): void {
 					else usageSubsystem?.stop(ctx);
 			}
 				// footer/footer-toggle/barWidth change only the rendered string (the
-				// next render reads them fresh); pollIntervalMs change restarts the poller.
+				// next render reads them fresh); pollIntervalMs change restarts the
+				// poller (0 switches to manual refresh: no timer, no footer bar).
 				if (previous.usage.pollIntervalMs !== nextConfig.usage.pollIntervalMs && nextConfig.usage.enabled) {
 					usageSubsystem?.rescheduleTimer();
 					usageSubsystem?.refresh();

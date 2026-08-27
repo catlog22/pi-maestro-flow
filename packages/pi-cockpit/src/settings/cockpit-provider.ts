@@ -211,7 +211,7 @@ const CATALOGS = {
 		"cockpit.usage.footer": "Show in footer",
 		"cockpit.usage.footer.description": "Render the live quota bar on a dedicated footer line. The /usage command works regardless of this toggle.",
 		"cockpit.usage.pollIntervalMs": "Poll interval (ms)",
-		"cockpit.usage.pollIntervalMs.description": "How often to refresh usage data. Clamped to 30s..30min. Lower values hit provider APIs more often.",
+		"cockpit.usage.pollIntervalMs.description": "How often to refresh usage data. Clamped to 30s..30min; 0 = manual refresh only (no polling, no footer bar; /usage fetches on open and with `r`). Lower values hit provider APIs more often.",
 		"cockpit.usage.barWidth": "Bar width",
 		"cockpit.usage.barWidth.description": "Characters per quota bar in the footer. Clamped to 4..16.",
 		"cockpit.usage.commandKey": "Command key",
@@ -296,7 +296,7 @@ const CATALOGS = {
 		"cockpit.usage.footer": "在状态栏显示",
 		"cockpit.usage.footer.description": "在专属状态栏行渲染实时配额条。/usage 命令不受此开关影响。",
 		"cockpit.usage.pollIntervalMs": "轮询间隔（毫秒）",
-		"cockpit.usage.pollIntervalMs.description": "刷新用量数据的频率，钳制在 30 秒..30 分钟。值越小调用供应商 API 越频繁。",
+		"cockpit.usage.pollIntervalMs.description": "刷新用量数据的频率，钳制在 30 秒..30 分钟；0 = 仅手动刷新（不轮询、不显示状态栏；进入 /usage 时抓取并按 r 刷新）。值越小调用供应商 API 越频繁。",
 		"cockpit.usage.barWidth": "进度条宽度",
 		"cockpit.usage.barWidth.description": "状态栏中每条配额条的字符宽度，钳制在 4..16。",
 		"cockpit.usage.commandKey": "命令键",
@@ -423,7 +423,7 @@ const DEFINITIONS: readonly SettingDefinition[] = [
 		activation: "live",
 		sensitivity: "public",
 		reversibility: "full",
-		editor: { kind: "integer", min: 30_000, max: 1_800_000, step: 1000 },
+		editor: { kind: "integer", min: 0, max: 1_800_000, step: 1000 },
 	},
 	{
 		key: "usage.barWidth",
@@ -795,7 +795,7 @@ function validValue(key: CockpitSettingKey, value: JsonValue): boolean {
 	if (key === "title.generationModel") return typeof value === "string";
 	if (key.startsWith("title.")) return typeof value === "boolean";
 	if (key === "usage.enabled" || key === "usage.footer") return typeof value === "boolean";
-	if (key === "usage.pollIntervalMs") return typeof value === "number" && Number.isSafeInteger(value) && value >= 30_000 && value <= 1_800_000;
+	if (key === "usage.pollIntervalMs") return typeof value === "number" && Number.isSafeInteger(value) && (value === 0 || (value >= 30_000 && value <= 1_800_000));
 	if (key === "usage.barWidth") return typeof value === "number" && Number.isSafeInteger(value) && value >= 4 && value <= 16;
 	if (key === "usage.commandKey") return typeof value === "string" && value.trim().length > 0;
 	if (key === "quietSymbols") return value === "check" || value === "dot";

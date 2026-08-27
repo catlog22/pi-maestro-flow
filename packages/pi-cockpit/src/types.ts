@@ -221,7 +221,7 @@ export interface UsageConfig {
 	enabled: boolean;
 	/** Show the live quota bar in the Cockpit footer (a dedicated footer line). */
 	footer: boolean;
-	/** Poll interval in milliseconds; clamped 30s..30min. Default 2min. */
+	/** Poll interval in milliseconds; clamped 30s..30min. Default 2min. 0 = manual refresh (no polling, no footer bar; /usage fetches on open and on `r`). */
 	pollIntervalMs: number;
 	/** Characters per quota bar in the footer; clamped 4..16. Default 8. */
 	barWidth: number;
