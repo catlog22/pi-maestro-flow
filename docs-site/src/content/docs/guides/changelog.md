@@ -5,11 +5,11 @@ icon: "🔄"
 
 这里记录 pi maestro flow 套件从上一稳定版本到当前版本的用户可见变化、行为调整、问题修复和升级要求。
 
-> **当前稳定版本：v0.22.0（2026-08-20）。** Teammate 2.0.0 后端注册表（破坏性大版本，首个 2.x 公开发布）、MCPX 看板、提示词增强、`/notify` 提醒、用量洞察；引擎同步 `maestro-flow@0.5.79`；搭配 Cockpit 0.17.0 与 Settings-Core 0.2.0。后续 0.22.1 / 0.22.2 为打包修复补丁（已发布到 npm，见下），不改动安装命令与公告 banner。
+> **当前稳定版本：v0.23.0（2026-08-27）。** 持久化 workspace 运行时 Broker + 完成持久化（崩溃一致重投 teammate 结果）、原生 Computer Use/OCR、Review & Refine Plan 面板、MCPX 看板增强、持久化 flow-schedule 控制器、Cockpit `/usage` 按提供商 7 天 token 趋势；引擎同步 `maestro-flow@0.5.82`；搭配 Teammate 2.1.0、Cockpit 0.18.0、Settings-Core 0.2.1、Backend-Core 0.1.1 与 Backends 0.1.1。本版 `PI_RUNTIME_BROKER` 默认关闭（可选启用持久 broker sidecar）。
 
-## 未发布（下一版本，开发中）
+## v0.23.0（2026-08-27）
 
-> 以下为 `v0.22.0` 之后已合入 `master` 但尚未发版的内容快照。条目随 commit 滚动积累，发版时转正为正式小节。
+> 本版发布 Flow 0.23.0、Teammate 2.1.0、Cockpit 0.18.0、Settings-Core 0.2.1、Backend-Core 0.1.1 与 Backends 0.1.1；引擎 pin `maestro-flow` 0.5.79 → 0.5.82（caret）。121 commits / 789 文件 / +135,044 −12,784。
 
 - **Teammate 运行时身份与 runtime-broker v3**：workspace 身份集中到 `getRuntimeWorkspaceIdentity`（canonical 路径 + 稳定 `workspaceId` + 旧 id 列表），flow-schedule、completion 投递、workspace peers、mailbox 共享同一解析路径并仍能匹配 realpath 规范化前的旧 id。runtime-broker 协议升至 schema v3：新增 `broker.probe` 握手、分页 `stream.events.page`（带稳定 `throughRevision` 上界，避免无限重放快照）、readiness challenge。completion-outbox / mailbox file store 增加崩溃一致 replace 顺序与 GC；workspace peers 增加不可变 per-session owner claim（锁保护 acquire + 陈旧接管）。
 - **Fork / wait-cycle / todo-context 公开契约**：新增 `fork-snapshot`（`context: "fork"` 子会话从祖先链快照启动）、`wait-cycle` 自等待死锁检测（observe wait 屏障要求循环 target 时拒绝）、版本化 `todo-context` 公开 API（`./v1/todo-context` 导出，forked/spawned 子智能体在 prompt 中直接获得紧凑 Todo 状态，无额外 IPC）。
@@ -20,7 +20,6 @@ icon: "🔄"
 - **flow-schedule 工作区身份 + Todo mutation 门控**：flow-schedule actor runtime 经 `getRuntimeWorkspaceIdentity` 解析身份，并接受 `todoMutationSupported`，工具据此门控 Todo 变更（仅 managed-worker 窗口）。
 - **Cockpit 会话投影围栏 + CLI agent 徽章 + 用量条**：agents-store 与 endpoint-store 携带 `SessionProjectionIdentity`（workspaceId/sessionId/sourceId/generation），行与端点围栏到当前 root session，连接时拒绝陈旧 registry 代际。外部 CLI 后端（`cli/*` 模型前缀）渲染专用徽章，stall 超时改由本地持有（30s，不再导入 broker 常量）。新增 usage 模块（`usage/core.ts` + `extension.ts`）轮询 provider 配额/余额/消费并在 footer 专用行渲染进度条，经 Cockpit config（`usage.enabled/footer/pollIntervalMs/barWidth/commandKey`）与设置 provider 配置。
 - **observe lastResult 无条件渲染**：observe 输出现在无条件渲染 `lastResult`——非 verbose 显示一行扁平摘要、verbose 仍显示完整多行块，使轮询观察者无需请求 detail 即可区分“已完成所请”与“尚未开始”。配套窗口侧 `mainLastSettle` 单槽投影，跨轮次保留最近一次 `agent_settled` 结果。
-- **已发布补丁 0.22.1 / 0.22.2（2026-08-21，仅打包修复，npm `latest`）**：0.22.1 补声明 flow 对 `pi-maestro-backends` 的运行时依赖（原经 teammate 传递依赖才装上，现显式声明）；0.22.2 把 `maestro-flow` 引擎约束由精确 pin `0.5.79` 改为 caret `^0.5.79`（引擎纯 patch 节奏、向后兼容，升引擎 patch 不必再改 flow pin；cockpit/teammate/settings-core 仍精确 pin，0.x 下 caret 对 minor 频跳的包是假放宽）。纯打包修复，故安装命令与公告 banner 维持 `@0.22.0`。
 - **Teammate 运行时核心升级——model-registry 模型注册**：以 canonical 模型注册 id + 部署拓扑 + 四道门（registered/resolvable/sessionAvailable/healthy）替代 backend-registry 的 v2 模式；DSH 部署用 adapter-model selector；远端路由仅在当前 root Monitor session 可用并给出确定性 `unavailableReason`；共享模型健康协调器与熔断策略（`model-circuit-breaker`）；`model-routing` 接入注册 id 解析与 circuit 策略同步；`registry-host` 读取 model-registry 模式并投影 pair 发布、mode 三态切换。新增 `pi-teammate-models` CLI（list/edit/add）与 connection TUI 向导（`connection-forms` / `connection-wizards` 复用 cli-edit/cli-add），`model-mapping-overlay` / `remote-config-pane` / `locale-catalog-model` 适配。
 - **completion-durability 投递（teammate 输出不再因中断/压缩丢失）**：`completion-outbox`（coordinator/file-store/registry/types）落盘 outbox + 重投；`public/v1/completion-durability` 注册表符号与 provider 契约；`runs/execution` + `extension/index` + `extension/teammate-proxy` 子会话绑定、`receiveMessageEnd` 回放、`reply_to`/`correlationId` 投递种子；flow 侧 `FlowCompletionDurabilityProvider` + `agent-output-capture`/`store` 元数据。后续多轮审查修复（崩溃一致性、向后兼容与 pin 语义、WAL 恢复与 caller 通知、聚合 import 路径）。
 - **briefing 装配**：`runs/briefing.assembleTaskPrompt` 将 `agent://` / `file:` 引用懒拼入子任务 prompt，`execution` 在使用 `params.task` 前统一装配。

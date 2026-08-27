@@ -21,8 +21,8 @@
     "logo_alt": "Maestro Flow Logo"
   },
   "announcement": {
-    "title": "v0.22.0 is out — Teammate 2.0 backend registry (breaking) + MCPX dashboard + prompt enhance + usage insights (engine synced to maestro-flow 0.5.79). Upgrade:",
-    "install": "pi install npm:pi-maestro-flow@0.22.0",
+    "title": "v0.23.0 is out — runtime broker + completion durability + Computer Use/OCR + Review & Refine Plan panel + usage trends (engine synced to maestro-flow 0.5.82). Upgrade:",
+    "install": "pi install npm:pi-maestro-flow@0.23.0",
     "close": "Dismiss"
   },
   "accessibility": {
