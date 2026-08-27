@@ -8872,6 +8872,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     state.currentSourceId = undefined;
     state.settlementOwner = undefined;
     widgetCtx?.ui.setWidget("teammate-agents", undefined);
+    agentWidgetInstalled = false;
     widgetCtx = null;
     setPersistentUi(undefined);
   }
@@ -8924,6 +8925,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
   }
 
   let widgetCtx: ExtensionContext | null = null;
+  let agentWidgetInstalled = false;
   const teammateSettingsProvider = createTeammateSettingsProvider({
     openLegacySettings: async () => {
       if (!widgetCtx) return;
@@ -9007,22 +9009,19 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
         ownerId: owner.ownerId,
         bindable: true,
       };
-      const agentRows: SessionSelectionRow[] = owner.agents.map((agent) => {
-        const key = `${owner.ownerId}:${agent.correlationId}`;
-        return {
-          correlationId: key,
-          displayName: agent.name ?? agent.correlationId.slice(0, 8),
-          agentRole: agent.agent,
-          status: agent.status,
-          idleSeconds: Math.round((Date.now() - agent.lastActivityAt) / 1000),
-              source: owner.sessionName ?? `remote:${owner.ownerId.slice(0, 6)}`,
-          kind: "agent",
-          ownerId: owner.ownerId,
-          bindable: false,
-          ...(agent.depth === undefined ? {} : { depth: agent.depth }),
-          ...(agent.parentCorrelationId ? { parentCorrelationId: agent.parentCorrelationId } : {}),
-        } satisfies SessionSelectionRow;
-      });
+      const agentRows: SessionSelectionRow[] = owner.agents.map((agent) => ({
+        correlationId: `owner:${owner.ownerId}:${agent.correlationId}`,
+        displayName: agent.name ?? agent.correlationId.slice(0, 8),
+        agentRole: agent.agent,
+        status: agent.status,
+        idleSeconds: Math.round((Date.now() - agent.lastActivityAt) / 1000),
+        source: owner.sessionName ?? `remote:${owner.ownerId.slice(0, 6)}`,
+        kind: "agent",
+        ownerId: owner.ownerId,
+        bindable: true,
+        ...(agent.depth === undefined ? {} : { depth: agent.depth }),
+        ...(agent.parentCorrelationId ? { parentCorrelationId: agent.parentCorrelationId } : {}),
+      }));
       return [windowRow, ...agentRows];
     });
     const remoteWorkerRows: SessionSelectionRow[] = currentRemoteMonitorRuns().map((run) => ({
@@ -9055,32 +9054,27 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
   // ---------------------------------------------------------------------------
 
   pi.registerCommand("teammate-send", {
-    description: "Send a message to another Pi session while Monitor mode is active; without arguments, choose a session and enter the message.",
-    getArgumentCompletions(prefix: string) {
-      if (!ownsMonitorCommunication(captureMonitorCommunication())) return null;
-      void refreshWorkspacePeerOwners();
+    description: "Send a message to another Pi window or one of its active agents; without arguments, preview and choose a target.",
+    async getArgumentCompletions(prefix: string) {
+      try {
+        await workspacePeerLifecycle;
+        await refreshWorkspacePeerOwners();
+      } catch {
+        return null;
+      }
       const matches = sessionSelectionRows()
-        .filter((row) => row.kind === "window" && row.bindable === true)
+        .filter((row) => row.bindable === true)
         .map((row) => ({
           value: row.correlationId,
           label: row.displayName,
-          description: `${row.agentRole} · ${row.source ?? "workspace peer"}`,
+          description: `${row.agentRole} · ${row.source ?? "workspace peer"} · target=${row.correlationId}`,
         }))
         .filter((entry) => entry.value.startsWith(prefix.trimStart()));
       return matches.length > 0 ? matches : null;
     },
     async handler(args: string, ctx) {
-      const monitorCapture = captureMonitorCommunication();
-      if (!ownsMonitorCommunication(monitorCapture)) {
-        ctx.ui.notify("/teammate-send is available only after entering Monitor mode with /monitor.", "warning");
-        return;
-      }
       await workspacePeerLifecycle;
       await refreshWorkspacePeerOwners();
-      if (!ownsMonitorCommunication(monitorCapture)) {
-        ctx.ui.notify("Monitor mode ended before cross-window messaging was ready.", "warning");
-        return;
-      }
 
       const trimmed = args.trim();
       let target: string | undefined;
@@ -9088,7 +9082,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
       if (trimmed) {
         const separator = trimmed.search(/\s/);
         if (separator < 0) {
-          ctx.ui.notify("Usage: /teammate-send <owner:ownerId> <message>", "warning");
+          ctx.ui.notify("Usage: /teammate-send <target> <message>", "warning");
           return;
         }
         target = trimmed.slice(0, separator);
@@ -9100,7 +9094,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
       } else {
         preemptCockpitResize();
         const result = await showSessionSendOverlay(ctx, {
-          getSessions: () => sessionSelectionRows().filter((row) => row.kind === "window" && row.bindable === true),
+          getSessions: () => sessionSelectionRows().filter((row) => row.bindable === true),
         });
         if (!result) return;
         target = result.target;
@@ -9111,8 +9105,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
         selector: target,
         message,
         mode: "follow_up",
-        source: "monitor",
-        authorize: () => ownsMonitorCommunication(monitorCapture),
+        source: "user",
       });
       ctx.ui.notify(
         delivery.delivered
@@ -9458,10 +9451,19 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     },
   });
 
+  function clearAgentWidget(): void {
+    if (!agentWidgetInstalled) return;
+    widgetCtx?.ui.setWidget("teammate-agents", undefined);
+    agentWidgetInstalled = false;
+  }
+
   function updateAgentWidget(): void {
-    if (!widgetCtx) return;
+    if (!widgetCtx) {
+      agentWidgetInstalled = false;
+      return;
+    }
     if (cockpitOwnsAgents || interactivePanelActive || foregroundToolRuns.size > 0) {
-      widgetCtx.ui.setWidget("teammate-agents", undefined);
+      clearAgentWidget();
       return;
     }
     const now = Date.now();
@@ -9474,7 +9476,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
       return true;
     });
     if (visible.length === 0) {
-      widgetCtx.ui.setWidget("teammate-agents", undefined);
+      clearAgentWidget();
       return;
     }
 
@@ -9486,6 +9488,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
       },
       invalidate() {},
     }), { placement: "belowEditor" });
+    agentWidgetInstalled = true;
   }
 
   let widgetTimer: ReturnType<typeof setInterval> | null = null;

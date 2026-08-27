@@ -519,8 +519,7 @@ test("runGraph rejects a dependent prompt that resolves to empty text", async ()
   assert.equal(results[0].exitCode, 0);
   assert.equal(results[1].exitCode, 1);
   assert.match(results[1].messages[0].content, /Resolved task prompt requires non-empty text/);
-  // Regression: synthetic failures bypass publishResult, so durable completion
-  // delivery would throw "has no immutable publicationId" without the fallback.
+  // Synthetic failures establish the same immutable identity as executed turns.
   assert.ok(results[1].publicationId, "synthetic failure must carry a publicationId");
 });
 
@@ -560,10 +559,7 @@ test("direct failed runs retain the resolved task cwd without a completion obser
 
   assert.equal(result.exitCode, 1);
   assert.equal(result.originCwd, taskCwd);
-  // Regression: pre-launch rejections (rejectAndPublish) and cancellations
-  // (cancelAtBoundary) bypass publishResult, so durable completion delivery
-  // would throw "has no immutable publicationId" without the fallback in
-  // publishTurnComplete.
+  // Rejected runs retain an immutable identity even without a publication observer.
   assert.ok(result.publicationId, "rejected run must carry a publicationId");
 });
 
@@ -1985,7 +1981,8 @@ test("native teammate status widget yields while another surface owns agent disp
   assert.match(source, /const foregroundToolRuns = new Set<string>\(\)/);
   assert.match(source, /if \(params\.background === false\) \{[\s\S]*?foregroundToolRuns\.add\(correlationId\)[\s\S]*?updateAgentWidget\(\)/);
   assert.match(source, /if \(foregroundToolRuns\.delete\(correlationId\)\) updateAgentWidget\(\)/);
-  assert.match(source, /if \(cockpitOwnsAgents \|\| interactivePanelActive \|\| foregroundToolRuns\.size > 0\) \{[\s\S]*?setWidget\("teammate-agents", undefined\)/);
+  assert.match(source, /function clearAgentWidget\(\): void \{[\s\S]*?if \(!agentWidgetInstalled\) return;[\s\S]*?setWidget\("teammate-agents", undefined\)[\s\S]*?agentWidgetInstalled = false/);
+  assert.match(source, /if \(cockpitOwnsAgents \|\| interactivePanelActive \|\| foregroundToolRuns\.size > 0\) \{[\s\S]*?clearAgentWidget\(\)/);
 });
 
 test("Alt+R delegates the active Agent or Window session list to Cockpit ownership", () => {

@@ -82,7 +82,11 @@ export class SessionSendOverlay {
       const pointer = current ? accent(">") : " ";
       const check = selected ? green("[x]") : dim("[ ]");
       const source = session.source && session.source !== "local" ? dim(` [${session.source}]`) : "";
-      const row = ` ${pointer} ${check} ${statusIcon(session.status)} ${session.displayName}  ${dim(translateStatusIdentifier(session.status, this.t))}  ${dim(session.agentRole)}${source}`;
+      const identifier = session.kind === "window" && session.ownerId
+        ? session.ownerId
+        : session.correlationId.split(":").at(-1) ?? session.correlationId;
+      const id = dim(` · id=${identifier.slice(0, 8)}`);
+      const row = ` ${pointer} ${check} ${statusIcon(session.status)} ${session.displayName}${id}  ${dim(translateStatusIdentifier(session.status, this.t))}  ${dim(session.agentRole)}${source}`;
       lines.push(this.frameLine(current ? accent(row) : row, inner, dim));
     }
     if (this.sessions.length === 0) {
@@ -92,6 +96,7 @@ export class SessionSendOverlay {
     lines.push(this.frameLine("", inner, dim));
     const target = this.selected ? this.sessions.find((session) => session.correlationId === this.selected) : undefined;
     lines.push(this.frameLine(` ${this.t("sessionSend.target")} ${target?.displayName ?? dim(this.t("sessionSend.selectPlaceholder"))}`, inner, dim));
+    lines.push(this.frameLine(` ID: ${target?.correlationId ?? dim("—")}`, inner, dim));
     const messageValue = this.editingMessage
       ? ` > ${this.message}\x1b[7m \x1b[0m`
       : ` > ${this.message || dim(this.t("sessionSend.editPlaceholder"))}`;

@@ -41,6 +41,10 @@ test("session send overlay selects a peer window and submits the message", () =>
   // Non-bindable local rows are removed from the picker. Select the peer,
   // enter the message, and submit it.
   overlay.handleInput(" ");
+  const preview = overlay.render(120).join("\n");
+  assert.match(preview, /remote-window.*id=aaaaaaaa/);
+  assert.match(preview, /ID: owner:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/);
+
   overlay.handleInput("\t");
   overlay.handleInput("check the deployment");
   overlay.handleInput("\r");
@@ -49,6 +53,29 @@ test("session send overlay selects a peer window and submits the message", () =>
     target: "owner:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     message: "check the deployment",
   });
+});
+
+test("session send overlay submits a canonical remote agent target", () => {
+  let result: SessionSendOverlayResult | null | undefined;
+  const target = "owner:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:agent-correlation-id";
+  const overlay = new SessionSendOverlay({
+    getSessions: () => [row({
+      correlationId: target,
+      displayName: "audit-agent",
+      agentRole: "reviewer",
+      kind: "agent",
+    })],
+    close: (value) => { result = value; },
+  });
+  overlay.setRequestRender(() => {});
+
+  overlay.handleInput(" ");
+  assert.match(overlay.render(120).join("\n"), /ID: owner:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:agent-correlation-id/);
+  overlay.handleInput("\t");
+  overlay.handleInput("review the change");
+  overlay.handleInput("\r");
+
+  assert.deepEqual(result, { target, message: "review the change" });
 });
 
 test("session send overlay refuses an empty message and accepts portable Escape encodings", () => {

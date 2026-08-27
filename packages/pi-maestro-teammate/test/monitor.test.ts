@@ -290,7 +290,9 @@ test("monitor communication uses tool-local capability gates without global inte
   assert.doesNotMatch(proxySource, /crossSessionError\("Cross-window teammate-send"\)/);
   assert.match(source, /Cross-window teammate-list views are available only after the user enters Monitor mode/);
   assert.match(source, /hasCrossWindowTarget[\s\S]*?ownsMonitorCommunication\(monitorCapture\)/);
-  assert.match(source, /\/teammate-send is available only after entering Monitor mode/);
+  assert.doesNotMatch(source, /\/teammate-send is available only after entering Monitor mode/);
+  assert.match(source, /pi\.registerCommand\("teammate-send"[\s\S]*?source: "user"/);
+  assert.match(source, /correlationId: `owner:\$\{owner\.ownerId\}:\$\{agent\.correlationId\}`[\s\S]*?bindable: true/);
   assert.match(proxySource, /authorizeCrossSession\?\.\(\) === true/);
   assert.match(proxySource, /crossSessionError\("teammate-list"\)/);
   assert.doesNotMatch(peerSource, /Reply with teammate-send/);
