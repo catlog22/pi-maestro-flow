@@ -140,6 +140,7 @@ import {
   type WorkspaceOwnerSnapshot,
   type WorkspaceOwnerState,
   type WorkspacePeerCommand,
+  type WorkspacePeerCommandAction,
   type WorkspacePeerCommandConsumer,
   type WorkspacePeerPublisher,
   type WorkspacePeerWindowListing,
@@ -1698,6 +1699,7 @@ export default function registerTeammateExtension(
   const workspaceTerminalResultPublications = new Map<string, Promise<boolean>>();
   const workspaceTerminalCompletionPublications = new Map<string, Promise<boolean>>();
   let workspaceReceiptReconcileTimer: ReturnType<typeof setInterval> | undefined;
+  let periodicCompletionReconcile: Promise<void> | undefined;
   let workspacePeerRefresh: {
     publisher: WorkspacePeerPublisher;
     fence: RootSessionFence;
@@ -9772,9 +9774,14 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
       void reconcileWorkspaceWindowTerminalRequests().catch((error) => {
         logDiagnosticWarn("[pi-maestro-teammate] workspace terminal request reconciliation failed:", error);
       });
-      void completionCoordinator.reconcile().catch((error) => {
-        logDiagnosticWarn("[pi-maestro-teammate] periodic completion reconciliation failed:", error);
-      });
+      if (!periodicCompletionReconcile) {
+        const reconcile = completionCoordinator.reconcile().catch((error) => {
+          logDiagnosticWarn("[pi-maestro-teammate] periodic completion reconciliation failed:", error);
+        }).finally(() => {
+          if (periodicCompletionReconcile === reconcile) periodicCompletionReconcile = undefined;
+        });
+        periodicCompletionReconcile = reconcile;
+      }
       try {
         redriveStaleIncomingRootMessages();
       } catch (error) {

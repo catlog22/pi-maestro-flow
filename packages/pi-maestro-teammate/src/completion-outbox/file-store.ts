@@ -1,4 +1,9 @@
-import { constants as fsConstants } from "node:fs";
+import {
+  constants as fsConstants,
+  lstatSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import {
@@ -10,6 +15,7 @@ import {
   readdir,
   rename,
   rm,
+  type FileHandle,
 } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import {
@@ -47,9 +53,11 @@ const LIVE_STATES = new Set<CompletionOutboxState>(["wal", "pending", "queued"])
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const HASH_ID = /^[a-f0-9]{64}$/;
 const LOCK_STALE_MS = 2 * 60_000;
-// A crash at lock:after-create leaves no PID/token record to probe. Give an
-// active creator a short bounded setup window, then reclaim the unchanged inode.
+// A crash at lock:after-create leaves a zero-byte inode with no PID/token to
+// probe. Only that exact setup shape is reclaimed on the short setup deadline;
+// an invalid non-empty record may be a concurrent fixed-width lease rewrite.
 const LOCK_SETUP_STALE_MS = 1_000;
+const WORKSPACE_LOCK_RECORD_BYTES = 4096;
 const LOCK_HEARTBEAT_MS = 10_000;
 // Raised from 15s to 45s: a full workspace GC scans every session × state dir
 // under the lock, which can hold the workspace lock long enough on slow disks
@@ -76,8 +84,8 @@ const GC_INDEX_DIR = ".gc-index";
 const GC_INDEX_STATE_NAME = "state.json";
 const GC_PAGE_SIZE = 128;
 const REPLACE_ERRORS = new Set(["EPERM", "EACCES", "EEXIST"]);
-const ORDERED_REPLACEMENT_PATTERN = /^(.*\.json)\.replace-(\d{20})-([A-Za-z0-9-]+)\.(new|committed|bak)$/;
-const LEGACY_REPLACEMENT_PATTERN = /^(.*\.json)\.replace-([A-Za-z0-9-]+)\.(new|committed|bak)$/;
+const ORDERED_REPLACEMENT_PATTERN = /^(.+)\.replace-(\d{20})-([A-Za-z0-9-]+)\.(new|committed|bak)$/;
+const LEGACY_REPLACEMENT_PATTERN = /^(.+)\.replace-([A-Za-z0-9-]+)\.(new|committed|bak)$/;
 const REPLACEMENT_TRANSACTION = /^\d{20}-[A-Za-z0-9-]{1,128}$/;
 const WORKSPACE_GENERATION = /^\d{20}$/;
 const FENCED_JSON_OVERHEAD_BYTES = 1024;
@@ -104,8 +112,24 @@ interface WorkspaceLockLease {
   token: string;
   generation: string;
   assertOwned(): Promise<void>;
+  assertOwnedSync(): void;
   beginMutation(path: string, transaction: string): Promise<void>;
   finishMutation(transaction: string): Promise<void>;
+}
+
+async function overwriteWorkspaceLockRecord(handle: FileHandle, record: WorkspaceLockRecord): Promise<void> {
+  const encoded = Buffer.from(`${JSON.stringify(record)}\n`, "utf8");
+  if (encoded.byteLength > WORKSPACE_LOCK_RECORD_BYTES) {
+    throw new Error("Completion outbox lock record exceeds its fixed-width slot.");
+  }
+  const payload = Buffer.alloc(WORKSPACE_LOCK_RECORD_BYTES, 0x20);
+  encoded.copy(payload);
+  let offset = 0;
+  while (offset < payload.byteLength) {
+    const { bytesWritten } = await handle.write(payload, offset, payload.byteLength - offset, offset);
+    if (bytesWritten <= 0) throw new Error("Completion outbox lock record write made no progress.");
+    offset += bytesWritten;
+  }
 }
 
 interface GcIndexEntry {
@@ -157,10 +181,77 @@ interface StoreOptions {
   maxLiveBytes?: number;
 }
 
+export interface CompletionOutboxCleanupOptions {
+  apply?: boolean;
+  maxEntries?: number;
+}
+
+export interface CompletionOutboxCleanupResult {
+  apply: boolean;
+  busy: boolean;
+  scannedEntries: number;
+  scannedFiles: number;
+  replacementFiles: number;
+  preservedFiles: number;
+  candidateFiles: number;
+  candidateBytes: number;
+  removedFiles: number;
+  removedBytes: number;
+  candidateSample: string[];
+}
+
+interface CleanupDirectoryIdentity {
+  path: string;
+  dev: number | bigint;
+  ino: number | bigint;
+}
+
+interface ReplacementCleanupCandidate {
+  path: string;
+  relativePath: string;
+  dir: string;
+  name: string;
+  transaction: string;
+  ancestors: CleanupDirectoryIdentity[];
+  dev: number | bigint;
+  ino: number | bigint;
+  size: number;
+  mtimeMs: number;
+  ctimeMs: number;
+}
+
+const DEFAULT_CLEANUP_MAX_ENTRIES = 100_000;
+const CLEANUP_SAMPLE_SIZE = 20;
+
 function fileCode(error: unknown): string | undefined {
   return error instanceof Error && "code" in error
     ? String((error as NodeJS.ErrnoException).code)
     : undefined;
+}
+
+function parseWorkspaceLockRecord(raw: string): WorkspaceLockRecord | undefined {
+  try {
+    const parsed = JSON.parse(raw) as Partial<WorkspaceLockRecord>;
+    const validLegacy = parsed.version === undefined
+      && parsed.generation === undefined && parsed.mutation === undefined;
+    const validMutation = parsed.mutation === undefined || Boolean(
+      parsed.mutation.version === 1
+      && boundedString(parsed.mutation.path, 4096)
+      && REPLACEMENT_TRANSACTION.test(parsed.mutation.transaction),
+    );
+    const validV2 = parsed.version === 2 && typeof parsed.generation === "string"
+      && WORKSPACE_GENERATION.test(parsed.generation) && validMutation;
+    if ((validLegacy || validV2)
+      && boundedString(parsed.ownerId, 512)
+      && boundedString(parsed.token, 128)
+      && Number.isSafeInteger(parsed.pid) && parsed.pid! > 0
+      && Number.isSafeInteger(parsed.heartbeatAt) && parsed.heartbeatAt! >= 0) {
+      return parsed as WorkspaceLockRecord;
+    }
+  } catch {
+    // Invalid or partially written records are contention, never authority.
+  }
+  return undefined;
 }
 
 function persistenceBoundary(scope: "outbox" | "lock", boundary: string): void {
@@ -648,6 +739,230 @@ async function latestReplacementNames(
       return order[left.kind] - order[right.kind] || left.name.localeCompare(right.name);
     })
     .map((entry) => entry.name);
+}
+
+function emptyCleanupResult(apply: boolean, busy = false): CompletionOutboxCleanupResult {
+  return {
+    apply,
+    busy,
+    scannedEntries: 0,
+    scannedFiles: 0,
+    replacementFiles: 0,
+    preservedFiles: 0,
+    candidateFiles: 0,
+    candidateBytes: 0,
+    removedFiles: 0,
+    removedBytes: 0,
+    candidateSample: [],
+  };
+}
+
+async function readWorkspaceGenerationFence(workspaceDir: string): Promise<string> {
+  const snapshots = await Promise.all((["a", "b"] as const).map(async (slot) => {
+    const path = workspaceGenerationSlot(workspaceDir, slot);
+    try {
+      const info = await lstat(path);
+      if (!info.isFile() || info.isSymbolicLink() || info.size > 1_024) {
+        return `${slot}:invalid:${String(info.dev)}:${String(info.ino)}:${info.size}:${info.mtimeMs}:${info.ctimeMs}`;
+      }
+      const raw = await readFile(path, "utf8");
+      return `${slot}:file:${String(info.dev)}:${String(info.ino)}:${info.size}:${info.mtimeMs}:${info.ctimeMs}:${raw}`;
+    } catch (error) {
+      if (fileCode(error) === "ENOENT") return `${slot}:missing`;
+      throw error;
+    }
+  }));
+  return snapshots.join("\0");
+}
+
+async function validateCleanupDirectories(
+  identities: readonly CleanupDirectoryIdentity[],
+  relativePath: string,
+): Promise<void> {
+  for (const identity of identities) {
+    const current = await lstat(identity.path).catch((error) => {
+      if (fileCode(error) === "ENOENT") return undefined;
+      throw error;
+    });
+    if (!current || !current.isDirectory() || current.isSymbolicLink()
+      || current.dev !== identity.dev || current.ino !== identity.ino) {
+      throw new Error(`Completion outbox cleanup directory changed during scan: ${relativePath}.`);
+    }
+  }
+}
+
+async function validateCleanupCandidate(candidate: ReplacementCleanupCandidate): Promise<void> {
+  await validateCleanupDirectories(candidate.ancestors, candidate.relativePath);
+  const current = await lstat(candidate.path).catch((error) => {
+    if (fileCode(error) === "ENOENT") return undefined;
+    throw error;
+  });
+  if (!current || !current.isFile() || current.isSymbolicLink()
+    || current.dev !== candidate.dev || current.ino !== candidate.ino
+    || current.size !== candidate.size || current.mtimeMs !== candidate.mtimeMs
+    || current.ctimeMs !== candidate.ctimeMs) {
+    throw new Error(`Completion outbox cleanup candidate changed during scan: ${candidate.relativePath}.`);
+  }
+  await validateCleanupDirectories(candidate.ancestors, candidate.relativePath);
+}
+
+function validateCleanupCandidateSync(candidate: ReplacementCleanupCandidate): void {
+  for (const identity of candidate.ancestors) {
+    let current: ReturnType<typeof lstatSync> | undefined;
+    try {
+      current = lstatSync(identity.path);
+    } catch (error) {
+      if (fileCode(error) !== "ENOENT") throw error;
+    }
+    if (!current || !current.isDirectory() || current.isSymbolicLink()
+      || current.dev !== identity.dev || current.ino !== identity.ino) {
+      throw new Error(`Completion outbox cleanup directory changed during scan: ${candidate.relativePath}.`);
+    }
+  }
+  let current: ReturnType<typeof lstatSync> | undefined;
+  try {
+    current = lstatSync(candidate.path);
+  } catch (error) {
+    if (fileCode(error) !== "ENOENT") throw error;
+  }
+  if (!current || !current.isFile() || current.isSymbolicLink()
+    || current.dev !== candidate.dev || current.ino !== candidate.ino
+    || current.size !== candidate.size || current.mtimeMs !== candidate.mtimeMs
+    || current.ctimeMs !== candidate.ctimeMs) {
+    throw new Error(`Completion outbox cleanup candidate changed during scan: ${candidate.relativePath}.`);
+  }
+}
+
+async function scanReplacementRemnants(
+  workspaceDir: string,
+  maxEntries: number,
+): Promise<{ result: CompletionOutboxCleanupResult; candidates: ReplacementCleanupCandidate[] }> {
+  const groups = new Map<string, {
+    dir: string;
+    canonical: string;
+    entries: ReplacementCleanupCandidate[];
+  }>();
+  const result = emptyCleanupResult(false);
+  const pendingDirs: Array<{ path: string; ancestors: CleanupDirectoryIdentity[] }> = [{
+    path: workspaceDir,
+    ancestors: [],
+  }];
+
+  while (pendingDirs.length > 0) {
+    const pending = pendingDirs.pop()!;
+    await validateCleanupDirectories(pending.ancestors, relative(workspaceDir, pending.path) || ".");
+    const dirInfo = await lstat(pending.path).catch((error) => {
+      if (fileCode(error) === "ENOENT" && pending.path === workspaceDir) return undefined;
+      throw error;
+    });
+    if (!dirInfo) break;
+    if (!dirInfo.isDirectory() || dirInfo.isSymbolicLink()) {
+      throw new Error(`Completion outbox cleanup directory must be real: ${pending.path}.`);
+    }
+    const dirIdentity: CleanupDirectoryIdentity = {
+      path: pending.path,
+      dev: dirInfo.dev,
+      ino: dirInfo.ino,
+    };
+    const ancestors = [...pending.ancestors, dirIdentity];
+    const entries = await readdir(pending.path, { withFileTypes: true });
+    entries.sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      result.scannedEntries += 1;
+      if (result.scannedEntries > maxEntries) {
+        throw new Error(`Completion outbox cleanup scan exceeded ${maxEntries} entries.`);
+      }
+      const path = join(pending.path, entry.name);
+      if (entry.isDirectory()) {
+        pendingDirs.push({ path, ancestors });
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      result.scannedFiles += 1;
+      const replacement = parseReplacementName(entry.name);
+      if (!replacement) continue;
+      const info = await lstat(path);
+      if (!info.isFile() || info.isSymbolicLink()) continue;
+      result.replacementFiles += 1;
+      const candidate: ReplacementCleanupCandidate = {
+        path,
+        relativePath: relative(workspaceDir, path),
+        dir: pending.path,
+        name: entry.name,
+        transaction: replacement.transaction,
+        ancestors,
+        dev: info.dev,
+        ino: info.ino,
+        size: info.size,
+        mtimeMs: info.mtimeMs,
+        ctimeMs: info.ctimeMs,
+      };
+      const key = `${pending.path}\0${replacement.canonical}`;
+      const group = groups.get(key) ?? { dir: pending.path, canonical: replacement.canonical, entries: [] };
+      group.entries.push(candidate);
+      groups.set(key, group);
+    }
+  }
+
+  const candidates: ReplacementCleanupCandidate[] = [];
+  for (const group of groups.values()) {
+    const canonicalPath = join(group.dir, group.canonical);
+    const [a, b] = await Promise.all([
+      readReplacementGenerationSlot(canonicalPath, "a"),
+      readReplacementGenerationSlot(canonicalPath, "b"),
+    ]);
+    const latest = latestReplacementGeneration(a, b);
+    const preservedTransactions = new Set<string>();
+    if (latest?.transaction && group.entries.some((entry) => entry.transaction === latest.transaction)) {
+      preservedTransactions.add(latest.transaction);
+    }
+    const latestNames = await latestReplacementNames(
+      group.dir,
+      group.canonical,
+      group.entries.map((entry) => entry.name),
+    );
+    for (const name of latestNames) {
+      const replacement = parseReplacementName(name);
+      if (replacement) preservedTransactions.add(replacement.transaction);
+    }
+    for (const entry of group.entries) {
+      if (preservedTransactions.has(entry.transaction)) result.preservedFiles += 1;
+      else candidates.push(entry);
+    }
+  }
+
+  candidates.sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+  result.candidateFiles = candidates.length;
+  result.candidateBytes = candidates.reduce((total, entry) => total + entry.size, 0);
+  result.candidateSample = candidates.slice(0, CLEANUP_SAMPLE_SIZE).map((entry) => entry.relativePath);
+  return { result, candidates };
+}
+
+async function removeReplacementCandidates(
+  candidates: readonly ReplacementCleanupCandidate[],
+  lease: WorkspaceLockLease,
+): Promise<{ removedFiles: number; removedBytes: number }> {
+  await lease.assertOwned();
+  for (const candidate of candidates) await validateCleanupCandidate(candidate);
+
+  const syncedDirs = new Set<string>();
+  let removedFiles = 0;
+  let removedBytes = 0;
+  for (const candidate of candidates) {
+    await validateCleanupCandidate(candidate);
+    await lease.assertOwned();
+    // No event-loop yield is permitted between this final authority/path fence
+    // and unlink: otherwise a nested directory can be swapped for a junction
+    // while the asynchronous lock read is in flight.
+    lease.assertOwnedSync();
+    validateCleanupCandidateSync(candidate);
+    rmSync(candidate.path);
+    syncedDirs.add(candidate.dir);
+    removedFiles += 1;
+    removedBytes += candidate.size;
+  }
+  for (const dir of [...syncedDirs].sort()) await fsyncDirectory(dir);
+  return { removedFiles, removedBytes };
 }
 
 function removalTombstonePath(path: string): string {
@@ -1142,6 +1457,48 @@ export class CompletionOutboxFileStore {
     return this.#withWorkspaceLock(workspaceId, (lease) => this.#gcLocked(workspaceId, lease));
   }
 
+  async cleanupRemnants(
+    workspaceId: string,
+    options: CompletionOutboxCleanupOptions = {},
+  ): Promise<CompletionOutboxCleanupResult> {
+    if (!boundedString(workspaceId, 128)) throw new Error("Invalid completion workspaceId.");
+    const apply = options.apply ?? false;
+    const maxEntries = options.maxEntries ?? DEFAULT_CLEANUP_MAX_ENTRIES;
+    if (!Number.isSafeInteger(maxEntries) || maxEntries < 1 || maxEntries > 1_000_000) {
+      throw new Error("Completion outbox cleanup maxEntries must be between 1 and 1000000.");
+    }
+    const workspaceDir = this.#workspaceDir(workspaceId);
+    if (!apply) {
+      const lockPath = join(workspaceDir, ".store.lock");
+      const generationBefore = await readWorkspaceGenerationFence(workspaceDir);
+      const lockedBefore = await lstat(lockPath).then(() => true, (error) => {
+        if (fileCode(error) === "ENOENT") return false;
+        throw error;
+      });
+      if (lockedBefore) return emptyCleanupResult(false, true);
+      const scanned = await scanReplacementRemnants(workspaceDir, maxEntries);
+      const generationAfter = await readWorkspaceGenerationFence(workspaceDir);
+      const lockedAfter = await lstat(lockPath).then(() => true, (error) => {
+        if (fileCode(error) === "ENOENT") return false;
+        throw error;
+      });
+      return lockedAfter || generationAfter !== generationBefore
+        ? emptyCleanupResult(false, true)
+        : scanned.result;
+    }
+
+    const cleaned = await this.#withWorkspaceLock<CompletionOutboxCleanupResult | undefined>(
+      workspaceId,
+      async (lease) => {
+        const scanned = await scanReplacementRemnants(workspaceDir, maxEntries);
+        const removed = await removeReplacementCandidates(scanned.candidates, lease);
+        return { ...scanned.result, apply: true, ...removed };
+      },
+      0,
+    );
+    return cleaned ?? emptyCleanupResult(true, true);
+  }
+
   /**
    * Non-blocking GC for the periodic reconcile path. If the workspace lock is
    * already held by a concurrent writer, returns `{ busy: true }` instead of
@@ -1569,7 +1926,7 @@ export class CompletionOutboxFileStore {
           heartbeatAt: Date.now(),
           generation,
         };
-        await handle.writeFile(`${JSON.stringify(initial)}\n`);
+        await overwriteWorkspaceLockRecord(handle, initial);
         persistenceBoundary("lock", "after-write");
         await handle.sync();
         persistenceBoundary("lock", "after-file-sync");
@@ -1608,7 +1965,7 @@ export class CompletionOutboxFileStore {
         const endedSameProcess = Boolean(snapshot?.record
           && snapshot.record.pid === process.pid
           && !ACTIVE_WORKSPACE_LOCK_TOKENS.has(snapshot.record.token));
-        const abandonedSetup = Boolean(snapshot && !snapshot.record
+        const abandonedSetup = Boolean(snapshot && !snapshot.record && snapshot.size === 0
           && now - Math.max(snapshot.mtimeMs, snapshot.ctimeMs) >= LOCK_SETUP_STALE_MS);
         if (snapshot && (definitivelyDead || endedSameProcess || stale && holderState !== "alive" || abandonedSetup)) {
           const mutation = snapshot.record?.mutation;
@@ -1621,6 +1978,7 @@ export class CompletionOutboxFileStore {
             && fresh.raw === snapshot.raw
             && fresh.dev === snapshot.dev
             && fresh.ino === snapshot.ino
+            && fresh.size === snapshot.size
             && fresh.mtimeMs === snapshot.mtimeMs
             && fresh.ctimeMs === snapshot.ctimeMs
             && fresh.record?.token === snapshot.record?.token);
@@ -1666,6 +2024,22 @@ export class CompletionOutboxFileStore {
         throw new Error(`Completion outbox lock ownership lost for ${workspaceId}.`);
       }
     };
+    const assertOwnedSync = (): void => {
+      if (heartbeatError) throw new Error(`Completion outbox lock ownership lost for ${workspaceId}.`, { cause: heartbeatError });
+      let record: WorkspaceLockRecord | undefined;
+      try {
+        const info = lstatSync(lockPath);
+        if (info.isFile() && !info.isSymbolicLink() && info.size <= WORKSPACE_LOCK_RECORD_BYTES) {
+          record = parseWorkspaceLockRecord(readFileSync(lockPath, "utf8"));
+        }
+      } catch (error) {
+        if (fileCode(error) !== "ENOENT") throw error;
+      }
+      if (!record || record.token !== token || record.ownerId !== this.ownerId
+        || record.generation !== generation) {
+        throw new Error(`Completion outbox lock ownership lost for ${workspaceId}.`);
+      }
+    };
     const writeLeaseRecord = async (mutation: WorkspaceLockMutation | undefined): Promise<void> => {
       const snapshot = await this.#readLockSnapshot(lockPath);
       if (!snapshot?.record || snapshot.record.token !== token || snapshot.record.ownerId !== this.ownerId
@@ -1673,10 +2047,7 @@ export class CompletionOutboxFileStore {
         throw new Error(`Completion outbox lock ownership lost for ${workspaceId}.`);
       }
       const next: WorkspaceLockRecord = { ...snapshot.record, heartbeatAt: Date.now(), mutation };
-      const payload = Buffer.from(`${JSON.stringify(next)}\n`, "utf8");
-      await handle!.truncate(0);
-      await handle!.write(payload, 0, payload.byteLength, 0);
-      await handle!.truncate(payload.byteLength);
+      await overwriteWorkspaceLockRecord(handle!, next);
       await handle!.sync();
       const confirmed = await this.#readLockSnapshot(lockPath);
       const confirmedMutation = confirmed?.record?.mutation;
@@ -1702,16 +2073,22 @@ export class CompletionOutboxFileStore {
       if (!contained || contained.startsWith("..") || resolve(workspaceDir, contained) !== resolve(path)) {
         throw new Error(`Completion mutation path escapes workspace ${workspaceId}.`);
       }
-      const snapshot = await this.#readLockSnapshot(lockPath);
-      if (snapshot?.record?.mutation) throw new Error(`Completion outbox lock already has an active mutation for ${workspaceId}.`);
-      await runLeaseUpdate(() => writeLeaseRecord({ version: 1, path: contained, transaction }));
+      await runLeaseUpdate(async () => {
+        const snapshot = await this.#readLockSnapshot(lockPath);
+        if (snapshot?.record?.mutation) {
+          throw new Error(`Completion outbox lock already has an active mutation for ${workspaceId}.`);
+        }
+        await writeLeaseRecord({ version: 1, path: contained, transaction });
+      });
     };
     const finishMutation = async (transaction: string): Promise<void> => {
-      const snapshot = await this.#readLockSnapshot(lockPath);
-      if (snapshot?.record?.mutation?.transaction !== transaction) {
-        throw new Error(`Completion outbox lock ownership lost for ${workspaceId}.`);
-      }
-      await runLeaseUpdate(() => writeLeaseRecord(undefined));
+      await runLeaseUpdate(async () => {
+        const snapshot = await this.#readLockSnapshot(lockPath);
+        if (snapshot?.record?.mutation?.transaction !== transaction) {
+          throw new Error(`Completion outbox lock ownership lost for ${workspaceId}.`);
+        }
+        await writeLeaseRecord(undefined);
+      });
     };
     const timer = setInterval(() => {
       if (heartbeat) return;
@@ -1721,7 +2098,15 @@ export class CompletionOutboxFileStore {
       }).catch(() => undefined);
     }, LOCK_HEARTBEAT_MS);
     timer.unref?.();
-    const lease: WorkspaceLockLease = { path: lockPath, token, generation, assertOwned, beginMutation, finishMutation };
+    const lease: WorkspaceLockLease = {
+      path: lockPath,
+      token,
+      generation,
+      assertOwned,
+      assertOwnedSync,
+      beginMutation,
+      finishMutation,
+    };
     try {
       await assertOwned();
       return await action(lease);
@@ -1774,41 +2159,21 @@ export class CompletionOutboxFileStore {
     record?: WorkspaceLockRecord;
     dev: number | bigint;
     ino: number | bigint;
+    size: number;
     mtimeMs: number;
     ctimeMs: number;
   } | undefined> {
     try {
       const info = await lstat(path);
-      if (!info.isFile() || info.isSymbolicLink() || info.size > 4096) return undefined;
+      if (!info.isFile() || info.isSymbolicLink() || info.size > WORKSPACE_LOCK_RECORD_BYTES) return undefined;
       const raw = await readFile(path, "utf8");
-      let record: WorkspaceLockRecord | undefined;
-      try {
-        const parsed = JSON.parse(raw) as Partial<WorkspaceLockRecord>;
-        const validLegacy = parsed.version === undefined
-          && parsed.generation === undefined && parsed.mutation === undefined;
-        const validMutation = parsed.mutation === undefined || Boolean(
-          parsed.mutation.version === 1
-          && boundedString(parsed.mutation.path, 4096)
-          && REPLACEMENT_TRANSACTION.test(parsed.mutation.transaction),
-        );
-        const validV2 = parsed.version === 2 && typeof parsed.generation === "string"
-          && WORKSPACE_GENERATION.test(parsed.generation) && validMutation;
-        if ((validLegacy || validV2)
-          && boundedString(parsed.ownerId, 512)
-          && boundedString(parsed.token, 128)
-          && Number.isSafeInteger(parsed.pid) && parsed.pid! > 0
-          && Number.isSafeInteger(parsed.heartbeatAt) && parsed.heartbeatAt! >= 0) {
-          record = parsed as WorkspaceLockRecord;
-        }
-      } catch {
-        // Invalid setup locks are fenced by inode/content metadata after a
-        // bounded grace period; they never require unbounded stale waiting.
-      }
+      const record = parseWorkspaceLockRecord(raw);
       return {
         raw,
         ...(record ? { record } : {}),
         dev: info.dev,
         ino: info.ino,
+        size: info.size,
         mtimeMs: info.mtimeMs,
         ctimeMs: info.ctimeMs,
       };

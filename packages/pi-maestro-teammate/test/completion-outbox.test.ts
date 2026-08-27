@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -637,6 +637,60 @@ test("failed lock setup removes its partial token before the next acquisition", 
   }
 });
 
+test("lease rewrites keep a fixed-width parseable lock record without truncation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "completion-lock-fixed-width-"));
+  const fsp = createRequire(import.meta.url)("node:fs/promises") as typeof import("node:fs/promises");
+  const originalOpen = fsp.open;
+  let lockSyncs = 0;
+  const replacementOpen: typeof originalOpen = (async (...args: Parameters<typeof originalOpen>) => {
+    const handle = await originalOpen(...args);
+    const path = String(args[0] ?? "");
+    if (!path.endsWith(".store.lock")) return handle;
+    const originalSync = handle.sync.bind(handle);
+    Reflect.set(handle, "truncate", async () => {
+      throw new Error("active lock records must never be truncated");
+    });
+    Reflect.set(handle, "sync", async () => {
+      await originalSync();
+      const raw = await readFile(path, "utf8");
+      assert.equal(Buffer.byteLength(raw, "utf8"), 4096);
+      assert.doesNotThrow(() => JSON.parse(raw));
+      lockSyncs += 1;
+    });
+    return handle;
+  }) as typeof originalOpen;
+  try {
+    Reflect.set(fsp, "open", replacementOpen);
+    syncBuiltinESMExports();
+    const store = new CompletionOutboxFileStore({ rootDir: root, ownerId: "fixed-width" });
+    assert.equal((await store.reserve(seed("fixed-width"), 4_096)).state, "reserved");
+    assert.ok(lockSyncs >= 3, "setup, mutation begin, and mutation finish persisted valid lock slots");
+  } finally {
+    Reflect.set(fsp, "open", originalOpen);
+    syncBuiltinESMExports();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("non-empty invalid lock snapshots are contention, not abandoned setup", async () => {
+  const root = await mkdtemp(join(tmpdir(), "completion-lock-invalid-rewrite-"));
+  const { createHash } = await import("node:crypto");
+  const workspaceDir = join(root, createHash("sha256").update(target.workspaceId, "utf8").digest("hex"));
+  const lockPath = join(workspaceDir, ".store.lock");
+  try {
+    await mkdir(workspaceDir, { recursive: true });
+    await writeFile(lockPath, "partial fixed-width lease rewrite");
+    const old = new Date(Date.now() - 10_000);
+    await utimes(lockPath, old, old);
+    const store = new CompletionOutboxFileStore({ rootDir: root, ownerId: "contender" });
+    const result = await store.tryGc(target.workspaceId);
+    assert.equal(result.busy, true);
+    assert.equal(await readFile(lockPath, "utf8"), "partial fixed-width lease rewrite");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("failed lock release leaves an ended same-pid token that the next operation reclaims", async () => {
   const root = await mkdtemp(join(tmpdir(), "completion-lock-release-failure-"));
   const fsp = createRequire(import.meta.url)("node:fs/promises") as typeof import("node:fs/promises");
@@ -833,6 +887,300 @@ test("tryGc returns busy instead of throwing when the workspace lock is held", a
       await rmLock(lockPath, { force: true });
     }
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("cleanup preserves the latest recoverable marker transaction and removes only older remnants", async () => {
+  await withStore(async (store, _advance, root) => {
+    await store.reserve(seed("cleanup-prime"), 4_096);
+    const { createHash } = await import("node:crypto");
+    const workspaceDir = join(root, createHash("sha256").update(target.workspaceId, "utf8").digest("hex"));
+    const markerPath = join(workspaceDir, ".gc-marker");
+    const oldTransaction = "00000000000000000001-old";
+    const currentTransaction = "00000000000000000002-current";
+    const oldPaths = [
+      `${markerPath}.replace-${oldTransaction}.new`,
+      `${markerPath}.replace-${oldTransaction}.committed`,
+      `${markerPath}.replace-${oldTransaction}.bak`,
+      `${markerPath}.replace-legacy-old.bak`,
+    ];
+    const currentCommitted = `${markerPath}.replace-${currentTransaction}.committed`;
+    const revocationFence = `${markerPath}.replace-revoked-${oldTransaction}`;
+    await writeFile(markerPath, JSON.stringify({ at: 1_000 }));
+    await writeFile(currentCommitted, JSON.stringify({ current: true }));
+    await writeFile(`${markerPath}.replace-generation-a`, JSON.stringify({
+      generation: "00000000000000000002",
+      clean: true,
+      transaction: currentTransaction,
+    }));
+    await Promise.all(oldPaths.map((path) => writeFile(path, JSON.stringify({ old: true }))));
+    await writeFile(revocationFence, "revoked\n");
+
+    const rootNamesBefore = await readdir(workspaceDir);
+    const workspaceGeneration = rootNamesBefore.find((name) => name.startsWith(".store-generation-"))!;
+    const workspaceGenerationBefore = await readFile(join(workspaceDir, workspaceGeneration), "utf8");
+    const dryRun = await store.cleanupRemnants(target.workspaceId);
+    assert.equal(dryRun.apply, false);
+    assert.equal(dryRun.busy, false);
+    assert.equal(dryRun.candidateFiles, oldPaths.length);
+    assert.equal(dryRun.removedFiles, 0);
+    assert.ok(dryRun.preservedFiles >= 1);
+    assert.deepEqual(await readdir(workspaceDir), rootNamesBefore);
+    assert.equal(await readFile(join(workspaceDir, workspaceGeneration), "utf8"), workspaceGenerationBefore);
+    await Promise.all(oldPaths.map((path) => readFile(path)));
+
+    const applied = await store.cleanupRemnants(target.workspaceId, { apply: true });
+    assert.equal(applied.busy, false);
+    assert.equal(applied.candidateFiles, oldPaths.length);
+    assert.equal(applied.removedFiles, oldPaths.length);
+    for (const path of oldPaths) {
+      await assert.rejects(readFile(path), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
+    }
+    assert.deepEqual(JSON.parse(await readFile(currentCommitted, "utf8")), { current: true });
+    assert.equal(await readFile(revocationFence, "utf8"), "revoked\n");
+    assert.deepEqual(JSON.parse(await readFile(markerPath, "utf8")), { at: 1_000 });
+
+    const repeated = await store.cleanupRemnants(target.workspaceId, { apply: true });
+    assert.equal(repeated.busy, false);
+    assert.equal(repeated.candidateFiles, 0);
+    assert.equal(repeated.removedFiles, 0);
+    assert.deepEqual(JSON.parse(await readFile(currentCommitted, "utf8")), { current: true });
+  });
+});
+
+test("cleanup returns busy without scanning or deleting while the workspace lock is held", async () => {
+  await withStore(async (store, _advance, root) => {
+    await store.reserve(seed("cleanup-busy"), 4_096);
+    const { createHash } = await import("node:crypto");
+    const { open: openLock, rm: rmLock } = await import("node:fs/promises");
+    const workspaceDir = join(root, createHash("sha256").update(target.workspaceId, "utf8").digest("hex"));
+    const lockPath = join(workspaceDir, ".store.lock");
+    const staleRemnant = join(workspaceDir, ".gc-marker.replace-00000000000000000001-stale.bak");
+    await writeFile(staleRemnant, "stale\n");
+    const holder = await openLock(lockPath, "wx", 0o600);
+    try {
+      const dryRun = await store.cleanupRemnants(target.workspaceId);
+      assert.equal(dryRun.busy, true);
+      assert.equal(dryRun.scannedEntries, 0);
+      const applied = await store.cleanupRemnants(target.workspaceId, { apply: true });
+      assert.equal(applied.busy, true);
+      assert.equal(applied.removedFiles, 0);
+      assert.equal(await readFile(staleRemnant, "utf8"), "stale\n");
+    } finally {
+      await holder.close();
+      await rmLock(lockPath, { force: true });
+    }
+  });
+});
+
+test("pi-teammate-outbox cleanup is dry-run by default and applies only with --apply", async () => {
+  const root = await mkdtemp(join(tmpdir(), "completion-cleanup-cli-root-"));
+  const workspace = await mkdtemp(join(tmpdir(), "completion-cleanup-cli-workspace-"));
+  try {
+    const { createHash } = await import("node:crypto");
+    const { getRuntimeWorkspaceIdentity } = await import("../src/runtime-broker/private-state.ts");
+    const identity = getRuntimeWorkspaceIdentity(workspace);
+    const workspaceDir = join(root, createHash("sha256").update(identity.workspaceId, "utf8").digest("hex"));
+    await mkdir(workspaceDir, { recursive: true });
+    const markerPath = join(workspaceDir, ".gc-marker");
+    const current = `${markerPath}.replace-00000000000000000002-current.committed`;
+    const obsolete = `${markerPath}.replace-00000000000000000001-obsolete.bak`;
+    await writeFile(current, "{}\n");
+    await writeFile(obsolete, "{}\n");
+    const cli = resolve("bin/pi-teammate-outbox.mjs");
+    const run = (...extra: string[]) => spawnSync(process.execPath, [cli, "cleanup", "--workspace", workspace, "--root", root, "--json", ...extra], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+    });
+
+    const dryRun = run();
+    assert.equal(dryRun.status, 0, dryRun.stderr);
+    assert.equal((JSON.parse(dryRun.stdout) as { candidateFiles: number }).candidateFiles, 1);
+    assert.equal(await readFile(obsolete, "utf8"), "{}\n");
+
+    const applied = run("--apply");
+    assert.equal(applied.status, 0, applied.stderr);
+    assert.equal((JSON.parse(applied.stdout) as { removedFiles: number }).removedFiles, 1);
+    await assert.rejects(readFile(obsolete), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
+    assert.equal(await readFile(current, "utf8"), "{}\n");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("cleanup preserves a readable replacement when the newest generation slot dangles", async () => {
+  await withStore(async (store, _advance, root) => {
+    const dispatch = seed("cleanup-dangling-slot");
+    const reservation = await store.reserve(dispatch, 4_096);
+    const reservationsDir = await findStateDir(root, "reservations");
+    const { createHash } = await import("node:crypto");
+    const reservationFile = `${createHash("sha256").update(reservation.reservationId, "utf8").digest("hex")}.json`;
+    const canonicalPath = join(reservationsDir, reservationFile);
+    const committed = (await readdir(reservationsDir)).find((name) =>
+      name.startsWith(`${reservationFile}.replace-`) && name.endsWith(".committed"));
+    assert.ok(committed);
+    await rm(canonicalPath);
+    await writeFile(`${canonicalPath}.replace-generation-a`, JSON.stringify({
+      generation: "00000000000000000099",
+      clean: false,
+      transaction: "00000000000000000099-absent",
+    }));
+    assert.equal((await store.reserve(dispatch, 4_096)).reservationId, reservation.reservationId);
+
+    const result = await store.cleanupRemnants(target.workspaceId, { apply: true });
+    assert.equal(result.busy, false);
+    assert.equal(result.candidateFiles, 0);
+    assert.equal(await readFile(join(reservationsDir, committed), "utf8").then((raw) => raw.length > 0), true);
+    assert.equal((await store.reserve(dispatch, 4_096)).reservationId, reservation.reservationId);
+  });
+});
+
+test("cleanup aborts when a scanned directory is replaced during the final lease check", async () => {
+  const root = await mkdtemp(join(tmpdir(), "completion-cleanup-dir-swap-"));
+  const fsp = createRequire(import.meta.url)("node:fs/promises") as typeof import("node:fs/promises");
+  const originalLstat = fsp.lstat;
+  const originalReadFile = fsp.readFile;
+  let armed = false;
+  let swapped = false;
+  try {
+    const store = new CompletionOutboxFileStore({ rootDir: root, ownerId: "cleanup-dir-swap" });
+    await store.reserve(seed("cleanup-dir-swap"), 4_096);
+    const { createHash } = await import("node:crypto");
+    const workspaceDir = join(root, createHash("sha256").update(target.workspaceId, "utf8").digest("hex"));
+    const lockPath = join(workspaceDir, ".store.lock");
+    const nested = join(workspaceDir, "nested");
+    const outside = join(root, "outside-workspace");
+    await mkdir(nested);
+    const markerPath = join(nested, ".gc-marker");
+    const current = `${markerPath}.replace-00000000000000000002-current.committed`;
+    const obsolete = `${markerPath}.replace-00000000000000000001-obsolete.bak`;
+    await writeFile(current, "{}\n");
+    await writeFile(obsolete, "do-not-delete\n");
+    let obsoleteStats = 0;
+    const replacementLstat: typeof originalLstat = (async (...args: Parameters<typeof originalLstat>) => {
+      const info = await originalLstat(...args);
+      if (String(args[0]) === obsolete && ++obsoleteStats === 3) armed = true;
+      return info;
+    }) as typeof originalLstat;
+    const replacementReadFile: typeof originalReadFile = (async (...args: Parameters<typeof originalReadFile>) => {
+      if (armed && !swapped && String(args[0]) === lockPath) {
+        await fsp.rename(nested, outside);
+        await symlink(outside, nested, process.platform === "win32" ? "junction" : "dir");
+        swapped = true;
+      }
+      return originalReadFile(...args);
+    }) as typeof originalReadFile;
+    Reflect.set(fsp, "lstat", replacementLstat);
+    Reflect.set(fsp, "readFile", replacementReadFile);
+    syncBuiltinESMExports();
+
+    await assert.rejects(
+      store.cleanupRemnants(target.workspaceId, { apply: true }),
+      /cleanup directory changed during scan/,
+    );
+    assert.equal(swapped, true);
+    assert.equal(await readFile(join(outside, ".gc-marker.replace-00000000000000000001-obsolete.bak"), "utf8"), "do-not-delete\n");
+  } finally {
+    Reflect.set(fsp, "lstat", originalLstat);
+    Reflect.set(fsp, "readFile", originalReadFile);
+    syncBuiltinESMExports();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("cleanup revalidates lease ownership immediately before each deletion", async () => {
+  const root = await mkdtemp(join(tmpdir(), "completion-cleanup-lease-fence-"));
+  const fsp = createRequire(import.meta.url)("node:fs/promises") as typeof import("node:fs/promises");
+  const originalLstat = fsp.lstat;
+  let replaced = false;
+  let lockPath = "";
+  try {
+    const store = new CompletionOutboxFileStore({ rootDir: root, ownerId: "cleanup-former" });
+    await store.reserve(seed("cleanup-lease-fence"), 4_096);
+    const { createHash } = await import("node:crypto");
+    const workspaceDir = join(root, createHash("sha256").update(target.workspaceId, "utf8").digest("hex"));
+    lockPath = join(workspaceDir, ".store.lock");
+    const markerPath = join(workspaceDir, ".gc-marker");
+    const current = `${markerPath}.replace-00000000000000000002-current.committed`;
+    const obsolete = `${markerPath}.replace-00000000000000000001-obsolete.bak`;
+    await writeFile(current, "{}\n");
+    await writeFile(obsolete, "do-not-delete\n");
+    let obsoleteStats = 0;
+    const replacementLstat: typeof originalLstat = (async (...args: Parameters<typeof originalLstat>) => {
+      const info = await originalLstat(...args);
+      if (String(args[0]) === obsolete && ++obsoleteStats === 3) {
+        await writeFile(lockPath, JSON.stringify({
+          version: 2,
+          ownerId: "cleanup-successor",
+          token: "successor-token",
+          pid: process.pid,
+          heartbeatAt: Date.now(),
+          generation: "00000000000000000099",
+        }));
+        replaced = true;
+      }
+      return info;
+    }) as typeof originalLstat;
+    Reflect.set(fsp, "lstat", replacementLstat);
+    syncBuiltinESMExports();
+
+    await assert.rejects(
+      store.cleanupRemnants(target.workspaceId, { apply: true }),
+      /lock ownership lost/,
+    );
+    assert.equal(replaced, true);
+    assert.equal(await readFile(obsolete, "utf8"), "do-not-delete\n");
+  } finally {
+    Reflect.set(fsp, "lstat", originalLstat);
+    syncBuiltinESMExports();
+    if (lockPath) await rm(lockPath, { force: true });
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("cleanup dry-run reports busy when a writer generation overlaps the scan", async () => {
+  const root = await mkdtemp(join(tmpdir(), "completion-cleanup-generation-fence-"));
+  const fsp = createRequire(import.meta.url)("node:fs/promises") as typeof import("node:fs/promises");
+  const originalReaddir = fsp.readdir;
+  let overlapped = false;
+  try {
+    const store = new CompletionOutboxFileStore({ rootDir: root, ownerId: "cleanup-generation-fence" });
+    await store.reserve(seed("cleanup-generation-fence"), 4_096);
+    const { createHash } = await import("node:crypto");
+    const workspaceDir = join(root, createHash("sha256").update(target.workspaceId, "utf8").digest("hex"));
+    const lockPath = join(workspaceDir, ".store.lock");
+    const markerPath = join(workspaceDir, ".gc-marker");
+    const obsolete = `${markerPath}.replace-00000000000000000001-obsolete.bak`;
+    await writeFile(`${markerPath}.replace-00000000000000000002-current.committed`, "{}\n");
+    await writeFile(obsolete, "do-not-delete\n");
+    const replacementReaddir: typeof originalReaddir = (async (...args: Parameters<typeof originalReaddir>) => {
+      if (!overlapped && String(args[0]) === workspaceDir) {
+        overlapped = true;
+        await writeFile(lockPath, "writer-active\n");
+        const entries = await originalReaddir(...args);
+        await writeFile(join(workspaceDir, ".store-generation-a"), JSON.stringify({
+          version: 1,
+          generation: "00000000000000000099",
+          token: "overlapping-writer",
+        }));
+        await rm(lockPath, { force: true });
+        return entries;
+      }
+      return originalReaddir(...args);
+    }) as typeof originalReaddir;
+    Reflect.set(fsp, "readdir", replacementReaddir);
+    syncBuiltinESMExports();
+
+    const result = await store.cleanupRemnants(target.workspaceId);
+    assert.equal(overlapped, true);
+    assert.equal(result.busy, true);
+    assert.equal(result.scannedEntries, 0);
+    assert.equal(await readFile(obsolete, "utf8"), "do-not-delete\n");
+  } finally {
+    Reflect.set(fsp, "readdir", originalReaddir);
+    syncBuiltinESMExports();
     await rm(root, { recursive: true, force: true });
   }
 });

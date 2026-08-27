@@ -9,6 +9,7 @@
   "bin": {
     "pi-teammate-broker": "./bin/pi-teammate-broker.mjs",
     "pi-teammate-models": "./bin/pi-teammate-models.mjs",
+    "pi-teammate-outbox": "./bin/pi-teammate-outbox.mjs",
     "pi-teammate-remote": "./bin/pi-teammate-remote.mjs"
   },
   "keywords": [
