@@ -1063,10 +1063,18 @@ export const TEAMMATE_INTERACTION_TIMEOUT_MS = 5 * 60_000;
  */
 export const TEAMMATE_INTERACTION_QUEUE_LIMIT = 16;
 
+function positiveIntegerEnvironment(name: string, fallback: number, minimum = 1): number {
+  const parsed = Number.parseInt(process.env[name] ?? "", 10);
+  return Number.isFinite(parsed) && parsed >= minimum ? parsed : fallback;
+}
+
 export const WAKEABLE_AGENT_BUDGET = Object.freeze({
-  maxSleepingAgents: 12,
-  anonymousTtlMs: 15 * 60_000,
-  namedTtlMs: 60 * 60_000,
+  // Sleeping agents retain a full Pi runtime. Keep the default small so a
+  // completed search fan-out cannot leave enough resident runtimes to pressure
+  // Windows; checkpoints still allow cold resume after eviction.
+  maxSleepingAgents: positiveIntegerEnvironment("PI_TEAMMATE_MAX_SLEEPING_AGENTS", 4),
+  anonymousTtlMs: positiveIntegerEnvironment("PI_TEAMMATE_ANONYMOUS_SLEEP_TTL_MS", 2 * 60_000, 1_000),
+  namedTtlMs: positiveIntegerEnvironment("PI_TEAMMATE_NAMED_SLEEP_TTL_MS", 10 * 60_000, 1_000),
 });
 
 export const AGENT_WIDGET_IDLE_HIDE_MS = 60_000;
