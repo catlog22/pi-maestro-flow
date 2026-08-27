@@ -7,7 +7,7 @@
  * so a brand new session picks up where the previous one left off.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -19,6 +19,9 @@ const DEFAULT_MAX_ENTRIES = 100;
 const DEFAULT_SAVE_DEBOUNCE_MS = 250;
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
+const DEFAULT_SAVE_RETRY_DELAYS_MS = Object.freeze([25, 75, 150]);
+
+type RenameFile = (oldPath: string, newPath: string) => Promise<void>;
 
 /**
  * Serializes every save across store instances so a fresh store's load() never
@@ -32,6 +35,8 @@ export interface InputHistoryStoreOptions {
   maxEntries?: number;
   debounceMs?: number;
   onError?: (error: unknown) => void;
+  renameFile?: RenameFile;
+  retryDelaysMs?: readonly number[];
 }
 
 /**
@@ -59,6 +64,8 @@ export class InputHistoryStore {
   private readonly maxEntries: number;
   private readonly debounceMs: number;
   private readonly onError: ((error: unknown) => void) | undefined;
+  private readonly renameFile: RenameFile;
+  private readonly retryDelaysMs: readonly number[];
   private entries: string[] = [];
   private timer: NodeJS.Timeout | undefined;
   private writes: Promise<void> = Promise.resolve();
@@ -70,6 +77,8 @@ export class InputHistoryStore {
     this.maxEntries = Math.max(1, options.maxEntries ?? DEFAULT_MAX_ENTRIES);
     this.debounceMs = Math.max(0, options.debounceMs ?? DEFAULT_SAVE_DEBOUNCE_MS);
     this.onError = options.onError;
+    this.renameFile = options.renameFile ?? rename;
+    this.retryDelaysMs = retryDelays(options.retryDelaysMs);
   }
 
   /** Newest first. */
@@ -124,21 +133,30 @@ export class InputHistoryStore {
   }
 
   private async save(): Promise<void> {
+    await mkdir(this.dir, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
+    for (let attempt = 0; ; attempt += 1) {
+      await this.mergeDiskEntries();
+      const temp = `${this.filePath}.${process.pid}.${randomUUID()}.tmp`;
+      try {
+        const payload = JSON.stringify({ version: 1, entries: this.entries }, null, 2);
+        await writeFile(temp, payload, { mode: PRIVATE_FILE_MODE, flag: "wx" });
+        await this.renameFile(temp, this.filePath);
+        return;
+      } catch (error) {
+        await rm(temp, { force: true }).catch(() => undefined);
+        const retryDelay = this.retryDelaysMs[attempt];
+        if (retryDelay === undefined || !isTransientReplaceError(error)) throw error;
+        await delay(retryDelay);
+      }
+    }
+  }
+
+  private async mergeDiskEntries(): Promise<void> {
     // Another pi window in the same workspace may have written since we loaded;
     // keep whatever it added instead of overwriting it.
     const known = new Set(this.entries);
     const disk = (await this.readFromDisk()).filter((value) => !known.has(value));
     this.entries = capped([...this.entries, ...disk], this.maxEntries);
-    await mkdir(this.dir, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
-    const temp = `${this.filePath}.${process.pid}.tmp`;
-    try {
-      const payload = JSON.stringify({ version: 1, entries: this.entries }, null, 2);
-      await writeFile(temp, payload, { mode: PRIVATE_FILE_MODE });
-      await rename(temp, this.filePath);
-    } catch (error) {
-      await rm(temp, { force: true });
-      throw error;
-    }
   }
 
   private async readFromDisk(): Promise<string[]> {
@@ -170,4 +188,18 @@ function parseEntries(raw: unknown): string[] {
 
 function capped(entries: string[], maxEntries: number): string[] {
   return entries.length > maxEntries ? entries.slice(0, maxEntries) : entries;
+}
+
+function retryDelays(value: readonly number[] | undefined): readonly number[] {
+  const source = value ?? DEFAULT_SAVE_RETRY_DELAYS_MS;
+  return Object.freeze(source.map((delayMs) => Math.max(0, delayMs)).filter(Number.isFinite));
+}
+
+function isTransientReplaceError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return code === "EPERM" || code === "EBUSY" || code === "EACCES";
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

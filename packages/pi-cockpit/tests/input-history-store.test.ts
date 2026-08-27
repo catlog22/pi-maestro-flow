@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -125,6 +125,42 @@ test("a save keeps entries another pi window wrote after we loaded", async () =>
     await store.flush();
 
     assert.deepEqual(store.list(), ["ours", "theirs"]);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("transient Windows replace conflicts are retried after merging disk writes", async () => {
+  const { cwd, rootDir, file, cleanup } = await workspace();
+  try {
+    const errors: unknown[] = [];
+    let attempts = 0;
+    const store = new InputHistoryStore(cwd, {
+      rootDir,
+      debounceMs: 0,
+      retryDelaysMs: [0],
+      onError: (error) => errors.push(error),
+      renameFile: async (oldPath, newPath) => {
+        attempts += 1;
+        if (attempts === 1) {
+          await writeFile(newPath, JSON.stringify({ version: 1, entries: ["theirs"] }), "utf8");
+          const error = new Error("target busy") as NodeJS.ErrnoException;
+          error.code = "EPERM";
+          throw error;
+        }
+        await rename(oldPath, newPath);
+      },
+    });
+    await store.load();
+    store.record("ours");
+    await store.flush();
+
+    assert.equal(attempts, 2);
+    assert.deepEqual(errors, []);
+    assert.deepEqual((JSON.parse(await readFile(file, "utf8")) as { entries: string[] }).entries, [
+      "ours",
+      "theirs",
+    ]);
   } finally {
     await cleanup();
   }
