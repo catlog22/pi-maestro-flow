@@ -304,16 +304,16 @@ export const TeammateSendParams = Type.Object({
   message: Type.Optional(
     Type.String({
       description:
-        'Message content. Required for "steer" and "follow_up" (steer is the default mode); optional only for "abort".',
+        'Message content. Required for "steer", "interrupt", and "follow_up" (steer is the default mode); optional only for "abort".',
     }),
   ),
   mode: Type.Optional(
-    Type.Unsafe<"steer" | "follow_up" | "abort">({
+    Type.Unsafe<"steer" | "follow_up" | "interrupt" | "abort">({
       type: "string",
-      enum: ["steer", "follow_up", "abort"],
+      enum: ["steer", "follow_up", "interrupt", "abort"],
       default: "steer",
       description:
-        'Delivery mode (default: "steer"). "steer" requests cancellation of the active agent turn; after cancellation is acknowledged, the message is delivered as the replacement or next prompt. It is not inserted into the middle of a running tool call. If cancellation is not acknowledged promptly, it degrades to queued follow_up. "follow_up" does not interrupt. It is consumed only when the target AgentSession would otherwise stop: after the active model response and every tool call, continuation, native retry, and compaction belonging to that turn finish. A tool returning is not a delivery boundary; earlier queued input is consumed first, and a session that never reaches its stop point can delay follow_up indefinitely. "abort" terminates the agent. For cross-session delivery, queued or accepted means persisted/enqueued but not necessarily consumed by the target model; do not resend without new evidence.',
+        'Delivery mode (default: "steer"). "steer" does NOT interrupt: it is queued on the target AgentSession steer queue and injected at the turn boundary (after the current model response and any tool calls finish). Multiple steers can be queued; with steeringMode "all" they are co-injected into one assistant turn. "interrupt" requests cancellation of the active agent turn; after cancellation is acknowledged, the message is delivered as the replacement or next prompt. It is not inserted into the middle of a running tool call, and a second interrupt while one is pending is rejected. If cancellation is not acknowledged promptly, it degrades to queued follow_up. "follow_up" does not interrupt and is consumed only when the target AgentSession would otherwise stop: after the active model response and every tool call, continuation, native retry, and compaction belonging to that turn finish. A tool returning is not a delivery boundary; earlier queued input is consumed first, and a session that never reaches its stop point can delay follow_up indefinitely. "abort" terminates the agent. For cross-session delivery, queued or accepted means persisted/enqueued but not necessarily consumed by the target model; do not resend without new evidence.',
     }),
   ),
   kind: Type.Optional(

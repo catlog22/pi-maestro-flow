@@ -91,6 +91,7 @@ export type MailboxMessageKind =
   | "result"
   | "steer"
   | "follow_up"
+  | "interrupt"
   | "task"
   | "control";
 
@@ -104,6 +105,7 @@ export function priorityForKind(kind: MailboxMessageKind): MailboxPriority {
     case "control":
       return "critical";
     case "steer":
+    case "interrupt":
       return "high";
     case "follow_up":
     case "task":
@@ -112,7 +114,7 @@ export function priorityForKind(kind: MailboxMessageKind): MailboxPriority {
 }
 
 /** Delivery mode for the message. */
-export type MailboxDeliveryMode = "steer" | "follow_up" | "abort" | "notify";
+export type MailboxDeliveryMode = "steer" | "follow_up" | "interrupt" | "abort" | "notify";
 
 // --- Envelope ---
 

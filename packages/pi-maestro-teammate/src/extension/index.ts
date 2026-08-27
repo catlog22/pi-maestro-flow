@@ -258,7 +258,7 @@ import {
   type RemoteMonitorRunListing,
   type RemoteMonitorTargetListing,
 } from "./remote-monitor.ts";
-import { REMOTE_HISTORY_ENTRY_TYPE } from "../sessions/remote-history.ts";
+import { REMOTE_HISTORY_ENTRY_TYPE, type RemoteHistoryMode } from "../sessions/remote-history.ts";
 import { showSessionSendOverlay } from "../tui/session-send-overlay.ts";
 import {
   SETTINGS_LOCALE_EVENT,
@@ -1782,7 +1782,10 @@ export default function registerTeammateExtension(
     entry: WindowThreadEntry,
     options: { replayed?: boolean; redriven?: boolean } = {},
   ) => {
-    const effectiveAction: "steer" | "follow_up" = entry.effectiveMode ?? "follow_up";
+    // Window-thread entries only ever record cross-window steer/follow_up;
+    // interrupt is local-only and never persisted here, but the union widened
+    // with SessionMessageMode, so narrow defensively.
+    const effectiveAction: "steer" | "follow_up" = entry.effectiveMode === "steer" ? "steer" : "follow_up";
     return {
       envelope: {
         customType: "teammate-message",
@@ -2279,7 +2282,10 @@ export default function registerTeammateExtension(
     let outgoing: WindowThreadEntryInput | undefined;
     let publicationStage: "published" | "accepted" | "rejected" | undefined;
     try {
-      const command = await enqueueWorkspacePeerCommand(publisher.identity, target, mode, message, {
+      // Workspace peers only carry steer/follow_up; interrupt is a local
+      // soft-interrupt that must not cross a window boundary.
+      const peerAction: WorkspacePeerCommandAction = mode === "steer" ? "steer" : "follow_up";
+      const command = await enqueueWorkspacePeerCommand(publisher.identity, target, peerAction, message, {
         now: commandCreatedAt,
         commandId: workspaceProtocolCommandId(request.messageId),
         source,
@@ -2512,7 +2518,7 @@ export default function registerTeammateExtension(
     correlationId: string,
     targetLabel: string,
     delivery: { body: string; from: string; provenance: MessageProvenanceV1 },
-    requestedMode: "steer" | "follow_up",
+    requestedMode: "steer" | "follow_up" | "interrupt",
   ): { delivered: boolean; error?: string; mode?: RpcMessageMode; wasSleeping?: boolean } => {
     const messageFrom = delivery.from;
     const agent = state.activeRuns.get(correlationId);
@@ -2764,7 +2770,7 @@ export default function registerTeammateExtension(
     correlationId: string,
     targetLabel: string,
     message: string,
-    requestedMode: "steer" | "follow_up",
+    requestedMode: "steer" | "follow_up" | "interrupt",
     options?: {
       senderCorrelationId?: string;
       messageKind?: SessionMessageKind;
@@ -2815,8 +2821,11 @@ export default function registerTeammateExtension(
     // Only for live agents with a writable stdin; sleeping agents needing
     // cold-resume (restart) keep the synchronous direct path so restart fires
     // before teammate-send returns (lifecycle contract).
+    // `interrupt` must bypass the mailbox and hit stdin directly: it owns the
+    // abort+prompt transaction that only a live stdin can serve. `steer` and
+    // `follow_up` are queueable and may round-trip through the mailbox.
     const host = mailboxHost;
-    if (host && host.mode === "authoritative" && requestedMode !== "steer" && agent?.stdin?.writable) {
+    if (host && host.mode === "authoritative" && requestedMode !== "interrupt" && agent?.stdin?.writable) {
       try {
         const mailboxRequest = {
           senderId,
@@ -5610,7 +5619,7 @@ export default function registerTeammateExtension(
         };
       }
 
-      const mode = requestedMode === "steer" || requestedMode === "abort" ? requestedMode : "follow_up";
+      const mode = requestedMode === "steer" || requestedMode === "abort" || requestedMode === "interrupt" ? requestedMode : "follow_up";
       const localRootTarget = params.to === "root" || params.to === "@root";
       const cid = localRootTarget ? undefined : resolveAgentCorrelationId(state, params.to);
       const monitorCapture = cid ? undefined : captureMonitorCommunication();
@@ -5618,6 +5627,13 @@ export default function registerTeammateExtension(
         if (mode === "abort") {
           return {
             content: [{ type: "text", text: "Cross-target teammate-send does not support abort for remote workers; use remote-worker close." }],
+            isError: true,
+            details: { delivered: false },
+          };
+        }
+        if (mode === "interrupt") {
+          return {
+            content: [{ type: "text", text: "Cross-target teammate-send does not support interrupt for remote workers; use steer (queued) or remote-worker close." }],
             isError: true,
             details: { delivered: false },
           };
@@ -5630,9 +5646,13 @@ export default function registerTeammateExtension(
             details: { delivered: false },
           };
         }
-        const routedMode = messageKind === "status" ? "follow_up" : mode;
+        // Remote workers reached this point only after abort/interrupt were
+        // rejected above, so the effective mode is a remote-compatible steer or
+        // follow_up. Narrowing here keeps the remote history mode honest.
+        const remoteMode: RemoteHistoryMode = mode === "steer" ? "steer" : "follow_up";
+        const routedMode = messageKind === "status" ? "follow_up" : remoteMode;
         try {
-          const receipt = await binding.session.send(params.to, routedMode, message, messageKind, id, mode);
+          const receipt = await binding.session.send(params.to, routedMode, message, messageKind, id, remoteMode);
           if (!ownsMonitorCommunication(monitorCapture)) {
             return {
               content: [{ type: "text", text: "Monitor mode ended during remote message delivery; the stale receipt was not published." }],
@@ -5772,7 +5792,9 @@ export default function registerTeammateExtension(
         ? "stored as context for the next substantive turn"
         : delivery.receipt?.wasSleeping
           ? "woken up + prompt"
-          : delivery.receipt?.mode === "steer" ? "active turn cancelled + prompt injected" : "queued until AgentSession would otherwise stop (tool return is not a delivery boundary)";
+          : delivery.receipt?.mode === "interrupt" ? "active turn cancelled + prompt injected"
+          : delivery.receipt?.mode === "steer" ? "queued for turn-boundary injection (does not interrupt tool calls)"
+          : "queued until AgentSession would otherwise stop (tool return is not a delivery boundary)";
       return {
         content: [{ type: "text", text: `Message ${modeLabel} for "${params.to}".${delivery.receipt?.wasSleeping ? " Agent woken up." : ""}` }],
         isError: false,

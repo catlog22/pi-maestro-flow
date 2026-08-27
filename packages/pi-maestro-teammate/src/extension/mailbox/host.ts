@@ -53,7 +53,7 @@ export function createMailboxAuthority(context: MailboxHostContext): MailboxAuth
     canRoute(senderId, recipientCorrelationId, mode) {
       // senderId "caller" means the root tool itself (user-driven).
       const requesterCid = senderId === "caller" ? undefined : senderId;
-      const rpcMode: RpcMessageMode = mode === "steer" ? "steer" : mode === "abort" ? "abort" : "follow_up";
+      const rpcMode: RpcMessageMode = mode === "steer" ? "steer" : mode === "abort" ? "abort" : mode === "interrupt" ? "interrupt" : "follow_up";
       return canProxySendTo(context.state, requesterCid, recipientCorrelationId, rpcMode);
     },
     currentGeneration() {
@@ -122,7 +122,7 @@ export interface MailboxHostOptions {
     payload: string;
     provenance?: MessageProvenanceV1;
     mode: string;
-    kind: "lifecycle" | "result" | "steer" | "follow_up" | "task" | "control";
+    kind: "lifecycle" | "result" | "steer" | "follow_up" | "interrupt" | "task" | "control";
   }) => Promise<MailboxDispatchDisposition | void>;
   mode?: RolloutMode;
   pollMs?: number;

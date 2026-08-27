@@ -41,7 +41,7 @@ export interface MailboxRolloutOptions {
     recipientCorrelationId: string;
     payload: string;
     mode: string;
-    kind: "lifecycle" | "result" | "steer" | "follow_up" | "task" | "control";
+    kind: "lifecycle" | "result" | "steer" | "follow_up" | "interrupt" | "task" | "control";
   }) => Promise<void>;
   now?: () => number;
 }
@@ -108,8 +108,8 @@ export class MailboxRollout {
     senderId: string;
     recipientId: string;
     recipientCorrelationId: string;
-    kind: "lifecycle" | "result" | "steer" | "follow_up" | "task" | "control";
-    mode: "steer" | "follow_up" | "abort" | "notify";
+    kind: "lifecycle" | "result" | "steer" | "follow_up" | "interrupt" | "task" | "control";
+    mode: "steer" | "follow_up" | "interrupt" | "abort" | "notify";
     payload: string;
     requestId?: string;
     correlationId?: string;

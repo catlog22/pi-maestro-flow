@@ -69,6 +69,7 @@ export interface MailboxEnqueueRequest {
 function ttlForKind(kind: MailboxMessageKind): number {
   switch (kind) {
     case "steer":
+    case "interrupt":
     case "control":
       return TTL_STEER_MS;
     default:
@@ -83,6 +84,7 @@ function provenanceKindForMailbox(kind: MailboxMessageKind): MessageProvenanceKi
     case "lifecycle": return "lifecycle";
     case "control": return "control";
     case "steer":
+    case "interrupt":
     case "follow_up":
       return "message";
   }

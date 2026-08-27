@@ -259,7 +259,7 @@ export type MessageProvenanceKind =
   | "supervision"
   | "lifecycle"
   | "control";
-export type MessageDeliveryModeV1 = "prompt" | "steer" | "follow_up" | "abort" | "notify";
+export type MessageDeliveryModeV1 = "prompt" | "steer" | "follow_up" | "interrupt" | "abort" | "notify";
 export type MessageSenderIdentityV1 =
   | { kind: "human"; ownerId: string; label?: string }
   | { kind: "root-agent"; ownerId: string; label?: string }

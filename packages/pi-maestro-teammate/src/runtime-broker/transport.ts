@@ -7,10 +7,11 @@ export type RuntimeTransportMessageKind =
   | "result"
   | "steer"
   | "follow_up"
+  | "interrupt"
   | "task"
   | "control";
 
-export type RuntimeTransportDeliveryMode = "steer" | "follow_up" | "abort" | "notify";
+export type RuntimeTransportDeliveryMode = "steer" | "follow_up" | "interrupt" | "abort" | "notify";
 export type RuntimeTransportPriority = "critical" | "high" | "normal";
 export type RuntimeTransportDeliveryState =
   | "staging"

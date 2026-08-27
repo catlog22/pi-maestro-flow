@@ -997,8 +997,8 @@ export async function handleProxyRequest(
     senderId: string;
     recipientId: string;
     recipientCorrelationId: string;
-    kind: "lifecycle" | "result" | "steer" | "follow_up" | "task" | "control";
-    mode: "steer" | "follow_up" | "abort" | "notify";
+    kind: "lifecycle" | "result" | "steer" | "follow_up" | "interrupt" | "task" | "control";
+    mode: "steer" | "follow_up" | "interrupt" | "abort" | "notify";
     payload: string;
     provenance?: MessageProvenanceV1;
   }) => Promise<{ path: string; result: { ok: boolean } }>,
@@ -1014,7 +1014,7 @@ export async function handleProxyRequest(
     targetCorrelationId?: string;
     senderCorrelationId?: string;
     message: string;
-    mode: "steer" | "follow_up" | "abort";
+    mode: "steer" | "follow_up" | "interrupt" | "abort";
     messageKind?: WorkspacePeerMessageKind;
     provenance?: MessageProvenanceV1;
   }) => Promise<SessionMessageResult>,

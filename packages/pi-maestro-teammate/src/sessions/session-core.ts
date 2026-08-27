@@ -24,7 +24,7 @@ export type SessionEndpointKind = "root" | "agent";
 export type SessionEndpointScope = "local" | "workspace-peer";
 export type SessionEndpointTransport = "local-root" | "local-agent-mailbox" | "workspace-peer-v1" | "child-ipc";
 export type SessionEndpointStatus = "running" | "sleeping" | "settled";
-export type SessionMessageMode = "steer" | "follow_up" | "abort";
+export type SessionMessageMode = "steer" | "follow_up" | "interrupt" | "abort";
 export type SessionMessageSource = "user" | "monitor" | "system";
 export type SessionMessageKind = "message" | "coordination" | "request" | "status" | "supervision";
 export type SessionDeliveryStage = "queued" | "injected";
@@ -42,7 +42,7 @@ export function sessionMessageTriggersTurn(kind: SessionMessageKind | undefined)
   return kind !== "status";
 }
 
-export type SessionEndpointCapability = "inspect" | "message" | "steer" | "follow_up" | "abort" | "wake"
+export type SessionEndpointCapability = "inspect" | "message" | "steer" | "follow_up" | "interrupt" | "abort" | "wake"
   | "monitor-workspace-aggregation"
   | "flow-schedule-todo-binding" | "flow-schedule-todo-projection" | "flow-schedule-todo-mutation" | "flow-schedule-report";
 
@@ -214,7 +214,7 @@ function agentCapabilities(owner: SessionOwnerProjection, agent: SessionAgentPro
   const capabilities: SessionEndpointCapability[] = ["inspect"];
   if (agent.status !== "settled") {
     capabilities.push("message", "steer", "follow_up");
-    if (owner.scope === "local") capabilities.push("abort");
+    if (owner.scope === "local") capabilities.push("interrupt", "abort");
     if (agent.wakeable || agent.status === "sleeping") capabilities.push("wake");
   }
   return Object.freeze(capabilities);

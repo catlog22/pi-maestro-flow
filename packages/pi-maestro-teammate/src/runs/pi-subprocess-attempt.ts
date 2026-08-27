@@ -295,7 +295,7 @@ interface AttemptTimers {
   modelSwitch?: ReturnType<typeof setTimeout>;
 }
 
-interface PendingInterruptingSteer {
+interface PendingInterrupt {
   abortRequestId: string;
   promptRequestId: string;
   message: string;
@@ -679,7 +679,7 @@ export async function runSingleAttempt(
   return new Promise<SingleResult>((resolve) => {
     let child: ChildProcess;
     let releaseRetryPersistenceGuard = () => {};
-    let pendingInterruptingSteer: PendingInterruptingSteer | undefined;
+    let pendingInterrupt: PendingInterrupt | undefined;
     /**
      * True when a settlement boundary (agent_settled, legacy agent_end) was
      * swallowed while the interrupt transaction owned settlement. A degraded
@@ -894,9 +894,9 @@ export async function runSingleAttempt(
       for (const line of stdoutLines.write(chunk)) processStdoutLine(line);
     });
 
-    const clearInterruptingSteer = (): PendingInterruptingSteer | undefined => {
-      const pending = pendingInterruptingSteer;
-      pendingInterruptingSteer = undefined;
+    const clearInterrupt = (): PendingInterrupt | undefined => {
+      const pending = pendingInterrupt;
+      pendingInterrupt = undefined;
       if (timers.interruptingSteer) {
         clearTimeout(timers.interruptingSteer);
         timers.interruptingSteer = undefined;
@@ -905,8 +905,8 @@ export async function runSingleAttempt(
     };
 
     const markSteerTurnSettledDuringAbort = (): void => {
-      if (pendingInterruptingSteer?.phase === "aborting") {
-        pendingInterruptingSteer.turnSettledDuringAbort = true;
+      if (pendingInterrupt?.phase === "aborting") {
+        pendingInterrupt.turnSettledDuringAbort = true;
       }
     };
 
