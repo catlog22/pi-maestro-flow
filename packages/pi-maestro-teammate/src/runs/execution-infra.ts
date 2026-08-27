@@ -151,6 +151,13 @@ export interface RunTeammateParams {
    * defaults to the global ceiling (MAX_DEFAULT_DEPTH).
    */
   maxNestingDepth?: number;
+  /**
+   * Overrides the child Pi subprocess steer-queue drain mode for this
+   * dispatch. "all" co-injects all queued steers in one assistant turn;
+   * "one-at-a-time" consumes one steer per turn. Omit to inherit the child's
+   * Pi settings (default "one-at-a-time").
+   */
+  steeringMode?: "all" | "one-at-a-time";
 }
 
 /** Parameters for the internal single-agent execution primitive. */
@@ -354,6 +361,14 @@ export interface RunTeammateOptions {
   toolExecutionHeartbeatMs?: number;
   /** @internal Test seam for the interrupting-steer acknowledgement deadline. */
   interruptingSteerTimeoutMs?: number;
+  /**
+   * Pi subprocess steer-queue drain mode. "all" injects every queued steer
+   * message in a single assistant turn (co-injection); "one-at-a-time" (the
+   * Pi default, left implicit) consumes one steer per turn. Only "all" is
+   * sent to the child via `set_steering_mode`; omitting this field keeps the
+   * child's inherited Pi settings.
+   */
+  steeringMode?: "all" | "one-at-a-time";
   /** @internal Foreground wait window before the extension detaches a still-running task. */
   foregroundMaxRunMs?: number;
 }
@@ -2320,7 +2335,19 @@ export function writeSystemPromptFile(
     "Do not emit a stop-terminated text-only turn while tool calls are still in flight. " +
     "If you need to narrate progress mid-task, continue the turn (do not stop) or use a tool call. " +
     "Emit your final text answer only after all tool calls have completed.";
-  writePrivateTextFile(promptFile, `${agentConfig.systemPrompt}${structuredOutputInstruction}${todoInstruction}${resultPublicationDiscipline}`);
+  // B1: coordination reporting discipline. teammate-send steer interrupts
+  // the parent's active turn; streaming each intermediate finding as a separate
+  // steer fragments the parent's final synthesis and is not a coordination
+  // use. Accumulate intermediate findings into the single final result; send
+  // teammate-send only for a hard blocker the parent must resolve, a safety/
+  // lifecycle constraint, or the one consolidated result when an explicit
+  // reply target requires it.
+  const coordinationReportingDiscipline =
+    "\n\n## Coordination reporting discipline\n" +
+    "Do not send teammate-send for routine intermediate findings. A steer message interrupts the parent's active turn; streaming each discovery as a separate steer fragments the parent's final answer and is not a coordination use.\n" +
+    "Accumulate intermediate findings into your single final result and return them there. Use teammate-send only for: a hard blocker the parent must resolve before you can continue, a safety or lifecycle constraint, or the one consolidated result when the dispatch prompt names an explicit reply target. Batch all findings into that single message instead of sending them one at a time.\n" +
+    "Never send routine acknowledgements, status pings, or incremental progress reports. Do not resend a queued or accepted message.";
+  writePrivateTextFile(promptFile, `${agentConfig.systemPrompt}${structuredOutputInstruction}${todoInstruction}${resultPublicationDiscipline}${coordinationReportingDiscipline}`);
   return promptFile;
 }
 

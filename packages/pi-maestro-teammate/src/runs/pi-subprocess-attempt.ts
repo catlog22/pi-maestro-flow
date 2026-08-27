@@ -764,6 +764,18 @@ export async function runSingleAttempt(
     // fallback across candidates at the process level.
 
     // RPC mode: stdin stays open for bidirectional messaging.
+    // Configure the Pi steer-queue drain mode before the first prompt so queued
+    // steers are co-injected per the dispatch's steeringMode. "all" drains the
+    // whole steerQueue into one assistant turn; "one-at-a-time" (Pi default) is
+    // left implicit. The response carries an id that no pending transaction
+    // matches, so onResponse ignores it.
+    if (child.stdin && options.steeringMode === "all") {
+      writeChildStdinLine(child.stdin, JSON.stringify({
+        id: `teammate-steering-mode-${randomUUID()}`,
+        type: "set_steering_mode",
+        mode: "all",
+      }));
+    }
     // Send initial prompt via RPC command. A resumed child already carries the
     // original task inside its loaded session history, so the initial prompt
     // becomes the resume directive instead of a re-send of the task text.

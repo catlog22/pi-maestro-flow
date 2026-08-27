@@ -357,8 +357,8 @@ export function buildDelegatedWorkerBootstrap(record: DelegationRecord, replyTo:
     ? "This window was forked from the source session for project context."
     : "This is a fresh worker session; the confirmed task document will supply its delegated context.";
   const executionLine = record.workerContext === "fork"
-    ? "After it arrives, apply it as an additive assignment on top of compatible inherited state, execute it end to end, verify the requested behavior, and report the outcome through teammate-send."
-    : "After it arrives, execute the self-contained task document end to end, verify the requested behavior, and report the outcome through teammate-send.";
+    ? "After it arrives, apply it as an additive assignment on top of compatible inherited state, execute it end to end, verify the requested behavior, and report the final outcome through teammate-send (send only a hard blocker or the one consolidated final result, not incremental findings)."
+    : "After it arrives, execute the self-contained task document end to end, verify the requested behavior, and report the final outcome through teammate-send (send only a hard blocker or the one consolidated final result, not incremental findings).";
   return [
     `You are the independently managed worker for delegation ${record.id}.`,
     contextLine,

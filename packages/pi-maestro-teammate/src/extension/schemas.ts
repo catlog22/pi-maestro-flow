@@ -219,6 +219,15 @@ export const TeammateParams = Type.Object({
     }),
   ),
 
+  steeringMode: Type.Optional(
+    Type.Unsafe<"all" | "one-at-a-time">({
+      type: "string",
+      enum: ["all", "one-at-a-time"],
+      description:
+        'Steer-queue drain mode for spawned subprocesses (default: inherited from the child Pi settings, normally "one-at-a-time"). "all" injects every queued steer message into a single assistant turn (co-injection), so multiple teammate-send steers queued during one tool-call window are seen together. "one-at-a-time" consumes one steer per turn. Only affects the native `steer` mode (interrupt/follow_up are unaffected).',
+    }),
+  ),
+
   // === Structured Output (default for tasks without their own) ===
 
   outputSchema: Type.Optional(

@@ -66,6 +66,7 @@ test("prompt schema and reserved result files are private on creation", () => {
   try {
     assert.match(fs.readFileSync(promptFile, "utf8"), /^private prompt/);
     assert.match(fs.readFileSync(promptFile, "utf8"), /## Result publication discipline/);
+    assert.match(fs.readFileSync(promptFile, "utf8"), /## Coordination reporting discipline/);
     assert.deepEqual(JSON.parse(fs.readFileSync(schemaFile, "utf8")), { type: "object" });
     assert.equal(fs.readFileSync(outputFile, "utf8"), "");
     if (process.platform !== "win32") {
@@ -123,6 +124,7 @@ test("todo binding appends an assigned-task instruction to the child system prom
   try {
     assert.match(fs.readFileSync(plain, "utf8"), /^private prompt/);
     assert.match(fs.readFileSync(plain, "utf8"), /## Result publication discipline/);
+    assert.match(fs.readFileSync(plain, "utf8"), /## Coordination reporting discipline/);
     const boundText = fs.readFileSync(bound, "utf8");
     assert.match(boundText, /## Assigned Todo tasks/);
     assert.match(boundText, /#12, #7/);
@@ -130,6 +132,7 @@ test("todo binding appends an assigned-task instruction to the child system prom
     assert.match(boundText, /Drive your queue with \`todo update\` only/);
     assert.match(boundText, /private prompt/);
     assert.match(boundText, /## Result publication discipline/);
+    assert.match(boundText, /## Coordination reporting discipline/);
   } finally {
     fs.rmSync(plain, { force: true });
     fs.rmSync(bound, { force: true });
@@ -142,6 +145,7 @@ test("child system prompt does not append taskType behavior instructions", () =>
     const promptText = fs.readFileSync(promptFile, "utf8");
     assert.match(promptText, /^private prompt/);
     assert.match(promptText, /## Result publication discipline/);
+    assert.match(promptText, /## Coordination reporting discipline/);
     assert.doesNotMatch(promptText, /Assigned taskType|routed as `explore`/);
   } finally {
     fs.rmSync(promptFile, { force: true });

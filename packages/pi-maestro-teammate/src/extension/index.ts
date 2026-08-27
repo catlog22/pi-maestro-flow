@@ -4550,6 +4550,9 @@ export default function registerTeammateExtension(
           : undefined;
         const options: RunTeammateOptions = {
           baseCwd: state.baseCwd || ctx.cwd,
+          // Dispatch-level steering-queue drain mode override; omitted keeps the
+          // child's inherited Pi settings (default one-at-a-time).
+          ...(params.steeringMode ? { steeringMode: params.steeringMode } : {}),
           // Lazy: taking the Monitor term throws when there is none, and a
           // purely local dispatch must not pay for that. Only loading a remote
           // registration reaches this.
