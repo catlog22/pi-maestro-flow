@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { resolveGlyphs, spinFrame } from "../src/icons.ts";
 import { shouldAnimateFrames, shouldAnimateSidebar, shouldRunTick, type TickPolicyState } from "../src/tick-policy.ts";
 
 function state(over: Partial<TickPolicyState> = {}): TickPolicyState {
@@ -13,6 +14,13 @@ function state(over: Partial<TickPolicyState> = {}): TickPolicyState {
 		...over,
 	};
 }
+
+test("animation advances at a terminal-friendly half-second cadence", () => {
+	const glyphs = resolveGlyphs("ascii");
+	assert.equal(spinFrame(glyphs, 0), glyphs.spinFrames[0]);
+	assert.equal(spinFrame(glyphs, 499), glyphs.spinFrames[0]);
+	assert.equal(spinFrame(glyphs, 500), glyphs.spinFrames[1]);
+});
 
 test("shouldRunTick keeps the loop alive for any activity in dynamic mode", () => {
 	assert.equal(shouldRunTick(state({})), false, "idle stays stopped");

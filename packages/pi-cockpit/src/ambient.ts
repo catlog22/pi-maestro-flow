@@ -135,3 +135,51 @@ export function titleFor(
 export function statusText(problem: string | undefined, mark: string): string | undefined {
 	return problem ? `${mark} cockpit: ${problem}` : undefined;
 }
+
+/**
+ * Some host UI setters invalidate the whole TUI even when the value did not
+ * change. Cache the last ambient values so the 250ms Cockpit tick only mutates
+ * host surfaces when there is a real text change.
+ */
+export class AmbientSurfaceCache {
+	private workingMessageKnown = false;
+	private workingMessage: string | undefined;
+	private titleKnown = false;
+	private title: string | undefined;
+	private readonly statuses = new Map<string, string | undefined>();
+
+	reset(): void {
+		this.workingMessageKnown = false;
+		this.workingMessage = undefined;
+		this.titleKnown = false;
+		this.title = undefined;
+		this.statuses.clear();
+	}
+
+	setWorkingMessage(setter: (message: string | undefined) => void, message: string | undefined): boolean {
+		if (this.workingMessageKnown && this.workingMessage === message) return false;
+		this.workingMessageKnown = true;
+		this.workingMessage = message;
+		setter(message);
+		return true;
+	}
+
+	setTitle(setter: (title: string) => void, title: string): boolean {
+		if (this.titleKnown && this.title === title) return false;
+		this.titleKnown = true;
+		this.title = title;
+		setter(title);
+		return true;
+	}
+
+	setStatus(
+		key: string,
+		setter: (key: string, text: string | undefined) => void,
+		text: string | undefined,
+	): boolean {
+		if (this.statuses.has(key) && this.statuses.get(key) === text) return false;
+		this.statuses.set(key, text);
+		setter(key, text);
+		return true;
+	}
+}

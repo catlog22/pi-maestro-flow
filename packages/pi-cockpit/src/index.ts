@@ -5,7 +5,7 @@ import type { TUI } from "@earendil-works/pi-tui";
 import { ambientKeysShouldYield, capturingOverlayVisible } from "./capturing-overlay.ts";
 import { Key, decodeKittyPrintable, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { AgentReadStoreRouter, effectiveAgentStatus, type CompletePayload, type MessagePayload, type StartedPayload } from "./agents-store.ts";
-import { statusText, titleFor, workingMessage, type AmbientState } from "./ambient.ts";
+import { AmbientSurfaceCache, statusText, titleFor, workingMessage, type AmbientState } from "./ambient.ts";
 import { generateTitleWithModel } from "./title-llm.ts";
 import { suggestTitle } from "./title-gen.ts";
 import { BashBgStore } from "./bash-bg-store.ts";
@@ -152,7 +152,7 @@ const COCKPIT_STATUS_KEY = "cockpit";
 // a turn runs (screens/REPL.tsx TITLE_STATIC_PREFIX / TITLE_ANIMATION_FRAMES).
 const TITLE_STATIC = "✳";
 const TITLE_FRAMES = ["⠂", "⠐"];
-const WIDTH_POLL_INTERVAL_MS = 250;
+const WIDTH_POLL_INTERVAL_MS = 500;
 // Static mode keeps token totals fresh enough without recomputing on every message.
 const USAGE_REFRESH_THROTTLE_MS = 10_000;
 // Quiet mode's rename of pi's hidden-thinking label. The live thinking timer
@@ -416,6 +416,7 @@ export default function (pi: ExtensionAPI): void {
 	// Persisted rather than toasted: a config that failed to load silently downgrades
 	// the whole session to defaults, so it belongs in a slot that does not scroll away.
 	let configProblem: string | undefined;
+	const ambientSurfaces = new AmbientSurfaceCache();
 	let quietToolsRegistered = false;
 
 	// Register quiet tools at extension load time, not just in session_start.
@@ -483,8 +484,8 @@ export default function (pi: ExtensionAPI): void {
 		const g = resolveGlyphs(config.icons.mode);
 		try {
 			if (!config.enabled) {
-				ctx.ui.setWorkingMessage(undefined);
-				ctx.ui.setStatus(COCKPIT_STATUS_KEY, undefined);
+				ambientSurfaces.setWorkingMessage((message) => ctx.ui.setWorkingMessage(message), undefined);
+				ambientSurfaces.setStatus(COCKPIT_STATUS_KEY, (key, text) => ctx.ui.setStatus(key, text), undefined);
 				return;
 			}
 			const activeTool = [...activeTools.values()].at(-1);
@@ -500,7 +501,7 @@ export default function (pi: ExtensionAPI): void {
 				hideLiveDuration: config.staticMode,
 				separator: ` ${g.separator} `,
 			};
-			ctx.ui.setWorkingMessage(workingMessage(state, now));
+			ambientSurfaces.setWorkingMessage((message) => ctx.ui.setWorkingMessage(message), workingMessage(state, now));
 			if (title.enabled) {
 				state.session = title.showSession ? sessionTag(ctx.sessionManager, aiTitle) : undefined;
 				state.model = title.showModel ? modelTag(ctx.model) : undefined;
@@ -511,9 +512,12 @@ export default function (pi: ExtensionAPI): void {
 					? maestroKnowledgeTag(maestro.snapshot()?.workflow?.knowledge)
 					: undefined;
 				state.frame = titleFrame(running);
-				ctx.ui.setTitle(titleFor(state, { ok: g.check, fail: g.cross }, g.separator, { maxLength: title.maxLength }));
+				ambientSurfaces.setTitle(
+					(value) => ctx.ui.setTitle(value),
+					titleFor(state, { ok: g.check, fail: g.cross }, g.separator, { maxLength: title.maxLength }),
+				);
 			}
-			ctx.ui.setStatus(COCKPIT_STATUS_KEY, statusText(configProblem, g.blocked));
+			ambientSurfaces.setStatus(COCKPIT_STATUS_KEY, (key, text) => ctx.ui.setStatus(key, text), statusText(configProblem, g.blocked));
 		} catch {
 			// ambient surfaces are best-effort; never let them break a render
 		}
@@ -1339,6 +1343,7 @@ export default function (pi: ExtensionAPI): void {
 		} catch {
 			// ambient surfaces are best-effort
 		}
+		ambientSurfaces.reset();
 		stopTick();
 		viewportStabilityPatch?.detach();
 		viewportStabilityPatch = undefined;
@@ -1754,6 +1759,7 @@ export default function (pi: ExtensionAPI): void {
 	// --- session + agent lifecycle ---
 	pi.on("session_start", (_e, ctx) => {
 		lastCtx = ctx;
+		ambientSurfaces.reset();
 		agentReads.bindSession(ctx.sessionManager.getSessionId());
 		agents = agentReads.current;
 		usingRuntimeV2 = false;

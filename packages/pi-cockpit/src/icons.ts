@@ -149,13 +149,11 @@ export function resolveGlyphs(mode: IconMode): IconGlyphs {
 /**
  * One source of truth for animation cadence.
  *
- * The frame clock and the redraw tick must be the same number. When frames
- * advanced every 120ms but the UI only repainted every 250ms, each repaint
- * skipped ~2 frames: the 6-frame braille spinner ran at half speed and the
- * 4-frame ASCII spinner degenerated into a two-glyph flip (| ↔ -), which reads
- * as blinking rather than rotation.
+ * The frame clock and redraw tick stay aligned so terminal animation advances
+ * one frame per paint. A half-second cadence remains legible without keeping
+ * the terminal renderer busy during long-running work.
  */
-export const ANIMATION_PERIOD_MS = 250;
+export const ANIMATION_PERIOD_MS = 500;
 
 /**
  * The frame to draw at `now`, or a stable glyph when nothing is driving redraws.

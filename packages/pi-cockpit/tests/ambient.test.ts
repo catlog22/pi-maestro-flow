@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { statusText, titleFor, workingMessage, type AmbientState } from "../src/ambient.ts";
+import { AmbientSurfaceCache, statusText, titleFor, workingMessage, type AmbientState } from "../src/ambient.ts";
 import type { AgentRow, BashBgJob, TodoItem } from "../src/types.ts";
 import { cockpitTuiLocale } from "../src/tui-i18n.ts";
 
@@ -178,4 +178,31 @@ test("failure outranks the frame glyph, keeping its own ✗", () => {
 		agents: [agent({ agent: "b", status: "failed" })],
 	}), MARKS);
 	assert.equal(t, "✗ pi - ~/w - 1 failed");
+});
+
+test("AmbientSurfaceCache suppresses duplicate host setter calls", () => {
+	const cache = new AmbientSurfaceCache();
+	const calls: string[] = [];
+
+	assert.equal(cache.setWorkingMessage((message) => calls.push(`working:${message ?? ""}`), undefined), true);
+	assert.equal(cache.setWorkingMessage((message) => calls.push(`working:${message ?? ""}`), undefined), false);
+	assert.equal(cache.setWorkingMessage((message) => calls.push(`working:${message ?? ""}`), "working"), true);
+	assert.equal(cache.setWorkingMessage((message) => calls.push(`working:${message ?? ""}`), "working"), false);
+
+	assert.equal(cache.setStatus("cockpit", (key, text) => calls.push(`status:${key}:${text ?? ""}`), undefined), true);
+	assert.equal(cache.setStatus("cockpit", (key, text) => calls.push(`status:${key}:${text ?? ""}`), undefined), false);
+	assert.equal(cache.setStatus("cockpit", (key, text) => calls.push(`status:${key}:${text ?? ""}`), "broken"), true);
+	assert.equal(cache.setStatus("cockpit", (key, text) => calls.push(`status:${key}:${text ?? ""}`), "broken"), false);
+
+	assert.deepEqual(calls, ["working:", "working:working", "status:cockpit:", "status:cockpit:broken"]);
+});
+
+test("AmbientSurfaceCache reset forces the next value to be published", () => {
+	const cache = new AmbientSurfaceCache();
+	let calls = 0;
+	cache.setTitle(() => { calls += 1; }, "pi");
+	cache.setTitle(() => { calls += 1; }, "pi");
+	cache.reset();
+	cache.setTitle(() => { calls += 1; }, "pi");
+	assert.equal(calls, 2);
 });
