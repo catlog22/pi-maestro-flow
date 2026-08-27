@@ -1184,3 +1184,37 @@ test("cleanup dry-run reports busy when a writer generation overlaps the scan", 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("cleanup dry-run catches a writer that starts after its generation snapshot", async () => {
+  const root = await mkdtemp(join(tmpdir(), "completion-cleanup-lock-order-"));
+  const fsp = createRequire(import.meta.url)("node:fs/promises") as typeof import("node:fs/promises");
+  const originalLstat = fsp.lstat;
+  let started = false;
+  let lockPath = "";
+  try {
+    const store = new CompletionOutboxFileStore({ rootDir: root, ownerId: "cleanup-lock-order" });
+    await store.reserve(seed("cleanup-lock-order"), 4_096);
+    const { createHash } = await import("node:crypto");
+    const workspaceDir = join(root, createHash("sha256").update(target.workspaceId, "utf8").digest("hex"));
+    lockPath = join(workspaceDir, ".store.lock");
+    const replacementLstat: typeof originalLstat = (async (...args: Parameters<typeof originalLstat>) => {
+      if (!started && String(args[0]) === lockPath) {
+        started = true;
+        await writeFile(lockPath, "writer-active\n");
+      }
+      return originalLstat(...args);
+    }) as typeof originalLstat;
+    Reflect.set(fsp, "lstat", replacementLstat);
+    syncBuiltinESMExports();
+
+    const result = await store.cleanupRemnants(target.workspaceId);
+    assert.equal(started, true);
+    assert.equal(result.busy, true);
+    assert.equal(result.scannedEntries, 0);
+  } finally {
+    Reflect.set(fsp, "lstat", originalLstat);
+    syncBuiltinESMExports();
+    if (lockPath) await rm(lockPath, { force: true });
+    await rm(root, { recursive: true, force: true });
+  }
+});
