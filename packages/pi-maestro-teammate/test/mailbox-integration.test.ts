@@ -335,14 +335,18 @@ test("hasPendingMail returns false after all messages are applied", async () => 
   });
   assert.ok(result.ok);
 
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  // Ack the message
-  await service.acknowledge(result.messageId);
-
-  const pending = await service.hasPendingMail();
-  assert.equal(pending, false);
-
-  await service.stop();
+  try {
+    const deadline = Date.now() + 5_000;
+    let pending = await service.hasPendingMail();
+    while ((dispatched.length === 0 || pending) && Date.now() < deadline) {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+      pending = await service.hasPendingMail();
+    }
+    assert.equal(dispatched.length, 1);
+    assert.equal(pending, false);
+  } finally {
+    await service.stop();
+  }
 });
 
 // --- Fenced agent: queue but don't dispatch ---
@@ -401,13 +405,21 @@ test("generation mismatch on dispatch → dead-letter", async () => {
 
   // Now start consumer — it will find the message but revalidation fails
   service.consumer.start();
-  await new Promise((resolve) => setTimeout(resolve, 200));
-  await service.stop();
+  try {
+    const deadline = Date.now() + 5_000;
+    let dead = await service.store.readEnvelope("dead", result.messageId);
+    while (!dead && Date.now() < deadline) {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+      dead = await service.store.readEnvelope("dead", result.messageId);
+    }
 
-  // Not dispatched
-  assert.equal(dispatched.length, 0);
-  // Dead-lettered
-  assert.ok(await service.store.readEnvelope("dead", result.messageId));
+    // Not dispatched
+    assert.equal(dispatched.length, 0);
+    // Dead-lettered
+    assert.ok(dead);
+  } finally {
+    await service.stop();
+  }
 });
 
 // --- Service lifecycle ---

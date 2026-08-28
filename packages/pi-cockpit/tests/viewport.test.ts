@@ -102,7 +102,7 @@ test("a short terminal shrinks the todo panel, summary line included in the budg
 	const opts = { glyphs, spin: "*", now: 0, expanded: true };
 	const tall = renderTodos(items, "list", 100, theme, utils, opts);
 	const short = renderTodos(items, "list", 100, theme, utils, { ...opts, maxRows: 4 });
-	assert.equal(tall.length, 10, "unbounded height keeps summary + 8 rows + overflow");
+	assert.equal(tall.length, 13, "unbounded height keeps summary + 11 rows + overflow");
 	assert.equal(short.length, 4, "summary + 2 tasks + overflow marker");
 	assert.match(short.at(-1)!, /18 more/);
 });

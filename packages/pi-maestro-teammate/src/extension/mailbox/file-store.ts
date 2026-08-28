@@ -295,12 +295,6 @@ async function prepareRecoverablePath(path: string, maxBytes: number): Promise<v
   }
 }
 
-async function cleanupReplacementRemnants(path: string): Promise<void> {
-  const candidates = await replacementCandidates(path);
-  for (const candidate of candidates) await rm(candidate, { force: true });
-  if (candidates.length > 0) await fsyncDirectory(dirname(path));
-}
-
 /** Recoverable old-or-new replacement; never delete-then-recreate canonical. */
 async function writeRecoverableJson(
   path: string,
@@ -332,7 +326,6 @@ async function writeRecoverableJson(
       await renameWithRetry(replacement, path);
       await fsyncDirectory(dir);
       boundary?.("replacement-published");
-      await cleanupReplacementRemnants(path);
       boundary?.("replacement-finished");
       return;
     }
@@ -345,7 +338,6 @@ async function writeRecoverableJson(
     boundary?.("replacement-published");
     await rm(backup, { force: true });
     await fsyncDirectory(dir);
-    await cleanupReplacementRemnants(path);
     boundary?.("replacement-finished");
   } catch (error) {
     await handle?.close().catch(() => undefined);
@@ -1065,7 +1057,10 @@ export class MailboxFileStore {
       });
       if (!exists) continue;
       const envelope = await this.readEnvelope(state, messageId);
-      if (!envelope) throw new Error(`mailbox messageId collision with unreadable envelope: ${state}/${messageId}`);
+      if (!envelope) {
+        if (!await directoryEntryExists(path)) continue;
+        throw new Error(`mailbox messageId collision with unreadable envelope: ${state}/${messageId}`);
+      }
       found.push({ state, envelope });
     }
     return found;

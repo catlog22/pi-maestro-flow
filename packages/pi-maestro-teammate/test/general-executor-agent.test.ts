@@ -16,8 +16,8 @@ test("canonical .pi includes every teammate builtin fallback definition", () => 
     const fallback = path.join(REPO_ROOT, "packages", "pi-maestro-teammate", "agents", `${name}.md`);
     assert.ok(fs.existsSync(canonical), `.pi/agents/${name}.md must exist`);
     assert.equal(
-      fs.readFileSync(canonical, "utf8"),
-      fs.readFileSync(fallback, "utf8"),
+      fs.readFileSync(canonical, "utf8").replace(/\r\n/g, "\n"),
+      fs.readFileSync(fallback, "utf8").replace(/\r\n/g, "\n"),
       `.pi/agents/${name}.md must match the teammate fallback`,
     );
   }

@@ -98,6 +98,8 @@ export declare class AttachOverlay implements Component, Focusable {
     }>, loadTranscript?: TranscriptLoader, initialTranscript?: boolean, locale?: SupportedSettingsLocale | undefined);
     setRequestRender(fn: () => void): void;
     private tickSignature;
+    private startTimer;
+    private stopTimer;
     private setTickVisibility;
     /**
      * The overlay only ever draws the active tab, but progress events arrive for

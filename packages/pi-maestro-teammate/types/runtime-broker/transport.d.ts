@@ -1,7 +1,7 @@
 import type { MessageProvenanceV1 } from "../shared/types.ts";
 export type RuntimeTransportDriver = "file" | "sqlite";
-export type RuntimeTransportMessageKind = "lifecycle" | "result" | "steer" | "follow_up" | "task" | "control";
-export type RuntimeTransportDeliveryMode = "steer" | "follow_up" | "abort" | "notify";
+export type RuntimeTransportMessageKind = "lifecycle" | "result" | "steer" | "follow_up" | "interrupt" | "task" | "control";
+export type RuntimeTransportDeliveryMode = "steer" | "follow_up" | "interrupt" | "abort" | "notify";
 export type RuntimeTransportPriority = "critical" | "high" | "normal";
 export type RuntimeTransportDeliveryState = "staging" | "ready" | "claimed" | "accepted" | "applied" | "rejected" | "expired" | "dead";
 export interface RuntimeTransportEnqueueRequest {

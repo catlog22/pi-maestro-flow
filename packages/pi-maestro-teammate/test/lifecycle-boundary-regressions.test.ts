@@ -1472,7 +1472,7 @@ test("empty warm turn emits lifecycle completion without another model notificat
   );
 });
 
-test("model-originated status is normalized to coordination and starts a turn", async () => {
+test("model-originated status is normalized to coordination and queues a steer", async () => {
   let stdin: PassThrough | undefined;
   const control: string[] = [];
   const spawnChildProcess = (() => {
@@ -1509,9 +1509,10 @@ test("model-originated status is normalized to coordination and starts a turn", 
     ctx,
   );
   assert.equal(status.isError, false);
-  assert.match(status.content[0]?.text ?? "", /active turn cancelled \+ prompt injected/i);
+  assert.match(status.content[0]?.text ?? "", /queued for turn-boundary injection.*does not interrupt/i);
   assert.doesNotMatch(status.content[0]?.text ?? "", /stored as context/i);
-  assert.match(control.join(""), /"id":"teammate-steer-abort-[^"]+","type":"abort"/);
+  assert.match(control.join(""), /"type":"steer"/);
+  assert.doesNotMatch(control.join(""), /"type":"abort"/);
 
   const state = (globalThis as typeof globalThis & Record<symbol, unknown>)[
     Symbol.for("pi-maestro-teammate.root-registry")
@@ -2942,11 +2943,13 @@ test("observe status and diagnose use the current window broker read model", asy
       },
     };
     await Promise.resolve(sessionStart({ reason: "new" }, ctx));
-    await waitFor(() => emitted.some(({ event, payload }) =>
+    const hasCanonicalSnapshot = () => emitted.some(({ event, payload }) =>
       event === "teammate:runtime-read-model-snapshot-v2"
       && Array.isArray(payload.agents)
       && payload.agents.some((agent: { correlationId?: string }) => agent.correlationId === "canonical-observe")
-    ));
+    );
+    await waitFor(hasCanonicalSnapshot, 15_000);
+    assert.equal(hasCanonicalSnapshot(), true);
 
     const result = await observeTool.execute(
       "canonical-observe-call",

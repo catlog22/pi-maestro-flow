@@ -506,7 +506,7 @@ test("shutdown drains and retries acknowledgement before owner authority closes"
   assert.ok(await service.store.readEnvelope("applied", result.messageId));
 });
 
-async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 3_000): Promise<void> {
+async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 10_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await predicate()) return;

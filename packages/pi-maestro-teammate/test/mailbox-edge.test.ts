@@ -140,14 +140,15 @@ test("concurrent claims over N messages: each claimed exactly once", async () =>
   });
   const consumers = [makeConsumer("a"), makeConsumer("b"), makeConsumer("c")];
   consumers.forEach((c) => c.start());
-  // Wait until all messages leave ready (dispatched) or timeout.
-  const deadline = Date.now() + 5000;
-  while ((await store.listMessages("ready")).length > 0 && Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 25));
+  try {
+    // Ready can empty while the last message is still claimed; wait for dispatch itself.
+    const deadline = Date.now() + 15_000;
+    while (dispatched.size < N && Date.now() < deadline) {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
+    }
+  } finally {
+    await Promise.all(consumers.map((consumer) => consumer.stop()));
   }
-  await Promise.all(consumers.map((c) => c.stop()));
-  // Allow trailing async file operations to settle before assertions/cleanup.
-  await new Promise((r) => setTimeout(r, 100));
 
   // All messages dispatched exactly once (no duplicates in the set)
   assert.equal(dispatched.size, N);
@@ -182,8 +183,14 @@ test("crash injection: stranded claimed message is reclaimed and re-dispatched",
     onDispatch: async (e) => { dispatched.push(e.messageId); },
   });
   newConsumer.start();
-  await new Promise((r) => setTimeout(r, 150));
-  await newConsumer.stop();
+  try {
+    const deadline = Date.now() + 2_000;
+    while (dispatched.length === 0 && Date.now() < deadline) {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+    }
+  } finally {
+    await newConsumer.stop();
+  }
 
   assert.equal(dispatched.length, 1, "stranded message must be reclaimed and dispatched");
   assert.equal(dispatched[0], envelope.messageId);

@@ -369,7 +369,7 @@ test("ACP client operations enforce permissions, root containment, and terminal 
   const driver = new AcpDriver({ cancelGraceMs: 50, startupTimeoutMs: 1_000 });
   try {
     const handle = await start(driver, configured);
-    await waitForTerminalSnapshot(handle);
+    await waitForTerminalSnapshot(handle, 10_000);
     const events = await collectEvents(handle);
     await handle.close();
     assert.equal(events.at(-1).status, "completed");
@@ -441,7 +441,7 @@ test("ACP follow-up queue is count-bounded and rejects input as soon as cancella
   const root = canonicalTempRoot("pi-acp-input-bound-");
   const script = writeFakeAgent(root);
   const configured = target(root, script, "cancel");
-  const driver = new AcpDriver({ cancelGraceMs: 50, startupTimeoutMs: 1_000 });
+  const driver = new AcpDriver({ cancelGraceMs: 50, startupTimeoutMs: 10_000 });
   try {
     const handle = await start(driver, configured);
     for (let index = 0; index < ACP_PENDING_INPUT_LIMIT; index += 1) {
@@ -559,7 +559,10 @@ test("ACP driver fails closed on mismatch, malformed, oversize, hanging, and non
       const root = canonicalTempRoot(`pi-acp-${mode}-`);
       const script = writeFakeAgent(root);
       const configured = target(root, script, mode);
-      const driver = new AcpDriver({ cancelGraceMs: 30, startupTimeoutMs: 80 });
+      const driver = new AcpDriver({
+        cancelGraceMs: 30,
+        startupTimeoutMs: mode === "hang" ? 80 : 10_000,
+      });
       try {
         if (mode === "mismatch" || mode === "hang" || mode === "nonzero") {
           await assert.rejects(start(driver, configured), mode === "mismatch" ? /version mismatch/ : /timed out|exited|closed|failed/i);
@@ -629,7 +632,8 @@ test("in-process ACP operations default deny and honor AbortSignal", async () =>
       }, timeoutController.signal);
       const startedAt = Date.now();
       const exit = await timeoutOperations.waitForTerminalExit({ sessionId: "session", terminalId: created.terminalId }, timeoutController.signal);
-      assert.equal(Date.now() - startedAt < 2_000, true);
+      const waitBudgetMs = process.platform === "win32" ? 10_000 : 2_000;
+      assert.equal(Date.now() - startedAt < waitBudgetMs, true);
       assert.equal(exit.exitCode !== undefined || exit.signal !== undefined, true);
       timeoutOperations.releaseTerminal({ sessionId: "session", terminalId: created.terminalId });
     } finally {

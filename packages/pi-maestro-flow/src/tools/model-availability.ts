@@ -8,22 +8,22 @@ import {
   probeCliToolCommand,
   sshHostConfigOf,
 } from "../providers/cli-tools-loader.ts";
-import { probeSshCliExecutable } from "pi-maestro-teammate/src/remote/ssh-exec.ts";
+import { probeSshCliExecutable } from "pi-maestro-teammate/v1/acp-cli";
 import { Text } from "@earendil-works/pi-tui";
 import { toolCallLine, toolResultLine } from "../quiet-render.ts";
-import { refreshModelRegistry } from "pi-maestro-teammate/v1/model-routing";
 import {
   modelRegistrationAvailabilityDiagnostics,
+  refreshModelRegistry,
   type ModelRegistrationAvailabilityDiagnostic,
-} from "pi-maestro-teammate/src/public/v1/model-routing.ts";
-import { modelRegistryPairSync } from "pi-maestro-teammate/src/public/v1/backends.ts";
-import { sharedModelHealthCoordinator } from "pi-maestro-teammate/src/public/v1/retry.ts";
+} from "pi-maestro-teammate/v1/model-routing";
+import { modelRegistryPairSync } from "pi-maestro-teammate/v1/backends";
+import { sharedModelHealthCoordinator } from "pi-maestro-teammate/v1/retry";
 import {
   TEAMMATE_MODEL_SESSION_EVENT,
   TEAMMATE_MODEL_SESSION_PROTOCOL_VERSION,
   TEAMMATE_MODEL_SESSION_QUERY_EVENT,
   type TeammateModelSessionEventV1,
-} from "pi-maestro-teammate/src/public/v1/events.ts";
+} from "pi-maestro-teammate/v1/events";
 
 export const ModelAvailabilityParams = Type.Object({
   filter: Type.Optional(Type.String({ description: "Optional substring to filter model/tool names" })),

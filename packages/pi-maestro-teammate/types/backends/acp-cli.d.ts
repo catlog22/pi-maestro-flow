@@ -76,6 +76,7 @@ export declare function createAcpCliBackend(run?: CliToolRunner, probe?: AcpConf
  * registration ship fields whose keys have no text.
  */
 export { ACP_CLI_SETTINGS_CATALOGS } from "./acp-cli-catalog.ts";
+export { probeSshCliExecutable } from "../remote/ssh-exec.ts";
 /**
  * The registered instance.
  *

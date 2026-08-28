@@ -187,7 +187,8 @@ test("Cockpit teammate event names and payload ingestion stay aligned with the p
 	assert.match(storeSource, /p\.phase/);
 	assert.match(storeSource, /p\.lastOutcome/);
 	assert.match(teammateEventsSource, /TeammateProgressMessageEvent extends Omit<AgentProgressSnapshot/);
-	assert.match(cockpitSource, /value\.isSend !== true[\s\S]*value\.isInteraction !== true/);
+	assert.match(cockpitSource, /TEAMMATE_MESSAGE_EVENT[\s\S]*agentReads\.applyLegacyMessage\(payload\)/);
+	assert.match(storeSource, /payload\.isSend === true \|\| payload\.isInteraction === true/);
 	assert.doesNotMatch(cockpitSource, /agents\.apply(?:Started|Message|Complete)\([^\n]* as /);
 });
 
@@ -284,7 +285,7 @@ test("Cockpit Agent modal opens from the Alt+R session list and shares the live 
 	assert.match(source, /const effectiveTodoExpanded = \(\): boolean =>\s*config\.todoExpanded/);
 	assert.match(source, /uninstallUi[\s\S]*?activeAgentOverlay\?\.finalize\(\)/);
 	assert.match(source, /session_start[\s\S]*?agentListScroll = \{ offset: 0, following: true \}/);
-	assert.match(source, /session_shutdown[\s\S]*?agents\.clear\(\);[\s\S]*?agentListScroll = \{ offset: 0, following: true \}/);
+	assert.match(source, /session_shutdown[\s\S]*?agentReads\.clear\(\);[\s\S]*?agentListScroll = \{ offset: 0, following: true \}/);
 });
 
 test("Flow publishes authoritative bash_bg snapshots and Cockpit can request a refresh", () => {

@@ -5,7 +5,21 @@ icon: "🔄"
 
 This page records user-visible features, behavior changes, fixes, and upgrade requirements from the previous stable release to the current version of the pi maestro flow suite.
 
-> **Current stable release: v0.23.0 (2026-08-27).** Persistent workspace runtime broker + completion durability (crash-consistent redelivery of teammate results), native Computer Use/OCR, Review & Refine Plan panel, MCPX dashboard enhancements, durable flow-schedule controller, per-provider 7-day token trend in Cockpit `/usage`; engine synced to `maestro-flow@0.5.82`; bundles Teammate 2.1.0, Cockpit 0.18.0, Settings-Core 0.2.1, Backend-Core 0.1.1, and Backends 0.1.1. `PI_RUNTIME_BROKER` defaults to off this release (opt into the persistent broker sidecar).
+> **Current stable release: v0.24.0 (2026-08-28).** Hardened process-tree reclamation and cancellation, explicit queued `steer` versus `interrupt`, completion-outbox operations, cross-window teammate coordination, Cockpit manual usage refresh and Todo event projection; engine remains `maestro-flow@0.5.82`; bundles Teammate 2.2.0, Cockpit 0.19.0, Settings-Core 0.2.1, Backend-Core 0.1.1, and Backends 0.1.1.
+
+## v0.24.0 (2026-08-28)
+
+> This release ships Flow 0.24.0, Teammate 2.2.0, and Cockpit 0.19.0. Settings-Core 0.2.1, Backend-Core 0.1.1, Backends 0.1.1, and the `maestro-flow@^0.5.82` engine range remain unchanged.
+
+- **Flow process lifecycle**: Maestro CLI, self-evolve stages, and SmartSearch share fail-closed process-tree reclamation; CLI runners accept `AbortSignal`, FFF initialization follows session cancellation, and SmartSearch enforces a host wall-clock deadline.
+- **Flow Plan and providers**: approved Plan decomposition/compaction handoffs preserve Goal continuation; `/api-manager` and the settings shell keep managed provider registries synchronized, including explicit-empty lists and legacy fallback.
+- **Teammate messaging**: `steer` now uses Pi's queued non-interrupting turn-boundary delivery; explicit `interrupt` performs abort + prompt and safely degrades to `follow_up` when interruption cannot be confirmed.
+- **Teammate durability and coordination**: adds the `pi-teammate-outbox` CLI and lock-race coverage for remnant cleanup; teammate-send can address workspace-peer agents and dispatch accepts a `steeringMode` override.
+- **Teammate resources and terminal state**: terminal results publish before completion callbacks; streaming progress is bounded; sleeping-runtime defaults are smaller and environment-configurable; corrupt outbox GC indexes self-heal.
+- **Cockpit responsiveness**: `/usage` gains manual refresh and a polling toggle; Todo state-change events project immediately; input-history saves are crash-consistent with transient retry; ambient writes are deduplicated on a 500ms animation cadence.
+- **MCPX**: quick tunnels now use HTTP/2.
+
+Upgrade: `pi install npm:pi-maestro-flow@0.24.0`
 
 ## v0.23.0 (2026-08-27)
 

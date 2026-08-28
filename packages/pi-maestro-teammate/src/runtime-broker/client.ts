@@ -48,7 +48,7 @@ const BROKER_BOOTSTRAP_TIMEOUT_MS = 5_000;
 const BROKER_CHILD_TERMINATION_GRACE_MS = 300;
 const BROKER_CHILD_FORCE_WAIT_MS = 5_000;
 const BROKER_CHILD_RECLAIM_POLL_MS = 25;
-const BROKER_WINDOWS_TASKKILL_TIMEOUT_MS = 1_000;
+const BROKER_WINDOWS_TASKKILL_TIMEOUT_MS = BROKER_CHILD_FORCE_WAIT_MS;
 const BROKER_MAX_LAUNCH_ATTEMPTS = 2;
 const BROKER_BIN_PATH = fileURLToPath(new URL("../../bin/pi-teammate-broker.mjs", import.meta.url));
 
@@ -556,7 +556,7 @@ export class RuntimeBrokerClient {
 }
 
 function validateClientOptions(options: RuntimeBrokerClientOptions): ValidatedRuntimeBrokerClientOptions {
-  const timeoutMs = options.timeoutMs ?? 5_000;
+  const timeoutMs = options.timeoutMs ?? 10_000;
   const maxLineBytes = options.maxLineBytes ?? DEFAULT_MAX_LINE_BYTES;
   const maxPendingRequests = options.maxPendingRequests ?? 256;
   const daemonExecutable = options.daemonExecutable ?? process.execPath;
@@ -1043,14 +1043,8 @@ async function invalidateBootstrap(
 
 async function reclaimBootstrapChild(bootstrap: BrokerBootstrap): Promise<void> {
   if (bootstrap.reclaimed) return;
-  if (bootstrap.reclamation) return bootstrap.reclamation;
-  const reclamation = reclaimBootstrapChildOnce(bootstrap);
-  bootstrap.reclamation = reclamation;
-  try {
-    await reclamation;
-  } finally {
-    if (bootstrap.reclamation === reclamation) bootstrap.reclamation = undefined;
-  }
+  bootstrap.reclamation ??= reclaimBootstrapChildOnce(bootstrap);
+  return bootstrap.reclamation;
 }
 
 async function reclaimBootstrapChildOnce(bootstrap: BrokerBootstrap): Promise<void> {

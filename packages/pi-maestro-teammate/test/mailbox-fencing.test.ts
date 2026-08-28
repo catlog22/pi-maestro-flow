@@ -191,18 +191,24 @@ test("service can restart after stop (stop-then-start)", async () => {
   await service.stop();
   await service.start();
 
-  const result = await service.enqueue({
-    senderId: "sender-1",
-    recipientId: "c".repeat(32),
-    recipientCorrelationId: "corr-child-1",
-    kind: "follow_up",
-    mode: "follow_up",
-    payload: "restarted",
-  });
-  assert.ok(result.ok);
-  await new Promise((resolve) => setTimeout(resolve, 150));
-  assert.equal(dispatched.length, 1);
-  await service.stop();
+  try {
+    const result = await service.enqueue({
+      senderId: "sender-1",
+      recipientId: "c".repeat(32),
+      recipientCorrelationId: "corr-child-1",
+      kind: "follow_up",
+      mode: "follow_up",
+      payload: "restarted",
+    });
+    assert.ok(result.ok);
+    const deadline = Date.now() + 2_000;
+    while (dispatched.length === 0 && Date.now() < deadline) {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+    }
+    assert.equal(dispatched.length, 1);
+  } finally {
+    await service.stop();
+  }
 });
 
 test("messages enqueued after consumer.stop() are never claimed or dispatched", async () => {
@@ -451,14 +457,20 @@ test("rollout upgrade shadow → authoritative starts the consumer", async () =>
   await rollout.setMode("authoritative");
   assert.equal(rollout.mode, "authoritative");
 
-  const result = await rollout.deliver({
-    senderId: "caller", recipientId: "r", recipientCorrelationId: "corr-1",
-    kind: "follow_up", mode: "follow_up", payload: "upgraded",
-  });
-  assert.equal(result.path, "v2");
-  await new Promise((resolve) => setTimeout(resolve, 150));
-  assert.deepEqual(dispatched, ["upgraded"]);
-  await service.stop();
+  try {
+    const result = await rollout.deliver({
+      senderId: "caller", recipientId: "r", recipientCorrelationId: "corr-1",
+      kind: "follow_up", mode: "follow_up", payload: "upgraded",
+    });
+    assert.equal(result.path, "v2");
+    const deadline = Date.now() + 2_000;
+    while (dispatched.length === 0 && Date.now() < deadline) {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+    }
+    assert.deepEqual(dispatched, ["upgraded"]);
+  } finally {
+    await service.stop();
+  }
 });
 
 // ===========================================================================
@@ -594,40 +606,42 @@ test("MailboxHost schedules periodic GC that sweeps applied receipts", async () 
     gcIntervalMs: 30,
     now: () => clock,
   });
-  await new Promise((resolve) => setTimeout(resolve, 60));
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 60));
 
-  const result = await host.rollout.deliver({
-    senderId: "caller",
-    recipientId: "target",
-    recipientCorrelationId: "corr-1",
-    kind: "follow_up",
-    mode: "follow_up",
-    payload: "gc me",
-  });
-  assert.ok(result.result.ok);
-  const messageId = (result.result as { messageId: string }).messageId;
-  // Wait deterministically for the consumer to claim→accept→apply the
-  // message. A fixed sleep raced the async dispatch chain under load; poll
-  // for the applied state instead so the GC assertion below tests the sweep,
-  // not consumer timing.
-  const appliedDeadline = Date.now() + 2_000;
-  while (Date.now() < appliedDeadline) {
-    if (await host.service.store.readEnvelope("applied", messageId)) break;
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    const result = await host.rollout.deliver({
+      senderId: "caller",
+      recipientId: "target",
+      recipientCorrelationId: "corr-1",
+      kind: "follow_up",
+      mode: "follow_up",
+      payload: "gc me",
+    });
+    assert.ok(result.result.ok);
+    const messageId = (result.result as { messageId: string }).messageId;
+    // Wait deterministically for the consumer to claim→accept→apply the
+    // message. A fixed sleep raced the async dispatch chain under load; poll
+    // for the applied state instead so the GC assertion below tests the sweep,
+    // not consumer timing.
+    const appliedDeadline = Date.now() + 10_000;
+    while (Date.now() < appliedDeadline) {
+      if (await host.service.store.readEnvelope("applied", messageId)) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(await host.service.store.readEnvelope("applied", messageId), "dispatched message is applied");
+
+    // Advance the injected clock past the receipt retention; the next GC tick
+    // must sweep the applied receipt.
+    clock += TTL_RECEIPT_MS + 1000;
+    // Poll for the GC sweep (gcIntervalMs=30) to clear the applied receipt
+    // after the clock advanced past TTL, instead of a fixed sleep.
+    const sweepDeadline = Date.now() + 10_000;
+    while (Date.now() < sweepDeadline) {
+      if (await host.service.store.readEnvelope("applied", messageId) === undefined) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(await host.service.store.readEnvelope("applied", messageId), undefined, "GC sweeps applied receipts");
+  } finally {
+    await host.stop();
   }
-  assert.ok(await host.service.store.readEnvelope("applied", messageId), "dispatched message is applied");
-
-  // Advance the injected clock past the receipt retention; the next GC tick
-  // must sweep the applied receipt.
-  clock += TTL_RECEIPT_MS + 1000;
-  // Poll for the GC sweep (gcIntervalMs=30) to clear the applied receipt
-  // after the clock advanced past TTL, instead of a fixed sleep.
-  const sweepDeadline = Date.now() + 2_000;
-  while (Date.now() < sweepDeadline) {
-    if (await host.service.store.readEnvelope("applied", messageId) === undefined) break;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  assert.equal(await host.service.store.readEnvelope("applied", messageId), undefined, "GC sweeps applied receipts");
-
-  await host.stop();
 });

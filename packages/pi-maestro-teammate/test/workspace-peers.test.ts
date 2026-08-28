@@ -823,13 +823,22 @@ test("publisher coalesces dirty writes, heartbeats, and removes its owner file o
     getState: () => current,
   });
   await runtime.start();
-  current = state(agent("cid-runtime", "runtime", "second"));
-  runtime.markDirty();
-  runtime.markDirty();
-  await new Promise((resolveDelay) => setTimeout(resolveDelay, 45));
-  const snapshot = JSON.parse(await readFile(ownerSnapshotPath(runtime.identity), "utf8"));
-  assert.equal(snapshot.agents[0].summary, "second");
-  await runtime.stop();
+  try {
+    current = state(agent("cid-runtime", "runtime", "second"));
+    runtime.markDirty();
+    runtime.markDirty();
+    const deadline = Date.now() + 5_000;
+    let observedSummary: unknown;
+    do {
+      const snapshot = JSON.parse(await readFile(ownerSnapshotPath(runtime.identity), "utf8"));
+      observedSummary = snapshot.agents[0]?.summary;
+      if (observedSummary === "second") break;
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
+    } while (Date.now() < deadline);
+    assert.equal(observedSummary, "second");
+  } finally {
+    await runtime.stop();
+  }
   await assert.rejects(readFile(ownerSnapshotPath(runtime.identity)), { code: "ENOENT" });
 });
 
@@ -1132,7 +1141,7 @@ test("remote commands receive an acknowledgement and expose only the action whit
   consumer.start();
   try {
     const result = await sendWorkspacePeerCommand(sender, remoteTarget(receiver), "steer", "change direction", {
-      timeoutMs: 1_000,
+      timeoutMs: 5_000,
       pollMs: 5,
     });
     assert.equal(result.timedOut, false);

@@ -53,7 +53,7 @@ export declare const TOOL_EXECUTION_HEARTBEAT_MS = 10000;
  */
 export declare function resolveAgentCacheRetention(env?: NodeJS.ProcessEnv): string;
 export declare function runSingleAttempt(params: RunSingleTeammateParams, agentConfig: AgentConfig, cwd: string, correlationId: string, replyTo: ReplyTarget, startTime: number, modelOverride: string | undefined, options: RunTeammateOptions): Promise<SingleResult>;
-export type RpcMessageMode = "prompt" | "steer" | "follow_up" | "abort";
+export type RpcMessageMode = "prompt" | "steer" | "follow_up" | "abort" | "interrupt";
 export declare function hasRpcTurnSidecar(stdin: Writable): boolean;
 export declare function sendRpcMessage(stdin: Writable, message: string, mode?: RpcMessageMode, token?: LeaseToken, provenance?: MessageProvenanceV1): boolean;
 export declare function sendChildIpcMessage(child: ChildProcess, message: Record<string, unknown>): boolean;

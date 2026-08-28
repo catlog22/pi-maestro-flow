@@ -17,7 +17,7 @@ export type SessionEndpointKind = "root" | "agent";
 export type SessionEndpointScope = "local" | "workspace-peer";
 export type SessionEndpointTransport = "local-root" | "local-agent-mailbox" | "workspace-peer-v1" | "child-ipc";
 export type SessionEndpointStatus = "running" | "sleeping" | "settled";
-export type SessionMessageMode = "steer" | "follow_up" | "abort";
+export type SessionMessageMode = "steer" | "follow_up" | "interrupt" | "abort";
 export type SessionMessageSource = "user" | "monitor" | "system";
 export type SessionMessageKind = "message" | "coordination" | "request" | "status" | "supervision";
 export type SessionDeliveryStage = "queued" | "injected";
@@ -25,7 +25,7 @@ export type SessionDeliveryStage = "queued" | "injected";
 export declare function normalizeSessionMessageKind(kind: SessionMessageKind | undefined, trustedStatus?: boolean): SessionMessageKind | undefined;
 /** Status messages update context but never start a model turn by themselves. */
 export declare function sessionMessageTriggersTurn(kind: SessionMessageKind | undefined): boolean;
-export type SessionEndpointCapability = "inspect" | "message" | "steer" | "follow_up" | "abort" | "wake" | "monitor-workspace-aggregation" | "flow-schedule-todo-binding" | "flow-schedule-todo-projection" | "flow-schedule-todo-mutation" | "flow-schedule-report";
+export type SessionEndpointCapability = "inspect" | "message" | "steer" | "follow_up" | "interrupt" | "abort" | "wake" | "monitor-workspace-aggregation" | "flow-schedule-todo-binding" | "flow-schedule-todo-projection" | "flow-schedule-todo-mutation" | "flow-schedule-report";
 export interface SessionEndpointIdentity {
     workspaceId: string;
     ownerId: string;

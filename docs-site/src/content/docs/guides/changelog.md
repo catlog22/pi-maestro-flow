@@ -5,7 +5,21 @@ icon: "🔄"
 
 这里记录 pi maestro flow 套件从上一稳定版本到当前版本的用户可见变化、行为调整、问题修复和升级要求。
 
-> **当前稳定版本：v0.23.0（2026-08-27）。** 持久化 workspace 运行时 Broker + 完成持久化（崩溃一致重投 teammate 结果）、原生 Computer Use/OCR、Review & Refine Plan 面板、MCPX 看板增强、持久化 flow-schedule 控制器、Cockpit `/usage` 按提供商 7 天 token 趋势；引擎同步 `maestro-flow@0.5.82`；搭配 Teammate 2.1.0、Cockpit 0.18.0、Settings-Core 0.2.1、Backend-Core 0.1.1 与 Backends 0.1.1。本版 `PI_RUNTIME_BROKER` 默认关闭（可选启用持久 broker sidecar）。
+> **当前稳定版本：v0.24.0（2026-08-28）。** 子进程树回收与取消语义加固、`steer`/`interrupt` 明确分离、completion-outbox 运维 CLI、跨窗口 teammate 协调、Cockpit 用量手动刷新与 Todo 事件投影；引擎保持 `maestro-flow@0.5.82`；搭配 Teammate 2.2.0、Cockpit 0.19.0、Settings-Core 0.2.1、Backend-Core 0.1.1 与 Backends 0.1.1。
+
+## v0.24.0（2026-08-28）
+
+> 本版发布 Flow 0.24.0、Teammate 2.2.0 与 Cockpit 0.19.0；Settings-Core 0.2.1、Backend-Core 0.1.1、Backends 0.1.1 及引擎范围 `maestro-flow@^0.5.82` 保持不变。
+
+- **Flow 进程生命周期**：Maestro CLI、self-evolve stage 与 SmartSearch 共用 fail-closed 进程树回收；CLI runner 支持 `AbortSignal`，FFF 初始化随会话取消，SmartSearch 增加宿主墙钟期限。
+- **Flow Plan 与 Provider**：批准后的 Plan 分解/压缩 handoff 保留 Goal continuation；`/api-manager` 与 settings shell 的 managed provider registry 保持同步并覆盖显式空列表与 legacy fallback。
+- **Teammate 消息语义**：`steer` 改为不打断当前 turn 的原生队列；新增显式 `interrupt`（abort + prompt），并在无法确认中断时安全降级为 `follow_up`。
+- **Teammate durability 与协调**：新增 `pi-teammate-outbox` CLI 和 remnant cleanup 锁竞态覆盖；teammate-send 可定位 workspace-peer agent，dispatch 支持 `steeringMode` 覆盖。
+- **Teammate 资源与终态**：终态结果先发布再触发 completion callback；流式 progress 有界；睡眠 runtime 默认预算降低且可用环境变量覆盖；损坏的 outbox GC 索引自动修复。
+- **Cockpit 响应性**：`/usage` 新增手动刷新与轮询开关；Todo state-change 事件实时投影；输入历史保存具备崩溃一致性与瞬态重试；ambient 写入去重并统一 500ms 动画节拍。
+- **MCPX**：quick tunnel 改用 HTTP/2。
+
+升级：`pi install npm:pi-maestro-flow@0.24.0`
 
 ## v0.23.0（2026-08-27）
 

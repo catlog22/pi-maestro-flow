@@ -9,8 +9,8 @@ import {
   refreshModelRegistry,
   saveSessionModelRoutingOverrides,
   type ModelRoutingRules,
+  type TeammateThinkingLevel,
 } from "pi-maestro-teammate/v1/model-routing";
-import type { TeammateThinkingLevel } from "pi-maestro-teammate/src/shared/thinking.ts";
 
 // TeammateTaskType is a runtime string union exported alongside
 // TEAMMATE_TASK_TYPES; the v1 barrel re-exports both. Fall back to the literal

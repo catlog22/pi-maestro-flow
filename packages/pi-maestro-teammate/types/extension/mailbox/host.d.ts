@@ -53,7 +53,7 @@ export interface MailboxHostOptions {
         payload: string;
         provenance?: MessageProvenanceV1;
         mode: string;
-        kind: "lifecycle" | "result" | "steer" | "follow_up" | "task" | "control";
+        kind: "lifecycle" | "result" | "steer" | "follow_up" | "interrupt" | "task" | "control";
     }) => Promise<MailboxDispatchDisposition | void>;
     mode?: RolloutMode;
     pollMs?: number;

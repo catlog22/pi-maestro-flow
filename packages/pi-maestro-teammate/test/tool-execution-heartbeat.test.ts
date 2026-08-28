@@ -86,7 +86,13 @@ test("a long-running tool keeps progress activity fresh via heartbeat; the heart
   );
 
   // Wait for the tool to be in flight and for several heartbeat ticks.
-  await delay(160);
+  const heartbeatDeadline = Date.now() + 5_000;
+  while (
+    progressCalls.filter((entry) => entry.phase === "tool-execution").length < 3
+    && Date.now() < heartbeatDeadline
+  ) {
+    await delay(20);
+  }
 
   const toolCalls = progressCalls.filter((entry) => entry.phase === "tool-execution");
   assert.ok(toolCalls.length >= 3, `expected repeated tool-execution progress, got ${toolCalls.length}`);

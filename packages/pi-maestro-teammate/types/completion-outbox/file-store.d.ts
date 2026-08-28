@@ -7,6 +7,23 @@ interface StoreOptions {
     maxLiveRecords?: number;
     maxLiveBytes?: number;
 }
+export interface CompletionOutboxCleanupOptions {
+    apply?: boolean;
+    maxEntries?: number;
+}
+export interface CompletionOutboxCleanupResult {
+    apply: boolean;
+    busy: boolean;
+    scannedEntries: number;
+    scannedFiles: number;
+    replacementFiles: number;
+    preservedFiles: number;
+    candidateFiles: number;
+    candidateBytes: number;
+    removedFiles: number;
+    removedBytes: number;
+    candidateSample: string[];
+}
 export declare function computeCompletionContentRevision(record: Omit<CompletionOutboxRecord, "contentRevision">): string;
 export declare class CompletionOutboxFileStore {
     #private;
@@ -31,6 +48,7 @@ export declare class CompletionOutboxFileStore {
     markDead(target: CompletionTarget, deliveryId: string, error: string): Promise<CompletionOutboxRecord | undefined>;
     usage(workspaceId: string): Promise<CompletionOutboxUsage>;
     gc(workspaceId: string): Promise<CompletionOutboxGcResult>;
+    cleanupRemnants(workspaceId: string, options?: CompletionOutboxCleanupOptions): Promise<CompletionOutboxCleanupResult>;
     /**
      * Non-blocking GC for the periodic reconcile path. If the workspace lock is
      * already held by a concurrent writer, returns `{ busy: true }` instead of

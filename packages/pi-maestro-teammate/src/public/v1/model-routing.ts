@@ -10,3 +10,9 @@
 export * from "../../models/model-catalog.ts";
 export * from "../../models/model-session-availability.ts";
 export * from "../../models/model-routing.ts";
+export {
+  TEAMMATE_THINKING_LEVELS,
+  parseTeammateThinkingLevel,
+  type TeammateThinkingInput,
+  type TeammateThinkingLevel,
+} from "../../shared/thinking.ts";

@@ -99,7 +99,12 @@ test("renderSessionDetail: active tool line shows the redacted args preview", ()
 
 test("renderSessionDetail: stalled agent without tail reports the silence instead of working", () => {
 	const lines = renderSessionDetail(
-		[agent({ status: "running", tail: "", lastActivityAt: Date.now() - 45_000 })],
+		[agent({
+			status: "running",
+			tail: "",
+			lastActivityAt: Date.now() - 45_000,
+			runtime: { health: "stalled" } as AgentRow["runtime"],
+		})],
 		"c1",
 		80,
 		theme as Theme,

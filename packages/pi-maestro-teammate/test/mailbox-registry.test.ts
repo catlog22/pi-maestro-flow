@@ -70,9 +70,15 @@ test("registry enqueueTaskNotification dispatches durably to the agent", async (
   assert.ok(result.ok);
 
   // Consumer dispatches the durable notification.
-  await new Promise((resolve) => setTimeout(resolve, 150));
-  assert.deepEqual(dispatched, ["task from flow host"]);
-  await service.stop();
+  try {
+    const deadline = Date.now() + 2_000;
+    while (dispatched.length === 0 && Date.now() < deadline) {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+    }
+    assert.deepEqual(dispatched, ["task from flow host"]);
+  } finally {
+    await service.stop();
+  }
 });
 
 test("registry deliverAgentMessage forwards the versioned request and result", async () => {
@@ -192,7 +198,13 @@ test("registry taskId dedups repeated notifications of the same logical task", a
   assert.equal(retry.ok, false, "same taskId must not be enqueued twice");
   assert.equal((retry as { code?: string }).code, "duplicate");
 
-  await new Promise((resolve) => setTimeout(resolve, 150));
-  assert.deepEqual(dispatched, ["first attempt"]);
-  await service.stop();
+  try {
+    const deadline = Date.now() + 2_000;
+    while (dispatched.length === 0 && Date.now() < deadline) {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+    }
+    assert.deepEqual(dispatched, ["first attempt"]);
+  } finally {
+    await service.stop();
+  }
 });

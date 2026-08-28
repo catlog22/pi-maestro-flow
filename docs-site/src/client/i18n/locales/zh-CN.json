@@ -21,8 +21,8 @@
     "logo_alt": "Maestro Flow 标志"
   },
   "announcement": {
-    "title": "v0.23.0 已发布 — 运行时 Broker + 完成持久化 + Computer Use/OCR + Review & Refine Plan 面板 + 用量趋势（引擎同步 maestro-flow 0.5.82）。升级：",
-    "install": "pi install npm:pi-maestro-flow@0.23.0",
+    "title": "v0.24.0 已发布 — 进程树回收 + 显式 interrupt + completion-outbox 运维 + Cockpit 响应性优化（引擎 maestro-flow 0.5.82）。升级：",
+    "install": "pi install npm:pi-maestro-flow@0.24.0",
     "close": "关闭提示"
   },
   "accessibility": {

@@ -144,6 +144,8 @@ export class MailboxHost {
   readonly #startPromise: Promise<void>;
   readonly #closeDispatchAuthority: (() => Promise<void>) | undefined;
   #gcTimer: ReturnType<typeof setInterval> | undefined;
+  #gcPromise: Promise<void> | undefined;
+  #gcPending = false;
 
   constructor(options: MailboxHostOptions) {
     const mode = options.mode ?? mailboxModeFromEnv();
@@ -251,14 +253,27 @@ export class MailboxHost {
     });
 
     // Periodic GC keeps applied/dead/expired receipts from accumulating.
-    this.#gcTimer = setInterval(() => {
-      for (const mailboxService of [service, ...legacyServices]) {
-        void mailboxService.runGC().catch((error) => {
-          logDiagnosticError(`[pi-maestro-teammate] mailbox GC failed:`, error);
-        });
-      }
-    }, options.gcIntervalMs ?? DEFAULT_GC_INTERVAL_MS);
+    this.#gcTimer = setInterval(() => this.#scheduleGC(), options.gcIntervalMs ?? DEFAULT_GC_INTERVAL_MS);
     this.#gcTimer.unref?.();
+  }
+
+  #scheduleGC(): void {
+    if (this.#gcPromise) {
+      this.#gcPending = true;
+      return;
+    }
+    this.#gcPending = false;
+    this.#gcPromise = Promise.all([this.service, ...this.#legacyServices].map(async (mailboxService) => {
+      await mailboxService.runGC();
+    })).then(
+      () => undefined,
+      (error) => {
+        logDiagnosticError(`[pi-maestro-teammate] mailbox GC failed:`, error);
+      },
+    ).finally(() => {
+      this.#gcPromise = undefined;
+      if (this.#gcPending && this.#gcTimer) this.#scheduleGC();
+    });
   }
 
   async stop(): Promise<void> {
@@ -266,8 +281,10 @@ export class MailboxHost {
       clearInterval(this.#gcTimer);
       this.#gcTimer = undefined;
     }
-    // Barrier on the in-flight start before stopping the consumer.
+    this.#gcPending = false;
+    // Barrier on in-flight startup and GC before stopping the consumer.
     await this.#startPromise.catch(() => undefined);
+    await this.#gcPromise;
     try {
       await Promise.all([this.service, ...this.#legacyServices].map((service) => service.stop()));
     } finally {

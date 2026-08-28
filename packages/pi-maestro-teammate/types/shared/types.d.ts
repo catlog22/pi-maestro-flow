@@ -225,7 +225,7 @@ export type MessageProvenanceConfidence = "verified" | "unknown";
 export type MessageProvenanceSource = "initial-task" | "session-router" | "mailbox" | "workspace-peer" | "completion-outbox" | "monitor" | "advisor" | "recovery" | "unknown";
 export type VerifiedMessageProvenanceSource = Exclude<MessageProvenanceSource, "unknown">;
 export type MessageProvenanceKind = MessageKind | "message" | "coordination" | "request" | "status" | "supervision" | "lifecycle" | "control";
-export type MessageDeliveryModeV1 = "prompt" | "steer" | "follow_up" | "abort" | "notify";
+export type MessageDeliveryModeV1 = "prompt" | "steer" | "follow_up" | "interrupt" | "abort" | "notify";
 export type MessageSenderIdentityV1 = {
     kind: "human";
     ownerId: string;

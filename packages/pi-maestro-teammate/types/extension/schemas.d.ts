@@ -58,6 +58,7 @@ export declare const TeammateParams: Type.TObject<{
     concurrencyWaitMs: Type.TOptional<Type.TInteger>;
     maxAgents: Type.TOptional<Type.TInteger>;
     maxNestingDepth: Type.TOptional<Type.TInteger>;
+    steeringMode: Type.TOptional<Type.TUnsafe<"all" | "one-at-a-time">>;
     outputSchema: Type.TOptional<Type.TUnsafe<Record<string, unknown>>>;
     background: Type.TOptional<Type.TBoolean>;
     context: Type.TOptional<Type.TUnsafe<"fresh" | "fork">>;
@@ -68,16 +69,16 @@ export declare const TeammateParams: Type.TObject<{
     timeoutMs: Type.TOptional<Type.TInteger>;
 }>;
 export declare const LocalTeammateListParams: Type.TObject<{
-    view: Type.TOptional<Type.TUnsafe<"active" | "named" | "all" | "roles">>;
+    view: Type.TOptional<Type.TUnsafe<"active" | "all" | "named" | "roles">>;
 }>;
 export declare const TeammateSendParams: Type.TObject<{
     to: Type.TString;
     message: Type.TOptional<Type.TString>;
-    mode: Type.TOptional<Type.TUnsafe<"follow_up" | "steer" | "abort">>;
+    mode: Type.TOptional<Type.TUnsafe<"follow_up" | "steer" | "abort" | "interrupt">>;
     kind: Type.TOptional<Type.TUnsafe<"coordination" | "request" | "supervision">>;
 }>;
 export declare const TeammateListParams: Type.TObject<{
-    view: Type.TOptional<Type.TUnsafe<"active" | "windows" | "named" | "all" | "roles" | "inbox">>;
+    view: Type.TOptional<Type.TUnsafe<"active" | "all" | "windows" | "named" | "roles" | "inbox">>;
     session: Type.TOptional<Type.TString>;
     peer: Type.TOptional<Type.TString>;
     direction: Type.TOptional<Type.TUnsafe<"outgoing" | "incoming">>;
@@ -103,7 +104,7 @@ export declare const ObserveParams: Type.TObject<{
     }>>;
     detail: Type.TOptional<Type.TUnsafe<"summary" | "tail" | "full">>;
     lines: Type.TOptional<Type.TInteger>;
-    waitMode: Type.TOptional<Type.TUnsafe<"count" | "all" | "any">>;
+    waitMode: Type.TOptional<Type.TUnsafe<"all" | "count" | "any">>;
     waitCount: Type.TOptional<Type.TInteger>;
     until: Type.TOptional<Type.TUnsafe<"completed" | "result-ready">>;
     timeoutMs: Type.TOptional<Type.TInteger>;
@@ -121,7 +122,7 @@ export declare const LocalObserveParams: Type.TUnsafe<LocalObserveParamsInput>;
 export declare const TeammateMonitorParams: Type.TObject<{
     action: Type.TUnsafe<"status" | "wait">;
     targets: Type.TArray<Type.TString>;
-    waitMode: Type.TOptional<Type.TUnsafe<"count" | "all" | "any">>;
+    waitMode: Type.TOptional<Type.TUnsafe<"all" | "count" | "any">>;
     waitCount: Type.TOptional<Type.TInteger>;
     timeoutMs: Type.TOptional<Type.TInteger>;
     lines: Type.TOptional<Type.TInteger>;

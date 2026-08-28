@@ -46,12 +46,12 @@ export type MailboxState = "staging" | "ready" | "claimed" | "accepted" | "appli
 export declare const TERMINAL_STATES: ReadonlySet<MailboxState>;
 /** States eligible for GC after retention period. */
 export declare const GC_ELIGIBLE_STATES: ReadonlySet<MailboxState>;
-export type MailboxMessageKind = "lifecycle" | "result" | "steer" | "follow_up" | "task" | "control";
+export type MailboxMessageKind = "lifecycle" | "result" | "steer" | "follow_up" | "interrupt" | "task" | "control";
 export type MailboxPriority = "critical" | "high" | "normal";
 /** Maps message kind to its default priority lane. */
 export declare function priorityForKind(kind: MailboxMessageKind): MailboxPriority;
 /** Delivery mode for the message. */
-export type MailboxDeliveryMode = "steer" | "follow_up" | "abort" | "notify";
+export type MailboxDeliveryMode = "steer" | "follow_up" | "interrupt" | "abort" | "notify";
 export interface MailboxEnvelope {
     /** Unique message identifier (UUID v4). */
     messageId: string;

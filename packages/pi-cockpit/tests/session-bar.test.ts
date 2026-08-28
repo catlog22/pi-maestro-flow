@@ -218,11 +218,12 @@ test("makeSessionBarWidget: status colors change only when the cached effective 
 	assert.ok(widget.render(100)[0].includes(`[${assigned}]@stable[/${assigned}]`));
 
 	now = 31_001;
+	rows[0].runtime = { health: "stalled" } as AgentRow["runtime"];
 	assert.match(widget.render(100)[0], /\[error\]@stable\[\/error\]/);
 	assert.match(widget.render(100)[0], /\[error\]@stable\[\/error\]/, "same stable state keeps the same color");
 
-	rows[0].lastActivityAt = now;
-	assert.ok(widget.render(100)[0].includes(`[${assigned}]@stable[/${assigned}]`), "new activity crosses back to running");
+	rows[0].runtime = { health: "healthy" } as AgentRow["runtime"];
+	assert.ok(widget.render(100)[0].includes(`[${assigned}]@stable[/${assigned}]`), "canonical health crosses back to running");
 });
 
 test("makeSessionBarWidget: reads live agents on every render", () => {

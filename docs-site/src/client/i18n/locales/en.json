@@ -21,8 +21,8 @@
     "logo_alt": "Maestro Flow Logo"
   },
   "announcement": {
-    "title": "v0.23.0 is out — runtime broker + completion durability + Computer Use/OCR + Review & Refine Plan panel + usage trends (engine synced to maestro-flow 0.5.82). Upgrade:",
-    "install": "pi install npm:pi-maestro-flow@0.23.0",
+    "title": "v0.24.0 is out — process-tree reclamation + explicit interrupt + completion-outbox operations + Cockpit responsiveness (maestro-flow 0.5.82). Upgrade:",
+    "install": "pi install npm:pi-maestro-flow@0.24.0",
     "close": "Dismiss"
   },
   "accessibility": {

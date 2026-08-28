@@ -17,7 +17,6 @@
  * ~/.maestro/cli-tools.json for pi-maestro-flow's original provider registration.
  */
 
-import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -82,7 +81,6 @@ export interface MaestroDelegateConfig {
 
 const GLOBAL_CONFIG_FILE = "teammate-cli-tools.json";
 const LEGACY_CONFIG_PATH = path.join(os.homedir(), ".maestro", "cli-tools.json");
-const PROBE_TIMEOUT_MS = 2_000;
 const PROBE_CACHE_TTL_MS = 30_000;
 
 export function getGlobalCliToolsConfigPath(): string {
@@ -326,6 +324,34 @@ function adapterInstallHint(command: string): string {
   return pkg === undefined ? "" : `; install it with: npm i -g ${pkg}`;
 }
 
+function localExecutableCandidates(command: string): string[] {
+  const hasPathSeparator = command.includes("/") || command.includes("\\");
+  const directories = hasPathSeparator
+    ? [process.cwd()]
+    : (process.env.PATH ?? "").split(path.delimiter).map((entry) => {
+      const trimmed = entry.trim();
+      return trimmed.replace(/^"|"$/g, "") || process.cwd();
+    });
+  const extensions = process.platform === "win32" && path.extname(command) === ""
+    ? ["", ...(process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";")]
+    : [""];
+  return [...new Set(directories.flatMap((directory) =>
+    extensions.map((extension) => path.resolve(directory, `${command}${extension.toLowerCase()}`)),
+  ))];
+}
+
+function localExecutableExists(command: string): boolean {
+  return localExecutableCandidates(command).some((candidate) => {
+    try {
+      if (!fs.statSync(candidate).isFile()) return false;
+      fs.accessSync(candidate, process.platform === "win32" ? fs.constants.F_OK : fs.constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
 function probeLocalExecutable(key: string, command: string): CliToolProbeResult {
   const quotedCommand = JSON.stringify(command);
   let result: CliToolProbeResult;
@@ -351,18 +377,9 @@ function probeLocalExecutable(key: string, command: string): CliToolProbeResult 
       };
     }
   } else {
-    try {
-      const lookup = process.platform === "win32" ? "where" : "which";
-      execFileSync(lookup, [command], {
-        encoding: "utf8",
-        timeout: PROBE_TIMEOUT_MS,
-        stdio: ["ignore", "ignore", "pipe"],
-        windowsHide: true,
-      });
-      result = { ok: true, command };
-    } catch {
-      result = { ok: false, command, error: `executable ${quotedCommand} not found on PATH${adapterInstallHint(command)}` };
-    }
+    result = localExecutableExists(command)
+      ? { ok: true, command }
+      : { ok: false, command, error: `executable ${quotedCommand} not found on PATH${adapterInstallHint(command)}` };
   }
   probeCache.set(key, { result, at: Date.now() });
   return result;

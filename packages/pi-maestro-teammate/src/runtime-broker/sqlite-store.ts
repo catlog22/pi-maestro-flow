@@ -306,9 +306,8 @@ export class RuntimeBrokerSqliteStore {
     const requestHash = hashCommitRequest(request);
     const alreadyCommitted = this.#recoverCommit(request.messageId, requestHash);
     if (alreadyCommitted) return alreadyCommitted;
-    const appliedAt = this.#readNow();
 
-    return this.#transaction(() => {
+    return this.#commitTransaction((appliedAt) => {
       const recovered = this.#recoverCommit(request.messageId, requestHash);
       if (recovered) return recovered;
 
@@ -1006,6 +1005,57 @@ export class RuntimeBrokerSqliteStore {
         this.#db.exec("ROLLBACK");
       } catch {
         // Preserve the original failure; a rollback can fail after SQLite aborts a transaction itself.
+      }
+      throw error;
+    }
+  }
+
+  #commitTransaction<T>(operation: (appliedAt: number) => T): T {
+    this.#db.exec("BEGIN IMMEDIATE");
+    let appliedAt: number;
+    try {
+      appliedAt = this.#readNow();
+      this.#db.exec("SAVEPOINT runtime_broker_commit_effects");
+    } catch (error) {
+      try {
+        this.#db.exec("ROLLBACK");
+      } catch {
+        // Preserve the original failure.
+      }
+      throw error;
+    }
+
+    let result: T;
+    try {
+      result = operation(appliedAt);
+    } catch (operationError) {
+      try {
+        this.#db.exec("ROLLBACK TO SAVEPOINT runtime_broker_commit_effects");
+        this.#db.exec("RELEASE SAVEPOINT runtime_broker_commit_effects");
+        this.#db.exec("COMMIT");
+      } catch (persistenceError) {
+        try {
+          this.#db.exec("ROLLBACK");
+        } catch {
+          // Preserve both the operation and persistence failures.
+        }
+        throw new AggregateError(
+          [operationError, persistenceError],
+          "runtime broker commit failed and logical time could not be persisted",
+        );
+      }
+      throw operationError;
+    }
+
+    try {
+      this.#db.exec("RELEASE SAVEPOINT runtime_broker_commit_effects");
+      this.#db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      try {
+        this.#db.exec("ROLLBACK");
+      } catch {
+        // Preserve the original failure.
       }
       throw error;
     }

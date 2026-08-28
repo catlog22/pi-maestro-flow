@@ -68,8 +68,8 @@ export declare function handleProxyRequest(pi: ExtensionAPI, state: TeammateStat
     senderId: string;
     recipientId: string;
     recipientCorrelationId: string;
-    kind: "lifecycle" | "result" | "steer" | "follow_up" | "task" | "control";
-    mode: "steer" | "follow_up" | "abort" | "notify";
+    kind: "lifecycle" | "result" | "steer" | "follow_up" | "interrupt" | "task" | "control";
+    mode: "steer" | "follow_up" | "interrupt" | "abort" | "notify";
     payload: string;
     provenance?: MessageProvenanceV1;
 }) => Promise<{
@@ -82,7 +82,7 @@ export declare function handleProxyRequest(pi: ExtensionAPI, state: TeammateStat
     targetCorrelationId?: string;
     senderCorrelationId?: string;
     message: string;
-    mode: "steer" | "follow_up" | "abort";
+    mode: "steer" | "follow_up" | "interrupt" | "abort";
     messageKind?: WorkspacePeerMessageKind;
     provenance?: MessageProvenanceV1;
 }) => Promise<SessionMessageResult>, refreshModelCapabilities?: () => Promise<readonly TeammateModelCapability[]>, authority?: TeammateProxyAuthority): Promise<void>;

@@ -575,6 +575,7 @@ test("connectOrStart preserves each concurrent caller's timeout", { timeout: 15_
   let client: RuntimeBrokerClient | undefined;
   try {
     const short = RuntimeBrokerClient.connectOrStart({ stateDirectory, timeoutMs: 100 });
+    void short.catch(() => undefined);
     await new Promise<void>((resolve) => setImmediate(resolve));
     const long = RuntimeBrokerClient.connectOrStart({ stateDirectory, timeoutMs: 8_000 });
     const [shortResult, longResult] = await Promise.allSettled([short, long]);

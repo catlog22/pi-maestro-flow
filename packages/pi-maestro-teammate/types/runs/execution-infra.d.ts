@@ -108,6 +108,13 @@ export interface RunTeammateParams {
      * defaults to the global ceiling (MAX_DEFAULT_DEPTH).
      */
     maxNestingDepth?: number;
+    /**
+     * Overrides the child Pi subprocess steer-queue drain mode for this
+     * dispatch. "all" co-injects all queued steers in one assistant turn;
+     * "one-at-a-time" consumes one steer per turn. Omit to inherit the child's
+     * Pi settings (default "one-at-a-time").
+     */
+    steeringMode?: "all" | "one-at-a-time";
 }
 /** Parameters for the internal single-agent execution primitive. */
 export interface RunSingleTeammateParams {
@@ -297,6 +304,14 @@ export interface RunTeammateOptions {
     toolExecutionHeartbeatMs?: number;
     /** @internal Test seam for the interrupting-steer acknowledgement deadline. */
     interruptingSteerTimeoutMs?: number;
+    /**
+     * Pi subprocess steer-queue drain mode. "all" injects every queued steer
+     * message in a single assistant turn (co-injection); "one-at-a-time" (the
+     * Pi default, left implicit) consumes one steer per turn. Only "all" is
+     * sent to the child via `set_steering_mode`; omitting this field keeps the
+     * child's inherited Pi settings.
+     */
+    steeringMode?: "all" | "one-at-a-time";
     /** @internal Foreground wait window before the extension detaches a still-running task. */
     foregroundMaxRunMs?: number;
 }
@@ -775,6 +790,8 @@ export declare function findStructuredOutputSchemaHazard(schema: Record<string, 
 export type ChildReclamationOutcome = {
     status: "reclaimed";
     forced: boolean;
+    /** False when the direct child exited but Windows taskkill never confirmed its tree sweep. */
+    treeCleanupConfirmed?: false;
 } | {
     status: "unreaped";
     forced: boolean;
