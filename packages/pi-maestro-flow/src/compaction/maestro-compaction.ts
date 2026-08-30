@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, realpath, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, normalize, relative, resolve } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { Api, Model } from "@earendil-works/pi-ai";
+import type { Api, Model, ProviderHeaders } from "@earendil-works/pi-ai";
 import { complete, isRetryableAssistantError } from "@earendil-works/pi-ai/compat";
 import {
   convertToLlm,
@@ -580,7 +580,7 @@ interface PersistCompactionDependencies {
 
 export function buildSummaryCompletionOptions(input: {
   apiKey: string;
-  headers?: Record<string, string>;
+  headers?: ProviderHeaders;
   maxTokens: number;
   signal: AbortSignal;
 }) {

@@ -59,6 +59,7 @@ import {
   effectiveReserveTokens,
   estimateContextTokens,
   isOutputLimitContextConstrained,
+  latestProviderUsageEpoch,
   MAX_CONSECUTIVE_COMPACTION_FAILURES,
   LOOP_CRITICAL_PERSIST_EVALUATIONS,
   MAX_OFF_BRANCH_PRUNE_BYTES,
@@ -214,12 +215,13 @@ test("compaction input keeps operator focus as non-privileged structured data", 
 test("compaction summary completion disables provider prompt caching", () => {
   const options = buildSummaryCompletionOptions({
     apiKey: "test-key",
-    headers: { "x-test": "yes" },
+    headers: { "x-test": "yes", "x-delete": null },
     maxTokens: 512,
     signal: new AbortController().signal,
   });
   assert.equal(options.cacheRetention, "none");
   assert.equal(options.headers?.["x-test"], "yes");
+  assert.equal(options.headers?.["x-delete"], null, "Pi header deletion markers pass through to pi-ai");
   assert.equal(options.maxRetries, SUMMARY_PROVIDER_MAX_RETRIES, "provider-level transient retries stay enabled");
 });
 
@@ -650,6 +652,91 @@ test("mid-turn token estimate adds tool results after the last assistant usage",
     contextWindow: 200,
     settings: { enabled: true, reserveTokens: 20, keepRecentTokens: 10 },
   }), true);
+});
+
+test("mid-turn token estimate ignores provider usage retained from before compaction", () => {
+  const epoch = {
+    oldUsage: 1_787_891_309_000,
+    oldResult: 1_787_891_309_001,
+    summary: 1_787_891_309_745,
+    newUsage: 1_787_891_310_000,
+  };
+  assert.ok(epoch.oldUsage < epoch.summary && epoch.summary < epoch.newUsage);
+
+  const iso = (timestamp: number): string => new Date(timestamp).toISOString();
+  const timestampCases: Array<{
+    name: string;
+    oldUsage: number | string;
+    oldResult: number | string;
+    summary: number | string;
+    newUsage: number | string;
+  }> = [{
+    name: "number",
+    ...epoch,
+  }, {
+    name: "numeric-string",
+    oldUsage: String(epoch.oldUsage),
+    oldResult: String(epoch.oldResult),
+    summary: String(epoch.summary),
+    newUsage: String(epoch.newUsage),
+  }, {
+    name: "ISO string",
+    oldUsage: iso(epoch.oldUsage),
+    oldResult: iso(epoch.oldResult),
+    summary: iso(epoch.summary),
+    newUsage: iso(epoch.newUsage),
+  }, {
+    name: "mixed formats",
+    oldUsage: epoch.oldUsage,
+    oldResult: String(epoch.oldResult),
+    summary: iso(epoch.summary),
+    newUsage: String(epoch.newUsage),
+  }];
+
+  for (const timestamps of timestampCases) {
+    const messages = [{
+      role: "compactionSummary",
+      content: "checkpoint",
+      timestamp: timestamps.summary,
+    }, {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "old-call", name: "read", arguments: {} }],
+      timestamp: timestamps.oldUsage,
+      usage: { input: 39_309, output: 1_556, cacheRead: 218_624, cacheWrite: 0, totalTokens: 259_489, cost: { total: 0 } },
+    }, {
+      role: "toolResult",
+      toolCallId: "old-call",
+      toolName: "read",
+      content: [{ type: "text", text: "deferred" }],
+      timestamp: timestamps.oldResult,
+      isError: true,
+    }] as unknown as Parameters<typeof estimateContextTokens>[0];
+
+    const staleEstimate = estimateContextTokens(messages);
+    assert.equal(staleEstimate.usageTokens, 0, `${timestamps.name}: pre-compaction usage is filtered`);
+    assert.ok(
+      staleEstimate.tokens < 1_000,
+      `${timestamps.name}: structural fallback stays small, got ${staleEstimate.tokens}`,
+    );
+    assert.equal(latestProviderUsageEpoch(messages), undefined, `${timestamps.name}: stale usage has no epoch`);
+
+    messages.push({
+      role: "assistant",
+      content: [{ type: "text", text: "continued" }],
+      timestamp: timestamps.newUsage,
+      usage: { input: 31_000, output: 72, cacheRead: 0, cacheWrite: 0, totalTokens: 31_072, cost: { total: 0 } },
+    } as never);
+
+    assert.deepEqual(estimateContextTokens(messages), {
+      tokens: 31_072,
+      usageTokens: 31_072,
+      trailingTokens: 0,
+    }, `${timestamps.name}: post-compaction usage is exact`);
+    assert.ok(
+      latestProviderUsageEpoch(messages)?.startsWith(`timestamp:${String(timestamps.newUsage)}:`),
+      `${timestamps.name}: latest epoch points to the new timestamp`,
+    );
+  }
 });
 
 test("pressure policy prunes stale large tool results but preserves the recent frontier", () => {
@@ -4268,6 +4355,20 @@ test("tool-call usage creates a hard-threshold intent when the context frame cou
 
   await fx.guard.onAgentEnd(fx.ctx);
   assert.equal(fx.compactCalls.length, 1, "usage-derived pressure compacts at the same settlement");
+});
+
+test("tool-call usage clears a stale non-interrupted intent after pressure falls", async () => {
+  const fx = loopCriticalFixture();
+  await fx.guard.evaluate(highUsageToolBatch(365_000), fx.ctx);
+  assert.equal(fx.guard.describeState().pendingIntent?.loopCritical, false);
+
+  Object.assign(fx.ctx, {
+    getContextUsage: () => ({ tokens: 31_072, contextWindow: 400_000, percent: 7.768 }),
+  });
+
+  assert.equal(fx.guard.onToolCall(fx.ctx), undefined);
+  assert.equal(fx.guard.describeState().pendingIntent, undefined);
+  assert.equal(fx.aborted(), 0);
 });
 
 test("usage-derived intent judges exhaustion against the active session window", async () => {

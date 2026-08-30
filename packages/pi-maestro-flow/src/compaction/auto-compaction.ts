@@ -366,6 +366,7 @@ export interface MessageRecord {
   isError?: unknown;
   usage?: unknown;
   stopReason?: unknown;
+  timestamp?: unknown;
   details?: unknown;
 }
 
@@ -1675,12 +1676,24 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       const usageTokens = usage?.tokens ?? (usage?.percent != null
         ? Math.floor((usage.percent / 100) * usage.contextWindow)
         : undefined);
+      const measuredUsageTokens = finiteNumber(usage?.tokens);
       let intent = state.pendingIntent?.generation === state.generation
         ? state.pendingIntent
         : undefined;
       if (intent && (!currentSettings.enabled || !sameSettings(currentSettings, intent.settings))) {
         if (state.pendingIntent === intent) state.pendingIntent = undefined;
         if (state.lastTriggerKey === intent.triggerKey) state.lastTriggerKey = undefined;
+        persistPendingIntent(pi, state);
+        intent = undefined;
+      }
+      if (intent && measuredUsageTokens !== undefined && measuredUsageTokens >= 0
+        && measuredUsageTokens <= intent.linkedThreshold.thresholdTokens
+        && !intent.contextExhausted && !intent.requestBlocked && !intent.loopCritical) {
+        if (state.pendingIntent === intent) state.pendingIntent = undefined;
+        if (state.lastTriggerKey === intent.triggerKey) state.lastTriggerKey = undefined;
+        state.highPressureDroppedTurns = 0;
+        state.belowEscalateStreak = 0;
+        state.lastNoCompactableKey = undefined;
         persistPendingIntent(pi, state);
         intent = undefined;
       }
@@ -3149,15 +3162,12 @@ export function shouldCompactMidTurn(input: {
 }
 
 export function estimateContextTokens(messages: AgentMessage[]): ContextEstimate {
-  let lastUsageIndex = -1;
-  let usageTokens = 0;
-  for (let index = messages.length - 1; index >= 0; index--) {
-    const usage = assistantUsage(messages[index]);
-    if (!usage) continue;
-    lastUsageIndex = index;
-    usageTokens = usage.totalTokens ?? usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
-    break;
-  }
+  const source = latestProviderUsageSource(messages);
+  const lastUsageIndex = source?.index ?? -1;
+  const usageTokens = source
+    ? source.usage.totalTokens
+      ?? source.usage.input + source.usage.output + source.usage.cacheRead + source.usage.cacheWrite
+    : 0;
   let trailingTokens = 0;
   for (let index = lastUsageIndex + 1; index < messages.length; index++) {
     trailingTokens += estimateMessageTokens(messages[index]);
@@ -3199,24 +3209,62 @@ export function assistantUsage(message: AgentMessage): { input: number; output: 
   };
 }
 
-export function latestProviderUsageEpoch(messages: AgentMessage[]): string | undefined {
+interface ProviderUsageSource {
+  index: number;
+  message: AgentMessage;
+  usage: NonNullable<ReturnType<typeof assistantUsage>>;
+}
+
+function messageTimestamp(message: AgentMessage): number | undefined {
+  const value = (message as MessageRecord).timestamp;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return undefined;
+  const numeric = Number(trimmed);
+  if (Number.isFinite(numeric)) return numeric;
+  const parsed = Date.parse(trimmed);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function latestProviderUsageSource(messages: AgentMessage[]): ProviderUsageSource | undefined {
+  let hasCompactionBoundary = false;
+  let compactionTimestamp: number | undefined;
+  for (const message of messages) {
+    if ((message as MessageRecord).role !== "compactionSummary") continue;
+    hasCompactionBoundary = true;
+    const timestamp = messageTimestamp(message);
+    if (timestamp !== undefined && (compactionTimestamp === undefined || timestamp > compactionTimestamp)) {
+      compactionTimestamp = timestamp;
+    }
+  }
+
   for (let index = messages.length - 1; index >= 0; index--) {
     const message = messages[index];
     const usage = assistantUsage(message);
     if (!usage) continue;
-    const record = message as MessageRecord & { timestamp?: unknown };
-    const usageKey = JSON.stringify(usage);
-    const timestamp = record.timestamp;
-    const epoch = (typeof timestamp === "number" || (typeof timestamp === "string" && timestamp.length > 0))
-      ? `timestamp:${String(timestamp)}:${usageKey}`
-      : `message:${createHash("sha256").update(JSON.stringify({
-        content: record.content,
-        stopReason: record.stopReason,
-        usage,
-      })).digest("hex")}`;
-    return epoch;
+    if (hasCompactionBoundary) {
+      const timestamp = messageTimestamp(message);
+      if (compactionTimestamp === undefined || timestamp === undefined || timestamp <= compactionTimestamp) continue;
+    }
+    return { index, message, usage };
   }
   return undefined;
+}
+
+export function latestProviderUsageEpoch(messages: AgentMessage[]): string | undefined {
+  const source = latestProviderUsageSource(messages);
+  if (!source) return undefined;
+  const record = source.message as MessageRecord;
+  const usageKey = JSON.stringify(source.usage);
+  const timestamp = record.timestamp;
+  return (typeof timestamp === "number" || (typeof timestamp === "string" && timestamp.length > 0))
+    ? `timestamp:${String(timestamp)}:${usageKey}`
+    : `message:${createHash("sha256").update(JSON.stringify({
+      content: record.content,
+      stopReason: record.stopReason,
+      usage: source.usage,
+    })).digest("hex")}`;
 }
 
 function finiteNumber(value: unknown): number | undefined {
