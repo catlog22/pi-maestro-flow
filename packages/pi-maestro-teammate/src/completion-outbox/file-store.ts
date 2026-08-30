@@ -82,7 +82,10 @@ const TRY_GC_MARKER_MIN_INTERVAL_MS = 30_000;
 const GC_MARKER_NAME = ".gc-marker";
 const GC_INDEX_DIR = ".gc-index";
 const GC_INDEX_STATE_NAME = "state.json";
-const GC_PAGE_SIZE = 128;
+const GC_INDEX_LATEST_DIR = "latest";
+const GC_INDEX_SEGMENT_SIZE = 128;
+const GC_SCAN_MAX_ENTRIES = 4_096;
+const GC_LOCK_BUDGET_MS = 500;
 const REPLACE_ERRORS = new Set(["EPERM", "EACCES", "EEXIST"]);
 const ORDERED_REPLACEMENT_PATTERN = /^(.+)\.replace-(\d{20})-([A-Za-z0-9-]+)\.(new|committed|bak)$/;
 const LEGACY_REPLACEMENT_PATTERN = /^(.+)\.replace-([A-Za-z0-9-]+)\.(new|committed|bak)$/;
@@ -135,6 +138,11 @@ async function overwriteWorkspaceLockRecord(handle: FileHandle, record: Workspac
 interface GcIndexEntry {
   path: string;
   kind: "record" | "reservation";
+}
+
+interface GcIndexLatest extends GcIndexEntry {
+  version: 1;
+  sequence: number;
 }
 
 interface GcIndexState {
@@ -1556,6 +1564,24 @@ export class CompletionOutboxFileStore {
     );
   }
 
+  #gcIndexLatestPath(workspaceId: string, entry: GcIndexEntry): string {
+    return join(
+      this.#workspaceDir(workspaceId),
+      GC_INDEX_DIR,
+      GC_INDEX_LATEST_DIR,
+      `${hashPath(`${entry.kind}\0${entry.path}`)}.json`,
+    );
+  }
+
+  async #readGcIndexLatest(workspaceId: string, entry: GcIndexEntry): Promise<GcIndexLatest | undefined> {
+    const raw = await readSafeJson(this.#gcIndexLatestPath(workspaceId, entry), 1_024);
+    if (!raw || typeof raw !== "object") return undefined;
+    const latest = raw as Partial<GcIndexLatest>;
+    if (latest.version !== 1 || latest.path !== entry.path || latest.kind !== entry.kind
+      || !Number.isSafeInteger(latest.sequence) || latest.sequence! < 0) return undefined;
+    return latest as GcIndexLatest;
+  }
+
   async #readGcIndexState(workspaceId: string): Promise<GcIndexState> {
     const raw = await readSafeJson(this.#gcIndexStatePath(workspaceId), 512);
     if (!raw || typeof raw !== "object") return { version: 1, head: 0, tail: 0 };
@@ -1576,7 +1602,7 @@ export class CompletionOutboxFileStore {
   }
 
   async #readGcIndexSegment(workspaceId: string, segmentNumber: number): Promise<GcIndexSegment> {
-    const base = segmentNumber * GC_PAGE_SIZE;
+    const base = segmentNumber * GC_INDEX_SEGMENT_SIZE;
     const raw = await readSafeJson(
       this.#gcIndexSegmentPath(workspaceId, segmentNumber),
       COMPLETION_OUTBOX_MAX_RECORD_BYTES,
@@ -1584,7 +1610,7 @@ export class CompletionOutboxFileStore {
     if (!raw || typeof raw !== "object") return { version: 1, base, entries: [] };
     const segment = raw as Partial<GcIndexSegment>;
     if (segment.version !== 1 || segment.base !== base || !Array.isArray(segment.entries)
-      || segment.entries.length > GC_PAGE_SIZE) {
+      || segment.entries.length > GC_INDEX_SEGMENT_SIZE) {
       // A single corrupt segment poisons the sweep cursor. Drop just that file
       // (entries there are stale at worst) and let the empty slot be skipped.
       await this.#resetGcIndexSegment(workspaceId, segmentNumber, "segment");
@@ -1616,23 +1642,30 @@ export class CompletionOutboxFileStore {
     workspaceId: string,
     entry: GcIndexEntry,
     lease: WorkspaceLockLease,
-  ): Promise<void> {
+    replaceSequence?: number,
+  ): Promise<number> {
     const workspaceDir = this.#workspaceDir(workspaceId);
     const entryPath = resolve(workspaceDir, entry.path);
     const contained = relative(workspaceDir, entryPath);
     if (!contained || contained.startsWith("..") || resolve(entryPath) !== entryPath) {
       throw new Error(`Completion GC index path escapes workspace ${workspaceId}.`);
     }
+    const canonicalEntry = { path: contained, kind: entry.kind } satisfies GcIndexEntry;
     const state = await this.#readGcIndexState(workspaceId);
+    const latest = await this.#readGcIndexLatest(workspaceId, canonicalEntry);
+    const latestActive = Boolean(latest && latest.sequence >= state.head && latest.sequence < state.tail);
+    if (latestActive && (replaceSequence === undefined || latest!.sequence !== replaceSequence)) {
+      return latest!.sequence;
+    }
     if (state.tail >= Number.MAX_SAFE_INTEGER - 1) {
       throw new Error(`Completion GC index exhausted for workspace ${workspaceId}.`);
     }
     const sequence = state.tail;
-    const segmentNumber = Math.floor(sequence / GC_PAGE_SIZE);
-    const slot = sequence % GC_PAGE_SIZE;
+    const segmentNumber = Math.floor(sequence / GC_INDEX_SEGMENT_SIZE);
+    const slot = sequence % GC_INDEX_SEGMENT_SIZE;
     const segment = await this.#readGcIndexSegment(workspaceId, segmentNumber);
     while (segment.entries.length <= slot) segment.entries.push(null);
-    segment.entries[slot] = { path: contained, kind: entry.kind };
+    segment.entries[slot] = canonicalEntry;
     await writeJsonAtomic(
       this.#gcIndexSegmentPath(workspaceId, segmentNumber),
       segment,
@@ -1645,6 +1678,16 @@ export class CompletionOutboxFileStore {
       512,
       lease,
     );
+    // The marker is committed after the segment and tail. A crash before this
+    // write leaves a legacy entry that the next sweep can adopt; it never makes
+    // a canonical record unreachable from GC.
+    await writeJsonAtomic(
+      this.#gcIndexLatestPath(workspaceId, canonicalEntry),
+      { version: 1, sequence, ...canonicalEntry } satisfies GcIndexLatest,
+      1_024,
+      lease,
+    );
+    return sequence;
   }
 
   async #writeTrackedJson(
@@ -1769,6 +1812,7 @@ export class CompletionOutboxFileStore {
   }
 
   async #gcLocked(workspaceId: string, lease: WorkspaceLockLease): Promise<CompletionOutboxGcResult> {
+    const startedAt = Date.now();
     const now = this.#now();
     const result: CompletionOutboxGcResult = { expired: 0, removed: 0, releasedReservations: 0 };
     let state = await this.#readGcIndexState(workspaceId);
@@ -1782,16 +1826,39 @@ export class CompletionOutboxFileStore {
       state = { ...state, sweepEnd };
       await writeJsonAtomic(this.#gcIndexStatePath(workspaceId), state, 512, lease);
     }
-    const pageEnd = Math.min(state.head + GC_PAGE_SIZE, sweepEnd);
-    for (let sequence = state.head; sequence < pageEnd; sequence += 1) {
+    const scanEnd = Math.min(state.head + GC_SCAN_MAX_ENTRIES, sweepEnd);
+    const segments = new Map<number, GcIndexSegment>();
+    const latestByEntry = new Map<string, GcIndexLatest | undefined>();
+    let knownTail = state.tail;
+    let pageEnd = state.head;
+    for (let sequence = state.head; sequence < scanEnd; sequence += 1) {
+      if (sequence > state.head && Date.now() - startedAt >= GC_LOCK_BUDGET_MS) break;
       await lease.assertOwned();
-      const segmentNumber = Math.floor(sequence / GC_PAGE_SIZE);
-      const segment = await this.#readGcIndexSegment(workspaceId, segmentNumber);
+      pageEnd = sequence + 1;
+      const segmentNumber = Math.floor(sequence / GC_INDEX_SEGMENT_SIZE);
+      let segment = segments.get(segmentNumber);
+      if (!segment) {
+        segment = await this.#readGcIndexSegment(workspaceId, segmentNumber);
+        segments.set(segmentNumber, segment);
+      }
       const entry = segment.entries[sequence - segment.base];
-      if (!entry || (entry.kind !== "record" && entry.kind !== "reservation")) continue;
+      if (!entry || typeof entry.path !== "string"
+        || (entry.kind !== "record" && entry.kind !== "reservation")) continue;
       const candidatePath = resolve(this.#workspaceDir(workspaceId), entry.path);
       const contained = relative(this.#workspaceDir(workspaceId), candidatePath);
       if (!contained || contained.startsWith("..")) continue;
+      const canonicalEntry = { path: contained, kind: entry.kind } satisfies GcIndexEntry;
+      const entryKey = `${entry.kind}\0${contained}`;
+      let latest = latestByEntry.get(entryKey);
+      if (!latestByEntry.has(entryKey)) {
+        latest = await this.#readGcIndexLatest(workspaceId, canonicalEntry);
+        latestByEntry.set(entryKey, latest);
+      }
+      const latestActive = Boolean(latest && latest.sequence >= state.head && latest.sequence < knownTail);
+      // Once one legacy duplicate is adopted, every other historical entry for
+      // the same canonical path is stale and can be consumed without re-appending.
+      if (latestActive && latest!.sequence !== sequence) continue;
+
       const raw = await readSafeJsonExactRecovery(candidatePath);
       let retain = false;
       if (entry.kind === "record") {
@@ -1828,7 +1895,11 @@ export class CompletionOutboxFileStore {
           retain = true;
         }
       }
-      if (retain) await this.#appendGcIndex(workspaceId, { path: contained, kind: entry.kind }, lease);
+      if (retain) {
+        const nextSequence = await this.#appendGcIndex(workspaceId, canonicalEntry, lease, sequence);
+        knownTail = Math.max(knownTail, nextSequence + 1);
+        latestByEntry.set(entryKey, { version: 1, sequence: nextSequence, ...canonicalEntry });
+      }
     }
 
     // Preserve appends performed while processing this page, then advance the
@@ -1844,9 +1915,9 @@ export class CompletionOutboxFileStore {
     if (next.head >= next.tail) next = { version: 1, head: 0, tail: 0 };
     await writeJsonAtomic(this.#gcIndexStatePath(workspaceId), next, 512, lease);
     const firstRetainedSegment = next.head === 0
-      ? Math.ceil(pageEnd / GC_PAGE_SIZE)
-      : Math.floor(next.head / GC_PAGE_SIZE);
-    for (let segment = Math.floor(state.head / GC_PAGE_SIZE); segment < firstRetainedSegment; segment += 1) {
+      ? Math.ceil(pageEnd / GC_INDEX_SEGMENT_SIZE)
+      : Math.floor(next.head / GC_INDEX_SEGMENT_SIZE);
+    for (let segment = Math.floor(state.head / GC_INDEX_SEGMENT_SIZE); segment < firstRetainedSegment; segment += 1) {
       await removeDurable(this.#gcIndexSegmentPath(workspaceId, segment), lease);
     }
     if (!completedSweep) result.hasMore = true;

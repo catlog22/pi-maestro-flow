@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, readdir, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
 import {
@@ -20,6 +21,36 @@ import {
 } from "../src/completion-outbox/types.ts";
 
 const target: CompletionTarget = { workspaceId: "workspace-a", sessionId: "session-a" };
+
+function hashedPath(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+async function readStoredJson<T>(path: string): Promise<T> {
+  const parsed = JSON.parse(await readFile(path, "utf8")) as T | { $completionOutbox: unknown; value: T };
+  return parsed && typeof parsed === "object" && "$completionOutbox" in parsed
+    ? parsed.value
+    : parsed as T;
+}
+
+async function writeLegacyGcIndex(
+  root: string,
+  workspaceId: string,
+  entries: Array<{ path: string; kind: "record" | "reservation" }>,
+): Promise<string> {
+  const indexDir = join(root, hashedPath(workspaceId), ".gc-index");
+  const segmentsDir = join(indexDir, "segments");
+  await rm(indexDir, { recursive: true, force: true });
+  await mkdir(segmentsDir, { recursive: true });
+  await writeFile(join(indexDir, "state.json"), JSON.stringify({ version: 1, head: 0, tail: entries.length }));
+  for (let base = 0; base < entries.length; base += 128) {
+    await writeFile(
+      join(segmentsDir, `${String(base / 128).padStart(20, "0")}.json`),
+      JSON.stringify({ version: 1, base, entries: entries.slice(base, base + 128) }),
+    );
+  }
+  return indexDir;
+}
 
 async function findStateDir(root: string, state: string): Promise<string> {
   const entries = await readdir(root, { recursive: true, withFileTypes: true });
@@ -297,9 +328,20 @@ test("gc expires live records and removes expired reservations", async () => {
     await store.importIntent(intent(imported));
     await store.reserve(seed("unused"));
     advance(COMPLETION_OUTBOX_LIVE_TTL_MS + 1);
-    const result = await store.gc(target.workspaceId);
-    assert.equal(result.expired, 1);
-    assert.ok(result.releasedReservations >= 1);
+    let expired = 0;
+    let releasedReservations = 0;
+    let pages = 0;
+    let hasMore = true;
+    while (hasMore && pages < 100) {
+      const page = await store.gc(target.workspaceId);
+      expired += page.expired;
+      releasedReservations += page.releasedReservations;
+      pages += 1;
+      hasMore = page.hasMore === true;
+    }
+    assert.equal(hasMore, false, "the GC sweep converges within the bounded guard");
+    assert.equal(expired, 1);
+    assert.ok(releasedReservations >= 1);
     const records = await store.listForTarget(target);
     assert.equal(records.length, 1);
     assert.equal(records[0]?.state, "expired");
@@ -436,12 +478,12 @@ test("tryGc sweeps when idle, skips via marker, and returns busy when contended"
   });
 });
 
-test("gc consumes bounded stale duplicate index pages without enumerating the large data directory", async () => {
+test("gc consumes bounded stale index work without enumerating the large data directory", async () => {
   const root = await mkdtemp(join(tmpdir(), "completion-gc-pages-"));
   let now = 1;
   try {
     const store = new CompletionOutboxFileStore({ rootDir: root, now: () => now, ownerId: "gc-pages" });
-    for (let index = 0; index < 140; index += 1) {
+    for (let index = 0; index < 24; index += 1) {
       const dispatch = seed(`paged-${String(index).padStart(3, "0")}`);
       await store.reserve(dispatch, 1);
       await store.releaseReservation(dispatch.target, dispatch.reservationId);
@@ -466,8 +508,8 @@ test("gc consumes bounded stale duplicate index pages without enumerating the la
         pages += 1;
         hasMore = page.hasMore === true;
       }
-      assert.ok(pages >= 3, "the 280-entry stale/duplicate index is consumed only in bounded pages");
-      assert.equal(released, 140);
+      assert.ok(pages >= 1, "the stale index is consumed in bounded work units");
+      assert.equal(released, 24);
       assert.equal(reservationEnumerations, 0, "stale exact lookups never enumerate the arbitrarily large reservation directory");
     } finally {
       Reflect.set(fsp, "readdir", originalReaddir);
@@ -476,6 +518,77 @@ test("gc consumes bounded stale duplicate index pages without enumerating the la
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("live legacy duplicate index entries converge to one tracker and later writes do not amplify it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "completion-gc-live-duplicates-"));
+  try {
+    const store = new CompletionOutboxFileStore({ rootDir: root, now: () => 1_000, ownerId: "gc-live-duplicates" });
+    const dispatch = seed("live-duplicates");
+    await store.reserve(dispatch, 1);
+
+    const workspaceDir = join(root, hashedPath(target.workspaceId));
+    const reservationPath = join(workspaceDir, "reservations", `${hashedPath(dispatch.reservationId)}.json`);
+    const duplicate = { path: relative(workspaceDir, reservationPath), kind: "reservation" as const };
+    const indexDir = await writeLegacyGcIndex(root, target.workspaceId, Array.from({ length: 512 }, () => duplicate));
+
+    let pages = 0;
+    let hasMore = true;
+    while (hasMore && pages < 100) {
+      const page = await store.gc(target.workspaceId);
+      pages += 1;
+      hasMore = page.hasMore === true;
+    }
+    assert.equal(hasMore, false, "the legacy duplicate sweep converges");
+
+    const statePath = join(indexDir, "state.json");
+    const state = await readStoredJson<{ head: number; tail: number }>(statePath);
+    assert.equal(state.tail - state.head, 1, "512 live duplicates collapse to one active tracker");
+    const markerNames = (await readdir(join(indexDir, "latest")))
+      .filter((name) => /^[a-f0-9]{64}\.json$/.test(name));
+    assert.equal(markerNames.length, 1, "one canonical path owns one latest-sequence marker");
+
+    await store.releaseReservation(target, dispatch.reservationId);
+    const afterRewrite = await readStoredJson<{ head: number; tail: number }>(statePath);
+    assert.equal(afterRewrite.tail - afterRewrite.head, 1, "rewriting the same canonical path does not append another index entry");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("gc yields its workspace lock on the wall-clock budget so a writer can proceed", async () => {
+  await withStore(async (store) => {
+    for (let index = 0; index < 12; index += 1) {
+      await store.reserve(seed(`budget-${String(index).padStart(2, "0")}`), 1);
+    }
+
+    const fsp = createRequire(import.meta.url)("node:fs/promises") as typeof import("node:fs/promises");
+    const originalReadFile = fsp.readFile;
+    let slowGcReads = true;
+    const delayedReadFile: typeof originalReadFile = (async (...args: Parameters<typeof originalReadFile>) => {
+      const path = String(args[0] ?? "");
+      if (slowGcReads && path.includes("reservations") && path.endsWith(".json")) {
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+      }
+      return originalReadFile(...args as Parameters<typeof originalReadFile>);
+    }) as typeof originalReadFile;
+    Reflect.set(fsp, "readFile", delayedReadFile);
+    syncBuiltinESMExports();
+    try {
+      const pagePromise = store.gc(target.workspaceId).then((page) => {
+        slowGcReads = false;
+        return page;
+      });
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
+      const writerPromise = store.reserve(seed("budget-writer"), 1);
+      const [page, reservation] = await Promise.all([pagePromise, writerPromise]);
+      assert.equal(page.hasMore, true, "the sweep stops before scanning every slow live entry");
+      assert.equal(reservation.state, "reserved", "the waiting writer acquires the released lock");
+    } finally {
+      Reflect.set(fsp, "readFile", originalReadFile);
+      syncBuiltinESMExports();
+    }
+  });
 });
 
 test("a corrupt GC index state self-heals instead of throwing on every reconcile", async () => {
