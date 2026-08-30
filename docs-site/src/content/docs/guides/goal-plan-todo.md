@@ -87,7 +87,7 @@ plan-decompose({ planHandoffKey: "<approved-handoff-key>" })
 
 ## 3. todo — 任务管理
 
-7 个操作，支持纯文本上下文和可选的 Pi Skill 执行。
+8 个操作，支持纯文本上下文和可选的 Pi Skill 执行。
 
 ```javascript
 // 创建任务
@@ -100,25 +100,34 @@ todo({
   skills: [{ name: "quality-review", role: "primary", args: "--level deep" }]
 })
 
-// 更新状态
+// 首次激活调用者自己的下一个可运行任务
+todo({ action: "advance" })
+
+// 当前任务完成后立即完成并推进调用者自己的下一任务
+todo({ action: "advance", id: "abc123", summary: "已完成认证模块" })
+
+// 只完成当前任务，不激活下一项
 todo({ action: "update", id: "abc123", status: "completed", summary: "已完成认证模块" })
 
 // 列出任务
 todo({ action: "list", filter: { status: "pending" } })
 
-// 激活下一个待办任务，返回解析后的上下文
+// 兼容入口：仅激活下一个待办任务
 todo({ action: "next" })
 ```
 
 | 操作 | 说明 |
 |------|------|
 | `create` | 创建任务（subject 必填；支持 batch 一次性铺开整个计划） |
-| `update` | 更新状态/摘要/上下文/技能 |
+| `update` | 更新状态/摘要/上下文/技能；可只完成而不继续 |
+| `advance` | 无活动任务时激活下一项；有活动任务时完成当前项并推进下一项 |
 | `list` | 按状态/成员过滤列出 |
 | `get` | 获取单个任务详情 |
 | `delete` | 删除任务 |
 | `clear` | 清除所有任务 |
-| `next` | 激活下一个可运行任务，返回解析后的上下文 |
+| `next` | 兼容操作：只激活下一个可运行任务，返回解析后的上下文 |
+
+`advance` 按调用 actor 隔离：它只能完成或激活分配给调用者的任务，但完成仍会全局解除跨角色依赖。一个逻辑目标需要多个角色时，使用一个父任务和多个分别分配的角色子任务，不让多个角色共同写一个 Todo 的终态。Canonical Workflow Session/Run 的镜像 Todo 仍由 Run lifecycle 驱动。
 
 ### 批量创建（DAG 依赖）
 
@@ -137,7 +146,7 @@ todo({
 
 ### 绑定给 Teammate 执行（v0.16.0+）
 
-todo 任务可通过 `tasks[].todo` 绑定给被派发的 Agent（`teammate` 工具）：Agent 接管归属并自动激活首个可运行任务，完成后自动推进队列（详见 [并行多智能体调度](/guides/teammate-dispatch)）。
+todo 任务可通过 `tasks[].todo` 绑定给被派发的 Agent（`teammate` 工具）：Agent 接管归属并自动激活首个可运行任务；每项完成时由该 Agent 立即调用 actor-scoped `advance` 推进自己的队列（详见 [并行多智能体调度](/guides/teammate-dispatch)）。
 
 ## 4. run-control — Maestro CLI 透传壳
 

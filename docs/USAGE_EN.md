@@ -277,7 +277,7 @@ While a Goal exists, a `goal-panel` renders above the input editor showing:
 
 ### 2.4 todo — Task Management
 
-7 actions with plain-text context and optional Pi Skill execution:
+8 actions with plain-text context and optional Pi Skill execution:
 
 ```javascript
 // Create task
@@ -290,13 +290,19 @@ todo({
   skills: [{ name: "quality-review", role: "primary", args: "--level deep" }]
 })
 
-// Update status
+// Activate the caller's first runnable task
+todo({ action: "advance" })
+
+// Complete the active task immediately and activate the caller's next task
+todo({ action: "advance", id: "abc123", summary: "Auth module done" })
+
+// Complete without activating another task
 todo({ action: "update", id: "abc123", status: "completed", summary: "Auth module done" })
 
 // List tasks
 todo({ action: "list", filter: { status: "pending" } })
 
-// Activate next pending task
+// Compatibility entry point: activate only
 todo({ action: "next" })
 
 // Assign to teammate
@@ -306,12 +312,15 @@ todo({ action: "create", subject: "Explore codebase", assignee: "explorer-1" })
 | Action | Description |
 |--------|-------------|
 | `create` | Create task (subject required) |
-| `update` | Update status/summary/context/skills |
+| `update` | Update status/summary/context/skills; may complete without continuing |
+| `advance` | Activate when idle, or complete the active task and promote the caller's next task |
 | `list` | List filtered by status/member |
 | `get` | Get single task details |
 | `delete` | Delete task |
 | `clear` | Clear all tasks |
-| `next` | Activate next pending task, return resolved context |
+| `next` | Compatibility action: activate the next pending task and return resolved context |
+
+`advance` is actor-scoped: it only completes or activates tasks assigned to the caller, while completion still releases cross-role dependencies globally. When one logical outcome needs several roles, use a parent task with singly owned role-specific child tasks instead of shared terminal ownership of one Todo. Canonical Workflow Session/Run mirror Todos remain lifecycle projections and continue to be driven through Run control.
 
 ---
 

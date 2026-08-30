@@ -48,7 +48,7 @@ The companion plugins are dependencies and **auto-register on postinstall** — 
 |----------|-------|-------------|
 | **Maestro tool** | 1 | `maestro` (explore / delegate / moa) |
 | **Goal tool** | 1 | `goal` (`get` / `create` / `update` / `complete`; user-owned lifecycle commands) |
-| **Todo tool** | 1 | `todo` (create / update / list / get / delete / clear / next) |
+| **Todo tool** | 1 | `todo` (create / update / list / get / delete / clear / next / advance) |
 | **Run control** | 1 | `run-control` (`session status`; `run brief/check/next/complete`; `session chain insert/update`) |
 | **Shell tool** | 1 | `bash_bg` (adaptive foreground/background execution) |
 | **Intelligence tools** | 5 | `lsp`, `browser`, `search_tool_bm25`, `smart_search`, `source_check` |
@@ -110,9 +110,8 @@ After installation:
 > **macOS:** Alt shortcuts match on the `alt` token everywhere; the UI shows them as `Option+X`. Terminal.app, iTerm2, and the VS Code integrated terminal need Option configured as Meta/Esc+ (or `terminal.integrated.macOptionIsMeta`) before they deliver `alt+X`; Kitty/WezTerm/Ghostty work out of the box. Slash commands are always available as fallbacks, and pi prints a one-time setup hint on affected terminals.
 | `/mcp` | MCP server management |
 | `/mcp auth` | MCP OAuth authentication flow |
-| `/api-manager` | API provider configuration (models, retry settings) |
+| `/api-manager` | API provider configuration (models, retry settings, model thinking defaults) |
 | `/vision` | Vision delegation settings (model, fallbacks, cache, retries, timeout) |
-| `/effort` | Thinking effort level |
 | `/model-failover` | Model failover routing configuration; `/model-failover status` shows circuit breaker health |
 | `/smart-search` | Smart Search provider configuration |
 | `/websearch`, `/curator` | Native web search and content curator |
@@ -445,6 +444,16 @@ write a competing session-local Todo state. Each task records both `createdBy` a
 `assignee`. Root can manage every task, while a teammate can update tasks it created or
 was assigned, hand work back to root, and keep one assigned task `in_progress` at a
 time. Different assignees may work concurrently, and dependencies can cross members.
+
+Todo is live execution state. Call `todo({ action: "advance" })` to activate the
+caller's first runnable task. When that task finishes, call
+`todo({ action: "advance", id, summary })` immediately to complete it and activate the
+caller's next runnable task. Use `update` with `status: "completed"` when completion
+must not start another task; `next` remains the activation-only compatibility action.
+`advance` never completes or activates another assignee's task. For one logical outcome
+that needs several roles, create one parent task plus one singly owned child task per
+role instead of sharing terminal ownership of one item. Canonical Workflow Session/Run
+mirror Todos remain lifecycle projections and continue to advance through Run control.
 
 Press `Alt+T` or run `/maestro-todo` to open the shared Todo Center. Use Left/Right to
 switch between All, root, and individual teammate scopes; Up/Down selects a task;

@@ -277,7 +277,7 @@ Goal 存在时，输入编辑器上方渲染 `goal-panel`，显示：
 
 ### 2.4 todo — 任务管理
 
-7 个操作，支持纯文本上下文和可选的 Pi Skill 执行：
+8 个操作，支持纯文本上下文和可选的 Pi Skill 执行：
 
 ```javascript
 // 创建任务
@@ -290,13 +290,19 @@ todo({
   skills: [{ name: "quality-review", role: "primary", args: "--level deep" }]
 })
 
-// 更新状态
+// 首次激活调用者自己的下一个可运行任务
+todo({ action: "advance" })
+
+// 当前任务完成后立即完成并推进调用者自己的下一任务
+todo({ action: "advance", id: "abc123", summary: "已完成认证模块" })
+
+// 只完成当前任务，不激活下一项
 todo({ action: "update", id: "abc123", status: "completed", summary: "已完成认证模块" })
 
 // 列出任务
 todo({ action: "list", filter: { status: "pending" } })
 
-// 激活下一个待办任务
+// 兼容入口：仅激活下一个待办任务
 todo({ action: "next" })
 
 // 分配给 teammate
@@ -306,12 +312,15 @@ todo({ action: "create", subject: "探索代码库", assignee: "explorer-1" })
 | 操作 | 说明 |
 |------|------|
 | `create` | 创建任务（subject 必填） |
-| `update` | 更新状态/摘要/上下文/技能 |
+| `update` | 更新状态/摘要/上下文/技能；可只完成而不继续 |
+| `advance` | 无活动任务时激活下一项；有活动任务时完成当前项并推进下一项 |
 | `list` | 按状态/成员过滤列出 |
 | `get` | 获取单个任务详情 |
 | `delete` | 删除任务 |
 | `clear` | 清除所有任务 |
-| `next` | 激活下一个待办任务，返回解析后的上下文 |
+| `next` | 兼容操作：只激活下一个待办任务，返回解析后的上下文 |
+
+`advance` 按调用 actor 隔离：它只能完成或激活分配给调用者的任务，但任务完成仍会全局解除跨角色依赖。一个逻辑目标需要多个角色时，应创建一个父任务和多个分别分配的角色子任务，不让多个角色共同写同一 Todo 的终态。Canonical Workflow Session/Run 的镜像 Todo 仍由 Run lifecycle 驱动，不使用普通 `advance` 代替 Run 控制。
 
 ---
 

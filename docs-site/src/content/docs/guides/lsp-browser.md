@@ -3,7 +3,7 @@ title: "LSP 语言服务器与浏览器控制"
 icon: "🌐"
 ---
 
-**LSP** 提供语言服务器代码智能（诊断、定义、引用、重构）；**browser** 通过 CDP 控制 Chromium。
+**LSP** 提供语言服务器代码智能（诊断、定义、引用、重构）；**browser** 通过 managed/profile/CDP 或显式 extension 通道控制 Chromium。
 
 ---
 
@@ -35,143 +35,163 @@ lsp({ action: "diagnostics", file: "src/auth/login.ts" })
 lsp({ action: "definition", file: "src/auth/login.ts", line: 42, symbol: "validateToken" })
 lsp({ action: "references", file: "src/auth/login.ts", line: 42, symbol: "validateToken" })
 lsp({ action: "rename", file: "src/auth/login.ts", line: 42, symbol: "validateToken", new_name: "verifyToken", apply: true })
-lsp({ action: "symbols", file: "*" })  // 工作区符号
+lsp({ action: "symbols", file: "*" })
 ```
 
-### 自动诊断
+插件注册了 **LSP 自动诊断**：文件编辑后自动触发诊断检查。
 
-插件注册了 **LSP 自动诊断**：文件编辑后自动触发诊断检查，及时暴露类型与语法错误。
+## 2. browser — 通道、可见性、所有权与能力
 
-## 2. browser — 浏览器控制
+browser 支持命名标签页、截图和页面内 JavaScript。四个概念不要混用：
 
-通过 CDP 控制 Chromium，支持命名标签页、截图和页面内 JavaScript 执行：
+- **channel**：`managed | profile | cdp | extension`
+- **visible**：Pi 启动的浏览器进程是否可见；默认 managed 为 headless
+- **ownership**：`owned | borrowed`；决定 close 是否关闭真实资源
+- **capabilities**：当前命名 tab 真实支持的 API
+
+默认没有变化：省略 channel/CDP/profile 选择器时使用 `managed` headless。扩展永远不会自动接管；断连也不会 silent fallback。
 
 | Action | 说明 |
 |--------|------|
-| `open` | 打开/附加浏览器标签页 |
-| `close` | 关闭标签页（`all: true` 关闭全部） |
-| `run` | 在页面中执行 JavaScript |
-| `guide` | 返回工具内置浏览器 SOP（Turnstile 配方、CDP 坐标陷阱、跨域 iframe、文件上传、attach 配置） |
+| `open` | 打开或附加命名标签页 |
+| `close` | 关闭/释放标签页（`all:true` 处理全部命名 entry） |
+| `run` | 在命名 tab 上执行 host JavaScript |
+| `guide` | 返回 browser SOP registry/index 或指定 topic |
+| `status` | 显式启动/探测 bridge，返回 live 连接和命名 tab 元数据 |
 
-### 选择模式：抓取 vs 登录/验证
+### Canonical channel
 
-| 场景 | 推荐模式 | 说明 |
-|------|----------|------|
-| 纯抓取（无登录/验证码） | `visible: false`（默认 headless） | 自动化指纹轻、速度快 |
-| 需登录态 / CAPTCHA / 真实指纹 | `visible: true` + `app.attach_user_profile` | 接管用户日常浏览器，保留登录态与指纹 |
+| channel | 选择方式 | ownership | 能力 |
+|---------|----------|-----------|------|
+| `managed` | 默认，或 `app.channel:"managed"` | `owned` | 完整 Puppeteer page/browser + tab helper |
+| `profile` | `app.channel:"profile"` + `app.user_profile_dir`；旧 `attach_user_profile` 兼容 | `borrowed` | 完整 Puppeteer/CDP helper，复用用户 profile |
+| `cdp` | `app.channel:"cdp"` + `app.cdp_url` | `borrowed` | 完整 Puppeteer/CDP helper，附加已有端点 |
+| `extension` | 必须显式 `app.channel:"extension"` | 绑定已有 tab 为 `borrowed`；按 url 创建为 `owned` | 有限 adapter，见下文 |
 
-> **重要**：纯 stealth 补丁不足以通过 Cloudflare managed challenge / Turnstile。遇到验证码场景务必使用 attach 模式接管真实浏览器。
+新旧 selector 冲突会 fail closed。例如 `channel:"managed"` 不能同时传 `cdp_url`。
 
-### attach 模式：接管用户已开浏览器
+### managed 与 profile
 
-attach 模式连接用户日常浏览器（已保留登录态、cookie、扩展、指纹），pi 不启动新实例、不复制 profile。
-
-**步骤**：
-
-1. 以调试端口启动 Chrome（需先完全退出当前 Chrome）：
-
-   ```bash
-   # Windows
-   chrome --remote-debugging-port=9222 --user-data-dir="C:/Users/<you>/AppData/Local/Google/Chrome/User Data"
-   # macOS
-   /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222 --user-data-dir="$HOME/Library/Application Support/Google/Chrome"
-   # Linux
-   google-chrome --remote-debugging-port=9222 --user-data-dir="$HOME/.config/google-chrome"
-   ```
-
-2. 在 pi 中 attach：
-
-   ```javascript
-   browser({
-     action: "open",
-     url: "https://example.com",
-     visible: true,
-     app: {
-       attach_user_profile: true,
-       user_profile_dir: "C:/Users/<you>/AppData/Local/Google/Chrome/User Data",
-     },
-   })
-   ```
-
-若探测不到调试端口，open 会报错并附带启动命令提示。pi 不会自动启动或复制用户 profile。
-
-### 浏览器扩展桥（Browser Bridge）—— 可选真实浏览器接管
-
-扩展桥安装一个 Chrome MV3 扩展，经 WebSocket 接管你日常的 Chrome（保留登录态、CAPTCHA 能力、真实指纹，以及 puppeteer CDP 路线无法触达的扩展级能力：partition cookies、`chrome.debugger`、`chrome.management`、contentSettings、CSP 头剥离）。它是**可选**的——未安装时 `browser` 工具自动回退既有 CDP attach/launch 路径，行为不变，不破坏任何现有功能。
-
-**安装**：`/install` 运行 `browser-bridge` 项，按引导在 `chrome://extensions` 开启开发者模式并加载 `optional/browser-bridge/` 目录（扩展随包发布）。安装后页面右下角徽章显示 `pi-bridge: 已连接` 或 `重连中`。
-
-**端口**：默认 `19222`；端口被占用或需自定义时，在扩展弹窗里改端口并在 pi 侧设置 `PI_BROWSER_BRIDGE_PORT` 匹配。
-
-> ⚠️ **安全提示**：扩展安装后默认剥离**所有站点**的 CSP 响应头（`declarativeNetRequest` 规则），以便在页面 MAIN 世界执行 agent 注入脚本。这是扩展通道的核心能力，但也意味着你浏览的所有页面的 CSP 防护被关闭。需要时用扩展 `dnr` 命令 `disable` 关闭。详见包内 `optional/BROWSER-BRIDGE-SETUP.md`。
-
-### run code 中的高级能力
-
-run code 接收 `page`（puppeteer Page）、`browser`（puppeteer Browser）和 `tab`（高层 helper）。除 `tab.observe/click/extract/screenshot` 等基础能力外：
-
-| 能力 | 入口 | 说明 |
-|------|------|------|
-| 原生 CDP domain 调用 | `await tab.cdp(method, params)` | 直接调用任意 CDP method，如 `Page.captureScreenshot`、`Network.getCookies`、`DOM.setFileInputFiles`；返回原始 JSON |
-| 会话级 Cookie 读写 | `tab.cookies.get/set/delete` | 管理任意域 cookie；attach 模式下可直接复用用户登录态 |
-| 文件上传 | `await tab.uploadFile(selector, ...paths)` | 向 `<input type=file>` 上传本地文件（路径相对 cwd） |
-| 跨域 iframe 执行 JS | `await tab.evalInFrame(matcher, fn, ...args)` | matcher 为 url 子串/正则/谓词；puppeteer frames 持有跨域执行上下文 |
-| closed Shadow DOM 穿透 | `await tab.pierce(selector)` → `{x,y}` | puppeteer `pierce/<sel>` 引擎穿透 **open** shadow；closed shadow 是 Chrome 限制，需 CDP `DOM.getDocument({pierce:true})` 兆底 |
-| 物理坐标点击 | `await tab.cdpClick(x, y, {hoverMs?})` | CDP Input 三事件序列（moved→pressed→released）；canvas/非DOM/hover 依赖组件 |
-| autofill 释放 | `await tab.autofillRelease(selector)` | bringToFront + cdpClick + 补 input/change 事件 |
-| 下载弹窗绕过 | `await tab.setDownloadBehavior(dirPath)` | CDP `Browser.setDownloadBehavior` allow，避免“下载多个文件”弹窗阻塞 |
-| 批量 CDP（$N 引用） | `await tab.cdpBatch([{method,params},...])` | 一轮多命令，后续 params 可用 `"$N.path"` 引用前序结果（0-indexed） |
-
-示例：
+纯抓取使用默认 managed headless：
 
 ```javascript
-// 原生 CDP：后台 tab 全页截图（无需 bringToFront）
-const { data } = await tab.cdp("Page.captureScreenshot", { format: "png", captureBeyondViewport: true });
-
-// Cookie 读写（需先导航到目标域）
-await tab.cookies.set({ name: "token", value: "abc", domain: "example.com" });
-const cs = await tab.cookies.get({ domain: "example.com" });
-await tab.cookies.delete({ name: "token" });
-
-// 文件上传
-await tab.uploadFile("#file-input", "./report.pdf", "./cover.png");
+browser({ action: "open", name: "scrape", url: "https://example.com" })
 ```
 
-> **高危 CDP method 警示**：`Page.crash`、`Browser.close`、`Target.disposeBrowserContext` 会终止浏览器会话，调用前请确认意图。
-
-### 常用示例
+登录态/CAPTCHA/真实指纹优先 profile：
 
 ```javascript
-// 打开页面（命名标签页，可复用）
-browser({ action: "open", url: "http://localhost:3000", name: "app" })
-
-// 执行 JS + 截图
 browser({
-  action: "run",
-  name: "app",
-  code: "await page.screenshot({ path: 'screenshot.png' }); return document.title;"
+  action: "open",
+  name: "daily-profile",
+  url: "https://example.com",
+  visible: true,
+  app: {
+    channel: "profile",
+    user_profile_dir: "C:/Users/<you>/AppData/Local/Google/Chrome/User Data"
+  }
 })
-
-// 设置视口
-browser({ action: "open", url: "...", viewport: { width: 1920, height: 1080 } })
-
-// 关闭
-browser({ action: "close", name: "app" })
-browser({ action: "close", all: true })
 ```
 
-### 配置项
+若 profile 已有 `DevToolsActivePort`，Pi 复用它；否则 Pi 以 `--remote-debugging-port=9222` 和该 user-data-dir 启动 Chrome，再通过 Puppeteer CDP 连接。该 profile 浏览器是 borrowed，close 不终止它。纯 stealth 不足以通过 Cloudflare managed challenge / Turnstile。
+
+`visible` 不是 channel。它控制 Pi 启动的 managed/profile 进程；对已存在的 CDP/profile 附加无效，extension 明确拒绝。
+
+### extension — 显式有限 adapter
+
+先运行 `/install browser-bridge`。安装流程要求：
+
+1. `browser({action:"status"})` 启动 bridge 并生成 `~/.pi/browser-bridge.json`。
+2. 在扩展 popup 中复制配置文件的实际 port 和 token。
+3. 再次用 status 确认 `bridge.authenticatedConnected:true`。
+
+借用已有 tab：
+
+```javascript
+browser({
+  action: "open",
+  name: "daily-extension",
+  app: { channel: "extension", target: "example.com" }
+})
+```
+
+按 `url` 创建 owned tab：
+
+```javascript
+browser({
+  action: "open",
+  name: "owned-extension",
+  url: "https://example.com",
+  app: { channel: "extension" }
+})
+```
+
+每个命名 entry 固定保存 `tabId`。borrowed close 只释放名称，owned close 关闭真实 Chrome tab。
+
+extension run 只支持：
+
+- `page.url/title/goto/evaluate`
+- `browser.pages`
+- `tab.url/title/goto/evaluate`
+- `tab.cdp/cdpBatch`
+- `tab.cookies.get/set/delete`
+- `tab.tabs`
+- `tab.screenshot`（CDP PNG）
+
+它不是 Puppeteer Page：ElementHandle、request interception、frame event、`tab.observe/click/fill/extract`、upload、OCR/detect 等未实现 API 会确定性报错并列出支持清单。断连不会改用 managed 浏览器或另一个 tab。
+
+> ⚠️ 扩展可执行页面 JS/raw CDP；首帧 token 是授权边界。安装时还默认启用动态 DNR 规则剥离所有站点的 CSP 响应头。不能接受该风险时不要安装或禁用扩展。详见包内 `optional/BROWSER-BRIDGE-SETUP.md`。
+
+### live status 与静态安装状态
+
+```javascript
+browser({ action: "status" })
+```
+
+status 会显式启动 bridge server，并返回：
+
+- `bridge.serverStarted` / `listeningPort` / `state`
+- `bridge.authenticatedConnected`
+- 认证扩展当前报告的 `bridge.tabCount`
+- `namedTabs[]` 的 `name/channel/ownership/capabilities`
+
+只有 status 是 live 证据。`/install list` 的 `installed` 只表示存在合法的历史 verified marker 和合法配置；它不表示扩展此刻在线。单独的 `browser-bridge.port` 文件甚至不算 installed。
+
+### managed/profile/cdp 的高级 helper
+
+这些 entry 的 run code 接收真实 Puppeteer `page`/`browser` 与完整 `tab` helper：
+
+| 能力 | 入口 |
+|------|------|
+| 原生 CDP | `tab.cdp(method, params)` |
+| CDP batch | `tab.cdpBatch([{method,params},...])` |
+| Cookie | `tab.cookies.get/set/delete` |
+| 文件上传 | `tab.uploadFile(selector, ...paths)` |
+| 跨域 iframe | `tab.evalInFrame(matcher, fn, ...args)` |
+| Shadow DOM 定位 | `tab.pierce(selector)` |
+| 坐标点击 | `tab.cdpClick(x, y, {hoverMs?})` |
+| DOM 观察/提取 | `tab.observe()` / `tab.extract("probe")` |
+| 变化检测 | `tab.snapshot()` / `tab.diff(before)` |
+| OCR/UI detect | `tab.ocr()` / `tab.detect()`（依赖本机已验证模型） |
+
+高危 CDP method（如 `Page.crash`、`Browser.close`）会终止会话，调用前确认意图。
+
+### 参数速查
 
 | 参数 | 说明 |
 |------|------|
-| `app.path` | 自定义 Chromium/Chrome/Edge 可执行文件路径 |
-| `app.cdp_url` | 连接已有浏览器 CDP 端点 |
-| `app.attach_user_profile` | attach 用户已开浏览器（需配合 `app.user_profile_dir`） |
-| `app.user_profile_dir` | 用户 Chrome user-data-dir（须以 `--remote-debugging-port` 启动） |
-| `wait_until` | 导航等待策略（load / domcontentloaded / networkidle0 / networkidle2） |
-| `dialogs` | 对话框处理（accept / dismiss） |
+| `app.channel` | canonical channel |
+| `app.path` | Chromium/Chrome/Edge 可执行路径 |
+| `app.cdp_url` | `cdp` channel 的已有端点 |
+| `app.attach_user_profile` | legacy profile selector |
+| `app.user_profile_dir` | profile channel 的 user-data-dir |
+| `app.target` | extension 借用 tab 的 URL/title 子串 |
+| `visible` | Pi 启动进程的可见性；默认 false |
+| `wait_until` | managed/profile/cdp 导航等待策略 |
+| `dialogs` | managed/profile/cdp 对话框策略 |
 
 ## 下一步
 
 - [MCP 集成](/guides/mcp) — 其他协议连接
 - [网络搜索与深度研究](/guides/smart-search) — 外部信息检索
-- [权限系统](/guides/permissions) — 只读工具豁免列表（含 lsp 类操作）
+- [权限系统](/guides/permissions) — 工具权限与只读操作
