@@ -859,3 +859,11 @@ Completion conflicts and current-schedule validation must run before any binding
 A negotiated pending or bound dispatch with no exact result uses acceptedAt, then publishedAt, then binding.createdAt as its timeout anchor and becomes ambiguous even while the target endpoint remains live.
 
 </spec-entry>
+
+<spec-entry category="arch" keywords="session-knowledge,manual" date="2026-08-28" sid="S-20260828-e6bb0fc5d8718f25" title="Generation-owned external resource authority" description="Promoted from run:run-e890f56e14d1" source="session:20260827-odyssey-search-index:KDC-e6bb0fc5d8718f25">
+
+### Generation-owned external resource authority
+
+External processes, listeners, caches, and async builders must be generation-owned. A mutable PID, port, path, or published registry entry is not identity. Startup publishes only after an instance token and canonical scope handshake succeed; every post-await publication revalidates the generation; invalidation and shutdown revoke new publication, cancel or join all publication-capable work, then release visible ownership. Stop/status operations must fail closed when identity cannot be authenticated.
+
+</spec-entry>
