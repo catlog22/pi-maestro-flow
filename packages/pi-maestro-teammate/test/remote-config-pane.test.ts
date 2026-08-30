@@ -16,13 +16,16 @@ const CATALOG: Record<string, string> = {
   "connections.scopeHint": "g/p scope",
   "connections.deploymentRow": "[D] {registration} · {model} · {harness}/{transport} · resolvable {resolvable}",
   "connections.hiddenHost": "(hidden) [H] {id}",
+  "connections.hiddenWorkspace": "(hidden) [W] {workspace}",
   "connections.hiddenTarget": "(hidden) [T] {id}",
   "connections.hostRow": "[H] {id}  {user}@{host}:{port} · SHA256:{keyPrefix}",
+  "connections.workspaceRow": "[W] {workspace}  {cwd} · host {host} · protocol >= {protocol}",
   "connections.targetRow": "[T] {id}  {driver} · {cwd} · host {host}",
   "connections.connecting": "(connecting)",
   "connections.timedOut": "timed out after {timeout}",
   "remote.newHost": "n new host",
   "remote.newTarget": "N new target",
+  "remote.newWorkspace": "w new workspace",
   "remote.test": "t test",
   "remote.delete": "d delete",
   "remote.filter": "/ filter",
@@ -48,7 +51,7 @@ function makeT(): TuiTranslator {
 function fixtureState(): RemoteConfigState {
   return {
     global: {
-      version: 2,
+      version: 3,
       hosts: {
         alpha: { host: "alpha.example.com", user: "alice", port: 22, hostKeySha256: `SHA256:${"A".repeat(43)}=` },
         bravo: { host: "10.0.0.5", user: "bob", port: 2222, hostKeySha256: `SHA256:${"B".repeat(43)}=` },
@@ -57,9 +60,10 @@ function fixtureState(): RemoteConfigState {
         dev: { host: "bravo", cwd: "/home/bob/dev", driver: "acp", command: ["/usr/bin/teammate-agent"] },
         prod: { host: "alpha", cwd: "/srv/app", driver: "pi-rpc", command: ["node", "server.mjs"] },
       },
+      workspaces: {},
     },
     project: {
-      version: 2,
+      version: 3,
       hosts: {
         alpha: null,
         local: { host: "127.0.0.1", user: "carol", port: 22, hostKeySha256: `SHA256:${"C".repeat(43)}=` },
@@ -68,8 +72,17 @@ function fixtureState(): RemoteConfigState {
         dev: null,
         staging: { host: "local", cwd: "/srv/staging", driver: "pi-rpc", command: ["node", "staging.mjs"] },
       },
+      workspaces: {
+        "prod/app": null,
+        "staging/app": {
+          host: "local",
+          cwd: "/srv/staging",
+          requiredPlugin: "pi-maestro-teammate",
+          minimumWindowProtocol: 2,
+        },
+      },
     },
-    config: { version: 2, hosts: {}, targets: {} },
+    config: { version: 3, hosts: {}, targets: {}, workspaces: {} },
   };
 }
 
@@ -110,7 +123,7 @@ test("renders hosts and targets of the global scope with badges and key prefixes
   assert.ok(out.includes("[H] bravo  bob@10.0.0.5:2222 · SHA256:BBBBBBBBBBBB"));
   assert.ok(out.includes("[T] dev  acp · /home/bob/dev · host bravo"));
   assert.ok(out.includes("[T] prod  pi-rpc · /srv/app · host alpha"));
-  assert.ok(out.includes("n new host · N new target · t test · d delete · g/p scope · / filter · Esc close"));
+  assert.ok(out.includes("n new host · N new target · w new workspace · t test · d delete"));
   // Frame style follows TeammateControlCenter (box border with │ and ╭/╰─╮/╯).
   assert.ok(out.startsWith("╭"));
   assert.ok(out.includes("│"));

@@ -6,12 +6,14 @@ import test from "node:test";
 import type { ClientChannel, ConnectConfig } from "ssh2";
 import {
   REMOTE_GATEWAY_COMMAND,
+  RemoteRpcResponseError,
   SshRemoteConnectionFactory,
   SshTransportError,
   createPinnedHostKeyVerifier,
+  diagnoseRemoteWindowBridgeError,
   type SshClientLike,
 } from "../src/remote/ssh.ts";
-import type { ResolvedRemoteTarget } from "../src/remote/types.ts";
+import type { ResolvedRemoteTarget, ResolvedRemoteWorkspace } from "../src/remote/types.ts";
 
 const PRESENTED_KEY = Buffer.from("pinned-test-host-key");
 const HOST_KEY = `SHA256:${createHash("sha256").update(PRESENTED_KEY).digest("base64").replace(/=+$/, "")}`;
@@ -31,6 +33,17 @@ function target(overrides: Partial<ResolvedRemoteTarget["hostConfig"]> = {}): Re
       identityFile: "/local/id_ed25519",
       ...overrides,
     },
+  };
+}
+
+function workspace(): ResolvedRemoteWorkspace {
+  return {
+    workspaceRef: "prod/app",
+    host: "linux-a",
+    cwd: "/srv/project",
+    requiredPlugin: "pi-maestro-teammate",
+    minimumWindowProtocol: 1,
+    hostConfig: target().hostConfig,
   };
 }
 
@@ -158,6 +171,37 @@ test("SSH uses identity-only auth, keepalive, and the literal fixed gateway comm
   assert.equal(client.commands[0].includes("touch"), false);
   await connection.close();
   await factory.close();
+});
+
+test("explicit workspaces reuse the pinned pool and fixed gateway without deriving a run target", async () => {
+  const client = new FakeSshClient();
+  const factory = factoryFor([client]);
+  const connection = await factory.connectWorkspace(workspace());
+  assert.deepEqual(client.commands, [REMOTE_GATEWAY_COMMAND]);
+  assert.equal(client.commands[0]?.includes("/srv/project"), false);
+  assert.equal(client.commands[0]?.includes("pi-rpc"), false);
+  await connection.close();
+  await factory.close();
+});
+
+test("window bridge diagnostics distinguish unreachable hosts from incompatible daemons", () => {
+  assert.deepEqual(diagnoseRemoteWindowBridgeError(new SshTransportError(
+    "connect-timeout",
+    "secret host detail",
+  )), {
+    status: "unsupported",
+    code: "host-unreachable",
+    message: "Configured SSH host is unreachable or could not be authenticated",
+  });
+  assert.deepEqual(diagnoseRemoteWindowBridgeError(new RemoteRpcResponseError(
+    -32601,
+    "unknown remote method",
+  )), {
+    status: "upgrade-required",
+    code: "daemon-incompatible",
+    message: "Remote daemon is incompatible with the window bridge handshake",
+  });
+  assert.equal(diagnoseRemoteWindowBridgeError(new SshTransportError("protocol", "bad wire")).code, "daemon-incompatible");
 });
 
 test("SSH gateway stderr is bounded and fails the notification stream without exposing content", async () => {

@@ -10,7 +10,7 @@ import {
   type WorkspacePeerWindowListing,
 } from "../src/extension/workspace-peers.ts";
 import { SessionSendOverlay, type SessionSelectionRow, type SessionSendOverlayResult } from "../src/tui/session-send-overlay.ts";
-import type { TeammateState } from "../src/shared/types.ts";
+import type { ActiveAgent, TeammateState } from "../src/shared/types.ts";
 
 function row(overrides: Partial<SessionSelectionRow> = {}): SessionSelectionRow {
   return {
@@ -170,6 +170,7 @@ async function proxyWorkspace(
   stateValue: TeammateState = proxyState(),
   sessionSend?: (request: SessionMessageRequest) => Promise<SessionMessageResult>,
   allowCrossSession = true,
+  spawnedBy?: string,
 ): Promise<Record<string, unknown>> {
   let response: Record<string, unknown> | undefined;
   await handleProxyRequest(
@@ -177,7 +178,7 @@ async function proxyWorkspace(
     stateValue,
     { tool, requestId: `${tool}-workspace-request`, params },
     (message) => { response = message as Record<string, unknown>; },
-    undefined,
+    spawnedBy,
     [],
     undefined,
     undefined,
@@ -260,6 +261,69 @@ test("child proxy normalizes legacy status to coordination when routing to @root
   const result = routed.result as { isError?: boolean; content?: Array<{ text?: string }> };
   assert.equal(result.isError, false);
   assert.match(result.content?.[0]?.text ?? "", /injected.*root session/i);
+});
+
+test("child proxy blocks routine root coordination unless the dispatch explicitly authorizes it", async () => {
+  const correlationId = "child-root-policy";
+  const state = proxyState();
+  const child = {
+    agent: "explorer",
+    correlationId,
+    task: "Inspect the code and return one final result.",
+    startedAt: 1,
+    lastActivityAt: 1,
+    status: "running",
+    inbox: [],
+    outputLog: [],
+    abortController: new AbortController(),
+    depth: 0,
+  } as ActiveAgent;
+  state.activeRuns.set(correlationId, child);
+
+  let deliveries = 0;
+  const sessionSend = async (): Promise<SessionMessageResult> => {
+    deliveries += 1;
+    return { delivered: true, transport: "local-root" };
+  };
+  const denied = await proxyWorkspace(
+    "teammate-send",
+    { to: "@root", message: "incremental finding" },
+    undefined,
+    state,
+    sessionSend,
+    true,
+    correlationId,
+  );
+  const deniedResult = denied.result as { isError?: boolean; content?: Array<{ text?: string }> };
+  assert.equal(deniedResult.isError, true);
+  assert.match(deniedResult.content?.[0]?.text ?? "", /Return findings in the final result/);
+  assert.equal(deliveries, 0);
+
+  child.task = "Report the consolidated answer with teammate-send to @root.";
+  const authorized = await proxyWorkspace(
+    "teammate-send",
+    { to: "@root", message: "consolidated result" },
+    undefined,
+    state,
+    sessionSend,
+    true,
+    correlationId,
+  );
+  assert.equal((authorized.result as { isError?: boolean }).isError, false);
+  assert.equal(deliveries, 1);
+
+  child.task = "Inspect the code and return one final result.";
+  const blocker = await proxyWorkspace(
+    "teammate-send",
+    { to: "@root", message: "Need a user decision", kind: "request" },
+    undefined,
+    state,
+    sessionSend,
+    true,
+    correlationId,
+  );
+  assert.equal((blocker.result as { isError?: boolean }).isError, false);
+  assert.equal(deliveries, 2);
 });
 
 test("nested proxy dispatch preserves root session routing at deeper levels", async () => {

@@ -26,12 +26,22 @@ import {
   type RemoteRunListResult,
   type RemoteRunStartParams,
   type RemoteRunStartResult,
+  type RemoteWindowListParams,
+  type RemoteWindowListResult,
+  type RemoteWindowObserveParams,
+  type RemoteWindowObserveResult,
+  type RemoteWindowReceiptParams,
+  type RemoteWindowReceiptResult,
+  type RemoteWindowSendParams,
+  type RemoteWindowSendResult,
+  type RemoteWindowBridgeNegotiation,
 } from "./protocol.ts";
 import type {
   RemoteHostConfig,
   RemoteStatus,
   RemoteWorkerIdentity,
   ResolvedRemoteTarget,
+  ResolvedRemoteWorkspace,
 } from "./types.ts";
 
 export const REMOTE_GATEWAY_COMMAND = "pi-teammate-remote connect --stdio" as const;
@@ -75,6 +85,28 @@ export class RemoteRpcResponseError extends Error {
     this.code = code;
     this.data = data;
   }
+}
+
+export type RemoteWindowBridgeFailure = Exclude<RemoteWindowBridgeNegotiation, { status: "supported" }>;
+
+/** Maps transport/setup failures without exposing remote stderr, argv, host, or path data. */
+export function diagnoseRemoteWindowBridgeError(error: unknown): RemoteWindowBridgeFailure {
+  const daemonIncompatible = error instanceof RemoteRpcResponseError
+    || (error instanceof SshTransportError
+      && (error.code === "protocol"
+        || error.code === "request-timeout"
+        || error.code === "output-limit"));
+  return daemonIncompatible
+    ? {
+      status: "upgrade-required",
+      code: "daemon-incompatible",
+      message: "Remote daemon is incompatible with the window bridge handshake",
+    }
+    : {
+      status: "unsupported",
+      code: "host-unreachable",
+      message: "Configured SSH host is unreachable or could not be authenticated",
+    };
 }
 
 export interface SshClientConnectConfig {
@@ -233,6 +265,12 @@ function hostPoolKey(host: RemoteHostConfig): string {
   return JSON.stringify([host.host, host.port, host.user, host.hostKeySha256, host.identityFile ?? "agent"]);
 }
 
+function validateHost(host: RemoteHostConfig): void {
+  if (!host.host || !host.user || !Number.isInteger(host.port)) {
+    throw new SshTransportError("protocol", "Configured remote SSH host is invalid");
+  }
+}
+
 function validateTarget(target: ResolvedRemoteTarget): void {
   if (!path.posix.isAbsolute(target.cwd) || target.cwd.includes("\0")) {
     throw new SshTransportError("protocol", "Configured remote target cwd must be an absolute POSIX path");
@@ -240,9 +278,16 @@ function validateTarget(target: ResolvedRemoteTarget): void {
   if (target.command.length < 1 || target.command.some((argument) => !argument || argument.includes("\0"))) {
     throw new SshTransportError("protocol", "Configured remote target command argv is invalid");
   }
-  if (!target.hostConfig.host || !target.hostConfig.user || !Number.isInteger(target.hostConfig.port)) {
-    throw new SshTransportError("protocol", "Configured remote SSH host is invalid");
+  validateHost(target.hostConfig);
+}
+
+function validateWorkspace(workspace: ResolvedRemoteWorkspace): void {
+  if (!path.posix.isAbsolute(workspace.cwd)
+    || path.posix.normalize(workspace.cwd) !== workspace.cwd
+    || workspace.cwd.includes("\0")) {
+    throw new SshTransportError("protocol", "Configured remote workspace cwd must be a canonical absolute POSIX path");
   }
+  validateHost(workspace.hostConfig);
 }
 
 function abortError(): Error {
@@ -651,6 +696,18 @@ class SshRemoteConnection implements RemoteConnection {
   list(commandId: string, monitorOwnerNonce: string): Promise<RemoteRunListResult> {
     return this.request("run/list", { commandId, monitorOwnerNonce });
   }
+  windowList(params: RemoteWindowListParams): Promise<RemoteWindowListResult> {
+    return this.request("window/list", params);
+  }
+  windowObserve(params: RemoteWindowObserveParams): Promise<RemoteWindowObserveResult> {
+    return this.request("window/observe", params);
+  }
+  windowSend(params: RemoteWindowSendParams): Promise<RemoteWindowSendResult> {
+    return this.request("window/send", params);
+  }
+  windowReceipt(params: RemoteWindowReceiptParams): Promise<RemoteWindowReceiptResult> {
+    return this.request("window/receipt", params);
+  }
   notifications(): AsyncIterable<RemoteProtocolNotification> { return this.#notifications; }
 
   async close(): Promise<void> {
@@ -682,6 +739,8 @@ class SshRemoteConnection implements RemoteConnection {
     if (envelope.method !== "run/state"
       && envelope.method !== "run/event"
       && envelope.method !== "run/result"
+      && envelope.method !== "window/state"
+      && envelope.method !== "window/message"
       && envelope.method !== "worker/heartbeat") {
       throw new SshTransportError("protocol", `Unknown remote notification method: ${envelope.method}`);
     }
@@ -732,12 +791,22 @@ export class SshRemoteConnectionFactory implements RemoteConnectionFactory {
   }
 
   async connect(target: ResolvedRemoteTarget, signal?: AbortSignal): Promise<RemoteConnection> {
-    if (this.#closed) throw new SshTransportError("transport", "SSH connection factory is closed");
     validateTarget(target);
-    const key = hostPoolKey(target.hostConfig);
+    return this.#connectHost(target.hostConfig, signal);
+  }
+
+  /** Opens the same pinned, pooled gateway for an explicitly configured workspace. */
+  async connectWorkspace(workspace: ResolvedRemoteWorkspace, signal?: AbortSignal): Promise<RemoteConnection> {
+    validateWorkspace(workspace);
+    return this.#connectHost(workspace.hostConfig, signal);
+  }
+
+  async #connectHost(host: RemoteHostConfig, signal?: AbortSignal): Promise<RemoteConnection> {
+    if (this.#closed) throw new SshTransportError("transport", "SSH connection factory is closed");
+    const key = hostPoolKey(host);
     let pool = this.#pools.get(key);
     if (!pool) {
-      pool = new HostConnectionPool(target.hostConfig, this.#options);
+      pool = new HostConnectionPool(host, this.#options);
       this.#pools.set(key, pool);
     }
     const lease = await pool.acquire(signal);

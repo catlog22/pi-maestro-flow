@@ -9,15 +9,20 @@ import {
   loadRemoteConfigState,
   replaceRemoteConfigStores,
   resolveRemoteTarget,
+  resolveRemoteWorkspace,
   saveGlobalRemoteConfig,
   saveProjectRemoteConfig,
   validateRemoteHostDraft,
   validateRemoteTargetDraft,
+  validateRemoteWorkspaceDraft,
   type GlobalRemoteConfigStore,
   type ProjectRemoteConfigStore,
   type RemoteDraftValidation,
 } from "../src/remote/config.ts";
-import { REMOTE_CONFIG_VERSION } from "../src/remote/types.ts";
+import {
+  REMOTE_CONFIG_VERSION,
+  REMOTE_WINDOW_BRIDGE_PLUGIN_ID,
+} from "../src/remote/types.ts";
 
 /**
  * macOS resolves `os.tmpdir()` through the `/var` -> `/private/var` symlink, while the remote
@@ -53,11 +58,19 @@ function globalStore(): GlobalRemoteConfigStore {
         command: ["pi"],
       },
     },
+    workspaces: {
+      "prod/app": {
+        host: "linux-a",
+        cwd: "/srv/project",
+        requiredPlugin: REMOTE_WINDOW_BRIDGE_PLUGIN_ID,
+        minimumWindowProtocol: 1,
+      },
+    },
   };
 }
 
 function emptyProject(): ProjectRemoteConfigStore {
-  return { version: REMOTE_CONFIG_VERSION, hosts: {}, targets: {} };
+  return { version: REMOTE_CONFIG_VERSION, hosts: {}, targets: {}, workspaces: {} };
 }
 
 test("remote config paths use the approved global and project locations", () => {
@@ -91,15 +104,28 @@ test("project remote config overrides global targets and can hide entries", () =
         },
         "linux-a/hidden": null,
       },
+      workspaces: {
+        "prod/app": {
+          host: "linux-a",
+          cwd: "/srv/project-copy",
+          requiredPlugin: REMOTE_WINDOW_BRIDGE_PLUGIN_ID,
+          minimumWindowProtocol: 2,
+        },
+      },
     }, globalPath);
 
     const state = loadRemoteConfigState(cwd, globalPath);
     assert.equal(state.config.targets["linux-a/pi"].cwd, "/srv/project-copy");
     assert.deepEqual(state.config.targets["linux-a/pi"].command, ["pi", "--mode", "rpc"]);
     assert.equal(state.config.targets["linux-a/hidden"], undefined);
+    assert.equal(state.config.workspaces["prod/app"].cwd, "/srv/project-copy");
+    assert.equal(state.config.workspaces["prod/app"].minimumWindowProtocol, 2);
     const target = resolveRemoteTarget(state.config, "linux-a/pi");
     assert.equal(target.hostConfig.hostKeySha256, HOST_KEY);
     assert.equal(target.id, "linux-a/pi");
+    const workspace = resolveRemoteWorkspace(state.config, "prod/app");
+    assert.equal(workspace.workspaceRef, "prod/app");
+    assert.equal(workspace.hostConfig.hostKeySha256, HOST_KEY);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -127,6 +153,7 @@ test("remote config rejects unsafe cwd, argv, fingerprints, and dangling hosts",
       version: REMOTE_CONFIG_VERSION,
       hosts: {},
       targets: { "missing/pi": { host: "missing", cwd: "/srv/project", driver: "pi-rpc", command: ["pi"] } },
+      workspaces: {},
     }, globalPath), /references unknown host/);
 
     saveGlobalRemoteConfig(globalStore(), globalPath);
@@ -134,7 +161,47 @@ test("remote config rejects unsafe cwd, argv, fingerprints, and dangling hosts",
       version: REMOTE_CONFIG_VERSION,
       hosts: { "linux-a": null },
       targets: {},
+      workspaces: {},
     }, globalPath), /references unknown host/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("remote workspaces fail closed on untrusted refs, cwd, plugins, protocols, and hosts", () => {
+  const root = canonicalTempRoot("pi-remote-workspace-invalid-");
+  const globalPath = path.join(root, "global.json");
+  const valid = globalStore();
+  try {
+    assert.throws(() => saveGlobalRemoteConfig({
+      ...valid,
+      workspaces: { "bad ref": valid.workspaces["prod/app"] },
+    }, globalPath), /workspace ref/);
+    assert.throws(() => saveGlobalRemoteConfig({
+      ...valid,
+      workspaces: { "prod/app": { ...valid.workspaces["prod/app"], cwd: "relative/path" } },
+    }, globalPath), /canonical absolute POSIX path/);
+    assert.throws(() => saveGlobalRemoteConfig({
+      ...valid,
+      workspaces: { "prod/app": { ...valid.workspaces["prod/app"], cwd: "/srv/app/../secret" } },
+    }, globalPath), /canonical absolute POSIX path/);
+    assert.throws(() => saveGlobalRemoteConfig({
+      ...valid,
+      workspaces: {
+        "prod/app": {
+          ...valid.workspaces["prod/app"],
+          requiredPlugin: "other-plugin" as typeof REMOTE_WINDOW_BRIDGE_PLUGIN_ID,
+        },
+      },
+    }, globalPath), /unsupported plugin/);
+    assert.throws(() => saveGlobalRemoteConfig({
+      ...valid,
+      workspaces: { "prod/app": { ...valid.workspaces["prod/app"], minimumWindowProtocol: 0 } },
+    }, globalPath), /minimumWindowProtocol/);
+    assert.throws(() => saveGlobalRemoteConfig({
+      ...valid,
+      workspaces: { "prod/app": { ...valid.workspaces["prod/app"], host: "missing" } },
+    }, globalPath), /workspace prod\/app references unknown host missing/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -265,6 +332,7 @@ test("collect-validate-commit replaces global and project stores with CAS", () =
           command: ["claude-agent-acp"],
         },
       },
+      workspaces: {},
     };
     replaceRemoteConfigStores(cwd, {
       global: initial.global,
@@ -332,7 +400,7 @@ test("project config rejects a project cwd reached through a symlinked ancestor"
   }
 });
 
-test("version 1 stores migrate to strict version 2 command profiles", () => {
+test("version 1 stores migrate to strict version 3 command profiles", () => {
   const root = canonicalTempRoot("pi-remote-migration-");
   const cwd = path.join(root, "project");
   const globalPath = path.join(root, "teammate-remotes.json");
@@ -382,6 +450,30 @@ test("version 1 stores migrate to strict version 2 command profiles", () => {
   }
 });
 
+test("version 2 stores read compatibly and save back as version 3", () => {
+  const root = canonicalTempRoot("pi-remote-v2-migration-");
+  const cwd = path.join(root, "project");
+  const globalPath = path.join(root, "teammate-remotes.json");
+  fs.mkdirSync(cwd, { recursive: true });
+  try {
+    fs.writeFileSync(globalPath, JSON.stringify({
+      version: 2,
+      hosts: globalStore().hosts,
+      targets: globalStore().targets,
+    }));
+    const state = loadRemoteConfigState(cwd, globalPath);
+    assert.equal(state.global.version, REMOTE_CONFIG_VERSION);
+    assert.deepEqual(state.global.workspaces, {});
+
+    saveGlobalRemoteConfig(state.global, globalPath);
+    const stored = JSON.parse(fs.readFileSync(globalPath, "utf8")) as Record<string, unknown>;
+    assert.equal(stored.version, REMOTE_CONFIG_VERSION);
+    assert.deepEqual(stored.workspaces, {});
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("malformed and unknown-version remote stores fail closed", () => {
   const root = canonicalTempRoot("pi-remote-malformed-");
   const cwd = path.join(root, "project");
@@ -391,7 +483,7 @@ test("malformed and unknown-version remote stores fail closed", () => {
     fs.writeFileSync(globalPath, JSON.stringify({ version: REMOTE_CONFIG_VERSION, hosts: {}, targets: {}, unexpected: true }));
     assert.throws(() => loadRemoteConfigState(cwd, globalPath), /Unknown global teammate remote config field/);
 
-    for (const version of [0, 3, "2", null]) {
+    for (const version of [0, 4, "3", null]) {
       fs.writeFileSync(globalPath, JSON.stringify({ version, hosts: {}, targets: {} }));
       assert.throws(() => loadRemoteConfigState(cwd, globalPath), /Unsupported teammate remote config version/);
     }
@@ -416,6 +508,13 @@ const VALID_TARGET_DRAFT = {
   cwd: "/srv/project",
   driver: "pi-rpc" as const,
   command: ["pi", "--remote"],
+};
+
+const VALID_WORKSPACE_DRAFT = {
+  host: "linux-a",
+  cwd: "/srv/project",
+  requiredPlugin: REMOTE_WINDOW_BRIDGE_PLUGIN_ID,
+  minimumWindowProtocol: 1,
 };
 
 test("validateRemoteHostDraft accepts a valid host and rejects field-level errors", () => {
@@ -476,6 +575,23 @@ test("validateRemoteTargetDraft accepts a valid target and rejects field-level e
     errorOf(validateRemoteTargetDraft("linux-a/pi", { ...VALID_TARGET_DRAFT, command: ["pi", "bad\u0000arg"] })),
     /Invalid remote target command argv/,
   );
+});
+
+test("validateRemoteWorkspaceDraft enforces the trusted workspace contract", () => {
+  assert.deepEqual(validateRemoteWorkspaceDraft("prod/app", VALID_WORKSPACE_DRAFT), { ok: true });
+  assert.match(errorOf(validateRemoteWorkspaceDraft("bad ref", VALID_WORKSPACE_DRAFT)), /workspace ref/);
+  assert.match(errorOf(validateRemoteWorkspaceDraft("prod/app", {
+    ...VALID_WORKSPACE_DRAFT,
+    cwd: "/srv/app/../secret",
+  })), /canonical absolute POSIX path/);
+  assert.match(errorOf(validateRemoteWorkspaceDraft("prod/app", {
+    ...VALID_WORKSPACE_DRAFT,
+    requiredPlugin: "other-plugin",
+  })), /unsupported plugin/);
+  assert.match(errorOf(validateRemoteWorkspaceDraft("prod/app", {
+    ...VALID_WORKSPACE_DRAFT,
+    minimumWindowProtocol: 0,
+  })), /minimumWindowProtocol/);
 });
 
 test("validateRemoteTargetDraft validates the forwarded env whitelist", () => {

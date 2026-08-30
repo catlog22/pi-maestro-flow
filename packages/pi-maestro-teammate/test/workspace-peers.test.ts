@@ -14,6 +14,8 @@ import {
   MAX_WORKSPACE_WINDOW_FINAL_TEXT_BYTES,
   MAIN_SESSION_PROGRESS_TEXT_BYTES,
   WORKSPACE_MAIN_SESSION_MARKER,
+  WORKSPACE_PEER_COMMAND_PROTOCOL_VERSION,
+  WORKSPACE_PEER_PLUGIN_ID,
   WORKSPACE_PEER_PROTOCOL_VERSION,
   WorkspaceTargetResolutionError,
   activeWorkspaceBackgroundJobsFromPayload,
@@ -167,6 +169,32 @@ test("workspace protocol command ids preserve native ids and normalize arbitrary
   assert.notEqual(workspaceProtocolCommandId("different-tool-call-id"), normalized);
 });
 
+test("workspace command envelopes derive a stable command id from the caller message id", async () => {
+  const { cwd, rootDir } = await temporaryWorkspace();
+  const sender = createWorkspacePeerIdentity(cwd, { rootDir, ownerId: OWNER_A, ownerNonce: NONCE_A });
+  const receiver = createWorkspacePeerIdentity(cwd, { rootDir, ownerId: OWNER_B, ownerNonce: NONCE_B });
+  const messageId = "tool-call/stable-message-1";
+  const command = await enqueueWorkspacePeerCommand(
+    sender,
+    remoteTarget(receiver),
+    "follow_up",
+    "stable delivery",
+    { messageId, now: 1_000 },
+  );
+  assert.equal(command.commandId, workspaceProtocolCommandId(messageId));
+  assert.equal(
+    (await stat(join(commandMailboxPath(sender, OWNER_B), `${command.commandId}.json`))).isFile(),
+    true,
+  );
+  await assert.rejects(
+    enqueueWorkspacePeerCommand(sender, remoteTarget(receiver), "follow_up", "conflict", {
+      messageId,
+      commandId: COMMAND_ID,
+    }),
+    /commandId conflicts with the normalized messageId/,
+  );
+});
+
 test("workspace identity is normalized, hashed, and isolated by cwd", async () => {
   const { cwd, rootDir } = await temporaryWorkspace();
   const equivalent = join(cwd, "nested", "..");
@@ -186,7 +214,7 @@ test("workspace identity is normalized, hashed, and isolated by cwd", async () =
   assert.deepEqual(discovery.corruptFiles, [`${OWNER_A}.json`]);
 });
 
-test("workspace peer protocol version and main-session selector stay stable", async () => {
+test("workspace peer facade, advertisement, protocol version, and main-session selector stay compatible", async () => {
   const { cwd, rootDir } = await temporaryWorkspace();
   const identity = createWorkspacePeerIdentity(cwd, { rootDir, ownerId: OWNER_A, ownerNonce: NONCE_A });
   const snapshot = buildWorkspaceOwnerSnapshot(identity, state(agent("cid-protocol", "protocol")), 1_000);
@@ -196,15 +224,46 @@ test("workspace peer protocol version and main-session selector stay stable", as
   assert.equal(identity.version, WORKSPACE_PEER_PROTOCOL_VERSION);
   assert.equal(snapshot.version, WORKSPACE_PEER_PROTOCOL_VERSION);
   assert.equal(snapshot.kind, "owner");
+  assert.deepEqual(snapshot.plugin, { id: WORKSPACE_PEER_PLUGIN_ID });
+  assert.deepEqual(snapshot.protocol, {
+    workspacePeerVersion: WORKSPACE_PEER_PROTOCOL_VERSION,
+    commandResponseVersion: WORKSPACE_PEER_COMMAND_PROTOCOL_VERSION,
+  });
+  assert.equal(snapshot.relay, undefined);
+
+  const legacySnapshot = JSON.parse(JSON.stringify(snapshot)) as Record<string, unknown>;
+  delete legacySnapshot.plugin;
+  delete legacySnapshot.protocol;
+  assert.equal(validateWorkspaceOwnerSnapshot(legacySnapshot, identity)?.plugin, undefined);
+  const advertised = validateWorkspaceOwnerSnapshot({
+    ...snapshot,
+    relay: { versions: [1], capabilities: ["receipt", "reply"] },
+  }, identity);
+  assert.deepEqual(advertised?.relay, { versions: [1], capabilities: ["receipt", "reply"] });
+  assert.equal(validateWorkspaceOwnerSnapshot({
+    ...snapshot,
+    relay: { versions: [1], capabilities: ["reply", "reply"] },
+  }, identity), undefined);
 
   const extensionSource = await readFile(new URL("../src/extension/index.ts", import.meta.url), "utf8");
-  const peerSource = await readFile(new URL("../src/extension/workspace-peers.ts", import.meta.url), "utf8");
+  const facadeSource = await readFile(new URL("../src/extension/workspace-peers.ts", import.meta.url), "utf8");
+  const peerCoreSource = await readFile(new URL("../src/sessions/workspace-peer-core.ts", import.meta.url), "utf8");
   const schemaSource = await readFile(new URL("../src/extension/schemas.ts", import.meta.url), "utf8");
-  assert.match(peerSource, /target: `owner:\$\{owner\.ownerId\}`/);
+  assert.match(facadeSource, /export \* from "\.\.\/sessions\/workspace-peer-core\.ts"/);
+  assert.match(peerCoreSource, /target: `owner:\$\{owner\.ownerId\}`/);
   assert.match(extensionSource, /workspacePeerOwners\.map\(projectWorkspacePeerWindow\)/);
   assert.match(extensionSource, /const agentSelector = \/\^owner:/);
   assert.match(extensionSource, /target: `owner:\$\{owner\.ownerId\}:\$\{agent\.correlationId\}`/);
   assert.match(schemaSource, /enum: \["active", "named", "all", "roles", "windows", "inbox"\]/);
+});
+
+test("workspace root message redrive and receipt reconciliation remain bounded", async () => {
+  const extensionSource = await readFile(new URL("../src/extension/index.ts", import.meta.url), "utf8");
+  assert.match(extensionSource, /const QUEUED_ROOT_REDRIVE_DELAY_MS = 60_000;/);
+  assert.match(extensionSource, /const QUEUED_ROOT_REDRIVE_COOLDOWN_MS = 60_000;/);
+  assert.match(extensionSource, /const QUEUED_ROOT_REDRIVE_MAX = 2;/);
+  assert.match(extensionSource, /previous\.count >= QUEUED_ROOT_REDRIVE_MAX/);
+  assert.match(extensionSource, /const RECONCILE_RECEIPT_MAX_AGE_MS = 10 \* 60_000;/);
 });
 
 test("workspace terminal result protocol classifies terminal turns and stays bounded", () => {
@@ -1658,7 +1717,7 @@ test("a live foreign process holding the persisted ownerId forces a new identity
 // Receipt finalization (target-side rewrite after actual injection)
 // ===========================================================================
 
-test("finalized responses flip deliveryStage to injected in place", async () => {
+test("finalized responses advance queued to injected to terminal replied with bounded retention", async () => {
   const { rootDir } = await temporaryWorkspace();
   const project = join(rootDir, "project");
   const sender = createWorkspacePeerIdentity(project, { rootDir, ownerId: OWNER_A, ownerNonce: NONCE_A });
@@ -1690,7 +1749,12 @@ test("finalized responses flip deliveryStage to injected in place", async () => 
   assert.equal(injected?.fromOwnerId, OWNER_B);
   assert.equal(injected?.toOwnerId, OWNER_A);
   assert.equal(injected?.commandId, COMMAND_ID);
-  // Idempotent: an already-finalized response is a no-op.
+  assert.equal(await finalizeWorkspacePeerResponse(target, OWNER_A, COMMAND_ID, "replied", { now: 2_500 }), true);
+  const replied = await readWorkspacePeerResponse(sender, COMMAND_ID);
+  assert.equal(replied?.deliveryStage, "replied");
+  assert.equal((replied?.expiresAt ?? 0) - (replied?.respondedAt ?? 0), 24 * 60 * 60_000);
+  // Idempotence and monotonicity: terminal replies neither repeat nor regress.
+  assert.equal(await finalizeWorkspacePeerResponse(target, OWNER_A, COMMAND_ID, "replied", { now: 2_750 }), false);
   assert.equal(await finalizeWorkspacePeerResponse(target, OWNER_A, COMMAND_ID, "injected", { now: 3_000 }), false);
   // Rejected responses are never finalized.
   const rejectedCommandId = "e".repeat(32);

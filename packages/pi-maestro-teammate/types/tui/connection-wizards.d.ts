@@ -1,6 +1,6 @@
 import type { ModelCliRow } from "../models/cli-list.ts";
 import { type RemoteConfigState, type RemoteConfigStorePair } from "../remote/config.ts";
-import type { RemoteHostConfig, RemoteTargetConfig } from "../remote/types.ts";
+import { type RemoteHostConfig, type RemoteTargetConfig, type RemoteWorkspaceConfig } from "../remote/types.ts";
 import type { RemotePaneScope } from "./remote-config-pane.ts";
 import { type ConnectionFormUi } from "./connection-forms.ts";
 /** Prompt adapter used by connection wizards and scripted tests. */
@@ -55,10 +55,16 @@ export interface RemoteTargetWizardDeps extends RemoteWizardDeps {
     id?: string;
     current?: RemoteTargetConfig;
 }
+export interface RemoteWorkspaceWizardDeps extends RemoteWizardDeps {
+    workspaceRef?: string;
+    current?: RemoteWorkspaceConfig;
+}
 /** Create or edit a remote host while preserving the remote-store CAS path. */
 export declare function wizardRemoteHost(ui: WizardUi, deps: RemoteHostWizardDeps): Promise<RemotePaneOutcome>;
 /** Create or edit a remote target while preserving the remote-store CAS path. */
 export declare function wizardRemoteTarget(ui: WizardUi, deps: RemoteTargetWizardDeps): Promise<RemotePaneOutcome>;
+/** Create or edit an explicitly trusted remote Pi workspace. */
+export declare function wizardRemoteWorkspace(ui: WizardUi, deps: RemoteWorkspaceWizardDeps): Promise<RemotePaneOutcome>;
 /** Explicitly write a legacy preview to a new sibling, never the source path. */
 export declare function wizardLegacyUpgrade(ui: WizardUi, skeletonText: string, filePath: string): Promise<ConnectionWizardOutcome>;
 export {};

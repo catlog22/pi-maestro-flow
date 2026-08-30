@@ -6,11 +6,17 @@ import type * as net from "node:net";
 import test from "node:test";
 import type { RemoteDriver, RemoteDriverContext, RemoteRunHandle } from "../src/remote/driver.ts";
 import {
+  createWorkspacePeerIdentity,
+  defaultWorkspacePeerRoot,
+  publishWorkspaceOwner,
+} from "../src/sessions/workspace-peer-core.ts";
+import {
   REMOTE_MAX_LINE_BYTES,
   createRemoteRequest,
   encodeRemoteEnvelope,
   parseRemoteEnvelopeLine,
   type RemoteJsonRpcEnvelope,
+  type RemoteInitializeResult,
   type RemoteRunCancelParams,
   type RemoteRunInputParams,
   type RemoteRunStartParams,
@@ -19,9 +25,11 @@ import { connectRemoteSocket, RemoteBridgeServer } from "../src/remote/server.ts
 import { createRemoteRunSnapshot } from "../src/remote/state.ts";
 import {
   REMOTE_PROTOCOL_VERSION,
+  REMOTE_WINDOW_BRIDGE_PLUGIN_ID,
   type RemoteRunCapture,
   type RemoteRunEvent,
   type ResolvedRemoteTarget,
+  type ResolvedRemoteWorkspace,
 } from "../src/remote/types.ts";
 
 const HOST_KEY = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -190,7 +198,15 @@ function readEnvelopes(socket: net.Socket, count: number): Promise<RemoteJsonRpc
   });
 }
 
-async function openServer(root: string, driver: TestDriver, options: { clientEgressBytes?: number } = {}) {
+async function openServer(
+  root: string,
+  driver: TestDriver,
+  options: {
+    clientEgressBytes?: number;
+    windowBridge?: false;
+    workspaces?: readonly ResolvedRemoteWorkspace[];
+  } = {},
+) {
   const server = new RemoteBridgeServer({
     stateDirectory: path.join(root, "state"),
     targets: [target()],
@@ -322,6 +338,47 @@ test("bridge redacts remote failures before transmission and command journaling"
   }
 });
 
+test("initialize advertises the optional window bridge without requiring new client params", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-server-window-bridge-"));
+  const driver = new TestDriver();
+  const { server, socket } = await openServer(root, driver);
+  try {
+    const responses = readEnvelopes(socket, 1);
+    socket.write(encodeRemoteEnvelope(initialize("legacy-client")));
+    const [response] = await responses;
+    assert.equal("result" in response, true);
+    const result = "result" in response ? response.result as RemoteInitializeResult : undefined;
+    assert.equal(result?.windowBridge?.pluginId, REMOTE_WINDOW_BRIDGE_PLUGIN_ID);
+    assert.match(result?.windowBridge?.pluginVersion ?? "", /^\d+\.\d+\.\d+/);
+    assert.deepEqual(result?.windowBridge?.workspacePeerVersions, [1]);
+    assert.deepEqual(result?.windowBridge?.relayVersions, [1]);
+    assert.deepEqual(result?.windowBridge?.runtimeVersions, [1]);
+  } finally {
+    socket.destroy();
+    await server.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a run-only legacy daemon can omit windowBridge without changing initialize", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-server-legacy-init-"));
+  const driver = new TestDriver();
+  const { server, socket } = await openServer(root, driver, { windowBridge: false });
+  try {
+    const responses = readEnvelopes(socket, 1);
+    socket.write(encodeRemoteEnvelope(initialize("legacy-daemon")));
+    const [response] = await responses;
+    assert.equal("result" in response, true);
+    const result = "result" in response ? response.result as RemoteInitializeResult : undefined;
+    assert.equal(result?.protocolVersion, REMOTE_PROTOCOL_VERSION);
+    assert.equal(result?.windowBridge, undefined);
+  } finally {
+    socket.destroy();
+    await server.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a remote/1 client is refused and the error names both protocol versions", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-server-version-"));
   const driver = new TestDriver();
@@ -411,6 +468,67 @@ test("a journal the server builds itself reports quarantine to the server's obse
     assert.equal(observed[0]?.directory, directory);
     assert.ok(observed[0]?.error instanceof Error, "the observer was told which run but not what condemned it");
   } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("remote window list is Monitor-gated and dispatched through the bridge", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-server-window-list-"));
+  const cwd = path.join(root, "project");
+  fs.mkdirSync(cwd, { recursive: true });
+  const runtimeRoot = defaultWorkspacePeerRoot(cwd);
+  const peer = createWorkspacePeerIdentity(cwd, { ownerId: "1".repeat(32), ownerNonce: "2".repeat(32) });
+  await publishWorkspaceOwner(peer, { agents: [], settled: [], sessionName: "remote-window" });
+  const workspace: ResolvedRemoteWorkspace = {
+    workspaceRef: "prod/app",
+    host: "prod",
+    cwd,
+    requiredPlugin: REMOTE_WINDOW_BRIDGE_PLUGIN_ID,
+    minimumWindowProtocol: 1,
+    hostConfig: {
+      host: "prod.example",
+      user: "dev",
+      port: 22,
+      hostKeySha256: HOST_KEY,
+    },
+  };
+  const driver = new TestDriver();
+  const { server, socket } = await openServer(root, driver, { workspaces: [workspace] });
+  try {
+    const deniedResponse = readEnvelopes(socket, 1);
+    socket.write(encodeRemoteEnvelope(createRemoteRequest("list-before-init", "window/list", {
+      commandId: "list-before-init",
+      monitorOwnerNonce: "monitor-window",
+      workspaceRef: "prod/app",
+      authorityId: "prod",
+      transportVersion: 1,
+    })));
+    const [denied] = await deniedResponse;
+    assert.equal("error" in denied ? denied.error.code : undefined, -32001);
+
+    const initializedResponse = readEnvelopes(socket, 1);
+    socket.write(encodeRemoteEnvelope(initialize("monitor-window", "initialize-window")));
+    assert.equal("result" in (await initializedResponse)[0]!, true);
+
+    const listedResponse = readEnvelopes(socket, 1);
+    socket.write(encodeRemoteEnvelope(createRemoteRequest("list-window", "window/list", {
+      commandId: "list-window",
+      monitorOwnerNonce: "monitor-window",
+      workspaceRef: "prod/app",
+      authorityId: "prod",
+      transportVersion: 1,
+    })));
+    const [listed] = await listedResponse;
+    assert.equal("result" in listed, true);
+    const windows = "result" in listed
+      ? (listed.result as { windows?: Array<{ capture?: { ownerId?: string; cancel?: boolean } }> }).windows
+      : undefined;
+    assert.equal(windows?.[0]?.capture?.ownerId, peer.ownerId);
+    assert.equal(windows?.[0]?.capture?.cancel, false);
+  } finally {
+    socket.destroy();
+    await server.close();
+    fs.rmSync(runtimeRoot, { recursive: true, force: true });
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

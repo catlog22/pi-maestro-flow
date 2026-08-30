@@ -28,6 +28,12 @@ export function createRuntimeActorHost(options: RuntimeActorHostClientOptions = 
 
 export * from "../../runtime-broker/contracts.ts";
 export {
+  SessionDomainBrokerCommitter,
+  type SessionDomainBrokerCommitPort,
+  type SessionDomainBrokerCommitterOptions,
+  type SessionDomainOutboxDraft,
+} from "../../runtime-broker/session-commit.ts";
+export {
   RuntimeBrokerClient,
   type RuntimeBrokerClientOptions,
 } from "../../runtime-broker/client.ts";

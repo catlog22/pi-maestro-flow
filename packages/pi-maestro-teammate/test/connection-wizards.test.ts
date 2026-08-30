@@ -208,9 +208,9 @@ test("legacy upgrade writes only the explicit sibling and refuses an existing co
 
 function emptyRemoteState(): RemoteConfigState {
   return {
-    global: { version: 2, hosts: {}, targets: {} },
-    project: { version: 2, hosts: {}, targets: {} },
-    config: { version: 2, hosts: {}, targets: {} },
+    global: { version: 3, hosts: {}, targets: {}, workspaces: {} },
+    project: { version: 3, hosts: {}, targets: {}, workspaces: {} },
+    config: { version: 3, hosts: {}, targets: {}, workspaces: {} },
   };
 }
 

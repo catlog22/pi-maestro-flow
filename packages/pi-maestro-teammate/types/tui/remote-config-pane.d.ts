@@ -29,6 +29,14 @@ export type RemotePaneRow = {
     cwd: string;
     scope: RemotePaneScope;
     hidden?: boolean;
+} | {
+    kind: "workspace";
+    workspaceRef: string;
+    host: string;
+    cwd: string;
+    minimumWindowProtocol: number;
+    scope: RemotePaneScope;
+    hidden?: boolean;
 };
 export type RemotePaneAction = {
     kind: "connection-edit-deployment";
@@ -52,12 +60,23 @@ export type RemotePaneAction = {
     kind: "remote-new-target";
     scope: RemotePaneScope;
 } | {
+    kind: "remote-edit-workspace";
+    workspaceRef: string;
+    scope: RemotePaneScope;
+} | {
+    kind: "remote-new-workspace";
+    scope: RemotePaneScope;
+} | {
     kind: "remote-delete-host";
     hostId: string;
     scope: RemotePaneScope;
 } | {
     kind: "remote-delete-target";
     targetId: string;
+    scope: RemotePaneScope;
+} | {
+    kind: "remote-delete-workspace";
+    workspaceRef: string;
     scope: RemotePaneScope;
 } | {
     kind: "remote-scope";

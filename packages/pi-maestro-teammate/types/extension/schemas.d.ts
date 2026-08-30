@@ -34,7 +34,7 @@ export declare const TeammateParams: Type.TObject<{
     mode: Type.TOptional<Type.TUnsafe<"default" | "expert">>;
     agent: Type.TOptional<Type.TString>;
     taskType: Type.TOptional<Type.TString>;
-    reply_to: Type.TOptional<Type.TUnsafe<"caller" | "main">>;
+    reply_to: Type.TOptional<Type.TUnsafe<"main" | "caller">>;
     tasks: Type.TArray<Type.TObject<{
         prompt: Type.TString;
         description: Type.TOptional<Type.TString>;
@@ -78,11 +78,12 @@ export declare const TeammateSendParams: Type.TObject<{
     kind: Type.TOptional<Type.TUnsafe<"coordination" | "request" | "supervision">>;
 }>;
 export declare const TeammateListParams: Type.TObject<{
-    view: Type.TOptional<Type.TUnsafe<"active" | "all" | "windows" | "named" | "roles" | "inbox">>;
+    view: Type.TOptional<Type.TUnsafe<"active" | "windows" | "all" | "named" | "roles" | "inbox">>;
+    scope: Type.TOptional<Type.TUnsafe<"local" | "remote" | "all">>;
     session: Type.TOptional<Type.TString>;
     peer: Type.TOptional<Type.TString>;
     direction: Type.TOptional<Type.TUnsafe<"outgoing" | "incoming">>;
-    status: Type.TOptional<Type.TUnsafe<"queued" | "accepted" | "injected" | "pending" | "timeout" | "rejected">>;
+    status: Type.TOptional<Type.TUnsafe<"queued" | "accepted" | "injected" | "pending" | "rejected" | "timeout">>;
     since: Type.TOptional<Type.TString>;
     limit: Type.TOptional<Type.TInteger>;
 }>;
@@ -108,7 +109,7 @@ export declare const ObserveParams: Type.TObject<{
     waitCount: Type.TOptional<Type.TInteger>;
     until: Type.TOptional<Type.TUnsafe<"completed" | "result-ready">>;
     timeoutMs: Type.TOptional<Type.TInteger>;
-    view: Type.TOptional<Type.TUnsafe<"turns" | "todos" | "session" | "live">>;
+    view: Type.TOptional<Type.TUnsafe<"todos" | "turns" | "session" | "live">>;
     turn: Type.TOptional<Type.TInteger>;
 }>;
 type LocalObserveParamsInput = Omit<Static<typeof ObserveParams>, "targets" | "view"> & {
@@ -119,6 +120,14 @@ type LocalObserveParamsInput = Omit<Static<typeof ObserveParams>, "targets" | "v
     view?: "live" | "turns";
 };
 export declare const LocalObserveParams: Type.TUnsafe<LocalObserveParamsInput>;
+export declare const MonitorQueryParams: Type.TObject<{
+    action: Type.TUnsafe<"wait" | "list" | "get">;
+    target: Type.TOptional<Type.TString>;
+    detail: Type.TOptional<Type.TUnsafe<"summary" | "full">>;
+    cursor: Type.TOptional<Type.TString>;
+    until: Type.TOptional<Type.TUnsafe<"settled" | "change" | "attention">>;
+    timeoutMs: Type.TOptional<Type.TInteger>;
+}>;
 export declare const TeammateMonitorParams: Type.TObject<{
     action: Type.TUnsafe<"status" | "wait">;
     targets: Type.TArray<Type.TString>;
@@ -129,13 +138,13 @@ export declare const TeammateMonitorParams: Type.TObject<{
     verbose: Type.TOptional<Type.TBoolean>;
 }>;
 export declare const WorkspaceWindowParams: Type.TObject<{
-    action: Type.TUnsafe<"close" | "create" | "list">;
+    action: Type.TUnsafe<"close" | "list" | "create">;
     name: Type.TOptional<Type.TString>;
     objective: Type.TOptional<Type.TString>;
     presentation: Type.TOptional<Type.TUnsafe<"headless" | "interactive">>;
 }>;
 export declare const RemoteWorkerParams: Type.TObject<{
-    action: Type.TUnsafe<"close" | "targets" | "create" | "list">;
+    action: Type.TUnsafe<"close" | "targets" | "list" | "create">;
     targetId: Type.TOptional<Type.TString>;
     name: Type.TOptional<Type.TString>;
     objective: Type.TOptional<Type.TString>;

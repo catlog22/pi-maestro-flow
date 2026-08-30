@@ -49,6 +49,15 @@ export type RemotePaneRow =
     cwd: string;
     scope: RemotePaneScope;
     hidden?: boolean;
+  }
+  | {
+    kind: "workspace";
+    workspaceRef: string;
+    host: string;
+    cwd: string;
+    minimumWindowProtocol: number;
+    scope: RemotePaneScope;
+    hidden?: boolean;
   };
 
 export type RemotePaneAction =
@@ -59,8 +68,11 @@ export type RemotePaneAction =
   | { kind: "remote-new-host"; scope: RemotePaneScope }
   | { kind: "remote-edit-target"; targetId: string; scope: RemotePaneScope }
   | { kind: "remote-new-target"; scope: RemotePaneScope }
+  | { kind: "remote-edit-workspace"; workspaceRef: string; scope: RemotePaneScope }
+  | { kind: "remote-new-workspace"; scope: RemotePaneScope }
   | { kind: "remote-delete-host"; hostId: string; scope: RemotePaneScope }
   | { kind: "remote-delete-target"; targetId: string; scope: RemotePaneScope }
+  | { kind: "remote-delete-workspace"; workspaceRef: string; scope: RemotePaneScope }
   | { kind: "remote-scope"; scope: RemotePaneScope }
   | { kind: "reload"; tab: "connections" };
 
@@ -202,6 +214,10 @@ export class RemoteConfigPane implements Component, Focusable {
         this.options.close({ kind: "remote-new-target", scope: this.scope });
         return;
       }
+      if (matchesKey(data, "w")) {
+        this.options.close({ kind: "remote-new-workspace", scope: this.scope });
+        return;
+      }
       if (matchesKey(data, "a")) {
         this.options.close({ kind: "connection-add-deployment" });
         return;
@@ -245,13 +261,15 @@ export class RemoteConfigPane implements Component, Focusable {
     if (items.length === 0) {
       rows.push(this.theme.fg("dim", this.t(tKey("remote.empty"))));
     } else {
-      let previousSection: "deployments" | "hosts" | "targets" | undefined;
+      let previousSection: "deployments" | "hosts" | "targets" | "workspaces" | undefined;
       for (const [index, row] of items.entries()) {
         const section = row.kind === "deployment" || row.kind === "legacy-notice"
           ? "deployments"
           : row.kind === "host"
             ? "hosts"
-            : "targets";
+            : row.kind === "workspace"
+              ? "workspaces"
+              : "targets";
         if (section !== previousSection) {
           rows.push(this.sectionLine(section, inner));
           previousSection = section;
@@ -332,6 +350,7 @@ export class RemoteConfigPane implements Component, Focusable {
     const text = [
       this.t(tKey("remote.newHost")),
       this.t(tKey("remote.newTarget")),
+      this.t(tKey("remote.newWorkspace")),
       this.t(tKey("remote.test")),
       this.t(tKey("remote.delete")),
       this.t(tKey("connections.scopeHint")),
@@ -342,12 +361,14 @@ export class RemoteConfigPane implements Component, Focusable {
     return truncateToWidth(text, width, "…");
   }
 
-  private sectionLine(section: "deployments" | "hosts" | "targets", width: number): string {
+  private sectionLine(section: "deployments" | "hosts" | "targets" | "workspaces", width: number): string {
     const key = section === "deployments"
       ? "connections.deploymentsTitle"
       : section === "hosts"
         ? "connections.hostsTitle"
-        : "connections.targetsTitle";
+        : section === "workspaces"
+          ? "connections.workspacesTitle"
+          : "connections.targetsTitle";
     return truncateToWidth(this.theme.bold(this.t(tKey(key))), width, "…");
   }
 
@@ -377,9 +398,11 @@ export class RemoteConfigPane implements Component, Focusable {
       });
     }
     if (row.hidden) {
-      return row.kind === "host"
-        ? this.t(tKey("connections.hiddenHost"), { id: row.id })
-        : this.t(tKey("connections.hiddenTarget"), { id: row.id });
+      if (row.kind === "host") return this.t(tKey("connections.hiddenHost"), { id: row.id });
+      if (row.kind === "workspace") {
+        return this.t(tKey("connections.hiddenWorkspace"), { workspace: row.workspaceRef });
+      }
+      return this.t(tKey("connections.hiddenTarget"), { id: row.id });
     }
     if (row.kind === "host") {
       return this.t(tKey("connections.hostRow"), {
@@ -388,6 +411,14 @@ export class RemoteConfigPane implements Component, Focusable {
         host: row.host,
         port: row.port,
         keyPrefix: row.keyPrefix,
+      });
+    }
+    if (row.kind === "workspace") {
+      return this.t(tKey("connections.workspaceRow"), {
+        workspace: row.workspaceRef,
+        cwd: row.cwd,
+        host: row.host,
+        protocol: row.minimumWindowProtocol,
       });
     }
     return this.t(tKey("connections.targetRow"), {
@@ -422,6 +453,16 @@ export class RemoteConfigPane implements Component, Focusable {
       for (const [id, host] of Object.entries(state.global.hosts)) {
         rows.push({ kind: "host", id, host: host.host, user: host.user, port: host.port, keyPrefix: hostKeyPrefix(host), scope: "global" });
       }
+      for (const [workspaceRef, workspace] of Object.entries(state.global.workspaces)) {
+        rows.push({
+          kind: "workspace",
+          workspaceRef,
+          host: workspace.host,
+          cwd: workspace.cwd,
+          minimumWindowProtocol: workspace.minimumWindowProtocol,
+          scope: "global",
+        });
+      }
       for (const [id, target] of Object.entries(state.global.targets)) {
         rows.push({ kind: "target", id, host: target.host, driver: target.driver, cwd: target.cwd, scope: "global" });
       }
@@ -430,6 +471,26 @@ export class RemoteConfigPane implements Component, Focusable {
         rows.push(entry === null
           ? { kind: "host", id, host: "", user: "", port: 0, keyPrefix: "", scope: "project", hidden: true }
           : { kind: "host", id, host: entry.host, user: entry.user, port: entry.port, keyPrefix: hostKeyPrefix(entry), scope: "project" });
+      }
+      for (const [workspaceRef, entry] of Object.entries(state.project.workspaces)) {
+        rows.push(entry === null
+          ? {
+            kind: "workspace",
+            workspaceRef,
+            host: "",
+            cwd: "",
+            minimumWindowProtocol: 0,
+            scope: "project",
+            hidden: true,
+          }
+          : {
+            kind: "workspace",
+            workspaceRef,
+            host: entry.host,
+            cwd: entry.cwd,
+            minimumWindowProtocol: entry.minimumWindowProtocol,
+            scope: "project",
+          });
       }
       for (const [id, entry] of Object.entries(state.project.targets)) {
         rows.push(entry === null
@@ -441,7 +502,8 @@ export class RemoteConfigPane implements Component, Focusable {
       deployment: 0,
       "legacy-notice": 0,
       host: 1,
-      target: 2,
+      workspace: 2,
+      target: 3,
     };
     rows.sort((left, right) => {
       const sectionOrder = order[left.kind] - order[right.kind];
@@ -450,12 +512,16 @@ export class RemoteConfigPane implements Component, Focusable {
         ? left.registrationId
         : left.kind === "legacy-notice"
           ? ""
-          : left.id;
+          : left.kind === "workspace"
+            ? left.workspaceRef
+            : left.id;
       const rightId = right.kind === "deployment"
         ? right.registrationId
         : right.kind === "legacy-notice"
           ? ""
-          : right.id;
+          : right.kind === "workspace"
+            ? right.workspaceRef
+            : right.id;
       return leftId.localeCompare(rightId);
     });
     return rows;
@@ -475,6 +541,9 @@ export class RemoteConfigPane implements Component, Focusable {
       ].join(" ");
     }
     if (row.kind === "host") return `${row.id} ${row.host}`;
+    if (row.kind === "workspace") {
+      return `${row.workspaceRef} ${row.host} ${row.cwd} ${row.minimumWindowProtocol}`;
+    }
     return `${row.id} ${row.host} ${row.driver} ${row.cwd}`;
   }
 
@@ -505,6 +574,8 @@ export class RemoteConfigPane implements Component, Focusable {
       this.options.close({ kind: "connection-edit-deployment", registrationId: row.registrationId });
     } else if (row.kind === "host") {
       this.options.close({ kind: "remote-edit-host", hostId: row.id, scope: this.scope });
+    } else if (row.kind === "workspace") {
+      this.options.close({ kind: "remote-edit-workspace", workspaceRef: row.workspaceRef, scope: this.scope });
     } else {
       this.options.close({ kind: "remote-edit-target", targetId: row.id, scope: this.scope });
     }
@@ -512,7 +583,11 @@ export class RemoteConfigPane implements Component, Focusable {
 
   private deleteRow(row: RemotePaneItem): void {
     if (row.kind === "host") this.options.close({ kind: "remote-delete-host", hostId: row.id, scope: this.scope });
-    else if (row.kind === "target") this.options.close({ kind: "remote-delete-target", targetId: row.id, scope: this.scope });
+    else if (row.kind === "workspace") {
+      this.options.close({ kind: "remote-delete-workspace", workspaceRef: row.workspaceRef, scope: this.scope });
+    } else if (row.kind === "target") {
+      this.options.close({ kind: "remote-delete-target", targetId: row.id, scope: this.scope });
+    }
   }
 
   private startTest(row: RemotePaneItem): void {

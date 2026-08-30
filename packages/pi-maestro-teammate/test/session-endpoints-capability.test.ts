@@ -2,7 +2,10 @@ import { createHash } from "node:crypto";
 import test, { afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { getWorkspaceProjectionProvider, registerWorkspaceProjectionProvider } from "../src/public/v1/workspace-projections.ts";
-import { projectTeammateSessionEndpoints } from "../src/extension/session-endpoints.ts";
+import {
+  createLocalWorkspacePeerDiscoveryProvider,
+  projectTeammateSessionEndpoints,
+} from "../src/extension/session-endpoints.ts";
 import {
   buildWorkspaceOwnerSnapshot,
   type WorkspacePeerIdentity,
@@ -178,4 +181,60 @@ test("workspace aggregation is advertised only for explicit Monitor projection",
   const monitor = projectTeammateSessionEndpoints(state, identity, [], undefined, true);
   assert.equal(local[0]?.capabilities.includes("monitor-workspace-aggregation"), false);
   assert.equal(monitor[0]?.capabilities.includes("monitor-workspace-aggregation"), true);
+});
+
+test("local workspace discovery provider exposes authority and revalidates owner capture after await", async () => {
+  const state = {
+    activeRuns: new Map(),
+    currentWorkspaceId: "workspace-current",
+    currentSessionId: "session-current",
+    currentSourceId: "source-current",
+    sessionGeneration: 4,
+  } as unknown as TeammateState;
+  const identity: WorkspacePeerIdentity = {
+    version: 1,
+    normalizedCwd: "D:/worker",
+    workspaceId: "e".repeat(64),
+    ownerId: "a".repeat(32),
+    ownerNonce: "b".repeat(32),
+    paths: {
+      rootDir: "D:/peer",
+      ownersDir: "D:/peer/owners",
+      commandsDir: "D:/peer/commands",
+      responsesDir: "D:/peer/responses",
+      identitiesDir: "D:/peer/identities",
+    },
+  };
+  const provider = createLocalWorkspacePeerDiscoveryProvider({
+    state,
+    identity,
+    cleanupStale: false,
+    discover: async () => ({ peers: [], staleOwnerIds: [], corruptFiles: [] }),
+  });
+  assert.deepEqual(provider.authority, {
+    kind: "local",
+    authorityId: identity.workspaceId,
+    instanceNonce: identity.ownerNonce,
+  });
+  const endpoints = await provider.refresh();
+  assert.equal(endpoints.length, 1);
+  assert.equal(endpoints[0]?.ownerId, identity.ownerId);
+  await provider.close();
+  assert.deepEqual(await provider.refresh(), []);
+
+  let releaseDiscovery!: () => void;
+  const discoveryGate = new Promise<void>((resolve) => { releaseDiscovery = resolve; });
+  const changing = createLocalWorkspacePeerDiscoveryProvider({
+    state,
+    identity,
+    discover: async () => {
+      await discoveryGate;
+      return { peers: [], staleOwnerIds: [], corruptFiles: [] };
+    },
+  });
+  const refresh = changing.refresh();
+  identity.ownerNonce = "c".repeat(32);
+  releaseDiscovery();
+  await assert.rejects(refresh, /owner changed while discovery was in flight/);
+  await changing.close();
 });

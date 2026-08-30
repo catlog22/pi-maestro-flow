@@ -78,6 +78,7 @@ import {
   wizardLegacyUpgrade,
   wizardRemoteHost,
   wizardRemoteTarget,
+  wizardRemoteWorkspace,
   type WizardUi,
 } from "./connection-wizards.ts";
 import {
@@ -3049,8 +3050,11 @@ const REMOTE_ACTION_KINDS = new Set([
   "remote-edit-host",
   "remote-new-target",
   "remote-edit-target",
+  "remote-new-workspace",
+  "remote-edit-workspace",
   "remote-delete-host",
   "remote-delete-target",
+  "remote-delete-workspace",
 ]);
 
 function isRemotePaneAction(action: ControlCenterAction): action is RemotePaneAction {
@@ -3064,6 +3068,7 @@ function remoteScopeStores(state: RemoteConfigState, scope: RemotePaneScope) {
         version: state.global.version,
         hosts: { ...state.global.hosts },
         targets: { ...state.global.targets },
+        workspaces: { ...state.global.workspaces },
       },
       project: state.project,
     };
@@ -3074,6 +3079,7 @@ function remoteScopeStores(state: RemoteConfigState, scope: RemotePaneScope) {
       version: state.project.version,
       hosts: { ...state.project.hosts },
       targets: { ...state.project.targets },
+      workspaces: { ...state.project.workspaces },
     },
   };
 }
@@ -3084,6 +3090,10 @@ function findHostInState(state: RemoteConfigState, hostId: string) {
 
 function findTargetInState(state: RemoteConfigState, targetId: string) {
   return state.global.targets[targetId] ?? (state.project.targets[targetId] ?? undefined);
+}
+
+function findWorkspaceInState(state: RemoteConfigState, workspaceRef: string) {
+  return state.global.workspaces[workspaceRef] ?? (state.project.workspaces[workspaceRef] ?? undefined);
 }
 
 function wizardUi(ctx: ExtensionContext, t: TuiTranslator): WizardUi {
@@ -3184,6 +3194,24 @@ async function handleConnectionPaneAction(
         });
         return { ...outcome, reloadCatalog: false };
       }
+      case "remote-new-workspace":
+      case "remote-edit-workspace": {
+        if (!state) return unavailableRemoteState(t);
+        const workspaceRef = action.kind === "remote-edit-workspace" ? action.workspaceRef : undefined;
+        const outcome = await wizardRemoteWorkspace(ui, {
+          state,
+          scope: action.scope,
+          cwd: ctx.cwd,
+          globalFilePath: options.globalFilePath,
+          ...(workspaceRef === undefined
+            ? {}
+            : { workspaceRef, current: findWorkspaceInState(state, workspaceRef) }),
+          persist: (cwd, expected, next, globalFilePath) => {
+            replaceRemoteConfigStores(cwd, expected, next, globalFilePath);
+          },
+        });
+        return { ...outcome, reloadCatalog: false };
+      }
       case "remote-delete-host": {
         if (!state) return unavailableRemoteState(t);
         const confirmed = await ctx.ui.confirm(t("remote.deleteHostTitle", { id: displayText(action.hostId) }), "");
@@ -3210,6 +3238,23 @@ async function handleConnectionPaneAction(
         return {
           ok: true,
           message: t("remote.targetDeleted", { id: displayText(action.targetId) }),
+          reloadRemote: true,
+          reloadCatalog: false,
+        };
+      }
+      case "remote-delete-workspace": {
+        if (!state) return unavailableRemoteState(t);
+        const confirmed = await ctx.ui.confirm(t("remote.deleteWorkspaceTitle", {
+          workspace: displayText(action.workspaceRef),
+        }), "");
+        if (!confirmed) return { ok: true, message: "", reloadRemote: false, reloadCatalog: false };
+        const stores = remoteScopeStores(state, action.scope);
+        if (action.scope === "project") stores.project.workspaces[action.workspaceRef] = null;
+        else delete stores.global.workspaces[action.workspaceRef];
+        await persistRemoteStores(ctx, options, state, stores);
+        return {
+          ok: true,
+          message: t("remote.workspaceDeleted", { workspace: displayText(action.workspaceRef) }),
           reloadRemote: true,
           reloadCatalog: false,
         };
@@ -3250,8 +3295,18 @@ async function persistRemoteStores(
   stores: { global: RemoteConfigState["global"]; project: RemoteConfigState["project"] },
 ): Promise<void> {
   const expected = {
-    global: { ...state.global, hosts: { ...state.global.hosts }, targets: { ...state.global.targets } },
-    project: { ...state.project, hosts: { ...state.project.hosts }, targets: { ...state.project.targets } },
+    global: {
+      ...state.global,
+      hosts: { ...state.global.hosts },
+      targets: { ...state.global.targets },
+      workspaces: { ...state.global.workspaces },
+    },
+    project: {
+      ...state.project,
+      hosts: { ...state.project.hosts },
+      targets: { ...state.project.targets },
+      workspaces: { ...state.project.workspaces },
+    },
   };
   replaceRemoteConfigStores(ctx.cwd, expected, stores, options?.globalFilePath);
 }

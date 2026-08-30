@@ -352,6 +352,12 @@ export const TeammateListParams = Type.Object({
       description: 'View to return: "active" live agents except completed entries, "named" addressable agents, "all" tracked live entries, "roles" role definitions, "windows" available cross-session windows, or "inbox" persisted cross-window messages.',
     }),
   ),
+  scope: Type.Optional(Type.Unsafe<"local" | "remote" | "all">({
+    type: "string",
+    enum: ["local", "remote", "all"],
+    default: "local",
+    description: 'Windows-only discovery scope. "local" is the compatibility default; "remote" and "all" may open configured SSH workspace connections.',
+  })),
   session: Type.Optional(Type.String({
     minLength: 1,
     description: 'Inbox-only session id/name/prefix. Omit to aggregate recent workspace sessions; use "current" for the active session.',
@@ -382,10 +388,16 @@ export const TeammateListParams = Type.Object({
   })),
 }, {
   additionalProperties: false,
-  allOf: ["session", "peer", "direction", "status", "since", "limit"].map((field) => ({
-    if: { required: [field] },
-    then: { properties: { view: { const: "inbox" } }, required: ["view"] },
-  })),
+  allOf: [
+    {
+      if: { required: ["scope"] },
+      then: { properties: { view: { const: "windows" } }, required: ["view"] },
+    },
+    ...["session", "peer", "direction", "status", "since", "limit"].map((field) => ({
+      if: { required: [field] },
+      then: { properties: { view: { const: "inbox" } }, required: ["view"] },
+    })),
+  ],
 });
 
 export const TeammateWatchParams = Type.Object({
@@ -598,7 +610,68 @@ export const LocalObserveParams = Type.Unsafe<LocalObserveParamsInput>({
 });
 
 // ---------------------------------------------------------------------------
-// Monitor — teammate-compatible multi-agent observation and barrier wait
+// Monitor — normalized single-window domain state (root Monitor only)
+// ---------------------------------------------------------------------------
+
+export const MonitorQueryParams = Type.Object({
+  action: Type.Unsafe<"list" | "get" | "wait">({
+    type: "string",
+    enum: ["list", "get", "wait"],
+    description: 'List normalized visible windows, get one exact window state, or wait on one window-domain condition.',
+  }),
+  target: Type.Optional(Type.String({
+    minLength: 1,
+    maxLength: 2_048,
+    description: "Exact owner/remote-window target returned by list. Required for get and wait.",
+  })),
+  detail: Type.Optional(Type.Unsafe<"summary" | "full">({
+    type: "string",
+    enum: ["summary", "full"],
+    default: "summary",
+    description: 'Summary returns normalized state only. "full" adds the selected window\'s bounded grouped timeline and is unavailable for list.',
+  })),
+  cursor: Type.Optional(Type.String({
+    minLength: 1,
+    maxLength: 2_048,
+    description: "Opaque window-scoped cursor returned by get/wait. With until=change, a different current cursor returns immediately.",
+  })),
+  until: Type.Optional(Type.Unsafe<"change" | "attention" | "settled">({
+    type: "string",
+    enum: ["change", "attention", "settled"],
+    default: "change",
+    description: "Wait-only window condition: semantic change, attention, or settled lifecycle/completion.",
+  })),
+  timeoutMs: Type.Optional(Type.Integer({
+    minimum: 1,
+    default: 600_000,
+    description: "Wait-only wall-clock timeout in milliseconds (default: 600000, 10 minutes).",
+  })),
+}, {
+  additionalProperties: false,
+  allOf: [
+    {
+      if: { properties: { action: { enum: ["get", "wait"] } }, required: ["action"] },
+      then: { required: ["target"] },
+    },
+    {
+      if: { properties: { action: { const: "list" } }, required: ["action"] },
+      then: { not: { anyOf: [
+        { required: ["target"] },
+        { required: ["cursor"] },
+        { required: ["until"] },
+        { required: ["timeoutMs"] },
+        { properties: { detail: { const: "full" } }, required: ["detail"] },
+      ] } },
+    },
+    ...["until", "timeoutMs"].map((field) => ({
+      if: { required: [field] },
+      then: { properties: { action: { const: "wait" } }, required: ["action", "target"] },
+    })),
+  ],
+});
+
+// ---------------------------------------------------------------------------
+// Legacy teammate monitor — teammate-compatible multi-agent barrier wait
 // ---------------------------------------------------------------------------
 
 export const TeammateMonitorParams = Type.Object({

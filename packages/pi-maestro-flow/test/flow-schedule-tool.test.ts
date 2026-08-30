@@ -5,8 +5,15 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   WORKSPACE_MAIN_SESSION_MARKER,
+  bindWorkspaceCompletionHandle,
   workspaceWindowCompletionHandle,
 } from "pi-maestro-teammate/v1/workspace-completion";
+import {
+  MONITOR_WINDOW_STATE_VERSION,
+  getMonitorWindowFacetProvider,
+  readMonitorWindowFacets,
+  type MonitorWindowFacetTargetV1,
+} from "pi-maestro-teammate/v1/monitor-window-state";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { Check } from "typebox/value";
@@ -31,9 +38,14 @@ import {
   flowScheduleResultMessageId,
   flowScheduleResultTransportMessageId,
 } from "../src/flow-schedule/protocol.ts";
+import {
+  FLOW_SCHEDULE_MONITOR_FACET_KIND,
+  createFlowScheduleMonitorFacetProvider,
+} from "../src/flow-schedule/monitor-facet.ts";
 import { registerFlowSchedule } from "../src/flow-schedule/register.ts";
 import { FlowScheduleRuntime } from "../src/flow-schedule/runtime.ts";
-import { FlowScheduleStore } from "../src/flow-schedule/store.ts";
+import { FlowScheduleStore, type FlowScheduleDispatchBundle } from "../src/flow-schedule/store.ts";
+import type { ExactWindowIdentity, FlowScheduleRecord } from "../src/flow-schedule/types.ts";
 import {
   createCoordinatorFlowScheduleTool,
   createWorkerFlowScheduleTool,
@@ -361,6 +373,340 @@ test("status shows the latest dispatch binding and exact Todo outcome after comp
 function runtimeDispose(runtime: FlowScheduleRuntime): void {
   runtime.dispose();
 }
+
+test("Flow Monitor facet projects only exact target schedules with negotiated Todo and authoritative result evidence", async () => {
+  const exactIdentity: ExactWindowIdentity = {
+    workspaceId: WORKSPACE_ID,
+    endpointId: TARGET,
+    ownerId: PEER_OWNER,
+    ownerNonce: PEER_NONCE,
+    sessionId: "peer-session",
+  };
+  const captured: MonitorWindowFacetTargetV1 = {
+    identity: {
+      workspaceId: exactIdentity.workspaceId,
+      endpointId: exactIdentity.endpointId,
+      ownerId: exactIdentity.ownerId,
+      ownerNonce: exactIdentity.ownerNonce,
+    },
+    workRef: { kind: "message", id: GENERIC_MESSAGE_ID },
+  };
+  const dispatchIds = {
+    active: DISPATCH_ID,
+    ambiguous: "123e4567-e89b-42d3-a456-426614174001",
+    complete: "123e4567-e89b-42d3-a456-426614174002",
+  };
+  const schedule = (
+    scheduleId: string,
+    stepState: FlowScheduleRecord["steps"][string]["state"],
+    dispatchId: string,
+    active: boolean,
+    identity: ExactWindowIdentity = exactIdentity,
+  ): FlowScheduleRecord => ({
+    version: 1,
+    scheduleId,
+    targetSelector: `owner:${identity.ownerId}`,
+    targetIdentity: identity,
+    state: "active",
+    stepIds: ["verify"],
+    steps: {
+      verify: {
+        stepId: "verify",
+        prompt: "Verify",
+        state: stepState,
+        attempts: [dispatchId],
+        ...(active ? { currentDispatchId: dispatchId } : {}),
+        todoBinding: { requireCompleted: true, conflictCheck: true },
+      },
+    },
+    ...(active ? { activeStepId: "verify" } : {}),
+    createdAt: 10,
+    updatedAt: 20,
+  });
+  const intent = (scheduleId: string, dispatchId: string) => ({
+    version: 1 as const,
+    dispatchId,
+    scheduleId,
+    stepId: "verify",
+    targetIdentity: exactIdentity,
+    state: "prepared" as const,
+    createdAt: 30,
+  });
+  const activeBundle: FlowScheduleDispatchBundle = {
+    intent: intent("active", dispatchIds.active),
+    published: {
+      version: 1,
+      type: "flow-schedule-published",
+      dispatchId: dispatchIds.active,
+      scheduleId: "active",
+      stepId: "verify",
+      messageId: "active-message",
+      traceId: dispatchIds.active,
+      publishedAt: 31,
+    },
+    accepted: {
+      version: 1,
+      type: "flow-schedule-accepted",
+      dispatchId: dispatchIds.active,
+      scheduleId: "active",
+      stepId: "verify",
+      messageId: "active-message",
+      acceptedAt: 32,
+      deliveryState: "injected",
+    },
+    binding: {
+      version: 1,
+      type: "flow-schedule-binding",
+      dispatchId: dispatchIds.active,
+      scheduleId: "active",
+      stepId: "verify",
+      todoId: "todo-active",
+      todoStatus: "in_progress",
+      state: "bound",
+      createdAt: 30,
+      updatedAt: 32,
+    },
+  };
+  const ambiguousBundle: FlowScheduleDispatchBundle = {
+    intent: intent("ambiguous", dispatchIds.ambiguous),
+    completion: {
+      version: 1,
+      type: "flow-schedule-completion",
+      dispatchId: dispatchIds.ambiguous,
+      scheduleId: "ambiguous",
+      stepId: "verify",
+      targetIdentity: exactIdentity,
+      state: "ambiguous",
+      reason: "terminal window had no exact report",
+      completedAt: 40,
+    },
+  };
+  const completionCorrelation = bindWorkspaceCompletionHandle(GENERIC_MESSAGE_ID, {
+    workspaceId: WORKSPACE_ID,
+    ownerId: PEER_OWNER,
+    ownerNonce: PEER_NONCE,
+  });
+  const completedBundle: FlowScheduleDispatchBundle = {
+    intent: { ...intent("complete", dispatchIds.complete), completionCorrelation },
+    binding: {
+      version: 1,
+      type: "flow-schedule-binding",
+      dispatchId: dispatchIds.complete,
+      scheduleId: "complete",
+      stepId: "verify",
+      todoId: "todo-complete",
+      todoStatus: "completed",
+      state: "completed",
+      createdAt: 30,
+      updatedAt: 50,
+    },
+    completion: {
+      version: 1,
+      type: "flow-schedule-completion",
+      dispatchId: dispatchIds.complete,
+      scheduleId: "complete",
+      stepId: "verify",
+      targetIdentity: exactIdentity,
+      state: "completed",
+      completedAt: 50,
+      result: {
+        version: 1,
+        type: "flow-schedule-result",
+        dispatchId: dispatchIds.complete,
+        scheduleId: "complete",
+        stepId: "verify",
+        outcome: "completed",
+        summary: "Verified exactly",
+        resources: ["agent://flow-result"],
+        completionCorrelation,
+        todoOutcome: { todoId: "todo-complete", todoStatus: "completed" },
+      },
+    },
+  };
+  const stale = schedule("stale", "awaiting-result", dispatchIds.active, true, {
+    ...exactIdentity,
+    ownerNonce: "c".repeat(32),
+  });
+  const bundles = new Map<string, FlowScheduleDispatchBundle>([
+    [dispatchIds.active, activeBundle],
+    [dispatchIds.ambiguous, ambiguousBundle],
+    [dispatchIds.complete, completedBundle],
+  ]);
+  const provider = createFlowScheduleMonitorFacetProvider(() => ({
+    async listSchedules() {
+      return [
+        schedule("complete", "completed", dispatchIds.complete, false),
+        stale,
+        schedule("active", "awaiting-result", dispatchIds.active, true),
+        schedule("ambiguous", "ambiguous", dispatchIds.ambiguous, false),
+      ];
+    },
+    async readDispatch(dispatchId) { return bundles.get(dispatchId); },
+  }));
+
+  const facets = await provider.read({
+    version: MONITOR_WINDOW_STATE_VERSION,
+    targets: [{ identity: captured.identity }, captured],
+  });
+  assert.ok(Array.isArray(facets));
+  assert.equal(facets.length, 1, "one exact window gets one Flow facet even when the caller also captures a WorkRef");
+  const facet = facets[0]!;
+  assert.equal(facet.kind, FLOW_SCHEDULE_MONITOR_FACET_KIND);
+  assert.deepEqual(facet.target, { identity: captured.identity }, "Flow coordination is window-scoped rather than attached to an unrelated current WorkRef");
+  const data = facet.data as {
+    source: string;
+    version: number;
+    revision: string;
+    schedules: Array<{
+      scheduleId: string;
+      activeStep?: { stepId: string; state: string };
+      dispatch?: {
+        state: string;
+        todoGate: {
+          negotiated: boolean;
+          requireCompleted: boolean;
+          conflictCheck: boolean;
+          authority: string;
+          reportedOutcome?: { todoId: string; todoStatus: string };
+        };
+        exactResult?: {
+          source: string;
+          authority: string;
+          summary: string;
+          canonicalCompletion?: { source: string; resource: string };
+        };
+      };
+      ambiguity: { ambiguous: boolean; reason?: string };
+    }>;
+  };
+  assert.equal(data.source, "pi-maestro-flow/flow-schedule");
+  assert.equal(data.revision, facet.revision);
+  assert.deepEqual(data.schedules.map((item) => item.scheduleId), ["active", "ambiguous", "complete"]);
+  assert.deepEqual(data.schedules[0]?.activeStep, { stepId: "verify", state: "awaiting-result", attempts: 1, dispatchId: dispatchIds.active });
+  assert.equal(data.schedules[0]?.dispatch?.state, "accepted");
+  assert.deepEqual(data.schedules[0]?.dispatch?.todoGate, {
+    requested: true,
+    negotiated: true,
+    requireCompleted: true,
+    conflictCheck: true,
+    authority: "additional-evidence-only",
+    binding: { state: "bound", todoId: "todo-active", todoStatus: "in_progress", updatedAt: 32 },
+  });
+  assert.deepEqual(data.schedules[1]?.ambiguity, {
+    ambiguous: true,
+    reason: "terminal window had no exact report",
+    completedAt: 40,
+  });
+  assert.deepEqual(data.schedules[1]?.dispatch?.todoGate, {
+    requested: true,
+    negotiated: false,
+    requireCompleted: false,
+    conflictCheck: false,
+    authority: "additional-evidence-only",
+  }, "a requested Todo binding is not a gate until a durable binding proves negotiation");
+  assert.ok(facet.attention?.some((item) => item.code === "flow-schedule-ambiguous"));
+  assert.equal(data.schedules[2]?.dispatch?.exactResult?.source, "exact-report");
+  assert.equal(data.schedules[2]?.dispatch?.exactResult?.authority, "business-completion");
+  assert.equal(data.schedules[2]?.dispatch?.exactResult?.canonicalCompletion?.source, "canonical-completion");
+  assert.equal(data.schedules[2]?.dispatch?.exactResult?.canonicalCompletion?.resource, completionCorrelation.resource);
+  assert.deepEqual(data.schedules[2]?.dispatch?.todoGate.reportedOutcome, {
+    todoId: "todo-complete",
+    todoStatus: "completed",
+  });
+});
+
+test("Flow Monitor facet rejects mismatched dispatch identity and degrades when unavailable or unreadable", async () => {
+  const identity = {
+    workspaceId: WORKSPACE_ID,
+    endpointId: TARGET,
+    ownerId: PEER_OWNER,
+    ownerNonce: PEER_NONCE,
+  };
+  const target: MonitorWindowFacetTargetV1 = { identity };
+  const schedule: FlowScheduleRecord = {
+    version: 1,
+    scheduleId: "release",
+    targetSelector: `owner:${PEER_OWNER}`,
+    targetIdentity: identity,
+    state: "active",
+    stepIds: ["verify"],
+    steps: { verify: { stepId: "verify", prompt: "Verify", state: "awaiting-result", attempts: [DISPATCH_ID], currentDispatchId: DISPATCH_ID } },
+    activeStepId: "verify",
+    createdAt: 1,
+    updatedAt: 2,
+  };
+  const provider = createFlowScheduleMonitorFacetProvider(() => ({
+    async listSchedules() { return [schedule]; },
+    async readDispatch() {
+      return {
+        intent: {
+          version: 1,
+          dispatchId: DISPATCH_ID,
+          scheduleId: "release",
+          stepId: "verify",
+          targetIdentity: { ...identity, ownerNonce: "c".repeat(32) },
+          state: "prepared",
+          createdAt: 3,
+        },
+      };
+    },
+  }));
+  const facets = await provider.read({ version: MONITOR_WINDOW_STATE_VERSION, targets: [target] });
+  assert.ok(Array.isArray(facets));
+  const scheduleData = (facets[0]?.data as { schedules?: Array<{ dispatch?: unknown }> }).schedules?.[0];
+  assert.equal(scheduleData?.dispatch, undefined);
+  assert.ok(facets[0]?.attention?.some((item) => item.code === "flow-schedule-dispatch-identity-mismatch"));
+
+  const unavailable = createFlowScheduleMonitorFacetProvider(() => undefined);
+  assert.deepEqual(await unavailable.read({ version: MONITOR_WINDOW_STATE_VERSION, targets: [target] }), []);
+  await assert.rejects(
+    () => unavailable.read({ version: 2, targets: [target] } as never),
+    /Unsupported Monitor window state version/,
+  );
+});
+
+test("root Flow registration publishes the public v1 facet and contains provider registration failure", () => {
+  const api = fakePi();
+  const registration = registerFlowSchedule(api.pi, { managedWorker: false, getRegistry: () => undefined });
+  try {
+    assert.ok(getMonitorWindowFacetProvider(FLOW_SCHEDULE_MONITOR_FACET_KIND));
+  } finally {
+    registration.dispose();
+  }
+  assert.equal(getMonitorWindowFacetProvider(FLOW_SCHEDULE_MONITOR_FACET_KIND), undefined);
+
+  const errors: unknown[] = [];
+  const degraded = registerFlowSchedule(fakePi().pi, {
+    managedWorker: false,
+    getRegistry: () => undefined,
+    registerMonitorFacetProvider() { throw new Error("facet registry unavailable"); },
+    onError: (error) => errors.push(error),
+  });
+  assert.equal(degraded.managedWorker, false);
+  assert.match(errors[0] instanceof Error ? errors[0].message : "", /facet registry unavailable/);
+  degraded.dispose();
+});
+
+test("public facet aggregation contains Flow read failures so base Monitor state can degrade", async () => {
+  const kind = FLOW_SCHEDULE_MONITOR_FACET_KIND;
+  const provider = createFlowScheduleMonitorFacetProvider(() => ({
+    async listSchedules() { throw new Error("flow store unavailable"); },
+    async readDispatch() { return undefined; },
+  }));
+  const dispose = (await import("pi-maestro-teammate/v1/monitor-window-state")).registerMonitorWindowFacetProvider(provider);
+  try {
+    const errors: string[] = [];
+    const facets = await readMonitorWindowFacets({
+      version: MONITOR_WINDOW_STATE_VERSION,
+      targets: [{ identity: { workspaceId: WORKSPACE_ID, endpointId: TARGET, ownerId: PEER_OWNER, ownerNonce: PEER_NONCE } }],
+    }, (message) => errors.push(message));
+    assert.deepEqual(facets, []);
+    assert.equal(errors.length, 1);
+    assert.match(errors[0]!, new RegExp(`provider "${kind}" read failed: flow store unavailable`));
+  } finally {
+    dispose();
+  }
+});
 
 test("managed-worker tool exposes report only and derives transport destination from the inbound dispatch", async () => {
   let published: SessionMessageRequest | undefined;

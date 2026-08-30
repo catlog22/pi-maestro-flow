@@ -63,6 +63,7 @@ function config(): RemoteConfig {
         command: ["pi", "--mode", "rpc"],
       },
     },
+    workspaces: {},
   };
 }
 

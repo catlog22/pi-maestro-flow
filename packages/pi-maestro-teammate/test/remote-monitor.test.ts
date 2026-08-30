@@ -11,7 +11,7 @@ import {
 import type { RemoteHistoryEntry } from "../src/sessions/remote-history.ts";
 
 const config: RemoteConfig = {
-  version: 2,
+  version: 3,
   hosts: {
     linux: {
       host: "worker.example.test",
@@ -28,6 +28,7 @@ const config: RemoteConfig = {
       command: ["pi"],
     },
   },
+  workspaces: {},
 };
 
 function snapshot(capture: RemoteRunCapture, status: RemoteRunSnapshot["status"] = "running", sequence = 0): RemoteRunSnapshot {

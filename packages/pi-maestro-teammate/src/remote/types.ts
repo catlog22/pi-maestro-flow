@@ -1,7 +1,8 @@
 /** Canonical public data model for the Maestro Remote Worker Protocol. */
 
 export const REMOTE_PROTOCOL_VERSION = "remote/2" as const;
-export const REMOTE_CONFIG_VERSION = 2 as const;
+export const REMOTE_CONFIG_VERSION = 3 as const;
+export const REMOTE_WINDOW_BRIDGE_PLUGIN_ID = "pi-maestro-teammate" as const;
 
 export type RemoteProtocolVersion = typeof REMOTE_PROTOCOL_VERSION;
 export type RemoteConfigVersion = typeof REMOTE_CONFIG_VERSION;
@@ -92,8 +93,22 @@ export interface RemoteTargetConfig {
   acp?: RemoteAcpPolicy;
 }
 
+/** A trusted remote Pi workspace eligible for explicit window discovery. */
+export interface RemoteWorkspaceConfig {
+  host: string;
+  /** Trusted absolute POSIX cwd; remote window requests never supply their own cwd. */
+  cwd: string;
+  requiredPlugin: typeof REMOTE_WINDOW_BRIDGE_PLUGIN_ID;
+  minimumWindowProtocol: number;
+}
+
 export interface ResolvedRemoteTarget extends RemoteTargetConfig {
   id: string;
+  hostConfig: RemoteHostConfig;
+}
+
+export interface ResolvedRemoteWorkspace extends RemoteWorkspaceConfig {
+  workspaceRef: string;
   hostConfig: RemoteHostConfig;
 }
 

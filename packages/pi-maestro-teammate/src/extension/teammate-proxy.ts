@@ -979,6 +979,15 @@ function proxyWaitCycleResult(
   };
 }
 
+function taskExplicitlyAllowsRootCoordination(task: string | undefined): boolean {
+  if (!task) return false;
+  const normalized = task.toLowerCase();
+  if (!normalized.includes("teammate-send") || !/(?:@root|\broot(?: session)?\b)/.test(normalized)) {
+    return false;
+  }
+  return !/(?:do not|don't|never|must not)\s+(?:call|use|send(?: via)?)?\s*`?teammate-send\b/.test(normalized);
+}
+
 export async function handleProxyRequest(
   pi: ExtensionAPI,
   state: TeammateState,
@@ -2887,6 +2896,24 @@ export async function handleProxyRequest(
       const messageKind = normalizeSessionMessageKind(requestedMessageKind) ?? "coordination";
       const localRootTarget = to === "root" || to === "@root";
       const localCid = localRootTarget ? undefined : resolveAgentCorrelationId(state, to);
+      const parentAgent = parentCid ? state.activeRuns.get(parentCid) : undefined;
+
+      if (
+        localRootTarget
+        && parentAgent
+        && messageKind === "coordination"
+        && !taskExplicitlyAllowsRootCoordination(parentAgent.task)
+      ) {
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{
+            type: "text",
+            text: "Routine child-to-root coordination is disabled. Return findings in the final result. The dispatch prompt must explicitly authorize teammate-send to root; use kind=request only for a hard blocker or kind=supervision for a safety/lifecycle constraint.",
+          }],
+          isError: true,
+          details: { delivered: false, reason: "routine-root-coordination" },
+        }});
+        return;
+      }
 
       if (((localRootTarget && sessionSend) || to.startsWith("owner:")) && (sessionSend || workspacePeerSend) && !localCid) {
         if (!message && requestedMode !== "abort") {

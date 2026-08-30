@@ -27,11 +27,18 @@ import {
   validateHostId,
   validateRemoteHostDraft,
   validateRemoteTargetDraft,
+  validateRemoteWorkspaceDraft,
   validateTargetId,
+  validateWorkspaceRef,
   type RemoteConfigState,
   type RemoteConfigStorePair,
 } from "../remote/config.ts";
-import type { RemoteHostConfig, RemoteTargetConfig } from "../remote/types.ts";
+import {
+  REMOTE_WINDOW_BRIDGE_PLUGIN_ID,
+  type RemoteHostConfig,
+  type RemoteTargetConfig,
+  type RemoteWorkspaceConfig,
+} from "../remote/types.ts";
 import type { RemotePaneScope } from "./remote-config-pane.ts";
 import {
   createTuiTranslator,
@@ -512,10 +519,25 @@ export interface RemoteTargetWizardDeps extends RemoteWizardDeps {
   current?: RemoteTargetConfig;
 }
 
+export interface RemoteWorkspaceWizardDeps extends RemoteWizardDeps {
+  workspaceRef?: string;
+  current?: RemoteWorkspaceConfig;
+}
+
 function cloneStores(state: RemoteConfigState): RemoteConfigStorePair {
   return {
-    global: { ...state.global, hosts: { ...state.global.hosts }, targets: { ...state.global.targets } },
-    project: { ...state.project, hosts: { ...state.project.hosts }, targets: { ...state.project.targets } },
+    global: {
+      ...state.global,
+      hosts: { ...state.global.hosts },
+      targets: { ...state.global.targets },
+      workspaces: { ...state.global.workspaces },
+    },
+    project: {
+      ...state.project,
+      hosts: { ...state.project.hosts },
+      targets: { ...state.project.targets },
+      workspaces: { ...state.project.workspaces },
+    },
   };
 }
 
@@ -721,6 +743,65 @@ export async function wizardRemoteTarget(
   return {
     ok: true,
     message: wizardText(ui, "remote.targetSaved", { id }),
+    reloadRemote: true,
+  };
+}
+
+/** Create or edit an explicitly trusted remote Pi workspace. */
+export async function wizardRemoteWorkspace(
+  ui: WizardUi,
+  deps: RemoteWorkspaceWizardDeps,
+): Promise<RemotePaneOutcome> {
+  const workspaceRef = await promptRemoteId(
+    ui,
+    wizardText(ui, "remote.workspaceRef"),
+    deps.workspaceRef,
+    validateWorkspaceRef,
+  );
+  if (workspaceRef === undefined) return remoteCancelled();
+  const hostIds = Object.keys(deps.state.config.hosts);
+  const host = await ui.select(wizardText(ui, "remote.workspaceHost"), hostIds);
+  if (host === undefined || !hostIds.includes(host)) return remoteCancelled();
+
+  const cwd = await promptRemoteValue(
+    ui,
+    { key: "cwd", kind: "path", labelKey: "remote.workspaceCwd", required: true },
+    deps.current?.cwd,
+    (value) => typeof value === "string"
+      && path.posix.isAbsolute(value)
+      && path.posix.normalize(value) === value,
+  );
+  if ("cancelled" in cwd) return remoteCancelled();
+  const minimumWindowProtocol = await promptRemoteValue(
+    ui,
+    { key: "minimumWindowProtocol", kind: "integer", labelKey: "remote.workspaceProtocol", default: 1, required: true },
+    deps.current?.minimumWindowProtocol ?? 1,
+    (value) => typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 65_535,
+  );
+  if ("cancelled" in minimumWindowProtocol) return remoteCancelled();
+
+  const draft = {
+    host,
+    cwd: cwd.value as string,
+    requiredPlugin: REMOTE_WINDOW_BRIDGE_PLUGIN_ID,
+    minimumWindowProtocol: minimumWindowProtocol.value as number,
+  } satisfies RemoteWorkspaceConfig;
+  const validation = validateRemoteWorkspaceDraft(workspaceRef, draft);
+  if (!validation.ok) {
+    return {
+      ok: false,
+      message: wizardText(ui, "remote.validationFailed", { error: validation.error }),
+      reloadRemote: false,
+    };
+  }
+
+  const next = cloneStores(deps.state);
+  const target = deps.scope === "global" ? next.global : next.project;
+  target.workspaces[workspaceRef] = draft;
+  await persistRemote(ui, deps, next);
+  return {
+    ok: true,
+    message: wizardText(ui, "remote.workspaceSaved", { workspace: workspaceRef }),
     reloadRemote: true,
   };
 }

@@ -6,13 +6,16 @@ import * as path from "node:path";
 import { IMMUTABLE_ENV_NAMES } from "./child-security.ts";
 import {
   REMOTE_CONFIG_VERSION,
+  REMOTE_WINDOW_BRIDGE_PLUGIN_ID,
   type RemoteAcpFileSystemPolicy,
   type RemoteAcpPolicy,
   type RemoteAcpTerminalCommand,
   type RemoteAcpTerminalPolicy,
   type RemoteHostConfig,
   type RemoteTargetConfig,
+  type RemoteWorkspaceConfig,
   type ResolvedRemoteTarget,
+  type ResolvedRemoteWorkspace,
 } from "./types.ts";
 
 const CONFIG_FILE = "teammate-remotes.json";
@@ -33,12 +36,15 @@ const MAX_ACP_FILE_BYTES = 1024 * 1024;
 const MAX_ACP_TERMINAL_TIMEOUT_MS = 5 * 60 * 1000;
 const HOST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const TARGET_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/;
+const WORKSPACE_REF_PATTERN = TARGET_ID_PATTERN;
 const HOST_KEY_PATTERN = /^SHA256:[A-Za-z0-9+/]{20,}={0,2}$/;
+const MAX_WINDOW_PROTOCOL_VERSION = 65_535;
 
 export interface GlobalRemoteConfigStore {
   version: typeof REMOTE_CONFIG_VERSION;
   hosts: Record<string, RemoteHostConfig>;
   targets: Record<string, RemoteTargetConfig>;
+  workspaces: Record<string, RemoteWorkspaceConfig>;
 }
 
 export interface ProjectRemoteConfigStore {
@@ -47,12 +53,15 @@ export interface ProjectRemoteConfigStore {
   hosts: Record<string, RemoteHostConfig | null>;
   /** Project values override globals; null explicitly hides a global entry. */
   targets: Record<string, RemoteTargetConfig | null>;
+  /** Project values override globals; null explicitly hides a global entry. */
+  workspaces: Record<string, RemoteWorkspaceConfig | null>;
 }
 
 export interface RemoteConfig {
   version: typeof REMOTE_CONFIG_VERSION;
   hosts: Record<string, RemoteHostConfig>;
   targets: Record<string, RemoteTargetConfig>;
+  workspaces: Record<string, RemoteWorkspaceConfig>;
 }
 
 export interface RemoteConfigState {
@@ -85,11 +94,11 @@ export function getProjectRemoteConfigPath(cwd: string): string {
 }
 
 function emptyGlobalStore(): GlobalRemoteConfigStore {
-  return { version: REMOTE_CONFIG_VERSION, hosts: {}, targets: {} };
+  return { version: REMOTE_CONFIG_VERSION, hosts: {}, targets: {}, workspaces: {} };
 }
 
 function emptyProjectStore(): ProjectRemoteConfigStore {
-  return { version: REMOTE_CONFIG_VERSION, hosts: {}, targets: {} };
+  return { version: REMOTE_CONFIG_VERSION, hosts: {}, targets: {}, workspaces: {} };
 }
 
 function plainObject(value: unknown): value is Record<string, unknown> {
@@ -115,6 +124,12 @@ export function validateHostId(id: string): void {
 
 export function validateTargetId(id: string): void {
   if (id.length > 128 || !TARGET_ID_PATTERN.test(id)) throw new Error(`Invalid remote target id: ${id}`);
+}
+
+export function validateWorkspaceRef(workspaceRef: string): void {
+  if (workspaceRef.length > 128 || !WORKSPACE_REF_PATTERN.test(workspaceRef)) {
+    throw new Error(`Invalid remote workspace ref: ${workspaceRef}`);
+  }
 }
 
 function normalizeHost(value: unknown, id: string): RemoteHostConfig {
@@ -337,6 +352,36 @@ function normalizeTarget(value: unknown, id: string): RemoteTargetConfig {
   };
 }
 
+function normalizeWorkspace(value: unknown, workspaceRef: string): RemoteWorkspaceConfig {
+  if (!plainObject(value)) throw new Error(`Invalid remote workspace: ${workspaceRef}`);
+  assertKnownKeys(
+    value,
+    ["host", "cwd", "requiredPlugin", "minimumWindowProtocol"],
+    `remote workspace ${workspaceRef}`,
+  );
+  const host = boundedString(value.host, `remote workspace host: ${workspaceRef}`, 64);
+  validateHostId(host);
+  const cwd = boundedString(value.cwd, `remote workspace cwd: ${workspaceRef}`, 4096);
+  if (!path.posix.isAbsolute(cwd) || path.posix.normalize(cwd) !== cwd) {
+    throw new Error(`Remote workspace cwd must be a canonical absolute POSIX path: ${workspaceRef}`);
+  }
+  if (value.requiredPlugin !== REMOTE_WINDOW_BRIDGE_PLUGIN_ID) {
+    throw new Error(`Remote workspace requires an unsupported plugin: ${workspaceRef}`);
+  }
+  if (typeof value.minimumWindowProtocol !== "number"
+    || !Number.isInteger(value.minimumWindowProtocol)
+    || value.minimumWindowProtocol < 1
+    || value.minimumWindowProtocol > MAX_WINDOW_PROTOCOL_VERSION) {
+    throw new Error(`Invalid remote workspace minimumWindowProtocol: ${workspaceRef}`);
+  }
+  return {
+    host,
+    cwd,
+    requiredPlugin: REMOTE_WINDOW_BRIDGE_PLUGIN_ID,
+    minimumWindowProtocol: value.minimumWindowProtocol,
+  };
+}
+
 const TARGET_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 function normalizeTargetEnv(value: unknown, id: string): string[] {
@@ -401,6 +446,18 @@ function migrateLegacyAcpPolicy(value: unknown, id: string): unknown {
 function migrateStore(value: unknown, label: "global" | "project"): unknown {
   if (!plainObject(value)) throw new Error(`Invalid ${label} teammate remote config`);
   if (value.version === REMOTE_CONFIG_VERSION) return value;
+  if (value.version === 2) {
+    assertKnownKeys(value, ["version", "hosts", "targets"], `version 2 ${label} teammate remote config`);
+    if (!plainObject(value.hosts) || !plainObject(value.targets)) {
+      throw new Error(`Invalid version 2 ${label} teammate remote config`);
+    }
+    return {
+      version: REMOTE_CONFIG_VERSION,
+      hosts: value.hosts,
+      targets: value.targets,
+      workspaces: {},
+    };
+  }
   if (value.version !== 1) {
     throw new Error(`Unsupported ${label === "project" ? "project " : ""}teammate remote config version: ${String(value.version)}`);
   }
@@ -421,7 +478,12 @@ function migrateStore(value: unknown, label: "global" | "project"): unknown {
       ...(target.acp === undefined ? {} : { acp: migrateLegacyAcpPolicy(target.acp, id) }),
     };
   }
-  return { version: REMOTE_CONFIG_VERSION, hosts: value.hosts, targets };
+  return {
+    version: REMOTE_CONFIG_VERSION,
+    hosts: value.hosts,
+    targets,
+    workspaces: {},
+  };
 }
 
 function normalizeGlobalStore(value: unknown): GlobalRemoteConfigStore {
@@ -431,10 +493,13 @@ function normalizeGlobalStore(value: unknown): GlobalRemoteConfigStore {
   if (migrated.version !== REMOTE_CONFIG_VERSION) {
     throw new Error(`Unsupported teammate remote config version: ${String(migrated.version)}`);
   }
-  assertKnownKeys(migrated, ["version", "hosts", "targets"], "global teammate remote config");
-  if (!plainObject(migrated.hosts) || !plainObject(migrated.targets)) throw new Error("Invalid global teammate remote config");
+  assertKnownKeys(migrated, ["version", "hosts", "targets", "workspaces"], "global teammate remote config");
+  if (!plainObject(migrated.hosts) || !plainObject(migrated.targets) || !plainObject(migrated.workspaces)) {
+    throw new Error("Invalid global teammate remote config");
+  }
   const hosts: Record<string, RemoteHostConfig> = {};
   const targets: Record<string, RemoteTargetConfig> = {};
+  const workspaces: Record<string, RemoteWorkspaceConfig> = {};
   for (const [id, host] of Object.entries(migrated.hosts)) {
     validateHostId(id);
     hosts[id] = normalizeHost(host, id);
@@ -443,7 +508,11 @@ function normalizeGlobalStore(value: unknown): GlobalRemoteConfigStore {
     validateTargetId(id);
     targets[id] = normalizeTarget(target, id);
   }
-  return { version: REMOTE_CONFIG_VERSION, hosts, targets };
+  for (const [workspaceRef, workspace] of Object.entries(migrated.workspaces)) {
+    validateWorkspaceRef(workspaceRef);
+    workspaces[workspaceRef] = normalizeWorkspace(workspace, workspaceRef);
+  }
+  return { version: REMOTE_CONFIG_VERSION, hosts, targets, workspaces };
 }
 
 function normalizeProjectStore(value: unknown): ProjectRemoteConfigStore {
@@ -453,10 +522,13 @@ function normalizeProjectStore(value: unknown): ProjectRemoteConfigStore {
   if (migrated.version !== REMOTE_CONFIG_VERSION) {
     throw new Error(`Unsupported project teammate remote config version: ${String(migrated.version)}`);
   }
-  assertKnownKeys(migrated, ["version", "hosts", "targets"], "project teammate remote config");
-  if (!plainObject(migrated.hosts) || !plainObject(migrated.targets)) throw new Error("Invalid project teammate remote config");
+  assertKnownKeys(migrated, ["version", "hosts", "targets", "workspaces"], "project teammate remote config");
+  if (!plainObject(migrated.hosts) || !plainObject(migrated.targets) || !plainObject(migrated.workspaces)) {
+    throw new Error("Invalid project teammate remote config");
+  }
   const hosts: Record<string, RemoteHostConfig | null> = {};
   const targets: Record<string, RemoteTargetConfig | null> = {};
+  const workspaces: Record<string, RemoteWorkspaceConfig | null> = {};
   for (const [id, host] of Object.entries(migrated.hosts)) {
     validateHostId(id);
     hosts[id] = host === null ? null : normalizeHost(host, id);
@@ -465,7 +537,11 @@ function normalizeProjectStore(value: unknown): ProjectRemoteConfigStore {
     validateTargetId(id);
     targets[id] = target === null ? null : normalizeTarget(target, id);
   }
-  return { version: REMOTE_CONFIG_VERSION, hosts, targets };
+  for (const [workspaceRef, workspace] of Object.entries(migrated.workspaces)) {
+    validateWorkspaceRef(workspaceRef);
+    workspaces[workspaceRef] = workspace === null ? null : normalizeWorkspace(workspace, workspaceRef);
+  }
+  return { version: REMOTE_CONFIG_VERSION, hosts, targets, workspaces };
 }
 
 function applyOverrides<T>(global: Record<string, T>, project: Record<string, T | null>): Record<string, T> {
@@ -480,12 +556,18 @@ function applyOverrides<T>(global: Record<string, T>, project: Record<string, T 
 function resolveConfig(global: GlobalRemoteConfigStore, project: ProjectRemoteConfigStore): RemoteConfig {
   const hosts = applyOverrides(global.hosts, project.hosts);
   const targets = applyOverrides(global.targets, project.targets);
+  const workspaces = applyOverrides(global.workspaces, project.workspaces);
   for (const [targetId, target] of Object.entries(targets)) {
     if (!Object.hasOwn(hosts, target.host)) {
       throw new Error(`Remote target ${targetId} references unknown host ${target.host}`);
     }
   }
-  return { version: REMOTE_CONFIG_VERSION, hosts, targets };
+  for (const [workspaceRef, workspace] of Object.entries(workspaces)) {
+    if (!Object.hasOwn(hosts, workspace.host)) {
+      throw new Error(`Remote workspace ${workspaceRef} references unknown host ${workspace.host}`);
+    }
+  }
+  return { version: REMOTE_CONFIG_VERSION, hosts, targets, workspaces };
 }
 
 function readJson(filePath: string): unknown {
@@ -743,6 +825,14 @@ export function resolveRemoteTarget(config: RemoteConfig, targetId: string): Res
   return { id: targetId, ...target, hostConfig };
 }
 
+export function resolveRemoteWorkspace(config: RemoteConfig, workspaceRef: string): ResolvedRemoteWorkspace {
+  const workspace = config.workspaces[workspaceRef];
+  if (!workspace) throw new Error(`Unknown remote workspace: ${workspaceRef}`);
+  const hostConfig = config.hosts[workspace.host];
+  if (!hostConfig) throw new Error(`Remote workspace ${workspaceRef} references unknown host ${workspace.host}`);
+  return { workspaceRef, ...workspace, hostConfig };
+}
+
 export function saveGlobalRemoteConfig(
   store: GlobalRemoteConfigStore,
   globalFilePath = getGlobalRemoteConfigPath(),
@@ -844,6 +934,17 @@ export function validateRemoteTargetDraft(id: string, value: unknown): RemoteDra
   try {
     validateTargetId(id);
     normalizeTarget(value, id);
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/** Validate a workspace draft with the same trusted-cwd rules as stored config. */
+export function validateRemoteWorkspaceDraft(workspaceRef: string, value: unknown): RemoteDraftValidation {
+  try {
+    validateWorkspaceRef(workspaceRef);
+    normalizeWorkspace(value, workspaceRef);
     return { ok: true };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };

@@ -1,6 +1,6 @@
 /** Driver-neutral boundaries implemented by bridge, SSH, Pi RPC, and ACP layers. */
-import type { RemoteInitializeParams, RemoteInitializeResult, RemoteProtocolNotification, RemoteRequestMethod, RemoteRequestParamsByMethod, RemoteResultByMethod, RemoteRunAttachParams, RemoteRunAttachResult, RemoteRunCancelParams, RemoteRunCancelResult, RemoteRunInputParams, RemoteRunInputResult, RemoteRunListResult, RemoteRunStartParams, RemoteRunStartResult } from "./protocol.ts";
-import type { RemoteDriverId, RemoteRunCapture, RemoteRunEvent, RemoteRunSnapshot, RemoteStatus, ResolvedRemoteTarget, RemoteWorkerIdentity } from "./types.ts";
+import type { RemoteInitializeParams, RemoteInitializeResult, RemoteProtocolNotification, RemoteRequestMethod, RemoteRequestParamsByMethod, RemoteResultByMethod, RemoteRunAttachParams, RemoteRunAttachResult, RemoteRunCancelParams, RemoteRunCancelResult, RemoteRunInputParams, RemoteRunInputResult, RemoteRunListResult, RemoteRunStartParams, RemoteRunStartResult, RemoteWindowListParams, RemoteWindowListResult, RemoteWindowObserveParams, RemoteWindowObserveResult, RemoteWindowReceiptParams, RemoteWindowReceiptResult, RemoteWindowSendParams, RemoteWindowSendResult } from "./protocol.ts";
+import type { RemoteDriverId, RemoteRunCapture, RemoteRunEvent, RemoteRunSnapshot, RemoteStatus, ResolvedRemoteTarget, ResolvedRemoteWorkspace, RemoteWorkerIdentity } from "./types.ts";
 export interface RemoteDriverContext extends RemoteWorkerIdentity {
     target: ResolvedRemoteTarget;
     signal: AbortSignal;
@@ -28,9 +28,15 @@ export interface RemoteConnection {
     input(params: RemoteRunInputParams): Promise<RemoteRunInputResult>;
     cancel(params: RemoteRunCancelParams): Promise<RemoteRunCancelResult>;
     list(commandId: string, monitorOwnerNonce: string): Promise<RemoteRunListResult>;
+    windowList?(params: RemoteWindowListParams): Promise<RemoteWindowListResult>;
+    windowObserve?(params: RemoteWindowObserveParams): Promise<RemoteWindowObserveResult>;
+    windowSend?(params: RemoteWindowSendParams): Promise<RemoteWindowSendResult>;
+    windowReceipt?(params: RemoteWindowReceiptParams): Promise<RemoteWindowReceiptResult>;
     notifications(): AsyncIterable<RemoteProtocolNotification>;
     close(): Promise<void>;
 }
 export interface RemoteConnectionFactory {
     connect(target: ResolvedRemoteTarget, signal?: AbortSignal): Promise<RemoteConnection>;
+    /** Optional for factories that support explicit configured workspace routes. */
+    connectWorkspace?(workspace: ResolvedRemoteWorkspace, signal?: AbortSignal): Promise<RemoteConnection>;
 }

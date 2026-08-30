@@ -5,6 +5,14 @@
  * dependency on extension/index.ts.
  */
 
+import { createHash } from "node:crypto";
+import type {
+  MonitorWindowAttentionV1,
+  MonitorWindowCardV1,
+  MonitorWindowIdentityV1,
+  MonitorWindowStateV1,
+} from "../public/v1/monitor-window-state.ts";
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -61,14 +69,14 @@ const MONITOR_MODE_CONTEXT = [
   "This session is the monitor control window. Its responsibility is to supervise and coordinate other workspace sessions and remote workers according to their tasks and the user's monitoring instructions. It may create and close Monitor-owned Pi windows through workspace-window and configured SSH-backed runs through remote-worker, but it must delegate project implementation to those workers instead of doing the work itself.",
   "Use workspace-window only for local Pi worker windows. Create only when the user's coordination request requires a new local worker; interactive is the default presentation. The objective is delivered by create, so do not resend it afterward. Retain the optional completion handle: settled results remain readable through its immutable agent:// resource after exit, and close forms a cancelled completion for pending work. The tool waits for workspace registration and returns the exact owner target for direct observation and messaging. Never attempt to close discovered external peer windows.",
   "Use remote-worker targets to inspect configured SSH targets, create to start only after the SSH bridge handshake and admission, list to inspect runs owned by this Monitor session, and close with the returned remote:<runId> target for lifecycle cancellation. Never treat a remote worker as a workspace owner or pass it to workspace-window.",
-  "Use teammate-list with view=windows to discover local Pi peer sessions. For one-shot or bounded checks, observe local peers as kind=workspace and remote runs as kind=remote using their remote:<runId> targets. Use teammate-send with follow_up or steer for interventions. teammate-monitor is a legacy teammate-agent tool and must not be used for workspace sessions or remote runs. Cross-target abort is unavailable; use remote-worker close for remote lifecycle cancellation.",
+  "Use monitor list/get/wait for ordinary attention-first window status and single-window waits. Retain the exact target and cursor it returns. Use observe only for raw provider snapshots, turns/todos/diagnose views, or multi-target all/any/count barriers; monitor never replaces those advanced observe semantics. Use teammate-list with view=windows only for compatibility discovery. Use teammate-send with follow_up or steer for interventions. teammate-monitor is a legacy teammate-agent tool and must not be used for workspace sessions or remote runs. Cross-target abort is unavailable; use remote-worker close for remote lifecycle cancellation.",
   "Use flow-schedule for durable ordered work in an existing managed workspace window. todoBinding.requireCompleted and conflictCheck are opt-in per step and require the worker's flow-schedule-todo-binding capability. A capability mismatch is an intentional graceful degradation: no Todo instruction or binding is created, and those gates are not enforced; status shows gate=none (not negotiated). Flow-schedule status shows dispatch, binding, and exact result evidence.",
   "Use observe with view=todos on workspace targets to inspect the worker root session's projected Todo state across processes. This view is display-only and never completion authority; a Flow schedule advances from an exact correlated report. A negotiated requireCompleted or conflictCheck gate uses the report's todoOutcome as additional evidence; without such a gate, the exact report remains the completion authority.",
-  "Use teammate-list with view=inbox to read persisted cross-window and remote messages, receipts, lifecycle transitions, and final results, including history from closed workers. The inbox is time-filtered to the last 24h by default; pass since with an ISO timestamp, a relative duration like \"7d\", or \"all\" to widen or disable the window. Inbox history never proves that a workspace window or remote run is still live; use observe for liveness.",
+  "Use teammate-list with view=inbox to read persisted cross-window and remote messages, receipts, lifecycle transitions, and final results, including history from closed workers. The inbox is time-filtered to the last 24h by default; pass since with an ISO timestamp, a relative duration like \"7d\", or \"all\" to widen or disable the window. Inbox history never proves that a workspace window or remote run is still live; use monitor list/get for ordinary liveness and attention, reserving observe for raw provider evidence.",
   "Todo gate evidence waits up to 30 seconds by default; missing or mismatched evidence, target replacement, or a terminal worker without an exact report becomes ambiguous. Inspect flow-schedule status before retrying, and retry only when duplicate work is acceptable.",
   "Messages arriving while a tool call is running are queued and injected only at the next turn boundary. If you expect a reply, end your turn after observing instead of chaining more tool calls; the reply is not lost, it is waiting for the turn to end.",
-  "Choose whether recurring monitoring is needed from the user's intent. Do not create a loop for a one-shot status request or a bounded observe wait/watch. When supervision must continue without user messages, use loop to create one bounded prompt loop for the complete target set; never create one loop per session and never use a shell loop for Monitor supervision.",
-  "Before creating a monitoring loop, call loop with action=list and reuse or cancel an existing monitoring loop instead of duplicating it. Each loop tick should rediscover the named workspace sessions, observe all targets in one call, compare new evidence with prior state, and intervene only on new evidence of stall, drift, or failure. Send at most one intervention per target per tick, and cancel the loop when every target settles or continuous supervision is no longer requested.",
+  "Choose whether recurring monitoring is needed from the user's intent. Do not create a loop for a one-shot monitor list/get request or a bounded monitor wait. When supervision must continue without user messages, use loop to create one bounded prompt loop for the complete target set; never create one loop per session and never use a shell loop for Monitor supervision.",
+  "Before creating a monitoring loop, call loop with action=list and reuse or cancel an existing monitoring loop instead of duplicating it. Each loop tick should use monitor list/get for ordinary normalized window state, compare new evidence with prior state, and intervene only on new evidence of stall, drift, or failure. Use observe only when that tick specifically needs raw turns/todos/diagnose evidence or a multi-target barrier. Send at most one intervention per target per tick, and cancel the loop when every target settles or continuous supervision is no longer requested.",
   "Write every teammate-send body as a concrete instruction carrying new information, a correction, an explicitly requested response, or a safety/lifecycle constraint. Routing metadata and reply instructions are added automatically; do not put routing boilerplate in the body. Do not send routine acknowledgements or status pings. Use steer for time-sensitive corrections and follow_up for non-urgent work.",
   "A queued or accepted receipt proves enqueueing only, not model consumption. Never repeat that message while it remains queued or accepted; wait for target-side injection or new peer-state evidence, and send again only when a later correction or constraint is necessary.",
   "Do not implement project work, edit files, run shell commands, or start unrelated research in this control window. Delegate or message the appropriate peer session instead.",
@@ -387,4 +395,434 @@ export function validateMonitorParams(params: MonitorParams): string | undefined
     }
   }
   return undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Window-domain Monitor query adapter
+// ---------------------------------------------------------------------------
+
+/** The new `monitor` tool is deliberately narrower than the provider-level `observe` tool. */
+export type MonitorQueryAction = "list" | "get" | "wait";
+export type MonitorQueryDetail = "summary" | "full";
+export type MonitorQueryUntil = "change" | "attention" | "settled";
+
+export interface MonitorQueryParams {
+  action: MonitorQueryAction;
+  target?: string;
+  detail?: MonitorQueryDetail;
+  cursor?: string;
+  until?: MonitorQueryUntil;
+  timeoutMs?: number;
+}
+
+/** Root Pi session plus one admitted Monitor generation. */
+export interface MonitorQueryAuthorityFence {
+  rootGeneration: number;
+  sessionId: string;
+  workspaceId: string;
+  sourceId: string;
+  monitorGeneration: number;
+}
+
+export interface MonitorQueryTimelineEntry {
+  at?: number;
+  label: string;
+  detail?: string;
+}
+
+export interface MonitorQueryTimelineGroup {
+  group: string;
+  entries: readonly MonitorQueryTimelineEntry[];
+}
+
+/** Exact address and optional bounded timeline for one card in a captured state. */
+export interface MonitorQueryTargetSnapshot {
+  target: string;
+  aliases?: readonly string[];
+  identity: MonitorWindowIdentityV1;
+  timeline?: readonly MonitorQueryTimelineGroup[];
+}
+
+export interface MonitorQuerySnapshot {
+  state: MonitorWindowStateV1;
+  targets: readonly MonitorQueryTargetSnapshot[];
+}
+
+export interface MonitorQueryDependencies {
+  captureAuthority(): MonitorQueryAuthorityFence | undefined;
+  isAuthorityCurrent(capture: MonitorQueryAuthorityFence): boolean;
+  /**
+   * Refresh providers, capture exact endpoints/owners, await facets, then
+   * revalidate those exact captures before returning.
+   */
+  read(capture: MonitorQueryAuthorityFence, signal: AbortSignal): Promise<MonitorQuerySnapshot>;
+  /** A wake hint only. The adapter always performs a fresh, fenced read afterward. */
+  waitForWake?(capture: MonitorQueryAuthorityFence, timeoutMs: number, signal: AbortSignal): Promise<void>;
+}
+
+export type MonitorQueryStatus = "ok" | "not-found" | "timeout" | "aborted" | "stale";
+
+export interface MonitorQueryWindow {
+  /** Exact address retained from the first fenced snapshot. */
+  target: string;
+  /** Window-scoped semantic cursor; changes in other windows do not advance it. */
+  cursor: string;
+  window: MonitorWindowCardV1;
+  /** Present only for detail=full and therefore only for get/wait. */
+  timeline?: readonly MonitorQueryTimelineGroup[];
+}
+
+export interface MonitorQueryResult {
+  version: 1;
+  action: MonitorQueryAction;
+  status: MonitorQueryStatus;
+  observedAt: number;
+  stateRevision?: string;
+  cursor?: string;
+  windows: readonly MonitorQueryWindow[];
+  attention: readonly MonitorWindowAttentionV1[];
+  reason?: string;
+}
+
+export const MONITOR_QUERY_DEFAULT_TIMEOUT_MS = 10 * 60_000;
+export const MONITOR_QUERY_POLL_MS = 250;
+
+/**
+ * Execute one window-domain Monitor query.
+ *
+ * Authority is checked before and after every await. Wait captures one exact
+ * owner identity from its start snapshot and never silently follows a selector
+ * to a replacement owner.
+ */
+export async function runMonitorQuery(
+  params: MonitorQueryParams,
+  dependencies: MonitorQueryDependencies,
+  signal: AbortSignal,
+): Promise<MonitorQueryResult> {
+  const capture = dependencies.captureAuthority();
+  if (!capture) return emptyMonitorQueryResult(params.action, "aborted", "Active root Monitor authority is required.");
+  if (signal.aborted) return emptyMonitorQueryResult(params.action, "aborted", abortReason(signal));
+
+  const first = await readFencedMonitorSnapshot(params.action, capture, dependencies, signal);
+  if ("result" in first) return first.result;
+  if (params.action === "list") return listMonitorQueryResult(first.snapshot);
+
+  const requested = params.target?.trim();
+  if (!requested) return snapshotError(params.action, first.snapshot, "not-found", "A target is required.");
+  const initialTarget = resolveMonitorQueryTarget(first.snapshot, requested);
+  if (!initialTarget) {
+    return snapshotError(params.action, first.snapshot, "not-found", `Monitor window ${JSON.stringify(requested)} was not found.`);
+  }
+  const initialWindow = windowForTarget(first.snapshot, initialTarget, params.detail === "full");
+  if (!initialWindow) return snapshotError(params.action, first.snapshot, "stale", "The exact Monitor window disappeared during the start snapshot.");
+  if (params.action === "get") return selectedMonitorQueryResult(params.action, first.snapshot, initialWindow);
+
+  const until = params.until ?? "change";
+  const baselineCursor = params.cursor ?? initialWindow.cursor;
+  if (waitConditionMet(until, initialWindow, baselineCursor)) {
+    return selectedMonitorQueryResult(params.action, first.snapshot, initialWindow);
+  }
+
+  const timeoutMs = params.timeoutMs ?? MONITOR_QUERY_DEFAULT_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
+  let latestSnapshot = first.snapshot;
+  let latestWindow = initialWindow;
+  while (true) {
+    if (signal.aborted) {
+      return selectedMonitorQueryResult(params.action, latestSnapshot, latestWindow, "aborted", abortReason(signal));
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      return selectedMonitorQueryResult(params.action, latestSnapshot, latestWindow, "timeout", `No ${until} event before timeout.`);
+    }
+    try {
+      await (dependencies.waitForWake ?? waitForMonitorQueryDelay)(
+        capture,
+        Math.min(MONITOR_QUERY_POLL_MS, remaining),
+        signal,
+      );
+    } catch (error) {
+      if (signal.aborted) {
+        return selectedMonitorQueryResult(params.action, latestSnapshot, latestWindow, "aborted", abortReason(signal));
+      }
+      if (!dependencies.isAuthorityCurrent(capture)) {
+        return selectedMonitorQueryResult(params.action, latestSnapshot, latestWindow, "stale", "Root session or Monitor generation changed while waiting.");
+      }
+      return selectedMonitorQueryResult(params.action, latestSnapshot, latestWindow, "aborted", errorMessage(error));
+    }
+    if (!dependencies.isAuthorityCurrent(capture)) {
+      return selectedMonitorQueryResult(params.action, latestSnapshot, latestWindow, "stale", "Root session or Monitor generation changed while waiting.");
+    }
+
+    const next = await readFencedMonitorSnapshot(params.action, capture, dependencies, signal);
+    if ("result" in next) {
+      if (next.result.status === "aborted" && !signal.aborted) {
+        return selectedMonitorQueryResult(params.action, latestSnapshot, latestWindow, "stale", next.result.reason);
+      }
+      return next.result;
+    }
+    const exact = exactMonitorQueryTarget(next.snapshot, initialTarget.identity);
+    const resolved = resolveMonitorQueryTarget(next.snapshot, requested);
+    if (!exact || !resolved || !sameMonitorIdentity(resolved.identity, initialTarget.identity)) {
+      return selectedMonitorQueryResult(
+        params.action,
+        latestSnapshot,
+        latestWindow,
+        "stale",
+        "The exact Monitor window owner was replaced or disappeared while waiting.",
+      );
+    }
+    const selected = windowForTarget(next.snapshot, exact, params.detail === "full");
+    if (!selected) {
+      return selectedMonitorQueryResult(params.action, latestSnapshot, latestWindow, "stale", "The exact Monitor window state became unavailable.");
+    }
+    latestSnapshot = next.snapshot;
+    latestWindow = selected;
+    if (waitConditionMet(until, selected, baselineCursor)) {
+      return selectedMonitorQueryResult(params.action, next.snapshot, selected);
+    }
+  }
+}
+
+/** Compact model-facing rendering; list never includes per-window timeline content. */
+export function formatMonitorQueryResult(result: MonitorQueryResult): string[] {
+  if (result.windows.length === 0) {
+    return [`MONITOR ${result.action} ${result.status}${result.reason ? ` · ${result.reason}` : ""}`];
+  }
+  const lines = [`MONITOR ${result.action} ${result.status} · ${result.windows.length} window${result.windows.length === 1 ? "" : "s"}`];
+  for (const selected of result.windows) {
+    const card = selected.window;
+    const label = card.window.name ?? card.window.sessionName ?? selected.target;
+    const topAttention = highestAttention(card.attention);
+    lines.push([
+      topAttention ? severityIcon(topAttention.severity) : "·",
+      selected.target,
+      label === selected.target ? undefined : label,
+      card.window.lifecycle.status,
+      `work=${card.work.status}`,
+      card.attention.length > 0 ? `attention=${card.attention.length}` : undefined,
+    ].filter(Boolean).join(" · "));
+    if (selected.timeline) {
+      for (const group of selected.timeline) {
+        lines.push(`-- ${group.group} --`);
+        for (const entry of group.entries) {
+          lines.push(`${entry.at === undefined ? "" : `${new Date(entry.at).toISOString()} `}${entry.label}${entry.detail ? ` · ${entry.detail}` : ""}`);
+        }
+      }
+    }
+  }
+  if (result.reason) lines.push(result.reason);
+  return lines;
+}
+
+function listMonitorQueryResult(snapshot: MonitorQuerySnapshot): MonitorQueryResult {
+  const windows = snapshot.targets.map((target) => windowForTarget(snapshot, target, false))
+    .filter((item): item is MonitorQueryWindow => item !== undefined)
+    .sort(compareAttentionFirst);
+  return {
+    version: 1,
+    action: "list",
+    status: "ok",
+    observedAt: snapshot.state.observedAt,
+    stateRevision: snapshot.state.revision,
+    cursor: snapshot.state.cursor,
+    windows,
+    attention: windows.flatMap((item) => item.window.attention),
+  };
+}
+
+function selectedMonitorQueryResult(
+  action: MonitorQueryAction,
+  snapshot: MonitorQuerySnapshot,
+  window: MonitorQueryWindow,
+  status: MonitorQueryStatus = "ok",
+  reason?: string,
+): MonitorQueryResult {
+  return {
+    version: 1,
+    action,
+    status,
+    observedAt: snapshot.state.observedAt,
+    stateRevision: snapshot.state.revision,
+    cursor: window.cursor,
+    windows: [window],
+    attention: window.window.attention,
+    ...(reason === undefined ? {} : { reason }),
+  };
+}
+
+function snapshotError(
+  action: MonitorQueryAction,
+  snapshot: MonitorQuerySnapshot,
+  status: MonitorQueryStatus,
+  reason: string,
+): MonitorQueryResult {
+  return {
+    version: 1,
+    action,
+    status,
+    observedAt: snapshot.state.observedAt,
+    stateRevision: snapshot.state.revision,
+    cursor: snapshot.state.cursor,
+    windows: [],
+    attention: [],
+    reason,
+  };
+}
+
+function emptyMonitorQueryResult(action: MonitorQueryAction, status: MonitorQueryStatus, reason: string): MonitorQueryResult {
+  return { version: 1, action, status, observedAt: Date.now(), windows: [], attention: [], reason };
+}
+
+async function readFencedMonitorSnapshot(
+  action: MonitorQueryAction,
+  capture: MonitorQueryAuthorityFence,
+  dependencies: MonitorQueryDependencies,
+  signal: AbortSignal,
+): Promise<{ snapshot: MonitorQuerySnapshot } | { result: MonitorQueryResult }> {
+  try {
+    const snapshot = await dependencies.read(capture, signal);
+    if (signal.aborted) return { result: emptyMonitorQueryResult(action, "aborted", abortReason(signal)) };
+    if (!dependencies.isAuthorityCurrent(capture)) {
+      return { result: emptyMonitorQueryResult(action, "stale", "Root session or Monitor generation changed during snapshot refresh.") };
+    }
+    validateMonitorQuerySnapshot(snapshot);
+    return { snapshot };
+  } catch (error) {
+    if (signal.aborted) return { result: emptyMonitorQueryResult(action, "aborted", abortReason(signal)) };
+    const status: MonitorQueryStatus = dependencies.isAuthorityCurrent(capture) ? "aborted" : "stale";
+    return { result: emptyMonitorQueryResult(action, status, errorMessage(error)) };
+  }
+}
+
+function validateMonitorQuerySnapshot(snapshot: MonitorQuerySnapshot): void {
+  const identities = new Map(snapshot.state.windows.map((window) => [monitorIdentityKey(window.identity), window]));
+  const targets = new Set<string>();
+  for (const target of snapshot.targets) {
+    if (!target.target || targets.has(target.target)) throw new Error("Monitor snapshot contains duplicate or empty targets.");
+    targets.add(target.target);
+    if (!identities.has(monitorIdentityKey(target.identity))) {
+      throw new Error(`Monitor target ${target.target} has no exact window state.`);
+    }
+  }
+  if (targets.size !== snapshot.state.windows.length) {
+    throw new Error("Monitor snapshot does not address every window exactly once.");
+  }
+}
+
+function resolveMonitorQueryTarget(snapshot: MonitorQuerySnapshot, requested: string): MonitorQueryTargetSnapshot | undefined {
+  const matches = snapshot.targets.filter((target) =>
+    target.target === requested || target.aliases?.includes(requested) === true
+  );
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function exactMonitorQueryTarget(
+  snapshot: MonitorQuerySnapshot,
+  identity: MonitorWindowIdentityV1,
+): MonitorQueryTargetSnapshot | undefined {
+  return snapshot.targets.find((target) => sameMonitorIdentity(target.identity, identity));
+}
+
+function windowForTarget(
+  snapshot: MonitorQuerySnapshot,
+  target: MonitorQueryTargetSnapshot,
+  full: boolean,
+): MonitorQueryWindow | undefined {
+  const window = snapshot.state.windows.find((candidate) => sameMonitorIdentity(candidate.identity, target.identity));
+  if (!window) return undefined;
+  return {
+    target: target.target,
+    cursor: monitorWindowCursor(window),
+    window,
+    ...(full ? { timeline: (target.timeline ?? []).map((group) => ({
+      group: group.group,
+      entries: group.entries.map((entry) => ({ ...entry })),
+    })) } : {}),
+  };
+}
+
+function monitorWindowCursor(window: MonitorWindowCardV1): string {
+  const semantic = {
+    ...window,
+    window: {
+      ...window.window,
+      lifecycle: {
+        ...window.window.lifecycle,
+        ownerPublishedAt: undefined,
+        ...(window.window.lifecycle.lastSettle === undefined
+          ? {}
+          : { lastSettle: { ...window.window.lifecycle.lastSettle, at: undefined } }),
+      },
+    },
+    work: {
+      ...window.work,
+      delivery: { ...window.work.delivery, updatedAt: undefined },
+      completion: { ...window.work.completion, completedAt: undefined },
+      todos: window.work.todos.map((todo) => ({ ...todo, updatedAt: undefined })),
+    },
+  };
+  const revision = createHash("sha256").update(JSON.stringify(semantic), "utf8").digest("hex");
+  return `monitor-window:v1:${revision}`;
+}
+
+function waitConditionMet(until: MonitorQueryUntil, selected: MonitorQueryWindow, baselineCursor: string): boolean {
+  if (until === "change") return selected.cursor !== baselineCursor;
+  if (until === "attention") return selected.window.attention.length > 0;
+  return selected.window.window.lifecycle.status === "settled"
+    || selected.window.window.lifecycle.status === "failed"
+    || selected.window.window.lifecycle.status === "disconnected"
+    || selected.window.work.completion.outcome !== "unknown";
+}
+
+function compareAttentionFirst(left: MonitorQueryWindow, right: MonitorQueryWindow): number {
+  const severity = attentionRank(right.window.attention) - attentionRank(left.window.attention);
+  return severity !== 0 ? severity : left.target.localeCompare(right.target);
+}
+
+function attentionRank(attention: readonly MonitorWindowAttentionV1[]): number {
+  return attention.reduce((rank, item) => Math.max(rank, item.severity === "error" ? 3 : item.severity === "warning" ? 2 : 1), 0);
+}
+
+function highestAttention(attention: readonly MonitorWindowAttentionV1[]): MonitorWindowAttentionV1 | undefined {
+  return [...attention].sort((left, right) => attentionRank([right]) - attentionRank([left]))[0];
+}
+
+function severityIcon(severity: MonitorWindowAttentionV1["severity"]): string {
+  return severity === "error" ? "✗" : severity === "warning" ? "!" : "i";
+}
+
+function sameMonitorIdentity(left: MonitorWindowIdentityV1, right: MonitorWindowIdentityV1): boolean {
+  return monitorIdentityKey(left) === monitorIdentityKey(right);
+}
+
+function monitorIdentityKey(identity: MonitorWindowIdentityV1): string {
+  return [identity.workspaceId, identity.ownerId, identity.ownerNonce, identity.endpointId].join("\u0000");
+}
+
+function waitForMonitorQueryDelay(
+  _capture: MonitorQueryAuthorityFence,
+  timeoutMs: number,
+  signal: AbortSignal,
+): Promise<void> {
+  if (signal.aborted) return Promise.reject(signal.reason ?? new Error("Monitor wait aborted."));
+  return new Promise((resolve, reject) => {
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(signal.reason ?? new Error("Monitor wait aborted."));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, timeoutMs);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function abortReason(signal: AbortSignal): string {
+  return signal.reason === undefined ? "Monitor query aborted." : errorMessage(signal.reason);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

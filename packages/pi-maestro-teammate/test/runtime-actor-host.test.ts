@@ -802,7 +802,20 @@ test("WindowSupervisor binds canonical identity and releases after v1 stop", asy
       generation: 7,
     },
   });
+  assert.equal(host.batches[0]?.[0]?.kind, "domain.event");
+  assert.equal(host.batches[0]?.[0]?.kind === "domain.event" ? host.batches[0][0].eventType : undefined, "session.window.advertised");
+  await actor.publishMessage("accepted", "message-1", "outgoing", "steer");
+  await actor.publishMessage("injected", "message-1", "outgoing", "steer");
+  await actor.publishMessage("replied", "message-1", "outgoing", "steer");
   await actor.stop();
+  const eventTypes = host.batches.flatMap((batch) => batch.map((event) => event.kind === "domain.event" ? event.eventType : event.kind));
+  assert.deepEqual(eventTypes, [
+    "session.window.advertised",
+    "session.message.accepted",
+    "session.message.injected",
+    "session.message.replied",
+    "session.window.withdrawn",
+  ]);
   assert.equal(host.released, 1);
   assert.equal(actor.active, false);
 });

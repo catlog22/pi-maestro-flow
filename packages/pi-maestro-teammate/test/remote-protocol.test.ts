@@ -5,7 +5,10 @@ import {
   REMOTE_MAX_LINE_BYTES,
   createRemoteRequest,
   encodeRemoteEnvelope,
+  negotiateRemoteWindowBridge,
+  normalizeRemoteWindowBridgeAdvertisement,
   parseRemoteEnvelopeLine,
+  type RemoteInitializeResult,
 } from "../src/remote/protocol.ts";
 import {
   RemoteCommandDeduplicator,
@@ -16,6 +19,7 @@ import {
 import {
   REMOTE_PROTOCOL_VERSION,
   REMOTE_STATUSES,
+  REMOTE_WINDOW_BRIDGE_PLUGIN_ID,
   isRemoteTerminalStatus,
   type RemoteRunCapture,
 } from "../src/remote/types.ts";
@@ -27,6 +31,66 @@ test("remote/2 exposes the approved status contract", () => {
   ]);
   assert.equal(isRemoteTerminalStatus("completed"), true);
   assert.equal(isRemoteTerminalStatus("disconnected"), false);
+});
+
+test("windowBridge advertisement is optional, bounded, and negotiated separately from remote runs", () => {
+  const base: RemoteInitializeResult = {
+    workerId: "worker-a",
+    instanceNonce: "instance-a",
+    protocolVersion: REMOTE_PROTOCOL_VERSION,
+    concurrency: 4,
+    activeRuns: 0,
+    status: "ready",
+  };
+  const workspace = {
+    requiredPlugin: REMOTE_WINDOW_BRIDGE_PLUGIN_ID,
+    minimumWindowProtocol: 2,
+  };
+
+  assert.deepEqual(negotiateRemoteWindowBridge(workspace, base), {
+    status: "unsupported",
+    code: "plugin-missing",
+    message: "Remote daemon did not advertise required plugin pi-maestro-teammate",
+  });
+
+  const advertised: RemoteInitializeResult = {
+    ...base,
+    windowBridge: {
+      pluginId: REMOTE_WINDOW_BRIDGE_PLUGIN_ID,
+      pluginVersion: "2.2.0",
+      workspacePeerVersions: [1, 2],
+      relayVersions: [1],
+      runtimeVersions: [1],
+    },
+  };
+  const supported = negotiateRemoteWindowBridge(workspace, advertised, 1);
+  assert.equal(supported.status, "supported");
+  if (supported.status === "supported") {
+    assert.equal(supported.windowProtocolVersion, 2);
+    assert.equal(Object.isFrozen(supported.advertisement), true);
+    assert.equal(Object.isFrozen(supported.advertisement.workspacePeerVersions), true);
+  }
+  const noActiveWindow = negotiateRemoteWindowBridge(workspace, advertised, 0);
+  assert.equal(noActiveWindow.status, "unsupported");
+  assert.equal("code" in noActiveWindow ? noActiveWindow.code : undefined, "no-active-window");
+  assert.equal(negotiateRemoteWindowBridge({ ...workspace, minimumWindowProtocol: 3 }, advertised).status, "upgrade-required");
+
+  const wrongPlugin = {
+    ...advertised,
+    windowBridge: { ...advertised.windowBridge!, pluginId: "other-plugin" },
+  };
+  const wrongPluginResult = negotiateRemoteWindowBridge(workspace, wrongPlugin);
+  assert.equal("code" in wrongPluginResult ? wrongPluginResult.code : undefined, "plugin-missing");
+  assert.throws(() => normalizeRemoteWindowBridgeAdvertisement({
+    ...advertised.windowBridge,
+    workspacePeerVersions: [1, 1],
+  }), /workspacePeerVersions/);
+  const malformed = {
+    ...advertised,
+    windowBridge: { ...advertised.windowBridge!, relayVersions: [0] },
+  } as RemoteInitializeResult;
+  const malformedResult = negotiateRemoteWindowBridge(workspace, malformed);
+  assert.equal("code" in malformedResult ? malformedResult.code : undefined, "daemon-incompatible");
 });
 
 test("remote/2 JSON-RPC requests round-trip as one NDJSON record", () => {

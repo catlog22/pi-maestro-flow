@@ -135,8 +135,9 @@ function remoteState(): RemoteConfigState {
           command: ["pi"],
         },
       },
+      workspaces: {},
     },
-    project: { version: REMOTE_CONFIG_VERSION, hosts: {}, targets: {} },
+    project: { version: REMOTE_CONFIG_VERSION, hosts: {}, targets: {}, workspaces: {} },
     config: {
       version: REMOTE_CONFIG_VERSION,
       hosts: {
@@ -155,6 +156,7 @@ function remoteState(): RemoteConfigState {
           command: ["pi"],
         },
       },
+      workspaces: {},
     },
   };
 }

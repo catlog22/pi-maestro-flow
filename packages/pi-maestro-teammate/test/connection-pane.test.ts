@@ -48,7 +48,7 @@ const t = ((key: string, params?: Readonly<Record<string, string | number | bool
 function state(): RemoteConfigState {
   return {
     global: {
-      version: 2,
+      version: 3,
       hosts: {
         worker: {
           host: "worker.example.com",
@@ -65,9 +65,10 @@ function state(): RemoteConfigState {
           command: ["agent"],
         },
       },
+      workspaces: {},
     },
     project: {
-      version: 2,
+      version: 3,
       hosts: {
         local: {
           host: "127.0.0.1",
@@ -77,8 +78,9 @@ function state(): RemoteConfigState {
         },
       },
       targets: {},
+      workspaces: {},
     },
-    config: { version: 2, hosts: {}, targets: {} },
+    config: { version: 3, hosts: {}, targets: {}, workspaces: {} },
   };
 }
 
@@ -204,9 +206,9 @@ test("legacy notice is dim and Enter emits upgrade", () => {
 
 test("empty state and scope switching remain available", () => {
   const emptyState: RemoteConfigState = {
-    global: { version: 2, hosts: {}, targets: {} },
-    project: { version: 2, hosts: {}, targets: {} },
-    config: { version: 2, hosts: {}, targets: {} },
+    global: { version: 3, hosts: {}, targets: {}, workspaces: {} },
+    project: { version: 3, hosts: {}, targets: {}, workspaces: {} },
+    config: { version: 3, hosts: {}, targets: {}, workspaces: {} },
   };
   const { pane: empty } = makePane({
     state: emptyState,

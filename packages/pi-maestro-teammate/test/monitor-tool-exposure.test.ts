@@ -40,7 +40,7 @@ function harness(initialActive: string[]) {
   const controller = new MonitorToolExposureController(pi, {
     local,
     monitor,
-    exclusiveNames: ["workspace-window", "remote-worker"],
+    exclusiveNames: ["monitor", "workspace-window", "remote-worker"],
   });
   return {
     controller,
@@ -75,6 +75,7 @@ test("Monitor tool exposure switches variants and restores shared active-tool pr
     "observe",
     "other-tool",
     "teammate-send",
+    "monitor",
     "workspace-window",
     "remote-worker",
   ]);

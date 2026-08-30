@@ -21,13 +21,26 @@ export type SessionSurfaceMode = "legacy" | "shadow" | "unified";
 export type SessionViewMode = "agents" | "windows";
 export type SessionWindowModeAction = "enter" | "exit";
 export type SessionEndpointKind = "root" | "agent";
-export type SessionEndpointScope = "local" | "workspace-peer";
-export type SessionEndpointTransport = "local-root" | "local-agent-mailbox" | "workspace-peer-v1" | "child-ipc";
+export type SessionEndpointScope = "local" | "workspace-peer" | "ssh-window";
+export type SessionEndpointTransport = "local-root" | "local-agent-mailbox" | "workspace-peer-v1" | "remote-workspace-rpc-v1" | "child-ipc";
+
+export interface SessionRouteAuthority {
+  kind: "local" | "ssh";
+  authorityId: string;
+  instanceNonce?: string;
+}
+
+/** Discovery is transport-neutral; providers retain their own authority and lifecycle. */
+export interface SessionDiscoveryProvider {
+  readonly authority: SessionRouteAuthority;
+  refresh(signal?: AbortSignal): Promise<readonly SessionEndpoint[]>;
+  close(): Promise<void>;
+}
 export type SessionEndpointStatus = "running" | "sleeping" | "settled";
 export type SessionMessageMode = "steer" | "follow_up" | "interrupt" | "abort";
 export type SessionMessageSource = "user" | "monitor" | "system";
 export type SessionMessageKind = "message" | "coordination" | "request" | "status" | "supervision";
-export type SessionDeliveryStage = "queued" | "injected";
+export type SessionDeliveryStage = "queued" | "injected" | "replied";
 
 /** Model-originated status is coordination; only trusted host telemetry stays context-only. */
 export function normalizeSessionMessageKind(
@@ -43,6 +56,7 @@ export function sessionMessageTriggersTurn(kind: SessionMessageKind | undefined)
 }
 
 export type SessionEndpointCapability = "inspect" | "message" | "steer" | "follow_up" | "interrupt" | "abort" | "wake"
+  | "receipt" | "reply"
   | "monitor-workspace-aggregation"
   | "flow-schedule-todo-binding" | "flow-schedule-todo-projection" | "flow-schedule-todo-mutation" | "flow-schedule-report";
 
@@ -69,6 +83,11 @@ export interface SessionEndpoint extends SessionEndpointIdentity {
   /** Projection producer and monotonic incarnation for local isolation. */
   sourceId?: string;
   generation?: number;
+  workspaceRef?: string;
+  /** Exact externally addressable selector, when distinct from the endpoint id. */
+  target?: string;
+  /** Transport authority and incarnation for local/SSH route isolation. */
+  routeAuthority?: SessionRouteAuthority;
   sessionName?: string;
   name?: string;
   agent?: string;
@@ -100,7 +119,13 @@ export interface SessionOwnerProjection extends Omit<SessionEndpointIdentity, "c
   sourceId?: string;
   generation?: number;
   sessionName?: string;
+  workspaceRef?: string;
+  target?: string;
+  routeAuthority?: SessionRouteAuthority;
   contextPressure?: number;
+  agentCount?: number;
+  /** Exact capabilities advertised by this owner; defaults preserve the v1 local/workspace behavior. */
+  capabilities?: readonly SessionEndpointCapability[];
   /** Extra root-endpoint capabilities this owner advertises (e.g. flow-schedule-todo-binding). */
   extraCapabilities?: readonly SessionEndpointCapability[];
   agents: readonly SessionAgentProjection[];
@@ -108,6 +133,7 @@ export interface SessionOwnerProjection extends Omit<SessionEndpointIdentity, "c
 
 export type SessionSelectorKind =
   | "endpoint-id"
+  | "remote-window"
   | "local-root"
   | "owner-root"
   | "owner-agent"
@@ -159,13 +185,24 @@ export function sessionAgentEndpointId(identity: SessionEndpointIdentity & { cor
   return `${SESSION_ENDPOINT_ID_PREFIX}/${encodeIdSegment(identity.workspaceId)}/${encodeIdSegment(identity.ownerId)}/${encodeIdSegment(identity.ownerNonce)}/agent/${encodeIdSegment(identity.correlationId)}`;
 }
 
+export function sessionRemoteRootEndpointId(
+  authority: SessionRouteAuthority,
+  workspaceRef: string,
+  identity: Omit<SessionEndpointIdentity, "correlationId">,
+): string {
+  return `${SESSION_ENDPOINT_ID_PREFIX}/ssh/${encodeIdSegment(authority.authorityId)}/${encodeIdSegment(authority.instanceNonce ?? "")}/${encodeIdSegment(workspaceRef)}/${encodeIdSegment(identity.workspaceId)}/${encodeIdSegment(identity.ownerId)}/${encodeIdSegment(identity.ownerNonce)}/root`;
+}
+
 function compareText(left: string | undefined, right: string | undefined): number {
   return (left ?? "").localeCompare(right ?? "", "en");
 }
 
 function endpointOrder(left: Omit<SessionEndpoint, "ordinal" | "contentRevision">, right: Omit<SessionEndpoint, "ordinal" | "contentRevision">): number {
-  if (left.scope !== right.scope) return left.scope === "local" ? -1 : 1;
-  return compareText(left.workspaceId, right.workspaceId)
+  const scopeOrder: Record<SessionEndpointScope, number> = { local: 0, "workspace-peer": 1, "ssh-window": 2 };
+  if (left.scope !== right.scope) return scopeOrder[left.scope] - scopeOrder[right.scope];
+  return compareText(left.routeAuthority?.authorityId, right.routeAuthority?.authorityId)
+    || compareText(left.target, right.target)
+    || compareText(left.workspaceId, right.workspaceId)
     || compareText(left.ownerId, right.ownerId)
     || compareText(left.ownerNonce, right.ownerNonce)
     || (left.kind === right.kind ? 0 : left.kind === "root" ? -1 : 1)
@@ -188,6 +225,9 @@ function semanticEndpoint(endpoint: Omit<SessionEndpoint, "ordinal" | "contentRe
     sessionId: endpoint.sessionId,
     sourceId: endpoint.sourceId,
     generation: endpoint.generation,
+    workspaceRef: endpoint.workspaceRef,
+    target: endpoint.target,
+    routeAuthority: endpoint.routeAuthority,
     sessionName: endpoint.sessionName,
     name: endpoint.name,
     agent: endpoint.agent,
@@ -230,23 +270,30 @@ export function projectSessionEndpoints(owners: readonly SessionOwnerProjection[
     };
     projected.push({
       version: SESSION_ENDPOINT_VERSION,
-      id: sessionRootEndpointId(identity),
+      id: owner.scope === "ssh-window" && owner.routeAuthority && owner.workspaceRef
+        ? sessionRemoteRootEndpointId(owner.routeAuthority, owner.workspaceRef, identity)
+        : sessionRootEndpointId(identity),
       kind: "root",
       scope: owner.scope,
       transport: owner.transport ?? (owner.scope === "local" ? "local-root" : "workspace-peer-v1"),
       ...identity,
       status: owner.status,
       capabilities: Object.freeze(
-        owner.extraCapabilities && owner.extraCapabilities.length > 0
-          ? ["inspect", "message", "steer", "follow_up", ...owner.extraCapabilities]
-          : ["inspect", "message", "steer", "follow_up"],
+        owner.capabilities
+          ? [...owner.capabilities]
+          : owner.extraCapabilities && owner.extraCapabilities.length > 0
+            ? ["inspect", "message", "steer", "follow_up", ...owner.extraCapabilities]
+            : ["inspect", "message", "steer", "follow_up"],
       ),
       ...(owner.sessionId ? { sessionId: owner.sessionId } : {}),
       ...(owner.sourceId ? { sourceId: owner.sourceId } : {}),
       ...(owner.generation === undefined ? {} : { generation: owner.generation }),
+      ...(owner.workspaceRef === undefined ? {} : { workspaceRef: owner.workspaceRef }),
+      ...(owner.target === undefined ? {} : { target: owner.target }),
+      ...(owner.routeAuthority === undefined ? {} : { routeAuthority: Object.freeze({ ...owner.routeAuthority }) }),
       ...(owner.sessionName ? { sessionName: owner.sessionName } : {}),
       ...(owner.contextPressure === undefined ? {} : { contextPressure: owner.contextPressure }),
-      agentCount: owner.agents.filter((agent) => agent.status !== "settled").length,
+      agentCount: owner.agentCount ?? owner.agents.filter((agent) => agent.status !== "settled").length,
     });
     for (const agent of owner.agents) {
       projected.push({
@@ -341,6 +388,8 @@ export class EndpointDirectory {
     }
     const exact = this.#byId.get(selector);
     if (exact && (options.includeSettled !== false || exact.status !== "settled")) return resolved(selector, "endpoint-id", [exact]);
+    const exactTarget = endpoints.filter((endpoint) => endpoint.target === selector);
+    if (exactTarget.length > 0) return resolved(selector, "remote-window", exactTarget);
 
     const requested = selector.startsWith("@") ? selector.slice(1) : selector;
     const agents = endpoints.filter((endpoint) => endpoint.kind === "agent");
@@ -401,10 +450,24 @@ export class EndpointDirectory {
   }
 }
 
+export interface SessionRouteCapture extends SessionEndpointIdentity {
+  endpointId: string;
+  transport: SessionEndpointTransport;
+  /** Immutable capability decision made when the outgoing message is established. */
+  capabilities: readonly SessionEndpointCapability[];
+  generation?: number;
+  sourceId?: string;
+  workspaceRef?: string;
+  target?: string;
+  routeAuthority?: SessionRouteAuthority;
+}
+
 export interface SessionMessageRequest {
   selector: string;
   message: string;
   mode: SessionMessageMode;
+  /** Exact route/capability fence retained across retries; normally established by MessageRouter. */
+  routeCapture?: SessionRouteCapture;
   messageId?: string;
   source?: SessionMessageSource;
   messageKind?: SessionMessageKind;
@@ -432,7 +495,12 @@ export interface SessionEndpointSnapshot {
 }
 
 export type WindowThreadDirection = "outgoing" | "incoming";
-export type WindowThreadStatus = "pending" | "queued" | "injected" | "accepted" | "rejected" | "timeout";
+export type WindowThreadStatus = "pending" | "queued" | "injected" | "replied" | "accepted" | "rejected" | "timeout";
+export const WINDOW_THREAD_TERMINAL_STATUSES: ReadonlySet<WindowThreadStatus> = new Set([
+  "replied",
+  "rejected",
+  "timeout",
+]);
 
 export interface WindowThreadEntry {
   version: typeof SESSION_ENDPOINT_VERSION;
@@ -470,11 +538,14 @@ export interface WindowThreadSnapshot {
 
 export type WindowThreadEntryInput = Omit<WindowThreadEntry, "version" | "revision" | "contentRevision">;
 
-/** Only injected/legacy-accepted entries prove model consumption; queued entries remain recoverable. */
+/** Injected/legacy-accepted/replied entries prove delivery; queued entries remain recoverable. */
 export function windowThreadReplayReceipt(
   entry: WindowThreadEntry | undefined,
 ): { status: "accepted" | "rejected"; message: string } | undefined {
   if (!entry || entry.status === "pending" || entry.status === "queued") return undefined;
+  if (entry.status === "replied") {
+    return { status: "accepted", message: "workspace command already reached a terminal reply" };
+  }
   return entry.status === "injected" || entry.status === "accepted"
     ? { status: "accepted", message: "workspace command was already consumed" }
     : { status: "rejected", message: "workspace command was already rejected" };
@@ -559,7 +630,7 @@ function validThreadEntry(value: unknown): WindowThreadEntry | undefined {
     || (entry.mode !== "steer" && entry.mode !== "follow_up")
     || (entry.effectiveMode !== undefined && entry.effectiveMode !== "steer" && entry.effectiveMode !== "follow_up")
     || typeof entry.body !== "string"
-    || !["pending", "queued", "injected", "accepted", "rejected", "timeout"].includes(String(entry.status))
+    || !["pending", "queued", "injected", "replied", "accepted", "rejected", "timeout"].includes(String(entry.status))
     || typeof entry.createdAt !== "number" || !Number.isSafeInteger(entry.createdAt) || entry.createdAt < 0
     || typeof entry.updatedAt !== "number" || !Number.isSafeInteger(entry.updatedAt) || entry.updatedAt < entry.createdAt
     || typeof entry.revision !== "number" || !Number.isSafeInteger(entry.revision) || entry.revision < 1) return undefined;
@@ -693,8 +764,10 @@ export class WindowThreadStore {
   record(input: WindowThreadEntryInput): WindowThreadEntry {
     const key = threadKey(input);
     const previous = this.#byKey.get(key);
-    const previousTerminal = previous && ["injected", "accepted", "rejected", "timeout"].includes(previous.status);
-    if (previousTerminal) return previous;
+    if (previous && WINDOW_THREAD_TERMINAL_STATUSES.has(previous.status)) return previous;
+    if (previous && (previous.status === "injected" || previous.status === "accepted") && input.status !== "replied") {
+      return previous;
+    }
     if (previous?.status === "queued" && input.status === "pending") return previous;
     if (previous
       && previous.workspaceId === input.workspaceId
@@ -787,6 +860,53 @@ export interface SessionRouteClassification {
   reason?: string;
 }
 
+/** Capture the complete local endpoint fence and freeze its capability decision. */
+export function captureSessionRoute(endpoint: SessionEndpoint): SessionRouteCapture {
+  return Object.freeze({
+    endpointId: endpoint.id,
+    workspaceId: endpoint.workspaceId,
+    ownerId: endpoint.ownerId,
+    ownerNonce: endpoint.ownerNonce,
+    ...(endpoint.correlationId === undefined ? {} : { correlationId: endpoint.correlationId }),
+    transport: endpoint.transport,
+    capabilities: Object.freeze([...endpoint.capabilities]),
+    ...(endpoint.generation === undefined ? {} : { generation: endpoint.generation }),
+    ...(endpoint.sourceId === undefined ? {} : { sourceId: endpoint.sourceId }),
+    ...(endpoint.workspaceRef === undefined ? {} : { workspaceRef: endpoint.workspaceRef }),
+    ...(endpoint.target === undefined ? {} : { target: endpoint.target }),
+    ...(endpoint.routeAuthority === undefined ? {} : { routeAuthority: Object.freeze({ ...endpoint.routeAuthority }) }),
+  });
+}
+
+function endpointForRouteCapture(
+  endpoint: SessionEndpoint,
+  capture: SessionRouteCapture | undefined,
+): { endpoint: SessionEndpoint; capture: SessionRouteCapture } | { reason: string } {
+  const normalized = capture === undefined ? captureSessionRoute(endpoint) : Object.freeze({
+    ...capture,
+    capabilities: Object.freeze([...capture.capabilities]),
+  });
+  if (normalized.endpointId !== endpoint.id
+    || normalized.workspaceId !== endpoint.workspaceId
+    || normalized.ownerId !== endpoint.ownerId
+    || normalized.ownerNonce !== endpoint.ownerNonce
+    || normalized.correlationId !== endpoint.correlationId
+    || normalized.transport !== endpoint.transport
+    || normalized.generation !== endpoint.generation
+    || normalized.sourceId !== endpoint.sourceId
+    || normalized.workspaceRef !== endpoint.workspaceRef
+    || normalized.target !== endpoint.target
+    || normalized.routeAuthority?.kind !== endpoint.routeAuthority?.kind
+    || normalized.routeAuthority?.authorityId !== endpoint.routeAuthority?.authorityId
+    || normalized.routeAuthority?.instanceNonce !== endpoint.routeAuthority?.instanceNonce) {
+    return { reason: "The captured session route no longer matches the endpoint owner fence." };
+  }
+  return {
+    capture: normalized,
+    endpoint: Object.freeze({ ...endpoint, capabilities: normalized.capabilities }),
+  };
+}
+
 export interface SessionMessageResult {
   delivered: boolean;
   endpointId?: string;
@@ -865,8 +985,12 @@ export class MessageRouter {
     targetCorrelationId: request.targetCorrelationId,
   })): SessionRouteClassification {
     if (resolution.code !== "resolved" || !resolution.endpoint) return { transport: "local-agent-mailbox", routable: false, reason: resolution.message ?? resolution.code };
-    const adapter = this.#adapters.get(resolution.endpoint.transport);
-    return adapter?.classify(resolution.endpoint, request) ?? { transport: resolution.endpoint.transport, routable: false, reason: `No ${resolution.endpoint.transport} adapter is registered.` };
+    const routed = endpointForRouteCapture(resolution.endpoint, request.routeCapture);
+    if ("reason" in routed) {
+      return { transport: resolution.endpoint.transport, routable: false, reason: routed.reason };
+    }
+    const adapter = this.#adapters.get(routed.endpoint.transport);
+    return adapter?.classify(routed.endpoint, request) ?? { transport: routed.endpoint.transport, routable: false, reason: `No ${routed.endpoint.transport} adapter is registered.` };
   }
 
   compare(request: SessionMessageRequest): SessionShadowComparison | undefined {
@@ -905,11 +1029,16 @@ export class MessageRouter {
       targetCorrelationId: request.targetCorrelationId,
     });
     if (resolution.code !== "resolved" || !resolution.endpoint) return { delivered: false, error: resolution.message ?? resolution.code };
-    const classification = this.classify(request, resolution);
+    const routed = endpointForRouteCapture(resolution.endpoint, request.routeCapture);
+    if ("reason" in routed) {
+      return { delivered: false, endpointId: resolution.endpoint.id, transport: resolution.endpoint.transport, error: routed.reason };
+    }
+    const routedRequest: SessionMessageRequest = { ...request, routeCapture: routed.capture };
+    const classification = this.classify(routedRequest, resolution);
     if (!classification.routable) return { delivered: false, endpointId: resolution.endpoint.id, transport: classification.transport, error: classification.reason };
     const adapter = this.#adapters.get(classification.transport);
     if (!adapter) return { delivered: false, endpointId: resolution.endpoint.id, transport: classification.transport, error: "Session transport adapter is unavailable." };
-    return adapter.deliver(resolution.endpoint, request);
+    return adapter.deliver(routed.endpoint, routedRequest);
   }
 }
 
@@ -1082,6 +1211,10 @@ export function createLocalAgentMailboxTransportAdapter(deliver: SessionTranspor
 
 export function createWorkspacePeerV1TransportAdapter(deliver: SessionTransportDelivery): SessionTransportAdapter {
   return callbackAdapter("workspace-peer-v1", (endpoint, request) => endpoint.transport === "workspace-peer-v1" ? capabilityReason(endpoint, request) : "Not a workspace peer endpoint.", deliver);
+}
+
+export function createRemoteWorkspaceRpcV1TransportAdapter(deliver: SessionTransportDelivery): SessionTransportAdapter {
+  return callbackAdapter("remote-workspace-rpc-v1", (endpoint, request) => endpoint.transport === "remote-workspace-rpc-v1" ? capabilityReason(endpoint, request) : "Not a remote workspace endpoint.", deliver);
 }
 
 /** Child callers proxy every target to the root; the root remains delivery authority. */

@@ -5,6 +5,10 @@ import { getSessionHostRegistry, type SessionHostRegistry } from "pi-maestro-tea
 import { registerWorkspaceProjectionProvider } from "pi-maestro-teammate/v1/workspace-projections";
 import { MONITOR_TOOL_EXPOSURE_EVENT, type MonitorToolExposureEventV1 } from "pi-maestro-teammate/v1/events";
 import { FlowScheduleBrokerRuntime } from "./broker-runtime.ts";
+import {
+  registerFlowScheduleMonitorFacet,
+  type FlowScheduleMonitorFacetOptions,
+} from "./monitor-facet.ts";
 import { FlowScheduleRuntime, replayFlowScheduleReportOutbox, type FlowScheduleRuntimeOptions } from "./runtime.ts";
 import { FlowScheduleStore } from "./store.ts";
 import {
@@ -25,6 +29,7 @@ export interface RegisterFlowScheduleOptions {
   runtimeOptions?: Omit<FlowScheduleRuntimeOptions, "store" | "getRegistry">;
   /** Whether this managed execution path can mutate Todo state. ACP callers set false. */
   todoMutationSupported?: boolean;
+  registerMonitorFacetProvider?: FlowScheduleMonitorFacetOptions["registerProvider"];
   onError?: (error: unknown) => void;
 }
 
@@ -184,6 +189,16 @@ export function registerFlowSchedule(
       disposeWorkerBroker();
     });
   } else {
+    try {
+      capabilityDisposers.push(registerFlowScheduleMonitorFacet({
+        getStore: () => binding?.store,
+        ...(options.registerMonitorFacetProvider === undefined
+          ? {}
+          : { registerProvider: options.registerMonitorFacetProvider }),
+      }));
+    } catch (error) {
+      reportError(error);
+    }
     const events = (pi as ExtensionAPI & {
       events?: { on?: (channel: string, handler: (data: unknown) => void) => () => void };
     }).events;

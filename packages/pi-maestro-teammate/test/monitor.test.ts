@@ -229,7 +229,10 @@ test("monitor mode context is persistent, idempotent, and supervision-only", () 
   assert.match(injected, /remote-worker targets/);
   assert.match(injected, /remote:<runId>/);
   assert.match(injected, /Never attempt to close discovered external peer windows/);
-  assert.match(injected, /observe local peers as kind=workspace and remote runs as kind=remote/);
+  assert.match(injected, /monitor list\/get\/wait for ordinary attention-first window status/);
+  assert.match(injected, /observe only for raw provider snapshots, turns\/todos\/diagnose views, or multi-target all\/any\/count barriers/);
+  assert.match(injected, /monitor list\/get for ordinary liveness and attention/);
+  assert.match(injected, /Each loop tick should use monitor list\/get for ordinary normalized window state/);
   assert.match(injected, /flow-schedule-todo-binding capability/);
   assert.match(injected, /observe with view=todos on workspace targets/);
   assert.match(injected, /display-only and never completion authority/);
@@ -274,6 +277,7 @@ test("activePromptLoopIdsFromPayload keeps only active prompt loops", () => {
 test("monitor communication uses tool-local capability gates without global interception", async () => {
   const source = await readFile(new URL("../src/extension/index.ts", import.meta.url), "utf8");
   const monitorSource = await readFile(new URL("../src/extension/monitor.ts", import.meta.url), "utf8");
+  const lifecycleSource = await readFile(new URL("../src/extension/monitor-window-lifecycle.ts", import.meta.url), "utf8");
   const coreSource = await readFile(new URL("../src/extension/teammate-core.ts", import.meta.url), "utf8");
   const proxySource = await readFile(new URL("../src/extension/teammate-proxy.ts", import.meta.url), "utf8");
   const peerSource = await readFile(new URL("../src/extension/workspace-peers.ts", import.meta.url), "utf8");
@@ -282,7 +286,7 @@ test("monitor communication uses tool-local capability gates without global inte
   assert.match(source, /new MonitorToolExposureController\(pi/);
   assert.match(source, /local: \[sendTool, localListTool, localObserveTool\]/);
   assert.match(source, /monitor: \[sendTool, listTool, observeTool\]/);
-  assert.match(source, /exclusiveNames: \["workspace-window", "remote-worker"\]/);
+  assert.match(source, /exclusiveNames: \["monitor", "workspace-window", "remote-worker"\]/);
   assert.match(source, /monitorInteractionModeActive = true[\s\S]*?monitorToolExposure\?\.enter\(\)/);
   assert.match(source, /monitorInteractionModeActive = false[\s\S]*?monitorToolExposure\?\.exit\(\)/);
   // Sending is not Monitor-gated; window discovery (teammate-list) is.
@@ -298,19 +302,21 @@ test("monitor communication uses tool-local capability gates without global inte
   assert.doesNotMatch(peerSource, /Reply with teammate-send/);
   assert.match(coreSource, /LOCAL_TEAMMATE_LIST_DESCRIPTION/);
   assert.match(coreSource, /LOCAL_OBSERVE_DESCRIPTION/);
+  assert.match(source, /name: "monitor"/);
+  assert.match(source, /Use observe when you need raw provider snapshots, turns\/todos\/diagnose views, or an all\/any\/count barrier/);
   assert.match(source, /name: "workspace-window"/);
   assert.match(source, /const monitorCapture = captureMonitorCommunication\(\);[\s\S]*?workspace-window is available only after the user enters Monitor mode/);
-  assert.match(source, /const sessionName = managedWindowSessionName\(name\)/);
-  assert.match(source, /const completionHandle = workspaceWindowCompletionHandle\(randomUUID\(\)\.replace\(\/-\/g, ""\)\)/);
-  assert.match(source, /messageId: completionHandle\.requestMessageId,[\s\S]*?source: "monitor",[\s\S]*?messageKind: "request",[\s\S]*?terminalResultRequested: true/);
+  assert.match(source, /managedWindowSessionName\(request\.name\)/);
+  assert.match(source, /createHandle: \(\) => workspaceWindowCompletionHandle\(randomUUID\(\)\.replace\(\/-\/g, ""\)\)/);
+  assert.match(source, /messageId: handle\.requestMessageId,[\s\S]*?source: "monitor",[\s\S]*?messageKind: "request",[\s\S]*?terminalResultRequested: true/);
   // Durability-provider absence degrades to passive delivery instead of failing the send.
   assert.match(source, /class WorkspaceTerminalDurabilityUnavailableError extends Error/);
   assert.match(source, /!\(error instanceof WorkspaceTerminalDurabilityUnavailableError\)[\s\S]*?Terminal completion reservation failed/);
   assert.match(source, /without canonical completion tracking/);
   assert.match(source, /targetCorrelationId: WORKSPACE_MAIN_SESSION_MARKER/);
-  assert.match(source, /delivery\.receipt\?\.publicationStage !== "accepted"/);
-  assert.match(source, /Result: \$\{completionHandle\.resource\}/);
-  assert.match(source, /outcome: "cancelled",[\s\S]*?Workspace window \$\{name\} was closed by its Monitor owner/);
+  assert.match(source, /accepted: delivery\.delivered && delivery\.receipt\?\.publicationStage === "accepted"/);
+  assert.match(source, /Result: \$\{created\.handle\.resource\}/);
+  assert.match(lifecycleSource, /Workspace window \$\{name\} was closed by its Monitor owner/);
   assert.match(source, /MANAGED_WINDOW_TERMINAL_DEADLINE_MS/);
   assert.match(source, /Workspace worker runtime died without publishing a canonical terminal envelope/);
   assert.match(source, /targetSessionId: fence\.sessionId/);
@@ -320,12 +326,12 @@ test("monitor communication uses tool-local capability gates without global inte
   assert.match(source, /window\.terminationRequested = true;[\s\S]*?termination\.terminate\(\)/);
   assert.match(source, /window\.settled = true;[\s\S]*?publishWorkspaceTerminalCompletion\(request, terminal\)[\s\S]*?window\.terminalPublished = true;[\s\S]*?stopManagedWindow\(window\.name\)/);
   assert.match(source, /window\.completionHandle[\s\S]*?window\.terminalDeadlineAt !== undefined[\s\S]*?!window\.terminalPublished/);
-  assert.match(source, /spawned\.window\.completionHandle = completionHandle;[\s\S]*?routeSessionMessage\(\{/);
+  assert.match(source, /bindHandle: \(window, handle\) => \{ window\.completionHandle = handle; \},[\s\S]*?deliverObjective:[\s\S]*?routeSessionMessage\(\{/);
   assert.match(source, /owner\.sessionName === window\.sessionName/);
   assert.doesNotMatch(source, /terminal result request registered for the launched root task/);
-  assert.match(source, /managedWindows\.get\(name\) !== spawned\.window \|\| !exactManagedWindowOwner\(spawned\.window\)/);
-  assert.match(source, /owner\.ownerId === window\.ownerId[\s\S]*?owner\.ownerNonce === window\.ownerNonce[\s\S]*?owner\.pid === window\.pid/);
-  assert.match(source, /await refreshWorkspacePeerOwnersStrict\(\)[\s\S]*?terminateManagedWindowProcess\(window\)/);
+  assert.match(lifecycleSource, /assertAdmission\(authority, window, admittedOwner, request\.name, "workspace registration"\)/);
+  assert.match(source, /left\.ownerId === right\.ownerId[\s\S]*?left\.ownerNonce === right\.ownerNonce[\s\S]*?left\.pid === right\.pid/);
+  assert.match(source, /const owners = await refreshWorkspacePeerOwnersStrict\(\)[\s\S]*?terminateManagedWindowProcess\(window\)/);
   assert.match(source, /const exited = window\.pid !== undefined && !managedWindowPidIsAlive\(window\.pid\)/);
   assert.match(source, /const status = await terminateManagedWindowProcess\(window\)/);
   assert.doesNotMatch(source, /monitorController/);
@@ -341,7 +347,7 @@ test("monitor communication uses tool-local capability gates without global inte
   assert.match(source, /use remote-worker close/);
   assert.match(source, /shutdownRemoteMonitorBinding\(\)/);
   assert.match(source, /agentRole: `remote worker[\s\S]*?kind: "remote"/);
-  assert.match(source, /remoteRuns\.length} remote/);
+  assert.match(source, /\/monitor status — render the same normalized projector as monitor list[\s\S]*?executeMonitorQuery\(\{ action: "list" \}/);
   assert.match(monitorSource, /workspace-window only for local Pi worker windows/);
   assert.match(monitorSource, /remote-worker targets/);
   assert.match(monitorSource, /objective is delivered by create/);

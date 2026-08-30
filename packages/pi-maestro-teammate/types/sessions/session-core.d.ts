@@ -14,18 +14,29 @@ export type SessionSurfaceMode = "legacy" | "shadow" | "unified";
 export type SessionViewMode = "agents" | "windows";
 export type SessionWindowModeAction = "enter" | "exit";
 export type SessionEndpointKind = "root" | "agent";
-export type SessionEndpointScope = "local" | "workspace-peer";
-export type SessionEndpointTransport = "local-root" | "local-agent-mailbox" | "workspace-peer-v1" | "child-ipc";
+export type SessionEndpointScope = "local" | "workspace-peer" | "ssh-window";
+export type SessionEndpointTransport = "local-root" | "local-agent-mailbox" | "workspace-peer-v1" | "remote-workspace-rpc-v1" | "child-ipc";
+export interface SessionRouteAuthority {
+    kind: "local" | "ssh";
+    authorityId: string;
+    instanceNonce?: string;
+}
+/** Discovery is transport-neutral; providers retain their own authority and lifecycle. */
+export interface SessionDiscoveryProvider {
+    readonly authority: SessionRouteAuthority;
+    refresh(signal?: AbortSignal): Promise<readonly SessionEndpoint[]>;
+    close(): Promise<void>;
+}
 export type SessionEndpointStatus = "running" | "sleeping" | "settled";
 export type SessionMessageMode = "steer" | "follow_up" | "interrupt" | "abort";
 export type SessionMessageSource = "user" | "monitor" | "system";
 export type SessionMessageKind = "message" | "coordination" | "request" | "status" | "supervision";
-export type SessionDeliveryStage = "queued" | "injected";
+export type SessionDeliveryStage = "queued" | "injected" | "replied";
 /** Model-originated status is coordination; only trusted host telemetry stays context-only. */
 export declare function normalizeSessionMessageKind(kind: SessionMessageKind | undefined, trustedStatus?: boolean): SessionMessageKind | undefined;
 /** Status messages update context but never start a model turn by themselves. */
 export declare function sessionMessageTriggersTurn(kind: SessionMessageKind | undefined): boolean;
-export type SessionEndpointCapability = "inspect" | "message" | "steer" | "follow_up" | "interrupt" | "abort" | "wake" | "monitor-workspace-aggregation" | "flow-schedule-todo-binding" | "flow-schedule-todo-projection" | "flow-schedule-todo-mutation" | "flow-schedule-report";
+export type SessionEndpointCapability = "inspect" | "message" | "steer" | "follow_up" | "interrupt" | "abort" | "wake" | "receipt" | "reply" | "monitor-workspace-aggregation" | "flow-schedule-todo-binding" | "flow-schedule-todo-projection" | "flow-schedule-todo-mutation" | "flow-schedule-report";
 export interface SessionEndpointIdentity {
     workspaceId: string;
     ownerId: string;
@@ -48,6 +59,11 @@ export interface SessionEndpoint extends SessionEndpointIdentity {
     /** Projection producer and monotonic incarnation for local isolation. */
     sourceId?: string;
     generation?: number;
+    workspaceRef?: string;
+    /** Exact externally addressable selector, when distinct from the endpoint id. */
+    target?: string;
+    /** Transport authority and incarnation for local/SSH route isolation. */
+    routeAuthority?: SessionRouteAuthority;
     sessionName?: string;
     name?: string;
     agent?: string;
@@ -77,12 +93,18 @@ export interface SessionOwnerProjection extends Omit<SessionEndpointIdentity, "c
     sourceId?: string;
     generation?: number;
     sessionName?: string;
+    workspaceRef?: string;
+    target?: string;
+    routeAuthority?: SessionRouteAuthority;
     contextPressure?: number;
+    agentCount?: number;
+    /** Exact capabilities advertised by this owner; defaults preserve the v1 local/workspace behavior. */
+    capabilities?: readonly SessionEndpointCapability[];
     /** Extra root-endpoint capabilities this owner advertises (e.g. flow-schedule-todo-binding). */
     extraCapabilities?: readonly SessionEndpointCapability[];
     agents: readonly SessionAgentProjection[];
 }
-export type SessionSelectorKind = "endpoint-id" | "local-root" | "owner-root" | "owner-agent" | "session-name" | "window-owner-prefix" | "name" | "name-id-prefix" | "correlation-id" | "correlation-prefix";
+export type SessionSelectorKind = "endpoint-id" | "remote-window" | "local-root" | "owner-root" | "owner-agent" | "session-name" | "window-owner-prefix" | "name" | "name-id-prefix" | "correlation-id" | "correlation-prefix";
 export type SessionResolutionCode = "resolved" | "invalid" | "not_found" | "ambiguous" | "not_routable";
 export interface SessionResolution {
     code: SessionResolutionCode;
@@ -104,6 +126,7 @@ export declare function sessionRootEndpointId(identity: Omit<SessionEndpointIden
 export declare function sessionAgentEndpointId(identity: SessionEndpointIdentity & {
     correlationId: string;
 }): string;
+export declare function sessionRemoteRootEndpointId(authority: SessionRouteAuthority, workspaceRef: string, identity: Omit<SessionEndpointIdentity, "correlationId">): string;
 /** Stable 64-bit FNV-1a; suitable for change detection, not security. */
 export declare function sessionContentRevision(value: unknown): string;
 export declare function projectSessionEndpoints(owners: readonly SessionOwnerProjection[]): readonly SessionEndpoint[];
@@ -120,10 +143,23 @@ export declare class EndpointDirectory {
     }): () => void;
     resolve(rawSelector: string, options?: SessionResolveOptions): SessionResolution;
 }
+export interface SessionRouteCapture extends SessionEndpointIdentity {
+    endpointId: string;
+    transport: SessionEndpointTransport;
+    /** Immutable capability decision made when the outgoing message is established. */
+    capabilities: readonly SessionEndpointCapability[];
+    generation?: number;
+    sourceId?: string;
+    workspaceRef?: string;
+    target?: string;
+    routeAuthority?: SessionRouteAuthority;
+}
 export interface SessionMessageRequest {
     selector: string;
     message: string;
     mode: SessionMessageMode;
+    /** Exact route/capability fence retained across retries; normally established by MessageRouter. */
+    routeCapture?: SessionRouteCapture;
     messageId?: string;
     source?: SessionMessageSource;
     messageKind?: SessionMessageKind;
@@ -149,7 +185,8 @@ export interface SessionEndpointSnapshot {
     endpoints: readonly SessionEndpoint[];
 }
 export type WindowThreadDirection = "outgoing" | "incoming";
-export type WindowThreadStatus = "pending" | "queued" | "injected" | "accepted" | "rejected" | "timeout";
+export type WindowThreadStatus = "pending" | "queued" | "injected" | "replied" | "accepted" | "rejected" | "timeout";
+export declare const WINDOW_THREAD_TERMINAL_STATUSES: ReadonlySet<WindowThreadStatus>;
 export interface WindowThreadEntry {
     version: typeof SESSION_ENDPOINT_VERSION;
     messageId: string;
@@ -183,7 +220,7 @@ export interface WindowThreadSnapshot {
     entries: readonly WindowThreadEntry[];
 }
 export type WindowThreadEntryInput = Omit<WindowThreadEntry, "version" | "revision" | "contentRevision">;
-/** Only injected/legacy-accepted entries prove model consumption; queued entries remain recoverable. */
+/** Injected/legacy-accepted/replied entries prove delivery; queued entries remain recoverable. */
 export declare function windowThreadReplayReceipt(entry: WindowThreadEntry | undefined): {
     status: "accepted" | "rejected";
     message: string;
@@ -214,6 +251,8 @@ export interface SessionRouteClassification {
     routable: boolean;
     reason?: string;
 }
+/** Capture the complete local endpoint fence and freeze its capability decision. */
+export declare function captureSessionRoute(endpoint: SessionEndpoint): SessionRouteCapture;
 export interface SessionMessageResult {
     delivered: boolean;
     endpointId?: string;
@@ -325,5 +364,6 @@ export type SessionTransportDelivery = (endpoint: SessionEndpoint, request: Sess
 export declare function createLocalRootTransportAdapter(deliver: SessionTransportDelivery): SessionTransportAdapter;
 export declare function createLocalAgentMailboxTransportAdapter(deliver: SessionTransportDelivery): SessionTransportAdapter;
 export declare function createWorkspacePeerV1TransportAdapter(deliver: SessionTransportDelivery): SessionTransportAdapter;
+export declare function createRemoteWorkspaceRpcV1TransportAdapter(deliver: SessionTransportDelivery): SessionTransportAdapter;
 /** Child callers proxy every target to the root; the root remains delivery authority. */
 export declare function createChildIpcTransportAdapter(deliver: SessionTransportDelivery): SessionTransportAdapter;

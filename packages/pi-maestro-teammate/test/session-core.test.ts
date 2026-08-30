@@ -6,6 +6,7 @@ import {
   SESSION_HOST_REGISTRY_KEY,
   SessionHostRegistry,
   WindowThreadStore,
+  captureSessionRoute,
   createChildIpcTransportAdapter,
   createLocalAgentMailboxTransportAdapter,
   createLocalRootTransportAdapter,
@@ -19,6 +20,7 @@ import {
   normalizeSessionMessageKind,
   sessionMessageTriggersTurn,
   sessionSurfaceModeFromEnv,
+  windowThreadReplayReceipt,
   type LegacySessionAuthority,
   type SessionEndpoint,
   type SessionMessageRequest,
@@ -266,6 +268,49 @@ test("all physical adapters classify their canonical transport, including child 
   assert.deepEqual(deliveries, [childEndpoint.id]);
 });
 
+test("route capture freezes capabilities while retaining the complete owner fence", async () => {
+  const projected = projectSessionEndpoints(owners());
+  const remote = endpointBy(projected, (endpoint) => endpoint.scope === "workspace-peer" && endpoint.kind === "root");
+  const capture = captureSessionRoute(remote);
+  assert.equal(Object.isFrozen(capture), true);
+  assert.equal(Object.isFrozen(capture.capabilities), true);
+
+  const narrowed: SessionEndpoint = Object.freeze({
+    ...remote,
+    capabilities: Object.freeze(["inspect"] as const),
+  });
+  const directory = new EndpointDirectory([narrowed]);
+  let deliveredCapabilities: readonly string[] | undefined;
+  const router = new MessageRouter({
+    directory,
+    surface: "unified",
+    adapters: [createWorkspacePeerV1TransportAdapter(async (endpoint, input) => {
+      deliveredCapabilities = endpoint.capabilities;
+      assert.deepEqual(input.routeCapture?.capabilities, capture.capabilities);
+      return { delivered: true, endpointId: endpoint.id, transport: "workspace-peer-v1" };
+    })],
+  });
+
+  const captured = await router.route(request({
+    selector: remote.id,
+    mode: "follow_up",
+    routeCapture: capture,
+  }));
+  assert.equal(captured.delivered, true);
+  assert.deepEqual(deliveredCapabilities, capture.capabilities);
+
+  const fresh = await router.route(request({ selector: remote.id, mode: "follow_up" }));
+  assert.equal(fresh.delivered, false, "a fresh route observes the narrowed capability advertisement");
+
+  const stale = await router.route(request({
+    selector: remote.id,
+    mode: "follow_up",
+    routeCapture: { ...capture, ownerNonce: "3".repeat(32) },
+  }));
+  assert.equal(stale.delivered, false);
+  assert.match(stale.error ?? "", /captured session route no longer matches/);
+});
+
 test("session host registry publishes through the versioned global symbol", () => {
   const host = {} as typeof globalThis & Record<symbol, unknown>;
   const registry = new SessionHostRegistry({ endpoints: projectSessionEndpoints(owners()) });
@@ -446,7 +491,7 @@ test("persistent session journal accepts direction-bound terminal requests and r
   assert.equal(legacy.terminalResultRequested, undefined, "legacy entries remain valid without terminal opt-in");
 });
 
-test("window thread transitions pending to queued to injected without losing replay metadata", () => {
+test("window thread transitions pending to queued to injected to replied without losing replay metadata", () => {
   const persisted: unknown[] = [];
   const store = new WindowThreadStore({ persist: (entry) => persisted.push(entry) });
   const messageId = "8".repeat(32);
@@ -486,7 +531,15 @@ test("window thread transitions pending to queued to injected without losing rep
   assert.equal(injected?.status, "injected");
   assert.equal(injected?.revision, 3);
   assert.equal(persisted.length, 2, "injection reconciliation does not persist a crash-inverted thread receipt");
-  assert.equal(store.transition(messageId, "incoming", "rejected", 1_300), injected, "injected is terminal");
+  const replied = store.transition(messageId, "incoming", "replied", 1_300);
+  assert.equal(replied?.status, "replied");
+  assert.equal(replied?.revision, 4);
+  assert.deepEqual(windowThreadReplayReceipt(replied), {
+    status: "accepted",
+    message: "workspace command already reached a terminal reply",
+  });
+  assert.equal(persisted.length, 3);
+  assert.equal(store.transition(messageId, "incoming", "rejected", 1_400), replied, "replied is terminal");
 });
 
 test("window thread ownership changes advance the semantic revision", () => {

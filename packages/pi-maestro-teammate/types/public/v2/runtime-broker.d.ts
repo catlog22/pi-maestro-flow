@@ -13,6 +13,7 @@ export interface RuntimeActorHostClientOptions {
 }
 export declare function createRuntimeActorHost(options?: RuntimeActorHostClientOptions): RuntimeActorHostClient;
 export * from "../../runtime-broker/contracts.ts";
+export { SessionDomainBrokerCommitter, type SessionDomainBrokerCommitPort, type SessionDomainBrokerCommitterOptions, type SessionDomainOutboxDraft, } from "../../runtime-broker/session-commit.ts";
 export { RuntimeBrokerClient, type RuntimeBrokerClientOptions, } from "../../runtime-broker/client.ts";
 export { getRuntimeWorkspaceIdentity, type RuntimeWorkspaceIdentity, } from "../../runtime-broker/private-state.ts";
 export { probeRuntimeBrokerCapability, type RuntimeBrokerCapability, } from "../../runtime-broker/capability.ts";

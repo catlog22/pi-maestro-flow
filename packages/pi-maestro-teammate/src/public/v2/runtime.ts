@@ -8,3 +8,6 @@ export {
   parseRuntimeProjectionV2,
 } from "../../runtime-v2/validation.ts";
 export * from "../../runtime-v2/read-model.ts";
+export * from "../../runtime-v2/session-domain.ts";
+export * from "../../runtime-v2/session-broker-read-model.ts";
+export * from "../../runtime-v2/session-rollout.ts";

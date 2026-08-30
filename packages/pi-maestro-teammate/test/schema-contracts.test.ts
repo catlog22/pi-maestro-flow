@@ -117,6 +117,12 @@ test("local teammate list schema excludes cross-window views", () => {
   assert.equal(Check(LocalTeammateListParams, { view: "active", peer: "owner:abc" }), false);
 
   assert.equal(Check(TeammateListParams, { view: "windows" }), true);
+  for (const scope of ["local", "remote", "all"] as const) {
+    assert.equal(Check(TeammateListParams, { view: "windows", scope }), true);
+  }
+  assert.equal(Check(TeammateListParams, { view: "active", scope: "remote" }), false);
+  assert.equal(Check(TeammateListParams, { view: "windows", scope: "other" }), false);
+  assert.equal(Check(LocalTeammateListParams, { view: "active", scope: "local" }), false);
   assert.equal(Check(TeammateListParams, { view: "inbox", limit: 10 }), true);
 });
 

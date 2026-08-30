@@ -4,6 +4,7 @@ import * as path from "node:path";
 import {
   loadRemoteConfig,
   resolveRemoteTarget,
+  resolveRemoteWorkspace,
 } from "./config.ts";
 import {
   ensurePrivateRemoteDirectory,
@@ -131,7 +132,8 @@ async function serve(options: ParsedOptions): Promise<void> {
   try {
     const config = loadRemoteConfig(options.configCwd);
     const targets = Object.keys(config.targets).map((id) => resolveRemoteTarget(config, id));
-    server = new RemoteBridgeServer({ stateDirectory: options.stateDirectory, targets });
+    const workspaces = Object.keys(config.workspaces).map((workspaceRef) => resolveRemoteWorkspace(config, workspaceRef));
+    server = new RemoteBridgeServer({ stateDirectory: options.stateDirectory, targets, workspaces });
     await server.listen();
     await new Promise<void>((resolve) => {
       process.once("SIGINT", resolve);

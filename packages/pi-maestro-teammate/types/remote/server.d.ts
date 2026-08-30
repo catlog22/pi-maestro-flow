@@ -1,20 +1,28 @@
 import * as net from "node:net";
 import type { RemoteDriver } from "./driver.ts";
 import { RemoteRunJournal } from "./journal.ts";
-import { type ResolvedRemoteTarget } from "./types.ts";
+import { type RemoteWindowBridgeAdvertisement } from "./protocol.ts";
+import { type ResolvedRemoteTarget, type ResolvedRemoteWorkspace } from "./types.ts";
 import { type RuntimeV2ShadowSink } from "../runtime-v2/shadow.ts";
 export declare const REMOTE_SOCKET_FILE = "bridge.sock";
 export declare const REMOTE_DAEMON_LOCK_FILE = "daemon.lock";
 export declare const REMOTE_HEARTBEAT_MS = 15000;
 export declare const REMOTE_CLIENT_EGRESS_BYTES: number;
+export declare const REMOTE_WINDOW_BRIDGE_WORKSPACE_PEER_VERSIONS: readonly [1];
+export declare const REMOTE_WINDOW_BRIDGE_RELAY_VERSIONS: readonly [1];
+export declare const REMOTE_WINDOW_BRIDGE_RUNTIME_VERSIONS: readonly [1];
+export declare function createRemoteWindowBridgeAdvertisement(pluginVersion?: string): RemoteWindowBridgeAdvertisement;
 export interface RemoteBridgeServerOptions {
     stateDirectory?: string;
     journal?: RemoteRunJournal;
     targets: readonly ResolvedRemoteTarget[];
+    workspaces?: readonly ResolvedRemoteWorkspace[];
     drivers?: readonly RemoteDriver[];
     concurrency?: number;
     heartbeatMs?: number;
     clientEgressBytes?: number;
+    /** Disable only for compatibility tests that emulate a run-only legacy daemon. */
+    windowBridge?: RemoteWindowBridgeAdvertisement | false;
     runtimeV2ShadowSink?: RuntimeV2ShadowSink;
     /**
      * Where a quarantined run is reported, for a journal this server constructs itself.

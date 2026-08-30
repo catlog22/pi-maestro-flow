@@ -17,6 +17,10 @@ import {
   REMOTE_MAX_LINE_BYTES,
   REMOTE_MAX_OBJECTIVE_BYTES,
   encodeRemoteEnvelope,
+  normalizeRemoteWindowListParams,
+  normalizeRemoteWindowObserveParams,
+  normalizeRemoteWindowReceiptParams,
+  normalizeRemoteWindowSendParams,
   parseRemoteEnvelopeLine,
   type RemoteInitializeParams,
   type RemoteJsonRpcEnvelope,
@@ -24,6 +28,7 @@ import {
   type RemoteJsonRpcId,
   type RemoteJsonRpcRequest,
   type RemoteJsonRpcSuccess,
+  type RemoteProtocolNotification,
   type RemoteRequestMethod,
   type RemoteRequestParamsByMethod,
   type RemoteResultByMethod,
@@ -31,14 +36,18 @@ import {
   type RemoteRunCancelParams,
   type RemoteRunInputParams,
   type RemoteRunStartParams,
+  type RemoteWindowBridgeAdvertisement,
 } from "./protocol.ts";
 import {
   REMOTE_PROTOCOL_VERSION,
+  REMOTE_WINDOW_BRIDGE_PLUGIN_ID,
   type RemoteRunCapture,
   type RemoteRunEvent,
   type ResolvedRemoteTarget,
+  type ResolvedRemoteWorkspace,
 } from "./types.ts";
 import { redactRemoteError } from "./child-security.ts";
+import { RemoteWindowService } from "./window-service.ts";
 import { adaptRemoteRunEventV2 } from "../runtime-v2/adapters.ts";
 import { createRuntimeV2ShadowSink, type RuntimeV2ShadowSink } from "../runtime-v2/shadow.ts";
 
@@ -46,6 +55,29 @@ export const REMOTE_SOCKET_FILE = "bridge.sock";
 export const REMOTE_DAEMON_LOCK_FILE = "daemon.lock";
 export const REMOTE_HEARTBEAT_MS = 15_000;
 export const REMOTE_CLIENT_EGRESS_BYTES = 16 * 1024 * 1024;
+export const REMOTE_WINDOW_BRIDGE_WORKSPACE_PEER_VERSIONS = Object.freeze([1] as const);
+export const REMOTE_WINDOW_BRIDGE_RELAY_VERSIONS = Object.freeze([1] as const);
+export const REMOTE_WINDOW_BRIDGE_RUNTIME_VERSIONS = Object.freeze([1] as const);
+
+function packageVersion(): string {
+  const metadata = JSON.parse(fs.readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as { version?: unknown };
+  if (typeof metadata.version !== "string" || !metadata.version || metadata.version.length > 128) {
+    throw new Error("Invalid pi-maestro-teammate package version");
+  }
+  return metadata.version;
+}
+
+export function createRemoteWindowBridgeAdvertisement(
+  pluginVersion = packageVersion(),
+): RemoteWindowBridgeAdvertisement {
+  return Object.freeze({
+    pluginId: REMOTE_WINDOW_BRIDGE_PLUGIN_ID,
+    pluginVersion,
+    workspacePeerVersions: REMOTE_WINDOW_BRIDGE_WORKSPACE_PEER_VERSIONS,
+    relayVersions: REMOTE_WINDOW_BRIDGE_RELAY_VERSIONS,
+    runtimeVersions: REMOTE_WINDOW_BRIDGE_RUNTIME_VERSIONS,
+  });
+}
 
 class RemoteRpcError extends Error {
   readonly code: number;
@@ -72,10 +104,13 @@ export interface RemoteBridgeServerOptions {
   stateDirectory?: string;
   journal?: RemoteRunJournal;
   targets: readonly ResolvedRemoteTarget[];
+  workspaces?: readonly ResolvedRemoteWorkspace[];
   drivers?: readonly RemoteDriver[];
   concurrency?: number;
   heartbeatMs?: number;
   clientEgressBytes?: number;
+  /** Disable only for compatibility tests that emulate a run-only legacy daemon. */
+  windowBridge?: RemoteWindowBridgeAdvertisement | false;
   runtimeV2ShadowSink?: RuntimeV2ShadowSink;
   /**
    * Where a quarantined run is reported, for a journal this server constructs itself.
@@ -199,6 +234,8 @@ export class RemoteBridgeServer {
   readonly #concurrency: number;
   readonly #heartbeatMs: number;
   readonly #clientEgressBytes: number;
+  readonly #windowBridge?: RemoteWindowBridgeAdvertisement;
+  readonly #windowService?: RemoteWindowService;
   readonly #runtimeV2ShadowSink: RuntimeV2ShadowSink;
   #startingRuns = 0;
   #server?: net.Server;
@@ -218,12 +255,25 @@ export class RemoteBridgeServer {
     this.#concurrency = options.concurrency ?? 4;
     this.#heartbeatMs = options.heartbeatMs ?? REMOTE_HEARTBEAT_MS;
     this.#clientEgressBytes = options.clientEgressBytes ?? REMOTE_CLIENT_EGRESS_BYTES;
+    this.#windowBridge = options.windowBridge === false
+      ? undefined
+      : options.windowBridge ?? createRemoteWindowBridgeAdvertisement();
     this.#runtimeV2ShadowSink = options.runtimeV2ShadowSink ?? createRuntimeV2ShadowSink({
       stateDirectory: this.journal.stateDirectory,
       onError: (error) => {
         process.stderr.write(`pi-teammate-remote: Runtime V2 shadow append failed: ${redactRemoteError(error)}\n`);
       },
     });
+    this.#windowService = this.#windowBridge === undefined
+      ? undefined
+      : new RemoteWindowService({
+          workspaces: options.workspaces ?? [],
+          identity: this.journal.identity,
+          notify: (monitorOwnerNonce, notification) => this.#sendWindowNotification(monitorOwnerNonce, notification),
+          onDomainEvent: (event) => {
+            this.#runtimeV2ShadowSink.appendAfterV1(() => undefined, () => [event]);
+          },
+        });
     if (!Number.isInteger(this.#concurrency) || this.#concurrency < 1 || this.#concurrency > 128) {
       throw new Error("Remote daemon concurrency must be between 1 and 128");
     }
@@ -263,6 +313,7 @@ export class RemoteBridgeServer {
     for (const controller of this.#controllers.values()) controller.abort();
     this.#controllers.clear();
     await Promise.allSettled([...this.#drivers.values()].map((driver) => driver.close()));
+    this.#windowService?.close();
     this.#handles.clear();
     const server = this.#server;
     this.#server = undefined;
@@ -353,6 +404,10 @@ export class RemoteBridgeServer {
         case "run/input": return this.#input(params as RemoteRunInputParams);
         case "run/cancel": return this.#cancel(params as RemoteRunCancelParams);
         case "run/list": return { runs: this.journal.listRuns(monitorOwnerNonce).map((record) => record.snapshot) };
+        case "window/list": return this.#requireWindowService().list(params as RemoteRequestParamsByMethod["window/list"]);
+        case "window/observe": return this.#requireWindowService().observe(params as RemoteRequestParamsByMethod["window/observe"]);
+        case "window/send": return this.#requireWindowService().send(params as RemoteRequestParamsByMethod["window/send"]);
+        case "window/receipt": return this.#requireWindowService().receipt(params as RemoteRequestParamsByMethod["window/receipt"]);
       }
     });
     if (!outcome.ok) throw new RemoteRpcError(outcome.code, outcome.message, outcome.data);
@@ -375,6 +430,7 @@ export class RemoteBridgeServer {
       concurrency: this.#concurrency,
       activeRuns,
       status: statusForRuns(activeRuns),
+      ...(this.#windowBridge ? { windowBridge: this.#windowBridge } : {}),
     };
   }
 
@@ -606,7 +662,24 @@ export class RemoteBridgeServer {
         };
       case "run/list":
         return { commandId: validateCommandId(raw.commandId), monitorOwnerNonce: validateOwner(raw.monitorOwnerNonce) };
+      case "window/list":
+      case "window/observe":
+      case "window/send":
+      case "window/receipt":
+        try {
+          if (method === "window/list") return normalizeRemoteWindowListParams(raw);
+          if (method === "window/observe") return normalizeRemoteWindowObserveParams(raw);
+          if (method === "window/send") return normalizeRemoteWindowSendParams(raw);
+          return normalizeRemoteWindowReceiptParams(raw);
+        } catch (error) {
+          throw new RemoteRpcError(-32602, error instanceof Error ? error.message : "Invalid remote window params");
+        }
     }
+  }
+
+  #requireWindowService(): RemoteWindowService {
+    if (!this.#windowService) throw new RemoteRpcError(-32601, "Remote window bridge is unavailable");
+    return this.#windowService;
   }
 
   #sendRunEvent(client: ClientState, event: RemoteRunEvent): void {
@@ -616,7 +689,22 @@ export class RemoteBridgeServer {
     this.#send(client, { jsonrpc: REMOTE_JSONRPC_VERSION, method: event.type, params: event });
   }
 
+  #sendWindowNotification(monitorOwnerNonce: string, notification: RemoteProtocolNotification["params"]): void {
+    if (notification.type !== "window/state" && notification.type !== "window/message") return;
+    for (const client of this.#clients) {
+      if (client.monitorOwnerNonce !== monitorOwnerNonce) continue;
+      this.#send(client, {
+        jsonrpc: REMOTE_JSONRPC_VERSION,
+        method: notification.type,
+        params: notification,
+      } as RemoteProtocolNotification);
+    }
+  }
+
   #broadcastHeartbeat(): void {
+    void this.#windowService?.tick().catch((error: unknown) => {
+      process.stderr.write(`pi-teammate-remote: window relay tick failed: ${redactRemoteError(error)}\n`);
+    });
     const activeRuns = this.#handles.size;
     for (const client of this.#clients) {
       if (!client.monitorOwnerNonce) continue;
@@ -699,7 +787,11 @@ export class RemoteBridgeServer {
       || method === "run/attach"
       || method === "run/input"
       || method === "run/cancel"
-      || method === "run/list";
+      || method === "run/list"
+      || method === "window/list"
+      || method === "window/observe"
+      || method === "window/send"
+      || method === "window/receipt";
   }
 
   async #removeStaleSocket(): Promise<void> {
