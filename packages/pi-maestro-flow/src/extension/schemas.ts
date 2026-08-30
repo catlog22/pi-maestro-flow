@@ -228,6 +228,7 @@ export const TodoToolParams = Type.Object({
     "delete",
     "clear",
     "next",
+    "advance",
   ]),
 
   subject: Type.Optional(

@@ -96,6 +96,8 @@ The Project Knowledge Gate precedes todo creation.
 
 Use `todo` when work has ≥3 steps/phases, has step dependencies, or spans turns. Same-turn work with <3 steps and no dependencies: execute inline without todo.
 
+Todo is a live execution state machine, not a retrospective checklist. Immediately after a task meets its acceptance criteria, call `todo advance` with its id and summary before any tool call or work belonging to another Todo; never defer multiple completions until finalization. `advance` is actor-scoped. Use `todo update` immediately instead when work becomes blocked, is paused, or must be completed without activating another task.
+
 Boundary with `goal` and Workflow Sessions — decide in order: (1) an active Workflow Session already tracks its Runs → use run-control, add neither todo nor goal; (2) multi-turn work needing persistence, a budget, or independent verification → goal; (3) in-session multi-phase, dependency, or cross-turn work → todo; (4) otherwise inline execution.
 
 Mechanics (batch create, blockedBy, next/update, delegation via teammate `tasks[].todo`) live in the todo and teammate tool descriptions — follow those contracts.

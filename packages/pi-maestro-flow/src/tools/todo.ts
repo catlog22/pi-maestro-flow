@@ -98,7 +98,7 @@ export interface TodoBatchSpec {
 }
 
 export interface TodoParams {
-  action: "create" | "update" | "list" | "get" | "delete" | "clear" | "next";
+  action: "create" | "update" | "list" | "get" | "delete" | "clear" | "next" | "advance";
   subject?: string;
   description?: string;
   status?: TaskStatus;
@@ -663,8 +663,10 @@ async function executeTodoAction(
         return handleClear(ctx, actor);
       case "next":
         return await handleNext(ctx, actor, generation);
+      case "advance":
+        return await handleAdvance(params, ctx, actor, generation);
       default:
-        return err(`Unknown action "${action}". Valid: create, update, list, get, delete, clear, next`);
+        return err(`Unknown action "${action}". Valid: create, update, list, get, delete, clear, next, advance`);
     }
   } catch (e) {
     return err(`Error in todo ${action}: ${e instanceof Error ? e.message : String(e)}`);
@@ -1093,6 +1095,91 @@ function handleClear(ctx: ExtensionContext, actor: TodoActorRef): FlowToolResult
   return ok(`Cleared ${count} task(s).`, "clear");
 }
 
+async function handleAdvance(
+  params: TodoParams,
+  ctx: ExtensionContext,
+  actor: TodoActorRef,
+  generation: number,
+): Promise<FlowToolResult> {
+  const active = findActiveTask(actor.id);
+  if (!active) {
+    if (params.id !== undefined || params.summary !== undefined) {
+      return err(`@${actor.label} has no in_progress task. Omit id and summary to activate the next runnable task.`, "advance");
+    }
+    const next = runnableTasksForActor(actor.id)[0];
+    if (next?.origin) {
+      return err(`Task #${next.id} is a canonical Workflow mirror. Advance it through the Workflow Run lifecycle; use todo next only when the mirror instructions explicitly require activation.`, "advance");
+    }
+    return relabelTodoResult(await handleNext(ctx, actor, generation), "advance");
+  }
+
+  if (active.origin) {
+    return err(`Task #${active.id} is a canonical Workflow mirror. Advance it through the Workflow Run lifecycle, not todo advance.`, "advance");
+  }
+  if (active.assignee.id !== actor.id) {
+    return err(`@${actor.label} cannot advance task #${active.id}; it is assigned to @${active.assignee.label}.`, "advance");
+  }
+  if (!params.id) {
+    return err(`id is required to complete active task #${active.id} with advance.`, "advance");
+  }
+  if (params.id !== active.id) {
+    return err(`Advance id mismatch for @${actor.label}: active task is #${active.id}, not #${params.id}.`, "advance");
+  }
+  const summary = params.summary?.trim();
+  if (!summary) {
+    return err(`summary is required to complete active task #${active.id} with advance.`, "advance");
+  }
+
+  const completion = await handleUpdate({
+    action: "update",
+    id: active.id,
+    status: "completed",
+    summary,
+    updateFields: ["status", "summary"],
+  }, ctx, actor, generation);
+  if (completion.isError) return relabelTodoResult(completion, "advance");
+
+  const completedNote = `Completed #${active.id}: ${active.subject}`;
+  const nextCandidate = runnableTasksForActor(actor.id)[0];
+  if (nextCandidate?.origin) {
+    return ok(`${completedNote}. Next task #${nextCandidate.id} is a canonical Workflow mirror and remains ${nextCandidate.status}; advance it through the Workflow Run lifecycle.`, "advance");
+  }
+
+  let next: FlowToolResult;
+  try {
+    next = await handleNext(ctx, actor, generation);
+  } catch (error) {
+    return err(`${completedNote}, but the next task was not activated: ${error instanceof Error ? error.message : String(error)}`, "advance");
+  }
+  const nextText = todoResultText(next);
+  if (next.isError) {
+    if (nextText.startsWith("Error: Dependency deadlock:")) {
+      return ok(`${completedNote}. ${nextText.replace("Error: Dependency deadlock:", "Waiting:")}`, "advance");
+    }
+    if (nextText.includes("the task remains in_progress")) {
+      return err(`${completedNote}. ${nextText.replace(/^Error: /, "")}`, "advance");
+    }
+    return err(`${completedNote}, but the next task was not activated: ${nextText}`, "advance");
+  }
+  return ok(`${completedNote}\n\n${nextText}`, "advance");
+}
+
+function todoResultText(result: FlowToolResult): string {
+  const block = result.content.find((item) => item.type === "text");
+  return block && "text" in block ? block.text : "Todo request completed.";
+}
+
+function relabelTodoResult(result: FlowToolResult, action: string): FlowToolResult {
+  const details = result.details as TodoResultDetails | undefined;
+  return details ? { ...result, details: { ...details, action } } : result;
+}
+
+function runnableTasksForActor(actorId: string): TodoTask[] {
+  return [...tasks.values()]
+    .filter((task) => task.assignee.id === actorId && task.status === "pending" && task.blockedBy.length === 0)
+    .sort((left, right) => left.createdAt - right.createdAt);
+}
+
 async function handleNext(
   ctx: ExtensionContext,
   actor: TodoActorRef,
@@ -1103,9 +1190,7 @@ async function handleNext(
     return err(`Task #${active.id} is already in progress for @${actor.label} (one in_progress per actor). Complete or pause it first, or dispatch parallel work via teammates without changing todo status.`, "next");
   }
 
-  const pending = [...tasks.values()]
-    .filter((t) => t.assignee.id === actor.id && t.status === "pending" && t.blockedBy.length === 0)
-    .sort((a, b) => a.createdAt - b.createdAt);
+  const pending = runnableTasksForActor(actor.id);
 
   if (pending.length === 0) {
     const inProgress = [...tasks.values()].filter((t) => t.assignee.id === actor.id && t.status === "in_progress");
@@ -1221,7 +1306,28 @@ async function handleNext(
   if (activation) activeSkillSnapshots.set(draft.id, activation);
   runSkillInjection = undefined;
   if (pendingGoalSwitch && task.goalId) {
-    switchCurrentGoal(task.goalId, ctx, { resume: !userStoppedGate });
+    try {
+      const switched = switchCurrentGoal(task.goalId, ctx, { resume: !userStoppedGate });
+      if (!switched) throw new Error(`Goal ${task.goalId} was not found.`);
+    } catch (goalError) {
+      const rollback = cloneTodoTask(task);
+      rollback.updatedAt = Date.now();
+      const rollbackTasks = new Map(tasks);
+      rollbackTasks.set(rollback.id, rollback);
+      try {
+        commitTodoState(rollbackTasks);
+        clearSkillSnapshot(task.id);
+      } catch (rollbackError) {
+        return err(
+          `Task #${task.id} was activated, but Goal ${task.goalId} selection failed and Todo rollback also failed; the task remains in_progress. Goal error: ${goalError instanceof Error ? goalError.message : String(goalError)}. Rollback error: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
+          "next",
+        );
+      }
+      return err(
+        `Goal ${task.goalId} selection failed for task #${task.id}; activation was rolled back to ${task.status}. ${goalError instanceof Error ? goalError.message : String(goalError)}`,
+        "next",
+      );
+    }
   }
 
   return ok(parts.join("\n"), "next");
@@ -1424,7 +1530,11 @@ function commitTodoState(
   persist(nextTasks);
   tasks = nextTasks;
   markTodoChanged();
-  onTodoStateChanged?.();
+  try {
+    onTodoStateChanged?.();
+  } catch (error) {
+    console.warn(`[pi-maestro-flow] Todo state projection failed after commit: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 /** Subscribe to every Todo revision change without replacing the root UI listener. */

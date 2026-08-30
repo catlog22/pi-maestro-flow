@@ -59,6 +59,15 @@ test("Todo v5 reconciles canonical mirror tasks while preserving user tasks", as
     assert.equal((persisted as { version?: number }).version, 5);
     assert.equal(JSON.stringify(persisted).includes("session-1"), true);
 
+    const mirrorAdvance = await executeTodo({
+      action: "advance",
+      id: mirrors[1]!.id,
+      summary: "must remain canonical",
+    }, extensionContext);
+    assert.equal(mirrorAdvance.isError, true);
+    assert.match((mirrorAdvance.content[0] as { text: string }).text, /canonical Workflow mirror/);
+    assert.equal(getVisibleTasks().find((task) => task.id === mirrors[1]!.id)?.status, "in_progress");
+
     const unchanged = reconcileMirrorTasks(specs, extensionContext);
     assert.equal(unchanged.unchanged.length, 2);
     assert.equal(unchanged.created.length, 0);
@@ -71,6 +80,40 @@ test("Todo v5 reconciles canonical mirror tasks while preserving user tasks", as
 
     const firstOnly = reconcileMirrorTasks(specs.slice(0, 1), extensionContext);
     assert.equal(firstOnly.tombstoned.length, 0, "already deleted mirrors remain tombstoned");
+  } finally {
+    onSessionShutdown(todoContext);
+  }
+});
+
+test("todo advance completes local work without activating a pending canonical mirror", async () => {
+  initTodo({ appendEntry() {} } as never);
+  const todoContext = context([]);
+  const extensionContext = { cwd: "D:/workspace", ui: { setStatus() {} } } as unknown as ExtensionContext;
+  onSessionStart(todoContext);
+
+  try {
+    await executeTodo({ action: "create", subject: "Local work" }, extensionContext);
+    const local = getVisibleTasks()[0]!;
+    await executeTodo({ action: "advance" }, extensionContext);
+    reconcileMirrorTasks([{
+      origin: { sessionId: "session-1", step: "plan", runId: "run-2", runSeq: "002" },
+      subject: "Canonical next",
+      status: "pending",
+      blockedByOriginKeys: [],
+      skills: [],
+    }], extensionContext);
+    const mirror = getVisibleTasks().find((task) => task.origin)!;
+
+    const result = await executeTodo({
+      action: "advance",
+      id: local.id,
+      summary: "Local done",
+    }, extensionContext);
+
+    assert.equal(result.isError, undefined);
+    assert.match((result.content[0] as { text: string }).text, /canonical Workflow mirror.*remains pending/);
+    assert.equal(getVisibleTasks().find((task) => task.id === local.id)?.status, "completed");
+    assert.equal(getVisibleTasks().find((task) => task.id === mirror.id)?.status, "pending");
   } finally {
     onSessionShutdown(todoContext);
   }

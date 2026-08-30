@@ -12,6 +12,7 @@ import {
   delegateTodoTasksToAgent,
   sealTodoTasksOnAgentComplete,
   subscribeTodoStateChanges,
+  setTodoStateChangeListener,
   getTodoCompactionSnapshot,
   getVisibleTasks,
   initTodo,
@@ -605,14 +606,66 @@ test("todo with a quality-gate Goal blocks completion until the Goal verifies", 
     assert.match((blocked.content[0] as { text: string }).text, /Quality gate Goal not verified/);
     assert.equal(getVisibleTasks()[0].status, "pending");
 
+    await executeTodo({ action: "advance" }, ctx);
+    const blockedAdvance = await executeTodo({ action: "advance", id, summary: "Guarded done" }, ctx);
+    assert.equal(blockedAdvance.isError, true);
+    assert.match((blockedAdvance.content[0] as { text: string }).text, /Quality gate Goal not verified/);
+    assert.equal(getVisibleTasks()[0].status, "in_progress");
+
     const completion = await executeGoal({ action: "complete", summary: "Gate satisfied" }, goalCtx);
     assert.match(completion.text, /done/i);
 
-    const done = await executeTodo({ action: "update", id, status: "completed" }, ctx);
+    const done = await executeTodo({ action: "advance", id, summary: "Guarded done" }, ctx);
     assert.notEqual((done as { isError?: boolean }).isError, true);
     assert.equal(getVisibleTasks()[0].status, "completed");
   } finally {
     setGoalVerifierRunnerForTest(undefined);
+    await executeGoalCommand({ action: "clear" }, goalCtx);
+    goalSessionShutdown(goalCtx);
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("todo advance rolls back next activation when Goal selection persistence fails", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-advance-goal-switch-"));
+  const loader = new TodoSkillLoader({ cwd: root });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+  const successfulGoalApi = { appendEntry() {} } as never;
+  initGoal(successfulGoalApi);
+  const goalCtx = {
+    cwd: root,
+    ui: { notify() {}, setStatus() {} },
+    abort() {},
+  } as GoalContext;
+  goalSessionStart(goalCtx, { reason: "new" });
+
+  try {
+    const originalGoal = addGoal("Original goal", goalCtx);
+    const nextGoal = addGoal("Next task goal", goalCtx);
+    switchCurrentGoal(originalGoal.id, goalCtx);
+    await executeTodo({ action: "create", subject: "Current" }, ctx);
+    await executeTodo({ action: "create", subject: "Next", goalId: nextGoal.id }, ctx);
+    const [current, next] = getVisibleTasks();
+    await executeTodo({ action: "advance" }, ctx);
+
+    setTodoStateChangeListener(() => { throw new Error("projection failed"); });
+    initGoal({ appendEntry() { throw new Error("goal persist failed"); } } as never);
+    const result = await executeTodo({
+      action: "advance",
+      id: current.id,
+      summary: "Current done",
+    }, ctx);
+
+    assert.equal(result.isError, true);
+    assert.match((result.content[0] as { text: string }).text, /activation was rolled back to pending.*goal persist failed/);
+    assert.equal(getVisibleTasks().find((task) => task.id === current.id)?.status, "completed");
+    assert.equal(getVisibleTasks().find((task) => task.id === next.id)?.status, "pending");
+    assert.equal(getActiveGoal()?.id, originalGoal.id);
+  } finally {
+    setTodoStateChangeListener(undefined);
+    initGoal(successfulGoalApi);
     await executeGoalCommand({ action: "clear" }, goalCtx);
     goalSessionShutdown(goalCtx);
     onSessionShutdown(todoContext);
@@ -1136,6 +1189,161 @@ test("todo next refuses to activate a second task", async () => {
     assert.match((second.content[0] as { text: string }).text, /already in progress/);
     assert.deepEqual(getVisibleTasks().map((task) => task.status), ["in_progress", "pending"]);
   } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("todo advance activates, completes, and promotes actor-owned tasks", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-advance-"));
+  const loader = new TodoSkillLoader({ cwd: root });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+
+  try {
+    assert.equal(Check(TodoToolParams, { action: "advance" }), true);
+    await executeTodo({
+      action: "create",
+      tasks: [
+        { subject: "First" },
+        { subject: "Second", blockedBy: [0] },
+      ],
+    }, ctx);
+    const [first, second] = getVisibleTasks();
+
+    const started = await executeTodo({ action: "advance" }, ctx);
+    assert.equal(started.isError, undefined);
+    assert.deepEqual(getVisibleTasks().map((task) => task.status), ["in_progress", "blocked"]);
+
+    const mismatch = await executeTodo({ action: "advance", id: second.id, summary: "wrong" }, ctx);
+    assert.equal(mismatch.isError, true);
+    assert.match((mismatch.content[0] as { text: string }).text, /id mismatch/);
+    const emptySummary = await executeTodo({ action: "advance", id: first.id, summary: "   " }, ctx);
+    assert.equal(emptySummary.isError, true);
+    assert.match((emptySummary.content[0] as { text: string }).text, /summary is required/);
+
+    const promoted = await executeTodo({ action: "advance", id: first.id, summary: "First done" }, ctx);
+    assert.equal(promoted.isError, undefined);
+    assert.deepEqual(getVisibleTasks().map((task) => task.status), ["completed", "in_progress"]);
+    assert.equal(getVisibleTasks()[0].summary, "First done");
+    assert.match((promoted.content[0] as { text: string }).text, /Task #1/);
+
+    const finished = await executeTodo({ action: "advance", id: second.id, summary: "Second done" }, ctx);
+    assert.equal(finished.isError, undefined);
+    assert.deepEqual(getVisibleTasks().map((task) => task.status), ["completed", "completed"]);
+    assert.match((finished.content[0] as { text: string }).text, /All tasks completed/);
+
+    const stale = await executeTodo({ action: "advance", id: second.id, summary: "retry" }, ctx);
+    assert.equal(stale.isError, true);
+    assert.match((stale.content[0] as { text: string }).text, /no in_progress task/);
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("todo advance isolates actor cursors while releasing cross-actor dependencies", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-advance-actors-"));
+  const loader = new TodoSkillLoader({ cwd: root });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+  const worker: TodoActorRef = { kind: "teammate", id: "advance-worker", label: "worker" };
+
+  try {
+    registerTodoActor(worker);
+    await executeTodo({ action: "create", subject: "Root upstream" }, ctx);
+    const upstream = getVisibleTasks()[0];
+    await executeTodo({ action: "create", subject: "Worker independent" }, ctx, worker);
+    await executeTodo({
+      action: "create",
+      subject: "Worker downstream",
+      blockedBy: [upstream.id],
+    }, ctx, worker);
+    const [, independent, downstream] = getVisibleTasks();
+
+    await executeTodo({ action: "advance" }, ctx);
+    await executeTodo({ action: "advance" }, ctx, worker);
+    assert.deepEqual(getVisibleTasks().map((task) => task.status), ["in_progress", "in_progress", "blocked"]);
+
+    const rootCannotCompleteWorker = await executeTodo({
+      action: "advance",
+      id: independent.id,
+      summary: "not root-owned",
+    }, ctx);
+    assert.equal(rootCannotCompleteWorker.isError, true);
+    assert.equal(getVisibleTasks().find((task) => task.id === independent.id)?.status, "in_progress");
+
+    const workerWaits = await executeTodo({
+      action: "advance",
+      id: independent.id,
+      summary: "Independent done",
+    }, ctx, worker);
+    assert.equal(workerWaits.isError, undefined);
+    assert.match((workerWaits.content[0] as { text: string }).text, /Waiting:/);
+    assert.equal(getVisibleTasks().find((task) => task.id === downstream.id)?.status, "blocked");
+
+    await executeTodo({ action: "advance", id: upstream.id, summary: "Upstream done" }, ctx);
+    assert.equal(getVisibleTasks().find((task) => task.id === downstream.id)?.status, "pending");
+    assert.equal(getVisibleTasks().some((task) => task.assignee.id === worker.id && task.status === "in_progress"), false);
+
+    await executeTodo({ action: "advance" }, ctx, worker);
+    assert.equal(getVisibleTasks().find((task) => task.id === downstream.id)?.status, "in_progress");
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("todo advance preserves completion when the next task skill cannot activate", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-advance-skill-error-"));
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [], diagnostics: [] }) },
+  });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+
+  try {
+    await executeTodo({ action: "create", subject: "Current" }, ctx);
+    await executeTodo({
+      action: "create",
+      subject: "Missing skill next",
+      skills: [{ name: "missing", role: "primary" }],
+    }, ctx);
+    const [current, next] = getVisibleTasks();
+    await executeTodo({ action: "advance" }, ctx);
+
+    const result = await executeTodo({ action: "advance", id: current.id, summary: "Current done" }, ctx);
+    assert.equal(result.isError, true);
+    assert.match((result.content[0] as { text: string }).text, /Completed #.*next task was not activated.*E_SKILL_NOT_FOUND/);
+    assert.equal(getVisibleTasks().find((task) => task.id === current.id)?.status, "completed");
+    assert.equal(getVisibleTasks().find((task) => task.id === next.id)?.status, "pending");
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("todo advance does not publish completion when completion persistence fails", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-advance-persist-error-"));
+  const loader = new TodoSkillLoader({ cwd: root });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+
+  try {
+    await executeTodo({ action: "create", subject: "Persisted current" }, ctx);
+    const current = getVisibleTasks()[0];
+    await executeTodo({ action: "advance" }, ctx);
+    const before = getTodoCompactionSnapshot();
+    initTodo({ appendEntry() { throw new Error("advance persist failed"); } } as never);
+
+    const result = await executeTodo({ action: "advance", id: current.id, summary: "Must not commit" }, ctx);
+    assert.equal(result.isError, true);
+    assert.match((result.content[0] as { text: string }).text, /advance persist failed/);
+    assert.deepEqual(getTodoCompactionSnapshot(), before);
+  } finally {
+    initTodo({ appendEntry() {} } as never);
     onSessionShutdown(todoContext);
     await rm(root, { recursive: true, force: true });
   }
