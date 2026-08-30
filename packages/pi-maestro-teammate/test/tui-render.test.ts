@@ -228,6 +228,49 @@ test("streaming progress shows live duration and split token usage", () => {
   assert.match(rendered, /stalled 4[45]s/);
 });
 
+test("ordinary in-flight task rows stay stable while live telemetry changes", () => {
+  const result: AgentToolResult<Details> = {
+    content: [{ type: "text", text: "working" }],
+    details: {
+      mode: "single",
+      results: [],
+      progress: [{
+        agent: "reviewer",
+        name: "review",
+        correlationId: "review-agent",
+        taskIndex: 0,
+        dependencies: [],
+        status: "running",
+        durationMs: 60_000,
+        toolCount: 1,
+        inputTokens: 100,
+        outputTokens: 20,
+      }],
+    },
+  };
+  const component = renderTeammateResult(result, { expanded: false }, theme as never);
+  const first = component.render(120);
+  const firstTask = first.find((line) => line.includes("@review"));
+  assert.ok(firstTask);
+  assert.doesNotMatch(firstTask, /1 tools|1m|in 100|out 20/);
+  assert.match(first.join("\n"), /1 tools.*1m0s.*in 100.*out 20/);
+
+  result.details = {
+    ...result.details!,
+    progress: result.details!.progress!.map((entry) => ({
+      ...entry,
+      durationMs: 61_000,
+      toolCount: 2,
+      inputTokens: 140,
+      outputTokens: 30,
+    })),
+  };
+  component.invalidate();
+  const second = component.render(120);
+  assert.equal(second.find((line) => line.includes("@review")), firstTask);
+  assert.match(second.join("\n"), /2 tools.*1m1s.*in 140.*out 30/);
+});
+
 test("streaming progress leaves the final terminal column empty", () => {
   const now = Date.now();
   const width = 80;
@@ -254,7 +297,7 @@ test("streaming progress leaves the final terminal column empty", () => {
     },
   }, { expanded: false }, theme as never).render(width);
 
-  assert.equal(Math.max(...lines.map(visibleWidth)), width - 1);
+  assert.ok(Math.max(...lines.map(visibleWidth)) <= width - 1);
   for (const line of lines) assert.ok(visibleWidth(line) < width);
 });
 

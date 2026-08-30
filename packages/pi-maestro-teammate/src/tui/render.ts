@@ -315,8 +315,9 @@ export function renderTeammateResult(
   if (isQuietMode()) {
     body = renderQuietTeammateResult(result, theme);
   } else if (!details || details.results.length === 0) {
-    // No results yet — streaming progress or background ack.
-    body = renderProgress(result, details, options, theme, expert);
+    // Keep task rows stable in every streaming mode. Expert mode also keeps
+    // nested child rows stable; ordinary mode preserves child stall telemetry.
+    body = renderProgress(result, details, options, theme, true, expert);
   } else if (details.results.length === 1) {
     body = renderSingleResult(details.results[0], options, theme);
   } else {
@@ -411,7 +412,8 @@ function renderProgress(
   details: Details | undefined,
   options: { expanded: boolean },
   theme: Theme,
-  stableInFlightRows = false,
+  stableTaskRows = true,
+  stableChildRows = false,
 ): Component {
   const progress = details?.progress;
   const childCalls = details?.childCalls ?? [];
@@ -495,7 +497,7 @@ function renderProgress(
       palette,
       Date.now(),
       undefined,
-      { stableInFlightRows },
+      { stableInFlightRows: stableTaskRows },
     );
     const entryByTaskIndex = new Map<number, AgentProgressSnapshot>();
     for (const entry of entries) entryByTaskIndex.set(entry.taskIndex, entry);
@@ -549,7 +551,7 @@ function renderProgress(
           theme,
           lines,
           false,
-          stableInFlightRows,
+          stableChildRows,
         );
       }
     }
@@ -558,13 +560,14 @@ function renderProgress(
       const parent = child.parentCorrelationId;
       return !parent || (!taskCids.has(parent) && !childCids.has(parent));
     });
-    renderChildSubtree(rootOrphans, childrenByParent, "", theme, lines, false, stableInFlightRows);
+    renderChildSubtree(rootOrphans, childrenByParent, "", theme, lines, false, stableChildRows);
 
     if (focused) {
       const recentTools = focused.recentTools ?? [];
       const activeTool = recentTools.find((tool) => tool.status === "running")
         ?? recentTools[recentTools.length - 1];
       const liveMeta = statusMeta([
+        focused.toolCount ? tuiT("metrics.tools", { count: focused.toolCount }) : "",
         focusedDurationMs !== undefined ? formatDuration(focusedDurationMs) : "",
         focusedTokens,
         stalled ? theme.fg("error", tuiT("status.stalled", { seconds: Math.floor(idleMs / 1000) })) : "",
