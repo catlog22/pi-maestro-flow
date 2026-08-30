@@ -8,6 +8,7 @@ import { CompactionArbiter } from "../src/compaction/compaction-arbiter.ts";
 import {
   consumePlanCleanContextCompaction,
   getMode,
+  getPlanArtifactSummary,
   getPlanHandoffStatus,
   getPlanText,
   initPlan,
@@ -404,6 +405,7 @@ test("Plan lifecycle leaves the tool surface untouched across every transition",
   try {
     await onSessionStartPlan(harness.ctx);
     assert.equal(harness.statuses.at(-1), "ACT");
+    assert.equal(getPlanArtifactSummary().available, false);
     const actSnapshot = [...harness.active];
     // Session start is the one point that touches the surface, and it only tops
     // up the Plan tools so all seven stay callable on the stable surface.
@@ -423,6 +425,7 @@ test("Plan lifecycle leaves the tool surface untouched across every transition",
     const updated = await execute(harness, "plan-update", { markdown: "# Durable plan" });
     assert.equal(updated.details.revision, 1);
     assert.equal(harness.statuses.at(-1), "READY");
+    assert.deepEqual(getPlanArtifactSummary(), { available: true, revision: 1, status: "draft" });
     assert.equal(await readFile(updated.details.path, "utf8"), "# Durable plan");
 
     await execute(harness, "plan-exit");
@@ -435,6 +438,7 @@ test("Plan lifecycle leaves the tool surface untouched across every transition",
     assert.deepEqual(harness.active, actSnapshot);
     await onSessionStartPlan(harness.ctx);
     assert.deepEqual(harness.active, actSnapshot);
+    assert.equal(getPlanArtifactSummary().available, true);
   } finally {
     onSessionShutdownPlan(harness.ctx);
     await rm(root, { recursive: true, force: true });

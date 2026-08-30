@@ -3,6 +3,7 @@ import {
   COCKPIT_MAESTRO_QUERY_EVENT,
   MAESTRO_UI_SNAPSHOT_EVENT,
   MAESTRO_UI_SNAPSHOT_VERSION,
+  type MaestroArtifactV1,
   type MaestroGoalV1,
   type MaestroModeV1,
   type MaestroSwarmV1,
@@ -19,13 +20,20 @@ export interface MaestroUiProjectionInput {
   goals: readonly GoalDetailEntry[];
   currentGoalId?: string;
   swarm: TeamSwarmProjection | null | undefined;
+  artifact: {
+    available: boolean;
+    revision: number;
+    status: string;
+    knowledgeAvailable?: boolean;
+    knowledgeSessionId?: string;
+  };
   planMode: string;
   approvalMode: string;
 }
 
 export type MaestroUiProjectionV1 = Pick<
   MaestroUiStateSnapshotV1,
-  "workflow" | "goals" | "currentGoalId" | "swarm" | "mode"
+  "workflow" | "goals" | "currentGoalId" | "swarm" | "artifact" | "mode"
 >;
 
 export interface MaestroUiPublisherOptions {
@@ -43,11 +51,13 @@ export function projectMaestroUiState(input: MaestroUiProjectionInput): MaestroU
   const currentGoalId = input.currentGoalId && goals.some((goal) => goal.id === input.currentGoalId)
     ? input.currentGoalId
     : undefined;
+  const workflow = projectWorkflow(input.workflow);
   return {
-    workflow: projectWorkflow(input.workflow),
+    workflow,
     goals,
     ...(currentGoalId ? { currentGoalId } : {}),
     swarm: projectSwarm(input.swarm),
+    artifact: projectArtifact(input.artifact),
     mode: projectMode(input.planMode, input.approvalMode),
   };
 }
@@ -216,6 +226,17 @@ function projectSwarm(projection: TeamSwarmProjection | null | undefined): Maest
       ...(projection.best.summary ? { summary: projection.best.summary } : {}),
     } : null,
     updatedAt: Number.isFinite(updatedAt) && updatedAt >= 0 ? updatedAt : 0,
+  };
+}
+
+function projectArtifact(plan: MaestroUiProjectionInput["artifact"]): MaestroArtifactV1 {
+  return {
+    available: plan.available || Boolean(plan.knowledgeAvailable),
+    planRevision: plan.revision,
+    planStatus: plan.status,
+    ...(plan.knowledgeAvailable && plan.knowledgeSessionId
+      ? { knowledgeSessionId: plan.knowledgeSessionId }
+      : {}),
   };
 }
 

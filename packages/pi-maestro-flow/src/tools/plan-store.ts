@@ -119,6 +119,26 @@ export interface PlanDraftArchive extends PlanDraftArchiveEntry {
   markdown: string;
 }
 
+export type PlanArtifactKind = "current" | "draft" | "approved" | "review";
+export type PlanReviewArtifactRole = "reviewer" | "decomposer" | "optimizer" | "brainstormer";
+
+export interface PlanArtifactEntry {
+  id: string;
+  kind: PlanArtifactKind;
+  revision: number;
+  checksum: string;
+  createdAt: string;
+  path: string;
+  role?: PlanReviewArtifactRole;
+}
+
+export interface PlanReviewArtifactInput {
+  revision: number;
+  role: PlanReviewArtifactRole;
+  markdown: string;
+  createdAt: string;
+}
+
 interface LockOwner {
   token: string;
   pid: number;
@@ -170,6 +190,7 @@ export class PlanStore {
   readonly approvalsDir: string;
   readonly recoveryDir: string;
   readonly draftsDir: string;
+  readonly reviewsDir: string;
   readonly currentPath: string;
   readonly manifestPath: string;
   readonly pendingPath: string;
@@ -208,6 +229,7 @@ export class PlanStore {
     this.approvalsDir = join(this.plansDir, "approvals");
     this.recoveryDir = join(this.plansDir, "recovery");
     this.draftsDir = join(this.plansDir, "drafts");
+    this.reviewsDir = join(this.plansDir, "reviews");
     this.currentPath = join(this.plansDir, "current.md");
     this.manifestPath = join(this.plansDir, "manifest.json");
     this.pendingPath = join(this.plansDir, "approval.pending.json");
@@ -298,7 +320,9 @@ export class PlanStore {
       const parsed = parseDraftArchiveName(entry);
       if (!parsed) continue;
       try {
-        const markdown = await readFile(join(this.draftsDir, entry), "utf8");
+        const archivePath = join(this.draftsDir, entry);
+        await secureExistingPrivateFile(archivePath);
+        const markdown = await readFile(archivePath, "utf8");
         const checksum = checksumText(markdown);
         if (!checksum.startsWith(parsed.checksumPrefix)) continue;
         recovered.push({
@@ -316,7 +340,9 @@ export class PlanStore {
 
   /** Read the Markdown of an archived draft by its plansDir-relative path. */
   async readDraft(path: string): Promise<string> {
-    return readFile(this.resolveDraftPath(path), "utf8");
+    const archivePath = this.resolveDraftPath(path);
+    await secureExistingPrivateFile(archivePath);
+    return readFile(archivePath, "utf8");
   }
 
   /** Restore a previously archived draft as the current draft (new revision). */
@@ -328,6 +354,151 @@ export class PlanStore {
     }
     const markdown = await this.readDraft(target.path);
     return this.saveDraft(markdown, expectedCurrentRevision);
+  }
+
+  /** Persist one immutable Review & Refine output for the Plan revision it evaluated. */
+  async saveReviewArtifact(input: PlanReviewArtifactInput): Promise<PlanArtifactEntry> {
+    if (!Number.isSafeInteger(input.revision) || input.revision < 0) {
+      throw new Error("Plan review artifact revision must be a non-negative integer");
+    }
+    if (!isPlanReviewArtifactRole(input.role) || !isIsoDate(input.createdAt)) {
+      throw new Error("Invalid Plan review artifact metadata");
+    }
+    return this.withWorkspaceLock(async (ownerToken) => {
+      await ensurePrivateDirectory(this.reviewsDir);
+      const checksum = checksumText(input.markdown);
+      const archiveName = `${archiveTimestamp(input.createdAt)}-r${String(input.revision).padStart(4, "0")}-${input.role}-${checksum}.md`;
+      const path = join("reviews", archiveName);
+      await this.assertLockOwnership(ownerToken);
+      await atomicWriteText(join(this.reviewsDir, archiveName), input.markdown);
+      return {
+        id: `plan-review:${path}`,
+        kind: "review",
+        revision: input.revision,
+        checksum,
+        createdAt: input.createdAt,
+        path,
+        role: input.role,
+      };
+    });
+  }
+
+  /** List persisted Review & Refine outputs, newest first. */
+  async listReviewArtifacts(): Promise<PlanArtifactEntry[]> {
+    await ensurePrivateDirectory(this.reviewsDir);
+    let entries: string[];
+    try {
+      entries = await readdir(this.reviewsDir);
+    } catch (error) {
+      if (isMissingFile(error)) return [];
+      throw error;
+    }
+    const reviews: PlanArtifactEntry[] = [];
+    for (const entry of entries) {
+      const parsed = parseReviewArchiveName(entry);
+      if (!parsed) continue;
+      try {
+        const archivePath = join(this.reviewsDir, entry);
+        await secureExistingPrivateFile(archivePath);
+        const markdown = await readFile(archivePath, "utf8");
+        const checksum = checksumText(markdown);
+        if (checksum !== parsed.checksum) continue;
+        const path = join("reviews", entry);
+        reviews.push({
+          id: `plan-review:${path}`,
+          kind: "review",
+          revision: parsed.revision,
+          checksum,
+          createdAt: archiveTimestampToIso(parsed.archivedAt) ?? parsed.archivedAt,
+          path,
+          role: parsed.role,
+        });
+      } catch {
+        // Missing, unreadable, or invalid review outputs are not displayable artifacts.
+      }
+    }
+    return reviews.sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.path.localeCompare(left.path));
+  }
+
+  /** List all displayable Plan documents bound to this Pi chat session. */
+  async listArtifacts(): Promise<PlanArtifactEntry[]> {
+    const loaded = await this.load();
+    const artifacts: PlanArtifactEntry[] = [];
+    if (loaded.markdown.trim() && loaded.manifest.status !== "approved") {
+      artifacts.push({
+        id: "plan-current",
+        kind: "current",
+        revision: loaded.manifest.revision,
+        checksum: loaded.manifest.draftChecksum,
+        createdAt: loaded.manifest.updatedAt,
+        path: "current.md",
+      });
+    }
+    for (const draft of await this.listDrafts()) {
+      artifacts.push({
+        id: `plan-draft:${draft.path}`,
+        kind: "draft",
+        revision: draft.revision,
+        checksum: draft.checksum,
+        createdAt: archiveTimestampToIso(draft.archivedAt) ?? draft.archivedAt,
+        path: draft.path,
+      });
+    }
+    for (const approvalPath of [...loaded.manifest.approvals].reverse()) {
+      const parsed = parseArchivePath(approvalPath);
+      if (!parsed) continue;
+      try {
+        const archivePath = join(this.plansDir, approvalPath);
+        await secureExistingPrivateFile(archivePath);
+        const markdown = await readFile(archivePath, "utf8");
+        const checksum = checksumText(markdown);
+        if (!checksum.startsWith(parsed.checksumPrefix)) continue;
+        artifacts.push({
+          id: `plan-approved:${approvalPath}`,
+          kind: "approved",
+          revision: parsed.revision,
+          checksum,
+          createdAt: archiveTimestampToIso(parsed.archivedAt) ?? parsed.archivedAt,
+          path: approvalPath,
+        });
+      } catch {
+        // load() already validates committed approvals; tolerate a later deletion here.
+      }
+    }
+    artifacts.push(...await this.listReviewArtifacts());
+    return artifacts;
+  }
+
+  async hasArtifacts(): Promise<boolean> {
+    return (await this.listArtifacts()).length > 0;
+  }
+
+  /** Read an artifact only when its immutable identity still matches the listing. */
+  async readArtifact(entry: PlanArtifactEntry): Promise<string> {
+    let markdown: string;
+    if (entry.kind === "current") {
+      if (entry.path !== "current.md") throw new Error("Invalid current Plan artifact path");
+      markdown = await readOptionalText(this.currentPath);
+    } else if (entry.kind === "draft") {
+      markdown = await this.readDraft(entry.path);
+    } else if (entry.kind === "approved") {
+      if (!parseArchivePath(entry.path)) throw new Error("Invalid approved Plan artifact path");
+      const archivePath = join(this.plansDir, entry.path);
+      await secureExistingPrivateFile(archivePath);
+      markdown = await readFile(archivePath, "utf8");
+    } else {
+      const archiveName = basename(entry.path);
+      if (entry.path !== join("reviews", archiveName) || !parseReviewArchiveName(archiveName)) {
+        throw new Error("Invalid Plan review artifact path");
+      }
+      const archivePath = join(this.reviewsDir, archiveName);
+      await secureExistingPrivateFile(archivePath);
+      markdown = await readFile(archivePath, "utf8");
+    }
+    if (checksumText(markdown) !== entry.checksum) {
+      throw new Error("Plan artifact changed after it was listed");
+    }
+    return markdown;
   }
 
   /** Validate and resolve a drafts-relative path, rejecting traversal. */
@@ -565,6 +736,7 @@ export class PlanStore {
       ensurePrivateDirectory(this.approvalsDir),
       ensurePrivateDirectory(this.recoveryDir),
       ensurePrivateDirectory(this.draftsDir),
+      ensurePrivateDirectory(this.reviewsDir),
     ]);
   }
 
@@ -1239,21 +1411,22 @@ function invalidManifest(): never {
   throw new Error("Invalid Plan manifest");
 }
 
-function parseArchivePath(value: string): { revision: number; checksumPrefix: string; handoffKey?: string } | null {
+function parseArchivePath(value: string): { revision: number; checksumPrefix: string; archivedAt: string; handoffKey?: string } | null {
   const entry = basename(value);
   if (value !== join("approvals", entry)) return null;
   return parseArchiveName(entry);
 }
 
-function parseArchiveName(value: string): { revision: number; checksumPrefix: string; handoffKey?: string } | null {
-  const match = /^\d{8}T\d{6,9}Z-r(\d+)-([a-f0-9]{8})(?:-h([a-f0-9]{64}))?\.md$/i.exec(value);
+function parseArchiveName(value: string): { revision: number; checksumPrefix: string; archivedAt: string; handoffKey?: string } | null {
+  const match = /^(\d{8}T\d{6,9}Z)-r(\d+)-([a-f0-9]{8})(?:-h([a-f0-9]{64}))?\.md$/i.exec(value);
   if (!match) return null;
-  const revision = Number(match[1]);
+  const revision = Number(match[2]);
   if (!Number.isSafeInteger(revision) || revision < 1) return null;
   return {
     revision,
-    checksumPrefix: match[2].toLowerCase(),
-    ...(match[3] ? { handoffKey: match[3].toLowerCase() } : {}),
+    checksumPrefix: match[3].toLowerCase(),
+    archivedAt: match[1],
+    ...(match[4] ? { handoffKey: match[4].toLowerCase() } : {}),
   };
 }
 
@@ -1264,6 +1437,37 @@ function parseDraftArchiveName(value: string): { revision: number; checksumPrefi
   const revision = Number(match[2]);
   if (!Number.isSafeInteger(revision) || revision < 1) return null;
   return { revision, checksumPrefix: match[3].toLowerCase(), archivedAt: match[1] };
+}
+
+function parseReviewArchiveName(value: string): {
+  revision: number;
+  checksum: string;
+  archivedAt: string;
+  role: PlanReviewArtifactRole;
+} | null {
+  const match = /^(\d{8}T\d{6,9}Z)-r(\d+)-(reviewer|decomposer|optimizer|brainstormer)-([a-f0-9]{64})\.md$/i.exec(value);
+  if (!match) return null;
+  const revision = Number(match[2]);
+  const role = match[3].toLowerCase();
+  if (!Number.isSafeInteger(revision) || revision < 0 || !isPlanReviewArtifactRole(role)) return null;
+  return {
+    revision,
+    role,
+    checksum: match[4].toLowerCase(),
+    archivedAt: match[1],
+  };
+}
+
+function isPlanReviewArtifactRole(value: unknown): value is PlanReviewArtifactRole {
+  return value === "reviewer" || value === "decomposer" || value === "optimizer" || value === "brainstormer";
+}
+
+function archiveTimestampToIso(value: string): string | null {
+  const match = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(\d{0,3})Z$/.exec(value);
+  if (!match) return null;
+  const milliseconds = (match[7] || "0").padEnd(3, "0");
+  const iso = `${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:${match[6]}.${milliseconds}Z`;
+  return isIsoDate(iso) ? iso : null;
 }
 
 function isChecksum(value: unknown): value is string {

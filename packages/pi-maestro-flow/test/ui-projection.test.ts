@@ -102,6 +102,7 @@ function input(): MaestroUiProjectionInput {
     goals: goals(),
     currentGoalId: "goal-1",
     swarm: swarm(),
+    artifact: { available: true, revision: 3, status: "draft" },
     planMode: "plan",
     approvalMode: "bypassPermissions",
   };
@@ -132,6 +133,11 @@ test("projects workflow, Goal, mode, and read-only Team Swarm state into v1", ()
   });
   assert.equal(projection.currentGoalId, "goal-1");
   assert.deepEqual(projection.mode, { kind: "plan", label: "bypassPermissions" });
+  assert.deepEqual(projection.artifact, {
+    available: true,
+    planRevision: 3,
+    planStatus: "draft",
+  });
   assert.deepEqual(projection.swarm, {
     sessionId: "swarm-1",
     objective: "Search the solution space",
@@ -150,7 +156,25 @@ test("projects workflow, Goal, mode, and read-only Team Swarm state into v1", ()
     },
     updatedAt: Date.parse("2026-07-27T12:00:00.000Z"),
   });
-  assert.deepEqual(Object.keys(projection).sort(), ["currentGoalId", "goals", "mode", "swarm", "workflow"]);
+  assert.deepEqual(Object.keys(projection).sort(), ["artifact", "currentGoalId", "goals", "mode", "swarm", "workflow"]);
+});
+
+test("session-bound staged Knowledge makes the Artifact entry available without a Plan", () => {
+  const next = input();
+  next.artifact = {
+    available: false,
+    revision: 0,
+    status: "empty",
+    knowledgeAvailable: true,
+    knowledgeSessionId: "session-1",
+  };
+  delete next.workflow?.knowledge;
+  assert.deepEqual(projectMaestroUiState(next).artifact, {
+    available: true,
+    planRevision: 0,
+    planStatus: "empty",
+    knowledgeSessionId: "session-1",
+  });
 });
 
 test("cold full publish, stable dedupe, safe revisions, and session generations are ordered", () => {
@@ -267,7 +291,7 @@ test("root extension source composes existing listeners and publishes every requ
   assert.match(extensionSource, /async function refreshWorkflow[\s\S]*?updateTodoWidget\(\);\s*publishMaestroUi\(\);/);
   assert.match(extensionSource, /registerSwarmDisplay\(pi, \{[\s\S]*?onProjectionChange[\s\S]*?publishMaestroUi\(\)/);
   assert.match(extensionSource, /pi\.on\("session_start"[\s\S]*?beginSession\(\)[\s\S]*?publishMaestroUi\(\)/);
-  assert.match(extensionSource, /pi\.on\("session_shutdown"[\s\S]*?maestroUiSessionActive = false;\s*maestroUiPublisher\.clear\(\)/);
+  assert.match(extensionSource, /pi\.on\("session_shutdown"[\s\S]*?maestroUiSessionActive = false;[\s\S]*?maestroUiPublisher\.clear\(\)/);
 
   assert.doesNotMatch(swarmSource, /registerTool\(|registerCommand\(|swarm_runtime/);
   assert.match(swarmSource, /onProjectionChange\?\.\(snapshot\)/);

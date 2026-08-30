@@ -909,6 +909,81 @@ test("PlanStore prunes the draft history to the configured limit", async () => {
   }
 });
 
+test("PlanStore exposes session-bound Plan versions and persisted Review outputs as Artifacts", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-artifacts-"));
+  let now = new Date("2026-08-28T10:00:00.000Z");
+  try {
+    const store = new PlanStore(join(root, "workspace"), {
+      rootDir: join(root, "global"),
+      session: { id: "pi-session-a" },
+      now: () => now,
+    });
+    await store.saveDraft("# Plan r1", 0);
+    now = new Date("2026-08-28T10:01:00.000Z");
+    await store.saveDraft("# Plan r2", 1);
+    await store.saveReviewArtifact({
+      revision: 2,
+      role: "reviewer",
+      markdown: "# Review\n\nRevise acceptance checks.",
+      createdAt: "2026-08-28T10:02:00.000Z",
+    });
+    now = new Date("2026-08-28T10:03:00.000Z");
+    await store.approve("# Plan r2", 2);
+
+    const artifacts = await store.listArtifacts();
+    assert.deepEqual(
+      artifacts.map((artifact) => [artifact.kind, artifact.revision]),
+      [["draft", 1], ["approved", 3], ["review", 2]],
+    );
+    assert.equal(await store.hasArtifacts(), true);
+    const review = artifacts.find((artifact) => artifact.kind === "review")!;
+    assert.equal(review.role, "reviewer");
+    assert.equal(await store.readArtifact(review), "# Review\n\nRevise acceptance checks.");
+    const collisionA = await store.saveReviewArtifact({
+      revision: 2,
+      role: "optimizer",
+      markdown: "review-21641",
+      createdAt: "2026-08-28T10:04:00.000Z",
+    });
+    const collisionB = await store.saveReviewArtifact({
+      revision: 2,
+      role: "optimizer",
+      markdown: "review-24060",
+      createdAt: "2026-08-28T10:04:00.000Z",
+    });
+    assert.notEqual(collisionA.path, collisionB.path, "full checksums keep distinct review outputs immutable");
+    assert.equal(await store.readArtifact(collisionA), "review-21641");
+    assert.equal(await store.readArtifact(collisionB), "review-24060");
+    const approved = artifacts.find((artifact) => artifact.kind === "approved")!;
+    assert.equal(await store.readArtifact(approved), "# Plan r2");
+
+    const otherSession = new PlanStore(join(root, "workspace"), {
+      rootDir: join(root, "global"),
+      session: { id: "pi-session-b" },
+    });
+    assert.deepEqual(await otherSession.listArtifacts(), []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("PlanStore rejects forged Artifact paths and detects current-draft changes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-artifact-fence-"));
+  try {
+    const store = new PlanStore(join(root, "workspace"), { rootDir: join(root, "global") });
+    await store.saveDraft("# Safe", 0);
+    const current = (await store.listArtifacts()).find((artifact) => artifact.kind === "current")!;
+    await writeFile(store.currentPath, "# Changed", "utf8");
+    await assert.rejects(() => store.readArtifact(current), /changed after it was listed/);
+    await assert.rejects(
+      () => store.readArtifact({ ...current, kind: "review", path: "../current.md" }),
+      /Invalid Plan review artifact path/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("read-only approved snapshot validates the archive without repairing storage", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-approved-readonly-"));
   try {

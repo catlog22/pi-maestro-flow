@@ -30,6 +30,7 @@ import {
   PlanStore,
   prewarmProcessIdentity,
   type LoadedPlan,
+  type PlanArtifactEntry,
   type PlanExecutionChoice,
   type PlanExecutionContextMode,
   type PlanSessionIdentity,
@@ -93,6 +94,17 @@ export interface PlanCompactionSnapshot {
   path?: string;
 }
 
+export interface LoadedPlanArtifactDocument {
+  entry: PlanArtifactEntry;
+  markdown: string;
+}
+
+export interface PlanArtifactSummary {
+  available: boolean;
+  revision: number;
+  status: PlanToolDetails["status"];
+}
+
 interface PlanRuntimeOptions {
   storeFactory?: (cwd: string, session: PlanSessionIdentity) => PlanStore;
   hasExecutableTodo?: (handoffKey: string) => boolean;
@@ -153,6 +165,7 @@ let latestStatus: PlanToolDetails["status"] = "empty";
 let latestHandoffKey: string | undefined;
 let latestExecution: PlanExecutionChoice | undefined;
 let latestWorkflowBinding: PlanWorkflowBinding | undefined;
+let latestArtifactAvailable = false;
 let awaitingAction = false;
 let pendingPlanExitReminder: string | undefined;
 let pendingPlanEnterNote: string | undefined;
@@ -272,6 +285,25 @@ export function getPlanText(): string {
   return latestPlan ?? "";
 }
 
+export function getPlanArtifactSummary(): PlanArtifactSummary {
+  return {
+    available: latestArtifactAvailable,
+    revision: latestRevision,
+    status: latestStatus,
+  };
+}
+
+export async function loadCurrentPlanArtifacts(ctx: PlanContext): Promise<LoadedPlanArtifactDocument[]> {
+  const store = await ensureStore(ctx);
+  const entries = await store.listArtifacts();
+  latestArtifactAvailable = entries.length > 0;
+  onPlanModeChanged?.(ctx);
+  return Promise.all(entries.map(async (entry) => ({
+    entry,
+    markdown: await store.readArtifact(entry),
+  })));
+}
+
 export function clearPlan(): void {
   latestPlan = undefined;
   latestRevision = 0;
@@ -279,6 +311,7 @@ export function clearPlan(): void {
   latestHandoffKey = undefined;
   latestExecution = undefined;
   latestWorkflowBinding = undefined;
+  latestArtifactAvailable = false;
   refineSession = undefined;
   refineSessionRevision = -1;
   refineLatestOutput = undefined;
@@ -317,6 +350,9 @@ function applyLoadedPlan(loaded: LoadedPlan): void {
   latestHandoffKey = loaded.manifest.handoffKey;
   latestExecution = loaded.manifest.execution;
   latestWorkflowBinding = loaded.manifest.workflowBinding;
+  latestArtifactAvailable = latestArtifactAvailable
+    || Boolean(loaded.markdown.trim())
+    || loaded.manifest.approvals.length > 0;
   awaitingAction = loaded.manifest.status === "approved" && Boolean(loaded.markdown.trim());
 }
 
@@ -400,6 +436,8 @@ export async function onSessionStartPlan(ctx: PlanContext): Promise<void> {
     const loaded = await store.load();
     if (!isCurrentPlanOperation(ctx, operation)) return;
     applyLoadedPlan(loaded);
+    latestArtifactAvailable = await store.hasArtifacts();
+    if (!isCurrentPlanOperation(ctx, operation)) return;
     if (loaded.manifest.status === "approved"
       && loaded.manifest.execution?.backend === "workflow"
       && (loaded.manifest.workflowBinding?.status !== "bound"
@@ -597,6 +635,7 @@ function resetRuntimeState(): void {
   latestHandoffKey = undefined;
   latestExecution = undefined;
   latestWorkflowBinding = undefined;
+  latestArtifactAvailable = false;
   refineSession = undefined;
   refineSessionRevision = -1;
   refineLatestOutput = undefined;
@@ -923,7 +962,9 @@ export async function onAgentEndPlan(event: { messages: unknown[] }, ctx: PlanCo
     const saved = await store.saveDraft(proposedPlan, latestRevision);
     if (!isCurrentPlanOperation(ctx, operation)) return;
     applyLoadedPlan(saved);
+    latestArtifactAvailable = Boolean(saved.markdown.trim()) || latestArtifactAvailable;
     syncModeStatus(ctx);
+    onPlanModeChanged?.(ctx);
     ctx.ui.notify("Compatibility plan captured to current.md. Use plan-review or plan-confirm.", "info");
   } catch (error) {
     if (!isCurrentPlanOperation(ctx, operation, operation.store !== undefined)) return;
@@ -942,7 +983,9 @@ async function savePlan(
   const saved = await store.saveDraft(markdown, expectedRevision);
   if (!isCurrentPlanOperation(ctx, operation)) return undefined;
   applyLoadedPlan(saved);
+  latestArtifactAvailable = Boolean(saved.markdown.trim()) || latestArtifactAvailable;
   syncModeStatus(ctx);
+  onPlanModeChanged?.(ctx);
   return saved;
 }
 
@@ -1031,11 +1074,23 @@ async function reviewPlan(
         refineLatestRoleLabel = undefined;
       }
       const initialRole: RefineRole = refineSession?.currentRole ?? "reviewer";
+      const reviewedRevision = latestRevision;
       const outcome = await openRefinePanel(extensionApi, ctx, {
         markdown: latestPlan ?? "",
         initialRole,
         session: refineSession,
         signal,
+        async onOutput(turn) {
+          await store.saveReviewArtifact({
+            revision: reviewedRevision,
+            role: turn.role,
+            markdown: turn.output,
+            createdAt: turn.createdAt,
+          });
+          if (!isCurrentPlanOperation(ctx, operation)) return;
+          latestArtifactAvailable = true;
+          onPlanModeChanged?.(ctx);
+        },
       });
       if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
       refineSession = outcome.session;

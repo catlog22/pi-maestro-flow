@@ -19,7 +19,9 @@ import registerMaestroExtension, {
   shouldActivateWorkflowSession,
   shouldAttachWorkflowSession,
   shouldRestoreWorkflowGoal,
+  settleFailedCompaction,
   todoActorFromTeammateStarted,
+  workflowArtifactKnowledgeSessionId,
   workflowSnapshotForAttachedSession,
 } from "../src/extension/index.ts";
 import type { WorkflowSnapshot } from "../src/session/types.ts";
@@ -27,7 +29,7 @@ import { shutdownIntelligenceTools } from "../src/tools/intelligence.ts";
 import { readAgentOutput } from "../src/teammate/agent-output-store.ts";
 import { isRunControlReadAction } from "../src/tools/run-control.ts";
 import { PLAN_TOGGLE_KEY } from "../src/tools/plan.ts";
-import { NATIVE_FALLBACK_COMPACTION_MARKER } from "../src/compaction/compaction-arbiter.ts";
+import { CompactionArbiter, NATIVE_FALLBACK_COMPACTION_MARKER } from "../src/compaction/compaction-arbiter.ts";
 import {
   MAESTRO_GLOBAL_SHORTCUTS,
   auditShortcutConflicts,
@@ -67,6 +69,17 @@ function createChineseHarness(entries: ChineseEntry[], cwd: string, homeDir: str
   } as unknown as ExtensionContext;
   const mode = registerChineseResponseMode(api, { homeDir });
   return { commands, sessionStartHandlers, beforeAgentStartHandlers, notifications, ctx, mode };
+}
+
+function registerRootMaestroExtension(api: ExtensionAPI): void {
+  const previous = process.env.PI_TEAMMATE_CHILD;
+  delete process.env.PI_TEAMMATE_CHILD;
+  try {
+    registerMaestroExtension(api);
+  } finally {
+    if (previous === undefined) delete process.env.PI_TEAMMATE_CHILD;
+    else process.env.PI_TEAMMATE_CHILD = previous;
+  }
 }
 
 test("Chinese response mode restores, persists, and appends its prompt once", async () => {
@@ -189,6 +202,14 @@ test("statusline snapshot is filtered to the Workflow Session the Pi session lea
   assert.equal(workflowSnapshotForAttachedSession(snapshot, undefined), undefined);
   assert.equal(workflowSnapshotForAttachedSession(undefined, "session-1"), undefined);
   assert.equal(workflowSnapshotForAttachedSession({ ...snapshot, session: undefined }, "session-1"), undefined);
+});
+
+test("Artifact Knowledge resolves only from the Workflow Session attached to this Pi session", () => {
+  const snapshot = workflowAttachSnapshot();
+  assert.equal(workflowArtifactKnowledgeSessionId(snapshot, true, "session-1"), "session-1");
+  assert.equal(workflowArtifactKnowledgeSessionId(snapshot, false, "session-1"), undefined);
+  assert.equal(workflowArtifactKnowledgeSessionId(snapshot, true, "session-other"), undefined);
+  assert.equal(workflowArtifactKnowledgeSessionId(snapshot, true, undefined), undefined);
 });
 
 test("teammate started events expose a Todo actor before the teammate calls Todo", () => {
@@ -363,6 +384,28 @@ test("shortcut command menu fixes, re-audits, and restores without touching othe
   assert.deepEqual(JSON.parse(readFileSync(configPath, "utf8")), { "app.model.select": "alt+shift+p" });
 });
 
+test("session_compact_failed settles only the extension compaction that owns the active lease", () => {
+  const arbiter = new CompactionArbiter();
+  arbiter.observeStart();
+  assert.equal(
+    settleFailedCompaction(arbiter, { aborted: true, fromExtension: false }),
+    false,
+    "a denied hook emits a host cancellation event but must preserve the existing owner",
+  );
+  assert.equal(arbiter.currentOwner(), "native");
+  assert.equal(settleFailedCompaction(arbiter, { aborted: false, fromExtension: true }), true);
+  assert.equal(arbiter.currentOwner(), undefined);
+  assert.equal(
+    settleFailedCompaction(arbiter, { aborted: true, fromExtension: true }),
+    false,
+    "duplicate failure events are idempotent",
+  );
+
+  arbiter.observeStart();
+  assert.equal(settleFailedCompaction(arbiter, { aborted: true, fromExtension: true }), true);
+  assert.equal(arbiter.currentOwner(), undefined);
+});
+
 test("extension registers LSP, browser, and BM25 discovery", async () => {
   const tools: ToolDefinition[] = [];
   const active: string[] = [];
@@ -396,7 +439,8 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
     },
   });
 
-  registerMaestroExtension(api);
+  registerRootMaestroExtension(api);
+  assert.equal(handlers.get("session_compact_failed")?.length, 1, "root compaction failures release lifecycle state");
   assert.equal(getTeammateChildToolBroker("todo"), undefined, "Todo authority must not outlive a root session");
   assert.equal(getTeammatePermissionBroker(), undefined, "permission authority must not outlive a root session");
   assert.equal(
@@ -558,6 +602,13 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
   const todoTool = tools.find((tool) => tool.name === "todo");
   assert.match(todoTool?.description ?? "", /blockedBy integer N means the earlier array item tasks\[N\]/);
   assert.match(todoTool?.description ?? "", /blockedBy: \[0\]/);
+  assert.match(todoTool?.description ?? "", /advance: omit id\/summary/);
+  assert.match(JSON.stringify(todoTool?.parameters), /advance/);
+  const todoGuidelines = todoTool?.promptGuidelines?.join("\n") ?? "";
+  assert.match(todoGuidelines, /live execution state machine/);
+  assert.match(todoGuidelines, /before any tool call or work belonging to another Todo/);
+  assert.match(todoGuidelines, /never batch-complete/);
+  assert.match(todoGuidelines, /actor-scoped/);
   const todoSchema = todoTool?.parameters as {
     properties?: {
       tasks?: {
@@ -657,7 +708,7 @@ test("teammate tool_result persistence backfills graph task names from progress"
         return () => undefined;
       },
     });
-    registerMaestroExtension(api);
+    registerRootMaestroExtension(api);
 
     const toolResultHandlers = handlers.get("tool_result") ?? [];
     assert.ok(toolResultHandlers.length > 0, "tool_result hook must be registered");
@@ -729,7 +780,7 @@ test("teammate complete event listener persists background structured results", 
         return () => undefined;
       },
     });
-    registerMaestroExtension(api);
+    registerRootMaestroExtension(api);
 
     // GUI forwarder + persistence listener both subscribe to the completion event.
     const completeHandlers = handlers.get("teammate:complete") ?? [];
@@ -788,7 +839,17 @@ test("teammate child registers interaction, local Bash, and parent-permission su
   }
 
   assert.deepEqual(tools.map((tool) => tool.name), [...MAESTRO_CHILD_TOOL_NAMES]);
+  const childTodo = tools.find((tool) => tool.name === "todo");
+  assert.match(childTodo?.description ?? "", /immediately finish it with `todo advance`/);
+  assert.match(JSON.stringify(childTodo?.parameters), /advance/);
+  const childTodoGuidelines = childTodo?.promptGuidelines?.join("\n") ?? "";
+  assert.match(childTodoGuidelines, /immediately when your active task finishes/);
+  assert.match(childTodoGuidelines, /never defer several completions until your final answer/);
+  assert.match(childTodoGuidelines, /actor-scoped/);
+  const workflowMirrorSkill = readFileSync(join(import.meta.dirname, "../../../.pi/skills/maestro/SKILL.md"), "utf8");
+  assert.match(workflowMirrorSkill, /Advance only with `todo\(\{ action: "next" \}\)`/);
   assert.deepEqual([...handlers.keys()], [
+    "session_shutdown",
     "session_start",
     "tool_call",
     "context",
@@ -797,7 +858,7 @@ test("teammate child registers interaction, local Bash, and parent-permission su
     "agent_settled",
     "session_before_compact",
     "session_compact",
-    "session_shutdown",
+    "session_compact_failed",
   ]);
   assert.equal(handlers.get("tool_call")?.length, 2, "compaction guard precedes child permission handling");
   assert.equal(handlers.has("before_agent_start"), false, "child must not own parent Goal/Todo/Workflow startup");
@@ -893,14 +954,16 @@ test("teammate child registers interaction, local Bash, and parent-permission su
   assert.match(settledFailureNotifications[0] ?? "", /Child settled context compaction failed/);
 });
 
-test("intelligence shutdown awaits both managers and contains cleanup failures", async () => {
+test("intelligence shutdown closes browser entries before the process-owned bridge and contains cleanup failures", async () => {
   const calls: string[] = [];
   await shutdownIntelligenceTools({
     lsp: { async shutdown() { await new Promise((resolve) => setTimeout(resolve, 10)); calls.push("lsp"); } },
     browser: { async closeAll() { calls.push("browser"); throw new Error("close failed"); } },
+    bridge: { async shutdown() { calls.push("bridge"); } },
     computerUse: { async shutdown() { calls.push("computer_use"); } },
   }, 100);
-  assert.deepEqual(calls.sort(), ["browser", "computer_use", "lsp"]);
+  assert.deepEqual([...calls].sort(), ["bridge", "browser", "computer_use", "lsp"]);
+  assert.ok(calls.indexOf("bridge") > calls.indexOf("browser"), "owned extension tabs must close before bridge shutdown");
 });
 
 function statuslessWorkflowAttachSnapshot(

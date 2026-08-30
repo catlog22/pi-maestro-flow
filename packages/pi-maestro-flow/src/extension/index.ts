@@ -190,6 +190,7 @@ import {
   getMode as getPlanMode,
   hasPlan,
   getPlanText,
+  getPlanArtifactSummary,
   getPlanHandoffStatus,
   setPlanModeChangeListener,
   type PlanContext,
@@ -198,6 +199,7 @@ import {
 import type { PlanWorkflowConfirmationOptions } from "../tools/plan-confirm.ts";
 import type { LoadedPlan, PlanExecutionChoice, PlanWorkflowBinding } from "../tools/plan-store.ts";
 import { registerPlanModelSelection } from "../tools/plan-model.ts";
+import { registerArtifactCommand } from "../tools/session-artifact-command.ts";
 import { installStatusline } from "../statusline/statusline.ts";
 import { registerCodexHookAdapter } from "../hooks/pi-adapter.ts";
 import { createPermissionController } from "../permissions/controller.ts";
@@ -662,6 +664,15 @@ export function workflowSnapshotForAttachedSession(
   return sessionId && attachedSessionId === sessionId ? snapshot : undefined;
 }
 
+export function workflowArtifactKnowledgeSessionId(
+  snapshot: WorkflowSnapshotLike | undefined,
+  workflowSessionOptedIn: boolean,
+  attachedSessionId: string | undefined,
+): string | undefined {
+  if (!workflowSessionOptedIn) return undefined;
+  return workflowSnapshotForAttachedSession(snapshot, attachedSessionId)?.session?.sessionId;
+}
+
 export function isWorkflowOptInCommand(command: string): boolean {
   if (/\bmaestro\s+ralph\b/.test(command)) return true;
   const runAction = /\bmaestro\s+run\s+([\w-]+)/.exec(command)?.[1];
@@ -876,6 +887,14 @@ export function registerChineseResponseMode(
   };
 }
 
+export function settleFailedCompaction(
+  arbiter: Pick<CompactionArbiter, "complete">,
+  event: { aborted: boolean; fromExtension: boolean },
+): boolean {
+  if (!event.fromExtension) return false;
+  return arbiter.complete(event.aborted ? "cancel" : "error");
+}
+
 export default function registerMaestroExtension(pi: ExtensionAPI): void {
   const disposeCompletionDurabilityProvider = getCompletionDurabilityRegistry().register(
     new FlowCompletionDurabilityProvider(),
@@ -1015,7 +1034,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
         if (result.sealed.length === 0 && result.failed.length === 0) return;
         updateTodoWidget();
         if (result.sealed.length > 0) {
-          rootCtx.ui?.notify?.(`Todo: sealed ${result.sealed.length} task(s) for @${actor.label} on completion`, "info");
+          rootCtx.ui?.notify?.(`Todo recovery: auto-sealed ${result.sealed.length} task(s) for @${actor.label}; the agent did not explicitly advance them when work finished`, "warning");
         }
         // A rejected seal (typically an unverified Goal quality gate) leaves the
         // task in_progress; without a warning it dangles silently.
@@ -1094,6 +1113,8 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   // the knowledge center.
   const KNOWLEDGE_PENDING_STATUS_KEY = "maestro-knowledge-pending";
   let lastKnowledgePendingNotify = "";
+  let artifactKnowledgeSessionId: string | undefined;
+  let artifactKnowledgeCandidateCount = 0;
 
   function updateKnowledgePendingStatus(
     ctx: ExtensionContext,
@@ -1134,6 +1155,11 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
           (candidate) => candidate.reconciliation?.promotion_eligibility === "review_required",
         ).length,
       });
+      if (workflowArtifactKnowledgeSessionId(workflowSnapshotForUi(), workflowSessionOptedIn, attachedWorkflowSessionId) === sessionId) {
+        artifactKnowledgeSessionId = sessionId;
+        artifactKnowledgeCandidateCount = summary.candidates.length;
+        publishMaestroUi();
+      }
     } catch {
       // Ignore — next seal/refresh will retry.
     }
@@ -1149,14 +1175,28 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   let teammateAttachTodoIsolated = false;
   let flowSettingsContext: ExtensionContext | undefined;
   const maestroUiPublisher = new MaestroUiPublisher({
-    read: () => ({
-      workflow: deriveWorkflowViewModel(workflowSnapshotForUi()),
-      goals: getGoalPanelEntries(),
-      currentGoalId: getActiveGoal()?.id,
-      swarm: currentSwarmProjection,
-      planMode: getPlanMode(),
-      approvalMode: effectivePermissionMode(approvalMode),
-    }),
+    read: () => {
+      const knowledgeSessionId = workflowArtifactKnowledgeSessionId(
+        workflowSnapshotForUi(),
+        workflowSessionOptedIn,
+        attachedWorkflowSessionId,
+      );
+      const knowledgeAvailable = artifactKnowledgeCandidateCount > 0
+        && artifactKnowledgeSessionId === knowledgeSessionId;
+      return {
+        workflow: deriveWorkflowViewModel(workflowSnapshotForUi()),
+        goals: getGoalPanelEntries(),
+        currentGoalId: getActiveGoal()?.id,
+        swarm: currentSwarmProjection,
+        artifact: {
+          ...getPlanArtifactSummary(),
+          knowledgeAvailable,
+          knowledgeSessionId: knowledgeAvailable ? knowledgeSessionId : undefined,
+        },
+        planMode: getPlanMode(),
+        approvalMode: effectivePermissionMode(approvalMode),
+      };
+    },
     emit: (event, snapshot) => pi.events.emit(event, snapshot),
   });
   registerMaestroUiQuery(pi.events, maestroUiPublisher, () => maestroUiSessionActive);
@@ -1512,18 +1552,20 @@ Actions:
 - create (single): { action: "create", subject: "...", assignee: "self|root|id|unique-id-prefix|label|@label|label#id-prefix", context: "...", skills: [{ name, role: "primary|guard|support", args?: "..." }] }
 - create (batch): { action: "create", tasks: [{ subject, description?, context?, blockedBy?, skills?, goalId? }, ...] } — blockedBy integer N means the earlier array item tasks[N] (0-based), e.g. blockedBy: [0]
 - update: { action: "update", id, updateFields: [...], ... } — list changed fields; empty string/array clears clearable fields
+- advance: omit id/summary to activate your first runnable task; with an active task pass its id and a non-empty summary to complete it and activate your next runnable task
 - list / get / delete / clear / next
 
-Parallel delegation: bind todo ids via teammate \`tasks[].todo\`; delegated agents advance with \`todo update\`, root self-drives with \`todo next\`.
+Parallel delegation: bind todo ids via teammate \`tasks[].todo\`; every actor advances only tasks assigned to itself. \`next\` remains the activation-only compatibility action.
 
-Contract: subject is the title; description is detail. status is update-only on create (never pass status to create). Each actor has at most one in_progress task. Skill binding requires exactly one primary.`,
+Contract: Todo is a live execution state machine, not a retrospective checklist. subject is the title; description is detail. status is update-only on create (never pass status to create). Each actor has at most one in_progress task. Skill binding requires exactly one primary.`,
 
-    promptSnippet: "Lay out a whole multi-step plan in one batch create (≥3 steps), then drive it step by step with resolved context and optional skill guidance.",
+    promptSnippet: "Lay out a whole multi-step plan in one batch create (≥3 steps), then keep it live by advancing each task immediately when its outcome is complete.",
     promptGuidelines: [
       "Use todo when work has ≥3 steps/phases, step dependencies, or cross-turn context — create the COMPLETE plan in one batch create BEFORE executing.",
       "A task is a verifiable outcome (feature, phase, component), not a single edit or command; put affected files and verification criteria in description/context.",
       "Batch blockedBy: tasks[i].blockedBy = [N] means tasks[i] depends on tasks[N], where 0 <= N < i.",
-      "Drive with todo next; it errors while a task is in_progress — close each step with todo update status=completed (+ summary) first.",
+      "Todo is a live execution state machine: immediately after a task meets its acceptance criteria, call todo advance with its id and summary before any tool call or work belonging to another Todo; never batch-complete finished tasks during finalization.",
+      "Advance is actor-scoped and only completes or activates tasks assigned to the caller. Use update immediately instead when work becomes blocked, is paused, or must be completed without activating another task.",
     ],
 
     parameters: TodoToolParams,
@@ -1681,6 +1723,19 @@ When NOT to use:
   });
   registerPlanTools(pi, { onUserAttention: notifyController.requestInput });
   registerPlanCommand(pi);
+  registerArtifactCommand(pi, {
+    getKnowledgeSessionId: () => workflowArtifactKnowledgeSessionId(
+      workflowSnapshotForUi(),
+      workflowSessionOptedIn,
+      attachedWorkflowSessionId,
+    ),
+    onKnowledgeLoaded: (sessionId, candidateCount) => {
+      if (workflowArtifactKnowledgeSessionId(workflowSnapshotForUi(), workflowSessionOptedIn, attachedWorkflowSessionId) !== sessionId) return;
+      artifactKnowledgeSessionId = sessionId;
+      artifactKnowledgeCandidateCount = candidateCount;
+      publishMaestroUi();
+    },
+  });
   registerSwarmDisplay(pi, {
     onProjectionChange(projection) {
       currentSwarmProjection = projection;
@@ -2944,6 +2999,8 @@ When NOT to use:
     previousGuiServer?.close("session-restart");
     maestroUiPublisher.beginSession();
     maestroUiSessionActive = true;
+    artifactKnowledgeSessionId = undefined;
+    artifactKnowledgeCandidateCount = 0;
     await disposeTeammateSessionRegistrations();
     state.baseCwd = ctx.cwd;
     // K9: inject the host session identity into the process environment so all
@@ -3003,6 +3060,12 @@ When NOT to use:
       await refreshWorkflow(ctx);
     }
     await onSessionStartPlan(ctx);
+    const knowledgeSessionId = workflowArtifactKnowledgeSessionId(
+      workflowSnapshotForUi(),
+      workflowSessionOptedIn,
+      attachedWorkflowSessionId,
+    );
+    if (knowledgeSessionId) await refreshKnowledgePendingStatus(ctx, knowledgeSessionId);
     const configuredMode = await permissionController.reload(ctx);
     if (configuredMode === "plan" && !isPlanMode()) await planToggleMode(ctx);
     if (configuredMode) approvalMode = configuredMode;
@@ -3080,6 +3143,8 @@ When NOT to use:
     guiEvents.bind(null);
     closingGuiServer?.close("session-shutdown");
     maestroUiSessionActive = false;
+    artifactKnowledgeSessionId = undefined;
+    artifactKnowledgeCandidateCount = 0;
     maestroUiPublisher.clear();
     await disposeTeammateSessionRegistrations();
     // Fence callbacks and leases before the first await so teardown cannot
@@ -3313,6 +3378,25 @@ When NOT to use:
     await goalCompact(event, ctx, { deferContinuation: true });
   });
 
+  pi.on("session_compact_failed", (event, ctx) => {
+    preserveCompletedTurnFromNativeThreshold = false;
+    if (!settleFailedCompaction(compactionArbiter, event)) return;
+    lastCompactionCancel = {
+      reason: event.aborted
+        ? `${event.reason} compaction aborted`
+        : event.errorMessage ?? `${event.reason} compaction failed`,
+      at: Date.now(),
+    };
+    try {
+      goalCompactionCancelled(ctx);
+    } catch (error) {
+      ctx.ui.notify(
+        `Goal state rollback after compaction failure failed: ${error instanceof Error ? error.message : String(error)}`,
+        "warning",
+      );
+    }
+  });
+
   pi.on("input", (event) => {
     return goalInput(event);
   });
@@ -3455,7 +3539,13 @@ When NOT to use:
     // the current Session's knowledge view stays live.
     if (event.toolName === "bash" && /\bmaestro\s+(?:knowledge\s+(?:record|stage|promote|review|reconcile)|load|search)\b/.test(command)) {
       guiEvents.emit(GUI_EVENTS.stateChanged, { subsystem: "knowledge", at: Date.now() });
-      publishMaestroUi();
+      const knowledgeSessionId = workflowArtifactKnowledgeSessionId(
+        workflowSnapshotForUi(),
+        workflowSessionOptedIn,
+        attachedWorkflowSessionId,
+      );
+      if (!event.isError && knowledgeSessionId) await refreshKnowledgePendingStatus(ctx, knowledgeSessionId);
+      else publishMaestroUi();
     }
     // Session/Run lifecycle writes (run/session/execution/artifact/ralph) refresh
     // the canonical Workflow snapshot. The v3 surface (run next/complete,
@@ -3977,6 +4067,10 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
     compactionArbiter.complete("success");
     autoCompaction.onCompact(completedOwner, ctx);
   });
+  pi.on("session_compact_failed", (event) => {
+    preserveCompletedTurnFromNativeThreshold = false;
+    settleFailedCompaction(compactionArbiter, event);
+  });
   pi.on("session_shutdown", async (_event, ctx) => {
     autoCompaction.onSessionShutdown(ctx);
     preserveCompletedTurnFromNativeThreshold = false;
@@ -4001,12 +4095,12 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
 Tasks created here are attributed to this teammate and assigned to self by default.
 Use assignee="root" to hand work back to root. Teammates can update tasks they created or were assigned; only root can clear the shared list.
 
-If root delegated a task to you (spawned with todo: "<id>"), it is usually already active (in_progress) — check with \`todo list\`, work on the in_progress one, and finish it with \`todo update <id> status=completed summary=<one-line result>\`. Then activate your next assigned task with \`todo update <id> status=in_progress\` (\`todo update\` is the delegated-agent channel; \`todo next\` is root's self-drive channel). Leave a task pending only if you could not complete it.`,
-    promptSnippet: "Create and update teammate-owned tasks in the shared root Todo list.",
+If root delegated a task to you (spawned with todo: "<id>"), it is usually already active (in_progress) — check with \`todo list\`, work on it, and immediately finish it with \`todo advance\` using that id and a one-line summary. Advance only completes or activates tasks assigned to you. Use \`todo advance\` without id/summary when you have no active task and need to activate your next assigned task; use \`todo update\` when blocked, paused, or completing without continuing.`,
+    promptSnippet: "Keep teammate-owned tasks live in the shared root Todo list and advance each one immediately when its work finishes.",
     promptGuidelines: [
       "Use todo for newly discovered follow-up work, explicit blockers, and resumable steps.",
-      "Complete or pause your active Todo before activating another task assigned to you.",
-      "If root delegated a task to you (spawned with todo: \"<id>\"), it is usually already active — work on the in_progress one and finish it with todo update <id> status=completed summary=... before your final answer; keep it pending only if you could not complete it.",
+      "Todo is live state tracking: immediately when your active task finishes, call todo advance with its id and summary before doing work for another Todo; never defer several completions until your final answer.",
+      "Advance is actor-scoped. Complete, block, or pause your active Todo before activating another task assigned to you; a final-answer Todo check is recovery only, not the normal update boundary.",
     ],
     parameters: TodoToolParams,
     async execute(_id, params, signal) {
