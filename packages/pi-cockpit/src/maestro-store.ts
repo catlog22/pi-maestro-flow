@@ -1,6 +1,7 @@
 import { sanitizeExtensionStatusText } from "./extension-status.ts";
 import {
 	MAESTRO_UI_SNAPSHOT_VERSION,
+	type MaestroArtifactV1,
 	type MaestroGoalV1,
 	type MaestroModeV1,
 	type MaestroSwarmBestV1,
@@ -87,6 +88,8 @@ function parseSnapshot(value: unknown): MaestroUiSnapshotV1 | undefined {
 	}
 	const swarm = value.swarm === null ? null : parseSwarm(value.swarm);
 	if (swarm === undefined) return undefined;
+	const artifact = value.artifact === undefined ? undefined : parseArtifact(value.artifact);
+	if (value.artifact !== undefined && artifact === undefined) return undefined;
 	const mode = parseMode(value.mode);
 	if (mode === undefined) return undefined;
 	if (value.currentGoalId !== undefined && !isOpaqueId(value.currentGoalId)) return undefined;
@@ -98,6 +101,7 @@ function parseSnapshot(value: unknown): MaestroUiSnapshotV1 | undefined {
 		goals,
 		...(value.currentGoalId === undefined ? {} : { currentGoalId: value.currentGoalId }),
 		swarm,
+		...(artifact === undefined ? {} : { artifact }),
 		mode,
 	};
 }
@@ -236,6 +240,20 @@ function parseSwarmBest(value: unknown): MaestroSwarmBestV1 | undefined {
 		iteration: value.iteration,
 		score: value.score,
 		...(summary === undefined ? {} : { summary }),
+	};
+}
+
+function parseArtifact(value: unknown): MaestroArtifactV1 | undefined {
+	if (!isRecord(value) || typeof value.available !== "boolean") return undefined;
+	if (value.planRevision !== undefined && !isNonNegativeInteger(value.planRevision)) return undefined;
+	const planStatus = value.planStatus === undefined ? undefined : displayString(value.planStatus);
+	if (value.planStatus !== undefined && planStatus === undefined) return undefined;
+	if (value.knowledgeSessionId !== undefined && !isOpaqueId(value.knowledgeSessionId)) return undefined;
+	return {
+		available: value.available,
+		...(value.planRevision === undefined ? {} : { planRevision: value.planRevision }),
+		...(planStatus === undefined ? {} : { planStatus }),
+		...(value.knowledgeSessionId === undefined ? {} : { knowledgeSessionId: value.knowledgeSessionId }),
 	};
 }
 

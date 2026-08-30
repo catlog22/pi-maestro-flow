@@ -2,12 +2,17 @@ import { altKey } from "pi-maestro-settings-core/v1";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { matchesKey, visibleWidth } from "@earendil-works/pi-tui";
+import { matchesKey, visibleWidth, type AutocompleteProvider } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { EndpointStore, isMonitorControlEndpoint, type CockpitEndpoint, type EndpointStoreSnapshot } from "../src/endpoint-store.ts";
 import { SessionUiState } from "../src/session-ui-state.ts";
 import { assignedAgentColor } from "../src/agent-bar.ts";
 import { renderWindowBar, windowSessionColor } from "../src/window-bar.ts";
+import {
+	buildWindowAutocompleteTargets,
+	createWindowAutocompleteProvider,
+	resolveWindowRouteInput,
+} from "../src/window-autocomplete.ts";
 import { renderWindowThreadView } from "../src/window-thread-view.ts";
 import { cockpitTuiLocale } from "../src/tui-i18n.ts";
 import type { SessionHostSnapshot } from "pi-maestro-teammate/v1/sessions";
@@ -165,6 +170,17 @@ test("Cockpit intercepts exact monitor before agent routing and hides windows by
 	assert.match(source, /sessionUi\.mode === "window" \? selectedWindowInputTarget\(\) : selectedAgentTarget\(\)/);
 	assert.match(source, /!endpoint \|\| isMonitorControlEndpoint\(endpoint\)\) return undefined;/);
 	assert.match(source, /sigil: "#"/);
+	assert.match(source, /createWindowAutocompleteProvider/);
+	assert.match(source, /config\.enabled && e\.source === "interactive"/);
+	assert.match(source, /resolveWindowRouteInput\(e\.text, windowAutocompleteTargets\(\), selectedHashWindowTargets\)/);
+	assert.match(source, /config\.enabled && sessionUi\.mode === "window"/);
+	const rejectedHashRoute = source.slice(
+		source.indexOf('if (hashWindowRoute.code !== "resolved")'),
+		source.indexOf("if (!hashWindowRoute.message)"),
+	);
+	assert.doesNotMatch(rejectedHashRoute, /selectedHashWindowTargets\.delete/);
+	assert.match(source, /selectedHashWindowTargets\.delete\(hashWindowRoute\.token\)/);
+	assert.doesNotMatch(source, /selectedHashWindowTargets\.delete\(hashWindowRoute\.target\.token/);
 	assert.match(source, /matchesKey\(data, "alt\+left"\)/);
 	assert.match(source, /matchesKey\(data, "alt\+right"\)/);
 });
@@ -204,10 +220,66 @@ test("Window Bar includes a local Monitor control entry only while active", () =
 	const value = store.snapshot();
 	const control = controlWindow(value);
 	assert.equal(value.windows[0]?.id, control.id);
-	assert.equal(control.label, "control");
+	assert.equal(control.label, `control·${LOCAL_OWNER.slice(0, 6)}`);
 	assert.equal(control.registryEndpoint?.scope, "local");
 	assert.equal(control.logicalKey, `monitor-control:${LOCAL_OWNER}:${LOCAL_NONCE}`);
 	assert.equal(value.windows.length, 2);
+});
+
+test("typing # offers current and peer windows and resolves a one-shot route", async () => {
+	const store = new EndpointStore({ getLegacyAgents: () => [] });
+	store.applyRegistrySnapshot(snapshot());
+	const targets = buildWindowAutocompleteTargets(store.snapshot(), {
+		current: "current window",
+		peer: "peer window",
+	});
+	assert.deepEqual(targets.map((target) => target.token), [
+		`control·${LOCAL_OWNER.slice(0, 6)}`,
+		`build·${REMOTE_OWNER.slice(0, 6)}`,
+	]);
+	assert.match(targets[0]?.description ?? "", new RegExp(`owner:${LOCAL_OWNER}`));
+	assert.match(targets[0]?.description ?? "", new RegExp(`incarnation:${LOCAL_NONCE}`));
+	assert.match(targets[1]?.description ?? "", new RegExp(`owner:${REMOTE_OWNER}`));
+	assert.match(targets[1]?.description ?? "", new RegExp(`incarnation:${REMOTE_NONCE}`));
+
+	const delegated: AutocompleteProvider = {
+		async getSuggestions() { return null; },
+		applyCompletion(lines, cursorLine, cursorCol) { return { lines, cursorLine, cursorCol }; },
+	};
+	const selected = new Map();
+	const provider = createWindowAutocompleteProvider(
+		delegated,
+		() => targets,
+		(target) => selected.set(target.token.toLocaleLowerCase("en"), target),
+	);
+	const all = await provider.getSuggestions(["#"], 0, 1, { signal: new AbortController().signal });
+	assert.deepEqual(all?.items.map((item) => item.value), [
+		`#control·${LOCAL_OWNER.slice(0, 6)}`,
+		`#build·${REMOTE_OWNER.slice(0, 6)}`,
+	]);
+	const build = await provider.getSuggestions(["#bu"], 0, 3, { signal: new AbortController().signal });
+	assert.equal(build?.items.length, 1);
+	const completion = provider.applyCompletion(["#bu"], 0, 3, build!.items[0]!, build!.prefix);
+	assert.equal(completion.lines[0], `#build·${REMOTE_OWNER.slice(0, 6)} `);
+	const input = `${completion.lines[0]}review this`;
+	const route = resolveWindowRouteInput(input, targets, selected);
+	assert.equal(route?.code, "resolved");
+	assert.equal(route?.code === "resolved" ? route.target.routeSelector : undefined, ROOT_ID);
+	assert.equal(route?.code === "resolved" ? route.token : undefined, `build·${REMOTE_OWNER.slice(0, 6)}`);
+	assert.equal(route?.message, "review this");
+	const renamed = { ...targets[1]!, token: `renamed·${REMOTE_OWNER.slice(0, 6)}`, label: "renamed" };
+	const renamedRoute = resolveWindowRouteInput(input, [renamed], selected);
+	assert.equal(renamedRoute?.code === "resolved" ? renamedRoute.token : undefined, `build·${REMOTE_OWNER.slice(0, 6)}`);
+	assert.equal(renamedRoute?.code === "resolved" ? renamedRoute.target.token : undefined, renamed.token);
+	assert.equal(resolveWindowRouteInput(input, [], selected)?.code, "stale");
+	assert.equal(resolveWindowRouteInput(input, [], selected)?.code, "stale");
+
+	const colliding = { ...targets[1]!, routeSelector: SECOND_ROOT_ID, ownerNonce: SECOND_NONCE };
+	assert.equal(resolveWindowRouteInput(input, [targets[1]!, colliding])?.code, "ambiguous");
+	const current = resolveWindowRouteInput(`#control·${LOCAL_OWNER.slice(0, 6)} continue here`, targets);
+	assert.equal(current?.code, "resolved");
+	assert.equal(current?.code === "resolved" ? current.target.current : undefined, true);
+	assert.equal(current?.message, "continue here");
 });
 
 test("Window Bar renders explicit control and peer windows and fits every width", () => {
@@ -222,7 +294,7 @@ test("Window Bar renders explicit control and peer windows and fits every width"
 		assert.ok(visibleWidth(lines[0]!) <= width, `width ${width}: ${lines[0]}`);
 	}
 	const line = renderWindowBar(value.windows, state, 80, theme as Theme)[0]!;
-	assert.match(line, /#control/);
+	assert.match(line, new RegExp(`#control·${LOCAL_OWNER.slice(0, 6)}`));
 	assert.match(line, /#build/);
 	assert.doesNotMatch(line, /■|mon 1/);
 	assert.equal(windowSessionColor(controlWindow(value)), "accent");
@@ -263,6 +335,21 @@ test("Window Bar shows the Alt+R list hint only outside a capturing overlay", ()
 	const hidden = renderWindowBar(value.windows, state, 100, theme as Theme)[0]!;
 	assert.match(visible, new RegExp(`${altRe("R")} list$`));
 	assert.doesNotMatch(hidden, new RegExp(`${altRe("R")}`));
+});
+
+test("Window Bar renders the /artifact replacement hint without changing the empty state", () => {
+	const store = new EndpointStore({ getLegacyAgents: () => [] });
+	store.applyRegistrySnapshot(snapshot("windows"));
+	const value = store.snapshot();
+	const state = new SessionUiState();
+	state.reconcile("window", value.windows, value.windows[0]?.id);
+	const taggedTheme: Pick<Theme, "fg" | "bold"> = {
+		fg: (color, text) => `<${color}>${text}</${color}>`,
+		bold: (text) => text,
+	};
+	const hint = { text: "/artifact", color: "accent" as const };
+	assert.match(renderWindowBar(value.windows, state, 100, taggedTheme as Theme, { shortcutHint: hint })[0]!, /<accent>\/artifact<\/accent>$/);
+	assert.doesNotMatch(renderWindowBar([], state, 100, taggedTheme as Theme, { shortcutHint: hint })[0]!, /artifact/);
 });
 
 test("Window Bar empty state is width bounded", () => {
@@ -321,7 +408,7 @@ test("duplicate window names gain a non-color owner suffix", () => {
 	store.applyRegistrySnapshot(withSecondWindow(snapshot("windows"), "build"));
 	const value = store.snapshot();
 	assert.deepEqual(value.windows.map((window) => window.label), [
-		"control",
+		`control·${LOCAL_OWNER.slice(0, 6)}`,
 		`build·${REMOTE_OWNER.slice(0, 6)}`,
 		`build·${SECOND_OWNER.slice(0, 6)}`,
 	]);

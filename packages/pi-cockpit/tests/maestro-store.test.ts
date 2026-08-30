@@ -37,6 +37,7 @@ function snapshot(sessionGeneration: string, revision: number): Record<string, u
 			best: { workerId: "worker-1", iteration: 1, score: 0.8, summary: "Best result" },
 			updatedAt: 200,
 		},
+		artifact: { available: true, planRevision: 3, planStatus: "draft", knowledgeSessionId: "session-1" },
 		mode: { kind: "workflow", label: "Running" },
 		publishedAt: 200,
 	};
@@ -86,6 +87,27 @@ test("rejects unsupported versions and malformed envelopes without replacing sta
 	assert.equal(store.applySnapshot({ ...snapshot("generation-a", 2), publishedAt: Number.NaN }), false);
 	assert.equal(store.applySnapshot({ ...snapshot("generation-a", 2), mode: { kind: undefined } }), false);
 	assert.equal(store.snapshot()?.revision, 1);
+});
+
+test("accepts optional Artifact state and rejects malformed Artifact fields", () => {
+	const store = new MaestroStore();
+	assert.equal(store.applySnapshot(snapshot("generation-a", 1)), true);
+	assert.deepEqual(store.snapshot()?.artifact, {
+		available: true,
+		planRevision: 3,
+		planStatus: "draft",
+		knowledgeSessionId: "session-1",
+	});
+
+	const malformed = snapshot("generation-a", 2);
+	(malformed.artifact as { available: unknown }).available = "yes";
+	assert.equal(store.applySnapshot(malformed), false);
+	assert.equal(store.snapshot()?.revision, 1);
+
+	const compatible = snapshot("generation-a", 2);
+	delete compatible.artifact;
+	assert.equal(store.applySnapshot(compatible), true, "older producers may omit Artifact state");
+	assert.equal(store.snapshot()?.artifact, undefined);
 });
 
 test("deeply rejects malformed workflow, goal, and swarm fields", () => {

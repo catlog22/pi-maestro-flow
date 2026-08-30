@@ -209,6 +209,21 @@ test("Agent Bar shows the Alt+R list hint only when the surface is not covered b
 	assert.doesNotMatch(hidden, new RegExp(`${altRe("R")}`));
 });
 
+test("Agent Bar renders the /artifact replacement hint in the requested accent color", () => {
+	const state = new SessionUiState();
+	state.reconcile("agent", endpoints, "root");
+	const taggedTheme: Pick<Theme, "fg" | "bold"> = {
+		fg: (color, text) => `<${color}>${text}</${color}>`,
+		bold: (text) => text,
+	};
+	const line = renderAgentBar(endpoints, state, 100, taggedTheme as Theme, {
+		now: 10_000,
+		shortcutHint: { text: "/artifact", color: "accent" },
+	})[0]!;
+	assert.match(line, /<accent>\/artifact<\/accent>$/);
+	assert.doesNotMatch(line, new RegExp(`${altRe("R")} list`));
+});
+
 test("Agent Bar appends the live tool to a running agent chip", () => {
 	const running = endpoints.map((endpoint) => endpoint.kind === "agent"
 		? { ...endpoint, agentRow: { ...row, activeTool: "bash" } }

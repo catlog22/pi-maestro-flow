@@ -82,7 +82,8 @@ test("Cockpit session bar, command, and shortcut contracts stay stable", () => {
   assert.match(source, /COCKPIT_SESSION_LIST_EVENT[\s\S]*?openSessionList\(ctx\)/);
   assert.match(source, /allEntries = mode === "window" \? \[\.\.\.snapshot\.windows\] : \[\.\.\.snapshot\.endpoints\]/);
   assert.match(source, /ctx\.ui\.select\([\s\S]*?tuiT\("window\.title"\)[\s\S]*?tuiT\("overlay\.agents\.title"\)/);
-  assert.match(source, /sessionListOverlayActive\(\) \? undefined : tuiT\("session\.listHint"\)/);
+  assert.match(source, /const sessionBarHint = \(\) =>/);
+  assert.match(source, /maestro\.snapshot\(\)\?\.artifact\?\.available[\s\S]*?tuiT\("artifact\.hint"\)[\s\S]*?tuiT\("session\.listHint"\)/);
   assert.doesNotMatch(source, /alt\+shift\+(?:r|l|up|down)/);
   assert.match(source, /data !== "\\x1b\[1;2A" && data !== "\\x1b\[1;2B"/);
 });
@@ -286,6 +287,19 @@ test("Cockpit Agent modal opens from the Alt+R session list and shares the live 
 	assert.match(source, /uninstallUi[\s\S]*?activeAgentOverlay\?\.finalize\(\)/);
 	assert.match(source, /session_start[\s\S]*?agentListScroll = \{ offset: 0, following: true \}/);
 	assert.match(source, /session_shutdown[\s\S]*?agentReads\.clear\(\);[\s\S]*?agentListScroll = \{ offset: 0, following: true \}/);
+});
+
+test("Cockpit projects Pi UI prompts as waiting without ending the running lifecycle", () => {
+	const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+	const handlersStart = source.indexOf('pi.on("ui_prompt_start"');
+	const handlersEnd = source.indexOf("// --- live elapsed for folded thinking rows ---", handlersStart);
+	assert.ok(handlersStart >= 0 && handlersEnd > handlersStart);
+	const promptHandlers = source.slice(handlersStart, handlersEnd);
+	assert.match(promptHandlers, /uiPromptDepth = nextUiPromptDepth\(uiPromptDepth, "start"\)/);
+	assert.match(promptHandlers, /nextUiPromptDepth\(uiPromptDepth, "end"\)/);
+	assert.doesNotMatch(promptHandlers, /running\s*=/);
+	assert.match(source, /session_start[\s\S]*?uiPromptDepth = 0;[\s\S]*?ambientSurfaces\.reset\(\)/);
+	assert.match(source, /session_shutdown[\s\S]*?runningStartedAt = undefined;[\s\S]*?uiPromptDepth = 0/);
 });
 
 test("Flow publishes authoritative bash_bg snapshots and Cockpit can request a refresh", () => {

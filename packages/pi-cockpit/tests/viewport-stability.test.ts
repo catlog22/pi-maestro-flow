@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { TUI, type Component, type Terminal } from "@earendil-works/pi-tui";
+import { TuiMainScreen, type Component, type Terminal, type TUI } from "@earendil-works/pi-tui";
 import { attachViewportStability } from "../src/viewport-stability.ts";
 import { createDynamicTuiReference, createSwitchingDynamicTuiReference } from "./dynamic-tui-reference.ts";
 
@@ -31,9 +31,16 @@ interface TuiInternals {
 	previousHeight: number;
 }
 
+function methodOwner(target: object, method: string): object {
+	let owner = Object.getPrototypeOf(target) as object | null;
+	while (owner && !Object.hasOwn(owner, method)) owner = Object.getPrototypeOf(owner) as object | null;
+	assert.ok(owner, `${method} must exist on the renderer prototype chain`);
+	return owner;
+}
+
 function renderHarness(initialLines: string[]) {
 	const terminal = new FakeTerminal();
-	const tui = new TUI(terminal);
+	const tui = new TuiMainScreen(terminal);
 	let lines = [...initialLines];
 	const component: Component = {
 		render: () => [...lines],
@@ -185,7 +192,7 @@ test("detach restores an existing instance descriptor exactly", () => {
 
 test("dynamic TUI references patch the stable renderer prototype without wrapping dispatch closures", () => {
 	const h = renderHarness(["zero", "one", "two", "three", "four"]);
-	const owner = Object.getPrototypeOf(h.tui) as object;
+	const owner = methodOwner(h.tui, "applyLineResets");
 	const original = Object.getOwnPropertyDescriptor(owner, "applyLineResets")?.value;
 	const reference = createDynamicTuiReference(h.tui);
 
@@ -207,7 +214,7 @@ test("dynamic TUI references patch the stable renderer prototype without wrappin
 
 test("dynamic TUI prototype attachments stay installed until every owner detaches", () => {
 	const h = renderHarness(["zero"]);
-	const owner = Object.getPrototypeOf(h.tui) as object;
+	const owner = methodOwner(h.tui, "applyLineResets");
 	const original = Object.getOwnPropertyDescriptor(owner, "applyLineResets")?.value;
 	const first = attachViewportStability(createDynamicTuiReference(h.tui));
 	const wrapped = Object.getOwnPropertyDescriptor(owner, "applyLineResets")?.value;
@@ -234,7 +241,7 @@ test("dynamic TUI probing fails closed for throwing, cyclic, or shadowed methods
 	assert.equal(attachViewportStability(cyclic).active, false);
 
 	const shadowed = renderHarness(["zero"]);
-	const owner = Object.getPrototypeOf(shadowed.tui) as object;
+	const owner = methodOwner(shadowed.tui, "applyLineResets");
 	const original = Object.getOwnPropertyDescriptor(owner, "applyLineResets")?.value;
 	Object.defineProperty(shadowed.tui, "applyLineResets", {
 		configurable: true,

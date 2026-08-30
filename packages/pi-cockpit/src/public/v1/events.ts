@@ -138,6 +138,14 @@ export interface MaestroSwarmV1 {
 	updatedAt: number;
 }
 
+/** Session-bound documents exposed through `/artifact`. */
+export interface MaestroArtifactV1 {
+	available: boolean;
+	planRevision?: number;
+	planStatus?: string;
+	knowledgeSessionId?: string;
+}
+
 /**
  * The active Maestro projection. String values are deliberately open so adding
  * a producer mode does not require a protocol revision.
@@ -164,6 +172,8 @@ export interface MaestroUiStateSnapshotV1 extends MaestroUiEnvelopeV1 {
 	goals: MaestroGoalV1[];
 	currentGoalId?: string;
 	swarm: MaestroSwarmV1 | null;
+	/** Optional for compatibility with older Maestro producers. */
+	artifact?: MaestroArtifactV1;
 	mode: MaestroModeV1;
 }
 

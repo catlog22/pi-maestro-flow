@@ -5,7 +5,7 @@ import type { TUI } from "@earendil-works/pi-tui";
 import { ambientKeysShouldYield, capturingOverlayVisible } from "./capturing-overlay.ts";
 import { Key, decodeKittyPrintable, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { AgentReadStoreRouter, effectiveAgentStatus, type CompletePayload, type MessagePayload, type StartedPayload } from "./agents-store.ts";
-import { AmbientSurfaceCache, statusText, titleFor, workingMessage, type AmbientState } from "./ambient.ts";
+import { AmbientSurfaceCache, nextUiPromptDepth, statusText, titleFor, workingMessage, type AmbientState } from "./ambient.ts";
 import { generateTitleWithModel } from "./title-llm.ts";
 import { suggestTitle } from "./title-gen.ts";
 import { BashBgStore } from "./bash-bg-store.ts";
@@ -56,6 +56,12 @@ import {
 import { SessionUiState } from "./session-ui-state.ts";
 import { nextSessionTabId } from "./session-tabs.ts";
 import { renderWindowBar, windowSessionColor } from "./window-bar.ts";
+import {
+	buildWindowAutocompleteTargets,
+	createWindowAutocompleteProvider,
+	resolveWindowRouteInput,
+	type WindowAutocompleteTarget,
+} from "./window-autocomplete.ts";
 import { makeWindowThreadWidget } from "./window-thread-view.ts";
 import { agentPanelRows, panelRows } from "./viewport.ts";
 import { createZenBrowseController, type ZenBrowseController } from "./zen-browse.ts";
@@ -394,6 +400,7 @@ export default function (pi: ExtensionAPI): void {
 	let surfaceState: CockpitSurfaceState = "disabled";
 	let running = false;
 	let runningStartedAt: number | undefined;
+	let uiPromptDepth = 0;
 	// Auto-generated session title from the first turn (the rule-based / LLM
 	// stand-in for Claude Code's Haiku title). Cleared per session.
 	let aiTitle: string | undefined;
@@ -496,6 +503,7 @@ export default function (pi: ExtensionAPI): void {
 				agents: agents.snapshot(),
 				jobs: bashBg.snapshot(),
 				running,
+				waitingForInput: uiPromptDepth > 0,
 				cwd: title.showCwd ? formatCwd(ctx.sessionManager.getCwd()) : undefined,
 				activeTool: activeTool?.name,
 				workingStartedAt: activeTool?.startedAt ?? runningStartedAt,
@@ -512,7 +520,7 @@ export default function (pi: ExtensionAPI): void {
 				state.maestroKnowledge = title.showMaestro
 					? maestroKnowledgeTag(maestro.snapshot()?.workflow?.knowledge)
 					: undefined;
-				state.frame = titleFrame(running);
+				state.frame = titleFrame(running && uiPromptDepth === 0);
 				ambientSurfaces.setTitle(
 					(value) => ctx.ui.setTitle(value),
 					titleFor(state, { ok: g.check, fail: g.cross }, g.separator, { maxLength: title.maxLength }),
@@ -883,6 +891,12 @@ export default function (pi: ExtensionAPI): void {
 		};
 	};
 
+	const selectedHashWindowTargets = new Map<string, WindowAutocompleteTarget>();
+	const windowAutocompleteTargets = () => buildWindowAutocompleteTargets(endpoints.snapshot(), {
+		current: tuiT("window.autocompleteCurrent"),
+		peer: tuiT("window.autocompletePeer"),
+	});
+
 	const publishInputTarget = (force = false): void => {
 		const target = sessionUi.mode === "window" ? selectedWindowInputTarget() : selectedAgentTarget();
 		const sigil = target && "sigil" in target ? target.sigil : "@";
@@ -1082,6 +1096,13 @@ export default function (pi: ExtensionAPI): void {
 		if (config.enabled) syncAgentWidgetPlacement(ctx, "belowEditor");
 	};
 
+	const sessionBarHint = () => {
+		if (sessionListOverlayActive()) return undefined;
+		return maestro.snapshot()?.artifact?.available
+			? { text: tuiT("artifact.hint"), color: "accent" as const }
+			: tuiT("session.listHint");
+	};
+
 	const installSessionBar = (ctx: ExtensionContext): void => {
 		ctx.ui.setWidget(
 			SESSION_BAR_WIDGET_KEY,
@@ -1093,7 +1114,7 @@ export default function (pi: ExtensionAPI): void {
 					getState: () => sessionUi,
 					getNow: () => nowSnapshot,
 					isMainRunning: () => running,
-					getShortcutHint: () => sessionListOverlayActive() ? undefined : tuiT("session.listHint"),
+					getShortcutHint: sessionBarHint,
 				})(tui, theme);
 				return {
 					render(width: number): string[] {
@@ -1104,7 +1125,7 @@ export default function (pi: ExtensionAPI): void {
 								sessionUi,
 								width,
 								theme,
-								{ shortcutHint: sessionListOverlayActive() ? undefined : tuiT("session.listHint") },
+								{ shortcutHint: sessionBarHint() },
 							)
 							: agentWidget.render(width);
 					},
@@ -1766,6 +1787,7 @@ export default function (pi: ExtensionAPI): void {
 	// --- session + agent lifecycle ---
 	pi.on("session_start", (_e, ctx) => {
 		lastCtx = ctx;
+		uiPromptDepth = 0;
 		ambientSurfaces.reset();
 		agentReads.bindSession(ctx.sessionManager.getSessionId());
 		agents = agentReads.current;
@@ -1804,6 +1826,12 @@ export default function (pi: ExtensionAPI): void {
 		});
 		settingsLocale.reload();
 		settingsRegistry.emitLocale(settingsLocale.locale);
+		selectedHashWindowTargets.clear();
+		ctx.ui.addAutocompleteProvider((current) => createWindowAutocompleteProvider(
+			current,
+			() => config.enabled ? windowAutocompleteTargets() : [],
+			(target) => selectedHashWindowTargets.set(target.token.toLocaleLowerCase("en"), target),
+		));
 		invalidateUsageCache();
 		// Quiet mode: register compact tool renderers and fold thinking blocks.
 		// Tools are normally registered at extension load time (above) so they
@@ -1898,6 +1926,7 @@ export default function (pi: ExtensionAPI): void {
 		lastCtx = undefined;
 		running = false;
 		runningStartedAt = undefined;
+		uiPromptDepth = 0;
 		activeTools.clear();
 		thinkingTimer.reset();
 		invalidateUsageCache();
@@ -1925,6 +1954,16 @@ export default function (pi: ExtensionAPI): void {
 		activeTools.clear();
 		thinkingTimer.stop();
 		syncTick();
+		req();
+	});
+	pi.on("ui_prompt_start", () => {
+		uiPromptDepth = nextUiPromptDepth(uiPromptDepth, "start");
+		req();
+	});
+	pi.on("ui_prompt_end", () => {
+		const nextDepth = nextUiPromptDepth(uiPromptDepth, "end");
+		if (nextDepth === uiPromptDepth) return;
+		uiPromptDepth = nextDepth;
 		req();
 	});
 
@@ -1971,6 +2010,60 @@ export default function (pi: ExtensionAPI): void {
 		const hasImages = (e.images?.length ?? 0) > 0;
 		const interactiveText = e.source === "interactive" && e.text.trim().length > 0;
 		const isSynthetic = e.text.startsWith("/") || e.text.startsWith("!");
+		const hashWindowRoute = config.enabled && e.source === "interactive" && !isSynthetic
+			? resolveWindowRouteInput(e.text, windowAutocompleteTargets(), selectedHashWindowTargets)
+			: undefined;
+
+		if (hashWindowRoute) {
+			if (hashWindowRoute.code !== "resolved") {
+				ctx.ui.notify(tuiT(hashWindowRoute.code === "stale"
+					? "notice.windowTargetUnavailable"
+					: "notice.windowTargetAmbiguous"), "warning");
+				ctx.ui.setEditorText(e.text);
+				return { action: "handled" as const };
+			}
+			if (!hashWindowRoute.message) {
+				ctx.ui.notify(tuiT("notice.windowMessageRequired"), "warning");
+				ctx.ui.setEditorText(e.text);
+				return { action: "handled" as const };
+			}
+			if (hashWindowRoute.target.current) {
+				selectedHashWindowTargets.delete(hashWindowRoute.token);
+				if (!firstUserText) firstUserText = hashWindowRoute.message;
+				return { action: "transform" as const, text: hashWindowRoute.message };
+			}
+			if (hasImages) {
+				ctx.ui.notify(tuiT("notice.imagePeer"), "warning");
+				ctx.ui.setEditorText(e.text);
+				return { action: "handled" as const };
+			}
+			if (!registry) {
+				ctx.ui.notify(tuiT("notice.peerDeliveryUnavailable"), "warning");
+				ctx.ui.setEditorText(e.text);
+				return { action: "handled" as const };
+			}
+			const delivery = await (registry.send?.({
+				selector: hashWindowRoute.target.routeSelector,
+				message: hashWindowRoute.message,
+				mode: e.streamingBehavior === "steer" ? "steer" : "follow_up",
+				source: "user",
+			}) ?? registry.router?.route({
+				selector: hashWindowRoute.target.routeSelector,
+				message: hashWindowRoute.message,
+				mode: e.streamingBehavior === "steer" ? "steer" : "follow_up",
+				source: "user",
+			}));
+			if (!delivery?.delivered) {
+				ctx.ui.notify(tuiT("notice.peerMessageFailed", {
+					label: hashWindowRoute.target.label,
+					message: delivery?.error ?? tuiT("notice.deliveryRegistryUnavailable"),
+				}), "error");
+				ctx.ui.setEditorText(e.text);
+			} else {
+				selectedHashWindowTargets.delete(hashWindowRoute.token);
+			}
+			return { action: "handled" as const };
+		}
 
 		if (e.source === "interactive" && !hasImages && e.text.trim() === "monitor") {
 			if (!registry?.requestWindowMode) {
@@ -1981,7 +2074,7 @@ export default function (pi: ExtensionAPI): void {
 			return { action: "handled" as const };
 		}
 
-		if (sessionUi.mode === "window" && (interactiveText || hasImages) && !isSynthetic) {
+		if (config.enabled && sessionUi.mode === "window" && (interactiveText || hasImages) && !isSynthetic) {
 			const target = selectedWindowEndpoint();
 			if (!target) {
 				ctx.ui.notify(tuiT("notice.noMonitorWindow"), "warning");

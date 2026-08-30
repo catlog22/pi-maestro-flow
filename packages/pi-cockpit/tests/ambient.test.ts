@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { AmbientSurfaceCache, statusText, titleFor, workingMessage, type AmbientState } from "../src/ambient.ts";
+import { AmbientSurfaceCache, nextUiPromptDepth, statusText, titleFor, workingMessage, type AmbientState } from "../src/ambient.ts";
 import type { AgentRow, BashBgJob, TodoItem } from "../src/types.ts";
 import { cockpitTuiLocale } from "../src/tui-i18n.ts";
 
@@ -78,6 +78,27 @@ test("workingMessage omits a frozen elapsed in static mode", () => {
 	});
 	assert.equal(workingMessage(staticState, 4_200), "\x1b[3mteammate-wait\x1b[23m");
 	assert.equal(workingMessage(staticState, 66_400), "\x1b[3mteammate-wait\x1b[23m");
+});
+
+test("UI prompt depth nests, saturates at zero, and projects a waiting state without ending the turn", () => {
+	let depth = nextUiPromptDepth(0, "start");
+	depth = nextUiPromptDepth(depth, "start");
+	assert.equal(depth, 2);
+	depth = nextUiPromptDepth(depth, "end");
+	assert.equal(depth, 1);
+	depth = nextUiPromptDepth(nextUiPromptDepth(depth, "end"), "end");
+	assert.equal(depth, 0);
+
+	const waiting = state({
+		running: true,
+		waitingForInput: true,
+		activeTool: "ask-user-question",
+		workingStartedAt: 1_000,
+		cwd: "~/w",
+	});
+	assert.equal(workingMessage(waiting, 66_400), "\x1b[3mWAITING FOR INPUT\x1b[23m");
+	assert.equal(titleFor(waiting, MARKS), "pi - ~/w - WAITING FOR INPUT");
+	assert.equal(waiting.running, true, "waiting does not end the agent lifecycle");
 });
 
 test("title falls back to the bare workspace when nothing is happening", () => {

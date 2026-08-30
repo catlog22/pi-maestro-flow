@@ -37,12 +37,19 @@ export interface SessionBarDeps {
 	getCurrentSession?: () => { label: string; color: ThemeColor } | undefined;
 }
 
+export interface SessionBarHint {
+	text: string;
+	color?: ThemeColor;
+}
+
+export type SessionBarHintValue = string | SessionBarHint;
+
 export interface AgentBarDeps {
 	getEndpoints: () => readonly CockpitEndpoint[];
 	getState: () => SessionUiState;
 	getNow: () => number;
 	isMainRunning?: () => boolean;
-	getShortcutHint?: () => string | undefined;
+	getShortcutHint?: () => SessionBarHintValue | undefined;
 }
 
 export const AGENT_SESSION_COLORS = [
@@ -154,7 +161,7 @@ function endpointColor(endpoint: CockpitEndpoint, status: AgentBarStatus, now: n
 export interface AgentBarRenderOptions {
 	mainRunning?: boolean;
 	now?: number;
-	shortcutHint?: string;
+	shortcutHint?: SessionBarHintValue;
 }
 
 /** Chip-to-chip separator in the agent bar. */
@@ -231,11 +238,12 @@ export function renderSessionBarLine(
 	renderContent: (width: number) => string,
 	width: number,
 	theme: Theme,
-	shortcutHint?: string,
+	shortcutHint?: SessionBarHintValue,
 ): string {
 	const w = Math.max(1, width);
 	if (!shortcutHint) return renderContent(w);
-	const hint = theme.fg("dim", shortcutHint);
+	const hintSpec = typeof shortcutHint === "string" ? { text: shortcutHint, color: "dim" as const } : shortcutHint;
+	const hint = theme.fg(hintSpec.color ?? "dim", hintSpec.text);
 	const hintWidth = visibleWidth(hint);
 	const gap = 2;
 	if (w < hintWidth + gap + 8) return renderContent(w);

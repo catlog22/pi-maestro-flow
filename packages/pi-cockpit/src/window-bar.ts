@@ -3,18 +3,18 @@ import { truncateToWidth, type TUI } from "@earendil-works/pi-tui";
 import type { CockpitEndpoint } from "./endpoint-store.ts";
 import { isMonitorControlEndpoint } from "./endpoint-store.ts";
 import type { SessionUiState } from "./session-ui-state.ts";
-import { assignedAgentColor, renderSessionBarLine } from "./agent-bar.ts";
+import { assignedAgentColor, renderSessionBarLine, type SessionBarHintValue } from "./agent-bar.ts";
 import { tuiT } from "./tui-i18n.ts";
 import { formatUnreadCount, renderSessionTabLine, type SessionTab } from "./session-tabs.ts";
 
 export interface WindowBarDeps {
 	getWindows: () => readonly CockpitEndpoint[];
 	getState: () => SessionUiState;
-	getShortcutHint?: () => string | undefined;
+	getShortcutHint?: () => SessionBarHintValue | undefined;
 }
 
 export interface WindowBarRenderOptions {
-	shortcutHint?: string;
+	shortcutHint?: SessionBarHintValue;
 }
 
 interface WindowTab extends SessionTab {

@@ -16,6 +16,7 @@ export interface AmbientState {
 	agents: readonly AgentRow[];
 	jobs: readonly BashBgJob[];
 	running: boolean;
+	waitingForInput?: boolean;
 	cwd?: string;
 	activeTool?: string;
 	workingStartedAt?: number;
@@ -54,6 +55,10 @@ function failedJobs(jobs: readonly BashBgJob[]): BashBgJob[] {
 	return jobs.filter((job) => job.status === "failed" || (job.exitCode !== null && job.exitCode !== 0));
 }
 
+export function nextUiPromptDepth(depth: number, event: "start" | "end"): number {
+	return event === "start" ? depth + 1 : Math.max(0, depth - 1);
+}
+
 /**
  * The streaming working line.
  *
@@ -61,10 +66,12 @@ function failedJobs(jobs: readonly BashBgJob[]): BashBgJob[] {
  * elapsed value, matching the compact folded-thinking label.
  */
 export function workingMessage(state: AmbientState, now = Date.now()): string | undefined {
-	const label = state.activeTool ?? (state.running ? tuiT("ambient.working") : undefined);
+	const label = state.waitingForInput
+		? tuiT("ambient.waitingForInput")
+		: state.activeTool ?? (state.running ? tuiT("ambient.working") : undefined);
 	if (!label) return undefined;
 	const sep = state.separator ?? " ";
-	const text = (state.hideLiveDuration || state.workingStartedAt === undefined)
+	const text = (state.waitingForInput || state.hideLiveDuration || state.workingStartedAt === undefined)
 		? label
 		: `${label}${sep}${formatThinkingDuration(now - state.workingStartedAt)}`;
 	return `\x1b[3m${text}\x1b[23m`;
@@ -100,6 +107,8 @@ export function titleFor(
 	let title: string;
 	if (broken > 0) {
 		title = `${marks.fail} ${base}${sep}${tuiT("ambient.failed", { count: broken })}`;
+	} else if (state.waitingForInput) {
+		title = `${prefix}${base}${sep}${tuiT("ambient.waitingForInput")}`;
 	} else if (state.running) {
 		const live = liveAgents(state.agents).length;
 		title = live > 0

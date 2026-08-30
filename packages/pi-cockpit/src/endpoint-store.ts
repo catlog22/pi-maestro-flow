@@ -507,7 +507,7 @@ export class EndpointStore {
 				id: `${MONITOR_CONTROL_ENDPOINT_PREFIX}${encodeURIComponent(root.id)}`,
 				logicalKey: `monitor-control:${root.ownerId}:${root.ownerNonce}`,
 				kind: "window",
-				label: "control",
+				label: `control·${root.ownerId.slice(0, 6)}`,
 				ordinal: Number.MIN_SAFE_INTEGER,
 				status: root.status,
 				contentRevision: revisionOf([root.contentRevision, controlActivityRevision]),
