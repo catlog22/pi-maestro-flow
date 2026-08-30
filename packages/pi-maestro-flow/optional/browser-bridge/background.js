@@ -1,8 +1,10 @@
 // background.js — Pi Browser Bridge service worker
 //
 // WebSocket client that connects back to the pi-maestro-flow agent
-// (ws://127.0.0.1:<port>, default 19222, configurable via chrome.storage.local
-// key "pi_ws_port"). Routes agent commands to chrome.* APIs:
+// (ws://127.0.0.1:<port>, default 19222). Both port and the owner token are
+// configured in chrome.storage.local. The token is sent in the first frame and
+// command traffic is disabled until the server confirms authentication.
+// Routes agent commands to chrome.* APIs:
 //   exec | cdp | cookies | tabs | management | contentSettings | dnr | batch
 //
 // MV3 keepalive: chrome.alarms probes/reconnects while disconnected and pings
@@ -11,10 +13,13 @@
 
 const DEFAULT_WS_PORT = 19222;
 const STORAGE_PORT_KEY = 'pi_ws_port';
+const STORAGE_TOKEN_KEY = 'pi_ws_token';
 
 let ws = null;
 let status = 'disconnected';
 let wsPort = DEFAULT_WS_PORT;
+let wsToken = '';
+let authenticated = false;
 
 function setStatus(s) {
   if (s === status) return;
@@ -44,13 +49,27 @@ async function isServerAlive(port) {
   }
 }
 
-async function loadPort() {
+async function restrictCredentialStorage() {
   try {
-    const stored = await chrome.storage.local.get(STORAGE_PORT_KEY);
+    // Content scripts run in untrusted page contexts. Keep the bridge token
+    // available only to trusted extension pages and the service worker.
+    await chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
+  } catch (_) {
+    // Older Chromium builds may not expose setAccessLevel. The handshake still
+    // fails closed; the popup can report an unconfigured/failed connection.
+  }
+}
+
+async function loadConfig() {
+  try {
+    const stored = await chrome.storage.local.get([STORAGE_PORT_KEY, STORAGE_TOKEN_KEY]);
     const p = Number(stored[STORAGE_PORT_KEY]);
-    wsPort = Number.isInteger(p) && p > 0 ? p : DEFAULT_WS_PORT;
+    const token = typeof stored[STORAGE_TOKEN_KEY] === 'string' ? stored[STORAGE_TOKEN_KEY].trim() : '';
+    wsPort = Number.isInteger(p) && p > 0 && p <= 65535 ? p : DEFAULT_WS_PORT;
+    wsToken = /^[A-Za-z0-9_-]{32,}$/.test(token) ? token : '';
   } catch {
     wsPort = DEFAULT_WS_PORT;
+    wsToken = '';
   }
 }
 
@@ -152,6 +171,77 @@ function wrapExecScript(code, forCdp = false) {
   return forCdp ? body : body;
 }
 
+function validateJsonWireValue(value, location, ancestors) {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value) || Object.is(value, -0)) {
+      throw new Error(`Browser extension ${location} contains a number outside the JSON wire domain.`);
+    }
+    return;
+  }
+  if (typeof value !== 'object') {
+    throw new Error(`Browser extension ${location} contains unsupported ${typeof value} outside the JSON wire domain.`);
+  }
+  if (ancestors.has(value)) {
+    throw new Error(`Browser extension ${location} contains a cycle outside the JSON wire domain.`);
+  }
+
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      const ownKeys = Reflect.ownKeys(value);
+      for (let index = 0; index < value.length; index += 1) {
+        const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+        if (!descriptor || !descriptor.enumerable || !('value' in descriptor)) {
+          throw new Error(`Browser extension ${location}[${index}] is not a JSON wire data property.`);
+        }
+        validateJsonWireValue(descriptor.value, `${location}[${index}]`, ancestors);
+      }
+      for (const key of ownKeys) {
+        if (key === 'length') continue;
+        if (typeof key !== 'string' || !/^(0|[1-9]\d*)$/.test(key) || Number(key) >= value.length) {
+          throw new Error(`Browser extension ${location} contains a non-index array property outside the JSON wire domain.`);
+        }
+      }
+      return;
+    }
+
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new Error(`Browser extension ${location} contains an unsupported object outside the JSON wire domain.`);
+    }
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key !== 'string') {
+        throw new Error(`Browser extension ${location} contains a symbol key outside the JSON wire domain.`);
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !descriptor.enumerable || !('value' in descriptor)) {
+        throw new Error(`Browser extension ${location}.${key} is not an enumerable JSON wire data property.`);
+      }
+      validateJsonWireValue(descriptor.value, `${location}.${key}`, ancestors);
+    }
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
+function serializeBridgeResponse(request, response) {
+  try {
+    // exec is the page.evaluate wire boundary. Validate before JSON.stringify so
+    // NaN/Infinity/functions/symbols/Map/cycles cannot silently become null/{}.
+    if (request.cmd === 'exec' && response?.ok) {
+      validateJsonWireValue(response.data, 'evaluation result', new Set());
+    }
+    return JSON.stringify({ type: response.ok ? 'result' : 'error', id: request.id, ...response });
+  } catch (error) {
+    return JSON.stringify({
+      type: 'error',
+      id: request.id,
+      error: error instanceof Error ? error.message : `Browser extension evaluation result is outside the JSON wire domain: ${String(error)}`,
+    });
+  }
+}
+
 async function handleCdp(msg) {
   const tabId = msg.tabId;
   if (!tabId) return { ok: false, error: 'cdp requires tabId' };
@@ -166,6 +256,20 @@ async function handleCdp(msg) {
   }
 }
 
+function cookieUrl(cookie, fallbackUrl) {
+  if (cookie.url) return cookie.url;
+  if (cookie.domain) {
+    const host = String(cookie.domain).replace(/^\./, '');
+    return `${cookie.secure ? 'https' : 'http'}://${host}${cookie.path || '/'}`;
+  }
+  return fallbackUrl;
+}
+
+function cookieMatches(cookie, filter) {
+  return (!filter?.domain || cookie.domain.includes(filter.domain)) &&
+    (!filter?.name || cookie.name === filter.name);
+}
+
 async function handleCookies(msg) {
   try {
     let url = msg.url;
@@ -174,18 +278,66 @@ async function handleCookies(msg) {
       url = tab.url;
     }
     if (!url) return { ok: false, error: 'cookies requires url or tabId' };
+    const method = msg.method || 'get';
+    if (method === 'set') {
+      const cookies = Array.isArray(msg.cookies) ? msg.cookies : [];
+      if (cookies.length === 0) return { ok: false, error: 'cookies.set requires cookies' };
+      const written = [];
+      for (const source of cookies) {
+        const details = {};
+        for (const key of ['name', 'value', 'domain', 'path', 'secure', 'httpOnly', 'expirationDate', 'storeId', 'partitionKey']) {
+          if (source[key] !== undefined) details[key] = source[key];
+        }
+        details.url = cookieUrl(source, url);
+        if (!details.url) return { ok: false, error: 'cookies.set requires url or domain' };
+        if (source.sameSite !== undefined) {
+          const sameSite = String(source.sameSite).toLowerCase();
+          details.sameSite = sameSite === 'none' ? 'no_restriction' : sameSite;
+        }
+        if (source.expirationDate === undefined && Number.isFinite(source.expires) && source.expires > 0) {
+          details.expirationDate = source.expires;
+        }
+        written.push(await chrome.cookies.set(details));
+      }
+      return { ok: true, data: written };
+    }
+
     const origin = (url.match(/^https?:\/\/[^/]+/) || [])[0] || url;
     const all = await chrome.cookies.getAll({ url });
     let part = [];
     try { part = await chrome.cookies.getAll({ url, partitionKey: { topLevelSite: origin } }); } catch (_) {}
     const merged = [...all];
     for (const c of part) {
-      if (!merged.some((x) => x.name === c.name && x.domain === c.domain)) merged.push(c);
+      const partitionSite = c.partitionKey?.topLevelSite || '';
+      if (!merged.some((x) => x.name === c.name && x.domain === c.domain && (x.partitionKey?.topLevelSite || '') === partitionSite)) merged.push(c);
     }
-    return { ok: true, data: merged };
+    const filtered = merged.filter((cookie) => cookieMatches(cookie, msg.filter));
+    if (method === 'get') return { ok: true, data: filtered };
+    if (method === 'delete') {
+      const removed = [];
+      for (const cookie of filtered) {
+        const details = { url: cookieUrl(cookie, url), name: cookie.name, storeId: cookie.storeId };
+        if (cookie.partitionKey) details.partitionKey = cookie.partitionKey;
+        removed.push(await chrome.cookies.remove(details));
+      }
+      return { ok: true, data: removed };
+    }
+    return { ok: false, error: 'unknown cookies method: ' + method };
   } catch (e) {
     return { ok: false, error: e.message || String(e) };
   }
+}
+
+function tabData(tab) {
+  return {
+    id: tab.id,
+    url: tab.url,
+    title: tab.title,
+    active: tab.active,
+    windowId: tab.windowId,
+    pinned: tab.pinned,
+    muted: tab.mutedInfo?.muted,
+  };
 }
 
 async function handleTabs(msg) {
@@ -198,18 +350,37 @@ async function handleTabs(msg) {
         windowId: msg.windowId,
         openerTabId: msg.openerTabId,
       });
-      return { ok: true, data: { id: tab.id, url: tab.url, title: tab.title } };
+      return { ok: true, data: tabData(tab) };
     }
     if (msg.method === 'switch') {
       const tab = await chrome.tabs.update(msg.tabId, { active: true });
       await chrome.windows.update(tab.windowId, { focused: true });
       return { ok: true };
     }
+    if (msg.method === 'get') {
+      if (!Number.isInteger(msg.tabId)) return { ok: false, error: 'tabs.get requires tabId' };
+      return { ok: true, data: tabData(await chrome.tabs.get(msg.tabId)) };
+    }
+    if (msg.method === 'update') {
+      if (!Number.isInteger(msg.tabId)) return { ok: false, error: 'tabs.update requires tabId' };
+      // Accept direct fields (consistent with create/switch) while also allowing
+      // updateProperties/properties for callers that already group Chrome args.
+      const source = msg.updateProperties || msg.properties || msg;
+      const update = {};
+      for (const key of ['url', 'active', 'highlighted', 'pinned', 'muted', 'openerTabId', 'autoDiscardable']) {
+        if (source[key] !== undefined) update[key] = source[key];
+      }
+      if (Object.keys(update).length === 0) return { ok: false, error: 'tabs.update requires at least one update field' };
+      return { ok: true, data: tabData(await chrome.tabs.update(msg.tabId, update)) };
+    }
+    if (msg.method === 'close') {
+      if (!Number.isInteger(msg.tabId)) return { ok: false, error: 'tabs.close requires tabId' };
+      await chrome.tabs.remove(msg.tabId);
+      return { ok: true, data: { id: msg.tabId } };
+    }
+    // Missing method and explicit query remain backward compatible.
     const tabs = (await chrome.tabs.query({})).filter((t) => isScriptable(t.url));
-    return {
-      ok: true,
-      data: tabs.map((t) => ({ id: t.id, url: t.url, title: t.title, active: t.active, windowId: t.windowId })),
-    };
+    return { ok: true, data: tabs.map(tabData) };
   } catch (e) {
     return { ok: false, error: e.message || String(e) };
   }
@@ -329,76 +500,186 @@ async function dispatch(msg) {
 
 const isScriptable = (url) => Boolean(url) && /^https?:/.test(url);
 
+// Command records deliberately distinguish queued from started work. A queued
+// command can be stopped without fabricating a result. Browser APIs already in
+// progress are generally not abortable, so cancel_ack stopped=false retains
+// terminal ownership until the real result/error is sent.
+const trackedCommands = new Map();
+
+function sendCancelAcknowledgement(socket, id, stopped) {
+  if (ws !== socket || !authenticated || socket.readyState !== WebSocket.OPEN) return;
+  try { socket.send(JSON.stringify({ type: 'cancel_ack', id, stopped })); } catch (_) {}
+}
+
+function cancelTrackedCommand(socket, id) {
+  const tracked = trackedCommands.get(id);
+  if (!tracked || tracked.socket !== socket || tracked.started) {
+    sendCancelAcknowledgement(socket, id, false);
+    return;
+  }
+  tracked.stopped = true;
+  sendCancelAcknowledgement(socket, id, true);
+}
+
+async function executeTrackedCommand(socket, request) {
+  if (trackedCommands.has(request.id)) {
+    try { socket.send(JSON.stringify({ type: 'error', id: request.id, error: 'duplicate browser-bridge command id' })); } catch (_) {}
+    return;
+  }
+  const tracked = { socket, started: false, stopped: false };
+  trackedCommands.set(request.id, tracked);
+  try { socket.send(JSON.stringify({ type: 'ack', id: request.id })); } catch (_) {
+    trackedCommands.delete(request.id);
+    return;
+  }
+
+  // Yield one task so an immediate cancel can stop undispatched work. Once the
+  // task begins, cancellation must not synthesize completion ahead of the real
+  // browser API result/error.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (tracked.stopped || ws !== socket || !authenticated || socket.readyState !== WebSocket.OPEN) {
+    if (trackedCommands.get(request.id) === tracked) trackedCommands.delete(request.id);
+    return;
+  }
+  tracked.started = true;
+  try {
+    const response = await dispatch(request);
+    if (ws === socket && authenticated && socket.readyState === WebSocket.OPEN) {
+      socket.send(serializeBridgeResponse(request, response));
+    }
+  } catch (error) {
+    if (ws === socket && authenticated && socket.readyState === WebSocket.OPEN) {
+      try { socket.send(JSON.stringify({ type: 'error', id: request.id, error: error.message || String(error) })); } catch (_) {}
+    }
+  } finally {
+    if (trackedCommands.get(request.id) === tracked) trackedCommands.delete(request.id);
+  }
+}
+
+function releaseTrackedCommands(socket) {
+  for (const [id, tracked] of trackedCommands) {
+    if (tracked.socket !== socket) continue;
+    tracked.stopped = !tracked.started;
+    trackedCommands.delete(id);
+  }
+}
+
 // --- WebSocket connection ---
 
 async function connectWS() {
   if (ws && ws.readyState <= 1) return; // CONNECTING or OPEN
-  await loadPort();
-  ws = null;
-  try {
-    ws = new WebSocket(`ws://127.0.0.1:${wsPort}`);
-    setStatus('connecting');
-  } catch (e) {
-    ws = null;
+  await loadConfig();
+  // Startup/install/probe callbacks can overlap while storage is loading.
+  if (ws && ws.readyState <= 1) return;
+  authenticated = false;
+  if (!wsToken) {
+    setStatus('unconfigured');
     scheduleProbe();
     return;
   }
-  ws.onopen = async () => {
-    setStatus('connected');
-    scheduleKeepalive();
-    const tabs = (await chrome.tabs.query({})).filter((t) => isScriptable(t.url));
-    ws.send(JSON.stringify({
-      type: 'ext_ready',
-      tabs: tabs.map((t) => ({ id: t.id, url: t.url, title: t.title })),
-    }));
+
+  let socket;
+  let authenticationFailed = false;
+  try {
+    socket = new WebSocket(`ws://127.0.0.1:${wsPort}`);
+    ws = socket;
+    setStatus('connecting');
+  } catch (_) {
+    ws = null;
+    setStatus('disconnected');
+    scheduleProbe();
+    return;
+  }
+  socket.onopen = () => {
+    if (ws !== socket) return;
+    setStatus('authenticating');
+    // Security boundary: this must be the first frame on every connection.
+    socket.send(JSON.stringify({ type: 'auth', token: wsToken }));
   };
-  ws.onmessage = async (event) => {
+  socket.onmessage = async (event) => {
+    if (ws !== socket) return;
     let data;
     try { data = JSON.parse(event.data); } catch { return; }
-    if (data.type === 'ping') return; // keepalive ping; no reply needed
-    if (data.id && data.cmd) {
-      try { ws.send(JSON.stringify({ type: 'ack', id: data.id })); } catch (_) {}
-      try {
-        const res = await dispatch(data);
-        ws.send(JSON.stringify({ type: res.ok ? 'result' : 'error', id: data.id, ...res }));
-      } catch (e) {
-        ws.send(JSON.stringify({ type: 'error', id: data.id, error: e.message || String(e) }));
+    if (!authenticated) {
+      if (data.type === 'auth_error') {
+        authenticationFailed = true;
+        setStatus('auth-failed');
+        try { socket.close(1008, 'authentication failed'); } catch (_) {}
+        return;
       }
+      if (data.type !== 'auth_ok') return;
+      authenticated = true;
+      setStatus('connected');
+      scheduleKeepalive();
+      const tabs = (await chrome.tabs.query({})).filter((t) => isScriptable(t.url));
+      socket.send(JSON.stringify({
+        type: 'ext_ready',
+        tabs: tabs.map((t) => ({ id: t.id, url: t.url, title: t.title })),
+      }));
+      return;
+    }
+    if (data.type === 'ping') return;
+    if (data.type === 'cancel' && typeof data.id === 'string') {
+      cancelTrackedCommand(socket, data.id);
+      return;
+    }
+    if (typeof data.id === 'string' && data.id && data.cmd) {
+      void executeTrackedCommand(socket, data);
     }
   };
-  ws.onclose = () => {
-    setStatus('disconnected');
+  socket.onclose = (event) => {
+    releaseTrackedCommands(socket);
+    if (ws !== socket) return;
+    authenticated = false;
     ws = null;
+    setStatus(authenticationFailed || event.code === 1008 ? 'auth-failed' : 'disconnected');
     scheduleProbe();
   };
-  ws.onerror = () => { /* onclose will follow */ };
+  socket.onerror = () => { /* onclose will follow */ };
 }
+
+async function startBridge() {
+  await restrictCredentialStorage();
+  await connectWS();
+}
+
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.cmd !== 'status') return false;
+  sendResponse({ ok: true, data: status, port: wsPort, configured: Boolean(wsToken) });
+  return false;
+});
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === 'pi-self-reload') { chrome.runtime.reload(); return; }
   if (alarm.name === 'pi-ws-keepalive') {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      try { ws.send('{"type":"ping"}'); scheduleKeepalive(); } catch (_) { ws = null; scheduleProbe(); }
-    } else { ws = null; scheduleProbe(); }
+    if (ws && authenticated && ws.readyState === WebSocket.OPEN) {
+      try { ws.send('{"type":"ping"}'); scheduleKeepalive(); } catch (_) { try { ws.close(); } catch (_) {} }
+    } else {
+      authenticated = false;
+      scheduleProbe();
+    }
     return;
   }
   if (alarm.name === 'pi-ws-probe') {
     if (ws && ws.readyState <= 1) return;
+    await loadConfig();
+    if (!wsToken) { setStatus('unconfigured'); scheduleProbe(); return; }
     if (await isServerAlive(wsPort)) connectWS();
     else { setStatus('disconnected'); scheduleProbe(); }
   }
 });
 
-chrome.runtime.onStartup.addListener(connectWS);
+chrome.runtime.onStartup.addListener(startBridge);
 chrome.runtime.onInstalled.addListener(() => {
   // Enable CSP-stripping by default so MAIN-world exec works on strict sites.
   handleDnr({ method: 'enable' }).catch(() => {});
-  connectWS();
+  startBridge();
 });
 
-// Sync the agent's tab list on navigation/close so reconnects re-bind targets.
+// Sync the agent's tab list only after authentication, so ext_ready remains the
+// first capability-bearing message and unauthenticated sockets stay inert.
 async function sendTabsUpdate() {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!ws || !authenticated || ws.readyState !== WebSocket.OPEN) return;
   const tabs = (await chrome.tabs.query({})).filter((t) => isScriptable(t.url));
   ws.send(JSON.stringify({ type: 'tabs_update', tabs: tabs.map((t) => ({ id: t.id, url: t.url, title: t.title })) }));
 }
@@ -406,4 +687,4 @@ chrome.tabs.onUpdated.addListener((_, info) => { if (info.status === 'complete')
 chrome.tabs.onRemoved.addListener(sendTabsUpdate);
 chrome.tabs.onCreated.addListener(sendTabsUpdate);
 
-connectWS();
+startBridge();

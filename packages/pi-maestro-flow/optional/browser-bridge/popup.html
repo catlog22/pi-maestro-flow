@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <title>Pi Browser Bridge</title>
     <style>
-      body { font: 13px/1.5 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; margin: 12px; min-width: 220px; }
+      body { font: 13px/1.5 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; margin: 12px; min-width: 280px; }
       h1 { font-size: 14px; margin: 0 0 8px; }
       #status { font-weight: bold; margin-bottom: 10px; }
       label { display: block; margin-top: 8px; }
@@ -19,8 +19,11 @@
     <label>WS 端口 (默认 19222)
       <input id="port" type="number" min="1" max="65535" />
     </label>
+    <label>认证 Token
+      <input id="token" type="password" autocomplete="off" spellcheck="false" />
+    </label>
     <button id="save">保存并重连</button>
-    <div class="hint">改端口后需在 pi 侧用 PI_BROWSER_BRIDGE_PORT 匹配，或让 pi 自动探测实际监听端口（见 ~/.pi/browser-bridge.port）。</div>
+    <div class="hint">从 pi 侧 <code>~/.pi/browser-bridge.json</code> 复制实际端口和 token。两项必须匹配；仅连接 localhost 不会获得授权。</div>
     <script src="popup.js"></script>
   </body>
 </html>

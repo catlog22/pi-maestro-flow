@@ -3,14 +3,28 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { Browser, CDPSession, CookieParam, Cookie, ElementHandle, Frame, HTTPRequest, HTTPResponse, KeyInput, Page, Target, WaitForOptions } from "puppeteer-core";
+import type { Browser, CDPSession, CookieParam, ElementHandle, Frame, HTTPRequest, HTTPResponse, KeyInput, Page, Target, WaitForOptions } from "puppeteer-core";
 import puppeteer from "puppeteer-core";
 import { PROBE_JS, FIND_LISTS_JS, foldListsJs, monitorStartJs, MONITOR_STOP_JS, optimizeHtmlForTokens, smartTruncate, diffHtml, type HtmlDiff } from "./simplify.ts";
 import { STEALTH_INIT_JS, STEALTH_LAUNCH_ARGS } from "./stealth.ts";
 import { runOcr, runDetect, isLocalVisionError, type OcrOutcome, type DetectOutcome } from "../../providers/local-vision.ts";
-import { browserBridge } from "./bridge-server.ts";
+import { browserBridge, type BridgeConnectionIdentity, type BridgeStatus } from "./bridge-server.ts";
 
 export type WaitUntil = "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
+export type BrowserChannel = "managed" | "profile" | "cdp" | "extension";
+export type BrowserOwnership = "owned" | "borrowed";
+
+export interface BrowserCapabilities {
+  page: boolean;
+  cdp: boolean;
+  cookies: boolean;
+}
+
+export interface BrowserConnectionInfo {
+  channel: BrowserChannel;
+  ownership: BrowserOwnership;
+  capabilities: BrowserCapabilities;
+}
 
 export interface BrowserOpenOptions {
   name: string;
@@ -18,6 +32,7 @@ export interface BrowserOpenOptions {
   url?: string;
   executablePath?: string;
   cdpUrl?: string;
+  channel?: BrowserChannel;
   args?: string[];
   target?: string;
   visible?: boolean;
@@ -33,6 +48,7 @@ export interface BrowserOpenOptions {
 export interface BrowserTabInfo {
   name: string;
   kind: "headless" | "headed" | "connected" | "extension";
+  connection: BrowserConnectionInfo;
   url: string;
   title: string;
   reused: boolean;
@@ -48,9 +64,29 @@ export interface BrowserRunOutput {
   newTabs?: Array<{ url: string }>;
 }
 
+export interface BrowserNamedTabStatus {
+  name: string;
+  channel: BrowserChannel;
+  ownership: BrowserOwnership;
+  capabilities: BrowserCapabilities;
+}
+
+export interface BrowserManagerStatus {
+  bridge: {
+    serverStarted: boolean;
+    state: BridgeStatus;
+    listeningPort: number | null;
+    authenticatedConnected: boolean;
+    /** Number of live Chrome tabs last reported by the authenticated extension. */
+    tabCount: number;
+  };
+  namedTabs: BrowserNamedTabStatus[];
+}
+
 export interface BrowserManagerLike {
   open(options: BrowserOpenOptions): Promise<BrowserTabInfo>;
   run(name: string, code: string, cwd: string, signal: AbortSignal | undefined, timeoutMs: number): Promise<BrowserRunOutput>;
+  status(): Promise<BrowserManagerStatus>;
   close(name: string): Promise<boolean>;
   closeAll(): Promise<number>;
 }
@@ -62,10 +98,18 @@ interface RequestListenerScope {
   cleanup(): void;
 }
 
-interface TabEntry {
+interface BaseEntry {
   name: string;
   key: string;
   kind: "headless" | "headed" | "connected" | "extension";
+  connection: BrowserConnectionInfo;
+  ownedTempFiles: Set<string>;
+  busy: boolean;
+}
+
+interface PuppeteerEntry extends BaseEntry {
+  backend: "puppeteer";
+  kind: "headless" | "headed" | "connected";
   browser: Browser;
   page: Page;
   owned: boolean;
@@ -74,10 +118,28 @@ interface TabEntry {
   dialogHandler?: (dialog: import("puppeteer-core").Dialog) => Promise<void>;
   requestScope?: RequestListenerScope;
   elementSelectors: Map<number, string>;
-  ownedTempFiles: Set<string>;
-  busy: boolean;
   cdpSession?: CDPSession;
 }
+
+interface ExtensionEntry extends BaseEntry {
+  backend: "extension";
+  kind: "extension";
+  /** Fixed when the named entry is opened; never re-resolved from bridge defaults. */
+  tabId: number;
+  ownedTab: boolean;
+  url: string;
+  title: string;
+  bridgeIdentity: BridgeConnectionIdentity;
+  closed: boolean;
+  activeRun: {
+    controller: AbortController;
+    promise: Promise<BrowserRunOutput>;
+  } | null;
+  /** Raw bridge commands outlive abort-facing wrappers and must be joined on close. */
+  underlyingOperations: Set<Promise<unknown>>;
+}
+
+type TabEntry = PuppeteerEntry | ExtensionEntry;
 
 interface OpeningEntry {
   key: string;
@@ -86,22 +148,60 @@ interface OpeningEntry {
   abort(): void;
 }
 
+type CanonicalBrowserOpenOptions = BrowserOpenOptions & { channel: BrowserChannel };
+
+export function canonicalizeBrowserOpenOptions(options: BrowserOpenOptions): CanonicalBrowserOpenOptions {
+  const explicit = options.channel;
+  if (explicit) {
+    if (options.attachUserProfile === true && explicit !== "profile") {
+      throw browserChannelConflict(explicit, "app.attach_user_profile", "profile");
+    }
+    if (options.cdpUrl && explicit !== "cdp") {
+      throw browserChannelConflict(explicit, "app.cdp_url", "cdp");
+    }
+    if (explicit === "profile" && options.attachUserProfile === false) {
+      throw browserChannelConflict(explicit, "app.attach_user_profile=false", "managed");
+    }
+    if (explicit === "profile" && !options.userProfileDir) {
+      throw new Error('app.channel "profile" requires app.user_profile_dir.');
+    }
+    if (explicit === "cdp" && !options.cdpUrl) {
+      throw new Error('app.channel "cdp" requires app.cdp_url.');
+    }
+    return { ...options, channel: explicit };
+  }
+
+  // Preserve the historical precedence when both legacy selectors are present:
+  // attach_user_profile won over cdp_url before app.channel existed.
+  const channel: BrowserChannel = options.attachUserProfile === true
+    ? "profile"
+    : options.cdpUrl
+      ? "cdp"
+      : "managed";
+  return { ...options, channel };
+}
+
+function browserChannelConflict(channel: BrowserChannel, parameter: string, implied: BrowserChannel): Error {
+  return new Error(`app.channel ${JSON.stringify(channel)} conflicts with legacy ${parameter}, which selects ${JSON.stringify(implied)}.`);
+}
+
 export class BrowserManager implements BrowserManagerLike {
   #tabs = new Map<string, TabEntry>();
   #opening = new Map<string, OpeningEntry>();
   #lifecycle = new AbortController();
 
   async open(options: BrowserOpenOptions): Promise<BrowserTabInfo> {
-    throwIfAborted(options.signal);
-    const key = browserKey(options);
-    const requestKey = browserOpenRequestKey(options, key);
+    const canonical = canonicalizeBrowserOpenOptions(options);
+    throwIfAborted(canonical.signal);
+    const key = browserKey(canonical);
+    const requestKey = browserOpenRequestKey(canonical, key);
     const pending = this.#opening.get(options.name);
     if (pending) {
       if (pending.requestKey !== requestKey) throw new Error(`Tab "${options.name}" is already opening with different settings.`);
       return { ...(await pending.promise), reused: true };
     }
     let existing = this.#tabs.get(options.name);
-    if (existing && (!existing.browser.connected || existing.page.isClosed())) {
+    if (existing?.backend === "puppeteer" && (!existing.browser.connected || existing.page.isClosed())) {
       this.#tabs.delete(options.name);
       await disposeEntry(existing);
       existing = undefined;
@@ -113,19 +213,19 @@ export class BrowserManager implements BrowserManagerLike {
     }
     if (existing) {
       if (existing.key !== key) throw new Error(`Tab "${options.name}" already uses a different browser. Close it before changing app settings.`);
-      const combined = combineSignals(options.signal, this.#lifecycle.signal);
+      const combined = combineSignals(canonical.signal, this.#lifecycle.signal);
       try {
-        const effective = { ...options, signal: combined.signal };
-        await this.#configurePage(existing, effective);
-        return this.#info(existing, true, combined.signal, options.timeoutMs);
+        const effective = { ...canonical, signal: combined.signal };
+        await this.#configureEntry(existing, effective);
+        return this.#info(existing, true, combined.signal, canonical.timeoutMs);
       } finally {
         combined.dispose();
       }
     }
 
     const controller = new AbortController();
-    const combined = combineSignals(options.signal, this.#lifecycle.signal, controller.signal);
-    const effective = { ...options, signal: combined.signal };
+    const combined = combineSignals(canonical.signal, this.#lifecycle.signal, controller.signal);
+    const effective = { ...canonical, signal: combined.signal };
     let promise: Promise<BrowserTabInfo>;
     promise = this.#openNew(effective, key);
     const opening: OpeningEntry = { key, requestKey, promise, abort: () => controller.abort() };
@@ -138,7 +238,9 @@ export class BrowserManager implements BrowserManagerLike {
     }
   }
 
-  async #openNew(options: BrowserOpenOptions, key: string): Promise<BrowserTabInfo> {
+  async #openNew(options: CanonicalBrowserOpenOptions, key: string): Promise<BrowserTabInfo> {
+    if (options.channel === "extension") return this.#openNewExtension(options, key);
+
     const connection = await connectBrowser(options, key);
     let page: Page | undefined;
     let ownedPage = false;
@@ -147,10 +249,16 @@ export class BrowserManager implements BrowserManagerLike {
       if (options.target && !pickedPage) throw new Error(`No browser page matched target ${JSON.stringify(options.target)}.`);
       page = pickedPage ?? await raceAbort(connection.browser.newPage(), options.signal, options.timeoutMs);
       ownedPage = connection.owned || !pickedPage;
-      const entry: TabEntry = {
+      const entry: PuppeteerEntry = {
+        backend: "puppeteer",
         name: options.name,
         key,
         kind: connection.kind,
+        connection: {
+          channel: connection.channel,
+          ownership: connection.owned ? "owned" : "borrowed",
+          capabilities: { page: true, cdp: true, cookies: true },
+        },
         browser: connection.browser,
         page,
         owned: connection.owned,
@@ -160,7 +268,7 @@ export class BrowserManager implements BrowserManagerLike {
         ownedTempFiles: new Set(),
         busy: false,
       };
-      await this.#configurePage(entry, options);
+      await this.#configureEntry(entry, options);
       throwIfAborted(options.signal);
       this.#registerEntry(entry);
       return this.#info(entry, connection.reused, options.signal, options.timeoutMs);
@@ -171,12 +279,116 @@ export class BrowserManager implements BrowserManagerLike {
     }
   }
 
+  async #openNewExtension(options: CanonicalBrowserOpenOptions, key: string): Promise<BrowserTabInfo> {
+    validateExtensionOpenOptions(options);
+    await raceAbort(browserBridge.waitUntilConnected(options.timeoutMs), options.signal, options.timeoutMs);
+    throwIfAborted(options.signal);
+    const bridgeIdentity = requireExtensionConnection();
+    const reported = await queryExtensionTabs(bridgeIdentity, options.signal, options.timeoutMs);
+    let selected: ExtensionTabState | undefined;
+    let ownedTab = false;
+
+    if (options.target) {
+      const needle = options.target.toLowerCase();
+      selected = reported.find((tab) => tab.url.toLowerCase().includes(needle) || tab.title.toLowerCase().includes(needle));
+      if (!selected) throw new Error(`No browser extension tab matched target ${JSON.stringify(options.target)}.`);
+    } else if (options.url) {
+      const result = await awaitExtensionBridge(
+        bridgeIdentity,
+        options.signal,
+        options.timeoutMs,
+        () => browserBridge.tabsCmd("create", { url: options.url, active: false }, options.timeoutMs, bridgeIdentity),
+      );
+      selected = parseExtensionTab(result.data, "tabs.create");
+      ownedTab = true;
+    } else {
+      selected = reported[0];
+      if (!selected) throw new Error("browser-bridge: the authenticated extension reported no scriptable tabs; pass url to create an owned tab.");
+    }
+
+    const entry: ExtensionEntry = {
+      backend: "extension",
+      name: options.name,
+      key,
+      kind: "extension",
+      connection: {
+        channel: "extension",
+        ownership: ownedTab ? "owned" : "borrowed",
+        // This is an honest limited adapter, not a puppeteer Page implementation.
+        capabilities: { page: false, cdp: true, cookies: true },
+      },
+      tabId: selected.id,
+      ownedTab,
+      url: selected.url,
+      title: selected.title,
+      bridgeIdentity,
+      closed: false,
+      activeRun: null,
+      underlyingOperations: new Set(),
+      ownedTempFiles: new Set(),
+      busy: false,
+    };
+
+    try {
+      await this.#configureEntry(entry, options, ownedTab && !options.target);
+      assertExtensionEntryActive(entry, options.signal);
+      this.#registerEntry(entry);
+      return this.#info(entry, false, options.signal, options.timeoutMs);
+    } catch (error) {
+      entry.closed = true;
+      if (ownedTab) {
+        await awaitExtensionBridge(
+          bridgeIdentity,
+          undefined,
+          Math.min(2_000, options.timeoutMs),
+          () => browserBridge.tabsCmd("close", { tabId: entry.tabId }, Math.min(2_000, options.timeoutMs), bridgeIdentity),
+        ).catch(() => {});
+      }
+      throw error;
+    }
+  }
+
   async run(name: string, code: string, cwd: string, signal: AbortSignal | undefined, timeoutMs: number): Promise<BrowserRunOutput> {
     const entry = this.#tabs.get(name);
     if (!entry) throw new Error(`No tab named "${name}". Open it first.`);
     if (entry.busy) throw new Error(`Tab "${name}" is busy.`);
     if (!code.trim()) throw new Error("Browser run requires non-empty code.");
     throwIfAborted(signal);
+    if (entry.backend === "extension") return this.#runTrackedExtension(entry, code, cwd, signal, timeoutMs);
+    return this.#runPuppeteer(entry, code, cwd, signal, timeoutMs);
+  }
+
+  async #runTrackedExtension(
+    entry: ExtensionEntry,
+    code: string,
+    cwd: string,
+    signal: AbortSignal | undefined,
+    timeoutMs: number,
+  ): Promise<BrowserRunOutput> {
+    assertExtensionEntryActive(entry, signal);
+    const controller = new AbortController();
+    const combined = combineSignals(signal, controller.signal);
+    const promise = this.#runExtension(entry, code, cwd, combined.signal, timeoutMs);
+    entry.activeRun = { controller, promise };
+    let interrupted = false;
+    try {
+      return await promise;
+    } catch (error) {
+      interrupted = isInterruptError(error);
+      throw error;
+    } finally {
+      if (entry.activeRun?.promise === promise) entry.activeRun = null;
+      combined.dispose();
+      if (interrupted && !entry.closed && this.#tabs.get(entry.name) === entry) {
+        entry.closed = true;
+        this.#tabs.delete(entry.name);
+        await disposeEntry(entry).catch(() => {});
+      }
+    }
+  }
+
+  async #runPuppeteer(entry: PuppeteerEntry, code: string, cwd: string, signal: AbortSignal | undefined, timeoutMs: number): Promise<BrowserRunOutput> {
+    const name = entry.name;
     entry.busy = true;
     const displays: BrowserRunOutput["displays"] = [];
     const screenshots: BrowserRunOutput["screenshots"] = [];
@@ -258,9 +470,82 @@ export class BrowserManager implements BrowserManagerLike {
     }
   }
 
+  async #runExtension(entry: ExtensionEntry, code: string, cwd: string, signal: AbortSignal | undefined, timeoutMs: number): Promise<BrowserRunOutput> {
+    assertExtensionEntryActive(entry, signal);
+    entry.busy = true;
+    const displays: BrowserRunOutput["displays"] = [];
+    const screenshots: BrowserRunOutput["screenshots"] = [];
+    const createdTabs: Array<{ id?: number; url: string }> = [];
+    const beforeUrl = entry.url;
+    try {
+      const { page, browser, tab } = createExtensionAdapters(entry, cwd, displays, screenshots, createdTabs, signal, timeoutMs);
+      const assert = (condition: unknown, message = "Browser assertion failed") => { if (!condition) throw new Error(message); };
+      const wait = (ms: number) => abortableDelay(ms, signal);
+      const display = (value: unknown) => displays.push({ type: "text", text: formatDisplay(value) });
+      const print = (...values: unknown[]) => displays.push({ type: "text", text: values.map(formatDisplay).join(" ") });
+      const capturedConsole = { log: print, info: print, warn: print, error: print, debug: print };
+      const execute = compileRunCode(code);
+      const returnValue = await raceAbort(execute(page, browser, tab, assert, wait, display, print, signal, capturedConsole), signal, timeoutMs);
+      assertExtensionEntryActive(entry, signal);
+      const current = await getExtensionTab(entry.tabId, entry.bridgeIdentity, signal, timeoutMs, entry);
+      assertExtensionEntryActive(entry, signal);
+      entry.url = current.url;
+      entry.title = current.title;
+      const uniqueTabs = new Map<string, { url: string }>();
+      for (const item of createdTabs) {
+        if (item.url) uniqueTabs.set(item.id === undefined ? item.url : String(item.id), { url: item.url });
+      }
+      return {
+        displays,
+        returnValue,
+        screenshots,
+        url: entry.url,
+        navigated: beforeUrl !== entry.url || undefined,
+        newTabs: uniqueTabs.size > 0 ? [...uniqueTabs.values()] : undefined,
+      };
+    } catch (error) {
+      throw browserRunErrorHint(error);
+    } finally {
+      entry.busy = false;
+    }
+  }
+
+  async status(): Promise<BrowserManagerStatus> {
+    // Status is an explicit live probe and therefore one of only two operations
+    // allowed to start the process-owned bridge (the other is extension open).
+    await browserBridge.start();
+    const listeningPort = browserBridge.listeningPort();
+    const authenticatedConnected = browserBridge.isConnected();
+    const reportedState = browserBridge.status();
+    const state: BridgeStatus = authenticatedConnected
+      ? "connected"
+      : reportedState === "connected"
+        ? "disconnected"
+        : reportedState;
+    const namedTabs = [...this.#tabs.values()]
+      .map((entry): BrowserNamedTabStatus => ({
+        name: entry.name,
+        channel: entry.connection.channel,
+        ownership: entry.connection.ownership,
+        capabilities: { ...entry.connection.capabilities },
+      }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+    return {
+      bridge: {
+        serverStarted: listeningPort !== null,
+        state,
+        listeningPort,
+        authenticatedConnected,
+        tabCount: authenticatedConnected ? browserBridge.tabs().length : 0,
+      },
+      namedTabs,
+    };
+  }
+
   async close(name: string): Promise<boolean> {
     const entry = this.#tabs.get(name);
     if (entry) {
+      if (entry.backend === "extension") entry.closed = true;
       this.#tabs.delete(name);
       await disposeEntry(entry);
       return true;
@@ -277,6 +562,9 @@ export class BrowserManager implements BrowserManagerLike {
     const openings = [...this.#opening.values()];
     this.#lifecycle.abort();
     this.#lifecycle = new AbortController();
+    for (const entry of entries) {
+      if (entry.backend === "extension") entry.closed = true;
+    }
     for (const opening of openings) opening.abort();
     this.#tabs.clear();
     this.#opening.clear();
@@ -289,22 +577,42 @@ export class BrowserManager implements BrowserManagerLike {
   }
 
   #registerEntry(entry: TabEntry): void {
-    const discard = () => { void this.#discardEntry(entry); };
-    entry.page.once("close", discard);
-    entry.browser.once("disconnected", discard);
+    if (entry.backend === "puppeteer") {
+      const discard = () => { void this.#discardEntry(entry); };
+      entry.page.once("close", discard);
+      entry.browser.once("disconnected", discard);
+    }
     this.#tabs.set(entry.name, entry);
   }
 
-  async #discardEntry(entry: TabEntry): Promise<void> {
+  async #discardEntry(entry: PuppeteerEntry): Promise<void> {
     if (this.#tabs.get(entry.name) !== entry) return;
     this.#tabs.delete(entry.name);
     await disposeEntry(entry);
   }
 
-  async #configurePage(entry: TabEntry, options: BrowserOpenOptions): Promise<void> {
-    // The extension channel drives the user's real browser; stealth is not
-    // injected (it would fight the real fingerprint). Same as `connected`.
-    if (entry.kind !== "connected" && entry.kind !== "extension") await entry.page.evaluateOnNewDocument(STEALTH_INIT_JS);
+  async #configureEntry(entry: TabEntry, options: BrowserOpenOptions, urlAlreadyApplied = false): Promise<void> {
+    if (entry.backend === "extension") {
+      validateExtensionOpenOptions(options);
+      if (!browserBridge.isConnected()) throw extensionDisconnectedError(entry);
+      if (options.url && !urlAlreadyApplied) {
+        const result = await awaitExtensionBridge(
+          entry.bridgeIdentity,
+          options.signal,
+          options.timeoutMs,
+          () => browserBridge.tabsCmd("update", { tabId: entry.tabId, url: options.url }, options.timeoutMs, entry.bridgeIdentity),
+          entry,
+        );
+        assertExtensionEntryActive(entry, options.signal);
+        const updated = parseExtensionTab(result.data, "tabs.update");
+        if (updated.id !== entry.tabId) throw new Error(`browser-bridge tabs.update changed fixed tabId ${entry.tabId} to ${updated.id}.`);
+        entry.url = updated.url;
+        entry.title = updated.title;
+      }
+      return;
+    }
+
+    if (entry.kind !== "connected") await entry.page.evaluateOnNewDocument(STEALTH_INIT_JS);
     if (options.viewport) {
       await entry.page.setViewport({
         width: options.viewport.width,
@@ -324,9 +632,27 @@ export class BrowserManager implements BrowserManagerLike {
   }
 
   async #info(entry: TabEntry, reused: boolean, signal: AbortSignal | undefined, timeoutMs: number): Promise<BrowserTabInfo> {
+    if (entry.backend === "extension") {
+      const current = await getExtensionTab(entry.tabId, entry.bridgeIdentity, signal, timeoutMs, entry);
+      assertExtensionEntryActive(entry, signal);
+      entry.url = current.url;
+      entry.title = current.title;
+      return {
+        name: entry.name,
+        kind: entry.kind,
+        connection: { ...entry.connection, capabilities: { ...entry.connection.capabilities } },
+        url: entry.url,
+        title: entry.title,
+        reused,
+      };
+    }
     return {
       name: entry.name,
       kind: entry.kind,
+      connection: {
+        ...entry.connection,
+        capabilities: { ...entry.connection.capabilities },
+      },
       url: entry.page.url(),
       title: await raceAbort(entry.page.title(), signal, timeoutMs),
       reused,
@@ -335,8 +661,400 @@ export class BrowserManager implements BrowserManagerLike {
   }
 }
 
+interface ExtensionTabState {
+  id: number;
+  url: string;
+  title: string;
+}
+
+const EXTENSION_ADAPTER_CAPABILITIES = [
+  "page.url", "page.title", "page.goto(url)", "page.evaluate",
+  "browser.pages",
+  "tab.name", "tab.page", "tab.signal", "tab.url", "tab.title", "tab.goto(url)", "tab.evaluate", "tab.cdp", "tab.cdpBatch",
+  "tab.cookies.get", "tab.cookies.set", "tab.cookies.delete", "tab.tabs", "tab.screenshot",
+] as const;
+
+function validateExtensionOpenOptions(options: BrowserOpenOptions): void {
+  const unsupported: string[] = [];
+  if (options.executablePath) unsupported.push("app.path");
+  if (options.args?.length) unsupported.push("app.args");
+  if (options.visible !== undefined) unsupported.push("visible");
+  if (options.viewport) unsupported.push("viewport");
+  if (options.waitUntil) unsupported.push("wait_until");
+  if (options.dialogs) unsupported.push("dialogs");
+  if (options.userProfileDir) unsupported.push("app.user_profile_dir");
+  if (unsupported.length > 0) {
+    throw new Error(`Browser extension channel does not support open option(s): ${unsupported.join(", ")}. Supported open selectors: app.target to borrow an existing tab, or url to create an owned tab.`);
+  }
+  if (options.url) assertExtensionUrl(options.url);
+}
+
+function assertExtensionUrl(url: string): void {
+  if (!/^https?:\/\//i.test(url)) throw new Error(`Browser extension channel only supports http(s) tab URLs, received ${JSON.stringify(url)}.`);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function parseExtensionTab(value: unknown, operation: string): ExtensionTabState {
+  if (!value || typeof value !== "object") throw new Error(`browser-bridge ${operation} returned no tab metadata.`);
+  const tab = value as { id?: unknown; url?: unknown; title?: unknown };
+  if (!Number.isInteger(tab.id) || typeof tab.url !== "string") {
+    throw new Error(`browser-bridge ${operation} returned invalid tab metadata.`);
+  }
+  return { id: tab.id as number, url: tab.url, title: typeof tab.title === "string" ? tab.title : "" };
+}
+
+function requireExtensionConnection(): BridgeConnectionIdentity {
+  const identity = browserBridge.connectionIdentity();
+  if (!identity) throw new Error("browser-bridge disconnected; extension channel does not fall back to managed Chromium.");
+  return identity;
+}
+
+function assertExtensionConnection(identity: BridgeConnectionIdentity, signal?: AbortSignal): void {
+  throwIfAborted(signal);
+  browserBridge.assertConnection(identity);
+}
+
+function assertExtensionEntryActive(entry: ExtensionEntry, signal?: AbortSignal): void {
+  if (entry.closed) throw abortError();
+  if (!browserBridge.isConnected()) throw extensionDisconnectedError(entry);
+  assertExtensionConnection(entry.bridgeIdentity, signal);
+}
+
+async function awaitExtensionBridge<T>(
+  identity: BridgeConnectionIdentity,
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+  operation: () => Promise<T>,
+  owner?: ExtensionEntry,
+): Promise<T> {
+  assertExtensionConnection(identity, signal);
+  const underlying = operation();
+  if (owner) {
+    owner.underlyingOperations.add(underlying);
+    void underlying.then(
+      () => owner.underlyingOperations.delete(underlying),
+      () => owner.underlyingOperations.delete(underlying),
+    );
+  }
+  const result = await raceAbort(underlying, signal, timeoutMs);
+  assertExtensionConnection(identity, signal);
+  return result;
+}
+
+async function queryExtensionTabs(
+  identity: BridgeConnectionIdentity,
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+  owner?: ExtensionEntry,
+): Promise<ExtensionTabState[]> {
+  const result = await awaitExtensionBridge(
+    identity,
+    signal,
+    timeoutMs,
+    () => browserBridge.tabsCmd("query", undefined, timeoutMs, identity),
+    owner,
+  );
+  if (!Array.isArray(result.data)) throw new Error("browser-bridge tabs.query returned invalid tab metadata.");
+  return result.data.map((tab) => parseExtensionTab(tab, "tabs.query"));
+}
+
+async function getExtensionTab(
+  tabId: number,
+  identity: BridgeConnectionIdentity,
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+  owner?: ExtensionEntry,
+): Promise<ExtensionTabState> {
+  const result = await awaitExtensionBridge(
+    identity,
+    signal,
+    timeoutMs,
+    () => browserBridge.tabsCmd("get", { tabId }, timeoutMs, identity),
+    owner,
+  );
+  const tab = parseExtensionTab(result.data, "tabs.get");
+  if (tab.id !== tabId) throw new Error(`browser-bridge tabs.get returned tabId ${tab.id} for fixed tabId ${tabId}.`);
+  return tab;
+}
+
+function extensionDisconnectedError(entry: ExtensionEntry): Error {
+  return new Error(`browser-bridge disconnected from extension entry ${JSON.stringify(entry.name)} (fixed tabId ${entry.tabId}); extension channel does not fall back to managed Chromium.`);
+}
+
+function unsupportedExtensionCapability(pathName: string): Error {
+  return new Error(`Browser extension adapter does not support ${pathName}. Supported capabilities: ${EXTENSION_ADAPTER_CAPABILITIES.join(", ")}.`);
+}
+
+function limitedExtensionAdapter<T extends object>(scope: string, supported: T): T {
+  return new Proxy(supported, {
+    get(target, property, receiver) {
+      if (property === "then") return undefined;
+      if (typeof property === "symbol") return Reflect.get(target, property, receiver);
+      if (Object.prototype.hasOwnProperty.call(target, property)) return Reflect.get(target, property, receiver);
+      throw unsupportedExtensionCapability(`${scope}.${property}`);
+    },
+  });
+}
+
+function serializeExtensionEvaluation(pageFunction: string | ((...args: unknown[]) => unknown), args: unknown[]): string {
+  validateJsonWireValue(args, "page.evaluate arguments", new Set());
+  const serializedArgs = JSON.stringify(args);
+  if (typeof pageFunction === "string") return `return await (${pageFunction});`;
+  // Rebuild data in the page realm. Direct object-literal interpolation would
+  // reinterpret an own __proto__ key as a prototype setter.
+  return `return await (${pageFunction.toString()})(...JSON.parse(${JSON.stringify(serializedArgs)}));`;
+}
+
+function validateJsonWireValue(value: unknown, location: string, ancestors: Set<object>): void {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || Object.is(value, -0)) {
+      throw new Error(`Browser extension ${location} contains a number outside the JSON wire domain.`);
+    }
+    return;
+  }
+  if (typeof value !== "object") {
+    throw new Error(`Browser extension ${location} contains unsupported ${typeof value} outside the JSON wire domain.`);
+  }
+  if (ancestors.has(value)) {
+    throw new Error(`Browser extension ${location} contains a cycle outside the JSON wire domain.`);
+  }
+
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      const ownKeys = Reflect.ownKeys(value);
+      for (let index = 0; index < value.length; index += 1) {
+        if (!Object.prototype.hasOwnProperty.call(value, index)) {
+          throw new Error(`Browser extension ${location}[${index}] is an array hole outside the JSON wire domain.`);
+        }
+        validateJsonWireValue(value[index], `${location}[${index}]`, ancestors);
+      }
+      for (const key of ownKeys) {
+        if (key === "length") continue;
+        if (typeof key !== "string" || !/^(0|[1-9]\d*)$/.test(key) || Number(key) >= value.length) {
+          throw new Error(`Browser extension ${location} contains a non-index array property outside the JSON wire domain.`);
+        }
+        const descriptor = Object.getOwnPropertyDescriptor(value, key);
+        if (!descriptor?.enumerable || !("value" in descriptor)) {
+          throw new Error(`Browser extension ${location}[${key}] is not a JSON wire data property.`);
+        }
+      }
+      return;
+    }
+
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new Error(`Browser extension ${location} contains unsupported ${prototype?.constructor?.name ?? "object"} outside the JSON wire domain.`);
+    }
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key !== "string") {
+        throw new Error(`Browser extension ${location} contains a symbol key outside the JSON wire domain.`);
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor?.enumerable || !("value" in descriptor)) {
+        throw new Error(`Browser extension ${location}.${key} is not an enumerable JSON wire data property.`);
+      }
+      validateJsonWireValue(descriptor.value, `${location}.${key}`, ancestors);
+    }
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
+function createExtensionAdapters(
+  entry: ExtensionEntry,
+  cwd: string,
+  displays: BrowserRunOutput["displays"],
+  screenshots: BrowserRunOutput["screenshots"],
+  createdTabs: Array<{ id?: number; url: string }>,
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+): { page: object; browser: object; tab: object } {
+  const recordNewTabs = (items: Array<{ id?: number; url?: string }> | undefined) => {
+    for (const item of items ?? []) if (item.url) createdTabs.push({ id: item.id, url: item.url });
+  };
+
+  const createPage = (state: ExtensionTabState): object => {
+    const refresh = async () => {
+      const current = await getExtensionTab(state.id, entry.bridgeIdentity, signal, timeoutMs, entry);
+      assertExtensionEntryActive(entry, signal);
+      state.url = current.url;
+      state.title = current.title;
+      if (state.id === entry.tabId) {
+        entry.url = current.url;
+        entry.title = current.title;
+      }
+      return current;
+    };
+    const goto = async (url: string, options?: { waitUntil?: unknown; timeout?: unknown }) => {
+      if (options && Object.keys(options).length > 0) throw unsupportedExtensionCapability("page.goto options");
+      assertExtensionUrl(url);
+      assertExtensionEntryActive(entry, signal);
+      const result = await awaitExtensionBridge(
+        entry.bridgeIdentity,
+        signal,
+        timeoutMs,
+        () => browserBridge.tabsCmd("update", { tabId: state.id, url }, timeoutMs, entry.bridgeIdentity),
+        entry,
+      );
+      assertExtensionEntryActive(entry, signal);
+      const updated = parseExtensionTab(result.data, "tabs.update");
+      if (updated.id !== state.id) throw new Error(`browser-bridge tabs.update changed fixed tabId ${state.id} to ${updated.id}.`);
+      state.url = updated.url;
+      state.title = updated.title;
+      if (state.id === entry.tabId) {
+        entry.url = updated.url;
+        entry.title = updated.title;
+      }
+      return { url: updated.url, title: updated.title };
+    };
+    const evaluate = async (pageFunction: string | ((...args: unknown[]) => unknown), ...args: unknown[]) => {
+      assertExtensionEntryActive(entry, signal);
+      const code = serializeExtensionEvaluation(pageFunction, args);
+      const result = await awaitExtensionBridge(
+        entry.bridgeIdentity,
+        signal,
+        timeoutMs,
+        () => browserBridge.exec(state.id, code, timeoutMs, entry.bridgeIdentity),
+        entry,
+      );
+      assertExtensionEntryActive(entry, signal);
+      recordNewTabs(result.newTabs);
+      return result.data;
+    };
+    return limitedExtensionAdapter("page", {
+      url: () => state.url,
+      title: async () => (await refresh()).title,
+      goto,
+      evaluate,
+    });
+  };
+
+  const page = createPage({ id: entry.tabId, url: entry.url, title: entry.title });
+  const cdp = async (method: string, params?: Record<string, unknown>) => {
+    assertExtensionEntryActive(entry, signal);
+    const result = await awaitExtensionBridge(
+      entry.bridgeIdentity,
+      signal,
+      timeoutMs,
+      () => browserBridge.cdp(entry.tabId, method, params, timeoutMs, entry.bridgeIdentity),
+      entry,
+    );
+    assertExtensionEntryActive(entry, signal);
+    if (!isRecord(result.data)) throw new Error(`browser-bridge ${method} returned invalid CDP data.`);
+    return result.data;
+  };
+  const cdpBatch = async (commands: Array<{ method: string; params?: Record<string, unknown> }>) => {
+    if (!Array.isArray(commands)) throw new Error("tab.cdpBatch requires an array of CDP commands.");
+    const bridged = commands.map((command) => ({ cmd: "cdp", method: command.method, params: command.params ?? {} }));
+    const result = await awaitExtensionBridge(
+      entry.bridgeIdentity,
+      signal,
+      timeoutMs,
+      () => browserBridge.batch(bridged, entry.tabId, timeoutMs, entry.bridgeIdentity),
+      entry,
+    );
+    assertExtensionEntryActive(entry, signal);
+    return result.results ?? [];
+  };
+  const screenshot = async (options?: { selector?: string; fullPage?: boolean; save?: string; silent?: boolean }) => {
+    if (options?.selector) throw unsupportedExtensionCapability("tab.screenshot selector");
+    const result = await cdp("Page.captureScreenshot", {
+      format: "png",
+      fromSurface: true,
+      captureBeyondViewport: options?.fullPage ?? false,
+    });
+    if (typeof result.data !== "string") throw new Error("browser-bridge Page.captureScreenshot returned no base64 PNG data.");
+    const buffer = Buffer.from(result.data, "base64");
+    const destination = options?.save
+      ? path.resolve(cwd, options.save)
+      : path.join(os.tmpdir(), `pi-maestro-browser-extension-${Date.now()}-${Math.random().toString(36).slice(2)}.png`);
+    await fs.mkdir(path.dirname(destination), { recursive: true });
+    assertExtensionEntryActive(entry, signal);
+    await fs.writeFile(destination, buffer, { flag: options?.save ? "w" : "wx", mode: options?.save ? 0o666 : 0o600 });
+    try {
+      assertExtensionEntryActive(entry, signal);
+    } catch (error) {
+      if (!options?.save) await fs.rm(destination, { force: true }).catch(() => {});
+      throw error;
+    }
+    if (!options?.save) entry.ownedTempFiles.add(destination);
+    const metadata = { path: destination, mimeType: "image/png", bytes: buffer.length };
+    screenshots.push(metadata);
+    if (!options?.silent) {
+      displays.push({ type: "text", text: `Screenshot saved: ${destination}` });
+      displays.push({ type: "image", data: result.data, mimeType: "image/png" });
+    }
+    return metadata;
+  };
+  const cookieApi = limitedExtensionAdapter("tab.cookies", {
+    async get(filter?: { domain?: string; name?: string }) {
+      const result = await awaitExtensionBridge(
+        entry.bridgeIdentity,
+        signal,
+        timeoutMs,
+        () => browserBridge.send("cookies", { method: "get", tabId: entry.tabId, filter }, timeoutMs, entry.bridgeIdentity),
+        entry,
+      );
+      assertExtensionEntryActive(entry, signal);
+      return Array.isArray(result.data) ? result.data : [];
+    },
+    async set(cookies: CookieParam | CookieParam[]) {
+      const list = Array.isArray(cookies) ? cookies : [cookies];
+      const result = await awaitExtensionBridge(
+        entry.bridgeIdentity,
+        signal,
+        timeoutMs,
+        () => browserBridge.send("cookies", { method: "set", tabId: entry.tabId, cookies: list }, timeoutMs, entry.bridgeIdentity),
+        entry,
+      );
+      assertExtensionEntryActive(entry, signal);
+      return result.data;
+    },
+    async delete(filter: { domain?: string; name?: string }) {
+      const result = await awaitExtensionBridge(
+        entry.bridgeIdentity,
+        signal,
+        timeoutMs,
+        () => browserBridge.send("cookies", { method: "delete", tabId: entry.tabId, filter }, timeoutMs, entry.bridgeIdentity),
+        entry,
+      );
+      assertExtensionEntryActive(entry, signal);
+      return result.data;
+    },
+  });
+  const tab = limitedExtensionAdapter("tab", {
+    name: entry.name,
+    page,
+    signal,
+    url: () => entry.url,
+    title: async () => {
+      const current = await getExtensionTab(entry.tabId, entry.bridgeIdentity, signal, timeoutMs, entry);
+      assertExtensionEntryActive(entry, signal);
+      entry.url = current.url;
+      entry.title = current.title;
+      return current.title;
+    },
+    goto: (url: string, options?: { waitUntil?: unknown; timeout?: unknown }) => (page as { goto(url: string, options?: object): Promise<unknown> }).goto(url, options),
+    evaluate: (pageFunction: string | ((...args: unknown[]) => unknown), ...args: unknown[]) => (page as { evaluate(fn: typeof pageFunction, ...values: unknown[]): Promise<unknown> }).evaluate(pageFunction, ...args),
+    cdp,
+    cdpBatch,
+    cookies: cookieApi,
+    tabs: async () => (await queryExtensionTabs(entry.bridgeIdentity, signal, timeoutMs, entry)).map(({ url, title }) => ({ url, title })),
+    screenshot,
+  });
+  const browser = limitedExtensionAdapter("browser", {
+    pages: async () => (await queryExtensionTabs(entry.bridgeIdentity, signal, timeoutMs, entry)).map((state) => createPage(state)),
+  });
+  return { page, browser, tab };
+}
+
 function createTabApi(
-  entry: TabEntry,
+  entry: PuppeteerEntry,
   cwd: string,
   displays: BrowserRunOutput["displays"],
   screenshots: BrowserRunOutput["screenshots"],
@@ -503,33 +1221,12 @@ function createTabApi(
       await handle.uploadFile(...filePaths.map((file) => path.resolve(cwd, file)));
     },
     async cdp(method: string, params?: Record<string, unknown>) {
-      // Extension channel route (active only when an entry has kind==="extension";
-      // connectBrowser does not produce such entries yet — see the TODO there and
-      // optional/BROWSER-BRIDGE-SETUP.md NOTES). Dormant until open-channel activation.
-      if (entry.kind === "extension") {
-        // Extension channel: route to chrome.debugger via the bridge instead of a
-        // puppeteer CDPSession (the user's browser has no persistent debug port here).
-        const tabId = browserBridge.resolveTabId();
-        const res = await browserBridge.cdp(tabId, method, params, timeoutMs);
-        if (!res.ok) throw new Error(res.error ?? "browser-bridge cdp failed");
-        return res.data as Record<string, unknown>;
-      }
       if (!entry.cdpSession || entry.cdpSession.connection() === null) entry.cdpSession = await page.target().createCDPSession();
       return entry.cdpSession.send(method as never, params as never) as Promise<Record<string, unknown>>;
     },
     cookies: {
       async get(filter?: { domain?: string; name?: string }) {
-        let all;
-        if (entry.kind === "extension") {
-          // Extension channel includes partition cookies (chrome.cookies.getAll
-          // with partitionKey) that puppeteer's page.cookies() cannot reach.
-          const tabId = browserBridge.resolveTabId();
-          const res = await browserBridge.cookies({ tabId }, timeoutMs);
-          if (!res.ok) throw new Error(res.error ?? "browser-bridge cookies failed");
-          all = res.data as Cookie[];
-        } else {
-          all = await page.cookies();
-        }
+        const all = await page.cookies();
         if (!filter) return all;
         return all.filter((cookie) =>
           (!filter.domain || cookie.domain.includes(filter.domain)) &&
@@ -618,12 +1315,6 @@ function createTabApi(
     // in one round-trip; later commands may reference earlier results via
     // "$<index>.<dotted.path>" strings (recursively resolved from results so far).
     async cdpBatch(commands: Array<{ method: string; params?: Record<string, unknown> }>) {
-      if (entry.kind === "extension") {
-        // Extension channel: the extension resolves $N references server-side.
-        const tabId = browserBridge.resolveTabId();
-        const res = await browserBridge.batch(commands as Array<Record<string, unknown>>, tabId, timeoutMs);
-        return (res.results ?? []) as unknown[];
-      }
       if (!entry.cdpSession || entry.cdpSession.connection() === null) entry.cdpSession = await page.target().createCDPSession();
       const session = entry.cdpSession;
       const results: unknown[] = [];
@@ -725,17 +1416,9 @@ function profileDirFor(key: string): string {
   return path.join(BROWSER_PROFILE_BASE, createHash("sha1").update(key).digest("hex").slice(0, 16));
 }
 
-async function connectBrowser(options: BrowserOpenOptions, key: string): Promise<{ browser: Browser; owned: boolean; kind: "headless" | "headed" | "connected"; reused: boolean; profileDir?: string }> {
-  // TODO(future): the optional browser-bridge extension (installed via
-  // /install browser-bridge) exposes extension-level capabilities over WS.
-  // BrowserBridgeServer is wired and the cdp/cookies.get/cdpBatch helpers in
-  // createTabApi route to it when an entry has kind==="extension" — but this
-  // function never produces such an entry yet (all open flows still go through
-  // CDP attach/launch). Full open-channel activation (a Proxy-Page translating
-  // the ~28 puppeteer Page methods to the extension protocol) is a follow-up;
-  // see optional/BROWSER-BRIDGE-SETUP.md NOTES. Without it the extension
-  // branch helpers are dormant, and browser behavior is unchanged.
-  if (options.attachUserProfile) {
+async function connectBrowser(options: CanonicalBrowserOpenOptions, key: string): Promise<{ browser: Browser; owned: boolean; kind: "headless" | "headed" | "connected"; channel: Exclude<BrowserChannel, "extension">; reused: boolean; profileDir?: string }> {
+  if (options.channel === "extension") throw new Error("Internal error: extension entries must use the browser-bridge backend.");
+  if (options.channel === "profile") {
     if (!options.userProfileDir) throw new Error("attach_user_profile requires app.user_profile_dir pointing at a Chrome user-data-dir whose browser runs with --remote-debugging-port.");
     let port = await devToolsPortFor(options.userProfileDir);
     if (!port) {
@@ -750,12 +1433,13 @@ async function connectBrowser(options: BrowserOpenOptions, key: string): Promise
     }
     const pending = puppeteer.connect({ browserURL: `http://127.0.0.1:${port}` });
     const browser = await acquireResource(pending, options.signal, options.timeoutMs, (late) => late.disconnect());
-    return { browser, owned: false, kind: "connected", reused: false, profileDir: options.userProfileDir };
+    return { browser, owned: false, kind: "connected", channel: "profile", reused: false, profileDir: options.userProfileDir };
   }
-  if (options.cdpUrl) {
+  if (options.channel === "cdp") {
+    if (!options.cdpUrl) throw new Error('app.channel "cdp" requires app.cdp_url.');
     const pending = puppeteer.connect({ browserURL: options.cdpUrl.replace(/\/$/, "") });
     const browser = await acquireResource(pending, options.signal, options.timeoutMs, (late) => late.disconnect());
-    return { browser, owned: false, kind: "connected", reused: false };
+    return { browser, owned: false, kind: "connected", channel: "cdp", reused: false };
   }
   const executablePath = await findBrowserExecutable(options.executablePath, options.cwd);
   if (!executablePath) throw new Error("No Chromium browser found. Set app.path, app.cdp_url, PUPPETEER_EXECUTABLE_PATH, or CHROME_PATH.");
@@ -763,12 +1447,12 @@ async function connectBrowser(options: BrowserOpenOptions, key: string): Promise
   // Reuse a still-running browser from this or a previous session: every puppeteer
   // launch enables remote debugging, so a live instance leaves DevToolsActivePort.
   const reused = await tryReuseBrowser(profileDir, options);
-  if (reused) return { ...reused, owned: true, reused: true, profileDir };
+  if (reused) return { ...reused, owned: true, channel: "managed", reused: true, profileDir };
   // A crash can orphan chrome children (e.g. the network service holding
   // first_party_sets.db) that keep the profile locked; reclaim them before relaunching.
   if (await staleProfileProcessesExist(profileDir)) await reclaimProfileProcesses(profileDir);
   const launched = await launchBrowser(executablePath, options, profileDir);
-  return { ...launched, owned: true, reused: false, profileDir };
+  return { ...launched, owned: true, channel: "managed", reused: false, profileDir };
 }
 
 async function tryReuseBrowser(profileDir: string, options: BrowserOpenOptions): Promise<{ browser: Browser; kind: "headless" | "headed" } | undefined> {
@@ -988,6 +1672,39 @@ async function disablePageRequestInterception(page: Page): Promise<void> {
 }
 
 async function disposeEntry(entry: TabEntry): Promise<void> {
+  if (entry.backend === "extension") {
+    let disposeError: unknown;
+    try {
+      const activeRun = entry.activeRun;
+      if (activeRun) {
+        activeRun.controller.abort();
+        await activeRun.promise.catch(() => {});
+        if (entry.activeRun === activeRun) entry.activeRun = null;
+      }
+      // activeRun is the abort-facing wrapper. Raw bridge commands can remain
+      // acknowledged and executing after that wrapper rejects, so disposal must
+      // join them before reporting close or destructively closing an owned tab.
+      while (entry.underlyingOperations.size > 0) {
+        await Promise.allSettled([...entry.underlyingOperations]);
+      }
+      if (browserBridge.isConnected()) {
+        browserBridge.assertConnection(entry.bridgeIdentity);
+        if (entry.ownedTab) {
+          await browserBridge.tabsCmd("close", { tabId: entry.tabId }, 2_000, entry.bridgeIdentity);
+          browserBridge.assertConnection(entry.bridgeIdentity);
+        }
+      } else if (entry.ownedTab) {
+        throw extensionDisconnectedError(entry);
+      }
+    } catch (error) {
+      disposeError = error;
+    } finally {
+      await Promise.allSettled([...entry.ownedTempFiles].map((file) => fs.rm(file, { force: true })));
+      entry.ownedTempFiles.clear();
+    }
+    if (disposeError) throw disposeError;
+    return;
+  }
   try { if (entry.cdpSession && entry.cdpSession.connection() !== null) await entry.cdpSession.detach(); } catch {}
   try { if (entry.ownedPage && !entry.page.isClosed()) await completesWithin(entry.page.close(), 2_000); } catch {}
   await disposeBrowser(entry.browser, entry.owned, entry.profileDir);
@@ -1019,13 +1736,17 @@ async function closeWithin(browser: Browser, profileDir?: string): Promise<void>
   if (profileDir) await reclaimProfileProcesses(profileDir).catch(() => {});
 }
 
-function browserKey(options: BrowserOpenOptions): string {
-  if (options.attachUserProfile) return `attach:${options.userProfileDir ?? ""}`;
-  if (options.cdpUrl) return `cdp:${options.cdpUrl.replace(/\/$/, "")}`;
+function browserKey(options: CanonicalBrowserOpenOptions): string {
+  if (options.channel === "profile") return `attach:${options.userProfileDir ?? ""}`;
+  if (options.channel === "cdp") {
+    if (!options.cdpUrl) throw new Error('app.channel "cdp" requires app.cdp_url.');
+    return `cdp:${options.cdpUrl.replace(/\/$/, "")}`;
+  }
+  if (options.channel === "extension") return "extension";
   return `launched:${options.visible ? "headed" : "headless"}:${path.resolve(options.cwd, options.executablePath ?? "auto")}:${JSON.stringify(options.args ?? [])}`;
 }
 
-function browserOpenRequestKey(options: BrowserOpenOptions, browser: string): string {
+function browserOpenRequestKey(options: CanonicalBrowserOpenOptions, browser: string): string {
   return JSON.stringify({
     browser,
     url: options.url ?? "",
@@ -1033,7 +1754,7 @@ function browserOpenRequestKey(options: BrowserOpenOptions, browser: string): st
     viewport: options.viewport ?? null,
     waitUntil: options.waitUntil ?? "load",
     dialogs: options.dialogs ?? "accept",
-    visible: options.attachUserProfile || options.cdpUrl ? null : (options.visible ?? false),
+    visible: options.channel === "managed" ? (options.visible ?? false) : null,
   });
 }
 

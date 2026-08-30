@@ -10,11 +10,17 @@ import type { EmbeddedSopMap } from "../sop-types.ts";
 
 const SOP_CORE = `Browser SOP — when to use which tab.* helper and field-tested recipes.
 
-1. MODE CHOICE (first decision)
-  - Pure scraping (no login/CAPTCHA): open { visible:false } (headless default).
-  - Login state / CAPTCHA / real fingerprint: open { visible:true, app:{ attach_user_profile:true, user_profile_dir } }.
+1. CHANNEL / VISIBILITY / OWNERSHIP (first decision)
+  - Default stays channel=managed with visible=false (headless). No bridge detection changes that default.
+  - Pure scraping (no login/CAPTCHA): open { app:{channel:"managed"}, visible:false }.
+  - Login state / CAPTCHA / real fingerprint over Puppeteer: open { app:{channel:"profile", user_profile_dir}, visible:true }. Legacy attach_user_profile:true remains an equivalent profile selector.
     Pure stealth is NOT enough for Cloudflare managed challenges — attaching the user's real browser is the working path.
-  - attach setup: pi auto-launches the user's Chrome with --remote-debugging-port=9222 --user-data-dir=<dir> when no live debug port is found, so just pass attach_user_profile + user_profile_dir. If a Chrome with that profile is already running with a debug port, pi reuses it.
+  - Optional extension adapter: ONLY open { app:{channel:"extension", target} } to borrow an existing tab, or add url to create an owned tab. Disconnect/unsupported calls fail closed; there is no managed fallback.
+  - extension capabilities are limited to page.url/title/goto/evaluate, browser.pages, and tab.url/title/goto/evaluate/cdp/cdpBatch/cookies/tabs/screenshot. It is not a Puppeteer Page and has no ElementHandle/request interception/frame-event parity.
+  - ownership is owned or borrowed: closing a borrowed entry releases only the name; closing an extension-owned tab closes the real tab.
+  - visible controls a Pi-launched browser process; it is not a channel selector. Existing CDP/profile attachments ignore it; extension rejects it.
+  - profile setup: pi auto-launches the user's Chrome with --remote-debugging-port=9222 --user-data-dir=<dir> when no live debug port is found. If a Chrome with that profile already exposes a debug port, pi reuses it.
+  - Live diagnostics: browser action=status explicitly starts the optional bridge and reports serverStarted, authenticatedConnected, live extension tabCount, plus named-tab channel/ownership/capabilities. /install state is historical/configuration evidence, never live connectivity.
 
 2. CLOUDFLARE TURNSTILE (verified on NewAPI)
   - Attach the real browser (step 1) — CF trusts the real fingerprint.
@@ -216,7 +222,7 @@ export const BROWSER_SOPS_BASELINE: EmbeddedSopMap = {
  * registry) because it documents `tab.*` helpers, not SOP topics; the tool
  * passes it to {@link SopRegistry.renderIndex} as the trailing section.
  */
-export const BROWSER_HELPER_QUICKREF = `Helper quickref (available in run code as tab.* — pick by target, then load the matching SOP topic for pitfalls):
+export const BROWSER_HELPER_QUICKREF = `Helper quickref for managed/profile/cdp entries (full Puppeteer tab.* — pick by target, then load the matching SOP topic for pitfalls):
   CDP raw         tab.cdp(method, params) — raw JSON; high-risk (Page.crash/Browser.close end session)
   CDP batch       tab.cdpBatch([{method,params},...]) with "$N.path" refs — one round-trip; check each result.ok
   CDP click       tab.cdpClick(x, y, {hoverMs?}) — Input 3-event; canvas/non-DOM/hover-dependent
@@ -235,4 +241,9 @@ export const BROWSER_HELPER_QUICKREF = `Helper quickref (available in run code a
   Select          tab.select(selector, ...values) — native <select> option picking
   Wait            tab.waitFor(selector) / waitForSelector / waitForUrl / waitForNavigation / waitForResponse — wait for DOM / url / nav / XHR
 
-Parameter reference: action enumeration and per-field semantics (url, app.attach_user_profile, app.user_profile_dir, code, topic, ...) live in the tool signature's schema description — inspect the tool definition, not this registry. This registry covers HOW (recipes, helpers, pitfalls); the schema covers WHAT (which params each action accepts).`;
+Extension channel quickref (explicit opt-in; unsupported properties fail closed):
+  page.url/title/goto/evaluate; browser.pages; tab.url/title/goto/evaluate/cdp/cdpBatch/cookies/tabs/screenshot
+  It has no ElementHandle, request interception, frame-event, DOM observe/click/fill/extract, upload, OCR/detect, or other Puppeteer-helper parity.
+  Use browser action=status for live bridge and named-entry connection metadata. Disconnect never falls back to managed Chromium.
+
+Parameter reference: action enumeration and per-field semantics (url, app.channel, app.attach_user_profile, app.user_profile_dir, code, topic, ...) live in the tool signature's schema description — inspect the tool definition, not this registry. This registry covers HOW (recipes, helpers, pitfalls); the schema covers WHAT (which params each action accepts).`;

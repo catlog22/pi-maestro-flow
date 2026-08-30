@@ -5,7 +5,7 @@ import * as fs from "node:fs/promises";
 import * as http from "node:http";
 import * as path from "node:path";
 import { BrowserParams, createBrowserTool } from "../src/tools/browser-tool.ts";
-import { BrowserManager, browserRunErrorHint, compileRunCode, type BrowserManagerLike, type BrowserOpenOptions, type BrowserRunOutput, type BrowserTabInfo } from "../src/tools/browser/manager.ts";
+import { BrowserManager, browserRunErrorHint, canonicalizeBrowserOpenOptions, compileRunCode, type BrowserManagerLike, type BrowserManagerStatus, type BrowserOpenOptions, type BrowserRunOutput, type BrowserTabInfo } from "../src/tools/browser/manager.ts";
 import { STEALTH_INIT_JS, STEALTH_LAUNCH_ARGS } from "../src/tools/browser/stealth.ts";
 
 class FakeBrowserManager implements BrowserManagerLike {
@@ -14,11 +14,43 @@ class FakeBrowserManager implements BrowserManagerLike {
   closed: string[] = [];
   closeAllCount = 2;
   abortRun = false;
+  statusResult: BrowserManagerStatus = {
+    bridge: {
+      serverStarted: true,
+      state: "connected",
+      listeningPort: 19222,
+      authenticatedConnected: true,
+      tabCount: 3,
+    },
+    namedTabs: [{
+      name: "docs",
+      channel: "cdp",
+      ownership: "borrowed",
+      capabilities: { page: true, cdp: true, cookies: true },
+    }],
+  };
 
   async open(options: BrowserOpenOptions): Promise<BrowserTabInfo> {
-    this.opened = options;
-    const kind = options.cdpUrl || options.attachUserProfile ? "connected" : options.visible ? "headed" : "headless";
-    return { name: options.name, kind, url: options.url ?? "about:blank", title: "Example", reused: false, viewport: { width: 1000, height: 700 } };
+    const canonical = canonicalizeBrowserOpenOptions(options);
+    this.opened = canonical;
+    const kind = canonical.channel === "extension"
+      ? "extension"
+      : canonical.channel === "managed"
+        ? canonical.visible ? "headed" : "headless"
+        : "connected";
+    return {
+      name: canonical.name,
+      kind,
+      connection: {
+        channel: canonical.channel,
+        ownership: canonical.channel === "managed" ? "owned" : "borrowed",
+        capabilities: { page: canonical.channel !== "extension", cdp: true, cookies: true },
+      },
+      url: canonical.url ?? "about:blank",
+      title: "Example",
+      reused: false,
+      viewport: { width: 1000, height: 700 },
+    };
   }
   async run(name: string, code: string, cwd: string, signal: AbortSignal | undefined, timeoutMs: number): Promise<BrowserRunOutput> {
     if (this.abortRun || signal?.aborted) {
@@ -32,6 +64,7 @@ class FakeBrowserManager implements BrowserManagerLike {
       url: "https://example.com",
     };
   }
+  async status(): Promise<BrowserManagerStatus> { return structuredClone(this.statusResult); }
   async close(name: string): Promise<boolean> { this.closed.push(name); return true; }
   async closeAll(): Promise<number> { return this.closeAllCount; }
 }
@@ -44,8 +77,8 @@ test("stealth module exports the webdriver/plugins/chrome/permissions patches an
   assert.ok(STEALTH_LAUNCH_ARGS.includes('--disable-blink-features=AutomationControlled'), 'STEALTH_LAUNCH_ARGS must disable AutomationControlled');
 });
 
-test("browser schema preserves open/run/close and full control inputs", () => {
-  assert.deepEqual((BrowserParams.properties.action as { enum: string[] }).enum, ["open", "close", "run", "guide"]);
+test("browser schema preserves legacy actions and reserves status", () => {
+  assert.deepEqual((BrowserParams.properties.action as { enum: string[] }).enum, ["open", "close", "run", "guide", "status"]);
   assert.deepEqual(Object.keys(BrowserParams.properties).sort(), [
     "action", "all", "app", "code", "dialogs", "kill", "name", "timeout", "topic", "url", "viewport", "visible", "wait_until",
   ]);
@@ -54,6 +87,7 @@ test("browser schema preserves open/run/close and full control inputs", () => {
   assert.equal(Check(BrowserParams, { action: "run" }), false);
   assert.equal(Check(BrowserParams, { action: "run", code: "return true;" }), true);
   assert.equal(Check(BrowserParams, { action: "run", code: "" }), false);
+  assert.equal(Check(BrowserParams, { action: "status" }), true);
 });
 
 test("browser tool guidelines expose probe/snapshot/diff/monitor helpers", async () => {
@@ -82,7 +116,9 @@ test("browser tool guidelines expose probe/snapshot/diff/monitor helpers", async
   assert.match(joined, /tab\.autofillRelease\(/, "guidelines must mention tab.autofillRelease()");
   assert.match(joined, /tab\.setDownloadBehavior\(/, "guidelines must mention tab.setDownloadBehavior()");
   assert.match(joined, /tab\.cdpBatch\(/, "guidelines must mention tab.cdpBatch()");
-  // Schema is unchanged: no new top-level action or param was added.
+  assert.match(joined, /action:status/, "guidelines must identify status as the live bridge probe");
+  assert.match(joined, /never falls back|no managed-browser fallback/, "guidelines must state that extension fails closed without fallback");
+  // Channel stays nested under app, so the legacy top-level schema is unchanged.
   assert.deepEqual(Object.keys(BrowserParams.properties).sort(), [
     "action", "all", "app", "code", "dialogs", "kill", "name", "timeout", "topic", "url", "viewport", "visible", "wait_until",
   ]);
@@ -97,7 +133,11 @@ test("browser tool forwards named-tab open options and returns run displays, ima
     viewport: { width: 1000, height: 700, scale: 1 }, wait_until: "domcontentloaded", dialogs: "dismiss",
   }, undefined, undefined, ctx);
   assert.equal(opened.details?.browser, "connected");
+  assert.equal(opened.details?.connection?.channel, "cdp");
+  assert.equal(opened.details?.connection?.ownership, "borrowed");
+  assert.deepEqual(opened.details?.connection?.capabilities, { page: true, cdp: true, cookies: true });
   assert.equal(manager.opened?.name, "docs");
+  assert.equal(manager.opened?.channel, "cdp");
   assert.equal(manager.opened?.waitUntil, "domcontentloaded");
 
   const run = await tool.execute("run", { action: "run", name: "docs", code: "return await tab.observe();", timeout: 5 }, undefined, undefined, ctx);
@@ -115,7 +155,10 @@ test("browser open forwards visible for a headed launch and reports the kind", a
     action: "open", name: "ui", url: "https://example.com", visible: true,
   }, undefined, undefined, ctx);
   assert.equal(manager.opened?.visible, true);
+  assert.equal(manager.opened?.channel, "managed");
   assert.equal(opened.details?.browser, "headed");
+  assert.equal(opened.details?.connection?.channel, "managed");
+  assert.equal(opened.details?.connection?.ownership, "owned");
 });
 
 test("browser open forwards attach_user_profile + user_profile_dir into the manager", async () => {
@@ -136,15 +179,81 @@ test("browser open forwards attach_user_profile + user_profile_dir into the mana
   // attachUserProfile is set, mirroring the real connectBrowser attach branch.
   assert.equal(manager.opened?.attachUserProfile, true);
   assert.equal(manager.opened?.userProfileDir, "C:/Users/me/AppData/Local/Google/Chrome/User Data");
+  assert.equal(manager.opened?.channel, "profile");
   assert.equal(opened.details?.browser, "connected");
+  assert.equal(opened.details?.connection?.channel, "profile");
 });
 
-test("browser schema accepts app.attach_user_profile / app.user_profile_dir", () => {
+test("browser schema accepts legacy profile selectors and canonical app.channel", () => {
   assert.equal(Check(BrowserParams, {
     action: "open",
     app: { attach_user_profile: true, user_profile_dir: "C:/x" },
   }), true);
   assert.equal(Check(BrowserParams, { action: "open", app: { attach_user_profile: true } }), true);
+  for (const channel of ["managed", "profile", "cdp", "extension"]) {
+    assert.equal(Check(BrowserParams, { action: "open", app: { channel } }), true, channel);
+  }
+  assert.equal(Check(BrowserParams, { action: "open", app: { channel: "connected" } }), false);
+});
+
+test("canonical browser channel inference preserves legacy routing", () => {
+  const base = { name: "main", cwd: "D:/workspace", timeoutMs: 30_000 };
+  assert.equal(canonicalizeBrowserOpenOptions(base).channel, "managed");
+  assert.equal(canonicalizeBrowserOpenOptions({ ...base, cdpUrl: "http://127.0.0.1:9222" }).channel, "cdp");
+  assert.equal(canonicalizeBrowserOpenOptions({ ...base, attachUserProfile: true, userProfileDir: "C:/profile" }).channel, "profile");
+  assert.equal(
+    canonicalizeBrowserOpenOptions({ ...base, cdpUrl: "http://127.0.0.1:9222", attachUserProfile: true, userProfileDir: "C:/profile" }).channel,
+    "profile",
+    "the historical attach_user_profile precedence must remain intact",
+  );
+  assert.equal(canonicalizeBrowserOpenOptions({ ...base, channel: "managed" }).channel, "managed");
+  assert.equal(canonicalizeBrowserOpenOptions({ ...base, channel: "extension" }).channel, "extension");
+  assert.equal(canonicalizeBrowserOpenOptions({ ...base, channel: "profile", userProfileDir: "C:/profile" }).channel, "profile");
+  assert.equal(canonicalizeBrowserOpenOptions({ ...base, channel: "cdp", cdpUrl: "http://127.0.0.1:9222" }).channel, "cdp");
+});
+
+test("canonical browser channel conflicts fail closed", () => {
+  const base = { name: "main", cwd: "D:/workspace", timeoutMs: 30_000 };
+  assert.throws(
+    () => canonicalizeBrowserOpenOptions({ ...base, channel: "managed", cdpUrl: "http://127.0.0.1:9222" }),
+    /app\.channel "managed" conflicts with legacy app\.cdp_url/,
+  );
+  assert.throws(
+    () => canonicalizeBrowserOpenOptions({ ...base, channel: "cdp", attachUserProfile: true, userProfileDir: "C:/profile", cdpUrl: "http://127.0.0.1:9222" }),
+    /app\.channel "cdp" conflicts with legacy app\.attach_user_profile/,
+  );
+  assert.throws(
+    () => canonicalizeBrowserOpenOptions({ ...base, channel: "profile", userProfileDir: "C:/profile", cdpUrl: "http://127.0.0.1:9222" }),
+    /app\.channel "profile" conflicts with legacy app\.cdp_url/,
+  );
+  assert.throws(() => canonicalizeBrowserOpenOptions({ ...base, channel: "profile" }), /requires app\.user_profile_dir/);
+  assert.throws(() => canonicalizeBrowserOpenOptions({ ...base, channel: "cdp" }), /requires app\.cdp_url/);
+});
+
+test("browser tool forwards an explicit canonical channel and returns structured live status", async () => {
+  const manager = new FakeBrowserManager();
+  const tool = createBrowserTool(manager);
+  const ctx = { cwd: "D:/workspace" } as never;
+  const opened = await tool.execute("open", {
+    action: "open",
+    app: { channel: "cdp", cdp_url: "http://127.0.0.1:9222" },
+  }, undefined, undefined, ctx);
+  assert.equal(manager.opened?.channel, "cdp");
+  assert.equal(opened.details?.browser, "connected", "the legacy browser projection must remain available");
+  assert.equal(opened.details?.connection?.channel, "cdp");
+  const status = await tool.execute("status", { action: "status" }, undefined, undefined, ctx);
+  assert.equal(status.details?.action, "status");
+  assert.deepEqual(status.details?.status, manager.statusResult);
+  assert.equal(status.details?.status?.bridge.serverStarted, true);
+  assert.equal(status.details?.status?.bridge.authenticatedConnected, true);
+  assert.equal(status.details?.status?.bridge.tabCount, 3);
+  assert.deepEqual(status.details?.status?.namedTabs[0], {
+    name: "docs",
+    channel: "cdp",
+    ownership: "borrowed",
+    capabilities: { page: true, cdp: true, cookies: true },
+  });
+  assert.match(status.details?.result ?? "", /Browser status \(live\)/);
 });
 
 test("browser guide returns registry index; topic loads one document", async () => {
@@ -247,6 +356,11 @@ test("browser manager drives a real local Chromium tab when an executable is ava
   try {
     const opened = await Promise.all([manager.open(openOptions), manager.open(openOptions)]);
     assert.deepEqual(opened.map((item) => item.reused).sort(), [false, true]);
+    assert.deepEqual(opened.map((item) => item.kind), ["headless", "headless"], "managed browser remains headless by default");
+    assert.deepEqual(opened.map((item) => item.connection), [
+      { channel: "managed", ownership: "owned", capabilities: { page: true, cdp: true, cookies: true } },
+      { channel: "managed", ownership: "owned", capabilities: { page: true, cdp: true, cookies: true } },
+    ]);
   } catch (error) {
     if (error instanceof Error && /No Chromium browser found/.test(error.message)) {
       t.skip("No local Chromium executable is available.");

@@ -9,6 +9,7 @@ import { createBrowserTool, type BrowserToolDetails } from "../tools/browser-too
 import {
   BrowserManager,
   type BrowserManagerLike,
+  type BrowserManagerStatus,
   type BrowserOpenOptions,
   type BrowserRunOutput,
   type BrowserTabInfo,
@@ -42,6 +43,17 @@ class ScopedTeammateBrowserManager implements BrowserManagerLike {
     timeoutMs: number,
   ): Promise<BrowserRunOutput> {
     return this.manager.run(this.#physicalName(name), code, cwd, signal, timeoutMs);
+  }
+
+  async status(): Promise<BrowserManagerStatus> {
+    const prefix = `teammate:${this.actorId}:`;
+    const status = await this.manager.status();
+    return {
+      ...status,
+      namedTabs: status.namedTabs
+        .filter((tab) => this.#names.has(tab.name))
+        .map((tab) => ({ ...tab, name: tab.name.slice(prefix.length) })),
+    };
   }
 
   async close(name: string): Promise<boolean> {

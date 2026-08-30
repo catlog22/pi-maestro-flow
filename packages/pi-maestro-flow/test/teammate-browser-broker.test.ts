@@ -5,6 +5,7 @@ import { TeammateBrowserBroker } from "../src/teammate/browser-broker.ts";
 import { browserManager } from "../src/tools/browser/manager.ts";
 import type {
   BrowserManagerLike,
+  BrowserManagerStatus,
   BrowserOpenOptions,
   BrowserRunOutput,
   BrowserTabInfo,
@@ -20,6 +21,11 @@ class FakeBrowserManager implements BrowserManagerLike {
     return {
       name: options.name,
       kind: "headless",
+      connection: {
+        channel: "managed",
+        ownership: "owned",
+        capabilities: { page: true, cdp: true, cookies: true },
+      },
       url: options.url ?? "about:blank",
       title: "test",
       reused: false,
@@ -29,6 +35,24 @@ class FakeBrowserManager implements BrowserManagerLike {
   async run(name: string): Promise<BrowserRunOutput> {
     if (!this.opened.has(name)) throw new Error(`No tab named ${name}`);
     return { displays: [], returnValue: undefined, screenshots: [], url: "about:blank" };
+  }
+
+  async status(): Promise<BrowserManagerStatus> {
+    return {
+      bridge: {
+        serverStarted: true,
+        state: "disconnected",
+        listeningPort: 19222,
+        authenticatedConnected: false,
+        tabCount: 0,
+      },
+      namedTabs: [...this.opened.keys()].map((name) => ({
+        name,
+        channel: "managed",
+        ownership: "owned",
+        capabilities: { page: true, cdp: true, cookies: true },
+      })),
+    };
   }
 
   async close(name: string): Promise<boolean> {
@@ -69,6 +93,18 @@ test("teammate browser broker runs in root manager with actor-scoped tab names",
     "teammate:actor-b:main",
   ]);
   assert.equal(manager.opened.get("teammate:actor-a:main")?.signal, controller.signal);
+
+  const actorStatus = await broker.execute(request("actor-a", { action: "status" }), ctx);
+  assert.deepEqual(
+    (actorStatus.details as { status?: { namedTabs?: Array<{ name: string }> } } | undefined)?.status?.namedTabs,
+    [{
+      name: "main",
+      channel: "managed",
+      ownership: "owned",
+      capabilities: { page: true, cdp: true, cookies: true },
+    }],
+    "teammate status must translate and expose only the caller's named tabs",
+  );
 
   await broker.execute(request("actor-a", { action: "close", all: true }), ctx);
   assert.deepEqual(manager.closed, ["teammate:actor-a:main"]);

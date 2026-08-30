@@ -77,12 +77,12 @@ export const INSTALL_ITEMS: readonly InstallItem[] = [
   },
   {
     id: "browser-bridge",
-    title: "浏览器扩展桥（真实浏览器接管）",
-    description: "安装 Chrome 扩展，让 browser 工具零启动接管你的日常浏览器，保留登录态/CAPTCHA 能力。",
+    title: "浏览器扩展桥（显式 extension 通道）",
+    description: "安装 Chrome 扩展，为 browser 工具提供保留登录态的有限 extension adapter；需显式选择，不会自动接管或回退。",
     docFile: "BROWSER-BRIDGE-SETUP.md",
     category: "optional",
     promptIntro:
-      "安装浏览器扩展桥。按文档交互式确认 WS 端口与当前 Chrome 状态，引导用户在 chrome://extensions 加载 optional/browser-bridge 目录，最后验证 pi 侧扩展连接与扩展徽章状态。未装时 browser 工具自动回退 CDP，无破坏。",
+      "安装浏览器扩展桥。先用 browser status 启动并读取 pi 侧实际端口，再引导用户从 ~/.pi/browser-bridge.json 复制端口和 token、在 chrome://extensions 加载 optional/browser-bridge 目录，最后用 browser status 验证认证连接。extension 仅在 app.channel='extension' 时使用，断连不回退 managed。",
   },
   {
     id: "smart-search",
@@ -145,6 +145,38 @@ function probeExecutable(executable: string): boolean {
 }
 function resolveDocPath(docFile: string): string | undefined {
   return resolvePackageOrWorkspaceResource(["optional", docFile], resolveOwnPackageJson());
+}
+
+interface BrowserBridgeConfig {
+  version?: unknown;
+  port?: unknown;
+  token?: unknown;
+}
+
+interface BrowserBridgeVerifiedMarker {
+  version?: unknown;
+  protocol?: unknown;
+  port?: unknown;
+  verifiedAt?: unknown;
+}
+
+function isValidBridgePort(value: unknown): value is number {
+  return Number.isInteger(value) && Number(value) > 0 && Number(value) <= 65_535;
+}
+
+function isValidBrowserBridgeConfig(value: BrowserBridgeConfig | null): boolean {
+  return value?.version === 1
+    && isValidBridgePort(value.port)
+    && typeof value.token === "string"
+    && /^[A-Za-z0-9_-]{32,}$/.test(value.token);
+}
+
+function isValidBrowserBridgeVerifiedMarker(value: BrowserBridgeVerifiedMarker | null): boolean {
+  return value?.version === 1
+    && value.protocol === "first-frame-token-v1"
+    && isValidBridgePort(value.port)
+    && typeof value.verifiedAt === "string"
+    && Number.isFinite(Date.parse(value.verifiedAt));
 }
 
 /** Probe an item's install status from its config files. */
@@ -228,17 +260,17 @@ export function probeInstallStatus(id: string): InstallStatus {
         return hasMode ? "installed" : "partial";
       }
       case "browser-bridge": {
-        // Port file is written by BrowserBridgeServer.start() once the WS
-        // server binds. Its presence means the bridge server has been started
-        // (by a prior browser open / install run); the extension's live
-        // connection is only confirmable at runtime via the bridge status, so
-        // "installed" = port file present + valid port, "partial" = file stale.
-        // This probe stays synchronous and side-effect free so /install list is
-        // a pure read.
-        const portFile = join(homedir(), ".pi", "browser-bridge.port");
-        if (!existsSync(portFile)) return "not-installed";
-        const port = Number(readFileSync(portFile, "utf8").trim());
-        return Number.isInteger(port) && port > 0 ? "installed" : "partial";
+        // Static install state is historical/configuration evidence only. The
+        // legacy port file merely proves that a server once bound; it never
+        // proves that an extension authenticated. Live state belongs solely to
+        // browser action=status.
+        const directory = process.env.PI_BROWSER_BRIDGE_DIR?.trim() || join(homedir(), ".pi");
+        const markerPath = join(directory, "browser-bridge.verified");
+        if (!existsSync(markerPath)) return "not-installed";
+        const marker = readJson(markerPath) as BrowserBridgeVerifiedMarker | null;
+        if (!isValidBrowserBridgeVerifiedMarker(marker)) return "partial";
+        const config = readJson(join(directory, "browser-bridge.json")) as BrowserBridgeConfig | null;
+        return isValidBrowserBridgeConfig(config) ? "installed" : "partial";
       }
       default:
         return "unknown";
