@@ -24,10 +24,12 @@ export interface MailboxRolloutOptions {
     config?: Partial<RolloutConfig>;
     /** Fallback delivery function for v1 direct path. */
     directDeliver: (envelope: {
+        messageId?: string;
         senderId: string;
         recipientCorrelationId: string;
         payload: string;
         mode: string;
+        capabilities?: readonly string[];
         kind: "lifecycle" | "result" | "steer" | "follow_up" | "interrupt" | "task" | "control";
     }) => Promise<void>;
     now?: () => number;
@@ -51,11 +53,15 @@ export declare class MailboxRollout {
      * Disk errors are ALWAYS surfaced, never silently falling back.
      */
     deliver(request: {
+        /** Stable caller-selected UUID for retry/receipt reconciliation. */
+        messageId?: string;
         senderId: string;
         recipientId: string;
         recipientCorrelationId: string;
         kind: "lifecycle" | "result" | "steer" | "follow_up" | "interrupt" | "task" | "control";
         mode: "steer" | "follow_up" | "interrupt" | "abort" | "notify";
+        /** Route capabilities frozen by v2; forwarded on the direct path when supplied. */
+        capabilities?: readonly string[];
         payload: string;
         requestId?: string;
         correlationId?: string;

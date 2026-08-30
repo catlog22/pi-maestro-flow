@@ -20,8 +20,11 @@ import {
   type MailboxMessageKind,
   type MailboxPriority,
   CORRELATION_ID_PATTERN,
+  MAILBOX_CAPABILITY_PATTERN,
   MAILBOX_SCHEMA_VERSION,
+  MAX_FROZEN_CAPABILITIES,
   MAX_PAYLOAD_BYTES,
+  MESSAGE_ID_PATTERN,
   priorityForKind,
   SAFE_ID_PATTERN,
   TTL_NORMAL_MS,
@@ -51,6 +54,8 @@ export interface MailboxAuthority {
 // --- Enqueue Request ---
 
 export interface MailboxEnqueueRequest {
+  /** Stable caller-selected UUID for retry/receipt reconciliation. */
+  messageId?: string;
   workspaceId: string;
   teamId: string;
   senderId: string;
@@ -58,6 +63,8 @@ export interface MailboxEnqueueRequest {
   recipientCorrelationId: string;
   kind: MailboxMessageKind;
   mode: MailboxDeliveryMode;
+  /** Route capabilities frozen into the immutable envelope. Defaults to [mode]. */
+  capabilities?: readonly string[];
   payload: string;
   provenance?: MessageProvenanceV1;
   requestId?: string;
@@ -123,9 +130,30 @@ export class MailboxRouter {
    */
   async enqueue(request: MailboxEnqueueRequest): Promise<MailboxEnqueueResult> {
     const now = this.#now();
+    const messageId = request.messageId ?? randomUUID();
+    const capabilities = Object.freeze([...(request.capabilities ?? [request.mode])]);
+    const capturedRequest: MailboxEnqueueRequest = Object.freeze({
+      ...request,
+      capabilities,
+      ...(request.provenance === undefined
+        ? {}
+        : { provenance: normalizeMessageProvenanceV1(request.provenance) }),
+    });
+
+    // Freeze caller-owned routing inputs before the first async boundary.
+    if (!MESSAGE_ID_PATTERN.test(messageId)) {
+      return { ok: false, code: "route_invalid", message: "invalid messageId" };
+    }
+    if (capabilities.length < 1
+      || capabilities.length > MAX_FROZEN_CAPABILITIES
+      || capabilities.some((capability) => !MAILBOX_CAPABILITY_PATTERN.test(capability))
+      || new Set(capabilities).size !== capabilities.length
+      || !capabilities.includes(capturedRequest.mode)) {
+      return { ok: false, code: "route_invalid", message: "invalid frozen capabilities" };
+    }
 
     // 0. Workspace isolation: reject cross-workspace enqueue attempts.
-    if (this.#workspaceId !== undefined && request.workspaceId !== this.#workspaceId) {
+    if (this.#workspaceId !== undefined && capturedRequest.workspaceId !== this.#workspaceId) {
       return { ok: false, code: "route_invalid", message: "workspace mismatch: message from another workspace" };
     }
 
@@ -133,76 +161,80 @@ export class MailboxRouter {
     // and workspaceId are joined into file paths and authority decisions, so
     // reject anything unsafe (traversal, separators, empty). "caller" (the root
     // tool identity) already matches SAFE_ID_PATTERN.
-    if (!SAFE_ID_PATTERN.test(request.senderId)) {
+    if (!SAFE_ID_PATTERN.test(capturedRequest.senderId)) {
       return { ok: false, code: "route_invalid", message: "invalid senderId" };
     }
-    if (!SAFE_ID_PATTERN.test(request.workspaceId)) {
+    if (!SAFE_ID_PATTERN.test(capturedRequest.workspaceId)) {
       return { ok: false, code: "route_invalid", message: "invalid workspaceId" };
     }
-    if (!CORRELATION_ID_PATTERN.test(request.recipientCorrelationId)) {
+    if (!CORRELATION_ID_PATTERN.test(capturedRequest.recipientCorrelationId)) {
       return { ok: false, code: "route_invalid", message: "invalid recipientCorrelationId" };
     }
 
     // 1. Validate route
-    const route = this.#authority.canRoute(request.senderId, request.recipientCorrelationId, request.mode);
+    const route = this.#authority.canRoute(
+      capturedRequest.senderId,
+      capturedRequest.recipientCorrelationId,
+      capturedRequest.mode,
+    );
     if (!route.allowed) {
       return { ok: false, code: "route_invalid", message: route.reason ?? "route validation failed" };
     }
 
     // 2. Check payload size
-    const payloadBytes = Buffer.byteLength(request.payload, "utf8");
+    const payloadBytes = Buffer.byteLength(capturedRequest.payload, "utf8");
     if (payloadBytes > MAX_PAYLOAD_BYTES) {
       return { ok: false, code: "payload_too_large", message: `payload exceeds ${MAX_PAYLOAD_BYTES} bytes` };
     }
 
     // 3. Resolve priority and check quota
-    const priority: MailboxPriority = priorityForKind(request.kind);
+    const priority: MailboxPriority = priorityForKind(capturedRequest.kind);
     const admission = await this.#quota.check(priority);
     if (!admission.allowed) {
       return { ok: false, code: "quota_exceeded", message: `quota exceeded (live: ${admission.live})` };
     }
 
     // 4. Build envelope
-    const messageId = randomUUID();
     const generatedProvenance: VerifiedMessageProvenanceV1 = {
       version: MESSAGE_PROVENANCE_VERSION,
       messageId,
       source: "mailbox",
-      messageKind: provenanceKindForMailbox(request.kind),
-      deliveryMode: request.mode,
+      messageKind: provenanceKindForMailbox(capturedRequest.kind),
+      deliveryMode: capturedRequest.mode,
       confidence: "verified",
-      sender: request.senderId === "caller"
-        ? { kind: "root-agent", ownerId: request.teamId, label: "caller" }
-        : { kind: "system", ownerId: request.senderId, label: request.senderId },
+      sender: capturedRequest.senderId === "caller"
+        ? { kind: "root-agent", ownerId: capturedRequest.teamId, label: "caller" }
+        : { kind: "system", ownerId: capturedRequest.senderId, label: capturedRequest.senderId },
     };
-    const provenance = request.provenance === undefined
+    const provenance = capturedRequest.provenance === undefined
       ? generatedProvenance
-      : normalizeMessageProvenanceV1(request.provenance);
-    const ttlMs = ttlForKind(request.kind);
-    const senderSeq = (this.#senderSeqBySender.get(request.senderId) ?? 0) + 1;
-    this.#senderSeqBySender.set(request.senderId, senderSeq);
+      : capturedRequest.provenance;
+    const ttlMs = ttlForKind(capturedRequest.kind);
+    const senderSeq = (this.#senderSeqBySender.get(capturedRequest.senderId) ?? 0) + 1;
+    this.#senderSeqBySender.set(capturedRequest.senderId, senderSeq);
     const envelopeBase: Omit<MailboxEnvelope, "hash"> = {
       messageId,
       schemaVersion: MAILBOX_SCHEMA_VERSION,
-      workspaceId: request.workspaceId,
-      teamId: request.teamId,
-      senderId: request.senderId,
-      recipientId: request.recipientId,
-      recipientCorrelationId: request.recipientCorrelationId,
-      kind: request.kind,
-      mode: request.mode,
+      workspaceId: capturedRequest.workspaceId,
+      teamId: capturedRequest.teamId,
+      senderId: capturedRequest.senderId,
+      recipientId: capturedRequest.recipientId,
+      recipientCorrelationId: capturedRequest.recipientCorrelationId,
+      kind: capturedRequest.kind,
+      mode: capturedRequest.mode,
+      capabilities,
       priority,
       senderSeq,
       createdAt: now,
       expiresAt: now + ttlMs,
       ttlMs,
       sessionGeneration: this.#authority.currentGeneration(),
-      leaseEpoch: this.#authority.currentLeaseEpoch(request.recipientCorrelationId),
-      leaseNonce: this.#authority.currentLeaseNonce(request.recipientCorrelationId),
-      payload: request.payload,
+      leaseEpoch: this.#authority.currentLeaseEpoch(capturedRequest.recipientCorrelationId),
+      leaseNonce: this.#authority.currentLeaseNonce(capturedRequest.recipientCorrelationId),
+      payload: capturedRequest.payload,
       provenance,
-      ...(request.requestId ? { requestId: request.requestId } : {}),
-      ...(request.correlationId ? { correlationId: request.correlationId } : {}),
+      ...(capturedRequest.requestId ? { requestId: capturedRequest.requestId } : {}),
+      ...(capturedRequest.correlationId ? { correlationId: capturedRequest.correlationId } : {}),
     };
 
     // Compute hash
@@ -215,13 +247,18 @@ export class MailboxRouter {
     // before publication is repaired from that record by this call or startup
     // recovery; the prepare is never unmarked merely because the caller lost a
     // response.
-    const dedupKey = request.requestId ?? request.correlationId;
+    const dedupKey = capturedRequest.requestId ?? capturedRequest.correlationId;
     if (dedupKey) {
-      const requestHash = computeMailboxRequestHash(request);
+      const requestHash = computeMailboxRequestHash(capturedRequest);
       const prepared = await this.#store.prepareEnqueue(dedupKey, requestHash, envelope);
       if (prepared.status !== "prepared") {
         const detail = prepared.status === "conflict" ? " with conflicting immutable request data" : "";
-        return { ok: false, code: "duplicate", message: `message ${dedupKey} already processed${detail}` };
+        return {
+          ok: false,
+          code: "duplicate",
+          message: `message ${dedupKey} already processed${detail}`,
+          messageId: prepared.messageId,
+        };
       }
       return { ok: true, messageId: prepared.messageId, state: "ready" };
     }
@@ -262,6 +299,11 @@ export class MailboxRouter {
       return { allowed: false, action: "dead", reason: "workspace mismatch on dispatch" };
     }
 
+    // Frozen capabilities cannot be widened or narrowed by a later advertisement.
+    if (envelope.capabilities !== undefined && !envelope.capabilities.includes(envelope.mode)) {
+      return { allowed: false, action: "dead", reason: "frozen capability snapshot does not permit the delivery mode" };
+    }
+
     // Check generation
     const currentGen = this.#authority.currentGeneration();
     if (envelope.sessionGeneration !== currentGen) {
@@ -300,11 +342,13 @@ export function computeMailboxRequestHash(request: MailboxEnqueueRequest): strin
   const canonical = canonicalRequestValue({
     workspaceId: request.workspaceId,
     teamId: request.teamId,
+    messageId: request.messageId,
     senderId: request.senderId,
     recipientId: request.recipientId,
     recipientCorrelationId: request.recipientCorrelationId,
     kind: request.kind,
     mode: request.mode,
+    capabilities: request.capabilities,
     payload: request.payload,
     provenance: request.provenance,
     requestId: request.requestId,

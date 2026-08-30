@@ -108,10 +108,34 @@ test("valid route succeeds and message reaches ready state", async () => {
   assert.ok(envelope);
   assert.equal(envelope.payload, "test message");
   assert.equal(envelope.kind, "follow_up");
+  assert.deepEqual(envelope.capabilities, ["follow_up"]);
   assert.equal(envelope.priority, "normal");
   assert.equal(envelope.sessionGeneration, 1);
   assert.equal(envelope.leaseEpoch, 1);
   assert.equal(envelope.leaseNonce, "nonce-abc");
+});
+
+test("caller messageId and capability decision are frozen before async admission", async () => {
+  const router = makeRouter();
+  const messageId = "11111111-1111-4111-8111-111111111111";
+  const capabilities = ["message", "follow_up"];
+  const mutable = makeRequest({ messageId, capabilities });
+  const pending = router.enqueue(mutable);
+
+  mutable.messageId = "22222222-2222-4222-8222-222222222222";
+  mutable.mode = "abort";
+  mutable.payload = "mutated after enqueue";
+  mutable.capabilities = ["abort"];
+  capabilities.push("abort");
+
+  const result = await pending;
+  assert.ok(result.ok);
+  assert.equal(result.messageId, messageId);
+  const envelope = await store.readEnvelope("ready", messageId);
+  assert.ok(envelope);
+  assert.equal(envelope.mode, "follow_up");
+  assert.equal(envelope.payload, "test message");
+  assert.deepEqual(envelope.capabilities, ["message", "follow_up"]);
 });
 
 test("lifecycle kind gets critical priority", async () => {
@@ -315,10 +339,15 @@ test("senderSeq increments monotonically", async () => {
 
 test("duplicate requestId is rejected before a second ready entry is written", async () => {
   const router = makeRouter();
-  const first = await router.enqueue(makeRequest({ requestId: "task-dedup-1" }));
+  const messageId = "33333333-3333-4333-8333-333333333333";
+  const first = await router.enqueue(makeRequest({ messageId, requestId: "task-dedup-1" }));
   assert.ok(first.ok);
-  const second = await router.enqueue(makeRequest({ requestId: "task-dedup-1", payload: "retry" }));
+  assert.equal(first.messageId, messageId);
+  const second = await router.enqueue(makeRequest({ messageId, requestId: "task-dedup-1", payload: "retry" }));
   assert.equal(second.ok, false);
-  if (!second.ok) assert.equal(second.code, "duplicate");
+  if (!second.ok) {
+    assert.equal(second.code, "duplicate");
+    assert.equal(second.messageId, messageId);
+  }
   assert.equal((await store.listMessages("ready")).length, 1);
 });

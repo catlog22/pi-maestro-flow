@@ -64,11 +64,15 @@ export declare class MailboxService extends EventEmitter {
      * This is the primary entry point replacing direct stdin delivery.
      */
     enqueue(request: {
+        /** Stable caller-selected UUID for retry/receipt reconciliation. */
+        messageId?: string;
         senderId: string;
         recipientId: string;
         recipientCorrelationId: string;
         kind: MailboxMessageKind;
         mode: MailboxDeliveryMode;
+        /** Route capabilities frozen into the immutable envelope. */
+        capabilities?: readonly string[];
         payload: string;
         provenance?: MessageProvenanceV1;
         requestId?: string;

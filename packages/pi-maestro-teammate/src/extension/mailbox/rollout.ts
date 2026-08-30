@@ -37,10 +37,12 @@ export interface MailboxRolloutOptions {
   config?: Partial<RolloutConfig>;
   /** Fallback delivery function for v1 direct path. */
   directDeliver: (envelope: {
+    messageId?: string;
     senderId: string;
     recipientCorrelationId: string;
     payload: string;
     mode: string;
+    capabilities?: readonly string[];
     kind: "lifecycle" | "result" | "steer" | "follow_up" | "interrupt" | "task" | "control";
   }) => Promise<void>;
   now?: () => number;
@@ -105,28 +107,34 @@ export class MailboxRollout {
    * Disk errors are ALWAYS surfaced, never silently falling back.
    */
   async deliver(request: {
+    /** Stable caller-selected UUID for retry/receipt reconciliation. */
+    messageId?: string;
     senderId: string;
     recipientId: string;
     recipientCorrelationId: string;
     kind: "lifecycle" | "result" | "steer" | "follow_up" | "interrupt" | "task" | "control";
     mode: "steer" | "follow_up" | "interrupt" | "abort" | "notify";
+    /** Route capabilities frozen by v2; forwarded on the direct path when supplied. */
+    capabilities?: readonly string[];
     payload: string;
     requestId?: string;
     correlationId?: string;
   }): Promise<{ path: "v1" | "v2" | "shadow"; result: MailboxEnqueueResult | { ok: true; messageId?: string; state: "ready" } }> {
     switch (this.#config.mode) {
       case "disabled": {
-        // Pure v1 direct path — no durable message exists, so no messageId.
+        // Pure v1 direct path — no durable message exists, so no generated messageId.
         await this.#directDeliver({
+          ...(request.messageId === undefined ? {} : { messageId: request.messageId }),
           senderId: request.senderId,
           recipientCorrelationId: request.recipientCorrelationId,
           payload: request.payload,
           mode: request.mode,
+          ...(request.capabilities === undefined ? {} : { capabilities: request.capabilities }),
           kind: request.kind,
         });
         return {
           path: "v1",
-          result: { ok: true, state: "ready" },
+          result: { ok: true, ...(request.messageId === undefined ? {} : { messageId: request.messageId }), state: "ready" },
         };
       }
 
@@ -135,10 +143,12 @@ export class MailboxRollout {
         const enqueueResult = await this.#service.enqueue(request);
         // Also deliver via direct path (shadow does NOT consume from v2)
         await this.#directDeliver({
+          ...(request.messageId === undefined ? {} : { messageId: request.messageId }),
           senderId: request.senderId,
           recipientCorrelationId: request.recipientCorrelationId,
           payload: request.payload,
           mode: request.mode,
+          ...(request.capabilities === undefined ? {} : { capabilities: request.capabilities }),
           kind: request.kind,
         });
         return { path: "shadow", result: enqueueResult };

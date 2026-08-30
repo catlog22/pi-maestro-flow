@@ -14,6 +14,10 @@ export declare const MAILBOX_TRANSITION_RECORD_VERSION: 1;
 export declare const MAX_PAYLOAD_BYTES: number;
 /** Maximum total envelope size in bytes. */
 export declare const MAX_ENVELOPE_BYTES: number;
+/** Maximum capabilities frozen into one message envelope. */
+export declare const MAX_FROZEN_CAPABILITIES = 32;
+/** Capability tokens are protocol identifiers, never display labels. */
+export declare const MAILBOX_CAPABILITY_PATTERN: RegExp;
 /** Claim lease duration before renewal is required. */
 export declare const CLAIM_LEASE_MS = 30000;
 /** Claim renewal interval. */
@@ -71,6 +75,8 @@ export interface MailboxEnvelope {
     kind: MailboxMessageKind;
     /** Delivery mode. */
     mode: MailboxDeliveryMode;
+    /** Capability decision frozen when this envelope is established. */
+    capabilities?: readonly string[];
     /** Priority lane for scheduling. */
     priority: MailboxPriority;
     /** Monotonic sender sequence for FIFO ordering within sender+priority. */
@@ -174,6 +180,7 @@ export type MailboxEnqueueResult = {
     ok: false;
     code: "quota_exceeded" | "route_invalid" | "generation_mismatch" | "lease_invalid" | "duplicate" | "payload_too_large" | "envelope_too_large";
     message: string;
+    messageId?: string;
 };
 export interface MailboxPaths {
     /** Root mailbox directory. */

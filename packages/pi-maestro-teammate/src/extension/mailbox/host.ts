@@ -122,6 +122,7 @@ export interface MailboxHostOptions {
     payload: string;
     provenance?: MessageProvenanceV1;
     mode: string;
+    capabilities?: readonly string[];
     kind: "lifecycle" | "result" | "steer" | "follow_up" | "interrupt" | "task" | "control";
   }) => Promise<MailboxDispatchDisposition | void>;
   mode?: RolloutMode;
@@ -182,6 +183,7 @@ export class MailboxHost {
         payload: envelope.payload,
         ...(envelope.provenance === undefined ? {} : { provenance: envelope.provenance }),
         mode: envelope.mode,
+        ...(envelope.capabilities === undefined ? {} : { capabilities: envelope.capabilities }),
         kind: envelope.kind,
       }),
       pollMs: options.pollMs,

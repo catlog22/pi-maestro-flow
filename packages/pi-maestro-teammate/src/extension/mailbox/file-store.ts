@@ -23,6 +23,7 @@ import {
 import { basename, dirname, join } from "node:path";
 import {
   CLAIM_STALE_MS,
+  MAILBOX_CAPABILITY_PATTERN,
   MAILBOX_DEDUP_RECORD_VERSION,
   MAILBOX_SCHEMA_VERSION,
   MAILBOX_STATE_RECORD_VERSION,
@@ -36,6 +37,7 @@ import {
   type MailboxStateRecord,
   type MailboxTransitionRecord,
   MAX_ENVELOPE_BYTES,
+  MAX_FROZEN_CAPABILITIES,
   MAX_PAYLOAD_BYTES,
   MESSAGE_ID_PATTERN,
   stateDirKey,
@@ -193,14 +195,21 @@ async function directoryEntryExists(path: string): Promise<boolean> {
 }
 
 async function readSafeJson(path: string, maxBytes: number): Promise<unknown | undefined> {
-  try {
-    const info = await lstat(path);
-    if (!info.isFile() || info.isSymbolicLink() || info.size > maxBytes) return undefined;
-    return JSON.parse(await readFile(path, "utf8")) as unknown;
-  } catch (error) {
-    if (fileCode(error) === "ENOENT") return undefined;
-    if (error instanceof SyntaxError) return undefined;
-    throw error;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      const info = await lstat(path);
+      if (!info.isFile() || info.isSymbolicLink() || info.size > maxBytes) return undefined;
+      return JSON.parse(await readFile(path, "utf8")) as unknown;
+    } catch (error) {
+      const code = fileCode(error);
+      if (code === "ENOENT") return undefined;
+      if (error instanceof SyntaxError) return undefined;
+      if ((code === "EPERM" || code === "EACCES" || code === "EBUSY") && attempt < RENAME_MAX_RETRIES) {
+        await new Promise((resolve) => setTimeout(resolve, RENAME_RETRY_MS * (attempt + 1)));
+        continue;
+      }
+      throw error;
+    }
   }
 }
 
@@ -383,6 +392,14 @@ function validEnvelope(envelope: unknown, expectedMessageId?: string): envelope 
     && typeof value.payload === "string"
     && typeof value.workspaceId === "string"
     && typeof value.recipientCorrelationId === "string"
+    && (value.capabilities === undefined
+      || (Array.isArray(value.capabilities)
+        && value.capabilities.length >= 1
+        && value.capabilities.length <= MAX_FROZEN_CAPABILITIES
+        && value.capabilities.every((capability) => typeof capability === "string" && MAILBOX_CAPABILITY_PATTERN.test(capability))
+        && new Set(value.capabilities).size === value.capabilities.length
+        && typeof value.mode === "string"
+        && value.capabilities.includes(value.mode)))
     && verifyEnvelopeHash(value as MailboxEnvelope);
 }
 

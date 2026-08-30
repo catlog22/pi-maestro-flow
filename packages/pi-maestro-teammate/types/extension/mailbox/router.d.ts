@@ -27,6 +27,8 @@ export interface MailboxAuthority {
     managesRecipient(recipientCorrelationId: string): boolean;
 }
 export interface MailboxEnqueueRequest {
+    /** Stable caller-selected UUID for retry/receipt reconciliation. */
+    messageId?: string;
     workspaceId: string;
     teamId: string;
     senderId: string;
@@ -34,6 +36,8 @@ export interface MailboxEnqueueRequest {
     recipientCorrelationId: string;
     kind: MailboxMessageKind;
     mode: MailboxDeliveryMode;
+    /** Route capabilities frozen into the immutable envelope. Defaults to [mode]. */
+    capabilities?: readonly string[];
     payload: string;
     provenance?: MessageProvenanceV1;
     requestId?: string;

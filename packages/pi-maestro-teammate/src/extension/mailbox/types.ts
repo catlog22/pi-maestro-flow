@@ -20,6 +20,11 @@ export const MAX_PAYLOAD_BYTES = 64 * 1024;
 /** Maximum total envelope size in bytes. */
 export const MAX_ENVELOPE_BYTES = 96 * 1024;
 
+/** Maximum capabilities frozen into one message envelope. */
+export const MAX_FROZEN_CAPABILITIES = 32;
+/** Capability tokens are protocol identifiers, never display labels. */
+export const MAILBOX_CAPABILITY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
+
 /** Claim lease duration before renewal is required. */
 export const CLAIM_LEASE_MS = 30_000;
 /** Claim renewal interval. */
@@ -137,6 +142,8 @@ export interface MailboxEnvelope {
   kind: MailboxMessageKind;
   /** Delivery mode. */
   mode: MailboxDeliveryMode;
+  /** Capability decision frozen when this envelope is established. */
+  capabilities?: readonly string[];
   /** Priority lane for scheduling. */
   priority: MailboxPriority;
   /** Monotonic sender sequence for FIFO ordering within sender+priority. */
@@ -246,7 +253,7 @@ export interface MailboxDedupRecord {
 
 export type MailboxEnqueueResult =
   | { ok: true; messageId: string; state: "ready" }
-  | { ok: false; code: "quota_exceeded" | "route_invalid" | "generation_mismatch" | "lease_invalid" | "duplicate" | "payload_too_large" | "envelope_too_large"; message: string };
+  | { ok: false; code: "quota_exceeded" | "route_invalid" | "generation_mismatch" | "lease_invalid" | "duplicate" | "payload_too_large" | "envelope_too_large"; message: string; messageId?: string };
 
 // --- Directory Layout ---
 
