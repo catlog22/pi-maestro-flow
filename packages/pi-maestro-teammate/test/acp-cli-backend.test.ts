@@ -51,6 +51,37 @@ function resolved(config: Record<string, ConfigValue>) {
   return resolveBackendConfig(acpCliBackend, config);
 }
 
+test("acp-cli live control behavior matches its run-only capability table", async () => {
+  let aborted = false;
+  const backend = createAcpCliBackend(async (params) => {
+    await new Promise<void>((resolve) => {
+      if (params.signal.aborted) {
+        aborted = true;
+        resolve();
+        return;
+      }
+      params.signal.addEventListener("abort", () => {
+        aborted = true;
+        resolve();
+      }, { once: true });
+    });
+    return { ...CLEAN_RUN, exitCode: 1, terminalStatus: "cancelled" };
+  });
+  const capabilities = backend.capabilities(LOCAL_CONFIG);
+  assert.equal(capabilities.steer, "unsupported");
+  assert.equal(capabilities.followUp, "unsupported");
+  assert.equal(capabilities.abort, "native");
+
+  const run = await backend.start(specOf(), runOptionsOf(LOCAL_CONFIG));
+  assert.equal(run.send("not deliverable", "follow_up"), false);
+  assert.equal(run.send("not steerable", "steer"), false);
+  run.abort();
+  const outcome = await run.outcome;
+  assert.equal(aborted, true);
+  assert.equal(outcome.result.wakeable, false);
+  assert.equal(outcome.result.terminalStatus, "terminated");
+});
+
 test("acp-cli declares outputSchema unsupported and the gate rejects a schema task before start", async () => {
   const launches: RunLocalCliToolParams[] = [];
   const backend = createAcpCliBackend(async (params) => {

@@ -193,6 +193,32 @@ function optionsOf(
   };
 }
 
+test("remote driver capability tables match the ACP and Pi-RPC control contracts", () => {
+  const backend = createRemoteBackend(() => new FakeRemoteManager("pi-rpc"));
+  assert.deepEqual(backend.capabilities({ targetId: "beta", driver: "acp" }), {
+    outputSchema: "emulated",
+    forkContext: "unsupported",
+    modelSelection: "unsupported",
+    thinkingLevel: "unsupported",
+    todoBinding: "unsupported",
+    toolFilter: "unsupported",
+    steer: "unsupported",
+    followUp: "native",
+    abort: "native",
+  });
+  assert.deepEqual(backend.capabilities({ targetId: "beta", driver: "pi-rpc" }), {
+    outputSchema: "native",
+    forkContext: "unsupported",
+    modelSelection: "unsupported",
+    thinkingLevel: "unsupported",
+    todoBinding: "unsupported",
+    toolFilter: "unsupported",
+    steer: "native",
+    followUp: "native",
+    abort: "native",
+  });
+});
+
 test("a registration whose declared driver disagrees with the resolved target refuses to start", async () => {
   const backend = createRemoteBackend(() => new FakeRemoteManager("acp"));
 
