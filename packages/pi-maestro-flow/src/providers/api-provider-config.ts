@@ -11,7 +11,6 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
   getAgentDir,
-  SettingsManager,
   type ExtensionAPI,
   type ExtensionCommandContext,
   type ExtensionContext,
@@ -19,7 +18,7 @@ import {
   type ProviderModelConfig,
 } from "@earendil-works/pi-coding-agent";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { getSupportedThinkingLevels, type ModelCost } from "@earendil-works/pi-ai";
+import type { ModelCost } from "@earendil-works/pi-ai";
 import { NETWORK_RETRY_POLICY, RESOLVED_NETWORK_RETRY_POLICY } from "pi-maestro-teammate/v1/retry";
 import { getTuiLocale } from "../tui/locale.ts";
 import {
@@ -34,7 +33,6 @@ import {
   type EnhanceContextDepth,
 } from "../prompt-enhance/config.ts";
 import {
-  EFFORT_LEVELS,
   EFFORT_STATUS_KEY,
   isThinkingLevel as isCanonicalThinkingLevel,
 } from "../effort-display.ts";
@@ -87,26 +85,7 @@ const API_FORMAT_NAMES: Readonly<Record<string, string>> = Object.freeze({
 /** UI copy for the API Manager menu and notification surface. */
 const CATALOGS = {
   en: {
-    "effort.noModel": "No active model; cannot adjust thinking effort.",
-    "effort.currentMarker": " (current)",
-    "effort.title": "Choose thinking effort (current: {level})",
-    "effort.saveFailed": "Failed to save thinking effort: {message}",
-    "effort.applyFailed": "Failed to apply thinking effort: {message}",
-    "effort.applied": "Thinking effort set to {level}",
-    "effort.manageEntry": "⚙ Manage thinking levels…",
-    "effort.mgmt.title": "Manage thinking levels",
-    "effort.mgmt.add": "➕ Add level",
-    "effort.mgmt.remove": "🗑 Delete level",
-    "effort.mgmt.rename": "✏ Rename level",
-    "effort.mgmt.reset": "♻ Restore defaults",
-    "effort.mgmt.namePrompt": "Level display name",
-    "effort.mgmt.targetPrompt": "Map to canonical level",
-    "effort.mgmt.pickPrompt": "Select a level entry",
-    "effort.mgmt.renamePrompt": "New display name",
-    "effort.mgmt.duplicateName": "{name} already exists",
-    "effort.mgmt.lastEntry": "At least one thinking level must remain",
-    "effort.mgmt.saved": "Thinking levels saved",
-    "effort.mgmt.resetDone": "Thinking levels restored to defaults",
+    "value.currentMarker": " (current)",
     "retry.on": "On",
     "retry.off": "Off",
     "retry.menuTitle": "Provider auto-retry",
@@ -121,7 +100,6 @@ const CATALOGS = {
     "retry.notifyPath": "Config: {path}",
     "manager.needTui": "/api-manager interactive menu requires an interactive Pi session.",
     "manager.visionNeedTui": "/api-manager vision requires an interactive Pi session; use /vision status to view state.",
-    "manager.effortNeedTui": "/api-manager effort requires an interactive Pi session.",
     "manager.needProviderId": "/api-manager {action} requires a Provider ID.",
     "manager.configureNeedTui": "/api-manager configure requires an interactive Pi session.",
     "manager.actionNeedTui": "/api-manager {action} requires an interactive Pi session.",
@@ -130,7 +108,7 @@ const CATALOGS = {
     "manager.exportPathPrompt": "Export file path",
     "manager.importPathPrompt": "Import file path",
     "manager.commandDescription": "Manage API models and Provider configuration",
-    "effort.commandDescription": "Adjust thinking effort for the current model (shortcut for /api-manager effort)",
+    "manager.thinkingMoved": "Thinking levels moved to Pi's built-in /thinking command; manage per-model defaults in /settings.",
     "retry.initFailed": "Failed to initialize default retry settings: {message}",
     "form.title.add": "Add {name} model",
     "form.title.edit": "Edit {name} / {model}",
@@ -201,26 +179,7 @@ const CATALOGS = {
     "discovery.noConnection": "Discovery needs a valid Base URL (fill it in the form first).",
   },
   "zh-CN": {
-    "effort.noModel": "当前没有模型，无法调整思考强度。",
-    "effort.currentMarker": "（当前）",
-    "effort.title": "选择思考强度（当前：{level}）",
-    "effort.saveFailed": "思考强度保存失败：{message}",
-    "effort.applyFailed": "思考强度应用失败：{message}",
-    "effort.applied": "思考强度已设为 {level}",
-    "effort.manageEntry": "⚙ 管理思考等级…",
-    "effort.mgmt.title": "管理思考等级",
-    "effort.mgmt.add": "➕ 新增等级",
-    "effort.mgmt.remove": "🗑 删除等级",
-    "effort.mgmt.rename": "✏ 重命名",
-    "effort.mgmt.reset": "♻ 恢复默认",
-    "effort.mgmt.namePrompt": "等级显示名称",
-    "effort.mgmt.targetPrompt": "映射到 canonical 档位",
-    "effort.mgmt.pickPrompt": "选择等级条目",
-    "effort.mgmt.renamePrompt": "新的显示名称",
-    "effort.mgmt.duplicateName": "{name} 已存在",
-    "effort.mgmt.lastEntry": "至少保留一个思考等级",
-    "effort.mgmt.saved": "思考等级列表已保存",
-    "effort.mgmt.resetDone": "已恢复默认思考等级",
+    "value.currentMarker": "（当前）",
     "retry.on": "开启",
     "retry.off": "关闭",
     "retry.menuTitle": "Provider 自动重试",
@@ -235,7 +194,6 @@ const CATALOGS = {
     "retry.notifyPath": "配置：{path}",
     "manager.needTui": "/api-manager 交互菜单需要交互式 Pi 会话。",
     "manager.visionNeedTui": "/api-manager vision 需要交互式 Pi 会话；状态查看可使用 /vision status。",
-    "manager.effortNeedTui": "/api-manager effort 需要交互式 Pi 会话。",
     "manager.needProviderId": "/api-manager {action} 需要指定 Provider ID。",
     "manager.configureNeedTui": "/api-manager configure 需要交互式 Pi 会话。",
     "manager.actionNeedTui": "/api-manager {action} 需要交互式 Pi 会话。",
@@ -244,7 +202,7 @@ const CATALOGS = {
     "manager.exportPathPrompt": "导出文件路径",
     "manager.importPathPrompt": "导入文件路径",
     "manager.commandDescription": "管理 API 模型与 Provider 配置",
-    "effort.commandDescription": "调整当前模型的思考强度（/api-manager effort 的快捷入口）",
+    "manager.thinkingMoved": "思考强度已迁移到 Pi 官方 /thinking；每模型默认值请在 /settings 中管理。",
     "retry.initFailed": "Retry 默认配置初始化失败：{message}",
     "form.title.add": "新增 {name} 模型",
     "form.title.edit": "修改 {name} / {model}",
@@ -426,7 +384,7 @@ export interface ApiRetrySettings {
   maxDelayMs?: number;
 }
 
-export type ApiProviderAction = "cache" | "cache-agent" | "configure" | "delete" | "disable" | "effort" | "enable" | "enhance" | "export" | "filter" | "import" | "list" | "logout" | "nextsuggest" | "price" | "provider" | "reset" | "retry" | "show" | "stats" | "toggle" | "vision";
+export type ApiProviderAction = "cache" | "cache-agent" | "configure" | "delete" | "disable" | "enable" | "enhance" | "export" | "filter" | "import" | "list" | "logout" | "nextsuggest" | "price" | "provider" | "reset" | "retry" | "show" | "stats" | "toggle" | "vision";
 export type ApiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export const DEFAULT_THINKING_LEVEL: ApiThinkingLevel = "medium";
@@ -479,151 +437,6 @@ export const PROVIDERS: readonly ProviderDefaults[] = [
 export const mutationQueues = new Map<string, Promise<void>>();
 
 /**
- * Interactive thinking-effort picker backed by api-manager.json (defaultsPath).
- * The picker renders the managed level list (effortLevels section; absent means
- * all canonical levels) filtered to levels the current model supports, plus an
- * entry point into the add/delete/rename management submenu.
- * Shared by the /effort shortcut and the /api-manager effort action.
- */
-async function adjustThinkingEffort(
-  pi: ExtensionAPI,
-  ctx: ExtensionCommandContext,
-  defaultsPath: string,
-): Promise<void> {
-  if (!ctx.model) {
-    ctx.ui.notify(t("effort.noModel"), "warning");
-    return;
-  }
-  const current = pi.getThinkingLevel();
-  const levelMap = ctx.model.thinkingLevelMap;
-  const supportsMax = levelMap?.xhigh === "max" || levelMap?.max === "max";
-  const supported = new Set<ThinkingLevel>([
-    ...getSupportedThinkingLevels(ctx.model).filter(isThinkingLevel),
-    ...(supportsMax ? ["max" as ThinkingLevel] : []),
-  ]);
-  const manageLabel = t("effort.manageEntry");
-  while (true) {
-    const entries = (await loadEffortLevels(defaultsPath)).filter((entry) => supported.has(entry.level));
-    const labels = new Map<string, EffortLevelEntry>();
-    const options = entries.map((entry) => {
-      const base = entry.name === entry.level ? entry.name : `${entry.name} → ${entry.level}`;
-      const label = `${base}${entry.level === current ? t("effort.currentMarker") : ""}`;
-      labels.set(label, entry);
-      return label;
-    });
-    const choice = await ctx.ui.select(t("effort.title", { level: current }), [...options, manageLabel]);
-    if (choice === undefined) return;
-    if (choice === manageLabel) {
-      await manageEffortLevels(ctx, defaultsPath);
-      continue;
-    }
-    const selected = labels.get(choice);
-    if (!selected) continue;
-    try {
-      await saveModelThinkingDefault(ctx.model.provider, ctx.model.id, selected.level, defaultsPath);
-    } catch (error) {
-      ctx.ui.notify(t("effort.saveFailed", { message: errorMessage(error) }), "error");
-      return;
-    }
-    try {
-      setPiThinkingLevel(pi, selected.level);
-    } catch (error) {
-      ctx.ui.notify(t("effort.applyFailed", { message: errorMessage(error) }), "error");
-      return;
-    }
-    syncEffortStatus(ctx, selected.level);
-    ctx.ui.notify(t("effort.applied", { level: selected.level }), "info");
-    return;
-  }
-}
-
-/** Add/delete/rename the managed /effort level list persisted in api-manager.json. */
-async function manageEffortLevels(
-  ctx: ExtensionCommandContext,
-  defaultsPath: string,
-): Promise<void> {
-  const actions = [
-    { label: t("effort.mgmt.add"), run: () => addEffortLevel(ctx, defaultsPath) },
-    { label: t("effort.mgmt.remove"), run: () => removeEffortLevel(ctx, defaultsPath) },
-    { label: t("effort.mgmt.rename"), run: () => renameEffortLevel(ctx, defaultsPath) },
-    { label: t("effort.mgmt.reset"), run: () => resetEffortLevelsAction(ctx, defaultsPath) },
-  ];
-  const choice = await ctx.ui.select(t("effort.mgmt.title"), actions.map((action) => action.label));
-  if (choice === undefined) return;
-  const action = actions.find((entry) => entry.label === choice);
-  if (!action) return;
-  try {
-    await action.run();
-  } catch (error) {
-    ctx.ui.notify(t("effort.saveFailed", { message: errorMessage(error) }), "error");
-  }
-}
-
-async function addEffortLevel(ctx: ExtensionCommandContext, defaultsPath: string): Promise<void> {
-  const nameInput = await ctx.ui.input(t("effort.mgmt.namePrompt"), "");
-  if (nameInput === undefined) return;
-  const name = nameInput.trim();
-  if (!name) return;
-  const entries = await loadEffortLevels(defaultsPath);
-  if (entries.some((entry) => entry.name === name)) {
-    ctx.ui.notify(t("effort.mgmt.duplicateName", { name }), "warning");
-    return;
-  }
-  const level = await ctx.ui.select(t("effort.mgmt.targetPrompt"), [...EFFORT_LEVELS]) as ThinkingLevel | undefined;
-  if (!level) return;
-  await saveEffortLevels([...entries, { name, level }], defaultsPath);
-  ctx.ui.notify(t("effort.mgmt.saved"), "info");
-}
-
-async function removeEffortLevel(ctx: ExtensionCommandContext, defaultsPath: string): Promise<void> {
-  const entries = await loadEffortLevels(defaultsPath);
-  if (entries.length <= 1) {
-    ctx.ui.notify(t("effort.mgmt.lastEntry"), "warning");
-    return;
-  }
-  const target = await pickEffortEntry(ctx, entries);
-  if (!target) return;
-  await saveEffortLevels(entries.filter((entry) => entry !== target), defaultsPath);
-  ctx.ui.notify(t("effort.mgmt.saved"), "info");
-}
-
-async function renameEffortLevel(ctx: ExtensionCommandContext, defaultsPath: string): Promise<void> {
-  const entries = await loadEffortLevels(defaultsPath);
-  const target = await pickEffortEntry(ctx, entries);
-  if (!target) return;
-  const nameInput = await ctx.ui.input(t("effort.mgmt.renamePrompt"), target.name);
-  if (nameInput === undefined) return;
-  const name = nameInput.trim();
-  if (!name || name === target.name) return;
-  if (entries.some((entry) => entry !== target && entry.name === name)) {
-    ctx.ui.notify(t("effort.mgmt.duplicateName", { name }), "warning");
-    return;
-  }
-  await saveEffortLevels(
-    entries.map((entry) => (entry === target ? { ...entry, name } : entry)),
-    defaultsPath,
-  );
-  ctx.ui.notify(t("effort.mgmt.saved"), "info");
-}
-
-async function resetEffortLevelsAction(ctx: ExtensionCommandContext, defaultsPath: string): Promise<void> {
-  await resetEffortLevels(defaultsPath);
-  ctx.ui.notify(t("effort.mgmt.resetDone"), "info");
-}
-
-function effortEntryLabel(entry: EffortLevelEntry): string {
-  return entry.name === entry.level ? entry.name : `${entry.name} → ${entry.level}`;
-}
-
-async function pickEffortEntry(
-  ctx: ExtensionCommandContext,
-  entries: readonly EffortLevelEntry[],
-): Promise<EffortLevelEntry | undefined> {
-  const choice = await ctx.ui.select(t("effort.mgmt.pickPrompt"), entries.map(effortEntryLabel));
-  return entries.find((entry) => effortEntryLabel(entry) === choice);
-}
-
-/**
  * Register API Providers through Pi's documented models.json contract. A Provider
  * owns provider-level connection config (URL, API key, format, headers, auth) and
  * hosts one or more models; models under the same Provider share that connection.
@@ -672,14 +485,45 @@ export function registerApiProviderConfigs(
       await handle.openManager(ctx, args);
     },
   });
-  pi.registerCommand("effort", {
-    description: t("effort.commandDescription"),
-    async handler(_args, ctx) {
-      await adjustThinkingEffort(pi, ctx, defaultsPath);
-    },
-  });
   if (typeof pi.on === "function") {
     pi.on("session_start", async (_event, ctx) => {
+      let migratedLevel: ThinkingLevel | undefined;
+      try {
+        const migration = await migrateLegacyModelThinkingDefaults(
+          ctx.cwd,
+          modelsPath,
+          defaultsPath,
+          settingsPath,
+        );
+        if (migration.retainedKeys.length > 0) {
+          ctx.ui.notify(`Legacy thinking defaults retained: ${migration.retainedKeys.length}`, "warning");
+        }
+        if (ctx.model) {
+          const currentLegacyKeys = new Set([
+            modelThinkingKey(ctx.model.provider, ctx.model.id),
+            legacyModelThinkingKey(ctx.model.provider, ctx.model.id),
+          ]);
+          const hasPriorThinking = (ctx.sessionManager?.getBranch?.() ?? [])
+            .some((entry) => entry.type === "thinking_level_change");
+          if (!hasPriorThinking && migration.migratedKeys.some((key) => currentLegacyKeys.has(key))) {
+            migratedLevel = await loadModelThinkingDefault(
+              ctx.model.provider,
+              ctx.model.id,
+              settingsPath,
+              ctx.cwd,
+            );
+          }
+        }
+      } catch (error) {
+        ctx.ui.notify(`Model thinking default migration failed: ${errorMessage(error)}`, "warning");
+      }
+      if (migratedLevel !== undefined) {
+        try {
+          setPiThinkingLevel(pi, migratedLevel);
+        } catch (error) {
+          ctx.ui.notify(`Migrated thinking default apply failed: ${errorMessage(error)}`, "warning");
+        }
+      }
       try {
         await ensureApiRetryDefaults(settingsPath);
       } catch (error) {
@@ -691,11 +535,6 @@ export function registerApiProviderConfigs(
         ctx.ui.notify(`Model filter init failed: ${errorMessage(error)}`, "warning");
       }
       syncEffortStatus(ctx, pi.getThinkingLevel());
-    });
-    pi.on("model_select", async (event, ctx) => {
-      const level = await loadModelThinkingDefault(event.model.provider, event.model.id, defaultsPath);
-      if (level) setPiThinkingLevel(pi, level);
-      syncEffortStatus(ctx, level ?? pi.getThinkingLevel());
     });
     pi.on("thinking_level_select", (event, ctx) => syncEffortStatus(ctx, event.level));
     pi.on("session_shutdown", (_event, ctx) => syncEffortStatus(ctx, undefined));
@@ -983,8 +822,8 @@ async function manageRetrySettings(
     return;
   }
 
-  const enabledLabel = `${t("retry.on")}${current.enabled ? t("effort.currentMarker") : ""}`;
-  const disabledLabel = `${t("retry.off")}${current.enabled ? "" : t("effort.currentMarker")}`;
+  const enabledLabel = `${t("retry.on")}${current.enabled ? t("value.currentMarker") : ""}`;
+  const disabledLabel = `${t("retry.off")}${current.enabled ? "" : t("value.currentMarker")}`;
   const enabledChoice = await ctx.ui.select(t("retry.menuTitle"), [enabledLabel, disabledLabel]);
   if (!enabledChoice) return;
   const enabled = enabledChoice === enabledLabel;
@@ -1037,7 +876,7 @@ export async function managePromptCacheSettings(
   }
 
   const options = PROMPT_CACHE_POLICIES.map((policy) =>
-    `${policy}${policy === current ? t("effort.currentMarker") : ""}`,
+    `${policy}${policy === current ? t("value.currentMarker") : ""}`,
   );
   const choice = await ctx.ui.select(
     "提示缓存策略（auto: 仅 gpt-5.6+ 模型发送；off: 不发送；on: 始终发送）",
@@ -1045,7 +884,7 @@ export async function managePromptCacheSettings(
   );
   if (!choice) return;
   const policy = PROMPT_CACHE_POLICIES.find(
-    (value) => `${value}${value === current ? t("effort.currentMarker") : ""}` === choice,
+    (value) => `${value}${value === current ? t("value.currentMarker") : ""}` === choice,
   );
   if (!policy || !isPromptCachePolicy(policy)) return;
   const confirmed = await ctx.ui.confirm(
@@ -1380,13 +1219,13 @@ export async function manageAgentCacheRetention(
   }
 
   const tiers = ["short", "long", "none"] as const;
-  const options = tiers.map((tier) => `${tier}${tier === current ? t("effort.currentMarker") : ""}`);
+  const options = tiers.map((tier) => `${tier}${tier === current ? t("value.currentMarker") : ""}`);
   const choice = await ctx.ui.select(
     "Agent 缓存档位（short: 5m/隐含 30m；long: 1h/24h；none: 不缓存）",
     options,
   );
   if (!choice) return;
-  const tier = tiers.find((value) => `${value}${value === current ? t("effort.currentMarker") : ""}` === choice);
+  const tier = tiers.find((value) => `${value}${value === current ? t("value.currentMarker") : ""}` === choice);
   if (!tier || !isAgentCacheRetention(tier)) return;
   const confirmed = await ctx.ui.confirm(
     "确认修改 Agent 缓存档位",
@@ -1561,6 +1400,10 @@ async function showApiProviderManager(
   defaultsPath: string,
   settingsPath: string,
 ): Promise<void> {
+  if (/^effort(?:\s|$)/i.test(args.trim())) {
+    ctx.ui.notify(t("manager.thinkingMoved"), "info");
+    return;
+  }
   const parsed = parseManagerArgs(args);
   if (!ctx.hasUI && !parsed.action) {
     ctx.ui.notify(t("manager.needTui"), "warning");
@@ -1574,14 +1417,6 @@ async function showApiProviderManager(
       return;
     }
     await showVisionDelegationManager(ctx, dirname(modelsPath));
-    return;
-  }
-  if (action === "effort") {
-    if (!ctx.hasUI) {
-      ctx.ui.notify(t("manager.effortNeedTui"), "warning");
-      return;
-    }
-    await adjustThinkingEffort(pi, ctx, defaultsPath);
     return;
   }
   if (action === "list") {
@@ -1628,7 +1463,7 @@ async function showApiProviderManager(
     const targetPath = input?.trim();
     if (!targetPath) return;
     if (action === "export") {
-      await exportApiManagerConfig(ctx, targetPath, modelsPath, defaultsPath);
+      await exportApiManagerConfig(ctx, targetPath, modelsPath, defaultsPath, settingsPath);
     } else {
       await importApiManagerConfig(pi, ctx, targetPath, modelsPath, defaultsPath, settingsPath);
     }
@@ -1702,7 +1537,7 @@ async function showApiProviderManager(
     }
     if (parsed.target) {
       if (parsed.target.kind === "preset") {
-        await configureProvider(pi, parsed.target.preset, ctx, modelsPath, defaultsPath);
+        await configureProvider(pi, parsed.target.preset, ctx, modelsPath, defaultsPath, settingsPath);
       } else {
         const requireNew = parsed.target.id === "";
         await configureCustomChannel(
@@ -1710,6 +1545,7 @@ async function showApiProviderManager(
           ctx,
           modelsPath,
           defaultsPath,
+          settingsPath,
           parsed.target.id || undefined,
           requireNew,
         );
@@ -1726,7 +1562,7 @@ async function showApiProviderManager(
       const ref = await resolveChannelRef(parsed.target, ctx, modelsPath);
       if (!ref) return;
       if (action === "show") {
-        await showProvider(ctx, ref.id, ref.name, modelsPath, defaultsPath);
+        await showProvider(ctx, ref.id, ref.name, modelsPath, defaultsPath, settingsPath);
         return;
       }
       if (!ctx.hasUI) {
@@ -1783,10 +1619,11 @@ async function configureProvider(
   ctx: ExtensionCommandContext,
   modelsPath: string,
   defaultsPath: string,
+  settingsPath: string,
 ): Promise<void> {
   const target = await chooseModelToConfigure(provider.id, provider.name, ctx, modelsPath);
   if (!target) return;
-  await configurePresetModelTarget(pi, provider, target, ctx, modelsPath, defaultsPath);
+  await configurePresetModelTarget(pi, provider, target, ctx, modelsPath, defaultsPath, settingsPath);
 }
 
 export async function configurePresetModelTarget(
@@ -1796,12 +1633,21 @@ export async function configurePresetModelTarget(
   ctx: ExtensionCommandContext,
   modelsPath: string,
   defaultsPath: string,
+  settingsPath = join(dirname(modelsPath), "settings.json"),
 ): Promise<void> {
   if (supportsApiModelForm(ctx)) {
-    await configurePresetModelWithForm(pi, provider, ctx, modelsPath, defaultsPath, target.adding ? null : target.modelId);
+    await configurePresetModelWithForm(
+      pi,
+      provider,
+      ctx,
+      modelsPath,
+      defaultsPath,
+      settingsPath,
+      target.adding ? null : target.modelId,
+    );
     return;
   }
-  await configurePresetModelWithSteps(pi, provider, target, ctx, modelsPath, defaultsPath);
+  await configurePresetModelWithSteps(pi, provider, target, ctx, modelsPath, defaultsPath, settingsPath);
 }
 
 /** Legacy step-by-step fallback for hosts without the custom form overlay. */
@@ -1812,6 +1658,7 @@ async function configurePresetModelWithSteps(
   ctx: ExtensionCommandContext,
   modelsPath: string,
   defaultsPath: string,
+  settingsPath: string,
 ): Promise<void> {
   const current = await loadApiProviderSettings(provider.id, modelsPath, target.modelId);
   const maxThinking = current.maxThinking === true || runtimeSupportsMaxThinking(ctx);
@@ -1841,8 +1688,14 @@ async function configurePresetModelWithSteps(
     ctx,
     provider.api,
     reasoningChoice === enabledLabel,
-    await loadModelThinkingDefault(targetProviderId, target.modelId ?? modelIds[0], defaultsPath)
-      ?? currentDefaultThinkingLevel(ctx, modelsPath),
+    await loadModelThinkingDefault(
+      targetProviderId,
+      target.modelId ?? modelIds[0],
+      settingsPath,
+      ctx.cwd,
+      defaultsPath,
+    )
+      ?? currentDefaultThinkingLevel(ctx, modelsPath, settingsPath),
     maxThinking,
   );
   if (!defaultThinkingLevel) return;
@@ -1909,16 +1762,27 @@ async function configurePresetModelWithSteps(
     };
     result = await saveApiProviderSettings(next, modelsPath);
     if (previousModelId !== undefined && previousModelId !== nextModelId) {
-      await renameModelThinkingDefault(targetProviderId, previousModelId, nextModelId, defaultsPath);
+      await renameModelThinkingDefault(targetProviderId, previousModelId, nextModelId, settingsPath, ctx.cwd, defaultsPath);
       await renameDefaultModelRef(ctx, modelsPath, targetProviderId, previousModelId, nextModelId);
     }
     await saveModelThinkingDefault(
       targetProviderId,
       nextModelId,
       canonicalThinkingLevel(defaultThinkingLevel),
+      settingsPath,
+      ctx.cwd,
       defaultsPath,
     );
-    if (index === 0) await saveDefaultModelAndThinking(ctx, modelsPath, targetProviderId, nextModelId, wasAdding);
+    if (index === 0) {
+      await saveDefaultModelAndThinking(
+        ctx,
+        modelsPath,
+        targetProviderId,
+        nextModelId,
+        wasAdding,
+        settingsPath,
+      );
+    }
   }
   if (!findPreset(targetProviderId)) await addManagedProvider(defaultsPath, targetProviderId);
   reloadProviderRegistration(pi, ctx, targetProviderId, modelsPath);
@@ -1943,6 +1807,7 @@ async function configureCustomChannel(
   ctx: ExtensionCommandContext,
   modelsPath: string,
   defaultsPath: string,
+  settingsPath: string,
   initialId?: string,
   requireNew = false,
 ): Promise<void> {
@@ -1955,7 +1820,7 @@ async function configureCustomChannel(
   }
   const preset = findPreset(providerId);
   if (preset) {
-    await configureProvider(pi, preset, ctx, modelsPath, defaultsPath);
+    await configureProvider(pi, preset, ctx, modelsPath, defaultsPath, settingsPath);
     return;
   }
   if (requireNew) {
@@ -1966,12 +1831,13 @@ async function configureCustomChannel(
       ctx,
       modelsPath,
       defaultsPath,
+      settingsPath,
     );
     return;
   }
   const target = await chooseModelToConfigure(providerId, await channelDisplayName(providerId, modelsPath), ctx, modelsPath);
   if (!target) return;
-  await configureCustomModelTarget(pi, providerId, target, ctx, modelsPath, defaultsPath);
+  await configureCustomModelTarget(pi, providerId, target, ctx, modelsPath, defaultsPath, settingsPath);
 }
 
 export async function configureCustomModelTarget(
@@ -1981,12 +1847,21 @@ export async function configureCustomModelTarget(
   ctx: ExtensionCommandContext,
   modelsPath: string,
   defaultsPath: string,
+  settingsPath = join(dirname(modelsPath), "settings.json"),
 ): Promise<void> {
   if (supportsApiModelForm(ctx)) {
-    await configureCustomModelWithForm(pi, providerId, ctx, modelsPath, defaultsPath, target.adding ? null : target.modelId);
+    await configureCustomModelWithForm(
+      pi,
+      providerId,
+      ctx,
+      modelsPath,
+      defaultsPath,
+      settingsPath,
+      target.adding ? null : target.modelId,
+    );
     return;
   }
-  await configureCustomModelWithSteps(pi, providerId, target, ctx, modelsPath, defaultsPath);
+  await configureCustomModelWithSteps(pi, providerId, target, ctx, modelsPath, defaultsPath, settingsPath);
 }
 
 /** Dynamic model discovery + selective injection into Pi. */
@@ -2136,6 +2011,7 @@ async function configureCustomModelWithSteps(
   ctx: ExtensionCommandContext,
   modelsPath: string,
   defaultsPath: string,
+  settingsPath: string,
 ): Promise<void> {
   const currentDisplayName = await channelDisplayName(providerId, modelsPath);
   const current = await loadApiProviderSettings(providerId, modelsPath, target.modelId);
@@ -2198,8 +2074,14 @@ async function configureCustomModelWithSteps(
     ctx,
     api,
     reasoning,
-    await loadModelThinkingDefault(targetProviderId, target.modelId ?? modelIds[0], defaultsPath)
-      ?? currentDefaultThinkingLevel(ctx, modelsPath),
+    await loadModelThinkingDefault(
+      targetProviderId,
+      target.modelId ?? modelIds[0],
+      settingsPath,
+      ctx.cwd,
+      defaultsPath,
+    )
+      ?? currentDefaultThinkingLevel(ctx, modelsPath, settingsPath),
     maxThinking,
   );
   if (!defaultThinkingLevel) return;
@@ -2331,16 +2213,27 @@ async function configureCustomModelWithSteps(
     };
     result = await saveApiProviderSettings(next, modelsPath);
     if (previousModelId !== undefined && previousModelId !== nextModelId) {
-      await renameModelThinkingDefault(targetProviderId, previousModelId, nextModelId, defaultsPath);
+      await renameModelThinkingDefault(targetProviderId, previousModelId, nextModelId, settingsPath, ctx.cwd, defaultsPath);
       await renameDefaultModelRef(ctx, modelsPath, targetProviderId, previousModelId, nextModelId);
     }
     await saveModelThinkingDefault(
       targetProviderId,
       nextModelId,
       canonicalThinkingLevel(defaultThinkingLevel),
+      settingsPath,
+      ctx.cwd,
       defaultsPath,
     );
-    if (index === 0) await saveDefaultModelAndThinking(ctx, modelsPath, targetProviderId, nextModelId, wasAdding);
+    if (index === 0) {
+      await saveDefaultModelAndThinking(
+        ctx,
+        modelsPath,
+        targetProviderId,
+        nextModelId,
+        wasAdding,
+        settingsPath,
+      );
+    }
   }
   await addManagedProvider(defaultsPath, targetProviderId);
   reloadProviderRegistration(pi, ctx, targetProviderId, modelsPath);
@@ -2366,6 +2259,7 @@ async function configurePresetModelWithForm(
   ctx: ExtensionCommandContext,
   modelsPath: string,
   defaultsPath: string,
+  settingsPath: string,
   modelId: string | null,
 ): Promise<void> {
   const adding = modelId === null;
@@ -2375,9 +2269,9 @@ async function configurePresetModelWithForm(
     : current.maxThinking === true;
   const existingModelIds = await configuredModelIds(provider.id, modelsPath);
   const currentThinking = modelId
-    ? await loadModelThinkingDefault(provider.id, modelId, defaultsPath)
-      ?? currentDefaultThinkingLevel(ctx, modelsPath)
-    : currentDefaultThinkingLevel(ctx, modelsPath);
+    ? await loadModelThinkingDefault(provider.id, modelId, settingsPath, ctx.cwd, defaultsPath)
+      ?? currentDefaultThinkingLevel(ctx, modelsPath, settingsPath)
+    : currentDefaultThinkingLevel(ctx, modelsPath, settingsPath);
   const result = await showApiModelEditor(ctx, {
     title: adding
       ? t("form.title.add", { name: provider.name })
@@ -2477,16 +2371,27 @@ async function configurePresetModelWithForm(
     };
     saveResult = await saveApiProviderSettings(next, modelsPath);
     if (!adding && modelId !== nextModelId) {
-      await renameModelThinkingDefault(targetProviderId, modelId, nextModelId, defaultsPath);
+      await renameModelThinkingDefault(targetProviderId, modelId, nextModelId, settingsPath, ctx.cwd, defaultsPath);
       await renameDefaultModelRef(ctx, modelsPath, targetProviderId, modelId, nextModelId);
     }
     await saveModelThinkingDefault(
       targetProviderId,
       nextModelId,
       canonicalThinkingLevel(defaultThinkingLevel),
+      settingsPath,
+      ctx.cwd,
       defaultsPath,
     );
-    if (index === 0) await saveDefaultModelAndThinking(ctx, modelsPath, targetProviderId, nextModelId, adding);
+    if (index === 0) {
+      await saveDefaultModelAndThinking(
+        ctx,
+        modelsPath,
+        targetProviderId,
+        nextModelId,
+        adding,
+        settingsPath,
+      );
+    }
   }
   if (!findPreset(targetProviderId)) await addManagedProvider(defaultsPath, targetProviderId);
   reloadProviderRegistration(pi, ctx, targetProviderId, modelsPath);
@@ -2516,6 +2421,7 @@ async function configureCustomModelWithForm(
   ctx: ExtensionCommandContext,
   modelsPath: string,
   defaultsPath: string,
+  settingsPath: string,
   modelId: string | null,
 ): Promise<void> {
   const adding = modelId === null;
@@ -2527,9 +2433,9 @@ async function configureCustomModelWithForm(
   const currentApi = current.api ?? "openai-completions";
   const existingModelIds = await configuredModelIds(providerId, modelsPath);
   const currentThinking = modelId
-    ? await loadModelThinkingDefault(providerId, modelId, defaultsPath)
-      ?? currentDefaultThinkingLevel(ctx, modelsPath)
-    : currentDefaultThinkingLevel(ctx, modelsPath);
+    ? await loadModelThinkingDefault(providerId, modelId, settingsPath, ctx.cwd, defaultsPath)
+      ?? currentDefaultThinkingLevel(ctx, modelsPath, settingsPath)
+    : currentDefaultThinkingLevel(ctx, modelsPath, settingsPath);
   const compat = current.compat ?? {};
   const result = await showApiModelEditor(ctx, {
     title: adding
@@ -2738,16 +2644,27 @@ async function configureCustomModelWithForm(
     };
     saveResult = await saveApiProviderSettings(next, modelsPath);
     if (!adding && modelId !== nextModelId) {
-      await renameModelThinkingDefault(targetProviderId, modelId, nextModelId, defaultsPath);
+      await renameModelThinkingDefault(targetProviderId, modelId, nextModelId, settingsPath, ctx.cwd, defaultsPath);
       await renameDefaultModelRef(ctx, modelsPath, targetProviderId, modelId, nextModelId);
     }
     await saveModelThinkingDefault(
       targetProviderId,
       nextModelId,
       canonicalThinkingLevel(defaultThinkingLevel),
+      settingsPath,
+      ctx.cwd,
       defaultsPath,
     );
-    if (index === 0) await saveDefaultModelAndThinking(ctx, modelsPath, targetProviderId, nextModelId, adding);
+    if (index === 0) {
+      await saveDefaultModelAndThinking(
+        ctx,
+        modelsPath,
+        targetProviderId,
+        nextModelId,
+        adding,
+        settingsPath,
+      );
+    }
   }
   await addManagedProvider(defaultsPath, targetProviderId);
   reloadProviderRegistration(pi, ctx, targetProviderId, modelsPath);
@@ -2970,10 +2887,12 @@ import {
   isCost,
   isStringRecord,
   isThinkingLevel,
+  legacyModelThinkingKey,
   listProviders,
-  loadEffortLevels,
   loadModelThinkingDefault,
   managedProviderIdsSync,
+  migrateLegacyModelThinkingDefaults,
+  modelThinkingKey,
   migrateLegacyProviderThinkingMaps,
   normalizeChannelId,
   notifySaved,
@@ -2986,14 +2905,12 @@ import {
   removeProviderKey,
   renameDefaultModelRef,
   renameModelThinkingDefault,
-  resetEffortLevels,
   required,
   resetProvider,
   resolveChannelRef,
   retryCount,
   runtimeSupportsMaxThinking,
   saveDefaultModelAndThinking,
-  saveEffortLevels,
   saveModelThinkingDefault,
   serializeMutation,
   setPiThinkingLevel,
@@ -3004,7 +2921,7 @@ import {
   writeApiProviderSettings,
   writeModelsRoot,
 } from "./api-provider-ops.ts";
-import type { CacheAgentManagerArgs, CacheManagerArgs, ConfigureModelTarget, EffortLevelEntry, RetryManagerArgs } from "./api-provider-ops.ts";
+import type { CacheAgentManagerArgs, CacheManagerArgs, ConfigureModelTarget, RetryManagerArgs } from "./api-provider-ops.ts";
 import { showUsageStatsPanel } from "./usage-stats-panel.ts";
 import {
   applyCacheRetentionEnv,

@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import type { ProviderHeaders } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { activityMonitor } from "./activity.ts";
 import type { SearchOptions, SearchResponse, SearchResult } from "./perplexity.ts";
@@ -24,7 +25,21 @@ interface OpenAIAuth {
 	provider: "openai-codex" | "openai";
 	apiKey: string;
 	model: string;
-	headers: Record<string, string>;
+	headers: ProviderHeaders;
+}
+
+export function applyProviderHeaders(
+	defaults: Record<string, string>,
+	overrides: ProviderHeaders | undefined,
+): Record<string, string> {
+	const headers = new Map<string, [string, string]>();
+	for (const [name, value] of Object.entries(defaults)) headers.set(name.toLowerCase(), [name, value]);
+	for (const [name, value] of Object.entries(overrides ?? {})) {
+		const key = name.toLowerCase();
+		if (value === null) headers.delete(key);
+		else headers.set(key, [name, value]);
+	}
+	return Object.fromEntries(headers.values());
 }
 
 interface NormalizedDomainFilters {
@@ -360,18 +375,18 @@ export async function searchWithOpenAI(
 	}
 
 	const activityId = activityMonitor.logStart({ type: "api", query });
-	const headers: Record<string, string> = {
-		...auth.headers,
+	const useCodexEndpoint = auth.provider === "openai-codex" || isCodexJwt(auth.apiKey);
+	const defaults: Record<string, string> = {
 		Authorization: `Bearer ${auth.apiKey}`,
 		"Content-Type": "application/json",
 		"OpenAI-Beta": "responses=experimental",
 	};
-	const useCodexEndpoint = auth.provider === "openai-codex" || isCodexJwt(auth.apiKey);
 	if (useCodexEndpoint) {
 		const accountId = extractAccountId(auth.apiKey);
-		if (accountId) headers["chatgpt-account-id"] = accountId;
-		headers.originator = "pi";
+		if (accountId) defaults["chatgpt-account-id"] = accountId;
+		defaults.originator = "pi";
 	}
+	const headers = applyProviderHeaders(defaults, auth.headers);
 
 	const body = {
 		model: auth.model,

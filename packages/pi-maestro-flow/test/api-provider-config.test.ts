@@ -54,10 +54,13 @@ import {
   setApiProviderEnabled,
 } from "../src/providers/api-provider-config.ts";
 import {
+  actionFromArg,
   chooseProvider,
   inferredManagedProviderIds,
   managedProviderIdsSync,
+  migrateLegacyModelThinkingDefaults,
   modelCentricProviderOrder,
+  parseManagerArgs,
 } from "../src/providers/api-provider-ops.ts";
 import {
   applyCacheRetentionEnv,
@@ -72,35 +75,41 @@ import {
   supportsOpenAIPromptCacheOptions,
 } from "../src/providers/prompt-cache-policy.ts";
 
-function createEffortHarness(options: {
+function createThinkingRuntimeHarness(options: {
   modelsPath: string;
   defaultsPath: string;
+  settingsPath?: string;
   current?: string;
   apply?: (level: string) => void;
   registerProvider?: (name: string, config: any) => void;
 }) {
   const commands = new Map<string, any>();
-  let modelSelect: ((event: any) => Promise<void>) | undefined;
+  const handlers = new Map<string, (event: any, ctx: any) => any>();
+  let current = options.current ?? "medium";
   registerApiProviderConfigs({
     registerProvider: options.registerProvider ?? (() => {}),
     registerCommand(name: string, command: any) {
       commands.set(name, command);
     },
     getThinkingLevel() {
-      return options.current ?? "medium";
+      return current;
     },
     setThinkingLevel(level: string) {
+      current = level;
       options.apply?.(level);
     },
-    on(event: string, handler: (event: any) => Promise<void>) {
-      if (event === "model_select") modelSelect = handler;
+    on(event: string, handler: (event: any, ctx: any) => any) {
+      handlers.set(event, handler);
     },
-  } as any, options);
+  } as any, {
+    ...options,
+    settingsPath: options.settingsPath ?? join(dirname(options.modelsPath), "settings.json"),
+  });
   return {
-    command: commands.get("effort"),
     commands,
-    get modelSelect() {
-      return modelSelect;
+    handlers,
+    get current() {
+      return current;
     },
   };
 }
@@ -317,9 +326,21 @@ test("registers configured providers and the /api-manager command", async (t) =>
   assert.equal(registered[2].config.name, undefined);
   assert.equal(registered[2].config.models[0].id, "claude-sonnet-4-5");
   assert.deepEqual(registered[2].config.models[0].thinkingLevelMap, { xhigh: "high" });
-  assert.equal(commands.size, 2);
+  assert.equal(commands.size, 1);
   assert.ok(commands.has("api-manager"));
-  assert.ok(commands.has("effort"));
+  assert.equal(commands.has("effort"), false, "official /thinking remains the only top-level thinking command");
+  assert.equal(actionFromArg("effort"), undefined);
+  const movedNotices: Array<{ message: string; type: string }> = [];
+  await commands.get("api-manager").handler("effort", {
+    hasUI: true,
+    ui: {
+      notify(message: string, type: string) { movedNotices.push({ message, type }); },
+    },
+  });
+  assert.deepEqual(movedNotices, [{
+    message: "思考强度已迁移到 Pi 官方 /thinking；每模型默认值请在 /settings 中管理。",
+    type: "info",
+  }]);
   assert.equal(commands.has("api-login"), false);
 
   assert.ok(getModels("openai").length > 0);
@@ -860,6 +881,7 @@ test("/api-manager creates or updates URL, model, reasoning, and API key", async
   const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-login-"));
   t.after(() => rmSync(tempDir, { recursive: true, force: true }));
   const modelsPath = join(tempDir, "models.json");
+  const settingsPath = join(tempDir, "custom-agent", "settings.json");
   const projectSettingsPath = join(tempDir, ".pi", "settings.json");
   mkdirSync(dirname(projectSettingsPath), { recursive: true });
   writeFileSync(projectSettingsPath, JSON.stringify({
@@ -873,7 +895,7 @@ test("/api-manager creates or updates URL, model, reasoning, and API key", async
   const registrations: Array<{ name: string; config: any }> = [];
   const unregistered: string[] = [];
   const appliedThinkingLevels: string[] = [];
-  let modelSelectHandler: ((event: any) => Promise<void>) | undefined;
+  const runtimeHandlers = new Set<string>();
   const commands = new Map<string, any>();
   registerApiProviderConfigs({
     registerProvider(name: string, config: any) {
@@ -885,13 +907,16 @@ test("/api-manager creates or updates URL, model, reasoning, and API key", async
     registerCommand(name: string, command: any) {
       commands.set(name, command);
     },
+    getThinkingLevel() {
+      return "medium";
+    },
     setThinkingLevel(level: string) {
       appliedThinkingLevels.push(level);
     },
-    on(event: string, handler: (event: any) => Promise<void>) {
-      if (event === "model_select") modelSelectHandler = handler;
+    on(event: string) {
+      runtimeHandlers.add(event);
     },
-  } as any, { modelsPath });
+  } as any, { modelsPath, settingsPath });
 
   const inputAnswers = ["https://proxy.example.com/v1/", "gpt-5.4", "400000", "128000", "openai-secret"];
   const selectAnswers = [
@@ -939,18 +964,18 @@ test("/api-manager creates or updates URL, model, reasoning, and API key", async
   assert.equal(saved.providers["maestro-openai"].models[0].thinkingLevelMap.xhigh, "max");
   assert.equal("max" in saved.providers["maestro-openai"].models[0].thinkingLevelMap, false);
   assert.equal(saved.providers["maestro-openai"].apiKey, "openai-secret");
-  const settings = JSON.parse(readFileSync(join(tempDir, "settings.json"), "utf8"));
+  const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
   assert.equal(settings.defaultProvider, "maestro-openai");
   assert.equal(settings.defaultModel, "gpt-5.4");
   // Configuring a model must not overwrite the global thinking fallback; the selected
-  // level is persisted per model (api-manager.json modelDefaults, asserted below).
+  // level is persisted in Pi's official per-model settings.
   assert.equal(settings.defaultThinkingLevel, undefined);
+  assert.equal(settings.modelThinkingLevels["maestro-openai/gpt-5.4"], "max");
   assert.deepEqual(appliedThinkingLevels, []);
-  assert.ok(modelSelectHandler);
-  await modelSelectHandler!({ model: { provider: "maestro-openai", id: "gpt-5.4" } });
-  assert.deepEqual(appliedThinkingLevels, ["max"]);
-  const defaults = JSON.parse(readFileSync(join(tempDir, "api-manager.json"), "utf8"));
-  assert.equal(defaults.modelDefaults["maestro-openai/gpt-5.4"], "max");
+  assert.equal(runtimeHandlers.has("model_select"), false);
+  assert.equal(JSON.parse(readFileSync(settingsPath, "utf8")).defaultThinkingLevel, undefined);
+  const defaultsPath = join(tempDir, "api-manager.json");
+  assert.equal(existsSync(defaultsPath) ? JSON.parse(readFileSync(defaultsPath, "utf8")).modelDefaults : undefined, undefined);
   assert.ok(selectOptions[1]?.includes("max"));
   assert.doesNotMatch(selectOptions.flat().join("\n"), /环境变量|保留当前 API key/);
   assert.deepEqual(unregistered, []);
@@ -1106,9 +1131,9 @@ test("/api-manager form preloads an existing model, renames it in place, and pre
   assert.equal(provider.models.length, 1);
   assert.equal(provider.models[0].thinkingLevelMap.xhigh, "xhigh");
   assert.equal(provider.apiKey, "existing-secret-must-stay");
-  const defaults = JSON.parse(readFileSync(join(tempDir, "api-manager.json"), "utf8"));
-  assert.equal(defaults.modelDefaults["maestro-openai/attempted-rename"], "medium");
-  assert.equal(defaults.modelDefaults["maestro-openai/existing-model"], undefined);
+  const settings = JSON.parse(readFileSync(join(tempDir, "settings.json"), "utf8"));
+  assert.equal(settings.modelThinkingLevels["maestro-openai/attempted-rename"], "medium");
+  assert.equal(settings.modelThinkingLevels["maestro-openai/existing-model"], undefined);
 });
 
 test("/api-manager form reconciles an incompatible global thinking default", async (t) => {
@@ -1154,8 +1179,8 @@ test("/api-manager form reconciles an incompatible global thinking default", asy
   });
 
   assert.match(rendered, /默认思考强度\s+off/);
-  const defaults = JSON.parse(readFileSync(join(tempDir, "api-manager.json"), "utf8"));
-  assert.equal(defaults.modelDefaults["maestro-openai/non-reasoning-model"], "off");
+  const settings = JSON.parse(readFileSync(join(tempDir, "settings.json"), "utf8"));
+  assert.equal(settings.modelThinkingLevels["maestro-openai/non-reasoning-model"], "off");
 });
 
 test("loadApiProviderSettings returns advanced user-defined Provider form parameters", async (t) => {
@@ -1310,9 +1335,9 @@ test("/api-manager custom form preserves advanced parameters and unknown compat 
   assert.equal(saved.models[0].compat, undefined);
   assert.equal(saved.models[0].headers, undefined);
   assert.equal(saved.authHeader, false);
-  const defaults = JSON.parse(readFileSync(defaultsPath, "utf8"));
-  assert.equal(defaults.modelDefaults["advanced-proxy/attempted-custom-rename"], "medium");
-  assert.equal(defaults.modelDefaults["advanced-proxy/advanced-model"], undefined);
+  const settings = JSON.parse(readFileSync(join(tempDir, "settings.json"), "utf8"));
+  assert.equal(settings.modelThinkingLevels["advanced-proxy/attempted-custom-rename"], "medium");
+  assert.equal(settings.modelThinkingLevels["advanced-proxy/advanced-model"], undefined);
 });
 
 test("saveApiProviderSettings renames a model in place and preserves siblings", async (t) => {
@@ -1387,14 +1412,78 @@ test("saveApiProviderSettings rejects renaming onto an existing model id", async
 test("renameModelThinkingDefault moves the per-model thinking default", async (t) => {
   const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-rename-thinking-"));
   t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const settingsPath = join(tempDir, "settings.json");
+  await saveModelThinkingDefault("maestro-openai", "old-model", "high", settingsPath, tempDir);
+  await saveModelThinkingDefault("maestro-openai", "other-model", "low", settingsPath, tempDir);
+  await renameModelThinkingDefault("maestro-openai", "old-model", "new-model", settingsPath, tempDir);
+  const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+  assert.equal(settings.modelThinkingLevels["maestro-openai/old-model"], undefined);
+  assert.equal(settings.modelThinkingLevels["maestro-openai/new-model"], "high");
+  assert.equal(settings.modelThinkingLevels["maestro-openai/other-model"], "low");
+});
+
+test("legacy model thinking defaults migrate idempotently and retain unsafe keys", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-thinking-migration-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
   const defaultsPath = join(tempDir, "api-manager.json");
-  await saveModelThinkingDefault("maestro-openai", "old-model", "high", defaultsPath);
-  await saveModelThinkingDefault("maestro-openai", "other-model", "low", defaultsPath);
-  await renameModelThinkingDefault("maestro-openai", "old-model", "new-model", defaultsPath);
-  const defaults = JSON.parse(readFileSync(defaultsPath, "utf8"));
-  assert.equal(defaults.modelDefaults["maestro-openai/old-model"], undefined);
-  assert.equal(defaults.modelDefaults["maestro-openai/new-model"], "high");
-  assert.equal(defaults.modelDefaults["maestro-openai/other-model"], "low");
+  const settingsPath = join(tempDir, "settings.json");
+  writeFileSync(modelsPath, JSON.stringify({
+    providers: {
+      openai: { models: [{ id: "gpt" }] },
+      anthropic: { models: [{ id: "claude" }] },
+      deepseek: { models: [{ id: "chat" }] },
+      team: { models: [{ id: "a/b" }] },
+      "team/a": { models: [{ id: "b" }] },
+    },
+  }));
+  writeFileSync(defaultsPath, JSON.stringify({
+    version: 1,
+    modelDefaults: {
+      "openai/gpt": "high",
+      "anthropic/claude": "high",
+      "deepseek/chat": "low",
+      "team/a%2Fb": "low",
+      "team%2Fa/b": "high",
+      "team/a/b": "medium",
+      "unknown/model": "xhigh",
+      "openai/invalid": "turbo",
+    },
+  }));
+  writeFileSync(settingsPath, JSON.stringify({
+    modelThinkingLevels: { "anthropic/claude": "medium" },
+  }));
+
+  const first = await migrateLegacyModelThinkingDefaults(tempDir, modelsPath, defaultsPath, settingsPath);
+  assert.deepEqual(first.migratedKeys.sort(), ["deepseek/chat", "openai/gpt"]);
+  assert.deepEqual(
+    first.retainedKeys.map((entry) => [entry.key, entry.reason]).sort(),
+    [
+      ["openai/invalid", "invalid"],
+      ["team%2Fa/b", "official-key-collision"],
+      ["team/a%2Fb", "official-key-collision"],
+      ["team/a/b", "ambiguous"],
+      ["unknown/model", "unknown"],
+    ],
+  );
+  const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+  assert.deepEqual(settings.modelThinkingLevels, {
+    "anthropic/claude": "medium",
+    "deepseek/chat": "low",
+    "openai/gpt": "high",
+  });
+  const retained = JSON.parse(readFileSync(defaultsPath, "utf8")).modelDefaults;
+  assert.deepEqual(retained, {
+    "team/a%2Fb": "low",
+    "team%2Fa/b": "high",
+    "team/a/b": "medium",
+    "unknown/model": "xhigh",
+    "openai/invalid": "turbo",
+  });
+
+  const second = await migrateLegacyModelThinkingDefaults(tempDir, modelsPath, defaultsPath, settingsPath);
+  assert.deepEqual(second.migratedKeys, []);
+  assert.deepEqual(JSON.parse(readFileSync(settingsPath, "utf8")).modelThinkingLevels, settings.modelThinkingLevels);
 });
 
 test("renameDefaultModelRef updates the default model reference", async (t) => {
@@ -1715,9 +1804,8 @@ test("/api-manager reset clears provider config and restores the global thinking
 
   const saved = JSON.parse(readFileSync(modelsPath, "utf8"));
   assert.equal(saved.providers["maestro-anthropic"], undefined);
-  const defaults = JSON.parse(readFileSync(defaultsPath, "utf8"));
-  assert.equal(defaults.modelDefaults["maestro-anthropic/claude-private"], undefined);
   const settings = JSON.parse(readFileSync(join(tempDir, "settings.json"), "utf8"));
+  assert.equal(settings.modelThinkingLevels?.["maestro-anthropic/claude-private"], undefined);
   assert.equal(settings.defaultThinkingLevel, "medium");
   assert.deepEqual(unregistered, ["maestro-anthropic"]);
   assert.equal(refreshes, 1);
@@ -1918,157 +2006,116 @@ test("models.json custom API settings preserve DeepSeek models", async (t) => {
   assert.ok(deepseekAfter.some((model) => model.id === "deepseek-v4-pro"));
 });
 
-test("/effort renders canonical capability order with current marker", async (t) => {
-  const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-canonical-"));
+test("session_start applies a newly migrated current-model default exactly once", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-thinking-session-migration-"));
   t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
   const defaultsPath = join(tempDir, "api-manager.json");
+  const settingsPath = join(tempDir, "settings.json");
+  writeFileSync(modelsPath, JSON.stringify({
+    providers: { openai: { models: [{ id: "gpt" }] } },
+  }));
+  writeFileSync(defaultsPath, JSON.stringify({
+    version: 1,
+    modelDefaults: { "openai/gpt": "high", "unknown/model": "low" },
+  }));
+  writeFileSync(settingsPath, JSON.stringify({ defaultThinkingLevel: "medium" }));
+
   const applied: string[] = [];
-  const harness = createEffortHarness({
-    modelsPath: join(tempDir, "models.json"),
+  const statuses: Array<{ key: string; value: string | undefined }> = [];
+  const notifications: Array<{ message: string; type: string }> = [];
+  const harness = createThinkingRuntimeHarness({
+    modelsPath,
     defaultsPath,
+    settingsPath,
     current: "medium",
     apply(level) { applied.push(level); },
   });
-  const notifications: Array<{ message: string; type: string }> = [];
-  const statuses: Array<{ key: string; value: string | undefined }> = [];
-  let rendered: string[] = [];
-  let title = "";
-  await harness.command.handler("", {
-    model: {
-      provider: "maestro-openai",
-      id: "gpt-5.4",
-      reasoning: true,
-      thinkingLevelMap: { xhigh: "xhigh" },
-    },
+  assert.equal(harness.handlers.has("model_select"), false, "Pi owns recurring model-switch restoration");
+  const sessionStart = harness.handlers.get("session_start");
+  assert.ok(sessionStart);
+  const ctx = {
+    cwd: tempDir,
+    model: { provider: "openai", id: "gpt" },
+    sessionManager: { getBranch() { return []; } },
+    modelRegistry: { getAvailable() { return []; } },
     ui: {
-      async select(nextTitle: string, options: string[]) {
-        title = nextTitle;
-        rendered = options;
-        return "high";
-      },
       notify(message: string, type: string) { notifications.push({ message, type }); },
+      setStatus(key: string, value: string | undefined) { statuses.push({ key, value }); },
+    },
+  };
+
+  await sessionStart!({ type: "session_start", reason: "startup" }, ctx);
+  assert.deepEqual(applied, ["high"]);
+  assert.equal(harness.current, "high");
+  const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+  assert.equal(settings.modelThinkingLevels["openai/gpt"], "high");
+  assert.equal(settings.defaultThinkingLevel, "medium");
+  assert.deepEqual(JSON.parse(readFileSync(defaultsPath, "utf8")).modelDefaults, {
+    "unknown/model": "low",
+  });
+  assert.deepEqual(notifications.find((entry) => entry.message.startsWith("Legacy thinking defaults retained")), {
+    message: "Legacy thinking defaults retained: 1",
+    type: "warning",
+  });
+  assert.deepEqual(statuses.at(-1), { key: "maestro-effort", value: "high" });
+
+  await sessionStart!({ type: "session_start", reason: "reload" }, ctx);
+  assert.deepEqual(applied, ["high"], "a consumed legacy value is never applied again");
+
+  const thinkingSelect = harness.handlers.get("thinking_level_select");
+  assert.ok(thinkingSelect);
+  thinkingSelect!({ level: "xhigh" }, ctx);
+  assert.deepEqual(statuses.at(-1), { key: "maestro-effort", value: "xhigh" });
+});
+
+test("session_start migration never overrides resumed-session thinking", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-thinking-session-resume-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  const defaultsPath = join(tempDir, "api-manager.json");
+  const settingsPath = join(tempDir, "settings.json");
+  writeFileSync(modelsPath, JSON.stringify({
+    providers: { openai: { models: [{ id: "gpt" }] } },
+  }));
+  writeFileSync(defaultsPath, JSON.stringify({
+    version: 1,
+    modelDefaults: { "openai/gpt": "high" },
+  }));
+  writeFileSync(settingsPath, JSON.stringify({ defaultThinkingLevel: "medium" }));
+
+  const applied: string[] = [];
+  const statuses: Array<{ key: string; value: string | undefined }> = [];
+  const harness = createThinkingRuntimeHarness({
+    modelsPath,
+    defaultsPath,
+    settingsPath,
+    current: "low",
+    apply(level) { applied.push(level); },
+  });
+  const sessionStart = harness.handlers.get("session_start");
+  assert.ok(sessionStart);
+  await sessionStart!({ type: "session_start", reason: "resume" }, {
+    cwd: tempDir,
+    model: { provider: "openai", id: "gpt" },
+    sessionManager: {
+      getBranch() { return [{ type: "thinking_level_change", thinkingLevel: "low" }]; },
+    },
+    modelRegistry: { getAvailable() { return []; } },
+    ui: {
+      notify() {},
       setStatus(key: string, value: string | undefined) { statuses.push({ key, value }); },
     },
   });
 
-  assert.deepEqual(rendered, [
-    "off",
-    "minimal",
-    "low",
-    "medium（当前）",
-    "high",
-    "xhigh",
-    "⚙ 管理思考等级…",
-  ]);
-  assert.equal(title, "选择思考强度（当前：medium）");
-  assert.deepEqual(applied, ["high"]);
-  assert.deepEqual(notifications.at(-1), { message: "思考强度已设为 high", type: "info" });
-  assert.deepEqual(statuses.at(-1), { key: "maestro-effort", value: "high" });
-});
-
-test("/effort filters unsupported canonical levels", async (t) => {
-  const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-filter-"));
-  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
-  const harness = createEffortHarness({
-    modelsPath: join(tempDir, "models.json"),
-    defaultsPath: join(tempDir, "api-manager.json"),
-  });
-  let rendered: string[] = [];
-  await harness.command.handler("", {
-    model: {
-      provider: "test",
-      id: "filtered",
-      reasoning: true,
-      thinkingLevelMap: { off: null, minimal: null, xhigh: null },
-    },
-    ui: {
-      async select(_title: string, options: string[]) {
-        rendered = options;
-        return undefined;
-      },
-      notify() {},
-    },
-  });
-  assert.deepEqual(rendered, ["low", "medium（当前）", "high", "⚙ 管理思考等级…"]);
-});
-
-test("/effort offers max when the model maps a max wire value", async (t) => {
-  const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-max-level-"));
-  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
-  const harness = createEffortHarness({
-    modelsPath: join(tempDir, "models.json"),
-    defaultsPath: join(tempDir, "api-manager.json"),
-  });
-  let rendered: string[] = [];
-  await harness.command.handler("", {
-    model: {
-      provider: "maestro-qwen",
-      id: "qwen3.8-max",
-      reasoning: true,
-      thinkingLevelMap: { off: null, xhigh: "max" },
-    },
-    ui: {
-      async select(_title: string, options: string[]) {
-        rendered = options;
-        return undefined;
-      },
-      notify() {},
-    },
-  });
-  assert.ok(rendered.includes("max"));
-  assert.deepEqual(rendered.slice(-2), ["max", "⚙ 管理思考等级…"]);
-});
-
-test("/effort persists API Manager and system providers by model key", async (t) => {
-  const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-provider-keys-"));
-  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
-  const modelsPath = join(tempDir, "models.json");
-  const defaultsPath = join(tempDir, "api-manager.json");
-  writeFileSync(modelsPath, "invalid models file");
-  const applied: string[] = [];
-  const harness = createEffortHarness({
-    modelsPath,
-    defaultsPath,
-    apply(level) { applied.push(level); },
-  });
-  const invoke = async (model: any, selected: string) => {
-    await harness.command.handler("", {
-      model,
-      ui: {
-        async select() { return selected; },
-        notify() {},
-      },
-    });
-  };
-  await invoke(
-    { provider: "maestro-openai", id: "gpt-5.4", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
-    "high",
-  );
-  await invoke(
-    { provider: "anthropic", id: "claude-sonnet", reasoning: true, thinkingLevelMap: { xhigh: "high" } },
-    "xhigh",
-  );
-  await invoke(
-    { provider: "team", id: "a/b", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
-    "low",
-  );
-  await invoke(
-    { provider: "team/a", id: "b", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
-    "high",
-  );
-
-  const defaults = JSON.parse(readFileSync(defaultsPath, "utf8"));
-  assert.equal(defaults.modelDefaults["maestro-openai/gpt-5.4"], "high");
-  assert.equal(defaults.modelDefaults["anthropic/claude-sonnet"], "xhigh");
-  assert.equal(defaults.modelDefaults["team/a%2Fb"], "low");
-  assert.equal(defaults.modelDefaults["team%2Fa/b"], "high");
-  assert.equal(defaults.modelDefaults["team/a/b"], undefined);
-  assert.deepEqual(applied, ["high", "xhigh", "low", "high"]);
-  assert.equal(readFileSync(modelsPath, "utf8"), "invalid models file");
+  assert.deepEqual(applied, []);
+  assert.equal(harness.current, "low");
+  assert.equal(JSON.parse(readFileSync(settingsPath, "utf8")).modelThinkingLevels["openai/gpt"], "high");
+  assert.deepEqual(statuses.at(-1), { key: "maestro-effort", value: "low" });
 });
 
 test("legacy Qwen entry path preserves ProviderConfig metadata, compat, and live max mapping", async (t) => {
-  const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-qwen-entry-"));
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-thinking-qwen-entry-"));
   t.after(() => rmSync(tempDir, { recursive: true, force: true }));
   const modelsPath = join(tempDir, "models.json");
   const defaultsPath = join(tempDir, "api-manager.json");
@@ -2129,17 +2176,12 @@ test("legacy Qwen entry path preserves ProviderConfig metadata, compat, and live
     "maestro-qwen": { type: "api_key", key: "qwen-secret" },
   }), modelsPath);
   const captured: Array<{ name: string; config: any }> = [];
-  const applied: string[] = [];
-  const harness = createEffortHarness({
-    modelsPath,
-    defaultsPath,
-    current: "xhigh",
-    apply(level) { applied.push(level); },
-    registerProvider(name, config) {
+  registerApiProviderConfigs({
+    registerProvider(name: string, config: any) {
       captured.push({ name, config });
       registry.registerProvider(name, config);
     },
-  });
+  } as any, { modelsPath, defaultsPath });
 
   const registration = captured.find((entry) => entry.name === "maestro-qwen")?.config;
   assert.ok(registration);
@@ -2176,17 +2218,6 @@ test("legacy Qwen entry path preserves ProviderConfig metadata, compat, and live
   assert.equal(request.ok, true);
   assert.deepEqual(request.headers, { "X-Provider": "qwen", "X-Model": "qwen-max" });
 
-  await harness.command.handler("", {
-    model: live,
-    ui: {
-      async select() { return "xhigh（当前）"; },
-      notify() {},
-    },
-  });
-  assert.ok(harness.modelSelect);
-  await harness.modelSelect!({ model: live });
-  assert.deepEqual(applied, ["xhigh", "xhigh"]);
-
   const loaded = await loadApiProviderSettings("maestro-qwen", modelsPath);
   assert.equal(loaded.maxThinking, true);
   const saved = JSON.parse(readFileSync(modelsPath, "utf8"));
@@ -2201,7 +2232,7 @@ test("legacy Qwen entry path preserves ProviderConfig metadata, compat, and live
 });
 
 test("runtime max capability accepts legacy and canonical mappings", async (t) => {
-  const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-runtime-max-"));
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-thinking-runtime-max-"));
   t.after(() => rmSync(tempDir, { recursive: true, force: true }));
   const modelsPath = join(tempDir, "models.json");
   const commands = new Map<string, any>();
@@ -2243,309 +2274,6 @@ test("runtime max capability accepts legacy and canonical mappings", async (t) =
   const map = registrations[0].config.models[0].thinkingLevelMap;
   assert.deepEqual(map, { off: null, xhigh: "max" });
   assert.equal("max" in map, false);
-});
-
-test("/effort cancellation and missing model are no-ops", async (t) => {
-  const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-noop-"));
-  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
-  const defaultsPath = join(tempDir, "api-manager.json");
-  const applied: string[] = [];
-  const harness = createEffortHarness({
-    modelsPath: join(tempDir, "models.json"),
-    defaultsPath,
-    apply(level) { applied.push(level); },
-  });
-  await harness.command.handler("", {
-    model: { provider: "openai", id: "gpt", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
-    ui: { async select() { return undefined; }, notify() {} },
-  });
-  assert.equal(existsSync(defaultsPath), false);
-  assert.deepEqual(applied, []);
-
-  const notifications: Array<{ message: string; type: string }> = [];
-  await harness.command.handler("", {
-    model: undefined,
-    ui: { notify(message: string, type: string) { notifications.push({ message, type }); } },
-  });
-  assert.equal(notifications.at(-1)?.type, "warning");
-  assert.equal(notifications.at(-1)?.message, "当前没有模型，无法调整思考强度。");
-  assert.deepEqual(applied, []);
-});
-
-/** Scripted UI for /effort management flows: queues select returns/inputs, records rendered options. */
-function createEffortManagementUi(options: {
-  selects: Array<string | undefined>;
-  inputs?: string[];
-}) {
-  const state = {
-    rendered: [] as string[],
-    titles: [] as string[],
-    notifications: [] as Array<{ message: string; type: string }>,
-  };
-  return {
-    state,
-    ui: {
-      async select(title: string, opts: string[]) {
-        state.titles.push(title);
-        state.rendered = opts;
-        return options.selects.shift();
-      },
-      async input(_title: string, _initial: string) {
-        return options.inputs?.shift();
-      },
-      notify(message: string, type: string) { state.notifications.push({ message, type }); },
-      setStatus() {},
-    },
-  } as any;
-}
-
-const EFFORT_MANAGE_LABEL = "⚙ 管理思考等级…";
-
-test("/effort management adds a named alias mapped to a canonical level", async (t) => {
-  const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-mgmt-add-"));
-  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
-  const defaultsPath = join(tempDir, "api-manager.json");
-  const applied: string[] = [];
-  const harness = createEffortHarness({
-    modelsPath: join(tempDir, "models.json"),
-    defaultsPath,
-    apply(level) { applied.push(level); },
-  });
-  const view = createEffortManagementUi({
-    // picker → manage → add → name → target xhigh → picker shows alias → pick it
-    selects: [EFFORT_MANAGE_LABEL, "➕ 新增等级", "xhigh", "深度 → xhigh"],
-    inputs: ["深度"],
-  });
-  await harness.command.handler("", {
-    model: { provider: "openai", id: "gpt", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
-    get ui() { return view.ui; },
-  });
-  const saved = JSON.parse(readFileSync(defaultsPath, "utf8"));
-  assert.equal(saved.effortLevels.entries.at(-1).name, "深度");
-  assert.equal(saved.effortLevels.entries.at(-1).level, "xhigh");
-  assert.equal(saved.effortLevels.entries.length, 8);
-  assert.ok(view.state.rendered.includes("深度 → xhigh"));
-  assert.deepEqual(applied, ["xhigh"]);
-});
-
-test("/effort management deletes a default level and hides it from the picker", async (t) => {
-  const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-mgmt-remove-"));
-  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
-  const defaultsPath = join(tempDir, "api-manager.json");
-  const harness = createEffortHarness({
-    modelsPath: join(tempDir, "models.json"),
-    defaultsPath,
-  });
-  const view = createEffortManagementUi({
-    // picker → manage → remove → pick "off" → picker re-renders without "off"
-    selects: [EFFORT_MANAGE_LABEL, "🗑 删除等级", "off", undefined],
-  });
-  await harness.command.handler("", {
-    model: { provider: "openai", id: "gpt", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
-    get ui() { return view.ui; },
-  });
-  const saved = JSON.parse(readFileSync(defaultsPath, "utf8"));
-  assert.equal(saved.effortLevels.entries.length, 6);
-  assert.ok(saved.effortLevels.entries.every((entry: any) => entry.name !== "off"));
-  assert.ok(!view.state.rendered.includes("off"));
-});
-
-test("/effort management renames an entry and applies it under the new name", async (t) => {
-  const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-mgmt-rename-"));
-  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
-  const defaultsPath = join(tempDir, "api-manager.json");
-  const applied: string[] = [];
-  const harness = createEffortHarness({
-    modelsPath: join(tempDir, "models.json"),
-    defaultsPath,
-    apply(level) { applied.push(level); },
-  });
-  const view = createEffortManagementUi({
-    // picker → manage → rename → pick "high" → new name → picker → pick renamed entry
-    selects: [EFFORT_MANAGE_LABEL, "✏ 重命名", "high", "高 → high"],
-    inputs: ["高"],
-  });
-  await harness.command.handler("", {
-    model: { provider: "openai", id: "gpt", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
-    get ui() { return view.ui; },
-  });
-  const saved = JSON.parse(readFileSync(defaultsPath, "utf8"));
-  const renamed = saved.effortLevels.entries.find((entry: any) => entry.level === "high");
-  assert.equal(renamed.name, "高");
-  assert.deepEqual(applied, ["high"]);
-  assert.equal(view.state.notifications.at(-1)?.message, "思考强度已设为 high");
-});
-
-test("/effort management rejects duplicate names without writing", async (t) => {
-  const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-mgmt-dup-"));
-  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
-  const defaultsPath = join(tempDir, "api-manager.json");
-  const harness = createEffortHarness({
-    modelsPath: join(tempDir, "models.json"),
-    defaultsPath,
-  });
-  const view = createEffortManagementUi({
-    selects: [EFFORT_MANAGE_LABEL, "➕ 新增等级", undefined],
-    inputs: ["high"],
-  });
-  await harness.command.handler("", {
-    model: { provider: "openai", id: "gpt", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
-    get ui() { return view.ui; },
-  });
-  assert.equal(view.state.notifications.at(-1)?.type, "warning");
-  assert.match(view.state.notifications.at(-1)?.message ?? "", /已存在/);
-  assert.equal(existsSync(defaultsPath), false);
-});
-
-test("/effort management keeps at least one entry", async (t) => {
-  const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-mgmt-last-"));
-  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
-  const defaultsPath = join(tempDir, "api-manager.json");
-  writeFileSync(defaultsPath, JSON.stringify({
-    version: 1,
-    effortLevels: { entries: [{ name: "only", level: "low" }] },
-  }));
-  const harness = createEffortHarness({
-    modelsPath: join(tempDir, "models.json"),
-    defaultsPath,
-  });
-  const view = createEffortManagementUi({
-    selects: [EFFORT_MANAGE_LABEL, "🗑 删除等级", undefined],
-  });
-  await harness.command.handler("", {
-    model: { provider: "openai", id: "gpt", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
-    get ui() { return view.ui; },
-  });
-  assert.equal(view.state.notifications.at(-1)?.type, "warning");
-  assert.match(view.state.notifications.at(-1)?.message ?? "", /至少保留一个思考等级/);
-  const saved = JSON.parse(readFileSync(defaultsPath, "utf8"));
-  assert.equal(saved.effortLevels.entries.length, 1);
-});
-
-test("/effort management restores defaults by removing the persisted section", async (t) => {
-  const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-mgmt-reset-"));
-  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
-  const defaultsPath = join(tempDir, "api-manager.json");
-  writeFileSync(defaultsPath, JSON.stringify({
-    version: 1,
-    effortLevels: { entries: [{ name: "深度", level: "xhigh" }] },
-    modelDefaults: { "openai/gpt": "low" },
-  }));
-  const harness = createEffortHarness({
-    modelsPath: join(tempDir, "models.json"),
-    defaultsPath,
-  });
-  const view = createEffortManagementUi({
-    selects: [EFFORT_MANAGE_LABEL, "♻ 恢复默认", undefined],
-  });
-  await harness.command.handler("", {
-    model: { provider: "openai", id: "gpt", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
-    get ui() { return view.ui; },
-  });
-  const saved = JSON.parse(readFileSync(defaultsPath, "utf8"));
-  assert.equal("effortLevels" in saved, false);
-  assert.deepEqual(saved.modelDefaults, { "openai/gpt": "low" });
-  assert.ok(view.state.rendered.includes("off"));
-  assert.ok(!view.state.rendered.includes("深度 → xhigh"));
-});
-
-test("/effort persistence failure preserves existing default bytes and runtime", async (t) => {
-  const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-save-failure-"));
-  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
-  const defaultsPath = join(tempDir, "api-manager.json");
-  writeFileSync(defaultsPath, "[\n  \"sentinel\"\n]\n");
-  const before = readFileSync(defaultsPath);
-  const applied: string[] = [];
-  const harness = createEffortHarness({
-    modelsPath: join(tempDir, "models.json"),
-    defaultsPath,
-    apply(level) { applied.push(level); },
-  });
-  const notifications: Array<{ message: string; type: string }> = [];
-  await harness.command.handler("", {
-    model: { provider: "openai", id: "gpt", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
-    ui: {
-      async select() { return "high"; },
-      notify(message: string, type: string) { notifications.push({ message, type }); },
-    },
-  });
-  assert.deepEqual(readFileSync(defaultsPath), before);
-  assert.deepEqual(applied, []);
-  assert.equal(notifications.at(-1)?.type, "error");
-  assert.match(notifications.at(-1)?.message ?? "", /^思考强度保存失败：/);
-});
-
-test("model_select restores canonical effort, synchronizes the status, and passes max through", async (t) => {
-  const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-model-select-"));
-  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
-  const defaultsPath = join(tempDir, "api-manager.json");
-  writeFileSync(defaultsPath, JSON.stringify({
-    version: 1,
-    modelDefaults: {
-      "maestro-openai/gpt-5.4": "max",
-      "anthropic/claude-sonnet": "max",
-    },
-  }));
-  const applied: string[] = [];
-  const statuses: Array<{ key: string; value: string | undefined }> = [];
-  const harness = createEffortHarness({
-    modelsPath: join(tempDir, "models.json"),
-    defaultsPath,
-    apply(level) { applied.push(level); },
-  });
-  assert.ok(harness.modelSelect);
-  const ctx = { ui: { setStatus(key: string, value: string | undefined) { statuses.push({ key, value }); } } };
-  await harness.modelSelect!({ model: { provider: "maestro-openai", id: "gpt-5.4" } }, ctx);
-  await harness.modelSelect!({ model: { provider: "anthropic", id: "claude-sonnet" } }, ctx);
-  assert.deepEqual(applied, ["max", "max"]);
-  assert.equal(applied.includes("max"), true);
-  assert.deepEqual(statuses, [
-    { key: "maestro-effort", value: "max" },
-    { key: "maestro-effort", value: "max" },
-  ]);
-});
-
-test("/effort does not change global defaultThinkingLevel", async (t) => {
-  const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-global-default-"));
-  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
-  const settingsPath = join(tempDir, "settings.json");
-  writeFileSync(settingsPath, JSON.stringify({ defaultThinkingLevel: "medium", sentinel: true }));
-  const harness = createEffortHarness({
-    modelsPath: join(tempDir, "models.json"),
-    defaultsPath: join(tempDir, "api-manager.json"),
-  });
-  await harness.command.handler("", {
-    cwd: tempDir,
-    model: { provider: "openai", id: "gpt", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
-    ui: { async select() { return "high"; }, notify() {} },
-  });
-  const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
-  assert.equal(settings.defaultThinkingLevel, "medium");
-  assert.equal(settings.sentinel, true);
-});
-
-test("/effort reports synchronous runtime apply errors after durable save", async (t) => {
-  const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-apply-failure-"));
-  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
-  const defaultsPath = join(tempDir, "api-manager.json");
-  const harness = createEffortHarness({
-    modelsPath: join(tempDir, "models.json"),
-    defaultsPath,
-    apply() { throw new Error("runtime unavailable"); },
-  });
-  const notifications: Array<{ message: string; type: string }> = [];
-  await harness.command.handler("", {
-    model: { provider: "openai", id: "gpt", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
-    ui: {
-      async select() { return "high"; },
-      notify(message: string, type: string) { notifications.push({ message, type }); },
-    },
-  });
-  const defaults = JSON.parse(readFileSync(defaultsPath, "utf8"));
-  assert.equal(defaults.modelDefaults["openai/gpt"], "high");
-  assert.equal(notifications.at(-1)?.type, "error");
-  assert.match(notifications.at(-1)?.message ?? "", /^思考强度应用失败：/);
-  assert.equal(notifications.some((entry) => entry.message.startsWith("思考强度已设为")), false);
 });
 
 test("saveApiProviderSettings stores explicit api, compat, and name for a user-defined Provider", async (t) => {
@@ -2672,9 +2400,10 @@ test("/api-manager creates a user-defined Provider with a free-form id and chose
 
   const defaults = JSON.parse(readFileSync(join(tempDir, "api-manager.json"), "utf8"));
   assert.deepEqual(defaults.managedProviders, ["my-proxy"]);
-  assert.equal(defaults.modelDefaults["my-proxy/my-model"], "high");
+  assert.equal(defaults.modelDefaults, undefined);
 
   const settings = JSON.parse(readFileSync(join(tempDir, "settings.json"), "utf8"));
+  assert.equal(settings.modelThinkingLevels["my-proxy/my-model"], "high");
   assert.equal(settings.defaultProvider, "my-proxy");
   assert.equal(settings.defaultModel, "my-model");
 
@@ -2799,7 +2528,11 @@ test("/api-manager delete removes a user-defined Provider and migrates its manag
   const defaults = JSON.parse(readFileSync(defaultsPath, "utf8"));
   assert.deepEqual(defaults.managedProviders, ["new-kept", "old-kept"]);
   assert.equal(defaults.managedChannels, undefined);
-  assert.equal(defaults.modelDefaults["my-proxy/my-model"], undefined);
+  assert.equal(defaults.modelDefaults?.["my-proxy/my-model"], undefined);
+  const settings = existsSync(join(tempDir, "settings.json"))
+    ? JSON.parse(readFileSync(join(tempDir, "settings.json"), "utf8"))
+    : {};
+  assert.equal(settings.modelThinkingLevels?.["my-proxy/my-model"], undefined);
   assert.deepEqual(unregistered, ["my-proxy"]);
   assert.equal(refreshes, 1);
 });
@@ -3181,6 +2914,7 @@ test("/api-manager no-arg configure lists every model globally and edits through
   // Model-centric navigation: one list shows every model; format is only an attribute.
   assert.ok(selectCalls[0]?.options.includes("启用或停用 Provider"));
   assert.ok(selectCalls[0]?.options.some((option) => option.startsWith("Vision 多模态策略")));
+  assert.equal(selectCalls[0]?.options.some((option) => option.includes("思考强度")), false);
   const global = selectCalls.find((call) => call.title !== "选择操作");
   assert.ok(global);
   assert.ok(global!.options.some((option) => option.includes("maestro-openai / model-a")));
@@ -3398,9 +3132,8 @@ test("/api-manager creates multiple models in one form submission from a comma-s
   const settings = JSON.parse(readFileSync(join(tempDir, "settings.json"), "utf8"));
   assert.equal(settings.defaultProvider, "maestro-openai");
   assert.equal(settings.defaultModel, "model-b");
-  const defaults = JSON.parse(readFileSync(defaultsPath, "utf8")).modelDefaults;
-  assert.equal(defaults["maestro-openai/model-b"], "medium");
-  assert.equal(defaults["maestro-openai/model-c"], "medium");
+  assert.equal(settings.modelThinkingLevels["maestro-openai/model-b"], "medium");
+  assert.equal(settings.modelThinkingLevels["maestro-openai/model-c"], "medium");
 });
 
 test("Model ID list validation rejects duplicates and models that already exist", async (t) => {
@@ -3729,8 +3462,8 @@ test("/api-manager exports and imports Provider configuration round-trip", async
     name: "Advanced Proxy",
   }, modelsPath);
   writeFileSync(defaultsPath, JSON.stringify({ version: 1, managedProviders: ["advanced-proxy"] }));
-  await saveModelThinkingDefault("maestro-openai", "model-a", "high", defaultsPath);
-  await saveModelThinkingDefault("advanced-proxy", "proxy-model", "low", defaultsPath);
+  await saveModelThinkingDefault("maestro-openai", "model-a", "high", settingsPath, tempDir);
+  await saveModelThinkingDefault("advanced-proxy", "proxy-model", "low", settingsPath, tempDir);
   // A provider not owned by the API Manager must stay outside the export
   // and survive the import untouched.
   const deepseekEntry = {
@@ -3778,6 +3511,7 @@ test("/api-manager exports and imports Provider configuration round-trip", async
 
   // Simulate a fresh machine: only the foreign Provider remains.
   writeFileSync(modelsPath, JSON.stringify({ providers: { deepseek: deepseekEntry } }));
+  writeFileSync(settingsPath, JSON.stringify({}));
   rmSync(defaultsPath, { force: true });
 
   await commands.get("api-manager").handler(`import ${exportPath}`, ctx);
@@ -3794,8 +3528,10 @@ test("/api-manager exports and imports Provider configuration round-trip", async
   assert.equal(importedRoot.providers["advanced-proxy"].api, "openai-completions");
   const importedDefaults = JSON.parse(readFileSync(defaultsPath, "utf8"));
   assert.deepEqual(importedDefaults.managedProviders, ["advanced-proxy"]);
-  assert.equal(importedDefaults.modelDefaults["maestro-openai/model-a"], "high");
-  assert.equal(importedDefaults.modelDefaults["advanced-proxy/proxy-model"], "low");
+  assert.equal(importedDefaults.modelDefaults, undefined);
+  const importedSettings = JSON.parse(readFileSync(settingsPath, "utf8"));
+  assert.equal(importedSettings.modelThinkingLevels["maestro-openai/model-a"], "high");
+  assert.equal(importedSettings.modelThinkingLevels["advanced-proxy/proxy-model"], "low");
   assert.ok(registered.includes("maestro-openai"));
   assert.ok(registered.includes("advanced-proxy"));
   assert.ok(refreshes >= 2);
@@ -3869,9 +3605,11 @@ test("/api-manager export uses the default path and import keeps local keys plus
   assert.equal(importedRoot.providers["custom-y"].apiKey, "y-secret");
   const importedDefaults = JSON.parse(readFileSync(defaultsPath, "utf8"));
   assert.deepEqual(importedDefaults.managedProviders, ["custom-x", "custom-y"]);
-  assert.equal(importedDefaults.modelDefaults["custom-y/m2"], "low");
+  assert.equal(importedDefaults.modelDefaults, undefined);
+  const importedSettings = JSON.parse(readFileSync(settingsPath, "utf8"));
+  assert.equal(importedSettings.modelThinkingLevels["custom-y/m2"], "low");
   // The replaced model list drops the stale local default.
-  assert.equal(importedDefaults.modelDefaults["custom-x/m1"], undefined);
+  assert.equal(importedSettings.modelThinkingLevels["custom-x/m1"], undefined);
 });
 
 test("/api-manager import rejects invalid files without touching models.json", async (t) => {

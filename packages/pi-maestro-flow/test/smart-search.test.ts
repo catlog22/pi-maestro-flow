@@ -3,6 +3,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
+import { buildSearchProviderUnavailableMessage } from "../src/tools/web-access/gemini-search.ts";
+import { applyProviderHeaders } from "../src/tools/web-access/openai-search.ts";
 import {
   SmartSearchParams,
   buildSmartSearchArgs,
@@ -12,6 +14,36 @@ import {
   type SmartSearchRunOptions,
   type SmartSearchRunner,
 } from "../src/tools/smart-search.ts";
+
+test("OpenAI direct requests apply Pi ProviderHeaders overrides after generated defaults", () => {
+  assert.deepEqual(applyProviderHeaders({
+    Authorization: "Bearer generated",
+    "Content-Type": "application/json",
+    "X-Delete": "generated",
+  }, {
+    authorization: null,
+    "content-type": "application/custom",
+    "x-custom": "custom",
+    "x-delete": null,
+  }), {
+    "content-type": "application/custom",
+    "x-custom": "custom",
+  });
+  assert.deepEqual(applyProviderHeaders({ Authorization: "Bearer generated" }, undefined), {
+    Authorization: "Bearer generated",
+  });
+});
+
+test("search provider unavailable message lists supported channels and free options", () => {
+  const message = buildSearchProviderUnavailableMessage("D:/config/web-search.json");
+  assert.match(message, /Available search channels \(free options included\)/);
+  assert.match(message, /Free, no key: AnySearch/);
+  assert.match(message, /Free account: Gemini Web/);
+  assert.match(message, /Free tier: SERPdive krill/);
+  assert.match(message, /Self-hosted: SearXNG/);
+  assert.match(message, /OpenAI\/Codex, Brave, Parallel, Tavily, Perplexity, Exa, and Gemini API/);
+  assert.match(message, /D:\/config\/web-search\.json/);
+});
 
 class FakeRunner implements SmartSearchRunner {
   calls: Array<{ args: readonly string[]; options: SmartSearchRunOptions }> = [];

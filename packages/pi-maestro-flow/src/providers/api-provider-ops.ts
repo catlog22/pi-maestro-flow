@@ -24,7 +24,6 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { NETWORK_RETRY_POLICY } from "pi-maestro-teammate/v1/retry";
 import {
-  EFFORT_LEVELS,
   EFFORT_STATUS_KEY,
   isThinkingLevel as isCanonicalThinkingLevel,
 } from "../effort-display.ts";
@@ -81,7 +80,6 @@ const OPS_CATALOGS = {
     "menu.provider": "Manage Provider connection (URL / key / headers)",
     "menu.show": "View model details",
     "menu.vision": "Vision multimodal policy (current: {state})",
-    "menu.effort": "Adjust thinking effort",
     "menu.toggle": "Enable or disable a Provider",
     "menu.delete": "Delete a model",
     "menu.retry": "Automatic retry (current: {state})",
@@ -125,7 +123,6 @@ const OPS_CATALOGS = {
     "menu.provider": "管理 Provider 连接（URL / key / headers）",
     "menu.show": "查看模型详情",
     "menu.vision": "Vision 多模态策略（当前：{state}）",
-    "menu.effort": "调整思考强度",
     "menu.toggle": "启用或停用 Provider",
     "menu.delete": "删除模型",
     "menu.retry": "自动重试（当前：{state}）",
@@ -193,7 +190,7 @@ export async function removeProviderKey(
   if (!confirmed) return;
   const modelIds = await configuredModelIds(providerId, modelsPath);
   const result = await deleteApiProviderSettings(providerId, modelsPath);
-  await deleteProviderThinkingDefaults(providerId, defaultsPath);
+  await deleteProviderThinkingDefaults(providerId, modelIds, settingsPath, ctx.cwd, defaultsPath);
   for (const modelId of modelIds) {
     await clearDeletedDefaultModel(settingsPath, providerId, modelId);
   }
@@ -256,7 +253,7 @@ export async function resetProvider(
   if (!confirmed) return;
   const modelIds = await configuredModelIds(providerId, modelsPath);
   const result = await deleteApiProviderSettings(providerId, modelsPath);
-  await deleteProviderThinkingDefaults(providerId, defaultsPath);
+  await deleteProviderThinkingDefaults(providerId, modelIds, settingsPath, ctx.cwd, defaultsPath);
   for (const modelId of modelIds) {
     await clearDeletedDefaultModel(settingsPath, providerId, modelId);
   }
@@ -314,7 +311,7 @@ export async function deleteProviderModel(
   );
   if (!confirmed) return;
   const result = await deleteApiProviderModelSettings(providerId, modelId, modelsPath);
-  await deleteModelThinkingDefault(providerId, modelId, defaultsPath);
+  await deleteModelThinkingDefault(providerId, modelId, settingsPath, ctx.cwd, defaultsPath);
   await clearDeletedDefaultModel(settingsPath, providerId, modelId);
   if (modelIds.length === 1) {
     await removeManagedProvider(defaultsPath, providerId);
@@ -354,6 +351,8 @@ export async function listProviders(
       modelLines,
       providerLines,
       defaultsPath,
+      settingsPath,
+      ctx.cwd,
     );
   }
   for (const id of managedProviderIdsSync(defaultsPath, modelsPath)) {
@@ -371,6 +370,8 @@ export async function listProviders(
       modelLines,
       providerLines,
       defaultsPath,
+      settingsPath,
+      ctx.cwd,
     );
   }
   ctx.ui.notify([
@@ -379,7 +380,7 @@ export async function listProviders(
     "Providers（URL / API key 级配置）：",
     ...providerLines,
     ...(await renderModelFilterSummary(defaultsPath)),
-    `Pi 全局默认思考强度：${currentDefaultThinkingLevel(ctx, modelsPath)}`,
+    `Pi 全局默认思考强度：${currentDefaultThinkingLevel(ctx, modelsPath, settingsPath)}`,
     `Provider 自动重试：${retry.enabled ? "开启" : "关闭"} · 最大 ${retry.maxRetries} 次 · 退避上限 ${retry.maxDelayMs ?? NETWORK_RETRY_POLICY.maxDelayMs}ms`,
     `文件：${modelsPath}`,
   ].join("\n"), "info");
@@ -395,11 +396,13 @@ export async function appendListLines(
   modelLines: string[],
   providerLines: string[],
   defaultsPath: string,
+  settingsPath: string,
+  cwd: string,
 ): Promise<void> {
   const models = Array.isArray(config.models) ? config.models.filter(isRecord) : [];
   for (const model of models) {
     if (typeof model.id !== "string") continue;
-    const level = await loadModelThinkingDefault(providerId, model.id, defaultsPath);
+    const level = await loadModelThinkingDefault(providerId, model.id, settingsPath, cwd, defaultsPath);
     const modelApi = typeof model.api === "string" ? model.api : api;
     modelLines.push([
       `- ${providerId}/${model.id}`,
@@ -427,6 +430,7 @@ export async function showProvider(
   displayName: string,
   modelsPath: string,
   defaultsPath: string,
+  settingsPath: string,
   preferredModelId?: string,
 ): Promise<void> {
   const preset = findPreset(providerId);
@@ -450,7 +454,7 @@ export async function showProvider(
         : await ctx.ui.select(`选择要查看的 ${displayName} 模型`, modelIds));
     if (!modelId) return;
     const model = models.find((entry) => entry.id === modelId) ?? {};
-    const level = await loadModelThinkingDefault(providerId, modelId, defaultsPath);
+    const level = await loadModelThinkingDefault(providerId, modelId, settingsPath, ctx.cwd, defaultsPath);
     const modelApi = typeof model.api === "string" ? model.api : api;
     ctx.ui.notify([
       displayName,
@@ -474,7 +478,9 @@ export async function showProvider(
   }
   const modelLines = await Promise.all(models.map(async (model) => {
     const id = typeof model.id === "string" ? model.id : "<invalid>";
-    const level = id === "<invalid>" ? undefined : await loadModelThinkingDefault(providerId, id, defaultsPath);
+    const level = id === "<invalid>"
+      ? undefined
+      : await loadModelThinkingDefault(providerId, id, settingsPath, ctx.cwd, defaultsPath);
     return `- ${id} · reasoning=${model.reasoning === true ? "enabled" : "disabled"} · vision=${Array.isArray(model.input) && model.input.includes("image") ? "on" : "off"} · default=${level ?? "global"}`;
   }));
   ctx.ui.notify([
@@ -485,7 +491,7 @@ export async function showProvider(
     `Base URL：${typeof config.baseUrl === "string" ? config.baseUrl : preset?.baseUrl ?? ""}`,
     `Models（${models.length}）：`,
     ...modelLines,
-    `Default thinking（Pi 全局）：${currentDefaultThinkingLevel(ctx, modelsPath)}`,
+    `Default thinking（Pi 全局）：${currentDefaultThinkingLevel(ctx, modelsPath, settingsPath)}`,
     `Auth：${authSource(config.apiKey)}`,
     `文件：${modelsPath}`,
   ].join("\n"), "info");
@@ -1268,6 +1274,7 @@ export async function configureNewModel(
   ctx: ExtensionCommandContext,
   modelsPath: string,
   defaultsPath: string,
+  settingsPath: string,
 ): Promise<void> {
   const options: Array<{ label: string; target: ChannelTarget }> = [];
   for (const preset of PROVIDERS) {
@@ -1301,17 +1308,49 @@ export async function configureNewModel(
     const providerId = normalizeChannelId(idInput);
     const preset = findPreset(providerId);
     if (preset) {
-      await configurePresetModelTarget(pi, preset, { modelId: null, adding: true }, ctx, modelsPath, defaultsPath);
+      await configurePresetModelTarget(
+        pi,
+        preset,
+        { modelId: null, adding: true },
+        ctx,
+        modelsPath,
+        defaultsPath,
+        settingsPath,
+      );
     } else {
-      await configureCustomModelTarget(pi, providerId, { modelId: null, adding: true }, ctx, modelsPath, defaultsPath);
+      await configureCustomModelTarget(
+        pi,
+        providerId,
+        { modelId: null, adding: true },
+        ctx,
+        modelsPath,
+        defaultsPath,
+        settingsPath,
+      );
     }
     return;
   }
   if (target!.kind === "preset") {
-    await configurePresetModelTarget(pi, target!.preset, { modelId: null, adding: true }, ctx, modelsPath, defaultsPath);
+    await configurePresetModelTarget(
+      pi,
+      target!.preset,
+      { modelId: null, adding: true },
+      ctx,
+      modelsPath,
+      defaultsPath,
+      settingsPath,
+    );
     return;
   }
-  await configureCustomModelTarget(pi, target!.id, { modelId: null, adding: true }, ctx, modelsPath, defaultsPath);
+  await configureCustomModelTarget(
+    pi,
+    target!.id,
+    { modelId: null, adding: true },
+    ctx,
+    modelsPath,
+    defaultsPath,
+    settingsPath,
+  );
 }
 
 export async function dispatchGlobalModelPick(
@@ -1324,12 +1363,12 @@ export async function dispatchGlobalModelPick(
   settingsPath: string,
 ): Promise<void> {
   if (pick.kind === "new-model") {
-    await configureNewModel(pi, ctx, modelsPath, defaultsPath);
+    await configureNewModel(pi, ctx, modelsPath, defaultsPath, settingsPath);
     return;
   }
   const displayName = await channelDisplayName(pick.providerId, modelsPath);
   if (action === "show") {
-    await showProvider(ctx, pick.providerId, displayName, modelsPath, defaultsPath, pick.modelId);
+    await showProvider(ctx, pick.providerId, displayName, modelsPath, defaultsPath, settingsPath, pick.modelId);
     return;
   }
   if (action === "delete") {
@@ -1347,8 +1386,11 @@ export async function dispatchGlobalModelPick(
   }
   const preset = findPreset(pick.providerId);
   const target: ConfigureModelTarget = { modelId: pick.modelId, adding: false };
-  if (preset) await configurePresetModelTarget(pi, preset, target, ctx, modelsPath, defaultsPath);
-  else await configureCustomModelTarget(pi, pick.providerId, target, ctx, modelsPath, defaultsPath);
+  if (preset) {
+    await configurePresetModelTarget(pi, preset, target, ctx, modelsPath, defaultsPath, settingsPath);
+  } else {
+    await configureCustomModelTarget(pi, pick.providerId, target, ctx, modelsPath, defaultsPath, settingsPath);
+  }
 }
 
 export function numberedOptionLabel(index: number, label: string): string {
@@ -1414,7 +1456,6 @@ export async function chooseAction(
     { action: "configure", label: opsText("menu.configure") },
     { action: "show", label: opsText("menu.show") },
     { action: "vision", label: opsText("menu.vision", { state: opsText(vision.enabled ? "value.on" : "value.off") }) },
-    { action: "effort", label: opsText("menu.effort") },
     { action: "toggle", label: opsText("menu.toggle") },
     { action: "delete", label: opsText("menu.delete") },
     { action: "retry", label: opsText("menu.retry", { state: opsText(retry.enabled ? "value.on" : "value.off") }) },
@@ -1464,7 +1505,6 @@ export function actionFromArg(value: string): ApiProviderAction | undefined {
   if (value === "cache" || value === "prompt-cache" || value === "promptcache") return "cache";
   if (value === "cache-agent" || value === "agent-cache") return "cache-agent";
   if (value === "vision") return "vision";
-  if (value === "effort") return "effort";
   if (value === "nextsuggest" || value === "next-suggest" || value === "suggest") return "nextsuggest";
   if (value === "enhance" || value === "prompt-enhance") return "enhance";
   if (value === "price" || value === "pricing" || value === "cost") return "price";
@@ -1511,8 +1551,9 @@ export async function chooseDefaultThinkingLevel(
 export function currentDefaultThinkingLevel(
   ctx: ExtensionCommandContext,
   modelsPath: string,
+  settingsPath = join(dirname(modelsPath), "settings.json"),
 ): ApiThinkingLevel {
-  const manager = SettingsManager.create(ctx.cwd, dirname(modelsPath));
+  const manager = SettingsManager.create(ctx.cwd, dirname(settingsPath));
   return (manager.getDefaultThinkingLevel() as ApiThinkingLevel | undefined) ?? DEFAULT_THINKING_LEVEL;
 }
 
@@ -1554,14 +1595,15 @@ export async function saveDefaultModelAndThinking(
   provider: string,
   modelId: string,
   isAdding: boolean,
+  settingsPath = join(dirname(modelsPath), "settings.json"),
 ): Promise<void> {
   // Per-model thinking defaults are persisted separately (saveModelThinkingDefault) and
-  // applied on model_select; settings.json.defaultThinkingLevel is only a global fallback,
-  // so configuring a model must never overwrite it. Only a newly ADDED model becomes the
+  // consumed by Pi on future startup/model switches; settings.json.defaultThinkingLevel is
+  // only a global fallback, so configuring a model must never overwrite it. Only a newly ADDED model becomes the
   // default model — editing an existing model leaves the current default untouched so
   // same-format siblings are not affected.
   if (!isAdding) return;
-  const manager = SettingsManager.create(ctx.cwd, dirname(modelsPath));
+  const manager = SettingsManager.create(ctx.cwd, dirname(settingsPath));
   manager.setDefaultModelAndProvider(provider, modelId);
   await manager.flush();
   const errors = manager.drainErrors();
@@ -1593,130 +1635,234 @@ export function legacyModelThinkingKey(provider: string, modelId: string): strin
   return `${provider}/${modelId}`;
 }
 
+interface ConfiguredModelPair {
+  provider: string;
+  modelId: string;
+  encodedKey: string;
+  officialKey: string;
+}
+
+export interface LegacyModelThinkingMigrationResult {
+  migratedKeys: string[];
+  retainedKeys: Array<{ key: string; reason: "invalid" | "unknown" | "ambiguous" | "official-key-collision" }>;
+}
+
+function modelThinkingSettingsManager(cwd: string, settingsPath: string): ReturnType<typeof SettingsManager.create> {
+  return SettingsManager.create(cwd, dirname(settingsPath));
+}
+
+function throwSettingsManagerErrors(
+  manager: ReturnType<typeof SettingsManager.create>,
+  action: string,
+): void {
+  const errors = manager.drainErrors();
+  if (errors.length > 0) {
+    throw new Error(`${action}: ${errors.map((entry) => entry.error.message).join("; ")}`);
+  }
+}
+
+async function flushThinkingSettings(
+  manager: ReturnType<typeof SettingsManager.create>,
+  action: string,
+): Promise<void> {
+  await manager.flush();
+  throwSettingsManagerErrors(manager, action);
+}
+
+async function configuredModelPairs(modelsPath: string): Promise<ConfiguredModelPair[]> {
+  const root = await readModelsRoot(modelsPath);
+  const providers = isRecord(root.providers) ? root.providers : {};
+  const pairs: ConfiguredModelPair[] = [];
+  for (const [provider, config] of Object.entries(providers)) {
+    if (!isRecord(config) || !Array.isArray(config.models)) continue;
+    for (const model of config.models) {
+      if (!isRecord(model) || typeof model.id !== "string") continue;
+      pairs.push({
+        provider,
+        modelId: model.id,
+        encodedKey: modelThinkingKey(provider, model.id),
+        officialKey: legacyModelThinkingKey(provider, model.id),
+      });
+    }
+  }
+  return pairs;
+}
+
+function uniquePairs(pairs: readonly ConfiguredModelPair[]): ConfiguredModelPair[] {
+  const seen = new Set<string>();
+  return pairs.filter((pair) => {
+    const identity = `${pair.provider}\0${pair.modelId}`;
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
+  });
+}
+
+/**
+ * Move legacy API Manager model defaults into Pi's official settings store.
+ *
+ * The official key is a raw `provider/modelId` string, so pairs that collapse to
+ * the same key cannot be represented safely. Such entries, plus unknown or
+ * ambiguous raw legacy keys, remain untouched in api-manager.json for manual
+ * recovery/backward compatibility. Settings are flushed before legacy entries
+ * are removed, making retries idempotent and ensuring official values win.
+ * `migratedKeys` reports only values newly written to the official store.
+ */
+export async function migrateLegacyModelThinkingDefaults(
+  cwd: string,
+  modelsPath: string,
+  defaultsPath: string,
+  settingsPath: string,
+): Promise<LegacyModelThinkingMigrationResult> {
+  const defaultsRoot = await readModelsRoot(defaultsPath);
+  const legacyDefaults = isRecord(defaultsRoot.modelDefaults) ? defaultsRoot.modelDefaults : {};
+  const pairs = await configuredModelPairs(modelsPath);
+  const byEncoded = new Map<string, ConfiguredModelPair[]>();
+  const byOfficial = new Map<string, ConfiguredModelPair[]>();
+  for (const pair of pairs) {
+    byEncoded.set(pair.encodedKey, [...(byEncoded.get(pair.encodedKey) ?? []), pair]);
+    byOfficial.set(pair.officialKey, [...(byOfficial.get(pair.officialKey) ?? []), pair]);
+  }
+
+  const manager = modelThinkingSettingsManager(cwd, settingsPath);
+  const migrated = new Map<string, ThinkingLevel>();
+  const consumed = new Map<string, ThinkingLevel>();
+  const retainedKeys: LegacyModelThinkingMigrationResult["retainedKeys"] = [];
+  for (const [key, value] of Object.entries(legacyDefaults)) {
+    if (!isThinkingLevel(value)) {
+      retainedKeys.push({ key, reason: "invalid" });
+      continue;
+    }
+    const candidates = uniquePairs([
+      ...(byEncoded.get(key) ?? []),
+      ...(byOfficial.get(key) ?? []),
+    ]);
+    if (candidates.length === 0) {
+      retainedKeys.push({ key, reason: "unknown" });
+      continue;
+    }
+    if (candidates.length !== 1) {
+      retainedKeys.push({ key, reason: "ambiguous" });
+      continue;
+    }
+    const pair = candidates[0];
+    if ((byOfficial.get(pair.officialKey)?.length ?? 0) !== 1) {
+      retainedKeys.push({ key, reason: "official-key-collision" });
+      continue;
+    }
+    if (manager.getModelThinkingLevel(pair.provider, pair.modelId) === undefined) {
+      manager.setModelThinkingLevel(pair.provider, pair.modelId, value);
+      migrated.set(key, value);
+    }
+    consumed.set(key, value);
+  }
+  await flushThinkingSettings(manager, "Unable to migrate model thinking defaults");
+
+  if (consumed.size > 0 && await fileExists(defaultsPath)) {
+    await serializeMutation(defaultsPath, async () => {
+      const current = await readModelsRoot(defaultsPath);
+      if (!isRecord(current.modelDefaults)) return;
+      const nextDefaults = { ...current.modelDefaults };
+      for (const [key, consumedValue] of consumed) {
+        if (nextDefaults[key] === consumedValue) delete nextDefaults[key];
+      }
+      const next = { ...current };
+      if (Object.keys(nextDefaults).length > 0) next.modelDefaults = nextDefaults;
+      else delete next.modelDefaults;
+      await writeModelsRoot(next, defaultsPath, true);
+    });
+  }
+
+  return { migratedKeys: [...migrated.keys()], retainedKeys };
+}
+
 export async function loadModelThinkingDefault(
   provider: string,
   modelId: string,
-  defaultsPath: string,
+  settingsPath: string,
+  cwd: string,
+  legacyDefaultsPath?: string,
 ): Promise<ThinkingLevel | undefined> {
-  const root = await readModelsRoot(defaultsPath);
+  const manager = modelThinkingSettingsManager(cwd, settingsPath);
+  const official = manager.getModelThinkingLevel(provider, modelId);
+  throwSettingsManagerErrors(manager, "Unable to load model thinking default");
+  if (official !== undefined) return official;
+  if (!legacyDefaultsPath) return undefined;
+  const root = await readModelsRoot(legacyDefaultsPath);
   if (!isRecord(root.modelDefaults)) return undefined;
-  const key = modelThinkingKey(provider, modelId);
-  const legacyKey = legacyModelThinkingKey(provider, modelId);
-  const value = root.modelDefaults[key] ?? root.modelDefaults[legacyKey];
+  const value = root.modelDefaults[modelThinkingKey(provider, modelId)]
+    ?? root.modelDefaults[legacyModelThinkingKey(provider, modelId)];
   return isThinkingLevel(value) ? value : undefined;
+}
+
+async function removeEncodedLegacyThinkingDefaults(
+  defaultsPath: string | undefined,
+  pairs: ReadonlyArray<{ provider: string; modelId: string }>,
+): Promise<void> {
+  if (!defaultsPath || !await fileExists(defaultsPath)) return;
+  await serializeMutation(defaultsPath, async () => {
+    const root = await readModelsRoot(defaultsPath);
+    if (!isRecord(root.modelDefaults)) return;
+    const nextDefaults = { ...root.modelDefaults };
+    for (const pair of pairs) delete nextDefaults[modelThinkingKey(pair.provider, pair.modelId)];
+    const next = { ...root };
+    if (Object.keys(nextDefaults).length > 0) next.modelDefaults = nextDefaults;
+    else delete next.modelDefaults;
+    await writeModelsRoot(next, defaultsPath, true);
+  });
 }
 
 export async function saveModelThinkingDefault(
   provider: string,
   modelId: string,
   level: ThinkingLevel,
-  defaultsPath: string,
+  settingsPath: string,
+  cwd: string,
+  legacyDefaultsPath?: string,
 ): Promise<void> {
-  await serializeMutation(defaultsPath, async () => {
-    const exists = await fileExists(defaultsPath);
-    const root = await readModelsRoot(defaultsPath);
-    const modelDefaults = isRecord(root.modelDefaults) ? { ...root.modelDefaults } : {};
-    const key = modelThinkingKey(provider, modelId);
-    const legacyKey = legacyModelThinkingKey(provider, modelId);
-    modelDefaults[key] = level;
-    if (legacyKey !== key) delete modelDefaults[legacyKey];
-    await writeModelsRoot({ ...root, version: 1, modelDefaults }, defaultsPath, exists);
-  });
+  const manager = modelThinkingSettingsManager(cwd, settingsPath);
+  manager.setModelThinkingLevel(provider, modelId, level);
+  await flushThinkingSettings(manager, "Unable to save model thinking default");
+  await removeEncodedLegacyThinkingDefaults(legacyDefaultsPath, [{ provider, modelId }]);
 }
 
 export async function deleteModelThinkingDefault(
   provider: string,
   modelId: string,
-  defaultsPath: string,
+  settingsPath: string,
+  cwd: string,
+  legacyDefaultsPath?: string,
 ): Promise<void> {
-  if (!await fileExists(defaultsPath)) return;
-  await serializeMutation(defaultsPath, async () => {
-    const root = await readModelsRoot(defaultsPath);
-    const modelDefaults = isRecord(root.modelDefaults) ? { ...root.modelDefaults } : {};
-    const key = modelThinkingKey(provider, modelId);
-    const legacyKey = legacyModelThinkingKey(provider, modelId);
-    delete modelDefaults[key];
-    if (legacyKey !== key) delete modelDefaults[legacyKey];
-    await writeModelsRoot({ ...root, modelDefaults }, defaultsPath, true);
-  });
+  const manager = modelThinkingSettingsManager(cwd, settingsPath);
+  manager.removeModelThinkingLevel(provider, modelId);
+  await flushThinkingSettings(manager, "Unable to delete model thinking default");
+  await removeEncodedLegacyThinkingDefaults(legacyDefaultsPath, [{ provider, modelId }]);
 }
 
 export async function renameModelThinkingDefault(
   provider: string,
   oldModelId: string,
   newModelId: string,
-  defaultsPath: string,
+  settingsPath: string,
+  cwd: string,
+  legacyDefaultsPath?: string,
 ): Promise<void> {
-  if (oldModelId === newModelId || !await fileExists(defaultsPath)) return;
-  await serializeMutation(defaultsPath, async () => {
-    const root = await readModelsRoot(defaultsPath);
-    const modelDefaults = isRecord(root.modelDefaults) ? { ...root.modelDefaults } : {};
-    const oldKey = modelThinkingKey(provider, oldModelId);
-    const legacyOldKey = legacyModelThinkingKey(provider, oldModelId);
-    const value = modelDefaults[oldKey] ?? modelDefaults[legacyOldKey];
-    if (value === undefined) return;
-    delete modelDefaults[oldKey];
-    if (legacyOldKey !== oldKey) delete modelDefaults[legacyOldKey];
-    modelDefaults[modelThinkingKey(provider, newModelId)] = value;
-    await writeModelsRoot({ ...root, version: 1, modelDefaults }, defaultsPath, true);
-  });
-}
-
-/** Named entry in the /effort managed list; `level` must be a canonical Pi level. */
-export interface EffortLevelEntry {
-  name: string;
-  level: ThinkingLevel;
-}
-
-/** Absent `effortLevels` section means the full identity list — "默认全部都有". */
-export function defaultEffortEntries(): EffortLevelEntry[] {
-  return EFFORT_LEVELS.map((level) => ({ name: level, level }));
-}
-
-/**
- * Load the managed /effort level list. Never throws: an absent or unreadable
- * section falls back to the full identity list so the picker still renders;
- * persistence errors surface later through the save path.
- */
-export async function loadEffortLevels(defaultsPath: string): Promise<EffortLevelEntry[]> {
-  let root: Record<string, unknown>;
-  try {
-    root = await readModelsRoot(defaultsPath);
-  } catch {
-    return defaultEffortEntries();
+  if (oldModelId === newModelId) return;
+  const manager = modelThinkingSettingsManager(cwd, settingsPath);
+  const value = manager.getModelThinkingLevel(provider, oldModelId);
+  if (value === undefined) {
+    throwSettingsManagerErrors(manager, "Unable to load model thinking default for rename");
+    return;
   }
-  const section = isRecord(root.effortLevels) ? root.effortLevels : undefined;
-  if (!section || !Array.isArray(section.entries)) return defaultEffortEntries();
-  const entries: EffortLevelEntry[] = [];
-  for (const item of section.entries) {
-    if (!isRecord(item)) continue;
-    if (typeof item.name !== "string" || item.name.trim().length === 0) continue;
-    if (!isCanonicalThinkingLevel(item.level)) continue;
-    entries.push({ name: item.name.trim(), level: item.level });
+  if (manager.getModelThinkingLevel(provider, newModelId) === undefined) {
+    manager.setModelThinkingLevel(provider, newModelId, value);
   }
-  return entries;
-}
-
-export async function saveEffortLevels(
-  entries: readonly EffortLevelEntry[],
-  defaultsPath: string,
-): Promise<void> {
-  await serializeMutation(defaultsPath, async () => {
-    const exists = await fileExists(defaultsPath);
-    const root = await readModelsRoot(defaultsPath);
-    await writeModelsRoot({ ...root, version: 1, effortLevels: { entries } }, defaultsPath, exists);
-  });
-}
-
-export async function resetEffortLevels(defaultsPath: string): Promise<void> {
-  if (!await fileExists(defaultsPath)) return;
-  await serializeMutation(defaultsPath, async () => {
-    const root = await readModelsRoot(defaultsPath);
-    if (!isRecord(root.effortLevels)) return;
-    const next = { ...root };
-    delete next.effortLevels;
-    await writeModelsRoot(next, defaultsPath, true);
-  });
+  manager.removeModelThinkingLevel(provider, oldModelId);
+  await flushThinkingSettings(manager, "Unable to rename model thinking default");
+  await removeEncodedLegacyThinkingDefaults(legacyDefaultsPath, [
+    { provider, modelId: oldModelId },
+    { provider, modelId: newModelId },
+  ]);
 }
 
 export async function renameDefaultModelRef(
@@ -1739,18 +1885,18 @@ export async function renameDefaultModelRef(
 
 export async function deleteProviderThinkingDefaults(
   provider: string,
-  defaultsPath: string,
+  modelIds: readonly string[],
+  settingsPath: string,
+  cwd: string,
+  legacyDefaultsPath?: string,
 ): Promise<void> {
-  if (!await fileExists(defaultsPath)) return;
-  await serializeMutation(defaultsPath, async () => {
-    const root = await readModelsRoot(defaultsPath);
-    const modelDefaults = isRecord(root.modelDefaults) ? { ...root.modelDefaults } : {};
-    const prefix = `${encodeURIComponent(provider)}/`;
-    for (const key of Object.keys(modelDefaults)) {
-      if (key.startsWith(prefix)) delete modelDefaults[key];
-    }
-    await writeModelsRoot({ ...root, modelDefaults }, defaultsPath, true);
-  });
+  const manager = modelThinkingSettingsManager(cwd, settingsPath);
+  for (const modelId of modelIds) manager.removeModelThinkingLevel(provider, modelId);
+  await flushThinkingSettings(manager, "Unable to delete Provider model thinking defaults");
+  await removeEncodedLegacyThinkingDefaults(
+    legacyDefaultsPath,
+    modelIds.map((modelId) => ({ provider, modelId })),
+  );
 }
 
 export function managedProviderIdsSync(defaultsPath: string, modelsPath?: string): string[] {
@@ -2085,30 +2231,31 @@ function countProviderModels(providers: Record<string, Record<string, unknown>>)
   return count;
 }
 
-/** Export payload: owned Provider entries verbatim from models.json plus their per-model thinking defaults. */
+/** Export payload: owned Provider entries verbatim plus official per-model thinking defaults. */
 export async function buildApiManagerExport(
   modelsPath: string,
   defaultsPath: string,
+  settingsPath: string,
+  cwd: string,
 ): Promise<Record<string, unknown>> {
   const root = await readModelsRoot(modelsPath);
   const providers = isRecord(root.providers) ? root.providers : {};
   const ids = apiManagerOwnedIds(root, defaultsPath, modelsPath);
   const exported: Record<string, Record<string, unknown>> = {};
+  const exportedDefaults: Record<string, ThinkingLevel> = {};
+  const manager = modelThinkingSettingsManager(cwd, settingsPath);
   for (const id of ids) {
     const entry = providers[id];
-    if (isRecord(entry)) exported[id] = entry;
-  }
-  const defaultsRoot = await readModelsRoot(defaultsPath);
-  const modelDefaults = isRecord(defaultsRoot.modelDefaults) ? defaultsRoot.modelDefaults : {};
-  const exportedDefaults: Record<string, unknown> = {};
-  for (const id of ids) {
-    const prefixes = [`${encodeURIComponent(id)}/`, `${id}/`];
-    for (const [key, value] of Object.entries(modelDefaults)) {
-      if (typeof value === "string" && prefixes.some((prefix) => key.startsWith(prefix))) {
-        exportedDefaults[key] = value;
-      }
+    if (!isRecord(entry)) continue;
+    exported[id] = entry;
+    const models = Array.isArray(entry.models) ? entry.models.filter(isRecord) : [];
+    for (const model of models) {
+      if (typeof model.id !== "string") continue;
+      const level = manager.getModelThinkingLevel(id, model.id);
+      if (level !== undefined) exportedDefaults[modelThinkingKey(id, model.id)] = level;
     }
   }
+  throwSettingsManagerErrors(manager, "Unable to load model thinking defaults for export");
   return {
     kind: API_MANAGER_EXPORT_KIND,
     version: API_MANAGER_EXPORT_VERSION,
@@ -2123,8 +2270,9 @@ export async function exportApiManagerConfig(
   exportPath: string,
   modelsPath: string,
   defaultsPath: string,
+  settingsPath: string,
 ): Promise<void> {
-  const payload = await buildApiManagerExport(modelsPath, defaultsPath);
+  const payload = await buildApiManagerExport(modelsPath, defaultsPath, settingsPath, ctx.cwd);
   const providers = payload.providers as Record<string, Record<string, unknown>>;
   const providerCount = Object.keys(providers).length;
   if (providerCount === 0) {
@@ -2200,7 +2348,15 @@ export async function importApiManagerConfig(
     result = await writeModelsRoot({ ...root, providers }, modelsPath, exists);
   });
   if (!result) throw new Error("API Manager import was not written");
-  await applyImportedDefaults(importedIds, payload.modelDefaults, defaultsPath);
+  await applyImportedDefaults(
+    ctx.cwd,
+    imported,
+    removedModels,
+    payload.modelDefaults,
+    modelsPath,
+    defaultsPath,
+    settingsPath,
+  );
   for (const [providerId, modelId] of removedModels) {
     await clearDeletedDefaultModel(settingsPath, providerId, modelId);
   }
@@ -2279,43 +2435,100 @@ function validateImportedProviders(value: unknown): Record<string, Record<string
   return result;
 }
 
-/** Replace the thinking defaults of imported Providers with the exported values and track managed ids. */
+function modelPairsFromProviderEntries(
+  providers: Record<string, Record<string, unknown>>,
+): ConfiguredModelPair[] {
+  const pairs: ConfiguredModelPair[] = [];
+  for (const [provider, entry] of Object.entries(providers)) {
+    if (!Array.isArray(entry.models)) continue;
+    for (const model of entry.models) {
+      if (!isRecord(model) || typeof model.id !== "string") continue;
+      pairs.push({
+        provider,
+        modelId: model.id,
+        encodedKey: modelThinkingKey(provider, model.id),
+        officialKey: legacyModelThinkingKey(provider, model.id),
+      });
+    }
+  }
+  return pairs;
+}
+
+/** Replace imported Providers' defaults in the official store and keep the wire field backward-compatible. */
 async function applyImportedDefaults(
-  importedIds: string[],
+  cwd: string,
+  imported: Record<string, Record<string, unknown>>,
+  removedModels: Array<[string, string]>,
   incomingDefaults: unknown,
+  modelsPath: string,
   defaultsPath: string,
+  settingsPath: string,
 ): Promise<void> {
+  const importedIds = Object.keys(imported);
+  const importedPairs = modelPairsFromProviderEntries(imported);
+  const allPairs = [
+    ...await configuredModelPairs(modelsPath),
+    ...removedModels.map(([provider, modelId]) => ({
+      provider,
+      modelId,
+      encodedKey: modelThinkingKey(provider, modelId),
+      officialKey: legacyModelThinkingKey(provider, modelId),
+    })),
+  ];
+  const byEncoded = new Map<string, ConfiguredModelPair[]>();
+  const byOfficial = new Map<string, ConfiguredModelPair[]>();
+  for (const pair of allPairs) {
+    byEncoded.set(pair.encodedKey, uniquePairs([...(byEncoded.get(pair.encodedKey) ?? []), pair]));
+    byOfficial.set(pair.officialKey, uniquePairs([...(byOfficial.get(pair.officialKey) ?? []), pair]));
+  }
+
+  const manager = modelThinkingSettingsManager(cwd, settingsPath);
+  const importedIdentities = new Set(importedPairs.map((pair) => `${pair.provider}\0${pair.modelId}`));
+  for (const pair of uniquePairs([...importedPairs, ...removedModels.map(([provider, modelId]) => ({
+    provider,
+    modelId,
+    encodedKey: modelThinkingKey(provider, modelId),
+    officialKey: legacyModelThinkingKey(provider, modelId),
+  }))])) {
+    if ((byOfficial.get(pair.officialKey)?.length ?? 0) === 1) {
+      manager.removeModelThinkingLevel(pair.provider, pair.modelId);
+    }
+  }
+
+  const retainedUnsafe: Record<string, ThinkingLevel> = {};
+  const incoming = isRecord(incomingDefaults) ? incomingDefaults : {};
+  for (const [key, value] of Object.entries(incoming)) {
+    if (!isThinkingLevel(value)) continue;
+    const candidates = uniquePairs([
+      ...(byEncoded.get(key) ?? []),
+      ...(byOfficial.get(key) ?? []),
+    ]).filter((pair) => importedIdentities.has(`${pair.provider}\0${pair.modelId}`));
+    if (candidates.length !== 1 || (byOfficial.get(candidates[0]?.officialKey ?? "")?.length ?? 0) !== 1) {
+      if (candidates.length > 0) retainedUnsafe[key] = value;
+      continue;
+    }
+    manager.setModelThinkingLevel(candidates[0].provider, candidates[0].modelId, value);
+  }
+  await flushThinkingSettings(manager, "Unable to import model thinking defaults");
+
   await serializeMutation(defaultsPath, async () => {
     const exists = await fileExists(defaultsPath);
     const root = await readModelsRoot(defaultsPath);
-    const modelDefaults = isRecord(root.modelDefaults) ? { ...root.modelDefaults } : {};
-    for (const id of importedIds) {
-      const prefixes = [`${encodeURIComponent(id)}/`, `${id}/`];
-      for (const key of Object.keys(modelDefaults)) {
-        if (prefixes.some((prefix) => key.startsWith(prefix))) delete modelDefaults[key];
-      }
-    }
-    const ownerParts = new Set<string>();
-    for (const id of importedIds) {
-      ownerParts.add(id);
-      ownerParts.add(encodeURIComponent(id));
-    }
-    const incoming = isRecord(incomingDefaults) ? incomingDefaults : {};
-    for (const [key, value] of Object.entries(incoming)) {
-      const providerPart = key.split("/")[0];
-      if (!ownerParts.has(providerPart) || !isThinkingLevel(value)) continue;
-      modelDefaults[key] = value;
-    }
+    const legacyDefaults = isRecord(root.modelDefaults) ? { ...root.modelDefaults } : {};
+    for (const pair of importedPairs) delete legacyDefaults[pair.encodedKey];
+    Object.assign(legacyDefaults, retainedUnsafe);
     const managed = managedProviderIds(root);
     for (const id of importedIds) {
       if (!findPreset(id) && !managed.includes(id)) managed.push(id);
     }
-    await writeModelsRoot({
+    const next: Record<string, unknown> = {
       ...withoutLegacyManagedChannels(root),
       version: 1,
-      modelDefaults,
       managedProviders: managed,
-    }, defaultsPath, exists);
+    };
+    if (Object.keys(legacyDefaults).length > 0) next.modelDefaults = legacyDefaults;
+    else delete next.modelDefaults;
+    await writeModelsRoot(next, defaultsPath, exists);
   });
 }
 

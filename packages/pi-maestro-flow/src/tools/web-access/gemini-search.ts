@@ -432,14 +432,23 @@ export async function search(query: string, options: FullSearchOptions = {}): Pr
 		throw new Error(`Auto provider search failed:\n  - ${fallbackErrors.join("\n  - ")}`);
 	}
 
-	throw new Error(
-		"No search provider available. Either:\n" +
+	throw new Error(buildSearchProviderUnavailableMessage(CONFIG_PATH));
+}
+
+export function buildSearchProviderUnavailableMessage(configPath: string): string {
+	return (
+		"No search provider available.\n" +
+		"Available search channels (free options included):\n" +
+		"  - Free, no key: AnySearch — explicitly select provider \"anysearch\"\n" +
+		"  - Free account: Gemini Web — sign into gemini.google.com in a supported Chromium-based browser\n" +
+		"  - Free tier: SERPdive krill — set serpdiveApiKey or SERPDIVE_API_KEY\n" +
+		"  - Self-hosted: SearXNG — set searxngBaseUrl or SEARXNG_BASE_URL\n" +
+		"  - Auth/API: OpenAI/Codex, Brave, Parallel, Tavily, Perplexity, Exa, and Gemini API\n" +
+		"Setup:\n" +
 		"  1. Use /login to sign in with a Codex subscription for OpenAI web search\n" +
-		`  2. Set openaiApiKey, braveApiKey, parallelApiKey, tavilyApiKey, serpdiveApiKey, searxngBaseUrl, perplexityApiKey, exaApiKey, geminiApiKey, or cloudflareApiKey in ${CONFIG_PATH}\n` +
+		`  2. Set openaiApiKey, braveApiKey, parallelApiKey, tavilyApiKey, serpdiveApiKey, searxngBaseUrl, perplexityApiKey, exaApiKey, geminiApiKey, or cloudflareApiKey in ${configPath}\n` +
 		"  3. Set OPENAI_API_KEY, BRAVE_API_KEY, PARALLEL_API_KEY, TAVILY_API_KEY, SERPDIVE_API_KEY, SEARXNG_BASE_URL, EXA_API_KEY, PERPLEXITY_API_KEY, GEMINI_API_KEY, or CLOUDFLARE_API_KEY env vars\n" +
-		"  4. Set GOOGLE_GEMINI_BASE_URL with CLOUDFLARE_API_KEY for Cloudflare AI Gateway routing\n" +
-		"  5. Sign into gemini.google.com in a supported Chromium-based browser\n" +
-		"  6. Explicitly select provider: \"anysearch\" for anonymous AnySearch"
+		"  4. Set GOOGLE_GEMINI_BASE_URL with CLOUDFLARE_API_KEY for Cloudflare AI Gateway routing"
 	);
 }
 

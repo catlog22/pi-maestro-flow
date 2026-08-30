@@ -1,5 +1,5 @@
 import { complete } from "@earendil-works/pi-ai/compat";
-import type { Api, AssistantMessage, ImageContent, Message, Model, TextContent } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, ImageContent, Message, Model, ProviderHeaders, TextContent } from "@earendil-works/pi-ai";
 import { truncateAtWord } from "./utils.ts";
 import { refreshModelRegistry } from "pi-maestro-teammate/v1/model-routing";
 import type { ExtensionUIContext, ModelRegistry } from "@earendil-works/pi-coding-agent";
@@ -127,7 +127,7 @@ async function resolveSamplingModel(
 ): Promise<{
   model: Model<Api>;
   apiKey?: string;
-  headers?: Record<string, string>;
+  headers?: ProviderHeaders;
 }> {
   const candidates: Model<Api>[] = [];
   await refreshModelRegistry({ modelRegistry: options.modelRegistry });
