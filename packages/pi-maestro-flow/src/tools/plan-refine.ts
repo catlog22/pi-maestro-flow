@@ -61,6 +61,8 @@ export interface RefineRunResult {
   ok: boolean;
   output?: string;
   error?: string;
+  warning?: string;
+  createdAt?: string;
 }
 
 export interface RunRefineOptions {
@@ -76,6 +78,7 @@ export interface OpenRefinePanelOptions {
   initialRole?: RefineRole;
   session?: RefineSession;
   signal?: AbortSignal;
+  onOutput?: (turn: RefineTurn) => Promise<void>;
 }
 
 export interface RefinePanelResult {
@@ -322,7 +325,25 @@ export async function openRefinePanel(
     run: async (role, model, label, userInput, signal) => {
       const spec = REFINE_ROLES[role];
       const prompt = spec.buildPrompt(options.markdown, session.turns, userInput);
-      return runRefineSubagent(pi, ctx, { prompt, model, taskType: spec.taskType, signal });
+      const result = await runRefineSubagent(pi, ctx, { prompt, model, taskType: spec.taskType, signal });
+      if (!result.ok || !result.output) return result;
+      const turn: RefineTurn = {
+        role,
+        modelLabel: label,
+        userInput,
+        output: result.output,
+        createdAt: new Date().toISOString(),
+      };
+      try {
+        await options.onOutput?.(turn);
+        return { ...result, createdAt: turn.createdAt };
+      } catch (error) {
+        return {
+          ...result,
+          createdAt: turn.createdAt,
+          warning: `Review result is visible but could not be saved as an Artifact: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
     },
     signal: options.signal,
   });

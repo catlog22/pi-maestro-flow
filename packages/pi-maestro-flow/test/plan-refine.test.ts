@@ -112,6 +112,32 @@ test("Review & Refine cursor activates model, input, run, apply, and discard row
   assert.equal(result.latestOutput, "## Result\naccepted");
 });
 
+test("Review & Refine keeps the persisted Artifact timestamp and surfaces save warnings", async () => {
+  const harness = createOverlayHarness();
+  const session = overlaySession();
+  const pending = renderRefineOverlay(harness.ctx, {
+    markdown: PLAN,
+    session,
+    roles: REFINE_ROLES,
+    async pickModel() { return undefined; },
+    async run() {
+      return {
+        ok: true,
+        output: "# Review output",
+        createdAt: "2026-08-28T12:00:00.000Z",
+        warning: "Review result is visible but could not be saved as an Artifact: disk full",
+      };
+    },
+  });
+  assert.ok(harness.component);
+  harness.component.handleInput("\r");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(session.turns[0]?.createdAt, "2026-08-28T12:00:00.000Z");
+  assert.match(harness.component.render(100).join("\n"), /could not be saved as an Artifact/);
+  harness.component.handleInput("d");
+  assert.equal((await pending).action, "discard");
+});
+
 test("Review & Refine overlay scrolls long previews and keeps shortcut compatibility", async () => {
   const harness = createOverlayHarness();
   const session = overlaySession();

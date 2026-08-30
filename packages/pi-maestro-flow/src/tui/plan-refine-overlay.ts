@@ -188,14 +188,16 @@ export async function renderRefineOverlay(
               modelLabel: label,
               userInput: pendingInput,
               output: result.output,
-              createdAt: new Date().toISOString(),
+              createdAt: result.createdAt ?? new Date().toISOString(),
             };
             session.turns.push(turn);
             selectedTurnIndex = session.turns.length - 1;
             previewMode = "output";
             previewOffset = 0;
             previewMaxOffset = 0;
-            status = `${spec.label} done — R toggles Plan/Output, [ ] cycles history.`;
+            status = result.warning
+              ? result.warning
+              : `${spec.label} done — R toggles Plan/Output, [ ] cycles history.`;
           } else {
             busyError = result.error ?? "unknown error";
             status = `${spec.label} failed: ${busyError}`;
@@ -324,7 +326,7 @@ export async function renderRefineOverlay(
               : "1-6 select · ↑↓ scroll/select · ←→ change role · Enter choose · PgUp/PgDn scroll · m model · i input · R plan/output · [ ] history · a apply · d discard · Esc cancel";
           rows.push(theme.fg("dim", truncateToWidth(footer, inner, "…")));
           if (status && phase !== "running") {
-            rows.push(theme.fg(busyError ? "warning" : "dim", truncateToWidth(status, inner, "…")));
+            rows.push(theme.fg(busyError || status.includes("could not be saved") ? "warning" : "dim", truncateToWidth(status, inner, "…")));
           }
           return frameBox(rows, safeWidth, theme);
         },
