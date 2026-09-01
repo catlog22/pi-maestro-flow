@@ -75,7 +75,7 @@ import {
 	buildZenTaskSheet,
 	type ZenSheetDocument,
 } from "./zen-sheet.ts";
-import { routeAgentInput } from "./input-routing.ts";
+import { isLegacyTodoOverlayInput, routeAgentInput } from "./input-routing.ts";
 import { activeThemeName, ThemePicker } from "./theme-picker.ts";
 import { ModelPicker, type ModelPickerEntry } from "./model-picker.ts";
 import { getUsageTotals, invalidateUsageCache, renderFooter, setUsageThrottle, type PaintTheme, type WidthUtils } from "./footer.ts";
@@ -390,6 +390,8 @@ export default function (pi: ExtensionAPI): void {
 	let sessionTheme: Theme | undefined;
 	// Fullscreen (alternate-screen fixed editor) controller, reload-gated.
 	let fullscreenController: FullscreenController | undefined;
+	/** Disposer for the legacy Alt+Shift+T compatibility hook (per applyUi). */
+	let todoOverlayShortcutDisposer: (() => void) | undefined;
 	/** Disposer for the session ←/→ navigation hook (per applyUi). */
 	let sessionBarNavDisposer: (() => void) | undefined;
 	/** Disposer for the agent-list Shift+↑/↓ scroll hook (per applyUi). */
@@ -1101,7 +1103,7 @@ export default function (pi: ExtensionAPI): void {
 		if (sessionListOverlayActive()) return undefined;
 		return maestro.snapshot()?.artifact?.available
 			? { text: tuiT("artifact.hint"), color: "accent" as const }
-			: tuiT("session.listHint");
+			: tuiT(sessionUi.mode === "agent" ? "session.agentListHint" : "session.listHint");
 	};
 
 	const installSessionBar = (ctx: ExtensionContext): void => {
@@ -1351,6 +1353,8 @@ export default function (pi: ExtensionAPI): void {
 		clearWidgets(ctx);
 		ctx.ui.setWidget(SESSION_BAR_WIDGET_KEY, undefined);
 		ctx.ui.setWidget(SESSION_DETAIL_WIDGET_KEY, undefined);
+		todoOverlayShortcutDisposer?.();
+		todoOverlayShortcutDisposer = undefined;
 		sessionBarNavDisposer?.();
 		sessionBarNavDisposer = undefined;
 		agentScrollDisposer?.();
@@ -1517,6 +1521,16 @@ export default function (pi: ExtensionAPI): void {
 		// window mode swaps in the window bar. Installed on every surface (dock
 		// and widgets), inserted last so it sits closest to the editor.
 		installSessionBar(ctx);
+		// Legacy terminals encode Alt+Shift+T as ESC + uppercase T, which the
+		// host shortcut matcher cannot distinguish without enhanced key reporting.
+		todoOverlayShortcutDisposer?.();
+		todoOverlayShortcutDisposer = ctx.ui.onTerminalInput((data) => {
+			if (!isLegacyTodoOverlayInput(data) || ambientKeysShouldYield(capturedTui)) return undefined;
+			void openTodoOverlay(ctx).catch((error) => {
+				ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
+			});
+			return { consume: true };
+		});
 		// ←/→ cycles tabs only with an empty composer. Window mode additionally
 		// accepts Alt+←/→ so drafts can be switched without losing cursor arrows.
 		// A capturing modal overlay owns navigation while it is open.

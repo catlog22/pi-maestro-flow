@@ -213,15 +213,15 @@ test("Agent Bar is safe at widths 1 through 120 and never exceeds the width", ()
 	}
 });
 
-test("Agent Bar shows the Alt+R list hint only when the surface is not covered by an overlay", () => {
+test("Agent Bar shows the concise Alt+R Agent hint only when the surface is not covered by an overlay", () => {
 	const state = new SessionUiState();
 	state.reconcile("agent", endpoints, "root");
 	const visible = stripAnsi(renderAgentBar(endpoints, state, 80, theme as Theme, {
 		now: 10_000,
-		shortcutHint: `${altKey("R")} list`,
+		shortcutHint: `${altKey("R")} Agent`,
 	})[0]);
 	const hidden = stripAnsi(renderAgentBar(endpoints, state, 80, theme as Theme, { now: 10_000 })[0]);
-	assert.match(visible, new RegExp(`${altRe("R")} list$`));
+	assert.match(visible, new RegExp(`${altRe("R")} Agent$`));
 	assert.doesNotMatch(hidden, new RegExp(`${altRe("R")}`));
 });
 

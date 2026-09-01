@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { MailboxHostRegistry } from "pi-maestro-teammate/v1/mailbox";
-import { routeAgentInput } from "../src/input-routing.ts";
+import { isLegacyTodoOverlayInput, routeAgentInput } from "../src/input-routing.ts";
 import { cockpitTuiLocale } from "../src/tui-i18n.ts";
 
 cockpitTuiLocale.setLocale("en");
@@ -20,6 +20,12 @@ function ui() {
 }
 
 const target = { correlationId: "corr-builder", label: "builder" };
+
+test("legacy Alt+Shift+T input is recognized without shadowing native shortcut sequences", () => {
+	assert.equal(isLegacyTodoOverlayInput("\x1bT"), true);
+	assert.equal(isLegacyTodoOverlayInput("\x1bt"), false);
+	assert.equal(isLegacyTodoOverlayInput("\x1b[116;4u"), false);
+});
 
 function registry(deliver: MailboxHostRegistry["deliverAgentMessage"]): MailboxHostRegistry {
 	return { deliverAgentMessage: deliver } as MailboxHostRegistry;

@@ -72,6 +72,7 @@ test("representative session surfaces rerender bilingually after a live locale e
 	};
 
 	cockpitTuiLocale.setLocale("en");
+	assert.equal(cockpitTuiLocale.t("session.agentListHint"), `${altKey("R")} Agent`);
 	assert.match(renderWindowBar([], state, 80, theme)[0] ?? "", /Windows · no peer sessions/);
 	let detail = renderSessionDetail([agent], agent.correlationId, 100, theme).join("\n");
 	assert.match(detail, /@builder/);
@@ -79,6 +80,7 @@ test("representative session surfaces rerender bilingually after a live locale e
 	assert.match(detail, new RegExp(`${altRe("R")} preview`));
 
 	events.emit(SETTINGS_LOCALE_EVENT, { version: 1, locale: "zh-CN", generation: "live-toggle" });
+	assert.equal(cockpitTuiLocale.t("session.agentListHint"), `${altKey("R")} Agent`);
 	assert.match(renderWindowBar([], state, 80, theme)[0] ?? "", /窗口 · 没有对等会话/);
 	detail = renderSessionDetail([agent], agent.correlationId, 100, theme).join("\n");
 	assert.match(detail, /@builder/, "agent identifiers are not translated");

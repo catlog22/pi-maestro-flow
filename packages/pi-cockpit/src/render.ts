@@ -63,6 +63,8 @@ export interface RenderOpts {
 	 * owner overrides this with the always-available `/cockpit todo`.
 	 */
 	toggleHint?: string;
+	/** How the user opens the full Todo overlay. Cockpit registers this shortcut itself. */
+	detailsHint?: string;
 	/**
 	 * Compact agent mode prints its own roster count. When the widget already
 	 * renders an "Agents N running" header, that would be the same sentence twice
@@ -80,6 +82,7 @@ export interface RenderOpts {
 }
 
 export const DEFAULT_TOGGLE_HINT = altKey("T");
+export const DEFAULT_TODO_DETAILS_HINT = altKey("Shift+T");
 
 // One cell per task stops scaling once the plan outgrows the terminal, so beyond
 // that the bar switches to a proportional summary instead of eating the whole line.
@@ -469,6 +472,7 @@ export function renderTodos(
 	const ell = theme.fg("dim", g.ellipsis);
 	const expanded = opts.expanded !== false;
 	const toggleHint = opts.toggleHint ?? DEFAULT_TOGGLE_HINT;
+	const detailsHint = opts.detailsHint ?? DEFAULT_TODO_DETAILS_HINT;
 
 	if (mode === "compact") {
 		const total = items.length;
@@ -482,6 +486,7 @@ export function renderTodos(
 		if (blocked > 0) {
 			segs.push({ text: theme.fg("error", tuiT("common.blocked", { count: blocked })), priority: 95, clippable: false });
 		}
+		segs.push({ text: theme.fg("dim", tuiT("widget.todo.details", { shortcut: detailsHint })), priority: 70, clippable: false });
 		segs.push({ text: theme.fg("dim", tuiT("widget.todo.expand", { shortcut: toggleHint })), priority: 10, clippable: false });
 		return [fitLineByPriority(segs, width, utils, " ", g.ellipsis)];
 	}
@@ -522,6 +527,11 @@ export function renderTodos(
 		const ntext = `${g.arrow} ${theme.fg(np.glyphColor, np.glyph)}${nactor ? ` ${theme.fg("mdLink", nactor)}` : ""} ${todoSubject(np, next.subject, theme)}`;
 		summarySegs.push({ text: ntext, priority: 20, clippable: false });
 	}
+	summarySegs.push({
+		text: theme.fg("dim", tuiT("widget.todo.details", { shortcut: detailsHint })),
+		priority: 35,
+		clippable: false,
+	});
 	summarySegs.push({
 		text: theme.fg("dim", `(${toggleHint} ${tuiT(expanded ? "widget.todo.collapse" : "widget.todo.expandAction")})`),
 		priority: 10,

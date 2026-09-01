@@ -34,6 +34,10 @@ export interface AgentInputRegistries {
 
 export type AgentInputRegistryProvider = MailboxHostRegistry | AgentInputRegistries;
 
+export function isLegacyTodoOverlayInput(data: string): boolean {
+	return data === "\x1bT";
+}
+
 function inputRegistries(provider: AgentInputRegistryProvider | undefined): AgentInputRegistries {
 	if (provider && "deliverAgentMessage" in provider) return { mailbox: provider };
 	return provider ?? {};

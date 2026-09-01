@@ -141,7 +141,7 @@ export function makeAgentWidget(deps: AgentWidgetDeps) {
 				// Focused-session priority: while a selected session's detail block is
 				// open, it owns the Agent height allowance and the roster collapses to
 				// this one-line summary. The per-agent rows stay reachable through the
-				// session-bar chips and the Alt+A overlay, so monitoring is preserved
+				// session bar and its Alt+R selection flow, so monitoring is preserved
 				// while the session content gains the released rows.
 				if (deps.hasSessionDetail?.()) return [headerLine];
 
