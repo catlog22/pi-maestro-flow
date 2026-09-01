@@ -7,6 +7,7 @@ import {
   registerMonitorWindowFacetProvider,
   type MonitorWorkRefV1,
   type MonitorWindowCompletionEvidenceV1,
+  type MonitorWindowFacetProvider,
   type MonitorWindowFacetTargetV1,
   type MonitorWindowIdentityV1,
 } from "../src/public/v1/monitor-window-state.ts";
@@ -266,6 +267,27 @@ test("attention is deduplicated and semantic revision ignores observation and he
   assert.notEqual(first.windows[0]?.window.lifecycle.ownerPublishedAt, second.windows[0]?.window.lifecycle.ownerPublishedAt);
 });
 
+test("canonical semantic revision uses binary Unicode key ordering", () => {
+  const composed = "é";
+  const decomposed = "e\u0301";
+  const facet = (data: Record<string, number>) => ({
+    kind: "unicode",
+    target: { identity: identity() },
+    revision: "same",
+    data,
+  });
+  const first = reduceMonitorWindowStateV1({
+    observedAt: 4_000,
+    windows: [{ endpoint: endpoint(), owner: owner(), facets: [facet({ [composed]: 1, [decomposed]: 2 })] }],
+  });
+  const second = reduceMonitorWindowStateV1({
+    observedAt: 4_000,
+    windows: [{ endpoint: endpoint(), owner: owner(), facets: [facet({ [decomposed]: 2, [composed]: 1 })] }],
+  });
+  assert.equal(first.revision, second.revision);
+  assert.equal(first.cursor, second.cursor);
+});
+
 test("root-side facet registry is replacement-safe and reads only exact captured targets", async () => {
   const kind = `monitor-test-${process.pid}-${Date.now()}`;
   const captured = target();
@@ -295,4 +317,153 @@ test("root-side facet registry is replacement-safe and reads only exact captured
     disposeSecond();
   }
   assert.equal(getMonitorWindowFacetProvider(kind), undefined);
+});
+
+test("facet boundary drops cyclic, oversized, non-finite, and malformed work/attention data independently", async () => {
+  const kind = `monitor-invalid-facet-${process.pid}-${Date.now()}`;
+  const captured = target();
+  const cyclic: Record<string, unknown> = {};
+  cyclic.self = cyclic;
+  let tooDeep: unknown = null;
+  for (let depth = 0; depth < 40; depth++) tooDeep = [tooDeep];
+  const provider: MonitorWindowFacetProvider = {
+    kind,
+    read: () => [
+      { kind, target: captured, revision: "valid", data: { ok: true } },
+      { kind, target: captured, revision: "bigint", data: 1n },
+      { kind, target: captured, revision: "cycle", data: cyclic },
+      { kind, target: captured, revision: "infinite", data: Number.POSITIVE_INFINITY },
+      { kind, target: captured, revision: "deep", data: tooDeep },
+      { kind, target: captured, revision: "large", data: "x".repeat(70 * 1_024) },
+      { kind, target: captured, revision: "escaped-large", data: "\"".repeat(40 * 1_024) },
+      { kind, target: captured, revision: "numeric-large", data: Array.from({ length: 3_000 }, () => Number.MAX_VALUE) },
+      { kind, target: { identity: captured.identity, workRef: { kind: "", id: "work" } }, revision: "work", data: null },
+      {
+        kind,
+        target: captured,
+        revision: "attention",
+        data: null,
+        attention: [{ code: "bad", severity: "fatal", message: "invalid severity" }],
+      },
+    ] as unknown as ReturnType<MonitorWindowFacetProvider["read"]>,
+  };
+  const dispose = registerMonitorWindowFacetProvider(provider);
+  try {
+    const errors: string[] = [];
+    const facets = await readMonitorWindowFacets(
+      { version: MONITOR_WINDOW_STATE_VERSION, targets: [captured] },
+      (message) => errors.push(message),
+    );
+    const emitted = facets.filter((facet) => facet.kind === kind);
+    assert.deepEqual(emitted.map((facet) => facet.revision), ["valid"]);
+    assert.equal(errors.filter((message) => message.includes(kind)).length, 9);
+    assert.doesNotThrow(() => reduceMonitorWindowStateV1({
+      observedAt: 4_000,
+      windows: [{ endpoint: endpoint(), owner: owner(), workRef: WORK, facets: emitted }],
+    }));
+  } finally {
+    dispose();
+  }
+});
+
+test("hung and flooding providers cannot mask a later healthy provider", async () => {
+  const suffix = `${process.pid}-${Date.now()}`;
+  const hungKind = `a-monitor-hung-${suffix}`;
+  const floodKind = `b-monitor-flood-${suffix}`;
+  const healthyKind = `z-monitor-healthy-${suffix}`;
+  const disposers = [
+    registerMonitorWindowFacetProvider({
+      kind: hungKind,
+      read: () => new Promise<never>(() => {}),
+    }),
+    registerMonitorWindowFacetProvider({
+      kind: floodKind,
+      read: () => Array.from({ length: 2_000 }, (_, index) => ({
+        kind: floodKind,
+        target: target(),
+        revision: `flood-${index}`,
+        data: { index },
+      })),
+    }),
+    registerMonitorWindowFacetProvider({
+      kind: healthyKind,
+      read: () => [{ kind: healthyKind, target: target(), revision: "healthy", data: { ok: true } }],
+    }),
+  ];
+  try {
+    const errors: string[] = [];
+    const startedAt = Date.now();
+    const facets = await readMonitorWindowFacets(
+      { version: MONITOR_WINDOW_STATE_VERSION, targets: [target()] },
+      (message) => errors.push(message),
+      { timeoutMs: 20 },
+    );
+    assert.equal(facets.some((facet) => facet.kind === healthyKind), true, "valid flood cannot consume the global cap first");
+    assert.ok(Date.now() - startedAt < 500, "providers share neither serial deadlines nor candidate budgets");
+    assert.ok(errors.some((message) => message.includes(hungKind) && message.includes("deadline")));
+    assert.ok(errors.some((message) => message.includes(floodKind) && message.includes("candidate limit")));
+  } finally {
+    for (const dispose of disposers) dispose();
+  }
+});
+
+test("parallel facet reads aggregate deterministically by binary provider kind", async () => {
+  const suffix = `${process.pid}-${Date.now()}`;
+  const firstKind = `a-monitor-order-${suffix}`;
+  const secondKind = `z-monitor-order-${suffix}`;
+  let releaseFirst!: () => void;
+  const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const disposers = [
+    registerMonitorWindowFacetProvider({
+      kind: firstKind,
+      read: async () => {
+        await firstGate;
+        return [{ kind: firstKind, target: target(), revision: "first", data: null }];
+      },
+    }),
+    registerMonitorWindowFacetProvider({
+      kind: secondKind,
+      read: () => {
+        releaseFirst();
+        return [{ kind: secondKind, target: target(), revision: "second", data: null }];
+      },
+    }),
+  ];
+  try {
+    const facets = await readMonitorWindowFacets(
+      { version: MONITOR_WINDOW_STATE_VERSION, targets: [target()] },
+      undefined,
+      { timeoutMs: 100 },
+    );
+    assert.deepEqual(facets.map((facet) => facet.kind), [firstKind, secondKind]);
+  } finally {
+    releaseFirst();
+    for (const dispose of disposers) dispose();
+  }
+});
+
+test("public v1 facet read without options keeps legacy unbounded waiting", async () => {
+  const kind = `monitor-unbounded-${process.pid}-${Date.now()}`;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const dispose = registerMonitorWindowFacetProvider({
+    kind,
+    read: async () => {
+      await gate;
+      return [{ kind, target: target(), revision: "released", data: null }];
+    },
+  });
+  try {
+    let settled = false;
+    const read = readMonitorWindowFacets({ version: MONITOR_WINDOW_STATE_VERSION, targets: [target()] })
+      .then((facets) => { settled = true; return facets; });
+    await new Promise((resolve) => setTimeout(resolve, 1_050));
+    assert.equal(settled, false, "no-options public read must not inherit the Monitor's 1s bound");
+    release();
+    const facets = await read;
+    assert.equal(facets.some((facet) => facet.kind === kind), true);
+  } finally {
+    release();
+    dispose();
+  }
 });

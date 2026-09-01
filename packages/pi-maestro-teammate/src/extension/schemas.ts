@@ -13,6 +13,10 @@
 
 import { Type, type Static } from "typebox";
 import { TEAMMATE_THINKING_INPUTS } from "../shared/thinking.ts";
+import {
+  MONITOR_QUERY_DEFAULT_TIMEOUT_MS,
+  MONITOR_QUERY_MAX_TIMEOUT_MS,
+} from "./monitor.ts";
 
 const TaskType = Type.String({
   minLength: 1,
@@ -643,8 +647,9 @@ export const MonitorQueryParams = Type.Object({
   })),
   timeoutMs: Type.Optional(Type.Integer({
     minimum: 1,
-    default: 600_000,
-    description: "Wait-only wall-clock timeout in milliseconds (default: 600000, 10 minutes).",
+    maximum: MONITOR_QUERY_MAX_TIMEOUT_MS,
+    default: MONITOR_QUERY_DEFAULT_TIMEOUT_MS,
+    description: `Wait-only wall-clock timeout in milliseconds (default: ${MONITOR_QUERY_DEFAULT_TIMEOUT_MS}; maximum: ${MONITOR_QUERY_MAX_TIMEOUT_MS}).`,
   })),
 }, {
   additionalProperties: false,
@@ -747,11 +752,24 @@ export const WorkspaceWindowParams = Type.Object({
     minLength: 1,
     description: "Task objective passed to the new Pi worker. Required for create.",
   })),
+  provider: Type.Optional(Type.Unsafe<"native" | "herdr">({
+    type: "string",
+    enum: ["native", "herdr"],
+    default: "native",
+    description: "Local window provider for create (default: native). Herdr supports interactive presentation only.",
+  })),
+  herdrSession: Type.Optional(Type.String({
+    minLength: 1,
+    maxLength: 64,
+    pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+    default: "default",
+    description: "Herdr session name for create with provider=herdr (default: default).",
+  })),
   presentation: Type.Optional(Type.Unsafe<"interactive" | "headless">({
     type: "string",
     enum: ["interactive", "headless"],
     default: "interactive",
-    description: "Open a visible interactive terminal by default; use headless only when no terminal UI is needed.",
+    description: "Open a visible interactive terminal by default; use headless only with the native provider when no terminal UI is needed.",
   })),
 }, {
   additionalProperties: false,
@@ -771,6 +789,21 @@ export const WorkspaceWindowParams = Type.Object({
     {
       if: { required: ["presentation"] },
       then: { properties: { action: { const: "create" } }, required: ["action"] },
+    },
+    {
+      if: { required: ["provider"] },
+      then: { properties: { action: { const: "create" } }, required: ["action"] },
+    },
+    {
+      if: { required: ["herdrSession"] },
+      then: {
+        properties: { action: { const: "create" }, provider: { const: "herdr" } },
+        required: ["action", "provider"],
+      },
+    },
+    {
+      if: { properties: { provider: { const: "herdr" } }, required: ["provider"] },
+      then: { properties: { presentation: { const: "interactive" } } },
     },
   ],
 });

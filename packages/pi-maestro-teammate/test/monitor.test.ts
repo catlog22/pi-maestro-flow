@@ -221,36 +221,47 @@ test("formatBarrierCompact produces compact output", () => {
 // Monitor control context
 // ---------------------------------------------------------------------------
 
-test("monitor mode context is persistent, idempotent, and supervision-only", () => {
+test("monitor mode context is persistent, structured, idempotent, and supervision-only", () => {
   const injected = appendMonitorModeContext("base prompt");
   assert.match(injected, /<monitor_mode>/);
-  assert.match(injected, /monitor control window/);
-  assert.match(injected, /workspace-window only for local Pi worker windows/);
-  assert.match(injected, /remote-worker targets/);
+
+  const sections = [
+    "## Role and authority",
+    "## Complete-project orchestration",
+    "## Tool routing",
+    "## Recurring supervision",
+    "## Message timing and exit",
+  ];
+  let previous = -1;
+  for (const section of sections) {
+    const index = injected.indexOf(section);
+    assert.ok(index > previous, `${section} must appear once in the expected order`);
+    assert.equal(injected.lastIndexOf(section), index, `${section} must be unique`);
+    previous = index;
+  }
+
+  assert.match(injected, /delegates all project implementation, file edits, shell commands/);
+  assert.match(injected, /one read-only planning or technical-lead worker/);
+  assert.match(injected, /execute a phase DAG/);
+  assert.match(injected, /settled windows alone do not prove project success/);
+  assert.match(injected, /Release or deployment is not implied by implementation/);
+
+  assert.match(injected, /workspace-window only for local Pi workers/);
+  assert.match(injected, /provider=herdr requires an already-running local Herdr session/);
   assert.match(injected, /remote:<runId>/);
-  assert.match(injected, /Never attempt to close discovered external peer windows/);
-  assert.match(injected, /monitor list\/get\/wait for ordinary attention-first window status/);
+  assert.match(injected, /monitor list\/get\/wait for normalized attention-first state/);
   assert.match(injected, /observe only for raw provider snapshots, turns\/todos\/diagnose views, or multi-target all\/any\/count barriers/);
-  assert.match(injected, /monitor list\/get for ordinary liveness and attention/);
-  assert.match(injected, /Each loop tick should use monitor list\/get for ordinary normalized window state/);
-  assert.match(injected, /flow-schedule-todo-binding capability/);
-  assert.match(injected, /observe with view=todos on workspace targets/);
-  assert.match(injected, /display-only and never completion authority/);
-  assert.match(injected, /no Todo instruction or binding is created/);
-  assert.match(injected, /exact report remains the completion authority/);
-  assert.match(injected, /Todo gate evidence waits up to 30 seconds/);
-  assert.match(injected, /duplicate work is acceptable/);
-  assert.match(injected, /view=inbox to read persisted cross-window and remote messages/);
-  assert.match(injected, /objective is delivered by create/);
-  assert.match(injected, /intervene only on new evidence of stall, drift, or failure/);
-  assert.match(injected, /at most one intervention per target per tick/);
-  assert.match(injected, /Do not send routine acknowledgements or status pings/);
-  assert.match(injected, /Never repeat that message while it remains queued or accepted/);
-  assert.match(injected, /queued and injected only at the next turn boundary/);
-  assert.match(injected, /one bounded prompt loop for the complete target set/);
-  assert.match(injected, /loop with action=list/);
-  assert.match(injected, /not stopped by \/monitor exit/);
-  assert.match(injected, /Do not implement project work/);
+  assert.match(injected, /teammate-list view=inbox reads persisted messages/);
+  assert.match(injected, /flow-schedule create then start/);
+  assert.match(injected, /exact correlated Flow report remains completion authority/);
+
+  assert.match(injected, /deferred condition followed by an action/);
+  assert.match(injected, /one bounded prompt loop for the complete phase, never one loop per target and never a shell loop/);
+  assert.match(injected, /revalidate the exact owner after every await before intervening/);
+  assert.match(injected, /cancel the current loop, and only then delegate an explicitly authorized non-idempotent action exactly once/);
+  assert.match(injected, /queued until the next turn boundary/);
+  assert.match(injected, /\/monitor exit does not stop them/);
+
   assert.equal(appendMonitorModeContext(injected), injected);
 });
 
@@ -331,9 +342,16 @@ test("monitor communication uses tool-local capability gates without global inte
   assert.doesNotMatch(source, /terminal result request registered for the launched root task/);
   assert.match(lifecycleSource, /assertAdmission\(authority, window, admittedOwner, request\.name, "workspace registration"\)/);
   assert.match(source, /left\.ownerId === right\.ownerId[\s\S]*?left\.ownerNonce === right\.ownerNonce[\s\S]*?left\.pid === right\.pid/);
-  assert.match(source, /const owners = await refreshWorkspacePeerOwnersStrict\(\)[\s\S]*?terminateManagedWindowProcess\(window\)/);
+  assert.match(source, /const owners = await refreshWorkspacePeerOwnersStrict\(\)/);
+  assert.match(source, /terminateManagedWindowProcess\([\s\S]*?window,[\s\S]*?authorization\.authorize/);
   assert.match(source, /const exited = window\.pid !== undefined && !managedWindowPidIsAlive\(window\.pid\)/);
-  assert.match(source, /const status = await terminateManagedWindowProcess\(window\)/);
+  assert.match(source, /const status = await terminateManagedWindowProcess\([\s\S]*?window,[\s\S]*?authorization\.authorize,[\s\S]*?terminationStarted = true/);
+  assert.match(source, /createHerdrWindow\(\{[\s\S]*?piArgs: buildManagedWindowPiArgs/);
+  assert.match(source, /closeHerdrWindowExact\(window\.runtime\.capture/);
+  assert.match(source, /if \(window\.runtime\.provider === "native" && window\.presentation === "interactive"\) \{[\s\S]*?refreshWorkspacePeerOwnersStrict\(\)/);
+  assert.match(source, /hasNativeInteractiveWindows[\s\S]*?window\.runtime\.provider === "native"[\s\S]*?terminateManagedWindowProcess/);
+  assert.match(source, /provider: request\.provider \?\? "native"/);
+  assert.match(source, /provider=herdr creates an interactive Pi workspace in an already-running local Herdr session/);
   assert.doesNotMatch(source, /monitorController/);
   assert.match(source, /if \(managedWindows\.get\(name\) === window\) managedWindows\.delete\(name\)/);
   assert.match(source, /termination\.outcome/);
@@ -348,13 +366,14 @@ test("monitor communication uses tool-local capability gates without global inte
   assert.match(source, /shutdownRemoteMonitorBinding\(\)/);
   assert.match(source, /agentRole: `remote worker[\s\S]*?kind: "remote"/);
   assert.match(source, /\/monitor status — render the same normalized projector as monitor list[\s\S]*?executeMonitorQuery\(\{ action: "list" \}/);
-  assert.match(monitorSource, /workspace-window only for local Pi worker windows/);
+  assert.match(monitorSource, /workspace-window only for local Pi workers/);
+  assert.match(monitorSource, /provider=herdr requires an already-running local Herdr session/);
   assert.match(monitorSource, /remote-worker targets/);
-  assert.match(monitorSource, /objective is delivered by create/);
-  assert.match(monitorSource, /at most one intervention per target per tick/);
-  assert.match(monitorSource, /Never repeat that message while it remains queued or accepted/);
-  assert.match(monitorSource, /Never attempt to close discovered external peer windows/);
-  assert.match(monitorSource, /injected only at the next turn boundary/);
+  assert.match(monitorSource, /Create already delivers the objective/);
+  assert.match(monitorSource, /at most once per target per tick/);
+  assert.match(monitorSource, /never resend it without later target-side injection/);
+  assert.match(monitorSource, /never close discovered external peers/);
+  assert.match(monitorSource, /queued until the next turn boundary/);
   assert.match(source, /message\(s\) arrived during this/);
   assert.match(source, /end the turn to receive it/);
   assert.match(source, /queued while a tool was running/);

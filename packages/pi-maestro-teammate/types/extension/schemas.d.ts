@@ -97,13 +97,13 @@ export declare const TeammateWaitParams: Type.TObject<{
     waitMs: Type.TOptional<Type.TInteger>;
 }>;
 export declare const ObserveParams: Type.TObject<{
-    action: Type.TUnsafe<"status" | "diagnose" | "wait" | "watch">;
+    action: Type.TUnsafe<"status" | "wait" | "diagnose" | "watch">;
     targets: Type.TArray<Type.TObject<{
         kind: Type.TString;
         id: Type.TString;
         cursor: Type.TOptional<Type.TString>;
     }>>;
-    detail: Type.TOptional<Type.TUnsafe<"summary" | "tail" | "full">>;
+    detail: Type.TOptional<Type.TUnsafe<"summary" | "full" | "tail">>;
     lines: Type.TOptional<Type.TInteger>;
     waitMode: Type.TOptional<Type.TUnsafe<"all" | "count" | "any">>;
     waitCount: Type.TOptional<Type.TInteger>;
@@ -125,7 +125,7 @@ export declare const MonitorQueryParams: Type.TObject<{
     target: Type.TOptional<Type.TString>;
     detail: Type.TOptional<Type.TUnsafe<"summary" | "full">>;
     cursor: Type.TOptional<Type.TString>;
-    until: Type.TOptional<Type.TUnsafe<"settled" | "change" | "attention">>;
+    until: Type.TOptional<Type.TUnsafe<"settled" | "attention" | "change">>;
     timeoutMs: Type.TOptional<Type.TInteger>;
 }>;
 export declare const TeammateMonitorParams: Type.TObject<{
@@ -141,10 +141,12 @@ export declare const WorkspaceWindowParams: Type.TObject<{
     action: Type.TUnsafe<"close" | "list" | "create">;
     name: Type.TOptional<Type.TString>;
     objective: Type.TOptional<Type.TString>;
+    provider: Type.TOptional<Type.TUnsafe<"native" | "herdr">>;
+    herdrSession: Type.TOptional<Type.TString>;
     presentation: Type.TOptional<Type.TUnsafe<"headless" | "interactive">>;
 }>;
 export declare const RemoteWorkerParams: Type.TObject<{
-    action: Type.TUnsafe<"close" | "targets" | "list" | "create">;
+    action: Type.TUnsafe<"close" | "list" | "targets" | "create">;
     targetId: Type.TOptional<Type.TString>;
     name: Type.TOptional<Type.TString>;
     objective: Type.TOptional<Type.TString>;

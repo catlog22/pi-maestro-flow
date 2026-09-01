@@ -54,6 +54,8 @@ import {
   activePromptLoopIdsFromPayload,
   applyMonitorModeContext,
   formatMonitorQueryResult,
+  observeMonitorRemoteWindowsForRevalidation,
+  revalidateMonitorRemoteWindowCaptures,
   runMonitorQuery,
   formatCompact,
   formatVerbose,
@@ -76,7 +78,15 @@ import {
 import {
   MonitorWindowLifecycleService,
   type MonitorWindowCreateRequest,
+  type MonitorWindowStopAuthorization,
+  type MonitorWindowStopResult,
 } from "./monitor-window-lifecycle.ts";
+import {
+  HerdrRollbackError,
+  closeHerdrWindowExact,
+  createHerdrWindow,
+  type HerdrWindowCapture,
+} from "./herdr-window-provider.ts";
 import {
   reduceMonitorWindowStateV1,
   type MonitorManagedWindowEvidenceV1,
@@ -84,6 +94,7 @@ import {
   type MonitorWindowThreadEvidenceV1,
 } from "./monitor-window-state.ts";
 import {
+  MONITOR_WINDOW_FACET_READ_TIMEOUT_MS,
   MONITOR_WINDOW_STATE_VERSION,
   readMonitorWindowFacets,
   type MonitorWindowCompletionEvidenceV1,
@@ -239,11 +250,16 @@ import {
   auxToolCallFallback,
   auxToolResultFallback,
   renderCompletionOutboxMessage,
+  renderMonitorResult,
+  renderObserveCall,
+  renderObserveResult,
   renderQuietTeammateAux,
   renderTeammateCall,
   renderTeammateListCall,
   renderTeammateListResult,
   renderTeammateResult,
+  renderTeammateSendCall,
+  renderTeammateSendResult,
 } from "../tui/render.ts";
 import { AttachOverlay } from "../tui/attach-overlay.ts";
 import {
@@ -290,7 +306,10 @@ import {
   remoteWindowIncomingThreadEntry,
   remoteWindowReceiptThreadStatus,
 } from "./remote-window-session.ts";
-import type { RemoteWindowNotification } from "../remote/protocol.ts";
+import {
+  type RemoteWindowCapture,
+  type RemoteWindowNotification,
+} from "../remote/protocol.ts";
 import { REMOTE_HISTORY_ENTRY_TYPE, type RemoteHistoryMode } from "../sessions/remote-history.ts";
 import { showSessionSendOverlay } from "../tui/session-send-overlay.ts";
 import {
@@ -589,6 +608,8 @@ import {
 import {
   localRootSessionCapabilities,
   projectTeammateSessionEndpoints,
+  sameMonitorRootSessionClaim,
+  selectMonitorVisibleRootEndpoints,
 } from "./session-endpoints.ts";
 import {
   CompletionDeliveryCoordinator,
@@ -1156,6 +1177,12 @@ export default function registerTeammateExtension(
       async execute(_id: string, params: { to: string; message?: string; mode?: RpcMessageMode; kind?: SessionMessageKind }, signal: AbortSignal) {
         return proxyCall<{ delivered: boolean }>("teammate-send", params, signal);
       },
+      renderCall(args, theme, context) {
+        return renderTeammateSendCall(args, theme, context);
+      },
+      renderResult(result, options, theme, context) {
+        return renderTeammateSendResult(result, options, theme, context.args, context.isError);
+      },
     });
 
     pi.registerTool({
@@ -1172,8 +1199,8 @@ export default function registerTeammateExtension(
       renderCall(args, theme, context) {
         return renderTeammateListCall(args, theme, context);
       },
-      renderResult(result, options, theme) {
-        return renderTeammateListResult(result, options, theme);
+      renderResult(result, options, theme, context) {
+        return renderTeammateListResult(result, options, theme, context.args, context.isError);
       },
     });
 
@@ -1238,6 +1265,12 @@ export default function registerTeammateExtension(
           isError: failed,
           details: { output, result },
         };
+      },
+      renderCall(args, theme, context) {
+        return renderObserveCall(args, theme, context);
+      },
+      renderResult(result, options, theme) {
+        return renderObserveResult(result, options, theme, context.isError);
       },
     });
 
@@ -1690,6 +1723,8 @@ export default function registerTeammateExtension(
   const foregroundToolRuns = new Set<string>();
   state.cancelInteractions = (correlationId, reason) =>
     void interactionQueue.cancelForAgent(correlationId, reason);
+  state.cancelInteractionRequest = (requestId, reason) =>
+    void interactionQueue.cancelByRequest(requestId, reason);
 
   /** Completed teammate sessions recovered from disk (post-restart history). */
   let historyScans: WorkspaceSessionScan[] = [];
@@ -3778,11 +3813,6 @@ export default function registerTeammateExtension(
             ...(workspaceMainLastSettle === undefined ? {} : { mainLastSettle: workspaceMainLastSettle }),
           }),
         });
-        await publisher.start();
-        if (!ownsWorkspacePeerGeneration()) {
-          await publisher.stop().catch(() => undefined);
-          return;
-        }
         const runtimeActor = createWindowSupervisorRuntimeActor({
           cwd,
           workspaceId: publisher.identity.workspaceId,
@@ -3803,17 +3833,29 @@ export default function registerTeammateExtension(
           await runtimeActor.stop().catch(() => undefined);
           return;
         }
+        const unbindWorkspacePeerRuntime = (consumer?: WorkspacePeerCommandConsumer): void => {
+          let changed = false;
+          if (consumer && workspacePeerConsumer === consumer) {
+            workspacePeerConsumer = undefined;
+            changed = true;
+          }
+          if (workspacePeerPublisher === publisher) {
+            workspacePeerPublisher = undefined;
+            changed = true;
+          }
+          if (workspaceWindowRuntimeActor === runtimeActor) {
+            workspaceWindowRuntimeActor = undefined;
+            changed = true;
+          }
+          if (changed) refreshSessionEndpointDirectory();
+        };
         workspacePeerPublisher = publisher;
         workspaceWindowRuntimeActor = runtimeActor;
-        // Events can arrive while the initial owner snapshot is being written.
-        // Publish the latest in-memory progress once the publisher is bound.
-        publisher.markDirty();
         const registry = sessionHostRegistry;
         if (!registry) {
+          unbindWorkspacePeerRuntime();
           await publisher.stop().catch(() => undefined);
           await runtimeActor.stop().catch(() => undefined);
-          workspacePeerPublisher = undefined;
-          workspaceWindowRuntimeActor = undefined;
           return;
         }
         const consumer = createWorkspacePeerCommandConsumer(publisher.identity, async (command) => {
@@ -4010,20 +4052,31 @@ export default function registerTeammateExtension(
           return result;
         });
         consumer.start();
-        if (!ownsWorkspacePeerGeneration()) {
+        workspacePeerConsumer = consumer;
+        try {
+          // Publish the owner only after its command consumer can acknowledge
+          // objectives; discovery is the admission signal for managed windows.
+          await publisher.start();
+        } catch (error) {
+          unbindWorkspacePeerRuntime(consumer);
           await consumer.stop().catch(() => undefined);
-          if (workspacePeerPublisher === publisher) workspacePeerPublisher = undefined;
-          if (workspaceWindowRuntimeActor === runtimeActor) workspaceWindowRuntimeActor = undefined;
+          await publisher.stop().catch(() => undefined);
+          await runtimeActor.stop().catch(() => undefined);
+          throw error;
+        }
+        if (!ownsWorkspacePeerGeneration()) {
+          unbindWorkspacePeerRuntime(consumer);
+          await consumer.stop().catch(() => undefined);
           await publisher.stop().catch(() => undefined);
           await runtimeActor.stop().catch(() => undefined);
           return;
         }
-        workspacePeerConsumer = consumer;
+        // Events can arrive while the initial owner snapshot is being written.
+        // Publish the latest in-memory progress once the publisher is bound.
+        publisher.markDirty();
         await refreshWorkspacePeerOwners();
         if (!ownsWorkspacePeerGeneration()) {
-          if (workspacePeerConsumer === consumer) workspacePeerConsumer = undefined;
-          if (workspacePeerPublisher === publisher) workspacePeerPublisher = undefined;
-          if (workspaceWindowRuntimeActor === runtimeActor) workspaceWindowRuntimeActor = undefined;
+          unbindWorkspacePeerRuntime(consumer);
           await consumer.stop().catch(() => undefined);
           await publisher.stop().catch(() => undefined);
           await runtimeActor.stop().catch(() => undefined);
@@ -5320,6 +5373,10 @@ export default function registerTeammateExtension(
             return;
           }
           if (event.type === "teammate_proxy_cancel" && typeof event.requestId === "string") {
+            interactionQueue.cancelByRequest(
+              event.requestId,
+              "The requesting teammate cancelled this interaction.",
+            );
             cancelProxyDispatch(state, event.requestId);
             return;
           }
@@ -6123,17 +6180,11 @@ export default function registerTeammateExtension(
     },
 
     renderCall(args, theme, context) {
-      if (context.isPartial === false) return new Text("", 0, 0);
-      const mode = typeof args.mode === "string" ? args.mode : "steer";
-      return renderQuietTeammateAux("teammate-send", `@${String(args.to ?? "?")} · ${mode}`, "running", theme)
-        ?? auxToolCallFallback("teammate-send", theme);
+      return renderTeammateSendCall(args, theme, context);
     },
 
-    renderResult(result, options, theme) {
-      if (options.isPartial) return new Text("", 0, 0);
-      const failed = (result as { isError?: boolean }).isError === true || result.details?.delivered !== true;
-      return renderQuietTeammateAux("teammate-send", failed ? "delivery failed" : "delivered", failed ? "failure" : "success", theme)
-        ?? auxToolResultFallback(result, theme);
+    renderResult(result, options, theme, context) {
+      return renderTeammateSendResult(result, options, theme, context.args, context.isError);
     },
   };
 
@@ -6326,8 +6377,8 @@ export default function registerTeammateExtension(
       return renderTeammateListCall(args, theme, context);
     },
 
-    renderResult(result, options, theme) {
-      return renderTeammateListResult(result, options, theme);
+    renderResult(result, options, theme, context) {
+      return renderTeammateListResult(result, options, theme, context.args, context.isError);
     },
   };
 
@@ -6345,8 +6396,8 @@ export default function registerTeammateExtension(
     renderCall(args, theme, context) {
       return renderTeammateListCall(args, theme, context);
     },
-    renderResult(result, options, theme) {
-      return renderTeammateListResult(result, options, theme);
+    renderResult(result, options, theme, context) {
+      return renderTeammateListResult(result, options, theme, context.args, context.isError);
     },
   };
 
@@ -6656,19 +6707,32 @@ export default function registerTeammateExtension(
   // ---------------------------------------------------------------------------
 
   type ManagedWindowPresentation = "interactive" | "headless";
+  type ManagedWindowProvider = "native" | "herdr";
 
   interface WorkspaceWindowToolParams {
     action: "create" | "list" | "close";
     name?: string;
     objective?: string;
+    provider?: ManagedWindowProvider;
+    herdrSession?: string;
     presentation?: ManagedWindowPresentation;
   }
+
+  type ManagedWindowRuntime =
+    | {
+        provider: "native";
+        child: ChildProcess;
+        termination?: ChildTerminationController;
+      }
+    | {
+        provider: "herdr";
+        capture: HerdrWindowCapture;
+      };
 
   interface ManagedWindow {
     name: string;
     sessionName: string;
-    child: ChildProcess;
-    termination?: ChildTerminationController;
+    runtime: ManagedWindowRuntime;
     startedAt: number;
     cwd: string;
     objective: string;
@@ -6699,10 +6763,22 @@ export default function registerTeammateExtension(
   const MANAGED_WINDOW_HANDSHAKE_TIMEOUT_INTERACTIVE_MS = 60_000;
   const MANAGED_WINDOW_HANDSHAKE_POLL_MS = 250;
   const managedWindows = new Map<string, ManagedWindow>();
+  const managedWindowLaunchReservations = new Map<string, string>();
 
   function managedWindowSessionName(name: string): string {
     const token = randomUUID().replace(/-/g, "");
     return `mw-${token}-${name.slice(0, 27)}`;
+  }
+
+  function managedWindowHerdrAgentName(): string {
+    return `mw-${randomUUID().replace(/-/g, "").slice(0, 29)}`;
+  }
+
+  interface ManagedWindowSpawnOptions {
+    provider?: ManagedWindowProvider;
+    herdrSession?: string;
+    authorize?: () => boolean;
+    signal?: AbortSignal;
   }
 
   function managedWindowDelay(ms: number, signal?: AbortSignal): Promise<void> {
@@ -6729,17 +6805,84 @@ export default function registerTeammateExtension(
     sessionName = name,
     forkSessionFile?: string,
     management: "monitor" | "delegation" = "monitor",
+    options: ManagedWindowSpawnOptions = {},
   ): Promise<{ ok: boolean; window?: ManagedWindow; error?: string }> {
-    if (managedWindows.has(name)) return { ok: false, error: `window "${name}" is already spawned` };
-    if (managedWindows.size >= MAX_MANAGED_WINDOWS) {
+    const provider = options.provider ?? "native";
+    if (managedWindows.has(name) || managedWindowLaunchReservations.has(name)) {
+      return { ok: false, error: `window "${name}" is already spawned` };
+    }
+    if (managedWindows.size + managedWindowLaunchReservations.size >= MAX_MANAGED_WINDOWS) {
       return { ok: false, error: `managed window limit reached (${MAX_MANAGED_WINDOWS})` };
     }
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(name)) {
       return { ok: false, error: "window name must start alphanumeric and use [A-Za-z0-9._-]" };
     }
     if (!objective.trim()) return { ok: false, error: "window objective is required" };
+    if (provider === "herdr" && presentation !== "interactive") {
+      return { ok: false, error: "Herdr windows support interactive presentation only." };
+    }
+    if (provider === "herdr" && management !== "monitor") {
+      return { ok: false, error: "Herdr windows are available only to the Monitor lifecycle." };
+    }
 
     const cwd = state.baseCwd ?? cwdFallback;
+    if (provider === "herdr") {
+      const reservation = randomUUID().replace(/-/g, "");
+      managedWindowLaunchReservations.set(name, reservation);
+      const ownsReservation = (): boolean => managedWindowLaunchReservations.get(name) === reservation
+        && managedWindows.get(name) === undefined;
+      const authorize = (): boolean => ownsReservation() && (options.authorize?.() ?? true);
+      const startedAt = Date.now();
+      try {
+        const created = await createHerdrWindow({
+          herdrSession: options.herdrSession ?? "default",
+          cwd,
+          agentName: managedWindowHerdrAgentName(),
+          sessionName,
+          piArgs: buildManagedWindowPiArgs({ sessionName, presentation: "interactive", forkSessionFile }),
+          authorize,
+          signal: options.signal,
+        });
+        if (!authorize()) throw new Error(`Herdr window "${name}" lost its creation authority.`);
+        const window: ManagedWindow = {
+          name,
+          sessionName,
+          runtime: { provider: "herdr", capture: created.capture },
+          startedAt,
+          cwd,
+          objective,
+          presentation,
+          management,
+          settled: false,
+          terminalPublished: false,
+        };
+        managedWindows.set(name, window);
+        return { ok: true, window };
+      } catch (error) {
+        if (error instanceof HerdrRollbackError && ownsReservation()) {
+          const window: ManagedWindow = {
+            name,
+            sessionName,
+            runtime: { provider: "herdr", capture: error.capture },
+            startedAt,
+            cwd,
+            objective,
+            presentation,
+            management,
+            launchError: error.message,
+            settled: false,
+            terminalPublished: false,
+          };
+          managedWindows.set(name, window);
+        }
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      } finally {
+        if (managedWindowLaunchReservations.get(name) === reservation) {
+          managedWindowLaunchReservations.delete(name);
+        }
+      }
+    }
+
     const piCommand = getPiSpawnCommand(
       buildManagedWindowPiArgs({ sessionName, presentation, forkSessionFile }),
     );
@@ -6754,11 +6897,11 @@ export default function registerTeammateExtension(
       shell: false,
       windowsHide: presentation === "interactive",
     });
+    const termination = presentation === "headless" ? createChildTerminationController(child) : undefined;
     const window: ManagedWindow = {
       name,
       sessionName,
-      child,
-      ...(presentation === "headless" ? { termination: createChildTerminationController(child) } : {}),
+      runtime: { provider: "native", child, ...(termination ? { termination } : {}) },
       startedAt: Date.now(),
       cwd,
       objective,
@@ -6793,7 +6936,7 @@ export default function registerTeammateExtension(
     });
     child.once("exit", (code, signal) => {
       if (presentation === "headless") {
-        window.termination?.cleanup();
+        termination?.cleanup();
         if (window.management === "monitor"
           && window.completionHandle
           && window.terminalDeadlineAt !== undefined
@@ -6823,10 +6966,10 @@ export default function registerTeammateExtension(
     } catch (error) {
       if (presentation === "headless" && child.exitCode === null && child.signalCode === null) {
         window.terminationRequested = true;
-        window.termination?.terminate();
-        await window.termination?.outcome;
+        termination?.terminate();
+        await termination?.outcome;
       }
-      window.termination?.cleanup();
+      termination?.cleanup();
       if (managedWindows.get(name) === window) managedWindows.delete(name);
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
@@ -6902,11 +7045,25 @@ export default function registerTeammateExtension(
     );
   }
 
-  async function terminateManagedWindowProcess(window: ManagedWindow): Promise<"stopped" | "already-exited"> {
+  async function terminateManagedWindowProcess(
+    window: ManagedWindow,
+    authorize: () => boolean,
+    onTerminationStarted?: () => void,
+  ): Promise<"stopped" | "already-exited"> {
+    if (window.runtime.provider === "herdr") {
+      window.terminationRequested = true;
+      const outcome = await closeHerdrWindowExact(window.runtime.capture, {
+        authorize,
+        onCloseStarted: onTerminationStarted,
+      });
+      return outcome.status === "closed" ? "stopped" : "already-exited";
+    }
+
     if (window.presentation === "headless") {
-      const termination = window.termination;
+      const termination = window.runtime.termination;
       if (!termination) throw new Error(`Headless window "${window.name}" has no termination controller.`);
       window.terminationRequested = true;
+      onTerminationStarted?.();
       termination.terminate();
       const outcome = await termination.outcome;
       termination.cleanup();
@@ -6919,6 +7076,7 @@ export default function registerTeammateExtension(
     const owner = exactManagedWindowOwner(window);
     if (!owner) throw new Error(`Interactive window "${window.name}" has no fresh authenticated owner; ownership record retained.`);
     window.terminationRequested = true;
+    onTerminationStarted?.();
     return terminateProcessTreeByPid(owner.pid);
   }
 
@@ -7018,36 +7176,57 @@ export default function registerTeammateExtension(
     }
   }
 
-  async function stopExactManagedWindow(window: ManagedWindow): Promise<{ ok: boolean; status?: string; error?: string }> {
+  async function stopExactManagedWindow<Authority>(
+    window: ManagedWindow,
+    authorization: MonitorWindowStopAuthorization<Authority>,
+  ): Promise<MonitorWindowStopResult> {
     const name = window.name;
+    let terminationStarted = false;
+    const assertAuthorized = (phase: string): void => {
+      if (!authorization.authorize()) {
+        throw new Error(`Lifecycle authority changed ${phase} window "${name}" termination.`);
+      }
+    };
     try {
+      assertAuthorized("before");
       if (managedWindows.get(name) !== window) throw new Error(`managed window "${name}" was replaced`);
-      if (window.presentation === "interactive") {
+      if (window.runtime.provider === "native" && window.presentation === "interactive") {
         const owners = await refreshWorkspacePeerOwnersStrict();
+        assertAuthorized("during");
         if (managedWindows.get(name) !== window) throw new Error(`managed window "${name}" was replaced`);
         const owner = captureManagedWindowOwner(window, owners);
-        if (!owner) {
+        if (!owner && window.runtime.provider === "native") {
           const exited = window.pid !== undefined && !managedWindowPidIsAlive(window.pid);
           if (window.launchError || exited) {
             if (managedWindows.get(name) === window) managedWindows.delete(name);
-            return { ok: true, status: "already-exited" };
+            return { ok: true, terminationStarted, status: "already-exited" };
           }
           throw new Error(`Interactive window "${name}" has no fresh authenticated owner; ownership record retained for reconciliation.`);
         }
       }
 
-      const status = await terminateManagedWindowProcess(window);
+      assertAuthorized("before");
+      const status = await terminateManagedWindowProcess(
+        window,
+        authorization.authorize,
+        () => { terminationStarted = true; },
+      );
+      assertAuthorized("during");
       if (managedWindows.get(name) === window) managedWindows.delete(name);
-      return { ok: true, status };
+      return { ok: true, terminationStarted, status };
     } catch (error) {
-      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      return { ok: false, terminationStarted, error: error instanceof Error ? error.message : String(error) };
     }
   }
 
-  async function stopManagedWindow(name: string): Promise<{ ok: boolean; status?: string; error?: string }> {
+  async function stopManagedWindow(name: string): Promise<MonitorWindowStopResult> {
     const window = managedWindows.get(name);
-    if (!window) return { ok: false, error: `No managed window "${name}".` };
-    return stopExactManagedWindow(window);
+    if (!window) return { ok: false, terminationStarted: false, error: `No managed window "${name}".` };
+    return stopExactManagedWindow(window, {
+      scope: "exact-resource",
+      authority: window,
+      authorize: () => managedWindows.get(name) === window,
+    });
   }
 
   async function completeManagedWindowTerminalCommand(
@@ -7085,21 +7264,23 @@ export default function registerTeammateExtension(
 
   async function stopAllManagedWindows(): Promise<void> {
     const snapshot = [...managedWindows.values()];
-    const hasInteractiveWindows = snapshot.some((window) => window.presentation === "interactive");
-    let strictDiscoveryReady = !hasInteractiveWindows;
-    if (hasInteractiveWindows) {
+    const hasNativeInteractiveWindows = snapshot.some((window) =>
+      window.runtime.provider === "native" && window.presentation === "interactive"
+    );
+    let strictDiscoveryReady = !hasNativeInteractiveWindows;
+    if (hasNativeInteractiveWindows) {
       try {
         await refreshWorkspacePeerOwnersStrict();
         strictDiscoveryReady = true;
       } catch (error) {
-        logDiagnosticError("[pi-maestro-teammate] managed-window shutdown discovery failed; interactive windows will not be killed from stale PID data:", error);
+        logDiagnosticError("[pi-maestro-teammate] managed-window shutdown discovery failed; native interactive windows will not be killed from stale PID data:", error);
       }
     }
 
     await Promise.allSettled(snapshot.map(async (window) => {
-      if (window.presentation === "interactive" && !strictDiscoveryReady) return;
+      if (window.runtime.provider === "native" && window.presentation === "interactive" && !strictDiscoveryReady) return;
       try {
-        if (window.presentation === "interactive") {
+        if (window.runtime.provider === "native" && window.presentation === "interactive") {
           if (window.management === "delegation") {
             try {
               const record = await loadDelegationRecord(state.baseCwd || window.cwd, window.name);
@@ -7116,7 +7297,10 @@ export default function registerTeammateExtension(
             return;
           }
         }
-        await terminateManagedWindowProcess(window);
+        await terminateManagedWindowProcess(
+          window,
+          () => managedWindows.get(window.name) === window,
+        );
         await closeDelegationRecordAfterTermination(window);
         if (managedWindows.get(window.name) === window) managedWindows.delete(window.name);
       } catch (error) {
@@ -8418,24 +8602,10 @@ export default function registerTeammateExtension(
       };
     },
     renderCall(args, theme, context) {
-      if (context.isPartial === false) return new Text("", 0, 0);
-      const action = String(args.action ?? "status");
-      const count = Array.isArray(args.targets) ? args.targets.length : 0;
-      const targetLabel = `${count} target${count === 1 ? "" : "s"}`;
-      return renderQuietTeammateAux("observe", `${action} · ${targetLabel}`, "running", theme)
-        ?? auxToolCallFallback("observe", theme);
+      return renderObserveCall(args, theme, context);
     },
     renderResult(result, options, theme) {
-      if (options.isPartial) return new Text("", 0, 0);
-      const observed = result.details?.result;
-      const failed = (result as { isError?: boolean }).isError === true;
-      const rest = observed
-        ? observed.action === "status"
-          ? `${observed.observations.length} target${observed.observations.length === 1 ? "" : "s"}`
-          : `${observed.reason} · ${observed.observations.filter((item) => item.waitStatus !== undefined).length}/${observed.observations.length} settled`
-        : failed ? "failed" : "completed";
-      return renderQuietTeammateAux("observe", rest, failed ? "failure" : "success", theme)
-        ?? auxToolResultFallback(result, theme);
+      return renderObserveResult(result, options, theme, context.isError);
     },
   };
 
@@ -8556,26 +8726,40 @@ export default function registerTeammateExtension(
   ): Promise<MonitorQuerySnapshot> => {
     if (!ownsMonitorQueryAuthority(authority)) throw new Error("Monitor query authority is stale before refresh.");
     await workspacePeerLifecycle;
-    await refreshWorkspacePeerOwners();
-    if (!ownsMonitorQueryAuthority(authority)) throw new Error("Monitor query authority changed during workspace refresh.");
+    if (!ownsMonitorQueryAuthority(authority)) throw new Error("Monitor query authority changed during workspace lifecycle wait.");
+    const publisher = workspacePeerPublisher;
+    if (!publisher) throw new Error("Workspace peer discovery is unavailable.");
+    const ownsWorkspaceCapture = (): boolean =>
+      workspacePeerPublisher === publisher && ownsMonitorQueryAuthority(authority);
+    const workspaceDiscovery = await discoverWorkspacePeers(publisher.identity, {
+      cleanupStale: true,
+      includeSelf: true,
+    });
+    if (!ownsWorkspaceCapture()) throw new Error("Monitor query authority changed during workspace refresh.");
+    const workspaceOwners = workspaceDiscovery.peers;
+    workspacePeerOwners = workspaceOwners.filter((owner) => owner.ownerId !== publisher.identity.ownerId);
+    reconcileManagedWindowOwners();
+    refreshSessionEndpointDirectory();
 
     let remoteBinding = currentRemoteMonitorBinding(remoteMonitorBinding) ? remoteMonitorBinding : undefined;
     try {
       remoteBinding ??= ensureRemoteMonitorBinding();
       await remoteBinding.windows.list(signal);
-      if (!currentRemoteMonitorBinding(remoteBinding) || !ownsMonitorQueryAuthority(authority)) {
+      if (!currentRemoteMonitorBinding(remoteBinding) || !ownsWorkspaceCapture()) {
         throw new Error("Monitor query authority changed during remote window refresh.");
       }
     } catch (error) {
-      if (!ownsMonitorQueryAuthority(authority)) throw error;
+      if (!ownsWorkspaceCapture()) throw error;
       logDiagnosticWarn("[pi-maestro-teammate] monitor remote window refresh degraded:", sanitizeRemoteMonitorError(error, "monitor query"));
       remoteBinding = currentRemoteMonitorBinding(remoteBinding) ? remoteBinding : undefined;
     }
     refreshSessionEndpointDirectory(true);
 
-    const endpoints = monitorRegistry.listEndpoints().filter((endpoint) =>
-      endpoint.kind === "root" && (endpoint.scope === "workspace-peer" || endpoint.scope === "ssh-window")
-    );
+    const endpoints = [...selectMonitorVisibleRootEndpoints(
+      monitorRegistry.listEndpoints(),
+      publisher.identity,
+      workspaceOwners,
+    )];
     const remoteRunByEndpoint = new Map<string, RemoteMonitorRunListing>();
     for (const [index, run] of currentRemoteMonitorRuns().entries()) {
       const endpointId = `monitor-remote-run/v1/${encodeURIComponent(run.targetId)}/${encodeURIComponent(run.runId)}/${run.generation}`;
@@ -8614,9 +8798,10 @@ export default function registerTeammateExtension(
       remoteRunByEndpoint.set(endpointId, run);
     }
     const capturedOwners = new Map<string, WorkspaceOwnerSnapshot>();
+    const capturedRemoteWindows = new Map<string, RemoteWindowCapture>();
     for (const endpoint of endpoints) {
-      if (endpoint.scope !== "workspace-peer") continue;
-      const owner = workspacePeerOwners.find((candidate) =>
+      if (endpoint.scope !== "local" && endpoint.scope !== "workspace-peer") continue;
+      const owner = workspaceOwners.find((candidate) =>
         candidate.workspaceId === endpoint.workspaceId
         && candidate.ownerId === endpoint.ownerId
         && candidate.ownerNonce === endpoint.ownerNonce
@@ -8632,21 +8817,27 @@ export default function registerTeammateExtension(
         if (!target) return;
         try {
           const observed = await remoteBinding!.windows.observe(target);
-          if (!currentRemoteMonitorBinding(remoteBinding) || !ownsMonitorQueryAuthority(authority)) {
+          if (!currentRemoteMonitorBinding(remoteBinding) || !ownsWorkspaceCapture()) {
             throw new Error("Monitor query authority changed during remote owner read.");
           }
           if (observed.owner.workspaceId === endpoint.workspaceId
             && observed.owner.ownerId === endpoint.ownerId
-            && observed.owner.ownerNonce === endpoint.ownerNonce) {
+            && observed.owner.ownerNonce === endpoint.ownerNonce
+            && observed.capture.workspaceRef === endpoint.workspaceRef
+            && observed.capture.authorityId === endpoint.routeAuthority?.authorityId
+            && observed.capture.gatewayWorkerId === endpoint.sourceId
+            && observed.capture.gatewayInstanceNonce === endpoint.routeAuthority?.instanceNonce
+            && observed.capture.generation === endpoint.generation) {
             capturedOwners.set(endpoint.id, observed.owner);
+            capturedRemoteWindows.set(endpoint.id, observed.capture);
           }
         } catch (error) {
-          if (!ownsMonitorQueryAuthority(authority)) throw error;
+          if (!ownsWorkspaceCapture()) throw error;
           logDiagnosticWarn(`[pi-maestro-teammate] monitor owner facet degraded for ${target}:`, sanitizeRemoteMonitorError(error, "owner read"));
         }
       }));
     }
-    if (!ownsMonitorQueryAuthority(authority)) throw new Error("Monitor query authority changed during owner reads.");
+    if (!ownsWorkspaceCapture()) throw new Error("Monitor query authority changed during owner reads.");
 
     const threadSnapshot = [...monitorRegistry.thread.list()];
     const reductionItems: MonitorWindowReductionItemV1[] = [];
@@ -8750,8 +8941,53 @@ export default function registerTeammateExtension(
     const facets = await readMonitorWindowFacets({
       version: MONITOR_WINDOW_STATE_VERSION,
       targets: facetTargets,
-    }, (message) => logDiagnosticWarn(`[pi-maestro-teammate] ${message}`));
-    if (!ownsMonitorQueryAuthority(authority)) throw new Error("Monitor query authority changed during facet reads.");
+    }, (message) => logDiagnosticWarn(`[pi-maestro-teammate] ${message}`), {
+      signal,
+      timeoutMs: MONITOR_WINDOW_FACET_READ_TIMEOUT_MS,
+    });
+    if (!ownsWorkspaceCapture()) throw new Error("Monitor query authority changed during facet reads.");
+
+    const remoteWindowRevalidationTargets = reductionItems.flatMap((item) => {
+      if (item.endpoint.scope !== "ssh-window" || remoteRunByEndpoint.has(item.endpoint.id)) return [];
+      const target = item.endpoint.target;
+      const startingCapture = capturedRemoteWindows.get(item.endpoint.id);
+      // Initial SSH observe is fail-soft: only a successfully captured window
+      // participates in the final fail-closed rotation sweep.
+      if (!target || !startingCapture) return [];
+      return [{ endpointId: item.endpoint.id, target, startingCapture }];
+    });
+    const finalRemoteBinding = remoteWindowRevalidationTargets.length > 0 ? remoteBinding : undefined;
+    if (remoteWindowRevalidationTargets.length > 0 && !finalRemoteBinding) {
+      throw new Error("Remote Monitor binding changed during snapshot reduction.");
+    }
+    const [remoteWindowObservations, finalWorkspaceDiscovery] = await Promise.all([
+      finalRemoteBinding
+        ? observeMonitorRemoteWindowsForRevalidation(
+            remoteWindowRevalidationTargets,
+            {
+              observe: (target) => finalRemoteBinding.windows.observe(target),
+              isCurrent: () => currentRemoteMonitorBinding(finalRemoteBinding) && ownsWorkspaceCapture(),
+            },
+          )
+        : Promise.resolve([]),
+      discoverWorkspacePeers(publisher.identity, { includeSelf: true }),
+    ]);
+    if (!ownsWorkspaceCapture()
+      || (finalRemoteBinding !== undefined && !currentRemoteMonitorBinding(finalRemoteBinding))) {
+      throw new Error("Monitor query authority changed during final owner revalidation.");
+    }
+    if (finalRemoteBinding) {
+      revalidateMonitorRemoteWindowCaptures(
+        remoteWindowObservations,
+        (target) => finalRemoteBinding.windows.capture(target),
+      );
+    }
+    const finalVisibleWorkspaceEndpoints = new Map(selectMonitorVisibleRootEndpoints(
+      monitorRegistry.listEndpoints(),
+      publisher.identity,
+      finalWorkspaceDiscovery.peers,
+    ).filter((endpoint) => endpoint.scope === "local" || endpoint.scope === "workspace-peer")
+      .map((endpoint) => [endpoint.id, endpoint] as const));
 
     for (const item of reductionItems) {
       const identity = monitorIdentityForEndpoint(item.endpoint);
@@ -8766,14 +9002,20 @@ export default function registerTeammateExtension(
           || current.monitorOwnerNonce !== binding?.session.monitorOwnerNonce) {
           throw new Error(`Remote Monitor run ${remoteRun.target} changed owner during snapshot reduction.`);
         }
-      } else {
+      } else if (item.endpoint.scope !== "ssh-window") {
         const current = monitorRegistry.directory.get(item.endpoint.id);
-        if (!current || !sameMonitorWindowIdentity(identity, monitorIdentityForEndpoint(current))) {
+        const finalEndpoint = finalVisibleWorkspaceEndpoints.get(item.endpoint.id);
+        if (!current
+          || !finalEndpoint
+          || !sameMonitorRootSessionClaim(item.endpoint, finalEndpoint)
+          || !sameMonitorRootSessionClaim(finalEndpoint, current)
+          || !sameMonitorWindowIdentity(identity, monitorIdentityForEndpoint(current))) {
           throw new Error(`Monitor window ${item.endpoint.id} changed owner during snapshot reduction.`);
         }
       }
       item.facets = facets.filter((facet) => sameMonitorWindowIdentity(facet.target.identity, identity));
     }
+    if (!ownsWorkspaceCapture()) throw new Error("Monitor query authority changed during snapshot reduction.");
 
     const stateSnapshot = reduceMonitorWindowStateV1({ observedAt: Date.now(), windows: reductionItems });
     return {
@@ -8822,9 +9064,8 @@ Use list for an attention-first overview, get for one complete normalized window
       if (context.isPartial === false) return new Text("", 0, 0);
       return auxToolCallFallback("monitor", theme);
     },
-    renderResult(result, options, theme) {
-      if (options.isPartial) return new Text("", 0, 0);
-      return auxToolResultFallback(result, theme);
+    renderResult(result, options, theme, context) {
+      return renderMonitorResult(result, options, theme, context.isError);
     },
   };
 
@@ -8916,6 +9157,8 @@ Use list for an attention-first overview, get for one complete normalized window
 
   interface WorkspaceWindowToolWindow {
     name: string;
+    provider: ManagedWindowProvider;
+    herdrSession?: string;
     presentation: ManagedWindowPresentation;
     status: "launching" | "running" | "disconnected" | "failed";
     objective: string;
@@ -8933,15 +9176,20 @@ Use list for an attention-first overview, get for one complete normalized window
   function workspaceWindowSnapshots(): WorkspaceWindowToolWindow[] {
     return [...managedWindows.values()].map((window) => {
       const owner = exactManagedWindowOwner(window);
+      const nativeHeadlessRunning = window.runtime.provider === "native"
+        && window.presentation === "headless"
+        && window.runtime.child.exitCode === null;
       const status: WorkspaceWindowToolWindow["status"] = window.launchError
         ? "failed"
-        : owner || (window.presentation === "headless" && window.child.exitCode === null)
+        : owner || nativeHeadlessRunning
           ? "running"
           : window.ownerId
             ? "disconnected"
             : "launching";
       return {
         name: window.name,
+        provider: window.runtime.provider,
+        ...(window.runtime.provider === "herdr" ? { herdrSession: window.runtime.capture.herdrSession } : {}),
         presentation: window.presentation,
         status,
         objective: window.objective,
@@ -8961,12 +9209,24 @@ Use list for an attention-first overview, get for one complete normalized window
     captureAuthority: captureMonitorQueryAuthority,
     isAuthorityCurrent: ownsMonitorQueryAuthority,
     createHandle: () => workspaceWindowCompletionHandle(randomUUID().replace(/-/g, "")),
-    spawn: (request: MonitorWindowCreateRequest) => spawnManagedWindow(
+    spawn: (
+      request: MonitorWindowCreateRequest,
+      authority: MonitorQueryAuthorityFence,
+      signal: AbortSignal,
+    ) => spawnManagedWindow(
       request.name,
       request.objective,
       request.cwd,
       request.presentation,
       managedWindowSessionName(request.name),
+      undefined,
+      "monitor",
+      {
+        provider: request.provider ?? "native",
+        herdrSession: request.herdrSession ?? "default",
+        authorize: () => ownsMonitorQueryAuthority(authority),
+        signal,
+      },
     ),
     isCurrentWindow: (window) => managedWindows.get(window.name) === window,
     waitForOwner: waitForManagedWindowOwner,
@@ -9003,10 +9263,11 @@ Use list for an attention-first overview, get for one complete normalized window
         throw new Error(`Terminal result request for window "${window.name}" was published without its outgoing journal entry.`);
       }
       window.terminalDeadlineAt = requestEntry.createdAt + MANAGED_WINDOW_TERMINAL_DEADLINE_MS;
-      if (window.child.exitCode !== null || window.child.signalCode !== null) {
+      if (window.runtime.provider === "native"
+        && (window.runtime.child.exitCode !== null || window.runtime.child.signalCode !== null)) {
         armManagedWindowTerminalFallback(window, {
           outcome: "failed",
-          error: `Workspace worker runtime exited before terminal setup acknowledgement (code ${window.child.exitCode ?? "?"}, signal ${window.child.signalCode ?? "none"}).`,
+          error: `Workspace worker runtime exited before terminal setup acknowledgement (code ${window.runtime.child.exitCode ?? "?"}, signal ${window.runtime.child.signalCode ?? "none"}).`,
         });
       }
     },
@@ -9027,10 +9288,11 @@ Use list for an attention-first overview, get for one complete normalized window
     renderShell: "self",
     description: `Create, list, or close Pi worker windows owned by the active Monitor coordinator.
 
-This lifecycle tool is available only after the user enters Monitor mode with /monitor. Create opens an interactive terminal by default, waits for exact workspace-peer registration, returns the exact owner target for direct observation and messaging, and provides an optional canonical completion handle. Close is restricted to windows created by this Monitor session; discovered external peer windows can be messaged or observed but cannot be closed. Terminal results remain retrievable after process exit through the handle's immutable agent:// resource; result bodies are not inlined into completion notices.`,
+This lifecycle tool is available only after the user enters Monitor mode with /monitor. Create uses the native provider by default; provider=herdr creates an interactive Pi workspace in an already-running local Herdr session. Both providers wait for exact workspace-peer registration, return the exact owner target for observation and messaging, and provide an optional canonical completion handle. Close is restricted to exact windows created by this Monitor session; discovered external peer windows can be messaged or observed but cannot be closed. Terminal results remain retrievable after process exit through the handle's immutable agent:// resource; result bodies are not inlined into completion notices.`,
     promptSnippet: "Create, list, or close Monitor-owned Pi worker windows.",
     promptGuidelines: [
       "Use create only when the user's monitoring or coordination request requires a new worker window; do not create speculative workers.",
+      "Use provider=herdr only for an already-running local Herdr session. Herdr supports interactive presentation only and never starts or stops the Herdr server.",
       "The create call already delivers its objective to the worker. After create, do not resend that objective; use the returned owner target only for later corrections, new constraints, explicit response requests, or safety/lifecycle instructions.",
       "Before close, retain the returned completion handle. Closing pending work forms a canonical cancelled completion at the same immutable agent:// resource.",
       "Read a settled result with the resource tool using the returned agent:// URI; completion notices contain only a status summary and that URI.",
@@ -9076,7 +9338,7 @@ This lifecycle tool is available only after the user enters Monitor mode with /m
         const windows = workspaceWindowSnapshots();
         if (windows.length === 0) return result("No Monitor-owned worker windows.");
         return result(windows.map((window) =>
-          `${window.status === "running" ? "■" : window.status === "launching" ? "□" : "✗"} ${window.name} · ${window.presentation} · ${window.status}${window.owner ? ` · ${window.owner}` : ""}`
+          `${window.status === "running" ? "■" : window.status === "launching" ? "□" : "✗"} ${window.name} · ${window.provider}${window.herdrSession ? `:${window.herdrSession}` : ""} · ${window.presentation} · ${window.status}${window.owner ? ` · ${window.owner}` : ""}`
         ).join("\n"));
       }
 
@@ -9093,17 +9355,20 @@ This lifecycle tool is available only after the user enters Monitor mode with /m
       if (!objective) return result("objective is required for workspace-window create.", true);
 
       const presentation = params.presentation ?? "interactive";
+      const provider = params.provider ?? "native";
       const created = await monitorWindowLifecycle.create({
         name,
         objective,
         cwd: state.baseCwd || process.cwd(),
         presentation,
+        provider,
+        ...(provider === "herdr" ? { herdrSession: params.herdrSession ?? "default" } : {}),
       }, signal);
       if (!created.ok || !created.owner || !created.handle) {
         return result(created.error ?? `Failed to create ${name}.`, true, created.handle);
       }
       return result(
-        `Created ${presentation} worker window ${name} as owner:${created.owner.ownerId}. Result: ${created.handle.resource}`,
+        `Created ${provider} ${presentation} worker window ${name} as owner:${created.owner.ownerId}. Result: ${created.handle.resource}`,
         false,
         created.handle,
       );

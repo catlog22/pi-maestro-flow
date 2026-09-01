@@ -5,13 +5,19 @@ import { getWorkspaceProjectionProvider, registerWorkspaceProjectionProvider } f
 import {
   createLocalWorkspacePeerDiscoveryProvider,
   projectTeammateSessionEndpoints,
+  sameMonitorRootSessionClaim,
+  selectMonitorVisibleRootEndpoints,
 } from "../src/extension/session-endpoints.ts";
 import {
   buildWorkspaceOwnerSnapshot,
   type WorkspacePeerIdentity,
 } from "../src/extension/workspace-peers.ts";
 import type { TeammateState } from "../src/shared/types.ts";
-import { projectSessionEndpoints, type SessionOwnerProjection } from "../src/sessions/session-core.ts";
+import {
+  projectSessionEndpoints,
+  type SessionEndpoint,
+  type SessionOwnerProjection,
+} from "../src/sessions/session-core.ts";
 
 const disposers: Array<() => void> = [];
 function cleanup(): void {
@@ -181,6 +187,98 @@ test("workspace aggregation is advertised only for explicit Monitor projection",
   const monitor = projectTeammateSessionEndpoints(state, identity, [], undefined, true);
   assert.equal(local[0]?.capabilities.includes("monitor-workspace-aggregation"), false);
   assert.equal(monitor[0]?.capabilities.includes("monitor-workspace-aggregation"), true);
+});
+
+test("Monitor visibility includes exact self and same-workspace roots without changing capabilities", () => {
+  const normalizedCwd = "D:/peer";
+  const workspaceId = createHash("sha256").update(normalizedCwd, "utf8").digest("hex");
+  const identity = { workspaceId, ownerId: "a".repeat(32), ownerNonce: "b".repeat(32) };
+  const state = {
+    activeRuns: new Map(),
+    currentWorkspaceId: workspaceId,
+    currentSessionId: "session-current",
+    currentSourceId: "source-current",
+    sessionGeneration: 4,
+  } as unknown as TeammateState;
+  const peerIdentity: WorkspacePeerIdentity = {
+    version: 1,
+    normalizedCwd,
+    workspaceId,
+    ownerId: "c".repeat(32),
+    ownerNonce: "d".repeat(32),
+    paths: {
+      rootDir: "D:/peer-root",
+      ownersDir: "D:/peer-root/owners",
+      commandsDir: "D:/peer-root/commands",
+      responsesDir: "D:/peer-root/responses",
+      identitiesDir: "D:/peer-root/identities",
+    },
+  };
+  const selfOwner = buildWorkspaceOwnerSnapshot({
+    ...peerIdentity,
+    ownerId: identity.ownerId,
+    ownerNonce: identity.ownerNonce,
+  }, {
+    agents: [],
+    settled: [],
+    sessionId: "session-current",
+    sessionName: "self",
+  }, 100);
+  const peer = buildWorkspaceOwnerSnapshot(peerIdentity, {
+    agents: [],
+    settled: [],
+    sessionId: "session-peer",
+    sessionName: "peer",
+  }, 100);
+  const projected = projectTeammateSessionEndpoints(state, identity, [peer], "self", true);
+  const self = projected.find((endpoint) => endpoint.kind === "root" && endpoint.scope === "local")!;
+  const sameWorkspacePeer = projected.find((endpoint) => endpoint.kind === "root" && endpoint.scope === "workspace-peer")!;
+  const foreignPeer = {
+    ...sameWorkspacePeer,
+    id: `${sameWorkspacePeer.id}-foreign`,
+    workspaceId: "f".repeat(64),
+  } satisfies SessionEndpoint;
+  const replacedSelf = {
+    ...self,
+    id: `${self.id}-replacement`,
+    ownerNonce: "9".repeat(32),
+  } satisfies SessionEndpoint;
+
+  const visible = selectMonitorVisibleRootEndpoints(
+    [...projected, foreignPeer, replacedSelf],
+    identity,
+    [selfOwner, peer],
+  );
+  assert.deepEqual(visible.map((endpoint) => endpoint.id), [self.id, sameWorkspacePeer.id]);
+  assert.deepEqual(
+    selectMonitorVisibleRootEndpoints(projected, identity, [peer]).map((endpoint) => endpoint.id),
+    [sameWorkspacePeer.id],
+    "a directory-only self endpoint is not observable without its validated owner snapshot",
+  );
+  assert.equal(visible[0], self, "selection must not rewrite capabilities or route authority");
+  assert.deepEqual(visible[0]?.capabilities, self.capabilities);
+  assert.equal(visible[0]?.sessionId, "session-current");
+  assert.equal(visible[0]?.sessionName, "self");
+  assert.equal(visible[1]?.sessionId, "session-peer");
+
+  const rotatedPeer = {
+    ...sameWorkspacePeer,
+    sessionId: "session-peer-rotated",
+    sourceId: "session-peer-rotated",
+    generation: 2,
+  } satisfies SessionEndpoint;
+  const rotatedOwner = {
+    ...peer,
+    sessionId: "session-peer-rotated",
+    ownerGeneration: 2,
+  };
+  const finalVisible = selectMonitorVisibleRootEndpoints([rotatedPeer], identity, [rotatedOwner]);
+  assert.deepEqual(finalVisible.map((endpoint) => endpoint.id), [sameWorkspacePeer.id]);
+  assert.equal(
+    sameMonitorRootSessionClaim(sameWorkspacePeer, finalVisible[0]!),
+    false,
+    "same owner identity and endpoint id cannot hide a rotated session/source/generation claim",
+  );
 });
 
 test("local workspace discovery provider exposes authority and revalidates owner capture after await", async () => {

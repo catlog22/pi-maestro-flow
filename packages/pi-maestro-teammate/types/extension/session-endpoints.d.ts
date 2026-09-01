@@ -4,6 +4,10 @@ import { type SessionDiscoveryProvider, type SessionEndpoint, type SessionEndpoi
 import { discoverWorkspacePeers, type WorkspaceOwnerSnapshot, type WorkspacePeerIdentity } from "../sessions/workspace-peer-core.ts";
 /** Projects live root state and validated workspace-peer v1 snapshots into canonical endpoints. */
 export declare function localRootSessionCapabilities(monitorAggregation?: boolean): readonly SessionEndpointCapability[];
+/** Exact root claim fence used before reducing evidence captured across awaits. */
+export declare function sameMonitorRootSessionClaim(left: SessionEndpoint, right: SessionEndpoint): boolean;
+/** Selects observable roots without granting capabilities or route authority. */
+export declare function selectMonitorVisibleRootEndpoints(endpoints: readonly SessionEndpoint[], localIdentity: Pick<WorkspacePeerIdentity, "workspaceId" | "ownerId" | "ownerNonce">, validatedOwners: readonly WorkspaceOwnerSnapshot[]): readonly SessionEndpoint[];
 export declare function projectTeammateSessionEndpoints(state: TeammateState, localIdentity: Pick<WorkspacePeerIdentity, "workspaceId" | "ownerId" | "ownerNonce">, remoteOwners: readonly WorkspaceOwnerSnapshot[], localSessionName?: string, monitorAggregation?: boolean, sshWindows?: readonly RemoteWindowMonitorListing[]): readonly SessionEndpoint[];
 export interface LocalWorkspacePeerDiscoveryProviderOptions {
     state: TeammateState;

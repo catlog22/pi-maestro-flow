@@ -109,6 +109,48 @@ export function localRootSessionCapabilities(monitorAggregation = false): readon
   return Object.freeze(capabilities);
 }
 
+/** Exact root claim fence used before reducing evidence captured across awaits. */
+export function sameMonitorRootSessionClaim(left: SessionEndpoint, right: SessionEndpoint): boolean {
+  return left.kind === "root"
+    && right.kind === "root"
+    && left.id === right.id
+    && left.scope === right.scope
+    && left.workspaceId === right.workspaceId
+    && left.ownerId === right.ownerId
+    && left.ownerNonce === right.ownerNonce
+    && left.sessionId === right.sessionId
+    && left.sourceId === right.sourceId
+    && left.generation === right.generation;
+}
+
+/** Selects observable roots without granting capabilities or route authority. */
+export function selectMonitorVisibleRootEndpoints(
+  endpoints: readonly SessionEndpoint[],
+  localIdentity: Pick<WorkspacePeerIdentity, "workspaceId" | "ownerId" | "ownerNonce">,
+  validatedOwners: readonly WorkspaceOwnerSnapshot[],
+): readonly SessionEndpoint[] {
+  return endpoints.filter((endpoint) => {
+    if (endpoint.kind !== "root") return false;
+    if (endpoint.scope === "ssh-window") return true;
+    if (endpoint.workspaceId !== localIdentity.workspaceId) return false;
+    const owner = validatedOwners.find((candidate) =>
+      candidate.workspaceId === endpoint.workspaceId
+      && candidate.ownerId === endpoint.ownerId
+      && candidate.ownerNonce === endpoint.ownerNonce
+    );
+    if (!owner) return false;
+    if (endpoint.scope === "workspace-peer") {
+      return endpoint.sessionId === owner.sessionId
+        && endpoint.sourceId === owner.sessionId
+        && endpoint.generation === owner.ownerGeneration;
+    }
+    return endpoint.scope === "local"
+      && endpoint.ownerId === localIdentity.ownerId
+      && endpoint.ownerNonce === localIdentity.ownerNonce
+      && endpoint.sessionId === owner.sessionId;
+  });
+}
+
 export function projectTeammateSessionEndpoints(
   state: TeammateState,
   localIdentity: Pick<WorkspacePeerIdentity, "workspaceId" | "ownerId" | "ownerNonce">,

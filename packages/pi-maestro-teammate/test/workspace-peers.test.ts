@@ -739,6 +739,38 @@ test("concurrent publishers retain separate per-owner files", async () => {
   assert.equal(JSON.parse(await readFile(ownerSnapshotPath(second), "utf8")).agents[0].name, "beta");
 });
 
+test("Monitor discovery includes self and active same-workspace roots while rejecting foreign, stale, and invalid snapshots", async () => {
+  const { cwd, rootDir } = await temporaryWorkspace();
+  const local = createWorkspacePeerIdentity(cwd, { rootDir, ownerId: OWNER_A, ownerNonce: NONCE_A });
+  const peer = createWorkspacePeerIdentity(cwd, { rootDir, ownerId: OWNER_B, ownerNonce: NONCE_B });
+  const stale = createWorkspacePeerIdentity(cwd, { rootDir, ownerId: OWNER_C, ownerNonce: NONCE_C });
+  await Promise.all([
+    publishWorkspaceOwner(local, state(agent("cid-self", "self")), 5_000),
+    publishWorkspaceOwner(peer, state(agent("cid-peer", "peer")), 5_000),
+    publishWorkspaceOwner(stale, state(agent("cid-stale", "stale")), 1_000),
+  ]);
+  const foreignOwnerId = "d".repeat(32);
+  const foreign = {
+    ...buildWorkspaceOwnerSnapshot(peer, state(agent("cid-foreign", "foreign")), 5_000),
+    workspaceId: "f".repeat(64),
+    ownerId: foreignOwnerId,
+  };
+  await writeFile(
+    join(local.paths.ownersDir, `${foreignOwnerId}.json`),
+    JSON.stringify(foreign),
+    "utf8",
+  );
+
+  const discovery = await discoverWorkspacePeers(local, {
+    now: 5_000,
+    staleAfterMs: 1_000,
+    includeSelf: true,
+  });
+  assert.deepEqual(discovery.peers.map((owner) => owner.ownerId).sort(), [OWNER_A, OWNER_B]);
+  assert.deepEqual(discovery.staleOwnerIds, [OWNER_C]);
+  assert.deepEqual(discovery.corruptFiles, [`${foreignOwnerId}.json`]);
+});
+
 test("stale and implausibly future owners are filtered and stale files can be cleaned", async () => {
   const { cwd, rootDir } = await temporaryWorkspace();
   const local = createWorkspacePeerIdentity(cwd, { rootDir, ownerId: OWNER_A, ownerNonce: NONCE_A });

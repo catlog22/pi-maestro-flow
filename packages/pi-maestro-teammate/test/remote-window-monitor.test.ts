@@ -26,7 +26,12 @@ import type {
   RemoteWindowSendParams,
   RemoteWindowSendResult,
 } from "../src/remote/protocol.ts";
-import type { RemoteStatus, RemoteWorkerIdentity, ResolvedRemoteWorkspace } from "../src/remote/types.ts";
+import {
+  REMOTE_CONFIG_VERSION,
+  type RemoteStatus,
+  type RemoteWorkerIdentity,
+  type ResolvedRemoteWorkspace,
+} from "../src/remote/types.ts";
 import { RemoteWindowMonitor } from "../src/extension/remote-window-monitor.ts";
 import {
   buildWorkspaceOwnerSnapshot,
@@ -187,7 +192,7 @@ class FakeConnection implements RemoteConnection {
 
 function config() {
   return {
-    version: 3 as const,
+    version: REMOTE_CONFIG_VERSION,
     hosts: {
       prod: {
         host: "prod.example",
@@ -222,7 +227,7 @@ test("run-only ACP, Pi-RPC, and CLI targets never become remote window endpoints
   const factory = new FakeFactory();
   const monitor = new RemoteWindowMonitor({
     config: {
-      version: 3,
+      version: REMOTE_CONFIG_VERSION,
       hosts: config().hosts,
       targets: {
         "prod/acp": { host: "prod", cwd: "/srv/acp", driver: "acp", command: ["/usr/bin/acp"] },

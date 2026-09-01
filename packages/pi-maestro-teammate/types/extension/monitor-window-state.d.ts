@@ -41,3 +41,5 @@ export interface MonitorWindowReductionInputV1 {
  * facet evidence into the public MonitorWindowStateV1 read model.
  */
 export declare function reduceMonitorWindowStateV1(input: MonitorWindowReductionInputV1): MonitorWindowStateV1;
+/** Canonical semantic hash shared by the state reducer and query cursors. */
+export declare function hashMonitorWindowSemanticV1(value: unknown): string;

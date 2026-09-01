@@ -202,6 +202,8 @@ test("workspace-window schema scopes lifecycle fields to their actions", () => {
   assert.equal(Check(WorkspaceWindowParams, { action: "close" }), false);
   assert.equal(Check(WorkspaceWindowParams, { action: "list", objective: "unexpected" }), false);
   assert.equal(Check(WorkspaceWindowParams, { action: "close", presentation: "interactive", name: "backend" }), false);
+  assert.equal(Check(WorkspaceWindowParams, { action: "list", provider: "native" }), false);
+  assert.equal(Check(WorkspaceWindowParams, { action: "close", name: "backend", provider: "herdr" }), false);
   assert.equal(Check(WorkspaceWindowParams, { action: "create", name: "bad name", objective: "Build API" }), false);
   assert.equal(Check(WorkspaceWindowParams, { action: "create", name: "backend", objective: "Build API", presentation: "other" }), false);
   assert.equal(Check(WorkspaceWindowParams, {
@@ -211,6 +213,35 @@ test("workspace-window schema scopes lifecycle fields to their actions", () => {
     handle: { correlationId: "not-an-input" },
   }), false);
   assert.match((WorkspaceWindowParams.properties.action as { description?: string }).description ?? "", /agent:\/\/ resource/);
+});
+
+test("workspace-window schema preserves native defaults and fences Herdr session options", () => {
+  const create = { action: "create", name: "backend", objective: "Build API" } as const;
+  const provider = WorkspaceWindowParams.properties.provider as unknown as { default?: string };
+  const herdrSession = WorkspaceWindowParams.properties.herdrSession as unknown as {
+    default?: string;
+    minLength?: number;
+    maxLength?: number;
+    pattern?: string;
+  };
+
+  assert.equal(provider.default, "native");
+  assert.equal(herdrSession.default, "default");
+  assert.equal(herdrSession.minLength, 1);
+  assert.equal(herdrSession.maxLength, 64);
+  assert.equal(Check(WorkspaceWindowParams, create), true, "legacy create shape remains native-compatible");
+  assert.equal(Check(WorkspaceWindowParams, { ...create, provider: "native", presentation: "headless" }), true);
+  assert.equal(Check(WorkspaceWindowParams, { ...create, provider: "herdr" }), true);
+  assert.equal(Check(WorkspaceWindowParams, { ...create, provider: "herdr", presentation: "interactive" }), true);
+  assert.equal(Check(WorkspaceWindowParams, { ...create, provider: "herdr", herdrSession: "default-1.alpha" }), true);
+
+  assert.equal(Check(WorkspaceWindowParams, { ...create, provider: "other" }), false);
+  assert.equal(Check(WorkspaceWindowParams, { ...create, provider: "herdr", presentation: "headless" }), false);
+  assert.equal(Check(WorkspaceWindowParams, { ...create, herdrSession: "default" }), false);
+  assert.equal(Check(WorkspaceWindowParams, { ...create, provider: "native", herdrSession: "default" }), false);
+  assert.equal(Check(WorkspaceWindowParams, { ...create, provider: "herdr", herdrSession: "" }), false);
+  assert.equal(Check(WorkspaceWindowParams, { ...create, provider: "herdr", herdrSession: "unsafe session" }), false);
+  assert.equal(Check(WorkspaceWindowParams, { ...create, provider: "herdr", herdrSession: `a${"b".repeat(64)}` }), false);
 });
 
 test("remote-worker schema scopes configured targets, creation, and owner-fenced close", () => {

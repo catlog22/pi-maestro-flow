@@ -10,9 +10,13 @@ export interface MonitorWindowCreateRequest {
     objective: string;
     cwd: string;
     presentation: "interactive" | "headless";
+    provider?: "native" | "herdr";
+    herdrSession?: string;
 }
 export interface MonitorWindowStopResult {
     ok: boolean;
+    /** True once process termination has been invoked, regardless of its outcome. */
+    terminationStarted: boolean;
     status?: string;
     error?: string;
 }
@@ -34,11 +38,19 @@ export interface MonitorWindowCloseResult<Handle> extends MonitorWindowStopResul
     handle?: Handle;
     completionPersisted?: boolean;
 }
+export interface MonitorWindowStopAuthorization<Authority> {
+    /** Exact-resource rollback is create-only; ordinary close remains Monitor-authority fenced. */
+    scope: "exact-resource" | "monitor-authority";
+    /** Captured root/Monitor generation retained for adapter-side diagnostics. */
+    authority: Authority;
+    /** Must be checked after every await and immediately before termination. */
+    authorize(): boolean;
+}
 export interface MonitorWindowLifecycleAdapter<Authority, Window, Owner, Handle, Delivery> {
     captureAuthority(): Authority | undefined;
     isAuthorityCurrent(authority: Authority): boolean;
     createHandle(): Handle;
-    spawn(request: MonitorWindowCreateRequest): Promise<{
+    spawn(request: MonitorWindowCreateRequest, authority: Authority, signal: AbortSignal): Promise<{
         ok: boolean;
         window?: Window;
         error?: string;
@@ -64,19 +76,20 @@ export interface MonitorWindowLifecycleAdapter<Authority, Window, Owner, Handle,
     handleOf(window: Window): Handle | undefined;
     isMonitorManaged(window: Window): boolean;
     markCloseRequested(window: Window, requested: boolean): void;
-    stopExact(window: Window): Promise<MonitorWindowStopResult>;
+    stopExact(window: Window, authorization: MonitorWindowStopAuthorization<Authority>): Promise<MonitorWindowStopResult>;
     finalizeCancelled(window: Window, message: string): Promise<boolean>;
 }
 /**
  * Owns admission ordering, exact-owner revalidation, generation/root fencing,
- * and rollback. Cleanup is intentionally exact-window scoped and still runs
- * after authority loss so a partially launched process is not orphaned.
+ * and rollback. Create rollback may reclaim only the exact spawned resource
+ * after authority loss; ordinary close always remains root/Monitor fenced.
  */
 export declare class MonitorWindowLifecycleService<Authority, Window, Owner, Handle, Delivery> {
     private readonly adapter;
     constructor(adapter: MonitorWindowLifecycleAdapter<Authority, Window, Owner, Handle, Delivery>);
     create(request: MonitorWindowCreateRequest, signal: AbortSignal): Promise<MonitorWindowCreateResult<Window, Owner, Handle>>;
     close(name: string): Promise<MonitorWindowCloseResult<Handle>>;
+    private stopAuthorization;
     private assertAuthority;
     private assertCurrentWindow;
     private assertAdmission;

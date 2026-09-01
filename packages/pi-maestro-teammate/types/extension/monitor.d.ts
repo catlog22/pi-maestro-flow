@@ -4,6 +4,7 @@
  * Pure context, snapshot, state, barrier, and validation helpers with no
  * dependency on extension/index.ts.
  */
+import { type RemoteWindowCapture, type RemoteWindowObserveResult } from "../remote/protocol.ts";
 import type { MonitorWindowAttentionV1, MonitorWindowCardV1, MonitorWindowIdentityV1, MonitorWindowStateV1 } from "../public/v1/monitor-window-state.ts";
 /** LLM-callable actions (enter/exit are user-only via /monitor command). */
 export type MonitorAction = "status" | "wait";
@@ -147,6 +148,19 @@ export interface MonitorQueryDependencies {
     /** A wake hint only. The adapter always performs a fresh, fenced read afterward. */
     waitForWake?(capture: MonitorQueryAuthorityFence, timeoutMs: number, signal: AbortSignal): Promise<void>;
 }
+export interface MonitorRemoteWindowRevalidationTarget {
+    endpointId: string;
+    target: string;
+    startingCapture: RemoteWindowCapture;
+}
+export interface MonitorRemoteWindowObservation {
+    target: MonitorRemoteWindowRevalidationTarget;
+    observed: RemoteWindowObserveResult;
+}
+export interface MonitorRemoteWindowObservationDependencies {
+    observe(target: string): Promise<RemoteWindowObserveResult>;
+    isCurrent(): boolean;
+}
 export type MonitorQueryStatus = "ok" | "not-found" | "timeout" | "aborted" | "stale";
 export interface MonitorQueryWindow {
     /** Exact address retained from the first fenced snapshot. */
@@ -169,7 +183,13 @@ export interface MonitorQueryResult {
     reason?: string;
 }
 export declare const MONITOR_QUERY_DEFAULT_TIMEOUT_MS: number;
+/** Node clamps larger one-shot timer delays to 1ms. */
+export declare const MONITOR_QUERY_MAX_TIMEOUT_MS = 2147483647;
 export declare const MONITOR_QUERY_POLL_MS = 250;
+/** Aggregate every post-facet SSH observation before final synchronous validation. */
+export declare function observeMonitorRemoteWindowsForRevalidation(targets: readonly MonitorRemoteWindowRevalidationTarget[], dependencies: MonitorRemoteWindowObservationDependencies): Promise<MonitorRemoteWindowObservation[]>;
+/** No remote await may occur between this full capture sweep and reduction. */
+export declare function revalidateMonitorRemoteWindowCaptures(observations: readonly MonitorRemoteWindowObservation[], capture: (target: string) => RemoteWindowCapture | undefined): void;
 /**
  * Execute one window-domain Monitor query.
  *

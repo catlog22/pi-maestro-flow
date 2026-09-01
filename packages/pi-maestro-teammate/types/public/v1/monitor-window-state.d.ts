@@ -6,6 +6,12 @@
  */
 export declare const MONITOR_WINDOW_STATE_VERSION: 1;
 export declare const MAX_MONITOR_WINDOW_FACETS = 256;
+export declare const MAX_MONITOR_WINDOW_FACET_CANDIDATES = 1024;
+export declare const MAX_MONITOR_WINDOW_FACET_ATTENTION = 64;
+export declare const MAX_MONITOR_WINDOW_FACET_JSON_DEPTH = 32;
+export declare const MAX_MONITOR_WINDOW_FACET_JSON_NODES = 4096;
+export declare const MAX_MONITOR_WINDOW_FACET_JSON_BYTES: number;
+export declare const MONITOR_WINDOW_FACET_READ_TIMEOUT_MS = 1000;
 /** Exact root endpoint incarnation. Every item of work evidence is fenced by all four fields. */
 export interface MonitorWindowIdentityV1 {
     workspaceId: string;
@@ -58,6 +64,14 @@ export interface MonitorWindowFacetProvider {
      */
     read(request: MonitorWindowFacetReadRequestV1): readonly MonitorWindowFacetV1[] | Promise<readonly MonitorWindowFacetV1[]>;
 }
+export interface MonitorWindowFacetReadOptionsV1 {
+    /** Request cancellation; provider promises are raced even if they ignore it. */
+    signal?: AbortSignal;
+    /** Absolute wall-clock deadline shared with the surrounding Monitor read. */
+    deadline?: number;
+    /** Per-provider read budget when no earlier deadline is supplied. */
+    timeoutMs?: number;
+}
 /** Register a process-local root facet provider. Stale disposers cannot remove replacements. */
 export declare function registerMonitorWindowFacetProvider(provider: MonitorWindowFacetProvider): () => void;
 export declare function getMonitorWindowFacetProvider(kind: string): MonitorWindowFacetProvider | undefined;
@@ -67,7 +81,7 @@ export declare function listMonitorWindowFacetProviders(): MonitorWindowFacetPro
  * target to poison the root Monitor snapshot. The returned facets remain
  * inputs to the pure reducer; this function itself performs no state reduction.
  */
-export declare function readMonitorWindowFacets(request: MonitorWindowFacetReadRequestV1, onError?: (message: string) => void): Promise<MonitorWindowFacetV1[]>;
+export declare function readMonitorWindowFacets(request: MonitorWindowFacetReadRequestV1, onError?: (message: string) => void, options?: MonitorWindowFacetReadOptionsV1): Promise<MonitorWindowFacetV1[]>;
 export type MonitorWindowLifecycleStatusV1 = "running" | "sleeping" | "settled" | "launching" | "failed" | "disconnected" | "unknown";
 export interface MonitorWindowLifecycleV1 {
     status: MonitorWindowLifecycleStatusV1;

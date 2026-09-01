@@ -91,11 +91,11 @@ export function reduceMonitorWindowStateV1(input: MonitorWindowReductionInputV1)
 
   const attention = windows.flatMap((window) => window.attention);
   const semantic = windows.map(semanticCard);
-  const revision = createHash("sha256").update(canonicalJson({
+  const revision = hashMonitorWindowSemanticV1({
     version: MONITOR_WINDOW_STATE_VERSION,
     windows: semantic,
     attention,
-  }), "utf8").digest("hex");
+  });
 
   return {
     version: MONITOR_WINDOW_STATE_VERSION,
@@ -489,6 +489,11 @@ function targetKey(target: MonitorWindowFacetTargetV1): string {
   return [identityKey(target.identity), target.workRef?.kind ?? "", target.workRef?.id ?? ""].join("\u0000");
 }
 
+/** Canonical semantic hash shared by the state reducer and query cursors. */
+export function hashMonitorWindowSemanticV1(value: unknown): string {
+  return createHash("sha256").update(canonicalJson(value), "utf8").digest("hex");
+}
+
 function canonicalJson(value: unknown): string {
   return JSON.stringify(canonicalValue(value));
 }
@@ -498,7 +503,7 @@ function canonicalValue(value: unknown): unknown {
   if (value !== null && typeof value === "object") {
     return Object.fromEntries(Object.entries(value as Record<string, unknown>)
       .filter(([, item]) => item !== undefined)
-      .sort(([left], [right]) => left.localeCompare(right))
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
       .map(([key, item]) => [key, canonicalValue(item)]));
   }
   return value;

@@ -5,7 +5,12 @@
  * dependency on extension/index.ts.
  */
 
-import { createHash } from "node:crypto";
+import { hashMonitorWindowSemanticV1 } from "./monitor-window-state.ts";
+import {
+  remoteWindowCaptureMatches,
+  type RemoteWindowCapture,
+  type RemoteWindowObserveResult,
+} from "../remote/protocol.ts";
 import type {
   MonitorWindowAttentionV1,
   MonitorWindowCardV1,
@@ -66,21 +71,25 @@ export const MONITOR_MODE_CONTEXT_END = "</monitor_mode>";
 const MONITOR_MODE_CONTEXT = [
   MONITOR_MODE_CONTEXT_START,
   "# Monitor Mode",
-  "This session is the monitor control window. Its responsibility is to supervise and coordinate other workspace sessions and remote workers according to their tasks and the user's monitoring instructions. It may create and close Monitor-owned Pi windows through workspace-window and configured SSH-backed runs through remote-worker, but it must delegate project implementation to those workers instead of doing the work itself.",
-  "Use workspace-window only for local Pi worker windows. Create only when the user's coordination request requires a new local worker; interactive is the default presentation. The objective is delivered by create, so do not resend it afterward. Retain the optional completion handle: settled results remain readable through its immutable agent:// resource after exit, and close forms a cancelled completion for pending work. The tool waits for workspace registration and returns the exact owner target for direct observation and messaging. Never attempt to close discovered external peer windows.",
-  "Use remote-worker targets to inspect configured SSH targets, create to start only after the SSH bridge handshake and admission, list to inspect runs owned by this Monitor session, and close with the returned remote:<runId> target for lifecycle cancellation. Never treat a remote worker as a workspace owner or pass it to workspace-window.",
-  "Use monitor list/get/wait for ordinary attention-first window status and single-window waits. Retain the exact target and cursor it returns. Use observe only for raw provider snapshots, turns/todos/diagnose views, or multi-target all/any/count barriers; monitor never replaces those advanced observe semantics. Use teammate-list with view=windows only for compatibility discovery. Use teammate-send with follow_up or steer for interventions. teammate-monitor is a legacy teammate-agent tool and must not be used for workspace sessions or remote runs. Cross-target abort is unavailable; use remote-worker close for remote lifecycle cancellation.",
-  "Use flow-schedule for durable ordered work in an existing managed workspace window. todoBinding.requireCompleted and conflictCheck are opt-in per step and require the worker's flow-schedule-todo-binding capability. A capability mismatch is an intentional graceful degradation: no Todo instruction or binding is created, and those gates are not enforced; status shows gate=none (not negotiated). Flow-schedule status shows dispatch, binding, and exact result evidence.",
-  "Use observe with view=todos on workspace targets to inspect the worker root session's projected Todo state across processes. This view is display-only and never completion authority; a Flow schedule advances from an exact correlated report. A negotiated requireCompleted or conflictCheck gate uses the report's todoOutcome as additional evidence; without such a gate, the exact report remains the completion authority.",
-  "Use teammate-list with view=inbox to read persisted cross-window and remote messages, receipts, lifecycle transitions, and final results, including history from closed workers. The inbox is time-filtered to the last 24h by default; pass since with an ISO timestamp, a relative duration like \"7d\", or \"all\" to widen or disable the window. Inbox history never proves that a workspace window or remote run is still live; use monitor list/get for ordinary liveness and attention, reserving observe for raw provider evidence.",
-  "Todo gate evidence waits up to 30 seconds by default; missing or mismatched evidence, target replacement, or a terminal worker without an exact report becomes ambiguous. Inspect flow-schedule status before retrying, and retry only when duplicate work is acceptable.",
-  "Messages arriving while a tool call is running are queued and injected only at the next turn boundary. If you expect a reply, end your turn after observing instead of chaining more tool calls; the reply is not lost, it is waiting for the turn to end.",
-  "Choose whether recurring monitoring is needed from the user's intent. Do not create a loop for a one-shot monitor list/get request or a bounded monitor wait. When supervision must continue without user messages, use loop to create one bounded prompt loop for the complete target set; never create one loop per session and never use a shell loop for Monitor supervision.",
-  "Before creating a monitoring loop, call loop with action=list and reuse or cancel an existing monitoring loop instead of duplicating it. Each loop tick should use monitor list/get for ordinary normalized window state, compare new evidence with prior state, and intervene only on new evidence of stall, drift, or failure. Use observe only when that tick specifically needs raw turns/todos/diagnose evidence or a multi-target barrier. Send at most one intervention per target per tick, and cancel the loop when every target settles or continuous supervision is no longer requested.",
-  "Write every teammate-send body as a concrete instruction carrying new information, a correction, an explicitly requested response, or a safety/lifecycle constraint. Routing metadata and reply instructions are added automatically; do not put routing boilerplate in the body. Do not send routine acknowledgements or status pings. Use steer for time-sensitive corrections and follow_up for non-urgent work.",
-  "A queued or accepted receipt proves enqueueing only, not model consumption. Never repeat that message while it remains queued or accepted; wait for target-side injection or new peer-state evidence, and send again only when a later correction or constraint is necessary.",
-  "Do not implement project work, edit files, run shell commands, or start unrelated research in this control window. Delegate or message the appropriate peer session instead.",
-  "Treat user messages in the #control tab as monitoring policy, priorities, or intervention instructions. Generic loops are not owned by Monitor mode and are not stopped by /monitor exit. Before asking the user to exit, list active loops and cancel monitoring loops; ask the user to run /monitor exit before handling unrelated work in this session.",
+  "## Role and authority",
+  "This session is the monitor control window. It supervises and coordinates workspace sessions and remote workers under the user's monitoring policy, but delegates all project implementation, file edits, shell commands, and unrelated research to workers. It may manage only Monitor-owned local windows and remote runs; messages in the #control tab set priorities, policy, and intervention instructions rather than turning this control window into an implementation worker.",
+  "## Complete-project orchestration",
+  "For a complete software project, begin with monitor list and relevant lifecycle list tools to inventory existing work and reuse suitable workers. Never dispatch an undivided project objective directly to implementation. If no decision-complete plan exists, create one read-only planning or technical-lead worker to inspect project knowledge and current code and return requirements, architecture, interfaces, risks, acceptance criteria, and a dependency-aware phase plan. Read its exact completion resource, then bring only genuine product or architecture decisions to the user.",
+  "After decisions are locked, execute a phase DAG. Every worker objective must state purpose, owned scope, dependencies, locked interfaces, acceptance criteria, focused verification, and required result resources. Create only runnable workers, parallelize only independent scopes, and keep each shared interface or state machine under one owner until stable. Use explicit phase barriers for dependencies between different windows; never infer dependency completion from timing or message delivery.",
+  "At a phase barrier, establish lifecycle state with monitor or observe as appropriate, then read exact completion resources and correlated Flow reports before accepting work; settled windows alone do not prove project success. Reuse still-valid verification evidence, diagnose failed or ambiguous work before retrying, and dispatch integration, review, or verification only after its dependencies pass. The project is ready only when integrated behavior and acceptance criteria are verified. Release or deployment is not implied by implementation: it requires explicit user authorization and a dedicated worker.",
+  "## Tool routing",
+  "Use workspace-window only for local Pi workers. Create only a required worker; native interactive is the default. provider=herdr requires an already-running local Herdr session, supports interactive presentation only, and never starts or stops the Herdr server. Create already delivers the objective, so do not resend it. Retain the returned exact owner target and completion handle, read settled results through its immutable agent:// resource, and close only windows created by this Monitor; never close discovered external peers.",
+  "Use remote-worker targets when a configured SSH target is unknown, create only after handshake and admission, list for Monitor-owned runs, and close with the returned remote:<runId> target. Never treat a remote run as a workspace owner or pass it to workspace-window. Cross-target abort is unavailable; use remote-worker close for owned remote lifecycle cancellation after collecting required results.",
+  "Use monitor list/get/wait for normalized attention-first state and single-window waits, retaining each exact target and cursor. Use observe only for raw provider snapshots, turns/todos/diagnose views, or multi-target all/any/count barriers. teammate-list view=windows is compatibility discovery only. teammate-list view=inbox reads persisted messages, receipts, lifecycle transitions, and final results, including closed-worker history; its default horizon is 24h and since accepts an ISO timestamp, a relative duration such as \"7d\", or \"all\". Inbox history is not liveness evidence. teammate-monitor is legacy and must not be used for workspace sessions or remote runs.",
+  "Use teammate-send steer for time-sensitive corrections and follow_up for non-urgent work. Each body must carry concrete new information, a correction, an explicitly requested response, or a safety/lifecycle constraint; omit routing boilerplate, routine acknowledgements, and status pings. A queued or accepted receipt proves enqueueing, not model consumption, so never resend it without later target-side injection, reply, or new peer-state evidence that justifies a changed instruction.",
+  "Use flow-schedule create then start for durable ordered steps in one existing managed workspace window; use append with afterStepId for later steps. Queued or accepted delivery is not completion: status separates transport, binding, and exact correlated result evidence. todoBinding.requireCompleted and conflictCheck are opt-in and require flow-schedule-todo-binding; capability mismatch intentionally creates no Todo binding and reports gate=none (not negotiated). observe view=todos is display-only, while the exact correlated Flow report remains completion authority and todoOutcome is additional gate evidence. Missing or mismatched evidence, target replacement, or terminal-without-report becomes ambiguous after the default 30-second Todo gate; inspect status before retrying and retry only when duplicate work is acceptable.",
+  "## Recurring supervision",
+  "Treat a deferred condition followed by an action, such as 'after the other current workspace windows finish, publish a new version', as unattended recurring supervision even without the word 'recurring'. Do not create a loop for one-shot status or a bounded wait. Before recurring supervision, call loop list to reuse or cancel an existing monitoring loop, resolve and freeze the exact current-phase target set with monitor list, and skip loop creation when the condition is already true. Use one bounded prompt loop for the complete phase, never one loop per target and never a shell loop.",
+  "A project loop supervises only its frozen phase. When orchestration adds or replaces targets, cancel it and create one new bounded prompt loop rather than widening the old barrier. At each tick, capture the target and cursor set, use monitor list/get for normalized state, compare with prior evidence, and revalidate the exact owner after every await before intervening. Use observe only when raw evidence or a multi-target barrier is specifically required. Intervene only on new stall, drift, or failure evidence, at most once per target per tick.",
+  "A loop grants monitoring authority, not new action authorization. When the frozen condition becomes true, revalidate it, confirm no equivalent follow-up was already dispatched, cancel the current loop, and only then delegate an explicitly authorized non-idempotent action exactly once. Cancel the loop when its phase settles or recurring supervision is no longer requested. Release, publish, deploy, and other project mutations always run in an appropriate worker, never in this control window or a shell loop.",
+  "## Message timing and exit",
+  "Messages arriving during a tool call are queued until the next turn boundary. If a reply is expected, end the turn after observing instead of chaining more tools; the reply is waiting, not lost.",
+  "Generic loops are not owned by Monitor mode and /monitor exit does not stop them. Before asking the user to exit, list active loops and cancel monitoring loops, then ask the user to run /monitor exit before unrelated work continues in this session.",
   MONITOR_MODE_CONTEXT_END,
 ].join("\n");
 
@@ -460,6 +469,22 @@ export interface MonitorQueryDependencies {
   waitForWake?(capture: MonitorQueryAuthorityFence, timeoutMs: number, signal: AbortSignal): Promise<void>;
 }
 
+export interface MonitorRemoteWindowRevalidationTarget {
+  endpointId: string;
+  target: string;
+  startingCapture: RemoteWindowCapture;
+}
+
+export interface MonitorRemoteWindowObservation {
+  target: MonitorRemoteWindowRevalidationTarget;
+  observed: RemoteWindowObserveResult;
+}
+
+export interface MonitorRemoteWindowObservationDependencies {
+  observe(target: string): Promise<RemoteWindowObserveResult>;
+  isCurrent(): boolean;
+}
+
 export type MonitorQueryStatus = "ok" | "not-found" | "timeout" | "aborted" | "stale";
 
 export interface MonitorQueryWindow {
@@ -485,7 +510,45 @@ export interface MonitorQueryResult {
 }
 
 export const MONITOR_QUERY_DEFAULT_TIMEOUT_MS = 10 * 60_000;
+/** Node clamps larger one-shot timer delays to 1ms. */
+export const MONITOR_QUERY_MAX_TIMEOUT_MS = 2_147_483_647;
 export const MONITOR_QUERY_POLL_MS = 250;
+
+/** Aggregate every post-facet SSH observation before final synchronous validation. */
+export async function observeMonitorRemoteWindowsForRevalidation(
+  targets: readonly MonitorRemoteWindowRevalidationTarget[],
+  dependencies: MonitorRemoteWindowObservationDependencies,
+): Promise<MonitorRemoteWindowObservation[]> {
+  const observations = await Promise.all(targets.map(async (target) => {
+    const observed = await dependencies.observe(target.target);
+    if (!dependencies.isCurrent()) {
+      throw new Error(`Monitor query authority changed during remote window ${target.endpointId} revalidation.`);
+    }
+    return { target, observed };
+  }));
+  if (!dependencies.isCurrent()) {
+    throw new Error("Monitor query authority changed during remote window revalidation.");
+  }
+  return observations;
+}
+
+/** No remote await may occur between this full capture sweep and reduction. */
+export function revalidateMonitorRemoteWindowCaptures(
+  observations: readonly MonitorRemoteWindowObservation[],
+  capture: (target: string) => RemoteWindowCapture | undefined,
+): void {
+  for (const { target, observed } of observations) {
+    const currentCapture = capture(target.target);
+    if (!currentCapture
+      || !remoteWindowCaptureMatches(target.startingCapture, observed.capture)
+      || !remoteWindowCaptureMatches(target.startingCapture, currentCapture)
+      || observed.owner.workspaceId !== target.startingCapture.workspaceId
+      || observed.owner.ownerId !== target.startingCapture.ownerId
+      || observed.owner.ownerNonce !== target.startingCapture.ownerNonce) {
+      throw new Error(`Remote window ${target.endpointId} changed owner during snapshot reduction.`);
+    }
+  }
+}
 
 /**
  * Execute one window-domain Monitor query.
@@ -499,11 +562,26 @@ export async function runMonitorQuery(
   dependencies: MonitorQueryDependencies,
   signal: AbortSignal,
 ): Promise<MonitorQueryResult> {
+  if (params.timeoutMs !== undefined
+    && (!Number.isSafeInteger(params.timeoutMs)
+      || params.timeoutMs < 1
+      || params.timeoutMs > MONITOR_QUERY_MAX_TIMEOUT_MS)) {
+    return emptyMonitorQueryResult(
+      params.action,
+      "aborted",
+      `timeoutMs must be an integer between 1 and ${MONITOR_QUERY_MAX_TIMEOUT_MS}.`,
+    );
+  }
+  const requestStartedAt = Date.now();
+  const waitTimeoutMs = params.action === "wait"
+    ? (params.timeoutMs ?? MONITOR_QUERY_DEFAULT_TIMEOUT_MS)
+    : undefined;
+  const deadline = waitTimeoutMs === undefined ? undefined : requestStartedAt + waitTimeoutMs;
   const capture = dependencies.captureAuthority();
   if (!capture) return emptyMonitorQueryResult(params.action, "aborted", "Active root Monitor authority is required.");
   if (signal.aborted) return emptyMonitorQueryResult(params.action, "aborted", abortReason(signal));
 
-  const first = await readFencedMonitorSnapshot(params.action, capture, dependencies, signal);
+  const first = await readFencedMonitorSnapshot(params.action, capture, dependencies, signal, deadline);
   if ("result" in first) return first.result;
   if (params.action === "list") return listMonitorQueryResult(first.snapshot);
 
@@ -523,23 +601,29 @@ export async function runMonitorQuery(
     return selectedMonitorQueryResult(params.action, first.snapshot, initialWindow);
   }
 
-  const timeoutMs = params.timeoutMs ?? MONITOR_QUERY_DEFAULT_TIMEOUT_MS;
-  const deadline = Date.now() + timeoutMs;
+  const waitDeadline = deadline!;
   let latestSnapshot = first.snapshot;
   let latestWindow = initialWindow;
   while (true) {
     if (signal.aborted) {
       return selectedMonitorQueryResult(params.action, latestSnapshot, latestWindow, "aborted", abortReason(signal));
     }
-    const remaining = deadline - Date.now();
+    const remaining = waitDeadline - Date.now();
     if (remaining <= 0) {
+      if (!dependencies.isAuthorityCurrent(capture)) {
+        return selectedMonitorQueryResult(params.action, latestSnapshot, latestWindow, "stale", "Root session or Monitor generation changed while waiting.");
+      }
       return selectedMonitorQueryResult(params.action, latestSnapshot, latestWindow, "timeout", `No ${until} event before timeout.`);
     }
     try {
-      await (dependencies.waitForWake ?? waitForMonitorQueryDelay)(
-        capture,
-        Math.min(MONITOR_QUERY_POLL_MS, remaining),
+      await awaitMonitorQueryOperation(
+        (operationSignal) => (dependencies.waitForWake ?? waitForMonitorQueryDelay)(
+          capture,
+          Math.min(MONITOR_QUERY_POLL_MS, remaining),
+          operationSignal,
+        ),
         signal,
+        waitDeadline,
       );
     } catch (error) {
       if (signal.aborted) {
@@ -548,18 +632,27 @@ export async function runMonitorQuery(
       if (!dependencies.isAuthorityCurrent(capture)) {
         return selectedMonitorQueryResult(params.action, latestSnapshot, latestWindow, "stale", "Root session or Monitor generation changed while waiting.");
       }
+      if (error instanceof MonitorQueryDeadlineError) {
+        return selectedMonitorQueryResult(params.action, latestSnapshot, latestWindow, "timeout", `No ${until} event before timeout.`);
+      }
       return selectedMonitorQueryResult(params.action, latestSnapshot, latestWindow, "aborted", errorMessage(error));
     }
     if (!dependencies.isAuthorityCurrent(capture)) {
       return selectedMonitorQueryResult(params.action, latestSnapshot, latestWindow, "stale", "Root session or Monitor generation changed while waiting.");
     }
 
-    const next = await readFencedMonitorSnapshot(params.action, capture, dependencies, signal);
+    const next = await readFencedMonitorSnapshot(params.action, capture, dependencies, signal, waitDeadline);
     if ("result" in next) {
-      if (next.result.status === "aborted" && !signal.aborted) {
-        return selectedMonitorQueryResult(params.action, latestSnapshot, latestWindow, "stale", next.result.reason);
-      }
-      return next.result;
+      const reason = next.result.status === "timeout"
+        ? `No ${until} event before timeout.`
+        : next.result.reason;
+      return selectedMonitorQueryResult(
+        params.action,
+        latestSnapshot,
+        latestWindow,
+        next.result.status,
+        reason,
+      );
     }
     const exact = exactMonitorQueryTarget(next.snapshot, initialTarget.identity);
     const resolved = resolveMonitorQueryTarget(next.snapshot, requested);
@@ -674,14 +767,79 @@ function emptyMonitorQueryResult(action: MonitorQueryAction, status: MonitorQuer
   return { version: 1, action, status, observedAt: Date.now(), windows: [], attention: [], reason };
 }
 
+class MonitorQueryDeadlineError extends Error {
+  constructor() {
+    super("Monitor query deadline elapsed.");
+    this.name = "MonitorQueryDeadlineError";
+  }
+}
+
+function awaitMonitorQueryOperation<T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+  requestSignal: AbortSignal,
+  deadline?: number,
+): Promise<T> {
+  if (requestSignal.aborted) return Promise.reject(requestSignal.reason ?? new Error("Monitor query aborted."));
+  if (deadline !== undefined && deadline <= Date.now()) return Promise.reject(new MonitorQueryDeadlineError());
+
+  const controller = new AbortController();
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cleanup = (): void => {
+      if (timer !== undefined) clearTimeout(timer);
+      requestSignal.removeEventListener("abort", onAbort);
+    };
+    const finish = (settle: () => void): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      settle();
+    };
+    const onAbort = (): void => {
+      const reason = requestSignal.reason ?? new Error("Monitor query aborted.");
+      controller.abort(reason);
+      finish(() => reject(reason));
+    };
+    requestSignal.addEventListener("abort", onAbort, { once: true });
+    if (deadline !== undefined) {
+      timer = setTimeout(() => {
+        const error = new MonitorQueryDeadlineError();
+        controller.abort(error);
+        finish(() => reject(error));
+      }, Math.max(0, deadline - Date.now()));
+    }
+
+    Promise.resolve()
+      .then(() => operation(controller.signal))
+      .then(
+        (value) => {
+          if (deadline !== undefined && Date.now() >= deadline) {
+            const error = new MonitorQueryDeadlineError();
+            controller.abort(error);
+            finish(() => reject(error));
+            return;
+          }
+          finish(() => resolve(value));
+        },
+        (error) => finish(() => reject(error)),
+      );
+  });
+}
+
 async function readFencedMonitorSnapshot(
   action: MonitorQueryAction,
   capture: MonitorQueryAuthorityFence,
   dependencies: MonitorQueryDependencies,
   signal: AbortSignal,
+  deadline?: number,
 ): Promise<{ snapshot: MonitorQuerySnapshot } | { result: MonitorQueryResult }> {
   try {
-    const snapshot = await dependencies.read(capture, signal);
+    const snapshot = await awaitMonitorQueryOperation(
+      (operationSignal) => dependencies.read(capture, operationSignal),
+      signal,
+      deadline,
+    );
     if (signal.aborted) return { result: emptyMonitorQueryResult(action, "aborted", abortReason(signal)) };
     if (!dependencies.isAuthorityCurrent(capture)) {
       return { result: emptyMonitorQueryResult(action, "stale", "Root session or Monitor generation changed during snapshot refresh.") };
@@ -690,8 +848,13 @@ async function readFencedMonitorSnapshot(
     return { snapshot };
   } catch (error) {
     if (signal.aborted) return { result: emptyMonitorQueryResult(action, "aborted", abortReason(signal)) };
-    const status: MonitorQueryStatus = dependencies.isAuthorityCurrent(capture) ? "aborted" : "stale";
-    return { result: emptyMonitorQueryResult(action, status, errorMessage(error)) };
+    if (!dependencies.isAuthorityCurrent(capture)) {
+      return { result: emptyMonitorQueryResult(action, "stale", "Root session or Monitor generation changed during snapshot refresh.") };
+    }
+    if (error instanceof MonitorQueryDeadlineError) {
+      return { result: emptyMonitorQueryResult(action, "timeout", "Monitor snapshot read exceeded the wait deadline.") };
+    }
+    return { result: emptyMonitorQueryResult(action, "aborted", errorMessage(error)) };
   }
 }
 
@@ -762,7 +925,7 @@ function monitorWindowCursor(window: MonitorWindowCardV1): string {
       todos: window.work.todos.map((todo) => ({ ...todo, updatedAt: undefined })),
     },
   };
-  const revision = createHash("sha256").update(JSON.stringify(semantic), "utf8").digest("hex");
+  const revision = hashMonitorWindowSemanticV1(semantic);
   return `monitor-window:v1:${revision}`;
 }
 

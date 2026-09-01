@@ -7,6 +7,12 @@
 
 export const MONITOR_WINDOW_STATE_VERSION = 1 as const;
 export const MAX_MONITOR_WINDOW_FACETS = 256;
+export const MAX_MONITOR_WINDOW_FACET_CANDIDATES = 1_024;
+export const MAX_MONITOR_WINDOW_FACET_ATTENTION = 64;
+export const MAX_MONITOR_WINDOW_FACET_JSON_DEPTH = 32;
+export const MAX_MONITOR_WINDOW_FACET_JSON_NODES = 4_096;
+export const MAX_MONITOR_WINDOW_FACET_JSON_BYTES = 64 * 1_024;
+export const MONITOR_WINDOW_FACET_READ_TIMEOUT_MS = 1_000;
 
 /** Exact root endpoint incarnation. Every item of work evidence is fenced by all four fields. */
 export interface MonitorWindowIdentityV1 {
@@ -75,6 +81,15 @@ export interface MonitorWindowFacetProvider {
   ): readonly MonitorWindowFacetV1[] | Promise<readonly MonitorWindowFacetV1[]>;
 }
 
+export interface MonitorWindowFacetReadOptionsV1 {
+  /** Request cancellation; provider promises are raced even if they ignore it. */
+  signal?: AbortSignal;
+  /** Absolute wall-clock deadline shared with the surrounding Monitor read. */
+  deadline?: number;
+  /** Per-provider read budget when no earlier deadline is supplied. */
+  timeoutMs?: number;
+}
+
 const FACET_REGISTRY_KEY = Symbol.for("pi-maestro.monitor-window-facet-providers.v1");
 const globals = globalThis as typeof globalThis & Record<symbol, unknown>;
 
@@ -105,7 +120,7 @@ export function getMonitorWindowFacetProvider(kind: string): MonitorWindowFacetP
 }
 
 export function listMonitorWindowFacetProviders(): MonitorWindowFacetProvider[] {
-  return [...facetRegistry().values()].sort((left, right) => left.kind.localeCompare(right.kind));
+  return [...facetRegistry().values()].sort((left, right) => binaryTextCompare(left.kind, right.kind));
 }
 
 /**
@@ -116,27 +131,68 @@ export function listMonitorWindowFacetProviders(): MonitorWindowFacetProvider[] 
 export async function readMonitorWindowFacets(
   request: MonitorWindowFacetReadRequestV1,
   onError?: (message: string) => void,
+  options?: MonitorWindowFacetReadOptionsV1,
 ): Promise<MonitorWindowFacetV1[]> {
   const allowed = new Set(request.targets.map(facetTargetKey));
-  const facets: MonitorWindowFacetV1[] = [];
-  for (const provider of listMonitorWindowFacetProviders()) {
+  const providers = listMonitorWindowFacetProviders();
+  const startedAt = Date.now();
+  const timeoutMs = options?.timeoutMs;
+  const timeoutDeadline = Number.isFinite(timeoutMs) && timeoutMs! >= 0
+    ? startedAt + timeoutMs!
+    : undefined;
+  const suppliedDeadline = Number.isFinite(options?.deadline) ? options!.deadline : undefined;
+  const deadline = timeoutDeadline === undefined
+    ? suppliedDeadline
+    : suppliedDeadline === undefined ? timeoutDeadline : Math.min(timeoutDeadline, suppliedDeadline);
+
+  // Providers start together and receive independent candidate budgets. A hung
+  // or flooding kind therefore cannot consume another kind's time/candidates.
+  const outcomes = await Promise.all(providers.map(async (provider) => {
+    const facets: MonitorWindowFacetV1[] = [];
+    const errors: string[] = [];
     try {
-      const emitted = await provider.read(request);
+      const emitted = await awaitFacetProvider(() => provider.read(request), options?.signal, deadline);
       if (!Array.isArray(emitted)) {
-        onError?.(`monitor window facet provider "${provider.kind}" returned a non-array result`);
-        continue;
+        errors.push(`monitor window facet provider "${provider.kind}" returned a non-array result`);
+        return { facets, errors };
       }
-      for (const facet of emitted) {
-        if (facets.length >= MAX_MONITOR_WINDOW_FACETS) return facets;
+      const candidateCount = Math.min(emitted.length, MAX_MONITOR_WINDOW_FACET_CANDIDATES);
+      for (let index = 0; index < candidateCount; index++) {
+        const facet: unknown = emitted[index];
         if (!validFacet(facet, provider.kind) || !allowed.has(facetTargetKey(facet.target))) {
-          onError?.(`monitor window facet provider "${provider.kind}" returned an invalid or uncaptured facet`);
+          errors.push(`monitor window facet provider "${provider.kind}" returned an invalid or uncaptured facet`);
           continue;
         }
-        facets.push(facet);
+        facets.push(cloneFacet(facet));
+      }
+      if (emitted.length > MAX_MONITOR_WINDOW_FACET_CANDIDATES) {
+        errors.push(`monitor window facet provider "${provider.kind}" candidate limit reached`);
       }
     } catch (error) {
-      onError?.(`monitor window facet provider "${provider.kind}" read failed: ${error instanceof Error ? error.message : String(error)}`);
+      if (options?.signal?.aborted) throw options.signal.reason ?? error;
+      errors.push(error instanceof MonitorWindowFacetDeadlineError
+        ? `monitor window facet provider "${provider.kind}" exceeded the read deadline`
+        : `monitor window facet provider "${provider.kind}" read failed: ${error instanceof Error ? error.message : String(error)}`);
     }
+    return { facets, errors };
+  }));
+
+  for (const outcome of outcomes) {
+    for (const message of outcome.errors) onError?.(message);
+  }
+  const facets: MonitorWindowFacetV1[] = [];
+  // Deterministic binary-kind round-robin prevents a valid flood from one kind
+  // consuming the entire global facet cap before a healthy later kind appears.
+  for (let index = 0; facets.length < MAX_MONITOR_WINDOW_FACETS; index++) {
+    let added = false;
+    for (const outcome of outcomes) {
+      const facet = outcome.facets[index];
+      if (!facet) continue;
+      facets.push(facet);
+      added = true;
+      if (facets.length >= MAX_MONITOR_WINDOW_FACETS) break;
+    }
+    if (!added) break;
   }
   return facets;
 }
@@ -276,16 +332,194 @@ function facetTargetKey(target: MonitorWindowFacetTargetV1): string {
   ].join("\u0000");
 }
 
-function validFacet(facet: MonitorWindowFacetV1, kind: string): boolean {
-  return Boolean(
-    facet
-      && facet.kind === kind
-      && typeof facet.revision === "string"
-      && facet.revision.length > 0
-      && facet.target?.identity
-      && typeof facet.target.identity.workspaceId === "string"
-      && typeof facet.target.identity.ownerId === "string"
-      && typeof facet.target.identity.ownerNonce === "string"
-      && typeof facet.target.identity.endpointId === "string",
-  );
+interface MonitorFacetValidationBudget {
+  nodes: number;
+}
+
+const FACET_TEXT_ENCODER = new TextEncoder();
+
+function validFacet(value: unknown, kind: string): value is MonitorWindowFacetV1 {
+  try {
+    if (!dataRecord(value, ["kind", "target", "revision", "data", "attention"])) return false;
+    const budget: MonitorFacetValidationBudget = { nodes: 0 };
+    if (value.kind !== kind || !boundedText(value.kind, true)) return false;
+    if (!boundedText(value.revision, true)) return false;
+    if (!validFacetTarget(value.target)) return false;
+    if (!validJsonValue(value.data, budget, 0, new WeakSet<object>())) return false;
+    if (value.attention !== undefined && !validFacetAttention(value.attention)) return false;
+    // Enforce the hard cap on the actual serialized facet after the complete
+    // depth/node/cycle/shape validation, including escapes, numbers and syntax.
+    const serialized = JSON.stringify(value);
+    return typeof serialized === "string"
+      && FACET_TEXT_ENCODER.encode(serialized).byteLength <= MAX_MONITOR_WINDOW_FACET_JSON_BYTES;
+  } catch {
+    return false;
+  }
+}
+
+function validFacetTarget(value: unknown): value is MonitorWindowFacetTargetV1 {
+  if (!dataRecord(value, ["identity", "workRef"]) || !validFacetIdentity(value.identity)) return false;
+  if (value.workRef === undefined) return true;
+  return dataRecord(value.workRef, ["kind", "id"])
+    && boundedText(value.workRef.kind, true)
+    && boundedText(value.workRef.id, true);
+}
+
+function validFacetIdentity(value: unknown): value is MonitorWindowIdentityV1 {
+  return dataRecord(value, ["workspaceId", "ownerId", "ownerNonce", "endpointId"])
+    && boundedText(value.workspaceId, true)
+    && boundedText(value.ownerId, true)
+    && boundedText(value.ownerNonce, true)
+    && boundedText(value.endpointId, true);
+}
+
+function validFacetAttention(value: unknown): value is readonly MonitorWindowFacetAttentionV1[] {
+  if (!Array.isArray(value) || value.length > MAX_MONITOR_WINDOW_FACET_ATTENTION) return false;
+  for (const item of value) {
+    if (!dataRecord(item, ["code", "severity", "message", "dedupeKey"])
+      || !boundedText(item.code, true)
+      || (item.severity !== "info" && item.severity !== "warning" && item.severity !== "error")
+      || !boundedText(item.severity, true)
+      || !boundedText(item.message, true)
+      || (item.dedupeKey !== undefined && !boundedText(item.dedupeKey, true))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function validJsonValue(
+  value: unknown,
+  budget: MonitorFacetValidationBudget,
+  depth: number,
+  active: WeakSet<object>,
+): value is MonitorWindowJsonValueV1 {
+  if (++budget.nodes > MAX_MONITOR_WINDOW_FACET_JSON_NODES || depth > MAX_MONITOR_WINDOW_FACET_JSON_DEPTH) return false;
+  if (value === null || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value === "string") return boundedText(value, false);
+  if (typeof value !== "object" || active.has(value)) return false;
+
+  active.add(value);
+  try {
+    if (Array.isArray(value)) {
+      const keys = Reflect.ownKeys(value);
+      if (keys.some((key) => typeof key !== "string" || (key !== "length" && !arrayIndex(key, value.length)))) return false;
+      for (let index = 0; index < value.length; index++) {
+        const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+        if (!descriptor || !("value" in descriptor)
+          || !validJsonValue(descriptor.value, budget, depth + 1, active)) return false;
+      }
+      return true;
+    }
+
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return false;
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key !== "string" || !boundedText(key, false)) return false;
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !descriptor.enumerable || !("value" in descriptor)
+        || !validJsonValue(descriptor.value, budget, depth + 1, active)) return false;
+    }
+    return true;
+  } finally {
+    active.delete(value);
+  }
+}
+
+function dataRecord(value: unknown, allowedKeys: readonly string[]): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return false;
+  const allowed = new Set(allowedKeys);
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== "string" || !allowed.has(key)) return false;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) return false;
+  }
+  return true;
+}
+
+function arrayIndex(key: string, length: number): boolean {
+  if (!/^(0|[1-9]\d*)$/.test(key)) return false;
+  const index = Number(key);
+  return Number.isSafeInteger(index) && index >= 0 && index < length && String(index) === key;
+}
+
+function boundedText(value: unknown, nonEmpty: boolean): value is string {
+  return typeof value === "string" && (!nonEmpty || Boolean(value.trim()));
+}
+
+function cloneFacet(facet: MonitorWindowFacetV1): MonitorWindowFacetV1 {
+  return {
+    kind: facet.kind,
+    target: {
+      identity: { ...facet.target.identity },
+      ...(facet.target.workRef === undefined ? {} : { workRef: { ...facet.target.workRef } }),
+    },
+    revision: facet.revision,
+    data: cloneJsonValue(facet.data),
+    ...(facet.attention === undefined ? {} : { attention: facet.attention.map((item) => ({ ...item })) }),
+  };
+}
+
+function cloneJsonValue(value: MonitorWindowJsonValueV1): MonitorWindowJsonValueV1 {
+  if (Array.isArray(value)) return value.map(cloneJsonValue);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, cloneJsonValue(item)]));
+  }
+  return value;
+}
+
+class MonitorWindowFacetDeadlineError extends Error {
+  constructor() {
+    super("Monitor window facet read deadline elapsed.");
+    this.name = "MonitorWindowFacetDeadlineError";
+  }
+}
+
+function awaitFacetProvider<T>(
+  operation: () => T | Promise<T>,
+  signal: AbortSignal | undefined,
+  deadline: number | undefined,
+): Promise<T> {
+  if (signal?.aborted) return Promise.reject(signal.reason ?? new Error("Monitor facet read aborted."));
+  if (deadline !== undefined && deadline <= Date.now()) return Promise.reject(new MonitorWindowFacetDeadlineError());
+  // Compatibility: public v1 reads with no options have no implicit timeout.
+  if (!signal && deadline === undefined) return Promise.resolve().then(operation);
+
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cleanup = (): void => {
+      if (timer !== undefined) clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const finish = (settle: () => void): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      settle();
+    };
+    const onAbort = (): void => finish(() => reject(signal?.reason ?? new Error("Monitor facet read aborted.")));
+    if (deadline !== undefined) {
+      timer = setTimeout(
+        () => finish(() => reject(new MonitorWindowFacetDeadlineError())),
+        Math.max(0, deadline - Date.now()),
+      );
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve()
+      .then(operation)
+      .then(
+        (value) => deadline !== undefined && Date.now() >= deadline
+          ? finish(() => reject(new MonitorWindowFacetDeadlineError()))
+          : finish(() => resolve(value)),
+        (error) => finish(() => reject(error)),
+      );
+  });
+}
+
+function binaryTextCompare(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }

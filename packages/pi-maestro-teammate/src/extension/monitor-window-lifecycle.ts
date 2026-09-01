@@ -11,10 +11,14 @@ export interface MonitorWindowCreateRequest {
   objective: string;
   cwd: string;
   presentation: "interactive" | "headless";
+  provider?: "native" | "herdr";
+  herdrSession?: string;
 }
 
 export interface MonitorWindowStopResult {
   ok: boolean;
+  /** True once process termination has been invoked, regardless of its outcome. */
+  terminationStarted: boolean;
   status?: string;
   error?: string;
 }
@@ -40,11 +44,24 @@ export interface MonitorWindowCloseResult<Handle> extends MonitorWindowStopResul
   completionPersisted?: boolean;
 }
 
+export interface MonitorWindowStopAuthorization<Authority> {
+  /** Exact-resource rollback is create-only; ordinary close remains Monitor-authority fenced. */
+  scope: "exact-resource" | "monitor-authority";
+  /** Captured root/Monitor generation retained for adapter-side diagnostics. */
+  authority: Authority;
+  /** Must be checked after every await and immediately before termination. */
+  authorize(): boolean;
+}
+
 export interface MonitorWindowLifecycleAdapter<Authority, Window, Owner, Handle, Delivery> {
   captureAuthority(): Authority | undefined;
   isAuthorityCurrent(authority: Authority): boolean;
   createHandle(): Handle;
-  spawn(request: MonitorWindowCreateRequest): Promise<{ ok: boolean; window?: Window; error?: string }>;
+  spawn(
+    request: MonitorWindowCreateRequest,
+    authority: Authority,
+    signal: AbortSignal,
+  ): Promise<{ ok: boolean; window?: Window; error?: string }>;
   isCurrentWindow(window: Window): boolean;
   waitForOwner(window: Window, signal: AbortSignal): Promise<Owner>;
   refreshOwners(): Promise<void>;
@@ -66,7 +83,10 @@ export interface MonitorWindowLifecycleAdapter<Authority, Window, Owner, Handle,
   handleOf(window: Window): Handle | undefined;
   isMonitorManaged(window: Window): boolean;
   markCloseRequested(window: Window, requested: boolean): void;
-  stopExact(window: Window): Promise<MonitorWindowStopResult>;
+  stopExact(
+    window: Window,
+    authorization: MonitorWindowStopAuthorization<Authority>,
+  ): Promise<MonitorWindowStopResult>;
   finalizeCancelled(window: Window, message: string): Promise<boolean>;
 }
 
@@ -76,8 +96,8 @@ function messageOf(error: unknown): string {
 
 /**
  * Owns admission ordering, exact-owner revalidation, generation/root fencing,
- * and rollback. Cleanup is intentionally exact-window scoped and still runs
- * after authority loss so a partially launched process is not orphaned.
+ * and rollback. Create rollback may reclaim only the exact spawned resource
+ * after authority loss; ordinary close always remains root/Monitor fenced.
  */
 export class MonitorWindowLifecycleService<Authority, Window, Owner, Handle, Delivery> {
   constructor(
@@ -95,7 +115,7 @@ export class MonitorWindowLifecycleService<Authority, Window, Owner, Handle, Del
     if (signal.aborted) return { ok: false, error: "Monitor window creation was aborted." };
 
     const handle = this.adapter.createHandle();
-    const spawned = await this.adapter.spawn(request);
+    const spawned = await this.adapter.spawn(request, authority, signal);
     if (!spawned.ok || !spawned.window) {
       return { ok: false, error: spawned.error ?? `Failed to create ${request.name}.` };
     }
@@ -136,7 +156,11 @@ export class MonitorWindowLifecycleService<Authority, Window, Owner, Handle, Del
       return { ok: true, window, owner: admittedOwner, handle };
     } catch (error) {
       if (published) this.adapter.markCloseRequested(window, true);
-      const cleanup = await this.adapter.stopExact(window);
+      const cleanup = await this.adapter.stopExact(window, {
+        scope: "exact-resource",
+        authority,
+        authorize: () => this.adapter.lookup(request.name) === window,
+      });
       let completionPersisted = true;
       if (published && cleanup.ok) {
         completionPersisted = await this.adapter.finalizeCancelled(
@@ -165,28 +189,32 @@ export class MonitorWindowLifecycleService<Authority, Window, Owner, Handle, Del
   async close(name: string): Promise<MonitorWindowCloseResult<Handle>> {
     const authority = this.adapter.captureAuthority();
     if (!authority || !this.adapter.isAuthorityCurrent(authority)) {
-      return { ok: false, error: "Active root Monitor authority is required." };
+      return { ok: false, terminationStarted: false, error: "Active root Monitor authority is required." };
     }
     const window = this.adapter.lookup(name);
-    if (!window) return { ok: false, error: `No managed window "${name}".` };
+    if (!window) return { ok: false, terminationStarted: false, error: `No managed window "${name}".` };
+
+    if (!this.adapter.isMonitorManaged(window)) {
+      return { ok: false, terminationStarted: false, error: `Window "${name}" is not managed by Monitor.` };
+    }
 
     const handle = this.adapter.handleOf(window);
-    const managed = this.adapter.isMonitorManaged(window);
-    if (managed && handle) this.adapter.markCloseRequested(window, true);
-    const stopped = await this.adapter.stopExact(window);
+    if (handle) this.adapter.markCloseRequested(window, true);
+    const stopped = await this.adapter.stopExact(window, this.stopAuthorization(authority));
     if (!this.adapter.isAuthorityCurrent(authority)) {
+      if (handle && !stopped.terminationStarted) this.adapter.markCloseRequested(window, false);
       return {
+        ...stopped,
         ok: false,
         error: `Root session or Monitor generation changed during window "${name}" close.`,
         ...(handle === undefined ? {} : { handle }),
-        ...(stopped.status === undefined ? {} : { status: stopped.status }),
       };
     }
     if (!stopped.ok) {
-      if (managed && handle) this.adapter.markCloseRequested(window, false);
+      if (handle && !stopped.terminationStarted) this.adapter.markCloseRequested(window, false);
       return { ...stopped, ...(handle === undefined ? {} : { handle }) };
     }
-    if (!managed || !handle) return { ...stopped, ...(handle === undefined ? {} : { handle }) };
+    if (!handle) return { ...stopped };
 
     const completionPersisted = await this.adapter.finalizeCancelled(
       window,
@@ -194,8 +222,8 @@ export class MonitorWindowLifecycleService<Authority, Window, Owner, Handle, Del
     );
     if (!this.adapter.isAuthorityCurrent(authority)) {
       return {
+        ...stopped,
         ok: false,
-        status: stopped.status,
         handle,
         completionPersisted,
         error: `Root session or Monitor generation changed while window "${name}" close completion was persisted.`,
@@ -203,14 +231,22 @@ export class MonitorWindowLifecycleService<Authority, Window, Owner, Handle, Del
     }
     if (!completionPersisted) {
       return {
+        ...stopped,
         ok: false,
-        status: stopped.status,
         handle,
         completionPersisted,
         error: `Closed Monitor-owned window ${name} (${stopped.status ?? "stopped"}), but canonical cancelled completion could not be persisted.`,
       };
     }
     return { ...stopped, handle, completionPersisted };
+  }
+
+  private stopAuthorization(authority: Authority): MonitorWindowStopAuthorization<Authority> {
+    return {
+      scope: "monitor-authority",
+      authority,
+      authorize: () => this.adapter.isAuthorityCurrent(authority),
+    };
   }
 
   private assertAuthority(authority: Authority, phase: string): void {
