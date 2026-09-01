@@ -25,6 +25,7 @@ export * from "./remote.ts";
 export * from "./retry.ts";
 export * from "./scheduler.ts";
 export * from "./sessions.ts";
+export * from "./ssh-hosts.ts";
 export * from "./supervision.ts";
 export * from "./todo-context.ts";
 export * from "./types.ts";

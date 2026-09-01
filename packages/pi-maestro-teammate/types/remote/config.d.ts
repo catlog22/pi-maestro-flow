@@ -1,14 +1,14 @@
-import { REMOTE_CONFIG_VERSION, type RemoteHostConfig, type RemoteTargetConfig, type RemoteWorkspaceConfig, type ResolvedRemoteTarget, type ResolvedRemoteWorkspace } from "./types.ts";
+import { REMOTE_CONFIG_VERSION, type RemoteHostEntry, type RemoteTargetConfig, type RemoteWorkspaceConfig, type ResolvedRemoteTarget, type ResolvedRemoteWorkspace } from "./types.ts";
 export interface GlobalRemoteConfigStore {
     version: typeof REMOTE_CONFIG_VERSION;
-    hosts: Record<string, RemoteHostConfig>;
+    hosts: Record<string, RemoteHostEntry>;
     targets: Record<string, RemoteTargetConfig>;
     workspaces: Record<string, RemoteWorkspaceConfig>;
 }
 export interface ProjectRemoteConfigStore {
     version: typeof REMOTE_CONFIG_VERSION;
     /** Project values override globals; null explicitly hides a global entry. */
-    hosts: Record<string, RemoteHostConfig | null>;
+    hosts: Record<string, RemoteHostEntry | null>;
     /** Project values override globals; null explicitly hides a global entry. */
     targets: Record<string, RemoteTargetConfig | null>;
     /** Project values override globals; null explicitly hides a global entry. */
@@ -16,7 +16,7 @@ export interface ProjectRemoteConfigStore {
 }
 export interface RemoteConfig {
     version: typeof REMOTE_CONFIG_VERSION;
-    hosts: Record<string, RemoteHostConfig>;
+    hosts: Record<string, RemoteHostEntry>;
     targets: Record<string, RemoteTargetConfig>;
     workspaces: Record<string, RemoteWorkspaceConfig>;
 }

@@ -1,6 +1,6 @@
 /** Canonical public data model for the Maestro Remote Worker Protocol. */
 export declare const REMOTE_PROTOCOL_VERSION: "remote/2";
-export declare const REMOTE_CONFIG_VERSION: 3;
+export declare const REMOTE_CONFIG_VERSION: 4;
 export declare const REMOTE_WINDOW_BRIDGE_PLUGIN_ID: "pi-maestro-teammate";
 export type RemoteProtocolVersion = typeof REMOTE_PROTOCOL_VERSION;
 export type RemoteConfigVersion = typeof REMOTE_CONFIG_VERSION;
@@ -20,6 +20,13 @@ export interface RemoteHostConfig {
     /** Local identity-file reference. Omit to use ssh-agent authentication. */
     identityFile?: string;
 }
+/** A host entry resolved at connection time through the process-local `/ssh` provider. */
+export interface RemoteHostReferenceConfig {
+    sshHostRef: string;
+}
+/** Backward-compatible inline host configuration or a provider-owned host reference. */
+export type RemoteHostEntry = RemoteHostConfig | RemoteHostReferenceConfig;
+export declare function isRemoteHostReferenceConfig(value: RemoteHostEntry): value is RemoteHostReferenceConfig;
 export interface RemoteAcpFileSystemPolicy {
     read?: boolean;
     write?: boolean;
@@ -75,11 +82,11 @@ export interface RemoteWorkspaceConfig {
 }
 export interface ResolvedRemoteTarget extends RemoteTargetConfig {
     id: string;
-    hostConfig: RemoteHostConfig;
+    hostConfig: RemoteHostEntry;
 }
 export interface ResolvedRemoteWorkspace extends RemoteWorkspaceConfig {
     workspaceRef: string;
-    hostConfig: RemoteHostConfig;
+    hostConfig: RemoteHostEntry;
 }
 export interface RemoteWorkerIdentity {
     workerId: string;

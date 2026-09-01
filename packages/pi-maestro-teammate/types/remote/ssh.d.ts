@@ -1,6 +1,6 @@
 import type { RemoteConnection, RemoteConnectionFactory } from "./driver.ts";
 import { type RemoteWindowBridgeNegotiation } from "./protocol.ts";
-import type { ResolvedRemoteTarget, ResolvedRemoteWorkspace } from "./types.ts";
+import { type ResolvedRemoteTarget, type ResolvedRemoteWorkspace } from "./types.ts";
 export declare const REMOTE_GATEWAY_COMMAND: "pi-teammate-remote connect --stdio";
 export declare const SSH_DEFAULT_CONNECT_TIMEOUT_MS = 10000;
 export declare const SSH_DEFAULT_HANDSHAKE_TIMEOUT_MS = 15000;

@@ -19,6 +19,7 @@ export type RemotePaneRow = {
     user: string;
     port: number;
     keyPrefix: string;
+    sshHostRef?: string;
     scope: RemotePaneScope;
     hidden?: boolean;
 } | {

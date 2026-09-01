@@ -6,8 +6,8 @@
  * models and executed over the Agent Client Protocol:
  *
  * - mode "local": the CLI is spawned on this machine (which/where reachability);
- * - mode "ssh": the CLI runs on a remote host over a direct ssh2 exec, with the
- *   ssh connection fields embedded per tool (host/user/port/hostKeySha256/identityFile).
+ * - mode "ssh": the CLI runs on a remote host over a direct ssh2 exec, using
+ *   either an `/ssh` manager reference or embedded connection fields.
  *
  * Discovery follows the same convention as teammate-models.json / teammate-remotes.json:
  * the global file is ~/.pi/agent/teammate-cli-tools.json and the project file is
@@ -31,6 +31,7 @@ export interface CliToolConfig {
     cwd?: string;
     /** Trusted environment-variable names forwarded from the parent process. */
     env?: readonly string[];
+    sshHostRef?: string;
     host?: string;
     user?: string;
     port?: number;
@@ -101,8 +102,12 @@ export declare function getEnabledTools<T extends {
 export declare function cliToolCommand(name: string, config: CliToolConfig): string;
 /** Full argv used to launch a CLI tool. */
 export declare function cliToolArgv(name: string, config: CliToolConfig): [string, ...string[]];
-/** SSH connection fields lifted from a tool config; null if incomplete. */
+/** Safe configuration diagnostic for one ssh-mode tool, or undefined when complete. */
+export declare function sshHostConfigIssue(config: CliToolConfig): string | undefined;
+/** Embedded SSH connection fields lifted from a tool config; null for references or invalid input. */
 export declare function sshHostConfigOf(config: CliToolConfig): RemoteHostConfig | null;
+/** Resolve either host source immediately before a new direct-SSH connection. */
+export declare function resolveSshHostConfigOf(config: CliToolConfig): Promise<RemoteHostConfig>;
 export interface CliToolProbeResult {
     ok: boolean;
     command: string;

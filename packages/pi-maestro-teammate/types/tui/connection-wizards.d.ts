@@ -1,6 +1,7 @@
+import { listSshHostRefs } from "../public/v1/ssh-hosts.ts";
 import type { ModelCliRow } from "../models/cli-list.ts";
 import { type RemoteConfigState, type RemoteConfigStorePair } from "../remote/config.ts";
-import { type RemoteHostConfig, type RemoteTargetConfig, type RemoteWorkspaceConfig } from "../remote/types.ts";
+import { type RemoteHostEntry, type RemoteTargetConfig, type RemoteWorkspaceConfig } from "../remote/types.ts";
 import type { RemotePaneScope } from "./remote-config-pane.ts";
 import { type ConnectionFormUi } from "./connection-forms.ts";
 /** Prompt adapter used by connection wizards and scripted tests. */
@@ -25,6 +26,8 @@ export interface DeploymentWizardDeps {
     yes?: boolean;
     /** Dynamic module-loading seam, reached only after a module is selected. */
     importModule?: (specifier: string) => Promise<unknown>;
+    /** Injectable `/ssh` provider-list seam for deterministic deployment tests. */
+    listHostRefs?: typeof listSshHostRefs;
 }
 export interface DeploymentEditWizardDeps extends DeploymentWizardDeps {
     /** Rows already produced by buildModelList; the wizard does not rebuild them. */
@@ -49,7 +52,9 @@ interface RemoteWizardDeps {
 }
 export interface RemoteHostWizardDeps extends RemoteWizardDeps {
     id?: string;
-    current?: RemoteHostConfig;
+    current?: RemoteHostEntry;
+    /** Injectable provider-list seam for deterministic configuration tests. */
+    listHostRefs?: typeof listSshHostRefs;
 }
 export interface RemoteTargetWizardDeps extends RemoteWizardDeps {
     id?: string;

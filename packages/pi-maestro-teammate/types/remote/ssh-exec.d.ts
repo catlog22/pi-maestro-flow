@@ -15,6 +15,7 @@
  * the default factory casts the real ssh2 Client onto that surface.
  */
 import { type ConnectConfig } from "ssh2";
+import type { SshHostProfile } from "pi-maestro-backend-core/v1/ssh";
 import type { RemoteHostConfig } from "./types.ts";
 /** Minimal writable channel surface consumed by the adapter (duplex in practice). */
 export interface SshExecChannel extends NodeJS.WritableStream {
@@ -54,6 +55,8 @@ export interface SshCliProbeResult {
     ok: boolean;
     error?: string;
 }
+/** Map a validated, non-secret host-provider profile to the existing ssh2 transport shape. */
+export declare function remoteHostConfigFromSshProfile(profile: SshHostProfile): RemoteHostConfig;
 /**
  * Probe whether a remote CLI is reachable: connect to the host and check that
  * the executable resolves (command -v / which). No ACP traffic is sent.

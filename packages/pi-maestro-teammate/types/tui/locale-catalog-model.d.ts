@@ -54,6 +54,7 @@ export declare const MODEL_TUI_CATALOGS: {
         readonly "connections.hiddenWorkspace": "(hidden) [W] {workspace}";
         readonly "connections.hiddenTarget": "(hidden) [T] {id}";
         readonly "connections.hostRow": "[H] {id}  {user}@{host}:{port} · SHA256:{keyPrefix}";
+        readonly "connections.hostRefRow": "[H] {id}  /ssh reference · {sshHostRef}";
         readonly "connections.workspaceRow": "[W] {workspace}  {cwd} · host {host} · protocol >= {protocol}";
         readonly "connections.targetRow": "[T] {id}  {driver} · {cwd} · host {host}";
         readonly "connections.connecting": "(connecting)";
@@ -77,6 +78,12 @@ export declare const MODEL_TUI_CATALOGS: {
         readonly "remote.validationFailed": "Validation failed: {error}";
         readonly "remote.hostId": "Host id (alphanumeric, dots, dashes, underscores)";
         readonly "remote.hostIdRequired": "Host id is required.";
+        readonly "remote.hostSource": "SSH host source";
+        readonly "remote.hostSourceInline": "Inline SSH settings";
+        readonly "remote.hostSourceManager": "Select from unlocked /ssh manager";
+        readonly "remote.hostRefSelect": "Select compatible /ssh host";
+        readonly "remote.hostRefUnavailable": "/ssh host references are unavailable: {error}";
+        readonly "remote.hostRefNoneCompatible": "The unlocked /ssh manager has no bash host using agent or passphrase-free identity authentication.";
         readonly "remote.hostAddress": "Host address";
         readonly "remote.hostUser": "SSH user";
         readonly "remote.hostPort": "SSH port";
@@ -321,6 +328,7 @@ export declare const MODEL_TUI_CATALOGS: {
         readonly "connections.hiddenWorkspace": "（已隐藏）[W] {workspace}";
         readonly "connections.hiddenTarget": "（已隐藏）[T] {id}";
         readonly "connections.hostRow": "[H] {id}  {user}@{host}:{port} · SHA256:{keyPrefix}";
+        readonly "connections.hostRefRow": "[H] {id}  /ssh 引用 · {sshHostRef}";
         readonly "connections.workspaceRow": "[W] {workspace}  {cwd} · 主机 {host} · 协议 >= {protocol}";
         readonly "connections.targetRow": "[T] {id}  {driver} · {cwd} · 主机 {host}";
         readonly "connections.connecting": "（连接中）";
@@ -344,6 +352,12 @@ export declare const MODEL_TUI_CATALOGS: {
         readonly "remote.validationFailed": "校验失败：{error}";
         readonly "remote.hostId": "主机 id（字母数字、点、横线、下划线）";
         readonly "remote.hostIdRequired": "主机 id 不能为空。";
+        readonly "remote.hostSource": "SSH 主机来源";
+        readonly "remote.hostSourceInline": "内嵌 SSH 设置";
+        readonly "remote.hostSourceManager": "从已解锁的 /ssh 管理器选择";
+        readonly "remote.hostRefSelect": "选择兼容的 /ssh 主机";
+        readonly "remote.hostRefUnavailable": "/ssh 主机引用不可用：{error}";
+        readonly "remote.hostRefNoneCompatible": "已解锁的 /ssh 管理器中没有使用 agent 或无口令 identity 认证的 bash 主机。";
         readonly "remote.hostAddress": "主机地址";
         readonly "remote.hostUser": "SSH 用户";
         readonly "remote.hostPort": "SSH 端口";
