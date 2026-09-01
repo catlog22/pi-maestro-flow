@@ -1450,6 +1450,28 @@ test("slash Goal argument hints make an explicit budget discoverable", () => {
   assert.equal(goalArgumentCompletions("unknown"), null);
 });
 
+test("goal get settles and clears stale display state when no Goal exists", async () => {
+  initGoal({ appendEntry() {} } as never);
+  const statusCalls: Array<string | undefined> = [];
+  const widgetCalls: unknown[] = [];
+  const ctx = createContext({
+    ui: {
+      notify() {},
+      setStatus(_key: string, value: string | undefined) { statusCalls.push(value); },
+      setWidget(_key: string, value: unknown) { widgetCalls.push(value); },
+    },
+  });
+  onSessionStart(ctx, { reason: "new" });
+  try {
+    const result = await executeGoal({ action: "get" }, ctx);
+    assert.deepEqual(result, { text: "No goal set.", isError: false });
+    assert.equal(statusCalls.at(-1), undefined);
+    assert.equal(widgetCalls.at(-1), undefined);
+  } finally {
+    onSessionShutdown(ctx);
+  }
+});
+
 test("goal create has no budget unless tokenBudget is explicitly provided", async () => {
   initGoal({ appendEntry() {} } as never);
   const ctx = createContext({ isIdle: () => false });
