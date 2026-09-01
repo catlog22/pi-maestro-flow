@@ -15,6 +15,7 @@ const {
   persistAgentOutputChecked,
   getAgentOutputStoreUsage,
   deleteAgentOutput,
+  guardedDeleteAgentOutput,
   readAgentOutput,
   resolveAgentOutput,
   getAgentOutputPath,
@@ -551,9 +552,11 @@ test("usage lists current-workspace records and deletion repairs the latest alia
   assert.equal(usage.maxRecords, MAX_AGENT_FILES);
   assert.ok(usage.totalBytes > 0);
   assert.deepEqual(usage.entries.map((entry) => entry.id), [
-    "managed-agent",
-    "managed-agent",
+    "managed-publication-2",
+    "managed-publication-1",
   ]);
+  assert.ok(usage.entries.every((entry) => /^[a-f0-9]{64}$/.test(entry.revision)));
+  assert.ok(usage.entries.every((entry) => entry.pinned === false));
   assert.equal(usage.entries[0]?.name, "managed-task");
   assert.equal(usage.entries[0]?.preview, '{"turn":2}');
 
@@ -834,6 +837,22 @@ async function writeInvalidOpenManifest(bucket: string, publicationId: string): 
   await writeFile(path, JSON.stringify({ state: "open", published: [{ publicationId }] }));
   return path;
 }
+
+test("guarded deletion rejects stale revisions and publications pinned after inventory", async () => {
+  const project = join(root, "pin-delete-proj");
+  await mkdir(project, { recursive: true });
+  await persistAgentOutputChecked("pin-delete-corr", "pin-delete", "general", { durable: true }, project, "pin-delete-publication");
+  const before = await getAgentOutputStoreUsage(project);
+  const entry = before.entries.find((candidate) => candidate.id === "pin-delete-publication");
+  assert.ok(entry);
+  assert.equal(await guardedDeleteAgentOutput(entry.id, project, "0".repeat(64)), "stale");
+  const bucket = await bucketContaining("pin-delete-publication.json");
+  await writeOpenManifest(bucket, ["pin-delete-publication"]);
+  assert.equal(await guardedDeleteAgentOutput(entry.id, project, entry.revision), "protected");
+  assert.deepEqual((await readAgentOutput("pin-delete-publication", project)).output, { durable: true });
+  const after = await getAgentOutputStoreUsage(project);
+  assert.equal(after.entries.find((candidate) => candidate.id === entry.id)?.pinned, true);
+});
 
 test("pinned publications are never evicted even at capacity", async () => {
   const project = join(root, "pin-capacity-proj");

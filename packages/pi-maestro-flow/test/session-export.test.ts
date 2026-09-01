@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -8,6 +8,7 @@ import {
   exportSessionHistory,
   formatBytes,
   formatSessionLocation,
+  inventorySessionTranscripts,
   probeSessionFile,
   resolveExportTarget,
   tryCopyToClipboard,
@@ -113,6 +114,29 @@ test("resolveExportTarget treats directories and file paths distinctly", async (
     // Explicit file path (non-existent) → resolved against cwd verbatim.
     const explicit = await resolveExportTarget("copy.jsonl", sessionFile, root);
     assert.equal(explicit, join(root, "copy.jsonl"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("inventorySessionTranscripts validates headers and excludes symlinks/non-JSONL", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-session-inventory-"));
+  try {
+    const valid = join(root, "valid.jsonl");
+    await writeFile(valid, `${JSON.stringify({ type: "session", id: "session-a", cwd: "/workspace" })}\n`, "utf8");
+    await writeFile(join(root, "invalid.jsonl"), "not-json\n", "utf8");
+    await writeFile(join(root, "notes.txt"), "ignored", "utf8");
+    await symlink(valid, join(root, "linked.jsonl"));
+
+    const entries = await inventorySessionTranscripts(root);
+    assert.deepEqual(entries.map((entry) => entry.fileName), ["invalid.jsonl", "valid.jsonl"]);
+    const validEntry = entries.find((entry) => entry.fileName === "valid.jsonl")!;
+    assert.equal(validEntry.headerValid, true);
+    assert.equal(validEntry.sessionId, "session-a");
+    assert.equal(validEntry.cwd, "/workspace");
+    assert.match(validEntry.id, /^transcript:[a-f0-9]{64}$/);
+    assert.match(validEntry.revision, /^[a-f0-9]{64}$/);
+    assert.equal(entries.find((entry) => entry.fileName === "invalid.jsonl")!.headerValid, false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

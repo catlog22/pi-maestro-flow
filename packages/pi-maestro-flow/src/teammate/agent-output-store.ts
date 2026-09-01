@@ -76,16 +76,20 @@ export interface AgentOutputMatch {
   preview: string;
 }
 export interface AgentOutputStoreEntry {
+  /** Canonical record id used by storage management. */
   id: string;
   correlationId: string;
   publicationId?: string;
-  /** Internal canonical filename; the public id remains correlationId. */
   canonicalId: string;
   name?: string;
   agent?: string;
   capturedAt: string;
   sizeBytes: number;
   preview: string;
+  /** Open/finalized completion manifests pin this publication. */
+  pinned: boolean;
+  /** Full SHA-256 fingerprint of the exact canonical record bytes. */
+  revision: string;
 }
 
 export interface AgentOutputStoreUsage {
@@ -530,21 +534,27 @@ async function listCanonicalRecords(dir: string): Promise<AgentOutputStoreEntry[
   const names = (await readdir(dir, { withFileTypes: true }))
     .filter((entry) => entry.isFile() && isCanonicalRecordName(entry.name))
     .map((entry) => entry.name);
+  const pinnedIds = await manifestPinnedPublicationIds(dir);
   const entries: AgentOutputStoreEntry[] = [];
   for (const fileName of names) {
     const filePath = join(dir, fileName);
-    const [record, info] = await Promise.all([loadRecord(filePath), lstat(filePath)]);
-    if (!record || info.isSymbolicLink() || !info.isFile()) continue;
+    const [text, info] = await Promise.all([readPrivateText(filePath), lstat(filePath)]);
+    if (text === undefined || info.isSymbolicLink() || !info.isFile()) continue;
+    const record = parseRecord(text);
+    if (!record) continue;
+    const canonicalId = record.publicationId ?? record.correlationId;
     entries.push({
-      id: record.correlationId,
+      id: canonicalId,
       correlationId: record.correlationId,
       ...(record.publicationId ? { publicationId: record.publicationId } : {}),
-      canonicalId: record.publicationId ?? record.correlationId,
+      canonicalId,
       ...(record.name ? { name: record.name } : {}),
       ...(record.agent ? { agent: record.agent } : {}),
       capturedAt: record.capturedAt,
       sizeBytes: info.size,
       preview: outputPreview(record.output),
+      pinned: pinnedIds.has(canonicalId),
+      revision: createHash("sha256").update(text, "utf8").digest("hex"),
     });
   }
   entries.sort((a, b) => b.capturedAt.localeCompare(a.capturedAt) || b.id.localeCompare(a.id));
@@ -715,54 +725,84 @@ export async function readExactAgentPublication(
 /** Report current-workspace occupancy and records without exposing other workspace buckets. */
 export async function getAgentOutputStoreUsage(cwd: string): Promise<AgentOutputStoreUsage> {
   const dir = await prepareBucketDir(cwd);
-  const entries = await listCanonicalRecords(dir);
-  return {
-    records: entries.length,
-    maxRecords: MAX_AGENT_FILES,
-    totalBytes: entries.reduce((total, entry) => total + entry.sizeBytes, 0),
-    entries,
-  };
+  const release = await lockSettingsResource(join(dir, ".agent-output-store"));
+  try {
+    const entries = await listCanonicalRecords(dir);
+    return {
+      records: entries.length,
+      maxRecords: MAX_AGENT_FILES,
+      totalBytes: entries.reduce((total, entry) => total + entry.sizeBytes, 0),
+      entries,
+    };
+  } finally {
+    await release();
+  }
 }
 
-/** Delete one canonical record from the current workspace and repair any latest alias that referenced it. */
-export async function deleteAgentOutput(id: string, cwd: string): Promise<boolean> {
-  if (!isRecordId(id)) return false;
-  const dir = await prepareBucketDir(cwd);
+export type AgentOutputDeleteStatus = "deleted" | "missing" | "protected" | "stale";
+
+async function deleteAgentOutputLocked(
+  dir: string,
+  id: string,
+  expectedRevision?: string,
+): Promise<AgentOutputDeleteStatus> {
+  // Resolve direct ids and latest aliases only after acquiring the production
+  // store lock. This prevents a previewed correlation alias from being swapped
+  // to a newer publication between resolution and deletion.
   let recordId = id;
-  let initialInfo = await lstat(recordFile(dir, recordId)).catch((error) => {
+  let text = await readPrivateText(recordFile(dir, recordId));
+  if (text === undefined) {
+    const alias = await loadAlias(aliasFile(dir, id), id);
+    const target = alias ? await resolveAliasedRecord(dir, id, alias) : null;
+    if (!target?.publicationId) return "missing";
+    recordId = target.publicationId;
+    text = await readPrivateText(recordFile(dir, recordId));
+  }
+  if (text === undefined) return "missing";
+  const filePath = recordFile(dir, recordId);
+  const info = await lstat(filePath).catch((error) => {
     if (fileErrorCode(error) === "ENOENT") return undefined;
     throw error;
   });
-  if (!initialInfo) {
-    const alias = await loadAlias(aliasFile(dir, id), id);
-    const target = alias ? await resolveAliasedRecord(dir, id, alias) : null;
-    if (!target?.publicationId) return false;
-    recordId = target.publicationId;
-    initialInfo = await lstat(recordFile(dir, recordId)).catch((error) => {
-      if (fileErrorCode(error) === "ENOENT") return undefined;
-      throw error;
-    });
+  if (!info) return "missing";
+  if (info.isSymbolicLink() || !info.isFile()) {
+    throw new Error(`Agent output path must be a regular file: ${filePath}`);
   }
-  if (!initialInfo) return false;
+  const record = parseRecord(text);
+  if (!record || (record.publicationId !== undefined ? record.publicationId !== recordId : record.correlationId !== recordId)) {
+    return "missing";
+  }
+  if ((await manifestPinnedPublicationIds(dir)).has(recordId)) return "protected";
+  const revision = createHash("sha256").update(text, "utf8").digest("hex");
+  if (expectedRevision !== undefined && revision !== expectedRevision) return "stale";
+  await unlink(filePath);
+  await repairAliasesAfterDeletion(dir, recordId);
+  return "deleted";
+}
+
+/** Guarded cleanup rechecks alias, pin state, and exact record revision under the store lock. */
+export async function guardedDeleteAgentOutput(
+  id: string,
+  cwd: string,
+  expectedRevision: string,
+): Promise<AgentOutputDeleteStatus> {
+  if (!isRecordId(id) || !/^[a-f0-9]{64}$/.test(expectedRevision)) return "stale";
+  const dir = await prepareBucketDir(cwd);
   const release = await lockSettingsResource(join(dir, ".agent-output-store"));
   try {
-    const filePath = recordFile(dir, recordId);
-    const info = await lstat(filePath).catch((error) => {
-      if (fileErrorCode(error) === "ENOENT") return undefined;
-      throw error;
-    });
-    if (!info) return false;
-    if (info.isSymbolicLink() || !info.isFile()) {
-      throw new Error(`Agent output path must be a regular file: ${filePath}`);
-    }
-    const record = await loadRecord(filePath);
-    if (!record) return false;
-    if (record.publicationId !== undefined ? record.publicationId !== recordId : record.correlationId !== recordId) {
-      return false;
-    }
-    await unlink(filePath);
-    await repairAliasesAfterDeletion(dir, recordId);
-    return true;
+    return await deleteAgentOutputLocked(dir, id, expectedRevision);
+  } finally {
+    await release();
+  }
+}
+
+/** Boolean compatibility API; deletion is still pin-safe and lock-serialized. */
+export async function deleteAgentOutput(id: string, cwd: string): Promise<boolean> {
+  if (!isRecordId(id)) return false;
+  const dir = await prepareBucketDir(cwd);
+  const release = await lockSettingsResource(join(dir, ".agent-output-store"));
+  try {
+    return await deleteAgentOutputLocked(dir, id) === "deleted";
   } finally {
     await release();
   }

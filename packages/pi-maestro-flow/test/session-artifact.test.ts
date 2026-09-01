@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -14,6 +14,12 @@ import {
   planArtifactItem,
   writeArtifactMarkdownExclusive,
 } from "../src/tools/session-artifact-command.ts";
+import {
+  artifactExportOwnershipDir,
+  listArtifactExportOwnership,
+  recordArtifactExportOwnership,
+} from "../src/tools/session-artifact-export-store.ts";
+import { lockSettingsResource } from "../src/settings/resource-lock.ts";
 import {
   SessionArtifactOverlay,
   type SessionArtifactItem,
@@ -194,6 +200,80 @@ test("Artifact export never overwrites an existing predictable path", async () =
     assert.notEqual(written, preferred);
     assert.equal(await readFile(preferred, "utf8"), "existing");
     assert.equal(await readFile(written, "utf8"), "new artifact");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Artifact ownership sidecar records full digests and rolls Markdown back on publication failure", async () => {
+  const root = await mkdtemp(join(tmpdir(), "artifact-owner-"));
+  try {
+    const markdown = "# Managed\n\ncontent";
+    const target = await writeArtifactMarkdownExclusive(markdown, join(root, "managed.md"));
+    await recordArtifactExportOwnership({
+      cwd: root,
+      writtenPath: target,
+      source: "plan",
+      artifactId: "plan-current",
+      markdown,
+      createdAt: new Date("2026-08-28T12:34:56.000Z"),
+    });
+    const ownership = await listArtifactExportOwnership(root);
+    assert.equal(ownership.length, 1);
+    assert.equal(ownership[0]!.ownership?.artifactIdDigest.length, 64);
+    assert.equal(ownership[0]!.ownership?.contentDigest.length, 64);
+    assert.equal(ownership[0]!.ownership?.targetDigest.length, 64);
+    assert.equal(ownership[0]!.protectionReason, undefined);
+    if (process.platform !== "win32") {
+      assert.equal((await stat(artifactExportOwnershipDir(root))).mode & 0o777, 0o700);
+    }
+
+    const rollbackRoot = await mkdtemp(join(tmpdir(), "artifact-owner-rollback-"));
+    try {
+      const rollbackTarget = await writeArtifactMarkdownExclusive("rollback", join(rollbackRoot, "rollback.md"));
+      await writeFile(join(rollbackRoot, ".pi"), "occupied");
+      await assert.rejects(() => recordArtifactExportOwnership({
+        cwd: rollbackRoot,
+        writtenPath: rollbackTarget,
+        source: "review",
+        artifactId: "review:1",
+        markdown: "rollback",
+        createdAt: new Date(),
+      }));
+      await assert.rejects(() => readFile(rollbackTarget));
+    } finally {
+      await rm(rollbackRoot, { recursive: true, force: true });
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Artifact ownership rollback never deletes a replacement pathname", async () => {
+  const root = await mkdtemp(join(tmpdir(), "artifact-owner-race-"));
+  try {
+    const markdown = "# Original";
+    const target = await writeArtifactMarkdownExclusive(markdown, join(root, "race.md"));
+    const input = {
+      cwd: root,
+      writtenPath: target,
+      source: "plan",
+      artifactId: "race-artifact",
+      markdown,
+      createdAt: new Date("2026-08-28T12:34:56.000Z"),
+    };
+    await recordArtifactExportOwnership(input);
+    const store = artifactExportOwnershipDir(root);
+    const release = await lockSettingsResource(join(store, ".artifact-export-store"));
+    const pending = recordArtifactExportOwnership(input);
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+    await unlink(target);
+    await writeFile(target, "replacement", "utf8");
+    await release();
+
+    await assert.rejects(pending, /refused to delete a changed pathname/);
+    assert.equal(await readFile(target, "utf8"), "replacement");
+    assert.equal((await listArtifactExportOwnership(root)).length, 1);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

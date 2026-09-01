@@ -14,6 +14,7 @@ import {
   type SessionArtifactOverlayAction,
 } from "../tui/session-artifact-overlay.ts";
 import { loadCurrentPlanArtifacts, type LoadedPlanArtifactDocument } from "./plan.ts";
+import { recordArtifactExportOwnership } from "./session-artifact-export-store.ts";
 
 export interface ArtifactCommandOptions {
   getKnowledgeSessionId?: (ctx: ExtensionCommandContext) => string | undefined;
@@ -101,11 +102,25 @@ export async function executeArtifactCommand(
       );
       continue;
     }
-    const outputPath = defaultArtifactExportPath(ctx.cwd, selected, (options.now ?? (() => new Date()))());
+    const exportedAt = (options.now ?? (() => new Date()))();
+    const outputPath = defaultArtifactExportPath(ctx.cwd, selected, exportedAt);
     try {
       const writtenPath = options.writeMarkdown
         ? (await options.writeMarkdown(selected.markdown, outputPath), outputPath)
         : await writeArtifactMarkdownExclusive(selected.markdown, outputPath);
+      // Test/custom writers retain their existing injection contract. Every
+      // production Markdown export publishes private ownership metadata and is
+      // rolled back by the store if that publication fails.
+      if (!options.writeMarkdown) {
+        await recordArtifactExportOwnership({
+          cwd: ctx.cwd,
+          writtenPath,
+          source: selected.source,
+          artifactId: selected.id,
+          markdown: selected.markdown,
+          createdAt: exportedAt,
+        });
+      }
       ctx.ui.notify(`已导出 Artifact：${selected.title} → ${writtenPath}`, "info");
     } catch (error) {
       ctx.ui.notify(`导出 Artifact 失败：${errorMessage(error)}`, "warning");

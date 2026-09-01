@@ -13,9 +13,12 @@
 
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { mkdir, appendFile, readFile, writeFile, readdir } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, appendFile, lstat, readFile, rename, readdir, unlink, writeFile } from "node:fs/promises";
 import { existsSync, statSync } from "node:fs";
-import { join, basename } from "node:path";
+import { join, resolve } from "node:path";
+import { TextDecoder } from "node:util";
+import { lockSettingsResource } from "../settings/resource-lock.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -82,42 +85,74 @@ export function usageHistoryDir(): string {
 	return join(getAgentDir(), "usage-history");
 }
 
-function sessionFile(sessionId: string): string {
-	return join(usageHistoryDir(), `${sanitizeSessionId(sessionId)}.jsonl`);
+function fullDigest(value: string | Buffer): string {
+	return createHash("sha256").update(value).digest("hex");
+}
+
+function readableSessionPrefix(sessionId: string): string {
+	return sessionId.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^\.+/, "").slice(0, 80) || "unknown";
+}
+
+/** Canonical filenames retain the complete SHA-256 digest of the session id. */
+export function usageSessionFile(sessionId: string): string {
+	return join(usageHistoryDir(), `${readableSessionPrefix(sessionId)}--${fullDigest(sessionId)}.jsonl`);
+}
+
+function legacySessionFile(sessionId: string): string {
+	const legacy = sessionId.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^\.+/, "").slice(0, 200) || "unknown";
+	return join(usageHistoryDir(), `${legacy}.jsonl`);
 }
 
 function indexPath(): string {
 	return join(usageHistoryDir(), "index.json");
 }
 
-function sanitizeSessionId(sessionId: string): string {
-	// Keep ids filesystem-safe; collapse path separators and dots that could escape.
-	return sessionId.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^\.+/, "").slice(0, 200) || "unknown";
+function storeLockPath(): string {
+	return join(usageHistoryDir(), ".usage-history-store");
+}
+
+async function withUsageHistoryLock<T>(operation: () => Promise<T>): Promise<T> {
+	await mkdir(usageHistoryDir(), { recursive: true });
+	const release = await lockSettingsResource(storeLockPath());
+	try {
+		return await operation();
+	} finally {
+		await release();
+	}
+}
+
+async function atomicWrite(path: string, contents: string): Promise<void> {
+	const temporary = `${path}.tmp-${process.pid}-${randomUUID()}`;
+	try {
+		await writeFile(temporary, contents, "utf8");
+		await rename(temporary, path);
+	} catch (error) {
+		await unlink(temporary).catch(() => undefined);
+		throw error;
+	}
 }
 
 // ---------------------------------------------------------------------------
 // Recording (write path)
 // ---------------------------------------------------------------------------
 
-let indexWriteScheduled = false;
-const pendingIndexUpdates = new Map<string, { entry: SessionIndexEntry; dirty: boolean }>();
-
 /**
  * Record one finalized assistant message. Best-effort: errors are swallowed
- * so the agent turn never breaks. The index update is debounced — only one
- * write per tick no matter how many messages land together.
+ * so the agent turn never breaks. The append, migration, and index update use
+ * the same resource lock as cleanup; a delayed index write can therefore never
+ * recreate an entry after guarded deletion.
  */
 export async function recordUsage(message: AssistantMessage, sessionId: string, cwd: string): Promise<void> {
 	const record = toRecord(message, sessionId, cwd);
-	const dir = usageHistoryDir();
 	try {
-		await mkdir(dir, { recursive: true });
-		await appendFile(sessionFile(sessionId), `${JSON.stringify(record)}\n`, "utf8");
+		await withUsageHistoryLock(async () => {
+			await migrateSessionLocked(sessionId);
+			await appendFile(usageSessionFile(sessionId), `${JSON.stringify(record)}\n`, "utf8");
+			await refreshIndexEntryLocked(sessionId);
+		});
 	} catch {
 		// Disk failure, permission, etc. — usage tracking is best-effort.
-		return;
 	}
-	scheduleIndexUpdate(record);
 }
 
 function toRecord(message: AssistantMessage, sessionId: string, cwd: string): UsageRecord {
@@ -145,78 +180,6 @@ function toRecord(message: AssistantMessage, sessionId: string, cwd: string): Us
 	};
 }
 
-function scheduleIndexUpdate(record: UsageRecord): void {
-	const key = record.sessionId;
-	const existing = pendingIndexUpdates.get(key)?.entry;
-	const models = existing ? existing.modelCount : 0;
-	const entry: SessionIndexEntry = existing
-		? {
-			sessionId: key,
-			firstTs: Math.min(existing.firstTs, record.ts),
-			lastTs: Math.max(existing.lastTs, record.ts),
-			recordCount: existing.recordCount + 1,
-			totalCost: round4(existing.totalCost + record.cost.total),
-			modelCount: models, // updated lazily on flush; precise count not needed in-flight
-		}
-		: {
-			sessionId: key,
-			firstTs: record.ts,
-			lastTs: record.ts,
-			recordCount: 1,
-			totalCost: round4(record.cost.total),
-			modelCount: 1,
-		};
-	pendingIndexUpdates.set(key, { entry, dirty: true });
-	if (!indexWriteScheduled) {
-		indexWriteScheduled = true;
-		queueMicrotask(flushIndexUpdates);
-	}
-}
-
-async function flushIndexUpdates(): Promise<void> {
-	const pending = new Map(pendingIndexUpdates);
-	pendingIndexUpdates.clear();
-	if (pending.size === 0) {
-		// COR-RV-007: reset the flag only when we are certain no write is pending.
-		indexWriteScheduled = false;
-		return;
-	}
-	try {
-		const current = await readIndex();
-		for (const [key, { entry }] of pending) {
-			const merged = mergeIndexEntry(current.sessions.find((s) => s.sessionId === key), entry, key);
-			const idx = current.sessions.findIndex((s) => s.sessionId === key);
-			if (idx >= 0) current.sessions[idx] = merged;
-			else current.sessions.push(merged);
-		}
-		await writeFile(indexPath(), `${JSON.stringify(current, null, 2)}\n`, "utf8");
-	} catch {
-		// Index is best-effort; a stale/missing index degrades gracefully to a scan.
-	} finally {
-		// COR-RV-007: reset the flag AFTER the async write completes so a
-		// concurrent scheduleIndexUpdate cannot start a parallel flush that
-		// reads stale index data and clobbers this write. If new updates
-		// arrived during the async I/O, re-schedule to flush them.
-		indexWriteScheduled = false;
-		if (pendingIndexUpdates.size > 0) {
-			indexWriteScheduled = true;
-			queueMicrotask(flushIndexUpdates);
-		}
-	}
-}
-
-function mergeIndexEntry(prev: SessionIndexEntry | undefined, next: SessionIndexEntry, key: string): SessionIndexEntry {
-	if (!prev) return next;
-	return {
-		sessionId: key,
-		firstTs: Math.min(prev.firstTs, next.firstTs),
-		lastTs: Math.max(prev.lastTs, next.lastTs),
-		recordCount: prev.recordCount + next.recordCount,
-		totalCost: round4(prev.totalCost + next.totalCost),
-		modelCount: Math.max(prev.modelCount, next.modelCount),
-	};
-}
-
 async function readIndex(): Promise<SessionIndex> {
 	try {
 		const raw = await readFile(indexPath(), "utf8");
@@ -228,6 +191,29 @@ async function readIndex(): Promise<SessionIndex> {
 	}
 }
 
+function indexEntryFor(sessionId: string, records: readonly UsageRecord[]): SessionIndexEntry | undefined {
+	if (records.length === 0) return undefined;
+	return {
+		sessionId,
+		firstTs: Math.min(...records.map((record) => record.ts)),
+		lastTs: Math.max(...records.map((record) => record.ts)),
+		recordCount: records.length,
+		totalCost: round4(records.reduce((sum, record) => sum + record.cost.total, 0)),
+		modelCount: new Set(records.map((record) => record.model)).size,
+	};
+}
+
+async function refreshIndexEntryLocked(sessionId: string): Promise<void> {
+	const current = await readIndex();
+	const records = (await readSessionRecordsLocked(sessionId)).filter((record) => record.sessionId === sessionId);
+	const next = indexEntryFor(sessionId, records);
+	const index = current.sessions.findIndex((entry) => entry.sessionId === sessionId);
+	if (next && index >= 0) current.sessions[index] = next;
+	else if (next) current.sessions.push(next);
+	else if (index >= 0) current.sessions.splice(index, 1);
+	await atomicWrite(indexPath(), `${JSON.stringify(current, null, 2)}\n`);
+}
+
 // ---------------------------------------------------------------------------
 // Reading (read path)
 // ---------------------------------------------------------------------------
@@ -236,7 +222,12 @@ export async function readHistory(scope: ReadScope, opts: ReadOptions = {}): Pro
 	const filterCwd = scope.kind === "workspace" ? scope.cwd : undefined;
 	let files: string[];
 	if (scope.kind === "session") {
-		files = [sessionFile(scope.sessionId)];
+		try {
+			await withUsageHistoryLock(() => migrateSessionLocked(scope.sessionId));
+		} catch {
+			// Reads degrade to the canonical/legacy files that remain.
+		}
+		files = await existingSessionFiles(scope.sessionId);
 	} else {
 		files = await listSessionFiles();
 		// PERF-RV-001: Prune files before parsing to reduce O(N×M) JSON.parse.
@@ -254,7 +245,7 @@ export async function readHistory(scope: ReadScope, opts: ReadOptions = {}): Pro
 			const index = await readIndex();
 			const indexed = new Map<string, SessionIndexEntry>();
 			for (const entry of index.sessions) {
-				indexed.set(sessionFile(entry.sessionId), entry);
+				indexed.set(usageSessionFile(entry.sessionId), entry);
 			}
 			files = files.filter((f) => {
 				const entry = indexed.get(f);
@@ -271,6 +262,7 @@ export async function readHistory(scope: ReadScope, opts: ReadOptions = {}): Pro
 	for (const file of files) {
 		const lines = await readJsonl(file);
 		for (const rec of lines) {
+			if (scope.kind === "session" && rec.sessionId !== scope.sessionId) continue;
 			if (opts.since !== undefined && rec.ts < opts.since) continue;
 			if (filterCwd !== undefined && rec.cwd !== filterCwd) continue;
 			records.push(rec);
@@ -287,11 +279,23 @@ async function listSessionFiles(): Promise<string[]> {
 	const dir = usageHistoryDir();
 	if (!existsSync(dir)) return [];
 	try {
-		const entries = await readdir(dir);
-		return entries.filter((f) => f.endsWith(".jsonl")).map((f) => join(dir, f));
+		const entries = await readdir(dir, { withFileTypes: true });
+		return entries.filter((entry) => entry.isFile() && !entry.isSymbolicLink() && entry.name.endsWith(".jsonl")).map((entry) => join(dir, entry.name));
 	} catch {
 		return [];
 	}
+}
+
+async function existingSessionFiles(sessionId: string): Promise<string[]> {
+	const candidates = [...new Set([usageSessionFile(sessionId), legacySessionFile(sessionId)])];
+	const files: string[] = [];
+	for (const path of candidates) {
+		try {
+			const info = await lstat(path);
+			if (info.isFile() && !info.isSymbolicLink()) files.push(path);
+		} catch {}
+	}
+	return files;
 }
 
 async function readJsonl(file: string): Promise<UsageRecord[]> {
@@ -314,8 +318,278 @@ async function readJsonl(file: string): Promise<UsageRecord[]> {
 	return out;
 }
 
+async function readSessionRecordsLocked(sessionId: string): Promise<UsageRecord[]> {
+	const records: UsageRecord[] = [];
+	for (const file of await existingSessionFiles(sessionId)) records.push(...await readJsonl(file));
+	return records;
+}
+
+async function migrateSessionLocked(sessionId: string): Promise<void> {
+	const legacy = legacySessionFile(sessionId);
+	const canonical = usageSessionFile(sessionId);
+	if (legacy === canonical) return;
+	let legacyInfo;
+	try {
+		legacyInfo = await lstat(legacy);
+	} catch {
+		return;
+	}
+	if (!legacyInfo.isFile() || legacyInfo.isSymbolicLink()) return;
+	const legacyParsed = await inspectUsageFile(legacy);
+	// A colliding or partially unreadable legacy filename is never rewritten or deleted.
+	if (!legacyParsed.valid || legacyParsed.sessionIds.size !== 1 || !legacyParsed.sessionIds.has(sessionId)) return;
+
+	let canonicalRecords: UsageRecord[] = [];
+	try {
+		const canonicalInfo = await lstat(canonical);
+		if (!canonicalInfo.isFile() || canonicalInfo.isSymbolicLink()) return;
+		const canonicalParsed = await inspectUsageFile(canonical);
+		// Preserve every raw byte if the canonical file is only partially parseable.
+		// An empty/ASCII-whitespace-only JSONL file is a valid empty migration target.
+		if (!canonicalParsed.valid && !isJsonlWhitespaceOnly(canonicalParsed.raw)) return;
+		canonicalRecords = canonicalParsed.records;
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code !== "ENOENT") return;
+	}
+
+	const seen = new Set<string>();
+	const merged: UsageRecord[] = [];
+	for (const record of [...canonicalRecords, ...legacyParsed.records]) {
+		const identity = stableJsonIdentity(record);
+		if (seen.has(identity)) continue;
+		seen.add(identity);
+		merged.push(record);
+	}
+	merged.sort((a, b) => a.ts - b.ts);
+	await atomicWrite(canonical, merged.map((record) => JSON.stringify(record)).join("\n") + (merged.length ? "\n" : ""));
+	// Canonical persistence succeeded; only now may the fully parsed legacy file disappear.
+	await unlink(legacy);
+	await refreshIndexEntryLocked(sessionId);
+}
+
 export async function readSessionIndex(): Promise<SessionIndex> {
 	return readIndex();
+}
+
+export interface UsageHistoryInventoryEntry {
+	path: string;
+	fileName: string;
+	id: string;
+	revision: string;
+	sizeBytes: number;
+	modified: Date;
+	sessionIds: string[];
+	cwds: string[];
+	cleanupEligible: boolean;
+	protectionReason?: string;
+}
+
+interface InspectedUsageFile {
+	records: UsageRecord[];
+	sessionIds: Set<string>;
+	cwds: Set<string>;
+	valid: boolean;
+	raw: Buffer;
+}
+
+function stableJsonIdentity(value: unknown): string {
+	if (Array.isArray(value)) return `[${value.map(stableJsonIdentity).join(",")}]`;
+	if (value && typeof value === "object") {
+		const object = value as Record<string, unknown>;
+		return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${stableJsonIdentity(object[key])}`).join(",")}}`;
+	}
+	return JSON.stringify(value) ?? "undefined";
+}
+
+function isUsageRecord(value: unknown): value is UsageRecord {
+	if (!value || typeof value !== "object") return false;
+	const record = value as Partial<UsageRecord>;
+	const usage = record.usage as Partial<UsageRecord["usage"]> | undefined;
+	const cost = record.cost as Partial<UsageRecord["cost"]> | undefined;
+	return Number.isFinite(record.ts) && typeof record.sessionId === "string" && record.sessionId.length > 0
+		&& typeof record.cwd === "string" && typeof record.model === "string" && typeof record.provider === "string"
+		&& Boolean(usage)
+		&& Number.isFinite(usage?.input) && Number.isFinite(usage?.output)
+		&& Number.isFinite(usage?.cacheRead) && Number.isFinite(usage?.cacheWrite)
+		&& Boolean(cost)
+		&& Number.isFinite(cost?.total) && Number.isFinite(cost?.input) && Number.isFinite(cost?.output)
+		&& Number.isFinite(cost?.cacheRead) && Number.isFinite(cost?.cacheWrite);
+}
+
+const strictUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
+
+function isJsonlWhitespaceOnly(raw: Buffer): boolean {
+	return raw.every((byte) => byte === 0x09 || byte === 0x0a || byte === 0x0d || byte === 0x20);
+}
+
+async function inspectUsageFile(path: string): Promise<InspectedUsageFile> {
+	let raw: Buffer;
+	try {
+		raw = await readFile(path);
+	} catch {
+		return { records: [], sessionIds: new Set(), cwds: new Set(), valid: false, raw: Buffer.alloc(0) };
+	}
+	let decoded: string;
+	try {
+		decoded = strictUtf8Decoder.decode(raw);
+	} catch {
+		return { records: [], sessionIds: new Set(), cwds: new Set(), valid: false, raw };
+	}
+	const records: UsageRecord[] = [];
+	let valid = true;
+	for (const line of decoded.split("\n")) {
+		if (!line.trim()) continue;
+		try {
+			const parsed: unknown = JSON.parse(line);
+			if (!isUsageRecord(parsed)) valid = false;
+			else records.push(parsed);
+		} catch {
+			valid = false;
+		}
+	}
+	if (records.length === 0) valid = false;
+	return {
+		records,
+		sessionIds: new Set(records.map((record) => record.sessionId)),
+		cwds: new Set(records.map((record) => record.cwd)),
+		valid,
+		raw,
+	};
+}
+
+export interface UsageLiveSessionProtection {
+	/** Session ids reported live by the authoritative workspace session directory. */
+	liveSessionIds?: ReadonlySet<string>;
+	/** False when no authoritative live-session view could be refreshed. */
+	evidenceAvailable?: boolean;
+}
+
+function usageProtection(
+	inspected: InspectedUsageFile,
+	cwd: string,
+	currentSessionId: string | undefined,
+	liveProtection: UsageLiveSessionProtection,
+): string | undefined {
+	if (!inspected.valid) return "damaged or unknown usage-history contents";
+	if (inspected.sessionIds.size !== 1) return "mixed or unknown session ownership";
+	if (inspected.cwds.size !== 1) return "mixed cwd ownership";
+	const sessionId = [...inspected.sessionIds][0]!;
+	const ownerCwd = [...inspected.cwds][0]!;
+	if (currentSessionId && sessionId === currentSessionId) return "current session is active";
+	if (ownerCwd !== cwd) return "owned by another workspace";
+	if (liveProtection.evidenceAvailable !== true) return "live-session status is unavailable; cleanup is conservatively disabled";
+	if (liveProtection.liveSessionIds?.has(sessionId)) return "workspace peer session is active";
+	return undefined;
+}
+
+async function scanUsageFilesLocked(
+	cwd: string,
+	currentSessionId?: string,
+	liveProtection: UsageLiveSessionProtection = {},
+): Promise<UsageHistoryInventoryEntry[]> {
+	let names: string[];
+	try {
+		names = await readdir(usageHistoryDir());
+	} catch {
+		return [];
+	}
+	const entries: UsageHistoryInventoryEntry[] = [];
+	for (const fileName of names.sort()) {
+		if (!fileName.endsWith(".jsonl")) continue;
+		const path = join(usageHistoryDir(), fileName);
+		let info;
+		try {
+			info = await lstat(path);
+		} catch {
+			continue;
+		}
+		const itemId = `usage:${fullDigest(resolve(path))}`;
+		if (!info.isFile() || info.isSymbolicLink()) {
+			entries.push({
+				path, fileName, id: itemId,
+				revision: fullDigest(`${resolve(path)}\0${info.dev}\0${info.ino}\0${info.size}\0${info.mtimeMs}`),
+				sizeBytes: info.size, modified: info.mtime, sessionIds: [], cwds: [], cleanupEligible: false,
+				protectionReason: "symlink or non-regular entry",
+			});
+			continue;
+		}
+		const inspected = await inspectUsageFile(path);
+		const protectionReason = usageProtection(inspected, cwd, currentSessionId, liveProtection);
+		entries.push({
+			path, fileName, id: itemId,
+			revision: fullDigest(Buffer.concat([Buffer.from(`${resolve(path)}\0`, "utf8"), inspected.raw])),
+			sizeBytes: info.size, modified: info.mtime,
+			sessionIds: [...inspected.sessionIds], cwds: [...inspected.cwds],
+			cleanupEligible: protectionReason === undefined,
+			...(protectionReason ? { protectionReason } : {}),
+		});
+	}
+	return entries;
+}
+
+/** Inventory usage files, migrating unambiguous legacy files under the store lock. */
+export async function inventoryUsageHistory(
+	cwd: string,
+	currentSessionId?: string,
+	liveProtection: UsageLiveSessionProtection = {},
+): Promise<UsageHistoryInventoryEntry[]> {
+	return withUsageHistoryLock(async () => {
+		const initial = await scanUsageFilesLocked(cwd, currentSessionId, liveProtection);
+		for (const entry of initial) {
+			if (entry.sessionIds.length !== 1) continue;
+			const sessionId = entry.sessionIds[0]!;
+			if (resolve(entry.path) !== resolve(usageSessionFile(sessionId))) await migrateSessionLocked(sessionId);
+		}
+		return scanUsageFilesLocked(cwd, currentSessionId, liveProtection);
+	});
+}
+
+export interface DeleteUsageHistoryRequest {
+	cwd: string;
+	itemId: string;
+	revision: string;
+	currentSessionId?: string;
+	liveProtection?: UsageLiveSessionProtection;
+}
+
+export interface DeleteUsageHistoryResult {
+	status: "deleted" | "missing" | "protected" | "stale" | "failed";
+	reclaimedBytes?: number;
+	message?: string;
+}
+
+/** Delete only a still-identical, regular, purely current-workspace usage file. */
+export async function guardedDeleteUsageHistory(request: DeleteUsageHistoryRequest): Promise<DeleteUsageHistoryResult> {
+	try {
+		return await withUsageHistoryLock(async () => {
+			const entry = (await scanUsageFilesLocked(
+				request.cwd,
+				request.currentSessionId,
+				request.liveProtection,
+			)).find((item) => item.id === request.itemId);
+			if (!entry) return { status: "missing" };
+			if (entry.revision !== request.revision) return { status: "stale", message: "usage-history file changed after preview" };
+			if (entry.protectionReason || !entry.cleanupEligible || entry.sessionIds.length !== 1) {
+				return { status: "protected", message: entry.protectionReason ?? "ownership is not cleanup-eligible" };
+			}
+			const sessionId = entry.sessionIds[0]!;
+			await unlink(entry.path);
+			try {
+				await refreshIndexEntryLocked(sessionId);
+				return { status: "deleted", reclaimedBytes: entry.sizeBytes };
+			} catch (error) {
+				const detail = error instanceof Error ? error.message : String(error);
+				return {
+					status: "deleted",
+					reclaimedBytes: entry.sizeBytes,
+					message: `usage data was deleted, but non-authoritative index reconciliation failed: ${detail}`,
+				};
+			}
+		});
+	} catch (error) {
+		return { status: "failed", message: error instanceof Error ? error.message : String(error) };
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -517,7 +791,7 @@ function round4(n: number): number {
  */
 
 interface BackfillCache {
-	/** Set of session file basenames already scanned. */
+	/** Full SHA-256 digests of absolute session paths already scanned. */
 	scannedFiles: string[];
 	/** Map: cwd -> count of records extracted. */
 	workspaceCounts: Record<string, number>;
@@ -543,10 +817,14 @@ async function readBackfillCache(): Promise<BackfillCache> {
 async function writeBackfillCache(cache: BackfillCache): Promise<void> {
 	try {
 		await mkdir(usageHistoryDir(), { recursive: true });
-		await writeFile(backfillCachePath(), `${JSON.stringify(cache, null, 2)}\n`, "utf8");
+		await atomicWrite(backfillCachePath(), `${JSON.stringify(cache, null, 2)}\n`);
 	} catch {
 		// Best-effort cache.
 	}
+}
+
+function backfillPathKey(file: string): string {
+	return fullDigest(resolve(file));
 }
 
 /** Parse one Pi session file into usage records. Returns [] on any error. */
@@ -620,62 +898,57 @@ async function parseSessionFile(file: string): Promise<UsageRecord[]> {
 export async function backfillFromSessions(): Promise<{ newRecords: number; newFiles: number }> {
 	const sessionsDir = join(getAgentDir(), "sessions");
 	if (!existsSync(sessionsDir)) return { newRecords: 0, newFiles: 0 };
-	const cache = await readBackfillCache();
-	const scanned = new Set(cache.scannedFiles);
-	// Collect all session files across all workspace subdirectories.
-	const files: string[] = [];
-	try {
-		for (const sub of await readdir(sessionsDir, { withFileTypes: true })) {
-			if (!sub.isDirectory()) continue;
-			const subDir = join(sessionsDir, sub.name);
-			for (const fn of await readdir(subDir)) {
-				if (fn.endsWith(".jsonl")) files.push(join(subDir, fn));
+	return withUsageHistoryLock(async () => {
+		const cache = await readBackfillCache();
+		// Ignore legacy basename cache entries: rescanning once is safe because timestamps dedupe.
+		const scanned = new Set(cache.scannedFiles.filter((key) => /^[a-f0-9]{64}$/.test(key)));
+		const files: string[] = [];
+		try {
+			for (const sub of await readdir(sessionsDir, { withFileTypes: true })) {
+				if (!sub.isDirectory() || sub.isSymbolicLink()) continue;
+				const subDir = join(sessionsDir, sub.name);
+				for (const entry of await readdir(subDir, { withFileTypes: true })) {
+					if (entry.isFile() && !entry.isSymbolicLink() && entry.name.endsWith(".jsonl")) files.push(join(subDir, entry.name));
+				}
 			}
+		} catch {
+			return { newRecords: 0, newFiles: 0 };
 		}
-	} catch {
-		return { newRecords: 0, newFiles: 0 };
-	}
-	const newFiles = files.filter((f) => !scanned.has(basename(f)));
-	if (newFiles.length === 0) return { newRecords: 0, newFiles: 0 };
-	let totalNew = 0;
-	for (const f of newFiles) {
-		const records = await parseSessionFile(f);
-		if (records.length === 0) {
-			scanned.add(basename(f));
-			continue;
-		}
-		// Group by sessionId and append to that session's JSONL. Deduplicate by
-		// checking the existing file's ts set so re-runs don't double-count.
-		const bySession = new Map<string, UsageRecord[]>();
-		for (const r of records) {
-			const list = bySession.get(r.sessionId) ?? [];
-			list.push(r);
-			bySession.set(r.sessionId, list);
-		}
-		for (const [sid, recs] of bySession) {
-			const existing = await readExistingTimestamps(sid);
-			const fresh = recs.filter((r) => !existing.has(r.ts));
-			if (fresh.length === 0) continue;
-			try {
-				await mkdir(usageHistoryDir(), { recursive: true });
-				await appendFile(sessionFile(sid), fresh.map((r) => JSON.stringify(r)).join("\n") + "\n", "utf8");
-				totalNew += fresh.length;
-				cache.workspaceCounts[recs[0].cwd] = (cache.workspaceCounts[recs[0].cwd] ?? 0) + fresh.length;
-			} catch {
-				// Best-effort.
+		const newFiles = files.filter((file) => !scanned.has(backfillPathKey(file)));
+		if (newFiles.length === 0) return { newRecords: 0, newFiles: 0 };
+		let totalNew = 0;
+		const changedSessions = new Set<string>();
+		for (const file of newFiles) {
+			const records = await parseSessionFile(file);
+			const bySession = new Map<string, UsageRecord[]>();
+			for (const record of records) {
+				const list = bySession.get(record.sessionId) ?? [];
+				list.push(record);
+				bySession.set(record.sessionId, list);
 			}
+			for (const [sessionId, sessionRecords] of bySession) {
+				await migrateSessionLocked(sessionId);
+				const existing = await readExistingTimestamps(sessionId);
+				const fresh = sessionRecords.filter((record) => !existing.has(record.ts));
+				if (fresh.length === 0) continue;
+				try {
+					await appendFile(usageSessionFile(sessionId), fresh.map((record) => JSON.stringify(record)).join("\n") + "\n", "utf8");
+					totalNew += fresh.length;
+					changedSessions.add(sessionId);
+					const ownerCwd = fresh[0]?.cwd ?? "";
+					cache.workspaceCounts[ownerCwd] = (cache.workspaceCounts[ownerCwd] ?? 0) + fresh.length;
+				} catch {
+					// Best-effort.
+				}
+			}
+			scanned.add(backfillPathKey(file));
 		}
-		scanned.add(basename(f));
-	}
-	// PERF-RV-015: prune scannedFiles entries for files that no longer exist on
-	// disk, and cap the array length as a secondary guard against unbounded growth.
-	const currentBasenames = new Set(files.map((f) => basename(f)));
-	cache.scannedFiles = [...scanned].filter((f) => currentBasenames.has(f));
-	if (cache.scannedFiles.length > 5000) {
-		cache.scannedFiles = cache.scannedFiles.slice(-5000);
-	}
-	await writeBackfillCache(cache);
-	return { newRecords: totalNew, newFiles: newFiles.length };
+		for (const sessionId of changedSessions) await refreshIndexEntryLocked(sessionId);
+		const currentKeys = new Set(files.map(backfillPathKey));
+		cache.scannedFiles = [...scanned].filter((key) => currentKeys.has(key)).slice(-5000);
+		await writeBackfillCache(cache);
+		return { newRecords: totalNew, newFiles: newFiles.length };
+	});
 }
 
 /**
@@ -687,7 +960,7 @@ export async function backfillFromSessions(): Promise<{ newRecords: number; newF
 async function readExistingTimestamps(sessionId: string): Promise<Set<number>> {
 	const ts = new Set<number>();
 	try {
-		const raw = await readFile(sessionFile(sessionId), "utf8");
+		const raw = await readFile(usageSessionFile(sessionId), "utf8");
 		for (const line of raw.split("\n")) {
 			const t = line.trim();
 			if (!t) continue;

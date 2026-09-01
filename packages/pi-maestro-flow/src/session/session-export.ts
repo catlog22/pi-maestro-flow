@@ -1,4 +1,5 @@
-import { copyFile, mkdir, stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { copyFile, lstat, mkdir, open, readdir, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 /**
@@ -17,6 +18,85 @@ export interface SessionFileStatus {
   exists: boolean;
   bytes: number | undefined;
   modified: Date | undefined;
+}
+
+export interface SessionTranscriptInventoryEntry {
+  path: string;
+  fileName: string;
+  sessionId?: string;
+  cwd?: string;
+  sizeBytes: number;
+  modified: Date;
+  /** Full-entropy identity; never expose a truncated filename as an item key. */
+  id: string;
+  revision: string;
+  headerValid: boolean;
+}
+
+function fullDigest(value: string | Buffer): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+async function readSessionHeader(file: string): Promise<{ sessionId?: string; cwd?: string; valid: boolean }> {
+  let handle;
+  try {
+    handle = await open(file, "r");
+    const buffer = Buffer.alloc(64 * 1024);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    for (const line of buffer.subarray(0, bytesRead).toString("utf8").split("\n")) {
+      if (!line.trim()) continue;
+      const parsed = JSON.parse(line) as Record<string, unknown>;
+      const sessionId = typeof parsed.id === "string" ? parsed.id : undefined;
+      const cwd = typeof parsed.cwd === "string" ? parsed.cwd : undefined;
+      return { sessionId, cwd, valid: parsed.type === "session" && Boolean(sessionId) && Boolean(cwd) };
+    }
+  } catch {
+    // Invalid/unreadable transcript headers remain visible but protected.
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+  return { valid: false };
+}
+
+/**
+ * Inventory transcript files in exactly one host-provided session directory.
+ * Symlinks and non-regular entries are ignored; callers must treat every
+ * returned transcript as read-only host-owned data.
+ */
+export async function inventorySessionTranscripts(sessionDir: string): Promise<SessionTranscriptInventoryEntry[]> {
+  let names: string[];
+  try {
+    names = await readdir(sessionDir);
+  } catch {
+    return [];
+  }
+  const entries: SessionTranscriptInventoryEntry[] = [];
+  for (const fileName of names.sort()) {
+    if (!fileName.endsWith(".jsonl")) continue;
+    const path = join(sessionDir, fileName);
+    let info;
+    try {
+      info = await lstat(path);
+    } catch {
+      continue;
+    }
+    if (!info.isFile() || info.isSymbolicLink()) continue;
+    const header = await readSessionHeader(path);
+    const identity = fullDigest(resolve(path));
+    const revision = fullDigest(`${resolve(path)}\0${info.dev}\0${info.ino}\0${info.size}\0${info.mtimeMs}`);
+    entries.push({
+      path,
+      fileName,
+      ...(header.sessionId ? { sessionId: header.sessionId } : {}),
+      ...(header.cwd ? { cwd: header.cwd } : {}),
+      sizeBytes: info.size,
+      modified: info.mtime,
+      id: `transcript:${identity}`,
+      revision,
+      headerValid: header.valid,
+    });
+  }
+  return entries;
 }
 
 /** Stat the session history file without throwing when it is absent. */

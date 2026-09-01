@@ -9,6 +9,7 @@ import {
   generatePreview,
   spillDir,
   spillContentDigest,
+  spillOwnerMarkerPath,
   spillPath,
   spillToolResult,
   validateSpillPath,
@@ -49,19 +50,29 @@ test("spillToolResult writes file and returns preview", async () => {
     assert.equal(result.contentDigest, spillContentDigest(content));
     const written = await readFile(result.path, "utf8");
     assert.equal(written, content);
+    const marker = JSON.parse(await readFile(spillOwnerMarkerPath(sessionId), "utf8"));
+    assert.equal(marker.sessionId, sessionId);
+    assert.equal(marker.sessionDigest.length, 64);
+    assert.equal(marker.pid, process.pid);
+    assert.equal(marker.ownerToken.length >= 16, true);
+    assert.match(marker.heartbeatAt, /^\d{4}-\d{2}-\d{2}T/);
   } finally {
     await cleanupSpillDir(sessionId);
   }
 });
 
-test("spillToolResult is idempotent (wx flag)", async () => {
+test("spillToolResult is idempotent (wx flag) and refreshes the same owner token", async () => {
   const sessionId = `test-idempotent-${Date.now()}`;
   const content = "y".repeat(SPILL_THRESHOLD_CHARS);
   try {
     const first = await spillToolResult(sessionId, "call-dup", content);
+    const firstMarker = JSON.parse(await readFile(spillOwnerMarkerPath(sessionId), "utf8"));
     const second = await spillToolResult(sessionId, "call-dup", content);
+    const secondMarker = JSON.parse(await readFile(spillOwnerMarkerPath(sessionId), "utf8"));
     assert.equal(first.path, second.path);
     assert.equal(first.preview, second.preview);
+    assert.equal(secondMarker.ownerToken, firstMarker.ownerToken);
+    assert.ok(Date.parse(secondMarker.heartbeatAt) >= Date.parse(firstMarker.heartbeatAt));
     const written = await readFile(second.path, "utf8");
     assert.equal(written, content);
   } finally {

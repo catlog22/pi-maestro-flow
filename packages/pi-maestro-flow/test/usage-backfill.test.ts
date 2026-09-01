@@ -72,6 +72,26 @@ test("backfill is idempotent: re-scanning the same file does not duplicate recor
 	assert.equal(records.length, 1, "no duplicate records after re-scan");
 });
 
+test("backfill cache keys use full paths so equal basenames in different workspace dirs both scan", async () => {
+	const name = "2026-07-09T03-00-00-000Z_same.jsonl";
+	const assistant = (id: string, cwd: string, timestamp: string) => [
+		JSON.stringify({ type: "session", id, timestamp, cwd }),
+		JSON.stringify({
+			type: "message", timestamp,
+			message: {
+				role: "assistant", provider: "openai", model: "m", timestamp,
+				usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } },
+			},
+		}),
+	];
+	writeSessionFile("same-a", name, assistant("same-a", "/same/a", "2026-07-09T03:00:01.000Z"));
+	writeSessionFile("same-b", name, assistant("same-b", "/same/b", "2026-07-09T03:00:02.000Z"));
+	const result = await backfillFromSessions();
+	assert.equal(result.newFiles, 2);
+	assert.equal((await readHistory({ kind: "workspace", cwd: "/same/a" })).length, 1);
+	assert.equal((await readHistory({ kind: "workspace", cwd: "/same/b" })).length, 1);
+});
+
 test("backfill skips non-assistant messages (user/tool messages have no usage)", async () => {
 	const slugB = "--other-cwd--";
 	writeSessionFile(slugB, "2026-07-08T02-00-00-000Z_s2.jsonl", [
