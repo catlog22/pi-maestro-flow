@@ -245,15 +245,37 @@ test("teammate-list call and result own mutually exclusive unbacked phases", () 
   }, { isPartial: true }, theme as never).render(80);
   const result = renderTeammateListResult({
     content: [{ type: "text", text: "@worker running" }],
-    details: { agents: [{ name: "worker" }] },
+    details: { agents: [{
+      agent: "general",
+      name: "worker",
+      correlationId: "worker-correlation",
+      status: "running",
+      durationMs: 5_000,
+      idleMs: 1_000,
+      inboxSize: 0,
+      phase: "prompting",
+      resolvedModel: "test-model",
+    }] },
   }, { isPartial: false }, theme as never, { view: "active" }).render(80);
 
   assert.match(call[0], /teammate-list active/);
   assert.deepEqual(settledCall, []);
   assert.deepEqual(partialResult, []);
-  assert.match(result[0], /^╭─ ✓ teammate-list · active · 1 item$/);
-  assert.equal(result[1], "│ @worker running");
-  assert.match(result.at(-1) ?? "", /^╰─/);
+  assert.match(result[0], /^╭ ✓ teammate-list · active · 1 item.*─╮$/);
+  assert.match(result[1], /^│ ● @worker · running\s+│$/);
+  assert.match(result[2], /^│ role general · id worker-c\s+│$/);
+  assert.match(result[3], /^│ active 5s · phase prompting\s+│$/);
+  assert.match(result[4], /^│ model test-model\s+│$/);
+  assert.match(result.at(-1) ?? "", /^╰─+╯$/);
+  assert.ok(result.every((line) => visibleWidth(line) === 79), "card must leave the terminal's final column empty");
+
+  const narrow = renderTeammateListResult({
+    content: [{ type: "text", text: "@worker running" }],
+    details: { agents: [{ agent: "general", name: "worker", correlationId: "worker-correlation", status: "running" }] },
+  }, { isPartial: false }, theme as never, { view: "active" }).render(24);
+  assert.ok(narrow.every((line) => visibleWidth(line) === 23), "narrow cards must not trigger terminal autowrap");
+  assert.match(narrow[0], /^╭.*╮$/);
+  assert.match(narrow.at(-1) ?? "", /^╰─+╯$/);
 
   setQuietMode(false);
   const fallback = renderTeammateListResult({
@@ -269,32 +291,68 @@ test("communication and Monitor results use bounded structured cards", () => {
     content: [{ type: "text", text: "Message queued for worker." }],
     details: { delivered: true },
   }, { isPartial: false, expanded: false }, theme as never, { to: "worker", mode: "follow_up" }).render(80);
-  assert.match(sent[0], /^╭─ ✓ teammate-send · @worker · follow_up · delivered$/);
-  assert.equal(sent[1], "│ Message queued for worker.");
+  assert.match(sent[0], /^╭ ✓ teammate-send · @worker · follow_up · delivered.*╮$/);
+  assert.match(sent[1], /^│ Message queued for worker\.\s+│$/);
+  assert.ok(sent.every((line) => visibleWidth(line) === 79));
 
   const failedSent = renderTeammateSendResult({
     content: [{ type: "text", text: "Delivery rejected." }],
     details: { delivered: true },
   }, { isPartial: false, expanded: false }, theme as never, { to: "worker", mode: "steer" }, true).render(80);
-  assert.match(failedSent[0], /^╭─ ✕ teammate-send · @worker · steer · delivery failed$/);
+  assert.match(failedSent[0], /^╭ ✕ teammate-send · @worker · steer · delivery failed.*╮$/);
 
   const observed = renderObserveResult({
     content: [{ type: "text", text: "2 targets: snapshot" }],
     details: {
       output: ["2 targets: snapshot", "teammate:a\trunning\tworking", "bash_bg:b\tcompleted\tdone"],
-      result: { action: "status", reason: "snapshot", observations: [{}, {}] },
+      result: {
+        action: "status",
+        reason: "snapshot",
+        observations: [
+          { target: { kind: "teammate", id: "a" }, nativeStatus: "running", summary: "working", phase: "prompting" },
+          { target: { kind: "bash_bg", id: "b" }, nativeStatus: "completed", summary: "done" },
+        ],
+      },
     },
   }, { isPartial: false, expanded: false }, theme as never).render(80);
-  assert.match(observed[0], /^╭─ ✓ observe · status · 2 targets · snapshot$/);
-  assert.ok(observed.some((line) => line.startsWith("│ teammate:a")));
+  assert.match(observed[0], /^╭ ✓ observe · status · 2 targets · snapshot.*╮$/);
+  assert.ok(observed.some((line) => /^│ ● teammate:a · running\s+│$/.test(line)));
+  assert.ok(observed.some((line) => /^│ ✓ bash_bg:b · completed\s+│$/.test(line)));
+  assert.ok(observed.some((line) => /^├─+┤$/.test(line)));
+  assert.ok(observed.every((line) => visibleWidth(line) === 79));
 
   const monitored = renderMonitorResult({
     content: [{ type: "text", text: "MONITOR list ok · 1 window\n· · owner:abc · running" }],
-    details: { action: "list", status: "ok", windows: [{}] },
-  }, { isPartial: false, expanded: false }, theme as never).render(80);
-  assert.match(monitored[0], /^╭─ ✓ monitor · list · ok · 1 window$/);
-  assert.ok(monitored.every((line) => visibleWidth(line) <= 80));
-  assert.match(monitored.at(-1) ?? "", /^╰─/);
+    details: {
+      action: "list",
+      status: "ok",
+      windows: [{
+        target: "owner:abc",
+        window: {
+          window: { name: "worker-a", lifecycle: { status: "running" } },
+          work: { status: "active" },
+          attention: [],
+        },
+        timeline: [{
+          group: "activity",
+          entries: [{ at: 1_000, label: "FULL TIMELINE DETAIL", detail: "expanded" }],
+        }],
+      }],
+    },
+  }, { isPartial: false, expanded: true }, theme as never).render(80);
+  assert.match(monitored[0], /^╭ ✓ monitor · list · ok · 1 window.*╮$/);
+  assert.ok(monitored.some((line) => /^│ ● worker-a · running\s+│$/.test(line)));
+  assert.ok(monitored.some((line) => /^│ target owner:abc\s+│$/.test(line)));
+  assert.ok(monitored.some((line) => line.includes("FULL TIMELINE DETAIL · expanded")));
+  assert.ok(monitored.every((line) => visibleWidth(line) === 79));
+  assert.match(monitored.at(-1) ?? "", /^╰─+╯$/);
+
+  const windows = renderTeammateListResult({
+    content: [{ type: "text", text: "window" }],
+    details: { agents: [{ kind: "window", displayName: "peer", status: "running", target: "owner:peer", agentCount: 1, contextPressure: 42 }] },
+  }, { isPartial: false }, theme as never, { view: "windows" }).render(80);
+  assert.ok(windows.some((line) => line.includes("1 agent · context 42%")));
+  assert.doesNotMatch(windows.join("\n"), /4200%/);
 });
 
 test("quiet completed single result is one concise named line without its message body", () => {

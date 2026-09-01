@@ -7,7 +7,7 @@
 import { quietStatusMark } from "./quiet-state.ts";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
-import { truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
 // A structural subset of pi's Theme so both the real Theme and the MCP renderer's
 // local RenderTheme (string-keyed fg) satisfy it without contravariance errors.
@@ -63,6 +63,7 @@ export function toolResultCard(
 		arg?: string;
 		summary?: string;
 		rows?: string[];
+		groups?: string[][];
 	},
 ): Component {
 	const bold = theme.bold ?? ((text: string) => text);
@@ -72,13 +73,31 @@ export function toolResultCard(
 	return {
 		render(width: number): string[] {
 			const safeWidth = Math.max(1, width);
-			const header = `${theme.fg("dim", "╭─")} ${mark} ${theme.fg("toolTitle", bold(o.name))}${o.arg ? ` ${theme.fg("accent", o.arg)}` : ""}${o.summary ? ` ${theme.fg("dim", `· ${o.summary}`)}` : ""}`;
-			const bodyWidth = Math.max(1, safeWidth - 2);
-			const rows = (o.rows ?? []).flatMap((row) => wrapTextWithAnsi(row || " ", bodyWidth));
+			const label = `${mark} ${theme.fg("toolTitle", bold(o.name))}${o.arg ? ` ${theme.fg("accent", o.arg)}` : ""}${o.summary ? ` ${theme.fg("dim", `· ${o.summary}`)}` : ""}`;
+			const cardWidth = Math.max(1, safeWidth - 1);
+			if (cardWidth < 6) return [truncateToWidth(label, cardWidth, "…")];
+
+			const innerWidth = cardWidth - 2;
+			const contentWidth = Math.max(1, innerWidth - 2);
+			const fit = (text: string, width: number): string => {
+				const clipped = truncateToWidth(text, width, "…");
+				return `${clipped}${" ".repeat(Math.max(0, width - visibleWidth(clipped)))}`;
+			};
+			const header = truncateToWidth(` ${label} `, innerWidth, "…");
+			const top = `${theme.fg("dim", "╭")}${header}${theme.fg("dim", `${"─".repeat(Math.max(0, innerWidth - visibleWidth(header)))}╮`)}`;
+			const groups = o.groups ?? ((o.rows?.length ?? 0) > 0 ? [o.rows ?? []] : []);
+			const body: string[] = [];
+			for (const [index, group] of groups.entries()) {
+				if (index > 0) body.push(theme.fg("dim", `├${"─".repeat(innerWidth)}┤`));
+				const wrapped = group.flatMap((row) => wrapTextWithAnsi(row || " ", contentWidth));
+				for (const row of wrapped) {
+					body.push(`${theme.fg("dim", "│")} ${fit(row, contentWidth)} ${theme.fg("dim", "│")}`);
+				}
+			}
 			return [
-				truncateToWidth(header, safeWidth, "…"),
-				...rows.map((row) => truncateToWidth(`${theme.fg("dim", "│")} ${row}`, safeWidth, "…")),
-				truncateToWidth(theme.fg("dim", "╰────────────"), safeWidth, ""),
+				top,
+				...body,
+				theme.fg("dim", `╰${"─".repeat(innerWidth)}╯`),
 			];
 		},
 		invalidate(): void {},

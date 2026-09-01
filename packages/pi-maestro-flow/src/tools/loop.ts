@@ -397,6 +397,22 @@ export function formatJob(job: LoopJobSnapshot, now: number = Date.now()): strin
   return `${parts.join(" ")}${result}${log}`;
 }
 
+function formatJobCardRows(job: LoopJobSnapshot, now: number, expanded: boolean): string[] {
+  const timing = [
+    job.nextRunAt !== undefined ? `next ${formatRelative(job.nextRunAt, now)}` : "",
+    job.lastRunAt !== undefined ? `last ${formatRelative(job.lastRunAt, now)}` : "",
+  ].filter(Boolean).join(" · ");
+  return [
+    `${STATUS_GLYPH[job.status]} ${job.id} · ${job.status}`,
+    `${job.kind} · every ${formatDuration(job.intervalMs)} · runs ${job.runCount}/${job.maxRuns}`,
+    `task ${truncateText(job.task, expanded ? 240 : 80)}`,
+    timing,
+    job.lastResult ? `result ${truncateText(job.lastResult, expanded ? 400 : 120)}` : "",
+    expanded && job.cwd ? `cwd ${job.cwd}` : "",
+    expanded && job.logDir ? `log ${job.logDir}` : "",
+  ].filter(Boolean);
+}
+
 /** Resolve a user-supplied loop id against known jobs: exact match, else unique prefix. */
 export function resolveLoopId(requested: string, jobs: LoopJobSnapshot[]): { id: string } | { error: string } {
   const exact = jobs.find((j) => j.id === requested);
@@ -507,7 +523,7 @@ export function registerLoop(pi: ExtensionAPI): void {
         if (params.action === "list") {
           const jobs = scheduler.list();
           return {
-            content: [{ type: "text", text: jobs.length ? jobs.map(formatJob).join("\n") : "No loops." }],
+            content: [{ type: "text", text: jobs.length ? jobs.map((job) => formatJob(job)).join("\n") : "No loops." }],
             details: { jobs },
           };
         }
@@ -557,10 +573,12 @@ export function registerLoop(pi: ExtensionAPI): void {
       const block = result.content.find((item) => item.type === "text");
       const text = block && "text" in block ? block.text : "";
       const isError = context.isError || (result as { isError?: boolean }).isError === true;
-      const visibleJobs = options.expanded ? jobs : jobs.slice(0, 8);
-      const rows = visibleJobs.map((job) => formatJob(job));
-      if (visibleJobs.length < jobs.length) rows.push(`… ${jobs.length - visibleJobs.length} more loops · expand for details`);
-      if (rows.length === 0 && text) rows.push(text);
+      const collapsedJobCount = jobs.length > 8 ? 7 : 8;
+      const visibleJobs = options.expanded ? jobs : jobs.slice(0, collapsedJobCount);
+      const now = Date.now();
+      const groups = visibleJobs.map((job) => formatJobCardRows(job, now, options.expanded));
+      if (visibleJobs.length < jobs.length) groups.push([`… ${jobs.length - visibleJobs.length} more loops · expand for details`]);
+      if (groups.length === 0 && text) groups.push(text.split("\n"));
       const summary = isError
         ? (text.split("\n").find((line) => line.trim()) ?? "failed")
         : action === "list"
@@ -571,7 +589,7 @@ export function registerLoop(pi: ExtensionAPI): void {
         ok: !isError,
         arg: action,
         summary,
-        rows,
+        groups,
       });
     },
   });
@@ -583,7 +601,7 @@ export function registerLoop(pi: ExtensionAPI): void {
       const action = tokens[0]?.toLowerCase();
       if (!action || action === "list") {
         const jobs = scheduler.list();
-        ctx.ui.notify(jobs.length ? jobs.map(formatJob).join("\n") : "No loops.", "info");
+        ctx.ui.notify(jobs.length ? jobs.map((job) => formatJob(job)).join("\n") : "No loops.", "info");
         return;
       }
       if (action === "cancel") {

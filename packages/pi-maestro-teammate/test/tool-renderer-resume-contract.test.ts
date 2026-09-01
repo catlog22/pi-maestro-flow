@@ -191,9 +191,10 @@ test("quiet mode renders auxiliary communication as a structured card", () => {
   );
   const lines = result?.render(80) ?? [];
   assert.equal(lines.length, 3);
-  assert.match(lines[0] ?? "", /^╭─ ✓ teammate-send · @\? · steer · delivered$/);
-  assert.equal(lines[1], "│ delivered");
-  assert.match(lines[2] ?? "", /^╰─/);
+  assert.match(lines[0] ?? "", /^╭ ✓ teammate-send · @\? · steer · delivered.*╮$/);
+  assert.match(lines[1] ?? "", /^│ delivered\s+│$/);
+  assert.match(lines[2] ?? "", /^╰─+╯$/);
+  assert.ok(lines.every((line) => line.length === 79), "self-rendered cards must leave the final terminal column empty");
 });
 
 test("auxiliary renderers never leak the quiet-only undefined through an as-never cast", () => {

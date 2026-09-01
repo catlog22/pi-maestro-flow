@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Check } from "typebox/value";
 import { readFile } from "node:fs/promises";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import {
   LoopParams,
   LoopScheduler,
@@ -400,6 +401,11 @@ test("registerLoop publishes authoritative snapshots on scheduler updates and qu
   assert.equal(emitted.at(-1)?.payload.jobs[0]?.status, "scheduled");
   assert.equal(entries.at(-1)?.type, "loop-state");
 
+  const listed = await tool.execute("list-loops", { action: "list" });
+  const listedText = listed.content.find((item) => item.type === "text")?.text ?? "";
+  assert.match(listedText, /next in (?:60s|1m)/, "list must use wall-clock time instead of Array.map's index argument");
+  assert.doesNotMatch(listedText, /20697d|next in \d{4,}d/);
+
   const renderTheme: RenderTheme = {
     fg: (_name, text) => text,
     bold: (text) => text,
@@ -411,9 +417,12 @@ test("registerLoop publishes authoritative snapshots on scheduler updates and qu
   assert.deepEqual(tool.renderCall({ action: "create" }, renderTheme, { isPartial: false }).render(80), []);
 
   const card = tool.renderResult(created, { expanded: false, isPartial: false }, renderTheme, { args: { action: "create" } }).render(100);
-  assert.match(card[0], /^╭─ ✓ loop create · created loop-/);
-  assert.ok(card.some((line) => /^│ ○ loop-.*scheduled.*runs=0\/2/.test(line)));
-  assert.match(card.at(-1) ?? "", /^╰─/);
+  assert.match(card[0], /^╭ ✓ loop create · created loop-.*─╮$/);
+  assert.match(card[1], /^│ ○ loop-.* · scheduled\s+│$/);
+  assert.match(card[2], /^│ prompt · every 1m · runs 0\/2\s+│$/);
+  assert.match(card[3], /^│ task check status\s+│$/);
+  assert.match(card.at(-1) ?? "", /^╰─+╯$/);
+  assert.ok(card.every((line) => visibleWidth(line) === 99), "loop cards must leave the terminal's final column empty");
   assert.deepEqual(
     tool.renderResult(created, { expanded: false, isPartial: true }, renderTheme, { args: { action: "create" } }).render(100),
     [],
@@ -426,8 +435,23 @@ test("registerLoop publishes authoritative snapshots on scheduler updates and qu
     renderTheme,
     { args: { action: "create" }, isError: true },
   ).render(100);
-  assert.match(errorCard[0], /^╭─ ✕ loop create · kind, task, and intervalMs are required/);
-  assert.equal(errorCard[1], "│ kind, task, and intervalMs are required for create.");
+  assert.match(errorCard[0], /^╭ ✕ loop create · kind, task, and intervalMs are required.*╮$/);
+  assert.match(errorCard[1], /^│ kind, task, and intervalMs are required for create\.\s+│$/);
+  assert.ok(errorCard.every((line) => visibleWidth(line) === 99));
+
+  for (let index = 0; index < 8; index++) {
+    await tool.execute(`create-extra-${index}`, {
+      action: "create",
+      kind: "prompt",
+      task: `extra ${index}`,
+      intervalMs: 60_000,
+      maxRuns: 1,
+    });
+  }
+  const many = await tool.execute("list-many", { action: "list" });
+  const manyCard = tool.renderResult(many, { expanded: false, isPartial: false }, renderTheme, { args: { action: "list" } }).render(100);
+  assert.ok(manyCard.some((line) => line.includes("… 2 more loops · expand for details")));
+  assert.equal(manyCard.filter((line) => /^├─+┤$/.test(line)).length, 7, "seven jobs plus the overflow marker consume the eight-group budget");
 
   const updateCount = emitted.length;
   eventHandlers.get(LOOP_QUERY_EVENT)!();

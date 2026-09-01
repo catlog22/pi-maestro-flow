@@ -10,6 +10,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   Box, Text, type Component,
   truncateToWidth,
+  visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import {
@@ -289,7 +290,8 @@ interface TeammateToolCardOptions {
   status: ToolCardStatus;
   expanded?: boolean;
   detail?: string;
-  maxCollapsedLines?: number;
+  groups?: string[][];
+  maxCollapsedGroups?: number;
 }
 
 function resultText(result: AgentToolResult<unknown>): string {
@@ -305,6 +307,154 @@ function isErrorResult(result: AgentToolResult<unknown>): boolean {
   return (result as { isError?: boolean }).isError === true;
 }
 
+function recordOf(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function textField(record: Record<string, unknown> | undefined, key: string): string | undefined {
+  const value = record?.[key];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function numberField(record: Record<string, unknown> | undefined, key: string): number | undefined {
+  const value = record?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function compactDuration(milliseconds: number): string {
+  const seconds = Math.max(0, Math.round(milliseconds / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  return seconds % 60 === 0 ? `${minutes}m` : `${minutes}m${seconds % 60}s`;
+}
+
+function cardStatusGlyph(status: string): string {
+  if (/fail|error|stall|not-found|terminated/i.test(status)) return "✕";
+  if (/complete|success|result-ready|delivered/i.test(status)) return "✓";
+  if (/sleep|idle|queued|scheduled/i.test(status)) return "○";
+  return "●";
+}
+
+function teammateListGroups(entries: unknown[], fallback: string): string[][] {
+  if (entries.length === 0) return fallback ? [fallback.split("\n")] : [];
+  return entries.map((entry) => {
+    const item = recordOf(entry);
+    if (!item) return [String(entry)];
+    const kind = textField(item, "kind");
+    const status = textField(item, "status") ?? "available";
+
+    if (typeof item.correlationId === "string") {
+      const name = textField(item, "name");
+      const role = textField(item, "agent") ?? "teammate";
+      const treePrefix = textField(item, "treePrefix") ?? "";
+      const title = `${treePrefix}${cardStatusGlyph(status)} ${name ? `@${name}` : role} · ${status}`;
+      const identity = [name ? `role ${role}` : "", `id ${item.correlationId.slice(0, 8)}`].filter(Boolean).join(" · ");
+      const durationMs = numberField(item, "durationMs");
+      const idleMs = numberField(item, "idleMs");
+      const inboxSize = numberField(item, "inboxSize");
+      const phase = textField(item, "phase");
+      const activity = [
+        durationMs !== undefined ? `active ${compactDuration(durationMs)}` : "",
+        phase ? `phase ${phase}` : "",
+        idleMs !== undefined && idleMs >= 5_000 ? `idle ${compactDuration(idleMs)}` : "",
+        inboxSize ? `inbox ${inboxSize}` : "",
+      ].filter(Boolean).join(" · ");
+      const model = textField(item, "resolvedModel") ?? textField(item, "requestedModel");
+      const target = textField(item, "target");
+      return [title, identity, activity, model ? `model ${model}` : "", target ? `target ${target}` : ""].filter(Boolean);
+    }
+
+    if (kind === "window" || kind === "ssh-window") {
+      const label = textField(item, "displayName") ?? textField(item, "sessionName") ?? textField(item, "target") ?? "window";
+      const agents = numberField(item, "agentCount") ?? 0;
+      const contextPressure = numberField(item, "contextPressure");
+      return [
+        `${cardStatusGlyph(status)} ${label} · ${status}`,
+        textField(item, "target") ? `target ${textField(item, "target")}` : "",
+        `${agents} agent${agents === 1 ? "" : "s"}${contextPressure !== undefined ? ` · context ${Math.round(contextPressure)}%` : ""}`,
+      ].filter(Boolean);
+    }
+
+    if (kind === "window-message" || kind === "remote-history") {
+      const direction = textField(item, "direction") ?? "message";
+      const source = textField(item, "source") ?? kind;
+      return [
+        `${direction === "incoming" ? "←" : "→"} ${source} · ${status}`,
+        textField(item, "target") ? `target ${textField(item, "target")}` : "",
+        textField(item, "body") ?? "",
+      ].filter(Boolean);
+    }
+
+    const name = textField(item, "name") ?? textField(item, "id") ?? "item";
+    const description = textField(item, "description");
+    const source = textField(item, "source");
+    return [`◆ ${name}`, description ?? "", source ? `source ${source}` : ""].filter(Boolean);
+  });
+}
+
+function observeGroups(details: ObserveCardDetails | undefined, fallback: string, expanded: boolean): string[][] {
+  const observations = details?.result?.observations ?? [];
+  if (observations.length === 0) return fallback ? [fallback.split("\n")] : [];
+  return observations.map((value) => {
+    const observation = recordOf(value);
+    const target = recordOf(observation?.target);
+    const label = `${textField(target, "kind") ?? "target"}:${textField(target, "id") ?? "unknown"}`;
+    const status = textField(observation, "nativeStatus") ?? textField(observation, "outcome") ?? "unknown";
+    const rows = [
+      `${cardStatusGlyph(status)} ${label} · ${status}`,
+      textField(observation, "summary") ?? "",
+      textField(observation, "phase") ? `phase ${textField(observation, "phase")}` : "",
+      textField(observation, "error") ? `error ${textField(observation, "error")}` : "",
+      textField(observation, "lastResult") ? `result ${textField(observation, "lastResult")}` : "",
+    ].filter(Boolean);
+    if (expanded && Array.isArray(observation?.detail)) {
+      rows.push(...observation.detail.filter((line): line is string => typeof line === "string"));
+    }
+    return rows;
+  });
+}
+
+function monitorGroups(details: MonitorCardDetails | undefined, fallback: string, expanded: boolean): string[][] {
+  const windows = details?.windows ?? [];
+  if (windows.length === 0) return fallback ? [fallback.split("\n")] : [];
+  const groups = windows.map((value) => {
+    const selected = recordOf(value);
+    const card = recordOf(selected?.window);
+    const identity = recordOf(card?.window);
+    const lifecycle = recordOf(identity?.lifecycle);
+    const work = recordOf(card?.work);
+    const status = textField(lifecycle, "status") ?? "unknown";
+    const target = textField(selected, "target") ?? "window";
+    const label = textField(identity, "name") ?? textField(identity, "sessionName") ?? target;
+    const attention = Array.isArray(card?.attention) ? card.attention.length : 0;
+    const rows = [
+      `${cardStatusGlyph(status)} ${label} · ${status}`,
+      `target ${target}`,
+      [textField(work, "status") ? `work ${textField(work, "status")}` : "", attention ? `attention ${attention}` : ""].filter(Boolean).join(" · "),
+    ].filter(Boolean);
+    if (expanded && Array.isArray(selected?.timeline)) {
+      for (const timelineValue of selected.timeline) {
+        const timeline = recordOf(timelineValue);
+        const group = textField(timeline, "group") ?? "events";
+        rows.push(`timeline ${group}`);
+        if (!Array.isArray(timeline?.entries)) continue;
+        for (const entryValue of timeline.entries) {
+          const entry = recordOf(entryValue);
+          const at = numberField(entry, "at");
+          const entryLabel = textField(entry, "label") ?? "event";
+          const entryDetail = textField(entry, "detail");
+          rows.push(`${at === undefined ? "" : `${new Date(at).toISOString()} `}${entryLabel}${entryDetail ? ` · ${entryDetail}` : ""}`);
+        }
+      }
+    }
+    return rows;
+  });
+  if (expanded && details?.reason) groups.push([`reason ${details.reason}`]);
+  return groups;
+}
+
 function renderTeammateToolCard(
   result: AgentToolResult<unknown>,
   options: TeammateToolCardOptions,
@@ -315,24 +465,35 @@ function renderTeammateToolCard(
     const safeWidth = Math.max(1, width);
     const tone = options.status === "failure" ? "error" : "success";
     const mark = theme.fg(tone, quietStatusMark(options.status));
-    const header = [
-      `${theme.fg("dim", "╭─")} ${mark} ${theme.bold(options.name)}`,
+    const label = [
+      `${mark} ${theme.bold(options.name)}`,
       options.summary ? theme.fg("dim", `· ${options.summary}`) : "",
     ].filter(Boolean).join(" ");
-    const bodyWidth = Math.max(1, safeWidth - 2);
-    const wrapped = detail
-      ? detail.split("\n").flatMap((line) => wrapTextWithAnsi(line || " ", bodyWidth))
-      : [];
-    const maxLines = options.expanded ? wrapped.length : (options.maxCollapsedLines ?? 8);
-    const shown = wrapped.slice(0, maxLines);
-    if (shown.length < wrapped.length) {
-      shown.push(theme.fg("dim", `… ${wrapped.length - shown.length} more lines · expand for details`));
+    const cardWidth = Math.max(1, safeWidth - 1);
+    if (cardWidth < 6) return [truncateToWidth(label, cardWidth, "…")];
+
+    const innerWidth = cardWidth - 2;
+    const contentWidth = Math.max(1, innerWidth - 2);
+    const fit = (text: string, targetWidth: number): string => {
+      const clipped = truncateToWidth(text, targetWidth, "…");
+      return `${clipped}${" ".repeat(Math.max(0, targetWidth - visibleWidth(clipped)))}`;
+    };
+    const header = truncateToWidth(` ${label} `, innerWidth, "…");
+    const top = `${theme.fg("dim", "╭")}${header}${theme.fg("dim", `${"─".repeat(Math.max(0, innerWidth - visibleWidth(header)))}╮`)}`;
+    const rawGroups = options.groups ?? (detail ? [detail.split("\n")] : []);
+    const groupBudget = options.maxCollapsedGroups ?? 8;
+    const groups = !options.expanded && rawGroups.length > groupBudget
+      ? [...rawGroups.slice(0, Math.max(0, groupBudget - 1)), [`… ${rawGroups.length - groupBudget + 1} more items · expand for details`]]
+      : rawGroups;
+    const body: string[] = [];
+    for (const [index, group] of groups.entries()) {
+      if (index > 0) body.push(theme.fg("dim", `├${"─".repeat(innerWidth)}┤`));
+      const wrapped = group.flatMap((line) => wrapTextWithAnsi(line || " ", contentWidth));
+      for (const line of wrapped) {
+        body.push(`${theme.fg("dim", "│")} ${fit(line, contentWidth)} ${theme.fg("dim", "│")}`);
+      }
     }
-    return [
-      truncateToWidth(header, safeWidth, "…"),
-      ...shown.map((line) => truncateToWidth(`${theme.fg("dim", "│")} ${line}`, safeWidth, "…")),
-      truncateToWidth(theme.fg("dim", "╰────────────"), safeWidth, ""),
-    ];
+    return [top, ...body, theme.fg("dim", `╰${"─".repeat(innerWidth)}╯`)];
   });
 }
 
@@ -357,7 +518,8 @@ export function renderTeammateListResult(
     summary: `${view} · ${count} item${count === 1 ? "" : "s"}`,
     status: rendererError || isErrorResult(result) ? "failure" : "success",
     expanded: options.expanded,
-    maxCollapsedLines: 12,
+    groups: teammateListGroups(result.details?.agents ?? [], resultText(result)),
+    maxCollapsedGroups: 7,
   }, theme);
 }
 
@@ -388,7 +550,8 @@ export function renderTeammateSendResult(
     summary: `@${String(args?.to ?? "?")} · ${mode} · ${failed ? "delivery failed" : "delivered"}`,
     status: failed ? "failure" : "success",
     expanded: options.expanded,
-    maxCollapsedLines: 2,
+    groups: resultText(result) ? [resultText(result).split("\n")] : [],
+    maxCollapsedGroups: 1,
   }, theme);
 }
 
@@ -433,14 +596,15 @@ export function renderObserveResult(
     summary: `${action} · ${count} target${count === 1 ? "" : "s"} · ${reason}`,
     status: failed ? "failure" : "success",
     expanded: options.expanded,
-    detail: details?.output?.join("\n"),
-    maxCollapsedLines: 8,
+    groups: observeGroups(details, details?.output?.join("\n") ?? resultText(result), options.expanded === true),
+    maxCollapsedGroups: 6,
   }, theme);
 }
 
 interface MonitorCardDetails {
   action?: string;
   status?: string;
+  reason?: string;
   windows?: unknown[];
 }
 
@@ -460,7 +624,8 @@ export function renderMonitorResult(
     summary: `${details?.action ?? "list"} · ${details?.status ?? (failed ? "failed" : "ok")} · ${count} window${count === 1 ? "" : "s"}`,
     status: failed ? "failure" : "success",
     expanded: options.expanded,
-    maxCollapsedLines: 10,
+    groups: monitorGroups(details, resultText(result), options.expanded === true),
+    maxCollapsedGroups: 6,
   }, theme);
 }
 
