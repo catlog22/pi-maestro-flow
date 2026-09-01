@@ -34,7 +34,7 @@ export type WindowRouteResolution = {
 	message: string;
 };
 
-function targetToken(label: string, ownerId: string): string {
+export function ownerDisplayToken(label: string, ownerId: string): string {
 	const normalized = label
 		.replace(/[\s#]+/g, "-")
 		.replace(/^-+|-+$/g, "") || "window";
@@ -52,7 +52,7 @@ function targetFromEndpoint(
 	const ownerTarget = `owner:${registryEndpoint.ownerId}`;
 	const displayLabel = current ? "control" : endpoint.label;
 	return {
-		token: targetToken(displayLabel, registryEndpoint.ownerId),
+		token: ownerDisplayToken(displayLabel, registryEndpoint.ownerId),
 		label: displayLabel,
 		description: [
 			current ? labels.current : labels.peer,

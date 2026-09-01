@@ -20,6 +20,8 @@ function stripAnsi(line: string): string {
 	return line.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
+const LOCAL_OWNER = "b".repeat(32);
+
 const row: AgentRow = {
 	correlationId: "c1",
 	agent: "general",
@@ -42,6 +44,20 @@ const endpoints: CockpitEndpoint[] = [{
 	contentRevision: "root-r1",
 	routeSelector: "root",
 	source: "registry",
+	registryEndpoint: {
+		version: 1,
+		id: "root",
+		kind: "root",
+		scope: "local",
+		transport: "local-root",
+		workspaceId: "workspace",
+		ownerId: LOCAL_OWNER,
+		ownerNonce: "c".repeat(32),
+		status: "running",
+		capabilities: [],
+		ordinal: 0,
+		contentRevision: "root-r1",
+	},
 }, {
 	id: "agent",
 	logicalKey: "agent:c1",
@@ -65,10 +81,10 @@ test("Agent Bar renders chips with the selected session highlighted and per-chip
 		mainRunning: true,
 		now: 10_000,
 	});
-	assert.match(stripAnsi(line), /@main/);
+	assert.match(stripAnsi(line), new RegExp(`@main·${LOCAL_OWNER.slice(0, 6)}`));
 	assert.match(stripAnsi(line), /@builder/);
 	// The selected (root) chip is highlighted with the ▸ marker.
-	assert.match(stripAnsi(line), /▸ @main/);
+	assert.match(stripAnsi(line), new RegExp(`▸ @main·${LOCAL_OWNER.slice(0, 6)}`));
 	// Unread stays as a per-chip badge, not a summary line.
 	assert.match(stripAnsi(line), /•1/);
 	// The removed right-edge summary (● @label · status · ctx N%) stays gone.

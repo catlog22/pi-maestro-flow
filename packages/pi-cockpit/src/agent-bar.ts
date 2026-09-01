@@ -15,6 +15,7 @@ import type { AgentRow } from "./types.ts";
 import { effectiveAgentStatus, isCliAgent, type AgentDisplayStatus } from "./agents-store.ts";
 import { visibleAgentRows } from "./stack-widget.ts";
 import { tuiT } from "./tui-i18n.ts";
+import { ownerDisplayToken } from "./window-autocomplete.ts";
 
 export const SESSION_BAR_WIDGET_KEY = "cockpit-session-bar";
 export const AGENT_BAR_WIDGET_KEY = SESSION_BAR_WIDGET_KEY;
@@ -277,9 +278,10 @@ export function renderAgentBar(
 		const outcome = status === "done" || status === "failed" || status === "terminated" || status === "sleeping"
 			? endpoint.agentRow?.lastOutcome
 			: undefined;
+		const ownerId = endpoint.kind === "root" ? endpoint.registryEndpoint?.ownerId : undefined;
 		return {
 			id: endpoint.id,
-			label: endpoint.label,
+			label: ownerId ? ownerDisplayToken(endpoint.label, ownerId) : endpoint.label,
 			ordinal: endpoint.ordinal,
 			unread: state.endpoint(endpoint.id).unread,
 			endpoint,

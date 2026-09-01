@@ -85,6 +85,7 @@ test("Cockpit session bar, command, and shortcut contracts stay stable", () => {
   assert.match(source, /const sessionBarHint = \(\) =>/);
   assert.match(source, /maestro\.snapshot\(\)\?\.artifact\?\.available[\s\S]*?tuiT\("artifact\.hint"\)[\s\S]*?tuiT\("session\.listHint"\)/);
   assert.doesNotMatch(source, /alt\+shift\+(?:r|l|up|down)/);
+  assert.match(source, /showOwner = mode === "window" \|\| endpoint\.kind === "root"[\s\S]*?ownerDisplayToken\(endpoint\.label, endpoint\.registryEndpoint\.ownerId\)/);
   assert.match(source, /data !== "\\x1b\[1;2A" && data !== "\\x1b\[1;2B"/);
 });
 
@@ -277,6 +278,7 @@ test("Cockpit Agent modal opens from the Alt+R session list and shares the live 
 	assert.match(source, /selectedIndex > 0[\s\S]*?allEntries\[selectedIndex\]![\s\S]*?endpoint\.id === selectedId \? tuiStatus\("selected"\)/);
 	assert.match(source, /if \(mode === "window"\) selectWindow\(endpoint\.id\)[\s\S]*?selectEndpoint\(endpoint\.id\)/);
 	assert.match(source, /previewAgent = endpoint\.kind === "agent"[\s\S]*?openAgentOverlay\(ctx\)/);
+	assert.match(source, /showOwner = mode === "window" \|\| endpoint\.kind === "root"/);
 	assert.match(source, /new AgentOverlay\(\{[\s\S]*?getAgents: \(\) => agents\.snapshot\(\)/);
 	assert.match(source, /ownedRender = \(\) => tui\.requestRender\(\)/);
 	assert.match(source, /activeAgentOverlayRender = ownedRender/);

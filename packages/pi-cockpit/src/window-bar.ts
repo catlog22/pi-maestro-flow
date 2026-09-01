@@ -6,6 +6,7 @@ import type { SessionUiState } from "./session-ui-state.ts";
 import { assignedAgentColor, renderSessionBarLine, type SessionBarHintValue } from "./agent-bar.ts";
 import { tuiT } from "./tui-i18n.ts";
 import { formatUnreadCount, renderSessionTabLine, type SessionTab } from "./session-tabs.ts";
+import { ownerDisplayToken } from "./window-autocomplete.ts";
 
 export interface WindowBarDeps {
 	getWindows: () => readonly CockpitEndpoint[];
@@ -36,7 +37,8 @@ function renderTab(tab: WindowTab, selected: boolean, theme: Theme): string {
 		? theme.fg("accent", "◆")
 		: theme.fg("muted", "○");
 	const unread = (tab.unread ?? 0) > 0 ? theme.fg("warning", ` ${formatUnreadCount(tab.unread ?? 0)}`) : "";
-	const label = `#${tab.label}`;
+	const ownerId = tab.endpoint.registryEndpoint?.ownerId;
+	const label = `#${ownerId ? ownerDisplayToken(tab.label, ownerId) : tab.label}`;
 	return selected
 		? `${marker} ${theme.fg(color, theme.bold(`▸ ${label}`))}${unread}`
 		: `${marker} ${theme.fg(color, label)}${unread}`;

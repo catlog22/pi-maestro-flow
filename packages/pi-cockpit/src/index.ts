@@ -59,6 +59,7 @@ import { renderWindowBar, windowSessionColor } from "./window-bar.ts";
 import {
 	buildWindowAutocompleteTargets,
 	createWindowAutocompleteProvider,
+	ownerDisplayToken,
 	resolveWindowRouteInput,
 	type WindowAutocompleteTarget,
 } from "./window-autocomplete.ts";
@@ -2314,7 +2315,11 @@ export default function (pi: ExtensionAPI): void {
 				: "";
 			const detail = [current, tuiStatus(endpoint.status), agentCount].filter(Boolean).join(" · ");
 			const sigil = mode === "window" ? "#" : "@";
-			return `${sigil}${endpoint.label}${detail ? ` · ${detail}` : ""}`;
+			const showOwner = mode === "window" || endpoint.kind === "root";
+			const label = showOwner && endpoint.registryEndpoint
+				? ownerDisplayToken(endpoint.label, endpoint.registryEndpoint.ownerId)
+				: endpoint.label;
+			return `${sigil}${label}${detail ? ` · ${detail}` : ""}`;
 		});
 		let previewAgent = false;
 		enterCapturingOverlay();

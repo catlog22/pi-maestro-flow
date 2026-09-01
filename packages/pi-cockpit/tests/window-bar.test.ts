@@ -11,6 +11,7 @@ import { renderWindowBar, windowSessionColor } from "../src/window-bar.ts";
 import {
 	buildWindowAutocompleteTargets,
 	createWindowAutocompleteProvider,
+	ownerDisplayToken,
 	resolveWindowRouteInput,
 } from "../src/window-autocomplete.ts";
 import { renderWindowThreadView } from "../src/window-thread-view.ts";
@@ -237,6 +238,11 @@ test("typing # offers current and peer windows and resolves a one-shot route", a
 		`control·${LOCAL_OWNER.slice(0, 6)}`,
 		`build·${REMOTE_OWNER.slice(0, 6)}`,
 	]);
+	assert.equal(ownerDisplayToken("build", REMOTE_OWNER), `build·${REMOTE_OWNER.slice(0, 6)}`);
+	assert.equal(
+		ownerDisplayToken(`build·${REMOTE_OWNER.slice(0, 6)}`, REMOTE_OWNER),
+		`build·${REMOTE_OWNER.slice(0, 6)}`,
+	);
 	assert.match(targets[0]?.description ?? "", new RegExp(`owner:${LOCAL_OWNER}`));
 	assert.match(targets[0]?.description ?? "", new RegExp(`incarnation:${LOCAL_NONCE}`));
 	assert.match(targets[1]?.description ?? "", new RegExp(`owner:${REMOTE_OWNER}`));
@@ -295,7 +301,7 @@ test("Window Bar renders explicit control and peer windows and fits every width"
 	}
 	const line = renderWindowBar(value.windows, state, 80, theme as Theme)[0]!;
 	assert.match(line, new RegExp(`#control·${LOCAL_OWNER.slice(0, 6)}`));
-	assert.match(line, /#build/);
+	assert.match(line, new RegExp(`#build·${REMOTE_OWNER.slice(0, 6)}`));
 	assert.doesNotMatch(line, /■|mon 1/);
 	assert.equal(windowSessionColor(controlWindow(value)), "accent");
 	assert.equal(windowSessionColor(remoteWindow(value)), assignedAgentColor(REMOTE_OWNER));
@@ -315,7 +321,7 @@ test("Window Bar keeps a selected sleeping peer in the accent color", () => {
 		bold: (text) => text,
 	};
 	const rendered = renderWindowBar(sleeping, state, 120, taggedTheme as Theme)[0]!;
-	assert.match(rendered, /<accent>▸ #build<\/accent>/);
+	assert.match(rendered, new RegExp(`<accent>▸ #build·${REMOTE_OWNER.slice(0, 6)}<\\/accent>`));
 	assert.doesNotMatch(rendered, /■ #build/);
 });
 
