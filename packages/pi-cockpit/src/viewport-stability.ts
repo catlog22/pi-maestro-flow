@@ -7,6 +7,10 @@ type ApplyLineResets = (lines: string[]) => string[];
 
 interface ViewportTuiInternals {
 	applyLineResets?: ApplyLineResets;
+	previousLines?: string[];
+	previousViewportTop?: number;
+	previousHeight?: number;
+	terminal?: { rows: number };
 }
 
 interface ViewportStabilityMarker {
@@ -38,6 +42,22 @@ function once(action: () => void): () => void {
 
 function markerOf(fn: ApplyLineResets): ViewportStabilityMarker | undefined {
 	return (fn as ApplyLineResets & Record<symbol, ViewportStabilityMarker | undefined>)[VIEWPORT_STABILITY_MARKER];
+}
+
+const ANSI_ESCAPE = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))/g;
+const TRAILING_DURATION = /(\s(?:·\s*)?)(?:\d+(?:\.\d+)?s|\d+m\d{1,2}s)$/;
+
+function differsOnlyByTrailingDuration(previous: string, next: string): boolean {
+	const previousPlain = previous.replace(ANSI_ESCAPE, "");
+	const nextPlain = next.replace(ANSI_ESCAPE, "");
+	if (previousPlain === nextPlain) return false;
+	if (!TRAILING_DURATION.test(previousPlain) || !TRAILING_DURATION.test(nextPlain)) return false;
+	return previousPlain.replace(TRAILING_DURATION, "$1<duration>")
+		=== nextPlain.replace(TRAILING_DURATION, "$1<duration>");
+}
+
+function isKittyImageLine(line: string | undefined): boolean {
+	return typeof line === "string" && line.includes("\x1b_G");
 }
 
 function prototypeMethodSlot(target: object): ApplyLineResetsSlot | undefined {
@@ -90,9 +110,10 @@ function resolveApplyLineResetsSlot(internals: ViewportTuiInternals): ApplyLineR
 }
 
 /**
- * Installs a detachable compatibility hook without altering pi-tui's diff
- * baseline. Hidden lines cannot be rewritten in terminal scrollback, so
- * claiming they were rendered leaves stale frames such as live tool timers.
+ * Prevents timer-only churn above the visible viewport from forcing a full
+ * redraw. The next frame keeps the terminal's actual hidden text, so the diff
+ * baseline remains truthful; status, content, layout and image changes retain
+ * pi-tui's native redraw path.
  */
 export function attachViewportStability(tui: TUI): ViewportStabilityPatch {
 	try {
@@ -106,7 +127,31 @@ export function attachViewportStability(tui: TUI): ViewportStabilityPatch {
 		let dispatches = 0;
 		const wrapped: ApplyLineResets = function (this: ViewportTuiInternals, lines: string[]): string[] {
 			dispatches += 1;
-			return original.call(this, lines);
+			const nextLines = original.call(this, lines);
+			const previousLines = this.previousLines;
+			const viewportTop = this.previousViewportTop;
+			if (
+				Array.isArray(previousLines)
+					&& previousLines.length === nextLines.length
+					&& typeof viewportTop === "number"
+					&& Number.isFinite(viewportTop)
+					&& viewportTop > 0
+					&& this.previousHeight === this.terminal?.rows
+			) {
+				const hiddenEnd = Math.min(previousLines.length, Math.trunc(viewportTop));
+				const hiddenHasKittyImage = previousLines.slice(0, hiddenEnd).some(isKittyImageLine)
+					|| nextLines.slice(0, hiddenEnd).some(isKittyImageLine);
+				if (!hiddenHasKittyImage) {
+					for (let index = 0; index < hiddenEnd; index += 1) {
+						const previous = previousLines[index];
+						const next = nextLines[index];
+						if (previous !== undefined && next !== undefined && differsOnlyByTrailingDuration(previous, next)) {
+							nextLines[index] = previous;
+						}
+					}
+				}
+			}
+			return nextLines;
 		};
 		let references = 1;
 		const release = (): void => {

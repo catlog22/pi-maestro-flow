@@ -57,8 +57,8 @@ function renderHarness(initialLines: string[]) {
 	};
 }
 
-test("equal-height hidden timer changes use the host redraw instead of leaving stale scrollback", () => {
-	const h = renderHarness(["teammate · 11s", "one", "two", "three", "four"]);
+test("equal-height hidden timer changes stay frozen without adding redraw frames", () => {
+	const h = renderHarness(["\x1b[3mteammate · 11s\x1b[23m", "one", "two", "three", "four"]);
 	const patch = attachViewportStability(h.tui);
 	assert.equal(patch.active, true);
 
@@ -67,26 +67,41 @@ test("equal-height hidden timer changes use the host redraw instead of leaving s
 	assert.equal(h.internals.previousViewportTop, 2);
 	h.terminal.writes.length = 0;
 
-	h.setLines(["teammate · 38s", "one", "two", "three", "four"]);
+	h.setLines(["\x1b[3mteammate · 38s\x1b[23m", "one", "two", "three", "four"]);
 	h.render();
-	assert.equal(h.tui.fullRedraws, 2, "hidden text changes must retain pi-tui's fullRender(true) branch");
-	assert.equal(h.terminal.writes.some((value) => value.includes("\x1b[3J")), true);
-	assert.equal(h.terminal.writes.some((value) => value.includes("teammate · 38s")), true);
-	assert.ok(h.internals.previousLines[0]?.startsWith("teammate · 38s\x1b[0m"));
+	assert.equal(h.tui.fullRedraws, 1, "timer-only churn above the viewport must not clear and replay scrollback");
+	assert.equal(h.terminal.writes.some((value) => value.includes("\x1b[3J")), false);
+	assert.equal(h.terminal.writes.some((value) => value.includes("teammate · 38s")), false);
+	assert.ok(h.internals.previousLines[0]?.includes("teammate · 11s"), "the diff baseline must match terminal scrollback");
 });
 
-test("a hidden change keeps visible updates in the same native full redraw", () => {
-	const h = renderHarness(["zero", "one", "two", "three", "four"]);
+test("a hidden timer change does not block a visible differential update", () => {
+	const h = renderHarness(["teammate · 11s", "one", "two", "three", "four"]);
 	attachViewportStability(h.tui);
 	h.render();
 	h.terminal.writes.length = 0;
 
-	h.setLines(["ZERO", "one", "two", "three", "FOUR"]);
+	h.setLines(["teammate · 38s", "one", "two", "three", "FOUR"]);
+	h.render();
+	assert.equal(h.tui.fullRedraws, 1);
+	assert.equal(h.terminal.writes.some((value) => value.includes("\x1b[3J")), false);
+	assert.equal(h.terminal.writes.some((value) => value.includes("teammate · 38s")), false);
+	assert.equal(h.terminal.writes.some((value) => value.includes("FOUR")), true);
+	assert.ok(h.internals.previousLines[0]?.startsWith("teammate · 11s\x1b[0m"));
+	assert.ok(h.internals.previousLines[4]?.startsWith("FOUR\x1b[0m"));
+});
+
+test("a hidden non-timer change keeps the native full redraw", () => {
+	const h = renderHarness(["teammate · running", "one", "two", "three", "four"]);
+	attachViewportStability(h.tui);
+	h.render();
+	h.terminal.writes.length = 0;
+
+	h.setLines(["teammate · completed", "one", "two", "three", "four"]);
 	h.render();
 	assert.equal(h.tui.fullRedraws, 2);
-	assert.equal(h.terminal.writes.length, 1);
-	assert.equal(h.terminal.writes[0].includes("\x1b[3J"), true);
-	assert.match(h.terminal.writes[0], /FOUR/);
+	assert.equal(h.terminal.writes.some((value) => value.includes("\x1b[3J")), true);
+	assert.equal(h.terminal.writes.some((value) => value.includes("teammate · completed")), true);
 });
 
 test("visible Kitty image lines keep hidden changes in the native redraw path", () => {
