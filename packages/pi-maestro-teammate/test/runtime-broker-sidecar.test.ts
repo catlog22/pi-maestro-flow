@@ -111,6 +111,32 @@ async function stopDetachedBroker(stateDirectory: string): Promise<void> {
   assert.equal(runtimeBrokerProcessExists(record.pid), false, "detached broker must terminate during test cleanup");
 }
 
+test("runtime broker Windows tree signalling is bounded and rejects unconfirmed null status", () => {
+  const source = fs.readFileSync(new URL("../src/runtime-broker/client.ts", import.meta.url), "utf8");
+  const start = source.indexOf("function signalBootstrapProcessTree");
+  const end = source.indexOf("function bootstrapProcessTreeExists", start);
+  assert.ok(start >= 0 && end > start);
+  const implementation = source.slice(start, end);
+  assert.match(implementation, /spawnSync\(executable, \["\/PID", String\(pid\), "\/T"/);
+  assert.match(implementation, /timeout: BROKER_WINDOWS_TASKKILL_TIMEOUT_MS/);
+  assert.match(implementation, /if \(result\.status === null\)/);
+  assert.match(implementation, /signal=\$\{result\.signal \?\? "none"\}/);
+  assert.match(implementation, /error=\$\{errorCode\}/);
+  assert.match(implementation, /result\.status !== 0 && result\.status !== 128/);
+  assert.match(implementation, /return result\.status === 0/);
+  assert.doesNotMatch(implementation, /result\.status !== null/);
+
+  const reclamationStart = source.indexOf("async function reclaimBootstrapChildOnce");
+  const reclamationEnd = source.indexOf("async function waitForPromiseUntil", reclamationStart);
+  assert.ok(reclamationStart >= 0 && reclamationEnd > reclamationStart);
+  const reclamation = source.slice(reclamationStart, reclamationEnd);
+  assert.match(reclamation, /windowsTreeCleanupConfirmed = signalBootstrapProcessTree/);
+  assert.match(reclamation, /windowsTreeCleanupConfirmed \|\| bootstrap\.daemonIsLeafProcess/);
+  assert.match(reclamation, /was not confirmed reclaimed after forced termination/);
+  assert.match(source, /daemonIsLeafProcess = options\.daemonIsLeafProcess \?\? true/);
+  assert.match(source, /daemonIsLeafProcess: options\.daemonIsLeafProcess/);
+});
+
 test("runtime broker state paths are private and Windows pipe names are stable and state-scoped", () => {
   const root = makeStateDirectory("runtime-broker-state-");
   try {

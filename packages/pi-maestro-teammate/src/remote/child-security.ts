@@ -11,6 +11,7 @@ export {
 } from "pi-maestro-backends/child-env";
 
 const REDACTION = "[REDACTED]";
+const WINDOWS_TASKKILL_TIMEOUT_MS = 5_000;
 
 export function utf8ByteLength(value: string): number {
   return Buffer.byteLength(value, "utf8");
@@ -76,7 +77,11 @@ export interface ProcessTreeDependencies {
   platform?: NodeJS.Platform;
   environment?: NodeJS.ProcessEnv;
   kill?: (pid: number, signal: NodeJS.Signals) => void;
-  runTaskkill?: (command: WindowsTaskkillCommand) => { status: number | null; error?: Error };
+  runTaskkill?: (command: WindowsTaskkillCommand) => {
+    status: number | null;
+    error?: Error;
+    signal?: NodeJS.Signals | null;
+  };
 }
 
 export function captureProcessTree(pid: number | undefined): ProcessTreeIdentity | undefined {
@@ -102,15 +107,34 @@ function isMissingProcess(error: unknown): boolean {
   return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ESRCH";
 }
 
-function defaultTaskkill(command: WindowsTaskkillCommand): { status: number | null; error?: Error } {
+function defaultTaskkill(command: WindowsTaskkillCommand): { status: number | null; error?: Error; signal?: NodeJS.Signals | null } {
   const result = spawnSync(command.executable, command.args, {
     windowsHide: true,
     stdio: "ignore",
+    timeout: WINDOWS_TASKKILL_TIMEOUT_MS,
   });
   return {
     status: result.status,
+    signal: result.signal,
     ...(result.error ? { error: result.error } : {}),
   };
+}
+
+function taskkillUnconfirmedError(
+  result: { status: number | null; error?: Error; signal?: NodeJS.Signals | null },
+): Error {
+  const errorCode = result.error && "code" in result.error
+    ? String((result.error as NodeJS.ErrnoException).code)
+    : undefined;
+  const details = [
+    "status=null",
+    `signal=${result.signal ?? "none"}`,
+    ...(errorCode ? [`error=${errorCode}`] : []),
+  ].join(", ");
+  return new Error(
+    `taskkill process-tree result was unconfirmed (${details})`,
+    result.error ? { cause: result.error } : undefined,
+  );
 }
 
 /** Signal a captured process tree without consulting the leader's current state. */
@@ -127,9 +151,11 @@ export function signalProcessTree(
       dependencies.environment,
     );
     const result = (dependencies.runTaskkill ?? defaultTaskkill)(command);
+    if (result.status === null) throw taskkillUnconfirmedError(result);
     if (result.error && !isMissingProcess(result.error)) throw result.error;
-    // taskkill uses 128 when the process tree is already absent.
-    if (result.status !== null && result.status !== 0 && result.status !== 128) {
+    // taskkill uses 128 when the leader/tree is already absent. This is an
+    // absence signal, not proof that an earlier sweep reclaimed descendants.
+    if (result.status !== 0 && result.status !== 128) {
       throw new Error(`taskkill failed with status ${result.status}`);
     }
     return;

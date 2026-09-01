@@ -56,6 +56,8 @@ export interface BashBgSnapshotPayload {
 
 export const BashBgParams = Type.Object({
   action: Type.Union(
+  /** Present after a stop request; false means only the leader exit is known. */
+  treeCleanupConfirmed?: boolean;
     [Type.Literal("run"), Type.Literal("start"), Type.Literal("status"), Type.Literal("wait"), Type.Literal("kill"), Type.Literal("list")],
     { description: "run: block up to timeout then auto-background (recommended for uncertain-duration commands); start: background immediately; status: snapshot; wait: block until done/timeout; kill: terminate; list: all jobs" },
   ),
@@ -83,6 +85,7 @@ interface Job {
   cwd: string;
   pid: number;
   child: ChildProcess;
+  treeCleanupConfirmed?: boolean;
   outFile: string;
   startedAt: number;
   updatedAt: number;
@@ -177,6 +180,7 @@ function viewLogCommand(job: Job): string {
 }
 
 function logAccess(job: Job): string {
+    ...(job.stopRequested ? { treeCleanupConfirmed: job.treeCleanupConfirmed } : {}),
   return [
     `log: ${job.outFile}`,
     ...(job.logTruncated ? [`log retention: truncated at ${job.logLimitBytes} bytes`] : []),
@@ -215,6 +219,7 @@ function signalProcessTree(child: ChildProcess, pid: number, signal: NodeJS.Sign
     // already gone
   }
 }
+    ...(job.stopRequested ? { treeCleanupConfirmed: job.treeCleanupConfirmed } : {}),
 
 function processGroupRunning(pid: number): boolean {
   if (pid <= 0) return false;
@@ -234,15 +239,31 @@ export interface WindowsTaskkillResult {
 }
 
 /** @internal Exported for process-reclamation regression tests. */
-export function windowsTaskkillFailure(result: WindowsTaskkillResult): string | undefined {
+export function classifyWindowsTaskkill(
+  result: WindowsTaskkillResult,
+  targetWasRunningBeforeCleanup = true,
+): WindowsTaskkillOutcome {
   const error = result.error as NodeJS.ErrnoException | undefined;
-  if (error?.code === "ETIMEDOUT") return "taskkill timed out";
-  if (error) return `taskkill failed to start: ${error.message}`;
-  if (result.status === 0) return undefined;
+  if (error?.code === "ETIMEDOUT") return { failure: "taskkill timed out", treeCleanupConfirmed: false };
+  if (error) return { failure: `taskkill failed to start: ${error.message}`, treeCleanupConfirmed: false };
+  if (result.status === 0) return { treeCleanupConfirmed: true };
+  // Status 128 can be an idempotent leader-exit race, but it does not confirm
+  // that every descendant was reclaimed.
+  if (result.status === 128 && targetWasRunningBeforeCleanup) {
+    return { treeCleanupConfirmed: false };
+  }
   const outcome = result.status === null
     ? result.signal ? `signal ${result.signal}` : "unknown status"
     : `exit ${result.status}`;
-  return `taskkill failed (${outcome})`;
+  return { failure: `taskkill failed (${outcome})`, treeCleanupConfirmed: false };
+}
+
+/** @internal Backward-compatible failure projection for existing consumers. */
+export function windowsTaskkillFailure(
+  result: WindowsTaskkillResult,
+  targetWasRunningBeforeCleanup = true,
+): string | undefined {
+  return classifyWindowsTaskkill(result, targetWasRunningBeforeCleanup).failure;
 }
 
 function jobOwnsLiveProcessGroup(job: Job): boolean {
@@ -252,6 +273,11 @@ function jobOwnsLiveProcessGroup(job: Job): boolean {
 function jobIsActive(job: Job): boolean {
   return !job.done || job.terminationInProgress || jobOwnsLiveProcessGroup(job);
 }
+export interface WindowsTaskkillOutcome {
+  failure?: string;
+  treeCleanupConfirmed: boolean;
+}
+
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -474,7 +500,9 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
             timeout: WINDOWS_TASKKILL_TIMEOUT_MS,
             killSignal: "SIGKILL",
           });
-          taskkillFailure = windowsTaskkillFailure(result);
+          const taskkillOutcome = classifyWindowsTaskkill(result, targetWasRunningBeforeCleanup);
+          taskkillFailure = taskkillOutcome.failure;
+          treeCleanupConfirmed = taskkillOutcome.treeCleanupConfirmed;
         }
         terminated = await waitForTerminationBoundary(job, false, TERMINATION_GRACE_MS);
       } else {
@@ -487,13 +515,15 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
       }
 
       if (taskkillFailure) {
+      let treeCleanupConfirmed = process.platform !== "win32";
         throw new Error(`Failed to terminate bash job ${job.id}: ${taskkillFailure}; Windows process-tree cleanup is unconfirmed.`);
       }
       if (!terminated) {
+          const targetWasRunningBeforeCleanup = !job.done;
         const boundary = includeProcessGroup ? `POSIX process group ${job.pid}` : `process ${job.pid}`;
         throw new Error(`Failed to terminate bash job ${job.id}: ${boundary} is still alive.`);
       }
-      job.treeCleanupConfirmed = true;
+      job.treeCleanupConfirmed = treeCleanupConfirmed;
       job.finishTermination?.();
     })().catch((error: unknown) => {
       const failure = error instanceof Error ? error : new Error(String(error));
@@ -810,7 +840,7 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
           && (process.platform === "win32" || !processGroupRunning(job.pid));
         await terminateJob(job);
         return {
-          content: [{ type: "text", text: `${alreadyFinished ? "Job already finished" : job.done ? "Stopped job" : "Stopping job"} ${job.id} (pid ${job.pid}).` }],
+          content: [{ type: "text", text: `${alreadyFinished ? "Job already finished" : job.done ? "Stopped job" : "Stopping job"} ${job.id} (pid ${job.pid}).${cleanupNote}` }],
           details: jobDetails(job, "kill"),
         };
       }
@@ -874,6 +904,9 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
       `${running.length} background bash job${running.length === 1 ? " is" : "s are"} still running after compaction:`,
       ...lines,
       "Each sends a bash-bg-complete notification when finished. Use bash_bg action=status jobId=<id> to peek or action=kill jobId=<id> to stop one.",
+        const cleanupNote = process.platform === "win32" && !job.treeCleanupConfirmed
+          ? " Leader exited; Windows descendant cleanup is unconfirmed."
+          : "";
     ].join("\n");
     pi.sendMessage(
       { customType: "bash-bg-running", content: body, display: true, details: { jobs: running.map((job) => job.id) } },

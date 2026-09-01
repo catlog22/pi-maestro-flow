@@ -67,6 +67,7 @@ interface BrokerBootstrap {
   settled: boolean;
   failed: boolean;
   reclaimed: boolean;
+  daemonIsLeafProcess: boolean;
   reclamation?: Promise<void>;
 }
 
@@ -93,6 +94,7 @@ interface ValidatedRuntimeBrokerClientOptions {
   maxPendingRequests: number;
   daemonExecutable: string;
   daemonBinPath: string;
+  daemonIsLeafProcess: boolean;
 }
 
 export interface RuntimeBrokerClientOptions {
@@ -105,6 +107,8 @@ export interface RuntimeBrokerClientOptions {
   daemonExecutable?: string;
   /** Override used by embedders and failure-injection tests; defaults to the packaged broker bin. */
   daemonBinPath?: string;
+  /** Broker daemons are leaf processes by contract; set false for custom daemons that spawn descendants. */
+  daemonIsLeafProcess?: boolean;
 }
 
 class RuntimeBrokerClientTransportError extends Error {
@@ -561,6 +565,7 @@ function validateClientOptions(options: RuntimeBrokerClientOptions): ValidatedRu
   const maxPendingRequests = options.maxPendingRequests ?? 256;
   const daemonExecutable = options.daemonExecutable ?? process.execPath;
   const daemonBinPath = options.daemonBinPath ?? BROKER_BIN_PATH;
+  const daemonIsLeafProcess = options.daemonIsLeafProcess ?? true;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new Error("Runtime broker timeout must be positive");
   if (!Number.isSafeInteger(maxLineBytes) || maxLineBytes < 1024) {
     throw new Error("Runtime broker line limit must be at least 1024 bytes");
@@ -574,7 +579,17 @@ function validateClientOptions(options: RuntimeBrokerClientOptions): ValidatedRu
   if (!daemonBinPath || daemonBinPath.includes("\0")) {
     throw new Error("Runtime broker daemon bin must be a non-empty path");
   }
-  return { timeoutMs, maxLineBytes, maxPendingRequests, daemonExecutable, daemonBinPath };
+  if (typeof daemonIsLeafProcess !== "boolean") {
+    throw new Error("Runtime broker daemonIsLeafProcess must be boolean");
+  }
+  return {
+    timeoutMs,
+    maxLineBytes,
+    maxPendingRequests,
+    daemonExecutable,
+    daemonBinPath,
+    daemonIsLeafProcess,
+  };
 }
 
 class ClientLineDecoder {
@@ -870,6 +885,7 @@ function createBootstrap(
     settled: false,
     failed: false,
     reclaimed: false,
+    daemonIsLeafProcess: options.daemonIsLeafProcess,
   };
   slot.current = bootstrap;
   bootstrap.readiness = launchAndVerifyBootstrap(slot, bootstrap, options);
@@ -1055,7 +1071,8 @@ async function reclaimBootstrapChildOnce(bootstrap: BrokerBootstrap): Promise<vo
     bootstrap.reclaimed = true;
     return;
   }
-  if (await waitForBootstrapReclamation(bootstrap, 0)) {
+  let windowsTreeCleanupConfirmed = process.platform !== "win32";
+  if (await waitForBootstrapReclamation(bootstrap, 0, windowsTreeCleanupConfirmed)) {
     bootstrap.child = undefined;
     bootstrap.reclaimed = true;
     return;
@@ -1063,27 +1080,37 @@ async function reclaimBootstrapChildOnce(bootstrap: BrokerBootstrap): Promise<vo
 
   const signalErrors: unknown[] = [];
   try {
-    signalBootstrapProcessTree(childPid, false);
+    windowsTreeCleanupConfirmed = signalBootstrapProcessTree(childPid, false)
+      || windowsTreeCleanupConfirmed;
   } catch (error) {
     signalErrors.push(error);
   }
-  if (await waitForBootstrapReclamation(bootstrap, BROKER_CHILD_TERMINATION_GRACE_MS)) {
+  if (await waitForBootstrapReclamation(
+    bootstrap,
+    BROKER_CHILD_TERMINATION_GRACE_MS,
+    windowsTreeCleanupConfirmed,
+  )) {
     bootstrap.child = undefined;
     bootstrap.reclaimed = true;
     return;
   }
   try {
-    signalBootstrapProcessTree(childPid, true);
+    windowsTreeCleanupConfirmed = signalBootstrapProcessTree(childPid, true)
+      || windowsTreeCleanupConfirmed;
   } catch (error) {
     signalErrors.push(error);
   }
-  if (await waitForBootstrapReclamation(bootstrap, BROKER_CHILD_FORCE_WAIT_MS)) {
+  if (await waitForBootstrapReclamation(
+    bootstrap,
+    BROKER_CHILD_FORCE_WAIT_MS,
+    windowsTreeCleanupConfirmed,
+  )) {
     bootstrap.child = undefined;
     bootstrap.reclaimed = true;
     return;
   }
   throw new RuntimeBrokerBootstrapError(
-    `Runtime broker daemon process tree ${childPid} did not exit after forced termination`,
+    `Runtime broker daemon process tree ${childPid} was not confirmed reclaimed after forced termination`,
     signalErrors.length > 0
       ? { cause: new AggregateError(signalErrors, "Runtime broker process-tree signalling failed") }
       : undefined,
@@ -1093,6 +1120,7 @@ async function reclaimBootstrapChildOnce(bootstrap: BrokerBootstrap): Promise<vo
 async function waitForBootstrapReclamation(
   bootstrap: BrokerBootstrap,
   timeoutMs: number,
+  windowsTreeCleanupConfirmed: boolean,
 ): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   if (!bootstrap.childExited) {
@@ -1101,7 +1129,10 @@ async function waitForBootstrapReclamation(
     const exited = await waitForPromiseUntil(childExit, deadline);
     if (!exited) return false;
   }
-  if (process.platform === "win32" || bootstrap.childPid === undefined) return true;
+  if (bootstrap.childPid === undefined) return true;
+  if (process.platform === "win32") {
+    return windowsTreeCleanupConfirmed || bootstrap.daemonIsLeafProcess;
+  }
   while (bootstrapProcessTreeExists(bootstrap.childPid)) {
     if (Date.now() >= deadline) return false;
     await sleep(Math.min(BROKER_CHILD_RECLAIM_POLL_MS, Math.max(1, deadline - Date.now())));
@@ -1125,7 +1156,7 @@ async function waitForPromiseUntil(promise: Promise<void>, deadline: number): Pr
   });
 }
 
-function signalBootstrapProcessTree(pid: number, force: boolean): void {
+function signalBootstrapProcessTree(pid: number, force: boolean): boolean {
   if (process.platform === "win32") {
     const executable = process.env.SystemRoot
       ? path.win32.join(process.env.SystemRoot, "System32", "taskkill.exe")
@@ -1135,11 +1166,27 @@ function signalBootstrapProcessTree(pid: number, force: boolean): void {
       stdio: "ignore",
       timeout: BROKER_WINDOWS_TASKKILL_TIMEOUT_MS,
     });
+    if (result.status === null) {
+      const errorCode = result.error && "code" in result.error
+        ? String((result.error as NodeJS.ErrnoException).code)
+        : undefined;
+      const details = [
+        "status=null",
+        `signal=${result.signal ?? "none"}`,
+        ...(errorCode ? [`error=${errorCode}`] : []),
+      ].join(", ");
+      throw new Error(
+        `Runtime broker taskkill result was unconfirmed (${details})`,
+        result.error ? { cause: result.error } : undefined,
+      );
+    }
     if (result.error && (result.error as NodeJS.ErrnoException).code !== "ESRCH") throw result.error;
-    if (result.status !== null && result.status !== 0 && result.status !== 128) {
+    // Status 128 means the leader/tree is absent, not that an earlier sweep
+    // proved every detached descendant was reclaimed.
+    if (result.status !== 0 && result.status !== 128) {
       throw new Error(`taskkill failed with status ${result.status}`);
     }
-    return;
+    return result.status === 0;
   }
   const signal: NodeJS.Signals = force ? "SIGKILL" : "SIGTERM";
   try {
@@ -1152,6 +1199,7 @@ function signalBootstrapProcessTree(pid: number, force: boolean): void {
       if ((directError as NodeJS.ErrnoException).code !== "ESRCH") throw directError;
     }
   }
+  return true;
 }
 
 function bootstrapProcessTreeExists(pid: number): boolean {

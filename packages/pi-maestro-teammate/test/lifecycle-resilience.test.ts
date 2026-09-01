@@ -115,9 +115,9 @@ test("child close cleanup cancels the pending grace timer", async () => {
 
 test("Windows exited roots avoid redundant forced taskkill when graceful tree confirmation stalls", async () => {
   const child = new FakeChild();
-  const calls: Array<{ command: string; args: string[]; shell: boolean | undefined }> = [];
-  const spawnProcess = ((command: string, args: string[], options: { shell?: boolean }) => {
-    calls.push({ command, args, shell: options.shell });
+  const calls: Array<{ command: string; args: string[]; shell: boolean | undefined; timeout: number | undefined }> = [];
+  const spawnProcess = ((command: string, args: string[], options: { shell?: boolean; timeout?: number }) => {
+    calls.push({ command, args, shell: options.shell, timeout: options.timeout });
     return new EventEmitter();
   }) as unknown as typeof import("node:child_process").spawn;
   const termination = createChildTerminationController(child as unknown as ChildProcess, {
@@ -132,6 +132,7 @@ test("Windows exited roots avoid redundant forced taskkill when graceful tree co
     command: "taskkill",
     args: ["/PID", "4321", "/T"],
     shell: false,
+    timeout: 10,
   }]);
   child.signalCode = "SIGTERM";
   child.emit("exit", null, "SIGTERM");
@@ -146,6 +147,36 @@ test("Windows exited roots avoid redundant forced taskkill when graceful tree co
     forced: false,
     treeCleanupConfirmed: false,
   });
+  assert.deepEqual(child.signals, []);
+  termination.cleanup();
+});
+
+test("Windows taskkill status 128 only confirms leader absence, not descendant reclamation", async () => {
+  const child = new FakeChild();
+  const killers: EventEmitter[] = [];
+  const spawnProcess = (() => {
+    const killer = new EventEmitter();
+    killers.push(killer);
+    return killer;
+  }) as unknown as typeof import("node:child_process").spawn;
+  const termination = createChildTerminationController(child as unknown as ChildProcess, {
+    graceMs: 20,
+    reclamationTimeoutMs: 20,
+    platform: "win32",
+    spawnProcess,
+  });
+
+  termination.terminate();
+  child.signalCode = "SIGTERM";
+  child.emit("exit", null, "SIGTERM");
+  killers[0].emit("close", 128);
+
+  assert.deepEqual(await termination.outcome, {
+    status: "reclaimed",
+    forced: false,
+    treeCleanupConfirmed: false,
+  });
+  assert.equal(killers.length, 1);
   assert.deepEqual(child.signals, []);
   termination.cleanup();
 });

@@ -23,6 +23,7 @@ export interface ProcessTreeDependencies {
     runTaskkill?: (command: WindowsTaskkillCommand) => {
         status: number | null;
         error?: Error;
+        signal?: NodeJS.Signals | null;
     };
 }
 export declare function captureProcessTree(pid: number | undefined): ProcessTreeIdentity | undefined;

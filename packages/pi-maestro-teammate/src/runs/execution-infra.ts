@@ -1679,10 +1679,13 @@ export interface ProcessTreeByPidOptions {
   spawnProcess?: typeof crossSpawn;
   killProcess?: typeof process.kill;
   isProcessAlive?: (pid: number) => boolean;
+  taskkillTimeoutMs?: number;
   graceMs?: number;
   pollMs?: number;
   sleep?: (ms: number) => Promise<void>;
 }
+
+const DEFAULT_WINDOWS_TASKKILL_TIMEOUT_MS = 5_000;
 
 function processIsAlive(pid: number): boolean {
   try {
@@ -1702,18 +1705,48 @@ export async function terminateProcessTreeByPid(
   const platform = options.platform ?? process.platform;
   if (platform === "win32") {
     const spawnProcess = options.spawnProcess ?? crossSpawn;
+    const taskkillTimeoutMs = options.taskkillTimeoutMs ?? DEFAULT_WINDOWS_TASKKILL_TIMEOUT_MS;
+    if (!Number.isSafeInteger(taskkillTimeoutMs) || taskkillTimeoutMs <= 0) {
+      throw new Error(`Invalid taskkill timeout: ${taskkillTimeoutMs}`);
+    }
     return new Promise<"stopped" | "already-exited">((resolve, reject) => {
       const killer = spawnProcess(
         "taskkill",
         ["/PID", String(pid), "/T", "/F"],
-        { windowsHide: true, stdio: "ignore", shell: false },
+        {
+          windowsHide: true,
+          stdio: "ignore",
+          shell: false,
+          timeout: taskkillTimeoutMs,
+          killSignal: "SIGKILL",
+        },
       );
-      killer.once("error", reject);
-      killer.once("close", (code) => {
+      let settled = false;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const finish = (complete: () => void): void => {
+        if (settled) return;
+        settled = true;
+        if (timeout) clearTimeout(timeout);
+        killer.removeListener("error", onError);
+        killer.removeListener("close", onClose);
+        complete();
+      };
+      const onError = (error: Error): void => finish(() => reject(error));
+      const onClose = (code: number | null): void => finish(() => {
         if (code === 0) resolve("stopped");
         else if (code === 128) resolve("already-exited");
         else reject(new Error(`taskkill exited with code ${code ?? "unknown"}`));
       });
+      killer.once("error", onError);
+      killer.once("close", onClose);
+      timeout = setTimeout(() => {
+        try {
+          killer.kill?.("SIGKILL");
+        } catch {
+          // The taskkill subprocess may already be exiting.
+        }
+        finish(() => reject(new Error(`taskkill timed out after ${taskkillTimeoutMs}ms`)));
+      }, taskkillTimeoutMs);
     });
   }
 
@@ -2732,7 +2765,9 @@ export function createChildTerminationController(
   };
   const isAlive = (): boolean =>
     !exitObserved && child.exitCode === null && child.signalCode === null;
-  const markReclaimed = (treeCleanupConfirmed = true): void => {
+  const markReclaimed = (
+    treeCleanupConfirmed = platform !== "win32" || !terminationStarted || windowsTreeCleanupConfirmed,
+  ): void => {
     clearForceTimer();
     clearConfirmationTimer();
     settleOutcome({
@@ -2797,7 +2832,12 @@ export function createChildTerminationController(
       const killer = spawnProcess(
         "taskkill",
         ["/PID", String(child.pid), "/T", ...(force ? ["/F"] : [])],
-        { windowsHide: true, stdio: "ignore", shell: false },
+        {
+          windowsHide: true,
+          stdio: "ignore",
+          shell: false,
+          timeout: reclamationTimeoutMs,
+        },
       );
       let fallbackStarted = false;
       const fallbackOnce = (): void => {

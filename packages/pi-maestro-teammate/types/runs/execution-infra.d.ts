@@ -593,6 +593,7 @@ export interface ProcessTreeByPidOptions {
     spawnProcess?: typeof crossSpawn;
     killProcess?: typeof process.kill;
     isProcessAlive?: (pid: number) => boolean;
+    taskkillTimeoutMs?: number;
     graceMs?: number;
     pollMs?: number;
     sleep?: (ms: number) => Promise<void>;

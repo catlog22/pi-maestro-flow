@@ -9,6 +9,8 @@ export interface RuntimeBrokerClientOptions {
     daemonExecutable?: string;
     /** Override used by embedders and failure-injection tests; defaults to the packaged broker bin. */
     daemonBinPath?: string;
+    /** Broker daemons are leaf processes by contract; set false for custom daemons that spawn descendants. */
+    daemonIsLeafProcess?: boolean;
 }
 export declare function isRuntimeBrokerTransportError(error: unknown): boolean;
 export declare class RuntimeBrokerClient {

@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   buildWindowsTaskkillCommand,
   captureProcessTree,
   redactRemoteError,
   sanitizedChildEnvironment,
+  signalProcessTree,
   targetChildEnvironment,
   terminateProcessTree,
   truncateUtf8,
@@ -124,6 +126,49 @@ test("POSIX escalation retains the process group after the leader exits", async 
     [-4312, "SIGTERM"],
     [-4312, "SIGKILL"],
   ]);
+});
+
+test("Windows taskkill accepts absence status 128 but rejects unconfirmed null status with signal detail", () => {
+  const identity = captureProcessTree(9021);
+  assert.ok(identity);
+
+  assert.doesNotThrow(() => signalProcessTree(identity, "SIGTERM", {
+    platform: "win32",
+    runTaskkill: () => ({ status: 128 }),
+  }));
+
+  const timeoutError = Object.assign(new Error("taskkill timed out"), { code: "ETIMEDOUT" });
+  assert.throws(
+    () => signalProcessTree(identity, "SIGKILL", {
+      platform: "win32",
+      runTaskkill: () => ({ status: null, signal: "SIGTERM", error: timeoutError }),
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /unconfirmed \(status=null, signal=SIGTERM, error=ETIMEDOUT\)/);
+      assert.equal(error.cause, timeoutError);
+      return true;
+    },
+  );
+});
+
+test("canonical Windows taskkill execution is synchronous, hidden, and timeout bounded", () => {
+  const source = readFileSync(new URL("../src/remote/child-security.ts", import.meta.url), "utf8");
+  const start = source.indexOf("function defaultTaskkill");
+  const end = source.indexOf("function taskkillUnconfirmedError", start);
+  assert.ok(start >= 0 && end > start);
+  const implementation = source.slice(start, end);
+  assert.match(implementation, /spawnSync\(command\.executable, command\.args/);
+  assert.match(implementation, /windowsHide: true/);
+  assert.match(implementation, /stdio: "ignore"/);
+  assert.match(implementation, /timeout: WINDOWS_TASKKILL_TIMEOUT_MS/);
+  assert.match(source, /const WINDOWS_TASKKILL_TIMEOUT_MS = 5_000/);
+});
+
+test("legacy remote process-tree helper delegates to the canonical bounded API", () => {
+  const source = readFileSync(new URL("../src/remote/process-tree.ts", import.meta.url), "utf8");
+  assert.match(source, /signalProcessTree\(captureProcessTree\(child\.pid\), signal\)/);
+  assert.doesNotMatch(source, /\bspawn\s*\(|\.unref\s*\(|existsSync/);
 });
 
 test("Windows termination uses taskkill tree mode and forced escalation", async () => {

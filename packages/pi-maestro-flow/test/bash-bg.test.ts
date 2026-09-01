@@ -12,6 +12,7 @@ import {
 	type BashBgJobSnapshot,
 	type BashBgSnapshotPayload,
 	type RegisterBashBgOptions,
+	classifyWindowsTaskkill,
 	registerBashBg,
 	windowsTaskkillFailure,
 } from "../src/tools/bash-bg.ts";
@@ -33,8 +34,21 @@ test("bash_bg action description recommends run without implying an omitted defa
 
 test("bash_bg classifies Windows taskkill outcomes instead of trusting direct process exit", () => {
 	assert.equal(windowsTaskkillFailure({ status: 0, signal: null }), undefined);
+	assert.deepEqual(classifyWindowsTaskkill({ status: 0, signal: null }), { treeCleanupConfirmed: true });
+	assert.deepEqual(
+		classifyWindowsTaskkill({ status: 128, signal: null }),
+		{ treeCleanupConfirmed: false },
+		"a leader-exit race is idempotent without claiming descendant cleanup",
+	);
 	assert.equal(windowsTaskkillFailure({ status: 5, signal: null }), "taskkill failed (exit 5)");
+	assert.equal(windowsTaskkillFailure({ status: 128, signal: null }), undefined, "a target that exits during cleanup is idempotent");
+	assert.equal(
+		windowsTaskkillFailure({ status: 128, signal: null }, false),
+		"taskkill failed (exit 128)",
+		"a target that was already gone cannot confirm descendant cleanup",
+	);
 	assert.equal(windowsTaskkillFailure({ status: null, signal: "SIGKILL" }), "taskkill failed (signal SIGKILL)");
+	assert.equal(windowsTaskkillFailure({ status: null, signal: null }), "taskkill failed (unknown status)");
 	assert.equal(
 		windowsTaskkillFailure({
 			status: null,
@@ -629,7 +643,10 @@ test("bash_bg Windows taskkill has a source-enforced cleanup timeout and validat
 		source,
 		/spawnSync\("taskkill"[\s\S]{0,500}timeout: WINDOWS_TASKKILL_TIMEOUT_MS[\s\S]{0,100}killSignal: "SIGKILL"/,
 	);
-	assert.match(source, /taskkillFailure = windowsTaskkillFailure\(result\)/);
+	assert.match(source, /const taskkillOutcome = classifyWindowsTaskkill\(result, targetWasRunningBeforeCleanup\)/);
+	assert.match(source, /job\.treeCleanupConfirmed = treeCleanupConfirmed/);
+	assert.match(source, /treeCleanupConfirmed: job\.treeCleanupConfirmed/);
+	assert.match(source, /Leader exited; Windows descendant cleanup is unconfirmed/);
 	assert.match(source, /const terminationTargets = retiringJobs\.filter\(jobIsActive\);[\s\S]{0,200}Promise\.allSettled/);
 });
 
