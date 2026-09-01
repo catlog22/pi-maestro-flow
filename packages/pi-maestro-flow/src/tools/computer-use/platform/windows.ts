@@ -15,7 +15,6 @@ interface WindowsRuntime {
   readonly nut: unknown;
   readonly bridgeScript?: string;
   readonly pythonExecutable: string;
-  bridgeProbe?: Promise<boolean>;
 }
 
 interface BridgeEnvelope {
@@ -198,14 +197,13 @@ async function listWindows(runtime: WindowsRuntime, query?: WindowQuery, signal?
   const raw = await result as unknown;
   if (!Array.isArray(raw)) throw errorFor("window_list", "active-win returned an invalid window list");
   const currentId = activeWindowId(runtime);
-  const bridgeReady = await probeBridge(runtime, signal);
   const windows: WindowInfo[] = [];
   for (const [index, item] of raw.entries()) {
     abortIfNeeded(signal);
     const normalized = normalizeWindow(item);
     if (!normalized) continue;
     const id = normalized.id;
-    const clientBounds = normalized.clientBounds ?? (bridgeReady && /^\d+$/.test(id) ? await bridgeWindowBounds(runtime, id, signal) : null);
+    const clientBounds = normalized.clientBounds ?? (/^\d+$/.test(id) ? await bridgeWindowBounds(runtime, id, signal) : null);
     const window = { ...normalized, clientBounds, active: currentId ? currentId === id : normalized.active || index === 0 };
     if (matchesWindow(window, query)) windows.push(window);
   }
@@ -428,15 +426,6 @@ async function wait(milliseconds: number, signal?: AbortSignal): Promise<void> {
   abortIfNeeded(signal);
   await delay(milliseconds);
   abortIfNeeded(signal);
-}
-
-async function probeBridge(runtime: WindowsRuntime, signal?: AbortSignal): Promise<boolean> {
-  if (!runtime.bridgeScript) return false;
-  runtime.bridgeProbe ??= runBridgeJson(runtime, "probe", [], signal).then(() => true).catch((error: unknown) => {
-    if (error instanceof ComputerUseError && (error.code === "ABORTED" || error.code === "TIMEOUT")) throw error;
-    return false;
-  });
-  return runtime.bridgeProbe;
 }
 
 async function bridgeWindowBounds(runtime: WindowsRuntime, windowId: string, signal?: AbortSignal): Promise<PhysicalRect | null> {

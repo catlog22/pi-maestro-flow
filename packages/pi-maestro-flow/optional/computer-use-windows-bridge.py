@@ -18,13 +18,7 @@ def emit(payload: dict[str, Any]) -> None:
     print(json.dumps(payload, ensure_ascii=True, separators=(",", ":")), flush=True)
 
 
-def load_dependencies() -> tuple[Any, Any, Any, str | None]:
-    try:
-        import pywinauto
-        from pywinauto import Desktop
-        import win32gui
-    except Exception as exc:
-        return None, None, None, f"pywinauto/pywin32 unavailable: {exc}"
+def configure_dpi_awareness() -> None:
     try:
         ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
     except Exception:
@@ -35,7 +29,25 @@ def load_dependencies() -> tuple[Any, Any, Any, str | None]:
                 ctypes.windll.user32.SetProcessDPIAware()
             except Exception:
                 pass
-    return pywinauto, Desktop, win32gui, None
+
+
+def load_window_dependency() -> tuple[Any, str | None]:
+    try:
+        import win32gui
+    except Exception as exc:
+        return None, f"pywin32 unavailable: {exc}"
+    configure_dpi_awareness()
+    return win32gui, None
+
+
+def load_accessibility_dependencies() -> tuple[Any, Any, str | None]:
+    try:
+        import pywinauto
+        from pywinauto import Desktop
+    except Exception as exc:
+        return None, None, f"pywinauto unavailable: {exc}"
+    configure_dpi_awareness()
+    return pywinauto, Desktop, None
 
 
 def rect_dict(rect: Any) -> dict[str, int] | None:
@@ -194,20 +206,29 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    pywinauto, desktop_factory, win32gui, error = load_dependencies()
+    if args.hwnd is None and args.action != "probe":
+        emit({"ok": False, "code": "INVALID_INPUT", "message": "--hwnd is required"})
+        return
+    if args.action == "window":
+        win32gui, error = load_window_dependency()
+        if error:
+            emit({"ok": False, "code": "DEPENDENCY_UNAVAILABLE", "message": error, "missing": ["pywin32"]})
+            return
+        try:
+            emit({"ok": True, **window_info(win32gui, args.hwnd)})
+        except Exception as exc:
+            emit({"ok": False, "code": "UIA_OPERATION_FAILED", "message": str(exc)})
+        return
+
+    pywinauto, desktop_factory, error = load_accessibility_dependencies()
     if error:
-        emit({"ok": False, "code": "DEPENDENCY_UNAVAILABLE", "message": error, "missing": ["pywinauto", "pywin32"]})
+        emit({"ok": False, "code": "DEPENDENCY_UNAVAILABLE", "message": error, "missing": ["pywinauto"]})
         return
     if args.action == "probe":
         emit({"ok": True, "provider": "pywinauto-uia", "version": getattr(pywinauto, "__version__", None)})
         return
-    if args.hwnd is None:
-        emit({"ok": False, "code": "INVALID_INPUT", "message": "--hwnd is required"})
-        return
     try:
-        if args.action == "window":
-            emit({"ok": True, **window_info(win32gui, args.hwnd)})
-        elif args.action == "ui-tree":
+        if args.action == "ui-tree":
             if args.max_depth < 0 or args.max_depth > 32:
                 raise ValueError("max depth must be between 0 and 32")
             emit({

@@ -215,13 +215,13 @@ export function createComputerUseManager(adapter: DesktopAdapter = createDesktop
   return new ComputerUseManager(adapter, { ...hooks, vision });
 }
 
-class LazyComputerUseManager implements ComputerUseManagerLike {
-  private instance?: ComputerUseManager;
-  private closed = false;
+export class LazyComputerUseManager implements ComputerUseManagerLike {
+  private instance?: ComputerUseManagerLike;
 
-  private async get(): Promise<ComputerUseManager> {
-    if (this.closed) throw new ComputerUseError({ code: "INTERNAL", message: "Computer-use manager is shut down", retryable: false });
-    this.instance ??= createComputerUseManager();
+  constructor(private readonly create: () => ComputerUseManagerLike = createComputerUseManager) {}
+
+  private async get(): Promise<ComputerUseManagerLike> {
+    this.instance ??= this.create();
     return this.instance;
   }
   capabilities(options?: ManagerOperationOptions) { return this.get().then(manager => manager.capabilities(options)); }
@@ -244,7 +244,11 @@ class LazyComputerUseManager implements ComputerUseManagerLike {
   type(input: TextInput) { return this.get().then(manager => manager.type(input)); }
   paste(input: TextInput) { return this.get().then(manager => manager.paste(input)); }
   findBlock(input: FindBlockInput) { return this.get().then(manager => manager.findBlock(input)); }
-  async shutdown(): Promise<void> { this.closed = true; if (this.instance) await this.instance.shutdown(); }
+  async shutdown(): Promise<void> {
+    const current = this.instance;
+    this.instance = undefined;
+    await current?.shutdown();
+  }
 }
 
 /** Root-owned serialized desktop authority. Native providers are not constructed until the first operation. */

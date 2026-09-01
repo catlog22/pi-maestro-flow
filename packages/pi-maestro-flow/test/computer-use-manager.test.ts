@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ComputerUseManager } from "../src/tools/computer-use/manager.ts";
+import { ComputerUseManager, LazyComputerUseManager } from "../src/tools/computer-use/manager.ts";
 import { ComputerUseError, type CapturedFrame, type ControlNode, type WindowInfo } from "../src/tools/computer-use/types.ts";
 import type { DesktopAdapter } from "../src/tools/computer-use/platform/types.ts";
 
@@ -136,4 +136,20 @@ test("vision failures remain structured envelopes", async () => {
   const result = await manager.ocr({ source: "screen" });
   assert.equal(result.ok, false);
   if (!result.ok) assert.equal(result.error.code, "MODEL_UNAVAILABLE");
+});
+
+test("lazy manager recreates its native authority after session shutdown", async () => {
+  const adapters: ReturnType<typeof makeAdapter>[] = [];
+  const manager = new LazyComputerUseManager(() => {
+    const adapter = makeAdapter();
+    adapters.push(adapter);
+    return new ComputerUseManager(adapter);
+  });
+
+  await manager.capabilities();
+  await manager.shutdown();
+  await manager.capabilities();
+
+  assert.equal(adapters.length, 2);
+  assert.deepEqual(adapters[0]?.calls, ["shutdown"]);
 });
