@@ -49,7 +49,7 @@ import {
 } from "./schemas.ts";
 import { altKey } from "../key-labels.ts";
 import { setQuietMode } from "../quiet-state.ts";
-import { toolCallLine, toolResultLine, resultSummary } from "../quiet-render.ts";
+import { toolCallLine, toolResultCard, toolResultLine, resultSummary } from "../quiet-render.ts";
 import { registerKeybindingsCommand } from "../keybindings-command.ts";
 import { executeExplore, type ExploreParams } from "../tools/explore.ts";
 import { executeDelegate, type DelegateParams } from "../tools/delegate.ts";
@@ -116,6 +116,7 @@ import {
   type TodoActorRef,
   type TodoParams,
   type TodoResultDetails,
+  type TodoTaskSnapshot,
 } from "../tools/todo.ts";
 import { WorkflowBridge, buildTodoMirrorSpecs } from "../session/bridge.ts";
 import { guiEnabled, startGuiSubsystem, registerGuiTool, isGuiToolAllowed, getGuiTool, createGuiEventForwarder, GUI_EVENTS, bindGuiStartupIfCurrent, guiContextForGeneration, type GuiServerHandle, type GuiPermissionGateway } from "../gui/index.ts";
@@ -896,6 +897,279 @@ export function settleFailedCompaction(
   return arbiter.complete(event.aborted ? "cancel" : "error");
 }
 
+const TODO_RESULT_WINDOW_SIZE = 8;
+const TODO_RECENT_COMPLETED_LIMIT = 2;
+const TODO_DURATION_CHART_HEIGHT = 4;
+
+function sanitizeTodoRenderText(value: string, maximum = 240): string {
+  const cleaned = value
+    .replace(/[\r\n\t]/g, " ")
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .trim();
+  return cleaned.length > maximum ? `${cleaned.slice(0, maximum - 1)}…` : cleaned;
+}
+
+function todoResultTextLines(text: string): string[] {
+  return text
+    .split("\n")
+    .map((line) => sanitizeTodoRenderText(line))
+    .filter(Boolean);
+}
+
+function recentCompletedTasks(tasks: readonly TodoTaskSnapshot[]): TodoTaskSnapshot[] {
+  return tasks
+    .filter((task) => task.status === "completed")
+    .sort((left, right) => {
+      const leftAt = typeof left.completedAt === "number" && Number.isFinite(left.completedAt) ? left.completedAt : 0;
+      const rightAt = typeof right.completedAt === "number" && Number.isFinite(right.completedAt) ? right.completedAt : 0;
+      return leftAt - rightAt;
+    })
+    .slice(-TODO_RECENT_COMPLETED_LIMIT);
+}
+
+function formatTodoDuration(milliseconds: number): string {
+  if (milliseconds < 1_000) return "<1s";
+  const seconds = Math.round(milliseconds / 1_000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m${seconds % 60 === 0 ? "" : `${seconds % 60}s`}`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h${minutes % 60 === 0 ? "" : `${minutes % 60}m`}`;
+}
+
+function todoCompletionDetail(
+  task: TodoTaskSnapshot,
+  theme: Parameters<typeof toolResultCard>[0],
+): string | undefined {
+  const parts = [
+    task.summary ? sanitizeTodoRenderText(task.summary, 180) : "",
+    typeof task.durationMs === "number" && Number.isFinite(task.durationMs) && task.durationMs >= 0
+      ? `active ${formatTodoDuration(task.durationMs)}`
+      : "",
+  ].filter(Boolean);
+  return parts.length > 0 ? theme.fg("dim", `  ↳ ${parts.join(" · ")}`) : undefined;
+}
+
+function todoDurationChart(
+  tasks: readonly TodoTaskSnapshot[],
+  theme: Parameters<typeof toolResultCard>[0],
+): string[] {
+  const completed = tasks.filter((task) => task.status === "completed");
+  if (completed.length === 0) return [];
+  const entries = completed.map((task) => {
+    const id = sanitizeTodoRenderText(task.id, 6).replace(/^#/, "");
+    const duration = typeof task.durationMs === "number" && Number.isFinite(task.durationMs) && task.durationMs >= 0
+      ? task.durationMs
+      : undefined;
+    return { label: `#${id}`, duration };
+  });
+  const maximum = Math.max(1, ...entries.map((entry) => entry.duration ?? 0));
+  const cellWidth = Math.max(3, ...entries.map((entry) => entry.label.length));
+  const center = (value: string): string => {
+    const width = visibleWidth(value);
+    const left = Math.floor((cellWidth - width) / 2);
+    return `${" ".repeat(left)}${value}${" ".repeat(cellWidth - width - left)}`;
+  };
+  const heights = entries.map((entry) => entry.duration === undefined
+    ? 0
+    : Math.max(1, Math.round((entry.duration / maximum) * TODO_DURATION_CHART_HEIGHT)));
+  const ticks = Array.from({ length: TODO_DURATION_CHART_HEIGHT }, (_, index) =>
+    formatTodoDuration(maximum * ((TODO_DURATION_CHART_HEIGHT - index) / TODO_DURATION_CHART_HEIGHT))
+  );
+  const yWidth = Math.max(2, ...ticks.map((tick) => tick.length));
+  const rows = ticks.map((tick, index) => {
+    const level = TODO_DURATION_CHART_HEIGHT - index;
+    const columns = heights.map((height) => center(height >= level ? theme.fg("accent", "█") : " ")).join(" ");
+    return `${tick.padStart(yWidth)} ${theme.fg("dim", "┤")} ${columns}`;
+  });
+  const axisWidth = entries.length * cellWidth + Math.max(0, entries.length - 1);
+  rows.push(`${"0s".padStart(yWidth)} ${theme.fg("dim", "┼")} ${theme.fg("dim", "─".repeat(axisWidth))}`);
+  rows.push(`${" ".repeat(yWidth + 3)}${entries.map((entry) => center(entry.label)).join(" ")}`);
+  return [theme.fg("dim", "Task time · Y=time · X=task"), ...rows];
+}
+
+function todoResultWindow(tasks: readonly TodoTaskSnapshot[], action: string): {
+  tasks: TodoTaskSnapshot[];
+  before: number;
+  after: number;
+} {
+  if (action === "advance") {
+    const scoped = tasks.filter((task) => task.status !== "deleted");
+    let anchor = scoped.findIndex((task) => task.status === "in_progress");
+    if (anchor < 0) anchor = scoped.findIndex((task) => task.status === "pending" || task.status === "blocked");
+    if (anchor < 0) {
+      const recentCompleted = recentCompletedTasks(scoped);
+      return {
+        tasks: recentCompleted,
+        before: scoped.length - recentCompleted.length,
+        after: 0,
+      };
+    }
+
+    const recentCompleted = recentCompletedTasks(scoped.slice(0, anchor));
+    const remainingSlots = TODO_RESULT_WINDOW_SIZE - recentCompleted.length;
+    const currentAndFuture = scoped
+      .slice(anchor)
+      .filter((task) => task.status !== "completed")
+      .slice(0, remainingSlots);
+    return {
+      tasks: [...recentCompleted, ...currentAndFuture],
+      before: Math.max(0, anchor - recentCompleted.length),
+      after: Math.max(0, scoped.length - anchor - currentAndFuture.length),
+    };
+  }
+
+  const scoped = [...tasks];
+  if (action === "create" || scoped.length <= TODO_RESULT_WINDOW_SIZE) {
+    return { tasks: scoped, before: 0, after: 0 };
+  }
+
+  let anchor = scoped.findIndex((task) => task.status === "in_progress");
+  if (anchor < 0) anchor = scoped.findIndex((task) => task.status === "pending" || task.status === "blocked");
+  if (anchor < 0) anchor = scoped.length - 1;
+  const start = Math.max(
+    0,
+    Math.min(anchor - Math.floor(TODO_RESULT_WINDOW_SIZE / 2), scoped.length - TODO_RESULT_WINDOW_SIZE),
+  );
+  return {
+    tasks: scoped.slice(start, start + TODO_RESULT_WINDOW_SIZE),
+    before: start,
+    after: scoped.length - start - TODO_RESULT_WINDOW_SIZE,
+  };
+}
+
+function todoTaskCardRow(
+  task: TodoTaskSnapshot,
+  theme: Parameters<typeof toolResultCard>[0],
+  showAssignee = false,
+): string {
+  const id = sanitizeTodoRenderText(task.id, 64);
+  const subject = sanitizeTodoRenderText(task.subject);
+  const label = id.startsWith("#") ? id : `#${id}`;
+  const assignment = showAssignee && task.assignee
+    ? theme.fg("dim", `  @${sanitizeTodoRenderText(task.assignee.label, 64)}`)
+    : "";
+  if (task.status === "in_progress") {
+    return `${theme.fg("warning", "▶ in progress")}  ${theme.fg("accent", label)}  ${subject}${assignment}`;
+  }
+  if (task.status === "blocked") {
+    const blockers = (task.blockedBy ?? [])
+      .map((blocker) => sanitizeTodoRenderText(blocker, 64).replace(/^#/, ""))
+      .filter(Boolean)
+      .map((blocker) => `#${blocker}`)
+      .join(", ");
+    const relation = blockers ? theme.fg("dim", `  ← ${blockers}`) : "";
+    return `${theme.fg("error", "! blocked")}      ${theme.fg("accent", label)}  ${subject}${assignment}${relation}`;
+  }
+  if (task.status === "completed") {
+    return `${theme.fg("success", "✓ completed")}    ${theme.fg("accent", label)}  ${theme.fg("dim", subject)}${assignment}`;
+  }
+  if (task.status === "deleted") {
+    return `${theme.fg("dim", "⊘ deleted")}      ${theme.fg("accent", label)}  ${theme.fg("dim", subject)}${assignment}`;
+  }
+  return `${theme.fg("dim", "○ pending")}      ${theme.fg("accent", label)}  ${subject}${assignment}`;
+}
+
+function renderTodoToolResult(
+  result: FlowToolResult,
+  expanded: boolean,
+  theme: Parameters<typeof toolResultCard>[0],
+  args: Record<string, unknown>,
+  contextIsError = false,
+) {
+  const details = result.details as TodoResultDetails | undefined;
+  const rawText = result.content.find((item) => item.type === "text" && "text" in item)?.text ?? "";
+  const isError = contextIsError || result.isError === true || !!details?.error;
+  const action = sanitizeTodoRenderText(String(args.action ?? details?.action ?? "?"), 32);
+  const advancedTaskId = action === "advance" && typeof args.id === "string"
+    ? args.id.replace(/^#/, "")
+    : undefined;
+  let callDetail = "";
+  if (action === "create") {
+    const batch = Array.isArray(args.tasks) ? args.tasks : undefined;
+    if (batch?.length) callDetail = ` ${batch.length} tasks`;
+    else {
+      const subject = sanitizeTodoRenderText(String(args.subject ?? ""), 40);
+      if (subject) callDetail = ` ${subject}`;
+    }
+  } else if (action === "update" || action === "get" || action === "delete") {
+    const batchSize = action === "update" && Array.isArray(args.updates)
+      ? args.updates.length
+      : action === "delete" && Array.isArray(args.ids)
+        ? args.ids.length
+        : 0;
+    if (batchSize > 0) callDetail = ` ${batchSize} tasks`;
+    else {
+      const id = sanitizeTodoRenderText(String(args.id ?? ""), 64);
+      if (id) callDetail = ` #${id.replace(/^#/, "")}`;
+    }
+  }
+  const arg = `${action}${callDetail}`.trim();
+  const displayTasks = !details?.tasks
+    ? undefined
+    : details.displayTaskIds === undefined
+      ? details.tasks
+      : details.displayTaskIds
+        .map((id) => details.tasks.find((task) => task.id === id))
+        .filter((task): task is TodoTaskSnapshot => task !== undefined);
+
+  if (isError || !displayTasks || action === "get" || displayTasks.length === 0) {
+    const rows = todoResultTextLines(rawText);
+    return toolResultCard(theme, {
+      name: "todo",
+      ok: !isError,
+      arg,
+      summary: rows[0] ?? (isError ? "failed" : "done"),
+      groups: rows.length > 0 ? [expanded ? rows : rows.slice(0, 8)] : [],
+    });
+  }
+
+  const displayTaskIds = new Set(displayTasks.map((task) => task.id));
+  const recentCompleted = action === "create"
+    ? recentCompletedTasks((details?.tasks ?? []).filter((task) => !displayTaskIds.has(task.id)))
+    : [];
+  const allTasks = action === "create" ? [...recentCompleted, ...displayTasks] : displayTasks;
+  const summaryTasks = action === "create" ? displayTasks : allTasks;
+  const completed = summaryTasks.filter((task) => task.status === "completed").length;
+  const running = summaryTasks.filter((task) => task.status === "in_progress").length;
+  const pending = summaryTasks.filter((task) => task.status === "pending").length;
+  const total = action === "advance"
+    ? allTasks.filter((task) => task.status !== "completed" && task.status !== "deleted").length
+    : summaryTasks.length;
+  const showTerminalSummary = action === "advance" && total === 0;
+  const window = todoResultWindow(allTasks, action);
+  const rows: string[] = [];
+  if (showTerminalSummary) {
+    rows.push(theme.fg("success", "✓ all tasks complete"), ...todoDurationChart(allTasks, theme));
+  } else {
+    if (window.before > 0) rows.push(theme.fg("dim", `↑ ${window.before} earlier tasks`));
+    for (const task of window.tasks) {
+      rows.push(todoTaskCardRow(task, theme, action === "advance"));
+      const showCompletion = task.status === "completed" && task.id.replace(/^#/, "") === advancedTaskId;
+      if (!showCompletion) continue;
+      const detail = todoCompletionDetail(task, theme);
+      if (detail) rows.push(detail);
+    }
+    if (window.after > 0) rows.push(theme.fg("dim", `↓ ${window.after} later tasks`));
+  }
+  const counts = [
+    action === "create"
+      ? `${total} created`
+      : `${total} ${action === "advance" ? "remaining" : `task${total === 1 ? "" : "s"}`}`,
+    running > 0 ? `${running} in progress` : "",
+    pending > 0 ? `${pending} pending` : "",
+    completed > 0 ? `${completed} done` : "",
+    recentCompleted.length > 0 ? `${recentCompleted.length} recent done` : "",
+  ].filter(Boolean);
+  return toolResultCard(theme, {
+    name: "todo",
+    ok: true,
+    arg,
+    summary: counts.join(" · "),
+    groups: rows.length > 0 ? [rows] : undefined,
+  });
+}
+
 export default function registerMaestroExtension(pi: ExtensionAPI): void {
   installReturnedToolErrorBridge(pi);
   const disposeCompletionDurabilityProvider = getCompletionDurabilityRegistry().register(
@@ -1554,9 +1828,11 @@ Only request completion after all work is done; the extension verifies it indepe
 Actions:
 - create (single): { action: "create", subject: "...", assignee: "self|root|id|unique-id-prefix|label|@label|label#id-prefix", context: "...", skills: [{ name, role: "primary|guard|support", args?: "..." }] }
 - create (batch): { action: "create", tasks: [{ subject, description?, context?, blockedBy?, skills?, goalId? }, ...] } — blockedBy integer N means the earlier array item tasks[N] (0-based), e.g. blockedBy: [0]
-- update: { action: "update", id, updateFields: [...], ... } — list changed fields; empty string/array clears clearable fields
+- update (single): { action: "update", id, updateFields: [...], ... } — list changed fields; empty string/array clears clearable fields
+- update (batch): { action: "update", updates: [{ id, updateFields?, ... }, ...] } — validates the whole batch and commits atomically
+- delete: use id for one task or ids for an atomic batch
 - advance: omit id/summary to activate your first runnable task; with an active task pass its id and a non-empty summary to complete it and activate your next runnable task
-- list / get / delete / clear / next
+- list / get / clear / next
 
 Parallel delegation: bind todo ids via teammate \`tasks[].todo\`; every actor advances only tasks assigned to itself. \`next\` remains the activation-only compatibility action.
 
@@ -1584,60 +1860,14 @@ Contract: Todo is a live execution state machine, not a retrospective checklist.
     },
 
     renderShell: "self",
-    renderCall(args, theme, ctx) {
+    renderCall(_args, theme, ctx) {
       if (ctx?.isPartial === false) return new Text("", 0, 0);
-      const action = (args.action as string) ?? "?";
-      let detail = "";
-      if (action === "create") {
-        const batch = Array.isArray(args.tasks) ? (args.tasks as unknown[]) : undefined;
-        if (batch && batch.length > 0) {
-          detail = ` ${batch.length} tasks`;
-        } else {
-          const subj = (args.subject as string) ?? "";
-          detail = subj ? ` ${subj.slice(0, 40)}${subj.length > 40 ? "…" : ""}` : "";
-        }
-      } else if (action === "update" || action === "get" || action === "delete") {
-        const id = (args.id as string) ?? "";
-        detail = id ? ` #${id}` : "";
-      }
-      return toolCallLine(theme, "todo", `${action}${detail}`.trim());
+      return toolCallLine(theme, "todo");
     },
 
     renderResult(result, opts, theme, ctx) {
       if (opts.isPartial) return new Text("", 0, 0);
-      const details = result.details as TodoResultDetails | undefined;
-      const rawText = result.content[0] && "text" in result.content[0] ? result.content[0].text : "";
-      const isError = !!(details?.error);
-      const action = String(ctx.args.action ?? "?");
-      let callDetail = "";
-      if (action === "create") {
-        const batch = Array.isArray(ctx.args.tasks) ? ctx.args.tasks as unknown[] : undefined;
-        if (batch?.length) callDetail = ` ${batch.length} tasks`;
-        else {
-          const subject = String(ctx.args.subject ?? "");
-          if (subject) callDetail = ` ${subject.slice(0, 40)}${subject.length > 40 ? "…" : ""}`;
-        }
-      } else if (action === "update" || action === "get" || action === "delete") {
-        const id = String(ctx.args.id ?? "");
-        if (id) callDetail = ` #${id}`;
-      }
-      const arg = `${action}${callDetail}`.trim();
-
-      if (!details?.tasks) {
-        return toolResultLine(theme, { name: "todo", ok: !isError, arg, summary: rawText.split("\n")[0]?.slice(0, 80) ?? "", expanded: opts.expanded, detail: rawText });
-      }
-
-      const allTasks = details.tasks;
-      const done = allTasks.filter((t) => t.status === "completed").length;
-      const running = allTasks.filter((t) => t.status === "in_progress").length;
-      const open = allTasks.filter((t) => t.status === "pending" || t.status === "blocked").length;
-      const counts: string[] = [];
-      if (done > 0) counts.push(`${done} done`);
-      if (running > 0) counts.push(`${running} in progress`);
-      if (open > 0) counts.push(`${open} open`);
-      const progress = `${allTasks.length} tasks (${counts.join(", ")})`;
-
-      return toolResultLine(theme, { name: "todo", ok: !isError, arg, summary: progress, expanded: opts.expanded, detail: rawText });
+      return renderTodoToolResult(result, opts.expanded, theme, ctx.args, ctx.isError);
     },
   };
 
@@ -4110,20 +4340,19 @@ If root delegated a task to you (spawned with todo: "<id>"), it is usually alrea
       return proxyTeammateChildTool("todo", params as unknown as Record<string, unknown>, signal);
     },
     renderShell: "self",
-    renderCall(args, theme, ctx) {
+    renderCall(_args, theme, ctx) {
       if (ctx?.isPartial === false) return new Text("", 0, 0);
-      const action = String(args.action ?? "?");
-      const subject = action === "create" && args.subject ? ` ${String(args.subject).slice(0, 40)}` : "";
-      return toolCallLine(theme, "todo", `${action}${subject}`);
+      return toolCallLine(theme, "todo");
     },
     renderResult(result, options, theme, ctx) {
       if (options.isPartial) return new Text("", 0, 0);
-      const block = result.content.find((item) => item.type === "text");
-      const text = block && "text" in block ? block.text : "Todo request completed.";
-      const isError = (result as { isError?: boolean }).isError === true;
-      const action = String(ctx.args.action ?? "?");
-      const subject = action === "create" && ctx.args.subject ? ` ${String(ctx.args.subject).slice(0, 40)}` : "";
-      return toolResultLine(theme, { name: "todo", ok: !isError, arg: `${action}${subject}`, summary: resultSummary(result), expanded: options.expanded, detail: text });
+      return renderTodoToolResult(
+        result as FlowToolResult,
+        options.expanded,
+        theme,
+        ctx.args,
+        ctx.isError,
+      );
     },
   };
   pi.registerTool(todoProxyTool);

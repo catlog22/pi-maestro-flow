@@ -604,7 +604,12 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
   assert.match(todoTool?.description ?? "", /blockedBy integer N means the earlier array item tasks\[N\]/);
   assert.match(todoTool?.description ?? "", /blockedBy: \[0\]/);
   assert.match(todoTool?.description ?? "", /advance: omit id\/summary/);
-  assert.match(JSON.stringify(todoTool?.parameters), /advance/);
+  assert.match(todoTool?.description ?? "", /update \(batch\).*commits atomically/);
+  assert.match(todoTool?.description ?? "", /delete: use id for one task or ids for an atomic batch/);
+  const todoParametersJson = JSON.stringify(todoTool?.parameters);
+  assert.match(todoParametersJson, /advance/);
+  assert.match(todoParametersJson, /"ids"/);
+  assert.match(todoParametersJson, /"updates"/);
   const todoGuidelines = todoTool?.promptGuidelines?.join("\n") ?? "";
   assert.match(todoGuidelines, /live execution state machine/);
   assert.match(todoGuidelines, /before any tool call or work belonging to another Todo/);
@@ -625,7 +630,13 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
   );
   assert.equal(todoSchema?.properties?.tasks?.items?.properties?.blockedBy?.items?.type, "integer");
   assert.equal(todoSchema?.properties?.tasks?.items?.properties?.blockedBy?.items?.minimum, 0);
+  assert.ok(todoTool?.renderCall);
   assert.ok(todoTool?.renderResult);
+  const renderTodoCall = todoTool.renderCall as unknown as (
+    args: Record<string, unknown>,
+    theme: { fg(name: string, text: string): string; bold(text: string): string },
+    context: { isPartial: boolean },
+  ) => { render(width: number): string[] };
   const renderTodoResult = todoTool.renderResult as unknown as (
     result: unknown,
     options: { expanded: boolean; isPartial: boolean },
@@ -633,17 +644,198 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
     context: { args: Record<string, unknown> },
   ) => { render(width: number): string[] };
   const todoTheme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
-  const todoTasks = Array.from({ length: 9 }, (_, index) => ({ id: `t${index}`, status: "pending" }));
+  const todoCallLines = renderTodoCall(
+    { action: "create", subject: "hidden\tTodo\u001b[31m\nsubject" },
+    todoTheme,
+    { isPartial: true },
+  ).render(80);
+  assert.match(todoCallLines.join(""), /todo/);
+  assert.doesNotMatch(todoCallLines.join(""), /create|hidden|subject|[\r\n\t\x1b]/, "Working renderer exposes only the tool name");
+
+  const todoTasks = Array.from({ length: 15 }, (_, index) => ({
+    id: `t${index}`,
+    subject: index === 8 ? "Task 9\t\u001b[31m\nowned\r" : `Task ${index + 1}`,
+    status: index === 8 ? "in_progress" : "pending",
+  }));
   const todoListComponent = renderTodoResult({
-    content: [{ type: "text", text: todoTasks.map((_, index) => `- [ ] Task ${index + 1}`).join("\n") }],
-    details: { action: "list", tasks: todoTasks },
+    content: [{ type: "text", text: todoTasks.map((task) => `- ${task.subject}`).join("\n") }],
+    details: { action: "list", tasks: todoTasks, displayTaskIds: todoTasks.map((task) => task.id) },
   }, { expanded: false, isPartial: false }, todoTheme, { args: { action: "list" } });
   assert.equal(typeof todoListComponent.render, "function", "todo list result must be a TUI Component");
   const todoListLines = todoListComponent.render(80).map((line) => line.trimEnd());
-  assert.deepEqual(todoListLines, ["  ✓ todo list · 9 tasks (9 open)"]);
+  assert.equal(todoListLines.length, 12, "card + earlier marker + 8-task window + later marker");
+  assert.equal(visibleWidth(todoListLines[0]), 79, "Todo card leaves the terminal autowrap column unused");
+  assert.match(todoListLines.join("\n"), /↑ 4 earlier tasks/);
+  assert.match(todoListLines.join("\n"), /↓ 3 later tasks/);
+  assert.match(todoListLines.join("\n"), /▶ in progress\s+#t8\s+Task 9\s+\[31m owned/);
+  assert.doesNotMatch(todoListLines.join(""), /[\r\n\x1b]/, "Todo rendering strips C0 controls at the card boundary");
   for (let width = 1; width <= 120; width++) {
     for (const line of todoListComponent.render(width)) assert.ok(visibleWidth(line) <= width, `width ${width}: ${line}`);
   }
+
+  const filteredComponent = renderTodoResult({
+    content: [{ type: "text", text: "▶ #t8 Task 9" }],
+    details: { action: "list", tasks: todoTasks, displayTaskIds: ["t8"] },
+  }, { expanded: false, isPartial: false }, todoTheme, { args: { action: "list", filter: { status: "in_progress" } } });
+  const filteredLines = filteredComponent.render(100).join("\n");
+  assert.match(filteredLines, /1 task.*1 in progress/);
+  assert.match(filteredLines, /#t8/);
+  assert.doesNotMatch(filteredLines, /#t(?:7|9)\b/, "filtered list renders only action-scoped task IDs");
+
+  const emptyFilterComponent = renderTodoResult({
+    content: [{ type: "text", text: "No tasks found." }],
+    details: { action: "list", tasks: todoTasks, displayTaskIds: [] },
+  }, { expanded: false, isPartial: false }, todoTheme, { args: { action: "list", filter: { status: "completed" } } });
+  const emptyFilterLines = emptyFilterComponent.render(100).join("\n");
+  assert.match(emptyFilterLines, /No tasks found\./);
+  assert.doesNotMatch(emptyFilterLines, /#t\d+/, "zero-match filter never falls back to the global snapshot");
+
+  const completedHistory = Array.from({ length: 3 }, (_, index) => ({
+    id: `old${index}`,
+    subject: `Completed ${index + 1}`,
+    status: "completed",
+  }));
+  const createComponent = renderTodoResult({
+    content: [{ type: "text", text: "Created 15 tasks." }],
+    details: {
+      action: "create",
+      tasks: [...completedHistory, ...todoTasks],
+      displayTaskIds: todoTasks.map((task) => task.id),
+    },
+  }, { expanded: false, isPartial: false }, todoTheme, { args: { action: "create", tasks: todoTasks } });
+  const createLines = createComponent.render(100);
+  assert.equal(createLines.length, 19, "create renders all 15 new tasks plus two recent completed tasks");
+  assert.match(createLines[0], /15 created.*2 recent done/);
+  assert.doesNotMatch(createLines.join("\n"), /earlier tasks|later tasks/);
+  assert.match(createLines.join("\n"), /Task 1/);
+  assert.match(createLines.join("\n"), /Task 15/);
+  assert.match(createLines.join("\n"), /#old1.*Completed 2/);
+  assert.match(createLines.join("\n"), /#old2.*Completed 3/);
+  assert.doesNotMatch(createLines.join("\n"), /#old0\b/, "create limits completed context to the two most recent tasks");
+
+  const createBacklogTasks = todoTasks.map((task, index) => ({
+    ...task,
+    status: index === 10 || index === 11 ? "completed" : task.status,
+  }));
+  const createOverBacklog = renderTodoResult({
+    content: [{ type: "text", text: "Created 2 tasks." }],
+    details: { action: "create", tasks: createBacklogTasks, displayTaskIds: ["t13", "t14"] },
+  }, { expanded: false, isPartial: false }, todoTheme, { args: { action: "create", tasks: [{}, {}] } });
+  const backlogCreateLines = createOverBacklog.render(100);
+  assert.equal(backlogCreateLines.length, 6, "create shows new tasks and only two recent completed backlog tasks");
+  assert.match(backlogCreateLines[0], /2 created.*2 recent done/);
+  assert.match(backlogCreateLines.join("\n"), /#t(?:10|11|13|14)\b/);
+  assert.doesNotMatch(backlogCreateLines.join("\n"), /#t12\b/, "pending backlog remains hidden");
+
+  const initialAdvanceTasks = todoTasks.map((task, index) => ({
+    ...task,
+    status: index === 0 ? "in_progress" : index === 14 ? "deleted" : "pending",
+  }));
+  const initialAdvanceLines = renderTodoResult({
+    content: [{ type: "text", text: "Activated #t0." }],
+    details: { action: "advance", tasks: initialAdvanceTasks },
+  }, { expanded: false, isPartial: false }, todoTheme, { args: { action: "advance" } }).render(100);
+  assert.equal(initialAdvanceLines.filter((line) => /#t\d+/.test(line)).length, 8);
+  assert.match(initialAdvanceLines.join("\n"), /#t0.*Task 1/);
+  assert.doesNotMatch(initialAdvanceLines.join("\n"), /✓ completed/);
+  assert.match(initialAdvanceLines.join("\n"), /↓ 6 later tasks/);
+
+  const advanceTasks = todoTasks.map((task, index) => ({
+    ...task,
+    status: index < 5 ? "completed" : index === 5 ? "in_progress" : index === 14 ? "deleted" : "pending",
+    assignee: index === 5
+      ? { kind: "teammate", id: "builder-correlation", label: "builder" }
+      : { kind: "root", id: "root", label: "root" },
+    summary: index === 4 ? "Finished task five" : undefined,
+    durationMs: index === 4 ? 65_000 : undefined,
+  }));
+  const advanceComponent = renderTodoResult({
+    content: [{ type: "text", text: "Completed #t4. Activated #t5." }],
+    details: { action: "advance", tasks: advanceTasks },
+  }, { expanded: false, isPartial: false }, todoTheme, { args: { action: "advance", id: "t4" } });
+  const advanceLines = advanceComponent.render(100);
+  assert.match(advanceLines[0], /9 remaining.*5 done/);
+  assert.match(advanceLines.join("\n"), /▶ in progress\s+#t5\s+Task 6\s+@builder/);
+  assert.match(advanceLines.join("\n"), /✓ completed\s+#t3\s+Task 4/);
+  assert.match(advanceLines.join("\n"), /✓ completed\s+#t4\s+Task 5/);
+  assert.match(advanceLines.join("\n"), /↳ Finished task five · active 1m5s/, "advance shows completion information for the task named by args.id");
+  assert.doesNotMatch(advanceLines.join("\n"), /#t(?:[0-2]|14)\b/);
+  assert.equal(advanceLines.filter((line) => /#t\d+/.test(line)).length, 8, "advance reserves two of eight slots for recent completed tasks");
+  assert.match(advanceLines.join("\n"), /↑ 3 earlier tasks/);
+  assert.match(advanceLines.join("\n"), /↓ 3 later tasks/);
+
+  const tailAdvanceTasks = todoTasks.map((task, index) => ({
+    ...task,
+    status: index < 12 ? "completed" : index === 12 ? "in_progress" : index === 14 ? "deleted" : "pending",
+  }));
+  const tailAdvanceLines = renderTodoResult({
+    content: [{ type: "text", text: "Completed #t11. Activated #t12." }],
+    details: { action: "advance", tasks: tailAdvanceTasks },
+  }, { expanded: false, isPartial: false }, todoTheme, { args: { action: "advance" } }).render(100);
+  assert.equal(tailAdvanceLines.filter((line) => /#t\d+/.test(line)).length, 4);
+  assert.match(tailAdvanceLines.join("\n"), /#t10.*Task 11/);
+  assert.match(tailAdvanceLines.join("\n"), /#t11.*Task 12/);
+  assert.match(tailAdvanceLines.join("\n"), /#t12.*Task 13/);
+  assert.match(tailAdvanceLines.join("\n"), /#t13.*Task 14/);
+  assert.equal(tailAdvanceLines.filter((line) => /✓ completed/.test(line)).length, 2);
+  assert.match(tailAdvanceLines.join("\n"), /↑ 10 earlier tasks/);
+  assert.doesNotMatch(tailAdvanceLines.join("\n"), /later tasks/);
+
+  const allCompletedTasks = todoTasks.map((task, index) => ({
+    ...task,
+    status: "completed",
+    summary: index === 13 ? "Finished\tpenultimate\u001b[31m" : index === 14 ? "Finished final task" : undefined,
+    durationMs: index === 13 ? 123_000 : index === 14 ? 3_600_000 : undefined,
+    completedAt: index + 1,
+  }));
+  const allCompletedLines = renderTodoResult({
+    content: [{ type: "text", text: "Completed #t14. All tasks completed." }],
+    details: { action: "advance", tasks: allCompletedTasks },
+  }, { expanded: false, isPartial: false }, todoTheme, { args: { action: "advance" } }).render(500);
+  assert.match(allCompletedLines[0], /0 remaining.*15 done/);
+  assert.match(allCompletedLines.join("\n"), /✓ all tasks complete/);
+  assert.doesNotMatch(
+    allCompletedLines.join("\n"),
+    /✓ completed|Task 14|Task 15|Finished penultimate|Finished final task/,
+    "terminal advance omits individual completed-task rows and details",
+  );
+  assert.match(allCompletedLines.join("\n"), /Task time · Y=time · X=task/);
+  const yRows = allCompletedLines.filter((line) => line.includes("┤"));
+  assert.equal(yRows.length, 4, "duration chart has a bounded four-level Y axis");
+  assert.match(yRows[0], /1h\s+┤/);
+  assert.equal((yRows[0].match(/█/g) ?? []).length, 1, "only the longest task reaches the top tick");
+  assert.equal((yRows[3].match(/█/g) ?? []).length, 2, "short positive durations retain a visible minimum column");
+  assert.ok(allCompletedLines.some((line) => /0s\s+┼\s+─+/.test(line)), "chart renders the zero baseline");
+  assert.ok(allCompletedLines.some((line) => /#t0.*#t13.*#t14/.test(line)), "X axis renders task sequence labels");
+  assert.doesNotMatch(allCompletedLines.join(""), /[\r\n\t\x1b]/);
+  for (let width = 1; width <= 120; width++) {
+    for (const line of renderTodoResult({
+      content: [{ type: "text", text: "Completed #t14. All tasks completed." }],
+      details: { action: "advance", tasks: allCompletedTasks },
+    }, { expanded: false, isPartial: false }, todoTheme, { args: { action: "advance", id: "t14" } }).render(width)) {
+      assert.ok(visibleWidth(line) <= width, `final chart width ${width}: ${line}`);
+    }
+  }
+  const ansiTodoTheme = {
+    fg: (_name: string, text: string) => `\x1b[31m${text}\x1b[0m`,
+    bold: (text: string) => `\x1b[1m${text}\x1b[22m`,
+  };
+  const ansiCompletedLines = renderTodoResult({
+    content: [{ type: "text", text: "Completed #t14. All tasks completed." }],
+    details: { action: "advance", tasks: allCompletedTasks },
+  }, { expanded: false, isPartial: false }, ansiTodoTheme, { args: { action: "advance", id: "t14" } }).render(500);
+  assert.ok(ansiCompletedLines.some((line) => line.includes("Task time")), "ANSI-colored bars render without falling back to raw result text");
+  assert.ok(ansiCompletedLines.every((line) => visibleWidth(line) <= 500));
+
+  const blockedSummaryLines = renderTodoResult({
+    content: [{ type: "text", text: "Blocked task" }],
+    details: {
+      action: "list",
+      tasks: [{ id: "blocked", subject: "Waiting", status: "blocked", blockedBy: ["1", "#upstream"] }],
+    },
+  }, { expanded: false, isPartial: false }, todoTheme, { args: { action: "list" } }).render(100);
+  assert.doesNotMatch(blockedSummaryLines[0], /blocked/, "Todo headers omit blocked counts and member noise");
+  assert.match(blockedSummaryLines.join("\n"), /! blocked.*#blocked.*Waiting.*← #1, #upstream/, "blocked rows show dependency IDs once with # sequence labels");
 
   let permissionPrompts = 0;
   const ctx = {
@@ -850,6 +1042,7 @@ test("teammate child registers interaction, local Bash, and parent-permission su
   const workflowMirrorSkill = readFileSync(join(import.meta.dirname, "../../../.pi/skills/maestro/SKILL.md"), "utf8");
   assert.match(workflowMirrorSkill, /Advance only with `todo\(\{ action: "next" \}\)`/);
   assert.deepEqual([...handlers.keys()], [
+    "tool_result",
     "session_shutdown",
     "session_start",
     "tool_call",
