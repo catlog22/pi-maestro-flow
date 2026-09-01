@@ -1269,7 +1269,7 @@ export default function registerTeammateExtension(
       renderCall(args, theme, context) {
         return renderObserveCall(args, theme, context);
       },
-      renderResult(result, options, theme) {
+      renderResult(result, options, theme, context) {
         return renderObserveResult(result, options, theme, context.isError);
       },
     });
@@ -8604,7 +8604,7 @@ export default function registerTeammateExtension(
     renderCall(args, theme, context) {
       return renderObserveCall(args, theme, context);
     },
-    renderResult(result, options, theme) {
+    renderResult(result, options, theme, context) {
       return renderObserveResult(result, options, theme, context.isError);
     },
   };

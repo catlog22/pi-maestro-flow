@@ -178,7 +178,7 @@ test("non-quiet fallback mirrors the host default rendering instead of hiding ou
   assert.deepEqual(empty?.render(80), []);
 });
 
-test("quiet mode keeps the compact lifecycle rows for auxiliary tools", () => {
+test("quiet mode renders auxiliary communication as a structured card", () => {
   setQuietMode(true, "check");
   const tools = registerAuxTools();
   const send = tools.get("teammate-send") as (ToolDefinition & LooseRenderer) | undefined;
@@ -190,9 +190,10 @@ test("quiet mode keeps the compact lifecycle rows for auxiliary tools", () => {
     { args: {}, isPartial: false },
   );
   const lines = result?.render(80) ?? [];
-  assert.equal(lines.length, 1);
-  assert.match(lines[0] ?? "", /teammate-send/);
-  assert.match(lines[0] ?? "", /delivered/);
+  assert.equal(lines.length, 3);
+  assert.match(lines[0] ?? "", /^╭─ ✓ teammate-send · @\? · steer · delivered$/);
+  assert.equal(lines[1], "│ delivered");
+  assert.match(lines[2] ?? "", /^╰─/);
 });
 
 test("auxiliary renderers never leak the quiet-only undefined through an as-never cast", () => {

@@ -19,8 +19,29 @@ export declare function renderTeammateListCall(args: Record<string, unknown>, th
 export declare function renderTeammateListResult(result: AgentToolResult<{
     agents: unknown[];
 }>, options: {
+    expanded?: boolean;
     isPartial?: boolean;
-}, theme: Theme): Component;
+}, theme: Theme, args?: Record<string, unknown>, rendererError?: boolean): Component;
+export declare function renderTeammateSendCall(args: Record<string, unknown>, theme: Theme, context?: {
+    isPartial?: boolean;
+}): Component;
+export declare function renderTeammateSendResult(result: AgentToolResult<{
+    delivered: boolean;
+}>, options: {
+    expanded?: boolean;
+    isPartial?: boolean;
+}, theme: Theme, args?: Record<string, unknown>, rendererError?: boolean): Component;
+export declare function renderObserveCall(args: Record<string, unknown>, theme: Theme, context?: {
+    isPartial?: boolean;
+}): Component;
+export declare function renderObserveResult(result: AgentToolResult<unknown>, options: {
+    expanded?: boolean;
+    isPartial?: boolean;
+}, theme: Theme, rendererError?: boolean): Component;
+export declare function renderMonitorResult(result: AgentToolResult<unknown>, options: {
+    expanded?: boolean;
+    isPartial?: boolean;
+}, theme: Theme, rendererError?: boolean): Component;
 export declare function renderTeammateResult(result: AgentToolResult<Details>, options: {
     expanded: boolean;
 }, theme: Theme, args?: Record<string, unknown>): Component;
