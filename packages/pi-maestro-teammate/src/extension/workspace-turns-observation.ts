@@ -173,6 +173,7 @@ function workspaceRunListSnapshot(
   options: ObservationReadOptions,
 ): ObservationSnapshot {
   const runs = collectWorkspaceRuns(owner);
+  const lifecycle = workspaceWindowLifecycle(owner);
   const windowName = owner.sessionName ?? `window:${owner.ownerId.slice(0, 8)}`;
   if (options.turn !== undefined) {
     const run = runs.find((candidate) => candidate.index === options.turn);
@@ -180,8 +181,8 @@ function workspaceRunListSnapshot(
       return {
         target,
         found: true,
-        nativeStatus: "unknown",
-        phase: "unknown",
+        nativeStatus: lifecycle.status,
+        phase: lifecycle.settled ? "settled" : "active",
         summary: `Run ${options.turn} not found (${runs.length} run${runs.length === 1 ? "" : "s"}).`,
         detail: runs.map((candidate) =>
           `Run ${candidate.index} · @${candidate.name} ${candidate.status}${candidate.summary ? ` · ${candidate.summary.slice(0, 60)}` : ""}`,
@@ -195,11 +196,13 @@ function workspaceRunListSnapshot(
       ...(run.summary ? [run.summary] : []),
       ...(detail !== "summary" ? run.outputTail.slice(-lines) : []),
     ];
+    const settled = run.status === "completed" || run.status === "failed"
+      || run.status === "terminated" || run.status === "sleeping";
     return {
       target,
       found: true,
       nativeStatus: run.status,
-      phase: run.status === "completed" || run.status === "failed" ? "settled" : "active",
+      phase: settled ? "settled" : run.status === "pending" ? "pending" : "active",
       summary: `Run ${run.index} · @${run.name} ${run.status}`,
       ...(detail !== "summary" && detailLines.length > 1 ? { detail: detailLines } : {}),
       updatedAt: owner.publishedAt,
@@ -214,8 +217,8 @@ function workspaceRunListSnapshot(
   return {
     target,
     found: true,
-    nativeStatus: "unknown",
-    phase: "unknown",
+    nativeStatus: lifecycle.status,
+    phase: lifecycle.settled ? "settled" : "active",
     summary: `${windowName} · ${runs.length} run${runs.length === 1 ? "" : "s"} · snapshot-limited (workspace peer published no session progress; showing runs)`,
     detail: listLines,
     updatedAt: owner.publishedAt,

@@ -202,6 +202,58 @@ test("diagnose requests canonical provider detail without changing snapshot sema
   }
 });
 
+test("diagnosis formatting distinguishes pending fallback and target-generated assistant provenance", () => {
+  const formatted = formatObserveResult({
+    action: "diagnose",
+    reason: "snapshot",
+    durationMs: 0,
+    observations: [{
+      target: { kind: "teammate", id: "worker" },
+      found: true,
+      nativeStatus: "running",
+      phase: "active",
+      summary: "running",
+      updatedAt: 1,
+      diagnosis: {
+        version: 1,
+        lifecycle: "running",
+        health: "healthy",
+        phase: "prompting",
+        activity: "running",
+        toolActivity: "idle",
+        resultReady: false,
+        reasonCode: "prompting",
+        trigger: {
+          version: 1,
+          messageId: "initial-1",
+          source: "initial-task",
+          messageKind: "task",
+          deliveryMode: "prompt",
+          confidence: "verified",
+          sender: { kind: "root-agent", ownerId: "root-1" },
+        },
+        lastMessage: {
+          role: "assistant",
+          timestamp: 1,
+          provenance: {
+            version: 1,
+            messageId: "assistant-1",
+            source: "agent-runtime",
+            messageKind: "message",
+            deliveryMode: "notify",
+            confidence: "verified",
+            sender: { kind: "teammate-agent", correlationId: "worker" },
+          },
+        },
+        fallbackDisposition: "not-evaluated",
+      },
+    }],
+  }).join("\n");
+
+  assert.match(formatted, /reason=prompting fallback=not-evaluated/);
+  assert.match(formatted, /last-message: source=agent-runtime confidence=verified sender=teammate-agent:worker/);
+});
+
 test("status observes mixed providers in target order", async () => {
   const disposeAgent = registerObservationProvider(provider("test-agent", async (id) => snapshot("test-agent", id, "completed")));
   const disposeJob = registerObservationProvider(provider("test-job", async (id) => snapshot("test-job", id, "completed")));

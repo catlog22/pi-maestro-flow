@@ -222,7 +222,7 @@ export interface Details {
 export type MessageKind = "task" | "notification" | "result";
 export declare const MESSAGE_PROVENANCE_VERSION: 1;
 export type MessageProvenanceConfidence = "verified" | "unknown";
-export type MessageProvenanceSource = "initial-task" | "session-router" | "mailbox" | "workspace-peer" | "completion-outbox" | "monitor" | "advisor" | "recovery" | "unknown";
+export type MessageProvenanceSource = "initial-task" | "agent-runtime" | "session-router" | "mailbox" | "workspace-peer" | "completion-outbox" | "monitor" | "advisor" | "recovery" | "unknown";
 export type VerifiedMessageProvenanceSource = Exclude<MessageProvenanceSource, "unknown">;
 export type MessageProvenanceKind = MessageKind | "message" | "coordination" | "request" | "status" | "supervision" | "lifecycle" | "control";
 export type MessageDeliveryModeV1 = "prompt" | "steer" | "follow_up" | "interrupt" | "abort" | "notify";
@@ -320,7 +320,7 @@ export interface AgentRuntimeDiagnosisV1 extends AgentRuntimeProjection {
     trigger: MessageProvenanceV1;
     lastMessage?: AgentTurnMessageMetadataV1;
     previousOutcome?: AgentRunOutcome;
-    fallbackDisposition: "eligible" | "ineligible" | "unknown";
+    fallbackDisposition: "eligible" | "ineligible" | "not-evaluated" | "unknown";
 }
 export type AgentRuntimeReasonCode = AgentRuntimeDiagnosisV1["reasonCode"];
 export type AgentFallbackDisposition = AgentRuntimeDiagnosisV1["fallbackDisposition"];
@@ -583,6 +583,8 @@ export interface TeammateState {
      * root extension; absent in states that never relay interactions.
      */
     cancelInteractions?: (correlationId: string, reason: string) => void;
+    /** Settles one relayed interaction by its child-provided requestId. */
+    cancelInteractionRequest?: (requestId: string, reason: string) => void;
     /**
      * Bounded, insertion-ordered record of agents that have left `activeRuns`.
      * A settled agent is removed outright, so without this a lookup afterwards

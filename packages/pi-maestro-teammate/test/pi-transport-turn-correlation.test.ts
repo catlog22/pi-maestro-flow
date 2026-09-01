@@ -154,6 +154,54 @@ test("transport sidecar correlates the exact lease-unwrapped user text and keeps
     assert.equal(event.runtimeGeneration, context.runtimeGeneration);
     assert.equal(event.promptSeq, context.promptSeq);
   }
+  const assistantMessages = events.flatMap((event) =>
+    "lastMessage" in event && event.lastMessage?.role === "assistant" ? [event.lastMessage] : []
+  );
+  assert.ok(assistantMessages.length > 0);
+  for (const message of assistantMessages) {
+    assert.equal(message.provenance.source, "agent-runtime");
+    assert.equal(message.provenance.confidence, "verified");
+    assert.deepEqual(message.provenance.sender, { kind: "teammate-agent", correlationId });
+  }
+});
+
+test("turn_end without an observed assistant message preserves the accepted user provenance", async () => {
+  const correlationId = "phase-3-missing-assistant";
+  const events: AgentTurnEvent[] = [];
+  const spawnChildProcess = (() => createFakeChild((command, handle) => {
+    if (command.type !== "prompt") return;
+    queueMicrotask(() => {
+      handle.stdout.write(line({
+        type: "message_end",
+        message: { role: "user", content: [{ type: "text", text: acceptedInput(command) }] },
+      }));
+      handle.stdout.write(line({ type: "turn_start" }));
+      handle.stdout.write(line({ type: "turn_end", message: {}, toolResults: [] }));
+      handle.stdout.write(line({ type: "agent_end", willRetry: false }));
+      handle.stdout.write(line({ type: "agent_settled" }));
+    });
+  }).child) as unknown as SpawnSeam;
+
+  await runSingleTeammate(
+    { agent: "general", task: "missing assistant task", context: "fork" },
+    {
+      baseCwd: process.cwd(),
+      correlationId,
+      initialTurnContext: stableContext(correlationId),
+      recordTurnEvent: (event) => events.push(event),
+      spawnChildProcess,
+    },
+  );
+  await delay(20);
+
+  const turnEnded = events.find((event) => event.type === "turn-ended");
+  assert.ok(turnEnded && turnEnded.type === "turn-ended");
+  assert.equal(turnEnded.lastMessage.role, "user");
+  assert.notEqual(turnEnded.lastMessage.provenance.source, "agent-runtime");
+  assert.equal(events.some((event) =>
+    "lastMessage" in event
+    && event.lastMessage?.provenance.source === "agent-runtime"
+  ), false);
 });
 
 test("streaming text deltas do not persist one progress event per token", async () => {

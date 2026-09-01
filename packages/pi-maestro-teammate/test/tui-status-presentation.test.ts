@@ -128,6 +128,12 @@ test("canonical runtime diagnosis keeps lifecycle, health, activity, trigger, an
     toolActivity: "unknown",
     resultReady: false,
   });
+  assert.equal(diagnoseAgentRuntime({
+    status: "running",
+    phase: "prompting",
+    lastActivityAt: now,
+    turn: { ...turn, state: "active", phase: "prompting", lastActivityAt: now },
+  }, now).fallbackDisposition, "not-evaluated");
 });
 
 test("legacy and malformed provenance fail closed without inventing a sender", () => {
@@ -163,6 +169,18 @@ test("legacy and malformed provenance fail closed without inventing a sender", (
   assert.equal(malformedVerified.source, "unknown");
   assert.equal(malformedVerified.sender.kind, "unknown");
   assert.ok(!("legacyLabel" in malformedVerified));
+
+  const interrupt = normalizeMessageProvenanceV1({
+    version: 1,
+    source: "session-router",
+    confidence: "verified",
+    messageId: "interrupt-message-1",
+    messageKind: "request",
+    deliveryMode: "interrupt",
+    sender: { kind: "human", ownerId: "owner" },
+  });
+  assert.equal(interrupt.confidence, "verified");
+  assert.equal(interrupt.deliveryMode, "interrupt");
 });
 
 test("effective display status derives result-ready and stalled from the shared threshold", () => {

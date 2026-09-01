@@ -193,7 +193,10 @@ export function diagnoseAgentRuntime(
     fallbackDisposition: runtime.phase === "settling"
       ? "ineligible"
       : input.fallbackEligible === true ? "eligible"
-        : input.fallbackEligible === false ? "ineligible" : "unknown",
+        : input.fallbackEligible === false ? "ineligible"
+          : runtime.activity === "running" && runtime.lifecycle !== "retrying" && runtime.phase !== "retrying"
+            ? "not-evaluated"
+            : "unknown",
   };
 }
 

@@ -53,7 +53,6 @@ import type {
 import {
   AGENT_TURN_VERSION,
   normalizeMessageProvenanceV1,
-  unknownMessageProvenanceV1,
 } from "../shared/types.ts";
 import {
   wrapLeasedMessage,
@@ -569,6 +568,23 @@ export async function runSingleAttempt(
     ...input.context,
     loopSeq: input.loopSeq,
     timestamp,
+  });
+
+  const assistantMessageMetadata = (
+    input: PendingModelInput,
+    timestamp: number,
+  ): AgentTurnMessageMetadataV1 => ({
+    role: "assistant",
+    timestamp,
+    provenance: {
+      version: 1,
+      messageId: randomUUID(),
+      source: "agent-runtime",
+      messageKind: "message",
+      deliveryMode: "notify",
+      confidence: "verified",
+      sender: { kind: "teammate-agent", correlationId: input.context.correlationId },
+    },
   });
 
   const enqueueTransportInput = (
@@ -1734,11 +1750,7 @@ export async function runSingleAttempt(
       if (event.type === "message_end" && msg?.role !== "assistant") return;
       if (currentModelInput) {
         const timestamp = turnEventTimestamp();
-        currentModelInput.lastMessage = {
-          role: "assistant",
-          timestamp,
-          provenance: unknownMessageProvenanceV1({ messageKind: "message" }),
-        };
+        currentModelInput.lastMessage = assistantMessageMetadata(currentModelInput, timestamp);
       }
       const text = extractTextContent(event) || state.streamingText || undefined;
       if (text) {
@@ -1911,20 +1923,20 @@ export async function runSingleAttempt(
       recordResolvedModel(event, msg);
       recordRuntimeEventError(event, "turn_end");
       if (currentModelInput) {
-        if (!currentModelInput.lastMessage || currentModelInput.lastMessage.role !== "assistant") {
+        if (msg?.role === "assistant"
+          && (!currentModelInput.lastMessage || currentModelInput.lastMessage.role !== "assistant")) {
           const timestamp = turnEventTimestamp();
-          currentModelInput.lastMessage = {
-            role: "assistant",
-            timestamp,
-            provenance: unknownMessageProvenanceV1({ messageKind: "message" }),
-          };
+          currentModelInput.lastMessage = assistantMessageMetadata(currentModelInput, timestamp);
         }
-        const timestamp = turnEventTimestamp();
-        recordCanonicalTurnEvent({
-          ...turnEventBase(currentModelInput, timestamp),
-          type: "turn-ended",
-          lastMessage: currentModelInput.lastMessage,
-        });
+        const lastMessage = currentModelInput.lastMessage;
+        if (lastMessage) {
+          const timestamp = turnEventTimestamp();
+          recordCanonicalTurnEvent({
+            ...turnEventBase(currentModelInput, timestamp),
+            type: "turn-ended",
+            lastMessage,
+          });
+        }
       }
       if (isPiResultReadyTurn(event, {
         inFlightToolCount: state.inFlightToolCount,

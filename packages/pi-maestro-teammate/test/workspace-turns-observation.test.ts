@@ -277,6 +277,8 @@ test("workspaceTurnsSnapshot falls back to run list when peer published no mainP
     readOptions(),
   );
   assert.equal(snapshot.found, true);
+  assert.equal(snapshot.nativeStatus, "running");
+  assert.equal(snapshot.phase, "active");
   assert.match(snapshot.summary ?? "", /2 runs · snapshot-limited \(workspace peer published no session progress; showing runs\)/);
   assert.ok(snapshot.detail?.some((line) => /Run 1 · @cid-1 running/.test(line)));
   assert.ok(snapshot.detail?.some((line) => /Run 2 · @cid-2 completed/.test(line)));
@@ -293,6 +295,7 @@ test("workspaceTurnsSnapshot run-list fallback never exposes a legacy settled re
     readOptions({ turn: 1 }),
   );
   assert.equal(snapshot.found, true);
+  assert.equal(snapshot.phase, "settled");
   assert.match(snapshot.summary ?? "", /Run 1 · @cid-2 completed/);
   assert.ok(snapshot.detail?.some((line) => line.includes("settled summary")));
   assert.equal(snapshot.detail?.some((line) => line === "-- result --"), false);
@@ -307,6 +310,8 @@ test("workspaceTurnsSnapshot run-list fallback reports run not found", () => {
     20,
     readOptions({ turn: 5 }),
   );
+  assert.equal(snapshot.nativeStatus, "running");
+  assert.equal(snapshot.phase, "active");
   assert.match(snapshot.summary ?? "", /Run 5 not found \(1 run\)/);
   assert.ok(snapshot.detail?.some((line) => line.startsWith("Run 1 ·")));
 });
@@ -320,5 +325,7 @@ test("workspaceTurnsSnapshot run-list fallback with no runs reports empty window
     readOptions(),
   );
   assert.equal(snapshot.found, true);
+  assert.equal(snapshot.nativeStatus, "completed");
+  assert.equal(snapshot.phase, "settled");
   assert.deepEqual(snapshot.detail, ["No window activity recorded in the peer snapshot."]);
 });

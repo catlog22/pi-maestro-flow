@@ -241,6 +241,7 @@ export const MESSAGE_PROVENANCE_VERSION = 1 as const;
 export type MessageProvenanceConfidence = "verified" | "unknown";
 export type MessageProvenanceSource =
   | "initial-task"
+  | "agent-runtime"
   | "session-router"
   | "mailbox"
   | "workspace-peer"
@@ -323,7 +324,7 @@ function provenanceIdentifier(value: unknown): string | undefined {
 }
 
 function verifiedProvenanceSource(value: unknown): value is VerifiedMessageProvenanceSource {
-  return value === "initial-task" || value === "session-router" || value === "mailbox"
+  return value === "initial-task" || value === "agent-runtime" || value === "session-router" || value === "mailbox"
     || value === "workspace-peer" || value === "completion-outbox" || value === "monitor" || value === "advisor"
     || value === "recovery";
 }
@@ -335,7 +336,7 @@ function provenanceKind(value: unknown): value is MessageProvenanceKind {
 }
 
 function provenanceDeliveryMode(value: unknown): value is MessageDeliveryModeV1 {
-  return value === "prompt" || value === "steer" || value === "follow_up"
+  return value === "prompt" || value === "steer" || value === "follow_up" || value === "interrupt"
     || value === "abort" || value === "notify";
 }
 
@@ -489,7 +490,7 @@ export interface AgentRuntimeDiagnosisV1 extends AgentRuntimeProjection {
   trigger: MessageProvenanceV1;
   lastMessage?: AgentTurnMessageMetadataV1;
   previousOutcome?: AgentRunOutcome;
-  fallbackDisposition: "eligible" | "ineligible" | "unknown";
+  fallbackDisposition: "eligible" | "ineligible" | "not-evaluated" | "unknown";
 }
 
 export type AgentRuntimeReasonCode = AgentRuntimeDiagnosisV1["reasonCode"];
