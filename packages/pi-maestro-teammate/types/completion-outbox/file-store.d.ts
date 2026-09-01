@@ -53,11 +53,9 @@ export declare class CompletionOutboxFileStore {
      * Non-blocking GC for the periodic reconcile path. If the workspace lock is
      * already held by a concurrent writer, returns `{ busy: true }` instead of
      * waiting or throwing — a maintenance sweep must never crash or warn on
-     * transient contention. Also honors a cross-process `.gc-marker` so that
-     * when multiple Pi processes share the outbox only one sweeps within
-     * TRY_GC_MARKER_MIN_INTERVAL_MS; the others return `{ skipped: true }`.
-     * Expired records are inert (acquireClaim/deliverDue reject them), so
-     * skipping a sweep is safe; the next reconcile reclaims them.
+     * transient contention. The cross-process marker cools down every bounded
+     * page and, after a complete sweep, suppresses unchanged work until the first
+     * retained record can expire. Expired records are inert until a later sweep.
      */
     tryGc(workspaceId: string): Promise<CompletionOutboxTryGcResult>;
 }

@@ -83,6 +83,8 @@ export interface CompletionOutboxGcResult {
   releasedReservations: number;
   /** More bounded GC pages remain for this workspace. */
   hasMore?: boolean;
+  /** Earliest retained record expiry after a complete sweep. */
+  nextGcAt?: number;
 }
 
 /** Result of a non-blocking {@link CompletionOutboxFileStore.tryGc} sweep. */

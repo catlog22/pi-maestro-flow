@@ -316,8 +316,44 @@ test("claim lease excludes another process until expiry", async () => {
 
 test("capacity exhaustion fails before a second reservation", async () => {
   await withStore(async (store) => {
-    await store.reserve(seed("capacity-a"), 2_048);
+    const first = seed("capacity-a");
+    await store.reserve(first, 2_048);
+    assert.equal((await store.reserve(first, 2_048)).state, "reserved", "a live idempotent reservation is not double-counted");
+    await assert.rejects(() => store.reserve(first, 4_096), /size mismatch/);
     await assert.rejects(() => store.reserve(seed("capacity-b"), 2_048), /capacity exhausted.*No teammate child was started/s);
+  }, { maxLiveRecords: 1, maxLiveBytes: 4_096 });
+});
+
+test("an expired exact reservation is renewed and counted before another dispatch starts", async () => {
+  await withStore(async (store, advance) => {
+    const dispatch = seed("capacity-renew");
+    const original = await store.reserve(dispatch, 2_048);
+    advance(COMPLETION_OUTBOX_LIVE_TTL_MS + 1);
+
+    const renewed = await store.reserve(dispatch, 2_048);
+    assert.equal(renewed.state, "reserved");
+    assert.ok(renewed.expiresAt > original.expiresAt);
+    await assert.rejects(() => store.reserve(seed("capacity-after-renew"), 2_048), /capacity exhausted/);
+  }, { maxLiveRecords: 1, maxLiveBytes: 4_096 });
+});
+
+test("reserve ignores expired capacity without running maintenance GC", async () => {
+  await withStore(async (store, advance, root) => {
+    const expired = seed("capacity-expired");
+    await store.reserve(expired, 2_048);
+    advance(COMPLETION_OUTBOX_LIVE_TTL_MS + 1);
+
+    const replacement = await store.reserve(seed("capacity-replacement"), 2_048);
+    assert.equal(replacement.state, "reserved");
+
+    const expiredPath = join(
+      root,
+      hashedPath(target.workspaceId),
+      "reservations",
+      `${hashedPath(expired.reservationId)}.json`,
+    );
+    const untouched = await readStoredJson<{ state: string }>(expiredPath);
+    assert.equal(untouched.state, "reserved", "foreground reserve must not sweep or rewrite old entries");
   }, { maxLiveRecords: 1, maxLiveBytes: 4_096 });
 });
 
@@ -478,6 +514,24 @@ test("tryGc sweeps when idle, skips via marker, and returns busy when contended"
   });
 });
 
+test("completed GC sleeps until retained expiry and any later workspace mutation invalidates the fence", async () => {
+  await withStore(async (store, advance) => {
+    const dispatch = seed("gc-sleep-a");
+    await store.reserve(dispatch, 1);
+    const first = await store.tryGc(target.workspaceId);
+    assert.equal(first.hasMore, undefined);
+    assert.equal(first.nextGcAt, 1_000 + COMPLETION_OUTBOX_LIVE_TTL_MS);
+
+    advance(31_000);
+    assert.equal((await store.tryGc(target.workspaceId)).skipped, true, "unchanged live data must not be rewritten every interval");
+
+    await store.releaseReservation(target, dispatch.reservationId);
+    const invalidated = await store.tryGc(target.workspaceId);
+    assert.equal(invalidated.skipped, undefined, "a same-path expiry rewrite invalidates the workspace generation fence");
+    assert.equal(invalidated.nextGcAt, 32_000 + 24 * 60 * 60 * 1_000);
+  });
+});
+
 test("gc consumes bounded stale index work without enumerating the large data directory", async () => {
   const root = await mkdtemp(join(tmpdir(), "completion-gc-pages-"));
   let now = 1;
@@ -575,7 +629,7 @@ test("gc yields its workspace lock on the wall-clock budget so a writer can proc
     Reflect.set(fsp, "readFile", delayedReadFile);
     syncBuiltinESMExports();
     try {
-      const pagePromise = store.gc(target.workspaceId).then((page) => {
+      const pagePromise = store.tryGc(target.workspaceId).then((page) => {
         slowGcReads = false;
         return page;
       });
@@ -584,6 +638,7 @@ test("gc yields its workspace lock on the wall-clock budget so a writer can proc
       const [page, reservation] = await Promise.all([pagePromise, writerPromise]);
       assert.equal(page.hasMore, true, "the sweep stops before scanning every slow live entry");
       assert.equal(reservation.state, "reserved", "the waiting writer acquires the released lock");
+      assert.equal((await store.tryGc(target.workspaceId)).skipped, true, "an incomplete page cools down competing coordinators");
     } finally {
       Reflect.set(fsp, "readFile", originalReadFile);
       syncBuiltinESMExports();
@@ -624,6 +679,25 @@ test("a corrupt GC index state self-heals instead of throwing on every reconcile
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("tryGc does not let an expiry marker suppress corrupt-state self-healing", async () => {
+  await withStore(async (store, advance, root) => {
+    await store.reserve(seed("marker-corrupt-state"), 1);
+    assert.ok((await store.tryGc(target.workspaceId)).nextGcAt);
+
+    const statePath = join(root, hashedPath(target.workspaceId), ".gc-index", "state.json");
+    const state = await readStoredJson<{ tail: number }>(statePath);
+    await writeFile(statePath, JSON.stringify({ version: 2, head: 0, tail: state.tail }));
+    advance(31_000);
+
+    const healed = await store.tryGc(target.workspaceId);
+    assert.equal(healed.skipped, undefined);
+    await assert.rejects(
+      () => readdir(join(root, hashedPath(target.workspaceId), ".gc-index")),
+      (error: NodeJS.ErrnoException) => error.code === "ENOENT",
+    );
+  });
 });
 
 test("a corrupt GC index segment self-heals instead of poisoning the sweep", async () => {
@@ -835,6 +909,45 @@ test("failed lock release leaves an ended same-pid token that the next operation
     Reflect.set(fsp, "rename", originalRename);
     Reflect.set(fsp, "rm", originalRm);
     syncBuiltinESMExports();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an in-process waiter cannot reclaim the canonical lock during release", async () => {
+  const root = await mkdtemp(join(tmpdir(), "completion-lock-release-race-"));
+  const fsp = createRequire(import.meta.url)("node:fs/promises") as typeof import("node:fs/promises");
+  const originalRename = fsp.rename;
+  let releaseStarted!: () => void;
+  let continueRelease!: () => void;
+  const atRelease = new Promise<void>((resolveRelease) => { releaseStarted = resolveRelease; });
+  const releaseGate = new Promise<void>((resolveRelease) => { continueRelease = resolveRelease; });
+  let blocked = false;
+  const replacementRename: typeof originalRename = (async (...args: Parameters<typeof originalRename>) => {
+    const source = String(args[0] ?? "");
+    const destination = String(args[1] ?? "");
+    if (!blocked && source.endsWith(".store.lock") && destination.includes(".release-")) {
+      blocked = true;
+      releaseStarted();
+      await releaseGate;
+    }
+    return originalRename(...args);
+  }) as typeof originalRename;
+  try {
+    const store = new CompletionOutboxFileStore({ rootDir: root, ownerId: "release-race" });
+    Reflect.set(fsp, "rename", replacementRename);
+    syncBuiltinESMExports();
+
+    const first = store.reserve(seed("release-race-a"), 1);
+    await atRelease;
+    const second = store.reserve(seed("release-race-b"), 1);
+    continueRelease();
+
+    const reservations = await Promise.all([first, second]);
+    assert.deepEqual(reservations.map((entry) => entry.state), ["reserved", "reserved"]);
+  } finally {
+    Reflect.set(fsp, "rename", originalRename);
+    syncBuiltinESMExports();
+    continueRelease?.();
     await rm(root, { recursive: true, force: true });
   }
 });

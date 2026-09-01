@@ -68,16 +68,10 @@ const LOCK_HEARTBEAT_MS = 10_000;
 const LOCK_WAIT_MS = 45_000;
 const LOCK_RETRY_MS = 25;
 const RENAME_MAX_RETRIES = 5;
-// Throttle the *implicit* GC run inside reserve() so a high write rate does not
-// repeatedly take the workspace lock for a full scan on every reservation. A
-// reserve() capacity check only needs recently-accurate usage; an explicit
-// store.gc() call always runs a full GC regardless of this interval.
-const RESERVE_GC_MIN_INTERVAL_MS = 30_000;
-// Cross-process GC marker: tryGc() writes this after a sweep so concurrent Pi
-// processes sharing the same outbox directory can skip a redundant sweep within
-// the gap. A process-local throttle (like #lastReconcileGcAt) is invisible to
-// other processes; this marker is the cross-process equivalent. Short on purpose
-// so a crashed GC still lets the next process re-sweep soon.
+// Cross-process GC marker: tryGc() writes this after every bounded page so
+// concurrent coordinators cannot turn an old index backlog into a lock convoy.
+// A completed sweep also records the earliest retained expiry and remains idle
+// until then unless a new index entry invalidates its tail fence.
 const TRY_GC_MARKER_MIN_INTERVAL_MS = 30_000;
 const GC_MARKER_NAME = ".gc-marker";
 const GC_INDEX_DIR = ".gc-index";
@@ -150,6 +144,18 @@ interface GcIndexState {
   head: number;
   tail: number;
   sweepEnd?: number;
+  nextGcAt?: number;
+}
+
+function validGcIndexState(value: unknown): value is GcIndexState {
+  if (!value || typeof value !== "object") return false;
+  const state = value as Partial<GcIndexState>;
+  return state.version === 1
+    && Number.isSafeInteger(state.head) && state.head! >= 0
+    && Number.isSafeInteger(state.tail) && state.tail! >= state.head!
+    && (state.sweepEnd === undefined || Number.isSafeInteger(state.sweepEnd)
+      && state.sweepEnd! >= state.head! && state.sweepEnd! <= state.tail!)
+    && (state.nextGcAt === undefined || Number.isSafeInteger(state.nextGcAt) && state.nextGcAt! >= 0);
 }
 
 interface GcIndexSegment {
@@ -1195,7 +1201,6 @@ export class CompletionOutboxFileStore {
   readonly #now: () => number;
   readonly #maxLiveRecords: number;
   readonly #maxLiveBytes: number;
-  #lastReserveGcAt: Map<string, number> = new Map();
 
   constructor(options: StoreOptions = {}) {
     this.rootDir = resolve(options.rootDir ?? process.env.PI_TEAMMATE_COMPLETION_OUTBOX_ROOT ?? join(homedir(), ".pi", "teammate", "completion-outbox", "v1"));
@@ -1217,7 +1222,18 @@ export class CompletionOutboxFileStore {
       throw new Error(`Invalid completion reservation size: ${reservedBytes}.`);
     }
     return this.#withWorkspaceLock(seed.target.workspaceId, async (lease) => {
-      await this.#maybeReserveGc(seed.target.workspaceId, lease);
+      const now = this.#now();
+      const existing = await this.#readReservation(seed.target.workspaceId, seed.reservationId);
+      if (existing && (existing.dispatchId !== seed.dispatchId || !targetEquals(existing.target, seed.target))) {
+        throw new Error(`Completion reservation ${seed.reservationId} already belongs to another dispatch.`);
+      }
+      if (existing?.state === "reserved" && existing.expiresAt > now) {
+        if (existing.reservedBytes !== reservedBytes) {
+          throw new Error(`Completion reservation ${seed.reservationId} size mismatch.`);
+        }
+        return existing;
+      }
+
       const usage = await this.#usageLocked(seed.target.workspaceId);
       if (usage.liveRecords + 1 > this.#maxLiveRecords
         || usage.liveBytes + reservedBytes > this.#maxLiveBytes) {
@@ -1228,14 +1244,6 @@ export class CompletionOutboxFileStore {
           + "No teammate child was started; resume/consume pending completions or disable PI_TEAMMATE_COMPLETION_REDELIVERY.",
         );
       }
-      const existing = await this.#readReservation(seed.target.workspaceId, seed.reservationId);
-      if (existing) {
-        if (existing.dispatchId !== seed.dispatchId || !targetEquals(existing.target, seed.target)) {
-          throw new Error(`Completion reservation ${seed.reservationId} already belongs to another dispatch.`);
-        }
-        return existing;
-      }
-      const now = this.#now();
       const record: CompletionReservationRecord = {
         version: COMPLETION_OUTBOX_SCHEMA_VERSION,
         reservationId: seed.reservationId,
@@ -1243,7 +1251,7 @@ export class CompletionOutboxFileStore {
         target: seed.target,
         reservedBytes,
         state: "reserved",
-        createdAt: now,
+        createdAt: existing?.createdAt ?? now,
         updatedAt: now,
         expiresAt: now + COMPLETION_OUTBOX_LIVE_TTL_MS,
       };
@@ -1511,39 +1519,43 @@ export class CompletionOutboxFileStore {
    * Non-blocking GC for the periodic reconcile path. If the workspace lock is
    * already held by a concurrent writer, returns `{ busy: true }` instead of
    * waiting or throwing — a maintenance sweep must never crash or warn on
-   * transient contention. Also honors a cross-process `.gc-marker` so that
-   * when multiple Pi processes share the outbox only one sweeps within
-   * TRY_GC_MARKER_MIN_INTERVAL_MS; the others return `{ skipped: true }`.
-   * Expired records are inert (acquireClaim/deliverDue reject them), so
-   * skipping a sweep is safe; the next reconcile reclaims them.
+   * transient contention. The cross-process marker cools down every bounded
+   * page and, after a complete sweep, suppresses unchanged work until the first
+   * retained record can expire. Expired records are inert until a later sweep.
    */
   async tryGc(workspaceId: string): Promise<CompletionOutboxTryGcResult> {
     const empty: CompletionOutboxTryGcResult = { expired: 0, removed: 0, releasedReservations: 0 };
     if (!boundedString(workspaceId, 128)) return { ...empty, busy: true };
     const workspaceDir = this.#workspaceDir(workspaceId);
     const markerPath = join(workspaceDir, GC_MARKER_NAME);
+    const markerSkips = async (value: unknown, now: number): Promise<boolean> => {
+      if (!value || typeof value !== "object") return false;
+      const candidate = value as { at?: unknown; generationFence?: unknown; tail?: unknown; nextGcAt?: unknown };
+      if (!Number.isSafeInteger(candidate.at) || typeof candidate.generationFence !== "string"
+        || !HASH_ID.test(candidate.generationFence)) return false;
+      const rawState = await readSafeJson(this.#gcIndexStatePath(workspaceId), 512);
+      const state = rawState === undefined ? { version: 1, head: 0, tail: 0 } satisfies GcIndexState : rawState;
+      if (!validGcIndexState(state)) return false;
+      if (now - (candidate.at as number) < TRY_GC_MARKER_MIN_INTERVAL_MS) return true;
+      if (hashPath(await readWorkspaceGenerationFence(workspaceDir)) !== candidate.generationFence
+        || !Number.isSafeInteger(candidate.tail) || state.tail !== candidate.tail) return false;
+      return Number.isSafeInteger(candidate.nextGcAt) && (candidate.nextGcAt as number) > now;
+    };
     const now = this.#now();
-    const marker = await readSafeJson(markerPath, 64);
-    if (marker && typeof marker === "object" && "at" in marker && typeof (marker as { at: unknown }).at === "number"
-      && now - (marker as { at: number }).at < TRY_GC_MARKER_MIN_INTERVAL_MS) {
-      return { ...empty, skipped: true };
-    }
+    if (await markerSkips(await readSafeJson(markerPath, 192), now)) return { ...empty, skipped: true };
     const result = await this.#withWorkspaceLock<CompletionOutboxTryGcResult | undefined>(
       workspaceId,
       async (lease) => {
-        // Re-check the marker inside the lock to close the TOCTOU window between
-        // the lock-free read above and acquisition: another process may have just
-        // finished a sweep and written the marker while we waited.
-        const fresh = await readSafeJson(markerPath, 64);
-        const freshAt = fresh && typeof fresh === "object" && "at" in fresh && typeof (fresh as { at: unknown }).at === "number"
-          ? (fresh as { at: number }).at : 0;
-        if (freshAt > 0 && now - freshAt < TRY_GC_MARKER_MIN_INTERVAL_MS) {
-          return { ...empty, skipped: true };
-        }
+        // Re-check inside the lock to close the lock-free marker/state race.
+        if (await markerSkips(await readSafeJson(markerPath, 192), now)) return { ...empty, skipped: true };
         const swept = await this.#gcLocked(workspaceId, lease);
-        // A page with remaining work deliberately leaves the marker stale so a
-        // later reconcile can continue the bounded cursor instead of waiting.
-        if (!swept.hasMore) await writeJsonAtomic(markerPath, { at: this.#now() }, 64, lease);
+        const state = await this.#readGcIndexState(workspaceId);
+        await writeJsonAtomic(markerPath, {
+          at: this.#now(),
+          generationFence: hashPath(await readWorkspaceGenerationFence(workspaceDir)),
+          tail: state.tail,
+          ...(!swept.hasMore && swept.nextGcAt !== undefined ? { nextGcAt: swept.nextGcAt } : {}),
+        }, 192, lease);
         return swept;
       },
       0,
@@ -1584,12 +1596,8 @@ export class CompletionOutboxFileStore {
 
   async #readGcIndexState(workspaceId: string): Promise<GcIndexState> {
     const raw = await readSafeJson(this.#gcIndexStatePath(workspaceId), 512);
-    if (!raw || typeof raw !== "object") return { version: 1, head: 0, tail: 0 };
-    const state = raw as Partial<GcIndexState>;
-    if (state.version !== 1 || !Number.isSafeInteger(state.head) || state.head! < 0
-      || !Number.isSafeInteger(state.tail) || state.tail! < state.head!
-      || state.sweepEnd !== undefined && (!Number.isSafeInteger(state.sweepEnd)
-        || state.sweepEnd! < state.head! || state.sweepEnd! > state.tail!)) {
+    if (raw === undefined) return { version: 1, head: 0, tail: 0 };
+    if (!validGcIndexState(raw)) {
       // The GC index is an optimization over the authoritative record/reservation
       // files: expired records are inert (acquireClaim/deliverDue reject them),
       // so dropping a corrupt index only defers a maintenance sweep. A corrupt
@@ -1598,7 +1606,7 @@ export class CompletionOutboxFileStore {
       await this.#resetGcIndex(workspaceId, "state");
       return { version: 1, head: 0, tail: 0 };
     }
-    return state as GcIndexState;
+    return raw;
   }
 
   async #readGcIndexSegment(workspaceId: string, segmentNumber: number): Promise<GcIndexSegment> {
@@ -1773,6 +1781,7 @@ export class CompletionOutboxFileStore {
 
   async #usageLocked(workspaceId: string): Promise<CompletionOutboxUsage> {
     const workspaceDir = this.#workspaceDir(workspaceId);
+    const now = this.#now();
     let sessionNames: string[] = [];
     try {
       sessionNames = (await readdir(workspaceDir, { withFileTypes: true }))
@@ -1790,7 +1799,7 @@ export class CompletionOutboxFileStore {
         try { names = await readdir(dir); } catch (error) { if (fileCode(error) !== "ENOENT") throw error; }
         for (const name of canonicalJsonNames(names)) {
           const raw = await readSafeJson(join(dir, name));
-          if (!validRecord(raw) || raw.state !== state) continue;
+          if (!validRecord(raw) || raw.state !== state || raw.expiresAt <= now) continue;
           liveRecords += 1;
           liveBytes += Buffer.byteLength(JSON.stringify(raw), "utf8");
         }
@@ -1802,7 +1811,7 @@ export class CompletionOutboxFileStore {
       const names = canonicalJsonNames(await readdir(reservationsDir));
       for (const name of names) {
         const raw = await readSafeJson(join(reservationsDir, name));
-        if (!validReservation(raw) || raw.state !== "reserved") continue;
+        if (!validReservation(raw) || raw.state !== "reserved" || raw.expiresAt <= now) continue;
         reservations += 1;
         liveRecords += 1;
         liveBytes += raw.reservedBytes;
@@ -1823,9 +1832,10 @@ export class CompletionOutboxFileStore {
     // enumerating or sorting any unbounded state/session directory.
     const sweepEnd = state.sweepEnd ?? state.tail;
     if (state.sweepEnd === undefined) {
-      state = { ...state, sweepEnd };
+      state = { ...state, sweepEnd, nextGcAt: undefined };
       await writeJsonAtomic(this.#gcIndexStatePath(workspaceId), state, 512, lease);
     }
+    let nextGcAt = state.nextGcAt;
     const scanEnd = Math.min(state.head + GC_SCAN_MAX_ENTRIES, sweepEnd);
     const segments = new Map<number, GcIndexSegment>();
     const latestByEntry = new Map<string, GcIndexLatest | undefined>();
@@ -1860,7 +1870,7 @@ export class CompletionOutboxFileStore {
       if (latestActive && latest!.sequence !== sequence) continue;
 
       const raw = await readSafeJsonExactRecovery(candidatePath);
-      let retain = false;
+      let retainUntil: number | undefined;
       if (entry.kind === "record") {
         if (!validRecord(raw)) continue;
         if (LIVE_STATES.has(raw.state) && raw.expiresAt <= now) {
@@ -1885,17 +1895,18 @@ export class CompletionOutboxFileStore {
           await removeDurableBounded(candidatePath, lease);
           result.removed += 1;
         } else {
-          retain = true;
+          retainUntil = raw.expiresAt;
         }
       } else if (validReservation(raw)) {
         if (raw.expiresAt <= now) {
           await removeDurableBounded(candidatePath, lease);
           result.releasedReservations += 1;
         } else {
-          retain = true;
+          retainUntil = raw.expiresAt;
         }
       }
-      if (retain) {
+      if (retainUntil !== undefined) {
+        nextGcAt = Math.min(nextGcAt ?? retainUntil, retainUntil);
         const nextSequence = await this.#appendGcIndex(workspaceId, canonicalEntry, lease, sequence);
         knownTail = Math.max(knownTail, nextSequence + 1);
         latestByEntry.set(entryKey, { version: 1, sequence: nextSequence, ...canonicalEntry });
@@ -1910,7 +1921,9 @@ export class CompletionOutboxFileStore {
     let next: GcIndexState = {
       ...latest,
       head: pageEnd,
-      ...(completedSweep ? { sweepEnd: undefined } : { sweepEnd }),
+      ...(completedSweep
+        ? { sweepEnd: undefined, nextGcAt: undefined }
+        : { sweepEnd, nextGcAt }),
     };
     if (next.head >= next.tail) next = { version: 1, head: 0, tail: 0 };
     await writeJsonAtomic(this.#gcIndexStatePath(workspaceId), next, 512, lease);
@@ -1921,24 +1934,8 @@ export class CompletionOutboxFileStore {
       await removeDurable(this.#gcIndexSegmentPath(workspaceId, segment), lease);
     }
     if (!completedSweep) result.hasMore = true;
+    else if (nextGcAt !== undefined) result.nextGcAt = nextGcAt;
     return result;
-  }
-
-  // reserve() only needs usage that is recent enough for a capacity check; running a
-  // full workspace GC on every reservation takes the lock for too long under load.
-  // Throttle the implicit GC to once per RESERVE_GC_MIN_INTERVAL_MS per workspace.
-  //
-  // NOTE: #usageLocked() counts files in live state dirs without reading expiresAt,
-  // so skipping a sweep means expired-but-not-yet-swept records still count against
-  // the quota until the next explicit store.gc() (reconcile) reclaims them. This
-  // is intentionally conservative: it can only false-reject (never over-admit),
-  // and the next reconcile past RECONCILE_GC_MIN_INTERVAL_MS reclaims the slack.
-  async #maybeReserveGc(workspaceId: string, lease: WorkspaceLockLease): Promise<void> {
-    const now = this.#now();
-    const last = this.#lastReserveGcAt.get(workspaceId) ?? 0;
-    if (now - last < RESERVE_GC_MIN_INTERVAL_MS) return;
-    await this.#gcLocked(workspaceId, lease);
-    this.#lastReserveGcAt.set(workspaceId, now);
   }
 
   async #consumeReservation(
@@ -2184,43 +2181,47 @@ export class CompletionOutboxFileStore {
     } finally {
       clearInterval(timer);
       await heartbeat?.catch(() => undefined);
-      // The lease has ended before release I/O begins. A canonical lock left by
-      // a failed release is therefore reclaimable even though its pid is this
-      // still-running process; active tokens from other in-process stores remain
-      // fenced by the shared set.
-      ACTIVE_WORKSPACE_LOCK_TOKENS.delete(token);
       await handle.close().catch(() => undefined);
-      const current = await this.#readLockSnapshot(lockPath).catch(() => undefined);
-      if (current?.record?.token === token && current.record.ownerId === this.ownerId) {
-        const releasePath = `${lockPath}.release-${token}`;
-        try {
-          await renameWithRetry(lockPath, releasePath);
-          persistenceBoundary("lock", "after-release-rename");
-          await fsyncDirectory(workspaceDir);
-          await rm(releasePath, { force: true });
-          persistenceBoundary("lock", "after-release-remove");
-          await fsyncDirectory(workspaceDir);
-        } catch (error) {
-          const remaining = await this.#readLockSnapshot(lockPath).catch(() => undefined);
-          if (remaining?.record?.token === token && remaining.record.ownerId === this.ownerId) {
-            try {
-              await rm(lockPath, { force: true });
-              await fsyncDirectory(workspaceDir);
-            } catch (cleanupError) {
-              throw new Error(`Completion outbox lock release failed for ${workspaceId}; ended token remains reclaimable.`, {
-                cause: cleanupError,
-              });
+      try {
+        // Keep the token active until the canonical lock has been moved away.
+        // Otherwise an in-process waiter can reclaim the ended token and create
+        // a new canonical lock between this release's token check and rename.
+        const current = await this.#readLockSnapshot(lockPath).catch(() => undefined);
+        if (current?.record?.token === token && current.record.ownerId === this.ownerId) {
+          const releasePath = `${lockPath}.release-${token}`;
+          try {
+            await renameWithRetry(lockPath, releasePath);
+            persistenceBoundary("lock", "after-release-rename");
+            await fsyncDirectory(workspaceDir);
+            await rm(releasePath, { force: true });
+            persistenceBoundary("lock", "after-release-remove");
+            await fsyncDirectory(workspaceDir);
+          } catch (error) {
+            const remaining = await this.#readLockSnapshot(lockPath).catch(() => undefined);
+            if (remaining?.record?.token === token && remaining.record.ownerId === this.ownerId) {
+              try {
+                await rm(lockPath, { force: true });
+                await fsyncDirectory(workspaceDir);
+              } catch (cleanupError) {
+                throw new Error(`Completion outbox lock release failed for ${workspaceId}; ended token remains reclaimable.`, {
+                  cause: cleanupError,
+                });
+              }
+              const afterCleanup = await this.#readLockSnapshot(lockPath).catch(() => undefined);
+              if (afterCleanup?.record?.token === token) {
+                throw new Error(`Completion outbox lock release failed for ${workspaceId}; ended token remains reclaimable.`, {
+                  cause: error,
+                });
+              }
+            } else if (!REPLACE_ERRORS.has(fileCode(error) ?? "") && fileCode(error) !== "ENOENT") {
+              throw error;
             }
-            const afterCleanup = await this.#readLockSnapshot(lockPath).catch(() => undefined);
-            if (afterCleanup?.record?.token === token) {
-              throw new Error(`Completion outbox lock release failed for ${workspaceId}; ended token remains reclaimable.`, {
-                cause: error,
-              });
-            }
-          } else if (!REPLACE_ERRORS.has(fileCode(error) ?? "") && fileCode(error) !== "ENOENT") {
-            throw error;
           }
         }
+      } finally {
+        // A failed release intentionally leaves an ended same-process token that
+        // the next operation can reclaim through the normal fenced takeover path.
+        ACTIVE_WORKSPACE_LOCK_TOKENS.delete(token);
       }
     }
   }

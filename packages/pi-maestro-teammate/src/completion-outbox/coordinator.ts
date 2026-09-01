@@ -151,15 +151,10 @@ export class CompletionDeliveryCoordinator {
   #binding: CompletionSessionBinding | undefined;
   #unsubscribe: (() => void) | undefined;
   #disposed = false;
-  // Throttle store.gc() inside reconcile(): a full workspace GC under the lock
-  // competes with reserve()/importIntent() writers and is the main source of the
-  // "Timed out acquiring completion outbox lock" warnings. Expired records are
-  // inert (deliverDue/acquireClaim already reject expired entries), so skipping
-  // a sweep between two reconciles is safe; the next reconcile past this gap
-  // reclaims them. This is the only place store.gc() is called — bindSession()
-  // relies on this reconcile path for the initial sweep on a fresh binding.
-  // Seeded lazily on the first reconcile so the first sweep always runs (a zero
-  // seed under a small mocked clock would otherwise skip the first sweep).
+  // Throttle GC attempts inside reconcile(). tryGc() also persists a cross-process
+  // page/expiry fence, but this local guard prevents one coordinator from
+  // immediately reacquiring the maintenance lock while a backlog remains.
+  // Seeded lazily so the first reconcile still attempts one non-blocking page.
   #lastReconcileGcAt: number | undefined;
 
   constructor(options: CompletionCoordinatorOptions = {}) {
@@ -331,12 +326,12 @@ export class CompletionDeliveryCoordinator {
       // failed" warning. Canonical and legacy roots remain isolated and are
       // swept independently; no alias root is merged or deleted.
       if (this.#lastReconcileGcAt === undefined || now - this.#lastReconcileGcAt >= RECONCILE_GC_MIN_INTERVAL_MS) {
-        let swept = false;
+        let attempted = false;
         for (const target of targets) {
           const result = await this.store.tryGc(target.workspaceId);
-          if (!result.busy && !result.skipped && !result.hasMore) swept = true;
+          if (!result.busy && !result.skipped) attempted = true;
         }
-        if (swept) this.#lastReconcileGcAt = now;
+        if (attempted) this.#lastReconcileGcAt = now;
       }
       const providers = new Set<CompletionDurabilityProvider>();
       const currentProvider = this.registry.current();
