@@ -361,6 +361,8 @@ export interface RunTeammateOptions {
   toolExecutionHeartbeatMs?: number;
   /** @internal Test seam for the interrupting-steer acknowledgement deadline. */
   interruptingSteerTimeoutMs?: number;
+  /** @internal Test seam for model selection, set_model and resume acknowledgement deadlines. */
+  modelSwitchAckTimeoutMs?: number;
   /**
    * Pi subprocess steer-queue drain mode. "all" injects every queued steer
    * message in a single assistant turn (co-injection); "one-at-a-time" (the

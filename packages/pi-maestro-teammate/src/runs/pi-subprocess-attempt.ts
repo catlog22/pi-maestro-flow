@@ -248,6 +248,8 @@ interface AttemptState {
   inFlightToolCount: number;
   /** Absorbing state: once terminal, queued child lines must not reopen a turn. */
   terminal: boolean;
+  /** Unique owner of an asynchronous model-selection decision. */
+  modelSwitchDecisionId?: string;
   /** In-process model switch transaction, when one is awaiting Pi's ack. */
   modelSwitch?: {
     requestId: string;
@@ -511,6 +513,7 @@ export async function runSingleAttempt(
     completedToolCount: 0,
     inFlightToolCount: 0,
     terminal: false,
+    modelSwitchDecisionId: undefined,
   };
 
   // AC8: Rich progress tracking
@@ -703,6 +706,20 @@ export async function runSingleAttempt(
      */
     let steerSettlementSwallowed = false;
     let compactionSettlementSwallowed = false;
+    let autoRetryProgressMessage: string | undefined;
+    const clearAutoRetryProgressMessage = (): void => {
+      if (progress.lastMessage === autoRetryProgressMessage) progress.lastMessage = undefined;
+      autoRetryProgressMessage = undefined;
+    };
+    let modelFailoverProgressMessage: string | undefined;
+    const setModelFailoverProgressMessage = (message: string): void => {
+      modelFailoverProgressMessage = message;
+      progress.lastMessage = message;
+    };
+    const clearModelFailoverProgressMessage = (): void => {
+      if (progress.lastMessage === modelFailoverProgressMessage) progress.lastMessage = undefined;
+      modelFailoverProgressMessage = undefined;
+    };
     let latestCompactionGeneration = -1;
     const closedCompactionRecoveries = new Set<string>();
     const compactionRecoveryKey = (recovery: { recoveryId: string; generation: number }): string =>
@@ -713,6 +730,7 @@ export async function runSingleAttempt(
       }
     };
     const interruptingSteerTimeoutMs = options.interruptingSteerTimeoutMs ?? INTERRUPTING_STEER_TIMEOUT_MS;
+    const modelSwitchAckTimeoutMs = options.modelSwitchAckTimeoutMs ?? MODEL_SWITCH_ACK_TIMEOUT_MS;
 
     const spawnEnv = buildChildSpawnEnv(
       correlationId,
@@ -1019,7 +1037,15 @@ export async function runSingleAttempt(
       token?: LeaseToken,
       provenance?: MessageProvenanceV1,
     ): boolean => {
-      if (!child.stdin || pendingInterrupt || state.modelSwitch || state.terminal || state.turnLifecycleSettled) return false;
+      if (
+        !child.stdin
+        || pendingInterrupt
+        || state.modelSwitchDecisionId
+        || state.modelSwitch
+        || state.modelSwitchResumeRequestId
+        || state.terminal
+        || state.turnLifecycleSettled
+      ) return false;
       const nonce = randomUUID();
       steerSettlementSwallowed = false;
       pendingInterrupt = {
@@ -1097,6 +1123,10 @@ export async function runSingleAttempt(
       if (messages.length === 0 && state.lastContent) {
         appendBoundedTranscriptMessage(messages, { role: "assistant", content: state.lastContent });
       }
+      if (exitCode !== 0 || terminalStatus !== "completed") {
+        const terminalMessage = messages.at(-1)?.content;
+        if (terminalMessage) progress.lastMessage = terminalMessage;
+      }
       options.onProgress?.(progress);
       clearAllTimers();
       cleanupFile(systemPromptFile);
@@ -1154,6 +1184,10 @@ export async function runSingleAttempt(
         closeActiveCompactionRecovery();
         state.compactionRecovery = undefined;
         compactionSettlementSwallowed = false;
+        state.modelSwitchDecisionId = undefined;
+        state.modelSwitchResumeRequestId = undefined;
+        autoRetryProgressMessage = undefined;
+        modelFailoverProgressMessage = undefined;
         resetUsage(pendingMessageUsage);
         if (terminateChild) {
           state.terminal = true;
@@ -1248,6 +1282,10 @@ export async function runSingleAttempt(
         // The result is already consumable; settle with whatever structured
         // output was captured instead of blocking on a missing agent_settled/close.
         const structuredOutput = readStructuredOutput(true);
+        if (state.runtimeFailure) {
+          completeTurn(structuredOutput, true, 1);
+          return;
+        }
         if (structuredOutput === undefined) {
           // A corrective continuation is already in flight; the resumed turn
           // has not produced a value yet, so keep waiting for its settlement.
@@ -1303,10 +1341,12 @@ export async function runSingleAttempt(
       const eventKey = compactionRecoveryKey(event);
       if (closedCompactionRecoveries.has(eventKey)) return;
       const active = state.compactionRecovery;
+      const phaseRank = { pending: 0, completed: 1, continuation: 2 } as const;
+      let phaseAdvanced = false;
       if (active) {
         if (active.generation !== event.generation || active.recoveryId !== event.recoveryId) return;
-        const phaseRank = { pending: 0, completed: 1, continuation: 2 } as const;
         if (event.phase !== "failed" && phaseRank[event.phase] < phaseRank[active.phase]) return;
+        phaseAdvanced = event.phase !== "failed" && phaseRank[event.phase] > phaseRank[active.phase];
       }
       if (event.phase === "failed") {
         closedCompactionRecoveries.add(eventKey);
@@ -1333,6 +1373,10 @@ export async function runSingleAttempt(
         generation: event.generation,
         phase: event.phase,
       };
+      if (phaseAdvanced && timers.compactionRecovery) {
+        clearTimeout(timers.compactionRecovery);
+        timers.compactionRecovery = undefined;
+      }
       progress.status = "running";
       progress.phase = event.phase === "pending" ? "compacting" : "continuing";
       progress.resultReadyAt = undefined;
@@ -1546,9 +1590,21 @@ export async function runSingleAttempt(
         timers.outputLimitRecovery = undefined;
       }
       state.turnLifecycleSettled = false;
-      // The new turn acknowledges the resume prompt after a model switch;
-      // a stale id must not match a later response.
+      const pendingSwitch = state.modelSwitch;
+      if (pendingSwitch && !pendingSwitch.acknowledged) {
+        options.onChildEvent?.({
+          type: "teammate_model_switch_abandoned",
+          correlationId,
+          model: pendingSwitch.targetModel,
+        });
+      }
+      state.modelSwitchDecisionId = undefined;
+      state.modelSwitch = undefined;
       state.modelSwitchResumeRequestId = undefined;
+      if (timers.modelSwitch) clearTimeout(timers.modelSwitch);
+      timers.modelSwitch = undefined;
+      clearAutoRetryProgressMessage();
+      clearModelFailoverProgressMessage();
       state.lastAssistantStopReason = undefined;
       state.runtimeFailure = undefined;
       progress.status = "running";
@@ -1817,7 +1873,7 @@ export async function runSingleAttempt(
           state.structuredOutputAttemptFailed = true;
         }
         const structuredOutput = readStructuredOutput(false);
-        if (event.isError !== true && structuredOutput !== undefined) {
+        if (event.isError !== true && structuredOutput !== undefined && !state.runtimeFailure) {
           completeTurn(structuredOutput, true);
         }
       }
@@ -1900,77 +1956,110 @@ export async function runSingleAttempt(
      * outcome so a rejected command settles the original failure.
      */
     function startModelSwitch(failure: string, previousModel?: string): void {
+      if (state.modelSwitchDecisionId || state.modelSwitch || state.modelSwitchResumeRequestId) return;
       const stdin = child.stdin;
-      void Promise.resolve(options.onModelFailover!(failure, previousModel)).then((targetModel) => {
-        if (targetModel === undefined || state.terminal || state.turnLifecycleSettled) {
-          settleAsFailed();
-          return;
-        }
-        const slash = targetModel.indexOf("/");
-        if (slash <= 0) {
-          appendBoundedTranscriptMessage(messages, {
-            role: "system",
-            content:
-              `Model failover hook returned an invalid model id "${targetModel}"; `
-              + "settling the original failure instead of hot-swapping.",
-          });
-          settleAsFailed();
-          return;
-        }
-        const requestId = `teammate-model-switch-${randomUUID()}`;
-        state.modelSwitch = { requestId, targetModel, acknowledged: false };
-        progress.phase = "continuing";
-        progress.lastMessage = `Model failover: switching ${state.resolvedModel} -> ${targetModel}`;
-        options.onProgress?.(progress);
-        const sent = stdin !== null
-          && writeChildStdinLine(stdin, JSON.stringify({
-            id: requestId,
-            type: "set_model",
-            provider: targetModel.slice(0, slash),
-            modelId: targetModel.slice(slash + 1),
-          }));
-        if (!sent) {
-          state.modelSwitch = undefined;
-          settleAsFailed();
-          return;
-        }
-        timers.modelSwitch = setTimeout(() => {
-          timers.modelSwitch = undefined;
-          const pending = state.modelSwitch;
-          if (!pending || pending.requestId !== requestId || state.terminal) return;
-          state.modelSwitch = undefined;
-          appendBoundedTranscriptMessage(messages, {
-            role: "system",
-            content:
-              `Pi did not acknowledge the in-process model switch to ${targetModel} `
-              + "within the failover deadline; settling the original failure.",
-          });
-          settleAsFailed();
-        }, MODEL_SWITCH_ACK_TIMEOUT_MS);
-        timers.modelSwitch.unref?.();
-      }).catch((error) => {
-        // The decision hook rejected or threw: settle the original failure
-        // instead of leaving the turn stranded with no settlement path.
-        if (state.terminal || state.turnLifecycleSettled) return;
+      const decisionId = randomUUID();
+      state.modelSwitchDecisionId = decisionId;
+      timers.modelSwitch = setTimeout(() => {
+        timers.modelSwitch = undefined;
+        if (state.modelSwitchDecisionId !== decisionId || state.terminal || state.turnLifecycleSettled) return;
+        state.modelSwitchDecisionId = undefined;
         appendBoundedTranscriptMessage(messages, {
           role: "system",
-          content:
-            `Model failover hook failed: ${error instanceof Error ? error.message : String(error)}; `
-            + "settling the original failure.",
+          content: "Model failover selection did not finish within the failover deadline; settling the original failure.",
         });
         settleAsFailed();
-      });
+      }, modelSwitchAckTimeoutMs);
+      timers.modelSwitch.unref?.();
+      void Promise.resolve()
+        .then(() => options.onModelFailover!(failure, previousModel))
+        .then((targetModel) => {
+          if (state.modelSwitchDecisionId !== decisionId || state.terminal || state.turnLifecycleSettled) {
+            if (targetModel !== undefined) {
+              options.onChildEvent?.({
+                type: "teammate_model_switch_abandoned",
+                correlationId,
+                model: targetModel,
+              });
+            }
+            return;
+          }
+          state.modelSwitchDecisionId = undefined;
+          if (timers.modelSwitch) clearTimeout(timers.modelSwitch);
+          timers.modelSwitch = undefined;
+          if (targetModel === undefined) {
+            settleAsFailed();
+            return;
+          }
+          const slash = targetModel.indexOf("/");
+          if (slash <= 0) {
+            appendBoundedTranscriptMessage(messages, {
+              role: "system",
+              content:
+                `Model failover hook returned an invalid model id "${targetModel}"; `
+                + "settling the original failure instead of hot-swapping.",
+            });
+            settleAsFailed();
+            return;
+          }
+          const requestId = `teammate-model-switch-${randomUUID()}`;
+          state.modelSwitch = { requestId, targetModel, acknowledged: false };
+          progress.phase = "continuing";
+          setModelFailoverProgressMessage(`Model failover: switching ${state.resolvedModel} -> ${targetModel}`);
+          options.onProgress?.(progress);
+          const sent = stdin !== null
+            && writeChildStdinLine(stdin, JSON.stringify({
+              id: requestId,
+              type: "set_model",
+              provider: targetModel.slice(0, slash),
+              modelId: targetModel.slice(slash + 1),
+            }));
+          if (!sent) {
+            settleAsFailed();
+            return;
+          }
+          timers.modelSwitch = setTimeout(() => {
+            timers.modelSwitch = undefined;
+            const pending = state.modelSwitch;
+            if (!pending || pending.requestId !== requestId || state.terminal) return;
+            appendBoundedTranscriptMessage(messages, {
+              role: "system",
+              content:
+                `Pi did not acknowledge the in-process model switch to ${targetModel} `
+                + "within the failover deadline; settling the original failure.",
+            });
+            settleAsFailed();
+          }, modelSwitchAckTimeoutMs);
+          timers.modelSwitch.unref?.();
+        })
+        .catch((error) => {
+          if (state.modelSwitchDecisionId !== decisionId || state.terminal || state.turnLifecycleSettled) return;
+          state.modelSwitchDecisionId = undefined;
+          if (timers.modelSwitch) clearTimeout(timers.modelSwitch);
+          timers.modelSwitch = undefined;
+          appendBoundedTranscriptMessage(messages, {
+            role: "system",
+            content:
+              `Model failover hook failed: ${error instanceof Error ? error.message : String(error)}; `
+              + "settling the original failure.",
+          });
+          settleAsFailed();
+        });
     }
 
     /** Settle the turn as a failure after an aborted or rejected model switch. */
     function settleAsFailed(): void {
       if (state.turnLifecycleSettled || state.terminal) return;
+      state.modelSwitchDecisionId = undefined;
+      state.modelSwitchResumeRequestId = undefined;
+      if (timers.modelSwitch) clearTimeout(timers.modelSwitch);
+      timers.modelSwitch = undefined;
       // A switch that never reached its ack (rejected set_model, timeout,
       // dead stdin) never ran under the target model. Tell the host so it can
       // release the trial acquisition instead of charging a phantom failure.
       const pendingSwitch = state.modelSwitch;
+      state.modelSwitch = undefined;
       if (pendingSwitch !== undefined && !pendingSwitch.acknowledged) {
-        state.modelSwitch = undefined;
         options.onChildEvent?.({
           type: "teammate_model_switch_abandoned",
           correlationId,
@@ -1984,28 +2073,26 @@ export async function runSingleAttempt(
     /** Finalize the current run after Pi confirms no retry, compaction, or queued continuation remains. */
     function settleAgentSession(): void {
       if (state.compactionRecovery) {
-        compactionSettlementSwallowed = true;
-        progress.status = "running";
-        progress.phase = state.compactionRecovery.phase === "pending" ? "compacting" : "continuing";
-        progress.resultReadyAt = undefined;
-        options.onProgress?.(progress);
-        armCompactionRecoveryDeadline();
-        return;
+        if (state.compactionRecovery.phase === "continuation" && state.runtimeFailure) {
+          closeActiveCompactionRecovery();
+          state.compactionRecovery = undefined;
+          compactionSettlementSwallowed = false;
+          if (timers.compactionRecovery) {
+            clearTimeout(timers.compactionRecovery);
+            timers.compactionRecovery = undefined;
+          }
+        } else {
+          compactionSettlementSwallowed = true;
+          progress.status = "running";
+          progress.phase = state.compactionRecovery.phase === "pending" ? "compacting" : "continuing";
+          progress.resultReadyAt = undefined;
+          options.onProgress?.(progress);
+          armCompactionRecoveryDeadline();
+          return;
+        }
       }
+      if (state.modelSwitchDecisionId || state.modelSwitch || state.modelSwitchResumeRequestId) return;
       const structuredOutput = readStructuredOutput(false);
-      if (params.outputSchema && structuredOutput === undefined) {
-        // A corrective continuation is already in flight; wait for the resumed
-        // turn instead of settling the run while it is still pending.
-        if (structuredOutputRecoveryActive) return;
-        if (startStructuredOutputRecovery()) return;
-        appendStructuredOutputFailure();
-        appendBoundedTranscriptMessage(messages, {
-          role: "system",
-          content: STRUCTURED_OUTPUT_SETTLEMENT_DIAGNOSTICS.agentEnd,
-        });
-        completeTurn(undefined, true, 1);
-        return;
-      }
       const exitCode = state.runtimeFailure ? 1 : 0;
       // In-process model failover: when the turn failed with a retryable
       // provider error, the child runtime is still alive (wakeable), and a
@@ -2025,6 +2112,19 @@ export async function runSingleAttempt(
         && isFallbackProviderError(state.runtimeFailure)
       ) {
         void startModelSwitch(state.runtimeFailure, state.switchedModel);
+        return;
+      }
+      if (params.outputSchema && structuredOutput === undefined) {
+        // A corrective continuation is already in flight; wait for the resumed
+        // turn instead of settling the run while it is still pending.
+        if (structuredOutputRecoveryActive) return;
+        if (startStructuredOutputRecovery()) return;
+        appendStructuredOutputFailure();
+        appendBoundedTranscriptMessage(messages, {
+          role: "system",
+          content: STRUCTURED_OUTPUT_SETTLEMENT_DIAGNOSTICS.agentEnd,
+        });
+        completeTurn(undefined, true, 1);
         return;
       }
       completeTurn(structuredOutput, !wakeable || exitCode !== 0, exitCode);
@@ -2118,14 +2218,16 @@ export async function runSingleAttempt(
       const attempt = typeof event.attempt === "number" ? event.attempt : undefined;
       const maxAttempts = typeof event.maxAttempts === "number" ? event.maxAttempts : undefined;
       const errorMessage = typeof event.errorMessage === "string" ? event.errorMessage : undefined;
-      progress.lastMessage = [
+      autoRetryProgressMessage = [
         attempt === undefined ? "Pi is retrying the provider request" : `Pi retry ${attempt}${maxAttempts ? `/${maxAttempts}` : ""}`,
         errorMessage,
       ].filter(Boolean).join(": ");
+      progress.lastMessage = autoRetryProgressMessage;
       options.onProgress?.(progress);
     }
 
     function onAutoRetryEnd(event: JsonLineEvent): void {
+      clearAutoRetryProgressMessage();
       progress.status = "running";
       progress.phase = event.success === true ? "continuing" : "settling";
       options.onProgress?.(progress);
@@ -2159,7 +2261,6 @@ export async function runSingleAttempt(
           timers.modelSwitch = undefined;
         }
         if (event.success !== true || event.command !== "set_model") {
-          state.modelSwitch = undefined;
           appendBoundedTranscriptMessage(messages, {
             role: "system",
             content:
@@ -2194,7 +2295,7 @@ export async function runSingleAttempt(
         progress.status = "running";
         progress.phase = "continuing";
         progress.resultReadyAt = undefined;
-        progress.lastMessage = `Model failover: switched to ${modelSwitch.targetModel}`;
+        setModelFailoverProgressMessage(`Model failover: switched to ${modelSwitch.targetModel}`);
         options.onProgress?.(progress);
         const prompt = options.resumePrompt ?? MODEL_FALLBACK_RESUME_PROMPT;
         const resumeRequestId = `teammate-model-switch-resume-${randomUUID()}`;
@@ -2209,7 +2310,21 @@ export async function runSingleAttempt(
           }));
         if (!sent) {
           settleAsFailed();
+          return;
         }
+        timers.modelSwitch = setTimeout(() => {
+          timers.modelSwitch = undefined;
+          if (state.modelSwitchResumeRequestId !== resumeRequestId || state.terminal || state.turnLifecycleSettled) return;
+          state.modelSwitchResumeRequestId = undefined;
+          appendBoundedTranscriptMessage(messages, {
+            role: "system",
+            content:
+              `Pi did not start the resumed turn under ${modelSwitch.targetModel} `
+              + "within the failover deadline; settling the failed turn.",
+          });
+          settleAsFailed();
+        }, modelSwitchAckTimeoutMs);
+        timers.modelSwitch.unref?.();
         return;
       }
       // The resume prompt after a successful in-process switch was rejected:
@@ -2223,6 +2338,8 @@ export async function runSingleAttempt(
         && event.success !== true
       ) {
         state.modelSwitchResumeRequestId = undefined;
+        if (timers.modelSwitch) clearTimeout(timers.modelSwitch);
+        timers.modelSwitch = undefined;
         appendBoundedTranscriptMessage(messages, {
           role: "system",
           content:
@@ -2345,6 +2462,17 @@ export async function runSingleAttempt(
         interruptHandlers.delete(child.stdin);
       }
       clearAllTimers();
+      const closingSwitch = state.modelSwitch;
+      state.modelSwitchDecisionId = undefined;
+      state.modelSwitch = undefined;
+      state.modelSwitchResumeRequestId = undefined;
+      if (closingSwitch && !closingSwitch.acknowledged) {
+        options.onChildEvent?.({
+          type: "teammate_model_switch_abandoned",
+          correlationId,
+          model: closingSwitch.targetModel,
+        });
+      }
       termination.cleanup();
       unbindTerminationSignal();
 

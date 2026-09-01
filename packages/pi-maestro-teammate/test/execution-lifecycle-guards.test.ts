@@ -765,7 +765,7 @@ test("each warm turn gets its own lifecycle confirmation deadline", async () => 
 
 test("agent_settled waits through retry and compaction phases", async () => {
   const completions: SingleResult[] = [];
-  const phases: Array<AgentProgress["phase"]> = [];
+  const progress: Array<Pick<AgentProgress, "phase" | "lastMessage">> = [];
   let handle: FakeChildHandle | undefined;
   const spawnChildProcess = (() => {
     handle = createFakeChild();
@@ -789,16 +789,23 @@ test("agent_settled waits through retry and compaction phases", async () => {
       baseCwd: process.cwd(),
       spawnChildProcess,
       resultReadyGraceMs: 100,
-      onProgress: (entry) => phases.push(entry.phase),
+      onProgress: (entry) => progress.push({ phase: entry.phase, lastMessage: entry.lastMessage }),
       onTurnComplete: (entry) => completions.push(entry),
     },
   );
 
   assert.equal(result.lifecyclePending, true);
   assert.equal(completions.length, 0);
-  assert.ok(phases.includes("retrying"));
-  assert.ok(phases.includes("compacting"));
-  assert.ok(phases.includes("continuing"));
+  const retryIndex = progress.findIndex((entry) => entry.phase === "retrying");
+  assert.ok(retryIndex >= 0);
+  assert.match(progress[retryIndex].lastMessage ?? "", /Pi retry 1\/3: rate limited/);
+  assert.deepEqual(
+    progress[retryIndex + 1],
+    { phase: "continuing", lastMessage: undefined },
+    "a completed retry must not leak its message into later progress updates",
+  );
+  assert.ok(progress.some((entry) => entry.phase === "compacting"));
+  assert.ok(progress.some((entry) => entry.phase === "continuing"));
   await delay(80);
   assert.equal(completions.length, 1);
   assert.equal(completions[0].exitCode, 0);
@@ -1000,7 +1007,7 @@ test("output-limit: a child exit during recovery is not a success", async () => 
   assert.equal(handle!.killed(), false, "an already-exited child needs no kill");
 });
 
-test("compaction recovery: agent_settled waits for the continuation turn", async () => {
+test("compaction recovery: each advanced phase gets a full deadline for the continuation turn", async () => {
   const parentSession = path.join(os.tmpdir(), `teammate-compaction-parent-${Date.now()}.jsonl`);
   fs.writeFileSync(parentSession, "{}\n");
   let handle: FakeChildHandle | undefined;
@@ -1029,6 +1036,8 @@ test("compaction recovery: agent_settled waits for the continuation turn", async
           generation: 2,
           phase: "continuation",
         });
+      }, 60);
+      setTimeout(() => {
         handle!.stdout.write(line({ type: "agent_start" }));
         handle!.stdout.write(line({ type: "turn_start" }));
         handle!.child.emit("message", {
@@ -1046,7 +1055,7 @@ test("compaction recovery: agent_settled waits for the continuation turn", async
         handle!.stdout.write(line(resultReadyTurnEnd("continued after compaction")));
         handle!.stdout.write(line({ type: "agent_end", willRetry: false }));
         handle!.stdout.write(line({ type: "agent_settled" }));
-      }, 10);
+      }, 120);
     });
     return handle!.child;
   }) as unknown as SpawnSeam;
@@ -1069,6 +1078,61 @@ test("compaction recovery: agent_settled waits for the continuation turn", async
     assert.equal(handle!.killed(), true, "the non-wakeable fork is reclaimed only after the continuation settles");
   } finally {
     fs.rmSync(parentSession, { force: true });
+  }
+});
+
+test("compaction recovery: a settled continuation provider failure bypasses the watchdog", async () => {
+  let handle: FakeChildHandle | undefined;
+  const spawnChildProcess = (() => {
+    handle = createFakeChild();
+    queueMicrotask(() => {
+      handle!.child.emit("message", {
+        type: "teammate_compaction_state",
+        recoveryId: "session:failed-continuation",
+        generation: 1,
+        phase: "pending",
+      });
+      handle!.stdout.write(line({ type: "agent_end", willRetry: false }));
+      handle!.stdout.write(line({ type: "agent_settled" }));
+      handle!.child.emit("message", {
+        type: "teammate_compaction_state",
+        recoveryId: "session:failed-continuation",
+        generation: 1,
+        phase: "completed",
+      });
+      handle!.child.emit("message", {
+        type: "teammate_compaction_state",
+        recoveryId: "session:failed-continuation",
+        generation: 1,
+        phase: "continuation",
+      });
+      handle!.stdout.write(line({
+        type: "message_end",
+        message: { role: "assistant", stopReason: "error", errorMessage: "WebSocket error" },
+      }));
+      handle!.stdout.write(line({ type: "agent_end", willRetry: false }));
+      handle!.stdout.write(line({ type: "agent_settled" }));
+    });
+    return handle!.child;
+  }) as unknown as SpawnSeam;
+
+  const keepAlive = setInterval(() => {}, 25);
+  try {
+    const result = await runSingleTeammate(
+      { agent: "general", task: "recover context", context: "fresh" },
+      { baseCwd: process.cwd(), spawnChildProcess, outputLimitRecoveryTimeoutMs: 100 },
+    );
+
+    assert.equal(result.exitCode, 1);
+    assert.ok(result.messages.some((message) => /WebSocket error/.test(message.content)));
+    assert.equal(
+      result.messages.some((message) => /compaction recovery did not continue/.test(message.content)),
+      false,
+      "an authoritative failed continuation must settle through provider failure handling",
+    );
+    assert.equal(handle!.killed(), true);
+  } finally {
+    clearInterval(keepAlive);
   }
 });
 
@@ -1445,6 +1509,77 @@ const structuredToolEvents = (value: unknown): Array<Record<string, unknown>> =>
   { type: "tool_execution_start", toolName: "structured_output" },
   { type: "tool_execution_end", toolName: "structured_output", isError: false },
 ];
+
+test("structured_output success never overrides an existing runtime failure", async () => {
+  const runScenario = async (lane: "tool-shortcut" | "result-ready-grace"): Promise<SingleResult> => {
+    const spawnChildProcess = ((
+      _command: string,
+      _args: readonly string[],
+      spawnOptions: { env?: NodeJS.ProcessEnv },
+    ) => {
+      const handle = createFakeChild();
+      const outputPath = spawnOptions.env?.PI_TEAMMATE_STRUCTURED_OUTPUT_PATH;
+      if (lane === "result-ready-grace" && typeof outputPath !== "string") {
+        throw new Error("structured output path missing from child environment");
+      }
+      queueMicrotask(() => {
+        if (lane === "result-ready-grace") {
+          fs.writeFileSync(outputPath!, JSON.stringify({ value: lane }), "utf8");
+        }
+        handle.stdout.write(line({ type: "agent_start" }));
+        handle.stdout.write(line({ type: "turn_start" }));
+        handle.stdout.write(line({
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [{
+              type: "toolCall",
+              name: "structured_output",
+              arguments: { value: lane },
+            }],
+          },
+        }));
+        if (lane === "tool-shortcut") {
+          handle.stdout.write(line({ type: "tool_execution_start", toolName: "structured_output" }));
+        }
+        handle.stdout.write(line({ type: "error", error: "Authentication failed: token expired" }));
+        if (lane === "tool-shortcut") {
+          handle.stdout.write(line({ type: "tool_execution_end", toolName: "structured_output", isError: false }));
+          handle.stdout.write(line({ type: "agent_end", willRetry: false }));
+          handle.stdout.write(line({ type: "agent_settled" }));
+        } else {
+          handle.stdout.write(line(resultReadyTurnEnd("schema result is ready")));
+        }
+      });
+      return handle.child;
+    }) as unknown as SpawnSeam;
+
+    return runSingleTeammate(
+      {
+        agent: "general",
+        task: "return structured output",
+        context: "fresh",
+        outputSchema: valueSchema,
+      },
+      { baseCwd: process.cwd(), spawnChildProcess, resultReadyGraceMs: 30 },
+    );
+  };
+
+  const keepAlive = setInterval(() => {}, 10);
+  try {
+    for (const lane of ["tool-shortcut", "result-ready-grace"] as const) {
+      const result = await runScenario(lane);
+      assert.equal(result.exitCode, 1, `${lane} published false success`);
+      assert.deepEqual(result.structuredOutput, { value: lane });
+      assert.ok(
+        result.messages.some((message) => /Authentication failed: token expired/.test(message.content)),
+        `${lane} lost the runtime failure diagnostic: ${JSON.stringify(result.messages)}`,
+      );
+    }
+  } finally {
+    clearInterval(keepAlive);
+  }
+});
 
 test("missing structured_output resumes the child once and accepts the resubmitted value", async () => {
   let handle: FakeChildHandle | undefined;

@@ -307,9 +307,14 @@ test("B: a missing checkpoint file does not enable resume", async () => {
  * resume prompt goes over the same channel, and the turn settles as success
  * under the new model — all without spawning a second child.
  */
-test("A: a live child hot-swaps to the next model via set_model RPC", async () => {
+test("A: a structured-output child hot-swaps to the next model via set_model RPC", async () => {
   const spawned: Array<{ args: readonly string[] }> = [];
   let stdinCommands: Array<Record<string, unknown>> = [];
+  const progress: Array<{
+    phase: string | undefined;
+    requestedModel: string | undefined;
+    lastMessage: string | undefined;
+  }> = [];
 
   const spawnChildProcess = ((_command: string, args: readonly string[]) => {
     const handle = createFakeChild();
@@ -343,9 +348,14 @@ test("A: a live child hot-swaps to the next model via set_model RPC", async () =
               handle.stdout.write(line({ type: "agent_start" }));
               handle.stdout.write(line({ type: "turn_start" }));
               handle.stdout.write(line({
-                type: "message_end",
-                message: { role: "assistant", content: [{ type: "text", text: "RECOVERED_IN_PLACE" }] },
+                type: "assistant",
+                message: {
+                  role: "assistant",
+                  content: [{ type: "toolCall", name: "structured_output", arguments: { value: "RECOVERED_IN_PLACE" } }],
+                },
               }));
+              handle.stdout.write(line({ type: "tool_execution_start", toolName: "structured_output" }));
+              handle.stdout.write(line({ type: "tool_execution_end", toolName: "structured_output", isError: false }));
               handle.stdout.write(line({ type: "agent_end" }));
               handle.stdout.write(line({ type: "agent_settled" }));
             });
@@ -355,7 +365,8 @@ test("A: a live child hot-swaps to the next model via set_model RPC", async () =
         }
       }
     });
-    // First turn: 503 after some work, but the child stays alive (wakeable).
+    // First turn: a legacy agent_end without willRetry and the modern
+    // agent_settled boundary arrive together while model selection is pending.
     queueMicrotask(() => {
       handle.stdout.write(line({ type: "agent_start" }));
       handle.stdout.write(line({ type: "turn_start" }));
@@ -369,7 +380,7 @@ test("A: a live child hot-swaps to the next model via set_model RPC", async () =
           errorMessage: "OpenAI API error (503)",
         },
       }));
-      handle.stdout.write(line({ type: "agent_end", willRetry: false }));
+      handle.stdout.write(line({ type: "agent_end" }));
       handle.stdout.write(line({ type: "agent_settled" }));
     });
     return handle.child;
@@ -384,6 +395,11 @@ test("A: a live child hot-swaps to the next model via set_model RPC", async () =
           task: "task",
           model: "provider/primary",
           fallbackModels: ["provider/backup"],
+          outputSchema: {
+            type: "object",
+            properties: { value: { type: "string" } },
+            required: ["value"],
+          },
         },
         {
           baseCwd: process.cwd(),
@@ -391,6 +407,11 @@ test("A: a live child hot-swaps to the next model via set_model RPC", async () =
           modelCapabilities: [{ id: "provider/primary" }, { id: "provider/backup" }],
           modelCircuitBreaker: new ModelCircuitBreaker(),
           enableRetryBackoff: false,
+          onProgress: (entry) => progress.push({
+            phase: entry.phase,
+            requestedModel: entry.requestedModel,
+            lastMessage: entry.lastMessage,
+          }),
         },
       ),
       new Promise<never>((_, rej) => setTimeout(() => rej(new Error("A TIMEOUT")), 8000)),
@@ -401,6 +422,11 @@ test("A: a live child hot-swaps to the next model via set_model RPC", async () =
     assert.ok(setModel, `set_model missing from ${JSON.stringify(stdinCommands)}`);
     assert.equal(setModel.provider, "provider");
     assert.equal(setModel.modelId, "backup");
+    assert.equal(
+      stdinCommands.filter((command) => command.type === "set_model").length,
+      1,
+      "legacy agent_end plus agent_settled must share one failover decision",
+    );
     const resumePrompt = stdinCommands.find(
       (command) => command.type === "prompt" && typeof command.id === "string",
     );
@@ -409,6 +435,14 @@ test("A: a live child hot-swaps to the next model via set_model RPC", async () =
     // The run succeeded in place under the switched model.
     assert.equal(result.exitCode, 0);
     assert.equal(result.model, "provider/backup");
+    assert.deepEqual(result.structuredOutput, { value: "RECOVERED_IN_PLACE" });
+    assert.ok(
+      progress.some((entry) =>
+        entry.phase === "prompting"
+        && entry.requestedModel === "provider/backup"
+        && entry.lastMessage === undefined),
+      `model-switch progress leaked across the resumed turn: ${JSON.stringify(progress)}`,
+    );
   } finally {
     clearInterval(keepAlive);
   }
@@ -978,6 +1012,108 @@ test("H1: a rejected resume prompt settles instead of hanging", async () => {
     assert.deepEqual(result.attemptedModels, ["provider/primary", "provider/backup"]);
   } finally {
     clearInterval(keepAlive);
+  }
+});
+
+/**
+ * H2: set_model can succeed while the resumed turn never starts. The resume
+ * phase has its own deadline and must project that diagnostic before close.
+ */
+test("H2: a silent resumed turn settles on the model-switch deadline", async () => {
+  const spawned: Array<{ args: readonly string[] }> = [];
+  const handles: FakeChildHandle[] = [];
+  const progress: Array<{ status: string; lastMessage?: string }> = [];
+
+  const spawnChildProcess = ((_command: string, args: readonly string[]) => {
+    const handle = createFakeChild();
+    handles.push(handle);
+    spawned.push({ args });
+    handle.child.stdin!.on("data", (chunk: Buffer) => {
+      for (const raw of chunk.toString().split("\n")) {
+        if (!raw.trim()) continue;
+        try {
+          const command = JSON.parse(raw) as Record<string, unknown>;
+          if (command.type === "set_model") {
+            queueMicrotask(() => {
+              handle.stdout.write(line({
+                type: "response",
+                id: command.id,
+                command: "set_model",
+                success: true,
+              }));
+            });
+          }
+          // Deliberately ignore the resume prompt: Pi stays silent.
+        } catch {
+          // Ignore malformed test lines.
+        }
+      }
+    });
+    queueMicrotask(() => {
+      handle.stdout.write(line({ type: "agent_start" }));
+      handle.stdout.write(line({ type: "turn_start" }));
+      handle.stdout.write(line({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          stopReason: "error",
+          errorMessage: "OpenAI API error (503)",
+        },
+      }));
+      handle.stdout.write(line({ type: "agent_end", willRetry: false }));
+      handle.stdout.write(line({ type: "agent_settled" }));
+    });
+    return handle.child;
+  }) as unknown as SpawnSeam;
+
+  const controller = new AbortController();
+  type ProgressSnapshot = { status: string; lastMessage?: string };
+  let resolveFailure!: (entry: ProgressSnapshot) => void;
+  const failureObserved = new Promise<ProgressSnapshot>((resolve) => { resolveFailure = resolve; });
+  let watchdog: ReturnType<typeof setTimeout> | undefined;
+  let run: ReturnType<typeof runSingleTeammate> | undefined;
+  try {
+    run = runSingleTeammate(
+      {
+        agent: "general",
+        task: "task",
+        model: "provider/primary",
+        fallbackModels: ["provider/backup"],
+      },
+      {
+        baseCwd: process.cwd(),
+        spawnChildProcess,
+        modelCapabilities: [{ id: "provider/primary" }, { id: "provider/backup" }],
+        modelCircuitBreaker: new ModelCircuitBreaker(),
+        enableRetryBackoff: false,
+        modelSwitchAckTimeoutMs: 40,
+        signal: controller.signal,
+        onProgress: (entry) => {
+          const snapshot = { status: entry.status, lastMessage: entry.lastMessage };
+          progress.push(snapshot);
+          if (
+            snapshot.status === "failed"
+            && /did not start the resumed turn under provider\/backup/.test(snapshot.lastMessage ?? "")
+          ) resolveFailure(snapshot);
+        },
+      },
+    );
+    void run.catch(() => undefined);
+    const timeout = new Promise<never>((_, reject) => {
+      watchdog = setTimeout(() => reject(new Error(
+        `H2 TIMEOUT spawned=${JSON.stringify(spawned)} progress=${JSON.stringify(progress)}`,
+      )), 5_000);
+    });
+    const terminal = await Promise.race([failureObserved, timeout]);
+
+    assert.equal(terminal.status, "failed");
+    assert.match(terminal.lastMessage ?? "", /did not start the resumed turn under provider\/backup/);
+    assert.equal(spawned.length, 1);
+  } finally {
+    if (watchdog) clearTimeout(watchdog);
+    controller.abort();
+    for (const handle of handles) handle.close(null, "SIGTERM");
+    await run?.catch(() => undefined);
   }
 });
 
