@@ -21,6 +21,13 @@ class FakeBrowserManager implements BrowserManagerLike {
       listeningPort: 19222,
       authenticatedConnected: true,
       tabCount: 3,
+      pendingPairings: [{
+        requestId: "11111111-1111-4111-8111-111111111111",
+        code: "123456",
+        expiresAt: 4_000_000_000_000,
+        generation: 7,
+        origin: "chrome-extension://test",
+      }],
     },
     namedTabs: [{
       name: "docs",
@@ -65,6 +72,9 @@ class FakeBrowserManager implements BrowserManagerLike {
     };
   }
   async status(): Promise<BrowserManagerStatus> { return structuredClone(this.statusResult); }
+  async pair(requestId: string, code: string) {
+    return { requestId, port: 19222, installationId: `11111111-1111-4111-8111-${code.repeat(2)}` };
+  }
   async close(name: string): Promise<boolean> { this.closed.push(name); return true; }
   async closeAll(): Promise<number> { return this.closeAllCount; }
 }
@@ -77,10 +87,10 @@ test("stealth module exports the webdriver/plugins/chrome/permissions patches an
   assert.ok(STEALTH_LAUNCH_ARGS.includes('--disable-blink-features=AutomationControlled'), 'STEALTH_LAUNCH_ARGS must disable AutomationControlled');
 });
 
-test("browser schema preserves legacy actions and reserves status", () => {
-  assert.deepEqual((BrowserParams.properties.action as { enum: string[] }).enum, ["open", "close", "run", "guide", "status"]);
+test("browser schema preserves legacy actions and adds explicit status/pair surfaces", () => {
+  assert.deepEqual((BrowserParams.properties.action as { enum: string[] }).enum, ["open", "close", "run", "guide", "status", "pair"]);
   assert.deepEqual(Object.keys(BrowserParams.properties).sort(), [
-    "action", "all", "app", "code", "dialogs", "kill", "name", "timeout", "topic", "url", "viewport", "visible", "wait_until",
+    "action", "all", "app", "code", "dialogs", "kill", "name", "request_id", "timeout", "topic", "url", "viewport", "visible", "wait_until",
   ]);
   assert.equal(Check(BrowserParams, { action: "open" }), true);
   assert.equal(Check(BrowserParams, { action: "close" }), true);
@@ -88,6 +98,9 @@ test("browser schema preserves legacy actions and reserves status", () => {
   assert.equal(Check(BrowserParams, { action: "run", code: "return true;" }), true);
   assert.equal(Check(BrowserParams, { action: "run", code: "" }), false);
   assert.equal(Check(BrowserParams, { action: "status" }), true);
+  assert.equal(Check(BrowserParams, { action: "pair" }), false);
+  assert.equal(Check(BrowserParams, { action: "pair", request_id: "request", code: "123456" }), true);
+  assert.equal(Check(BrowserParams, { action: "pair", request_id: "request", code: "wrong" }), false);
 });
 
 test("browser tool guidelines expose probe/snapshot/diff/monitor helpers", async () => {
@@ -117,10 +130,12 @@ test("browser tool guidelines expose probe/snapshot/diff/monitor helpers", async
   assert.match(joined, /tab\.setDownloadBehavior\(/, "guidelines must mention tab.setDownloadBehavior()");
   assert.match(joined, /tab\.cdpBatch\(/, "guidelines must mention tab.cdpBatch()");
   assert.match(joined, /action:status/, "guidelines must identify status as the live bridge probe");
+  assert.match(joined, /pendingPairings/, "guidelines must expose pending pairing requests");
+  assert.match(joined, /action:pair/, "guidelines must expose one-time pairing approval");
   assert.match(joined, /never falls back|no managed-browser fallback/, "guidelines must state that extension fails closed without fallback");
-  // Channel stays nested under app, so the legacy top-level schema is unchanged.
+  // Channel stays nested under app; pairing adds only its explicit request id.
   assert.deepEqual(Object.keys(BrowserParams.properties).sort(), [
-    "action", "all", "app", "code", "dialogs", "kill", "name", "timeout", "topic", "url", "viewport", "visible", "wait_until",
+    "action", "all", "app", "code", "dialogs", "kill", "name", "request_id", "timeout", "topic", "url", "viewport", "visible", "wait_until",
   ]);
 });
 
@@ -247,6 +262,7 @@ test("browser tool forwards an explicit canonical channel and returns structured
   assert.equal(status.details?.status?.bridge.serverStarted, true);
   assert.equal(status.details?.status?.bridge.authenticatedConnected, true);
   assert.equal(status.details?.status?.bridge.tabCount, 3);
+  assert.equal(status.details?.status?.bridge.pendingPairings[0]?.code, "123456");
   assert.deepEqual(status.details?.status?.namedTabs[0], {
     name: "docs",
     channel: "cdp",
@@ -254,6 +270,15 @@ test("browser tool forwards an explicit canonical channel and returns structured
     capabilities: { page: true, cdp: true, cookies: true },
   });
   assert.match(status.details?.result ?? "", /Browser status \(live\)/);
+
+  const paired = await tool.execute("pair", {
+    action: "pair",
+    request_id: "11111111-1111-4111-8111-111111111111",
+    code: "123456",
+  }, undefined, undefined, ctx);
+  assert.equal(paired.details?.action, "pair");
+  assert.equal(paired.details?.pairingApproval?.requestId, "11111111-1111-4111-8111-111111111111");
+  assert.match(paired.details?.result ?? "", /store the credentials and reconnect/i);
 });
 
 test("browser guide returns registry index; topic loads one document", async () => {

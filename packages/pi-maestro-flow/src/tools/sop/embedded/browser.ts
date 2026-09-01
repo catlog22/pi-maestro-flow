@@ -16,11 +16,14 @@ const SOP_CORE = `Browser SOP — when to use which tab.* helper and field-teste
   - Login state / CAPTCHA / real fingerprint over Puppeteer: open { app:{channel:"profile", user_profile_dir}, visible:true }. Legacy attach_user_profile:true remains an equivalent profile selector.
     Pure stealth is NOT enough for Cloudflare managed challenges — attaching the user's real browser is the working path.
   - Optional extension adapter: ONLY open { app:{channel:"extension", target} } to borrow an existing tab, or add url to create an owned tab. Disconnect/unsupported calls fail closed; there is no managed fallback.
+  - First-time extension setup is zero-copy: call browser status, let the loaded extension auto-discover the default 19222..19231 range, verify its pending requestId + six-digit code, then call browser pair. Pairing only delivers credentials; the verified marker is written after the extension reconnects with challenge-response authentication.
+  - PI_BROWSER_BRIDGE_PORT changes the server's ten-port anchor only. An empty extension cannot read the Pi process environment, so a custom anchor must also be entered in popup Advanced settings; manual port/token remains recovery/compatibility only.
   - extension capabilities are limited to page.url/title/goto/evaluate, browser.pages, and tab.url/title/goto/evaluate/cdp/cdpBatch/cookies/tabs/screenshot. It is not a Puppeteer Page and has no ElementHandle/request interception/frame-event parity.
   - ownership is owned or borrowed: closing a borrowed entry releases only the name; closing an extension-owned tab closes the real tab.
   - visible controls a Pi-launched browser process; it is not a channel selector. Existing CDP/profile attachments ignore it; extension rejects it.
   - profile setup: pi auto-launches the user's Chrome with --remote-debugging-port=9222 --user-data-dir=<dir> when no live debug port is found. If a Chrome with that profile already exposes a debug port, pi reuses it.
-  - Live diagnostics: browser action=status explicitly starts the optional bridge and reports serverStarted, authenticatedConnected, live extension tabCount, plus named-tab channel/ownership/capabilities. /install state is historical/configuration evidence, never live connectivity.
+  - Live diagnostics: browser action=status explicitly starts the optional bridge and reports pendingPairings, authenticatedConnected, drainingCommands, live extension tabCount, plus named-tab channel/ownership/capabilities. /install state requires a successful legacy-token or challenge-response authentication marker; pairing alone is not installed and historical state is never live connectivity.
+  - Caller timeout is not proof that already-running page JavaScript stopped: draining ownership remains until a real result/error/disconnect terminal, and an owned tab closes only after that terminal.
 
 2. CLOUDFLARE TURNSTILE (verified on NewAPI)
   - Attach the real browser (step 1) — CF trusts the real fingerprint.

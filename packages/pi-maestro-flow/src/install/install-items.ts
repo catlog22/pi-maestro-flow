@@ -173,7 +173,7 @@ function isValidBrowserBridgeConfig(value: BrowserBridgeConfig | null): boolean 
 
 function isValidBrowserBridgeVerifiedMarker(value: BrowserBridgeVerifiedMarker | null): boolean {
   return value?.version === 1
-    && value.protocol === "first-frame-token-v1"
+    && (value.protocol === "first-frame-token-v1" || value.protocol === "challenge-hmac-sha256-v1")
     && isValidBridgePort(value.port)
     && typeof value.verifiedAt === "string"
     && Number.isFinite(Date.parse(value.verifiedAt));

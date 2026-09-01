@@ -10,6 +10,7 @@ import {
   type BrowserManagerLike,
   type BrowserManagerStatus,
 } from "./browser/manager.ts";
+import type { PairingApproval } from "./browser/bridge-server.ts";
 import { getSopRegistry, SOP_INDEX_EXTRAS, SOP_INDEX_HEADERS } from "./sop/sop-registry-singleton.ts";
 
 type BrowserWaitUntil = "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
@@ -21,10 +22,10 @@ type BrowserDialogPolicy = "accept" | "dismiss";
 // rules. `guide` with no topic returns the registry index; `guide` + topic loads
 // one document. Knowhow updates flow through `maestro knowledge stage → promote`.
 
-const BrowserAction = Type.Unsafe<"open" | "close" | "run" | "guide" | "status">({
+const BrowserAction = Type.Unsafe<"open" | "close" | "run" | "guide" | "status" | "pair">({
   type: "string",
-  enum: ["open", "close", "run", "guide", "status"],
-  description: "open: launch or attach a tab; close: close one or all tabs; run: execute JavaScript in a tab; guide: return the SOP registry index (pass topic to load one document); status: start/probe the extension bridge and report live connections plus named-tab capabilities",
+  enum: ["open", "close", "run", "guide", "status", "pair"],
+  description: "open: launch or attach a tab; close: close one or all tabs; run: execute JavaScript in a tab; guide: return the SOP registry index; status: start/probe the extension bridge and list pending pairings; pair: approve one pending request with request_id + code",
 });
 const WaitUntil = Type.Unsafe<BrowserWaitUntil>({
   type: "string",
@@ -57,19 +58,31 @@ export const BrowserParams = Type.Object({
   })),
   wait_until: Type.Optional(WaitUntil),
   dialogs: Type.Optional(DialogPolicy),
-  code: Type.Optional(Type.String({ minLength: 1, description: "Async JavaScript function body executed with page/browser/tab helpers; required for run" })),
+  code: Type.Optional(Type.String({ minLength: 1, description: "Async JavaScript for run, or the six-digit confirmation code for pair" })),
+  request_id: Type.Optional(Type.String({ minLength: 1, description: "Pending pairing requestId returned by browser status; required for pair" })),
   topic: Type.Optional(Type.String({ description: "SOP document id for action=guide (see registry index): core | captcha-strategies | automation-antipatterns; omit to list available documents" })),
   timeout: Type.Optional(Type.Number({ minimum: 1, maximum: 300, description: "Timeout in seconds" })),
   all: Type.Optional(Type.Boolean({ description: "Close all named tabs" })),
   kill: Type.Optional(Type.Boolean({ description: "Deprecated alias for close; owned browsers are always closed regardless of this flag" })),
 }, {
   additionalProperties: false,
-  if: { properties: { action: { const: "run" } }, required: ["action"] },
-  then: { required: ["code"] },
+  allOf: [
+    {
+      if: { properties: { action: { const: "run" } }, required: ["action"] },
+      then: { required: ["code"] },
+    },
+    {
+      if: { properties: { action: { const: "pair" } }, required: ["action"] },
+      then: {
+        required: ["request_id", "code"],
+        properties: { code: { type: "string", pattern: "^\\d{6}$" } },
+      },
+    },
+  ],
 });
 
 export interface BrowserToolDetails {
-  action: "open" | "close" | "run" | "guide" | "status";
+  action: "open" | "close" | "run" | "guide" | "status" | "pair";
   name?: string;
   url?: string;
   browser?: "headless" | "headed" | "connected" | "extension";
@@ -80,6 +93,7 @@ export interface BrowserToolDetails {
   navigated?: boolean;
   newTabs?: Array<{ url: string }>;
   status?: BrowserManagerStatus;
+  pairingApproval?: PairingApproval;
 }
 
 export function createBrowserTool(manager: BrowserManagerLike = browserManager): ToolDefinition<typeof BrowserParams, BrowserToolDetails> {
@@ -88,12 +102,12 @@ export function createBrowserTool(manager: BrowserManagerLike = browserManager):
   return {
     name: "browser",
     label: "Browser",
-    description: "Control Chromium through named tabs. Open or attach a browser, inspect live bridge/named-tab status, run trusted host-level JavaScript with page/browser/tab helpers, capture screenshots, and close one or all tabs. The run action requires non-empty code, is shell-equivalent, and is blocked in Plan mode. For managed/profile/cdp entries, page is a puppeteer-core Page (page.setViewport({width,height}), page.goto, page.evaluate, page.screenshot — Puppeteer, not Playwright) and browser is a puppeteer Browser. Extension entries instead expose limited honest adapters: page.url/title/goto/evaluate, browser.pages, and tab.url/title/goto/evaluate/cdp/cdpBatch/cookies/tabs/screenshot; every other call fails closed with the capability list.\\n\\nBEFORE ANY browser operation: call action: guide to get the SOP registry index, then load the relevant document by topic (core: mode choice, Turnstile recipe, helpers, pitfalls; captcha-strategies; automation-antipatterns; network-mocking; auth-flows; form-widgets; list-scraping; antibot-landscape). Acting before reading the SOP risks silent failure.\\n\\nCAPABILITY MAP (when to use which):\\n  - Live bridge state and named-tab channel/ownership/capabilities → action:'status' (this explicitly starts the optional bridge server)\\n  - Pure scraping (no login/CAPTCHA) → open with visible:false (headless default) + tab.extract('probe')\\n  - Login state / CAPTCHA / real fingerprint → FIRST call action:guide, then open with visible:true + app.attach_user_profile + app.user_profile_dir (attach the user's daily browser; pi auto-launches Chrome with --remote-debugging-port=9222 if no live debug port, or reuses a running instance; pure stealth is NOT enough for Cloudflare managed challenges)\\n  - Raw CDP domain call → tab.cdp(method, params) (e.g. Page.captureScreenshot, Network.getCookies, DOM.setFileInputFiles)\\n  - Cookie read/write → tab.cookies.get/set/delete (session-level; in attach mode the user's login cookies are present)\\n  - File upload → tab.uploadFile(selector, ...paths); transient <input type=file> without a persistent DOM node → tab.cdp('DOM.setFileInputFiles', ...)\\n  - Cross-origin iframe JS → tab.evalInFrame(matcher, fn, ...args) (matcher = url substring/RegExp/predicate)\\n  - Open Shadow DOM → tab.pierce(selector) → {x,y}; follow with tab.cdpClick(x,y)\\n  - Canvas / non-DOM / hover-dependent click → tab.cdpClick(x, y, {hoverMs?}) (CDP Input 3-event sequence)\\n  - Chrome autofill release → tab.autofillRelease(selector) (brings tab to front, clicks, re-dispatches input/change)\\n  - Download-dialog bypass → tab.setDownloadBehavior(dirPath)\\n  - Multi-CDP chain → tab.cdpBatch([{method,params},...]) with '$N.path' references\\n  - On-page OCR / visual localization -> tab.ocr({region?,langs?}) returns {text, lines:[{bbox,text,confidence}]}; tab.detect({mode?,langs?}) returns {items:[{bbox,type,label,confidence}]} for canvas/non-DOM buttons. Follow with tab.cdpClick(cx, cy). Default langs is eng; pass eng+chi_sim for Chinese. Uses the shared local RapidOCR/OmniParser service and manifest-listed model assets; unavailable or unverified models return structured errors and OmniParser fails closed. For text-only needs without local models, describe_image can read text but cannot return reliable pixel coordinates\\n  - DOM observation → tab.observe() (interactive elements + numeric ids), tab.extract('probe'|'list'|'text'|'html'), tab.snapshot() + tab.diff(before) for change detection, tab.monitorStart/Stop for transient text\\n  - Navigation/new-tab detection is auto-reported in run output (navigated, newTabs).\\nSOP registry: action: guide returns the index; load a document with topic.\\nPass visible: true to open a headed (visible) browser window; the default is headless.",
-    promptSnippet: "Use browser for interactive web navigation, DOM observation, form input, screenshots, and live connection status. Managed/profile/cdp run code receives a puppeteer-core Page and full tab helper. app.channel='extension' is opt-in and receives limited adapters (page.url/title/goto/evaluate, browser.pages, tab.url/title/goto/evaluate/cdp/cdpBatch/cookies/tabs/screenshot); unsupported calls fail closed and the channel never falls back to managed Chromium. action:'status' is the only live bridge/configuration report and explicitly starts the bridge server. Pass visible:true when Pi must launch a visible browser; for CAPTCHA/login use the profile channel with app.user_profile_dir.",
+    description: "Control Chromium through named tabs. Open or attach a browser, inspect live bridge/named-tab status, run trusted host-level JavaScript with page/browser/tab helpers, capture screenshots, and close one or all tabs. The run action requires non-empty code, is shell-equivalent, and is blocked in Plan mode. For managed/profile/cdp entries, page is a puppeteer-core Page (page.setViewport({width,height}), page.goto, page.evaluate, page.screenshot — Puppeteer, not Playwright) and browser is a puppeteer Browser. Extension entries instead expose limited honest adapters: page.url/title/goto/evaluate, browser.pages, and tab.url/title/goto/evaluate/cdp/cdpBatch/cookies/tabs/screenshot; every other call fails closed with the capability list.\\n\\nBEFORE ANY browser operation: call action: guide to get the SOP registry index, then load the relevant document by topic (core: mode choice, Turnstile recipe, helpers, pitfalls; captcha-strategies; automation-antipatterns; network-mocking; auth-flows; form-widgets; list-scraping; antibot-landscape). Acting before reading the SOP risks silent failure.\\n\\nCAPABILITY MAP (when to use which):\\n  - Extension setup: status starts the default server range 19222..19231; the loaded extension moves from unpaired to pendingPairings; pair only delivers credentials, then challenge-response reconnect produces authenticatedConnected; PI_BROWSER_BRIDGE_PORT custom anchors also require popup Advanced port\\n  - Pure scraping (no login/CAPTCHA) → open with visible:false (headless default) + tab.extract('probe')\\n  - Login state / CAPTCHA / real fingerprint → FIRST call action:guide, then open with visible:true + app.attach_user_profile + app.user_profile_dir (attach the user's daily browser; pi auto-launches Chrome with --remote-debugging-port=9222 if no live debug port, or reuses a running instance; pure stealth is NOT enough for Cloudflare managed challenges)\\n  - Raw CDP domain call → tab.cdp(method, params) (e.g. Page.captureScreenshot, Network.getCookies, DOM.setFileInputFiles)\\n  - Cookie read/write → tab.cookies.get/set/delete (session-level; in attach mode the user's login cookies are present)\\n  - File upload → tab.uploadFile(selector, ...paths); transient <input type=file> without a persistent DOM node → tab.cdp('DOM.setFileInputFiles', ...)\\n  - Cross-origin iframe JS → tab.evalInFrame(matcher, fn, ...args) (matcher = url substring/RegExp/predicate)\\n  - Open Shadow DOM → tab.pierce(selector) → {x,y}; follow with tab.cdpClick(x,y)\\n  - Canvas / non-DOM / hover-dependent click → tab.cdpClick(x, y, {hoverMs?}) (CDP Input 3-event sequence)\\n  - Chrome autofill release → tab.autofillRelease(selector) (brings tab to front, clicks, re-dispatches input/change)\\n  - Download-dialog bypass → tab.setDownloadBehavior(dirPath)\\n  - Multi-CDP chain → tab.cdpBatch([{method,params},...]) with '$N.path' references\\n  - On-page OCR / visual localization -> tab.ocr({region?,langs?}) returns {text, lines:[{bbox,text,confidence}]}; tab.detect({mode?,langs?}) returns {items:[{bbox,type,label,confidence}]} for canvas/non-DOM buttons. Follow with tab.cdpClick(cx, cy). Default langs is eng; pass eng+chi_sim for Chinese. Uses the shared local RapidOCR/OmniParser service and manifest-listed model assets; unavailable or unverified models return structured errors and OmniParser fails closed. For text-only needs without local models, describe_image can read text but cannot return reliable pixel coordinates\\n  - DOM observation → tab.observe() (interactive elements + numeric ids), tab.extract('probe'|'list'|'text'|'html'), tab.snapshot() + tab.diff(before) for change detection, tab.monitorStart/Stop for transient text\\n  - Navigation/new-tab detection is auto-reported in run output (navigated, newTabs).\\nSOP registry: action: guide returns the index; load a document with topic.\\nPass visible: true to open a headed (visible) browser window; the default is headless.",
+    promptSnippet: "Use browser for interactive web navigation, DOM observation, form input, screenshots, and live connection status. Managed/profile/cdp run code receives a puppeteer-core Page and full tab helper. app.channel='extension' is opt-in and receives limited adapters (page.url/title/goto/evaluate, browser.pages, tab.url/title/goto/evaluate/cdp/cdpBatch/cookies/tabs/screenshot); unsupported calls fail closed and the channel never falls back to managed Chromium. First-time extension setup is zero-copy on the default 19222..19231 range: action:'status' reports pendingPairings; action:'pair' only delivers credentials, then challenge-response reconnect establishes authenticatedConnected. PI_BROWSER_BRIDGE_PORT changes the server anchor but a custom anchor must also be entered in popup Advanced settings; manual port/token is recovery only. Pass visible:true when Pi must launch a visible browser; for CAPTCHA/login use the profile channel with app.user_profile_dir.",
     promptGuidelines: [
       "Before ANY browser operation, call action:guide to get the SOP registry index, then read the relevant topic documents: core (mode choice, Turnstile recipe, helpers, CDP pitfalls), captcha-strategies, automation-antipatterns, network-mocking, auth-flows (login/2FA/OAuth), form-widgets (rich text/select/date/drag), list-scraping (infinite scroll/pagination), antibot-landscape (identify the WAF first). THEN choose the browser mode by scenario: pure scraping (no login/CAPTCHA) → open with visible:false (headless); login state / CAPTCHA / real fingerprint → open with visible:true + app.attach_user_profile + app.user_profile_dir. pi auto-launches Chrome with --remote-debugging-port=9222 if no live debug port is found (or reuses a running instance). Pure stealth patches are NOT enough for Cloudflare managed challenges — attaching the user's real browser is the working path.",
       "Match the helper to the target: DOM elements → tab.observe()/tab.click()/tab.fill(); canvas / non-DOM / hover-dependent components → tab.cdpClick(x,y); open Shadow DOM → tab.pierce(selector) then tab.cdpClick; cross-origin iframe → tab.evalInFrame(matcher, fn); file upload → tab.uploadFile(selector, paths) or tab.cdp('DOM.setFileInputFiles') for transient inputs; raw CDP domain → tab.cdp(method, params).",
-      "Use action:status for live bridge state. It explicitly starts the optional bridge server and reports authenticatedConnected, extension tabCount, plus every named tab's channel, ownership, and capabilities. Static /install state is historical/configuration evidence only.",
+      "Use action:status for live bridge state. By default it starts the optional server in 19222..19231 and reports pendingPairings, authenticatedConnected, drainingCommands, extension tabCount, and named-tab capabilities. Match a pending requestId/code with the popup and approve it with action:pair; pairing only delivers credentials, and the historical verified marker is written after challenge-response reconnect authenticates. PI_BROWSER_BRIDGE_PORT changes the server anchor, but an empty extension cannot read that environment variable, so a custom anchor must also be entered under popup Advanced settings. Caller timeout does not force-stop already-running page JavaScript; lifecycle ownership remains draining until a real terminal.",
       "Call browser open before run, and reuse a stable tab name across related steps.",
       "Managed/profile/cdp run code receives page (puppeteer-core Page), browser (puppeteer Browser), and tab (high-level helper). Extension entries receive only the limited adapter capabilities listed in the tool description; unsupported properties fail closed.",
       "Top-level const/let/class/function in run code are scoped safely: you may declare any name, even wait, page, assert, display, etc., without a redeclaration error (a reused name shadows that helper inside your code).",
@@ -173,9 +187,18 @@ export function createBrowserTool(manager: BrowserManagerLike = browserManager):
           return success(doc.body, { action: "guide", result: doc.body });
         }
         if (params.action === "status") {
-          const status = await manager.status();
+          const status = await manager.status(signal);
           const text = `Browser status (live):\n${formatValue(status)}`;
           return success(text, { action: "status", status, result: text });
+        }
+        if (params.action === "pair") {
+          const requestId = params.request_id?.trim();
+          const code = params.code?.trim();
+          if (!requestId) throw new Error("Browser pair requires request_id from browser status.");
+          if (!code || !/^\d{6}$/.test(code)) throw new Error("Browser pair requires the exact six-digit code from browser status.");
+          const approval = await manager.pair(requestId, code, signal);
+          const text = `Approved browser pairing ${approval.requestId} on port ${approval.port}. The extension will store the credentials and reconnect with authenticated authority.`;
+          return success(text, { action: "pair", pairingApproval: approval, result: text });
         }
         if (!params.code?.trim()) throw new Error("Browser run requires non-empty code.");
         const output = await manager.run(name, params.code, ctx.cwd, signal, timeoutMs);

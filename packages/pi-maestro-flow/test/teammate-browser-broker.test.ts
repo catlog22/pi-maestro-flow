@@ -45,6 +45,7 @@ class FakeBrowserManager implements BrowserManagerLike {
         listeningPort: 19222,
         authenticatedConnected: false,
         tabCount: 0,
+        pendingPairings: [],
       },
       namedTabs: [...this.opened.keys()].map((name) => ({
         name,
@@ -53,6 +54,10 @@ class FakeBrowserManager implements BrowserManagerLike {
         capabilities: { page: true, cdp: true, cookies: true },
       })),
     };
+  }
+
+  async pair(requestId: string, _code: string) {
+    return { requestId, port: 19222, installationId: "11111111-1111-4111-8111-111111111111" };
   }
 
   async close(name: string): Promise<boolean> {

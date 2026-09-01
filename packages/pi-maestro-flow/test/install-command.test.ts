@@ -81,12 +81,18 @@ test("browser bridge install probe requires a valid verified marker and config, 
     writeJson("browser-bridge.verified", { ...marker, verifiedAt: "invalid" });
     assert.equal(probeInstallStatus("browser-bridge"), "partial", "a malformed marker cannot prove historical verification");
 
+    writeJson("browser-bridge.verified", { ...marker, protocol: "pairing-v1" });
+    assert.equal(probeInstallStatus("browser-bridge"), "partial", "pairing credential delivery is not verified authentication");
+
     writeJson("browser-bridge.verified", marker);
     writeJson("browser-bridge.json", { ...config, token: "short" });
     assert.equal(probeInstallStatus("browser-bridge"), "partial", "verified history with incomplete config is partial");
 
     writeJson("browser-bridge.json", config);
     assert.equal(probeInstallStatus("browser-bridge"), "installed");
+
+    writeJson("browser-bridge.verified", { ...marker, protocol: "challenge-hmac-sha256-v1" });
+    assert.equal(probeInstallStatus("browser-bridge"), "installed", "HMAC possession proof is valid install evidence");
   } finally {
     if (previous === undefined) delete process.env.PI_BROWSER_BRIDGE_DIR;
     else process.env.PI_BROWSER_BRIDGE_DIR = previous;

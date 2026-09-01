@@ -4,9 +4,14 @@
     <meta charset="utf-8" />
     <title>Pi Browser Bridge</title>
     <style>
-      body { font: 13px/1.5 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; margin: 12px; min-width: 280px; }
+      body { font: 13px/1.5 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; margin: 12px; min-width: 300px; color: #111827; }
       h1 { font-size: 14px; margin: 0 0 8px; }
-      #status { font-weight: bold; margin-bottom: 10px; }
+      #status { font-weight: 700; margin-bottom: 8px; }
+      #pairing { display: none; padding: 9px; border: 1px solid #f59e0b; border-radius: 6px; background: #fffbeb; }
+      #pairing-code { font: 700 22px/1.2 ui-monospace, monospace; letter-spacing: 3px; margin: 3px 0; }
+      .meta { color: #6b7280; font-size: 11px; overflow-wrap: anywhere; }
+      details { margin-top: 12px; border-top: 1px solid #e5e7eb; padding-top: 8px; }
+      summary { cursor: pointer; color: #4b5563; }
       label { display: block; margin-top: 8px; }
       input { width: 100%; box-sizing: border-box; padding: 4px; margin-top: 2px; }
       button { margin-top: 10px; padding: 6px 12px; cursor: pointer; }
@@ -15,15 +20,25 @@
   </head>
   <body>
     <h1>Pi Browser Bridge</h1>
-    <div id="status">状态: 查询中…</div>
-    <label>WS 端口 (默认 19222)
-      <input id="port" type="number" min="1" max="65535" />
-    </label>
-    <label>认证 Token
-      <input id="token" type="password" autocomplete="off" spellcheck="false" />
-    </label>
-    <button id="save">保存并重连</button>
-    <div class="hint">从 pi 侧 <code>~/.pi/browser-bridge.json</code> 复制实际端口和 token。两项必须匹配；仅连接 localhost 不会获得授权。</div>
+    <div id="status">状态: 正在发现…</div>
+    <div id="pairing">
+      <div>等待确认，配对码：</div>
+      <div id="pairing-code"></div>
+      <div class="hint">先调用 <code>browser status</code>，再使用返回的 <code>requestId</code> 和此代码调用 <code>browser pair</code>。批准前此连接不能执行任何命令。</div>
+      <div id="pairing-request" class="meta"></div>
+    </div>
+
+    <details id="advanced">
+      <summary>高级设置（旧版手工配置）</summary>
+      <label>WS 端口
+        <input id="port" type="number" min="1" max="65535" />
+      </label>
+      <label>认证 Token
+        <input id="token" type="password" autocomplete="off" spellcheck="false" />
+      </label>
+      <button id="save">保存并重连</button>
+      <div class="hint">通常无需填写。仅在使用旧版手工流程时，从 pi 侧配置文件复制实际端口和 token。</div>
+    </details>
     <script src="popup.js"></script>
   </body>
 </html>

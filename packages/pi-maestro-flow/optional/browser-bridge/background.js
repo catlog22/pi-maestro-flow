@@ -1,9 +1,9 @@
 // background.js — Pi Browser Bridge service worker
 //
-// WebSocket client that connects back to the pi-maestro-flow agent
-// (ws://127.0.0.1:<port>, default 19222). Both port and the owner token are
-// configured in chrome.storage.local. The token is sent in the first frame and
-// command traffic is disabled until the server confirms authentication.
+// WebSocket client that connects back to the pi-maestro-flow agent. New
+// installations discover only 127.0.0.1:19222..19231, require a protocol-marked
+// pairing challenge, and persist credentials only after explicit approval.
+// Legacy manual port/token configuration remains supported.
 // Routes agent commands to chrome.* APIs:
 //   exec | cdp | cookies | tabs | management | contentSettings | dnr | batch
 //
@@ -12,14 +12,30 @@
 // GenericAgent tmwd_cdp_bridge extension but trimmed to pi's needs.
 
 const DEFAULT_WS_PORT = 19222;
+const DISCOVERY_LAST_PORT = 19231;
+const DISCOVERY_TIMEOUT_MS = 750;
+const BRIDGE_PROTOCOL = 'pi-browser-bridge/v1';
+const HMAC_AUTH_PROTOCOL = 'challenge-hmac-sha256-v1';
 const STORAGE_PORT_KEY = 'pi_ws_port';
 const STORAGE_TOKEN_KEY = 'pi_ws_token';
+const STORAGE_INSTALLATION_KEY = 'pi_ws_installation_id';
 
 let ws = null;
 let status = 'disconnected';
 let wsPort = DEFAULT_WS_PORT;
 let wsToken = '';
+let serverInstallationId = '';
 let authenticated = false;
+let pairing = null;
+let connectionAttempt = 0;
+let pairingInstallationId = '';
+
+function ownsAttempt(socket, attempt, expectedStatus) {
+  return ws === socket
+    && attempt === connectionAttempt
+    && socket.readyState === WebSocket.OPEN
+    && status === expectedStatus;
+}
 
 function setStatus(s) {
   if (s === status) return;
@@ -36,19 +52,6 @@ function scheduleKeepalive() {
   chrome.alarms.create('pi-ws-keepalive', { delayInMinutes: 0.4 }); // ~24s
 }
 
-async function isServerAlive(port) {
-  try {
-    const ctrl = new AbortController();
-    setTimeout(() => ctrl.abort(), 2000);
-    await fetch(`http://127.0.0.1:${port}`, { signal: ctrl.signal });
-    return true;
-  } catch (e) {
-    // A 4xx/5xx HTTP response still means the port is listening; only a
-    // network error (connection refused / timeout) means the server is down.
-    return e instanceof TypeError ? false : true;
-  }
-}
-
 async function restrictCredentialStorage() {
   try {
     // Content scripts run in untrusted page contexts. Keep the bridge token
@@ -62,15 +65,118 @@ async function restrictCredentialStorage() {
 
 async function loadConfig() {
   try {
-    const stored = await chrome.storage.local.get([STORAGE_PORT_KEY, STORAGE_TOKEN_KEY]);
+    const stored = await chrome.storage.local.get([STORAGE_PORT_KEY, STORAGE_TOKEN_KEY, STORAGE_INSTALLATION_KEY]);
     const p = Number(stored[STORAGE_PORT_KEY]);
     const token = typeof stored[STORAGE_TOKEN_KEY] === 'string' ? stored[STORAGE_TOKEN_KEY].trim() : '';
-    wsPort = Number.isInteger(p) && p > 0 && p <= 65535 ? p : DEFAULT_WS_PORT;
-    wsToken = /^[A-Za-z0-9_-]{32,}$/.test(token) ? token : '';
+    const installationId = typeof stored[STORAGE_INSTALLATION_KEY] === 'string' ? stored[STORAGE_INSTALLATION_KEY].trim() : '';
+    return {
+      port: Number.isInteger(p) && p > 0 && p <= 65535 ? p : DEFAULT_WS_PORT,
+      token: /^[A-Za-z0-9_-]{32,}$/.test(token) ? token : '',
+      installationId: isInstallationId(installationId) ? installationId : '',
+    };
   } catch {
-    wsPort = DEFAULT_WS_PORT;
-    wsToken = '';
+    return { port: DEFAULT_WS_PORT, token: '', installationId: '' };
   }
+}
+
+function isInstallationId(value) {
+  return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+function candidatePorts(configuredPort, hasToken) {
+  const ports = [];
+  if (hasToken && Number.isInteger(configuredPort) && configuredPort > 0 && configuredPort <= 65535) ports.push(configuredPort);
+  for (let port = DEFAULT_WS_PORT; port <= DISCOVERY_LAST_PORT; port += 1) {
+    if (!ports.includes(port)) ports.push(port);
+  }
+  return ports;
+}
+
+function parsePairingChallenge(data, port, now = Date.now()) {
+  if (!data || data.type !== 'pairing_challenge' || data.protocol !== BRIDGE_PROTOCOL) return null;
+  if (typeof data.requestId !== 'string' || !/^[0-9a-f-]{36}$/i.test(data.requestId)) return null;
+  if (typeof data.code !== 'string' || !/^\d{6}$/.test(data.code)) return null;
+  if (!Number.isSafeInteger(data.generation) || data.generation <= 0) return null;
+  if (!Number.isFinite(data.expiresAt) || data.expiresAt <= now || data.expiresAt > now + 5 * 60_000) return null;
+  return { requestId: data.requestId, code: data.code, generation: data.generation, expiresAt: data.expiresAt, port };
+}
+
+function parsePairingApproval(data, expected, now = Date.now()) {
+  if (!expected || !data || data.type !== 'pairing_approved' || data.protocol !== BRIDGE_PROTOCOL) return null;
+  if (expected.expiresAt <= now || data.expiresAt !== expected.expiresAt) return null;
+  if (data.requestId !== expected.requestId || data.generation !== expected.generation || data.port !== expected.port) return null;
+  if (typeof data.token !== 'string' || !/^[A-Za-z0-9_-]{32,}$/.test(data.token)) return null;
+  if (!isInstallationId(data.installationId)) return null;
+  return { port: data.port, token: data.token, installationId: data.installationId };
+}
+
+function base64Url(bytes) {
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function createClientNonce() {
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  return base64Url(bytes);
+}
+
+function authTranscript(challenge) {
+  return JSON.stringify([
+    HMAC_AUTH_PROTOCOL,
+    challenge.clientNonce,
+    challenge.serverNonce,
+    challenge.installationId,
+    challenge.port,
+    challenge.generation,
+  ]);
+}
+
+function parseAuthChallenge(data, port, clientNonce, expectedInstallationId, now = Date.now()) {
+  if (!data || data.type !== 'auth_challenge' || data.protocol !== HMAC_AUTH_PROTOCOL) return null;
+  if (data.clientNonce !== clientNonce || typeof data.serverNonce !== 'string' || !/^[A-Za-z0-9_-]{22,86}$/.test(data.serverNonce)) return null;
+  if (!isInstallationId(data.installationId) || (expectedInstallationId && data.installationId !== expectedInstallationId)) return null;
+  if (data.port !== port || !Number.isSafeInteger(data.generation) || data.generation <= 0) return null;
+  if (!Number.isFinite(data.expiresAt) || data.expiresAt <= now || data.expiresAt > now + 30_000) return null;
+  return {
+    clientNonce,
+    serverNonce: data.serverNonce,
+    installationId: data.installationId,
+    port,
+    generation: data.generation,
+    expiresAt: data.expiresAt,
+  };
+}
+
+async function createAuthProof(token, challenge) {
+  const key = await globalThis.crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(token),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const signature = await globalThis.crypto.subtle.sign('HMAC', key, new TextEncoder().encode(authTranscript(challenge)));
+  return base64Url(new Uint8Array(signature));
+}
+
+function parseAuthenticatedHello(data, port, expectedInstallationId) {
+  if (!data || data.type !== 'auth_ok' || data.protocol !== BRIDGE_PROTOCOL || data.port !== port) return null;
+  if (!isInstallationId(data.installationId)) return null;
+  if (expectedInstallationId && data.installationId !== expectedInstallationId) return null;
+  return { installationId: data.installationId };
+}
+
+async function storeApprovedCredentials(data, expected, now = Date.now()) {
+  const credentials = parsePairingApproval(data, expected, now);
+  if (!credentials) throw new Error('invalid browser bridge pairing approval');
+  await chrome.storage.local.set({
+    [STORAGE_PORT_KEY]: credentials.port,
+    [STORAGE_TOKEN_KEY]: credentials.token,
+    [STORAGE_INSTALLATION_KEY]: credentials.installationId,
+  });
+  return credentials;
 }
 
 // --- Command handlers (one per cmd field) ---
@@ -526,7 +632,7 @@ async function executeTrackedCommand(socket, request) {
     try { socket.send(JSON.stringify({ type: 'error', id: request.id, error: 'duplicate browser-bridge command id' })); } catch (_) {}
     return;
   }
-  const tracked = { socket, started: false, stopped: false };
+  const tracked = { socket, attempt: connectionAttempt, started: false, stopped: false };
   trackedCommands.set(request.id, tracked);
   try { socket.send(JSON.stringify({ type: 'ack', id: request.id })); } catch (_) {
     trackedCommands.delete(request.id);
@@ -537,18 +643,18 @@ async function executeTrackedCommand(socket, request) {
   // task begins, cancellation must not synthesize completion ahead of the real
   // browser API result/error.
   await new Promise((resolve) => setTimeout(resolve, 0));
-  if (tracked.stopped || ws !== socket || !authenticated || socket.readyState !== WebSocket.OPEN) {
+  if (tracked.stopped || !ownsAttempt(socket, tracked.attempt, 'connected') || !authenticated) {
     if (trackedCommands.get(request.id) === tracked) trackedCommands.delete(request.id);
     return;
   }
   tracked.started = true;
   try {
     const response = await dispatch(request);
-    if (ws === socket && authenticated && socket.readyState === WebSocket.OPEN) {
+    if (ownsAttempt(socket, tracked.attempt, 'connected') && authenticated) {
       socket.send(serializeBridgeResponse(request, response));
     }
   } catch (error) {
-    if (ws === socket && authenticated && socket.readyState === WebSocket.OPEN) {
+    if (ownsAttempt(socket, tracked.attempt, 'connected') && authenticated) {
       try { socket.send(JSON.stringify({ type: 'error', id: request.id, error: error.message || String(error) })); } catch (_) {}
     }
   } finally {
@@ -566,76 +672,242 @@ function releaseTrackedCommands(socket) {
 
 // --- WebSocket connection ---
 
-async function connectWS() {
-  if (ws && ws.readyState <= 1) return; // CONNECTING or OPEN
-  await loadConfig();
-  // Startup/install/probe callbacks can overlap while storage is loading.
-  if (ws && ws.readyState <= 1) return;
-  authenticated = false;
-  if (!wsToken) {
-    setStatus('unconfigured');
-    scheduleProbe();
-    return;
+function extensionProposal() {
+  const origin = typeof chrome.runtime.getURL === 'function' ? chrome.runtime.getURL('') : 'chrome-extension://pi-browser-bridge';
+  if (!pairingInstallationId) {
+    pairingInstallationId = globalThis.crypto?.randomUUID?.()
+      || `${chrome.runtime.id || 'pi-browser-bridge'}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   }
+  return { origin, installationId: pairingInstallationId };
+}
 
-  let socket;
-  let authenticationFailed = false;
-  try {
-    socket = new WebSocket(`ws://127.0.0.1:${wsPort}`);
-    ws = socket;
-    setStatus('connecting');
-  } catch (_) {
-    ws = null;
-    setStatus('disconnected');
-    scheduleProbe();
-    return;
-  }
-  socket.onopen = () => {
-    if (ws !== socket) return;
-    setStatus('authenticating');
-    // Security boundary: this must be the first frame on every connection.
-    socket.send(JSON.stringify({ type: 'auth', token: wsToken }));
-  };
-  socket.onmessage = async (event) => {
-    if (ws !== socket) return;
-    let data;
-    try { data = JSON.parse(event.data); } catch { return; }
-    if (!authenticated) {
-      if (data.type === 'auth_error') {
-        authenticationFailed = true;
-        setStatus('auth-failed');
-        try { socket.close(1008, 'authentication failed'); } catch (_) {}
+function connectCandidate(port, token, expectedInstallationId, attempt) {
+  return new Promise((resolve) => {
+    let socket;
+    let settled = false;
+    let accepted = false;
+    let reconnectAfterApproval = false;
+    let outcome = 'miss';
+    let authChallenge = null;
+    let clientNonce = '';
+    const finish = (next) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve(next);
+    };
+    const timeout = setTimeout(() => {
+      if (accepted) return;
+      try { socket?.close(1000, 'discovery timeout'); } catch (_) {}
+      finish(outcome);
+    }, DISCOVERY_TIMEOUT_MS);
+
+    try {
+      socket = new WebSocket(`ws://127.0.0.1:${port}`);
+      ws = socket;
+    } catch (_) {
+      clearTimeout(timeout);
+      if (ws === socket) ws = null;
+      resolve('miss');
+      return;
+    }
+
+    socket.onopen = () => {
+      if (ws !== socket || attempt !== connectionAttempt) {
+        try { socket.close(); } catch (_) {}
+        finish('miss');
         return;
       }
-      if (data.type !== 'auth_ok') return;
-      authenticated = true;
-      setStatus('connected');
-      scheduleKeepalive();
-      const tabs = (await chrome.tabs.query({})).filter((t) => isScriptable(t.url));
-      socket.send(JSON.stringify({
-        type: 'ext_ready',
-        tabs: tabs.map((t) => ({ id: t.id, url: t.url, title: t.title })),
-      }));
-      return;
-    }
-    if (data.type === 'ping') return;
-    if (data.type === 'cancel' && typeof data.id === 'string') {
-      cancelTrackedCommand(socket, data.id);
-      return;
-    }
-    if (typeof data.id === 'string' && data.id && data.cmd) {
-      void executeTrackedCommand(socket, data);
-    }
-  };
-  socket.onclose = (event) => {
-    releaseTrackedCommands(socket);
-    if (ws !== socket) return;
-    authenticated = false;
-    ws = null;
-    setStatus(authenticationFailed || event.code === 1008 ? 'auth-failed' : 'disconnected');
-    scheduleProbe();
-  };
-  socket.onerror = () => { /* onclose will follow */ };
+      try {
+        // Discovery candidates receive only a fresh nonce. The stored token is
+        // used locally to prove a marked challenge and is never sent on scan.
+        if (token) {
+          clientNonce = createClientNonce();
+          setStatus('authenticating');
+          socket.send(JSON.stringify({ type: 'auth_probe', protocol: HMAC_AUTH_PROTOCOL, clientNonce }));
+        } else {
+          socket.send(JSON.stringify({ type: 'pairing_request', protocol: BRIDGE_PROTOCOL, ...extensionProposal() }));
+        }
+      } catch (_) {
+        try { socket.close(); } catch (_) {}
+        finish('miss');
+      }
+    };
+
+    socket.onmessage = async (event) => {
+      if (ws !== socket || attempt !== connectionAttempt) return;
+      let data;
+      try { data = JSON.parse(event.data); } catch {
+        try { socket.close(1002, 'invalid discovery frame'); } catch (_) {}
+        finish('miss');
+        return;
+      }
+
+      if (!authenticated && token) {
+        if (data.type === 'auth_error') {
+          outcome = 'auth-failed';
+          try { socket.close(1008, 'authentication failed'); } catch (_) {}
+          finish(outcome);
+          return;
+        }
+        if (!authChallenge) {
+          authChallenge = parseAuthChallenge(data, port, clientNonce, expectedInstallationId);
+          if (!authChallenge) {
+            try { socket.close(1002, 'unrecognized browser bridge'); } catch (_) {}
+            finish('miss');
+            return;
+          }
+          let proof;
+          try {
+            proof = await createAuthProof(token, authChallenge);
+          } catch (error) {
+            if (!ownsAttempt(socket, attempt, 'authenticating')) return;
+            outcome = 'auth-failed';
+            try { socket.close(1011, 'authentication proof failed'); } catch (_) {}
+            finish(outcome);
+            return;
+          }
+          if (!ownsAttempt(socket, attempt, 'authenticating')) return;
+          socket.send(JSON.stringify({
+            type: 'auth_proof',
+            protocol: HMAC_AUTH_PROTOCOL,
+            ...authChallenge,
+            expiresAt: undefined,
+            proof,
+          }));
+          return;
+        }
+        const hello = parseAuthenticatedHello(data, port, expectedInstallationId);
+        if (!hello) {
+          try { socket.close(1002, 'unrecognized browser bridge'); } catch (_) {}
+          finish('miss');
+          return;
+        }
+        accepted = true;
+        const configuredPort = wsPort;
+        if (expectedInstallationId && port !== configuredPort) {
+          try {
+            await chrome.storage.local.set({ [STORAGE_PORT_KEY]: port });
+          } catch (error) {
+            if (!ownsAttempt(socket, attempt, 'authenticating')) return;
+            outcome = 'auth-failed';
+            try { socket.close(1011, 'port persistence failed'); } catch (_) {}
+            finish(outcome);
+            return;
+          }
+          if (!ownsAttempt(socket, attempt, 'authenticating')) return;
+        }
+        if (!ownsAttempt(socket, attempt, 'authenticating')) return;
+        authenticated = true;
+        pairing = null;
+        wsPort = port;
+        serverInstallationId = hello.installationId;
+        setStatus('connected');
+        scheduleKeepalive();
+        finish('accepted');
+        const tabs = (await chrome.tabs.query({})).filter((t) => isScriptable(t.url));
+        if (ws === socket && attempt === connectionAttempt && authenticated && status === 'connected' && socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({
+            type: 'ext_ready',
+            tabs: tabs.map((t) => ({ id: t.id, url: t.url, title: t.title })),
+          }));
+        }
+        return;
+      }
+
+      if (!authenticated && !token) {
+        if (!pairing) {
+          const challenge = parsePairingChallenge(data, port);
+          if (!challenge) {
+            try { socket.close(1002, 'unrecognized browser bridge'); } catch (_) {}
+            finish('miss');
+            return;
+          }
+          pairing = challenge;
+          accepted = true;
+          setStatus('pairing-pending');
+          finish('accepted');
+          return;
+        }
+        setStatus('saving-credentials');
+        let credentials;
+        try {
+          credentials = await storeApprovedCredentials(data, pairing);
+        } catch (_) {
+          if (!ownsAttempt(socket, attempt, 'saving-credentials')) return;
+          setStatus('pairing-failed');
+          try { socket.close(1011, 'credential storage failed'); } catch (_) {}
+          return;
+        }
+        if (!ownsAttempt(socket, attempt, 'saving-credentials')) return;
+        wsPort = credentials.port;
+        wsToken = credentials.token;
+        serverInstallationId = credentials.installationId;
+        pairing = null;
+        reconnectAfterApproval = true;
+        setStatus('connecting');
+        try { socket.close(1000, 'credentials stored; reconnecting'); } catch (_) {
+          ws = null;
+          setTimeout(() => { void connectWS(); }, 0);
+        }
+        return;
+      }
+
+      if (data.type === 'ping') return;
+      if (data.type === 'cancel' && typeof data.id === 'string') {
+        cancelTrackedCommand(socket, data.id);
+        return;
+      }
+      if (typeof data.id === 'string' && data.id && data.cmd) void executeTrackedCommand(socket, data);
+    };
+
+    socket.onclose = (event) => {
+      releaseTrackedCommands(socket);
+      if (!settled) finish(outcome);
+      if (ws !== socket || attempt !== connectionAttempt) return;
+      authenticated = false;
+      ws = null;
+      if (pairing?.port === port) pairing = null;
+      if (reconnectAfterApproval) {
+        setStatus('connecting');
+        setTimeout(() => { void connectWS(); }, 0);
+        return;
+      }
+      if (accepted) {
+        setStatus(event.code === 1008 ? 'auth-failed' : 'disconnected');
+        scheduleProbe();
+      }
+    };
+    socket.onerror = () => {
+      if (!accepted) finish(outcome);
+      try { socket.close(); } catch (_) {}
+    };
+  });
+}
+
+async function connectWS() {
+  if (ws && ws.readyState <= 1) return; // CONNECTING or OPEN
+  const attempt = ++connectionAttempt;
+  const config = await loadConfig();
+  if (attempt !== connectionAttempt || (ws && ws.readyState <= 1)) return;
+  wsPort = config.port;
+  wsToken = config.token;
+  serverInstallationId = config.installationId;
+  authenticated = false;
+  pairing = null;
+  const token = config.token;
+  const expectedInstallationId = config.installationId;
+  setStatus(token ? 'connecting' : 'discovering');
+  let authenticationFailed = false;
+  for (const port of candidatePorts(wsPort, Boolean(token))) {
+    if (attempt !== connectionAttempt) return;
+    const result = await connectCandidate(port, token, expectedInstallationId, attempt);
+    if (result === 'accepted') return;
+    if (result === 'auth-failed') authenticationFailed = true;
+  }
+  if (attempt !== connectionAttempt) return;
+  setStatus(authenticationFailed ? 'auth-failed' : token ? 'disconnected' : 'not-found');
+  scheduleProbe();
 }
 
 async function startBridge() {
@@ -645,7 +917,14 @@ async function startBridge() {
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.cmd !== 'status') return false;
-  sendResponse({ ok: true, data: status, port: wsPort, configured: Boolean(wsToken) });
+  sendResponse({
+    ok: true,
+    data: status,
+    port: wsPort,
+    configured: Boolean(wsToken),
+    installationId: serverInstallationId || undefined,
+    pairing: pairing ? { ...pairing } : undefined,
+  });
   return false;
 });
 
@@ -662,10 +941,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
   if (alarm.name === 'pi-ws-probe') {
     if (ws && ws.readyState <= 1) return;
-    await loadConfig();
-    if (!wsToken) { setStatus('unconfigured'); scheduleProbe(); return; }
-    if (await isServerAlive(wsPort)) connectWS();
-    else { setStatus('disconnected'); scheduleProbe(); }
+    await connectWS();
   }
 });
 
@@ -679,9 +955,12 @@ chrome.runtime.onInstalled.addListener(() => {
 // Sync the agent's tab list only after authentication, so ext_ready remains the
 // first capability-bearing message and unauthenticated sockets stay inert.
 async function sendTabsUpdate() {
-  if (!ws || !authenticated || ws.readyState !== WebSocket.OPEN) return;
+  const socket = ws;
+  const attempt = connectionAttempt;
+  if (!socket || !authenticated || status !== 'connected' || socket.readyState !== WebSocket.OPEN) return;
   const tabs = (await chrome.tabs.query({})).filter((t) => isScriptable(t.url));
-  ws.send(JSON.stringify({ type: 'tabs_update', tabs: tabs.map((t) => ({ id: t.id, url: t.url, title: t.title })) }));
+  if (!ownsAttempt(socket, attempt, 'connected') || !authenticated) return;
+  socket.send(JSON.stringify({ type: 'tabs_update', tabs: tabs.map((t) => ({ id: t.id, url: t.url, title: t.title })) }));
 }
 chrome.tabs.onUpdated.addListener((_, info) => { if (info.status === 'complete') sendTabsUpdate(); });
 chrome.tabs.onRemoved.addListener(sendTabsUpdate);

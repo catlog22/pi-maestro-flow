@@ -1,8 +1,8 @@
+import { renameSync } from "node:fs";
 import * as fs from "node:fs/promises";
-import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
-import { randomBytes, randomInt, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, randomInt, randomUUID, timingSafeEqual } from "node:crypto";
 import { WebSocketServer, WebSocket } from "ws";
 
 /**
@@ -13,16 +13,20 @@ import { WebSocketServer, WebSocket } from "ws";
  * containing a random token and requires that token in the first WebSocket
  * frame. No extension message is processed before authentication succeeds.
  *
- * The extension keeps the command protocol unchanged after authentication.
- * The actual port is also written to a legacy discovery file, but that file is
- * never installation or connectivity evidence. New installs copy both port and
- * token from the owner-only config file and use browser status for live state.
+ * New extensions scan only the bounded 19222..19231 range, require a marked
+ * Browser Bridge pairing challenge, and receive credentials only after explicit
+ * requestId+code approval. The owner-only config and manual port/token fields
+ * remain as a legacy path; neither localhost nor an open port grants authority.
  */
 
 const DEFAULT_PORT = 19222;
+const DISCOVERY_PORT_COUNT = 10;
+const BRIDGE_PROTOCOL = "pi-browser-bridge/v1";
+const HMAC_AUTH_PROTOCOL = "challenge-hmac-sha256-v1";
+const LEGACY_AUTH_PROTOCOL = "first-frame-token-v1";
 const BRIDGE_DIRECTORY = process.env.PI_BROWSER_BRIDGE_DIR?.trim() || path.join(os.homedir(), ".pi");
-const ANCHOR_ENV = "PI_BROWSER_BRIDGE_PORT";
 const AUTH_TIMEOUT_MS = 5_000;
+const AUTH_CHALLENGE_TTL_MS = 5_000;
 const PAIRING_TTL_MS = 120_000;
 const CANCEL_ACK_TIMEOUT_MS = 1_000;
 const PRIVATE_DIRECTORY_MODE = 0o700;
@@ -97,8 +101,33 @@ interface AuthMessage {
   type: "auth";
   token: string;
 }
+interface AuthProbeMessage {
+  type: "auth_probe";
+  protocol: typeof HMAC_AUTH_PROTOCOL;
+  clientNonce: string;
+}
+interface AuthProofMessage {
+  type: "auth_proof";
+  protocol: typeof HMAC_AUTH_PROTOCOL;
+  clientNonce: string;
+  serverNonce: string;
+  installationId: string;
+  port: number;
+  generation: number;
+  proof: string;
+}
+interface AuthChallenge {
+  clientNonce: string;
+  serverNonce: string;
+  installationId: string;
+  port: number;
+  generation: number;
+  expiresAt: number;
+  consumed: boolean;
+}
 interface PairingRequestMessage {
   type: "pairing_request";
+  protocol: string;
   origin?: string;
   installationId?: string;
 }
@@ -159,6 +188,7 @@ interface SocketSession {
   authenticated: boolean;
   firstFrameSeen: boolean;
   pairingRequestId: string | null;
+  authChallenge: AuthChallenge | null;
 }
 
 interface PairingRequest {
@@ -182,17 +212,51 @@ interface PairingRequestInfo {
   installationId?: string;
 }
 
+interface PairingApproval {
+  requestId: string;
+  port: number;
+  installationId: string;
+}
+
 interface BridgePersistencePaths {
   configFile: string;
   portFile: string;
+}
+
+interface VerifiedInstallMarker {
+  version: 1;
+  protocol: typeof LEGACY_AUTH_PROTOCOL | typeof HMAC_AUTH_PROTOCOL;
+  port: number;
+  installationId: string;
+  verifiedAt: string;
+}
+
+interface VerifiedMarkerWriteContext {
+  path: string;
+  signal: AbortSignal;
+  assertOwner: () => void;
+}
+
+type VerifiedMarkerWriter = (marker: VerifiedInstallMarker, context: VerifiedMarkerWriteContext) => Promise<void>;
+
+interface AuthCommit {
+  serverGeneration: number;
+  socketGeneration: number;
+  socket: WebSocket;
+  server: WebSocketServer;
+  installationId: string;
+  controller: AbortController;
+  promise: Promise<boolean>;
 }
 
 interface BrowserBridgeServerOptions {
   directory?: string;
   anchorPort?: number;
   pairingTtlMs?: number;
+  authChallengeTtlMs?: number;
   cancelAckTimeoutMs?: number;
   persistConfig?: (config: BridgeConfig, paths: BridgePersistencePaths, signal: AbortSignal) => Promise<void>;
+  writeVerifiedMarker?: VerifiedMarkerWriter;
 }
 
 interface ProvisionalStartAttempt {
@@ -209,6 +273,7 @@ class BrowserBridgeServer {
   #socketSessions = new Map<WebSocket, SocketSession>();
   #authenticationTimers = new Map<WebSocket, NodeJS.Timeout>();
   #pairingRequests = new Map<string, PairingRequest>();
+  #authCommits = new Set<AuthCommit>();
   #port: number | null = null;
   #token: string | null = null;
   #installationId: string | null = null;
@@ -228,21 +293,29 @@ class BrowserBridgeServer {
   readonly #portFile: string;
   readonly #verifiedInstallFile: string;
   readonly #anchorPort: number;
+  readonly #lastPort: number;
   readonly #pairingTtlMs: number;
+  readonly #authChallengeTtlMs: number;
   readonly #cancelAckTimeoutMs: number;
   readonly #persistConfig: (config: BridgeConfig, paths: BridgePersistencePaths, signal: AbortSignal) => Promise<void>;
+  readonly #writeVerifiedMarker: VerifiedMarkerWriter;
 
   constructor(options: BrowserBridgeServerOptions = {}) {
     this.#directory = options.directory?.trim() || BRIDGE_DIRECTORY;
     this.#configFile = path.join(this.#directory, "browser-bridge.json");
     this.#portFile = path.join(this.#directory, "browser-bridge.port");
     this.#verifiedInstallFile = path.join(this.#directory, "browser-bridge.verified");
-    const envPort = Number(process.env[ANCHOR_ENV]);
-    const configuredPort = Number.isInteger(envPort) && envPort > 0 ? envPort : DEFAULT_PORT;
-    this.#anchorPort = options.anchorPort ?? configuredPort;
+    const anchorPort = options.anchorPort ?? DEFAULT_PORT;
+    if (!Number.isInteger(anchorPort) || anchorPort < 1 || anchorPort > 65_535 - DISCOVERY_PORT_COUNT + 1) {
+      throw new Error(`browser-bridge discovery range must start between 1 and ${65_535 - DISCOVERY_PORT_COUNT + 1}`);
+    }
+    this.#anchorPort = anchorPort;
+    this.#lastPort = anchorPort + DISCOVERY_PORT_COUNT - 1;
     this.#pairingTtlMs = positiveDuration(options.pairingTtlMs, PAIRING_TTL_MS, "pairing TTL");
+    this.#authChallengeTtlMs = positiveDuration(options.authChallengeTtlMs, AUTH_CHALLENGE_TTL_MS, "authentication challenge TTL");
     this.#cancelAckTimeoutMs = positiveDuration(options.cancelAckTimeoutMs, CANCEL_ACK_TIMEOUT_MS, "cancel acknowledgement timeout");
     this.#persistConfig = options.persistConfig ?? persistBridgeConfig;
+    this.#writeVerifiedMarker = options.writeVerifiedMarker ?? persistVerifiedMarker;
   }
 
   /** Current authenticated connection state. */
@@ -284,8 +357,8 @@ class BrowserBridgeServer {
       }));
   }
 
-  /** Promote exactly one live pairing request after code verification. */
-  async approvePairing(requestId: string, code: string): Promise<BridgeConnectionIdentity> {
+  /** Approve exactly one live request and deliver credentials to that inert socket. */
+  async approvePairing(requestId: string, code: string): Promise<PairingApproval> {
     const request = this.#pairingRequests.get(requestId);
     if (!request || request.expiresAt <= Date.now()) {
       if (request) this.#expirePairingRequest(request, "pairing request expired");
@@ -304,47 +377,61 @@ class BrowserBridgeServer {
       throw new Error("browser-bridge pairing request socket generation is no longer live");
     }
 
-    // Verified-marker persistence is the approval commit boundary. The awaited
-    // operation revalidates server/socket generation before command authority is
-    // published or credentials are returned to the extension.
+    // Pairing delivers credentials only. It never proves possession and never
+    // writes the verified marker or grants command authority on this socket.
     request.approving = true;
-    let accepted: boolean;
-    try {
-      accepted = await this.#acceptAuthenticatedSocket(request.socket, "pairing-v1");
-    } catch (error) {
-      this.#expirePairingRequest(request, "pairing approval failed");
-      throw error;
-    }
     const currentSession = this.#socketSessions.get(request.socket);
     if (
-      !accepted
-      || currentSession !== session
+      currentSession !== session
       || currentSession.generation !== request.generation
+      || currentSession.authenticated
       || this.#pairingRequests.get(requestId) !== request
       || request.expiresAt <= Date.now()
-      || this.#connection?.socket !== request.socket
       || !this.#token
+      || !this.#port
+      || !this.#installationId
     ) {
       this.#expirePairingRequest(request, "pairing request revoked during approval");
       throw new Error("browser-bridge pairing request was revoked during approval");
     }
 
-    currentSession.authenticated = true;
-    this.#removePairingRequest(request);
+    const approval = {
+      requestId,
+      port: this.#port,
+      installationId: this.#installationId,
+    } satisfies PairingApproval;
     try {
-      request.socket.send(JSON.stringify({
+      await sendWebSocketFrame(request.socket, {
         type: "pairing_approved",
-        requestId,
+        protocol: BRIDGE_PROTOCOL,
+        ...approval,
+        generation: request.generation,
+        expiresAt: request.expiresAt,
         token: this.#token,
-      }));
+      });
     } catch (error) {
-      request.socket.terminate();
+      this.#expirePairingRequest(request, "pairing credential delivery failed");
       throw new Error(`browser-bridge could not publish pairing approval: ${error instanceof Error ? error.message : String(error)}`);
     }
-    for (const waiter of [...this.#connectionWaiters]) waiter.resolve();
-    const identity = this.connectionIdentity();
-    if (!identity) throw new Error("browser-bridge pairing approval lost its connection generation");
-    return identity;
+    if (
+      this.#pairingRequests.get(requestId) !== request
+      || this.#socketSessions.get(request.socket) !== session
+      || session.generation !== request.generation
+      || request.expiresAt <= Date.now()
+      || request.socket.readyState !== WebSocket.OPEN
+    ) {
+      this.#expirePairingRequest(request, "pairing request revoked during credential delivery");
+      throw new Error("browser-bridge pairing request was revoked during credential delivery");
+    }
+    this.#removePairingRequest(request);
+    const reconnectTimer = setTimeout(() => {
+      if (request.socket.readyState === WebSocket.OPEN) {
+        try { request.socket.close(1000, "reconnect with approved credentials"); } catch { request.socket.terminate(); }
+      }
+    }, 2_000);
+    reconnectTimer.unref();
+    this.#authenticationTimers.set(request.socket, reconnectTimer);
+    return approval;
   }
 
   /** Reject one pending pairing proposal without affecting authenticated work. */
@@ -393,56 +480,62 @@ class BrowserBridgeServer {
     }
     const fallback = this.defaultTabId();
     if (fallback !== null) return fallback;
-    throw new Error("browser-bridge: no authenticated tab connected. Configure the extension with the port and token from ~/.pi/browser-bridge.json.");
+    throw new Error("browser-bridge: no authenticated tab connected. Open the extension, then use browser status and browser pair for first-time setup.");
   }
 
-  /** Lazily start the loopback WebSocket server (idempotent and restartable after shutdown). */
-  async start(): Promise<void> {
-    if (this.#shutdownPromise) await this.#shutdownPromise;
+  /** Lazily start within the bounded discovery range (idempotent and abortable). */
+  async start(signal?: AbortSignal): Promise<void> {
+    throwIfSignalAborted(signal);
+    if (this.#shutdownPromise) {
+      if (signal) await abortableStartBoundary(this.#shutdownPromise, signal);
+      else await this.#shutdownPromise;
+    }
+    let createdAttempt = false;
     if (!this.#startPromise) {
+      createdAttempt = true;
       const startAttempt: ProvisionalStartAttempt = {
         generation: ++this.#serverGeneration,
         controller: new AbortController(),
         server: null,
         closePromise: null,
       };
+      const abortFromCaller = () => startAttempt.controller.abort(
+        signal?.reason instanceof Error ? signal.reason : new Error("browser-bridge startup aborted"),
+      );
+      signal?.addEventListener("abort", abortFromCaller, { once: true });
       const promise = this.#start(startAttempt);
       this.#startAttempt = startAttempt;
       this.#startPromise = promise;
       void promise.then(
         () => {
+          signal?.removeEventListener("abort", abortFromCaller);
           if (this.#startAttempt === startAttempt) this.#startAttempt = null;
         },
         () => {
+          signal?.removeEventListener("abort", abortFromCaller);
           if (this.#startAttempt === startAttempt) this.#startAttempt = null;
           if (this.#startPromise === promise) this.#startPromise = null;
         },
       );
     }
-    return this.#startPromise;
+    return signal && !createdAttempt ? abortableStartBoundary(this.#startPromise, signal) : this.#startPromise;
   }
 
   async #start(attempt: ProvisionalStartAttempt): Promise<void> {
     const { generation, controller } = attempt;
     await ensurePrivateDirectory(this.#directory);
     this.#assertStartGeneration(generation);
+    throwIfSignalAborted(controller.signal);
     const existingConfig = await readBridgeConfig(this.#configFile);
     this.#assertStartGeneration(generation);
+    throwIfSignalAborted(controller.signal);
     const token = existingConfig?.token ?? randomBytes(32).toString("base64url");
     const installationId = existingConfig?.installationId ?? randomUUID();
-    const port = await findFreePort(this.#anchorPort);
-    this.#assertStartGeneration(generation);
-    const server = new WebSocketServer({
-      port,
-      host: "127.0.0.1",
-      maxPayload: MAX_PAYLOAD_BYTES,
-    });
-    attempt.server = server;
-    server.on("connection", (socket) => this.#handleConnection(socket));
 
     try {
-      await abortableStartBoundary(waitForListening(server), controller.signal);
+      const { server, port } = await this.#bindBounded(attempt);
       this.#assertStartGeneration(generation);
+      throwIfSignalAborted(controller.signal);
       const config = { version: 1, port, token, installationId } satisfies BridgeConfig;
       const persistence = this.#persistConfig(
         config,
@@ -466,6 +559,30 @@ class BrowserBridgeServer {
       await this.#cleanupFailedStart(attempt, error);
       throw error;
     }
+  }
+
+  async #bindBounded(attempt: ProvisionalStartAttempt): Promise<{ server: WebSocketServer; port: number }> {
+    for (let port = this.#anchorPort; port <= this.#lastPort; port += 1) {
+      throwIfSignalAborted(attempt.controller.signal);
+      const server = new WebSocketServer({
+        port,
+        host: "127.0.0.1",
+        maxPayload: MAX_PAYLOAD_BYTES,
+      });
+      attempt.server = server;
+      server.on("connection", (socket) => this.#handleConnection(socket));
+      try {
+        await abortableStartBoundary(waitForListening(server), attempt.controller.signal);
+        return { server, port };
+      } catch (error) {
+        await closeServer(server).catch(() => {});
+        if (attempt.server === server) attempt.server = null;
+        throwIfSignalAborted(attempt.controller.signal);
+        if (fileErrorCode(error) === "EADDRINUSE") continue;
+        throw error;
+      }
+    }
+    throw new Error(`browser-bridge: no available port in fixed discovery range ${this.#anchorPort}..${this.#lastPort}`);
   }
 
   #assertStartGeneration(generation: number): void {
@@ -495,7 +612,7 @@ class BrowserBridgeServer {
       };
       waiter.timer = setTimeout(() => {
         waiter.reject(new Error(
-          `browser-bridge: no authenticated extension connected within ${timeoutMs}ms. Configure both port and token from ${this.#configFile}.`,
+          `browser-bridge: no authenticated extension connected within ${timeoutMs}ms. Open the extension and approve its pending request with browser status/browser pair; legacy manual port/token configuration remains available.`,
         ));
       }, timeoutMs);
       this.#connectionWaiters.add(waiter);
@@ -511,6 +628,7 @@ class BrowserBridgeServer {
       authenticated: false,
       firstFrameSeen: false,
       pairingRequestId: null,
+      authChallenge: null,
     };
     this.#socketSessions.set(socket, session);
     // An accepted socket is not visible live state until canonical persistence
@@ -525,53 +643,57 @@ class BrowserBridgeServer {
     socket.on("message", (raw, isBinary) => {
       const text = raw.toString();
       if (!session.authenticated) {
-        if (session.firstFrameSeen || isBinary) {
-          this.#rejectUnauthenticated(socket, session.pairingRequestId
-            ? "pairing socket has no command authority before approval"
-            : "authentication must be the first text frame");
+        if (isBinary) {
+          this.#rejectUnauthenticated(socket, "authentication requires text frames");
           return;
         }
-        session.firstFrameSeen = true;
-        let message: AuthMessage | PairingRequestMessage | null = null;
-        try {
-          const parsed = JSON.parse(text) as Record<string, unknown>;
-          if (parsed?.type === "auth" && typeof parsed.token === "string") message = parsed as unknown as AuthMessage;
-          else if (parsed?.type === "pairing_request") message = parsed as unknown as PairingRequestMessage;
-        } catch {
-          // Rejected below without exposing parser details to an unauthenticated peer.
-        }
-        if (message?.type === "pairing_request") {
-          this.#registerPairingRequest(socket, session, message);
-          return;
-        }
-        if (!message || message.type !== "auth" || !this.#token || !tokensEqual(message.token, this.#token)) {
-          this.#rejectUnauthenticated(socket, "invalid browser bridge token");
-          return;
-        }
-        // The extension waits for auth_ok before sending ext_ready, so no later
-        // frame can race through while the verified marker is being persisted.
-        void this.#acceptAuthenticatedSocket(socket, "first-frame-token-v1").then((accepted) => {
-          const current = this.#socketSessions.get(socket);
-          if (current !== session || current.generation !== session.generation) return;
-          // Flip the per-socket gate before auth_ok can cause the extension to
-          // send ext_ready in the next event-loop turn.
-          session.authenticated = accepted;
-          if (!accepted) return;
-          try {
-            socket.send(JSON.stringify({ type: "auth_ok" }));
-          } catch {
-            session.authenticated = false;
-            socket.terminate();
+        const parsed = parseJsonRecord(text);
+        if (!session.firstFrameSeen) {
+          session.firstFrameSeen = true;
+          const pairingRequest = decodePairingRequest(parsed);
+          if (pairingRequest) {
+            this.#registerPairingRequest(socket, session, pairingRequest);
             return;
           }
-          for (const waiter of [...this.#connectionWaiters]) waiter.resolve();
-        }).catch(() => this.#rejectUnauthenticated(socket, "authentication persistence failed", 1011));
+          const legacyAuth = decodeLegacyAuth(parsed);
+          if (legacyAuth) {
+            if (!this.#token || !tokensEqual(legacyAuth.token, this.#token)) {
+              this.#rejectUnauthenticated(socket, "invalid browser bridge token");
+              return;
+            }
+            this.#completeAuthentication(socket, session, LEGACY_AUTH_PROTOCOL);
+            return;
+          }
+          const probe = decodeAuthProbe(parsed);
+          if (probe) {
+            this.#issueAuthChallenge(socket, session, probe);
+            return;
+          }
+          this.#rejectUnauthenticated(socket, "invalid browser bridge authentication frame");
+          return;
+        }
+        if (session.pairingRequestId) {
+          this.#rejectUnauthenticated(socket, "pairing socket has no command authority");
+          return;
+        }
+        const challenge = session.authChallenge;
+        const proof = decodeAuthProof(parsed);
+        if (!challenge || !proof || !this.#verifyAuthProof(session, challenge, proof)) {
+          this.#rejectUnauthenticated(socket, "invalid browser bridge authentication proof");
+          return;
+        }
+        challenge.consumed = true;
+        session.authChallenge = null;
+        this.#completeAuthentication(socket, session, HMAC_AUTH_PROTOCOL);
         return;
       }
       this.#handleMessage(socket, text);
     });
 
     socket.on("close", () => {
+      for (const commit of this.#authCommits) {
+        if (commit.socket === socket) commit.controller.abort(new Error("browser-bridge authentication socket closed"));
+      }
       this.#connections.delete(socket);
       this.#socketSessions.delete(socket);
       this.#clearAuthenticationTimer(socket);
@@ -594,11 +716,25 @@ class BrowserBridgeServer {
   }
 
   #registerPairingRequest(socket: WebSocket, session: SocketSession, message: PairingRequestMessage): void {
+    if (message.protocol !== BRIDGE_PROTOCOL) {
+      this.#rejectUnauthenticated(socket, "unrecognized browser bridge discovery protocol");
+      return;
+    }
     const origin = optionalProposalField(message.origin, "origin", 2_048);
     const installationId = optionalProposalField(message.installationId, "installationId", 256);
     if (origin instanceof Error || installationId instanceof Error) {
       this.#rejectUnauthenticated(socket, (origin instanceof Error ? origin : installationId as Error).message);
       return;
+    }
+    // A newer generation from the same extension installation replaces the old
+    // code. Approving a stale/replaced code therefore always fails closed.
+    if (installationId || origin) {
+      for (const existing of [...this.#pairingRequests.values()]) {
+        if (
+          (installationId && existing.installationId === installationId)
+          || (!installationId && origin && !existing.installationId && existing.origin === origin)
+        ) this.#expirePairingRequest(existing, "pairing request replaced by newer generation");
+      }
     }
     const requestId = randomUUID();
     const code = String(randomInt(0, 1_000_000)).padStart(6, "0");
@@ -619,7 +755,14 @@ class BrowserBridgeServer {
     this.#pairingRequests.set(requestId, request);
     this.#clearAuthenticationTimer(socket);
     try {
-      socket.send(JSON.stringify({ type: "pairing_challenge", requestId, code, expiresAt }));
+      socket.send(JSON.stringify({
+        type: "pairing_challenge",
+        protocol: BRIDGE_PROTOCOL,
+        requestId,
+        code,
+        expiresAt,
+        generation: session.generation,
+      }));
     } catch {
       this.#removePairingRequest(request);
       socket.terminate();
@@ -641,39 +784,161 @@ class BrowserBridgeServer {
     this.#rejectUnauthenticated(request.socket, reason);
   }
 
-  async #acceptAuthenticatedSocket(socket: WebSocket, protocol: "first-frame-token-v1" | "pairing-v1"): Promise<boolean> {
+  #issueAuthChallenge(socket: WebSocket, session: SocketSession, probe: AuthProbeMessage): void {
+    const installationId = this.#installationId;
+    const port = this.#port;
+    if (!this.#server || !this.#token || !installationId || !port || !this.#connections.has(socket)) {
+      this.#rejectUnauthenticated(socket, "browser bridge authentication generation is unavailable");
+      return;
+    }
+    const challenge: AuthChallenge = {
+      clientNonce: probe.clientNonce,
+      serverNonce: randomBytes(16).toString("base64url"),
+      installationId,
+      port,
+      generation: session.generation,
+      expiresAt: Date.now() + this.#authChallengeTtlMs,
+      consumed: false,
+    };
+    session.authChallenge = challenge;
+    try {
+      socket.send(JSON.stringify({
+        type: "auth_challenge",
+        protocol: HMAC_AUTH_PROTOCOL,
+        ...challenge,
+        consumed: undefined,
+      }));
+    } catch {
+      session.authChallenge = null;
+      socket.terminate();
+    }
+  }
+
+  #verifyAuthProof(session: SocketSession, challenge: AuthChallenge, proof: AuthProofMessage): boolean {
+    if (
+      challenge.consumed
+      || challenge.expiresAt <= Date.now()
+      || session.generation !== challenge.generation
+      || proof.clientNonce !== challenge.clientNonce
+      || proof.serverNonce !== challenge.serverNonce
+      || proof.installationId !== challenge.installationId
+      || proof.port !== challenge.port
+      || proof.generation !== challenge.generation
+      || this.#installationId !== challenge.installationId
+      || this.#port !== challenge.port
+      || !this.#token
+    ) return false;
+    const expected = createHmac("sha256", this.#token)
+      .update(authTranscript(challenge))
+      .digest("base64url");
+    return tokensEqual(proof.proof, expected);
+  }
+
+  #completeAuthentication(
+    socket: WebSocket,
+    session: SocketSession,
+    protocol: typeof LEGACY_AUTH_PROTOCOL | typeof HMAC_AUTH_PROTOCOL,
+  ): void {
+    void this.#acceptAuthenticatedSocket(socket, session, protocol).then((accepted) => {
+      const current = this.#socketSessions.get(socket);
+      if (!accepted || current !== session || current.generation !== session.generation || socket.readyState !== WebSocket.OPEN) return;
+      session.authenticated = true;
+      try {
+        socket.send(JSON.stringify({
+          type: "auth_ok",
+          protocol: BRIDGE_PROTOCOL,
+          authProtocol: protocol,
+          port: this.#port,
+          installationId: this.#installationId,
+        }));
+      } catch {
+        session.authenticated = false;
+        socket.terminate();
+        return;
+      }
+      for (const waiter of [...this.#connectionWaiters]) waiter.resolve();
+    }, () => this.#rejectUnauthenticated(socket, "authentication persistence failed", 1011));
+  }
+
+  #assertAuthCommitOwner(commit: AuthCommit): void {
+    throwIfSignalAborted(commit.controller.signal);
+    const session = this.#socketSessions.get(commit.socket);
+    if (
+      this.#serverGeneration !== commit.serverGeneration
+      || this.#server !== commit.server
+      || this.#installationId !== commit.installationId
+      || !session
+      || session.generation !== commit.socketGeneration
+      || !this.#connections.has(commit.socket)
+      || commit.socket.readyState !== WebSocket.OPEN
+    ) throw new Error("browser-bridge authentication commit generation was revoked");
+  }
+
+  #startAuthCommit(
+    socket: WebSocket,
+    session: SocketSession,
+    protocol: typeof LEGACY_AUTH_PROTOCOL | typeof HMAC_AUTH_PROTOCOL,
+  ): AuthCommit {
     const server = this.#server;
     const installationId = this.#installationId;
-    if (!server || !installationId || !this.#connections.has(socket) || socket.readyState !== WebSocket.OPEN) return false;
+    const port = this.#port;
+    if (!server || !installationId || !port) throw new Error("browser-bridge authentication generation is unavailable");
+    for (const existing of this.#authCommits) {
+      if (existing.socketGeneration < session.generation) {
+        existing.controller.abort(new Error("browser-bridge authentication commit replaced by newer socket generation"));
+      }
+    }
+    const commit = {
+      serverGeneration: this.#serverGeneration,
+      socketGeneration: session.generation,
+      socket,
+      server,
+      installationId,
+      controller: new AbortController(),
+      promise: Promise.resolve(false),
+    } satisfies AuthCommit;
+    const marker = {
+      version: 1,
+      protocol,
+      port,
+      installationId,
+      verifiedAt: new Date().toISOString(),
+    } satisfies VerifiedInstallMarker;
+    commit.promise = (async () => {
+      this.#assertAuthCommitOwner(commit);
+      await this.#writeVerifiedMarker(marker, {
+        path: this.#verifiedInstallFile,
+        signal: commit.controller.signal,
+        assertOwner: () => this.#assertAuthCommitOwner(commit),
+      });
+      this.#assertAuthCommitOwner(commit);
+      return true;
+    })();
+    this.#authCommits.add(commit);
+    void commit.promise.finally(() => this.#authCommits.delete(commit)).catch(() => undefined);
+    return commit;
+  }
+
+  async #acceptAuthenticatedSocket(
+    socket: WebSocket,
+    session: SocketSession,
+    protocol: typeof LEGACY_AUTH_PROTOCOL | typeof HMAC_AUTH_PROTOCOL,
+  ): Promise<boolean> {
+    let commit: AuthCommit;
     try {
-      await writePrivateFile(this.#verifiedInstallFile, `${JSON.stringify({
-        version: 1,
-        protocol,
-        port: this.#port,
-        installationId,
-        verifiedAt: new Date().toISOString(),
-      }, null, 2)}\n`);
+      commit = this.#startAuthCommit(socket, session, protocol);
+      if (!await commit.promise) return false;
+      this.#assertAuthCommitOwner(commit);
     } catch {
       this.#rejectUnauthenticated(socket, "could not persist verified install marker", 1011);
       return false;
     }
-    if (
-      this.#server !== server
-      || this.#installationId !== installationId
-      || !this.#connections.has(socket)
-      || socket.readyState !== WebSocket.OPEN
-    ) return false;
-
+    const installationId = commit.installationId;
     const previous = this.#connection;
     if (previous && previous.socket !== socket) {
-      // Pending calls belong to the previous authenticated transport; never let
-      // a replacement extension satisfy their ids.
       this.#terminateCommandsForConnection(previous, "replaced", new Error("browser-bridge connection replaced"));
       try { previous.socket.close(1000, "replaced by authenticated connection"); } catch { previous.socket.terminate(); }
     }
-    // A new authenticated transport has not reported its tabs yet. Clear the
-    // previous transport's snapshot so status can never label stale tabs live
-    // during the auth_ok → ext_ready window.
     this.#tabs = [];
     this.#defaultTabId = null;
     this.#connection = {
@@ -739,6 +1004,7 @@ class BrowserBridgeServer {
       }
       case "cancel_ack": {
         const acknowledgement = msg as CancelAckMessage;
+        if (typeof acknowledgement.id !== "string" || typeof acknowledgement.stopped !== "boolean") break;
         const connection = this.#connection;
         if (!connection) break;
         this.#handleCancelAcknowledgement(acknowledgement, connection);
@@ -749,6 +1015,7 @@ class BrowserBridgeServer {
       case "result":
       case "error": {
         const result = msg as ResultMessage;
+        if (typeof result.id !== "string") break;
         const connection = this.#connection;
         if (!connection) break;
         this.#finish(result.id, {
@@ -833,11 +1100,13 @@ class BrowserBridgeServer {
     for (const timer of this.#authenticationTimers.values()) clearTimeout(timer);
     this.#authenticationTimers.clear();
     for (const request of [...this.#pairingRequests.values()]) this.#removePairingRequest(request);
+    for (const commit of this.#authCommits) commit.controller.abort(error);
     this.#socketSessions.clear();
     for (const socket of this.#connections) {
       try { socket.terminate(); } catch { /* already closed */ }
     }
     this.#connections.clear();
+    await Promise.allSettled([...this.#authCommits].map((commit) => commit.promise));
     await this.#closeStartAttempt(attempt);
   }
 
@@ -882,12 +1151,16 @@ class BrowserBridgeServer {
     for (const timer of this.#authenticationTimers.values()) clearTimeout(timer);
     this.#authenticationTimers.clear();
     for (const request of [...this.#pairingRequests.values()]) this.#removePairingRequest(request);
+    for (const commit of this.#authCommits) commit.controller.abort(error);
     this.#socketSessions.clear();
     for (const socket of this.#connections) {
       try { socket.terminate(); } catch { /* already closed */ }
     }
     this.#connections.clear();
 
+    // Marker commits own the server/token/installation identity until every
+    // publication-capable continuation has observed cancellation and settled.
+    await Promise.allSettled([...this.#authCommits].map((commit) => commit.promise));
     const closing: Promise<void>[] = [];
     if (startAttempt) closing.push(this.#closeStartAttempt(startAttempt));
     if (server) closing.push(closeServer(server));
@@ -922,7 +1195,7 @@ class BrowserBridgeServer {
     if (expectedConnection) this.assertConnection(expectedConnection);
     const active = this.#connection;
     if (!this.isConnected() || !active) {
-      throw new Error(`browser-bridge: authenticated extension not connected. Configure both port and token from ${this.#configFile}.`);
+      throw new Error("browser-bridge: authenticated extension not connected. Open the extension and approve its pending request with browser status/browser pair.");
     }
     const connection = {
       installationId: active.installationId,
@@ -1009,6 +1282,7 @@ class BrowserBridgeServer {
         cancellation.reject(new Error(`browser-bridge cancel acknowledgement timed out after ${this.#cancelAckTimeoutMs}ms`));
       }, this.#cancelAckTimeoutMs),
     };
+    cancellation.timer.unref();
     pending.cancellation = cancellation;
     try {
       pending.socket.send(JSON.stringify({ type: "cancel", id: pending.id }), (error) => {
@@ -1095,6 +1369,99 @@ class BrowserBridgeServer {
   }
 }
 
+function parseJsonRecord(text: string): Record<string, unknown> | null {
+  try {
+    const value = JSON.parse(text) as unknown;
+    return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, required: readonly string[], optional: readonly string[] = []): boolean {
+  const keys = Object.keys(value);
+  return required.every((key) => Object.hasOwn(value, key))
+    && keys.every((key) => required.includes(key) || optional.includes(key));
+}
+
+function decodeLegacyAuth(value: Record<string, unknown> | null): AuthMessage | null {
+  if (!value || !hasOnlyKeys(value, ["type", "token"])) return null;
+  return value.type === "auth" && typeof value.token === "string" ? { type: "auth", token: value.token } : null;
+}
+
+function decodePairingRequest(value: Record<string, unknown> | null): PairingRequestMessage | null {
+  if (!value || !hasOnlyKeys(value, ["type", "protocol"], ["origin", "installationId"])) return null;
+  if (value.type !== "pairing_request" || typeof value.protocol !== "string") return null;
+  return {
+    type: "pairing_request",
+    protocol: value.protocol,
+    ...(value.origin !== undefined ? { origin: value.origin as string } : {}),
+    ...(value.installationId !== undefined ? { installationId: value.installationId as string } : {}),
+  };
+}
+
+function isNonce(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{22,86}$/.test(value);
+}
+
+function decodeAuthProbe(value: Record<string, unknown> | null): AuthProbeMessage | null {
+  if (!value || !hasOnlyKeys(value, ["type", "protocol", "clientNonce"])) return null;
+  if (value.type !== "auth_probe" || value.protocol !== HMAC_AUTH_PROTOCOL || !isNonce(value.clientNonce)) return null;
+  return { type: "auth_probe", protocol: HMAC_AUTH_PROTOCOL, clientNonce: value.clientNonce };
+}
+
+function decodeAuthProof(value: Record<string, unknown> | null): AuthProofMessage | null {
+  if (!value || !hasOnlyKeys(value, ["type", "protocol", "clientNonce", "serverNonce", "installationId", "port", "generation", "proof"])) return null;
+  if (
+    value.type !== "auth_proof"
+    || value.protocol !== HMAC_AUTH_PROTOCOL
+    || !isNonce(value.clientNonce)
+    || !isNonce(value.serverNonce)
+    || !isInstallationId(value.installationId)
+    || !isValidPort(value.port)
+    || !Number.isSafeInteger(value.generation)
+    || Number(value.generation) <= 0
+    || typeof value.proof !== "string"
+    || !/^[A-Za-z0-9_-]{43}$/.test(value.proof)
+  ) return null;
+  return {
+    type: "auth_proof",
+    protocol: HMAC_AUTH_PROTOCOL,
+    clientNonce: value.clientNonce,
+    serverNonce: value.serverNonce,
+    installationId: value.installationId,
+    port: value.port,
+    generation: value.generation as number,
+    proof: value.proof,
+  };
+}
+
+function authTranscript(value: Pick<AuthChallenge, "clientNonce" | "serverNonce" | "installationId" | "port" | "generation">): string {
+  return JSON.stringify([
+    HMAC_AUTH_PROTOCOL,
+    value.clientNonce,
+    value.serverNonce,
+    value.installationId,
+    value.port,
+    value.generation,
+  ]);
+}
+
+function isValidPort(value: unknown): value is number {
+  return Number.isInteger(value) && Number(value) >= 1 && Number(value) <= 65_535;
+}
+
+function parseProductionAnchorPort(value: string | undefined): number {
+  if (value === undefined) return DEFAULT_PORT;
+  if (!/^\d+$/.test(value)) throw new Error("PI_BROWSER_BRIDGE_PORT must be a decimal integer");
+  const port = Number(value);
+  const maximum = 65_535 - DISCOVERY_PORT_COUNT + 1;
+  if (!Number.isSafeInteger(port) || port < 1 || port > maximum) {
+    throw new Error(`PI_BROWSER_BRIDGE_PORT must be between 1 and ${maximum}`);
+  }
+  return port;
+}
+
 function positiveDuration(value: number | undefined, fallback: number, label: string): number {
   if (value === undefined) return fallback;
   if (!Number.isFinite(value) || value <= 0) throw new Error(`browser-bridge ${label} must be greater than zero`);
@@ -1172,6 +1539,15 @@ function isInstallationId(value: unknown): value is string {
   return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
 
+async function persistVerifiedMarker(marker: VerifiedInstallMarker, context: VerifiedMarkerWriteContext): Promise<void> {
+  await writePrivateFile(
+    context.path,
+    `${JSON.stringify(marker, null, 2)}\n`,
+    context.signal,
+    context.assertOwner,
+  );
+}
+
 async function persistBridgeConfig(config: BridgeConfig, paths: BridgePersistencePaths, signal: AbortSignal): Promise<void> {
   // The credential-free legacy port file is not installation authority. Commit
   // it first and the canonical owner-only config last. Abort checks fence each
@@ -1196,7 +1572,12 @@ async function ensurePrivateDirectory(directory: string): Promise<void> {
   await fs.chmod(directory, PRIVATE_DIRECTORY_MODE);
 }
 
-async function writePrivateFile(filePath: string, content: string, signal?: AbortSignal): Promise<void> {
+async function writePrivateFile(
+  filePath: string,
+  content: string,
+  signal?: AbortSignal,
+  beforePublish?: () => void,
+): Promise<void> {
   await ensurePrivateDirectory(path.dirname(filePath));
   try {
     const details = await fs.lstat(filePath);
@@ -1207,6 +1588,7 @@ async function writePrivateFile(filePath: string, content: string, signal?: Abor
 
   const temporaryPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
   let handle: Awaited<ReturnType<typeof fs.open>> | null = null;
+  let published = false;
   try {
     throwIfSignalAborted(signal);
     handle = await fs.open(temporaryPath, "wx", PRIVATE_FILE_MODE);
@@ -1216,19 +1598,18 @@ async function writePrivateFile(filePath: string, content: string, signal?: Abor
     await handle.close();
     handle = null;
     throwIfSignalAborted(signal);
-    try {
-      await fs.rename(temporaryPath, filePath);
-    } catch (error) {
-      // Windows does not consistently replace an existing destination. The
-      // temporary file is already owner-only and remains in the same directory.
-      if (!new Set(["EEXIST", "EPERM", "EACCES"]).has(fileErrorCode(error) ?? "")) throw error;
-      await fs.rm(filePath, { force: true });
-      await fs.rename(temporaryPath, filePath);
-    }
-    await fs.chmod(filePath, PRIVATE_FILE_MODE);
+    beforePublish?.();
+    // No await is permitted between the final owner check and publication:
+    // a revoked generation must never resume later and replace the marker.
+    // renameSync uses the platform's atomic replace primitive; failure is
+    // fail-closed and never removes the canonical target first.
+    renameSync(temporaryPath, filePath);
+    published = true;
   } finally {
-    await handle?.close().catch(() => {});
-    await fs.rm(temporaryPath, { force: true }).catch(() => {});
+    if (!published) {
+      if (handle) await handle.close().catch(() => undefined);
+      await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
+    }
   }
 }
 
@@ -1256,6 +1637,19 @@ function abortableStartBoundary<T>(promise: Promise<T>, signal: AbortSignal): Pr
 function throwIfSignalAborted(signal?: AbortSignal): void {
   if (!signal?.aborted) return;
   throw signal.reason instanceof Error ? signal.reason : new Error("browser-bridge startup aborted");
+}
+
+function sendWebSocketFrame(socket: WebSocket, value: unknown): Promise<void> {
+  return new Promise((resolve, reject) => {
+    try {
+      socket.send(JSON.stringify(value), (error) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    } catch (error) {
+      reject(error);
+    }
+  });
 }
 
 function waitForListening(server: WebSocketServer): Promise<void> {
@@ -1291,26 +1685,19 @@ function fileErrorCode(error: unknown): string | undefined {
   return error && typeof error === "object" && "code" in error ? String((error as NodeJS.ErrnoException).code) : undefined;
 }
 
-/** Find the first free TCP port at or above start. */
-function findFreePort(start: number): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const tryPort = (port: number) => {
-      if (port > 65535) return reject(new Error("no free browser-bridge port found"));
-      const tester = net.createServer();
-      tester.once("error", () => tryPort(port + 1));
-      tester.once("listening", () => {
-        tester.once("close", () => resolve(port));
-        tester.close();
-      });
-      tester.listen(port, "127.0.0.1");
-    };
-    tryPort(start);
-  });
-}
-
 /** Process-wide singleton (mirrors the single authenticated extension connection). */
-export const browserBridge = new BrowserBridgeServer();
-export { BrowserBridgeServer };
+export const browserBridge = new BrowserBridgeServer({
+  anchorPort: parseProductionAnchorPort(process.env.PI_BROWSER_BRIDGE_PORT),
+});
+export {
+  BRIDGE_PROTOCOL,
+  BrowserBridgeServer,
+  DEFAULT_PORT,
+  DISCOVERY_PORT_COUNT,
+  HMAC_AUTH_PROTOCOL,
+  authTranscript,
+  parseProductionAnchorPort,
+};
 export type {
   BridgeCancelAck,
   BridgeCommandTerminal,
@@ -1320,7 +1707,11 @@ export type {
   BridgeStatus,
   BridgeTab,
   BrowserBridgeServerOptions,
+  PairingApproval,
   PairingRequestInfo,
   TabsMethod,
   TrackedBridgeCommand,
+  VerifiedInstallMarker,
+  VerifiedMarkerWriteContext,
+  VerifiedMarkerWriter,
 };

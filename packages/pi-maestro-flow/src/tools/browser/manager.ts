@@ -8,7 +8,16 @@ import puppeteer from "puppeteer-core";
 import { PROBE_JS, FIND_LISTS_JS, foldListsJs, monitorStartJs, MONITOR_STOP_JS, optimizeHtmlForTokens, smartTruncate, diffHtml, type HtmlDiff } from "./simplify.ts";
 import { STEALTH_INIT_JS, STEALTH_LAUNCH_ARGS } from "./stealth.ts";
 import { runOcr, runDetect, isLocalVisionError, type OcrOutcome, type DetectOutcome } from "../../providers/local-vision.ts";
-import { browserBridge, type BridgeConnectionIdentity, type BridgeStatus } from "./bridge-server.ts";
+import {
+  browserBridge,
+  type BridgeCommandTerminal,
+  type BridgeConnectionIdentity,
+  type BridgeResult,
+  type BridgeStatus,
+  type PairingApproval,
+  type PairingRequestInfo,
+  type TrackedBridgeCommand,
+} from "./bridge-server.ts";
 
 export type WaitUntil = "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
 export type BrowserChannel = "managed" | "profile" | "cdp" | "extension";
@@ -79,6 +88,10 @@ export interface BrowserManagerStatus {
     authenticatedConnected: boolean;
     /** Number of live Chrome tabs last reported by the authenticated extension. */
     tabCount: number;
+    /** Short-lived, command-inert discovery requests awaiting explicit approval. */
+    pendingPairings: PairingRequestInfo[];
+    /** Caller-finished extension commands still awaiting a real lifecycle terminal. */
+    drainingCommands: number;
   };
   namedTabs: BrowserNamedTabStatus[];
 }
@@ -86,7 +99,8 @@ export interface BrowserManagerStatus {
 export interface BrowserManagerLike {
   open(options: BrowserOpenOptions): Promise<BrowserTabInfo>;
   run(name: string, code: string, cwd: string, signal: AbortSignal | undefined, timeoutMs: number): Promise<BrowserRunOutput>;
-  status(): Promise<BrowserManagerStatus>;
+  status(signal?: AbortSignal): Promise<BrowserManagerStatus>;
+  pair(requestId: string, code: string, signal?: AbortSignal): Promise<PairingApproval>;
   close(name: string): Promise<boolean>;
   closeAll(): Promise<number>;
 }
@@ -121,7 +135,21 @@ interface PuppeteerEntry extends BaseEntry {
   cdpSession?: CDPSession;
 }
 
-interface ExtensionEntry extends BaseEntry {
+interface ExtensionTrackedOperation {
+  handle: TrackedBridgeCommand;
+  draining: boolean;
+}
+
+interface ExtensionOperationOwner {
+  /** False after timeout/abort or once close starts; no new commands may begin. */
+  acceptingCommands: boolean;
+  /** Every command terminal owned by this entry, including caller-finished work. */
+  terminalOperations: Set<ExtensionTrackedOperation>;
+  /** Host-side post-processing that may outlive its bridge command terminal. */
+  hostOperations: Set<Promise<void>>;
+}
+
+interface ExtensionEntry extends BaseEntry, ExtensionOperationOwner {
   backend: "extension";
   kind: "extension";
   /** Fixed when the named entry is opened; never re-resolved from bridge defaults. */
@@ -135,8 +163,7 @@ interface ExtensionEntry extends BaseEntry {
     controller: AbortController;
     promise: Promise<BrowserRunOutput>;
   } | null;
-  /** Raw bridge commands outlive abort-facing wrappers and must be joined on close. */
-  underlyingOperations: Set<Promise<unknown>>;
+  disposePromise: Promise<void> | null;
 }
 
 type TabEntry = PuppeteerEntry | ExtensionEntry;
@@ -188,6 +215,7 @@ function browserChannelConflict(channel: BrowserChannel, parameter: string, impl
 export class BrowserManager implements BrowserManagerLike {
   #tabs = new Map<string, TabEntry>();
   #opening = new Map<string, OpeningEntry>();
+  #provisionalExtensionOwners = new Set<ExtensionOperationOwner>();
   #lifecycle = new AbortController();
 
   async open(options: BrowserOpenOptions): Promise<BrowserTabInfo> {
@@ -284,65 +312,89 @@ export class BrowserManager implements BrowserManagerLike {
     await raceAbort(browserBridge.waitUntilConnected(options.timeoutMs), options.signal, options.timeoutMs);
     throwIfAborted(options.signal);
     const bridgeIdentity = requireExtensionConnection();
-    const reported = await queryExtensionTabs(bridgeIdentity, options.signal, options.timeoutMs);
-    let selected: ExtensionTabState | undefined;
+    const operationOwner = createExtensionOperationOwner();
+    this.#provisionalExtensionOwners.add(operationOwner);
+    let entry: ExtensionEntry | undefined;
     let ownedTab = false;
-
-    if (options.target) {
-      const needle = options.target.toLowerCase();
-      selected = reported.find((tab) => tab.url.toLowerCase().includes(needle) || tab.title.toLowerCase().includes(needle));
-      if (!selected) throw new Error(`No browser extension tab matched target ${JSON.stringify(options.target)}.`);
-    } else if (options.url) {
-      const result = await awaitExtensionBridge(
-        bridgeIdentity,
-        options.signal,
-        options.timeoutMs,
-        () => browserBridge.tabsCmd("create", { url: options.url, active: false }, options.timeoutMs, bridgeIdentity),
-      );
-      selected = parseExtensionTab(result.data, "tabs.create");
-      ownedTab = true;
-    } else {
-      selected = reported[0];
-      if (!selected) throw new Error("browser-bridge: the authenticated extension reported no scriptable tabs; pass url to create an owned tab.");
-    }
-
-    const entry: ExtensionEntry = {
-      backend: "extension",
-      name: options.name,
-      key,
-      kind: "extension",
-      connection: {
-        channel: "extension",
-        ownership: ownedTab ? "owned" : "borrowed",
-        // This is an honest limited adapter, not a puppeteer Page implementation.
-        capabilities: { page: false, cdp: true, cookies: true },
-      },
-      tabId: selected.id,
-      ownedTab,
-      url: selected.url,
-      title: selected.title,
-      bridgeIdentity,
-      closed: false,
-      activeRun: null,
-      underlyingOperations: new Set(),
-      ownedTempFiles: new Set(),
-      busy: false,
-    };
-
     try {
+      const reported = await queryExtensionTabs(bridgeIdentity, options.signal, options.timeoutMs, operationOwner);
+      let selected: ExtensionTabState | undefined;
+
+      if (options.target) {
+        const needle = options.target.toLowerCase();
+        selected = reported.find((tab) => tab.url.toLowerCase().includes(needle) || tab.title.toLowerCase().includes(needle));
+        if (!selected) throw new Error(`No browser extension tab matched target ${JSON.stringify(options.target)}.`);
+      } else if (options.url) {
+        const result = await awaitExtensionBridge(
+          bridgeIdentity,
+          options.signal,
+          options.timeoutMs,
+          () => browserBridge.sendTracked("tabs", { method: "create", url: options.url, active: false }, options.timeoutMs, bridgeIdentity),
+          operationOwner,
+        );
+        selected = parseExtensionTab(result.data, "tabs.create");
+        ownedTab = true;
+      } else {
+        selected = reported[0];
+        if (!selected) throw new Error("browser-bridge: the authenticated extension reported no scriptable tabs; pass url to create an owned tab.");
+      }
+
+      entry = {
+        backend: "extension",
+        name: options.name,
+        key,
+        kind: "extension",
+        connection: {
+          channel: "extension",
+          ownership: ownedTab ? "owned" : "borrowed",
+          // This is an honest limited adapter, not a puppeteer Page implementation.
+          capabilities: { page: false, cdp: true, cookies: true },
+        },
+        tabId: selected.id,
+        ownedTab,
+        url: selected.url,
+        title: selected.title,
+        bridgeIdentity,
+        closed: false,
+        acceptingCommands: operationOwner.acceptingCommands,
+        terminalOperations: operationOwner.terminalOperations,
+        hostOperations: operationOwner.hostOperations,
+        activeRun: null,
+        disposePromise: null,
+        ownedTempFiles: new Set(),
+        busy: false,
+      };
+      this.#provisionalExtensionOwners.delete(operationOwner);
+
       await this.#configureEntry(entry, options, ownedTab && !options.target);
       assertExtensionEntryActive(entry, options.signal);
       this.#registerEntry(entry);
-      return this.#info(entry, false, options.signal, options.timeoutMs);
+      return await this.#info(entry, false, options.signal, options.timeoutMs);
     } catch (error) {
-      entry.closed = true;
-      if (ownedTab) {
-        await awaitExtensionBridge(
-          bridgeIdentity,
-          undefined,
-          Math.min(2_000, options.timeoutMs),
-          () => browserBridge.tabsCmd("close", { tabId: entry.tabId }, Math.min(2_000, options.timeoutMs), bridgeIdentity),
-        ).catch(() => {});
+      operationOwner.acceptingCommands = false;
+      let cleanupError: unknown;
+      if (entry) {
+        entry.closed = true;
+        entry.acceptingCommands = false;
+        cancelExtensionOperations(entry);
+        if (ownedTab) {
+          entry.disposePromise ??= disposeEntry(entry);
+          try {
+            await entry.disposePromise;
+          } catch (caught) {
+            cleanupError = caught;
+          }
+        }
+        if (this.#tabs.get(entry.name) === entry) this.#tabs.delete(entry.name);
+      } else {
+        cancelExtensionOperations(operationOwner);
+      }
+      this.#retireProvisionalExtensionOwner(operationOwner);
+      if (cleanupError !== undefined) {
+        throw new AggregateError(
+          [error, cleanupError],
+          `Browser extension open failed for ${JSON.stringify(options.name)} and owned-tab cleanup also failed.`,
+        );
       }
       throw error;
     }
@@ -354,7 +406,10 @@ export class BrowserManager implements BrowserManagerLike {
     if (entry.busy) throw new Error(`Tab "${name}" is busy.`);
     if (!code.trim()) throw new Error("Browser run requires non-empty code.");
     throwIfAborted(signal);
-    if (entry.backend === "extension") return this.#runTrackedExtension(entry, code, cwd, signal, timeoutMs);
+    if (entry.backend === "extension") {
+      assertExtensionEntryAcceptingCommands(entry);
+      return this.#runTrackedExtension(entry, code, cwd, signal, timeoutMs);
+    }
     return this.#runPuppeteer(entry, code, cwd, signal, timeoutMs);
   }
 
@@ -370,20 +425,20 @@ export class BrowserManager implements BrowserManagerLike {
     const combined = combineSignals(signal, controller.signal);
     const promise = this.#runExtension(entry, code, cwd, combined.signal, timeoutMs);
     entry.activeRun = { controller, promise };
-    let interrupted = false;
     try {
       return await promise;
     } catch (error) {
-      interrupted = isInterruptError(error);
+      if (isInterruptError(error)) {
+        // The caller is finished, but the named binding and every acknowledged
+        // command terminal remain manager-owned until an explicit close.
+        entry.acceptingCommands = false;
+        controller.abort();
+        cancelExtensionOperations(entry);
+      }
       throw error;
     } finally {
       if (entry.activeRun?.promise === promise) entry.activeRun = null;
       combined.dispose();
-      if (interrupted && !entry.closed && this.#tabs.get(entry.name) === entry) {
-        entry.closed = true;
-        this.#tabs.delete(entry.name);
-        await disposeEntry(entry).catch(() => {});
-      }
     }
   }
 
@@ -510,10 +565,10 @@ export class BrowserManager implements BrowserManagerLike {
     }
   }
 
-  async status(): Promise<BrowserManagerStatus> {
-    // Status is an explicit live probe and therefore one of only two operations
-    // allowed to start the process-owned bridge (the other is extension open).
-    await browserBridge.start();
+  async status(signal?: AbortSignal): Promise<BrowserManagerStatus> {
+    // Status is an explicit live probe and may start the process-owned bridge;
+    // extension open and explicit pair approval are the other startup surfaces.
+    await browserBridge.start(signal);
     const listeningPort = browserBridge.listeningPort();
     const authenticatedConnected = browserBridge.isConnected();
     const reportedState = browserBridge.status();
@@ -537,17 +592,40 @@ export class BrowserManager implements BrowserManagerLike {
         listeningPort,
         authenticatedConnected,
         tabCount: authenticatedConnected ? browserBridge.tabs().length : 0,
+        pendingPairings: browserBridge.pairingRequests(),
+        drainingCommands: this.#drainingExtensionCommands(),
       },
       namedTabs,
     };
   }
 
+  async pair(requestId: string, code: string, signal?: AbortSignal): Promise<PairingApproval> {
+    await browserBridge.start(signal);
+    throwIfAborted(signal);
+    // Approval is an atomic credential-delivery commit; once begun, do not
+    // misreport a successful approval as aborted after the side effect lands.
+    return browserBridge.approvePairing(requestId, code);
+  }
+
   async close(name: string): Promise<boolean> {
     const entry = this.#tabs.get(name);
     if (entry) {
-      if (entry.backend === "extension") entry.closed = true;
-      this.#tabs.delete(name);
-      await disposeEntry(entry);
+      if (entry.backend === "extension") {
+        entry.closed = true;
+        entry.acceptingCommands = false;
+        cancelExtensionOperations(entry);
+        entry.disposePromise ??= disposeEntry(entry);
+        try {
+          await entry.disposePromise;
+        } finally {
+          // Retain the binding while draining so the same name cannot reopen
+          // against work whose lifecycle terminal has not arrived yet.
+          if (this.#tabs.get(name) === entry) this.#tabs.delete(name);
+        }
+      } else {
+        this.#tabs.delete(name);
+        await disposeEntry(entry);
+      }
       return true;
     }
     const opening = this.#opening.get(name);
@@ -560,20 +638,60 @@ export class BrowserManager implements BrowserManagerLike {
   async closeAll(): Promise<number> {
     const entries = [...this.#tabs.values()];
     const openings = [...this.#opening.values()];
+    const provisionalOwners = [...this.#provisionalExtensionOwners];
     this.#lifecycle.abort();
     this.#lifecycle = new AbortController();
     for (const entry of entries) {
-      if (entry.backend === "extension") entry.closed = true;
+      if (entry.backend === "extension") {
+        entry.closed = true;
+        entry.acceptingCommands = false;
+        cancelExtensionOperations(entry);
+        entry.disposePromise ??= disposeEntry(entry);
+      }
+    }
+    for (const owner of provisionalOwners) {
+      owner.acceptingCommands = false;
+      cancelExtensionOperations(owner);
     }
     for (const opening of openings) opening.abort();
-    this.#tabs.clear();
-    this.#opening.clear();
-    await Promise.allSettled([...entries.map(disposeEntry), ...openings.map((opening) => opening.promise)]);
+    await Promise.allSettled([
+      ...entries.map((entry) => entry.backend === "extension" ? entry.disposePromise! : disposeEntry(entry)),
+      ...openings.map((opening) => opening.promise),
+      ...provisionalOwners.flatMap((owner) => [
+        ...[...owner.terminalOperations].map((operation) => operation.handle.terminal),
+        ...owner.hostOperations,
+      ]),
+    ]);
+    for (const entry of entries) if (this.#tabs.get(entry.name) === entry) this.#tabs.delete(entry.name);
+    for (const [name, opening] of this.#opening) if (openings.includes(opening)) this.#opening.delete(name);
+    for (const owner of provisionalOwners) this.#provisionalExtensionOwners.delete(owner);
     return entries.length;
   }
 
   has(name: string): boolean {
     return this.#tabs.has(name);
+  }
+
+  #drainingExtensionCommands(): number {
+    let total = 0;
+    for (const entry of this.#tabs.values()) {
+      if (entry.backend === "extension") total += drainingExtensionCommandCount(entry);
+    }
+    for (const owner of this.#provisionalExtensionOwners) total += drainingExtensionCommandCount(owner);
+    return total;
+  }
+
+  #retireProvisionalExtensionOwner(owner: ExtensionOperationOwner): void {
+    if (owner.terminalOperations.size === 0 && owner.hostOperations.size === 0) {
+      this.#provisionalExtensionOwners.delete(owner);
+      return;
+    }
+    this.#provisionalExtensionOwners.add(owner);
+    const terminals = [
+      ...[...owner.terminalOperations].map((operation) => operation.handle.terminal),
+      ...owner.hostOperations,
+    ];
+    void Promise.all(terminals).then(() => this.#provisionalExtensionOwners.delete(owner));
   }
 
   #registerEntry(entry: TabEntry): void {
@@ -600,7 +718,7 @@ export class BrowserManager implements BrowserManagerLike {
           entry.bridgeIdentity,
           options.signal,
           options.timeoutMs,
-          () => browserBridge.tabsCmd("update", { tabId: entry.tabId, url: options.url }, options.timeoutMs, entry.bridgeIdentity),
+          () => browserBridge.sendTracked("tabs", { method: "update", tabId: entry.tabId, url: options.url }, options.timeoutMs, entry.bridgeIdentity),
           entry,
         );
         assertExtensionEntryActive(entry, options.signal);
@@ -717,30 +835,101 @@ function assertExtensionConnection(identity: BridgeConnectionIdentity, signal?: 
   browserBridge.assertConnection(identity);
 }
 
-function assertExtensionEntryActive(entry: ExtensionEntry, signal?: AbortSignal): void {
+function assertExtensionEntryAcceptingCommands(entry: ExtensionEntry): void {
   if (entry.closed) throw abortError();
+  if (!entry.acceptingCommands) {
+    throw new Error(`Browser extension entry ${JSON.stringify(entry.name)} is draining after an interrupted command; close it before issuing new commands.`);
+  }
+}
+
+function assertExtensionEntryActive(entry: ExtensionEntry, signal?: AbortSignal): void {
+  assertExtensionEntryAcceptingCommands(entry);
   if (!browserBridge.isConnected()) throw extensionDisconnectedError(entry);
   assertExtensionConnection(entry.bridgeIdentity, signal);
 }
 
-async function awaitExtensionBridge<T>(
+function createExtensionOperationOwner(): ExtensionOperationOwner {
+  return { acceptingCommands: true, terminalOperations: new Set(), hostOperations: new Set() };
+}
+
+function trackExtensionOperation(owner: ExtensionOperationOwner, handle: TrackedBridgeCommand): ExtensionTrackedOperation {
+  const operation = { handle, draining: false } satisfies ExtensionTrackedOperation;
+  owner.terminalOperations.add(operation);
+  void handle.terminal.then(() => owner.terminalOperations.delete(operation));
+  return operation;
+}
+
+function trackExtensionHostOperation<T>(owner: ExtensionOperationOwner, operation: Promise<T>): Promise<T> {
+  const terminal = operation.then(() => undefined, () => undefined);
+  owner.hostOperations.add(terminal);
+  void terminal.then(() => owner.hostOperations.delete(terminal));
+  return operation;
+}
+
+function markExtensionOperationDraining(owner: ExtensionOperationOwner, operation: ExtensionTrackedOperation): void {
+  owner.acceptingCommands = false;
+  operation.draining = true;
+  void operation.handle.cancel().catch(() => {});
+}
+
+function cancelExtensionOperations(owner: ExtensionOperationOwner): void {
+  owner.acceptingCommands = false;
+  for (const operation of owner.terminalOperations) {
+    operation.draining = true;
+    void operation.handle.cancel().catch(() => {});
+  }
+}
+
+function drainingExtensionCommandCount(owner: ExtensionOperationOwner): number {
+  let count = 0;
+  for (const operation of owner.terminalOperations) if (operation.draining) count += 1;
+  return count;
+}
+
+async function awaitExtensionBridge(
   identity: BridgeConnectionIdentity,
   signal: AbortSignal | undefined,
   timeoutMs: number,
-  operation: () => Promise<T>,
-  owner?: ExtensionEntry,
-): Promise<T> {
+  operation: () => Promise<TrackedBridgeCommand>,
+  owner?: ExtensionOperationOwner,
+): Promise<BridgeResult> {
   assertExtensionConnection(identity, signal);
-  const underlying = operation();
-  if (owner) {
-    owner.underlyingOperations.add(underlying);
-    void underlying.then(
-      () => owner.underlyingOperations.delete(underlying),
-      () => owner.underlyingOperations.delete(underlying),
-    );
+  if (owner && !owner.acceptingCommands) throw new Error("Browser extension command owner is draining; no new commands may start.");
+  const handle = await operation();
+  const tracked = owner ? trackExtensionOperation(owner, handle) : undefined;
+  try {
+    const result = await raceAbort(handle.response, signal, timeoutMs);
+    assertExtensionConnection(identity, signal);
+    return result;
+  } catch (error) {
+    if (isInterruptError(error)) {
+      if (owner && tracked) markExtensionOperationDraining(owner, tracked);
+      else void handle.cancel().catch(() => {});
+    }
+    throw error;
   }
-  const result = await raceAbort(underlying, signal, timeoutMs);
-  assertExtensionConnection(identity, signal);
+}
+
+async function awaitExtensionBridgeTerminal(
+  identity: BridgeConnectionIdentity,
+  timeoutMs: number,
+  operation: () => Promise<TrackedBridgeCommand>,
+  owner: ExtensionOperationOwner,
+): Promise<BridgeResult> {
+  const handle = await operation();
+  const tracked = trackExtensionOperation(owner, handle);
+  let result: BridgeResult | undefined;
+  let responseError: unknown;
+  try {
+    result = await handle.response;
+  } catch (error) {
+    responseError = error;
+    if (isInterruptError(error)) markExtensionOperationDraining(owner, tracked);
+  }
+  await handle.terminal;
+  if (responseError) throw responseError;
+  browserBridge.assertConnection(identity);
+  if (!result) throw new Error(`browser-bridge command produced no response within ${timeoutMs}ms`);
   return result;
 }
 
@@ -748,13 +937,13 @@ async function queryExtensionTabs(
   identity: BridgeConnectionIdentity,
   signal: AbortSignal | undefined,
   timeoutMs: number,
-  owner?: ExtensionEntry,
+  owner?: ExtensionOperationOwner,
 ): Promise<ExtensionTabState[]> {
   const result = await awaitExtensionBridge(
     identity,
     signal,
     timeoutMs,
-    () => browserBridge.tabsCmd("query", undefined, timeoutMs, identity),
+    () => browserBridge.sendTracked("tabs", { method: "query" }, timeoutMs, identity),
     owner,
   );
   if (!Array.isArray(result.data)) throw new Error("browser-bridge tabs.query returned invalid tab metadata.");
@@ -766,13 +955,13 @@ async function getExtensionTab(
   identity: BridgeConnectionIdentity,
   signal: AbortSignal | undefined,
   timeoutMs: number,
-  owner?: ExtensionEntry,
+  owner?: ExtensionOperationOwner,
 ): Promise<ExtensionTabState> {
   const result = await awaitExtensionBridge(
     identity,
     signal,
     timeoutMs,
-    () => browserBridge.tabsCmd("get", { tabId }, timeoutMs, identity),
+    () => browserBridge.sendTracked("tabs", { method: "get", tabId }, timeoutMs, identity),
     owner,
   );
   const tab = parseExtensionTab(result.data, "tabs.get");
@@ -898,7 +1087,7 @@ function createExtensionAdapters(
         entry.bridgeIdentity,
         signal,
         timeoutMs,
-        () => browserBridge.tabsCmd("update", { tabId: state.id, url }, timeoutMs, entry.bridgeIdentity),
+        () => browserBridge.sendTracked("tabs", { method: "update", tabId: state.id, url }, timeoutMs, entry.bridgeIdentity),
         entry,
       );
       assertExtensionEntryActive(entry, signal);
@@ -919,7 +1108,7 @@ function createExtensionAdapters(
         entry.bridgeIdentity,
         signal,
         timeoutMs,
-        () => browserBridge.exec(state.id, code, timeoutMs, entry.bridgeIdentity),
+        () => browserBridge.sendTracked("exec", { tabId: state.id, code }, timeoutMs, entry.bridgeIdentity),
         entry,
       );
       assertExtensionEntryActive(entry, signal);
@@ -941,7 +1130,7 @@ function createExtensionAdapters(
       entry.bridgeIdentity,
       signal,
       timeoutMs,
-      () => browserBridge.cdp(entry.tabId, method, params, timeoutMs, entry.bridgeIdentity),
+      () => browserBridge.sendTracked("cdp", { tabId: entry.tabId, method, params: params ?? {} }, timeoutMs, entry.bridgeIdentity),
       entry,
     );
     assertExtensionEntryActive(entry, signal);
@@ -955,13 +1144,13 @@ function createExtensionAdapters(
       entry.bridgeIdentity,
       signal,
       timeoutMs,
-      () => browserBridge.batch(bridged, entry.tabId, timeoutMs, entry.bridgeIdentity),
+      () => browserBridge.sendTracked("batch", { commands: bridged, tabId: entry.tabId }, timeoutMs, entry.bridgeIdentity),
       entry,
     );
     assertExtensionEntryActive(entry, signal);
     return result.results ?? [];
   };
-  const screenshot = async (options?: { selector?: string; fullPage?: boolean; save?: string; silent?: boolean }) => {
+  const screenshot = (options?: { selector?: string; fullPage?: boolean; save?: string; silent?: boolean }) => trackExtensionHostOperation(entry, (async () => {
     if (options?.selector) throw unsupportedExtensionCapability("tab.screenshot selector");
     const result = await cdp("Page.captureScreenshot", {
       format: "png",
@@ -990,14 +1179,14 @@ function createExtensionAdapters(
       displays.push({ type: "image", data: result.data, mimeType: "image/png" });
     }
     return metadata;
-  };
+  })());
   const cookieApi = limitedExtensionAdapter("tab.cookies", {
     async get(filter?: { domain?: string; name?: string }) {
       const result = await awaitExtensionBridge(
         entry.bridgeIdentity,
         signal,
         timeoutMs,
-        () => browserBridge.send("cookies", { method: "get", tabId: entry.tabId, filter }, timeoutMs, entry.bridgeIdentity),
+        () => browserBridge.sendTracked("cookies", { method: "get", tabId: entry.tabId, filter }, timeoutMs, entry.bridgeIdentity),
         entry,
       );
       assertExtensionEntryActive(entry, signal);
@@ -1009,7 +1198,7 @@ function createExtensionAdapters(
         entry.bridgeIdentity,
         signal,
         timeoutMs,
-        () => browserBridge.send("cookies", { method: "set", tabId: entry.tabId, cookies: list }, timeoutMs, entry.bridgeIdentity),
+        () => browserBridge.sendTracked("cookies", { method: "set", tabId: entry.tabId, cookies: list }, timeoutMs, entry.bridgeIdentity),
         entry,
       );
       assertExtensionEntryActive(entry, signal);
@@ -1020,7 +1209,7 @@ function createExtensionAdapters(
         entry.bridgeIdentity,
         signal,
         timeoutMs,
-        () => browserBridge.send("cookies", { method: "delete", tabId: entry.tabId, filter }, timeoutMs, entry.bridgeIdentity),
+        () => browserBridge.sendTracked("cookies", { method: "delete", tabId: entry.tabId, filter }, timeoutMs, entry.bridgeIdentity),
         entry,
       );
       assertExtensionEntryActive(entry, signal);
@@ -1675,23 +1864,34 @@ async function disposeEntry(entry: TabEntry): Promise<void> {
   if (entry.backend === "extension") {
     let disposeError: unknown;
     try {
+      entry.closed = true;
+      entry.acceptingCommands = false;
       const activeRun = entry.activeRun;
       if (activeRun) {
         activeRun.controller.abort();
+        cancelExtensionOperations(entry);
         await activeRun.promise.catch(() => {});
         if (entry.activeRun === activeRun) entry.activeRun = null;
       }
-      // activeRun is the abort-facing wrapper. Raw bridge commands can remain
-      // acknowledged and executing after that wrapper rejects, so disposal must
-      // join them before reporting close or destructively closing an owned tab.
-      while (entry.underlyingOperations.size > 0) {
-        await Promise.allSettled([...entry.underlyingOperations]);
+      // The caller-facing run/response is not the lifecycle terminal. Join every
+      // result/error/cancelled/disconnect terminal before releasing the binding
+      // or issuing the destructive owned-tab close.
+      cancelExtensionOperations(entry);
+      while (entry.terminalOperations.size > 0 || entry.hostOperations.size > 0) {
+        await Promise.all([
+          ...[...entry.terminalOperations].map((operation) => operation.handle.terminal),
+          ...entry.hostOperations,
+        ]);
       }
       if (browserBridge.isConnected()) {
         browserBridge.assertConnection(entry.bridgeIdentity);
         if (entry.ownedTab) {
-          await browserBridge.tabsCmd("close", { tabId: entry.tabId }, 2_000, entry.bridgeIdentity);
-          browserBridge.assertConnection(entry.bridgeIdentity);
+          await awaitExtensionBridgeTerminal(
+            entry.bridgeIdentity,
+            2_000,
+            () => browserBridge.sendTracked("tabs", { method: "close", tabId: entry.tabId }, 2_000, entry.bridgeIdentity),
+            entry,
+          );
         }
       } else if (entry.ownedTab) {
         throw extensionDisconnectedError(entry);

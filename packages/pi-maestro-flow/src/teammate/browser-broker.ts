@@ -14,6 +14,7 @@ import {
   type BrowserRunOutput,
   type BrowserTabInfo,
 } from "../tools/browser/manager.ts";
+import type { PairingApproval } from "../tools/browser/bridge-server.ts";
 
 class ScopedTeammateBrowserManager implements BrowserManagerLike {
   readonly #names = new Set<string>();
@@ -45,15 +46,19 @@ class ScopedTeammateBrowserManager implements BrowserManagerLike {
     return this.manager.run(this.#physicalName(name), code, cwd, signal, timeoutMs);
   }
 
-  async status(): Promise<BrowserManagerStatus> {
+  async status(signal?: AbortSignal): Promise<BrowserManagerStatus> {
     const prefix = `teammate:${this.actorId}:`;
-    const status = await this.manager.status();
+    const status = await this.manager.status(signal);
     return {
       ...status,
       namedTabs: status.namedTabs
         .filter((tab) => this.#names.has(tab.name))
         .map((tab) => ({ ...tab, name: tab.name.slice(prefix.length) })),
     };
+  }
+
+  pair(requestId: string, code: string, signal?: AbortSignal): Promise<PairingApproval> {
+    return this.manager.pair(requestId, code, signal);
   }
 
   async close(name: string): Promise<boolean> {

@@ -13,17 +13,17 @@
 - **ownership**：`owned | borrowed`，决定 close 是否关闭真实标签页/浏览器。
 - **capabilities**：每个命名 tab 实际支持的能力；unsupported API 会列出支持清单并失败关闭。
 
-> ⚠️ **安全提示**：此扩展可执行页面 JavaScript 和 raw CDP，配置 token 是授权边界，不能只依赖 localhost。安装时扩展还会默认启用动态规则 9999，剥离所有站点的 CSP 响应头，以支持严格 CSP 页面的 MAIN-world evaluate；不接受该风险时不要安装，或在 Chrome 中禁用/移除扩展。当前有限 browser adapter 不暴露 `management`、`contentSettings` 或 `dnr` 管理面。
+> ⚠️ **安全提示**：此扩展可执行页面 JavaScript 和 raw CDP，配对后生成的 token 才是授权边界，不能只依赖 localhost。未批准的 discovery socket 没有命令权限。安装时扩展还会默认启用动态规则 9999，剥离所有站点的 CSP 响应头，以支持严格 CSP 页面的 MAIN-world evaluate；不接受该风险时不要安装，或在 Chrome 中禁用/移除扩展。当前有限 browser adapter 不暴露 `management`、`contentSettings` 或 `dnr` 管理面。
 
 ## INTERACTIVE INPUTS
 
 执行前必须用 `ctx.ui` 交互式确认：
 
 - 用户是否允许在 `chrome://extensions` 开启开发者模式并手动加载未打包扩展。
-- 用户理解 token 不应粘贴到聊天、日志或网页，只在扩展 popup 与本机 `~/.pi/browser-bridge.json` 之间复制。
+- 用户理解首次连接需要批准扩展 popup 与 `browser status` 显示的同一配对请求；无需复制 port/token。
 - 用户理解 `extension` 必须通过 `app.channel: "extension"` 显式选择，断连不会操作另一个浏览器。
 
-不要猜测端口。Pi 可能因端口冲突选择更高的空闲端口，始终以 `browser status` 生成的配置为准。
+默认发现范围固定为 `19222..19231`。只有完成 Browser Bridge discovery handshake 的端口会被接受；port/token 手工输入仅保留在 popup 的高级故障恢复设置中。
 
 ## PREREQUISITES
 
@@ -33,7 +33,7 @@
 
 ## TASK
 
-### 1. 启动桥并生成本机配置
+### 1. 启动桥
 
 先调用：
 
@@ -41,17 +41,7 @@
 browser({ action: "status" })
 ```
 
-`status` 是显式的 live probe，会启动进程持有的 loopback WebSocket server，并生成 owner-only `~/.pi/browser-bridge.json`：
-
-```json
-{
-  "version": 1,
-  "port": 19222,
-  "token": "<随机 token>"
-}
-```
-
-实际端口可能不是 `19222`。`~/.pi/browser-bridge.port` 只是兼容发现文件，不能证明扩展已安装或已连接。
+`status` 是显式 live probe。默认会在 `19222..19231` 启动进程持有的 loopback server；范围内非 Browser Bridge 服务会被跳过，十个端口全部不可用时明确失败。若启动 Pi 前设置 `PI_BROWSER_BRIDGE_PORT`，它会严格校验并改用以该值为起点的十端口 server 范围；空配置扩展无法读取 Pi 的环境变量，因此自定义起点必须同时在 popup“高级设置”中填写端口。
 
 ### 2. 定位并加载扩展
 
@@ -63,13 +53,23 @@ browser({ action: "status" })
 4. 选择 `optional/browser-bridge/` 目录。
 5. 打开 “Pi Browser Bridge” popup。
 
-不要代替用户操作浏览器 UI。
+不要代替用户绕过浏览器的扩展安装授权。
 
-### 3. 配置端口和 token
+### 3. 自动发现并批准一次配对
 
-从 `~/.pi/browser-bridge.json` 复制**实际** `port` 和完整 `token` 到扩展 popup，点击“保存并重连”。两项必须同时匹配。popup 的 `已认证连接` 才代表首帧 token 认证成功；`重连中`、`未配置 token` 或 `认证失败` 都不算连接。
+空配置扩展会自动扫描 `19222..19231`，仅接受带 `pi-browser-bridge/v1` challenge 的服务。popup 进入“等待 Pi 确认”后调用：
 
-如需指定首选起始端口，可在启动 Pi 前设置 `PI_BROWSER_BRIDGE_PORT=<端口>`；若端口被占用，Pi 仍可能选择更高端口，因此扩展继续以配置文件为准。
+```javascript
+browser({ action: "status" })
+```
+
+从 `bridge.pendingPairings` 取得当前 `requestId` 和六位 `code`，确认它与 popup 显示的请求一致，然后批准：
+
+```javascript
+browser({ action: "pair", request_id: "<requestId>", code: "<六位 code>" })
+```
+
+批准只对当前 socket generation、未过期且 requestId/code 完全匹配的请求生效。凭证由服务端直接下发并由扩展保存；**pairing 本身不写 verified marker，也不获得命令权限**。扩展随后关闭 pairing socket，以不会在扫描中发送 raw token 的 challenge-response 握手建立独立认证连接；只有该认证成功才写 `browser-bridge.verified`。reload 后自动认证，无需再次输入配置。port/token 手工字段只在 popup 的“高级设置”中用于故障恢复或自定义 server 起点。
 
 ### 4. 用 live status 验证
 
@@ -82,9 +82,11 @@ browser({ action: "status" })
 检查：
 
 - `bridge.serverStarted === true`
+- `bridge.pendingPairings` 已清空
 - `bridge.authenticatedConnected === true`
 - `bridge.state === "connected"`
 - `bridge.tabCount` 是已认证扩展当前报告的 Chrome http(s) 标签页数量
+- `bridge.drainingCommands === 0`
 - `namedTabs` 列出 Pi 当前命名 tab 的 `channel`、`ownership`、`capabilities`
 
 只有 `browser status` 声明实时 server/connection/tab 状态。`/install list` 是静态、无副作用的历史/配置检查：
@@ -93,7 +95,7 @@ browser({ action: "status" })
 - 有标记但标记或 `browser-bridge.json` 不完整/非法：`partial`
 - 合法 verified marker + 合法配置：`installed`
 
-`installed` 只表示曾成功认证且当前配置结构合法，不表示扩展此刻在线。
+`installed` 只表示曾通过 legacy token 或 challenge-response 成功认证且当前配置结构合法，不表示扩展此刻在线。只完成 pairing、尚未认证重连时不算 installed。
 
 ### 5. 显式使用 extension channel
 
@@ -136,11 +138,12 @@ extension run 只支持：
 
 按顺序验证：
 
-1. `browser status` 显示 server started；读取其实际 port。
-2. popup 配置 port/token 后显示 `已认证连接`。
-3. `browser status` 显示 authenticated connected 与 live tab count。
-4. 用显式 `app.channel:"extension"` 借用一个标签页，确认 status 中 named tab 为 `channel:"extension"`、`ownership:"borrowed"`、`capabilities.page:false`。
-5. 可选抽查 `tab.title()`、`tab.cdp("Page.getFrameTree")`、`tab.cookies.get()`；不要用未声明的 Puppeteer helper 验证 parity。
+1. `browser status` 显示 server started。
+2. popup 自动发现并显示待配对请求；status 返回同一 requestId/code。
+3. `browser pair` 批准后 popup 显示 `已认证连接`，reload 后仍自动认证。
+4. `browser status` 显示 pendingPairings 为空、authenticated connected、live tab count 与 drainingCommands。
+5. 用显式 `app.channel:"extension"` 借用一个标签页，确认 status 中 named tab 为 `channel:"extension"`、`ownership:"borrowed"`、`capabilities.page:false`。
+6. 可选抽查 `tab.title()`、`tab.cdp("Page.getFrameTree")`、`tab.cookies.get()`；不要用未声明的 Puppeteer helper 验证 parity。
 
 ## ROLLBACK
 
@@ -153,6 +156,7 @@ extension run 只支持：
 ## NOTES
 
 - 扩展运行在 MV3 service worker 中，用 `chrome.alarms` 保活/重连；瞬时断连仍可能恢复，但只有新的 `browser status` 是当前 live 证据。
-- 成功首帧 token 认证才写 `browser-bridge.verified`。marker 是 historical verified 证据，不是健康检查。
-- bridge server 只由 `browser status` 或显式 `app.channel:"extension"` open 启动；普通 managed/profile/cdp open 不启动它。
+- 成功配对后的独立 challenge-response 认证连接才写 `browser-bridge.verified`；候选端口只收到 nonce/proof，不收到 raw token。marker 是 historical verified 证据，不是健康检查。
+- bridge server 只由 `browser status`、`browser pair` 或显式 `app.channel:"extension"` open 启动；普通 managed/profile/cdp open 不启动它。
+- caller timeout 会把 entry 标为 draining 并请求取消；已经开始且无法证明停止的页面 JS/Chrome API 仍由 manager 持有到真实 result/error/disconnect terminal，owned tab 不会提前关闭。
 - 完整 Puppeteer Page/ElementHandle/request interception/frame event parity 不在当前版本范围内。
