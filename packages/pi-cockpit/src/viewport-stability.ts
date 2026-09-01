@@ -7,10 +7,6 @@ type ApplyLineResets = (lines: string[]) => string[];
 
 interface ViewportTuiInternals {
 	applyLineResets?: ApplyLineResets;
-	previousLines?: string[];
-	previousViewportTop?: number;
-	previousHeight?: number;
-	terminal?: { rows: number };
 }
 
 interface ViewportStabilityMarker {
@@ -42,10 +38,6 @@ function once(action: () => void): () => void {
 
 function markerOf(fn: ApplyLineResets): ViewportStabilityMarker | undefined {
 	return (fn as ApplyLineResets & Record<symbol, ViewportStabilityMarker | undefined>)[VIEWPORT_STABILITY_MARKER];
-}
-
-function isKittyImageLine(line: string | undefined): boolean {
-	return typeof line === "string" && line.includes("\x1b_G");
 }
 
 function prototypeMethodSlot(target: object): ApplyLineResetsSlot | undefined {
@@ -98,12 +90,9 @@ function resolveApplyLineResetsSlot(internals: ViewportTuiInternals): ApplyLineR
 }
 
 /**
- * Mirrors pi-tui's viewport-safe diff behavior until the host ships it.
- *
- * pi-tui 0.82/0.83 clears the screen and scrollback whenever the first changed
- * line is above the visible viewport. For stable-height content, those lines
- * cannot be updated in terminal scrollback and should only advance the diff
- * baseline. Visible changes are then rendered normally from viewportTop.
+ * Installs a detachable compatibility hook without altering pi-tui's diff
+ * baseline. Hidden lines cannot be rewritten in terminal scrollback, so
+ * claiming they were rendered leaves stale frames such as live tool timers.
  */
 export function attachViewportStability(tui: TUI): ViewportStabilityPatch {
 	try {
@@ -117,30 +106,7 @@ export function attachViewportStability(tui: TUI): ViewportStabilityPatch {
 		let dispatches = 0;
 		const wrapped: ApplyLineResets = function (this: ViewportTuiInternals, lines: string[]): string[] {
 			dispatches += 1;
-			const nextLines = original.call(this, lines);
-			const previousLines = this.previousLines;
-			const viewportTop = this.previousViewportTop;
-			const previousHeight = this.previousHeight;
-			const currentHeight = this.terminal?.rows;
-			if (
-				Array.isArray(previousLines)
-				&& Array.isArray(nextLines)
-				&& previousLines.length === nextLines.length
-				&& typeof viewportTop === "number"
-				&& Number.isFinite(viewportTop)
-				&& viewportTop > 0
-				&& typeof previousHeight === "number"
-				&& Number.isFinite(previousHeight)
-				&& previousHeight === currentHeight
-			) {
-				const hiddenEnd = Math.min(previousLines.length, Math.trunc(viewportTop));
-				const hiddenHasKittyImage = previousLines.slice(0, hiddenEnd).some(isKittyImageLine)
-					|| nextLines.slice(0, hiddenEnd).some(isKittyImageLine);
-				if (!hiddenHasKittyImage) {
-					for (let index = 0; index < hiddenEnd; index++) previousLines[index] = nextLines[index];
-				}
-			}
-			return nextLines;
+			return original.call(this, lines);
 		};
 		let references = 1;
 		const release = (): void => {

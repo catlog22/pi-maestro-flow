@@ -57,8 +57,8 @@ function renderHarness(initialLines: string[]) {
 	};
 }
 
-test("equal-height hidden changes fold into the baseline without host clearing", () => {
-	const h = renderHarness(["zero", "one", "two", "three", "four"]);
+test("equal-height hidden timer changes use the host redraw instead of leaving stale scrollback", () => {
+	const h = renderHarness(["teammate · 11s", "one", "two", "three", "four"]);
 	const patch = attachViewportStability(h.tui);
 	assert.equal(patch.active, true);
 
@@ -67,15 +67,15 @@ test("equal-height hidden changes fold into the baseline without host clearing",
 	assert.equal(h.internals.previousViewportTop, 2);
 	h.terminal.writes.length = 0;
 
-	h.setLines(["ZERO", "ONE", "two", "three", "four"]);
+	h.setLines(["teammate · 38s", "one", "two", "three", "four"]);
 	h.render();
-	assert.equal(h.tui.fullRedraws, 1, "must not enter pi-tui's fullRender(true) branch");
-	assert.equal(h.terminal.writes.some((value) => value.includes("\x1b[3J")), false);
-	assert.ok(h.internals.previousLines[0]?.startsWith("ZERO\x1b[0m"));
-	assert.ok(h.internals.previousLines[1]?.startsWith("ONE\x1b[0m"));
+	assert.equal(h.tui.fullRedraws, 2, "hidden text changes must retain pi-tui's fullRender(true) branch");
+	assert.equal(h.terminal.writes.some((value) => value.includes("\x1b[3J")), true);
+	assert.equal(h.terminal.writes.some((value) => value.includes("teammate · 38s")), true);
+	assert.ok(h.internals.previousLines[0]?.startsWith("teammate · 38s\x1b[0m"));
 });
 
-test("visible changes still render differentially after hidden changes are absorbed", () => {
+test("a hidden change keeps visible updates in the same native full redraw", () => {
 	const h = renderHarness(["zero", "one", "two", "three", "four"]);
 	attachViewportStability(h.tui);
 	h.render();
@@ -83,13 +83,13 @@ test("visible changes still render differentially after hidden changes are absor
 
 	h.setLines(["ZERO", "one", "two", "three", "FOUR"]);
 	h.render();
-	assert.equal(h.tui.fullRedraws, 1);
+	assert.equal(h.tui.fullRedraws, 2);
 	assert.equal(h.terminal.writes.length, 1);
-	assert.equal(h.terminal.writes[0].includes("\x1b[3J"), false);
+	assert.equal(h.terminal.writes[0].includes("\x1b[3J"), true);
 	assert.match(h.terminal.writes[0], /FOUR/);
 });
 
-test("visible Kitty image lines do not block hidden equal-height baseline folding", () => {
+test("visible Kitty image lines keep hidden changes in the native redraw path", () => {
 	const image = "\x1b_Ga=T,f=100,r=1,i=1;image\x1b\\";
 	const h = renderHarness(["zero", "one", image, "three", "four"]);
 	attachViewportStability(h.tui);
@@ -99,8 +99,8 @@ test("visible Kitty image lines do not block hidden equal-height baseline foldin
 
 	h.setLines(["ZERO", "ONE", image, "three", "four"]);
 	h.render();
-	assert.equal(h.tui.fullRedraws, 1, "a visible Kitty image must not force host clearing");
-	assert.equal(h.terminal.writes.some((value) => value.includes("\x1b[3J")), false);
+	assert.equal(h.tui.fullRedraws, 2);
+	assert.equal(h.terminal.writes.some((value) => value.includes("\x1b[3J")), true);
 	assert.ok(h.internals.previousLines[0]?.startsWith("ZERO\x1b[0m"));
 	assert.ok(h.internals.previousLines[1]?.startsWith("ONE\x1b[0m"));
 	assert.ok(h.internals.previousLines[2]?.includes("\x1b_G"));
@@ -205,8 +205,8 @@ test("dynamic TUI references patch the stable renderer prototype without wrappin
 	h.terminal.writes.length = 0;
 	h.setLines(["ZERO", "ONE", "two", "three", "four"]);
 	h.render();
-	assert.equal(h.tui.fullRedraws, 1, "dynamic references receive the same hidden-line fast path");
-	assert.equal(h.terminal.writes.some((value) => value.includes("\x1b[3J")), false);
+	assert.equal(h.tui.fullRedraws, 2, "dynamic references preserve the native hidden-line redraw");
+	assert.equal(h.terminal.writes.some((value) => value.includes("\x1b[3J")), true);
 
 	patch.detach();
 	assert.equal(Object.getOwnPropertyDescriptor(owner, "applyLineResets")?.value, original);
@@ -252,7 +252,7 @@ test("dynamic TUI probing fails closed for throwing, cyclic, or shadowed methods
 	assert.equal(Object.getOwnPropertyDescriptor(owner, "applyLineResets")?.value, original);
 });
 
-test("dynamic TUI references retain viewport stability when the renderer instance changes", () => {
+test("dynamic TUI references preserve native redraws when the renderer instance changes", () => {
 	const first = renderHarness(["zero", "one", "two", "three", "four"]);
 	const second = renderHarness(["zero", "one", "two", "three", "four"]);
 	let current = first.tui;
@@ -265,8 +265,8 @@ test("dynamic TUI references retain viewport stability when the renderer instanc
 	second.terminal.writes.length = 0;
 	second.setLines(["ZERO", "ONE", "two", "three", "four"]);
 	second.render();
-	assert.equal(second.tui.fullRedraws, 1);
-	assert.equal(second.terminal.writes.some((value) => value.includes("\x1b[3J")), false);
+	assert.equal(second.tui.fullRedraws, 2);
+	assert.equal(second.terminal.writes.some((value) => value.includes("\x1b[3J")), true);
 
 	patch.detach();
 });
