@@ -127,7 +127,7 @@ export const GoalToolParams = Type.Object({
   acceptance: Type.Optional(
     Type.Array(Type.String({ maxLength: MAX_ACCEPTANCE_COMMAND_CHARS }), {
       maxItems: 5,
-      description: `Acceptance commands (max 5, ${MAX_ACCEPTANCE_COMMAND_CHARS} characters each), configurable on create or update. During completion the extension reruns them and their exit status directly determines verification; without commands, completion uses the agent verifier.`,
+      description: `Acceptance commands (max 5, ${MAX_ACCEPTANCE_COMMAND_CHARS} characters each), configurable on create or update. During completion the extension reruns them from the workspace with the platform system shell, so commands must be focused and cross-platform; exit status directly determines verification; without commands, completion uses the agent verifier.`,
     }),
   ),
 }, { additionalProperties: false });

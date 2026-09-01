@@ -515,8 +515,9 @@ test("Plan confirmation archives the exact draft before restoring Act and inject
     assert.match(toolText, /maestro search/);
     assert.match(toolText, /maestro load/);
     assert.match(toolText, /Todo dependency graph/);
-    assert.match(toolText, /quality gate/);
-    assert.match(toolText, /acceptance criteria/);
+    assert.match(toolText, /Goal creation is optional/);
+    assert.match(toolText, /Do not create a Goal solely because the Plan was approved/);
+    assert.match(toolText, /A Todo without a Goal completes through its own acceptance criteria/);
 
     const store = new PlanStore(harness.ctx.cwd, {
       rootDir: join(root, "global"),
@@ -1132,7 +1133,9 @@ test("Plan hooks preserve read-only discovery and block mutations before approva
     assert.match(planPrompt, /Root performs one contract spot-check/);
     assert.match(planPrompt, /without starting\s+another review chain/);
     assert.match(planPrompt, /scope, boundaries, non-goals/);
-    assert.match(planPrompt, /quality gates to key Todos/);
+    assert.match(planPrompt, /Goal creation is optional/);
+    assert.match(planPrompt, /never create one solely because the Plan was approved/);
+    assert.match(planPrompt, /most\s+Todos should complete without one/);
     for (const toolName of ["Read", "ffgrep", "fffind", "smart_search"]) {
       assert.equal(onToolCallPlan({ toolName, input: {} }), undefined, toolName);
     }

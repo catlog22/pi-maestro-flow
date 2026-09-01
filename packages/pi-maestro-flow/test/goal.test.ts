@@ -8,6 +8,10 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { ModelCircuitBreaker } from "pi-maestro-teammate/v1/retry";
 import { GoalToolParams } from "../src/extension/schemas.ts";
 import {
+  GOAL_ACCEPTANCE_COMMAND_TIMEOUT_MS,
+  GOAL_VERIFIER_TIMEOUT_MS,
+} from "../src/tools/goal-verification.ts";
+import {
   FAILOVER_TERMINAL_EVENT,
   getProjectModelFailoverPath,
   registerModelFailover,
@@ -2034,6 +2038,11 @@ test("verifier infrastructure error exposes bounded child diagnostics without co
   }
 });
 
+test("Goal verification timeouts allow package-scale checks while staying bounded", () => {
+  assert.equal(GOAL_VERIFIER_TIMEOUT_MS, 10 * 60_000);
+  assert.equal(GOAL_ACCEPTANCE_COMMAND_TIMEOUT_MS, 5 * 60_000);
+});
+
 test("acceptance commands exiting 0 via the real runner complete the Goal without the agent", async () => {
   let agentCalls = 0;
   setAcceptanceRunnerForTest(undefined);
@@ -3315,7 +3324,7 @@ test("an unrelated user Goal is never relabeled as the canonical Workflow owner"
 });
 
 test("canonical Session identity changes fence the old workflow Goal and replace it", async () => {
-  const persisted: Array<{ goal?: { workflowSessionId?: string; status?: string } | null }> = [];
+  const persisted: Array<{ goal?: { workflowSessionId?: string; status?: string; supersededByGoalId?: string } | null }> = [];
   const ctx = createContext({ sessionManager: { getEntries: () => [] } });
   initGoal({ appendEntry(_type: string, value: unknown) { persisted.push(value as typeof persisted[number]); } } as never);
   onSessionStart(ctx);
@@ -3338,6 +3347,7 @@ test("canonical Session identity changes fence the old workflow Goal and replace
       entry.goal?.workflowSessionId === "session-1" && entry.goal.status === "paused"
     );
     assert.ok(oldPersisted, "the old workflow-owned Goal must be paused before replacement");
+    assert.equal(oldPersisted.goal?.supersededByGoalId, replacement?.id);
   } finally {
     await executeGoalCommand({ action: "clear" }, ctx);
     onSessionShutdown(ctx);
@@ -3370,11 +3380,96 @@ test("same-Session generation changes rebind a workflow Goal in place without le
     const afterSeal = reconcileWorkflowGoal(sealed, ctx);
     assert.equal(afterSeal?.id, original?.id);
     assert.equal(afterSeal?.workflowSessionGeneration, "canonical:valid:session-1:3");
-    assert.equal(afterSeal?.status, "active");
-    assert.equal(afterSeal?.pauseReason, undefined);
+    assert.equal(afterSeal?.status, "paused");
+    assert.equal(afterSeal?.pauseReason, "gate");
   } finally {
     await executeGoalCommand({ action: "clear" }, ctx);
     onSessionShutdown(ctx);
+  }
+});
+
+test("canonical binding mismatch pauses before running acceptance commands", async () => {
+  let acceptanceCalls = 0;
+  setAcceptanceRunnerForTest(async (command) => {
+    acceptanceCalls++;
+    return { command, exitCode: 0, output: "must not run" };
+  });
+  let currentSnapshot = completionReadyWorkflowSnapshot("session-1");
+  setWorkflowCoordinator({
+    status: () => currentSnapshot,
+    async refreshSnapshot() { return currentSnapshot; },
+  } as never);
+  const ctx = createContext({ isIdle: () => false, sessionManager: { getEntries: () => [] } });
+  initGoal({ appendEntry() {}, sendMessage() {} } as never);
+  onSessionStart(ctx);
+
+  try {
+    const bound = reconcileWorkflowGoal(currentSnapshot, ctx);
+    await executeGoal({
+      action: "update",
+      objective: bound!.text,
+      acceptance: ["must-not-run"],
+    }, ctx);
+    currentSnapshot = completionReadyWorkflowSnapshot("session-2", "canonical:valid:session-2:1");
+
+    const result = await executeGoal({ action: "complete", summary: "All work is complete." }, ctx);
+
+    assert.equal(acceptanceCalls, 0);
+    assert.equal(getActiveGoal()?.status, "paused");
+    assert.equal(getActiveGoal()?.pauseReason, "gate");
+    assert.match(result.text, /Goal is paused/);
+    assert.match(result.text, /session-1/);
+    assert.match(result.text, /session-2/);
+    assert.match(result.text, /run-control/);
+    assert.doesNotMatch(result.text, /continue the active Goal/);
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+    setWorkflowCoordinator(undefined);
+    setAcceptanceRunnerForTest(undefined);
+  }
+});
+
+test("terminal canonical Workflow pauses resumed Goal before running acceptance commands", async () => {
+  let acceptanceCalls = 0;
+  setAcceptanceRunnerForTest(async (command) => {
+    acceptanceCalls++;
+    return { command, exitCode: 0, output: "must not run" };
+  });
+  let currentSnapshot = completionReadyWorkflowSnapshot("session-1");
+  setWorkflowCoordinator({
+    status: () => currentSnapshot,
+    async refreshSnapshot() { return currentSnapshot; },
+  } as never);
+  const ctx = createContext({ isIdle: () => false, sessionManager: { getEntries: () => [] } });
+  initGoal({ appendEntry() {}, sendMessage() {} } as never);
+  onSessionStart(ctx);
+
+  try {
+    const bound = reconcileWorkflowGoal(currentSnapshot, ctx);
+    currentSnapshot = completionReadyWorkflowSnapshot("session-1", "canonical:valid:session-1:2");
+    currentSnapshot.session!.status = "sealed";
+    const sealed = reconcileWorkflowGoal(currentSnapshot, ctx);
+    assert.equal(sealed?.status, "paused");
+    assert.equal(sealed?.pauseReason, "gate");
+
+    await executeGoal({
+      action: "update",
+      objective: bound!.text,
+      acceptance: ["must-not-run"],
+    }, ctx);
+    const result = await executeGoal({ action: "complete", summary: "All work is complete." }, ctx);
+
+    assert.equal(acceptanceCalls, 0);
+    assert.equal(getActiveGoal()?.status, "paused");
+    assert.equal(getActiveGoal()?.pauseReason, "gate");
+    assert.match(result.text, /terminal canonical Workflow Session session-1/);
+    assert.match(result.text, /run-control/);
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+    setWorkflowCoordinator(undefined);
+    setAcceptanceRunnerForTest(undefined);
   }
 });
 

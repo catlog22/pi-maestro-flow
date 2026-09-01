@@ -22,6 +22,7 @@ import {
   hasMatchingWorkflowBinding,
   isOverflow,
   isRetryableGoalFailure,
+  isTerminalCanonicalWorkflow,
   normalizeAcceptance,
   redactAcceptanceCommandForDisplay,
   verifyGoalCompletion,
@@ -198,6 +199,7 @@ configureGoalVerification({
   refreshWorkflowSnapshot() {
     return workflowCoordinator?.refreshSnapshot?.() ?? Promise.resolve(workflowCoordinator?.status());
   },
+  fenceGoalLifecycle,
   pauseGoal,
   updateUsage,
   persistGoal,
@@ -274,12 +276,14 @@ export async function executeGoal(
         };
       }
       const outcome = await verifyGoalCompletion(completionSummary, ctx);
-      return {
-        text: outcome.status === "done"
-          ? "Goal done (verified)."
-          : `Goal completion was not verified; continue the active Goal. Reason: ${outcome.reason}`,
-        isError: false,
-      };
+      const text = outcome.status === "done"
+        ? "Goal done (verified)."
+        : outcome.status === "paused"
+          ? `Goal completion was not verified; the Goal is paused. Reason: ${outcome.reason}`
+          : outcome.status === "hold"
+            ? `Goal completion was not started. Reason: ${outcome.reason}`
+            : `Goal completion was not verified; continue the active Goal. Reason: ${outcome.reason}`;
+      return { text, isError: false };
     }
     default:
       return { text: "Unknown action. Valid: get, create, update, complete", isError: true };
@@ -398,16 +402,18 @@ export function reconcileWorkflowGoal(snapshot: WorkflowSnapshot, ctx: GoalConte
     return activeGoal;
   }
 
+  const terminalWorkflow = isTerminalCanonicalWorkflow(snapshot);
   const currentGoal = activeGoal;
   if (currentGoal?.workflowSessionId && currentGoal.workflowSessionId !== session.sessionId) {
     fenceGoalLifecycle();
     const paused = pauseGoal(currentGoal, "gate");
-    persistGoal(paused);
-    if (session.status === "sealed" || session.status === "archived") {
+    if (terminalWorkflow) {
+      persistGoal(paused);
       updateStatusLine(ctx, paused);
       return paused;
     }
     const replacement = createWorkflowGoal(session, ctx, snapshot.sessionGeneration);
+    persistGoal({ ...paused, supersededByGoalId: replacement.id });
     persistGoal(replacement);
     updateStatusLine(ctx, replacement);
     return replacement;
@@ -417,15 +423,28 @@ export function reconcileWorkflowGoal(snapshot: WorkflowSnapshot, ctx: GoalConte
     .some((gate) => gate.blocking && ["failed", "blocked"].includes(gate.status));
   if (currentGoal?.workflowSessionId === session.sessionId
     && currentGoal.workflowSessionGeneration !== snapshot.sessionGeneration) {
-    const rebound = currentGoal.status === "paused" && currentGoal.pauseReason === "gate" && !failedGate
-      ? activateResumedGoal(currentGoal)
-      : { ...currentGoal, updatedAt: Date.now() };
+    if (terminalWorkflow && currentGoal.status === "active") fenceGoalLifecycle();
+    const rebound = terminalWorkflow
+      ? currentGoal.status === "active"
+        ? pauseGoal(currentGoal, "gate")
+        : { ...currentGoal, updatedAt: Date.now() }
+      : currentGoal.status === "paused" && currentGoal.pauseReason === "gate" && !failedGate
+        ? activateResumedGoal(currentGoal)
+        : { ...currentGoal, updatedAt: Date.now() };
     rebound.workflowSessionGeneration = snapshot.sessionGeneration;
     persistGoal(rebound);
     updateStatusLine(ctx, rebound);
   }
 
-  if (session.status === "sealed" || session.status === "archived") return activeGoal;
+  if (terminalWorkflow) {
+    if (activeGoal?.workflowSessionId === session.sessionId && activeGoal.status === "active") {
+      fenceGoalLifecycle();
+      const paused = pauseGoal(activeGoal, "gate");
+      persistGoal(paused);
+      updateStatusLine(ctx, paused);
+    }
+    return activeGoal;
+  }
   if (!activeGoal) {
     const created = createWorkflowGoal(session, ctx, snapshot.sessionGeneration, failedGate);
     persistGoal(created);

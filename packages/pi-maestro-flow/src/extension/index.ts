@@ -414,12 +414,11 @@ export function shouldRestoreWorkflowGoal(
   goal: { workflowSessionId?: string } | undefined,
   snapshot: WorkflowSnapshot | undefined,
 ): boolean {
-  const canonicalSessionId = snapshot?.canonicalClaim?.status === "valid"
-    ? snapshot.session?.sessionId
-    : undefined;
-  return reason !== "new"
-    && reason !== "fork"
-    && Boolean(goal?.workflowSessionId && goal.workflowSessionId === canonicalSessionId);
+  if (reason === "new" || reason === "fork" || !goal?.workflowSessionId) return false;
+  const sessionId = snapshot?.session?.sessionId;
+  return snapshot?.source === "canonical"
+    && snapshot.canonicalClaim?.status === "valid"
+    && Boolean(sessionId && snapshot.canonicalClaim.activeSessionId === sessionId);
 }
 
 export function isWorkflowSessionMatchable(
@@ -985,7 +984,7 @@ function todoDurationChart(
   const axisWidth = entries.length * cellWidth + Math.max(0, entries.length - 1);
   rows.push(`${"0s".padStart(yWidth)} ${theme.fg("dim", "┼")} ${theme.fg("dim", "─".repeat(axisWidth))}`);
   rows.push(`${" ".repeat(yWidth + 3)}${entries.map((entry) => center(entry.label)).join(" ")}`);
-  return [theme.fg("dim", "Task time · Y=time · X=task"), ...rows];
+  return rows;
 }
 
 function todoResultWindow(tasks: readonly TodoTaskSnapshot[], action: string): {
@@ -1721,7 +1720,7 @@ The --to flag is MANDATORY. A bare \`maestro delegate codex\` treats "codex" as 
 - update: Replace the active Goal objective and resume it automatically. { action: "update", objective: "..." }
 - complete: Request completion verification after all work is done. Declared acceptance commands are rerun and decide the result directly; without them, an independent agent verifier is used. { action: "complete", summary: "..." }
 - optional budget: Include tokenBudget only when the user explicitly requests one. { action: "create", objective: "...", tokenBudget: "100k" }
-- optional acceptance: Declare or replace up to 5 acceptance commands on create or update. { action: "create", objective: "...", acceptance: ["npm test -- foo.test.ts"] }
+- optional acceptance: Declare or replace up to 5 acceptance commands on create or update. Commands run from the workspace with the platform system shell, so keep them focused and cross-platform. { action: "create", objective: "...", acceptance: ["npm test -- foo.test.ts"] }
 
 When to use:
 - create a Goal for multi-turn autonomous work that needs sustained momentum, a token budget, or verified completion.
@@ -1737,7 +1736,8 @@ Only request completion after all work is done; the extension verifies it indepe
       "Use goal get to inspect state. Use goal create only when no Goal exists; use goal update to replace its objective and resume it.",
       "Omit tokenBudget by default. Set it only when the user explicitly requests a Token budget.",
       "Use goal complete only after all requirements are met and provide concise verification evidence; the extension owns the done transition.",
-      "Prefer declaring acceptance commands at goal create or update. Run focused checks before goal complete for fresh evidence; the extension reruns declared commands during verification.",
+      "Prefer focused, cross-platform acceptance commands; they run from the workspace with the platform system shell and are rerun during verification.",
+      "If a Workflow-bound Goal is gate-paused or reports a canonical authority mismatch, do not resume it with goal update. Continue through run-control and let Workflow reconciliation replace or retire the stale Goal.",
     ],
 
     parameters: GoalToolParams,

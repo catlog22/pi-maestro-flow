@@ -1504,9 +1504,10 @@ function buildPlanExecutionContract(
           `   - For simple work, create the Todo directly with planHandoffKey: "${handoffKey}".`,
         ]
       : ["   - For complex approved work, use plan-decompose before creating Todos."]),
-    "4. Attach a Goal as the quality gate only to key Todos that carry verifiable acceptance criteria; do NOT create a Goal for every Todo. Goals are flat and time-ordered — put the overall acceptance Goal on the last Todo when an overall sign-off is needed.",
+    "4. Goal creation is optional. Do not create a Goal solely because the Plan was approved. Create one only when this work genuinely needs cross-turn persistence, a user-requested budget, or independent completion verification and no active Workflow Session already owns execution.",
+    "   - When Todos are used, attach a Goal only to a key Todo with verifiable acceptance criteria; never create one for every Todo. A Todo without a Goal completes through its own acceptance criteria.",
     "5. Prefer the teammate tool to delegate independent Todo work; use direct execution only when delegation would not help.",
-    "6. Execute the Todo sequence; activating a Todo auto-switches to its quality-gate Goal, and a Todo completes only after its Goal verifies.",
+    "6. Execute the Todo sequence; activating a Todo switches to its quality-gate Goal only when that Todo explicitly has one, and only that Todo waits for Goal verification.",
   ];
   if (refineFeedback) {
     base.push(
@@ -2089,8 +2090,11 @@ function buildPlanEnterNote(): string {
     "- Keep the final Markdown decision-complete and directly consumable by an execution agent. Omit",
     "  interview logs, delegate transcripts, and generic boilerplate. Validate the planner's draft",
     "  against the planner role contract before persisting it; return incomplete drafts for revision.",
-    "- Approval decomposes the locked Plan into an ordered Todo graph; attach Goals as",
-    "  quality gates to key Todos (overall acceptance Goal last) before implementation.",
+    "- Approval decomposes the locked Plan into an ordered Todo graph. Goal creation is optional:",
+    "  never create one solely because the Plan was approved; use one only when cross-turn persistence,",
+    "  a user-requested budget, or independent completion verification is genuinely needed and no active",
+    "  Workflow Session already owns execution. A Todo may carry a Goal as a key quality gate, but most",
+    "  Todos should complete without one.",
     "",
     // Injected as a one-time custom message (before_agent_start.message) so the
     // system prompt prefix stays stable for prompt-cache reuse.

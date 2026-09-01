@@ -172,7 +172,7 @@ test("workspace extension path loads before runtime actions are bound", () => {
   assert.equal(result.status, 0, result.stderr || result.stdout);
 });
 
-test("Workflow Goal restore requires a workflow-owned Goal matching the canonical Session", () => {
+test("Workflow Goal restore reconciles any workflow-owned Goal against valid canonical authority", () => {
   const snapshot = workflowAttachSnapshot();
   const owned = { workflowSessionId: "session-1" };
   assert.equal(shouldRestoreWorkflowGoal("startup", undefined, snapshot), false);
@@ -182,7 +182,17 @@ test("Workflow Goal restore requires a workflow-owned Goal matching the canonica
   assert.equal(shouldRestoreWorkflowGoal("startup", owned, snapshot), true);
   assert.equal(shouldRestoreWorkflowGoal("reload", owned, snapshot), true);
   assert.equal(shouldRestoreWorkflowGoal("resume", owned, snapshot), true);
-  assert.equal(shouldRestoreWorkflowGoal("resume", { workflowSessionId: "session-other" }, snapshot), false);
+  assert.equal(
+    shouldRestoreWorkflowGoal("resume", { workflowSessionId: "session-other" }, snapshot),
+    true,
+    "a stale workflow-owned Goal must enter reconciliation so the canonical Session can replace it",
+  );
+  const inconsistent = structuredClone(snapshot);
+  inconsistent.canonicalClaim = { activeSessionId: "session-other", status: "valid" };
+  assert.equal(shouldRestoreWorkflowGoal("resume", owned, inconsistent), false);
+  const invalid = structuredClone(snapshot);
+  invalid.canonicalClaim = { activeSessionId: "session-1", status: "invalid", error: "broken" };
+  assert.equal(shouldRestoreWorkflowGoal("resume", owned, invalid), false);
   assert.equal(shouldRestoreWorkflowGoal("new", owned, snapshot), false);
   assert.equal(shouldRestoreWorkflowGoal("fork", owned, snapshot), false);
 });
@@ -799,7 +809,7 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
     /✓ completed|Task 14|Task 15|Finished penultimate|Finished final task/,
     "terminal advance omits individual completed-task rows and details",
   );
-  assert.match(allCompletedLines.join("\n"), /Task time · Y=time · X=task/);
+  assert.doesNotMatch(allCompletedLines.join("\n"), /Task time · Y=time · X=task/);
   const yRows = allCompletedLines.filter((line) => line.includes("┤"));
   assert.equal(yRows.length, 4, "duration chart has a bounded four-level Y axis");
   assert.match(yRows[0], /1h\s+┤/);
@@ -824,7 +834,7 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
     content: [{ type: "text", text: "Completed #t14. All tasks completed." }],
     details: { action: "advance", tasks: allCompletedTasks },
   }, { expanded: false, isPartial: false }, ansiTodoTheme, { args: { action: "advance", id: "t14" } }).render(500);
-  assert.ok(ansiCompletedLines.some((line) => line.includes("Task time")), "ANSI-colored bars render without falling back to raw result text");
+  assert.ok(ansiCompletedLines.some((line) => line.includes("\x1b[31m█\x1b[0m")), "ANSI-colored bars render without falling back to raw result text");
   assert.ok(ansiCompletedLines.every((line) => visibleWidth(line) <= 500));
 
   const blockedSummaryLines = renderTodoResult({

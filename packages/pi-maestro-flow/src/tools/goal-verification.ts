@@ -129,12 +129,14 @@ export const MAX_OBJECTIVE_LENGTH = 4_000;
 export const MAX_COMPLETION_SUMMARY_CHARS = 4_000;
 export const MAX_ACCEPTANCE_COMMANDS = 5;
 export const MAX_ACCEPTANCE_COMMAND_CHARS = 500;
-const VERIFIER_TIMEOUT_MS = 180_000;
+/** @internal */
+export const GOAL_VERIFIER_TIMEOUT_MS = 600_000;
 const MAX_VERIFICATION_FAILURES = 3;
 const MAX_VERIFIER_EVIDENCE_ITEMS = 24;
 const MAX_VERIFIER_EVIDENCE_ITEM_CHARS = 1_200;
 const MAX_VERIFIER_EVIDENCE_CHARS = 12_000;
-const ACCEPTANCE_COMMAND_TIMEOUT_MS = 60_000;
+/** @internal */
+export const GOAL_ACCEPTANCE_COMMAND_TIMEOUT_MS = 300_000;
 const ACCEPTANCE_OUTPUT_CHARS = 1_500;
 
 const NON_RETRYABLE_RE =
@@ -159,6 +161,7 @@ export interface GoalVerificationBridge {
   set verificationInFlight(value: VerificationInFlight | undefined);
   getWorkflowSnapshot(): WorkflowSnapshot | undefined;
   refreshWorkflowSnapshot(): Promise<WorkflowSnapshot | undefined>;
+  fenceGoalLifecycle(): void;
   pauseGoal(goal: ActiveGoal, reason?: ActiveGoal["pauseReason"]): ActiveGoal;
   updateUsage(goal: ActiveGoal, ctx: GoalContext): void;
   persistGoal(goal: ActiveGoal): void;
@@ -258,7 +261,7 @@ async function runVerifier(
         const raw = await runTeammateFn(
           verifierParams(
             dispatchContext.task,
-            dispatchContext.timeoutMs ?? VERIFIER_TIMEOUT_MS,
+            dispatchContext.timeoutMs ?? GOAL_VERIFIER_TIMEOUT_MS,
             dispatchContext.outputSchema,
             mainSessionModelFallback(ctx),
           ),
@@ -270,7 +273,7 @@ async function runVerifier(
       },
       {
         task: verifyTask,
-        deadlineMs: VERIFIER_TIMEOUT_MS,
+        deadlineMs: GOAL_VERIFIER_TIMEOUT_MS,
         maxFailures: MAX_VERIFICATION_FAILURES,
         outputSchema: VERIFIER_OUTPUT_SCHEMA,
         fallbackTextParser: parseVerifierOutput,
@@ -353,7 +356,7 @@ async function runAcceptanceCommand(command: string, cwd: string): Promise<Accep
       timedOut = true;
       try { child?.kill("SIGKILL"); } catch { /* already exited */ }
       finish(null);
-    }, ACCEPTANCE_COMMAND_TIMEOUT_MS);
+    }, GOAL_ACCEPTANCE_COMMAND_TIMEOUT_MS);
     try {
       child = spawn(command, { shell: true, cwd });
       const append = (chunk: Buffer | string) => {
@@ -956,6 +959,40 @@ export function hasMatchingWorkflowBinding(
   );
 }
 
+export function isTerminalCanonicalWorkflow(snapshot: WorkflowSnapshot | undefined): boolean {
+  if (snapshot?.source !== "canonical" || !snapshot.session) return false;
+  const derived = deriveWorkflowStatus(snapshot);
+  return derived.authority === "execution-derived"
+    ? derived.lifecycle === "archived" || snapshot.execution?.status === "sealed"
+    : snapshot.session.status === "sealed" || snapshot.session.status === "archived";
+}
+
+function canonicalWorkflowAdmissionIssue(
+  goal: Pick<ActiveGoal, "workflowSessionId" | "workflowSessionGeneration">,
+  snapshot: WorkflowSnapshot | undefined,
+): string | undefined {
+  const boundSessionId = goal.workflowSessionId;
+  if (!boundSessionId || snapshot?.canonicalClaim?.status === "invalid") return undefined;
+  const canonicalGoal = goal.workflowSessionGeneration?.startsWith("canonical:") ?? false;
+  const canonicalSnapshot = snapshot?.source === "canonical";
+  if (!canonicalGoal && !canonicalSnapshot) return undefined;
+
+  if (snapshot?.session?.sessionId === boundSessionId && isTerminalCanonicalWorkflow(snapshot)) {
+    return `Goal is bound to terminal canonical Workflow Session ${boundSessionId}. `
+      + `Use run-control { argv: ["session","status","--session","${boundSessionId}","--json"] } `
+      + "to inspect its sealed authority; do not retry Goal completion.";
+  }
+  if (hasMatchingWorkflowBinding(goal, snapshot)) return undefined;
+
+  const currentSessionId = snapshot?.session?.sessionId
+    ?? snapshot?.canonicalClaim?.activeSessionId
+    ?? "(none)";
+  const statusSessionId = currentSessionId === "(none)" ? boundSessionId : currentSessionId;
+  return `Goal is bound to canonical Workflow Session ${boundSessionId}, but current canonical authority is ${currentSessionId}. `
+    + `Use run-control { argv: ["session","status","--session","${statusSessionId}","--json"] } `
+    + "to re-read authority and continue the canonical Run; do not retry Goal completion.";
+}
+
 function shouldApplyCompletionBlockers(
   goal: Pick<ActiveGoal, "workflowSessionId" | "workflowSessionGeneration">,
   snapshot: WorkflowSnapshot | undefined,
@@ -1096,7 +1133,7 @@ function isSince(timestamp: unknown, since: number): boolean {
 
 type VerificationOutcome =
   | { status: "done" }
-  | { status: "continue" | "hold"; reason: string };
+  | { status: "continue" | "hold" | "paused"; reason: string };
 
 async function verifyByAcceptanceCommands(goal: ActiveGoal, ctx: GoalContext): Promise<VerifierVerdict> {
   const bridge = getGoalVerificationBridge();
@@ -1141,8 +1178,19 @@ export async function verifyGoalCompletion(
   }
 
   const workflowSnapshot = bridge.getWorkflowSnapshot();
-  const completionFence = canonicalCompletionFence(bridge.activeGoal, workflowSnapshot);
-  const canonicalBlockers = shouldApplyCompletionBlockers(bridge.activeGoal, workflowSnapshot)
+  const goalAtAdmission = bridge.activeGoal;
+  const bindingIssue = canonicalWorkflowAdmissionIssue(goalAtAdmission, workflowSnapshot);
+  if (bindingIssue) {
+    bridge.fenceGoalLifecycle();
+    const paused = bridge.pauseGoal(goalAtAdmission, "gate");
+    bridge.activeGoal = paused;
+    bridge.updateUsage(paused, ctx);
+    bridge.persistGoal(paused);
+    bridge.updateStatusLine(ctx, paused);
+    return { status: "paused", reason: bindingIssue };
+  }
+  const completionFence = canonicalCompletionFence(goalAtAdmission, workflowSnapshot);
+  const canonicalBlockers = shouldApplyCompletionBlockers(goalAtAdmission, workflowSnapshot)
     ? canonicalCompletionBlockers(workflowSnapshot)
     : [];
   if (canonicalBlockers.length > 0) {
