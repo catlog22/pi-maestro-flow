@@ -69,6 +69,8 @@ function endpoints() {
       scope: "local" as const,
       status: "running" as const,
       sessionId: "local-session",
+      sourceId: "local-source",
+      generation: 7,
       agents: [],
     },
     {
@@ -615,6 +617,293 @@ test("Flow Monitor facet projects only exact target schedules with negotiated To
   });
 });
 
+test("Flow Monitor facet omits negotiated Todo outcomes whose completion correlation is not exact", async () => {
+  const identity = {
+    workspaceId: WORKSPACE_ID,
+    endpointId: TARGET,
+    ownerId: PEER_OWNER,
+    ownerNonce: PEER_NONCE,
+  };
+  const expectedCorrelation = bindWorkspaceCompletionHandle(GENERIC_MESSAGE_ID, {
+    workspaceId: WORKSPACE_ID,
+    ownerId: PEER_OWNER,
+    ownerNonce: PEER_NONCE,
+  });
+  const wrongCorrelation = bindWorkspaceCompletionHandle("8".repeat(32), {
+    workspaceId: WORKSPACE_ID,
+    ownerId: PEER_OWNER,
+    ownerNonce: PEER_NONCE,
+  });
+  const cases: Array<{
+    scheduleId: string;
+    dispatchId: string;
+    intentCorrelation?: FlowScheduleDispatchBundle["intent"]["completionCorrelation"];
+    resultCorrelation?: FlowScheduleDispatchBundle["intent"]["completionCorrelation"];
+  }> = [
+    { scheduleId: "legacy", dispatchId: "123e4567-e89b-42d3-a456-426614174001" },
+    {
+      scheduleId: "different",
+      dispatchId: "123e4567-e89b-42d3-a456-426614174002",
+      intentCorrelation: expectedCorrelation,
+      resultCorrelation: wrongCorrelation,
+    },
+    {
+      scheduleId: "intent-only",
+      dispatchId: "123e4567-e89b-42d3-a456-426614174003",
+      intentCorrelation: expectedCorrelation,
+    },
+    {
+      scheduleId: "result-only",
+      dispatchId: "123e4567-e89b-42d3-a456-426614174004",
+      resultCorrelation: wrongCorrelation,
+    },
+  ];
+  const schedules: FlowScheduleRecord[] = cases.map((testCase) => ({
+    version: 1,
+    scheduleId: testCase.scheduleId,
+    targetSelector: `owner:${PEER_OWNER}`,
+    targetIdentity: identity,
+    state: "completed",
+    stepIds: ["verify"],
+    steps: {
+      verify: {
+        stepId: "verify",
+        prompt: "Verify",
+        state: "completed",
+        attempts: [testCase.dispatchId],
+        todoBinding: { requireCompleted: true, conflictCheck: true },
+      },
+    },
+    createdAt: 1,
+    updatedAt: 2,
+  }));
+  const bundles = new Map<string, FlowScheduleDispatchBundle>();
+  for (const testCase of cases) {
+    const todoId = `todo-${testCase.scheduleId}`;
+    bundles.set(testCase.dispatchId, {
+      intent: {
+        version: 1,
+        dispatchId: testCase.dispatchId,
+        scheduleId: testCase.scheduleId,
+        stepId: "verify",
+        targetIdentity: identity,
+        ...(testCase.intentCorrelation === undefined ? {} : {
+          completionCorrelation: testCase.intentCorrelation,
+        }),
+        state: "prepared",
+        createdAt: 3,
+      },
+      binding: {
+        version: 1,
+        type: "flow-schedule-binding",
+        dispatchId: testCase.dispatchId,
+        scheduleId: testCase.scheduleId,
+        stepId: "verify",
+        todoId,
+        todoStatus: "completed",
+        state: "completed",
+        createdAt: 3,
+        updatedAt: 4,
+      },
+      completion: {
+        version: 1,
+        type: "flow-schedule-completion",
+        dispatchId: testCase.dispatchId,
+        scheduleId: testCase.scheduleId,
+        stepId: "verify",
+        targetIdentity: identity,
+        state: "completed",
+        completedAt: 4,
+        result: {
+          version: 1,
+          type: "flow-schedule-result",
+          dispatchId: testCase.dispatchId,
+          scheduleId: testCase.scheduleId,
+          stepId: "verify",
+          outcome: "completed",
+          summary: `${testCase.scheduleId} exact result`,
+          resources: [testCase.resultCorrelation?.resource ?? `agent://report-${testCase.scheduleId}`],
+          todoOutcome: { todoId, todoStatus: "completed" },
+          ...(testCase.resultCorrelation === undefined ? {} : {
+            completionCorrelation: testCase.resultCorrelation,
+          }),
+        },
+      },
+    });
+  }
+  const provider = createFlowScheduleMonitorFacetProvider(() => ({
+    async listSchedules() { return schedules; },
+    async readDispatch(dispatchId) { return bundles.get(dispatchId); },
+  }));
+
+  const [facet] = await provider.read({
+    version: MONITOR_WINDOW_STATE_VERSION,
+    targets: [{ identity }],
+  });
+  assert.ok(facet);
+  const data = facet.data as {
+    schedules: Array<{
+      scheduleId: string;
+      dispatch?: {
+        todoGate: { reportedOutcome?: { todoId: string; todoStatus: string } };
+        exactResult?: { summary: string };
+      };
+    }>;
+  };
+  const projected = new Map(data.schedules.map((schedule) => [schedule.scheduleId, schedule]));
+  assert.equal(projected.get("legacy")?.dispatch?.exactResult?.summary, "legacy exact result");
+  assert.deepEqual(projected.get("legacy")?.dispatch?.todoGate.reportedOutcome, {
+    todoId: "todo-legacy",
+    todoStatus: "completed",
+  });
+  for (const scheduleId of ["different", "intent-only", "result-only"]) {
+    assert.equal(projected.get(scheduleId)?.dispatch?.exactResult, undefined, scheduleId);
+    assert.equal(projected.get(scheduleId)?.dispatch?.todoGate.reportedOutcome, undefined, scheduleId);
+  }
+  const correlationWarnings = facet.attention?.filter((item) =>
+    item.code === "flow-schedule-completion-correlation-mismatch"
+  ) ?? [];
+  assert.equal(correlationWarnings.length, 3);
+  assert.ok(correlationWarnings.every((item) => item.severity === "warning"));
+  assert.equal(JSON.stringify(facet).includes(wrongCorrelation.resource), false);
+});
+
+test("Flow Monitor facet requires completion and intent sessionId to match before projecting exact evidence", async () => {
+  const identity = {
+    workspaceId: WORKSPACE_ID,
+    endpointId: TARGET,
+    ownerId: PEER_OWNER,
+    ownerNonce: PEER_NONCE,
+  };
+  const exactIdentity = { ...identity, sessionId: "expected-session" };
+  const completionCorrelation = bindWorkspaceCompletionHandle("7".repeat(32), {
+    workspaceId: WORKSPACE_ID,
+    ownerId: PEER_OWNER,
+    ownerNonce: PEER_NONCE,
+  });
+  const schedule: FlowScheduleRecord = {
+    version: 1,
+    scheduleId: "identity-mismatch",
+    targetSelector: `owner:${PEER_OWNER}`,
+    targetIdentity: exactIdentity,
+    state: "completed",
+    stepIds: ["verify"],
+    steps: {
+      verify: {
+        stepId: "verify",
+        prompt: "Verify",
+        state: "completed",
+        attempts: [DISPATCH_ID],
+        todoBinding: { requireCompleted: true, conflictCheck: true },
+      },
+    },
+    createdAt: 1,
+    updatedAt: 2,
+  };
+  const bundle: FlowScheduleDispatchBundle = {
+    intent: {
+      version: 1,
+      dispatchId: DISPATCH_ID,
+      scheduleId: schedule.scheduleId,
+      stepId: "verify",
+      targetIdentity: exactIdentity,
+      completionCorrelation,
+      state: "prepared",
+      createdAt: 3,
+    },
+    binding: {
+      version: 1,
+      type: "flow-schedule-binding",
+      dispatchId: DISPATCH_ID,
+      scheduleId: schedule.scheduleId,
+      stepId: "verify",
+      todoId: "todo-identity-mismatch",
+      todoStatus: "completed",
+      state: "completed",
+      createdAt: 3,
+      updatedAt: 4,
+    },
+    completion: {
+      version: 1,
+      type: "flow-schedule-completion",
+      dispatchId: DISPATCH_ID,
+      scheduleId: schedule.scheduleId,
+      stepId: "verify",
+      targetIdentity: { ...exactIdentity, sessionId: "different-session" },
+      state: "completed",
+      completedAt: 4,
+      result: {
+        version: 1,
+        type: "flow-schedule-result",
+        dispatchId: DISPATCH_ID,
+        scheduleId: schedule.scheduleId,
+        stepId: "verify",
+        outcome: "completed",
+        summary: "Wrong session result",
+        resources: ["agent://wrong-session"],
+        completionCorrelation,
+        todoOutcome: { todoId: "todo-identity-mismatch", todoStatus: "completed" },
+      },
+    },
+  };
+  const provider = createFlowScheduleMonitorFacetProvider(() => ({
+    async listSchedules() { return [schedule]; },
+    async readDispatch() { return bundle; },
+  }));
+
+  const [facet] = await provider.read({
+    version: MONITOR_WINDOW_STATE_VERSION,
+    targets: [{ identity }],
+  });
+  assert.ok(facet);
+  const projected = (facet.data as {
+    schedules: Array<{
+      dispatch?: {
+        todoGate: { reportedOutcome?: { todoId: string; todoStatus: string } };
+        exactResult?: { canonicalCompletion?: { resource: string } };
+      };
+    }>;
+  }).schedules[0];
+  assert.equal(projected?.dispatch?.exactResult, undefined);
+  assert.equal(projected?.dispatch?.todoGate.reportedOutcome, undefined);
+  assert.equal(JSON.stringify(facet).includes("agent://wrong-session"), false);
+  assert.equal(JSON.stringify(facet).includes(completionCorrelation.resource), false);
+  assert.ok(facet.attention?.some((item) =>
+    item.code === "flow-schedule-completion-identity-mismatch" && item.severity === "warning"
+  ));
+
+  const matchingProvider = createFlowScheduleMonitorFacetProvider(() => ({
+    async listSchedules() { return [schedule]; },
+    async readDispatch() {
+      return {
+        ...bundle,
+        completion: { ...bundle.completion!, targetIdentity: exactIdentity },
+      };
+    },
+  }));
+  const [matchingFacet] = await matchingProvider.read({
+    version: MONITOR_WINDOW_STATE_VERSION,
+    targets: [{ identity }],
+  });
+  assert.ok(matchingFacet);
+  const matching = (matchingFacet.data as {
+    schedules: Array<{
+      dispatch?: {
+        todoGate: { reportedOutcome?: { todoId: string; todoStatus: string } };
+        exactResult?: { canonicalCompletion?: { resource: string } };
+      };
+    }>;
+  }).schedules[0];
+  assert.equal(matching?.dispatch?.exactResult?.canonicalCompletion?.resource, completionCorrelation.resource);
+  assert.deepEqual(matching?.dispatch?.todoGate.reportedOutcome, {
+    todoId: "todo-identity-mismatch",
+    todoStatus: "completed",
+  });
+  assert.equal(matchingFacet.attention?.some((item) =>
+    item.code === "flow-schedule-completion-identity-mismatch"
+  ) ?? false, false);
+});
+
 test("Flow Monitor facet rejects mismatched dispatch identity and degrades when unavailable or unreadable", async () => {
   const identity = {
     workspaceId: WORKSPACE_ID,
@@ -762,20 +1051,31 @@ function fakePi(): {
   pi: ExtensionAPI;
   tools: ToolDefinition[];
   handlers: Map<string, Array<(event: unknown, ctx: ExtensionContext) => unknown>>;
+  messages: Array<{ message: unknown; options?: unknown }>;
   active: () => string[];
   emit: (channel: string, data: unknown) => void;
+  invoke: (name: string, event?: unknown, ctx?: ExtensionContext) => Promise<void>;
 } {
   const tools: ToolDefinition[] = [];
   const handlers = new Map<string, Array<(event: unknown, ctx: ExtensionContext) => unknown>>();
   const eventHandlers = new Map<string, Array<(data: unknown) => void>>();
+  const messages: Array<{ message: unknown; options?: unknown }> = [];
   let active: string[] = [];
   const emit = (channel: string, data: unknown): void => {
     for (const handler of eventHandlers.get(channel) ?? []) handler(data);
+  };
+  const invoke = async (
+    name: string,
+    event: unknown = {},
+    ctx: ExtensionContext = context("/tmp/flow-schedule-fake-pi"),
+  ): Promise<void> => {
+    for (const handler of handlers.get(name) ?? []) await handler(event, ctx);
   };
   const pi = {
     registerTool(tool: ToolDefinition) { tools.push(tool); },
     getActiveTools() { return [...active]; },
     setActiveTools(names: string[]) { active = [...names]; },
+    sendMessage(message: unknown, options?: unknown) { messages.push({ message, options }); },
     events: {
       on(channel: string, handler: (data: unknown) => void) {
         const current = eventHandlers.get(channel) ?? [];
@@ -794,7 +1094,7 @@ function fakePi(): {
       handlers.set(name, current);
     },
   } as unknown as ExtensionAPI;
-  return { pi, tools, handlers, active: () => [...active], emit };
+  return { pi, tools, handlers, messages, active: () => [...active], emit, invoke };
 }
 
 test("Flow extension wires managed-worker registration and defers root authority to Monitor exposure", async () => {
@@ -941,6 +1241,9 @@ test("registration exposes Monitor control, managed report-only, and no ordinary
   assert.equal(workerRegistration.monitor, false);
   assert.equal(workerApi.tools.length, 1);
   assert.equal(Check(workerApi.tools[0]!.parameters, { action: "create", scheduleId: "x" }), false);
+  for (const hook of ["message_end", "turn_start", "tool_result", "agent_end", "agent_settled"]) {
+    assert.equal(workerApi.handlers.get(hook), undefined, `managed worker must not register ${hook}`);
+  }
   const workerRoot = await mkdtemp(join(tmpdir(), "flow-schedule-worker-register-"));
   try {
     const workerStart = workerApi.handlers.get("session_start")?.[0];
@@ -965,6 +1268,9 @@ test("registration exposes Monitor control, managed report-only, and no ordinary
   assert.deepEqual(ordinaryApi.tools, []);
   assert.equal(ordinaryApi.handlers.get("session_start")?.length, 1);
   assert.equal(ordinaryApi.handlers.get("session_shutdown")?.length, 1);
+  for (const hook of ["message_end", "turn_start", "tool_result", "agent_end", "agent_settled"]) {
+    assert.equal(ordinaryApi.handlers.get(hook), undefined, `ordinary root must not register ${hook}`);
+  }
   ordinaryRegistration.dispose();
 
   const root = await mkdtemp(join(tmpdir(), "flow-schedule-register-"));

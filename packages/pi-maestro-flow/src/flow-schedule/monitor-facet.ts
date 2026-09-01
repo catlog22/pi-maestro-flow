@@ -10,6 +10,8 @@ import {
   type MonitorWindowIdentityV1,
   type MonitorWindowJsonValueV1,
 } from "pi-maestro-teammate/v1/monitor-window-state";
+import { validateWorkspaceCompletionCorrelation } from "pi-maestro-teammate/v1/workspace-completion";
+import { sameCompletionCorrelation } from "./runtime.ts";
 import type { FlowScheduleDispatchBundle } from "./store.ts";
 import type {
   ExactWindowIdentity,
@@ -122,15 +124,26 @@ async function projectSchedule(
     }
   }
 
-  const completion = bundle?.completion
+  const dispatchBoundCompletion = bundle?.completion
+    && sameExactIdentity(bundle.completion.targetIdentity, bundle.intent.targetIdentity)
     && sameIdentity(bundle.completion.targetIdentity, identity)
     && bundle.completion.dispatchId === bundle.intent.dispatchId
     && bundle.completion.scheduleId === bundle.intent.scheduleId
     && bundle.completion.stepId === bundle.intent.stepId
     ? bundle.completion
     : undefined;
+  const correlationMatches = bundle === undefined
+    || dispatchBoundCompletion === undefined
+    || exactCompletionCorrelationMatches(bundle);
+  const completion = correlationMatches ? dispatchBoundCompletion : undefined;
   if (bundle?.completion && !completion) {
-    attention.push({
+    const correlationMismatch = dispatchBoundCompletion !== undefined && !correlationMatches;
+    attention.push(correlationMismatch ? {
+      code: "flow-schedule-completion-correlation-mismatch",
+      severity: "warning",
+      message: `Flow completion ${bundle.completion.dispatchId} did not exactly match its intent completion correlation and its authoritative result was omitted.`,
+      dedupeKey: `flow-schedule:${schedule.scheduleId}:${bundle.completion.dispatchId}:completion-correlation-mismatch`,
+    } : {
       code: "flow-schedule-completion-identity-mismatch",
       severity: "warning",
       message: `Flow completion ${bundle.completion.dispatchId} did not match the captured window identity and was omitted.`,
@@ -198,7 +211,7 @@ function projectDispatch(
       ...(bundle.published === undefined ? {} : { publishedAt: bundle.published.publishedAt }),
       ...(bundle.accepted === undefined ? {} : { acceptedAt: bundle.accepted.acceptedAt }),
     },
-    todoGate: projectTodoGate(stepBinding, negotiated, bundle),
+    todoGate: projectTodoGate(stepBinding, negotiated, bundle.binding, completion),
     ...(exact === undefined ? {} : {
       exactResult: {
         source: "exact-report",
@@ -222,21 +235,22 @@ function projectDispatch(
 function projectTodoGate(
   requested: FlowScheduleTodoBindingSpec | undefined,
   negotiated: boolean,
-  bundle: FlowScheduleDispatchBundle,
+  binding: FlowScheduleDispatchBundle["binding"],
+  completion: FlowScheduleDispatchBundle["completion"],
 ): MonitorWindowJsonValueV1 {
-  const outcome = negotiated ? bundle.completion?.result?.todoOutcome : undefined;
+  const outcome = negotiated ? completion?.result?.todoOutcome : undefined;
   return {
     requested: requested !== undefined,
     negotiated,
     requireCompleted: negotiated && requested?.requireCompleted === true,
     conflictCheck: negotiated && requested?.conflictCheck === true,
     authority: "additional-evidence-only",
-    ...(bundle.binding === undefined ? {} : {
+    ...(binding === undefined ? {} : {
       binding: {
-        state: bundle.binding.state,
-        ...(bundle.binding.todoId === undefined ? {} : { todoId: bundle.binding.todoId }),
-        ...(bundle.binding.todoStatus === undefined ? {} : { todoStatus: bundle.binding.todoStatus }),
-        updatedAt: bundle.binding.updatedAt,
+        state: binding.state,
+        ...(binding.todoId === undefined ? {} : { todoId: binding.todoId }),
+        ...(binding.todoStatus === undefined ? {} : { todoStatus: binding.todoStatus }),
+        updatedAt: binding.updatedAt,
       },
     }),
     ...(outcome === undefined ? {} : {
@@ -255,6 +269,19 @@ function latestDispatchId(schedule: FlowScheduleRecord): string | undefined {
   return latest;
 }
 
+function exactCompletionCorrelationMatches(bundle: FlowScheduleDispatchBundle): boolean {
+  const result = bundle.completion?.result;
+  if (result === undefined) return true;
+  const intentValue = bundle.intent.completionCorrelation;
+  const resultValue = result.completionCorrelation;
+  if (intentValue === undefined && resultValue === undefined) return true;
+  const intent = validateWorkspaceCompletionCorrelation(intentValue);
+  const reported = validateWorkspaceCompletionCorrelation(resultValue);
+  return intent !== undefined
+    && reported !== undefined
+    && sameCompletionCorrelation(intent, reported);
+}
+
 function dispatchMatches(
   bundle: FlowScheduleDispatchBundle,
   schedule: FlowScheduleRecord,
@@ -265,6 +292,14 @@ function dispatchMatches(
     && bundle.intent.scheduleId === schedule.scheduleId
     && schedule.steps[bundle.intent.stepId] !== undefined
     && sameIdentity(bundle.intent.targetIdentity, identity);
+}
+
+function sameExactIdentity(left: ExactWindowIdentity, right: ExactWindowIdentity): boolean {
+  return left.workspaceId === right.workspaceId
+    && left.ownerId === right.ownerId
+    && left.ownerNonce === right.ownerNonce
+    && left.endpointId === right.endpointId
+    && left.sessionId === right.sessionId;
 }
 
 function sameIdentity(left: ExactWindowIdentity, right: MonitorWindowIdentityV1): boolean {

@@ -125,6 +125,8 @@ export function registerFlowSchedule(
       ...options.runtimeOptions,
       store,
       getRegistry,
+      captureMonitorAuthority: () => monitorActive ? { generation: monitorGeneration } : undefined,
+      isMonitorAuthorityCurrent: (capture) => monitorActive && capture.generation === monitorGeneration,
       ...(brokerRuntime.enabled ? { brokerRuntime } : {}),
     });
     binding = {
@@ -160,6 +162,8 @@ export function registerFlowSchedule(
       coordinatorToolRegistered = true;
     }
     setCoordinatorActive(active);
+    const reconcile = active ? binding?.runtime.reconcileReady?.() : undefined;
+    if (reconcile) void reconcile.catch(reportError);
   };
 
   if (managedWorker) {

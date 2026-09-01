@@ -27,6 +27,7 @@ import {
   encodeFlowScheduleDispatch,
   encodeFlowScheduleResult,
   flowScheduleDispatchMessageId,
+  flowScheduleReportReminderMessageId,
   flowScheduleResultMessageId,
   flowScheduleResultTransportMessageId,
 } from "../src/flow-schedule/protocol.ts";
@@ -634,6 +635,330 @@ test("runtime observes and revalidates exact identity before intent, then persis
     registry.thread.transition(flowScheduleDispatchMessageId(DISPATCH_A), "outgoing", "injected", 11);
     await runtime.reconcileReady();
     assert.equal((await store.readDispatch(DISPATCH_A))?.accepted?.deliveryState, "injected");
+  } finally {
+    runtime.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("paired Monitor authority callbacks publish only current generations with source=monitor", async () => {
+  for (const authority of ["current", "stale", "absent"] as const) {
+    const { root, store, now } = await storeHarness();
+    const sent: SessionMessageRequest[] = [];
+    const registry = registryWithDelivery(async (host, endpoint, request) => {
+      sent.push(request);
+      recordOutgoing(host, endpoint, request, "queued");
+      return {
+        delivered: true,
+        endpointId: endpoint.id,
+        receipt: { publicationStage: "accepted", deliveryStage: "queued", messageId: request.messageId },
+      };
+    });
+    const runtime = new FlowScheduleRuntime({
+      store,
+      getRegistry: () => registry,
+      observe: liveObservation,
+      now,
+      createDispatchId: () => DISPATCH_A,
+      captureMonitorAuthority: () => authority === "absent" ? undefined : { generation: 7 },
+      isMonitorAuthorityCurrent: (capture) => authority === "current" && capture.generation === 7,
+    });
+    try {
+      await runtime.reconcileReady();
+      assert.equal(sent.length, authority === "current" ? 2 : 0, authority);
+      if (authority === "current") {
+        assert.equal(sent[0]?.source, "monitor");
+        assert.equal(sent[0]?.messageId, flowScheduleDispatchMessageId(DISPATCH_A));
+        assert.equal(sent[0]?.messageKind, "request");
+        assert.equal(sent[1]?.source, "monitor");
+        assert.equal(sent[1]?.messageId, flowScheduleReportReminderMessageId(DISPATCH_A));
+        assert.equal(sent[1]?.messageKind, "request");
+        assert.equal(sent[1]?.mode, "follow_up");
+        assert.equal(sent[1]?.traceId, DISPATCH_A);
+        assert.match(sent[1]?.message ?? "", /flow-schedule tool with action=report/);
+        assert.match(sent[1]?.message ?? "", new RegExp(DISPATCH_A));
+        await runtime.reconcileReady();
+        assert.equal(sent.length, 2, "accepted follow-up must remain single-flight across reconciliation");
+      } else {
+        assert.equal((await store.readDispatch(DISPATCH_A))?.published, undefined, authority);
+      }
+    } finally {
+      runtime.dispose();
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("timed-out report reminder stays single-flight until runtime recovery", async () => {
+  const { root, store, now } = await storeHarness();
+  const sent: SessionMessageRequest[] = [];
+  const reminderId = flowScheduleReportReminderMessageId(DISPATCH_A);
+  let rejectRecovery = false;
+  const registry = registryWithDelivery(async (host, endpoint, request) => {
+    sent.push(request);
+    const reminder = request.messageId === reminderId;
+    if (reminder && rejectRecovery) {
+      return {
+        delivered: false,
+        endpointId: endpoint.id,
+        receipt: { publicationStage: "rejected", messageId: request.messageId },
+      };
+    }
+    recordOutgoing(host, endpoint, request, reminder ? "timeout" : "queued");
+    return reminder
+      ? {
+          delivered: false,
+          endpointId: endpoint.id,
+          receipt: { publicationStage: "published", messageId: request.messageId },
+        }
+      : {
+          delivered: true,
+          endpointId: endpoint.id,
+          receipt: { publicationStage: "accepted", deliveryStage: "queued", messageId: request.messageId },
+        };
+  });
+  const runtimeOptions = {
+    store,
+    getRegistry: () => registry,
+    observe: liveObservation,
+    now,
+    createDispatchId: () => DISPATCH_A,
+    captureMonitorAuthority: () => ({ generation: 7 }),
+    isMonitorAuthorityCurrent: (capture: { generation: number }) => capture.generation === 7,
+  };
+  const first = new FlowScheduleRuntime(runtimeOptions);
+  try {
+    await first.reconcileReady();
+    assert.deepEqual(sent.map((request) => request.messageId), [
+      flowScheduleDispatchMessageId(DISPATCH_A),
+      reminderId,
+    ]);
+    await first.reconcileReady();
+    assert.equal(sent.length, 2, "the same runtime must not accumulate timed-out follow-ups");
+    assert.equal((await store.readDispatch(DISPATCH_A))?.completion, undefined, "a reminder is not a business result");
+    first.dispose();
+    rejectRecovery = true;
+
+    const recovered = new FlowScheduleRuntime(runtimeOptions);
+    try {
+      await recovered.reconcileReady();
+      assert.deepEqual(sent.map((request) => request.messageId), [
+        flowScheduleDispatchMessageId(DISPATCH_A),
+        reminderId,
+        reminderId,
+      ], "runtime recovery may redrive the same deterministic reminder identity once");
+      await recovered.reconcileReady();
+      assert.equal(sent.length, 3, "a rejected recovery receipt must retain the single-flight latch");
+    } finally {
+      recovered.dispose();
+    }
+  } finally {
+    first.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("publication receipts without an outgoing reminder journal stay single-flight", async () => {
+  for (const stage of ["accepted", "rejected"] as const) {
+    const { root, store, now } = await storeHarness();
+    const sent: SessionMessageRequest[] = [];
+    const reminderId = flowScheduleReportReminderMessageId(DISPATCH_A);
+    const registry = registryWithDelivery(async (host, endpoint, request) => {
+      sent.push(request);
+      if (request.messageId === reminderId) {
+        return stage === "accepted"
+          ? {
+              delivered: true,
+              endpointId: endpoint.id,
+              receipt: {
+                publicationStage: "accepted",
+                deliveryStage: "queued",
+                messageId: request.messageId,
+              },
+            }
+          : {
+              delivered: false,
+              endpointId: endpoint.id,
+              receipt: { publicationStage: "rejected", messageId: request.messageId },
+            };
+      }
+      recordOutgoing(host, endpoint, request, "queued");
+      return {
+        delivered: true,
+        endpointId: endpoint.id,
+        receipt: { publicationStage: "accepted", deliveryStage: "queued", messageId: request.messageId },
+      };
+    });
+    const runtime = new FlowScheduleRuntime({
+      store,
+      getRegistry: () => registry,
+      observe: liveObservation,
+      now,
+      createDispatchId: () => DISPATCH_A,
+      captureMonitorAuthority: () => ({ generation: 7 }),
+      isMonitorAuthorityCurrent: (capture) => capture.generation === 7,
+    });
+    try {
+      await runtime.reconcileReady();
+      await runtime.reconcileReady();
+      assert.deepEqual(sent.map((request) => request.messageId), [
+        flowScheduleDispatchMessageId(DISPATCH_A),
+        reminderId,
+      ], `${stage} receipt without a journal must still latch the reminder attempt`);
+      assert.equal(registry.thread.get(reminderId, "outgoing"), undefined);
+      assert.equal((await store.readDispatch(DISPATCH_A))?.completion, undefined);
+    } finally {
+      runtime.dispose();
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("rejected report reminder is terminal without synthesizing or retrying a result", async () => {
+  const { root, store, now } = await storeHarness();
+  const sent: SessionMessageRequest[] = [];
+  const reminderId = flowScheduleReportReminderMessageId(DISPATCH_A);
+  const registry = registryWithDelivery(async (host, endpoint, request) => {
+    sent.push(request);
+    const reminder = request.messageId === reminderId;
+    recordOutgoing(host, endpoint, request, reminder ? "rejected" : "queued");
+    return reminder
+      ? {
+          delivered: false,
+          endpointId: endpoint.id,
+          receipt: { publicationStage: "rejected", messageId: request.messageId },
+        }
+      : {
+          delivered: true,
+          endpointId: endpoint.id,
+          receipt: { publicationStage: "accepted", deliveryStage: "queued", messageId: request.messageId },
+        };
+  });
+  const runtimeOptions = {
+    store,
+    getRegistry: () => registry,
+    observe: liveObservation,
+    now,
+    createDispatchId: () => DISPATCH_A,
+    captureMonitorAuthority: () => ({ generation: 7 }),
+    isMonitorAuthorityCurrent: (capture: { generation: number }) => capture.generation === 7,
+  };
+  const first = new FlowScheduleRuntime(runtimeOptions);
+  try {
+    await first.reconcileReady();
+    await first.reconcileReady();
+    assert.deepEqual(sent.map((request) => request.messageId), [
+      flowScheduleDispatchMessageId(DISPATCH_A),
+      reminderId,
+    ]);
+    assert.equal((await store.readDispatch(DISPATCH_A))?.completion, undefined);
+    first.dispose();
+
+    const recovered = new FlowScheduleRuntime(runtimeOptions);
+    try {
+      await recovered.reconcileReady();
+      assert.equal(sent.length, 2, "an exact target rejection cannot be repaired by replaying the same reminder ID");
+      assert.equal((await store.readDispatch(DISPATCH_A))?.completion, undefined, "rejection is not a business report");
+    } finally {
+      recovered.dispose();
+    }
+  } finally {
+    first.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Monitor re-entry publishes the same dispatch prepared while authority was absent", async () => {
+  const { root, store, now } = await storeHarness();
+  const sent: SessionMessageRequest[] = [];
+  let monitorGeneration: number | undefined;
+  let dispatchAllocations = 0;
+  const registry = registryWithDelivery(async (host, endpoint, request) => {
+    sent.push(request);
+    recordOutgoing(host, endpoint, request, "queued");
+    return {
+      delivered: true,
+      endpointId: endpoint.id,
+      receipt: { publicationStage: "accepted", deliveryStage: "queued", messageId: request.messageId },
+    };
+  });
+  const runtime = new FlowScheduleRuntime({
+    store,
+    getRegistry: () => registry,
+    observe: liveObservation,
+    now,
+    createDispatchId: () => {
+      dispatchAllocations += 1;
+      return DISPATCH_A;
+    },
+    captureMonitorAuthority: () => monitorGeneration === undefined ? undefined : { generation: monitorGeneration },
+    isMonitorAuthorityCurrent: (capture) => capture.generation === monitorGeneration,
+  });
+  try {
+    await runtime.reconcileReady();
+    assert.equal(sent.length, 0);
+    assert.equal((await store.readDispatch(DISPATCH_A))?.intent.state, "prepared");
+    assert.equal((await store.readDispatch(DISPATCH_A))?.published, undefined);
+
+    monitorGeneration = 9;
+    await runtime.reconcileReady();
+    assert.equal(dispatchAllocations, 1, "re-entry must reuse the durable prepared intent");
+    assert.deepEqual(sent.map((request) => request.messageId), [
+      flowScheduleDispatchMessageId(DISPATCH_A),
+      flowScheduleReportReminderMessageId(DISPATCH_A),
+    ]);
+    assert.equal(sent[0]?.traceId, DISPATCH_A);
+    assert.equal(sent[0]?.source, "monitor");
+    assert.equal(sent[1]?.traceId, DISPATCH_A);
+    assert.equal(sent[1]?.source, "monitor");
+    assert.equal(sent[1]?.mode, "follow_up");
+  } finally {
+    runtime.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("accepted result reconciliation proceeds after Monitor authority becomes inactive", async () => {
+  const { root, store, now } = await storeHarness();
+  let monitorActive = true;
+  let monitorGeneration = 3;
+  const registry = registryWithDelivery(async (host, endpoint, request) => {
+    recordOutgoing(host, endpoint, request, "injected");
+    return {
+      delivered: true,
+      endpointId: endpoint.id,
+      receipt: { publicationStage: "accepted", deliveryStage: "injected", messageId: request.messageId },
+    };
+  });
+  const runtime = new FlowScheduleRuntime({
+    store,
+    getRegistry: () => registry,
+    observe: liveObservation,
+    now,
+    createDispatchId: () => DISPATCH_A,
+    captureMonitorAuthority: () => monitorActive ? { generation: monitorGeneration } : undefined,
+    isMonitorAuthorityCurrent: (capture) => monitorActive && capture.generation === monitorGeneration,
+  });
+  try {
+    await runtime.reconcileReady();
+    const bundle = (await store.readDispatch(DISPATCH_A))!;
+    assert.ok(bundle.accepted);
+
+    monitorActive = false;
+    monitorGeneration += 1;
+    recordIncomingResult(registry, bundle.intent.targetIdentity, createFlowScheduleResult({
+      scheduleId: "release",
+      stepId: "verify",
+      dispatchId: DISPATCH_A,
+      outcome: "completed",
+      summary: "Reconciled after Monitor exit",
+    }));
+    await runtime.reconcileReady();
+    assert.equal((await store.readSchedule("release"))?.state, "completed");
+    assert.equal(
+      (await store.readSchedule("release"))?.steps.verify.result?.summary,
+      "Reconciled after Monitor exit",
+    );
   } finally {
     runtime.dispose();
     await rm(root, { recursive: true, force: true });

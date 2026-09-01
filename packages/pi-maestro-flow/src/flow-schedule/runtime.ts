@@ -49,6 +49,7 @@ import {
   encodeFlowScheduleDispatch,
   encodeFlowScheduleResult,
   flowScheduleDispatchMessageId,
+  flowScheduleReportReminderMessageId,
   flowScheduleResultMessageId,
   flowScheduleResultTransportMessageId,
 } from "./protocol.ts";
@@ -157,6 +158,10 @@ export interface FlowScheduleRuntimeEvent {
   detail?: string;
 }
 
+export interface FlowScheduleMonitorAuthority {
+  readonly generation: number;
+}
+
 export interface FlowScheduleRuntimeOptions {
   store: FlowScheduleRuntimeStore;
   getRegistry?: RegistryProvider;
@@ -174,6 +179,10 @@ export interface FlowScheduleRuntimeOptions {
   admitFailureThreshold?: number;
   /** Pulls fresh workspace-peer discovery into the session host directory; invoked once when target capture fails before the admission is deferred. */
   refreshRegistryTargets?: () => Promise<void>;
+  /** Captures the active Monitor generation immediately before dispatch publication. */
+  captureMonitorAuthority?: () => FlowScheduleMonitorAuthority | undefined;
+  /** Revalidates a captured Monitor generation at the transport publication boundary. */
+  isMonitorAuthorityCurrent?: (authority: FlowScheduleMonitorAuthority) => boolean;
   schedulerOptions?: SchedulerCoreOptions;
 }
 
@@ -250,6 +259,18 @@ function composeDispatchInstruction(prompt: string, binding: FlowScheduleTodoBin
   return `${prompt}
 
 [flow-schedule todo binding${label}${gateText}] This dispatch is bound to a Flow schedule. Create a Todo task for this work, then report its id and final status via flow-schedule report's todoOutcome field (todoId + todoStatus). Use the dispatchId carried in this message when reporting.`;
+}
+
+function composeFlowScheduleReportReminder(
+  dispatchId: string,
+  binding: FlowScheduleTodoBindingSpec | undefined,
+): string {
+  const todo = binding === undefined
+    ? ""
+    : " This dispatch is Todo-bound: report the actual todoId and current todoStatus in todoOutcome."
+      + (binding.requireCompleted ? " The actual Todo must be completed for requireCompleted." : "")
+      + (binding.conflictCheck ? " Preserve the actual Todo state for conflictCheck." : "");
+  return `[flow-schedule report reminder] Before finishing, call the flow-schedule tool with action=report and dispatchId=${dispatchId}. Choose completed or failed from the work actually performed and provide the real summary/resources; this reminder does not report an outcome for you.${todo}`;
 }
 
 function localRoot(snapshot: SessionHostSnapshot): SessionEndpoint | undefined {
@@ -336,6 +357,24 @@ function published(entry: WindowThreadEntry | undefined): boolean {
   return entry !== undefined && ["queued", "injected", "accepted", "rejected", "timeout"].includes(entry.status);
 }
 
+function exactReportReminderOutgoing(
+  entry: WindowThreadEntry | undefined,
+  identity: ExactWindowIdentity,
+  dispatchId: string,
+  body: string,
+): entry is WindowThreadEntry {
+  return entry?.direction === "outgoing"
+    && entry.messageId === flowScheduleReportReminderMessageId(dispatchId)
+    && entry.traceId === dispatchId
+    && entry.workspaceId === identity.workspaceId
+    && entry.peerOwnerId === identity.ownerId
+    && entry.peerOwnerNonce === identity.ownerNonce
+    && entry.source === "monitor"
+    && entry.messageKind === "request"
+    && entry.mode === "follow_up"
+    && entry.body === body;
+}
+
 function exactOutgoing(
   entry: WindowThreadEntry | undefined,
   identity: ExactWindowIdentity,
@@ -383,7 +422,7 @@ function exactIncomingResult(
     && entry.messageKind === "status";
 }
 
-function sameCompletionCorrelation(
+export function sameCompletionCorrelation(
   left: WorkspaceCompletionCorrelation | undefined,
   right: WorkspaceCompletionCorrelation | undefined,
 ): boolean {
@@ -511,6 +550,9 @@ export class FlowScheduleRuntime {
   private readonly store: FlowScheduleRuntimeStore;
   private readonly getRegistry: RegistryProvider;
   private readonly refreshRegistryTargets?: () => Promise<void>;
+  private readonly captureMonitorAuthority: () => FlowScheduleMonitorAuthority | undefined;
+  private readonly isMonitorAuthorityCurrent: (authority: FlowScheduleMonitorAuthority) => boolean;
+  private readonly monitorAuthorityRequired: boolean;
   private readonly observe: Observer;
   private readonly now: () => number;
   private readonly createDispatchId: () => string;
@@ -522,6 +564,7 @@ export class FlowScheduleRuntime {
   private readonly admitFailureThreshold: number;
   readonly brokerRuntime?: FlowScheduleBrokerRuntime;
   private readonly listeners = new Set<(event: FlowScheduleRuntimeEvent) => void>();
+  private readonly reportReminderAttempts = new Map<string, "attempting" | "receipt-recorded">();
   private registryUnsubscribe?: () => void;
   private reconcilePromise?: Promise<void>;
   private shutdownPromise?: Promise<void>;
@@ -535,6 +578,12 @@ export class FlowScheduleRuntime {
     this.store = options.store;
     this.getRegistry = options.getRegistry ?? (() => getSessionHostRegistry());
     this.refreshRegistryTargets = options.refreshRegistryTargets ?? (async () => { await getSessionHostDirectoryRefresh()?.(); });
+    if ((options.captureMonitorAuthority === undefined) !== (options.isMonitorAuthorityCurrent === undefined)) {
+      throw new Error("Flow schedule Monitor authority callbacks must be configured together");
+    }
+    this.monitorAuthorityRequired = options.captureMonitorAuthority !== undefined;
+    this.captureMonitorAuthority = options.captureMonitorAuthority ?? (() => undefined);
+    this.isMonitorAuthorityCurrent = options.isMonitorAuthorityCurrent ?? (() => false);
     this.observe = options.observe ?? observeTargets;
     this.now = options.now ?? Date.now;
     this.createDispatchId = options.createDispatchId ?? (() => createFlowScheduleDispatchId(randomUUID));
@@ -1374,9 +1423,13 @@ export class FlowScheduleRuntime {
 
   private async publishAttempt(schedule: FlowScheduleRecord, initial: FlowScheduleDispatchBundle): Promise<void> {
     let bundle = await this.store.readDispatch(initial.intent.dispatchId) ?? initial;
-    if (this.disposed || bundle.completion || bundle.accepted) return;
+    if (this.disposed || bundle.completion) return;
     const step = schedule.steps[bundle.intent.stepId];
     if (!step) return;
+    if (bundle.accepted) {
+      await this.queueReportReminder(schedule, bundle, bundle.binding ? step.todoBinding : undefined);
+      return;
+    }
     let capture = captureTarget(this.getRegistry, schedule.targetSelector, bundle.intent.targetIdentity);
     if (!capture) return;
     const dispatchMessageId = flowScheduleDispatchMessageId(bundle.intent.dispatchId);
@@ -1424,9 +1477,13 @@ export class FlowScheduleRuntime {
       if (!bundle.accepted) {
         await this.recordAccepted(bundle, outgoing!.status === "injected" ? "injected" : "accepted");
       }
+      await this.queueReportReminder(schedule, bundle, effectiveTodoBinding);
       return;
     }
-    if (outgoing?.status === "queued") return;
+    if (outgoing?.status === "queued") {
+      await this.queueReportReminder(schedule, bundle, effectiveTodoBinding);
+      return;
+    }
     if (outgoing?.status === "rejected") {
       await this.completeAmbiguous(bundle, "Target rejected the dispatch without a report");
       return;
@@ -1434,6 +1491,9 @@ export class FlowScheduleRuntime {
 
     capture = captureTarget(this.getRegistry, schedule.targetSelector, bundle.intent.targetIdentity);
     if (!capture) return;
+    const monitorAuthority = this.monitorAuthorityRequired ? this.captureMonitorAuthority() : undefined;
+    if (this.monitorAuthorityRequired
+      && (!monitorAuthority || !this.isMonitorAuthorityCurrent(monitorAuthority))) return;
     const fence = capture;
     let delivery: SessionMessageResult | undefined;
     try {
@@ -1443,10 +1503,13 @@ export class FlowScheduleRuntime {
         mode: "follow_up",
         messageId: dispatchMessageId,
         traceId: bundle.intent.dispatchId,
-        source: "system",
+        source: this.monitorAuthorityRequired ? "monitor" : "system",
         messageKind: "request",
         replyTo: `owner:${capture.localRoot.ownerId}`,
-        authorize: () => !this.disposed && captureStillValid(this.getRegistry, fence),
+        authorize: () => !this.disposed
+          && captureStillValid(this.getRegistry, fence)
+          && (!this.monitorAuthorityRequired
+            || monitorAuthority !== undefined && this.isMonitorAuthorityCurrent(monitorAuthority)),
         signal: this.controller.signal,
       });
     } catch (error) {
@@ -1463,6 +1526,13 @@ export class FlowScheduleRuntime {
       await this.recordPublished(bundle);
       bundle = await this.store.readDispatch(bundle.intent.dispatchId) ?? bundle;
     }
+    const reminderEligible = delivery?.delivered === true
+      || delivery?.receipt?.publicationStage === "accepted"
+      || (exactOutgoing(outgoing, bundle.intent.targetIdentity, bundle.intent.dispatchId, body)
+        && (outgoing.status === "queued" || consumed(outgoing)));
+    if (reminderEligible) {
+      await this.queueReportReminder(schedule, bundle, effectiveTodoBinding);
+    }
     const accepted = delivery?.receipt?.deliveryStage === "injected"
       || (exactOutgoing(outgoing, bundle.intent.targetIdentity, bundle.intent.dispatchId, body) && consumed(outgoing));
     if (accepted) {
@@ -1471,6 +1541,82 @@ export class FlowScheduleRuntime {
         await this.recordAccepted(bundle, state);
       }
       return;
+    }
+  }
+
+  private async queueReportReminder(
+    schedule: FlowScheduleRecord,
+    bundle: FlowScheduleDispatchBundle,
+    todoBinding: FlowScheduleTodoBindingSpec | undefined,
+  ): Promise<void> {
+    if (!this.monitorAuthorityRequired) return;
+    const dispatchId = bundle.intent.dispatchId;
+    const messageId = flowScheduleReportReminderMessageId(dispatchId);
+    const body = composeFlowScheduleReportReminder(dispatchId, todoBinding);
+    const registry = this.getRegistry();
+    const existing = registry?.thread.get(messageId, "outgoing");
+    if (existing && !exactReportReminderOutgoing(existing, bundle.intent.targetIdentity, dispatchId, body)) {
+      this.emit({
+        type: "diagnostic",
+        scheduleId: schedule.scheduleId,
+        dispatchId,
+        detail: "Flow report reminder message ID is bound to a different durable thread entry",
+      });
+      return;
+    }
+    if (existing?.status === "rejected") {
+      this.emit({
+        type: "diagnostic",
+        scheduleId: schedule.scheduleId,
+        dispatchId,
+        detail: "Target rejected the Flow report reminder",
+      });
+      return;
+    }
+    if (this.reportReminderAttempts.has(messageId)) return;
+    if (existing && existing.status !== "timeout") return;
+
+    const capture = captureTarget(this.getRegistry, schedule.targetSelector, bundle.intent.targetIdentity);
+    const monitorAuthority = this.captureMonitorAuthority();
+    if (!capture || !monitorAuthority || !this.isMonitorAuthorityCurrent(monitorAuthority)) return;
+    const priorRevision = existing?.contentRevision;
+    this.reportReminderAttempts.set(messageId, "attempting");
+    try {
+      const delivery = await capture.registry.send({
+        selector: capture.endpoint.id,
+        message: body,
+        mode: "follow_up",
+        messageId,
+        traceId: dispatchId,
+        source: "monitor",
+        messageKind: "request",
+        replyTo: `owner:${capture.localRoot.ownerId}`,
+        authorize: () => !this.disposed
+          && captureStillValid(this.getRegistry, capture)
+          && this.isMonitorAuthorityCurrent(monitorAuthority),
+        signal: this.controller.signal,
+      });
+      if (delivery.receipt?.publicationStage !== undefined) {
+        this.reportReminderAttempts.set(messageId, "receipt-recorded");
+      }
+    } catch (error) {
+      this.emit({
+        type: "diagnostic",
+        scheduleId: schedule.scheduleId,
+        dispatchId,
+        detail: `Flow report reminder publication failed: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    } finally {
+      const current = this.getRegistry()?.thread.get(messageId, "outgoing");
+      const journalAdvanced = exactReportReminderOutgoing(
+        current,
+        bundle.intent.targetIdentity,
+        dispatchId,
+        body,
+      ) && current.contentRevision !== priorRevision;
+      if (this.reportReminderAttempts.get(messageId) === "attempting" && !journalAdvanced) {
+        this.reportReminderAttempts.delete(messageId);
+      }
     }
   }
 

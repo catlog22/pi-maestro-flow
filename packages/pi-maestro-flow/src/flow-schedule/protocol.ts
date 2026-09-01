@@ -27,6 +27,14 @@ export function flowScheduleDispatchMessageId(dispatchId: string): string {
   return dispatchId.replaceAll("-", "");
 }
 
+/** Workspace-peer v1 transport identity for the queued report reminder. */
+export function flowScheduleReportReminderMessageId(dispatchId: string): string {
+  if (!FLOW_SCHEDULE_DISPATCH_ID_PATTERN.test(dispatchId)) {
+    throw new FlowScheduleValidationError("Flow schedule report reminder transport ID", "", "dispatchId must be a UUID v4");
+  }
+  return createHash("sha256").update(`flow-schedule-report-reminder\0${dispatchId}`).digest("hex").slice(0, 32);
+}
+
 /** Workspace-peer v1 transport identity for a Flow result. */
 export function flowScheduleResultTransportMessageId(dispatchId: string): string {
   if (!FLOW_SCHEDULE_DISPATCH_ID_PATTERN.test(dispatchId)) {
