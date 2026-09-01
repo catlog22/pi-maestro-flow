@@ -26,6 +26,7 @@ interface RunTeammateParams {
     prompt: string;
     taskType?: string;
     thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+    fallbackModels?: string[];
     timeoutMs?: number;
     outputSchema?: Record<string, unknown>;
   }>;
@@ -158,7 +159,7 @@ export interface GoalVerificationBridge {
   set verificationInFlight(value: VerificationInFlight | undefined);
   getWorkflowSnapshot(): WorkflowSnapshot | undefined;
   refreshWorkflowSnapshot(): Promise<WorkflowSnapshot | undefined>;
-  pauseGoal(goal: ActiveGoal): ActiveGoal;
+  pauseGoal(goal: ActiveGoal, reason?: ActiveGoal["pauseReason"]): ActiveGoal;
   updateUsage(goal: ActiveGoal, ctx: GoalContext): void;
   persistGoal(goal: ActiveGoal): void;
   commitVerifiedCompletion(goal: ActiveGoal, ctx: GoalContext): void;
@@ -259,6 +260,7 @@ async function runVerifier(
             dispatchContext.task,
             dispatchContext.timeoutMs ?? VERIFIER_TIMEOUT_MS,
             dispatchContext.outputSchema,
+            mainSessionModelFallback(ctx),
           ),
           { ...options, signal: dispatchContext.signal },
         );
@@ -448,8 +450,23 @@ function verifierParams(
   task: string,
   timeoutMs: number,
   outputSchema: Record<string, unknown> = VERIFIER_OUTPUT_SCHEMA,
+  fallbackModels: string[] = [],
 ): RunTeammateParams {
-  return { tasks: [{ agent: "verifier", prompt: task, timeoutMs, outputSchema }] };
+  return {
+    tasks: [{
+      agent: "verifier",
+      taskType: "verification",
+      prompt: task,
+      timeoutMs,
+      outputSchema,
+      ...(fallbackModels.length > 0 ? { fallbackModels } : {}),
+    }],
+  };
+}
+
+function mainSessionModelFallback(ctx: GoalContext): string[] {
+  const model = ctx.model;
+  return model?.provider && model.id ? [`${model.provider}/${model.id}`] : [];
 }
 
 /**
@@ -932,12 +949,10 @@ export function hasMatchingWorkflowBinding(
 ): boolean {
   return Boolean(
     goal.workflowSessionId
-    && goal.workflowSessionGeneration !== undefined
     && snapshot?.source === "canonical"
     && snapshot.canonicalClaim?.status === "valid"
     && snapshot.canonicalClaim.activeSessionId === goal.workflowSessionId
     && goal.workflowSessionId === snapshot.session?.sessionId
-    && goal.workflowSessionGeneration === snapshot.sessionGeneration
   );
 }
 
@@ -1170,27 +1185,32 @@ export async function verifyGoalCompletion(
   }
 
   if (verdict.status === "error") {
-    // Verifier infrastructure fault (non-zero exit, missing structured output,
-    // evidence collection failure). This is not the Goal's fault, so it must not
-    // consume the failure budget — but it still needs a bound of its own. A
-    // persistent fault (teammate package absent, extension API uninitialized)
-    // otherwise leaves the Goal permanently un-completable, the Todo gate
-    // permanently closed, and the model retrying forever with no escalation.
+    // Verifier infrastructure faults are not Goal failures. The verifier dispatch
+    // already tries its configured verification model and the active main-session
+    // model in an isolated read-only verifier context before reaching this branch.
     const infraErrorStreak = (bridge.activeGoal.infraErrorStreak ?? 0) + 1;
+    const infraDetail = boundedSecretText(verdict.reasoning, 400);
     if (infraErrorStreak >= MAX_VERIFICATION_FAILURES) {
-      bridge.activeGoal = bridge.pauseGoal({ ...bridge.activeGoal, infraErrorStreak });
+      bridge.activeGoal = bridge.pauseGoal({
+        ...bridge.activeGoal,
+        infraErrorStreak,
+        lastVerificationFailure: infraDetail,
+      }, "verification");
       bridge.persistGoal(bridge.activeGoal);
       bridge.updateStatusLine(ctx, bridge.activeGoal);
-      ctx.ui.notify(`Goal paused: the verifier failed with an infrastructure error ${infraErrorStreak} times in a row, so completion cannot be checked. Fix the verifier, then use /goal resume.`, "warning");
+      ctx.ui.notify(`Goal verification blocked: the independent verifier failed with an infrastructure error ${infraErrorStreak} times in a row. Fix the verifier, then use /goal resume.`, "warning");
       return { status: "hold", reason: verdict.reasoning };
     }
-    bridge.activeGoal = { ...bridge.activeGoal, infraErrorStreak };
+    bridge.activeGoal = {
+      ...bridge.activeGoal,
+      infraErrorStreak,
+      lastVerificationFailure: infraDetail,
+    };
     bridge.updateUsage(bridge.activeGoal, ctx);
     bridge.persistGoal(bridge.activeGoal);
     bridge.updateStatusLine(ctx, bridge.activeGoal);
-    const infraDetail = boundedSecretText(verdict.reasoning, 400);
     ctx.ui.notify(
-      `Goal verifier hit an infrastructure error; the attempt was not counted. Re-request completion to retry.${infraDetail ? ` Reason: ${infraDetail}` : ""}`,
+      `Goal verifier hit an infrastructure error after model fallback; the attempt was not counted. Re-request completion to retry.${infraDetail ? ` Reason: ${infraDetail}` : ""}`,
       "warning",
     );
     return { status: "continue", reason: verdict.reasoning };
@@ -1200,14 +1220,25 @@ export async function verifyGoalCompletion(
   // healthy — the infra streak only bounds *consecutive* faults.
   if (verdict.status === "inconclusive") {
     const verificationFailures = (bridge.activeGoal.verificationFailures ?? 0) + 1;
+    const inconclusiveDetail = boundedSecretText(verdict.reasoning, 400);
     if (verificationFailures >= MAX_VERIFICATION_FAILURES) {
-      bridge.activeGoal = bridge.pauseGoal({ ...bridge.activeGoal, verificationFailures, infraErrorStreak: 0 });
+      bridge.activeGoal = bridge.pauseGoal({
+        ...bridge.activeGoal,
+        verificationFailures,
+        infraErrorStreak: 0,
+        lastVerificationFailure: inconclusiveDetail,
+      }, "verification");
       bridge.persistGoal(bridge.activeGoal);
       bridge.updateStatusLine(ctx, bridge.activeGoal);
-      ctx.ui.notify(`Goal paused after ${verificationFailures} inconclusive verification attempts. Use /goal resume to retry.`, "warning");
+      ctx.ui.notify(`Goal verification blocked after ${verificationFailures} inconclusive attempts. Use /goal resume to retry.`, "warning");
       return { status: "hold", reason: verdict.reasoning };
     }
-    bridge.activeGoal = { ...bridge.activeGoal, verificationFailures, infraErrorStreak: 0 };
+    bridge.activeGoal = {
+      ...bridge.activeGoal,
+      verificationFailures,
+      infraErrorStreak: 0,
+      lastVerificationFailure: inconclusiveDetail,
+    };
     bridge.updateUsage(bridge.activeGoal, ctx);
     bridge.persistGoal(bridge.activeGoal);
     bridge.updateStatusLine(ctx, bridge.activeGoal);

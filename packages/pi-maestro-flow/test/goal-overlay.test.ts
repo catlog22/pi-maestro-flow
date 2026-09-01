@@ -44,6 +44,8 @@ function sampleEntries(): GoalDetailEntry[] {
       todoSubject: "Task B",
       acceptance: ["npm test"],
       workflowSessionId: "sess-1",
+      infraErrorStreak: 2,
+      lastVerificationFailure: "Provider timed out after fallback",
     }),
     entry("g3", "Final acceptance", { status: "paused", pauseReason: "user" }),
   ];
@@ -155,6 +157,8 @@ test("Goal overlay detail mode shows the full objective and lifecycle fields", (
   assert.match(text, /Task\s+Task B/);
   assert.match(text, /Acceptance\s+npm test/);
   assert.match(text, /Workflow\s+sess-1/);
+  assert.match(text, /Verifier infra\s+2 consecutive errors/);
+  assert.match(text, /Last verify\s+Provider timed out after fallback/);
   assert.match(text, /Updated\s+0s ago/);
   assert.match(text, /Esc back/);
   h.overlay.handleInput("\x1b");

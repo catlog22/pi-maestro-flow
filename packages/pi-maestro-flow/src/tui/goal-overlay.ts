@@ -209,7 +209,13 @@ export class GoalOverlay implements Component, Focusable {
     if (entry.acceptance?.length) lines.push(field("Acceptance", entry.acceptance.join(" · "), width));
     if (entry.workflowSessionId) lines.push(field("Workflow", entry.workflowSessionId, width));
     if (entry.verificationFailures) {
-      lines.push(field("Failures", `${entry.verificationFailures} verification failure${entry.verificationFailures === 1 ? "" : "s"}`, width));
+      lines.push(field("Failures", `${entry.verificationFailures} inconclusive verification attempt${entry.verificationFailures === 1 ? "" : "s"}`, width));
+    }
+    if (entry.infraErrorStreak) {
+      lines.push(field("Verifier infra", `${entry.infraErrorStreak} consecutive error${entry.infraErrorStreak === 1 ? "" : "s"}`, width));
+    }
+    if (entry.lastVerificationFailure) {
+      lines.push(field("Last verify", entry.lastVerificationFailure, width));
     }
     lines.push(field("Updated", `${formatGoalDuration(ageSeconds(entry.updatedAt, now))} ago`, width));
     if (state.hint) lines.push(field("Hint", theme.fg("dim", state.hint), width));

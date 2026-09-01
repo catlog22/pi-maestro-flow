@@ -8,7 +8,7 @@ export type GoalWidgetPhase = "normal" | "waiting" | "retrying" | "verifying" | 
  * PauseReason; keeping one literal list here stops the widget model from
  * silently narrowing what the domain can actually produce.
  */
-export type GoalPauseReason = "user" | "budget" | "gate" | "stalled";
+export type GoalPauseReason = "user" | "budget" | "gate" | "verification" | "stalled";
 
 export interface GoalWidgetModel {
   objective: string;
@@ -31,6 +31,8 @@ export interface GoalDetailEntry extends GoalPanelEntry {
   startedAt: number;
   updatedAt: number;
   verificationFailures?: number;
+  infraErrorStreak?: number;
+  lastVerificationFailure?: string;
   acceptance?: string[];
   workflowSessionId?: string;
 }
@@ -140,6 +142,9 @@ export function goalVisualState(goal: GoalWidgetModel, phase: GoalWidgetPhase): 
   }
   if (goal.pauseReason === "gate") {
     return { glyph: "!", label: "BLOCKED", color: "error", hint: "resolve Workflow gate" };
+  }
+  if (goal.pauseReason === "verification") {
+    return { glyph: "!", label: "VERIFY BLOCKED", color: "warning", hint: "/goal resume to retry verification" };
   }
   return { glyph: "⏸", label: "STOPPED", color: "warning", hint: "/goal resume" };
 }

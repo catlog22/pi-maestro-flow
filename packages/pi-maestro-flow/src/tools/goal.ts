@@ -89,6 +89,7 @@ export interface ActiveGoal {
   workflowSessionId?: string;
   planHandoffKey?: string;
   workflowSessionGeneration?: string;
+  supersededByGoalId?: string;
   verificationFailures?: number;
   /**
    * Consecutive verifier *infrastructure* errors, counted separately from
@@ -111,6 +112,7 @@ interface ContinuationPending {
 
 export interface GoalContext {
   cwd: string;
+  model?: ExtensionContext["model"];
   ui: {
     confirm?: (title: string, message: string) => Promise<boolean>;
     notify: (message: string, level?: "info" | "warning" | "error") => void;
@@ -397,10 +399,7 @@ export function reconcileWorkflowGoal(snapshot: WorkflowSnapshot, ctx: GoalConte
   }
 
   const currentGoal = activeGoal;
-  if (currentGoal?.workflowSessionId && (
-    currentGoal.workflowSessionId !== session.sessionId
-    || currentGoal.workflowSessionGeneration !== snapshot.sessionGeneration
-  )) {
+  if (currentGoal?.workflowSessionId && currentGoal.workflowSessionId !== session.sessionId) {
     fenceGoalLifecycle();
     const paused = pauseGoal(currentGoal, "gate");
     persistGoal(paused);
@@ -414,9 +413,19 @@ export function reconcileWorkflowGoal(snapshot: WorkflowSnapshot, ctx: GoalConte
     return replacement;
   }
 
-  if (session.status === "sealed" || session.status === "archived") return activeGoal;
   const failedGate = session.runs.flatMap((run) => run.gates)
     .some((gate) => gate.blocking && ["failed", "blocked"].includes(gate.status));
+  if (currentGoal?.workflowSessionId === session.sessionId
+    && currentGoal.workflowSessionGeneration !== snapshot.sessionGeneration) {
+    const rebound = currentGoal.status === "paused" && currentGoal.pauseReason === "gate" && !failedGate
+      ? activateResumedGoal(currentGoal)
+      : { ...currentGoal, updatedAt: Date.now() };
+    rebound.workflowSessionGeneration = snapshot.sessionGeneration;
+    persistGoal(rebound);
+    updateStatusLine(ctx, rebound);
+  }
+
+  if (session.status === "sealed" || session.status === "archived") return activeGoal;
   if (!activeGoal) {
     const created = createWorkflowGoal(session, ctx, snapshot.sessionGeneration, failedGate);
     persistGoal(created);
@@ -750,7 +759,7 @@ export function switchCurrentGoal(
   opts: { resume?: boolean } = {},
 ): ActiveGoal | undefined {
   const target = goalRegistry.find((goal) => goal.id === goalId);
-  if (!target) return undefined;
+  if (!target || isSupersededWorkflowProjection(target)) return undefined;
   const nextGoal = opts.resume && target.status === "paused"
     ? { ...target, status: "active" as const, pauseReason: undefined, verificationFailures: 0, infraErrorStreak: 0, updatedAt: Date.now() }
     : target;
@@ -1275,6 +1284,41 @@ function recoverPendingGoalTodoDetaches(ctx: GoalContext, todoStateJustLoaded = 
   return detached;
 }
 
+function isSupersededWorkflowProjection(goal: ActiveGoal): boolean {
+  return typeof goal.supersededByGoalId === "string" && goal.supersededByGoalId.length > 0;
+}
+
+function isLegacyWorkflowRollover(goal: ActiveGoal, current: ActiveGoal | undefined): current is ActiveGoal {
+  return Boolean(
+    current?.workflowSessionId
+    && current.workflowSessionGeneration
+    && goal.id !== current.id
+    && goal.status === "paused"
+    && goal.pauseReason === "gate"
+    && goal.workflowSessionId === current.workflowSessionId
+    && goal.workflowSessionGeneration
+    && goal.workflowSessionGeneration !== current.workflowSessionGeneration
+    && goal.startedAt < current.startedAt
+  );
+}
+
+function repairLegacyWorkflowGoalRollovers(
+  goals: ActiveGoal[],
+  current: ActiveGoal | undefined,
+  referencedGoalIds: ReadonlySet<string>,
+): ActiveGoal[] {
+  const repaired: ActiveGoal[] = [];
+  for (const goal of goals) {
+    if (isSupersededWorkflowProjection(goal) || !isLegacyWorkflowRollover(goal, current)) {
+      repaired.push(goal);
+      continue;
+    }
+    if (!referencedGoalIds.has(goal.id) && goal.updatedAt <= current.startedAt) continue;
+    repaired.push({ ...goal, supersededByGoalId: current.id });
+  }
+  return repaired;
+}
+
 /** Bind the root UI/UCL to durable Goal state changes. */
 export function setGoalStateChangeListener(listener: (() => void) | undefined): void {
   onGoalStateChanged = listener;
@@ -1307,21 +1351,25 @@ function loadGoalFromSession(ctx: GoalContext, sessionId: string | undefined): A
 
   if (Array.isArray(data?.goals)) {
     const loadedGoals = data.goals.filter(isGoal).map(normalizeLoadedGoal);
-    const completedReferencedGoalIds = loadedGoals
+    const loadedCurrent = loadedGoals.find((goal) => goal.id === data.currentGoalId);
+    const current = loadedCurrent?.status === "done" ? undefined : loadedCurrent;
+    const repairedGoals = repairLegacyWorkflowGoalRollovers(loadedGoals, current, referencedGoalIds);
+    const completedReferencedGoalIds = repairedGoals
       .filter((goal) => goal.status === "done" && referencedGoalIds.has(goal.id))
       .map((goal) => goal.id);
     const nextPendingDetaches = [...new Set([...loadedPendingDetaches, ...completedReferencedGoalIds])];
-    const loadedCurrent = loadedGoals.find((goal) => goal.id === data.currentGoalId);
-    const current = loadedCurrent?.status === "done" ? undefined : loadedCurrent;
     const retainedRegistry = retainGoalRegistry(
-      loadedGoals,
+      repairedGoals,
       current?.id,
       referencedGoalIds,
       new Set(nextPendingDetaches),
     );
+    const rolloverRepairChanged = repairedGoals.length !== loadedGoals.length
+      || repairedGoals.some((goal, index) => goal !== loadedGoals[index]);
     const needsRepair = nextPendingDetaches.length !== loadedPendingDetaches.length
       || current?.id !== data.currentGoalId
-      || retainedRegistry.length !== loadedGoals.length;
+      || rolloverRepairChanged
+      || retainedRegistry.length !== repairedGoals.length;
     if (needsRepair) appendGoalState(current, retainedRegistry, nextPendingDetaches);
     goalRegistry = retainedRegistry;
     pendingTodoDetachGoalIds = nextPendingDetaches;
@@ -1371,10 +1419,11 @@ function isGoal(v: unknown): v is ActiveGoal {
     typeof g.startedAt === "number" && typeof g.updatedAt === "number" &&
     typeof g.iteration === "number" &&
     typeof g.tokensUsed === "number" && typeof g.baselineTokens === "number" &&
-    (g.pauseReason === undefined || ["user", "budget", "gate", "error", "stalled"].includes(String(g.pauseReason))) &&
+    (g.pauseReason === undefined || ["user", "budget", "gate", "verification", "error", "stalled"].includes(String(g.pauseReason))) &&
     (g.planHandoffKey === undefined || typeof g.planHandoffKey === "string") &&
     (g.workflowSessionId === undefined || typeof g.workflowSessionId === "string") &&
-    (g.workflowSessionGeneration === undefined || typeof g.workflowSessionGeneration === "string")
+    (g.workflowSessionGeneration === undefined || typeof g.workflowSessionGeneration === "string") &&
+    (g.supersededByGoalId === undefined || typeof g.supersededByGoalId === "string")
     && (g.verificationFailures === undefined || (typeof g.verificationFailures === "number" && g.verificationFailures >= 0))
     && (g.infraErrorStreak === undefined || (typeof g.infraErrorStreak === "number" && g.infraErrorStreak >= 0))
     && (g.acceptance === undefined || (Array.isArray(g.acceptance) && g.acceptance.every((item) => typeof item === "string")))
@@ -1763,7 +1812,9 @@ export function getGoalPanelEntries(): GoalDetailEntry[] {
   for (const task of getVisibleTasks()) {
     if (task.goalId && !todoByGoal.has(task.goalId)) todoByGoal.set(task.goalId, task.subject);
   }
-  return getGoalList().map((entry) => toDetailEntry(entry, todoByGoal.get(entry.id)));
+  return getGoalList()
+    .filter((entry) => !isSupersededWorkflowProjection(entry))
+    .map((entry) => toDetailEntry(entry, todoByGoal.get(entry.id)));
 }
 
 function toDetailEntry(goal: ActiveGoal, todoSubject: string | undefined): GoalDetailEntry {
@@ -1779,6 +1830,8 @@ function toDetailEntry(goal: ActiveGoal, todoSubject: string | undefined): GoalD
     startedAt: goal.startedAt,
     updatedAt: goal.updatedAt,
     verificationFailures: goal.verificationFailures,
+    infraErrorStreak: goal.infraErrorStreak,
+    lastVerificationFailure: goal.lastVerificationFailure,
     acceptance: goal.acceptance?.map(redactAcceptanceCommandForDisplay),
     workflowSessionId: goal.workflowSessionId,
     retryAttempt: goalRecovery?.goalId === goal.id
@@ -1831,7 +1884,7 @@ function ensureElapsedTimer(ctx: GoalContext, goalId: string): void {
 export function fmtStatusLine(goal: ActiveGoal | undefined): string | undefined {
   if (!goal) return undefined;
   if (goal.status === "done") return "done";
-  if (goal.status === "paused") return goal.pauseReason === "budget" ? `budget ${fmtBudget(goal)}` : goal.pauseReason === "gate" ? "gate blocked" : goal.pauseReason === "stalled" ? "stalled" : "paused";
+  if (goal.status === "paused") return goal.pauseReason === "budget" ? `budget ${fmtBudget(goal)}` : goal.pauseReason === "gate" ? "gate blocked" : goal.pauseReason === "verification" ? "verification blocked" : goal.pauseReason === "stalled" ? "stalled" : "paused";
   if (goal.tokenBudget !== undefined) return `active ${fmtBudget(goal)}`;
   return `active ${fmtDuration(goal.timeUsedSeconds)}`;
 }

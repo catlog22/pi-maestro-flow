@@ -692,6 +692,88 @@ function makeGoalRecord(id: string, text: string, status: "active" | "paused" | 
   };
 }
 
+test("Goal restart repairs legacy Workflow rollover duplicates and isolates referenced history", () => {
+  type SessionEntry = { type: "custom"; customType: string; data: unknown };
+  const entries: SessionEntry[] = [];
+  const sessionId = "legacy-workflow-rollovers";
+  const workflowSessionId = "workflow-1";
+  const oldAmbiguous = {
+    ...makeGoalRecord("goal-old-ambiguous", "Updated old workflow projection", "paused", 0),
+    updatedAt: 10,
+    pauseReason: "gate" as const,
+    workflowSessionId,
+    workflowSessionGeneration: "canonical:valid:workflow-1:0",
+  };
+  const oldUnreferenced = {
+    ...makeGoalRecord("goal-old-unreferenced", "Old workflow projection", "paused", 1),
+    pauseReason: "gate" as const,
+    workflowSessionId,
+    workflowSessionGeneration: "canonical:valid:workflow-1:1",
+  };
+  const oldReferenced = {
+    ...makeGoalRecord("goal-old-referenced", "Referenced old workflow projection", "paused", 2),
+    pauseReason: "gate" as const,
+    workflowSessionId,
+    workflowSessionGeneration: "canonical:valid:workflow-1:2",
+  };
+  const current = {
+    ...makeGoalRecord("goal-current", "Current workflow projection", "active", 3),
+    workflowSessionId,
+    workflowSessionGeneration: "canonical:valid:workflow-1:3",
+  };
+  entries.push({
+    type: "custom",
+    customType: "goal-state",
+    data: {
+      version: 2,
+      sessionId,
+      goal: current,
+      goals: [oldAmbiguous, oldUnreferenced, oldReferenced, current],
+      currentGoalId: current.id,
+    },
+  });
+  entries.push({
+    type: "custom",
+    customType: "todo-state",
+    data: {
+      version: 5,
+      tasks: {
+        referenced: { id: "referenced", subject: "Referenced contract", status: "pending", goalId: oldReferenced.id },
+      },
+    },
+  });
+  const appendEntry = (customType: string, data: unknown) => {
+    entries.push({ type: "custom", customType, data });
+  };
+  const ctx = createContext({
+    sessionManager: { getSessionId: () => sessionId, getEntries: () => entries },
+  });
+  initGoal({ appendEntry } as never);
+  onSessionStart(ctx, { reason: "startup" });
+
+  try {
+    assert.equal(getActiveGoal()?.id, current.id);
+    const loaded = getGoalList();
+    assert.deepEqual(loaded.map((goal) => goal.id), [oldAmbiguous.id, oldReferenced.id, current.id]);
+    assert.equal(loaded.find((goal) => goal.id === oldAmbiguous.id)?.supersededByGoalId, current.id);
+    assert.equal(loaded.find((goal) => goal.id === oldReferenced.id)?.supersededByGoalId, current.id);
+    assert.deepEqual(getGoalPanelEntries().map((goal) => goal.id), [current.id]);
+    assert.equal(switchCurrentGoal(oldReferenced.id, ctx, { resume: true }), undefined);
+    const repaired = entries.filter((entry) => entry.customType === "goal-state").at(-1)?.data as {
+      goals?: Array<{ id: string; supersededByGoalId?: string }>;
+    };
+    assert.deepEqual(repaired.goals?.map((goal) => goal.id), [oldAmbiguous.id, oldReferenced.id, current.id]);
+    assert.equal(repaired.goals?.find((goal) => goal.id === oldAmbiguous.id)?.supersededByGoalId, current.id);
+    assert.equal(repaired.goals?.find((goal) => goal.id === oldReferenced.id)?.supersededByGoalId, current.id);
+
+    const standalone = addGoal("Independent follow-up", ctx);
+    assert.deepEqual(getGoalPanelEntries().map((goal) => goal.id), [current.id, standalone.id]);
+    assert.equal(switchCurrentGoal(oldReferenced.id, ctx, { resume: true }), undefined);
+  } finally {
+    onSessionShutdown(ctx);
+  }
+});
+
 test("Goal history restart durably detaches many completed Todo gates before enforcing absolute bounds", () => {
   type SessionEntry = { type: "custom"; customType: string; data: unknown };
   const entries: SessionEntry[] = [];
@@ -866,6 +948,7 @@ test("goal widget renders explicit lifecycle states within widths 1 through 120"
     { goal: { ...base, status: "paused", pauseReason: "user" }, phase: "normal", label: /STOPPED/ },
     { goal: { ...base, status: "paused", pauseReason: "budget" }, phase: "normal", label: /BUDGET/ },
     { goal: { ...base, status: "paused", pauseReason: "gate" }, phase: "normal", label: /BLOCKED/ },
+    { goal: { ...base, status: "paused", pauseReason: "verification" }, phase: "normal", label: /VERIFY BLOCKED/ },
   ];
 
   for (const variant of variants) {
@@ -1650,7 +1733,7 @@ test("verifier receives bounded raw tool evidence produced after the goal starte
 });
 
 test("explicit completion injects bounded session and matching canonical Workflow evidence", async () => {
-  const calls: Array<{ tasks: Array<{ agent?: string; prompt: string; thinking?: string; timeoutMs?: number }> }> = [];
+  const calls: Array<{ tasks: Array<{ agent?: string; prompt: string; taskType?: string; thinking?: string; fallbackModels?: string[]; timeoutMs?: number }> }> = [];
   const verifierOptions: Array<{ onChildRequest?: unknown }> = [];
   let statusCalls = 0;
   setGoalVerifierRunnerForTest(async (params, options) => {
@@ -1672,6 +1755,7 @@ test("explicit completion injects bounded session and matching canonical Workflo
   } as never);
   const ctx = createContext({
     isIdle: () => false,
+    model: { provider: "provider", id: "main-model" } as never,
     sessionManager: { getEntries: () => entries },
   });
 
@@ -1724,7 +1808,8 @@ test("explicit completion injects bounded session and matching canonical Workflo
     assert.equal(calls.length, 1);
     assert.equal(statusCalls, 1);
     assert.ok(calls.every((call) => call.tasks[0]?.agent === "verifier"));
-    assert.equal(calls[0]?.tasks[0]?.taskType, undefined);
+    assert.equal(calls[0]?.tasks[0]?.taskType, "verification");
+    assert.deepEqual(calls[0]?.tasks[0]?.fallbackModels, ["provider/main-model"]);
     assert.equal(calls[0]?.tasks[0]?.thinking, undefined);
     assert.ok(verifierOptions.every((options) => typeof options.onChildRequest === "function"));
     const task = calls[0]?.tasks[0]?.prompt ?? "";
@@ -1804,7 +1889,9 @@ test("Goal pauses after three inconclusive explicit completion attempts", async 
       }, ctx);
     }
     assert.equal(getActiveGoal()?.status, "paused");
+    assert.equal(getActiveGoal()?.pauseReason, "verification");
     assert.equal(getActiveGoal()?.verificationFailures, 3);
+    assert.match(getActiveGoal()?.lastVerificationFailure ?? "", /no structured_output/i);
     await executeGoalCommand({ action: "resume" }, ctx);
     assert.equal(getActiveGoal()?.status, "active");
     assert.equal(getActiveGoal()?.verificationFailures, 0);
@@ -1851,7 +1938,9 @@ test("Goal pauses after three consecutive verifier infrastructure errors", async
 
     await executeGoal({ action: "complete", summary: "Third attempt against a broken verifier." }, ctx);
     assert.equal(getActiveGoal()?.status, "paused");
+    assert.equal(getActiveGoal()?.pauseReason, "verification");
     assert.equal(getActiveGoal()?.infraErrorStreak, 3);
+    assert.match(getActiveGoal()?.lastVerificationFailure ?? "", /exit status/i);
     assert.equal(getActiveGoal()?.verificationFailures ?? 0, 0);
     assert.ok(
       notices.some((message) => /infrastructure error 3 times in a row/.test(message)),
@@ -2286,7 +2375,7 @@ test("agent_end continues without verification and an explicit valid fail keeps 
   }
 });
 
-test("unbound and mismatched Goals exclude unrelated canonical Workflow evidence", async () => {
+test("unbound Goals exclude unrelated Workflow evidence while same-Session revision drift stays bound", async () => {
   const tasks: string[] = [];
   setGoalVerifierRunnerForTest(async (params) => {
     tasks.push(params.tasks[0]?.prompt ?? "");
@@ -2335,11 +2424,11 @@ test("unbound and mismatched Goals exclude unrelated canonical Workflow evidence
       action: "complete",
       summary: "The bound Workflow Goal work is complete.",
     }, ctx);
-    assert.match(
+    assert.match(tasks[1] ?? "", /Session session-1: running/);
+    assert.doesNotMatch(
       tasks[1] ?? "",
-      /"relatedCanonicalWorkflowEvidence": "\(Unavailable: the current canonical Workflow Session identity does not match this Goal's binding\.\)"/,
+      /Unavailable: the current canonical Workflow Session identity does not match this Goal's binding/,
     );
-    assert.doesNotMatch(tasks[1] ?? "", /Session session-[12]: running/);
   } finally {
     await executeGoalCommand({ action: "clear" }, ctx);
     onSessionShutdown(ctx);
@@ -2988,7 +3077,7 @@ test("completion summary accepts 4000 characters and rejects 4001 before verifie
     const allowedGoalFields = new Set([
       "id", "text", "status", "pauseReason", "startedAt", "updatedAt", "iteration",
       "tokenBudget", "tokensUsed", "timeUsedSeconds", "baselineTokens", "workflowSessionId",
-      "planHandoffKey", "workflowSessionGeneration", "verificationFailures",
+      "planHandoffKey", "workflowSessionGeneration", "supersededByGoalId", "verificationFailures",
       "infraErrorStreak", "lastVerificationFailure", "acceptance",
       "prevTokensUsed", "lowProgressCount",
     ]);
@@ -3255,27 +3344,34 @@ test("canonical Session identity changes fence the old workflow Goal and replace
   }
 });
 
-test("canonical identityRevision generation changes recreate a workflow Goal under the same Session id", async () => {
-  const persisted: Array<{ goal?: { workflowSessionGeneration?: string; status?: string } | null }> = [];
+test("same-Session generation changes rebind a workflow Goal in place without leaving blocked history", async () => {
+  const persisted: Array<{ goal?: { id?: string; workflowSessionGeneration?: string; status?: string } | null }> = [];
   const ctx = createContext({ sessionManager: { getEntries: () => [] } });
   initGoal({ appendEntry(_type: string, value: unknown) { persisted.push(value as typeof persisted[number]); } } as never);
   onSessionStart(ctx);
   try {
     const first = workflowSnapshot();
-    const oldGoal = reconcileWorkflowGoal(first, ctx);
-    assert.equal(oldGoal?.workflowSessionGeneration, "canonical:valid:session-1:1");
+    const original = reconcileWorkflowGoal(first, ctx);
+    assert.equal(original?.workflowSessionGeneration, "canonical:valid:session-1:1");
 
     const next = workflowSnapshot();
     next.session!.identityRevision = 2;
     next.sessionGeneration = "canonical:valid:session-1:2";
-    const replacement = reconcileWorkflowGoal(next, ctx);
+    const rebound = reconcileWorkflowGoal(next, ctx);
 
-    assert.equal(replacement?.workflowSessionId, "session-1");
-    assert.equal(replacement?.workflowSessionGeneration, "canonical:valid:session-1:2");
-    assert.notEqual(replacement?.id, oldGoal?.id);
-    assert.ok(persisted.some((entry) =>
-      entry.goal?.workflowSessionGeneration === "canonical:valid:session-1:1" && entry.goal.status === "paused"
-    ));
+    assert.equal(rebound?.id, original?.id);
+    assert.equal(rebound?.workflowSessionId, "session-1");
+    assert.equal(rebound?.workflowSessionGeneration, "canonical:valid:session-1:2");
+    assert.equal(rebound?.status, "active");
+    assert.ok(!persisted.some((entry) => entry.goal?.id === original?.id && entry.goal.status === "paused"));
+
+    const sealed = completionReadyWorkflowSnapshot("session-1", "canonical:valid:session-1:3");
+    sealed.session!.status = "sealed";
+    const afterSeal = reconcileWorkflowGoal(sealed, ctx);
+    assert.equal(afterSeal?.id, original?.id);
+    assert.equal(afterSeal?.workflowSessionGeneration, "canonical:valid:session-1:3");
+    assert.equal(afterSeal?.status, "active");
+    assert.equal(afterSeal?.pauseReason, undefined);
   } finally {
     await executeGoalCommand({ action: "clear" }, ctx);
     onSessionShutdown(ctx);
