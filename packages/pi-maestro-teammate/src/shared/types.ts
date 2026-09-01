@@ -728,6 +728,8 @@ export interface TeammateState {
    * root extension; absent in states that never relay interactions.
    */
   cancelInteractions?: (correlationId: string, reason: string) => void;
+  /** Settles one relayed interaction by its child-provided requestId. */
+  cancelInteractionRequest?: (requestId: string, reason: string) => void;
   /**
    * Bounded, insertion-ordered record of agents that have left `activeRuns`.
    * A settled agent is removed outright, so without this a lookup afterwards

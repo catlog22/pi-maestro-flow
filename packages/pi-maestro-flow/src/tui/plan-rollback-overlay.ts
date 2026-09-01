@@ -20,6 +20,7 @@ import type { PlanDraftArchiveEntry } from "../tools/plan-store.ts";
 export interface RenderRollbackOverlayOptions {
   drafts: PlanDraftArchiveEntry[];
   readDraft: (path: string) => Promise<string>;
+  signal?: AbortSignal;
 }
 
 export interface RenderRollbackOverlayResult {
@@ -37,7 +38,7 @@ export async function renderRollbackOverlay(
   ctx: RollbackContext,
   options: RenderRollbackOverlayOptions,
 ): Promise<RenderRollbackOverlayResult> {
-  if (!ctx.hasUI) return { action: "cancel" };
+  if (!ctx.hasUI || options.signal?.aborted) return { action: "cancel" };
   const drafts = options.drafts;
 
   const result = await ctx.ui.custom<RenderRollbackOverlayResult>(
@@ -46,6 +47,17 @@ export async function renderRollbackOverlay(
       let preview = "";
       let loadingPreview = false;
       let lastWidth = 80;
+      let settled = false;
+
+      const finish = (value: RenderRollbackOverlayResult): void => {
+        if (settled) return;
+        settled = true;
+        options.signal?.removeEventListener("abort", onAbort);
+        done(value);
+      };
+      const onAbort = (): void => finish({ action: "cancel" });
+      options.signal?.addEventListener("abort", onAbort, { once: true });
+      if (options.signal?.aborted) onAbort();
 
       const markdownTheme: MarkdownTheme = {
         heading: (text) => theme.fg("accent", theme.bold(text)),
@@ -74,10 +86,10 @@ export async function renderRollbackOverlay(
           preview = "Unable to read this draft archive.";
         } finally {
           loadingPreview = false;
-          tui.requestRender();
+          if (!settled) tui.requestRender();
         }
       }
-      void refreshPreview();
+      if (!settled) void refreshPreview();
 
       function visibleStart(): number {
         if (drafts.length <= MAX_VISIBLE) return 0;
@@ -161,18 +173,20 @@ export async function renderRollbackOverlay(
             return;
           }
           if (matchesKey(data, Key.enter)) {
-            done({ action: "restore", selected: drafts[selected] });
+            finish({ action: "restore", selected: drafts[selected] });
             return;
           }
           if (matchesKey(data, Key.escape)) {
-            done({ action: "cancel" });
+            finish({ action: "cancel" });
             return;
           }
           tui.requestRender();
         },
 
         invalidate(): void {},
-        dispose(): void {},
+        dispose(): void {
+          finish({ action: "cancel" });
+        },
       };
     },
     {

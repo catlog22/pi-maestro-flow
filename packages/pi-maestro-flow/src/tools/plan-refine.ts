@@ -318,7 +318,7 @@ export async function openRefinePanel(
     roles: REFINE_ROLES,
     pickModel: async () => {
       const models = await listAvailableReviewModels(ctx);
-      const picked = await pickReviewModel(ctx, models);
+      const picked = await pickReviewModel(ctx, models, options.signal);
       if (!picked) return undefined;
       return picked;
     },

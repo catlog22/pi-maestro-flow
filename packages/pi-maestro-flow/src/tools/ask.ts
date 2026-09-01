@@ -52,19 +52,22 @@ type AskToolResult = AgentToolResult<AskResultDetails> & { isError?: boolean };
 export async function executeAsk(
   params: AskParams,
   ctx: ExtensionContext,
-  options: { onUserAttention?: UserAttentionHandler; requestId?: string } = {},
+  options: { onUserAttention?: UserAttentionHandler; requestId?: string; signal?: AbortSignal } = {},
 ): Promise<AskToolResult> {
   const questions = params.questions?.slice(0, 4) ?? [];
   if (questions.length === 0) {
     return askError("At least one question is required.");
   }
+  const signal = options.signal ?? ctx.signal;
+  if (signal?.aborted) return cancelledAsk();
 
   if (isTeammateChild()) {
     const relay = await requestTeammateInteraction<{
       action: "answer" | "cancel";
       answers?: AskAnswer[];
-    }>("question", { questions });
+    }>("question", { questions }, undefined, signal);
     if (!relay.ok) {
+      if (relay.reason === "aborted") return cancelledAsk();
       const detail = relay.error ? `: ${relay.error}` : "";
       return askError(`Teammate questionnaire relay ${relay.reason}${detail}.`);
     }
@@ -89,11 +92,11 @@ export async function executeAsk(
   const terminalUi = mode === "tui"
     || (mode === undefined && Boolean(ctx.ui.custom) && Boolean(ctx.ui.onTerminalInput));
   if (!terminalUi) {
-    const answers = await showAskDialogs(questions, ctx);
+    const answers = await showAskDialogs(questions, ctx, signal);
     return answers ? askSuccess(answers) : cancelledAsk();
   }
 
-  const answers = await showAskWizard(questions, ctx);
+  const answers = await showAskWizard(questions, ctx, signal);
   if (!answers) {
     return cancelledAsk();
   }
@@ -112,6 +115,7 @@ function cancelledAsk(): AskToolResult {
 async function showAskDialogs(
   questions: QuestionSpec[],
   ctx: ExtensionContext,
+  signal?: AbortSignal,
 ): Promise<AskAnswer[] | undefined> {
   const answers: AskAnswer[] = [];
   for (let index = 0; index < questions.length; index++) {
@@ -119,7 +123,7 @@ async function showAskDialogs(
     const title = `${question.header ?? `问题 ${index + 1}`}\n${question.question}`;
     const baseOptions = question.options ?? [];
     if (baseOptions.length === 0) {
-      const text = await ctx.ui.input(title, "输入回答");
+      const text = await ctx.ui.input(title, "输入回答", { signal });
       if (text === undefined) return undefined;
       answers.push({
         question: question.question,
@@ -134,12 +138,12 @@ async function showAskDialogs(
       ? baseOptions
       : [...baseOptions, { label: NONE_OPTION_LABEL }];
     const selected = question.multiSelect
-      ? await selectMultipleDialog(ctx, title, options)
-      : await selectOneDialog(ctx, title, options);
+      ? await selectMultipleDialog(ctx, title, options, signal)
+      : await selectOneDialog(ctx, title, options, signal);
     if (!selected) return undefined;
     let text: string | undefined;
     if (selected.includes(NONE_OPTION_LABEL)) {
-      const custom = await ctx.ui.input(title, "你想要什么方案？（可选）");
+      const custom = await ctx.ui.input(title, "你想要什么方案？（可选）", { signal });
       if (custom === undefined) return undefined;
       text = custom.trim() || undefined;
     }
@@ -157,11 +161,12 @@ async function selectOneDialog(
   ctx: ExtensionContext,
   title: string,
   options: QuestionOption[],
+  signal?: AbortSignal,
 ): Promise<string[] | undefined> {
   const labels = options.map((option, index) =>
     `${index + 1}. ${option.label}${option.description ? ` — ${option.description}` : ""}`
   );
-  const choice = await ctx.ui.select(title, labels);
+  const choice = await ctx.ui.select(title, labels, { signal });
   const index = choice ? labels.indexOf(choice) : -1;
   return index >= 0 ? [options[index].label] : undefined;
 }
@@ -170,6 +175,7 @@ async function selectMultipleDialog(
   ctx: ExtensionContext,
   title: string,
   options: QuestionOption[],
+  signal?: AbortSignal,
 ): Promise<string[] | undefined> {
   const selected = new Set<number>();
   while (true) {
@@ -177,7 +183,7 @@ async function selectMultipleDialog(
       `${selected.has(index) ? "[x]" : "[ ]"} ${index + 1}. ${option.label}`
     );
     const done = `完成（${selected.size}）`;
-    const choice = await ctx.ui.select(title, [...labels, done]);
+    const choice = await ctx.ui.select(title, [...labels, done], { signal });
     if (choice === undefined) return undefined;
     if (choice === done) {
       return [...selected].sort((a, b) => a - b).map((index) => options[index].label);
@@ -228,13 +234,26 @@ function askError(message: string): AskToolResult {
 async function showAskWizard(
   questions: QuestionSpec[],
   ctx: ExtensionContext,
+  signal?: AbortSignal,
 ): Promise<AskAnswer[] | undefined> {
+  if (signal?.aborted) return undefined;
   // Rendered as an in-composer interactive panel (the default ui.custom
   // path), not an overlay: the cockpit's ambient ←/→/Shift+↑↓ hooks yield
   // to any custom component holding input focus, so the wizard owns those
   // keys while it is up without covering the rest of the UI.
   return ctx.ui.custom<AskAnswer[] | undefined>(
     (tui, theme, _keybindings, done) => {
+      let settled = false;
+      const finish = (result: AskAnswer[] | undefined) => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener("abort", onAbort);
+        done(result);
+      };
+      const onAbort = () => finish(undefined);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted) queueMicrotask(onAbort);
+
       const optionsList = questions.map((q) => {
         const options = q.options ?? [];
         if (options.length === 0 || options.some((option) => option.label === NONE_OPTION_LABEL)) {
@@ -852,7 +871,7 @@ async function showAskWizard(
           } else if (step > 0) {
             enterStep(step - 1);
           } else {
-            done(undefined);
+            finish(undefined);
           }
           return;
         }
@@ -1004,7 +1023,7 @@ async function showAskWizard(
         const value = token.text;
         if (step === questions.length) {
           if (value === "\r" || value === "\n" || value === "\x1bOM") {
-            done(submitActionCursor === 0 ? collectAnswers() : undefined);
+            finish(submitActionCursor === 0 ? collectAnswers() : undefined);
           } else if (value === "\x1b") {
             enterStep(step - 1);
           } else if (value === "k" || value === "\x1b[A" || value === "\x1bOA") {
@@ -1035,7 +1054,7 @@ async function showAskWizard(
         }
         if (value === "\x1b") {
           if (step > 0) enterStep(step - 1);
-          else done(undefined);
+          else finish(undefined);
           return;
         }
         if (value === "h" || value === "\x1b[D" || value === "\x1bOD" || value === "\x1b[Z") {
@@ -1082,7 +1101,7 @@ async function showAskWizard(
 
         handleInput(data: string): void {
           if (lastWidth < 20) {
-            if (data === "\x1b" || data === "\x03") done(undefined);
+            if (data === "\x1b" || data === "\x03") finish(undefined);
             return;
           }
           decodeInput(data === "\x03" ? "\x1b" : data);
@@ -1091,7 +1110,7 @@ async function showAskWizard(
         invalidate() {},
         dispose() {
           if (pasteFlushTimer) clearTimeout(pasteFlushTimer);
-          done(undefined);
+          finish(undefined);
         },
       };
       return createdPanel;

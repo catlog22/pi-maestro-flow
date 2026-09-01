@@ -97,6 +97,37 @@ test("pickReviewModel returns undefined when the picker is cancelled", async () 
   assert.equal(choice, undefined);
 });
 
+test("pickReviewModel abort and disposal close the nested picker exactly once", async () => {
+  let component: ReturnType<CustomFactory> | undefined;
+  let doneCalls = 0;
+  let resolveCustom: ((value: string | undefined) => void) | undefined;
+  const customResult = new Promise<string | undefined>((resolve) => { resolveCustom = resolve; });
+  const ctx = {
+    hasUI: true,
+    model: { provider: "provider", id: "session" },
+    ui: {
+      async custom(factory: CustomFactory) {
+        component = factory(undefined as never, minimalTheme(), undefined as never, (value) => {
+          doneCalls += 1;
+          resolveCustom?.(value);
+        });
+        return customResult;
+      },
+      notify() {},
+    },
+  } as unknown as ExtensionContext;
+  const controller = new AbortController();
+  const pending = pickReviewModel(ctx, ["provider/reviewer"], controller.signal);
+  assert.ok(component);
+
+  controller.abort();
+  component.dispose();
+  component.handleInput("\x1b");
+
+  assert.equal(await pending, undefined);
+  assert.equal(doneCalls, 1);
+});
+
 test("pickReviewModel falls back to the session model without a UI and warns when missing", async () => {
   const harness = createReviewHarness({ hasUI: false });
   const choice = await pickReviewModel(harness.ctx, []);

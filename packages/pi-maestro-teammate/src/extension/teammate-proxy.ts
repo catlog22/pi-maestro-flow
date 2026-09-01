@@ -507,6 +507,12 @@ export function createTeammateInteractionQueue(
 
   return {
     enqueue,
+    cancelByRequest(requestId, reason) {
+      const waiter = waiting.get(requestId);
+      if (!waiter) return false;
+      waiter.settle(reason, "queue_cancel");
+      return true;
+    },
     cancelForAgent(correlationId, reason) {
       let cancelled = 0;
       for (const waiter of [...waiting.values()]) {
@@ -2208,6 +2214,10 @@ export async function handleProxyRequest(
             return;
           }
           if (evt.type === "teammate_proxy_cancel" && typeof evt.requestId === "string") {
+            state.cancelInteractionRequest?.(
+              evt.requestId,
+              "The requesting teammate cancelled this interaction.",
+            );
             cancelProxyDispatch(state, evt.requestId);
             return;
           }

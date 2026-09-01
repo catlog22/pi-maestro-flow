@@ -166,6 +166,46 @@ test("cancelling the front owner releases the terminal for the next prompt", asy
   assert.equal(queue.pendingCount(), 0);
 });
 
+test("requestId cancellation releases one parent waiter exactly once and advances the queue", async () => {
+  const state = makeState();
+  const first = addAgent(state, "first");
+  const second = addAgent(state, "second");
+  const opened: string[] = [];
+  const ctx = {
+    cwd: process.cwd(),
+    hasUI: true,
+    ui: {
+      select(_title: string, _options: string[], dialog?: { signal?: AbortSignal }) {
+        opened.push(opened.length === 0 ? "first" : "second");
+        if (opened.length === 2) return Promise.resolve("Deny");
+        return new Promise<string | undefined>((resolve) => {
+          dialog?.signal?.addEventListener("abort", () => resolve(undefined), { once: true });
+        });
+      },
+    },
+  } as never;
+  const queue = createTeammateInteractionQueue(stubPi, state, 1_000);
+  const firstEvent = permissionEvent(first);
+  const firstRequestId = firstEvent.requestId as string;
+  const firstReplies: Reply[] = [];
+  const secondReplies: Reply[] = [];
+
+  queue.enqueue(firstEvent, (msg) => firstReplies.push(msg as Reply), ctx, first);
+  await delay(10);
+  queue.enqueue(permissionEvent(second), (msg) => secondReplies.push(msg as Reply), ctx, second);
+
+  assert.equal(queue.cancelByRequest(firstRequestId, "The requesting child aborted."), true);
+  assert.equal(queue.cancelByRequest(firstRequestId, "duplicate cancellation"), false);
+  await delay(30);
+
+  assert.deepEqual(opened, ["first", "second"]);
+  assert.equal(firstReplies.length, 1, "the cancelled parent waiter settles exactly once");
+  assert.equal(firstReplies[0].result?.action, "cancel");
+  assert.equal(secondReplies.length, 1, "the queued prompt advances after cancellation");
+  assert.equal(secondReplies[0].result?.action, "deny");
+  assert.equal(queue.pendingCount(), 0);
+});
+
 test("a settled request is never answered twice", async () => {
   const state = makeState();
   const cid = addAgent(state, "asker");

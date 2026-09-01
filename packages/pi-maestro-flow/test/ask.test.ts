@@ -438,6 +438,21 @@ test("host-driven widget disposal settles the questionnaire", async () => {
   assert.equal(harness.cleared, true);
 });
 
+test("abort settles and disposes a mounted questionnaire", async () => {
+  const harness = createHarness();
+  const controller = new AbortController();
+  const pending = executeAsk(
+    { questions: [{ question: "Choose", options: [{ label: "A" }] }] },
+    harness.ctx,
+    { signal: controller.signal },
+  );
+  assert.equal(harness.cleared, false);
+  controller.abort();
+  const result = await pending;
+  assert.equal(result.details.cancelled, true);
+  assert.equal(harness.cleared, true);
+});
+
 test("questionnaire blocks invisible input and submit below 20 columns", async () => {
   const harness = createHarness();
   const pending = executeAsk({ questions: [{ question: "Choose", options: [{ label: "A" }] }] }, harness.ctx);
@@ -452,16 +467,20 @@ test("questionnaire blocks invisible input and submit below 20 columns", async (
 
 test("RPC mode uses official dialog methods instead of terminal widgets", async () => {
   const calls: string[] = [];
+  const signals: Array<AbortSignal | undefined> = [];
+  const controller = new AbortController();
   const ctx = {
     mode: "rpc",
     hasUI: true,
     ui: {
-      async select(_title: string, options: string[]) {
+      async select(_title: string, options: string[], opts?: { signal?: AbortSignal }) {
         calls.push("select");
+        signals.push(opts?.signal);
         return options[0];
       },
-      async input() {
+      async input(_title: string, _placeholder?: string, opts?: { signal?: AbortSignal }) {
         calls.push("input");
+        signals.push(opts?.signal);
         return "Nearest region";
       },
       setWidget() { throw new Error("RPC must not install a terminal widget"); },
@@ -473,8 +492,9 @@ test("RPC mode uses official dialog methods instead of terminal widgets", async 
       { question: "Strategy?", options: [{ label: "Preset" }, { label: "Custom" }] },
       { question: "Constraints?" },
     ],
-  }, ctx);
+  }, ctx, { signal: controller.signal });
   assert.deepEqual(calls, ["select", "input"]);
+  assert.deepEqual(signals, [controller.signal, controller.signal]);
   assert.deepEqual(result.details.answers, [
     { question: "Strategy?", selected: ["Preset"] },
     { question: "Constraints?", selected: [], text: "Nearest region" },

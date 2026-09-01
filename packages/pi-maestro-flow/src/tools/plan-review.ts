@@ -109,7 +109,9 @@ function resolveReviewModelFallback(ctx: Pick<ExtensionContext, "model" | "ui">)
 export async function pickReviewModel(
   ctx: Pick<ExtensionContext, "hasUI" | "ui" | "model">,
   models: string[],
+  signal?: AbortSignal,
 ): Promise<ReviewModelChoice | undefined> {
+  if (signal?.aborted) return undefined;
   if (!ctx.hasUI) return resolveReviewModelFallback(ctx);
   const options = [FOLLOW_SESSION_LABEL, ...models];
   const items = options.map((value) => ({ value, label: value }));
@@ -125,16 +127,20 @@ export async function pickReviewModel(
       const input = new Input();
       const maxVisible = Math.min(options.length, 10);
       const list = new SelectList(items, maxVisible, listTheme);
-      list.onSelect = (item) => done(item.value);
-      list.onCancel = () => done(undefined);
-      const syncFilter = () => list.setFilter(input.getValue());
-      syncFilter();
       let settled = false;
       const finish = (value: string | undefined): void => {
         if (settled) return;
         settled = true;
+        signal?.removeEventListener("abort", onAbort);
         done(value);
       };
+      const onAbort = (): void => finish(undefined);
+      list.onSelect = (item) => finish(item.value);
+      list.onCancel = () => finish(undefined);
+      const syncFilter = () => list.setFilter(input.getValue());
+      syncFilter();
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted) onAbort();
       return {
         render(width: number): string[] {
           const inner = Math.max(1, width - 2);
@@ -177,7 +183,9 @@ export async function pickReviewModel(
           input.invalidate();
           list.invalidate();
         },
-        dispose(): void {},
+        dispose(): void {
+          finish(undefined);
+        },
       };
     },
     {

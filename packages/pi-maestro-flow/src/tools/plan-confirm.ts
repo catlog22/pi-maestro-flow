@@ -47,6 +47,7 @@ export interface PlanConfirmationOptions {
   contextPercent?: number;
   defaultExecution?: PlanExecutionChoice;
   workflow?: PlanWorkflowConfirmationOptions;
+  signal?: AbortSignal;
   /** Archived draft revisions available for rollback. */
   drafts?: { revision: number; archivedAt: string; checksum: string }[];
 }
@@ -73,7 +74,7 @@ export async function openPlanConfirmation(
   ctx: Pick<ExtensionContext, "hasUI" | "ui">,
   options: PlanConfirmationOptions,
 ): Promise<PlanConfirmationDecision> {
-  if (!ctx.hasUI) return { action: "close" };
+  if (!ctx.hasUI || options.signal?.aborted) return { action: "close" };
 
   const result = await ctx.ui.custom<PlanConfirmationDecision>(
     (tui, theme, _keybindings, done) => {
@@ -126,11 +127,18 @@ export async function openPlanConfirmation(
           : { backend, context: contextMode };
       }
 
+      let settled = false;
       function complete(action: PlanConfirmationAction): void {
+        if (settled) return;
+        settled = true;
+        options.signal?.removeEventListener("abort", onAbort);
         done(action === "execute"
           ? { action, execution: executionChoice() }
           : { action });
       }
+      const onAbort = () => complete("close");
+      options.signal?.addEventListener("abort", onAbort, { once: true });
+      if (options.signal?.aborted) queueMicrotask(onAbort);
 
       function changeControl(row: SelectionRow, direction: -1 | 1): void {
         status = "";
@@ -282,7 +290,10 @@ export async function openPlanConfirmation(
           markdown.invalidate();
         },
 
-        dispose(): void {},
+        dispose(): void {
+          options.signal?.removeEventListener("abort", onAbort);
+          complete("close");
+        },
       };
     },
     {

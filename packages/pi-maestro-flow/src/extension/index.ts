@@ -4166,17 +4166,19 @@ When NOT to use:
     ],
 
     parameters: AskUserQuestionParams,
+    executionMode: "sequential",
 
     async execute(
       _id: string,
       params: Record<string, unknown>,
-      _signal: AbortSignal,
+      signal: AbortSignal | undefined,
       _onUpdate: ((result: FlowToolResult) => void) | undefined,
       ctx: ExtensionContext,
     ): Promise<FlowToolResult> {
       return executeAsk(params as unknown as AskParams, ctx, {
         onUserAttention,
         requestId: `question:${_id}`,
+        signal,
       });
     },
 

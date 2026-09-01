@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import {
   REFINE_ROLES,
@@ -9,6 +9,7 @@ import {
   buildBrainstormerPrompt,
   createRefineSession,
   cycleRole,
+  openRefinePanel,
   type RefineRole,
   type RefineSession,
   type RefineTurn,
@@ -263,6 +264,67 @@ test("Review & Refine composes the parent abort signal into each run", async () 
   assert.equal(runSignal.aborted, true);
   const result = await pending;
   assert.equal(result.action, "cancel");
+});
+
+test("openRefinePanel threads the parent signal into the nested model picker", async () => {
+  let overlay: { handleInput(data: string): void } | undefined;
+  let picker: { dispose(): void } | undefined;
+  let overlayDone: ((value: unknown) => void) | undefined;
+  let pickerDone: ((value: unknown) => void) | undefined;
+  let pickerDoneCalls = 0;
+  const overlayResult = new Promise<unknown>((resolve) => { overlayDone = resolve; });
+  const pickerResult = new Promise<unknown>((resolve) => { pickerDone = resolve; });
+  let customCalls = 0;
+  const ctx = {
+    cwd: process.cwd(),
+    hasUI: true,
+    model: { provider: "provider", id: "session" },
+    modelRegistry: {
+      getAvailable: () => [{ provider: "provider", id: "reviewer" }],
+    },
+    isProjectTrusted: true,
+    ui: {
+      async custom(factory: Function) {
+        customCalls += 1;
+        if (customCalls === 1) {
+          overlay = factory(
+            { requestRender() {} },
+            { fg: (_name: string, text: string) => text, bold: (text: string) => text },
+            {},
+            (value: unknown) => overlayDone?.(value),
+          );
+          return overlayResult;
+        }
+        picker = factory(
+          { requestRender() {} },
+          { fg: (_name: string, text: string) => text, bold: (text: string) => text },
+          {},
+          (value: unknown) => {
+            pickerDoneCalls += 1;
+            pickerDone?.(value);
+          },
+        );
+        return pickerResult;
+      },
+      notify() {},
+    },
+  } as unknown as ExtensionContext;
+  const controller = new AbortController();
+  const pending = openRefinePanel({} as ExtensionAPI, ctx, {
+    markdown: PLAN,
+    signal: controller.signal,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(overlay);
+
+  overlay.handleInput("m");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(picker);
+  controller.abort();
+  picker.dispose();
+
+  assert.equal((await pending).action, "cancel");
+  assert.equal(pickerDoneCalls, 1);
 });
 
 test("Review & Refine settles as cancelled when the parent aborts while idle", async () => {

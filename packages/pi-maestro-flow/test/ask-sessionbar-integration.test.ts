@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { TUI } from "@earendil-works/pi-tui";
+import { TuiMainScreen } from "@earendil-works/pi-tui";
 import { ambientKeysShouldYield, customComponentCapturesInput } from "../../pi-cockpit/src/capturing-overlay.ts";
 import { executeAsk } from "../src/tools/ask.ts";
 
@@ -94,7 +94,7 @@ function createAskHarness(tui: TUI) {
 
 test("ask wizard ←/→ survives the session-bar cycling listener while mounted in the composer", async () => {
 	const terminal = makeTerminal();
-	const tui = new TUI(terminal as never);
+	const tui = new TuiMainScreen(terminal as never);
 
 	// Mirror the cockpit session-bar hook: consume ←/→ on an empty composer
 	// unless ambient keys should yield (capturing overlay or custom component).

@@ -79,6 +79,33 @@ test("teammate relay reports response timeout separately from send failure", asy
   }
 });
 
+test("teammate relay announces requestId cancellation before settling an abort", async () => {
+  const previousChild = process.env.PI_TEAMMATE_CHILD;
+  const sendDescriptor = Object.getOwnPropertyDescriptor(process, "send");
+  const sent: Array<Record<string, unknown>> = [];
+  process.env.PI_TEAMMATE_CHILD = "1";
+  Object.defineProperty(process, "send", {
+    configurable: true,
+    value(message: Record<string, unknown>) { sent.push(message); return true; },
+  });
+  const controller = new AbortController();
+  try {
+    const pending = requestTeammateInteraction("question", {}, 60_000, controller.signal);
+    controller.abort();
+    const cancellation = sent.at(-1);
+    assert.equal(cancellation?.type, "teammate_proxy_cancel");
+    assert.equal(cancellation?.requestId, sent[0]?.requestId);
+    assert.equal(cancellation?.reason, "aborted");
+    assert.deepEqual(await pending, { ok: false, reason: "aborted" });
+    assert.equal(sent.filter((message) => message.type === "teammate_proxy_cancel").length, 1);
+  } finally {
+    if (sendDescriptor) Object.defineProperty(process, "send", sendDescriptor);
+    else delete (process as typeof process & { send?: unknown }).send;
+    if (previousChild === undefined) delete process.env.PI_TEAMMATE_CHILD;
+    else process.env.PI_TEAMMATE_CHILD = previousChild;
+  }
+});
+
 test("real teammate child IPC resumes permission and AskUserQuestion calls", async () => {
   const child = fork(new URL("./fixtures/teammate-interaction-child.ts", import.meta.url), {
     env: {

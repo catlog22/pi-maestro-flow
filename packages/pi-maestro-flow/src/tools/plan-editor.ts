@@ -15,6 +15,7 @@ export interface PlanEditorOptions {
   revision: number;
   allowConfirm: boolean;
   pathLabel?: string;
+  signal?: AbortSignal;
   onSave(markdown: string, expectedRevision: number): Promise<number>;
   onConfirm(markdown: string, expectedRevision: number): Promise<void>;
 }
@@ -32,7 +33,7 @@ export async function openPlanEditor(
   ctx: PlanEditorContext,
   options: PlanEditorOptions,
 ): Promise<PlanEditorResult> {
-  if (!ctx.hasUI) {
+  if (!ctx.hasUI || options.signal?.aborted) {
     return { action: "cancelled", markdown: options.markdown, revision: options.revision };
   }
 
@@ -59,6 +60,18 @@ export async function openPlanEditor(
       let busy = false;
       let status = "";
       let lastWidth = 80;
+      let settled = false;
+
+      const finish = (result: PlanEditorResult) => {
+        if (settled) return;
+        settled = true;
+        options.signal?.removeEventListener("abort", onAbort);
+        done(result);
+      };
+      const cancel = () => finish({ action: "cancelled", markdown: editor.getText(), revision });
+      const onAbort = () => cancel();
+      options.signal?.addEventListener("abort", onAbort, { once: true });
+      if (options.signal?.aborted) queueMicrotask(onAbort);
 
       editor.onChange = () => {
         status = "";
@@ -96,7 +109,7 @@ export async function openPlanEditor(
         try {
           await options.onConfirm(markdown, revision);
           savedText = markdown;
-          done({ action: "approved", markdown, revision: revision + 1 });
+          finish({ action: "approved", markdown, revision: revision + 1 });
         } catch (error) {
           if (isPersistedApprovalError(error)) {
             revision = error.revision;
@@ -176,7 +189,7 @@ export async function openPlanEditor(
             return;
           }
           if (matchesKey(data, Key.escape)) {
-            done({ action: "cancelled", markdown: editor.getText(), revision });
+            cancel();
             return;
           }
           editor.handleInput(data);
@@ -187,7 +200,10 @@ export async function openPlanEditor(
           editor.invalidate();
         },
 
-        dispose(): void {},
+        dispose(): void {
+          options.signal?.removeEventListener("abort", onAbort);
+          cancel();
+        },
       };
     },
     {

@@ -650,13 +650,16 @@ test("permission prompts request user attention before blocking without exposing
   const userPath = join(root, "user-settings.json");
   await writeFile(userPath, JSON.stringify({ permissions: { ask: ["Bash(*)"] } }));
   const calls: string[] = [];
+  const signal = new AbortController().signal;
   const ctx = {
     cwd: root,
     hasUI: true,
+    signal,
     ui: {
       notify() {},
-      async select() {
+      async select(_title: string, _options: string[], opts?: { signal?: AbortSignal }) {
         calls.push("select");
+        assert.equal(opts?.signal, signal);
         return "Allow once";
       },
     },

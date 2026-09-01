@@ -56,7 +56,7 @@ export type PlanHandoffStatus = "none" | "todo-required" | "ready";
 export type PlanContext = Pick<
   ExtensionContext,
   "cwd" | "hasUI" | "ui" | "isIdle" | "sessionManager" | "compact" | "model" | "modelRegistry" | "isProjectTrusted"
-> & Partial<Pick<ExtensionContext, "abort" | "getContextUsage">>;
+> & Partial<Pick<ExtensionContext, "abort" | "getContextUsage" | "signal">>;
 
 interface PlanReviewOutcome {
   approved: boolean;
@@ -997,6 +997,8 @@ async function reviewPlan(
   signal?: AbortSignal,
   onUserAttention?: UserAttentionHandler,
 ): Promise<PlanReviewOutcome> {
+  signal ??= ctx.signal;
+  if (signal?.aborted) return { approved: false, exited: false };
   if (!ctx.hasUI) {
     if (isCurrentPlanOperation(ctx, operation, false)) {
       ctx.ui.notify("Plan review requires an interactive UI.", "warning");
@@ -1014,7 +1016,7 @@ async function reviewPlan(
       id: `plan-review:${operation.sessionId}:${operation.operationId}`,
       kind: "plan-review",
     }, ctx);
-    await editPlan(ctx, store.currentPath, operation);
+    await editPlan(ctx, store.currentPath, operation, signal);
     if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
     return { approved: false, exited: false };
   }
@@ -1046,6 +1048,7 @@ async function reviewPlan(
       defaultExecution: latestExecution,
       workflow,
       drafts,
+      signal,
     });
     if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
     const action = decision.action;
@@ -1056,7 +1059,7 @@ async function reviewPlan(
       refineLatestRole = undefined;
       refineLatestAppliesAs = undefined;
       refineLatestRoleLabel = undefined;
-      await editPlan(ctx, store.currentPath, operation);
+      await editPlan(ctx, store.currentPath, operation, signal);
       if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
       continue;
     }
@@ -1149,6 +1152,7 @@ async function reviewPlan(
       const rollback = await renderRollbackOverlay(ctx, {
         drafts: entries,
         readDraft: (path) => store.readDraft(path),
+        signal,
       });
       if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
       if (rollback.action === "restore" && rollback.selected) {
@@ -1174,6 +1178,7 @@ async function reviewPlan(
       const discussion = await ctx.ui.input(
         "Continue discussing the Plan",
         "Enter feedback or a question",
+        { signal },
       );
       if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
       if (!discussion?.trim()) continue;
@@ -1279,12 +1284,14 @@ async function editPlan(
   ctx: PlanContext,
   pathLabel: string,
   operation: PlanOperationIdentity,
+  signal?: AbortSignal,
 ): Promise<void> {
   await openPlanEditor(ctx, {
     markdown: latestPlan ?? "",
     revision: latestRevision,
     allowConfirm: false,
     pathLabel,
+    signal,
     async onSave(markdown, expectedRevision) {
       if (!isCurrentPlanOperation(ctx, operation)) throw new Error("Plan operation was superseded");
       const saved = await savePlan(ctx, markdown, expectedRevision, operation);
@@ -1783,11 +1790,12 @@ export function registerPlanTools(
     label: "Plan Draft Editor",
     description: "Open the full-screen editable Markdown draft in an interactive UI. Save or cancel without entering Act mode. Use plan-confirm for Review & Refine (role-based AI review and refinement).",
     parameters: EmptyPlanParams,
-    async execute(_id, _params, _signal, _onUpdate, ctx) {
+    executionMode: "sequential",
+    async execute(_id, _params, signal, _onUpdate, ctx) {
       const operation = beginPlanOperation(ctx);
       const blocked = requirePlanMode("review");
       if (blocked) return blocked;
-      await reviewPlan(ctx, false, "message", operation, undefined, options.onUserAttention);
+      await reviewPlan(ctx, false, "message", operation, signal, options.onUserAttention);
       if (!isCurrentPlanOperation(ctx, operation)) return supersededResult("review");
       return result("Plan review closed; Plan mode remains active.", currentDetails("review"));
     },
@@ -1811,6 +1819,7 @@ export function registerPlanTools(
     description: "Present the Markdown Plan in an interactive UI with choices to execute, modify, discuss, run role-based Review & Refine, or exit. Current-context execution returns through the tool result; compact execution settles the turn, compacts, then resumes automatically.",
     promptSnippet: "Standard presentation step after plan-update. The user controls approval and may run role-based Review & Refine; choosing Execute authorizes immediate implementation, with compact execution resuming automatically after turn settlement.",
     parameters: EmptyPlanParams,
+    executionMode: "sequential",
     async execute(_id, _params, signal, _onUpdate, ctx) {
       const operation = beginPlanOperation(ctx);
       const blocked = requirePlanMode("confirm");
@@ -2038,6 +2047,8 @@ function buildPlanEnterNote(): string {
     "- Align every user requirement with a planned outcome and a verifiable acceptance check.",
     "",
     "Agent boundary (the hook only lets you dispatch `explorer` and `planner`):",
+    "- Never use plan-exit to bypass a blocked role or tool. Stay in Plan mode and reshape the work",
+    "  to the allowed read-only boundary; use plan-exit only when the user wants to abandon planning.",
     "- Standard flow (broad or uncertain scope): dispatch `explorer` ONCE with batched parallel",
     "  prompts; unless the cross-module escalation below applies, dispatch one `planner`, passing",
     "  each explorer result's exact `agent://` publication ID as an immutable briefing reference",
@@ -2046,6 +2057,11 @@ function buildPlanEnterNote(): string {
     "  compatibility rules) as a mandatory first-round checklist so the plan passes review in one",
     "  round. Never re-dispatch planning from scratch; send targeted revision instructions to the same",
     "  planner instead.",
+    "- Required-result barrier: if a required explorer/planner dispatch moves to background or a bounded",
+    "  wait times out, do not begin final synthesis or call plan-update / plan-confirm. Wait for automatic",
+    "  delivery or use one bounded observe wait until every required result is result-ready, then ensure",
+    "  each result's content is present in the current context (inline or loaded from its exact immutable",
+    "  publication ID) before composing or persisting the Plan.",
     "- Lightweight flow (small, well-understood task): skip agent exploration entirely — inspect the",
     "  code yourself with read/search tools, then either author the draft via plan-update directly or",
     "  make one `planner` call with that content injected. After spot-checking the result, go straight",

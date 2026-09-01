@@ -5,7 +5,7 @@ interface PendingInteraction {
   timer: ReturnType<typeof setTimeout>;
 }
 
-export type TeammateInteractionFailureReason = "unavailable" | "timeout" | "send-failed";
+export type TeammateInteractionFailureReason = "unavailable" | "timeout" | "send-failed" | "aborted";
 
 export type TeammateInteractionResult<T> =
   | { ok: true; result: T }
@@ -26,23 +26,46 @@ export async function requestTeammateInteraction<T>(
   interaction: "permission" | "question",
   payload: Record<string, unknown>,
   timeoutMs = 10 * 60_000,
+  signal?: AbortSignal,
 ): Promise<TeammateInteractionResult<T>> {
   if (!isTeammateChild()) return { ok: false, reason: "unavailable" };
+  if (signal?.aborted) return { ok: false, reason: "aborted" };
   const state = relayState();
   installListener(state);
   const requestId = randomUUID();
   return new Promise<TeammateInteractionResult<T>>((resolve) => {
     let settled = false;
     let timer: ReturnType<typeof setTimeout>;
+    const notifyParentAbort = (): void => {
+      try {
+        process.send?.({
+          type: "teammate_proxy_cancel",
+          requestId,
+          reason: "aborted",
+        }, () => {});
+      } catch {
+        // The channel is already gone, which is itself the cancellation.
+      }
+    };
+    const onAbort = () => {
+      notifyParentAbort();
+      finish({ ok: false, reason: "aborted" });
+    };
     const finish = (result: TeammateInteractionResult<T>) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
       state.pending.delete(requestId);
       resolve(result);
     };
     timer = setTimeout(() => finish({ ok: false, reason: "timeout" }), timeoutMs);
     timer.unref?.();
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
     state.pending.set(requestId, {
       timer,
       resolve: (result) => finish({ ok: true, result: result as T }),

@@ -96,7 +96,7 @@ export function createPermissionController(options: {
           authorization: "parent",
           toolName: call.toolName,
           input: call.input,
-        });
+        }, undefined, ctx.signal);
         if (!relay.ok) {
           const detail = relay.error ? `: ${relay.error}` : "";
           return {
@@ -172,7 +172,7 @@ export function createPermissionController(options: {
         "Allow once",
         "Always allow",
         "Deny",
-      ]);
+      ], { signal: ctx.signal });
       if (choice === "Allow once") return;
       if (choice === "Always allow") {
         if (!loaded) loaded = await loadPermissionSettings(ctx.cwd, userSettingsPath);

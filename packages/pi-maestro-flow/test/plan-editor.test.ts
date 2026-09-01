@@ -4,9 +4,10 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { openPlanConfirmation } from "../src/tools/plan-confirm.ts";
 import { openPlanEditor } from "../src/tools/plan-editor.ts";
+import { renderRollbackOverlay } from "../src/tui/plan-rollback-overlay.ts";
 
 function createHarness() {
-  let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
+  let component: { render(width: number): string[]; handleInput(data: string): void; dispose?(): void } | undefined;
   let doneValue: unknown;
   let doneResolve: ((value: unknown) => void) | undefined;
   const donePromise = new Promise<unknown>((resolve) => { doneResolve = resolve; });
@@ -51,6 +52,65 @@ test("Plan editor renders line numbers, current-line marker and bounded widths",
   harness.component.handleInput("\x1b");
   const result = await pending;
   assert.equal(result.action, "cancelled");
+});
+
+test("Plan rollback overlay aborts and disposes with one exact close", async () => {
+  let component: { handleInput(data: string): void; dispose(): void } | undefined;
+  let doneCalls = 0;
+  let resolveDone: ((value: unknown) => void) | undefined;
+  const donePromise = new Promise<unknown>((resolve) => { resolveDone = resolve; });
+  const ctx = {
+    hasUI: true,
+    ui: {
+      async custom(factory: Function) {
+        component = factory(
+          { requestRender() {} },
+          { fg: (_name: string, text: string) => text, bold: (text: string) => text },
+          {},
+          (value: unknown) => {
+            doneCalls += 1;
+            resolveDone?.(value);
+          },
+        );
+        return donePromise;
+      },
+    },
+  } as unknown as ExtensionContext;
+  const controller = new AbortController();
+  const pending = renderRollbackOverlay(ctx, {
+    drafts: [{
+      revision: 2,
+      checksum: "abcdef0123456789",
+      archivedAt: "20260824T100000Z",
+      path: "drafts/r2.md",
+    }],
+    async readDraft() { return "# archived"; },
+    signal: controller.signal,
+  });
+  assert.ok(component);
+
+  controller.abort();
+  component.dispose();
+  component.handleInput("\x1b");
+
+  assert.deepEqual(await pending, { action: "cancel" });
+  assert.equal(doneCalls, 1);
+});
+
+test("Plan editor abort closes the custom UI as cancelled", async () => {
+  const harness = createHarness();
+  const controller = new AbortController();
+  const pending = openPlanEditor(harness.ctx, {
+    markdown: "draft",
+    revision: 1,
+    allowConfirm: false,
+    signal: controller.signal,
+    async onSave() { return 2; },
+    async onConfirm() {},
+  });
+  assert.ok(harness.component);
+  controller.abort();
+  assert.deepEqual(await pending, { action: "cancelled", markdown: "draft", revision: 1 });
 });
 
 test("Plan editor saves without closing and confirms the exact edited buffer", async () => {
@@ -115,6 +175,18 @@ test("Plan confirmation renders execution controls without a New Pi session opti
     action: "execute",
     execution: { backend: "standalone", context: "current" },
   });
+});
+
+test("Plan confirmation abort closes the custom UI", async () => {
+  const harness = createHarness();
+  const controller = new AbortController();
+  const pending = openPlanConfirmation(harness.ctx, {
+    markdown: "# Plan",
+    signal: controller.signal,
+  });
+  assert.ok(harness.component);
+  controller.abort();
+  assert.deepEqual(await pending, { action: "close" });
 });
 
 test("Plan confirmation selects compact execution in the current Pi session", async () => {

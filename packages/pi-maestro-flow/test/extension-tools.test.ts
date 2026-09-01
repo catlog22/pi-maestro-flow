@@ -515,6 +515,7 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
   assert.ok(maestroProperties?.concurrency, "maestro explore schema should expose a concurrency bound");
 
   const askTool = tools.find((tool) => tool.name === "ask-user-question");
+  assert.equal(askTool?.executionMode, "sequential");
   assert.ok(askTool?.renderResult);
   const renderAskResult = askTool.renderResult as unknown as (
     result: unknown,

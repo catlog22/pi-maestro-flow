@@ -2263,6 +2263,10 @@ export function createTeammateDirectChildRequestHandler(
     }
 
     if (event.type === "teammate_proxy_cancel" && typeof event.requestId === "string") {
+      interactionQueue.cancelByRequest(
+        event.requestId,
+        "The requesting teammate cancelled this interaction.",
+      );
       cancelProxyDispatch(state, event.requestId);
       return;
     }
@@ -2317,6 +2321,8 @@ export interface TeammateInteractionQueue {
     ctx: ExtensionContext | null | undefined,
     fallbackCorrelationId?: string,
   ): void;
+  /** Settles one exact request by its child-provided requestId. */
+  cancelByRequest(requestId: string, reason: string): boolean;
   /** Settles every request belonging to a gone agent. Returns how many. */
   cancelForAgent(correlationId: string, reason: string): number;
   /** Requests still waiting for an answer, in flight or queued. */

@@ -45,6 +45,7 @@ import {
 interface ToolLike {
   description?: string;
   parameters?: unknown;
+  executionMode?: "parallel" | "sequential";
   execute(id: string, params: Record<string, unknown>, signal: AbortSignal | undefined, onUpdate: undefined, ctx: ExtensionContext): Promise<any>;
 }
 
@@ -115,6 +116,7 @@ function createHarness(
   const messages: string[] = [];
   const messageOptions: Array<{ deliverAs?: string } | undefined> = [];
   const notifications: string[] = [];
+  const inputSignals: Array<AbortSignal | undefined> = [];
   const attentionRequests: Array<{ id: string; kind: string; subject?: string }> = [];
   const statuses: Array<string | undefined> = [];
   const compactions: Array<{
@@ -133,7 +135,10 @@ function createHarness(
   const ui = {
     setStatus(_key: string, value: string | undefined) { statuses.push(value); },
     notify(message: string) { notifications.push(message); },
-    async input() { return runtime.discussionInput; },
+    async input(_title: string, _placeholder: string, options?: { signal?: AbortSignal }) {
+      inputSignals.push(options?.signal);
+      return runtime.discussionInput;
+    },
     async custom(factory: Function) {
       return new Promise((resolve) => {
         const component = factory(tui, theme, {}, resolve);
@@ -270,6 +275,7 @@ function createHarness(
     messages,
     messageOptions,
     notifications,
+    inputSignals,
     attentionRequests,
     statuses,
     compactions,
@@ -302,6 +308,8 @@ test("Plan tool descriptions match the prompt-only mode lifecycle", async () => 
     assert.doesNotMatch(harness.tools.get("plan-exit")?.description ?? "", /restore the exact prior active tool set/);
     assert.match(harness.tools.get("plan-status")?.description ?? "", /while Plan mode is active/);
     assert.match(harness.tools.get("plan-review")?.description ?? "", /interactive UI/);
+    assert.equal(harness.tools.get("plan-review")?.executionMode, "sequential");
+    assert.equal(harness.tools.get("plan-confirm")?.executionMode, "sequential");
     assert.match(harness.tools.get("plan-decompose")?.description ?? "", /main-flow decomposition prompt/);
     assert.match(harness.tools.get("plan-decompose")?.description ?? "", /exact approved handoff key/);
     assert.match(harness.tools.get("plan-decompose")?.description ?? "", /creates no files, Todos, messages, or agents/);
@@ -1028,7 +1036,17 @@ test("Continue discussion returns feedback through the tool result without injec
     await onSessionStartPlan(harness.ctx);
     await execute(harness, "plan-enter");
     await execute(harness, "plan-update", { markdown: "# Discuss Plan" });
-    const confirmed = await execute(harness, "plan-confirm");
+    const controller = new AbortController();
+    const confirmTool = harness.tools.get("plan-confirm");
+    assert.ok(confirmTool);
+    const confirmed = await confirmTool.execute(
+      "plan-confirm",
+      {},
+      controller.signal,
+      undefined,
+      harness.ctx,
+    );
+    assert.equal(harness.inputSignals.at(-1), controller.signal);
     assert.equal(confirmed.details.approved, false);
     assert.equal(getMode(), "plan");
     assert.deepEqual(harness.messages, []);
@@ -1090,6 +1108,11 @@ test("Plan hooks preserve read-only discovery and block mutations before approva
     assert.match(planPrompt, /unless the cross-module escalation below applies, dispatch one `planner`/);
     assert.match(planPrompt, /exact `agent:\/\/` publication ID as an immutable briefing reference/);
     assert.match(planPrompt, /correlation ID only when latest-turn semantics are intentional/);
+    assert.match(planPrompt, /Never use plan-exit to bypass a blocked role or tool/);
+    assert.match(planPrompt, /moves to background or a bounded\s+wait times out/);
+    assert.match(planPrompt, /do not begin final synthesis or call plan-update \/ plan-confirm/);
+    assert.match(planPrompt, /until every required result is result-ready/);
+    assert.match(planPrompt, /each result's content is present in the current context/);
     assert.match(planPrompt, /Lightweight flow \(small, well-understood task\): skip agent exploration entirely/);
     assert.match(planPrompt, /at most ONE nested read-only agent/);
     assert.match(planPrompt, /revising its own draft/);
