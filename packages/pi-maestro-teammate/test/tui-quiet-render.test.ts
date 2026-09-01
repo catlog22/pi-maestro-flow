@@ -4,7 +4,18 @@ import { readFileSync } from "node:fs";
 import test, { afterEach } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { isQuietMode, setQuietMode } from "../src/quiet-state.ts";
-import { auxToolCallFallback, auxToolResultFallback, renderQuietTeammateAux, renderTeammateCall, renderTeammateListCall, renderTeammateListResult, renderTeammateResult } from "../src/tui/render.ts";
+import {
+  auxToolCallFallback,
+  auxToolResultFallback,
+  renderMonitorResult,
+  renderObserveResult,
+  renderQuietTeammateAux,
+  renderTeammateCall,
+  renderTeammateListCall,
+  renderTeammateListResult,
+  renderTeammateResult,
+  renderTeammateSendResult,
+} from "../src/tui/render.ts";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { Details, SingleResult } from "../src/shared/types.ts";
 
@@ -138,6 +149,45 @@ test("quiet streaming progress keeps agent and child trees but hides stream cont
   assert.doesNotMatch(rendered.join("\n"), new RegExp(`${altRe("R")}`));
 });
 
+test("quiet in-flight rows stay stable while live telemetry changes", () => {
+  setQuietMode(true);
+  const render = (toolCount: number, inputTokens: number, outputTokens: number, durationMs: number) => renderTeammateResult({
+    content: [{ type: "text", text: "working" }],
+    details: {
+      mode: "single",
+      results: [],
+      progress: [{
+        agent: "reviewer",
+        name: "review",
+        correlationId: "review-agent",
+        taskIndex: 0,
+        dependencies: [],
+        status: "running",
+        toolCount,
+        inputTokens,
+        outputTokens,
+        durationMs,
+      }],
+      childCalls: [{
+        agent: "explorer",
+        name: "nested",
+        correlationId: "nested-agent",
+        parentCorrelationId: "review-agent",
+        status: "running",
+        inputTokens,
+        outputTokens,
+        durationMs,
+      }],
+    },
+  }, { expanded: false }, theme as never).render(160);
+
+  const first = render(3, 12_500, 315, 13_000);
+  const second = render(15, 51_900, 1_100, 77_000);
+
+  assert.deepEqual(second, first);
+  assert.doesNotMatch(first.join("\n"), /3 tools|12\.5k|315|13s/);
+});
+
 test("quiet streaming progress leaves the final terminal column empty", () => {
   setQuietMode(true, "dot");
   const now = Date.now();
@@ -166,7 +216,7 @@ test("quiet streaming progress leaves the final terminal column empty", () => {
   }, { expanded: false }, theme as never).render(width);
 
   assert.equal(rendered.length, 2);
-  assert.equal(Math.max(...rendered.map(visibleWidth)), width - 1);
+  assert.ok(Math.max(...rendered.map(visibleWidth)) <= width - 1);
   for (const line of rendered) assert.ok(visibleWidth(line) < width);
 });
 
@@ -186,6 +236,7 @@ test("quiet streaming progress retains a structural row on a narrow viewport", (
 });
 
 test("teammate-list call and result own mutually exclusive unbacked phases", () => {
+  setQuietMode(true);
   const call = renderTeammateListCall({ view: "active" }, theme as never, { isPartial: true }).render(80);
   const settledCall = renderTeammateListCall({ view: "active" }, theme as never, { isPartial: false }).render(80);
   const partialResult = renderTeammateListResult({
@@ -194,13 +245,56 @@ test("teammate-list call and result own mutually exclusive unbacked phases", () 
   }, { isPartial: true }, theme as never).render(80);
   const result = renderTeammateListResult({
     content: [{ type: "text", text: "@worker running" }],
-    details: { agents: [] },
-  }, { isPartial: false }, theme as never).render(80);
+    details: { agents: [{ name: "worker" }] },
+  }, { isPartial: false }, theme as never, { view: "active" }).render(80);
 
   assert.match(call[0], /teammate-list active/);
   assert.deepEqual(settledCall, []);
   assert.deepEqual(partialResult, []);
-  assert.deepEqual(result, ["@worker running"]);
+  assert.match(result[0], /^╭─ ✓ teammate-list · active · 1 item$/);
+  assert.equal(result[1], "│ @worker running");
+  assert.match(result.at(-1) ?? "", /^╰─/);
+
+  setQuietMode(false);
+  const fallback = renderTeammateListResult({
+    content: [{ type: "text", text: "@worker running" }],
+    details: { agents: [{ name: "worker" }] },
+  }, { isPartial: false }, theme as never, { view: "active" }).render(80);
+  assert.deepEqual(fallback, ["@worker running"]);
+});
+
+test("communication and Monitor results use bounded structured cards", () => {
+  setQuietMode(true);
+  const sent = renderTeammateSendResult({
+    content: [{ type: "text", text: "Message queued for worker." }],
+    details: { delivered: true },
+  }, { isPartial: false, expanded: false }, theme as never, { to: "worker", mode: "follow_up" }).render(80);
+  assert.match(sent[0], /^╭─ ✓ teammate-send · @worker · follow_up · delivered$/);
+  assert.equal(sent[1], "│ Message queued for worker.");
+
+  const failedSent = renderTeammateSendResult({
+    content: [{ type: "text", text: "Delivery rejected." }],
+    details: { delivered: true },
+  }, { isPartial: false, expanded: false }, theme as never, { to: "worker", mode: "steer" }, true).render(80);
+  assert.match(failedSent[0], /^╭─ ✕ teammate-send · @worker · steer · delivery failed$/);
+
+  const observed = renderObserveResult({
+    content: [{ type: "text", text: "2 targets: snapshot" }],
+    details: {
+      output: ["2 targets: snapshot", "teammate:a\trunning\tworking", "bash_bg:b\tcompleted\tdone"],
+      result: { action: "status", reason: "snapshot", observations: [{}, {}] },
+    },
+  }, { isPartial: false, expanded: false }, theme as never).render(80);
+  assert.match(observed[0], /^╭─ ✓ observe · status · 2 targets · snapshot$/);
+  assert.ok(observed.some((line) => line.startsWith("│ teammate:a")));
+
+  const monitored = renderMonitorResult({
+    content: [{ type: "text", text: "MONITOR list ok · 1 window\n· · owner:abc · running" }],
+    details: { action: "list", status: "ok", windows: [{}] },
+  }, { isPartial: false, expanded: false }, theme as never).render(80);
+  assert.match(monitored[0], /^╭─ ✓ monitor · list · ok · 1 window$/);
+  assert.ok(monitored.every((line) => visibleWidth(line) <= 80));
+  assert.match(monitored.at(-1) ?? "", /^╰─/);
 });
 
 test("quiet completed single result is one concise named line without its message body", () => {
@@ -365,17 +459,26 @@ test("dot symbol mode applies to teammate running, success, and failure rows", (
   assert.match(failure[0], /^\s*!\s+@inspection/);
 });
 
-test("started, send, observe, wait, watch, and monitor are wired to the shared quiet renderer", () => {
+test("auxiliary teammate surfaces are wired to quiet rows or shared result cards", () => {
   const source = readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf8");
-  for (const name of ["teammate-started", "teammate-send", "observe", "teammate-wait", "teammate-watch", "teammate-monitor"]) {
+  for (const name of ["teammate-started", "teammate-wait", "teammate-watch", "teammate-monitor"]) {
     assert.match(source, new RegExp(`renderQuietTeammateAux\\(\\"${name}\\"`));
   }
+  assert.equal((source.match(/return renderTeammateSendCall\(/g) ?? []).length, 2);
+  assert.equal((source.match(/return renderTeammateSendResult\(/g) ?? []).length, 2);
+  assert.equal((source.match(/return renderObserveCall\(/g) ?? []).length, 2);
+  assert.equal((source.match(/return renderObserveResult\(/g) ?? []).length, 2);
+  assert.equal((source.match(/return renderMonitorResult\(/g) ?? []).length, 1);
+  assert.equal((source.match(/renderTeammateSendResult\(result, options, theme, context\.args, context\.isError\)/g) ?? []).length, 2);
+  assert.equal((source.match(/renderTeammateListResult\(result, options, theme, context\.args, context\.isError\)/g) ?? []).length, 3);
+  assert.equal((source.match(/renderObserveResult\(result, options, theme, context\.isError\)/g) ?? []).length, 2);
+  assert.equal((source.match(/renderMonitorResult\(result, options, theme, context\.isError\)/g) ?? []).length, 1);
 });
 
-test("auxiliary teammate renderers make call and result phases mutually exclusive", () => {
+test("remaining inline auxiliary renderers make call and result phases mutually exclusive", () => {
   const source = readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf8");
-  assert.equal((source.match(/if \(context\.isPartial === false\) return new Text\("", 0, 0\);/g) ?? []).length, 7);
-  assert.equal((source.match(/if \(options\.isPartial\) return new Text\("", 0, 0\);/g) ?? []).length, 7);
+  assert.equal((source.match(/if \(context\.isPartial === false\) return new Text\("", 0, 0\);/g) ?? []).length, 6);
+  assert.equal((source.match(/if \(options\.isPartial\) return new Text\("", 0, 0\);/g) ?? []).length, 5);
 });
 
 test("auxiliary teammate tools use a self render shell in root and nested registrations", () => {
@@ -395,6 +498,10 @@ test("root and nested self-rendered teammate tools share renderers", () => {
   assert.equal((source.match(/return renderTeammateResult\(/g) ?? []).length, 3);
   assert.equal((source.match(/return renderTeammateListCall\(/g) ?? []).length, 3);
   assert.equal((source.match(/return renderTeammateListResult\(/g) ?? []).length, 3);
+  assert.equal((source.match(/return renderTeammateSendCall\(/g) ?? []).length, 2);
+  assert.equal((source.match(/return renderTeammateSendResult\(/g) ?? []).length, 2);
+  assert.equal((source.match(/return renderObserveCall\(/g) ?? []).length, 2);
+  assert.equal((source.match(/return renderObserveResult\(/g) ?? []).length, 2);
 });
 
 // Uniqueness guard (not a behaviour test): the ownership event is the single

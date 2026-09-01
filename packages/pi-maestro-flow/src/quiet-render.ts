@@ -7,7 +7,7 @@
 import { quietStatusMark } from "./quiet-state.ts";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
 // A structural subset of pi's Theme so both the real Theme and the MCP renderer's
 // local RenderTheme (string-keyed fg) satisfy it without contravariance errors.
@@ -53,6 +53,36 @@ export function toolResultLine(
 	let line = `  ${mark} ${theme.fg("toolTitle", bold(o.name))}${o.arg ? ` ${theme.fg("accent", o.arg)}` : ""}${o.summary ? ` ${theme.fg("dim", `· ${o.summary}`)}` : ""}`;
 	if (o.expanded && o.detail && o.detail.trim()) line += `\n${theme.fg("dim", o.detail)}`;
 	return lineComponent(line);
+}
+
+export function toolResultCard(
+	theme: QuietTheme,
+	o: {
+		name: string;
+		ok?: boolean;
+		arg?: string;
+		summary?: string;
+		rows?: string[];
+	},
+): Component {
+	const bold = theme.bold ?? ((text: string) => text);
+	const mark = o.ok === false
+		? theme.fg("error", quietStatusMark("failure"))
+		: theme.fg("success", quietStatusMark("success"));
+	return {
+		render(width: number): string[] {
+			const safeWidth = Math.max(1, width);
+			const header = `${theme.fg("dim", "╭─")} ${mark} ${theme.fg("toolTitle", bold(o.name))}${o.arg ? ` ${theme.fg("accent", o.arg)}` : ""}${o.summary ? ` ${theme.fg("dim", `· ${o.summary}`)}` : ""}`;
+			const bodyWidth = Math.max(1, safeWidth - 2);
+			const rows = (o.rows ?? []).flatMap((row) => wrapTextWithAnsi(row || " ", bodyWidth));
+			return [
+				truncateToWidth(header, safeWidth, "…"),
+				...rows.map((row) => truncateToWidth(`${theme.fg("dim", "│")} ${row}`, safeWidth, "…")),
+				truncateToWidth(theme.fg("dim", "╰────────────"), safeWidth, ""),
+			];
+		},
+		invalidate(): void {},
+	};
 }
 
 /** First non-empty line of a tool result's text content, truncated to maxLen. */

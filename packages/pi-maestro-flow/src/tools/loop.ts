@@ -2,6 +2,7 @@ import { SchedulerCore, type SchedulerCoreOptions } from "pi-maestro-teammate/v1
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getShellConfig } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import { toolCallLine, toolResultCard } from "../quiet-render.ts";
 import type { FlowToolResult } from "./tool-result.ts";
 import { Type } from "typebox";
 import { spawn } from "node:child_process";
@@ -537,6 +538,41 @@ export function registerLoop(pi: ExtensionAPI): void {
         const message = error instanceof Error ? error.message : String(error);
         return { content: [{ type: "text", text: message }], isError: true, details: { jobs: [] } };
       }
+    },
+    renderShell: "self",
+    renderCall(args, theme, context) {
+      if (context?.isPartial === false) return new Text("", 0, 0);
+      const action = String(args.action ?? "list");
+      const detail = action === "create"
+        ? `${action} ${String(args.kind ?? "?")}${typeof args.intervalMs === "number" ? ` · every ${formatDuration(args.intervalMs)}` : ""}`
+        : action === "cancel"
+          ? `${action} ${String(args.loopId ?? "?")}`
+          : action;
+      return toolCallLine(theme, "loop", detail);
+    },
+    renderResult(result, options, theme, context) {
+      if (options.isPartial) return new Text("", 0, 0);
+      const action = String(context.args.action ?? "list");
+      const jobs = result.details?.jobs ?? [];
+      const block = result.content.find((item) => item.type === "text");
+      const text = block && "text" in block ? block.text : "";
+      const isError = context.isError || (result as { isError?: boolean }).isError === true;
+      const visibleJobs = options.expanded ? jobs : jobs.slice(0, 8);
+      const rows = visibleJobs.map((job) => formatJob(job));
+      if (visibleJobs.length < jobs.length) rows.push(`… ${jobs.length - visibleJobs.length} more loops · expand for details`);
+      if (rows.length === 0 && text) rows.push(text);
+      const summary = isError
+        ? (text.split("\n").find((line) => line.trim()) ?? "failed")
+        : action === "list"
+          ? `${jobs.length} loop${jobs.length === 1 ? "" : "s"}`
+          : `${action === "create" ? "created" : "cancelled"} ${jobs[0]?.id ?? "loop"}`;
+      return toolResultCard(theme, {
+        name: "loop",
+        ok: !isError,
+        arg: action,
+        summary,
+        rows,
+      });
     },
   });
 

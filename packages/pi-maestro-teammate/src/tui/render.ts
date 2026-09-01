@@ -281,21 +281,187 @@ export function renderTeammateListCall(
   return new Text(`  ${theme.fg("warning", "…")} ${theme.bold("teammate-list")} ${theme.fg("dim", view)}`, 0, 0);
 }
 
-export function renderTeammateListResult(
-  result: AgentToolResult<{ agents: unknown[] }>,
-  options: { isPartial?: boolean },
-  theme: Theme,
-): Component {
-  if (options.isPartial) return new Text("", 0, 0);
-  const text = typeof result.content === "string"
+type ToolCardStatus = "success" | "failure";
+
+interface TeammateToolCardOptions {
+  name: string;
+  summary: string;
+  status: ToolCardStatus;
+  expanded?: boolean;
+  detail?: string;
+  maxCollapsedLines?: number;
+}
+
+function resultText(result: AgentToolResult<unknown>): string {
+  return typeof result.content === "string"
     ? result.content
     : result.content
       .map((entry) => entry.type === "text" ? entry.text : "")
       .filter(Boolean)
       .join("\n");
-  return dynamicComponent((width) => text.split("\n").map((line) =>
-    truncateToWidth(line, Math.max(1, width), theme.fg("dim", "…"))
-  ));
+}
+
+function isErrorResult(result: AgentToolResult<unknown>): boolean {
+  return (result as { isError?: boolean }).isError === true;
+}
+
+function renderTeammateToolCard(
+  result: AgentToolResult<unknown>,
+  options: TeammateToolCardOptions,
+  theme: Theme,
+): Component {
+  const detail = options.detail ?? resultText(result);
+  return dynamicComponent((width) => {
+    const safeWidth = Math.max(1, width);
+    const tone = options.status === "failure" ? "error" : "success";
+    const mark = theme.fg(tone, quietStatusMark(options.status));
+    const header = [
+      `${theme.fg("dim", "╭─")} ${mark} ${theme.bold(options.name)}`,
+      options.summary ? theme.fg("dim", `· ${options.summary}`) : "",
+    ].filter(Boolean).join(" ");
+    const bodyWidth = Math.max(1, safeWidth - 2);
+    const wrapped = detail
+      ? detail.split("\n").flatMap((line) => wrapTextWithAnsi(line || " ", bodyWidth))
+      : [];
+    const maxLines = options.expanded ? wrapped.length : (options.maxCollapsedLines ?? 8);
+    const shown = wrapped.slice(0, maxLines);
+    if (shown.length < wrapped.length) {
+      shown.push(theme.fg("dim", `… ${wrapped.length - shown.length} more lines · expand for details`));
+    }
+    return [
+      truncateToWidth(header, safeWidth, "…"),
+      ...shown.map((line) => truncateToWidth(`${theme.fg("dim", "│")} ${line}`, safeWidth, "…")),
+      truncateToWidth(theme.fg("dim", "╰────────────"), safeWidth, ""),
+    ];
+  });
+}
+
+export function renderTeammateListResult(
+  result: AgentToolResult<{ agents: unknown[] }>,
+  options: { expanded?: boolean; isPartial?: boolean },
+  theme: Theme,
+  args?: Record<string, unknown>,
+  rendererError = false,
+): Component {
+  if (options.isPartial) return new Text("", 0, 0);
+  if (!isQuietMode()) {
+    const text = resultText(result);
+    return dynamicComponent((width) => text.split("\n").map((line) =>
+      truncateToWidth(line, Math.max(1, width), theme.fg("dim", "…"))
+    ));
+  }
+  const count = result.details?.agents.length ?? 0;
+  const view = typeof args?.view === "string" ? args.view : "active";
+  return renderTeammateToolCard(result, {
+    name: "teammate-list",
+    summary: `${view} · ${count} item${count === 1 ? "" : "s"}`,
+    status: rendererError || isErrorResult(result) ? "failure" : "success",
+    expanded: options.expanded,
+    maxCollapsedLines: 12,
+  }, theme);
+}
+
+export function renderTeammateSendCall(
+  args: Record<string, unknown>,
+  theme: Theme,
+  context?: { isPartial?: boolean },
+): Component {
+  if (context?.isPartial === false) return new Text("", 0, 0);
+  const mode = typeof args.mode === "string" ? args.mode : "steer";
+  return renderQuietTeammateAux("teammate-send", `@${String(args.to ?? "?")} · ${mode}`, "running", theme)
+    ?? auxToolCallFallback("teammate-send", theme);
+}
+
+export function renderTeammateSendResult(
+  result: AgentToolResult<{ delivered: boolean }>,
+  options: { expanded?: boolean; isPartial?: boolean },
+  theme: Theme,
+  args?: Record<string, unknown>,
+  rendererError = false,
+): Component {
+  if (options.isPartial) return new Text("", 0, 0);
+  if (!isQuietMode()) return auxToolResultFallback(result, theme);
+  const failed = rendererError || isErrorResult(result) || result.details?.delivered !== true;
+  const mode = typeof args?.mode === "string" ? args.mode : "steer";
+  return renderTeammateToolCard(result, {
+    name: "teammate-send",
+    summary: `@${String(args?.to ?? "?")} · ${mode} · ${failed ? "delivery failed" : "delivered"}`,
+    status: failed ? "failure" : "success",
+    expanded: options.expanded,
+    maxCollapsedLines: 2,
+  }, theme);
+}
+
+interface ObserveCardDetails {
+  output?: string[];
+  result?: {
+    action?: string;
+    reason?: string;
+    observations?: unknown[];
+  };
+}
+
+export function renderObserveCall(
+  args: Record<string, unknown>,
+  theme: Theme,
+  context?: { isPartial?: boolean },
+): Component {
+  if (context?.isPartial === false) return new Text("", 0, 0);
+  const action = String(args.action ?? "status");
+  const count = Array.isArray(args.targets) ? args.targets.length : 0;
+  const targetLabel = `${count} target${count === 1 ? "" : "s"}`;
+  return renderQuietTeammateAux("observe", `${action} · ${targetLabel}`, "running", theme)
+    ?? auxToolCallFallback("observe", theme);
+}
+
+export function renderObserveResult(
+  result: AgentToolResult<unknown>,
+  options: { expanded?: boolean; isPartial?: boolean },
+  theme: Theme,
+  rendererError = false,
+): Component {
+  if (options.isPartial) return new Text("", 0, 0);
+  if (!isQuietMode()) return auxToolResultFallback(result, theme);
+  const details = result.details as ObserveCardDetails | undefined;
+  const observed = details?.result;
+  const failed = rendererError || isErrorResult(result);
+  const count = observed?.observations?.length ?? 0;
+  const action = observed?.action ?? "status";
+  const reason = observed?.reason ?? (failed ? "failed" : "completed");
+  return renderTeammateToolCard(result, {
+    name: "observe",
+    summary: `${action} · ${count} target${count === 1 ? "" : "s"} · ${reason}`,
+    status: failed ? "failure" : "success",
+    expanded: options.expanded,
+    detail: details?.output?.join("\n"),
+    maxCollapsedLines: 8,
+  }, theme);
+}
+
+interface MonitorCardDetails {
+  action?: string;
+  status?: string;
+  windows?: unknown[];
+}
+
+export function renderMonitorResult(
+  result: AgentToolResult<unknown>,
+  options: { expanded?: boolean; isPartial?: boolean },
+  theme: Theme,
+  rendererError = false,
+): Component {
+  if (options.isPartial) return new Text("", 0, 0);
+  if (!isQuietMode()) return auxToolResultFallback(result, theme);
+  const details = result.details as MonitorCardDetails | undefined;
+  const failed = rendererError || isErrorResult(result);
+  const count = details?.windows?.length ?? 0;
+  return renderTeammateToolCard(result, {
+    name: "monitor",
+    summary: `${details?.action ?? "list"} · ${details?.status ?? (failed ? "failed" : "ok")} · ${count} window${count === 1 ? "" : "s"}`,
+    status: failed ? "failure" : "success",
+    expanded: options.expanded,
+    maxCollapsedLines: 10,
+  }, theme);
 }
 
 
@@ -847,21 +1013,27 @@ function appendQuietAgentTree(
 
   const taskCids = new Set(entries.map((entry) => entry.correlationId).filter(Boolean));
   const childCids = new Set(childCalls.map((child) => child.correlationId));
-  for (const row of buildProgressTree(effectiveEntries, quietPalette(theme))) {
+  for (const row of buildProgressTree(
+    effectiveEntries,
+    quietPalette(theme),
+    Date.now(),
+    undefined,
+    { stableInFlightRows: true },
+  )) {
     const result = results[row.taskIndex];
     const failure = result && result.exitCode !== 0
       ? theme.fg("error", ` · ${quietFirstError(result)}`)
       : "";
     lines.push(`${row.text}${failure}`);
     const cid = entryByTaskIndex.get(row.taskIndex)?.correlationId;
-    if (cid) renderChildSubtree(childrenByParent.get(cid) ?? [], childrenByParent, "  ", theme, lines, true);
+    if (cid) renderChildSubtree(childrenByParent.get(cid) ?? [], childrenByParent, "  ", theme, lines, true, true);
   }
 
   const rootOrphans = childCalls.filter((child) => {
     const parent = child.parentCorrelationId;
     return !parent || (!taskCids.has(parent) && !childCids.has(parent));
   });
-  renderChildSubtree(rootOrphans, childrenByParent, "", theme, lines, true);
+  renderChildSubtree(rootOrphans, childrenByParent, "", theme, lines, true, true);
 }
 
 function quietResultLine(result: SingleResult, theme: Theme, fallbackName?: string): string {

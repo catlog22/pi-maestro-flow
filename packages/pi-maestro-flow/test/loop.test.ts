@@ -332,8 +332,22 @@ test("event constants are exported", () => {
 
 test("registerLoop publishes authoritative snapshots on scheduler updates and queries", async () => {
   type Handler = (...args: any[]) => unknown;
+  type RenderComponent = { render(width: number): string[] };
+  type RenderTheme = { fg(name: string, text: string): string; bold(text: string): string };
+  type LoopToolResult = {
+    content: Array<{ type: string; text?: string }>;
+    isError?: boolean;
+    details?: { jobs?: LoopJobSnapshot[] };
+  };
   type LoopTool = {
-    execute(id: string, params: Record<string, unknown>): Promise<{ details?: { jobs?: LoopJobSnapshot[] } }>;
+    execute(id: string, params: Record<string, unknown>): Promise<LoopToolResult>;
+    renderCall?(args: Record<string, unknown>, theme: RenderTheme, context: { isPartial?: boolean }): RenderComponent;
+    renderResult?(
+      result: LoopToolResult,
+      options: { expanded: boolean; isPartial?: boolean },
+      theme: RenderTheme,
+      context: { args: Record<string, unknown>; isError?: boolean },
+    ): RenderComponent;
   };
   const eventHandlers = new Map<string, Handler>();
   const lifecycleHandlers = new Map<string, Handler>();
@@ -385,6 +399,35 @@ test("registerLoop publishes authoritative snapshots on scheduler updates and qu
   assert.equal(emitted.at(-1)?.payload.jobs[0]?.id, job.id);
   assert.equal(emitted.at(-1)?.payload.jobs[0]?.status, "scheduled");
   assert.equal(entries.at(-1)?.type, "loop-state");
+
+  const renderTheme: RenderTheme = {
+    fg: (_name, text) => text,
+    bold: (text) => text,
+  };
+  assert.ok(tool.renderCall);
+  assert.ok(tool.renderResult);
+  const call = tool.renderCall({ action: "create", kind: "prompt", intervalMs: 60_000 }, renderTheme, { isPartial: true }).render(80);
+  assert.match(call[0], /loop create prompt · every 1m/);
+  assert.deepEqual(tool.renderCall({ action: "create" }, renderTheme, { isPartial: false }).render(80), []);
+
+  const card = tool.renderResult(created, { expanded: false, isPartial: false }, renderTheme, { args: { action: "create" } }).render(100);
+  assert.match(card[0], /^╭─ ✓ loop create · created loop-/);
+  assert.ok(card.some((line) => /^│ ○ loop-.*scheduled.*runs=0\/2/.test(line)));
+  assert.match(card.at(-1) ?? "", /^╰─/);
+  assert.deepEqual(
+    tool.renderResult(created, { expanded: false, isPartial: true }, renderTheme, { args: { action: "create" } }).render(100),
+    [],
+  );
+
+  const rejected = await tool.execute("invalid-loop", { action: "create" });
+  const errorCard = tool.renderResult(
+    rejected,
+    { expanded: false, isPartial: false },
+    renderTheme,
+    { args: { action: "create" }, isError: true },
+  ).render(100);
+  assert.match(errorCard[0], /^╭─ ✕ loop create · kind, task, and intervalMs are required/);
+  assert.equal(errorCard[1], "│ kind, task, and intervalMs are required for create.");
 
   const updateCount = emitted.length;
   eventHandlers.get(LOOP_QUERY_EVENT)!();
