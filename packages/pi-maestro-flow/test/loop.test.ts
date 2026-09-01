@@ -335,6 +335,11 @@ test("registerLoop publishes authoritative snapshots on scheduler updates and qu
   type Handler = (...args: any[]) => unknown;
   type RenderComponent = { render(width: number): string[] };
   type RenderTheme = { fg(name: string, text: string): string; bold(text: string): string };
+  type MessageRenderer = (
+    message: { content: string; details?: unknown },
+    options: { expanded: boolean },
+    theme: RenderTheme,
+  ) => RenderComponent;
   type LoopToolResult = {
     content: Array<{ type: string; text?: string }>;
     isError?: boolean;
@@ -354,6 +359,7 @@ test("registerLoop publishes authoritative snapshots on scheduler updates and qu
   const lifecycleHandlers = new Map<string, Handler>();
   const emitted: Array<{ event: string; payload: { jobs: LoopJobSnapshot[] } }> = [];
   const entries: Array<{ type: string; data: unknown }> = [];
+  const messageRenderers = new Map<string, MessageRenderer>();
   let tool: LoopTool | undefined;
   const pi = {
     events: {
@@ -373,7 +379,9 @@ test("registerLoop publishes authoritative snapshots on scheduler updates and qu
       tool = value;
     },
     registerCommand() {},
-    registerMessageRenderer() {},
+    registerMessageRenderer(type: string, renderer: MessageRenderer) {
+      messageRenderers.set(type, renderer);
+    },
     on(event: string, handler: Handler) {
       lifecycleHandlers.set(event, handler);
       return () => lifecycleHandlers.delete(event);
@@ -427,6 +435,30 @@ test("registerLoop publishes authoritative snapshots on scheduler updates and qu
     tool.renderResult(created, { expanded: false, isPartial: true }, renderTheme, { args: { action: "create" } }).render(100),
     [],
   );
+
+  const eventRenderer = messageRenderers.get("loop-event");
+  assert.ok(eventRenderer);
+  const completedEventComponent = eventRenderer({
+    content: "Loop loop-test completed: done\tclean\u001b[31m",
+    details: { loopId: "loop-test", outcome: "completed", runCount: 2, maxRuns: 2 },
+  }, { expanded: false }, renderTheme);
+  const completedEvent = completedEventComponent.render(80);
+  assert.match(completedEvent[0], /^╭ ✓ loop-event · loop-test · completed · 2\/2.*╮$/);
+  assert.doesNotMatch(completedEvent.join(""), /[\r\n\t\x00-\x1f\x7f]/);
+  assert.ok(completedEvent.every((line) => visibleWidth(line) === 79));
+  assert.deepEqual(completedEventComponent.render(1), []);
+  const malformedEvent = eventRenderer({
+    content: `Loop loop-test completed: ${"detail".repeat(700)}`,
+    details: { loopId: "loop-test", outcome: "completed\u001b[31m", runCount: 2, maxRuns: 2 },
+  }, { expanded: false }, renderTheme).render(24);
+  assert.doesNotMatch(malformedEvent.join(""), /\x1b\[31m/);
+  assert.ok(malformedEvent.length <= 10);
+  const failedEvent = eventRenderer({
+    content: "Loop loop-test failed: boom",
+    details: { loopId: "loop-test", outcome: "failed", runCount: 1, maxRuns: 2 },
+  }, { expanded: false }, renderTheme).render(24);
+  assert.match(failedEvent[0], /^╭ ✕ loop-event/);
+  assert.ok(failedEvent.every((line) => visibleWidth(line) === 23));
 
   const rejected = await tool.execute("invalid-loop", { action: "create" });
   const errorCard = tool.renderResult(

@@ -9,7 +9,7 @@ import {
   type ObservationSnapshot,
   type ObservationWaitOptions,
 } from "pi-maestro-teammate/v1/observation";
-import { toolCallLine, toolResultLine, resultFirstLine } from "../quiet-render.ts";
+import { sanitizeCardText, toolCallLine, toolResultCard, toolResultLine, resultFirstLine } from "../quiet-render.ts";
 import { Type } from "typebox";
 import { spawn, spawnSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
@@ -33,6 +33,14 @@ export const BASH_BG_QUERY_EVENT = "bash-bg:query";
 
 export type BashBgJobStatus = "running" | "stopping" | "completed" | "failed" | "killed";
 
+function isBashBgJobStatus(value: unknown): value is BashBgJobStatus {
+  return value === "running"
+    || value === "stopping"
+    || value === "completed"
+    || value === "failed"
+    || value === "killed";
+}
+
 export interface BashBgJobSnapshot {
   id: string;
   command: string;
@@ -48,6 +56,8 @@ export interface BashBgJobSnapshot {
   outputTail: string;
   outputBytes: number;
   logPath: string;
+  /** Present after a stop request; false means only the leader exit is known. */
+  treeCleanupConfirmed?: boolean;
 }
 
 export interface BashBgSnapshotPayload {
@@ -56,8 +66,6 @@ export interface BashBgSnapshotPayload {
 
 export const BashBgParams = Type.Object({
   action: Type.Union(
-  /** Present after a stop request; false means only the leader exit is known. */
-  treeCleanupConfirmed?: boolean;
     [Type.Literal("run"), Type.Literal("start"), Type.Literal("status"), Type.Literal("wait"), Type.Literal("kill"), Type.Literal("list")],
     { description: "run: block up to timeout then auto-background (recommended for uncertain-duration commands); start: background immediately; status: snapshot; wait: block until done/timeout; kill: terminate; list: all jobs" },
   ),
@@ -77,6 +85,17 @@ export interface BashBgDetails {
   command?: string;
   logPath?: string;
   viewCommand?: string;
+  treeCleanupConfirmed?: boolean;
+}
+
+interface BashBgCompletionDetails {
+  jobId: string;
+  exitCode: number | null;
+  status?: BashBgJobStatus;
+  command?: string;
+  outputTail?: string;
+  logPath?: string;
+  viewCommand?: string;
 }
 
 interface Job {
@@ -85,7 +104,6 @@ interface Job {
   cwd: string;
   pid: number;
   child: ChildProcess;
-  treeCleanupConfirmed?: boolean;
   outFile: string;
   startedAt: number;
   updatedAt: number;
@@ -161,6 +179,7 @@ function jobSnapshot(job: Job): BashBgJobSnapshot {
     outputTail: tailOutput(job, MAX_SNAPSHOT_TAIL_LINES).text,
     outputBytes: job.outputBytes,
     logPath: job.outFile,
+    ...(job.stopRequested ? { treeCleanupConfirmed: job.treeCleanupConfirmed } : {}),
   };
   if (job.outputFinalized) job.cachedSnapshot = snapshot;
   return snapshot;
@@ -180,7 +199,6 @@ function viewLogCommand(job: Job): string {
 }
 
 function logAccess(job: Job): string {
-    ...(job.stopRequested ? { treeCleanupConfirmed: job.treeCleanupConfirmed } : {}),
   return [
     `log: ${job.outFile}`,
     ...(job.logTruncated ? [`log retention: truncated at ${job.logLimitBytes} bytes`] : []),
@@ -200,6 +218,7 @@ function jobDetails(job: Job, action: string, truncated = false): BashBgDetails 
     running: jobIsActive(job),
     exitCode: job.exitCode,
     command: job.command,
+    ...(job.stopRequested ? { treeCleanupConfirmed: job.treeCleanupConfirmed } : {}),
     ...(truncated ? { logPath: job.outFile, viewCommand: viewLogCommand(job) } : {}),
   };
 }
@@ -219,7 +238,6 @@ function signalProcessTree(child: ChildProcess, pid: number, signal: NodeJS.Sign
     // already gone
   }
 }
-    ...(job.stopRequested ? { treeCleanupConfirmed: job.treeCleanupConfirmed } : {}),
 
 function processGroupRunning(pid: number): boolean {
   if (pid <= 0) return false;
@@ -236,6 +254,11 @@ export interface WindowsTaskkillResult {
   error?: Error;
   signal: NodeJS.Signals | null;
   status: number | null;
+}
+
+export interface WindowsTaskkillOutcome {
+  failure?: string;
+  treeCleanupConfirmed: boolean;
 }
 
 /** @internal Exported for process-reclamation regression tests. */
@@ -273,11 +296,6 @@ function jobOwnsLiveProcessGroup(job: Job): boolean {
 function jobIsActive(job: Job): boolean {
   return !job.done || job.terminationInProgress || jobOwnsLiveProcessGroup(job);
 }
-export interface WindowsTaskkillOutcome {
-  failure?: string;
-  treeCleanupConfirmed: boolean;
-}
-
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -454,8 +472,11 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
         details: {
           jobId: job.id,
           exitCode: job.exitCode,
+          status,
+          command: job.command,
+          outputTail: tail.text,
           ...(tail.truncated ? { logPath: job.outFile, viewCommand: viewLogCommand(job) } : {}),
-        },
+        } satisfies BashBgCompletionDetails,
       },
       { triggerTurn: true },
     );
@@ -491,9 +512,11 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
     const termination = (async () => {
       let terminated = false;
       let taskkillFailure: string | undefined;
+      let treeCleanupConfirmed = process.platform !== "win32";
       if (process.platform === "win32") {
         // spawnSync: async spawn of taskkill silently fails to complete under pi's jiti loader on Windows.
         if (job.pid > 0) {
+          const targetWasRunningBeforeCleanup = !job.done;
           const result = spawnSync("taskkill", ["/pid", String(job.pid), "/T", "/F"], {
             stdio: "ignore",
             windowsHide: true,
@@ -515,11 +538,9 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
       }
 
       if (taskkillFailure) {
-      let treeCleanupConfirmed = process.platform !== "win32";
         throw new Error(`Failed to terminate bash job ${job.id}: ${taskkillFailure}; Windows process-tree cleanup is unconfirmed.`);
       }
       if (!terminated) {
-          const targetWasRunningBeforeCleanup = !job.done;
         const boundary = includeProcessGroup ? `POSIX process group ${job.pid}` : `process ${job.pid}`;
         throw new Error(`Failed to terminate bash job ${job.id}: ${boundary} is still alive.`);
       }
@@ -737,6 +758,49 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
   initializeRuntime();
   pi.on("session_start", initializeRuntime);
 
+  pi.registerMessageRenderer<BashBgCompletionDetails>("bash-bg-complete", (message, renderOptions, theme) => {
+    const details = message.details;
+    const content = typeof message.content === "string"
+      ? message.content
+      : message.content.map((entry) => entry.type === "text" ? entry.text : "").filter(Boolean).join("\n");
+    const status = isBashBgJobStatus(details?.status)
+      ? details.status
+      : ((details?.exitCode ?? 1) === 0 ? "completed" : "failed");
+    const failed = status !== "completed" || details?.exitCode !== 0;
+    const groups: string[][] = [];
+    const command = details?.command ? sanitizeCardText(details.command) : "";
+    if (command) groups.push([`command ${command}`]);
+
+    const outputLines = (details?.outputTail ?? "")
+      .split("\n")
+      .map((line) => sanitizeCardText(line))
+      .filter(Boolean);
+    if (outputLines.length > 0) {
+      const visible = renderOptions.expanded || outputLines.length <= 6
+        ? outputLines
+        : [`… ${outputLines.length - 6} earlier output lines`, ...outputLines.slice(-6)];
+      groups.push(visible);
+    }
+    const access = [
+      details?.logPath ? `log ${sanitizeCardText(details.logPath)}` : "",
+      details?.viewCommand ? `view ${sanitizeCardText(details.viewCommand)}` : "",
+    ].filter(Boolean);
+    if (access.length > 0) groups.push(access);
+    if (groups.length === 0) {
+      const fallback = content.split("\n").map((line) => sanitizeCardText(line)).filter(Boolean);
+      if (fallback.length > 0) groups.push(renderOptions.expanded ? fallback : fallback.slice(0, 8));
+    }
+
+    const exit = details?.exitCode === null || details?.exitCode === undefined ? "" : ` · exit ${details.exitCode}`;
+    return toolResultCard(theme, {
+      name: "bash-bg-complete",
+      ok: !failed,
+      summary: `${sanitizeCardText(details?.jobId ?? "job", 80)} · ${status}${exit}`,
+      groups,
+      maxBodyRows: renderOptions.expanded ? undefined : 8,
+    });
+  });
+
   pi.registerTool({
     name: "bash_bg",
     label: "Background Bash",
@@ -839,6 +903,9 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
           && !job.terminationFailure
           && (process.platform === "win32" || !processGroupRunning(job.pid));
         await terminateJob(job);
+        const cleanupNote = process.platform === "win32" && !job.treeCleanupConfirmed
+          ? " Leader exited; Windows descendant cleanup is unconfirmed."
+          : "";
         return {
           content: [{ type: "text", text: `${alreadyFinished ? "Job already finished" : job.done ? "Stopped job" : "Stopping job"} ${job.id} (pid ${job.pid}).${cleanupNote}` }],
           details: jobDetails(job, "kill"),
@@ -904,9 +971,6 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
       `${running.length} background bash job${running.length === 1 ? " is" : "s are"} still running after compaction:`,
       ...lines,
       "Each sends a bash-bg-complete notification when finished. Use bash_bg action=status jobId=<id> to peek or action=kill jobId=<id> to stop one.",
-        const cleanupNote = process.platform === "win32" && !job.treeCleanupConfirmed
-          ? " Leader exited; Windows descendant cleanup is unconfirmed."
-          : "";
     ].join("\n");
     pi.sendMessage(
       { customType: "bash-bg-running", content: body, display: true, details: { jobs: running.map((job) => job.id) } },

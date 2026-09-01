@@ -64,6 +64,7 @@ export function toolResultCard(
 		summary?: string;
 		rows?: string[];
 		groups?: string[][];
+		maxBodyRows?: number;
 	},
 ): Component {
 	const bold = theme.bold ?? ((text: string) => text);
@@ -73,8 +74,9 @@ export function toolResultCard(
 	return {
 		render(width: number): string[] {
 			const safeWidth = Math.max(1, width);
+			if (safeWidth <= 1) return [];
 			const label = `${mark} ${theme.fg("toolTitle", bold(o.name))}${o.arg ? ` ${theme.fg("accent", o.arg)}` : ""}${o.summary ? ` ${theme.fg("dim", `· ${o.summary}`)}` : ""}`;
-			const cardWidth = Math.max(1, safeWidth - 1);
+			const cardWidth = safeWidth - 1;
 			if (cardWidth < 6) return [truncateToWidth(label, cardWidth, "…")];
 
 			const innerWidth = cardWidth - 2;
@@ -94,9 +96,18 @@ export function toolResultCard(
 					body.push(`${theme.fg("dim", "│")} ${fit(row, contentWidth)} ${theme.fg("dim", "│")}`);
 				}
 			}
+			let visibleBody = body;
+			if (o.maxBodyRows !== undefined && body.length > o.maxBodyRows) {
+				const kept = Math.max(0, o.maxBodyRows - 1);
+				const hidden = body.length - kept;
+				visibleBody = [
+					...body.slice(0, kept),
+					`${theme.fg("dim", "│")} ${fit(`… ${hidden} more rows · expand for details`, contentWidth)} ${theme.fg("dim", "│")}`,
+				];
+			}
 			return [
 				top,
-				...body,
+				...visibleBody,
 				theme.fg("dim", `╰${"─".repeat(innerWidth)}╯`),
 			];
 		},
@@ -139,4 +150,13 @@ export function compactJson(value: unknown, maxLen = 50): string {
 	if (s === undefined || s === "null") return "";
 	s = s.replace(/\s+/g, " ").trim();
 	return s.length > maxLen ? `${s.slice(0, maxLen - 1)}…` : s;
+}
+
+/** Normalize untrusted custom-message text before it enters a terminal card. */
+export function sanitizeCardText(value: string, maxLen = 4_096): string {
+	const cleaned = value
+		.replace(/[\r\n\t]/g, " ")
+		.replace(/[\u0000-\u001f\u007f]/g, "")
+		.trim();
+	return cleaned.length > maxLen ? `${cleaned.slice(0, maxLen - 1)}…` : cleaned;
 }

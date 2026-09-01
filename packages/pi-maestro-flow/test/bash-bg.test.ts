@@ -4,6 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, Theme, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import {
 	BASH_BG_QUERY_EVENT,
 	BASH_BG_UPDATE_EVENT,
@@ -11,8 +12,8 @@ import {
 	type BashBgDetails,
 	type BashBgJobSnapshot,
 	type BashBgSnapshotPayload,
-	type RegisterBashBgOptions,
 	classifyWindowsTaskkill,
+	type RegisterBashBgOptions,
 	registerBashBg,
 	windowsTaskkillFailure,
 } from "../src/tools/bash-bg.ts";
@@ -33,22 +34,22 @@ test("bash_bg action description recommends run without implying an omitted defa
 });
 
 test("bash_bg classifies Windows taskkill outcomes instead of trusting direct process exit", () => {
-	assert.equal(windowsTaskkillFailure({ status: 0, signal: null }), undefined);
 	assert.deepEqual(classifyWindowsTaskkill({ status: 0, signal: null }), { treeCleanupConfirmed: true });
 	assert.deepEqual(
 		classifyWindowsTaskkill({ status: 128, signal: null }),
 		{ treeCleanupConfirmed: false },
 		"a leader-exit race is idempotent without claiming descendant cleanup",
 	);
-	assert.equal(windowsTaskkillFailure({ status: 5, signal: null }), "taskkill failed (exit 5)");
+	assert.equal(windowsTaskkillFailure({ status: 0, signal: null }), undefined);
 	assert.equal(windowsTaskkillFailure({ status: 128, signal: null }), undefined, "a target that exits during cleanup is idempotent");
 	assert.equal(
 		windowsTaskkillFailure({ status: 128, signal: null }, false),
 		"taskkill failed (exit 128)",
 		"a target that was already gone cannot confirm descendant cleanup",
 	);
-	assert.equal(windowsTaskkillFailure({ status: null, signal: "SIGKILL" }), "taskkill failed (signal SIGKILL)");
+	assert.equal(windowsTaskkillFailure({ status: 5, signal: null }), "taskkill failed (exit 5)");
 	assert.equal(windowsTaskkillFailure({ status: null, signal: null }), "taskkill failed (unknown status)");
+	assert.equal(windowsTaskkillFailure({ status: null, signal: "SIGKILL" }), "taskkill failed (signal SIGKILL)");
 	assert.equal(
 		windowsTaskkillFailure({
 			status: null,
@@ -86,14 +87,21 @@ interface ToolLike {
 	): { render(width: number): string[] };
 }
 
+type MessageRendererLike = (
+	message: { customType?: string; content: string; details?: unknown },
+	options: { expanded: boolean },
+	theme: Theme,
+) => { render(width: number): string[] } | undefined;
+
 interface Harness {
 	tool: ToolLike;
 	emit: (channel: string, payload?: unknown) => void;
 	snapshots: BashBgSnapshotPayload[];
 	messages: Array<{
-		message: { customType?: string; content?: string };
+		message: { customType?: string; content?: string; details?: unknown };
 		options?: { triggerTurn?: boolean; deliverAs?: string };
 	}>;
+	renderers: Map<string, MessageRendererLike>;
 	shutdown: () => Promise<void>;
 	startSession: () => void;
 }
@@ -104,6 +112,7 @@ function createHarness(options: RegisterBashBgOptions = {}): Harness {
 	const lifecycleHandlers = new Map<string, Array<(event?: unknown) => unknown>>();
 	const snapshots: BashBgSnapshotPayload[] = [];
 	const messages: Harness["messages"] = [];
+	const renderers = new Map<string, MessageRendererLike>();
 	const emit = (channel: string, payload?: unknown): void => {
 		if (channel === BASH_BG_UPDATE_EVENT) snapshots.push(payload as BashBgSnapshotPayload);
 		for (const handler of eventHandlers.get(channel) ?? []) handler(payload);
@@ -127,6 +136,9 @@ function createHarness(options: RegisterBashBgOptions = {}): Harness {
 		sendMessage(message: Harness["messages"][number]["message"], options?: Harness["messages"][number]["options"]) {
 			messages.push({ message, options });
 		},
+		registerMessageRenderer(type: string, renderer: MessageRendererLike) {
+			renderers.set(type, renderer);
+		},
 	} as unknown as ExtensionAPI;
 	registerBashBg(api, options);
 	assert.ok(registeredTool);
@@ -135,6 +147,7 @@ function createHarness(options: RegisterBashBgOptions = {}): Harness {
 		emit,
 		snapshots,
 		messages,
+		renderers,
 		shutdown: async () => {
 			await Promise.all((lifecycleHandlers.get("session_shutdown") ?? []).map((handler) => handler()));
 		},
@@ -302,6 +315,36 @@ test("bash_bg start queues one completion turn after returning control", async (
 		assert.equal(harness.messages[0]?.options?.triggerTurn, true);
 		assert.equal(harness.messages[0]?.options?.deliverAs, undefined);
 		assert.doesNotMatch(harness.messages[0]?.message.content ?? "", /\nlog: |\nview: /);
+
+		const renderer = harness.renderers.get("bash-bg-complete");
+		assert.ok(renderer, "bash-bg-complete must own its custom-message renderer");
+		const renderTheme = { fg: (_name: string, text: string) => text, bold: (text: string) => text } as Theme;
+		const component = renderer(harness.messages[0]!.message as never, { expanded: false }, renderTheme);
+		assert.ok(component);
+		const lines = component.render(80);
+		assert.match(lines[0], /^╭ ✓ bash-bg-complete · bg-.* · completed · exit 0.*╮$/);
+		assert.ok(lines.some((line) => line.includes("command node -e")));
+		assert.ok(lines.some((line) => line.includes("background done")));
+		assert.ok(lines.every((line) => visibleWidth(line) === 79));
+
+		const hostile = renderer({
+			customType: "bash-bg-complete",
+			content: "ignored",
+			details: {
+				jobId: "bg-hostile",
+				exitCode: 1,
+				status: "failed\u001b[31m",
+				command: `echo\tbad\u001b[31m ${"command".repeat(200)}`,
+				outputTail: `first\n${"output".repeat(700)}\u0000`,
+			},
+		}, { expanded: false }, renderTheme)!;
+		const hostileLines = hostile.render(24);
+		assert.match(hostileLines[0], /^╭ ✕ bash-bg-complete/);
+		assert.doesNotMatch(hostileLines.join(""), /\x1b\[31m/, "untrusted ANSI is stripped before rendering");
+		assert.doesNotMatch(hostileLines.join(""), /[\r\n\t\x00-\x08\x0b\x0c\x0e-\x1a\x1c-\x1f\x7f]/);
+		assert.ok(hostileLines.length <= 10, "collapsed completion is capped at 8 body rows plus borders");
+		assert.ok(hostileLines.every((line) => visibleWidth(line) === 23));
+		assert.deepEqual(hostile.render(1), [], "width one must not occupy the autowrap column");
 	} finally {
 		await harness.shutdown();
 	}

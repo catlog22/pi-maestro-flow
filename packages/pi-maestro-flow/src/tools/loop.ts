@@ -2,7 +2,7 @@ import { SchedulerCore, type SchedulerCoreOptions } from "pi-maestro-teammate/v1
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getShellConfig } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { toolCallLine, toolResultCard } from "../quiet-render.ts";
+import { sanitizeCardText, toolCallLine, toolResultCard } from "../quiet-render.ts";
 import type { FlowToolResult } from "./tool-result.ts";
 import { Type } from "typebox";
 import { spawn } from "node:child_process";
@@ -671,16 +671,28 @@ export function registerLoop(pi: ExtensionAPI): void {
     return new Text(`${theme.fg("muted", "⟳")} ${theme.fg("dim", label)}${theme.fg("dim", progress)} ${summary}`, 0, 0);
   });
 
-  pi.registerMessageRenderer("loop-event", (msg, _opts, theme) => {
-    const details = msg.details as { outcome?: string; runCount?: number; maxRuns?: number } | undefined;
+  pi.registerMessageRenderer("loop-event", (msg, options, theme) => {
+    const details = msg.details as { loopId?: string; outcome?: string; runCount?: number; maxRuns?: number } | undefined;
     const failed = details?.outcome === "failed";
+    const outcome = details?.outcome === "failed" || details?.outcome === "completed"
+      ? details.outcome
+      : sanitizeCardText(details?.outcome ?? (failed ? "failed" : "completed"), 40);
     const progress = details?.runCount !== undefined && details?.maxRuns !== undefined
-      ? ` ${details.runCount}/${details.maxRuns}`
+      ? sanitizeCardText(`${details.runCount}/${details.maxRuns}`, 40)
       : "";
-    const content = typeof msg.content === "string" ? msg.content : "";
-    const headline = content.split(":")[0] || "loop event";
-    const color = failed ? "error" : "success";
-    return new Text(`${theme.fg(color, failed ? "✗" : "✓")} ${theme.fg(color, headline)}${theme.fg("dim", progress)}`, 0, 0);
+    const content = typeof msg.content === "string" ? sanitizeCardText(msg.content) : "";
+    const summary = [
+      sanitizeCardText(details?.loopId ?? "loop", 80),
+      outcome,
+      progress,
+    ].filter(Boolean).join(" · ");
+    return toolResultCard(theme, {
+      name: "loop-event",
+      ok: !failed,
+      summary,
+      groups: content ? [[content]] : [],
+      maxBodyRows: options.expanded ? undefined : 8,
+    });
   });
 
   // Restore persisted loops on session resume/reload; discover independent
