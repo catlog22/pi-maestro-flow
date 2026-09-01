@@ -121,7 +121,7 @@ type LocalObserveParamsInput = Omit<Static<typeof ObserveParams>, "targets" | "v
 };
 export declare const LocalObserveParams: Type.TUnsafe<LocalObserveParamsInput>;
 export declare const MonitorQueryParams: Type.TObject<{
-    action: Type.TUnsafe<"wait" | "list" | "get">;
+    action: Type.TUnsafe<"list" | "wait" | "get">;
     target: Type.TOptional<Type.TString>;
     detail: Type.TOptional<Type.TUnsafe<"summary" | "full">>;
     cursor: Type.TOptional<Type.TString>;
@@ -138,7 +138,7 @@ export declare const TeammateMonitorParams: Type.TObject<{
     verbose: Type.TOptional<Type.TBoolean>;
 }>;
 export declare const WorkspaceWindowParams: Type.TObject<{
-    action: Type.TUnsafe<"close" | "list" | "create">;
+    action: Type.TUnsafe<"list" | "close" | "create">;
     name: Type.TOptional<Type.TString>;
     objective: Type.TOptional<Type.TString>;
     provider: Type.TOptional<Type.TUnsafe<"native" | "herdr">>;
@@ -146,7 +146,7 @@ export declare const WorkspaceWindowParams: Type.TObject<{
     presentation: Type.TOptional<Type.TUnsafe<"headless" | "interactive">>;
 }>;
 export declare const RemoteWorkerParams: Type.TObject<{
-    action: Type.TUnsafe<"close" | "list" | "targets" | "create">;
+    action: Type.TUnsafe<"list" | "close" | "targets" | "create">;
     targetId: Type.TOptional<Type.TString>;
     name: Type.TOptional<Type.TString>;
     objective: Type.TOptional<Type.TString>;

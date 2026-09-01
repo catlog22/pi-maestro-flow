@@ -313,6 +313,8 @@ export declare function replyProxyFailure(event: Record<string, unknown>, reply:
 export interface TeammateInteractionQueue {
     /** Serializes one relayed child request behind any already in flight. */
     enqueue(event: Record<string, unknown>, reply: (msg: unknown) => void, ctx: ExtensionContext | null | undefined, fallbackCorrelationId?: string): void;
+    /** Settles one exact request by its child-provided requestId. */
+    cancelByRequest(requestId: string, reason: string): boolean;
     /** Settles every request belonging to a gone agent. Returns how many. */
     cancelForAgent(correlationId: string, reason: string): number;
     /** Requests still waiting for an answer, in flight or queued. */

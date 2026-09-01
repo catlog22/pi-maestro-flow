@@ -45,11 +45,21 @@ export declare function renderMonitorResult(result: AgentToolResult<unknown>, op
 export declare function renderTeammateResult(result: AgentToolResult<Details>, options: {
     expanded: boolean;
 }, theme: Theme, args?: Record<string, unknown>): Component;
+export declare function renderTeammateCompletionMessage(content: string, details: Details, expanded: boolean, theme: Theme): Component;
+export declare function renderTeammateCompletionFallbackMessage(content: string, expanded: boolean, theme: Theme): Component;
 export interface CompletionOutboxRenderDetails {
     replayed: boolean;
     resources: readonly string[];
 }
 export declare function renderCompletionOutboxMessage(content: string, details: CompletionOutboxRenderDetails, expanded: boolean, theme: Theme): Component;
+export interface TeammateStalledRenderDetails {
+    mode?: string;
+    correlationId?: string;
+    name?: string;
+    agent?: string;
+    diagnosis?: unknown;
+}
+export declare function renderTeammateStalledMessage(content: string, details: TeammateStalledRenderDetails | undefined, expanded: boolean, theme: Theme): Component;
 export declare function renderQuietTeammateAux(name: "teammate-send" | "teammate-wait" | "teammate-watch" | "teammate-started" | "teammate-monitor" | "observe", rest: string, status: "running" | "success" | "failure", theme: Theme): Component | undefined;
 /**
  * Host-contract fallbacks for auxiliary tool renderers when quiet mode is off.

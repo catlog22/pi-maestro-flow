@@ -3509,8 +3509,12 @@ test("background completion renderer stays compact but expands to the full resul
   const message = { content, details: { mode: "single" as const, results: [result] } };
   const theme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
 
-  const collapsed = renderer(message, { expanded: false }, theme).render(80);
-  assert.equal(collapsed.length, 1);
+  const collapsedComponent = renderer(message, { expanded: false }, theme);
+  const collapsed = collapsedComponent.render(80);
+  assert.match(collapsed[0]!, /^╭ ✓ teammate-complete · 1 result · completed.*╮$/);
+  assert.ok(collapsed.length <= 10);
+  assert.ok(collapsed.every((line) => visibleWidth(line) === 79));
+  assert.deepEqual(collapsedComponent.render(1), []);
   const expanded = renderer(message, { expanded: true }, theme).render(80).join("\n");
   assert.match(expanded, /background line 30/);
   assert.equal(message.content, content);
@@ -3553,9 +3557,12 @@ test("durable completion renderer handles outbox envelopes without raw fallback"
   };
   const theme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
 
-  const collapsed = renderer(message, { expanded: false }, theme).render(80);
-  assert.equal(collapsed.length, 1);
-  assert.match(collapsed[0]!, /teammate-complete replayed · 1 publication/);
+  const collapsedComponent = renderer(message, { expanded: false }, theme);
+  const collapsed = collapsedComponent.render(80);
+  assert.match(collapsed[0]!, /^╭ ✓ teammate-complete · replayed · 1 publication.*╮$/);
+  assert.ok(collapsed.length <= 10);
+  assert.ok(collapsed.every((line) => visibleWidth(line) === 79));
+  assert.deepEqual(collapsedComponent.render(1), []);
   const expanded = renderer(message, { expanded: true }, theme).render(80).join("\n");
   assert.match(expanded, /agent:\/\/publication/);
 });

@@ -7,9 +7,13 @@ import { isQuietMode, setQuietMode } from "../src/quiet-state.ts";
 import {
   auxToolCallFallback,
   auxToolResultFallback,
+  renderCompletionOutboxMessage,
   renderMonitorResult,
   renderObserveResult,
   renderQuietTeammateAux,
+  renderTeammateCompletionFallbackMessage,
+  renderTeammateCompletionMessage,
+  renderTeammateStalledMessage,
   renderTeammateCall,
   renderTeammateListCall,
   renderTeammateListResult,
@@ -92,6 +96,76 @@ test("auxiliary tool fallbacks are total Components mirroring host default rende
   const empty = auxToolResultFallback({ content: [] } as never, theme as never);
   assert.equal(typeof empty.render, "function");
   assert.deepEqual(empty.render(80), []);
+});
+
+test("completion and stalled custom messages render bounded full-width cards", () => {
+  const details: Details = { mode: "single", results: [okResult()] };
+  const completionComponent = renderTeammateCompletionMessage(
+    "raw completion body",
+    details,
+    false,
+    theme as never,
+  );
+  const collapsed = completionComponent.render(80);
+  assert.match(collapsed[0], /^╭ ✓ teammate-complete · 1 result · completed.*╮$/);
+  assert.match(collapsed.join("\n"), /@inspection.*done/);
+  assert.doesNotMatch(collapsed.join("\n"), /complete output/, "collapsed completion hides message bodies");
+  assert.ok(collapsed.every((line) => visibleWidth(line) === 79));
+  assert.deepEqual(completionComponent.render(1), [], "width one must not occupy the autowrap column");
+
+  const expanded = renderTeammateCompletionMessage(
+    "raw completion body",
+    details,
+    true,
+    theme as never,
+  ).render(80);
+  assert.match(expanded.join("\n"), /complete output/);
+
+  const failedComponent = renderTeammateCompletionMessage(
+    "failure body",
+    { mode: "single", results: [failedResult()] },
+    false,
+    theme as never,
+  );
+  const failed = failedComponent.render(80);
+  assert.match(failed[0], /^╭ ✕ teammate-complete · 1 result · 1 failed.*╮$/);
+  const failedNarrow = failedComponent.render(24);
+  assert.match(failedNarrow[0], /^╭ ✕ teammate-complet/);
+  assert.ok(failedNarrow.every((line) => visibleWidth(line) === 23));
+
+  const replayed = renderCompletionOutboxMessage(
+    `restored\tresult\u001b[31m ${"detail".repeat(700)}\nFull result: agent://publication`,
+    { replayed: true, resources: ["agent://publication"] },
+    false,
+    theme as never,
+  ).render(80);
+  assert.match(replayed[0], /^╭ ✓ teammate-complete · replayed · 1 publication.*╮$/);
+  assert.doesNotMatch(replayed.join(""), /\x1b\[31m/);
+  assert.ok(replayed.length <= 10, "collapsed outbox completion is capped at 8 body rows plus borders");
+  assert.ok(replayed.every((line) => visibleWidth(line) === 79));
+
+  const fallbackComponent = renderTeammateCompletionFallbackMessage(
+    `Agent failed\t\u001b[31m ${"failure".repeat(700)}`,
+    false,
+    theme as never,
+  );
+  const fallback = fallbackComponent.render(24);
+  assert.match(fallback[0], /^╭ ✕ teammate-complet/);
+  assert.doesNotMatch(fallback.join(""), /\x1b\[31m/);
+  assert.ok(fallback.length <= 10);
+  assert.ok(fallback.every((line) => visibleWidth(line) === 23));
+  assert.deepEqual(fallbackComponent.render(1), []);
+
+  const stalled = renderTeammateStalledMessage(
+    "agent\tstalled\u001b[31m",
+    { name: "worker", agent: "general", mode: "single", diagnosis: { status: "stalled" } },
+    true,
+    theme as never,
+  ).render(80);
+  assert.match(stalled[0], /^╭ ✕ teammate-stalled · @worker · general · single.*╮$/);
+  assert.match(stalled.join("\n"), /status stalled/);
+  assert.doesNotMatch(stalled.join(""), /[\r\n\t\x00-\x1f\x7f]/);
+  assert.ok(stalled.every((line) => visibleWidth(line) === 79));
 });
 
 test("quiet single-task call leaves all rendering to the result component", () => {
@@ -531,6 +605,10 @@ test("auxiliary teammate surfaces are wired to quiet rows or shared result cards
   assert.equal((source.match(/renderTeammateListResult\(result, options, theme, context\.args, context\.isError\)/g) ?? []).length, 3);
   assert.equal((source.match(/renderObserveResult\(result, options, theme, context\.isError\)/g) ?? []).length, 2);
   assert.equal((source.match(/renderMonitorResult\(result, options, theme, context\.isError\)/g) ?? []).length, 1);
+  assert.equal((source.match(/return renderTeammateCompletionFallbackMessage\(/g) ?? []).length, 1);
+  assert.equal((source.match(/return renderTeammateCompletionMessage\(/g) ?? []).length, 1);
+  assert.equal((source.match(/return renderTeammateStalledMessage\(/g) ?? []).length, 1);
+  assert.match(source, /registerMessageRenderer\([\s\S]*?"teammate-stalled"/);
 });
 
 test("remaining inline auxiliary renderers make call and result phases mutually exclusive", () => {
@@ -553,7 +631,7 @@ test("auxiliary teammate tools use a self render shell in root and nested regist
 test("root and nested self-rendered teammate tools share renderers", () => {
   const source = readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf8");
   assert.equal((source.match(/return renderTeammateCall\(/g) ?? []).length, 2);
-  assert.equal((source.match(/return renderTeammateResult\(/g) ?? []).length, 3);
+  assert.equal((source.match(/return renderTeammateResult\(/g) ?? []).length, 2);
   assert.equal((source.match(/return renderTeammateListCall\(/g) ?? []).length, 3);
   assert.equal((source.match(/return renderTeammateListResult\(/g) ?? []).length, 3);
   assert.equal((source.match(/return renderTeammateSendCall\(/g) ?? []).length, 2);

@@ -252,6 +252,9 @@ import {
   auxToolResultFallback,
   renderCompletionOutboxMessage,
   renderMonitorResult,
+  renderTeammateCompletionFallbackMessage,
+  renderTeammateCompletionMessage,
+  renderTeammateStalledMessage,
   renderObserveCall,
   renderObserveResult,
   renderQuietTeammateAux,
@@ -688,15 +691,35 @@ export default function registerTeammateExtension(
       } else if (rawDetails && "result" in rawDetails && rawDetails.result) {
         details = { mode: "single", results: [rawDetails.result] };
       }
-      if (!details) return undefined;
+      if (!details) {
+        return renderTeammateCompletionFallbackMessage(
+          contentText,
+          options.expanded,
+          theme as ExtensionContext["ui"]["theme"],
+        );
+      }
 
-      const content = typeof message.content === "string"
-        ? [{ type: "text" as const, text: message.content }]
-        : message.content;
-      return renderTeammateResult({
-        content,
+      return renderTeammateCompletionMessage(
+        contentText,
         details,
-      }, options, theme as ExtensionContext["ui"]["theme"]);
+        options.expanded,
+        theme as ExtensionContext["ui"]["theme"],
+      );
+    },
+  );
+
+  pi.registerMessageRenderer(
+    "teammate-stalled",
+    (message, options, theme) => {
+      const content = typeof message.content === "string"
+        ? message.content
+        : message.content.map((entry) => entry.type === "text" ? entry.text : "").filter(Boolean).join("\n");
+      return renderTeammateStalledMessage(
+        content,
+        message.details as Parameters<typeof renderTeammateStalledMessage>[1],
+        options.expanded,
+        theme as ExtensionContext["ui"]["theme"],
+      );
     },
   );
 

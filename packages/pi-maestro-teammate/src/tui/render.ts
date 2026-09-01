@@ -292,6 +292,7 @@ interface TeammateToolCardOptions {
   detail?: string;
   groups?: string[][];
   maxCollapsedGroups?: number;
+  maxCollapsedRows?: number;
 }
 
 function resultText(result: AgentToolResult<unknown>): string {
@@ -463,13 +464,14 @@ function renderTeammateToolCard(
   const detail = options.detail ?? resultText(result);
   return dynamicComponent((width) => {
     const safeWidth = Math.max(1, width);
+    if (safeWidth <= 1) return [];
     const tone = options.status === "failure" ? "error" : "success";
     const mark = theme.fg(tone, quietStatusMark(options.status));
     const label = [
       `${mark} ${theme.bold(options.name)}`,
       options.summary ? theme.fg("dim", `· ${options.summary}`) : "",
     ].filter(Boolean).join(" ");
-    const cardWidth = Math.max(1, safeWidth - 1);
+    const cardWidth = safeWidth - 1;
     if (cardWidth < 6) return [truncateToWidth(label, cardWidth, "…")];
 
     const innerWidth = cardWidth - 2;
@@ -493,7 +495,16 @@ function renderTeammateToolCard(
         body.push(`${theme.fg("dim", "│")} ${fit(line, contentWidth)} ${theme.fg("dim", "│")}`);
       }
     }
-    return [top, ...body, theme.fg("dim", `╰${"─".repeat(innerWidth)}╯`)];
+    let visibleBody = body;
+    if (!options.expanded && options.maxCollapsedRows !== undefined && body.length > options.maxCollapsedRows) {
+      const kept = Math.max(0, options.maxCollapsedRows - 1);
+      const hidden = body.length - kept;
+      visibleBody = [
+        ...body.slice(0, kept),
+        `${theme.fg("dim", "│")} ${fit(`… ${hidden} more rows · expand for details`, contentWidth)} ${theme.fg("dim", "│")}`,
+      ];
+    }
+    return [top, ...visibleBody, theme.fg("dim", `╰${"─".repeat(innerWidth)}╯`)];
   });
 }
 
@@ -1084,6 +1095,91 @@ function qLine(theme: Theme, markedGlyph: string, name: string, rest: string): s
   return `  ${markedGlyph} ${parts.join(" ")}`;
 }
 
+function sanitizeMessageCardText(value: string, maxLen = 4_096): string {
+  const cleaned = value
+    .replace(/[\r\n\t]/g, " ")
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .trim();
+  return cleaned.length > maxLen ? `${cleaned.slice(0, maxLen - 1)}…` : cleaned;
+}
+
+function messageCardLines(content: string): string[] {
+  return content.split("\n").map((line) => sanitizeMessageCardText(line)).filter(Boolean);
+}
+
+function boundedMessageLines(lines: string[], expanded: boolean, limit = 6): string[] {
+  if (expanded || lines.length <= limit) return lines;
+  return [...lines.slice(0, limit), `… ${lines.length - limit} more lines · expand for details`];
+}
+
+function completionResultCardLine(result: SingleResult, theme: Theme): string {
+  const failed = result.exitCode !== 0;
+  const glyph = theme.fg(failed ? "error" : "success", quietStatusMark(failed ? "failure" : "success"));
+  const displayName = sanitizeMessageCardText(result.name ?? result.agent, 120);
+  const label = result.name ? `@${displayName}` : displayName;
+  const role = result.name ? `(${sanitizeMessageCardText(result.agent, 80)})` : "";
+  const totalTokens = result.usage.inputTokens + result.usage.outputTokens;
+  const state = failed
+    ? `${tuiT("progress.quiet.failed")} · ${sanitizeMessageCardText(quietFirstError(result), 240)}`
+    : tuiT("progress.quiet.done");
+  const rest = statusMeta([
+    role,
+    state,
+    formatDuration(result.durationMs),
+    totalTokens > 0 ? tuiT("metrics.tokens", { count: formatTokens(totalTokens) }) : "",
+  ], theme);
+  return qLine(theme, glyph, label, rest).trimStart();
+}
+
+export function renderTeammateCompletionMessage(
+  content: string,
+  details: Details,
+  expanded: boolean,
+  theme: Theme,
+): Component {
+  const failed = details.results.filter((result) => result.exitCode !== 0).length;
+  const groups = details.results.map((result) => {
+    const rows = [completionResultCardLine(result, theme)];
+    if (expanded) {
+      const finalMessage = [...result.messages].reverse().find((message) => message.role === "assistant")?.content ?? "";
+      rows.push(...messageCardLines(finalMessage));
+    }
+    return rows;
+  });
+  if (groups.length === 0) {
+    const fallback = boundedMessageLines(messageCardLines(content), expanded);
+    if (fallback.length > 0) groups.push(fallback);
+  }
+  return renderTeammateToolCard({ content: [{ type: "text", text: content }], details: {} }, {
+    name: "teammate-complete",
+    summary: `${details.results.length} result${details.results.length === 1 ? "" : "s"} · ${failed > 0 ? `${failed} failed` : "completed"}`,
+    status: failed > 0 ? "failure" : "success",
+    expanded,
+    groups,
+    maxCollapsedGroups: 7,
+    maxCollapsedRows: 8,
+  }, theme);
+}
+
+export function renderTeammateCompletionFallbackMessage(
+  content: string,
+  expanded: boolean,
+  theme: Theme,
+): Component {
+  const lines = messageCardLines(content);
+  const firstLine = lines[0] ?? "completed";
+  const failed = /\b(?:fail(?:ed|ure)?|error|terminated|aborted|stalled)\b/i.test(firstLine);
+  return renderTeammateToolCard({ content: [{ type: "text", text: content }], details: {} }, {
+    name: "teammate-complete",
+    summary: sanitizeMessageCardText(firstLine, 160),
+    status: failed ? "failure" : "success",
+    expanded,
+    groups: lines.length > 0 ? [boundedMessageLines(lines, expanded)] : [],
+    maxCollapsedGroups: 1,
+    maxCollapsedRows: 8,
+  }, theme);
+}
+
 export interface CompletionOutboxRenderDetails {
   replayed: boolean;
   resources: readonly string[];
@@ -1095,14 +1191,58 @@ export function renderCompletionOutboxMessage(
   expanded: boolean,
   theme: Theme,
 ): Component {
-  if (expanded) return new Text(theme.fg("toolOutput", content), 0, 0);
-  const firstLine = content.split("\n").find((line) => line.trim())?.trim() ?? "completed";
   const publicationCount = details.resources.length;
   const state = details.replayed ? "replayed" : "completed";
-  const rest = `${state} · ${publicationCount} publication${publicationCount === 1 ? "" : "s"} · ${firstLine}`;
-  const tone = details.replayed ? "warning" : "success";
-  const glyph = theme.fg(tone, details.replayed ? "↻" : "✓");
-  return dynamicComponent((width) => [truncateToWidth(qLine(theme, glyph, "teammate-complete", rest), Math.max(1, width), "…")]);
+  const contentRows = boundedMessageLines(messageCardLines(content), expanded);
+  const groups: string[][] = contentRows.length > 0 ? [contentRows] : [];
+  if (expanded && details.resources.length > 0) {
+    groups.push(details.resources.map((resource) => sanitizeMessageCardText(resource, 512)));
+  }
+  return renderTeammateToolCard({ content: [{ type: "text", text: content }], details: {} }, {
+    name: "teammate-complete",
+    summary: `${state} · ${publicationCount} publication${publicationCount === 1 ? "" : "s"}`,
+    status: "success",
+    expanded,
+    groups,
+    maxCollapsedGroups: 2,
+    maxCollapsedRows: 8,
+  }, theme);
+}
+
+export interface TeammateStalledRenderDetails {
+  mode?: string;
+  correlationId?: string;
+  name?: string;
+  agent?: string;
+  diagnosis?: unknown;
+}
+
+export function renderTeammateStalledMessage(
+  content: string,
+  details: TeammateStalledRenderDetails | undefined,
+  expanded: boolean,
+  theme: Theme,
+): Component {
+  const label = sanitizeMessageCardText(details?.name ?? details?.agent ?? "agent", 120);
+  const summary = [`@${label}`, details?.agent && details.agent !== details.name ? details.agent : "", details?.mode ?? "stalled"]
+    .map((part) => sanitizeMessageCardText(part, 120))
+    .filter(Boolean)
+    .join(" · ");
+  const groups: string[][] = [boundedMessageLines(messageCardLines(content), expanded)];
+  if (expanded && details?.diagnosis && typeof details.diagnosis === "object") {
+    const diagnosis = Object.entries(details.diagnosis as Record<string, unknown>)
+      .map(([key, value]) => `${sanitizeMessageCardText(key, 80)} ${sanitizeMessageCardText(String(value), 240)}`);
+    if (diagnosis.length > 0) groups.push(diagnosis);
+  }
+  return renderTeammateToolCard({ content: [{ type: "text", text: content }], details: {} }, {
+    name: "teammate-stalled",
+    summary,
+    status: "failure",
+    expanded,
+    groups: groups.filter((group) => group.length > 0),
+    maxCollapsedGroups: 2,
+    maxCollapsedRows: 8,
+  }, theme);
 }
 
 export function renderQuietTeammateAux(
