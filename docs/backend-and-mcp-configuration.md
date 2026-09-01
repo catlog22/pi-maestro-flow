@@ -77,8 +77,11 @@
 | `startupTimeoutMs` | 否 | 握手上限，默认 15000。**只该往上调** |
 | `cwd` / `env` | 否 | `env` 装的是**变量名**，含等号的条目会被拒 |
 | `mode` | 否 | `local`（默认）或 `ssh` |
-| `host` / `user` / `hostKeySha256` | `mode: "ssh"` 时是 | 缺任一条都会在读注册文档时报错，逐个点名 |
-| `port` / `identityFile` | 否 | `port` 默认 22 |
+| `sshHostRef` | `mode: "ssh"` 时二选一 | `/ssh` manager 中的主机 id；使用时不能再写任何内嵌 SSH 字段 |
+| `host` / `user` / `hostKeySha256` | 未用 `sshHostRef` 时是 | 内嵌 SSH 目标；缺任一条都会在读注册文档时报错 |
+| `port` / `identityFile` | 否 | 仅用于内嵌 SSH；`port` 默认 22 |
+
+引用主机前须先通过 `/ssh` 解锁 manager。引用仅支持 `bash` + ssh-agent 或无 passphrase identity；manager 中的 password、带 passphrase identity 和 PowerShell 主机不会被复制或降级，而是在解析引用时明确拒绝。旧内嵌字段继续兼容，但不能与 `sshHostRef` 混用。
 
 **模型是两个轴，不是一个。** `modelId` 选的是哪个 CLI，`acpModel` 选的是那个 CLI 里的哪个模型。任务里 `model` 等于路由 id 时用注册项的 `acpModel`，不等于时该值本身就是内层模型。
 
@@ -187,11 +190,14 @@ npm --prefix packages/pi-maestro-teammate run check:acp-registry     # 只检查
 | `model` | 否 | `deepseek-v4-flash` |
 | `apiKeyEnv` | 否 | credential-ref |
 | `envPassthrough` | 否 | 变量名列表 |
-| `todoBridge` | 否 | `false` |
-| `cwd` / `maxTokens` | 否 | — |
+| `mode` | 否 | `local`；设为 `ssh` 时在远端启动 |
+| `sshHostRef` | ssh 时二选一 | `/ssh` manager 中的兼容主机 id |
+| `host` / `user` / `port` / `hostKeySha256` / `identityFile` | ssh 时二选一 | 旧内嵌 SSH 连接字段；不得与 `sshHostRef` 混用 |
+| `todoBridge` | 否 | `false`；ssh 模式不支持 |
+| `cwd` / `maxTokens` | 否 | —；ssh 下 `cwd` 是远端路径 |
 | `requestTimeoutMs` | 否 | `300000` |
 
-`cordisConfig` 是必填且没有默认值，路径不存在会在读注册文档时就失败，不会拖到运行期。
+`cordisConfig` 是必填且没有默认值，路径不存在会在读注册文档时就失败，不会拖到运行期。ssh 引用在每个 run 开始前解析为内存中的非敏感连接配置；注册文档只保存 id，不保存 manager 密码或私钥口令。
 
 **`apiKeyEnv` 存的是键名，不是密钥。** 它声明为 `credential-ref` 且位置是 `env-file-key`：宿主把键名写进 dsh 运行时自己的 env 文件（在 `cordis.yml` 旁边），密钥本身从不经过宿主。所以这个注册文档可以提交进仓库。
 

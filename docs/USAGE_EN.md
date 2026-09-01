@@ -143,15 +143,40 @@ Migration: back up the file, retain deployment ids/config, add `version: 2`, exp
 
 Known gap: registry dispatch still drops task-level `timeoutMs`; neither `backend-registry` nor `model-registry` has a host watchdog. Configure a deployment timeout such as ACP `runTimeoutMs` where required. The complete manifest and topology contract is in [Teammate Backend Adapter Contract](teammate-backend-adapter-contract.md).
 
+#### Reusing `/ssh` hosts
+
+Remote Worker, ACP direct-SSH/`cli/<tool>`, and DSH SSH can use `sshHostRef` to reference a host in the encrypted SSH manager. Unlock the manager through `/ssh`, then select a compatible host in Connections. The current `#ssh` selection binds only the independent `ssh` tool and never changes teammate routing.
+
+Remote Worker v4 configuration places the reference on a host alias; each target/workspace still owns its remote `cwd`, driver, and command:
+
+```json
+{
+  "version": 4,
+  "hosts": { "production": { "sshHostRef": "server-id-from-ssh-manager" } },
+  "targets": {
+    "production/pi": {
+      "host": "production",
+      "cwd": "/srv/project",
+      "driver": "pi-rpc",
+      "command": ["pi", "--mode", "rpc"]
+    }
+  },
+  "workspaces": {}
+}
+```
+
+ACP/DSH deployments set `sshHostRef` directly under `mode: "ssh"`. A reference is mutually exclusive with embedded `host`, `user`, `port`, `hostKeySha256`, and `identityFile`; existing embedded configurations remain supported. Teammate references accept only `bash` hosts using ssh-agent or an identity file **without a passphrase**. Password, passphrase-protected identity, and PowerShell hosts remain usable by the independent `ssh` tool but are explicitly rejected for teammate references. A locked manager, deleted reference, or missing provider fails new connections closed; an authenticated channel already executing may finish.
+
 #### DSH direct-SSH mode
 
-A DSH deployment with `"mode": "ssh"` launches its runtime on a remote host over OpenSSH. Six fields govern the transport:
+A DSH deployment with `"mode": "ssh"` launches its runtime on a remote host over OpenSSH. Its connection source is either one `sshHostRef` or the original five embedded SSH fields:
 
 | Field | Kind | Meaning |
 |---|---|---|
 | `mode` | enum | `"ssh"` selects the remote launch; default `"local"` ignores every field below |
-| `host` | text | remote hostname; **required** under `ssh` |
-| `user` | text | remote login name; **required** under `ssh` |
+| `sshHostRef` | text | host id from the `/ssh` manager; cannot be combined with embedded SSH fields |
+| `host` | text | embedded remote hostname; **required** when `sshHostRef` is absent |
+| `user` | text | embedded remote login name; **required** when `sshHostRef` is absent |
 | `port` | integer | TCP port, default `22` |
 | `hostKeySha256` | text | optional `SHA256:...` fingerprint pinned via a pre-flight `ssh-keyscan` |
 | `identityFile` | path | optional private key; ssh then offers only that key (`IdentitiesOnly`) |
@@ -162,7 +187,7 @@ Authentication is BatchMode and identity-file/agent-only: the launch runs `ssh -
 
 `hostKeySha256` is a pre-flight pin, not handshake-time verification: `ssh-keyscan` runs before launch and the fingerprint match is enforced against the pinned known_hosts file at connect time. Pin a fingerprint obtained over a trusted channel; a rotated host key fails the launch closed.
 
-`envPassthrough` degrades to best-effort `SetEnv`: only names this host resolves are forwarded, and the remote sshd drops any name its `AcceptEnv` does not permit — keep anything essential in the runtime's own configuration beside `cordis.yml`.
+`envPassthrough` degrades to best-effort `SendEnv`: values remain only in the scrubbed ssh child environment and never enter argv; only names this host resolves are forwarded, and the remote sshd drops any name its `AcceptEnv` does not permit — keep anything essential in the runtime's own configuration beside `cordis.yml`.
 
 `todoBridge` is unsupported with `mode: ssh` and rejected at load: the todo endpoint listens on this host's loopback, unreachable from a remote runtime.
 

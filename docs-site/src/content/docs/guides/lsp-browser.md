@@ -99,11 +99,15 @@ browser({
 
 ### extension — 显式有限 adapter
 
-先运行 `/install browser-bridge`。安装流程要求：
+先运行 `/install browser-bridge`。默认安装心智是 **未安装 → 待配对 → 已连接**：
 
-1. `browser({action:"status"})` 启动 bridge 并生成 `~/.pi/browser-bridge.json`。
-2. 在扩展 popup 中复制配置文件的实际 port 和 token。
-3. 再次用 status 确认 `bridge.authenticatedConnected:true`。
+1. `browser({action:"status"})` 默认在 `19222..19231` 启动 bridge。
+2. 加载扩展后，它会自动发现 bridge，并在 popup 与 `status.bridge.pendingPairings` 中显示同一 requestId 和六位 code。
+3. 调用 `browser({action:"pair", request_id, code})` 批准一次；pairing 只下发并持久化凭证，不产生 verified marker 或命令权限。
+4. 扩展关闭 pairing socket，以不发送 raw token 的 challenge-response 握手重连；认证成功后才写 historical verified marker。
+5. 再次用 status 确认 `bridge.authenticatedConnected:true` 且 `pendingPairings` 为空；reload 后自动认证。
+
+默认流程无需复制 port/token。`PI_BROWSER_BRIDGE_PORT` 只改变 server 的十端口起点；空配置扩展不能读取 Pi 进程环境，因此自定义起点还必须在 popup 高级设置中填写端口。手工 port/token 仅用于高级恢复/兼容。
 
 借用已有 tab：
 
@@ -138,9 +142,9 @@ extension run 只支持：
 - `tab.tabs`
 - `tab.screenshot`（CDP PNG）
 
-它不是 Puppeteer Page：ElementHandle、request interception、frame event、`tab.observe/click/fill/extract`、upload、OCR/detect 等未实现 API 会确定性报错并列出支持清单。断连不会改用 managed 浏览器或另一个 tab。
+它不是 Puppeteer Page：ElementHandle、request interception、frame event、`tab.observe/click/fill/extract`、upload、OCR/detect 等未实现 API 会确定性报错并列出支持清单。断连不会改用 managed 浏览器或另一个 tab。caller timeout 也不代表已经运行的页面 JavaScript 被强制停止：命令会保持 draining，直到真实 result/error/disconnect terminal；owned tab 只在 terminal 之后关闭。
 
-> ⚠️ 扩展可执行页面 JS/raw CDP；首帧 token 是授权边界。安装时还默认启用动态 DNR 规则剥离所有站点的 CSP 响应头。不能接受该风险时不要安装或禁用扩展。详见包内 `optional/BROWSER-BRIDGE-SETUP.md`。
+> ⚠️ 扩展可执行页面 JS/raw CDP；批准配对后生成的 token 是授权边界，未批准的 discovery socket 没有命令权限。安装时还默认启用动态 DNR 规则剥离所有站点的 CSP 响应头。不能接受该风险时不要安装或禁用扩展。详见包内 `optional/BROWSER-BRIDGE-SETUP.md`。
 
 ### live status 与静态安装状态
 
@@ -151,11 +155,13 @@ browser({ action: "status" })
 status 会显式启动 bridge server，并返回：
 
 - `bridge.serverStarted` / `listeningPort` / `state`
+- `bridge.pendingPairings`
 - `bridge.authenticatedConnected`
+- `bridge.drainingCommands`
 - 认证扩展当前报告的 `bridge.tabCount`
 - `namedTabs[]` 的 `name/channel/ownership/capabilities`
 
-只有 status 是 live 证据。`/install list` 的 `installed` 只表示存在合法的历史 verified marker 和合法配置；它不表示扩展此刻在线。单独的 `browser-bridge.port` 文件甚至不算 installed。
+只有 status 是 live 证据。`/install list` 的 `installed` 只表示存在由 legacy token 或 challenge-response 成功认证产生的历史 verified marker 和合法配置；pairing 本身不算 installed，也不表示扩展此刻在线。单独的 `browser-bridge.port` 文件甚至不算 installed。
 
 ### managed/profile/cdp 的高级 helper
 

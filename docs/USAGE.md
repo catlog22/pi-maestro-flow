@@ -143,15 +143,40 @@ CLI 兼容投影必须显式设置 `compatibility: { "version": 1, "teammateCliT
 
 已知缺口：registry dispatch 仍会丢弃 task 级 `timeoutMs`；`backend-registry` 与 `model-registry` 都没有 host watchdog。需要超时时应配置部署自己的字段，例如 ACP `runTimeoutMs`。完整 manifest 与拓扑契约见 [Teammate Backend Adapter Contract](teammate-backend-adapter-contract.md)。
 
+#### 复用 `/ssh` 主机
+
+Remote Worker、ACP direct-SSH/`cli/<tool>` 和 DSH SSH 都可以用 `sshHostRef` 引用加密 SSH manager 中的主机。先通过 `/ssh` 解锁 manager，再在 Connections 中选择兼容主机；`#ssh` 当前选择只绑定独立 `ssh` 工具，不会改变 teammate 路由。
+
+Remote Worker 的 v4 配置把引用放在 host alias 上，target/workspace 仍保留自己的远端 `cwd`、driver 和 command：
+
+```json
+{
+  "version": 4,
+  "hosts": { "production": { "sshHostRef": "server-id-from-ssh-manager" } },
+  "targets": {
+    "production/pi": {
+      "host": "production",
+      "cwd": "/srv/project",
+      "driver": "pi-rpc",
+      "command": ["pi", "--mode", "rpc"]
+    }
+  },
+  "workspaces": {}
+}
+```
+
+ACP/DSH deployment 则在 `mode: "ssh"` 下直接设置 `sshHostRef`。引用与内嵌的 `host`、`user`、`port`、`hostKeySha256`、`identityFile` 互斥；旧内嵌配置继续兼容。teammate 引用仅接受 `bash` 主机以及 ssh-agent 或**无 passphrase**的 identity file。manager 中的 password、带 passphrase identity 和 PowerShell 主机仍可供独立 `ssh` 工具使用，但会被 teammate 引用明确拒绝。manager 锁定、引用删除或 provider 不可用时，新连接 fail closed；已认证且正在执行的 channel 可以完成。
+
 #### DSH 直连 SSH 模式
 
-DSH 部署设置 `"mode": "ssh"` 后会通过 OpenSSH 在远端主机上启动运行时。六个字段控制该传输：
+DSH 部署设置 `"mode": "ssh"` 后会通过 OpenSSH 在远端主机上启动运行时。连接来源可以是一个 `sshHostRef`，也可以是原有的五个内嵌 SSH 字段：
 
 | 字段 | 类型 | 含义 |
 |---|---|---|
 | `mode` | enum | `"ssh"` 选择远端启动；默认 `"local"` 时忽略下列所有字段 |
-| `host` | text | 远端主机名；`ssh` 下**必填** |
-| `user` | text | 远端登录名；`ssh` 下**必填** |
+| `sshHostRef` | text | `/ssh` manager 中的主机 id；使用时不能再设置任何内嵌 SSH 字段 |
+| `host` | text | 内嵌模式的远端主机名；未使用 `sshHostRef` 时**必填** |
+| `user` | text | 内嵌模式的远端登录名；未使用 `sshHostRef` 时**必填** |
 | `port` | integer | TCP 端口，默认 `22` |
 | `hostKeySha256` | text | 可选的 `SHA256:...` 指纹，启动前通过 `ssh-keyscan` 预检固定 |
 | `identityFile` | path | 可选私钥；ssh 随后只提供这把密钥（`IdentitiesOnly`） |
@@ -162,7 +187,7 @@ DSH 部署设置 `"mode": "ssh"` 后会通过 OpenSSH 在远端主机上启动�
 
 `hostKeySha256` 是启动前预检固定，不等于握手时验证：`ssh-keyscan` 在启动前运行，指纹匹配在连接时对照固定的 known_hosts 文件强制执行。请通过可信渠道获取指纹；远端若在扫描与连接之间轮换主机密钥，启动会直接失败（符合预期）。
 
-`envPassthrough` 降级为尽力而为的 `SetEnv`：只有本机实际解析到的名字才会转发，而远端 sshd 会丢弃其 `AcceptEnv` 不允许的名字——运行时真正需要的内容请放在 `cordis.yml` 旁的自身配置里。
+`envPassthrough` 降级为尽力而为的 `SendEnv`：值只保留在已净化的 ssh 子进程环境中，不会进入 argv；只有本机实际解析到的名字才会转发，而远端 sshd 会丢弃其 `AcceptEnv` 不允许的名字——运行时真正需要的内容请放在 `cordis.yml` 旁的自身配置里。
 
 `mode: ssh` 下不支持 `todoBridge` 并会在加载时被拒绝：todo endpoint 监听本机 loopback，远端运行时无法到达。
 

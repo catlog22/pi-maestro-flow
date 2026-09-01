@@ -54,8 +54,11 @@ ACP 启动配置与 ACP wire schema 是两个层次：启动配置告诉 client 
 | `cwd` | agent 启动时的工作目录 |
 | `env` | 允许透传的环境变量名；不是 `NAME=value` 数组 |
 | `mode` | `local` 或 `ssh`，由宿主的 transport 决定 |
-| `host` / `user` | SSH transport 的目标信息 |
-| `hostKeySha256` | SSH 主机指纹固定值，可选但建议使用 |
+| `sshHostRef` | `/ssh` manager 中的兼容主机 id；与下面所有内嵌 SSH 字段互斥 |
+| `host` / `user` | 未使用 `sshHostRef` 时的 SSH transport 目标信息 |
+| `hostKeySha256` | 内嵌 SSH 主机指纹固定值 |
+
+`sshHostRef` 在每次 run 开始前解析；manager 必须已通过 `/ssh` 解锁，且主机必须是 `bash` + ssh-agent 或无 passphrase identity。password、私钥口令和 PowerShell 配置不会进入 ACP backend。旧内嵌 SSH 配置继续支持。
 
 配置中只写变量名，不写凭证值：
 
@@ -211,9 +214,10 @@ pi-maestro-teammate/v1/acp-cli
 | `acpModel` | agent 内层模型，必须来自 `session/new` |
 | `startupTimeoutMs` | `initialize` + `session/new` 的握手上限 |
 | `runTimeoutMs` | 单条 registration 的回合运行上限 |
-| `cwd` | agent 工作目录 |
+| `cwd` | agent 工作目录；ssh 模式下是远端路径 |
 | `env` | 允许父进程透传的变量名 |
 | `mode` | `local` 或 `ssh` |
+| `sshHostRef` | ssh 模式下引用 `/ssh` manager 主机；不能与内嵌 host/user/port/hostKeySha256/identityFile 混用 |
 
 `modelId` 和 `acpModel` 是两个不同的轴：
 

@@ -70,7 +70,7 @@ icon: "🌿"
 | 变量 | 说明 |
 |------|------|
 | `CHROME_PATH` / `PUPPETEER_EXECUTABLE_PATH` | Chromium/Chrome/Edge 可执行文件路径（browser 工具 `app.path` 的备用来源） |
-| `PI_BROWSER_BRIDGE_PORT` | extension bridge 的首选起始 WebSocket 端口（默认 `19222`；仅 `browser status` 或显式 extension open 启动；实际端口以 `~/.pi/browser-bridge.json` 为准，不触发自动回退） |
+| `PI_BROWSER_BRIDGE_PORT` | extension bridge server 的十端口起点（默认 `19222`，即 `19222..19231`；非法/越界值明确失败）。空配置扩展不会读取 Pi 进程环境，自定义起点还需在 popup 高级设置中填写端口；不触发自动回退 |
 | `BROWSER` | 默认浏览器提示 |
 
 ## 说明

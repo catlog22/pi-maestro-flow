@@ -319,7 +319,7 @@ export function createAcpCliBackend(run: CliToolRunner = runCliTool): TeammateBa
 export default createAcpCliBackend();
 ```
 
-Its configuration fields are `command`, `args`, `cwd`, `env`, `mode`, `host`, `user`, `port`, `hostKeySha256`, `identityFile`, `modelId`, `runTimeoutMs`, and `startupTimeoutMs`. None of them is a `credential-ref`: an ACP CLI resolves its own provider credentials from its own configuration, so there is no secret for the host to hold. `env` holds variable **names** the parent process may forward, and `resolveConfig` refuses an entry containing `=`, because a name-and-value entry writes a secret into a committed document.
+Its configuration fields are `command`, `args`, `cwd`, `env`, `mode`, `sshHostRef`, `host`, `user`, `port`, `hostKeySha256`, `identityFile`, `modelId`, `runTimeoutMs`, and `startupTimeoutMs`. Under `mode: "ssh"`, `sshHostRef` selects a compatible host from the host-owned encrypted SSH manager and is mutually exclusive with every embedded SSH field; the embedded form remains backward compatible. None of these is a provider-credential `credential-ref`: an ACP CLI resolves its own model-provider credentials from its own configuration, while `sshHostRef` is a non-secret host id resolved at run time through `BackendHostCapabilities`. `env` holds variable **names** the parent process may forward, and `resolveConfig` refuses an entry containing `=`, because a name-and-value entry writes a secret into a committed document.
 
 Its capability table declares `modelSelection: "native"` and `abort: "native"`, and everything else `unsupported`. The `native` model selection is honoured rather than assumed: one registration serves one route, and `start` refuses a spec naming any other model instead of running the wrong CLI under the requested model's name.
 
@@ -358,14 +358,17 @@ Its `recoveryShape` is `in-context-continuation`, and the fence still gates it e
 
 ### Direct SSH (`mode: ssh`)
 
-Setting `mode` to `ssh` turns the launch into an OpenSSH command line aimed at a remote host. Six fields govern it, mirroring the acp-cli backend's ssh surface so one transport is configured the same way twice:
+Setting `mode` to `ssh` turns the launch into an OpenSSH command line aimed at a remote host. The connection source is either one host-owned reference or the original embedded fields, mirroring the acp-cli backend's ssh surface:
 
 | Field | Meaning |
 |---|---|
 | `mode` | `"ssh"` selects the remote launch; every field below is unused under `local` |
-| `host`, `user`, `port` | the ssh destination; `host` and `user` become required, `port` defaults to 22 |
-| `hostKeySha256` | optional OpenSSH `SHA256:...` fingerprint; when set, the host key is pinned before launch |
-| `identityFile` | optional private key handed to ssh with `-i` plus `IdentitiesOnly=yes` |
+| `sshHostRef` | non-secret id resolved per run through `BackendHostCapabilities.resolveSshHost`; mutually exclusive with all embedded SSH fields |
+| `host`, `user`, `port` | embedded ssh destination; `host` and `user` are required when no reference is used, and `port` defaults to 22 |
+| `hostKeySha256` | optional embedded OpenSSH `SHA256:...` fingerprint; when set, the host key is pinned before launch |
+| `identityFile` | optional embedded private-key path handed to ssh with `-i` plus `IdentitiesOnly=yes` |
+
+The reference provider exposes only `bash` profiles authenticated by ssh-agent or a passphrase-free identity path. Passwords, private-key passphrases, and private-key contents never cross the backend seam. A missing capability, locked manager, deleted id, or incompatible profile fails the run before OpenSSH is spawned; legacy embedded registrations are unaffected.
 
 The remote side is **POSIX shell only**: the remote command is POSIX-quoted argv joined under `cd <cwd> && exec <runtime> <cordisConfig>`, executed by the remote login shell. A Windows remote without a POSIX shell is not a target.
 
@@ -373,6 +376,6 @@ Authentication fails closed: the launch runs `ssh -o BatchMode=yes -o StrictHost
 
 A pinned fingerprint is a **pre-flight pin, not handshake-time verification**. `ssh-keyscan` runs before launch, the returned records are matched against the configured fingerprint, and the matching lines are written to a single-entry known_hosts file that this launch's `UserKnownHostsFile` points at. That proves the host presented the pinned key *at scan time*; ssh then enforces it at connect time against that file. It does not turn the scan itself into an authenticated channel — pinning a fingerprint you read over a compromised path pins the attacker's key just as well. A host that rotates keys between scan and connect fails the launch closed, which is the intended behavior.
 
-Environment passthrough degrades to best-effort `SetEnv`: only names this host actually resolves are forwarded as `-o SetEnv=<name>=<value>`; an unset name is skipped rather than sent as an explicit empty value that would clobber whatever the far side already has. Note sshd accepts `SetEnv` only when its own `AcceptEnv` permits the name — a name the remote refuses is silently dropped by sshd, so anything the runtime genuinely needs should live in its own configuration beside `cordis.yml`.
+Environment passthrough degrades to best-effort `SendEnv`: only names this host actually resolves are forwarded as `-o SendEnv=<name>`, while each value remains in the already-scrubbed ssh child environment instead of appearing in process argv. An unset name is skipped rather than sent as an explicit empty value that would clobber whatever the far side already has. sshd accepts the variable only when its own `AcceptEnv` permits the name — a name the remote refuses is silently dropped, so anything the runtime genuinely needs should live in its own configuration beside `cordis.yml`.
 
 Two consequences deserve naming. `todoBridge` is unsupported under `ssh` and rejected at load: the todo endpoint listens on this host's loopback, which a runtime on a far host cannot reach. And `requestTimeoutMs` bounds each JSON-RPC request individually, not the whole turn — over ssh every request pays a network round trip, so a timeout tuned for localhost can fail mid-turn on a slow link; the resolver warns below 300000 rather than rejecting, because a fast link with a low bound is legitimately fine.
