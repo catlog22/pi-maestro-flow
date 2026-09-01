@@ -38,6 +38,7 @@ import {
   TeammateWatchParams,
   WorkspaceWindowParams,
 } from "./schemas.ts";
+import { installReturnedToolErrorBridge } from "./tool-error-signal.ts";
 import {
   formatObserveResult,
   observeTargets,
@@ -654,6 +655,8 @@ export default function registerTeammateExtension(
   pi: ExtensionAPI,
   runtimeOptions: TeammateRuntimeOptions = {},
 ): void {
+  installReturnedToolErrorBridge(pi);
+
   pi.registerMessageRenderer(
     "teammate-started",
     (message, _options, theme) => {

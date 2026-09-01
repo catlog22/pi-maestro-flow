@@ -39,7 +39,7 @@ import {
   MAESTRO_TODO_STATE_CHANGED_EVENT,
   type CockpitUiOwnershipV1,
 } from "pi-cockpit/v1/events";
-import type { FlowToolResult } from "../tools/tool-result.ts";
+import { installReturnedToolErrorBridge, type FlowToolResult } from "../tools/tool-result.ts";
 import { Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
   MaestroParams,
@@ -897,6 +897,7 @@ export function settleFailedCompaction(
 }
 
 export default function registerMaestroExtension(pi: ExtensionAPI): void {
+  installReturnedToolErrorBridge(pi);
   const disposeCompletionDurabilityProvider = getCompletionDurabilityRegistry().register(
     new FlowCompletionDurabilityProvider(),
   );

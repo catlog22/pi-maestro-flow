@@ -1,4 +1,5 @@
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
+import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 /**
  * A tool result that also carries the `isError` flag the TUI reads.
@@ -15,3 +16,25 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
  * `as { isError?: boolean }` casts at every call site.
  */
 export type FlowToolResult<T = unknown> = AgentToolResult<T> & { isError?: boolean };
+
+/** Bridge returned `isError` flags into pi's canonical tool-result error state. */
+export function installReturnedToolErrorBridge(pi: ExtensionAPI): void {
+  const returnedFailures = new Set<string>();
+  const registerTool = pi.registerTool.bind(pi);
+
+  (pi as unknown as { registerTool: (tool: ToolDefinition) => void }).registerTool = (tool) => {
+    const execute = tool.execute.bind(tool);
+    registerTool({
+      ...tool,
+      async execute(toolCallId, params, signal, onUpdate, ctx) {
+        const result = await execute(toolCallId, params, signal, onUpdate, ctx);
+        if ((result as FlowToolResult).isError === true) returnedFailures.add(toolCallId);
+        return result;
+      },
+    });
+  };
+
+  pi.on("tool_result", (event) => (
+    returnedFailures.delete(event.toolCallId) ? { isError: true } : undefined
+  ));
+}
