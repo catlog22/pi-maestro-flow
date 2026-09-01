@@ -209,20 +209,55 @@ test("acp-cli refuses a config env entry that carries a value instead of a name"
   assert.deepEqual(resolved({ ...LOCAL_CONFIG, env: ["API_KEY"] }).errors, []);
 });
 
-test("acp-cli refuses ssh mode without host user and hostKeySha256", () => {
+test("acp-cli requires exactly one complete SSH source and preserves legacy inline defaults", () => {
   const bad = resolved({ ...LOCAL_CONFIG, mode: "ssh" });
-  assert.equal(bad.errors.length, 3);
-  for (const key of ["host", "user", "hostKeySha256"]) {
-    assert.ok(bad.errors.some((error) => error.includes(`"${key}"`)), `missing ${key}`);
-  }
-  const good = resolved({
+  assert.equal(bad.errors.length, 1);
+  assert.match(bad.errors[0]!, /sshHostRef or host, user and hostKeySha256/);
+
+  const inline = resolved({
     ...LOCAL_CONFIG,
     mode: "ssh",
     host: "build-01",
     user: "agent",
     hostKeySha256: "abc",
   });
-  assert.deepEqual(good.errors, []);
+  assert.deepEqual(inline.errors, []);
+  assert.equal(inline.values.port, 22, "legacy embedded SSH still defaults its port");
+
+  const referenced = resolved({ ...LOCAL_CONFIG, mode: "ssh", sshHostRef: "managed-1" });
+  assert.deepEqual(referenced.errors, []);
+  assert.equal(referenced.values.port, undefined, "the manager remains authoritative for its port");
+
+  const inlineOverrides: Array<Record<string, ConfigValue>> = [
+    { host: "override" },
+    { user: "override" },
+    { port: 2222 },
+    { hostKeySha256: "override" },
+    { identityFile: "/tmp/override" },
+  ];
+  for (const override of inlineOverrides) {
+    const mixed = resolved({ ...LOCAL_CONFIG, mode: "ssh", sshHostRef: "managed-1", ...override });
+    assert.ok(mixed.errors.some((error) => error.includes("cannot be combined")), mixed.errors.join("; "));
+  }
+  assert.match(
+    resolved({ ...LOCAL_CONFIG, sshHostRef: "managed-1" }).errors.join("; "),
+    /requires "mode" to be "ssh"/,
+  );
+});
+
+test("acp-cli carries sshHostRef to the direct-SSH runner without adding inline overrides", async () => {
+  const launches: RunLocalCliToolParams[] = [];
+  const backend = createAcpCliBackend(async (params) => {
+    launches.push(params);
+    return CLEAN_RUN;
+  });
+  await (await backend.start(
+    specOf({ model: "cli/mock" }),
+    runOptionsOf({ ...LOCAL_CONFIG, mode: "ssh", sshHostRef: "managed-1" }),
+  )).outcome;
+  assert.equal(launches[0]?.config.sshHostRef, "managed-1");
+  assert.equal(launches[0]?.config.host, undefined);
+  assert.equal(launches[0]?.config.port, undefined);
 });
 
 test("acp-cli refuses a config without a command", () => {
@@ -546,14 +581,15 @@ test("acp-cli refuses to list options it does not publish, and remote catalogues
 
   // An ssh registration's catalogue lives on the far host; answering with the
   // local machine's would be a plausible wrong answer, so it refuses instead.
-  await assert.rejects(
-    () => backend.listConfigOptions!(
-      "acpModel",
-      { ...LOCAL_CONFIG, mode: "ssh", host: "build-01", user: "agent", hostKeySha256: "abc" },
-      AbortSignal.timeout(1_000),
-    ),
-    (error: Error) => error.message.includes("ssh"),
-  );
+  for (const sshConfig of [
+    { ...LOCAL_CONFIG, mode: "ssh", host: "build-01", user: "agent", hostKeySha256: "abc" },
+    { ...LOCAL_CONFIG, mode: "ssh", sshHostRef: "managed-1" },
+  ]) {
+    await assert.rejects(
+      () => backend.listConfigOptions!("acpModel", sshConfig, AbortSignal.timeout(1_000)),
+      (error: Error) => error.message.includes("sshHostRef") && error.message.includes("not reachable"),
+    );
+  }
 
   // Neither refusal reached the agent.
   assert.equal(probes, 0);

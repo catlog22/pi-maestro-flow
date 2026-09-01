@@ -777,13 +777,14 @@ test("the ssh transport fields mirror the acp-cli surface", () => {
   });
   assert.equal(byKey.get("host")?.kind, "text");
   assert.equal(byKey.get("user")?.kind, "text");
+  assert.equal(byKey.get("sshHostRef")?.kind, "text");
   assert.equal(byKey.get("port")?.kind, "integer");
-  assert.equal(byKey.get("port")?.default, 22);
+  assert.equal(byKey.get("port")?.default, undefined, "a referenced host owns its port");
   assert.equal(byKey.get("hostKeySha256")?.kind, "text");
   assert.equal(byKey.get("identityFile")?.kind, "path");
   // None of them is a credential-ref: like an ACP CLI, a remote dsh runtime
   // resolves its own credentials from its own configuration.
-  for (const key of ["mode", "host", "user", "port", "hostKeySha256", "identityFile"]) {
+  for (const key of ["mode", "sshHostRef", "host", "user", "port", "hostKeySha256", "identityFile"]) {
     assert.notEqual(byKey.get(key)?.kind, "credential-ref");
   }
 });
@@ -800,8 +801,125 @@ test("ssh mode requires a host and a user", () => {
       /"host" is required/.test(error),
     ),
   );
+  for (const invalid of [
+    { host: "build host", user: "agent" },
+    { host: "build", user: "runner user" },
+  ]) {
+    assert.ok(
+      resolveConfig({ mode: "ssh", ...invalid }).errors.some((error) =>
+        /must not contain whitespace or control characters/.test(error),
+      ),
+    );
+  }
   // The complete registration passes.
   assert.deepEqual(resolveConfig(SSH_CONFIG).errors, []);
+});
+
+test("sshHostRef is authoritative and legacy inline SSH keeps port 22", () => {
+  const backend = createDshBackend(async () => fakeDriver());
+  const referenced = resolveBackendConfig(backend, { ...CONFIG, mode: "ssh", sshHostRef: "managed-1" });
+  assert.deepEqual(referenced.errors, []);
+  assert.equal(referenced.values.port, undefined);
+
+  const inline = resolveBackendConfig(backend, SSH_CONFIG);
+  assert.deepEqual(inline.errors, []);
+  assert.equal(inline.values.port, 22);
+
+  for (const override of [
+    { host: "override" },
+    { user: "override" },
+    { port: 2222 },
+    { hostKeySha256: `SHA256:${"B".repeat(43)}` },
+    { identityFile: "/tmp/id" },
+  ]) {
+    const mixed = resolveBackendConfig(backend, {
+      ...CONFIG,
+      mode: "ssh",
+      sshHostRef: "managed-1",
+      ...override,
+    });
+    assert.match(mixed.errors.join("\n"), /cannot be combined/);
+  }
+  assert.match(
+    resolveBackendConfig(backend, { ...CONFIG, mode: "local", sshHostRef: "managed-1" }).errors.join("\n"),
+    /requires "mode" to be "ssh"/,
+  );
+  const pasted = "top secret password";
+  const invalid = resolveBackendConfig(backend, { ...CONFIG, mode: "ssh", sshHostRef: pasted });
+  assert.match(invalid.errors.join("\n"), /valid \/ssh host id/);
+  assert.doesNotMatch(invalid.errors.join("\n"), /top secret password/);
+});
+
+test("a DSH host reference resolves for every run into a non-secret effective config", async () => {
+  const driverConfigs: Record<string, unknown>[] = [];
+  const backend = createDshBackend(async (config) => {
+    driverConfigs.push({ ...config });
+    return fakeDriver();
+  });
+  let resolutions = 0;
+  const config = { ...CONFIG, mode: "ssh", sshHostRef: "managed-1" };
+  const options: BackendRunOptions = {
+    ...runOptions(config),
+    host: {
+      async resolveSshHost(hostRef) {
+        resolutions += 1;
+        return {
+          id: hostRef,
+          label: "Managed",
+          host: `build-${resolutions}.example.test`,
+          user: "runner",
+          port: 2222,
+          shell: "bash",
+          hostKeySha256: `SHA256:${"A".repeat(43)}`,
+          authentication: resolutions === 1
+            ? { kind: "identity", identityFile: "/home/runner/.ssh/id_ed25519" }
+            : { kind: "agent" },
+        };
+      },
+    },
+  };
+
+  for (let index = 0; index < 2; index += 1) {
+    const outcome = await (await backend.start(SPEC, options)).outcome;
+    await outcome.reclamation;
+  }
+
+  assert.equal(resolutions, 2);
+  assert.equal(driverConfigs[0]?.host, "build-1.example.test");
+  assert.equal(driverConfigs[1]?.host, "build-2.example.test");
+  assert.equal(driverConfigs[0]?.identityFile, "/home/runner/.ssh/id_ed25519");
+  assert.equal(driverConfigs[1]?.identityFile, undefined, "agent auth does not invent an identity path");
+  for (const effective of driverConfigs) {
+    assert.equal(effective.user, "runner");
+    assert.equal(effective.port, 2222);
+    assert.equal(effective.hostKeySha256, `SHA256:${"A".repeat(43)}`);
+    assert.doesNotMatch(JSON.stringify(effective), /password|passphrase|privateKey|top-secret/u);
+  }
+  assert.deepEqual(options.config, config, "the shared registration remains unchanged");
+});
+
+test("a referenced DSH deployment fails before driver creation when the host capability is absent", async () => {
+  let created = 0;
+  const backend = createDshBackend(async () => {
+    created += 1;
+    return fakeDriver();
+  });
+  await assert.rejects(
+    backend.start(SPEC, runOptions({ ...CONFIG, mode: "ssh", sshHostRef: "managed-1" })),
+    /exposes no SSH host provider/,
+  );
+  assert.equal(created, 0);
+});
+
+test("todoBridge remains refused for referenced SSH deployments", () => {
+  const resolved = resolveBackendConfig(createDshBackend(async () => fakeDriver()), {
+    ...CONFIG,
+    mode: "ssh",
+    sshHostRef: "managed-1",
+    todoBridge: true,
+  });
+  assert.equal(resolved.errors.length, 1);
+  assert.match(resolved.errors[0]!, /loopback/);
 });
 
 test("port must be positive", () => {

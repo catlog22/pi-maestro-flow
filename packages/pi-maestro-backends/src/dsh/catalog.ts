@@ -39,6 +39,9 @@ export const DSH_SETTINGS_CATALOGS: TranslationCatalogs = {
       "Where the runtime is launched. `local` runs the dsh agent on this host; `ssh` launches it on a remote machine over SSH (the host/user fields below are then required).",
     "dsh.mode.local": "Local process",
     "dsh.mode.ssh": "Remote over SSH",
+    "dsh.sshHostRef": "/ssh host reference",
+    "dsh.sshHostRef.description":
+      "Host id from the unlocked /ssh manager. Use this instead of host, user, port, host-key, and identity fields; the manager remains authoritative.",
     "dsh.host": "SSH host",
     "dsh.host.description":
       "Host the dsh agent is launched on when `mode` is `ssh`. Required under ssh; ignored under local.",
@@ -81,6 +84,9 @@ export const DSH_SETTINGS_CATALOGS: TranslationCatalogs = {
       "运行时在哪里启动。`local` 在本机跑 dsh agent；`ssh` 经 SSH 在远程机器上启动（此时下面的 host/user 为必填）。",
     "dsh.mode.local": "本地进程",
     "dsh.mode.ssh": "经 SSH 远程",
+    "dsh.sshHostRef": "/ssh 主机引用",
+    "dsh.sshHostRef.description":
+      "已解锁 /ssh 管理器中的主机 id。使用它时不要再填写 host、user、port、主机指纹或私钥路径；这些字段继续由管理器统一负责。",
     "dsh.host": "SSH 主机",
     "dsh.host.description":
       "`mode` 为 `ssh` 时启动 dsh agent 的目标主机。ssh 下必填，local 下忽略。",

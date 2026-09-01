@@ -18,6 +18,7 @@
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { Client, type ConnectConfig } from "ssh2";
+import type { SshHostProfile } from "pi-maestro-backend-core/v1/ssh";
 import type { RemoteHostConfig } from "./types.ts";
 import {
   SSH_DEFAULT_CONNECT_TIMEOUT_MS,
@@ -72,6 +73,19 @@ export interface SshCliProbeResult {
   error?: string;
 }
 
+/** Map a validated, non-secret host-provider profile to the existing ssh2 transport shape. */
+export function remoteHostConfigFromSshProfile(profile: SshHostProfile): RemoteHostConfig {
+  return {
+    host: profile.host,
+    user: profile.user,
+    port: profile.port,
+    hostKeySha256: profile.hostKeySha256,
+    ...(profile.authentication.kind === "identity"
+      ? { identityFile: profile.authentication.identityFile }
+      : {}),
+  };
+}
+
 const SIGNALS: Record<number, NodeJS.Signals> = {
   1: "SIGINT",
   2: "SIGINT",
@@ -108,6 +122,7 @@ function connectDirect(
   return new Promise((resolve, reject) => {
     let settled = false;
     let hostKeyRejected = false;
+    let privateKey: Buffer | undefined;
     const connectTimeoutMs = options.connectTimeoutMs ?? SSH_DEFAULT_CONNECT_TIMEOUT_MS;
     const handshakeTimeoutMs = options.handshakeTimeoutMs ?? SSH_DEFAULT_HANDSHAKE_TIMEOUT_MS;
     const connectTimer = setTimeout(
@@ -126,6 +141,8 @@ function connectDirect(
       client.off("ready", onReady);
       client.off("error", onError);
       client.off("close", onClose);
+      privateKey?.fill(0);
+      privateKey = undefined;
       if (error) {
         client.destroy();
         reject(error);
@@ -147,7 +164,6 @@ function connectDirect(
     client.once("close", onClose);
 
     const agentSocket = options.agentSocket ?? process.env.SSH_AUTH_SOCK;
-    let privateKey: Buffer | undefined;
     if (host.identityFile) {
       try {
         privateKey = options.readIdentityFile?.(host.identityFile) ?? readPrivateIdentityFile(host.identityFile);

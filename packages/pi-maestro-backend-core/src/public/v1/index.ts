@@ -2,7 +2,7 @@
  * v1 barrel.
  *
  * Prefer the narrow subpaths (`pi-maestro-backend-core/v1/spec`,
- * `/v1/backend`, `/v1/registry`) over this barrel: importing the barrel drags
+ * `/v1/backend`, `/v1/registry`, `/v1/ssh`) over this barrel: importing the barrel drags
  * every contract into a consumer that usually needs one of them.
  */
 
@@ -35,6 +35,13 @@ export type {
   SettlementAuthority,
   TeammateBackend,
 } from "./backend.ts";
+
+export type {
+  SshHostProfile,
+  SshHostProfileAuthentication,
+  SshHostReferenceIssue,
+  SshHostReferenceSummary,
+} from "./ssh.ts";
 
 export type {
   BackendRegistration,

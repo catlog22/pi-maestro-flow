@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Client } from "ssh2";
 import type { RemoteConnection, RemoteConnectionFactory } from "./driver.ts";
+import { resolveSshHostRef } from "../public/v1/ssh-hosts.ts";
 import {
   REMOTE_MAX_LINE_BYTES,
   createRemoteRequest,
@@ -36,12 +37,14 @@ import {
   type RemoteWindowSendResult,
   type RemoteWindowBridgeNegotiation,
 } from "./protocol.ts";
-import type {
-  RemoteHostConfig,
-  RemoteStatus,
-  RemoteWorkerIdentity,
-  ResolvedRemoteTarget,
-  ResolvedRemoteWorkspace,
+import {
+  isRemoteHostReferenceConfig,
+  type RemoteHostConfig,
+  type RemoteHostEntry,
+  type RemoteStatus,
+  type RemoteWorkerIdentity,
+  type ResolvedRemoteTarget,
+  type ResolvedRemoteWorkspace,
 } from "./types.ts";
 
 export const REMOTE_GATEWAY_COMMAND = "pi-teammate-remote connect --stdio" as const;
@@ -265,6 +268,26 @@ function hostPoolKey(host: RemoteHostConfig): string {
   return JSON.stringify([host.host, host.port, host.user, host.hostKeySha256, host.identityFile ?? "agent"]);
 }
 
+async function resolveRemoteHostEntry(entry: RemoteHostEntry): Promise<{
+  host: RemoteHostConfig;
+  sshHostRef?: string;
+}> {
+  if (!isRemoteHostReferenceConfig(entry)) return { host: entry };
+  const profile = await resolveSshHostRef(entry.sshHostRef);
+  return {
+    sshHostRef: entry.sshHostRef,
+    host: {
+      host: profile.host,
+      user: profile.user,
+      port: profile.port,
+      hostKeySha256: profile.hostKeySha256,
+      ...(profile.authentication.kind === "identity"
+        ? { identityFile: profile.authentication.identityFile }
+        : {}),
+    },
+  };
+}
+
 function validateHost(host: RemoteHostConfig): void {
   if (!host.host || !host.user || !Number.isInteger(host.port)) {
     throw new SshTransportError("protocol", "Configured remote SSH host is invalid");
@@ -278,7 +301,6 @@ function validateTarget(target: ResolvedRemoteTarget): void {
   if (target.command.length < 1 || target.command.some((argument) => !argument || argument.includes("\0"))) {
     throw new SshTransportError("protocol", "Configured remote target command argv is invalid");
   }
-  validateHost(target.hostConfig);
 }
 
 function validateWorkspace(workspace: ResolvedRemoteWorkspace): void {
@@ -287,7 +309,6 @@ function validateWorkspace(workspace: ResolvedRemoteWorkspace): void {
     || workspace.cwd.includes("\0")) {
     throw new SshTransportError("protocol", "Configured remote workspace cwd must be a canonical absolute POSIX path");
   }
-  validateHost(workspace.hostConfig);
 }
 
 function abortError(): Error {
@@ -299,18 +320,21 @@ function abortError(): Error {
 class HostConnectionPool {
   readonly #host: RemoteHostConfig;
   readonly #options: NormalizedSshOptions;
+  readonly #onClose: () => void;
   readonly #slots: PoolSlot[] = [];
   readonly #pending: PendingLease[] = [];
   #connecting = 0;
+  #retired = false;
   #closed = false;
 
-  constructor(host: RemoteHostConfig, options: NormalizedSshOptions) {
+  constructor(host: RemoteHostConfig, options: NormalizedSshOptions, onClose: () => void) {
     this.#host = host;
     this.#options = options;
+    this.#onClose = onClose;
   }
 
   acquire(signal?: AbortSignal): Promise<PoolLease> {
-    if (this.#closed) return Promise.reject(new SshTransportError("transport", "SSH host pool is closed"));
+    if (this.#closed || this.#retired) return Promise.reject(new SshTransportError("transport", "SSH host pool is closed"));
     if (signal?.aborted) return Promise.reject(abortError());
     if (this.#pending.length >= this.#options.maxPendingPerHost) {
       return Promise.reject(new SshTransportError("pool-limit", "SSH host pool pending limit reached"));
@@ -330,6 +354,16 @@ class HostConnectionPool {
     });
   }
 
+  retire(): void {
+    if (this.#closed || this.#retired) return;
+    this.#retired = true;
+    for (const pending of this.#pending.splice(0)) {
+      this.#cleanupPending(pending);
+      pending.reject(new SshTransportError("transport", "SSH host reference changed before pool admission"));
+    }
+    this.#closeRetiredIfIdle();
+  }
+
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
@@ -341,10 +375,14 @@ class HostConnectionPool {
       slot.closed = true;
       slot.client.end();
     }
+    this.#onClose();
   }
 
   #drain(): void {
-    if (this.#closed) return;
+    if (this.#closed || this.#retired) {
+      this.#closeRetiredIfIdle();
+      return;
+    }
     while (this.#pending.length > 0) {
       const slot = this.#slots.find((candidate) => !candidate.closed
         && candidate.activeChannels < this.#options.maxChannelsPerConnection);
@@ -371,9 +409,10 @@ class HostConnectionPool {
       this.#connecting += 1;
       void this.#openSlot().then((created) => {
         this.#connecting -= 1;
-        if (this.#closed) {
+        if (this.#closed || this.#retired) {
           created.client.end();
           pending.reject(new SshTransportError("transport", "SSH host pool closed during setup"));
+          this.#closeRetiredIfIdle();
           return;
         }
         created.activeChannels = 1;
@@ -396,13 +435,20 @@ class HostConnectionPool {
         if (released) return;
         released = true;
         slot.activeChannels = Math.max(0, slot.activeChannels - 1);
-        this.#drain();
+        if (this.#retired) this.#closeRetiredIfIdle();
+        else this.#drain();
       },
     };
   }
 
   #cleanupPending(pending: PendingLease): void {
     if (pending.signal && pending.onAbort) pending.signal.removeEventListener("abort", pending.onAbort);
+  }
+
+  #closeRetiredIfIdle(): void {
+    if (!this.#retired || this.#closed || this.#connecting > 0) return;
+    if (this.#slots.some((slot) => !slot.closed && slot.activeChannels > 0)) return;
+    this.close();
   }
 
   async #openSlot(): Promise<PoolSlot> {
@@ -431,6 +477,7 @@ function connectSshClient(
     let hostKeyRejected = false;
     let connectTimer: NodeJS.Timeout | undefined;
     let handshakeTimer: NodeJS.Timeout | undefined;
+    let privateKey: Buffer | undefined;
     const finish = (error?: Error) => {
       if (settled) return;
       settled = true;
@@ -440,6 +487,8 @@ function connectSshClient(
       client.off("ready", onReady);
       client.off("error", onError);
       client.off("close", onClose);
+      privateKey?.fill(0);
+      privateKey = undefined;
       if (error) {
         client.destroy();
         reject(error);
@@ -477,7 +526,7 @@ function connectSshClient(
     connectTimer.unref?.();
 
     try {
-      const privateKey = host.identityFile ? options.readIdentityFile(host.identityFile) : undefined;
+      privateKey = host.identityFile ? options.readIdentityFile(host.identityFile) : undefined;
       if (!privateKey && !options.agentSocket) throw new SshTransportError(
         "authentication",
         "Configured SSH host requires an identity-file reference or an available ssh-agent",
@@ -784,6 +833,8 @@ async function execGateway(client: SshClientLike): Promise<SshChannelLike> {
 export class SshRemoteConnectionFactory implements RemoteConnectionFactory {
   readonly #options: NormalizedSshOptions;
   readonly #pools = new Map<string, HostConnectionPool>();
+  readonly #allPools = new Set<HostConnectionPool>();
+  readonly #referencePoolKeys = new Map<string, string>();
   #closed = false;
 
   constructor(options: SshRemoteConnectionFactoryOptions = {}) {
@@ -801,13 +852,36 @@ export class SshRemoteConnectionFactory implements RemoteConnectionFactory {
     return this.#connectHost(workspace.hostConfig, signal);
   }
 
-  async #connectHost(host: RemoteHostConfig, signal?: AbortSignal): Promise<RemoteConnection> {
+  async #connectHost(entry: RemoteHostEntry, signal?: AbortSignal): Promise<RemoteConnection> {
     if (this.#closed) throw new SshTransportError("transport", "SSH connection factory is closed");
-    const key = hostPoolKey(host);
+    const resolved = await resolveRemoteHostEntry(entry);
+    if (this.#closed) throw new SshTransportError("transport", "SSH connection factory is closed");
+    validateHost(resolved.host);
+    const hostKey = hostPoolKey(resolved.host);
+    const key = resolved.sshHostRef === undefined
+      ? `inline:${hostKey}`
+      : `reference:${resolved.sshHostRef}:${hostKey}`;
+    if (resolved.sshHostRef !== undefined) {
+      const previousKey = this.#referencePoolKeys.get(resolved.sshHostRef);
+      if (previousKey && previousKey !== key) {
+        const previousPool = this.#pools.get(previousKey);
+        if (previousPool && this.#pools.get(previousKey) === previousPool) this.#pools.delete(previousKey);
+        previousPool?.retire();
+      }
+      this.#referencePoolKeys.set(resolved.sshHostRef, key);
+    }
     let pool = this.#pools.get(key);
     if (!pool) {
-      pool = new HostConnectionPool(host, this.#options);
+      const reference = resolved.sshHostRef;
+      pool = new HostConnectionPool(resolved.host, this.#options, () => {
+        if (this.#pools.get(key) === pool) this.#pools.delete(key);
+        if (pool) this.#allPools.delete(pool);
+        if (reference !== undefined && this.#referencePoolKeys.get(reference) === key) {
+          this.#referencePoolKeys.delete(reference);
+        }
+      });
       this.#pools.set(key, pool);
+      this.#allPools.add(pool);
     }
     const lease = await pool.acquire(signal);
     try {
@@ -822,7 +896,9 @@ export class SshRemoteConnectionFactory implements RemoteConnectionFactory {
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
-    for (const pool of this.#pools.values()) pool.close();
+    for (const pool of [...this.#allPools]) pool.close();
     this.#pools.clear();
+    this.#allPools.clear();
+    this.#referencePoolKeys.clear();
   }
 }

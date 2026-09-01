@@ -9,7 +9,11 @@ import {
 } from "@earendil-works/pi-tui";
 import type { ModelCliRow } from "../models/cli-list.ts";
 import type { RemoteConfigState } from "../remote/config.ts";
-import type { RemoteHostConfig } from "../remote/types.ts";
+import {
+  isRemoteHostReferenceConfig,
+  type RemoteHostConfig,
+  type RemoteHostEntry,
+} from "../remote/types.ts";
 import { removeLastGrapheme, sanitizeSingleLineInput } from "./input-text.ts";
 import {
   onTuiLocaleChange,
@@ -38,6 +42,7 @@ export type RemotePaneRow =
     user: string;
     port: number;
     keyPrefix: string;
+    sshHostRef?: string;
     scope: RemotePaneScope;
     hidden?: boolean;
   }
@@ -120,6 +125,21 @@ function clampIndex(index: number, length: number): number {
 
 function hostKeyPrefix(host: RemoteHostConfig): string {
   return host.hostKeySha256.replace(/^SHA256:/, "").slice(0, 12);
+}
+
+function remoteHostRow(id: string, entry: RemoteHostEntry, scope: RemotePaneScope): Extract<RemotePaneRow, { kind: "host" }> {
+  if (isRemoteHostReferenceConfig(entry)) {
+    return { kind: "host", id, host: "", user: "", port: 0, keyPrefix: "", sshHostRef: entry.sshHostRef, scope };
+  }
+  return {
+    kind: "host",
+    id,
+    host: entry.host,
+    user: entry.user,
+    port: entry.port,
+    keyPrefix: hostKeyPrefix(entry),
+    scope,
+  };
 }
 
 /**
@@ -405,6 +425,9 @@ export class RemoteConfigPane implements Component, Focusable {
       return this.t(tKey("connections.hiddenTarget"), { id: row.id });
     }
     if (row.kind === "host") {
+      if (row.sshHostRef) {
+        return this.t(tKey("connections.hostRefRow"), { id: row.id, sshHostRef: row.sshHostRef });
+      }
       return this.t(tKey("connections.hostRow"), {
         id: row.id,
         user: row.user,
@@ -451,7 +474,7 @@ export class RemoteConfigPane implements Component, Focusable {
     }
     if (this.scope === "global") {
       for (const [id, host] of Object.entries(state.global.hosts)) {
-        rows.push({ kind: "host", id, host: host.host, user: host.user, port: host.port, keyPrefix: hostKeyPrefix(host), scope: "global" });
+        rows.push(remoteHostRow(id, host, "global"));
       }
       for (const [workspaceRef, workspace] of Object.entries(state.global.workspaces)) {
         rows.push({
@@ -470,7 +493,7 @@ export class RemoteConfigPane implements Component, Focusable {
       for (const [id, entry] of Object.entries(state.project.hosts)) {
         rows.push(entry === null
           ? { kind: "host", id, host: "", user: "", port: 0, keyPrefix: "", scope: "project", hidden: true }
-          : { kind: "host", id, host: entry.host, user: entry.user, port: entry.port, keyPrefix: hostKeyPrefix(entry), scope: "project" });
+          : remoteHostRow(id, entry, "project"));
       }
       for (const [workspaceRef, entry] of Object.entries(state.project.workspaces)) {
         rows.push(entry === null
@@ -540,7 +563,7 @@ export class RemoteConfigPane implements Component, Focusable {
         row.healthyStatic ? "healthy" : "unhealthy",
       ].join(" ");
     }
-    if (row.kind === "host") return `${row.id} ${row.host}`;
+    if (row.kind === "host") return `${row.id} ${row.sshHostRef ?? row.host}`;
     if (row.kind === "workspace") {
       return `${row.workspaceRef} ${row.host} ${row.cwd} ${row.minimumWindowProtocol}`;
     }

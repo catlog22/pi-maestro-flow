@@ -176,9 +176,15 @@ export const DSH_CONFIG_FIELDS: readonly BackendConfigField[] = [
     labelKey: "dsh.mode",
     default: "local",
   },
+  {
+    key: "sshHostRef",
+    kind: "text",
+    labelKey: "dsh.sshHostRef",
+    descriptionKey: "dsh.sshHostRef.description",
+  },
   { key: "host", kind: "text", labelKey: "dsh.host" },
   { key: "user", kind: "text", labelKey: "dsh.user" },
-  { key: "port", kind: "integer", labelKey: "dsh.port", default: 22 },
+  { key: "port", kind: "integer", labelKey: "dsh.port" },
   { key: "hostKeySha256", kind: "text", labelKey: "dsh.hostKeySha256" },
   { key: "identityFile", kind: "path", labelKey: "dsh.identityFile" },
   {
@@ -241,6 +247,42 @@ export type DshDriverFactory = (
 function text(config: Record<string, ConfigValue>, key: string): string | undefined {
   const value = config[key];
   return typeof value === "string" ? value : undefined;
+}
+
+const INLINE_SSH_FIELDS = ["host", "user", "port", "hostKeySha256", "identityFile"] as const;
+const SSH_HOST_REF = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+function hasConfiguredSshField(config: Record<string, ConfigValue>, key: (typeof INLINE_SSH_FIELDS)[number]): boolean {
+  const value = config[key];
+  return typeof value === "number" || (typeof value === "string" && value.trim().length > 0);
+}
+
+/** Resolve a manager-owned SSH host into a private per-run configuration snapshot. */
+async function resolveDshRunConfig(
+  config: Record<string, ConfigValue>,
+  options: BackendRunOptions,
+): Promise<Record<string, ConfigValue>> {
+  const hostRef = text(config, "sshHostRef")?.trim();
+  if (text(config, "mode") !== "ssh" || !hostRef) return config;
+  if (options.host.resolveSshHost === undefined) {
+    throw new Error(
+      "dsh SSH host reference cannot be resolved because this host exposes no SSH host provider",
+    );
+  }
+  const profile = await options.host.resolveSshHost(hostRef);
+  const resolved: Record<string, ConfigValue> = {
+    ...config,
+    host: profile.host,
+    user: profile.user,
+    port: profile.port,
+    hostKeySha256: profile.hostKeySha256,
+  };
+  if (profile.authentication.kind === "identity") {
+    resolved.identityFile = profile.authentication.identityFile;
+  } else {
+    delete resolved.identityFile;
+  }
+  return resolved;
 }
 
 /**
@@ -410,6 +452,7 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
     resolveConfig(config: Record<string, ConfigValue>): ResolvedBackendConfig {
       const errors: string[] = [];
       const warnings: string[] = [];
+      const values: Record<string, ConfigValue> = { ...config };
       for (const key of ["maxTokens", "requestTimeoutMs", "port"]) {
         const value = config[key];
         if (value === undefined) continue;
@@ -417,6 +460,9 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
         errors.push(`"${key}" must be a positive number, got ${String(value)}`);
       }
       const mode = text(config, "mode") ?? "local";
+      // Preserve the legacy resolved value for local registrations while
+      // leaving a referenced SSH port under manager ownership.
+      if (mode !== "ssh" && values.port === undefined) values.port = 22;
       // The credential field names a lookup; a value that looks like a key
       // means someone pasted the secret into a field built to hold a name. The
       // rejected value is never quoted back: the likeliest reason it failed is
@@ -454,12 +500,29 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
           }
         }
       }
-      // Checked at load rather than at launch, so an incomplete host is named
-      // while the operator is still looking at the registration document.
+      // Checked at load rather than at launch, so exactly one SSH source is
+      // authoritative while the operator is still looking at the registration.
+      const rawHostRef = text(config, "sshHostRef");
+      const hostRef = rawHostRef?.trim() ?? "";
       if (mode === "ssh") {
-        for (const key of ["host", "user"]) {
-          if ((text(config, key) ?? "").trim().length > 0) continue;
-          errors.push(`"${key}" is required when "mode" is "ssh"`);
+        if (rawHostRef !== undefined && !SSH_HOST_REF.test(hostRef)) {
+          errors.push('"sshHostRef" must be a valid /ssh host id');
+        }
+        const inlineFields = INLINE_SSH_FIELDS.filter((key) => hasConfiguredSshField(config, key));
+        if (hostRef.length > 0 && inlineFields.length > 0) {
+          errors.push(
+            '"sshHostRef" cannot be combined with "host", "user", "port", "hostKeySha256" or "identityFile"',
+          );
+        } else if (hostRef.length === 0) {
+          for (const key of ["host", "user"]) {
+            const value = text(config, key) ?? "";
+            if (value.trim().length === 0) {
+              errors.push(`"${key}" is required when "mode" is "ssh"`);
+            } else if (/\s|\p{Cc}/u.test(value)) {
+              errors.push(`"${key}" must not contain whitespace or control characters when "mode" is "ssh"`);
+            }
+          }
+          if (values.port === undefined) values.port = 22;
         }
         // The launch fields cross an ssh command line to the far host, where a
         // control character is an argv boundary or a terminal command, not
@@ -473,6 +536,8 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
             + "the value crosses an ssh command line, where it cannot be carried as text",
           );
         }
+      } else if (hostRef.length > 0) {
+        errors.push('"sshHostRef" requires "mode" to be "ssh"');
       }
       // The todo endpoint listens on this host's loopback interface for this
       // host's processes; a runtime launched on a far host connects to its own
@@ -497,7 +562,7 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
           + "every request crosses the network; consider raising it to at least 300000",
         );
       }
-      return { values: config, errors, ...(warnings.length === 0 ? {} : { warnings }) };
+      return { values, errors, ...(warnings.length === 0 ? {} : { warnings }) };
     },
 
     async start(spec: TeammateRunSpec, options: BackendRunOptions): Promise<BackendRun> {
@@ -506,10 +571,11 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
       // harness fixes its model at construction, so select the task's route on
       // a private snapshot rather than mutating (or ignoring) that shared
       // registration object.
-      const runConfig: Record<string, ConfigValue> = {
+      const selectedConfig: Record<string, ConfigValue> = {
         ...options.config,
         ...(spec.model === undefined ? {} : { model: spec.model }),
       };
+      const runConfig = await resolveDshRunConfig(selectedConfig, options);
       const effectiveModel = text(runConfig, "model") ?? "";
       // Started before the driver, because the runtime reads the URL out of its
       // environment as it boots: an endpoint opened afterwards would be one the

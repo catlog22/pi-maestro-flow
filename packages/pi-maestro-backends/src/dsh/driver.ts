@@ -148,9 +148,9 @@ const SSH_CONNECT_TIMEOUT_SECONDS = 10;
  * instead: strict host-key checking and batch mode so a missing key or an
  * unknown host fails closed rather than prompting a turn to death, the
  * optional identity file with `IdentitiesOnly`, a bounded connect timeout,
- * `SetEnv` for every passthrough name this host actually resolves, and then —
- * after `--`, so ssh cannot reinterpret it — the quoted remote command that
- * cds to the working directory and `exec`s the runtime.
+ * `SendEnv` for every passthrough name this host actually resolves, and then —
+ * after `--`, so ssh cannot reinterpret the destination — the quoted remote
+ * command that cds to the working directory and `exec`s the runtime.
  *
  * @param config - the backend's resolved configuration.
  * @param baseCwd - the run's effective directory, when the registration
@@ -190,14 +190,16 @@ export function composeDshLaunch(
 
   const host = text(config, "host");
   const user = text(config, "user");
-  // `resolveConfig` refuses an incomplete host at load; this is the same
-  // refusal at launch, so a config that skipped validation cannot compose an
-  // ssh command line aimed at nowhere.
+  // `resolveConfig` refuses an incomplete or token-splitting destination at
+  // load; repeat the same boundary here for callers that compose directly.
   if ((host ?? "").trim().length === 0) {
     throw new Error('"host" is required when "mode" is "ssh"');
   }
   if ((user ?? "").trim().length === 0) {
     throw new Error('"user" is required when "mode" is "ssh"');
+  }
+  if (/\s|\p{Cc}/u.test(host!) || /\s|\p{Cc}/u.test(user!)) {
+    throw new Error('SSH "host" and "user" must not contain whitespace or control characters');
   }
 
   const args: string[] = [];
@@ -212,14 +214,14 @@ export function composeDshLaunch(
   args.push("-o", "StrictHostKeyChecking=yes");
   if (pinning !== undefined) args.push("-o", `UserKnownHostsFile=${pinning.knownHostsFile}`);
   args.push("-o", `ConnectTimeout=${SSH_CONNECT_TIMEOUT_SECONDS}`);
-  // Only names this host resolves are forwarded; a name the host does not set
-  // would send an explicit empty value and clobber whatever the far side has.
+  // Only names this host resolves are forwarded. Values remain in the scrubbed
+  // child environment and never enter argv, where process inspection and crash
+  // tooling could expose them; OpenSSH reads them through SendEnv instead.
   for (const name of names(config, "envPassthrough")) {
-    const value = process.env[name];
-    if (value === undefined) continue;
-    args.push("-o", `SetEnv=${name}=${value}`);
+    if (process.env[name] === undefined) continue;
+    args.push("-o", `SendEnv=${name}`);
   }
-  args.push(`${user}@${host}`, "--", buildRemoteCommand([command, cordisConfig], cwd));
+  args.push("--", `${user}@${host}`, buildRemoteCommand([command, cordisConfig], cwd));
   return {
     command: "ssh",
     args,

@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { RemoteConfig } from "../src/remote/config.ts";
 import type { RemoteRunCancelResult, RemoteRunInputResult } from "../src/remote/protocol.ts";
-import type { RemoteRunCapture, RemoteRunSnapshot } from "../src/remote/types.ts";
+import {
+  REMOTE_CONFIG_VERSION,
+  type RemoteRunCapture,
+  type RemoteRunSnapshot,
+} from "../src/remote/types.ts";
 import type { RemoteWorkerStartRequest, RemoteWorkerWaitOptions } from "../src/remote/worker-manager.ts";
 import {
   RemoteMonitorSession,
@@ -11,7 +15,7 @@ import {
 import type { RemoteHistoryEntry } from "../src/sessions/remote-history.ts";
 
 const config: RemoteConfig = {
-  version: 3,
+  version: REMOTE_CONFIG_VERSION,
   hosts: {
     linux: {
       host: "worker.example.test",

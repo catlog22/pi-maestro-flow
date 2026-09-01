@@ -59,8 +59,8 @@ test("ssh composition has the exact ordered argv and quotes hostile remote token
     const pin: HostKeyPin = { knownHostsFile: "/tmp/pinned-known-hosts", dispose() {} };
     const launch = composeDshLaunch({
       mode: "ssh",
-      host: "build host",
-      user: "runner user",
+      host: "build-host",
+      user: "runner-user",
       port: 2207,
       identityFile: "/keys/id with space",
       envPassthrough: ["DSH_DRIVER_TEST_VALUE", "DSH_DRIVER_TEST_UNSET"],
@@ -79,11 +79,13 @@ test("ssh composition has the exact ordered argv and quotes hostile remote token
       "-o", "StrictHostKeyChecking=yes",
       "-o", "UserKnownHostsFile=/tmp/pinned-known-hosts",
       "-o", "ConnectTimeout=10",
-      "-o", "SetEnv=DSH_DRIVER_TEST_VALUE=value with $ and 'quotes'",
-      "runner user@build host",
+      "-o", "SendEnv=DSH_DRIVER_TEST_VALUE",
       "--",
+      "runner-user@build-host",
       "cd '/remote/dir with $dollar\nnext'\\''part' && exec 'agent $HOME '\\''quoted'\\''\ncommand' '/remote/cordis file.yml\nsecond'",
     ]);
+    assert.equal(launch.env?.DSH_DRIVER_TEST_VALUE, "value with $ and 'quotes'");
+    assert.equal(launch.args?.some((argument) => argument.includes("value with $")), false);
     assert.equal(launch.cwd, "/unused");
     assert.equal(launch.requestTimeoutMs, 42_000);
   } finally {
@@ -92,7 +94,7 @@ test("ssh composition has the exact ordered argv and quotes hostile remote token
   }
 });
 
-test("ssh composition rejects a missing host or user before launch", () => {
+test("ssh composition rejects a missing or token-splitting host or user before launch", () => {
   assert.throws(
     () => composeDshLaunch({ mode: "ssh", user: "runner", cordisConfig: "c.yml" }),
     /"host" is required/,
@@ -100,6 +102,14 @@ test("ssh composition rejects a missing host or user before launch", () => {
   assert.throws(
     () => composeDshLaunch({ mode: "ssh", host: "build", cordisConfig: "c.yml" }),
     /"user" is required/,
+  );
+  assert.throws(
+    () => composeDshLaunch({ mode: "ssh", host: "build host", user: "runner", cordisConfig: "c.yml" }),
+    /must not contain whitespace or control characters/,
+  );
+  assert.throws(
+    () => composeDshLaunch({ mode: "ssh", host: "build", user: "runner user", cordisConfig: "c.yml" }),
+    /must not contain whitespace or control characters/,
   );
 });
 

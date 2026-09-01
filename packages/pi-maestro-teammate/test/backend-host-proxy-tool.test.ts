@@ -8,6 +8,7 @@ import {
   type TeammateChildToolBrokerRequest,
 } from "../src/runs/child-extensions.ts";
 import { runSingleTeammate } from "../src/runs/execution.ts";
+import { registerSshHostProvider } from "../src/public/v1/ssh-hosts.ts";
 
 /**
  * How a non-Pi backend reaches a host-implemented tool.
@@ -104,6 +105,36 @@ test("a backend reaches the host todo broker under its own attempt identity", as
     assert.equal(seen[0]!.actor.correlationId, options.correlationId);
   } finally {
     release();
+  }
+});
+
+test("a backend resolves SSH references through the process-local host provider", async () => {
+  let seenRef: string | undefined;
+  const registration = registerSshHostProvider({
+    async list() { return [{ id: "managed-1", label: "Managed", compatible: true }]; },
+    async resolve(hostRef) {
+      seenRef = hostRef;
+      return {
+        id: hostRef,
+        label: "Managed",
+        host: "managed.example.test",
+        user: "runner",
+        port: 22,
+        shell: "bash",
+        hostKeySha256: `SHA256:${"A".repeat(43)}`,
+        authentication: { kind: "agent" },
+      };
+    },
+  });
+  try {
+    const options = await attemptOptions();
+    assert.notEqual(options.host.resolveSshHost, undefined);
+    const profile = await options.host.resolveSshHost!("managed-1");
+    assert.equal(seenRef, "managed-1");
+    assert.equal(profile.host, "managed.example.test");
+    assert.equal(profile.authentication.kind, "agent");
+  } finally {
+    registration.dispose();
   }
 });
 

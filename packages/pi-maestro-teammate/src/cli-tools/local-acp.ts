@@ -34,7 +34,7 @@ import type {
 import {
   cliToolArgv,
   probeCliToolCommand,
-  sshHostConfigOf,
+  resolveSshHostConfigOf,
   type CliToolConfig,
 } from "./cli-tools-config.ts";
 
@@ -174,11 +174,15 @@ export async function runSshCliTool(
   params: RunLocalCliToolParams,
 ): Promise<CliToolRunResult> {
   const startedAt = Date.now();
-  const hostConfig = sshHostConfigOf(params.config);
-  if (!hostConfig) {
+  let hostConfig: Awaited<ReturnType<typeof resolveSshHostConfigOf>>;
+  try {
+    // Resolve for every new run: locking, deleting, or editing an `/ssh` host
+    // therefore affects new connections without disturbing an active channel.
+    hostConfig = await resolveSshHostConfigOf(params.config);
+  } catch (error) {
     return failedResult(
       startedAt,
-      `CLI tool "${params.tool}" ssh mode requires host, user and hostKeySha256 in teammate-cli-tools.json`,
+      `CLI tool "${params.tool}" SSH host could not be resolved: ${error instanceof Error ? error.message : "unknown SSH host error"}`,
     );
   }
 

@@ -52,6 +52,7 @@ import type {
 import {
   cliToolArgv,
   probeCliToolCommand,
+  sshHostConfigIssue,
   type CliToolConfig,
 } from "../cli-tools/cli-tools-config.ts";
 import {
@@ -282,9 +283,18 @@ export const ACP_CLI_CONFIG_FIELDS: readonly BackendConfigField[] = [
     labelKey: "acpCli.mode",
     default: "local",
   },
+  {
+    key: "sshHostRef",
+    kind: "text",
+    labelKey: "acpCli.sshHostRef",
+    descriptionKey: "acpCli.sshHostRef.description",
+  },
   { key: "host", kind: "text", labelKey: "acpCli.host" },
   { key: "user", kind: "text", labelKey: "acpCli.user" },
-  { key: "port", kind: "integer", labelKey: "acpCli.port", default: 22 },
+  // Applied only to embedded SSH below. Leaving this declaration without a
+  // generic default lets validation distinguish an explicit override from a
+  // reference that must take its port exclusively from `/ssh`.
+  { key: "port", kind: "integer", labelKey: "acpCli.port" },
   { key: "hostKeySha256", kind: "text", labelKey: "acpCli.hostKeySha256" },
   { key: "identityFile", kind: "path", labelKey: "acpCli.identityFile" },
   {
@@ -420,6 +430,7 @@ async function installedLaunchConfig(
 function launchConfigOf(config: Record<string, ConfigValue>): CliToolConfig {
   const command = text(config, "command");
   const cwd = text(config, "cwd");
+  const sshHostRef = text(config, "sshHostRef");
   const host = text(config, "host");
   const user = text(config, "user");
   const port = count(config, "port");
@@ -432,6 +443,7 @@ function launchConfigOf(config: Record<string, ConfigValue>): CliToolConfig {
     args: list(config, "args"),
     ...(cwd === undefined ? {} : { cwd }),
     env: list(config, "env"),
+    ...(sshHostRef === undefined ? {} : { sshHostRef }),
     ...(host === undefined ? {} : { host }),
     ...(user === undefined ? {} : { user }),
     ...(port === undefined ? {} : { port }),
@@ -605,14 +617,18 @@ export function createAcpCliBackend(
           + "parent process forwards by name; a name=value entry puts the value in the registration document",
         );
       }
-      // Checked at load rather than at launch: the runner's ssh path already
-      // fails closed on an incomplete host, but it does so per run, long after
-      // the operator stopped looking at the file that caused it.
+      // Checked at load rather than at launch: one SSH source must be complete
+      // and authoritative. A reference cannot be paired with even a seemingly
+      // harmless port override, because that would recreate two sources of
+      // truth for the connection.
       if (mode === "ssh") {
-        for (const key of ["host", "user", "hostKeySha256"]) {
-          if ((text(config, key) ?? "").trim().length > 0) continue;
-          errors.push(`"${key}" is required when "mode" is "ssh"`);
+        const issue = sshHostConfigIssue(launchConfigOf(values));
+        if (issue !== undefined) errors.push(issue);
+        else if ((text(values, "sshHostRef") ?? "").trim().length === 0 && count(values, "port") === undefined) {
+          values.port = 22;
         }
+      } else if ((text(values, "sshHostRef") ?? "").trim().length > 0) {
+        errors.push('"sshHostRef" requires "mode" to be "ssh"');
       }
       return { values, errors };
     },
@@ -638,7 +654,7 @@ export function createAcpCliBackend(
         // beats returning the local machine's answer for a remote target.
         throw new Error(
           `teammate backend "acp-cli" cannot list "${field}" for an "ssh" registration: `
-          + "the probe launches the agent locally, so the target host's catalogue is not reachable here",
+          + "whether embedded or selected by sshHostRef, the target host's catalogue is not reachable by the local probe",
         );
       }
       const route = routeOf(config);

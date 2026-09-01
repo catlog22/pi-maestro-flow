@@ -12,6 +12,8 @@ import {
   loadMaestroDelegateConfig,
   loadCliToolsConfig,
   probeCliToolCommand,
+  resolveSshHostConfigOf,
+  sshHostConfigIssue,
   sshHostConfigOf,
   toCliToolModelEntries,
   type CliToolConfig,
@@ -21,6 +23,7 @@ import {
   cliToolNameFromModel,
   isCliToolModel,
 } from "../src/cli-tools/local-acp.ts";
+import { registerSshHostProvider } from "../src/public/v1/ssh-hosts.ts";
 
 const baseConfig: CliToolsConfig = {
   version: "1",
@@ -57,7 +60,7 @@ test("cliToolCommand falls back to the tool name; cliToolArgv appends args", () 
   assert.deepEqual(cliToolArgv("with-args", baseConfig.tools["with-args"]!), ["node", "--version"]);
 });
 
-test("sshHostConfigOf lifts complete ssh fields and rejects incomplete ones", () => {
+test("sshHostConfigOf preserves legacy inline fields and rejects incomplete or mixed sources", () => {
   const complete: CliToolConfig = {
     enabled: true,
     mode: "ssh",
@@ -67,9 +70,7 @@ test("sshHostConfigOf lifts complete ssh fields and rejects incomplete ones", ()
     hostKeySha256: "SHA256:abc",
     identityFile: "~/.ssh/id_ed25519",
   };
-  const host = sshHostConfigOf(complete);
-  assert.ok(host);
-  assert.deepEqual(host, {
+  assert.deepEqual(sshHostConfigOf(complete), {
     host: "devbox",
     user: "dyw",
     port: 22,
@@ -78,8 +79,48 @@ test("sshHostConfigOf lifts complete ssh fields and rejects incomplete ones", ()
   });
   assert.equal(sshHostConfigOf({ enabled: true, mode: "ssh", host: "devbox" }), null);
   assert.equal(sshHostConfigOf({ enabled: true, mode: "ssh", host: "devbox", user: "u", port: 99999, hostKeySha256: "SHA256:abc" }), null);
+  assert.equal(sshHostConfigOf({ enabled: true, mode: "ssh", sshHostRef: "managed-1" }), null);
+  assert.match(
+    sshHostConfigIssue({ enabled: true, mode: "ssh", sshHostRef: "managed-1", port: 2222 }) ?? "",
+    /cannot be combined/,
+  );
+  assert.match(sshHostConfigIssue({ enabled: true, mode: "ssh", sshHostRef: " " }) ?? "", /non-empty/);
   // local tools never need ssh fields
   assert.equal(sshHostConfigOf({ enabled: true }), null);
+});
+
+test("resolveSshHostConfigOf maps a fresh manager profile without copying credentials", async () => {
+  let resolutions = 0;
+  const registration = registerSshHostProvider({
+    async list() { return []; },
+    async resolve(hostRef) {
+      resolutions += 1;
+      return {
+        id: hostRef,
+        label: "Managed",
+        host: "managed.example.test",
+        user: "runner",
+        port: 2222,
+        shell: "bash",
+        hostKeySha256: `SHA256:${"A".repeat(43)}`,
+        authentication: { kind: "identity", identityFile: "/home/runner/.ssh/id_ed25519" },
+      };
+    },
+  });
+  try {
+    const config = { enabled: true, mode: "ssh" as const, sshHostRef: "managed-1" };
+    assert.deepEqual(await resolveSshHostConfigOf(config), {
+      host: "managed.example.test",
+      user: "runner",
+      port: 2222,
+      hostKeySha256: `SHA256:${"A".repeat(43)}`,
+      identityFile: "/home/runner/.ssh/id_ed25519",
+    });
+    await resolveSshHostConfigOf(config);
+    assert.equal(resolutions, 2, "each new connection resolves the reference again");
+  } finally {
+    registration.dispose();
+  }
 });
 
 test("probeCliToolCommand reports reachable and missing local executables", () => {
@@ -179,7 +220,15 @@ test("ssh probe fails closed on incomplete config; optimistic pass on complete c
     host: "devbox",
   });
   assert.equal(incomplete.ok, false);
-  assert.match(incomplete.error ?? "", /host, user and hostKeySha256/);
+  assert.match(incomplete.error ?? "", /sshHostRef or host, user and hostKeySha256/);
+
+  const referenced = probeCliToolCommand("ssh-reference-optimistic", {
+    enabled: true,
+    mode: "ssh",
+    sshHostRef: "managed-probe",
+    command: "codex",
+  });
+  assert.equal(referenced.ok, true, "a complete reference starts a real async provider/remote probe");
 
   // Complete config optimistically passes while the async probe runs.
   const complete = probeCliToolCommand("ssh-optimistic", {

@@ -121,10 +121,14 @@ test("project remote config overrides global targets and can hide entries", () =
     assert.equal(state.config.workspaces["prod/app"].cwd, "/srv/project-copy");
     assert.equal(state.config.workspaces["prod/app"].minimumWindowProtocol, 2);
     const target = resolveRemoteTarget(state.config, "linux-a/pi");
+    assert.equal("sshHostRef" in target.hostConfig, false);
+    if ("sshHostRef" in target.hostConfig) throw new Error("expected inline target host");
     assert.equal(target.hostConfig.hostKeySha256, HOST_KEY);
     assert.equal(target.id, "linux-a/pi");
     const workspace = resolveRemoteWorkspace(state.config, "prod/app");
     assert.equal(workspace.workspaceRef, "prod/app");
+    assert.equal("sshHostRef" in workspace.hostConfig, false);
+    if ("sshHostRef" in workspace.hostConfig) throw new Error("expected inline workspace host");
     assert.equal(workspace.hostConfig.hostKeySha256, HOST_KEY);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -400,7 +404,7 @@ test("project config rejects a project cwd reached through a symlinked ancestor"
   }
 });
 
-test("version 1 stores migrate to strict version 3 command profiles", () => {
+test("version 1 stores migrate to strict version 4 command profiles", () => {
   const root = canonicalTempRoot("pi-remote-migration-");
   const cwd = path.join(root, "project");
   const globalPath = path.join(root, "teammate-remotes.json");
@@ -450,7 +454,7 @@ test("version 1 stores migrate to strict version 3 command profiles", () => {
   }
 });
 
-test("version 2 stores read compatibly and save back as version 3", () => {
+test("version 2 stores read compatibly and save back as version 4", () => {
   const root = canonicalTempRoot("pi-remote-v2-migration-");
   const cwd = path.join(root, "project");
   const globalPath = path.join(root, "teammate-remotes.json");
@@ -474,6 +478,31 @@ test("version 2 stores read compatibly and save back as version 3", () => {
   }
 });
 
+test("version 3 stores migrate to version 4 without changing inline hosts or overrides", () => {
+  const root = canonicalTempRoot("pi-remote-v3-migration-");
+  const cwd = path.join(root, "project");
+  const globalPath = path.join(root, "teammate-remotes.json");
+  fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
+  const global = { ...globalStore(), version: 3 };
+  const project = {
+    version: 3,
+    hosts: { "linux-a": { sshHostRef: "manager-host" } },
+    targets: {},
+    workspaces: {},
+  };
+  try {
+    fs.writeFileSync(globalPath, JSON.stringify(global));
+    fs.writeFileSync(getProjectRemoteConfigPath(cwd), JSON.stringify(project));
+    const state = loadRemoteConfigState(cwd, globalPath);
+    assert.equal(state.global.version, REMOTE_CONFIG_VERSION);
+    assert.equal(state.project.version, REMOTE_CONFIG_VERSION);
+    assert.deepEqual(state.project.hosts["linux-a"], { sshHostRef: "manager-host" });
+    assert.deepEqual(state.config.hosts["linux-a"], { sshHostRef: "manager-host" });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("malformed and unknown-version remote stores fail closed", () => {
   const root = canonicalTempRoot("pi-remote-malformed-");
   const cwd = path.join(root, "project");
@@ -483,7 +512,7 @@ test("malformed and unknown-version remote stores fail closed", () => {
     fs.writeFileSync(globalPath, JSON.stringify({ version: REMOTE_CONFIG_VERSION, hosts: {}, targets: {}, unexpected: true }));
     assert.throws(() => loadRemoteConfigState(cwd, globalPath), /Unknown global teammate remote config field/);
 
-    for (const version of [0, 4, "3", null]) {
+    for (const version of [0, 5, "4", null]) {
       fs.writeFileSync(globalPath, JSON.stringify({ version, hosts: {}, targets: {} }));
       assert.throws(() => loadRemoteConfigState(cwd, globalPath), /Unsupported teammate remote config version/);
     }
@@ -517,8 +546,15 @@ const VALID_WORKSPACE_DRAFT = {
   minimumWindowProtocol: 1,
 };
 
-test("validateRemoteHostDraft accepts a valid host and rejects field-level errors", () => {
+test("validateRemoteHostDraft accepts inline or referenced hosts and rejects mixed sources", () => {
   assert.deepEqual(validateRemoteHostDraft("linux-b", VALID_HOST_DRAFT), { ok: true });
+  assert.deepEqual(validateRemoteHostDraft("linux-b", { sshHostRef: "manager-host" }), { ok: true });
+  assert.equal(validateRemoteHostDraft("linux-b", { ...VALID_HOST_DRAFT, sshHostRef: "manager-host" }).ok, false);
+  assert.match(
+    errorOf(validateRemoteHostDraft("linux-b", { ...VALID_HOST_DRAFT, sshHostRef: "manager-host" })),
+    /Unknown remote host linux-b field/,
+  );
+  assert.equal(validateRemoteHostDraft("linux-b", { sshHostRef: "bad ref" }).ok, false);
 
   assert.equal(validateRemoteHostDraft("Bad ID", VALID_HOST_DRAFT).ok, false);
   assert.match(errorOf(validateRemoteHostDraft("Bad ID", VALID_HOST_DRAFT)), /Invalid remote host id/);

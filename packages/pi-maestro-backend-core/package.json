@@ -15,7 +15,8 @@
     "./v1": "./src/public/v1/index.ts",
     "./v1/spec": "./src/public/v1/spec.ts",
     "./v1/backend": "./src/public/v1/backend.ts",
-    "./v1/registry": "./src/public/v1/registry.ts"
+    "./v1/registry": "./src/public/v1/registry.ts",
+    "./v1/ssh": "./src/public/v1/ssh.ts"
   },
   "files": [
     "src/**/*.ts"

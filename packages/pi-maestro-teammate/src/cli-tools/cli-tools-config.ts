@@ -6,8 +6,8 @@
  * models and executed over the Agent Client Protocol:
  *
  * - mode "local": the CLI is spawned on this machine (which/where reachability);
- * - mode "ssh": the CLI runs on a remote host over a direct ssh2 exec, with the
- *   ssh connection fields embedded per tool (host/user/port/hostKeySha256/identityFile).
+ * - mode "ssh": the CLI runs on a remote host over a direct ssh2 exec, using
+ *   either an `/ssh` manager reference or embedded connection fields.
  *
  * Discovery follows the same convention as teammate-models.json / teammate-remotes.json:
  * the global file is ~/.pi/agent/teammate-cli-tools.json and the project file is
@@ -22,7 +22,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AvailableModelEntry } from "../models/model-catalog.ts";
 import type { RemoteHostConfig } from "../remote/types.ts";
-import { probeSshCliExecutable } from "../remote/ssh-exec.ts";
+import { resolveSshHostRef } from "../public/v1/ssh-hosts.ts";
+import {
+  probeSshCliExecutable,
+  remoteHostConfigFromSshProfile,
+} from "../remote/ssh-exec.ts";
 
 /** Launch configuration for a teammate-managed CLI tool. */
 export interface CliToolConfig {
@@ -37,7 +41,8 @@ export interface CliToolConfig {
   cwd?: string;
   /** Trusted environment-variable names forwarded from the parent process. */
   env?: readonly string[];
-  // SSH connection fields (mode "ssh" only):
+  // SSH source (mode "ssh" only): a manager reference OR embedded fields.
+  sshHostRef?: string;
   host?: string;
   user?: string;
   port?: number;
@@ -235,22 +240,71 @@ export function cliToolArgv(name: string, config: CliToolConfig): [string, ...st
   return [cliToolCommand(name, config), ...(config.args ?? [])];
 }
 
-/** SSH connection fields lifted from a tool config; null if incomplete. */
-export function sshHostConfigOf(config: CliToolConfig): RemoteHostConfig | null {
-  if ((config.mode ?? "local") !== "ssh") return null;
+const SSH_INLINE_FIELDS: readonly (keyof CliToolConfig)[] = [
+  "host",
+  "user",
+  "port",
+  "hostKeySha256",
+  "identityFile",
+];
+
+function hasInlineSshField(config: CliToolConfig): boolean {
+  return SSH_INLINE_FIELDS.some((key) => {
+    const value = config[key];
+    return typeof value === "number" || (typeof value === "string" && value.trim().length > 0);
+  });
+}
+
+/** Safe configuration diagnostic for one ssh-mode tool, or undefined when complete. */
+export function sshHostConfigIssue(config: CliToolConfig): string | undefined {
+  if ((config.mode ?? "local") !== "ssh") return undefined;
+  const rawRef = config.sshHostRef;
+  const hostRef = rawRef?.trim() ?? "";
+  if (rawRef !== undefined && hostRef.length === 0) {
+    return "sshHostRef must be a non-empty /ssh host id";
+  }
+  if (hostRef && hasInlineSshField(config)) {
+    return "sshHostRef cannot be combined with host, user, port, hostKeySha256 or identityFile";
+  }
+  if (hostRef) return undefined;
+
   const host = config.host?.trim() ?? "";
   const user = config.user?.trim() ?? "";
-  const port = config.port ?? 22;
   const hostKeySha256 = config.hostKeySha256?.trim() ?? "";
-  if (!host || !user || !hostKeySha256) return null;
-  if (!Number.isInteger(port) || port < 1 || port > 65_535) return null;
+  if (!host || !user || !hostKeySha256) {
+    return "ssh mode requires sshHostRef or host, user and hostKeySha256";
+  }
+  const port = config.port ?? 22;
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    return "ssh port must be an integer between 1 and 65535";
+  }
+  return undefined;
+}
+
+/** Embedded SSH connection fields lifted from a tool config; null for references or invalid input. */
+export function sshHostConfigOf(config: CliToolConfig): RemoteHostConfig | null {
+  if (sshHostConfigIssue(config) !== undefined || (config.sshHostRef?.trim() ?? "")) return null;
+  if ((config.mode ?? "local") !== "ssh") return null;
   return {
-    host,
-    user,
-    port,
-    hostKeySha256,
+    host: config.host!.trim(),
+    user: config.user!.trim(),
+    port: config.port ?? 22,
+    hostKeySha256: config.hostKeySha256!.trim(),
     ...(config.identityFile?.trim() ? { identityFile: config.identityFile.trim() } : {}),
   };
+}
+
+/** Resolve either host source immediately before a new direct-SSH connection. */
+export async function resolveSshHostConfigOf(config: CliToolConfig): Promise<RemoteHostConfig> {
+  const issue = sshHostConfigIssue(config);
+  if (issue !== undefined) throw new Error(issue);
+  const hostRef = config.sshHostRef?.trim();
+  if (hostRef) {
+    return remoteHostConfigFromSshProfile(await resolveSshHostRef(hostRef));
+  }
+  const inline = sshHostConfigOf(config);
+  if (!inline) throw new Error("ssh mode requires sshHostRef or complete embedded SSH fields");
+  return inline;
 }
 
 export interface CliToolProbeResult {
@@ -278,6 +332,10 @@ const sshProbeInflight = new Map<string, Promise<void>>();
  */
 function probeCacheKey(command: string, config: CliToolConfig): string {
   if ((config.mode ?? "local") !== "ssh") return JSON.stringify(["local", command]);
+  const hostRef = config.sshHostRef?.trim();
+  if (hostRef && sshHostConfigIssue(config) === undefined) {
+    return JSON.stringify(["ssh-ref", hostRef, command]);
+  }
   const hostConfig = sshHostConfigOf(config);
   // An incomplete ssh config has no target to name; the verdict is the same
   // refusal for every such registration, so they share one entry.
@@ -386,22 +444,20 @@ function probeLocalExecutable(key: string, command: string): CliToolProbeResult 
 }
 
 function probeSshTool(key: string, command: string, config: CliToolConfig): CliToolProbeResult {
-  const hostConfig = sshHostConfigOf(config);
-  if (!hostConfig) {
-    const result: CliToolProbeResult = {
-      ok: false,
-      command,
-      error: "ssh mode requires host, user and hostKeySha256 in teammate-cli-tools.json",
-    };
+  const issue = sshHostConfigIssue(config);
+  if (issue !== undefined) {
+    const result: CliToolProbeResult = { ok: false, command, error: issue };
     probeCache.set(key, { result, at: Date.now() });
     return result;
   }
-  // Optimistically list a complete configuration; warm the cache asynchronously
-  // so the next refresh filters unreachable hosts. Deduplicate concurrent probes.
+  // Optimistically list a complete source while an actual provider-resolution
+  // and remote executable probe warms the cache. This is the same bounded
+  // discovery behavior as embedded SSH, not a local catalogue result.
   const result: CliToolProbeResult = { ok: true, command };
   probeCache.set(key, { result, at: Date.now() });
   if (!sshProbeInflight.has(key)) {
-    const probe = probeSshCliExecutable(hostConfig, command)
+    const probe = resolveSshHostConfigOf(config)
+      .then((hostConfig) => probeSshCliExecutable(hostConfig, command))
       .then((outcome) => {
         probeCache.set(key, {
           result: outcome.ok
@@ -410,9 +466,13 @@ function probeSshTool(key: string, command: string, config: CliToolConfig): CliT
           at: Date.now(),
         });
       })
-      .catch(() => {
+      .catch((error: unknown) => {
         probeCache.set(key, {
-          result: { ok: false, command, error: `remote executable "${command}" probe failed` },
+          result: {
+            ok: false,
+            command,
+            error: error instanceof Error ? error.message : `remote executable "${command}" probe failed`,
+          },
           at: Date.now(),
         });
       })

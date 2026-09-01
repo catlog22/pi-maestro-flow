@@ -322,6 +322,7 @@ import dshBackend, { DSH_SETTINGS_CATALOGS } from "pi-maestro-backends/dsh";
 import acpCliBackend, { ACP_CLI_SETTINGS_CATALOGS } from "pi-maestro-teammate/v1/acp-cli";
 import { PI_SUBPROCESS, PI_SUBPROCESS_CONFIG_FIELDS, PI_SUBPROCESS_SETTINGS_CATALOGS } from "pi-maestro-teammate/v1/backends";
 import { registerInstallCommand } from "../install/install-command.ts";
+import { registerSshManager } from "../ssh-manager/extension.ts";
 
 export const MAESTRO_CHILD_TOOL_NAMES = [
   "ask-user-question",
@@ -905,6 +906,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
     return;
   }
 
+  registerSshManager(pi);
   const disposeTuiLocaleEvents = registerTuiLocaleEvents(pi.events);
   // Dispose EventBus subscriptions on shutdown (defensive; framework may auto-dispose).
   const disposers: Array<() => void> = [disposeCompletionDurabilityProvider];

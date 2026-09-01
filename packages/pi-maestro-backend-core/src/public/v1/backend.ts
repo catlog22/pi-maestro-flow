@@ -23,6 +23,7 @@ import type {
   SingleResult,
   TeammateRunSpec,
 } from "./spec.ts";
+import type { SshHostProfile } from "./ssh.ts";
 
 /**
  * How completely a backend serves one capability.
@@ -280,6 +281,13 @@ export interface ResolvedBackendConfig {
  * ignores it.
  */
 export interface BackendHostCapabilities {
+  /**
+   * Resolve a host-owned SSH reference immediately before a backend opens a
+   * connection. The returned profile contains no password, private key, or
+   * private-key passphrase. Hosts that do not expose an SSH provider omit this
+   * optional ability, preserving compatibility with existing backends.
+   */
+  resolveSshHost?(hostRef: string): Promise<SshHostProfile>;
   requestPermission?(request: {
     toolName: string;
     detail: string;

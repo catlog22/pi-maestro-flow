@@ -4,6 +4,7 @@ import type {
   BackendConfigField,
   ConfigValue,
 } from "pi-maestro-backend-core/v1/backend";
+import { listSshHostRefs } from "../public/v1/ssh-hosts.ts";
 import {
   candidateConflicts,
   isValidId,
@@ -35,7 +36,9 @@ import {
 } from "../remote/config.ts";
 import {
   REMOTE_WINDOW_BRIDGE_PLUGIN_ID,
+  isRemoteHostReferenceConfig,
   type RemoteHostConfig,
+  type RemoteHostEntry,
   type RemoteTargetConfig,
   type RemoteWorkspaceConfig,
 } from "../remote/types.ts";
@@ -78,6 +81,8 @@ export interface DeploymentWizardDeps {
   yes?: boolean;
   /** Dynamic module-loading seam, reached only after a module is selected. */
   importModule?: (specifier: string) => Promise<unknown>;
+  /** Injectable `/ssh` provider-list seam for deterministic deployment tests. */
+  listHostRefs?: typeof listSshHostRefs;
 }
 
 export interface DeploymentEditWizardDeps extends DeploymentWizardDeps {
@@ -185,12 +190,14 @@ async function buildEditCandidate(
     }
   }
   if (edits.size === 0) return { noChanges: true };
-  // Mirror the add flow's ssh-required rule against the candidate config: an
-  // ssh launch cannot compose without a host or user, so the edit must not
-  // publish a manifest the backend would only reject at dispatch.
+  // Mirror the add flow's ssh-required rule against the candidate config.
+  // A manager reference owns the destination fields; the embedded form still
+  // requires host and user so the edit cannot publish an unusable launch.
   const candidate = { ...current };
   for (const [key, value] of edits) candidate[key] = value;
-  const missing = candidate.mode === "ssh"
+  const hasSshHostRef = typeof candidate.sshHostRef === "string"
+    && candidate.sshHostRef.trim().length > 0;
+  const missing = candidate.mode === "ssh" && !hasSshHostRef
     ? ["host", "user"].filter((key) =>
       candidate[key] === undefined || String(candidate[key]).trim().length === 0)
     : [];
@@ -294,11 +301,41 @@ async function promptAddConfig(
   ui: WizardUi,
   fields: readonly BackendConfigField[],
   seed: Readonly<Record<string, ConfigValue>>,
-): Promise<{ cancelled: true } | { config: Record<string, ConfigValue> }> {
+  listHostRefs: typeof listSshHostRefs,
+): Promise<{ cancelled: true } | { error: string } | { config: Record<string, ConfigValue> }> {
   const config: Record<string, ConfigValue> = { ...seed };
   for (const field of fields) {
+    if (field.key === "sshHostRef" && config.mode === "ssh") {
+      const inlineSource = wizardText(ui, "remote.hostSourceInline");
+      const managerSource = wizardText(ui, "remote.hostSourceManager");
+      const source = await ui.select(wizardText(ui, "remote.hostSource"), [inlineSource, managerSource]);
+      if (source === undefined) return cancelled();
+      if (source === managerSource) {
+        let references: Awaited<ReturnType<typeof listSshHostRefs>>;
+        try {
+          references = await listHostRefs();
+        } catch (error) {
+          return {
+            error: wizardText(ui, "remote.hostRefUnavailable", {
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          };
+        }
+        const compatible = references.filter((reference) => reference.compatible);
+        if (compatible.length === 0) return { error: wizardText(ui, "remote.hostRefNoneCompatible") };
+        const options = compatible.map((reference) => `${reference.label} · ${reference.id}`);
+        const selected = await ui.select(wizardText(ui, "remote.hostRefSelect"), options);
+        if (selected === undefined) return cancelled();
+        const index = options.indexOf(selected);
+        if (index < 0) return cancelled();
+        config.sshHostRef = compatible[index]!.id;
+      }
+      continue;
+    }
+    const hasSshHostRef = typeof config.sshHostRef === "string"
+      && config.sshHostRef.trim().length > 0;
     const required = field.required === true
-      || (config.mode === "ssh" && (field.key === "host" || field.key === "user"));
+      || (config.mode === "ssh" && !hasSshHostRef && (field.key === "host" || field.key === "user"));
     const answer = await promptOneConfigField(ui, field, config, required);
     if ("cancelled" in answer) return answer;
     if (answer.value !== undefined) config[field.key] = answer.value;
@@ -448,8 +485,11 @@ export async function wizardDeploymentAdd(
   // Third-party resolution occurs only after its module id and deployment have
   // been selected; builtins still resolve from static field constants.
   const fields = await resolveConfigFieldsForModule(moduleId, deps.importModule);
-  const configured = await promptAddConfig(ui, fields, seededConfig);
+  const configured = await promptAddConfig(ui, fields, seededConfig, deps.listHostRefs ?? listSshHostRefs);
   if ("cancelled" in configured) return configured;
+  if ("error" in configured) {
+    return { ok: false, message: configured.error, reloadCatalog: false };
+  }
 
   const existingModels = base.models as Record<string, ModelRegistrationV2>;
   const registrationContext = {
@@ -511,7 +551,9 @@ interface RemoteWizardDeps {
 
 export interface RemoteHostWizardDeps extends RemoteWizardDeps {
   id?: string;
-  current?: RemoteHostConfig;
+  current?: RemoteHostEntry;
+  /** Injectable provider-list seam for deterministic configuration tests. */
+  listHostRefs?: typeof listSshHostRefs;
 }
 
 export interface RemoteTargetWizardDeps extends RemoteWizardDeps {
@@ -610,38 +652,76 @@ export async function wizardRemoteHost(
   const id = await promptRemoteId(ui, wizardText(ui, "remote.hostId"), deps.id, validateHostId);
   if (id === undefined) return remoteCancelled();
 
+  const inlineSource = wizardText(ui, "remote.hostSourceInline");
+  const managerSource = wizardText(ui, "remote.hostSourceManager");
+  const source = await ui.select(wizardText(ui, "remote.hostSource"), [inlineSource, managerSource]);
+  if (source === undefined) return remoteCancelled();
+  if (source === managerSource) {
+    let references: Awaited<ReturnType<typeof listSshHostRefs>>;
+    try {
+      references = await (deps.listHostRefs ?? listSshHostRefs)();
+    } catch (error) {
+      return {
+        ok: false,
+        message: wizardText(ui, "remote.hostRefUnavailable", {
+          error: error instanceof Error ? error.message : String(error),
+        }),
+        reloadRemote: false,
+      };
+    }
+    const compatible = references.filter((entry) => entry.compatible);
+    if (compatible.length === 0) {
+      return { ok: false, message: wizardText(ui, "remote.hostRefNoneCompatible"), reloadRemote: false };
+    }
+    const options = compatible.map((entry) => `${entry.label} · ${entry.id}`);
+    const selected = await ui.select(wizardText(ui, "remote.hostRefSelect"), options);
+    const index = selected === undefined ? -1 : options.indexOf(selected);
+    if (index < 0) return remoteCancelled();
+    const draft: RemoteHostEntry = { sshHostRef: compatible[index]!.id };
+    const validation = validateRemoteHostDraft(id, draft);
+    if (!validation.ok) {
+      return { ok: false, message: wizardText(ui, "remote.validationFailed", { error: validation.error }), reloadRemote: false };
+    }
+    const next = cloneStores(deps.state);
+    const target = deps.scope === "global" ? next.global : next.project;
+    target.hosts[id] = draft;
+    await persistRemote(ui, deps, next);
+    return { ok: true, message: wizardText(ui, "remote.hostSaved", { id }), reloadRemote: true };
+  }
+
+  const current = deps.current && !isRemoteHostReferenceConfig(deps.current) ? deps.current : undefined;
   const host = await promptRemoteValue(
     ui,
     { key: "host", kind: "text", labelKey: "remote.hostAddress", required: true },
-    deps.current?.host,
+    current?.host,
     (value) => typeof value === "string" && value.length <= 253 && !/\s/.test(value),
   );
   if ("cancelled" in host) return remoteCancelled();
   const user = await promptRemoteValue(
     ui,
     { key: "user", kind: "text", labelKey: "remote.hostUser", required: true },
-    deps.current?.user,
+    current?.user,
     (value) => typeof value === "string" && value.length <= 128 && !/\s/.test(value),
   );
   if ("cancelled" in user) return remoteCancelled();
   const port = await promptRemoteValue(
     ui,
     { key: "port", kind: "integer", labelKey: "remote.hostPort", default: 22, required: true },
-    deps.current?.port ?? 22,
+    current?.port ?? 22,
     (value) => typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 65_535,
   );
   if ("cancelled" in port) return remoteCancelled();
   const hostKey = await promptRemoteValue(
     ui,
     { key: "hostKeySha256", kind: "text", labelKey: "remote.hostKey", required: true },
-    deps.current?.hostKeySha256,
+    current?.hostKeySha256,
     (value) => typeof value === "string" && HOST_KEY_PATTERN.test(value),
   );
   if ("cancelled" in hostKey) return remoteCancelled();
   const identity = await promptRemoteValue(
     ui,
     { key: "identityFile", kind: "path", labelKey: "remote.identityFile" },
-    deps.current?.identityFile,
+    current?.identityFile,
     (value) => value === undefined || (typeof value === "string" && value.length <= 4096),
     false,
   );

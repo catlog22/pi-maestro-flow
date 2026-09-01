@@ -5,6 +5,10 @@ import { PassThrough } from "node:stream";
 import test from "node:test";
 import type { ClientChannel, ConnectConfig } from "ssh2";
 import {
+  SshHostProviderError,
+  registerSshHostProvider,
+} from "../src/public/v1/ssh-hosts.ts";
+import {
   REMOTE_GATEWAY_COMMAND,
   RemoteRpcResponseError,
   SshRemoteConnectionFactory,
@@ -13,12 +17,16 @@ import {
   diagnoseRemoteWindowBridgeError,
   type SshClientLike,
 } from "../src/remote/ssh.ts";
-import type { ResolvedRemoteTarget, ResolvedRemoteWorkspace } from "../src/remote/types.ts";
+import type {
+  RemoteHostConfig,
+  ResolvedRemoteTarget,
+  ResolvedRemoteWorkspace,
+} from "../src/remote/types.ts";
 
 const PRESENTED_KEY = Buffer.from("pinned-test-host-key");
 const HOST_KEY = `SHA256:${createHash("sha256").update(PRESENTED_KEY).digest("base64").replace(/=+$/, "")}`;
 
-function target(overrides: Partial<ResolvedRemoteTarget["hostConfig"]> = {}): ResolvedRemoteTarget {
+function target(overrides: Partial<RemoteHostConfig> = {}): ResolvedRemoteTarget {
   return {
     id: "linux-a/pi",
     host: "linux-a",
@@ -61,6 +69,7 @@ class FakeSshClient extends EventEmitter {
   readonly connectConfigs: ConnectConfig[] = [];
   readonly commands: string[] = [];
   readonly channels: ClientChannel[] = [];
+  endCalls = 0;
 
   constructor(mode: FakeSshClient["mode"] = "ready", presentedKey = PRESENTED_KEY) {
     super();
@@ -93,6 +102,7 @@ class FakeSshClient extends EventEmitter {
   }
 
   end(): this {
+    this.endCalls += 1;
     queueMicrotask(() => this.emit("close"));
     return this;
   }
@@ -165,6 +175,7 @@ test("SSH uses identity-only auth, keepalive, and the literal fixed gateway comm
   assert.equal(config.keepaliveInterval, 1234);
   assert.equal(config.keepaliveCountMax, 7);
   assert.equal(Buffer.isBuffer(config.privateKey), true);
+  assert.equal((config.privateKey as Buffer).every((byte) => byte === 0), true, "identity bytes are cleared after authentication");
   assert.deepEqual(client.commands, [REMOTE_GATEWAY_COMMAND]);
   assert.equal(client.commands[0], "pi-teammate-remote connect --stdio");
   assert.equal(client.commands[0].includes("/srv/project"), false);
@@ -182,6 +193,103 @@ test("explicit workspaces reuse the pinned pool and fixed gateway without derivi
   assert.equal(client.commands[0]?.includes("pi-rpc"), false);
   await connection.close();
   await factory.close();
+});
+
+test("SSH host references resolve on every new connection and retire changed pools after active channels finish", async () => {
+  const firstClient = new FakeSshClient();
+  const secondClient = new FakeSshClient();
+  const thirdClient = new FakeSshClient();
+  let hostname = "first.example";
+  const registration = registerSshHostProvider({
+    async list() { return [{ id: "manager-host", label: "Managed", compatible: true }]; },
+    async resolve(hostRef) {
+      return {
+        id: hostRef,
+        label: "Managed",
+        host: hostname,
+        user: "dev",
+        port: 22,
+        shell: "bash",
+        hostKeySha256: HOST_KEY,
+        authentication: { kind: "identity" as const, identityFile: "/local/managed-key" },
+      };
+    },
+  });
+  const factory = factoryFor([firstClient, secondClient, thirdClient]);
+  const referenced: ResolvedRemoteTarget = { ...target(), hostConfig: { sshHostRef: "manager-host" } };
+  try {
+    const first = await factory.connect(referenced);
+    assert.equal(firstClient.connectConfigs[0]?.host, "first.example");
+    hostname = "second.example";
+    const second = await factory.connect(referenced);
+    assert.equal(secondClient.connectConfigs[0]?.host, "second.example");
+    assert.equal(firstClient.endCalls, 0, "changing a reference must not kill an active channel");
+    hostname = "first.example";
+    const third = await factory.connect(referenced);
+    assert.equal(thirdClient.connectConfigs[0]?.host, "first.example", "a cycled profile must not reuse its retired pool");
+
+    await first.close();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(firstClient.endCalls, 1, "retired pool should close once its active channel releases");
+    await second.close();
+    await third.close();
+  } finally {
+    registration.dispose();
+    await factory.close();
+  }
+});
+
+test("remote workspaces resolve agent-backed host references before opening the fixed gateway", async () => {
+  const client = new FakeSshClient();
+  const registration = registerSshHostProvider({
+    async list() { return [{ id: "workspace-host", label: "Workspace", compatible: true }]; },
+    async resolve(hostRef) {
+      return {
+        id: hostRef,
+        label: "Workspace",
+        host: "workspace.example",
+        user: "ops",
+        port: 2222,
+        shell: "bash",
+        hostKeySha256: HOST_KEY,
+        authentication: { kind: "agent" as const },
+      };
+    },
+  });
+  const factory = factoryFor([client], { agentSocket: "/tmp/test-agent.sock" });
+  try {
+    const connection = await factory.connectWorkspace({
+      ...workspace(),
+      hostConfig: { sshHostRef: "workspace-host" },
+    });
+    assert.equal(client.connectConfigs[0]?.host, "workspace.example");
+    assert.equal(client.connectConfigs[0]?.agent, "/tmp/test-agent.sock");
+    assert.deepEqual(client.connectConfigs[0]?.authHandler, ["agent"]);
+    assert.deepEqual(client.commands, [REMOTE_GATEWAY_COMMAND]);
+    await connection.close();
+  } finally {
+    registration.dispose();
+    await factory.close();
+  }
+});
+
+test("locked SSH host references fail before any transport is opened", async () => {
+  const registration = registerSshHostProvider({
+    async list() { throw new SshHostProviderError("manager-locked", "Open /ssh to unlock it."); },
+    async resolve() { throw new SshHostProviderError("manager-locked", "Open /ssh to unlock it."); },
+  });
+  const factory = factoryFor([]);
+  try {
+    await assert.rejects(
+      factory.connect({ ...target(), hostConfig: { sshHostRef: "manager-host" } }),
+      (error: unknown) => error instanceof SshHostProviderError
+        && error.code === "manager-locked"
+        && /Open \/ssh/u.test(error.message),
+    );
+  } finally {
+    registration.dispose();
+    await factory.close();
+  }
 });
 
 test("window bridge diagnostics distinguish unreachable hosts from incompatible daemons", () => {

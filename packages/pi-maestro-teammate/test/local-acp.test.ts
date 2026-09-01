@@ -5,6 +5,10 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runLocalCliTool, runSshCliTool } from "../src/cli-tools/local-acp.ts";
 import type { SshExecChannel, SshExecClient } from "../src/remote/ssh-exec.ts";
+import {
+  SshHostProviderError,
+  registerSshHostProvider,
+} from "../src/public/v1/ssh-hosts.ts";
 import type { CliToolConfig } from "../src/cli-tools/cli-tools-config.ts";
 
 const fixturePath = fileURLToPath(new URL("./fixtures/mock-acp-server.mjs", import.meta.url));
@@ -227,7 +231,9 @@ class MockAcpChannel extends Duplex implements SshExecChannel {
 class MockSshClient implements SshExecClient {
   readonly channels: MockAcpChannel[] = [];
   readonly execCommands: string[] = [];
-  connect(_config: unknown): unknown {
+  readonly connectConfigs: unknown[] = [];
+  connect(config: unknown): unknown {
+    this.connectConfigs.push(config);
     setTimeout(() => this.#emit("ready"), 5);
     return this;
   }
@@ -313,6 +319,94 @@ test("runSshCliTool execs the remote CLI over the mock ssh channel and settles c
   // The remote command wraps the argv and cds into the remote cwd.
   assert.equal(client.execCommands.length, 1);
   assert.match(client.execCommands[0]!, /^cd '\/remote\/project' && exec 'node' 'mock-remote-cli'$/);
+  const privateKey = (client.connectConfigs[0] as { privateKey?: Buffer }).privateKey;
+  assert.equal(privateKey?.every((byte) => byte === 0), true, "identity bytes are cleared after authentication");
+});
+
+test("runSshCliTool resolves sshHostRef for every run and preserves the configured remote cwd", async () => {
+  let resolutions = 0;
+  const registration = registerSshHostProvider({
+    async list() { return []; },
+    async resolve(hostRef) {
+      resolutions += 1;
+      return {
+        id: hostRef,
+        label: "Managed host",
+        host: "managed.example.test",
+        user: "runner",
+        port: 2222,
+        shell: "bash",
+        hostKeySha256: `SHA256:${"A".repeat(43)}`,
+        authentication: { kind: "agent" },
+      };
+    },
+  });
+  try {
+    const clients: MockSshClient[] = [];
+    for (let index = 0; index < 2; index += 1) {
+      const client = new MockSshClient();
+      clients.push(client);
+      const run = await runSshCliTool({
+        tool: "remote-cli",
+        config: {
+          enabled: true,
+          mode: "ssh",
+          sshHostRef: "managed-1",
+          command: "node",
+          args: ["mock-remote-cli"],
+          cwd: "/deployment/project",
+        },
+        prompt: "hi",
+        cwd: process.cwd(),
+        signal: new AbortController().signal,
+        timeoutMs: 15_000,
+        sshOptions: { createClient: () => client, agentSocket: "/tmp/mock-agent.sock" },
+      });
+      assert.equal(run.terminalStatus, "completed");
+      assert.equal(client.execCommands[0], "cd '/deployment/project' && exec 'node' 'mock-remote-cli'");
+      assert.equal((client.connectConfigs[0] as { host?: unknown }).host, "managed.example.test");
+      assert.equal((client.connectConfigs[0] as { agent?: unknown }).agent, "/tmp/mock-agent.sock");
+    }
+    assert.equal(resolutions, 2);
+  } finally {
+    registration.dispose();
+  }
+});
+
+test("runSshCliTool fails closed for locked missing and incompatible manager references", async () => {
+  const cases = [
+    ["manager-locked", "SSH manager is locked"],
+    ["host-not-found", "SSH host reference was not found"],
+    ["host-incompatible", "SSH host reference is incompatible"],
+  ] as const;
+  for (const [code, message] of cases) {
+    const registration = registerSshHostProvider({
+      async list() { return []; },
+      async resolve() { throw new SshHostProviderError(code, message); },
+    });
+    let connections = 0;
+    try {
+      const run = await runSshCliTool({
+        tool: "remote-cli",
+        config: { enabled: true, mode: "ssh", sshHostRef: "managed-1", command: "node" },
+        prompt: "hi",
+        cwd: process.cwd(),
+        signal: new AbortController().signal,
+        sshOptions: {
+          createClient: () => {
+            connections += 1;
+            return new MockSshClient();
+          },
+        },
+      });
+      assert.equal(run.terminalStatus, "failed");
+      assert.match(run.messages[0]?.content ?? "", new RegExp(message));
+      assert.doesNotMatch(run.messages[0]?.content ?? "", /password|passphrase|private-key-value/u);
+      assert.equal(connections, 0);
+    } finally {
+      registration.dispose();
+    }
+  }
 });
 
 test("runSshCliTool rejects an incomplete ssh config without connecting", async () => {
@@ -326,7 +420,7 @@ test("runSshCliTool rejects an incomplete ssh config without connecting", async 
   });
   assert.equal(run.exitCode, 1);
   assert.equal(run.terminalStatus, "failed");
-  assert.match(run.messages[0]?.content ?? "", /host, user and hostKeySha256/);
+  assert.match(run.messages[0]?.content ?? "", /sshHostRef or host, user and hostKeySha256/);
 });
 
 test("runLocalCliTool honours a configured ACP startup timeout", async () => {

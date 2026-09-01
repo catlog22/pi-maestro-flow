@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { RemoteConfigState } from "../src/remote/config.ts";
+import { REMOTE_CONFIG_VERSION } from "../src/remote/types.ts";
 import type { TuiTranslator } from "../src/tui/locale.ts";
 import {
   RemoteConfigPane,
@@ -19,6 +20,7 @@ const CATALOG: Record<string, string> = {
   "connections.hiddenWorkspace": "(hidden) [W] {workspace}",
   "connections.hiddenTarget": "(hidden) [T] {id}",
   "connections.hostRow": "[H] {id}  {user}@{host}:{port} · SHA256:{keyPrefix}",
+  "connections.hostRefRow": "[H] {id}  /ssh reference · {sshHostRef}",
   "connections.workspaceRow": "[W] {workspace}  {cwd} · host {host} · protocol >= {protocol}",
   "connections.targetRow": "[T] {id}  {driver} · {cwd} · host {host}",
   "connections.connecting": "(connecting)",
@@ -51,7 +53,7 @@ function makeT(): TuiTranslator {
 function fixtureState(): RemoteConfigState {
   return {
     global: {
-      version: 3,
+      version: REMOTE_CONFIG_VERSION,
       hosts: {
         alpha: { host: "alpha.example.com", user: "alice", port: 22, hostKeySha256: `SHA256:${"A".repeat(43)}=` },
         bravo: { host: "10.0.0.5", user: "bob", port: 2222, hostKeySha256: `SHA256:${"B".repeat(43)}=` },
@@ -63,7 +65,7 @@ function fixtureState(): RemoteConfigState {
       workspaces: {},
     },
     project: {
-      version: 3,
+      version: REMOTE_CONFIG_VERSION,
       hosts: {
         alpha: null,
         local: { host: "127.0.0.1", user: "carol", port: 22, hostKeySha256: `SHA256:${"C".repeat(43)}=` },
@@ -82,7 +84,7 @@ function fixtureState(): RemoteConfigState {
         },
       },
     },
-    config: { version: 3, hosts: {}, targets: {}, workspaces: {} },
+    config: { version: REMOTE_CONFIG_VERSION, hosts: {}, targets: {}, workspaces: {} },
   };
 }
 
@@ -128,6 +130,15 @@ test("renders hosts and targets of the global scope with badges and key prefixes
   assert.ok(out.startsWith("╭"));
   assert.ok(out.includes("│"));
   assert.ok(out.trimEnd().endsWith("╯"));
+});
+
+test("referenced hosts render their stable /ssh reference without exposing connection details", () => {
+  const state = fixtureState();
+  state.global.hosts.managed = { sshHostRef: "manager-host" };
+  const { pane } = makePane({ state });
+  const out = pane.render(100).join("\n");
+  assert.ok(out.includes("[H] managed  /ssh reference · manager-host"));
+  assert.equal(out.includes("manager.example"), false);
 });
 
 test("g/p toggles scope and project null entries render as hidden rows", () => {

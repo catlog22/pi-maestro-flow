@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ModelCliRow } from "../src/models/cli-list.ts";
 import type { RemoteConfigState } from "../src/remote/config.ts";
+import { REMOTE_CONFIG_VERSION } from "../src/remote/types.ts";
 import type { TuiTranslator } from "../src/tui/locale.ts";
 import {
   RemoteConfigPane,
@@ -48,7 +49,7 @@ const t = ((key: string, params?: Readonly<Record<string, string | number | bool
 function state(): RemoteConfigState {
   return {
     global: {
-      version: 3,
+      version: REMOTE_CONFIG_VERSION,
       hosts: {
         worker: {
           host: "worker.example.com",
@@ -68,7 +69,7 @@ function state(): RemoteConfigState {
       workspaces: {},
     },
     project: {
-      version: 3,
+      version: REMOTE_CONFIG_VERSION,
       hosts: {
         local: {
           host: "127.0.0.1",
@@ -80,7 +81,7 @@ function state(): RemoteConfigState {
       targets: {},
       workspaces: {},
     },
-    config: { version: 3, hosts: {}, targets: {}, workspaces: {} },
+    config: { version: REMOTE_CONFIG_VERSION, hosts: {}, targets: {}, workspaces: {} },
   };
 }
 
@@ -206,9 +207,9 @@ test("legacy notice is dim and Enter emits upgrade", () => {
 
 test("empty state and scope switching remain available", () => {
   const emptyState: RemoteConfigState = {
-    global: { version: 3, hosts: {}, targets: {}, workspaces: {} },
-    project: { version: 3, hosts: {}, targets: {}, workspaces: {} },
-    config: { version: 3, hosts: {}, targets: {}, workspaces: {} },
+    global: { version: REMOTE_CONFIG_VERSION, hosts: {}, targets: {}, workspaces: {} },
+    project: { version: REMOTE_CONFIG_VERSION, hosts: {}, targets: {}, workspaces: {} },
+    config: { version: REMOTE_CONFIG_VERSION, hosts: {}, targets: {}, workspaces: {} },
   };
   const { pane: empty } = makePane({
     state: emptyState,

@@ -901,7 +901,7 @@ test("P7 acceptance block", async (t) => {
         "agent",        // command (required)
         "", "", "",     // args, cwd, env
         "",             // mode
-        "", "", "", "", // host, user, port, hostKeySha256
+        "", "", "", "", "", // sshHostRef, host, user, port, hostKeySha256
         "", "", "", "", "", "", // identityFile, modelId, acpModel, acpMode, acpThoughtLevel, runTimeoutMs
         "",             // startupTimeoutMs
         // First registration attempt targets the EXISTING deployment and

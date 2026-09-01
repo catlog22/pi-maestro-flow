@@ -83,6 +83,7 @@ import {
 } from "./execution-infra.ts";
 import { buildReplayFence } from "./recovery-protocol.ts";
 import { cliToolNameFromModel, isCliToolModel } from "../cli-tools/local-acp.ts";
+import { resolveSshHostRef } from "../public/v1/ssh-hosts.ts";
 
 export * from "./execution-infra.ts";
 import {
@@ -637,6 +638,7 @@ function backendOptionsOf(
     // reaches. An absent broker is a configuration failure, not a hang, so it
     // is reported by name rather than waited on.
     host: {
+      resolveSshHost: resolveSshHostRef,
       async proxyToolCall(request: {
         toolName: string;
         args: unknown;

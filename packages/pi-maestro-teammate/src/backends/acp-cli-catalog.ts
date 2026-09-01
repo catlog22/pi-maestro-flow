@@ -43,6 +43,9 @@ export const ACP_CLI_SETTINGS_CATALOGS: TranslationCatalogs = {
     "acpCli.mode": "Launch mode",
     "acpCli.mode.local": "Local process",
     "acpCli.mode.ssh": "Remote over SSH",
+    "acpCli.sshHostRef": "/ssh host reference",
+    "acpCli.sshHostRef.description":
+      "Host id from the unlocked encrypted /ssh manager. Use it instead of every embedded SSH connection field; the host is resolved again for each run.",
     "acpCli.host": "SSH host",
     "acpCli.user": "SSH user",
     "acpCli.port": "SSH port",
@@ -92,6 +95,9 @@ export const ACP_CLI_SETTINGS_CATALOGS: TranslationCatalogs = {
     "acpCli.mode": "启动方式",
     "acpCli.mode.local": "本地进程",
     "acpCli.mode.ssh": "经 SSH 远程",
+    "acpCli.sshHostRef": "/ssh 主机引用",
+    "acpCli.sshHostRef.description":
+      "已解锁加密 /ssh 管理器中的主机 id。它必须替代全部内嵌 SSH 连接字段，并在每次运行时重新解析。",
     "acpCli.host": "SSH 主机",
     "acpCli.user": "SSH 用户",
     "acpCli.port": "SSH 端口",

@@ -11,7 +11,7 @@ import {
   type RemoteAcpPolicy,
   type RemoteAcpTerminalCommand,
   type RemoteAcpTerminalPolicy,
-  type RemoteHostConfig,
+  type RemoteHostEntry,
   type RemoteTargetConfig,
   type RemoteWorkspaceConfig,
   type ResolvedRemoteTarget,
@@ -42,7 +42,7 @@ const MAX_WINDOW_PROTOCOL_VERSION = 65_535;
 
 export interface GlobalRemoteConfigStore {
   version: typeof REMOTE_CONFIG_VERSION;
-  hosts: Record<string, RemoteHostConfig>;
+  hosts: Record<string, RemoteHostEntry>;
   targets: Record<string, RemoteTargetConfig>;
   workspaces: Record<string, RemoteWorkspaceConfig>;
 }
@@ -50,7 +50,7 @@ export interface GlobalRemoteConfigStore {
 export interface ProjectRemoteConfigStore {
   version: typeof REMOTE_CONFIG_VERSION;
   /** Project values override globals; null explicitly hides a global entry. */
-  hosts: Record<string, RemoteHostConfig | null>;
+  hosts: Record<string, RemoteHostEntry | null>;
   /** Project values override globals; null explicitly hides a global entry. */
   targets: Record<string, RemoteTargetConfig | null>;
   /** Project values override globals; null explicitly hides a global entry. */
@@ -59,7 +59,7 @@ export interface ProjectRemoteConfigStore {
 
 export interface RemoteConfig {
   version: typeof REMOTE_CONFIG_VERSION;
-  hosts: Record<string, RemoteHostConfig>;
+  hosts: Record<string, RemoteHostEntry>;
   targets: Record<string, RemoteTargetConfig>;
   workspaces: Record<string, RemoteWorkspaceConfig>;
 }
@@ -132,8 +132,14 @@ export function validateWorkspaceRef(workspaceRef: string): void {
   }
 }
 
-function normalizeHost(value: unknown, id: string): RemoteHostConfig {
+function normalizeHost(value: unknown, id: string): RemoteHostEntry {
   if (!plainObject(value)) throw new Error(`Invalid remote host: ${id}`);
+  if (Object.hasOwn(value, "sshHostRef")) {
+    assertKnownKeys(value, ["sshHostRef"], `remote host ${id}`);
+    const sshHostRef = boundedString(value.sshHostRef, `remote SSH host reference: ${id}`, 64);
+    if (!HOST_ID_PATTERN.test(sshHostRef)) throw new Error(`Invalid remote SSH host reference: ${id}`);
+    return { sshHostRef };
+  }
   assertKnownKeys(value, ["host", "user", "port", "hostKeySha256", "identityFile"], `remote host ${id}`);
   const host = boundedString(value.host, `remote host address: ${id}`, 253);
   const user = boundedString(value.user, `remote host user: ${id}`, 128);
@@ -446,6 +452,13 @@ function migrateLegacyAcpPolicy(value: unknown, id: string): unknown {
 function migrateStore(value: unknown, label: "global" | "project"): unknown {
   if (!plainObject(value)) throw new Error(`Invalid ${label} teammate remote config`);
   if (value.version === REMOTE_CONFIG_VERSION) return value;
+  if (value.version === 3) {
+    assertKnownKeys(value, ["version", "hosts", "targets", "workspaces"], `version 3 ${label} teammate remote config`);
+    if (!plainObject(value.hosts) || !plainObject(value.targets) || !plainObject(value.workspaces)) {
+      throw new Error(`Invalid version 3 ${label} teammate remote config`);
+    }
+    return { ...value, version: REMOTE_CONFIG_VERSION };
+  }
   if (value.version === 2) {
     assertKnownKeys(value, ["version", "hosts", "targets"], `version 2 ${label} teammate remote config`);
     if (!plainObject(value.hosts) || !plainObject(value.targets)) {
@@ -497,7 +510,7 @@ function normalizeGlobalStore(value: unknown): GlobalRemoteConfigStore {
   if (!plainObject(migrated.hosts) || !plainObject(migrated.targets) || !plainObject(migrated.workspaces)) {
     throw new Error("Invalid global teammate remote config");
   }
-  const hosts: Record<string, RemoteHostConfig> = {};
+  const hosts: Record<string, RemoteHostEntry> = {};
   const targets: Record<string, RemoteTargetConfig> = {};
   const workspaces: Record<string, RemoteWorkspaceConfig> = {};
   for (const [id, host] of Object.entries(migrated.hosts)) {
@@ -526,7 +539,7 @@ function normalizeProjectStore(value: unknown): ProjectRemoteConfigStore {
   if (!plainObject(migrated.hosts) || !plainObject(migrated.targets) || !plainObject(migrated.workspaces)) {
     throw new Error("Invalid project teammate remote config");
   }
-  const hosts: Record<string, RemoteHostConfig | null> = {};
+  const hosts: Record<string, RemoteHostEntry | null> = {};
   const targets: Record<string, RemoteTargetConfig | null> = {};
   const workspaces: Record<string, RemoteWorkspaceConfig | null> = {};
   for (const [id, host] of Object.entries(migrated.hosts)) {
