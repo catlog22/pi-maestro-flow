@@ -1213,6 +1213,9 @@ test("todo advance activates, completes, and promotes actor-owned tasks", async 
 
     const started = await executeTodo({ action: "advance" }, ctx);
     assert.equal(started.isError, undefined);
+    const startedSnapshot = (started.details as { tasks: Array<{ id: string; assignee: TodoActorRef }> }).tasks
+      .find((task) => task.id === first.id);
+    assert.deepEqual(startedSnapshot?.assignee, { kind: "root", id: "root", label: "root" });
     assert.deepEqual(getVisibleTasks().map((task) => task.status), ["in_progress", "blocked"]);
 
     const mismatch = await executeTodo({ action: "advance", id: second.id, summary: "wrong" }, ctx);
@@ -1262,7 +1265,10 @@ test("todo advance isolates actor cursors while releasing cross-actor dependenci
     const [, independent, downstream] = getVisibleTasks();
 
     await executeTodo({ action: "advance" }, ctx);
-    await executeTodo({ action: "advance" }, ctx, worker);
+    const workerStarted = await executeTodo({ action: "advance" }, ctx, worker);
+    const workerSnapshot = (workerStarted.details as { tasks: Array<{ id: string; assignee: TodoActorRef }> }).tasks
+      .find((task) => task.id === independent.id);
+    assert.deepEqual(workerSnapshot?.assignee, worker);
     assert.deepEqual(getVisibleTasks().map((task) => task.status), ["in_progress", "in_progress", "blocked"]);
 
     const rootCannotCompleteWorker = await executeTodo({
@@ -2276,17 +2282,39 @@ test("todo batch create lays out a whole plan with integer index dependencies", 
     const visible = getVisibleTasks();
     assert.deepEqual(visible.map((t) => t.subject), ["Design schema", "Implement handler", "Write tests"]);
     assert.deepEqual(visible.map((t) => t.status), ["pending", "blocked", "blocked"]);
+    assert.deepEqual(
+      (created.details as { displayTaskIds?: string[] }).displayTaskIds,
+      visible.map((task) => task.id),
+      "create details identify only the tasks created by this action",
+    );
 
     const [first, second, third] = visible;
+    const detailTasks = (created.details as { tasks: Array<{ id: string; blockedBy?: string[] }> }).tasks;
+    assert.deepEqual(detailTasks.find((task) => task.id === first.id)?.blockedBy, undefined);
+    assert.deepEqual(detailTasks.find((task) => task.id === second.id)?.blockedBy, [first.id]);
+    assert.deepEqual(detailTasks.find((task) => task.id === third.id)?.blockedBy, [second.id]);
     assert.deepEqual(second.blockedBy, [first.id]);
     assert.deepEqual(third.blockedBy, [second.id]);
+
+    const pendingList = await executeTodo({ action: "list", filter: { status: "pending" } }, ctx);
+    assert.deepEqual((pendingList.details as { displayTaskIds?: string[] }).displayTaskIds, [first.id]);
+    const emptyList = await executeTodo({ action: "list", filter: { status: "completed" } }, ctx);
+    assert.deepEqual((emptyList.details as { displayTaskIds?: string[] }).displayTaskIds, []);
+    assert.match((emptyList.content[0] as { text: string }).text, /No tasks found/);
 
     const next = await executeTodo({ action: "next" }, ctx);
     assert.match((next.content[0] as { text: string }).text, /Design schema/);
     assert.deepEqual(getVisibleTasks().map((t) => t.status), ["in_progress", "blocked", "blocked"]);
+    assert.equal(typeof getVisibleTasks()[0].activeStartedAt, "number");
 
-    await executeTodo({ action: "update", id: first.id, status: "completed", summary: "done" }, ctx);
+    const completedResult = await executeTodo({ action: "update", id: first.id, status: "completed", summary: "done" }, ctx);
+    const completedSnapshot = (completedResult.details as { tasks: Array<{ id: string; durationMs?: number }> }).tasks
+      .find((task) => task.id === first.id);
+    assert.equal(typeof completedSnapshot?.durationMs, "number", "completed task snapshots always carry chartable timing data");
     const after = getVisibleTasks();
+    assert.equal(typeof after[0].completedAt, "number");
+    assert.equal(typeof after[0].activeDurationMs, "number");
+    assert.equal(after[0].activeStartedAt, undefined);
     assert.equal(after[1].status, "pending");
     assert.deepEqual(after[1].blockedBy, []);
     assert.equal(after[2].status, "blocked");
@@ -2337,6 +2365,107 @@ test("todo batch create is atomic — an invalid spec aborts without creating an
     assert.equal((missingSubject as { isError?: boolean }).isError, true);
     assert.match((missingSubject.content[0] as { text: string }).text, /tasks\[1\]\.subject is required/);
     assert.equal(getVisibleTasks().length, 0);
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("todo batch update and delete validate fully before one atomic commit", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-batch-mutations-"));
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [], diagnostics: [] }) },
+  });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+
+  try {
+    await executeTodo({
+      action: "create",
+      tasks: [
+        { subject: "A" },
+        { subject: "B", blockedBy: [0] },
+        { subject: "C", blockedBy: [1] },
+      ],
+    }, ctx);
+    const [a, b, c] = getVisibleTasks();
+
+    const invalidUpdate = await executeTodo({
+      action: "update",
+      updates: [
+        { id: a.id, subject: "A changed" },
+        { id: "missing", subject: "missing" },
+      ],
+    }, ctx);
+    assert.equal((invalidUpdate as { isError?: boolean }).isError, true);
+    assert.match((invalidUpdate.content[0] as { text: string }).text, /updates\[1\]: Task not found/);
+    assert.equal(getVisibleTasks()[0].subject, "A", "an invalid later update leaves the whole batch untouched");
+
+    const conflictingUpdate = await executeTodo({
+      action: "update",
+      id: a.id,
+      updates: [{ id: b.id, subject: "B changed" }],
+    }, ctx);
+    assert.equal((conflictingUpdate as { isError?: boolean }).isError, true);
+    assert.match((conflictingUpdate.content[0] as { text: string }).text, /either id with top-level fields or updates/);
+
+    const updated = await executeTodo({
+      action: "update",
+      updates: [
+        { id: a.id, status: "completed", summary: "A done" },
+        { id: b.id, status: "in_progress", subject: "B active" },
+      ],
+    }, ctx);
+    assert.equal((updated as { isError?: boolean }).isError, undefined);
+    assert.match((updated.content[0] as { text: string }).text, /Updated 2 tasks/);
+    assert.deepEqual((updated.details as { displayTaskIds?: string[] }).displayTaskIds, [a.id, b.id]);
+    const afterUpdate = getVisibleTasks();
+    assert.equal(afterUpdate.find((task) => task.id === a.id)?.status, "completed");
+    assert.equal(afterUpdate.find((task) => task.id === b.id)?.status, "in_progress");
+    assert.equal(afterUpdate.find((task) => task.id === b.id)?.subject, "B active");
+    assert.deepEqual(afterUpdate.find((task) => task.id === b.id)?.blockedBy, []);
+    assert.equal(afterUpdate.find((task) => task.id === c.id)?.status, "blocked");
+
+    const invalidDelete = await executeTodo({ action: "delete", ids: [a.id, "missing"] }, ctx);
+    assert.equal((invalidDelete as { isError?: boolean }).isError, true);
+    assert.match((invalidDelete.content[0] as { text: string }).text, /Task not found: missing/);
+    assert.ok(getVisibleTasks().some((task) => task.id === a.id), "an invalid later id leaves the whole delete batch untouched");
+
+    const conflictingDelete = await executeTodo({ action: "delete", id: a.id, ids: [b.id] }, ctx);
+    assert.equal((conflictingDelete as { isError?: boolean }).isError, true);
+    assert.match((conflictingDelete.content[0] as { text: string }).text, /either id or ids/);
+
+    const deleted = await executeTodo({ action: "delete", ids: [a.id, b.id] }, ctx);
+    assert.equal((deleted as { isError?: boolean }).isError, undefined);
+    assert.match((deleted.content[0] as { text: string }).text, /Deleted 2 tasks/);
+    assert.deepEqual((deleted.details as { displayTaskIds?: string[] }).displayTaskIds, [a.id, b.id]);
+    const afterDelete = getVisibleTasks();
+    assert.deepEqual(afterDelete.map((task) => task.id), [c.id]);
+    assert.equal(afterDelete[0].status, "pending");
+    assert.deepEqual(afterDelete[0].blockedBy, []);
+
+    const singleDelete = await executeTodo({ action: "delete", id: c.id }, ctx);
+    assert.match((singleDelete.content[0] as { text: string }).text, new RegExp(`Deleted #${c.id}: C`));
+
+    await executeTodo({
+      action: "create",
+      tasks: [{ subject: "D" }, { subject: "E", blockedBy: [0] }],
+    }, ctx);
+    const [d, e] = getVisibleTasks();
+    const reverseOrdered = await executeTodo({
+      action: "update",
+      updates: [
+        { id: e.id, subject: "E updated before unblock" },
+        { id: d.id, status: "completed", summary: "D done" },
+      ],
+    }, ctx);
+    assert.equal((reverseOrdered as { isError?: boolean }).isError, undefined);
+    const afterReverseOrdered = getVisibleTasks();
+    assert.equal(afterReverseOrdered.find((task) => task.id === e.id)?.subject, "E updated before unblock");
+    assert.equal(afterReverseOrdered.find((task) => task.id === e.id)?.status, "pending");
+    assert.deepEqual(afterReverseOrdered.find((task) => task.id === e.id)?.blockedBy, []);
   } finally {
     onSessionShutdown(todoContext);
     await rm(root, { recursive: true, force: true });

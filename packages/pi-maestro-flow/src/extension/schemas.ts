@@ -218,6 +218,23 @@ const TodoBatchTaskSchema = Type.Object({
   ),
 }, { additionalProperties: false });
 
+const TodoBatchUpdateSchema = Type.Object({
+  id: Type.String({ minLength: 1, description: "Task ID to update" }),
+  subject: Type.Optional(Type.String({ minLength: 1, description: "Replacement task title" })),
+  description: Type.Optional(Type.String({ description: "Replacement description; empty clears it" })),
+  status: Type.Optional(StringEnum(["pending", "in_progress", "completed", "blocked"])),
+  blockedBy: Type.Optional(Type.Array(Type.String(), { description: "Replacement dependency task IDs" })),
+  context: Type.Optional(Type.String({ description: "Replacement context; empty clears it" })),
+  skills: Type.Optional(Type.Array(TodoSkillBindingSchema, { description: "Replacement ordered skill bindings; empty clears them" })),
+  summary: Type.Optional(Type.String({ description: "Replacement completion summary; empty clears it" })),
+  updateFields: Type.Optional(Type.Array(StringEnum([...TODO_UPDATE_FIELDS]), {
+    description: "Fields changed by this update; listed values must be present",
+    uniqueItems: true,
+  })),
+  assignee: Type.Optional(Type.String({ description: "Replacement assignee selector" })),
+  goalId: Type.Optional(Type.String({ description: "Replacement Goal quality gate; empty clears it" })),
+}, { additionalProperties: false });
+
 // The top level remains permissive for the legacy `skill` input normalized by todo.ts.
 export const TodoToolParams = Type.Object({
   action: StringEnum([
@@ -272,7 +289,20 @@ export const TodoToolParams = Type.Object({
   ),
 
   id: Type.Optional(
-    Type.String({ description: "Task ID (required for get/update/delete)" }),
+    Type.String({ description: "Task ID (required for get and single update/delete)" }),
+  ),
+  ids: Type.Optional(
+    Type.Array(Type.String({ minLength: 1 }), {
+      minItems: 1,
+      uniqueItems: true,
+      description: "Task IDs for atomic batch delete; cannot be combined with id",
+    }),
+  ),
+  updates: Type.Optional(
+    Type.Array(TodoBatchUpdateSchema, {
+      minItems: 1,
+      description: "Atomic batch updates; cannot be combined with id or top-level update fields",
+    }),
   ),
   filter: Type.Optional(TodoFilterSchema),
   planHandoffKey: Type.Optional(

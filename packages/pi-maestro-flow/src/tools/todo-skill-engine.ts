@@ -215,19 +215,22 @@ export type TodoParamsInput = TodoParams & {
 export function normalizeTodoParams(input: TodoParamsInput): TodoParams {
   const { skill: legacySkill, ...params } = input;
   if (params.id) params.id = params.id.replace(/^#+/, "");
-  if (params.skills !== undefined) {
-    return {
-      ...params,
-      skills: params.skills === null ? null : normalizeSkillBindings(params.skills),
-    };
+  if (params.ids) params.ids = params.ids.map((id) => id.replace(/^#+/, ""));
+  if (params.updates) {
+    params.updates = params.updates.map((update) => ({
+      ...update,
+      id: update.id.replace(/^#+/, ""),
+      ...(update.skills !== undefined
+        ? { skills: update.skills === null ? null : normalizeSkillBindings(update.skills) }
+        : {}),
+    }));
   }
-  if (legacySkill !== undefined) {
-    return {
-      ...params,
-      skills: legacySkill === null
-        ? null
-        : [{ ...normalizeSkillConfig(legacySkill), role: "primary" }],
-    };
+  if (params.skills !== undefined) {
+    params.skills = params.skills === null ? null : normalizeSkillBindings(params.skills);
+  } else if (legacySkill !== undefined) {
+    params.skills = legacySkill === null
+      ? null
+      : [{ ...normalizeSkillConfig(legacySkill), role: "primary" }];
   }
   return params;
 }

@@ -196,6 +196,15 @@ export function normalizeLoadedTask(id: string, raw: unknown): TodoTask {
     assignee,
     createdAt: typeof task.createdAt === "number" ? task.createdAt : now,
     updatedAt: typeof task.updatedAt === "number" ? task.updatedAt : now,
+    ...(status === "in_progress" && typeof task.activeStartedAt === "number" && Number.isFinite(task.activeStartedAt)
+      ? { activeStartedAt: task.activeStartedAt }
+      : {}),
+    ...(typeof task.activeDurationMs === "number" && Number.isFinite(task.activeDurationMs) && task.activeDurationMs >= 0
+      ? { activeDurationMs: task.activeDurationMs }
+      : {}),
+    ...(status === "completed" && typeof task.completedAt === "number" && Number.isFinite(task.completedAt)
+      ? { completedAt: task.completedAt }
+      : {}),
   };
 }
 

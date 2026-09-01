@@ -85,6 +85,9 @@ export interface TodoTask {
   assignee: TodoActorRef;
   createdAt: number;
   updatedAt: number;
+  activeStartedAt?: number;
+  activeDurationMs?: number;
+  completedAt?: number;
 }
 
 export interface TodoBatchSpec {
@@ -94,6 +97,20 @@ export interface TodoBatchSpec {
   skills?: TodoSkillBinding[];
   assignee?: string;
   blockedBy?: number[];
+  goalId?: string;
+}
+
+export interface TodoUpdateSpec {
+  id: string;
+  subject?: string;
+  description?: string;
+  status?: TaskStatus;
+  blockedBy?: string[];
+  context?: string;
+  skills?: TodoSkillBinding[] | null;
+  summary?: string;
+  updateFields?: TodoUpdateField[];
+  assignee?: string;
   goalId?: string;
 }
 
@@ -108,6 +125,8 @@ export interface TodoParams {
   summary?: string;
   updateFields?: TodoUpdateField[];
   id?: string;
+  ids?: string[];
+  updates?: TodoUpdateSpec[];
   assignee?: string;
   tasks?: TodoBatchSpec[];
   filter?: { status?: TaskStatus; memberId?: string };
@@ -126,11 +145,17 @@ export interface TodoTaskSnapshot {
   id: string;
   subject: string;
   status: TaskStatus;
+  assignee: TodoActorRef;
+  blockedBy?: string[];
+  summary?: string;
+  durationMs?: number;
+  completedAt?: number;
 }
 
 export interface TodoResultDetails {
   action: string;
   tasks: TodoTaskSnapshot[];
+  displayTaskIds?: string[];
   error?: string;
 }
 
@@ -736,7 +761,7 @@ function handleCreate(params: TodoParams, ctx: ExtensionContext, actor: TodoActo
   nextTasks.set(id, task);
   commitTodoState(nextTasks);
 
-  return ok(`Created #${id}: ${task.subject} (${task.status})`, "create");
+  return ok(`Created #${id}: ${task.subject} (${task.status})`, "create", [id]);
 }
 
 /**
@@ -819,20 +844,26 @@ function handleBatchCreate(specs: TodoBatchSpec[], actor: TodoActorRef, planHand
   commitTodoState(nextTasks);
 
   const lines = created.map((t) => `#${t.id} ${t.subject} (${t.status})`);
-  return ok(`Created ${created.length} tasks:\n${lines.join("\n")}`, "create");
+  return ok(`Created ${created.length} tasks:\n${lines.join("\n")}`, "create", created.map((task) => task.id));
 }
 
-async function handleUpdate(
+interface PreparedTodoUpdate {
+  before: TodoTask;
+  draft: TodoTask;
+  activationInputsChanged: boolean;
+  shouldActivate: boolean;
+}
+
+function prepareTodoUpdate(
   params: TodoParams,
-  ctx: ExtensionContext,
   actor: TodoActorRef,
-  generation: number,
-): Promise<FlowToolResult> {
-  if (!params.id) return err("id is required for update", "update");
-  const task = tasks.get(params.id);
-  if (!task) return err(`Task not found: ${params.id}`, "update");
-  if (task.status === "deleted") return err(`Cannot update deleted task: ${params.id}`, "update");
-  if (!canEditTask(actor, task)) return err(`@${actor.label} cannot update task #${params.id}`, "update");
+  state: Map<string, TodoTask>,
+): PreparedTodoUpdate | { error: string } {
+  if (!params.id) return { error: "id is required for update" };
+  const task = state.get(params.id);
+  if (!task) return { error: `Task not found: ${params.id}` };
+  if (task.status === "deleted") return { error: `Cannot update deleted task: ${params.id}` };
+  if (!canEditTask(actor, task)) return { error: `@${actor.label} cannot update task #${params.id}` };
 
   const before = cloneTodoTask(task);
   const draft = cloneTodoTask(task);
@@ -842,13 +873,13 @@ async function handleUpdate(
 
   if (updateFields) {
     for (const field of updateFields) {
-      if (params[field] === undefined) return err(`${field} is required when listed in updateFields`, "update");
+      if (params[field] === undefined) return { error: `${field} is required when listed in updateFields` };
     }
   }
 
   if (updates("subject")) {
     const subject = params.subject!;
-    if (!subject.trim()) return err("subject cannot be empty", "update");
+    if (!subject.trim()) return { error: "subject cannot be empty" };
     draft.subject = subject;
   }
   if (updates("description")) {
@@ -866,7 +897,7 @@ async function handleUpdate(
 
   if (updates("assignee")) {
     const assignee = resolveAssignee(params.assignee!, actor);
-    if ("error" in assignee) return err(assignee.error, "update");
+    if ("error" in assignee) return { error: assignee.error };
     draft.assignee = assignee.actor;
   }
 
@@ -882,8 +913,8 @@ async function handleUpdate(
   }
 
   if (updates("blockedBy")) {
-    const blockerResolution = resolveBlockedBy(draft.id, params.blockedBy!);
-    if (blockerResolution.error) return err(blockerResolution.error, "update");
+    const blockerResolution = resolveBlockedBy(draft.id, params.blockedBy!, state);
+    if (blockerResolution.error) return { error: blockerResolution.error };
     draft.blockedBy = blockerResolution.blockedBy;
   }
 
@@ -894,57 +925,139 @@ async function handleUpdate(
   ) {
     draft.status = deriveDependencyStatus(draft.blockedBy);
   }
+  applyTaskStatusTiming(before, draft);
 
   if (draft.status === "in_progress" && draft.blockedBy.length > 0) {
-    return err(`Task #${draft.id} is blocked by: ${draft.blockedBy.join(", ")}`, "update");
+    return { error: `Task #${draft.id} is blocked by: ${draft.blockedBy.join(", ")}` };
   }
   if (
     draft.status === "in_progress"
     && (before.status !== "in_progress" || before.assignee.id !== draft.assignee.id)
   ) {
-    const active = findActiveTask(draft.assignee.id, draft.id);
+    const active = findActiveTask(draft.assignee.id, draft.id, state);
     if (active) {
-      return err(`Task #${active.id} is already in progress for @${draft.assignee.label} (one in_progress per actor). For parallel work, dispatch teammates without changing todo status; update each task when its agent completes.`, "update");
+      return { error: `Task #${active.id} is already in progress for @${draft.assignee.label} (one in_progress per actor). For parallel work, dispatch teammates without changing todo status; update each task when its agent completes.` };
     }
   }
 
   if (draft.status !== before.status && !isValidTransition(before.status, draft.status)) {
-    return err(`Invalid status transition: ${before.status} → ${draft.status}`, "update");
+    return { error: `Invalid status transition: ${before.status} → ${draft.status}` };
   }
 
   if (draft.status === "completed" && before.status !== "completed" && draft.goalId) {
     const gate = getGoalById(draft.goalId);
     if (!gate) {
-      return err(`Quality gate Goal ${draft.goalId} for task #${draft.id} was not found; cannot verify completion.`, "update");
+      return { error: `Quality gate Goal ${draft.goalId} for task #${draft.id} was not found; cannot verify completion.` };
     }
     if (gate.status !== "done") {
-      // A paused Goal cannot be driven to done by `goal complete` — it has to be
-      // resumed first. Pointing at the wrong command is worst exactly when the
-      // Goal paused because its verifier kept erroring out.
       const how = gate.status === "paused"
         ? "Resume the Goal (/goal resume) and let it verify before completing this task."
         : "Complete the Goal (goal complete) to verify it before completing this task.";
-      return err(`Quality gate Goal not verified for task #${draft.id}: "${gate.text}" (${gate.status}). ${how}`, "update");
+      return { error: `Quality gate Goal not verified for task #${draft.id}: "${gate.text}" (${gate.status}). ${how}` };
     }
   }
 
   const activationInputsChanged = before.context !== draft.context
     || JSON.stringify(before.skills) !== JSON.stringify(draft.skills);
   const assigneeChanged = before.assignee.id !== draft.assignee.id;
-  // A task without skills has nothing to activate: skipping avoids the async
-  // round-trip and the concurrency window it opens, and keeps skill-less tasks
-  // free of meaningless skillActivation metadata.
   const shouldActivate = draft.status === "in_progress"
     && draft.skills.length > 0
     && (before.status !== "in_progress" || activationInputsChanged || assigneeChanged || !draft.skillActivation);
+  return { before, draft, activationInputsChanged, shouldActivate };
+}
+
+async function handleBatchUpdate(
+  updates: TodoUpdateSpec[],
+  actor: TodoActorRef,
+  generation: number,
+): Promise<FlowToolResult> {
+  if (updates.length === 0) return err("updates must be a non-empty array", "update");
+  const ids = updates.map((update) => update.id);
+  if (new Set(ids).size !== ids.length) return err("update ids must be unique", "update");
+
+  const baseline = cloneTaskMap();
+  const candidate = cloneTaskMap();
+  const preparedUpdates: PreparedTodoUpdate[] = [];
+  for (const [index, update] of updates.entries()) {
+    const prepared = prepareTodoUpdate({ action: "update", ...update }, actor, candidate);
+    if ("error" in prepared) return err(`updates[${index}]: ${prepared.error}`, "update");
+    candidate.set(prepared.draft.id, prepared.draft);
+    if (prepared.draft.status === "completed" && prepared.before.status !== "completed") {
+      autoUnblock(candidate, prepared.draft.id);
+    }
+    preparedUpdates.push(prepared);
+  }
+
+  const activations = new Map<string, SkillActivation>();
+  for (const prepared of preparedUpdates) {
+    prepared.draft = candidate.get(prepared.draft.id)!;
+    const activation = prepared.shouldActivate ? await activateTask(prepared.draft) : undefined;
+    if (activation) {
+      prepared.draft.skillActivation = activationMetadata(activation);
+      candidate.set(prepared.draft.id, prepared.draft);
+      activations.set(prepared.draft.id, activation);
+    }
+    if (prepared.draft.status === "pending" || prepared.draft.skills.length === 0) {
+      prepared.draft.skillActivation = undefined;
+      candidate.set(prepared.draft.id, prepared.draft);
+    }
+  }
+
+  if (activations.size > 0) {
+    assertTodoGeneration(generation);
+    if (JSON.stringify([...tasks]) !== JSON.stringify([...baseline])) {
+      throw new Error("Todo state changed while batch skills were activating; retry the mutation.");
+    }
+  }
+
+  const changed = preparedUpdates.filter((prepared) => taskChanged(prepared.before, prepared.draft)
+    || JSON.stringify(prepared.before.skillActivation) !== JSON.stringify(prepared.draft.skillActivation));
+  if (changed.length === 0) return ok(`No changes: ${updates.length} tasks`, "update", ids);
+  const updatedAt = Date.now();
+  for (const prepared of changed) {
+    prepared.draft.updatedAt = updatedAt;
+    candidate.set(prepared.draft.id, prepared.draft);
+  }
+
+  commitTodoState(candidate);
+  for (const prepared of preparedUpdates) {
+    const activation = activations.get(prepared.draft.id);
+    if (activation) {
+      activeSkillSnapshots.set(prepared.draft.id, activation);
+      runSkillInjection = undefined;
+    } else if (prepared.activationInputsChanged || prepared.draft.status !== "in_progress") {
+      clearSkillSnapshot(prepared.draft.id);
+    }
+  }
+
+  const lines = preparedUpdates.map(({ before, draft }) => {
+    const statusNote = before.status !== draft.status ? ` (${before.status} → ${draft.status})` : "";
+    return `#${draft.id} ${draft.subject}${statusNote}`;
+  });
+  return ok(`Updated ${preparedUpdates.length} tasks:\n${lines.join("\n")}`, "update", ids);
+}
+
+async function handleUpdate(
+  params: TodoParams,
+  ctx: ExtensionContext,
+  actor: TodoActorRef,
+  generation: number,
+): Promise<FlowToolResult> {
+  if (params.updates !== undefined) {
+    const conflicting = ["id", "subject", "description", "status", "blockedBy", "context", "skills", "summary", "updateFields", "assignee", "goalId"]
+      .filter((field) => params[field as keyof TodoParams] !== undefined);
+    if (conflicting.length > 0) {
+      return err(`update accepts either id with top-level fields or updates, not both; ${conflicting.join(", ")} cannot accompany updates`, "update");
+    }
+    return handleBatchUpdate(params.updates, actor, generation);
+  }
+
+  const prepared = prepareTodoUpdate(params, actor, tasks);
+  if ("error" in prepared) return err(prepared.error, "update");
+  const { before, draft, activationInputsChanged, shouldActivate } = prepared;
   const activation = shouldActivate ? await activateTask(draft) : undefined;
   if (shouldActivate) {
-    revalidateAsyncTodoMutation({
-      generation,
-      before,
-      draft,
-      actor,
-    });
+    revalidateAsyncTodoMutation({ generation, before, draft, actor });
   }
   if (activation) draft.skillActivation = activationMetadata(activation);
   if (draft.status === "pending" || draft.skills.length === 0) draft.skillActivation = undefined;
@@ -960,8 +1073,6 @@ async function handleUpdate(
     autoUnblock(nextTasks, draft.id);
   }
 
-  // Persist and update the UI against the detached candidate state. Only after
-  // every fallible operation succeeds do we publish the task and skill snapshot.
   commitTodoState(nextTasks);
   if (activation) {
     activeSkillSnapshots.set(draft.id, activation);
@@ -994,7 +1105,7 @@ function handleList(params: TodoParams, actor: TodoActorRef): FlowToolResult {
   }
 
   if (filtered.length === 0) {
-    return ok("No tasks found.", "list");
+    return ok("No tasks found.", "list", []);
   }
 
   // Pre-compute reverse dependency map: taskId -> list of task IDs it blocks
@@ -1022,7 +1133,7 @@ function handleList(params: TodoParams, actor: TodoActorRef): FlowToolResult {
     return `${statusIcon(t.status)} ${actorTag(t)} #${t.id} ${t.subject}${tagStr}`;
   });
 
-  return ok(lines.join("\n"), "list");
+  return ok(lines.join("\n"), "list", filtered.map((task) => task.id));
 }
 
 function handleGet(params: TodoParams): FlowToolResult {
@@ -1061,29 +1172,49 @@ function handleGet(params: TodoParams): FlowToolResult {
 }
 
 function handleDelete(params: TodoParams, ctx: ExtensionContext, actor: TodoActorRef): FlowToolResult {
-  if (!params.id) return err("id is required for delete", "delete");
-  const task = tasks.get(params.id);
-  if (!task) return err(`Task not found: ${params.id}`, "delete");
-  if (!canDeleteTask(actor, task)) return err(`@${actor.label} cannot delete task #${params.id}`, "delete");
+  if (params.id && params.ids !== undefined) return err("delete accepts either id or ids, not both", "delete");
+  const requestedIds = params.ids ?? (params.id ? [params.id] : []);
+  if (requestedIds.length === 0) return err("id or ids is required for delete", "delete");
+  if (new Set(requestedIds).size !== requestedIds.length) return err("delete ids must be unique", "delete");
 
+  const selected: TodoTask[] = [];
+  for (const id of requestedIds) {
+    const task = tasks.get(id);
+    if (!task) return err(`Task not found: ${id}`, "delete");
+    if (!canDeleteTask(actor, task)) return err(`@${actor.label} cannot delete task #${id}`, "delete");
+    selected.push(task);
+  }
+
+  const deletedIds = new Set(requestedIds);
   const nextTasks = cloneTaskMap();
-  const deleted = nextTasks.get(params.id)!;
-  deleted.status = "deleted";
-  deleted.updatedAt = Date.now();
+  const updatedAt = Date.now();
+  for (const id of requestedIds) {
+    const deleted = nextTasks.get(id)!;
+    const before = tasks.get(id)!;
+    deleted.status = "deleted";
+    deleted.updatedAt = updatedAt;
+    applyTaskStatusTiming(before, deleted, updatedAt);
+  }
 
-  for (const t of nextTasks.values()) {
-    if (t.status !== "deleted" && t.blockedBy.includes(params.id)) {
-      t.blockedBy = t.blockedBy.filter((d) => d !== params.id);
-      if (t.status === "blocked" || t.status === "pending") {
-        t.status = deriveDependencyStatus(t.blockedBy);
-      }
-      t.updatedAt = Date.now();
+  for (const task of nextTasks.values()) {
+    if (task.status === "deleted" || !task.blockedBy.some((id) => deletedIds.has(id))) continue;
+    task.blockedBy = task.blockedBy.filter((id) => !deletedIds.has(id));
+    if (task.status === "blocked" || task.status === "pending") {
+      task.status = deriveDependencyStatus(task.blockedBy);
     }
+    task.updatedAt = updatedAt;
   }
 
   commitTodoState(nextTasks);
-  clearCommittedSkillSnapshots(new Set([deleted.id]));
-  return ok(`Deleted #${deleted.id}: ${deleted.subject}`, "delete");
+  clearCommittedSkillSnapshots(deletedIds);
+  if (selected.length === 1) {
+    return ok(`Deleted #${selected[0].id}: ${selected[0].subject}`, "delete", requestedIds);
+  }
+  return ok(
+    `Deleted ${selected.length} tasks:\n${selected.map((task) => `#${task.id} ${task.subject}`).join("\n")}`,
+    "delete",
+    requestedIds,
+  );
 }
 
 function handleClear(ctx: ExtensionContext, actor: TodoActorRef): FlowToolResult {
@@ -1300,6 +1431,7 @@ async function handleNext(
 
   draft.skillActivation = activation ? activationMetadata(activation) : undefined;
   draft.updatedAt = Date.now();
+  applyTaskStatusTiming(task, draft, draft.updatedAt);
   const nextTasks = new Map(tasks);
   nextTasks.set(draft.id, draft);
   commitTodoState(nextTasks);
@@ -1417,6 +1549,22 @@ const VALID_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
 
 function isValidTransition(from: TaskStatus, to: TaskStatus): boolean {
   return VALID_TRANSITIONS[from]?.includes(to) ?? false;
+}
+
+function applyTaskStatusTiming(before: TodoTask, draft: TodoTask, changedAt = Date.now()): void {
+  if (before.status === draft.status) return;
+  if (before.status === "in_progress") {
+    if (before.activeStartedAt !== undefined) {
+      draft.activeDurationMs = (before.activeDurationMs ?? 0) + Math.max(0, changedAt - before.activeStartedAt);
+    }
+    delete draft.activeStartedAt;
+  }
+  if (draft.status === "in_progress") {
+    draft.activeStartedAt = changedAt;
+    delete draft.completedAt;
+  } else if (draft.status === "completed") {
+    draft.completedAt = changedAt;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1634,7 +1782,10 @@ function taskChanged(before: TodoTask, after: TodoTask): boolean {
     JSON.stringify(before.skills) !== JSON.stringify(after.skills) ||
     JSON.stringify(before.origin) !== JSON.stringify(after.origin) ||
     JSON.stringify(before.createdBy) !== JSON.stringify(after.createdBy) ||
-    JSON.stringify(before.assignee) !== JSON.stringify(after.assignee)
+    JSON.stringify(before.assignee) !== JSON.stringify(after.assignee) ||
+    before.activeStartedAt !== after.activeStartedAt ||
+    before.activeDurationMs !== after.activeDurationMs ||
+    before.completedAt !== after.completedAt
   );
 }
 
@@ -1828,25 +1979,41 @@ function actorTag(task: TodoTask): string {
     : `@${createdBy}→@${assignee}`;
 }
 
-function findActiveTask(assigneeId: string, excludeId?: string): TodoTask | undefined {
-  return [...tasks.values()].find(
+function findActiveTask(
+  assigneeId: string,
+  excludeId?: string,
+  state: Map<string, TodoTask> = tasks,
+): TodoTask | undefined {
+  return [...state.values()].find(
     (task) => task.status === "in_progress"
       && task.assignee.id === assigneeId
       && task.id !== excludeId,
   );
 }
 
-function snapshotDetails(action: string, error?: string): TodoResultDetails {
-  const tasks = getVisibleTasks().map((task): TodoTaskSnapshot => ({
-    id: task.id,
-    subject: task.subject,
-    status: task.status,
-  }));
-  return { action, tasks, ...(error ? { error } : {}) };
+function snapshotDetails(action: string, error?: string, displayTaskIds?: string[]): TodoResultDetails {
+  const capturedAt = Date.now();
+  const tasks = getVisibleTasks().map((task): TodoTaskSnapshot => {
+    const durationMs = (task.activeDurationMs ?? 0)
+      + (task.status === "in_progress" && task.activeStartedAt !== undefined
+        ? Math.max(0, capturedAt - task.activeStartedAt)
+        : 0);
+    return {
+      id: task.id,
+      subject: task.subject,
+      status: task.status,
+      assignee: cloneActor(task.assignee),
+      ...(task.blockedBy.length > 0 ? { blockedBy: [...task.blockedBy] } : {}),
+      ...(task.summary ? { summary: task.summary } : {}),
+      ...(durationMs > 0 || task.status === "completed" ? { durationMs } : {}),
+      ...(task.status === "completed" ? { completedAt: task.completedAt ?? task.updatedAt } : {}),
+    };
+  });
+  return { action, tasks, ...(displayTaskIds !== undefined ? { displayTaskIds } : {}), ...(error ? { error } : {}) };
 }
 
-function ok(text: string, action = "unknown"): FlowToolResult {
-  return { content: [{ type: "text", text }], details: snapshotDetails(action) };
+function ok(text: string, action = "unknown", displayTaskIds?: string[]): FlowToolResult {
+  return { content: [{ type: "text", text }], details: snapshotDetails(action, undefined, displayTaskIds) };
 }
 
 function err(text: string, action = "unknown"): FlowToolResult {
