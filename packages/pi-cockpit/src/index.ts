@@ -5,7 +5,7 @@ import type { TUI } from "@earendil-works/pi-tui";
 import { ambientKeysShouldYield, capturingOverlayVisible } from "./capturing-overlay.ts";
 import { Key, decodeKittyPrintable, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { AgentReadStoreRouter, effectiveAgentStatus, type CompletePayload, type MessagePayload, type StartedPayload } from "./agents-store.ts";
-import { AmbientSurfaceCache, nextUiPromptDepth, statusText, titleFor, workingMessage, type AmbientState } from "./ambient.ts";
+import { AmbientSurfaceCache, nextUiPromptDepth, shouldHideWorkingDuration, statusText, titleFor, workingMessage, type AmbientState } from "./ambient.ts";
 import { generateTitleWithModel } from "./title-llm.ts";
 import { suggestTitle } from "./title-gen.ts";
 import { BashBgStore } from "./bash-bg-store.ts";
@@ -510,7 +510,7 @@ export default function (pi: ExtensionAPI): void {
 				cwd: title.showCwd ? formatCwd(ctx.sessionManager.getCwd()) : undefined,
 				activeTool: activeTool?.name,
 				workingStartedAt: activeTool?.startedAt ?? runningStartedAt,
-				hideLiveDuration: config.staticMode,
+				hideLiveDuration: shouldHideWorkingDuration(capturedTui?.mode, config.staticMode),
 				separator: ` ${g.separator} `,
 			};
 			ambientSurfaces.setWorkingMessage((message) => ctx.ui.setWorkingMessage(message), workingMessage(state, now));

@@ -486,7 +486,6 @@ export function renderTodos(
 		if (blocked > 0) {
 			segs.push({ text: theme.fg("error", tuiT("common.blocked", { count: blocked })), priority: 95, clippable: false });
 		}
-		segs.push({ text: theme.fg("dim", tuiT("widget.todo.details", { shortcut: detailsHint })), priority: 70, clippable: false });
 		segs.push({ text: theme.fg("dim", tuiT("widget.todo.expand", { shortcut: toggleHint })), priority: 10, clippable: false });
 		return [fitLineByPriority(segs, width, utils, " ", g.ellipsis)];
 	}
@@ -527,11 +526,13 @@ export function renderTodos(
 		const ntext = `${g.arrow} ${theme.fg(np.glyphColor, np.glyph)}${nactor ? ` ${theme.fg("mdLink", nactor)}` : ""} ${todoSubject(np, next.subject, theme)}`;
 		summarySegs.push({ text: ntext, priority: 20, clippable: false });
 	}
-	summarySegs.push({
-		text: theme.fg("dim", tuiT("widget.todo.details", { shortcut: detailsHint })),
-		priority: 35,
-		clippable: false,
-	});
+	if (expanded) {
+		summarySegs.push({
+			text: theme.fg("dim", tuiT("widget.todo.details", { shortcut: detailsHint })),
+			priority: 35,
+			clippable: false,
+		});
+	}
 	summarySegs.push({
 		text: theme.fg("dim", `(${toggleHint} ${tuiT(expanded ? "widget.todo.collapse" : "widget.todo.expandAction")})`),
 		priority: 10,

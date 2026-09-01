@@ -59,11 +59,20 @@ export function nextUiPromptDepth(depth: number, event: "start" | "end"): number
 	return event === "start" ? depth + 1 : Math.max(0, depth - 1);
 }
 
+export function shouldHideWorkingDuration(
+	mode: "regular" | "fullscreen" | undefined,
+	staticMode: boolean,
+): boolean {
+	// Pi's regular renderer shares scrollback between the transcript and status
+	// row, so a moving live timer can be preserved as transcript height changes.
+	return staticMode || mode !== "fullscreen";
+}
+
 /**
  * The streaming working line.
  *
- * Cockpit hides the host indicator and renders the active state with a live
- * elapsed value, matching the compact folded-thinking label.
+ * Cockpit hides the host indicator and renders the active state. Fullscreen may
+ * add a live elapsed value; the regular main screen keeps this row stable.
  */
 export function workingMessage(state: AmbientState, now = Date.now()): string | undefined {
 	const label = state.waitingForInput

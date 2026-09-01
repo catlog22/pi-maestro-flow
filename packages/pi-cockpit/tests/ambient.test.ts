@@ -1,6 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { AmbientSurfaceCache, nextUiPromptDepth, statusText, titleFor, workingMessage, type AmbientState } from "../src/ambient.ts";
+import {
+	AmbientSurfaceCache,
+	nextUiPromptDepth,
+	shouldHideWorkingDuration,
+	statusText,
+	titleFor,
+	workingMessage,
+	type AmbientState,
+} from "../src/ambient.ts";
 import type { AgentRow, BashBgJob, TodoItem } from "../src/types.ts";
 import { cockpitTuiLocale } from "../src/tui-i18n.ts";
 
@@ -78,6 +86,25 @@ test("workingMessage omits a frozen elapsed in static mode", () => {
 	});
 	assert.equal(workingMessage(staticState, 4_200), "\x1b[3mteammate-wait\x1b[23m");
 	assert.equal(workingMessage(staticState, 66_400), "\x1b[3mteammate-wait\x1b[23m");
+});
+
+test("regular main-screen working rows stay stable while fullscreen keeps live duration", () => {
+	assert.equal(shouldHideWorkingDuration("regular", false), true);
+	assert.equal(shouldHideWorkingDuration(undefined, false), true);
+	assert.equal(shouldHideWorkingDuration("fullscreen", false), false);
+	assert.equal(shouldHideWorkingDuration("fullscreen", true), true);
+
+	const regular = state({
+		running: true,
+		activeTool: "teammate",
+		workingStartedAt: 1_000,
+		hideLiveDuration: shouldHideWorkingDuration("regular", false),
+	});
+	assert.equal(workingMessage(regular, 4_200), "\x1b[3mteammate\x1b[23m");
+	assert.equal(workingMessage(regular, 66_400), "\x1b[3mteammate\x1b[23m");
+
+	const fullscreen = { ...regular, hideLiveDuration: shouldHideWorkingDuration("fullscreen", false) };
+	assert.equal(workingMessage(fullscreen, 66_400), "\x1b[3mteammate 1m05s\x1b[23m");
 });
 
 test("UI prompt depth nests, saturates at zero, and projects a waiting state without ending the turn", () => {

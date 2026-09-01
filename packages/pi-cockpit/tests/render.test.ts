@@ -423,15 +423,18 @@ test("renderTodos degrades when the theme exposes no weight or strikethrough", (
 	assert.ok(lines.some((line) => line.includes("task 1")));
 });
 
-test("renderTodos list collapsed: summary only", () => {
-	const collapsed = { ...opts, expanded: false };
-	const lines = renderTodos([todo("0", "completed"), todo("1", "in_progress"), todo("2", "pending")], "list", 80, theme, utils, collapsed);
-	assert.equal(lines.length, 1);
-	assert.ok(lines[0].includes("Todo"));
-	assert.ok(lines[0].includes("task 1"), "collapsed summary keeps the next actionable task");
-	assert.ok(lines[0].includes(`${DEFAULT_TODO_DETAILS_HINT} full list`));
-	assert.ok(lines[0].includes(`${DEFAULT_TOGGLE_HINT} expand`));
+test("renderTodos list toggles shortcut hints with expansion state", () => {
+	const items = [todo("0", "completed"), todo("1", "in_progress"), todo("2", "pending")];
+	const collapsed = renderTodos(items, "list", 80, theme, utils, { ...opts, expanded: false });
+	assert.equal(collapsed.length, 1);
+	assert.ok(collapsed[0].includes("Todo"));
+	assert.ok(collapsed[0].includes("task 1"), "collapsed summary keeps the next actionable task");
+	assert.ok(!collapsed[0].includes(`${DEFAULT_TODO_DETAILS_HINT} full list`));
+	assert.ok(collapsed[0].includes(`${DEFAULT_TOGGLE_HINT} expand`));
 
+	const expanded = renderTodos(items, "list", 200, theme, utils, opts);
+	assert.ok(expanded[0].includes(`${DEFAULT_TODO_DETAILS_HINT} full list`));
+	assert.ok(expanded[0].includes(`${DEFAULT_TOGGLE_HINT} collapse`));
 });
 
 test("renderTodos collapsed line includes running state, member count and assignee", () => {
@@ -493,7 +496,7 @@ test("renderTodos compact: bar + percent, width bounded", () => {
 		assert.ok(lines[0].includes("%"));
 		assert.ok(utils.measure(lines[0]) <= width, `w=${width}: ${lines[0]}`);
 		if (width === 60) {
-			assert.ok(lines[0].includes(`${DEFAULT_TODO_DETAILS_HINT} full list`));
+			assert.ok(!lines[0].includes(`${DEFAULT_TODO_DETAILS_HINT} full list`));
 			assert.ok(lines[0].includes(`${DEFAULT_TOGGLE_HINT} expand`));
 		}
 	}
