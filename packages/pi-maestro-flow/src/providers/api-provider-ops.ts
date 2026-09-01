@@ -913,10 +913,7 @@ export function canonicalizeLegacyThinkingLevelMap(value: unknown): {
       typeof entry[1] === "string" || entry[1] === null
     ),
   );
-  if (map.xhigh !== "xhigh" || map.max !== "max") return { map, changed: false };
-  map.xhigh = "max";
-  delete map.max;
-  return { map, changed: true };
+  return { map, changed: false };
 }
 
 export function materializeProviderCompat(providerCompat: unknown, modelCompat: unknown):

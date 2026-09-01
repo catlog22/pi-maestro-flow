@@ -2114,7 +2114,7 @@ test("session_start migration never overrides resumed-session thinking", async (
   assert.deepEqual(statuses.at(-1), { key: "maestro-effort", value: "low" });
 });
 
-test("legacy Qwen entry path preserves ProviderConfig metadata, compat, and live max mapping", async (t) => {
+test("Qwen entry path preserves ProviderConfig metadata, compat, and canonical max mapping", async (t) => {
   const tempDir = mkdtempSync(join(tmpdir(), "pi-thinking-qwen-entry-"));
   t.after(() => rmSync(tempDir, { recursive: true, force: true }));
   const modelsPath = join(tempDir, "models.json");
@@ -2190,8 +2190,12 @@ test("legacy Qwen entry path preserves ProviderConfig metadata, compat, and live
   assert.equal(registration.authHeader, false);
   const registeredModel = registration.models.find((model: any) => model.id === "qwen-max");
   assert.deepEqual(registeredModel.headers, { "X-Model": "qwen-max" });
-  assert.deepEqual(registeredModel.thinkingLevelMap, { off: null, xhigh: "max", extra: "keep-me" });
-  assert.equal("max" in registeredModel.thinkingLevelMap, false);
+  assert.deepEqual(registeredModel.thinkingLevelMap, {
+    off: null,
+    xhigh: "xhigh",
+    max: "max",
+    extra: "keep-me",
+  });
 
   const live = registry.find("maestro-qwen", "qwen-max")!;
   assert.equal(live.provider, "maestro-qwen");
@@ -2212,8 +2216,8 @@ test("legacy Qwen entry path preserves ProviderConfig metadata, compat, and live
     supportsExplicitPromptCacheMode: false,
     supportsLongCacheRetention: false,
   });
-  assert.equal(live.thinkingLevelMap?.xhigh, "max");
-  assert.equal("max" in (live.thinkingLevelMap ?? {}), false);
+  assert.equal(live.thinkingLevelMap?.xhigh, "xhigh");
+  assert.equal(live.thinkingLevelMap?.max, "max");
   const request = await registry.getApiKeyAndHeaders(live);
   assert.equal(request.ok, true);
   assert.deepEqual(request.headers, { "X-Provider": "qwen", "X-Model": "qwen-max" });
@@ -2226,7 +2230,8 @@ test("legacy Qwen entry path preserves ProviderConfig metadata, compat, and live
   assert.deepEqual(saved.providers["maestro-qwen"].models[1], siblingModel);
   assert.deepEqual(saved.providers["maestro-qwen"].models[0].thinkingLevelMap, {
     off: null,
-    xhigh: "max",
+    xhigh: "xhigh",
+    max: "max",
     extra: "keep-me",
   });
 });
