@@ -5,9 +5,24 @@ icon: "🔄"
 
 这里记录 pi maestro flow 套件从上一稳定版本到当前版本的用户可见变化、行为调整、问题修复和升级要求。
 
-> **当前稳定版本：v0.24.0（2026-08-28）。** 子进程树回收与取消语义加固、`steer`/`interrupt` 明确分离、completion-outbox 运维 CLI、跨窗口 teammate 协调、Cockpit 用量手动刷新与 Todo 事件投影；引擎保持 `maestro-flow@0.5.82`；搭配 Teammate 2.2.0、Cockpit 0.19.0、Settings-Core 0.2.1、Backend-Core 0.1.1 与 Backends 0.1.1。
+> **当前稳定版本：v0.25.0（2026-09-01）。** SSH 主机管理、远程窗口监督、会话 Artifact、Todo 结果卡片与 Goal/Plan 生命周期加固；引擎精确 pin `maestro-flow@0.5.83`；搭配 Teammate 2.3.0、Cockpit 0.20.0、Settings-Core 0.2.1、Backend-Core 0.1.2 与 Backends 0.1.2。
 
-## v0.24.0（2026-08-28）
+## v0.25.0（2026-09-01）
+
+> 本版发布 Flow 0.25.0、Teammate 2.3.0、Cockpit 0.20.0、Backend-Core 0.1.2 与 Backends 0.1.2；Settings-Core 0.2.1 保持不变；引擎精确 pin `maestro-flow` 0.5.82 → 0.5.83。51 个实现提交 / 357 个文件 / +59,169 −17,914（不含本发布元数据）。
+
+- **Flow SSH 与连接能力**：新增加密 `/ssh` 主机引用和配置管理，完善 DSH 远程 SSH 启动；浏览器扩展桥接加入配对认证与显式通道；flow-schedule、数据管理器和 session Artifact 支持带归属元数据的跨会话工作流。
+- **Flow 编排与边界**：Todo 支持原子批量变更、任务计时与结果卡片；压缩、工具结果 spill、Provider/usage 历史和浏览器工具链继续加固。Goal 完成验证扩大到受限的 10 分钟 verifier / 5 分钟 acceptance 命令，并在 canonical Workflow 身份漂移或终态时 fail closed；Plan 不再因批准本身强制创建 Goal。
+- **Flow 上下文连续性**：新增有界的 `session_history` 与精确 `session://` 条目资源；显式 `new_context` 重置默认关闭，开启后携带确定性的 Todo/Goal/Plan 恢复 capsule 与经过校验的资源引用。
+- **Flow Todo 持久性**：Todo 任务保留经过校验的 `resourceUris`；agent output 淘汰时保留 completion manifest 与 alias 引用的记录。
+- **Teammate 2.3.0**：加入 agent/runtime provenance、Monitor window 生命周期与远程窗口协议，重构 workspace-peer 观察投影；增强 SSH/远程 worker、ACP 配置、completion outbox GC 和跨窗口消息投递的崩溃一致性与终态处理。
+- **Teammate 模型路由与结算**：保存的 Profiles 可按稳定 ID 或名称列出、解析、激活，`/teammate-model` 可直接打开 Profiles 标签；structured-output 失败会保留 provider 原因及对应的结算诊断。
+- **Cockpit 0.20.0**：增加窗口自动完成、session/window owner 标识、结构化工具调用/结果卡片、Todo 结果任务卡与 duration chart；viewport 和工作中状态行在普通主屏保持稳定，Todo 折叠态只显示相关快捷提示。
+- **Backend contracts**：Backend-Core 暴露 SSH 主机契约；Backends 完善 DSH SSH 启动与远程事件处理。
+
+升级：`pi install npm:pi-maestro-flow@0.25.0`
+
+
 
 > 本版发布 Flow 0.24.0、Teammate 2.2.0 与 Cockpit 0.19.0；Settings-Core 0.2.1、Backend-Core 0.1.1、Backends 0.1.1 及引擎范围 `maestro-flow@^0.5.82` 保持不变。
 

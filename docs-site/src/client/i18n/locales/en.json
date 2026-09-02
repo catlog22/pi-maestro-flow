@@ -21,8 +21,8 @@
     "logo_alt": "Maestro Flow Logo"
   },
   "announcement": {
-    "title": "v0.24.0 is out — process-tree reclamation + explicit interrupt + completion-outbox operations + Cockpit responsiveness (maestro-flow 0.5.82). Upgrade:",
-    "install": "pi install npm:pi-maestro-flow@0.24.0",
+    "title": "v0.25.0 is out — SSH host management + remote-window supervision + session Artifacts + hardened Goal/Plan lifecycle (maestro-flow 0.5.83). Upgrade:",
+    "install": "pi install npm:pi-maestro-flow@0.25.0",
     "close": "Dismiss"
   },
   "accessibility": {

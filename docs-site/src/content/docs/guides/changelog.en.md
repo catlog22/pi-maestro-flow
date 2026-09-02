@@ -5,9 +5,24 @@ icon: "🔄"
 
 This page records user-visible features, behavior changes, fixes, and upgrade requirements from the previous stable release to the current version of the pi maestro flow suite.
 
-> **Current stable release: v0.24.0 (2026-08-28).** Hardened process-tree reclamation and cancellation, explicit queued `steer` versus `interrupt`, completion-outbox operations, cross-window teammate coordination, Cockpit manual usage refresh and Todo event projection; engine remains `maestro-flow@0.5.82`; bundles Teammate 2.2.0, Cockpit 0.19.0, Settings-Core 0.2.1, Backend-Core 0.1.1, and Backends 0.1.1.
+> **Current stable release: v0.25.0 (2026-09-01).** SSH host management, remote-window supervision, session Artifacts, Todo result cards, and hardened Goal/Plan lifecycle; exact engine pin `maestro-flow@0.5.83`; bundles Teammate 2.3.0, Cockpit 0.20.0, Settings-Core 0.2.1, Backend-Core 0.1.2, and Backends 0.1.2.
 
-## v0.24.0 (2026-08-28)
+## v0.25.0 (2026-09-01)
+
+> This release ships Flow 0.25.0, Teammate 2.3.0, Cockpit 0.20.0, Backend-Core 0.1.2, and Backends 0.1.2; Settings-Core 0.2.1 is unchanged; exact engine pin `maestro-flow` 0.5.82 → 0.5.83. 51 implementation commits / 357 files / +59,169 −17,914 (excluding this release metadata).
+
+- **Flow SSH and connectivity**: add encrypted `/ssh` host references and configuration, improve DSH remote SSH launch, add authenticated browser-extension pairing on an explicit channel, and connect flow-schedule, data-manager, and session Artifacts with ownership metadata.
+- **Flow orchestration boundaries**: add atomic Todo batch mutations, task timing, and result cards; harden compaction, tool-result spill, provider/usage history, and browser tooling. Goal verification now allows bounded 10-minute verifiers and 5-minute acceptance commands, while canonical Workflow identity drift and terminal state fail closed; Plan approval no longer forces Goal creation.
+- **Flow context continuity**: add bounded `session_history` and exact `session://` entry resources; explicit `new_context` resets are opt-in and carry deterministic Todo/Goal/Plan recovery capsules with validated resource references.
+- **Flow Todo durability**: Todo tasks retain validated `resourceUris`, while agent output eviction preserves records referenced by durable completion manifests and aliases.
+- **Teammate 2.3.0**: add agent/runtime provenance, Monitor window lifecycle and remote-window protocols, and a workspace-peer observation rewrite; harden SSH/remote workers, ACP configuration, completion-outbox GC, and cross-window delivery ordering and crash consistency.
+- **Teammate model routing and settlement**: saved Profiles can be listed, resolved, and activated by stable ID or name, with `/teammate-model` opening the Profiles tab; structured-output failures preserve provider causes alongside the applicable settlement diagnostic.
+- **Cockpit 0.20.0**: add window autocomplete, session/window owner identity, structured tool-call/result cards, Todo task cards and duration charts; stabilize the regular main-screen viewport and working row, and show only relevant shortcut hints while Todo is collapsed.
+- **Backend contracts**: expose the SSH host contract from Backend-Core and improve DSH SSH launch and remote event handling in Backends.
+
+Upgrade: `pi install npm:pi-maestro-flow@0.25.0`
+
+
 
 > This release ships Flow 0.24.0, Teammate 2.2.0, and Cockpit 0.19.0. Settings-Core 0.2.1, Backend-Core 0.1.1, Backends 0.1.1, and the `maestro-flow@^0.5.82` engine range remain unchanged.
 

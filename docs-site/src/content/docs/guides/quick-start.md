@@ -5,7 +5,7 @@ icon: "🚀"
 
 10 分钟了解 Maestro Flow 的核心功能和使用方法。完整安装步骤见[安装与初始化](/guides/install)。
 
-> 当前稳定安装版本为 `0.21.6`（远程 teammate 工作器 + plan Knowledge Gate）。
+> 当前稳定安装版本为 `0.25.0`（SSH 主机管理、远程窗口监督、会话 Artifact 与 Goal/Plan 生命周期加固）。
 
 ---
 
@@ -16,7 +16,7 @@ icon: "🚀"
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 
 # 2. 安装或升级插件（teammate 与 cockpit 自动随附）
-pi install npm:pi-maestro-flow@0.24.0
+pi install npm:pi-maestro-flow@0.25.0
 
 # 3. 验证 Flow、Teammate 与 Cockpit 均已列出
 pi list

@@ -187,7 +187,17 @@ project .pi/agents > project .agents > ~/.agents > legacy user directory > bundl
 
 ## Model Routing Profiles
 
-Configure task-type defaults with `Alt+M` or `/teammate-models`. The Control Center's **Profiles** tab manages named routing Profiles shared by every project. Its **Routing** tab edits the active global Profile and combines built-in task types, discovered agent types, and types already present in that Profile.
+Configure task-type defaults with `Alt+M` or `/teammate-models`. The Control Center's **Profiles** tab is the saved-template system: it manages multiple named routing Profiles shared by every project. Its **Routing** tab edits the active global Profile and combines built-in task types, discovered agent types, and types already present in that Profile.
+
+Switch the current project's template directly by stable Profile ID or display name. With no argument, the command opens the Control Center on **Profiles**:
+
+```text
+/teammate-model fast-lane
+/teammate-model Fast Lane
+/teammate-model
+```
+
+Command completion lists every saved template and marks the project-active and global-default entries. If display names are duplicated, use the stable ID. Direct switching disables but preserves project overrides, matching the Profiles UI.
 
 The **Roles** tab lists discovered roles and their effective durable route. Role-scoped settings can be edited through the unified Settings surface as `role.<role-name>.model`, `role.<role-name>.fallbacks`, and `role.<role-name>.thinking`. These settings are stored in the same global Profile or project override file; package updates never rewrite role definitions or user routing data.
 
