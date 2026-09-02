@@ -6,6 +6,7 @@
  *   - goal: Autonomous Goal read/create surface with automatic loop-end verification
  *   - ask-user-question: Structured questionnaire for user input
  *   - todo: Task management with plain context, optional skills, and step tracking
+ *   - session_history: bounded read-only current/workspace/teammate session history
  *   - lsp: Language-server diagnostics, navigation, refactors, and raw requests
  *   - browser: Named-tab Chromium control and screenshots
  *   - computer_use: Serialized physical desktop observation and control
@@ -80,6 +81,7 @@ import {
   onAgentSettled as goalAgentSettled,
   onProviderPressureSettled as goalProviderPressureSettled,
   getActiveGoal,
+  getGoalCompactionSnapshot,
   getGoalPanelEntries,
   currentGoalPhase,
   switchCurrentGoal,
@@ -105,6 +107,7 @@ import {
   sealTodoTasksOnAgentComplete,
   formatTodoActorSelector,
   getVisibleTasks,
+  getTodoCompactionSnapshot,
   onAgentEndTodo,
   onBeforeAgentStartTodo,
   onContextTodo,
@@ -192,6 +195,7 @@ import {
   hasPlan,
   getPlanText,
   getPlanArtifactSummary,
+  getPlanCompactionSnapshot,
   getPlanHandoffStatus,
   setPlanModeChangeListener,
   type PlanContext,
@@ -214,8 +218,14 @@ import {
   createMaestroCompaction,
   persistMaestroCompactionKnowhow,
   runWithCompactionStatus,
+  type MaestroRecoveryState,
   type WorkflowRecoveryIdentity,
 } from "../compaction/maestro-compaction.ts";
+import {
+  buildNewContextRecoveryCapsule,
+  createNewContextController,
+  newContextFirstKeptEntryId,
+} from "../compaction/new-context.ts";
 import {
   commitProjectedCompactionInput,
   createMidTurnAutoCompaction,
@@ -249,6 +259,8 @@ import { registerFlowSchedule } from "../flow-schedule/register.ts";
 import { registerModelAvailability } from "../tools/model-availability.ts";
 import { registerTeammateSessionRouting } from "../tools/teammate-session-routing.ts";
 import { registerResourceTool } from "../tools/resource.ts";
+import { registerSessionHistoryTool } from "../tools/session-history.ts";
+import { registerNewContextTool } from "../tools/new-context.ts";
 import { registerConflictTool } from "../tools/conflict.ts";
 import {
   capturePublishedAgentResult,
@@ -325,6 +337,10 @@ import { PI_SUBPROCESS, PI_SUBPROCESS_CONFIG_FIELDS, PI_SUBPROCESS_SETTINGS_CATA
 import { registerInstallCommand } from "../install/install-command.ts";
 import { registerSshManager } from "../ssh-manager/extension.ts";
 
+type BrokeredTodoResultDetails = TodoResultDetails & {
+  newContextRecoveryState?: MaestroRecoveryState;
+};
+
 export const MAESTRO_CHILD_TOOL_NAMES = [
   "ask-user-question",
   "bash_bg",
@@ -332,6 +348,8 @@ export const MAESTRO_CHILD_TOOL_NAMES = [
   "smart_search",
   "source_check",
   "resource",
+  "session_history",
+  "new_context",
   "lsp",
   "browser",
   "computer_use",
@@ -1360,7 +1378,19 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
       };
       const result = await executeTodo(request.input as unknown as TodoParams, ctx, actor);
       updateTodoWidget();
-      return result;
+      const details = result.details as TodoResultDetails | undefined;
+      if ((result as { isError?: boolean }).isError || details?.transition !== "new_context") return result;
+      const workflow = workflowRecoveryIdentity();
+      const recoveryState: MaestroRecoveryState = {
+        todo: getTodoCompactionSnapshot(),
+        goal: getGoalCompactionSnapshot(),
+        plan: getPlanCompactionSnapshot(),
+        ...(workflow ? { workflow } : {}),
+      };
+      return {
+        ...result,
+        details: { ...details, newContextRecoveryState: recoveryState } satisfies BrokeredTodoResultDetails,
+      };
     };
     const result = childTodoMutationQueue.then(execute, execute);
     childTodoMutationQueue = result.then(() => undefined, () => undefined);
@@ -1368,6 +1398,14 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   };
 
   const compactionArbiter = new CompactionArbiter();
+  const newContextController = createNewContextController(compactionArbiter, {
+    continueAfterReset() {
+      pi.sendUserMessage(
+        "Continue from the recovery capsule and the active Todo's exact next action.",
+        { deliverAs: "followUp" },
+      );
+    },
+  });
   const midTurnAutoCompaction = createMidTurnAutoCompaction(pi, { arbiter: compactionArbiter });
   const state: MaestroState = {
     baseCwd: "",
@@ -1826,24 +1864,27 @@ Only request completion after all work is done; the extension verifies it indepe
     description: `Task management with plain-text context and optional Pi skill execution.
 
 Actions:
-- create (single): { action: "create", subject: "...", assignee: "self|root|id|unique-id-prefix|label|@label|label#id-prefix", context: "...", skills: [{ name, role: "primary|guard|support", args?: "..." }] }
-- create (batch): { action: "create", tasks: [{ subject, description?, context?, blockedBy?, skills?, goalId? }, ...] } — blockedBy integer N means the earlier array item tasks[N] (0-based), e.g. blockedBy: [0]
-- update (single): { action: "update", id, updateFields: [...], ... } — list changed fields; empty string/array clears clearable fields
+- create (single): { action: "create", subject: "...", assignee: "self|root|id|unique-id-prefix|label|@label|label#id-prefix", context: "...", skills: [{ name, role: "primary|guard|support", args?: "..." }], resourceUris?: ["agent://..."] }
+- create (batch): { action: "create", tasks: [{ subject, description?, context?, blockedBy?, skills?, resourceUris?, goalId? }, ...] } — blockedBy integer N means the earlier array item tasks[N] (0-based), e.g. blockedBy: [0]
+- update (single): { action: "update", id, updateFields: [...], ... } — list changed fields; empty string/array clears clearable fields; resourceUris replaces the full reference list
 - update (batch): { action: "update", updates: [{ id, updateFields?, ... }, ...] } — validates the whole batch and commits atomically
 - delete: use id for one task or ids for an atomic batch
-- advance: omit id/summary to activate your first runnable task; with an active task pass its id and a non-empty summary to complete it and activate your next runnable task
+- advance: omit id/summary/resourceUris to activate your first runnable task; with an active task pass its id, a non-empty summary, optional resourceUris, and optional transition (keep_context|new_context) to complete it and activate your next runnable task. transition=new_context requires compaction.newContext.enabled=true and otherwise fails before Todo mutation.
 - list / get / clear / next
 
 Parallel delegation: bind todo ids via teammate \`tasks[].todo\`; every actor advances only tasks assigned to itself. \`next\` remains the activation-only compatibility action.
 
-Contract: Todo is a live execution state machine, not a retrospective checklist. subject is the title; description is detail. status is update-only on create (never pass status to create). Each actor has at most one in_progress task. Skill binding requires exactly one primary.`,
+Contract: Todo is a live execution state machine, not a retrospective checklist. subject is the title; description is detail. status is update-only on create (never pass status to create). Each actor has at most one in_progress task. Skill binding requires exactly one primary. context carries current progress and the exact next action; summary carries outcome, evidence, decisions, and downstream impact. resourceUris are validated durable references; prefer exact immutable publication IDs (for example agent://<publication-id>) over aliases. advance transition is a request-only receipt for an active completion and is not persisted or scheduled by Todo.`,
 
     promptSnippet: "Lay out a whole multi-step plan in one batch create (≥3 steps), then keep it live by advancing each task immediately when its outcome is complete.",
     promptGuidelines: [
       "Use todo when work has ≥3 steps/phases, step dependencies, or cross-turn context — create the COMPLETE plan in one batch create BEFORE executing.",
       "A task is a verifiable outcome (feature, phase, component), not a single edit or command; put affected files and verification criteria in description/context.",
+      "Keep context focused on current progress and the exact next action; put outcome, evidence, decisions, and downstream impact in summary.",
       "Batch blockedBy: tasks[i].blockedBy = [N] means tasks[i] depends on tasks[N], where 0 <= N < i.",
       "Todo is a live execution state machine: immediately after a task meets its acceptance criteria, call todo advance with its id and summary before any tool call or work belonging to another Todo; never batch-complete finished tasks during finalization.",
+      "On completion, attach validated resourceUris for durable evidence and prefer exact immutable publication IDs over mutable aliases.",
+      "Advance transition is request-only: pass transition=keep_context or new_context only with an active completion-form advance; new_context requires compaction.newContext.enabled=true, the receipt is not persisted, and omission preserves the current behavior.",
       "Advance is actor-scoped and only completes or activates tasks assigned to the caller. Use update immediately instead when work becomes blocked, is paused, or must be completed without activating another task.",
     ],
 
@@ -1856,7 +1897,38 @@ Contract: Todo is a live execution state machine, not a retrospective checklist.
       _onUpdate: ((result: FlowToolResult) => void) | undefined,
       ctx: ExtensionContext,
     ): Promise<FlowToolResult> {
-      return executeTodo(params as unknown as TodoParams, ctx);
+      const todoParams = params as unknown as TodoParams;
+      const result = await executeTodo(todoParams, ctx);
+      const details = result.details as TodoResultDetails | undefined;
+      if (!(result as { isError?: boolean }).isError && details?.transition === "new_context") {
+        try {
+          const receipt = newContextController.schedule({
+            source: "todo-transition",
+            actorId: "root",
+            resourceUris: todoParams.resourceUris,
+          }, ctx);
+          return {
+            ...result,
+            details: {
+              ...details,
+              contextTransition: receipt.coalesced ? "coalesced" : "scheduled",
+              contextTransitionRequestId: receipt.requestId,
+            } satisfies TodoResultDetails,
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          ctx.ui.notify(`Todo was committed, but its new-context transition could not be scheduled: ${message}`, "warning");
+          return {
+            ...result,
+            details: {
+              ...details,
+              contextTransition: "failed",
+              contextTransitionError: message,
+            } satisfies TodoResultDetails,
+          };
+        }
+      }
+      return result;
     },
 
     renderShell: "self",
@@ -1988,6 +2060,8 @@ When NOT to use:
   registerModelAvailability(pi);
   registerTeammateSessionRouting(pi);
   registerResourceTool(pi);
+  registerSessionHistoryTool(pi);
+  registerNewContextTool(pi, newContextController, "root");
   registerConflictTool(pi);
   registerDataManagerCommand(pi);
   registerKeybindingsCommand(pi);
@@ -3248,6 +3322,7 @@ When NOT to use:
       // Identity injection is best-effort; resolution falls back to other tiers.
     }
     compactionArbiter.reset();
+    newContextController.onSessionStart(ctx);
     preserveCompletedTurnFromNativeThreshold = false;
     teammateAttachTodoIsolated = false;
     midTurnAutoCompaction.onSessionStart(ctx, event);
@@ -3385,6 +3460,7 @@ When NOT to use:
     midTurnAutoCompaction.onSessionShutdown(ctx);
     preserveCompletedTurnFromNativeThreshold = false;
     lastCompactionCancel = undefined;
+    newContextController.onSessionShutdown();
     compactionArbiter.reset();
     // Non-destructive: preserve the prune manifest and spill resources so a
     // resumed session replays the identical transformed prefix. Destructive
@@ -3488,6 +3564,34 @@ When NOT to use:
     try {
       const result = await runObservedCompaction(observed, async () => {
         goalBeforeCompact(ctx);
+        if (observed.trigger?.owner === "new-context") {
+          const newContextRequest = newContextController.consume(observed.trigger, ctx);
+          if (!newContextRequest) {
+            ctx.ui.notify("New-context reset was cancelled because its fenced payload was unavailable.", "warning");
+            lastCompactionCancel = {
+              reason: "new-context payload unavailable",
+              at: Date.now(),
+              operationId: observed.operationId,
+            };
+            return { cancel: true };
+          }
+          const newContext = {
+            requestId: newContextRequest.requestId,
+            source: newContextRequest.source,
+            ...(newContextRequest.carryForward ? { carryForward: newContextRequest.carryForward } : {}),
+            resourceUris: [...newContextRequest.resourceUris],
+          };
+          const compaction = await runWithCompactionStatus(event, ctx, () =>
+            createMaestroCompaction(event, ctx, {
+              getWorkflowIdentity: () => workflowRecoveryIdentity(),
+              trigger: observed.trigger,
+              newContext,
+              summaryOverrideFactory: buildNewContextRecoveryCapsule,
+              firstKeptEntryIdOverride: newContextFirstKeptEntryId(newContextRequest),
+              failClosed: true,
+            }), observed);
+          return compaction?.compaction ? compaction : { cancel: true };
+        }
         const cleanContextRequest = observed.trigger?.owner === "plan-handoff"
           && observed.trigger.reason === "clean-context"
           && isPlanCleanContextCompactionInstructions(event.customInstructions)
@@ -3600,6 +3704,18 @@ When NOT to use:
     // Clear the non-persistent Plan replacement before any async subsystem can
     // enqueue a continuation or fail. The persisted compaction is now canonical.
     onCompactPlan(ctx);
+    if (newContextController.hasPending()) {
+      queueMicrotask(() => {
+        try {
+          newContextController.onAgentSettled(ctx);
+        } catch (error) {
+          ctx.ui.notify(
+            `Deferred new-context settlement failed: ${error instanceof Error ? error.message : String(error)}`,
+            "warning",
+          );
+        }
+      });
+    }
     try {
       await persistMaestroCompactionKnowhow(event, ctx);
     } catch (error) {
@@ -3718,15 +3834,16 @@ When NOT to use:
   });
 
   // Model failover registered its agent_settled arbiter before this consolidated
-  // root handler. Goal consumes the authoritative settlement first; an explicit
-  // Plan handoff suppresses only Goal's next continuation, then takes compaction
-  // ownership before the automatic pressure policy runs.
+  // root handler. Goal consumes the authoritative settlement first. An explicit
+  // new-context request wins a same-settlement Plan compact handoff so the Plan
+  // implementation follow-up is delivered only after the deterministic reset.
   pi.on("agent_settled", async (_event, ctx) => {
     const syntheticInterruption = midTurnAutoCompaction.isSyntheticCompactionInterruptionActive();
     const planCompactPending = hasPendingPlanCompactHandoff(ctx);
+    const newContextPending = newContextController.hasPending();
     try {
       if (syntheticInterruption) goalProviderPressureSettled(ctx);
-      else await goalAgentSettled(ctx, { suppressContinuation: planCompactPending });
+      else await goalAgentSettled(ctx, { suppressContinuation: planCompactPending || newContextPending });
     } catch (error) {
       ctx.ui.notify(
         `Goal settlement failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -3741,6 +3858,16 @@ When NOT to use:
         "warning",
       );
     }
+    if (newContextPending) {
+      try {
+        newContextController.onAgentSettled(ctx);
+      } catch (error) {
+        ctx.ui.notify(
+          `New-context settlement failed: ${error instanceof Error ? error.message : String(error)}`,
+          "warning",
+        );
+      }
+    }
     try {
       onAgentSettledPlan(ctx);
     } catch (error) {
@@ -3748,6 +3875,16 @@ When NOT to use:
         `Plan settlement failed: ${error instanceof Error ? error.message : String(error)}`,
         "warning",
       );
+    }
+    if (!newContextPending) {
+      try {
+        newContextController.onAgentSettled(ctx);
+      } catch (error) {
+        ctx.ui.notify(
+          `New-context settlement failed: ${error instanceof Error ? error.message : String(error)}`,
+          "warning",
+        );
+      }
     }
     try {
       await midTurnAutoCompaction.onAgentEnd(ctx);
@@ -4162,13 +4299,23 @@ When NOT to use:
  * parent Pi session may own the canonical continuation lease.
  */
 function registerMaestroChildSurface(pi: ExtensionAPI): void {
+  const childActorId = process.env.PI_TEAMMATE_CORRELATION_ID ?? "child";
   const compactionArbiter = new CompactionArbiter();
+  const newContextController = createNewContextController(compactionArbiter, {
+    continueAfterReset() {
+      pi.sendUserMessage(
+        "Continue from the recovery capsule and the active Todo's exact next action.",
+        { deliverAs: "followUp" },
+      );
+    },
+  });
   const autoCompaction = createMidTurnAutoCompaction(pi, { arbiter: compactionArbiter });
   let preserveCompletedTurnFromNativeThreshold = false;
 
   pi.on("session_start", (event, ctx) => {
     preserveCompletedTurnFromNativeThreshold = false;
     compactionArbiter.reset();
+    newContextController.onSessionStart(ctx);
     autoCompaction.onSessionStart(ctx, event);
   });
   // Child sessions share the same hard-threshold gate: block+terminate, never abort.
@@ -4202,6 +4349,14 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
     );
   });
   pi.on("agent_settled", async (_event, ctx) => {
+    try {
+      newContextController.onAgentSettled(ctx);
+    } catch (error) {
+      ctx.ui.notify(
+        `Child new-context settlement failed: ${error instanceof Error ? error.message : String(error)}`,
+        "warning",
+      );
+    }
     try {
       await autoCompaction.onAgentEnd(ctx);
     } catch (error) {
@@ -4267,6 +4422,31 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
     }
     const providerPressureRecovery = isProviderPressureCompactionTrigger(observed.trigger);
     try {
+      if (observed.trigger?.owner === "new-context") {
+        const newContextRequest = newContextController.consume(observed.trigger, ctx);
+        if (!newContextRequest) {
+          ctx.ui.notify("Child new-context reset was cancelled because its fenced payload was unavailable.", "warning");
+          observed.finalize("cancel");
+          return { cancel: true };
+        }
+        const newContext = {
+          requestId: newContextRequest.requestId,
+          source: newContextRequest.source,
+          ...(newContextRequest.carryForward ? { carryForward: newContextRequest.carryForward } : {}),
+          resourceUris: [...newContextRequest.resourceUris],
+        };
+        const result = await runObservedCompaction(observed, () =>
+          createMaestroCompaction(event, ctx, {
+            trigger: observed.trigger,
+            newContext,
+            recoveryState: newContextRequest.recoveryState,
+            summaryOverrideFactory: buildNewContextRecoveryCapsule,
+            firstKeptEntryIdOverride: newContextFirstKeptEntryId(newContextRequest),
+            failClosed: true,
+          }));
+        if (result?.cancel) observed.finalize("cancel");
+        return result;
+      }
       const projected = await autoCompaction.projectCompactionInput(event, ctx);
       commitProjectedCompactionInput(event, projected);
       const result = await runObservedCompaction(observed, () =>
@@ -4307,6 +4487,7 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
   pi.on("session_shutdown", async (_event, ctx) => {
     autoCompaction.onSessionShutdown(ctx);
     preserveCompletedTurnFromNativeThreshold = false;
+    newContextController.onSessionShutdown();
     compactionArbiter.reset();
     await lspManager.shutdown();
   });
@@ -4317,6 +4498,8 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
   registerSmartSearchTool(pi);
   pi.registerTool(createSourceCheckTool() as never);
   registerResourceTool(pi);
+  registerSessionHistoryTool(pi);
+  registerNewContextTool(pi, newContextController, childActorId);
   pi.registerTool(createLspTool() as never);
   pi.registerTool(createTeammateChildBrowserTool());
   pi.registerTool(createTeammateChildComputerUseTool());
@@ -4328,16 +4511,53 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
 Tasks created here are attributed to this teammate and assigned to self by default.
 Use assignee="root" to hand work back to root. Teammates can update tasks they created or were assigned; only root can clear the shared list.
 
-If root delegated a task to you (spawned with todo: "<id>"), it is usually already active (in_progress) — check with \`todo list\`, work on it, and immediately finish it with \`todo advance\` using that id and a one-line summary. Advance only completes or activates tasks assigned to you. Use \`todo advance\` without id/summary when you have no active task and need to activate your next assigned task; use \`todo update\` when blocked, paused, or completing without continuing.`,
+If root delegated a task to you (spawned with todo: "<id>"), it is usually already active (in_progress) — check with \`todo list\`, work on it, and immediately finish it with \`todo advance\` using that id, a one-line summary, optional resourceUris, and optional transition (keep_context|new_context). Advance only completes or activates tasks assigned to you. Use \`todo advance\` without id/summary/resourceUris when you have no active task and need to activate your next assigned task; use \`todo update\` when blocked, paused, or completing without continuing.`,
     promptSnippet: "Keep teammate-owned tasks live in the shared root Todo list and advance each one immediately when its work finishes.",
     promptGuidelines: [
       "Use todo for newly discovered follow-up work, explicit blockers, and resumable steps.",
       "Todo is live state tracking: immediately when your active task finishes, call todo advance with its id and summary before doing work for another Todo; never defer several completions until your final answer.",
+      "Keep context to current progress and the exact next action; summaries should record outcome, evidence, decisions, and downstream impact. Attach durable resourceUris using exact immutable publication IDs when available.",
+      "Advance transition is request-only (keep_context|new_context), valid only with an active completion-form advance; new_context requires compaction.newContext.enabled=true and otherwise fails before Todo mutation; its receipt is not persisted.",
       "Advance is actor-scoped. Complete, block, or pause your active Todo before activating another task assigned to you; a final-answer Todo check is recovery only, not the normal update boundary.",
     ],
     parameters: TodoToolParams,
-    async execute(_id, params, signal) {
-      return proxyTeammateChildTool("todo", params as unknown as Record<string, unknown>, signal);
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      const result = await proxyTeammateChildTool("todo", params as unknown as Record<string, unknown>, signal);
+      const details = result.details as BrokeredTodoResultDetails | undefined;
+      if (!(result as { isError?: boolean }).isError && details?.transition === "new_context") {
+        const { newContextRecoveryState, ...publicDetails } = details;
+        try {
+          if (!newContextRecoveryState) {
+            throw new Error("Root-authorized recovery state was unavailable");
+          }
+          const receipt = newContextController.schedule({
+            source: "todo-transition",
+            actorId: childActorId,
+            resourceUris: params.resourceUris,
+            recoveryState: newContextRecoveryState,
+          }, ctx);
+          return {
+            ...result,
+            details: {
+              ...publicDetails,
+              contextTransition: receipt.coalesced ? "coalesced" : "scheduled",
+              contextTransitionRequestId: receipt.requestId,
+            } satisfies TodoResultDetails,
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          ctx.ui.notify(`Todo was committed, but its new-context transition could not be scheduled: ${message}`, "warning");
+          return {
+            ...result,
+            details: {
+              ...publicDetails,
+              contextTransition: "failed",
+              contextTransitionError: message,
+            } satisfies TodoResultDetails,
+          };
+        }
+      }
+      return result;
     },
     renderShell: "self",
     renderCall(_args, theme, ctx) {

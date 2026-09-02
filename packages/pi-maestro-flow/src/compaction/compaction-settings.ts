@@ -107,6 +107,18 @@ export interface LosslessCompactionSettings {
   enabled: boolean;
 }
 
+/**
+ * Explicit new-context compaction is an opt-in mode. It is intentionally
+ * separate from the threshold-triggered automatic summary compaction path.
+ */
+export interface NewContextCompactionConfigPatch {
+  enabled?: boolean;
+}
+
+export interface NewContextCompactionSettings {
+  enabled: boolean;
+}
+
 export interface SoftCompactionConfigPatch {
   enabled?: boolean;
   nudgeRatio?: number;
@@ -181,9 +193,10 @@ export interface CompactionConfigPatch {
   /** Compaction summary model as `provider/id`; undefined follows the active session model. */
   model?: string;
   soft?: SoftCompactionConfigPatch;
+  newContext?: NewContextCompactionConfigPatch;
 }
 
-export const COMPACTION_FIELDS = ["enabled", "reserveTokens", "keepRecentTokens", "model"] as const;
+export const COMPACTION_FIELDS = ["enabled", "reserveTokens", "keepRecentTokens", "model", "newContext"] as const;
 
 export type CompactionSettingSource = "project" | "user" | "default";
 
@@ -194,8 +207,14 @@ export interface EffectiveCompactionSettings {
   /** Configured compaction model (`provider/id`); undefined follows the active session model. */
   model?: string;
   soft: SoftCompactionSettings;
+  /** Explicit new-context mode gate; defaults off and never affects automatic compaction. */
+  newContext: NewContextCompactionSettings;
   source: Record<keyof CompactionConfigPatch, CompactionSettingSource>;
 }
+
+/** Stable disabled message shared by standalone and Todo new-context callers. */
+export const NEW_CONTEXT_DISABLED_MESSAGE =
+  "Explicit new-context compaction is disabled; set compaction.newContext.enabled to true in /maestro-compaction or your settings.";
 
 export type CompactionScope = "project" | "user";
 
@@ -238,10 +257,17 @@ function readRawCompaction(path: string): CompactionConfigPatch {
     if (typeof c.model === "string" && c.model.trim().length > 0) patch.model = c.model.trim();
     const soft = readRawSoft(c.soft);
     if (soft) patch.soft = soft;
+    const newContext = readRawNewContext(c.newContext);
+    if (newContext) patch.newContext = newContext;
     return patch;
   } catch {
     return {};
   }
+}
+
+function readRawNewContext(value: unknown): NewContextCompactionConfigPatch | undefined {
+  if (!isRecord(value) || typeof value.enabled !== "boolean") return undefined;
+  return { enabled: value.enabled };
 }
 
 function readRawSoft(value: unknown): SoftCompactionConfigPatch | undefined {
@@ -362,6 +388,7 @@ export function resolveEffectiveCompactionSettings(
     keepRecentTokens: "default",
     model: "default",
     soft: "default",
+    newContext: "default",
   };
 
   let enabled = true;
@@ -369,12 +396,17 @@ export function resolveEffectiveCompactionSettings(
   let keepRecentTokens = DEFAULT_KEEP_RECENT_TOKENS;
   let model: string | undefined;
   const soft: SoftCompactionSettings = createDefaultSoftCompaction();
+  const newContext: NewContextCompactionSettings = { enabled: false };
 
   for (const [patch, src] of [[userPatch, "user"], [projectPatch, "project"]] as const) {
     if (patch.enabled !== undefined) { enabled = patch.enabled; source.enabled = src; }
     if (patch.reserveTokens !== undefined) { reserveTokens = patch.reserveTokens; source.reserveTokens = src; }
     if (patch.keepRecentTokens !== undefined) { keepRecentTokens = patch.keepRecentTokens; source.keepRecentTokens = src; }
     if (patch.model !== undefined) { model = patch.model; source.model = src; }
+    if (patch.newContext?.enabled !== undefined) {
+      newContext.enabled = patch.newContext.enabled;
+      source.newContext = src;
+    }
     if (patch.soft !== undefined) {
       if (patch.soft.enabled !== undefined) soft.enabled = patch.soft.enabled;
       if (patch.soft.nudgeRatio !== undefined) soft.nudgeRatio = patch.soft.nudgeRatio;
@@ -416,7 +448,7 @@ export function resolveEffectiveCompactionSettings(
     }
   }
 
-  return { enabled, reserveTokens, keepRecentTokens, model, soft, source };
+  return { enabled, reserveTokens, keepRecentTokens, model, soft, newContext, source };
 }
 
 export function validateCompactionPatch(
@@ -429,6 +461,9 @@ export function validateCompactionPatch(
 
   if (patch.model !== undefined && (typeof patch.model !== "string" || !patch.model.includes("/"))) {
     errors.push(`model must be a "provider/id" reference`);
+  }
+  if (patch.newContext?.enabled !== undefined && typeof patch.newContext.enabled !== "boolean") {
+    errors.push(`newContext.enabled must be a boolean`);
   }
 
   for (const field of ["reserveTokens", "keepRecentTokens"] as const) {
@@ -562,6 +597,9 @@ export function validateEffectiveCompactionSettings(settings: EffectiveCompactio
   if (settings.model !== undefined && (typeof settings.model !== "string" || !settings.model.includes("/"))) {
     errors.push(`model must be a "provider/id" reference`);
   }
+  if (typeof settings.newContext.enabled !== "boolean") {
+    errors.push(`newContext.enabled must be a boolean`);
+  }
   return { errors, warnings: [] };
 }
 
@@ -692,6 +730,14 @@ async function patchSettingsFile(path: string, patch: CompactionConfigPatch): Pr
     }
     compaction.soft = merged;
   }
+  if (patch.newContext !== undefined) {
+    const merged: Record<string, unknown> = isRecord(compaction.newContext) ? { ...compaction.newContext } : {};
+    for (const [key, value] of Object.entries(patch.newContext)) {
+      if (value !== undefined) merged[key] = value;
+    }
+    if (Object.keys(merged).length > 0) compaction.newContext = merged;
+    else delete compaction.newContext;
+  }
   root.compaction = compaction;
   await atomicWriteJson(path, root);
 }
@@ -748,6 +794,11 @@ async function replaceKnownFieldsInSettingsFile(path: string, values: Compaction
     }
     compaction.soft = soft;
   }
+  const newContext: Record<string, unknown> = isRecord(compaction.newContext) ? { ...compaction.newContext } : {};
+  if (values.newContext?.enabled === undefined) delete newContext.enabled;
+  else newContext.enabled = values.newContext.enabled;
+  if (Object.keys(newContext).length === 0) delete compaction.newContext;
+  else compaction.newContext = newContext;
   if (Object.keys(compaction).length === 0) delete root.compaction;
   else root.compaction = compaction;
   await atomicWriteJson(path, root);
@@ -818,6 +869,21 @@ async function atomicWriteJson(path: string, value: unknown): Promise<void> {
 
   await fileOperations.unlink(backupPath);
   await fsyncDirectory(dirname(path));
+}
+
+/** Read the authoritative effective gate for explicit new-context callers. */
+export function isNewContextCompactionEnabled(projectRoot: string): boolean {
+  return readEffectiveCompactionSettings(projectRoot).newContext.enabled;
+}
+
+/**
+ * Fail-closed preflight for explicit new-context compaction. The returned
+ * settings are the same effective snapshot used by the compaction runtime.
+ */
+export function requireNewContextCompactionEnabled(projectRoot: string): EffectiveCompactionSettings {
+  const settings = readEffectiveCompactionSettings(projectRoot);
+  if (!settings.newContext.enabled) throw new Error(NEW_CONTEXT_DISABLED_MESSAGE);
+  return settings;
 }
 
 function positiveNumber(value: unknown): number | undefined {

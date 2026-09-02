@@ -3060,7 +3060,7 @@ test("custom compaction captures the persisted active Todo skill", async () => {
       },
     );
     const captured = result?.compaction?.details as MaestroCompactionDetails;
-    assert.equal(captured.schemaVersion, 3);
+    assert.equal(captured.schemaVersion, 4);
     assert.equal(captured.todo.activeTaskId, "active");
     assert.deepEqual(captured.goal, { stateVersion: 2, goals: [] });
     assert.deepEqual(captured.plan, {
@@ -3083,7 +3083,7 @@ test("custom compaction captures the persisted active Todo skill", async () => {
   }
 });
 
-test("createMaestroCompaction records the observed trigger without bumping the schema version", async () => {
+test("createMaestroCompaction records the observed trigger in details v4", async () => {
   initTodo({ appendEntry() {} } as never);
   const todoContext = {
     cwd: "D:\\repo",
@@ -3124,8 +3124,7 @@ test("createMaestroCompaction records the observed trigger without bumping the s
       },
     );
     const captured = result?.compaction?.details as MaestroCompactionDetails;
-    // Additive optional field: the schema version is unchanged.
-    assert.equal(captured.schemaVersion, 3);
+    assert.equal(captured.schemaVersion, 4);
     assert.deepEqual(captured.trigger, trigger);
   } finally {
     onSessionShutdown(todoContext);
@@ -3183,7 +3182,7 @@ test("createMaestroCompaction omits trigger for native compaction and still read
       },
     );
     const captured = result?.compaction?.details as MaestroCompactionDetails;
-    assert.equal(captured.schemaVersion, 3);
+    assert.equal(captured.schemaVersion, 4);
     // No observed trigger was supplied, so none is fabricated; the trigger-less
     // previous details were still read for lineage.
     assert.equal(captured.trigger, undefined);

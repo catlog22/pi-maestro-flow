@@ -1,6 +1,6 @@
 import type { CompactionThresholdReason } from "./compaction-threshold.ts";
 
-export type CompactionRequestOwner = "mid-turn" | "plan-handoff" | "output-limit";
+export type CompactionRequestOwner = "mid-turn" | "plan-handoff" | "output-limit" | "new-context";
 export type CompactionOwner = CompactionRequestOwner | "native";
 
 /**
@@ -38,10 +38,19 @@ export interface PlanHandoffCompactionTrigger {
   reason: string;
 }
 
+/** Deterministic same-session context reset requested by Todo or the standalone tool. */
+export interface NewContextCompactionTrigger {
+  owner: "new-context";
+  /** Stable scheduler request identity; never reused across session generations. */
+  requestId: number;
+  source: "todo-transition" | "tool";
+}
+
 export type CompactionTrigger =
   | MidTurnCompactionTrigger
   | OutputLimitCompactionTrigger
-  | PlanHandoffCompactionTrigger;
+  | PlanHandoffCompactionTrigger
+  | NewContextCompactionTrigger;
 
 export function isProviderPressureCompactionTrigger(
   trigger: CompactionTrigger | undefined,
@@ -262,6 +271,10 @@ export class CompactionArbiter {
     return this.active?.id;
   }
 
+  currentTrigger(): CompactionTrigger | undefined {
+    return this.active?.trigger;
+  }
+
   private finalize(id: number, outcome: CompactionOutcome): boolean {
     if (this.active?.id !== id) return false;
     this.active.cleanup?.();
@@ -292,7 +305,7 @@ function tagCompactionInstructions(request: CompactionRequest, instructions: str
 export function compactionRequestFromInstructions(
   instructions: string | undefined,
 ): CompactionRequest | undefined {
-  const match = instructions?.match(/^\[maestro-compaction-owner:(mid-turn|plan-handoff|output-limit):(\d+)\]/);
+  const match = instructions?.match(/^\[maestro-compaction-owner:(mid-turn|plan-handoff|output-limit|new-context):(\d+)\]/);
   if (!match) return undefined;
   return {
     owner: match[1] as CompactionRequestOwner,

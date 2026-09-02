@@ -180,6 +180,7 @@ const BASE_CATALOGS = {
     "flow.group.failover": "Model failover",
     "flow.group.manage": "Flow management",
     "flow.compaction.enabled": "Enable compaction",
+    "flow.compaction.newContext.enabled": "Enable explicit new-context compaction",
     "flow.compaction.reserveTokens": "Reserved tokens",
     "flow.compaction.keepRecentTokens": "Recent tokens to keep",
     "flow.compaction.model": "Summary model",
@@ -238,6 +239,7 @@ const BASE_CATALOGS = {
     "flow.overview.reserve": "Reserved tokens",
     "flow.overview.keep": "Recent tokens kept",
     "flow.overview.model": "Compaction model",
+    "flow.overview.newContext": "Explicit new-context mode",
     "flow.overview.soft": "Soft stage",
     "flow.overview.chains": "Fallback chains",
     "flow.overview.noChains": "No fallback chains configured",
@@ -258,6 +260,7 @@ const BASE_CATALOGS = {
     "flow.group.failover": "模型故障转移",
     "flow.group.manage": "Flow 管理",
     "flow.compaction.enabled": "启用上下文压缩",
+    "flow.compaction.newContext.enabled": "启用显式新上下文压缩",
     "flow.compaction.reserveTokens": "保留 Token",
     "flow.compaction.keepRecentTokens": "保留最近 Token",
     "flow.compaction.model": "摘要模型",
@@ -316,6 +319,7 @@ const BASE_CATALOGS = {
     "flow.overview.reserve": "预留 Token",
     "flow.overview.keep": "保留最近 Token",
     "flow.overview.model": "压缩模型",
+    "flow.overview.newContext": "显式新上下文模式",
     "flow.overview.soft": "软阶段",
     "flow.overview.chains": "回退链",
     "flow.overview.noChains": "尚未配置回退链",
@@ -546,6 +550,7 @@ export function registerFlowSettingsProvider(events: SettingsEventBus, provider:
 function definitions(): SettingDefinition[] {
   const writable: SettingDefinition[] = [
     setting("compaction.enabled", "flow.group.compaction", "flow.compaction.enabled", "boolean", true, "next-turn"),
+    setting("compaction.newContext.enabled", "flow.group.compaction", "flow.compaction.newContext.enabled", "boolean", false, "next-turn"),
     setting("compaction.reserveTokens", "flow.group.compaction", "flow.compaction.reserveTokens", "integer", 16_384, "next-turn", { min: 1, max: MAX_RESERVE_TOKENS, step: 1024 }),
     setting("compaction.keepRecentTokens", "flow.group.compaction", "flow.compaction.keepRecentTokens", "integer", 20_000, "next-turn", { min: 1, max: MAX_RESERVE_TOKENS, step: 1024 }),
     setting("compaction.model", "flow.group.compaction", "flow.compaction.model", "model", null, "next-turn", { optionsSource: "flow.available-models" }),
@@ -752,6 +757,7 @@ function validateRequest(
 
 function parseSettingKey(key: string): ParsedKey | undefined {
   if (key === "compaction.enabled") return { kind: "compaction", path: ["enabled"] };
+  if (key === "compaction.newContext.enabled") return { kind: "compaction", path: ["newContext", "enabled"] };
   if (key === "compaction.reserveTokens") return { kind: "compaction", path: ["reserveTokens"] };
   if (key === "compaction.keepRecentTokens") return { kind: "compaction", path: ["keepRecentTokens"] };
   if (key === "compaction.model") return { kind: "compaction", path: ["model"] };
@@ -857,6 +863,8 @@ function readCompactionPatch(root: Record<string, unknown>): CompactionConfigPat
   const keepRecent = positiveInt(hard.keepRecentTokens) ?? positiveInt(raw.keepRecentTokens);
   if (keepRecent !== undefined) patch.keepRecentTokens = keepRecent;
   if (typeof raw.model === "string" && raw.model.trim()) patch.model = raw.model.trim();
+  const newContextRaw = isRecord(raw.newContext) ? raw.newContext : {};
+  if (typeof newContextRaw.enabled === "boolean") patch.newContext = { enabled: newContextRaw.enabled };
   const soft: SoftCompactionConfigPatch = {};
   if (typeof softRaw.enabled === "boolean") soft.enabled = softRaw.enabled;
   for (const field of ["nudgeRatio", "pruneRatio", "pruneTargetRatio"] as const) {
@@ -922,7 +930,7 @@ function applyChanges(kind: ResourceKind, raw: Record<string, unknown>, changes:
       } else hard[parsed.path[0]] = change.value;
       if (Object.keys(hard).length) compaction.hard = hard;
       else delete compaction.hard;
-    } else if (parsed.path[0] === "soft") {
+    } else if (parsed.path[0] === "soft" || parsed.path[0] === "newContext") {
       setOrUnsetPath(compaction, parsed.path, change);
     } else if (change.operation === "unset" || (parsed.path[0] === "model" && change.value === null)) {
       delete compaction[parsed.path[0]];
@@ -1199,6 +1207,11 @@ function compactionDerivedRows(effective: EffectiveCompactionSettings): Settings
     { labelKey: "flow.overview.reserve", value: String(effective.reserveTokens) },
     { labelKey: "flow.overview.keep", value: String(effective.keepRecentTokens) },
     { labelKey: "flow.overview.model", value: effective.model ?? "—" },
+    {
+      labelKey: "flow.overview.newContext",
+      value: effective.newContext.enabled ? "on" : "off",
+      status: effective.newContext.enabled ? "ok" : "dim",
+    },
     {
       labelKey: "flow.overview.soft",
       value: effective.soft.enabled

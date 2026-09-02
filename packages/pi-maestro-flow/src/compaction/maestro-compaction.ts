@@ -36,8 +36,9 @@ import {
 } from "./compaction-threshold.ts";
 
 const DETAILS_KIND = "maestro-session-checkpoint";
-const DETAILS_VERSION = 3;
-const PREVIOUS_DETAILS_VERSION = 2;
+/** Details v4 carries the deterministic new-context trigger metadata. */
+const DETAILS_VERSION = 4;
+const PREVIOUS_DETAILS_VERSION = 3;
 const LEGACY_DETAILS_VERSION = 1;
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
@@ -517,9 +518,24 @@ export interface MaestroCompactionReference {
   supersededBy?: string;
 }
 
+export interface MaestroNewContextDetails {
+  requestId: number;
+  source: "todo-transition" | "tool";
+  carryForward?: string;
+  resourceUris: string[];
+}
+
+/** Root-authorized shared recovery state handed to child-session resets. */
+export interface MaestroRecoveryState {
+  todo: TodoCompactionSnapshot;
+  goal: GoalCompactionSnapshot;
+  plan: PlanCompactionSnapshot;
+  workflow?: WorkflowRecoveryIdentity;
+}
+
 export interface MaestroCompactionDetails {
   kind: typeof DETAILS_KIND;
-  schemaVersion: typeof DETAILS_VERSION | typeof PREVIOUS_DETAILS_VERSION | typeof LEGACY_DETAILS_VERSION;
+  schemaVersion: typeof DETAILS_VERSION | typeof PREVIOUS_DETAILS_VERSION | 2 | typeof LEGACY_DETAILS_VERSION;
   checkpointId: string;
   previousCheckpointId?: string;
   sessionId: string;
@@ -532,10 +548,11 @@ export interface MaestroCompactionDetails {
   activeSkills: MaestroActiveSkill[];
   references: MaestroCompactionReference[];
   knowhowPath: string;
+  /** Deterministic context-reset request metadata (v4; absent on legacy entries). */
+  newContext?: MaestroNewContextDetails;
   /**
    * Optional durable trigger metadata. Additive and self-describing (discriminated
-   * by `owner`), so it does not require a schema-version bump: older readers ignore
-   * it and older details simply omit it.
+   * by `owner`), so older readers can still consume the checkpoint.
    */
   trigger?: CompactionTrigger;
 }
@@ -567,6 +584,14 @@ interface CreateCompactionDependencies {
   summaryInputTokens?: number;
   /** Deterministic summary used by clean-context handoffs; bypasses model summarization. */
   summaryOverride?: string;
+  /** Build a deterministic summary from the one details snapshot captured below. */
+  summaryOverrideFactory?: (details: MaestroCompactionDetails) => string | undefined;
+  /** Optional pre-captured details snapshot, primarily for scheduler tests/hosts. */
+  detailsSnapshot?: MaestroCompactionDetails;
+  /** Metadata for the new-context trigger persisted in details v4. */
+  newContext?: MaestroNewContextDetails;
+  /** Root-authorized shared state for child-session deterministic resets. */
+  recoveryState?: MaestroRecoveryState;
   /** Override the recent-history boundary. A non-matching id keeps no old entries. */
   firstKeptEntryIdOverride?: string;
   /** Return cancel instead of falling through to Pi native summarization. */
@@ -628,6 +653,9 @@ export function formatCompactionStatus(input: {
   }
   if (trigger?.owner === "plan-handoff") {
     return `COMPACT ${input.tokensBefore}/${input.contextWindow} plan-handoff`;
+  }
+  if (trigger?.owner === "new-context") {
+    return `COMPACT ${input.tokensBefore}/${input.contextWindow} new-context`;
   }
   return `COMPACT ${input.tokensBefore}/${configuredThreshold} native configured`;
 }
@@ -753,12 +781,67 @@ Use this EXACT format:
 - Added References:
 - Superseded References:`;
 
+/**
+ * Capture the complete runtime details exactly once for a compaction request.
+ * Deterministic summary producers (notably new-context) receive this same
+ * object, rather than independently reading Todo/Goal/Plan state after the
+ * summary has started.
+ */
+export async function captureMaestroCompactionDetails(
+  event: SessionBeforeCompactEvent,
+  ctx: ExtensionContext,
+  dependencies: CreateCompactionDependencies = {},
+): Promise<MaestroCompactionDetails> {
+  if (dependencies.detailsSnapshot) return dependencies.detailsSnapshot;
+  const now = dependencies.now?.() ?? new Date();
+  const checkpointId = dependencies.checkpointId?.() ?? randomUUID();
+  const previousDetails = findPreviousDetails(event);
+  const workflow = dependencies.recoveryState?.workflow
+    ?? (dependencies.getWorkflowIdentity
+      ? await dependencies.getWorkflowIdentity()
+      : previousDetails?.workflow);
+  const todo = dependencies.recoveryState?.todo ?? getTodoCompactionSnapshot();
+  const goal = dependencies.recoveryState?.goal ?? getGoalCompactionSnapshot();
+  const plan = dependencies.recoveryState?.plan ?? getPlanCompactionSnapshot();
+  const activeSkills = collectActiveSkills(todo.tasks);
+  const knowhowPath = buildKnowhowPath(ctx.cwd, now.toISOString(), ctx.sessionManager.getSessionId(), checkpointId);
+  const currentReferences = collectCurrentReferencePaths(event);
+  if (previousDetails?.knowhowPath) {
+    currentReferences.push({ path: previousDetails.knowhowPath, role: "read" });
+  }
+  const references = mergeCompactionReferences(
+    previousDetails?.references ?? [],
+    currentReferences,
+    checkpointId,
+  );
+  return {
+    kind: DETAILS_KIND,
+    schemaVersion: DETAILS_VERSION,
+    checkpointId,
+    ...(previousDetails ? { previousCheckpointId: previousDetails.checkpointId } : {}),
+    sessionId: ctx.sessionManager.getSessionId(),
+    projectRoot: ctx.cwd,
+    createdAt: now.toISOString(),
+    ...(workflow ? { workflow: cloneWorkflowIdentity(workflow) } : {}),
+    todo,
+    goal,
+    plan,
+    activeSkills,
+    references,
+    knowhowPath,
+    ...(dependencies.newContext ? { newContext: { ...dependencies.newContext, resourceUris: [...dependencies.newContext.resourceUris] } } : {}),
+    ...(dependencies.trigger ? { trigger: dependencies.trigger } : {}),
+  };
+}
+
+/** Alias retained for hosts that call this a details snapshot factory. */
+export const createMaestroCompactionDetails = captureMaestroCompactionDetails;
+
 export async function createMaestroCompaction(
   event: SessionBeforeCompactEvent,
   ctx: ExtensionContext,
   dependencies: CreateCompactionDependencies = {},
 ): Promise<SessionBeforeCompactResult | undefined> {
-  const model = ctx.model;
   const failClosed = dependencies.failClosed === true;
   const summaryFailure = (reason: string): SessionBeforeCompactResult | undefined => {
     try {
@@ -774,54 +857,25 @@ export async function createMaestroCompaction(
     }
     return failClosed ? { cancel: true } : undefined;
   };
-  if (!model) return summaryFailure("No model selected");
 
-  const now = dependencies.now?.() ?? new Date();
-  const checkpointId = dependencies.checkpointId?.() ?? randomUUID();
-  const previousDetails = findPreviousDetails(event);
-  const workflow = dependencies.getWorkflowIdentity
-    ? await dependencies.getWorkflowIdentity()
-    : previousDetails?.workflow;
-  const todo = getTodoCompactionSnapshot();
-  const goal = getGoalCompactionSnapshot();
-  const plan = getPlanCompactionSnapshot();
-  const activeSkills = collectActiveSkills(todo.tasks);
-  const knowhowPath = buildKnowhowPath(ctx.cwd, now.toISOString(), ctx.sessionManager.getSessionId(), checkpointId);
-  const currentReferences = collectCurrentReferencePaths(event);
-  if (previousDetails?.knowhowPath) {
-    currentReferences.push({ path: previousDetails.knowhowPath, role: "read" });
+  let details: MaestroCompactionDetails;
+  try {
+    details = await captureMaestroCompactionDetails(event, ctx, dependencies);
+  } catch (error) {
+    return summaryFailure(error instanceof Error ? error.message : String(error));
   }
-  const references = mergeCompactionReferences(
-    previousDetails?.references ?? [],
-    currentReferences,
-    checkpointId,
-  );
-  const details: MaestroCompactionDetails = {
-    kind: DETAILS_KIND,
-    schemaVersion: DETAILS_VERSION,
-    checkpointId,
-    ...(previousDetails ? { previousCheckpointId: previousDetails.checkpointId } : {}),
-    sessionId: ctx.sessionManager.getSessionId(),
-    projectRoot: ctx.cwd,
-    createdAt: now.toISOString(),
-    ...(workflow ? { workflow: cloneWorkflowIdentity(workflow) } : {}),
-    todo,
-    goal,
-    plan,
-    activeSkills,
-    references,
-    knowhowPath,
-    ...(dependencies.trigger ? { trigger: dependencies.trigger } : {}),
-  };
 
-  if (dependencies.summaryOverride !== undefined) {
-    const summary = dependencies.summaryOverride.trim();
-    if (!summary) return undefined;
-    // P2-1 (appended recent images): intentionally not implemented on this path.
-    // Host appendCompaction() accepts only a summary string; without a
-    // patch-package mechanism, appending image blocks post-compact would break
-    // the firstKeptEntryId boundary and cache-stable prune manifest. Recent
-    // images inside the keep-recent window already survive compaction verbatim.
+  let summaryOverride: string | undefined;
+  try {
+    summaryOverride = dependencies.summaryOverrideFactory?.(details) ?? dependencies.summaryOverride;
+  } catch (error) {
+    return summaryFailure(error instanceof Error ? error.message : String(error));
+  }
+  // Explicit deterministic summaries are allowed in a model-less session and
+  // must never enter either the native or model-summary fallback path.
+  if (summaryOverride !== undefined) {
+    const summary = summaryOverride.trim();
+    if (!summary) return summaryFailure("The deterministic summary was empty");
     return {
       compaction: {
         summary,
@@ -831,6 +885,9 @@ export async function createMaestroCompaction(
       },
     };
   }
+
+  const model = ctx.model;
+  if (!model) return summaryFailure("No model selected");
 
   const messages = [...event.preparation.messagesToSummarize, ...event.preparation.turnPrefixMessages];
   const buildPromptFor = (sourceMessages: AgentMessage[], droppedRounds: number): string => {
@@ -1004,12 +1061,19 @@ function findPreviousDetails(event: SessionBeforeCompactEvent): MaestroCompactio
   return undefined;
 }
 
-function asMaestroDetails(value: unknown): MaestroCompactionDetails | undefined {
-  if (!value || typeof value !== "object") return undefined;
+/**
+ * Normalize persisted compaction details into the current v4 shape. Older
+ * checkpoints intentionally remain readable: v1/v2 did not carry Goal/Plan,
+ * and v3 did not carry new-context metadata. Unknown additive fields are
+ * retained so a newer host can round-trip details it does not understand.
+ */
+export function normalizeMaestroCompactionDetails(value: unknown): MaestroCompactionDetails | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const candidate = value as Partial<MaestroCompactionDetails>;
   if (candidate.kind !== DETAILS_KIND
     || (candidate.schemaVersion !== DETAILS_VERSION
       && candidate.schemaVersion !== PREVIOUS_DETAILS_VERSION
+      && candidate.schemaVersion !== 2
       && candidate.schemaVersion !== LEGACY_DETAILS_VERSION)) return undefined;
   if (typeof candidate.checkpointId !== "string"
     || typeof candidate.sessionId !== "string"
@@ -1018,12 +1082,55 @@ function asMaestroDetails(value: unknown): MaestroCompactionDetails | undefined 
     || typeof candidate.knowhowPath !== "string"
     || !candidate.todo
     || typeof candidate.todo !== "object"
+    || Array.isArray(candidate.todo)
     || !Array.isArray(candidate.activeSkills)
     || !Array.isArray(candidate.references)) return undefined;
-  if (candidate.schemaVersion === DETAILS_VERSION
-    && (!candidate.goal || typeof candidate.goal !== "object"
-      || !candidate.plan || typeof candidate.plan !== "object")) return undefined;
-  return candidate as MaestroCompactionDetails;
+
+  const rawTodo = candidate.todo as TodoCompactionSnapshot;
+  const todo = {
+    ...rawTodo,
+    tasks: rawTodo.tasks.map((task) => ({
+      ...task,
+      blockedBy: Array.isArray(task.blockedBy) ? [...task.blockedBy] : [],
+      skills: Array.isArray(task.skills) ? task.skills.map((skill) => ({ ...skill })) : [],
+      resourceUris: Array.isArray(task.resourceUris) ? task.resourceUris.filter((uri): uri is string => typeof uri === "string") : [],
+    })),
+  };
+  const goal = candidate.goal && typeof candidate.goal === "object" && !Array.isArray(candidate.goal)
+    ? candidate.goal as GoalCompactionSnapshot
+    : { stateVersion: 2, goals: [] };
+  const plan = candidate.plan && typeof candidate.plan === "object" && !Array.isArray(candidate.plan)
+    ? candidate.plan as PlanCompactionSnapshot
+    : { mode: "act" as const, status: "empty" as const, revision: 0, handoffStatus: "none" as const };
+  const newContext = candidate.newContext && typeof candidate.newContext === "object" && !Array.isArray(candidate.newContext)
+    ? (() => {
+      const context = candidate.newContext as Partial<MaestroNewContextDetails>;
+      const requestId = context.requestId;
+      if (!Number.isSafeInteger(requestId)
+        || (context.source !== "todo-transition" && context.source !== "tool")
+        || !Array.isArray(context.resourceUris)) return undefined;
+      return {
+        requestId: requestId as number,
+        source: context.source,
+        ...(typeof context.carryForward === "string" ? { carryForward: context.carryForward } : {}),
+        resourceUris: context.resourceUris.filter((uri): uri is string => typeof uri === "string"),
+      } satisfies MaestroNewContextDetails;
+    })()
+    : undefined;
+  return {
+    ...(candidate as MaestroCompactionDetails),
+    schemaVersion: DETAILS_VERSION,
+    todo,
+    goal,
+    plan,
+    newContext,
+    activeSkills: candidate.activeSkills.map((skill) => ({ ...skill, requiredFiles: [...skill.requiredFiles], deferredFiles: [...skill.deferredFiles] })),
+    references: candidate.references.map((reference) => ({ ...reference })),
+  };
+}
+
+function asMaestroDetails(value: unknown): MaestroCompactionDetails | undefined {
+  return normalizeMaestroCompactionDetails(value);
 }
 
 function isPathInside(root: string, candidate: string): boolean {

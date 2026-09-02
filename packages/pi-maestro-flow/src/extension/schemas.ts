@@ -7,7 +7,12 @@
 
 import { Type } from "typebox";
 import { MAX_ACCEPTANCE_COMMAND_CHARS } from "../tools/goal-verification.ts";
-import { TODO_UPDATE_FIELDS } from "../tools/todo-contract.ts";
+import {
+  TODO_ADVANCE_TRANSITIONS,
+  TODO_MAX_RESOURCE_URI_BYTES,
+  TODO_MAX_RESOURCE_URIS,
+  TODO_UPDATE_FIELDS,
+} from "../tools/todo-contract.ts";
 
 function StringEnum<T extends string[]>(values: [...T], description?: string) {
   return Type.Unsafe<T[number]>({
@@ -179,6 +184,18 @@ const TodoSkillBindingSchema = Type.Object({
   ),
 }, { additionalProperties: false });
 
+const TodoResourceUrisSchema = Type.Array(
+  Type.String({
+    minLength: 1,
+    maxLength: TODO_MAX_RESOURCE_URI_BYTES,
+    description: "Trimmed resource URI; runtime enforces the UTF-8 byte limit",
+  }),
+  {
+    maxItems: TODO_MAX_RESOURCE_URIS,
+    description: `Durable resource references (max ${TODO_MAX_RESOURCE_URIS}; ${TODO_MAX_RESOURCE_URI_BYTES} UTF-8 bytes each)`,
+  },
+);
+
 const TodoFilterSchema = Type.Object({
   status: Type.Optional(
     StringEnum(["pending", "in_progress", "completed", "blocked"]),
@@ -202,6 +219,7 @@ const TodoBatchTaskSchema = Type.Object({
   skills: Type.Optional(
     Type.Array(TodoSkillBindingSchema, { description: "Ordered Pi skill bindings; exactly one primary when present" }),
   ),
+  resourceUris: Type.Optional(TodoResourceUrisSchema),
   assignee: Type.Optional(
     Type.String({ description: "Assignee selector; defaults to the calling actor" }),
   ),
@@ -227,6 +245,7 @@ const TodoBatchUpdateSchema = Type.Object({
   context: Type.Optional(Type.String({ description: "Replacement context; empty clears it" })),
   skills: Type.Optional(Type.Array(TodoSkillBindingSchema, { description: "Replacement ordered skill bindings; empty clears them" })),
   summary: Type.Optional(Type.String({ description: "Replacement completion summary; empty clears it" })),
+  resourceUris: Type.Optional(TodoResourceUrisSchema),
   updateFields: Type.Optional(Type.Array(StringEnum([...TODO_UPDATE_FIELDS]), {
     description: "Fields changed by this update; listed values must be present",
     uniqueItems: true,
@@ -268,6 +287,7 @@ export const TodoToolParams = Type.Object({
       description: "Ordered Pi skill bindings. Omit when no skill is needed; on update, an empty array clears the stored skills",
     }),
   ),
+  resourceUris: Type.Optional(TodoResourceUrisSchema),
   summary: Type.Optional(
     Type.String({ description: "Short completion summary carried into later todo steps" }),
   ),
@@ -284,7 +304,7 @@ export const TodoToolParams = Type.Object({
   tasks: Type.Optional(
     Type.Array(TodoBatchTaskSchema, {
       minItems: 1,
-      description: "Non-empty batch for create. Inside tasks[i].blockedBy, each integer N means tasks[N] in this same array and must satisfy 0 <= N < i. Cannot be combined with single-task fields (subject, description, blockedBy, assignee, context, skills, goalId)",
+      description: "Non-empty batch for create. Inside tasks[i].blockedBy, each integer N means tasks[N] in this same array and must satisfy 0 <= N < i. Cannot be combined with single-task fields (subject, description, blockedBy, assignee, context, skills, resourceUris, goalId)",
     }),
   ),
 
@@ -310,5 +330,8 @@ export const TodoToolParams = Type.Object({
   ),
   goalId: Type.Optional(
     Type.String({ description: "Id of the Goal acting as this task's quality gate (bind sparingly, only for tasks with verifiable acceptance); empty string clears it on update" }),
+  ),
+  transition: Type.Optional(
+    StringEnum([...TODO_ADVANCE_TRANSITIONS], "Request-only completion transition for active advance; it is not persisted or scheduled by Todo"),
   ),
 });

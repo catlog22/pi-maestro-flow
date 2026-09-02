@@ -125,8 +125,8 @@ test("API Manager provider exposes settings, retry policy and the original manag
 
 test("Flow provider reports configured and effective values across global and project scopes", async () => {
   const { provider, context, globalSettings, projectSettings, globalFailover, projectFailover } = fixture();
-  writeJson(globalSettings, { unknownRoot: true, compaction: { enabled: false, hard: { reserveTokens: 10000 }, soft: { enabled: false } } });
-  writeJson(projectSettings, { compaction: { hard: { keepRecentTokens: 9000 }, soft: { enabled: true, velocity: { enabled: true } } } });
+  writeJson(globalSettings, { unknownRoot: true, compaction: { enabled: false, hard: { reserveTokens: 10000 }, soft: { enabled: false }, newContext: { enabled: true } } });
+  writeJson(projectSettings, { compaction: { hard: { keepRecentTokens: 9000 }, soft: { enabled: true, velocity: { enabled: true } }, newContext: { enabled: false } } });
   writeJson(globalFailover, { enabled: true, fallbackModels: { "openai/main": ["qwen/fallback"] }, unknownGlobal: 1 });
   writeJson(projectFailover, { fallbackModels: { "qwen/main": ["openai/fallback"] } });
 
@@ -145,6 +145,9 @@ test("Flow provider reports configured and effective values across global and pr
   const softEnabled = snapshot.effective.values.find((entry) => entry.key === "compaction.soft.enabled");
   assert.equal(softEnabled?.value, true);
   assert.equal(softEnabled?.scope, "project");
+  const newContextEnabled = snapshot.effective.values.find((entry) => entry.key === "compaction.newContext.enabled");
+  assert.equal(newContextEnabled?.value, false);
+  assert.equal(newContextEnabled?.scope, "project");
   assert.deepEqual(snapshot.effective.values.find((entry) => entry.key === "failover.fallbackModels")?.value, [
     { model: "openai/main", fallbacks: ["qwen/fallback"] },
     { model: "qwen/main", fallbacks: ["openai/fallback"] },
@@ -154,6 +157,7 @@ test("Flow provider reports configured and effective values across global and pr
   const derivedRows = derived?.value as Array<Record<string, unknown>>;
   assert.ok(Array.isArray(derivedRows) && derivedRows.length >= 4);
   assert.equal(derivedRows.find((row) => row.labelKey === "flow.overview.enabled")?.value, "off");
+  assert.equal(derivedRows.find((row) => row.labelKey === "flow.overview.newContext")?.value, "off");
   const chains = snapshot.effective.values.find((entry) => entry.key === "failover.overview")?.value as Array<Record<string, unknown>>;
   assert.ok(Array.isArray(chains) && chains.length >= 2);
   assert.ok(chains.some((row) => String(row.label).includes("qwen/main")));

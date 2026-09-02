@@ -23,6 +23,7 @@ export * from "./observation.ts";
 export * from "./progress-tree.ts";
 export * from "./remote.ts";
 export * from "./retry.ts";
+export * from "./session-history.ts";
 export * from "./scheduler.ts";
 export * from "./sessions.ts";
 export * from "./ssh-hosts.ts";

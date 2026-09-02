@@ -468,6 +468,8 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
   assert.equal(names.filter((name) => name === "computer_use").length, 1);
   assert.equal(names.filter((name) => name === "search_tool_bm25").length, 1);
   assert.ok(names.includes("run-control"));
+  assert.ok(names.includes("session_history"));
+  assert.ok(names.includes("new_context"));
   assert.equal(names.includes("swarm_runtime"), false);
   assert.ok(commands.includes("maestro-session"));
   assert.ok(commands.includes("maestro-todo"));
@@ -1042,6 +1044,8 @@ test("teammate child registers interaction, local Bash, and parent-permission su
   }
 
   assert.deepEqual(tools.map((tool) => tool.name), [...MAESTRO_CHILD_TOOL_NAMES]);
+  const childNewContext = tools.find((tool) => tool.name === "new_context");
+  assert.match(childNewContext?.description ?? "", /same-session context reset/);
   const childTodo = tools.find((tool) => tool.name === "todo");
   assert.match(childTodo?.description ?? "", /immediately finish it with `todo advance`/);
   assert.match(JSON.stringify(childTodo?.parameters), /advance/);

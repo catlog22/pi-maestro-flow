@@ -44,10 +44,10 @@ import {
 } from "../compaction/compaction-threshold.ts";
 
 type CompactionField = typeof COMPACTION_FIELDS[number];
-type EditableCompactionField = Exclude<CompactionField, "enabled">;
+type EditableCompactionField = Exclude<CompactionField, "enabled" | "newContext">;
 type SoftMechanismItem = "softLossless" | "softCacheGate" | "softTimeBased" | "softRelevance" | "softDedup";
-type MenuItem = "threshold" | "enabled" | "keepRecentTokens" | "softEnabled" | SoftMechanismItem | "compactModel";
-type ConfigFieldItem = Exclude<MenuItem, "softEnabled" | SoftMechanismItem>;
+type MenuItem = "threshold" | "enabled" | "keepRecentTokens" | "softEnabled" | SoftMechanismItem | "compactModel" | "newContext";
+type ConfigFieldItem = Exclude<MenuItem, "softEnabled" | SoftMechanismItem | "newContext">;
 type SaveState = "clean" | "dirty" | "saving" | "failed";
 
 interface CompactionTheme extends FrameTheme {}
@@ -77,6 +77,7 @@ const CATALOGS = {
     "item.softRelevance": "Relevance ranking",
     "item.softDedup": "Cross-turn dedup",
     "item.compactModel": "Compaction model",
+    "item.newContext": "Explicit new-context compaction",
     "item.threshold.short": "Threshold",
     "item.enabled.short": "Auto",
     "item.softEnabled.short": "Soft",
@@ -86,6 +87,7 @@ const CATALOGS = {
     "item.softRelevance.short": "Relevance",
     "item.softDedup.short": "Dedup",
     "item.compactModel.short": "Model",
+    "item.newContext.short": "New ctx",
     "item.keepRecentTokens.short": "Keep",
     "detail.threshold": "Shows the real runtime threshold; editing changes the configured threshold, converted back to reserved output space on save.",
     "detail.enabled": "Controls both Pi native automatic compaction and Maestro in-flight compaction.",
@@ -97,6 +99,7 @@ const CATALOGS = {
     "detail.softRelevance": "Prioritizes pruning low-relevance output by lexical relevance (BM25/keywords) to the latest user instruction; off by default.",
     "detail.softDedup": "Replaces verbatim duplicates of earlier tool output with context pointers; referenced output stays protected; off by default.",
     "detail.compactModel": "Model used for text-compaction summaries; follows the current session model by default and falls back at runtime when resolution fails.",
+    "detail.newContext": "Allows standalone new_context requests and Todo advance transition:new_context. Off by default; this gate never changes threshold-triggered automatic compaction.",
     "value.on": "● On",
     "value.off": "○ Off",
     "value.inherit": "Follow session model",
@@ -226,6 +229,7 @@ const CATALOGS = {
     "item.softRelevance": "相关性排序",
     "item.softDedup": "跨轮去重",
     "item.compactModel": "压缩模型",
+    "item.newContext": "显式新上下文压缩",
     "item.threshold.short": "阈值",
     "item.enabled.short": "自动",
     "item.softEnabled.short": "软压缩",
@@ -235,6 +239,7 @@ const CATALOGS = {
     "item.softRelevance.short": "相关",
     "item.softDedup.short": "去重",
     "item.compactModel.short": "模型",
+    "item.newContext.short": "新上下文",
     "item.keepRecentTokens.short": "保留",
     "detail.threshold": "显示运行时真实阈值；编辑的是配置阈值，保存后仍换算为预留输出空间。",
     "detail.enabled": "同时控制 Pi 原生自动压缩与 Maestro 执行中压缩。",
@@ -246,6 +251,7 @@ const CATALOGS = {
     "detail.softRelevance": "按最近用户指令的词法相关性（BM25/关键词）优先裁剪低相关输出；默认关闭。",
     "detail.softDedup": "把与更早工具输出逐字重复的片段替换为上下文指针，被引用输出受保护；默认关闭。",
     "detail.compactModel": "用于生成文本压缩摘要的模型；默认跟随当前会话模型，解析失败运行时自动回退。",
+    "detail.newContext": "允许 standalone new_context 请求与 Todo advance transition:new_context。默认关闭；此门禁不会改变按阈值触发的自动压缩。",
     "value.on": "● 已开启",
     "value.off": "○ 已关闭",
     "value.inherit": "跟随当前会话模型",
@@ -370,6 +376,7 @@ interface ScopeDraft {
   reserveTokens?: string;
   keepRecentTokens?: string;
   model?: string;
+  newContext?: { enabled?: boolean };
   soft?: SoftCompactionConfigPatch;
 }
 
@@ -413,7 +420,7 @@ const SOFT_MECHANISM_KEYS: Record<SoftMechanismItem, "lossless" | "cache" | "tim
 const MENU_ITEMS: readonly MenuItem[] = [
   "threshold", "enabled", "keepRecentTokens", "softEnabled",
   "softLossless", "softCacheGate", "softTimeBased", "softRelevance", "softDedup",
-  "compactModel",
+  "compactModel", "newContext",
 ];
 
 function isSoftMechanismItem(item: MenuItem): item is SoftMechanismItem {
@@ -432,6 +439,7 @@ function itemLabel(item: MenuItem): CatalogKey {
     case "softRelevance": return "item.softRelevance";
     case "softDedup": return "item.softDedup";
     case "compactModel": return "item.compactModel";
+    case "newContext": return "item.newContext";
   }
 }
 
@@ -450,6 +458,7 @@ function shortLabel(item: MenuItem): CatalogKey {
     case "softRelevance": return "item.softRelevance.short";
     case "softDedup": return "item.softDedup.short";
     case "compactModel": return "item.compactModel.short";
+    case "newContext": return "item.newContext.short";
     case "keepRecentTokens": return "item.keepRecentTokens.short";
   }
 }
@@ -586,6 +595,12 @@ export class CompactionSettingsOverlay implements Component, Focusable {
           delete soft.enabled;
           if (Object.keys(soft).length === 0) delete this.drafts[this.scope].soft;
         }
+      } else if (item === "newContext") {
+        const newContext = this.drafts[this.scope].newContext;
+        if (newContext) {
+          delete newContext.enabled;
+          if (Object.keys(newContext).length === 0) delete this.drafts[this.scope].newContext;
+        }
       } else if (isSoftMechanismItem(item)) {
         const key = SOFT_MECHANISM_KEYS[item];
         const soft = this.drafts[this.scope].soft;
@@ -656,6 +671,11 @@ export class CompactionSettingsOverlay implements Component, Focusable {
         ? `${this.t("value.inheritPrefix")}${this.sourceLabel(this.effective().source.soft)}`
         : this.sourceLabel(this.scope);
     }
+    if (item === "newContext") {
+      return this.drafts[this.scope].newContext?.enabled === undefined
+        ? `${this.t("value.inheritPrefix")}${this.sourceLabel(this.effective().source.newContext)}`
+        : this.sourceLabel(this.scope);
+    }
     const field = configFieldForItem(item);
     return this.drafts[this.scope][field] === undefined
       ? `${this.t("value.inheritPrefix")}${this.sourceLabel(this.effective().source[field])}`
@@ -724,7 +744,7 @@ export class CompactionSettingsOverlay implements Component, Focusable {
 
   private handleEditInput(data: string): void {
     const item = this.selectedItem();
-    if (item === "enabled" || item === "softEnabled") {
+    if (item === "enabled" || item === "softEnabled" || item === "newContext") {
       this.editing = false;
       return;
     }
@@ -853,6 +873,9 @@ export class CompactionSettingsOverlay implements Component, Focusable {
       const scopeTag = this.t(this.scopeKey(scope));
       if (before.enabled !== after.enabled) {
         changes.push(this.t(after.enabled ? "confirm.toggleOn" : "confirm.toggleOff", { scope: scopeTag, field: this.t("item.enabled") }));
+      }
+      if (before.newContext?.enabled !== after.newContext?.enabled) {
+        changes.push(this.t(after.newContext?.enabled ? "confirm.toggleOn" : "confirm.toggleOff", { scope: scopeTag, field: this.t("item.newContext") }));
       }
       const fields: Array<["reserveTokens" | "keepRecentTokens" | "model", MenuItem]> = [
         ["reserveTokens", "threshold"],
@@ -988,6 +1011,7 @@ export class CompactionSettingsOverlay implements Component, Focusable {
   private itemValue(item: MenuItem): string {
     const effective = this.effective();
     if (item === "enabled") return effective.enabled ? this.t("value.on") : this.t("value.off");
+    if (item === "newContext") return effective.newContext.enabled ? this.t("value.on") : this.t("value.off");
     if (item === "softEnabled") return effective.soft.enabled ? this.t("value.on") : this.t("value.off");
     if (isSoftMechanismItem(item)) {
       return effective.soft[SOFT_MECHANISM_KEYS[item]]?.enabled === true ? this.t("value.on") : this.t("value.off");
@@ -1012,7 +1036,7 @@ export class CompactionSettingsOverlay implements Component, Focusable {
       }
       return String(effective.reserveTokens);
     }
-    if (item === "softEnabled") return "";
+    if (item === "softEnabled" || item === "newContext") return "";
     if (isSoftMechanismItem(item)) return "";
     return String(effective[configFieldForItem(item)]);
   }
@@ -1093,16 +1117,19 @@ export class CompactionSettingsOverlay implements Component, Focusable {
 
   private selectedConfigField(): EditableCompactionField | undefined {
     const item = this.selectedItem();
-    if (item === "enabled" || item === "softEnabled" || isSoftMechanismItem(item)) return undefined;
+    if (item === "enabled" || item === "newContext" || item === "softEnabled" || isSoftMechanismItem(item)) return undefined;
     return configFieldForItem(item) as EditableCompactionField;
   }
 
   private isToggleItem(item: MenuItem): boolean {
-    return item === "enabled" || item === "softEnabled" || isSoftMechanismItem(item);
+    return item === "enabled" || item === "newContext" || item === "softEnabled" || isSoftMechanismItem(item);
   }
 
   private toggleSelectedItem(item: MenuItem): void {
-    if (item === "softEnabled") {
+    if (item === "newContext") {
+      const current = this.drafts[this.scope].newContext ?? {};
+      this.drafts[this.scope].newContext = { ...current, enabled: !this.effective().newContext.enabled };
+    } else if (item === "softEnabled") {
       const current = this.drafts[this.scope].soft ?? {};
       this.drafts[this.scope].soft = { ...current, enabled: !this.effective().soft.enabled };
     } else if (isSoftMechanismItem(item)) {
@@ -1413,6 +1440,7 @@ function toDraft(patch: CompactionConfigPatch): ScopeDraft {
     ...(patch.reserveTokens !== undefined ? { reserveTokens: String(patch.reserveTokens) } : {}),
     ...(patch.keepRecentTokens !== undefined ? { keepRecentTokens: String(patch.keepRecentTokens) } : {}),
     ...(patch.model !== undefined ? { model: patch.model } : {}),
+    ...(patch.newContext !== undefined ? { newContext: { ...patch.newContext } } : {}),
     ...(patch.soft !== undefined ? { soft: { ...patch.soft } } : {}),
   };
 }
@@ -1423,13 +1451,19 @@ function draftToPatch(draft: ScopeDraft): CompactionConfigPatch {
     ...(draft.reserveTokens !== undefined ? { reserveTokens: Number(draft.reserveTokens) } : {}),
     ...(draft.keepRecentTokens !== undefined ? { keepRecentTokens: Number(draft.keepRecentTokens) } : {}),
     ...(draft.model !== undefined ? { model: draft.model } : {}),
+    ...(draft.newContext !== undefined ? { newContext: { ...draft.newContext } } : {}),
     ...(draft.soft !== undefined ? { soft: { ...draft.soft } } : {}),
   };
 }
 
 function draftEqual(left: ScopeDraft, right: ScopeDraft): boolean {
-  return COMPACTION_FIELDS.every((field) => left[field] === right[field])
+  return COMPACTION_FIELDS.filter((field) => field !== "newContext").every((field) => left[field] === right[field])
+    && newContextDraftEqual(left.newContext, right.newContext)
     && softDraftEqual(left.soft, right.soft);
+}
+
+function newContextDraftEqual(left?: { enabled?: boolean }, right?: { enabled?: boolean }): boolean {
+  return left?.enabled === right?.enabled;
 }
 
 function softDraftEqual(left?: SoftCompactionConfigPatch, right?: SoftCompactionConfigPatch): boolean {

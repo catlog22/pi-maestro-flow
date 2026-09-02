@@ -33,6 +33,36 @@ test("compaction settings use the Pi default user path when the agent directory 
   }
 });
 
+test("new-context compaction defaults off and follows project-over-user precedence", async () => {
+  const fixture = await createFixture();
+  try {
+    assert.equal(readEffectiveCompactionSettings(fixture.projectDir).newContext.enabled, false);
+    await writeSettings(fixture.agentDir, {
+      compaction: { newContext: { enabled: true } },
+    });
+    await writeSettings(join(fixture.projectDir, ".pi"), {
+      compaction: { newContext: { enabled: false, vendorOption: "keep" } },
+    });
+
+    let effective = readEffectiveCompactionSettings(fixture.projectDir);
+    assert.equal(effective.newContext.enabled, false);
+    assert.equal(effective.source.newContext, "project");
+
+    await saveCompactionScope("project", fixture.projectDir, { newContext: { enabled: true } });
+    let project = await readJson(resolveProjectSettingsPath(fixture.projectDir));
+    assert.deepEqual(project.compaction.newContext, { enabled: true, vendorOption: "keep" });
+
+    await saveCompactionScope("project", fixture.projectDir, {});
+    project = await readJson(resolveProjectSettingsPath(fixture.projectDir));
+    assert.deepEqual(project.compaction.newContext, { vendorOption: "keep" });
+    effective = readEffectiveCompactionSettings(fixture.projectDir);
+    assert.equal(effective.newContext.enabled, true);
+    assert.equal(effective.source.newContext, "user");
+  } finally {
+    await fixture.dispose();
+  }
+});
+
 test("compaction settings resolve paths, precedence, and field-level sources", async () => {
   const fixture = await createFixture();
   try {
@@ -44,12 +74,14 @@ test("compaction settings resolve paths, precedence, and field-level sources", a
       keepRecentTokens: DEFAULT_KEEP_RECENT_TOKENS,
       model: undefined,
       soft: { ...DEFAULT_SOFT_COMPACTION },
+      newContext: { enabled: false },
       source: {
         enabled: "default",
         reserveTokens: "default",
         keepRecentTokens: "default",
         model: "default",
         soft: "default",
+        newContext: "default",
       },
     });
 
@@ -70,12 +102,14 @@ test("compaction settings resolve paths, precedence, and field-level sources", a
       keepRecentTokens: 12_000,
       model: undefined,
       soft: { ...DEFAULT_SOFT_COMPACTION },
+      newContext: { enabled: false },
       source: {
         enabled: "project",
         reserveTokens: "user",
         keepRecentTokens: "project",
         model: "default",
         soft: "default",
+        newContext: "default",
       },
     });
   } finally {
@@ -107,12 +141,14 @@ test("compaction settings ignore malformed files and invalid optional fields", a
       keepRecentTokens: DEFAULT_KEEP_RECENT_TOKENS,
       model: undefined,
       soft: { ...DEFAULT_SOFT_COMPACTION },
+      newContext: { enabled: false },
       source: {
         enabled: "default",
         reserveTokens: "default",
         keepRecentTokens: "default",
         model: "default",
         soft: "default",
+        newContext: "default",
       },
     });
     await assert.rejects(

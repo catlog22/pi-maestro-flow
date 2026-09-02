@@ -217,6 +217,26 @@ test("compaction TUI toggles the soft-compression switch independently and saves
   });
 });
 
+test("compaction TUI toggles explicit new-context mode independently", async () => {
+  const saves: Array<{ scope: CompactionScope; values: Record<string, unknown> }> = [];
+  const overlay = createOverlay({
+    async saveScope(scope, values) { saves.push({ scope, values }); },
+  });
+  for (let index = 0; index < 10; index++) overlay.handleInput("\x1b[B"); // -> newContext
+  assert.match(overlay.render(80).join("\n"), /显式新上下文压缩 · ○ 已关闭/);
+  overlay.handleInput(" ");
+  assert.match(overlay.render(80).join("\n"), /显式新上下文压缩 · ● 已开启 · 项目/);
+  overlay.handleInput("\x13");
+  overlay.handleInput("\r");
+  await flushAsync();
+  const projectSave = saves.find((save) => save.scope === "project");
+  assert.deepEqual(projectSave?.values, {
+    reserveTokens: 10_000,
+    keepRecentTokens: 12_000,
+    newContext: { enabled: true },
+  });
+});
+
 test("compaction TUI toggles soft mechanism switches and saves the soft group", async () => {
   const saves: Array<{ scope: CompactionScope; values: Record<string, unknown> }> = [];
   const overlay = createOverlay({
