@@ -44,7 +44,10 @@ browser pairing, provider history, and cross-window rendering.
   reloads, and late results.
 - **Remote configuration** - SSH host contracts, ACP catalog/configuration, DSH
   and remote-worker transport handling, and model/configuration surfaces are
-  synchronized across the package and generated declarations.
+  synchronized across the package and generated declarations. Managed SSH
+  host references preserve the OpenSSH port default without materializing an
+  inline override, and runtime-broker mailbox recovery exposes awaitable
+  client prewarm for deterministic startup ordering.
 - **Model routing and settlement** - saved routing Profiles can be listed,
   resolved, activated by stable ID or name, and opened directly from
   `/teammate-model`; structured-output failures retain provider causes and the
@@ -77,8 +80,8 @@ browser pairing, provider history, and cross-window rendering.
 
 ## Stats
 
-- **51 implementation commits** since v0.24.0
-- **357 files** changed, **+59,169 / -17,914** in the implementation range
+- **52 implementation commits** since v0.24.0
+- **358 files** changed, **+59,108 / -17,907** in the implementation range
 
 ## Install / Upgrade
 

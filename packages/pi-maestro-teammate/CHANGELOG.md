@@ -7,6 +7,7 @@
 - Existing v3 routing Profiles are now documented as the saved-template system: multiple named configurations remain global, while each project persists its active template and preserved compatibility overrides.
 - Added `/teammate-model [profile-id-or-name]` with completion for direct project switching. `/teammate-model` without arguments opens the Control Center on **Profiles**; `/teammate-models` and `Alt+M` continue to open the full control center.
 - Added public list, resolve, and atomic activate helpers for Profile/template consumers. Name matching is case-insensitive, stable IDs win, and duplicate display names fail closed with the candidate IDs.
+- Managed SSH host references preserve the OpenSSH default port without materializing an inline override; runtime-broker mailbox recovery exposes awaitable client prewarm for deterministic startup ordering.
 
 ### Session history and durable resources
 
