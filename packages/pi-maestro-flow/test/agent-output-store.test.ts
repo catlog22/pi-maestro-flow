@@ -600,6 +600,61 @@ test("rolling capacity evicts the oldest record to make room for new publication
   assert.equal((await getAgentOutputStoreUsage(workspace)).records, MAX_AGENT_FILES);
 });
 
+test("an alias-protected overage does not scan unrelated completion manifests", async () => {
+  const workspace = join(root, "alias-protected-overage");
+  await persistAgentOutputChecked(
+    "protected-correlation-0",
+    "protected",
+    "general",
+    { index: 0 },
+    workspace,
+    "protected-publication-0",
+  );
+  const bucket = await bucketContaining("protected-publication-0.json");
+  const capturedAt = new Date().toISOString();
+  await Promise.all(Array.from({ length: MAX_AGENT_FILES - 1 }, async (_, offset) => {
+    const index = offset + 1;
+    const correlationId = `protected-correlation-${index}`;
+    const publicationId = `protected-publication-${index}`;
+    await Promise.all([
+      writeFile(join(bucket, `${publicationId}.json`), JSON.stringify({
+        correlationId,
+        publicationId,
+        capturedAt,
+        output: { index },
+      })),
+      writeFile(join(bucket, `${correlationId}.alias.json`), JSON.stringify({
+        kind: "agent-output-alias",
+        correlationId,
+        publicationId,
+      })),
+    ]);
+  }));
+
+  const malformedBucket = join(outRoot(), "unrelated-malformed-bucket");
+  await mkdir(malformedBucket, { recursive: true });
+  await writeFile(join(malformedBucket, ".completion-intents"), "not a directory");
+  try {
+    assert.equal(
+      await persistAgentOutputChecked(
+        "protected-correlation-overflow",
+        "protected",
+        "general",
+        { overflow: true },
+        workspace,
+        "protected-publication-overflow",
+      ),
+      "stored",
+    );
+    assert.deepEqual(
+      (await readExactAgentPublication("protected-publication-overflow", workspace))?.output,
+      { overflow: true },
+    );
+  } finally {
+    await rm(malformedBucket, { recursive: true, force: true });
+  }
+});
+
 test("persistAgentOutput rejects a linked global output root", async (t) => {
   const linkedRoot = await mkdtemp(join(tmpdir(), "pi-out-linked-"));
   const external = await mkdtemp(join(tmpdir(), "pi-out-external-"));

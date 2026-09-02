@@ -78,6 +78,20 @@ test("todo schema uses non-negative integer indexes for batch dependencies", () 
     subject: "Legacy skill remains compatible",
     skill: { name: "demo" },
   }), true);
+  assert.equal(Check(TodoToolParams, {
+    action: "advance",
+    id: "0",
+    summary: "done",
+    resourceUris: ["agent://publication-1"],
+    transition: "new_context",
+  }), true);
+  assert.equal(Check(TodoToolParams, {
+    action: "advance",
+    id: "0",
+    summary: "done",
+    resourceUris: ["http://not-allowed"],
+    transition: "invalid",
+  }), false);
 });
 
 test("Todo revision subscribers receive mutations without replacing the root listener", async () => {
@@ -458,7 +472,7 @@ test("todo next switches to the task's quality-gate Goal but leaves a user-stopp
     assert.match((stoppedNext.content[0] as { text: string }).text, /\/goal resume/);
 
     // A system-internal pause carries no such intent, so it is still auto-resumed.
-    // Drive a real one: three inconclusive verdicts pause the Goal with no pauseReason.
+    // Drive a real one: three inconclusive verdicts pause the Goal with a verification reason.
     await executeGoalCommand({ action: "resume" }, goalCtx);
     setGoalVerifierRunnerForTest(async () => ({
       exitCode: 0,
@@ -468,7 +482,7 @@ test("todo next switches to the task's quality-gate Goal but leaves a user-stopp
       await executeGoal({ action: "complete", summary: `Attempt ${attempt + 1} at the gate.` }, goalCtx);
     }
     assert.equal(getActiveGoal()?.status, "paused");
-    assert.equal(getActiveGoal()?.pauseReason, undefined);
+    assert.equal(getActiveGoal()?.pauseReason, "verification");
 
     await executeTodo({ action: "update", id: getVisibleTasks()[0].id, status: "pending" }, ctx);
     switchCurrentGoal(goalA.id, goalCtx);
@@ -553,7 +567,7 @@ test("reloading tasks drops bindings to Goals that no longer exist", async () =>
     const entry = {
       type: "custom",
       customType: "todo-state",
-      data: { version: 5, tasks: { [persisted.id]: persisted } },
+      data: { version: 6, tasks: { [persisted.id]: persisted } },
     };
     todoContext = startTodo(root, loader, [entry]);
 
@@ -814,7 +828,7 @@ test("skill re-activation failure degrades the turn instead of throwing into the
     todoContext = startTodo(root, loader, [{
       type: "custom",
       customType: "todo-state",
-      data: { version: 5, tasks: { [persisted.id]: persisted } },
+      data: { version: 6, tasks: { [persisted.id]: persisted } },
     }]);
 
     const result = await onContextTodo([]);
@@ -1164,8 +1178,134 @@ test("todo widget unifies root and teammate tasks sorted by status priority", as
   }
 });
 
-test("todo state version is 5", () => {
-  assert.equal(getTodoCompactionSnapshot().stateVersion, 5);
+test("todo state version is 6", () => {
+  assert.equal(getTodoCompactionSnapshot().stateVersion, 6);
+});
+
+test("todo resourceUris normalize across create, update, advance, and reload", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-resources-"));
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [], diagnostics: [] }) },
+  });
+  const persisted: unknown[] = [];
+  initTodo({ appendEntry(_type: string, data: unknown) { persisted.push(data); } } as never);
+  const todoContext = {
+    cwd: root,
+    ui: { setStatus() {} },
+    skillLoader: loader,
+    sessionManager: { getEntries: () => [] },
+  } as TodoContext;
+  onSessionStart(todoContext);
+  const ctx = { ...makeExtensionContext(), cwd: root } as never;
+  try {
+    const created = await executeTodo({
+      action: "create",
+      subject: "Resource task",
+      resourceUris: [" agent://publication-1 ", "agent://publication-1", "session://s1/entry/e1"],
+    }, ctx);
+    assert.equal(created.isError, undefined);
+    const id = getVisibleTasks()[0]!.id;
+    assert.deepEqual(getVisibleTasks()[0]!.resourceUris, ["agent://publication-1", "session://s1/entry/e1"]);
+
+    await executeTodo({ action: "update", id, resourceUris: [" pr://owner/repo/1 ", "pr://owner/repo/1"] }, ctx);
+    assert.deepEqual(getVisibleTasks()[0]!.resourceUris, ["pr://owner/repo/1"]);
+    await executeTodo({ action: "update", id, subject: "Renamed" }, ctx);
+    assert.deepEqual(getVisibleTasks()[0]!.resourceUris, ["pr://owner/repo/1"]);
+    await executeTodo({ action: "update", id, resourceUris: [] }, ctx);
+    assert.deepEqual(getVisibleTasks()[0]!.resourceUris, []);
+
+    const rejected = await executeTodo({ action: "update", id, resourceUris: ["http://not-allowed"] }, ctx);
+    assert.equal(rejected.isError, true);
+    assert.deepEqual(getVisibleTasks()[0]!.resourceUris, []);
+    for (const malformed of [
+      "agent://",
+      "session://s1",
+      "session://s1/entry/..",
+      "pr://owner/repo/not-a-number",
+      "issue://owner/repo/1/files",
+      "skill://../secret",
+      "rule://",
+    ]) {
+      const malformedResult = await executeTodo({ action: "update", id, resourceUris: [malformed] }, ctx);
+      assert.equal(malformedResult.isError, true, `${malformed} must be rejected`);
+      assert.deepEqual(getVisibleTasks()[0]!.resourceUris, []);
+    }
+    const tooMany = await executeTodo({
+      action: "update",
+      id,
+      resourceUris: Array.from({ length: 17 }, (_, index) => `agent://publication-${index}`),
+    }, ctx);
+    assert.equal(tooMany.isError, true);
+    assert.deepEqual(getVisibleTasks()[0]!.resourceUris, []);
+    const tooLargeUtf8 = await executeTodo({
+      action: "update",
+      id,
+      resourceUris: [`agent://${"é".repeat(1024)}`],
+    }, ctx);
+    assert.equal(tooLargeUtf8.isError, true);
+    assert.deepEqual(getVisibleTasks()[0]!.resourceUris, []);
+    const transitionWithoutActive = await executeTodo({ action: "advance", transition: "new_context" }, ctx);
+    assert.equal(transitionWithoutActive.isError, true);
+    assert.equal((transitionWithoutActive.details as { transition?: string }).transition, undefined);
+
+    await executeTodo({ action: "next" }, ctx);
+    const gated = await executeTodo({
+      action: "advance",
+      id,
+      summary: "Must not commit while disabled",
+      resourceUris: ["agent://must-not-commit"],
+      transition: "new_context",
+    }, ctx);
+    assert.equal(gated.isError, true);
+    assert.equal(getVisibleTasks()[0]!.status, "in_progress");
+    assert.deepEqual(getVisibleTasks()[0]!.resourceUris, []);
+
+    await mkdir(join(root, ".pi"), { recursive: true });
+    await writeFile(join(root, ".pi", "settings.json"), JSON.stringify({
+      compaction: { newContext: { enabled: true } },
+    }));
+    const completed = await executeTodo({
+      action: "advance",
+      id,
+      summary: "Finished with immutable evidence",
+      resourceUris: [" agent://publication-2 ", "agent://publication-2"],
+      transition: "new_context",
+    }, ctx);
+    assert.equal(completed.isError, undefined);
+    assert.equal((completed.details as { transition?: string }).transition, "new_context");
+    assert.deepEqual(getVisibleTasks()[0]!.resourceUris, ["agent://publication-2"]);
+    assert.doesNotMatch(JSON.stringify(persisted), /new_context/, "transition must not be persisted");
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("todo resourceUris migrate to an empty list for legacy state", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-resource-migration-"));
+  const loader = new TodoSkillLoader({ cwd: root });
+  const legacyTask = {
+    id: "legacy",
+    subject: "Legacy",
+    status: "pending",
+    blockedBy: [],
+    skills: [],
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const todoContext = startTodo(root, loader, [{
+    type: "custom",
+    customType: "todo-state",
+    data: { version: 5, tasks: { legacy: legacyTask } },
+  }]);
+  try {
+    assert.deepEqual(getVisibleTasks()[0]?.resourceUris, []);
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("todo next refuses to activate a second task", async () => {

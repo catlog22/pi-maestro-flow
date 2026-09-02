@@ -460,9 +460,11 @@ async function aliasReferencedPublicationIds(dir: string): Promise<Set<string>> 
   const names = (await readdir(dir, { withFileTypes: true }))
     .filter((entry) => entry.isFile() && entry.name.endsWith(ALIAS_SUFFIX))
     .map((entry) => entry.name);
+  const aliases = await Promise.all(names.map((fileName) =>
+    loadAlias(join(dir, fileName), fileName.slice(0, -ALIAS_SUFFIX.length))
+  ));
   const referenced = new Set<string>();
-  for (const fileName of names) {
-    const alias = await loadAlias(join(dir, fileName), fileName.slice(0, -ALIAS_SUFFIX.length));
+  for (const alias of aliases) {
     if (!alias) continue;
     referenced.add(alias.publicationId);
     if (alias.fallbackPublicationId) referenced.add(alias.fallbackPublicationId);
@@ -470,20 +472,23 @@ async function aliasReferencedPublicationIds(dir: string): Promise<Set<string>> 
   return referenced;
 }
 
-/**
- * 滚动淘汰最旧的 count 条记录为新记录腾位：优先删未被 alias 引用的，
- * 否则删最旧记录，并修复受影响的 alias 回退链。
- */
+/** 滚动淘汰最旧且未被 alias 或完成清单引用的记录。 */
 async function evictOldestRecords(dir: string, count: number): Promise<void> {
   if (count <= 0) return;
-  const entries = await listCanonicalRecords(dir);
   const referenced = await aliasReferencedPublicationIds(dir);
-  for (const pinned of await manifestPinnedPublicationIds(dir)) referenced.add(pinned);
+  const unreferencedNames = (await readdir(dir, { withFileTypes: true }))
+    .filter((entry) => entry.isFile() && isCanonicalRecordName(entry.name))
+    .map((entry) => entry.name)
+    .filter((fileName) => !referenced.has(fileName.slice(0, -".json".length)));
+  if (unreferencedNames.length === 0) return;
+
+  const pinned = await manifestPinnedPublicationIds(dir);
+  const entries = await listCanonicalRecords(dir, pinned, unreferencedNames);
   // Pinned records are never eviction candidates: a temporary capacity
   // overage is preferable to destroying the only durable copy needed for
   // completion redelivery.
   const candidates: AgentOutputStoreEntry[] = [];
-  const pool = entries.filter((entry) => !referenced.has(entry.canonicalId));
+  const pool = entries.filter((entry) => !entry.pinned);
   for (let index = pool.length - 1; index >= 0 && candidates.length < count; index -= 1) {
     candidates.push(pool[index]!);
   }
@@ -491,7 +496,6 @@ async function evictOldestRecords(dir: string, count: number): Promise<void> {
     await unlink(recordFile(dir, entry.canonicalId)).catch((error) => {
       if (fileErrorCode(error) !== "ENOENT") throw error;
     });
-    await repairAliasesAfterDeletion(dir, entry.canonicalId);
   }
 }
 
@@ -511,39 +515,44 @@ async function manifestPinnedPublicationIds(dir: string): Promise<Set<string>> {
   } catch (error) {
     if (fileErrorCode(error) !== "ENOENT") throw error;
   }
-  for (const bucket of buckets) {
+  const manifests = await Promise.all([...buckets].map(async (bucket) => {
     const manifestDir = join(bucket, COMPLETION_MANIFEST_DIR);
     let names: string[];
     try {
       names = await readdir(manifestDir);
     } catch (error) {
-      if (fileErrorCode(error) === "ENOENT") continue;
+      if (fileErrorCode(error) === "ENOENT") return [];
       throw error;
     }
-    for (const fileName of completionManifestCanonicalNames(names)) {
-      const manifest = await readCompletionManifestFile(join(manifestDir, fileName));
-      if (!manifest || manifest.state !== "open" && manifest.state !== "finalized") continue;
-      for (const published of manifest.published) pinned.add(published.publicationId);
-      for (const resource of manifest.intent?.resources ?? []) pinned.add(resource.publicationId);
-    }
+    return Promise.all(completionManifestCanonicalNames(names).map((fileName) =>
+      readCompletionManifestFile(join(manifestDir, fileName))
+    ));
+  }));
+  for (const manifest of manifests.flat()) {
+    if (!manifest || manifest.state !== "open" && manifest.state !== "finalized") continue;
+    for (const published of manifest.published) pinned.add(published.publicationId);
+    for (const resource of manifest.intent?.resources ?? []) pinned.add(resource.publicationId);
   }
   return pinned;
 }
 
-async function listCanonicalRecords(dir: string): Promise<AgentOutputStoreEntry[]> {
-  const names = (await readdir(dir, { withFileTypes: true }))
+async function listCanonicalRecords(
+  dir: string,
+  knownPinnedIds?: ReadonlySet<string>,
+  knownNames?: readonly string[],
+): Promise<AgentOutputStoreEntry[]> {
+  const names = knownNames ?? (await readdir(dir, { withFileTypes: true }))
     .filter((entry) => entry.isFile() && isCanonicalRecordName(entry.name))
     .map((entry) => entry.name);
-  const pinnedIds = await manifestPinnedPublicationIds(dir);
-  const entries: AgentOutputStoreEntry[] = [];
-  for (const fileName of names) {
+  const pinnedIds = knownPinnedIds ?? await manifestPinnedPublicationIds(dir);
+  const entries = (await Promise.all(names.map(async (fileName): Promise<AgentOutputStoreEntry | undefined> => {
     const filePath = join(dir, fileName);
     const [text, info] = await Promise.all([readPrivateText(filePath), lstat(filePath)]);
-    if (text === undefined || info.isSymbolicLink() || !info.isFile()) continue;
+    if (text === undefined || info.isSymbolicLink() || !info.isFile()) return undefined;
     const record = parseRecord(text);
-    if (!record) continue;
+    if (!record) return undefined;
     const canonicalId = record.publicationId ?? record.correlationId;
-    entries.push({
+    return {
       id: canonicalId,
       correlationId: record.correlationId,
       ...(record.publicationId ? { publicationId: record.publicationId } : {}),
@@ -555,8 +564,8 @@ async function listCanonicalRecords(dir: string): Promise<AgentOutputStoreEntry[
       preview: outputPreview(record.output),
       pinned: pinnedIds.has(canonicalId),
       revision: createHash("sha256").update(text, "utf8").digest("hex"),
-    });
-  }
+    };
+  }))).filter((entry): entry is AgentOutputStoreEntry => entry !== undefined);
   entries.sort((a, b) => b.capturedAt.localeCompare(a.capturedAt) || b.id.localeCompare(a.id));
   return entries;
 }

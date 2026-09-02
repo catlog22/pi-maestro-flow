@@ -10,6 +10,7 @@
  *   （correlationId 是统一查询 ID，解析到该 agent 的最新结果；publicationId 仅作为兼容入口；
  *   任务名重名时返回匹配列表（correlationId + 时间 + 内容预览），按 correlationId 精确查询；
  *   带 outputSchema 的任务记录其校验后的结构化输出，普通任务记录最终答案文本；裸 agent://<correlationId> 返回完整输出）
+ * - session://<sessionId>/entry/<entryId> — 当前 host-authorized Pi session history 的可见 active-chain entry
  * - memory://… — 预留（返回明确的未实现提示，避免模型猜测）
  *
  * 只读工具：plan 白名单 + 权限 ALWAYS_ALLOWED + 系统提示引导同步注册
@@ -21,19 +22,37 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { homedir } from "node:os";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
 import { toolCallLine, toolResultLine, resultSummary } from "../quiet-render.ts";
 import { checkGhAvailable, showGhHint } from "./web-access/github-api.ts";
 import { getAgentOutputPath, formatAgentMatchListing, resolveAgentOutput } from "../teammate/agent-output-store.ts";
+import { createSessionHistoryInventoryProvider } from "./session-history.ts";
+import {
+  SessionHistoryService,
+  parseSessionHistoryUri,
+  type SessionHistoryInventorySource,
+} from "pi-maestro-teammate/v1/session-history";
 
 export const ResourceParams = Type.Object({
   uri: Type.String({
     description:
-      "Protocol resource URI: pr://owner/repo/N (or pr://N, optional /diff or /files), issue://owner/repo/N (or issue://N), skill://name, rule://name, agent://<correlationId>[/key[/index]]. See the tool description for scheme semantics.",
+      "Protocol resource URI: pr://owner/repo/N (or pr://N, optional /diff or /files), issue://owner/repo/N (or issue://N), skill://name, rule://name, agent://<correlationId>[/key[/index]], or session://<sessionId>/entry/<entryId>. See the tool description for scheme semantics.",
   }),
 });
+
+export interface ResourceResolveOptions {
+  /** Fresh host-authorized session inventory used by session:// reads. */
+  sessionHistory?: SessionHistoryInventorySource | SessionHistoryService;
+}
+
+export interface ResourceToolOptions {
+  /** Optional session inventory override for focused hosts/tests. */
+  sessionHistory?: SessionHistoryInventorySource | SessionHistoryService;
+  /** Optional host-context inventory factory. */
+  sessionHistoryFactory?: (ctx: ExtensionContext) => SessionHistoryInventorySource;
+}
 
 export interface ResourceDetails {
   uri: string;
@@ -355,11 +374,27 @@ function trimOutput(text: string): string {
   return `${trimmed.slice(0, MAX_OUTPUT_CHARS)}\n\n[Output truncated at ${MAX_OUTPUT_CHARS} chars]`;
 }
 
-export async function resolveResource(uri: string, cwd: string, signal?: AbortSignal): Promise<{ content: string; title: string; cached: boolean }> {
+/** Session IDs are opaque to the host but resource segments must never become
+ * path-like selectors (including percent-encoded separators). */
+function safeSessionResourceIdentifier(value: string): boolean {
+  return value.length > 0
+    && value.length <= 512
+    && value !== "."
+    && value !== ".."
+    && !/[\\/]/.test(value)
+    && !/[\u0000-\u001f\u007f]/.test(value);
+}
+
+export async function resolveResource(
+  uri: string,
+  cwd: string,
+  signal?: AbortSignal,
+  options: ResourceResolveOptions = {},
+): Promise<{ content: string; title: string; cached: boolean }> {
   const parsed = parseResourceUri(uri);
   if (!parsed) {
     throw new Error(
-      `Unsupported URI format: "${uri}". Supported schemes: pr://, issue://, skill://, rule://, agent://. ` +
+      `Unsupported URI format: "${uri}". Supported schemes: pr://, issue://, skill://, rule://, agent://, session://. ` +
       "For local files use the read tool.",
     );
   }
@@ -424,17 +459,62 @@ export async function resolveResource(uri: string, cwd: string, signal?: AbortSi
       const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
       return { content: trimOutput(text), title: `agent://${id}`, cached: false };
     }
+    case "session": {
+      const sessionUri = uri.trim().replace(/^session:\/\//i, "session://");
+      const parsedSession = parseSessionHistoryUri(sessionUri);
+      // Resource deliberately supports only an exact visible entry. A bare
+      // session URI belongs to session_history discovery/read_turn and would
+      // otherwise make it too easy to widen a resource read accidentally.
+      if (!parsedSession || !parsedSession.entryId || !safeSessionResourceIdentifier(parsedSession.sessionId)
+        || !safeSessionResourceIdentifier(parsedSession.entryId)) {
+        throw new Error(
+          `Invalid session:// URI: expected session://<sessionId>/entry/<entryId> with safe identifiers.`,
+        );
+      }
+      const source = options.sessionHistory;
+      if (!source) {
+        throw new Error("session:// resources require an active host session context.");
+      }
+      let result;
+      try {
+        const service = source instanceof SessionHistoryService
+          ? source
+          : new SessionHistoryService(source);
+        result = await service.readUri(sessionUri, {
+          signal,
+        });
+      } catch (error) {
+        if (signal?.aborted) throw signal.reason ?? error;
+        // Inventory providers are host-owned. Do not pass provider errors (and
+        // potentially embedded filesystem paths) through the model-visible
+        // resource error surface.
+        throw new Error("Session history read failed.");
+      }
+      if (!result.found || !result.selectedEntry) {
+        throw new Error(`Session entry not found or not visible: ${sessionUri}`);
+      }
+      // The public service already strips thinking, hidden rows, abandoned
+      // branches, and tool arguments. Serialize only the selected entry so a
+      // resource read cannot accidentally widen into a transcript dump.
+      return {
+        content: trimOutput(JSON.stringify(result.selectedEntry, null, 2)),
+        title: sessionUri,
+        cached: false,
+      };
+    }
     case "memory":
       throw new Error(
         "The memory:// scheme is reserved for future persistent memory access. " +
         "Use the knowledge system (maestro knowledge) for memory today.",
       );
     default:
-      throw new Error(`Unsupported scheme "${scheme}://" in "${uri}". Supported: pr://, issue://, skill://, rule://, agent://.`);
+      throw new Error(`Unsupported scheme "${scheme}://" in "${uri}". Supported: pr://, issue://, skill://, rule://, agent://, session://.`);
   }
 }
 
-export function createResourceTool(): ToolDefinition<typeof ResourceParams, ResourceDetails> {
+export function createResourceTool(
+  options: ResourceToolOptions = {},
+): ToolDefinition<typeof ResourceParams, ResourceDetails> {
   return {
     name: "resource",
     label: "Resource",
@@ -445,12 +525,14 @@ export function createResourceTool(): ToolDefinition<typeof ResourceParams, Reso
 - \`skill://name\` — installed skill's SKILL.md (project .pi/skills, .agents/skills, then home).
 - \`rule://name\` — project rule files (agents → AGENTS.md, rules → RULES.md, cursor → .cursorrules, cline → .clinerules, plus .pi/rules/ and docs/).
 - \`agent://<id>[/key[/index[/field]]]\` — published teammate output. Exact correlation and publication IDs resolve globally across workspace buckets; task-name discovery remains scoped to the caller's workspace/subtree and may return a disambiguation list. A correlation ID follows that task's latest publication, while a publication ID pins one immutable result; use task names only to discover candidates, then retain an exact ID. Bare \`agent://<id>\` returns the whole output; optional path segments load one nested field, e.g. \`agent://catalog-audit-correlation/findings/0/path\`. Do NOT append \`/json\`. Agent resources are not cached: reuse content already present in the current context instead of loading the same immutable URI again.
+- \`session://<sessionId>/entry/<entryId>\` — one visible active-chain entry from the host-authorized session history. Obtain exact URIs from \`session_history\`; arbitrary transcript paths, hidden rows, thinking blocks, abandoned branches, and tool-call arguments are rejected or omitted. Session reads are never cached.
 
 pr:// and issue:// require the gh CLI (https://cli.github.com). Results are cached in memory for 5 minutes — re-reads within the window return the cached copy, so refetch after state changes only when the window has expired.
 Read local files with the built-in read tool — resource is for protocol resources only.`,
-    promptSnippet: "Use resource for pr://, issue://, skill://, rule://, agent:// protocol resources; use read for local files.",
+    promptSnippet: "Use resource for pr://, issue://, skill://, rule://, agent://, session:// protocol resources; use read for local files.",
     promptGuidelines: [
-      "pr://, issue://, skill://, rule://, agent:// protocol resources are read via the resource tool — do not pass them to the built-in read tool (read is for local files).",
+      "pr://, issue://, skill://, rule://, agent://, session:// protocol resources are read via the resource tool — do not pass them to the built-in read tool (read is for local files).",
+      "For session:// entry resources, first obtain the exact URI from session_history; reads revalidate the host-authorized active chain and never expose paths, hidden rows, thinking, or tool arguments.",
       "For teammate results, use task names only to discover candidates; retain an exact correlation ID for that task's latest result or a publication ID for one immutable result. Exact IDs resolve globally; task-name lookup stays workspace-scoped.",
       "Load the smallest required agent://<exact-id>/key/index subtree, never append /json, and do not reload an unchanged immutable URI already present in the current context.",
     ],
@@ -460,7 +542,12 @@ Read local files with the built-in read tool — resource is for protocol resour
       const uri = params.uri.trim();
       if (!uri) throw new Error("resource uri is required and must not be empty.");
       const cwd = ctx.cwd;
-      const { content, title, cached } = await resolveResource(uri, cwd, signal);
+      const sessionHistory = options.sessionHistory
+        ?? options.sessionHistoryFactory?.(ctx)
+        ?? createSessionHistoryInventoryProvider(ctx, "all");
+      const { content, title, cached } = await resolveResource(uri, cwd, signal, {
+        sessionHistory,
+      });
       if (signal?.aborted) throw new Error("Tool execution aborted.");
       return {
         content: [{ type: "text", text: content }],
@@ -496,6 +583,9 @@ Read local files with the built-in read tool — resource is for protocol resour
   };
 }
 
-export function registerResourceTool(pi: ExtensionAPI): void {
-  pi.registerTool(createResourceTool() as never);
+export function registerResourceTool(
+  pi: ExtensionAPI,
+  options: ResourceToolOptions = {},
+): void {
+  pi.registerTool(createResourceTool(options) as never);
 }

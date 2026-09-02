@@ -5,6 +5,10 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import {
+  isNewContextCompactionEnabled,
+  NEW_CONTEXT_DISABLED_MESSAGE,
+} from "../compaction/compaction-settings.ts";
 import { getActiveGoal, getGoalById, switchCurrentGoal } from "./goal.ts";
 import { TodoSkillLoader } from "../skills/skill-loader.ts";
 import type { TodoSkillBinding } from "../skills/skill-composer.ts";
@@ -19,7 +23,12 @@ import {
   type TodoMirrorTaskSpec,
   type TodoTaskOrigin,
 } from "../session/types.ts";
-import type { TodoUpdateField } from "./todo-contract.ts";
+import {
+  appendTodoResourceUris,
+  normalizeTodoResourceUris,
+  type TodoAdvanceTransition,
+  type TodoUpdateField,
+} from "./todo-contract.ts";
 import {
   TODO_STATE_VERSION,
   assertTodoGeneration,
@@ -76,6 +85,7 @@ export interface TodoTask {
   blockedBy: string[];
   context?: string;
   skills: TodoSkillBinding[];
+  resourceUris: string[];
   skillActivation?: SkillActivationMetadata;
   summary?: string;
   origin?: TodoTaskOrigin;
@@ -95,6 +105,7 @@ export interface TodoBatchSpec {
   description?: string;
   context?: string;
   skills?: TodoSkillBinding[];
+  resourceUris?: string[];
   assignee?: string;
   blockedBy?: number[];
   goalId?: string;
@@ -109,6 +120,7 @@ export interface TodoUpdateSpec {
   context?: string;
   skills?: TodoSkillBinding[] | null;
   summary?: string;
+  resourceUris?: string[];
   updateFields?: TodoUpdateField[];
   assignee?: string;
   goalId?: string;
@@ -123,6 +135,8 @@ export interface TodoParams {
   context?: string;
   skills?: TodoSkillBinding[] | null;
   summary?: string;
+  resourceUris?: string[];
+  transition?: TodoAdvanceTransition;
   updateFields?: TodoUpdateField[];
   id?: string;
   ids?: string[];
@@ -156,6 +170,12 @@ export interface TodoResultDetails {
   action: string;
   tasks: TodoTaskSnapshot[];
   displayTaskIds?: string[];
+  /** Request-only transition receipt emitted after a successful completion-form advance. */
+  transition?: TodoAdvanceTransition;
+  /** Extension scheduler outcome; never persisted in Todo state. */
+  contextTransition?: "scheduled" | "coalesced" | "failed";
+  contextTransitionRequestId?: number;
+  contextTransitionError?: string;
   error?: string;
 }
 
@@ -377,6 +397,9 @@ export function reconcileMirrorTasks(
       status: blockedBy.length > 0 && spec.status === "pending" ? "blocked" : spec.status,
       blockedBy,
       ...(spec.context ? { context: spec.context } : {}),
+      // Workflow mirrors do not own completion resources; preserve any local
+      // references already attached to an existing mirror task.
+      resourceUris: existing?.resourceUris ? [...existing.resourceUris] : [],
       skills: spec.skills.map((skill) => ({ ...skill })),
       ...(spec.summary ? { summary: spec.summary } : {}),
       origin,
@@ -480,6 +503,13 @@ export async function executeTodo(
   ctx: ExtensionContext,
   actor: TodoActorRef = ROOT_TODO_ACTOR,
 ): Promise<FlowToolResult> {
+  // Gate the explicit transition before entering the serialized mutation
+  // queue. A disabled request must not complete the active task, activate the
+  // next task, append a Todo entry, or schedule any future context reset.
+  if (input.action === "advance" && input.transition === "new_context"
+    && !isNewContextCompactionEnabled(ctx.cwd)) {
+    return err(NEW_CONTEXT_DISABLED_MESSAGE, "advance");
+  }
   const generation = todoGeneration;
   const execute = () => executeTodoAction(input, ctx, actor, generation);
   if (!isTodoMutation(input.action)) return execute();
@@ -673,6 +703,14 @@ async function executeTodoAction(
     assertTodoGeneration(generation);
     rememberActor(actor);
     const params = normalizeTodoParams(input);
+    if (params.transition !== undefined && action !== "advance") {
+      return err("transition is only valid for active completion-form advance", action);
+    }
+    if (params.transition !== undefined
+      && params.transition !== "keep_context"
+      && params.transition !== "new_context") {
+      return err(`Invalid advance transition: ${String(params.transition)}`, "advance");
+    }
     switch (action) {
       case "create":
         return handleCreate(params, ctx, actor);
@@ -720,6 +758,7 @@ function handleCreate(params: TodoParams, ctx: ExtensionContext, actor: TodoActo
     if (params.assignee !== undefined) conflicting.push("assignee");
     if (params.context !== undefined) conflicting.push("context");
     if (params.skills !== undefined) conflicting.push("skills");
+    if (params.resourceUris !== undefined) conflicting.push("resourceUris");
     if (params.goalId !== undefined) conflicting.push("goalId");
     if (conflicting.length > 0) {
       return err(`create accepts either a single task (subject) or a batch (tasks), not both; ${conflicting.join(", ")} cannot accompany tasks.`, "create");
@@ -745,6 +784,7 @@ function handleCreate(params: TodoParams, ctx: ExtensionContext, actor: TodoActo
     status: blockedBy.length > 0 ? "blocked" : "pending",
     blockedBy,
     skills: params.skills ?? [],
+    resourceUris: normalizeTodoResourceUris(params.resourceUris),
     ...(params.context ? { context: params.context } : {}),
     ...(params.planHandoffKey ? { planHandoffKey: params.planHandoffKey } : {}),
     ...(params.goalId ? { goalId: params.goalId } : {}),
@@ -828,6 +868,7 @@ function handleBatchCreate(specs: TodoBatchSpec[], actor: TodoActorRef, planHand
       status: blockedBy.length > 0 ? "blocked" : "pending",
       blockedBy,
       skills,
+      resourceUris: normalizeTodoResourceUris(spec.resourceUris),
       ...(spec.context ? { context: spec.context } : {}),
       ...(planHandoffKey ? { planHandoffKey } : {}),
       ...(spec.goalId ? { goalId: spec.goalId } : {}),
@@ -889,6 +930,9 @@ function prepareTodoUpdate(
   if (updates("summary")) {
     if (params.summary === "") delete draft.summary;
     else draft.summary = params.summary;
+  }
+  if (updates("resourceUris")) {
+    draft.resourceUris = normalizeTodoResourceUris(params.resourceUris);
   }
   if (updates("goalId")) {
     if (params.goalId === "") delete draft.goalId;
@@ -1044,7 +1088,7 @@ async function handleUpdate(
   generation: number,
 ): Promise<FlowToolResult> {
   if (params.updates !== undefined) {
-    const conflicting = ["id", "subject", "description", "status", "blockedBy", "context", "skills", "summary", "updateFields", "assignee", "goalId"]
+    const conflicting = ["id", "subject", "description", "status", "blockedBy", "context", "skills", "summary", "resourceUris", "transition", "updateFields", "assignee", "goalId"]
       .filter((field) => params[field as keyof TodoParams] !== undefined);
     if (conflicting.length > 0) {
       return err(`update accepts either id with top-level fields or updates, not both; ${conflicting.join(", ")} cannot accompany updates`, "update");
@@ -1233,9 +1277,12 @@ async function handleAdvance(
   generation: number,
 ): Promise<FlowToolResult> {
   const active = findActiveTask(actor.id);
+  const suppliedResources = params.resourceUris === undefined
+    ? undefined
+    : normalizeTodoResourceUris(params.resourceUris);
   if (!active) {
-    if (params.id !== undefined || params.summary !== undefined) {
-      return err(`@${actor.label} has no in_progress task. Omit id and summary to activate the next runnable task.`, "advance");
+    if (params.id !== undefined || params.summary !== undefined || suppliedResources !== undefined || params.transition !== undefined) {
+      return err(`@${actor.label} has no in_progress task. Omit id, summary, resourceUris, and transition to activate the next runnable task.`, "advance");
     }
     const next = runnableTasksForActor(actor.id)[0];
     if (next?.origin) {
@@ -1261,19 +1308,30 @@ async function handleAdvance(
     return err(`summary is required to complete active task #${active.id} with advance.`, "advance");
   }
 
+  const completionResourceUris = suppliedResources === undefined
+    ? undefined
+    : appendTodoResourceUris(active.resourceUris, suppliedResources);
   const completion = await handleUpdate({
     action: "update",
     id: active.id,
     status: "completed",
     summary,
-    updateFields: ["status", "summary"],
+    ...(completionResourceUris !== undefined ? { resourceUris: completionResourceUris } : {}),
+    updateFields: completionResourceUris !== undefined
+      ? ["status", "summary", "resourceUris"]
+      : ["status", "summary"],
   }, ctx, actor, generation);
   if (completion.isError) return relabelTodoResult(completion, "advance");
 
   const completedNote = `Completed #${active.id}: ${active.subject}`;
   const nextCandidate = runnableTasksForActor(actor.id)[0];
   if (nextCandidate?.origin) {
-    return ok(`${completedNote}. Next task #${nextCandidate.id} is a canonical Workflow mirror and remains ${nextCandidate.status}; advance it through the Workflow Run lifecycle.`, "advance");
+    return ok(
+      `${completedNote}. Next task #${nextCandidate.id} is a canonical Workflow mirror and remains ${nextCandidate.status}; advance it through the Workflow Run lifecycle.`,
+      "advance",
+      undefined,
+      params.transition,
+    );
   }
 
   let next: FlowToolResult;
@@ -1285,14 +1343,19 @@ async function handleAdvance(
   const nextText = todoResultText(next);
   if (next.isError) {
     if (nextText.startsWith("Error: Dependency deadlock:")) {
-      return ok(`${completedNote}. ${nextText.replace("Error: Dependency deadlock:", "Waiting:")}`, "advance");
+      return ok(
+        `${completedNote}. ${nextText.replace("Error: Dependency deadlock:", "Waiting:")}`,
+        "advance",
+        undefined,
+        params.transition,
+      );
     }
     if (nextText.includes("the task remains in_progress")) {
       return err(`${completedNote}. ${nextText.replace(/^Error: /, "")}`, "advance");
     }
     return err(`${completedNote}, but the next task was not activated: ${nextText}`, "advance");
   }
-  return ok(`${completedNote}\n\n${nextText}`, "advance");
+  return ok(`${completedNote}\n\n${nextText}`, "advance", undefined, params.transition);
 }
 
 function todoResultText(result: FlowToolResult): string {
@@ -1496,6 +1559,7 @@ function cloneTodoTask(task: TodoTask): TodoTask {
     ...task,
     blockedBy: [...task.blockedBy],
     skills: task.skills.map((skill) => ({ ...skill })),
+    resourceUris: task.resourceUris ? [...task.resourceUris] : [],
     createdBy: cloneActor(task.createdBy),
     assignee: cloneActor(task.assignee),
     ...(task.origin ? { origin: { ...task.origin } } : {}),
@@ -1780,6 +1844,7 @@ function taskChanged(before: TodoTask, after: TodoTask): boolean {
     before.context !== after.context ||
     before.goalId !== after.goalId ||
     JSON.stringify(before.skills) !== JSON.stringify(after.skills) ||
+    JSON.stringify(before.resourceUris) !== JSON.stringify(after.resourceUris) ||
     JSON.stringify(before.origin) !== JSON.stringify(after.origin) ||
     JSON.stringify(before.createdBy) !== JSON.stringify(after.createdBy) ||
     JSON.stringify(before.assignee) !== JSON.stringify(after.assignee) ||
@@ -1991,7 +2056,12 @@ function findActiveTask(
   );
 }
 
-function snapshotDetails(action: string, error?: string, displayTaskIds?: string[]): TodoResultDetails {
+function snapshotDetails(
+  action: string,
+  error?: string,
+  displayTaskIds?: string[],
+  transition?: TodoAdvanceTransition,
+): TodoResultDetails {
   const capturedAt = Date.now();
   const tasks = getVisibleTasks().map((task): TodoTaskSnapshot => {
     const durationMs = (task.activeDurationMs ?? 0)
@@ -2009,11 +2079,25 @@ function snapshotDetails(action: string, error?: string, displayTaskIds?: string
       ...(task.status === "completed" ? { completedAt: task.completedAt ?? task.updatedAt } : {}),
     };
   });
-  return { action, tasks, ...(displayTaskIds !== undefined ? { displayTaskIds } : {}), ...(error ? { error } : {}) };
+  return {
+    action,
+    tasks,
+    ...(displayTaskIds !== undefined ? { displayTaskIds } : {}),
+    ...(transition !== undefined ? { transition } : {}),
+    ...(error ? { error } : {}),
+  };
 }
 
-function ok(text: string, action = "unknown", displayTaskIds?: string[]): FlowToolResult {
-  return { content: [{ type: "text", text }], details: snapshotDetails(action, undefined, displayTaskIds) };
+function ok(
+  text: string,
+  action = "unknown",
+  displayTaskIds?: string[],
+  transition?: TodoAdvanceTransition,
+): FlowToolResult {
+  return {
+    content: [{ type: "text", text }],
+    details: snapshotDetails(action, undefined, displayTaskIds, transition),
+  };
 }
 
 function err(text: string, action = "unknown"): FlowToolResult {
