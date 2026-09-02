@@ -184,7 +184,7 @@ export const DSH_CONFIG_FIELDS: readonly BackendConfigField[] = [
   },
   { key: "host", kind: "text", labelKey: "dsh.host" },
   { key: "user", kind: "text", labelKey: "dsh.user" },
-  { key: "port", kind: "integer", labelKey: "dsh.port" },
+  { key: "port", kind: "integer", labelKey: "dsh.port", default: 22 },
   { key: "hostKeySha256", kind: "text", labelKey: "dsh.hostKeySha256" },
   { key: "identityFile", kind: "path", labelKey: "dsh.identityFile" },
   {

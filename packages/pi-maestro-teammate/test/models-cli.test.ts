@@ -838,7 +838,7 @@ test("P7 acceptance block", async (t) => {
         "",                  // apiKeyEnv → default NAME
         "",                  // envPassthrough
         "",                  // mode → default local
-        "", "", "", "",      // host, user, port, hostKeySha256
+        "", "", "", "", "",      // sshHostRef, host, user, port, hostKeySha256
         "", "", "",          // identityFile, todoBridge, maxTokens
         "",                  // requestTimeoutMs → default
         "",                  // registration target deployment (new)

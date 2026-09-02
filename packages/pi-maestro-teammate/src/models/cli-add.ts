@@ -373,7 +373,13 @@ async function promptAddField(
   field: BackendConfigField,
   config: Record<string, ConfigValue>,
 ): Promise<void> {
-  const current = config[field.key] !== undefined ? config[field.key] : field.default;
+  // A manager-owned SSH host supplies the port; do not materialize the inline default.
+  const managedSshHost = field.key === "port"
+    && config.mode === "ssh"
+    && typeof config.sshHostRef === "string"
+    && config.sshHostRef.trim().length > 0;
+  const defaultValue = managedSshHost ? undefined : field.default;
+  const current = config[field.key] !== undefined ? config[field.key] : defaultValue;
   // An ssh launch cannot even compose without a host or user, so those two
   // are required the moment the transport variant chose "ssh".
   const requiredNow = field.required === true
@@ -388,7 +394,7 @@ async function promptAddField(
     if (line.trim().length === 0) {
       if (current !== undefined) {
         // Empty input keeps the seeded transport value or the declared default.
-        if (config[field.key] === undefined && field.default !== undefined) config[field.key] = field.default;
+        if (config[field.key] === undefined && defaultValue !== undefined) config[field.key] = defaultValue;
         return;
       }
       if (requiredNow) {

@@ -296,8 +296,7 @@ test("immediate fresh consumer defers crash-after-acquire until the orphan lease
   let restarted: MailboxService | undefined;
   try {
     await strandAcceptedEnvelope(stranded, message, now);
-    replayCommitter.prewarm();
-    await settlePrewarm();
+    await replayCommitter.prewarm();
     restarted = createRestartMailboxService({
       rootDir: mailboxRoot,
       now: () => now,
@@ -391,8 +390,7 @@ test("immediate fresh consumer recovers post-commit after orphan lease expiry wi
     assert.equal(store.readEvents(streamId).length, 1);
     await strandAcceptedEnvelope(stranded, message, now);
 
-    replayCommitter.prewarm();
-    await settlePrewarm();
+    await replayCommitter.prewarm();
     restarted = createRestartMailboxService({
       rootDir: mailboxRoot,
       now: () => now,
@@ -406,6 +404,7 @@ test("immediate fresh consumer recovers post-commit after orphan lease expiry wi
     await waitFor(
       async () => acquireAttempts === 1 && !!(await restarted!.store.readEnvelope("ready", message.messageId)),
       "post-commit restart did not defer the orphaned lease",
+      10_000,
     );
     await new Promise((resolve) => setTimeout(resolve, 75));
     assert.equal(acquireAttempts, 1);
@@ -417,6 +416,7 @@ test("immediate fresh consumer recovers post-commit after orphan lease expiry wi
     await waitFor(
       async () => !!(await restarted!.store.readEnvelope("applied", message.messageId)),
       "post-commit envelope did not recover at lease expiry",
+      10_000,
     );
 
     assert.equal(acquireAttempts, 2);

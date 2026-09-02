@@ -677,7 +677,7 @@ test("bootstrap surfaces an early daemon exit without waiting for the full calle
 });
 
 test("timed-out bootstrap reclaims late children before allowing a successor generation", {
-  timeout: 30_000,
+  timeout: process.platform === "win32" ? 60_000 : 30_000,
 }, async () => {
   const stateDirectory = makeStateDirectory("runtime-broker-late-child-timeout-");
   const delayedBin = path.join(stateDirectory, "delayed-broker.mjs");
@@ -693,10 +693,14 @@ test("timed-out bootstrap reclaims late children before allowing a successor gen
     "",
   ].join("\n"), "utf8");
 
+  // Windows taskkill and child-tree confirmation can consume the two bounded
+  // cleanup windows before the caller deadline; keep the production deadline
+  // unchanged and give this acceptance fixture room to observe both attempts.
+  const callerTimeoutMs = process.platform === "win32" ? 45_000 : 22_000;
   let successor: RuntimeBrokerClient | undefined;
   try {
     await assert.rejects(
-      RuntimeBrokerClient.connectOrStart({ stateDirectory, timeoutMs: 22_000, daemonBinPath: delayedBin }),
+      RuntimeBrokerClient.connectOrStart({ stateDirectory, timeoutMs: callerTimeoutMs, daemonBinPath: delayedBin }),
       /failed after 2 launch attempts/,
     );
     const startedPids = fs.readFileSync(attemptsPath, "utf8")

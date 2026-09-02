@@ -12,7 +12,8 @@ export declare function runtimeBrokerMailboxStreamId(messageId: string): string;
 export declare class RuntimeBrokerMailboxCommitter {
     #private;
     constructor(options: RuntimeBrokerMailboxCommitterOptions);
-    prewarm(): void;
+    /** Start the client connection and expose completion for callers that must gate dispatch on readiness. */
+    prewarm(): Promise<void>;
     commit(envelope: MailboxEnvelope): Promise<RuntimeBrokerCommitResult>;
     commitIfReady(envelope: MailboxEnvelope): Promise<RuntimeBrokerCommitResult | undefined>;
     close(): Promise<void>;

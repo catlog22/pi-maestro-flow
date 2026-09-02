@@ -295,7 +295,9 @@ test("persistently failing dispatch dead-letters after MAX_DISPATCH_RETRIES", as
   await store.promoteToReady(envelope.messageId);
 
   consumer.start();
-  const deadline = Date.now() + 5_000;
+  // Windows durable state transitions can take several seconds per retry; keep
+  // the assertion bounded while allowing all five attempts to be observed.
+  const deadline = Date.now() + (process.platform === "win32" ? 30_000 : 5_000);
   while (Date.now() < deadline) {
     if ((await store.listMessages("dead")).includes(envelope.messageId)) break;
     await new Promise((resolve) => setTimeout(resolve, 20));

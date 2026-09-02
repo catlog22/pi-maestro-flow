@@ -36,9 +36,10 @@ export class RuntimeBrokerMailboxCommitter {
     this.#options = options;
   }
 
-  prewarm(): void {
-    if (this.#closed || this.#clientGeneration) return;
-    void this.#getClient().catch(() => undefined);
+  /** Start the client connection and expose completion for callers that must gate dispatch on readiness. */
+  prewarm(): Promise<void> {
+    if (this.#closed || this.#clientGeneration) return Promise.resolve();
+    return this.#getClient().then(() => undefined, () => undefined);
   }
 
   commit(envelope: MailboxEnvelope): Promise<RuntimeBrokerCommitResult> {
