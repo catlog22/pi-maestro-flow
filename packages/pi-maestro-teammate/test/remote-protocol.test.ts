@@ -57,7 +57,7 @@ test("windowBridge advertisement is optional, bounded, and negotiated separately
     ...base,
     windowBridge: {
       pluginId: REMOTE_WINDOW_BRIDGE_PLUGIN_ID,
-      pluginVersion: "2.2.0",
+      pluginVersion: "2.3.0",
       workspacePeerVersions: [1, 2],
       relayVersions: [1],
       runtimeVersions: [1],

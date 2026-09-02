@@ -57,6 +57,7 @@ const LEAF_SUBPATHS = [
   "types.ts",
   "events.ts",
   "retry.ts",
+  "session-history.ts",
   "progress-tree.ts",
   "agents.ts",
   "model-routing.ts",

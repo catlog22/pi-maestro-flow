@@ -272,7 +272,10 @@ import {
   sanitizeSingleLineInput,
   type DecodedInputToken,
 } from "../tui/input-text.ts";
-import { showModelMappingOverlay } from "../tui/model-mapping-overlay.ts";
+import {
+  showModelMappingOverlay,
+  type ControlCenterTab,
+} from "../tui/model-mapping-overlay.ts";
 import { showModelAskOverlay } from "../tui/model-ask-overlay.ts";
 import { sharedModelCircuitBreaker } from "../public/v1/retry.ts";
 import { normalizePiRetryErrorMessage } from "../runs/retry.ts";
@@ -436,9 +439,11 @@ import {
   toCliToolModelEntries,
 } from "../cli-tools/cli-tools-config.ts";
 import {
+  activateModelRoutingProfile,
   applyModelRouting,
   appendTaskTypeRoutingContext,
   formatModelRoutingConfig,
+  listModelRoutingProfiles,
   loadModelRoutingState,
   parseTeammateTaskType,
   refreshModelRegistry,
@@ -9973,7 +9978,10 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     }
   };
 
-  async function showTeammateControlCenter(ctx: ExtensionContext): Promise<void> {
+  async function showTeammateControlCenter(
+    ctx: ExtensionContext,
+    initialTab?: ControlCenterTab,
+  ): Promise<void> {
     const activeAgents = Array.from(state.activeRuns.values())
       .filter((agent) => agent.status !== "completed")
       .map((agent) => ({
@@ -9987,6 +9995,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
         cwd: agent.cwd,
       }));
     await showModelMappingOverlay(ctx, refreshModelCatalog(ctx).models, {
+      ...(initialTab ? { initialTab } : {}),
       agents: discoverAgents(ctx.cwd),
       activeAgents,
       modelHealth: sharedModelCircuitBreaker.snapshot(),
@@ -10047,6 +10056,58 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
       await showTeammateControlCenter(ctx);
       tool.description = buildTeammateToolDescription(ctx.cwd);
       pi.registerTool(tool);
+    },
+  });
+
+  pi.registerCommand("teammate-model", {
+    description: "Switch the saved teammate model routing template for this project; without arguments, open Profiles",
+    getArgumentCompletions(prefix: string) {
+      const cwd = widgetCtx?.cwd;
+      if (!cwd) return null;
+      try {
+        const query = prefix.trimStart().toLowerCase();
+        const matches = listModelRoutingProfiles(cwd)
+          .filter((profile) =>
+            profile.id.toLowerCase().includes(query)
+            || profile.name.toLowerCase().includes(query)
+          )
+          .map((profile) => {
+            const states = [
+              profile.active ? "active for this project" : undefined,
+              profile.default ? "global default" : undefined,
+            ].filter((value): value is string => value !== undefined);
+            return {
+              value: profile.id,
+              label: `${profile.name} · ${profile.id}`,
+              description: states.join(" · ") || "saved routing template",
+            };
+          });
+        return matches.length > 0 ? matches : null;
+      } catch {
+        return null;
+      }
+    },
+    async handler(args, ctx) {
+      const reference = args.trim();
+      if (!reference) {
+        preemptCockpitResize();
+        await showTeammateControlCenter(ctx, "profiles");
+        tool.description = buildTeammateToolDescription(ctx.cwd);
+        pi.registerTool(tool);
+        return;
+      }
+      try {
+        const selected = activateModelRoutingProfile(ctx.cwd, reference);
+        const profile = selected.global.profiles[selected.config.profileId]!;
+        ctx.ui.notify(
+          `Teammate model template "${profile.name}" (${selected.config.profileId}) activated for this project.`,
+          "info",
+        );
+        tool.description = buildTeammateToolDescription(ctx.cwd);
+        pi.registerTool(tool);
+      } catch (error) {
+        ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
+      }
     },
   });
 

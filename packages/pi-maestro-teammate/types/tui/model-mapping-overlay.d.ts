@@ -41,6 +41,8 @@ export interface TeammateControlCenterOptions {
     agents?: readonly AgentConfig[];
     activeAgents?: readonly ControlCenterActiveAgent[];
     modelHealth?: readonly ModelCircuitSnapshot[];
+    /** Tab shown when the Control Center first opens. */
+    initialTab?: ControlCenterTab;
     onOpenAgent?: (correlationId: string) => Promise<void>;
     /** Remote configuration state for the Connections tab. */
     remoteState?: RemoteConfigState;

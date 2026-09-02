@@ -130,6 +130,17 @@ export declare function saveProjectThinkingLevel(cwd: string, taskType: Teammate
 export declare function saveProjectModelMapping(cwd: string, taskType: TeammateTaskType, model: string | null, globalFilePath?: string): ModelRoutingConfig;
 export declare function saveProjectFallbackMapping(cwd: string, taskType: TeammateTaskType, models: string[] | null, globalFilePath?: string): ModelRoutingConfig;
 export declare function saveProjectRoleMapping(cwd: string, role: string, rules: ModelRoutingRoleRules | null, globalFilePath?: string): ModelRoutingConfig;
+/** A saved teammate model routing template (called a Profile in the Control Center). */
+export interface ModelRoutingProfileSummary {
+    id: string;
+    name: string;
+    active: boolean;
+    default: boolean;
+}
+/** List saved routing templates with the current project's active selection. */
+export declare function listModelRoutingProfiles(cwd: string, globalFilePath?: string): ModelRoutingProfileSummary[];
+/** Resolve a stable Profile id or display name without changing the selection. */
+export declare function resolveModelRoutingProfile(cwd: string, reference: string, globalFilePath?: string): ModelRoutingProfileSummary;
 export declare function saveGlobalProfileModelMapping(cwd: string, profileId: string, taskType: TeammateTaskType, model: string | null, globalFilePath?: string): ModelRoutingState;
 export declare function saveGlobalProfileThinkingLevel(cwd: string, profileId: string, taskType: TeammateTaskType, thinking: TeammateThinkingLevel | null, globalFilePath?: string): ModelRoutingState;
 export declare function saveGlobalProfileFallbackMapping(cwd: string, profileId: string, taskType: TeammateTaskType, models: string[] | null, globalFilePath?: string): ModelRoutingState;
@@ -151,6 +162,12 @@ export declare function createAndActivateGlobalModelRoutingProfile(cwd: string, 
 export declare function renameGlobalModelRoutingProfile(cwd: string, profileId: string, name: string, globalFilePath?: string): ModelRoutingState;
 export declare function setDefaultGlobalModelRoutingProfile(cwd: string, profileId: string, globalFilePath?: string): ModelRoutingState;
 export declare function setProjectActiveModelRoutingProfile(cwd: string, profileId: string, globalFilePath?: string): ModelRoutingState;
+/**
+ * Activate a saved routing template for this project by stable id or display
+ * name. Profile resolution and the project write share the existing global +
+ * project lock, so a concurrent rename/delete cannot race the selection.
+ */
+export declare function activateModelRoutingProfile(cwd: string, reference: string, globalFilePath?: string): ModelRoutingState;
 export declare function setProjectModelRoutingOverridesEnabled(cwd: string, enabled: boolean, globalFilePath?: string): ModelRoutingState;
 export declare function clearProjectModelRoutingOverrides(cwd: string, globalFilePath?: string): ModelRoutingState;
 export declare function promoteProjectModelRoutingOverrides(cwd: string, name: string, globalFilePath?: string): ModelRoutingState;

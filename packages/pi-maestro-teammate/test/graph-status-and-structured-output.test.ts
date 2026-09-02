@@ -365,6 +365,9 @@ test("root and proxy single/graph paths preserve provider cause before every sch
         const runtimeOptions = {
           spawnChildProcess: createScriptedSpawn(diagnostic, providerCause),
           resultReadyGraceMs: 1,
+          onRunOptionsCreated(options: Parameters<NonNullable<TeammateRuntimeOptions["onRunOptionsCreated"]>>[0]) {
+            options.modelCapabilities = [];
+          },
         };
         const params = mode === "single"
           ? { tasks: [{ agent: "general", prompt: "diagnose", outputSchema: schema }], background: false }
@@ -423,7 +426,7 @@ test("root and proxy single/graph paths preserve provider cause before every sch
         assert.equal(result.isError, true, `${publicPath}/${mode}/${diagnostic} must fail closed`);
         assert.ok(
           text.indexOf(providerCause) >= 0 && text.indexOf(providerCause) < text.indexOf("Structured output:"),
-          `${publicPath}/${mode}/${diagnostic} must show the provider cause first`,
+          `${publicPath}/${mode}/${diagnostic} must show the provider cause first; text=${JSON.stringify(text)}`,
         );
         assert.match(
           text,
@@ -3611,6 +3614,7 @@ test("Alt+R opens the native agent view without injecting a slash command", asyn
   // cockpit session bar (TEAMMATE_OPEN_AGENT_EVENT), not a slash command.
   assert.ok(!commands.has("teammate-session"));
   assert.ok(commands.has("teammate-models"));
+  assert.ok(commands.has("teammate-model"));
   assert.ok(shortcut);
   assert.ok(modelShortcut);
   await shortcut({

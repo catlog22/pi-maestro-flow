@@ -100,7 +100,7 @@ class FakeConnection implements RemoteConnection {
       status: "ready",
       windowBridge: {
         pluginId: "pi-maestro-teammate",
-        pluginVersion: "2.2.0",
+        pluginVersion: "2.3.0",
         workspacePeerVersions: [1],
         relayVersions: [1],
         runtimeVersions: [1],

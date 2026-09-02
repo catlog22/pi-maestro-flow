@@ -2346,6 +2346,13 @@ export function readRegularTextFile(filePath: string): string {
   }
 }
 
+function inlineLegacySearchTemplateReferences(systemPrompt: string): string {
+  return systemPrompt.replace(
+    /@?~\/\.maestro\/templates\/search-tools\.md/g,
+    "the built-in search discipline below",
+  );
+}
+
 export function writeSystemPromptFile(
   agentConfig: AgentConfig,
   correlationId: string,
@@ -2355,6 +2362,7 @@ export function writeSystemPromptFile(
   const tmpDir = teammateTempRoot();
   ensurePrivateDirectory(tmpDir);
   const promptFile = path.join(tmpDir, `prompt-${correlationSessionDirectoryName(correlationId)}.md`);
+  const systemPrompt = inlineLegacySearchTemplateReferences(agentConfig.systemPrompt);
   const structuredOutputInstruction = outputSchema
     ? "\n\n## Required structured output\nYou must finish by calling the structured_output tool exactly once with a value that satisfies its JSON Schema. A prose-only final answer is invalid. Do not emit any answer after that tool call."
     : "";
@@ -2382,7 +2390,12 @@ export function writeSystemPromptFile(
     "Do not send teammate-send for routine intermediate findings. A steer message interrupts the parent's active turn; streaming each discovery as a separate steer fragments the parent's final answer and is not a coordination use.\n" +
     "Accumulate intermediate findings into your single final result and return them there. Use teammate-send only for: a hard blocker the parent must resolve before you can continue, a safety or lifecycle constraint, or the one consolidated result when the dispatch prompt names an explicit reply target. Batch all findings into that single message instead of sending them one at a time.\n" +
     "Never send routine acknowledgements, status pings, or incremental progress reports. Do not resend a queued or accepted message.";
-  writePrivateTextFile(promptFile, `${agentConfig.systemPrompt}${structuredOutputInstruction}${todoInstruction}${resultPublicationDiscipline}${coordinationReportingDiscipline}`);
+  const toolPathAndSearchDiscipline =
+    "\n\n## Tool path and search discipline\n" +
+    "This section is self-contained and supersedes any role instruction to load a user-home search template. Do not load external user-home search templates or guess a user home to locate one.\n" +
+    "Search only within the task working directory, paths explicitly named in the task, or another path whose existence you verified directly. Never search a filesystem root or drive root; forbidden examples include `find /`, `rg <pattern> /`, `Get-ChildItem C:\\\\ -Recurse`, and recursive scans of `C:/`.\n" +
+    "If an expected file is absent, report the exact missing path and continue with bounded known roots when possible; do not broaden to a root-wide search. Use the narrowest available search or read tool, and give shell searches an explicit timeout.";
+  writePrivateTextFile(promptFile, `${systemPrompt}${structuredOutputInstruction}${todoInstruction}${resultPublicationDiscipline}${coordinationReportingDiscipline}${toolPathAndSearchDiscipline}`);
   return promptFile;
 }
 

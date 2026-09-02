@@ -9,6 +9,7 @@ import {
   ModelCircuitBreaker,
 } from "../src/models/model-circuit-breaker.ts";
 import {
+  activateModelRoutingProfile,
   applyModelRouting,
   appendTaskTypeRoutingContext,
   clearProjectModelRoutingOverrides,
@@ -20,11 +21,13 @@ import {
   getSessionModelRoutingPath,
   getProjectModelRoutingPath,
   inferTaskType,
+  listModelRoutingProfiles,
   loadModelRoutingConfig,
   loadModelRoutingState,
   promoteProjectModelRoutingOverrides,
   refreshModelRegistry,
   renameGlobalModelRoutingProfile,
+  resolveModelRoutingProfile,
   resolveTaskTypeMeta,
   saveGlobalProfileCustomType,
   saveGlobalProfileFallbackMapping,
@@ -647,6 +650,49 @@ test("global profiles are shared while each project persists its active selectio
     assert.equal(routed.tasks[0].model, "provider/fast");
     assert.deepEqual(routed.tasks[0].fallbackModels, ["provider/backup"]);
     assert.equal(routed.tasks[0].thinking, "low");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("saved routing templates activate by stable id or display name", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-template-switch-"));
+  const globalPath = path.join(root, "home", "teammate-models.json");
+  const cwd = path.join(root, "project");
+  try {
+    saveProjectModelMapping(cwd, "analysis", "provider/project-override", globalPath);
+    const fastId = createGlobalModelRoutingProfile(cwd, "Fast Lane", undefined, globalPath).changedProfileId!;
+    const qualityId = createGlobalModelRoutingProfile(cwd, "Quality", undefined, globalPath).changedProfileId!;
+    const duplicateOne = createGlobalModelRoutingProfile(cwd, "Shared Template", undefined, globalPath).changedProfileId!;
+    const duplicateTwo = createGlobalModelRoutingProfile(cwd, "Shared Template", undefined, globalPath).changedProfileId!;
+    saveGlobalProfileModelMapping(cwd, fastId, "explore", "provider/fast", globalPath);
+    saveGlobalProfileThinkingLevel(cwd, fastId, "explore", "low", globalPath);
+
+    const selectedByName = activateModelRoutingProfile(cwd, "  FAST LANE  ", globalPath);
+    assert.equal(selectedByName.config.profileId, fastId);
+    assert.equal(selectedByName.config.mappings.explore, "provider/fast");
+    assert.equal(selectedByName.config.thinkingLevels.explore, "low");
+    assert.equal(selectedByName.project.applyOverrides, false);
+    assert.equal(selectedByName.project.overrides.mappings.analysis, "provider/project-override");
+
+    const profiles = listModelRoutingProfiles(cwd, globalPath);
+    assert.equal(profiles[0]?.id, fastId);
+    assert.equal(profiles[0]?.active, true);
+    assert.equal(profiles.find((profile) => profile.id === "default")?.default, true);
+    assert.equal(resolveModelRoutingProfile(cwd, "quality", globalPath).id, qualityId);
+    assert.equal(resolveModelRoutingProfile(cwd, "Quality", globalPath).id, qualityId);
+
+    const selectedById = activateModelRoutingProfile(cwd, qualityId, globalPath);
+    assert.equal(selectedById.config.profileId, qualityId);
+    assert.throws(
+      () => resolveModelRoutingProfile(cwd, "Shared Template", globalPath),
+      new RegExp(`Ambiguous.*${duplicateOne}.*${duplicateTwo}`),
+    );
+    assert.throws(
+      () => activateModelRoutingProfile(cwd, "does-not-exist", globalPath),
+      /Unknown teammate model profile or template/,
+    );
+    assert.equal(loadModelRoutingState(cwd, globalPath).config.profileId, qualityId);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -121,6 +121,23 @@ test("completion and stalled custom messages render bounded full-width cards", (
   ).render(80);
   assert.match(expanded.join("\n"), /complete output/);
 
+  const multiResult = renderTeammateCompletionMessage(
+    "raw multi completion body",
+    {
+      mode: "parallel",
+      results: [
+        okResult(),
+        { ...okResult(), agent: "reviewer", name: "review", correlationId: "review-correlation" },
+      ],
+    },
+    false,
+    theme as never,
+  ).render(80);
+  assert.match(multiResult[0], /^╭ ✓ teammate-complete · 2 results · completed.*╮$/);
+  assert.ok(multiResult.some((line) => line.includes("@inspection")));
+  assert.ok(multiResult.some((line) => line.includes("@review")));
+  assert.doesNotMatch(multiResult.join("\n"), /^├─+┤$/m, "completion results share one uninterrupted outer box");
+
   const failedComponent = renderTeammateCompletionMessage(
     "failure body",
     { mode: "single", results: [failedResult()] },
@@ -318,7 +335,7 @@ test("teammate-list call and result own mutually exclusive unbacked phases", () 
     details: { agents: [] },
   }, { isPartial: true }, theme as never).render(80);
   const result = renderTeammateListResult({
-    content: [{ type: "text", text: "@worker running" }],
+    content: [{ type: "text", text: "@worker running\n@review sleeping" }],
     details: { agents: [{
       agent: "general",
       name: "worker",
@@ -329,17 +346,24 @@ test("teammate-list call and result own mutually exclusive unbacked phases", () 
       inboxSize: 0,
       phase: "prompting",
       resolvedModel: "test-model",
+    }, {
+      agent: "reviewer",
+      name: "review",
+      correlationId: "review-correlation",
+      status: "sleeping",
     }] },
   }, { isPartial: false }, theme as never, { view: "active" }).render(80);
 
   assert.match(call[0], /teammate-list active/);
   assert.deepEqual(settledCall, []);
   assert.deepEqual(partialResult, []);
-  assert.match(result[0], /^╭ ✓ teammate-list · active · 1 item.*─╮$/);
+  assert.match(result[0], /^╭ ✓ teammate-list · active · 2 items.*─╮$/);
   assert.match(result[1], /^│ ● @worker · running\s+│$/);
   assert.match(result[2], /^│ role general · id worker-c\s+│$/);
   assert.match(result[3], /^│ active 5s · phase prompting\s+│$/);
   assert.match(result[4], /^│ model test-model\s+│$/);
+  assert.ok(result.some((line) => /^│ ○ @review · sleeping\s+│$/.test(line)));
+  assert.doesNotMatch(result.join("\n"), /^├─+┤$/m, "list items share one uninterrupted outer box");
   assert.match(result.at(-1) ?? "", /^╰─+╯$/);
   assert.ok(result.every((line) => visibleWidth(line) === 79), "card must leave the terminal's final column empty");
 
@@ -392,7 +416,7 @@ test("communication and Monitor results use bounded structured cards", () => {
   assert.match(observed[0], /^╭ ✓ observe · status · 2 targets · snapshot.*╮$/);
   assert.ok(observed.some((line) => /^│ ● teammate:a · running\s+│$/.test(line)));
   assert.ok(observed.some((line) => /^│ ✓ bash_bg:b · completed\s+│$/.test(line)));
-  assert.ok(observed.some((line) => /^├─+┤$/.test(line)));
+  assert.doesNotMatch(observed.join("\n"), /^├─+┤$/m, "observations share one uninterrupted outer box");
   assert.ok(observed.every((line) => visibleWidth(line) === 79));
 
   const monitored = renderMonitorResult({

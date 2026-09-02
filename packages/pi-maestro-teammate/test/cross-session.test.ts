@@ -276,6 +276,7 @@ test("child proxy blocks routine root coordination unless the dispatch explicitl
     inbox: [],
     outputLog: [],
     abortController: new AbortController(),
+    sleepMs: 0,
     depth: 0,
   } as ActiveAgent;
   state.activeRuns.set(correlationId, child);

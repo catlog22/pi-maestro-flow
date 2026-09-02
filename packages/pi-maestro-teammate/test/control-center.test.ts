@@ -530,6 +530,33 @@ test("profiles tab exposes global state and returns a reversible management acti
   assert.deepEqual(closed, [{ kind: "manage-profile", profileId: "fast", profileQuery: "", tab: "profiles" }]);
 });
 
+test("model overlay can open directly on the Profiles template tab", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "control-center-initial-profile-tab-"));
+  const cwd = path.join(root, "project");
+  const globalFilePath = path.join(root, "home", "teammate-models.json");
+  let rendered = "";
+  const ctx = {
+    cwd,
+    ui: {
+      async custom(factory: Function) {
+        const component = factory({ requestRender() {} }, theme, {}, () => {});
+        rendered = component.render(100).join("\n");
+        component.dispose?.();
+        return null;
+      },
+      notify() {},
+    },
+  } as never;
+  try {
+    await showModelMappingOverlay(ctx, [], { initialTab: "profiles", globalFilePath });
+    assert.match(rendered, /\[(?:配置方案|Profiles) 1\]/);
+    assert.match(rendered, /Default/);
+    assert.match(rendered, /Enter (?:管理|manage)/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("routing edits the active global Profile while surfacing runtime project overrides", () => {
   const { center } = makeCenter({ state: profileState(true) });
   const routing = center.render(100).join("\n");

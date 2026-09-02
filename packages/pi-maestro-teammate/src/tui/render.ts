@@ -488,8 +488,7 @@ function renderTeammateToolCard(
       ? [...rawGroups.slice(0, Math.max(0, groupBudget - 1)), [`… ${rawGroups.length - groupBudget + 1} more items · expand for details`]]
       : rawGroups;
     const body: string[] = [];
-    for (const [index, group] of groups.entries()) {
-      if (index > 0) body.push(theme.fg("dim", `├${"─".repeat(innerWidth)}┤`));
+    for (const group of groups) {
       const wrapped = group.flatMap((line) => wrapTextWithAnsi(line || " ", contentWidth));
       for (const line of wrapped) {
         body.push(`${theme.fg("dim", "│")} ${fit(line, contentWidth)} ${theme.fg("dim", "│")}`);

@@ -1509,6 +1509,77 @@ function requireProfile(store: GlobalModelRoutingStore, profileId: string): Mode
   return store.profiles[profileId];
 }
 
+/** A saved teammate model routing template (called a Profile in the Control Center). */
+export interface ModelRoutingProfileSummary {
+  id: string;
+  name: string;
+  active: boolean;
+  default: boolean;
+}
+
+function sortedProfileSummaries(
+  store: GlobalModelRoutingStore,
+  activeProfileId?: string,
+): ModelRoutingProfileSummary[] {
+  return Object.entries(store.profiles)
+    .map(([id, profile]) => ({
+      id,
+      name: profile.name,
+      active: id === activeProfileId,
+      default: id === store.defaultProfile,
+    }))
+    .sort((left, right) =>
+      Number(right.active) - Number(left.active)
+      || left.name.localeCompare(right.name)
+      || left.id.localeCompare(right.id)
+    );
+}
+
+function resolveProfileId(store: GlobalModelRoutingStore, reference: string): string {
+  const query = reference.trim();
+  if (!query) throw new Error("Teammate model profile or template name is required");
+  if (hasOwn(store.profiles, query)) return query;
+
+  const entries = Object.entries(store.profiles);
+  const lowerQuery = query.toLowerCase();
+  const caseInsensitiveIds = entries.filter(([id]) => id.toLowerCase() === lowerQuery);
+  if (caseInsensitiveIds.length === 1) return caseInsensitiveIds[0]![0];
+
+  const exactNames = entries.filter(([, profile]) => profile.name === query);
+  if (exactNames.length === 1) return exactNames[0]![0];
+  if (exactNames.length > 1) {
+    throw new Error(`Ambiguous teammate model template "${query}"; use one of these IDs: ${exactNames.map(([id]) => id).join(", ")}`);
+  }
+
+  const names = entries.filter(([, profile]) => profile.name.toLowerCase() === lowerQuery);
+  if (names.length === 1) return names[0]![0];
+  if (names.length > 1) {
+    throw new Error(`Ambiguous teammate model template "${query}"; use one of these IDs: ${names.map(([id]) => id).join(", ")}`);
+  }
+  throw new Error(`Unknown teammate model profile or template: ${query}`);
+}
+
+/** List saved routing templates with the current project's active selection. */
+export function listModelRoutingProfiles(
+  cwd: string,
+  globalFilePath = getGlobalModelRoutingPath(),
+): ModelRoutingProfileSummary[] {
+  const state = loadModelRoutingState(cwd, globalFilePath);
+  return sortedProfileSummaries(state.global, state.config.profileId);
+}
+
+/** Resolve a stable Profile id or display name without changing the selection. */
+export function resolveModelRoutingProfile(
+  cwd: string,
+  reference: string,
+  globalFilePath = getGlobalModelRoutingPath(),
+): ModelRoutingProfileSummary {
+  const state = loadModelRoutingState(cwd, globalFilePath);
+  const profileId = resolveProfileId(state.global, reference);
+  return sortedProfileSummaries(state.global, state.config.profileId)
+    .find((profile) => profile.id === profileId)!;
+}
+
 function saveGlobalProfile(
   cwd: string,
   profileId: string,
@@ -1778,6 +1849,27 @@ export function setProjectActiveModelRoutingProfile(
   return withGlobalAndProjectLocks(cwd, globalFilePath, (projectFilePath) => {
     const global = readGlobalStore(globalFilePath);
     requireProfile(global, profileId);
+    const project = readProjectStore(projectFilePath);
+    project.activeProfile = profileId;
+    project.applyOverrides = false;
+    writeJson(projectFilePath, project);
+    return resolvedState(cwd, globalFilePath);
+  });
+}
+
+/**
+ * Activate a saved routing template for this project by stable id or display
+ * name. Profile resolution and the project write share the existing global +
+ * project lock, so a concurrent rename/delete cannot race the selection.
+ */
+export function activateModelRoutingProfile(
+  cwd: string,
+  reference: string,
+  globalFilePath = getGlobalModelRoutingPath(),
+): ModelRoutingState {
+  return withGlobalAndProjectLocks(cwd, globalFilePath, (projectFilePath) => {
+    const global = readGlobalStore(globalFilePath);
+    const profileId = resolveProfileId(global, reference);
     const project = readProjectStore(projectFilePath);
     project.activeProfile = profileId;
     project.applyOverrides = false;

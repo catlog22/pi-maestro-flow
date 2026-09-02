@@ -116,6 +116,8 @@ export interface TeammateControlCenterOptions {
   agents?: readonly AgentConfig[];
   activeAgents?: readonly ControlCenterActiveAgent[];
   modelHealth?: readonly ModelCircuitSnapshot[];
+  /** Tab shown when the Control Center first opens. */
+  initialTab?: ControlCenterTab;
   onOpenAgent?: (correlationId: string) => Promise<void>;
   /** Remote configuration state for the Connections tab. */
   remoteState?: RemoteConfigState;
@@ -2727,7 +2729,7 @@ export async function showModelMappingOverlay(
       message: displayText(error instanceof Error ? error.message : String(error)),
     }), "error");
   }
-  let initialTab: ControlCenterTab = "routing";
+  let initialTab: ControlCenterTab = options.initialTab ?? "routing";
   let initialProfileId: string | undefined;
   let initialProfileQuery = "";
   let initialStatusText = "";

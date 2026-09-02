@@ -368,6 +368,7 @@ export class RemoteConfigPane implements Component, Focusable {
 
   private footerLine(width: number): string {
     const text = [
+      this.t(tKey("connections.addDeployment")),
       this.t(tKey("remote.newHost")),
       this.t(tKey("remote.newTarget")),
       this.t(tKey("remote.newWorkspace")),
@@ -376,7 +377,6 @@ export class RemoteConfigPane implements Component, Focusable {
       this.t(tKey("connections.scopeHint")),
       this.t(tKey("remote.filter")),
       this.t(tKey("remote.close")),
-      this.t(tKey("connections.addDeployment")),
     ].join(" · ");
     return truncateToWidth(text, width, "…");
   }

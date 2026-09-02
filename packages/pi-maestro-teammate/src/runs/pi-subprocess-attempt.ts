@@ -1299,6 +1299,13 @@ export async function runSingleAttempt(
         // output was captured instead of blocking on a missing agent_settled/close.
         const structuredOutput = readStructuredOutput(true);
         if (state.runtimeFailure) {
+          if (params.outputSchema && structuredOutput === undefined) {
+            appendStructuredOutputFailure();
+            appendBoundedTranscriptMessage(messages, {
+              role: "system",
+              content: STRUCTURED_OUTPUT_SETTLEMENT_DIAGNOSTICS.resultReadyGrace,
+            });
+          }
           completeTurn(structuredOutput, true, 1);
           return;
         }

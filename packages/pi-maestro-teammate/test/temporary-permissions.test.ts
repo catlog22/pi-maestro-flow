@@ -82,6 +82,25 @@ test("prompt schema and reserved result files are private on creation", () => {
   }
 });
 
+test("child prompt inlines bounded search guidance instead of loading user-home templates", () => {
+  const promptFile = writeSystemPromptFile({
+    ...promptAgent,
+    systemPrompt:
+      "Review the target.\n~/.maestro/templates/search-tools.md\n@~/.maestro/templates/search-tools.md",
+  }, `search-discipline-${randomUUID()}`);
+  try {
+    const promptText = fs.readFileSync(promptFile, "utf8");
+    assert.doesNotMatch(promptText, /@?~\/\.maestro\/templates\/search-tools\.md/);
+    assert.match(promptText, /## Tool path and search discipline/);
+    assert.match(promptText, /supersedes any role instruction to load a user-home search template/);
+    assert.match(promptText, /Never search a filesystem root or drive root/);
+    assert.match(promptText, /`find \/`/);
+    assert.match(promptText, /give shell searches an explicit timeout/);
+  } finally {
+    fs.rmSync(promptFile, { force: true });
+  }
+});
+
 test("structured output tightens a pre-existing result file before writing", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-structured-permissions-"));
   const outputFile = path.join(root, "result.json");
