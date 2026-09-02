@@ -333,7 +333,7 @@ test("stream lifecycle uses the Windows forced tree teardown", { skip: process.p
   // escalation is covered by the platform-specific case above.
   const driver = await makeDriver("teardown");
   const run = driver.run("probe", { sessionId: "windows-teardown-session" });
-  const runRejection = assert.rejects(run, /runtime exited|runtime closed|SIGTERM-IGNORED|input closed/);
+  const runRejection = assert.rejects(run, /runtime exited|runtime closed|runtime client is closed|SIGTERM-IGNORED|input closed/);
   try {
     await new Promise((resolve) => setTimeout(resolve, 300));
     await driver.close();
