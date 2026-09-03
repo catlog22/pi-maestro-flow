@@ -81,7 +81,7 @@ icon: "🧮"
 
 `compaction.newContext.enabled` 默认关闭，并按字段遵循 project-over-user 优先级。关闭时 `new_context` 与 `compact_history` 不注册到新进程的模型工具面；开启后在 Session 启动或下一 Agent turn 前注册并激活。它只控制显式 reset 及其当前会话恢复工具与 Todo `advance transition=new_context`，不会改变 automatic/native compact 的阈值、修剪或溢出恢复。
 
-只应在 Todo 或阶段已经完成、`Todo.context` 与必要 `resourceUris` 已持久化、下一阶段弱耦合且能从 recovery capsule 恢复时使用。普通或临界 token 压力继续由 automatic compact 处理；不要仅因 token 占用较高而调用 `new_context`。完整流程、调用示例、capsule 内容与故障语义见 [New Context 确定性上下文重置](/guides/new-context)。
+只应在 Todo 或阶段已经完成、`Todo.context` 与必要 `resourceUris` 已持久化、下一阶段弱耦合且能从 recovery capsule 恢复时使用。Todo completion checkpoint 决定 reset 时机，pressure 只决定紧迫度：late auto-prune 提供普通建议，critical 则应在开始下一 Todo 前优先 reset。任务执行中不要因 token 压力中断当前 Todo，automatic compact 继续承担容量安全兜底；没有 Todo completion 时不产生动态提醒。完整流程、调用示例、capsule 内容与故障语义见 [New Context 确定性上下文重置](/guides/new-context)。
 
 ### 设计权衡
 

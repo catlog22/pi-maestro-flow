@@ -1203,6 +1203,48 @@ test("compaction recovery: a missing continuation fails instead of publishing em
   assert.equal(handle!.killed(), true);
 });
 
+test("compaction recovery: cancelled explicit reset clears the parent wait without failing", async () => {
+  let handle: FakeChildHandle | undefined;
+  const spawnChildProcess = (() => {
+    handle = createFakeChild();
+    queueMicrotask(() => {
+      handle!.child.emit("message", {
+        type: "teammate_compaction_state",
+        recoveryId: "session:explicit-reset",
+        generation: 1,
+        phase: "pending",
+      });
+      handle!.stdout.write(line({ type: "agent_end", willRetry: false }));
+      handle!.stdout.write(line({ type: "agent_settled" }));
+      setTimeout(() => {
+        handle!.child.emit("message", {
+          type: "teammate_compaction_state",
+          recoveryId: "session:explicit-reset",
+          generation: 1,
+          phase: "cancelled",
+          reason: "a newer message is pending",
+        });
+        handle!.stdout.write(line({ type: "agent_start" }));
+        handle!.stdout.write(line({ type: "turn_start" }));
+        handle!.stdout.write(line(resultReadyTurnEnd("continued in the current context")));
+        handle!.stdout.write(line({ type: "agent_end", willRetry: false }));
+        handle!.stdout.write(line({ type: "agent_settled" }));
+      }, 10);
+    });
+    return handle!.child;
+  }) as unknown as SpawnSeam;
+
+  const result = await runSingleTeammate(
+    { agent: "general", task: "cancel explicit reset", context: "fresh" },
+    { baseCwd: process.cwd(), spawnChildProcess, outputLimitRecoveryTimeoutMs: 100 },
+  );
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.messages.at(-1)?.content, "continued in the current context");
+  assert.equal(result.messages.some((message) => /compaction recovery did not continue/.test(message.content)), false);
+  assert.equal(handle!.killed(), false, "a wakeable child remains available after cancellation");
+});
+
 // ---------------------------------------------------------------------------
 // OBS-6 / OBS-7 — terminal conditions must leave evidence
 // ---------------------------------------------------------------------------

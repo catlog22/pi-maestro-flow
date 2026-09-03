@@ -166,6 +166,59 @@ test("new-context scheduler coalesces same-actor inputs and consumes only its fe
   }
 });
 
+test("child new-context publishes recovery phases and cancellation without reporting failure", async () => {
+  const fixture = await enabledProject();
+  const previousChild = process.env.PI_TEAMMATE_CHILD;
+  const previousCorrelation = process.env.PI_TEAMMATE_CORRELATION_ID;
+  const originalSend = process.send;
+  const events: Array<Record<string, unknown>> = [];
+  process.env.PI_TEAMMATE_CHILD = "1";
+  process.env.PI_TEAMMATE_CORRELATION_ID = "new-context-relay-test";
+  Object.defineProperty(process, "send", {
+    configurable: true,
+    writable: true,
+    value: (message: Record<string, unknown>) => {
+      events.push(message);
+      return true;
+    },
+  });
+
+  try {
+    const arbiter = new CompactionArbiter();
+    const controller = createNewContextController(arbiter);
+    const harness = context(fixture.cwd);
+    controller.onSessionStart(harness.ctx as never);
+    const first = controller.schedule({ source: "tool", actorId: "child" }, harness.ctx as never);
+    assert.equal(await controller.onAgentSettled(harness.ctx as never), true);
+    const request = compactionRequestFromInstructions(harness.compactOptions?.customInstructions);
+    const observed = arbiter.observeStart(request);
+    assert.ok(observed.trigger);
+    controller.consume(observed.trigger!, harness.ctx as never);
+    harness.compactOptions?.onComplete?.();
+
+    const pending = controller.schedule({ source: "tool", actorId: "child" }, harness.ctx as never);
+    assert.equal(pending.requestId, first.requestId + 1);
+    const pendingMessageContext = { ...harness.ctx, hasPendingMessages: () => true };
+    assert.equal(await controller.onAgentSettled(pendingMessageContext as never), false);
+
+    assert.deepEqual(events.map((event) => event.phase), [
+      "pending", "completed", "continuation", "pending", "cancelled",
+    ]);
+    assert.ok(events.every((event) => event.type === "teammate_compaction_state"));
+    assert.ok(events.every((event) => event.correlationId === "new-context-relay-test"));
+    assert.equal(events[0]?.generation, first.requestId);
+    assert.equal(events[3]?.generation, pending.requestId);
+  } finally {
+    await fixture.dispose();
+    if (previousChild === undefined) delete process.env.PI_TEAMMATE_CHILD;
+    else process.env.PI_TEAMMATE_CHILD = previousChild;
+    if (previousCorrelation === undefined) delete process.env.PI_TEAMMATE_CORRELATION_ID;
+    else process.env.PI_TEAMMATE_CORRELATION_ID = previousCorrelation;
+    if (originalSend === undefined) delete (process as { send?: typeof process.send }).send;
+    else Object.defineProperty(process, "send", { configurable: true, writable: true, value: originalSend });
+  }
+});
+
 test("new-context cancels a pending reset when a newer message is queued", async () => {
   const fixture = await enabledProject();
   try {
@@ -401,6 +454,19 @@ test("new-context scheduler is actor/session fenced and Plan handoff ownership w
   }
 });
 
+test("new_context guidance uses Todo checkpoints and pressure only for urgency", () => {
+  const tool = createNewContextTool(
+    createNewContextController(new CompactionArbiter()),
+    "root",
+  );
+  assert.match(tool.description, /completed Todo checkpoint/);
+  const guidance = tool.promptGuidelines.join("\\n");
+  assert.match(guidance, /primary semantic reset/);
+  assert.match(guidance, /critical prioritizes it before the next Todo/);
+  assert.match(guidance, /do not interrupt the task merely because pressure rises/);
+  assert.match(guidance, /Do not emit or infer pressure-driven reminders without a Todo completion checkpoint/);
+});
+
 test("standalone new_context fails closed while the config gate is disabled", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "maestro-new-context-disabled-"));
   try {
@@ -428,11 +494,12 @@ test("standalone new_context fails closed while the config gate is disabled", as
 test("standalone new_context guidance treats Todo pressure as a post-advance decision", () => {
   const tool = createNewContextTool(createNewContextController(new CompactionArbiter()), "root");
   const guidance = tool.promptGuidelines?.join("\n") ?? "";
-  assert.match(guidance, /pressure advisory arrives after its advance has committed/);
+  assert.match(guidance, /pressure advisory arrives only after its completion-form advance has committed/);
   assert.match(guidance, /task activated in that same result/);
   assert.match(guidance, /call this standalone tool/);
   assert.match(guidance, /Never treat the advisory as a retroactive transition/);
-  assert.match(guidance, /do not reset when it reports critical pressure/);
+  assert.match(guidance, /critical prioritizes it before the next Todo/);
+  assert.doesNotMatch(guidance, /do not reset when it reports critical pressure/);
 });
 
 test("recovery capsule is deterministic, priority ordered, bounded, and includes recovery identities", () => {

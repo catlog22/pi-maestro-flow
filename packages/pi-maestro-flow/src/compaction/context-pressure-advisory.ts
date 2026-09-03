@@ -4,6 +4,8 @@ import type { FlowToolResult } from "../tools/tool-result.ts";
 /** Stable markers keep Agent-visible result augmentation idempotent. */
 export const CONTEXT_PRESSURE_ADVISORY_MARKER = "[context-pressure-advisory]";
 export const CONTEXT_TRANSITION_FAILURE_MARKER = "[new-context-transition-failed]";
+/** Recommend a manual reset only in the latter half of the prune→hard window. */
+export const NEW_CONTEXT_ADVISORY_INTERVAL_FRACTION = 0.5;
 
 export interface TodoCompletionAdvanceInput {
   action?: unknown;
@@ -24,6 +26,29 @@ function isCompletionFormAdvance(input: TodoCompletionAdvanceInput): boolean {
     && input.summary.trim().length > 0;
 }
 
+export function newContextAdvisoryWindow(
+  snapshot: ContextPressureSnapshot,
+): { startTokens: number; endTokens: number } | undefined {
+  const pruneTokens = snapshot.pruneTokens;
+  const hardThresholdTokens = snapshot.hardThresholdTokens;
+  if (pruneTokens === undefined
+    || !Number.isFinite(pruneTokens)
+    || !Number.isFinite(hardThresholdTokens)
+    || hardThresholdTokens <= pruneTokens) return undefined;
+  const startTokens = Math.ceil(
+    pruneTokens + (hardThresholdTokens - pruneTokens) * NEW_CONTEXT_ADVISORY_INTERVAL_FRACTION,
+  );
+  return { startTokens, endTokens: hardThresholdTokens };
+}
+
+function isInLateAutoPruneAdvisoryWindow(snapshot: ContextPressureSnapshot): boolean {
+  if (snapshot.band !== "auto-prune") return false;
+  const window = newContextAdvisoryWindow(snapshot);
+  return window !== undefined
+    && snapshot.estimatedTokens >= window.startTokens
+    && snapshot.estimatedTokens < window.endTokens;
+}
+
 /**
  * Build the bounded Agent-facing guidance for one successful Todo completion.
  * This helper is pure: callers provide the effective new-context gate and the
@@ -34,22 +59,21 @@ export function buildContextPressureAdvisory(
   snapshot: ContextPressureSnapshot | undefined,
   newContextEnabled: boolean,
 ): string | undefined {
-  if (!newContextEnabled || !snapshot || snapshot.band === "normal") return undefined;
+  if (!newContextEnabled || !snapshot) return undefined;
 
   const usage = `${formatTokens(snapshot.estimatedTokens)}/${formatTokens(snapshot.contextWindow)} tokens`;
   const hard = `hard threshold ${formatTokens(snapshot.hardThresholdTokens)} (${formatTokens(snapshot.remainingToHard)} remaining)`;
-  const decision = "This advance has already committed the completed Todo and may have activated the next one. Inspect the current Todo result before acting. Call the standalone new_context tool only when a next phase still exists, this completion is a durable semantic boundary, progress/context/resources are persisted, the next phase is loosely coupled and recoverable from the capsule, and no messages are pending. Otherwise continue or settle in the current context. Do not carry this advisory forward to an unrelated Todo.";
+  const checkpoint = "This reminder is emitted only after a completion-form Todo advance; active Todo work and non-Todo activity are not interrupted or reminded.";
+  const decision = "Inspect the task activated in this same result. Call the standalone new_context tool only when a next phase exists, progress/context/resources are persisted, the next phase is loosely coupled and recoverable from the capsule, and no messages are pending. Otherwise continue or settle. Do not carry this advisory forward to an unrelated Todo.";
 
-  switch (snapshot.band) {
-    case "nudge":
-      return `${CONTEXT_PRESSURE_ADVISORY_MARKER} Context pressure is in the nudge band (${usage}; ${hard}). No reset is required; automatic compaction remains the token-pressure owner. ${decision}`;
-    case "auto-prune":
-      return `${CONTEXT_PRESSURE_ADVISORY_MARKER} Context pressure is in the auto-prune band (${usage}; ${hard}); automatic pruning may be active. ${decision}`;
-    case "critical":
-      return `${CONTEXT_PRESSURE_ADVISORY_MARKER} Context pressure is critical (${usage}; ${hard}). Automatic compaction owns token-pressure recovery. Do not call new_context in response to this advisory; continue or settle in the current context.`;
-    default:
-      return undefined;
+  if (snapshot.band === "critical") {
+    return `${CONTEXT_PRESSURE_ADVISORY_MARKER} Context pressure is critical (${usage}; ${hard}). This Todo completion is the safe checkpoint: prioritize new_context before beginning the next Todo when the recovery conditions are satisfied. Automatic compaction remains the capacity-safety fallback during active work or when it is already pending. ${checkpoint} ${decision}`;
   }
+
+  if (!isInLateAutoPruneAdvisoryWindow(snapshot)) return undefined;
+  const window = newContextAdvisoryWindow(snapshot)!;
+  const reminderWindow = `${formatTokens(window.startTokens)}–${formatTokens(window.endTokens)} tokens`;
+  return `${CONTEXT_PRESSURE_ADVISORY_MARKER} Context pressure is in the late auto-prune reminder window (${usage}; ${hard}); automatic pruning may be active. The New Context reminder window is ${reminderWindow}; below it, continue working because a reset is too early. ${checkpoint} ${decision}`;
 }
 
 function appendAgentVisibleText(result: FlowToolResult, marker: string, message: string): FlowToolResult {

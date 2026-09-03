@@ -103,16 +103,16 @@ new_context({
 
 - 仅仅因为 token 使用率升高；
 - 正处于一个强耦合任务或工具调用中途；
-- pressure 已进入 critical/hard，automatic compact 正在接管；
+- Todo 尚未完成时，即使 pressure 已进入 critical/hard，也不要为了 reset 中断任务；此时由 automatic compact 维持容量安全；
 - 模型输出因 maxTokens 截断——这由 output-limit recovery 处理；
 - Todo、Goal、Plan 或证据尚未持久化；
 - reset 后仍必须依赖聊天中的隐含推理才能继续。
 
 ## Agent 如何获得 Token 提醒
 
-系统复用 automatic compaction 的同一份 pressure snapshot，不创建第二套阈值。Todo 前期保持静默；只有显式 New Context 已启用、pressure 已离开 `normal`，并且 completion-form `advance` 成功提交时，Agent 才可能在该 tool result 中看到 `[context-pressure-advisory]`：
+系统复用 automatic compaction 的同一份 pressure snapshot，不创建第二套阈值。动态提醒只出现在 Todo 检查点：只有显式 New Context 已启用、completion-form `advance` 成功提交，并且 pressure 进入 late auto-prune（prune→hard 后半段）或 `critical` 时，Agent 才会在该 tool result 中看到 `[context-pressure-advisory]`。任务执行中以及没有 Todo completion 的场景都不会产生动态提醒：
 
-- 当前 band：`nudge`、`auto-prune` 或 `critical`；
+- 当前 band：late `auto-prune` 或 `critical`；
 - `estimatedTokens/contextWindow`；
 - hard threshold 与剩余 token；
 - post-advance 决策约束。
@@ -122,17 +122,18 @@ new_context({
 1. 检查同一 tool result 中刚激活的 Todo；若没有后续阶段、任务被阻塞或工作已经完成，则继续、等待或 settled，不 reset；
 2. 确认 summary、Todo context 和 resourceUris 已足以从 recovery capsule 恢复；
 3. 确认下一阶段弱耦合且没有 pending user messages；
-4. 仅在 `nudge` 或 `auto-prune` 下随后调用 standalone `new_context`；
-5. `critical` 下不响应提醒调用 `new_context`，由 automatic compaction 负责恢复。
+4. late `auto-prune` 下把 `new_context` 作为普通建议；
+5. `critical` 下把当前 Todo completion 视为安全检查点，在开始下一 Todo 前优先调用 `new_context`；如果 automatic compaction 已在 pending/running，则先让现有仲裁完成。
 
-| Pressure band | Agent 行为 |
-|---------------|------------|
+| Pressure band | Todo completion 后的 Agent 行为 |
+|---------------|-------------------------------|
 | `normal` | 完全静默，继续当前 context |
-| `nudge` | 不要求 reset；仅在刚形成的可恢复语义边界考虑 standalone reset |
-| `auto-prune` | automatic pruning 可能已运行；若刚激活阶段可独立恢复，可考虑 standalone reset |
-| `critical` | 不响应提醒 reset；automatic compaction 拥有恢复职责 |
+| `nudge` | 完全静默，避免过早 reset |
+| early `auto-prune` | 完全静默，避免过早 reset |
+| late `auto-prune` | 普通提醒；若刚激活阶段可独立恢复，可考虑 standalone reset |
+| `critical` | 高优先级提醒；恢复条件满足时，在开始下一 Todo 前优先 reset；automatic compaction 保留为执行中和已 pending 时的容量兜底 |
 
-同一提醒不得作为以后无关 Todo 的 transition 依据。New Context 本身没有独立 token 阈值；阈值公式和 output-headroom 推导见 [Compaction 容量管理](/guides/compaction-config)。
+Todo completion checkpoint 决定是否适合切换上下文，pressure 只决定紧迫程度。同一提醒不得作为以后无关 Todo 的 transition 依据；没有 Todo completion 时不产生 pressure reminder。New Context 本身没有独立 token 阈值；阈值公式和 output-headroom 推导见 [Compaction 容量管理](/guides/compaction-config)。
 
 ## Recovery Capsule 包含什么
 
@@ -242,7 +243,7 @@ Todo/Goal/Plan/Run 持久化
   → compact_history 最小补全
 ```
 
-Automatic compaction、arbiter 和 pressure estimator 是内部机制，不是 Agent 主动工具。Critical pressure、overflow 和 output-limit recovery 仍由它们处理。
+Automatic compaction、arbiter 和 pressure estimator 是内部容量安全机制，不是 Agent 主动工具。任务执行中的 critical pressure、overflow 和 output-limit recovery 仍由它们处理；到达已持久化的 Todo completion checkpoint 后，New Context 才是进入下一阶段的首选语义 reset。
 
 ## 失败与恢复语义
 

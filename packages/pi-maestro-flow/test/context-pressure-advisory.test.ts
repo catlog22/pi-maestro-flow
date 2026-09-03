@@ -21,6 +21,13 @@ const baseSnapshot: ContextPressureSnapshot = {
   pruneTokens: 320_000,
 };
 
+const lateAutoPruneSnapshot: ContextPressureSnapshot = {
+  ...baseSnapshot,
+  band: "auto-prune",
+  estimatedTokens: 345_000,
+  remainingToHard: 15_000,
+};
+
 function result(text = "Completed #1: phase"): FlowToolResult {
   return {
     content: [{ type: "text", text }],
@@ -38,39 +45,49 @@ function completionInput(transition?: string) {
 }
 
 test("pressure advisory is pure and includes bounded post-advance decision facts", () => {
-  const advisory = buildContextPressureAdvisory(baseSnapshot, true);
+  const advisory = buildContextPressureAdvisory(lateAutoPruneSnapshot, true);
   assert.ok(advisory);
   assert.ok(advisory.includes(CONTEXT_PRESSURE_ADVISORY_MARKER));
-  assert.match(advisory, /280,000\/400,000 tokens/);
+  assert.match(advisory, /345,000\/400,000 tokens/);
   assert.match(advisory, /hard threshold 360,000/);
-  assert.match(advisory, /80,000 remaining/);
-  assert.match(advisory, /No reset is required/);
-  assert.match(advisory, /already committed the completed Todo/);
-  assert.match(advisory, /Inspect the current Todo result before acting/);
+  assert.match(advisory, /15,000 remaining/);
+  assert.match(advisory, /late auto-prune reminder window/);
+  assert.match(advisory, /340,000–360,000 tokens/);
+  assert.match(advisory, /This reminder is emitted only after a completion-form Todo advance/);
+  assert.match(advisory, /active Todo work and non-Todo activity are not interrupted or reminded/);
   assert.match(advisory, /standalone new_context tool/);
-  assert.match(advisory, /a next phase still exists/);
+  assert.match(advisory, /a next phase exists/);
   assert.match(advisory, /no messages are pending/);
   assert.match(advisory, /Do not carry this advisory forward to an unrelated Todo/);
 });
 
-test("advisory covers auto-prune and makes critical a no-reset instruction", () => {
-  const autoPrune = buildContextPressureAdvisory({ ...baseSnapshot, band: "auto-prune" }, true);
+test("advisory waits for late auto-prune and makes critical a high-priority checkpoint", () => {
+  assert.equal(buildContextPressureAdvisory(baseSnapshot, true), undefined);
+  assert.equal(buildContextPressureAdvisory({ ...baseSnapshot, band: "auto-prune" }, true), undefined);
+
+  const autoPrune = buildContextPressureAdvisory(lateAutoPruneSnapshot, true);
   assert.ok(autoPrune);
-  assert.match(autoPrune, /auto-prune/);
+  assert.match(autoPrune, /late auto-prune reminder window/);
   assert.match(autoPrune, /automatic pruning/);
   assert.match(autoPrune, /standalone new_context tool/);
 
-  const critical = buildContextPressureAdvisory({ ...baseSnapshot, band: "critical", remainingToHard: 0 }, true);
+  const critical = buildContextPressureAdvisory({
+    ...baseSnapshot,
+    band: "critical",
+    estimatedTokens: 365_000,
+    remainingToHard: 0,
+  }, true);
   assert.ok(critical);
-  assert.match(critical, /critical/);
-  assert.match(critical, /Automatic compaction owns token-pressure recovery/);
-  assert.match(critical, /Do not call new_context in response to this advisory/);
-  assert.match(critical, /continue or settle in the current context/);
-  assert.doesNotMatch(critical, /standalone new_context tool/);
+  assert.match(critical, /Context pressure is critical/);
+  assert.match(critical, /This Todo completion is the safe checkpoint/);
+  assert.match(critical, /prioritize new_context before beginning the next Todo/);
+  assert.match(critical, /capacity-safety fallback during active work/);
+  assert.doesNotMatch(critical, /Do not call new_context/);
 });
 
 test("normal, disabled, unknown, and requested new_context paths stay unchanged", () => {
   assert.equal(buildContextPressureAdvisory({ ...baseSnapshot, band: "normal" }, true), undefined);
+  assert.equal(buildContextPressureAdvisory(baseSnapshot, true), undefined);
   assert.equal(buildContextPressureAdvisory(baseSnapshot, false), undefined);
   assert.equal(buildContextPressureAdvisory(undefined, true), undefined);
 
@@ -97,12 +114,13 @@ test("only successful completion-form advances receive Agent-visible content", (
   const completion = appendTodoContextPressureAdvisory(
     result(),
     completionInput(),
-    baseSnapshot,
+    lateAutoPruneSnapshot,
     true,
   );
   const text = completion.content.find((item) => item.type === "text");
   assert.ok(text && "text" in text);
   assert.ok(text.text.includes(CONTEXT_PRESSURE_ADVISORY_MARKER));
+  assert.match(text.text, /late auto-prune reminder window/);
   assert.equal((completion.details as { transition?: unknown }).transition, undefined);
 
   const listResult: FlowToolResult = {
@@ -121,7 +139,7 @@ test("only successful completion-form advances receive Agent-visible content", (
   const activationOnly = appendTodoContextPressureAdvisory(
     activationResult,
     { action: "advance" },
-    baseSnapshot,
+    { ...baseSnapshot, band: "critical", estimatedTokens: 365_000, remainingToHard: 0 },
     true,
   );
   assert.equal(activationOnly, activationResult);

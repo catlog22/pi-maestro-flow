@@ -381,7 +381,7 @@ interface ChildCompactionStateEvent {
   type: "teammate_compaction_state";
   recoveryId: string;
   generation: number;
-  phase: "pending" | "continuation" | "completed" | "failed";
+  phase: "pending" | "continuation" | "completed" | "failed" | "cancelled";
   reason?: string;
 }
 
@@ -392,7 +392,8 @@ function childCompactionStateEvent(message: Record<string, unknown>): ChildCompa
     || (message.phase !== "pending"
       && message.phase !== "continuation"
       && message.phase !== "completed"
-      && message.phase !== "failed")) return undefined;
+      && message.phase !== "failed"
+      && message.phase !== "cancelled")) return undefined;
   return {
     type: "teammate_compaction_state",
     recoveryId: message.recoveryId,
@@ -1364,6 +1365,17 @@ export async function runSingleAttempt(
       const eventKey = compactionRecoveryKey(event);
       if (closedCompactionRecoveries.has(eventKey)) return;
       const active = state.compactionRecovery;
+      if (event.phase === "cancelled") {
+        if (active && (active.generation !== event.generation || active.recoveryId !== event.recoveryId)) return;
+        closedCompactionRecoveries.add(eventKey);
+        state.compactionRecovery = undefined;
+        compactionSettlementSwallowed = false;
+        if (timers.compactionRecovery) {
+          clearTimeout(timers.compactionRecovery);
+          timers.compactionRecovery = undefined;
+        }
+        return;
+      }
       const phaseRank = { pending: 0, completed: 1, continuation: 2 } as const;
       let phaseAdvanced = false;
       if (active) {

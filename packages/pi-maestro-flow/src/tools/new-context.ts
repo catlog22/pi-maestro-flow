@@ -43,12 +43,14 @@ export function createNewContextTool(
     label: "New Context",
     description: `Schedule a deterministic same-session context reset at agent settlement.
 
-This makes no model summarization call. The next context contains a bounded recovery capsule built from authoritative Todo, Goal, Plan, Workflow, checkpoint, and resource state. Automatic compaction is unchanged. Requires compaction.newContext.enabled=true.`,
+This makes no model summarization call. The next context contains a bounded recovery capsule built from authoritative Todo, Goal, Plan, Workflow, checkpoint, and resource state. Automatic compaction is unchanged. Use this primarily at a completed Todo checkpoint: late auto-prune recommends a reset, while critical pressure makes it a priority before the next Todo. Do not interrupt active Todo work merely because pressure rises. Requires compaction.newContext.enabled=true.`,
     promptSnippet: "Schedule a deterministic same-session context reset without model summarization",
     promptGuidelines: [
-      "Use only at a durable semantic phase boundary when the next phase is loosely coupled; ordinary or critical token pressure remains handled by automatic compaction.",
+      "Use New Context as the primary semantic reset at a durable Todo completion checkpoint when the next phase is loosely coupled. Pressure determines urgency, not whether the checkpoint is safe: late auto-prune recommends reset and critical prioritizes it before the next Todo.",
+      "During active Todo work, do not interrupt the task merely because pressure rises. Automatic compaction remains the capacity-safety fallback until the next safe Todo checkpoint and whenever it is already pending.",
       "Put live progress and the exact next action in Todo.context before resetting; attach durable references through resourceUris.",
-      "A Todo pressure advisory arrives after its advance has committed. Inspect the task activated in that same result, then call this standalone tool only if a next phase exists, persisted state is sufficient, and no messages are pending; otherwise continue or settle. Never treat the advisory as a retroactive transition or carry it to an unrelated Todo, and do not reset when it reports critical pressure.",
+      "A Todo pressure advisory arrives only after its completion-form advance has committed. Inspect the task activated in that same result, then call this standalone tool only if a next phase exists, persisted state is sufficient, and no messages are pending; otherwise continue or settle. Never treat the advisory as a retroactive transition or carry it to an unrelated Todo.",
+      "Do not emit or infer pressure-driven reminders without a Todo completion checkpoint. Standalone use remains explicit and must not be triggered by token pressure alone.",
     ],
     parameters: NewContextParams,
     async execute(_id, params, _signal, _onUpdate, ctx) {

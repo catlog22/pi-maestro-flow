@@ -1,4 +1,4 @@
-export type TeammateCompactionPhase = "pending" | "continuation" | "completed" | "failed";
+export type TeammateCompactionPhase = "pending" | "continuation" | "completed" | "failed" | "cancelled";
 
 export interface TeammateCompactionStateEvent {
   type: "teammate_compaction_state";

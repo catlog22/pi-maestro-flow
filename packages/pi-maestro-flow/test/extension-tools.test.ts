@@ -633,7 +633,8 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
   assert.match(todoGuidelines, /task activated in that same result/);
   assert.match(todoGuidelines, /standalone new_context tool/);
   assert.match(todoGuidelines, /cannot change the completed advance retroactively/);
-  assert.match(todoGuidelines, /critical means do not reset/);
+  assert.match(todoGuidelines, /critical makes it a priority before beginning the next Todo/);
+  assert.match(todoGuidelines, /never infer a pressure reminder without a Todo completion checkpoint/);
   const todoSchema = todoTool?.parameters as {
     properties?: {
       tasks?: {
@@ -1079,7 +1080,8 @@ test("teammate child registers interaction, local Bash, and parent-permission su
   assert.match(childTodoGuidelines, /task activated in that same result/);
   assert.match(childTodoGuidelines, /standalone new_context tool/);
   assert.match(childTodoGuidelines, /cannot change the completed advance retroactively/);
-  assert.match(childTodoGuidelines, /critical means do not reset/);
+  assert.match(childTodoGuidelines, /critical makes it a priority before beginning the next Todo/);
+  assert.match(childTodoGuidelines, /never infer a pressure reminder without a Todo completion checkpoint/);
   const workflowMirrorSkill = readFileSync(join(import.meta.dirname, "../../../.pi/skills/maestro/SKILL.md"), "utf8");
   assert.match(workflowMirrorSkill, /Advance only with `todo\(\{ action: "next" \}\)`/);
   assert.deepEqual([...handlers.keys()], [

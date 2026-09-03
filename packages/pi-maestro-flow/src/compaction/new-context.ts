@@ -11,6 +11,10 @@ import type {
   NewContextCompactionTrigger,
 } from "./compaction-arbiter.ts";
 import { requireNewContextCompactionEnabled } from "./compaction-settings.ts";
+import {
+  publishTeammateCompactionState,
+  type TeammateCompactionPhase,
+} from "./teammate-compaction-relay.ts";
 
 export const NEW_CONTEXT_MAX_BYTES = 32 * 1024;
 export const NEW_CONTEXT_MAX_CARRY_FORWARD_BYTES = 4 * 1024;
@@ -125,6 +129,23 @@ export function createNewContextController(
   let awaitingCompactionSettlement = false;
   let deferredNoticeKey: string | undefined;
 
+  const recoveryIdFor = (request: ScheduledNewContextRequest): string =>
+    `${request.sessionId}:new-context:${request.requestId}`;
+  const publishRecoveryState = (
+    request: ScheduledNewContextRequest,
+    phase: TeammateCompactionPhase,
+    reason?: string,
+  ): void => {
+    publishTeammateCompactionState({
+      recoveryId: recoveryIdFor(request),
+      // requestId is monotonic within this controller and therefore provides a
+      // recovery ordering fence stronger than the reusable lifecycle generation.
+      generation: request.requestId,
+      phase,
+      ...(reason ? { reason } : {}),
+    });
+  };
+
   const reset = (sessionId?: string) => {
     lifecycleGeneration += 1;
     activeSessionId = sessionId;
@@ -173,6 +194,7 @@ export function createNewContextController(
     pending = undefined;
     awaitingCompactionSettlement = false;
     deferredNoticeKey = undefined;
+    publishRecoveryState(request, "cancelled", "coalesced into the equivalent Plan context handoff");
     ctx.ui.notify("New-context request was coalesced into the equivalent deterministic Plan context handoff.", "info");
     return true;
   };
@@ -187,6 +209,7 @@ export function createNewContextController(
       || (!request.recoveryState && getTodoCompactionSnapshot().revision < request.todoRevision)) {
       pending = undefined;
       awaitingCompactionSettlement = false;
+      publishRecoveryState(request, "cancelled", "the session generation changed");
       ctx.ui.notify("New-context request was discarded because the session generation changed.", "warning");
       return false;
     }
@@ -194,6 +217,7 @@ export function createNewContextController(
       pending = undefined;
       awaitingCompactionSettlement = false;
       deferredNoticeKey = undefined;
+      publishRecoveryState(request, "cancelled", "a newer message is pending");
       ctx.ui.notify("New-context request was cancelled because a newer message is pending; continuing with the current context.", "info");
       return false;
     }
@@ -202,6 +226,7 @@ export function createNewContextController(
     } catch (error) {
       pending = undefined;
       awaitingCompactionSettlement = false;
+      publishRecoveryState(request, "cancelled", error instanceof Error ? error.message : String(error));
       ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
       continueAfterReset(ctx, request);
       return false;
@@ -253,6 +278,7 @@ export function createNewContextController(
         if (isCurrentRequest(request, ctx)) {
           pending = undefined;
           awaitingCompactionSettlement = false;
+          publishRecoveryState(request, "cancelled", "root recovery state refresh failed");
           ctx.ui.notify(
             `New-context reset could not refresh root recovery state; continuing with the current context: ${error instanceof Error ? error.message : String(error)}`,
             "warning",
@@ -319,12 +345,18 @@ export function createNewContextController(
           if (request.lifecycleGeneration !== lifecycleGeneration
             || request.sessionId !== activeSessionId
             || request.sessionId !== sessionIdOf(ctx)
-            || ctx.hasPendingMessages?.()) return;
+            || ctx.hasPendingMessages?.()) {
+            publishRecoveryState(request, "cancelled", "the reset became stale or a newer message is pending");
+            return;
+          }
+          publishRecoveryState(request, "completed");
+          publishRecoveryState(request, "continuation");
           continueAfterReset(ctx, request);
         },
         onError(error) {
           if (inFlight?.requestId === request.requestId) inFlight = undefined;
           lease.release();
+          publishRecoveryState(request, "cancelled", "the compaction failed");
           if (!isRequestLifecycleCurrent(request, ctx)) return;
           ctx.ui.notify(`New-context reset failed; continuing with the current context: ${error.message}`, "warning");
           continueAfterReset(ctx, request);
@@ -334,6 +366,7 @@ export function createNewContextController(
     } catch (error) {
       if (inFlight?.requestId === request.requestId) inFlight = undefined;
       lease.release();
+      publishRecoveryState(request, "cancelled", "the compaction request could not start");
       if (isRequestLifecycleCurrent(request, ctx)) {
         ctx.ui.notify(
           `New-context reset failed; continuing with the current context: ${error instanceof Error ? error.message : String(error)}`,
@@ -388,6 +421,7 @@ export function createNewContextController(
         ...(carryForward ? { carryForward } : {}),
         resourceUris,
       };
+      publishRecoveryState(pending, "pending");
       return { requestId, coalesced: false };
     },
 
