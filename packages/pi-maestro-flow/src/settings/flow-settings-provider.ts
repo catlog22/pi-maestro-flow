@@ -22,6 +22,7 @@ import {
   type SettingsOverviewRow,
 } from "pi-maestro-settings-core/v1";
 import {
+  DEFAULT_NEW_CONTEXT_ENABLED,
   MAX_RESERVE_TOKENS,
   resolveEffectiveCompactionSettings,
   resolveProjectSettingsPath,
@@ -180,7 +181,8 @@ const BASE_CATALOGS = {
     "flow.group.failover": "Model failover",
     "flow.group.manage": "Flow management",
     "flow.compaction.enabled": "Enable compaction",
-    "flow.compaction.newContext.enabled": "Enable explicit new-context compaction",
+    "flow.compaction.newContext.enabled": "New Context",
+    "flow.compaction.newContext.enabled.description": "Enabled by default. At a completed Todo checkpoint, Space toggles the global or project override; Ctrl+S applies it for the next Agent turn.",
     "flow.compaction.reserveTokens": "Reserved tokens",
     "flow.compaction.keepRecentTokens": "Recent tokens to keep",
     "flow.compaction.model": "Summary model",
@@ -260,7 +262,8 @@ const BASE_CATALOGS = {
     "flow.group.failover": "模型故障转移",
     "flow.group.manage": "Flow 管理",
     "flow.compaction.enabled": "启用上下文压缩",
-    "flow.compaction.newContext.enabled": "启用显式新上下文压缩",
+    "flow.compaction.newContext.enabled": "New Context",
+    "flow.compaction.newContext.enabled.description": "默认开启。在已完成的 Todo 检查点，可用空格切换全局或项目覆盖，Ctrl+S 保存并在下一 Agent turn 生效。",
     "flow.compaction.reserveTokens": "保留 Token",
     "flow.compaction.keepRecentTokens": "保留最近 Token",
     "flow.compaction.model": "摘要模型",
@@ -550,7 +553,7 @@ export function registerFlowSettingsProvider(events: SettingsEventBus, provider:
 function definitions(): SettingDefinition[] {
   const writable: SettingDefinition[] = [
     setting("compaction.enabled", "flow.group.compaction", "flow.compaction.enabled", "boolean", true, "next-turn"),
-    setting("compaction.newContext.enabled", "flow.group.compaction", "flow.compaction.newContext.enabled", "boolean", false, "next-turn"),
+    setting("compaction.newContext.enabled", "flow.group.compaction", "flow.compaction.newContext.enabled", "boolean", DEFAULT_NEW_CONTEXT_ENABLED, "next-turn", {}, "override", "flow.compaction.newContext.enabled.description"),
     setting("compaction.reserveTokens", "flow.group.compaction", "flow.compaction.reserveTokens", "integer", 16_384, "next-turn", { min: 1, max: MAX_RESERVE_TOKENS, step: 1024 }),
     setting("compaction.keepRecentTokens", "flow.group.compaction", "flow.compaction.keepRecentTokens", "integer", 20_000, "next-turn", { min: 1, max: MAX_RESERVE_TOKENS, step: 1024 }),
     setting("compaction.model", "flow.group.compaction", "flow.compaction.model", "model", null, "next-turn", { optionsSource: "flow.available-models" }),
@@ -617,11 +620,13 @@ function setting(
   activation: SettingsActivation,
   editor: Omit<SettingDefinition["editor"], "kind"> = {},
   merge: SettingDefinition["merge"] = "override",
+  descriptionKey?: string,
 ): SettingDefinition {
   return {
     key,
     group,
     labelKey,
+    ...(descriptionKey ? { descriptionKey } : {}),
     defaultValue,
     scopes: ["global", "project"],
     merge,

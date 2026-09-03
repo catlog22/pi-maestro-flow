@@ -10,6 +10,7 @@ import { DEFAULT_DEDUP_MIN_CHARS, DEFAULT_DEDUP_MIN_LINES } from "./dedup.ts";
 
 export const DEFAULT_RESERVE_TOKENS = 16_384;
 export const DEFAULT_KEEP_RECENT_TOKENS = 20_000;
+export const DEFAULT_NEW_CONTEXT_ENABLED = true;
 
 /**
  * Absolute upper bound for `reserveTokens`, applied at load time where the
@@ -108,8 +109,8 @@ export interface LosslessCompactionSettings {
 }
 
 /**
- * Explicit new-context compaction is an opt-in mode. It is intentionally
- * separate from the threshold-triggered automatic summary compaction path.
+ * Explicit new-context compaction is enabled by default and remains separate
+ * from the threshold-triggered automatic summary compaction path.
  */
 export interface NewContextCompactionConfigPatch {
   enabled?: boolean;
@@ -207,14 +208,14 @@ export interface EffectiveCompactionSettings {
   /** Configured compaction model (`provider/id`); undefined follows the active session model. */
   model?: string;
   soft: SoftCompactionSettings;
-  /** Explicit new-context mode gate; defaults off and never affects automatic compaction. */
+  /** Explicit new-context mode gate; defaults on and never affects automatic compaction. */
   newContext: NewContextCompactionSettings;
   source: Record<keyof CompactionConfigPatch, CompactionSettingSource>;
 }
 
 /** Stable disabled message shared by standalone and Todo new-context callers. */
 export const NEW_CONTEXT_DISABLED_MESSAGE =
-  "Explicit new-context compaction is disabled; set compaction.newContext.enabled to true in /maestro-compaction or your settings.";
+  "Explicit new-context compaction is disabled by settings; set compaction.newContext.enabled to true in /maestro-compaction or your settings.";
 
 export type CompactionScope = "project" | "user";
 
@@ -396,7 +397,7 @@ export function resolveEffectiveCompactionSettings(
   let keepRecentTokens = DEFAULT_KEEP_RECENT_TOKENS;
   let model: string | undefined;
   const soft: SoftCompactionSettings = createDefaultSoftCompaction();
-  const newContext: NewContextCompactionSettings = { enabled: false };
+  const newContext: NewContextCompactionSettings = { enabled: DEFAULT_NEW_CONTEXT_ENABLED };
 
   for (const [patch, src] of [[userPatch, "user"], [projectPatch, "project"]] as const) {
     if (patch.enabled !== undefined) { enabled = patch.enabled; source.enabled = src; }

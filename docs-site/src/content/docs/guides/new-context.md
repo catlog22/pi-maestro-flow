@@ -18,29 +18,30 @@ icon: "🔄"
 | 摘要方式 | 可调用模型生成摘要 | 不调用模型，生成确定性 capsule |
 | 保留内容 | 摘要 + 近期对话 | Todo/Goal/Plan/Workflow/checkpoint/resources 等权威状态 |
 | 适用时机 | 上下文容量不足 | Todo/语义阶段的自然边界 |
-| 默认状态 | 开启 | 关闭，需显式启用 |
+| 默认状态 | 开启 | 开启，可显式关闭 |
 
 ## 配置
 
 用户级配置位于 `~/.pi/agent/settings.json`，项目级配置位于 `<项目>/.pi/settings.json`；项目字段覆盖用户字段。
 
+配置可省略，New Context 默认开启。若需要显式覆盖，可在用户级或项目级设置布尔值：
+
 ```json
 {
   "compaction": {
     "newContext": {
-      "enabled": true
+      "enabled": false
     }
   }
 }
 ```
 
-也可以在 `/maestro-settings` 的 Flow provider 中切换 `compaction.newContext.enabled`。
+也可以在 Cockpit 的 `/maestro-settings` 中进入 Flow provider，搜索 `New Context`，用 `Space` 切换当前 scope，再用 `Ctrl+S` 保存。列表在未设置覆盖时会同时显示实际生效值。
 
 工具面随 effective 配置动态变化：
 
-- `false`（默认）：新进程不会注册 `new_context` 或 `compact_history`，模型工具列表中不存在这两个工具；
-- `true`：在 Session 启动或下一次 Agent turn 前注册并激活两个工具；
-- 从 `true` 改回 `false`：下一次 Agent turn 前从 active tool surface 移除，遗留调用也会 fail closed；重启进程后 registry 中完全不存在。
+- `true`（默认）：在 Session 启动或下一次 Agent turn 前注册并激活 `new_context` 与 `compact_history`；
+- 显式 `false`：下一次 Agent turn 前从 active tool surface 移除，遗留调用也会 fail closed；重启进程后 registry 中完全不存在。
 
 > 该开关只启用显式 reset 及其当前会话恢复工具，不改变 automatic/native compact 的 reserve、soft band、hard threshold 或 fallback 行为。
 
@@ -302,7 +303,7 @@ resource({ uri: "session://<current-session-id>/entry/<entry-id>" })
 
 ## 使用前检查表
 
-- [ ] `compaction.newContext.enabled=true`
+- [ ] `/maestro-settings` 中 `compaction.newContext.enabled` 的 effective value 为 `true`（默认值或显式覆盖）
 - [ ] 当前阶段已经完成
 - [ ] 仍存在明确的后续阶段
 - [ ] Todo context/summary 已更新
@@ -310,7 +311,7 @@ resource({ uri: "session://<current-session-id>/entry/<entry-id>" })
 - [ ] 下一阶段可独立恢复
 - [ ] 没有 pending user messages
 - [ ] 若由 advisory 触发，它来自刚完成的同一次 `advance`
-- [ ] 不是单纯因为 token pressure，也不是 `critical` band
+- [ ] 不是单纯因为 token pressure；若处于 `critical`，只在刚完成的 Todo checkpoint reset
 
 ## 下一步
 

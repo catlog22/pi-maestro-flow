@@ -59,6 +59,10 @@ test("Flow provider describes editable settings, complex actions and bilingual c
   assert.equal(description.capabilities.prepareCommit, true);
   assert.ok(description.settings.some((entry) => entry.key === "compaction.soft.velocity.minFullness"));
   assert.equal(description.settings.find((entry) => entry.key === "compaction.keepRecentTokens")?.editor.max, 2_000_000);
+  const newContext = description.settings.find((entry) => entry.key === "compaction.newContext.enabled");
+  assert.equal(newContext?.defaultValue, true);
+  assert.equal(newContext?.editor.kind, "boolean");
+  assert.equal(newContext?.descriptionKey, "flow.compaction.newContext.enabled.description");
   const failoverDef = description.settings.find((entry) => entry.key === "failover.fallbackModels")!;
   assert.equal(failoverDef.editor.kind, "list-crud");
   assert.ok(failoverDef.editor.itemFields?.some((f) => f.key === "fallbacks" && f.editor.kind === "string-list"));
@@ -67,6 +71,14 @@ test("Flow provider describes editable settings, complex actions and bilingual c
   assert.deepEqual(responseLanguage?.editor.options?.map((entry) => entry.value), ["default", "zh-CN"]);
   assert.equal(description.catalogs?.en["flow.compaction.enabled"], "Enable compaction");
   assert.equal(description.catalogs?.["zh-CN"]["flow.compaction.enabled"], "启用上下文压缩");
+  assert.match(description.catalogs?.en["flow.compaction.newContext.enabled.description"] ?? "", /Space toggles/);
+  assert.match(description.catalogs?.["zh-CN"]["flow.compaction.newContext.enabled.description"] ?? "", /空格切换/);
+  const snapshot = await provider.read({ context });
+  assert.deepEqual(snapshot.effective.values.find((entry) => entry.key === "compaction.newContext.enabled"), {
+    key: "compaction.newContext.enabled",
+    value: true,
+    source: "default",
+  });
   const keys = new Set(description.settings.flatMap((entry) => [
     entry.group,
     entry.labelKey,

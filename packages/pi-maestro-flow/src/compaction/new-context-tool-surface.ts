@@ -9,8 +9,8 @@ export interface NewContextToolSurface {
 }
 
 /**
- * Registers the opt-in tools lazily and keeps them out of the model-facing
- * active set while the effective New Context setting is disabled.
+ * Registers the gated tools lazily and keeps them out of the model-facing
+ * active set while the effective New Context setting is explicitly disabled.
  */
 export function createNewContextToolSurface(
   pi: Pick<ExtensionAPI, "getActiveTools" | "setActiveTools">,

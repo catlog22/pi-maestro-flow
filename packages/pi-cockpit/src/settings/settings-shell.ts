@@ -1283,7 +1283,15 @@ export class MaestroSettingsShell implements Component, Focusable {
 		const change = this.params.coordinator.changes(providerId).find((entry) => entry.key === definition.key && entry.scope === scope);
 		if (change?.operation === "unset") return this.t("settings.inherited");
 		if (change?.operation === "set") return this.formatValue(definition, change.value);
-		return this.displayConfigured(definition, this.configuredValue(this.params.coordinator.baseline(providerId), definition.key, scope));
+		const baseline = this.params.coordinator.baseline(providerId);
+		const configured = this.configuredValue(baseline, definition.key, scope);
+		if (!configured || configured.state === "absent") {
+			const effective = baseline?.effective.values.find((value) => value.key === definition.key);
+			if (effective) {
+				return `${this.t("settings.state.absent")} · ${this.t("settings.effective")} ${this.formatValue(definition, effective.value)}`;
+			}
+		}
+		return this.displayConfigured(definition, configured);
 	}
 
 	private configuredValue(snapshot: SettingsSnapshot | undefined, key: string, scope: SettingsScope) {

@@ -141,6 +141,56 @@ test("one coordinator commits Cockpit, Flow and Teammate without merging their s
 	} finally { rmSync(state.root, { recursive: true, force: true }); }
 });
 
+test("Cockpit shell renders and commits the Flow New Context toggle", async () => {
+	const state = fixture();
+	try {
+		const events = new SharedEventBus();
+		const registry = new SettingsProviderRegistry(events);
+		registerFlowSettingsProvider(events, state.flow);
+		registry.discover(state.context);
+		const coordinator = new SettingsCoordinator(registry);
+		assert.deepEqual(await coordinator.load(state.context), []);
+		const providers = await registry.describe(state.context);
+		const localeState = new SettingsLocaleState(state.paths.locale, registry);
+		const shell = new MaestroSettingsShell({
+			registry,
+			coordinator,
+			localeState,
+			initial: { context: state.context, providers, failures: [] },
+			reload: async () => ({ context: state.context, providers, failures: [] }),
+			theme: { fg: (_role: string, value: string) => value, bold: (value: string) => value } as never,
+			modelOptions: [],
+			requestRender() {},
+			requestAction() {},
+			close() {},
+		});
+
+		assert.match(shell.render(120).join("\n"), /Flow/);
+		shell.handleInput("\r");
+		shell.handleInput("/");
+		for (const character of "newcontext") shell.handleInput(character);
+		shell.handleInput("\r");
+		const initialRow = shell.render(120).find((line) => line.includes("New Context")) ?? "";
+		assert.match(initialRow, /not set · Effective On/);
+
+		shell.handleInput(" ");
+		assert.deepEqual(
+			coordinator.changes("pi-maestro-flow").find((change) => change.key === "compaction.newContext.enabled"),
+			{ operation: "set", key: "compaction.newContext.enabled", scope: "global", value: false },
+		);
+		const draftRow = shell.render(120).find((line) => line.includes("New Context")) ?? "";
+		assert.match(draftRow, /Off/);
+
+		shell.handleInput("\x13");
+		for (let attempt = 0; attempt < 100 && coordinator.changes().length > 0; attempt++) {
+			await new Promise<void>((resolve) => setTimeout(resolve, 10));
+		}
+		assert.deepEqual(coordinator.changes(), []);
+		assert.equal(JSON.parse(readFileSync(state.paths.globalSettings, "utf8")).compaction.newContext.enabled, false);
+		assert.ok(shell.render(120).some((line) => line.includes("Settings saved")));
+	} finally { rmSync(state.root, { recursive: true, force: true }); }
+});
+
 test("cross-provider validation conflict prevents every provider commit", async () => {
 	const state = fixture();
 	try {

@@ -34,7 +34,7 @@ icon: "🧮"
     "reserveTokens": 16384,
     "keepRecentTokens": 20000,
     "model": "provider/compaction-model",
-    "newContext": { "enabled": false },
+    "newContext": { "enabled": true },
     "soft": {
       "enabled": true,
       "nudgeRatio": 0.7,
@@ -59,7 +59,7 @@ icon: "🧮"
 | `reserveTokens` | `16384` | 为模型响应预留的 Token |
 | `keepRecentTokens` | `20000` | 始终保留的近期对话 Token |
 | `model` | 跟随会话模型 | 压缩摘要模型（`provider/id`） |
-| `newContext.enabled` | `false` | 启用显式、无模型摘要的同会话上下文重置 |
+| `newContext.enabled` | `true` | 启用显式、无模型摘要的同会话上下文重置 |
 
 ### 软压缩字段（多准则决策）
 
@@ -79,7 +79,7 @@ icon: "🧮"
 
 ### 显式 New Context
 
-`compaction.newContext.enabled` 默认关闭，并按字段遵循 project-over-user 优先级。关闭时 `new_context` 与 `compact_history` 不注册到新进程的模型工具面；开启后在 Session 启动或下一 Agent turn 前注册并激活。它只控制显式 reset 及其当前会话恢复工具与 Todo `advance transition=new_context`，不会改变 automatic/native compact 的阈值、修剪或溢出恢复。
+`compaction.newContext.enabled` 默认开启，并按字段遵循 project-over-user 优先级。显式关闭时，`new_context` 与 `compact_history` 不注册到新进程的模型工具面；开启时在 Session 启动或下一 Agent turn 前注册并激活。Cockpit 的 `/maestro-settings` → Flow → New Context 会显示当前 scope 配置与 effective value，可用 `Space` 切换、`Ctrl+S` 保存。该开关只控制显式 reset 及其当前会话恢复工具与 Todo `advance transition=new_context`，不会改变 automatic/native compact 的阈值、修剪或溢出恢复。
 
 只应在 Todo 或阶段已经完成、`Todo.context` 与必要 `resourceUris` 已持久化、下一阶段弱耦合且能从 recovery capsule 恢复时使用。Todo completion checkpoint 决定 reset 时机，pressure 只决定紧迫度：late auto-prune 提供普通建议，critical 则应在开始下一 Todo 前优先 reset。任务执行中不要因 token 压力中断当前 Todo，automatic compact 继续承担容量安全兜底；没有 Todo completion 时不产生动态提醒。完整流程、调用示例、capsule 内容与故障语义见 [New Context 确定性上下文重置](/guides/new-context)。
 

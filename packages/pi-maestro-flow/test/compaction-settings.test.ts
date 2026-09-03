@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   createDefaultSoftCompaction,
   DEFAULT_KEEP_RECENT_TOKENS,
+  DEFAULT_NEW_CONTEXT_ENABLED,
   DEFAULT_RESERVE_TOKENS,
   DEFAULT_SOFT_COMPACTION,
   MAX_RESERVE_TOKENS,
@@ -33,10 +34,10 @@ test("compaction settings use the Pi default user path when the agent directory 
   }
 });
 
-test("new-context compaction defaults off and follows project-over-user precedence", async () => {
+test("new-context compaction defaults on and follows project-over-user precedence", async () => {
   const fixture = await createFixture();
   try {
-    assert.equal(readEffectiveCompactionSettings(fixture.projectDir).newContext.enabled, false);
+    assert.equal(readEffectiveCompactionSettings(fixture.projectDir).newContext.enabled, DEFAULT_NEW_CONTEXT_ENABLED);
     await writeSettings(fixture.agentDir, {
       compaction: { newContext: { enabled: true } },
     });
@@ -74,7 +75,7 @@ test("compaction settings resolve paths, precedence, and field-level sources", a
       keepRecentTokens: DEFAULT_KEEP_RECENT_TOKENS,
       model: undefined,
       soft: { ...DEFAULT_SOFT_COMPACTION },
-      newContext: { enabled: false },
+      newContext: { enabled: DEFAULT_NEW_CONTEXT_ENABLED },
       source: {
         enabled: "default",
         reserveTokens: "default",
@@ -102,7 +103,7 @@ test("compaction settings resolve paths, precedence, and field-level sources", a
       keepRecentTokens: 12_000,
       model: undefined,
       soft: { ...DEFAULT_SOFT_COMPACTION },
-      newContext: { enabled: false },
+      newContext: { enabled: DEFAULT_NEW_CONTEXT_ENABLED },
       source: {
         enabled: "project",
         reserveTokens: "user",
@@ -141,7 +142,7 @@ test("compaction settings ignore malformed files and invalid optional fields", a
       keepRecentTokens: DEFAULT_KEEP_RECENT_TOKENS,
       model: undefined,
       soft: { ...DEFAULT_SOFT_COMPACTION },
-      newContext: { enabled: false },
+      newContext: { enabled: DEFAULT_NEW_CONTEXT_ENABLED },
       source: {
         enabled: "default",
         reserveTokens: "default",

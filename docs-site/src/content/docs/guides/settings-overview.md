@@ -39,7 +39,7 @@ flowchart LR
     "reserveTokens": 16384,
     "keepRecentTokens": 20000,
     "model": "provider/compaction-model",
-    "newContext": { "enabled": false },
+    "newContext": { "enabled": true },
     "soft": {
       "enabled": true,
       "nudgeRatio": 0.7,
@@ -54,7 +54,7 @@ flowchart LR
 }
 ```
 
-`compaction.newContext.enabled` 默认关闭；项目级字段覆盖用户级字段。关闭时 `new_context` 与 `compact_history` 不存在于新进程的模型工具面；开启后在 Session 启动或下一 Agent turn 前出现。它只启用显式确定性 reset 及当前会话恢复，不改变 automatic compact 的 token 阈值。
+`compaction.newContext.enabled` 默认开启；项目级字段覆盖用户级字段。显式关闭时，`new_context` 与 `compact_history` 不存在于新进程的模型工具面；开启时在 Session 启动或下一 Agent turn 前出现。Cockpit 统一设置面板会在未配置覆盖时显示 effective value，并允许用 `Space` 切换当前 scope、`Ctrl+S` 保存。该开关只启用显式确定性 reset 及当前会话恢复，不改变 automatic compact 的 token 阈值。
 
 ## 各插件的设置面
 
