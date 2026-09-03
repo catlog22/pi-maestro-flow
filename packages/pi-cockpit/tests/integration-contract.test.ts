@@ -137,6 +137,7 @@ test("Cockpit owns native UI through events instead of clearing foreign widget k
 	assert.match(source, /pi\.events\.emit\(COCKPIT_UI_OWNERSHIP_EVENT/);
 	assert.match(source, /agents: config\.enabled && config\.hideNativeAgents/);
 	assert.match(source, /sessionList: config\.enabled/);
+	assert.match(source, /todoDurationChart: config\.todoDurationChart/);
 	assert.match(source, /quietSymbols: config\.quietSymbols/);
 	assert.match(source, /footer: config\.enabled/);
 	assert.match(source, /footer: false/);
@@ -151,12 +152,21 @@ test("Cockpit owns native UI through events instead of clearing foreign widget k
 	assert.equal(COCKPIT_TODO_TOGGLE_EVENT, "cockpit:toggle-todo");
 });
 
-test("Cockpit owns and releases the viewport-stability patch across TUI lifecycles", () => {
+test("Cockpit owns, retries, and releases the viewport-stability patch across TUI modes", () => {
 	const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
 	assert.match(source, /let viewportStabilityPatch: ViewportStabilityPatch \| undefined/);
 	assert.match(
 		source,
-		/const ensureViewportStability[^]*?viewportStabilityPatch\?\.detach\(\);[^]*?viewportStabilityPatch = attachViewportStability\(tui\);[^]*?stabilityTui = tui;/,
+		/const ensureViewportStability[^]*?if \(tui\.mode === "fullscreen"\) return;[^]*?viewportStabilityPatch\?\.active[^]*?const patch = attachViewportStability\(tui\);[^]*?stabilityTui = patch\.active \? tui : undefined;/,
+	);
+	assert.match(
+		source,
+		/const requestCapturedRender[^]*?ensureViewportStability\(tui\);[^]*?tui\.requestRender\(\);/,
+	);
+	assert.match(source, /requestRender: requestCapturedRender/);
+	assert.match(
+		source,
+		/const req[^]*?requestCapturedRender\(\);[^]*?activeAgentOverlayRender\?\.\(\);[^]*?sidebarController\?\.requestRender\(\);/,
 	);
 	assert.match(
 		source,
@@ -284,7 +294,7 @@ test("Cockpit Agent modal opens from the Alt+R session list and shares the live 
 	assert.match(source, /new AgentOverlay\(\{[\s\S]*?getAgents: \(\) => agents\.snapshot\(\)/);
 	assert.match(source, /ownedRender = \(\) => tui\.requestRender\(\)/);
 	assert.match(source, /activeAgentOverlayRender = ownedRender/);
-	assert.match(source, /capturedTui\?\.requestRender\(\);[\s\S]*?activeAgentOverlayRender\?\.\(\)/);
+	assert.match(source, /requestCapturedRender\(\);[\s\S]*?activeAgentOverlayRender\?\.\(\)/);
 	assert.match(source, /getExpanded: effectiveTodoExpanded/);
 	assert.match(source, /todoExpanded: effectiveTodoExpanded\(\)/);
 	assert.match(source, /const effectiveTodoExpanded = \(\): boolean =>\s*config\.todoExpanded/);

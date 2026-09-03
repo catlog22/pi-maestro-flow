@@ -220,6 +220,10 @@ export function registerPlanModelSelection(
     }
   });
 
+  pi.on("agent_end", async (_event, ctx) => {
+    if (!planModeActive()) await restore(ctx);
+  });
+
   pi.on("session_shutdown", async (_event, ctx) => {
     if (await restore(ctx)) warnedMessages.clear();
   });

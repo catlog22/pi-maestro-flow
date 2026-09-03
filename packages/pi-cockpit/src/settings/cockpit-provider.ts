@@ -68,6 +68,7 @@ const CONFIG_KEYS = [
 	"agentsMode",
 	"todoMode",
 	"todoExpanded",
+	"todoDurationChart",
 	"stackStyle",
 	"hideNativeAgents",
 	"toolPalette",
@@ -164,6 +165,8 @@ const CATALOGS = {
 		"cockpit.agentsMode": "Agent display",
 		"cockpit.todoMode": "Todo display",
 		"cockpit.todoExpanded": "Todo expanded",
+		"cockpit.todoDurationChart": "Advance duration chart",
+		"cockpit.todoDurationChart.description": "Show a task-duration chart after advance completes the entire Todo list.",
 		"cockpit.stackStyle": "Stack projection",
 		"cockpit.hideNativeAgents": "Hide native agent widget",
 		"cockpit.icons.mode": "Icon mode",
@@ -249,6 +252,8 @@ const CATALOGS = {
 		"cockpit.agentsMode": "Agent 显示",
 		"cockpit.todoMode": "Todo 显示",
 		"cockpit.todoExpanded": "展开 Todo",
+		"cockpit.todoDurationChart": "Advance 耗时图",
+		"cockpit.todoDurationChart.description": "当 advance 完成整个 Todo 列表后显示任务耗时统计图。",
 		"cockpit.stackStyle": "栈投影",
 		"cockpit.hideNativeAgents": "隐藏原生 Agent 面板",
 		"cockpit.icons.mode": "图标模式",
@@ -367,8 +372,9 @@ const DEFINITIONS: readonly SettingDefinition[] = [
 	enumDefinition("agentsMode", "cockpit.group.panels", 0, "cockpit.agentsMode", ["list", "compact"], "live"),
 	enumDefinition("todoMode", "cockpit.group.panels", 1, "cockpit.todoMode", ["list", "compact"], "live"),
 	booleanDefinition("todoExpanded", "cockpit.group.panels", 2, "cockpit.todoExpanded", "live"),
+	booleanDefinition("todoDurationChart", "cockpit.group.panels", 3, "cockpit.todoDurationChart", "live", "cockpit.todoDurationChart.description"),
 	enumDefinition("stackStyle", "cockpit.group.layout", 4, "cockpit.stackStyle", ["classic", "zen"], "live"),
-	booleanDefinition("hideNativeAgents", "cockpit.group.panels", 3, "cockpit.hideNativeAgents", "live"),
+	booleanDefinition("hideNativeAgents", "cockpit.group.panels", 4, "cockpit.hideNativeAgents", "live"),
 	enumDefinition("sidebar.mode", "cockpit.group.sidebar", 0, "cockpit.sidebar.mode", ["auto", "on", "off"], "live"),
 	{
 		key: "sidebar.width",
@@ -789,7 +795,7 @@ function setUsageValue(usage: CockpitConfig["usage"], field: string, value: Json
 }
 
 function validValue(key: CockpitSettingKey, value: JsonValue): boolean {
-	if (["enabled", "staticMode", "pinEditorBottom", "doubleEscapeClearInput", "fullscreenInput", "copyOnSelect", "historyEnabled", "quietMode", "todoExpanded", "hideNativeAgents"].includes(key)) return typeof value === "boolean";
+	if (["enabled", "staticMode", "pinEditorBottom", "doubleEscapeClearInput", "fullscreenInput", "copyOnSelect", "historyEnabled", "quietMode", "todoExpanded", "todoDurationChart", "hideNativeAgents"].includes(key)) return typeof value === "boolean";
 	if (key === "sidebar.width") return typeof value === "number" && Number.isSafeInteger(value) && value >= 32 && value <= 56;
 	if (key === "title.maxLength") return typeof value === "number" && Number.isSafeInteger(value) && value >= 20 && value <= 200;
 	if (key === "title.generationModel") return typeof value === "string";

@@ -28,7 +28,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { toolCallLine, toolResultLine, resultSummary } from "../quiet-render.ts";
 import { checkGhAvailable, showGhHint } from "./web-access/github-api.ts";
 import { getAgentOutputPath, formatAgentMatchListing, resolveAgentOutput } from "../teammate/agent-output-store.ts";
-import { createSessionHistoryInventoryProvider } from "./session-history.ts";
+import { createCompactHistoryInventoryProvider } from "./session-history.ts";
 import {
   SessionHistoryService,
   parseSessionHistoryUri,
@@ -463,7 +463,7 @@ export async function resolveResource(
       const sessionUri = uri.trim().replace(/^session:\/\//i, "session://");
       const parsedSession = parseSessionHistoryUri(sessionUri);
       // Resource deliberately supports only an exact visible entry. A bare
-      // session URI belongs to session_history discovery/read_turn and would
+      // session URI belongs to compact_history discovery/read_turn and would
       // otherwise make it too easy to widen a resource read accidentally.
       if (!parsedSession || !parsedSession.entryId || !safeSessionResourceIdentifier(parsedSession.sessionId)
         || !safeSessionResourceIdentifier(parsedSession.entryId)) {
@@ -525,14 +525,14 @@ export function createResourceTool(
 - \`skill://name\` — installed skill's SKILL.md (project .pi/skills, .agents/skills, then home).
 - \`rule://name\` — project rule files (agents → AGENTS.md, rules → RULES.md, cursor → .cursorrules, cline → .clinerules, plus .pi/rules/ and docs/).
 - \`agent://<id>[/key[/index[/field]]]\` — published teammate output. Exact correlation and publication IDs resolve globally across workspace buckets; task-name discovery remains scoped to the caller's workspace/subtree and may return a disambiguation list. A correlation ID follows that task's latest publication, while a publication ID pins one immutable result; use task names only to discover candidates, then retain an exact ID. Bare \`agent://<id>\` returns the whole output; optional path segments load one nested field, e.g. \`agent://catalog-audit-correlation/findings/0/path\`. Do NOT append \`/json\`. Agent resources are not cached: reuse content already present in the current context instead of loading the same immutable URI again.
-- \`session://<sessionId>/entry/<entryId>\` — one visible active-chain entry from the host-authorized session history. Obtain exact URIs from \`session_history\`; arbitrary transcript paths, hidden rows, thinking blocks, abandoned branches, and tool-call arguments are rejected or omitted. Session reads are never cached.
+- \`session://<sessionId>/entry/<entryId>\` — one visible active-chain entry from the host-authorized current-session compact history. Obtain exact URIs from \`compact_history\`; arbitrary transcript paths, non-current sessions, hidden rows, thinking blocks, abandoned branches, and tool-call arguments are rejected or omitted. Session reads are never cached.
 
 pr:// and issue:// require the gh CLI (https://cli.github.com). Results are cached in memory for 5 minutes — re-reads within the window return the cached copy, so refetch after state changes only when the window has expired.
 Read local files with the built-in read tool — resource is for protocol resources only.`,
     promptSnippet: "Use resource for pr://, issue://, skill://, rule://, agent://, session:// protocol resources; use read for local files.",
     promptGuidelines: [
       "pr://, issue://, skill://, rule://, agent://, session:// protocol resources are read via the resource tool — do not pass them to the built-in read tool (read is for local files).",
-      "For session:// entry resources, first obtain the exact URI from session_history; reads revalidate the host-authorized active chain and never expose paths, hidden rows, thinking, or tool arguments.",
+      "For session:// entry resources, first obtain the exact URI from compact_history; reads revalidate the host-authorized current-session active chain and never expose paths, hidden rows, thinking, or tool arguments.",
       "For teammate results, use task names only to discover candidates; retain an exact correlation ID for that task's latest result or a publication ID for one immutable result. Exact IDs resolve globally; task-name lookup stays workspace-scoped.",
       "Load the smallest required agent://<exact-id>/key/index subtree, never append /json, and do not reload an unchanged immutable URI already present in the current context.",
     ],
@@ -544,7 +544,7 @@ Read local files with the built-in read tool — resource is for protocol resour
       const cwd = ctx.cwd;
       const sessionHistory = options.sessionHistory
         ?? options.sessionHistoryFactory?.(ctx)
-        ?? createSessionHistoryInventoryProvider(ctx, "all");
+        ?? createCompactHistoryInventoryProvider(ctx);
       const { content, title, cached } = await resolveResource(uri, cwd, signal, {
         sessionHistory,
       });

@@ -1,11 +1,10 @@
 /**
- * session_history — bounded, read-only discovery of host-authorized Pi
- * session transcripts.
+ * compact_history — bounded, read-only recovery history for the current Pi
+ * session.
  *
- * The teammate package owns transcript parsing and projection. Flow only builds
- * a fresh, host-authorized inventory from the current Pi session context and
- * passes it through the public v1 session-history API. No path supplied by the
- * model is ever accepted, retained, or returned.
+ * The teammate package owns transcript parsing and projection. Flow supplies
+ * only the host-authorized active session file; no model-provided scope,
+ * session id, or path is accepted, retained, or returned.
  */
 
 import { readdir } from "node:fs/promises";
@@ -22,6 +21,7 @@ import {
   MAX_SESSION_HISTORY_QUERY_CHARS,
   SESSION_HISTORY_INCLUDES,
   SessionHistoryService,
+  type SessionHistoryEntry,
   type SessionHistoryInclude,
   type SessionHistoryInventoryEntry,
   type SessionHistoryInventorySource,
@@ -32,6 +32,9 @@ import { toolCallLine, toolResultLine, resultSummary } from "../quiet-render.ts"
 export const SESSION_HISTORY_SCOPES = ["current_session", "workspace_sessions", "teammates"] as const;
 export type SessionHistoryScope = (typeof SESSION_HISTORY_SCOPES)[number];
 type InventoryScope = SessionHistoryScope | "all";
+
+export const COMPACT_HISTORY_ACTIONS = ["timeline", "search", "read_turn", "read_checkpoint"] as const;
+export type CompactHistoryAction = (typeof COMPACT_HISTORY_ACTIONS)[number];
 
 const MAX_DISCOVERY_DIRECTORIES = MAX_SESSION_HISTORY_FILES * 4;
 const MAX_DISCOVERY_PATHS = MAX_SESSION_HISTORY_FILES * 8;
@@ -44,26 +47,20 @@ function StringEnum<T extends readonly string[]>(values: T, description?: string
   });
 }
 
-/** Action contract intentionally contains only read operations. */
-export const SessionHistoryParams = Type.Object({
+/** Action contract intentionally contains only current-session read operations. */
+export const CompactHistoryParams = Type.Object({
   action: StringEnum(
-    ["list_sessions", "search", "read_turn"] as const,
-    "Bounded read-only session history action.",
-  ),
-  scope: Type.Optional(
-    StringEnum(
-      SESSION_HISTORY_SCOPES,
-      "History scope: current Pi session, workspace session directory, or teammate sessions.",
-    ),
+    COMPACT_HISTORY_ACTIONS,
+    "Current-session compact recovery action.",
   ),
   query: Type.Optional(
     Type.String({ minLength: 1, maxLength: MAX_SESSION_HISTORY_QUERY_CHARS, description: "Literal, case-insensitive search text (required for search)." }),
   ),
-  sessionId: Type.Optional(
-    Type.String({ minLength: 1, maxLength: 512, description: "Exact session id (required for read_turn)." }),
-  ),
   turn: Type.Optional(
     Type.Integer({ minimum: 0, description: "1-based turn number; 0 is the preamble (required for read_turn)." }),
+  ),
+  checkpointId: Type.Optional(
+    Type.String({ minLength: 1, maxLength: 512, description: "Checkpoint id or compaction entry id (required for read_checkpoint)." }),
   ),
   include: Type.Optional(
     Type.Array(
@@ -72,16 +69,14 @@ export const SessionHistoryParams = Type.Object({
         minItems: 1,
         maxItems: SESSION_HISTORY_INCLUDES.length,
         uniqueItems: true,
-        description: "Categories to include. Defaults to user, assistant, visible_custom, and compaction; tool_result is explicit only.",
+        description: "Categories for search/read_turn. Defaults to user, assistant, visible_custom, and compaction; tool_result is explicit only.",
       },
     ),
   ),
   limit: Type.Optional(
-    Type.Integer({ minimum: 1, maximum: MAX_SESSION_HISTORY_MATCHES, description: "Single result limit for sessions, matches, or selected-turn entries." }),
+    Type.Integer({ minimum: 1, maximum: MAX_SESSION_HISTORY_MATCHES, description: "Result limit for timeline, search, or selected-turn entries." }),
   ),
 }, { additionalProperties: false });
-
-export type SessionHistoryAction = "list_sessions" | "search" | "read_turn";
 
 /** Minimal context shape used by the inventory builder, kept structural so it
  * can be used by focused tests without constructing a full ExtensionContext. */
@@ -89,20 +84,22 @@ export interface SessionHistoryHostContext {
   cwd?: string;
   sessionManager?: {
     getSessionFile?: () => string | undefined;
+    getSessionId?: () => string | undefined;
   };
 }
 
-export interface SessionHistoryToolDetails {
-  action: SessionHistoryAction;
-  scope: SessionHistoryScope;
+export interface CompactHistoryToolDetails {
+  action: CompactHistoryAction;
   [key: string]: unknown;
 }
 
-export interface SessionHistoryToolOptions {
-  /** Test/host inventory override. The default is a fresh inventory from `ctx`. */
+export interface CompactHistoryToolOptions {
+  /** Test/host inventory override. The default is the active file from `ctx`. */
   inventory?: SessionHistoryInventorySource;
-  /** Optional scoped inventory factory for hosts with their own authorization. */
-  inventoryFactory?: (scope: SessionHistoryScope, ctx: ExtensionContext) => SessionHistoryInventorySource;
+  /** Optional current-session inventory factory for hosts with their own authorization. */
+  inventoryFactory?: (ctx: ExtensionContext) => SessionHistoryInventorySource;
+  /** Defense-in-depth gate for a definition retained after the opt-in mode is disabled. */
+  isEnabled?: (ctx: ExtensionContext) => boolean;
 }
 
 /**
@@ -228,23 +225,16 @@ export function createSessionHistoryInventoryProvider(
   };
 }
 
-/** Friendly alias for hosts/tests that prefer an inventory-named function. */
-export const sessionHistoryInventoryProvider = createSessionHistoryInventoryProvider;
-
-function defaultScope(_action: SessionHistoryAction): SessionHistoryScope {
-  return "current_session";
+/** Active-session inventory used by compact_history and session:// resources. */
+export function createCompactHistoryInventoryProvider(
+  ctx: SessionHistoryHostContext,
+): SessionHistoryInventorySource {
+  return createSessionHistoryInventoryProvider(ctx, "current_session");
 }
 
-function actionValue(value: unknown): SessionHistoryAction | undefined {
-  return value === "list_sessions" || value === "search" || value === "read_turn"
-    ? value
-    : undefined;
-}
-
-function scopeValue(value: unknown, action: SessionHistoryAction): SessionHistoryScope | undefined {
-  if (value === undefined) return defaultScope(action);
-  return SESSION_HISTORY_SCOPES.includes(value as SessionHistoryScope)
-    ? value as SessionHistoryScope
+function actionValue(value: unknown): CompactHistoryAction | undefined {
+  return COMPACT_HISTORY_ACTIONS.includes(value as CompactHistoryAction)
+    ? value as CompactHistoryAction
     : undefined;
 }
 
@@ -329,111 +319,224 @@ function errorMessage(error: unknown): string {
   return message.replace(/(?:[A-Za-z]:[\\/]|\\\\)[^\s"']+|\/(?:[^\s"']+)/g, "[path omitted]");
 }
 
-export async function executeSessionHistory(
+function capsuleField(text: string, label: string): string | undefined {
+  const prefix = `- ${label}:`;
+  const line = text.split("\n").find((candidate) => candidate.startsWith(prefix));
+  const value = line?.slice(prefix.length).trim();
+  return value ? value.slice(0, 512) : undefined;
+}
+
+function checkpointProjection(entry: SessionHistoryEntry): Record<string, unknown> {
+  const checkpointId = capsuleField(entry.text, "Checkpoint ID");
+  const previousCheckpointId = capsuleField(entry.text, "Previous Checkpoint");
+  const newContext = entry.text.includes("Maestro New Context Recovery Capsule");
+  const firstLine = entry.text
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.length > 0 && !line.startsWith("<recovery_capsule") && line !== "IMPORTANT:");
+  return {
+    sessionId: entry.sessionId,
+    entryId: entry.entryId,
+    turn: entry.turn,
+    resourceUri: entry.resourceUri,
+    timestamp: entry.timestamp,
+    source: newContext ? "new-context" : "compaction",
+    ...(checkpointId ? { checkpointId } : {}),
+    ...(previousCheckpointId ? { previousCheckpointId } : {}),
+    summary: checkpointId ? `Checkpoint ${checkpointId}` : (firstLine ?? "Compaction checkpoint").slice(0, 240),
+  };
+}
+
+function hostCurrentSessionId(ctx: SessionHistoryHostContext): string | undefined {
+  try {
+    const value = ctx.sessionManager?.getSessionId?.();
+    if (typeof value !== "string") return undefined;
+    return safeIdentifier(value, "current session id");
+  } catch {
+    return undefined;
+  }
+}
+
+async function currentSessionId(
+  ctx: SessionHistoryHostContext,
+  service: SessionHistoryService,
+  signal?: AbortSignal,
+): Promise<{ sessionId?: string; fallback?: Record<string, unknown> }> {
+  const hostId = hostCurrentSessionId(ctx);
+  if (hostId) return { sessionId: hostId };
+  const listed = sanitizeResult(await service.list({ limit: 1, signal }));
+  const sessionId = listed.sessions[0]?.sessionId;
+  if (sessionId) return { sessionId };
+  const { sessions: _sessions, ...metrics } = listed;
+  return { fallback: metrics as unknown as Record<string, unknown> };
+}
+
+function missingCurrentSession(
+  fallback: Record<string, unknown> | undefined,
+  selection: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    version: 1,
+    ...(fallback ?? { filesRead: 0, bytesRead: 0, truncated: false, omissions: [] }),
+    ...selection,
+    found: false,
+  };
+}
+
+export async function executeCompactHistory(
   params: Record<string, unknown>,
   ctx: ExtensionContext,
-  options: SessionHistoryToolOptions = {},
+  options: CompactHistoryToolOptions = {},
   signal?: AbortSignal,
-): Promise<AgentToolResult<SessionHistoryToolDetails>> {
+): Promise<AgentToolResult<CompactHistoryToolDetails>> {
   const action = actionValue(params.action);
-  const scope = scopeValue(params.scope, action ?? "list_sessions");
-  if (!action || !scope) {
+  if (!action) {
     return {
-      content: [{ type: "text", text: "Invalid session_history action or scope." }],
+      content: [{ type: "text", text: "Invalid compact_history action." }],
       isError: true,
-      details: { action: (action ?? "list_sessions") as SessionHistoryAction, scope: scope ?? "current_session", error: "invalid action or scope" },
-    } as unknown as AgentToolResult<SessionHistoryToolDetails>;
+      details: { action: "timeline", error: "invalid action" },
+    } as unknown as AgentToolResult<CompactHistoryToolDetails>;
   }
 
   try {
-    if (signal?.aborted) throw signal.reason ?? new Error("Session history read aborted.");
+    if (signal?.aborted) throw signal.reason ?? new Error("Compact history read aborted.");
+    if (options.isEnabled && !options.isEnabled(ctx)) {
+      return {
+        content: [{ type: "text", text: "Compact History is unavailable because compaction.newContext.enabled is false." }],
+        isError: true,
+        details: { action, error: "new context disabled" },
+      } as unknown as AgentToolResult<CompactHistoryToolDetails>;
+    }
     const source = options.inventory
-      ?? options.inventoryFactory?.(scope, ctx)
-      ?? createSessionHistoryInventoryProvider(ctx, scope);
+      ?? options.inventoryFactory?.(ctx)
+      ?? createCompactHistoryInventoryProvider(ctx);
     const service = new SessionHistoryService(source);
     const scanOptions = boundedOptions(params);
     let result: Record<string, unknown>;
-    if (action === "list_sessions") {
-      result = sanitizeResult(await service.list({ ...scanOptions, signal })) as unknown as Record<string, unknown>;
+
+    if (action === "timeline") {
+      const timeline = sanitizeResult(await service.compactions({ limit: scanOptions.limit, signal }));
+      result = {
+        ...timeline,
+        checkpoints: timeline.checkpoints.map(checkpointProjection),
+      } as unknown as Record<string, unknown>;
     } else if (action === "search") {
       const query = safeQuery(params.query);
       result = sanitizeResult(await service.search(query, { ...scanOptions, signal })) as unknown as Record<string, unknown>;
-    } else {
-      const sessionId = safeIdentifier(params.sessionId, "sessionId");
+    } else if (action === "read_turn") {
       const turn = safeTurn(params.turn);
-      const readResult = sanitizeResult(await service.read({
-        sessionId,
-        turn,
-        ...scanOptions,
-        signal,
-      }));
-      // The service read result contains only the selected turn/entries and
-      // scan metrics; it never widens into a full-session transcript dump.
-      result = readResult as unknown as Record<string, unknown>;
+      const current = await currentSessionId(ctx, service, signal);
+      result = current.sessionId
+        ? sanitizeResult(await service.read({ sessionId: current.sessionId, turn, ...scanOptions, signal })) as unknown as Record<string, unknown>
+        : missingCurrentSession(current.fallback, { selectedTurn: turn });
+    } else {
+      const checkpointId = safeIdentifier(params.checkpointId, "checkpointId");
+      const current = await currentSessionId(ctx, service, signal);
+      if (!current.sessionId) {
+        result = missingCurrentSession(current.fallback, { checkpointId });
+      } else {
+        const direct = sanitizeResult(await service.read({
+          sessionId: current.sessionId,
+          entryId: checkpointId,
+          include: ["compaction"],
+          limit: 1,
+          signal,
+        }));
+        if (direct.found && direct.selectedEntry) {
+          result = { ...direct, checkpointId } as unknown as Record<string, unknown>;
+        } else {
+          const search = sanitizeResult(await service.search(checkpointId, {
+            include: ["compaction"],
+            limit: MAX_SESSION_HISTORY_MATCHES,
+            signal,
+          }));
+          let selected: Record<string, unknown> | undefined;
+          for (const match of search.matches) {
+            const candidate = sanitizeResult(await service.read({
+              sessionId: current.sessionId,
+              entryId: match.entryId,
+              include: ["compaction"],
+              limit: 1,
+              signal,
+            }));
+            const exact = candidate.selectedEntry?.entries.some(
+              (entry) => capsuleField(entry.text, "Checkpoint ID") === checkpointId,
+            );
+            if (candidate.found && candidate.selectedEntry && exact) {
+              selected = { ...candidate, checkpointId } as unknown as Record<string, unknown>;
+              break;
+            }
+          }
+          result = selected ?? {
+            version: search.version,
+            ...(search.generation === undefined ? {} : { generation: search.generation }),
+            checkpointId,
+            found: false,
+            filesRead: search.filesRead,
+            bytesRead: search.bytesRead,
+            truncated: search.truncated,
+            omissions: search.omissions,
+          };
+        }
+      }
     }
-    const details = { action, scope, result, ...result } as SessionHistoryToolDetails;
+
+    const details = { action, result, ...result } as CompactHistoryToolDetails;
     return {
       content: [{ type: "text", text: serializeResult(result) }],
       details,
-    } as unknown as AgentToolResult<SessionHistoryToolDetails>;
+    } as unknown as AgentToolResult<CompactHistoryToolDetails>;
   } catch (error) {
     if (signal?.aborted) throw signal.reason ?? error;
     const message = errorMessage(error);
     return {
       content: [{ type: "text", text: message }],
       isError: true,
-      details: { action, scope, error: message },
-    } as unknown as AgentToolResult<SessionHistoryToolDetails>;
+      details: { action, error: message },
+    } as unknown as AgentToolResult<CompactHistoryToolDetails>;
   }
 }
 
-export function createSessionHistoryTool(
-  options: SessionHistoryToolOptions = {},
-): ToolDefinition<typeof SessionHistoryParams> {
+export function createCompactHistoryTool(
+  options: CompactHistoryToolOptions = {},
+): ToolDefinition<typeof CompactHistoryParams> {
   return {
-    name: "session_history",
-    label: "Session History",
-    description: `Read bounded Pi session history through the host-authorized teammate v1 service. This tool is read-only and accepts no transcript paths, writes, caches, or indexes.
+    name: "compact_history",
+    label: "Compact History",
+    description: `Read bounded recovery history for the current Pi session only. The host selects the active transcript; this tool accepts no session id, scope, transcript path, writes, caches, or indexes.
 
 Actions:
-- list_sessions: list validated sessions and exact session:// URIs.
-- search: literal case-insensitive search over visible active-chain text; each match includes an exact session://<sessionId>/entry/<entryId> URI.
-- read_turn: read one session turn by exact sessionId and 1-based turn number (0 is the preamble).
+- timeline: list the newest current-session compaction checkpoints and exact session:// entry URIs.
+- search: literal case-insensitive search over visible active-chain text in the current session.
+- read_turn: read one current-session turn by its 1-based turn number (0 is the preamble).
+- read_checkpoint: read one compaction entry by checkpoint id or timeline entry id.
 
-Scopes:
-- current_session: only the current Pi session transcript.
-- workspace_sessions: transcripts in the current Pi session directory.
-- teammates: transcripts in the bounded teammate-session directories for the current session.
-
-The include categories are user, assistant, visible_custom, compaction, and tool_result; the default is the first four and tool_result requires explicit inclusion. Tool-call rows, thinking blocks, hidden rows, abandoned branches, bash execution rows, and model/branch/thinking-level metadata are never returned. Every result includes bounded scan metrics, truncation state, and omission reasons. Use the resource tool with a returned exact session entry URI to re-read one visible entry; arbitrary filesystem paths are rejected.`,
-    promptSnippet: "Bounded read-only session history discovery with exact session entry resource URIs",
+The visible categories are user, assistant, visible_custom, compaction, and tool_result; tool_result is explicit only. Tool-call rows, thinking blocks, hidden rows, abandoned branches, bash execution rows, and model/branch/thinking metadata are never returned. Use resource with an exact returned session://<sessionId>/entry/<entryId> URI when only one durable entry is needed.`,
+    promptSnippet: "Current-session compact recovery timeline and bounded visible history",
     promptGuidelines: [
-      "Use list_sessions before read_turn when the exact session id or turn is unknown.",
-      "Use search for literal case-insensitive discovery; preserve the exact match URI for resource round-trips.",
-      "Choose current_session, workspace_sessions, or teammates explicitly when the narrower view is sufficient.",
-      "Never infer or provide a session transcript filesystem path; session history is host-authorized and read-only.",
+      "Recover from the capsule and live Todo/Goal/Plan/Workflow state first; use compact_history only when a required current-session fact is absent.",
+      "Use timeline to identify a checkpoint, search to locate a visible fact, and read_turn/read_checkpoint only for the smallest required slice.",
+      "Preserve exact session:// entry URIs for resource reads; never infer or provide a transcript filesystem path.",
+      "compact_history never scans workspace or teammate sessions and never accepts a session id from the model.",
     ],
-    parameters: SessionHistoryParams,
+    parameters: CompactHistoryParams,
     executionMode: "sequential",
     async execute(_id, params, signal, _onUpdate, ctx) {
-      return executeSessionHistory(params as Record<string, unknown>, ctx, options, signal);
+      return executeCompactHistory(params as Record<string, unknown>, ctx, options, signal);
     },
     renderShell: "self",
     renderCall(args, theme, ctx) {
       if (ctx?.isPartial === false) return new Text("", 0, 0);
-      const action = String(args.action ?? "?");
-      const scope = args.scope ? ` ${String(args.scope)}` : "";
-      return toolCallLine(theme, "session_history", `${action}${scope}`);
+      return toolCallLine(theme, "compact_history", String(args.action ?? "?"));
     },
     renderResult(result, opts, theme, ctx) {
       if (opts.isPartial) return new Text("", 0, 0);
       const isError = (result as { isError?: boolean }).isError === true;
       const action = String(ctx.args.action ?? "?");
-      const scope = ctx.args.scope ? ` ${String(ctx.args.scope)}` : "";
       return toolResultLine(theme, {
-        name: "session_history",
+        name: "compact_history",
         ok: !isError,
-        arg: `${action}${scope}`,
+        arg: action,
         summary: resultSummary(result),
         expanded: opts.expanded,
         detail: result.content.find((item) => item.type === "text" && "text" in item)?.text,
@@ -442,9 +545,9 @@ The include categories are user, assistant, visible_custom, compaction, and tool
   };
 }
 
-export function registerSessionHistoryTool(
+export function registerCompactHistoryTool(
   pi: ExtensionAPI,
-  options: SessionHistoryToolOptions = {},
+  options: CompactHistoryToolOptions = {},
 ): void {
-  pi.registerTool(createSessionHistoryTool(options) as never);
+  pi.registerTool(createCompactHistoryTool(options) as never);
 }

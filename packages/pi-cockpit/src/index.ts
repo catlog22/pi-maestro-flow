@@ -357,6 +357,27 @@ export default function (pi: ExtensionAPI): void {
 	// thinking label / teammate tree still stream above the visible viewport.
 	let stabilityTui: TUI | undefined;
 	let viewportStabilityPatch: ViewportStabilityPatch | undefined;
+	const ensureViewportStability = (tui: TUI): void => {
+		// Native fullscreen owns a fixed application viewport and has no main-screen
+		// applyLineResets hook. Do not cache that expected miss: the same dynamic TUI
+		// reference can later dispatch to the regular renderer.
+		if (tui.mode === "fullscreen") return;
+		if (stabilityTui === tui && viewportStabilityPatch?.active) return;
+		viewportStabilityPatch?.detach();
+		const patch = attachViewportStability(tui);
+		viewportStabilityPatch = patch;
+		stabilityTui = patch.active ? tui : undefined;
+	};
+	const requestCapturedRender = (): void => {
+		try {
+			const tui = capturedTui;
+			if (!tui) return;
+			ensureViewportStability(tui);
+			tui.requestRender();
+		} catch {
+			// tui may be gone between sessions
+		}
+	};
 	// True while Cockpit owns a capturing overlay (bash jobs, theme picker,
 	// settings panel). Split-pane resize must yield to the overlay's focus and
 	// refuse to start while one is open; otherwise the resize listener — a
@@ -455,13 +476,7 @@ export default function (pi: ExtensionAPI): void {
 	// while the model thinks, then the settled duration. Pi owns the fold.
 	const thinkingTimer = new ThinkingFoldTimer({
 		getTui: () => capturedTui,
-		requestRender: () => {
-			try {
-				capturedTui?.requestRender();
-			} catch {
-				// tui may be gone between sessions
-			}
-		},
+		requestRender: requestCapturedRender,
 		getBaseLabel: () => (config.quietMode ? quietThinkingLabel() : undefined),
 		getGlyphs: () => resolveGlyphs(config.icons.mode),
 		isThinkingHidden: () => (lastCtx ? readHideThinkingBlock(lastCtx.cwd) : false),
@@ -601,7 +616,7 @@ export default function (pi: ExtensionAPI): void {
 			if (refreshAmbientSurface) refreshAmbient(now);
 			if (agentPriorityChanged) publishUiOwnership();
 			try {
-				capturedTui?.requestRender();
+				requestCapturedRender();
 				activeAgentOverlayRender?.();
 				sidebarController?.requestRender();
 			} catch {
@@ -691,6 +706,7 @@ export default function (pi: ExtensionAPI): void {
 			sidebar: ownsDock,
 			goal: ownsDock,
 			todoExpanded: effectiveTodoExpanded(),
+			todoDurationChart: config.todoDurationChart,
 			quiet: config.enabled && config.quietMode,
 			quietSymbols: config.quietSymbols,
 			static: config.staticMode,
@@ -746,13 +762,6 @@ export default function (pi: ExtensionAPI): void {
 		}
 	};
 
-
-	const ensureViewportStability = (tui: TUI): void => {
-		if (stabilityTui === tui) return;
-		viewportStabilityPatch?.detach();
-		viewportStabilityPatch = attachViewportStability(tui);
-		stabilityTui = tui;
-	};
 
 	const sessionListOverlayActive = (): boolean =>
 		capturingOverlayActive || ambientKeysShouldYield(capturedTui);
@@ -1916,6 +1925,7 @@ export default function (pi: ExtensionAPI): void {
 			sidebar: false,
 			goal: false,
 			todoExpanded: config.todoExpanded,
+			todoDurationChart: config.todoDurationChart,
 			quiet: false,
 			quietSymbols: config.quietSymbols,
 			static: config.staticMode,

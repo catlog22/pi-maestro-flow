@@ -48,6 +48,17 @@ function toolResult(id: string, parentId: string, text: string): unknown {
     message: { role: "toolResult", toolCallId: "tool-1", toolName: "Read", content: [{ type: "text", text }], isError: false, timestamp: 3 },
   };
 }
+function compaction(id: string, parentId: string, timestamp: string, summary: string): unknown {
+  return {
+    type: "compaction",
+    id,
+    parentId,
+    timestamp,
+    summary,
+    firstKeptEntryId: parentId,
+    tokensBefore: 1_000,
+  };
+}
 function inventory(...paths: string[]): SessionHistoryInventoryEntry[] {
   return paths.map((file) => ({ path: file, fileName: path.basename(file) }));
 }
@@ -83,6 +94,26 @@ test("projects only approved default categories from the active chain", async ()
   const serialized = JSON.stringify(read);
   assert.doesNotMatch(serialized, /secret-argument|provider\/model|secret-provider|secret-model|secret-level|secret branch|toolCallId|toolName|isError/);
   assert.equal(read.turn?.entries[1]?.resourceUri, sessionEntryUri("session-active", "a2"));
+});
+
+test("compaction timeline is newest-first, bounded, and keeps exact entry URIs", async () => {
+  const dir = tmpDir();
+  const file = writeTranscript(dir, "compact.jsonl", [
+    header("compact-session"),
+    user("u1", null, "first phase"),
+    compaction("cp-1", "u1", "2026-08-01T00:00:02.000Z", "first compact"),
+    user("u2", "cp-1", "second phase"),
+    compaction("cp-2", "u2", "2026-08-01T00:00:04.000Z", "second compact"),
+  ]);
+  const service = new SessionHistoryService(inventory(file));
+
+  const result = await service.compactions({ limit: 1 });
+  assert.equal(result.checkpointCount, 2);
+  assert.deepEqual(result.checkpoints.map((entry) => entry.entryId), ["cp-2"]);
+  assert.equal(result.checkpoints[0]?.resourceUri, sessionEntryUri("compact-session", "cp-2"));
+  assert.equal(result.checkpoints[0]?.kind, "compaction");
+  assert.equal(result.truncated, true);
+  assert.equal(result.omissions.some((item) => item.reason === "result-limit"), true);
 });
 
 test("literal search uses categorical include and tool_result is explicit only", async () => {

@@ -20,6 +20,9 @@ const NEW_CONTEXT_INSTRUCTIONS = [
   "Do not call a model to summarize the conversation.",
 ].join("\n");
 
+/** Private child→root broker used to refresh the recovery capsule at settlement. */
+export const NEW_CONTEXT_RECOVERY_BROKER_NAME = "maestro-new-context-recovery";
+
 export interface NewContextScheduleInput {
   source: "todo-transition" | "tool";
   actorId: string;
@@ -42,11 +45,18 @@ export interface NewContextScheduleReceipt {
   coalesced: boolean;
 }
 
+export type NewContextControllerContext = Pick<
+  ExtensionContext,
+  "cwd" | "sessionManager" | "compact" | "ui" | "hasPendingMessages"
+>;
+
 export interface NewContextController {
   onSessionStart(ctx: Pick<ExtensionContext, "sessionManager">): void;
   onSessionShutdown(): void;
   schedule(input: NewContextScheduleInput, ctx: Pick<ExtensionContext, "cwd" | "sessionManager">): NewContextScheduleReceipt;
-  onAgentSettled(ctx: Pick<ExtensionContext, "cwd" | "sessionManager" | "compact" | "ui" | "hasPendingMessages">): boolean;
+  onAgentSettled(ctx: NewContextControllerContext): Promise<boolean>;
+  /** Retry a deferred request only after the host proves the prior compaction settled. */
+  onCompactionSettled(ctx: NewContextControllerContext): Promise<boolean>;
   consume(trigger: NewContextCompactionTrigger, ctx: Pick<ExtensionContext, "sessionManager">): ScheduledNewContextRequest | undefined;
   hasPending(): boolean;
 }
@@ -56,6 +66,11 @@ export interface NewContextControllerOptions {
     ctx: Pick<ExtensionContext, "sessionManager" | "ui" | "hasPendingMessages">,
     request: ScheduledNewContextRequest,
   ) => void;
+  /** Refresh root-authorized state immediately before a child reset owns a lease. */
+  refreshRecoveryState?: (
+    request: ScheduledNewContextRequest,
+    ctx: NewContextControllerContext,
+  ) => MaestroRecoveryState | undefined | Promise<MaestroRecoveryState | undefined>;
 }
 
 function sessionIdOf(ctx: Pick<ExtensionContext, "sessionManager">): string {
@@ -106,10 +121,16 @@ export function createNewContextController(
   let nextRequestId = 0;
   let pending: ScheduledNewContextRequest | undefined;
   let inFlight: ScheduledNewContextRequest | undefined;
+  let settlingRequestId: number | undefined;
+  let awaitingCompactionSettlement = false;
+  let deferredNoticeKey: string | undefined;
 
   const reset = (sessionId?: string) => {
     lifecycleGeneration += 1;
     activeSessionId = sessionId;
+    settlingRequestId = undefined;
+    awaitingCompactionSettlement = false;
+    deferredNoticeKey = undefined;
     pending = undefined;
     inFlight = undefined;
   };
@@ -127,6 +148,202 @@ export function createNewContextController(
       );
     }
   };
+  const isRequestLifecycleCurrent = (
+    request: ScheduledNewContextRequest,
+    ctx: Pick<ExtensionContext, "sessionManager">,
+  ): boolean => request.lifecycleGeneration === lifecycleGeneration
+    && request.sessionId === activeSessionId
+    && request.sessionId === sessionIdOf(ctx);
+  const isCurrentRequest = (
+    request: ScheduledNewContextRequest,
+    ctx: Pick<ExtensionContext, "sessionManager">,
+  ): boolean => isRequestLifecycleCurrent(request, ctx)
+    && pending?.requestId === request.requestId;
+  const hasUniquePayload = (request: ScheduledNewContextRequest): boolean =>
+    request.carryForward !== undefined || request.resourceUris.length > 0;
+  const coalesceIntoEquivalentPlan = (
+    request: ScheduledNewContextRequest,
+    ctx: Pick<ExtensionContext, "ui">,
+  ): boolean => {
+    const trigger = arbiter.currentTrigger();
+    if (arbiter.currentOwner() !== "plan-handoff"
+      || trigger?.owner !== "plan-handoff"
+      || trigger.reason !== "clean-context"
+      || hasUniquePayload(request)) return false;
+    pending = undefined;
+    awaitingCompactionSettlement = false;
+    deferredNoticeKey = undefined;
+    ctx.ui.notify("New-context request was coalesced into the equivalent deterministic Plan context handoff.", "info");
+    return true;
+  };
+
+  async function tryStart(ctx: NewContextControllerContext): Promise<boolean> {
+    const request = pending;
+    if (!request || inFlight || settlingRequestId !== undefined || awaitingCompactionSettlement) return false;
+    const sessionId = sessionIdOf(ctx);
+    if (request.lifecycleGeneration !== lifecycleGeneration
+      || request.sessionId !== sessionId
+      || activeSessionId !== sessionId
+      || (!request.recoveryState && getTodoCompactionSnapshot().revision < request.todoRevision)) {
+      pending = undefined;
+      awaitingCompactionSettlement = false;
+      ctx.ui.notify("New-context request was discarded because the session generation changed.", "warning");
+      return false;
+    }
+    if (ctx.hasPendingMessages?.()) {
+      pending = undefined;
+      awaitingCompactionSettlement = false;
+      deferredNoticeKey = undefined;
+      ctx.ui.notify("New-context request was cancelled because a newer message is pending; continuing with the current context.", "info");
+      return false;
+    }
+    try {
+      requireNewContextCompactionEnabled(ctx.cwd);
+    } catch (error) {
+      pending = undefined;
+      awaitingCompactionSettlement = false;
+      ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
+      continueAfterReset(ctx, request);
+      return false;
+    }
+
+    const activeOwner = arbiter.currentOwner();
+    if (activeOwner) {
+      if (coalesceIntoEquivalentPlan(request, ctx)) return false;
+      const noticeKey = `active:${activeOwner}`;
+      if (deferredNoticeKey !== noticeKey) {
+        deferredNoticeKey = noticeKey;
+        const ownerLabel = activeOwner === "plan-handoff" ? "Plan" : activeOwner;
+        ctx.ui.notify(
+          `New-context request was deferred until the active ${ownerLabel} compaction settles; Todo state was preserved.`,
+          "info",
+        );
+      }
+      return false;
+    }
+
+    const tombstone = arbiter.timeoutTombstone();
+    if (tombstone) {
+      // Time alone cannot prove the timed-out host compaction stopped. Keep the
+      // request pending until session_compact/session_compact_failed acknowledges settlement.
+      awaitingCompactionSettlement = true;
+      const noticeKey = "tombstone";
+      if (deferredNoticeKey !== noticeKey) {
+        deferredNoticeKey = noticeKey;
+        ctx.ui.notify(
+          `New-context request is waiting for a timed-out compaction to settle (~${Math.ceil(tombstone.remainingMs / 1000)}s hold left).`,
+          "info",
+        );
+      }
+      return false;
+    }
+
+    // Child sessions must not use the transition-time root snapshot. Refresh
+    // immediately before the lease is acquired so the deterministic capsule
+    // reflects all root mutations that occurred while the child was running.
+    if (options.refreshRecoveryState) {
+      settlingRequestId = request.requestId;
+      try {
+        const recoveryState = await options.refreshRecoveryState(request, ctx);
+        if (!recoveryState) throw new Error("Root-authorized recovery state was unavailable");
+        if (!isCurrentRequest(request, ctx)) return false;
+        request.recoveryState = recoveryState;
+        request.todoRevision = recoveryState.todo.revision;
+      } catch (error) {
+        if (isCurrentRequest(request, ctx)) {
+          pending = undefined;
+          awaitingCompactionSettlement = false;
+          ctx.ui.notify(
+            `New-context reset could not refresh root recovery state; continuing with the current context: ${error instanceof Error ? error.message : String(error)}`,
+            "warning",
+          );
+          continueAfterReset(ctx, request);
+        }
+        return false;
+      } finally {
+        if (settlingRequestId === request.requestId) settlingRequestId = undefined;
+      }
+    }
+    if (!isCurrentRequest(request, ctx)) return false;
+
+    const trigger: NewContextCompactionTrigger = {
+      owner: "new-context",
+      requestId: request.requestId,
+      source: request.source,
+    };
+    const lease = arbiter.request("new-context", trigger);
+    if (!lease) {
+      // The arbiter can become busy while the child/root snapshot refresh is
+      // in flight. Preserve pending and classify the denial from the state
+      // observed after the failed request; no transition is consumed here.
+      const deniedOwner = arbiter.currentOwner();
+      if (deniedOwner && coalesceIntoEquivalentPlan(request, ctx)) return false;
+      const deniedTombstone = deniedOwner ? undefined : arbiter.timeoutTombstone();
+      if (deniedTombstone) {
+        awaitingCompactionSettlement = true;
+        const noticeKey = "tombstone";
+        if (deferredNoticeKey !== noticeKey) {
+          deferredNoticeKey = noticeKey;
+          ctx.ui.notify(
+            `New-context request is waiting for a timed-out compaction to settle (~${Math.ceil(deniedTombstone.remainingMs / 1000)}s hold left).`,
+            "info",
+          );
+        }
+      } else if (deniedOwner) {
+        const noticeKey = `active:${deniedOwner}`;
+        if (deferredNoticeKey !== noticeKey) {
+          deferredNoticeKey = noticeKey;
+          const ownerLabel = deniedOwner === "plan-handoff" ? "Plan" : deniedOwner;
+          ctx.ui.notify(
+            `New-context request was deferred until the active ${ownerLabel} compaction settles; Todo state was preserved.`,
+            "info",
+          );
+        }
+      } else {
+        ctx.ui.notify("New-context request could not acquire its compaction lease; Todo state was preserved.", "warning");
+      }
+      return false;
+    }
+
+    awaitingCompactionSettlement = false;
+    deferredNoticeKey = undefined;
+    // This is the sole pending→inFlight transition. Never clear pending before
+    // arbiter.request succeeds: an active owner or tombstone must be retriable.
+    pending = undefined;
+    inFlight = request;
+    try {
+      ctx.compact({
+        customInstructions: lease.tagInstructions(NEW_CONTEXT_INSTRUCTIONS),
+        onComplete() {
+          lease.release();
+          if (request.lifecycleGeneration !== lifecycleGeneration
+            || request.sessionId !== activeSessionId
+            || request.sessionId !== sessionIdOf(ctx)
+            || ctx.hasPendingMessages?.()) return;
+          continueAfterReset(ctx, request);
+        },
+        onError(error) {
+          if (inFlight?.requestId === request.requestId) inFlight = undefined;
+          lease.release();
+          if (!isRequestLifecycleCurrent(request, ctx)) return;
+          ctx.ui.notify(`New-context reset failed; continuing with the current context: ${error.message}`, "warning");
+          continueAfterReset(ctx, request);
+        },
+      });
+      return true;
+    } catch (error) {
+      if (inFlight?.requestId === request.requestId) inFlight = undefined;
+      lease.release();
+      if (isRequestLifecycleCurrent(request, ctx)) {
+        ctx.ui.notify(
+          `New-context reset failed; continuing with the current context: ${error instanceof Error ? error.message : String(error)}`,
+          "warning",
+        );
+        continueAfterReset(ctx, request);
+      }
+      return false;
+    }
+  }
 
   return {
     onSessionStart(ctx) {
@@ -174,77 +391,13 @@ export function createNewContextController(
       return { requestId, coalesced: false };
     },
 
-    onAgentSettled(ctx) {
-      const request = pending;
-      if (!request) return false;
-      pending = undefined;
-      const sessionId = sessionIdOf(ctx);
-      if (request.lifecycleGeneration !== lifecycleGeneration
-        || request.sessionId !== sessionId
-        || activeSessionId !== sessionId
-        || (!request.recoveryState && getTodoCompactionSnapshot().revision < request.todoRevision)) {
-        ctx.ui.notify("New-context request was discarded because the session generation changed.", "warning");
-        return false;
-      }
-      try {
-        requireNewContextCompactionEnabled(ctx.cwd);
-      } catch (error) {
-        ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
-        continueAfterReset(ctx, request);
-        return false;
-      }
-      if (arbiter.currentOwner() === "plan-handoff") {
-        const planTrigger = arbiter.currentTrigger();
-        if (planTrigger?.owner === "plan-handoff" && planTrigger.reason === "clean-context") {
-          ctx.ui.notify("New-context request was coalesced into the equivalent deterministic Plan context handoff.", "info");
-          return false;
-        }
-        pending = request;
-        ctx.ui.notify("New-context request was deferred until the active Plan compaction settles.", "info");
-        return false;
-      }
-      const trigger: NewContextCompactionTrigger = {
-        owner: "new-context",
-        requestId: request.requestId,
-        source: request.source,
-      };
-      const lease = arbiter.request("new-context", trigger);
-      if (!lease) {
-        const activeOwner = arbiter.currentOwner();
-        ctx.ui.notify("New-context request could not start because another compaction is active; Todo state was preserved.", "warning");
-        if (!activeOwner) continueAfterReset(ctx, request);
-        return false;
-      }
-      inFlight = request;
-      try {
-        ctx.compact({
-          customInstructions: lease.tagInstructions(NEW_CONTEXT_INSTRUCTIONS),
-          onComplete() {
-            lease.release();
-            if (request.lifecycleGeneration !== lifecycleGeneration
-              || request.sessionId !== activeSessionId
-              || request.sessionId !== sessionIdOf(ctx)
-              || ctx.hasPendingMessages?.()) return;
-            continueAfterReset(ctx, request);
-          },
-          onError(error) {
-            if (inFlight?.requestId === request.requestId) inFlight = undefined;
-            lease.release();
-            ctx.ui.notify(`New-context reset failed; continuing with the current context: ${error.message}`, "warning");
-            continueAfterReset(ctx, request);
-          },
-        });
-        return true;
-      } catch (error) {
-        if (inFlight?.requestId === request.requestId) inFlight = undefined;
-        lease.release();
-        ctx.ui.notify(
-          `New-context reset failed; continuing with the current context: ${error instanceof Error ? error.message : String(error)}`,
-          "warning",
-        );
-        continueAfterReset(ctx, request);
-        return false;
-      }
+    async onAgentSettled(ctx) {
+      return tryStart(ctx);
+    },
+
+    async onCompactionSettled(ctx) {
+      awaitingCompactionSettlement = false;
+      return tryStart(ctx);
     },
 
     consume(trigger, ctx) {
@@ -313,13 +466,13 @@ function taskBlock(task: TodoTask, contextBytes: number, summaryBytes: number): 
 /** Build the non-model recovery capsule used as Pi's required non-empty compaction summary. */
 export function buildNewContextRecoveryCapsule(details: MaestroCompactionDetails): string {
   const lines: string[] = [
-    "<recovery_capsule version=\"1\">",
+    "<recovery_capsule version=\"2\">",
     "IMPORTANT:",
     "- This is the authoritative structured recovery state.",
     "- Continue from the active Todo's exact next action.",
     "- Use resource for listed URIs.",
-    "- If a required fact or URI is absent, use session_history; do not guess.",
-    "- Capsule: Maestro New Context Recovery Capsule v1; no model summary was generated.",
+    "- If a required current-session fact or URI is absent, use compact_history; do not guess.",
+    "- Capsule: Maestro New Context Recovery Capsule v2; no model summary was generated.",
     "",
     "## Session",
     `- Session ID: ${boundedUtf8(details.sessionId, 512)}`,
@@ -443,7 +596,7 @@ export function buildNewContextRecoveryCapsule(details: MaestroCompactionDetails
     `- active=${omitted.active}, runnable=${omitted.runnable}, blocked=${omitted.blocked}, completed=${omitted.completed}, transitionResources=${omitted.transitionResources}, references=${omitted.references}`,
     "",
     "## Recovery Hint",
-    "Use `todo list`/`todo get` for live task state. Use `session_history` for bounded visible transcript recovery and `resource` for exact agent://, session://, pr://, issue://, skill://, or rule:// references.",
+    "Use `todo list`/`todo get` for live task state. Use `compact_history` for bounded current-session recovery and `resource` for exact agent://, session://, pr://, issue://, skill://, or rule:// references.",
     "</recovery_capsule>",
   );
 

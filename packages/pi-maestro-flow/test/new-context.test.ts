@@ -10,12 +10,14 @@ import {
   newContextFirstKeptEntryId,
 } from "../src/compaction/new-context.ts";
 import {
+  blocksNativeCompactionFallback,
   CompactionArbiter,
   compactionRequestFromInstructions,
 } from "../src/compaction/compaction-arbiter.ts";
 import {
   createMaestroCompaction,
   type MaestroCompactionDetails,
+  type MaestroRecoveryState,
 } from "../src/compaction/maestro-compaction.ts";
 import type { TodoTask } from "../src/tools/todo.ts";
 import { createNewContextTool } from "../src/tools/new-context.ts";
@@ -145,7 +147,7 @@ test("new-context scheduler coalesces same-actor inputs and consumes only its fe
     }, harness.ctx as never);
     assert.equal(second.requestId, first.requestId);
     assert.equal(second.coalesced, true);
-    assert.equal(controller.onAgentSettled(harness.ctx as never), true);
+    assert.equal(await controller.onAgentSettled(harness.ctx as never), true);
 
     const request = compactionRequestFromInstructions(harness.compactOptions?.customInstructions);
     assert.deepEqual(request, { owner: "new-context", id: 1 });
@@ -159,6 +161,190 @@ test("new-context scheduler coalesces same-actor inputs and consumes only its fe
     harness.compactOptions?.onComplete?.();
     assert.equal(continuations, 1);
     assert.equal(arbiter.currentOwner(), undefined);
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+test("new-context cancels a pending reset when a newer message is queued", async () => {
+  const fixture = await enabledProject();
+  try {
+    const controller = createNewContextController(new CompactionArbiter());
+    const harness = context(fixture.cwd);
+    controller.onSessionStart(harness.ctx as never);
+    controller.schedule({ source: "tool", actorId: "root" }, harness.ctx as never);
+
+    const pendingMessageContext = {
+      ...harness.ctx,
+      hasPendingMessages: () => true,
+    };
+    assert.equal(await controller.onAgentSettled(pendingMessageContext as never), false);
+    assert.equal(controller.hasPending(), false);
+    assert.equal(harness.compactOptions, undefined);
+    assert.match(harness.notifications.join("\n"), /newer message is pending/);
+    assert.match(harness.notifications.join("\n"), /continuing with the current context/);
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+test("new-context keeps pending across active owners and retries after settlement", async () => {
+  const fixture = await enabledProject();
+  try {
+    const arbiter = new CompactionArbiter();
+    const controller = createNewContextController(arbiter);
+    const harness = context(fixture.cwd);
+    controller.onSessionStart(harness.ctx as never);
+    const native = arbiter.observeStart(undefined);
+    assert.equal(native.allowed, true);
+    controller.schedule({ source: "tool", actorId: "root" }, harness.ctx as never);
+    assert.equal(await controller.onAgentSettled(harness.ctx as never), false);
+    assert.equal(controller.hasPending(), true, "active-owner denial must not consume the request");
+    assert.equal(harness.compactOptions, undefined);
+
+    native.finalize("success");
+    assert.equal(await controller.onAgentSettled(harness.ctx as never), true);
+    const request = compactionRequestFromInstructions(harness.compactOptions?.customInstructions);
+    assert.deepEqual(request, { owner: "new-context", id: 2 });
+    const observed = arbiter.observeStart(request);
+    assert.equal(observed.allowed, true);
+    if (observed.trigger?.owner !== "new-context") assert.fail("missing new-context trigger");
+    assert.ok(controller.consume(observed.trigger, harness.ctx as never));
+    harness.compactOptions?.onComplete?.();
+    assert.equal(await controller.onAgentSettled(harness.ctx as never), false, "a consumed request cannot start twice");
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+test("new-context tombstone waits for explicit host settlement acknowledgement", async () => {
+  const fixture = await enabledProject();
+  try {
+    const arbiter = new CompactionArbiter(100);
+    const controller = createNewContextController(arbiter);
+    const harness = context(fixture.cwd);
+    controller.onSessionStart(harness.ctx as never);
+    arbiter.observeStart(undefined);
+    await new Promise((resolve) => setTimeout(resolve, 110));
+    assert.ok(arbiter.timeoutTombstone());
+    controller.schedule({ source: "tool", actorId: "root" }, harness.ctx as never);
+    assert.equal(await controller.onAgentSettled(harness.ctx as never), false);
+    assert.equal(controller.hasPending(), true);
+    await new Promise((resolve) => setTimeout(resolve, 110));
+    assert.equal(await controller.onAgentSettled(harness.ctx as never), false, "elapsed time alone must not prove settlement");
+    assert.equal(harness.compactOptions, undefined);
+    arbiter.complete("success");
+    assert.equal(await controller.onCompactionSettled(harness.ctx as never), true);
+    const request = compactionRequestFromInstructions(harness.compactOptions?.customInstructions);
+    if (!request || request.owner !== "new-context") assert.fail("missing acknowledged new-context lease");
+    const observed = arbiter.observeStart(request);
+    assert.ok(controller.consume(observed.trigger!, harness.ctx as never));
+    harness.compactOptions?.onComplete?.();
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+test("new-context drops stale error callbacks after a session generation change", async () => {
+  const fixture = await enabledProject();
+  try {
+    let continuations = 0;
+    const controller = createNewContextController(new CompactionArbiter(), {
+      continueAfterReset: () => { continuations += 1; },
+    });
+    const harness = context(fixture.cwd);
+    controller.onSessionStart(harness.ctx as never);
+    controller.schedule({ source: "tool", actorId: "root" }, harness.ctx as never);
+    assert.equal(await controller.onAgentSettled(harness.ctx as never), true);
+    controller.onSessionStart({ sessionManager: { getSessionId: () => "session-2" } } as never);
+    harness.compactOptions?.onError?.(new Error("late session-1 failure"));
+    assert.equal(continuations, 0);
+    assert.doesNotMatch(harness.notifications.join("\n"), /late session-1 failure/);
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+test("new-context post-refresh denial still coalesces an equivalent Plan handoff", async () => {
+  const fixture = await enabledProject();
+  try {
+    const runtime = details([task({ id: "1", subject: "active", status: "in_progress" })]);
+    const arbiter = new CompactionArbiter();
+    let planLease: ReturnType<CompactionArbiter["request"]> | undefined;
+    const controller = createNewContextController(arbiter, {
+      refreshRecoveryState: async () => {
+        planLease = arbiter.request("plan-handoff", { owner: "plan-handoff", reason: "clean-context" });
+        return runtime;
+      },
+    });
+    const harness = context(fixture.cwd);
+    controller.onSessionStart(harness.ctx as never);
+    controller.schedule({ source: "tool", actorId: "child" }, harness.ctx as never);
+    assert.equal(await controller.onAgentSettled(harness.ctx as never), false);
+    assert.equal(controller.hasPending(), false);
+    assert.match(harness.notifications.join("\n"), /equivalent deterministic Plan/);
+    planLease?.release();
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+test("new-context recovery policy blocks native model summarization fallback", () => {
+  assert.equal(blocksNativeCompactionFallback({ owner: "new-context", requestId: 1, source: "tool" }), true);
+  assert.equal(blocksNativeCompactionFallback({
+    owner: "mid-turn",
+    recovery: "provider-pressure",
+    estimatedTokens: 100,
+    contextWindow: 100,
+    effectiveThresholdTokens: 90,
+    configuredThresholdTokens: 90,
+    effectiveReserveTokens: 10,
+    configuredReserveTokens: 10,
+    reason: "configured",
+  }), true);
+  assert.equal(blocksNativeCompactionFallback({ owner: "plan-handoff", reason: "clean-context" }), false);
+});
+
+test("child recovery state refresh happens at lease time and fails closed", async () => {
+  const fixture = await enabledProject();
+  try {
+    const runtime = details([task({ id: "1", subject: "active", status: "in_progress" })]);
+    const refreshed: MaestroRecoveryState = {
+      todo: { ...runtime.todo, revision: 27 },
+      goal: runtime.goal!,
+      plan: runtime.plan!,
+      workflow: runtime.workflow,
+    };
+    let refreshCalls = 0;
+    const arbiter = new CompactionArbiter();
+    const controller = createNewContextController(arbiter, {
+      refreshRecoveryState: async () => {
+        refreshCalls += 1;
+        return refreshed;
+      },
+    });
+    const harness = context(fixture.cwd);
+    controller.onSessionStart(harness.ctx as never);
+    controller.schedule({ source: "tool", actorId: "child", recoveryState: runtime }, harness.ctx as never);
+    assert.equal(await controller.onAgentSettled(harness.ctx as never), true);
+    assert.equal(refreshCalls, 1);
+    const request = compactionRequestFromInstructions(harness.compactOptions?.customInstructions);
+    if (!request || request.owner !== "new-context") assert.fail("missing refreshed new-context lease");
+    const observed = arbiter.observeStart(request);
+    const consumed = controller.consume(observed.trigger!, harness.ctx as never);
+    assert.equal(consumed?.recoveryState?.todo.revision, 27);
+    harness.compactOptions?.onError?.(new Error("test cleanup"));
+
+    const failedHarness = context(fixture.cwd, "session-2");
+    const failed = createNewContextController(new CompactionArbiter(), {
+      refreshRecoveryState: async () => undefined,
+    });
+    failed.onSessionStart(failedHarness.ctx as never);
+    failed.schedule({ source: "tool", actorId: "child" }, failedHarness.ctx as never);
+    assert.equal(await failed.onAgentSettled(failedHarness.ctx as never), false);
+    assert.equal(failed.hasPending(), false);
+    assert.equal(failedHarness.compactOptions, undefined);
+    assert.match(failedHarness.notifications.join("\n"), /could not refresh root recovery state/);
   } finally {
     await fixture.dispose();
   }
@@ -178,7 +364,7 @@ test("new-context scheduler is actor/session fenced and Plan handoff ownership w
     );
     const planLease = arbiter.request("plan-handoff", { owner: "plan-handoff", reason: "clean-context" });
     assert.ok(planLease);
-    assert.equal(controller.onAgentSettled(harness.ctx as never), false);
+    assert.equal(await controller.onAgentSettled(harness.ctx as never), false);
     assert.equal(harness.compactOptions, undefined);
     assert.match(harness.notifications.join("\n"), /equivalent deterministic Plan/);
     assert.equal(controller.hasPending(), false);
@@ -187,11 +373,24 @@ test("new-context scheduler is actor/session fenced and Plan handoff ownership w
     controller.schedule({ source: "tool", actorId: "root" }, harness.ctx as never);
     const preservingPlan = arbiter.request("plan-handoff", { owner: "plan-handoff", reason: "preserve-approved-plan" });
     assert.ok(preservingPlan);
-    assert.equal(controller.onAgentSettled(harness.ctx as never), false);
+    assert.equal(await controller.onAgentSettled(harness.ctx as never), false);
     assert.equal(controller.hasPending(), true);
     assert.match(harness.notifications.join("\n"), /deferred until the active Plan compaction settles/);
     preservingPlan.release();
-    assert.equal(controller.onAgentSettled(harness.ctx as never), true);
+    assert.equal(await controller.onAgentSettled(harness.ctx as never), true);
+    harness.compactOptions?.onError?.(new Error("test cleanup"));
+
+    controller.schedule({ source: "tool", actorId: "root", carryForward: "payload must survive" }, harness.ctx as never);
+    const payloadPlan = arbiter.request("plan-handoff", { owner: "plan-handoff", reason: "clean-context" });
+    assert.ok(payloadPlan);
+    assert.equal(await controller.onAgentSettled(harness.ctx as never), false);
+    assert.equal(controller.hasPending(), true, "Plan coalescing must preserve requests with unique payload");
+    payloadPlan.release();
+    assert.equal(await controller.onAgentSettled(harness.ctx as never), true);
+    const payloadRequest = compactionRequestFromInstructions(harness.compactOptions?.customInstructions);
+    if (!payloadRequest || payloadRequest.owner !== "new-context") assert.fail("missing payload new-context lease");
+    const payloadObserved = arbiter.observeStart(payloadRequest);
+    assert.ok(controller.consume(payloadObserved.trigger!, harness.ctx as never)?.carryForward);
     harness.compactOptions?.onError?.(new Error("test cleanup"));
 
     controller.schedule({ source: "tool", actorId: "root" }, harness.ctx as never);
@@ -226,6 +425,16 @@ test("standalone new_context fails closed while the config gate is disabled", as
   }
 });
 
+test("standalone new_context guidance treats Todo pressure as a post-advance decision", () => {
+  const tool = createNewContextTool(createNewContextController(new CompactionArbiter()), "root");
+  const guidance = tool.promptGuidelines?.join("\n") ?? "";
+  assert.match(guidance, /pressure advisory arrives after its advance has committed/);
+  assert.match(guidance, /task activated in that same result/);
+  assert.match(guidance, /call this standalone tool/);
+  assert.match(guidance, /Never treat the advisory as a retroactive transition/);
+  assert.match(guidance, /do not reset when it reports critical pressure/);
+});
+
 test("recovery capsule is deterministic, priority ordered, bounded, and includes recovery identities", () => {
   const runtime = details([
     task({ id: "2", subject: "teammate active", status: "in_progress", assignee: { kind: "teammate", id: "a", label: "agent" }, context: "next child action" }),
@@ -241,8 +450,9 @@ test("recovery capsule is deterministic, priority ordered, bounded, and includes
   assert.match(capsule, /Workflow Session: workflow-1/);
   assert.match(capsule, /Handoff Key: handoff-1/);
   assert.match(capsule, /agent:\/\/publication-1/);
-  assert.match(capsule, /session_history/);
-  assert.match(capsule, /<recovery_capsule version="1">/);
+  assert.match(capsule, /compact_history/);
+  assert.doesNotMatch(capsule, /session_history/);
+  assert.match(capsule, /<recovery_capsule version="2">/);
   assert.ok(capsule.endsWith("</recovery_capsule>"));
 
   const manyActive = details(Array.from({ length: 8 }, (_, index) => task({

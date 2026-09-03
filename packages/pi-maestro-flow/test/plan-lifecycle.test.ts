@@ -96,6 +96,7 @@ function createHarness(
     deferCompactionComplete?: boolean;
     onCompactionRequested?: () => void;
     sendUserMessageError?: string;
+    confirmationResult?: unknown;
     workflowConfirmation?: () => {
       current?: { sessionId: string; intent: string; available: boolean; reason?: string };
       allowNew: boolean;
@@ -140,6 +141,9 @@ function createHarness(
       return runtime.discussionInput;
     },
     async custom(factory: Function) {
+      if (Object.prototype.hasOwnProperty.call(runtime, "confirmationResult")) {
+        return runtime.confirmationResult;
+      }
       return new Promise((resolve) => {
         const component = factory(tui, theme, {}, resolve);
         if (confirmationInputs) {
@@ -1054,6 +1058,43 @@ test("Continue discussion returns feedback through the tool result without injec
     assert.equal(harness.aborts, 0);
     assert.match(confirmed.content[0]?.text ?? "", /Plan feedback returned/);
     assert.match(confirmed.content[0]?.text ?? "", /Keep the API compatible/);
+  } finally {
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("malformed confirmation UI results cannot approve a Plan", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-confirm-malformed-"));
+  const harness = createHarness(
+    root,
+    false,
+    false,
+    false,
+    false,
+    "malformed-confirmation",
+    undefined,
+    false,
+    { todoKeys: [] },
+    undefined,
+    { confirmationResult: {} },
+  );
+  try {
+    await onSessionStartPlan(harness.ctx);
+    await execute(harness, "plan-enter");
+    await execute(harness, "plan-update", { markdown: "# Unapproved Plan" });
+    const confirmed = await execute(harness, "plan-confirm");
+
+    assert.equal(confirmed.details.approved, false);
+    assert.equal(getMode(), "plan");
+    assert.equal(harness.aborts, 1);
+    const store = new PlanStore(harness.ctx.cwd, {
+      rootDir: join(root, "global"),
+      session: { id: harness.ctx.sessionManager.getSessionId() },
+    });
+    const loaded = await store.load();
+    assert.equal(loaded.manifest.status, "draft");
+    assert.deepEqual(loaded.manifest.approvals, []);
   } finally {
     onSessionShutdownPlan(harness.ctx);
     await rm(root, { recursive: true, force: true });

@@ -30,6 +30,15 @@ test("staticMode invalid values fall back to the caller's base", () => {
 	assert.equal(mergeConfig(enabledBase, { staticMode: false }).staticMode, false);
 });
 
+test("todo duration chart defaults on and persists an explicit toggle", () => {
+	assert.equal(DEFAULT_CONFIG.todoDurationChart, true);
+	assert.equal(mergeConfig(DEFAULT_CONFIG, {}).todoDurationChart, true);
+	assert.equal(mergeConfig(DEFAULT_CONFIG, { todoDurationChart: false }).todoDurationChart, false);
+	assert.equal(mergeConfig(DEFAULT_CONFIG, { todoDurationChart: "off" }).todoDurationChart, true);
+	const document = mergeConfigDocument({}, { ...DEFAULT_CONFIG, todoDurationChart: false });
+	assert.equal(document.todoDurationChart, false);
+});
+
 test("currency merges as usd|cny and rate clamps to a positive number", () => {
 	assert.equal(DEFAULT_CONFIG.currency, "usd");
 	assert.equal(DEFAULT_CONFIG.currencyRate, 7.2);

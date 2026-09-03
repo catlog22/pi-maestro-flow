@@ -1813,11 +1813,15 @@ async function withWorkspaceOwnerClaimMutex<T>(
 
     const current = await inspectBoundedJson(lockPath, OWNER_CLAIM_LOCK_FILE_MAX_BYTES);
     const record = validateWorkspaceOwnerClaimLockRecord(current?.value);
+    // PIDs are recyclable, so acquiredAt is also a hard lease bound for valid locks.
+    const recordStale = record !== undefined
+      && (Math.abs(acquiredAt - record.acquiredAt) > OWNER_CLAIM_LOCK_STALE_MS
+        || !processIsAlive(record.pid));
     const changedAt = current ? Math.max(current.mtimeMs, current.ctimeMs) : acquiredAt;
     const malformedStale = current !== undefined
       && record === undefined
       && Math.abs(acquiredAt - changedAt) > OWNER_CLAIM_LOCK_STALE_MS;
-    if (current && (record && !processIsAlive(record.pid) || malformedStale)) {
+    if (current && (recordStale || malformedStale)) {
       await quarantinePrivateFileIfUnchanged(lockPath, current, OWNER_CLAIM_LOCK_FILE_MAX_BYTES).catch(() => false);
       continue;
     }

@@ -195,6 +195,8 @@ export interface CockpitUiOwnershipV1 {
 	/** True only while the dock renders Maestro Goal state. */
 	goal: boolean;
 	todoExpanded: boolean;
+	/** Whether Flow should render the duration chart after a terminal todo advance. */
+	todoDurationChart?: boolean;
 	quiet: boolean;
 	quietSymbols: "check" | "dot";
 	/** Static mode: per-second churn (elapsed ticks, spinners) is suppressed. */

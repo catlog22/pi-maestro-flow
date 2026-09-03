@@ -1192,6 +1192,11 @@ async function reviewPlan(
       exitMode(ctx, operation);
       return { approved: false, exited: true };
     }
+    if (action !== "execute") {
+      abortPlanTurn(ctx);
+      ctx.ui.notify("Plan confirmation closed without an explicit Execute decision.", "warning");
+      return { approved: false, exited: false };
+    }
 
     const markdown = latestPlan ?? "";
     const executionChoice = decision.execution ?? { backend: "standalone", context: "current" };

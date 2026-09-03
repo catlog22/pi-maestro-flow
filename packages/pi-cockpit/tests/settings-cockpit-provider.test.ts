@@ -70,6 +70,10 @@ test("Cockpit provider describes editable settings and host-owned actions", asyn
 		assert.equal(pinEditor?.descriptionKey, "cockpit.pinEditorBottom.description");
 		assert.ok(description.settings.some((setting) => setting.key === "staticMode" && setting.editor.kind === "boolean"));
 		assert.ok(description.settings.some((setting) => setting.key === "toolPalette" && setting.editor.kind === "enum"), "toolPalette now editable via the provider");
+		const durationChart = description.settings.find((setting) => setting.key === "todoDurationChart");
+		assert.equal(durationChart?.editor.kind, "boolean");
+		assert.equal(durationChart?.defaultValue, true);
+		assert.equal(durationChart?.activation, "live");
 		const stackStyle = description.settings.find((setting) => setting.key === "stackStyle");
 		assert.equal(stackStyle?.editor.kind, "enum");
 		assert.equal(stackStyle?.defaultValue, "classic");

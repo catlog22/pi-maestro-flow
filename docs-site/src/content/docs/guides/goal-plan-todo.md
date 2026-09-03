@@ -129,6 +129,22 @@ todo({ action: "next" })
 
 `advance` 按调用 actor 隔离：它只能完成或激活分配给调用者的任务，但完成仍会全局解除跨角色依赖。一个逻辑目标需要多个角色时，使用一个父任务和多个分别分配的角色子任务，不让多个角色共同写一个 Todo 的终态。Canonical Workflow Session/Run 的镜像 Todo 仍由 Run lifecycle 驱动。
 
+### Todo 阶段切换到 New Context
+
+启用 `compaction.newContext.enabled` 后，completion-form `advance` 可通过 `transition: "new_context"` 在任务提交后调度确定性上下文重置：
+
+```javascript
+todo({
+  action: "advance",
+  id: "abc123",
+  summary: "实现阶段完成并通过聚焦测试",
+  resourceUris: ["agent://<publication-id>"],
+  transition: "new_context"
+})
+```
+
+只在当前阶段已经完整持久化、下一阶段弱耦合时使用；普通 token 压力仍由 automatic compact 处理。完整决策表、recovery capsule 和失败语义见 [New Context 确定性上下文重置](/guides/new-context)。
+
 ### 批量创建（DAG 依赖）
 
 ```javascript
@@ -169,6 +185,7 @@ run-control({ argv: ["run", "edit", "quality-review", "--after", "current"] })
 
 ## 下一步
 
+- [New Context 确定性上下文重置](/guides/new-context) — Todo 阶段边界的确定性 reset
 - [并行多智能体调度](/guides/teammate-dispatch) — 与 todo 配合的执行引擎
 - [权限系统](/guides/permissions) — Plan 模式与权限的关系
 - [知识系统](/guides/knowledge) — 目标驱动的知识沉淀

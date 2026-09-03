@@ -60,6 +60,7 @@ export interface SessionHistoryOptions {
 export type SessionHistoryListOptions = SessionHistoryOptions;
 export type SessionHistorySearchOptions = SessionHistoryOptions;
 export type SessionHistoryReadOptions = SessionHistoryOptions;
+export type SessionHistoryCompactionOptions = Omit<SessionHistoryOptions, "include">;
 export interface SessionHistorySession {
     sessionId: string;
     resourceUri: string;
@@ -117,6 +118,12 @@ export interface SessionHistorySearchResult extends ScanMetrics {
     matches: readonly SessionHistorySearchMatch[];
     matchCount: number;
 }
+export interface SessionHistoryCompactionResult extends ScanMetrics {
+    version: typeof SESSION_HISTORY_VERSION;
+    generation?: number;
+    checkpoints: readonly SessionHistoryEntry[];
+    checkpointCount: number;
+}
 export interface SessionHistoryEntryRead {
     sessionId: string;
     entryId: string;
@@ -154,6 +161,8 @@ export declare class SessionHistoryService {
     listSessions(options?: SessionHistoryListOptions): Promise<SessionHistoryListResult>;
     search(query: string, options?: SessionHistorySearchOptions): Promise<SessionHistorySearchResult>;
     searchSessions(query: string, options?: SessionHistorySearchOptions): Promise<SessionHistorySearchResult>;
+    compactions(options?: SessionHistoryCompactionOptions): Promise<SessionHistoryCompactionResult>;
+    listCompactions(options?: SessionHistoryCompactionOptions): Promise<SessionHistoryCompactionResult>;
     read(sessionId: string, options?: SessionHistoryReadOptions): Promise<SessionHistoryReadResult>;
     read(request: SessionHistoryReadRequest): Promise<SessionHistoryReadResult>;
     readSession(sessionId: string, options?: SessionHistoryReadOptions): Promise<SessionHistoryReadResult>;
@@ -164,6 +173,7 @@ export declare class SessionHistoryService {
 export declare function createSessionHistoryService(source: SessionHistoryInventorySource | SessionHistoryServiceOptions): SessionHistoryService;
 export declare function listSessionHistory(source: SessionHistoryInventorySource | SessionHistoryServiceOptions, options?: SessionHistoryListOptions): Promise<SessionHistoryListResult>;
 export declare function searchSessionHistory(source: SessionHistoryInventorySource | SessionHistoryServiceOptions, query: string, options?: SessionHistorySearchOptions): Promise<SessionHistorySearchResult>;
+export declare function listSessionCompactions(source: SessionHistoryInventorySource | SessionHistoryServiceOptions, options?: SessionHistoryCompactionOptions): Promise<SessionHistoryCompactionResult>;
 export declare function readSessionHistory(source: SessionHistoryInventorySource | SessionHistoryServiceOptions, request: SessionHistoryReadRequest): Promise<SessionHistoryReadResult>;
 export declare function readSessionHistoryEntry(source: SessionHistoryInventorySource | SessionHistoryServiceOptions, sessionId: string, entryId: string, options?: SessionHistoryReadOptions): Promise<SessionHistoryEntryRead | undefined>;
 export declare function readSessionHistoryTurn(source: SessionHistoryInventorySource | SessionHistoryServiceOptions, sessionId: string, turn: number, options?: SessionHistoryReadOptions): Promise<SessionHistoryTurn | undefined>;

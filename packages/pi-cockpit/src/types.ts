@@ -260,6 +260,8 @@ export interface CockpitConfig {
 	agentsMode: ViewMode;
 	todoMode: ViewMode;
 	todoExpanded: boolean;
+	/** Show the duration chart after a terminal todo advance. */
+	todoDurationChart: boolean;
 	/** Above-editor stack projection: classic Todo/Agents widgets or the unified Zen stack. */
 	stackStyle: StackStyle;
 	hideNativeAgents: boolean;
@@ -318,6 +320,7 @@ export const DEFAULT_CONFIG: CockpitConfig = {
 	agentsMode: "list",
 	todoMode: "list",
 	todoExpanded: false,
+	todoDurationChart: true,
 	stackStyle: "classic",
 	hideNativeAgents: true,
 	pinEditorBottom: false,

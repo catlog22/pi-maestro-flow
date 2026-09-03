@@ -67,6 +67,7 @@ settings
 | `compaction.reserveTokens` | integer | `16384` | 响应预留 Token |
 | `compaction.keepRecentTokens` | integer | `20000` | 保留近期 Token |
 | `compaction.model` | string | 跟随会话 | 压缩摘要模型（`provider/id`） |
+| `compaction.newContext.enabled` | boolean | `false` | 启用显式确定性 reset；不改变自动压缩阈值 |
 | `compaction.soft.enabled` | boolean | `true` | 软压缩开关 |
 | `compaction.soft.nudgeRatio` | number | `0.7` | 提示压缩满度比 |
 | `compaction.soft.pruneRatio` | number | `0.8` | 开始修剪满度比 |

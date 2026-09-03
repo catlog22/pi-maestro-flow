@@ -162,6 +162,18 @@ test("Plan turns select the configured model once and Act restores it in the sam
   assert.deepEqual(harness.selected, ["provider/plan", "provider/act"]);
 });
 
+test("leaving Plan mode restores the Act model when the current agent turn ends", async () => {
+  const harness = createHarness(() => "provider/plan");
+  harness.setPlanMode(true);
+  await harness.fire("before_agent_start");
+  await harness.fire("agent_end");
+  assert.deepEqual(harness.selected, ["provider/plan"]);
+
+  harness.setPlanMode(false);
+  await harness.fire("agent_end");
+  assert.deepEqual(harness.selected, ["provider/plan", "provider/act"]);
+});
+
 test("invalid Plan model restores the Act model and warns without repeated notifications", async () => {
   let configured = "provider/plan";
   const harness = createHarness(() => configured);

@@ -99,6 +99,7 @@ export interface SessionHistoryOptions {
 export type SessionHistoryListOptions = SessionHistoryOptions;
 export type SessionHistorySearchOptions = SessionHistoryOptions;
 export type SessionHistoryReadOptions = SessionHistoryOptions;
+export type SessionHistoryCompactionOptions = Omit<SessionHistoryOptions, "include">;
 
 export interface SessionHistorySession {
   sessionId: string;
@@ -160,6 +161,12 @@ export interface SessionHistorySearchResult extends ScanMetrics {
   query: string;
   matches: readonly SessionHistorySearchMatch[];
   matchCount: number;
+}
+export interface SessionHistoryCompactionResult extends ScanMetrics {
+  version: typeof SESSION_HISTORY_VERSION;
+  generation?: number;
+  checkpoints: readonly SessionHistoryEntry[];
+  checkpointCount: number;
 }
 export interface SessionHistoryEntryRead {
   sessionId: string;
@@ -296,6 +303,26 @@ export class SessionHistoryService {
     return this.search(query, options);
   }
 
+  async compactions(options: SessionHistoryCompactionOptions = {}): Promise<SessionHistoryCompactionResult> {
+    const limit = boundedLimit(options.limit);
+    const scan = await this.#scan(new Set<SessionHistoryInclude>(["compaction"]), options.signal);
+    const all = scan.sessions
+      .flatMap((session) => session.entries)
+      .filter((entry) => entry.kind === "compaction")
+      .sort((left, right) => right.timestamp - left.timestamp || right.entryId.localeCompare(left.entryId));
+    const checkpoints = all.slice(0, limit);
+    return resultWithMetrics(scan, {
+      version: SESSION_HISTORY_VERSION,
+      ...(scan.generation === undefined ? {} : { generation: scan.generation }),
+      checkpoints: Object.freeze(checkpoints),
+      checkpointCount: all.length,
+    }, all.length - checkpoints.length);
+  }
+
+  async listCompactions(options: SessionHistoryCompactionOptions = {}): Promise<SessionHistoryCompactionResult> {
+    return this.compactions(options);
+  }
+
   async read(sessionId: string, options?: SessionHistoryReadOptions): Promise<SessionHistoryReadResult>;
   async read(request: SessionHistoryReadRequest): Promise<SessionHistoryReadResult>;
   async read(
@@ -417,6 +444,9 @@ export function listSessionHistory(source: SessionHistoryInventorySource | Sessi
 }
 export function searchSessionHistory(source: SessionHistoryInventorySource | SessionHistoryServiceOptions, query: string, options: SessionHistorySearchOptions = {}): Promise<SessionHistorySearchResult> {
   return createSessionHistoryService(source).search(query, options);
+}
+export function listSessionCompactions(source: SessionHistoryInventorySource | SessionHistoryServiceOptions, options: SessionHistoryCompactionOptions = {}): Promise<SessionHistoryCompactionResult> {
+  return createSessionHistoryService(source).compactions(options);
 }
 export function readSessionHistory(source: SessionHistoryInventorySource | SessionHistoryServiceOptions, request: SessionHistoryReadRequest): Promise<SessionHistoryReadResult> {
   return createSessionHistoryService(source).read(request);

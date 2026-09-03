@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { TuiMainScreen, type Component, type Terminal, type TUI } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, TuiAltScreen, TuiMainScreen, type Component, type Terminal, type TUI } from "@earendil-works/pi-tui";
 import { attachViewportStability } from "../src/viewport-stability.ts";
 import { createDynamicTuiReference, createSwitchingDynamicTuiReference } from "./dynamic-tui-reference.ts";
 
@@ -29,6 +29,8 @@ interface TuiInternals {
 	previousLines: string[];
 	previousViewportTop: number;
 	previousHeight: number;
+	previousWidth: number;
+	hardwareCursorRow: number;
 }
 
 function methodOwner(target: object, method: string): object {
@@ -57,8 +59,8 @@ function renderHarness(initialLines: string[]) {
 	};
 }
 
-test("equal-height hidden timer changes stay frozen without adding redraw frames", () => {
-	const h = renderHarness(["\x1b[3mteammate · 11s\x1b[23m", "one", "two", "three", "four"]);
+test("equal-height hidden Agent Bar changes stay frozen without replaying scrollback", () => {
+	const h = renderHarness(["▸ @main  @builder · teammate •2", "one", "two", "three", "four"]);
 	const patch = attachViewportStability(h.tui);
 	assert.equal(patch.active, true);
 
@@ -67,44 +69,47 @@ test("equal-height hidden timer changes stay frozen without adding redraw frames
 	assert.equal(h.internals.previousViewportTop, 2);
 	h.terminal.writes.length = 0;
 
-	h.setLines(["\x1b[3mteammate · 38s\x1b[23m", "one", "two", "three", "four"]);
+	h.setLines(["▸ @main  @builder · read path=src •3", "one", "two", "three", "four"]);
 	h.render();
-	assert.equal(h.tui.fullRedraws, 1, "timer-only churn above the viewport must not clear and replay scrollback");
+	assert.equal(h.tui.fullRedraws, 1, "hidden Agent activity must not clear and replay scrollback");
 	assert.equal(h.terminal.writes.some((value) => value.includes("\x1b[3J")), false);
-	assert.equal(h.terminal.writes.some((value) => value.includes("teammate · 38s")), false);
-	assert.ok(h.internals.previousLines[0]?.includes("teammate · 11s"), "the diff baseline must match terminal scrollback");
+	assert.equal(h.terminal.writes.some((value) => value.includes("read path=src")), false);
+	assert.ok(h.internals.previousLines[0]?.includes("@builder · teammate •2"), "the diff baseline must match terminal scrollback");
 });
 
-test("a hidden timer change does not block a visible differential update", () => {
-	const h = renderHarness(["teammate · 11s", "one", "two", "three", "four"]);
+test("a hidden Agent Bar change does not block a visible differential update", () => {
+	const h = renderHarness(["▸ @main  @builder · teammate •2", "one", "two", "three", "four"]);
 	attachViewportStability(h.tui);
 	h.render();
 	h.terminal.writes.length = 0;
 
-	h.setLines(["teammate · 38s", "one", "two", "three", "FOUR"]);
+	h.setLines(["▸ @main  @builder · read path=src •3", "one", "two", "three", "FOUR"]);
 	h.render();
 	assert.equal(h.tui.fullRedraws, 1);
 	assert.equal(h.terminal.writes.some((value) => value.includes("\x1b[3J")), false);
-	assert.equal(h.terminal.writes.some((value) => value.includes("teammate · 38s")), false);
+	assert.equal(h.terminal.writes.some((value) => value.includes("read path=src")), false);
 	assert.equal(h.terminal.writes.some((value) => value.includes("FOUR")), true);
-	assert.ok(h.internals.previousLines[0]?.startsWith("teammate · 11s\x1b[0m"));
+	assert.ok(h.internals.previousLines[0]?.startsWith("▸ @main  @builder · teammate •2\x1b[0m"));
 	assert.ok(h.internals.previousLines[4]?.startsWith("FOUR\x1b[0m"));
 });
 
-test("a hidden non-timer change keeps the native full redraw", () => {
-	const h = renderHarness(["teammate · running", "one", "two", "three", "four"]);
+test("changes at the first visible line remain live", () => {
+	const h = renderHarness(["zero", "one", "two", "three", "four"]);
 	attachViewportStability(h.tui);
 	h.render();
 	h.terminal.writes.length = 0;
 
-	h.setLines(["teammate · completed", "one", "two", "three", "four"]);
+	h.setLines(["ZERO", "ONE", "TWO", "three", "four"]);
 	h.render();
-	assert.equal(h.tui.fullRedraws, 2);
-	assert.equal(h.terminal.writes.some((value) => value.includes("\x1b[3J")), true);
-	assert.equal(h.terminal.writes.some((value) => value.includes("teammate · completed")), true);
+	assert.equal(h.tui.fullRedraws, 1);
+	assert.equal(h.terminal.writes.some((value) => value.includes("\x1b[3J")), false);
+	assert.equal(h.terminal.writes.some((value) => value.includes("TWO")), true);
+	assert.ok(h.internals.previousLines[0]?.startsWith("zero\x1b[0m"));
+	assert.ok(h.internals.previousLines[1]?.startsWith("one\x1b[0m"));
+	assert.ok(h.internals.previousLines[2]?.startsWith("TWO\x1b[0m"));
 });
 
-test("visible Kitty image lines keep hidden changes in the native redraw path", () => {
+test("a Kitty image at the first visible line does not block hidden scrollback preservation", () => {
 	const image = "\x1b_Ga=T,f=100,r=1,i=1;image\x1b\\";
 	const h = renderHarness(["zero", "one", image, "three", "four"]);
 	attachViewportStability(h.tui);
@@ -114,10 +119,10 @@ test("visible Kitty image lines keep hidden changes in the native redraw path", 
 
 	h.setLines(["ZERO", "ONE", image, "three", "four"]);
 	h.render();
-	assert.equal(h.tui.fullRedraws, 2);
-	assert.equal(h.terminal.writes.some((value) => value.includes("\x1b[3J")), true);
-	assert.ok(h.internals.previousLines[0]?.startsWith("ZERO\x1b[0m"));
-	assert.ok(h.internals.previousLines[1]?.startsWith("ONE\x1b[0m"));
+	assert.equal(h.tui.fullRedraws, 1);
+	assert.equal(h.terminal.writes.some((value) => value.includes("\x1b[3J")), false);
+	assert.ok(h.internals.previousLines[0]?.startsWith("zero\x1b[0m"));
+	assert.ok(h.internals.previousLines[1]?.startsWith("one\x1b[0m"));
 	assert.ok(h.internals.previousLines[2]?.includes("\x1b_G"));
 });
 
@@ -131,30 +136,129 @@ test("content height changes retain pi-tui full redraw behavior", () => {
 	h.render();
 	assert.equal(h.tui.fullRedraws, 2);
 	assert.equal(h.terminal.writes.some((value) => value.includes("\x1b[3J")), true);
+	assert.ok(h.internals.previousLines[0]?.startsWith("ZERO\x1b[0m"));
 });
 
-test("terminal height changes leave the old diff baseline untouched", () => {
+test("content shrink retains pi-tui full redraw behavior", () => {
+	const h = renderHarness(["zero", "one", "two", "three", "four", "five"]);
+	attachViewportStability(h.tui);
+	h.render();
+	h.terminal.writes.length = 0;
+
+	h.setLines(["ZERO", "one", "two", "three", "four"]);
+	h.render();
+	assert.equal(h.tui.fullRedraws, 2);
+	assert.equal(h.terminal.writes.some((value) => value.includes("\x1b[3J")), true);
+	assert.ok(h.internals.previousLines[0]?.startsWith("ZERO\x1b[0m"));
+	assert.equal(h.internals.previousLines.length, 5);
+});
+
+test("terminal height changes retain the native canonical redraw", () => {
 	const h = renderHarness(["zero", "one", "two", "three", "four"]);
 	attachViewportStability(h.tui);
 	h.render();
 	assert.equal(h.internals.previousHeight, 3);
-	const oldHiddenLine = h.internals.previousLines[1];
+	h.terminal.writes.length = 0;
 
 	h.terminal.rows = 4;
-	h.internals.applyLineResets(["ZERO", "ONE", "two", "three", "four"]);
-	assert.equal(h.internals.previousLines[1], oldHiddenLine);
+	h.setLines(["ZERO", "ONE", "two", "three", "four"]);
+	h.render();
+	assert.equal(h.tui.fullRedraws, 2);
+	assert.equal(h.terminal.writes.some((value) => value.includes("\x1b[3J")), true);
+	assert.ok(h.internals.previousLines[0]?.startsWith("ZERO\x1b[0m"));
+	assert.ok(h.internals.previousLines[1]?.startsWith("ONE\x1b[0m"));
 });
 
-test("hidden Kitty image controls stay in the native redraw path", () => {
+test("terminal width changes retain the native canonical redraw", () => {
 	const h = renderHarness(["zero", "one", "two", "three", "four"]);
 	attachViewportStability(h.tui);
 	h.render();
+	assert.equal(h.internals.previousWidth, 40);
+	h.terminal.writes.length = 0;
+
+	h.terminal.columns = 50;
+	h.setLines(["ZERO", "ONE", "two", "three", "four"]);
+	h.render();
+	assert.equal(h.tui.fullRedraws, 2);
+	assert.equal(h.terminal.writes.some((value) => value.includes("\x1b[3J")), true);
+	assert.ok(h.internals.previousLines[0]?.startsWith("ZERO\x1b[0m"));
+	assert.ok(h.internals.previousLines[1]?.startsWith("ONE\x1b[0m"));
+});
+
+test("capturing overlays repaint visible rows without replaying hidden main-screen churn", () => {
+	const h = renderHarness(["history old", "one", "two", "three", "four"]);
+	attachViewportStability(h.tui);
+	let overlayText = "overlay old";
+	const handle = h.tui.showOverlay({
+		render: () => [overlayText],
+		invalidate: () => undefined,
+	}, { row: 0, col: 0, width: 20 });
+	h.tui.renderNow();
+	assert.equal(h.internals.previousViewportTop, 2);
+	h.terminal.writes.length = 0;
+
+	h.setLines(["history NEW", "ONE", "two", "three", "four"]);
+	overlayText = "overlay NEW";
+	h.tui.renderNow();
+	assert.equal(h.tui.fullRedraws, 1);
+	assert.equal(h.terminal.writes.some((value) => value.includes("\x1b[3J")), false);
+	assert.equal(h.terminal.writes.some((value) => value.includes("overlay NEW")), true);
+	assert.ok(h.internals.previousLines[0]?.startsWith("history old\x1b[0m"));
+	assert.ok(h.internals.previousLines[1]?.startsWith("one\x1b[0m"));
+
+	handle.hide();
+	h.tui.renderNow();
+});
+
+test("cursor positioning stays live while hidden content remains immutable", () => {
+	const h = renderHarness(["history old", "one", "two", "three", `four${CURSOR_MARKER}`]);
+	attachViewportStability(h.tui);
+	h.render();
+	assert.equal(h.internals.hardwareCursorRow, 4);
+	h.terminal.writes.length = 0;
+
+	h.setLines(["history NEW", "ONE", "two", `three${CURSOR_MARKER}`, "four"]);
+	h.render();
+	assert.equal(h.tui.fullRedraws, 1);
+	assert.equal(h.terminal.writes.some((value) => value.includes("\x1b[3J")), false);
+	assert.equal(h.terminal.writes.some((value) => value.includes("\x1b[1A")), true);
+	assert.equal(h.internals.hardwareCursorRow, 3);
+	assert.ok(h.internals.previousLines[0]?.startsWith("history old\x1b[0m"));
+});
+
+test("hidden Kitty image controls stay in the native redraw path", () => {
 	const oldImage = "\x1b_Ga=T,f=100,r=2,i=1;old\x1b\\";
 	const newImage = "\x1b_Ga=T,f=100,r=2,i=1;new\x1b\\";
-	h.internals.previousLines[0] = oldImage;
+	const h = renderHarness([oldImage, "one", "two", "three", "four"]);
+	attachViewportStability(h.tui);
+	h.render();
+	h.terminal.writes.length = 0;
 
-	h.internals.applyLineResets([newImage, "one", "two", "three", "four"]);
-	assert.equal(h.internals.previousLines[0], oldImage);
+	h.setLines([newImage, "ONE", "two", "three", "four"]);
+	h.render();
+	assert.equal(h.tui.fullRedraws, 2);
+	assert.equal(h.terminal.writes.some((value) => value.includes("\x1b[3J")), true);
+	assert.ok(h.internals.previousLines[0]?.includes("new"));
+	assert.ok(h.internals.previousLines[1]?.startsWith("ONE\x1b[0m"));
+});
+
+test("native fullscreen misses are not cached by a dynamic TUI reference", () => {
+	const fullscreen = new TuiAltScreen(new FakeTerminal());
+	const regular = renderHarness(["zero", "one", "two", "three", "four"]);
+	let current: TUI = fullscreen;
+	const reference = createSwitchingDynamicTuiReference(() => current);
+	assert.equal(attachViewportStability(reference).active, false);
+
+	current = regular.tui;
+	const patch = attachViewportStability(reference);
+	assert.equal(patch.active, true);
+	regular.render();
+	regular.terminal.writes.length = 0;
+	regular.setLines(["ZERO", "ONE", "two", "three", "four"]);
+	regular.render();
+	assert.equal(regular.tui.fullRedraws, 1);
+	assert.equal(regular.terminal.writes.some((value) => value.includes("\x1b[3J")), false);
+	patch.detach();
 });
 
 test("overlapping attachments retain the hook until the last detach", () => {
@@ -220,8 +324,10 @@ test("dynamic TUI references patch the stable renderer prototype without wrappin
 	h.terminal.writes.length = 0;
 	h.setLines(["ZERO", "ONE", "two", "three", "four"]);
 	h.render();
-	assert.equal(h.tui.fullRedraws, 2, "dynamic references preserve the native hidden-line redraw");
-	assert.equal(h.terminal.writes.some((value) => value.includes("\x1b[3J")), true);
+	assert.equal(h.tui.fullRedraws, 1, "dynamic references preserve hidden scrollback without a full redraw");
+	assert.equal(h.terminal.writes.some((value) => value.includes("\x1b[3J")), false);
+	assert.ok(h.internals.previousLines[0]?.startsWith("zero\x1b[0m"));
+	assert.ok(h.internals.previousLines[1]?.startsWith("one\x1b[0m"));
 
 	patch.detach();
 	assert.equal(Object.getOwnPropertyDescriptor(owner, "applyLineResets")?.value, original);
@@ -267,7 +373,7 @@ test("dynamic TUI probing fails closed for throwing, cyclic, or shadowed methods
 	assert.equal(Object.getOwnPropertyDescriptor(owner, "applyLineResets")?.value, original);
 });
 
-test("dynamic TUI references preserve native redraws when the renderer instance changes", () => {
+test("dynamic TUI references preserve hidden scrollback when the renderer instance changes", () => {
 	const first = renderHarness(["zero", "one", "two", "three", "four"]);
 	const second = renderHarness(["zero", "one", "two", "three", "four"]);
 	let current = first.tui;
@@ -280,8 +386,10 @@ test("dynamic TUI references preserve native redraws when the renderer instance 
 	second.terminal.writes.length = 0;
 	second.setLines(["ZERO", "ONE", "two", "three", "four"]);
 	second.render();
-	assert.equal(second.tui.fullRedraws, 2);
-	assert.equal(second.terminal.writes.some((value) => value.includes("\x1b[3J")), true);
+	assert.equal(second.tui.fullRedraws, 1);
+	assert.equal(second.terminal.writes.some((value) => value.includes("\x1b[3J")), false);
+	assert.ok(second.internals.previousLines[0]?.startsWith("zero\x1b[0m"));
+	assert.ok(second.internals.previousLines[1]?.startsWith("one\x1b[0m"));
 
 	patch.detach();
 });

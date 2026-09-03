@@ -189,6 +189,19 @@ test("Plan confirmation abort closes the custom UI", async () => {
   assert.deepEqual(await pending, { action: "close" });
 });
 
+test("Plan confirmation fails closed when the custom UI returns a malformed decision", async () => {
+  for (const result of [{}, { action: "execute" }, { action: "unexpected" }]) {
+    const ctx = {
+      hasUI: true,
+      ui: { async custom() { return result; } },
+    } as unknown as ExtensionContext;
+    assert.deepEqual(
+      await openPlanConfirmation(ctx, { markdown: "# Unapproved Plan" }),
+      { action: "close" },
+    );
+  }
+});
+
 test("Plan confirmation selects compact execution in the current Pi session", async () => {
   const harness = createHarness();
   const pending = openPlanConfirmation(harness.ctx, {

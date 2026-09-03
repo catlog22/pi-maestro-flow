@@ -46,8 +46,9 @@ export function createNewContextTool(
 This makes no model summarization call. The next context contains a bounded recovery capsule built from authoritative Todo, Goal, Plan, Workflow, checkpoint, and resource state. Automatic compaction is unchanged. Requires compaction.newContext.enabled=true.`,
     promptSnippet: "Schedule a deterministic same-session context reset without model summarization",
     promptGuidelines: [
-      "Use only when an explicit clean context is useful; ordinary token pressure remains handled by automatic compaction.",
+      "Use only at a durable semantic phase boundary when the next phase is loosely coupled; ordinary or critical token pressure remains handled by automatic compaction.",
       "Put live progress and the exact next action in Todo.context before resetting; attach durable references through resourceUris.",
+      "A Todo pressure advisory arrives after its advance has committed. Inspect the task activated in that same result, then call this standalone tool only if a next phase exists, persisted state is sufficient, and no messages are pending; otherwise continue or settle. Never treat the advisory as a retroactive transition or carry it to an unrelated Todo, and do not reset when it reports critical pressure.",
     ],
     parameters: NewContextParams,
     async execute(_id, params, _signal, _onUpdate, ctx) {

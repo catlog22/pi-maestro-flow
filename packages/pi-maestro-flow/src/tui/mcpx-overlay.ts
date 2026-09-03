@@ -618,7 +618,10 @@ export class McpxOverlay implements Component, Focusable {
       return;
     }
     if (this.snapshot.endpoint === "online") {
-      this.status = "mcpx 已在运行";
+      const tunnel = this.snapshot.tunnel;
+      this.status = tunnel?.url && (!tunnel.alive || tunnel.health === "dead")
+        ? "本地 mcpx 已运行；公网隧道异常，请按 T 重建（s/R 只控制本地 mcpx）"
+        : "mcpx 已在运行";
       this.params.requestRender();
       return;
     }
@@ -733,7 +736,12 @@ export class McpxOverlay implements Component, Focusable {
         if (reachable) { online = true; break; }
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
-      this.status = online ? "mcpx 已重启并监听" : "mcpx 进程已拉起但端点未就绪（可能端口被占用或配置有误，稍后按 r 刷新）";
+      const tunnel = this.snapshot.tunnel;
+      this.status = online
+        ? tunnel?.url && (!tunnel.alive || tunnel.health === "dead")
+          ? "mcpx 已重启并监听；公网隧道仍异常，请按 T 重建"
+          : "mcpx 已重启并监听"
+        : "mcpx 进程已拉起但端点未就绪（可能端口被占用或配置有误，稍后按 r 刷新）";
     } catch (error) {
       this.status = `重启失败: ${error instanceof Error ? error.message : String(error)}`;
     } finally {
@@ -1669,7 +1677,7 @@ export class McpxOverlay implements Component, Focusable {
     }
     if (this.status) rows.push(fitLine(this.status, inner));
     if (this.snapshot.error) rows.push(fitLine(fg("31", `! ${this.snapshot.error}`), inner));
-    rows.push(...fitSegments(inner, ["Enter message detail", "V windows", "r refresh", this.snapshot.endpoint === "online" ? "x stop" : "s start", "R restart", "T tunnel", "W workspaces", "e 注册(租约)", "E 注册(永久)", "c wizard", "C 配置", "P password", "Esc close"]));
+    rows.push(...fitSegments(inner, ["Enter message detail", "V windows", "r refresh", this.snapshot.endpoint === "online" ? "x stop" : "s start", "R restart", "T 隧道重建", "W workspaces", "e 注册(租约)", "E 注册(永久)", "c wizard", "C 配置", "P password", "Esc close"]));
     return frame(rows, width);
   }
 
@@ -1742,13 +1750,15 @@ export class McpxOverlay implements Component, Focusable {
       // go-sdk Host guard that sits *after* auth. If mcpx was not restarted to
       // load disable_localhost_protection, a real client gets 403 *after* auth.
       rows.push(fitLine(fg("2", "  i 若客户端鉴权后仍 403：检查 server.disable_localhost_protection 并重启 mcpx"), width));
+    } else if (!tunnel.alive) {
+      rows.push(fitLine(fg("31", "  ! 隧道进程未运行（PID 文件可能已陈旧）— 按 T 重建隧道并自动同步新 URL"), width));
     } else if (tunnel.health === "dead") {
       // quick-tunnel URL is ephemeral: a dead tunnel usually means the edge
       // connection dropped and the URL can no longer be reached at all. T
       // restarts the tunnel, writes the new URL into config, and restarts mcpx.
       const hint = this.snapshot.endpoint === "online"
-        ? "按 R 重启 mcpx 加载新配置，或按 T 重启隧道并自动同步新 URL"
-        : "按 s 启动 mcpx，或按 T 重启隧道并自动同步新 URL";
+        ? "按 R 重启 mcpx 加载新配置，或按 T 重建隧道并自动同步新 URL"
+        : "按 s 启动 mcpx，或按 T 重建隧道并自动同步新 URL";
       rows.push(fitLine(fg("31", `  ! 隧道异常：mcpx 可能未重启加载新配置（403 Host/404 OAuth 路由）或隧道已断 — ${hint}`), width));
     }
     return rows;

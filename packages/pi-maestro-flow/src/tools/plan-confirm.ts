@@ -307,7 +307,31 @@ export async function openPlanConfirmation(
     },
   );
 
-  return result ?? { action: "close" };
+  return isPlanConfirmationDecision(result) ? result : { action: "close" };
+}
+
+function isPlanConfirmationDecision(value: unknown): value is PlanConfirmationDecision {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const decision = value as Record<string, unknown>;
+  const action = decision.action;
+  if (![
+    "execute",
+    "modify",
+    "continue",
+    "refine",
+    "rollback",
+    "exit-plan",
+    "close",
+  ].includes(typeof action === "string" ? action : "")) return false;
+  if (action !== "execute") return true;
+
+  const execution = decision.execution;
+  if (!execution || typeof execution !== "object" || Array.isArray(execution)) return false;
+  const choice = execution as Record<string, unknown>;
+  if (choice.context !== "current" && choice.context !== "compact") return false;
+  if (choice.backend === "standalone") return true;
+  return choice.backend === "workflow"
+    && (choice.workflowTarget === "current" || choice.workflowTarget === "new");
 }
 
 function availableWorkflowTargets(options: PlanConfirmationOptions): PlanWorkflowTarget[] {

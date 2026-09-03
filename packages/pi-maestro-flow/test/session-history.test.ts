@@ -6,8 +6,8 @@ import test from "node:test";
 import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 import {
-  createSessionHistoryInventoryProvider,
-  createSessionHistoryTool,
+  createCompactHistoryInventoryProvider,
+  createCompactHistoryTool,
 } from "../src/tools/session-history.ts";
 import { resolveResource } from "../src/tools/resource.ts";
 import { sessionEntryUri } from "pi-maestro-teammate/v1/session-history";
@@ -63,14 +63,29 @@ function hidden(id: string, parentId: string): unknown {
   };
 }
 
+function compaction(id: string, parentId: string, summary: string): unknown {
+  return {
+    type: "compaction",
+    id,
+    parentId,
+    timestamp: "2026-08-01T00:00:04.000Z",
+    summary,
+    firstKeptEntryId: parentId,
+    tokensBefore: 1_000,
+  };
+}
+
 function writeTranscript(file: string, entries: unknown[]): Promise<void> {
   return writeFile(file, `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`, "utf8");
 }
 
-function context(cwd: string, sessionFile: string): ExtensionContext {
+function context(cwd: string, sessionFile: string, sessionId = "current-session"): ExtensionContext {
   return {
     cwd,
-    sessionManager: { getSessionFile: () => sessionFile },
+    sessionManager: {
+      getSessionFile: () => sessionFile,
+      getSessionId: () => sessionId,
+    },
   } as unknown as ExtensionContext;
 }
 
@@ -78,15 +93,12 @@ function resultText(result: { content: Array<{ type: string; text?: string }> })
   return result.content.find((item) => item.type === "text")?.text ?? "";
 }
 
-test("session_history scopes are bounded and expose exact entry URIs", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pi-flow-session-history-"));
+test("compact_history reads only the active session and exposes checkpoint recovery", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-flow-compact-history-"));
   try {
     const sessions = join(root, "sessions");
     const currentFile = join(sessions, "root-session.jsonl");
-    const olderFile = join(sessions, "older-session.jsonl");
-    const teammateDir = join(sessions, "root-session", "worker-a");
-    const teammateFile = join(teammateDir, "worker.jsonl");
-    await mkdir(teammateDir, { recursive: true });
+    await mkdir(sessions, { recursive: true });
     await writeTranscript(currentFile, [
       header("current-session"),
       user("u1", null, "current question"),
@@ -94,12 +106,23 @@ test("session_history scopes are bounded and expose exact entry URIs", async () 
       user("abandoned", "u1", "abandoned needle"),
       assistant("a2", "u1", "visible needle answer"),
       hidden("hidden", "a2"),
+      compaction("cp-entry", "hidden", [
+        '<recovery_capsule version="2">',
+        "- Capsule: Maestro New Context Recovery Capsule v2; no model summary was generated.",
+        "- Checkpoint ID: checkpoint-1",
+        "- Previous Checkpoint: checkpoint-0",
+        "</recovery_capsule>",
+      ].join("\n")),
     ]);
-    await writeTranscript(olderFile, [header("older-session"), user("old-u", null, "older text")]);
-    await writeTranscript(teammateFile, [header("teammate-session"), user("team-u", null, "teammate needle")]);
+    for (let index = 0; index < 25; index += 1) {
+      await writeTranscript(join(sessions, `older-${index}.jsonl`), [
+        header(`older-${index}`),
+        user(`old-${index}`, null, "older needle"),
+      ]);
+    }
 
     const ctx = context(root, currentFile);
-    const tool = createSessionHistoryTool();
+    const tool = createCompactHistoryTool();
     const call = tool.execute as unknown as (
       id: string,
       params: Record<string, unknown>,
@@ -108,39 +131,36 @@ test("session_history scopes are bounded and expose exact entry URIs", async () 
       ctx: ExtensionContext,
     ) => Promise<{ content: Array<{ type: string; text?: string }>; details?: unknown; isError?: boolean }>;
 
-    const current = await call("list-current", { action: "list_sessions", scope: "current_session" }, new AbortController().signal, undefined, ctx);
-    const currentPayload = JSON.parse(resultText(current)) as { sessions: Array<{ sessionId: string }> };
-    assert.deepEqual(currentPayload.sessions.map((entry) => entry.sessionId), ["current-session"]);
+    const timeline = await call("timeline", { action: "timeline" }, new AbortController().signal, undefined, ctx);
+    const timelinePayload = JSON.parse(resultText(timeline)) as {
+      checkpoints: Array<{ entryId: string; checkpointId?: string; previousCheckpointId?: string; source: string; resourceUri: string }>;
+      filesRead: number;
+    };
+    assert.equal(timelinePayload.filesRead, 1);
+    assert.deepEqual(timelinePayload.checkpoints, [{
+      sessionId: "current-session",
+      entryId: "cp-entry",
+      turn: 1,
+      resourceUri: sessionEntryUri("current-session", "cp-entry"),
+      timestamp: Date.parse("2026-08-01T00:00:04.000Z"),
+      source: "new-context",
+      checkpointId: "checkpoint-1",
+      previousCheckpointId: "checkpoint-0",
+      summary: "Checkpoint checkpoint-1",
+    }]);
 
-    const teammates = await call("list-teammates", { action: "list_sessions", scope: "teammates" }, new AbortController().signal, undefined, ctx);
-    const teammatePayload = JSON.parse(resultText(teammates)) as { sessions: Array<{ sessionId: string }> };
-    assert.deepEqual(teammatePayload.sessions.map((entry) => entry.sessionId), ["teammate-session"]);
-
-    const search = await call("search", {
-      action: "search",
-      scope: "workspace_sessions",
-      query: "NEEDLE",
-    }, new AbortController().signal, undefined, ctx);
-    assert.equal(search.isError, undefined);
+    const search = await call("search", { action: "search", query: "NEEDLE" }, new AbortController().signal, undefined, ctx);
     const searchPayload = JSON.parse(resultText(search)) as {
       matches: Array<{ sessionId: string; entryId: string; resourceUri: string }>;
       filesRead: number;
-      bytesRead: number;
-      truncated: boolean;
-      omissions: unknown[];
     };
     assert.deepEqual(searchPayload.matches.map((match) => match.sessionId), ["current-session"]);
     assert.equal(searchPayload.matches[0]?.resourceUri, sessionEntryUri("current-session", "a2"));
-    assert.equal(searchPayload.filesRead, 2);
-    assert.ok(searchPayload.bytesRead > 0);
-    assert.equal(searchPayload.truncated, false);
-    assert.deepEqual(searchPayload.omissions, []);
-    assert.doesNotMatch(resultText(search), /must stay hidden|secret-path|abandoned needle/);
+    assert.equal(searchPayload.filesRead, 1);
+    assert.doesNotMatch(resultText(search), /older needle|must stay hidden|secret-path|abandoned needle/);
 
     const readTurn = await call("read-turn", {
       action: "read_turn",
-      scope: "current_session",
-      sessionId: "current-session",
       turn: 1,
       limit: 10,
     }, new AbortController().signal, undefined, ctx);
@@ -148,20 +168,25 @@ test("session_history scopes are bounded and expose exact entry URIs", async () 
     assert.equal(turnPayload.found, true);
     assert.equal((turnPayload.turn as { turn?: number } | undefined)?.turn, 1);
     assert.equal("sessions" in turnPayload, false);
-    assert.equal("turns" in turnPayload, false);
-    assert.equal("session" in turnPayload, false);
     assert.doesNotMatch(resultText(readTurn), /must stay hidden|secret-path|provider\/model|toolCallId|toolName/);
+
+    const checkpoint = await call("checkpoint", {
+      action: "read_checkpoint",
+      checkpointId: "checkpoint-1",
+    }, new AbortController().signal, undefined, ctx);
+    const checkpointPayload = JSON.parse(resultText(checkpoint)) as Record<string, unknown>;
+    assert.equal(checkpointPayload.found, true);
+    assert.match(resultText(checkpoint), /Recovery Capsule v2/);
 
     const resource = await resolveResource(
       searchPayload.matches[0]!.resourceUri,
       root,
       undefined,
-      { sessionHistory: createSessionHistoryInventoryProvider(ctx, "all") },
+      { sessionHistory: createCompactHistoryInventoryProvider(ctx) },
     );
     assert.equal(resource.cached, false);
     assert.match(resource.content, /visible needle answer/);
-    assert.doesNotMatch(resource.content, /must stay hidden|secret-path/);
-    assert.doesNotMatch(resource.content, /root-session\.jsonl/);
+    assert.doesNotMatch(resource.content, /must stay hidden|secret-path|root-session\.jsonl/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -178,7 +203,7 @@ test("session resources revalidate active-chain visibility and reject arbitrary 
       hidden("hidden", "a2"),
     ]);
     const ctx = context(root, currentFile);
-    const inventory = createSessionHistoryInventoryProvider(ctx, "all");
+    const inventory = createCompactHistoryInventoryProvider(ctx);
 
     await assert.rejects(
       () => resolveResource(sessionEntryUri("session-visible", "abandoned"), root, undefined, { sessionHistory: inventory }),
@@ -209,20 +234,48 @@ test("session resources revalidate active-chain visibility and reject arbitrary 
   }
 });
 
-test("session history registration has the exact approved read-only contract", () => {
+test("compact_history fails closed if a retained definition is called after disable", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-flow-compact-history-disabled-"));
+  try {
+    const currentFile = join(root, "session.jsonl");
+    await writeTranscript(currentFile, [header("current-session"), user("u1", null, "visible")]);
+    let inventoryRead = false;
+    const tool = createCompactHistoryTool({
+      isEnabled: () => false,
+      inventory: () => {
+        inventoryRead = true;
+        return [{ path: currentFile }];
+      },
+    });
+    const call = tool.execute as unknown as (
+      id: string,
+      params: Record<string, unknown>,
+      signal: AbortSignal,
+      onUpdate: undefined,
+      ctx: ExtensionContext,
+    ) => Promise<{ content: Array<{ type: string; text?: string }>; isError?: boolean }>;
+    const result = await call("disabled", { action: "timeline" }, new AbortController().signal, undefined, context(root, currentFile));
+    assert.equal(result.isError, true);
+    assert.match(resultText(result), /newContext\.enabled is false/);
+    assert.equal(inventoryRead, false, "disabled calls must not open the session file");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("compact history registration has the exact current-session read-only contract", () => {
   const tools: ToolDefinition[] = [];
-  const tool = createSessionHistoryTool();
+  const tool = createCompactHistoryTool();
   tools.push(tool as ToolDefinition);
-  assert.equal(tools[0]?.name, "session_history");
+  assert.equal(tools[0]?.name, "compact_history");
   const schema = tool.parameters as {
     properties?: Record<string, { enum?: string[]; items?: { enum?: string[] } }>;
     additionalProperties?: boolean;
   };
-  assert.deepEqual(schema.properties?.action?.enum, ["list_sessions", "search", "read_turn"]);
-  assert.deepEqual(schema.properties?.scope?.enum, ["current_session", "workspace_sessions", "teammates"]);
+  assert.deepEqual(schema.properties?.action?.enum, ["timeline", "search", "read_turn", "read_checkpoint"]);
   assert.deepEqual(schema.properties?.include?.items?.enum, ["user", "assistant", "visible_custom", "compaction", "tool_result"]);
-  assert.deepEqual(Object.keys(schema.properties ?? {}), ["action", "scope", "query", "sessionId", "turn", "include", "limit"]);
+  assert.deepEqual(Object.keys(schema.properties ?? {}), ["action", "query", "turn", "checkpointId", "include", "limit"]);
   assert.equal(schema.additionalProperties, false);
-  assert.match(tool.description, /read-only/);
-  assert.doesNotMatch(JSON.stringify(schema), /delete|update|write|maxFiles|maxMatches|includeToolResults/i);
+  assert.match(tool.description, /current Pi session only/);
+  assert.doesNotMatch(JSON.stringify(schema), /scope|sessionId|path|delete|update|write|maxFiles|maxMatches|includeToolResults/i);
 });

@@ -10,7 +10,8 @@ interface ViewportTuiInternals {
 	previousLines?: string[];
 	previousViewportTop?: number;
 	previousHeight?: number;
-	terminal?: { rows: number };
+	previousWidth?: number;
+	terminal?: { columns: number; rows: number };
 }
 
 interface ViewportStabilityMarker {
@@ -42,18 +43,6 @@ function once(action: () => void): () => void {
 
 function markerOf(fn: ApplyLineResets): ViewportStabilityMarker | undefined {
 	return (fn as ApplyLineResets & Record<symbol, ViewportStabilityMarker | undefined>)[VIEWPORT_STABILITY_MARKER];
-}
-
-const ANSI_ESCAPE = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))/g;
-const TRAILING_DURATION = /(\s(?:·\s*)?)(?:\d+(?:\.\d+)?s|\d+m\d{1,2}s)$/;
-
-function differsOnlyByTrailingDuration(previous: string, next: string): boolean {
-	const previousPlain = previous.replace(ANSI_ESCAPE, "");
-	const nextPlain = next.replace(ANSI_ESCAPE, "");
-	if (previousPlain === nextPlain) return false;
-	if (!TRAILING_DURATION.test(previousPlain) || !TRAILING_DURATION.test(nextPlain)) return false;
-	return previousPlain.replace(TRAILING_DURATION, "$1<duration>")
-		=== nextPlain.replace(TRAILING_DURATION, "$1<duration>");
 }
 
 function isKittyImageLine(line: string | undefined): boolean {
@@ -110,13 +99,17 @@ function resolveApplyLineResetsSlot(internals: ViewportTuiInternals): ApplyLineR
 }
 
 /**
- * Prevents timer-only churn above the visible viewport from forcing a full
- * redraw. The next frame keeps the terminal's actual hidden text, so the diff
- * baseline remains truthful; status, content, layout and image changes retain
- * pi-tui's native redraw path.
+ * Treats the hidden viewport prefix as immutable scrollback while frame size is
+ * stable. The next frame keeps the terminal's actual hidden text, so visible
+ * changes can use pi-tui's differential path instead of clearing and replaying
+ * the screen. Structural, resize and image changes retain the native path.
  */
 export function attachViewportStability(tui: TUI): ViewportStabilityPatch {
 	try {
+		// Native fullscreen has an application-owned fixed viewport. Its inherited
+		// applyLineResets method is not part of that renderer's diff path, so patching
+		// it would report a false-positive attachment on the shared TUI base class.
+		if (tui.mode === "fullscreen") return { active: false, detach() {} };
 		const internals = tui as unknown as ViewportTuiInternals;
 		const slot = resolveApplyLineResetsSlot(internals);
 		if (!slot) return { active: false, detach() {} };
@@ -137,6 +130,7 @@ export function attachViewportStability(tui: TUI): ViewportStabilityPatch {
 					&& Number.isFinite(viewportTop)
 					&& viewportTop > 0
 					&& this.previousHeight === this.terminal?.rows
+					&& this.previousWidth === this.terminal?.columns
 			) {
 				const hiddenEnd = Math.min(previousLines.length, Math.trunc(viewportTop));
 				const hiddenHasKittyImage = previousLines.slice(0, hiddenEnd).some(isKittyImageLine)
@@ -144,10 +138,7 @@ export function attachViewportStability(tui: TUI): ViewportStabilityPatch {
 				if (!hiddenHasKittyImage) {
 					for (let index = 0; index < hiddenEnd; index += 1) {
 						const previous = previousLines[index];
-						const next = nextLines[index];
-						if (previous !== undefined && next !== undefined && differsOnlyByTrailingDuration(previous, next)) {
-							nextLines[index] = previous;
-						}
+						if (previous !== undefined) nextLines[index] = previous;
 					}
 				}
 			}

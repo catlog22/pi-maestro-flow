@@ -145,6 +145,24 @@ test("compaction lifecycle clears active state independently of the auto mode", 
   assert.deepEqual(statuses, ["COMPACT 91000/90000 native configured", undefined]);
 });
 
+test("pressure snapshot mirrors the linked threshold and clears after compaction", async () => {
+  const fx = loopCriticalFixture();
+  await fx.guard.evaluate(highUsageToolBatch(300_000), fx.ctx);
+  const snapshot = fx.guard.describeState().pressureSnapshot;
+  assert.ok(snapshot, "a complete pressure cycle publishes a snapshot");
+  assert.equal(snapshot.generation, 0);
+  assert.equal(snapshot.contextWindow, 400_000);
+  assert.equal(snapshot.hardThresholdTokens, 360_000);
+  assert.equal(snapshot.estimatedTokens, 300_030);
+  assert.equal(snapshot.remainingToHard, 59_970);
+  assert.equal(snapshot.band, "nudge");
+  if (snapshot.nudgeTokens !== undefined) assert.ok(snapshot.nudgeTokens > 0);
+  if (snapshot.pruneTokens !== undefined) assert.ok(snapshot.pruneTokens > 0);
+
+  fx.guard.onCompact(undefined, fx.ctx);
+  assert.equal(fx.guard.describeState().pressureSnapshot, undefined);
+});
+
 function details(): MaestroCompactionDetails {
   return {
     kind: "maestro-session-checkpoint",
@@ -1289,13 +1307,15 @@ test("mid-turn compaction watchdog releases the run lock when the host never set
   }
 });
 
-test("internals load failure warns once per cooldown and keeps retrying", async () => {
+test("internals load failure falls back to host mid-turn compaction", async () => {
   let loads = 0;
+  let compactCalls = 0;
+  let complete: (() => void) | undefined;
   const notifications: string[] = [];
   const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
     loadInternals: async () => {
       loads++;
-      throw new Error("resolve failed");
+      throw new Error("Cannot find module '@earendil-works/pi-coding-agent'");
     },
     readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
   });
@@ -1303,7 +1323,10 @@ test("internals load failure warns once per cooldown and keeps retrying", async 
     cwd: "D:\\repo",
     model: { contextWindow: 1_000 },
     abort() {},
-    compact() {},
+    compact(options: { onComplete(): void }) {
+      compactCalls++;
+      complete = options.onComplete;
+    },
     hasPendingMessages: () => false,
     sessionManager: { getBranch: () => [{ type: "message" }] },
     ui: {
@@ -1311,18 +1334,75 @@ test("internals load failure warns once per cooldown and keeps retrying", async 
       notify(message: string) { notifications.push(message); },
     },
   } as never;
-  // Exhausted estimates settle every turn, so each allowed turn retries the loader.
-  const messages = highUsageToolBatch(1_050);
-  for (let turn = 0; turn < 8; turn++) {
-    await guard.evaluate(messages, ctx);
-    await guard.onAgentEnd(ctx);
-  }
-  assert.equal(loads, 4, "the loader is retried after the breaker cooldown (turns 1-3, then 8)");
-  assert.equal(
-    notifications.filter((message) => /Mid-turn compaction disabled/.test(message)).length,
-    2,
-    "the warning re-arms after the cooldown instead of going silent forever",
-  );
+
+  await guard.evaluate(highUsageToolBatch(1_050), ctx);
+  await guard.onAgentEnd(ctx);
+
+  assert.equal(loads, 1);
+  assert.equal(compactCalls, 1, "missing optional Pi internals must not disable host compaction");
+  assert.ok(notifications.some((message) => /preflight unavailable; using host validation/.test(message)));
+  assert.ok(notifications.every((message) => !/compaction disabled/.test(message)));
+  complete?.();
+});
+
+test("internals load failure falls back to host output-limit compaction", async () => {
+  let compactCalls = 0;
+  let complete: (() => void) | undefined;
+  const notifications: string[] = [];
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    loadInternals: async () => {
+      throw new Error("Cannot find module '@earendil-works/pi-coding-agent'");
+    },
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 1_000 },
+    getContextUsage: () => ({ tokens: 950, contextWindow: 1_000, percent: 95 }),
+    hasPendingMessages: () => false,
+    compact(options: { onComplete(): void }) {
+      compactCalls++;
+      complete = options.onComplete;
+    },
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: {
+      setStatus() {},
+      notify(message: string) { notifications.push(message); },
+    },
+  } as never;
+
+  guard.onSessionStart(ctx);
+  await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
+  await guard.onAgentEnd(ctx);
+
+  assert.equal(compactCalls, 1, "output-limit recovery must also rely on host validation");
+  assert.ok(notifications.some((message) => /preflight unavailable; using host validation/.test(message)));
+  assert.ok(notifications.every((message) => !/compaction disabled/.test(message)));
+  complete?.();
+});
+
+test("a throwing UI warning cannot block host compaction fallback", async () => {
+  let compactCalls = 0;
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    loadInternals: async () => { throw new Error("optional peer missing"); },
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 1_000 },
+    abort() {},
+    compact() { compactCalls++; },
+    hasPendingMessages: () => false,
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: {
+      setStatus() {},
+      notify() { throw new Error("UI disconnected"); },
+    },
+  } as never;
+
+  await guard.evaluate(highUsageToolBatch(1_050), ctx);
+  await guard.onAgentEnd(ctx);
+  assert.equal(compactCalls, 1);
 });
 
 test("applyContextPressurePolicy honors output-clamp derived soft bands", () => {
@@ -1807,7 +1887,7 @@ test("blocked intent notification and tombstone failures stay fail-closed and re
   await run(true);
 });
 
-test("pending intent v2 rejects malformed blocked state and v1 loads only as ordinary legacy pressure", async () => {
+test("pending intent v3 rejects malformed blocked state and v1 loads only as ordinary legacy pressure", async () => {
   const journal: Array<{ type: string; data: unknown }> = [];
   let branch: Array<{ type?: string; customType?: string; data?: unknown }> = [];
   let compacted = 0;
@@ -1845,7 +1925,7 @@ test("pending intent v2 rejects malformed blocked state and v1 loads only as ord
     const data = entry.data as { pending?: unknown } | undefined;
     return entry.type === "maestro-auto-compaction-intent" && data?.pending;
   })?.data as { version: number; sessionId: string; pending: Record<string, unknown> };
-  assert.equal(encoded.version, 2);
+  assert.equal(encoded.version, 3);
 
   branch = [{
     type: "custom",
@@ -1866,7 +1946,7 @@ test("pending intent v2 rejects malformed blocked state and v1 loads only as ord
   const malformed = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, dependencies);
   malformed.onSessionStart(ctx, { reason: "resume" });
   await malformed.onAgentEnd(ctx);
-  assert.equal(compacted, 0, "malformed v2 intent is rejected");
+  assert.equal(compacted, 0, "malformed v3 intent is rejected");
 });
 
 test("direct compaction completion applies the final payload guard", async () => {
@@ -2303,6 +2383,38 @@ test("session start fences a settled compaction awaiting internals from the prev
 
   assert.equal(oldSessionAborts, 0);
   assert.equal(oldSessionCompactions, 0);
+});
+
+test("stale session_compact cannot mutate a replacement session or its arbiter owner", async () => {
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const oldCtx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 1_000 },
+    sessionManager: { getSessionId: () => "old-session", getBranch: () => [] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+  const newCtx = {
+    ...oldCtx,
+    abort() {},
+    sessionManager: { getSessionId: () => "new-session", getBranch: () => [{ type: "message" }] },
+  } as never;
+  guard.onSessionStart(oldCtx);
+  guard.onSessionStart(newCtx);
+  await guard.evaluate(highUsageToolBatch(1_050), newCtx);
+  const pending = guard.describeState().pendingIntent;
+  const pressure = guard.describeState().pressureSnapshot;
+  const arbiter = new CompactionArbiter();
+  assert.ok(arbiter.request("mid-turn"));
+
+  const accepted = guard.onCompact("mid-turn", oldCtx);
+  if (accepted) arbiter.complete("success");
+
+  assert.equal(accepted, false);
+  assert.deepEqual(guard.describeState().pendingIntent, pending);
+  assert.deepEqual(guard.describeState().pressureSnapshot, pressure);
+  assert.equal(arbiter.currentOwner(), "mid-turn", "the extension must not settle a new-session owner");
 });
 
 test("concurrent context evaluations serialize instead of leaking an untransformed request", async () => {
@@ -4139,8 +4251,11 @@ function loopCriticalFixture(options: { hasPendingMessages?: () => boolean } = {
   const compactCalls: Array<{ customInstructions?: string; onComplete(): void; onError(error: Error): void }> = [];
   const sent: string[] = [];
   const notifications: Array<{ message: string; level: string | undefined }> = [];
+  const journal: Array<{ type: string; data: unknown }> = [];
+  const sessionId = "loop-critical-session";
   const arbiter = new CompactionArbiter(100);
   const guard = createMidTurnAutoCompaction({
+    appendEntry(type: string, data: unknown) { journal.push({ type, data }); },
     sendUserMessage(message: string) { sent.push(message); },
   } as never, {
     leaseTimeoutMs: 100,
@@ -4156,7 +4271,7 @@ function loopCriticalFixture(options: { hasPendingMessages?: () => boolean } = {
     abort() { aborted++; },
     compact(options: { customInstructions?: string; onComplete(): void; onError(error: Error): void }) { compactCalls.push(options); },
     hasPendingMessages: options.hasPendingMessages ?? (() => false),
-    sessionManager: { getBranch: () => [{ type: "message" }] },
+    sessionManager: { getSessionId: () => sessionId, getBranch: () => [{ type: "message" }] },
     ui: {
       setStatus() {},
       notify(message: string, level: string | undefined) { notifications.push({ message, level }); },
@@ -4166,6 +4281,8 @@ function loopCriticalFixture(options: { hasPendingMessages?: () => boolean } = {
     guard,
     ctx,
     arbiter,
+    sessionId,
+    journal,
     aborted: () => aborted,
     compactCalls,
     sent,
@@ -4288,6 +4405,89 @@ test("the first tool call after the hard threshold interrupts and compacts at se
   assert.equal(fx.compactCalls.length, 1, "the first settlement submits compaction without a two-turn delay");
   fx.compactCalls[0].onComplete();
   assert.match(fx.sent.at(-1) ?? "", /Continue the interrupted task/, "compaction resumes the interrupted tool loop");
+});
+
+test("submitted mid-turn intent stays durable until settlement and recovers after restart", async () => {
+  const fx = loopCriticalFixture();
+  fx.guard.onSessionStart(fx.ctx);
+  await fx.guard.evaluate(highUsageToolBatch(365_000), fx.ctx);
+  assert.equal(fx.guard.onToolCall(fx.ctx)?.block, true);
+  await fx.guard.onAgentEnd(fx.ctx);
+  assert.equal(fx.compactCalls.length, 1);
+
+  const submitted = fx.journal.findLast((entry) => entry.type === "maestro-auto-compaction-intent")?.data as {
+    version?: number;
+    phase?: string;
+    pending?: unknown;
+  } | undefined;
+  assert.equal(submitted?.version, 3);
+  assert.equal(submitted?.phase, "submitted");
+  assert.ok(submitted?.pending, "submission keeps the interrupted intent durable");
+
+  const resumedJournal: Array<{ type: string; data: unknown }> = [];
+  const resumedCompactions: Array<{ onComplete(): void; onError(error: Error): void }> = [];
+  const resumed = createMidTurnAutoCompaction({
+    appendEntry(type: string, data: unknown) { resumedJournal.push({ type, data }); },
+    sendUserMessage() {},
+  } as never, {
+    arbiter: new CompactionArbiter(100),
+    leaseTimeoutMs: 100,
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({ enabled: true, reserveTokens: 16_384, keepRecentTokens: 20_000 }),
+  });
+  const resumedCtx = {
+    ...fx.ctx,
+    compact(options: { onComplete(): void; onError(error: Error): void }) { resumedCompactions.push(options); },
+    sessionManager: {
+      getSessionId: () => fx.sessionId,
+      getBranch: () => [{ type: "custom", customType: "maestro-auto-compaction-intent", data: submitted }],
+    },
+  } as never;
+  resumed.onSessionStart(resumedCtx, { reason: "resume" });
+  assert.equal(resumed.describeState().pendingIntent?.loopCritical, true);
+  const recovered = resumedJournal.findLast((entry) => entry.type === "maestro-auto-compaction-intent")?.data as {
+    phase?: string;
+    pending?: unknown;
+  } | undefined;
+  assert.equal(recovered?.phase, "pending", "a new lifecycle re-arms an uncertain submitted intent");
+  assert.ok(recovered?.pending);
+  await resumed.onAgentEnd(resumedCtx);
+  assert.equal(resumedCompactions.length, 1, "the recovered intent submits once in the new lifecycle");
+
+  const continuationJournal: Array<{ type: string; data: unknown }> = [];
+  const replayedContinuations: string[] = [];
+  const settled = createMidTurnAutoCompaction({
+    appendEntry(type: string, data: unknown) { continuationJournal.push({ type, data }); },
+    sendUserMessage(message: string) { replayedContinuations.push(message); },
+  } as never);
+  settled.onSessionStart({
+    ...resumedCtx,
+    hasPendingMessages: () => false,
+    sessionManager: {
+      getSessionId: () => fx.sessionId,
+      getBranch: () => [
+        { type: "custom", customType: "maestro-auto-compaction-intent", data: submitted },
+        { type: "compaction", id: "completed-after-submit" },
+      ],
+    },
+  } as never, { reason: "resume" });
+  assert.equal(settled.describeState().pendingIntent, undefined);
+  assert.equal(replayedContinuations.length, 1, "a newer compaction boundary replays the interrupted continuation");
+  const replayedState = continuationJournal.findLast((entry) => entry.type === "maestro-auto-compaction-intent")?.data as {
+    phase?: string;
+    pending?: unknown;
+  } | undefined;
+  assert.equal(replayedState?.phase, "cleared", "successful replay tombstones the durable continuation");
+  assert.equal(replayedState?.pending, null);
+
+  fx.guard.onCompact("mid-turn", fx.ctx);
+  fx.compactCalls[0].onComplete();
+  const cleared = fx.journal.findLast((entry) => entry.type === "maestro-auto-compaction-intent")?.data as {
+    phase?: string;
+    pending?: unknown;
+  } | undefined;
+  assert.equal(cleared?.phase, "cleared");
+  assert.equal(cleared?.pending, null);
 });
 
 test("a tool-boundary gate survives post-block pressure relief and resumes after compaction", async () => {
@@ -4617,10 +4817,14 @@ test("loop-critical flag survives persistence and legacy intents hydrate without
     const data = entry.data as { pending?: unknown } | undefined;
     return entry.type === "maestro-auto-compaction-intent" && data?.pending;
   })?.data as { version: number; sessionId: string; pending: Record<string, unknown> };
-  assert.equal(encoded.version, 2);
+  assert.equal(encoded.version, 3);
   assert.equal(encoded.pending.loopCritical, true, "the interruption flag is durable");
 
-  branch = [{ type: "custom", customType: "maestro-auto-compaction-intent", data: encoded }];
+  branch = [{
+    type: "custom",
+    customType: "maestro-auto-compaction-intent",
+    data: { ...encoded, version: 2 },
+  }];
   const resumed = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, dependencies);
   resumed.onSessionStart(ctx, { reason: "resume" });
   assert.equal(resumed.describeState().pendingIntent?.loopCritical, true);
@@ -4697,7 +4901,11 @@ test("a zombie submission suppresses the loop interruption until it settles", as
     await fx.guard.evaluate(highUsageToolBatch(386_000 + evaluation), fx.ctx);
   }
   assert.equal(fx.aborted(), 1, "no new interruption while the zombie may still settle");
-  assert.equal(fx.guard.describeState().pendingIntent?.loopCritical, false, "a suppressed interruption never flags the intent");
+  assert.equal(
+    fx.guard.describeState().pendingIntent?.loopCritical,
+    true,
+    "the submitted interruption remains durable while its zombie owner may still settle",
+  );
 
   fx.compactCalls[0].onComplete();
   assert.equal(fx.guard.describeState().zombieOwner, undefined);

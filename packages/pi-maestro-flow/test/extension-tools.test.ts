@@ -28,6 +28,7 @@ import type { WorkflowSnapshot } from "../src/session/types.ts";
 import { shutdownIntelligenceTools } from "../src/tools/intelligence.ts";
 import { readAgentOutput } from "../src/teammate/agent-output-store.ts";
 import { isRunControlReadAction } from "../src/tools/run-control.ts";
+import { setTodoDurationChartEnabled } from "../src/todo-chart-state.ts";
 import { PLAN_TOGGLE_KEY } from "../src/tools/plan.ts";
 import { CompactionArbiter, NATIVE_FALLBACK_COMPACTION_MARKER } from "../src/compaction/compaction-arbiter.ts";
 import {
@@ -468,8 +469,9 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
   assert.equal(names.filter((name) => name === "computer_use").length, 1);
   assert.equal(names.filter((name) => name === "search_tool_bm25").length, 1);
   assert.ok(names.includes("run-control"));
-  assert.ok(names.includes("session_history"));
-  assert.ok(names.includes("new_context"));
+  assert.equal(names.includes("compact_history"), false, "opt-in compact tools must not register before enable");
+  assert.equal(names.includes("session_history"), false);
+  assert.equal(names.includes("new_context"), false, "opt-in compact tools must not register before enable");
   assert.equal(names.includes("swarm_runtime"), false);
   assert.ok(commands.includes("maestro-session"));
   assert.ok(commands.includes("maestro-todo"));
@@ -627,6 +629,11 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
   assert.match(todoGuidelines, /before any tool call or work belonging to another Todo/);
   assert.match(todoGuidelines, /never batch-complete/);
   assert.match(todoGuidelines, /actor-scoped/);
+  assert.match(todoGuidelines, /\[context-pressure-advisory\]/);
+  assert.match(todoGuidelines, /task activated in that same result/);
+  assert.match(todoGuidelines, /standalone new_context tool/);
+  assert.match(todoGuidelines, /cannot change the completed advance retroactively/);
+  assert.match(todoGuidelines, /critical means do not reset/);
   const todoSchema = todoTool?.parameters as {
     properties?: {
       tasks?: {
@@ -800,10 +807,11 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
     durationMs: index === 13 ? 123_000 : index === 14 ? 3_600_000 : undefined,
     completedAt: index + 1,
   }));
-  const allCompletedLines = renderTodoResult({
+  const allCompletedComponent = renderTodoResult({
     content: [{ type: "text", text: "Completed #t14. All tasks completed." }],
     details: { action: "advance", tasks: allCompletedTasks },
-  }, { expanded: false, isPartial: false }, todoTheme, { args: { action: "advance" } }).render(500);
+  }, { expanded: false, isPartial: false }, todoTheme, { args: { action: "advance" } });
+  const allCompletedLines = allCompletedComponent.render(500);
   assert.match(allCompletedLines[0], /0 remaining.*15 done/);
   assert.match(allCompletedLines.join("\n"), /✓ all tasks complete/);
   assert.doesNotMatch(
@@ -820,6 +828,14 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
   assert.ok(allCompletedLines.some((line) => /0s\s+┼\s+─+/.test(line)), "chart renders the zero baseline");
   assert.ok(allCompletedLines.some((line) => /#t0.*#t13.*#t14/.test(line)), "X axis renders task sequence labels");
   assert.doesNotMatch(allCompletedLines.join(""), /[\r\n\t\x1b]/);
+  const compactChartLines = allCompletedComponent.render(70);
+  assert.equal(compactChartLines.filter((line) => line.includes("┼")).length, 2, "overflowing tasks split into aligned chart bands");
+  assert.ok(compactChartLines.every((line) => visibleWidth(line) <= 70));
+  setTodoDurationChartEnabled(false);
+  const hiddenChartLines = allCompletedComponent.render(100);
+  assert.match(hiddenChartLines.join("\n"), /✓ all tasks complete/);
+  assert.doesNotMatch(hiddenChartLines.join("\n"), /[┤┼█]/, "Cockpit can hide an already-rendered terminal advance chart");
+  setTodoDurationChartEnabled(true);
   for (let width = 1; width <= 120; width++) {
     for (const line of renderTodoResult({
       content: [{ type: "text", text: "Completed #t14. All tasks completed." }],
@@ -1020,10 +1036,13 @@ test("teammate complete event listener persists background structured results", 
 
 test("teammate child registers interaction, local Bash, and parent-permission surfaces", async () => {
   const tools: ToolDefinition[] = [];
+  const active: string[] = [];
   const handlers = new Map<string, Array<(...args: unknown[]) => unknown>>();
   const api = new Proxy({} as ExtensionAPI, {
     get(_target, property) {
-      if (property === "registerTool") return (tool: ToolDefinition) => { tools.push(tool); };
+      if (property === "registerTool") return (tool: ToolDefinition) => { tools.push(tool); active.push(tool.name); };
+      if (property === "getActiveTools") return () => [...active];
+      if (property === "setActiveTools") return (names: string[]) => { active.splice(0, active.length, ...names); };
       if (property === "events") return { on: () => () => undefined, emit: () => undefined };
       if (property === "on") return (event: string, handler: (...args: unknown[]) => unknown) => {
         const list = handlers.get(event) ?? [];
@@ -1043,9 +1062,12 @@ test("teammate child registers interaction, local Bash, and parent-permission su
     else process.env.PI_TEAMMATE_CHILD = previous;
   }
 
-  assert.deepEqual(tools.map((tool) => tool.name), [...MAESTRO_CHILD_TOOL_NAMES]);
-  const childNewContext = tools.find((tool) => tool.name === "new_context");
-  assert.match(childNewContext?.description ?? "", /same-session context reset/);
+  assert.deepEqual(
+    tools.map((tool) => tool.name),
+    MAESTRO_CHILD_TOOL_NAMES.filter((name) => name !== "compact_history" && name !== "new_context"),
+  );
+  assert.equal(tools.some((tool) => tool.name === "compact_history"), false);
+  assert.equal(tools.some((tool) => tool.name === "new_context"), false);
   const childTodo = tools.find((tool) => tool.name === "todo");
   assert.match(childTodo?.description ?? "", /immediately finish it with `todo advance`/);
   assert.match(JSON.stringify(childTodo?.parameters), /advance/);
@@ -1053,12 +1075,18 @@ test("teammate child registers interaction, local Bash, and parent-permission su
   assert.match(childTodoGuidelines, /immediately when your active task finishes/);
   assert.match(childTodoGuidelines, /never defer several completions until your final answer/);
   assert.match(childTodoGuidelines, /actor-scoped/);
+  assert.match(childTodoGuidelines, /\[context-pressure-advisory\]/);
+  assert.match(childTodoGuidelines, /task activated in that same result/);
+  assert.match(childTodoGuidelines, /standalone new_context tool/);
+  assert.match(childTodoGuidelines, /cannot change the completed advance retroactively/);
+  assert.match(childTodoGuidelines, /critical means do not reset/);
   const workflowMirrorSkill = readFileSync(join(import.meta.dirname, "../../../.pi/skills/maestro/SKILL.md"), "utf8");
   assert.match(workflowMirrorSkill, /Advance only with `todo\(\{ action: "next" \}\)`/);
   assert.deepEqual([...handlers.keys()], [
     "tool_result",
     "session_shutdown",
     "session_start",
+    "before_agent_start",
     "tool_call",
     "context",
     "before_provider_request",
@@ -1069,7 +1097,7 @@ test("teammate child registers interaction, local Bash, and parent-permission su
     "session_compact_failed",
   ]);
   assert.equal(handlers.get("tool_call")?.length, 2, "compaction guard precedes child permission handling");
-  assert.equal(handlers.has("before_agent_start"), false, "child must not own parent Goal/Todo/Workflow startup");
+  assert.equal(handlers.get("before_agent_start")?.length, 1, "child only uses before_agent_start to sync opt-in compact tools");
   let providerAborts = 0;
   const providerCtx = {
     cwd: "D:/workspace",

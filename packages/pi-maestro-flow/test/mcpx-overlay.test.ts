@@ -412,6 +412,19 @@ test("key dispatch: r=refresh, R=restart, w=workspaces (no r/R overlap)", async 
   const s = overlay;
   await overlay.refresh();
 
+  // A stale tunnel PID must not make s look like a recovery action: s/R only
+  // control the local mcpx server, while T owns tunnel reconstruction.
+  s["snapshot"] = {
+    ...s["snapshot"],
+    endpoint: "online",
+    tunnel: { pid: 123, url: "https://stale.trycloudflare.com", alive: false, health: "dead" },
+  };
+  overlay.handleInput("s");
+  assert.match(String(s["status"]), /按 T 重建/);
+  const staleTunnelView = overlay.render(100).join("\n");
+  assert.match(staleTunnelView, /PID 文件可能已陈旧/);
+  assert.match(staleTunnelView, /T 隧道重建/);
+
   // lowercase w enters workspace mode (previously only uppercase W worked)
   overlay.handleInput("w");
   assert.equal(s["mode"], "workspace", "w must open workspace mode");

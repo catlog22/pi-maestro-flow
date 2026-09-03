@@ -5,7 +5,20 @@ icon: "🔄"
 
 This page records user-visible features, behavior changes, fixes, and upgrade requirements from the previous stable release to the current version of the pi maestro flow suite.
 
-> **Current stable release: v0.25.0 (2026-09-01).** SSH host management, remote-window supervision, session Artifacts, Todo result cards, and hardened Goal/Plan lifecycle; exact engine pin `maestro-flow@0.5.83`; bundles Teammate 2.3.0, Cockpit 0.20.0, Settings-Core 0.2.1, Backend-Core 0.1.2, and Backends 0.1.2.
+> **Current stable release: v0.26.0 (2026-09-02).** Deterministic New-Context resets, current-session Compact History recovery, and context-pressure guidance; exact engine pin `maestro-flow@0.5.83`; bundles Teammate 2.4.0, Cockpit 0.21.0, Settings-Core 0.2.1, Backend-Core 0.1.2, and Backends 0.1.2.
+
+## v0.26.0 (2026-09-02)
+
+> This release ships Flow 0.26.0, Teammate 2.4.0, and Cockpit 0.21.0; Settings-Core 0.2.1, Backend-Core 0.1.2, and Backends 0.1.2 are unchanged; exact engine pin `maestro-flow@0.5.83`. 51 files / +2,747 −538 (excluding this release metadata).
+
+- **Flow explicit New-Context mode**: a new `compaction.newContext.enabled` switch keeps `new_context` and `compact_history` out of a fresh model tool registry while disabled (the default); once enabled, both register at Session start or before the next Agent turn. `new_context` performs a deterministic, no-model-summary same-session reset and hands the next stage a Todo/Goal/Plan Recovery Capsule v2 including validated `resourceUris`.
+- **Flow Compact History recovery**: `compact_history` is current-session-only and host-authorized, exposing `timeline`, `search`, `read_turn`, and `read_checkpoint` actions plus exact `session://` entry resources; recovery capsules are parsed into Checkpoint ID / Previous Checkpoint so a reset boundary stays recoverable.
+- **Flow context-pressure guidance**: compaction scheduling projects estimated tokens, window headroom, hard-threshold margin, and soft-band push/prune budgets into Todo output, with a `[context-pressure-advisory]` handoff marker when `advance transition=new_context` is advised; failed handoffs are marked `[new-context-transition-failed]` instead of failing silently.
+- **Flow Todo handoff & duration charts**: terminal Todo handoffs can render the Todo duration bar chart (`todoDurationChart`) end to end from Cockpit events to rendering.
+- **Teammate 2.4.0**: new `SessionHistory.compactions()` bounded, versioned checkpoint query API; workspace-peer stale-lock fix (`acquiredAt` hard bound plus process-liveness check) so PID reuse can no longer cause permanent lockouts.
+- **Cockpit 0.21.0**: viewport-stability rendering rework with expanded regression coverage; public v1 events surface the `todoDurationChart` flag.
+
+Upgrade: `pi install npm:pi-maestro-flow@0.26.0`
 
 ## v0.25.0 (2026-09-01)
 

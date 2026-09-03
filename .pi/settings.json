@@ -3,6 +3,9 @@
     "skills"
   ],
   "compaction": {
-    "model": "maestro-qwen--deepseek-v4-flash/deepseek-v4-flash"
+    "model": "maestro-qwen--deepseek-v4-flash/deepseek-v4-flash",
+    "newContext": {
+      "enabled": true
+    }
   }
 }

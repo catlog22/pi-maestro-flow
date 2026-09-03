@@ -503,7 +503,7 @@ test("readDelegatedTasks scopes to a session id", async (t) => {
   });
 });
 
-test("readTunnelState alive matches the real process table (tasklist CSV fix)", async (t) => {
+test("readTunnelState rejects stale PID files reused by another process", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "tunnel-alive-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const prev = process.env.MCPX_TUNNEL_PID_FILE;
@@ -513,11 +513,10 @@ test("readTunnelState alive matches the real process table (tasklist CSV fix)", 
     if (prev === undefined) delete process.env.MCPX_TUNNEL_PID_FILE;
     else process.env.MCPX_TUNNEL_PID_FILE = prev;
   });
-  // own pid is alive — the old last-column CSV parse always read Mem Usage and
-  // reported every live process as dead.
+  // The PID is alive but belongs to this Node test process, not cloudflared.
+  // A stale PID file must not turn that unrelated process into a live tunnel.
   await writeFile(file, String(process.pid), "utf8");
-  assert.equal(readTunnelState().alive, true, "own pid must be detected alive");
-  // impossible pid is dead
+  assert.equal(readTunnelState().alive, false, "non-cloudflared PID must be rejected");
   await writeFile(file, "4194304", "utf8");
   assert.equal(readTunnelState().alive, false, "impossible pid must be dead");
 });

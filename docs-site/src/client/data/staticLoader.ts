@@ -328,6 +328,16 @@ export const guideRegistry: Array<{
     category: 'configuration',
   },
   {
+    slug: 'new-context',
+    file: 'new-context.md',
+    title: 'New Context & Compact History',
+    description: 'Deterministic same-session reset, current-session compact recovery, pressure guidance, and Todo handoff',
+    title_zh: 'New Context 与 Compact History',
+    description_zh: '同会话确定性重置、当前会话恢复历史、压力提示与 Todo 阶段交接',
+    icon: 'refresh-cw',
+    category: 'configuration',
+  },
+  {
     slug: 'vision-config',
     file: 'vision-config.md',
     title: 'Vision Multimodal Delegation',

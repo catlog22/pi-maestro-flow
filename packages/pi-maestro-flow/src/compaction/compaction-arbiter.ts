@@ -58,6 +58,11 @@ export function isProviderPressureCompactionTrigger(
   return trigger?.owner === "mid-turn" && trigger.recovery === "provider-pressure";
 }
 
+/** Deterministic recovery requests must never fall through to native model summarization. */
+export function blocksNativeCompactionFallback(trigger: CompactionTrigger | undefined): boolean {
+  return trigger?.owner === "new-context" || isProviderPressureCompactionTrigger(trigger);
+}
+
 export type CompactionOutcome = "success" | "cancel" | "error" | "timeout";
 
 export const COMPACTION_LEASE_TIMEOUT_MS = 5 * 60_000;

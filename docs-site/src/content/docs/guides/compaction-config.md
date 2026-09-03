@@ -34,6 +34,7 @@ icon: "🧮"
     "reserveTokens": 16384,
     "keepRecentTokens": 20000,
     "model": "provider/compaction-model",
+    "newContext": { "enabled": false },
     "soft": {
       "enabled": true,
       "nudgeRatio": 0.7,
@@ -58,6 +59,7 @@ icon: "🧮"
 | `reserveTokens` | `16384` | 为模型响应预留的 Token |
 | `keepRecentTokens` | `20000` | 始终保留的近期对话 Token |
 | `model` | 跟随会话模型 | 压缩摘要模型（`provider/id`） |
+| `newContext.enabled` | `false` | 启用显式、无模型摘要的同会话上下文重置 |
 
 ### 软压缩字段（多准则决策）
 
@@ -74,6 +76,12 @@ icon: "🧮"
 | `relevance.enabled` | `false` | 相关度排序（bm25）：改变被修剪顺序；默认保持最新优先 |
 | `crossTurnDedup.enabled` | `false` | 跨轮去重（`minLines` 3 / `minChars` 40） |
 | `lossless.enabled` | `true` | 无损格式折叠（零风险） |
+
+### 显式 New Context
+
+`compaction.newContext.enabled` 默认关闭，并按字段遵循 project-over-user 优先级。关闭时 `new_context` 与 `compact_history` 不注册到新进程的模型工具面；开启后在 Session 启动或下一 Agent turn 前注册并激活。它只控制显式 reset 及其当前会话恢复工具与 Todo `advance transition=new_context`，不会改变 automatic/native compact 的阈值、修剪或溢出恢复。
+
+只应在 Todo 或阶段已经完成、`Todo.context` 与必要 `resourceUris` 已持久化、下一阶段弱耦合且能从 recovery capsule 恢复时使用。普通或临界 token 压力继续由 automatic compact 处理；不要仅因 token 占用较高而调用 `new_context`。完整流程、调用示例、capsule 内容与故障语义见 [New Context 确定性上下文重置](/guides/new-context)。
 
 ### 设计权衡
 
@@ -103,6 +111,7 @@ icon: "🧮"
 
 ## 下一步
 
+- [New Context 确定性上下文重置](/guides/new-context) — 阶段边界的无模型摘要 reset
 - [设置系统总览](/guides/settings-overview) — 配置作用域与持久化
 - [Goal 目标 · Plan 计划 · todo 任务](/guides/goal-plan-todo) — 压缩存活的长时目标
 - [环境变量速查](/guides/env-vars) — `PI_CODING_AGENT_DIR` 等

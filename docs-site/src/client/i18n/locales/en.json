@@ -21,8 +21,8 @@
     "logo_alt": "Maestro Flow Logo"
   },
   "announcement": {
-    "title": "v0.25.0 is out — SSH host management + remote-window supervision + session Artifacts + hardened Goal/Plan lifecycle (maestro-flow 0.5.83). Upgrade:",
-    "install": "pi install npm:pi-maestro-flow@0.25.0",
+    "title": "v0.26.0 is out — deterministic New-Context resets + Compact-History recovery + context-pressure guidance (maestro-flow 0.5.83). Upgrade:",
+    "install": "pi install npm:pi-maestro-flow@0.26.0",
     "close": "Dismiss"
   },
   "accessibility": {

@@ -13,6 +13,7 @@ import {
   MAX_WORKSPACE_WINDOW_ERROR_BYTES,
   MAX_WORKSPACE_WINDOW_FINAL_TEXT_BYTES,
   MAIN_SESSION_PROGRESS_TEXT_BYTES,
+  OWNER_CLAIM_FILE_VERSION,
   WORKSPACE_MAIN_SESSION_MARKER,
   WORKSPACE_PEER_COMMAND_PROTOCOL_VERSION,
   WORKSPACE_PEER_PLUGIN_ID,
@@ -1693,6 +1694,33 @@ test("mailbox consumer stops before handling after its owner claim is replaced",
   assert.equal(handled, 0, "the replacement rejects a command addressed to the former nonce");
   assert.equal(consumed[0]?.response.status, "rejected");
   await replacement.release();
+});
+
+test("a valid stale owner claim mutex is recovered when its pid has been reused", async () => {
+  const { rootDir } = await temporaryWorkspace();
+  const project = join(rootDir, "project");
+  const sessionKey = join(rootDir, "sessions", "reused-pid.jsonl");
+  const identity = createWorkspacePeerIdentity(project, { rootDir });
+  await ensureWorkspacePeerDirectories(identity);
+  const lockPath = join(
+    rootDir,
+    "identities",
+    "claims",
+    `${workspaceIdForCwd(sessionKey)}.lock.json`,
+  );
+  const currentTime = Date.now();
+  await writeFile(lockPath, `${JSON.stringify({
+    version: OWNER_CLAIM_FILE_VERSION,
+    token: OWNER_A,
+    pid: process.pid,
+    acquiredAt: currentTime - 120_001,
+  })}\n`, { mode: 0o600 });
+  await utimes(lockPath, new Date(currentTime), new Date(currentTime));
+
+  const recovered = await claimWorkspaceOwnerIdentity(project, { rootDir, sessionKey });
+  await recovered.assertOwned();
+  assert.equal(await fileExists(lockPath), false);
+  await recovered.release();
 });
 
 test("clock rollback does not leave a malformed owner claim permanently contended", async () => {

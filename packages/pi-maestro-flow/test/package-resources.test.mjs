@@ -17,10 +17,10 @@ const cockpitRoot = join(root, "..", "pi-cockpit");
 const settingsCoreRoot = join(root, "..", "pi-maestro-settings-core");
 const exactSemver = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const piCorePeerBaselines = {
-  "@earendil-works/pi-agent-core": "0.83.0",
-  "@earendil-works/pi-ai": "0.83.0",
-  "@earendil-works/pi-coding-agent": "0.83.0",
-  "@earendil-works/pi-tui": "0.83.0",
+  "@earendil-works/pi-agent-core": "0.84.4",
+  "@earendil-works/pi-ai": "0.84.4",
+  "@earendil-works/pi-coding-agent": "0.84.4",
+  "@earendil-works/pi-tui": "0.84.4",
   typebox: "1.3.7",
 };
 const smartSearchSource = "https://github.com/konbakuyomu/smartsearch/archive/667c465d0f6ea16a423f03c434f94e21505d3595.tar.gz";

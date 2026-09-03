@@ -376,7 +376,9 @@ export function readTunnelState(): TunnelState {
     // no PID file — tunnel was never started via the wizard in this profile
   }
   const url = readConfigServerURL();
-  const alive = pid !== undefined && isProcessAlive(pid);
+  // A stale PID file can point at a newly-reused PID. Liveness alone would then
+  // report an unrelated process (for example Code.exe) as the active tunnel.
+  const alive = pid !== undefined && processMatches(pid, "cloudflared");
   return { pid, url, alive, health: "unknown" };
 }
 

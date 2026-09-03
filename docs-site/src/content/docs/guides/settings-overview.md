@@ -39,6 +39,7 @@ flowchart LR
     "reserveTokens": 16384,
     "keepRecentTokens": 20000,
     "model": "provider/compaction-model",
+    "newContext": { "enabled": false },
     "soft": {
       "enabled": true,
       "nudgeRatio": 0.7,
@@ -52,6 +53,8 @@ flowchart LR
   }
 }
 ```
+
+`compaction.newContext.enabled` 默认关闭；项目级字段覆盖用户级字段。关闭时 `new_context` 与 `compact_history` 不存在于新进程的模型工具面；开启后在 Session 启动或下一 Agent turn 前出现。它只启用显式确定性 reset 及当前会话恢复，不改变 automatic compact 的 token 阈值。
 
 ## 各插件的设置面
 
@@ -89,4 +92,5 @@ flowchart LR
 
 - [API Provider 与模型故障转移](/guides/api-provider-config) — 模型与熔断配置
 - [Compaction 容量管理](/guides/compaction-config) — 压缩阈值配置
+- [New Context 确定性上下文重置](/guides/new-context) — 显式 reset、恢复 capsule 与配置边界
 - [Vision 多模态委托](/guides/vision-config) — 图片委托配置

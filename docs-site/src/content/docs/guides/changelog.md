@@ -5,7 +5,20 @@ icon: "🔄"
 
 这里记录 pi maestro flow 套件从上一稳定版本到当前版本的用户可见变化、行为调整、问题修复和升级要求。
 
-> **当前稳定版本：v0.25.0（2026-09-01）。** SSH 主机管理、远程窗口监督、会话 Artifact、Todo 结果卡片与 Goal/Plan 生命周期加固；引擎精确 pin `maestro-flow@0.5.83`；搭配 Teammate 2.3.0、Cockpit 0.20.0、Settings-Core 0.2.1、Backend-Core 0.1.2 与 Backends 0.1.2。
+> **当前稳定版本：v0.26.0（2026-09-02）。** 显式 New Context 确定性重置、当前会话 Compact History 恢复与上下文压力提示；引擎精确 pin `maestro-flow@0.5.83`；搭配 Teammate 2.4.0、Cockpit 0.21.0、Settings-Core 0.2.1、Backend-Core 0.1.2 与 Backends 0.1.2。
+
+## v0.26.0（2026-09-02）
+
+> 本版发布 Flow 0.26.0、Teammate 2.4.0 与 Cockpit 0.21.0；Settings-Core 0.2.1、Backend-Core 0.1.2 与 Backends 0.1.2 保持不变；引擎精确 pin `maestro-flow@0.5.83`。51 个文件 / +2,747 / −538（不含本发布元数据）。
+
+- **Flow 显式 New Context 模式**：新增 `compaction.newContext.enabled` 开关。关闭（默认）时 `new_context` 与 `compact_history` 都不注册到新进程的模型工具面；开启后在 Session 启动或下一个 Agent turn 前注册。`new_context` 在无模型摘要的确定性同会话重置中携带 Todo/Goal/Plan Recovery Capsule v2（含经过校验的 `resourceUris`）。
+- **Flow Compact History 恢复**：`compact_history` 仅限当前会话且经宿主授权，提供 `timeline`、`search`、`read_turn` 与 `read_checkpoint` 动作及精确 `session://` 条目资源；恢复 capsule 解析出 Checkpoint ID / Previous Checkpoint，Reset 边界可随时恢复。
+- **Flow 上下文压力建议**：压缩调度把预计 token、窗口剩余、硬阈值余量、软带 push/prune 预算投影为 Todo 输出建议，并在 `advance transition=new_context` 交接时给出 `[context-pressure-advisory]` 标记；交接失败标记为 `[new-context-transition-failed]` 而非静默丢失。
+- **Flow Todo 交接与时长图**：终态 Todo 交接可渲染时长柱状图（`todoDurationChart`），从 Cockpit 事件到渲染全链路打通。
+- **Teammate 2.4.0**：新增 `SessionHistory.compactions()` 有界、带版本的 checkpoint 查询 API；修复 workspace-peer 陈旧锁（`acquiredAt` 硬上限 + 进程存活检测），PID 复用不再造成永久锁死。
+- **Cockpit 0.21.0**：viewport 稳定渲染重构与回归测试覆盖；public v1 events 新增 `todoDurationChart` 标志。
+
+升级：`pi install npm:pi-maestro-flow@0.26.0`
 
 ## v0.25.0（2026-09-01）
 
