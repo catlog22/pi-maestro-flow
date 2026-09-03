@@ -176,13 +176,13 @@ test("Agent Bar pans so every selection stays visible and highlighted at a fixed
 	}
 });
 
-test("Agent Bar renders every chip without markers at the exact-fit width", () => {
+test("Agent Bar renders every chip without markers when content plus the reserved column fits", () => {
 	const state = new SessionUiState();
 	state.reconcile("agent", endpoints, "root");
 	state.select("agent");
 	const wide = renderAgentBar(endpoints, state, 200, theme as Theme, { now: 10_000 })[0];
 	const exact = visibleWidth(wide);
-	const plain = stripAnsi(renderAgentBar(endpoints, state, exact, theme as Theme, { now: 10_000 })[0]);
+	const plain = stripAnsi(renderAgentBar(endpoints, state, exact + 1, theme as Theme, { now: 10_000 })[0]);
 	assert.match(plain, /▸ @builder/);
 	assert.match(plain, /@main/);
 	assert.doesNotMatch(plain, /◀|▶/);
@@ -209,7 +209,8 @@ test("Agent Bar is safe at widths 1 through 120 and never exceeds the width", ()
 	for (let width = 1; width <= 120; width++) {
 		state.select("agent7");
 		const [line] = renderAgentBar(many, state, width, theme as Theme, { now: 10_000 });
-		assert.ok(visibleWidth(line) <= width, `width ${width}: ${visibleWidth(line)}`);
+		const liveWidth = Math.max(1, width - 1);
+		assert.ok(visibleWidth(line) <= liveWidth, `width ${width}: ${visibleWidth(line)} > ${liveWidth}`);
 	}
 });
 
@@ -222,6 +223,7 @@ test("Agent Bar shows the concise Alt+R Agent hint only when the surface is not 
 	})[0]);
 	const hidden = stripAnsi(renderAgentBar(endpoints, state, 80, theme as Theme, { now: 10_000 })[0]);
 	assert.match(visible, new RegExp(`${altRe("R")} Agent$`));
+	assert.equal(visibleWidth(visible), 79, "the live bar reserves the terminal's final column");
 	assert.doesNotMatch(hidden, new RegExp(`${altRe("R")}`));
 });
 

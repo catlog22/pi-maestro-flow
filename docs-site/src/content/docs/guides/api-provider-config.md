@@ -33,7 +33,7 @@ icon: "🔑"
 
 ### 自定义 Provider
 
-在 `/api-manager` 中注册自定义端点：`id`、`api`（协议）、`baseUrl`、`modelId`、`contextWindow`、`maxTokens`。注册后即可在 teammate 的 `model: "provider/model"` 中引用。
+在 `/api-manager` 中注册自定义端点：`id`、`api`（协议）、`baseUrl`、`modelId`、`contextWindow`、`maxTokens`。注册后即可在 teammate 的 `model: "provider/model"` 中引用。请求头经 `ProviderHeaders` 归一化（大小写不敏感覆盖），同一语义适用于 API 调用、web 搜索与 MCP 采样。
 
 ### API 重试策略
 
@@ -42,7 +42,7 @@ icon: "🔑"
 | `retry.enabled` | `true` | 是否启用 API 重试 |
 | `retry.maxRetries` | `5` | 最大重试次数（CLI `/api-manager retry` 上限 5；设置面板上限 10） |
 
-> 默认思考级别：`medium`。不同模型支持的级别范围不同（见[模型路由](/guides/model-routing)）。
+> 默认思考级别：`medium`。不同模型支持的级别范围不同（见[模型路由](/guides/model-routing)）；`xhigh` 与 `max` 为两个不同级别，`max` 不再是 `xhigh` 的别名。
 
 ### 敏感字段（secret）规则
 

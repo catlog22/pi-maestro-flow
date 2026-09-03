@@ -59,7 +59,7 @@ Goal 存在时，输入编辑器上方渲染 `goal-panel`：状态（ACTIVE / WA
 
 ### 切换方式
 
-`Alt+Shift+P` 或 `/plan` 切换 Plan/Act 模式。
+`Alt+Shift+P` 或 `/plan` 切换 Plan/Act 模式。`ask` / `plan-confirm` / `plan-editor` / `plan-review` 等交互工具支持取消透传：中止信号会沿权限提示与 teammate 交互中继向前传递，ask 按顺序执行。
 
 ```javascript
 plan-enter()                 // 进入计划模式，加载 current.md 草稿
@@ -118,8 +118,9 @@ todo({ action: "next" })
 
 | 操作 | 说明 |
 |------|------|
-| `create` | 创建任务（subject 必填；支持 batch 一次性铺开整个计划） |
-| `update` | 更新状态/摘要/上下文/技能；可只完成而不继续 |
+| `create` | 创建任务（subject 必填；支持 batch 一次性铺开整个计划，原子提交） |
+| `update` | 更新状态/摘要/上下文/技能；可只完成而不继续；`updates[]` 支持一次原子批量更新多项 |
+| `delete` | 删除单个任务（`id`）或原子批量删除（`ids[]`，不可与 `id` 同用） |
 | `advance` | 无活动任务时激活下一项；有活动任务时完成当前项并推进下一项 |
 | `list` | 按状态/成员过滤列出 |
 | `get` | 获取单个任务详情 |
@@ -127,7 +128,9 @@ todo({ action: "next" })
 | `clear` | 清除所有任务 |
 | `next` | 兼容操作：只激活下一个可运行任务，返回解析后的上下文 |
 
-`advance` 按调用 actor 隔离：它只能完成或激活分配给调用者的任务，但完成仍会全局解除跨角色依赖。一个逻辑目标需要多个角色时，使用一个父任务和多个分别分配的角色子任务，不让多个角色共同写一个 Todo 的终态。Canonical Workflow Session/Run 的镜像 Todo 仍由 Run lifecycle 驱动。
+`advance` 按调用 actor 隔离：它只能完成或激活分配给调用者的任务，但完成仍会全局解除跨角色依赖。一个逻辑目标需要多个角色时，使用一个父任务和多个分别分配的角色子任务，不让多个角色共同写一个 Todo 的终态。Canonical Workflow Session/Run 的镜像 Todo 仍由 Run lifecycle 驱动；同 generation mirror 对账会保留本地计时元数据与 skill 激活状态。
+
+任务携带 `resourceUris` 持久化资源引用（如 `agent://<publication-id>`）与计时元数据（开始/完成时间、耗时）；todo 结果渲染为任务卡片并附耗时图，可在 Cockpit 状态堆栈中查看。
 
 ### Todo 阶段切换到 New Context
 

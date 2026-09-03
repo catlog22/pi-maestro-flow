@@ -141,7 +141,7 @@ Flow Schedule does not replace the other surfaces:
 - `loop` handles recurring checks;
 - Flow Schedule controls ordered dispatch and exact result correlation.
 
-Creating a schedule does not send work; the agent creates it, starts it, and uses schedule status to distinguish transport acceptance from exact completion evidence. Optional Todo completion and conflict gates apply only when the worker advertises the required capability. Without that capability, those gates are not negotiated and the exact correlated report remains the completion authority.
+Creating a schedule does not send work; the agent creates it, starts it, and uses schedule status to distinguish transport acceptance from exact completion evidence. Optional Todo completion and conflict gates apply only when the worker advertises the required capability. Without that capability, those gates are not negotiated and the exact correlated report remains the completion authority. Queued report reminders travel over a validated workspace-peer v1 transport identity and are fenced by the Monitor authority generation.
 
 ## 8. Monitor vs Advisor vs Observe
 

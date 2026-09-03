@@ -137,13 +137,20 @@ teammate-send({ to: "my-agent", message: "请也检查边界情况", mode: "foll
 teammate-send({ to: "my-agent", message: "停止当前方案，改用替代方案", mode: "steer" })
 ```
 
+## 运行时保障（v0.25+）
+
+- **来源可追溯**：agent 运行时 provenance 与中断投递状态可观测，取消的显式重置会清理等待与计时，不发布虚假失败；
+- **恢复语义**：recovery failover 结算收敛，被取消后挂起的消息可在既有上下文中继续；
+- **进程清理**：Windows 进程树清理会确认真实回收，不只凭 `taskkill` 退出码判断；完成消息 outbox GC 有界，reconcile 期间节流；
+- **完成与停滞卡片**：completion / stalled 消息渲染为有界卡片，状态变化经事件通知，不要轮询。
+
 ## 结果记录（agent://）
 
 完成任务的输出可通过协议资源读取：`agent://<correlationId>` 返回结构化输出（带 outputSchema 的任务）或最终答案文本（普通任务）；路径段可取嵌套字段，如 `agent://reviewer-1/findings/0/path`。
 
 ## 思考深度控制
 
-逐任务控制推理深度：`off` → `minimal` → `low` → `medium` → `high` → `xhigh`（`max` 为别名）。v0.16.0 起所有级别均可选并透传（不再受限）。
+逐任务控制推理深度：`off` → `minimal` → `low` → `medium` → `high` → `xhigh` → `max`。`xhigh` 与 `max` 是两个不同的 canonical 级别（`max` 与 Pi runtime 的 ThinkingLevel 一致，不再降级为 `xhigh`）。
 
 ```javascript
 teammate({

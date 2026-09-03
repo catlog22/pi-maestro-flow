@@ -59,7 +59,7 @@ export function renderWindowBar(
 		endpoint,
 	}));
 	if (tabs.length === 0) {
-		return [truncateToWidth(theme.fg("muted", tuiT("window.empty")), Math.max(1, width), "…")];
+		return [truncateToWidth(theme.fg("muted", tuiT("window.empty")), Math.max(1, width - 1), "…")];
 	}
 	return [renderSessionBarLine(
 		(availableWidth) => renderSessionTabLine(tabs, availableWidth, {

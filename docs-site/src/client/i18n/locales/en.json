@@ -21,8 +21,8 @@
     "logo_alt": "Maestro Flow Logo"
   },
   "announcement": {
-    "title": "v0.27.0 is out — New Context defaults on + workspace Session History + knowledge-aware Plans (maestro-flow 0.5.84). Upgrade:",
-    "install": "pi install npm:pi-maestro-flow@0.27.0",
+    "title": "v0.27.1 is out — Cockpit last-column wrap fix + Todo numbering starts at #1. Upgrade:",
+    "install": "pi install npm:pi-maestro-flow@0.27.1",
     "close": "Dismiss"
   },
   "accessibility": {

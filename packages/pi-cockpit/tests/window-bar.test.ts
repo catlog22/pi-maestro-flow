@@ -297,7 +297,8 @@ test("Window Bar renders explicit control and peer windows and fits every width"
 	for (let width = 1; width <= 120; width++) {
 		const lines = renderWindowBar(value.windows, state, width, theme as Theme);
 		assert.equal(lines.length, 1);
-		assert.ok(visibleWidth(lines[0]!) <= width, `width ${width}: ${lines[0]}`);
+		const liveWidth = Math.max(1, width - 1);
+		assert.ok(visibleWidth(lines[0]!) <= liveWidth, `width ${width}: ${visibleWidth(lines[0]!)} > ${liveWidth}`);
 	}
 	const line = renderWindowBar(value.windows, state, 80, theme as Theme)[0]!;
 	assert.match(line, new RegExp(`#control·${LOCAL_OWNER.slice(0, 6)}`));
@@ -340,6 +341,7 @@ test("Window Bar shows the Alt+R list hint only outside a capturing overlay", ()
 	)[0]!;
 	const hidden = renderWindowBar(value.windows, state, 100, theme as Theme)[0]!;
 	assert.match(visible, new RegExp(`${altRe("R")} list$`));
+	assert.equal(visibleWidth(visible), 99, "the live bar reserves the terminal's final column");
 	assert.doesNotMatch(hidden, new RegExp(`${altRe("R")}`));
 });
 
@@ -362,7 +364,8 @@ test("Window Bar empty state is width bounded", () => {
 	const state = new SessionUiState();
 	for (let width = 1; width <= 30; width++) {
 		const line = renderWindowBar([], state, width, theme as Theme)[0]!;
-		assert.ok(visibleWidth(line) <= width, `width ${width}: ${visibleWidth(line)}`);
+		const liveWidth = Math.max(1, width - 1);
+		assert.ok(visibleWidth(line) <= liveWidth, `width ${width}: ${visibleWidth(line)} > ${liveWidth}`);
 	}
 });
 

@@ -207,7 +207,8 @@ export interface TodoContext {
 // ---------------------------------------------------------------------------
 
 let tasks: Map<string, TodoTask> = new Map();
-let nextTaskId = 0;
+// Task ids are user-facing sequence numbers, so they start at 1 ("#1" is the first task).
+let nextTaskId = 1;
 let knownActors: Map<string, TodoActorRef> = new Map([[ROOT_TODO_ACTOR.id, ROOT_TODO_ACTOR]]);
 let extensionApi: ExtensionAPI | undefined;
 let onTodoStateChanged: (() => void) | undefined;
@@ -269,7 +270,7 @@ export function onSessionShutdown(ctx: TodoContext): void {
   todoSessionLoaded = false;
   todoMutationQueue = Promise.resolve();
   tasks.clear();
-  nextTaskId = 0;
+  nextTaskId = 1;
   knownActors = new Map([[ROOT_TODO_ACTOR.id, cloneActor(ROOT_TODO_ACTOR)]]);
   skillLoader = undefined;
   skillRuntime = undefined;
@@ -1593,7 +1594,7 @@ function commitTaskIds(count: number): void {
 }
 
 function syncTaskIdCounter(state: Map<string, TodoTask> = tasks): void {
-  let max = -1;
+  let max = 0;
   for (const id of state.keys()) {
     const n = Number(id);
     if (Number.isInteger(n) && n > max) max = n;

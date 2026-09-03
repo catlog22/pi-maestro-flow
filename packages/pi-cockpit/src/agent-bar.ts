@@ -241,7 +241,9 @@ export function renderSessionBarLine(
 	theme: Theme,
 	shortcutHint?: SessionBarHintValue,
 ): string {
-	const w = Math.max(1, width);
+	// A live main-screen row must not write the terminal's final column: doing so
+	// arms auto-wrap, while pi-tui still tracks the cursor on the original row.
+	const w = Math.max(1, width - 1);
 	if (!shortcutHint) return renderContent(w);
 	const hintSpec = typeof shortcutHint === "string" ? { text: shortcutHint, color: "dim" as const } : shortcutHint;
 	const hint = theme.fg(hintSpec.color ?? "dim", hintSpec.text);
@@ -262,7 +264,7 @@ export function renderAgentBar(
 	theme: Theme,
 	options: AgentBarRenderOptions = {},
 ): string[] {
-	if (endpoints.length === 0) return [truncateToWidth(chip(MAIN_SESSION_LABEL, true, "accent", theme), Math.max(1, width), "…")];
+	if (endpoints.length === 0) return [truncateToWidth(chip(MAIN_SESSION_LABEL, true, "accent", theme), Math.max(1, width - 1), "…")];
 	const now = options.now ?? 0;
 	// A stale selection (id no longer in the endpoint list) must not leave the
 	// bar without a highlighted chip: fall back to root / first endpoint.

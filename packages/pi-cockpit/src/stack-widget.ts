@@ -96,6 +96,9 @@ export function makeAgentWidget(deps: AgentWidgetDeps) {
 		return {
 			render(width: number): string[] {
 				const cfg = deps.getConfig();
+				// Agent rows update while teammate runs. Leave the final terminal column
+				// untouched so auto-wrap cannot move the real cursor below pi-tui's model.
+				const liveWidth = Math.max(1, width - 1);
 				// graph(...) is the dispatch container, not an additional worker. Keep it
 				// in AgentsStore for linkage and cleanup, and bridge its visible descendants
 				// to the nearest non-graph ancestor for rendering.
@@ -137,7 +140,7 @@ export function makeAgentWidget(deps: AgentWidgetDeps) {
 				if (runCount) headerSegs.push({ text: theme.fg("dim", tuiT("common.running", { count: runCount })), priority: 80, clippable: false });
 				if (pendingCount) headerSegs.push({ text: theme.fg("dim", tuiT("common.pending", { count: pendingCount })), priority: 60, clippable: false });
 				if (sleepingCount) headerSegs.push({ text: theme.fg("dim", tuiT("common.sleeping", { count: sleepingCount })), priority: 50, clippable: false });
-				const headerLine = fitLineByPriority(headerSegs, width, UTILS, theme.fg("dim", g.separator), g.ellipsis);
+				const headerLine = fitLineByPriority(headerSegs, liveWidth, UTILS, theme.fg("dim", g.separator), g.ellipsis);
 				// Focused-session priority: while a selected session's detail block is
 				// open, it owns the Agent height allowance and the roster collapses to
 				// this one-line summary. The per-agent rows stay reachable through the
@@ -183,12 +186,12 @@ export function makeAgentWidget(deps: AgentWidgetDeps) {
 							above > 0 ? `↑ ${tuiT("common.more", { count: above })}` : "",
 							below > 0 ? `↓ ${tuiT("common.more", { count: below })}` : "",
 						].filter(Boolean).join(` ${g.separator} `)),
-						width,
+						liveWidth,
 						g.ellipsis,
 					)
 					: undefined;
 				if (marker && above > 0) lines.push(marker);
-				lines.push(...renderAgents(visible, cfg.agentsMode, width, paint, UTILS, { ...opts, withHead: false, maxRows: windowRows + 1 }));
+				lines.push(...renderAgents(visible, cfg.agentsMode, liveWidth, paint, UTILS, { ...opts, withHead: false, maxRows: windowRows + 1 }));
 				if (marker && above === 0) lines.push(marker);
 				return lines;
 			},

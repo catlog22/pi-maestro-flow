@@ -16,6 +16,9 @@ pi-cockpit 提供编辑器上方实时状态堆栈 + Starship 风格 Footer，�
 - **终端标题**：Claude Code 风格 Tab 标题 + 可选 LLM 生成会话摘要
 - **Sidebar Dock**：编辑器侧边停靠栏（模式/宽度/密度可配）
 - **背景任务覆盖层**：`Alt+J` 查看 bash_bg 任务实时状态
+- **Todo 覆盖层**：`Alt+Shift+T` 打开 todo 覆盖层（legacy 终端兼容钩子），附全列表提示
+- **Owner 身份标识**：session bar 与 window bar 显示 owner 身份 token（`label·ownerId前缀`），窗口关闭或替换后需按新 owner 重新寻址
+- **有效值显示**：未显式设置的配置项同时显示缺席状态与继承来的有效值（含 Flow New Context 开关的渲染—编辑—持久化全链路）
 - **跨会话监督**：Window Bar 中按 `Alt+W` 切换目标窗口的 Monitor 绑定
 - **CLI agent 徽章**：外部 CLI 后端（`cli/*` 模型）的 agent 行渲染专用 `⌘ cli` 徽章
 
@@ -131,6 +134,7 @@ pi-cockpit 提供编辑器上方实时状态堆栈 + Starship 风格 Footer，�
 | `/cockpit sidebar` | 报告当前侧栏模式/宽度/密度 |
 | `/theme <name>` | 切换主题（带实时预览）；`cockpit-zen` 是 Zen 栈配套的可选暖金主题，不会自动修改 `stackStyle` |
 | `Alt+J` | 打开后台 Bash 任务覆盖层 |
+| `Alt+Shift+T` | 打开 Todo 任务覆盖层（legacy 终端兼容） |
 | `Alt+L` | 浏览当前 Cockpit 表面；Zen 模式下首次 Enter 展开行内详情，第二次 Enter 打开实体详情，Esc 逐级返回；Agent 详情中 `m` 设置输入目标 |
 | `Alt+Shift+P` | 切换 Plan/Act 模式 |
 

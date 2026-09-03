@@ -1087,7 +1087,7 @@ test("todo widget renders nothing when there are no tasks or runs", () => {
   assert.deepEqual(renderTodoWidget([], true, 120, []), []);
 });
 
-test("todo allocates 0-based ids and update resolves #0", async () => {
+test("todo allocates 1-based ids and update resolves #1", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-todo-zero-id-"));
   const loader = new TodoSkillLoader({
     cwd: root,
@@ -1098,19 +1098,19 @@ test("todo allocates 0-based ids and update resolves #0", async () => {
   const ctx = makeExtensionContext();
 
   try {
-    const first = await executeTodo({ action: "create", subject: "Zeroth task" }, ctx);
-    assert.match((first.content[0] as { text: string }).text, /Created #0/);
-    const second = await executeTodo({ action: "create", subject: "First task" }, ctx);
-    assert.match((second.content[0] as { text: string }).text, /Created #1/);
+    const first = await executeTodo({ action: "create", subject: "First task" }, ctx);
+    assert.match((first.content[0] as { text: string }).text, /Created #1/);
+    const second = await executeTodo({ action: "create", subject: "Second task" }, ctx);
+    assert.match((second.content[0] as { text: string }).text, /Created #2/);
 
-    const updated = await executeTodo({ action: "update", id: "#0", status: "completed" }, ctx);
+    const updated = await executeTodo({ action: "update", id: "#1", status: "completed" }, ctx);
     assert.equal((updated as { isError?: boolean }).isError, undefined);
-    assert.match((updated.content[0] as { text: string }).text, /Updated #0/);
+    assert.match((updated.content[0] as { text: string }).text, /Updated #1/);
 
     const tasks = getVisibleTasks();
-    assert.equal(tasks[0].id, "0");
+    assert.equal(tasks[0].id, "1");
     assert.equal(tasks[0].status, "completed");
-    assert.equal(tasks[1].id, "1");
+    assert.equal(tasks[1].id, "2");
   } finally {
     onSessionShutdown(todoContext);
     await rm(root, { recursive: true, force: true });
@@ -1151,7 +1151,7 @@ test("todo widget unifies root and teammate tasks sorted by status priority", as
     await executeTodo({ action: "create", subject: "Root done" }, ctx);
     await executeTodo({ action: "create", subject: "Root pending" }, ctx);
     await executeTodo({ action: "create", subject: "Worker active" }, ctx, worker);
-    await executeTodo({ action: "update", id: "0", status: "completed" }, ctx);
+    await executeTodo({ action: "update", id: "1", status: "completed" }, ctx);
     await executeTodo({ action: "next" }, ctx, worker);
 
     const visible = getVisibleTasks();
@@ -1373,7 +1373,7 @@ test("todo advance activates, completes, and promotes actor-owned tasks", async 
     assert.equal(promoted.isError, undefined);
     assert.deepEqual(getVisibleTasks().map((task) => task.status), ["completed", "in_progress"]);
     assert.equal(getVisibleTasks()[0].summary, "First done");
-    assert.match((promoted.content[0] as { text: string }).text, /Task #1/);
+    assert.match((promoted.content[0] as { text: string }).text, /Task #2/);
 
     const finished = await executeTodo({ action: "advance", id: second.id, summary: "Second done" }, ctx);
     assert.equal(finished.isError, undefined);
@@ -2955,7 +2955,7 @@ test("todo delegation is DAG-aware: blocked tasks delegate with dependency info 
     // Delegating a blocked task still moves the assignee and names the deps.
     const delegated = await delegateTodoTaskToAgent(downstream.id, antDown, ctx);
     assert.equal((delegated as { isError?: boolean }).isError, undefined);
-    assert.match((delegated.content[0] as { text: string }).text, /blocked by #0/);
+    assert.match((delegated.content[0] as { text: string }).text, /blocked by #1/);
     assert.equal(getVisibleTasks()[1].assignee.id, "ant-down");
     assert.equal(getVisibleTasks()[1].status, "blocked");
 

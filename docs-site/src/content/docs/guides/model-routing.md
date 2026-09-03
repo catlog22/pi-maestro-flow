@@ -40,8 +40,8 @@ teammate({
 | `low` | 低深度推理 |
 | `medium` | 中等深度（平衡速度和质量） |
 | `high` | 高深度推理 |
-| `xhigh` | 极高深度（最慢但最彻底） |
-| `max` | `xhigh` 的别名 |
+| `xhigh` | 极高深度 |
+| `max` | 独立 canonical 级别（与 Pi runtime 的 ThinkingLevel 一致，不再降级为 `xhigh`） |
 
 ### 使用方式
 
@@ -62,6 +62,19 @@ teammate({
 ```
 
 > 不同模型支持的思考级别范围不同，且由运行时模型目录（`<available_teammate_models>`）动态决定——同一模型在不同环境可能支持不同的级别集。超出范围的级别会被模型拒绝或降级，以实际输出为准。
+
+## 路由 Profiles（v0.25+）
+
+命名 profile 把 `mappings` / `fallbackMappings` / `thinkingLevels` / `roleMappings` 打包为一套可切换的路由配置，运行时附带 safeguards（ Authority 生成围栏、完成消息 outbox GC 有界、进程树清理确认回收而非仅凭退出码判断）。
+
+| 项 | 说明 |
+|----|------|
+| 全局配置 | `~/.pi/agent/teammate-models.json`（`defaultProfile` + `profiles` + 可选 `retiredProfileIds`） |
+| 会话覆盖 | `<cwd>/.pi/teammate-models.session.<safe>.json` |
+| 管理入口 | Control Center（`Alt+M` / `/teammate-models` 模型映射覆盖层） |
+| 请求覆盖 | 单次派发可用 `model` / `fallbackModels` / `thinking` 覆盖 profile 结果 |
+
+> 优先级仍为：任务级 `model` > 顶层 `model` > `taskType` 映射（含 profile 内映射）> 角色 model > 父 Pi 模型。
 
 ## taskType 与路由
 

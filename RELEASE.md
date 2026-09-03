@@ -1,95 +1,66 @@
-# v0.27.0 — Default New-Context Recovery, Workspace Session History & Knowledge-Aware Plans
+# v0.27.1 — Cockpit Last-Column Wrap Fix & Todo Numbering From #1
 
 ## Overview
 
-This release publishes **Flow 0.27.0**, **Teammate 2.5.0**, and **Cockpit 0.22.0**.
-**Settings-Core 0.2.1**, **Backend-Core 0.1.2**, and **Backends 0.1.2** remain
-unchanged. The core engine is updated to the latest exact pin,
-`maestro-flow@0.5.84`.
+This is a small patch release on top of v0.27.0. It publishes **Flow 0.27.1**
+and **Cockpit 0.22.1**. **Teammate 2.5.0**, **Settings-Core 0.2.1**,
+**Backend-Core 0.1.2**, and **Backends 0.1.2** remain unchanged, and the exact
+external engine pin stays at `maestro-flow@0.5.84` (already the latest).
 
-New Context recovery is now enabled by default, while the new read-only
-`session_history` tool makes bounded current, workspace, and teammate session
-history available independently of compaction. Plan execution also gains an
-explicit end-of-task knowledge assessment, teammate compaction cancellation is
-handled without false failure, and Cockpit shows inherited settings together
-with their effective values.
+Two user-facing fixes ship in the published companions: Cockpit no longer
+writes the terminal's final column on live rows (which armed auto-wrap and
+pushed the real cursor below pi-tui's model), and Todo task ids are
+user-facing sequence numbers starting at `#1` instead of `#0`.
 
 ## Highlights
 
-### Flow 0.27.0
+### Flow 0.27.1
 
-- **New Context enabled by default** - `compaction.newContext.enabled` now
-  defaults to on. Deterministic resets remain scheduled only at settlement and
-  preserve the bounded recovery capsule; soft context pressure recommends a
-  reset at completed Todo boundaries while critical pressure prioritizes the
-  next safe reset.
-- **Bounded workspace session history** - the new always-available,
-  host-authorized `session_history` tool lists sessions, performs literal
-  searches, and reads exact turns across current, workspace, or teammate
-  scopes. It exposes only active-chain user/assistant/visible compaction data,
-  keeps tool results opt-in, and never reveals transcript paths or hidden tool
-  calls.
-- **Exact session resources** - `resource` now resolves authorized
-  `session://` entries discovered by either `compact_history` or
-  `session_history`, including prior workspace sessions, while revalidating the
-  active chain on every read.
-- **Knowledge-aware Plans** - Plan contracts require an end-of-execution
-  knowledge outcome: stage only reusable non-obvious lessons that meet the
-  project quality bar, or explicitly report zero candidates without inventing
-  content. `session_history` is admitted as a read-only Plan-mode discovery
-  tool after the governing Maestro knowledge search misses.
-- **Stable Workflow mirrors** - same-generation Todo reconciliation now
-  preserves local timing metadata and skill activation instead of treating an
-  unchanged canonical mirror as a fresh update.
-- **Latest Maestro engine** - the exact external engine pin moves from
-  `maestro-flow@0.5.83` to `maestro-flow@0.5.84`.
+- **Todo numbering starts at #1** - `packages/pi-maestro-flow/src/tools/todo.ts`
+  initializes the task-id counter at 1 and resets to 1 on session shutdown, so
+  the first created task is `#1`. The id-reconciliation scan adopts the same
+  base. Covered by `test/todo.test.ts` (98 tests pass).
+- **Exact companion bump** - the precise `pi-cockpit` dependency moves from
+  `0.22.0` to `0.22.1`, so the published Flow tarball carries the wrap fix
+  below. No other dependency changes.
 
-### Teammate 2.5.0
+### Cockpit 0.22.1
 
-- **Compaction cancellation recovery** - a cancelled explicit reset now clears
-  the parent's compaction wait and timer without publishing a false failure,
-  allowing a pending message to continue in the existing context.
-- **Planner knowledge outcome** - the built-in planner emits a dedicated
-  Knowledge Outcome section that predicts only plausible reusable lessons and
-  requires an explicit zero-candidate result when none qualify.
-
-### Cockpit 0.22.0
-
-- **Effective settings visibility** - unset settings now display both the
-  absence of an explicit value and the inherited effective value. The Flow New
-  Context toggle is covered end to end through render, edit, and persistence.
-- **Standalone compatibility** - Cockpit no longer performs runtime value
-  imports from its optional Teammate peer. Its local V2 read-model adapter keeps
-  canonical snapshots and deltas available when Teammate is present while a
-  bare Cockpit installation continues to load through the V1 fallback.
+- **Last-column wrap fix** - live main-screen rows leave the final terminal
+  column untouched so auto-wrap cannot move the real cursor:
+  `src/agent-bar.ts` (session bar line and empty-endpoint chip),
+  `src/stack-widget.ts` (agent widget header, marker, and agent rows via a
+  shared `liveWidth`), and `src/window-bar.ts` (empty-window line). Covered by
+  the updated `tests/agent-bar.test.ts`, `tests/stack-widget.test.ts`, and
+  `tests/window-bar.test.ts` (49 targeted tests pass).
+- **Docs refresh** - teammate-dispatch, model-routing, goal-plan-todo,
+  cockpit, monitor, api-provider-config, and bash-bg-observe guides plus the
+  tool-schema reference are updated; install commands and the docs-site banner
+  point at `0.27.1`.
 
 ## Package version table
 
 | Package | Previous | New |
 |---|---|---|
-| pi-maestro-flow | 0.26.0 | 0.27.0 |
-| pi-maestro-teammate | 2.4.0 | 2.5.0 |
-| pi-cockpit | 0.21.0 | 0.22.0 |
+| pi-maestro-flow | 0.27.0 | 0.27.1 |
+| pi-cockpit | 0.22.0 | 0.22.1 |
+| pi-maestro-teammate | 2.5.0 | 2.5.0 (unchanged) |
 | pi-maestro-settings-core | 0.2.1 | 0.2.1 (unchanged) |
 | pi-maestro-backend-core | 0.1.2 | 0.1.2 (unchanged) |
 | pi-maestro-backends | 0.1.2 | 0.1.2 (unchanged) |
-| maestro-flow (engine pin) | 0.5.83 | 0.5.84 |
+| maestro-flow (engine pin) | 0.5.84 | 0.5.84 (unchanged, latest) |
 
 ## Stats
 
-- **42 implementation and documentation files** changed on top of v0.26.0
-  before release metadata
-- **+1,003 / -134** lines before package-version and release-note updates
+- **29 files** changed on top of v0.27.0 before release-note updates
+- **+203 / -70** lines before release-note updates
 
 ## Install / Upgrade
 
 ```bash
-pi install npm:pi-maestro-flow@0.27.0
+pi install npm:pi-maestro-flow@0.27.1
 ```
 
 This pulls the exact published companions `pi-maestro-teammate@2.5.0` and
-`pi-cockpit@0.22.0`, plus `pi-maestro-settings-core@0.2.1`,
+`pi-cockpit@0.22.1`, plus `pi-maestro-settings-core@0.2.1`,
 `pi-maestro-backend-core@0.1.2`, and `pi-maestro-backends@0.1.2`.
-
-New Context is enabled by default. Set `compaction.newContext.enabled` to
-`false` if deterministic settlement-time resets are not desired.

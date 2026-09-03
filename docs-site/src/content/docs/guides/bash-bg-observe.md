@@ -35,7 +35,7 @@ bash_bg({ action: "list" })
 |------|------|
 | 命令在 `timeout` 内完成 | 前台直接返回完整输出 |
 | 超过 `timeout` 仍运行 | 自动转入后台，返回 jobId |
-| 后台完成 | 推送 bash-bg-complete 通知（新回合） |
+| 后台完成 | 推送 bash-bg-complete 通知（新回合），完成与 loop 事件渲染为有界卡片 |
 | 常驻进程（dev server 等） | 用 `action: "start"` 立即后台化 |
 
 ### 与 observe 配合

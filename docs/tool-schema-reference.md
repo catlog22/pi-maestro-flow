@@ -1,6 +1,6 @@
 # Pi 工具 Schema 参考文档
 
-> 生成时间：2026-01-22 · teammate 章节修订于 2026-07-15（对应 pi-maestro-teammate ≥ 0.4.4 的 schema）| 共 17 个系统工具
+> 生成时间：2026-01-22 · 修订于 2026-09-03（对应 pi-maestro-flow ≥ 0.27.0 / pi-maestro-teammate ≥ 2.5.0）| 共 21 个系统工具
 
 ## 目录
 
@@ -21,6 +21,10 @@
 15. [search_tool_bm25](#15-search_tool_bm25---工具搜索)
 16. [smart_search](#16-smart_search---智能搜索)
 17. [plan-enter](#17-plan-enter---进入-plan-模式)
+18. [run-control](#18-run-control---maestro-sessionrun-生命周期)
+19. [session_history](#19-session_history---有界会话历史)
+20. [new-context](#20-new-context---确定性上下文重置)
+21. [resource](#21-resource---精确协议资源读取)
 
 ---
 
@@ -119,7 +123,7 @@ edit({
 | `context` | enum | | `fresh`（默认）/`fork` |
 | `model` | string | | 精确 `provider/model` 默认值 |
 | `fallbackModels` | string[] | | 默认的按序 fallback 链 |
-| `thinking` | enum | | 默认思考深度；`max` 是 `xhigh` 别名 |
+| `thinking` | enum | | 默认思考深度（`off`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`；`xhigh` 与 `max` 为不同 canonical 级别） |
 | `cwd` | string | | 默认工作目录 |
 | `timeoutMs` | integer | | 默认超时毫秒数 |
 
@@ -226,8 +230,9 @@ explore 提示词结构（explorer 类 agent 通用）：`FIND:`(目标+条件) 
 
 | 参数 | 类型 | 必需 | 说明 |
 |------|------|:---:|------|
-| `action` | enum | ✅ | `get`/`create` |
-| `objective` | string | create 时 ✅ | 目标描述 |
+| `action` | enum | ✅ | `get`/`create`/`update`/`complete` |
+| `objective` | string | create 时 ✅ | 目标描述（update 时为替换后的新目标） |
+| `summary` | string | complete 时 ✅ | 完成证据说明 |
 | `tokenBudget` | string | | 可选的显式 Token 预算；默认省略即无预算。接受纯数字、`k`、`m`，仅用于 create |
 
 预算不是 Goal 的默认属性：只有调用方显式传入 `tokenBudget`，或用户在 `/goal create|resume` 中使用 `--tokens` 后才存在。`/goal` 使用 Pi 原生参数补全显示无预算创建和 `--tokens 100k` 两种 hint；function schema 不添加 provider 不兼容的非标准 `hint` 字段。
@@ -246,7 +251,11 @@ Session 隔离：Goal 持久化条目绑定当前 `sessionId`。`/new` 与 `/for
 goal({ action: "create", objective: "实现认证模块" })
 goal({ action: "create", objective: "实现认证模块", tokenBudget: "500k" }) // 显式预算
 goal({ action: "get" })
+goal({ action: "update", objective: "实现认证模块 + 刷新令牌" })
+goal({ action: "complete", summary: "全部实现并通过测试" })
 ```
+
+Workflow Session/Run 绑定的 Goal 由 Run lifecycle 驱动，其他会话只读，防止误操作。
 
 ---
 
@@ -275,18 +284,27 @@ ask_user_question({ questions: [{ question: "选择语言", options: [{ label: "
 
 | 参数 | 类型 | 必需 | 说明 |
 |------|------|:---:|------|
-| `action` | enum | ✅ | `create`/`update`/`list`/`get`/`delete`/`clear`/`next` |
-| `id` | string | | 任务 ID |
-| `subject` | string | | 标题(create 必需) |
+| `action` | enum | ✅ | `create`/`update`/`list`/`get`/`delete`/`clear`/`next`/`advance` |
+| `id` | string | | 单任务 ID（get/单 update/单 delete 用） |
+| `ids` | string[] | | 批量原子删除；不可与 `id` 同用 |
+| `subject` | string | | 标题（单 create 必需） |
+| `tasks` | Task[] | | 非空批量创建；`blockedBy` 用同批下标构成 DAG，原子提交 |
+| `updates` | Update[] | | 非空批量原子更新；不可与 `id`/顶层更新字段同用 |
 | `description` | string | | 详情 |
 | `status` | enum | | `pending`/`in_progress`/`completed`/`blocked` |
 | `blockedBy` | string[] | | 依赖 ID |
 | `context` | string | | 执行上下文 |
 | `skills` | Skill[]/null | | skill 绑定 |
-| `summary` | string | | 完成摘要 |
-| `filter` | object | | `{ status }` |
+| `summary` | string | | 完成摘要（会注入后续任务上下文） |
+| `resourceUris` | string[] | | 持久化资源引用（如 `agent://<publication-id>`），随任务持久化 |
+| `goalId` | string | | 作为质量门的 Goal；空字符串清除 |
+| `transition` | enum | | 仅 `advance` 可用：`new_context` 在提交后调度确定性上下文重置 |
+| `filter` | object | | `{ status, memberId? }` |
+| `planHandoffKey` | string | | 已批准 Plan 的 handoff key |
 
 **Skill 结构：** `{ name, role: "primary"|"guard"|"support", args? }`
+
+`advance` 是 live 状态机完成动作：无活动任务时激活调用者自己的下一可运行任务；有活动任务时完成当前项并推进下一项，按调用 actor 隔离归属。`tasks[].todo` 可把 Todo 绑定给派发的 teammate Agent，由其自行推进。任务携带计时元数据（开始/完成时间、耗时），同 generation Workflow mirror 对账时保留本地计时与 skill 激活状态。
 
 ---
 
@@ -363,4 +381,58 @@ ask_user_question({ questions: [{ question: "选择语言", options: [{ label: "
 
 ---
 
-> 本文档基于系统提示词中的工具定义生成，覆盖全部 17 个工具的参数 schema。
+---
+
+## 18. `run-control` - Maestro Session/Run 生命周期
+
+canonical Maestro CLI 的 argv 透传壳，是 Session/Run 生命周期的唯一 LLM 工具面。读命令（`status`/`brief`/`check`/`recall`/`evidence`/`list`/`show`/`graph`/`search`/`load`/`review` 等）无需 mutation lease；写命令（`next`/`done`/`decide`/`seal`/`edit`/`meta`/`recover` 等）需当前 Pi session 持有 lease，Plan 模式阻断。
+
+```js
+run-control({ argv: ["session", "status"] })
+run-control({ argv: ["run", "done", "run-123", "--verdict", "done", "--summary", "完成"] })
+```
+
+---
+
+## 19. `session_history` - 有界会话历史
+
+始终可用、宿主授权的只读工具，在 current / workspace / teammate 三种 scope 中有界列举会话、字面搜索、读取精确 turn。仅暴露 active-chain 可见消息（user/assistant/visible_custom/compaction），`tool_result` 须显式 opt-in；不接受 transcript 路径，不暴露隐藏行、thinking 与工具调用参数。
+
+| 参数 | 类型 | 必需 | 说明 |
+|------|------|:---:|------|
+| `action` | enum | ✅ | `list_sessions`/`search`/`read_turn` |
+| `scope` | enum | | `current_session`/`workspace_sessions`/`teammates` |
+| `query` | string | search 时 ✅ | 字面大小写不敏感搜索文本 |
+| `sessionId` / `turn` | string/integer | read_turn 时 ✅ | 精确会话与 1-based turn（0 为 preamble） |
+| `include` | string[] | | 默认不含 `tool_result` |
+| `limit` | integer | | 单结果上限 |
+
+```js
+session_history({ action: "search", scope: "workspace_sessions", query: "migration", limit: 5 })
+```
+
+---
+
+## 20. `new-context` - 确定性上下文重置
+
+在 Todo 完成边界调度确定性同会话上下文重置（默认启用，`compaction.newContext.enabled` 可关）。新上下文只携带 Todo/Goal/Plan/Workflow 状态派生的有界 recovery capsule，不做模型摘要。
+
+```js
+todo({ action: "advance", id: "abc123", summary: "阶段完成", transition: "new_context" })
+```
+
+只在当前阶段已完整持久化、下一阶段弱耦合时使用；普通 token 压力仍由 automatic compact 处理。
+
+---
+
+## 21. `resource` - 精确协议资源读取
+
+按 URI 读取协议资源（与本地文件读取互补）：`pr://`/`issue://`（GitHub）、`skill://`、`rule://`、`agent://<id>`（teammate 产出，支持子路径取嵌套字段）、`session://<sessionId>/entry/<entryId>`（经 `compact_history` 或 `session_history` 发现的授权条目，每次读取重校验 active chain）。
+
+```js
+resource({ uri: "agent://reviewer-1/findings/0/path" })
+```
+
+---
+
+> 本文档基于系统提示词中的工具定义生成，覆盖全部 21 个工具的参数 schema。

@@ -2,7 +2,7 @@ import { altKey } from "pi-maestro-settings-core/v1";
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import type { TUI } from "@earendil-works/pi-tui";
+import { visibleWidth, type TUI } from "@earendil-works/pi-tui";
 import { makeAgentWidget, makeTodoWidget } from "../src/stack-widget.ts";
 import { DEFAULT_TOGGLE_HINT } from "../src/render.ts";
 import { makeSessionDetailWidget } from "../src/session-detail.ts";
@@ -98,6 +98,29 @@ test("agent-area widget stays hidden when there are no teammates", () => {
 	})(tui, theme);
 	const lines = component.render(100);
 	assert.deepEqual(lines, []);
+});
+
+test("live agent rows reserve the terminal's final column", () => {
+	const component = makeAgentWidget({
+		getAgents: () => [{
+			correlationId: "worker",
+			agent: "explorer",
+			name: "explorer",
+			role: "explorer",
+			task: "inspect " + "rendering ".repeat(20),
+			status: "running",
+			tail: "streaming " + "output ".repeat(20),
+			startedAt: 1,
+			lastActivityAt: ACTIVE_AT,
+		}],
+		getConfig: () => DEFAULT_CONFIG,
+		isRunning: () => true,
+	})(tui, theme);
+	const lines = component.render(40);
+	assert.ok(lines.length > 1);
+	for (const line of lines) {
+		assert.ok(visibleWidth(line) <= 39, `live row used the final column: ${visibleWidth(line)}`);
+	}
 });
 
 test("agent-area widget excludes graph dispatch containers from rows and running count", () => {

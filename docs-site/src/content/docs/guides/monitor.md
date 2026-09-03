@@ -141,7 +141,7 @@ Flow Schedule 不替代其他能力：
 - `loop` 处理重复检查；
 - Flow Schedule 管理有序派发和精确结果关联。
 
-创建 schedule 不会发送工作；Agent 会先创建、再启动，并通过 schedule 状态区分传输接收与精确完成证据。可选 Todo 完成门禁和冲突门禁只有在 worker 声明所需能力时才生效；未声明时不会协商这些门禁，精确关联报告仍是完成依据。
+创建 schedule 不会发送工作；Agent 会先创建、再启动，并通过 schedule 状态区分传输接收与精确完成证据。可选 Todo 完成门禁和冲突门禁只有在 worker 声明所需能力时才生效；未声明时不会协商这些门禁，精确关联报告仍是完成依据。排队的 report reminder 经校验过的 workspace-peer v1 传输身份投递，并受 Monitor authority 生成围栏约束。
 
 ## 8. Monitor、Advisor 与 Observe 的区别
 
