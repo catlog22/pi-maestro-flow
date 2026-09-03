@@ -1,94 +1,95 @@
-# v0.26.0 — Deterministic New-Context Reset, Compact-History Recovery & Context-Pressure Guidance
+# v0.27.0 — Default New-Context Recovery, Workspace Session History & Knowledge-Aware Plans
 
 ## Overview
 
-This release publishes **Flow 0.26.0**, **Teammate 2.4.0**, and **Cockpit 0.21.0**.
+This release publishes **Flow 0.27.0**, **Teammate 2.5.0**, and **Cockpit 0.22.0**.
 **Settings-Core 0.2.1**, **Backend-Core 0.1.2**, and **Backends 0.1.2** remain
-unchanged. The core engine stays exact-pinned at `maestro-flow@0.5.83`.
+unchanged. The core engine is updated to the latest exact pin,
+`maestro-flow@0.5.84`.
 
-The release turns the explicit **New Context** mode into a first-class,
-deterministic workflow boundary: `new_context` resets are unchanged-summary
-and opt-in, `compact_history` recovers the current session through compact
-timelines, search, and turn/checkpoint reads with exact `session://` resources,
-and compaction pressure surfaces as actionable advisory on Todo handoffs.
-It also adds Todo duration charts, a teammate-side checkpoint history API,
-and viewport-stability hardening in Cockpit.
+New Context recovery is now enabled by default, while the new read-only
+`session_history` tool makes bounded current, workspace, and teammate session
+history available independently of compaction. Plan execution also gains an
+explicit end-of-task knowledge assessment, teammate compaction cancellation is
+handled without false failure, and Cockpit shows inherited settings together
+with their effective values.
 
 ## Highlights
 
-### Flow 0.26.0
+### Flow 0.27.0
 
-- **Explicit New-Context mode** - new `compaction.newContext.enabled` controls
-  registration: while disabled, `new_context` and `compact_history` stay absent
-  from a fresh model tool registry; after enabling, both tools are registered
-  at Session start or the next Agent turn. `new_context` performs a
-  deterministic, no-model-summary same-session reset and hands the next stage a
-  Todo/Goal/Plan Recovery Capsule v2 (validated `resourceUris` included).
-- **Compact-history recovery** - `compact_history` is current-session-only and
-  host-authorized, exposing compact `timeline`, `search`, `read_turn`, and
-  `read_checkpoint` actions with exact `session://` entry resources. Checkpoint
-  projections now parse the recovery capsule (Checkpoint ID / Previous
-  Checkpoint) so a reset boundary is always recoverable.
-- **Context-pressure guidance** - compaction scheduling now projects context
-  pressure (estimated tokens vs. the context window, hard-threshold headroom,
-  and soft-band push/prune token budgets) into Todo output advice, including a
-  `[context-pressure-advisory]` handoff marker when a Todo
-  `advance transition=new_context` is advised; failed transitions are marked
-  `[new-context-transition-failed]` instead of failing silently.
-- **Todo handoff & duration charts** - terminal Todo advances can render the
-  duration chart (bounded 5-bar baseline, empty-spacing aware), with the
-  `todoDurationChart` option honored end to end in Cockpit events.
-- **Tooling & regressions** - Plan tooling gains confirmed-action passing and
-  model/details fields; resource formatting and session-history scan bounds are
-  tightened; MCPX bridge/overlay registration is hardened, and compaction,
-  session-history, and regression suites are expanded accordingly.
+- **New Context enabled by default** - `compaction.newContext.enabled` now
+  defaults to on. Deterministic resets remain scheduled only at settlement and
+  preserve the bounded recovery capsule; soft context pressure recommends a
+  reset at completed Todo boundaries while critical pressure prioritizes the
+  next safe reset.
+- **Bounded workspace session history** - the new always-available,
+  host-authorized `session_history` tool lists sessions, performs literal
+  searches, and reads exact turns across current, workspace, or teammate
+  scopes. It exposes only active-chain user/assistant/visible compaction data,
+  keeps tool results opt-in, and never reveals transcript paths or hidden tool
+  calls.
+- **Exact session resources** - `resource` now resolves authorized
+  `session://` entries discovered by either `compact_history` or
+  `session_history`, including prior workspace sessions, while revalidating the
+  active chain on every read.
+- **Knowledge-aware Plans** - Plan contracts require an end-of-execution
+  knowledge outcome: stage only reusable non-obvious lessons that meet the
+  project quality bar, or explicitly report zero candidates without inventing
+  content. `session_history` is admitted as a read-only Plan-mode discovery
+  tool after the governing Maestro knowledge search misses.
+- **Stable Workflow mirrors** - same-generation Todo reconciliation now
+  preserves local timing metadata and skill activation instead of treating an
+  unchanged canonical mirror as a fresh update.
+- **Latest Maestro engine** - the exact external engine pin moves from
+  `maestro-flow@0.5.83` to `maestro-flow@0.5.84`.
 
-### Teammate 2.4.0
+### Teammate 2.5.0
 
-- **Checkpoint history API** - `SessionHistory.compactions()` returns bounded,
-  versioned compaction checkpoints (with generation when available), replacing
-  ad-hoc scans for the flow compact-history timeline.
-- **Workspace-peer lock lease fix** - stale lock claims now also verify lock
-  freshness (`acquiredAt` hard bound) and process liveness, so PID reuse can
-  no longer produce permanent lockouts in workspace coordination.
+- **Compaction cancellation recovery** - a cancelled explicit reset now clears
+  the parent's compaction wait and timer without publishing a false failure,
+  allowing a pending message to continue in the existing context.
+- **Planner knowledge outcome** - the built-in planner emits a dedicated
+  Knowledge Outcome section that predicts only plausible reusable lessons and
+  requires an explicit zero-candidate result when none qualify.
 
-### Cockpit 0.21.0
+### Cockpit 0.22.0
 
-- **Viewport stability** - renderer wiring reworked so the stable main screen
-  keeps viewport rows and working status aligned; related live-render edge
-  cases are covered by expanded regression tests.
-- **Todo duration chart events** - the terminal-advance duration chart flag is
-  surfaced as `todoDurationChart` on the public v1 events surface, keeping
-  Flow and Cockpit projections in sync.
+- **Effective settings visibility** - unset settings now display both the
+  absence of an explicit value and the inherited effective value. The Flow New
+  Context toggle is covered end to end through render, edit, and persistence.
+- **Standalone compatibility** - Cockpit no longer performs runtime value
+  imports from its optional Teammate peer. Its local V2 read-model adapter keeps
+  canonical snapshots and deltas available when Teammate is present while a
+  bare Cockpit installation continues to load through the V1 fallback.
 
 ## Package version table
 
 | Package | Previous | New |
 |---|---|---|
-| pi-maestro-flow | 0.25.0 | 0.26.0 |
-| pi-maestro-teammate | 2.3.0 | 2.4.0 |
-| pi-cockpit | 0.20.0 | 0.21.0 |
+| pi-maestro-flow | 0.26.0 | 0.27.0 |
+| pi-maestro-teammate | 2.4.0 | 2.5.0 |
+| pi-cockpit | 0.21.0 | 0.22.0 |
 | pi-maestro-settings-core | 0.2.1 | 0.2.1 (unchanged) |
 | pi-maestro-backend-core | 0.1.2 | 0.1.2 (unchanged) |
 | pi-maestro-backends | 0.1.2 | 0.1.2 (unchanged) |
-| maestro-flow (engine pin) | 0.5.83 | 0.5.83 (unchanged) |
+| maestro-flow (engine pin) | 0.5.83 | 0.5.84 |
 
 ## Stats
 
-- **66 files** changed (**60 modified, 6 added**) on top of v0.25.0, surfacing
-  as the single release commit for this cycle
-- **+2,880 / -645** lines (tracked diff +2,210 / -645, plus 6 new files totaling +670 lines)
+- **42 implementation and documentation files** changed on top of v0.26.0
+  before release metadata
+- **+1,003 / -134** lines before package-version and release-note updates
 
 ## Install / Upgrade
 
 ```bash
-pi install npm:pi-maestro-flow@0.26.0
+pi install npm:pi-maestro-flow@0.27.0
 ```
 
-This pulls the exact published companions `pi-maestro-teammate@2.4.0` and
-`pi-cockpit@0.21.0`, plus `pi-maestro-settings-core@0.2.1`,
+This pulls the exact published companions `pi-maestro-teammate@2.5.0` and
+`pi-cockpit@0.22.0`, plus `pi-maestro-settings-core@0.2.1`,
 `pi-maestro-backend-core@0.1.2`, and `pi-maestro-backends@0.1.2`.
 
-**New Context is opt-in**: enable `compaction.newContext.enabled` in `.pi`
-settings. While disabled, `new_context` and `compact_history` are not
-registered on the model tool surface and nothing else changes.
+New Context is enabled by default. Set `compaction.newContext.enabled` to
+`false` if deterministic settlement-time resets are not desired.

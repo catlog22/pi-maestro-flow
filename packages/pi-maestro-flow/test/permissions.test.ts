@@ -98,6 +98,7 @@ test("permission modes each enforce their own behavior", () => {
   assert.equal(evaluatePermission({ toolName: "find", input: { pattern: "*.ts" } }, "dontAsk", empty).behavior, "allow");
   assert.equal(evaluatePermission({ toolName: "ffgrep", input: { pattern: "Todo" } }, "dontAsk", empty).behavior, "allow");
   assert.equal(evaluatePermission({ toolName: "fffind", input: { pattern: "todo" } }, "dontAsk", empty).behavior, "allow");
+  assert.equal(evaluatePermission({ toolName: "session_history", input: { action: "search", scope: "workspace_sessions", query: "todo" } }, "dontAsk", empty).behavior, "allow");
   assert.equal(evaluatePermission({ toolName: "teammate", input: { agent: "explorer" } }, "dontAsk", empty).behavior, "allow");
   assert.equal(
     suggestedAllowRule({ toolName: "deploy", input: { action: "release", environment: "prod" } }),

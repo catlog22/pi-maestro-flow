@@ -46,7 +46,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 
 ```bash
 # Install or upgrade the suite (teammate auto-installs as a dependency)
-pi install npm:pi-maestro-flow@0.26.0
+pi install npm:pi-maestro-flow@0.27.0
 
 # Verify that the suite components are listed, then restart Pi or reload extensions.
 pi list
@@ -807,7 +807,7 @@ teammate({ agent: "delegate", context: "fresh", task: "PURPOSE: Read state and c
 
 ```bash
 # ─── Installation ───
-pi install npm:pi-maestro-flow@0.26.0
+pi install npm:pi-maestro-flow@0.27.0
 pi list
 
 # ─── Knowledge ───

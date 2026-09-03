@@ -815,7 +815,7 @@ export function onToolCallPlan(event: {
   if (new Set([
     "read", "grep", "glob", "ls", "find", "ffgrep", "fffind", "ask-user-question",
     "teammate-list", "teammate-watch", "observe", "search_tool_bm25", "smart_search", "source_check",
-    "resource",
+    "resource", "session_history",
     "plan-enter", "plan-update", "plan-review", "plan-confirm", "plan-exit", "plan-status",
   ]).has(toolName)) return undefined;
   return planMutationBlock(event.toolName);
@@ -1513,10 +1513,13 @@ function buildPlanExecutionContract(
     "   - When Todos are used, attach a Goal only to a key Todo with verifiable acceptance criteria; never create one for every Todo. A Todo without a Goal completes through its own acceptance criteria.",
     "5. Prefer the teammate tool to delegate independent Todo work; use direct execution only when delegation would not help.",
     "6. Execute the Todo sequence; activating a Todo switches to its quality-gate Goal only when that Todo explicitly has one, and only that Todo waits for Goal verification.",
+    "7. After implementation and verification, assess the task execution for reusable knowledge before declaring completion:",
+    "   - Stage only a non-obvious pitfall, failure lesson, trade-off, or newly established prescriptive constraint through the active Run/Session knowledge workflow; do not duplicate facts already auto-staged from accepted decisions or locked constraints.",
+    "   - If nothing meets the knowledge quality bar, explicitly report zero knowledge candidates. Never fabricate a candidate merely to complete the process.",
   ];
   if (refineFeedback) {
     base.push(
-      `7. Review & Refine feedback${refineRoleLabel ? ` from ${refineRoleLabel}` : ""}: incorporate valid findings during execution.`,
+      `8. Review & Refine feedback${refineRoleLabel ? ` from ${refineRoleLabel}` : ""}: incorporate valid findings during execution.`,
       "<refine-feedback>",
       refineFeedback,
       "</refine-feedback>",
@@ -2051,6 +2054,10 @@ function buildPlanEnterNote(): string {
     "Planning quality:",
     "- Ground every decision in codebase evidence, not assumption.",
     "- Align every user requirement with a planned outcome and a verifiable acceptance check.",
+    "- Require every Plan to include an end-of-execution knowledge outcome: after implementation and",
+    "  verification, assess the task execution for a reusable pitfall, failure lesson, trade-off, or",
+    "  prescriptive constraint. Plan candidate staging only when the quality bar is met; otherwise require",
+    "  an explicit zero-candidate result. Actual knowledge writes happen after approval in Act/Run mode.",
     "",
     "Agent boundary (the hook only lets you dispatch `explorer` and `planner`):",
     "- Never use plan-exit to bypass a blocked role or tool. Stay in Plan mode and reshape the work",

@@ -10,7 +10,7 @@
  *   （correlationId 是统一查询 ID，解析到该 agent 的最新结果；publicationId 仅作为兼容入口；
  *   任务名重名时返回匹配列表（correlationId + 时间 + 内容预览），按 correlationId 精确查询；
  *   带 outputSchema 的任务记录其校验后的结构化输出，普通任务记录最终答案文本；裸 agent://<correlationId> 返回完整输出）
- * - session://<sessionId>/entry/<entryId> — 当前 host-authorized Pi session history 的可见 active-chain entry
+ * - session://<sessionId>/entry/<entryId> — host-authorized Pi session history 的可见 active-chain entry
  * - memory://… — 预留（返回明确的未实现提示，避免模型猜测）
  *
  * 只读工具：plan 白名单 + 权限 ALWAYS_ALLOWED + 系统提示引导同步注册
@@ -28,7 +28,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { toolCallLine, toolResultLine, resultSummary } from "../quiet-render.ts";
 import { checkGhAvailable, showGhHint } from "./web-access/github-api.ts";
 import { getAgentOutputPath, formatAgentMatchListing, resolveAgentOutput } from "../teammate/agent-output-store.ts";
-import { createCompactHistoryInventoryProvider } from "./session-history.ts";
+import { createSessionHistoryInventoryProvider } from "./session-history.ts";
 import {
   SessionHistoryService,
   parseSessionHistoryUri,
@@ -525,14 +525,14 @@ export function createResourceTool(
 - \`skill://name\` — installed skill's SKILL.md (project .pi/skills, .agents/skills, then home).
 - \`rule://name\` — project rule files (agents → AGENTS.md, rules → RULES.md, cursor → .cursorrules, cline → .clinerules, plus .pi/rules/ and docs/).
 - \`agent://<id>[/key[/index[/field]]]\` — published teammate output. Exact correlation and publication IDs resolve globally across workspace buckets; task-name discovery remains scoped to the caller's workspace/subtree and may return a disambiguation list. A correlation ID follows that task's latest publication, while a publication ID pins one immutable result; use task names only to discover candidates, then retain an exact ID. Bare \`agent://<id>\` returns the whole output; optional path segments load one nested field, e.g. \`agent://catalog-audit-correlation/findings/0/path\`. Do NOT append \`/json\`. Agent resources are not cached: reuse content already present in the current context instead of loading the same immutable URI again.
-- \`session://<sessionId>/entry/<entryId>\` — one visible active-chain entry from the host-authorized current-session compact history. Obtain exact URIs from \`compact_history\`; arbitrary transcript paths, non-current sessions, hidden rows, thinking blocks, abandoned branches, and tool-call arguments are rejected or omitted. Session reads are never cached.
+- \`session://<sessionId>/entry/<entryId>\` — one visible active-chain entry from host-authorized session history. Obtain exact URIs from \`compact_history\` or \`session_history\`; arbitrary transcript paths, unauthorized sessions, hidden rows, thinking blocks, abandoned branches, and tool-call arguments are rejected or omitted. Session reads are never cached.
 
 pr:// and issue:// require the gh CLI (https://cli.github.com). Results are cached in memory for 5 minutes — re-reads within the window return the cached copy, so refetch after state changes only when the window has expired.
 Read local files with the built-in read tool — resource is for protocol resources only.`,
     promptSnippet: "Use resource for pr://, issue://, skill://, rule://, agent://, session:// protocol resources; use read for local files.",
     promptGuidelines: [
       "pr://, issue://, skill://, rule://, agent://, session:// protocol resources are read via the resource tool — do not pass them to the built-in read tool (read is for local files).",
-      "For session:// entry resources, first obtain the exact URI from compact_history; reads revalidate the host-authorized current-session active chain and never expose paths, hidden rows, thinking, or tool arguments.",
+      "For session:// entry resources, first obtain the exact URI from compact_history or session_history; reads revalidate the host-authorized active chain and never expose paths, hidden rows, thinking, or tool arguments.",
       "For teammate results, use task names only to discover candidates; retain an exact correlation ID for that task's latest result or a publication ID for one immutable result. Exact IDs resolve globally; task-name lookup stays workspace-scoped.",
       "Load the smallest required agent://<exact-id>/key/index subtree, never append /json, and do not reload an unchanged immutable URI already present in the current context.",
     ],
@@ -544,7 +544,7 @@ Read local files with the built-in read tool — resource is for protocol resour
       const cwd = ctx.cwd;
       const sessionHistory = options.sessionHistory
         ?? options.sessionHistoryFactory?.(ctx)
-        ?? createCompactHistoryInventoryProvider(ctx);
+        ?? createSessionHistoryInventoryProvider(ctx, "all");
       const { content, title, cached } = await resolveResource(uri, cwd, signal, {
         sessionHistory,
       });

@@ -5,7 +5,20 @@ icon: "🔄"
 
 这里记录 pi maestro flow 套件从上一稳定版本到当前版本的用户可见变化、行为调整、问题修复和升级要求。
 
-> **当前稳定版本：v0.26.0（2026-09-02）。** 显式 New Context 确定性重置、当前会话 Compact History 恢复与上下文压力提示；引擎精确 pin `maestro-flow@0.5.83`；搭配 Teammate 2.4.0、Cockpit 0.21.0、Settings-Core 0.2.1、Backend-Core 0.1.2 与 Backends 0.1.2。
+> **当前稳定版本：v0.27.0（2026-09-03）。** New Context 默认启用、跨工作区有界 Session History 与知识感知 Plan；引擎精确 pin `maestro-flow@0.5.84`；搭配 Teammate 2.5.0、Cockpit 0.22.0、Settings-Core 0.2.1、Backend-Core 0.1.2 与 Backends 0.1.2。
+
+## v0.27.0（2026-09-03）
+
+> 本版发布 Flow 0.27.0、Teammate 2.5.0 与 Cockpit 0.22.0；Settings-Core 0.2.1、Backend-Core 0.1.2 与 Backends 0.1.2 保持不变；引擎精确 pin `maestro-flow@0.5.83` → `0.5.84`。42 个实现与文档文件 / +1,003 / −134（不含本发布元数据）。
+
+- **Flow New Context 默认启用**：`compaction.newContext.enabled` 默认值改为开启；确定性重置仍只在结算边界调度并携带有界恢复 capsule，上下文压力会在完成 Todo 后提示或优先安排下一个安全重置点。
+- **Flow Session History**：新增始终可用、宿主授权的只读 `session_history` 工具，可在 current/workspace/teammate 三种 scope 中有界列举会话、字面搜索和读取精确 turn；仅暴露 active-chain 可见消息，工具结果显式 opt-in，绝不暴露 transcript 路径、隐藏行、thinking 或工具调用参数。
+- **Flow Session Resource、Plan 与 Workflow mirror**：`resource` 可读取由 `compact_history` 或 `session_history` 发现的精确 `session://` 条目；Plan 契约加入执行后知识结果评估，只沉淀达到质量门槛的非显然经验，否则明确报告零候选，不得编造；同 generation Todo mirror 对账会保留本地计时与 skill activation。
+- **Teammate 2.5.0**：显式 reset 被取消时清理父进程等待和 timer，不再误报恢复失败；planner 新增 Knowledge Outcome 章节并要求零候选结论。
+- **Cockpit 0.22.0**：未显式设置的配置同时显示继承的 effective value；Flow New Context 开关从渲染、编辑到持久化获得跨包回归覆盖；V2 read-model 改用本地 adapter，缺少可选 Teammate peer 时裸 Cockpit 仍可加载并退回 V1。
+- **引擎同步**：Flow 精确依赖升级到最新 `maestro-flow@0.5.84`。
+
+升级：`pi install npm:pi-maestro-flow@0.27.0`
 
 ## v0.26.0（2026-09-02）
 

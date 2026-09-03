@@ -469,9 +469,9 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
   assert.equal(names.filter((name) => name === "computer_use").length, 1);
   assert.equal(names.filter((name) => name === "search_tool_bm25").length, 1);
   assert.ok(names.includes("run-control"));
-  assert.equal(names.includes("compact_history"), false, "opt-in compact tools must not register before enable");
-  assert.equal(names.includes("session_history"), false);
-  assert.equal(names.includes("new_context"), false, "opt-in compact tools must not register before enable");
+  assert.ok(names.includes("session_history"), "session history remains available independently of new-context compaction");
+  assert.equal(names.includes("compact_history"), false, "lazy compact tools must not register before the first enabled sync");
+  assert.equal(names.includes("new_context"), false, "lazy compact tools must not register before the first enabled sync");
   assert.equal(names.includes("swarm_runtime"), false);
   assert.ok(commands.includes("maestro-session"));
   assert.ok(commands.includes("maestro-todo"));
@@ -1067,6 +1067,7 @@ test("teammate child registers interaction, local Bash, and parent-permission su
     tools.map((tool) => tool.name),
     MAESTRO_CHILD_TOOL_NAMES.filter((name) => name !== "compact_history" && name !== "new_context"),
   );
+  assert.ok(tools.some((tool) => tool.name === "session_history"));
   assert.equal(tools.some((tool) => tool.name === "compact_history"), false);
   assert.equal(tools.some((tool) => tool.name === "new_context"), false);
   const childTodo = tools.find((tool) => tool.name === "todo");
@@ -1099,7 +1100,7 @@ test("teammate child registers interaction, local Bash, and parent-permission su
     "session_compact_failed",
   ]);
   assert.equal(handlers.get("tool_call")?.length, 2, "compaction guard precedes child permission handling");
-  assert.equal(handlers.get("before_agent_start")?.length, 1, "child only uses before_agent_start to sync opt-in compact tools");
+  assert.equal(handlers.get("before_agent_start")?.length, 1, "child only uses before_agent_start to sync gated compact tools");
   let providerAborts = 0;
   const providerCtx = {
     cwd: "D:/workspace",

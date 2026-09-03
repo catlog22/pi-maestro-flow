@@ -11,18 +11,226 @@ import type {
 } from "pi-maestro-teammate/v1/types";
 import type {
 	RuntimeAgentReadEntityV2,
+	RuntimeReadModelChangeV2,
 	RuntimeReadModelDeltaV2,
 	RuntimeReadModelOwnershipV2,
 	RuntimeReadModelSnapshotV2,
-} from "pi-maestro-teammate/v2/runtime";
-import {
-	RuntimeReadModelProjectionV2,
-	parseRuntimeReadModelDeltaV2,
-	parseRuntimeReadModelOwnershipV2,
-	parseRuntimeReadModelSnapshotV2,
+	RuntimeReadModelSourceV2,
 } from "pi-maestro-teammate/v2/runtime";
 import { sanitizeExtensionStatusText } from "./extension-status.ts";
 import { EXPERT_LEADER_NAME, type AgentRow, type AgentStatus } from "./types.ts";
+
+export const RUNTIME_READ_MODEL_DELTA_EVENT = "teammate:runtime-read-model-delta-v2";
+export const RUNTIME_READ_MODEL_QUERY_EVENT = "teammate:runtime-read-model-query-v2";
+export const RUNTIME_READ_MODEL_SNAPSHOT_EVENT = "teammate:runtime-read-model-snapshot-v2";
+export const RUNTIME_READ_MODEL_UNAVAILABLE_EVENT = "teammate:runtime-read-model-unavailable-v2";
+
+/** Keep Cockpit loadable when its optional Teammate peer is absent. */
+export function runtimeV2ReadEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	return env.PI_RUNTIME_BROKER?.trim().toLowerCase() === "sqlite"
+		&& (env.PI_RUNTIME_V2_READ === undefined || env.PI_RUNTIME_V2_READ === "1");
+}
+
+function plainObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function safeInteger(value: unknown, minimum = 0): value is number {
+	return Number.isSafeInteger(value) && (value as number) >= minimum;
+}
+
+function identifier(value: unknown): value is string {
+	return typeof value === "string" && value.length > 0 && value.length <= 1024 && !value.includes("\0");
+}
+
+function parseRuntimeReadModelOwnershipV2(value: unknown): RuntimeReadModelOwnershipV2 | undefined {
+	if (!plainObject(value)
+		|| !identifier(value.workspaceId)
+		|| !identifier(value.sessionId)
+		|| !identifier(value.sourceId)
+		|| !safeInteger(value.generation, 1)) return undefined;
+	return {
+		workspaceId: value.workspaceId,
+		sessionId: value.sessionId,
+		sourceId: value.sourceId,
+		generation: value.generation,
+	};
+}
+
+function parseSource(value: unknown): RuntimeReadModelSourceV2 | undefined {
+	if (!plainObject(value)
+		|| !identifier(value.streamId)
+		|| !safeInteger(value.revision, 1)
+		|| !safeInteger(value.generation, 1)) return undefined;
+	const projection = value.projection === undefined
+		? undefined
+		: parseRuntimeReadModelOwnershipV2(value.projection);
+	if (value.projection !== undefined && !projection) return undefined;
+	return {
+		streamId: value.streamId,
+		revision: value.revision,
+		generation: value.generation,
+		...(projection ? { projection } : {}),
+	};
+}
+
+const AGENT_STATUSES = new Set<RuntimeAgentReadEntityV2["status"]>([
+	"pending", "running", "retrying", "sleeping", "completed", "failed", "terminated",
+]);
+
+function parseRuntimeEntity(value: unknown): RuntimeAgentReadEntityV2 | undefined {
+	if (!plainObject(value)
+		|| !identifier(value.correlationId)
+		|| !safeInteger(value.generation, 1)
+		|| !identifier(value.agent)
+		|| !AGENT_STATUSES.has(value.status as RuntimeAgentReadEntityV2["status"])
+		|| !safeInteger(value.startedAt)
+		|| !safeInteger(value.lastActivityAt)) return undefined;
+	for (const key of ["name", "task", "spawnedBy", "parentCorrelationId", "phase", "requestedModel", "resolvedModel", "lastMessage", "error"] as const) {
+		if (value[key] !== undefined && typeof value[key] !== "string") return undefined;
+	}
+	if (value.dependencies !== undefined
+		&& (!Array.isArray(value.dependencies) || value.dependencies.some((item) => !safeInteger(item)))) return undefined;
+	if (value.attemptedModels !== undefined
+		&& (!Array.isArray(value.attemptedModels) || value.attemptedModels.some((item) => typeof item !== "string"))) return undefined;
+	if (value.projection !== undefined && !parseRuntimeReadModelOwnershipV2(value.projection)) return undefined;
+	return structuredClone(value) as unknown as RuntimeAgentReadEntityV2;
+}
+
+function parseRuntimeReadModelDeltaV2(value: unknown): RuntimeReadModelDeltaV2 | undefined {
+	if (!plainObject(value)
+		|| value.version !== 2
+		|| value.revision !== 1
+		|| value.kind !== "agent-runs-delta"
+		|| !safeInteger(value.baseCursor)
+		|| !safeInteger(value.nextCursor, 1)
+		|| value.nextCursor <= value.baseCursor
+		|| !Array.isArray(value.changes)) return undefined;
+	const source = parseSource(value.source);
+	if (!source) return undefined;
+	const changes: RuntimeReadModelChangeV2[] = [];
+	for (const change of value.changes) {
+		if (!plainObject(change)) return undefined;
+		if (change.kind === "upsert") {
+			const entity = parseRuntimeEntity(change.entity);
+			if (!entity) return undefined;
+			changes.push({ kind: "upsert", entity });
+			continue;
+		}
+		if (change.kind === "tombstone"
+			&& identifier(change.correlationId)
+			&& safeInteger(change.generation, 1)) {
+			changes.push({ kind: "tombstone", correlationId: change.correlationId, generation: change.generation });
+			continue;
+		}
+		return undefined;
+	}
+	return {
+		version: 2,
+		revision: 1,
+		kind: "agent-runs-delta",
+		baseCursor: value.baseCursor,
+		nextCursor: value.nextCursor,
+		source,
+		changes,
+	};
+}
+
+function parseRuntimeReadModelSnapshotV2(value: unknown): RuntimeReadModelSnapshotV2 | undefined {
+	if (!plainObject(value)
+		|| value.version !== 2
+		|| value.revision !== 1
+		|| value.kind !== "agent-runs-snapshot"
+		|| !safeInteger(value.cursor)
+		|| !Array.isArray(value.agents)) return undefined;
+	const source = parseSource(value.source);
+	if (!source) return undefined;
+	const agents = value.agents.map(parseRuntimeEntity);
+	if (agents.some((agent) => agent === undefined)) return undefined;
+	return {
+		version: 2,
+		revision: 1,
+		kind: "agent-runs-snapshot",
+		cursor: value.cursor,
+		source,
+		agents: agents as RuntimeAgentReadEntityV2[],
+	};
+}
+
+function cloneRuntimeEntity(entity: RuntimeAgentReadEntityV2): RuntimeAgentReadEntityV2 {
+	return structuredClone(entity);
+}
+
+class RuntimeReadModelProjectionV2 {
+	readonly #agents = new Map<string, RuntimeAgentReadEntityV2>();
+	#cursor = 0;
+	#source: RuntimeReadModelSourceV2 = { streamId: "uninitialized", revision: 1, generation: 1 };
+	#initialized = false;
+
+	get cursor(): number { return this.#cursor; }
+
+	applySnapshot(input: unknown): boolean {
+		const snapshot = parseRuntimeReadModelSnapshotV2(input);
+		if (!snapshot) return false;
+		if (this.#initialized && snapshot.source.streamId === this.#source.streamId) {
+			if (snapshot.source.generation < this.#source.generation) return false;
+			if (snapshot.source.generation === this.#source.generation && snapshot.cursor < this.#cursor) return false;
+		}
+		const next = new Map<string, RuntimeAgentReadEntityV2>();
+		for (const agent of snapshot.agents) {
+			const existing = next.get(agent.correlationId);
+			if (existing && existing.generation > agent.generation) continue;
+			next.set(agent.correlationId, cloneRuntimeEntity(agent));
+		}
+		this.#agents.clear();
+		for (const [id, agent] of next) this.#agents.set(id, agent);
+		this.#cursor = snapshot.cursor;
+		this.#source = { ...snapshot.source };
+		this.#initialized = true;
+		return true;
+	}
+
+	applyDelta(input: unknown): boolean {
+		const delta = parseRuntimeReadModelDeltaV2(input);
+		if (!delta
+			|| delta.baseCursor !== this.#cursor
+			|| delta.nextCursor <= this.#cursor
+			|| delta.source.streamId !== this.#source.streamId
+			|| delta.source.generation !== this.#source.generation
+			|| JSON.stringify(delta.source.projection) !== JSON.stringify(this.#source.projection)
+			|| delta.source.revision !== delta.nextCursor) return false;
+		const next = new Map([...this.#agents].map(([id, agent]) => [id, cloneRuntimeEntity(agent)]));
+		for (const change of delta.changes) {
+			if (change.kind === "upsert") {
+				const current = next.get(change.entity.correlationId);
+				if (current && change.entity.generation < current.generation) return false;
+				next.set(change.entity.correlationId, cloneRuntimeEntity(change.entity));
+				continue;
+			}
+			const current = next.get(change.correlationId);
+			if (current && change.generation < current.generation) return false;
+			if (!current || change.generation === current.generation) next.delete(change.correlationId);
+		}
+		this.#agents.clear();
+		for (const [id, agent] of next) this.#agents.set(id, agent);
+		this.#cursor = delta.nextCursor;
+		this.#source = { ...delta.source };
+		return true;
+	}
+
+	snapshot(): RuntimeReadModelSnapshotV2 {
+		return {
+			version: 2,
+			revision: 1,
+			kind: "agent-runs-snapshot",
+			cursor: this.#cursor,
+			source: { ...this.#source },
+			agents: [...this.#agents.values()]
+				.sort((left, right) => left.correlationId.localeCompare(right.correlationId))
+				.map(cloneRuntimeEntity),
+		};
+	}
+}
 
 const STATUS_TEXT_MAX = 48;
 /** Selected-session output kept for the expandable fixed detail region. */

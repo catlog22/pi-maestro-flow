@@ -444,6 +444,7 @@ test("planner is the sole Plan author with an execution-ready document contract"
       "Execution Plan",
       "Validation",
       "Risks and Recovery",
+      "Knowledge Outcome",
       "Open Decisions",
     ]) {
       assert.ok(prompt.includes(`## ${section}`), section);
@@ -460,6 +461,9 @@ test("planner is the sole Plan author with an execution-ready document contract"
       assert.ok(prompt.includes(`\`${taskField}\``), taskField);
     }
     assert.match(prompt, /Dependencies must form an executable DAG/);
+    assert.match(prompt, /end-of-execution assessment after implementation and verification/);
+    assert.match(prompt, /explicitly report zero candidates/);
+    assert.match(prompt, /must not fabricate knowledge in advance/);
     assert.match(prompt, /Do not edit files/);
 
     const args = buildPiArgs(planner, { agent: "planner" }, "prompt.md");

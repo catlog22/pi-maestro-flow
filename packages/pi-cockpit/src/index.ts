@@ -4,7 +4,18 @@ import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type Exte
 import type { TUI } from "@earendil-works/pi-tui";
 import { ambientKeysShouldYield, capturingOverlayVisible } from "./capturing-overlay.ts";
 import { Key, decodeKittyPrintable, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { AgentReadStoreRouter, effectiveAgentStatus, type CompletePayload, type MessagePayload, type StartedPayload } from "./agents-store.ts";
+import {
+	AgentReadStoreRouter,
+	RUNTIME_READ_MODEL_DELTA_EVENT,
+	RUNTIME_READ_MODEL_QUERY_EVENT,
+	RUNTIME_READ_MODEL_SNAPSHOT_EVENT,
+	RUNTIME_READ_MODEL_UNAVAILABLE_EVENT,
+	effectiveAgentStatus,
+	runtimeV2ReadEnabled,
+	type CompletePayload,
+	type MessagePayload,
+	type StartedPayload,
+} from "./agents-store.ts";
 import { AmbientSurfaceCache, nextUiPromptDepth, shouldHideWorkingDuration, statusText, titleFor, workingMessage, type AmbientState } from "./ambient.ts";
 import { generateTitleWithModel } from "./title-llm.ts";
 import { suggestTitle } from "./title-gen.ts";
@@ -120,13 +131,6 @@ import {
 	type CockpitConfig,
 } from "./types.ts";
 import type { MailboxHostRegistry } from "pi-maestro-teammate/v1/mailbox";
-import {
-	RUNTIME_READ_MODEL_DELTA_EVENT,
-	RUNTIME_READ_MODEL_QUERY_EVENT,
-	RUNTIME_READ_MODEL_SNAPSHOT_EVENT,
-	RUNTIME_READ_MODEL_UNAVAILABLE_EVENT,
-	runtimeV2ReadEnabled,
-} from "pi-maestro-teammate/v2/runtime";
 
 export {
 	EndpointStore,

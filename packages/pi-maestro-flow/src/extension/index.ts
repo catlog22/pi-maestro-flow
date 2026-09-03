@@ -6,6 +6,7 @@
  *   - goal: Autonomous Goal read/create surface with automatic loop-end verification
  *   - ask-user-question: Structured questionnaire for user input
  *   - todo: Task management with plain context, optional skills, and step tracking
+ *   - session_history: bounded read-only current/workspace/teammate session history
  *   - compact_history: bounded read-only recovery history for the current session
  *   - lsp: Language-server diagnostics, navigation, refactors, and raw requests
  *   - browser: Named-tab Chromium control and screenshots
@@ -263,7 +264,7 @@ import { registerFlowSchedule } from "../flow-schedule/register.ts";
 import { registerModelAvailability } from "../tools/model-availability.ts";
 import { registerTeammateSessionRouting } from "../tools/teammate-session-routing.ts";
 import { registerResourceTool } from "../tools/resource.ts";
-import { registerCompactHistoryTool } from "../tools/session-history.ts";
+import { registerCompactHistoryTool, registerSessionHistoryTool } from "../tools/session-history.ts";
 import { registerNewContextTool } from "../tools/new-context.ts";
 import { isNewContextCompactionEnabled } from "../compaction/compaction-settings.ts";
 import {
@@ -357,6 +358,7 @@ export const MAESTRO_CHILD_TOOL_NAMES = [
   "smart_search",
   "source_check",
   "resource",
+  "session_history",
   "compact_history",
   "new_context",
   "lsp",
@@ -2129,6 +2131,7 @@ When NOT to use:
   registerModelAvailability(pi);
   registerTeammateSessionRouting(pi);
   registerResourceTool(pi);
+  registerSessionHistoryTool(pi);
   registerConflictTool(pi);
   registerDataManagerCommand(pi);
   registerKeybindingsCommand(pi);
@@ -4660,6 +4663,7 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
   registerSmartSearchTool(pi);
   pi.registerTool(createSourceCheckTool() as never);
   registerResourceTool(pi);
+  registerSessionHistoryTool(pi);
   pi.registerTool(createLspTool() as never);
   pi.registerTool(createTeammateChildBrowserTool());
   pi.registerTool(createTeammateChildComputerUseTool());

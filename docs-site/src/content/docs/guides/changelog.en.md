@@ -5,7 +5,20 @@ icon: "🔄"
 
 This page records user-visible features, behavior changes, fixes, and upgrade requirements from the previous stable release to the current version of the pi maestro flow suite.
 
-> **Current stable release: v0.26.0 (2026-09-02).** Deterministic New-Context resets, current-session Compact History recovery, and context-pressure guidance; exact engine pin `maestro-flow@0.5.83`; bundles Teammate 2.4.0, Cockpit 0.21.0, Settings-Core 0.2.1, Backend-Core 0.1.2, and Backends 0.1.2.
+> **Current stable release: v0.27.0 (2026-09-03).** New Context enabled by default, bounded workspace Session History, and knowledge-aware Plans; exact engine pin `maestro-flow@0.5.84`; bundles Teammate 2.5.0, Cockpit 0.22.0, Settings-Core 0.2.1, Backend-Core 0.1.2, and Backends 0.1.2.
+
+## v0.27.0 (2026-09-03)
+
+> This release ships Flow 0.27.0, Teammate 2.5.0, and Cockpit 0.22.0; Settings-Core 0.2.1, Backend-Core 0.1.2, and Backends 0.1.2 are unchanged; exact engine pin `maestro-flow@0.5.83` → `0.5.84`. 42 implementation and documentation files / +1,003 / −134 (excluding release metadata).
+
+- **Flow New Context defaults on**: `compaction.newContext.enabled` now defaults to enabled. Deterministic resets remain settlement-bound and preserve the bounded recovery capsule; context pressure recommends a reset after completed Todos or prioritizes the next safe reset boundary.
+- **Flow Session History**: the always-available, host-authorized, read-only `session_history` tool performs bounded session listing, literal search, and exact-turn reads across current, workspace, and teammate scopes. It exposes only visible active-chain messages, keeps tool results opt-in, and never reveals transcript paths, hidden rows, thinking, or tool-call arguments.
+- **Flow Session Resources, Plans, and Workflow mirrors**: `resource` reads exact `session://` entries discovered by either `compact_history` or `session_history`. Plan contracts now require an end-of-execution knowledge assessment: stage only qualifying non-obvious lessons or explicitly report zero candidates without fabrication. Same-generation Todo mirror reconciliation preserves local timing metadata and skill activation.
+- **Teammate 2.5.0**: cancelled explicit resets clear the parent wait and timer without a false recovery failure; the planner gains a Knowledge Outcome section with an explicit zero-candidate contract.
+- **Cockpit 0.22.0**: unset settings now show their inherited effective value, with the Flow New Context toggle covered through rendering, editing, and persistence. A local V2 read-model adapter keeps bare Cockpit loadable through the V1 fallback when its optional Teammate peer is absent.
+- **Engine sync**: Flow exact-pins the latest `maestro-flow@0.5.84`.
+
+Upgrade: `pi install npm:pi-maestro-flow@0.27.0`
 
 ## v0.26.0 (2026-09-02)
 

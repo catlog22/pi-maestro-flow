@@ -16,7 +16,7 @@ test("lookupBuiltinPricing resolves official OpenAI rates from the pi-ai catalog
   assert.equal(match!.source, "openai");
   assert.deepEqual(
     { input: match!.cost.input, output: match!.cost.output, cacheRead: match!.cost.cacheRead, cacheWrite: match!.cost.cacheWrite },
-    { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 6.25 },
+    { input: 4, output: 20, cacheRead: 0.4, cacheWrite: 5 },
   );
 });
 
@@ -39,10 +39,10 @@ test("lookupBuiltinPricing returns undefined for unknown ids", () => {
 test("lookupBuiltinPricing prefers the catalog matching the channel's API driver", () => {
   const openai = lookupBuiltinPricing("gpt-5.6-sol", "openai-responses");
   assert.equal(openai?.source, "openai");
-  assert.equal(openai?.cost.cacheWrite, 6.25);
+  assert.equal(openai?.cost.cacheWrite, 5);
   const azure = lookupBuiltinPricing("gpt-5.6-sol", "azure-openai-responses");
   assert.equal(azure?.source, "azure-openai-responses");
-  assert.equal(azure?.cost.cacheWrite, 6.25);
+  assert.equal(azure?.cost.cacheWrite, 5);
   const codex = lookupBuiltinPricing("gpt-5.6-sol", "openai-codex-responses");
   assert.equal(codex?.source, "openai-codex");
   const deepseek = lookupBuiltinPricing("deepseek-v4-flash", "openai-completions");

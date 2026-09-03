@@ -407,6 +407,15 @@ export function reconcileMirrorTasks(
       assignee: cloneActor(ROOT_TODO_ACTOR),
       createdAt: existing?.createdAt ?? now,
       updatedAt: existing?.updatedAt ?? now,
+      ...(existing?.activeStartedAt !== undefined && spec.status === "in_progress"
+        ? { activeStartedAt: existing.activeStartedAt }
+        : {}),
+      ...(existing?.activeDurationMs !== undefined
+        ? { activeDurationMs: existing.activeDurationMs }
+        : {}),
+      ...(existing?.completedAt !== undefined && spec.status === "completed"
+        ? { completedAt: existing.completedAt }
+        : {}),
     };
     if (existing?.skillActivation && mirrorActivationStillValid(existing, next)) {
       next.skillActivation = cloneSkillActivation(existing.skillActivation);

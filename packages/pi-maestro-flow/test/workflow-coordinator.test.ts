@@ -2790,7 +2790,7 @@ test("real Maestro v3 coordinator publishes and replays a Plan Session after res
     assert.equal(typeof recoveredEnvelope.result.run_id, "string");
     assert.match(recoveredEnvelope.result.run_id, /^run-/);
     assert.equal(typeof recoveredEnvelope.result.artifact_id, "string");
-    assert.notMatch(recoveredEnvelope.result.artifact_id, /^plan:/);
+    assert.doesNotMatch(recoveredEnvelope.result.artifact_id, /^plan:/);
     assert.equal(replayEnvelope.ok, true);
     assert.equal(replayEnvelope.result.session_id, sessionId);
     assert.equal(replayEnvelope.result.run_id, recoveredEnvelope.result.run_id);
@@ -2889,7 +2889,7 @@ test("real Maestro v3 coordinator publishes into an existing Session and surface
     assert.equal(firstEnvelope.result.session_id, "real-plan-current");
     // v3 core seals a real plan/1.0 artifact under the current-plan alias.
     assert.match(firstEnvelope.result.run_id, /^run-/);
-    assert.notMatch(firstEnvelope.result.artifact_id, /^plan:/);
+    assert.doesNotMatch(firstEnvelope.result.artifact_id, /^plan:/);
     const sessionDir = join(root, ".workflow", "sessions", "real-plan-current");
     const artifacts = JSON.parse(
       await readFile(join(sessionDir, "artifacts.json"), "utf8"),

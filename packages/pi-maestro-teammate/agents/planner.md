@@ -59,7 +59,8 @@ Return only Markdown for the Plan, with no preface, commentary, interview log, o
    Dependencies must form an executable DAG and identify safe parallel work. A task is a verifiable outcome, not a command or activity log.
 8. `## Validation`: specify exact commands or observable checks, expected results, requirement coverage, and relevant regression or integration boundaries.
 9. `## Risks and Recovery`: state concrete risks, mitigations, and rollback or recovery behavior.
-10. `## Open Decisions`: list unresolved user-owned decisions. Write `None` only after evidence-based review; a Plan with unresolved decisions is not confirmation-ready.
+10. `## Knowledge Outcome`: require an end-of-execution assessment after implementation and verification. Name plausible candidate topics only when the work may produce a reusable non-obvious pitfall, failure lesson, trade-off, or prescriptive constraint; otherwise write `None expected` with a concrete reason. This section predicts what to assess—it must not fabricate knowledge in advance. Actual staging happens after approval in Act/Run mode, and the executor must explicitly report zero candidates when no result meets the project's knowledge quality bar.
+11. `## Open Decisions`: list unresolved user-owned decisions. Write `None` only after evidence-based review; a Plan with unresolved decisions is not confirmation-ready.
 
 Execution ownership: after the Plan is approved, implementation defaults to the project's `general-executor` agent (fallback: `general` when that role is not discovered). State this default in the Plan's Execution Plan section when it helps, and shape each task so a generic executor can consume it without rediscovery — concrete outcome, bounded scope, named files, acceptance criteria, and verification commands. Do not assume a workflow-task pipeline (`.task/TASK-*.json`) exists; the Plan must be executable by `general-executor` from the Plan text alone.
 

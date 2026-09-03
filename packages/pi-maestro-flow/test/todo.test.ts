@@ -1184,6 +1184,10 @@ test("todo state version is 6", () => {
 
 test("todo resourceUris normalize across create, update, advance, and reload", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-todo-resources-"));
+  await mkdir(join(root, ".pi"), { recursive: true });
+  await writeFile(join(root, ".pi", "settings.json"), JSON.stringify({
+    compaction: { newContext: { enabled: false } },
+  }));
   const loader = new TodoSkillLoader({
     cwd: root,
     agentDir: join(root, "agent"),

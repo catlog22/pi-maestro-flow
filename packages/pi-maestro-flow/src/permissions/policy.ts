@@ -57,6 +57,7 @@ const ALWAYS_ALLOWED_TOOLS = new Set([
   "plan-status",
   "search_tool_bm25",
   "resource",
+  "session_history",
 ]);
 
 const EDIT_TOOLS = new Set(["Edit", "Write", "NotebookEdit"]);

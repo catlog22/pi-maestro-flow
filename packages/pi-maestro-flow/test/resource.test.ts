@@ -105,9 +105,43 @@ test("resource prompt contract distinguishes agent names, correlation ids and pu
   assert.match(description, /correlation ID follows that task's latest publication/);
   assert.match(description, /publication ID pins one immutable result/);
   assert.match(description, /Agent resources are not cached/);
+  assert.match(description, /compact_history.*session_history/);
   assert.match(guidelines, /smallest required agent:\/\/<exact-id>\/key\/index subtree/);
   assert.match(guidelines, /do not reload an unchanged immutable URI/);
   assert.doesNotMatch(description, /publicationId remains a compatibility alias/);
+});
+
+test("resource reads an exact entry discovered from an authorized workspace session", async () => {
+  const sessions = join(root, "workspace-sessions");
+  const currentFile = join(sessions, "current.jsonl");
+  const priorFile = join(sessions, "prior.jsonl");
+  await mkdir(sessions, { recursive: true });
+  await writeFile(currentFile, [
+    { type: "session", version: 3, id: "resource-current", timestamp: "2026-08-01T00:00:00.000Z", cwd: root },
+    { type: "message", id: "u-current", parentId: null, timestamp: "2026-08-01T00:00:01.000Z", message: { role: "user", content: "current", timestamp: 1 } },
+  ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+  await writeFile(priorFile, [
+    { type: "session", version: 3, id: "resource-prior", timestamp: "2026-08-01T00:00:00.000Z", cwd: root },
+    { type: "message", id: "u-prior", parentId: null, timestamp: "2026-08-01T00:00:01.000Z", message: { role: "user", content: "prior workspace evidence", timestamp: 1 } },
+  ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+
+  const tool = createResourceTool();
+  const call = tool.execute as unknown as (
+    id: string,
+    params: { uri: string },
+    signal: AbortSignal,
+    onUpdate: undefined,
+    ctx: { cwd: string; sessionManager: { getSessionFile(): string } },
+  ) => Promise<{ content: Array<{ type: string; text?: string }> }>;
+  const result = await call(
+    "workspace-entry",
+    { uri: "session://resource-prior/entry/u-prior" },
+    new AbortController().signal,
+    undefined,
+    { cwd: root, sessionManager: { getSessionFile: () => currentFile } },
+  );
+  assert.match(result.content[0]?.text ?? "", /prior workspace evidence/);
+  assert.doesNotMatch(result.content[0]?.text ?? "", /prior\.jsonl/);
 });
 
 test("resource quiet call row shows the uri and settles empty once complete", () => {

@@ -33,6 +33,9 @@ export const SESSION_HISTORY_SCOPES = ["current_session", "workspace_sessions", 
 export type SessionHistoryScope = (typeof SESSION_HISTORY_SCOPES)[number];
 type InventoryScope = SessionHistoryScope | "all";
 
+export const SESSION_HISTORY_ACTIONS = ["list_sessions", "search", "read_turn"] as const;
+export type SessionHistoryAction = (typeof SESSION_HISTORY_ACTIONS)[number];
+
 export const COMPACT_HISTORY_ACTIONS = ["timeline", "search", "read_turn", "read_checkpoint"] as const;
 export type CompactHistoryAction = (typeof COMPACT_HISTORY_ACTIONS)[number];
 
@@ -46,6 +49,43 @@ function StringEnum<T extends readonly string[]>(values: T, description?: string
     ...(description ? { description } : {}),
   });
 }
+
+/** Action contract intentionally contains only bounded read operations. */
+export const SessionHistoryParams = Type.Object({
+  action: StringEnum(
+    SESSION_HISTORY_ACTIONS,
+    "Bounded read-only session history action.",
+  ),
+  scope: Type.Optional(
+    StringEnum(
+      SESSION_HISTORY_SCOPES,
+      "History scope: current Pi session, workspace session directory, or teammate sessions.",
+    ),
+  ),
+  query: Type.Optional(
+    Type.String({ minLength: 1, maxLength: MAX_SESSION_HISTORY_QUERY_CHARS, description: "Literal, case-insensitive search text (required for search)." }),
+  ),
+  sessionId: Type.Optional(
+    Type.String({ minLength: 1, maxLength: 512, description: "Exact session id (required for read_turn)." }),
+  ),
+  turn: Type.Optional(
+    Type.Integer({ minimum: 0, description: "1-based turn number; 0 is the preamble (required for read_turn)." }),
+  ),
+  include: Type.Optional(
+    Type.Array(
+      StringEnum(SESSION_HISTORY_INCLUDES, "Approved visible transcript category."),
+      {
+        minItems: 1,
+        maxItems: SESSION_HISTORY_INCLUDES.length,
+        uniqueItems: true,
+        description: "Categories to include. Defaults to user, assistant, visible_custom, and compaction; tool_result is explicit only.",
+      },
+    ),
+  ),
+  limit: Type.Optional(
+    Type.Integer({ minimum: 1, maximum: MAX_SESSION_HISTORY_MATCHES, description: "Single result limit for sessions, matches, or selected-turn entries." }),
+  ),
+}, { additionalProperties: false });
 
 /** Action contract intentionally contains only current-session read operations. */
 export const CompactHistoryParams = Type.Object({
@@ -86,6 +126,19 @@ export interface SessionHistoryHostContext {
     getSessionFile?: () => string | undefined;
     getSessionId?: () => string | undefined;
   };
+}
+
+export interface SessionHistoryToolDetails {
+  action: SessionHistoryAction;
+  scope: SessionHistoryScope;
+  [key: string]: unknown;
+}
+
+export interface SessionHistoryToolOptions {
+  /** Test/host inventory override. The default is a fresh inventory from `ctx`. */
+  inventory?: SessionHistoryInventorySource;
+  /** Optional scoped inventory factory for hosts with their own authorization. */
+  inventoryFactory?: (scope: SessionHistoryScope, ctx: ExtensionContext) => SessionHistoryInventorySource;
 }
 
 export interface CompactHistoryToolDetails {
@@ -225,6 +278,9 @@ export function createSessionHistoryInventoryProvider(
   };
 }
 
+/** Friendly alias for hosts/tests that prefer an inventory-named function. */
+export const sessionHistoryInventoryProvider = createSessionHistoryInventoryProvider;
+
 /** Active-session inventory used by compact_history and session:// resources. */
 export function createCompactHistoryInventoryProvider(
   ctx: SessionHistoryHostContext,
@@ -232,7 +288,24 @@ export function createCompactHistoryInventoryProvider(
   return createSessionHistoryInventoryProvider(ctx, "current_session");
 }
 
-function actionValue(value: unknown): CompactHistoryAction | undefined {
+function defaultScope(_action: SessionHistoryAction): SessionHistoryScope {
+  return "current_session";
+}
+
+function sessionActionValue(value: unknown): SessionHistoryAction | undefined {
+  return SESSION_HISTORY_ACTIONS.includes(value as SessionHistoryAction)
+    ? value as SessionHistoryAction
+    : undefined;
+}
+
+function scopeValue(value: unknown, action: SessionHistoryAction): SessionHistoryScope | undefined {
+  if (value === undefined) return defaultScope(action);
+  return SESSION_HISTORY_SCOPES.includes(value as SessionHistoryScope)
+    ? value as SessionHistoryScope
+    : undefined;
+}
+
+function compactActionValue(value: unknown): CompactHistoryAction | undefined {
   return COMPACT_HISTORY_ACTIONS.includes(value as CompactHistoryAction)
     ? value as CompactHistoryAction
     : undefined;
@@ -383,13 +456,72 @@ function missingCurrentSession(
   };
 }
 
+export async function executeSessionHistory(
+  params: Record<string, unknown>,
+  ctx: ExtensionContext,
+  options: SessionHistoryToolOptions = {},
+  signal?: AbortSignal,
+): Promise<AgentToolResult<SessionHistoryToolDetails>> {
+  const action = sessionActionValue(params.action);
+  const scope = scopeValue(params.scope, action ?? "list_sessions");
+  if (!action || !scope) {
+    return {
+      content: [{ type: "text", text: "Invalid session_history action or scope." }],
+      isError: true,
+      details: {
+        action: (action ?? "list_sessions") as SessionHistoryAction,
+        scope: scope ?? "current_session",
+        error: "invalid action or scope",
+      },
+    } as unknown as AgentToolResult<SessionHistoryToolDetails>;
+  }
+
+  try {
+    if (signal?.aborted) throw signal.reason ?? new Error("Session history read aborted.");
+    const source = options.inventory
+      ?? options.inventoryFactory?.(scope, ctx)
+      ?? createSessionHistoryInventoryProvider(ctx, scope);
+    const service = new SessionHistoryService(source);
+    const scanOptions = boundedOptions(params);
+    let result: Record<string, unknown>;
+    if (action === "list_sessions") {
+      result = sanitizeResult(await service.list({ ...scanOptions, signal })) as unknown as Record<string, unknown>;
+    } else if (action === "search") {
+      const query = safeQuery(params.query);
+      result = sanitizeResult(await service.search(query, { ...scanOptions, signal })) as unknown as Record<string, unknown>;
+    } else {
+      const sessionId = safeIdentifier(params.sessionId, "sessionId");
+      const turn = safeTurn(params.turn);
+      result = sanitizeResult(await service.read({
+        sessionId,
+        turn,
+        ...scanOptions,
+        signal,
+      })) as unknown as Record<string, unknown>;
+    }
+    const details = { action, scope, result, ...result } as SessionHistoryToolDetails;
+    return {
+      content: [{ type: "text", text: serializeResult(result) }],
+      details,
+    } as unknown as AgentToolResult<SessionHistoryToolDetails>;
+  } catch (error) {
+    if (signal?.aborted) throw signal.reason ?? error;
+    const message = errorMessage(error);
+    return {
+      content: [{ type: "text", text: message }],
+      isError: true,
+      details: { action, scope, error: message },
+    } as unknown as AgentToolResult<SessionHistoryToolDetails>;
+  }
+}
+
 export async function executeCompactHistory(
   params: Record<string, unknown>,
   ctx: ExtensionContext,
   options: CompactHistoryToolOptions = {},
   signal?: AbortSignal,
 ): Promise<AgentToolResult<CompactHistoryToolDetails>> {
-  const action = actionValue(params.action);
+  const action = compactActionValue(params.action);
   if (!action) {
     return {
       content: [{ type: "text", text: "Invalid compact_history action." }],
@@ -495,6 +627,71 @@ export async function executeCompactHistory(
       details: { action, error: message },
     } as unknown as AgentToolResult<CompactHistoryToolDetails>;
   }
+}
+
+export function createSessionHistoryTool(
+  options: SessionHistoryToolOptions = {},
+): ToolDefinition<typeof SessionHistoryParams> {
+  return {
+    name: "session_history",
+    label: "Session History",
+    description: `Read bounded Pi session history through the host-authorized teammate v1 service. This tool is read-only and accepts no transcript paths, writes, caches, or indexes.
+
+Actions:
+- list_sessions: list validated sessions and exact session:// URIs.
+- search: literal case-insensitive search over visible active-chain text; each match includes an exact session://<sessionId>/entry/<entryId> URI.
+- read_turn: read one session turn by exact sessionId and 1-based turn number (0 is the preamble).
+
+Scopes:
+- current_session: only the current Pi session transcript.
+- workspace_sessions: transcripts in the current Pi session directory.
+- teammates: transcripts in the bounded teammate-session directories for the current session.
+
+Use this as a secondary discovery source when Maestro knowledge search completed successfully but returned no relevant hits: search workspace_sessions with 1-3 subject keywords for similar prior work. Session history is historical evidence, not governing knowledge; verify useful findings against current specs, code, and live state. Do not use it instead of the mandatory Maestro Search/Load knowledge gate.
+
+The include categories are user, assistant, visible_custom, compaction, and tool_result; the default is the first four and tool_result requires explicit inclusion. Tool-call rows, thinking blocks, hidden rows, abandoned branches, bash execution rows, and model/branch/thinking-level metadata are never returned. Every result includes bounded scan metrics, truncation state, and omission reasons. Use the resource tool with a returned exact session entry URI to re-read one visible entry; arbitrary filesystem paths are rejected.`,
+    promptSnippet: "After a zero-relevant-hit Maestro knowledge search, use bounded read-only workspace session history to find similar prior work; treat it as historical evidence, not governing knowledge.",
+    promptGuidelines: [
+      "Run the mandatory Maestro knowledge search first. Only when it completes with no relevant hits, use session_history search with scope=workspace_sessions and 1-3 subject keywords to investigate similar prior sessions.",
+      "Session history is a secondary historical lead, not authoritative knowledge: verify any useful finding against current specs, code, configuration, and live state before acting.",
+      "Use list_sessions before read_turn when the exact session id or turn is unknown; use search for literal case-insensitive discovery and preserve exact match URIs for resource reads.",
+      "Choose current_session, workspace_sessions, or teammates explicitly; use the narrowest scope that can answer the question and inspect teammate history only when its provenance is relevant.",
+      "Never infer or provide a session transcript filesystem path; session history is host-authorized and read-only.",
+    ],
+    parameters: SessionHistoryParams,
+    executionMode: "sequential",
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      return executeSessionHistory(params as Record<string, unknown>, ctx, options, signal);
+    },
+    renderShell: "self",
+    renderCall(args, theme, ctx) {
+      if (ctx?.isPartial === false) return new Text("", 0, 0);
+      const action = String(args.action ?? "?");
+      const scope = args.scope ? ` ${String(args.scope)}` : "";
+      return toolCallLine(theme, "session_history", `${action}${scope}`);
+    },
+    renderResult(result, opts, theme, ctx) {
+      if (opts.isPartial) return new Text("", 0, 0);
+      const isError = (result as { isError?: boolean }).isError === true;
+      const action = String(ctx.args.action ?? "?");
+      const scope = ctx.args.scope ? ` ${String(ctx.args.scope)}` : "";
+      return toolResultLine(theme, {
+        name: "session_history",
+        ok: !isError,
+        arg: `${action}${scope}`,
+        summary: resultSummary(result),
+        expanded: opts.expanded,
+        detail: result.content.find((item) => item.type === "text" && "text" in item)?.text,
+      });
+    },
+  };
+}
+
+export function registerSessionHistoryTool(
+  pi: ExtensionAPI,
+  options: SessionHistoryToolOptions = {},
+): void {
+  pi.registerTool(createSessionHistoryTool(options) as never);
 }
 
 export function createCompactHistoryTool(

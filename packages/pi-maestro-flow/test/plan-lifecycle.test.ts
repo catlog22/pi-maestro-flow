@@ -522,6 +522,9 @@ test("Plan confirmation archives the exact draft before restoring Act and inject
     assert.match(toolText, /Goal creation is optional/);
     assert.match(toolText, /Do not create a Goal solely because the Plan was approved/);
     assert.match(toolText, /A Todo without a Goal completes through its own acceptance criteria/);
+    assert.match(toolText, /After implementation and verification, assess the task execution for reusable knowledge/);
+    assert.match(toolText, /explicitly report zero knowledge candidates/);
+    assert.match(toolText, /Never fabricate a candidate/);
 
     const store = new PlanStore(harness.ctx.cwd, {
       rootDir: join(root, "global"),
@@ -1174,10 +1177,13 @@ test("Plan hooks preserve read-only discovery and block mutations before approva
     assert.match(planPrompt, /Root performs one contract spot-check/);
     assert.match(planPrompt, /without starting\s+another review chain/);
     assert.match(planPrompt, /scope, boundaries, non-goals/);
+    assert.match(planPrompt, /end-of-execution knowledge outcome/);
+    assert.match(planPrompt, /explicit zero-candidate result/);
+    assert.match(planPrompt, /Actual knowledge writes happen after approval in Act\/Run mode/);
     assert.match(planPrompt, /Goal creation is optional/);
     assert.match(planPrompt, /never create one solely because the Plan was approved/);
     assert.match(planPrompt, /most\s+Todos should complete without one/);
-    for (const toolName of ["Read", "ffgrep", "fffind", "smart_search"]) {
+    for (const toolName of ["Read", "ffgrep", "fffind", "smart_search", "session_history"]) {
       assert.equal(onToolCallPlan({ toolName, input: {} }), undefined, toolName);
     }
     assert.match(onToolCallPlan({ toolName: "custom-tool", input: {} })?.reason ?? "", /blocked/);

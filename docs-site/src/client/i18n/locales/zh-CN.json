@@ -21,8 +21,8 @@
     "logo_alt": "Maestro Flow 标志"
   },
   "announcement": {
-    "title": "v0.26.0 已发布 — 确定性的 New Context 重置 + Compact History 会话恢复 + 上下文压力建议（引擎 maestro-flow 0.5.83）。升级：",
-    "install": "pi install npm:pi-maestro-flow@0.26.0",
+    "title": "v0.27.0 已发布 — New Context 默认启用 + 跨工作区 Session History + 知识感知 Plan（引擎 maestro-flow 0.5.84）。升级：",
+    "install": "pi install npm:pi-maestro-flow@0.27.0",
     "close": "关闭提示"
   },
   "accessibility": {

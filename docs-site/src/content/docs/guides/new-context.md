@@ -156,7 +156,7 @@ Reset 完成后，系统发送 follow-up：
 Continue from the recovery capsule and the active Todo's exact next action.
 ```
 
-Agent 应先读取 capsule 和活动 Todo 的精确下一步；需要历史原文时，通过 `compact_history` 或 `resource` 按引用恢复，而不是猜测。
+Agent 应先读取 capsule 和活动 Todo 的精确下一步；需要当前会话恢复原文时，通过 `compact_history`，需要查找相似的既往 workspace 会话时通过 `session_history`，再用 `resource` 按精确引用复核，而不是猜测。
 
 ## Compact History — 当前会话恢复工具
 
@@ -184,7 +184,31 @@ compact_history({ action: "read_checkpoint", checkpointId: "<checkpoint-id>" })
 resource({ uri: "session://<current-session-id>/entry/<entry-id>" })
 ```
 
-`session://` 保持稳定资源协议，但只允许当前 Session 的 visible active-chain entry。旧的 `session_history` 公共工具已经移除。
+`compact_history` 返回的 `session://` URI 仍只来自当前 Session 的 visible active chain。
+
+## Session History — 知识检索未命中后的历史线索
+
+`session_history` 是独立、始终可用的只读工具，不受 New Context 开关控制。它用于 Maestro 知识检索成功但没有相关命中后，在受限的历史范围中寻找相似工作线索；历史内容不是治理知识，采用前必须回到当前代码、spec 和 live state 验证。
+
+| Scope | 用途 |
+|-------|------|
+| `current_session` | 当前 Pi Session transcript |
+| `workspace_sessions` | 当前 session 目录中经过宿主校验的历史会话 |
+| `teammates` | 当前会话边界内的 teammate session |
+
+| Action | 用途 |
+|--------|------|
+| `list_sessions` | 列出授权会话与可用的精确 `session://` URI |
+| `search` | 对 visible active-chain 文本做大小写不敏感的字面搜索 |
+| `read_turn` | 按精确 session ID 与 turn 编号读取一小段历史 |
+
+```javascript
+session_history({ action: "search", scope: "workspace_sessions", query: "migration", limit: 5 })
+session_history({ action: "read_turn", scope: "workspace_sessions", sessionId: "<session-id>", turn: 8 })
+resource({ uri: "session://<session-id>/entry/<entry-id>" })
+```
+
+`session_history` 与 `resource` 每次读取都会重新校验宿主授权和 active chain；它们不接受 transcript 路径，也不会暴露 hidden row、thinking、abandoned branch 或工具调用参数。默认 include 与 `compact_history` 相同，`tool_result` 仍须显式请求。
 
 ## 完整流程
 

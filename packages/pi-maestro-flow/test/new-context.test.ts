@@ -470,6 +470,10 @@ test("new_context guidance uses Todo checkpoints and pressure only for urgency",
 test("standalone new_context fails closed while the config gate is disabled", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "maestro-new-context-disabled-"));
   try {
+    await mkdir(join(cwd, ".pi"), { recursive: true });
+    await writeFile(join(cwd, ".pi", "settings.json"), JSON.stringify({
+      compaction: { newContext: { enabled: false } },
+    }));
     const controller = createNewContextController(new CompactionArbiter());
     const harness = context(cwd);
     controller.onSessionStart(harness.ctx as never);
