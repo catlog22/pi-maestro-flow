@@ -9,6 +9,10 @@
  */
 export * from "../../models/model-catalog.ts";
 export * from "../../models/model-session-availability.ts";
+export {
+  isModelRoutingProfileId,
+  validateModelRoutingV3Rules,
+} from "../../models/model-routing.ts";
 export * from "../../models/model-routing.ts";
 export {
   TEAMMATE_THINKING_LEVELS,

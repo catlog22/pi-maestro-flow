@@ -59,7 +59,7 @@ export interface ModelRoutingRoleRules {
   thinking?: TeammateThinkingLevel | null;
   /** Per-role circuit breaker policy applied to the role's mapped model. */
   circuit?: ModelCircuitPolicy | null;
-  /** Assigned task type; outranks the agent's frontmatter taskType at routing time. */
+  /** Legacy persisted metadata. Task types only affect routing when supplied by the dispatch. */
   taskType?: TeammateTaskType | null;
 }
 
@@ -339,6 +339,14 @@ function validateV3Rules(value: Record<string, unknown>, label: string): void {
   }
 }
 
+/** Validate the canonical persisted V3 routing-rules grammar without normalizing it. */
+export function validateModelRoutingV3Rules(value: unknown): asserts value is ModelRoutingRules {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Invalid model routing v3 rules");
+  }
+  validateV3Rules(value as Record<string, unknown>, "model routing v3 rules");
+}
+
 function normalizeRules(value: unknown): ModelRoutingRules {
   const parsed = value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -505,8 +513,9 @@ function normalizeProfileName(value: unknown, fallback: string): string {
   return normalized ? normalized.slice(0, 64) : fallback;
 }
 
-function isProfileId(value: string): boolean {
-  return /^[a-z0-9][a-z0-9._-]{0,47}$/.test(value);
+/** Return whether a value is a canonical 1..48 character V3 routing profile ID. */
+export function isModelRoutingProfileId(value: unknown): value is string {
+  return typeof value === "string" && /^[a-z0-9][a-z0-9._-]{0,47}$/.test(value);
 }
 
 function profileIdFromName(name: string): string {
@@ -549,7 +558,7 @@ function normalizeGlobalStore(parsed: Record<string, unknown> | undefined): Glob
     }
     const profiles: Record<string, ModelRoutingProfile> = {};
     for (const [profileId, rawProfile] of Object.entries(parsed.profiles as Record<string, unknown>)) {
-      if (!isProfileId(profileId) || !rawProfile || typeof rawProfile !== "object" || Array.isArray(rawProfile)) {
+      if (!isModelRoutingProfileId(profileId) || !rawProfile || typeof rawProfile !== "object" || Array.isArray(rawProfile)) {
         return invalidGlobalStore();
       }
       const profile = rawProfile as Record<string, unknown>;
@@ -575,7 +584,7 @@ function normalizeGlobalStore(parsed: Record<string, unknown> | undefined): Glob
       : Array.isArray(parsed.retiredProfileIds)
         && new Set(parsed.retiredProfileIds).size === parsed.retiredProfileIds.length
         && parsed.retiredProfileIds.every((entry) =>
-          typeof entry === "string" && isProfileId(entry) && !hasOwn(profiles, entry)
+          isModelRoutingProfileId(entry) && !hasOwn(profiles, entry)
         )
         ? [...new Set(parsed.retiredProfileIds as string[])]
         : invalidGlobalStore();
@@ -617,7 +626,7 @@ function normalizeProjectStore(parsed: Record<string, unknown> | undefined): Pro
       throw new Error("Invalid v3 project teammate model config");
     }
     if (parsed.activeProfile !== undefined
-      && (typeof parsed.activeProfile !== "string" || !isProfileId(parsed.activeProfile.trim()))) {
+      && (typeof parsed.activeProfile !== "string" || !isModelRoutingProfileId(parsed.activeProfile.trim()))) {
       throw new Error("Invalid active Profile in project teammate model config");
     }
     const activeProfile = typeof parsed.activeProfile === "string" && parsed.activeProfile.trim()
@@ -1350,21 +1359,16 @@ function readConfigContent(filePath: string): string {
 
 export function discoverRoutingTaskTypes(
   cwd: string,
-  agents: readonly { taskType?: TeammateTaskType }[] = [],
+  _agents: readonly { taskType?: TeammateTaskType }[] = [],
   loadedConfig?: ModelRoutingConfig,
 ): TeammateTaskType[] {
   const config = loadedConfig ?? loadModelRoutingConfig(cwd);
   const taskTypes = new Set<TeammateTaskType>(TEAMMATE_TASK_TYPES);
-  for (const agent of agents) {
-    const taskType = parseTeammateTaskType(agent.taskType);
-    if (taskType) taskTypes.add(taskType);
-  }
   for (const taskType of [
     ...Object.keys(config.mappings),
     ...Object.keys(config.fallbackMappings ?? {}),
     ...Object.keys(config.thinkingLevels),
     ...Object.keys(config.typeMeta ?? {}),
-    ...Object.values(config.roleMappings ?? {}).flatMap((rules) => rules?.taskType ? [rules.taskType] : []),
   ]) {
     const normalized = parseTeammateTaskType(taskType);
     if (normalized) taskTypes.add(normalized);
@@ -2009,20 +2013,12 @@ export function inferTaskTypeByKeywords(
   return undefined;
 }
 
-function inferTaskTypeWithKeywords(config: ModelRoutingConfig, input: TaskTypeInput): TeammateTaskType | undefined {
-  // Explicit user-configured keywords outrank the built-in heuristic regexes:
-  // a configured trigger word is a higher-confidence signal than the generic
-  // prompt patterns, so a custom type can claim prompts the heuristics would
-  // otherwise route to a built-in type.
-  return inferTaskTypeByKeywords(config, input.task) ?? inferTaskType(input);
-}
-
 function mappedModel(
   config: ModelRoutingConfig,
   input: TaskTypeInput,
   availableModels: readonly string[],
 ): string | undefined {
-  const taskType = inferTaskTypeWithKeywords(config, input);
+  const taskType = input.taskType;
   if (taskType) {
     const configured = config.mappings[taskType];
     if (configured) {
@@ -2040,7 +2036,7 @@ function mappedFallbackModels(
   input: TaskTypeInput,
   availableModels: readonly string[],
 ): string[] | undefined {
-  const taskType = inferTaskTypeWithKeywords(config, input);
+  const taskType = input.taskType;
   const configured = taskType ? config.fallbackMappings?.[taskType] : undefined;
   if (configured) {
     const filtered = availableModels.length > 0
@@ -2057,7 +2053,7 @@ function mappedFallbackModels(
 }
 
 function mappedThinking(config: ModelRoutingConfig, input: TaskTypeInput): TeammateThinkingLevel | undefined {
-  const taskType = inferTaskTypeWithKeywords(config, input);
+  const taskType = input.taskType;
   if (taskType) {
     const configured = config.thinkingLevels[taskType];
     if (configured) return configured;
@@ -2075,11 +2071,11 @@ export function applyModelRouting(
 ): RunTeammateParams {
   const topLevelModel = params.model;
   const topLevelThinking = parseTeammateThinkingLevel(params.thinking);
-  // Default resolution: when neither the task nor the top level pins a model,
-  // configured task-type/role mappings still win, otherwise the dispatch
-  // inherits the main session's model (or the parent agent's resolved model for
-  // nested dispatches). An inherited model absent from the teammate catalog is
-  // skipped so a stale session model cannot force an invalid child spawn.
+  // Default resolution: an explicit task type selects its configured route.
+  // Without one, the selected role's model wins before the dispatch inherits
+  // the main session's model (or the parent agent's resolved model for nested
+  // dispatches). An inherited model absent from the teammate catalog is skipped
+  // so a stale session model cannot force an invalid child spawn.
   const resolvedInheritModel = inheritModel
     && (availableModels.length === 0 || availableModels.includes(inheritModel))
     ? inheritModel
@@ -2090,12 +2086,7 @@ export function applyModelRouting(
     const config = loadModelRoutingConfig(routingCwd, globalFilePath, sessionId);
     const agent = task.agent ?? params.agent ?? "general";
     const agentConfig = resolveAgent(routingCwd, agent);
-    const explicitTaskType = task.taskType ?? params.taskType;
-    const assignedRoleTaskType = roleRules(config, { agent, task: task.prompt })?.taskType;
-    const roleTaskType = assignedRoleTaskType ?? agentConfig?.taskType;
-    const taskType = explicitTaskType
-      ?? roleTaskType
-      ?? inferTaskTypeWithKeywords(config, { agent, task: task.prompt });
+    const taskType = task.taskType ?? params.taskType;
     return {
       ...task,
       ...(taskType ? { taskType } : {}),
@@ -2126,10 +2117,10 @@ export function applyModelRouting(
 
 /**
  * Sync per-role circuit policies from the routing config onto a circuit
- * breaker: each role rule with a `circuit` policy uses the assigned task
- * type's mapped model first, then the role model when the type has no model.
- * The breaker's policy map is rebuilt from the config on every call, so
- * removed policies do not linger.
+ * breaker. Circuit policies apply to the role's configured model; task-type
+ * routes are selected per dispatch and do not bind back to roles. The breaker's
+ * policy map is rebuilt from the config on every call, so removed policies do
+ * not linger.
  */
 export function syncModelCircuitPolicies(
   breaker: ModelCircuitBreaker,
@@ -2140,8 +2131,7 @@ export function syncModelCircuitPolicies(
   const config = loadModelRoutingConfig(cwd, globalFilePath);
   for (const rules of Object.values(config.roleMappings ?? {})) {
     if (!rules || !rules.circuit) continue;
-    const typeModel = rules.taskType ? config.mappings[rules.taskType] : undefined;
-    const model = typeModel ?? rules.model;
+    const model = rules.model;
     if (!model) continue;
     breaker.setPolicy(model, rules.circuit);
   }
@@ -2426,9 +2416,9 @@ export function appendTaskTypeRoutingContext(
     TASK_TYPE_ROUTING_START_MARKER,
     "## Teammate taskType routing",
     "`taskType` selects configured model, fallback-model, and thinking defaults (and, in experts mode, the default expert agent when none is given); it never changes a chosen agent's role, tools, permissions, or task scope.",
-    "Set `tasks[].taskType` by the task's actual phase; top-level `taskType` is the default for all tasks. If omitted, the runtime uses the agent default or prompt inference and may inherit the parent model. Set `model` only to override routing.",
+    "Set `tasks[].taskType` by the task's actual phase; top-level `taskType` is the default for all tasks. If omitted, the runtime uses the selected role's model configuration, then may inherit the parent model. No role or prompt inference assigns a task type. Set `model` only to override routing.",
     "",
-    "Legal task types (agents may declare more):",
+    "Legal task types (routing configuration may declare more):",
     ...TEAMMATE_TASK_TYPES.map((type) => `  - ${type}`),
     ...(customTypes.length > 0 ? customTypes : []),
     "",

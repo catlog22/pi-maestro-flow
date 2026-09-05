@@ -21,6 +21,8 @@ import {
   getSessionModelRoutingPath,
   getProjectModelRoutingPath,
   inferTaskType,
+  inferTaskTypeByKeywords,
+  isModelRoutingProfileId,
   listModelRoutingProfiles,
   loadModelRoutingConfig,
   loadModelRoutingState,
@@ -50,6 +52,7 @@ import {
   setProjectModelRoutingOverridesEnabled,
   syncModelCircuitPolicies,
   TEAMMATE_TASK_TYPE_META,
+  validateModelRoutingV3Rules,
 } from "../src/models/model-routing.ts";
 
 const mutableFs = createRequire(import.meta.url)("node:fs") as typeof fs;
@@ -125,6 +128,62 @@ test("task types expose role metadata for the configuration UI", () => {
   assert.equal(TEAMMATE_TASK_TYPE_META.explore.roles, "explorer");
   assert.match(TEAMMATE_TASK_TYPE_META.development.description, /Implementation/);
   assert.equal(Object.keys(TEAMMATE_TASK_TYPE_META).length, 7);
+});
+
+test("canonical V3 routing rules validator accepts the complete public grammar", () => {
+  const rules: unknown = {
+    mappings: { "custom-7": "provider/primary", review: null },
+    fallbackMappings: { "custom-7": ["provider/backup"], review: null },
+    thinkingLevels: { "custom-7": "max", review: null },
+    roleMappings: {
+      reviewer: {
+        model: "provider/role",
+        fallbackModels: ["provider/role-backup"],
+        thinking: "high",
+        circuit: { threshold: 1, cooldownMs: 0 },
+        taskType: " CUSTOM-7 ",
+      },
+      retired: null,
+    },
+    typeMeta: { "custom-7": { keywords: ["audit"] }, retired: null },
+  };
+  validateModelRoutingV3Rules(rules);
+  assert.equal(rules.mappings["custom-7"], "provider/primary");
+});
+
+test("canonical V3 routing rules validator rejects every bounded grammar violation", () => {
+  const valid = (): Record<string, unknown> => ({ mappings: {}, thinkingLevels: {} });
+  const invalidRules: unknown[] = [
+    null,
+    [],
+    { ...valid(), unknown: true },
+    { mappings: null, thinkingLevels: {} },
+    { mappings: { "bad type!": "provider/model" }, thinkingLevels: {} },
+    { mappings: { analysis: " " }, thinkingLevels: {} },
+    { ...valid(), fallbackMappings: { analysis: [""] } },
+    { mappings: {}, thinkingLevels: { analysis: "ultra" } },
+    { ...valid(), roleMappings: { "Bad Role": {} } },
+    { ...valid(), roleMappings: { reviewer: { unknown: true } } },
+    { ...valid(), roleMappings: { reviewer: { circuit: { unknown: true } } } },
+    { ...valid(), roleMappings: { reviewer: { circuit: { threshold: 0 } } } },
+    { ...valid(), roleMappings: { reviewer: { circuit: { threshold: 1.5 } } } },
+    { ...valid(), roleMappings: { reviewer: { circuit: { cooldownMs: -1 } } } },
+    { ...valid(), roleMappings: { reviewer: { circuit: { cooldownMs: Number.POSITIVE_INFINITY } } } },
+    { ...valid(), typeMeta: { "bad type!": null } },
+    { ...valid(), typeMeta: { analysis: { unknown: true } } },
+    { ...valid(), typeMeta: { analysis: { keywords: [""] } } },
+  ];
+  for (const value of invalidRules) {
+    assert.throws(() => validateModelRoutingV3Rules(value));
+  }
+});
+
+test("canonical V3 routing profile IDs allow numeric-leading IDs across exact length bounds", () => {
+  assert.equal(isModelRoutingProfileId("7"), true);
+  assert.equal(isModelRoutingProfileId(`7${"a".repeat(47)}`), true);
+  for (const value of ["", `7${"a".repeat(48)}`, "Upper", "bad id", "-leading", null, 7]) {
+    assert.equal(isModelRoutingProfileId(value), false);
+  }
 });
 
 test("task type inference prioritizes explicit phases, roles, and task text", () => {
@@ -203,7 +262,7 @@ Review security.
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
-test("role frontmatter taskType routes models below explicit task types", () => {
+test("role frontmatter taskType is metadata while explicit task types route models", () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-role-routing-"));
   const globalPath = path.join(cwd, "home", "teammate-models.json");
   const agentsDir = path.join(cwd, ".pi", "agents");
@@ -224,13 +283,8 @@ Review security evidence.
     const fromRole = applyModelRouting({
       tasks: [{ agent: "security-specialist", prompt: "Inspect the module" }],
     }, cwd, available, globalPath);
-    assert.equal(fromRole.tasks[0].taskType, "security-audit");
-    assert.equal(fromRole.tasks[0].model, "provider/review");
-    assert.ok(discoverRoutingTaskTypes(
-      cwd,
-      [{ taskType: "security-audit" }],
-      loadModelRoutingConfig(cwd, globalPath),
-    ).includes("security-audit"));
+    assert.equal(fromRole.tasks[0].taskType, undefined);
+    assert.equal(fromRole.tasks[0].model, undefined);
 
     const fromTopLevel = applyModelRouting({
       taskType: "analysis",
@@ -272,7 +326,7 @@ Review security evidence.
 
     saveProjectModelMapping(cwd, "analysis", "provider/analysis", globalPath);
     const fromTaskType = applyModelRouting({
-      tasks: [{ agent: "security-specialist", prompt: "Inspect the module" }],
+      tasks: [{ agent: "security-specialist", taskType: "analysis", prompt: "Inspect the module" }],
     }, cwd, ["provider/analysis", "provider/role", "provider/parent"], globalPath, "provider/parent");
     assert.equal(fromTaskType.tasks[0].model, "provider/analysis");
   } finally {
@@ -280,7 +334,7 @@ Review security evidence.
   }
 });
 
-test("task cwd selects that project's custom role type and routing config", () => {
+test("task cwd selects that project's routing config for an explicit task type", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-cwd-routing-"));
   const globalPath = path.join(root, "home", "teammate-models.json");
   const target = path.join(root, "target");
@@ -296,7 +350,7 @@ Manage releases.
   try {
     saveProjectModelMapping(target, "release", "provider/release", globalPath);
     const routed = applyModelRouting({
-      tasks: [{ agent: "release-manager", cwd: target, prompt: "Prepare release" }],
+      tasks: [{ agent: "release-manager", taskType: "release", cwd: target, prompt: "Prepare release" }],
     }, root, ["provider/release"], globalPath);
     assert.equal(routed.tasks[0].taskType, "release");
     assert.equal(routed.tasks[0].model, "provider/release");
@@ -578,7 +632,7 @@ test("multi-task routing applies per phase while explicit defaults win", () => {
     const routed = applyModelRouting({
       agent: "general",
       tasks: [
-        { agent: "explorer", prompt: "Locate auth handlers" },
+        { agent: "explorer", taskType: "explore", prompt: "Locate auth handlers" },
         { agent: "general", prompt: "Diagnose auth failure", taskType: "debug" },
         { agent: "reviewer", prompt: "Review the fix", model: "anthropic/claude-sonnet" },
       ],
@@ -645,7 +699,7 @@ test("global profiles are shared while each project persists its active selectio
     setDefaultGlobalModelRoutingProfile(firstProject, fastId!, globalPath);
     assert.equal(loadModelRoutingConfig(secondProject, globalPath).mappings.explore, "provider/fast");
     const routed = applyModelRouting({
-      tasks: [{ agent: "explorer", prompt: "Locate files" }],
+      tasks: [{ agent: "explorer", taskType: "explore", prompt: "Locate files" }],
     }, firstProject, ["provider/fast", "provider/backup"], globalPath);
     assert.equal(routed.tasks[0].model, "provider/fast");
     assert.deepEqual(routed.tasks[0].fallbackModels, ["provider/backup"]);
@@ -1443,6 +1497,7 @@ test("appendTaskTypeRoutingContext injects a concise, idempotent routing contrac
     assert.match(first, /selects configured model, fallback-model, and thinking defaults/);
     assert.match(first, /never changes a chosen agent's role, tools, permissions, or task scope/);
     assert.match(first, /Set `tasks\[\]\.taskType` by the task's actual phase/);
+    assert.match(first, /No role or prompt inference assigns a task type/);
     assert.match(first, /Legal task types/);
     for (const type of ["explore", "analysis", "debug", "planning", "development", "review", "testing"]) {
       assert.match(first, new RegExp(`^  - ${type}$`, "m"));
@@ -1587,7 +1642,7 @@ test("task type keywords are configured but never auto-injected into the routing
   }
 });
 
-test("task type keywords auto-infer the type from the task prompt", () => {
+test("task type keywords remain advisory and never assign a routing type", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mtasktype-kw-infer-"));
   const globalPath = path.join(root, "home", ".pi", "agent", "teammate-models.json");
   const cwd = path.join(root, "project");
@@ -1595,27 +1650,19 @@ test("task type keywords auto-infer the type from the task prompt", () => {
   try {
     saveGlobalProfileCustomType(cwd, "default", "security-audit", { keywords: ["audit", "security"] }, globalPath);
     const config = loadModelRoutingConfig(cwd, globalPath);
+    assert.equal(inferTaskTypeByKeywords(config, "Run a security audit on the auth module"), "security-audit");
 
-    // Keyword hit infers the custom type when no agent declares a taskType.
     const routed = applyModelRouting({
       tasks: [{ agent: "specialist-helper", prompt: "Run a security audit on the auth module" }],
     }, cwd, ["provider/audit"], globalPath);
-    assert.equal(routed.tasks[0].taskType, "security-audit");
-    assert.equal(routed.tasks[0].model, undefined); // no mapping configured yet
+    assert.equal(routed.tasks[0].taskType, undefined);
+    assert.equal(routed.tasks[0].model, undefined);
 
-    // Configured keywords outrank the built-in heuristic regexes.
-    const keywordFirst = applyModelRouting({
+    const builtInPrompt = applyModelRouting({
       tasks: [{ agent: "specialist-helper", prompt: "Review the pull request" }],
     }, cwd, [], globalPath);
-    assert.equal(keywordFirst.tasks[0].taskType, "review");
+    assert.equal(builtInPrompt.tasks[0].taskType, undefined);
 
-    // Word-boundary matching: "auditor" does not trigger the "audit" keyword.
-    const boundary = applyModelRouting({
-      tasks: [{ agent: "specialist-helper", prompt: "Interview the auditor about policy" }],
-    }, cwd, [], globalPath);
-    assert.notEqual(boundary.tasks[0].taskType, "security-audit");
-
-    // Explicit taskType still wins over keyword inference.
     const explicit = applyModelRouting({
       tasks: [{ agent: "specialist-helper", taskType: "analysis", prompt: "Run a security audit now" }],
     }, cwd, [], globalPath);
@@ -1625,7 +1672,7 @@ test("task type keywords auto-infer the type from the task prompt", () => {
   }
 });
 
-test("assigned role taskType persists and outranks the agent frontmatter type", () => {
+test("legacy role and frontmatter taskType metadata persists but never routes", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-role-type-"));
   const globalPath = path.join(root, "home", ".pi", "agent", "teammate-models.json");
   const cwd = path.join(root, "project");
@@ -1639,16 +1686,11 @@ Work.
 `);
   try {
     saveGlobalProfileRoleMapping(cwd, "default", "dual-role", { taskType: "analysis" }, globalPath);
+    assert.equal(loadModelRoutingConfig(cwd, globalPath).roleMappings?.["dual-role"]?.taskType, "analysis");
     const routed = applyModelRouting({
       tasks: [{ agent: "dual-role", prompt: "Trace the call chain" }],
     }, cwd, [], globalPath);
-    assert.equal(routed.tasks[0].taskType, "analysis");
-
-    saveGlobalProfileRoleMapping(cwd, "default", "dual-role", { taskType: null }, globalPath);
-    const reverted = applyModelRouting({
-      tasks: [{ agent: "dual-role", prompt: "Trace the call chain" }],
-    }, cwd, [], globalPath);
-    assert.equal(reverted.tasks[0].taskType, "review");
+    assert.equal(routed.tasks[0].taskType, undefined);
 
     saveGlobalProfileRoleMapping(cwd, "default", "dual-role", { taskType: "debug" }, globalPath);
     const explicit = applyModelRouting({
@@ -1665,7 +1707,7 @@ Work.
   }
 });
 
-test("assigned role type supplies model, fallbacks, thinking, and circuit before role fallbacks", () => {
+test("role defaults apply without taskType while explicit taskType routes win", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-role-type-route-"));
   const globalPath = path.join(root, "home", ".pi", "agent", "teammate-models.json");
   const cwd = path.join(root, "project");
@@ -1686,21 +1728,28 @@ test("assigned role type supplies model, fallbacks, thinking, and circuit before
     const routed = applyModelRouting({
       tasks: [{ agent: "specialist", prompt: "Investigate the failure" }],
     }, cwd, available, globalPath);
-    assert.equal(routed.tasks[0].taskType, "analysis");
-    assert.equal(routed.tasks[0].model, "provider/type");
-    assert.deepEqual(routed.tasks[0].fallbackModels, ["provider/type-fallback"]);
-    assert.equal(routed.tasks[0].thinking, "high");
+    assert.equal(routed.tasks[0].taskType, undefined);
+    assert.equal(routed.tasks[0].model, "provider/role");
+    assert.deepEqual(routed.tasks[0].fallbackModels, ["provider/role-fallback"]);
+    assert.equal(routed.tasks[0].thinking, "low");
+
+    const explicitType = applyModelRouting({
+      tasks: [{ agent: "specialist", taskType: "analysis", prompt: "Investigate the failure" }],
+    }, cwd, available, globalPath);
+    assert.equal(explicitType.tasks[0].model, "provider/type");
+    assert.deepEqual(explicitType.tasks[0].fallbackModels, ["provider/type-fallback"]);
+    assert.equal(explicitType.tasks[0].thinking, "high");
 
     const breaker = new ModelCircuitBreaker();
     syncModelCircuitPolicies(breaker, cwd, globalPath);
-    const first = breaker.acquireCandidate("provider/type");
-    const second = breaker.acquireCandidate("provider/type");
+    const first = breaker.acquireCandidate("provider/role");
+    const second = breaker.acquireCandidate("provider/role");
     assert.equal(first.allowed, true);
     assert.equal(second.allowed, true);
     if (first.allowed) breaker.recordRetryableFailure(first);
     if (second.allowed) breaker.recordRetryableFailure(second);
-    assert.equal(breaker.snapshot().find((entry) => entry.model === "provider/type")?.state, "OPEN");
-    assert.equal(breaker.snapshot().find((entry) => entry.model === "provider/role"), undefined);
+    assert.equal(breaker.snapshot().find((entry) => entry.model === "provider/role")?.state, "OPEN");
+    assert.equal(breaker.snapshot().find((entry) => entry.model === "provider/type"), undefined);
 
     saveGlobalProfileModelMapping(cwd, "default", "analysis", null, globalPath);
     saveGlobalProfileFallbackMapping(cwd, "default", "analysis", null, globalPath);

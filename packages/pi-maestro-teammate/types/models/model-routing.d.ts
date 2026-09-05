@@ -23,7 +23,7 @@ export interface ModelRoutingRoleRules {
     thinking?: TeammateThinkingLevel | null;
     /** Per-role circuit breaker policy applied to the role's mapped model. */
     circuit?: ModelCircuitPolicy | null;
-    /** Assigned task type; outranks the agent's frontmatter taskType at routing time. */
+    /** Legacy persisted metadata. Task types only affect routing when supplied by the dispatch. */
     taskType?: TeammateTaskType | null;
 }
 /** User-editable metadata for a task type: trigger keywords, like a skill description. */
@@ -92,6 +92,10 @@ export interface SessionModelRoutingStore {
     createdAtMs: number;
     rules: ModelRoutingRules;
 }
+/** Validate the canonical persisted V3 routing-rules grammar without normalizing it. */
+export declare function validateModelRoutingV3Rules(value: unknown): asserts value is ModelRoutingRules;
+/** Return whether a value is a canonical 1..48 character V3 routing profile ID. */
+export declare function isModelRoutingProfileId(value: unknown): value is string;
 /**
  * Persist a session-scoped routing override. Session overrides stack on top
  * of project overrides (and the active profile) and apply only to the single
@@ -123,7 +127,7 @@ export interface ModelRoutingStoreContentPair {
 export declare function loadModelRoutingStores(globalFilePath: string, projectFilePath: string): ModelRoutingStorePair;
 /** @internal Publish a prepared Settings transaction through the routing lock/journal protocol. */
 export declare function replaceModelRoutingStores(globalFilePath: string, projectFilePath: string, expected: ModelRoutingStorePair, next: ModelRoutingStorePair, expectedContent?: ModelRoutingStoreContentPair): ModelRoutingStorePair;
-export declare function discoverRoutingTaskTypes(cwd: string, agents?: readonly {
+export declare function discoverRoutingTaskTypes(cwd: string, _agents?: readonly {
     taskType?: TeammateTaskType;
 }[], loadedConfig?: ModelRoutingConfig): TeammateTaskType[];
 export declare function saveProjectThinkingLevel(cwd: string, taskType: TeammateTaskType, thinking: TeammateThinkingLevel | null, globalFilePath?: string): ModelRoutingConfig;
@@ -182,10 +186,10 @@ export declare function inferTaskTypeByKeywords(config: ModelRoutingConfig, task
 export declare function applyModelRouting(params: RunTeammateParams, cwd: string, availableModels?: readonly string[], globalFilePath?: string, inheritModel?: string, sessionId?: string): RunTeammateParams;
 /**
  * Sync per-role circuit policies from the routing config onto a circuit
- * breaker: each role rule with a `circuit` policy uses the assigned task
- * type's mapped model first, then the role model when the type has no model.
- * The breaker's policy map is rebuilt from the config on every call, so
- * removed policies do not linger.
+ * breaker. Circuit policies apply to the role's configured model; task-type
+ * routes are selected per dispatch and do not bind back to roles. The breaker's
+ * policy map is rebuilt from the config on every call, so removed policies do
+ * not linger.
  */
 export declare function syncModelCircuitPolicies(breaker: ModelCircuitBreaker, cwd: string, globalFilePath?: string): void;
 /** Reconcile registry-mode health against the dispatch projection's stable hash. */
