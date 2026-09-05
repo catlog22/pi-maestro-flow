@@ -40,8 +40,8 @@ icon: "🔄"
 
 工具面随 effective 配置动态变化：
 
-- `true`（默认）：在 Session 启动或下一次 Agent turn 前注册并激活 `new_context` 与 `compact_history`；
-- 显式 `false`：下一次 Agent turn 前从 active tool surface 移除，遗留调用也会 fail closed；重启进程后 registry 中完全不存在。
+- `true`（默认）：在 Session 启动或下一次 Agent turn 前注册并激活 `new_context`，同时允许 `session_history` 的 `timeline` / `read_checkpoint` 恢复动作；
+- 显式 `false`：下一次 Agent turn 前从 active tool surface 移除 `new_context`；`session_history` 仍可用于普通历史读取，但 checkpoint 恢复动作会 fail closed。
 
 > 该开关只启用显式 reset 及其当前会话恢复工具，不改变 automatic/native compact 的 reserve、soft band、hard threshold 或 fallback 行为。
 
@@ -153,62 +153,42 @@ Recovery Capsule v2 最大 32 KiB，由运行时确定性生成，主要包含�
 Reset 完成后，系统发送 follow-up：
 
 ```text
-Continue from the recovery capsule and the active Todo's exact next action.
+Continue from the recovery capsule and the active Todo's exact next action. If a required current-session fact is absent, use session_history with scope=current_session.
 ```
 
-Agent 应先读取 capsule 和活动 Todo 的精确下一步；需要当前会话恢复原文时，通过 `compact_history`，需要查找相似的既往 workspace 会话时通过 `session_history`，再用 `resource` 按精确引用复核，而不是猜测。
+Agent 应先读取 capsule 和活动 Todo 的精确下一步；只有当前会话事实缺失时，才通过 `session_history` 的 `current_session` scope 读取最小切片。需要查找相似的既往 workspace 会话时，仍须先完成 Maestro 知识检索，再使用 `workspace_sessions`，最后用 `resource` 按精确引用复核。
 
-## Compact History — 当前会话恢复工具
+## Session History — 当前恢复与历史线索的统一入口
 
-`compact_history` 专门服务于当前 Pi Session 的 New Context/compact 恢复。运行时只使用宿主 `sessionManager` 授权的当前 transcript；它不接受 `scope`、`sessionId` 或文件路径，也不会枚举 workspace 或 teammate 的历史文件。
-
-| Action | 用途 |
-|--------|------|
-| `timeline` | 按新到旧列出当前会话的 compact checkpoints、来源和精确 `session://` URI |
-| `search` | 在当前会话 visible active chain 中做字面量搜索 |
-| `read_turn` | 按 turn 编号读取当前会话的一小段历史；`0` 表示 preamble |
-| `read_checkpoint` | 按 capsule checkpoint ID 或 timeline entry ID 读取一次 compact entry |
-
-```javascript
-compact_history({ action: "timeline", limit: 10 })
-compact_history({ action: "search", query: "migration decision", limit: 5 })
-compact_history({ action: "read_turn", turn: 17, limit: 10 })
-compact_history({ action: "read_checkpoint", checkpointId: "<checkpoint-id>" })
-```
-
-默认只返回 `user`、`assistant`、`visible_custom` 与 `compaction`；`tool_result` 必须显式加入 `include`。Thinking、tool-call 参数、hidden message、abandoned branch、bash execution、模型与 thinking-level 元数据始终不返回。
-
-`timeline/search` 返回的精确条目可以交给 `resource` 二次验证并读取：
-
-```javascript
-resource({ uri: "session://<current-session-id>/entry/<entry-id>" })
-```
-
-`compact_history` 返回的 `session://` URI 仍只来自当前 Session 的 visible active chain。
-
-## Session History — 知识检索未命中后的历史线索
-
-`session_history` 是独立、始终可用的只读工具，不受 New Context 开关控制。它用于 Maestro 知识检索成功但没有相关命中后，在受限的历史范围中寻找相似工作线索；历史内容不是治理知识，采用前必须回到当前代码、spec 和 live state 验证。
+`session_history` 是始终可用的统一只读入口。它通过 scope 区分当前会话恢复和跨会话历史发现；运行时只读取宿主授权的 transcript，不接受文件路径。
 
 | Scope | 用途 |
 |-------|------|
-| `current_session` | 当前 Pi Session transcript |
+| `current_session` | 当前 Pi Session 的 visible active chain 与 compact checkpoint |
 | `workspace_sessions` | 当前 session 目录中经过宿主校验的历史会话 |
 | `teammates` | 当前会话边界内的 teammate session |
 
 | Action | 用途 |
 |--------|------|
 | `list_sessions` | 列出授权会话与可用的精确 `session://` URI |
-| `search` | 对 visible active-chain 文本做大小写不敏感的字面搜索 |
-| `read_turn` | 按精确 session ID 与 turn 编号读取一小段历史 |
+| `search` | 对选定 scope 的 visible active-chain 文本做大小写不敏感的字面搜索 |
+| `read_turn` | 按 turn 编号读取一小段历史；`current_session` 可省略 `sessionId` |
+| `timeline` | 按新到旧列出当前会话 checkpoint；仅限 `current_session` |
+| `read_checkpoint` | 按 capsule checkpoint ID 或 timeline entry ID 读取 compact entry；仅限 `current_session` |
 
 ```javascript
+session_history({ action: "timeline", scope: "current_session", limit: 10 })
+session_history({ action: "search", scope: "current_session", query: "migration decision", limit: 5 })
+session_history({ action: "read_turn", scope: "current_session", turn: 17, limit: 10 })
+session_history({ action: "read_checkpoint", scope: "current_session", checkpointId: "<checkpoint-id>" })
 session_history({ action: "search", scope: "workspace_sessions", query: "migration", limit: 5 })
 session_history({ action: "read_turn", scope: "workspace_sessions", sessionId: "<session-id>", turn: 8 })
 resource({ uri: "session://<session-id>/entry/<entry-id>" })
 ```
 
-`session_history` 与 `resource` 每次读取都会重新校验宿主授权和 active chain；它们不接受 transcript 路径，也不会暴露 hidden row、thinking、abandoned branch 或工具调用参数。默认 include 与 `compact_history` 相同，`tool_result` 仍须显式请求。
+`timeline` 与 `read_checkpoint` 遵循 `compaction.newContext.enabled`；关闭时 fail closed。Workspace/teammate 历史仅是知识检索无相关命中后的二级线索，不是治理知识，采用前必须回到当前 spec、代码、配置和 live state 验证。
+
+默认只返回 `user`、`assistant`、`visible_custom` 与 `compaction`；`tool_result` 必须显式加入 `include`。`session_history` 与 `resource` 每次读取都会重新校验宿主授权和 active chain；Thinking、tool-call 参数、hidden message、abandoned branch、bash execution、模型与 thinking-level 元数据始终不返回。
 
 ## 完整流程
 
@@ -254,7 +234,7 @@ Teammate 的 Todo mutation 仍由 root 权威保存。Child 真正申请 reset l
 | 触发 | `todo advance transition=new_context` | 在任务提交后调度 reset；推荐的阶段边界入口 |
 | Reset 后 | `todo get/list`、`goal get`、`plan-status`、`run-control run brief` | 读取最新权威执行状态 |
 | 精确证据 | `resource` | 读取 capsule/Todo 中已有的 durable URI |
-| 历史补全 | `compact_history` | 仅当 capsule 和权威状态缺少当前会话事实时读取最小历史切片 |
+| 历史补全 | `session_history`（`scope=current_session`） | 仅当 capsule 和权威状态缺少当前会话事实时读取最小历史切片 |
 | 人类观察 | `/compaction-status`、`/maestro-settings` | 查看 arbiter/pressure/pending 状态与 effective 配置 |
 
 推荐顺序：
@@ -265,7 +245,7 @@ Todo/Goal/Plan/Run 持久化
   → Recovery Capsule v2
   → Todo/Goal/Plan/Run 权威状态
   → resource 精确证据
-  → compact_history 最小补全
+  → session_history current_session 最小补全
 ```
 
 Automatic compaction、arbiter 和 pressure estimator 是内部容量安全机制，不是 Agent 主动工具。任务执行中的 critical pressure、overflow 和 output-limit recovery 仍由它们处理；到达已持久化的 Todo completion checkpoint 后，New Context 才是进入下一阶段的首选语义 reset。
@@ -317,13 +297,13 @@ Automatic compaction、arbiter 和 pressure estimator 是内部容量安全机�
 先检查 capsule 中的 `resourceUris` 和 lineage；再按以下顺序恢复，不要把完整聊天复制进 `carryForward`：
 
 ```javascript
-compact_history({ action: "timeline" })
-compact_history({ action: "search", query: "缺失事实" })
-compact_history({ action: "read_turn", turn: 17 })
+session_history({ action: "timeline", scope: "current_session" })
+session_history({ action: "search", scope: "current_session", query: "缺失事实" })
+session_history({ action: "read_turn", scope: "current_session", turn: 17 })
 resource({ uri: "session://<current-session-id>/entry/<entry-id>" })
 ```
 
-如果事实来自旧 Session，应通过已持久化的 knowledge、Run artifact 或其他 durable URI 恢复；`compact_history` 不会扩大到 workspace 历史。
+如果事实来自旧 Session，应优先通过已持久化的 knowledge、Run artifact 或其他 durable URI 恢复；只有 Maestro 知识检索无相关命中时，才把 `workspace_sessions` 当作历史线索。
 
 ## 使用前检查表
 

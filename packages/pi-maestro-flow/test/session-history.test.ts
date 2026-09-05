@@ -3,16 +3,18 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import {
   createCompactHistoryInventoryProvider,
-  createCompactHistoryTool,
   createSessionHistoryInventoryProvider,
   createSessionHistoryTool,
 } from "../src/tools/session-history.ts";
 import { resolveResource } from "../src/tools/resource.ts";
-import { sessionEntryUri } from "pi-maestro-teammate/v1/session-history";
+import {
+  MAX_SESSION_HISTORY_FILES,
+  sessionEntryUri,
+} from "pi-maestro-teammate/v1/session-history";
 
 function header(id: string): unknown {
   return {
@@ -95,18 +97,27 @@ function resultText(result: { content: Array<{ type: string; text?: string }> })
   return result.content.find((item) => item.type === "text")?.text ?? "";
 }
 
-test("session_history finds similar workspace sessions after a knowledge-search miss", async () => {
+test("session_history prioritizes current and recent workspace sessions beyond the scan cap", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-flow-session-history-"));
   try {
     const sessions = join(root, "sessions");
-    const currentFile = join(sessions, "root-session.jsonl");
-    const olderFile = join(sessions, "older-session.jsonl");
+    const currentFile = join(sessions, "000-current-session.jsonl");
+    const recentFile = join(sessions, "2026-09-01T09-17-32-193Z_recent-session.jsonl");
+    const archivedFile = join(sessions, "2026-01-01T00-00-00-000Z_archived-session.jsonl");
     await mkdir(sessions, { recursive: true });
+    await Promise.all(Array.from({ length: MAX_SESSION_HISTORY_FILES }, (_, index) => writeTranscript(
+      join(sessions, `2026-08-31T00-00-00-000Z_archive-${String(index).padStart(3, "0")}.jsonl`),
+      [header(`archive-${index}`), user(`archive-user-${index}`, null, "unrelated history")],
+    )));
     await writeTranscript(currentFile, [header("current-session"), user("u1", null, "current task")]);
-    await writeTranscript(olderFile, [
-      header("older-session"),
-      user("old-u", null, "legacy fallback needle"),
-      assistant("old-a", "old-u", "prior approach"),
+    await writeTranscript(recentFile, [
+      header("recent-session"),
+      user("recent-u", null, "recent fallback needle"),
+      assistant("recent-a", "recent-u", "prior approach"),
+    ]);
+    await writeTranscript(archivedFile, [
+      header("archived-session"),
+      user("archived-u", null, "archived evidence"),
     ]);
 
     const ctx = context(root, currentFile);
@@ -119,6 +130,16 @@ test("session_history finds similar workspace sessions after a knowledge-search 
       ctx: ExtensionContext,
     ) => Promise<{ content: Array<{ type: string; text?: string }>; details?: unknown; isError?: boolean }>;
 
+    const listed = await call("list", {
+      action: "list_sessions",
+      scope: "workspace_sessions",
+      limit: 1,
+    }, new AbortController().signal, undefined, ctx);
+    assert.deepEqual(
+      (JSON.parse(resultText(listed)) as { sessions: Array<{ sessionId: string }> }).sessions.map((session) => session.sessionId),
+      ["current-session"],
+    );
+
     const search = await call("search", {
       action: "search",
       scope: "workspace_sessions",
@@ -127,17 +148,27 @@ test("session_history finds similar workspace sessions after a knowledge-search 
     const searchPayload = JSON.parse(resultText(search)) as {
       matches: Array<{ sessionId: string; entryId: string; resourceUri: string }>;
       filesRead: number;
+      truncated: boolean;
     };
-    assert.deepEqual(searchPayload.matches.map((match) => match.sessionId), ["older-session"]);
-    assert.equal(searchPayload.filesRead, 2);
+    assert.deepEqual(searchPayload.matches.map((match) => match.sessionId), ["recent-session"]);
+    assert.equal(searchPayload.filesRead, MAX_SESSION_HISTORY_FILES);
+    assert.equal(searchPayload.truncated, true);
 
     const readTurn = await call("read-turn", {
       action: "read_turn",
       scope: "workspace_sessions",
-      sessionId: "older-session",
+      sessionId: "recent-session",
       turn: 1,
     }, new AbortController().signal, undefined, ctx);
     assert.equal((JSON.parse(resultText(readTurn)) as { found: boolean }).found, true);
+
+    const archivedTurn = await call("read-archived-turn", {
+      action: "read_turn",
+      scope: "workspace_sessions",
+      sessionId: "archived-session",
+      turn: 1,
+    }, new AbortController().signal, undefined, ctx);
+    assert.equal((JSON.parse(resultText(archivedTurn)) as { found: boolean }).found, true);
 
     const resource = await resolveResource(
       searchPayload.matches[0]!.resourceUri,
@@ -145,15 +176,15 @@ test("session_history finds similar workspace sessions after a knowledge-search 
       undefined,
       { sessionHistory: createSessionHistoryInventoryProvider(ctx, "all") },
     );
-    assert.match(resource.content, /legacy fallback needle/);
-    assert.doesNotMatch(resource.content, /older-session\.jsonl/);
+    assert.match(resource.content, /recent fallback needle/);
+    assert.doesNotMatch(resource.content, /recent-session\.jsonl/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("compact_history reads only the active session and exposes checkpoint recovery", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pi-flow-compact-history-"));
+test("session_history current_session reads only the active session and exposes checkpoint recovery", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-flow-session-recovery-"));
   try {
     const sessions = join(root, "sessions");
     const currentFile = join(sessions, "root-session.jsonl");
@@ -181,7 +212,7 @@ test("compact_history reads only the active session and exposes checkpoint recov
     }
 
     const ctx = context(root, currentFile);
-    const tool = createCompactHistoryTool();
+    const tool = createSessionHistoryTool({ isCompactRecoveryEnabled: () => true });
     const call = tool.execute as unknown as (
       id: string,
       params: Record<string, unknown>,
@@ -208,7 +239,14 @@ test("compact_history reads only the active session and exposes checkpoint recov
       summary: "Checkpoint checkpoint-1",
     }]);
 
-    const search = await call("search", { action: "search", query: "NEEDLE" }, new AbortController().signal, undefined, ctx);
+    const invalidTimeline = await call("timeline-workspace", {
+      action: "timeline",
+      scope: "workspace_sessions",
+    }, new AbortController().signal, undefined, ctx);
+    assert.equal(invalidTimeline.isError, true);
+    assert.match(resultText(invalidTimeline), /only with scope=current_session/);
+
+    const search = await call("search", { action: "search", scope: "current_session", query: "NEEDLE" }, new AbortController().signal, undefined, ctx);
     const searchPayload = JSON.parse(resultText(search)) as {
       matches: Array<{ sessionId: string; entryId: string; resourceUri: string }>;
       filesRead: number;
@@ -293,14 +331,14 @@ test("session resources revalidate active-chain visibility and reject arbitrary 
   }
 });
 
-test("compact_history fails closed if a retained definition is called after disable", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pi-flow-compact-history-disabled-"));
+test("session_history checkpoint recovery fails closed when new context is disabled", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-flow-session-recovery-disabled-"));
   try {
     const currentFile = join(root, "session.jsonl");
     await writeTranscript(currentFile, [header("current-session"), user("u1", null, "visible")]);
     let inventoryRead = false;
-    const tool = createCompactHistoryTool({
-      isEnabled: () => false,
+    const tool = createSessionHistoryTool({
+      isCompactRecoveryEnabled: () => false,
       inventory: () => {
         inventoryRead = true;
         return [{ path: currentFile }];
@@ -322,39 +360,25 @@ test("compact_history fails closed if a retained definition is called after disa
   }
 });
 
-test("session history registration preserves the bounded knowledge-miss fallback contract", () => {
+test("session history registration exposes unified recovery and historical discovery", () => {
   const tool = createSessionHistoryTool();
   const schema = tool.parameters as {
     properties?: Record<string, { enum?: string[]; items?: { enum?: string[] } }>;
     additionalProperties?: boolean;
   };
   assert.equal(tool.name, "session_history");
-  assert.deepEqual(schema.properties?.action?.enum, ["list_sessions", "search", "read_turn"]);
+  assert.deepEqual(schema.properties?.action?.enum, ["list_sessions", "search", "read_turn", "timeline", "read_checkpoint"]);
   assert.deepEqual(schema.properties?.scope?.enum, ["current_session", "workspace_sessions", "teammates"]);
   assert.deepEqual(schema.properties?.include?.items?.enum, ["user", "assistant", "visible_custom", "compaction", "tool_result"]);
-  assert.deepEqual(Object.keys(schema.properties ?? {}), ["action", "scope", "query", "sessionId", "turn", "include", "limit"]);
+  assert.deepEqual(Object.keys(schema.properties ?? {}), ["action", "scope", "query", "sessionId", "turn", "checkpointId", "include", "limit"]);
   assert.equal(schema.additionalProperties, false);
   const guidance = tool.promptGuidelines?.join("\n") ?? "";
-  assert.match(guidance, /Maestro knowledge search first/);
+  assert.match(guidance, /capsule and live Todo\/Goal\/Plan\/Workflow state first/);
+  assert.match(guidance, /scope=current_session/);
+  assert.match(guidance, /mandatory Maestro knowledge search/);
   assert.match(guidance, /no relevant hits/);
   assert.match(guidance, /scope=workspace_sessions/);
   assert.match(guidance, /not authoritative knowledge/);
+  assert.doesNotMatch(`${tool.description}\n${guidance}`, /compact_history/);
   assert.doesNotMatch(JSON.stringify(schema), /delete|update|write|maxFiles|maxMatches|includeToolResults/i);
-});
-
-test("compact history registration has the exact current-session read-only contract", () => {
-  const tools: ToolDefinition[] = [];
-  const tool = createCompactHistoryTool();
-  tools.push(tool as ToolDefinition);
-  assert.equal(tools[0]?.name, "compact_history");
-  const schema = tool.parameters as {
-    properties?: Record<string, { enum?: string[]; items?: { enum?: string[] } }>;
-    additionalProperties?: boolean;
-  };
-  assert.deepEqual(schema.properties?.action?.enum, ["timeline", "search", "read_turn", "read_checkpoint"]);
-  assert.deepEqual(schema.properties?.include?.items?.enum, ["user", "assistant", "visible_custom", "compaction", "tool_result"]);
-  assert.deepEqual(Object.keys(schema.properties ?? {}), ["action", "query", "turn", "checkpointId", "include", "limit"]);
-  assert.equal(schema.additionalProperties, false);
-  assert.match(tool.description, /current Pi session only/);
-  assert.doesNotMatch(JSON.stringify(schema), /scope|sessionId|path|delete|update|write|maxFiles|maxMatches|includeToolResults/i);
 });

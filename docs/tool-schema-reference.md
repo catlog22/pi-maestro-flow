@@ -396,18 +396,20 @@ run-control({ argv: ["run", "done", "run-123", "--verdict", "done", "--summary",
 
 ## 19. `session_history` - 有界会话历史
 
-始终可用、宿主授权的只读工具，在 current / workspace / teammate 三种 scope 中有界列举会话、字面搜索、读取精确 turn。仅暴露 active-chain 可见消息（user/assistant/visible_custom/compaction），`tool_result` 须显式 opt-in；不接受 transcript 路径，不暴露隐藏行、thinking 与工具调用参数。
+始终可用、宿主授权的统一只读工具：`current_session` 用于压缩后恢复，`workspace_sessions` / `teammates` 用于知识检索无相关命中后的历史线索。仅暴露 active-chain 可见消息（user/assistant/visible_custom/compaction），`tool_result` 须显式 opt-in；不接受 transcript 路径，不暴露隐藏行、thinking 与工具调用参数。
 
 | 参数 | 类型 | 必需 | 说明 |
 |------|------|:---:|------|
-| `action` | enum | ✅ | `list_sessions`/`search`/`read_turn` |
+| `action` | enum | ✅ | `list_sessions`/`search`/`read_turn`/`timeline`/`read_checkpoint` |
 | `scope` | enum | | `current_session`/`workspace_sessions`/`teammates` |
 | `query` | string | search 时 ✅ | 字面大小写不敏感搜索文本 |
-| `sessionId` / `turn` | string/integer | read_turn 时 ✅ | 精确会话与 1-based turn（0 为 preamble） |
+| `sessionId` / `turn` | string/integer | read_turn 时 ✅ | `current_session` 可省略 sessionId；turn 为 1-based（0 为 preamble） |
+| `checkpointId` | string | read_checkpoint 时 ✅ | 仅限 `current_session` |
 | `include` | string[] | | 默认不含 `tool_result` |
 | `limit` | integer | | 单结果上限 |
 
 ```js
+session_history({ action: "timeline", scope: "current_session", limit: 5 })
 session_history({ action: "search", scope: "workspace_sessions", query: "migration", limit: 5 })
 ```
 
@@ -427,7 +429,7 @@ todo({ action: "advance", id: "abc123", summary: "阶段完成", transition: "ne
 
 ## 21. `resource` - 精确协议资源读取
 
-按 URI 读取协议资源（与本地文件读取互补）：`pr://`/`issue://`（GitHub）、`skill://`、`rule://`、`agent://<id>`（teammate 产出，支持子路径取嵌套字段）、`session://<sessionId>/entry/<entryId>`（经 `compact_history` 或 `session_history` 发现的授权条目，每次读取重校验 active chain）。
+按 URI 读取协议资源（与本地文件读取互补）：`pr://`/`issue://`（GitHub）、`skill://`、`rule://`、`agent://<id>`（teammate 产出，支持子路径取嵌套字段）、`session://<sessionId>/entry/<entryId>`（经 `session_history` 发现的授权条目，每次读取重校验 active chain）。
 
 ```js
 resource({ uri: "agent://reviewer-1/findings/0/path" })

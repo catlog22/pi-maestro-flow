@@ -8,7 +8,7 @@
  */
 export declare const SESSION_HISTORY_VERSION: 1;
 export declare const SESSION_HISTORY_URI_SCHEME: "session://";
-export declare const MAX_SESSION_HISTORY_FILES = 20;
+export declare const MAX_SESSION_HISTORY_FILES = 100;
 export declare const MAX_SESSION_HISTORY_BYTES: number;
 export declare const MAX_SESSION_HISTORY_MATCHES = 20;
 export declare const MAX_SESSION_HISTORY_SNIPPET_CHARS = 1000;

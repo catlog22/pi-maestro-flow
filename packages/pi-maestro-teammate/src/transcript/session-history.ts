@@ -13,7 +13,7 @@ import { parseSessionEntries } from "@earendil-works/pi-coding-agent";
 
 export const SESSION_HISTORY_VERSION = 1 as const;
 export const SESSION_HISTORY_URI_SCHEME = "session://" as const;
-export const MAX_SESSION_HISTORY_FILES = 20;
+export const MAX_SESSION_HISTORY_FILES = 100;
 export const MAX_SESSION_HISTORY_BYTES = 32 * 1024 * 1024;
 export const MAX_SESSION_HISTORY_MATCHES = 20;
 export const MAX_SESSION_HISTORY_SNIPPET_CHARS = 1_000;
