@@ -1,7 +1,9 @@
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { NewContextController } from "../compaction/new-context.ts";
 import { NEW_CONTEXT_MAX_CARRY_FORWARD_BYTES } from "../compaction/new-context.ts";
+import { toolCallLine, toolResultCard, type QuietTheme } from "../quiet-render.ts";
 import { TODO_MAX_RESOURCE_URIS, TODO_MAX_RESOURCE_URI_BYTES } from "./todo-contract.ts";
 import type { FlowToolResult } from "./tool-result.ts";
 
@@ -32,6 +34,82 @@ function result(text: string, details: NewContextToolDetails, isError = false): 
     details,
     ...(isError ? { isError: true } : {}),
   };
+}
+
+function inputSummary(params: { carryForward?: string; resourceUris?: string[] }): string {
+  const parts = ["schedule"];
+  if (params.carryForward?.trim()) parts.push(`${Buffer.byteLength(params.carryForward, "utf8")}B carry-forward`);
+  if (params.resourceUris?.length) {
+    parts.push(`${params.resourceUris.length} resource${params.resourceUris.length === 1 ? "" : "s"}`);
+  }
+  return parts.join(" · ");
+}
+
+function sanitizeNewContextRenderText(value: string, maximum = 240): string {
+  const cleaned = value
+    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, "")
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/[\r\n\t]/g, " ")
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .trim();
+  return cleaned.length > maximum ? `${cleaned.slice(0, maximum - 1)}…` : cleaned;
+}
+
+function resultText(result: FlowToolResult): string {
+  const block = result.content.find((item) => item.type === "text" && "text" in item);
+  return block && "text" in block ? sanitizeNewContextRenderText(block.text) : "";
+}
+
+function renderNewContextResult(
+  toolResult: FlowToolResult,
+  expanded: boolean,
+  theme: QuietTheme,
+  params: { carryForward?: string; resourceUris?: string[] },
+) {
+  const details = toolResult.details as NewContextToolDetails | undefined;
+  const isError = toolResult.isError === true || details?.scheduled === false;
+  const requestLabel = details?.requestId === undefined ? "" : `#${details.requestId}`;
+  const state = details?.coalesced ? "updated" : "scheduled";
+  const capsuleParts = ["recovery capsule"];
+  if (params.carryForward?.trim()) {
+    capsuleParts.push(`${Buffer.byteLength(params.carryForward, "utf8")}B carry-forward`);
+  }
+  if (params.resourceUris?.length) {
+    capsuleParts.push(`${params.resourceUris.length} resource${params.resourceUris.length === 1 ? "" : "s"}`);
+  }
+
+  if (isError) {
+    const message = sanitizeNewContextRenderText(
+      resultText(toolResult) || details?.error || "Context reset could not be scheduled.",
+    );
+    return toolResultCard(theme, {
+      name: "new context",
+      ok: false,
+      arg: "schedule",
+      summary: "failed",
+      groups: [[
+        `${theme.fg("error", "! blocked")}      context reset`,
+        theme.fg("dim", message),
+      ]],
+      maxBodyRows: expanded ? undefined : 3,
+    });
+  }
+
+  const status = details?.coalesced ? "request updated" : "pending";
+  const taskRow = `${theme.fg("warning", `○ ${status}`)}${requestLabel ? `      ${theme.fg("accent", requestLabel)}` : ""}  context reset`;
+  const timingRow = theme.fg("dim", `  after current turn settles · ${capsuleParts.join(" · ")}`);
+  const groups = [[taskRow, timingRow]];
+  if (expanded) {
+    const message = resultText(toolResult);
+    if (message) groups.push([theme.fg("dim", message)]);
+  }
+  return toolResultCard(theme, {
+    name: "new context",
+    ok: true,
+    arg: "schedule",
+    summary: requestLabel ? `${requestLabel} ${state}` : state,
+    groups,
+  });
 }
 
 export function createNewContextTool(
@@ -71,6 +149,15 @@ This makes no model summarization call. The next context contains a bounded reco
         const message = error instanceof Error ? error.message : String(error);
         return result(message, { scheduled: false, error: message }, true);
       }
+    },
+    renderShell: "self",
+    renderCall(params, theme, ctx) {
+      if (ctx?.isPartial === false) return new Text("", 0, 0);
+      return toolCallLine(theme, "new context", inputSummary(params));
+    },
+    renderResult(toolResult, options, theme, ctx) {
+      if (options.isPartial) return new Text("", 0, 0);
+      return renderNewContextResult(toolResult, options.expanded, theme, ctx.args);
     },
   };
 }

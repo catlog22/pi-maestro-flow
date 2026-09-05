@@ -5,7 +5,7 @@ import * as fs from "node:fs/promises";
 import * as http from "node:http";
 import * as path from "node:path";
 import { BrowserParams, createBrowserTool } from "../src/tools/browser-tool.ts";
-import { BrowserManager, browserRunErrorHint, canonicalizeBrowserOpenOptions, compileRunCode, type BrowserManagerLike, type BrowserManagerStatus, type BrowserOpenOptions, type BrowserRunOutput, type BrowserTabInfo } from "../src/tools/browser/manager.ts";
+import { BrowserManager, browserRunErrorHint, canonicalizeBrowserOpenOptions, compileRunCode, observeBrowserRunApis, type BrowserManagerLike, type BrowserManagerStatus, type BrowserOpenOptions, type BrowserRunOutput, type BrowserTabInfo } from "../src/tools/browser/manager.ts";
 import { STEALTH_INIT_JS, STEALTH_LAUNCH_ARGS } from "../src/tools/browser/stealth.ts";
 
 class FakeBrowserManager implements BrowserManagerLike {
@@ -361,6 +361,37 @@ test("browser run error hints explain evaluate callback scoping", () => {
 test("compileRunCode surfaces ReferenceError with the undefined name", async () => {
   const execute = compileRunCode("return missingClicked;");
   await assert.rejects(() => execute(undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined), /missingClicked is not defined/);
+});
+
+test("browser run API contains floating method rejections without swallowing awaited failures", async () => {
+  const reports: Array<{ operation: string; message: string }> = [];
+  const page = {
+    value: "ok",
+    read() { return Promise.resolve(this.value); },
+    fail(message: string) { return Promise.reject(new Error(message)); },
+  };
+  const browser = { pages() { return Promise.resolve([]); } };
+  const tab = {
+    page,
+    cookies: { fail(message: string) { return Promise.reject(new Error(message)); } },
+  };
+  const observed = observeBrowserRunApis("test", page, browser, tab, (operation, error) => {
+    reports.push({ operation, message: error instanceof Error ? error.message : String(error) });
+  });
+
+  assert.equal(observed.tab.page, observed.page);
+  assert.equal(await observed.page.read(), "ok", "method this binding and awaited resolution must stay intact");
+  void observed.page.fail("floating-page");
+  void observed.tab.cookies.fail("floating-cookie");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(reports, [
+    { operation: "page.fail", message: "floating-page" },
+    { operation: "tab.cookies.fail", message: "floating-cookie" },
+  ]);
+
+  await assert.rejects(observed.page.fail("awaited"), /awaited/, "awaited failures must still reject normally");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(reports.length, 2, "an awaited rejection must not be reported as floating");
 });
 
 test("browser temporary screenshots use exclusive owner-only creation", async () => {

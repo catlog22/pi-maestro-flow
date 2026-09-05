@@ -22,6 +22,16 @@ import {
 import type { TodoTask } from "../src/tools/todo.ts";
 import { createNewContextTool } from "../src/tools/new-context.ts";
 
+const renderTheme = {
+  fg: (_role: string, text: string) => text,
+  bold: (text: string) => text,
+};
+
+function render(component: { render(width: number): string[] } | undefined): string {
+  assert.ok(component);
+  return component.render(120).join("\n");
+}
+
 async function enabledProject(): Promise<{ cwd: string; dispose(): Promise<void> }> {
   const cwd = await mkdtemp(join(tmpdir(), "maestro-new-context-"));
   await mkdir(join(cwd, ".pi"), { recursive: true });
@@ -494,6 +504,45 @@ test("new_context guidance uses Todo checkpoints and pressure only for urgency",
   assert.match(guidance, /critical prioritizes it before the next Todo/);
   assert.match(guidance, /do not interrupt the task merely because pressure rises/);
   assert.match(guidance, /Do not emit or infer pressure-driven reminders without a Todo completion checkpoint/);
+});
+
+test("new_context renders a Todo-style card with compact recovery inputs", () => {
+  const tool = createNewContextTool(createNewContextController(new CompactionArbiter()), "root");
+  const args = {
+    carryForward: "继续验证",
+    resourceUris: ["agent://publication-1", "session://session-1/entry/e1"],
+  };
+  const call = render(tool.renderCall?.(args, renderTheme as never, { isPartial: true } as never));
+  assert.match(call, /… new context schedule · 12B carry-forward · 2 resources/);
+
+  const compact = render(tool.renderResult?.({
+    content: [{ type: "text", text: "New-context request 7 scheduled for the end of the current turn." }],
+    details: { requestId: 7, scheduled: true },
+  }, { expanded: false, isPartial: false } as never, renderTheme as never, { args } as never));
+  assert.match(compact, /✓ new context schedule · #7 scheduled/);
+  assert.match(compact, /○ pending\s+#7\s+context reset/);
+  assert.match(compact, /after current turn settles · recovery capsule · 12B carry-forward · 2 resources/);
+  assert.doesNotMatch(compact, /New-context request 7 scheduled/);
+
+  const expanded = render(tool.renderResult?.({
+    content: [{ type: "text", text: "New-context request 7 scheduled for the end of the current turn." }],
+    details: { requestId: 7, scheduled: true },
+  }, { expanded: true, isPartial: false } as never, renderTheme as never, { args } as never));
+  assert.match(expanded, /New-context request 7 scheduled/);
+});
+
+test("new_context render uses the blocked Todo state for scheduling failures", () => {
+  const tool = createNewContextTool(createNewContextController(new CompactionArbiter()), "root");
+  const card = render(tool.renderResult?.({
+    content: [{ type: "text", text: "\u001b]52;c;payload\u0007New Context is disabled.\u001b[31m\n" + "x".repeat(500) }],
+    details: { scheduled: false, error: "New Context is disabled." },
+    isError: true,
+  } as never, { expanded: false, isPartial: false } as never, renderTheme as never, { args: {} } as never));
+  assert.match(card, /✕ new context schedule · failed/);
+  assert.match(card, /! blocked\s+context reset/);
+  assert.match(card, /New Context is disabled/);
+  assert.doesNotMatch(card, /[\u001b\u0007]|payload|\[31m/);
+  assert.ok(card.split("\n").length <= 6, "compact error cards stay bounded");
 });
 
 test("standalone new_context fails closed while the config gate is disabled", async () => {

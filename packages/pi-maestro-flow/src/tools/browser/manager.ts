@@ -480,13 +480,14 @@ export class BrowserManager implements BrowserManagerLike {
       requestScope = installRequestListenerScope(entry.page);
       entry.requestScope = requestScope;
       const tab = createTabApi(entry, cwd, displays, screenshots, signal, timeoutMs);
+      const runApis = observeBrowserRunApis(name, entry.page, entry.browser, tab);
       const assert = (condition: unknown, message = "Browser assertion failed") => { if (!condition) throw new Error(message); };
       const wait = (ms: number) => abortableDelay(ms, signal);
       const display = (value: unknown) => displays.push({ type: "text", text: formatDisplay(value) });
       const print = (...values: unknown[]) => displays.push({ type: "text", text: values.map(formatDisplay).join(" ") });
       const capturedConsole = { log: print, info: print, warn: print, error: print, debug: print };
       const execute = compileRunCode(code);
-      const returnValue = await raceAbort(execute(entry.page, entry.browser, tab, assert, wait, display, print, signal, capturedConsole), signal, timeoutMs);
+      const returnValue = await raceAbort(execute(runApis.page, runApis.browser, runApis.tab, assert, wait, display, print, signal, capturedConsole), signal, timeoutMs);
       const afterUrl = entry.page.isClosed() ? "" : entry.page.url();
       const navigated = Boolean(beforeUrl && afterUrl && beforeUrl !== afterUrl);
       let newTabs: Array<{ url: string }> | undefined;
@@ -533,14 +534,15 @@ export class BrowserManager implements BrowserManagerLike {
     const createdTabs: Array<{ id?: number; url: string }> = [];
     const beforeUrl = entry.url;
     try {
-      const { page, browser, tab } = createExtensionAdapters(entry, cwd, displays, screenshots, createdTabs, signal, timeoutMs);
+      const adapters = createExtensionAdapters(entry, cwd, displays, screenshots, createdTabs, signal, timeoutMs);
+      const runApis = observeBrowserRunApis(entry.name, adapters.page, adapters.browser, adapters.tab);
       const assert = (condition: unknown, message = "Browser assertion failed") => { if (!condition) throw new Error(message); };
       const wait = (ms: number) => abortableDelay(ms, signal);
       const display = (value: unknown) => displays.push({ type: "text", text: formatDisplay(value) });
       const print = (...values: unknown[]) => displays.push({ type: "text", text: values.map(formatDisplay).join(" ") });
       const capturedConsole = { log: print, info: print, warn: print, error: print, debug: print };
       const execute = compileRunCode(code);
-      const returnValue = await raceAbort(execute(page, browser, tab, assert, wait, display, print, signal, capturedConsole), signal, timeoutMs);
+      const returnValue = await raceAbort(execute(runApis.page, runApis.browser, runApis.tab, assert, wait, display, print, signal, capturedConsole), signal, timeoutMs);
       assertExtensionEntryActive(entry, signal);
       const current = await getExtensionTab(entry.tabId, entry.bridgeIdentity, signal, timeoutMs, entry);
       assertExtensionEntryActive(entry, signal);
@@ -2064,6 +2066,95 @@ function formatDisplay(value: unknown): string {
 
 function isInterruptError(error: unknown): boolean {
   return error instanceof Error && (error.name === "AbortError" || /timed out/i.test(error.message));
+}
+
+export type BrowserRunPromiseReporter = (operation: string, error: unknown) => void;
+
+function observeBrowserRunPromise(
+  value: unknown,
+  operation: string,
+  report: BrowserRunPromiseReporter,
+): unknown {
+  if (!(value instanceof Promise)) return value;
+  let consumed = false;
+  void value.then(
+    () => undefined,
+    (error) => {
+      queueMicrotask(() => {
+        if (consumed) return;
+        try {
+          report(operation, error);
+        } catch (reportError) {
+          console.warn(`[pi-maestro-flow] failed to report an unobserved browser promise: ${reportError instanceof Error ? reportError.message : String(reportError)}`);
+        }
+      });
+    },
+  );
+  return new Proxy(value, {
+    get(promise, property) {
+      if (property === "then" || property === "catch" || property === "finally") {
+        return (...args: unknown[]) => {
+          consumed = true;
+          const method = Reflect.get(promise, property, promise) as (...values: unknown[]) => unknown;
+          return observeBrowserRunPromise(Reflect.apply(method, promise, args), operation, report);
+        };
+      }
+      const member = Reflect.get(promise, property, promise);
+      return typeof member === "function" ? member.bind(promise) : member;
+    },
+  });
+}
+
+function observeBrowserRunAsyncMethods<T extends object>(
+  target: T,
+  scope: string,
+  report: BrowserRunPromiseReporter,
+): T {
+  const methods = new Map<PropertyKey, (...args: unknown[]) => unknown>();
+  let proxy: T;
+  proxy = new Proxy(target, {
+    get(inner, property) {
+      const value = Reflect.get(inner, property, inner);
+      if (typeof value !== "function") return value;
+      const cached = methods.get(property);
+      if (cached) return cached;
+      const wrapped = (...args: unknown[]): unknown => {
+        const result = Reflect.apply(value, inner, args);
+        if (result === inner) return proxy;
+        return observeBrowserRunPromise(result, `${scope}.${String(property)}`, report);
+      };
+      methods.set(property, wrapped);
+      return wrapped;
+    },
+  });
+  return proxy;
+}
+
+export function observeBrowserRunApis<
+  TPage extends object,
+  TBrowser extends object,
+  TTab extends object,
+>(
+  name: string,
+  page: TPage,
+  browser: TBrowser,
+  tab: TTab,
+  report?: BrowserRunPromiseReporter,
+): { page: TPage; browser: TBrowser; tab: TTab } {
+  const notify = report ?? ((operation: string, error: unknown) => {
+    const reason = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    console.warn(`[pi-maestro-flow] browser run ${JSON.stringify(name)} left ${operation} promise unobserved: ${reason}`);
+  });
+  const observedPage = observeBrowserRunAsyncMethods(page, "page", notify);
+  const observedBrowser = observeBrowserRunAsyncMethods(browser, "browser", notify);
+  const nested = tab as TTab & { page?: TPage; cookies?: object };
+  if (nested.page) nested.page = observedPage;
+  if (nested.cookies) nested.cookies = observeBrowserRunAsyncMethods(nested.cookies, "tab.cookies", notify);
+  return {
+    page: observedPage,
+    browser: observedBrowser,
+    tab: observeBrowserRunAsyncMethods(tab, "tab", notify),
+  };
 }
 
 const RUN_HELPER_NAMES = ["page", "browser", "tab", "assert", "wait", "display", "print", "signal", "console"] as const;
