@@ -33,7 +33,7 @@ function workflowResult(exitCode = 0): SingleResult {
 test("expert call renders a dedicated width-safe Component with a sanitized objective", () => {
   const args = {
     mode: "expert",
-    tasks: [{ prompt: "Audit\nauth\u001b[2J\tboundary", todo: "SECRET_TODO" }],
+    tasks: [{ prompt: `Audit\nauth\u001b[2J\tboundary ${"changing objective ".repeat(20)}`, todo: "SECRET_TODO" }],
   };
   const component = renderTeammateCall(args, theme as never, { isPartial: true });
   assert.equal(typeof component.render, "function");
@@ -43,12 +43,12 @@ test("expert call renders a dedicated width-safe Component with a sanitized obje
   assert.match(lines[0] ?? "", /◆ EXPERT/);
   assert.doesNotMatch(lines[0] ?? "", /workflow Leader/);
   assert.match(lines[1] ?? "", /objective Audit auth \[2J boundary/);
-  assert.doesNotMatch(lines.join(""), /[\n\r\u001b]/);
+  assert.doesNotMatch(lines.join("").replace(/\x1b\[[0-9;]*m/g, ""), /[\n\r\u001b]/);
   assert.doesNotMatch(lines.join(" "), /SECRET_TODO/);
 
   for (const width of [1, 8, 20, 40, 80]) {
     for (const line of component.render(width)) {
-      assert.ok(visibleWidth(line) <= width, `line must fit width ${width}: ${JSON.stringify(line)}`);
+      assert.ok(visibleWidth(line) <= Math.max(1, width - 1), `line must reserve the final column at width ${width}: ${JSON.stringify(line)}`);
     }
   }
 });
@@ -96,6 +96,11 @@ test("expert streaming result frames the existing Leader and delegated-agent tre
   assert.match(lines.join("\n"), /@expert-leader/);
   assert.match(lines.join("\n"), /@review/);
   assert.doesNotMatch(lines.join("\n"), /#42/);
+  for (const width of [12, 20, 40, 80, 120]) {
+    for (const line of component.render(width)) {
+      assert.ok(visibleWidth(line) <= Math.max(1, width - 1), `expert result used the final column at width ${width}`);
+    }
+  }
 });
 
 test("expert in-flight rows stay stable while live telemetry changes", () => {
@@ -172,6 +177,23 @@ test("expert completed and failed results expose accurate terminal headers", () 
   }, { expanded: false }, theme as never, expertArgs).render(100);
   assert.match(completed[0] ?? "", /✓ Leader synthesized/);
   assert.match(completed.join("\n"), /workflow/);
+
+  for (const results of [[workflowResult()], [workflowResult(), { ...workflowResult(), correlationId: "second" }]]) {
+    const component = renderTeammateResult({
+      content: [{ type: "text", text: "done" }],
+      details: { mode: results.length === 1 ? "single" : "graph", results },
+    }, { expanded: true }, theme as never, expertArgs);
+    for (const width of [32, 80]) {
+      const lines = component.render(width);
+      const box = lines.slice(1);
+      assert.ok(box.length > 0);
+      for (const line of box) {
+        assert.equal(visibleWidth(line), width - 1);
+        assert.match(line, / $/, `expert Box must keep its right padding at width ${width}`);
+      }
+      assert.ok(lines.every((line) => visibleWidth(line) <= width - 1));
+    }
+  }
 
   const failed = renderTeammateResult({
     content: [{ type: "text", text: "failed" }],

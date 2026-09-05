@@ -12,6 +12,16 @@ function stripAnsi(value: string): string {
   return value.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
+function assertLiveRows(lines: string[], width: number): void {
+  if (width <= 1) {
+    assert.deepEqual(lines, [], `width ${width} cannot reserve a terminal column`);
+    return;
+  }
+  for (const line of lines) {
+    assert.ok(visibleWidth(line) <= width - 1, `width ${width}: ${visibleWidth(line)} ${line}`);
+  }
+}
+
 async function settleAsyncWork(): Promise<void> {
   await new Promise<void>((resolve) => setImmediate(resolve));
 }
@@ -179,6 +189,17 @@ test("Cockpit ownership isolates the Flow footer from lifecycle reinstalls", () 
   }
 });
 
+test("statusline emits no rows when the terminal cannot reserve its final column", () => {
+  const harness = createHarness();
+  try {
+    assertLiveRows(harness.render(0), 0);
+    assertLiveRows(harness.render(1), 1);
+    assertLiveRows(harness.render(2), 2);
+  } finally {
+    harness.dispose();
+  }
+});
+
 test("statusline reflows on stable silent terminal width changes using the same footer instance", (t) => {
   t.mock.timers.enable({ apis: ["setInterval"] });
   const harness = createHarness({ terminalWidth: 120 });
@@ -186,7 +207,9 @@ test("statusline reflows on stable silent terminal width changes using the same 
     harness.statuses.set("mode", "ACT");
     harness.statuses.set("approval-mode", "APPROVAL default");
     harness.statuses.set("maestro-auto-compact-mode", "AUTO ON");
-    assert.match(stripAnsi(harness.render(120)[0]), /AUTO-COMPACT ON/);
+    const initial = harness.render(120)[0];
+    assert.match(stripAnsi(initial), /AUTO-COMPACT ON/);
+    assert.ok(visibleWidth(initial) <= 119, "live footer must reserve the final column");
 
     harness.setTerminalWidth(42);
     t.mock.timers.tick(500);
@@ -201,7 +224,7 @@ test("statusline reflows on stable silent terminal width changes using the same 
     assert.ok(state.lastRequestedRender);
     assert.match(stripAnsi(state.lastRequestedRender[0]), /AUTO/);
     assert.doesNotMatch(stripAnsi(state.lastRequestedRender[0]), /AUTO-COMPACT ON/);
-    assert.ok(visibleWidth(state.lastRequestedRender[0]) <= 42);
+    assert.ok(visibleWidth(state.lastRequestedRender[0]) <= 41);
 
     t.mock.timers.tick(1_000);
     assert.equal(harness.resizeState().forcedRenderRequests, 1, "unchanged width must not redraw");
@@ -214,7 +237,7 @@ test("statusline reflows on stable silent terminal width changes using the same 
     assert.equal(state.forcedRenderRequests, 2);
     assert.ok(state.lastRequestedRender);
     assert.match(stripAnsi(state.lastRequestedRender[0]), /AUTO-COMPACT ON/);
-    assert.ok(visibleWidth(state.lastRequestedRender[0]) <= 120);
+    assert.ok(visibleWidth(state.lastRequestedRender[0]) <= 119);
 
     const renderRequestsBeforeSameBandResize = state.renderRequests;
     harness.setTerminalWidth(100);
@@ -223,7 +246,7 @@ test("statusline reflows on stable silent terminal width changes using the same 
     assert.equal(state.renderRequests, renderRequestsBeforeSameBandResize + 1);
     assert.equal(state.forcedRenderRequests, 2, "same-layout-band changes use incremental rendering");
     assert.ok(state.lastRequestedRender);
-    assert.ok(visibleWidth(state.lastRequestedRender[0]) <= 100);
+    assert.ok(visibleWidth(state.lastRequestedRender[0]) <= 99);
 
     harness.setTerminalWidth(70);
     harness.render(70);
@@ -502,14 +525,16 @@ test("statusline links approval mode with ACT, PLAN and READY using width-aware 
     }
 
     harness.statuses.set("mode", "ACT");
+    harness.statuses.set("approval-mode", "APPROVAL default");
+    assert.ok(stripAnsi(harness.render(48)[0]).startsWith("ACT/default"));
+    assert.ok(stripAnsi(harness.render(80)[0]).startsWith("[A] ACT · APPROVAL default"));
+
     harness.statuses.set("approval-mode", "APPROVAL YOLO");
     const yolo = harness.render(100)[0];
     assert.ok(yolo.includes(`${ansiFg(COLORS.danger)}${ANSI_BOLD}YOLO`));
 
     for (let width = 1; width <= 120; width++) {
-      for (const line of harness.render(width)) {
-        assert.ok(visibleWidth(line) <= width, `width ${width}: ${visibleWidth(line)} ${line}`);
-      }
+      assertLiveRows(harness.render(width), width);
     }
   } finally {
     harness.dispose();
@@ -563,9 +588,7 @@ test("statusline renders the linked effort name after the model", () => {
     assert.doesNotMatch(stripAnsi(harness.render(120)[0]), /high\s+\[/);
 
     for (let width = 1; width <= 120; width++) {
-      for (const line of harness.render(width)) {
-        assert.ok(visibleWidth(line) <= width, `width ${width}: ${visibleWidth(line)} ${line}`);
-      }
+      assertLiveRows(harness.render(width), width);
     }
   } finally {
     harness.dispose();
@@ -602,10 +625,11 @@ test("statusline renders Swarm iteration and convergence on one optional compact
     assert.equal(wide.length, 2);
     assert.equal(stripAnsi(wide[1]!), "SWARM 2/4 · CONV 65%");
 
-    for (let width = 1; width <= 80; width++) {
+    assertLiveRows(harness.render(1), 1);
+    for (let width = 2; width <= 80; width++) {
       const lines = harness.render(width);
       assert.equal(lines.length, 2);
-      assert.ok(visibleWidth(lines[1]!) <= width, `width ${width}: ${lines[1]}`);
+      assertLiveRows(lines, width);
     }
 
     harness.statuses.delete("maestro-swarm");
@@ -643,9 +667,7 @@ test("statusline renders context pressure across full compact and narrow widths"
     assert.match(stripAnsi(harness.render(120)[1]), /CTX COMPACT 91000\/90000/);
     assert.match(stripAnsi(harness.render(36)[1]), /CTX COMPACT/);
     for (let width = 1; width <= 120; width++) {
-      for (const line of harness.render(width)) {
-        assert.ok(visibleWidth(line) <= width, `width ${width}: ${visibleWidth(line)} ${line}`);
-      }
+      assertLiveRows(harness.render(width), width);
     }
 
     harness.statuses.delete("maestro-auto-compact");
@@ -656,9 +678,7 @@ test("statusline renders context pressure across full compact and narrow widths"
     assert.doesNotMatch(stripAnsi(harness.render(120)[0]), /AUTO-PRUNE|CRITICAL|P!|C!/);
 
     for (let width = 1; width <= 120; width++) {
-      for (const line of harness.render(width)) {
-        assert.ok(visibleWidth(line) <= width, `width ${width}: ${visibleWidth(line)} ${line}`);
-      }
+      assertLiveRows(harness.render(width), width);
     }
 
     harness.statuses.delete("maestro-auto-compact-mode");
@@ -708,9 +728,7 @@ test("statusline renders reason-bearing context pressure without dropping the li
 
     // Every reason-bearing tier must respect its width budget.
     for (let width = 1; width <= 120; width++) {
-      for (const line of harness.render(width)) {
-        assert.ok(visibleWidth(line) <= width, `width ${width}: ${visibleWidth(line)} ${line}`);
-      }
+      assertLiveRows(harness.render(width), width);
     }
   } finally {
     harness.dispose();
@@ -748,9 +766,7 @@ test("statusline keeps hard-compaction statuses owner-distinguishing across widt
     assert.equal(stripAnsi(harness.render(120)[1]), "CTX AUTO-PRUNE 82000/90000 -3");
 
     for (let width = 1; width <= 120; width++) {
-      for (const line of harness.render(width)) {
-        assert.ok(visibleWidth(line) <= width, `width ${width}: ${visibleWidth(line)} ${line}`);
-      }
+      assertLiveRows(harness.render(width), width);
     }
   } finally {
     harness.dispose();
@@ -818,9 +834,7 @@ test("statusline renders canonical Session/Run separately from active tool calls
     assert.match(narrow, /» Resume from gate/, "recovery action stays visible after the label");
 
     for (let width = 1; width <= 120; width++) {
-      for (const line of harness.render(width)) {
-        assert.ok(visibleWidth(line) <= width, `width ${width}: ${visibleWidth(line)} ${line}`);
-      }
+      assertLiveRows(harness.render(width), width);
     }
   } finally {
     harness.dispose();

@@ -21,7 +21,9 @@ function lineComponent(text: string): Component {
 	return {
 		render(width: number): string[] {
 			const safeWidth = Math.max(1, width);
-			return text.split("\n").map((line) => truncateToWidth(line, safeWidth, "…"));
+			if (safeWidth <= 1) return [];
+			const liveWidth = safeWidth - 1;
+			return text.split("\n").map((line) => truncateToWidth(line, liveWidth, "…"));
 		},
 		invalidate(): void {},
 	};

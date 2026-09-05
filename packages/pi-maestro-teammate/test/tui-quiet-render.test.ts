@@ -79,6 +79,12 @@ test("quiet auxiliary teammate surfaces use lifecycle rows without message bodie
     assert.ok((rendered?.[0] ?? "").includes(rest));
   }
 
+  for (const width of [20, 40, 80, 120]) {
+    const rendered = renderQuietTeammateAux("teammate-send", "@" + "child".repeat(50), "running", theme as never)?.render(width) ?? [];
+    assert.equal(rendered.length, 1);
+    assert.ok(visibleWidth(rendered[0]) <= width - 1, `width ${width}: ${visibleWidth(rendered[0])}`);
+  }
+
   setQuietMode(false);
   assert.equal(renderQuietTeammateAux("teammate-send", "SECRET_MESSAGE", "running", theme as never), undefined);
 });

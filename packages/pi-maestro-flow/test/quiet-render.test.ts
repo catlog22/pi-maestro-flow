@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { setQuietMode } from "../src/quiet-state.ts";
 import { createLspTool } from "../src/tools/lsp-tool.ts";
 import { toolCallLine, toolResultLine } from "../src/quiet-render.ts";
@@ -19,6 +20,15 @@ test("toolCallLine renders one running row with the tool name and arguments", ()
 	assert.deepEqual(lines(toolCallLine(theme, "lsp", "diagnostics sample.ts:1")), [
 		"  … lsp diagnostics sample.ts:1",
 	]);
+});
+
+test("running quiet tool rows reserve the terminal's final column", () => {
+	for (const width of [20, 40, 80, 120]) {
+		const rendered = toolCallLine(theme, "resource", "agent://" + "x".repeat(200)).render(width);
+		assert.equal(rendered.length, 1);
+		assert.ok(visibleWidth(rendered[0]) <= width - 1, `width ${width}: ${visibleWidth(rendered[0])}`);
+	}
+	assert.deepEqual(toolCallLine(theme, "resource", "agent://x").render(1), []);
 });
 
 test("toolResultLine renders one completed row with arguments and summary", () => {

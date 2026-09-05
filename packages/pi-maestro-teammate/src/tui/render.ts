@@ -241,7 +241,7 @@ function frameExpertResult(
       ], theme);
       const header = `${theme.fg(state.tone, state.glyph)} ${theme.bold("Leader")} ${theme.fg("accent", state.label)}${meta ? `  ${meta}` : ""}`;
       return [header, ...body.render(width)].map((line) =>
-        truncateToWidth(line, Math.max(1, width), "…")
+        truncateToWidth(line, liveRenderWidth(width), "…")
       );
     },
     invalidate(): void {
@@ -263,11 +263,11 @@ export function renderTeammateCall(
   return dynamicComponent((width) => {
     const header = `${theme.fg("accent", "◆")} ${theme.bold("EXPERT")}`;
     if (isQuietMode() || !objective || width < 28) {
-      return [truncateToWidth(header, Math.max(1, width), "…")];
+      return [truncateToWidth(header, liveRenderWidth(width), "…")];
     }
     const objectiveLine = `${theme.fg("dim", "└ objective")} ${objective}`;
     return [header, objectiveLine].map((line) =>
-      truncateToWidth(line, Math.max(1, width), "…")
+      truncateToWidth(line, liveRenderWidth(width), "…")
     );
   });
 }
@@ -660,9 +660,9 @@ export function renderTeammateResult(
     // nested child rows stable; ordinary mode preserves child stall telemetry.
     body = renderProgress(result, details, options, theme, true, expert);
   } else if (details.results.length === 1) {
-    body = renderSingleResult(details.results[0], options, theme);
+    body = renderSingleResult(details.results[0], options, theme, expert);
   } else {
-    body = renderMultiResult(details, options, theme);
+    body = renderMultiResult(details, options, theme, expert);
   }
   return expert
     ? frameExpertResult(body, result, details, theme)
@@ -942,6 +942,7 @@ function renderSingleResult(
   r: SingleResult,
   options: { expanded: boolean },
   theme: Theme,
+  reserveFinalColumn = false,
 ): Component {
   const icon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
   const header = (): string => {
@@ -964,7 +965,8 @@ function renderSingleResult(
 
   // Completed results never change; memoize so unrelated redraws cost nothing.
   return memoizedComponent((w) => {
-    const contentWidth = Math.max(1, w - 2);
+    const boxWidth = reserveFinalColumn ? liveRenderWidth(w) : Math.max(1, w);
+    const contentWidth = Math.max(1, boxWidth - 2);
     const messageWidth = Math.max(1, contentWidth - 2);
     const lines: string[] = [truncateToWidth(header(), contentWidth, "…")];
 
@@ -982,9 +984,9 @@ function renderSingleResult(
       appendWrappedMessage(lines, lastMsg, messageWidth, theme);
     }
 
-    if (w < 32) return lines.map((line) => truncateToWidth(line, Math.max(1, w), "…"));
+    if (w < 32) return lines.map((line) => truncateToWidth(line, boxWidth, "…"));
     proxy.lines = lines;
-    return [...box.render(w)];
+    return [...box.render(boxWidth)];
   });
 }
 
@@ -992,6 +994,7 @@ function renderMultiResult(
   details: Details,
   options: { expanded: boolean },
   theme: Theme,
+  reserveFinalColumn = false,
 ): Component {
   const results = details.results;
   const okCount = results.filter((r) => r.exitCode === 0).length;
@@ -1013,7 +1016,8 @@ function renderMultiResult(
 
   // Completed results never change; memoize so unrelated redraws cost nothing.
   return memoizedComponent((w) => {
-    const contentWidth = Math.max(1, w - 2);
+    const boxWidth = reserveFinalColumn ? liveRenderWidth(w) : Math.max(1, w);
+    const contentWidth = Math.max(1, boxWidth - 2);
     const previewWidth = Math.max(1, contentWidth - 3);
     const messageWidth = Math.max(1, previewWidth - 2);
     const lines = [truncateToWidth(header(), contentWidth, "…")];
@@ -1053,9 +1057,9 @@ function renderMultiResult(
       }
     }
 
-    if (w < 32) return lines.map((line) => truncateToWidth(line, Math.max(1, w), "…"));
+    if (w < 32) return lines.map((line) => truncateToWidth(line, boxWidth, "…"));
     proxy.lines = lines;
-    return [...box.render(w)];
+    return [...box.render(boxWidth)];
   });
 }
 
@@ -1253,7 +1257,7 @@ export function renderQuietTeammateAux(
   if (!isQuietMode()) return undefined;
   const tone = status === "failure" ? "error" : status === "success" ? "success" : "warning";
   const glyph = theme.fg(tone, quietStatusMark(status));
-  return dynamicComponent((w) => [truncateToWidth(qLine(theme, glyph, name, rest), Math.max(1, w), "…")]);
+  return dynamicComponent((w) => [truncateToWidth(qLine(theme, glyph, name, rest), liveRenderWidth(w), "…")]);
 }
 
 /**

@@ -331,8 +331,8 @@ function renderContextPressure(value: string | undefined, width: number): string
 	return `${ansiFg(color)}${text}${ANSI_RESET}`;
 }
 
-function renderPressureLine(value: string | undefined, width: number): string {
-	return truncateToWidth(renderContextPressure(value, width), Math.max(1, width), "…");
+function renderPressureLine(value: string | undefined, width: number, layoutWidth = width): string {
+	return truncateToWidth(renderContextPressure(value, layoutWidth), Math.max(1, width), "…");
 }
 
 const SEP = `${ansiFg(COLORS.separator)} · ${ANSI_RESET}`;
@@ -423,6 +423,7 @@ function renderLine1(
 	knowledgeStatus: string | undefined,
 	teammateDiagnosticStatus: string | undefined,
 	usageSparkline: string,
+	layoutWidth = width,
 ): string {
 	const safeWidth = Math.max(1, width);
 	const modeFull = renderPlanModeStatus(modeStatus, approvalStatus, 80);
@@ -454,7 +455,7 @@ function renderLine1(
 		contextCompact = buildContextBar(usedPct, true);
 	}
 
-	const candidates = safeWidth >= 80
+	const candidates = layoutWidth >= 80
 		? [
 			[modeFull, modelText, contextFull, autoCompactionFull, evolText, knowledgeText, teammateDiagText, toolCallText, dirGitText, tokenText],
 			[modeCompact, modelText, contextCompact, autoCompactionCompact, evolText, teammateDiagText, toolCallText, dirGitText, tokenText],
@@ -463,7 +464,7 @@ function renderLine1(
 			[modeCompact, modelText, contextCompact, autoCompactionCompact, dirText],
 			[modeNarrow, autoCompactionNarrow, contextCompact, modelText],
 		]
-		: safeWidth >= 48
+		: layoutWidth >= 48
 			? [
 				[modeCompact, autoCompactionCompact, modelText, contextCompact, teammateDiagText, evolText, dirGitText],
 				[modeCompact, autoCompactionCompact, modelText, contextCompact, teammateDiagText, dirGitText],
@@ -478,7 +479,7 @@ function renderLine1(
 	return renderFirstFittingLine(candidates, safeWidth);
 }
 
-export function renderWorkflowStatusline(view: WorkflowViewModel, width: number): string {
+export function renderWorkflowStatusline(view: WorkflowViewModel, width: number, layoutWidth = width): string {
 	const safeWidth = Math.max(1, width);
 	const run = view.activeRun;
 	const runText = run
@@ -492,12 +493,12 @@ export function renderWorkflowStatusline(view: WorkflowViewModel, width: number)
 
 	// Session label leads every layout so concurrent sessions stay identifiable
 	// even when the line is truncated to a narrow terminal.
-	if (safeWidth < 20) {
+	if (layoutWidth < 20) {
 		return truncateToWidth(session, safeWidth, "…");
 	}
 
 	let parts: string[];
-	if (safeWidth < 80) {
+	if (layoutWidth < 80) {
 		parts = [session, recovery, status, runText, chain];
 	} else {
 		const gates = view.gates ? `gate ${view.gates.passed}/${view.gates.total}` : "";
@@ -678,6 +679,10 @@ export function installStatusline(
 						pendingWidth = null;
 						stableWidthSamples = 0;
 					}
+					// Every status line can change while mounted. Keep the final terminal
+					// column empty so incremental footer updates cannot arm auto-wrap.
+					if (!Number.isFinite(width) || width <= 1) return [];
+					const liveWidth = width - 1;
 					const state = getMaestroState();
 					const activeToolCalls = (state.activeToolCalls ?? state.activeRuns)?.size ?? 0;
 					const lines: string[] = [];
@@ -692,16 +697,16 @@ export function installStatusline(
 					const knowledgeStatus = footerData.getExtensionStatuses().get("maestro-knowledge-pending");
 					const teammateDiagnosticStatus = footerData.getExtensionStatuses().get("pi-teammate-diagnostic");
 					const usageSparkline = renderUsageSparklineSegment(usageSeries, statsFooterConfig, width);
-					lines.push(renderLine1(rs, activeToolCalls, cwd, width, modeStatus, approvalStatus, compactionModeStatus, effortStatus, evolStatus, knowledgeStatus, teammateDiagnosticStatus, usageSparkline));
+					lines.push(renderLine1(rs, activeToolCalls, cwd, liveWidth, modeStatus, approvalStatus, compactionModeStatus, effortStatus, evolStatus, knowledgeStatus, teammateDiagnosticStatus, usageSparkline, width));
 
-					const pressureLine = renderPressureLine(pressureStatus, width);
+					const pressureLine = renderPressureLine(pressureStatus, liveWidth, width);
 					if (pressureLine) lines.push(pressureLine);
 
-					const swarmLine = renderSwarmStatusline(swarmStatus, width);
+					const swarmLine = renderSwarmStatusline(swarmStatus, liveWidth);
 					if (swarmLine) lines.push(swarmLine);
 
 					const workflow = deriveWorkflowViewModel(getWorkflowSnapshot());
-					if (workflow) lines.push(renderWorkflowStatusline(workflow, width));
+					if (workflow) lines.push(renderWorkflowStatusline(workflow, liveWidth, width));
 
 					return lines;
 				},
