@@ -284,6 +284,8 @@ export interface SoftPressureBands {
 interface PendingCompactionIntent {
   generation: number;
   triggerKey: string;
+  /** Stable logical recovery identity; absent only on legacy journal records. */
+  recoveryId?: string;
   estimate: ContextEstimate;
   linkedThreshold: LinkedCompactionThresholdModel & { usable: true };
   settings: CompactionSettings;
@@ -610,7 +612,10 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
   function recoveryIdFor(intent: PendingCompactionIntent): string {
     // The producer marker is part of the wire identity. Auto and new-context
     // generations are independent counters and must never be compared globally.
-    return autoRecoveryId(state.sessionId, intent);
+    return intent.recoveryId ?? autoRecoveryId(state.sessionId, intent);
+  }
+  function newAutoRecoveryId(triggerKey: string): string {
+    return `${state.sessionId ?? "unknown"}:auto:${triggerKey}:${randomUUID()}`;
   }
   function publishRecoveryState(
     intent: PendingCompactionIntent,
@@ -1164,6 +1169,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
             state.pendingIntent = {
               generation,
               triggerKey,
+              recoveryId: newAutoRecoveryId(triggerKey),
               estimate,
               linkedThreshold,
               settings,
@@ -1238,6 +1244,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       state.pendingIntent = {
         generation,
         triggerKey,
+        recoveryId: newAutoRecoveryId(triggerKey),
         estimate,
         linkedThreshold,
         settings,
@@ -2194,6 +2201,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
           intent = {
             generation: state.generation,
             triggerKey,
+            recoveryId: newAutoRecoveryId(triggerKey),
             estimate,
             linkedThreshold: threshold,
             settings,
@@ -2370,6 +2378,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         state.pendingIntent = {
           generation,
           triggerKey,
+          recoveryId: newAutoRecoveryId(triggerKey),
           estimate,
           linkedThreshold,
           settings,
@@ -3252,6 +3261,7 @@ type PersistedIntentPhase = "pending" | "submitted" | "continuation" | "cleared"
 function pendingIntentPayload(intent: PendingCompactionIntent): Record<string, unknown> {
   return {
     triggerKey: intent.triggerKey,
+    ...(intent.recoveryId ? { recoveryId: intent.recoveryId } : {}),
     estimate: intent.estimate,
     linkedThreshold: intent.linkedThreshold,
     settings: intent.settings,
@@ -3410,6 +3420,7 @@ function loadPersistedIntent(
     if (typeof pending.triggerKey !== "string" || !pending.estimate || !pending.linkedThreshold
       || !pending.settings || !pending.effectiveSettings
       || typeof pending.contextExhausted !== "boolean"
+      || (version === PENDING_INTENT_VERSION && pending.recoveryId !== undefined && typeof pending.recoveryId !== "string")
       || (version !== 1 && typeof pending.requestBlocked !== "boolean")) return undefined;
     intent = {
       ...pending,

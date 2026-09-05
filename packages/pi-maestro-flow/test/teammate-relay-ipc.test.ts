@@ -8,6 +8,42 @@ import { dispatchChildIpcMessage } from "pi-maestro-teammate/v1/execution";
 import { registerTeammatePermissionBroker } from "pi-maestro-teammate/v1/child-extensions";
 import type { ActiveAgent, TeammateState } from "pi-maestro-teammate/v1/types";
 import { requestTeammateInteraction } from "../src/permissions/teammate-relay.ts";
+import { publishTeammateCompactionWakeReceipt } from "../src/compaction/teammate-compaction-relay.ts";
+
+
+test("compaction wake receipt matches the teammate consumer envelope exactly", () => {
+  const previousChild = process.env.PI_TEAMMATE_CHILD;
+  const previousCorrelation = process.env.PI_TEAMMATE_CORRELATION_ID;
+  const sendDescriptor = Object.getOwnPropertyDescriptor(process, "send");
+  const sent: Array<Record<string, unknown>> = [];
+  process.env.PI_TEAMMATE_CHILD = "1";
+  process.env.PI_TEAMMATE_CORRELATION_ID = "wake-child";
+  Object.defineProperty(process, "send", {
+    configurable: true,
+    value(message: Record<string, unknown>) { sent.push(message); return true; },
+  });
+  try {
+    assert.equal(publishTeammateCompactionWakeReceipt({
+      recoveryId: "recovery", producer: "auto", generation: 7, wakeId: "wake",
+      state: "consumed", sequence: 3, deadlineAt: 1234, runtimeGeneration: 2,
+      sessionId: "session", branchCheckpointId: "checkpoint", messageId: "message",
+    }), true);
+    assert.deepEqual(sent, [{
+      type: "teammate_compaction_wake_receipt", version: 1,
+      recoveryId: "recovery", producer: "auto", generation: 7, wakeId: "wake",
+      state: "consumed", sequence: 3, deadlineAt: 1234, runtimeGeneration: 2,
+      sessionId: "session", branchCheckpointId: "checkpoint", messageId: "message",
+      correlationId: "wake-child",
+    }]);
+  } finally {
+    if (sendDescriptor) Object.defineProperty(process, "send", sendDescriptor);
+    else delete (process as typeof process & { send?: unknown }).send;
+    if (previousChild === undefined) delete process.env.PI_TEAMMATE_CHILD;
+    else process.env.PI_TEAMMATE_CHILD = previousChild;
+    if (previousCorrelation === undefined) delete process.env.PI_TEAMMATE_CORRELATION_ID;
+    else process.env.PI_TEAMMATE_CORRELATION_ID = previousCorrelation;
+  }
+});
 
 test("teammate relay reports synchronous IPC send failures explicitly", async () => {
   const previousChild = process.env.PI_TEAMMATE_CHILD;
