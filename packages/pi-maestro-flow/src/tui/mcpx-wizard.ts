@@ -484,10 +484,10 @@ export class McpxWizardOverlay implements Component, Focusable {
     this.metricsUrl = undefined;
     try {
       if (pid && child) {
-        if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
+        if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
         else child.kill();
       } else if (pid && isProcessOwnedBy(pid, "cloudflared")) {
-        if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
+        if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
         else process.kill(pid, "SIGTERM");
       }
     } catch { /* best-effort cleanup on overlay close */ }
@@ -1010,7 +1010,7 @@ export class McpxWizardOverlay implements Component, Focusable {
     }
     try {
       if (process.platform === "win32") {
-        spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore", shell: false });
+        spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore", shell: false, windowsHide: true });
       } else if (this.tunnelProcess && !this.tunnelProcess.killed) {
         this.tunnelProcess.kill();
       } else {
@@ -1122,6 +1122,7 @@ function resolveExecutable(command: string): string | undefined {
     encoding: "utf8",
     timeout: 5_000,
     shell: false,
+    windowsHide: true,
   });
   if (probe.status !== 0) return undefined;
   const lines = String(probe.stdout || "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean);

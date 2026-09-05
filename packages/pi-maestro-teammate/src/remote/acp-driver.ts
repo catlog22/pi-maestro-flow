@@ -923,7 +923,7 @@ export async function probeAcpConfigOptions(
   const spawnChild = options.spawnChild ?? ((command, args, spawnOptions) => spawn(command, args, spawnOptions));
   const child = spawnChild(target.command[0]!, target.command.slice(1), {
     cwd: target.cwd,
-    detached: true,
+    detached: process.platform !== "win32",
     env: targetChildEnvironment(target.env),
     windowsHide: true,
     shell: false,
@@ -1003,7 +1003,7 @@ export class AcpDriver implements RemoteDriver {
     };
     const child = this.#spawnChild(context.target.command[0], context.target.command.slice(1), {
       cwd: context.target.cwd,
-      detached: true,
+      detached: process.platform !== "win32",
       env: targetChildEnvironment(context.target.env),
       windowsHide: true,
       shell: false,

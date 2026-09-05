@@ -74,7 +74,7 @@ export function sendDesktopNotification(
       const child = spawnProcess(
         "powershell.exe",
         ["-NoProfile", "-NonInteractive", "-Command", buildWindowsToastScript(title, body)],
-        { detached: true, stdio: "ignore", windowsHide: true },
+        { detached: platform !== "win32", stdio: "ignore", windowsHide: true },
       );
       child.on("error", () => {});
       child.unref();

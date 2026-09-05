@@ -9,6 +9,7 @@ import {
   buildWindowsToastScript,
   detectDesktopNotificationTarget,
   sanitizeNotificationText,
+  sendDesktopNotification,
 } from "../src/notify/desktop-notifier.ts";
 import {
   DEFAULT_NOTIFY_CONFIG,
@@ -300,4 +301,20 @@ test("desktop notification protocols sanitize untrusted text", () => {
   const powershell = buildWindowsToastScript("Pi's task", "line\nbody");
   assert.match(powershell, /Pi''s task/);
   assert.doesNotMatch(powershell, /[\n\r]/);
+});
+
+test("Windows desktop notifications hide their process without detaching a console", () => {
+  let launchOptions: { detached?: boolean; windowsHide?: boolean } | undefined;
+  const sent = sendDesktopNotification("Title", "Body", {
+    platform: "win32",
+    env: {},
+    spawnProcess: ((_command: string, _args: readonly string[], options: typeof launchOptions) => {
+      launchOptions = options;
+      return { on() {}, unref() {} };
+    }) as never,
+  });
+
+  assert.equal(sent, true);
+  assert.equal(launchOptions?.detached, false);
+  assert.equal(launchOptions?.windowsHide, true);
 });

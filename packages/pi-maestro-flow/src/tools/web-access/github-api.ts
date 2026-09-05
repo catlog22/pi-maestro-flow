@@ -12,7 +12,7 @@ export async function checkGhAvailable(): Promise<boolean> {
 	if (ghAvailable !== null) return ghAvailable;
 
 	return new Promise((resolve) => {
-		execFile("gh", ["--version"], { timeout: 5000 }, (err) => {
+		execFile("gh", ["--version"], { timeout: 5000, windowsHide: true }, (err) => {
 			ghAvailable = !err;
 			resolve(ghAvailable);
 		});
@@ -30,7 +30,7 @@ export async function checkRepoSize(owner: string, repo: string, signal?: AbortS
 	if (!(await checkGhAvailable())) return null;
 
 	return new Promise((resolve) => {
-		execFile("gh", ["api", `repos/${owner}/${repo}`, "--jq", ".size"], { timeout: 10000, ...(signal ? { signal } : {}) }, (err, stdout) => {
+		execFile("gh", ["api", `repos/${owner}/${repo}`, "--jq", ".size"], { timeout: 10000, windowsHide: true, ...(signal ? { signal } : {}) }, (err, stdout) => {
 			if (err) {
 				resolve(null);
 				return;
@@ -45,7 +45,7 @@ async function getDefaultBranch(owner: string, repo: string, signal?: AbortSigna
 	if (!(await checkGhAvailable())) return null;
 
 	return new Promise((resolve) => {
-		execFile("gh", ["api", `repos/${owner}/${repo}`, "--jq", ".default_branch"], { timeout: 10000, ...(signal ? { signal } : {}) }, (err, stdout) => {
+		execFile("gh", ["api", `repos/${owner}/${repo}`, "--jq", ".default_branch"], { timeout: 10000, windowsHide: true, ...(signal ? { signal } : {}) }, (err, stdout) => {
 			if (err) {
 				resolve(null);
 				return;
@@ -63,7 +63,7 @@ async function fetchTreeViaApi(owner: string, repo: string, ref: string, signal?
 		execFile(
 			"gh",
 			["api", `repos/${owner}/${repo}/git/trees/${ref}?recursive=1`, "--jq", ".tree[].path"],
-			{ timeout: 15000, maxBuffer: 5 * 1024 * 1024, ...(signal ? { signal } : {}) },
+			{ timeout: 15000, maxBuffer: 5 * 1024 * 1024, windowsHide: true, ...(signal ? { signal } : {}) },
 			(err, stdout) => {
 				if (err) {
 					resolve(null);
@@ -89,7 +89,7 @@ async function fetchReadmeViaApi(owner: string, repo: string, ref: string, signa
 		execFile(
 			"gh",
 			["api", `repos/${owner}/${repo}/readme?ref=${ref}`, "--jq", ".content"],
-			{ timeout: 10000, ...(signal ? { signal } : {}) },
+			{ timeout: 10000, windowsHide: true, ...(signal ? { signal } : {}) },
 			(err, stdout) => {
 				if (err) {
 					resolve(null);
@@ -113,7 +113,7 @@ async function fetchFileViaApi(owner: string, repo: string, path: string, ref: s
 		execFile(
 			"gh",
 			["api", `repos/${owner}/${repo}/contents/${path}?ref=${ref}`, "--jq", ".content"],
-			{ timeout: 10000, maxBuffer: 2 * 1024 * 1024, ...(signal ? { signal } : {}) },
+			{ timeout: 10000, maxBuffer: 2 * 1024 * 1024, windowsHide: true, ...(signal ? { signal } : {}) },
 			(err, stdout) => {
 				if (err) {
 					resolve(null);

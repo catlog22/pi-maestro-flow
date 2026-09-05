@@ -138,7 +138,7 @@ function probePythonBridge(scriptPath: string): boolean {
 
 function probeExecutable(executable: string): boolean {
   try {
-    return spawnSync(executable, ["--version"], { encoding: "utf8", shell: false, timeout: 750, stdio: ["ignore", "ignore", "ignore"] }).status === 0;
+    return spawnSync(executable, ["--version"], { encoding: "utf8", shell: false, windowsHide: true, timeout: 750, stdio: ["ignore", "ignore", "ignore"] }).status === 0;
   } catch {
     return false;
   }

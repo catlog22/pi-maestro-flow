@@ -40,7 +40,7 @@ function getGlimpseBinaryPath(): string | null {
 
   // Global npm install
   try {
-    const globalRoot = execFileSync("npm", ["root", "-g"], { encoding: "utf-8" }).trim();
+    const globalRoot = execFileSync("npm", ["root", "-g"], { encoding: "utf-8", windowsHide: true }).trim();
     const binaryPath = join(globalRoot, "glimpseui", "src", "glimpse");
     if (existsSync(binaryPath)) return binaryPath;
   } catch (error) {

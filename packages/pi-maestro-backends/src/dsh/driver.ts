@@ -336,7 +336,11 @@ function writeKnownHosts(lines: readonly string[]): HostKeyPin {
 /** Scan the host's public keys with the OpenSSH CLI. */
 function defaultKeyscanRunner(argv: readonly string[]): Promise<KeyscanResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(argv[0]!, argv.slice(1), { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(argv[0]!, argv.slice(1), {
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: false,
+      windowsHide: true,
+    });
     let stdout = "";
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {

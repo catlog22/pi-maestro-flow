@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import type { SpawnOptionsWithoutStdio } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as net from "node:net";
@@ -10,6 +11,7 @@ import { AcpClientOperations } from "../src/remote/acp-client-operations.ts";
 import {
   ACP_PENDING_INPUT_LIMIT,
   AcpDriver,
+  probeAcpConfigOptions,
 } from "../src/remote/acp-driver.ts";
 import type { RemoteRunHandle } from "../src/remote/driver.ts";
 import { createRemoteRequest, parseRemoteEnvelopeLine, type RemoteJsonRpcEnvelope } from "../src/remote/protocol.ts";
@@ -294,6 +296,38 @@ test("bridge defaults register the ACP driver", async () => {
   } finally {
     peer?.close();
     await server.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("ACP launches hide Windows consoles and only detach on POSIX", async () => {
+  const root = canonicalTempRoot("pi-acp-spawn-options-");
+  const configured = target(root, path.join(root, "unused-agent.mjs"), "normal");
+  const launches: Array<SpawnOptionsWithoutStdio & { stdio: ["pipe", "pipe", "pipe"] }> = [];
+  const spawnChild = (
+    _command: string,
+    _args: readonly string[],
+    options: SpawnOptionsWithoutStdio & { stdio: ["pipe", "pipe", "pipe"] },
+  ): never => {
+    launches.push(options);
+    throw new Error("spawn captured");
+  };
+
+  try {
+    await assert.rejects(
+      probeAcpConfigOptions({ command: configured.command, cwd: configured.cwd, env: configured.env ?? [] }, { spawnChild }),
+      /spawn captured/,
+    );
+    const driver = new AcpDriver({ spawnChild });
+    await assert.rejects(start(driver, configured), /spawn captured/);
+
+    assert.equal(launches.length, 2);
+    for (const options of launches) {
+      assert.equal(options.detached, process.platform !== "win32");
+      assert.equal(options.windowsHide, true);
+      assert.equal(options.shell, false);
+    }
+  } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

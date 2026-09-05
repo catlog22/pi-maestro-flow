@@ -293,6 +293,7 @@ function isProcessAlive(pid: number): boolean {
       const result = spawnSync("tasklist", ["/FI", `PID eq ${pid}`, "/NH", "/FO", "CSV"], {
         encoding: "utf8",
         timeout: 5_000,
+        windowsHide: true,
       });
       if (result.status !== 0) return false;
       // SEC-RV-008: parse the CSV output and compare the PID column exactly,
@@ -782,6 +783,7 @@ function resolveCloudflared(): string | undefined {
     encoding: "utf8",
     timeout: 10_000,
     shell: false,
+    windowsHide: true,
   });
   if (probe.status === 0) {
     const line = String(probe.stdout || "").split(/\r?\n/).find(Boolean);
@@ -994,6 +996,7 @@ function processMatches(pid: number, expectedName: string): boolean {
     const result = spawnSync("tasklist", ["/FI", `PID eq ${pid}`, "/NH", "/FO", "CSV"], {
       encoding: "utf8",
       timeout: 3_000,
+      windowsHide: true,
     });
     const stdout = String(result.stdout || "");
     if (result.status !== 0 || !stdout.trim()) return false;
@@ -1040,7 +1043,7 @@ async function killTunnel(pid: number, port?: number): Promise<void> {
   }
   try {
     if (process.platform === "win32") {
-      spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
+      spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
     } else {
       await killProcessWithEscalation(pid);
     }

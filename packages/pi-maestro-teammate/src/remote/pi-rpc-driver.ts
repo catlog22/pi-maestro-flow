@@ -680,7 +680,7 @@ export class PiRpcDriver implements RemoteDriver {
     try {
       child = this.#spawnChild(command.executable, command.args, {
         cwd: context.target.cwd,
-        detached: true,
+        detached: process.platform !== "win32",
         env: targetChildEnvironment(context.target.env, request.outputSchema === undefined
           ? undefined
           : {

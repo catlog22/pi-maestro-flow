@@ -839,7 +839,7 @@ function tick() {
   let code = 0;
   try {
     output = execFileSync(CONFIG.shell, [...CONFIG.shellArgs, CONFIG.task], {
-      cwd: CONFIG.cwd, timeout: ${DEFAULT_SHELL_TIMEOUT_MS}, encoding: "utf8",
+      cwd: CONFIG.cwd, timeout: ${DEFAULT_SHELL_TIMEOUT_MS}, encoding: "utf8", windowsHide: true,
     });
   } catch (e) {
     code = e.status ?? 1;

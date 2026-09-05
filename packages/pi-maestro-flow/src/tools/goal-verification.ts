@@ -358,7 +358,7 @@ async function runAcceptanceCommand(command: string, cwd: string): Promise<Accep
       finish(null);
     }, GOAL_ACCEPTANCE_COMMAND_TIMEOUT_MS);
     try {
-      child = spawn(command, { shell: true, cwd });
+      child = spawn(command, { shell: true, cwd, windowsHide: true });
       const append = (chunk: Buffer | string) => {
         if (output.length < ACCEPTANCE_OUTPUT_CHARS * 2) output += String(chunk);
       };

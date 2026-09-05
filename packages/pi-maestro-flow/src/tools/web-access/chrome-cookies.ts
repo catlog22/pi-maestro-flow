@@ -270,7 +270,7 @@ function readBrowserPassword(config: BrowserConfig, currentPlatform: ReturnType<
 
 function readKeychainPassword(account: string, service: string): Promise<string | null> {
 	return new Promise((resolve) => {
-		execFile("security", ["find-generic-password", "-w", "-a", account, "-s", service], { timeout: 5000 }, (err, stdout) => {
+		execFile("security", ["find-generic-password", "-w", "-a", account, "-s", service], { timeout: 5000, windowsHide: true }, (err, stdout) => {
 			if (err) { resolve(null); return; }
 			resolve(stdout.trim() || null);
 		});
@@ -280,7 +280,7 @@ function readKeychainPassword(account: string, service: string): Promise<string 
 function readLinuxPassword(secretToolApp: string | undefined): Promise<{ password: string; cacheable: boolean }> {
 	if (!secretToolApp) return Promise.resolve({ password: "peanuts", cacheable: true });
 	return new Promise((resolve) => {
-		execFile("secret-tool", ["lookup", "application", secretToolApp], { timeout: 5000 }, (err, stdout) => {
+		execFile("secret-tool", ["lookup", "application", secretToolApp], { timeout: 5000, windowsHide: true }, (err, stdout) => {
 			if (err) { resolve({ password: "peanuts", cacheable: false }); return; }
 			const password = stdout.trim();
 			resolve(password ? { password, cacheable: true } : { password: "peanuts", cacheable: false });
@@ -339,7 +339,7 @@ async function runSqliteQuery(dbPath: string, sql: string): Promise<QueryResult>
 
 function runSqliteCli(dbPath: string, sql: string): Promise<QueryResult> {
 	return new Promise((resolve) => {
-		execFile("sqlite3", ["-readonly", "-json", dbPath, sql], { timeout: 5000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+		execFile("sqlite3", ["-readonly", "-json", dbPath, sql], { timeout: 5000, maxBuffer: 1024 * 1024, windowsHide: true }, (err, stdout) => {
 			if (err) { resolve({ status: "failure", failure: err.code === "ENOENT" ? "unavailable" : "query" }); return; }
 			try {
 				const parsed = JSON.parse(stdout || "[]");
@@ -354,7 +354,7 @@ function runSqliteCli(dbPath: string, sql: string): Promise<QueryResult> {
 function runPythonSqlite(dbPath: string, sql: string): Promise<QueryResult> {
 	const script = "import json,sqlite3,sys\ntry:\n c=sqlite3.connect('file:'+sys.argv[1]+'?mode=ro',uri=True)\n c.row_factory=sqlite3.Row\n print(json.dumps([dict(r) for r in c.execute(sys.argv[2]).fetchall()]))\nexcept Exception:\n sys.exit(1)";
 	return new Promise((resolve) => {
-		execFile("python3", ["-c", script, dbPath, sql], { timeout: 5000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+		execFile("python3", ["-c", script, dbPath, sql], { timeout: 5000, maxBuffer: 1024 * 1024, windowsHide: true }, (err, stdout) => {
 			if (err) { resolve({ status: "failure", failure: err.code === "ENOENT" ? "unavailable" : "query" }); return; }
 			try {
 				const parsed = JSON.parse(stdout || "[]");

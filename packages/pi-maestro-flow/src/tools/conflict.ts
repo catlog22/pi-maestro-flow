@@ -63,7 +63,7 @@ export interface GitRunner {
 const defaultGitRunner: GitRunner = {
   run(args, cwd): Promise<GitRunResult> {
     return new Promise((resolvePromise) => {
-      execFile("git", args, { cwd, timeout: 15_000, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
+      execFile("git", args, { cwd, timeout: 15_000, maxBuffer: 8 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
         if (err) {
           resolvePromise({ ok: false, stdout: "", stderr: (stderr || "").trim() || err.message });
           return;

@@ -322,7 +322,7 @@ async function forceNpxCache(packageSpec: string): Promise<void> {
       const proc = spawn(
         "npm",
         ["exec", "--yes", "--package", packageSpec, "--", "node", "-e", "1"],
-        { stdio: "ignore" }
+        { stdio: "ignore", windowsHide: true }
       );
       const timer = setTimeout(() => {
         proc.kill();
@@ -447,7 +447,7 @@ function getNpmCacheDir(): string | null {
     return envSource;
   }
   try {
-    const result = spawnSync("npm", ["config", "get", "cache"], { encoding: "utf-8" });
+    const result = spawnSync("npm", ["config", "get", "cache"], { encoding: "utf-8", windowsHide: true });
     if (result.status === 0) {
       const path = String(result.stdout).trim();
       npmCacheDirCached = { dir: path || null, envSource };

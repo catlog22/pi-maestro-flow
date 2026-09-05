@@ -218,7 +218,7 @@ export async function extractVideoFrame(filePath: string, seconds: number = 1): 
 		const buffer = execFileSync("ffmpeg", [
 			"-ss", String(seconds), "-i", filePath,
 			"-frames:v", "1", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1",
-		], { maxBuffer: 5 * 1024 * 1024, timeout: 10000, stdio: ["pipe", "pipe", "pipe"] });
+		], { maxBuffer: 5 * 1024 * 1024, timeout: 10000, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
 		if (buffer.length === 0) return { error: "ffmpeg failed: empty output" };
 		return { data: buffer.toString("base64"), mimeType: "image/jpeg" };
 	} catch (err) {
@@ -233,7 +233,7 @@ export async function getLocalVideoDuration(filePath: string): Promise<number | 
 			"-show_entries", "format=duration",
 			"-of", "csv=p=0",
 			filePath,
-		], { timeout: 10000, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }).trim();
+		], { timeout: 10000, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], windowsHide: true }).trim();
 		const duration = Number.parseFloat(output);
 		if (!Number.isFinite(duration)) return { error: "ffprobe failed: invalid duration output" };
 		return duration;

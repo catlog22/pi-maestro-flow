@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import type { SpawnOptionsWithoutStdio } from "node:child_process";
 import * as fs from "node:fs";
 import * as net from "node:net";
 import * as os from "node:os";
@@ -192,6 +193,46 @@ class RpcClient {
     }
   }
 }
+
+test("Pi RPC launches hide Windows consoles and only detach on POSIX", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-remote-spawn-options-"));
+  const scratchRoot = path.join(root, "scratch");
+  const configured = target(root, [process.execPath, path.join(root, "unused-pi.mjs")]);
+  let launch: (SpawnOptionsWithoutStdio & { stdio: ["pipe", "pipe", "pipe"] }) | undefined;
+  const driver = new PiRpcDriver({
+    scratchRoot,
+    spawnChild: (_command, _args, options): never => {
+      launch = options;
+      throw new Error("spawn captured");
+    },
+  });
+
+  try {
+    await assert.rejects(driver.start({
+      commandId: "start-spawn-options",
+      targetId: configured.id,
+      monitorOwnerNonce: "owner-spawn-options",
+      name: "spawn options",
+      objective: "Capture spawn options",
+      cwd: configured.cwd,
+      driver: "pi-rpc",
+      command: configured.command,
+    }, {
+      workerId: "worker-spawn-options",
+      instanceNonce: "instance-spawn-options",
+      target: configured,
+      signal: new AbortController().signal,
+    }), /spawn captured/);
+
+    assert.equal(launch?.detached, process.platform !== "win32");
+    assert.equal(launch?.windowsHide, true);
+    assert.equal(launch?.shell, false);
+    assert.deepEqual(fs.readdirSync(scratchRoot), []);
+  } finally {
+    await driver.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("Pi RPC driver launches trusted argv, normalizes events, and removes private scratch files", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-remote-driver-"));

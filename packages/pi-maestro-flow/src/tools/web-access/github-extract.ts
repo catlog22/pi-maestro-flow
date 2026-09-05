@@ -258,7 +258,7 @@ function cloneDir(config: GitHubCloneConfig, owner: string, repo: string, ref?: 
 
 function execClone(args: string[], localPath: string, timeoutMs: number): Promise<string | null> {
 	return new Promise((resolve) => {
-		execFile(args[0], args.slice(1), { timeout: timeoutMs }, (err) => {
+		execFile(args[0], args.slice(1), { timeout: timeoutMs, windowsHide: true }, (err) => {
 			if (err) {
 				try {
 					rmSync(localPath, { recursive: true, force: true });

@@ -164,7 +164,7 @@ export async function getYouTubeStreamInfo(videoId: string): Promise<StreamResul
 		const output = execFileSync("yt-dlp", [
 			"--print", "duration",
 			"-g", `https://www.youtube.com/watch?v=${videoId}`,
-		], { timeout: 15000, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }).trim();
+		], { timeout: 15000, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], windowsHide: true }).trim();
 		const lines = output.split(/\r?\n/);
 		const rawDuration = lines[0]?.trim();
 		const streamUrl = lines[1]?.trim();
@@ -182,7 +182,7 @@ async function extractFrameFromStream(streamUrl: string, seconds: number): Promi
 		const buffer = execFileSync("ffmpeg", [
 			"-ss", String(seconds), "-i", streamUrl,
 			"-frames:v", "1", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1",
-		], { maxBuffer: 5 * 1024 * 1024, timeout: 30000, stdio: ["pipe", "pipe", "pipe"] });
+		], { maxBuffer: 5 * 1024 * 1024, timeout: 30000, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
 		if (buffer.length === 0) return { error: "ffmpeg failed: empty output" };
 		return { data: buffer.toString("base64"), mimeType: "image/jpeg" };
 	} catch (err) {

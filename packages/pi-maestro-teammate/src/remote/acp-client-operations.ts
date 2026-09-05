@@ -353,7 +353,7 @@ export class AcpClientOperations {
     );
     const child = spawn(profile.executable, args, {
       cwd,
-      detached: true,
+      detached: process.platform !== "win32",
       env: environment,
       windowsHide: true,
       shell: false,

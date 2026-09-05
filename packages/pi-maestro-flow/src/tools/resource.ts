@@ -96,7 +96,7 @@ function runGh(args: string[], cwd: string, signal?: AbortSignal, timeoutMs = 15
     execFile(
       "gh",
       args,
-      { cwd, timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, ...(signal ? { signal } : {}) },
+      { cwd, timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, windowsHide: true, ...(signal ? { signal } : {}) },
       (err, stdout, stderr) => {
         if (err) {
           const message = (stderr || "").trim() || err.message;
