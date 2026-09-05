@@ -73,6 +73,7 @@ import {
 import {
   classifyModelHealthFailure,
   classifyRetryError,
+  classifyRetryInput,
   extractRetryAfterMs,
   isFallbackProviderError,
   ModelHealthAttemptState,
@@ -82,7 +83,12 @@ import {
   MODEL_FALLBACK_RESUME_PROMPT,
   TeammatePublicationCaptureError,
 } from "./execution-infra.ts";
-import { buildReplayFence } from "./recovery-protocol.ts";
+import {
+  buildReplayFence,
+  hasExternalReplayRisk,
+  type RecoveryFailureChainV1,
+  type RecoveryFailureRecordV1,
+} from "./recovery-protocol.ts";
 import { cliToolNameFromModel, isCliToolModel } from "../cli-tools/local-acp.ts";
 import { resolveSshHostRef } from "../public/v1/ssh-hosts.ts";
 
@@ -1162,6 +1168,32 @@ async function runSingleTeammateV1(
     externalReplayRisk: false,
   };
   let resumeHandoff: PendingResumeHandoff | undefined;
+  let failureSequence = 0;
+  let failureChain: RecoveryFailureChainV1 = { version: 1, decisions: Object.freeze([]) };
+  const failureRecord = (
+    message: string,
+    layer: RecoveryFailureRecordV1["layer"],
+    phase: string,
+    model?: string,
+  ): RecoveryFailureRecordV1 => Object.freeze({
+    code: layer === "recovery" ? phase : classifyRetryError(message),
+    layer,
+    phase,
+    sequence: ++failureSequence,
+    sanitizedMessage: message,
+    ...(model === undefined ? {} : { model }),
+  });
+  const addFailureDecision = (code: string, decision: string, evidenceRef?: string): void => {
+    failureChain = Object.freeze({
+      ...failureChain,
+      decisions: Object.freeze([...failureChain.decisions, Object.freeze({
+        code,
+        sequence: ++failureSequence,
+        decision,
+        ...(evidenceRef === undefined ? {} : { evidenceRef }),
+      })]),
+    });
+  };
   const appendReplayFenceDiagnostic = (
     result: SingleResult,
     facts: ReplayFenceTotals,
@@ -1687,7 +1719,7 @@ async function runSingleTeammateV1(
         discardCompletion();
         throw error;
       }
-      const candidateResult = attempt.result;
+      const candidateResult = attachPublicResultContext(attempt.result);
       nextCandidateLoopSeqOffset = Math.max(
         nextCandidateLoopSeqOffset + 1,
         candidateMaxLoopSeq + 1,
@@ -1702,7 +1734,6 @@ async function runSingleTeammateV1(
           registrationCandidate,
         );
       }
-      attachPublicResultContext(candidateResult);
       lastResult = candidateResult;
       candidateResult.originCwd ??= cwd;
       if (modelToUse === undefined) {
@@ -1731,6 +1762,13 @@ async function runSingleTeammateV1(
         }
         settlePendingModelAcquisitions(true);
         candidateResult.attemptedModels = attemptedModels.length > 1 ? attemptedModels : undefined;
+        if (failureChain.initiating || failureChain.decisions.length > 0) {
+          failureChain = Object.freeze({
+            ...failureChain,
+            terminal: failureRecord("Recovery completed successfully.", "recovery", "fallback-succeeded", modelToUse),
+          });
+          candidateResult.recoveryFailureChain = failureChain;
+        }
         await publishResult(candidateResult, cwd);
         commitCompletion();
         return candidateResult;
@@ -1752,6 +1790,31 @@ async function runSingleTeammateV1(
       }
 
       const error = resultFailureMessage(candidateResult.messages);
+      if (failureChain.initiating === undefined && candidateResult.recoveryFailureChain?.initiating) {
+        failureChain = Object.freeze({
+          ...failureChain,
+          initiating: candidateResult.recoveryFailureChain.initiating,
+        });
+      }
+      const structuredInitiating = candidateResult.recoveryFailureChain?.initiating;
+      const structuredRetryKind = structuredInitiating === undefined
+        ? classifyRetryInput({ source: "recovery-diagnostic", message: error })
+        : classifyRetryInput({
+            source: structuredInitiating.layer === "transport" ? "transport" : "provider",
+            message: structuredInitiating.sanitizedMessage,
+          });
+      const fallbackFailure = candidateResult.recoveryFailureChain !== undefined
+        ? structuredRetryKind !== undefined && structuredRetryKind !== "non-retryable"
+        : isFallbackProviderError(error);
+      // Reclamation is also the final evidence drain boundary for attempts that
+      // could actually enter fallback. Non-provider terminal paths retain their
+      // legacy settlement timing and never authorize replay.
+      const finalReclamation = fallbackFailure
+        ? await attempt.reclamation
+        : { status: "reclaimed" as const };
+      if (fallbackFailure && candidateResult.replayEvidence) {
+        candidateResult.replayEvidence = Object.freeze({ ...candidateResult.replayEvidence, finalized: true });
+      }
       let registryFailureClassification: ReturnType<typeof classifyModelHealthFailure> | undefined;
       if (modelRegistryContext !== undefined) {
         if (permit !== undefined && !settled) {
@@ -1760,7 +1823,6 @@ async function runSingleTeammateV1(
         }
         settlePendingModelAcquisitions(false, error);
       }
-      const fallbackFailure = isFallbackProviderError(error);
       const recoveryFacts = attempt.recovery;
       const authoritativeFailure = recoveryFacts.settlementAuthority === "authoritative";
       const preActivityInfrastructureExit = recoveryFacts.preActivityInfrastructureExit;
@@ -1768,7 +1830,9 @@ async function runSingleTeammateV1(
       // chain, not only the final Pi process that happened to fail.
       replayTotals.completedToolCount += recoveryFacts.completedToolCount;
       replayTotals.inFlightToolCount += recoveryFacts.inFlightToolCount;
-      replayTotals.externalReplayRisk ||= recoveryFacts.externalReplayRisk;
+      replayTotals.externalReplayRisk ||= candidateResult.replayEvidence === undefined
+        ? recoveryFacts.externalReplayRisk
+        : hasExternalReplayRisk(candidateResult.replayEvidence);
       const replayFenceClear = !buildReplayFence({
         completedToolCount: replayTotals.completedToolCount,
         unknownEffect: replayTotals.inFlightToolCount > 0 || replayTotals.externalReplayRisk,
@@ -1819,6 +1883,7 @@ async function runSingleTeammateV1(
             + `Legacy or interrupted child streams have degraded recovery capability and cannot be fresh-replayed safely.`,
         });
       } else if (resumableCheckpoint && resumeUnknownEffect && fallbackFailure) {
+        addFailureDecision("checkpoint-resume-replay-risk", "checkpoint resume denied", "replayEvidence");
         // A checkpoint exists but the failed run left a tool in flight or
         // external replay risk: resuming the session could repeat side
         // effects the history does not record. Block the resume path and
@@ -1834,6 +1899,7 @@ async function runSingleTeammateV1(
             + `the run settles as failed instead.`,
         });
       } else if (!resumableCheckpoint && (fallbackFailure || preActivityInfrastructureExit) && !replayFenceClear) {
+        addFailureDecision("fresh-replay-risk", "fresh fallback denied", "replayEvidence");
         appendReplayFenceDiagnostic(candidateResult, replayTotals);
       } else if (modelSelectionUnsupported && failoverConditionsMet) {
         // Every other condition for failover held, so without this record the
@@ -1860,21 +1926,25 @@ async function runSingleTeammateV1(
       }
 
       if (fallbackEligible) {
-        // Awaiting here serialises attempts: the replacement must not start
-        // while the failed runtime may still deliver callbacks.
-        const reclamation = await attempt.reclamation;
-        if (reclamation.status === "unreaped") {
+        // The failed runtime was reclaimed above before final replay evidence
+        // was read; replacement admission still fails closed if it was unreaped.
+        if (finalReclamation.status === "unreaped") {
           candidateResult.messages.push({
             role: "system",
             content:
               `Teammate did not confirm reclamation of the failed child; `
               + `model fallback was stopped to fence stale callbacks for correlationId=${correlationId}.`,
           });
+          addFailureDecision("reclamation-unconfirmed", "fallback denied: failed child was not reclaimed");
           fallbackEligible = false;
         }
       }
 
       if (fallbackEligible) {
+        addFailureDecision(
+          resumableCheckpoint ? "checkpoint-resume" : "fresh-fallback",
+          resumableCheckpoint ? "checkpoint resume admitted" : "fresh fallback admitted",
+        );
         if (permit?.kind === "legacy" && !settled) {
           if (preActivityInfrastructureExit) breaker.releaseCandidate(permit.acquisition);
           else breaker.recordRetryableFailure(permit.acquisition);
@@ -1923,6 +1993,12 @@ async function runSingleTeammateV1(
       }
       if (modelRegistryContext === undefined) settlePendingModelAcquisitions(false);
       candidateResult.attemptedModels = attemptedModels.length > 1 ? attemptedModels : undefined;
+      const terminalMessage = candidateResult.messages.at(-1)?.content ?? error;
+      failureChain = Object.freeze({
+        ...failureChain,
+        terminal: failureRecord(terminalMessage, "recovery", "fallback-terminal", modelToUse),
+      });
+      candidateResult.recoveryFailureChain = failureChain;
       await publishResult(candidateResult, cwd);
       commitCompletion();
       return candidateResult;
@@ -1936,6 +2012,14 @@ async function runSingleTeammateV1(
   if (options.signal?.aborted) return cancelAtBoundary("after model candidate processing");
   if (lastResult) {
     lastResult.attemptedModels = attemptedModels.length > 1 ? attemptedModels : undefined;
+    if (lastResult.exitCode !== 0) {
+      const terminalMessage = lastResult.messages.at(-1)?.content ?? "Teammate recovery exhausted.";
+      failureChain = Object.freeze({
+        ...failureChain,
+        terminal: failureRecord(terminalMessage, "recovery", "fallback-terminal", lastResult.model),
+      });
+      lastResult.recoveryFailureChain = failureChain;
+    }
     await publishResult(lastResult, cwd);
     publishTurnComplete(lastResult);
     return lastResult;

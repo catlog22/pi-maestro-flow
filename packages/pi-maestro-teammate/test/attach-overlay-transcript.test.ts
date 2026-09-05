@@ -194,6 +194,54 @@ test("initialTranscript opens straight into the transcript view", async () => {
   }
 });
 
+test("permission confirmations stay hidden from activity without hiding tool details", () => {
+  const agent = fakeAgent();
+  const runs = new Map([[agent.correlationId, agent]]);
+  const overlay = new AttachOverlay(agent, () => {}, () => runs);
+  try {
+    overlay.appendLog(agent.correlationId, "[06:12:22] ? permission request", "tool");
+    overlay.appendLog(agent.correlationId, "[06:12:22] ◀ permission allow_once", "system");
+    overlay.appendLog(agent.correlationId, "[06:12:23] ✓ plugin.search query=overlay", "tool");
+    overlay.appendLog(agent.correlationId, "matched 4 files", "output");
+
+    const lines = overlay.render(80, 24).join("\n");
+    assert.doesNotMatch(lines, /permission request|permission allow_once/);
+    assert.match(lines, /plugin\.search query=overlay/);
+    assert.match(lines, /matched 4 files/);
+  } finally {
+    overlay.dispose();
+  }
+});
+
+test("initial transcript shows plugin tool calls and results but hides permission confirmations", async () => {
+  const agent = fakeAgent();
+  const runs = new Map([[agent.correlationId, agent]]);
+  const overlay = new AttachOverlay(
+    agent,
+    () => {},
+    () => runs,
+    undefined,
+    () => Promise.resolve(transcript([
+      { kind: "system", role: "system", text: "[06:12:22] ? permission request", timestamp: 1 },
+      { kind: "system", role: "system", text: "[06:12:22] ◀ permission allow_once", timestamp: 2 },
+      { kind: "tool", role: "assistant", text: '{"query":"overlay"}', toolName: "plugin.search", timestamp: 3 },
+      { kind: "tool_result", role: "toolResult", text: "matched file A\nmatched file B", toolName: "plugin.search", timestamp: 4 },
+    ])),
+    true,
+  );
+  try {
+    await tick();
+    const lines = overlay.render(80, 24).join("\n");
+    assert.doesNotMatch(lines, /permission request|permission allow_once/);
+    assert.match(lines, /plugin\.search/);
+    assert.match(lines, /\{"query":"overlay"\}/);
+    assert.match(lines, /matched file A/);
+    assert.match(lines, /matched file B/);
+  } finally {
+    overlay.dispose();
+  }
+});
+
 test("composer works in transcript mode (view-and-steer)", async () => {
   const agent = fakeAgent();
   const runs = new Map([[agent.correlationId, agent]]);

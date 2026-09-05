@@ -189,12 +189,12 @@ project .pi/agents > project .agents > ~/.agents > legacy user directory > bundl
 
 Configure task-type defaults with `Alt+M` or `/teammate-models`. The Control Center's **Profiles** tab is the saved-template system: it manages multiple named routing Profiles shared by every project. Its **Routing** tab edits the active global Profile and combines built-in task types, discovered agent types, and types already present in that Profile.
 
-Switch the current project's template directly by stable Profile ID or display name. With no argument, the command opens the Control Center on **Profiles**:
+Switch the current project's template directly by stable Profile ID or display name. With no argument, the same command opens the full Control Center:
 
 ```text
-/teammate-model fast-lane
-/teammate-model Fast Lane
-/teammate-model
+/teammate-models fast-lane
+/teammate-models Fast Lane
+/teammate-models
 ```
 
 Command completion lists every saved template and marks the project-active and global-default entries. If display names are duplicated, use the stable ID. Direct switching disables but preserves project overrides, matching the Profiles UI.

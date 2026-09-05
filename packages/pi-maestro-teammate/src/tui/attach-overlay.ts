@@ -61,6 +61,11 @@ const INBOX_PREVIEW_LINES = 4;
 const GRAPH_LIST_MAX_ROWS = 7;
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const SPINNER_MS = 500;
+const PERMISSION_CONFIRMATION_LINE = /^\[\d{2}:\d{2}:\d{2}\]\s+(?:\?\s+permission request|◀\s+permission(?:\s+\S.*)?)$/i;
+
+function isPermissionConfirmationLine(text: string): boolean {
+  return PERMISSION_CONFIRMATION_LINE.test(text.trim());
+}
 
 /** Tab identity for the main conversation — a switching target, not a log. */
 export const MAIN_TAB = "__main__";
@@ -420,6 +425,7 @@ export class AttachOverlay implements Component, Focusable {
       changed = true;
     }
     for (const line of update.lines ?? []) {
+      if (isPermissionConfirmationLine(line.text)) continue;
       log.lines.push(line);
       if (log.lines.length > MAX_LOG_LINES) {
         log.lines.shift();
@@ -435,6 +441,7 @@ export class AttachOverlay implements Component, Focusable {
     text: string,
     kind: AgentLog["lines"][0]["kind"] = "info",
   ): void {
+    if (isPermissionConfirmationLine(text)) return;
     const log = this.ensureLog(cid);
     if (!log) return;
     log.lines.push({ text, kind });
@@ -1137,6 +1144,7 @@ export class AttachOverlay implements Component, Focusable {
   }
 
   private renderTranscriptRow(row: TranscriptRow, width: number): string[] {
+    if (isPermissionConfirmationLine(row.text)) return [];
     const contentWidth = Math.max(1, width - 2);
     switch (row.kind) {
       case "user":

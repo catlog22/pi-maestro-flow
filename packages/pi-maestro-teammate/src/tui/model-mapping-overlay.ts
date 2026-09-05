@@ -428,7 +428,6 @@ export class TeammateControlCenter implements Component, Focusable {
       ...Object.keys(activeProfile.fallbackMappings ?? {}),
       ...Object.keys(activeProfile.thinkingLevels),
       ...Object.keys(activeProfile.typeMeta ?? {}),
-      ...Object.values(activeProfile.roleMappings ?? {}).flatMap((rules) => rules?.taskType ? [rules.taskType] : []),
     ];
     this.taskTypes = [...new Set([...discoveredTaskTypes, ...profileTaskTypes])];
     this.activeAgents = [...params.activeAgents].sort((left, right) =>
@@ -595,10 +594,6 @@ export class TeammateControlCenter implements Component, Focusable {
     }
     if (matchesKey(data, Key.ctrl("o")) && this.tab === "roles") {
       this.activateRoleCircuitSelection();
-      return;
-    }
-    if (matchesKey(data, Key.ctrl("t")) && this.tab === "roles") {
-      this.activateRoleTypeSelection();
       return;
     }
     if (matchesKey(data, Key.ctrl("n")) && this.tab === "routing") {
@@ -807,42 +802,18 @@ export class TeammateControlCenter implements Component, Focusable {
     const taskType = this.modelTaskType;
     if (role) {
       const rules = this.roleRules(role);
-      const agent = this.agents.find((candidate) => candidate.name === role);
-      const assignedType = rules?.taskType ?? agent?.taskType;
-      const typeModel = assignedType ? this.config.mappings[assignedType] : undefined;
       return [
-        {
-          value: "type",
-          label: this.t("model.setting.type"),
-          detail: assignedType
-            ? `${assignedType}${typeModel
-                ? ` · ${this.t("model.route.routesTo", { model: typeModel })}`
-                : ` · ${this.t("model.route.notPinned")}`}`
-            : this.t("model.route.frontmatter"),
-          active: Boolean(rules?.taskType),
-          unavailable: false,
-        },
         {
           value: "model",
           label: this.t("model.setting.modelOverride"),
-          detail: rules?.model
-            ? `${rules.model}${assignedType && typeModel ? ` · ${this.t("model.route.behindType", { type: assignedType })}` : ""}`
-            : assignedType && typeModel
-              ? this.t("model.route.inheritType", { value: typeModel })
-              : this.t("model.route.inheritModel"),
+          detail: rules?.model ?? this.t("model.route.inheritModel"),
           active: Boolean(rules?.model),
           unavailable: false,
         },
         {
           value: "thinking",
           label: this.t("model.setting.thinkingOverride"),
-          detail: rules?.thinking
-            ? `${rules.thinking}${assignedType && this.config.thinkingLevels[assignedType]
-                ? ` · ${this.t("model.route.behindType", { type: assignedType })}`
-                : ""}`
-            : assignedType && this.config.thinkingLevels[assignedType]
-              ? this.t("model.route.inheritType", { value: this.config.thinkingLevels[assignedType]! })
-              : this.t("model.route.inheritThinking"),
+          detail: rules?.thinking ?? this.t("model.route.inheritThinking"),
           active: Boolean(rules?.thinking),
           unavailable: false,
         },
@@ -850,12 +821,8 @@ export class TeammateControlCenter implements Component, Focusable {
           value: "fallback",
           label: this.t("model.setting.fallbackOverride"),
           detail: rules?.fallbackModels?.length
-            ? `${rules.fallbackModels.join(" → ")}${assignedType && this.config.fallbackMappings?.[assignedType]?.length
-                ? ` · ${this.t("model.route.behindType", { type: assignedType })}`
-                : ""}`
-            : assignedType && this.config.fallbackMappings?.[assignedType]?.length
-              ? this.t("model.route.inheritType", { value: this.config.fallbackMappings[assignedType]!.join(" → ") })
-              : this.t("common.none"),
+            ? rules.fallbackModels.join(" → ")
+            : this.t("common.none"),
           active: Boolean(rules?.fallbackModels?.length),
           unavailable: false,
         },
@@ -869,7 +836,6 @@ export class TeammateControlCenter implements Component, Focusable {
       ];
     }
     if (!taskType) return [];
-    const assignedRoles = this.assignedRoles(taskType);
     const keywords = this.config.typeMeta?.[taskType]?.keywords ?? [];
     return [
       {
@@ -893,15 +859,6 @@ export class TeammateControlCenter implements Component, Focusable {
           ? this.config.fallbackMappings[taskType]!.join(" → ")
           : this.t("common.none"),
         active: Boolean(this.config.fallbackMappings?.[taskType]?.length),
-        unavailable: false,
-      },
-      {
-        value: "roles",
-        label: this.t("model.setting.roles"),
-        detail: assignedRoles.length > 0
-          ? assignedRoles.map((name) => `@${name}`).join(", ")
-          : this.t("model.route.noneAssigned"),
-        active: assignedRoles.length > 0,
         unavailable: false,
       },
       {
@@ -1541,19 +1498,11 @@ export class TeammateControlCenter implements Component, Focusable {
         if (this.config.fallbackMappings) delete this.config.fallbackMappings[taskType];
         if (this.config.thinkingLevels) delete this.config.thinkingLevels[taskType];
         if (this.config.typeMeta) delete this.config.typeMeta[taskType];
-        if (this.config.roleMappings) {
-          for (const [role, rules] of Object.entries(this.config.roleMappings)) {
-            if (rules?.taskType === taskType) this.config.roleMappings[role] = { ...rules, taskType: null };
-          }
-        }
-        const declaredByAgent = this.agents.some((agent) => agent.taskType === taskType);
         this.refreshTaskTypes();
         this.selected.routing = clampIndex(this.selected.routing, this.filteredTaskTypes().length);
         this.saving = false;
         this.statusTone = "success";
-        this.statusText = declaredByAgent
-          ? this.t("model.resetType", { type: taskType })
-          : this.t("model.deletedType", { type: taskType });
+        this.statusText = this.t("model.deletedType", { type: taskType });
         this.params.requestRender();
       } catch (error) {
         this.saving = false;
@@ -1822,7 +1771,7 @@ export class TeammateControlCenter implements Component, Focusable {
     return this.agents.filter((agent) => {
       const rules = this.roleRules(agent.name);
       const circuit = rules?.circuit;
-      return `${agent.name} ${agent.description} ${agent.source} ${agent.taskType ?? ""} ${agent.model ?? ""} ${rules?.taskType ?? ""} ${rules?.model ?? ""} ${(rules?.fallbackModels ?? []).join(" ")} ${rules?.thinking ?? ""} ${circuit ? `${circuit.threshold ?? CIRCUIT_DEFAULT_THRESHOLD} ${Math.round((circuit.cooldownMs ?? CIRCUIT_DEFAULT_COOLDOWN_MS) / 1000)}` : ""} ${(agent.tools ?? []).join(" ")}`
+      return `${agent.name} ${agent.description} ${agent.source} ${agent.model ?? ""} ${rules?.model ?? ""} ${(rules?.fallbackModels ?? []).join(" ")} ${rules?.thinking ?? ""} ${circuit ? `${circuit.threshold ?? CIRCUIT_DEFAULT_THRESHOLD} ${Math.round((circuit.cooldownMs ?? CIRCUIT_DEFAULT_COOLDOWN_MS) / 1000)}` : ""} ${(agent.tools ?? []).join(" ")}`
         .toLowerCase()
         .includes(query);
     });
@@ -2215,11 +2164,8 @@ export class TeammateControlCenter implements Component, Focusable {
     if (this.tab === "roles") {
       const agent = item as AgentConfig;
       const roleRules = this.roleRules(agent.name);
-      const taskType = roleRules?.taskType ?? agent.taskType;
-      const typeModel = taskType ? this.config.mappings[taskType] : undefined;
-      const model = typeModel ?? roleRules?.model ?? agent.model;
-      const route = [taskType, model].filter(Boolean).map(displayText).join(" → ");
-      const suffix = route ? ` · ${route}` : "";
+      const model = roleRules?.model ?? agent.model;
+      const suffix = model ? ` · ${displayText(model)}` : "";
       return truncateToWidth(`${prefix} @${this.params.theme.bold(displayText(agent.name))} ${this.params.theme.fg("dim", `[${displayText(agent.source)}]${suffix}`)}`, width, "…");
     }
     const agent = item as ControlCenterActiveAgent;
@@ -2285,15 +2231,9 @@ export class TeammateControlCenter implements Component, Focusable {
       }
       const meta = this.taskTypeMeta(taskType);
       const mapping = this.config.mappings[taskType] ?? this.t("model.route.autoMain");
-      const assignedRoles = this.assignedRoles(taskType);
       lines.push(this.params.theme.bold(displayText(meta.label)));
       lines.push(this.params.theme.fg("muted", this.t("model.suggestedRoles", {
         roles: displayText(meta.roles),
-      })));
-      lines.push(this.params.theme.fg("dim", this.t("model.assignedRoles", {
-        roles: assignedRoles.length > 0
-          ? assignedRoles.map((name) => `@${displayText(name)}`).join(", ")
-          : this.t("common.none"),
       })));
       lines.push(...wrapTextWithAnsi(displayText(meta.description), Math.max(1, width)).slice(0, 3));
       lines.push(this.params.theme.fg("dim", this.t("model.modelValue", { model: displayText(mapping) })));
@@ -2322,10 +2262,7 @@ export class TeammateControlCenter implements Component, Focusable {
         profile: displayText(this.config.profileName),
       })));
       if (!(TEAMMATE_TASK_TYPES as readonly string[]).includes(taskType)) {
-        const declaredByAgent = this.agents.some((agent) => agent.taskType === taskType);
-        lines.push(this.params.theme.fg("dim", declaredByAgent
-          ? this.t("model.agentDeclared")
-          : this.t("model.customTypeDelete")));
+        lines.push(this.params.theme.fg("dim", this.t("model.customTypeDelete")));
       }
       lines.push(this.params.theme.fg("dim", this.t("model.editKeywords")));
       if (this.state.project.applyOverrides) {
@@ -2337,36 +2274,25 @@ export class TeammateControlCenter implements Component, Focusable {
       lines.push(`@${this.params.theme.bold(displayText(agent.name))} ${this.params.theme.fg("dim", `[${displayText(agent.source)}]`)}`);
       lines.push(...wrapTextWithAnsi(normalizedText(displayText(agent.description)), Math.max(1, width)).slice(0, 3));
       const roleRules = this.roleRules(agent.name);
-      const assignedType = roleRules?.taskType ?? agent.taskType;
-      const typeModel = assignedType ? this.config.mappings[assignedType] : undefined;
-      const typeFallbacks = assignedType ? this.config.fallbackMappings?.[assignedType] : undefined;
-      const typeThinking = assignedType ? this.config.thinkingLevels[assignedType] : undefined;
-      const effectiveModel = typeModel ?? roleRules?.model ?? agent.model;
-      const effectiveFallbacks = typeFallbacks ?? roleRules?.fallbackModels;
-      const effectiveThinking = typeThinking ?? roleRules?.thinking ?? agent.thinking;
-      const modelSource = typeModel
-        ? this.t("model.source.type", { type: assignedType! })
-        : roleRules?.model
-          ? this.t("model.source.roleOverride")
-          : agent.model
-            ? this.t("model.source.frontmatter")
-            : this.t("model.source.runtime");
-      const fallbackSource = typeFallbacks
-        ? this.t("model.source.type", { type: assignedType! })
-        : roleRules?.fallbackModels
-          ? this.t("model.source.roleOverride")
+      const effectiveModel = roleRules?.model ?? agent.model;
+      const effectiveFallbacks = roleRules?.fallbackModels ?? agent.fallbackModels;
+      const effectiveThinking = roleRules?.thinking ?? agent.thinking;
+      const modelSource = roleRules?.model
+        ? this.t("model.source.roleOverride")
+        : agent.model
+          ? this.t("model.source.frontmatter")
+          : this.t("model.source.runtime");
+      const fallbackSource = roleRules?.fallbackModels
+        ? this.t("model.source.roleOverride")
+        : agent.fallbackModels
+          ? this.t("model.source.frontmatter")
           : this.t("common.none");
-      const thinkingSource = typeThinking
-        ? this.t("model.source.type", { type: assignedType! })
-        : roleRules?.thinking
-          ? this.t("model.source.roleOverride")
-          : agent.thinking
-            ? this.t("model.source.frontmatter")
-            : this.t("model.source.piDefault");
+      const thinkingSource = roleRules?.thinking
+        ? this.t("model.source.roleOverride")
+        : agent.thinking
+          ? this.t("model.source.frontmatter")
+          : this.t("model.source.piDefault");
       const modelForCircuit = effectiveModel;
-      lines.push(this.params.theme.fg("dim", this.t("model.typeValue", {
-        type: displayText(assignedType ?? this.t("model.unassignedInferred")),
-      })));
       lines.push(this.params.theme.fg("dim", this.t("model.effectiveModel", {
         model: displayText(effectiveModel ?? this.t("model.autoRouted")),
         source: displayText(modelSource),

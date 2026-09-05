@@ -232,21 +232,18 @@ test("control center keeps roles, routing and active collaboration visible", () 
   assert.match(narrow, /Teammate Control Center|Teammates/);
 });
 
-test("arrow navigation switches tabs and opens settings with cursor actions", () => {
+test("arrow navigation switches tabs and opens role model settings", () => {
   const { center } = makeCenter();
   assert.match(center.render(100).join("\n"), /\[Routing 7\]/);
   center.handleInput("\x1b[C");
   assert.match(center.render(100).join("\n"), /\[Roles 2\]/);
   center.handleInput("\x1b[B");
   center.handleInput("\r");
-  assert.match(center.render(100).join("\n"), /@reviewer › Settings/);
-  center.handleInput("\x1b[B");
+  const settings = center.render(100).join("\n");
+  assert.match(settings, /@reviewer › Settings/);
+  assert.doesNotMatch(settings, /Type.*(?:configured|inherited)/);
   center.handleInput("\x1b[C");
   assert.match(center.render(100).join("\n"), /@reviewer › Model/);
-  center.handleInput("\x1b");
-  assert.match(center.render(100).join("\n"), /@reviewer › Settings/);
-  center.handleInput("\x1b[C");
-  assert.match(center.render(100).join("\n"), /@reviewer › Type/);
   center.handleInput("\x1b[D");
   assert.match(center.render(100).join("\n"), /@reviewer › Settings/);
   center.handleInput("\x1b");
@@ -255,14 +252,14 @@ test("arrow navigation switches tabs and opens settings with cursor actions", ()
   assert.match(center.render(100).join("\n"), /\[Routing 7\]/);
 });
 
-test("control center derives custom routing types from discovered agents", () => {
+test("control center does not derive routing types from role metadata", () => {
   const specialist = { ...agent("security-specialist"), taskType: "security-audit" };
   const { center } = makeCenter({ agents: [agent("planner"), specialist] });
   center.handleInput("audit");
   const view = center.render(100).join("\n");
-  assert.match(view, /Routing 8/);
-  assert.match(view, /Security Audit/);
-  assert.match(view, /security-specialist/);
+  assert.match(view, /Routing 7/);
+  assert.doesNotMatch(view, /Security Audit/);
+  assert.doesNotMatch(view, /security-specialist/);
 });
 
 test("control center accepts cross-platform Enter and Escape encodings", () => {
@@ -678,19 +675,20 @@ test("attach overlay preserves manual scroll position while new logs arrive", ()
   }
 });
 
-test("roles tab exposes independently selectable type, model, and thinking settings", async () => {
+test("roles tab exposes model, thinking, fallback, and circuit settings without taskType", async () => {
   const { center, savedRoleRules } = makeCenter({ initialTab: "roles" });
   center.handleInput("\r");
   const settings = center.render(100).join("\n");
   assert.match(settings, /@planner › Settings/);
-  assert.match(settings, /Type/);
+  assert.doesNotMatch(settings, /Type.*(?:configured|inherited)/);
   assert.match(settings, /Model override/);
   assert.match(settings, /Thinking override/);
+  assert.match(settings, /Fallback override/);
+  assert.match(settings, /Circuit/);
   for (let width = 1; width <= 120; width++) {
     assert.ok(center.render(width).every((line) => visibleWidth(line) <= width));
   }
 
-  center.handleInput("\x1b[B"); // Model override
   center.handleInput("\x1b[C");
   assert.match(center.render(100).join("\n"), /@planner › Model/);
   center.handleInput("\x1b[B");
@@ -700,7 +698,6 @@ test("roles tab exposes independently selectable type, model, and thinking setti
   assert.deepEqual(savedRoleRules, [{ role: "planner", rules: { model: "openai/gpt-5" } }]);
   assert.match(center.render(100).join("\n"), /@planner › Settings/);
 
-  center.handleInput("\x1b[B");
   center.handleInput("\x1b[B"); // Thinking override
   center.handleInput("\r");
   assert.match(center.render(100).join("\n"), /@planner › Thinking/);
@@ -853,7 +850,7 @@ test("Ctrl+D deletes a custom agent type and its routing entries", async () => {
   for (let index = 0; index < "audit".length; index++) center.handleInput("\x7f");
   center.handleInput("\x1b[C");
   const roleView = center.render(100).join("\n");
-  assert.match(roleView, /Type · unassigned \/ inferred/);
+  assert.doesNotMatch(roleView, /Type ·/);
   assert.match(roleView, /Role model override · openai\/gpt-5/);
 });
 
@@ -926,66 +923,50 @@ test("routing tab offers a visible + New custom type entry that opens creation",
   assert.match(center.render(100).join("\n"), /type identifier \(e\.g\. security-audit\)/);
 });
 
-test("Ctrl+T assigns a task type to a role via cursor selection", async () => {
+test("Ctrl+T does not bind a task type to a role", () => {
   const savedRoleRules: Array<{ role: string; rules: unknown }> = [];
   const { center } = makeCenter({
     initialTab: "roles",
     saveRoleRules: (role, rules) => savedRoleRules.push({ role, rules }),
   });
   center.handleInput("\x14"); // Ctrl+T
-  const picker = center.render(100).join("\n");
-  assert.match(picker, /@planner › Type/);
-  assert.match(picker, /auto \/ agent frontmatter/);
-  assert.match(picker, /Explore/);
-  center.handleInput("\x1b[B"); // explore
-  center.handleInput("\x1b[B"); // analysis
-  center.handleInput("\r");
-  await new Promise((resolve) => setTimeout(resolve, 25));
-  assert.deepEqual(savedRoleRules, [{ role: "planner", rules: { taskType: "analysis" } }]);
-  assert.match(center.render(100).join("\n"), /Saved · @planner type → analysis/);
+  const view = center.render(100).join("\n");
+  assert.match(view, /\[Roles 2\]/);
+  assert.doesNotMatch(view, /@planner › Type/);
+  assert.doesNotMatch(view, /Ctrl\+T/);
+  assert.deepEqual(savedRoleRules, []);
 });
 
-test("role detail shows the assigned type and auto restores the agent frontmatter type", async () => {
-  const savedRoleRules: Array<{ role: string; rules: unknown }> = [];
+test("role detail ignores legacy role and frontmatter taskType metadata", () => {
+  const planner = { ...agent("planner"), taskType: "planning" };
   const { center } = makeCenter({
     initialTab: "roles",
-    saveRoleRules: (role, rules) => savedRoleRules.push({ role, rules }),
+    agents: [planner],
+    config: {
+      version: 2,
+      mappings: { analysis: "openai/gpt-5" },
+      thinkingLevels: { analysis: "high" },
+      roleMappings: { planner: { taskType: "analysis", model: "anthropic/sonnet" } },
+    },
   });
-  assert.match(center.render(100).join("\n"), /Type · unassigned \/ inferred/);
-  center.handleInput("\x14"); // Ctrl+T
-  center.handleInput("\r"); // auto restores
-  await new Promise((resolve) => setTimeout(resolve, 25));
-  assert.deepEqual(savedRoleRules, [{ role: "planner", rules: { taskType: null } }]);
+  const view = center.render(100).join("\n");
+  assert.doesNotMatch(view, /Type ·/);
+  assert.match(view, /Effective model · anthropic\/sonnet · role override/);
 });
 
-test("type settings assign multiple roles with cursor toggles", async () => {
+test("taskType settings do not expose role assignment", () => {
   const saved: Array<{ taskType: string; roles: readonly string[] }> = [];
   const { center } = makeCenter({
     saveTypeRoles: (taskType, roles) => saved.push({ taskType, roles: [...roles] }),
   });
   center.handleInput("\r"); // Explore settings
-  for (let index = 0; index < 3; index++) center.handleInput("\x1b[B"); // Roles
-  center.handleInput("\x1b[C");
-  const picker = center.render(100).join("\n");
-  assert.match(picker, /Explore › Roles/);
-  assert.match(picker, /@planner/);
-  assert.match(picker, /@reviewer/);
-  center.handleInput(" ");
-  center.handleInput("\x1b[B");
-  center.handleInput(" ");
-  center.handleInput("\r");
-  await new Promise((resolve) => setTimeout(resolve, 25));
-  assert.deepEqual(saved, [{ taskType: "explore", roles: ["planner", "reviewer"] }]);
-  assert.match(center.render(100).join("\n"), /Saved roles · @planner, @reviewer/);
-  assert.match(center.render(100).join("\n"), /@planner, @reviewer/);
-
-  center.handleInput("\x1b");
-  center.handleInput("\x1b[C"); // Roles tab
-  const roleView = center.render(100).join("\n");
-  assert.match(roleView, /Type · explore/);
+  const settings = center.render(100).join("\n");
+  assert.match(settings, /Explore › Settings/);
+  assert.doesNotMatch(settings, /Roles.*(?:configured|inherited)/);
+  assert.deepEqual(saved, []);
 });
 
-test("role assigned type shows the type model ahead of its role model override", () => {
+test("legacy assigned type never masks the role model override", () => {
   const { center } = makeCenter({
     initialTab: "roles",
     config: {
@@ -998,16 +979,15 @@ test("role assigned type shows the type model ahead of its role model override",
     },
   });
   const detail = center.render(100).join("\n");
-  assert.match(detail, /Type · analysis/);
-  assert.match(detail, /Effective model · openai\/gpt-5 · type analysis/);
-  assert.match(detail, /Role model override · anthropic\/sonnet/);
+  assert.doesNotMatch(detail, /Type · analysis/);
+  assert.match(detail, /Effective model · anthropic\/sonnet · role override/);
+  assert.match(detail, /Effective thinking · low · role override/);
 
   center.handleInput("\r");
   const settings = center.render(100).join("\n");
-  assert.match(settings, /Type.*configured/);
-  assert.match(settings, /analysis · routes to openai\/gpt-5/);
-  center.handleInput("\x1b[B");
-  assert.match(center.render(100).join("\n"), /anthropic\/sonnet · fallback behind analysis/);
+  assert.doesNotMatch(settings, /Type.*configured/);
+  assert.match(settings, /anthropic\/sonnet/);
+  assert.doesNotMatch(settings, /fallback behind analysis/);
 });
 
 function registryDocument(): Record<string, unknown> {

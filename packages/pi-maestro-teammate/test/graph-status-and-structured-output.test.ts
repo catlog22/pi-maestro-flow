@@ -3768,7 +3768,10 @@ test("durable completion renderer handles outbox envelopes without raw fallback"
 });
 
 test("Alt+R opens the native agent view without injecting a slash command", async () => {
-  const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
+  const commands = new Map<string, {
+    handler: (args: string, ctx: unknown) => Promise<void>;
+    getArgumentCompletions?: (prefix: string) => unknown;
+  }>();
   const eventHandlers = new Map<string, Set<(payload: unknown) => void>>();
   const emittedEvents: Array<{ event: string; payload: unknown }> = [];
   const events = {
@@ -3810,8 +3813,11 @@ test("Alt+R opens the native agent view without injecting a slash command", asyn
   // /teammate-session was removed: the session view is now driven by the
   // cockpit session bar (TEAMMATE_OPEN_AGENT_EVENT), not a slash command.
   assert.ok(!commands.has("teammate-session"));
-  assert.ok(commands.has("teammate-models"));
-  assert.ok(commands.has("teammate-model"));
+  const modelCommand = commands.get("teammate-models");
+  assert.ok(modelCommand);
+  assert.equal(typeof modelCommand.getArgumentCompletions, "function");
+  assert.ok(!commands.has("teammate-model"));
+  assert.ok(commands.has("advisor"), "the shared broker registers one Advisor command");
   assert.ok(shortcut);
   assert.ok(modelShortcut);
   await shortcut({

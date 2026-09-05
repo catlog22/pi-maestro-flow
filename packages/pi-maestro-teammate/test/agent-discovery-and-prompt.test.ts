@@ -75,7 +75,7 @@ Act as the project specialist.
     const description = buildTeammateToolDescription(project);
     assert.match(description, /Available Teammate Agents section/);
     assert.doesNotMatch(description, /specialist \[project\]/);
-    assert.match(description, /specialist-work: model=auto\/inherit main session/);
+    assert.doesNotMatch(description, /specialist-work: model=/);
     assert.match(description, /Minimal call:\n  \{ tasks: \[\{ prompt: "Inspect auth" \}\] \}/);
     assert.match(description, /Omit outputSchema for ordinary tasks/);
     const ordinaryCallSection = description.slice(
@@ -417,7 +417,7 @@ test("planner is the sole Plan author with an execution-ready document contract"
     const planner = resolveAgent(project, "planner");
     assert.ok(planner);
     assert.equal(planner.source, "builtin");
-    assert.equal(planner.taskType, "planning");
+    assert.equal(planner.taskType, undefined);
     assert.equal(planner.thinking, "high");
     assert.deepEqual(planner.tools, ["read", "grep", "find", "ls"]);
     assert.equal(planner.systemPromptMode, "replace");
@@ -502,7 +502,7 @@ test("verifier is the bundled read-only Goal fallback role", () => {
   try {
     const verifier = resolveAgent(project, "verifier");
     assert.equal(verifier?.source, "builtin");
-    assert.equal(verifier?.taskType, "verification");
+    assert.equal(verifier?.taskType, undefined);
     assert.equal(verifier?.thinking, "low");
     assert.deepEqual(verifier?.tools, ["read", "grep", "find", "ls"]);
     assert.equal(verifier?.systemPromptMode, "replace");
@@ -522,7 +522,7 @@ test("research role exposes project knowledge and web research tools", () => {
   try {
     const research = resolveAgent(project, "research");
     assert.equal(research?.source, "builtin");
-    assert.equal(research?.taskType, "analysis");
+    assert.equal(research?.taskType, undefined);
     assert.equal(research?.thinking, "high");
     assert.deepEqual(research?.tools, ["read", "grep", "find", "ls", "bash", "smart_search", "source_check"]);
     assert.match(research?.systemPrompt ?? "", /maestro search/);

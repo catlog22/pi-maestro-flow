@@ -269,7 +269,7 @@ test("slash status and monitor list share one query execution path while both li
   assert.match(source, /catch \(error\) \{\s*unbindWorkspacePeerRuntime\(consumer\);/);
   assert.match(source, /if \(!registry\) \{\s*unbindWorkspacePeerRuntime\(\);/);
   const monitorCommandStart = source.indexOf('pi.registerCommand("monitor"');
-  const advisorCommandStart = source.indexOf('pi.registerCommand("advisor"');
-  const slash = source.slice(monitorCommandStart, advisorCommandStart);
+  const shortcutStart = source.indexOf('pi.registerShortcut("alt+r"');
+  const slash = source.slice(monitorCommandStart, shortcutStart);
   assert.doesNotMatch(slash, /spawnManagedWindow\(|stopManagedWindow\(|waitForManagedWindowOwner\(|routeSessionMessage\(/);
 });
