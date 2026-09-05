@@ -133,6 +133,32 @@ function validIntent(value: unknown, manifest: Omit<CompletionDispatchManifest, 
     && computeCompletionIntentRevision(withoutRevision) === contentRevision;
 }
 
+/** Finalized/applied manifests must retain one committed publication per task. */
+function hasExactFinalizedResourceSet(manifest: CompletionDispatchManifest): boolean {
+  const expected = [...manifest.expectedTasks];
+  if (expected.length === 0 || new Set(expected).size !== expected.length) return false;
+  if (manifest.published.length !== expected.length || !manifest.intent) return false;
+  const publishedByCorrelation = new Map<string, CompletionManifestPublishedEntry>();
+  const publishedIds = new Set<string>();
+  for (const entry of manifest.published) {
+    if (entry.state !== "committed"
+      || publishedIds.has(entry.publicationId)
+      || publishedByCorrelation.has(entry.correlationId)
+      || !expected.includes(entry.correlationId)) return false;
+    publishedIds.add(entry.publicationId);
+    publishedByCorrelation.set(entry.correlationId, entry);
+  }
+  if (expected.some((correlationId) => !publishedByCorrelation.has(correlationId))) return false;
+  const resources = manifest.intent.resources;
+  const resourceIds = new Set(resources.map((resource) => resource.publicationId));
+  if (resources.length !== expected.length || resourceIds.size !== resources.length) return false;
+  return resources.every((resource) => {
+    if (!expected.includes(resource.correlationId)) return false;
+    const published = publishedByCorrelation.get(resource.correlationId);
+    return published?.publicationId === resource.publicationId;
+  }) && new Set(resources.map((resource) => resource.correlationId)).size === expected.length;
+}
+
 export function completionManifestRevision(
   manifest: Omit<CompletionDispatchManifest, "contentRevision">,
 ): string {
@@ -174,7 +200,8 @@ export function parseCompletionManifest(value: unknown): CompletionDispatchManif
   const { contentRevision, ...withoutRevision } = typed;
   if (completionManifestRevision(withoutRevision) !== contentRevision) return undefined;
   if (typed.state === "finalized" || typed.state === "applied") {
-    if (!typed.intent || typed.deliveryId !== typed.intent.deliveryId || !validIntent(typed.intent, withoutRevision)) return undefined;
+    if (!typed.intent || typed.deliveryId !== typed.intent.deliveryId || !validIntent(typed.intent, withoutRevision)
+      || !hasExactFinalizedResourceSet(typed)) return undefined;
   } else if (typed.intent !== undefined || typed.deliveryId !== undefined) {
     return undefined;
   }

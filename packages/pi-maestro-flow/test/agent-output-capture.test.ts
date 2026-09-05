@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after, before } from "node:test";
@@ -222,7 +222,7 @@ test("capturePublishedAgentResult acknowledges persistence before release", asyn
   assert.ok(persistence);
   await persistence;
   assert.equal(acknowledged, "publication-1");
-  assert.equal(resource, "agent://published-cid-1");
+  assert.equal(resource, "agent://publication-1");
   assert.deepEqual((await readAgentOutput("publication-1", root)).output, { ready: true });
   assert.deepEqual((await readAgentOutput("published-cid-1", root)).output, { ready: true });
 });
@@ -304,7 +304,7 @@ test("capturePublishedAgentResult stores an overflow publication by rolling out 
   assert.ok(persistence);
   await persistence;
   assert.equal(storedPublication, "capacity-overflow-publication", "overflow publication is stored");
-  assert.equal(resource, "agent://capacity-overflow-cid", "the stored resource is acknowledged");
+  assert.equal(resource, "agent://capacity-overflow-publication", "the immutable stored resource is acknowledged");
   assert.deepEqual((await readAgentOutput("capacity-overflow-publication", workspace)).output, { overflow: true });
   await assert.rejects(() => readAgentOutput("capture-capacity-0", workspace), /No persisted teammate output/);
   assert.equal((await getAgentOutputStoreUsage(workspace)).records, MAX_AGENT_FILES);
@@ -371,7 +371,7 @@ test("published capture stages before persistence and commits only after immutab
   const correlationId = "capture-order-correlation";
   const order: string[] = [];
   const registry = getCompletionDurabilityRegistry();
-  const dispose = registry.register(durabilityProvider({
+  const provider = durabilityProvider({
     async stagePublication(input) {
       order.push("stage");
       assert.equal(input.resource.publicationId, publicationId);
@@ -382,7 +382,9 @@ test("published capture stages before persistence and commits only after immutab
       assert.equal(input.publicationId, publicationId);
       assert.deepEqual((await readAgentOutput(publicationId, root)).output, { durable: true });
     },
-  }));
+  });
+  const dispose = registry.register(provider);
+  const releasePin = registry.pinDispatch("dispatch-order", provider);
   let persistence: Promise<unknown> | undefined;
   try {
     assert.equal(capturePublishedAgentResult({
@@ -402,7 +404,53 @@ test("published capture stages before persistence and commits only after immutab
     assert.ok(persistence);
     await persistence;
     assert.deepEqual(order, ["stage", "commit"]);
-  } finally { dispose(); }
+  } finally {
+    releasePin();
+    dispose();
+  }
+});
+
+test("durable publication without its dispatch pin fails closed", async () => {
+  const dispatchId = `dispatch-unpinned-${Date.now()}`;
+  const publicationId = `publication-unpinned-${Date.now()}`;
+  let stageCalls = 0;
+  const registry = getCompletionDurabilityRegistry();
+  const dispose = registry.register(durabilityProvider({
+    async stagePublication() { stageCalls += 1; },
+  }));
+  let persistence: Promise<unknown> | undefined;
+  try {
+    capturePublishedAgentResult({
+      result: {
+        correlationId: "unpinned-correlation",
+        publicationId,
+        originCwd: root,
+        agent: "general",
+        output: "must not cross provider generations",
+        completionDispatchId: dispatchId,
+        completionReservationId: "unpinned-reservation",
+      },
+      waitUntil(promise: Promise<unknown>) { persistence = promise; },
+    });
+    assert.ok(persistence);
+    await assert.rejects(persistence, /has no pinned durability provider/);
+    assert.equal(stageCalls, 0);
+    await assert.rejects(() => readAgentOutput(publicationId, root), /No persisted teammate output/);
+  } finally {
+    dispose();
+  }
+});
+
+test("Flow shutdown retires admission before awaits and retains canonical capture through provider pin drain", async () => {
+  const source = await readFile(new URL("../src/extension/index.ts", import.meta.url), "utf8");
+  const shutdown = source.slice(source.indexOf('pi.on("session_shutdown", async (event, ctx) => {'));
+  const firstAwait = shutdown.indexOf("await ");
+  assert.ok(shutdown.indexOf("midTurnAutoCompaction.onSessionShutdown(ctx)") < firstAwait);
+  assert.ok(shutdown.indexOf("disposeCompletionDurabilityProvider()") < firstAwait);
+  assert.ok(shutdown.indexOf("waitForProviderIdle?.") < firstAwait);
+  const deferredDisposal = shutdown.indexOf("void completionOwnershipDrained.then(disposePublishedResultCapture)");
+  assert.ok(deferredDisposal > shutdown.indexOf("waitForProviderIdle?."));
+  assert.doesNotMatch(shutdown, /await completionOwnershipDrained/);
 });
 
 test("provider reload cannot redirect staged or committed publication ownership", async () => {

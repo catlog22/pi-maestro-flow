@@ -1076,6 +1076,7 @@ export function deliverTeammateCompleteNotification(options: {
   parentCid?: string;
   parentSessionId?: string;
   sessionGeneration?: number;
+  parentRuntimeGeneration?: number;
 }): boolean {
   const {
     pi,
@@ -1085,6 +1086,7 @@ export function deliverTeammateCompleteNotification(options: {
     parentCid,
     parentSessionId,
     sessionGeneration,
+    parentRuntimeGeneration,
   } = options;
 
   if (replyTarget === "main" || !parentCid) {
@@ -1094,6 +1096,8 @@ export function deliverTeammateCompleteNotification(options: {
   const parentAgent = state.activeRuns.get(parentCid);
   if (parentSessionId
     && parentAgent?.sessionId === parentSessionId
+    && (parentRuntimeGeneration === undefined
+      || parentAgent.runtimeGeneration === parentRuntimeGeneration)
     && parentAgent.sendControl
     && parentAgent.status !== "completed"
     && parentAgent.status !== "failed"
@@ -1102,11 +1106,31 @@ export function deliverTeammateCompleteNotification(options: {
       type: "teammate_complete_delivery",
       correlationId: parentCid,
       generation: sessionGeneration ?? 0,
+      runtimeGeneration: parentRuntimeGeneration ?? parentAgent.runtimeGeneration ?? 0,
       sessionId: parentSessionId,
       envelope,
     });
   }
   return false;
+}
+
+export function trackAgentSettlement<T>(
+  state: TeammateState,
+  settlement: Promise<T>,
+): Promise<T> {
+  const tracked = settlement as Promise<unknown>;
+  (state.dispatchSettlements ??= new Set()).add(tracked);
+  void tracked.finally(() => {
+    state.dispatchSettlements?.delete(tracked);
+    if (state.dispatchSettlements?.size === 0) state.dispatchSettlements = undefined;
+  }).catch(() => undefined);
+  return settlement;
+}
+
+export async function drainAgentSettlements(state: TeammateState): Promise<void> {
+  while ((state.dispatchSettlements?.size ?? 0) > 0) {
+    await Promise.allSettled([...state.dispatchSettlements!]);
+  }
 }
 
 export interface DurableFailureFallbackOptions {

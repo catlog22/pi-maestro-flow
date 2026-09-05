@@ -207,7 +207,9 @@ export class FlowCompletionDurabilityProvider implements CompletionDurabilityPro
   }
 
   async beginDispatch(seed: CompletionDispatchSeed): Promise<CompletionDispatchHandle> {
-    if (!SAFE_ID.test(seed.dispatchId) || !SAFE_ID.test(seed.reservationId) || !seed.originCwd) {
+    if (!SAFE_ID.test(seed.dispatchId) || !SAFE_ID.test(seed.reservationId) || !seed.originCwd
+      || seed.expectedTasks.length === 0
+      || new Set(seed.expectedTasks).size !== seed.expectedTasks.length) {
       throw new Error("Invalid completion dispatch seed.");
     }
     const existingPath = await this.#locate(seed.dispatchId);
@@ -266,12 +268,30 @@ export class FlowCompletionDurabilityProvider implements CompletionDurabilityPro
   async stagePublication(input: CompletionPublicationInput): Promise<void> {
     await this.#mutateDispatch(input.dispatchId, (current, now) => {
       this.#assertReservation(current, input.reservationId);
-      const existing = current.published.find((entry) => entry.publicationId === input.resource.publicationId);
-      if (existing?.state === "committed") return current;
-      if (existing?.state === "staged" && existing.originCwd !== input.resource.originCwd) {
-        throw new Error(`Publication ${input.resource.publicationId} already staged from a different origin.`);
+      if (current.state !== "open") {
+        throw new Error(`Completion dispatch ${input.dispatchId} no longer accepts publications.`);
       }
-      const published = current.published.filter((entry) => entry.publicationId !== input.resource.publicationId);
+      if (!current.expectedTasks.includes(input.resource.correlationId)) {
+        throw new Error(`Publication ${input.resource.publicationId} does not belong to an expected task.`);
+      }
+      const existing = current.published.find((entry) => entry.publicationId === input.resource.publicationId);
+      if (existing && (existing.correlationId !== input.resource.correlationId
+        || existing.originCwd !== input.resource.originCwd)) {
+        throw new Error(`Publication ${input.resource.publicationId} already belongs to another result.`);
+      }
+      if (existing?.state === "committed") return current;
+      const previousForTask = current.published.find((entry) =>
+        entry.correlationId === input.resource.correlationId
+        && entry.publicationId !== input.resource.publicationId);
+      if (previousForTask?.state === "committed") {
+        throw new Error(`Expected task ${input.resource.correlationId} already has a committed publication.`);
+      }
+      // A failed capture may leave one staged entry. Its retry owns the same
+      // task slot and replaces that uncommitted entry rather than growing a
+      // manifest that can never satisfy the exact-set invariant.
+      const published = current.published.filter((entry) =>
+        entry.publicationId !== input.resource.publicationId
+        && entry.correlationId !== input.resource.correlationId);
       // Byte-cap the summary at the persistence boundary so an oversized summary
       // can never be written and then silently quarantined on the next read
       // (the strict validator caps by UTF-8 bytes, not characters).
@@ -303,27 +323,69 @@ export class FlowCompletionDurabilityProvider implements CompletionDurabilityPro
     let intent: CompletionIntent | undefined;
     await this.#mutateDispatch(input.dispatchId, async (current, now) => {
       this.#assertReservation(current, input.reservationId);
-      if (current.intent) { intent = current.intent; return current; }
       if (!current.notificationRequired) {
         throw new Error(`Completion dispatch ${input.dispatchId} does not require notification.`);
       }
-      const published = [...current.published];
-      const resolvedResources: CompletionResource[] = [];
-      for (const resource of input.resources) {
-        const index = published.findIndex((entry) => entry.publicationId === resource.publicationId);
-        const entry = index < 0 ? undefined : published[index];
-        const origin = entry?.originCwd ?? current.originCwd;
-        const record = entry
-          ? await readExactAgentPublication(resource.publicationId, origin)
-          : undefined;
-        if (!entry
-          || entry.state !== "staged" && entry.state !== "committed"
-          || !record
-          || record.correlationId !== entry.correlationId) {
-          throw new Error(`Completion publication ${resource.publicationId} is not durably committed.`);
+
+      // A completion intent is a graph-wide release boundary. It may not drop
+      // a task, duplicate one, or substitute a container/unrelated resource.
+      const expected = [...current.expectedTasks];
+      const expectedSet = new Set(expected);
+      if (expected.length === 0 || expectedSet.size !== expected.length) {
+        throw new Error(`Completion dispatch ${input.dispatchId} has an invalid expected task set.`);
+      }
+      const inputCorrelations = input.resources.map((resource) => resource.correlationId);
+      const inputCorrelationSet = new Set(inputCorrelations);
+      if (inputCorrelations.length !== expected.length
+        || inputCorrelationSet.size !== inputCorrelations.length
+        || inputCorrelations.some((correlationId) => !expectedSet.has(correlationId))) {
+        throw new Error(`Completion dispatch ${input.dispatchId} resources do not exactly match expected tasks.`);
+      }
+      const inputPublicationIds = new Set(input.resources.map((resource) => resource.publicationId));
+      if (inputPublicationIds.size !== input.resources.length) {
+        throw new Error(`Completion dispatch ${input.dispatchId} resources contain duplicate publications.`);
+      }
+      if (current.intent) {
+        const finalizedByCorrelation = new Map(current.intent.resources.map((resource) => [resource.correlationId, resource]));
+        if (input.resources.some((resource) =>
+          finalizedByCorrelation.get(resource.correlationId)?.publicationId !== resource.publicationId)) {
+          throw new Error(`Completion dispatch ${input.dispatchId} resources do not match its finalized intent.`);
         }
-        if (entry.state === "staged") {
-          published[index] = { ...entry, state: "committed", committedAt: input.finalizedAt };
+        intent = current.intent;
+        return current;
+      }
+
+      const published = [...current.published];
+      const publishedByCorrelation = new Map<string, typeof published[number]>();
+      const publishedIds = new Set<string>();
+      for (const entry of published) {
+        if (entry.state !== "committed"
+          || publishedIds.has(entry.publicationId)
+          || publishedByCorrelation.has(entry.correlationId)
+          || !expectedSet.has(entry.correlationId)) {
+          throw new Error(`Completion dispatch ${input.dispatchId} has a non-exact committed publication set.`);
+        }
+        publishedIds.add(entry.publicationId);
+        publishedByCorrelation.set(entry.correlationId, entry);
+      }
+      if (published.length !== expected.length
+        || expected.some((correlationId) => !publishedByCorrelation.has(correlationId))) {
+        throw new Error(`Completion dispatch ${input.dispatchId} is missing a committed publication for an expected task.`);
+      }
+      if (input.resources.some((resource) => {
+        const entry = publishedByCorrelation.get(resource.correlationId);
+        return !entry || entry.publicationId !== resource.publicationId;
+      })) {
+        throw new Error(`Completion dispatch ${input.dispatchId} resources do not exactly match committed publications.`);
+      }
+
+      const resolvedResources: CompletionResource[] = [];
+      for (const correlationId of expected) {
+        const entry = publishedByCorrelation.get(correlationId)!;
+        const origin = entry.originCwd ?? current.originCwd;
+        const record = await readExactAgentPublication(entry.publicationId, origin);
+        if (!record || record.correlationId !== entry.correlationId) {
+          throw new Error(`Completion publication ${entry.publicationId} is not durably committed.`);
         }
         const { state: _state, stagedAt: _stagedAt, committedAt: _committedAt, ...canonicalResource } = entry;
         resolvedResources.push({ ...canonicalResource, originCwd: origin });

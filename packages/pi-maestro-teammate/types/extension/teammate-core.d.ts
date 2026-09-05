@@ -11,7 +11,7 @@ import type { RecentToolInfo } from "../shared/types.ts";
 import { type WorkspaceBackgroundJobSnapshot, type WorkspaceOwnerState } from "./workspace-peers.ts";
 import { type LeaseToken } from "../runs/session-handoff.ts";
 import type { RunTeammateOptions, RpcMessageMode, NormalizedTask } from "../runs/execution.ts";
-import type { TeammateState, AgentProgress, AgentProgressSnapshot, AgentRunPhase, ActiveAgent, DeferredContextMessage, AgentStatus, AgentTerminalStatus, SingleResult, StructuredResult } from "../shared/types.ts";
+import type { TeammateState, AgentProgress, AgentProgressSnapshot, AgentRunPhase, ActiveAgent, DeferredContextMessage, AgentStatus, AgentTerminalStatus, SingleResult, StructuredResult, TeammateResultPublicationResult } from "../shared/types.ts";
 import { TEAMMATE_STALL_TIMEOUT_MS } from "../shared/limits.ts";
 export { TEAMMATE_STALL_TIMEOUT_MS };
 export declare const TEAMMATE_PROMPT_SNIPPET = "Dispatch bounded work to discovered teammate roles for parallel, sequential, or specialist execution.";
@@ -77,8 +77,8 @@ export declare function finalResultText(result: SingleResult): string | undefine
  * payload minimal.
  */
 export declare function toStructuredResults(results: readonly SingleResult[], originCwd: string): StructuredResult[] | undefined;
-/** Publish one consumable result and await durable work claimed by listeners. */
-export declare function emitTeammateResultPublished(pi: ExtensionAPI, result: SingleResult, originCwd: string): Promise<void>;
+/** Publish one consumable result and await work claimed by listeners. */
+export declare function emitTeammateResultPublished(pi: ExtensionAPI, result: SingleResult, originCwd: string): Promise<TeammateResultPublicationResult>;
 /** Replace the retained turn value; undefined intentionally clears stale data. */
 export declare function setAgentStructuredOutput(agent: ActiveAgent, output: unknown): void;
 export type TeammateRuntimeOptions = Pick<RunTeammateOptions, "spawnChildProcess" | "resultReadyGraceMs" | "foregroundMaxRunMs"> & {

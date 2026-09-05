@@ -28,6 +28,7 @@ import type {
   AgentTurnEvent,
   AgentTurnTriggerContextV1,
   MessageProvenanceV1,
+  TeammateResultPublicationResult,
 } from "../shared/types.ts";
 import type { RuntimeActorHostClient } from "../runtime-broker/actor-host.ts";
 import { wrapLeasedMessage, type LeaseToken } from "./session-handoff.ts";
@@ -193,6 +194,23 @@ export interface ModelRegistryDispatchContext {
   readonly resolutionsByCorrelationId: ReadonlyMap<string, ReadonlyMap<string, ResolvedBackend>>;
 }
 
+/**
+ * A canonical publication listener explicitly reported that its immutable
+ * agent:// resource was not durably acknowledged. This is distinct from an
+ * unrelated observer error, which remains advisory.
+ */
+export class TeammatePublicationCaptureError extends Error {
+  readonly code = "TEAMMATE_PUBLICATION_CAPTURE" as const;
+  readonly captureError: unknown;
+
+  constructor(correlationId: string, captureError?: unknown) {
+    const detail = captureError instanceof Error ? captureError.message : captureError === undefined ? "unknown capture failure" : String(captureError);
+    super(`Canonical teammate result publication was not durably acknowledged for ${correlationId}: ${detail}`);
+    this.name = "TeammatePublicationCaptureError";
+    this.captureError = captureError;
+  }
+}
+
 export interface RunTeammateOptions {
   baseCwd: string;
   /**
@@ -336,9 +354,13 @@ export interface RunTeammateOptions {
   ) => void;
   /**
    * Runs once when the final consumable result is published, before the caller
-   * or a DAG dependent can observe it. Observer failures are non-fatal.
+   * or a DAG dependent can observe it. Observer failures are non-fatal; a
+   * returned publication result can explicitly reject canonical capture.
    */
-  onResultPublished?: (result: SingleResult, originCwd: string) => void | Promise<void>;
+  onResultPublished?: (
+    result: SingleResult,
+    originCwd: string,
+  ) => TeammateResultPublicationResult | void | Promise<TeammateResultPublicationResult | void>;
   onTurnComplete?: (result: SingleResult, terminalStatus?: AgentTerminalStatus) => void;
   /** Physical child-process reclamation, independent of logical turn settlement. */
   onReclamationOutcome?: (

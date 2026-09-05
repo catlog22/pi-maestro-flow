@@ -716,6 +716,8 @@ export interface TeammateState {
   currentSourceId?: string;
   /** Monotonic owner token for async work admitted by the current session. */
   sessionGeneration?: number;
+  /** Child execution promises retained until shutdown has observed process close. */
+  dispatchSettlements?: Set<Promise<unknown>>;
   /** @internal Outgoing owner retained while fenced shutdown records settled agents. */
   settlementOwner?: SessionProjectionIdentity;
   mainSessionFile?: string;
@@ -838,15 +840,35 @@ export interface StructuredResult {
   provenance?: TeammateExecutionProvenance;
 }
 
+/** Work claimed by a result-publication listener. */
+export type TeammateResultPublicationWorkKind = "canonical" | "observer";
+
+/**
+ * Outcome of the result-publication barrier. `resourceAcknowledged` is the
+ * canonical durable acknowledgement; observer errors are deliberately kept
+ * separate so an unrelated listener cannot turn a committed publication into
+ * a direct/fallback delivery.
+ */
+export interface TeammateResultPublicationResult {
+  resourceAcknowledged: boolean;
+  observerErrors: readonly unknown[];
+  /** Rejection (or a missing acknowledgement) from canonical capture work. */
+  captureError?: unknown;
+}
+
 /**
  * Per-result publication boundary. Consumers register durable work synchronously
  * with `waitUntil`; DAG dependents are released after those promises settle.
  * Persistence consumers acknowledge the canonical resource only after the
- * result is durably readable.
+ * result is durably readable. `kind` defaults to `observer` for compatibility;
+ * canonical persistence listeners should pass `{ kind: "canonical" }`.
  */
 export interface TeammateResultPublishedEvent {
   result: StructuredResult;
-  waitUntil(promise: Promise<unknown>): void;
+  waitUntil(
+    promise: Promise<unknown>,
+    options?: { kind?: TeammateResultPublicationWorkKind },
+  ): void;
   acknowledgeResource?(uri: string): void;
 }
 

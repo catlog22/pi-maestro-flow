@@ -160,7 +160,10 @@ export declare function deliverTeammateCompleteNotification(options: {
     parentCid?: string;
     parentSessionId?: string;
     sessionGeneration?: number;
+    parentRuntimeGeneration?: number;
 }): boolean;
+export declare function trackAgentSettlement<T>(state: TeammateState, settlement: Promise<T>): Promise<T>;
+export declare function drainAgentSettlements(state: TeammateState): Promise<void>;
 export interface DurableFailureFallbackOptions {
     publishDurableFailure(): Promise<boolean>;
     ownsDispatchGeneration(): boolean;

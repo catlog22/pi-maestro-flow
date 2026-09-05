@@ -154,12 +154,16 @@ export function capturePublishedAgentResult(
   onStored?: (publicationId: string) => void,
 ): boolean {
   if (!event || typeof event !== "object") return false;
-  const payload = event as { result?: unknown; waitUntil?: unknown; acknowledgeResource?: unknown };
+  const payload = event as {
+    result?: unknown;
+    waitUntil?: unknown;
+    acknowledgeResource?: unknown;
+  };
   if (typeof payload.waitUntil !== "function" || !payload.result) return false;
   const result = payload.result as { correlationId?: unknown; publicationId?: unknown };
   const correlationId = typeof result.correlationId === "string" ? result.correlationId : "unknown";
   const publicationId = typeof result.publicationId === "string" ? result.publicationId : undefined;
-  const resourceId = correlationId;
+  const resourceId = publicationId ?? correlationId;
   const persistence = (async () => {
     const registry = getCompletionDurabilityRegistry();
     const raw = payload.result as StructuredResultLike;
@@ -167,8 +171,13 @@ export function capturePublishedAgentResult(
     // A result belongs to the provider generation that accepted beginDispatch;
     // registry reloads must never redirect stage/commit to the new current one.
     const durableProvider = dispatchId
-      ? registry.providerForDispatch(dispatchId) ?? registry.current()
+      ? registry.providerForDispatch(dispatchId)
       : undefined;
+    if (dispatchId && !durableProvider) {
+      throw new Error(
+        `Completion dispatch ${dispatchId} has no pinned durability provider; refusing cross-generation capture.`,
+      );
+    }
     const reservationId = typeof raw.completionReservationId === "string" ? raw.completionReservationId : undefined;
     const originCwd = typeof raw.originCwd === "string" && raw.originCwd.length > 0 ? raw.originCwd : undefined;
     const outcome: CompletionOutcome = raw.completionOutcome === "failed" || raw.completionOutcome === "terminated"
@@ -218,6 +227,9 @@ export function capturePublishedAgentResult(
     }
     if (publicationId) onStored?.(publicationId);
   })();
-  (payload.waitUntil as (promise: Promise<unknown>) => void)(persistence);
+  (payload.waitUntil as (
+    promise: Promise<unknown>,
+    options?: { kind?: "canonical" | "observer" },
+  ) => void)(persistence, { kind: "canonical" });
   return true;
 }

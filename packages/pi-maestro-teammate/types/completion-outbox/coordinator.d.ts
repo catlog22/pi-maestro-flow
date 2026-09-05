@@ -51,6 +51,7 @@ export declare class CompletionDeliveryCoordinator {
     readonly registry: CompletionDurabilityRegistry;
     constructor(options?: CompletionCoordinatorOptions);
     beginDispatch(seed: CompletionDispatchSeed): Promise<CompletionDispatchDurability>;
+    stopAdmission(): void;
     requireNotification(input: CompletionNotificationRequirement): Promise<void>;
     abandon(seed: CompletionDispatchSeed, reason: string): Promise<void>;
     publishCompletion(input: CompletionFinalizeInput): Promise<CompletionPublishResult>;

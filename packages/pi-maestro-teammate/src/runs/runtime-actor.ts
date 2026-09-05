@@ -1,6 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { logDiagnosticWarn } from "../shared/diagnostic-log.ts";
-import type { AgentProgress, AgentTerminalStatus, SingleResult } from "../shared/types.ts";
+import type {
+  AgentProgress,
+  AgentTerminalStatus,
+  SingleResult,
+  TeammateResultPublicationResult,
+} from "../shared/types.ts";
 import type { ChildReclamationOutcome, RunTeammateOptions } from "./execution-infra.ts";
 import {
   createRuntimeActorHost,
@@ -127,9 +132,9 @@ export class AgentRunRuntimeActor {
           this.#lastChildClose = details;
         }
       },
-      onResultPublished: async (result, originCwd) => {
+      onResultPublished: async (result, originCwd): Promise<TeammateResultPublicationResult | void> => {
         await this.resultPublishedAfterV1(result);
-        await v1.onResultPublished?.(result, originCwd);
+        return v1.onResultPublished?.(result, originCwd);
       },
       onTurnComplete: (result, status) => {
         this.settledAfterV1(result, status, () => v1.onTurnComplete?.(result, status));

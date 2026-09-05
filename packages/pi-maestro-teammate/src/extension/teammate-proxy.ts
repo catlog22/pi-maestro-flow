@@ -279,7 +279,7 @@ import {
   terminateAndRemoveWakeableCohort, wakeableAgentCohorts,
   applyAgentRetryState, applyAgentResultReadyState, clearAgentResultReadyState,
   markSettledResultInspectable, recordChildReclamationOutcome, hasTeammateWidgetWork,
-  deliverDurableFailureWithFallback,
+  deliverDurableFailureWithFallback, trackAgentSettlement,
   emitComplete, safeSendMessage, notifyBackgroundFailure, replyProxyFailure,
   currentSessionProjectionIdentity,
   deliverTeammateCompleteNotification,
@@ -1074,6 +1074,9 @@ export async function handleProxyRequest(
       && state.currentSourceId === dispatchProjection.sourceId));
   const parentCid = resolveProxyParentCorrelationId(event, spawnedBy, state);
   const parentSessionId = parentCid ? state.activeRuns.get(parentCid)?.sessionId : undefined;
+  const parentRuntimeGeneration = parentCid
+    ? state.activeRuns.get(parentCid)?.runtimeGeneration
+    : undefined;
   const rootOwnerId = state.currentSessionId ?? parentSessionId ?? `process-${process.pid}`;
   const proxySender = (): Exclude<MessageSenderIdentityV1, { kind: "unknown" }> =>
     parentCid
@@ -1483,6 +1486,10 @@ export async function handleProxyRequest(
       const nestedKnownWarnings = new Map<string, Set<string>>();
       const nestedAdditionalNotification = new WeakMap<SingleResult, boolean>();
       const nestedAdditionalSeeds = new Map<string, CompletionDispatchSeed>();
+      const nestedPublishedResultsByCorrelation = new Map<string, {
+        result: SingleResult;
+        resourceAcknowledged: boolean;
+      }>();
       const finishProxyDispatchTracking = (): boolean => {
         const cancelled = state.cancelledProxyDispatches?.get(requestId) === cid;
         if (state.proxyDispatchByRequest?.get(requestId) === cid) {
@@ -1587,6 +1594,7 @@ export async function handleProxyRequest(
             },
           };
           const fallbackDelivery = (): void => {
+            if (!ownsDispatchGeneration()) return;
             const replyTarget = resolveAgentCompletionTarget(activeAgent);
             const delivered = deliverTeammateCompleteNotification({
               pi,
@@ -1595,11 +1603,13 @@ export async function handleProxyRequest(
               replyTarget,
               parentCid,
               parentSessionId,
-              sessionGeneration: state.sessionGeneration ?? 0,
+              sessionGeneration: dispatchGeneration,
+              parentRuntimeGeneration,
             });
             if (!delivered) markSettledResultInspectable(state, cid);
           };
           void publishNestedDurableCompletion(nestedPublication, terminalStatus).then((result) => {
+            if (!ownsDispatchGeneration()) return;
             if (!result.finalized) {
               fallbackDelivery();
               return;
@@ -1613,10 +1623,12 @@ export async function handleProxyRequest(
               replyTarget: "caller",
               parentCid,
               parentSessionId,
-              sessionGeneration: state.sessionGeneration ?? 0,
+              sessionGeneration: dispatchGeneration,
+              parentRuntimeGeneration,
             });
             if (!delivered) markSettledResultInspectable(state, cid);
           }, (error) => {
+            if (!ownsDispatchGeneration()) return;
             // publishCompletion rejects only before finalizeDelivery crosses the
             // commit point. Errors from the fulfilled delivery handler below
             // must never route into this direct fallback.
@@ -1659,6 +1671,7 @@ export async function handleProxyRequest(
         if (!notifyModel) return;
         const lastMessage = displayMessageForResult(result);
         const fallbackDelivery = (): void => {
+          if (!ownsDispatchGeneration()) return;
           if (!deliverTeammateCompleteNotification({
             pi,
             state,
@@ -1671,7 +1684,8 @@ export async function handleProxyRequest(
             replyTarget: resolveAgentCompletionTarget(activeAgent),
             parentCid,
             parentSessionId,
-            sessionGeneration: state.sessionGeneration ?? 0,
+            sessionGeneration: dispatchGeneration,
+            parentRuntimeGeneration,
           })) markSettledResultInspectable(state, result.correlationId);
         };
         const additionalSeed = result.publicationId
@@ -1691,6 +1705,7 @@ export async function handleProxyRequest(
           resources: nestedResources([result]),
           finalizedAt: Date.now(),
         }).then((publishResult) => {
+          if (!ownsDispatchGeneration()) return;
           if (!publishResult.finalized) {
             fallbackDelivery();
             return;
@@ -1704,10 +1719,12 @@ export async function handleProxyRequest(
             replyTarget: "caller",
             parentCid,
             parentSessionId,
-            sessionGeneration: state.sessionGeneration ?? 0,
+            sessionGeneration: dispatchGeneration,
+            parentRuntimeGeneration,
           });
           if (!delivered) markSettledResultInspectable(state, result.correlationId);
         }, (error) => {
+          if (!ownsDispatchGeneration()) return;
           logDiagnosticWarn("[pi-maestro-teammate] durable nested additional completion failed before finalization; using passive delivery:", error);
           fallbackDelivery();
         }).catch((error) => {
@@ -2090,9 +2107,23 @@ export async function handleProxyRequest(
             }
           }
           nestedAdditionalNotification.set(result, notifyAdditional);
-          let resultSeed = publicationCount === 1 ? completionSeed : undefined;
-          let resultDurable = publicationCount === 1 ? completionDurable : false;
-          if (publicationCount > 1 && notifyAdditional && completionSeed && authority.completion && result.publicationId) {
+          const previousPublication = nestedPublishedResultsByCorrelation.get(result.correlationId);
+          const retriesMainPublication = publicationCount > 1
+            && completionDurable
+            && completionSeed !== undefined
+            && previousPublication?.resourceAcknowledged === false;
+          let resultSeed = publicationCount === 1 || retriesMainPublication
+            ? completionSeed
+            : undefined;
+          let resultDurable = publicationCount === 1 || retriesMainPublication
+            ? completionDurable
+            : false;
+          if (publicationCount > 1
+            && !retriesMainPublication
+            && notifyAdditional
+            && completionSeed
+            && authority.completion
+            && result.publicationId) {
             const additionalSeed: CompletionDispatchSeed = {
               ...completionSeed,
               dispatchId: result.publicationId,
@@ -2121,7 +2152,15 @@ export async function handleProxyRequest(
               ? "terminated"
               : result.exitCode === 0 ? "completed" : "failed";
           }
-          return emitTeammateResultPublished(pi, result, originCwd);
+          const publication = await emitTeammateResultPublished(pi, result, originCwd);
+          const isMainPublication = resultSeed?.dispatchId === completionSeed?.dispatchId;
+          if (!previousPublication || (!previousPublication.resourceAcknowledged && isMainPublication)) {
+            nestedPublishedResultsByCorrelation.set(result.correlationId, {
+              result,
+              resourceAcknowledged: publication.resourceAcknowledged,
+            });
+          }
+          return resultDurable ? publication : undefined;
         },
         onTurnComplete: (result, terminalStatus) => {
           const canonicalStatus = terminalStatusForResult(result, terminalStatus);
@@ -2360,7 +2399,8 @@ export async function handleProxyRequest(
               replyTarget: resolveAgentCompletionTarget(target),
               parentCid,
               parentSessionId,
-              sessionGeneration: state.sessionGeneration ?? 0,
+              sessionGeneration: dispatchGeneration,
+              parentRuntimeGeneration,
             });
           };
           const onTurnComplete = runOpts.onTurnComplete;
@@ -2371,7 +2411,7 @@ export async function handleProxyRequest(
             deliverRestartCompletion();
           };
 
-          target.restartPending = runSingleTeammate(
+          target.restartPending = trackAgentSettlement(state, runSingleTeammate(
             singleRunParamsOf(task, {
               task: message,
               context: "fresh",
@@ -2404,7 +2444,7 @@ export async function handleProxyRequest(
               target.sleptAt = Date.now();
             }
             target.restartPending = undefined;
-          });
+          }));
           return true;
         };
       };
@@ -2514,7 +2554,7 @@ export async function handleProxyRequest(
       };
       const executeNested = (): ReturnType<typeof executeNestedCore> => {
         forkSnapshotExecutionStarted = true;
-        return executeNestedCore().finally(cleanupForkSnapshot);
+        return trackAgentSettlement(state, executeNestedCore().finally(cleanupForkSnapshot));
       };
 
       const settleNestedExecutionFailure = (error: unknown): string => {
@@ -2535,34 +2575,73 @@ export async function handleProxyRequest(
         return message;
       };
 
+      const nestedFailureResult = (
+        task: NormalizedTask | undefined,
+        taskCorrelationId: string,
+        agent: string,
+        message: string,
+      ): SingleResult => ({
+        agent,
+        ...(task?.name ? { name: task.name } : {}),
+        task: task?.prompt ?? singleTask.prompt,
+        exitCode: 1,
+        messages: [{ role: "assistant", content: message }],
+        usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cost: 0, turns: 0 },
+        model: task?.model ?? "",
+        correlationId: taskCorrelationId,
+        publicationId: randomUUID(),
+        originCwd: task?.cwd ?? dispatchOriginCwd,
+        durationMs: Date.now() - activeAgent.startedAt,
+        wakeable: false,
+        terminalStatus: "failed",
+        completionDispatchId: completionSeed?.dispatchId,
+        completionReservationId: completionSeed?.reservationId,
+        completionOutcome: "failed",
+      });
+      const publishNestedCanonicalFailureResult = async (result: SingleResult): Promise<void> => {
+        const publication = await emitTeammateResultPublished(pi, result, result.originCwd ?? dispatchOriginCwd);
+        nestedPublishedResultsByCorrelation.set(result.correlationId, {
+          result,
+          resourceAcknowledged: publication.resourceAcknowledged,
+        });
+        if (!publication.resourceAcknowledged) {
+          throw publication.captureError ?? new Error(
+            `Canonical nested teammate result ${result.correlationId} was not durably acknowledged.`,
+          );
+        }
+      };
       const publishNestedFailure = async (error: unknown): Promise<boolean> => {
         if (!completionDurable || !completionSeed || !authority.completion) return false;
         const message = error instanceof Error ? error.message : String(error);
-        const result: SingleResult = {
-          agent: activeAgent.agent,
-          task: singleTask.prompt,
-          exitCode: 1,
-          messages: [{ role: "assistant", content: message }],
-          usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cost: 0, turns: 0 },
-          model: "",
-          correlationId: cid,
-          publicationId: randomUUID(),
-          originCwd: dispatchOriginCwd,
-          durationMs: Date.now() - activeAgent.startedAt,
-          wakeable: false,
-          terminalStatus: "failed",
-          completionDispatchId: completionSeed.dispatchId,
-          completionReservationId: completionSeed.reservationId,
-          completionOutcome: "failed",
-        };
-        await emitTeammateResultPublished(pi, result, dispatchOriginCwd);
+        const failureResults: SingleResult[] = [];
+        if (!normalizedTasks) {
+          const result = nestedFailureResult(undefined, cid, activeAgent.agent, message);
+          await publishNestedCanonicalFailureResult(result);
+          failureResults.push(result);
+        } else {
+          for (let index = 0; index < taskCorrelationIds.length; index += 1) {
+            const taskCorrelationId = taskCorrelationIds[index]!;
+            const existing = nestedPublishedResultsByCorrelation.get(taskCorrelationId);
+            if (existing?.resourceAcknowledged && existing.result.publicationId) {
+              failureResults.push(existing.result);
+              continue;
+            }
+            const task = normalizedTasks[index];
+            const result = nestedFailureResult(task, taskCorrelationId, task?.agent ?? activeAgent.agent, message);
+            await publishNestedCanonicalFailureResult(result);
+            failureResults.push(result);
+          }
+        }
+        const summary = normalizedTasks
+          ? `${message}\n${failureResults.map((result) => displayMessageForResult(result)).join("\n")}`
+          : message;
         const published = await authority.completion.coordinator.publishCompletion({
           dispatchId: completionSeed.dispatchId,
           reservationId: completionSeed.reservationId,
           kind: "failure",
           outcome: "failed",
-          summary: truncateUtf8Head(message, 4_096),
-          resources: nestedResources([result]),
+          summary: truncateUtf8Head(summary, 4_096),
+          resources: nestedResources(failureResults),
           finalizedAt: Date.now(),
         });
         return published.finalized;

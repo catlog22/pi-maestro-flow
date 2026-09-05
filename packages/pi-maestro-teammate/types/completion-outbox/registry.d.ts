@@ -5,6 +5,7 @@ export declare class CompletionDurabilityRegistryImpl implements CompletionDurab
     snapshot(): CompletionDurabilityRegistrySnapshot;
     providerForDispatch(dispatchId: string): CompletionDurabilityProvider | undefined;
     pinDispatch(dispatchId: string, provider: CompletionDurabilityProvider): () => void;
+    waitForProviderIdle(provider: CompletionDurabilityProvider): Promise<void>;
     register(provider: CompletionDurabilityProvider): () => void;
     subscribe(listener: CompletionDurabilityRegistryListener): () => void;
 }

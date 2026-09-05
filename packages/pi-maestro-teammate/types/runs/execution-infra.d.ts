@@ -10,7 +10,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import crossSpawn from "cross-spawn";
 import { type AgentConfig } from "../agents/agents.ts";
-import type { SingleResult, Usage, AgentProgress, AgentTerminalStatus, AgentTurnEvent, AgentTurnTriggerContextV1, MessageProvenanceV1 } from "../shared/types.ts";
+import type { SingleResult, Usage, AgentProgress, AgentTerminalStatus, AgentTurnEvent, AgentTurnTriggerContextV1, MessageProvenanceV1, TeammateResultPublicationResult } from "../shared/types.ts";
 import type { RuntimeActorHostClient } from "../runtime-broker/actor-host.ts";
 import { type LeaseToken } from "./session-handoff.ts";
 import { type ResolvedModelRegistrationRouting, type TeammateTaskType } from "../models/model-routing.ts";
@@ -147,6 +147,16 @@ export interface ModelRegistryDispatchContext {
     readonly plansByCorrelationId: ReadonlyMap<string, ResolvedModelRegistrationRouting>;
     readonly resolutionsByCorrelationId: ReadonlyMap<string, ReadonlyMap<string, ResolvedBackend>>;
 }
+/**
+ * A canonical publication listener explicitly reported that its immutable
+ * agent:// resource was not durably acknowledged. This is distinct from an
+ * unrelated observer error, which remains advisory.
+ */
+export declare class TeammatePublicationCaptureError extends Error {
+    readonly code: "TEAMMATE_PUBLICATION_CAPTURE";
+    readonly captureError: unknown;
+    constructor(correlationId: string, captureError?: unknown);
+}
 export interface RunTeammateOptions {
     baseCwd: string;
     /**
@@ -282,9 +292,10 @@ export interface RunTeammateOptions {
     }) => void;
     /**
      * Runs once when the final consumable result is published, before the caller
-     * or a DAG dependent can observe it. Observer failures are non-fatal.
+     * or a DAG dependent can observe it. Observer failures are non-fatal; a
+     * returned publication result can explicitly reject canonical capture.
      */
-    onResultPublished?: (result: SingleResult, originCwd: string) => void | Promise<void>;
+    onResultPublished?: (result: SingleResult, originCwd: string) => TeammateResultPublicationResult | void | Promise<TeammateResultPublicationResult | void>;
     onTurnComplete?: (result: SingleResult, terminalStatus?: AgentTerminalStatus) => void;
     /** Physical child-process reclamation, independent of logical turn settlement. */
     onReclamationOutcome?: (correlationId: string, outcome: ChildReclamationOutcome) => void;

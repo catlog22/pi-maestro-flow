@@ -9,6 +9,10 @@ import test from "node:test";
 import type { ExtensionAPI, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { getObservationProvider } from "../src/public/v1/observation.ts";
+import {
+  getCompletionDurabilityRegistry,
+  type CompletionDurabilityProvider,
+} from "../src/public/v1/completion-durability.ts";
 import type { CompletionDeliveryEnvelope } from "../src/completion-outbox/coordinator.ts";
 import registerStructuredOutput from "../src/extension/structured-output.ts";
 import registerTeammateExtension, {
@@ -249,12 +253,13 @@ function createAbortAwareStructuredSpawn(
 function createRootTool(
   runtimeOptions: TeammateRuntimeOptions,
   sentMessages?: Array<{ customType?: string; content?: string }>,
+  eventsOverride?: ExtensionAPI["events"],
 ): RegisteredTeammateTool {
   delete (globalThis as typeof globalThis & Record<symbol, unknown>)[
     Symbol.for("pi-maestro-teammate.root-registry")
   ];
   let teammateTool: RegisteredTeammateTool | undefined;
-  const events = { on: () => () => {}, emit() {} };
+  const events = eventsOverride ?? ({ on: () => () => {}, emit() {} } as unknown as ExtensionAPI["events"]);
   const pi = new Proxy({
     events,
     registerTool(tool: RegisteredTeammateTool & { name: string }) {
@@ -746,11 +751,203 @@ test("result publication drains claimed work when an event listener throws", asy
     durationMs: 1,
   };
 
-  await assert.rejects(
-    () => emitTeammateResultPublished(pi, result, process.cwd()),
-    /listener failed/,
-  );
+  const publication = await emitTeammateResultPublished(pi, result, process.cwd());
+  assert.equal(publication.resourceAcknowledged, false);
+  assert.equal(publication.observerErrors.length, 1);
+  assert.match(String(publication.observerErrors[0]), /listener failed/);
   assert.equal(durable, true);
+});
+
+test("canonical publication acknowledgement survives unrelated listener failures", async () => {
+  const pi = {
+    events: {
+      emit(_name: string, event: {
+        waitUntil(promise: Promise<unknown>, options?: { kind?: "canonical" | "observer" }): void;
+        acknowledgeResource?(uri: string): void;
+      }) {
+        event.waitUntil(Promise.resolve().then(() => {
+          event.acknowledgeResource?.("agent://publication-acknowledged");
+        }), { kind: "canonical" });
+        event.waitUntil(Promise.reject(new Error("async observer failed")));
+        throw new Error("sync observer failed");
+      },
+    },
+  } as unknown as ExtensionAPI;
+  const result: SingleResult = {
+    agent: "general",
+    task: "produce",
+    exitCode: 0,
+    messages: [{ role: "assistant", content: "done" }],
+    usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cost: 0, turns: 1 },
+    model: "test/model",
+    correlationId: "published-acknowledged",
+    publicationId: "publication-acknowledged",
+    durationMs: 1,
+  };
+
+  const publication = await emitTeammateResultPublished(pi, result, process.cwd());
+  assert.equal(publication.resourceAcknowledged, true);
+  assert.equal(publication.captureError, undefined);
+  assert.equal(publication.observerErrors.length, 2);
+  assert.ok(publication.observerErrors.some((error) => String(error).includes("sync observer failed")));
+  assert.ok(publication.observerErrors.some((error) => String(error).includes("async observer failed")));
+
+  const acknowledgementOnly = await emitTeammateResultPublished({
+    events: {
+      emit(_name: string, event: { acknowledgeResource?(uri: string): void }) {
+        event.acknowledgeResource?.("agent://publication-acknowledged");
+      },
+    },
+  } as unknown as ExtensionAPI, result, process.cwd());
+  assert.equal(acknowledgementOnly.resourceAcknowledged, false, "ack without canonical work is not durable");
+});
+
+test("root graph synthetic recovery retries the original canonical dispatch", async () => {
+  const outboxRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teammate-canonical-retry-"));
+  const previousOutboxRoot = process.env.PI_TEAMMATE_COMPLETION_OUTBOX_ROOT;
+  process.env.PI_TEAMMATE_COMPLETION_OUTBOX_ROOT = outboxRoot;
+  const registry = getCompletionDurabilityRegistry();
+  const provider: CompletionDurabilityProvider = {
+    async beginDispatch(seed) {
+      return {
+        dispatchId: seed.dispatchId,
+        reservationId: seed.reservationId,
+        deliveryGroupId: seed.deliveryGroupId,
+      };
+    },
+    async requireNotification() {},
+    async stagePublication() {},
+    async commitPublication() {},
+    async finalizeDelivery() { throw new Error("foreground test must not finalize"); },
+    async listRecoverable() { return []; },
+    async acknowledgeApplied() {},
+    async abandonDispatch() {},
+    async prune() {},
+  };
+  const disposeProvider = registry.register(provider);
+  const retryPublications: Array<{
+    dispatchId?: string;
+    reservationId?: string;
+    publicationId?: string;
+  }> = [];
+  let retryCorrelationId: string | undefined;
+  let rejectedRetry = false;
+  const events = {
+    on() { return () => undefined; },
+    emit(name: string, event: {
+      result?: {
+        correlationId?: string;
+        completionDispatchId?: string;
+        completionReservationId?: string;
+        publicationId?: string;
+      };
+      waitUntil?(promise: Promise<unknown>, options?: { kind?: "canonical" | "observer" }): void;
+      acknowledgeResource?(uri: string): void;
+    }) {
+      if (name !== "teammate:result-published" || !event.result || !event.waitUntil) return;
+      retryCorrelationId ??= event.result.correlationId;
+      if (event.result.correlationId === retryCorrelationId) retryPublications.push({
+        dispatchId: event.result.completionDispatchId,
+        reservationId: event.result.completionReservationId,
+        publicationId: event.result.publicationId,
+      });
+      if (event.result.correlationId === retryCorrelationId && !rejectedRetry) {
+        rejectedRetry = true;
+        event.waitUntil(Promise.reject(new Error("injected canonical rejection")), { kind: "canonical" });
+        return;
+      }
+      const uri = `agent://${event.result.publicationId}`;
+      event.waitUntil(Promise.resolve().then(() => event.acknowledgeResource?.(uri)), { kind: "canonical" });
+    },
+  } as unknown as ExtensionAPI["events"];
+
+  try {
+    const tool = createRootTool(
+      { spawnChildProcess: createStructuredSpawn([{ value: 1 }, { value: 2 }]) },
+      undefined,
+      events,
+    );
+    const result = await tool.execute(
+      "canonical-retry",
+      {
+        tasks: [
+          {
+            agent: "general",
+            name: "retry",
+            prompt: "retry capture",
+            outputSchema: {
+              type: "object",
+              properties: { value: { type: "integer" } },
+              required: ["value"],
+              additionalProperties: false,
+            },
+          },
+          {
+            agent: "general",
+            name: "stable",
+            prompt: "complete normally",
+            outputSchema: {
+              type: "object",
+              properties: { value: { type: "integer" } },
+              required: ["value"],
+              additionalProperties: false,
+            },
+          },
+        ],
+        concurrency: 1,
+        background: false,
+      },
+      new AbortController().signal,
+      undefined,
+      {
+        ...rootToolContext(),
+        sessionManager: {
+          getSessionId: () => "canonical-retry-session",
+          getSessionFile: () => undefined,
+        },
+      } as never,
+    );
+
+    assert.equal(result.isError, true, "the recovered task remains a synthetic failure");
+    assert.equal(retryPublications.length, 2);
+    assert.ok(retryPublications[0]?.dispatchId);
+    assert.equal(retryPublications[1]?.dispatchId, retryPublications[0]?.dispatchId);
+    assert.equal(retryPublications[1]?.reservationId, retryPublications[0]?.reservationId);
+    assert.notEqual(retryPublications[1]?.publicationId, retryPublications[0]?.publicationId);
+  } finally {
+    disposeProvider();
+    if (previousOutboxRoot === undefined) delete process.env.PI_TEAMMATE_COMPLETION_OUTBOX_ROOT;
+    else process.env.PI_TEAMMATE_COMPLETION_OUTBOX_ROOT = previousOutboxRoot;
+    fs.rmSync(outboxRoot, { recursive: true, force: true });
+  }
+});
+
+test("canonical capture rejection prevents terminal publication", async () => {
+  let terminalCalls = 0;
+  await assert.rejects(() => runSingleTeammate({
+    agent: "general",
+    task: "capture must succeed",
+    outputSchema: {
+      type: "object",
+      properties: { value: { type: "integer" } },
+      required: ["value"],
+      additionalProperties: false,
+    },
+  }, {
+    baseCwd: process.cwd(),
+    spawnChildProcess: createStructuredSpawn([{ value: 1 }]),
+    onResultPublished() {
+      return {
+        resourceAcknowledged: false,
+        observerErrors: [],
+        captureError: new Error("canonical store unavailable"),
+      };
+    },
+    onTurnComplete() {
+      terminalCalls += 1;
+    },
+  }), /canonical store unavailable/);
+  assert.equal(terminalCalls, 0);
 });
 
 test("root and proxy expose identical validated structuredOutput projections", async () => {

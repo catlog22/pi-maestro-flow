@@ -37,9 +37,11 @@ function fakeChild(): ChildProcess {
   return child;
 }
 
-test("dependency-skipped DAG tasks publish a synthetic terminal completion", async () => {
+test("dependency-skipped DAG tasks publish before synthetic terminal completion", async () => {
   let spawns = 0;
+  const publications: SingleResult[] = [];
   const completions: Array<{ result: SingleResult; status?: AgentTerminalStatus }> = [];
+  const lifecycle: string[] = [];
   const spawnChildProcess = (() => {
     spawns += 1;
     const child = fakeChild();
@@ -65,15 +67,97 @@ test("dependency-skipped DAG tasks publish a synthetic terminal completion", asy
     baseCwd: process.cwd(),
     taskCorrelationIds: ["seed-cid", "dependent-cid"],
     spawnChildProcess,
-    onTurnComplete(result, status) { completions.push({ result, status }); },
+    onResultPublished(result) {
+      publications.push(result);
+      lifecycle.push(`published:${result.correlationId}`);
+    },
+    onTurnComplete(result, status) {
+      completions.push({ result, status });
+      lifecycle.push(`completed:${result.correlationId}`);
+    },
   });
 
   assert.equal(spawns, 1);
   assert.equal(results[0].exitCode, 1);
   assert.equal(results[1].exitCode, 1);
   assert.match(results[1].messages[0].content, /Skipped: upstream dependency failed/);
+  assert.deepEqual(publications.map((result) => result.correlationId).sort(), ["dependent-cid", "seed-cid"]);
   assert.deepEqual(completions.map(({ result }) => result.correlationId).sort(), ["dependent-cid", "seed-cid"]);
+  for (const correlationId of ["seed-cid", "dependent-cid"]) {
+    assert.ok(
+      lifecycle.indexOf(`published:${correlationId}`) < lifecycle.indexOf(`completed:${correlationId}`),
+      `${correlationId} must publish before terminal completion`,
+    );
+  }
   assert.equal(completions.find(({ result }) => result.correlationId === "dependent-cid")?.status, "failed");
+});
+
+test("synthetic capture rejection still releases deeper dependency waiters", async () => {
+  const published: string[] = [];
+  let spawns = 0;
+  const spawnChildProcess = (() => {
+    spawns += 1;
+    const child = fakeChild();
+    queueMicrotask(() => {
+      (child.stdout as PassThrough).write(`${JSON.stringify({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          stopReason: "error",
+          errorMessage: "Invalid API key",
+        },
+      })}\n`);
+      (child.stdout as PassThrough).write(`${JSON.stringify({ type: "agent_end" })}\n`);
+    });
+    return child;
+  }) as unknown as SpawnSeam;
+
+  await assert.rejects(() => runGraph([
+    { agent: "general", name: "seed", prompt: "fail" },
+    { agent: "general", name: "middle", prompt: "middle", dependsOn: ["seed"] },
+    { agent: "general", name: "leaf", prompt: "leaf", dependsOn: ["middle"] },
+  ], 1, {
+    baseCwd: process.cwd(),
+    taskCorrelationIds: ["release-seed", "release-middle", "release-leaf"],
+    spawnChildProcess,
+    onResultPublished(result) {
+      published.push(result.correlationId);
+      return result.correlationId === "release-middle"
+        ? {
+            resourceAcknowledged: false,
+            observerErrors: [],
+            captureError: new Error("middle synthetic capture rejected"),
+          }
+        : { resourceAcknowledged: true, observerErrors: [] };
+    },
+  }), /middle synthetic capture rejected/);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(spawns, 1);
+  assert.ok(published.includes("release-middle"));
+  assert.ok(published.includes("release-leaf"), "the rejected middle publication must still release its dependent");
+});
+
+test("synthetic graph results do not publish terminal completion after canonical capture rejection", async () => {
+  let terminalCalls = 0;
+  await assert.rejects(() => runGraph([
+    { agent: "general", name: "left", prompt: "left", dependsOn: ["right"] },
+    { agent: "general", name: "right", prompt: "right", dependsOn: ["left"] },
+  ], 1, {
+    baseCwd: process.cwd(),
+    taskCorrelationIds: ["left-capture", "right-capture"],
+    onResultPublished() {
+      return {
+        resourceAcknowledged: false,
+        observerErrors: [],
+        captureError: new Error("synthetic capture rejected"),
+      };
+    },
+    onTurnComplete() {
+      terminalCalls += 1;
+    },
+  }), /synthetic capture rejected/);
+  assert.equal(terminalCalls, 0);
 });
 
 test("runGraph rejects an oversized resolved prompt before child launch", async () => {
@@ -204,19 +288,36 @@ test("all pre-execution graph rejections publish synthetic terminal completions"
 
   for (const graphCase of cases) {
     let spawns = 0;
+    const publications: SingleResult[] = [];
     const completions: SingleResult[] = [];
+    const lifecycle: string[] = [];
     const ids = graphCase.tasks.map((_, index) => `${graphCase.name}-${index}`);
     const results = await runGraph(graphCase.tasks, 2, {
       baseCwd: process.cwd(),
       taskCorrelationIds: ids,
       spawnChildProcess: (() => { spawns += 1; return fakeChild(); }) as unknown as SpawnSeam,
-      onTurnComplete(entry) { completions.push(entry); },
+      onResultPublished(entry) {
+        publications.push(entry);
+        lifecycle.push(`published:${entry.correlationId}`);
+      },
+      onTurnComplete(entry) {
+        completions.push(entry);
+        lifecycle.push(`completed:${entry.correlationId}`);
+      },
     });
 
     assert.equal(spawns, 0, graphCase.name);
     assert.equal(results.length, graphCase.tasks.length, graphCase.name);
+    assert.equal(publications.length, graphCase.tasks.length, graphCase.name);
     assert.equal(completions.length, graphCase.tasks.length, graphCase.name);
+    assert.deepEqual(publications.map((entry) => entry.correlationId), ids, graphCase.name);
     assert.deepEqual(completions.map((entry) => entry.correlationId), ids, graphCase.name);
+    for (const correlationId of ids) {
+      assert.ok(
+        lifecycle.indexOf(`published:${correlationId}`) < lifecycle.indexOf(`completed:${correlationId}`),
+        `${graphCase.name}:${correlationId} must publish before terminal completion`,
+      );
+    }
     assert.ok(results.every((entry) => entry.exitCode === 1), graphCase.name);
     assert.match(results[0].messages[0].content, graphCase.message, graphCase.name);
   }

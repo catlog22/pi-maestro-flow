@@ -9,6 +9,7 @@ import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import registerTeammateExtension, {
   cancelProxyDispatch,
+  deliverTeammateCompleteNotification,
   enforceWakeableAgentBudget,
   handleProxyRequest,
   settleAgent,
@@ -2615,6 +2616,7 @@ test("nested background completion passively delivers teammate_complete_delivery
   assert.equal(controlMessages[0].type, "teammate_complete_delivery");
   assert.equal(controlMessages[0].correlationId, parentCid);
   assert.equal(controlMessages[0].sessionId, "parent-session");
+  assert.equal(controlMessages[0].runtimeGeneration, 0);
   const envelope = controlMessages[0].envelope as Record<string, unknown>;
   assert.equal(envelope.customType, "teammate-complete");
   const results = (envelope.details as { results: Array<{ messages: Array<{ role: string; content: string }> }> }).results;
@@ -2765,6 +2767,41 @@ test("nested background completion skips delivery when the parent session change
   assert.equal(controlMessages.length, 0);
 });
 
+test("nested passive completion is fenced to the dispatching child runtime generation", () => {
+  const state = createProxyState();
+  const sent: Record<string, unknown>[] = [];
+  const parent: ActiveAgent = {
+    agent: "general",
+    correlationId: "parent-runtime",
+    startedAt: Date.now(),
+    sessionId: "parent-session",
+    runtimeGeneration: 2,
+    abortController: new AbortController(),
+    inbox: [],
+    outputLog: [],
+    lastActivityAt: Date.now(),
+    depth: 0,
+    status: "running",
+    sleepMs: 0,
+    sendControl(message) { sent.push(message); return true; },
+  };
+  state.activeRuns.set(parent.correlationId, parent);
+  const base = {
+    pi: { sendMessage() {} } as never,
+    state,
+    envelope: { customType: "teammate-complete", content: "done", display: true },
+    replyTarget: "caller" as const,
+    parentCid: parent.correlationId,
+    parentSessionId: parent.sessionId,
+    sessionGeneration: 7,
+  };
+
+  assert.equal(deliverTeammateCompleteNotification({ ...base, parentRuntimeGeneration: 1 }), false);
+  assert.equal(sent.length, 0);
+  assert.equal(deliverTeammateCompleteNotification({ ...base, parentRuntimeGeneration: 2 }), true);
+  assert.equal(sent[0]?.runtimeGeneration, 2);
+});
+
 test("child bridge consumes teammate_complete_delivery and injects it locally", () => {
   const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8")
     + fs.readFileSync(new URL("../src/extension/teammate-proxy.ts", import.meta.url), "utf-8")
@@ -2772,10 +2809,14 @@ test("child bridge consumes teammate_complete_delivery and injects it locally", 
   assert.match(source, /type === "teammate_complete_delivery"/);
   assert.match(source, /m\.correlationId !== process\.env\.PI_TEAMMATE_CORRELATION_ID/);
   assert.match(source, /deliverySessionId !== bridge\.ctx\.sessionManager\.getSessionId\(\)/);
+  assert.match(source, /deliveryRuntimeGeneration !== childRuntimeGeneration/);
+  assert.match(source, /PI_TEAMMATE_RUNTIME_GENERATION/);
   assert.match(source, /safeSendMessage\(pi, envelope as never, \{ triggerTurn: true \}\)/);
   // Root side forwards the envelope over agent.sendControl only while the
   // dispatching child's session identity is unchanged.
   assert.match(source, /parentAgent\?\.sessionId === parentSessionId/);
+  assert.match(source, /parentAgent\.runtimeGeneration === parentRuntimeGeneration/);
+  assert.match(source, /runtimeGeneration: parentRuntimeGeneration/);
   assert.match(source, /sessionId: parentSessionId/);
 });
 

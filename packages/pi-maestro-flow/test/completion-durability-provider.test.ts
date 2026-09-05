@@ -7,7 +7,11 @@ import { pathToFileURL } from "node:url";
 import test from "node:test";
 import type { CompletionDispatchSeed, CompletionResource } from "pi-maestro-teammate/v1";
 import { FlowCompletionDurabilityProvider } from "../src/teammate/completion-durability-provider.ts";
-import { readCompletionManifestFile } from "../src/teammate/completion-manifest.ts";
+import {
+  parseCompletionManifest,
+  readCompletionManifestFile,
+  withCompletionManifestRevision,
+} from "../src/teammate/completion-manifest.ts";
 import { persistAgentOutputChecked } from "../src/teammate/agent-output-store.ts";
 
 async function fixture(run: (input: {
@@ -111,7 +115,7 @@ test("provider pins an immutable publication before finalizing a recoverable int
   });
 });
 
-test("finalize reconciles a readable staged publication before delivery", async () => {
+test("finalize requires the exact committed publication for every expected task", async () => {
   await fixture(async ({ provider, cwd, seed, resource }) => {
     await provider.beginDispatch(seed);
     await provider.requireNotification({
@@ -135,7 +139,16 @@ test("finalize reconciles a readable staged publication before delivery", async 
       resource.publicationId,
     ), "stored");
 
-    const intent = await provider.finalizeDelivery({
+    await assert.rejects(() => provider.finalizeDelivery({
+      dispatchId: seed.dispatchId,
+      reservationId: seed.reservationId,
+      kind: "single",
+      outcome: "completed",
+      summary: "done",
+      resources: [resource],
+      finalizedAt: 1_030,
+    }), /non-exact committed publication set/);
+    await assert.rejects(() => provider.finalizeDelivery({
       dispatchId: seed.dispatchId,
       reservationId: seed.reservationId,
       kind: "single",
@@ -148,9 +161,181 @@ test("finalize reconciles a readable staged publication before delivery", async 
         outcome: "failed",
       }],
       finalizedAt: 1_030,
+    }), /exactly match expected tasks/);
+    await provider.commitPublication({
+      dispatchId: seed.dispatchId,
+      reservationId: seed.reservationId,
+      publicationId: resource.publicationId,
+      committedAt: 1_040,
     });
-    assert.deepEqual(intent.resources, [resource], "the staged manifest owns immutable resource metadata");
+    const intent = await provider.finalizeDelivery({
+      dispatchId: seed.dispatchId,
+      reservationId: seed.reservationId,
+      kind: "single",
+      outcome: "completed",
+      summary: "done",
+      resources: [resource],
+      finalizedAt: 1_050,
+    });
+    assert.deepEqual(intent.resources, [resource], "the committed manifest owns immutable resource metadata");
     assert.deepEqual(await provider.listRecoverable(seed.target), [intent]);
+  });
+});
+
+test("a retried publication replaces only the same task's uncommitted slot", async () => {
+  await fixture(async ({ provider, outputRoot, cwd, seed, resource }) => {
+    const retry = {
+      ...resource,
+      publicationId: "publication-retry",
+      uri: "agent://publication-retry",
+      summary: "retry",
+    };
+    await provider.beginDispatch(seed);
+    await provider.requireNotification({
+      dispatchId: seed.dispatchId,
+      reservationId: seed.reservationId,
+      kind: "single",
+      requiredAt: 1_010,
+    });
+    await provider.stagePublication({
+      dispatchId: seed.dispatchId,
+      reservationId: seed.reservationId,
+      resource,
+      stagedAt: 1_020,
+    });
+    await provider.stagePublication({
+      dispatchId: seed.dispatchId,
+      reservationId: seed.reservationId,
+      resource: retry,
+      stagedAt: 1_030,
+    });
+
+    const bucket = (await readdir(outputRoot))[0]!;
+    const manifestDir = join(outputRoot, bucket, ".completion-intents");
+    const manifestPath = join(manifestDir, (await readdir(manifestDir)).find((name) => name.endsWith(".json"))!);
+    const staged = await readCompletionManifestFile(manifestPath);
+    assert.deepEqual(staged?.published.map((entry) => entry.publicationId), [retry.publicationId]);
+
+    assert.equal(await persistAgentOutputChecked(
+      retry.correlationId,
+      retry.name,
+      retry.agent,
+      "retry result",
+      cwd,
+      retry.publicationId,
+    ), "stored");
+    await provider.commitPublication({
+      dispatchId: seed.dispatchId,
+      reservationId: seed.reservationId,
+      publicationId: retry.publicationId,
+      committedAt: 1_040,
+    });
+    await assert.rejects(() => provider.finalizeDelivery({
+      dispatchId: seed.dispatchId,
+      reservationId: seed.reservationId,
+      kind: "single",
+      outcome: "completed",
+      summary: "done",
+      resources: [resource],
+      finalizedAt: 1_050,
+    }), /exactly match committed publications/);
+    const intent = await provider.finalizeDelivery({
+      dispatchId: seed.dispatchId,
+      reservationId: seed.reservationId,
+      kind: "single",
+      outcome: "completed",
+      summary: "done",
+      resources: [retry],
+      finalizedAt: 1_060,
+    });
+    assert.deepEqual(intent.resources, [retry]);
+  });
+});
+
+test("graph finalization and manifest parsing enforce the expected task exact set", async () => {
+  await fixture(async ({ provider, outputRoot, cwd, seed, resource }) => {
+    const second: CompletionResource = {
+      ...resource,
+      correlationId: "correlation-two",
+      publicationId: "publication-two",
+      uri: "agent://publication-two",
+      name: "worker-two",
+    };
+    const graphSeed: CompletionDispatchSeed = {
+      ...seed,
+      mode: "graph",
+      expectedTasks: [resource.correlationId, second.correlationId],
+    };
+    await provider.beginDispatch(graphSeed);
+    await provider.requireNotification({
+      dispatchId: seed.dispatchId,
+      reservationId: seed.reservationId,
+      kind: "graph",
+      requiredAt: 1_010,
+    });
+    for (const entry of [resource, second]) {
+      await provider.stagePublication({
+        dispatchId: seed.dispatchId,
+        reservationId: seed.reservationId,
+        resource: entry,
+        stagedAt: 1_020,
+      });
+      assert.equal(await persistAgentOutputChecked(
+        entry.correlationId,
+        entry.name,
+        entry.agent,
+        `${entry.correlationId} result`,
+        cwd,
+        entry.publicationId,
+      ), "stored");
+      await provider.commitPublication({
+        dispatchId: seed.dispatchId,
+        reservationId: seed.reservationId,
+        publicationId: entry.publicationId,
+        committedAt: 1_030,
+      });
+    }
+
+    await assert.rejects(() => provider.finalizeDelivery({
+      dispatchId: seed.dispatchId,
+      reservationId: seed.reservationId,
+      kind: "graph",
+      outcome: "completed",
+      summary: "partial",
+      resources: [resource],
+      finalizedAt: 1_040,
+    }), /exactly match expected tasks/);
+    await assert.rejects(() => provider.finalizeDelivery({
+      dispatchId: seed.dispatchId,
+      reservationId: seed.reservationId,
+      kind: "graph",
+      outcome: "completed",
+      summary: "unrelated",
+      resources: [resource, { ...second, correlationId: "container-correlation" }],
+      finalizedAt: 1_040,
+    }), /exactly match expected tasks/);
+
+    const intent = await provider.finalizeDelivery({
+      dispatchId: seed.dispatchId,
+      reservationId: seed.reservationId,
+      kind: "graph",
+      outcome: "completed",
+      summary: "complete",
+      resources: [resource, second],
+      finalizedAt: 1_050,
+    });
+    assert.deepEqual(intent.resources.map((entry) => entry.correlationId), graphSeed.expectedTasks);
+
+    const bucket = (await readdir(outputRoot))[0]!;
+    const manifestDir = join(outputRoot, bucket, ".completion-intents");
+    const manifestPath = join(manifestDir, (await readdir(manifestDir)).find((name) => name.endsWith(".json"))!);
+    const manifest = await readCompletionManifestFile(manifestPath);
+    assert.ok(manifest);
+    const { contentRevision: _contentRevision, ...withoutRevision } = manifest;
+    assert.equal(parseCompletionManifest(withCompletionManifestRevision({
+      ...withoutRevision,
+      expectedTasks: ["different-task", second.correlationId],
+    })), undefined);
   });
 });
 
@@ -475,6 +660,12 @@ test("abandon transitions only open manifests and preserves finalized/applied in
     await provider.requireNotification({ dispatchId: seed.dispatchId, reservationId: seed.reservationId, kind: "single", requiredAt: 8_000 });
     await provider.stagePublication({ dispatchId: seed.dispatchId, reservationId: seed.reservationId, resource, stagedAt: 8_010 });
     await persistAgentOutputChecked(resource.correlationId, resource.name, resource.agent, "irreversible", cwd, resource.publicationId);
+    await provider.commitPublication({
+      dispatchId: seed.dispatchId,
+      reservationId: seed.reservationId,
+      publicationId: resource.publicationId,
+      committedAt: 8_015,
+    });
     const intent = await provider.finalizeDelivery({
       dispatchId: seed.dispatchId,
       reservationId: seed.reservationId,

@@ -80,6 +80,7 @@ import {
 } from "./retry.ts";
 import {
   MODEL_FALLBACK_RESUME_PROMPT,
+  TeammatePublicationCaptureError,
 } from "./execution-infra.ts";
 import { buildReplayFence } from "./recovery-protocol.ts";
 import { cliToolNameFromModel, isCliToolModel } from "../cli-tools/local-acp.ts";
@@ -796,13 +797,17 @@ async function runSingleTeammateV1(
       originCwd: result.originCwd,
     };
     try {
-      await options.onResultPublished?.(result, originCwd);
+      const publication = await options.onResultPublished?.(result, originCwd);
+      if (publication && !publication.resourceAcknowledged) {
+        throw new TeammatePublicationCaptureError(result.correlationId, publication.captureError);
+      }
     } catch (error) {
+      if (error instanceof TeammatePublicationCaptureError) throw error;
       logDiagnosticWarn(
         `[pi-maestro-teammate] result publication observer failed for ${result.correlationId}: `
         + `${error instanceof Error ? error.message : String(error)}`,
       );
-      // Publication observers are advisory; the in-memory result remains authoritative.
+      // Unrelated publication observers are advisory; the in-memory result remains authoritative.
     }
   };
 
@@ -1356,7 +1361,7 @@ async function runSingleTeammateV1(
         },
       } : {}),
       ...(options.onResultPublished !== undefined ? {
-        onResultPublished: async (result: SingleResult, originCwd: string): Promise<void> => {
+        onResultPublished: async (result: SingleResult, originCwd: string) => {
           if (registrationCandidate === undefined) {
             removeUntrustedResultProvenance(result);
           } else {
@@ -1368,7 +1373,7 @@ async function runSingleTeammateV1(
             );
             result.attemptedModels = attemptedModels.length > 1 ? [...attemptedModels] : undefined;
           }
-          await options.onResultPublished?.(result, originCwd);
+          return options.onResultPublished?.(result, originCwd);
         },
       } : {}),
       // Only arm an in-process switch when Pi can select the successor through
@@ -1445,6 +1450,11 @@ async function runSingleTeammateV1(
                 // Warm follow-up turns establish the same durable boundary before completion delivery.
                 void publishResult(result, cwd).then(() => {
                   publishTurnComplete(result, effectiveStatus);
+                }).catch((error) => {
+                  logDiagnosticWarn(
+                    `[pi-maestro-teammate] warm-turn result publication failed for ${result.correlationId}; `
+                    + `terminal delivery was withheld: ${error instanceof Error ? error.message : String(error)}`,
+                  );
                 });
               }
             } else if (completionState === "buffering") {
@@ -1961,10 +1971,35 @@ export async function runGraph(
     if (tasks[i].name) indexByName.set(tasks[i].name!, i);
   }
 
-  const publishGraphRejection = (
+  const publishSyntheticResult = async (
+    result: SingleResult,
+    callbacks: RunTeammateOptions,
+  ): Promise<void> => {
+    const originCwd = callbacks.baseCwd;
+    result.originCwd ??= originCwd;
+    try {
+      const publication = await callbacks.onResultPublished?.(result, originCwd);
+      if (publication && !publication.resourceAcknowledged) {
+        throw new TeammatePublicationCaptureError(result.correlationId, publication.captureError);
+      }
+    } catch (error) {
+      if (error instanceof TeammatePublicationCaptureError) throw error;
+      logDiagnosticWarn(
+        `[pi-maestro-teammate] result publication observer failed for ${result.correlationId}: `
+        + `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    try {
+      callbacks.onTurnComplete?.(result, result.terminalStatus);
+    } catch {
+      // Completion observers cannot prevent the remaining graph tasks from settling.
+    }
+  };
+
+  const publishGraphRejection = async (
     message: string,
     dependencies: number[][] = tasks.map(() => []),
-  ): SingleResult[] => tasks.map((task, index) => {
+  ): Promise<SingleResult[]> => Promise.all(tasks.map(async (task, index) => {
     const result: SingleResult = {
       agent: task.agent,
       name: task.name,
@@ -1976,9 +2011,6 @@ export async function runGraph(
       correlationId: taskCorrelationIds[index],
       durationMs: 0,
       terminalStatus: "failed",
-      // Graph-level rejections bypass runSingleTeammate's publishResult, so
-      // durable completion delivery would otherwise throw on the missing
-      // publicationId.
       publicationId: randomUUID(),
     };
     const now = Date.now();
@@ -2001,13 +2033,9 @@ export async function runGraph(
     } catch {
       // Progress observers are advisory and cannot interrupt graph settlement.
     }
-    try {
-      options.onTurnComplete?.(result);
-    } catch {
-      // Validation observers cannot prevent the remaining graph tasks from settling.
-    }
+    await publishSyntheticResult(result, options);
     return result;
-  });
+  }));
 
   // Defensive validation for direct runGraph callers — the teammate tool
   // path already rejects these in normalizeTeammateParams.
@@ -2306,12 +2334,12 @@ export async function runGraph(
     }
   }
 
-  function publishSyntheticFailure(
+  async function publishSyntheticFailure(
     task: NormalizedTask,
     taskIndex: number,
     message: string,
     terminalStatus?: AgentTerminalStatus,
-  ): void {
+  ): Promise<void> {
     failed.add(taskIndex);
     const result: SingleResult = {
       agent: task.agent,
@@ -2324,16 +2352,24 @@ export async function runGraph(
       correlationId: taskCorrelationIds[taskIndex],
       durationMs: 0,
       terminalStatus: terminalStatus ?? "failed",
-      // Synthetic failures bypass runSingleTeammate's publishResult, so durable
-      // completion delivery would otherwise throw on the missing publicationId.
       publicationId: randomUUID(),
     };
     results[taskIndex] = result;
     reportTaskFailure(task, taskIndex, message, terminalStatus);
+    await publishSyntheticResult(result, graphRunOptions);
+  }
+
+  async function publishQueuedSyntheticFailure(
+    task: NormalizedTask,
+    taskIndex: number,
+    message: string,
+  ): Promise<void> {
     try {
-      options.onTurnComplete?.(result, result.terminalStatus);
-    } catch {
-      // Synthetic lifecycle observers cannot block dependency propagation.
+      await publishSyntheticFailure(task, taskIndex, message);
+    } finally {
+      // Publication rejection is terminal for this run, but dependency waiters
+      // must still observe the failed task and release their own graph slots.
+      notifyComplete(taskIndex);
     }
   }
 
@@ -2348,8 +2384,7 @@ export async function runGraph(
     const depsOk = await waitForDeps(idx);
 
     if (!depsOk) {
-      publishSyntheticFailure(task, idx, "Skipped: upstream dependency failed");
-      notifyComplete(idx);
+      await publishQueuedSyntheticFailure(task, idx, "Skipped: upstream dependency failed");
       return;
     }
 
@@ -2357,19 +2392,17 @@ export async function runGraph(
     try {
       resolvedTask = resolveVariables(task.prompt, outputs, taskNames);
     } catch (err) {
-      publishSyntheticFailure(
+      await publishQueuedSyntheticFailure(
         task,
         idx,
         `Variable resolution failed: ${err instanceof Error ? err.message : String(err)}`,
       );
-      notifyComplete(idx);
       return;
     }
 
     const resolvedTaskBoundaryError = taskPromptBoundaryError(resolvedTask);
     if (resolvedTaskBoundaryError) {
-      publishSyntheticFailure(task, idx, `Resolved task prompt ${resolvedTaskBoundaryError}.`);
-      notifyComplete(idx);
+      await publishQueuedSyntheticFailure(task, idx, `Resolved task prompt ${resolvedTaskBoundaryError}.`);
       return;
     }
 
@@ -2380,7 +2413,7 @@ export async function runGraph(
 
     try {
       if (graphRunOptions.signal?.aborted) {
-        publishSyntheticFailure(task, idx, "Cancelled before child process launch.", "terminated");
+        await publishSyntheticFailure(task, idx, "Cancelled before child process launch.", "terminated");
         return;
       }
 
@@ -2443,7 +2476,7 @@ export async function runGraph(
         failed.add(idx);
       }
     } catch (err) {
-      publishSyntheticFailure(
+      await publishSyntheticFailure(
         task,
         idx,
         `Execution error: ${err instanceof Error ? err.message : String(err)}`,

@@ -23,6 +23,11 @@ import {
   type CompletionDeliveryEnvelope,
 } from "../src/completion-outbox/coordinator.ts";
 import { CompletionOutboxFileStore } from "../src/completion-outbox/file-store.ts";
+import {
+  drainAgentSettlements,
+  trackAgentSettlement,
+} from "../src/extension/teammate-helpers.ts";
+import type { TeammateState } from "../src/shared/types.ts";
 
 class FakeProvider implements CompletionDurabilityProvider {
   readonly seeds = new Map<string, CompletionDispatchSeed>();
@@ -411,6 +416,70 @@ test("a throwing replacement provider cannot block prioritized pinned enumeratio
   });
 });
 
+test("stopAdmission fences an in-flight begin and retains its provider pin until rollback", async () => {
+  const root = await mkdtemp(join(tmpdir(), "completion-admission-fence-"));
+  const store = new CompletionOutboxFileStore({ rootDir: root, now: () => 2_000, ownerId: "admission" });
+  const registry = new CompletionDurabilityRegistryImpl();
+  const provider = new FakeProvider();
+  registry.register(provider);
+  let enteredBegin!: () => void;
+  const beginEntered = new Promise<void>((resolve) => { enteredBegin = resolve; });
+  let releaseBegin!: () => void;
+  const beginGate = new Promise<void>((resolve) => { releaseBegin = resolve; });
+  const originalBegin = provider.beginDispatch.bind(provider);
+  provider.beginDispatch = async (dispatch) => {
+    enteredBegin();
+    await beginGate;
+    return originalBegin(dispatch);
+  };
+  const coordinator = new CompletionDeliveryCoordinator({ store, registry, now: () => 2_000 });
+  try {
+    const dispatch = seed();
+    const beginning = coordinator.beginDispatch(dispatch);
+    await beginEntered;
+    assert.equal(registry.providerForDispatch(dispatch.dispatchId), provider);
+    let providerIdle = false;
+    const idle = registry.waitForProviderIdle(provider).then(() => { providerIdle = true; });
+    coordinator.stopAdmission();
+    let drained = false;
+    const draining = coordinator.drain().then(() => { drained = true; });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(drained, false);
+    assert.equal(providerIdle, false);
+
+    releaseBegin();
+    assert.deepEqual(await beginning, { durable: false });
+    await draining;
+    await idle;
+    assert.equal(providerIdle, true);
+    assert.equal(registry.providerForDispatch(dispatch.dispatchId), undefined);
+    assert.deepEqual(await coordinator.beginDispatch({ ...dispatch, dispatchId: "late" }), { durable: false });
+  } finally {
+    await coordinator.drain();
+    coordinator.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("tracked child settlements drain every promise admitted before shutdown", async () => {
+  const state = {
+    baseCwd: "",
+    currentSessionId: "session",
+    activeRuns: new Map(),
+    namedAgents: new Map(),
+  } as TeammateState;
+  let release!: () => void;
+  const settlement = new Promise<void>((resolve) => { release = resolve; });
+  trackAgentSettlement(state, settlement);
+  let drained = false;
+  const draining = drainAgentSettlements(state).then(() => { drained = true; });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(drained, false);
+  release();
+  await draining;
+  assert.equal(state.dispatchSettlements, undefined);
+});
+
 test("drain waits for fire-and-forget publication import and delivery", async () => {
   await fixture(async ({ coordinator, store, sent, bind }) => {
     await bind();
@@ -534,20 +603,75 @@ test("every root, nested, workspace, and additional caller branches on fulfilled
     rootSource.indexOf("const publishAdditionalTurnCompletion = ("),
     rootSource.indexOf("const parentSessionFile =", rootSource.indexOf("const publishAdditionalTurnCompletion = (")),
   );
-  assert.match(rootAdditional, /\.then\(\(publishResult\) => \{\s*if \(!publishResult\.finalized\) fallbackDelivery\(\);/);
+  assert.match(rootAdditional, /\.then\(\(publishResult\) => \{\s*if \(!ownsDispatchGeneration\(\)\) return;\s*if \(!publishResult\.finalized\) fallbackDelivery\(\);/);
+  assert.match(rootAdditional, /const fallbackDelivery = \(\): void => \{\s*if \(!ownsDispatchGeneration\(\)\) return;/);
+
+  const rootSingle = rootSource.slice(
+    rootSource.indexOf("const deliverSingleCompletion = (): void =>"),
+    rootSource.indexOf("const publishSingleResult =", rootSource.indexOf("const deliverSingleCompletion = (): void =>")),
+  );
+  const rootGraph = rootSource.slice(
+    rootSource.indexOf("const deliverGraphCompletion = (): void =>"),
+    rootSource.indexOf("const publishGraphResult =", rootSource.indexOf("const deliverGraphCompletion = (): void =>")),
+  );
+  assert.match(rootSingle, /const fallbackDelivery = \(\): void => \{\s*if \(!ownsDispatchGeneration\(\)\) return;/);
+  assert.match(rootGraph, /const fallbackDelivery = \(\): void => \{\s*if \(!ownsDispatchGeneration\(\)\) return;/);
 
   const nested = nestedSource.slice(
     nestedSource.indexOf("void publishNestedDurableCompletion"),
     nestedSource.indexOf("finishProxyDispatchTracking();", nestedSource.indexOf("void publishNestedDurableCompletion")),
   );
-  assert.match(nested, /if \(!result\.finalized\) \{\s*fallbackDelivery\(\)/);
+  assert.match(nested, /\.then\(\(result\) => \{\s*if \(!ownsDispatchGeneration\(\)\) return;\s*if \(!result\.finalized\) \{\s*fallbackDelivery\(\)/);
   assert.doesNotMatch(nested, /if \(!record\) \{\s*fallbackDelivery\(\)/);
 
   const nestedAdditional = nestedSource.slice(
     nestedSource.indexOf("const publishAdditionalNestedTurn = ("),
     nestedSource.indexOf("normalizedTasks?.forEach", nestedSource.indexOf("const publishAdditionalNestedTurn = (")),
   );
-  assert.match(nestedAdditional, /if \(!publishResult\.finalized\) \{\s*fallbackDelivery\(\)/);
+  assert.match(nestedAdditional, /\.then\(\(publishResult\) => \{\s*if \(!ownsDispatchGeneration\(\)\) return;\s*if \(!publishResult\.finalized\) \{\s*fallbackDelivery\(\)/);
+});
+
+test("root and nested synthetic recovery retry the failed canonical main dispatch", async () => {
+  const rootSource = await readFile(new URL("../src/extension/index.ts", import.meta.url), "utf8");
+  const nestedSource = await readFile(new URL("../src/extension/teammate-proxy.ts", import.meta.url), "utf8");
+  const rootPublication = rootSource.slice(
+    rootSource.indexOf("onResultPublished:"),
+    rootSource.indexOf("onTurnComplete:", rootSource.indexOf("onResultPublished:")),
+  );
+  const nestedPublication = nestedSource.slice(
+    nestedSource.indexOf("onResultPublished:"),
+    nestedSource.indexOf("onTurnComplete:", nestedSource.indexOf("onResultPublished:")),
+  );
+
+  assert.match(rootPublication, /const previousPublication = publishedResultsByCorrelation\.get\(result\.correlationId\)/);
+  assert.match(rootPublication, /publicationCount > 1[\s\S]*?previousPublication\?\.resourceAcknowledged === false/);
+  assert.match(rootPublication, /publicationCount === 1 \|\| retriesMainPublication[\s\S]*?\? completionSeed/);
+  assert.match(rootPublication, /publicationCount > 1\s*&& !retriesMainPublication\s*&& notifyAdditional/);
+  assert.match(rootPublication, /return resultCompletionDurable \? publication : undefined/);
+
+  assert.match(nestedPublication, /const previousPublication = nestedPublishedResultsByCorrelation\.get\(result\.correlationId\)/);
+  assert.match(nestedPublication, /publicationCount > 1[\s\S]*?previousPublication\?\.resourceAcknowledged === false/);
+  assert.match(nestedPublication, /publicationCount === 1 \|\| retriesMainPublication[\s\S]*?\? completionSeed/);
+  assert.match(nestedPublication, /publicationCount > 1\s*&& !retriesMainPublication\s*&& notifyAdditional/);
+  assert.match(nestedPublication, /return resultDurable \? publication : undefined/);
+});
+
+test("root shutdown fences admission and drains children before coordinator ownership", async () => {
+  const source = await readFile(new URL("../src/extension/index.ts", import.meta.url), "utf8");
+  const shutdown = source.slice(source.indexOf('pi.on("session_shutdown", async (event) => {'));
+  const firstAwait = shutdown.indexOf("await ");
+  const stopAdmission = shutdown.indexOf("completionCoordinator.stopAdmission();");
+  const abortChildren = shutdown.indexOf("abortRootSessionAgents();");
+  const drainChildren = shutdown.indexOf("await drainAgentSettlements(state);");
+  const drainCoordinator = shutdown.indexOf("await completionCoordinator.drain();");
+  const disposeCoordinator = shutdown.indexOf("completionCoordinator.dispose();");
+  const disposeListeners = shutdown.indexOf("for (const d of disposers)");
+  assert.ok(stopAdmission >= 0 && stopAdmission < firstAwait);
+  assert.ok(abortChildren > stopAdmission && abortChildren < firstAwait);
+  assert.ok(drainChildren > abortChildren);
+  assert.ok(drainCoordinator > drainChildren);
+  assert.ok(disposeCoordinator > drainCoordinator);
+  assert.ok(disposeListeners > disposeCoordinator);
 });
 
 test("child session shutdown awaits coordinator drain before disposing authorities", async () => {

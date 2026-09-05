@@ -1036,6 +1036,11 @@ export default function registerTeammateExtension(
           if (m.correlationId !== process.env.PI_TEAMMATE_CORRELATION_ID) return;
           const deliverySessionId = typeof m.sessionId === "string" ? m.sessionId : undefined;
           if (!deliverySessionId || deliverySessionId !== bridge.ctx.sessionManager.getSessionId()) return;
+          const deliveryRuntimeGeneration = Number(m.runtimeGeneration);
+          const childRuntimeGeneration = Number(process.env.PI_TEAMMATE_RUNTIME_GENERATION);
+          if (!Number.isSafeInteger(deliveryRuntimeGeneration)
+            || !Number.isSafeInteger(childRuntimeGeneration)
+            || deliveryRuntimeGeneration !== childRuntimeGeneration) return;
           const envelope = m.envelope as Record<string, unknown> | undefined;
           if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)
             || typeof envelope.customType !== "string") return;
@@ -3682,7 +3687,12 @@ export default function registerTeammateExtension(
           completionReservationId: seed.reservationId,
           completionOutcome,
         };
-        await emitTeammateResultPublished(pi, result, seed.originCwd);
+        const publication = await emitTeammateResultPublished(pi, result, seed.originCwd);
+        if (!publication.resourceAcknowledged) {
+          throw publication.captureError ?? new Error(
+            `Canonical workspace result ${request.messageId} was not durably acknowledged.`,
+          );
+        }
         const resource: CompletionResource = {
           correlationId: result.correlationId,
           publicationId,
@@ -4556,6 +4566,10 @@ export default function registerTeammateExtension(
       const knownWarningsByCorrelation = new Map<string, Set<string>>();
       const additionalNotificationByResult = new WeakMap<SingleResult, boolean>();
       const additionalCompletionSeeds = new Map<string, CompletionDispatchSeed>();
+      const publishedResultsByCorrelation = new Map<string, {
+        result: SingleResult;
+        resourceAcknowledged: boolean;
+      }>();
       const isLogicallyWakeable = (result: SingleResult): boolean => {
         const target = state.activeRuns.get(result.correlationId);
         return result.wakeable !== false || Boolean(target?.restart && target.sessionFile);
@@ -4609,42 +4623,83 @@ export default function registerTeammateExtension(
         });
         return publishResult.finalized;
       };
+      const failureResult = (
+        task: NormalizedTask | undefined,
+        taskCorrelationId: string,
+        agent: string,
+        message: string,
+      ): SingleResult => ({
+        agent,
+        ...(task?.name ? { name: task.name } : {}),
+        task: task?.prompt ?? singleTask.prompt,
+        exitCode: 1,
+        messages: [{ role: "assistant", content: message }],
+        usage: {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          cost: 0,
+          turns: 0,
+        },
+        model: task?.model ?? "",
+        correlationId: taskCorrelationId,
+        publicationId: randomUUID(),
+        originCwd: task?.cwd ?? baseCwd,
+        durationMs: Date.now() - activeAgent.startedAt,
+        wakeable: false,
+        terminalStatus: "failed",
+        completionDispatchId: completionSeed?.dispatchId,
+        completionReservationId: completionSeed?.reservationId,
+        completionOutcome: "failed",
+      });
+      const publishCanonicalFailureResult = async (result: SingleResult): Promise<void> => {
+        const publication = await emitTeammateResultPublished(pi, result, result.originCwd ?? baseCwd);
+        publishedResultsByCorrelation.set(result.correlationId, {
+          result,
+          resourceAcknowledged: publication.resourceAcknowledged,
+        });
+        if (!publication.resourceAcknowledged) {
+          throw publication.captureError ?? new Error(
+            `Canonical teammate result ${result.correlationId} was not durably acknowledged.`,
+          );
+        }
+      };
       const publishDurableFailure = async (
         agent: string,
         error: unknown,
+        graphWide = false,
       ): Promise<boolean> => {
         if (!completionDurable || !completionSeed) return false;
         const message = error instanceof Error ? error.message : String(error);
-        const result: SingleResult = {
-          agent,
-          task: singleTask.prompt,
-          exitCode: 1,
-          messages: [{ role: "assistant", content: message }],
-          usage: {
-            inputTokens: 0,
-            outputTokens: 0,
-            cacheReadTokens: 0,
-            cacheWriteTokens: 0,
-            cost: 0,
-            turns: 0,
-          },
-          model: "",
-          correlationId,
-          publicationId: randomUUID(),
-          originCwd: baseCwd,
-          durationMs: Date.now() - activeAgent.startedAt,
-          wakeable: false,
-          terminalStatus: "failed",
-          completionDispatchId: completionSeed.dispatchId,
-          completionReservationId: completionSeed.reservationId,
-          completionOutcome: "failed",
-        };
-        await emitTeammateResultPublished(pi, result, baseCwd);
-        return publishDurableCompletion("failure", "failed", message, [result]);
+        let failureResults: SingleResult[];
+        if (!graphWide) {
+          const result = failureResult(undefined, correlationId, agent, message);
+          await publishCanonicalFailureResult(result);
+          failureResults = [result];
+        } else {
+          failureResults = [];
+          for (let index = 0; index < taskCorrelationIds.length; index += 1) {
+            const taskCorrelationId = taskCorrelationIds[index]!;
+            const existing = publishedResultsByCorrelation.get(taskCorrelationId);
+            if (existing?.resourceAcknowledged && existing.result.publicationId) {
+              failureResults.push(existing.result);
+              continue;
+            }
+            const task = normalizedTasks[index];
+            const result = failureResult(task, taskCorrelationId, task?.agent ?? agent, message);
+            await publishCanonicalFailureResult(result);
+            failureResults.push(result);
+          }
+        }
+        const summary = graphWide
+          ? `${message}\n${failureResults.map((result) => displayMessageForResult(result)).join("\n")}`
+          : message;
+        return publishDurableCompletion("failure", "failed", summary, failureResults);
       };
-      const notifyFailureWithFallback = (agent: string, error: unknown): void => {
+      const notifyFailureWithFallback = (agent: string, error: unknown, graphWide = false): void => {
         void deliverDurableFailureWithFallback({
-          publishDurableFailure: () => publishDurableFailure(agent, error),
+          publishDurableFailure: () => publishDurableFailure(agent, error, graphWide),
           ownsDispatchGeneration,
           fallback: () => notifyBackgroundFailure(
             pi,
@@ -4699,6 +4754,7 @@ export default function registerTeammateExtension(
           // actual answer.
           const lastMessage = displayMessageForResult(singlePublishedResult ?? terminal);
           const fallbackDelivery = (): void => {
+            if (!ownsDispatchGeneration()) return;
             const delivered = safeSendMessage(
               pi,
               {
@@ -4800,6 +4856,7 @@ export default function registerTeammateExtension(
         );
         if (graphCompletionNotificationRequested) {
           const fallbackDelivery = (): void => {
+            if (!ownsDispatchGeneration()) return;
             const delivered = safeSendMessage(
               pi,
               {
@@ -4862,6 +4919,7 @@ export default function registerTeammateExtension(
         if (!notifyModel) return;
         const lastMessage = displayMessageForResult(result);
         const fallbackDelivery = (): void => {
+          if (!ownsDispatchGeneration()) return;
           if (!safeSendMessage(
             pi,
             {
@@ -4890,8 +4948,10 @@ export default function registerTeammateExtension(
           resources: durableResources([result]),
           finalizedAt: Date.now(),
         }).then((publishResult) => {
+          if (!ownsDispatchGeneration()) return;
           if (!publishResult.finalized) fallbackDelivery();
         }, (error) => {
+          if (!ownsDispatchGeneration()) return;
           logDiagnosticWarn("[pi-maestro-teammate] durable additional completion failed before finalization; using direct delivery:", error);
           fallbackDelivery();
         }).catch((error) => {
@@ -5052,9 +5112,22 @@ export default function registerTeammateExtension(
                   }
                 }
                 additionalNotificationByResult.set(result, notifyAdditional);
-                let resultCompletionSeed = publicationCount === 1 ? completionSeed : undefined;
-                let resultCompletionDurable = publicationCount === 1 ? completionDurable : false;
-                if (publicationCount > 1 && notifyAdditional && completionSeed && result.publicationId) {
+                const previousPublication = publishedResultsByCorrelation.get(result.correlationId);
+                const retriesMainPublication = publicationCount > 1
+                  && completionDurable
+                  && completionSeed !== undefined
+                  && previousPublication?.resourceAcknowledged === false;
+                let resultCompletionSeed = publicationCount === 1 || retriesMainPublication
+                  ? completionSeed
+                  : undefined;
+                let resultCompletionDurable = publicationCount === 1 || retriesMainPublication
+                  ? completionDurable
+                  : false;
+                if (publicationCount > 1
+                  && !retriesMainPublication
+                  && notifyAdditional
+                  && completionSeed
+                  && result.publicationId) {
                   const additionalSeed: CompletionDispatchSeed = {
                     ...completionSeed,
                     dispatchId: result.publicationId,
@@ -5083,7 +5156,18 @@ export default function registerTeammateExtension(
                     ? "terminated"
                     : result.exitCode === 0 ? "completed" : "failed";
                 }
-                return emitTeammateResultPublished(pi, result, originCwd);
+                const publication = await emitTeammateResultPublished(pi, result, originCwd);
+                const isMainPublication = resultCompletionSeed?.dispatchId === completionSeed?.dispatchId;
+                if (!previousPublication || (!previousPublication.resourceAcknowledged && isMainPublication)) {
+                  publishedResultsByCorrelation.set(result.correlationId, {
+                    result,
+                    resourceAcknowledged: publication.resourceAcknowledged,
+                  });
+                }
+                // A durable dispatch must fail closed when canonical capture is
+                // rejected. Observer errors are already separated by the
+                // publication API and never reach this branch as a rejection.
+                return resultCompletionDurable ? publication : undefined;
               },
           onTurnComplete: (result: SingleResult, terminalStatus?: AgentTerminalStatus) => {
             const canonicalStatus = terminalStatusForResult(result, terminalStatus);
@@ -5621,7 +5705,7 @@ export default function registerTeammateExtension(
             timeoutMs: task.timeoutMs,
             reply_to: params.reply_to,
           });
-          target.restartPending = runWithProgressFlushCleanup(
+          target.restartPending = trackAgentSettlement(state, runWithProgressFlushCleanup(
             () => runSingleTeammate(restartParams, options),
             progressFlushGate,
           ).then((result) => {
@@ -5649,7 +5733,7 @@ export default function registerTeammateExtension(
               target.sleptAt = Date.now();
             }
             target.restartPending = undefined;
-          });
+          }));
           return true;
         };
       };
@@ -5666,10 +5750,10 @@ export default function registerTeammateExtension(
           const activeGraphMode = inferGraphMode(normalizedTasks);
           const executeGraph = async () => {
             const options = makeOptions();
-            const results = await runWithProgressFlushCleanup(
+            const results = await trackAgentSettlement(state, runWithProgressFlushCleanup(
               () => runGraph(normalizedTasks, params.concurrency ?? 4, options),
               progressFlushGate,
-            ).finally(cleanupForkSnapshot);
+            ).finally(cleanupForkSnapshot));
 
             const hasError = results.some(resultIsError);
             const totalDur = activeGraphMode === "chain"
@@ -5727,7 +5811,7 @@ export default function registerTeammateExtension(
               settleGraphTaskAgent(state, taskId, 1, message, false, "terminated");
             });
             settleGraphContainerAgent(state, correlationId, 1, message, false);
-            notifyFailureWithFallback(activeGraphMode, error);
+            notifyFailureWithFallback(activeGraphMode, error, true);
           };
 
           const completeGraphInBackground = (
@@ -5860,10 +5944,10 @@ export default function registerTeammateExtension(
               : null;
             deadline = createForegroundDeadline(waitMs);
             const options = makeOptions();
-            runPromise = runWithProgressFlushCleanup(
+            runPromise = trackAgentSettlement(state, runWithProgressFlushCleanup(
               () => runSingleTeammate(singleRunParams, options),
               progressFlushGate,
-            ).finally(cleanupForkSnapshot);
+            ).finally(cleanupForkSnapshot));
             race = await Promise.race([
               runPromise.then((result) => ({ done: true as const, result, reason: undefined })),
               detachPromise.then((reason) => ({ done: false as const, result: null, reason })),
@@ -5938,10 +6022,10 @@ export default function registerTeammateExtension(
         await requireDurableNotification("single");
         markStallNotification();
         const options = makeOptions();
-        const bgPromise = runWithProgressFlushCleanup(
+        const bgPromise = trackAgentSettlement(state, runWithProgressFlushCleanup(
           () => runSingleTeammate(singleRunParams, options),
           progressFlushGate,
-        ).finally(cleanupForkSnapshot);
+        ).finally(cleanupForkSnapshot));
 
         bgPromise.then((result) => {
           if (!ownsDispatchGeneration()) return;
@@ -9935,6 +10019,12 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     }
   }
 
+  function abortRootSessionAgents(): void {
+    for (const [cid, run] of [...state.activeRuns]) {
+      killAgent(state, cid, run.name);
+    }
+  }
+
   function teardownRootSession(): void {
     // The shutdown hook has already fenced the outgoing generation. This phase
     // reclaims its requests, processes, and UI state without advancing it twice.
@@ -9948,9 +10038,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     state.cancelledProxyDispatches?.clear();
     stopWidgetTimer();
     stopWakeableEvictionTimer();
-    for (const [cid, run] of [...state.activeRuns]) {
-      killAgent(state, cid, run.name);
-    }
+    abortRootSessionAgents();
     state.namedAgents.clear();
     state.currentSessionId = null;
     state.currentWorkspaceId = undefined;
@@ -11063,6 +11151,18 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     cancelRuntimeReadHandle(closingRuntimeReadHandle);
     state.sessionGeneration = (state.sessionGeneration ?? 0) + 1;
     state.currentSessionId = null;
+    completionCoordinator.stopAdmission();
+    // Stop externally admitted commands and abort physical children before the
+    // first await. Their tracked settlements retain publication ownership until
+    // process close and canonical capture have both completed.
+    const stoppedMailbox = mailboxHost;
+    mailboxHost = undefined;
+    mailboxWorkspaceId = undefined;
+    rootGlobals[MAILBOX_REGISTRY_KEY] = undefined;
+    const mailboxStopped = stoppedMailbox?.stop().catch((error) => {
+      logDiagnosticError(`[pi-maestro-teammate] mailbox host stop failed:`, error);
+    });
+    abortRootSessionAgents();
     workspaceTerminalResultState.settled = true;
     const terminalPublished = await publishWorkspaceWindowTerminalResults(
       workspaceTerminalResultDraft ?? {
@@ -11109,18 +11209,6 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     }
     redrivenIncoming.clear();
     replayedIncoming.clear();
-    await completionCoordinator.drain();
-    completionCoordinator.dispose();
-    // Dispose EventBus subscriptions on shutdown (defensive; framework may auto-dispose).
-    for (const d of disposers) {
-      try { d(); } catch {}
-    }
-    // Stop the mailbox consumer BEFORE killing agents so no in-flight poll can
-    // inject into a dying session (previously never stopped at all).
-    const stoppedMailbox = mailboxHost;
-    mailboxHost = undefined;
-    mailboxWorkspaceId = undefined;
-    rootGlobals[MAILBOX_REGISTRY_KEY] = undefined;
     monitorRegistry.replaceEndpoints([]);
     monitorRegistry.thread.rebuild([]);
     exitMonitorInteractionMode();
@@ -11131,9 +11219,15 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
       }
       sessionHostRegistry = undefined;
     }
-    await stoppedMailbox?.stop().catch((error) => {
-      logDiagnosticError(`[pi-maestro-teammate] mailbox host stop failed:`, error);
-    });
+    await mailboxStopped;
+    await drainAgentSettlements(state);
+    await completionCoordinator.drain();
+    completionCoordinator.dispose();
+    // Publication observers and provider pins are released only after every
+    // admitted child and coordinator operation has crossed its settle boundary.
+    for (const d of disposers) {
+      try { d(); } catch {}
+    }
     teardownRootSession();
   });
 } // end if (!isChild)
@@ -11151,6 +11245,7 @@ import {
   clearAgentResultReadyState,
   createTeammateInteractionQueue,
   deliverDurableFailureWithFallback,
+  drainAgentSettlements,
   emitComplete,
   enforceWakeableAgentBudget,
   findSettledAgent,
@@ -11175,6 +11270,7 @@ import {
   statusForWatchTarget,
   sweepFailedAgents,
   sweepStalledAgents,
+  trackAgentSettlement,
   ts,
   waitForTeammate,
   waitOutput,

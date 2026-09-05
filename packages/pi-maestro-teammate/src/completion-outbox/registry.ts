@@ -20,6 +20,7 @@ export class CompletionDurabilityRegistryImpl implements CompletionDurabilityReg
     provider: CompletionDurabilityProvider;
     owners: Set<symbol>;
   }>();
+  readonly #providerIdleWaiters = new Map<CompletionDurabilityProvider, Set<() => void>>();
 
   current(): CompletionDurabilityProvider | undefined {
     return this.#provider;
@@ -52,8 +53,22 @@ export class CompletionDurabilityRegistryImpl implements CompletionDurabilityReg
       released = true;
       const active = this.#dispatchPins.get(dispatchId);
       if (!active || active.provider !== provider || !active.owners.delete(owner)) return;
-      if (active.owners.size === 0) this.#dispatchPins.delete(dispatchId);
+      if (active.owners.size === 0) {
+        this.#dispatchPins.delete(dispatchId);
+        this.#resolveProviderIdle(provider);
+      }
     };
+  }
+
+  waitForProviderIdle(provider: CompletionDurabilityProvider): Promise<void> {
+    if (![...this.#dispatchPins.values()].some((pin) => pin.provider === provider)) {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+      const waiters = this.#providerIdleWaiters.get(provider) ?? new Set<() => void>();
+      waiters.add(resolve);
+      this.#providerIdleWaiters.set(provider, waiters);
+    });
   }
 
   register(provider: CompletionDurabilityProvider): () => void {
@@ -78,6 +93,14 @@ export class CompletionDurabilityRegistryImpl implements CompletionDurabilityReg
     this.#listeners.add(listener);
     listener(this.snapshot());
     return () => this.#listeners.delete(listener);
+  }
+
+  #resolveProviderIdle(provider: CompletionDurabilityProvider): void {
+    if ([...this.#dispatchPins.values()].some((pin) => pin.provider === provider)) return;
+    const waiters = this.#providerIdleWaiters.get(provider);
+    if (!waiters) return;
+    this.#providerIdleWaiters.delete(provider);
+    for (const resolve of waiters) resolve();
   }
 
   #notify(): void {

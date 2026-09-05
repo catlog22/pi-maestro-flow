@@ -150,6 +150,7 @@ export class CompletionDeliveryCoordinator {
   readonly #operations = new Set<Promise<unknown>>();
   #binding: CompletionSessionBinding | undefined;
   #unsubscribe: (() => void) | undefined;
+  #accepting = true;
   #disposed = false;
   // Throttle GC attempts inside reconcile(). tryGc() also persists a cross-process
   // page/expiry fence, but this local guard prevents one coordinator from
@@ -169,8 +170,12 @@ export class CompletionDeliveryCoordinator {
     });
   }
 
-  async beginDispatch(seed: CompletionDispatchSeed): Promise<CompletionDispatchDurability> {
-    if (!this.#enabled()) return { durable: false };
+  beginDispatch(seed: CompletionDispatchSeed): Promise<CompletionDispatchDurability> {
+    return this.#track(this.#beginDispatch(seed));
+  }
+
+  async #beginDispatch(seed: CompletionDispatchSeed): Promise<CompletionDispatchDurability> {
+    if (!this.#accepting || this.#disposed || !this.#enabled()) return { durable: false };
     const existing = this.#dispatches.get(seed.dispatchId);
     if (existing) {
       if (existing.handle.reservationId !== seed.reservationId
@@ -181,19 +186,40 @@ export class CompletionDeliveryCoordinator {
     }
     const provider = this.registry.current();
     if (!provider) return { durable: false };
-    await this.store.reserve(seed);
+    // Acquire the cross-extension ownership pin before the first await. Flow
+    // may retire its current provider as soon as shutdown begins, but capture
+    // must retain this exact generation until the admitted begin either commits
+    // into #dispatches or rolls back.
+    const releaseProviderPin = this.registry.pinDispatch(seed.dispatchId, provider);
+    let reserved = false;
     try {
+      await this.store.reserve(seed);
+      reserved = true;
       const handle = await provider.beginDispatch(seed);
-      // Pin the provider instance in the shared registry as well as this
-      // coordinator. Flow publication capture resolves stage/commit through
-      // this dispatch ownership fence even after a provider reload.
-      const releaseProviderPin = this.registry.pinDispatch(seed.dispatchId, provider);
+      if (!this.#accepting || this.#disposed) {
+        await provider.abandonDispatch({
+          dispatchId: seed.dispatchId,
+          reservationId: seed.reservationId,
+          reason: "completion coordinator stopped admission during beginDispatch",
+          abandonedAt: this.#now(),
+        }).catch(() => undefined);
+        await this.store.releaseReservation(seed.target, seed.reservationId).catch(() => undefined);
+        releaseProviderPin();
+        return { durable: false };
+      }
       this.#dispatches.set(seed.dispatchId, { handle, seed, provider, releaseProviderPin });
       return { durable: true, handle };
     } catch (error) {
-      await this.store.releaseReservation(seed.target, seed.reservationId).catch(() => undefined);
+      if (reserved) {
+        await this.store.releaseReservation(seed.target, seed.reservationId).catch(() => undefined);
+      }
+      releaseProviderPin();
       throw error;
     }
+  }
+
+  stopAdmission(): void {
+    this.#accepting = false;
   }
 
   async requireNotification(input: CompletionNotificationRequirement): Promise<void> {
@@ -368,6 +394,7 @@ export class CompletionDeliveryCoordinator {
   }
 
   dispose(): void {
+    this.#accepting = false;
     this.#disposed = true;
     this.#binding = undefined;
     this.#acceptedByHost.clear();
@@ -595,8 +622,10 @@ export class CompletionDeliveryCoordinator {
     if (pinned) return pinned.provider;
     const recovered = this.#recoveredProviderPins.get(dispatchId);
     if (recovered) return recovered.provider;
-    const provider = this.registry.providerForDispatch(dispatchId) ?? this.registry.current();
-    if (!provider) throw new Error("Completion durability provider became unavailable.");
+    const provider = this.registry.providerForDispatch(dispatchId);
+    if (!provider) {
+      throw new Error(`Completion dispatch ${dispatchId} has no pinned durability provider.`);
+    }
     return provider;
   }
 

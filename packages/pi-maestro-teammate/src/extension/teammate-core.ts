@@ -141,6 +141,8 @@ import type {
   SingleResult,
   StructuredResult,
   TeammateInteractionRecord,
+  TeammateResultPublicationResult,
+  TeammateResultPublicationWorkKind,
   TeammateResultPublishedEvent,
 } from "../shared/types.ts";
 import { isAgentStalled, projectAgentActivity } from "../shared/agent-status.ts";
@@ -618,51 +620,71 @@ export function toStructuredResults(
   return entries.length > 0 ? entries : undefined;
 }
 
-/** Publish one consumable result and await durable work claimed by listeners. */
+/** Publish one consumable result and await work claimed by listeners. */
 export async function emitTeammateResultPublished(
   pi: ExtensionAPI,
   result: SingleResult,
   originCwd: string,
-): Promise<void> {
+): Promise<TeammateResultPublicationResult> {
   const projected = toStructuredResults([result], originCwd)?.[0];
-  if (!projected) return;
+  if (!projected) {
+    const captureError = new Error(
+      `Canonical teammate result ${result.correlationId} has no persistable output projection.`,
+    );
+    return { resourceAcknowledged: false, observerErrors: [], captureError };
+  }
 
-  const pending: Promise<unknown>[] = [];
-  const canonicalResource = `agent://${result.correlationId}`;
+  const pending: Array<{ promise: Promise<unknown>; kind: TeammateResultPublicationWorkKind }> = [];
+  const canonicalResource = `agent://${result.publicationId ?? result.correlationId}`;
   let acknowledgedResource: string | undefined;
   const event: TeammateResultPublishedEvent = {
     result: projected,
-    waitUntil(promise) {
-      pending.push(Promise.resolve(promise));
+    waitUntil(promise, options) {
+      pending.push({
+        promise: Promise.resolve(promise),
+        kind: options?.kind === "canonical" ? "canonical" : "observer",
+      });
     },
     acknowledgeResource(uri) {
       if (uri === canonicalResource) acknowledgedResource = uri;
     },
   };
-  let emissionError: unknown;
+  const observerErrors: unknown[] = [];
   try {
     pi.events.emit(TEAMMATE_RESULT_PUBLISHED_EVENT, event);
   } catch (error) {
-    emissionError = error;
+    // EventBus emission failures are observer failures. The canonical listener
+    // may have claimed and committed work before an unrelated listener threw.
+    observerErrors.push(error);
   }
 
-  const outcomes = await Promise.allSettled(pending);
-  for (const outcome of outcomes) {
-    if (outcome.status === "rejected") {
-      logDiagnosticWarn(
-        `[pi-maestro-teammate] result publication observer failed for ${result.correlationId}: `
-        + `${outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason)}`,
-      );
-    }
+  const outcomes = await Promise.allSettled(pending.map((entry) => entry.promise));
+  let captureError: unknown;
+  for (const [index, outcome] of outcomes.entries()) {
+    if (outcome.status !== "rejected") continue;
+    const claimed = pending[index];
+    if (claimed?.kind === "canonical" && captureError === undefined) captureError = outcome.reason;
+    else observerErrors.push(outcome.reason);
   }
-  if (emissionError !== undefined) throw emissionError;
-  if (
-    result.publicationId
+  const canonicalWorkClaimed = pending.some((entry) => entry.kind === "canonical");
+  const resourceAcknowledged = canonicalWorkClaimed
     && acknowledgedResource === canonicalResource
-    && outcomes.every((outcome) => outcome.status === "fulfilled")
-  ) {
+    && captureError === undefined;
+  if (!resourceAcknowledged && captureError === undefined) {
+    captureError = new Error(
+      `Canonical teammate result ${result.correlationId} was not acknowledged by a durable capture listener.`,
+    );
+  }
+  if (resourceAcknowledged && result.publicationId) {
     rememberAcknowledgedPublication(result.publicationId);
   }
+  for (const error of observerErrors) {
+    logDiagnosticWarn(
+      `[pi-maestro-teammate] result publication observer failed for ${result.correlationId}: `
+      + `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  return { resourceAcknowledged, observerErrors, ...(captureError === undefined ? {} : { captureError }) };
 }
 
 /** Replace the retained turn value; undefined intentionally clears stale data. */
