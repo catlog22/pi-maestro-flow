@@ -1,21 +1,23 @@
 /**
- * McpxOverlay — configure and monitor the mcpx (mcpx for pmf) connection:
- * binary/endpoint status, registered workspaces, discoverable Pi windows and
- * cross-window message history (workspace-peer file protocol).
+ * McpxOverlay — configure and monitor the Pi Maestro Gateway:
+ * daemon/HTTP status, registered workspaces, Gateway tasks, discoverable Pi
+ * windows, and cross-window message history.
  *
  * Keys: ↑↓/jk select history · Enter details · r refresh · R restart · e register/unregister cwd (lease) · E register/unregister cwd (permanent) · s start · x stop · t tunnel refresh · w workspaces · c wizard · p password · Esc close
  */
 import { createHash, randomUUID } from "node:crypto";
-import { spawn, spawnSync } from "node:child_process";
-import { readdirSync, readFileSync, existsSync, statSync, rmSync, type Dirent } from "node:fs";
+import { accessSync, constants, opendirSync, readdirSync, readFileSync, existsSync, statSync, type Dirent } from "node:fs";
 import { homedir } from "node:os";
-import { join, dirname, basename } from "node:path";
+import { basename, delimiter, dirname, join } from "node:path";
 import { Key, type Component, type Focusable, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { locateMcpx, isProcessOwnedBy, killProcessWithEscalation, readMcpxBearerToken, readTunnelState, probeTunnelHealth, restartQuickTunnel, stopQuickTunnel, updateConfigServerURL, restoreMcpxConfig, stopMcpx, readOpsPassword, detectMcpxForPmf, removeWorkspaceByPath, readDelegatedTasks, readMcpxConfigView, writeMcpxConfigChanges, type TunnelState, type DelegatedTask, type McpxConfigView } from "../mcpx-bridge.ts";
+import { locateMcpx, readMcpxBearerToken, readTunnelState, probeTunnelHealth, restartQuickTunnel, stopQuickTunnel, updateConfigServerURL, restoreMcpxConfig, stopMcpx as stopGateway, startMcpx as startGateway, restartMcpx as restartGateway, readGatewayControlStatus, listGatewayWorkspaces, startWorkspaceLease, registerMcpxWorkspacePermanent, readOpsPassword, detectMcpxForPmf, removeGatewayWorkspaceByPath, readGatewayDelegatedTasks, readGatewayCollaborativeSessions, readMcpxConfigView, writeMcpxConfigChanges, type TunnelState, type DelegatedTask, type McpxConfigView } from "../mcpx-bridge.ts";
+import type { CollaborativeSessionStateV1, GatewayTodoTaskV1 } from "../gateway/session-contracts.ts";
 import type { McpxConfigChanges } from "./mcpx-wizard.ts";
 import {
   McpxClientError,
   McpxStreamableHttpClient,
+  type McpxGatewayMonitor,
+  type McpxGatewayMonitorObservation,
   type McpxRemoteSession,
   type McpxRuntimeWindow,
   type McpxWindowEvent,
@@ -24,6 +26,10 @@ import {
 
 const MCPX_DEFAULT_ENDPOINT = "http://127.0.0.1:9090/mcp";
 const PEER_STALE_MS = 20_000;
+const MAX_PEER_RUNTIME_ROOTS = 8;
+const MAX_PEER_OWNERS_PER_ROOT = 16;
+const MAX_PEER_FILES_PER_OWNER = 64;
+const MAX_PEER_FILE_METADATA = 128;
 
 export interface McpxWorkspaceInfo {
   name: string;
@@ -86,9 +92,14 @@ export interface McpxSnapshot {
   runtimeWindows?: McpxRuntimeWindow[];
   runtimeWindowFallback?: "auth" | "unsupported" | "unavailable";
   tunnel?: TunnelState;
-  /** Delegated tasks from the mcpx file registry (all sessions). */
+  /** Gateway journal tasks followed by optional legacy read-only history. */
   tasks?: DelegatedTask[];
-  /** mcpx-for-pmf fork installed as a global npm package? */
+  /** Workspace-local collaboration authority. It is independent from Pi Todo. */
+  collaborativeSessions?: CollaborativeSessionStateV1[];
+  collaborationMonitors?: Record<string, McpxGatewayMonitor[]>;
+  collaborationMemberIds?: Record<string, string>;
+  collaborationError?: string;
+  /** Compatibility field names for verified built-in Gateway availability. */
   forkInstalled?: boolean;
   forkVersion?: string;
   /** PERF-RV-006: ops password read once during refresh, cached for renders. */
@@ -129,7 +140,7 @@ export interface McpxOverlayParams {
   endpointWaitMs?: number;
 }
 
-type OverlayMode = "list" | "detail" | "workspace" | "window-list" | "window-detail" | "config";
+type OverlayMode = "list" | "detail" | "workspace" | "window-list" | "window-detail" | "config" | "collaboration" | "collaboration-detail" | "monitor-detail";
 
 function normalizeWorkspacePath(value: string): string {
   let normalized = value.replace(/\\/g, "/");
@@ -147,29 +158,44 @@ function workspaceIdForCwd(cwd: string): string {
   return createHash("sha256").update(normalizeWorkspacePath(cwd), "utf8").digest("hex");
 }
 
-/** Runtime dirs of every known workspace (multi-workspace discovery). */
-function peerRuntimeRoots(): string[] {
-  const root = peerWorkspacesRoot();
-  let entries: Dirent[];
+/** Read at most `limit` entries without materializing an unbounded directory. */
+function boundedDirectoryEntries(path: string, limit: number): Dirent[] {
+  let directory: ReturnType<typeof opendirSync> | undefined;
   try {
-    entries = readdirSync(root, { withFileTypes: true });
+    directory = opendirSync(path);
+    const entries: Dirent[] = [];
+    while (entries.length < limit) {
+      const entry = directory.readSync();
+      if (!entry) break;
+      entries.push(entry);
+    }
+    return entries;
   } catch {
     return [];
+  } finally {
+    try { directory?.closeSync(); } catch { /* directory may already be closed */ }
   }
-  return entries.filter((entry) => entry.isDirectory()).map((entry) => join(root, entry.name, "runtime"));
 }
 
-/** Best-effort workspace label (normalizedCwd) from any owner snapshot. */
-function peerWorkspaceLabel(runtime: string): string | undefined {
-  let entries: string[];
-  try {
-    entries = readdirSync(join(runtime, "owners"));
-  } catch {
-    return undefined;
+/** Runtime dirs of a bounded workspace sample, prioritizing the current cwd. */
+function peerRuntimeRoots(preferredCwd?: string): string[] {
+  const root = peerWorkspacesRoot();
+  const preferredName = preferredCwd ? workspaceIdForCwd(preferredCwd) : undefined;
+  const names: string[] = preferredName ? [preferredName] : [];
+  for (const entry of boundedDirectoryEntries(root, MAX_PEER_RUNTIME_ROOTS)) {
+    if (!entry.isDirectory() || entry.name === preferredName) continue;
+    names.push(entry.name);
+    if (names.length >= MAX_PEER_RUNTIME_ROOTS) break;
   }
-  for (const entry of entries) {
-    if (!entry.endsWith(".json")) continue;
-    const snapshot = readJson<OwnerSnapshotFile>(join(runtime, "owners", entry));
+  return names.map((name) => join(root, name, "runtime"));
+}
+
+/** Best-effort workspace label (normalizedCwd) from a bounded owner sample. */
+function peerWorkspaceLabel(runtime: string): string | undefined {
+  const owners = join(runtime, "owners");
+  for (const entry of boundedDirectoryEntries(owners, MAX_PEER_OWNERS_PER_ROOT)) {
+    if (!entry.name.endsWith(".json")) continue;
+    const snapshot = readJson<OwnerSnapshotFile>(join(owners, entry.name));
     if (snapshot?.normalizedCwd) return snapshot.normalizedCwd;
   }
   return undefined;
@@ -202,18 +228,13 @@ function displayNameOf(sessionName: string | undefined, ownerId: string): string
   return label.length > 64 ? `${label.slice(0, 61)}...` : label;
 }
 
-function collectWindows(now: number): McpxWindowInfo[] {
+function collectWindows(now: number, preferredCwd?: string): McpxWindowInfo[] {
   const windows: McpxWindowInfo[] = [];
-  for (const runtime of peerRuntimeRoots()) {
-    let entries: string[];
-    try {
-      entries = readdirSync(join(runtime, "owners"));
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      if (!entry.endsWith(".json")) continue;
-      const fullPath = join(runtime, "owners", entry);
+  for (const runtime of peerRuntimeRoots(preferredCwd)) {
+    const owners = join(runtime, "owners");
+    for (const entry of boundedDirectoryEntries(owners, MAX_PEER_OWNERS_PER_ROOT)) {
+      if (!entry.name.endsWith(".json")) continue;
+      const fullPath = join(owners, entry.name);
       // PERF-RV-013: stat the file and skip stale ones BEFORE reading/parsing.
       // Owner snapshots are written periodically; a file whose mtime is older
       // than PEER_STALE_MS (20s) belongs to a window that already went offline
@@ -242,7 +263,7 @@ function collectWindows(now: number): McpxWindowInfo[] {
   return windows;
 }
 
-function collectThread(): McpxThreadEntry[] {
+function collectThread(preferredCwd?: string): McpxThreadEntry[] {
   const entries: McpxThreadEntry[] = [];
   // PERF-RV-005: Instead of reading and parsing every JSON file (which grows
   // linearly with history), we stat each file's mtime, sort by mtime desc, and
@@ -251,41 +272,34 @@ function collectThread(): McpxThreadEntry[] {
   const MAX_READ = 60;
 
   /** Collect file paths and mtimes from a two-level directory tree. */
-  function collectFileMeta(dir: string): Array<{ path: string; mtime: number }> {
+  function collectFileMeta(dir: string, limit: number): Array<{ path: string; mtime: number }> {
     const files: Array<{ path: string; mtime: number }> = [];
-    let owners: string[];
-    try {
-      owners = readdirSync(dir);
-    } catch {
-      return files;
-    }
-    for (const owner of owners) {
-      const ownerDir = join(dir, owner);
-      try {
-        if (!statSync(ownerDir).isDirectory()) continue;
-      } catch {
-        continue;
-      }
-      for (const file of readdirSync(ownerDir)) {
-        if (!file.endsWith(".json")) continue;
-        if (file.includes(".processing")) continue;
-        const fullPath = join(ownerDir, file);
+    for (const owner of boundedDirectoryEntries(dir, MAX_PEER_OWNERS_PER_ROOT)) {
+      if (!owner.isDirectory()) continue;
+      const ownerDir = join(dir, owner.name);
+      for (const file of boundedDirectoryEntries(ownerDir, Math.min(MAX_PEER_FILES_PER_OWNER, limit - files.length))) {
+        if (!file.name.endsWith(".json") || file.name.includes(".processing")) continue;
+        const fullPath = join(ownerDir, file.name);
         try {
           files.push({ path: fullPath, mtime: statSync(fullPath).mtimeMs });
         } catch {
           // file vanished — skip
         }
+        if (files.length >= limit) return files;
       }
     }
     return files;
   }
 
   const allFiles: Array<{ path: string; mtime: number; workspace?: string }> = [];
-  for (const runtime of peerRuntimeRoots()) {
+  for (const runtime of peerRuntimeRoots(preferredCwd)) {
     const workspace = peerWorkspaceLabel(runtime);
-    for (const file of [...collectFileMeta(join(runtime, "commands")), ...collectFileMeta(join(runtime, "responses"))]) {
-      allFiles.push({ ...file, workspace });
+    for (const kind of ["commands", "responses"] as const) {
+      const remaining = MAX_PEER_FILE_METADATA - allFiles.length;
+      if (remaining <= 0) break;
+      for (const file of collectFileMeta(join(runtime, kind), remaining)) allFiles.push({ ...file, workspace });
     }
+    if (allFiles.length >= MAX_PEER_FILE_METADATA) break;
   }
   allFiles.sort((a, b) => b.mtime - a.mtime);
   const toRead = allFiles.slice(0, MAX_READ);
@@ -405,18 +419,21 @@ export function collectMcpServers(cwd: string): McpxMcpServerInfo[] {
 }
 
 function isExecutableOnPath(command: string): boolean {
-  // PERF-RV-004: reuse cached result within a refresh cycle.
   if (executablePathCache.has(command)) return executablePathCache.get(command)!;
+  const canExecute = (path: string): boolean => {
+    try { accessSync(path, constants.X_OK); return true; }
+    catch { return false; }
+  };
   let result: boolean;
   if (command.includes("/") || command.includes("\\")) {
-    result = existsSync(command);
+    result = canExecute(command);
   } else {
-    const probe = spawnSync(process.platform === "win32" ? "where.exe" : "which", [command], {
-      encoding: "utf8",
-      timeout: 5_000,
-      shell: false,
-    });
-    result = probe.status === 0;
+    const names = process.platform === "win32" && !/\.[^./\\]+$/u.test(command)
+      ? [command, ...(process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean).map((extension) => `${command}${extension.toLowerCase()}`)]
+      : [command];
+    result = (process.env.PATH ?? "").split(delimiter).some((directory) =>
+      names.some((name) => canExecute(join(directory || process.cwd(), name))),
+    );
   }
   executablePathCache.set(command, result);
   return result;
@@ -481,9 +498,9 @@ async function probeEndpoint(configPath: string): Promise<{ endpoint: string; re
     // the board shows "mcpx (需鉴权)" instead of bare "online" with no version.
     let endpointVersion: string | undefined;
     if (info) endpointVersion = `${info.name} ${info.version}`;
-    else if (response.status === 401) endpointVersion = "mcpx 需鉴权（401）";
-    else if (response.status === 403) endpointVersion = "mcpx 拒绝（403 Host）";
-    else endpointVersion = `mcpx · HTTP ${response.status}`;
+    else if (response.status === 401) endpointVersion = "Pi Maestro Gateway 需鉴权（401）";
+    else if (response.status === 403) endpointVersion = "Pi Maestro Gateway 拒绝（403 Host）";
+    else endpointVersion = `Pi Maestro Gateway · HTTP ${response.status}`;
     return { endpoint, reachable, endpointVersion };
   } catch {
     return { endpoint, reachable: false };
@@ -516,13 +533,9 @@ export class McpxOverlay implements Component, Focusable {
   private workspaceToggleBusy = false;
   private workspaceToggleQueued = false;
   private workspaceToggleQueuedPermanent = false;
-  private starting = false; // guards startMcpx against re-entry (orphan spawns)
-  /** Set by stopMcpx to interrupt an in-flight startMcpx wait loop. */
-  private abortStart = false;
-  /** Last mcpx child this overlay spawned; used to refuse pile-up spawns while
-   *  a previous one is still alive but its endpoint never became reachable. */
-  private spawnedChild?: ReturnType<typeof spawn>;
+  private starting = false;
   private refreshGeneration = 0;
+  private refreshPromise?: Promise<void>;
   private closed = false; // set on close() so async refresh/render skip work after close
   private windowSelected = 0;
   private windowSessionSelected = 0;
@@ -531,6 +544,10 @@ export class McpxOverlay implements Component, Focusable {
   private observeGeneration = 0;
   private observing = false;
   private windowActionBusy = false;
+  private collaborationSelected = 0;
+  private collaborationItemSelected = 0;
+  private collaborationBusy = false;
+  private monitorObservation?: McpxGatewayMonitorObservation;
   private client?: McpxStreamableHttpClient;
   private clientEndpoint?: string;
   private clientBearerToken?: string;
@@ -560,38 +577,6 @@ export class McpxOverlay implements Component, Focusable {
     this.stopWindowObserve();
   }
 
-  private pidPath(): string {
-    return process.env.MCPX_PID_FILE ?? join(homedir(), ".mcpx", "mcpx-server.pid");
-  }
-
-  /** Read the server-written PID file ({home}/mcpx-server.pid). The Go server
-   *  owns this file (writes at start, removes on graceful shutdown), so it is
-   *  accurate no matter how mcpx was launched. */
-  private readPidFile(): number | undefined {
-    try {
-      const raw = readFileSync(this.pidPath(), "utf8").trim();
-      const parsed = Number(raw);
-      if (Number.isInteger(parsed) && parsed > 0) return parsed;
-    } catch {
-      // no pid file
-    }
-    return undefined;
-  }
-
-  private async killPid(pid: number): Promise<boolean> {
-    if (!isProcessOwnedBy(pid, "mcpx")) return false;
-    try {
-      if (process.platform === "win32") {
-        spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
-      } else {
-        await killProcessWithEscalation(pid);
-      }
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
   private configPath(): string {
     return join(homedir(), ".mcpx", "config.yaml");
   }
@@ -608,60 +593,15 @@ export class McpxOverlay implements Component, Focusable {
     return 9090;
   }
 
-  /** Start the mcpx server detached, persist its PID, and wait for the endpoint. */
+  /** Start only the verified packaged Gateway through its authenticated control client. */
   private async startMcpx(): Promise<void> {
-    if (this.starting) return; // a second "s" while starting would orphan the first spawn
-    const binary = locateMcpx();
-    if (!binary) {
-      this.status = "未找到 mcpx — 设置 MCPX_BIN 或将其加入 PATH";
-      this.params.requestRender();
-      return;
-    }
-    if (this.snapshot.endpoint === "online") {
-      const tunnel = this.snapshot.tunnel;
-      this.status = tunnel?.url && (!tunnel.alive || tunnel.health === "dead")
-        ? "本地 mcpx 已运行；公网隧道异常，请按 T 重建（s/R 只控制本地 mcpx）"
-        : "mcpx 已在运行";
-      this.params.requestRender();
-      return;
-    }
-    // A previous spawn that never became reachable may still be alive; spawning
-    // again would pile up mcpx processes (stdio is ignored, so nothing would
-    // surface the duplication).
-    if (this.spawnedChild?.exitCode === null) {
-      this.status = "上次拉起的 mcpx 仍在启动中（端点未就绪），请稍后按 r 刷新或用 R 重启";
-      this.params.requestRender();
-      return;
-    }
+    if (this.starting) return;
     this.starting = true;
-    this.abortStart = false;
-    this.status = "正在启动 mcpx…";
-    this.params.requestRender();
+    this.status = "正在启动 Pi Maestro Gateway…";
+    this.safeRequestRender();
     try {
-      const useShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(binary);
-      const child = spawn(binary, [], { detached: true, stdio: "ignore", shell: useShell });
-      child.unref();
-      this.spawnedChild = child;
-      // The Go server owns the PID file (writes at start, removes on shutdown);
-      // the TUI never writes it — a shell-wrapped spawn would persist the
-      // wrapper's pid, not mcpx's.
-      const deadline = Date.now() + (this.params.endpointWaitMs ?? 15_000);
-      let online = false;
-      while (Date.now() < deadline && !this.abortStart) {
-        const { reachable } = await probeEndpoint(this.configPath());
-        if (reachable) {
-          online = true;
-          break;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 500));
-      }
-      if (this.abortStart) {
-        // stopMcpx requested cancellation during the wait — kill the child we
-        // just spawned and let stopMcpx own the status + PID-file cleanup.
-        try { child.kill(); } catch { /* already dead */ }
-        return;
-      }
-      this.status = online ? "mcpx 已启动并监听" : "mcpx 进程已拉起但端点未就绪（可能端口被占用或配置有误，稍后按 r 刷新）";
+      const status = await startGateway(this.params.cwd);
+      this.status = status.online ? "Pi Maestro Gateway 已启动" : "Pi Maestro Gateway 尚未就绪";
     } catch (error) {
       this.status = `启动失败: ${error instanceof Error ? error.message : String(error)}`;
     } finally {
@@ -670,78 +610,32 @@ export class McpxOverlay implements Component, Focusable {
     await this.refresh();
   }
 
-  /** Stop the mcpx server (kills the process tree on Windows). */
+  /** Stop through authenticated Gateway IPC; fallback requires exact owner identity. */
   private async stopMcpx(): Promise<void> {
-    // A stop request during startMcpx's endpoint wait must be honored: signal
-    // abort so the wait loop kills the child it just spawned, then fall through
-    // to clean up any PID file / port listener. Refusing here would leave a
-    // half-started process untracked.
-    if (this.starting) this.abortStart = true;
-    const pid = this.readPidFile();
-    this.status = "正在停止 mcpx…";
-    this.params.requestRender();
+    this.status = "正在停止 Pi Maestro Gateway…";
+    this.safeRequestRender();
     try {
-      if (pid && await this.killPid(pid)) {
-        // /F kill skips the Go server's graceful PID-file cleanup — remove it.
-        try {
-          rmSync(this.pidPath(), { force: true });
-        } catch {
-          // best-effort
-        }
-      } else {
-        // PID file missing, stale, or owned by another process — only terminate
-        // a listener after killMcpxByPort verifies its command identity.
-        this.killMcpxByPort();
-        try { rmSync(this.pidPath(), { force: true }); } catch { /* best-effort */ }
+      const status = await readGatewayControlStatus(this.params.cwd);
+      if (!status.owner) this.status = "Pi Maestro Gateway 未运行";
+      else {
+        await stopGateway(this.params.cwd);
+        this.status = "Pi Maestro Gateway 已停止";
       }
-      this.status = "已发送停止信号";
     } catch (error) {
       this.status = `停止失败: ${error instanceof Error ? error.message : String(error)}`;
     }
     await this.refresh();
   }
 
-  /** R restarts mcpx: stop (tolerant of an already-dead/external process) then
-   *  start. Unlike `s`, this bypasses the online guard so a config-reload
-   *  restart works even when the endpoint is already up. */
+  /** Restart the built-in daemon so config changes take effect. */
   private async restartMcpx(): Promise<void> {
     if (this.starting) return;
-    const binary = locateMcpx();
-    if (!binary) {
-      this.status = "未找到 mcpx — 设置 MCPX_BIN 或将其加入 PATH";
-      this.safeRequestRender();
-      return;
-    }
     this.starting = true;
-    this.status = "正在重启 mcpx…";
+    this.status = "正在重启 Pi Maestro Gateway…";
     this.safeRequestRender();
-    // Stop any existing process. Tolerate a missing PID file — the process may
-    // have been started externally or died; then fall back to the port listener.
-    const pid = this.readPidFile();
-    if (!pid || !(await this.killPid(pid))) {
-      this.killMcpxByPort();
-    }
-    // Give the port a moment to release after kill.
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    // Start fresh — bypass the online guard (we just stopped it on purpose).
     try {
-      const useShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(binary);
-      const child = spawn(binary, [], { detached: true, stdio: "ignore", shell: useShell });
-      child.unref();
-      this.spawnedChild = child;
-      const deadline = Date.now() + (this.params.endpointWaitMs ?? 15_000);
-      let online = false;
-      while (Date.now() < deadline) {
-        const { reachable } = await probeEndpoint(this.configPath());
-        if (reachable) { online = true; break; }
-        await new Promise((resolve) => setTimeout(resolve, 500));
-      }
-      const tunnel = this.snapshot.tunnel;
-      this.status = online
-        ? tunnel?.url && (!tunnel.alive || tunnel.health === "dead")
-          ? "mcpx 已重启并监听；公网隧道仍异常，请按 T 重建"
-          : "mcpx 已重启并监听"
-        : "mcpx 进程已拉起但端点未就绪（可能端口被占用或配置有误，稍后按 r 刷新）";
+      const status = await restartGateway(this.params.cwd);
+      this.status = status.online ? "Pi Maestro Gateway 已重启" : "Pi Maestro Gateway 尚未就绪";
     } catch (error) {
       this.status = `重启失败: ${error instanceof Error ? error.message : String(error)}`;
     } finally {
@@ -750,49 +644,13 @@ export class McpxOverlay implements Component, Focusable {
     await this.refresh();
   }
 
-  /** Kill the process listening on the configured MCPX port (fallback when the PID file
-   *  is stale — e.g. mcpx was started by a prior board session or externally). */
-  private killMcpxByPort(port = this.listenPort()): void {
-    try {
-      if (process.platform === "win32") {
-        const result = spawnSync("netstat", ["-ano", "-p", "tcp"], {
-          encoding: "utf8", timeout: 5_000, shell: false,
-        });
-        // Strict port match: only LISTENING rows whose local-address column
-        // ends in the configured port followed by whitespace. Avoids matching
-        // a port with the same digits as a suffix on a different listener.
-        const PORT = port;
-        const portRe = new RegExp("\\s\\d+\\.\\d+\\.\\d+\\.\\d+:" + PORT + "\\s|\\[::\\]?:" + PORT + "\\s");
-        for (const line of String(result.stdout || "").split(/\r?\n/)) {
-          if (line.includes("LISTENING") && portRe.test(line)) {
-            const m = line.match(/\s(\d+)\s*$/);
-            if (m && isProcessOwnedBy(Number(m[1]), "mcpx")) {
-              spawnSync("taskkill", ["/pid", m[1], "/T", "/F"], { stdio: "ignore" });
-            }
-          }
-        }
-      } else {
-        // POSIX: lsof preferred, ss fallback; output is one pid per line.
-        const result = spawnSync("sh", ["-c", `lsof -ti tcp:${port} 2>/dev/null || ss -ltnp 'sport = :${port}' 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2`], {
-          encoding: "utf8", timeout: 5_000,
-        });
-        for (const line of String(result.stdout || "").split(/\r?\n/)) {
-          const n = Number(line.trim());
-          if (Number.isInteger(n) && n > 0 && isProcessOwnedBy(n, "mcpx")) {
-            try { process.kill(n, "SIGTERM"); } catch { /* dead */ }
-          }
-        }
-      }
-    } catch { /* best-effort */ }
-  }
-
   /** T restarts the Cloudflare quick tunnel, syncs its new URL into config.yaml's
    *  server_url, and restarts mcpx so the OAuth issuer matches the new URL.
    *  One-click refresh for the quick-tunnel-URL-changed scenario. */
   private async refreshTunnelAndMcpx(): Promise<void> {
     if (this.starting) return;
     this.starting = true;
-    this.status = "正在重启隧道并同步 mcpx…";
+    this.status = "正在重启隧道并同步 Pi Maestro Gateway…";
     this.safeRequestRender();
     let newUrl: string | undefined;
     let configUpdated = false;
@@ -807,30 +665,8 @@ export class McpxOverlay implements Component, Focusable {
       // 2. Write the new URL into config.yaml so mcpx's OAuth issuer matches.
       updateConfigServerURL(newUrl);
       configUpdated = true;
-      // 3. Restart mcpx to load the new server_url. Kill by PID file first, then
-      //    by port as a fallback (the PID file may point at a stale/external pid).
-      await stopMcpx();
-      this.killMcpxByPort();
-      await new Promise((resolve) => setTimeout(resolve, 800)); // port release
-      const stopDeadline = Date.now() + 2_000;
-      let oldProcessStillOnline = false;
-      while (Date.now() < stopDeadline) {
-        const { reachable } = await probeEndpoint(this.configPath());
-        if (!reachable) {
-          oldProcessStillOnline = false;
-          break;
-        }
-        oldProcessStillOnline = true;
-        await new Promise((resolve) => setTimeout(resolve, 200));
-      }
-      if (oldProcessStillOnline) throw new Error("旧 mcpx 进程未停止，已取消配置切换");
-      const binary = locateMcpx();
-      if (!binary) throw new Error("未找到 mcpx 二进制");
-      const useShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(binary);
-      const child = spawn(binary, [], { detached: true, stdio: "ignore", shell: useShell });
-      child.unref();
-      this.spawnedChild = child;
-      // 4. Wait for the endpoint to come back (new issuer).
+      // 3. Restart the authenticated built-in daemon to load the new issuer.
+      await restartGateway(this.params.cwd);
       const deadline = Date.now() + (this.params.endpointWaitMs ?? 15_000);
       let online = false;
       while (Date.now() < deadline) {
@@ -838,20 +674,19 @@ export class McpxOverlay implements Component, Focusable {
         if (reachable) { online = true; break; }
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
-      if (!online) throw new Error("mcpx 端点未就绪（可能端口被占用或配置有误）");
+      if (!online) throw new Error("Pi Maestro Gateway HTTP /mcp 端点未就绪");
       const publicHealth = await probeTunnelHealth(newUrl);
       const publicReady = publicHealth === "ok" || publicHealth === "auth";
       this.status = publicReady
-        ? `隧道已更新: ${newUrl}/mcp · mcpx 已重启 · 公网端点已就绪`
-        : `隧道已更新: ${newUrl}/mcp · mcpx 已重启，但公网端点仍未就绪（按 r 重试或 T 重启隧道）`;
+        ? `隧道已更新: ${newUrl}/mcp · Pi Maestro Gateway 已重启 · 公网端点已就绪`
+        : `隧道已更新: ${newUrl}/mcp · Pi Maestro Gateway 已重启，但公网端点仍未就绪（按 r 重试或 T 重启隧道）`;
     } catch (error) {
       let rolledBack = false;
       if (configUpdated) {
         // Stop both sides before restoring the old snapshot. The old tunnel URL
         // cannot be resumed after a Quick Tunnel rotation, so the consistent
         // fallback is the old local config with no tunnel process.
-        try { await stopMcpx(); } catch { /* best-effort */ }
-        try { this.killMcpxByPort(); } catch { /* best-effort */ }
+        try { await stopGateway(this.params.cwd); } catch { /* best-effort */ }
       }
       if (newUrl) {
         try { await stopQuickTunnel(); } catch { /* best-effort */ }
@@ -874,6 +709,17 @@ export class McpxOverlay implements Component, Focusable {
   }
   async refresh(): Promise<void> {
     if (this.closed) return;
+    if (this.refreshPromise) return this.refreshPromise;
+    const operation = this.refreshOnce();
+    this.refreshPromise = operation;
+    try {
+      await operation;
+    } finally {
+      if (this.refreshPromise === operation) this.refreshPromise = undefined;
+    }
+  }
+
+  private async refreshOnce(): Promise<void> {
     this.refreshGeneration++;
     const generation = this.refreshGeneration;
     executablePathCache.clear();
@@ -883,27 +729,37 @@ export class McpxOverlay implements Component, Focusable {
       const cwd = this.params.cwd;
       const now = Date.now();
       const binary = locateMcpx();
-      let version: string | undefined;
-      if (binary) {
-        const useShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(binary);
-        const result = spawnSync(binary, ["-version"], { encoding: "utf8", timeout: 10_000, shell: useShell });
-        version = result.status === 0 ? String(result.stdout || "").trim() || undefined : undefined;
-      }
+      const fork = detectMcpxForPmf();
+      const version = fork.version ? `pi-maestro-gateway ${fork.version}` : undefined;
+      const controlStatus = await readGatewayControlStatus(cwd);
       const configPath = join(homedir(), ".mcpx", "config.yaml");
-      const workspaces = collectWorkspaces(configPath);
+      const workspaces = (await listGatewayWorkspaces()).map((workspace) => ({
+        name: basename(workspace.path),
+        path: workspace.path,
+        ...(workspace.expiresAt === undefined ? {} : { expiresAt: workspace.expiresAt }),
+      }));
+      let collaborativeSessions: CollaborativeSessionStateV1[] = [];
+      let collaborationError: string | undefined;
+      try {
+        collaborativeSessions = await readGatewayCollaborativeSessions(cwd);
+      } catch (error) {
+        collaborationError = error instanceof Error ? error.message : String(error);
+      }
       const tunnel = readTunnelState();
       const { endpoint, reachable, endpointVersion } = await probeEndpoint(configPath);
       const online = reachable;
-      const fork = detectMcpxForPmf();
       const opsPassword = readOpsPassword();
 
       let connections: McpxConnectionInfo[] | undefined;
       let runtimeWindows: McpxRuntimeWindow[] | undefined;
       let runtimeWindowFallback: McpxSnapshot["runtimeWindowFallback"];
+      const collaborationMonitors: Record<string, McpxGatewayMonitor[]> = {};
+      const collaborationMemberIds: Record<string, string> = {};
       if (online) {
         const client = this.clientForEndpoint(endpoint);
+        const memberIds = collaborativeSessions.flatMap((state) => state.members.map((member) => member.id));
         try {
-          connections = await client.listRemoteSessions();
+          connections = await client.listRemoteSessions(memberIds);
           const windowGroups = await Promise.all(connections.map((session) => client.listWindows(session)));
           runtimeWindows = windowGroups.flat();
         } catch (error) {
@@ -912,11 +768,22 @@ export class McpxOverlay implements Component, Focusable {
             : error instanceof McpxClientError && error.kind === "unsupported"
               ? "unsupported"
               : "unavailable";
-          // A manual refresh must be able to recover after auth/config/runtime changes.
-          if (this.client === client) {
-            this.client = undefined;
-            this.clientEndpoint = undefined;
-            this.clientBearerToken = undefined;
+        }
+        for (let index = 0; index < collaborativeSessions.length; index++) {
+          const localState = collaborativeSessions[index]!;
+          const candidates = localState.members
+            .filter((member) => member.status === "active" && member.leaseExpiresAt > now)
+            .sort((left, right) => left.role === "owner" ? -1 : right.role === "owner" ? 1 : 0);
+          for (const member of candidates) {
+            try {
+              const state = await client.getGatewaySession(localState.session.id, member.id);
+              collaborativeSessions[index] = state;
+              collaborationMonitors[state.session.id] = await client.listGatewayMonitors(state.session.id, member.id);
+              collaborationMemberIds[state.session.id] = member.id;
+              break;
+            } catch {
+              // A local state file may belong to another authenticated principal.
+            }
           }
         }
       }
@@ -927,18 +794,22 @@ export class McpxOverlay implements Component, Focusable {
           binary: binary ?? undefined,
           version,
           endpoint: online ? "online" : "offline",
-          endpointVersion,
+          endpointVersion: endpointVersion ?? (controlStatus.online ? "Pi Maestro Gateway IPC online" : undefined),
           configPath: existsSync(configPath) ? configPath : undefined,
           workspaces,
           ...this.cwdRegistrationState(workspaces, cwd),
-          windows: collectWindows(now),
-          thread: collectThread(),
+          windows: collectWindows(now, cwd),
+          thread: collectThread(cwd),
           mcpServers: collectMcpServers(cwd),
           connections,
           runtimeWindows,
           runtimeWindowFallback,
           tunnel,
-          tasks: readDelegatedTasks(),
+          tasks: await readGatewayDelegatedTasks(),
+          collaborativeSessions,
+          collaborationMonitors,
+          collaborationMemberIds,
+          ...(collaborationError === undefined ? {} : { collaborationError }),
           forkInstalled: fork.installed,
           forkVersion: fork.version,
           opsPassword,
@@ -948,6 +819,8 @@ export class McpxOverlay implements Component, Focusable {
           Math.max(0, (connections?.length ?? 1) - 1),
         );
         this.windowSelected = Math.min(this.windowSelected, Math.max(0, this.windowEntries().length - 1));
+        this.collaborationSelected = Math.min(this.collaborationSelected, Math.max(0, collaborativeSessions.length - 1));
+        this.collaborationItemSelected = Math.min(this.collaborationItemSelected, Math.max(0, this.collaborationItems().length - 1));
       }
       if (tunnel.url) {
         void probeTunnelHealth(tunnel.url).then((health) => {
@@ -1074,6 +947,105 @@ export class McpxOverlay implements Component, Focusable {
     }
   }
 
+  private currentCollaborativeSession(): CollaborativeSessionStateV1 | undefined {
+    return this.snapshot.collaborativeSessions?.[this.collaborationSelected];
+  }
+
+  private collaborationItems(): Array<{ kind: "todo"; todo: GatewayTodoTaskV1 } | { kind: "monitor"; monitor: McpxGatewayMonitor }> {
+    const state = this.currentCollaborativeSession();
+    if (!state) return [];
+    return [
+      ...state.todos.map((todo) => ({ kind: "todo" as const, todo })),
+      ...(this.snapshot.collaborationMonitors?.[state.session.id] ?? []).map((monitor) => ({ kind: "monitor" as const, monitor })),
+    ];
+  }
+
+  private async renewCurrentGatewayMember(): Promise<void> {
+    if (this.collaborationBusy) return;
+    const state = this.currentCollaborativeSession();
+    const memberId = state && this.snapshot.collaborationMemberIds?.[state.session.id];
+    const member = state?.members.find((candidate) => candidate.id === memberId);
+    if (!state || !memberId || !member || !this.client) {
+      this.status = "Gateway member renewal unavailable for this authenticated identity";
+      this.safeRequestRender();
+      return;
+    }
+    this.collaborationBusy = true;
+    try {
+      await this.client.renewGatewayMember(state.session.id, memberId, state.session.revision, member.generation);
+      this.status = `Renewed member ${memberId} lease`;
+      await this.refresh();
+    } catch (error) {
+      this.status = `Member renewal failed: ${error instanceof Error ? error.message : String(error)}`;
+    } finally {
+      this.collaborationBusy = false;
+      this.safeRequestRender();
+    }
+  }
+
+  private async mutateSelectedGatewayTodo(action: "claim" | "release" | "advance", status?: "pending" | "blocked" | "completed" | "cancelled"): Promise<void> {
+    if (this.collaborationBusy) return;
+    const state = this.currentCollaborativeSession();
+    const item = this.collaborationItems()[this.collaborationItemSelected];
+    const memberId = state && this.snapshot.collaborationMemberIds?.[state.session.id];
+    if (!state || item?.kind !== "todo" || !memberId || !this.client) {
+      this.status = "Gateway Todo action unavailable for this authenticated member";
+      this.safeRequestRender();
+      return;
+    }
+    this.collaborationBusy = true;
+    this.status = `${action} Gateway Todo…`;
+    this.safeRequestRender();
+    try {
+      await this.client.mutateGatewayTodo({ action, sessionId: state.session.id, memberId, expectedSessionRevision: state.session.revision, todoId: item.todo.id, ...(status ? { status } : {}) });
+      this.status = `Gateway Todo ${action} completed`;
+      await this.refresh();
+    } catch (error) {
+      this.status = `Gateway Todo action failed: ${error instanceof Error ? error.message : String(error)}`;
+      this.safeRequestRender();
+    } finally {
+      this.collaborationBusy = false;
+    }
+  }
+
+  private async observeSelectedMonitor(reset = false): Promise<void> {
+    if (this.collaborationBusy) return;
+    const state = this.currentCollaborativeSession();
+    const item = this.collaborationItems()[this.collaborationItemSelected];
+    const memberId = state && this.snapshot.collaborationMemberIds?.[state.session.id];
+    if (!state || item?.kind !== "monitor" || !memberId || !this.client) return;
+    this.collaborationBusy = true;
+    try {
+      const cursor = reset ? 0 : (this.monitorObservation?.nextCursor ?? 0);
+      this.monitorObservation = await this.client.observeGatewayMonitor(state.session.id, memberId, item.monitor.handle, cursor);
+      this.status = this.monitorObservation.gap ? "Monitor cursor gap detected; showing retained events" : "";
+    } catch (error) {
+      this.status = `Monitor observe failed: ${error instanceof Error ? error.message : String(error)}`;
+    } finally {
+      this.collaborationBusy = false;
+      this.safeRequestRender();
+    }
+  }
+
+  private async cancelSelectedMonitor(): Promise<void> {
+    if (this.collaborationBusy) return;
+    const state = this.currentCollaborativeSession();
+    const item = this.collaborationItems()[this.collaborationItemSelected];
+    const memberId = state && this.snapshot.collaborationMemberIds?.[state.session.id];
+    if (!state || item?.kind !== "monitor" || !memberId || !this.client) return;
+    this.collaborationBusy = true;
+    try {
+      await this.client.cancelGatewayMonitor(state.session.id, memberId, item.monitor.handle);
+      this.status = "Monitor cancellation requested";
+      await this.refresh();
+    } catch (error) {
+      this.status = `Monitor cancel failed: ${error instanceof Error ? error.message : String(error)}`;
+    } finally {
+      this.collaborationBusy = false;
+      this.safeRequestRender();
+    }
+  }
+
   /** Mark the overlay closed so async refresh/render callbacks skip work. */
   markClosed(): void {
     this.closed = true;
@@ -1088,6 +1060,9 @@ export class McpxOverlay implements Component, Focusable {
     if (this.mode === "window-list") return this.renderWindowList(safeWidth);
     if (this.mode === "window-detail") return this.renderWindowDetail(safeWidth);
     if (this.mode === "config") return this.renderConfig(safeWidth);
+    if (this.mode === "collaboration") return this.renderCollaboration(safeWidth);
+    if (this.mode === "collaboration-detail") return this.renderCollaborationDetail(safeWidth);
+    if (this.mode === "monitor-detail") return this.renderMonitorDetail(safeWidth);
     return this.renderList(safeWidth);
   }
 
@@ -1106,11 +1081,64 @@ export class McpxOverlay implements Component, Focusable {
         } else {
           this.mode = "list";
         }
-      } else if (this.mode === "detail" || this.mode === "workspace" || this.mode === "window-list") {
+      } else if (this.mode === "monitor-detail") {
+        this.mode = "collaboration-detail";
+        this.monitorObservation = undefined;
+      } else if (this.mode === "collaboration-detail") {
+        this.mode = "collaboration";
+        this.collaborationItemSelected = 0;
+      } else if (this.mode === "detail" || this.mode === "workspace" || this.mode === "window-list" || this.mode === "collaboration") {
         this.mode = "list";
       } else {
         this.markClosed();
         this.params.close();
+      }
+      this.params.requestRender();
+      return;
+    }
+    if (this.mode === "monitor-detail") {
+      if (data === "r") void this.observeSelectedMonitor();
+      else if (data === "R") void this.observeSelectedMonitor(true);
+      else if (data === "x" || data === "X") void this.cancelSelectedMonitor();
+      return;
+    }
+    if (this.mode === "collaboration-detail") {
+      const items = this.collaborationItems();
+      if (matchesKey(data, Key.up) || matchesKey(data, "k")) {
+        this.collaborationItemSelected = Math.max(0, this.collaborationItemSelected - 1);
+      } else if (matchesKey(data, Key.down) || matchesKey(data, "j")) {
+        this.collaborationItemSelected = Math.min(Math.max(0, items.length - 1), this.collaborationItemSelected + 1);
+      } else if (isEnter(data) && items[this.collaborationItemSelected]?.kind === "monitor") {
+        this.monitorObservation = undefined;
+        this.mode = "monitor-detail";
+        void this.observeSelectedMonitor(true);
+      } else if (data === "u") {
+        void this.renewCurrentGatewayMember();
+      } else if (data === "a") {
+        const item = items[this.collaborationItemSelected];
+        if (item?.kind === "todo") void this.mutateSelectedGatewayTodo(item.todo.status === "in_progress" ? "release" : "claim");
+      } else if (data === "b") {
+        const item = items[this.collaborationItemSelected];
+        if (item?.kind === "todo") void this.mutateSelectedGatewayTodo("advance", item.todo.status === "blocked" ? "pending" : "blocked");
+      } else if (data === "d") {
+        void this.mutateSelectedGatewayTodo("advance", "completed");
+      } else if (data === "r") {
+        void this.refresh();
+      }
+      this.params.requestRender();
+      return;
+    }
+    if (this.mode === "collaboration") {
+      const sessions = this.snapshot.collaborativeSessions ?? [];
+      if (matchesKey(data, Key.up) || matchesKey(data, "k")) {
+        this.collaborationSelected = Math.max(0, this.collaborationSelected - 1);
+      } else if (matchesKey(data, Key.down) || matchesKey(data, "j")) {
+        this.collaborationSelected = Math.min(Math.max(0, sessions.length - 1), this.collaborationSelected + 1);
+      } else if (isEnter(data) && this.currentCollaborativeSession()) {
+        this.collaborationItemSelected = 0;
+        this.mode = "collaboration-detail";
+      } else if (data === "r") {
+        void this.refresh();
       }
       this.params.requestRender();
       return;
@@ -1189,6 +1217,12 @@ export class McpxOverlay implements Component, Focusable {
     }
     if (isEnter(data) && this.snapshot.thread.length > 0) {
       this.mode = "detail";
+      this.params.requestRender();
+      return;
+    }
+    if (data === "g" || data === "G") {
+      this.collaborationSelected = Math.min(this.collaborationSelected, Math.max(0, (this.snapshot.collaborativeSessions?.length ?? 1) - 1));
+      this.mode = "collaboration";
       this.params.requestRender();
       return;
     }
@@ -1274,24 +1308,16 @@ export class McpxOverlay implements Component, Focusable {
         // static `workspace register` while the extension provides a lease.
         const message = await this.params.onRegisterWorkspace(this.params.cwd);
         this.status = message;
+      } else if (registered) {
+        const { ok, message } = await removeGatewayWorkspaceByPath(this.params.cwd);
+        this.status = ok ? `unregistered: ${this.params.cwd}` : `remove failed: ${message}`;
       } else {
-        const binary = locateMcpx();
-        if (!binary) {
-          this.status = "mcpx binary not found — set MCPX_BIN or add mcpx to PATH";
-          return;
-        }
-        const command = registered ? "remove" : "register";
-        const useShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(binary);
-        if (useShell && /[\u0000\r\n&|<>^%!()]/.test(this.params.cwd)) {
-          this.status = "workspace path contains unsafe Windows shell characters";
-          return;
-        }
-        const result = spawnSync(binary, ["workspace", command, this.params.cwd], {
-          encoding: "utf8", timeout: 15_000, shell: useShell,
-        });
-        this.status = result.status === 0
-          ? (registered ? `unregistered: ${this.params.cwd}` : `registered: ${this.params.cwd}`)
-          : `${registered ? "remove" : "register"} failed (${result.status ?? "spawn error"}): ${String(result.stderr || result.stdout || "").trim()}`;
+        const registeredNow = permanent
+          ? await registerMcpxWorkspacePermanent(this.params.cwd)
+          : await startWorkspaceLease(this.params.cwd);
+        this.status = registeredNow
+          ? `registered: ${this.params.cwd}`
+          : `register failed: ${this.params.cwd}`;
       }
     } catch (error) {
       this.status = `${registered ? "remove" : "register"} failed: ${error instanceof Error ? error.message : String(error)}`;
@@ -1520,7 +1546,7 @@ export class McpxOverlay implements Component, Focusable {
     try {
       const { summary } = writeMcpxConfigChanges(this.configChanges);
       this.status = summary.length > 0
-        ? `已写入 ${summary.length} 项 — 重启 mcpx 后生效（R 重启 · 或 /mcpx 重入）`
+        ? `已写入 ${summary.length} 项 — 重启 Pi Maestro Gateway 后生效（R 重启 · 或 /gateway 重入）`
         : "无修改需写入";
       // Reload the view so the rendered values match what is now on disk.
       this.configView = readMcpxConfigView() ?? undefined;
@@ -1535,7 +1561,7 @@ export class McpxOverlay implements Component, Focusable {
 
   private renderConfig(width: number): string[] {
     const inner = width - 2;
-    const rows = [fitLine("MCPX 配置 · ↑↓ 选择 · Enter/space 编辑 · Esc 返回", inner), rule(inner)];
+    const rows = [fitLine("Pi Maestro Gateway 配置 · ↑↓ 选择 · Enter/space 编辑 · Esc 返回", inner), rule(inner)];
     if (!this.configView) {
       rows.push(fitLine(fg("33", "未读取到 config.yaml — 可先按 c 走向导生成，或保存后即生成"), inner));
       rows.push(...fitSegments(inner, ["Esc back"]));
@@ -1574,7 +1600,7 @@ export class McpxOverlay implements Component, Focusable {
       rows.push(fitLine(`${marker} ${valueText}`, inner));
     }
     rows.push(rule(inner));
-    rows.push(fitLine(fg("2", "  Enter/space 编辑标量 · 进入列表后 a 添加 d 删除 · 保存后按 R 重启 mcpx"), inner));
+    rows.push(fitLine(fg("2", "  Enter/space 编辑标量 · 进入列表后 a 添加 d 删除 · 保存后按 R 重启 Pi Maestro Gateway"), inner));
     if (this.status) rows.push(fitLine(this.status, inner));
     rows.push(...fitSegments(inner, ["Enter 编辑", "space 切换", "Esc 返回"]));
     return frame(rows, width);
@@ -1599,7 +1625,7 @@ export class McpxOverlay implements Component, Focusable {
   }
 
   private renderCompact(width: number): string {
-    const endpoint = this.snapshot.endpoint === "online" ? "mcpx online" : this.snapshot.endpoint === "offline" ? "mcpx offline" : "mcpx …";
+    const endpoint = this.snapshot.endpoint === "online" ? "Gateway HTTP online" : this.snapshot.endpoint === "offline" ? "Gateway HTTP offline" : "Gateway …";
     const windowCount = this.snapshot.runtimeWindows?.length ?? this.snapshot.windows.length;
     const content = `${endpoint} · ${windowCount} windows · Esc close`;
     return truncateToWidth(content, width, "…");
@@ -1607,7 +1633,7 @@ export class McpxOverlay implements Component, Focusable {
 
   private renderList(width: number): string[] {
     const inner = width - 2;
-    const rows = [fitLine("MCPX 连接监控 · mcpx for pmf", inner), rule(inner)];
+    const rows = [fitLine("Pi Maestro Gateway · 连接监控", inner), rule(inner)];
     rows.push(...this.renderForkRows(inner));
     rows.push(this.renderConnectionRow(inner));
     rows.push(rule(inner));
@@ -1624,9 +1650,9 @@ export class McpxOverlay implements Component, Focusable {
     rows.push(rule(inner));
     rows.push(fitLine(`客户端连接（${this.snapshot.connections?.length ?? "—"}）`, inner));
     if (this.snapshot.endpoint === "offline" || this.snapshot.endpoint === "unknown") {
-      rows.push(fitLine("  ○ mcpx 未运行 — 按 s 启动，启动后显示 Remote Session 连接", inner));
+      rows.push(fitLine("  ○ Gateway HTTP 未运行 — 按 s 启动 Pi Maestro Gateway", inner));
     } else if (!this.snapshot.connections || this.snapshot.connections.length === 0) {
-      rows.push(fitLine("  ○ 无活跃 Remote Session 连接（按 x 停止 mcpx）", inner));
+      rows.push(fitLine("  ○ 无活跃 Remote Session 连接（按 x 停止 Pi Maestro Gateway）", inner));
     } else {
       for (const connection of this.snapshot.connections.slice(0, 3)) {
         rows.push(fitLine(`  ${connection.workspace || "?"} · ${connection.status}${connection.label ? ` · ${connection.label}` : ""} · ${connection.sessionId.slice(0, 8)}`, inner));
@@ -1636,6 +1662,8 @@ export class McpxOverlay implements Component, Focusable {
     rows.push(...this.renderTunnelRows(inner));
     rows.push(...this.renderOpsPasswordRows(inner));
     rows.push(...this.renderDelegatedTaskRows(inner));
+    rows.push(rule(inner));
+    rows.push(...this.renderCollaborationSummary(inner));
     rows.push(rule(inner));
     const runtimeWindows = this.snapshot.runtimeWindows;
     rows.push(fitLine(`Pi 窗口（${runtimeWindows?.length ?? this.snapshot.windows.length}） · V 查看`, inner));
@@ -1677,7 +1705,7 @@ export class McpxOverlay implements Component, Focusable {
     }
     if (this.status) rows.push(fitLine(this.status, inner));
     if (this.snapshot.error) rows.push(fitLine(fg("31", `! ${this.snapshot.error}`), inner));
-    rows.push(...fitSegments(inner, ["Enter message detail", "V windows", "r refresh", this.snapshot.endpoint === "online" ? "x stop" : "s start", "R restart", "T 隧道重建", "W workspaces", "e 注册(租约)", "E 注册(永久)", "c wizard", "C 配置", "P password", "Esc close"]));
+    rows.push(...fitSegments(inner, ["Enter message detail", "G collaboration", "V windows", "r refresh", this.snapshot.endpoint === "online" ? "x stop" : "s start", "R restart", "T 隧道重建", "W workspaces", "e 注册(租约)", "E 注册(永久)", "c wizard", "C 配置", "P password", "Esc close"]));
     return frame(rows, width);
   }
 
@@ -1693,22 +1721,15 @@ export class McpxOverlay implements Component, Focusable {
     return { cwdRegistered: true, cwdLeaseStale: stale };
   }
 
-  /** mcpx-for-pmf fork 安装提醒 — 标题行下方。fork 未以 npm 全局包安装时提示
-   *  用户安装(若 mcpx 二进制也缺失,提示是上游/未装)。 */
   private renderForkRows(width: number): string[] {
     if (this.snapshot.forkInstalled) {
-      return [fitLine(fg("32", `mcpx-for-pmf 已安装${this.snapshot.forkVersion ? ` · v${this.snapshot.forkVersion}` : ""}`), width)];
+      return [fitLine(fg("32", `Pi Maestro Gateway 已安装${this.snapshot.forkVersion ? ` · v${this.snapshot.forkVersion}` : ""}`), width)];
     }
-    if (!this.snapshot.binary) {
-      // mcpx 二进制本身都没找到 — 看板的 s/R/T 都会报错;这里给出安装指引。
-      return [fitLine(fg("31", "未安装 mcpx — 运行 `npm i -g mcpx-for-pmf` 后按 s 启动"), width)];
-    }
-    // 二进制在(可能从源码编译或上游 mcpx),但 mcpx-for-pmf npm 包未装。
-    return [fitLine(fg("33", "未检测到 mcpx-for-pmf 包 — 建议运行 `npm i -g mcpx-for-pmf` 获取 pmf 专属工具（pi_window 等）"), width)];
+    return [fitLine(fg("31", "未找到 Pi Maestro Gateway — 设置 PI_MAESTRO_GATEWAY_BIN 或重新安装 pi-maestro-flow"), width)];
   }
 
   private renderConnectionRow(width: number): string {
-    const binary = this.snapshot.binary ?? "未找到 mcpx";
+    const binary = this.snapshot.binary ?? "未找到 Pi Maestro Gateway";
     const version = this.snapshot.version ? ` · ${this.snapshot.version}` : "";
     const endpoint = this.snapshot.endpoint === "online"
       ? fg("32", `● ${this.snapshot.endpointVersion ?? "online"}`)
@@ -1723,7 +1744,7 @@ export class McpxOverlay implements Component, Focusable {
       : fg("33", "未注册");
     // mcpx's registry is rebuilt only at startup and every ~5min (lease sweep);
     // a freshly-registered window is recognized by the runtime after that delay.
-    const sweepHint = this.snapshot.cwdRegistered && !this.snapshot.cwdLeaseStale ? " · mcpx ≤5min 内加载" : "";
+    const sweepHint = this.snapshot.cwdRegistered && !this.snapshot.cwdLeaseStale ? " · Gateway workspace 已生效" : "";
     return fitLine(`binary: ${binary}${version} · endpoint: ${endpoint} · 工作区 ${this.snapshot.workspaces.length} · 当前目录 ${registered}${sweepHint}`, width);
   }
 
@@ -1749,7 +1770,7 @@ export class McpxOverlay implements Component, Focusable {
       // reachable, but a probe carries no credentials so it cannot reach the
       // go-sdk Host guard that sits *after* auth. If mcpx was not restarted to
       // load disable_localhost_protection, a real client gets 403 *after* auth.
-      rows.push(fitLine(fg("2", "  i 若客户端鉴权后仍 403：检查 server.disable_localhost_protection 并重启 mcpx"), width));
+      rows.push(fitLine(fg("2", "  i 若客户端鉴权后仍 403：检查 server.disable_localhost_protection 并重启 Pi Maestro Gateway"), width));
     } else if (!tunnel.alive) {
       rows.push(fitLine(fg("31", "  ! 隧道进程未运行（PID 文件可能已陈旧）— 按 T 重建隧道并自动同步新 URL"), width));
     } else if (tunnel.health === "dead") {
@@ -1757,9 +1778,9 @@ export class McpxOverlay implements Component, Focusable {
       // connection dropped and the URL can no longer be reached at all. T
       // restarts the tunnel, writes the new URL into config, and restarts mcpx.
       const hint = this.snapshot.endpoint === "online"
-        ? "按 R 重启 mcpx 加载新配置，或按 T 重建隧道并自动同步新 URL"
-        : "按 s 启动 mcpx，或按 T 重建隧道并自动同步新 URL";
-      rows.push(fitLine(fg("31", `  ! 隧道异常：mcpx 可能未重启加载新配置（403 Host/404 OAuth 路由）或隧道已断 — ${hint}`), width));
+        ? "按 R 重启 Pi Maestro Gateway 加载新配置，或按 T 重建隧道并自动同步新 URL"
+        : "按 s 启动 Pi Maestro Gateway，或按 T 重建隧道并自动同步新 URL";
+      rows.push(fitLine(fg("31", `  ! 隧道异常：Gateway 可能未重启加载新配置（403 Host/404 OAuth 路由）或隧道已断 — ${hint}`), width));
     }
     return rows;
   }
@@ -1773,8 +1794,7 @@ export class McpxOverlay implements Component, Focusable {
     // Full reveal is also available directly from ~/.mcpx/config.yaml.
     const pw = this.snapshot.opsPassword;
     if (!pw) {
-      // config.yaml 未设 password — mcpx 启动时会在内存生成一个并打印到启动日志。
-      return [fitLine(fg("33", "运维口令：未在 config 持久化（mcpx 启动时自动生成，见启动日志 oauth_password）"), width)];
+      return [fitLine(fg("33", "运维口令：未在 config 持久化（OAuth 授权需要配置 oauth.password）"), width)];
     }
     const shown = this.revealOpsPassword
       ? pw
@@ -1787,7 +1807,7 @@ export class McpxOverlay implements Component, Focusable {
     ];
   }
 
-  /** 委派任务区块 — 显示 mcpx 任务注册表里的委派任务及状态/结果。 */
+  /** 委派任务区块 — Gateway metadata journal first, then legacy history. */
   private renderDelegatedTaskRows(width: number): string[] {
     const tasks = this.snapshot.tasks;
     if (!tasks || tasks.length === 0) return [];
@@ -1812,6 +1832,103 @@ export class McpxOverlay implements Component, Focusable {
       }
     }
     return rows;
+  }
+
+  private renderCollaborationSummary(width: number): string[] {
+    const sessions = this.snapshot.collaborativeSessions ?? [];
+    const todos = sessions.reduce((count, state) => count + state.todos.length, 0);
+    const monitors = Object.values(this.snapshot.collaborationMonitors ?? {}).reduce((count, values) => count + values.length, 0);
+    const rows = [fitLine(`Gateway 协作（${sessions.length} Session） · Gateway Todo ${todos} · Monitor ${monitors} · G 管理`, width)];
+    rows.push(fitLine(fg("33", "  Gateway Todo is independent and is not synchronized with Pi Todo."), width));
+    if (this.snapshot.collaborationError) rows.push(fitLine(fg("31", `  collaboration: ${this.snapshot.collaborationError}`), width));
+    return rows;
+  }
+
+  private renderCollaboration(width: number): string[] {
+    const inner = width - 2;
+    const sessions = this.snapshot.collaborativeSessions ?? [];
+    const rows = [fitLine("Gateway Collaboration · CollaborativeSession ↑↓ · Enter details", inner), rule(inner)];
+    rows.push(fitLine(fg("33", "Gateway Todo is independent and is not synchronized with Pi Todo."), inner));
+    if (sessions.length === 0) {
+      rows.push(fitLine("  ○ No workspace-local CollaborativeSession state", inner));
+    } else {
+      const start = Math.max(0, Math.min(this.collaborationSelected - 3, sessions.length - 7));
+      for (let index = start; index < Math.min(sessions.length, start + 7); index++) {
+        const state = sessions[index]!;
+        const marker = index === this.collaborationSelected ? fg("36", "▶") : " ";
+        const monitorCount = this.snapshot.collaborationMonitors?.[state.session.id]?.length ?? 0;
+        rows.push(fitLine(`${marker} ${state.session.id} · ${state.session.status} · revision ${state.session.revision} · members ${state.members.length} · Gateway Todo ${state.todos.length} · Monitor ${monitorCount}`, inner));
+      }
+    }
+    if (this.status) rows.push(fitLine(this.status, inner));
+    rows.push(...fitSegments(inner, ["Enter details", "r refresh", "Esc back"]));
+    return frame(rows, width);
+  }
+
+  private renderCollaborationDetail(width: number): string[] {
+    const inner = width - 2;
+    const state = this.currentCollaborativeSession();
+    const rows = [fitLine("CollaborativeSession · members, Gateway Todo, execution Monitor", inner), rule(inner)];
+    if (!state) {
+      rows.push(fitLine("  ○ Session is no longer available", inner));
+    } else {
+      rows.push(fitLine(`${state.session.id} · state ${state.session.status} · revision ${state.session.revision}`, inner));
+      rows.push(fitLine(`workspace: ${state.session.workspacePath}`, inner));
+      rows.push(rule(inner));
+      rows.push(fitLine(`Members (${state.members.length}) · lease generation / expiry`, inner));
+      for (const member of state.members.slice(0, 8)) {
+        const remaining = member.leaseExpiresAt - Date.now();
+        const lease = remaining <= 0 ? fg("31", "expired") : `${Math.ceil(remaining / 1000)}s`;
+        rows.push(fitLine(`  ${member.id} · ${member.role}/${member.status} · gen ${member.generation} · lease ${lease}`, inner));
+      }
+      rows.push(rule(inner));
+      rows.push(fitLine(`Gateway Todo (${state.todos.length}) · independent; not synchronized with Pi Todo`, inner));
+      const selectedTodo = this.collaborationItemSelected < state.todos.length ? this.collaborationItemSelected : 0;
+      const todoStart = Math.max(0, Math.min(selectedTodo - 3, state.todos.length - 8));
+      if (state.todos.length === 0) rows.push(fitLine("  ○ No Gateway Todo items", inner));
+      for (let index = todoStart; index < Math.min(state.todos.length, todoStart + 8); index++) {
+        const todo = state.todos[index]!;
+        const marker = index === this.collaborationItemSelected ? fg("36", "▶") : " ";
+        const assignee = todo.assigneeId ? ` · @${todo.assigneeId}` : "";
+        rows.push(fitLine(`${marker} ${todo.status} · ${todo.id}${assignee} · ${todo.subject}`, inner));
+      }
+      rows.push(rule(inner));
+      const monitors = this.snapshot.collaborationMonitors?.[state.session.id] ?? [];
+      rows.push(fitLine(`Execution Monitor (${monitors.length}) · stable cursor`, inner));
+      if (monitors.length === 0) rows.push(fitLine("  ○ No session-bound execution handles, or current identity is read-only", inner));
+      const selectedMonitor = Math.max(0, this.collaborationItemSelected - state.todos.length);
+      const monitorStart = Math.max(0, Math.min(selectedMonitor - 3, monitors.length - 8));
+      for (let index = monitorStart; index < Math.min(monitors.length, monitorStart + 8); index++) {
+        const monitor = monitors[index]!;
+        const marker = state.todos.length + index === this.collaborationItemSelected ? fg("36", "▶") : " ";
+        const status = monitor.task.status === "lost" ? fg("31", "lost") : monitor.task.status;
+        rows.push(fitLine(`${marker} ${status} · ${monitor.handle} · cursor ${monitor.task.eventCursor} · results ${monitor.task.resultCount}`, inner));
+      }
+    }
+    if (this.status) rows.push(fitLine(this.status, inner));
+    rows.push(...fitSegments(inner, ["↑↓ select", "Enter observe Monitor", "u renew my lease", "a claim/release Todo", "b block/unblock Todo", "d complete Todo", "r refresh", "Esc back"]));
+    return frame(rows, width);
+  }
+
+  private renderMonitorDetail(width: number): string[] {
+    const inner = width - 2;
+    const observation = this.monitorObservation;
+    const rows = [fitLine("Execution Monitor · cursor-addressed observation", inner), rule(inner)];
+    if (!observation) {
+      rows.push(fitLine(this.collaborationBusy ? "  observing…" : "  ○ No observation available", inner));
+    } else {
+      const status = observation.task.status === "lost" ? fg("31", "lost") : observation.task.status;
+      rows.push(fitLine(`${observation.handle} · ${status} · next cursor ${observation.nextCursor} · oldest ${observation.oldestCursor}${observation.hasMore ? " · more" : ""}`, inner));
+      rows.push(fitLine(observation.gap ? fg("31", "! cursor gap: older Monitor events were lost") : fg("32", "cursor continuity retained"), inner));
+      rows.push(rule(inner));
+      if (observation.events.length === 0) rows.push(fitLine("  ○ No retained events after this cursor", inner));
+      for (const event of observation.events.slice(-this.rowBudget(8, 12))) {
+        rows.push(fitLine(`  cursor ${event.cursor} · ${event.type} · ${new Date(event.at).toLocaleTimeString("zh-CN", { hour12: false })}`, inner));
+      }
+    }
+    if (this.status) rows.push(fitLine(this.status, inner));
+    rows.push(...fitSegments(inner, ["r next", "R replay retained", "x cancel", "Esc back"]));
+    return frame(rows, width);
   }
 
   private renderThreadRow(entry: McpxThreadEntry, selected: boolean, width: number): string {
@@ -1936,8 +2053,7 @@ export class McpxOverlay implements Component, Focusable {
     return frame(rows, width);
   }
 
-  /** W 子模式：列出所有已注册 workspace，↑↓ 选中，d 删除选中。删除调
-   *  `mcpx workspace remove`（只写 config，运行时 ≤5min lease sweep 后清理）。 */
+  /** W 子模式：列出并更新 built-in Gateway workspace registry。 */
   private renderWorkspace(width: number): string[] {
     const inner = width - 2;
     const ws = this.snapshot.workspaces;
@@ -1948,11 +2064,13 @@ export class McpxOverlay implements Component, Focusable {
       for (let i = 0; i < ws.length; i++) {
         const w = ws[i];
         const marker = i === this.wsSelected ? fg("36", "▶") : " ";
-        const lease = w.expiresAt ? fg("33", "租约·待清理") : fg("32", "永久");
+        const lease = w.expiresAt
+          ? w.expiresAt <= Date.now() ? fg("31", "租约·已过期") : fg("33", "租约")
+          : fg("32", "永久");
         rows.push(fitLine(`${marker} ${w.name} · ${w.path} · ${lease}`, inner));
       }
       rows.push(rule(inner));
-      rows.push(fitLine(fg("31", "  d 删除选中 workspace（mcpx ≤5min 内从运行时清理）"), inner));
+      rows.push(fitLine(fg("31", "  d 删除选中 workspace（立即从 Gateway registry 清理）"), inner));
     }
     rows.push(...fitSegments(inner, ["d delete", "e 注册(租约)", "E 注册(永久)", "Esc back"]));
     return frame(rows, width);
@@ -1968,7 +2086,7 @@ export class McpxOverlay implements Component, Focusable {
       await this.refresh();
       return;
     }
-    const { ok, message } = removeWorkspaceByPath(ws.path);
+    const { ok, message } = await removeGatewayWorkspaceByPath(ws.path);
     this.status = ok ? `已移除 ${ws.name} — ${message}` : `移除失败: ${message}`;
     this.safeRequestRender();
     await this.refresh();

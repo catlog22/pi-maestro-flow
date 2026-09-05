@@ -168,7 +168,17 @@ test("collectMcpServers merges .mcp.json files with later-wins precedence", asyn
   await writeFile(join(dir, ".agents", "mcp.json"), JSON.stringify({
     mcpServers: { github: { command: "custom-github" }, local: { command: "node" } },
   }), "utf8");
-  const servers = collectMcpServers(dir);
+  const previousPath = process.env.PATH;
+  process.env.PATH = "";
+  const startedAt = Date.now();
+  let servers: ReturnType<typeof collectMcpServers>;
+  try {
+    servers = collectMcpServers(dir);
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+  }
+  assert.ok(Date.now() - startedAt < 500, "dashboard executable discovery must not spawn blocking PATH probes");
   const byName = Object.fromEntries(servers.map((s) => [s.name, s]));
   assert.equal(servers.length, 2);
   assert.equal(byName.github.source, "agents"); // later file wins
@@ -255,6 +265,7 @@ test("e key routes register to onRegisterWorkspace (lease) and unregister to onU
     onUnregisterWorkspace: async (path) => { unregisterCalls.push(path); return "unregistered"; },
   });
   const s = overlay;
+  t.after(() => overlay.dispose());
   await overlay.refresh();
   // An e key received during the initial/manual refresh must be queued rather
   // than dropped silently.
@@ -325,6 +336,7 @@ test("E key routes register to onRegisterWorkspacePermanent and unregister to on
     onUnregisterWorkspace: async (path) => { unregisterCalls.push(path); return "unregistered"; },
   });
   const s = overlay;
+  t.after(() => overlay.dispose());
   await overlay.refresh();
   s["snapshot"].refreshing = false;
   overlay.handleInput("E");
@@ -410,17 +422,16 @@ test("key dispatch: r=refresh, R=restart, w=workspaces (no r/R overlap)", async 
   });
   const overlay = new McpxOverlay({ cwd: "D:/key-demo", requestRender: () => undefined, close: () => undefined, endpointWaitMs: 150 });
   const s = overlay;
+  t.after(() => overlay.dispose());
+  s["restartMcpx"] = async () => { s["status"] = "正在重启 Pi Maestro Gateway…"; };
   await overlay.refresh();
 
-  // A stale tunnel PID must not make s look like a recovery action: s/R only
-  // control the local mcpx server, while T owns tunnel reconstruction.
+  // A stale tunnel remains a separate T action; s/R own only the built-in daemon.
   s["snapshot"] = {
     ...s["snapshot"],
     endpoint: "online",
     tunnel: { pid: 123, url: "https://stale.trycloudflare.com", alive: false, health: "dead" },
   };
-  overlay.handleInput("s");
-  assert.match(String(s["status"]), /按 T 重建/);
   const staleTunnelView = overlay.render(100).join("\n");
   assert.match(staleTunnelView, /PID 文件可能已陈旧/);
   assert.match(staleTunnelView, /T 隧道重建/);
@@ -562,7 +573,7 @@ test("window rendering strips terminal control sequences from remote data", asyn
   assert.doesNotMatch(rendered, /\x1b\[2J/);
 });
 
-test("fork install prompt covers not-installed, binary-without-fork, and installed states", async () => {
+test("Gateway install prompt covers missing and verified built-in binaries", async () => {
   const { McpxOverlay } = await import("../src/tui/mcpx-overlay.ts");
   const overlay = new McpxOverlay({
     cwd: "D:/fork-prompt-demo",
@@ -574,22 +585,19 @@ test("fork install prompt covers not-installed, binary-without-fork, and install
     thread: [], mcpServers: [], windows: [],
   } satisfies Partial<McpxSnapshot>;
 
-  // 仅安装插件，mcpx 完全未安装 → 红色安装指引
   overlay["snapshot"] = { ...base, binary: undefined, forkInstalled: false } satisfies McpxSnapshot;
   let rows = overlay["renderForkRows"](100).join("\n");
-  assert.match(rows, /未安装 mcpx/);
-  assert.match(rows, /npm i -g mcpx-for-pmf/);
+  assert.match(rows, /未找到 Pi Maestro Gateway/);
+  assert.match(rows, /PI_MAESTRO_GATEWAY_BIN/);
+  assert.doesNotMatch(rows, /mcpx-for-pmf/);
 
-  // 有 mcpx 二进制（源码编译/上游包）但未装 mcpx-for-pmf npm 包 → 黄色建议
-  overlay["snapshot"] = { ...base, binary: "/usr/local/bin/mcpx", forkInstalled: false } satisfies McpxSnapshot;
-  rows = overlay["renderForkRows"](100).join("\n");
-  assert.match(rows, /未检测到 mcpx-for-pmf 包/);
-  assert.match(rows, /npm i -g mcpx-for-pmf/);
+  rows = overlay.render(100).join("\n");
+  assert.match(rows, /Pi Maestro Gateway · 连接监控/);
+  assert.doesNotMatch(rows, /MCPX 连接监控|\/mcpx\b/);
 
-  // fork 已安装 → 绿色确认 + 版本
-  overlay["snapshot"] = { ...base, binary: "/usr/local/bin/mcpx", forkInstalled: true, forkVersion: "0.9.7" } satisfies McpxSnapshot;
+  overlay["snapshot"] = { ...base, binary: "/usr/local/bin/pi-maestro-gateway", forkInstalled: true, forkVersion: "0.9.7" } satisfies McpxSnapshot;
   rows = overlay["renderForkRows"](100).join("\n");
-  assert.match(rows, /mcpx-for-pmf 已安装/);
+  assert.match(rows, /Pi Maestro Gateway 已安装/);
   assert.match(rows, /v0\.9\.7/);
 });
 
@@ -631,14 +639,18 @@ test("C enters inline config mode and edits scalars + lists then saves", async (
     "",
   ].join("\n"), "utf8");
 
-  const overlay = new McpxOverlay({ cwd: "D:/cfg-demo", requestRender: () => undefined, initialRefresh: false, close: () => undefined });
+  let wizardCalls = 0;
+  const overlay = new McpxOverlay({ cwd: "D:/cfg-demo", requestRender: () => undefined, initialRefresh: false, close: () => undefined, onOpenWizard: () => { wizardCalls++; } });
   const renderText = () => overlay.render(100).join("\n");
 
-  // C (capital) enters inline config mode; c would open the wizard (no onOpenWizard wired).
+  // c keeps opening the wizard; C (capital) remains the inline editor.
+  overlay.handleInput("c");
+  assert.equal(wizardCalls, 1);
+  assert.equal(overlay["mode"], "list");
   overlay.handleInput("C");
   assert.equal(overlay["mode"], "config");
   let text = renderText();
-  assert.match(text, /MCPX 配置/);
+  assert.match(text, /Pi Maestro Gateway 配置/);
   assert.match(text, /「服务器监听」/);
   assert.match(text, /host: 127\.0\.0\.1/);
   assert.match(text, /port: 9090/);
@@ -697,4 +709,67 @@ test("C enters inline config mode and edits scalars + lists then saves", async (
   assert.match(after, /default: confirm/);
   assert.match(after, /\^pi\\b/);
   assert.match(after, /\^ls\\b/); // existing allow preserved
+});
+
+test("Gateway collaboration view distinguishes independent Todo and exposes members plus Monitor cursors", async (t) => {
+  const { McpxOverlay } = await import("../src/tui/mcpx-overlay.ts");
+  const now = Date.now();
+  const todo = {
+    version: 1, id: "gw-todo-1", sessionId: "collab-1", revision: 1,
+    subject: "Gateway-only work", status: "pending", dependencyIds: [], creatorId: "owner",
+    createdAt: now, updatedAt: now,
+  } as const;
+  const sessionState = {
+    version: 1,
+    session: { version: 1, id: "collab-1", status: "active", revision: 2, workspaceId: "a".repeat(64), workspacePath: "D:/gateway-ui", createdAt: now, updatedAt: now },
+    members: [{ version: 1, id: "owner", sessionId: "collab-1", principalId: "http:bearer:test", role: "owner", status: "active", capabilities: ["session:read", "session:write", "member:manage", "todo:read", "todo:write"], generation: 3, leaseExpiresAt: now + 60_000, joinedAt: now, updatedAt: now }],
+    todos: [todo], operations: [], events: [],
+  } as never;
+  const monitor = { handle: "handle-1", task: { version: 1, id: "handle-1", status: "running", objective: "work", cwd: "D:/gateway-ui", createdAt: now, updatedAt: now, workspaceId: "a".repeat(64), eventCursor: 9, resultCount: 0 } } as never;
+  const mutations: Array<Record<string, unknown>> = [];
+  const fakeClient = {
+    mutateGatewayTodo: async (input: Record<string, unknown>) => { mutations.push(input); return todo; },
+    observeGatewayMonitor: async () => ({
+      handle: "handle-1", task: { ...monitor.task, status: "lost" }, events: [{ cursor: 7, taskId: "handle-1", type: "state", at: now }],
+      nextCursor: 7, oldestCursor: 7, hasMore: false, gap: true,
+    }),
+  };
+  const overlay = new McpxOverlay({ cwd: "D:/gateway-ui", requestRender: () => undefined, initialRefresh: false, close: () => undefined });
+  t.after(() => overlay.dispose());
+  overlay["snapshot"] = {
+    refreshing: false, endpoint: "online", workspaces: [], cwdRegistered: false, windows: [], thread: [], mcpServers: [],
+    collaborativeSessions: [sessionState], collaborationMonitors: { "collab-1": [monitor] }, collaborationMemberIds: { "collab-1": "owner" },
+  } as never;
+  overlay["client"] = fakeClient as never;
+
+  let text = overlay.render(110).join("\n");
+  assert.match(text, /Gateway Todo is independent and is not synchronized with Pi Todo/);
+  overlay.handleInput("g");
+  assert.equal(overlay["mode"], "collaboration");
+  text = overlay.render(110).join("\n");
+  assert.match(text, /CollaborativeSession/);
+  assert.match(text, /revision 2/);
+
+  overlay.handleInput("\r");
+  text = overlay.render(110).join("\n");
+  assert.match(text, /owner · owner\/active · gen 3 · lease/);
+  assert.match(text, /Gateway Todo \(1\) · independent; not synchronized with Pi Todo/);
+  assert.match(text, /pending · gw-todo-1 · Gateway-only work/);
+  assert.match(text, /running · handle-1 · cursor 9/);
+
+  overlay["closed"] = true; // keep the focused action test from starting a disk/network refresh
+  overlay.handleInput("a");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(mutations.length, 1);
+  assert.equal(mutations[0]!.action, "claim");
+  assert.equal(mutations[0]!.expectedSessionRevision, 2);
+
+  overlay["closed"] = false;
+  overlay["collaborationItemSelected"] = 1;
+  overlay.handleInput("\r");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  text = overlay.render(110).join("\n");
+  assert.match(text, /lost/);
+  assert.match(text, /next cursor 7 · oldest 7/);
+  assert.match(text, /cursor gap: older Monitor events were lost/);
 });

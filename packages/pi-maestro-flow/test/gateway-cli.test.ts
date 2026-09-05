@@ -1,0 +1,125 @@
+import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { PassThrough } from "node:stream";
+import { fileURLToPath } from "node:url";
+import test from "node:test";
+import { main } from "../src/gateway/cli.ts";
+import { locateGatewayBinary, resetGatewayBinaryCache } from "../src/gateway/control-client.ts";
+import { requestGatewayIpcControl } from "../src/gateway/ipc.ts";
+
+const packageRoot = fileURLToPath(new URL("../", import.meta.url));
+const bin = join(packageRoot, "bin", "pi-maestro-gateway.mjs");
+
+function cleanEnv(home?: string): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    ...(home ? { HOME: home, USERPROFILE: home } : {}),
+    NO_COLOR: "1",
+  };
+}
+
+test("packaged CLI reports machine-readable identity through its jiti wrapper", () => {
+  const result = spawnSync(process.execPath, [bin, "version", "--json"], {
+    cwd: packageRoot,
+    env: cleanEnv(),
+    encoding: "utf8",
+    timeout: 10_000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const value = JSON.parse(result.stdout) as { name: string; version: string; protocolVersion: number };
+  assert.equal(value.name, "pi-maestro-gateway");
+  assert.match(value.version, /^\d+\.\d+\.\d+/);
+  assert.equal(value.protocolVersion, 1);
+});
+
+test("binary locator falls back to the packaged CLI without a PATH install", (t) => {
+  const previousOfficial = process.env.PI_MAESTRO_GATEWAY_BIN;
+  const previousLegacy = process.env.MCPX_BIN;
+  const previousPath = process.env.PATH;
+  t.after(() => {
+    if (previousOfficial === undefined) delete process.env.PI_MAESTRO_GATEWAY_BIN;
+    else process.env.PI_MAESTRO_GATEWAY_BIN = previousOfficial;
+    if (previousLegacy === undefined) delete process.env.MCPX_BIN;
+    else process.env.MCPX_BIN = previousLegacy;
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+    resetGatewayBinaryCache();
+  });
+  delete process.env.PI_MAESTRO_GATEWAY_BIN;
+  delete process.env.MCPX_BIN;
+  process.env.PATH = "";
+  resetGatewayBinaryCache();
+
+  const located = locateGatewayBinary();
+  assert.ok(located);
+  assert.equal(located.path, bin);
+  assert.equal(located.source, "package");
+  assert.equal(located.command, process.execPath);
+  assert.deepEqual(located.argsPrefix, [bin]);
+});
+
+test("connect --stdio reports one deterministic offline error", async () => {
+  const home = await mkdtemp(join(tmpdir(), "gateway-cli-offline-"));
+  try {
+    const result = spawnSync(process.execPath, [bin, "connect", "--stdio"], {
+      cwd: packageRoot,
+      env: cleanEnv(home),
+      input: "",
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, "");
+    assert.equal(result.stderr.trim(), "Pi Maestro Gateway is offline. Start it with `pi-maestro-gateway serve`.");
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("serve returns after authenticated IPC stop", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "gateway-cli-stop-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const configPath = join(root, "config.yaml");
+  const ownerPath = join(root, "owner.json");
+  const unix = (value: string) => value.replace(/\\/g, "/");
+  await writeFile(configPath, [
+    "transport:",
+    "  http:",
+    "    enabled: false",
+    "state:",
+    `  root_dir: "${unix(join(root, "state"))}"`,
+    `  owner_path: "${unix(ownerPath)}"`,
+    "logging:",
+    "  level: silent",
+    "",
+  ].join("\n"));
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  const serving = main(["serve", "--json", "--config", configPath], { stdout, stderr });
+  let owner: { socket: string; ownerToken: string } | undefined;
+  for (let attempt = 0; attempt < 50 && !owner; attempt++) {
+    try { owner = JSON.parse(await readFile(ownerPath, "utf8")); }
+    catch { await new Promise((resolve) => setTimeout(resolve, 10)); }
+  }
+  assert.ok(owner, "serve should publish its owner before waiting for shutdown");
+  await requestGatewayIpcControl({ address: owner.socket, ownerToken: owner.ownerToken, action: "stop" });
+  assert.equal(await serving, 0);
+  assert.equal((await readFile(ownerPath, "utf8").catch(() => undefined)), undefined);
+});
+
+test("package manifest exposes the CLI and stable v1 API without removing source compatibility", async () => {
+  const manifest = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8")) as {
+    bin?: Record<string, string>;
+    files?: string[];
+    exports?: Record<string, string>;
+    dependencies?: Record<string, string>;
+  };
+  assert.equal(manifest.bin?.["pi-maestro-gateway"], "bin/pi-maestro-gateway.mjs");
+  assert.equal(manifest.exports?.["./gateway/v1"], "./src/gateway/public/v1/index.ts");
+  assert.equal(manifest.exports?.["./src/*"], "./src/*");
+  assert.equal(manifest.dependencies?.jiti, "2.7.0");
+  assert.ok(manifest.files?.includes("bin/"));
+});

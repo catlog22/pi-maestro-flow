@@ -32,7 +32,10 @@ export interface SshHostProfile {
 export type SshHostReferenceIssue =
   | "unsupported-shell"
   | "unsupported-password-authentication"
-  | "unsupported-identity-passphrase";
+  | "unsupported-identity-passphrase"
+  | "unsupported-managed-key"
+  | "unsupported-jump-host"
+  | "untrusted-host";
 
 /** Bounded display metadata for a host reference picker. */
 export interface SshHostReferenceSummary {

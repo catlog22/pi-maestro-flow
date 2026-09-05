@@ -7,7 +7,7 @@
  *      tightening to confirm/deny for shared or public deployments
  *   3. pi allow-rule (`^pi\b`) so pi_window/pi_execute work under strict policies
  *   4. skill discovery dirs (append the pi plugin skills dir when present)
- *   5. register the current workspace (lease-based via the /mcpx panel; here
+ *   5. register the current workspace (lease-based via the /gateway panel; here
  *      the write step just merges config sections)
  *   6. public tunnel (Cloudflare Quick Tunnel only — the unique mode)
  *   7. write confirmation (section-preserving merge into ~/.mcpx/config.yaml)
@@ -20,7 +20,7 @@ import { existsSync, readFileSync, writeFileSync, renameSync, rmSync } from "nod
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Key, type Component, type Focusable, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
-import { locateMcpx, discoverQuickTunnelProcesses, isProcessOwnedBy, isValidTunnelPort, killProcessWithEscalation, quickTunnelArgs } from "../mcpx-bridge.ts";
+import { discoverQuickTunnelProcesses, isProcessOwnedBy, isValidTunnelPort, killProcessWithEscalation, quickTunnelArgs, readTunnelState, recordQuickTunnelOwner } from "../mcpx-bridge.ts";
 
 export interface McpxWizardParams {
   cwd: string;
@@ -497,7 +497,7 @@ export class McpxWizardOverlay implements Component, Focusable {
   render(width: number): string[] {
     const safeWidth = Math.max(1, Math.min(width, 120));
     const inner = safeWidth - 2;
-    const rows = [fitLine(`MCPX 配置向导 · ${STEP_LABEL[this.step]}`, inner), rule(inner)];
+    const rows = [fitLine(`Pi Maestro Gateway 配置向导 · ${STEP_LABEL[this.step]}`, inner), rule(inner)];
     rows.push(...this.renderStep(inner));
     if (this.status) rows.push(fitLine(fg("33", this.status), inner));
     rows.push(fitSegments(inner, this.controls()));
@@ -548,7 +548,7 @@ export class McpxWizardOverlay implements Component, Focusable {
         return [
           fitLine("窗口注册独立于本向导", inner),
           fitLine("  本向导只写 ~/.mcpx/config.yaml（监听/认证/策略/隧道）。", inner),
-          fitLine("  注册当前工作区到 mcpx（绑定 lease）请在 /mcpx 看板按 e。", inner),
+          fitLine("  注册当前工作区到 Pi Maestro Gateway（绑定 lease）请在 /gateway 看板按 e。", inner),
           fitLine("  未完成初始配置时按 e 会自动回到本向导。", inner),
           option(0, "继续"),
         ];
@@ -591,7 +591,7 @@ export class McpxWizardOverlay implements Component, Focusable {
       ? (this.changes.authMode === "bearer" ? "Bearer" : "OAuth（自动升级）")
       : (this.changes.authMode === "bearer" ? "Bearer" : (this.changes.authMode === "oauth" ? "OAuth" : "open（仅本机）"));
     const rows = [fitLine("云端 MCP 连接信息（照此填入 ChatGPT / Claude 新建连接）：", inner)];
-    rows.push(fitLine(`  名称: mcpx for pmf`, inner));
+    rows.push(fitLine("  名称: Pi Maestro Gateway", inner));
     rows.push(fitLine(`  连接: ${tunnelUrl ? "服务器 URL" : "服务器 URL（本机调试）"}`, inner));
     rows.push(fitLine(`  服务器 URL: ${baseUrl}/mcp`, inner));
     rows.push(fitLine(`  身份验证: ${auth}`, inner));
@@ -735,7 +735,7 @@ export class McpxWizardOverlay implements Component, Focusable {
         break;
       case "workspace":
         // The wizard is one-time initial config; window registration is an
-        // independent per-window action done from the /mcpx board (e key).
+        // independent per-window action done from the /gateway board (e key).
         this.step = "tunnel";
         break;
       case "tunnel":
@@ -782,7 +782,7 @@ export class McpxWizardOverlay implements Component, Focusable {
         return;
       }
       if (!this.tunnelProcess) {
-        this.status = "隧道已认领但没有可读取的公网 URL，请检查 mcpx 配置后再继续";
+        this.status = "隧道已认领但没有可读取的公网 URL，请检查 Pi Maestro Gateway 配置后再继续";
         this.params.requestRender();
         return;
       }
@@ -803,7 +803,7 @@ export class McpxWizardOverlay implements Component, Focusable {
     }
     if (candidates.length > 1) {
       this.tunnelAdoptedPid = undefined;
-      this.status = `发现 ${candidates.length} 个相同端口的 Quick Tunnel，未启动新进程；请在 /mcpx 面板按 T 清理并重启`;
+      this.status = `发现 ${candidates.length} 个相同端口的 Quick Tunnel，未启动新进程；请在 /gateway 面板按 T 清理并重启`;
       this.params.requestRender();
       return;
     }
@@ -811,7 +811,7 @@ export class McpxWizardOverlay implements Component, Focusable {
       const candidate = candidates[0]!;
       this.tunnelAdoptedPid = candidate.pid;
       this.tunnelPort = port;
-      try { writeFileSync(this.tunnelPidPath(), String(candidate.pid), "utf8"); } catch { /* best-effort */ }
+      try { recordQuickTunnelOwner(candidate.pid, port); } catch { /* best-effort */ }
       const configuredUrl = this.configuredTunnelUrl();
       if (!this.changes.tunnelUrl && configuredUrl) this.changes.tunnelUrl = configuredUrl;
       this.status = configuredUrl
@@ -887,10 +887,8 @@ export class McpxWizardOverlay implements Component, Focusable {
           this.params.requestRender();
         }
       });
-      try {
-        writeFileSync(this.tunnelPidPath(), String(child.pid ?? ""), "utf8");
-      } catch {
-        // best-effort
+      if (child.pid) {
+        try { recordQuickTunnelOwner(child.pid, port); } catch { /* best-effort */ }
       }
       await this.waitForTunnelUrl();
     } catch (error) {
@@ -1040,13 +1038,7 @@ export class McpxWizardOverlay implements Component, Focusable {
   }
 
   private pidFromFile(): number | undefined {
-    try {
-      const raw = readFileSync(this.tunnelPidPath(), "utf8").trim();
-      const parsed = Number(raw);
-      return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
-    } catch {
-      return undefined;
-    }
+    return readTunnelState().pid;
   }
 
   /** Read an already configured URL for display only; never invent one. */
@@ -1077,7 +1069,7 @@ export class McpxWizardOverlay implements Component, Focusable {
       writeFileSync(temp, yaml, { encoding: "utf8", flag: "wx", mode: 0o600 });
       renameSync(temp, path);
       this.configCommitted = true;
-      this.status = "已写入 " + path + " — 重启 mcpx 后生效（窗口/wizard 亦可用 /mcpx 查看）";
+      this.status = "已写入 " + path + " — 重启 Pi Maestro Gateway 后生效（可用 /gateway 查看）";
       this.params.requestRender();
     } catch (error) {
       // COR-RV-001: clean up the orphaned .wizard.tmp file on renameSync failure.

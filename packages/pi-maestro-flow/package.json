@@ -3,6 +3,9 @@
   "version": "0.27.1",
   "description": "All-in-one multi-agent orchestration for the Pi coding agent — parallel teammate dispatch, goals, plans, knowledge system, MCP/LSP/browser, and cockpit visualization in a single install",
   "type": "module",
+  "bin": {
+    "pi-maestro-gateway": "bin/pi-maestro-gateway.mjs"
+  },
   "engines": {
     "node": ">=22.19.0"
   },
@@ -61,6 +64,7 @@
     "src/**/*.ts",
     "src/mcp/app-bridge.bundle.js",
     "src/mcp/LICENSE.pi-mcp-adapter",
+    "bin/",
     "scripts/",
     "schemas/",
     "templates/",
@@ -79,6 +83,7 @@
     "./gui/client": "./src/gui/client.ts",
     "./compaction/settings": "./src/compaction/compaction-settings.ts",
     "./compaction/arbiter": "./src/compaction/compaction-arbiter.ts",
+    "./gateway/v1": "./src/gateway/public/v1/index.ts",
     "./src/*": "./src/*"
   },
   "pi": {
@@ -99,6 +104,7 @@
     "@mozilla/readability": "^0.6.0",
     "@types/turndown": "^5.0.6",
     "cross-spawn": "7.0.6",
+    "jiti": "2.7.0",
     "linkedom": "^0.18.13",
     "maestro-flow": "0.5.84",
     "open": "10.2.0",

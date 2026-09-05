@@ -1,15 +1,20 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createCipheriv, randomBytes, scryptSync } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
   EncryptedSshStore,
+  effectiveSshHostDigest,
   replaceSshHost,
+  reverseSshHostDependencyClosure,
   validateSshHost,
   validateSshHosts,
+  validateSshManagerData,
   type SshHost,
+  type SshKey,
 } from "../src/ssh-manager/index.ts";
 
 const PIN = `SHA256:${"A".repeat(43)}`;
@@ -24,6 +29,9 @@ function passwordHost(overrides: Partial<SshHost> = {}): SshHost {
     shell: "bash",
     hostKey: PIN,
     auth: { kind: "password", password: "remote-password-secret" },
+    tags: [],
+    jumpHostId: null,
+    monitorEnabled: false,
     ...overrides,
   };
 }
@@ -119,6 +127,29 @@ test("encrypted SSH store rejects stale writers instead of losing another Pi pro
   }
 });
 
+test("explicit lock wins over in-flight unlock without clearing a later successful unlock", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ssh-manager-unlock-race-"));
+  const path = join(root, "ssh.enc.json");
+  const store = new EncryptedSshStore({ path });
+  try {
+    await store.create("master-password", [passwordHost()]);
+    store.lock();
+    const stale = store.unlock("master-password");
+    store.lock();
+    await assert.rejects(stale, /Unable to unlock/);
+    assert.equal(store.locked, true);
+
+    const failing = store.unlock("wrong-password");
+    const succeeding = store.unlock("master-password");
+    await assert.rejects(failing, /Unable to unlock/);
+    await succeeding;
+    assert.equal(store.locked, false, "an older failed unlock must not clear the newer successful state");
+  } finally {
+    store.lock();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("encrypted SSH store creation publishes exactly one winner", async () => {
   const root = await mkdtemp(join(tmpdir(), "ssh-manager-create-race-"));
   const path = join(root, "ssh.enc.json");
@@ -190,6 +221,11 @@ test("encrypted SSH store rejects oversized files before allocating their conten
 
 test("SSH host model validates pins/auth, uniqueness, and stable ids on edit", () => {
   assert.deepEqual(validateSshHost(passwordHost()), passwordHost());
+  const legacy = passwordHost();
+  delete (legacy as Partial<SshHost>).tags;
+  delete (legacy as Partial<SshHost>).jumpHostId;
+  delete (legacy as Partial<SshHost>).monitorEnabled;
+  assert.deepEqual(validateSshHost(legacy), passwordHost());
   assert.throws(() => validateSshHost({ ...passwordHost(), hostKey: "" }), /pinned SHA256/);
   assert.throws(() => validateSshHost({ ...passwordHost(), port: 0 }), /between 1 and 65535/);
   assert.throws(() => validateSshHost({ ...passwordHost(), shell: "cmd" }), /bash or powershell/);
@@ -197,4 +233,161 @@ test("SSH host model validates pins/auth, uniqueness, and stable ids on edit", (
   assert.throws(() => validateSshHosts([passwordHost(), passwordHost()]), /Duplicate SSH host id/);
   assert.throws(() => replaceSshHost([passwordHost()], "primary-1", passwordHost({ id: "changed" })), /cannot change/);
   assert.equal(replaceSshHost([passwordHost()], "primary-1", passwordHost({ label: "Edited" }))[0]!.id, "primary-1");
+});
+
+function managedKey(overrides: Partial<SshKey> = {}): SshKey {
+  return {
+    id: "managed-key-1",
+    label: "Deployment key",
+    privateKey: "-----BEGIN OPENSSH PRIVATE KEY-----\nprivate-material-secret\n-----END OPENSSH PRIVATE KEY-----\n",
+    passphrase: "key-passphrase-secret",
+    publicKeyFingerprint: PIN,
+    createdAt: "2025-01-01T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function writeV1Fixture(path: string, password: string, revision = 4): Promise<void> {
+  const salt = randomBytes(16);
+  const iv = randomBytes(12);
+  const key = scryptSync(password, salt, 32, { N: 32_768, r: 8, p: 1, maxmem: 64 * 1024 * 1024 });
+  const header = {
+    version: 1,
+    kdf: { name: "scrypt", N: 32_768, r: 8, p: 1, keyLength: 32 },
+    cipher: { name: "aes-256-gcm" },
+    salt: salt.toString("base64"),
+    iv: iv.toString("base64"),
+  };
+  const host = passwordHost();
+  const plaintext = Buffer.from(JSON.stringify({
+    version: 1,
+    revision,
+    hosts: [{ id: host.id, label: host.label, host: host.host, user: host.user, port: host.port, shell: host.shell, hostKey: host.hostKey, auth: host.auth }],
+  }));
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  cipher.setAAD(Buffer.from(JSON.stringify(header)));
+  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const envelope = { ...header, tag: cipher.getAuthTag().toString("base64"), ciphertext: ciphertext.toString("base64") };
+  key.fill(0); salt.fill(0); iv.fill(0); plaintext.fill(0); ciphertext.fill(0);
+  return writeFile(path, `${JSON.stringify(envelope)}\n`, { mode: 0o600 });
+}
+
+test("SSH v2 data validates managed keys, references, jump depth, cycles, and secret-free effective digests", () => {
+  const key = managedKey();
+  const jump = passwordHost({ id: "jump", auth: { kind: "agent" } });
+  const leaf = passwordHost({ id: "leaf", auth: { kind: "key", keyId: key.id }, jumpHostId: jump.id, hostKey: null, tags: ["prod"] });
+  const data = validateSshManagerData({ version: 2, revision: 0, keys: [key], hosts: [jump, leaf] });
+  assert.deepEqual(reverseSshHostDependencyClosure(data.hosts, "jump"), ["jump", "leaf"]);
+  const digest = effectiveSshHostDigest(data, "leaf");
+  assert.match(digest, /^[a-f0-9]{64}$/);
+  assert.doesNotMatch(digest, /secret|private-material/);
+  assert.throws(() => validateSshManagerData({ ...data, hosts: [{ ...leaf, auth: { kind: "key", keyId: "missing" } }] }), /missing key/);
+  assert.throws(() => validateSshManagerData({ ...data, hosts: [{ ...jump, jumpHostId: "leaf" }, leaf] }), /cycle/);
+  assert.throws(() => validateSshManagerData({ ...data, keys: [{ ...key, extra: true }] }), /unsupported field/);
+  assert.throws(() => validateSshManagerData({ ...data, hosts: [{ ...jump, tags: Array.from({ length: 17 }, (_, index) => `t${index}`) }] }), /at most 16/);
+  const chain = Array.from({ length: 7 }, (_, index) => passwordHost({ id: `h${index}`, jumpHostId: index === 6 ? null : `h${index + 1}` }));
+  assert.throws(() => validateSshManagerData({ version: 2, revision: 0, keys: [], hosts: chain }), /depth exceeds 5/);
+});
+
+test("encrypted SSH store provides fenced host/key CRUD and blocks referenced deletion", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ssh-manager-v2-crud-"));
+  const path = join(root, "ssh.enc.json");
+  const store = new EncryptedSshStore({ path });
+  try {
+    await store.create("master-password", []);
+    await store.addKey(managedKey());
+    await store.addHost(passwordHost({ auth: { kind: "key", keyId: "managed-key-1" } }));
+    assert.equal(store.checkoutKey("managed-key-1").privateKey, managedKey().privateKey);
+    await assert.rejects(store.deleteKey("managed-key-1"), /referenced/);
+    await store.addHost(passwordHost({ id: "leaf", jumpHostId: "primary-1" }));
+    await assert.rejects(store.deleteHost("primary-1"), /jump host/);
+    const disk = await readFile(path, "utf8");
+    assert.doesNotMatch(disk, /private-material-secret|key-passphrase-secret|remote-password-secret/);
+    await store.deleteHost("leaf");
+    await store.deleteHost("primary-1");
+    await store.deleteKey("managed-key-1");
+    assert.deepEqual(store.getKeys(), []);
+  } finally {
+    store.lock();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("saveConfiguration publishes keys and referring hosts in one revision", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ssh-manager-configuration-save-"));
+  const path = join(root, "ssh.enc.json");
+  const store = new EncryptedSshStore({ path });
+  try {
+    await store.create("master-password", []);
+    const key = managedKey();
+    const host = passwordHost({ auth: { kind: "key", keyId: key.id } });
+    await store.saveConfiguration([host], [key]);
+    assert.equal(store.revision, 1);
+    assert.equal(store.getHosts()[0]?.auth.kind, "key");
+    assert.equal(store.getKeys()[0]?.id, key.id);
+  } finally {
+    store.lock();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("v1 unlock migrates once with revision bump and exclusive private backup", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ssh-manager-v1-migrate-"));
+  const path = join(root, "hosts.enc.json");
+  const store = new EncryptedSshStore({ path });
+  try {
+    await writeV1Fixture(path, "migration-password");
+    const original = await readFile(path);
+    await store.unlock("migration-password");
+    assert.equal(store.revision, 5);
+    assert.deepEqual(store.getKeys(), []);
+    assert.deepEqual(store.getHosts()[0]!.tags, []);
+    assert.equal(store.getHosts()[0]!.jumpHostId, null);
+    assert.equal(store.getHosts()[0]!.monitorEnabled, false);
+    assert.deepEqual(await readFile(`${path}.v1.bak`), original);
+    if (process.platform !== "win32") assert.equal((await stat(`${path}.v1.bak`)).mode & 0o777, 0o600);
+    store.lock();
+    await store.unlock("migration-password");
+    assert.equal(store.revision, 5, "v2 unlock must not migrate again");
+  } finally {
+    store.lock();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("v1 migration resumes when an interrupted publication left the matching backup", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ssh-manager-v1-resume-"));
+  const path = join(root, "hosts.enc.json");
+  const store = new EncryptedSshStore({ path });
+  try {
+    await writeV1Fixture(path, "migration-password", 8);
+    const original = await readFile(path);
+    await writeFile(`${path}.v1.bak`, original, { mode: 0o600 });
+    await store.unlock("migration-password");
+    assert.equal(store.revision, 9);
+    assert.deepEqual(await readFile(`${path}.v1.bak`), original);
+  } finally {
+    store.lock();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("v1 migration backup collision fails closed and leaves the old store usable", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ssh-manager-v1-collision-"));
+  const path = join(root, "hosts.enc.json");
+  const store = new EncryptedSshStore({ path });
+  try {
+    await writeV1Fixture(path, "migration-password", 8);
+    const original = await readFile(path);
+    await writeFile(`${path}.v1.bak`, "collision", { mode: 0o600 });
+    await assert.rejects(store.unlock("migration-password"), /Unable to unlock/);
+    assert.equal(store.locked, true);
+    assert.deepEqual(await readFile(path), original);
+    await rm(`${path}.v1.bak`);
+    await store.unlock("migration-password");
+    assert.equal(store.revision, 9);
+  } finally {
+    store.lock();
+    await rm(root, { recursive: true, force: true });
+  }
 });

@@ -1,107 +1,149 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { existsSync, readFileSync } from "node:fs";
-import { tmpdir, homedir } from "node:os";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { McpxOverlay } from "../src/tui/mcpx-overlay.ts";
+import { GatewayControlClient, killGatewayProcessTree, type GatewayProcessSpawner } from "../src/gateway/control-client.ts";
+import { GatewayDaemon } from "../src/gateway/daemon.ts";
+import { GatewayOwnerStore } from "../src/gateway/owner-store.ts";
 
-const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-async function waitFor(predicate: () => boolean, timeoutMs = 8_000): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (predicate()) return true;
-    await wait(100);
-  }
-  return predicate();
+async function createConfig(root: string): Promise<{ configPath: string; ownerPath: string }> {
+  const configPath = join(root, "config.yaml");
+  const ownerPath = join(root, "owner.json");
+  const unix = (value: string) => value.replace(/\\/g, "/");
+  await writeFile(configPath, [
+    "transport:",
+    "  http:",
+    "    enabled: false",
+    "state:",
+    `  root_dir: "${unix(join(root, "state"))}"`,
+    `  owner_path: "${unix(ownerPath)}"`,
+    `  workspace_registry_path: "${unix(join(root, "workspaces.json"))}"`,
+    "logging:",
+    "  level: silent",
+    "",
+  ].join("\n"));
+  return { configPath, ownerPath };
 }
 
-async function withFakeMcpx(run: (binPath: string, markerPath: string) => Promise<void>): Promise<void> {
-  const dir = await mkdtemp(join(tmpdir(), "mcpx-ctl-"));
-  const markerPath = join(dir, "started.marker");
-  const pidPath = join(dir, "server.pid");
-  const isWin = process.platform === "win32";
-  const jsPath = join(dir, "fake-mcpx.js");
-  await writeFile(jsPath, [
-    "const fs = require('node:fs');",
-    // Mirror the real binary's contract: -version prints and exits without
-    // starting a server (the overlay's refresh probes `mcpx -version`).
-    "if (process.argv[2] === '-version') { console.log('mcpx 0.0.0-fake'); process.exit(0); }",
-    `fs.writeFileSync(${JSON.stringify(markerPath)}, 'started');`,
-    // The Go server owns the PID file; the fake mirrors that contract by
-    // writing the path the TUI reads (MCPX_PID_FILE override).
-    "if (process.env.MCPX_PID_FILE) fs.writeFileSync(process.env.MCPX_PID_FILE, String(process.pid));",
-    "setInterval(() => {}, 1000);",
-  ].join("\n"), "utf8");
-  const binPath = isWin ? join(dir, "fake-mcpx.cmd") : join(dir, "fake-mcpx");
-  if (isWin) {
-    await writeFile(binPath, `@echo off\r\nnode "${jsPath}" %*\r\n`, "utf8");
-  } else {
-    await writeFile(binPath, `#!/bin/sh\nnode "${jsPath}" "$@"\n`, "utf8");
-    const { chmod } = await import("node:fs/promises");
-    await chmod(binPath, 0o755);
-  }
-  const previous = process.env.MCPX_BIN;
-  const previousPidFile = process.env.MCPX_PID_FILE;
-  process.env.MCPX_BIN = binPath;
-  process.env.MCPX_PID_FILE = pidPath;
-  try {
-    await run(binPath, markerPath);
-  } finally {
-    if (previous === undefined) delete process.env.MCPX_BIN;
-    else process.env.MCPX_BIN = previous;
-    if (previousPidFile === undefined) delete process.env.MCPX_PID_FILE;
-    else process.env.MCPX_PID_FILE = previousPidFile;
-    // clean up any leftover process tree from the fake server
-    const pidFile = join(dir, "server.pid");
-    if (existsSync(pidFile)) {
-      const pid = Number(readFileSync(pidFile, "utf8").trim());
-      if (Number.isInteger(pid) && pid > 0) {
-        if (isWin) spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
-        else process.kill(pid, "SIGKILL");
-      }
-    }
-    await rm(dir, { recursive: true, force: true });
-  }
-}
-
-test("s starts the mcpx server and x stops it", async (t) => {
-  await withFakeMcpx(async (_binPath, markerPath) => {
-    // MCPX_PID_FILE is set by withFakeMcpx to the isolated dir — capture now
-    // (the env is restored after run returns).
-    const pidFile = process.env.MCPX_PID_FILE as string;
-    t.after(async () => {
-      // leave no trace: kill a leftover fake process and remove the pid file
-      if (existsSync(pidFile)) {
-        const pid = Number(readFileSync(pidFile, "utf8").trim());
-        if (Number.isInteger(pid) && pid > 0) {
-          if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
-          else process.kill(pid, "SIGKILL");
-        }
-        const { rmSync } = await import("node:fs");
-        rmSync(pidFile, { force: true });
-      }
-    });
-    const overlay = new McpxOverlay({
-      cwd: "D:/demo",
-      requestRender: () => undefined,
-      close: () => undefined,
-      endpointWaitMs: 1_000, // the fake server never opens an endpoint
-    });
-    t.after(() => overlay.dispose());
-
-    // start
-    overlay.handleInput("s");
-    const started = await waitFor(() => existsSync(markerPath));
-    assert.equal(started, true, "fake mcpx process should have started");
-    const pidWritten = await waitFor(() => existsSync(pidFile));
-    assert.equal(pidWritten, true, "PID file should be written");
-
-    // stop
-    overlay.handleInput("x");
-    const stopped = await waitFor(() => !existsSync(pidFile));
-    assert.equal(stopped, true, "PID file should be removed after stop");
+test("GatewayControlClient starts, restarts, and stops through authenticated IPC", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "gateway-control-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const { configPath } = await createConfig(root);
+  const daemons: GatewayDaemon[] = [];
+  const spawnProcess: GatewayProcessSpawner = (path, args) => {
+    assert.equal(path, "node-test");
+    assert.deepEqual(args, ["gateway-script", "serve", "--json", "--config", configPath]);
+    const daemon = new GatewayDaemon({ configPath });
+    daemons.push(daemon);
+    let exitCode: number | null = null;
+    void daemon.start().then(() => daemon.waitUntilStopped()).then(() => { exitCode = 0; });
+    return {
+      get exitCode() { return exitCode; },
+      unref() {},
+      kill() { void daemon.stop(); return true; },
+    };
+  };
+  const client = new GatewayControlClient({
+    configPath,
+    binary: {
+      path: "gateway-script",
+      version: "test",
+      source: "package",
+      command: "node-test",
+      argsPrefix: ["gateway-script"],
+    },
+    spawnProcess,
+    startupTimeoutMs: 2_000,
+    stopTimeoutMs: 2_000,
   });
+  t.after(async () => { await Promise.all(daemons.map((daemon) => daemon.stop())); });
+
+  const [started, joinedStart] = await Promise.all([client.start(), client.start()]);
+  assert.equal(started.online, true);
+  assert.equal(joinedStart.owner?.ownerToken, started.owner?.ownerToken);
+  assert.equal(daemons.length, 1, "concurrent start callers must share one daemon launch");
+  const firstOwnerToken = started.owner?.ownerToken;
+  assert.equal(typeof firstOwnerToken, "string");
+
+  const restarted = await client.restart();
+  assert.equal(restarted.online, true);
+  assert.notEqual(restarted.owner?.ownerToken, firstOwnerToken);
+  assert.equal(daemons.length, 2);
+
+  assert.equal(await client.stop(), true);
+  assert.deepEqual(await client.status(), { online: false });
+  await Promise.all(daemons.map((daemon) => daemon.waitUntilStopped()));
+});
+
+test("GatewayControlClient startup timeout is a strict wall-clock deadline", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "gateway-control-timeout-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const { configPath } = await createConfig(root);
+  let spawnCount = 0;
+  let killed = false;
+  const client = new GatewayControlClient({
+    configPath,
+    startupTimeoutMs: 50,
+    binary: { path: "gateway-script", version: "test", source: "package" },
+    spawnProcess: () => {
+      spawnCount++;
+      return { exitCode: null, unref() {}, kill() { killed = true; return true; } };
+    },
+  });
+
+  const startedAt = Date.now();
+  await assert.rejects(() => client.start(), /did not become ready within 50ms/);
+  assert.ok(Date.now() - startedAt < 500, "a status probe must not overrun the startup deadline");
+  assert.equal(spawnCount, 1);
+  assert.equal(killed, true);
+});
+
+test("GatewayControlClient converts spawn errors into one bounded start failure", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "gateway-control-spawn-error-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const { configPath } = await createConfig(root);
+  const client = new GatewayControlClient({
+    configPath,
+    startupTimeoutMs: 1_000,
+    binary: { path: "missing-gateway", version: "test", source: "package" },
+    spawnProcess: () => ({
+      exitCode: null,
+      once(_event, listener) { queueMicrotask(() => listener(new Error("spawn failed"))); },
+      unref() {},
+      kill() { return true; },
+    }),
+  });
+
+  const startedAt = Date.now();
+  await assert.rejects(() => client.start(), /spawn failed/);
+  assert.ok(Date.now() - startedAt < 500);
+});
+
+test("POSIX fallback signals the exact detached process group rather than one PID", async () => {
+  const signals: Array<[number, NodeJS.Signals | 0]> = [];
+  let groupAlive = true;
+  await killGatewayProcessTree(4242, {
+    platform: "linux",
+    alive: () => true,
+    signal: (pid, signal) => {
+      signals.push([pid, signal]);
+      if (signal === "SIGTERM") groupAlive = false;
+      if (signal === 0 && !groupAlive) throw Object.assign(new Error("gone"), { code: "ESRCH" });
+    },
+  });
+  assert.deepEqual(signals, [[-4242, "SIGTERM"], [-4242, 0]]);
+});
+
+test("GatewayControlClient refuses fallback stop when exact process identity differs", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "gateway-control-identity-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const { configPath, ownerPath } = await createConfig(root);
+  const ownerStore = new GatewayOwnerStore({ ownerPath, commandIdentity: "expected gateway command" });
+  const owner = await ownerStore.claim({ commandIdentity: "expected gateway command" });
+  t.after(() => ownerStore.release(owner.ownerToken));
+  const client = new GatewayControlClient({ configPath, processIdentity: () => "different command" });
+
+  await assert.rejects(() => client.stop(), /exact command identity/);
+  assert.equal((await ownerStore.read())?.ownerToken, owner.ownerToken);
 });

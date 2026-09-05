@@ -1,15 +1,9 @@
 /**
- * MCPX workspace registration bridge.
+ * `/mcpx` compatibility facade for the built-in Pi Maestro Gateway.
  *
- * Registration is dynamic (lease-based): `ensureMcpxWorkspace` registers the
- * current project root with a TTL lease (`mcpx workspace register --ttl …`).
- * While a window is alive it renews the lease every minute
- * (`startWorkspaceLease`); when the window goes offline the heartbeat stops
- * and MCPX drops the workspace once the lease expires. Registration is
- * opt-in: the /mcpx panel's e key toggles the lease for the current window
- * (default: not registered).
- *
- * Opt out with PI_MCPX_BRIDGE=0. Override the binary with MCPX_BIN.
+ * Existing exports and the ~/.mcpx config path remain available for one
+ * compatibility cycle, while lifecycle and workspace state are owned by the
+ * packaged Gateway. Opt out with PI_MCPX_BRIDGE=0.
  */
 
 import { randomUUID } from "node:crypto";
@@ -21,10 +15,21 @@ import { isAbsolute, join, resolve } from "node:path";
 // buildChangesYaml lives in the wizard module and uses only pure YAML helpers
 // (splitSections/parseListItems/patchYamlScalar) with no bridge dependency at
 // call time, so the circular import is safe under ESM lazy binding.
+import {
+  GatewayControlClient,
+  locateGatewayBinary,
+  resetGatewayBinaryCache,
+  type GatewayControlStatus,
+} from "./gateway/control-client.ts";
+import type { GatewayWorkspace } from "./gateway/contracts.ts";
+import { loadGatewayConfig } from "./gateway/config.ts";
+import { SessionStore } from "./gateway/session-store.ts";
+import type { CollaborativeSessionStateV1 } from "./gateway/session-contracts.ts";
 import { buildChangesYaml, type McpxConfigChanges } from "./tui/mcpx-wizard.ts";
 
 const bridgeDisabled = () => process.env.PI_MCPX_BRIDGE === "0";
 const registeredPaths = new Set<string>();
+const registeredWorkspaces = new Map<string, GatewayWorkspace>();
 const workspaceRegistrationPromises = new Map<string, Promise<boolean>>();
 
 export const LEASE_TTL_SECONDS = 300; // lease length; heartbeat renews every minute
@@ -34,87 +39,23 @@ let leaseTimer: NodeJS.Timeout | undefined;
 let leaseCwd: string | undefined;
 let leaseGeneration = 0;
 
-// PERF-RV-003: cache locateMcpx() result across calls within a process. null =
-// not-yet-probed; string = resolved path; undefined = probed-but-not-found.
-let cachedMcpx: string | undefined | null = null;
-// PERF-RV-003: cache detectMcpxForPmf() result across calls within a process.
-// null = not-yet-probed.
-let cachedMcpxForPmf: { installed: boolean; version?: string } | null = null;
+let defaultGatewayControl: GatewayControlClient | undefined;
 
-export function locateMcpx(): string | undefined {
-  // PERF-RV-003: return the cached result if we have already probed.
-  if (cachedMcpx !== null) return cachedMcpx ?? undefined;
-  const configured = process.env.MCPX_BIN;
-  if (configured && existsSync(configured)) { cachedMcpx = configured; return configured; }
-  // Default install location: ~/.mcpx/bin/mcpx(.exe) — the panel's s/x
-  // controls and the startup bridge find it here without PATH changes.
-  const homeBin = join(homedir(), ".mcpx", "bin", process.platform === "win32" ? "mcpx.exe" : "mcpx");
-  if (existsSync(homeBin)) { cachedMcpx = homeBin; return homeBin; }
-  const probe = spawnSync(process.platform === "win32" ? "where.exe" : "which", ["mcpx"], {
-    encoding: "utf8",
-    shell: false,
-    timeout: 10_000,
-  });
-  if (probe.status === 0) {
-    const line = String(probe.stdout || "").split(/\r?\n/).find(Boolean);
-    if (line) { cachedMcpx = line; return line; }
+function gatewayControl(cwd?: string): GatewayControlClient {
+  if (!defaultGatewayControl || (cwd && defaultGatewayControl.cwd !== absoluteRoot(cwd))) {
+    defaultGatewayControl = new GatewayControlClient({ cwd: absoluteRoot(cwd) });
   }
-  cachedMcpx = undefined;
-  return undefined;
+  return defaultGatewayControl;
+}
+
+/** @deprecated Compatibility name; resolves only a verified built-in Gateway binary. */
+export function locateMcpx(): string | undefined {
+  return locateGatewayBinary()?.path;
 }
 
 function absoluteRoot(root: string | undefined): string {
   const rawRoot = root ?? process.cwd();
   return isAbsolute(rawRoot) ? resolve(rawRoot) : resolve(process.cwd(), rawRoot);
-}
-
-function resolveMcpxSpawn(args: string[]): { binary: string; useShell: boolean } | { error: string } {
-  const mcpx = locateMcpx();
-  if (!mcpx) return { error: "mcpx binary not found" };
-  const useShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(mcpx);
-  // npm shims require cmd.exe, but never pass shell metacharacters through a
-  // shim. The normal installed mcpx.exe path uses shell:false and accepts all
-  // valid Windows paths.
-  if (useShell && args.some((arg) => /[\u0000\r\n&|<>^%!()]/.test(arg))) {
-    return { error: "unsafe Windows command argument" };
-  }
-  return { binary: mcpx, useShell };
-}
-
-function runMcpx(args: string[]): { status: number | null; stderr: string } {
-  const plan = resolveMcpxSpawn(args);
-  if ("error" in plan) return { status: null, stderr: plan.error };
-  const result = spawnSync(plan.binary, args, {
-    encoding: "utf8",
-    timeout: 15_000,
-    shell: plan.useShell,
-  });
-  return { status: result.status, stderr: String(result.stderr || result.stdout || "").trim() };
-}
-
-/** Async variant for the lease heartbeat: spawnSync would block the TUI event
- *  loop for up to 15s whenever the mcpx binary hangs or responds slowly. */
-function runMcpxAsync(args: string[]): Promise<{ status: number | null; stderr: string }> {
-  const plan = resolveMcpxSpawn(args);
-  if ("error" in plan) return Promise.resolve({ status: null, stderr: plan.error });
-  return new Promise((resolve) => {
-    const child = spawn(plan.binary, args, {
-      shell: plan.useShell,
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-    });
-    let output = "";
-    const capture = (chunk: Buffer) => { output = (output + chunk.toString()).slice(-16_384); };
-    child.stdout?.on("data", capture);
-    child.stderr?.on("data", capture);
-    const timer = setTimeout(() => { try { child.kill(); } catch { /* already dead */ } }, 15_000);
-    const finish = (status: number | null) => {
-      clearTimeout(timer);
-      resolve({ status, stderr: output.trim() });
-    };
-    child.on("error", () => finish(null));
-    child.on("close", (code) => finish(code));
-  });
 }
 
 /**
@@ -138,7 +79,8 @@ export async function ensureMcpxWorkspace(
     registeredPaths.add(absRoot);
     const registered = await renewWorkspaceLease(absRoot, ttlSeconds, generation);
     if (!registered) registeredPaths.delete(absRoot);
-    return registered;
+    else registeredWorkspaces.set(absRoot, registered);
+    return registered !== undefined;
   })();
   workspaceRegistrationPromises.set(absRoot, registration);
   try {
@@ -155,29 +97,20 @@ export async function ensureMcpxWorkspace(
  * per-path dedupe set: the heartbeat must actually re-register so the
  * TTL is extended while the window stays alive.
  */
-function renewWorkspaceLease(absRoot: string, ttlSeconds: number, generation?: number): Promise<boolean> {
+function renewWorkspaceLease(absRoot: string, ttlSeconds: number, generation?: number): Promise<GatewayWorkspace | undefined> {
   return new Promise((resolve) => {
     setImmediate(async () => {
-      // A heartbeat renewal enqueued before stop() must not fire after stop.
-      // generation is only supplied by the lease heartbeat; an explicit
-      // ensureMcpxWorkspace call (no generation) always runs.
       if (generation !== undefined && generation !== leaseGeneration) {
-        resolve(false);
+        resolve(undefined);
         return;
       }
       try {
-        const args = ttlSeconds > 0
-          ? ["workspace", "register", "--ttl", `${ttlSeconds}s`, absRoot]
-          : ["workspace", "register", absRoot];
-        const { status, stderr } = await runMcpxAsync(args);
-        const registered = status === 0;
-        if (!registered) {
-          console.warn(`[pi-maestro-flow] MCPX workspace registration failed (${status ?? "spawn error"}): ${stderr}`);
-        }
+        const registered = await gatewayControl().registerWorkspace(absRoot, ttlSeconds);
+        if (generation === undefined || generation === leaseGeneration) registeredWorkspaces.set(absRoot, registered);
         resolve(registered);
       } catch (error) {
-        console.warn(`[pi-maestro-flow] MCPX workspace registration skipped: ${error instanceof Error ? error.message : String(error)}`);
-        resolve(false);
+        console.warn(`[pi-maestro-flow] Gateway workspace registration skipped: ${error instanceof Error ? error.message : String(error)}`);
+        resolve(undefined);
       }
     });
   });
@@ -188,14 +121,14 @@ export function removeMcpxWorkspace(root?: string): void {
   if (bridgeDisabled()) return;
   const absRoot = absoluteRoot(root);
   registeredPaths.delete(absRoot);
-  try {
-    const { status, stderr } = runMcpx(["workspace", "remove", absRoot]);
-    if (status !== 0) {
-      console.warn(`[pi-maestro-flow] MCPX workspace removal failed (${status ?? "spawn error"}): ${stderr}`);
-    }
-  } catch (error) {
-    console.warn(`[pi-maestro-flow] MCPX workspace removal skipped: ${error instanceof Error ? error.message : String(error)}`);
-  }
+  const registration = registeredWorkspaces.get(absRoot);
+  registeredWorkspaces.delete(absRoot);
+  const fence = registration?.mode === "lease" && registration.ownerToken
+    ? { expectedGeneration: registration.generation, ownerToken: registration.ownerToken }
+    : undefined;
+  void gatewayControl().unregisterWorkspace(absRoot, fence).catch((error) => {
+    console.warn(`[pi-maestro-flow] Gateway workspace removal skipped: ${error instanceof Error ? error.message : String(error)}`);
+  });
 }
 
 /**
@@ -246,27 +179,25 @@ export async function registerMcpxWorkspacePermanent(cwd: string): Promise<boole
 /** Test hook: reset the in-process deduplication state. */
 export function _resetMcpxBridgeState(): void {
   registeredPaths.clear();
+  registeredWorkspaces.clear();
   workspaceRegistrationPromises.clear();
   stopWorkspaceLease();
-  // Also reset the caches so tests that set up a fresh MCPX_BIN in a temp dir
-  // re-probe instead of reusing a stale cached path from a prior test.
-  cachedMcpx = null;
-  cachedMcpxForPmf = null;
+  defaultGatewayControl = undefined;
+  resetGatewayBinaryCache();
 }
 
-/** Test hook: reset the locateMcpx cache (PERF-RV-003). */
+/** Test hook retained for compatibility. */
 export function _resetMcpxCache(): void {
-  cachedMcpx = null;
+  resetGatewayBinaryCache();
 }
 
-/** Test hook: reset the detectMcpxForPmf cache (PERF-RV-003). */
+/** Test hook retained for compatibility. */
 export function _resetMcpxForPmfCache(): void {
-  cachedMcpxForPmf = null;
+  resetGatewayBinaryCache();
 }
 
 // --- Tunnel health & config detection (shared by overlay + wizard + extension) ---
 
-const MCPX_PID_FILE = () => process.env.MCPX_PID_FILE ?? join(homedir(), ".mcpx", "mcpx-server.pid");
 const MCPX_TUNNEL_PID_FILE = () => process.env.MCPX_TUNNEL_PID_FILE ?? join(homedir(), ".mcpx", "cloudflared.pid");
 const MCPX_CONFIG_PATH = () => join(homedir(), ".mcpx", "config.yaml");
 
@@ -308,9 +239,52 @@ function parseProbeURL(raw: string): URL | undefined {
 
 export interface TunnelState {
   pid?: number;
+  ownerToken?: string;
+  port?: number;
+  commandIdentity?: string;
   url?: string;
   alive: boolean;
   health: TunnelHealth;
+}
+
+interface QuickTunnelOwnerRecord {
+  version: 1;
+  pid: number;
+  ownerToken: string;
+  port: number;
+  commandIdentity: string;
+}
+
+export function recordQuickTunnelOwner(pid: number, port: number): QuickTunnelOwnerRecord {
+  const owner: QuickTunnelOwnerRecord = {
+    version: 1,
+    pid,
+    ownerToken: randomUUID(),
+    port,
+    commandIdentity: quickTunnelCommandLine(["cloudflared", ...quickTunnelArgs(port)]),
+  };
+  writeFileSync(MCPX_TUNNEL_PID_FILE(), `${JSON.stringify(owner)}\n`, { encoding: "utf8", mode: 0o600 });
+  return owner;
+}
+
+function readQuickTunnelOwner(): QuickTunnelOwnerRecord | undefined {
+  let raw: string;
+  try { raw = readFileSync(MCPX_TUNNEL_PID_FILE(), "utf8").trim(); }
+  catch { return undefined; }
+  try {
+    const value = JSON.parse(raw) as Partial<QuickTunnelOwnerRecord>;
+    if (value.version !== 1 || !Number.isSafeInteger(value.pid) || (value.pid ?? 0) <= 0
+      || typeof value.ownerToken !== "string" || value.ownerToken.length < 16
+      || !isValidTunnelPort(value.port ?? 0) || typeof value.commandIdentity !== "string"
+      || !isQuickTunnelCommandLine(value.commandIdentity, value.port!)) return undefined;
+    return value as QuickTunnelOwnerRecord;
+  } catch {
+    const pid = Number(raw);
+    const port = readMcpxConfigView()?.server.port ?? 9090;
+    if (!Number.isSafeInteger(pid) || pid <= 0 || isQuickTunnelProcess(pid, port) !== true) return undefined;
+    try { return recordQuickTunnelOwner(pid, port); }
+    catch { return undefined; }
+  }
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -367,19 +341,20 @@ function readConfigServerURL(): string | undefined {
  * overlay calls them together so the board shows a complete row per refresh.
  */
 export function readTunnelState(): TunnelState {
-  let pid: number | undefined;
-  try {
-    const raw = readFileSync(MCPX_TUNNEL_PID_FILE(), "utf8").trim();
-    const parsed = Number(raw);
-    if (Number.isInteger(parsed) && parsed > 0) pid = parsed;
-  } catch {
-    // no PID file — tunnel was never started via the wizard in this profile
-  }
+  const owner = readQuickTunnelOwner();
   const url = readConfigServerURL();
-  // A stale PID file can point at a newly-reused PID. Liveness alone would then
-  // report an unrelated process (for example Code.exe) as the active tunnel.
-  const alive = pid !== undefined && processMatches(pid, "cloudflared");
-  return { pid, url, alive, health: "unknown" };
+  const alive = owner !== undefined && isQuickTunnelProcess(owner.pid, owner.port) === true;
+  return {
+    ...(owner ? {
+      pid: owner.pid,
+      ownerToken: owner.ownerToken,
+      port: owner.port,
+      commandIdentity: owner.commandIdentity,
+    } : {}),
+    url,
+    alive,
+    health: "unknown",
+  };
 }
 
 /**
@@ -624,49 +599,58 @@ export function writeMcpxConfigChanges(changes: McpxConfigChanges): { yaml: stri
   return { yaml, summary };
 }
 
-/**
- * Detect whether the `mcpx-for-pmf` fork is installed as a global npm package.
- * The fork's postinstall drops the platform binary at ~/.mcpx/bin; the npm
- * package name is the reliable signal that distinguishes the fork from the
- * upstream `mcpx` package. Returns { installed, version }.
- */
+/** Compatibility name: report only a verified packaged Gateway binary. */
 export function detectMcpxForPmf(): { installed: boolean; version?: string } {
-  // PERF-RV-003: return the cached result if we have already probed.
-  if (cachedMcpxForPmf !== null) return cachedMcpxForPmf;
+  const binary = locateGatewayBinary();
+  return binary ? { installed: true, version: binary.version } : { installed: false };
+}
+
+/** Compatibility wrapper; queues removal from the built-in Gateway registry. */
+export function removeWorkspaceByPath(path: string): { ok: boolean; message: string } {
+  const absRoot = absoluteRoot(path);
+  const registration = registeredWorkspaces.get(absRoot);
+  const fence = registration?.mode === "lease" && registration.ownerToken
+    ? { expectedGeneration: registration.generation, ownerToken: registration.ownerToken }
+    : undefined;
+  void gatewayControl().unregisterWorkspace(absRoot, fence).then((removed) => {
+    if (removed && registeredWorkspaces.get(absRoot)?.generation === registration?.generation) {
+      registeredPaths.delete(absRoot);
+      registeredWorkspaces.delete(absRoot);
+    }
+  }).catch(() => undefined);
+  return { ok: true, message: "已提交 Gateway workspace 移除" };
+}
+
+export async function removeGatewayWorkspaceByPath(path: string): Promise<{ ok: boolean; message: string }> {
   try {
-    // Resolve the global node_modules root: `npm root -g` prints the path.
-    const probe = spawnSync("npm", ["root", "-g"], {
-      encoding: "utf8",
-      timeout: 8_000,
-      shell: process.platform === "win32",
-    });
-    if (probe.status !== 0) { cachedMcpxForPmf = { installed: false }; return cachedMcpxForPmf; }
-    const root = String(probe.stdout || "").split(/\r?\n/).find((l) => l.trim());
-    if (!root) { cachedMcpxForPmf = { installed: false }; return cachedMcpxForPmf; }
-    const pkgPath = join(root.trim(), "mcpx-for-pmf", "package.json");
-    const raw = readFileSync(pkgPath, "utf8");
-    const pkg = JSON.parse(raw) as { name?: string; version?: string };
-    if (pkg.name === "mcpx-for-pmf") { cachedMcpxForPmf = { installed: true, version: pkg.version }; return cachedMcpxForPmf; }
-    cachedMcpxForPmf = { installed: false };
-    return cachedMcpxForPmf;
-  } catch {
-    cachedMcpxForPmf = { installed: false };
-    return cachedMcpxForPmf;
+    const absRoot = absoluteRoot(path);
+    const registration = registeredWorkspaces.get(absRoot);
+    const fence = registration?.mode === "lease" && registration.ownerToken
+      ? { expectedGeneration: registration.generation, ownerToken: registration.ownerToken }
+      : undefined;
+    const removed = await gatewayControl().unregisterWorkspace(absRoot, fence);
+    if (removed) {
+      registeredPaths.delete(absRoot);
+      registeredWorkspaces.delete(absRoot);
+    }
+    return removed
+      ? { ok: true, message: "已移除 Gateway workspace" }
+      : { ok: false, message: "Gateway workspace 不存在" };
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : String(error) };
   }
 }
 
-/**
- * Remove a registered workspace via `mcpx workspace remove <path>`.
- * Writes config.yaml only — the running mcpx rebuilds its in-memory registry
- * at the next ~5min lease sweep, so the removed workspace stays live until
- * then. Returns { ok, message }.
- */
-export function removeWorkspaceByPath(path: string): { ok: boolean; message: string } {
-  const mcpx = locateMcpx();
-  if (!mcpx) return { ok: false, message: "未找到 mcpx 二进制" };
-  const { status, stderr } = runMcpx(["workspace", "remove", path]);
-  if (status === 0) return { ok: true, message: "已移除（mcpx ≤5min 内清理）" };
-  return { ok: false, message: stderr || "workspace remove 失败" };
+export async function listGatewayWorkspaces(): Promise<GatewayWorkspace[]> {
+  return gatewayControl().listWorkspaces();
+}
+
+/** Read the workspace-local collaboration authority for the `/gateway` UI.
+ * This is intentionally separate from Pi Todo and never reads its store. */
+export async function readGatewayCollaborativeSessions(cwd: string): Promise<CollaborativeSessionStateV1[]> {
+  const config = await loadGatewayConfig();
+  const sessionsRoot = config.state.sessionsRoot ?? (config.state.rootDir ? join(config.state.rootDir, "sessions") : undefined);
+  return new SessionStore({ cwd, sessionsRoot }).list();
 }
 
 // --- Delegated task registry (Phase 4: board display) ---
@@ -762,6 +746,32 @@ export function readDelegatedTasks(sessionId?: string): DelegatedTask[] | undefi
   // newest first
   tasks.sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
   return tasks;
+}
+
+/** Gateway task journal first; legacy external files are optional read-only history. */
+export async function readGatewayDelegatedTasks(): Promise<DelegatedTask[] | undefined> {
+  let gatewayTasks: DelegatedTask[] = [];
+  try {
+    gatewayTasks = (await gatewayControl().listTasks()).map((task) => ({
+      task_id: task.id,
+      remote_session_id: "gateway",
+      workspace: task.cwd,
+      action: "teammate",
+      message: "",
+      purpose: "Gateway teammate task",
+      status: task.status,
+      created_at: new Date(task.createdAt).toISOString(),
+      ...(task.finishedAt === undefined ? {} : { completed_at: new Date(task.finishedAt).toISOString() }),
+      ...(task.publicationId === undefined ? {} : { result: `agent://${task.publicationId}` }),
+      ...(task.error === undefined ? {} : { error: task.error }),
+    }));
+  } catch {
+    // The journal may not exist before the first task.
+  }
+  const legacy = readDelegatedTasks() ?? [];
+  const tasks = [...gatewayTasks, ...legacy];
+  tasks.sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
+  return tasks.length > 0 ? tasks : undefined;
 }
 
 // --- Quick tunnel restart + config sync (one-click URL refresh) ---
@@ -1022,10 +1032,9 @@ export async function killProcessWithEscalation(pid: number): Promise<void> {
 }
 
 /** Kill a cloudflared tunnel process by PID (process tree on Windows). */
-async function killTunnel(pid: number): Promise<void> {
-  // SEC-RV-006: verify identity before killing so a reused PID cannot target an
-  // unrelated process. On mismatch, just clean the stale PID file and return.
-  if (pid && !processMatches(pid, "cloudflared")) {
+async function killTunnel(pid: number, port?: number): Promise<void> {
+  const owned = port === undefined ? processMatches(pid, "cloudflared") : isQuickTunnelProcess(pid, port) === true;
+  if (!owned) {
     try { rmSync(MCPX_TUNNEL_PID_FILE(), { force: true }); } catch { /* best-effort */ }
     return;
   }
@@ -1042,13 +1051,8 @@ async function killTunnel(pid: number): Promise<void> {
 
 /** Stop a Cloudflare quick tunnel tracked by the PID file (best-effort). */
 export async function stopQuickTunnel(): Promise<void> {
-  let pid: number | undefined;
-  try {
-    const raw = readFileSync(MCPX_TUNNEL_PID_FILE(), "utf8").trim();
-    const parsed = Number(raw);
-    if (Number.isInteger(parsed) && parsed > 0) pid = parsed;
-  } catch { /* no PID file */ }
-  if (pid) await killTunnel(pid);
+  const owner = readQuickTunnelOwner();
+  if (owner) await killTunnel(owner.pid, owner.port);
   try { rmSync(MCPX_TUNNEL_PID_FILE(), { force: true }); } catch { /* best-effort */ }
 }
 
@@ -1064,12 +1068,8 @@ export async function restartQuickTunnel(localPort: number, timeoutMs = 30_000):
   const existing = discoverQuickTunnelProcesses(localPort);
   if (!existing) throw new Error("无法确认现有 Quick Tunnel 进程，已停止启动以避免重复");
   const oldPids = new Set(existing.map((process) => process.pid));
-  for (const process of existing) await killTunnel(process.pid);
-  try {
-    const pidFile = readFileSync(MCPX_TUNNEL_PID_FILE(), "utf8").trim();
-    const pid = Number(pidFile);
-    if (Number.isInteger(pid) && oldPids.has(pid)) rmSync(MCPX_TUNNEL_PID_FILE(), { force: true });
-  } catch { /* no PID file */ }
+  for (const process of existing) await killTunnel(process.pid, localPort);
+  try { rmSync(MCPX_TUNNEL_PID_FILE(), { force: true }); } catch { /* no owner file */ }
   if (existing.length > 0) {
     await new Promise((resolve) => setTimeout(resolve, 500));
     const remaining = discoverQuickTunnelProcesses(localPort);
@@ -1091,7 +1091,9 @@ export async function restartQuickTunnel(localPort: number, timeoutMs = 30_000):
     windowsHide: true,
   });
   child.unref();
-  try { writeFileSync(MCPX_TUNNEL_PID_FILE(), String(child.pid ?? ""), "utf8"); } catch { /* best-effort */ }
+  if (child.pid) {
+    try { recordQuickTunnelOwner(child.pid, localPort); } catch { /* best-effort */ }
+  }
   const readLog = (): string => {
     if (logFd === undefined) return "";
     try { return readFileSync(logPath, "utf8"); } catch { return ""; }
@@ -1100,7 +1102,14 @@ export async function restartQuickTunnel(localPort: number, timeoutMs = 30_000):
   try {
     while (Date.now() < deadline) {
       const match = readLog().match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
-      if (match) return match[0];
+      if (match) {
+        const discovered = discoverQuickTunnelProcesses(localPort);
+        const owned = discovered?.find((candidate) => !oldPids.has(candidate.pid));
+        if (owned) {
+          try { recordQuickTunnelOwner(owned.pid, localPort); } catch { /* best-effort */ }
+        }
+        return match[0];
+      }
       // Any child exit without a URL match is a hard failure — a clean exit
       // (code 0) without a URL also means cloudflared is gone and the loop must
       // not keep polling for the full timeout.
@@ -1150,29 +1159,19 @@ export function updateConfigServerURL(url: string): void {
   replaceConfigAtomically(next);
 }
 
-/** Stop the mcpx process tracked by ~/.mcpx/mcpx-server.pid (best-effort). */
-export async function stopMcpx(): Promise<void> {
-  let pid: number | undefined;
-  const pidFile = MCPX_PID_FILE();
-  try {
-    const raw = readFileSync(pidFile, "utf8").trim();
-    const parsed = Number(raw);
-    if (Number.isInteger(parsed) && parsed > 0) pid = parsed;
-  } catch { /* no pid file */ }
-  if (!pid) return;
-  // SEC-RV-006: verify identity before killing so a reused PID cannot target an
-  // unrelated process. On mismatch, just clean the stale PID file and return.
-  if (pid && !processMatches(pid, "mcpx")) {
-    try { rmSync(pidFile, { force: true }); } catch { /* best-effort */ }
-    return;
-  }
-  try {
-    if (process.platform === "win32") {
-      spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
-    } else {
-      await killProcessWithEscalation(pid);
-    }
-  } catch { /* already dead */ }
-  try { rmSync(pidFile, { force: true }); } catch { /* best-effort */ }
+export async function readGatewayControlStatus(cwd?: string): Promise<GatewayControlStatus> {
+  return gatewayControl(cwd).status();
+}
+
+export async function startMcpx(cwd?: string): Promise<GatewayControlStatus> {
+  return gatewayControl(cwd).start();
+}
+
+export async function restartMcpx(cwd?: string): Promise<GatewayControlStatus> {
+  return gatewayControl(cwd).restart();
+}
+
+export async function stopMcpx(cwd?: string): Promise<void> {
+  await gatewayControl(cwd).stop();
 }
 

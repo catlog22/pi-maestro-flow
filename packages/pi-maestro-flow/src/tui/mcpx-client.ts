@@ -1,3 +1,7 @@
+import { randomUUID } from "node:crypto";
+import type { CollaborativeSessionStateV1, GatewayTodoTaskV1 } from "../gateway/session-contracts.ts";
+import type { GatewayTaskEvent, GatewayTeammateTaskView } from "../gateway/services/teammate-service.ts";
+
 export type McpxWindowSource = "registered" | "managed";
 
 export interface McpxRemoteSession {
@@ -64,6 +68,21 @@ export interface McpxWindowSendResult {
   created?: boolean;
   status?: string;
   raw: Record<string, unknown>;
+}
+
+export interface McpxGatewayMonitor {
+  handle: string;
+  task: GatewayTeammateTaskView;
+}
+
+export interface McpxGatewayMonitorObservation {
+  handle: string;
+  task: GatewayTeammateTaskView;
+  events: GatewayTaskEvent[];
+  nextCursor: number;
+  oldestCursor: number;
+  hasMore: boolean;
+  gap: boolean;
 }
 
 export type McpxClientErrorKind = "auth" | "unsupported" | "http" | "protocol" | "tool";
@@ -274,24 +293,98 @@ export class McpxStreamableHttpClient {
     this.capabilityPromise = undefined;
   }
 
-  async listRemoteSessions(): Promise<McpxRemoteSession[]> {
-    const data = await this.callTool("session", { action: "list", limit: 20 });
-    const sessions = isRecord(data.data) && Array.isArray(data.data.sessions)
-      ? data.data.sessions
-      : Array.isArray(data.sessions)
-        ? data.sessions
-        : [];
-    return sessions.flatMap((candidate) => {
-      if (!isRecord(candidate)) return [];
-      const sessionId = stringValue(candidate.remote_session_id);
-      if (!sessionId) return [];
-      return [{
+  async listRemoteSessions(memberIds?: readonly string[]): Promise<McpxRemoteSession[]> {
+    const memberCandidates = memberIds && memberIds.length > 0 ? [...new Set(memberIds)] : [undefined];
+    const outcomes = await Promise.all(memberCandidates.map(async (memberId) => {
+      try {
+        const data = await this.callTool("session", { action: "list", limit: 20, ...(memberId ? { memberId } : {}) });
+        const sessions = isRecord(data.data) && Array.isArray(data.data.sessions)
+          ? data.data.sessions
+          : Array.isArray(data.sessions)
+            ? data.sessions
+            : [];
+        return { sessions };
+      } catch (error) {
+        return { sessions: [] as unknown[], error };
+      }
+    }));
+    const collected = outcomes.flatMap((outcome) => outcome.sessions);
+    const firstError = outcomes.find((outcome) => outcome.error !== undefined)?.error;
+    if (collected.length === 0 && firstError && memberCandidates.length === 1) throw firstError;
+    const sessions = new Map<string, McpxRemoteSession>();
+    for (const candidate of collected) {
+      if (!isRecord(candidate)) continue;
+      const sessionId = stringValue(candidate.remote_session_id ?? candidate.id);
+      if (!sessionId) continue;
+      sessions.set(sessionId, {
         sessionId,
-        workspace: stringValue(candidate.workspace_name ?? candidate.workspace),
+        workspace: stringValue(candidate.workspace_name ?? candidate.workspace ?? candidate.workspacePath),
         label: optionalString(candidate.label),
         status: stringValue(candidate.status),
-      }];
+      });
+    }
+    return [...sessions.values()];
+  }
+
+  async getGatewaySession(sessionId: string, memberId: string): Promise<CollaborativeSessionStateV1> {
+    const data = await this.callTool("session", { action: "get", sessionId, memberId });
+    if (!isRecord(data.session) || !Array.isArray(data.members) || !Array.isArray(data.todos)) {
+      throw new McpxClientError("Gateway session response is malformed", "protocol");
+    }
+    return data as unknown as CollaborativeSessionStateV1;
+  }
+
+  async renewGatewayMember(sessionId: string, memberId: string, expectedSessionRevision: number, expectedGeneration: number, leaseTtlMs = 300_000): Promise<void> {
+    await this.callTool("session", { action: "renew", sessionId, memberId, expectedSessionRevision, expectedGeneration, leaseTtlMs, operationId: randomUUID() });
+  }
+
+  async listGatewayTodos(sessionId: string, memberId: string): Promise<GatewayTodoTaskV1[]> {
+    const data = await this.callTool("todo", { action: "list", sessionId, memberId });
+    if (!Array.isArray(data.todos)) throw new McpxClientError("Gateway Todo response is malformed", "protocol");
+    return data.todos as GatewayTodoTaskV1[];
+  }
+
+  async mutateGatewayTodo(input: {
+    action: "claim" | "release" | "advance";
+    sessionId: string;
+    memberId: string;
+    expectedSessionRevision: number;
+    todoId: string;
+    status?: "pending" | "blocked" | "completed" | "cancelled";
+  }): Promise<GatewayTodoTaskV1> {
+    const data = await this.callTool("todo", {
+      ...input,
+      operationId: randomUUID(),
+      ...(input.action === "advance" ? { status: input.status } : {}),
     });
+    if (!isRecord(data.todo)) throw new McpxClientError("Gateway Todo mutation response is malformed", "protocol");
+    return data.todo as unknown as GatewayTodoTaskV1;
+  }
+
+  async listGatewayMonitors(sessionId: string, memberId: string): Promise<McpxGatewayMonitor[]> {
+    const data = await this.callTool("monitor", { action: "list", sessionId, memberId });
+    if (!Array.isArray(data.monitors)) throw new McpxClientError("Gateway Monitor response is malformed", "protocol");
+    return data.monitors.flatMap((value) => isRecord(value) && typeof value.handle === "string" && isRecord(value.task)
+      ? [{ handle: value.handle, task: value.task as unknown as GatewayTeammateTaskView }]
+      : []);
+  }
+
+  async observeGatewayMonitor(sessionId: string, memberId: string, handle: string, cursor = 0): Promise<McpxGatewayMonitorObservation> {
+    const data = await this.callTool("monitor", { action: "observe", sessionId, memberId, handle, cursor, limit: 64 });
+    if (!isRecord(data.task) || !Array.isArray(data.events)) throw new McpxClientError("Gateway Monitor observation is malformed", "protocol");
+    return {
+      handle,
+      task: data.task as unknown as GatewayTeammateTaskView,
+      events: data.events as GatewayTaskEvent[],
+      nextCursor: numberValue(data.nextCursor),
+      oldestCursor: numberValue(data.oldestCursor),
+      hasMore: booleanValue(data.hasMore),
+      gap: booleanValue(data.gap),
+    };
+  }
+
+  async cancelGatewayMonitor(sessionId: string, memberId: string, handle: string): Promise<void> {
+    await this.callTool("monitor", { action: "cancel", sessionId, memberId, handle, reason: "Cancelled from /gateway" });
   }
 
   async listWindows(session: McpxRemoteSession): Promise<McpxRuntimeWindow[]> {

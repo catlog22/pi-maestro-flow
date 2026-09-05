@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { Value } from "typebox/value";
 import {
   createBoundSshToolContext,
   MaskedSecretInput,
@@ -9,6 +10,7 @@ import {
   SshToolParams,
   type SshHost,
   type SshHostManagerAction,
+  type SshKey,
 } from "../src/ssh-manager/index.ts";
 
 const theme = {
@@ -27,6 +29,9 @@ const hosts: SshHost[] = [
     shell: "bash",
     hostKey: PIN,
     auth: { kind: "password", password: "password-list-secret" },
+    tags: ["production", "linux"],
+    jumpHostId: null,
+    monitorEnabled: true,
   },
   {
     id: "beta-1",
@@ -37,6 +42,9 @@ const hosts: SshHost[] = [
     shell: "powershell",
     hostKey: PIN,
     auth: { kind: "identity", path: "/secret/location/id_beta", passphrase: "passphrase-list-secret" },
+    tags: ["windows"],
+    jumpHostId: "alpha-1",
+    monitorEnabled: false,
   },
 ];
 
@@ -67,16 +75,18 @@ test("SSH host manager lists no secrets and implements explicit slash filtering 
     done(next) { action = next; },
   });
 
-  const rendered = overlay.render(100).join("\n");
+  const rendered = overlay.render(140).join("\n");
   assert.match(rendered, /Alpha server/);
   assert.match(rendered, /alice@alpha\.example\.test:22/);
+  assert.match(rendered, /tags production,linux.*jump direct.*trusted.*monitor checking/);
+  assert.match(rendered, /jump Alpha server.*monitor disabled/);
   assert.doesNotMatch(rendered, /password-list-secret|passphrase-list-secret|secret\/location|SHA256:/);
   for (let width = 1; width <= 120; width += 1) {
     for (const line of overlay.render(width)) assert.ok(visibleWidth(line) <= width, `width ${width}: ${line}`);
   }
 
   overlay.handleInput("/");
-  overlay.handleInput("beta");
+  overlay.handleInput("windows");
   const filtered = overlay.render(100).join("\n");
   assert.match(filtered, /Beta server/);
   assert.doesNotMatch(filtered, /Alpha server/);
@@ -105,13 +115,29 @@ test("SSH host manager lists no secrets and implements explicit slash filtering 
   assert.equal(action?.kind, "lock");
 });
 
-test("LLM SSH tool schema exposes command/cwd/timeout only and binds host outside input", async () => {
-  const schema = SshToolParams as unknown as { properties: Record<string, unknown>; additionalProperties: boolean };
-  assert.deepEqual(Object.keys(schema.properties).sort(), ["command", "cwd", "timeout"]);
-  assert.equal(schema.additionalProperties, false);
-  assert.equal("host" in schema.properties, false);
-  assert.equal("auth" in schema.properties, false);
-  assert.equal("password" in schema.properties, false);
+test("SSH manager Keys view renders metadata only and exposes managed-key CRUD", () => {
+  const keys: SshKey[] = [{
+    id: "key-1", label: "Deploy key", privateKey: "private-key-secret", passphrase: "key-passphrase-secret",
+    publicKeyFingerprint: PIN, createdAt: "2026-01-01T00:00:00.000Z",
+  }];
+  let action: SshHostManagerAction | undefined;
+  const overlay = new SshHostManagerOverlay({ hosts, keys, theme, requestRender() {}, done(next) { action = next; } });
+  overlay.handleInput("K");
+  const rendered = overlay.render(120).join("\n");
+  assert.match(rendered, /\[Keys\].*1\/1/);
+  assert.match(rendered, new RegExp(`Deploy key.*${PIN.replace(/[+]/gu, "\\+")}.*2026-01-01.*18 bytes`));
+  assert.doesNotMatch(rendered, /private-key-secret|key-passphrase-secret/);
+  overlay.handleInput("R");
+  assert.equal(action?.kind, "replace-key");
+  assert.equal(action?.keyId, "key-1");
+});
+
+test("LLM SSH tool schema keeps legacy commands and Gateway actions hostless", async () => {
+  assert.equal(Value.Check(SshToolParams, { command: "id", cwd: "/srv", timeout: 5 }), true);
+  assert.equal(Value.Check(SshToolParams, { action: "describe", tool: "host" }), true);
+  assert.equal(Value.Check(SshToolParams, { command: "id", action: "status" }), false);
+  assert.equal(Value.Check(SshToolParams, { action: "status", host: "alpha.example.test" }), false);
+  assert.equal(Value.Check(SshToolParams, { action: "call", tool: "host", auth: {}, password: "secret" }), false);
 
   const provider = { current: [...hosts], getHosts() { return this.current; } };
   const context = createBoundSshToolContext(provider, new SshExecutor(), "alpha-1");

@@ -3,60 +3,52 @@ import { chmod, mkdtemp, readFile, rm, writeFile, mkdir } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ensureMcpxWorkspace, registerMcpxWorkspacePermanent, removeMcpxWorkspace, startWorkspaceLease, stopWorkspaceLease, _resetMcpxBridgeState, isMcpxConfigured, readTunnelState, readOpsPassword, readMcpxBearerToken, probeTunnelHealth, detectMcpxForPmf, removeWorkspaceByPath, readDelegatedTasks, isQuickTunnelCommandLine, isValidTunnelPort, setQuickTunnelDiscoveryForTest, readMcpxConfigView, writeMcpxConfigChanges, quickTunnelArgs } from "../src/mcpx-bridge.ts";
+import { ensureMcpxWorkspace, registerMcpxWorkspacePermanent, startWorkspaceLease, stopWorkspaceLease, _resetMcpxBridgeState, isMcpxConfigured, readTunnelState, readOpsPassword, readMcpxBearerToken, probeTunnelHealth, detectMcpxForPmf, locateMcpx, removeWorkspaceByPath, removeGatewayWorkspaceByPath, listGatewayWorkspaces, readDelegatedTasks, readGatewayDelegatedTasks, recordQuickTunnelOwner, isQuickTunnelCommandLine, isValidTunnelPort, setQuickTunnelDiscoveryForTest, readMcpxConfigView, writeMcpxConfigChanges, quickTunnelArgs } from "../src/mcpx-bridge.ts";
 
-const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-async function withFakeMcpx(run: (logPath: string, binDir: string) => Promise<void>): Promise<void> {
-  const dir = await mkdtemp(join(tmpdir(), "mcpx-bridge-"));
-  const logPath = join(dir, "calls.log");
-  const binDir = join(dir, "bin");
-  const { mkdir } = await import("node:fs/promises");
-  await mkdir(binDir);
-  const isWin = process.platform === "win32";
-  const shim = join(binDir, isWin ? "mcpx.cmd" : "mcpx");
-  await writeFile(
-    shim,
-    isWin
-      ? `@echo off\r\necho %*>> "${logPath}"\r\nexit /b 0\r\n`
-      : `#!/bin/sh\necho "$@" >> "${logPath}"\nexit 0\n`,
-  );
-  if (!isWin) await chmod(shim, 0o755);
-  const previousPath = process.env.PATH;
-  process.env.PATH = `${binDir}${isWin ? ";" : ":"}${previousPath ?? ""}`;
-  // MCPX_BIN wins over PATH and the real ~/.mcpx/bin install; pin the shim.
-  const previousBin = process.env.MCPX_BIN;
-  process.env.MCPX_BIN = shim;
-  try {
-    await run(logPath, binDir);
-  } finally {
-    process.env.PATH = previousPath;
-    if (previousBin === undefined) delete process.env.MCPX_BIN;
-    else process.env.MCPX_BIN = previousBin;
-    await rm(dir, { recursive: true, force: true });
-  }
-}
-
-test("registers a workspace when invoked (opt-in, e key / bridge API)", async (t) => {
+test("registers a workspace in the built-in Gateway registry", async (t) => {
   t.after(_resetMcpxBridgeState);
-  await withFakeMcpx(async (logPath) => {
+  await withIsolatedHome(async () => {
     const root = join(process.cwd(), "fixtures");
-    ensureMcpxWorkspace(root);
-    await wait(500);
-    const calls = await readFile(logPath, "utf8");
-    assert.match(calls, /workspace register "?.*fixtures"?/);
+    assert.equal(await ensureMcpxWorkspace(root), true);
+    const workspaces = await listGatewayWorkspaces();
+    assert.equal(workspaces.length, 1);
+    assert.equal(workspaces[0]?.path.replace(/\\/g, "/").toLowerCase(), root.replace(/\\/g, "/").toLowerCase());
+    assert.equal(workspaces[0]?.mode, "lease");
   });
 });
 
 test("deduplicates repeated registrations of the same path", async (t) => {
   t.after(_resetMcpxBridgeState);
-  await withFakeMcpx(async (logPath) => {
+  await withIsolatedHome(async () => {
     const root = join(process.cwd(), "fixtures");
-    ensureMcpxWorkspace(root);
-    ensureMcpxWorkspace(root);
-    await wait(500);
-    const calls = await readFile(logPath, "utf8");
-    assert.equal(calls.trim().split(/\r?\n/).filter(Boolean).length, 1);
+    assert.deepEqual(await Promise.all([ensureMcpxWorkspace(root), ensureMcpxWorkspace(root)]), [true, true]);
+    const workspaces = await listGatewayWorkspaces();
+    assert.equal(workspaces.length, 1);
+    assert.equal(workspaces[0]?.generation, 1);
+  });
+});
+
+test("imports legacy config workspaces once into the Gateway registry", async (t) => {
+  t.after(_resetMcpxBridgeState);
+  await withIsolatedHome(async (home) => {
+    const permanent = join(home, "permanent");
+    const leased = join(home, "leased");
+    await mkdir(join(home, ".mcpx"), { recursive: true });
+    await writeFile(join(home, ".mcpx", "config.yaml"), [
+      "workspaces:",
+      `  - name: permanent`,
+      `    path: "${permanent.replace(/\\/g, "/")}"`,
+      `  - name: leased`,
+      `    path: "${leased.replace(/\\/g, "/")}"`,
+      `    expires_at: "${new Date(Date.now() + 300_000).toISOString()}"`,
+      "",
+    ].join("\n"));
+    const imported = await listGatewayWorkspaces();
+    assert.deepEqual(imported.map((workspace) => workspace.mode), ["permanent", "lease"]);
+    assert.equal((await removeGatewayWorkspaceByPath(permanent)).ok, true);
+    const remaining = await listGatewayWorkspaces();
+    assert.equal(remaining.length, 1);
+    assert.equal(remaining[0]?.path.toLowerCase(), leased.toLowerCase());
   });
 });
 
@@ -65,56 +57,49 @@ test("skips registration when PI_MCPX_BRIDGE=0", async (t) => {
     delete process.env.PI_MCPX_BRIDGE;
     _resetMcpxBridgeState();
   });
-  await withFakeMcpx(async (logPath) => {
+  await withIsolatedHome(async () => {
     process.env.PI_MCPX_BRIDGE = "0";
-    ensureMcpxWorkspace(join(process.cwd(), "fixtures"));
-    await wait(500);
-    const calls = await readFile(logPath, "utf8").catch(() => "");
-    assert.equal(calls.trim(), "");
+    assert.equal(await ensureMcpxWorkspace(join(process.cwd(), "fixtures")), false);
+    assert.deepEqual(await listGatewayWorkspaces(), []);
   });
 });
 
 test("registers with a TTL lease and removes it", async (t) => {
   t.after(_resetMcpxBridgeState);
-  await withFakeMcpx(async (logPath) => {
+  await withIsolatedHome(async () => {
     const root = join(process.cwd(), "fixtures");
-    ensureMcpxWorkspace(root, 300);
-    await wait(500);
-    const calls = await readFile(logPath, "utf8");
-    assert.match(calls, /workspace register --ttl 300s "?.*fixtures"?/);
-    removeMcpxWorkspace(root);
-    await wait(500);
-    const calls2 = await readFile(logPath, "utf8");
-    assert.match(calls2, /workspace remove "?.*fixtures"?/);
+    assert.equal(await ensureMcpxWorkspace(root, 300), true);
+    const registered = (await listGatewayWorkspaces())[0];
+    assert.equal(registered?.mode, "lease");
+    assert.ok((registered?.expiresAt ?? 0) > Date.now());
+    const removed = await removeGatewayWorkspaceByPath(root);
+    assert.deepEqual(removed, { ok: true, message: "已移除 Gateway workspace" });
+    assert.deepEqual(await listGatewayWorkspaces(), []);
   });
 });
 
-test("lease heartbeat registers and renews; stop clears the timer", async (t) => {
+test("lease heartbeat registers through the Gateway and stop clears the timer", async (t) => {
   t.after(_resetMcpxBridgeState);
-  await withFakeMcpx(async (logPath) => {
+  await withIsolatedHome(async () => {
     const root = join(process.cwd(), "fixtures");
-    const registered = await startWorkspaceLease(root, 300);
-    assert.equal(registered, true);
-    const calls = await readFile(logPath, "utf8");
-    assert.match(calls, /workspace register --ttl 300s "?.*fixtures"?/);
+    assert.equal(await startWorkspaceLease(root, 300), true);
+    const workspace = (await listGatewayWorkspaces())[0];
+    assert.equal(workspace?.mode, "lease");
+    assert.equal(typeof workspace?.ownerToken, "string");
     stopWorkspaceLease();
-    // no further renewals after stop (registeredPaths dedup also guards)
-    const calls2 = await readFile(logPath, "utf8");
-    assert.equal(calls2.trim().split(/\r?\n/).filter(Boolean).length, 1);
+    assert.equal((await listGatewayWorkspaces())[0]?.generation, workspace?.generation);
   });
 });
 
-test("permanent registration registers without a TTL flag", async (t) => {
+test("permanent registration has no expiry or owner token", async (t) => {
   t.after(_resetMcpxBridgeState);
-  await withFakeMcpx(async (logPath) => {
+  await withIsolatedHome(async () => {
     const root = join(process.cwd(), "fixtures");
-    const registered = await registerMcpxWorkspacePermanent(root);
-    assert.equal(registered, true);
-    const calls = await readFile(logPath, "utf8");
-    assert.match(calls, /workspace register "?.*fixtures"?/);
-    assert.doesNotMatch(calls, /--ttl/);
-    // a single register call: no heartbeat is started for permanent entries
-    assert.equal(calls.trim().split(/\r?\n/).filter(Boolean).length, 1);
+    assert.equal(await registerMcpxWorkspacePermanent(root), true);
+    const workspace = (await listGatewayWorkspaces())[0];
+    assert.equal(workspace?.mode, "permanent");
+    assert.equal(workspace?.expiresAt, undefined);
+    assert.equal(workspace?.ownerToken, undefined);
   });
 });
 
@@ -417,39 +402,52 @@ test("readOpsPassword returns undefined when password is empty", async (t) => {
   });
 });
 
-test("detectMcpxForPmf returns an installed boolean shape", async (t) => {
+test("verified Gateway binary selection accepts only the built-in identity", async (t) => {
   t.after(_resetMcpxBridgeState);
-  const r = detectMcpxForPmf();
-  assert.equal(typeof r.installed, "boolean");
-  // version 只在 installed=true 时有意义
-  if (r.installed) assert.equal(typeof r.version, "string");
+  const dir = await mkdtemp(join(tmpdir(), "gateway-bin-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const isWin = process.platform === "win32";
+  const shim = join(dir, isWin ? "gateway.cmd" : "gateway");
+  const previousOfficial = process.env.PI_MAESTRO_GATEWAY_BIN;
+  const previousLegacy = process.env.MCPX_BIN;
+  t.after(() => {
+    if (previousOfficial === undefined) delete process.env.PI_MAESTRO_GATEWAY_BIN;
+    else process.env.PI_MAESTRO_GATEWAY_BIN = previousOfficial;
+    if (previousLegacy === undefined) delete process.env.MCPX_BIN;
+    else process.env.MCPX_BIN = previousLegacy;
+  });
+
+  const writeIdentity = async (name: string): Promise<void> => {
+    const payload = JSON.stringify({ name, version: "1.2.3", protocolVersion: 1 });
+    await writeFile(shim, isWin
+      ? `@echo off\r\necho ${payload}\r\n`
+      : `#!/bin/sh\nprintf '%s\\n' '${payload}'\n`);
+    if (!isWin) await chmod(shim, 0o755);
+  };
+
+  process.env.PI_MAESTRO_GATEWAY_BIN = shim;
+  await writeIdentity("unknown-mcpx");
+  _resetMcpxBridgeState();
+  assert.equal(locateMcpx(), undefined, "unknown external binaries are refused");
+  assert.deepEqual(detectMcpxForPmf(), { installed: false });
+
+  await writeIdentity("pi-maestro-gateway");
+  _resetMcpxBridgeState();
+  assert.equal(locateMcpx(), shim);
+  assert.deepEqual(detectMcpxForPmf(), { installed: true, version: "1.2.3" });
 });
 
-test("removeWorkspaceByPath calls `mcpx workspace remove <path>` and reports ok", async (t) => {
+test("removeWorkspaceByPath remains a non-blocking compatibility wrapper", async (t) => {
   t.after(_resetMcpxBridgeState);
-  const dir = await mkdtemp(join(tmpdir(), "mcpx-rm-"));
-  t.after(() => rm(dir, { recursive: true, force: true }));
-  const binDir = join(dir, "bin");
-  await mkdir(binDir);
-  const isWin = process.platform === "win32";
-  const shim = join(binDir, isWin ? "mcpx.cmd" : "mcpx");
-  // 记录被调用的参数，workspace remove 成功退出
-  const log = join(dir, "args.txt");
-  // Windows echo 重定向用正斜杠路径避免转义问题
-  const logPath = log.replace(/\\/g, "/");
-  await writeFile(shim, isWin
-    ? `@echo off\r\necho %* > "${logPath}"\r\nexit /b 0\r\n`
-    : `#!/bin/sh\nprintf '%s\\n' "$*" > "${log}"\nexit 0\n`);
-  if (!isWin) await (await import("node:fs/promises")).chmod(shim, 0o755);
-  const prev = process.env.MCPX_BIN;
-  process.env.MCPX_BIN = shim;
-  t.after(() => { if (prev === undefined) delete process.env.MCPX_BIN; else process.env.MCPX_BIN = prev; });
-
-  const r = removeWorkspaceByPath("D:/to-remove");
-  assert.equal(r.ok, true);
-  const args = await readFile(log, "utf8");
-  assert.match(args, /workspace remove/, "must call `workspace remove`");
-  assert.match(args, /D:\/to-remove/, "must pass the path through");
+  await withIsolatedHome(async () => {
+    const root = join(process.cwd(), "fixtures");
+    assert.equal(await ensureMcpxWorkspace(root), true);
+    assert.deepEqual(removeWorkspaceByPath(root), { ok: true, message: "已提交 Gateway workspace 移除" });
+    for (let attempt = 0; attempt < 100 && (await listGatewayWorkspaces()).length > 0; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.deepEqual(await listGatewayWorkspaces(), []);
+  });
 });
 
 test("readDelegatedTasks merges registry entry with result file", async (t) => {
@@ -501,6 +499,66 @@ test("readDelegatedTasks scopes to a session id", async (t) => {
     assert.equal(a?.length, 1);
     assert.equal(a![0].task_id, "t-sess-a");
   });
+});
+
+test("readGatewayDelegatedTasks prefers Gateway journal metadata and keeps legacy history", async (t) => {
+  t.after(_resetMcpxBridgeState);
+  await withIsolatedHome(async (home) => {
+    const stateRoot = join(home, "gateway-state");
+    await mkdir(join(home, ".mcpx"), { recursive: true });
+    await writeFile(join(home, ".mcpx", "config.yaml"), `state:\n  root_dir: "${stateRoot.replace(/\\/g, "/")}"\n`);
+    await mkdir(join(stateRoot, "tasks"), { recursive: true });
+    await writeFile(join(stateRoot, "tasks", "journal.json"), JSON.stringify({
+      version: 1,
+      tasks: [{
+        version: 1,
+        id: "gateway-task",
+        status: "completed",
+        cwd: process.cwd(),
+        workspaceId: "workspace-1",
+        principalId: "principal-1",
+        createdAt: 1_700_000_000_000,
+        updatedAt: 1_700_000_000_100,
+        finishedAt: 1_700_000_000_100,
+        publicationId: "publication-1",
+      }],
+    }));
+    const legacyDir = join(home, ".mcpx", "tasks", "delegated", "legacy");
+    await mkdir(legacyDir, { recursive: true });
+    await writeFile(join(legacyDir, "legacy-task.json"), JSON.stringify({
+      task_id: "legacy-task", remote_session_id: "legacy", workspace: "old",
+      action: "delegate", message: "", purpose: "history", status: "completed",
+      created_at: "2020-01-01T00:00:00.000Z",
+    }));
+
+    const tasks = await readGatewayDelegatedTasks();
+    assert.deepEqual(tasks?.map((task) => task.task_id), ["gateway-task", "legacy-task"]);
+    assert.equal(tasks?.[0]?.result, "agent://publication-1");
+    assert.equal(tasks?.[0]?.message, "", "Gateway journal never exposes prompt content");
+  });
+});
+
+test("recordQuickTunnelOwner writes a versioned owner record instead of a raw PID", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "tunnel-owner-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const previous = process.env.MCPX_TUNNEL_PID_FILE;
+  const path = join(dir, "cloudflared.pid");
+  process.env.MCPX_TUNNEL_PID_FILE = path;
+  t.after(() => {
+    if (previous === undefined) delete process.env.MCPX_TUNNEL_PID_FILE;
+    else process.env.MCPX_TUNNEL_PID_FILE = previous;
+  });
+  const owner = recordQuickTunnelOwner(process.pid, 19090);
+  const persisted = JSON.parse(await readFile(path, "utf8"));
+  assert.deepEqual(persisted, owner);
+  assert.equal(owner.version, 1);
+  assert.equal(owner.pid, process.pid);
+  assert.equal(owner.port, 19090);
+  assert.equal(typeof owner.ownerToken, "string");
+  assert.equal(isQuickTunnelCommandLine(owner.commandIdentity, owner.port), true);
+  const state = readTunnelState();
+  assert.equal(state.ownerToken, owner.ownerToken);
+  assert.equal(state.alive, false, "an owner record cannot adopt a non-cloudflared process");
 });
 
 test("readTunnelState rejects stale PID files reused by another process", async (t) => {

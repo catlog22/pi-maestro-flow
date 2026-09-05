@@ -235,3 +235,82 @@ test("Streamable HTTP client classifies authentication and old pi_window schemas
   await assert.rejects(oldClient.listWindows(remote), (error: unknown) => error instanceof McpxClientError && error.kind === "unsupported");
   assert.equal(initialized, true);
 });
+
+test("Streamable HTTP client types CollaborativeSession, Gateway Todo, and Monitor actions", async (t) => {
+  const seen: Array<{ name?: string; args?: Record<string, unknown> }> = [];
+  const now = Date.now();
+  const session = { version: 1, id: "collab", status: "active", revision: 4, workspaceId: "a".repeat(64), workspacePath: "/work", createdAt: now, updatedAt: now };
+  const member = { version: 1, id: "owner", sessionId: "collab", principalId: "http:bearer:test", role: "owner", status: "active", capabilities: ["session:read", "todo:read", "todo:write"], generation: 1, leaseExpiresAt: now + 60_000, joinedAt: now, updatedAt: now };
+  const todo = { version: 1, id: "gw-1", sessionId: "collab", revision: 1, subject: "Gateway work", status: "pending", dependencyIds: [], creatorId: "owner", createdAt: now, updatedAt: now };
+  const task = { version: 1, id: "handle-1", status: "lost", objective: "work", cwd: "/work", createdAt: now, updatedAt: now, workspaceId: "a".repeat(64), eventCursor: 12, resultCount: 0 };
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => { body += chunk; });
+    req.on("end", () => {
+      const payload = JSON.parse(body) as { id?: number; method: string; params?: { name?: string; arguments?: Record<string, unknown> } };
+      res.setHeader("Content-Type", "application/json");
+      if (payload.method === "initialize") { res.end(rpc(payload.id, { protocolVersion: "2025-11-25", capabilities: {} })); return; }
+      if (payload.method === "notifications/initialized") { res.statusCode = 202; res.end(); return; }
+      const name = payload.params?.name; const args = payload.params?.arguments ?? {};
+      seen.push({ name, args });
+      if (name === "session" && args.action === "list") res.end(toolResult(payload.id, { status: "ok", data: { sessions: [session] } }));
+      else if (name === "session") res.end(toolResult(payload.id, { status: "ok", data: { version: 1, session, members: [member], todos: [todo], operations: [], events: [] } }));
+      else if (name === "todo" && args.action === "list") res.end(toolResult(payload.id, { status: "ok", data: { todos: [todo] } }));
+      else if (name === "todo") res.end(toolResult(payload.id, { status: "ok", data: { todo: { ...todo, status: "in_progress", assigneeId: "owner" } } }));
+      else if (name === "monitor" && args.action === "list") res.end(toolResult(payload.id, { status: "ok", data: { monitors: [{ handle: "handle-1", task }] } }));
+      else if (name === "monitor" && args.action === "observe") res.end(toolResult(payload.id, { status: "ok", data: { handle: "handle-1", task, events: [{ cursor: 12, taskId: "handle-1", type: "state", at: now }], nextCursor: 12, oldestCursor: 8, hasMore: false, gap: true } }));
+      else if (name === "monitor" && args.action === "cancel") res.end(toolResult(payload.id, { status: "ok", data: { handle: "handle-1", task } }));
+      else { res.statusCode = 500; res.end("unexpected request"); }
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const address = server.address();
+  const client = new McpxStreamableHttpClient(`http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}/mcp`);
+
+  assert.deepEqual(await client.listRemoteSessions(["owner"]), [{ sessionId: "collab", workspace: "/work", label: undefined, status: "active" }]);
+  assert.equal((await client.getGatewaySession("collab", "owner")).session.revision, 4);
+  await client.renewGatewayMember("collab", "owner", 4, 1);
+  assert.equal((await client.listGatewayTodos("collab", "owner"))[0]!.subject, "Gateway work");
+  assert.equal((await client.mutateGatewayTodo({ action: "claim", sessionId: "collab", memberId: "owner", expectedSessionRevision: 4, todoId: "gw-1" })).status, "in_progress");
+  assert.equal((await client.listGatewayMonitors("collab", "owner"))[0]!.task.status, "lost");
+  const observation = await client.observeGatewayMonitor("collab", "owner", "handle-1", 7);
+  assert.equal(observation.gap, true);
+  assert.equal(observation.oldestCursor, 8);
+  await client.cancelGatewayMonitor("collab", "owner", "handle-1");
+  assert.equal(seen.find((entry) => entry.name === "session")?.args?.memberId, "owner");
+  const renewal = seen.find((entry) => entry.name === "session" && entry.args?.action === "renew")!;
+  assert.equal(renewal.args?.expectedGeneration, 1);
+  assert.equal(typeof renewal.args?.operationId, "string");
+  const mutation = seen.find((entry) => entry.name === "todo" && entry.args?.action === "claim")!;
+  assert.equal(mutation.args?.expectedSessionRevision, 4);
+  assert.equal(typeof mutation.args?.operationId, "string");
+});
+
+test("remote session discovery probes member identities concurrently", async () => {
+  let active = 0;
+  let maxActive = 0;
+  const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit) => {
+    const payload = JSON.parse(String(init?.body)) as { id?: number; method: string; params?: { arguments?: { memberId?: string } } };
+    if (payload.method === "initialize") {
+      return new Response(rpc(payload.id, { protocolVersion: "2025-11-25", capabilities: {} }), {
+        headers: { "Content-Type": "application/json", "Mcp-Session-Id": "parallel-session" },
+      });
+    }
+    if (payload.method === "notifications/initialized") return new Response(null, { status: 202 });
+    active++;
+    maxActive = Math.max(maxActive, active);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    active--;
+    const memberId = payload.params?.arguments?.memberId ?? "unknown";
+    return new Response(toolResult(payload.id, {
+      status: "ok",
+      data: { sessions: [{ id: `session-${memberId}`, workspacePath: "/work", status: "active" }] },
+    }), { headers: { "Content-Type": "application/json" } });
+  }) as typeof fetch;
+  const client = new McpxStreamableHttpClient("http://gateway.test/mcp", 1_000, fetchImpl);
+
+  const sessions = await client.listRemoteSessions(["member-a", "member-b", "member-c"]);
+  assert.equal(sessions.length, 3);
+  assert.ok(maxActive > 1, "one slow member must not serialize every status probe behind it");
+});

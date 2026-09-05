@@ -14,9 +14,21 @@ import { dirname, join, resolve } from "node:path";
 import {
   SSH_MANAGER_DATA_VERSION,
   cloneSshHost,
+  cloneSshKey,
+  effectiveSshHostDigest,
+  migrateLegacySshManagerData,
+  replaceSshHost,
+  replaceSshKey,
+  reverseSshHostDependencyClosure,
+  validateLegacySshManagerData,
+  validateSshHost,
   validateSshHosts,
+  validateSshKey,
+  validateSshKeys,
   validateSshManagerData,
+  type LegacySshManagerData,
   type SshHost,
+  type SshKey,
   type SshManagerData,
 } from "./model.ts";
 
@@ -73,6 +85,7 @@ export class EncryptedSshStore {
   private key: Buffer | undefined;
   private salt: Buffer | undefined;
   private data: SshManagerData | undefined;
+  private lifecycleGeneration = 0;
 
   constructor(options: EncryptedSshStoreOptions = {}) {
     this.path = options.path ?? defaultSshManagerStorePath();
@@ -84,94 +97,158 @@ export class EncryptedSshStore {
 
   async create(masterPassword: MasterPassword, hosts: unknown[] = []): Promise<void> {
     if (!this.locked) throw new Error("SSH manager store is already unlocked");
-    const validatedHosts = validateSshHosts(hosts);
+    const generation = ++this.lifecycleGeneration;
     const salt = randomBytes(SALT_BYTES);
-    const key = await deriveKey(masterPassword, salt);
-    const data: SshManagerData = { version: SSH_MANAGER_DATA_VERSION, revision: 0, hosts: validatedHosts };
+    let key: Buffer | undefined;
+    let data: SshManagerData | undefined;
     try {
+      key = await deriveKey(masterPassword, salt);
+      data = validateSshManagerData({
+        version: SSH_MANAGER_DATA_VERSION,
+        revision: 0,
+        keys: [],
+        hosts: validateSshHosts(hosts),
+      });
       const envelope = encryptData(data, key, salt);
       await withStoreLock(this.path, async () => {
         await assertMissing(this.path);
         await atomicPrivateWrite(this.path, serializeEnvelope(envelope), false);
       });
+      if (generation !== this.lifecycleGeneration) throw new Error("SSH manager lifecycle changed during creation");
       this.key = key;
-      this.salt = salt;
+      this.salt = Buffer.from(salt);
       this.data = data;
-    } catch (error) {
-      key.fill(0);
+      key = undefined;
+      data = undefined;
+    } finally {
+      key?.fill(0);
       salt.fill(0);
-      throw error;
+      if (data) clearDataSecrets(data);
     }
   }
 
   async unlock(masterPassword: MasterPassword): Promise<void> {
-    this.lock();
+    const generation = ++this.lifecycleGeneration;
+    this.clearResidentState();
     let key: Buffer | undefined;
     let salt: Buffer | undefined;
+    let initial: SshManagerData | LegacySshManagerData | undefined;
+    let data: SshManagerData | undefined;
     try {
       const envelope = await readEnvelope(this.path);
       salt = decodeFixedBase64(envelope.salt, SALT_BYTES, "salt");
       key = await deriveKey(masterPassword, salt);
-      const data = decryptData(envelope, key);
+      initial = decryptDataAnyVersion(envelope, key);
+      if (initial.version === SSH_MANAGER_DATA_VERSION) {
+        data = initial;
+        initial = undefined;
+      } else {
+        data = await this.migrateV1UnderLock(initial, key, salt);
+      }
+      if (generation !== this.lifecycleGeneration) throw new Error("SSH manager lifecycle changed during unlock");
       this.key = key;
       this.salt = salt;
       this.data = data;
+      key = undefined;
+      salt = undefined;
+      data = undefined;
     } catch {
+      if (generation === this.lifecycleGeneration) this.clearResidentState();
+      throw new Error("Unable to unlock SSH manager store");
+    } finally {
       key?.fill(0);
       salt?.fill(0);
-      this.lock();
-      throw new Error("Unable to unlock SSH manager store");
+      if (initial) clearDataSecrets(initial);
+      if (data) clearDataSecrets(data);
     }
   }
 
   lock(): void {
+    this.lifecycleGeneration++;
+    this.clearResidentState();
+  }
+
+  private clearResidentState(): void {
     this.key?.fill(0);
     this.salt?.fill(0);
     this.key = undefined;
     this.salt = undefined;
-    if (this.data) clearHostSecrets(this.data.hosts);
+    if (this.data) clearDataSecrets(this.data);
     this.data = undefined;
   }
 
-  getHosts(): SshHost[] {
-    return this.requireData().hosts.map(cloneSshHost);
+  getHosts(): SshHost[] { return this.requireData().hosts.map(cloneSshHost); }
+  getKeys(): SshKey[] { return this.requireData().keys.map(cloneSshKey); }
+  checkoutKey(id: string): SshKey {
+    const key = this.requireData().keys.find((candidate) => candidate.id === id);
+    if (!key) throw new Error("SSH key was not found");
+    return cloneSshKey(key);
   }
+  getReverseDependencyClosure(hostId: string): string[] { return reverseSshHostDependencyClosure(this.requireData().hosts, hostId); }
+  getEffectiveHostDigest(hostId: string): string { return effectiveSshHostDigest(this.requireData(), hostId); }
 
-  get revision(): number {
-    return this.requireData().revision;
-  }
+  get revision(): number { return this.requireData().revision; }
 
   async save(hosts: unknown = this.requireData().hosts): Promise<void> {
+    await this.saveConfiguration(hosts, this.requireData().keys);
+  }
+
+  async saveKeys(keys: unknown): Promise<void> { await this.saveConfiguration(this.requireData().hosts, keys); }
+  async saveConfiguration(hosts: unknown, keys: unknown): Promise<void> { await this.saveData(hosts, keys); }
+  async addHost(host: unknown): Promise<void> { await this.save([...this.requireData().hosts, validateSshHost(host)]); }
+  async updateHost(id: string, host: unknown): Promise<void> { await this.save(replaceSshHost(this.requireData().hosts, id, host)); }
+  async deleteHost(id: string): Promise<void> {
+    const data = this.requireData();
+    if (!data.hosts.some((host) => host.id === id)) throw new Error("SSH host was not found");
+    if (data.hosts.some((host) => host.jumpHostId === id)) throw new Error("SSH host is referenced as a jump host");
+    await this.save(data.hosts.filter((host) => host.id !== id));
+  }
+  async addKey(key: unknown): Promise<void> { await this.saveKeys([...this.requireData().keys, validateSshKey(key)]); }
+  async updateKey(id: string, key: unknown): Promise<void> { await this.saveKeys(replaceSshKey(this.requireData().keys, id, key)); }
+  async deleteKey(id: string): Promise<void> {
+    const data = this.requireData();
+    if (!data.keys.some((key) => key.id === id)) throw new Error("SSH key was not found");
+    if (data.hosts.some((host) => host.auth.kind === "key" && host.auth.keyId === id)) throw new Error("SSH key is referenced by a host");
+    await this.saveKeys(data.keys.filter((key) => key.id !== id));
+  }
+
+  private async saveData(hosts: unknown, keys: unknown): Promise<void> {
+    const generation = this.lifecycleGeneration;
     const current = this.requireData();
     const key = this.requireKey();
     const salt = this.requireSalt();
-    const validatedHosts = validateSshHosts(hosts);
-    const next: SshManagerData = {
-      version: SSH_MANAGER_DATA_VERSION,
-      revision: current.revision + 1,
-      hosts: validatedHosts,
-    };
-    await withStoreLock(this.path, async () => {
-      const envelope = await readEnvelope(this.path);
-      const diskSalt = decodeFixedBase64(envelope.salt, SALT_BYTES, "salt");
-      let diskData: SshManagerData | undefined;
-      try {
-        if (!diskSalt.equals(salt)) throw new Error("SSH manager changed while unlocked");
-        diskData = decryptData(envelope, key);
-        if (diskData.revision !== current.revision) {
-          throw new Error(`SSH manager revision conflict: expected ${current.revision}, found ${diskData.revision}`);
+    const next = validateSshManagerData({ version: SSH_MANAGER_DATA_VERSION, revision: current.revision + 1, hosts: validateSshHosts(hosts), keys: validateSshKeys(keys) });
+    try {
+      await withStoreLock(this.path, async () => {
+        const envelope = await readEnvelope(this.path);
+        const diskSalt = decodeFixedBase64(envelope.salt, SALT_BYTES, "salt");
+        let diskData: SshManagerData | undefined;
+        try {
+          if (!diskSalt.equals(salt)) throw new Error("SSH manager changed while unlocked");
+          diskData = decryptData(envelope, key);
+          if (diskData.revision !== current.revision) {
+            throw new Error(`SSH manager revision conflict: expected ${current.revision}, found ${diskData.revision}`);
+          }
+          await atomicPrivateWrite(this.path, serializeEnvelope(encryptData(next, key, salt)), true);
+        } finally {
+          diskSalt.fill(0);
+          if (diskData) clearDataSecrets(diskData);
         }
-        await atomicPrivateWrite(this.path, serializeEnvelope(encryptData(next, key, salt)), true);
-      } finally {
-        diskSalt.fill(0);
-        if (diskData) clearHostSecrets(diskData.hosts);
-      }
-    });
-    clearHostSecrets(current.hosts);
+      });
+    } catch (error) {
+      clearDataSecrets(next);
+      throw error;
+    }
+    if (generation !== this.lifecycleGeneration || this.data !== current) {
+      clearDataSecrets(next);
+      throw new Error("SSH manager lifecycle changed during save");
+    }
+    clearDataSecrets(current);
     this.data = next;
   }
 
   async reload(): Promise<void> {
+    const generation = this.lifecycleGeneration;
     const key = this.requireKey();
     const currentSalt = this.requireSalt();
     let envelopeSalt: Buffer | undefined;
@@ -180,15 +257,55 @@ export class EncryptedSshStore {
       envelopeSalt = decodeFixedBase64(envelope.salt, SALT_BYTES, "salt");
       if (!envelopeSalt.equals(currentSalt)) throw new Error("SSH manager salt changed while unlocked");
       const next = decryptData(envelope, key);
+      if (generation !== this.lifecycleGeneration) {
+        clearDataSecrets(next);
+        throw new Error("SSH manager lifecycle changed during reload");
+      }
       if (next.revision < this.requireData().revision) throw new Error("SSH manager revision moved backwards");
-      clearHostSecrets(this.requireData().hosts);
+      clearDataSecrets(this.requireData());
       this.data = next;
     } catch (error) {
-      this.lock();
+      if (generation === this.lifecycleGeneration) this.lock();
       throw error;
     } finally {
       envelopeSalt?.fill(0);
     }
+  }
+
+  private async migrateV1UnderLock(initial: LegacySshManagerData, key: Buffer, salt: Buffer): Promise<SshManagerData> {
+    return withStoreLock(this.path, async () => {
+      const artifact = await readEnvelopeArtifact(this.path);
+      let diskSalt: Buffer | undefined;
+      let diskData: SshManagerData | LegacySshManagerData | undefined;
+      let migrated: SshManagerData | undefined;
+      let published = false;
+      try {
+        diskSalt = decodeFixedBase64(artifact.envelope.salt, SALT_BYTES, "salt");
+        if (!diskSalt.equals(salt)) throw new Error("SSH manager changed during migration");
+        diskData = decryptDataAnyVersion(artifact.envelope, key);
+        if (diskData.version !== 1 || diskData.revision !== initial.revision) throw new Error("SSH manager changed during migration");
+        migrated = migrateLegacySshManagerData(diskData);
+        const backupPath = `${this.path}.v1.bak`;
+        const existingBackup = await readOptionalEnvelopeArtifact(backupPath);
+        try {
+          if (existingBackup) {
+            if (!existingBackup.content.equals(artifact.content)) throw new Error("SSH manager v1 backup does not match the current store");
+          } else {
+            await atomicPrivateWrite(backupPath, artifact.content, false);
+          }
+        } finally {
+          existingBackup?.content.fill(0);
+        }
+        await atomicPrivateWrite(this.path, serializeEnvelope(encryptData(migrated, key, salt)), true);
+        published = true;
+        return migrated;
+      } finally {
+        artifact.content.fill(0);
+        diskSalt?.fill(0);
+        if (diskData) clearDataSecrets(diskData);
+        if (migrated && !published) clearDataSecrets(migrated);
+      }
+    });
   }
 
   private requireData(): SshManagerData {
@@ -257,6 +374,15 @@ function encryptData(data: SshManagerData, key: Buffer, salt: Buffer): StoreEnve
 }
 
 function decryptData(envelope: StoreEnvelope, key: Buffer): SshManagerData {
+  const data = decryptDataAnyVersion(envelope, key);
+  if (data.version !== SSH_MANAGER_DATA_VERSION) {
+    clearDataSecrets(data);
+    throw new Error("Legacy SSH manager data requires migration");
+  }
+  return data;
+}
+
+function decryptDataAnyVersion(envelope: StoreEnvelope, key: Buffer): SshManagerData | LegacySshManagerData {
   const iv = decodeFixedBase64(envelope.iv, IV_BYTES, "iv");
   const tag = decodeFixedBase64(envelope.tag, TAG_BYTES, "tag");
   const ciphertext = decodeBase64(envelope.ciphertext, "ciphertext");
@@ -266,7 +392,9 @@ function decryptData(envelope: StoreEnvelope, key: Buffer): SshManagerData {
     decipher.setAAD(Buffer.from(authenticatedHeader(envelope), "utf8"));
     decipher.setAuthTag(tag);
     plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-    return validateSshManagerData(JSON.parse(plaintext.toString("utf8")));
+    const parsed: unknown = JSON.parse(plaintext.toString("utf8"));
+    const version = parsed && typeof parsed === "object" ? (parsed as { version?: unknown }).version : undefined;
+    return version === SSH_MANAGER_DATA_VERSION ? validateSshManagerData(parsed) : validateLegacySshManagerData(parsed);
   } finally {
     iv.fill(0);
     tag.fill(0);
@@ -300,6 +428,21 @@ function serializeEnvelope(envelope: StoreEnvelope): string {
 }
 
 async function readEnvelope(path: string): Promise<StoreEnvelope> {
+  const artifact = await readEnvelopeArtifact(path);
+  try { return artifact.envelope; }
+  finally { artifact.content.fill(0); }
+}
+
+async function readOptionalEnvelopeArtifact(path: string): Promise<{ envelope: StoreEnvelope; content: Buffer } | undefined> {
+  try {
+    return await readEnvelopeArtifact(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+async function readEnvelopeArtifact(path: string): Promise<{ envelope: StoreEnvelope; content: Buffer }> {
   const before = await lstat(path);
   if (before.isSymbolicLink() || !before.isFile()) throw new Error("SSH manager store must be a regular non-symlink file");
   const flags = constants.O_RDONLY | (process.platform === "win32" ? 0 : constants.O_NOFOLLOW);
@@ -325,9 +468,12 @@ async function readEnvelope(path: string): Promise<StoreEnvelope> {
     } finally {
       extra.fill(0);
     }
-    return validateEnvelope(JSON.parse(file.toString("utf8")));
-  } finally {
+    const envelope = validateEnvelope(JSON.parse(file.toString("utf8")));
+    return { envelope, content: file };
+  } catch (error) {
     file?.fill(0);
+    throw error;
+  } finally {
     await handle.close();
   }
 }
@@ -370,7 +516,7 @@ function decodeBase64(value: string, name: string): Buffer {
   return Buffer.from(value, "base64");
 }
 
-async function atomicPrivateWrite(path: string, content: string, replaceExisting: boolean): Promise<void> {
+async function atomicPrivateWrite(path: string, content: string | Uint8Array, replaceExisting: boolean): Promise<void> {
   const directory = dirname(path);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await enforcePrivateDirectory(directory);
@@ -496,7 +642,17 @@ function requireExactKeys(value: Record<string, unknown>, keys: ReadonlySet<stri
   }
 }
 
-function clearHostSecrets(hosts: SshHost[]): void {
+function clearDataSecrets(data: SshManagerData | LegacySshManagerData): void {
+  clearHostSecrets(data.hosts);
+  if ("keys" in data) {
+    for (const key of data.keys) {
+      key.privateKey = "";
+      if (key.passphrase) key.passphrase = "";
+    }
+  }
+}
+
+function clearHostSecrets(hosts: Array<{ auth: SshHost["auth"] }>): void {
   for (const host of hosts) {
     if (host.auth.kind === "password") host.auth.password = "";
     if (host.auth.kind === "identity" && host.auth.passphrase) host.auth.passphrase = "";

@@ -29,6 +29,7 @@ test.afterEach(() => {
 test("wizard starts at the listen step and shows all options", () => {
   const { overlay } = makeWizard();
   const text = renderText(overlay);
+  assert.match(text, /Pi Maestro Gateway 配置向导/);
   assert.match(text, /1\/7 监听地址/);
   assert.match(text, /host: 127\.0\.0\.1/);
   assert.match(text, /port: 9090/);
@@ -99,7 +100,12 @@ test("wizard adopts a discovered Quick Tunnel without relying on a PID file", as
   assert.equal(overlay["tunnelProcess"], undefined, "an existing candidate must be adopted, not spawned");
   assert.equal(overlay["tunnelAdoptedPid"], 424242);
   assert.match(overlay["status"], /隧道已在运行（PID 424242）/);
-  assert.equal(await readFile(pidPath, "utf8"), "424242");
+  const owner = JSON.parse(await readFile(pidPath, "utf8"));
+  assert.equal(owner.version, 1);
+  assert.equal(owner.pid, 424242);
+  assert.equal(owner.port, 9090);
+  assert.equal(typeof owner.ownerToken, "string");
+  assert.match(owner.commandIdentity, /cloudflared tunnel --protocol http2 --url http:\/\/127\.0\.0\.1:9090/);
 });
 
 test("wizard refuses to spawn when multiple matching Quick Tunnels exist", async (t) => {
@@ -119,6 +125,8 @@ test("wizard refuses to spawn when multiple matching Quick Tunnels exist", async
   assert.equal(overlay["tunnelProcess"], undefined);
   assert.equal(overlay["tunnelAdoptedPid"], undefined);
   assert.match(overlay["status"], /未启动新进程/);
+  assert.match(overlay["status"], /\/gateway 面板/);
+  assert.doesNotMatch(overlay["status"], /\/mcpx\b/);
 });
 
 test("tunnel step offers only the Cloudflare quick tunnel", async (t) => {
@@ -180,6 +188,10 @@ test("full flow reaches the write step and renders a summary", async (t) => {
   overlay.handleInput("\x1b[B");
   overlay.handleInput("\r");
   // workspace -> register
+  const workspaceText = renderText(overlay);
+  assert.match(workspaceText, /Pi Maestro Gateway/);
+  assert.match(workspaceText, /\/gateway 看板/);
+  assert.doesNotMatch(workspaceText, /\/mcpx\b/);
   overlay.handleInput("\r");
   // tunnel -> start the quick tunnel (Enter on the only option), wait for URL
   overlay.handleInput("\r");
