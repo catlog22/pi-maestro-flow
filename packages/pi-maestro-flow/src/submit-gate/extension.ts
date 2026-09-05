@@ -49,30 +49,63 @@ export default function registerSubmitGate(pi: ExtensionAPI): void {
   let flushTimer: ReturnType<typeof setTimeout> | undefined;
   let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
 
-  /** Serially replay queued messages: only send the next after the previous fully settles. */
+  /**
+   * Replay at most one queued message. `sendUserMessage` is intentionally not
+   * awaited: ExtensionAPI exposes it as void and the host owns the eventual
+   * run/settlement boundary. The gate remains pending until that boundary
+   * emits the next `agent_settled` event.
+   */
   function flushQueued(): void {
     clearTimeout(flushTimer);
-    // Detach from the current event loop so we don't nest submissions
-    // inside the agent_settled emit cycle.
-    flushTimer = setTimeout(async () => {
-      while (queued.length > 0) {
-        const message = queued.shift()!;
-        const content: string | (TextContent | ImageContent)[] =
-          message.images && message.images.length > 0
-            ? [{ type: "text", text: message.text } as TextContent, ...message.images]
-            : message.text;
-        try {
-          await pi.sendUserMessage(content);
-        } catch (error) {
-          console.error("[submit-gate] failed to flush queued message:", error);
-        }
+    if (!submissionPending || queued.length === 0) return;
+    // Detach from the current event loop so we don't nest submissions inside
+    // the agent_settled emit cycle.
+    flushTimer = setTimeout(() => {
+      flushTimer = undefined;
+      if (!submissionPending || queued.length === 0) return;
+      const message = queued.shift()!;
+      const content: string | (TextContent | ImageContent)[] =
+        message.images && message.images.length > 0
+          ? [{ type: "text", text: message.text } as TextContent, ...message.images]
+          : message.text;
+      try {
+        pi.sendUserMessage(content);
+      } catch (error) {
+        // Keep the message at the front for the timeout backstop. A void API
+        // cannot report an asynchronous prelude failure here.
+        queued.unshift(message);
+        console.error("[submit-gate] failed to flush queued message:", error);
       }
     }, 0);
   }
 
-  function releaseGate(): void {
-    submissionPending = false;
+  function armPending(): void {
+    submissionPending = true;
     clearTimeout(timeoutTimer);
+    timeoutTimer = setTimeout(() => {
+      timeoutTimer = undefined;
+      submissionPending = false;
+      if (queued.length > 0) {
+        // A timeout is not a settlement proof either; preserve single-flight
+        // by arming the next replay before handing it back to the host.
+        armPending();
+        flushQueued();
+      }
+    }, TIMEOUT_MS);
+  }
+
+  function releaseGate(): void {
+    clearTimeout(timeoutTimer);
+    timeoutTimer = undefined;
+    if (queued.length === 0) {
+      submissionPending = false;
+      clearTimeout(flushTimer);
+      flushTimer = undefined;
+      return;
+    }
+    // Re-arm before replay. The replayed message owns the next single-flight
+    // slot and the following queued message waits for a later settlement.
+    armPending();
     flushQueued();
   }
 
@@ -89,14 +122,9 @@ export default function registerSubmitGate(pi: ExtensionAPI): void {
       return { action: "handled" as const };
     }
 
-    submissionPending = true;
     // Backstop: if the submission fails inside the async prelude (compaction
     // throw, etc.) with no agent_settled, release the gate on timeout.
-    clearTimeout(timeoutTimer);
-    timeoutTimer = setTimeout(() => {
-      submissionPending = false;
-      flushQueued();
-    }, TIMEOUT_MS);
+    armPending();
     return { action: "continue" as const };
   });
 

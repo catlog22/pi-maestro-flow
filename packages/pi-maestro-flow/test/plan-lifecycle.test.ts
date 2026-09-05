@@ -11,11 +11,13 @@ import {
   getPlanArtifactSummary,
   getPlanHandoffStatus,
   getPlanText,
+  hasPendingPlanCompactHandoff,
   initPlan,
   isPlanCleanContextCompactionInstructions,
   onAgentEndPlan,
   onBeforeAgentStartPlan,
   onContextPlan,
+  onCompactPlan,
   onAgentSettledPlan,
   onSessionShutdownPlan,
   onSessionStartPlan,
@@ -963,8 +965,21 @@ test("plan handoff yields to an in-flight native or mid-turn compaction", async 
     await execute(harness, "plan-update", { markdown: "# Arbitrated Plan" });
     await executeCommand(harness, "plan", "approve");
     assert.equal(harness.compactions.length, 0);
-    assert.equal(harness.messages.length, 1);
+    assert.equal(harness.messages.length, 0);
+    assert.equal(hasPendingPlanCompactHandoff(harness.ctx), true, "the handoff remains owned while compaction is active");
     assert.ok(harness.notifications.some((message) => /already in progress/.test(message)));
+
+    // The arbiter settlement is authoritative, but the host compaction event
+    // still runs before its controller is cleared. onCompactPlan defers the
+    // void sendUserMessage call to the next host turn boundary.
+    native.releaseIfNative();
+    onCompactPlan(harness.ctx);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(harness.messages.length, 1);
+    assert.equal(hasPendingPlanCompactHandoff(harness.ctx), false);
+    onCompactPlan(harness.ctx);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(harness.messages.length, 1, "a second compaction settlement cannot duplicate execution");
   } finally {
     native.releaseIfNative();
     onSessionShutdownPlan(harness.ctx);
@@ -1270,22 +1285,27 @@ test("Plan hooks preserve read-only discovery and block mutations before approva
     }
     assert.equal(onToolCallPlan({ toolName: "todo", input: { action: "list" } }), undefined);
     assert.match(onToolCallPlan({ toolName: "todo", input: { action: "create" } })?.reason ?? "", /blocked/);
-    // Plan mode dispatch allowlist: explorer and planner pass; other roles are blocked at root.
-    assert.equal(onToolCallPlan({
-      toolName: "teammate",
-      input: { tasks: [{ prompt: "find entry points", agent: "explorer" }] },
-    }), undefined);
-    assert.equal(onToolCallPlan({
-      toolName: "teammate",
-      input: { tasks: [{ prompt: "author the Plan", agent: "planner" }] },
-    }), undefined);
-    for (const role of ["analyst", "research", "general"]) {
-      assert.match(onToolCallPlan({
+    // Plan mode dispatch allowlist permits all four built-in read-only planning roles.
+    for (const role of ["analyst", "research", "explorer", "planner"]) {
+      assert.equal(onToolCallPlan({
         toolName: "teammate",
-        input: { tasks: [{ prompt: "work", agent: role }] },
-      })?.reason ?? "", /blocked/, role);
+        input: { tasks: [{ prompt: "inspect the Plan", agent: role }] },
+      }), undefined, role);
     }
-    // Plan mode allows targeted revision of a read-only planner/explorer via teammate-send
+    assert.equal(onToolCallPlan({
+      toolName: "teammate",
+      input: {
+        tasks: [
+          { prompt: "find entry points", agent: "explorer" },
+          { prompt: "analyze constraints", agent: "analyst" },
+        ],
+      },
+    }), undefined, "mixed read-only roles");
+    assert.match(onToolCallPlan({
+      toolName: "teammate",
+      input: { tasks: [{ prompt: "implement", agent: "general" }] },
+    })?.reason ?? "", /blocked/, "general");
+    // Plan mode allows targeted revision of a read-only teammate via teammate-send
     // (steer/follow_up are message injections), but blocks abort (terminates the agent).
     assert.equal(onToolCallPlan({
       toolName: "teammate-send",
@@ -2189,7 +2209,7 @@ test("a stale settlement context cannot consume the current Plan compact handoff
   }
 });
 
-test("a hung Plan compaction falls back once and ignores its late callback", async () => {
+test("a hung Plan compaction waits for settlement and ignores duplicate callbacks", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-compact-watchdog-"));
   const harness = createHarness(
     root,
@@ -2217,8 +2237,12 @@ test("a hung Plan compaction falls back once and ignores its late callback", asy
     assert.equal(harness.compactions.length, 1);
 
     await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(harness.messages.length, 0, "the watchdog cannot submit while host compaction may still be active");
+    assert.equal(hasPendingPlanCompactHandoff(harness.ctx), true, "the handoff survives watchdog expiry");
+    assert.match(harness.notifications.join("\n"), /waiting for the host to settle/);
+    harness.compactions[0]?.onComplete?.({});
     assert.equal(harness.messages.length, 1);
-    assert.match(harness.notifications.join("\n"), /did not finish in time/);
+    assert.equal(hasPendingPlanCompactHandoff(harness.ctx), false);
     harness.compactions[0]?.onComplete?.({});
     assert.equal(harness.messages.length, 1, "a late compaction callback cannot duplicate execution");
   } finally {

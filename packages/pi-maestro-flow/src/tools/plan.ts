@@ -216,6 +216,8 @@ interface PlanCompactHandoff {
   markdown: string;
   executionMessage: string;
   onDelivered?: () => Promise<void>;
+  /** Set when another host compaction owns the boundary and must settle first. */
+  waitingForCompactionSettlement?: boolean;
 }
 
 interface PlanContextReplacement {
@@ -230,6 +232,8 @@ let nextPlanOperationId = 0;
 let activePlanOperation: PlanOperationIdentity | undefined;
 let activePlanHandoffRequest: PlanHandoffRequestIdentity | undefined;
 let pendingPlanCompactHandoff: PlanCompactHandoff | undefined;
+let activePlanCompactHandoff: PlanCompactHandoff | undefined;
+let planCompactionSettlementTimer: ReturnType<typeof setImmediate> | undefined;
 let pendingCleanContextCompaction: PlanCleanContextCompactionRequest | undefined;
 let planContextReplacement: PlanContextReplacement | undefined;
 // Review & Refine state is scoped to the current draft revision and reset when
@@ -646,6 +650,9 @@ function resetRuntimeState(): void {
   pendingPlanExitReminder = undefined;
   pendingPlanEnterNote = undefined;
   pendingPlanCompactHandoff = undefined;
+  activePlanCompactHandoff = undefined;
+  if (planCompactionSettlementTimer) clearImmediate(planCompactionSettlementTimer);
+  planCompactionSettlementTimer = undefined;
   pendingCleanContextCompaction = undefined;
   planContextReplacement = undefined;
 }
@@ -653,6 +660,26 @@ function resetRuntimeState(): void {
 export function onCompactPlan(ctx: PlanContext): void {
   planContextReplacement = undefined;
   syncModeStatus(ctx);
+  const handoff = pendingPlanCompactHandoff;
+  if (!handoff?.waitingForCompactionSettlement
+    || !planOperationMatchesContext(ctx, handoff.operation)
+    || !isCurrentPlanOperation(ctx, handoff.operation)) return;
+  // session_compact is emitted while the host still owns its compaction
+  // controller. Defer one macrotask so the host can clear that controller
+  // before the void sendUserMessage call below.
+  if (planCompactionSettlementTimer) return;
+  planCompactionSettlementTimer = setImmediate(() => {
+    planCompactionSettlementTimer = undefined;
+    const current = pendingPlanCompactHandoff;
+    if (!current || current !== handoff
+      || !current.waitingForCompactionSettlement
+      || !planOperationMatchesContext(ctx, current.operation)
+      || !isCurrentPlanOperation(ctx, current.operation)) return;
+    current.waitingForCompactionSettlement = false;
+    pendingPlanCompactHandoff = undefined;
+    deliverPlanHandoff(ctx, current);
+  });
+  planCompactionSettlementTimer.unref?.();
 }
 
 export function onContextPlan(messages: AgentMessage[]): { messages: AgentMessage[] } | undefined {
@@ -788,9 +815,8 @@ export function onToolCallPlan(event: {
     return planMutationBlock(`lsp ${action || "mutation"}`);
   }
   if (toolName === "teammate") {
-    // Plan mode delegates discovery to `explorer` and authoring to `planner` only;
-    // analysis/research belong inside the planner's single nested-agent budget.
-    const readOnlyAgents = new Set(["explorer", "planner"]);
+    // Plan mode permits only the built-in read-only planning roles at root.
+    const readOnlyAgents = new Set(["analyst", "research", "explorer", "planner"]);
     const topLevelAgent = typeof event.input.agent === "string" ? event.input.agent : "general";
     const tasks = Array.isArray(event.input.tasks) ? event.input.tasks : [];
     const agents = tasks.length > 0
@@ -804,7 +830,7 @@ export function onToolCallPlan(event: {
       : planMutationBlock(`teammate ${agents.join(", ")}`);
   }
   if (toolName === "teammate-send") {
-    // Plan mode allows targeted revision of the same read-only planner/explorer
+    // Plan mode allows targeted revision of the same read-only teammate
     // (steer/follow_up are message injections, not project mutations), but still
     // blocks abort, which terminates the agent and its subtree.
     const mode = typeof event.input.mode === "string" ? event.input.mode : "steer";
@@ -1336,6 +1362,14 @@ function isCurrentPlanHandoff(request: PlanHandoffRequestIdentity): boolean {
 function finishPlanHandoff(request: PlanHandoffRequestIdentity): boolean {
   if (!isCurrentPlanHandoff(request)) return false;
   activePlanHandoffRequest = undefined;
+  if (pendingPlanCompactHandoff?.request.requestId === request.requestId
+    && pendingPlanCompactHandoff.request.lifecycleGeneration === request.lifecycleGeneration) {
+    pendingPlanCompactHandoff = undefined;
+  }
+  if (activePlanCompactHandoff?.request.requestId === request.requestId
+    && activePlanCompactHandoff.request.lifecycleGeneration === request.lifecycleGeneration) {
+    activePlanCompactHandoff = undefined;
+  }
   if (pendingCleanContextCompaction?.requestId === request.requestId
     && pendingCleanContextCompaction.lifecycleGeneration === request.lifecycleGeneration) {
     pendingCleanContextCompaction = undefined;
@@ -1567,29 +1601,85 @@ async function deliverImplementation(
 }
 
 export function hasPendingPlanCompactHandoff(ctx: PlanContext): boolean {
-  const handoff = pendingPlanCompactHandoff;
+  const handoff = pendingPlanCompactHandoff ?? activePlanCompactHandoff;
   return Boolean(handoff
     && planOperationMatchesContext(ctx, handoff.operation)
     && isCurrentPlanOperation(ctx, handoff.operation));
 }
 
 export function onAgentSettledPlan(ctx: PlanContext): void {
+  // A compaction handoff already owns the current host boundary. A second
+  // settlement must not start a duplicate compaction or execution message.
+  if (activePlanCompactHandoff
+    && planOperationMatchesContext(ctx, activePlanCompactHandoff.operation)) {
+    if (isCurrentPlanOperation(ctx, activePlanCompactHandoff.operation)) return;
+    const stale = activePlanCompactHandoff;
+    activePlanCompactHandoff = undefined;
+    if (isCurrentPlanHandoff(stale.request)) finishPlanHandoff(stale.request);
+  }
   const handoff = pendingPlanCompactHandoff;
   if (!handoff || !planOperationMatchesContext(ctx, handoff.operation)) return;
-  pendingPlanCompactHandoff = undefined;
   if (!isCurrentPlanOperation(ctx, handoff.operation)) {
+    pendingPlanCompactHandoff = undefined;
     finishPlanHandoff(handoff.request);
+    return;
+  }
+  if (handoff.waitingForCompactionSettlement) {
+    // The host's next settled boundary is the first point at which a denied
+    // compaction can safely fall back to the current context. Keep waiting if
+    // an owner/tombstone still proves that compaction is unresolved.
+    if (compactionArbiter?.currentOwner() || compactionArbiter?.timeoutTombstone()) return;
+    handoff.waitingForCompactionSettlement = false;
+    pendingPlanCompactHandoff = undefined;
+    deliverPlanHandoff(ctx, handoff);
     return;
   }
   startPlanCompaction(ctx, handoff);
 }
 
+/** Queue an approved Plan message only at a host boundary known to be safe. */
+function deliverPlanHandoff(ctx: PlanContext, handoff: PlanCompactHandoff): boolean {
+  if (!isCurrentPlanOperation(ctx, handoff.operation) || !isCurrentPlanHandoff(handoff.request)) return false;
+  try {
+    sendImplementationMessage(ctx, handoff.executionMessage);
+  } catch (error) {
+    // A synchronous rejection is not an acceptance signal. Preserve the
+    // request so a later settled boundary can retry it.
+    handoff.waitingForCompactionSettlement = true;
+    if (activePlanCompactHandoff === handoff) activePlanCompactHandoff = undefined;
+    pendingPlanCompactHandoff = handoff;
+    ctx.ui.notify(`Plan execution handoff could not be queued: ${errorMessage(error)}`, "error");
+    return false;
+  }
+  if (!finishPlanHandoff(handoff.request)) return false;
+  void handoff.onDelivered?.();
+  return true;
+}
+
 function startPlanCompaction(ctx: PlanContext, handoff: PlanCompactHandoff): void {
-  const { request, operation, planPath, markdown, executionMessage, onDelivered } = handoff;
+  const { request, operation, planPath, markdown, executionMessage } = handoff;
   const lease = compactionArbiter?.request("plan-handoff", {
     owner: "plan-handoff",
     reason: "preserve-approved-plan",
   });
+
+  if (compactionArbiter && !lease) {
+    // Never consume the handoff while another compaction (or its timeout
+    // tombstone) may still own the host controller. The next authoritative
+    // settlement retries the current-context delivery exactly once.
+    const firstDeferral = !handoff.waitingForCompactionSettlement;
+    handoff.waitingForCompactionSettlement = true;
+    pendingPlanCompactHandoff = handoff;
+    if (firstDeferral) {
+      ctx.ui.notify("Compaction is already in progress; Plan execution is deferred until it settles.", "warning");
+    }
+    return;
+  }
+
+  // Request ownership is now established; only this transition may consume a
+  // pending handoff and expose the active compaction to settlement guards.
+  if (pendingPlanCompactHandoff === handoff) pendingPlanCompactHandoff = undefined;
+  activePlanCompactHandoff = handoff;
   let delivered = false;
   let watchdog: ReturnType<typeof setTimeout> | undefined;
   const deliver = (releaseLease = true) => {
@@ -1597,24 +1687,15 @@ function startPlanCompaction(ctx: PlanContext, handoff: PlanCompactHandoff): voi
     delivered = true;
     if (watchdog) clearTimeout(watchdog);
     if (releaseLease) lease?.release();
-    if (!isCurrentPlanOperation(ctx, operation) || !isCurrentPlanHandoff(request)) return false;
-    try {
-      sendImplementationMessage(ctx, executionMessage);
-    } catch (error) {
-      finishPlanHandoff(request);
-      ctx.ui.notify(`Plan execution handoff could not be queued: ${errorMessage(error)}`, "error");
+    if (!isCurrentPlanOperation(ctx, operation) || !isCurrentPlanHandoff(request)) {
+      if (activePlanCompactHandoff === handoff) activePlanCompactHandoff = undefined;
+      if (isCurrentPlanHandoff(request)) finishPlanHandoff(request);
       return false;
     }
-    if (!finishPlanHandoff(request)) return false;
-    void onDelivered?.();
-    return true;
+    const queued = deliverPlanHandoff(ctx, handoff);
+    if (!queued) delivered = false;
+    return queued;
   };
-
-  if (compactionArbiter && !lease) {
-    ctx.ui.notify("Compaction is already in progress; executing with the current context.", "warning");
-    deliver();
-    return;
-  }
 
   const compactionInstructions = [
     "Treat the following approved Plan as the authoritative execution contract.",
@@ -1625,9 +1706,11 @@ function startPlanCompaction(ctx: PlanContext, handoff: PlanCompactHandoff): voi
   ctx.ui.notify("Compacting context with the approved Plan preserved…", "info");
   watchdog = setTimeout(() => {
     if (isCurrentPlanOperation(ctx, operation) && isCurrentPlanHandoff(request)) {
-      ctx.ui.notify("Plan compaction did not finish in time; executing with the current context.", "warning");
+      // Wall-clock expiry does not prove that the host compaction stopped. Keep
+      // the handoff and wait for onComplete/onError, both invoked after the
+      // host clears its compaction controller.
+      ctx.ui.notify("Plan compaction did not finish in time; waiting for the host to settle before execution.", "warning");
     }
-    deliver(false);
   }, planCompactionHandoffTimeoutMs);
   watchdog.unref?.();
   try {

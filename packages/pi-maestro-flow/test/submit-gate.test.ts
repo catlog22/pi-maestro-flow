@@ -16,18 +16,11 @@ function createHarness() {
     on(name: string, h: Handler) {
       handlers.set(name, [...(handlers.get(name) ?? []), h]);
     },
-    // 模拟 sendUserMessage：完整走 prompt → input(extension) → run → agent_settled
-    async sendUserMessage(content: any) {
+    // ExtensionAPI.sendUserMessage is void. The host starts the run and emits
+    // agent_settled later; this harness keeps those boundaries explicit.
+    sendUserMessage(content: any) {
       const text = typeof content === "string" ? content : content[0]?.text;
       sent.push(text);
-      for (const h of handlers.get("input") ?? []) {
-        const r = await h(
-          { text, images: undefined, source: "extension", streamingBehavior: undefined },
-          { ui: { notify() {} } },
-        );
-        assert.equal(r?.action, "continue", `flush message "${text}" must pass the gate`);
-      }
-      for (const h of handlers.get("agent_settled")!) await h({}, {});
     },
   };
   return { handlers, sent, notified, pi };
@@ -55,7 +48,7 @@ test("空闲提交放行；压缩中空闲提交被拦截排队；settled 后自
   assert.equal(r.action, "handled");
   assert.equal(notified.length, 1);
 
-  // A 完成（agent_settled）→ 门禁解除，B 自动重放
+  // A 完成（agent_settled）→ 门禁重置并只重放一条 B
   for (const h of handlers.get("agent_settled")!) await h({}, {});
   await mock.timers.tick(0);
   assert.deepEqual(sent, ["B"]);
@@ -81,9 +74,12 @@ test("streaming 提交直接放行；多条排队消息按序串行重放", asyn
   assert.equal(r.action, "handled");
   assert.equal(notified.length, 2);
 
+  // One settlement releases exactly one message. B's void-returning replay
+  // does not settle the gate, so C must remain queued until the next event.
   for (const h of handlers.get("agent_settled")!) await h({}, {});
   await mock.timers.tick(0);
-  await mock.timers.tick(0);
+  assert.deepEqual(sent, ["B"]);
+  for (const h of handlers.get("agent_settled")!) await h({}, {});
   await mock.timers.tick(0);
   assert.deepEqual(sent, ["B", "C"]);
 });
