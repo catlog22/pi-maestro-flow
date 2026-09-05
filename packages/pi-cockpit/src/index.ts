@@ -25,6 +25,7 @@ import { MaestroStore } from "./maestro-store.ts";
 import { createSidebarController, type SidebarController } from "./sidebar-controller.ts";
 import { COCKPIT_SPLIT_PANE_MARKER } from "./split-pane.ts";
 import { attachViewportStability, type ViewportStabilityPatch } from "./viewport-stability.ts";
+import { attachCompactionStyle, type CompactionStylePatch } from "./compaction-style.ts";
 import {
 	COCKPIT_EDITOR_BOTTOM_MARKER,
 	EDITOR_BOTTOM_WIDGET_KEY,
@@ -369,6 +370,7 @@ export default function (pi: ExtensionAPI): void {
 	// thinking label / teammate tree still stream above the visible viewport.
 	let stabilityTui: TUI | undefined;
 	let viewportStabilityPatch: ViewportStabilityPatch | undefined;
+	let compactionStylePatch: CompactionStylePatch | undefined;
 	const ensureViewportStability = (tui: TUI): void => {
 		// Native fullscreen owns a fixed application viewport and has no main-screen
 		// applyLineResets hook. Do not cache that expected miss: the same dynamic TUI
@@ -474,6 +476,11 @@ export default function (pi: ExtensionAPI): void {
 	// AgentSession construction — before renderInitialMessages runs.
 	ensureConfigExists();
 	config = loadConfig();
+	compactionStylePatch = attachCompactionStyle({
+		isEnabled: () => config.enabled,
+		getTheme: () => lastCtx?.ui.theme,
+		getGlyphs: () => resolveGlyphs(config.icons.mode),
+	});
 	// Guarded edit replaces the built-in edit (same name, same execution, plus a
 	// UTF-8 gate): editing a non-UTF-8 file would otherwise corrupt its bytes.
 	registerGuardedEditTool(pi);
@@ -1972,6 +1979,8 @@ export default function (pi: ExtensionAPI): void {
 		}
 		settingsProviderDisposer = undefined;
 		endpoints.disconnect();
+		compactionStylePatch?.detach();
+		compactionStylePatch = undefined;
 		lastCtx = undefined;
 		pendingTargetReference = undefined;
 		running = false;

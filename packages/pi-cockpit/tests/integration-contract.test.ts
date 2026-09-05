@@ -175,6 +175,19 @@ test("Cockpit owns, retries, and releases the viewport-stability patch across TU
 	);
 });
 
+test("Cockpit installs compaction compact-form styling before resumed history renders", () => {
+	const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+	assert.match(source, /let compactionStylePatch: CompactionStylePatch \| undefined/);
+	assert.match(
+		source,
+		/config = loadConfig\(\);[^]*?compactionStylePatch = attachCompactionStyle\(\{[^]*?isEnabled: \(\) => config\.enabled[^]*?getTheme: \(\) => lastCtx\?\.ui\.theme[^]*?getGlyphs: \(\) => resolveGlyphs\(config\.icons\.mode\)[^]*?registerGuardedEditTool/,
+	);
+	assert.match(
+		source,
+		/session_shutdown[^]*?compactionStylePatch\?\.detach\(\);[^]*?compactionStylePatch = undefined/,
+	);
+});
+
 test("Cockpit acquires the footer before installing and releases it before deferred re-enable", () => {
 	const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
 	assert.match(
