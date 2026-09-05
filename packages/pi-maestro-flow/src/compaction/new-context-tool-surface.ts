@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-export const NEW_CONTEXT_TOOL_NAMES = ["compact_history", "new_context"] as const;
+export const NEW_CONTEXT_TOOL_NAMES = ["new_context"] as const;
 
 export interface NewContextToolSurface {
   readonly registered: boolean;

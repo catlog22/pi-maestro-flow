@@ -202,12 +202,13 @@ test("child new-context publishes recovery phases and cancellation without repor
     assert.equal(await controller.onAgentSettled(pendingMessageContext as never), false);
 
     assert.deepEqual(events.map((event) => event.phase), [
-      "pending", "completed", "continuation", "pending", "cancelled",
+      "pending", "pending", "completed", "continuation", "pending", "cancelled",
     ]);
     assert.ok(events.every((event) => event.type === "teammate_compaction_state"));
     assert.ok(events.every((event) => event.correlationId === "new-context-relay-test"));
+    assert.ok(events.every((event) => event.producer === "new-context"));
     assert.equal(events[0]?.generation, first.requestId);
-    assert.equal(events[3]?.generation, pending.requestId);
+    assert.equal(events[4]?.generation, pending.requestId);
   } finally {
     await fixture.dispose();
     if (previousChild === undefined) delete process.env.PI_TEAMMATE_CHILD;
@@ -234,7 +235,7 @@ test("new-context cancels a pending reset when a newer message is queued", async
     assert.equal(await controller.onAgentSettled(pendingMessageContext as never), false);
     assert.equal(controller.hasPending(), false);
     assert.equal(harness.compactOptions, undefined);
-    assert.match(harness.notifications.join("\n"), /newer message is pending/);
+    assert.match(harness.notifications.join("\n"), /newer turn or message is active/);
     assert.match(harness.notifications.join("\n"), /continuing with the current context/);
   } finally {
     await fixture.dispose();
@@ -403,6 +404,34 @@ test("child recovery state refresh happens at lease time and fails closed", asyn
   }
 });
 
+test("new-context cancels when a newer turn starts during async recovery refresh", async () => {
+  const fixture = await enabledProject();
+  try {
+    const runtime = details([task({ id: "1", subject: "active", status: "in_progress" })]);
+    let idle = true;
+    let resolveRefresh!: (state: MaestroRecoveryState) => void;
+    const refresh = new Promise<MaestroRecoveryState>((resolve) => { resolveRefresh = resolve; });
+    const controller = createNewContextController(new CompactionArbiter(), {
+      refreshRecoveryState: async () => refresh,
+    });
+    const harness = context(fixture.cwd);
+    Object.assign(harness.ctx, { isIdle: () => idle, hasPendingMessages: () => false });
+    controller.onSessionStart(harness.ctx as never);
+    controller.schedule({ source: "tool", actorId: "child", recoveryState: runtime }, harness.ctx as never);
+
+    const started = controller.onAgentSettled(harness.ctx as never);
+    await Promise.resolve();
+    idle = false;
+    resolveRefresh(runtime);
+
+    assert.equal(await started, false);
+    assert.equal(controller.hasPending(), false);
+    assert.equal(harness.compactOptions, undefined, "the stale request never reaches ctx.compact");
+  } finally {
+    await fixture.dispose();
+  }
+});
+
 test("new-context scheduler is actor/session fenced and Plan handoff ownership wins", async () => {
   const fixture = await enabledProject();
   try {
@@ -521,8 +550,9 @@ test("recovery capsule is deterministic, priority ordered, bounded, and includes
   assert.match(capsule, /Workflow Session: workflow-1/);
   assert.match(capsule, /Handoff Key: handoff-1/);
   assert.match(capsule, /agent:\/\/publication-1/);
-  assert.match(capsule, /compact_history/);
-  assert.doesNotMatch(capsule, /session_history/);
+  assert.match(capsule, /session_history/);
+  assert.match(capsule, /scope=current_session/);
+  assert.doesNotMatch(capsule, /compact_history/);
   assert.match(capsule, /<recovery_capsule version="2">/);
   assert.ok(capsule.endsWith("</recovery_capsule>"));
 

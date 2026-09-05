@@ -1245,6 +1245,109 @@ test("compaction recovery: cancelled explicit reset clears the parent wait witho
   assert.equal(handle!.killed(), false, "a wakeable child remains available after cancellation");
 });
 
+test("compaction recovery: generations are compared only within their producer", async () => {
+  let handle: FakeChildHandle | undefined;
+  const phases: string[] = [];
+  const spawnChildProcess = (() => {
+    handle = createFakeChild();
+    queueMicrotask(() => {
+      handle!.child.emit("message", {
+        type: "teammate_compaction_state",
+        producer: "auto",
+        recoveryId: "session:auto:active",
+        generation: 7,
+        phase: "pending",
+      });
+      handle!.stdout.write(line({ type: "agent_end", willRetry: false }));
+      handle!.stdout.write(line({ type: "agent_settled" }));
+      setTimeout(() => {
+        handle!.child.emit("message", {
+          type: "teammate_compaction_state",
+          producer: "new-context",
+          recoveryId: "session:new-context:deferred",
+          generation: 99,
+          phase: "pending",
+        });
+        handle!.child.emit("message", {
+          type: "teammate_compaction_state",
+          producer: "auto",
+          recoveryId: "session:auto:active",
+          generation: 7,
+          phase: "completed",
+        });
+        handle!.child.emit("message", {
+          type: "teammate_compaction_state",
+          producer: "auto",
+          recoveryId: "session:auto:active",
+          generation: 7,
+          phase: "continuation",
+        });
+        handle!.stdout.write(line({ type: "agent_start" }));
+        handle!.stdout.write(line({ type: "turn_start" }));
+        handle!.stdout.write(line(resultReadyTurnEnd("continued after the auto recovery")));
+        handle!.stdout.write(line({ type: "agent_end", willRetry: false }));
+        handle!.stdout.write(line({ type: "agent_settled" }));
+      }, 10);
+    });
+    return handle!.child;
+  }) as unknown as SpawnSeam;
+
+  const result = await runSingleTeammate(
+    { agent: "general", task: "keep producer generations isolated", context: "fresh" },
+    {
+      baseCwd: process.cwd(),
+      spawnChildProcess,
+      outputLimitRecoveryTimeoutMs: 100,
+      onProgress(progress) {
+        if (progress.phase) phases.push(progress.phase);
+      },
+    },
+  );
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.messages.at(-1)?.content, "continued after the auto recovery");
+  assert.ok(phases.includes("continuing"), "the active auto recovery advances despite a higher new-context generation");
+});
+
+test("compaction recovery: cancelled after a swallowed settlement settles without another turn", async () => {
+  let handle: FakeChildHandle | undefined;
+  const spawnChildProcess = (() => {
+    handle = createFakeChild();
+    queueMicrotask(() => {
+      handle!.child.emit("message", {
+        type: "teammate_compaction_state",
+        producer: "new-context",
+        recoveryId: "session:cancelled-without-turn",
+        generation: 4,
+        phase: "pending",
+      });
+      handle!.stdout.write(line(resultReadyTurnEnd("completed before reset cancellation")));
+      handle!.stdout.write(line({ type: "agent_end", willRetry: false }));
+      handle!.stdout.write(line({ type: "agent_settled" }));
+      setTimeout(() => {
+        handle!.child.emit("message", {
+          type: "teammate_compaction_state",
+          producer: "new-context",
+          recoveryId: "session:cancelled-without-turn",
+          generation: 4,
+          phase: "cancelled",
+          reason: "a newer message is pending",
+        });
+      }, 10);
+    });
+    return handle!.child;
+  }) as unknown as SpawnSeam;
+
+  const result = await runSingleTeammate(
+    { agent: "general", task: "cancel reset without continuation", context: "fresh" },
+    { baseCwd: process.cwd(), spawnChildProcess, outputLimitRecoveryTimeoutMs: 100 },
+  );
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.messages.at(-1)?.content, "completed before reset cancellation");
+  assert.equal(result.messages.some((message) => /compaction recovery did not continue/.test(message.content)), false);
+});
+
 // ---------------------------------------------------------------------------
 // OBS-6 / OBS-7 — terminal conditions must leave evidence
 // ---------------------------------------------------------------------------

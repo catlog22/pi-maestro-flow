@@ -306,6 +306,33 @@ test("compaction arbiter serializes extension requests while only observing nati
   assert.equal(arbiter.currentOwner(), undefined);
 });
 
+test("compaction arbiter fences a started extension compaction until settlement", () => {
+  const arbiter = new CompactionArbiter();
+  const lease = arbiter.request("mid-turn");
+  assert.ok(lease);
+  const request = compactionRequestFromInstructions(lease.tagInstructions("summary"));
+  assert.ok(request);
+
+  const started = arbiter.observeStart(request);
+  assert.equal(started.allowed, true);
+  assert.equal(started.owner, "mid-turn");
+
+  const competingNative = arbiter.observeStart();
+  assert.equal(competingNative.allowed, false, "native compaction cannot overlap an active host operation");
+  assert.equal(competingNative.owner, "mid-turn");
+  competingNative.releaseIfNative();
+  assert.equal(arbiter.currentOwner(), "mid-turn", "a denied native observation cannot revoke the active owner");
+
+  const duplicate = arbiter.observeStart(request);
+  assert.equal(duplicate.allowed, false, "the same tagged operation cannot start twice");
+  assert.equal(started.finalize("success"), true);
+
+  const nativeAfterSettlement = arbiter.observeStart();
+  assert.equal(nativeAfterSettlement.allowed, true);
+  assert.equal(nativeAfterSettlement.owner, "native");
+  nativeAfterSettlement.finalize("cancel");
+});
+
 test("runObservedCompaction finalizes ownership when projection fails", async () => {
   const arbiter = new CompactionArbiter();
   const native = arbiter.observeStart();
@@ -518,17 +545,17 @@ test("a late zombie completion resumes the interrupted task", async () => {
   await guard.onAgentEnd(ctx);
   assert.equal(compactCalls.length, 1, "an exhausted intent submits immediately");
 
-  // The watchdog fires before the host settles: ownership is revoked.
+  // The watchdog fires before the host settles and dispatches the single
+  // recovery wake. A later host callback may update bookkeeping but must not
+  // enqueue a second continuation for the same interrupted task.
   await new Promise((resolve) => setTimeout(resolve, 150));
   assert.notEqual(guard.describeState().zombieOwner, undefined, "the watchdog marks the unsettled submission");
+  assert.equal(sent.length, 1);
+  assert.match(sent[0] ?? "", /Retry compaction, then continue the interrupted task/);
 
-  // The host eventually completes successfully: the task must resume.
   compactCalls[0].onComplete();
   assert.equal(guard.describeState().zombieOwner, undefined, "a late completion clears the zombie");
-  assert.ok(
-    sent.some((message) => message.startsWith("Continue the interrupted task")),
-    "a late zombie completion sends the continuation prompt",
-  );
+  assert.equal(sent.length, 1, "late success does not dispatch a duplicate recovery wake");
 });
 
 test("compaction arbiter preserves output-limit ownership through instruction tags", () => {
@@ -2098,7 +2125,7 @@ test("mid-turn guard falls back to native compaction after exhausted failures tr
   assert.equal(callbacks.length, MAX_CONSECUTIVE_COMPACTION_FAILURES);
   assert.equal(sent.length, MAX_CONSECUTIVE_COMPACTION_FAILURES - 1, "the tripping failure uses native fallback instead of another retry turn");
   assert.ok(sent.every(({ message }) => /compaction failed.*context was exhausted/i.test(message)));
-  assert.ok(sent.every(({ options }) => JSON.stringify(options) === JSON.stringify({ deliverAs: "followUp" })));
+  assert.ok(sent.every(({ options }) => JSON.stringify(options) === JSON.stringify({ deliverAs: "steer" })));
   assert.equal(nativeFallbacks.length, 1, "a breaker trip triggers exactly one untagged native fallback");
   assert.equal(
     nativeFallbacks[0]?.customInstructions,
@@ -3929,6 +3956,60 @@ test("output-limit guard compacts and continues when a length stop hits high con
   assert.match(sent[0] ?? "", /Continue/);
 });
 
+test("output-limit recovery survives shutdown and a recorded delivery marker suppresses replay", async () => {
+  let branch: Array<Record<string, unknown>> = [];
+  const journal: Array<{ type: string; data: unknown }> = [];
+  const sent: string[] = [];
+  const createGuard = (capture: string[]) => createMidTurnAutoCompaction({
+    appendEntry(type: string, data: unknown) { journal.push({ type, data }); },
+    sendUserMessage(message: string) { capture.push(message); },
+  } as never, {
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 400_000, maxTokens: 32_000 },
+    getContextUsage: () => ({ tokens: 200_000, contextWindow: 400_000, percent: 50 }),
+    hasPendingMessages: () => false,
+    sessionManager: {
+      getSessionId: () => "output-limit-resume",
+      getBranch: () => branch,
+    },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  const initial = createGuard([]);
+  initial.onSessionStart(ctx);
+  await initial.onOutputLimit(lengthTruncatedBatch(), ctx);
+  initial.onSessionShutdown(ctx);
+  const pending = journal.findLast((entry) => {
+    const data = entry.data as { outputLimit?: unknown };
+    return data.outputLimit !== null && data.outputLimit !== undefined;
+  });
+  assert.ok(pending, "the truncated response is journaled before shutdown");
+
+  branch = [{ type: "custom", customType: pending.type, data: pending.data }];
+  const resumed = createGuard(sent);
+  resumed.onSessionStart(ctx, { reason: "resume" });
+  await resumed.onAgentEnd(ctx);
+  assert.equal(sent.length, 1, "resume delivers the persisted continuation exactly once");
+
+  const staged = journal.findLast((entry) => {
+    const data = entry.data as { outputLimit?: { phase?: string } };
+    return data.outputLimit?.phase === "continuation";
+  });
+  assert.ok(staged, "delivery is staged before sendUserMessage");
+  branch = [
+    { type: "custom", customType: staged.type, data: staged.data },
+    { type: "message", message: { role: "user", content: sent[0] } },
+  ];
+  const replayed: string[] = [];
+  const afterCrash = createGuard(replayed);
+  afterCrash.onSessionStart(ctx, { reason: "resume" });
+  await afterCrash.onAgentEnd(ctx);
+  assert.equal(replayed.length, 0, "a transcript delivery marker is the consumption receipt after a crash");
+});
+
 test("output-limit capture uses the linked summary-model absolute threshold", async () => {
   let compactCalls = 0;
   const summaryModel = { provider: "summary", id: "small", contextWindow: 50_000, maxTokens: 8_000 };
@@ -4250,13 +4331,17 @@ function loopCriticalFixture(options: { hasPendingMessages?: () => boolean } = {
   let aborted = 0;
   const compactCalls: Array<{ customInstructions?: string; onComplete(): void; onError(error: Error): void }> = [];
   const sent: string[] = [];
+  const sendOptions: unknown[] = [];
   const notifications: Array<{ message: string; level: string | undefined }> = [];
   const journal: Array<{ type: string; data: unknown }> = [];
   const sessionId = "loop-critical-session";
   const arbiter = new CompactionArbiter(100);
   const guard = createMidTurnAutoCompaction({
     appendEntry(type: string, data: unknown) { journal.push({ type, data }); },
-    sendUserMessage(message: string) { sent.push(message); },
+    sendUserMessage(message: string, options: unknown) {
+      sent.push(message);
+      sendOptions.push(options);
+    },
   } as never, {
     leaseTimeoutMs: 100,
     arbiter,
@@ -4286,6 +4371,7 @@ function loopCriticalFixture(options: { hasPendingMessages?: () => boolean } = {
     aborted: () => aborted,
     compactCalls,
     sent,
+    sendOptions,
     notifications,
   };
 }
@@ -4310,6 +4396,7 @@ test("sustained critical-band pressure inside a tool loop aborts once and settle
   assert.equal(fx.compactCalls.length, 1, "a loop-critical intent bypasses the two-turn defer");
   fx.compactCalls[0].onComplete();
   assert.match(fx.sent.at(-1) ?? "", /Continue the interrupted task/, "the interrupted loop resumes automatically");
+  assert.deepEqual(fx.sendOptions.at(-1), { deliverAs: "steer" }, "recovery must not wait on the already-settled turn");
 
   await fx.guard.evaluate(highUsageToolBatch(385_000), fx.ctx);
   await fx.guard.evaluate(highUsageToolBatch(385_000), fx.ctx);
@@ -4342,9 +4429,10 @@ test("tool-boundary compaction publishes typed teammate recovery phases", async 
 
     assert.deepEqual(
       events.map((event) => event.phase),
-      ["pending", "completed", "continuation"],
+      ["pending", "pending", "completed", "continuation"],
     );
     assert.ok(events.every((event) => event.type === "teammate_compaction_state"));
+    assert.ok(events.every((event) => event.producer === "auto"));
     assert.ok(events.every((event) => event.correlationId === "typed-compaction-test"));
     assert.equal(new Set(events.map((event) => event.recoveryId)).size, 1);
   } finally {
@@ -4529,10 +4617,12 @@ test("a late tool-boundary compaction resumes when session_compact precedes onCo
     undefined,
     "session_compact preserves late-completion ownership for the callback",
   );
+  assert.equal(fx.sent.length, 1, "the watchdog dispatched one recovery wake");
+  assert.match(fx.sent[0] ?? "", /Retry compaction, then continue the interrupted task/);
   fx.compactCalls[0].onComplete();
 
   assert.equal(fx.guard.describeState().zombieOwner, undefined);
-  assert.match(fx.sent.at(-1) ?? "", /Continue the interrupted task/);
+  assert.equal(fx.sent.length, 1, "session_compact plus late onComplete cannot double-wake the task");
 });
 
 test("tool-call usage creates a hard-threshold intent when the context frame could not", async () => {
@@ -4897,24 +4987,15 @@ test("a zombie submission suppresses the loop interruption until it settles", as
   await new Promise((resolve) => setTimeout(resolve, 150));
   assert.notEqual(fx.guard.describeState().zombieOwner, undefined, "the unsettled submission becomes a zombie");
 
+  assert.equal(fx.sent.length, 1, "the timed-out interruption receives one recovery wake");
   for (let evaluation = 0; evaluation < LOOP_CRITICAL_PERSIST_EVALUATIONS; evaluation++) {
     await fx.guard.evaluate(highUsageToolBatch(386_000 + evaluation), fx.ctx);
   }
   assert.equal(fx.aborted(), 1, "no new interruption while the zombie may still settle");
-  assert.equal(
-    fx.guard.describeState().pendingIntent?.loopCritical,
-    true,
-    "the submitted interruption remains durable while its zombie owner may still settle",
-  );
 
   fx.compactCalls[0].onComplete();
   assert.equal(fx.guard.describeState().zombieOwner, undefined);
-  for (let evaluation = 0; evaluation < LOOP_CRITICAL_PERSIST_EVALUATIONS; evaluation++) {
-    await fx.guard.evaluate(highUsageToolBatch(387_000 + evaluation), fx.ctx);
-  }
-  // The streak kept counting through the suppressed burst, so every evaluation
-  // of the next burst re-asserts the interruption (bounded resend semantics).
-  assert.equal(fx.aborted(), 1 + LOOP_CRITICAL_PERSIST_EVALUATIONS, "after the zombie settles the interruption re-asserts");
+  assert.equal(fx.sent.length, 1, "late settlement cannot duplicate the queued recovery wake");
 });
 
 test("an active foreign compaction owner suppresses the loop interruption", async () => {
@@ -7941,14 +8022,14 @@ test("tripped watchdog holds overlapping submissions and never starts native fal
   assert.equal(nativeFallbacks, 0, "watchdog never overlaps an unknown in-flight host compaction");
   assert.ok(notifications.some((message) => /may still be settling/i.test(message)));
 
-  // Once the bounded grace window elapses without any settle callback the
-  // swallowed call is presumed dead and a fresh attempt is allowed.
+  // Time alone cannot prove the host operation died. Even after another lease
+  // interval, fail closed until an authoritative completion/error callback.
   await new Promise((resolve) => setTimeout(resolve, 150));
   await guard.evaluate(messages, ctx);
   await guard.onAgentEnd(ctx);
   await guard.evaluate(messages, ctx);
   await guard.onAgentEnd(ctx);
-  assert.equal(primaryCompactions, 2, "a fresh attempt resumes after the grace window");
+  assert.equal(primaryCompactions, 1, "no second unknown-state compaction starts after a wall-clock grace period");
   assert.equal(nativeFallbacks, 0);
 });
 

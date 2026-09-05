@@ -13,7 +13,7 @@ test("New Context tools register only after enable and leave the active surface 
     },
   }, () => {
     registrations += 1;
-    active.push("compact_history", "new_context");
+    active.push("new_context");
   });
 
   assert.equal(surface.registered, false);
@@ -24,14 +24,14 @@ test("New Context tools register only after enable and leave the active surface 
   surface.sync(true);
   assert.equal(surface.registered, true);
   assert.equal(registrations, 1);
-  assert.deepEqual(active, ["todo", "resource", "compact_history", "new_context"]);
+  assert.deepEqual(active, ["todo", "resource", "new_context"]);
 
   surface.sync(false);
   assert.deepEqual(active, ["todo", "resource"]);
 
   surface.sync(true);
   assert.equal(registrations, 1, "re-enable must reuse the existing definitions");
-  assert.deepEqual(active, ["todo", "resource", "compact_history", "new_context"]);
+  assert.deepEqual(active, ["todo", "resource", "new_context"]);
 
   surface.deactivate();
   assert.deepEqual(active, ["todo", "resource"]);

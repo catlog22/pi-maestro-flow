@@ -107,6 +107,7 @@ interface ActiveCompaction {
   id: number;
   owner: CompactionOwner;
   trigger?: CompactionTrigger;
+  started: boolean;
   cleanup?: () => void;
 }
 
@@ -117,8 +118,9 @@ interface ActiveCompaction {
  * session_before_compact and participate in the same arbitration. The extension
  * may replace their summary through its session_before_compact handler, while
  * the completed-turn threshold policy may cancel a native threshold request to
- * preserve an active transcript. Native starts still win an in-flight race with
- * an extension request.
+ * preserve an active transcript. Native starts still win a race with an
+ * extension request that has only reserved ownership; once compaction starts,
+ * ownership remains fenced until authoritative settlement.
  */
 export class CompactionArbiter {
   private nextId = 0;
@@ -152,7 +154,7 @@ export class CompactionArbiter {
     if (this.active) return undefined;
     if (this.timeoutTombstone()) return undefined;
     const id = ++this.nextId;
-    this.active = { id, owner, trigger };
+    this.active = { id, owner, trigger, started: false };
     return {
       owner,
       operationId: id,
@@ -163,9 +165,10 @@ export class CompactionArbiter {
   }
 
   observeStart(request?: CompactionRequest, signal?: AbortSignal): ObservedCompaction {
-    // Pi-native compaction wins a race with an extension request. This preserves
-    // both native automatic behavior and the built-in manual command semantics.
-    if (!request && this.active && this.active.owner !== "native") {
+    // Pi-native compaction may win only before an extension reservation starts.
+    // Clearing an already-started owner cannot cancel its host operation and
+    // would let two summaries race against the same session snapshot.
+    if (!request && this.active && this.active.owner !== "native" && !this.active.started) {
       this.active.cleanup?.();
       this.active = undefined;
     }
@@ -183,16 +186,18 @@ export class CompactionArbiter {
     }
     if (this.active) {
       const observed = this.active;
-      const allowed = request !== undefined
+      const matchesReservation = request !== undefined
         && observed.owner === request.owner
         && observed.id === request.id;
+      const allowed = matchesReservation && !observed.started;
       // Extension-triggered compactions arrive without a cleanup/timeout.
       // Arm the same bounded deadline as native compactions only after the
-      // matching request starts; a stale/mismatched observation must not
-      // shorten the legitimate lease's lifetime. Abort means the host proved
-      // the compaction dead (cancel, no tombstone); a wall-clock expiry does
-      // not (timeout, tombstone).
-      if (allowed && !observed.cleanup) {
+      // matching request starts; a stale, duplicate, or mismatched observation
+      // must not shorten or share the legitimate lease. Abort means the host
+      // proved the compaction dead (cancel, no tombstone); a wall-clock expiry
+      // does not (timeout, tombstone).
+      if (allowed) {
+        observed.started = true;
         const expire = () => this.finalize(observed.id, "timeout");
         const onAbort = () => this.finalize(observed.id, "cancel");
         const timeout = setTimeout(expire, this.leaseTimeoutMs);
@@ -231,6 +236,7 @@ export class CompactionArbiter {
       this.active = {
         id,
         owner: "native",
+        started: true,
       };
       const timeout = setTimeout(expire, this.leaseTimeoutMs);
       timeout.unref?.();

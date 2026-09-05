@@ -218,6 +218,7 @@ interface AttemptState {
   /** A Flow synthetic compaction interruption must continue before this turn can settle. */
   compactionRecovery?: {
     recoveryId: string;
+    producer: string;
     generation: number;
     phase: "pending" | "continuation" | "completed";
   };
@@ -351,6 +352,7 @@ function buildChildSpawnEnv(
     PI_TEAMMATE_DEPTH: String((options.depth ?? getTeammateDepth()) + 1),
     PI_TEAMMATE_CORRELATION_ID: correlationId,
     PI_TEAMMATE_REPLY_TO: replyTo,
+    PI_TEAMMATE_RUNTIME_GENERATION: String(options.runtimeGeneration ?? 0),
     // Cache-tier pin (see resolveAgentCacheRetention): the child inherits the
     // parent env via the spread above, so an explicit short-tier override keeps
     // agents from inheriting the main process's long retention.
@@ -380,6 +382,8 @@ function isReplayNeutralChildIpcMessage(message: Record<string, unknown>): boole
 interface ChildCompactionStateEvent {
   type: "teammate_compaction_state";
   recoveryId: string;
+  /** Producer-local generations are comparable only within this namespace. */
+  producer: string;
   generation: number;
   phase: "pending" | "continuation" | "completed" | "failed" | "cancelled";
   reason?: string;
@@ -397,6 +401,11 @@ function childCompactionStateEvent(message: Record<string, unknown>): ChildCompa
   return {
     type: "teammate_compaction_state",
     recoveryId: message.recoveryId,
+    // Legacy children emitted one global-looking generation. Keep them in a
+    // separate namespace so mixed-version sessions remain backward compatible.
+    producer: typeof message.producer === "string" && message.producer.length > 0
+      ? message.producer
+      : "legacy",
     generation: message.generation as number,
     phase: message.phase,
     ...(typeof message.reason === "string" ? { reason: message.reason } : {}),
@@ -723,6 +732,7 @@ export async function runSingleAttempt(
      */
     let steerSettlementSwallowed = false;
     let compactionSettlementSwallowed = false;
+    let turnBoundaryEpoch = 0;
     let autoRetryProgressMessage: string | undefined;
     const clearAutoRetryProgressMessage = (): void => {
       if (progress.lastMessage === autoRetryProgressMessage) progress.lastMessage = undefined;
@@ -737,10 +747,10 @@ export async function runSingleAttempt(
       if (progress.lastMessage === modelFailoverProgressMessage) progress.lastMessage = undefined;
       modelFailoverProgressMessage = undefined;
     };
-    let latestCompactionGeneration = -1;
+    const latestCompactionGenerationByProducer = new Map<string, number>();
     const closedCompactionRecoveries = new Set<string>();
-    const compactionRecoveryKey = (recovery: { recoveryId: string; generation: number }): string =>
-      `${recovery.generation}:${recovery.recoveryId}`;
+    const compactionRecoveryKey = (recovery: { recoveryId: string; producer: string; generation: number }): string =>
+      `${recovery.producer}:${recovery.generation}:${recovery.recoveryId}`;
     const closeActiveCompactionRecovery = (): void => {
       if (state.compactionRecovery) {
         closedCompactionRecoveries.add(compactionRecoveryKey(state.compactionRecovery));
@@ -1348,13 +1358,14 @@ export async function runSingleAttempt(
 
     function handleChildCompactionState(event: ChildCompactionStateEvent): void {
       if (state.terminal || state.turnLifecycleSettled) return;
-      if (event.generation < latestCompactionGeneration) return;
-      if (event.generation > latestCompactionGeneration) {
-        latestCompactionGeneration = event.generation;
-        closedCompactionRecoveries.clear();
-        if (state.compactionRecovery) {
+      const latestGeneration = latestCompactionGenerationByProducer.get(event.producer) ?? -1;
+      if (event.generation < latestGeneration) return;
+      if (event.generation > latestGeneration) {
+        latestCompactionGenerationByProducer.set(event.producer, event.generation);
+        const active = state.compactionRecovery;
+        if (active?.producer === event.producer) {
+          closeActiveCompactionRecovery();
           state.compactionRecovery = undefined;
-          compactionSettlementSwallowed = false;
           if (timers.compactionRecovery) {
             clearTimeout(timers.compactionRecovery);
             timers.compactionRecovery = undefined;
@@ -1365,8 +1376,17 @@ export async function runSingleAttempt(
       const eventKey = compactionRecoveryKey(event);
       if (closedCompactionRecoveries.has(eventKey)) return;
       const active = state.compactionRecovery;
+      const matchesActive = active === undefined
+        || (active.producer === event.producer
+          && active.generation === event.generation
+          && active.recoveryId === event.recoveryId);
+      // Another producer may announce a deferred request while the current
+      // recovery owns settlement. It must re-announce pending when it actually
+      // acquires the compaction lease; never let incomparable counters replace
+      // the current owner.
+      if (!matchesActive) return;
       if (event.phase === "cancelled") {
-        if (active && (active.generation !== event.generation || active.recoveryId !== event.recoveryId)) return;
+        const settlementWasSwallowed = compactionSettlementSwallowed;
         closedCompactionRecoveries.add(eventKey);
         state.compactionRecovery = undefined;
         compactionSettlementSwallowed = false;
@@ -1374,12 +1394,24 @@ export async function runSingleAttempt(
           clearTimeout(timers.compactionRecovery);
           timers.compactionRecovery = undefined;
         }
+        if (settlementWasSwallowed) {
+          const cancelledAtTurnBoundary = turnBoundaryEpoch;
+          // The child may have already queued the continuation turn directly
+          // behind the cancellation IPC event. Yield through the I/O phase and
+          // settle only if no new turn boundary arrived.
+          const settleCancelledRecovery = setImmediate(() => {
+            if (state.terminal || state.turnLifecycleSettled
+              || turnBoundaryEpoch !== cancelledAtTurnBoundary
+              || state.compactionRecovery) return;
+            settleAgentSession();
+          });
+          settleCancelledRecovery.unref?.();
+        }
         return;
       }
       const phaseRank = { pending: 0, completed: 1, continuation: 2 } as const;
       let phaseAdvanced = false;
       if (active) {
-        if (active.generation !== event.generation || active.recoveryId !== event.recoveryId) return;
         if (event.phase !== "failed" && phaseRank[event.phase] < phaseRank[active.phase]) return;
         phaseAdvanced = event.phase !== "failed" && phaseRank[event.phase] > phaseRank[active.phase];
       }
@@ -1405,6 +1437,7 @@ export async function runSingleAttempt(
       }
       state.compactionRecovery = {
         recoveryId: event.recoveryId,
+        producer: event.producer,
         generation: event.generation,
         phase: event.phase,
       };
@@ -1416,7 +1449,10 @@ export async function runSingleAttempt(
       progress.phase = event.phase === "pending" ? "compacting" : "continuing";
       progress.resultReadyAt = undefined;
       options.onProgress?.(progress);
-      armCompactionRecoveryDeadline();
+      // Scheduling a future reset must not consume its entire watchdog while
+      // the current agent turn is still running. The deadline starts only once
+      // an authoritative settlement has actually been swallowed.
+      if (compactionSettlementSwallowed) armCompactionRecoveryDeadline();
     }
 
     function armOutputLimitRecoveryDeadline(): void {
@@ -1590,6 +1626,7 @@ export async function runSingleAttempt(
 
     /** A new agent loop starts: the previous turn's settlement no longer applies. */
     function onTurnBoundary(event: JsonLineEvent): void {
+      turnBoundaryEpoch += 1;
       if (pendingInterrupt?.phase === "aborting" && pendingInterrupt.turnSettledDuringAbort) {
         degradeInterruptToFollowUp("turn advanced before abort was acknowledged");
       }

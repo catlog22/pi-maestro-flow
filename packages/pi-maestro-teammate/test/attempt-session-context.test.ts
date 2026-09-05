@@ -155,6 +155,7 @@ test("an available parent session yields a private per-correlation session direc
       const { capture } = await runWithCapture(
         { agent: "general", task: "start clean", context: "fresh" },
         parentSessionFile,
+        { runtimeGeneration: 4 },
       );
 
       const expectedRoot = path.join(path.dirname(parentSessionFile), "parent");
@@ -162,6 +163,7 @@ test("an available parent session yields a private per-correlation session direc
       assert.equal(path.dirname(capture.sessionDir), expectedRoot);
       assert.equal(fs.existsSync(capture.sessionDir), true, "the directory must exist before spawn");
       assert.equal(capture.spawnEnv.PI_TEAMMATE_PARENT_SESSION, parentSessionFile);
+      assert.equal(capture.spawnEnv.PI_TEAMMATE_RUNTIME_GENERATION, "4");
     })
   );
 });

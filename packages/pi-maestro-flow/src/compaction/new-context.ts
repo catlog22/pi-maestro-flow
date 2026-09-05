@@ -51,7 +51,7 @@ export interface NewContextScheduleReceipt {
 
 export type NewContextControllerContext = Pick<
   ExtensionContext,
-  "cwd" | "sessionManager" | "compact" | "ui" | "hasPendingMessages"
+  "cwd" | "sessionManager" | "compact" | "ui" | "hasPendingMessages" | "isIdle"
 >;
 
 export interface NewContextController {
@@ -138,8 +138,8 @@ export function createNewContextController(
   ): void => {
     publishTeammateCompactionState({
       recoveryId: recoveryIdFor(request),
-      // requestId is monotonic within this controller and therefore provides a
-      // recovery ordering fence stronger than the reusable lifecycle generation.
+      producer: "new-context",
+      // requestId is monotonic only within the new-context producer.
       generation: request.requestId,
       phase,
       ...(reason ? { reason } : {}),
@@ -158,15 +158,17 @@ export function createNewContextController(
   const continueAfterReset = (
     ctx: Pick<ExtensionContext, "sessionManager" | "ui" | "hasPendingMessages">,
     request: ScheduledNewContextRequest,
-  ) => {
-    if (ctx.hasPendingMessages?.()) return;
+  ): boolean => {
+    if (ctx.hasPendingMessages?.()) return false;
     try {
       options.continueAfterReset?.(ctx, request);
+      return true;
     } catch (error) {
       ctx.ui.notify(
         `New-context continuation could not be queued: ${error instanceof Error ? error.message : String(error)}`,
         "warning",
       );
+      return false;
     }
   };
   const isRequestLifecycleCurrent = (
@@ -213,12 +215,12 @@ export function createNewContextController(
       ctx.ui.notify("New-context request was discarded because the session generation changed.", "warning");
       return false;
     }
-    if (ctx.hasPendingMessages?.()) {
+    if (ctx.isIdle?.() === false || ctx.hasPendingMessages?.()) {
       pending = undefined;
       awaitingCompactionSettlement = false;
       deferredNoticeKey = undefined;
-      publishRecoveryState(request, "cancelled", "a newer message is pending");
-      ctx.ui.notify("New-context request was cancelled because a newer message is pending; continuing with the current context.", "info");
+      publishRecoveryState(request, "cancelled", "a newer turn or message is active");
+      ctx.ui.notify("New-context request was cancelled because a newer turn or message is active; continuing with the current context.", "info");
       return false;
     }
     try {
@@ -291,6 +293,16 @@ export function createNewContextController(
       }
     }
     if (!isCurrentRequest(request, ctx)) return false;
+    // Refresh can yield while a newer user message arrives. Re-check the idle
+    // boundary after refresh and before acquiring the lease; otherwise this
+    // stale request can compact a context that is no longer idle.
+    if (ctx.isIdle?.() === false || ctx.hasPendingMessages?.()) {
+      pending = undefined;
+      awaitingCompactionSettlement = false;
+      deferredNoticeKey = undefined;
+      publishRecoveryState(request, "cancelled", "a newer turn or message arrived during recovery-state refresh");
+      return false;
+    }
 
     const trigger: NewContextCompactionTrigger = {
       owner: "new-context",
@@ -333,10 +345,15 @@ export function createNewContextController(
 
     awaitingCompactionSettlement = false;
     deferredNoticeKey = undefined;
-    // This is the sole pending→inFlight transition. Never clear pending before
-    // arbiter.request succeeds: an active owner or tombstone must be retriable.
-    pending = undefined;
+    // A prior pending announcement may have been ignored while another
+    // producer owned the parent settlement. Re-announce only after this
+    // request actually owns the lease.
+    publishRecoveryState(request, "pending");
+    // This is the sole pending→inFlight transition. Keep pending until
+    // compact() returns successfully; a throwing host call must not lose the
+    // request before its fallback continuation is accepted.
     inFlight = request;
+    let callbackFailed = false;
     try {
       ctx.compact({
         customInstructions: lease.tagInstructions(NEW_CONTEXT_INSTRUCTIONS),
@@ -346,33 +363,52 @@ export function createNewContextController(
             || request.sessionId !== activeSessionId
             || request.sessionId !== sessionIdOf(ctx)
             || ctx.hasPendingMessages?.()) {
+            if (inFlight?.requestId === request.requestId) inFlight = undefined;
             publishRecoveryState(request, "cancelled", "the reset became stale or a newer message is pending");
             return;
           }
           publishRecoveryState(request, "completed");
-          publishRecoveryState(request, "continuation");
-          continueAfterReset(ctx, request);
+          if (continueAfterReset(ctx, request)) {
+            publishRecoveryState(request, "continuation");
+          } else {
+            publishRecoveryState(request, "failed", "the reset continuation could not be queued");
+          }
         },
         onError(error) {
+          callbackFailed = true;
           if (inFlight?.requestId === request.requestId) inFlight = undefined;
           lease.release();
-          publishRecoveryState(request, "cancelled", "the compaction failed");
-          if (!isRequestLifecycleCurrent(request, ctx)) return;
+          if (!isRequestLifecycleCurrent(request, ctx)) {
+            publishRecoveryState(request, "cancelled", "the compaction failed after its lifecycle was replaced");
+            return;
+          }
           ctx.ui.notify(`New-context reset failed; continuing with the current context: ${error.message}`, "warning");
-          continueAfterReset(ctx, request);
+          if (continueAfterReset(ctx, request)) {
+            if (pending?.requestId === request.requestId) pending = undefined;
+            publishRecoveryState(request, "continuation");
+          } else {
+            publishRecoveryState(request, "failed", "the failed reset continuation could not be queued");
+          }
         },
       });
+      if (!callbackFailed && pending?.requestId === request.requestId) pending = undefined;
       return true;
     } catch (error) {
       if (inFlight?.requestId === request.requestId) inFlight = undefined;
       lease.release();
-      publishRecoveryState(request, "cancelled", "the compaction request could not start");
       if (isRequestLifecycleCurrent(request, ctx)) {
         ctx.ui.notify(
           `New-context reset failed; continuing with the current context: ${error instanceof Error ? error.message : String(error)}`,
           "warning",
         );
-        continueAfterReset(ctx, request);
+        if (continueAfterReset(ctx, request)) {
+          if (pending?.requestId === request.requestId) pending = undefined;
+          publishRecoveryState(request, "continuation");
+        } else {
+          publishRecoveryState(request, "failed", "the rejected reset continuation could not be queued");
+        }
+      } else {
+        publishRecoveryState(request, "cancelled", "the compaction request belonged to a replaced lifecycle");
       }
       return false;
     }
@@ -505,7 +541,7 @@ export function buildNewContextRecoveryCapsule(details: MaestroCompactionDetails
     "- This is the authoritative structured recovery state.",
     "- Continue from the active Todo's exact next action.",
     "- Use resource for listed URIs.",
-    "- If a required current-session fact or URI is absent, use compact_history; do not guess.",
+    "- If a required current-session fact or URI is absent, use session_history with scope=current_session; do not guess.",
     "- Capsule: Maestro New Context Recovery Capsule v2; no model summary was generated.",
     "",
     "## Session",
@@ -630,7 +666,7 @@ export function buildNewContextRecoveryCapsule(details: MaestroCompactionDetails
     `- active=${omitted.active}, runnable=${omitted.runnable}, blocked=${omitted.blocked}, completed=${omitted.completed}, transitionResources=${omitted.transitionResources}, references=${omitted.references}`,
     "",
     "## Recovery Hint",
-    "Use `todo list`/`todo get` for live task state. Use `compact_history` for bounded current-session recovery and `resource` for exact agent://, session://, pr://, issue://, skill://, or rule:// references.",
+    "Use `todo list`/`todo get` for live task state. Use `session_history` with scope=current_session for bounded recovery and `resource` for exact agent://, session://, pr://, issue://, skill://, or rule:// references.",
     "</recovery_capsule>",
   );
 

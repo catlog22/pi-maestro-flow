@@ -1,9 +1,12 @@
 export type TeammateCompactionPhase = "pending" | "continuation" | "completed" | "failed" | "cancelled";
+export type TeammateCompactionProducer = "auto" | "new-context" | "output-limit";
 
 export interface TeammateCompactionStateEvent {
   type: "teammate_compaction_state";
   recoveryId: string;
+  producer: TeammateCompactionProducer;
   phase: TeammateCompactionPhase;
+  /** Monotonic only within producer; different producers are never compared. */
   generation: number;
   reason?: string;
 }

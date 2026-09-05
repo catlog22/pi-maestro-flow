@@ -110,6 +110,18 @@ const PRUNE_STATE_ENTRY_TYPE = "maestro-auto-prune-state";
 const PENDING_INTENT_ENTRY_TYPE = "maestro-auto-compaction-intent";
 const PENDING_INTENT_VERSION = 3;
 const PRUNE_STATE_VERSION = 6;
+
+function autoRecoveryId(sessionId: string | undefined, intent: PendingCompactionIntent): string {
+  return `${sessionId ?? "unknown"}:auto:${intent.triggerKey}`;
+}
+
+function recoveryDeliveryMarker(recoveryId: string): string {
+  return `[maestro-recovery-delivery:${createHash("sha256").update(recoveryId).digest("hex").slice(0, 24)}]`;
+}
+
+function recoveryDeliveryPrompt(prompt: string, recoveryId: string): string {
+  return `${prompt}\n\n${recoveryDeliveryMarker(recoveryId)}`;
+}
 export const MAX_PRUNE_DELTAS_BETWEEN_CHECKPOINTS = 32;
 export const MAX_OFF_BRANCH_PRUNE_ENTRIES = 128;
 export const MAX_OFF_BRANCH_PRUNE_BYTES = 128 * 1024;
@@ -279,6 +291,10 @@ interface PendingCompactionIntent {
 
 interface PendingOutputLimitIntent {
   generation: number;
+  /** Producer-scoped identity; output-limit generations are not comparable to auto intents. */
+  recoveryId: string;
+  /** A continuation prompt is durably staged and must be replayed after refresh. */
+  phase?: "pending" | "submitted" | "continuation";
   settings: CompactionSettings;
   usage: ContextUsage;
   threshold: number;
@@ -307,6 +323,8 @@ export interface AutoCompactionState {
   /** Continuation was queued, but its cleared tombstone has not persisted yet. */
   deliveredContinuationIntent?: PendingCompactionIntent;
   pendingOutputLimitIntent?: PendingOutputLimitIntent;
+  /** Native fallback callback fence; invalidated by lifecycle/reset changes. */
+  nativeFallbackNonce: number;
   lastTriggerKey?: string;
   /** Turn at which the last internals-resolution warning was shown; undefined re-arms it. */
   internalsWarningTurn?: number;
@@ -515,6 +533,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     outputLimitContinuations: 0,
     outputLimitBreakerNotified: false,
     outputLimitContinuationNotified: false,
+    nativeFallbackNonce: 0,
     providerPressureAttempted: false,
     providerPressureBlocked: false,
     providerPressureTerminal: false,
@@ -557,7 +576,9 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     return state.loopCriticalBlocked || intent?.loopCritical === true ? true : undefined;
   }
   function recoveryIdFor(intent: PendingCompactionIntent): string {
-    return `${state.sessionId ?? "unknown"}:${intent.triggerKey}`;
+    // The producer marker is part of the wire identity. Auto and new-context
+    // generations are independent counters and must never be compared globally.
+    return autoRecoveryId(state.sessionId, intent);
   }
   function publishRecoveryState(
     intent: PendingCompactionIntent,
@@ -567,6 +588,23 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     if (!intent.requestBlocked && !intent.contextExhausted && !intent.loopCritical) return;
     publishTeammateCompactionState({
       recoveryId: recoveryIdFor(intent),
+      producer: "auto",
+      phase,
+      generation: intent.generation,
+      ...(reason ? { reason } : {}),
+    });
+  }
+  function outputRecoveryIdFor(intent: PendingOutputLimitIntent): string {
+    return intent.recoveryId;
+  }
+  function publishOutputRecoveryState(
+    intent: PendingOutputLimitIntent,
+    phase: TeammateCompactionPhase,
+    reason?: string,
+  ): void {
+    publishTeammateCompactionState({
+      recoveryId: outputRecoveryIdFor(intent),
+      producer: "output-limit",
       phase,
       generation: intent.generation,
       ...(reason ? { reason } : {}),
@@ -583,7 +621,17 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       console.warn(`[pi-maestro-flow] UI notification failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  function settleInterruptedContinuation(intent: PendingCompactionIntent, ctx: ExtensionContext): void {
+  /**
+   * Stage and deliver one interrupted-task wake. Staging is deliberately done
+   * before sendUserMessage: if the send throws, the durable continuation is
+   * still present for a later lifecycle instead of being cleared first.
+   */
+  function queueInterruptedContinuation(
+    intent: PendingCompactionIntent,
+    ctx: ExtensionContext,
+    prompt: string,
+    publishCompleted: boolean,
+  ): void {
     if (state.deliveredContinuationIntent === intent) {
       if (persistPendingIntent(pi, state)) state.deliveredContinuationIntent = undefined;
       return;
@@ -598,7 +646,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     }
 
     // Provider-pressure replay is deliberately in-process only. Interrupted
-    // task recovery must be durable before any follow-up can be queued.
+    // task recovery must be durable before any steer can be queued.
     if (durableContinuation) {
       state.pendingContinuationIntent = intent;
       if (!persistPendingIntent(pi, state)) {
@@ -609,18 +657,22 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       persistPendingIntent(pi, state);
     }
     try {
-      publishRecoveryState(intent, "completed");
+      if (publishCompleted) publishRecoveryState(intent, "completed");
+      pi.sendUserMessage(recoveryDeliveryPrompt(prompt, recoveryIdFor(intent)), { deliverAs: "steer" });
       publishRecoveryState(intent, "continuation");
-      pi.sendUserMessage(CONTINUE_PROMPT, { deliverAs: "followUp" });
       if (state.pendingContinuationIntent === intent) state.pendingContinuationIntent = undefined;
       if (durableContinuation) state.deliveredContinuationIntent = intent;
       if (persistPendingIntent(pi, state)) state.deliveredContinuationIntent = undefined;
       else notifyBestEffort(ctx, "Mid-turn continuation was queued, but its durable cleanup will retry at shutdown.", "warning");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      // Keep the staged continuation. A later lifecycle can retry the send.
       publishRecoveryState(intent, "failed", message);
       notifyBestEffort(ctx, `Mid-turn continuation failed: ${message}`, "error");
     }
+  }
+  function settleInterruptedContinuation(intent: PendingCompactionIntent, ctx: ExtensionContext): void {
+    queueInterruptedContinuation(intent, ctx, CONTINUE_PROMPT, true);
   }
   async function linkedThresholdFor(
     ctx: ExtensionContext,
@@ -689,6 +741,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     intent.loopCritical = true;
     state.loopCriticalBlocked = true;
     persistPendingIntent(pi, state);
+    publishRecoveryState(intent, "pending");
     ctx.abort();
     notifyPressureOnce(
       ctx,
@@ -705,6 +758,9 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
    * arbiter lease. Both entry points now clear the same set.
    */
   function releaseInFlight(): void {
+    // Invalidate callbacks from the replaced lifecycle before releasing the
+    // lease; the native fallback fence remains valid only for its own session.
+    state.nativeFallbackNonce += 1;
     state.running = false;
     state.activeOwner = undefined;
     state.zombieOwner = undefined;
@@ -1038,6 +1094,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       };
       state.lastTriggerKey = triggerKey;
       persistPendingIntent(pi, state);
+      if (contextExhausted) publishRecoveryState(state.pendingIntent!, "pending");
       if (contextExhausted) {
         // An actually overflowing request must never fall through to the
         // provider while waiting for the settled-phase compaction owner.
@@ -1060,6 +1117,25 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       "Mid-turn compaction repeatedly failed; falling back to Pi native compaction to recover the interrupted request.",
       "warning",
     );
+    const fallbackNonce = ++state.nativeFallbackNonce;
+    const fallbackGeneration = state.generation;
+    const fallbackSessionId = state.sessionId ?? sessionIdOf(ctx);
+    let callbackClaimed = false;
+    const ownsFallbackCallback = (): boolean => {
+      if (callbackClaimed || state.nativeFallbackNonce !== fallbackNonce) return false;
+      if (state.generation < fallbackGeneration || state.generation > fallbackGeneration + 1) return false;
+      const currentSessionId = state.sessionId ?? sessionIdOf(ctx);
+      return currentSessionId === fallbackSessionId;
+    };
+    const claimFallbackCallback = (): boolean => {
+      if (!ownsFallbackCallback()) return false;
+      callbackClaimed = true;
+      // A late callback must not be able to mutate this lifecycle or wake it a
+      // second time. onCompact intentionally leaves this nonce untouched for
+      // the one expected generation transition.
+      state.nativeFallbackNonce += 1;
+      return true;
+    };
     try {
       // Deliberately omit an owner tag. The session_before_compact arbiter
       // still observes this as native, while the marker exempts the recovery
@@ -1068,23 +1144,13 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       ctx.compact({
         customInstructions: NATIVE_FALLBACK_COMPACTION_MARKER,
         onComplete: () => {
+          if (!claimFallbackCallback()) return;
           state.breaker = resetCompactionBreaker();
           state.breakerNotified = false;
-          if (ctx.hasPendingMessages?.()) return;
-          try {
-            publishRecoveryState(intent, "completed");
-            publishRecoveryState(intent, "continuation");
-            pi.sendUserMessage(CONTINUE_PROMPT, { deliverAs: "followUp" });
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            publishRecoveryState(intent, "failed", message);
-            ctx.ui.notify(
-              `Native fallback continuation failed: ${message}`,
-              "error",
-            );
-          }
+          queueInterruptedContinuation(intent, ctx, CONTINUE_PROMPT, true);
         },
         onError: (error) => {
+          if (!claimFallbackCallback()) return;
           const message = error instanceof Error ? error.message : String(error);
           publishRecoveryState(intent, "failed", message);
           ctx.ui.notify(
@@ -1094,6 +1160,9 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         },
       });
     } catch (error) {
+      // A synchronous rejection belongs to this submission. Invalidate all
+      // late callbacks before recording the failure.
+      if (state.nativeFallbackNonce === fallbackNonce) state.nativeFallbackNonce += 1;
       const message = error instanceof Error ? error.message : String(error);
       publishRecoveryState(intent, "failed", message);
       ctx.ui.notify(
@@ -1107,21 +1176,15 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     const intent = state.pendingIntent;
     if (!intent || state.running || intent.generation !== state.generation) return;
     if (state.zombieOwner !== undefined) {
-      if (Date.now() >= (state.zombieDeadlineMs ?? 0)) {
-        // The grace window elapsed without any settle callback; treat the
-        // swallowed call as dead so compaction is not disabled forever.
-        state.zombieOwner = undefined;
-        state.zombieDeadlineMs = undefined;
-      } else {
-        // A timed-out submission may still settle inside the host; starting a
-        // new one now would race its late completion. Keep the intent queued.
-        notifyPressureOnce(
-          ctx,
-          `zombie:${state.zombieOwner}`,
-          "Mid-turn compaction held: a previously timed-out compaction may still be settling. New submissions resume once it completes or fails.",
-        );
-        return;
-      }
+      // A watchdog timeout does not prove that the host operation stopped. Keep
+      // the tombstone until its callback settles; otherwise a late callback can
+      // race a second unknown-state compaction and wake the task twice.
+      notifyPressureOnce(
+        ctx,
+        `zombie:${state.zombieOwner}`,
+        "Mid-turn compaction held: a previously timed-out compaction may still be settling. New submissions resume once it completes or fails.",
+      );
+      return;
     }
     if (!sameSettings(settingsFor(ctx), intent.settings)) {
       state.pendingIntent = undefined;
@@ -1174,28 +1237,14 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         notifyBreakerPaused();
         if (intent.loopCritical) {
           state.loopCriticalBlocked = false;
-          try {
-            publishRecoveryState(intent, "continuation");
-            pi.sendUserMessage(CONTINUE_PROMPT, { deliverAs: "followUp" });
-          } catch (recoveryError) {
-            const message = recoveryError instanceof Error ? recoveryError.message : String(recoveryError);
-            publishRecoveryState(intent, "failed", message);
-            ctx.ui.notify(`Mid-turn compaction recovery failed: ${message}`, "error");
-          }
+          queueInterruptedContinuation(intent, ctx, CONTINUE_PROMPT, false);
         } else if (options.allowNativeFallback !== false) {
           fallbackToNativeCompaction(ctx, intent);
         }
         return;
       }
       state.loopCriticalBlocked = false;
-      try {
-        publishRecoveryState(intent, "continuation");
-        pi.sendUserMessage(COMPACTION_RETRY_PROMPT, { deliverAs: "followUp" });
-      } catch (recoveryError) {
-        const message = recoveryError instanceof Error ? recoveryError.message : String(recoveryError);
-        publishRecoveryState(intent, "failed", message);
-        ctx.ui.notify(`Mid-turn compaction recovery failed: ${message}`, "error");
-      }
+      queueInterruptedContinuation(intent, ctx, COMPACTION_RETRY_PROMPT, false);
     };
     const breakerCheck = compactionBreakerAllows(state.breaker, state.turnCount);
     if (state.breaker.trippedAtTurn !== undefined && breakerCheck.breaker.trippedAtTurn === undefined) {
@@ -1224,7 +1273,8 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         `${message}: ${error instanceof Error ? error.message : String(error)}`,
         intent.requestBlocked ? "error" : "warning",
       );
-      clearPending();
+      const interrupted = !intent.requestBlocked && (intent.contextExhausted || intent.loopCritical);
+      if (!interrupted) clearPending();
       recoverInterruptedTask(intent);
     };
 
@@ -1340,6 +1390,10 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       }
       return;
     }
+    // A different producer may have announced a deferred request while another
+    // recovery owned the parent. Re-announce only when this request actually
+    // acquires the lease so the parent can bind the correct settlement owner.
+    publishRecoveryState(intent, "pending");
     state.running = true;
     state.activeRequestOwner = "mid-turn";
     state.activeLease = lease;
@@ -1385,8 +1439,8 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         state.activeOwner = undefined;
         state.activeRequestOwner = undefined;
         state.lastTriggerKey = undefined;
-        state.activeLease?.release();
-        state.activeLease = undefined;
+        // Do not release the lease here: watchdog timeout does not prove the
+        // host operation is dead. The late callback owns the release.
         clearPressureStatus(ctx);
         if (intent.requestBlocked) {
           state.providerPressureAttempted = false;
@@ -1416,14 +1470,17 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       if (state.zombieOwner === owner) {
         state.zombieOwner = undefined;
         state.zombieDeadlineMs = undefined;
-        clearPending();
+        state.activeLease?.release();
+        state.activeLease = undefined;
+        const interrupted = !intent.requestBlocked && (intent.contextExhausted || intent.loopCritical);
+        if (!interrupted) clearPending();
         ctx.ui.notify(
           `The timed-out mid-turn compaction eventually failed: ${error instanceof Error ? error.message : String(error)}`,
           "warning",
         );
-        // The watchdog already recorded the failure and released the lease;
-        // ownership stays revoked, but the interrupted task must not strand.
-        if (!state.running) recoverInterruptedTask(intent);
+        // The watchdog already dispatched the one recovery wake. Re-entering
+        // queueInterruptedContinuation is idempotent for the same intent.
+        if (!state.running && interrupted) recoverInterruptedTask(intent);
         return;
       }
       if (intent.generation !== state.generation || state.activeOwner !== owner) return;
@@ -1434,7 +1491,8 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       state.lastTriggerKey = undefined;
       state.activeLease?.release();
       state.activeLease = undefined;
-      clearPending();
+      const interrupted = !intent.requestBlocked && (intent.contextExhausted || intent.loopCritical);
+      if (!interrupted) clearPending();
       clearPressureStatus(ctx);
       ctx.ui.notify(`Mid-turn compaction failed: ${error instanceof Error ? error.message : String(error)}`, "error");
       if (intent.requestBlocked) {
@@ -1465,6 +1523,8 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
           if (state.zombieOwner === owner) {
             state.zombieOwner = undefined;
             state.zombieDeadlineMs = undefined;
+            state.activeLease?.release();
+            state.activeLease = undefined;
             ctx.ui.notify("The timed-out mid-turn compaction eventually completed.", "info");
             // The watchdog revoked ownership and recorded a failure, but the
             // compaction itself succeeded: restore success bookkeeping and
@@ -1500,23 +1560,67 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     }
   }
 
+  function queueOutputLimitWake(
+    intent: PendingOutputLimitIntent,
+    ctx: ExtensionContext,
+    prompt: string,
+    options: { clearAfterSend: boolean; publishCompleted: boolean },
+  ): boolean {
+    if (state.pendingOutputLimitIntent !== intent) return false;
+    if (ctx.hasPendingMessages?.()) {
+      state.pendingOutputLimitIntent = undefined;
+      persistPendingIntent(pi, state);
+      publishOutputRecoveryState(intent, "cancelled", "a newer user message superseded output-limit recovery");
+      return true;
+    }
+    // Stage the continuation before sendUserMessage. A thrown send therefore
+    // leaves a durable retry rather than clearing the only recovery intent.
+    intent.phase = options.clearAfterSend ? "continuation" : "pending";
+    if (!persistPendingIntent(pi, state)) {
+      notifyBestEffort(ctx, "Output-limit continuation paused: durable recovery state could not be saved.", "error");
+      return false;
+    }
+    try {
+      if (options.publishCompleted) publishOutputRecoveryState(intent, "completed");
+      pi.sendUserMessage(recoveryDeliveryPrompt(prompt, outputRecoveryIdFor(intent)), { deliverAs: "steer" });
+      publishOutputRecoveryState(intent, "continuation");
+      if (options.clearAfterSend) {
+        if (state.pendingOutputLimitIntent === intent) state.pendingOutputLimitIntent = undefined;
+        if (!persistPendingIntent(pi, state)) {
+          notifyBestEffort(ctx, "Output-limit continuation was queued, but its durable cleanup will retry at shutdown.", "warning");
+        }
+      }
+      if (options.clearAfterSend) state.outputLimitContinuations += 1;
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      publishOutputRecoveryState(intent, "failed", message);
+      notifyBestEffort(ctx, `Output-limit continuation failed: ${message}`, "error");
+      return false;
+    }
+  }
+
   async function settlePendingOutputLimit(ctx: ExtensionContext): Promise<boolean> {
     const intent = state.pendingOutputLimitIntent;
     if (!intent || state.running || intent.generation !== state.generation) return false;
     if (state.zombieOwner !== undefined) {
-      if (Date.now() >= (state.zombieDeadlineMs ?? 0)) {
-        state.zombieOwner = undefined;
-        state.zombieDeadlineMs = undefined;
-      } else {
-        return false;
-      }
+      // Never submit a second output-limit compaction while the first host
+      // callback is unknown. The callback (or an explicit lifecycle reset) is
+      // the only proof that this owner can be released.
+      return false;
     }
     if (!sameSettings(settingsFor(ctx), intent.settings)) {
       state.pendingOutputLimitIntent = undefined;
+      persistPendingIntent(pi, state);
+      publishOutputRecoveryState(intent, "cancelled", "compaction settings changed before output-limit recovery ran");
       return false;
+    }
+    if (intent.phase === "continuation") {
+      return queueOutputLimitWake(intent, ctx, OUTPUT_LIMIT_CONTINUE_PROMPT, { clearAfterSend: true, publishCompleted: true });
     }
     const clearPending = () => {
       if (state.pendingOutputLimitIntent === intent) state.pendingOutputLimitIntent = undefined;
+      persistPendingIntent(pi, state);
     };
     if (dependencies.arbiter?.currentOwner()) return true;
 
@@ -1540,9 +1644,14 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       && usageTokens !== undefined
       && usageTokens > linkedThreshold.thresholdTokens;
     if (contextConstrained === false && !linkedThresholdExceeded) {
-      clearPending();
-      if (ctx.hasPendingMessages?.()) return true;
+      if (ctx.hasPendingMessages?.()) {
+        clearPending();
+        publishOutputRecoveryState(intent, "cancelled", "a newer user message superseded output-limit recovery");
+        return true;
+      }
       if (state.outputLimitContinuations >= MAX_OUTPUT_LIMIT_CONTINUATIONS) {
+        clearPending();
+        publishOutputRecoveryState(intent, "failed", "output-limit continuation budget exhausted");
         if (!state.outputLimitContinuationNotified) {
           state.outputLimitContinuationNotified = true;
           ctx.ui.notify(
@@ -1552,17 +1661,13 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         }
         return true;
       }
-      try {
-        pi.sendUserMessage(OUTPUT_LIMIT_DIRECT_CONTINUE_PROMPT, { deliverAs: "followUp" });
-        state.outputLimitContinuations += 1;
-      } catch (error) {
-        ctx.ui.notify(`Output-limit continuation failed: ${error instanceof Error ? error.message : String(error)}`, "error");
-      }
+      queueOutputLimitWake(intent, ctx, OUTPUT_LIMIT_DIRECT_CONTINUE_PROMPT, { clearAfterSend: true, publishCompleted: false });
       return true;
     }
 
     if (state.outputLimitCompactions >= MAX_OUTPUT_LIMIT_COMPACTIONS) {
       clearPending();
+      publishOutputRecoveryState(intent, "failed", "output-limit compaction budget exhausted");
       if (!state.outputLimitBreakerNotified) {
         state.outputLimitBreakerNotified = true;
         ctx.ui.notify(
@@ -1599,11 +1704,13 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         preparation = internals.prepareCompaction(branch, intent.settings);
       } catch (error) {
         clearPending();
+        publishOutputRecoveryState(intent, "failed", error instanceof Error ? error.message : String(error));
         ctx.ui.notify(`Output-limit compaction preparation failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
         return false;
       }
       if (!preparation) {
         clearPending();
+        publishOutputRecoveryState(intent, "failed", "Pi reported no compactable history");
         ctx.ui.notify(
           "Output-limit compaction skipped: Pi has no compactable history; the response keeps hitting the output token limit inside the recent keep window.",
           "warning",
@@ -1625,7 +1732,14 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     const lease = dependencies.arbiter?.request("output-limit", outputLimitTrigger);
     if (dependencies.arbiter && !lease) return true;
 
-    clearPending();
+    // Keep the output-limit intent durable until the callback has queued the
+    // continuation. A compaction call can throw after accepting the request.
+    intent.phase = "submitted";
+    if (!persistPendingIntent(pi, state)) {
+      lease?.release();
+      return true;
+    }
+    publishOutputRecoveryState(intent, "pending");
     state.outputLimitCompactions += 1;
     state.running = true;
     state.activeRequestOwner = "output-limit";
@@ -1640,54 +1754,69 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       }
     };
     const instructions = buildOutputLimitInstructions(intent.usage, instructionReserve);
+    let callbackClaimed = false;
     const failOutputLimit = (error: unknown) => {
+      if (callbackClaimed || (state.activeOwner !== owner && state.zombieOwner !== owner)) return;
+      callbackClaimed = true;
       disarmWatchdog();
-      if (state.zombieOwner === owner) {
+      const timedOut = state.zombieOwner === owner;
+      if (timedOut) {
         state.zombieOwner = undefined;
         state.zombieDeadlineMs = undefined;
+        // The callback proves the host owner is settled; release the retained
+        // lease now (a timed-out arbiter may already have rejected it).
+        state.activeLease?.release();
+        state.activeLease = undefined;
         ctx.ui.notify(
           `The timed-out output-limit compaction eventually failed: ${error instanceof Error ? error.message : String(error)}`,
           "warning",
         );
       }
-      if (state.activeOwner !== owner) return;
-      state.running = false;
-      state.activeOwner = undefined;
-      state.activeRequestOwner = undefined;
-      state.activeLease?.release();
-      state.activeLease = undefined;
-      ctx.ui.notify(`Output-limit compaction failed: ${error instanceof Error ? error.message : String(error)}`, "error");
-      if (state.outputLimitCompactions >= MAX_OUTPUT_LIMIT_COMPACTIONS || ctx.hasPendingMessages?.()) return;
-      state.pendingOutputLimitIntent = intent;
-      try {
-        pi.sendUserMessage(OUTPUT_LIMIT_RETRY_PROMPT, { deliverAs: "followUp" });
-      } catch (recoveryError) {
-        state.pendingOutputLimitIntent = undefined;
-        ctx.ui.notify(`Output-limit compaction recovery failed: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`, "error");
+      if (state.activeOwner === owner) {
+        state.running = false;
+        state.activeOwner = undefined;
+        state.activeRequestOwner = undefined;
+        state.activeLease?.release();
+        state.activeLease = undefined;
       }
+      ctx.ui.notify(`Output-limit compaction failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+      if (state.outputLimitCompactions >= MAX_OUTPUT_LIMIT_COMPACTIONS || ctx.hasPendingMessages?.()) {
+        state.pendingOutputLimitIntent = undefined;
+        persistPendingIntent(pi, state);
+        publishOutputRecoveryState(intent, "failed", "output-limit compaction budget exhausted");
+        return;
+      }
+      // Keep the intent pending while the retry steer is sent. The next
+      // settled response will submit a fresh, known output-limit owner.
+      intent.phase = "pending";
+      state.pendingOutputLimitIntent = intent;
+      queueOutputLimitWake(intent, ctx, OUTPUT_LIMIT_RETRY_PROMPT, { clearAfterSend: false, publishCompleted: false });
     };
     try {
       ctx.compact({
         customInstructions: lease?.tagInstructions(instructions) ?? instructions,
         onComplete: () => {
+          if (callbackClaimed || (state.activeOwner !== owner && state.zombieOwner !== owner)) return;
+          callbackClaimed = true;
           disarmWatchdog();
           if (state.zombieOwner === owner) {
             state.zombieOwner = undefined;
             state.zombieDeadlineMs = undefined;
+            state.activeLease?.release();
+            state.activeLease = undefined;
             ctx.ui.notify("The timed-out output-limit compaction eventually completed.", "info");
           }
-          if (state.activeOwner !== owner) return;
-          state.running = false;
-          state.activeOwner = undefined;
-          state.activeRequestOwner = undefined;
-          state.activeLease?.release();
-          state.activeLease = undefined;
-          if (ctx.hasPendingMessages?.()) return;
-          try {
-            pi.sendUserMessage(OUTPUT_LIMIT_CONTINUE_PROMPT, { deliverAs: "followUp" });
-          } catch (error) {
-            ctx.ui.notify(`Output-limit continuation failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+          if (state.activeOwner === owner) {
+            state.running = false;
+            state.activeOwner = undefined;
+            state.activeRequestOwner = undefined;
+            state.activeLease?.release();
+            state.activeLease = undefined;
           }
+          // The callback is the proof that this owner settled; one staged wake
+          // is enough even when the watchdog already sent a retry steer.
+          intent.phase = "continuation";
+          queueOutputLimitWake(intent, ctx, OUTPUT_LIMIT_CONTINUE_PROMPT, { clearAfterSend: true, publishCompleted: true });
         },
         onError: failOutputLimit,
       });
@@ -1700,8 +1829,8 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         state.running = false;
         state.activeOwner = undefined;
         state.activeRequestOwner = undefined;
-        state.activeLease?.release();
-        state.activeLease = undefined;
+        // Do not release the lease here: watchdog timeout does not prove the
+        // host operation is dead. The late callback owns the release.
         ctx.ui.notify(
           "Output-limit compaction timed out; it will retry on the next truncated response.",
           "warning",
@@ -1747,8 +1876,9 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       state.pendingIntent = restored?.phase === "continuation" || restoredIntent?.requestBlocked
         ? undefined
         : restoredIntent;
+      state.pendingOutputLimitIntent = restored?.outputLimitIntent;
       state.persistedIntentKey = restored?.key ?? pendingIntentKey(undefined, "cleared");
-      if (restoredIntent?.requestBlocked || restored?.phase === "submitted") {
+      if (restoredIntent?.requestBlocked || restored?.phase === "submitted" || restored?.outputLimitIntent?.phase === "pending") {
         // A fresh lifecycle proves the old in-process owner is gone. Convert an
         // uncertain submitted record back to pending before any new admission.
         persistPendingIntent(pi, state);
@@ -1761,6 +1891,13 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       publishIdleStatus(ctx, settingsFor(ctx).enabled);
       if (state.pendingContinuationIntent) {
         settleInterruptedContinuation(state.pendingContinuationIntent, ctx);
+      } else if (state.pendingOutputLimitIntent?.phase === "continuation") {
+        queueOutputLimitWake(
+          state.pendingOutputLimitIntent,
+          ctx,
+          OUTPUT_LIMIT_CONTINUE_PROMPT,
+          { clearAfterSend: true, publishCompleted: true },
+        );
       }
     },
     async evaluate(messages, ctx) {
@@ -2113,6 +2250,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       const finalStopReason = finalAssistantStopReason(messages);
       if (!settings.enabled || !ctx.model || finalStopReason !== "length") {
         state.pendingOutputLimitIntent = undefined;
+        persistPendingIntent(pi, state);
         state.outputLimitCompactions = 0;
         state.outputLimitContinuations = 0;
         state.outputLimitBreakerNotified = false;
@@ -2122,6 +2260,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       if (generation !== state.generation) return;
       if (ctx.hasPendingMessages?.()) {
         state.pendingOutputLimitIntent = undefined;
+        persistPendingIntent(pi, state);
         return;
       }
       // A length stop means the assistant response was truncated at the model
@@ -2132,12 +2271,17 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       // still fails safely when there is no compactable history.
       const usage = ctx.getContextUsage?.()
         ?? { percent: null, tokens: null, contextWindow: ctx.model?.contextWindow ?? 0 };
-      state.pendingOutputLimitIntent = {
+      const outputLimitIntent: PendingOutputLimitIntent = {
         generation,
+        recoveryId: `${state.sessionId ?? "unknown"}:output-limit:${randomUUID()}`,
+        phase: "pending",
         settings,
         usage: { ...usage },
         threshold: settings.soft?.pruneRatio ?? DEFAULT_OUTPUT_LIMIT_RATIO,
       };
+      state.pendingOutputLimitIntent = outputLimitIntent;
+      persistPendingIntent(pi, state);
+      publishOutputRecoveryState(outputLimitIntent, "pending");
     },
     onCompact(completedOwner, ctx) {
       const eventSessionId = ctx ? sessionIdOf(ctx) : undefined;
@@ -2154,6 +2298,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       const preserveOutputLimitBreaker = !wasPreempted && activeRequestOwner === "output-limit";
       const outputLimitCompactions = state.outputLimitCompactions;
       const outputLimitBreakerNotified = state.outputLimitBreakerNotified;
+      const outputLimitIntent = state.pendingOutputLimitIntent;
       const continuationIntent = state.pendingIntent
         && !state.pendingIntent.requestBlocked
         && (state.pendingIntent.contextExhausted || state.pendingIntent.loopCritical)
@@ -2178,7 +2323,9 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         ? continuationIntent
         : undefined;
       state.deliveredContinuationIntent = undefined;
-      state.pendingOutputLimitIntent = undefined;
+      state.pendingOutputLimitIntent = outputLimitIntent && !ctx?.hasPendingMessages?.()
+        ? Object.assign(outputLimitIntent, { generation: state.generation, phase: preserveOutputLimitBreaker ? "submitted" : "continuation" })
+        : undefined;
       state.lastTriggerKey = undefined;
       state.lastNoCompactableKey = undefined;
       resetCycleState();
@@ -2187,6 +2334,9 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         state.outputLimitBreakerNotified = outputLimitBreakerNotified;
       }
       persistPruneManifest(pi, state);
+      if (!state.pendingOutputLimitIntent && outputLimitIntent) {
+        publishOutputRecoveryState(outputLimitIntent, "cancelled", "a newer user message superseded output-limit recovery");
+      }
       persistPendingIntent(pi, state);
       if (settledIntent && ctx) settleInterruptedContinuation(settledIntent, ctx);
       return true;
@@ -2203,6 +2353,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         : state.pendingIntent;
       const parkedContinuation = state.pendingContinuationIntent;
       const parkedDeliveredContinuation = state.deliveredContinuationIntent;
+      const parkedOutputLimit = state.pendingOutputLimitIntent;
       releaseInFlight();
       state.pendingIntent = parkedIntent
         ? { ...parkedIntent, generation: state.generation }
@@ -2212,6 +2363,9 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         : undefined;
       state.deliveredContinuationIntent = parkedDeliveredContinuation
         ? { ...parkedDeliveredContinuation, generation: state.generation }
+        : undefined;
+      state.pendingOutputLimitIntent = parkedOutputLimit
+        ? { ...parkedOutputLimit, generation: state.generation, phase: parkedOutputLimit.phase === "continuation" ? "continuation" : "pending" }
         : undefined;
       persistPruneManifest(pi, state);
       persistPendingIntent(pi, state);
@@ -2865,22 +3019,42 @@ function pendingIntentPayload(intent: PendingCompactionIntent): Record<string, u
   };
 }
 
+function outputLimitIntentPayload(intent: PendingOutputLimitIntent): Record<string, unknown> {
+  return {
+    recoveryId: intent.recoveryId,
+    phase: intent.phase ?? "pending",
+    settings: intent.settings,
+    usage: intent.usage,
+    threshold: intent.threshold,
+  };
+}
+
 function currentPendingIntentPhase(state: AutoCompactionState): PersistedIntentPhase {
   if (state.deliveredContinuationIntent) return "cleared";
   if (state.pendingContinuationIntent) return "continuation";
-  if (!state.pendingIntent) return "cleared";
-  return state.activeRequestOwner === "mid-turn" || state.zombieOwner !== undefined
-    ? "submitted"
-    : "pending";
+  if (state.pendingIntent) {
+    return state.activeRequestOwner === "mid-turn" || state.zombieOwner !== undefined
+      ? "submitted"
+      : "pending";
+  }
+  const output = state.pendingOutputLimitIntent;
+  if (!output) return "cleared";
+  if (output.phase === "continuation") return "continuation";
+  if (output.phase === "submitted" || state.activeRequestOwner === "output-limit" || state.zombieOwner !== undefined) {
+    return "submitted";
+  }
+  return "pending";
 }
 
 function pendingIntentKey(
   intent: PendingCompactionIntent | undefined,
   phase: PersistedIntentPhase,
+  outputLimit?: PendingOutputLimitIntent,
 ): string {
   return JSON.stringify({
     phase,
     pending: intent ? pendingIntentPayload(intent) : null,
+    outputLimit: outputLimit ? outputLimitIntentPayload(outputLimit) : null,
   });
 }
 
@@ -2889,7 +3063,8 @@ function persistPendingIntent(pi: ExtensionAPI, state: AutoCompactionState): boo
   const intent = phase === "cleared"
     ? undefined
     : state.pendingContinuationIntent ?? state.pendingIntent;
-  const key = pendingIntentKey(intent, phase);
+  const outputLimit = state.pendingOutputLimitIntent;
+  const key = pendingIntentKey(intent, phase, outputLimit);
   if (key === state.persistedIntentKey || !pi.appendEntry) return true;
   try {
     pi.appendEntry(PENDING_INTENT_ENTRY_TYPE, {
@@ -2897,6 +3072,7 @@ function persistPendingIntent(pi: ExtensionAPI, state: AutoCompactionState): boo
       sessionId: state.sessionId,
       phase,
       pending: intent ? pendingIntentPayload(intent) : null,
+      outputLimit: outputLimit ? outputLimitIntentPayload(outputLimit) : null,
     });
     state.persistedIntentKey = key;
     return true;
@@ -2909,6 +3085,7 @@ function persistPendingIntent(pi: ExtensionAPI, state: AutoCompactionState): boo
 
 interface LoadedPersistedIntent {
   intent?: PendingCompactionIntent;
+  outputLimitIntent?: PendingOutputLimitIntent;
   phase: PersistedIntentPhase;
   key: string;
 }
@@ -2924,20 +3101,30 @@ function loadPersistedIntent(
   } | undefined;
   const entries = manager?.getBranch?.() ?? manager?.getEntries?.() ?? [];
   let entry: { data?: unknown } | undefined;
+  let entryIndex = -1;
   let compactedAfterIntent = false;
   for (let index = entries.length - 1; index >= 0; index--) {
     const candidate = entries[index];
     if (candidate.type === "compaction") compactedAfterIntent = true;
     if (candidate.type === "custom" && candidate.customType === PENDING_INTENT_ENTRY_TYPE) {
       entry = candidate;
+      entryIndex = index;
       break;
     }
   }
+  const deliveryWasRecorded = (recoveryId: string): boolean => {
+    const marker = recoveryDeliveryMarker(recoveryId);
+    return entries.slice(entryIndex + 1).some((candidate) => {
+      try { return JSON.stringify(candidate).includes(marker); }
+      catch { return false; }
+    });
+  };
   const data = entry?.data as {
     version?: unknown;
     sessionId?: unknown;
     phase?: unknown;
     pending?: unknown;
+    outputLimit?: unknown;
   } | undefined;
   const version = data?.version;
   if (!data || (version !== 1 && version !== 2 && version !== PENDING_INTENT_VERSION)
@@ -2946,37 +3133,70 @@ function loadPersistedIntent(
     && (data.phase === "pending" || data.phase === "submitted" || data.phase === "continuation" || data.phase === "cleared")
       ? data.phase
       : data.pending && typeof data.pending === "object" ? "pending" : "cleared";
-  if (!data.pending || typeof data.pending !== "object") {
-    return phase === "cleared"
-      ? { phase, key: pendingIntentKey(undefined, phase) }
+  let intent: PendingCompactionIntent | undefined;
+  let recoveredPhase: PersistedIntentPhase = phase;
+  if (data.pending && typeof data.pending === "object" && phase !== "cleared") {
+    const pending = data.pending as Omit<PendingCompactionIntent, "generation">;
+    if (typeof pending.triggerKey !== "string" || !pending.estimate || !pending.linkedThreshold
+      || !pending.settings || !pending.effectiveSettings
+      || typeof pending.contextExhausted !== "boolean"
+      || (version !== 1 && typeof pending.requestBlocked !== "boolean")) return undefined;
+    intent = {
+      ...pending,
+      requestBlocked: version === 1 ? undefined : pending.requestBlocked,
+      loopCritical: pending.loopCritical === true,
+      generation,
+    };
+    recoveredPhase = compactedAfterIntent
+      ? !intent.requestBlocked && (intent.contextExhausted || intent.loopCritical)
+        ? "continuation"
+        : "cleared"
+      : phase;
+    if (recoveredPhase === "continuation" && deliveryWasRecorded(autoRecoveryId(sessionId, intent))) {
+      intent = undefined;
+      recoveredPhase = "cleared";
+    }
+  }
+
+  let outputLimitIntent: PendingOutputLimitIntent | undefined;
+  if (data.outputLimit && typeof data.outputLimit === "object") {
+    const output = data.outputLimit as {
+      recoveryId?: unknown;
+      phase?: unknown;
+      settings?: unknown;
+      usage?: unknown;
+      threshold?: unknown;
+    };
+    if (typeof output.recoveryId !== "string" || !output.settings || !output.usage
+      || typeof output.threshold !== "number") return undefined;
+    const outputPhase = compactedAfterIntent || output.phase === "continuation"
+      ? "continuation"
+      : "pending";
+    if (!deliveryWasRecorded(output.recoveryId)) {
+      outputLimitIntent = {
+        recoveryId: output.recoveryId,
+        settings: output.settings as CompactionSettings,
+        usage: output.usage as ContextUsage,
+        threshold: output.threshold,
+        generation,
+        phase: outputPhase,
+      };
+    }
+  }
+
+  if (!intent && !outputLimitIntent) {
+    return phase === "cleared" || recoveredPhase === "cleared"
+      ? { phase: "cleared", key: pendingIntentKey(undefined, "cleared") }
       : undefined;
   }
-  if (phase === "cleared") return undefined;
-  const pending = data.pending as Omit<PendingCompactionIntent, "generation">;
-  if (typeof pending.triggerKey !== "string" || !pending.estimate || !pending.linkedThreshold
-    || !pending.settings || !pending.effectiveSettings
-    || typeof pending.contextExhausted !== "boolean"
-    || (version !== 1 && typeof pending.requestBlocked !== "boolean")) {
-    return undefined;
-  }
-  const intent: PendingCompactionIntent = {
-    ...pending,
-    requestBlocked: version === 1 ? undefined : pending.requestBlocked,
-    loopCritical: pending.loopCritical === true,
-    generation,
-  };
-  const recoveredPhase: PersistedIntentPhase = compactedAfterIntent
-    ? !intent.requestBlocked && (intent.contextExhausted || intent.loopCritical)
-      ? "continuation"
-      : "cleared"
-    : phase;
-  if (recoveredPhase === "cleared") return undefined;
+  const effectivePhase = intent
+    ? recoveredPhase
+    : outputLimitIntent?.phase === "continuation" ? "continuation" : "pending";
   return {
-    intent,
-    phase: recoveredPhase,
-    // Preserve the actual journal key so an inferred continuation is appended
-    // durably before replay rather than mistaken for an existing record.
-    key: pendingIntentKey(intent, phase),
+    ...(intent ? { intent } : {}),
+    ...(outputLimitIntent ? { outputLimitIntent } : {}),
+    phase: effectivePhase,
+    key: pendingIntentKey(intent, effectivePhase, outputLimitIntent),
   };
 }
 
