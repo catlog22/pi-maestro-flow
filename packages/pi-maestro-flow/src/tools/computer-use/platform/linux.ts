@@ -5,7 +5,7 @@ import { waylandCapabilities, waylandRestrictedError } from "./index.ts";
 import { runBridgeProcess } from "./bridge-process.ts";
 import { NativeDesktopAdapter } from "./windows.ts";
 import type { AdapterOptions } from "./base.ts";
-import type { AccessibilityAdapter, CaptureRequest, KeyboardRequest, PointerRequest, TypeRequest, WindowQuery } from "./types.ts";
+import type { AccessibilityAdapter, CaptureRequest, KeyboardRequest, PointerRequest, ScrollRequest, TypeRequest, WindowQuery } from "./types.ts";
 
 function xdotoolCapability(): { state: "degraded" | "unavailable"; provider?: string; reason: string; errorCode?: "DEPENDENCY_UNAVAILABLE" } {
   try {
@@ -97,6 +97,11 @@ export class LinuxDesktopAdapter extends NativeDesktopAdapter {
   override async pointer(request: PointerRequest, signal?: AbortSignal): Promise<PointerActionResult> {
     this.ensureGlobalAllowed();
     return super.pointer(request, signal);
+  }
+
+  override async scroll(request: ScrollRequest, signal?: AbortSignal): Promise<PointerActionResult> {
+    this.ensureGlobalAllowed();
+    return super.scroll(request, signal);
   }
 
   async drag(request: PointerRequest & { to: PhysicalPoint }, signal?: AbortSignal): Promise<PointerActionResult> {

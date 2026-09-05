@@ -7,13 +7,14 @@ import {
   computerUseManager,
   type ComputerUseManagerLike,
   type ComputerUseStatus,
+  type ManagerOperationOptions,
 } from "./computer-use/manager.ts";
-import { errorInfo, type CapturedFrame, type PhysicalRect } from "./computer-use/types.ts";
+import { ComputerUseError, errorInfo, type CapturedFrame, type PhysicalRect } from "./computer-use/types.ts";
 import { getSopRegistry, SOP_INDEX_EXTRAS, SOP_INDEX_HEADERS } from "./sop/sop-registry-singleton.ts";
 
 const ACTIONS = [
   "guide", "capabilities", "status", "permissions", "list_windows", "activate", "screenshot", "ocr", "detect",
-  "ui_tree", "find_control", "press_control", "click", "double_click", "right_click", "move", "drag", "press",
+  "ui_tree", "find_control", "press_control", "click", "double_click", "right_click", "move", "scroll", "drag", "press",
   "type", "paste", "find_block",
 ] as const;
 type ComputerUseAction = typeof ACTIONS[number];
@@ -21,7 +22,7 @@ type ComputerUseAction = typeof ACTIONS[number];
 const ComputerUseAction = Type.Unsafe<ComputerUseAction>({
   type: "string",
   enum: [...ACTIONS],
-  description: "Desktop action. Call guide first, then use observe-act-verify for physical computer control.",
+  description: "Desktop action. Call guide first, then use observe-act-verify. Mouse actions are click, double_click, right_click, move, scroll, and drag.",
 });
 const Source = Type.Unsafe<"screen" | "window" | "region" | "image">({ type: "string", enum: ["screen", "window", "region", "image"] });
 const Region = Type.Object({
@@ -59,6 +60,9 @@ export const ComputerUseParams = Type.Object({
   allow_destructive: Type.Optional(Type.Boolean()),
   target_context: Type.Optional(Type.Unsafe<"desktop" | "local_game" | "network_game">({ type: "string", enum: ["desktop", "local_game", "network_game"] })),
   duration_ms: Type.Optional(Type.Number({ minimum: 0, maximum: 120_000 })),
+  observe_after: Type.Optional(Type.Boolean({ description: "For mouse actions, attach a fresh target-window screenshot after the action (default true)" })),
+  direction: Type.Optional(Type.Unsafe<"up" | "down" | "left" | "right">({ type: "string", enum: ["up", "down", "left", "right"], description: "Scroll direction" })),
+  magnitude: Type.Optional(Type.Integer({ minimum: 1, maximum: 10_000, description: "Bounded scroll amount" })),
   keys: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 64 })),
   text: Type.Optional(Type.String({ maxLength: 100_000 })),
   interval_ms: Type.Optional(Type.Number({ minimum: 0, maximum: 10_000 })),
@@ -78,8 +82,9 @@ export const ComputerUseParams = Type.Object({
     { if: { properties: { source: { const: "window" } }, required: ["source"] }, then: { required: ["window_id"] } },
     { if: { properties: { source: { const: "region" } }, required: ["source"] }, then: { required: ["region"] } },
     { if: { properties: { source: { const: "image" } }, required: ["source"] }, then: { required: ["path"] } },
-    { if: { properties: { action: { enum: ["activate", "ui_tree", "find_control", "press_control", "click", "double_click", "right_click", "move", "drag", "press", "type", "paste"] } }, required: ["action"] }, then: { required: ["window_id"] } },
-    { if: { properties: { action: { enum: ["click", "double_click", "right_click", "move", "drag"] } }, required: ["action"] }, then: { required: ["x", "y"] } },
+    { if: { properties: { action: { enum: ["activate", "ui_tree", "find_control", "press_control", "click", "double_click", "right_click", "move", "scroll", "drag", "press", "type", "paste"] } }, required: ["action"] }, then: { required: ["window_id"] } },
+    { if: { properties: { action: { enum: ["click", "double_click", "right_click", "move", "scroll", "drag"] } }, required: ["action"] }, then: { required: ["x", "y"] } },
+    { if: { properties: { action: { const: "scroll" } }, required: ["action"] }, then: { required: ["direction", "magnitude"] } },
     { if: { properties: { action: { const: "drag" } }, required: ["action"] }, then: { required: ["to_x", "to_y"] } },
     { if: { properties: { action: { const: "press_control" } }, required: ["action"] }, then: { required: ["control_ref"] } },
     { if: { properties: { action: { const: "find_control" } }, required: ["action"] }, then: { required: ["query"] } },
@@ -98,7 +103,7 @@ export interface ComputerUseToolDetails {
   image?: { mimeType: string; width: number; height: number; bytes: number; source: string };
 }
 
-const POINTER_ACTIONS = new Set(["click", "double_click", "right_click", "move", "drag"]);
+const POINTER_ACTIONS = new Set(["click", "double_click", "right_click", "move", "scroll", "drag"]);
 const VISION_ACTIONS = new Set(["ocr", "detect"]);
 const SOURCE_ACTIONS = new Set(["screenshot", "ocr", "detect", "find_block"]);
 
@@ -106,11 +111,14 @@ export function createComputerUseTool(manager: ComputerUseManagerLike = computer
   return {
     name: "computer_use",
     label: "Computer Use",
-    description: "Observe and control the physical desktop through a serialized, fail-closed ComputerUseManager. Use computer_use { action: \"guide\" } before desktop operations. Coordinates are physical pixels; activate and verify foreground state, then observe-act-verify. Near-zero diagnostics latch input until a fresh probe. Wayland, permissions, network-game software input, and unavailable native providers remain restricted.",
-    promptSnippet: "Use computer_use for bounded physical desktop observation and input. Call action=guide first, then capabilities/permissions and an observe action. Coordinates are physical screen pixels or verified window-client pixels; activate, act, and verify. Stop on near-zero, timeout, permission, Wayland, stale-control, or foreground errors.",
+    description: "Observe and control the physical desktop through a serialized, fail-closed ComputerUseManager. Use computer_use { action: \"guide\" } before desktop operations. Coordinates are physical pixels; activate and verify foreground state, then observe-act-verify. Mouse actions attach a fresh target-window screenshot by default so the next action uses current visual state. Near-zero diagnostics latch input until a fresh probe. Wayland, permissions, network-game software input, and unavailable native providers remain restricted.",
+    promptSnippet: "Use computer_use for bounded physical desktop observation and input. Call action=guide first, then capabilities/permissions and an observe action. Use verified mouse coordinates for visual targets instead of avoiding the pointer with keyboard navigation. Mouse actions observe the target window again by default. Stop on near-zero, timeout, permission, Wayland, stale-control, or foreground errors.",
     promptGuidelines: [
-      "Before desktop operations, call computer_use action=guide; load core for the observe-act-verify loop, coordinates for physical/client-origin/DPI rules, safety for destructive and near-zero stops, and platform for permissions/Wayland/provider limits.",
-      "Use capabilities and permissions before assuming screen capture, accessibility, input, or window control. Use list_windows/screenshot/ocr/detect/ui_tree/find_control to observe, then activate before input.",
+      "Before desktop operations, call computer_use action=guide; load core for the observe-act-verify loop, pointer for the mouse recipe, coordinates for physical/client-origin/DPI rules, safety for destructive and near-zero stops, and platform for permissions/Wayland/provider limits.",
+      "Use capabilities and permissions before assuming screen capture, accessibility, input, or window control. Observe through an ordered fallback: list_windows, then ui_tree/find_control when reliable, then screenshot with detect/OCR; use the model only to interpret verified pixels, never to invent coordinates. Activate before input.",
+      "When a target is visually identifiable but has no reliable accessibility control, use click/double_click/right_click with the verified box center; use move for hover UI, scroll at a verified point for bounded viewport movement, and drag for sliders, canvas, or reordering. Do not substitute repeated Tab/arrow navigation merely to avoid using the mouse.",
+      "Map screenshot/OCR/detect coordinates through image.origin into screen_physical coordinates, or use verified window_client_physical coordinates. Never guess a point or DPI scale.",
+      "Mouse actions attach a fresh target-window screenshot by default. Treat it as the next observation before choosing another action; set observe_after=false only when an immediate visual observation is intentionally unnecessary.",
       "Coordinates are physical pixels. window_client_physical is resolved from the verified client origin (ClientToScreen), never the outer window bounds. Windows DPI and macOS Retina scaling can change logical coordinates.",
       "Never retry a near-zero, timeout, foreground, stale-control, permission, Wayland, or network-game failure blindly. Destructive input requires allow_destructive=true.",
     ],
@@ -134,7 +142,10 @@ export function createComputerUseTool(manager: ComputerUseManagerLike = computer
           if (!doc) return failure(action, `Unknown SOP topic ${JSON.stringify(topic)}. Available: ${registry.topics("computer_use").join(", ")}.`);
           return success(doc.body, { action, result: doc.body });
         }
-        const options = { signal, timeoutMs: params.timeout_ms };
+        const options: ManagerOperationOptions = params.timeout_ms === undefined
+          ? { signal }
+          : { signal, deadline: Date.now() + params.timeout_ms };
+        const finishPointer = async (operation: Promise<unknown>) => pointerResult(action, await operation, params.window_id!, params.observe_after !== false, manager, options);
         let result: unknown;
         switch (action) {
           case "capabilities": result = await manager.capabilities(options); break;
@@ -151,11 +162,15 @@ export function createComputerUseTool(manager: ComputerUseManagerLike = computer
           case "ui_tree": result = await manager.uiTree({ windowId: params.window_id!, maxDepth: params.max_depth, includeOffscreen: params.include_offscreen, ...options }); break;
           case "find_control": result = await manager.findControl({ windowId: params.window_id!, query: params.query!, enabledOnly: params.enabled_only, maxResults: params.max_results, ...options }); break;
           case "press_control": result = await manager.pressControl({ window_id: params.window_id!, control_ref: params.control_ref!, allow_destructive: params.allow_destructive, target_context: params.target_context, ...options }); break;
-          case "click": result = await manager.click({ window_id: params.window_id!, x: params.x!, y: params.y!, coordinate_space: params.coordinate_space, allow_outside_window: params.allow_outside_window, allow_destructive: params.allow_destructive, target_context: params.target_context, duration_ms: params.duration_ms, ...options }); break;
-          case "double_click": result = await manager.doubleClick({ window_id: params.window_id!, x: params.x!, y: params.y!, coordinate_space: params.coordinate_space, allow_outside_window: params.allow_outside_window, allow_destructive: params.allow_destructive, target_context: params.target_context, duration_ms: params.duration_ms, ...options }); break;
-          case "right_click": result = await manager.rightClick({ window_id: params.window_id!, x: params.x!, y: params.y!, coordinate_space: params.coordinate_space, allow_outside_window: params.allow_outside_window, allow_destructive: params.allow_destructive, target_context: params.target_context, duration_ms: params.duration_ms, ...options }); break;
-          case "move": result = await manager.move({ window_id: params.window_id!, x: params.x!, y: params.y!, coordinate_space: params.coordinate_space, allow_outside_window: params.allow_outside_window, allow_destructive: params.allow_destructive, target_context: params.target_context, duration_ms: params.duration_ms, ...options }); break;
-          case "drag": result = await manager.drag({ window_id: params.window_id!, x: params.x!, y: params.y!, to_x: params.to_x!, to_y: params.to_y!, coordinate_space: params.coordinate_space, allow_outside_window: params.allow_outside_window, allow_destructive: params.allow_destructive, target_context: params.target_context, duration_ms: params.duration_ms, ...options }); break;
+          case "click": return await finishPointer(manager.click({ window_id: params.window_id!, x: params.x!, y: params.y!, coordinate_space: params.coordinate_space, allow_outside_window: params.allow_outside_window, allow_destructive: params.allow_destructive, target_context: params.target_context, duration_ms: params.duration_ms, ...options }));
+          case "double_click": return await finishPointer(manager.doubleClick({ window_id: params.window_id!, x: params.x!, y: params.y!, coordinate_space: params.coordinate_space, allow_outside_window: params.allow_outside_window, allow_destructive: params.allow_destructive, target_context: params.target_context, duration_ms: params.duration_ms, ...options }));
+          case "right_click": return await finishPointer(manager.rightClick({ window_id: params.window_id!, x: params.x!, y: params.y!, coordinate_space: params.coordinate_space, allow_outside_window: params.allow_outside_window, allow_destructive: params.allow_destructive, target_context: params.target_context, duration_ms: params.duration_ms, ...options }));
+          case "move": return await finishPointer(manager.move({ window_id: params.window_id!, x: params.x!, y: params.y!, coordinate_space: params.coordinate_space, allow_outside_window: params.allow_outside_window, allow_destructive: params.allow_destructive, target_context: params.target_context, duration_ms: params.duration_ms, ...options }));
+          case "scroll": {
+            if (!manager.scroll) throw new ComputerUseError({ code: "DEPENDENCY_UNAVAILABLE", message: "The injected computer-use manager does not support scroll", capability: "input", retryable: false });
+            return await finishPointer(manager.scroll({ window_id: params.window_id!, x: params.x!, y: params.y!, coordinate_space: params.coordinate_space, allow_outside_window: params.allow_outside_window, allow_destructive: params.allow_destructive, target_context: params.target_context, direction: params.direction!, magnitude: params.magnitude!, ...options }));
+          }
+          case "drag": return await finishPointer(manager.drag({ window_id: params.window_id!, x: params.x!, y: params.y!, to_x: params.to_x!, to_y: params.to_y!, coordinate_space: params.coordinate_space, allow_outside_window: params.allow_outside_window, allow_destructive: params.allow_destructive, target_context: params.target_context, duration_ms: params.duration_ms, ...options }));
           case "press": result = await manager.press({ window_id: params.window_id!, keys: params.keys!, allow_destructive: params.allow_destructive, target_context: params.target_context, ...options }); break;
           case "type": result = await manager.type({ window_id: params.window_id!, text: params.text!, interval_ms: params.interval_ms, allow_destructive: params.allow_destructive, target_context: params.target_context, ...options }); break;
           case "paste": result = await manager.paste({ window_id: params.window_id!, text: params.text!, interval_ms: params.interval_ms, allow_destructive: params.allow_destructive, target_context: params.target_context, ...options }); break;
@@ -191,6 +206,27 @@ function frameResult(action: ComputerUseAction, frame: CapturedFrame): AgentTool
   const image = { type: "image" as const, data: Buffer.from(frame.bytes).toString("base64"), mimeType: frame.image.mimeType };
   const details = { action, image: { mimeType: frame.image.mimeType, width: frame.image.width, height: frame.image.height, bytes: frame.bytes.byteLength, source: frame.image.source }, result: frame.image };
   return { content: [image, { type: "text", text: JSON.stringify(frame.image) }], details } as AgentToolResult<ComputerUseToolDetails>;
+}
+
+async function pointerResult(
+  action: ComputerUseAction,
+  actionResult: unknown,
+  windowId: string,
+  observeAfter: boolean,
+  manager: ComputerUseManagerLike,
+  options: ManagerOperationOptions,
+): Promise<AgentToolResult<ComputerUseToolDetails>> {
+  if (!observeAfter) return success(formatResult(actionResult), { action, result: actionResult });
+  try {
+    const frame = await manager.screenshot({ source: "window", window_id: windowId, ...options });
+    const result = { action_result: actionResult, observation: frame.image };
+    const image = { type: "image" as const, data: Buffer.from(frame.bytes).toString("base64"), mimeType: frame.image.mimeType };
+    const details = { action, image: { mimeType: frame.image.mimeType, width: frame.image.width, height: frame.image.height, bytes: frame.bytes.byteLength, source: frame.image.source }, result };
+    return { content: [image, { type: "text", text: formatResult(result) }], details } as AgentToolResult<ComputerUseToolDetails>;
+  } catch (error) {
+    const result = { action_result: actionResult, observation: { ok: false, error: errorInfo(error) } };
+    return success(formatResult(result), { action, result });
+  }
 }
 
 function success(text: string, details: ComputerUseToolDetails): AgentToolResult<ComputerUseToolDetails> {
@@ -241,6 +277,7 @@ function validateComputerUseParams(value: unknown): string | undefined {
   if (["activate", "ui_tree", "find_control", "press_control", ...POINTER_ACTIONS, "press", "type", "paste"].includes(action) && !stringValue(p.window_id)) return `${action} requires window_id from list_windows.`;
   if (POINTER_ACTIONS.has(action)) {
     if (!finiteNumber(p.x) || !finiteNumber(p.y)) return `${action} requires finite x and y coordinates.`;
+    if (action === "scroll" && (!(["up", "down", "left", "right"] as const).includes(p.direction as never) || !Number.isSafeInteger(p.magnitude) || (p.magnitude as number) < 1 || (p.magnitude as number) > 10_000)) return "scroll requires direction up/down/left/right and integer magnitude from 1 to 10000.";
     if (action === "drag" && (!finiteNumber(p.to_x) || !finiteNumber(p.to_y))) return "drag requires finite to_x and to_y coordinates.";
   }
   if (action === "press_control" && !stringValue(p.control_ref)) return "press_control requires a fresh control_ref from ui_tree or find_control.";

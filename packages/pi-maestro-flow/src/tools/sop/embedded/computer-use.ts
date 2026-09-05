@@ -43,6 +43,15 @@ const SOP_COORDINATES = `Coordinate guide
 - A screenshot region must include region { x, y, width, height }; window capture must include window_id. Verify foreground and the resulting frame before input.
 `;
 
+const SOP_POINTER = `Pointer guide
+
+- Choose the target from current evidence. Prefer press_control for a reliable enabled accessibility control; otherwise use screenshot with detect/OCR and a mouse action. Once accessibility is unavailable or unreliable for a window, do not keep retrying it.
+- For an image-local box [x1,y1,x2,y2], use its center and add image.origin to obtain screen_physical coordinates. Use window_client_physical only for coordinates proven relative to the client area. Never guess a point, origin, or DPI scale.
+- Use click/double_click/right_click for visual targets, move for hover-revealed UI, and drag for sliders, canvas, or reordering. Do not substitute repeated Tab/arrow navigation merely to avoid the mouse.
+- Pointer actions attach a fresh target-window screenshot by default. Treat it as the next observation, choose one next action, and avoid multi-step input against an unknown state. Set observe_after=false only when a new visual observation is intentionally unnecessary.
+- A near-zero result is a stop signal. Reassess the returned fresh screenshot or call another probe before any retry.
+`;
+
 const SOP_SAFETY = `Safety guide
 
 - Observe before acting and verify after acting. Every input must target a known window and verified foreground state.
@@ -64,11 +73,12 @@ const SOP_PLATFORM = `Platform guide
 export const COMPUTER_USE_SOPS_BASELINE: EmbeddedSopMap = {
   core: { title: "Observe, act, verify; coordinates, safety latches, and platform limits", body: SOP_CORE },
   coordinates: { title: "Coordinate spaces, client origin, DPI, Retina, image origins, and verification", body: SOP_COORDINATES },
+  pointer: { title: "UIA fallback, visual target centers, mouse actions, and post-action screenshots", body: SOP_POINTER },
   safety: { title: "Destructive input, near-zero stop, foreground verification, and bounded operations", body: SOP_SAFETY },
   platform: { title: "Capabilities, permissions, Wayland, native bridges, and unsupported targets", body: SOP_PLATFORM },
 };
 
 /** Trailing lines appended to the computer-use guide index (mirrors the former index footer). */
-export const COMPUTER_USE_INDEX_FOOTER = `Required loop: capabilities/permissions -> observe -> activate -> act -> verify.
-Coordinates are physical pixels; ClientToScreen/client origin, Windows DPI, and macOS Retina scaling matter.
+export const COMPUTER_USE_INDEX_FOOTER = `Required loop: capabilities/permissions -> observe -> activate -> one action -> fresh observation -> reassess.
+Use reliable accessibility controls first; otherwise use verified visual box centers and mouse actions instead of keyboard navigation. Coordinates are physical pixels; ClientToScreen/client origin, image.origin, Windows DPI, and macOS Retina scaling matter.
 Safety stops: near-zero verification, abort/timeout, foreground failure, stale controls, permissions, Wayland, and network-game limits.`;

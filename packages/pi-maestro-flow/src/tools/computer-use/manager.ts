@@ -25,6 +25,7 @@ import type {
   FindControlQuery,
   KeyboardRequest,
   PointerRequest,
+  ScrollRequest,
   TypeRequest,
   WindowQuery,
 } from "./platform/types.ts";
@@ -38,6 +39,7 @@ export type TargetContext = "desktop" | "local_game" | "network_game";
 export interface ComputerUseStatus { queue_depth: number; active_action?: string; latched_windows: string[]; worker_state: "available" | "unavailable" | "unknown"; models: "unverified" | "available" | "unavailable"; }
 export interface PointerInput extends ManagerOperationOptions { window_id: string; x: number; y: number; coordinate_space?: "screen_physical" | "window_client_physical"; allow_outside_window?: boolean; allow_destructive?: boolean; target_context?: TargetContext; duration_ms?: number; }
 export interface DragInput extends PointerInput { to_x: number; to_y: number; }
+export interface ScrollInput extends PointerInput { direction: ScrollRequest["direction"]; magnitude: number; }
 export interface KeyboardInput extends ManagerOperationOptions { window_id: string; keys: readonly string[]; allow_destructive?: boolean; target_context?: TargetContext; }
 export interface TextInput extends ManagerOperationOptions { window_id: string; text: string; interval_ms?: number; allow_destructive?: boolean; target_context?: TargetContext; }
 export interface ScreenshotInput extends ManagerOperationOptions { source: "screen" | "window" | "region"; window_id?: string; region?: PhysicalRect; display_id?: string; }
@@ -62,6 +64,7 @@ export interface ComputerUseManagerLike {
   doubleClick(input: PointerInput): Promise<PointerActionResult>;
   rightClick(input: PointerInput): Promise<PointerActionResult>;
   move(input: PointerInput): Promise<PointerActionResult>;
+  scroll?(input: ScrollInput): Promise<PointerActionResult>;
   drag(input: DragInput): Promise<PointerActionResult>;
   press(input: KeyboardInput): Promise<{ keys: readonly string[]; foregroundVerified: boolean }>;
   type(input: TextInput): Promise<{ characters: number; foregroundVerified: boolean }>;
@@ -163,7 +166,7 @@ export class ComputerUseManager implements ComputerUseManagerLike {
   activate(windowId: string, options: ManagerOperationOptions = {}): Promise<{ window: WindowInfo; foreground_verified: boolean }> { return this.enqueue("activate", options, async signal => { const result = await this.adapter.activate(this.requireWindowId(windowId), signal); if (!result.foregroundVerified) throw this.foregroundError(windowId); this.latchedWindows.delete(windowId); return { window: result.window, foreground_verified: true }; }); }
   screenshot(input: ScreenshotInput): Promise<CapturedFrame> { return this.enqueue("screenshot", input, async signal => { this.assertScreenshotInput(input); const frame = await this.adapter.capture({ source: input.source, windowId: input.window_id, region: input.region, displayId: input.display_id }, signal); if (input.window_id) this.latchedWindows.delete(input.window_id); else this.latchedWindows.clear(); return frame; }); }
 
-  ocr(input: VisionInput): Promise<OcrResultEnvelope> { return this.enqueue("ocr", input, async signal => { const frame = await this.captureVisionInput(input, signal); const vision = this.requireVision("ocr"); const raw = await vision.ocr(frame, { enhance: input.enhance, langs: input.langs }, signal); if (isVisionFailure(raw)) return { ok: false, error: new ComputerUseError({ code: visionCode(raw.code), message: raw.diagnostic, capability: "ocr", retryable: false, details: { engine: raw.engine } }).toJSON() }; return { ok: true, result: translateOcr(raw, frame) }; }); }
+  ocr(input: VisionInput): Promise<OcrResultEnvelope> { return this.enqueue("ocr", input, async signal => { const frame = await this.captureVisionInput(input, signal); const vision = this.requireVision("ocr"); const raw = await vision.ocr(frame, { enhance: input.enhance, langs: input.langs }, signal); if (isVisionFailure(raw)) return { ok: false, error: new ComputerUseError({ code: visionCode(raw.code), message: raw.diagnostic, capability: "ocr", retryable: false, details: { engine: raw.engine } }).toJSON() }; if (input.source === "window" && input.window_id) this.latchedWindows.delete(input.window_id); return { ok: true, result: translateOcr(raw, frame) }; }); }
   detect(input: VisionInput): Promise<DetectResultEnvelope> { return this.enqueue("detect", input, async signal => { const frame = await this.captureVisionInput(input, signal); const vision = this.requireVision("detect"); const raw = await vision.detect(frame, { mode: input.mode, confidence: input.confidence, iouThreshold: input.iou_threshold }, signal); if (isVisionFailure(raw)) return { ok: false, error: new ComputerUseError({ code: visionCode(raw.code), message: raw.diagnostic, capability: "detect", retryable: false, details: { engine: raw.engine } }).toJSON() }; if (frame.image.windowId) this.latchedWindows.delete(frame.image.windowId); return { ok: true, result: translateDetect(raw, frame) }; }); }
 
   uiTree(input: AccessibilityQuery & ManagerOperationOptions): Promise<{ snapshotId: string; controls: ControlNode[] }> { return this.enqueue("ui_tree", input, async signal => { const accessibility = this.requireAccessibility(); const result = await accessibility.uiTree({ windowId: input.windowId, maxDepth: input.maxDepth, includeOffscreen: input.includeOffscreen }, signal); this.rememberSnapshot(result.snapshotId, result.controls); this.latchedWindows.delete(input.windowId); return result; }); }
@@ -174,6 +177,7 @@ export class ComputerUseManager implements ComputerUseManagerLike {
   doubleClick(input: PointerInput): Promise<PointerActionResult> { return this.pointer("double_click", input); }
   rightClick(input: PointerInput): Promise<PointerActionResult> { return this.pointer("right_click", input); }
   move(input: PointerInput): Promise<PointerActionResult> { return this.pointer("move", input, false); }
+  scroll(input: ScrollInput): Promise<PointerActionResult> { return this.enqueue("scroll", input, async signal => { this.assertInputPolicy(input); this.assertInputNotLatched(input.window_id); if (!(["up", "down", "left", "right"] as const).includes(input.direction)) throw this.invalidInput("scroll direction must be up, down, left, or right"); if (!Number.isSafeInteger(input.magnitude) || input.magnitude < 1 || input.magnitude > 10_000) throw this.invalidInput("scroll magnitude must be an integer from 1 to 10000"); const target = await this.resolveInputTarget(input, signal); const scroll = this.adapter.scroll; if (!scroll) throw this.unavailable("input", "No verified native scroll provider is configured"); const before = await this.captureDiagnostic(target.point, target.window, signal); const result = await scroll.call(this.adapter, { windowId: target.window.id, point: target.point, coordinateSpace: "screen_physical", allowOutsideWindow: true, direction: input.direction, magnitude: input.magnitude }, signal); if (!result.foregroundVerified) throw this.foregroundError(target.window.id); const after = await this.captureDiagnostic(target.point, target.window, signal); const verification = compareDiagnostic(before, after, result.verification); const finalResult = { ...result, resolvedPoint: target.point, foregroundVerified: true, verification }; if (verification.verdict === "near_zero") this.latchedWindows.add(target.window.id); return finalResult; }); }
   drag(input: DragInput): Promise<PointerActionResult> { return this.enqueue("drag", input, async signal => { this.assertInputPolicy(input); this.assertInputNotLatched(input.window_id); const target = await this.resolveInputTarget(input, signal); const to = this.resolvePoint(input.to_x, input.to_y, target.window, input.coordinate_space, input.allow_outside_window === true); const drag = (this.adapter as DesktopAdapter & { drag?: (request: PointerRequest & { to: PhysicalPoint }, signal?: AbortSignal) => Promise<PointerActionResult> }).drag; if (!drag) throw this.unavailable("input", "No verified native drag provider is configured"); try { const result = await drag.call(this.adapter, { action: "move", windowId: target.window.id, point: target.point, coordinateSpace: "screen_physical", allowOutsideWindow: true, durationMs: input.duration_ms, to }, signal); if (!result.foregroundVerified) throw this.foregroundError(target.window.id); if (result.verification?.verdict === "near_zero") this.latchedWindows.add(target.window.id); return { ...result, resolvedPoint: target.point, foregroundVerified: true }; } finally { await this.releasePointer(target.window.id, signal); } }); }
 
   press(input: KeyboardInput): Promise<{ keys: readonly string[]; foregroundVerified: boolean }> { return this.enqueue("press", input, async signal => { this.assertInputPolicy(input); this.assertInputNotLatched(input.window_id); if (input.keys.length === 0) throw this.invalidInput("keys must not be empty"); if (!input.allow_destructive && isDestructiveKeys(input.keys)) throw this.invalidInput("Destructive key chords require allow_destructive=true"); await this.activateAndVerify(input.window_id, signal); const request: KeyboardRequest = { windowId: input.window_id, keys: input.keys }; try { const result = await this.adapter.press(request, signal); if (!result.foregroundVerified) throw this.foregroundError(input.window_id); return result; } finally { await this.releaseKeys(input.window_id, input.keys, signal); } }); }
@@ -193,7 +197,43 @@ export class ComputerUseManager implements ComputerUseManagerLike {
   private rememberSnapshot(snapshotId: string, controls: ControlNode[]): void { this.snapshots.set(snapshotId, new Map(controls.map(control => [control.ref, control]))); if (this.snapshots.size > 32) this.snapshots.delete(this.snapshots.keys().next().value!); }
   private knownControl(ref: string): ControlNode | undefined { for (const controls of this.snapshots.values()) { const control = controls.get(ref); if (control) return control; } return undefined; }
 
-  private enqueue<T>(action: string, options: ManagerOperationOptions, run: (signal: AbortSignal) => Promise<T>): Promise<T> { if (this.closed && action !== "shutdown") return Promise.reject(new ComputerUseError({ code: "INTERNAL", message: "Computer-use manager is shut down", retryable: false })); const controller = new AbortController(); const signal = combineSignal(options.signal, options.deadline, options.timeoutMs, controller); ComputerUseManager.queued++; let started = false; let settled = false; let resolveOuter!: (value: T | PromiseLike<T>) => void; let rejectOuter!: (reason?: unknown) => void; const outer = new Promise<T>((resolve, reject) => { resolveOuter = resolve; rejectOuter = reject; }); const cancelQueued = () => { if (!started && !settled) { settled = true; ComputerUseManager.queued--; rejectOuter(abortFailure(signal)); } }; const execute = async () => { if (settled || signal.aborted) { cancelQueued(); return; } started = true; ComputerUseManager.queued--; ComputerUseManager.activeAction = action; try { resolveOuter(await run(signal)); } catch (error) { rejectOuter(normalizeAbort(error, signal)); } finally { if (ComputerUseManager.activeAction === action) ComputerUseManager.activeAction = undefined; settled = true; } }; const next = ComputerUseManager.tail.then(execute, execute).then(() => undefined, () => undefined); ComputerUseManager.tail = next; signal.addEventListener("abort", cancelQueued, { once: true }); if (signal.aborted) cancelQueued(); return outer; }
+  private enqueue<T>(action: string, options: ManagerOperationOptions, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    if (this.closed && action !== "shutdown") return Promise.reject(new ComputerUseError({ code: "INTERNAL", message: "Computer-use manager is shut down", retryable: false }));
+    const controller = new AbortController();
+    const signal = combineSignal(options.signal, options.deadline, options.timeoutMs, controller);
+    ComputerUseManager.queued++;
+    let started = false;
+    let settled = false;
+    let resolveOuter!: (value: T | PromiseLike<T>) => void;
+    let rejectOuter!: (reason?: unknown) => void;
+    const outer = new Promise<T>((resolve, reject) => { resolveOuter = resolve; rejectOuter = reject; });
+    const cancel = () => {
+      if (settled) return;
+      settled = true;
+      if (!started) ComputerUseManager.queued--;
+      rejectOuter(abortFailure(signal));
+    };
+    const execute = async () => {
+      if (settled || signal.aborted) { cancel(); return; }
+      started = true;
+      ComputerUseManager.queued--;
+      ComputerUseManager.activeAction = action;
+      try {
+        const value = await run(signal);
+        if (signal.aborted) cancel();
+        else if (!settled) { settled = true; resolveOuter(value); }
+      } catch (error) {
+        if (!settled) { settled = true; rejectOuter(normalizeAbort(error, signal)); }
+      } finally {
+        if (ComputerUseManager.activeAction === action) ComputerUseManager.activeAction = undefined;
+      }
+    };
+    const next = ComputerUseManager.tail.then(execute, execute).then(() => undefined, () => undefined);
+    ComputerUseManager.tail = next;
+    signal.addEventListener("abort", cancel, { once: true });
+    if (signal.aborted) cancel();
+    return outer;
+  }
 
   private assertInputNotLatched(windowId: string): void { if (this.latchedWindows.has(windowId)) throw new ComputerUseError({ code: "FOREGROUND_NOT_VERIFIED", message: "Input is latched after a near-zero diagnostic; re-probe with screenshot, detect, ui_tree, or activate", capability: "input", retryable: false, details: { windowId, requiresReprobe: true } }); }
   private requireVision(capability: "ocr" | "detect"): VisionLike { if (!this.vision) throw this.unavailable(capability, "Shared vision service is unavailable"); return this.vision; }
@@ -239,6 +279,7 @@ export class LazyComputerUseManager implements ComputerUseManagerLike {
   doubleClick(input: PointerInput) { return this.get().then(manager => manager.doubleClick(input)); }
   rightClick(input: PointerInput) { return this.get().then(manager => manager.rightClick(input)); }
   move(input: PointerInput) { return this.get().then(manager => manager.move(input)); }
+  scroll(input: ScrollInput) { return this.get().then(manager => { if (!manager.scroll) throw new ComputerUseError({ code: "DEPENDENCY_UNAVAILABLE", message: "The computer-use manager does not support scroll", capability: "input", retryable: false }); return manager.scroll(input); }); }
   drag(input: DragInput) { return this.get().then(manager => manager.drag(input)); }
   press(input: KeyboardInput) { return this.get().then(manager => manager.press(input)); }
   type(input: TextInput) { return this.get().then(manager => manager.type(input)); }
@@ -262,6 +303,6 @@ function visionCode(code: string): "MODEL_UNAVAILABLE" | "MODEL_INTEGRITY_FAILED
 function translateOcr(result: OcrResult, frame: CapturedFrame): OcrResult { return { ...result, image: { ...result.image, ...frame.image, origin: frame.image.origin } }; }
 function translateDetect(result: DetectResult, frame: CapturedFrame): DetectResult { return { ...result, image: { ...result.image, ...frame.image, origin: frame.image.origin } }; }
 function compareDiagnostic(before: Uint8Array | undefined, after: Uint8Array | undefined, fallback: PointerActionResult["verification"]): PointerActionResult["verification"] { if (!before || !after) return fallback ?? { changedPixels: 0, totalPixels: 0, changePercent: 0, verdict: "unavailable", foregroundChanged: true, requiresReprobe: false }; const changed = before.length !== after.length || before.some((value, index) => value !== after[index]); return { changedPixels: changed ? 1 : 0, totalPixels: 1, changePercent: changed ? 100 : 0, verdict: changed ? "changed" : "near_zero", foregroundChanged: fallback?.foregroundChanged ?? true, requiresReprobe: !changed }; }
-function combineSignal(parent: AbortSignal | undefined, deadline: number | undefined, timeoutMs: number | undefined, controller: AbortController): AbortSignal { const signals: AbortSignal[] = [controller.signal]; if (parent) signals.push(parent); const duration = deadline !== undefined ? Math.max(0, deadline - Date.now()) : timeoutMs; if (duration !== undefined) signals.push(AbortSignal.timeout(Math.max(0, duration))); return AbortSignal.any(signals); }
+function combineSignal(parent: AbortSignal | undefined, deadline: number | undefined, timeoutMs: number | undefined, controller: AbortController): AbortSignal { const signals: AbortSignal[] = [controller.signal]; if (parent) signals.push(parent); const duration = deadline !== undefined ? deadline - Date.now() : timeoutMs; if (duration !== undefined) signals.push(duration <= 0 ? AbortSignal.abort(new DOMException("Computer-use operation deadline exceeded", "TimeoutError")) : AbortSignal.timeout(duration)); return AbortSignal.any(signals); }
 function abortFailure(signal: AbortSignal): ComputerUseError { return new ComputerUseError({ code: signal.reason?.name === "TimeoutError" ? "TIMEOUT" : "ABORTED", message: signal.reason?.name === "TimeoutError" ? "Computer-use operation deadline exceeded" : "Computer-use operation was aborted", retryable: signal.reason?.name === "TimeoutError" }); }
 function normalizeAbort(error: unknown, signal: AbortSignal): unknown { return signal.aborted ? abortFailure(signal) : (error instanceof ComputerUseError ? error : new ComputerUseError({ ...errorInfo(error), retryable: false })); }

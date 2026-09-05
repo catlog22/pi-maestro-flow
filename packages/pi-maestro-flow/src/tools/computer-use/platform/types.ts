@@ -42,6 +42,13 @@ export interface PointerRequest extends InputTarget {
   durationMs?: number;
 }
 
+export type ScrollDirection = "up" | "down" | "left" | "right";
+
+export interface ScrollRequest extends InputTarget {
+  direction: ScrollDirection;
+  magnitude: number;
+}
+
 export interface KeyboardRequest {
   windowId: string;
   keys: readonly string[];
@@ -87,6 +94,7 @@ export interface WindowAdapter {
 
 export interface InputAdapter {
   pointer(request: PointerRequest, signal?: AbortSignal): Promise<PointerActionResult>;
+  scroll?(request: ScrollRequest, signal?: AbortSignal): Promise<PointerActionResult>;
   press(request: KeyboardRequest, signal?: AbortSignal): Promise<{ keys: readonly string[]; foregroundVerified: boolean }>;
   type(request: TypeRequest, signal?: AbortSignal): Promise<{ characters: number; foregroundVerified: boolean }>;
   paste(request: TypeRequest, signal?: AbortSignal): Promise<{ characters: number; clipboardRestored: boolean; foregroundVerified: boolean }>;

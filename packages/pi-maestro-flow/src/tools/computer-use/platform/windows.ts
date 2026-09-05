@@ -1,7 +1,7 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { cropPng, detectBlankFrame, inspectPng } from "../artifacts.ts";
 import { ComputerUseError, type CapabilityMap, type CapturedFrame, type ControlNode, type DisplayInfo, type Permissions, type PhysicalPoint, type PhysicalRect, type PointerActionResult, type WindowInfo } from "../types.ts";
-import type { AccessibilityAdapter, AccessibilityQuery, CaptureRequest, FindControlQuery, KeyboardRequest, PointerRequest, TypeRequest, WindowQuery } from "./types.ts";
+import type { AccessibilityAdapter, AccessibilityQuery, CaptureRequest, FindControlQuery, KeyboardRequest, PointerRequest, ScrollRequest, TypeRequest, WindowQuery } from "./types.ts";
 import { BaseDesktopAdapter, explicitPermissions, optionalRequire, normalizeRect, numberProperty, record, stringProperty, type AdapterOptions, type NativeHooks } from "./base.ts";
 import { capabilityAvailable, capabilityUnavailable } from "./index.ts";
 import { runBridgeProcess } from "./bridge-process.ts";
@@ -367,6 +367,18 @@ async function pointer(runtime: WindowsRuntime, request: PointerRequest, point: 
   return { resolvedPoint: point, foregroundVerified: await foregroundVerified(runtime, request.windowId), verification: unavailableVerification() };
 }
 
+async function scroll(runtime: WindowsRuntime, request: ScrollRequest, point: PhysicalPoint, signal?: AbortSignal): Promise<PointerActionResult> {
+  abortIfNeeded(signal);
+  const mouse = nutPart(runtime, "mouse");
+  const methodName = request.direction === "up" ? "scrollUp" : request.direction === "down" ? "scrollDown" : request.direction === "left" ? "scrollLeft" : "scrollRight";
+  if (!hasMethod(mouse, "setPosition") || !hasMethod(mouse, methodName)) throw errorFor("input", `nut-js mouse.${methodName} is unavailable`);
+  await callAsync(mouse, "setPosition", { x: point.x, y: point.y });
+  await ensureMousePosition(mouse, point);
+  await callAsync(mouse, methodName, request.magnitude);
+  await ensureMousePosition(mouse, point);
+  return { resolvedPoint: point, foregroundVerified: await foregroundVerified(runtime, request.windowId), verification: unavailableVerification() };
+}
+
 async function press(runtime: WindowsRuntime, request: KeyboardRequest): Promise<{ keys: readonly string[]; foregroundVerified: boolean }> {
   const keyboard = nutPart(runtime, "keyboard");
   if (!hasMethod(keyboard, "pressKey")) throw errorFor("keyboard", "nut-js keyboard.pressKey is unavailable");
@@ -528,6 +540,7 @@ function createHooks(runtime: WindowsRuntime, options: AdapterOptions): NativeHo
     displays: options.hooks?.displays ?? ((signal) => displays(runtime, signal)),
     capture: options.hooks?.capture ?? ((request, signal) => capture(runtime, request, signal)),
     pointer: options.hooks?.pointer ?? ((request, point, signal) => pointer(runtime, request, point, signal)),
+    scroll: options.hooks?.scroll ?? ((request, point, signal) => scroll(runtime, request, point, signal)),
     press: options.hooks?.press ?? ((request) => press(runtime, request)),
     type: options.hooks?.type ?? ((request) => typeText(runtime, request)),
     paste: options.hooks?.paste ?? ((request) => pasteText(runtime, request)),

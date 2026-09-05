@@ -34,10 +34,51 @@ test("Windows client points resolve from client bounds, never outer window bound
   assert.deepEqual(received, { x: 120, y: 90 });
 });
 
+test("native scroll maps all directions and verifies the target position", async () => {
+  let position = { x: 0, y: 0 };
+  const calls: Array<[string, unknown]> = [];
+  const mouse = {
+    setPosition: async (point: { x: number; y: number }) => { position = point; calls.push(["position", point]); },
+    getPosition: async () => position,
+    scrollUp: async (magnitude: number) => { calls.push(["up", magnitude]); },
+    scrollDown: async (magnitude: number) => { calls.push(["down", magnitude]); },
+    scrollLeft: async (magnitude: number) => { calls.push(["left", magnitude]); },
+    scrollRight: async (magnitude: number) => { calls.push(["right", magnitude]); },
+  };
+  const load = (name: string) => name === "active-win"
+    ? { openWindows: async () => [], activeWindowSync: () => ({ id: "w" }) }
+    : name === "@nut-tree-fork/nut-js" ? { mouse } : undefined;
+  const adapter = createWindowsAdapter({ requireOptional: load });
+
+  for (const direction of ["up", "down", "left", "right"] as const) {
+    const result = await adapter.scroll({ windowId: "w", point: { x: 12, y: 8 }, coordinateSpace: "screen_physical", direction, magnitude: 4 });
+    assert.equal(result.foregroundVerified, true);
+  }
+
+  assert.deepEqual(calls, [
+    ["position", { x: 12, y: 8 }], ["up", 4],
+    ["position", { x: 12, y: 8 }], ["down", 4],
+    ["position", { x: 12, y: 8 }], ["left", 4],
+    ["position", { x: 12, y: 8 }], ["right", 4],
+  ]);
+});
+
+test("native scroll fails closed when the provider is missing or position verification fails", async () => {
+  const missing = createWindowsAdapter({ requireOptional: () => undefined });
+  await assert.rejects(missing.scroll({ windowId: "w", point: { x: 12, y: 8 }, coordinateSpace: "screen_physical", direction: "down", magnitude: 1 }), (error: unknown) => error instanceof ComputerUseError && error.code === "DEPENDENCY_UNAVAILABLE");
+
+  const load = (name: string) => name === "active-win"
+    ? { openWindows: async () => [], activeWindowSync: () => ({ id: "w" }) }
+    : name === "@nut-tree-fork/nut-js" ? { mouse: { setPosition: async () => {}, getPosition: async () => ({ x: 0, y: 0 }), scrollDown: async () => { throw new Error("must not scroll before verification"); } } } : undefined;
+  const misplaced = createWindowsAdapter({ requireOptional: load });
+  await assert.rejects(misplaced.scroll({ windowId: "w", point: { x: 12, y: 8 }, coordinateSpace: "screen_physical", direction: "down", magnitude: 1 }), (error: unknown) => error instanceof ComputerUseError && error.code === "FOREGROUND_NOT_VERIFIED");
+});
+
 test("Wayland global operations fail with a structured restriction", async () => {
   const adapter = createLinuxAdapter({ session: "wayland", env: { XDG_SESSION_TYPE: "wayland", WAYLAND_DISPLAY: "wayland-0" }, requireOptional: () => undefined });
   assert.equal(adapter.capabilities.features.window_list?.errorCode, "WAYLAND_RESTRICTED");
   await assert.rejects(adapter.listWindows(), (error: unknown) => error instanceof ComputerUseError && error.code === "WAYLAND_RESTRICTED");
+  await assert.rejects(adapter.scroll({ windowId: "1", point: { x: 1, y: 1 }, coordinateSpace: "screen_physical", direction: "down", magnitude: 1 }), (error: unknown) => error instanceof ComputerUseError && error.code === "WAYLAND_RESTRICTED");
   await assert.rejects(adapter.accessibility?.uiTree({ windowId: "1" }), (error: unknown) => error instanceof ComputerUseError && error.code === "WAYLAND_RESTRICTED");
 });
 

@@ -2,7 +2,7 @@ import { createRequire } from "node:module";
 import { detectBlankFrame, inspectPng, readBoundedPng } from "../artifacts.ts";
 import { clientToScreenPhysical } from "../coordinates.ts";
 import { ComputerUseError, type Capabilities, type CapabilityMap, type CapabilityName, type CapturedFrame, type ControlNode, type DisplayInfo, type ImageInfo, type Permissions, type PhysicalPoint, type PhysicalRect, type PointerActionResult, type WindowInfo } from "../types.ts";
-import type { AccessibilityAdapter, AccessibilityQuery, CaptureRequest, DesktopAdapter, FindControlQuery, ImageRequest, InputAdapter, KeyboardRequest, PermissionAdapter, PointerRequest, TypeRequest, WindowQuery } from "./types.ts";
+import type { AccessibilityAdapter, AccessibilityQuery, CaptureRequest, DesktopAdapter, FindControlQuery, ImageRequest, InputAdapter, InputTarget, KeyboardRequest, PermissionAdapter, PointerRequest, ScrollRequest, TypeRequest, WindowQuery } from "./types.ts";
 import { capability, capabilityAvailable, capabilityUnavailable, createCapabilities } from "./index.ts";
 
 export interface NativeHooks {
@@ -11,6 +11,7 @@ export interface NativeHooks {
   displays?: (signal?: AbortSignal) => Promise<DisplayInfo[]>;
   capture?: (request: CaptureRequest, signal?: AbortSignal) => Promise<CapturedFrame>;
   pointer?: (request: PointerRequest, resolvedPoint: PhysicalPoint, signal?: AbortSignal) => Promise<PointerActionResult>;
+  scroll?: (request: ScrollRequest, resolvedPoint: PhysicalPoint, signal?: AbortSignal) => Promise<PointerActionResult>;
   press?: (request: KeyboardRequest, signal?: AbortSignal) => Promise<{ keys: readonly string[]; foregroundVerified: boolean }>;
   type?: (request: TypeRequest, signal?: AbortSignal) => Promise<{ characters: number; foregroundVerified: boolean }>;
   paste?: (request: TypeRequest, signal?: AbortSignal) => Promise<{ characters: number; clipboardRestored: boolean; foregroundVerified: boolean }>;
@@ -166,6 +167,11 @@ export abstract class BaseDesktopAdapter implements DesktopAdapter {
     if (!this.hooks.pointer) throw this.unavailable("input", "No verified native pointer provider is configured");
     return this.hooks.pointer(request, resolved, signal);
   }
+  async scroll(request: ScrollRequest, signal?: AbortSignal): Promise<PointerActionResult> {
+    const resolved = await this.resolvePoint(request);
+    if (!this.hooks.scroll) throw this.unavailable("input", "No verified native scroll provider is configured");
+    return this.hooks.scroll(request, resolved, signal);
+  }
   async press(request: KeyboardRequest, signal?: AbortSignal): Promise<{ keys: readonly string[]; foregroundVerified: boolean }> {
     if (!this.hooks.press) throw this.unavailable("keyboard", "No verified native keyboard provider is configured");
     return this.hooks.press(request, signal);
@@ -188,7 +194,7 @@ export abstract class BaseDesktopAdapter implements DesktopAdapter {
     return new ComputerUseError({ code: "DEPENDENCY_UNAVAILABLE", message, capability, retryable: false, remediation: "Install/probe a supported native provider and re-check capabilities." });
   }
 
-  private async resolvePoint(request: PointerRequest): Promise<PhysicalPoint> {
+  private async resolvePoint(request: InputTarget): Promise<PhysicalPoint> {
     if (request.coordinateSpace === "screen_physical") return finitePoint(request.point);
     const windows = await this.listWindows({});
     const window = windows.find((candidate) => candidate.id === request.windowId);

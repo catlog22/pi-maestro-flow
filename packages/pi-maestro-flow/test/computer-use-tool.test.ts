@@ -29,6 +29,7 @@ function fakeManager(calls: string[]): ComputerUseManagerLike {
     doubleClick: async () => { calls.push("double_click"); return {} as never; },
     rightClick: async () => { calls.push("right_click"); return {} as never; },
     move: async () => { calls.push("move"); return {} as never; },
+    scroll: async () => { calls.push("scroll"); return {} as never; },
     drag: async () => { calls.push("drag"); return {} as never; },
     press: async () => { calls.push("press"); return { keys: ["a"], foregroundVerified: true }; },
     type: async () => { calls.push("type"); return { characters: 1, foregroundVerified: true }; },
@@ -51,15 +52,22 @@ test("computer_use schema enforces action/source conditionals", () => {
   assert.equal(Check(ComputerUseParams, { action: "ocr", source: "image", path: "x.png" }), true);
   assert.equal(Check(ComputerUseParams, { action: "click", window_id: "w", x: 1, y: 2 }), true);
   assert.equal(Check(ComputerUseParams, { action: "click", window_id: "w", x: 1 }), false);
+  assert.equal(Check(ComputerUseParams, { action: "scroll", window_id: "w", x: 1, y: 2, direction: "down", magnitude: 3 }), true);
+  assert.equal(Check(ComputerUseParams, { action: "scroll", window_id: "w", x: 1, y: 2, direction: "diagonal", magnitude: 3 }), false);
+  assert.equal(Check(ComputerUseParams, { action: "scroll", window_id: "w", x: 1, y: 2, direction: "down", magnitude: 0 }), false);
   assert.equal(Check(ComputerUseParams, { action: "drag", window_id: "w", x: 1, y: 2 }), false);
 });
 
 test("computer_use guide returns an index, topics, and structured unknown-topic errors", async () => {
   const tool = createComputerUseTool(fakeManager([]));
   const index = await execute(tool, { action: "guide" });
-  assert.match(String(index.content[0] && "text" in index.content[0] ? index.content[0].text : ""), /coordinates/);
+  assert.match(String(index.content[0] && "text" in index.content[0] ? index.content[0].text : ""), /pointer/);
   const topic = await execute(tool, { action: "guide", topic: "safety" });
   assert.match(String(topic.content[0] && "text" in topic.content[0] ? topic.content[0].text : ""), /near[_-]zero/);
+  const pointer = await execute(tool, { action: "guide", topic: "pointer" });
+  assert.match(String(pointer.content[0] && "text" in pointer.content[0] ? pointer.content[0].text : ""), /image\.origin/);
+  assert.match(tool.promptSnippet ?? "", /verified mouse coordinates/);
+  assert.match(tool.promptGuidelines?.join("\n") ?? "", /Do not substitute repeated Tab\/arrow navigation/);
   const unknown = await execute(tool, { action: "guide", topic: "nope" });
   assert.equal(unknown.isError, true);
   assert.match(String(unknown.content[0] && "text" in unknown.content[0] ? unknown.content[0].text : ""), /Unknown SOP topic/);
@@ -72,9 +80,10 @@ test("computer_use routes every operation family and exposes functional renderer
     { action: "capabilities" }, { action: "status" }, { action: "permissions" }, { action: "list_windows" },
     { action: "activate", window_id: "w" }, { action: "screenshot", source: "screen" }, { action: "ocr", source: "image", path: "x" },
     { action: "detect", source: "screen" }, { action: "ui_tree", window_id: "w" }, { action: "find_control", window_id: "w", query: "Save" },
-    { action: "press_control", window_id: "w", control_ref: "r" }, { action: "click", window_id: "w", x: 1, y: 2 },
-    { action: "double_click", window_id: "w", x: 1, y: 2 }, { action: "right_click", window_id: "w", x: 1, y: 2 },
-    { action: "move", window_id: "w", x: 1, y: 2 }, { action: "drag", window_id: "w", x: 1, y: 2, to_x: 3, to_y: 4 },
+    { action: "press_control", window_id: "w", control_ref: "r" }, { action: "click", window_id: "w", x: 1, y: 2, observe_after: false },
+    { action: "double_click", window_id: "w", x: 1, y: 2, observe_after: false }, { action: "right_click", window_id: "w", x: 1, y: 2, observe_after: false },
+    { action: "move", window_id: "w", x: 1, y: 2, observe_after: false }, { action: "scroll", window_id: "w", x: 1, y: 2, direction: "down", magnitude: 3, observe_after: false },
+    { action: "drag", window_id: "w", x: 1, y: 2, to_x: 3, to_y: 4, observe_after: false },
     { action: "press", window_id: "w", keys: ["a"] }, { action: "type", window_id: "w", text: "a" },
     { action: "paste", window_id: "w", text: "a" }, { action: "find_block", source: "screen", template_path: "x" },
   ];
@@ -99,6 +108,75 @@ test("computer_use routes every operation family and exposes functional renderer
   assert.match(resultComponent?.render(80).join("\n") ?? "", /computer_use/);
   const screenshot = await execute(tool, { action: "screenshot", source: "screen" });
   assert.equal(screenshot.content.some((item) => item.type === "image"), true);
+});
+
+test("computer_use mouse actions attach a fresh window screenshot by default", async () => {
+  const calls: string[] = [];
+  const tool = createComputerUseTool(fakeManager(calls));
+  const inputs: Record<string, unknown>[] = [
+    { action: "click", window_id: "w", x: 1, y: 2 },
+    { action: "double_click", window_id: "w", x: 1, y: 2 },
+    { action: "right_click", window_id: "w", x: 1, y: 2 },
+    { action: "move", window_id: "w", x: 1, y: 2 },
+    { action: "scroll", window_id: "w", x: 1, y: 2, direction: "down", magnitude: 3 },
+    { action: "drag", window_id: "w", x: 1, y: 2, to_x: 3, to_y: 4 },
+  ];
+
+  for (const input of inputs) {
+    const result = await execute(tool, input);
+    assert.equal(result.isError, undefined);
+    assert.equal(result.content.some((item) => item.type === "image"), true);
+  }
+
+  assert.deepEqual(calls, inputs.flatMap((input) => [input.action, "screenshot"]));
+});
+
+test("computer_use can skip post-action observation explicitly", async () => {
+  const calls: string[] = [];
+  const result = await execute(createComputerUseTool(fakeManager(calls)), { action: "click", window_id: "w", x: 1, y: 2, observe_after: false });
+  assert.equal(result.isError, undefined);
+  assert.equal(result.content.some((item) => item.type === "image"), false);
+  assert.deepEqual(calls, ["click"]);
+});
+
+test("computer_use preserves successful pointer actions when observation fails", async () => {
+  const calls: string[] = [];
+  const manager = fakeManager(calls);
+  manager.click = async () => ({ resolvedPoint: { x: 1, y: 2 }, foregroundVerified: true } as never);
+  manager.screenshot = async () => { calls.push("screenshot"); throw new Error("fixture observation failed"); };
+
+  const result = await execute(createComputerUseTool(manager), { action: "click", window_id: "w", x: 1, y: 2 });
+  const details = result.details?.result as { action_result?: unknown; observation?: { ok?: boolean; error?: { message?: string } } };
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(details.action_result, { resolvedPoint: { x: 1, y: 2 }, foregroundVerified: true });
+  assert.equal(details.observation?.ok, false);
+  assert.match(details.observation?.error?.message ?? "", /fixture observation failed/);
+});
+
+test("computer_use shares one absolute deadline across pointer action and observation", async () => {
+  const manager = fakeManager([]);
+  let actionDeadline: number | undefined;
+  let observationDeadline: number | undefined;
+  manager.click = async (input) => { actionDeadline = input.deadline; return {} as never; };
+  manager.screenshot = async (input) => { observationDeadline = input.deadline; return frame; };
+  const startedAt = Date.now();
+
+  const result = await execute(createComputerUseTool(manager), { action: "click", window_id: "w", x: 1, y: 2, timeout_ms: 1_000 });
+
+  assert.equal(result.isError, undefined);
+  assert.equal(observationDeadline, actionDeadline);
+  assert.ok((actionDeadline ?? 0) >= startedAt + 900);
+});
+
+test("computer_use keeps injected managers without scroll source-compatible", async () => {
+  const manager = fakeManager([]);
+  delete manager.scroll;
+
+  const result = await execute(createComputerUseTool(manager), { action: "scroll", window_id: "w", x: 1, y: 2, direction: "down", magnitude: 1 });
+
+  assert.equal(result.isError, true);
+  assert.equal(result.details?.error?.code, "DEPENDENCY_UNAVAILABLE");
+  assert.match(result.details?.error?.message ?? "", /does not support scroll/);
 });
 
 test("computer_use validation errors are actionable and structured", async () => {
