@@ -28,9 +28,10 @@ import cockpitEntry, { resolveCockpitSurfaceState } from "../src/index.ts";
 import extensionEntry from "../src/extension/index.ts";
 import { SESSION_BAR_WIDGET_KEY } from "../src/session-bar.ts";
 
-test("Cockpit defaults Todo to a one-line collapsed summary and Quiet to check symbols", () => {
+test("Cockpit defaults Todo to a one-line collapsed summary and Quiet to dot symbols", () => {
 	assert.equal(DEFAULT_CONFIG.todoExpanded, false);
-	assert.equal(DEFAULT_CONFIG.quietSymbols, "check");
+	assert.equal(DEFAULT_CONFIG.quietMode, true);
+	assert.equal(DEFAULT_CONFIG.quietSymbols, "dot");
 });
 
 test("Cockpit resolves one actual surface from enablement and deferred dock visibility", () => {
@@ -236,6 +237,21 @@ test("selected Cockpit sessions publish editor targets and route input through t
 	assert.match(source, /Symbol\.for\("pi-maestro-teammate\.mailbox-registry"\)/);
 	assert.doesNotMatch(source, /import\s*\{\s*MAILBOX_REGISTRY_KEY/);
 	assert.match(source, /if \(action === "handled"\) return \{ action: "handled" as const \}/);
+});
+
+test("Cockpit wires canonical target routing ahead of legacy and persistent routes", () => {
+	const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+	const canonical = source.indexOf("routeCanonicalTargetInput({");
+	const legacyWindow = source.indexOf("if (hashWindowRoute)");
+	const persistentWindow = source.indexOf("sessionUi.mode === \"window\"", legacyWindow);
+	const persistentAgent = source.indexOf("routeAgentInput(", persistentWindow);
+	assert.ok(canonical >= 0 && canonical < legacyWindow);
+	assert.ok(legacyWindow < persistentWindow && persistentWindow < persistentAgent);
+	assert.match(source, /createTargetAutocompleteProvider\([\s\S]*?createWindowAutocompleteProvider\(/u);
+	assert.match(source, /activateSsh: activateSshHost/u);
+	assert.match(source, /liveRegistry\?\.send\?\.\([\s\S]*?liveRegistry\?\.router\?\.route/u);
+	assert.match(source, /pi\.on\("before_agent_start"[\s\S]*?pendingTargetReference = undefined[\s\S]*?formatPendingTargetContext/u);
+	assert.match(source, /pi\.on\("agent_end"[\s\S]*?pendingTargetReference = undefined/u);
 });
 
 test("Cockpit defers settings-driven re-enable until the settings overlay is closed", () => {

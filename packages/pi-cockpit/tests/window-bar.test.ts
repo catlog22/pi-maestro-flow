@@ -14,7 +14,7 @@ import {
 	ownerDisplayToken,
 	resolveWindowRouteInput,
 } from "../src/window-autocomplete.ts";
-import { renderWindowThreadView } from "../src/window-thread-view.ts";
+import { makeWindowThreadWidget, renderWindowThreadView } from "../src/window-thread-view.ts";
 import { cockpitTuiLocale } from "../src/tui-i18n.ts";
 import type { SessionHostSnapshot } from "pi-maestro-teammate/v1/sessions";
 
@@ -172,6 +172,7 @@ test("Cockpit intercepts exact monitor before agent routing and hides windows by
 	assert.match(source, /!endpoint \|\| isMonitorControlEndpoint\(endpoint\)\) return undefined;/);
 	assert.match(source, /sigil: "#"/);
 	assert.match(source, /createWindowAutocompleteProvider/);
+	assert.match(source, /const isSynthetic = isLocalInputText\(e\.text\)/);
 	assert.match(source, /config\.enabled && e\.source === "interactive"/);
 	assert.match(source, /resolveWindowRouteInput\(e\.text, windowAutocompleteTargets\(\), selectedHashWindowTargets\)/);
 	assert.match(source, /config\.enabled && sessionUi\.mode === "window"/);
@@ -381,6 +382,21 @@ test("Window thread view filters by exact owner nonce and renders communication 
 	assert.doesNotMatch(lines.join("\n"), /wrong incarnation/);
 	assert.match(lines.join("\n"), /worker/);
 	assert.match(lines.join("\n"), /follow-up/);
+});
+
+test("Window thread widget reserves the terminal's final column", () => {
+	const store = new EndpointStore({ getLegacyAgents: () => [] });
+	store.applyRegistrySnapshot(snapshot("windows"));
+	const value = store.snapshot();
+	const widget = makeWindowThreadWidget({
+		getWindow: () => remoteWindow(value),
+		getEntries: () => value.thread.map((entry) => ({ ...entry, body: "changing remote message ".repeat(20) })),
+		getVisible: () => true,
+		getScroll: () => ({ offset: 0, following: true }),
+	})({} as never, theme as Theme);
+	for (const width of [40, 80, 120]) {
+		assert.ok(widget.render(width).every((line) => visibleWidth(line) <= width - 1));
+	}
 });
 
 test("Window thread live tail updates remote agent summaries with stable identity color", () => {

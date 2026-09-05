@@ -38,6 +38,11 @@ export function isLegacyTodoOverlayInput(data: string): boolean {
 	return data === "\x1bT";
 }
 
+/** Inputs owned by the local Pi host rather than the selected Agent/Window route. */
+export function isLocalInputText(text: string): boolean {
+	return text.startsWith("/") || text.startsWith("!") || text.trim().toLocaleLowerCase("en") === "#ssh";
+}
+
 function inputRegistries(provider: AgentInputRegistryProvider | undefined): AgentInputRegistries {
 	if (provider && "deliverAgentMessage" in provider) return { mailbox: provider };
 	return provider ?? {};
@@ -56,8 +61,7 @@ export async function routeAgentInput(
 ): Promise<"continue" | "handled"> {
 	const hasImages = (event.images?.length ?? 0) > 0;
 	const interactive = event.source === "interactive" && (event.text.trim().length > 0 || hasImages);
-	const synthetic = event.text.startsWith("/") || event.text.startsWith("!");
-	if (!interactive || synthetic || !target) return "continue";
+	if (!interactive || isLocalInputText(event.text) || !target) return "continue";
 
 	if (hasImages) {
 		ui.notify(tuiT("notice.agentImage", { label: target.label }), "warning");

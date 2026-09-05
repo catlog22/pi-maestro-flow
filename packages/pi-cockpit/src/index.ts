@@ -86,7 +86,7 @@ import {
 	buildZenTaskSheet,
 	type ZenSheetDocument,
 } from "./zen-sheet.ts";
-import { isLegacyTodoOverlayInput, routeAgentInput } from "./input-routing.ts";
+import { isLegacyTodoOverlayInput, isLocalInputText, routeAgentInput } from "./input-routing.ts";
 import { activeThemeName, ThemePicker } from "./theme-picker.ts";
 import { ModelPicker, type ModelPickerEntry } from "./model-picker.ts";
 import { getUsageTotals, invalidateUsageCache, renderFooter, setUsageThrottle, type PaintTheme, type WidthUtils } from "./footer.ts";
@@ -131,6 +131,14 @@ import {
 	type CockpitConfig,
 } from "./types.ts";
 import type { MailboxHostRegistry } from "pi-maestro-teammate/v1/mailbox";
+import { activateSshHost, listSshHostPickerEntries } from "pi-maestro-teammate/v1/ssh-hosts";
+import {
+	buildCockpitTargetCatalogue,
+	createTargetAutocompleteProvider,
+	formatPendingTargetContext,
+	routeCanonicalTargetInput,
+	type PendingTargetReference,
+} from "./target-integration.ts";
 
 export {
 	EndpointStore,
@@ -433,6 +441,7 @@ export default function (pi: ExtensionAPI): void {
 	// stand-in for Claude Code's Haiku title). Cleared per session.
 	let aiTitle: string | undefined;
 	let firstUserText: string | undefined;
+	let pendingTargetReference: PendingTargetReference | undefined;
 	let titleRequested = false;
 	let titleFrameIndex = 0;
 	let mainOutputRevision = 0;
@@ -912,6 +921,13 @@ export default function (pi: ExtensionAPI): void {
 		current: tuiT("window.autocompleteCurrent"),
 		peer: tuiT("window.autocompletePeer"),
 	});
+	const targetCatalogue = async () => {
+		try {
+			return buildCockpitTargetCatalogue(endpoints.snapshot(), await listSshHostPickerEntries(), true);
+		} catch {
+			return buildCockpitTargetCatalogue(endpoints.snapshot(), [], false);
+		}
+	};
 
 	const publishInputTarget = (force = false): void => {
 		const target = sessionUi.mode === "window" ? selectedWindowInputTarget() : selectedAgentTarget();
@@ -1841,6 +1857,7 @@ export default function (pi: ExtensionAPI): void {
 		maestro.clear();
 		aiTitle = undefined;
 		firstUserText = undefined;
+		pendingTargetReference = undefined;
 		titleRequested = false;
 		titleFrameIndex = 0;
 		titleGeneration += 1;
@@ -1855,10 +1872,13 @@ export default function (pi: ExtensionAPI): void {
 		settingsLocale.reload();
 		settingsRegistry.emitLocale(settingsLocale.locale);
 		selectedHashWindowTargets.clear();
-		ctx.ui.addAutocompleteProvider((current) => createWindowAutocompleteProvider(
-			current,
-			() => config.enabled ? windowAutocompleteTargets() : [],
-			(target) => selectedHashWindowTargets.set(target.token.toLocaleLowerCase("en"), target),
+		ctx.ui.addAutocompleteProvider((current) => createTargetAutocompleteProvider(
+			createWindowAutocompleteProvider(
+				current,
+				() => config.enabled ? windowAutocompleteTargets() : [],
+				(target) => selectedHashWindowTargets.set(target.token.toLocaleLowerCase("en"), target),
+			),
+			async () => config.enabled ? targetCatalogue() : buildCockpitTargetCatalogue(endpoints.snapshot(), [], false),
 		));
 		invalidateUsageCache();
 		// Quiet mode: register compact tool renderers and fold thinking blocks.
@@ -1953,6 +1973,7 @@ export default function (pi: ExtensionAPI): void {
 		settingsProviderDisposer = undefined;
 		endpoints.disconnect();
 		lastCtx = undefined;
+		pendingTargetReference = undefined;
 		running = false;
 		runningStartedAt = undefined;
 		uiPromptDepth = 0;
@@ -1971,6 +1992,13 @@ export default function (pi: ExtensionAPI): void {
 		usageSubsystem?.stop(ctx);
 	});
 
+	pi.on("before_agent_start", async (event) => {
+		const reference = pendingTargetReference;
+		pendingTargetReference = undefined;
+		if (!reference) return undefined;
+		const context = formatPendingTargetContext(reference, await targetCatalogue());
+		return context ? { systemPrompt: `${event.systemPrompt}\n\n${context}` } : undefined;
+	});
 	pi.on("agent_start", () => {
 		running = true;
 		runningStartedAt = Date.now();
@@ -1978,6 +2006,7 @@ export default function (pi: ExtensionAPI): void {
 		req();
 	});
 	pi.on("agent_end", () => {
+		pendingTargetReference = undefined;
 		running = false;
 		runningStartedAt = undefined;
 		activeTools.clear();
@@ -2038,7 +2067,41 @@ export default function (pi: ExtensionAPI): void {
 		const mailboxRegistry = globals[MAILBOX_REGISTRY_KEY] as MailboxHostRegistry | undefined;
 		const hasImages = (e.images?.length ?? 0) > 0;
 		const interactiveText = e.source === "interactive" && e.text.trim().length > 0;
-		const isSynthetic = e.text.startsWith("/") || e.text.startsWith("!");
+
+		if (config.enabled && e.source === "interactive") {
+			pendingTargetReference = undefined;
+			const canonical = await routeCanonicalTargetInput({
+				text: e.text,
+				hasImages,
+				getCatalogue: targetCatalogue,
+				activateSsh: activateSshHost,
+				send: async (request) => {
+					const liveRegistry = sessionRegistry() ?? endpoints.registry;
+					const delivery = await (liveRegistry?.send?.({
+						...request,
+						source: "user",
+					}) ?? liveRegistry?.router?.route({
+						...request,
+						source: "user",
+					}));
+					return delivery ?? { delivered: false, error: tuiT("notice.deliveryRegistryUnavailable") };
+				},
+				notify: (message, type) => ctx.ui.notify(message, type),
+				restore: (text) => {
+					const selectedId = sessionUi.selectedId(sessionUi.mode);
+					if (selectedId) sessionUi.setDraft(selectedId, text);
+					ctx.ui.setEditorText(text);
+				},
+			});
+			if (canonical?.action === "handled") return { action: "handled" as const };
+			if (canonical?.action === "transform") {
+				pendingTargetReference = canonical.reference;
+				if (!firstUserText) firstUserText = canonical.text;
+				return { action: "transform" as const, text: canonical.text };
+			}
+		}
+
+		const isSynthetic = isLocalInputText(e.text);
 		const hashWindowRoute = config.enabled && e.source === "interactive" && !isSynthetic
 			? resolveWindowRouteInput(e.text, windowAutocompleteTargets(), selectedHashWindowTargets)
 			: undefined;

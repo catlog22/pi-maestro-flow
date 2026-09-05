@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { MailboxHostRegistry } from "pi-maestro-teammate/v1/mailbox";
-import { isLegacyTodoOverlayInput, routeAgentInput } from "../src/input-routing.ts";
+import { isLegacyTodoOverlayInput, isLocalInputText, routeAgentInput } from "../src/input-routing.ts";
 import { cockpitTuiLocale } from "../src/tui-i18n.ts";
 
 cockpitTuiLocale.setLocale("en");
@@ -31,11 +31,15 @@ function registry(deliver: MailboxHostRegistry["deliverAgentMessage"]): MailboxH
 	return { deliverAgentMessage: deliver } as MailboxHostRegistry;
 }
 
-test("main-session, command, bash and noninteractive input continue normally", async () => {
+test("main-session, local controls, bash and noninteractive input continue normally", async () => {
 	const host = ui();
+	assert.equal(isLocalInputText("#ssh"), true);
+	assert.equal(isLocalInputText("  #SSH  "), true);
+	assert.equal(isLocalInputText("#ssh run this remotely"), false);
 	assert.equal(await routeAgentInput({ text: "hello", source: "interactive" }, undefined, undefined, host.value), "continue");
 	assert.equal(await routeAgentInput({ text: "/reload", source: "interactive" }, target, undefined, host.value), "continue");
 	assert.equal(await routeAgentInput({ text: "!pwd", source: "interactive" }, target, undefined, host.value), "continue");
+	assert.equal(await routeAgentInput({ text: "#ssh", source: "interactive" }, target, undefined, host.value), "continue");
 	assert.equal(await routeAgentInput({ text: "rpc", source: "rpc" }, target, undefined, host.value), "continue");
 });
 

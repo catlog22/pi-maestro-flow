@@ -52,10 +52,10 @@ test("currency merges as usd|cny and rate clamps to a positive number", () => {
 	assert.equal(mergeConfig(DEFAULT_CONFIG, { currencyRate: 7.135 }).currencyRate, 7.14);
 });
 
-test("legacy config without quietSymbols keeps the check default", () => {
+test("legacy config without quietSymbols keeps the dot default", () => {
 	const config = mergeConfig(DEFAULT_CONFIG, { quietMode: true });
 	assert.equal(config.quietMode, true);
-	assert.equal(config.quietSymbols, "check");
+	assert.equal(config.quietSymbols, "dot");
 });
 
 test("pinEditorBottom is opt-in and accepts only boolean values", () => {
@@ -83,8 +83,8 @@ test("claude-style interaction settings are independent opt-in booleans, default
 test("quietSymbols accepts supported modes and rejects unknown values", () => {
 	assert.equal(mergeConfig(DEFAULT_CONFIG, { quietSymbols: "dot" }).quietSymbols, "dot");
 	assert.equal(mergeConfig(DEFAULT_CONFIG, { quietSymbols: "check" }).quietSymbols, "check");
-	assert.equal(mergeConfig(DEFAULT_CONFIG, { quietSymbols: "icons" }).quietSymbols, "check");
-	assert.equal(mergeConfig(DEFAULT_CONFIG, { quietSymbols: null }).quietSymbols, "check");
+	assert.equal(mergeConfig(DEFAULT_CONFIG, { quietSymbols: "icons" }).quietSymbols, "dot");
+	assert.equal(mergeConfig(DEFAULT_CONFIG, { quietSymbols: null }).quietSymbols, "dot");
 });
 
 test("toolPalette accepts supported modes and rejects unknown values", () => {

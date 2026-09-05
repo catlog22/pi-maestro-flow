@@ -305,8 +305,8 @@ export interface CockpitConfig {
 	/** Provider usage bars (quota, balance, spend) in the footer + `/usage` overlay. */
 	usage: UsageConfig;
 	/**
-	 * Theme to apply at session start. Empty means "leave whatever pi is using",
-	 * so cockpit never overrides a theme the user picked elsewhere.
+	 * Theme to apply at session start. An empty value leaves the active Pi theme
+	 * unchanged.
 	 */
 	theme: string;
 }
@@ -314,8 +314,8 @@ export interface CockpitConfig {
 export const DEFAULT_CONFIG: CockpitConfig = {
 	enabled: true,
 	staticMode: false,
-	quietMode: false,
-	quietSymbols: "check",
+	quietMode: true,
+	quietSymbols: "dot",
 	toolPalette: "family",
 	agentsMode: "list",
 	todoMode: "list",
@@ -335,11 +335,11 @@ export const DEFAULT_CONFIG: CockpitConfig = {
 	title: {
 		enabled: true,
 		showSession: true,
-		showCwd: false,
-		showModel: false,
-		showThinking: false,
-		showGit: false,
-		showMaestro: false,
+		showCwd: true,
+		showModel: true,
+		showThinking: true,
+		showGit: true,
+		showMaestro: true,
 		generationModel: "",
 		maxLength: 80,
 	},
@@ -350,5 +350,5 @@ export const DEFAULT_CONFIG: CockpitConfig = {
 		barWidth: 8,
 		commandKey: "usage",
 	},
-	theme: "",
+	theme: "cockpit-zen",
 };

@@ -238,8 +238,11 @@ function alignRight(left: string, right: string, width: number, measure: WidthUt
 }
 
 export function renderFooter(p: FooterParts): string[] {
-	const { width, theme, glyphs: g, utils } = p;
-	if (width <= 0) return [""];
+	const { width: viewportWidth, theme, glyphs: g, utils } = p;
+	if (viewportWidth <= 0) return [""];
+	// Footer values repaint on usage, Git, workflow and background-job updates.
+	// Reserve the last terminal column so those rewrites cannot trigger auto-wrap.
+	const width = Math.max(1, viewportWidth - 1);
 	const ell = theme.fg("dim", g.ellipsis);
 	const sep = theme.fg("dim", g.separator.trim());
 

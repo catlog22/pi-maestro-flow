@@ -74,6 +74,27 @@ test("expanded Todo widget has one summary followed directly by task rows", () =
 	assert.ok(lines[1].includes("implement ownership"));
 });
 
+test("live Todo rows reserve the terminal's final column across widths", () => {
+	const component = makeTodoWidget({
+		getTodos: () => [{
+			id: "1",
+			subject: "streaming task " + "with changing state ".repeat(20),
+			status: "in_progress",
+			blockedBy: [],
+			skills: [],
+		}],
+		getConfig: () => ({ ...DEFAULT_CONFIG, todoExpanded: true }),
+	})(tui, theme);
+
+	for (const width of [20, 40, 80, 120]) {
+		const lines = component.render(width);
+		assert.ok(lines.length > 1);
+		for (const line of lines) {
+			assert.ok(visibleWidth(line) <= width - 1, `Todo row used the final column at width ${width}: ${visibleWidth(line)}`);
+		}
+	}
+});
+
 test("visible Agents temporarily collapse an expanded Todo preference", () => {
 	const config = { ...DEFAULT_CONFIG, todoExpanded: true };
 	let agentPriority = true;

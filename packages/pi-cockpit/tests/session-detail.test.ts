@@ -237,9 +237,11 @@ test("makeSessionDetailWidget: reads live state on every render", () => {
 		getVisible: () => visible,
 	})({} as never, theme as Theme);
 	assert.deepEqual(widget.render(80), []);
-	rows = [agent()];
+	rows = [agent({ tail: "changing session output ".repeat(20) })];
 	viewingId = "c1";
-	assert.deepEqual(widget.render(80), renderSessionDetail(rows, viewingId, 80, theme as Theme, 6));
+	const rendered = widget.render(80);
+	assert.deepEqual(rendered, renderSessionDetail(rows, viewingId, 79, theme as Theme, 6));
+	assert.ok(rendered.every((line) => visibleWidth(line) <= 79), "live session detail must reserve the final column");
 	visible = false;
 	assert.deepEqual(widget.render(80), []);
 });

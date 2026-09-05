@@ -121,7 +121,7 @@ test("getUsageTotals refreshes when the latest entry usage changes in place", ()
 	assert.equal(second.cost, 0.9);
 });
 
-test("renderFooter never exceeds width across many widths", () => {
+test("renderFooter reserves the terminal's final column across widths", () => {
 	for (let width = 1; width <= 120; width++) {
 		const lines = renderFooter(parts({
 			width,
@@ -131,7 +131,8 @@ test("renderFooter never exceeds width across many widths", () => {
 			],
 		}));
 		assert.ok(lines.length === 1 || lines.length === 2);
-		for (const l of lines) assert.ok(utils.measure(l) <= width, `width ${width}: line too long (${utils.measure(l)}): ${l}`);
+		const liveWidth = Math.max(1, width - 1);
+		for (const l of lines) assert.ok(utils.measure(l) <= liveWidth, `width ${width}: line used the final column (${utils.measure(l)}): ${l}`);
 	}
 });
 
@@ -213,7 +214,7 @@ test("narrow footer simplifies the resource group before dropping identity", () 
 	}));
 	assert.equal(lines.length, 1);
 	assert.match(lines[0], /^YOLO · ⚡ stream-70b/);
-	assert.equal(lines[0].length, 80);
+	assert.equal(lines[0].length, 79);
 	assert.match(lines[0], /↑12k · ↓3\.4k · \$0\.52$/);
 });
 
@@ -228,7 +229,7 @@ test("auto compact stays hidden while approval remains at the start of line one"
 	assert.equal(lines.length, 1);
 	assert.match(lines[0], /^APPROVAL default · ⚡ stream-70b/);
 	assert.doesNotMatch(lines.join("\n"), /AUTO COMPACT|AUTO ON/);
-	assert.equal(lines[0].length, 100);
+	assert.equal(lines[0].length, 99);
 	assert.match(lines[0], /↑12k · ↓3\.4k · \$0\.52$/);
 });
 

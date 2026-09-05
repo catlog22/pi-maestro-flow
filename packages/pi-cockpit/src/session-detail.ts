@@ -226,7 +226,7 @@ export function makeSessionDetailWidget(deps: SessionDetailDeps) {
 			return renderSessionDetail(
 				deps.getAgents(),
 				deps.getViewingId(),
-				width,
+				Math.max(1, width - 1),
 				theme,
 				maxRows,
 				deps.getScroll?.(),

@@ -72,6 +72,9 @@ export function makeTodoWidget(deps: TodoWidgetDeps) {
 				const cfg = deps.getConfig();
 				const todos = deps.getTodos();
 				if (todos.length === 0) return [];
+				// Todo rows repaint as task state changes. Keep the terminal's final
+				// column empty so auto-wrap cannot desynchronize pi-tui's cursor model.
+				const liveWidth = Math.max(1, width - 1);
 				const expanded = deps.getExpanded?.() ?? cfg.todoExpanded;
 				const g = resolveGlyphs(cfg.icons.mode);
 				// Todo row glyphs come from the glyph table (a hollow rectangle for
@@ -81,7 +84,7 @@ export function makeTodoWidget(deps: TodoWidgetDeps) {
 					expanded,
 					maxRows: panelRows(terminalRows(tui)),
 				};
-				return renderTodos(todos, expanded ? "list" : cfg.todoMode, width, paint, UTILS, opts);
+				return renderTodos(todos, expanded ? "list" : cfg.todoMode, liveWidth, paint, UTILS, opts);
 			},
 			invalidate(): void {},
 			dispose(): void {},

@@ -82,15 +82,15 @@ test("quiet controls stay grouped in mode, symbol, thinking order", () => {
 	assert.deepEqual(keys.slice(start, start + 3), ["quietMode", "quietSymbols", "thinkingFold"]);
 });
 
-test("quiet symbols cycle between check and dot modes", () => {
+test("quiet symbols cycle between dot and check modes", () => {
 	const row = buildRows(DEFAULT_CONFIG).find((candidate) => candidate.key === "quietSymbols");
 	assert.deepEqual(
 		{ value: row?.value, next: row?.next, accel: row?.accel },
-		{ value: "check", next: "dot", accel: "s" },
+		{ value: "dot", next: "check", accel: "s" },
 	);
-	const dotted = applyRow(DEFAULT_CONFIG, "quietSymbols");
-	assert.equal(dotted.quietSymbols, "dot");
-	assert.equal(applyRow(dotted, "quietSymbols").quietSymbols, "check");
+	const checked = applyRow(DEFAULT_CONFIG, "quietSymbols");
+	assert.equal(checked.quietSymbols, "check");
+	assert.equal(applyRow(checked, "quietSymbols").quietSymbols, "dot");
 });
 
 test("tool palette is hidden because tool names now follow lifecycle colors", () => {
@@ -180,11 +180,11 @@ test("title rows cycle every dimension and are reachable by accel", () => {
 	]);
 	assert.equal(applyRow(DEFAULT_CONFIG, "titleEnabled").title.enabled, false);
 	assert.equal(applyRow(DEFAULT_CONFIG, "titleSession").title.showSession, false);
-	assert.equal(applyRow(DEFAULT_CONFIG, "titleCwd").title.showCwd, true);
-	assert.equal(applyRow(DEFAULT_CONFIG, "titleModel").title.showModel, true);
-	assert.equal(applyRow(DEFAULT_CONFIG, "titleThinking").title.showThinking, true);
-	assert.equal(applyRow(DEFAULT_CONFIG, "titleGit").title.showGit, true);
-	assert.equal(applyRow(DEFAULT_CONFIG, "titleMaestro").title.showMaestro, true);
+	assert.equal(applyRow(DEFAULT_CONFIG, "titleCwd").title.showCwd, false);
+	assert.equal(applyRow(DEFAULT_CONFIG, "titleModel").title.showModel, false);
+	assert.equal(applyRow(DEFAULT_CONFIG, "titleThinking").title.showThinking, false);
+	assert.equal(applyRow(DEFAULT_CONFIG, "titleGit").title.showGit, false);
+	assert.equal(applyRow(DEFAULT_CONFIG, "titleMaestro").title.showMaestro, false);
 	// Round trip back on.
 	assert.equal(applyRow(applyRow(DEFAULT_CONFIG, "titleEnabled"), "titleEnabled").title.enabled, true);
 });

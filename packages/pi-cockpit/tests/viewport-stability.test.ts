@@ -169,20 +169,23 @@ test("terminal height changes retain the native canonical redraw", () => {
 	assert.ok(h.internals.previousLines[1]?.startsWith("ONE\x1b[0m"));
 });
 
-test("terminal width changes retain the native canonical redraw", () => {
-	const h = renderHarness(["zero", "one", "two", "three", "four"]);
-	attachViewportStability(h.tui);
-	h.render();
-	assert.equal(h.internals.previousWidth, 40);
-	h.terminal.writes.length = 0;
+test("terminal width changes in either direction retain the native canonical redraw", () => {
+	for (const [initialWidth, nextWidth] of [[40, 50], [50, 40]]) {
+		const h = renderHarness(["zero", "one", "two", "three", "four"]);
+		h.terminal.columns = initialWidth;
+		attachViewportStability(h.tui);
+		h.render();
+		assert.equal(h.internals.previousWidth, initialWidth);
+		h.terminal.writes.length = 0;
 
-	h.terminal.columns = 50;
-	h.setLines(["ZERO", "ONE", "two", "three", "four"]);
-	h.render();
-	assert.equal(h.tui.fullRedraws, 2);
-	assert.equal(h.terminal.writes.some((value) => value.includes("\x1b[3J")), true);
-	assert.ok(h.internals.previousLines[0]?.startsWith("ZERO\x1b[0m"));
-	assert.ok(h.internals.previousLines[1]?.startsWith("ONE\x1b[0m"));
+		h.terminal.columns = nextWidth;
+		h.setLines(["ZERO", "ONE", "two", "three", "four"]);
+		h.render();
+		assert.equal(h.tui.fullRedraws, 2, `${initialWidth} -> ${nextWidth} must use a full redraw`);
+		assert.equal(h.terminal.writes.some((value) => value.includes("\x1b[3J")), true);
+		assert.ok(h.internals.previousLines[0]?.startsWith("ZERO\x1b[0m"));
+		assert.ok(h.internals.previousLines[1]?.startsWith("ONE\x1b[0m"));
+	}
 });
 
 test("capturing overlays repaint visible rows without replaying hidden main-screen churn", () => {

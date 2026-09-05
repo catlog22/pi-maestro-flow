@@ -265,10 +265,13 @@ test("maxRows folds the tail into a dim more-marker", () => {
 	assert.match(lines.at(-1)!, /\d+ more/, "tail folds into a count");
 });
 
-test("every row fits the requested width", () => {
-	for (const width of [24, 40, 80]) {
-		for (const line of render({ width })) {
-			assert.ok(visibleWidth(line) <= width, `row exceeds width ${width}: ${line}`);
+test("live Zen rows reserve the terminal's final column", () => {
+	for (const width of [24, 40, 80, 120]) {
+		for (const line of render({
+			width,
+			todos: [{ ...todos[0], subject: "changing task state ".repeat(20) }],
+		})) {
+			assert.ok(visibleWidth(line) <= width - 1, `row used the final column at width ${width}: ${line}`);
 		}
 	}
 	assert.deepEqual(render({ width: 0 }), [], "zero width renders nothing");

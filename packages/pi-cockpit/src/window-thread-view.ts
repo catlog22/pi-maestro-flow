@@ -103,7 +103,14 @@ export function makeWindowThreadWidget(deps: WindowThreadViewDeps) {
 	return (_tui: TUI, theme: Theme) => ({
 		render(width: number): string[] {
 			if (!deps.getVisible()) return [];
-			return renderWindowThreadView(deps.getWindow(), deps.getEntries(), width, 10, deps.getScroll(), theme);
+			return renderWindowThreadView(
+				deps.getWindow(),
+				deps.getEntries(),
+				Math.max(1, width - 1),
+				10,
+				deps.getScroll(),
+				theme,
+			);
 		},
 		invalidate(): void {},
 		dispose(): void {},

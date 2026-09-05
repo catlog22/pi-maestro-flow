@@ -465,8 +465,11 @@ export function enumerateZenNavRows(input: ZenRenderInput): string[] {
 }
 
 export function renderZenStack(input: ZenRenderInput): string[] {
-	const width = Math.max(0, Math.trunc(input.width));
-	if (width <= 0) return [];
+	const viewportWidth = Math.max(0, Math.trunc(input.width));
+	if (viewportWidth <= 0) return [];
+	// Zen rows carry live task, agent and job state. Leave the terminal's final
+	// column untouched so a differential repaint cannot arm auto-wrap.
+	const width = Math.max(1, viewportWidth - 1);
 	const glyphs = resolveGlyphs(input.config.icons.mode);
 	const built = buildRows(input, glyphs);
 	if (built.length === 0) return [];
