@@ -4,6 +4,104 @@ export type RecoveryProtocolVersion = typeof RECOVERY_PROTOCOL_VERSION;
 export type RecoveryScope = "main" | "teammate";
 export type RecoveryOwner = "pi-core" | "teammate";
 
+export const RECOVERY_WAKE_RECEIPT_VERSION = 1 as const;
+export type RecoveryWakeReceiptState = "prepared" | "queued" | "consumed" | "turn-started" | "cancelled" | "failed";
+
+/** Additive companion to legacy teammate_compaction_state events. */
+export interface RecoveryWakeReceiptV1 {
+  version: typeof RECOVERY_WAKE_RECEIPT_VERSION;
+  recoveryId: string;
+  producer: string;
+  generation: number;
+  wakeId: string;
+  state: RecoveryWakeReceiptState;
+  sequence: number;
+  deadlineAt: number;
+  runtimeGeneration?: number;
+  sessionId?: string;
+  branchCheckpointId?: string;
+  messageId?: string;
+  turnId?: string;
+  reason?: string;
+}
+
+export type ReplayEvidenceSource =
+  | "tool"
+  | "proxy-request"
+  | "unknown-ipc"
+  | "stdout-protocol"
+  | "stderr"
+  | "legacy-unknown";
+
+export interface ReplayEvidenceEntry {
+  source: ReplayEvidenceSource;
+  reasonCode: string;
+  firstSequence: number;
+}
+
+export interface ReplayEvidenceV1 {
+  version: 1;
+  entries: readonly ReplayEvidenceEntry[];
+  overflowUnknown: boolean;
+  finalized: boolean;
+}
+
+const MAX_REPLAY_EVIDENCE_ENTRIES = 32;
+
+/** Bounded, monotonic replay evidence. Overflow is itself fail-closed. */
+export class ReplayEvidenceCollector {
+  private sequence = 0;
+  private overflowUnknown = false;
+  private readonly entries = new Map<string, ReplayEvidenceEntry>();
+
+  add(source: ReplayEvidenceSource, reasonCode: string): void {
+    this.sequence += 1;
+    const key = `${source}:${reasonCode}`;
+    if (this.entries.has(key)) return;
+    if (this.entries.size >= MAX_REPLAY_EVIDENCE_ENTRIES) {
+      this.overflowUnknown = true;
+      return;
+    }
+    this.entries.set(key, Object.freeze({ source, reasonCode, firstSequence: this.sequence }));
+  }
+
+  snapshot(finalized = false): ReplayEvidenceV1 {
+    return Object.freeze({
+      version: 1 as const,
+      entries: Object.freeze([...this.entries.values()]),
+      overflowUnknown: this.overflowUnknown,
+      finalized,
+    });
+  }
+}
+
+export function hasExternalReplayRisk(evidence: ReplayEvidenceV1 | undefined): boolean {
+  return evidence === undefined || evidence.overflowUnknown || evidence.entries.length > 0;
+}
+
+export interface RecoveryFailureRecordV1 {
+  code: string;
+  layer: "provider" | "transport" | "recovery";
+  phase: string;
+  sequence: number;
+  sanitizedMessage: string;
+  model?: string;
+}
+
+export interface RecoveryDecisionRecordV1 {
+  code: string;
+  sequence: number;
+  decision: string;
+  evidenceRef?: string;
+}
+
+export interface RecoveryFailureChainV1 {
+  version: 1;
+  initiating?: RecoveryFailureRecordV1;
+  decisions: readonly RecoveryDecisionRecordV1[];
+  terminal?: RecoveryFailureRecordV1;
+}
+
 export interface RecoveryEventBase {
   protocolVersion: RecoveryProtocolVersion;
   recoveryId: string;

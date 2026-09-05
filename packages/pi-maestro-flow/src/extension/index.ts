@@ -3861,7 +3861,10 @@ When NOT to use:
   // read-only boundary until Plan approval, before the interactive permission chain.
   pi.on("tool_call", (event) => onToolCallPlan(event, approvalMode === "bypassPermissions"));
 
-  pi.on("before_agent_start", async (event) => {
+  pi.on("before_agent_start", async (event, ctx) => {
+    // This is Pi's strongest public session-input boundary. It is correlated by
+    // the durable wake marker before any later agent lifecycle is accepted.
+    midTurnAutoCompaction.onBeforeAgentStart(event.prompt, ctx);
     // Pick up compaction settings edited while idle; cached again within the turn.
     midTurnAutoCompaction.refreshSettings();
     // Reset per-turn notify error latch so each turn starts clean.
@@ -3871,6 +3874,10 @@ When NOT to use:
     goalBeforeAgentStart(event);
     onBeforeAgentStartTodo();
     return planResult;
+  });
+
+  pi.on("agent_start", (_event, ctx) => {
+    midTurnAutoCompaction.onAgentStart(ctx);
   });
 
   pi.on("context", async (event, ctx) => {
@@ -4468,8 +4475,12 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
     newContextController.onSessionStart(ctx);
     autoCompaction.onSessionStart(ctx, event);
   });
-  pi.on("before_agent_start", (_event, ctx) => {
+  pi.on("before_agent_start", (event, ctx) => {
+    autoCompaction.onBeforeAgentStart(event.prompt, ctx);
     newContextToolSurface.sync(newContextToolsEnabled(ctx.cwd));
+  });
+  pi.on("agent_start", (_event, ctx) => {
+    autoCompaction.onAgentStart(ctx);
   });
   // Child sessions share the same hard-threshold gate: block+terminate, never abort.
   pi.on("tool_call", (_event, ctx) => autoCompaction.onToolCall(ctx));

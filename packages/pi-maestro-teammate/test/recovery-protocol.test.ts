@@ -13,6 +13,8 @@ import {
   type RecoveryEventBase,
   type RecoveryIntent,
   type RecoveryProtocolEvent,
+  ReplayEvidenceCollector,
+  hasExternalReplayRisk,
   type RecoverySettledEvent,
 } from "../src/public/v1/retry.ts";
 
@@ -117,6 +119,23 @@ const settleSuccess: RecoveryIntent = {
   kind: "settle",
   outcome: "success",
 };
+
+test("bounded replay evidence preserves first sequence and projects fail-closed", () => {
+  const evidence = new ReplayEvidenceCollector();
+  evidence.add("stderr", "raw-stderr");
+  evidence.add("stderr", "raw-stderr");
+  evidence.add("unknown-ipc", "unrecognized-child-ipc");
+  const snapshot = evidence.snapshot(true);
+
+  assert.deepEqual(snapshot.entries, [
+    { source: "stderr", reasonCode: "raw-stderr", firstSequence: 1 },
+    { source: "unknown-ipc", reasonCode: "unrecognized-child-ipc", firstSequence: 3 },
+  ]);
+  assert.equal(snapshot.finalized, true);
+  assert.equal(hasExternalReplayRisk(snapshot), true);
+  assert.equal(hasExternalReplayRisk(new ReplayEvidenceCollector().snapshot()), false);
+  assert.equal(hasExternalReplayRisk(undefined), true, "missing typed evidence is legacy-unknown");
+});
 
 test("public v1 contract represents all six typed recovery intents", () => {
   const intents = [retryProvider, fallbackModel, compactContext, continueOutput, drainQueue, settleSuccess];

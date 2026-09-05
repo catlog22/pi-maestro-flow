@@ -59,7 +59,10 @@ import { dedupBlocks, type DedupBlock } from "./dedup.ts";
 import {
   isTeammateForkStartup,
   publishTeammateCompactionState,
+  publishTeammateCompactionWakeReceipt,
   type TeammateCompactionPhase,
+  type TeammateCompactionProducer,
+  type TeammateCompactionWakeState,
 } from "./teammate-compaction-relay.ts";
 
 const PROTECTED_THRESHOLD_CHARS = 500;
@@ -108,7 +111,10 @@ export const MAX_OUTPUT_LIMIT_CONTINUATIONS = 8;
 export const LOOP_CRITICAL_PERSIST_EVALUATIONS = 3;
 const PRUNE_STATE_ENTRY_TYPE = "maestro-auto-prune-state";
 const PENDING_INTENT_ENTRY_TYPE = "maestro-auto-compaction-intent";
-const PENDING_INTENT_VERSION = 3;
+const PENDING_INTENT_VERSION = 4;
+const RECOVERY_WAKE_VERSION = 1;
+/** Matches the existing teammate recovery ceiling; retries and restarts never reset it. */
+const RECOVERY_WAKE_DEADLINE_MS = 300_000;
 const PRUNE_STATE_VERSION = 6;
 
 function autoRecoveryId(sessionId: string | undefined, intent: PendingCompactionIntent): string {
@@ -289,6 +295,26 @@ interface PendingCompactionIntent {
   loopCritical?: boolean;
 }
 
+export interface RecoveryWake {
+  version: 1;
+  recoveryId: string;
+  wakeId: string;
+  producer: TeammateCompactionProducer;
+  sessionId: string;
+  branchCheckpointId: string;
+  producerGeneration: number;
+  runtimeGeneration: number;
+  state: TeammateCompactionWakeState;
+  promptKind: string;
+  prompt: string;
+  sequence: number;
+  deadlineAt: number;
+  wakeAttempts: number;
+  messageId?: string;
+  turnId?: string;
+  reason?: string;
+}
+
 interface PendingOutputLimitIntent {
   generation: number;
   /** Producer-scoped identity; output-limit generations are not comparable to auto intents. */
@@ -320,9 +346,9 @@ export interface AutoCompactionState {
   pendingIntent?: PendingCompactionIntent;
   /** Compaction succeeded, but the interrupted task still needs a durable continuation. */
   pendingContinuationIntent?: PendingCompactionIntent;
-  /** Continuation was queued, but its cleared tombstone has not persisted yet. */
-  deliveredContinuationIntent?: PendingCompactionIntent;
   pendingOutputLimitIntent?: PendingOutputLimitIntent;
+  /** One durable logical wake shared by auto and output-limit producers. */
+  recoveryWake?: RecoveryWake;
   /** Native fallback callback fence; invalidated by lifecycle/reset changes. */
   nativeFallbackNonce: number;
   lastTriggerKey?: string;
@@ -466,6 +492,12 @@ export interface MidTurnCompactionStatus {
 
 export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: AutoCompactionDependencies = {}): {
   onSessionStart(ctx: ExtensionContext, event?: { reason?: string }): void;
+  /** Trusted input boundary: only a matching raw recovery prompt may become consumed. */
+  onBeforeAgentStart(prompt: string, ctx: ExtensionContext): void;
+  /** Associated lifecycle boundary: only the wake consumed immediately before it may start. */
+  onAgentStart(ctx: ExtensionContext): void;
+  /** Idempotently dispatch the current logical wake when settled/idle. */
+  ensureRecoveryWake(ctx: ExtensionContext): boolean;
   evaluate(messages: AgentMessage[], ctx: ExtensionContext): Promise<AgentMessage[] | undefined>;
   /**
    * Gate tool execution at the first hard-threshold boundary. Returns a
@@ -586,11 +618,16 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     reason?: string,
   ): void {
     if (!intent.requestBlocked && !intent.contextExhausted && !intent.loopCritical) return;
+    const recoveryId = recoveryIdFor(intent);
+    const wakeGeneration = state.recoveryWake?.recoveryId === recoveryId
+      ? state.recoveryWake.producerGeneration
+      : intent.generation;
     publishTeammateCompactionState({
-      recoveryId: recoveryIdFor(intent),
+      recoveryId,
       producer: "auto",
       phase,
-      generation: intent.generation,
+      generation: wakeGeneration,
+      ...(state.recoveryWake?.recoveryId === recoveryId ? { wakeProtocolVersion: 1 as const } : {}),
       ...(reason ? { reason } : {}),
     });
   }
@@ -602,11 +639,16 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     phase: TeammateCompactionPhase,
     reason?: string,
   ): void {
+    const recoveryId = outputRecoveryIdFor(intent);
+    const wakeGeneration = state.recoveryWake?.recoveryId === recoveryId
+      ? state.recoveryWake.producerGeneration
+      : intent.generation;
     publishTeammateCompactionState({
-      recoveryId: outputRecoveryIdFor(intent),
+      recoveryId,
       producer: "output-limit",
       phase,
-      generation: intent.generation,
+      generation: wakeGeneration,
+      ...(state.recoveryWake?.recoveryId === recoveryId ? { wakeProtocolVersion: 1 as const } : {}),
       ...(reason ? { reason } : {}),
     });
   }
@@ -621,21 +663,143 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       console.warn(`[pi-maestro-flow] UI notification failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  /**
-   * Stage and deliver one interrupted-task wake. Staging is deliberately done
-   * before sendUserMessage: if the send throws, the durable continuation is
-   * still present for a later lifecycle instead of being cleared first.
-   */
-  function queueInterruptedContinuation(
+  let consumedWakeAwaitingStart: string | undefined;
+  let dispatchedWakeThisLifecycle: string | undefined;
+
+  function runtimeGeneration(): number {
+    const value = Number(process.env.PI_TEAMMATE_RUNTIME_GENERATION);
+    return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+  }
+  function branchCheckpointId(ctx: ExtensionContext): string {
+    const branch = (ctx.sessionManager as { getBranch?: () => Array<{ id?: string }> }).getBranch?.() ?? [];
+    return branch.at(-1)?.id ?? `session:${state.sessionId ?? "unknown"}:root`;
+  }
+  function branchMessageForWake(ctx: ExtensionContext, wake: RecoveryWake): { id?: string } | undefined {
+    const marker = recoveryDeliveryMarker(wake.wakeId);
+    const branch = (ctx.sessionManager as {
+      getBranch?: () => Array<{ id?: string; type?: string; message?: unknown }>;
+    }).getBranch?.() ?? [];
+    return branch.findLast((entry) => {
+      if (entry.type !== "message") return false;
+      try { return JSON.stringify(entry.message).includes(marker); }
+      catch { return false; }
+    });
+  }
+  function wakeIsTerminal(wake: RecoveryWake): boolean {
+    return wake.state === "turn-started" || wake.state === "cancelled" || wake.state === "failed";
+  }
+  function publishWake(wake: RecoveryWake): void {
+    publishTeammateCompactionWakeReceipt({
+      recoveryId: wake.recoveryId,
+      producer: wake.producer,
+      generation: wake.producerGeneration,
+      wakeId: wake.wakeId,
+      state: wake.state,
+      sequence: wake.sequence,
+      deadlineAt: wake.deadlineAt,
+      runtimeGeneration: wake.runtimeGeneration,
+      sessionId: wake.sessionId,
+      branchCheckpointId: wake.branchCheckpointId,
+      ...(wake.messageId ? { messageId: wake.messageId } : {}),
+      ...(wake.turnId ? { turnId: wake.turnId } : {}),
+      ...(wake.reason ? { reason: wake.reason } : {}),
+    });
+  }
+  function prepareWake(
+    recoveryId: string,
+    producer: TeammateCompactionProducer,
+    producerGeneration: number,
+    promptKind: string,
+    prompt: string,
+    ctx: ExtensionContext,
+  ): RecoveryWake | undefined {
+    const existing = state.recoveryWake;
+    if (existing) {
+      if (existing.recoveryId === recoveryId && existing.producerGeneration === producerGeneration) return existing;
+      if (!wakeIsTerminal(existing)) {
+        notifyBestEffort(
+          ctx,
+          `Recovery wake ${recoveryId} was not staged because ${existing.recoveryId} still owns the durable handoff.`,
+          "error",
+        );
+        return undefined;
+      }
+    }
+    if (!pi.appendEntry) {
+      notifyBestEffort(ctx, "Recovery wake capability unavailable: this Pi ExtensionAPI cannot durably append the prepared input.", "error");
+      return undefined;
+    }
+    const wake: RecoveryWake = {
+      version: RECOVERY_WAKE_VERSION,
+      recoveryId,
+      wakeId: randomUUID(),
+      producer,
+      sessionId: state.sessionId ?? sessionIdOf(ctx) ?? "unknown-session",
+      branchCheckpointId: branchCheckpointId(ctx),
+      producerGeneration,
+      runtimeGeneration: runtimeGeneration(),
+      state: "prepared",
+      promptKind,
+      prompt,
+      sequence: 1,
+      deadlineAt: Date.now() + RECOVERY_WAKE_DEADLINE_MS,
+      wakeAttempts: 0,
+    };
+    state.recoveryWake = wake;
+    if (!persistPendingIntent(pi, state)) {
+      state.recoveryWake = existing;
+      return undefined;
+    }
+    publishWake(wake);
+    return wake;
+  }
+  function ensureRecoveryWake(ctx: ExtensionContext): boolean {
+    const wake = state.recoveryWake;
+    if (!wake || wakeIsTerminal(wake)) return false;
+    if (Date.now() >= wake.deadlineAt) {
+      wake.state = "failed";
+      wake.reason = "recovery wake deadline expired before an authoritative turn-started receipt";
+      wake.sequence += 1;
+      if (persistPendingIntent(pi, state)) publishWake(wake);
+      notifyBestEffort(ctx, wake.reason, "error");
+      return false;
+    }
+    if (wake.state === "consumed") {
+      notifyBestEffort(ctx, `Recovery wake ${wake.wakeId} was already consumed; this Pi runtime cannot transactionally restart its associated turn without duplicate input.`, "error");
+      return false;
+    }
+    if (branchMessageForWake(ctx, wake)) {
+      // The durable transcript proves insertion, but this API cannot prove the
+      // input was transactionally consumed or restart its associated turn.
+      notifyBestEffort(ctx, `Recovery wake ${wake.wakeId} is already present in the session; awaiting its authoritative lifecycle boundary.`, "warning");
+      return false;
+    }
+    if (dispatchedWakeThisLifecycle === wake.wakeId) return true;
+    wake.wakeAttempts += 1;
+    wake.sequence += 1;
+    if (!persistPendingIntent(pi, state)) {
+      notifyBestEffort(ctx, "Recovery wake dispatch paused: its durable attempt could not be saved.", "error");
+      return false;
+    }
+    publishWake(wake);
+    dispatchedWakeThisLifecycle = wake.wakeId;
+    try {
+      // ExtensionAPI is fire-and-forget. Synchronous return is deliberately not
+      // promoted to queued/consumed and never clears the durable obligation.
+      pi.sendUserMessage(recoveryDeliveryPrompt(wake.prompt, wake.wakeId), { deliverAs: "steer" });
+      return true;
+    } catch (error) {
+      dispatchedWakeThisLifecycle = undefined;
+      notifyBestEffort(ctx, `Recovery wake dispatch failed synchronously: ${error instanceof Error ? error.message : String(error)}`, "error");
+      return false;
+    }
+  }
+  function stageInterruptedWake(
     intent: PendingCompactionIntent,
     ctx: ExtensionContext,
     prompt: string,
     publishCompleted: boolean,
   ): void {
-    if (state.deliveredContinuationIntent === intent) {
-      if (persistPendingIntent(pi, state)) state.deliveredContinuationIntent = undefined;
-      return;
-    }
     if (state.pendingIntent === intent) state.pendingIntent = undefined;
     const durableContinuation = !intent.requestBlocked && (intent.contextExhausted || intent.loopCritical);
     const shouldContinue = intent.requestBlocked || durableContinuation;
@@ -644,35 +808,24 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       persistPendingIntent(pi, state);
       return;
     }
-
-    // Provider-pressure replay is deliberately in-process only. Interrupted
-    // task recovery must be durable before any steer can be queued.
-    if (durableContinuation) {
-      state.pendingContinuationIntent = intent;
-      if (!persistPendingIntent(pi, state)) {
-        notifyBestEffort(ctx, "Mid-turn continuation paused: durable recovery state could not be saved.", "error");
-        return;
-      }
-    } else {
-      persistPendingIntent(pi, state);
+    if (durableContinuation) state.pendingContinuationIntent = intent;
+    else persistPendingIntent(pi, state); // provider-pressure remains in-process only
+    const recoveryId = recoveryIdFor(intent);
+    const promptKind = prompt === COMPACTION_RETRY_PROMPT ? "retry-compaction" : "continue";
+    const wake = prepareWake(recoveryId, "auto", intent.generation, promptKind, prompt, ctx);
+    if (!wake) {
+      notifyBestEffort(ctx, "Mid-turn continuation paused: durable recovery wake could not be saved.", "error");
+      return;
     }
-    try {
-      if (publishCompleted) publishRecoveryState(intent, "completed");
-      pi.sendUserMessage(recoveryDeliveryPrompt(prompt, recoveryIdFor(intent)), { deliverAs: "steer" });
-      publishRecoveryState(intent, "continuation");
-      if (state.pendingContinuationIntent === intent) state.pendingContinuationIntent = undefined;
-      if (durableContinuation) state.deliveredContinuationIntent = intent;
-      if (persistPendingIntent(pi, state)) state.deliveredContinuationIntent = undefined;
-      else notifyBestEffort(ctx, "Mid-turn continuation was queued, but its durable cleanup will retry at shutdown.", "warning");
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      // Keep the staged continuation. A later lifecycle can retry the send.
-      publishRecoveryState(intent, "failed", message);
-      notifyBestEffort(ctx, `Mid-turn continuation failed: ${message}`, "error");
-    }
+    if (publishCompleted) publishRecoveryState(intent, "completed");
+    publishRecoveryState(intent, "continuation");
+    ensureRecoveryWake(ctx);
+  }
+  function queueInterruptedContinuation(intent: PendingCompactionIntent, ctx: ExtensionContext, prompt: string, publishCompleted: boolean): void {
+    stageInterruptedWake(intent, ctx, prompt, publishCompleted);
   }
   function settleInterruptedContinuation(intent: PendingCompactionIntent, ctx: ExtensionContext): void {
-    queueInterruptedContinuation(intent, ctx, CONTINUE_PROMPT, true);
+    stageInterruptedWake(intent, ctx, CONTINUE_PROMPT, true);
   }
   async function linkedThresholdFor(
     ctx: ExtensionContext,
@@ -770,8 +923,8 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     state.activeLease = undefined;
     state.pendingIntent = undefined;
     state.pendingContinuationIntent = undefined;
-    state.deliveredContinuationIntent = undefined;
     state.pendingOutputLimitIntent = undefined;
+    state.recoveryWake = undefined;
     state.lastTriggerKey = undefined;
     state.lastNoCompactableKey = undefined;
     state.highPressureDroppedTurns = 0;
@@ -1573,31 +1726,20 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       publishOutputRecoveryState(intent, "cancelled", "a newer user message superseded output-limit recovery");
       return true;
     }
-    // Stage the continuation before sendUserMessage. A thrown send therefore
-    // leaves a durable retry rather than clearing the only recovery intent.
     intent.phase = options.clearAfterSend ? "continuation" : "pending";
-    if (!persistPendingIntent(pi, state)) {
-      notifyBestEffort(ctx, "Output-limit continuation paused: durable recovery state could not be saved.", "error");
+    const promptKind = prompt === OUTPUT_LIMIT_RETRY_PROMPT
+      ? "retry-compaction"
+      : prompt === OUTPUT_LIMIT_DIRECT_CONTINUE_PROMPT ? "direct-continue" : "continue";
+    const wake = prepareWake(outputRecoveryIdFor(intent), "output-limit", intent.generation, promptKind, prompt, ctx);
+    if (!wake) {
+      notifyBestEffort(ctx, "Output-limit continuation paused: durable recovery wake could not be saved.", "error");
       return false;
     }
-    try {
-      if (options.publishCompleted) publishOutputRecoveryState(intent, "completed");
-      pi.sendUserMessage(recoveryDeliveryPrompt(prompt, outputRecoveryIdFor(intent)), { deliverAs: "steer" });
-      publishOutputRecoveryState(intent, "continuation");
-      if (options.clearAfterSend) {
-        if (state.pendingOutputLimitIntent === intent) state.pendingOutputLimitIntent = undefined;
-        if (!persistPendingIntent(pi, state)) {
-          notifyBestEffort(ctx, "Output-limit continuation was queued, but its durable cleanup will retry at shutdown.", "warning");
-        }
-      }
-      if (options.clearAfterSend) state.outputLimitContinuations += 1;
-      return true;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      publishOutputRecoveryState(intent, "failed", message);
-      notifyBestEffort(ctx, `Output-limit continuation failed: ${message}`, "error");
-      return false;
-    }
+    if (options.publishCompleted) publishOutputRecoveryState(intent, "completed");
+    publishOutputRecoveryState(intent, "continuation");
+    const dispatched = ensureRecoveryWake(ctx);
+    if (dispatched && options.clearAfterSend) state.outputLimitContinuations += 1;
+    return dispatched;
   }
 
   async function settlePendingOutputLimit(ctx: ExtensionContext): Promise<boolean> {
@@ -1869,6 +2011,14 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       evictOffBranchRestoredPrunes(state);
       const restored = loadPersistedIntent(ctx, state.sessionId, state.generation);
       const restoredIntent = restored?.intent;
+      state.recoveryWake = restored?.recoveryWake;
+      if (state.recoveryWake && !wakeIsTerminal(state.recoveryWake)) {
+        // Runtime generation fences the new executor; logical wake identity and
+        // absolute deadline remain unchanged across restart.
+        state.recoveryWake.runtimeGeneration = runtimeGeneration();
+      }
+      consumedWakeAwaitingStart = undefined;
+      dispatchedWakeThisLifecycle = undefined;
       // A provider-pressure intent belongs to the interrupted in-process request.
       // After a crash/fork there is no safe request identity to replay, so drop it;
       // the next genuinely invalid payload can derive a fresh intent.
@@ -1877,7 +2027,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         ? undefined
         : restoredIntent;
       state.pendingOutputLimitIntent = restored?.outputLimitIntent;
-      state.persistedIntentKey = restored?.key ?? pendingIntentKey(undefined, "cleared");
+      state.persistedIntentKey = restored?.key ?? pendingIntentKey(undefined, "cleared", undefined, state.recoveryWake);
       if (restoredIntent?.requestBlocked || restored?.phase === "submitted" || restored?.outputLimitIntent?.phase === "pending") {
         // A fresh lifecycle proves the old in-process owner is gone. Convert an
         // uncertain submitted record back to pending before any new admission.
@@ -1889,9 +2039,28 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       resetCycleState();
       state.turnCount = 0;
       publishIdleStatus(ctx, settingsFor(ctx).enabled);
-      if (state.pendingContinuationIntent) {
+      if (state.recoveryWake) {
+        if (!wakeIsTerminal(state.recoveryWake)) {
+          persistPendingIntent(pi, state);
+        } else {
+          // Replayed terminal receipts are absorbing. If the process crashed
+          // between receipt persistence and tombstone append, finish only that
+          // cleanup; never recreate or dispatch the logical wake.
+          publishWake(state.recoveryWake);
+          if (state.recoveryWake.state === "turn-started") {
+            if (state.recoveryWake.producer === "auto") {
+              state.pendingContinuationIntent = undefined;
+              state.pendingIntent = undefined;
+            } else if (state.recoveryWake.producer === "output-limit") {
+              state.pendingOutputLimitIntent = undefined;
+            }
+            persistPendingIntent(pi, state);
+          }
+        }
+      }
+      if (state.pendingContinuationIntent && (!state.recoveryWake || !wakeIsTerminal(state.recoveryWake))) {
         settleInterruptedContinuation(state.pendingContinuationIntent, ctx);
-      } else if (state.pendingOutputLimitIntent?.phase === "continuation") {
+      } else if (state.pendingOutputLimitIntent?.phase === "continuation" && (!state.recoveryWake || !wakeIsTerminal(state.recoveryWake))) {
         queueOutputLimitWake(
           state.pendingOutputLimitIntent,
           ctx,
@@ -1899,6 +2068,57 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
           { clearAfterSend: true, publishCompleted: true },
         );
       }
+    },
+    onBeforeAgentStart(prompt, ctx) {
+      const wake = state.recoveryWake;
+      if (!wake || (wake.state !== "prepared" && wake.state !== "queued")) return;
+      if (!prompt.includes(recoveryDeliveryMarker(wake.wakeId))) return;
+      const previous = { ...wake };
+      const recorded = branchMessageForWake(ctx, wake);
+      wake.state = "consumed";
+      wake.sequence += 1;
+      if (recorded?.id) wake.messageId = recorded.id;
+      if (!persistPendingIntent(pi, state)) {
+        Object.assign(wake, previous);
+        notifyBestEffort(ctx, "Recovery input was observed but its consumed receipt could not be persisted; lifecycle completion is fail-closed.", "error");
+        return;
+      }
+      consumedWakeAwaitingStart = wake.wakeId;
+      publishWake(wake);
+    },
+    onAgentStart(ctx) {
+      const wake = state.recoveryWake;
+      if (!wake || wake.state !== "consumed" || consumedWakeAwaitingStart !== wake.wakeId) return;
+      const previous = { ...wake };
+      wake.state = "turn-started";
+      wake.turnId = randomUUID();
+      wake.sequence += 1;
+      if (!persistPendingIntent(pi, state)) {
+        Object.assign(wake, previous);
+        consumedWakeAwaitingStart = undefined;
+        notifyBestEffort(ctx, "Recovery turn started but its correlated receipt could not be persisted; cleanup is fail-closed.", "error");
+        return;
+      }
+      consumedWakeAwaitingStart = undefined;
+      publishWake(wake);
+
+      const pendingContinuation = state.pendingContinuationIntent;
+      const pendingOutput = state.pendingOutputLimitIntent;
+      if (wake.producer === "auto") {
+        state.pendingContinuationIntent = undefined;
+        state.pendingIntent = undefined;
+      } else if (wake.producer === "output-limit") {
+        state.pendingOutputLimitIntent = undefined;
+      }
+      if (!persistPendingIntent(pi, state)) {
+        state.pendingContinuationIntent = pendingContinuation;
+        state.pendingOutputLimitIntent = pendingOutput;
+        state.recoveryWake = wake;
+        notifyBestEffort(ctx, "Recovery turn started, but the durable wake tombstone could not be appended; cleanup will retry fail-closed.", "error");
+      }
+    },
+    ensureRecoveryWake(ctx) {
+      return ensureRecoveryWake(ctx);
     },
     async evaluate(messages, ctx) {
       const generation = state.generation;
@@ -2322,7 +2542,6 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       state.pendingContinuationIntent = continuationIntent && !ctx?.hasPendingMessages?.()
         ? continuationIntent
         : undefined;
-      state.deliveredContinuationIntent = undefined;
       state.pendingOutputLimitIntent = outputLimitIntent && !ctx?.hasPendingMessages?.()
         ? Object.assign(outputLimitIntent, { generation: state.generation, phase: preserveOutputLimitBreaker ? "submitted" : "continuation" })
         : undefined;
@@ -2342,6 +2561,23 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       return true;
     },
     onSessionShutdown(ctx) {
+      // Retry a receipt-driven cleanup that previously failed to append. The
+      // terminal receipt remains absorbing while the obligation stays attached.
+      const terminalWake = state.recoveryWake;
+      if (terminalWake?.state === "turn-started") {
+        const pendingContinuation = state.pendingContinuationIntent;
+        const pendingOutput = state.pendingOutputLimitIntent;
+        if (terminalWake.producer === "auto") {
+          state.pendingContinuationIntent = undefined;
+          state.pendingIntent = undefined;
+        } else if (terminalWake.producer === "output-limit") {
+          state.pendingOutputLimitIntent = undefined;
+        }
+        if (!persistPendingIntent(pi, state)) {
+          state.pendingContinuationIntent = pendingContinuation;
+          state.pendingOutputLimitIntent = pendingOutput;
+        }
+      }
       // Non-destructive: a normal shutdown must not tombstone the prune
       // manifest. Release in-flight work and persist the current state so a
       // resume replays the identical transformed prefix; session-scoped spill
@@ -2352,8 +2588,8 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         ? undefined
         : state.pendingIntent;
       const parkedContinuation = state.pendingContinuationIntent;
-      const parkedDeliveredContinuation = state.deliveredContinuationIntent;
       const parkedOutputLimit = state.pendingOutputLimitIntent;
+      const parkedRecoveryWake = state.recoveryWake;
       releaseInFlight();
       state.pendingIntent = parkedIntent
         ? { ...parkedIntent, generation: state.generation }
@@ -2361,19 +2597,26 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       state.pendingContinuationIntent = parkedContinuation
         ? { ...parkedContinuation, generation: state.generation }
         : undefined;
-      state.deliveredContinuationIntent = parkedDeliveredContinuation
-        ? { ...parkedDeliveredContinuation, generation: state.generation }
-        : undefined;
       state.pendingOutputLimitIntent = parkedOutputLimit
         ? { ...parkedOutputLimit, generation: state.generation, phase: parkedOutputLimit.phase === "continuation" ? "continuation" : "pending" }
         : undefined;
+      state.recoveryWake = parkedRecoveryWake;
       persistPruneManifest(pi, state);
       persistPendingIntent(pi, state);
       if (ctx) clearPressureStatus(ctx);
     },
     reset(ctx) {
       state.generation += 1;
+      const cancelledWake = state.recoveryWake && !wakeIsTerminal(state.recoveryWake)
+        ? Object.assign(state.recoveryWake, {
+            state: "cancelled" as const,
+            sequence: state.recoveryWake.sequence + 1,
+            reason: "compaction guard reset",
+          })
+        : state.recoveryWake;
+      if (cancelledWake?.state === "cancelled" && persistPendingIntent(pi, state)) publishWake(cancelledWake);
       releaseInFlight();
+      state.recoveryWake = cancelledWake;
       if (state.sessionId) void cleanupSpillDir(state.sessionId, state.writerId);
       state.pruneManifest.clear();
       state.restoredPrunes.clear();
@@ -3029,8 +3272,11 @@ function outputLimitIntentPayload(intent: PendingOutputLimitIntent): Record<stri
   };
 }
 
+function recoveryWakePayload(wake: RecoveryWake): Record<string, unknown> {
+  return { ...wake };
+}
+
 function currentPendingIntentPhase(state: AutoCompactionState): PersistedIntentPhase {
-  if (state.deliveredContinuationIntent) return "cleared";
   if (state.pendingContinuationIntent) return "continuation";
   if (state.pendingIntent) {
     return state.activeRequestOwner === "mid-turn" || state.zombieOwner !== undefined
@@ -3050,11 +3296,13 @@ function pendingIntentKey(
   intent: PendingCompactionIntent | undefined,
   phase: PersistedIntentPhase,
   outputLimit?: PendingOutputLimitIntent,
+  recoveryWake?: RecoveryWake,
 ): string {
   return JSON.stringify({
     phase,
     pending: intent ? pendingIntentPayload(intent) : null,
     outputLimit: outputLimit ? outputLimitIntentPayload(outputLimit) : null,
+    recoveryWake: recoveryWake ? recoveryWakePayload(recoveryWake) : null,
   });
 }
 
@@ -3064,7 +3312,7 @@ function persistPendingIntent(pi: ExtensionAPI, state: AutoCompactionState): boo
     ? undefined
     : state.pendingContinuationIntent ?? state.pendingIntent;
   const outputLimit = state.pendingOutputLimitIntent;
-  const key = pendingIntentKey(intent, phase, outputLimit);
+  const key = pendingIntentKey(intent, phase, outputLimit, state.recoveryWake);
   if (key === state.persistedIntentKey || !pi.appendEntry) return true;
   try {
     pi.appendEntry(PENDING_INTENT_ENTRY_TYPE, {
@@ -3073,6 +3321,7 @@ function persistPendingIntent(pi: ExtensionAPI, state: AutoCompactionState): boo
       phase,
       pending: intent ? pendingIntentPayload(intent) : null,
       outputLimit: outputLimit ? outputLimitIntentPayload(outputLimit) : null,
+      recoveryWake: state.recoveryWake ? recoveryWakePayload(state.recoveryWake) : null,
     });
     state.persistedIntentKey = key;
     return true;
@@ -3086,8 +3335,28 @@ function persistPendingIntent(pi: ExtensionAPI, state: AutoCompactionState): boo
 interface LoadedPersistedIntent {
   intent?: PendingCompactionIntent;
   outputLimitIntent?: PendingOutputLimitIntent;
+  recoveryWake?: RecoveryWake;
   phase: PersistedIntentPhase;
   key: string;
+}
+
+function decodeRecoveryWake(value: unknown, sessionId: string | undefined): RecoveryWake | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const wake = value as Record<string, unknown>;
+  if (wake.version !== RECOVERY_WAKE_VERSION
+    || typeof wake.recoveryId !== "string" || typeof wake.wakeId !== "string"
+    || !["auto", "output-limit", "new-context"].includes(String(wake.producer))
+    || typeof wake.sessionId !== "string" || wake.sessionId !== sessionId
+    || typeof wake.branchCheckpointId !== "string"
+    || !Number.isSafeInteger(wake.producerGeneration) || !Number.isSafeInteger(wake.runtimeGeneration)
+    || !["prepared", "queued", "consumed", "turn-started", "cancelled", "failed"].includes(String(wake.state))
+    || typeof wake.promptKind !== "string" || typeof wake.prompt !== "string"
+    || !Number.isSafeInteger(wake.sequence) || !Number.isSafeInteger(wake.deadlineAt)
+    || !Number.isSafeInteger(wake.wakeAttempts)) return undefined;
+  for (const key of ["messageId", "turnId", "reason"] as const) {
+    if (wake[key] !== undefined && typeof wake[key] !== "string") return undefined;
+  }
+  return { ...wake } as unknown as RecoveryWake;
 }
 
 function loadPersistedIntent(
@@ -3125,11 +3394,12 @@ function loadPersistedIntent(
     phase?: unknown;
     pending?: unknown;
     outputLimit?: unknown;
+    recoveryWake?: unknown;
   } | undefined;
   const version = data?.version;
-  if (!data || (version !== 1 && version !== 2 && version !== PENDING_INTENT_VERSION)
+  if (!data || (version !== 1 && version !== 2 && version !== 3 && version !== PENDING_INTENT_VERSION)
     || data.sessionId !== sessionId) return undefined;
-  const phase: PersistedIntentPhase = version === PENDING_INTENT_VERSION
+  const phase: PersistedIntentPhase = (version === 3 || version === PENDING_INTENT_VERSION)
     && (data.phase === "pending" || data.phase === "submitted" || data.phase === "continuation" || data.phase === "cleared")
       ? data.phase
       : data.pending && typeof data.pending === "object" ? "pending" : "cleared";
@@ -3152,7 +3422,7 @@ function loadPersistedIntent(
         ? "continuation"
         : "cleared"
       : phase;
-    if (recoveredPhase === "continuation" && deliveryWasRecorded(autoRecoveryId(sessionId, intent))) {
+    if (version !== PENDING_INTENT_VERSION && recoveredPhase === "continuation" && deliveryWasRecorded(autoRecoveryId(sessionId, intent))) {
       intent = undefined;
       recoveredPhase = "cleared";
     }
@@ -3172,7 +3442,7 @@ function loadPersistedIntent(
     const outputPhase = compactedAfterIntent || output.phase === "continuation"
       ? "continuation"
       : "pending";
-    if (!deliveryWasRecorded(output.recoveryId)) {
+    if (version === PENDING_INTENT_VERSION || !deliveryWasRecorded(output.recoveryId)) {
       outputLimitIntent = {
         recoveryId: output.recoveryId,
         settings: output.settings as CompactionSettings,
@@ -3184,9 +3454,19 @@ function loadPersistedIntent(
     }
   }
 
+  const recoveryWake = version === PENDING_INTENT_VERSION
+    ? decodeRecoveryWake(data.recoveryWake, sessionId)
+    : undefined;
+  if (version === PENDING_INTENT_VERSION && data.recoveryWake !== null && data.recoveryWake !== undefined && !recoveryWake) {
+    return undefined;
+  }
   if (!intent && !outputLimitIntent) {
-    return phase === "cleared" || recoveredPhase === "cleared"
-      ? { phase: "cleared", key: pendingIntentKey(undefined, "cleared") }
+    return phase === "cleared" || recoveredPhase === "cleared" || recoveryWake
+      ? {
+          ...(recoveryWake ? { recoveryWake } : {}),
+          phase: "cleared",
+          key: pendingIntentKey(undefined, "cleared", undefined, recoveryWake),
+        }
       : undefined;
   }
   const effectivePhase = intent
@@ -3195,8 +3475,9 @@ function loadPersistedIntent(
   return {
     ...(intent ? { intent } : {}),
     ...(outputLimitIntent ? { outputLimitIntent } : {}),
+    ...(recoveryWake ? { recoveryWake } : {}),
     phase: effectivePhase,
-    key: pendingIntentKey(intent, effectivePhase, outputLimitIntent),
+    key: pendingIntentKey(intent, effectivePhase, outputLimitIntent, recoveryWake),
   };
 }
 

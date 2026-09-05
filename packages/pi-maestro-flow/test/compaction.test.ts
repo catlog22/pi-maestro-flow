@@ -493,7 +493,7 @@ test("a timed-out mid-turn submission holds new submissions until it settles", a
 test("a late zombie completion resumes the interrupted task", async () => {
   const compactCalls: Array<{ onComplete: () => void; onError: (error: Error) => void }> = [];
   const sent: string[] = [];
-  const guard = createMidTurnAutoCompaction({ sendUserMessage(message: string) { sent.push(message); } } as never, {
+  const guard = createMidTurnAutoCompaction({ appendEntry() {}, sendUserMessage(message: string) { sent.push(message); } } as never, {
     leaseTimeoutMs: 100,
     arbiter: new CompactionArbiter(100),
     loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
@@ -1593,6 +1593,7 @@ test("provider request hook aborts invalid thinking, compacts once, and resumes 
   const sent: string[] = [];
   const notifications: Array<{ message: string; level: string | undefined }> = [];
   const guard = createMidTurnAutoCompaction({
+    appendEntry() {},
     sendUserMessage(message: string) { sent.push(message); },
   } as never, {
     loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
@@ -1914,7 +1915,7 @@ test("blocked intent notification and tombstone failures stay fail-closed and re
   await run(true);
 });
 
-test("pending intent v3 rejects malformed blocked state and v1 loads only as ordinary legacy pressure", async () => {
+test("pending intent v1-v3 remain compatible and v4 rejects malformed blocked state", async () => {
   const journal: Array<{ type: string; data: unknown }> = [];
   let branch: Array<{ type?: string; customType?: string; data?: unknown }> = [];
   let compacted = 0;
@@ -1952,7 +1953,7 @@ test("pending intent v3 rejects malformed blocked state and v1 loads only as ord
     const data = entry.data as { pending?: unknown } | undefined;
     return entry.type === "maestro-auto-compaction-intent" && data?.pending;
   })?.data as { version: number; sessionId: string; pending: Record<string, unknown> };
-  assert.equal(encoded.version, 3);
+  assert.equal(encoded.version, 4);
 
   branch = [{
     type: "custom",
@@ -1962,8 +1963,25 @@ test("pending intent v3 rejects malformed blocked state and v1 loads only as ord
   const legacy = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, dependencies);
   legacy.onSessionStart(ctx, { reason: "resume" });
   assert.equal(legacy.isProviderPressureRecoveryActive(), false);
+  assert.ok(legacy.describeState().pendingIntent, "v1 decodes as ordinary deferred pressure");
   await legacy.onAgentEnd(ctx);
   assert.equal(compacted, 0, "v1 intent is ordinary deferred pressure, never a blocked request");
+
+  for (const version of [2, 3]) {
+    branch = [{
+      type: "custom",
+      customType: "maestro-auto-compaction-intent",
+      data: {
+        ...encoded,
+        version,
+        recoveryWake: undefined,
+        pending: { ...encoded.pending, requestBlocked: false },
+      },
+    }];
+    const compatible = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, dependencies);
+    compatible.onSessionStart(ctx, { reason: "resume" });
+    assert.ok(compatible.describeState().pendingIntent, `v${version} remains decodable`);
+  }
 
   branch = [{
     type: "custom",
@@ -1973,7 +1991,7 @@ test("pending intent v3 rejects malformed blocked state and v1 loads only as ord
   const malformed = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, dependencies);
   malformed.onSessionStart(ctx, { reason: "resume" });
   await malformed.onAgentEnd(ctx);
-  assert.equal(compacted, 0, "malformed v3 intent is rejected");
+  assert.equal(compacted, 0, "malformed v4 intent is rejected");
 });
 
 test("direct compaction completion applies the final payload guard", async () => {
@@ -2087,6 +2105,7 @@ test("mid-turn guard falls back to native compaction after exhausted failures tr
   let aborted = 0;
   let pending = false;
   const guard = createMidTurnAutoCompaction({
+    appendEntry() {},
     sendUserMessage(message: string, options: unknown) {
       sent.push({ message, options });
       pending = true;
@@ -2119,6 +2138,11 @@ test("mid-turn guard falls back to native compaction after exhausted failures tr
     await guard.evaluate(highUsageToolBatch(1_100), ctx);
     await guard.onAgentEnd(ctx);
     callbacks.at(-1)?.onError(new Error(`failure ${attempt + 1}`));
+    const recoveryPrompt = sent.at(-1)?.message;
+    if (attempt < MAX_CONSECUTIVE_COMPACTION_FAILURES - 1 && recoveryPrompt) {
+      guard.onBeforeAgentStart(recoveryPrompt, ctx);
+      guard.onAgentStart(ctx);
+    }
   }
 
   assert.equal(aborted, MAX_CONSECUTIVE_COMPACTION_FAILURES);
@@ -2335,6 +2359,7 @@ test("mid-turn reset fences stale compaction callbacks from the next lifecycle",
   const sent: string[] = [];
   const statuses: Array<string | undefined> = [];
   const guard = createMidTurnAutoCompaction({
+    appendEntry() {},
     sendUserMessage(message: string) { sent.push(message); },
   } as never, {
     loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
@@ -3931,6 +3956,7 @@ test("output-limit guard compacts and continues when a length stop hits high con
   let complete: (() => void) | undefined;
   let compactCalls = 0;
   const guard = createMidTurnAutoCompaction({
+    appendEntry() {},
     sendUserMessage(message: string) { sent.push(message); },
   } as never, {
     loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
@@ -3956,7 +3982,7 @@ test("output-limit guard compacts and continues when a length stop hits high con
   assert.match(sent[0] ?? "", /Continue/);
 });
 
-test("output-limit recovery survives shutdown and a recorded delivery marker suppresses replay", async () => {
+test("output-limit recovery survives shutdown and completes only at correlated lifecycle receipts", async () => {
   let branch: Array<Record<string, unknown>> = [];
   const journal: Array<{ type: string; data: unknown }> = [];
   const sent: string[] = [];
@@ -4007,7 +4033,203 @@ test("output-limit recovery survives shutdown and a recorded delivery marker sup
   const afterCrash = createGuard(replayed);
   afterCrash.onSessionStart(ctx, { reason: "resume" });
   await afterCrash.onAgentEnd(ctx);
-  assert.equal(replayed.length, 0, "a transcript delivery marker is the consumption receipt after a crash");
+  assert.equal(replayed.length, 0, "a matching session input suppresses duplicate prompt insertion");
+  const beforeReceipt = journal.at(-1)?.data as { phase?: string; recoveryWake?: { state?: string } };
+  assert.equal(beforeReceipt.recoveryWake?.state, "prepared", "a transcript marker alone is not promoted to consumed");
+  afterCrash.onBeforeAgentStart(sent[0] ?? "", ctx);
+  afterCrash.onAgentStart(ctx);
+  const completed = journal.at(-1)?.data as { phase?: string; outputLimit?: unknown; recoveryWake?: { state?: string } };
+  assert.equal(completed.phase, "cleared");
+  assert.equal(completed.outputLimit, null);
+  assert.equal(completed.recoveryWake?.state, "turn-started");
+});
+
+test("durable wake replays one wakeId across restart and lifecycle receipts are strictly correlated", async () => {
+  let branch: Array<Record<string, unknown>> = [];
+  const journal: Array<{ type: string; data: Record<string, unknown> }> = [];
+  const sent: string[] = [];
+  const makeGuard = (capture: string[]) => createMidTurnAutoCompaction({
+    appendEntry(type: string, data: Record<string, unknown>) { journal.push({ type, data }); },
+    sendUserMessage(message: string) {
+      capture.push(message);
+      // Model the installed fire-and-forget binding swallowing an asynchronous rejection.
+      void Promise.reject(new Error("async prompt rejection")).catch(() => {});
+    },
+  } as never, { readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }) });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 400_000, maxTokens: 32_000 },
+    getContextUsage: () => ({ tokens: 200_000, contextWindow: 400_000, percent: 50 }),
+    hasPendingMessages: () => false,
+    sessionManager: { getSessionId: () => "wake-crash-cuts", getBranch: () => branch },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  const first = makeGuard(sent);
+  first.onSessionStart(ctx);
+  await first.onOutputLimit(lengthTruncatedBatch(), ctx);
+  await first.onAgentEnd(ctx);
+  assert.equal(sent.length, 1, "settled idle recovery dispatch is explicit");
+  const prepared = journal.at(-1)!.data as { recoveryWake: { wakeId: string; state: string; deadlineAt: number; wakeAttempts: number } };
+  assert.equal(prepared.recoveryWake.state, "prepared", "sync return and later async rejection do not clear or claim queued");
+  const { wakeId, deadlineAt } = prepared.recoveryWake;
+
+  branch = [{ type: "custom", customType: "maestro-auto-compaction-intent", data: prepared }];
+  const replayed: string[] = [];
+  const second = makeGuard(replayed);
+  second.onSessionStart(ctx, { reason: "resume" });
+  assert.equal(replayed.length, 1);
+  const replay = journal.at(-1)!.data as { recoveryWake: { wakeId: string; deadlineAt: number; wakeAttempts: number; state: string } };
+  assert.equal(replay.recoveryWake.wakeId, wakeId, "ACK loss/replay reuses the logical wake id");
+  assert.equal(replay.recoveryWake.deadlineAt, deadlineAt, "restart cannot extend the absolute deadline");
+  assert.equal(replay.recoveryWake.wakeAttempts, 2);
+
+  second.onAgentStart(ctx);
+  second.onBeforeAgentStart("unrelated user input", ctx);
+  assert.equal((journal.at(-1)!.data as { recoveryWake: { state: string } }).recoveryWake.state, "prepared", "foreign lifecycle cannot consume the wake");
+
+  const prompt = replayed[0] ?? "";
+  branch = [
+    { type: "custom", customType: "maestro-auto-compaction-intent", data: replay },
+    { type: "message", id: "wake-message", message: { role: "user", content: prompt } },
+  ];
+  second.onBeforeAgentStart(prompt, ctx);
+  const consumed = journal.at(-1)!.data as { recoveryWake: { wakeId: string; state: string; messageId?: string } };
+  assert.equal(consumed.recoveryWake.state, "consumed");
+  assert.equal(consumed.recoveryWake.messageId, "wake-message");
+
+  branch = [{ type: "custom", customType: "maestro-auto-compaction-intent", data: consumed }, branch[1]];
+  const afterConsumedCrash: string[] = [];
+  const third = makeGuard(afterConsumedCrash);
+  third.onSessionStart(ctx, { reason: "resume" });
+  assert.equal(afterConsumedCrash.length, 0, "consumed crash recovery never inserts a duplicate prompt");
+  third.onAgentStart(ctx);
+  assert.equal((journal.at(-1)!.data as { recoveryWake: { state: string } }).recoveryWake.state, "consumed", "an unassociated post-restart agent_start is stale");
+
+  second.onAgentStart(ctx);
+  const started = journal.at(-1)!.data as { phase: string; outputLimit: unknown; recoveryWake: { wakeId: string; state: string } };
+  assert.equal(started.phase, "cleared");
+  assert.equal(started.outputLimit, null);
+  assert.equal(started.recoveryWake.state, "turn-started");
+  second.onBeforeAgentStart(prompt, ctx);
+  second.onAgentStart(ctx);
+  assert.equal((journal.at(-1)!.data as { recoveryWake: { state: string } }).recoveryWake.state, "turn-started", "terminal receipts absorb replay");
+});
+
+test("session shutdown preserves the durable wake identity for restart", async () => {
+  let branch: Array<Record<string, unknown>> = [];
+  const journal: Array<{ type: string; data: Record<string, unknown> }> = [];
+  const sent: string[] = [];
+  const makeGuard = (capture: string[]) => createMidTurnAutoCompaction({
+    appendEntry(type: string, data: Record<string, unknown>) { journal.push({ type, data }); },
+    sendUserMessage(message: string) { capture.push(message); },
+  } as never, { readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }) });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 400_000, maxTokens: 32_000 },
+    getContextUsage: () => ({ tokens: 200_000, contextWindow: 400_000, percent: 50 }),
+    hasPendingMessages: () => false,
+    sessionManager: { getSessionId: () => "wake-shutdown", getBranch: () => branch },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  const first = makeGuard(sent);
+  first.onSessionStart(ctx);
+  await first.onOutputLimit(lengthTruncatedBatch(), ctx);
+  await first.onAgentEnd(ctx);
+  const beforeShutdown = journal.at(-1)!.data as {
+    recoveryWake: { wakeId: string; state: string; deadlineAt: number };
+  };
+  first.onSessionShutdown(ctx);
+  const parked = journal.at(-1)!.data as {
+    recoveryWake?: { wakeId: string; state: string; deadlineAt: number };
+  };
+  assert.equal(parked.recoveryWake?.wakeId, beforeShutdown.recoveryWake.wakeId);
+  assert.equal(parked.recoveryWake?.state, "prepared");
+  assert.equal(parked.recoveryWake?.deadlineAt, beforeShutdown.recoveryWake.deadlineAt);
+
+  branch = [{ type: "custom", customType: "maestro-auto-compaction-intent", data: parked }];
+  const replayed: string[] = [];
+  const second = makeGuard(replayed);
+  second.onSessionStart(ctx, { reason: "resume" });
+  assert.equal(replayed.length, 1);
+  assert.equal(
+    (journal.at(-1)!.data as { recoveryWake: { wakeId: string } }).recoveryWake.wakeId,
+    beforeShutdown.recoveryWake.wakeId,
+  );
+});
+
+test("expired recovery wake fails without dispatch and keeps its original deadline", async () => {
+  const sessionId = "wake-deadline";
+  const deadlineAt = Date.now() - 1;
+  const data = {
+    version: 4,
+    sessionId,
+    phase: "continuation",
+    pending: null,
+    outputLimit: {
+      recoveryId: `${sessionId}:output-limit:1`, phase: "continuation",
+      settings: { enabled: true, reserveTokens: 100, keepRecentTokens: 100 },
+      usage: { tokens: 200_000, contextWindow: 400_000, percent: 50 }, threshold: 0.8,
+    },
+    recoveryWake: {
+      version: 1, recoveryId: `${sessionId}:output-limit:1`, wakeId: "stable-wake", producer: "output-limit",
+      sessionId, branchCheckpointId: "checkpoint", producerGeneration: 1, runtimeGeneration: 0,
+      state: "prepared", promptKind: "continue", prompt: "continue", sequence: 2,
+      deadlineAt, wakeAttempts: 1,
+    },
+  };
+  const journal: Array<Record<string, unknown>> = [];
+  const sent: string[] = [];
+  const guard = createMidTurnAutoCompaction({
+    appendEntry(_type: string, value: Record<string, unknown>) { journal.push(value); },
+    sendUserMessage(message: string) { sent.push(message); },
+  } as never);
+  const ctx = {
+    cwd: "D:\\repo", hasPendingMessages: () => false,
+    sessionManager: { getSessionId: () => sessionId, getBranch: () => [{ type: "custom", customType: "maestro-auto-compaction-intent", data }] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+  guard.onSessionStart(ctx, { reason: "resume" });
+  assert.equal(sent.length, 0);
+  const failed = journal.at(-1) as { recoveryWake: { state: string; deadlineAt: number } };
+  assert.equal(failed.recoveryWake.state, "failed");
+  assert.equal(failed.recoveryWake.deadlineAt, deadlineAt);
+});
+
+test("turn-started tombstone append failure remains fail-closed", async () => {
+  const journal: Array<Record<string, unknown>> = [];
+  const sent: string[] = [];
+  let rejectCleared = true;
+  const guard = createMidTurnAutoCompaction({
+    appendEntry(_type: string, data: Record<string, unknown>) {
+      if (rejectCleared && data.phase === "cleared") throw new Error("tombstone failed");
+      journal.push(data);
+    },
+    sendUserMessage(message: string) { sent.push(message); },
+  } as never, { readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }) });
+  const branch: Array<Record<string, unknown>> = [];
+  const ctx = {
+    cwd: "D:\\repo", model: { contextWindow: 400_000, maxTokens: 32_000 },
+    getContextUsage: () => ({ tokens: 200_000, contextWindow: 400_000, percent: 50 }), hasPendingMessages: () => false,
+    sessionManager: { getSessionId: () => "wake-tombstone", getBranch: () => branch },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+  guard.onSessionStart(ctx);
+  await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
+  await guard.onAgentEnd(ctx);
+  const prompt = sent[0] ?? "";
+  branch.push({ type: "message", id: "input", message: { role: "user", content: prompt } });
+  guard.onBeforeAgentStart(prompt, ctx);
+  guard.onAgentStart(ctx);
+  const durable = journal.at(-1) as { phase: string; outputLimit: unknown; recoveryWake: { state: string } };
+  assert.equal(durable.phase, "continuation");
+  assert.ok(durable.outputLimit, "failed tombstone keeps the obligation attached");
+  assert.equal(durable.recoveryWake.state, "turn-started", "the authoritative receipt itself remains durable and absorbing");
+  assert.equal(guard.ensureRecoveryWake(ctx), false, "fail-closed cleanup never redispatches a terminal wake");
+  rejectCleared = false;
+  guard.onSessionShutdown(ctx);
+  assert.equal((journal.at(-1) as { phase: string }).phase, "cleared", "a later boundary retries the tombstone");
 });
 
 test("output-limit capture uses the linked summary-model absolute threshold", async () => {
@@ -4043,8 +4265,10 @@ test("output-limit capture uses the linked summary-model absolute threshold", as
 
 test("output-limit compaction failure queues a bounded recovery turn", async () => {
   const sent: string[] = [];
+  const journal: Array<Record<string, unknown>> = [];
   let fail: ((error: Error) => void) | undefined;
   const guard = createMidTurnAutoCompaction({
+    appendEntry(_type: string, data: Record<string, unknown>) { journal.push(data); },
     sendUserMessage(message: string) { sent.push(message); },
   } as never, {
     loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
@@ -4066,12 +4290,15 @@ test("output-limit compaction failure queues a bounded recovery turn", async () 
 
   assert.equal(sent.length, 1);
   assert.match(sent[0] ?? "", /Automatic compaction failed/);
+  assert.equal((journal.at(-1)?.recoveryWake as { promptKind?: string })?.promptKind, "retry-compaction");
 });
 
 test("exhausted pre-submission failure queues recovery", async () => {
   const sent: string[] = [];
+  const journal: Array<Record<string, unknown>> = [];
   let aborted = 0;
   const guard = createMidTurnAutoCompaction({
+    appendEntry(_type: string, data: Record<string, unknown>) { journal.push(data); },
     sendUserMessage(message: string) { sent.push(message); },
   } as never, {
     loadInternals: async () => { throw new Error("internals unavailable"); },
@@ -4092,12 +4319,13 @@ test("exhausted pre-submission failure queues recovery", async () => {
   assert.equal(aborted, 1);
   assert.equal(sent.length, 1);
   assert.match(sent[0] ?? "", /context was exhausted/);
+  assert.equal((journal.at(-1)?.recoveryWake as { promptKind?: string })?.promptKind, "retry-compaction");
 });
 
 test("output-limit guard continues directly when a fixed cap is hit below context pressure", async () => {
   const sent: string[] = [];
   let compactCalls = 0;
-  const guard = createMidTurnAutoCompaction({ sendUserMessage(message: string) { sent.push(message); } } as never, {
+  const guard = createMidTurnAutoCompaction({ appendEntry() {}, sendUserMessage(message: string) { sent.push(message); } } as never, {
     loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
     readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100, soft: { enabled: true, nudgeRatio: 0.7, pruneRatio: 0.8, pruneTargetRatio: 0.7 } }),
   });
@@ -4125,6 +4353,7 @@ test("direct output-limit continuation has an independent bound and counts only 
   let pending = false;
   let throwSend = false;
   const guard = createMidTurnAutoCompaction({
+    appendEntry() {},
     sendUserMessage(message: string) {
       if (throwSend) throw new Error("queue unavailable");
       sent.push(message);
@@ -4144,6 +4373,10 @@ test("direct output-limit continuation has an independent bound and counts only 
   for (let attempt = 0; attempt < 3; attempt++) {
     await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
     await guard.onAgentEnd(ctx);
+    const recoveryPrompt = sent.at(-1);
+    assert.ok(recoveryPrompt);
+    guard.onBeforeAgentStart(recoveryPrompt, ctx);
+    guard.onAgentStart(ctx);
   }
   assert.equal(sent.length, 3, "direct continuation is not capped by the two-compaction breaker");
 
@@ -4159,8 +4392,7 @@ test("direct output-limit continuation has an independent bound and counts only 
   throwSend = false;
   assert.equal(sent.length, 3, "a failed enqueue consumes no direct-continuation attempt");
 
-  await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
-  await guard.onAgentEnd(ctx);
+  assert.equal(guard.ensureRecoveryWake(ctx), true, "the same durable wake can retry after a synchronous dispatch failure");
   assert.equal(sent.length, 4);
 });
 
@@ -4168,7 +4400,7 @@ test("output-limit guard recovers even when context usage is unavailable", async
   const sent: string[] = [];
   let complete: (() => void) | undefined;
   let compactCalls = 0;
-  const guard = createMidTurnAutoCompaction({ sendUserMessage(message: string) { sent.push(message); } } as never, {
+  const guard = createMidTurnAutoCompaction({ appendEntry() {}, sendUserMessage(message: string) { sent.push(message); } } as never, {
     loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
     readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
   });
@@ -4217,7 +4449,8 @@ test("output-limit guard stops compacting after the breaker cap across compact l
   let compactCalls = 0;
   let complete: (() => void) | undefined;
   const notifications: string[] = [];
-  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+  const sent: string[] = [];
+  const guard = createMidTurnAutoCompaction({ appendEntry() {}, sendUserMessage(message: string) { sent.push(message); } } as never, {
     loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
     readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100, soft: { enabled: true, nudgeRatio: 0.7, pruneRatio: 0.8, pruneTargetRatio: 0.7 } }),
   });
@@ -4236,6 +4469,10 @@ test("output-limit guard stops compacting after the breaker cap across compact l
     await guard.onAgentEnd(ctx);
     guard.onCompact();
     complete?.();
+    const recoveryPrompt = sent.at(-1);
+    assert.ok(recoveryPrompt);
+    guard.onBeforeAgentStart(recoveryPrompt, ctx);
+    guard.onAgentStart(ctx);
   }
   await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
   await guard.onAgentEnd(ctx);
@@ -4427,11 +4664,15 @@ test("tool-boundary compaction publishes typed teammate recovery phases", async 
     assert.equal(fx.compactCalls.length, 1);
     fx.compactCalls[0].onComplete();
 
+    const legacyEvents = events.filter((event) => event.type === "teammate_compaction_state");
+    const wakeEvents = events.filter((event) => event.type === "teammate_compaction_wake_receipt");
     assert.deepEqual(
-      events.map((event) => event.phase),
+      legacyEvents.map((event) => event.phase),
       ["pending", "pending", "completed", "continuation"],
+      "legacy producer phases remain unchanged",
     );
-    assert.ok(events.every((event) => event.type === "teammate_compaction_state"));
+    assert.deepEqual(wakeEvents.map((event) => event.state), ["prepared", "prepared"]);
+    assert.ok(wakeEvents.every((event) => event.version === 1));
     assert.ok(events.every((event) => event.producer === "auto"));
     assert.ok(events.every((event) => event.correlationId === "typed-compaction-test"));
     assert.equal(new Set(events.map((event) => event.recoveryId)).size, 1);
@@ -4508,7 +4749,7 @@ test("submitted mid-turn intent stays durable until settlement and recovers afte
     phase?: string;
     pending?: unknown;
   } | undefined;
-  assert.equal(submitted?.version, 3);
+  assert.equal(submitted?.version, 4);
   assert.equal(submitted?.phase, "submitted");
   assert.ok(submitted?.pending, "submission keeps the interrupted intent durable");
 
@@ -4565,8 +4806,22 @@ test("submitted mid-turn intent stays durable until settlement and recovers afte
     phase?: string;
     pending?: unknown;
   } | undefined;
-  assert.equal(replayedState?.phase, "cleared", "successful replay tombstones the durable continuation");
-  assert.equal(replayedState?.pending, null);
+  assert.equal(replayedState?.phase, "continuation", "fire-and-forget dispatch retains the durable continuation");
+  assert.ok(replayedState?.pending);
+  const replayedPrompt = replayedContinuations[0] ?? "";
+  const receiptCtx = {
+    ...resumedCtx,
+    sessionManager: {
+      getSessionId: () => fx.sessionId,
+      getBranch: () => [{ type: "message", id: "recovery-input", message: { role: "user", content: replayedPrompt } }],
+    },
+  } as never;
+  settled.onBeforeAgentStart(replayedPrompt, receiptCtx);
+  settled.onAgentStart(receiptCtx);
+  const receiptDrivenClear = continuationJournal.at(-1)?.data as { phase?: string; pending?: unknown; recoveryWake?: { state?: string } };
+  assert.equal(receiptDrivenClear.phase, "cleared");
+  assert.equal(receiptDrivenClear.pending, null);
+  assert.equal(receiptDrivenClear.recoveryWake?.state, "turn-started");
 
   fx.guard.onCompact("mid-turn", fx.ctx);
   fx.compactCalls[0].onComplete();
@@ -4574,8 +4829,8 @@ test("submitted mid-turn intent stays durable until settlement and recovers afte
     phase?: string;
     pending?: unknown;
   } | undefined;
-  assert.equal(cleared?.phase, "cleared");
-  assert.equal(cleared?.pending, null);
+  assert.equal(cleared?.phase, "continuation", "synchronous send return cannot clear the wake");
+  assert.ok(cleared?.pending);
 });
 
 test("a tool-boundary gate survives post-block pressure relief and resumes after compaction", async () => {
@@ -4907,7 +5162,7 @@ test("loop-critical flag survives persistence and legacy intents hydrate without
     const data = entry.data as { pending?: unknown } | undefined;
     return entry.type === "maestro-auto-compaction-intent" && data?.pending;
   })?.data as { version: number; sessionId: string; pending: Record<string, unknown> };
-  assert.equal(encoded.version, 3);
+  assert.equal(encoded.version, 4);
   assert.equal(encoded.pending.loopCritical, true, "the interruption flag is durable");
 
   branch = [{
@@ -5033,6 +5288,12 @@ test("a breaker trip during loop-critical recovery resumes via continuation, nev
     }
     await fx.guard.onAgentEnd(fx.ctx);
     fx.compactCalls.at(-1)?.onError(new Error('OpenAI API error (502): {"message":"Upstream service temporarily unavailable","type":"upstream_error"}'));
+    if (cycle < MAX_CONSECUTIVE_COMPACTION_FAILURES - 1) {
+      const recoveryPrompt = fx.sent.at(-1);
+      assert.ok(recoveryPrompt);
+      fx.guard.onBeforeAgentStart(recoveryPrompt, fx.ctx);
+      fx.guard.onAgentStart(fx.ctx);
+    }
   }
   assert.equal(fx.compactCalls.length, MAX_CONSECUTIVE_COMPACTION_FAILURES);
   assert.ok(

@@ -38,6 +38,16 @@ export const RESOLVED_NETWORK_RETRY_POLICY = resolveNetworkRetryPolicy();
 
 export type RetryErrorKind = "network" | "provider" | "fallback-only" | "auth" | "non-retryable";
 
+export type RetryClassificationInput =
+  | { source: "provider" | "transport"; message?: string; status?: number }
+  | { source: "recovery-diagnostic"; message: string };
+
+/** Synthetic recovery diagnostics are terminal context, never fresh provider failures. */
+export function classifyRetryInput(input: RetryClassificationInput): RetryErrorKind | undefined {
+  if (input.source === "recovery-diagnostic") return undefined;
+  return classifyRetryError(input.message, input.status);
+}
+
 export type ModelHealthFailureScope = ModelHealthScope | "none";
 
 export interface ModelHealthFailureInput {

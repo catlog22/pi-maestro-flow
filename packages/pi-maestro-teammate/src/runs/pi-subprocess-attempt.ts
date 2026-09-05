@@ -58,7 +58,15 @@ import {
   wrapLeasedMessage,
   type LeaseToken,
 } from "./session-handoff.ts";
-import { isFallbackProviderError } from "./retry.ts";
+import { classifyRetryError, isFallbackProviderError } from "./retry.ts";
+import {
+  RECOVERY_WAKE_RECEIPT_VERSION,
+  ReplayEvidenceCollector,
+  hasExternalReplayRisk,
+  type RecoveryFailureChainV1,
+  type RecoveryFailureRecordV1,
+  type RecoveryWakeReceiptV1,
+} from "./recovery-protocol.ts";
 import {
   EXECUTION_BUFFER_LIMITS,
   FIRST_ACTIVITY_TIMEOUT_MS,
@@ -117,10 +125,12 @@ interface AttemptRecoveryFacts {
   inFlightToolCount: number;
   /** A non-zero close before any child event, stderr, or possible side effect. */
   preActivityInfrastructureExit: boolean;
-  /** IPC or non-protocol output that may represent untracked external work. */
+  /** Exact compatibility projection of replayEvidence. */
   externalReplayRisk: boolean;
+  replayEvidence?: ReturnType<ReplayEvidenceCollector["snapshot"]>;
   /** Non-JSON stdout was attributed as assistant content (protocol violation). Optional: not all settlement paths populate it. */
-  stdoutProtocolViolation?: boolean; }
+  stdoutProtocolViolation?: boolean;
+}
 
 export const attemptRecoveryFacts = new WeakMap<SingleResult, AttemptRecoveryFacts>();
 const INTERRUPTING_STEER_TIMEOUT_MS = 10_000;
@@ -216,11 +226,15 @@ interface AttemptState {
   /** A length-truncated turn is waiting for child-local compaction and continuation. */
   outputLimitRecoveryPending: boolean;
   /** A Flow synthetic compaction interruption must continue before this turn can settle. */
+  latestWakeReceipt?: RecoveryWakeReceiptV1;
   compactionRecovery?: {
     recoveryId: string;
     producer: string;
     generation: number;
     phase: "pending" | "continuation" | "completed";
+    wakeProtocolVersion?: 1;
+    wakeReceipt?: RecoveryWakeReceiptV1;
+    absoluteDeadlineAt?: number;
   };
 
   // --- Attempt-scoped: survive turns for the lifetime of a wakeable child. ---
@@ -237,8 +251,8 @@ interface AttemptState {
   receivedFirstActivity: boolean;
   /** True only for a silent non-zero close before any child event or possible effect. */
   preActivityInfrastructureExit: boolean;
-  /** IPC or non-protocol output makes cross-process replay unsafe. */
-  externalReplayRisk: boolean;
+  /** Bounded monotonic provenance; the public boolean is its exact projection. */
+  replayEvidence: ReplayEvidenceCollector;
   /** Non-JSON stdout was attributed as assistant content (protocol violation). */
   stdoutProtocolViolation: boolean;
   initialResultPublished: boolean;
@@ -246,6 +260,8 @@ interface AttemptState {
   settlementCapability: AttemptSettlementCapability;
   completedToolCount: number;
   inFlightToolCount: number;
+  failureSequence: number;
+  failureChain: RecoveryFailureChainV1;
   /** Absorbing state: once terminal, queued child lines must not reopen a turn. */
   terminal: boolean;
   /** Unique owner of an asynchronous model-selection decision. */
@@ -373,10 +389,38 @@ function buildChildSpawnEnv(
   return spawnEnv;
 }
 
-/** Child IPC events that only publish identity or in-process recovery state. */
+/** Child IPC events that only publish identity or validated in-process recovery state. */
 function isReplayNeutralChildIpcMessage(message: Record<string, unknown>): boolean {
   return message.type === "teammate_session_ready"
-    || message.type === "teammate_compaction_state";
+    || childCompactionStateEvent(message) !== undefined
+    || childWakeReceipt(message) !== undefined;
+}
+
+function childWakeReceipt(message: Record<string, unknown>): RecoveryWakeReceiptV1 | undefined {
+  if (message.type !== "teammate_compaction_wake_receipt"
+    || message.version !== RECOVERY_WAKE_RECEIPT_VERSION
+    || typeof message.recoveryId !== "string"
+    || typeof message.producer !== "string"
+    || !Number.isSafeInteger(message.generation)
+    || typeof message.wakeId !== "string"
+    || !["prepared", "queued", "consumed", "turn-started", "cancelled", "failed"].includes(String(message.state))
+    || !Number.isSafeInteger(message.sequence)
+    || !Number.isSafeInteger(message.deadlineAt)) return undefined;
+  const optionalStrings = ["sessionId", "branchCheckpointId", "messageId", "turnId", "reason"] as const;
+  if (optionalStrings.some((key) => message[key] !== undefined && typeof message[key] !== "string")) return undefined;
+  if (message.runtimeGeneration !== undefined && !Number.isSafeInteger(message.runtimeGeneration)) return undefined;
+  return {
+    version: RECOVERY_WAKE_RECEIPT_VERSION,
+    recoveryId: message.recoveryId,
+    producer: message.producer,
+    generation: message.generation as number,
+    wakeId: message.wakeId,
+    state: message.state as RecoveryWakeReceiptV1["state"],
+    sequence: message.sequence as number,
+    deadlineAt: message.deadlineAt as number,
+    ...(message.runtimeGeneration === undefined ? {} : { runtimeGeneration: message.runtimeGeneration as number }),
+    ...Object.fromEntries(optionalStrings.flatMap((key) => typeof message[key] === "string" ? [[key, message[key]]] : [])),
+  } as RecoveryWakeReceiptV1;
 }
 
 interface ChildCompactionStateEvent {
@@ -386,6 +430,8 @@ interface ChildCompactionStateEvent {
   producer: string;
   generation: number;
   phase: "pending" | "continuation" | "completed" | "failed" | "cancelled";
+  /** Capability advertisement is carried on the ordered IPC state channel. */
+  wakeProtocolVersion?: 1;
   reason?: string;
 }
 
@@ -397,7 +443,8 @@ function childCompactionStateEvent(message: Record<string, unknown>): ChildCompa
       && message.phase !== "continuation"
       && message.phase !== "completed"
       && message.phase !== "failed"
-      && message.phase !== "cancelled")) return undefined;
+      && message.phase !== "cancelled")
+    || (message.wakeProtocolVersion !== undefined && message.wakeProtocolVersion !== 1)) return undefined;
   return {
     type: "teammate_compaction_state",
     recoveryId: message.recoveryId,
@@ -408,6 +455,7 @@ function childCompactionStateEvent(message: Record<string, unknown>): ChildCompa
       : "legacy",
     generation: message.generation as number,
     phase: message.phase,
+    ...(message.wakeProtocolVersion === 1 ? { wakeProtocolVersion: 1 as const } : {}),
     ...(typeof message.reason === "string" ? { reason: message.reason } : {}),
   };
 }
@@ -515,12 +563,15 @@ export async function runSingleAttempt(
     completedCacheWriteTokens: 0,
     receivedFirstActivity: false,
     preActivityInfrastructureExit: false,
-    externalReplayRisk: false,
+    replayEvidence: new ReplayEvidenceCollector(),
     stdoutProtocolViolation: false,
     initialResultPublished: false,
     settlementCapability: "unknown",
     completedToolCount: 0,
     inFlightToolCount: 0,
+    latestWakeReceipt: undefined,
+    failureSequence: 0,
+    failureChain: { version: 1, decisions: Object.freeze([]) },
     terminal: false,
     modelSwitchDecisionId: undefined,
   };
@@ -697,13 +748,39 @@ export async function runSingleAttempt(
     }
   };
 
+  const recordedRecoveryResults = new Set<SingleResult>();
+  const refreshReplayEvidence = (finalized = false): ReturnType<ReplayEvidenceCollector["snapshot"]> => {
+    const evidence = state.replayEvidence.snapshot(finalized);
+    for (const result of recordedRecoveryResults) {
+      result.replayEvidence = evidence;
+      const facts = attemptRecoveryFacts.get(result);
+      if (facts) attemptRecoveryFacts.set(result, {
+        ...facts,
+        externalReplayRisk: hasExternalReplayRisk(evidence),
+        replayEvidence: evidence,
+      });
+    }
+    return evidence;
+  };
+  const addReplayEvidence = (source: Parameters<ReplayEvidenceCollector["add"]>[0], reasonCode: string): void => {
+    state.replayEvidence.add(source, reasonCode);
+    refreshReplayEvidence();
+  };
   const recordAttemptRecovery = (result: SingleResult): SingleResult => {
+    recordedRecoveryResults.add(result);
+    const replayEvidence = refreshReplayEvidence();
+    result.replayEvidence = replayEvidence;
+    if (state.latestWakeReceipt) result.recoveryWakeReceipt = state.latestWakeReceipt;
+    if (state.failureChain.initiating || state.failureChain.terminal || state.failureChain.decisions.length > 0) {
+      result.recoveryFailureChain = state.failureChain;
+    }
     attemptRecoveryFacts.set(result, {
       settlementCapability: state.settlementCapability,
       completedToolCount: state.completedToolCount,
       inFlightToolCount: state.inFlightToolCount,
       preActivityInfrastructureExit: state.preActivityInfrastructureExit,
-      externalReplayRisk: state.externalReplayRisk,
+      externalReplayRisk: hasExternalReplayRisk(replayEvidence),
+      replayEvidence,
     });
     return result;
   };
@@ -862,7 +939,13 @@ export async function runSingleAttempt(
           handleChildCompactionState(compactionEvent);
           return;
         }
-        if (!isReplayNeutralChildIpcMessage(message)) state.externalReplayRisk = true;
+        const wakeReceipt = childWakeReceipt(message);
+        if (wakeReceipt) {
+          handleChildWakeReceipt(wakeReceipt);
+          return;
+        }
+        if (message.type === "proxy_request") addReplayEvidence("proxy-request", "child-proxy-request");
+        else if (!isReplayNeutralChildIpcMessage(message)) addReplayEvidence("unknown-ipc", "unrecognized-child-ipc");
       });
     }
 
@@ -942,7 +1025,7 @@ export async function runSingleAttempt(
       const trimmed = line.trim();
       if (!trimmed) {
         state.receivedFirstActivity = true;
-        state.externalReplayRisk = true;
+        addReplayEvidence("stdout-protocol", "blank-stdout-line");
         if (timers.firstActivity) clearTimeout(timers.firstActivity);
         return;
       }
@@ -951,7 +1034,7 @@ export async function runSingleAttempt(
         processEvent(event);
       } catch {
         state.receivedFirstActivity = true;
-        state.externalReplayRisk = true;
+        addReplayEvidence("stdout-protocol", "malformed-json-line");
         state.stdoutProtocolViolation = true;
         if (timers.firstActivity) clearTimeout(timers.firstActivity);
         state.lastContent = appendUtf8Tail(
@@ -1338,7 +1421,10 @@ export async function runSingleAttempt(
 
     function armCompactionRecoveryDeadline(): void {
       if (state.terminal || state.turnLifecycleSettled || timers.compactionRecovery || !state.compactionRecovery) return;
-      const deadlineMs = options.outputLimitRecoveryTimeoutMs ?? OUTPUT_LIMIT_RECOVERY_TIMEOUT_MS;
+      const configuredMs = options.outputLimitRecoveryTimeoutMs ?? OUTPUT_LIMIT_RECOVERY_TIMEOUT_MS;
+      const deadlineMs = state.compactionRecovery.absoluteDeadlineAt === undefined
+        ? configuredMs
+        : Math.max(0, state.compactionRecovery.absoluteDeadlineAt - Date.now());
       timers.compactionRecovery = setTimeout(() => {
         timers.compactionRecovery = undefined;
         const recovery = state.compactionRecovery;
@@ -1351,9 +1437,59 @@ export async function runSingleAttempt(
           + `(agent=${params.agent}, correlationId=${correlationId}, recoveryId=${recovery.recoveryId}, phase=${recovery.phase}); `
           + "the stalled recovery was aborted.";
         state.runtimeFailure = diagnostic;
+        state.failureChain = Object.freeze({
+          ...state.failureChain,
+          terminal: recoveryFailureRecord("wake-not-started", "recovery", "compaction-wake-timeout", diagnostic),
+        });
         appendBoundedTranscriptMessage(messages, { role: "system", content: diagnostic });
         completeTurn(readStructuredOutput(true), true, 1);
       }, deadlineMs);
+    }
+
+    function handleChildWakeReceipt(receipt: RecoveryWakeReceiptV1): void {
+      if (state.terminal || state.turnLifecycleSettled) return;
+      const active = state.compactionRecovery;
+      if (!active
+        || active.recoveryId !== receipt.recoveryId
+        || active.producer !== receipt.producer
+        || active.generation !== receipt.generation
+        || (receipt.runtimeGeneration !== undefined
+          && receipt.runtimeGeneration !== (options.runtimeGeneration ?? 0))) return;
+      const previous = active.wakeReceipt;
+      if (previous && (previous.wakeId !== receipt.wakeId || receipt.sequence <= previous.sequence)) return;
+      // A producer chooses the absolute deadline once. Later receipts may make
+      // it earlier, but duplicates/retries can never extend it.
+      active.absoluteDeadlineAt = Math.min(
+        active.absoluteDeadlineAt ?? receipt.deadlineAt,
+        receipt.deadlineAt,
+      );
+      active.wakeReceipt = Object.freeze({ ...receipt, deadlineAt: active.absoluteDeadlineAt });
+      state.latestWakeReceipt = active.wakeReceipt;
+      for (const result of recordedRecoveryResults) result.recoveryWakeReceipt = active.wakeReceipt;
+      if (receipt.state === "turn-started") {
+        closeActiveCompactionRecovery();
+        state.compactionRecovery = undefined;
+        compactionSettlementSwallowed = false;
+        if (timers.compactionRecovery) clearTimeout(timers.compactionRecovery);
+        timers.compactionRecovery = undefined;
+        return;
+      }
+      if (receipt.state === "cancelled" || receipt.state === "failed") {
+        handleChildCompactionState({
+          type: "teammate_compaction_state",
+          recoveryId: receipt.recoveryId,
+          producer: receipt.producer,
+          generation: receipt.generation,
+          phase: receipt.state,
+          ...(receipt.reason === undefined ? {} : { reason: receipt.reason }),
+        });
+        return;
+      }
+      if (timers.compactionRecovery) {
+        clearTimeout(timers.compactionRecovery);
+        timers.compactionRecovery = undefined;
+      }
+      if (compactionSettlementSwallowed) armCompactionRecoveryDeadline();
     }
 
     function handleChildCompactionState(event: ChildCompactionStateEvent): void {
@@ -1426,6 +1562,10 @@ export async function runSingleAttempt(
           `Teammate compaction recovery failed (agent=${params.agent}, correlationId=${correlationId}, `
           + `recoveryId=${event.recoveryId}): ${event.reason ?? "unknown recovery failure"}`;
         state.runtimeFailure = diagnostic;
+        state.failureChain = Object.freeze({
+          ...state.failureChain,
+          terminal: recoveryFailureRecord("compaction-recovery-failed", "recovery", "compaction", diagnostic),
+        });
         appendBoundedTranscriptMessage(messages, { role: "system", content: diagnostic });
         progress.lastMessage = diagnostic;
         progress.status = "failed";
@@ -1440,8 +1580,16 @@ export async function runSingleAttempt(
         producer: event.producer,
         generation: event.generation,
         phase: event.phase,
+        ...(event.wakeProtocolVersion === 1 || active?.wakeProtocolVersion === 1
+          ? { wakeProtocolVersion: 1 as const }
+          : {}),
+        ...(active?.wakeReceipt === undefined ? {} : { wakeReceipt: active.wakeReceipt }),
+        ...(active?.absoluteDeadlineAt === undefined ? {} : { absoluteDeadlineAt: active.absoluteDeadlineAt }),
       };
-      if (phaseAdvanced && timers.compactionRecovery) {
+      // Legacy producers retain their prior per-phase conservative deadline.
+      // Receipt-capable producers keep one absolute deadline for the wake.
+      if (phaseAdvanced && active?.wakeProtocolVersion === undefined
+        && active?.wakeReceipt === undefined && timers.compactionRecovery) {
         clearTimeout(timers.compactionRecovery);
         timers.compactionRecovery = undefined;
       }
@@ -1577,6 +1725,23 @@ export async function runSingleAttempt(
       }
     }
 
+    function recoveryFailureRecord(
+      code: string,
+      layer: RecoveryFailureRecordV1["layer"],
+      phase: string,
+      message: string,
+      model?: string,
+    ): RecoveryFailureRecordV1 {
+      return Object.freeze({
+        code,
+        layer,
+        phase,
+        sequence: ++state.failureSequence,
+        sanitizedMessage: message,
+        ...(model === undefined ? {} : { model }),
+      });
+    }
+
     function recordRuntimeEventError(event: JsonLineEvent, phase: string): void {
       const error = extractPiEventError(event);
       if (!error) return;
@@ -1613,6 +1778,19 @@ export async function runSingleAttempt(
       const diagnostic =
         `Teammate runtime error (phase=${phase}, agent=${params.agent}, model=${model || "unknown"}, `
         + `correlationId=${correlationId}): ${error}`;
+      if (state.failureChain.initiating === undefined) {
+        const retryKind = classifyRetryError(error);
+        state.failureChain = Object.freeze({
+          ...state.failureChain,
+          initiating: recoveryFailureRecord(
+            retryKind,
+            retryKind === "network" ? "transport" : "provider",
+            phase,
+            error,
+            model,
+          ),
+        });
+      }
       appendBoundedTranscriptMessage(messages, { role: "system", content: diagnostic });
       state.runtimeFailure = diagnostic;
       progress.lastMessage = diagnostic;
@@ -1644,7 +1822,11 @@ export async function runSingleAttempt(
           timers.outputLimitRecovery = undefined;
         }
       }
-      if (state.compactionRecovery) {
+      if (state.compactionRecovery
+        && state.compactionRecovery.wakeProtocolVersion === undefined
+        && state.compactionRecovery.wakeReceipt === undefined) {
+        // Legacy producers have no correlated consumer receipt, so retain the
+        // prior conservative behavior: any new boundary ends the wait.
         closeActiveCompactionRecovery();
         state.compactionRecovery = undefined;
         compactionSettlementSwallowed = false;
@@ -2507,7 +2689,7 @@ export async function runSingleAttempt(
     const stderrDecoder = new StringDecoder("utf8");
     child.stderr?.on("data", (chunk: Buffer) => {
       pokeLifecycleDeadline();
-      if (chunk.length > 0) state.externalReplayRisk = true;
+      if (chunk.length > 0) addReplayEvidence("stderr", "raw-stderr");
       state.stderrBuffer = appendUtf8Tail(
         state.stderrBuffer,
         stderrDecoder.write(chunk),

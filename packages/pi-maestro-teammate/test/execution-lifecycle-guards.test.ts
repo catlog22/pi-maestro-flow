@@ -1081,6 +1081,110 @@ test("compaction recovery: each advanced phase gets a full deadline for the cont
   }
 });
 
+test("receipt-capable compaction ignores unrelated turns and closes only on the matching wake", async () => {
+  let handle: FakeChildHandle | undefined;
+  const deadlineAt = Date.now() + 500;
+  const spawnChildProcess = (() => {
+    handle = createFakeChild();
+    queueMicrotask(() => {
+      handle!.child.emit("message", {
+        type: "teammate_compaction_state", producer: "auto", recoveryId: "receipt-recovery",
+        generation: 3, phase: "pending", wakeProtocolVersion: 1,
+      });
+      handle!.child.emit("message", {
+        type: "teammate_compaction_wake_receipt", version: 99, producer: "auto",
+        recoveryId: "receipt-recovery", generation: 3, wakeId: "bad-version",
+        state: "prepared", sequence: 0, deadlineAt,
+      });
+      handle!.stdout.write(line({ type: "agent_end", willRetry: false }));
+      handle!.stdout.write(line({ type: "agent_settled" }));
+      setTimeout(() => {
+        // Neither this arbitrary boundary nor foreign/stale receipts discharge
+        // the correlated recovery obligation.
+        handle!.stdout.write(line({ type: "agent_start" }));
+        handle!.stdout.write(line({ type: "turn_start" }));
+        // IPC and stdout are distinct channels. Even when the authoritative
+        // receipt arrives after the turn boundary, the advertised protocol
+        // prevents the boundary from being mistaken for legacy completion.
+        handle!.child.emit("message", {
+          type: "teammate_compaction_wake_receipt", version: 1, producer: "auto",
+          recoveryId: "receipt-recovery", generation: 3, wakeId: "wake-1",
+          state: "prepared", sequence: 1, deadlineAt,
+        });
+        handle!.child.emit("message", {
+          type: "teammate_compaction_wake_receipt", version: 1, producer: "auto",
+          recoveryId: "other", generation: 3, wakeId: "wake-1",
+          state: "turn-started", sequence: 9, deadlineAt: deadlineAt + 10_000,
+        });
+        handle!.child.emit("message", {
+          type: "teammate_compaction_wake_receipt", version: 1, producer: "auto",
+          recoveryId: "receipt-recovery", generation: 3, wakeId: "wake-1",
+          state: "queued", sequence: 1, deadlineAt: deadlineAt + 10_000,
+        });
+        handle!.child.emit("message", {
+          type: "teammate_compaction_wake_receipt", version: 1, producer: "auto",
+          recoveryId: "receipt-recovery", generation: 3, wakeId: "wake-1",
+          state: "turn-started", sequence: 2, deadlineAt: deadlineAt + 10_000,
+          turnId: "turn-wake-1",
+        });
+        handle!.stdout.write(line(resultReadyTurnEnd("continued from matching wake")));
+        handle!.stdout.write(line({ type: "agent_end", willRetry: false }));
+        handle!.stdout.write(line({ type: "agent_settled" }));
+      }, 20);
+    });
+    return handle!.child;
+  }) as unknown as SpawnSeam;
+
+  const result = await runSingleTeammate(
+    { agent: "general", task: "receipt recovery", context: "fresh" },
+    { baseCwd: process.cwd(), spawnChildProcess, outputLimitRecoveryTimeoutMs: 2_000 },
+  );
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.messages.at(-1)?.content, "continued from matching wake");
+  assert.equal(result.recoveryWakeReceipt?.state, "turn-started");
+  assert.equal(result.recoveryWakeReceipt?.wakeId, "wake-1");
+  assert.equal(result.recoveryWakeReceipt?.deadlineAt, deadlineAt);
+  assert.ok(result.replayEvidence?.entries.some((entry) =>
+    entry.source === "unknown-ipc" && entry.reasonCode === "unrecognized-child-ipc"));
+});
+
+test("receipt-capable compaction keeps the first absolute deadline despite later receipts", async () => {
+  let handle: FakeChildHandle | undefined;
+  const startedAt = Date.now();
+  const deadlineAt = startedAt + 80;
+  const spawnChildProcess = (() => {
+    handle = createFakeChild();
+    queueMicrotask(() => {
+      handle!.child.emit("message", {
+        type: "teammate_compaction_state", producer: "auto", recoveryId: "deadline-recovery",
+        generation: 1, phase: "pending",
+      });
+      handle!.child.emit("message", {
+        type: "teammate_compaction_wake_receipt", version: 1, producer: "auto",
+        recoveryId: "deadline-recovery", generation: 1, wakeId: "wake-deadline",
+        state: "prepared", sequence: 1, deadlineAt,
+      });
+      handle!.stdout.write(line({ type: "agent_end", willRetry: false }));
+      handle!.stdout.write(line({ type: "agent_settled" }));
+      setTimeout(() => handle!.child.emit("message", {
+        type: "teammate_compaction_wake_receipt", version: 1, producer: "auto",
+        recoveryId: "deadline-recovery", generation: 1, wakeId: "wake-deadline",
+        state: "queued", sequence: 2, deadlineAt: deadlineAt + 5_000,
+      }), 25);
+    });
+    return handle!.child;
+  }) as unknown as SpawnSeam;
+
+  const result = await runSingleTeammate(
+    { agent: "general", task: "deadline recovery", context: "fresh" },
+    { baseCwd: process.cwd(), spawnChildProcess, outputLimitRecoveryTimeoutMs: 2_000 },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.match(result.messages.at(-1)?.content ?? "", /compaction recovery did not continue/);
+  assert.ok(Date.now() - startedAt < 1_000, "later receipts must not extend the first absolute deadline");
+});
+
 test("compaction recovery: a settled continuation provider failure bypasses the watchdog", async () => {
   let handle: FakeChildHandle | undefined;
   const spawnChildProcess = (() => {
@@ -1125,6 +1229,11 @@ test("compaction recovery: a settled continuation provider failure bypasses the 
 
     assert.equal(result.exitCode, 1);
     assert.ok(result.messages.some((message) => /WebSocket error/.test(message.content)));
+    assert.equal(result.recoveryFailureChain?.initiating?.sanitizedMessage, "WebSocket error");
+    assert.equal(result.recoveryFailureChain?.initiating?.layer, "transport");
+    assert.equal(result.recoveryFailureChain?.terminal?.phase, "fallback-terminal");
+    assert.ok((result.recoveryFailureChain?.terminal?.sequence ?? 0)
+      > (result.recoveryFailureChain?.initiating?.sequence ?? 0));
     assert.equal(
       result.messages.some((message) => /compaction recovery did not continue/.test(message.content)),
       false,
@@ -1134,6 +1243,40 @@ test("compaction recovery: a settled continuation provider failure bypasses the 
   } finally {
     clearInterval(keepAlive);
   }
+});
+
+test("replay evidence is finalized after reclamation and retains late stderr risk", async () => {
+  let handle: FakeChildHandle | undefined;
+  const spawnChildProcess = (() => {
+    handle = createFakeChild();
+    queueMicrotask(() => {
+      handle!.stdout.write(line({ type: "agent_start" }));
+      handle!.stdout.write(line({
+        type: "message_end",
+        message: { role: "assistant", stopReason: "error", errorMessage: "WebSocket error" },
+      }));
+      handle!.stdout.write(line({ type: "agent_end", willRetry: false }));
+      handle!.stdout.write(line({ type: "agent_settled" }));
+      setTimeout(() => {
+        handle!.stderr.write("late shutdown diagnostic\n");
+        handle!.close(1, null);
+      }, 15);
+    });
+    return handle!.child;
+  }) as unknown as SpawnSeam;
+
+  const keepAlive = setInterval(() => {}, 10);
+  const result = await runSingleTeammate(
+    { agent: "general", task: "late risk", context: "fresh", model: "provider/primary" },
+    {
+      baseCwd: process.cwd(), spawnChildProcess,
+      modelCapabilities: [{ id: "provider/primary" }], enableRetryBackoff: false,
+    },
+  ).finally(() => clearInterval(keepAlive));
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.replayEvidence?.finalized, true);
+  assert.ok(result.replayEvidence?.entries.some((entry) =>
+    entry.source === "stderr" && entry.reasonCode === "raw-stderr"));
 });
 
 test("compaction recovery: a failed phase settles without a lifecycle boundary", async () => {
