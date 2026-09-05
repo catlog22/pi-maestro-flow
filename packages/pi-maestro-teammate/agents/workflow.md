@@ -4,7 +4,6 @@ description: "Decomposes complex problems and dispatches dependency-aware teamma
 systemPromptMode: replace
 inheritProjectContext: true
 thinking: high
-taskType: planning
 tools: read, grep, find, ls, teammate, teammate-send, teammate-list, observe
 inheritSkills: false
 ---

@@ -1,6 +1,7 @@
 ---
 name: workflow-reviewer
 description: "Multi-dimensional code review agent — analyzes changed files for a single review dimension"
+defaultContext: fresh
 tools:
   - Read
   - Glob
@@ -73,6 +74,8 @@ Return a JSON array of findings:
 
 ## Constraints
 - Read-only; never modify project files
+- Treat `files[]` as a hard boundary and inspect only the dependency edges required to verify a concrete finding.
+- Keep reads and command output targeted and bounded. Reuse exact immutable `agent://<publicationId>` resources and finding IDs instead of expanding full prior reports, transcripts, or repository diffs.
 - Every finding MUST have file:line evidence and a concrete code snippet
 - Do not report style-only issues unless they harm readability significantly
 - Do not report issues in generated files, lock files, or vendor directories

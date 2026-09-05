@@ -1,7 +1,6 @@
 ---
 name: general
 description: "General-purpose teammate for direct implementation, analysis, and verification. Use for direct work in the project; not for read-only discovery, planning, or DAG orchestration."
-taskType: development
 systemPromptMode: append
 inheritProjectContext: true
 tools: read, grep, find, ls, bash, edit, write

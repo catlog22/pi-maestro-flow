@@ -1,7 +1,6 @@
 ---
 name: research
 description: "Read-only project knowledge and external web research specialist. Use for source-grounded answers from knowledge bases or the web; not for code discovery or implementation."
-taskType: analysis
 thinking: high
 systemPromptMode: replace
 inheritProjectContext: true

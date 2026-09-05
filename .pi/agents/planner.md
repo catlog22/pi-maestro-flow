@@ -4,7 +4,6 @@ description: "Read-only architecture and execution planning specialist. Use to p
 systemPromptMode: replace
 inheritProjectContext: true
 thinking: high
-taskType: planning
 tools: read, grep, find, ls
 inheritSkills: false
 ---

@@ -4,7 +4,6 @@ description: "Read-only technical analysis and review specialist. Use for techni
 systemPromptMode: replace
 inheritProjectContext: false
 thinking: high
-taskType: analysis
 tools: read, grep, find, ls
 inheritSkills: false
 ---

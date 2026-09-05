@@ -1,7 +1,6 @@
 ---
 name: verifier
 description: "Independent read-only fallback verifier for Goal completion claims. Use only when a Goal declares no acceptance commands; not for ordinary review."
-taskType: verification
 thinking: low
 systemPromptMode: replace
 inheritProjectContext: false
