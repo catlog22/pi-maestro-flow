@@ -31,6 +31,11 @@ test("Gateway config normalizes legacy snake-case sections and rejects invalid k
   assert.throws(() => normalizeGatewayConfig({ security: { commands: { default: "maybe" } } }), GatewayConfigValidationError);
   assert.throws(() => normalizeGatewayConfig({ limits: { max_request_bytes: 99_999_999 } }), GatewayConfigValidationError);
   assert.throws(() => normalizeGatewayConfig({ transport: { http: { port: 0 } } }), GatewayConfigValidationError);
+  assert.throws(() => normalizeGatewayConfig({ transport: { http: { tls: { enabled: true } } } }), /requires certFile and keyFile/);
+  assert.throws(() => normalizeGatewayConfig({ security: { trustedFullAccess: { enabled: true, workspaceRoots: ["."] } } }), /auth.mode cannot be open/);
+  const trusted = normalizeGatewayConfig({ auth: { mode: "bearer", token: "secret" }, security: { trusted_full_access: { enabled: true, workspace_roots: ["."] } }, transport: { http: { tls: { enabled: true, cert_file: "cert.pem", key_file: "key.pem" } } } });
+  assert.deepEqual(trusted.security.trustedFullAccess, { enabled: true, workspaceRoots: ["."] });
+  assert.equal(trusted.transport.http.tls.enabled, true);
   assert.equal(normalizeGatewayConfig({ auth: { mode: "oauth", oauth: { password: "pw", token_secret: "legacy-secret" } } }).auth.mode, "oauth");
   assert.equal(normalizeGatewayConfig({ state: { sessions_root: ".pi/gateway/v1/sessions" } }).state.sessionsRoot, ".pi/gateway/v1/sessions");
   const legacyListener = normalizeGatewayConfig({ server: { host: "0.0.0.0", port: 9293 } });

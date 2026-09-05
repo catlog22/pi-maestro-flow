@@ -1,13 +1,17 @@
 /** Command line entry for the packaged Gateway daemon and stdio relay. */
 import { readFile } from "node:fs/promises";
-import type { Writable } from "node:stream";
+import type { Readable, Writable } from "node:stream";
 import { GatewayDaemon } from "./daemon.ts";
-import { connectGatewayIpc } from "./ipc.ts";
-import { GatewayOwnerActiveError } from "./owner-store.ts";
+import { connectGatewayIpc, requestGatewayIpcControl } from "./ipc.ts";
+import { GatewayOwnerActiveError, GatewayOwnerStore } from "./owner-store.ts";
 import type { GatewayOwnerRecord } from "./contracts.ts";
 import { GATEWAY_OFFLINE_MESSAGE, relayGatewayStdio } from "./stdio-relay.ts";
+import { GatewayResidentService } from "./resident-service.ts";
+import { loadGatewayConfig } from "./config.ts";
+import { applyPiConfigStream, serializePiConfigApplyError } from "./pi-config-apply.ts";
 
 export interface GatewayCliIo {
+  stdin?: Readable;
   stdout?: Writable;
   stderr?: Writable;
 }
@@ -58,6 +62,7 @@ async function packageVersion(): Promise<string> {
 }
 
 export async function main(argv = process.argv.slice(2), io: GatewayCliIo = {}): Promise<number> {
+  const stdin = io.stdin ?? process.stdin;
   const stdout = io.stdout ?? process.stdout;
   const stderr = io.stderr ?? process.stderr;
   const [command = "help", ...args] = argv;
@@ -71,6 +76,71 @@ export async function main(argv = process.argv.slice(2), io: GatewayCliIo = {}):
     if (command === "connect") {
       if (args.length !== 1 || args[0] !== "--stdio") throw new Error("Usage: pi-maestro-gateway connect --stdio");
       await relayGatewayStdio();
+      return 0;
+    }
+    if (command === "config-sync") {
+      if (args.length !== 1 || args[0] !== "apply") throw new Error("Usage: pi-maestro-gateway config-sync apply");
+      write(stdout, JSON.stringify(await applyPiConfigStream(stdin)));
+      return 0;
+    }
+    if (command === "service-run") {
+      const tokenIndex = args.indexOf("--installation-token");
+      if (tokenIndex < 0) throw new Error("service-run requires --installation-token");
+      const installationToken = requiredValue(args, tokenIndex + 1, "--installation-token");
+      const configIndex = args.indexOf("--config");
+      const configPath = configIndex < 0 ? undefined : requiredValue(args, configIndex + 1, "--config");
+      const serviceConfig = await loadGatewayConfig(configPath);
+      const resident = new GatewayResidentService({
+        configPath,
+        manifestPath: serviceConfig.state.serviceManifestPath,
+        ownerPath: serviceConfig.state.ownerPath,
+        allowDetachedFallback: args.includes("--detached-fallback") || (process.platform !== "win32" && process.platform !== "linux"),
+      });
+      await resident.validateServiceRun(installationToken, process.execPath, process.argv.slice(1), process.cwd());
+      const daemon = new GatewayDaemon({ configPath, commandIdentity: process.argv.join(" ") });
+      await daemon.start();
+      await waitForShutdown(async () => daemon.stop(), daemon.waitUntilStopped());
+      return 0;
+    }
+    if (command === "service") {
+      const action = args[0];
+      if (!action || !["install", "start", "stop", "restart", "status", "uninstall"].includes(action)) throw new Error("Usage: pi-maestro-gateway service install|start|stop|restart|status|uninstall [--json]");
+      const json = args.includes("--json");
+      const configIndex = args.indexOf("--config");
+      const configPath = configIndex < 0 ? undefined : requiredValue(args, configIndex + 1, "--config");
+      const fallback = args.includes("--detached-fallback");
+      const executableArg = process.argv[1];
+      const serviceConfig = await loadGatewayConfig(configPath);
+      const resident = new GatewayResidentService({ configPath, manifestPath: serviceConfig.state.serviceManifestPath, ownerPath: serviceConfig.state.ownerPath, command: process.execPath, argsPrefix: executableArg ? [executableArg] : [], allowDetachedFallback: fallback });
+      const value = action === "install" ? await (() => resident.install().then((manifest) => ({
+        installed: true,
+        kind: manifest.kind,
+        installationId: manifest.installationId,
+        installedAt: manifest.installedAt,
+      })))()
+        : action === "start" ? await resident.start()
+          : action === "stop" ? await resident.stop()
+            : action === "restart" ? await resident.restart()
+              : action === "status" ? await resident.status()
+                : await resident.uninstall();
+      write(stdout, json ? JSON.stringify(value) : typeof value === "object" ? JSON.stringify(value, null, 2) : String(value));
+      return 0;
+    }
+    if (command === "pair") {
+      const action = args[0];
+      if (!action || !["create", "bootstrap", "list", "revoke"].includes(action)) throw new Error("Usage: pi-maestro-gateway pair create|bootstrap|list|revoke [ID] [--ttl SECONDS] [--label LABEL]");
+      const configIndex = args.indexOf("--config");
+      const config = await loadGatewayConfig(configIndex < 0 ? undefined : requiredValue(args, configIndex + 1, "--config"));
+      const owner = await new GatewayOwnerStore({ ownerPath: config.state.ownerPath }).read();
+      if (!owner?.socket) throw new Error(GATEWAY_OFFLINE_MESSAGE);
+      const ttlIndex = args.indexOf("--ttl");
+      const labelIndex = args.indexOf("--label");
+      const data = action === "create" || action === "bootstrap" ? {
+        ...(ttlIndex < 0 ? {} : { ttlMs: Number(requiredValue(args, ttlIndex + 1, "--ttl")) * 1000 }),
+        ...(labelIndex < 0 ? {} : { label: requiredValue(args, labelIndex + 1, "--label") }),
+      } : action === "revoke" ? { id: requiredValue(args, 1, "revoke") } : undefined;
+      const value = await requestGatewayIpcControl({ address: owner.socket, ownerToken: owner.ownerToken, action: action === "create" ? "pair" : action === "bootstrap" ? "pair-bootstrap" : action === "list" ? "pair-list" : "pair-revoke", ...(data ? { data } : {}) });
+      write(stdout, JSON.stringify(value));
       return 0;
     }
     if (command === "serve") {
@@ -107,14 +177,20 @@ export async function main(argv = process.argv.slice(2), io: GatewayCliIo = {}):
         "Commands:",
         "  serve [--config PATH] [--host HOST] [--port PORT] [--no-http] [--json]",
         "  connect --stdio",
+        "  config-sync apply",
+        "  service install|start|stop|restart|status|uninstall [--json]",
+        "  pair create|bootstrap|list|revoke [ID]",
         "  version [--json]",
       ].join("\n"));
       return 0;
     }
     throw new Error(`Unknown command: ${command}`);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    write(stderr, message || GATEWAY_OFFLINE_MESSAGE);
+    if (command === "config-sync") write(stderr, serializePiConfigApplyError(error));
+    else {
+      const message = error instanceof Error ? error.message : String(error);
+      write(stderr, message || GATEWAY_OFFLINE_MESSAGE);
+    }
     return 1;
   }
 }

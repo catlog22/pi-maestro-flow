@@ -16,13 +16,14 @@ const AUTH_TYPE = "pi-maestro-gateway-auth";
 const MAX_AUTH_BYTES = 8 * 1024;
 const AUTH_TIMEOUT_MS = 5_000;
 
-export type GatewayIpcControlAction = "status" | "stop";
+export type GatewayIpcControlAction = "status" | "stop" | "pair" | "pair-bootstrap" | "pair-list" | "pair-revoke";
 
 interface GatewayIpcAuthFrame {
   type: typeof AUTH_TYPE;
   version: typeof GATEWAY_STATE_VERSION;
   ownerToken: string;
   control?: GatewayIpcControlAction;
+  data?: Record<string, unknown>;
 }
 
 interface GatewayIpcAckFrame {
@@ -37,7 +38,7 @@ export interface GatewayIpcServerOptions {
   ownerToken: string;
   address?: string;
   homeDir?: string;
-  onControl?: (action: GatewayIpcControlAction) => void;
+  onControl?: (action: GatewayIpcControlAction, data?: Record<string, unknown>) => void | unknown | Promise<unknown>;
 }
 
 export interface GatewayIpcServerHandle {
@@ -132,13 +133,13 @@ function authenticateSocket(
     if (frame.type !== AUTH_TYPE || frame.version !== GATEWAY_STATE_VERSION || typeof frame.ownerToken !== "string" || !constantTimeEqual(frame.ownerToken, options.ownerToken)) {
       return refuse("Gateway IPC owner token is invalid");
     }
-    if (frame.control !== undefined && frame.control !== "status" && frame.control !== "stop") {
+    if (frame.control !== undefined && !["status", "stop", "pair", "pair-bootstrap", "pair-list", "pair-revoke"].includes(frame.control)) {
       return refuse("Gateway IPC control action is invalid");
     }
     settled = true;
     cleanup();
     if (frame.control) {
-      void respondToControl(socket, frame.control, runtime, options.onControl);
+      void respondToControl(socket, frame.control, frame.data, runtime, options.onControl);
       return;
     }
     const remainder = buffer.subarray(newline + 1);
@@ -157,30 +158,38 @@ function authenticateSocket(
 async function respondToControl(
   socket: Socket,
   action: GatewayIpcControlAction,
+  requestData: Record<string, unknown> | undefined,
   runtime: GatewayRuntime,
   onControl: GatewayIpcServerOptions["onControl"],
 ): Promise<void> {
-  if (action === "stop" && !onControl) {
+  if (action !== "status" && !onControl) {
     const ack: GatewayIpcAckFrame = {
       type: AUTH_TYPE,
       version: GATEWAY_STATE_VERSION,
       ok: false,
-      error: "Gateway IPC stop control is unavailable",
+      error: `Gateway IPC ${action} control is unavailable`,
     };
     socket.end(`${JSON.stringify(ack)}\n`);
     return;
   }
-  const data = action === "status"
-    ? runtime.host.test(createLocalGatewayPrincipal("local-control", {
-      workspacePath: runtime.cwd,
-      source: "local-ipc-control",
-      scopes: ["gateway.control"],
-    }))
-    : { accepted: true, status: "stopping", pid: process.pid };
-  const ack: GatewayIpcAckFrame = { type: AUTH_TYPE, version: GATEWAY_STATE_VERSION, ok: true, data };
-  socket.end(`${JSON.stringify(ack)}\n`, () => {
-    if (action === "stop") queueMicrotask(() => onControl?.(action));
-  });
+  try {
+    const data = action === "status"
+      ? (onControl ? await onControl(action, requestData) : runtime.host.test(createLocalGatewayPrincipal("local-control", {
+        workspacePath: runtime.cwd,
+        source: "local-ipc-control",
+        scopes: ["gateway.control"],
+      })))
+      : action === "stop"
+        ? { accepted: true, status: "stopping", pid: process.pid }
+        : await onControl?.(action, requestData);
+    const ack: GatewayIpcAckFrame = { type: AUTH_TYPE, version: GATEWAY_STATE_VERSION, ok: true, data };
+    socket.end(`${JSON.stringify(ack)}\n`, () => {
+      if (action === "stop") queueMicrotask(() => { void onControl?.(action, requestData); });
+    });
+  } catch (error) {
+    const ack: GatewayIpcAckFrame = { type: AUTH_TYPE, version: GATEWAY_STATE_VERSION, ok: false, error: error instanceof Error ? error.message : String(error) };
+    socket.end(`${JSON.stringify(ack)}\n`);
+  }
 }
 
 async function serveSocket(runtime: GatewayRuntime, socket: Socket, remainder: Buffer): Promise<void> {
@@ -261,7 +270,7 @@ function retryableIpcStartupError(error: unknown): boolean {
 }
 
 function requestGatewayIpcControlOnce(
-  options: GatewayIpcConnectOptions & { action: GatewayIpcControlAction },
+  options: GatewayIpcConnectOptions & { action: GatewayIpcControlAction; data?: Record<string, unknown> },
   timeoutMs: number,
 ): Promise<unknown> {
   const socket = createConnection(options.address);
@@ -286,6 +295,7 @@ function requestGatewayIpcControlOnce(
         version: GATEWAY_STATE_VERSION,
         ownerToken: options.ownerToken,
         control: options.action,
+        ...(options.data === undefined ? {} : { data: options.data }),
       };
       socket.write(`${JSON.stringify(frame)}\n`);
     };
@@ -311,7 +321,7 @@ function requestGatewayIpcControlOnce(
 }
 
 export async function requestGatewayIpcControl(
-  options: GatewayIpcConnectOptions & { action: GatewayIpcControlAction },
+  options: GatewayIpcConnectOptions & { action: GatewayIpcControlAction; data?: Record<string, unknown> },
 ): Promise<unknown> {
   const timeoutMs = options.timeoutMs ?? AUTH_TIMEOUT_MS;
   const deadline = Date.now() + timeoutMs;

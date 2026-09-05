@@ -1,6 +1,6 @@
 /** Shared Gateway runtime used by local IPC and every HTTP MCP session. */
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { GatewayConfig } from "./config.ts";
@@ -10,6 +10,7 @@ import { GATEWAY_PROTOCOL_VERSION } from "./contracts.ts";
 import { GatewayCatalog } from "./catalog.ts";
 import { GatewayAuditSink } from "./audit.ts";
 import { GatewayPolicy } from "./policy.ts";
+import { GatewayPairingStore } from "./pairing-store.ts";
 import { gatewayError } from "./result.ts";
 import { validateGatewayValue } from "./validation.ts";
 import { gatewayJobsRoot, gatewaySessionsRoot, gatewayTasksRoot } from "./state-paths.ts";
@@ -31,6 +32,7 @@ export interface GatewayRuntimeOptions {
   cwd?: string;
   workspaceRegistry?: WorkspaceRegistry;
   teammatePort?: GatewayTeammatePort;
+  pairingStore?: GatewayPairingStore;
 }
 
 export class GatewayRuntime {
@@ -38,6 +40,7 @@ export class GatewayRuntime {
   readonly cwd: string;
   readonly registry: WorkspaceRegistry;
   readonly policy: GatewayPolicy;
+  readonly pairingStore: GatewayPairingStore;
   readonly host: HostService;
   readonly exec: ExecService;
   readonly job: JobService;
@@ -55,6 +58,9 @@ export class GatewayRuntime {
   private constructor(config: GatewayConfig, options: GatewayRuntimeOptions) {
     this.config = config;
     this.cwd = options.cwd ?? process.cwd();
+    if (config.security.trustedFullAccess?.enabled && config.auth.mode === "open") {
+      throw new Error("security.trustedFullAccess requires authenticated Gateway HTTP (auth.mode cannot be open)");
+    }
     this.registry = options.workspaceRegistry ?? new WorkspaceRegistry({
       path: config.state.workspaceRegistryPath,
       maxEntries: config.limits.maxWorkspaceCount,
@@ -65,7 +71,12 @@ export class GatewayRuntime {
       workspaces: config.workspaces,
       registry: this.registry,
       limits: config.limits,
+      trustedFullAccess: {
+        enabled: config.security.trustedFullAccess?.enabled ?? false,
+        workspaceRoots: (config.security.trustedFullAccess?.workspaceRoots ?? []).map((root) => isAbsolute(root) ? root : resolve(this.cwd, root)),
+      },
     });
+    this.pairingStore = options.pairingStore ?? new GatewayPairingStore({ path: config.state.pairingPath });
     const stateRoot = config.state.rootDir;
     const jobsRoot = stateRoot ? join(stateRoot, "jobs") : gatewayJobsRoot(this.cwd);
     const taskJournalPath = stateRoot ? join(stateRoot, "tasks", "journal.json") : join(gatewayTasksRoot(this.cwd), "journal.json");
@@ -76,6 +87,7 @@ export class GatewayRuntime {
       workspaceRoot: this.cwd,
       commandPolicy: config.security.commands,
       maxOutputBytes: config.limits.maxOutputBytes,
+      trustedFullAccess: config.security.trustedFullAccess?.enabled ?? false,
     });
     this.job = new JobService({
       policy: this.policy,
@@ -84,11 +96,13 @@ export class GatewayRuntime {
       jobsRoot,
       maxOutputBytes: config.limits.maxOutputBytes,
       retentionMs: config.retention.jobsMs,
+      trustedFullAccess: config.security.trustedFullAccess?.enabled ?? false,
     });
     this.file = new FileService({
       policy: this.policy,
       workspaceRoot: this.cwd,
       security: config.security.files,
+      trustedFullAccess: config.security.trustedFullAccess?.enabled ?? false,
     });
     this.teammate = new GatewayTeammateService({
       port: options.teammatePort,
@@ -191,6 +205,8 @@ export class GatewayRuntime {
     });
     return server;
   }
+
+  get isReady(): boolean { return !this.closed; }
 
   async close(): Promise<void> {
     if (this.closed) return;

@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import {
   createCipheriv,
   createDecipheriv,
+  createHash,
   randomBytes,
   randomUUID,
   scrypt as nodeScrypt,
@@ -13,23 +14,29 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
   SSH_MANAGER_DATA_VERSION,
+  cloneSshGatewayBinding,
   cloneSshHost,
   cloneSshKey,
   effectiveSshHostDigest,
   migrateLegacySshManagerData,
+  migrateSshManagerDataV2,
   replaceSshHost,
   replaceSshKey,
   reverseSshHostDependencyClosure,
   validateLegacySshManagerData,
+  validateSshGatewayBinding,
   validateSshHost,
   validateSshHosts,
   validateSshKey,
   validateSshKeys,
   validateSshManagerData,
+  validateSshManagerDataV2,
   type LegacySshManagerData,
+  type SshGatewayBinding,
   type SshHost,
   type SshKey,
   type SshManagerData,
+  type SshManagerDataV2,
 } from "./model.ts";
 
 const ENVELOPE_VERSION = 1 as const;
@@ -108,6 +115,7 @@ export class EncryptedSshStore {
         revision: 0,
         keys: [],
         hosts: validateSshHosts(hosts),
+        gatewayBindings: [],
       });
       const envelope = encryptData(data, key, salt);
       await withStoreLock(this.path, async () => {
@@ -132,7 +140,7 @@ export class EncryptedSshStore {
     this.clearResidentState();
     let key: Buffer | undefined;
     let salt: Buffer | undefined;
-    let initial: SshManagerData | LegacySshManagerData | undefined;
+    let initial: SshManagerData | SshManagerDataV2 | LegacySshManagerData | undefined;
     let data: SshManagerData | undefined;
     try {
       const envelope = await readEnvelope(this.path);
@@ -143,7 +151,7 @@ export class EncryptedSshStore {
         data = initial;
         initial = undefined;
       } else {
-        data = await this.migrateV1UnderLock(initial, key, salt);
+        data = await this.migrateUnderLock(initial, key, salt);
       }
       if (generation !== this.lifecycleGeneration) throw new Error("SSH manager lifecycle changed during unlock");
       this.key = key;
@@ -179,6 +187,14 @@ export class EncryptedSshStore {
 
   getHosts(): SshHost[] { return this.requireData().hosts.map(cloneSshHost); }
   getKeys(): SshKey[] { return this.requireData().keys.map(cloneSshKey); }
+  getGatewayBinding(hostId: string): SshGatewayBinding | undefined {
+    const binding = this.requireData().gatewayBindings.find((candidate) => candidate.hostId === hostId);
+    return binding ? cloneSshGatewayBinding(binding) : undefined;
+  }
+  getGatewayBindingFence(hostId: string): string {
+    const binding = this.getGatewayBinding(hostId);
+    return binding ? createHash("sha256").update(JSON.stringify(binding)).digest("hex") : "stdio";
+  }
   checkoutKey(id: string): SshKey {
     const key = this.requireData().keys.find((candidate) => candidate.id === id);
     if (!key) throw new Error("SSH key was not found");
@@ -195,6 +211,20 @@ export class EncryptedSshStore {
 
   async saveKeys(keys: unknown): Promise<void> { await this.saveConfiguration(this.requireData().hosts, keys); }
   async saveConfiguration(hosts: unknown, keys: unknown): Promise<void> { await this.saveData(hosts, keys); }
+  async saveGatewayBinding(hostId: string, binding: unknown, expectedRevision: number, expectedDigest: string): Promise<void> {
+    const current = this.requireData();
+    if (current.revision !== expectedRevision || effectiveSshHostDigest(current, hostId) !== expectedDigest) throw new Error("SSH configuration changed during Gateway pairing");
+    const nextBinding = validateSshGatewayBinding(binding);
+    if (nextBinding.hostId !== hostId || nextBinding.effectiveHostDigest !== expectedDigest) throw new Error("SSH Gateway binding does not match the pinned host configuration");
+    await this.saveData(current.hosts, current.keys, [...current.gatewayBindings.filter((item) => item.hostId !== hostId), nextBinding]);
+  }
+  async removeGatewayBinding(hostId: string): Promise<boolean> {
+    const current = this.requireData();
+    const bindings = current.gatewayBindings.filter((binding) => binding.hostId !== hostId);
+    if (bindings.length === current.gatewayBindings.length) return false;
+    await this.saveData(current.hosts, current.keys, bindings);
+    return true;
+  }
   async addHost(host: unknown): Promise<void> { await this.save([...this.requireData().hosts, validateSshHost(host)]); }
   async updateHost(id: string, host: unknown): Promise<void> { await this.save(replaceSshHost(this.requireData().hosts, id, host)); }
   async deleteHost(id: string): Promise<void> {
@@ -212,12 +242,19 @@ export class EncryptedSshStore {
     await this.saveKeys(data.keys.filter((key) => key.id !== id));
   }
 
-  private async saveData(hosts: unknown, keys: unknown): Promise<void> {
+  private async saveData(hosts: unknown, keys: unknown, gatewayBindings: readonly SshGatewayBinding[] = this.requireData().gatewayBindings): Promise<void> {
     const generation = this.lifecycleGeneration;
     const current = this.requireData();
     const key = this.requireKey();
     const salt = this.requireSalt();
-    const next = validateSshManagerData({ version: SSH_MANAGER_DATA_VERSION, revision: current.revision + 1, hosts: validateSshHosts(hosts), keys: validateSshKeys(keys) });
+    const nextHosts = validateSshHosts(hosts);
+    const nextKeys = validateSshKeys(keys);
+    const candidate = { version: SSH_MANAGER_DATA_VERSION, revision: current.revision + 1, hosts: nextHosts, keys: nextKeys, gatewayBindings };
+    const nextWithoutStaleBindings = gatewayBindings.filter((binding) => {
+      try { return nextHosts.some((host) => host.id === binding.hostId) && effectiveSshHostDigest(candidate as SshManagerData, binding.hostId) === binding.effectiveHostDigest; }
+      catch { return false; }
+    });
+    const next = validateSshManagerData({ ...candidate, gatewayBindings: nextWithoutStaleBindings });
     try {
       await withStoreLock(this.path, async () => {
         const envelope = await readEnvelope(this.path);
@@ -272,20 +309,20 @@ export class EncryptedSshStore {
     }
   }
 
-  private async migrateV1UnderLock(initial: LegacySshManagerData, key: Buffer, salt: Buffer): Promise<SshManagerData> {
+  private async migrateUnderLock(initial: LegacySshManagerData | SshManagerDataV2, key: Buffer, salt: Buffer): Promise<SshManagerData> {
     return withStoreLock(this.path, async () => {
       const artifact = await readEnvelopeArtifact(this.path);
       let diskSalt: Buffer | undefined;
-      let diskData: SshManagerData | LegacySshManagerData | undefined;
+      let diskData: SshManagerData | SshManagerDataV2 | LegacySshManagerData | undefined;
       let migrated: SshManagerData | undefined;
       let published = false;
       try {
         diskSalt = decodeFixedBase64(artifact.envelope.salt, SALT_BYTES, "salt");
         if (!diskSalt.equals(salt)) throw new Error("SSH manager changed during migration");
         diskData = decryptDataAnyVersion(artifact.envelope, key);
-        if (diskData.version !== 1 || diskData.revision !== initial.revision) throw new Error("SSH manager changed during migration");
-        migrated = migrateLegacySshManagerData(diskData);
-        const backupPath = `${this.path}.v1.bak`;
+        if (diskData.version !== initial.version || diskData.revision !== initial.revision) throw new Error("SSH manager changed during migration");
+        migrated = diskData.version === 1 ? migrateLegacySshManagerData(diskData) : migrateSshManagerDataV2(diskData);
+        const backupPath = `${this.path}.v${initial.version}.bak`;
         const existingBackup = await readOptionalEnvelopeArtifact(backupPath);
         try {
           if (existingBackup) {
@@ -382,7 +419,7 @@ function decryptData(envelope: StoreEnvelope, key: Buffer): SshManagerData {
   return data;
 }
 
-function decryptDataAnyVersion(envelope: StoreEnvelope, key: Buffer): SshManagerData | LegacySshManagerData {
+function decryptDataAnyVersion(envelope: StoreEnvelope, key: Buffer): SshManagerData | SshManagerDataV2 | LegacySshManagerData {
   const iv = decodeFixedBase64(envelope.iv, IV_BYTES, "iv");
   const tag = decodeFixedBase64(envelope.tag, TAG_BYTES, "tag");
   const ciphertext = decodeBase64(envelope.ciphertext, "ciphertext");
@@ -394,7 +431,9 @@ function decryptDataAnyVersion(envelope: StoreEnvelope, key: Buffer): SshManager
     plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
     const parsed: unknown = JSON.parse(plaintext.toString("utf8"));
     const version = parsed && typeof parsed === "object" ? (parsed as { version?: unknown }).version : undefined;
-    return version === SSH_MANAGER_DATA_VERSION ? validateSshManagerData(parsed) : validateLegacySshManagerData(parsed);
+    return version === SSH_MANAGER_DATA_VERSION ? validateSshManagerData(parsed)
+      : version === 2 ? validateSshManagerDataV2(parsed)
+        : validateLegacySshManagerData(parsed);
   } finally {
     iv.fill(0);
     tag.fill(0);
@@ -642,7 +681,7 @@ function requireExactKeys(value: Record<string, unknown>, keys: ReadonlySet<stri
   }
 }
 
-function clearDataSecrets(data: SshManagerData | LegacySshManagerData): void {
+function clearDataSecrets(data: SshManagerData | SshManagerDataV2 | LegacySshManagerData): void {
   clearHostSecrets(data.hosts);
   if ("keys" in data) {
     for (const key of data.keys) {
@@ -650,6 +689,7 @@ function clearDataSecrets(data: SshManagerData | LegacySshManagerData): void {
       if (key.passphrase) key.passphrase = "";
     }
   }
+  if ("gatewayBindings" in data) for (const binding of data.gatewayBindings) binding.token = "";
 }
 
 function clearHostSecrets(hosts: Array<{ auth: SshHost["auth"] }>): void {

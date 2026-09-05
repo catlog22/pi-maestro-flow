@@ -27,7 +27,7 @@ import {
   SshGatewayClientPool,
   type SshGatewayActionResult,
 } from "./gateway-client.ts";
-import { sshGatewayGuide } from "./guide.ts";
+import { pairSshGateway, sshGatewayGuide, unpairSshGateway } from "./guide.ts";
 import { SshToolParams, type SshToolInput } from "./llm-tool.ts";
 import {
   SSH_HOST_ID_PATTERN,
@@ -50,6 +50,14 @@ import {
   type OpenSshImportCandidate,
 } from "./openssh-config.ts";
 import { SshStatusMonitor, type SshHostOperationalStatus } from "./status-monitor.ts";
+import {
+  CurrentUserPiConfigSource,
+  SshPiConfigSyncTransport,
+  syncPiConfig,
+  type PiConfigLocalSource,
+  type PiConfigSyncAudit,
+  type PiConfigSyncTransport,
+} from "./pi-config-sync.ts";
 import {
   MaskedSecretInput,
   SshHostManagerOverlay,
@@ -91,6 +99,9 @@ export interface RegisterSshManagerOptions {
   gatewayPool?: SshGatewayClientPool;
   monitor?: SshStatusMonitor;
   discoverOpenSsh?: (options?: DiscoverOpenSshOptions) => Promise<OpenSshDiscoveryResult>;
+  configSource?: PiConfigLocalSource;
+  configSyncTransport?: (host: SshHost) => PiConfigSyncTransport;
+  configSyncAudit?: PiConfigSyncAudit;
 }
 
 export function registerSshManager(
@@ -99,9 +110,11 @@ export function registerSshManager(
 ): void {
   const store = options.store ?? new EncryptedSshStore({ path: options.storePath ?? defaultSshManagerStorePath() });
   const executor = options.executor ?? new SshExecutor(undefined, store);
-  const gatewayPool = options.gatewayPool ?? new SshGatewayClientPool(executor);
+  const gatewayPool = options.gatewayPool ?? new SshGatewayClientPool(executor, { bindingSource: store });
   const monitor = options.monitor ?? new SshStatusMonitor(store, executor);
   const discoverOpenSsh = options.discoverOpenSsh ?? discoverOpenSshConfig;
+  const configSource = options.configSource ?? new CurrentUserPiConfigSource();
+  const configSyncTransport = options.configSyncTransport ?? ((host: SshHost) => new SshPiConfigSyncTransport(executor, host));
   let selected: SelectedSshHost | undefined;
   let activeContext: ExtensionContext | undefined;
 
@@ -112,7 +125,7 @@ export function registerSshManager(
     ctx?.ui.setStatus(SSH_STATUS_KEY, undefined);
   };
 
-  const connectionFence = (hostId: string): string => `${store.revision}:${store.getEffectiveHostDigest(hostId)}`;
+  const connectionFence = (hostId: string): string => `${store.revision}:${store.getEffectiveHostDigest(hostId)}:${store.getGatewayBindingFence(hostId)}`;
 
   const selectHost = (host: SshHost, ctx: ExtensionContext): void => {
     activeContext = ctx;
@@ -207,8 +220,8 @@ export function registerSshManager(
     renderShell: "self",
     description: `Execute a bounded command or use the built-in Pi Maestro Gateway on any configured SSH server after the user unlocks the manager.
 
-Use action=targets to list provider-owned target ids, then pass targetId on a command or Gateway action. Omitting targetId preserves the optional #ssh default selection. The tool never accepts host or authentication parameters. Gateway actions use one fixed remote command and cannot override it. start_pi snapshots only explicitly selected existing tasks from the current local Pi Todo and launches an independent remote Gateway session; it never synchronizes or completes either Todo authority. Server configuration stays in the encrypted user-level SSH manager. #ssh selection remains independent of teammate and remote-worker routing. Each resolved target decides whether ordinary commands run through bash or PowerShell.`,
-    promptSnippet: "List unlocked SSH targets, execute a command, launch selected local Todo instructions with start_pi, or use Gateway actions by provider-owned targetId.",
+Use action=targets to list provider-owned target ids, then pass targetId on a command or Gateway action. Omitting targetId preserves the optional #ssh default selection. The tool never accepts host or authentication parameters. Gateway actions and sync_pi_config use fixed remote commands that cannot be overridden. sync_pi_config accepts only fixed categories; the host resolves current-user Pi files internally and never exposes their paths or contents. start_pi snapshots only explicitly selected existing tasks from the current local Pi Todo and launches an independent remote Gateway session; it never synchronizes or completes either Todo authority. Server configuration stays in the encrypted user-level SSH manager. #ssh selection remains independent of teammate and remote-worker routing. Each resolved target decides whether ordinary commands run through bash or PowerShell.`,
+    promptSnippet: "List unlocked SSH targets, execute a command, securely sync fixed Pi config categories, launch selected local Todo instructions with start_pi, or use Gateway actions by provider-owned targetId.",
     promptGuidelines: [
       "Use read-only inspection before mutations unless the user explicitly requested a change.",
       "Use action=guide for local Gateway setup instructions; it does not contact a server.",
@@ -292,6 +305,28 @@ Use action=targets to list provider-owned target ids, then pass targetId on a co
             details: details(result, executionHost),
           };
         }
+        if (params.action === "sync_pi_config") {
+          const fence = connectionFence(executionHost.id);
+          const syncResult = await syncPiConfig({
+            categories: params.categories,
+            source: configSource,
+            transport: configSyncTransport(executionHost),
+            signal,
+            audit: options.configSyncAudit,
+            assertFence: async () => {
+              await refreshStore();
+              if (connectionFence(executionHost!.id) !== fence) throw new Error("SSH target changed before configuration transfer");
+            },
+          });
+          return {
+            content: [{ type: "text" as const, text: JSON.stringify(syncResult, null, 2) }],
+            details: {
+              ...details(undefined, executionHost),
+              action: "sync_pi_config",
+              summary: `${syncResult.receipts.length} configuration categor${syncResult.receipts.length === 1 ? "y" : "ies"} synchronized`,
+            },
+          };
+        }
         const startPiContext = params.action === "start_pi"
           ? {
               piSessionRef: activeContext?.sessionManager.getSessionId?.() ?? "",
@@ -326,7 +361,7 @@ Use action=targets to list provider-owned target ids, then pass targetId on a co
             ...("action" in params ? {
               action: params.action,
               ...(params.action === "describe" || params.action === "call" ? { tool: params.tool } : {}),
-              summary: params.action === "targets" ? "target listing failed" : "gateway failed",
+              summary: params.action === "targets" ? "target listing failed" : params.action === "sync_pi_config" ? "configuration sync failed" : "gateway failed",
             } : {}),
           },
         };
@@ -363,8 +398,30 @@ Use action=targets to list provider-owned target ids, then pass targetId on a co
 
   pi.registerCommand("ssh", {
     description: "Open the independent encrypted SSH server manager TUI.",
-    async handler(_args, ctx) {
+    async handler(args, ctx) {
       activeContext = ctx;
+      const management = /^(pair|unpair)\s+([A-Za-z0-9][A-Za-z0-9._-]{0,63})$/u.exec(args.trim());
+      if (args.trim() && !management) {
+        ctx.ui.notify("Usage: /ssh, /ssh pair <targetId>, or /ssh unpair <targetId>.", "warning");
+        return;
+      }
+      if (management) {
+        if (!await ensureUnlocked(ctx, store)) return;
+        const hostId = management[2]!;
+        try {
+          await gatewayPool.invalidateHost(hostId);
+          if (management[1] === "pair") {
+            const receipt = await pairSshGateway(store, executor, hostId);
+            ctx.ui.notify(`Secure Gateway pairing saved for target ${receipt.hostId}; expiry is recorded in the encrypted store.`, "info");
+          } else {
+            const removed = await unpairSshGateway(store, executor, hostId);
+            ctx.ui.notify(removed ? "Secure Gateway pairing removed; stdio fallback is active." : "No Gateway pairing was stored for that target.", "info");
+          }
+        } catch (error) {
+          ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
+        }
+        return;
+      }
       await runManager(ctx, store, executor, monitor, discoverOpenSsh, {
         selectedId: () => selected?.id,
         select: (host) => selectHost(host, ctx),
@@ -422,7 +479,7 @@ Use action=targets to list provider-owned target ids, then pass targetId on a co
       const defaultTarget = host
         ? `The optional current #ssh default has id ${JSON.stringify(host.id)}, label ${JSON.stringify(host.label)}, and shell ${host.shell}.`
         : "No default server is selected; call action=targets and pass a returned targetId.";
-      const systemPrompt = `${event.systemPrompt}\n\n<ssh-management-context>\nThe independent encrypted SSH manager is unlocked. The agent may access any configured server through the ssh tool by first calling action=targets and then passing a provider-owned targetId. ${defaultTarget} targetId never contains host or authentication data, and omission uses only the optional #ssh default. start_pi accepts only local todoIds, an optional objective/agent/timeout, targetId, and requestId; the host reads and sanitizes current local Pi Todo tasks and session identity. Gateway actions always use the fixed remote command and never accept host, authentication, command, remote cwd, sessionId, snapshot, or callback overrides. #ssh selection does not select or configure teammate routing. Remote Monitor calls use the returned launch receipt and never update local Pi Todo. Never use remote-worker or expose credentials.\n</ssh-management-context>`;
+      const systemPrompt = `${event.systemPrompt}\n\n<ssh-management-context>\nThe independent encrypted SSH manager is unlocked. Gateway endpoint and credentials remain internal and are never included in this prompt. The agent may access any configured server through the ssh tool by first calling action=targets and then passing a provider-owned targetId. ${defaultTarget} targetId never contains host or authentication data, and omission uses only the optional #ssh default. sync_pi_config accepts only targetId and fixed categories (models, auth, teammate); local paths and contents are resolved and transferred by the host outside model-visible arguments and results. start_pi accepts only local todoIds, an optional objective/agent/timeout, targetId, and requestId; the host reads and sanitizes current local Pi Todo tasks and session identity. Gateway actions always use the fixed remote command and never accept host, authentication, command, remote cwd, sessionId, snapshot, or callback overrides. #ssh selection does not select or configure teammate routing. Remote Monitor calls use the returned launch receipt and never update local Pi Todo. Never use remote-worker or expose credentials.\n</ssh-management-context>`;
       return { systemPrompt };
     } catch {
       clearSelection(ctx);
@@ -626,24 +683,30 @@ async function runManager(
         const before = store.getReverseDependencyClosure(host.id);
         const replacement = await editHostWizard(ctx, store.getHosts(), store.getKeys(), host);
         if (!replacement) continue;
-        await store.updateHost(host.id, replacement);
         const affected = new Set([...before, ...store.getReverseDependencyClosure(host.id)]);
-        await invalidateHostIds(affected, bindings); monitor.reconcile(); notice = `Updated ${replacement.label}; affected selections and sessions were cleared`;
+        await invalidateHostIds(affected, bindings);
+        await unpairGatewayHostIds(affected, store, executor);
+        await store.updateHost(host.id, replacement);
+        monitor.reconcile(); notice = `Updated ${replacement.label}; affected selections and sessions were cleared`;
         continue;
       }
       if (action.kind === "delete") {
         if (!await ctx.ui.confirm(`Delete ${host.label}?`, "Referenced jump hosts cannot be deleted.")) continue;
         const affected = store.getReverseDependencyClosure(host.id);
+        await invalidateHostIds(affected, bindings);
+        await unpairGatewayHostIds(affected, store, executor);
         await store.deleteHost(host.id);
-        await invalidateHostIds(affected, bindings); monitor.reconcile(); notice = `Deleted ${host.label}`;
+        monitor.reconcile(); notice = `Deleted ${host.label}`;
         continue;
       }
       if (action.kind === "reset") {
         if (!await ctx.ui.confirm(`Reset trust for ${host.label}?`, "The saved host identity will be removed and monitoring disabled.")) continue;
         if (!await ctx.ui.confirm("Confirm trust reset", "A future Test will establish trust again.")) continue;
         const affected = store.getReverseDependencyClosure(host.id);
+        await invalidateHostIds(affected, bindings);
+        await unpairGatewayHostIds(affected, store, executor);
         await store.updateHost(host.id, { ...host, hostKey: null, monitorEnabled: false });
-        await invalidateHostIds(affected, bindings); monitor.reconcile(); notice = `Trust reset for ${host.label}`;
+        monitor.reconcile(); notice = `Trust reset for ${host.label}`;
         continue;
       }
       if (action.kind === "test") {
@@ -925,6 +988,10 @@ async function collectSshHostDraft(ctx: ExtensionContext, draft: SshHostDraft, h
   if (monitorChoice === undefined) return undefined;
   const monitorEnabled = monitorChoice === "On";
   return { id: draft.id, label, host, user, portText, shell, hostKey, auth, tags, jumpHostId, monitorEnabled };
+}
+
+async function unpairGatewayHostIds(ids: Iterable<string>, store: EncryptedSshStore, executor: SshExecutor): Promise<void> {
+  for (const id of new Set(ids)) if (store.getGatewayBinding(id)) await unpairSshGateway(store, executor, id);
 }
 
 async function invalidateHostIds(ids: Iterable<string>, bindings: ManagerBindings): Promise<void> {

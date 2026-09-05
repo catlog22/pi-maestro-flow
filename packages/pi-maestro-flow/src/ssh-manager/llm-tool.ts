@@ -41,7 +41,7 @@ const SshTargetedCommandToolParams = Type.Object({
 }, { additionalProperties: false });
 
 const gatewayToolName = Type.String({ minLength: 1, maxLength: 128 });
-const sshAction = <T extends "guide" | "targets" | "status" | "list" | "describe" | "call" | "start_pi">(action: T) => Type.Literal(action);
+const sshAction = <T extends "guide" | "targets" | "status" | "list" | "describe" | "call" | "start_pi" | "sync_pi_config">(action: T) => Type.Literal(action);
 
 export const SshToolParams = Type.Union([
   SshTargetedCommandToolParams,
@@ -49,6 +49,15 @@ export const SshToolParams = Type.Union([
   Type.Object({ action: sshAction("targets") }, { additionalProperties: false }),
   Type.Object({ action: sshAction("status"), targetId: sshTargetId() }, { additionalProperties: false }),
   Type.Object({ action: sshAction("list"), targetId: sshTargetId() }, { additionalProperties: false }),
+  Type.Object({
+    action: sshAction("sync_pi_config"),
+    targetId: sshTargetId(),
+    categories: Type.Array(Type.Union([
+      Type.Literal("models"),
+      Type.Literal("auth"),
+      Type.Literal("teammate"),
+    ]), { minItems: 1, maxItems: 3, uniqueItems: true }),
+  }, { additionalProperties: false }),
   Type.Object({
     action: sshAction("start_pi"),
     targetId: sshTargetId(),

@@ -3,6 +3,7 @@ import type { GatewayConfig } from "./config.ts";
 import { loadGatewayConfig } from "./config.ts";
 import type { GatewayOwnerRecord } from "./contracts.ts";
 import type { GatewayHttpServerHandle } from "./http-server.ts";
+import { isLoopbackHost } from "./auth.ts";
 import { gatewayIpcAddress, startGatewayIpcServer, type GatewayIpcServerHandle } from "./ipc.ts";
 import { GatewayOwnerStore } from "./owner-store.ts";
 import { gatewayLegacyPidPaths } from "./state-paths.ts";
@@ -71,8 +72,36 @@ export class GatewayDaemon {
       this.ipc = await startGatewayIpcServer(runtime, {
         ownerToken: owner.ownerToken,
         address,
-        onControl: (action) => {
-          if (action === "stop") void this.stop();
+        onControl: async (action, data) => {
+          if (action === "status") {
+            const host = runtime.host.test();
+            const httpEnabled = this.options.http ?? config.transport.http.enabled;
+            const httpReady = !httpEnabled || Boolean(this.http?.server.listening && runtime.isReady);
+            return { ...host, readiness: { ipc: true, http: httpReady, ready: httpReady } };
+          }
+          if (action === "stop") { void this.stop(); return; }
+          if (action === "pair" || action === "pair-bootstrap") {
+            const http = config.transport.http;
+            const effectiveHost = this.options.httpHost ?? http.host;
+            const reverseProxyHttps = isLoopbackHost(effectiveHost) && config.server.trustProxyHeaders && config.auth.oauth?.serverUrl?.startsWith("https://");
+            if (config.auth.mode === "open") throw new Error("Pairing requires authenticated Gateway HTTP");
+            if (!http.tls?.enabled && !reverseProxyHttps && !isLoopbackHost(effectiveHost)) throw new Error("Pairing is refused for non-loopback plaintext HTTP");
+            const ttlMs = data?.ttlMs;
+            const label = data?.label;
+            if (action === "pair-bootstrap" && (!this.http?.secure || !this.http.server.listening || !runtime.isReady)) throw new Error("Secure Gateway HTTPS is not ready for pairing");
+            const issued = await runtime.pairingStore.issue({
+              ...(ttlMs === undefined ? {} : { ttlMs: Number(ttlMs) }),
+              ...(label === undefined ? {} : { label: String(label) }),
+            });
+            return action === "pair-bootstrap"
+              ? { ...issued, endpoint: this.http!.url, serverName: "pi-maestro-gateway", protocolVersion: 1 }
+              : issued;
+          }
+          if (action === "pair-list") return runtime.pairingStore.list();
+          if (action === "pair-revoke") {
+            if (typeof data?.id !== "string" || !data.id) throw new Error("pair-revoke requires an id");
+            return { revoked: await runtime.pairingStore.revoke(data.id) };
+          }
         },
       });
       const enableHttp = this.options.http ?? config.transport.http.enabled;
@@ -95,6 +124,7 @@ export class GatewayDaemon {
     if (this.stopping) return this.stopping;
     this.stopping = (async () => {
       const ownerToken = this.owner?.ownerToken;
+      this.http?.setReady(false);
       await this.http?.close().catch(() => undefined);
       this.http = undefined;
       await this.ipc?.close().catch(() => undefined);

@@ -8,11 +8,14 @@ import test from "node:test";
 import {
   EncryptedSshStore,
   effectiveSshHostDigest,
+  pairSshGateway,
   replaceSshHost,
   reverseSshHostDependencyClosure,
   validateSshHost,
   validateSshHosts,
+  unpairSshGateway,
   validateSshManagerData,
+  type SshExecutor,
   type SshHost,
   type SshKey,
 } from "../src/ssh-manager/index.ts";
@@ -272,11 +275,24 @@ function writeV1Fixture(path: string, password: string, revision = 4): Promise<v
   return writeFile(path, `${JSON.stringify(envelope)}\n`, { mode: 0o600 });
 }
 
-test("SSH v2 data validates managed keys, references, jump depth, cycles, and secret-free effective digests", () => {
+function writeV2Fixture(path: string, password: string, revision = 6): Promise<void> {
+  const salt = randomBytes(16);
+  const iv = randomBytes(12);
+  const key = scryptSync(password, salt, 32, { N: 32_768, r: 8, p: 1, maxmem: 64 * 1024 * 1024 });
+  const header = { version: 1, kdf: { name: "scrypt", N: 32_768, r: 8, p: 1, keyLength: 32 }, cipher: { name: "aes-256-gcm" }, salt: salt.toString("base64"), iv: iv.toString("base64") };
+  const plaintext = Buffer.from(JSON.stringify({ version: 2, revision, keys: [], hosts: [passwordHost()] }));
+  const cipher = createCipheriv("aes-256-gcm", key, iv); cipher.setAAD(Buffer.from(JSON.stringify(header)));
+  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const envelope = { ...header, tag: cipher.getAuthTag().toString("base64"), ciphertext: ciphertext.toString("base64") };
+  key.fill(0); salt.fill(0); iv.fill(0); plaintext.fill(0); ciphertext.fill(0);
+  return writeFile(path, `${JSON.stringify(envelope)}\n`, { mode: 0o600 });
+}
+
+test("SSH v3 data validates managed keys, references, jump depth, cycles, bindings, and secret-free effective digests", () => {
   const key = managedKey();
   const jump = passwordHost({ id: "jump", auth: { kind: "agent" } });
   const leaf = passwordHost({ id: "leaf", auth: { kind: "key", keyId: key.id }, jumpHostId: jump.id, hostKey: null, tags: ["prod"] });
-  const data = validateSshManagerData({ version: 2, revision: 0, keys: [key], hosts: [jump, leaf] });
+  const data = validateSshManagerData({ version: 3, revision: 0, keys: [key], hosts: [jump, leaf], gatewayBindings: [] });
   assert.deepEqual(reverseSshHostDependencyClosure(data.hosts, "jump"), ["jump", "leaf"]);
   const digest = effectiveSshHostDigest(data, "leaf");
   assert.match(digest, /^[a-f0-9]{64}$/);
@@ -286,7 +302,7 @@ test("SSH v2 data validates managed keys, references, jump depth, cycles, and se
   assert.throws(() => validateSshManagerData({ ...data, keys: [{ ...key, extra: true }] }), /unsupported field/);
   assert.throws(() => validateSshManagerData({ ...data, hosts: [{ ...jump, tags: Array.from({ length: 17 }, (_, index) => `t${index}`) }] }), /at most 16/);
   const chain = Array.from({ length: 7 }, (_, index) => passwordHost({ id: `h${index}`, jumpHostId: index === 6 ? null : `h${index + 1}` }));
-  assert.throws(() => validateSshManagerData({ version: 2, revision: 0, keys: [], hosts: chain }), /depth exceeds 5/);
+  assert.throws(() => validateSshManagerData({ version: 3, revision: 0, keys: [], hosts: chain, gatewayBindings: [] }), /depth exceeds 5/);
 });
 
 test("encrypted SSH store provides fenced host/key CRUD and blocks referenced deletion", async () => {
@@ -348,7 +364,7 @@ test("v1 unlock migrates once with revision bump and exclusive private backup", 
     if (process.platform !== "win32") assert.equal((await stat(`${path}.v1.bak`)).mode & 0o777, 0o600);
     store.lock();
     await store.unlock("migration-password");
-    assert.equal(store.revision, 5, "v2 unlock must not migrate again");
+    assert.equal(store.revision, 5, "v3 unlock must not migrate again");
   } finally {
     store.lock();
     await rm(root, { recursive: true, force: true });
@@ -370,6 +386,67 @@ test("v1 migration resumes when an interrupted publication left the matching bac
     store.lock();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("v2 unlock migrates atomically to v3 with an empty independent binding store", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ssh-manager-v2-migrate-"));
+  const path = join(root, "hosts.enc.json");
+  const store = new EncryptedSshStore({ path });
+  try {
+    await writeV2Fixture(path, "migration-password");
+    const original = await readFile(path);
+    await store.unlock("migration-password");
+    assert.equal(store.revision, 7);
+    assert.equal(store.getGatewayBinding("primary-1"), undefined);
+    assert.deepEqual(await readFile(`${path}.v2.bak`), original);
+  } finally { store.lock(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("fixed SSH bootstrap persists only an encrypted binding and returns a sanitized receipt", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ssh-manager-bootstrap-"));
+  const path = join(root, "hosts.enc.json");
+  const store = new EncryptedSshStore({ path });
+  const token = "s".repeat(43);
+  const commands: string[] = [];
+  const executor = { async execute(_host: SshHost, request: { command: string }) {
+    commands.push(request.command);
+    return request.command.includes("bootstrap")
+      ? { stdout: JSON.stringify({ id: "pair-bootstrap", token, endpoint: "https://gateway.example.test/mcp", expiresAt: Date.now() + 60_000, serverName: "pi-maestro-gateway", protocolVersion: 1 }), stderr: "", exitCode: 0, signal: null, durationMs: 1 }
+      : { stdout: JSON.stringify({ revoked: true }), stderr: "", exitCode: 0, signal: null, durationMs: 1 };
+  } } as unknown as SshExecutor;
+  try {
+    await store.create("master-password", [passwordHost()]);
+    const receipt = await pairSshGateway(store, executor, "primary-1");
+    assert.deepEqual(Object.keys(receipt).sort(), ["expiresAt", "hostId", "paired"]);
+    assert.doesNotMatch(JSON.stringify(receipt), /gateway\.example|s{20}|pair-bootstrap/u);
+    assert.equal(store.getGatewayBinding("primary-1")?.token, token);
+    assert.doesNotMatch(await readFile(path, "utf8"), /gateway\.example|s{20}|pair-bootstrap/u);
+    assert.equal(await unpairSshGateway(store, executor, "primary-1"), true);
+    assert.equal(store.getGatewayBinding("primary-1"), undefined);
+    assert.match(commands[0]!, /^pi-maestro-gateway pair bootstrap/u);
+    assert.equal(commands[1], "pi-maestro-gateway pair revoke pair-bootstrap");
+  } finally { store.lock(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("v3 Gateway bindings are encrypted, separately fenced, rotated, and invalidated by host changes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ssh-manager-v3-binding-"));
+  const path = join(root, "hosts.enc.json");
+  const store = new EncryptedSshStore({ path });
+  try {
+    await store.create("master-password", [passwordHost()]);
+    const digest = store.getEffectiveHostDigest("primary-1");
+    const first = { hostId: "primary-1", endpoint: "https://gateway.example.test/mcp", token: "a".repeat(43), pairingId: "pair-first", expiresAt: Date.now() + 60_000, effectiveHostDigest: digest };
+    await store.saveGatewayBinding("primary-1", first, 0, digest);
+    const firstFence = store.getGatewayBindingFence("primary-1");
+    assert.deepEqual(store.getGatewayBinding("primary-1"), first);
+    assert.doesNotMatch(await readFile(path, "utf8"), /gateway\.example|pair-first|a{20}/u);
+    const second = { ...first, token: "b".repeat(43), pairingId: "pair-second" };
+    await store.saveGatewayBinding("primary-1", second, 1, digest);
+    assert.notEqual(store.getGatewayBindingFence("primary-1"), firstFence, "credential rotation changes only the private cache fence");
+    assert.equal(store.getEffectiveHostDigest("primary-1"), digest, "binding secrets never affect the effective host digest");
+    await store.updateHost("primary-1", passwordHost({ host: "changed.example.test" }));
+    assert.equal(store.getGatewayBinding("primary-1"), undefined, "host changes invalidate the binding in the same revision write");
+  } finally { store.lock(); await rm(root, { recursive: true, force: true }); }
 });
 
 test("v1 migration backup collision fails closed and leaves the old store usable", async () => {

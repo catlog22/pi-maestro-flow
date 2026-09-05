@@ -1,0 +1,23 @@
+{
+  "source": "real Windows schtasks.exe /Create followed by /Query /XML /HResult",
+  "capturedAt": "2026-06-11",
+  "redacted": true,
+  "taskVersion": "1.2",
+  "namespace": "http://schemas.microsoft.com/windows/2004/02/mit/task",
+  "topLevelOrder": ["RegistrationInfo", "Principals", "Settings", "Triggers", "Actions"],
+  "registration": ["Source", "Description", "URI"],
+  "logonTrigger": [],
+  "principal": ["UserId", "LogonType"],
+  "settings": {
+    "DisallowStartIfOnBatteries": "true",
+    "StopIfGoingOnBatteries": "true",
+    "ExecutionTimeLimit": "PT0S",
+    "MultipleInstancesPolicy": "IgnoreNew",
+    "IdleSettings": {
+      "StopOnIdleEnd": "true",
+      "RestartOnIdle": "false"
+    }
+  },
+  "exec": ["Command", "Arguments", "WorkingDirectory"],
+  "redactions": ["task name", "URI", "SID", "command", "arguments", "working directory"]
+}

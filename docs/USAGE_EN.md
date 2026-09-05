@@ -147,6 +147,8 @@ Known gap: registry dispatch still drops task-level `timeoutMs`; neither `backen
 
 Remote Worker, ACP direct-SSH/`cli/<tool>`, and DSH SSH can use `sshHostRef` to reference a host in the encrypted SSH manager. Unlock the manager through `/ssh`, then select a compatible host in Connections. The current `#ssh` selection binds only the independent `ssh` tool and never changes teammate routing.
 
+SSH manager store v3 encrypts Gateway bindings separately from host profiles. For a host whose key has already been pinned by Test, the user can run `/ssh pair <targetId>`; the extension runs only the fixed bootstrap, consumes endpoint/token internally, and displays a secret-free receipt. Gateway calls then prefer direct Streamable HTTPS. `/ssh unpair <targetId>` revokes the remote pairing before deleting the local binding and restoring the fixed stdio relay. Only connection refusal/timeout or 404/405 protocol unavailability may downgrade. TLS/hostname/certificate, 401/403, expiry/revocation, server identity, and host-digest failures fail closed. Endpoint, token, and pairing id never enter tool schemas, target listings, the system prompt, logs, or errors.
+
 Remote Worker v4 configuration places the reference on a host alias; each target/workspace still owns its remote `cwd`, driver, and command:
 
 ```json

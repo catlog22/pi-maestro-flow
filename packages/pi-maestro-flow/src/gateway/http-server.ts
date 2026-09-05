@@ -1,6 +1,8 @@
 /** Streamable HTTP MCP host. No static or Web UI routes are exposed. */
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server as NodeHttpServer, type ServerResponse } from "node:http";
+import { createServer as createHttpsServer } from "node:https";
+import { readFile } from "node:fs/promises";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
@@ -27,6 +29,8 @@ export interface GatewayHttpServerHandle {
   readonly port: number;
   readonly path: string;
   readonly url: string;
+  readonly secure: boolean;
+  setReady(ready: boolean): void;
   close(): Promise<void>;
 }
 
@@ -35,20 +39,32 @@ export async function startGatewayHttpServer(runtime: GatewayRuntime, options: G
   const port = options.port ?? runtime.config.transport.http.port;
   const path = normalizeMcpPath(options.path ?? runtime.config.transport.http.path);
   validateGatewayHttpSecurity(runtime.config, host);
-  const auth = new GatewayHttpAuth(runtime.config.auth);
+  const auth = new GatewayHttpAuth(runtime.config.auth, runtime.pairingStore);
   const sessions = new Map<string, HttpSession>();
-  const server = createServer((request, response) => {
+  let ready = true;
+  const tls = runtime.config.transport.http.tls;
+  const listener = (request: IncomingMessage, response: ServerResponse): void => {
     void handleRequest(request, response).catch((error) => {
       if (!response.headersSent) {
         const status = error instanceof HttpBodyError ? error.status : 500;
         jsonRpcError(response, status, status === 500 ? -32603 : -32700, error instanceof Error ? error.message : "Internal server error");
       } else if (!response.writableEnded) response.end();
     });
-  });
+  };
+  const server: NodeHttpServer = tls?.enabled
+    ? createHttpsServer({ cert: await readFile(tls.certFile!), key: await readFile(tls.keyFile!) }, listener)
+    : createServer(listener);
 
   async function handleRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const baseUrl = publicBaseUrl(runtime, request, host, boundPort(server, port));
     const url = new URL(request.url ?? "/", baseUrl);
+    if (url.pathname === "/healthz" || url.pathname === "/readyz") {
+      const healthy = url.pathname === "/healthz" || (ready && runtime.isReady);
+      const body = JSON.stringify({ status: healthy ? "ok" : "shutting_down" });
+      response.writeHead(healthy ? 200 : 503, { "content-type": "application/json", "cache-control": "no-store", "content-length": Buffer.byteLength(body) });
+      response.end(body);
+      return;
+    }
     if (await auth.handleOAuthRoute(request, response, url, baseUrl, path)) return;
     if (url.pathname !== path) {
       response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
@@ -70,7 +86,7 @@ export async function startGatewayHttpServer(runtime: GatewayRuntime, options: G
       return;
     }
     const resourceMetadataUrl = `${baseUrl}/.well-known/oauth-protected-resource${path}`;
-    const authenticated = auth.authenticate(request, resourceMetadataUrl);
+    const authenticated = await auth.authenticate(request, resourceMetadataUrl);
     if (!authenticated.principal) {
       response.writeHead(authenticated.status ?? 401, {
         "content-type": "application/json",
@@ -140,8 +156,11 @@ export async function startGatewayHttpServer(runtime: GatewayRuntime, options: G
     host,
     port: actualPort,
     path,
-    url: `${displayOrigin(host, actualPort)}${path}`,
+    url: `${displayOrigin(host, actualPort, tls?.enabled === true)}${path}`,
+    secure: tls?.enabled === true,
+    setReady(value: boolean): void { ready = value; },
     async close(): Promise<void> {
+      ready = false;
       if (closed) return;
       closed = true;
       await Promise.allSettled([...sessions.values()].map(async (session) => {
@@ -166,15 +185,15 @@ function boundPort(server: NodeHttpServer, fallback: number): number {
   return address && typeof address !== "string" ? address.port : fallback;
 }
 
-function displayOrigin(host: string, port: number): string {
-  return `http://${host.includes(":") && !host.startsWith("[") ? `[${host}]` : host}:${port}`;
+function displayOrigin(host: string, port: number, secure = false): string {
+  return `${secure ? "https" : "http"}://${host.includes(":") && !host.startsWith("[") ? `[${host}]` : host}:${port}`;
 }
 
 function publicBaseUrl(runtime: GatewayRuntime, request: IncomingMessage, host: string, port: number): string {
   const configured = runtime.config.auth.oauth?.serverUrl?.replace(/\/$/, "");
   if (configured) return configured;
   const authority = request.headers.host ?? `${host}:${port}`;
-  const protocol = runtime.config.server.trustProxyHeaders && request.headers["x-forwarded-proto"] === "https" ? "https" : "http";
+  const protocol = runtime.config.transport.http.tls?.enabled || (runtime.config.server.trustProxyHeaders && request.headers["x-forwarded-proto"] === "https") ? "https" : "http";
   return `${protocol}://${authority}`;
 }
 

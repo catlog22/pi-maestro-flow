@@ -371,6 +371,84 @@ test("an effective chain digest change closes the old full transport and fences 
   }
 });
 
+function bindingFetch(statusForPost = 200, serverName = "pi-maestro-gateway"): typeof fetch {
+  return (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    const method = String(init?.method ?? "GET").toUpperCase();
+    if (method === "GET") return new Response(null, { status: 405 });
+    if (method === "DELETE") return new Response(null, { status: 200 });
+    if (statusForPost !== 200) return new Response("failure", { status: statusForPost });
+    const request = JSON.parse(String(init?.body)) as JsonRpcRequest;
+    const result = request.method === "initialize"
+      ? { protocolVersion: request.params?.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: serverName, version: "1" } }
+      : request.method === "tools/list"
+        ? { tools: [{ name: "host", description: "host", inputSchema: { type: "object" } }] }
+        : { content: [{ type: "text", text: JSON.stringify({ ok: true, data: {} }) }] };
+    return new Response(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }), { status: 200, headers: { "content-type": "application/json", "mcp-session-id": "session-1" } });
+  }) as typeof fetch;
+}
+
+const binding = { hostId: host.id, endpoint: "https://gateway.example.test/mcp", token: "t".repeat(43), pairingId: "pair-1", expiresAt: Date.now() + 60_000, effectiveHostDigest: "digest-a" };
+
+test("paired Gateway uses HTTPS directly and keeps binding material out of results", async () => {
+  const executor = new FakeGatewayExecutor();
+  const pool = new SshGatewayClientPool(asExecutor(executor), { bindingSource: { getGatewayBinding: () => binding }, fetch: bindingFetch() });
+  try {
+    const result = await pool.execute(host, "digest-a", { action: "status" }, undefined, undefined, "binding-fence");
+    assert.equal(executor.requests.length, 0, "paired calls close the SSH bootstrap path before direct HTTPS use");
+    assert.doesNotMatch(JSON.stringify(result), /gateway\.example|t{20}|pair-1/u);
+  } finally { await pool.close(); }
+});
+
+test("HTTP session loss performs one bounded initialize and only then permits transient 5xx stdio fallback", async () => {
+  const executor = new FakeGatewayExecutor();
+  let initializes = 0;
+  let lists = 0;
+  const reconnectFetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    const method = String(init?.method ?? "GET").toUpperCase();
+    if (method === "GET") return new Response(null, { status: 405 });
+    if (method === "DELETE") return new Response(null, { status: 200 });
+    const request = JSON.parse(String(init?.body)) as JsonRpcRequest;
+    if (request.method === "initialize") initializes += 1;
+    if (request.method === "tools/list") lists += 1;
+    if (request.method === "tools/list" && lists === 2) return new Response("invalid session", { status: 400 });
+    if (request.method === "tools/list" && lists === 4) return new Response("temporary", { status: 503 });
+    const result = request.method === "initialize"
+      ? { protocolVersion: request.params?.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "pi-maestro-gateway", version: "1" } }
+      : { tools: [{ name: "host", description: "host", inputSchema: { type: "object" } }] };
+    return new Response(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }), { status: 200, headers: { "content-type": "application/json", "mcp-session-id": `session-${initializes}` } });
+  }) as typeof fetch;
+  const pool = new SshGatewayClientPool(asExecutor(executor), { bindingSource: { getGatewayBinding: () => binding }, fetch: reconnectFetch });
+  try {
+    await pool.execute(host, "digest-a", { action: "list" });
+    assert.equal(initializes, 2, "exactly one reinitialize follows session loss");
+    assert.equal(executor.requests.length, 1, "a transient 5xx may use stdio only after the bounded reconnect");
+  } finally { await pool.close(); }
+});
+
+test("HTTPS fallback matrix allows availability/protocol only and fails closed on auth, TLS, identity, digest, and expiry", async () => {
+  for (const status of [404, 405]) {
+    const executor = new FakeGatewayExecutor();
+    const pool = new SshGatewayClientPool(asExecutor(executor), { bindingSource: { getGatewayBinding: () => binding }, fetch: bindingFetch(status) });
+    await pool.execute(host, "digest-a", { action: "list" });
+    assert.equal(executor.requests.length, 1, `${status} falls back to fixed stdio`);
+    await pool.close();
+  }
+  const cases: Array<{ name: string; value: typeof binding; fetch: typeof fetch }> = [
+    { name: "auth", value: binding, fetch: bindingFetch(401) },
+    { name: "tls", value: binding, fetch: (async () => { throw Object.assign(new Error("certificate rejected"), { code: "CERT_HAS_EXPIRED" }); }) as typeof fetch },
+    { name: "identity", value: binding, fetch: bindingFetch(200, "other-server") },
+    { name: "digest", value: { ...binding, effectiveHostDigest: "b".repeat(64) }, fetch: bindingFetch() },
+    { name: "expiry", value: { ...binding, expiresAt: 1 }, fetch: bindingFetch() },
+  ];
+  for (const item of cases) {
+    const executor = new FakeGatewayExecutor();
+    const pool = new SshGatewayClientPool(asExecutor(executor), { bindingSource: { getGatewayBinding: () => item.value }, fetch: item.fetch, now: () => 2 });
+    await assert.rejects(pool.execute(host, "digest-a", { action: "list" }), SshGatewayCapabilityError, item.name);
+    assert.equal(executor.requests.length, 0, `${item.name} must not silently downgrade`);
+    await pool.close();
+  }
+});
+
 test("ordinary SSH hosts get an explicit Gateway capability error without fallback", async () => {
   const executor = new FakeGatewayExecutor();
   executor.failure = new Error("SSH command could not be started");

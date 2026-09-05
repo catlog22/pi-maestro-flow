@@ -1,6 +1,7 @@
 /** Gateway process ownership, stale detection and legacy PID adoption. */
-import { randomUUID } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { mkdir } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname } from "node:path";
@@ -92,8 +93,11 @@ function defaultIsProcessAlive(pid: number): boolean {
 
 function defaultProcessIdentity(pid: number): string | null {
   if (pid === process.pid) return process.argv.join(" ");
-  // Linux exposes an exact NUL-separated argv vector. Other platforms return
-  // null and owner checks conservatively treat a live PID as occupied.
+  if (process.platform === "win32") {
+    const script = `$p = Get-CimInstance Win32_Process -Filter \"ProcessId = ${pid}\"; if ($p) { [Console]::Out.Write($p.CommandLine) }`;
+    const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", timeout: 5_000, shell: false, windowsHide: true });
+    return result.status === 0 && !result.error ? String(result.stdout || "").trim() || null : null;
+  }
   try {
     const raw = readFileSync(`/proc/${pid}/cmdline`);
     return raw.toString("utf8").split("\0").filter(Boolean).join(" ") || null;
@@ -172,6 +176,16 @@ export class GatewayOwnerStore {
     try { await this.assertOwned(ownerToken); return true; } catch { return false; }
   }
 
+  async assertExactOwned(ownerToken: string, expectedIdentity: string, expectedSocket?: string): Promise<GatewayOwnerRecord> {
+    const current = await this.read();
+    if (!current || current.ownerToken !== ownerToken) throw new GatewayOwnerConflictError();
+    if (expectedSocket !== undefined && current.socket !== expectedSocket) throw new GatewayOwnerIdentityMismatchError("Gateway owner IPC address does not match the installed service");
+    if (!this.isProcessAlive(current.pid)) throw new GatewayOwnerConflictError("Gateway owner process is stale");
+    const observed = await this.getProcessIdentity(current.pid);
+    if (current.commandIdentity !== expectedIdentity || observed === null || observed !== expectedIdentity) throw new GatewayOwnerIdentityMismatchError();
+    return current;
+  }
+
   async release(ownerToken: string): Promise<boolean> {
     return this.mutate(async () => {
       const current = await this.read();
@@ -229,7 +243,7 @@ export class GatewayOwnerStore {
   private buildRecord(options: GatewayClaimOptions): GatewayOwnerRecord {
     const pid = options.pid ?? this.defaultPid;
     if (!Number.isSafeInteger(pid) || pid <= 0) throw new GatewayOwnerStoreError("pid must be a positive safe integer");
-    const ownerToken = options.ownerToken ?? randomUUID();
+    const ownerToken = options.ownerToken ?? `owner-${randomBytes(32).toString("base64url")}`;
     const commandIdentity = normalizeIdentity(options.commandIdentity ?? this.defaultCommandIdentity);
     const startedAt = positiveTimestamp(options.startedAt ?? this.now(), "startedAt");
     if (options.port !== undefined && options.socket !== undefined) throw new GatewayOwnerStoreError("port and socket are mutually exclusive");

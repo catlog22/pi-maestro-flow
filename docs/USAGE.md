@@ -147,6 +147,8 @@ CLI 兼容投影必须显式设置 `compatibility: { "version": 1, "teammateCliT
 
 Remote Worker、ACP direct-SSH/`cli/<tool>` 和 DSH SSH 都可以用 `sshHostRef` 引用加密 SSH manager 中的主机。先通过 `/ssh` 解锁 manager，再在 Connections 中选择兼容主机；`#ssh` 当前选择只绑定独立 `ssh` 工具，不会改变 teammate 路由。
 
+SSH manager store v3 把 Gateway binding 与主机资料分开加密保存。对已经 Test 并固定 host key 的主机，可由用户运行 `/ssh pair <targetId>`；扩展只执行固定 bootstrap、内部消费 endpoint/token，并只显示无秘密 receipt。之后 Gateway 优先直连 Streamable HTTPS；`/ssh unpair <targetId>` 会先撤销远端 pairing，再删除本地 binding 并恢复固定 stdio relay。只有连接拒绝/超时或 404/405 协议不可用会降级；TLS/hostname/certificate、401/403、过期/撤销、server identity 与 host digest 错误全部 fail closed。endpoint、token 和 pairing id 不会进入 tool schema、target 列表、system prompt、日志或错误。
+
 Remote Worker 的 v4 配置把引用放在 host alias 上，target/workspace 仍保留自己的远端 `cwd`、driver 和 command：
 
 ```json

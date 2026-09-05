@@ -55,6 +55,26 @@ test("policy uses one-way principal containment and expires configured leases", 
   assert.match(expired.reason, /expired/);
 });
 
+test("trustedFullAccess changes only unmatched defaults inside canonical trusted roots", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "gateway-security-trusted-"));
+  const outside = await mkdtemp(join(tmpdir(), "gateway-security-untrusted-"));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); await rm(outside, { recursive: true, force: true }); });
+  const config = createTestGatewayConfig(root, { mode: "bearer", token: "secret" });
+  config.security.trustedFullAccess = { enabled: true, workspaceRoots: [root] };
+  config.security.commands.default = "deny";
+  const runtime = await GatewayRuntime.create({ config, cwd: root });
+  t.after(() => runtime.close());
+  const owner = principal("trusted-owner", root);
+  const allowed = await runtime.exec.run({ command: process.execPath, args: ["-e", "process.stdout.write('ok')"], cwd: root, principal: owner });
+  assert.equal(allowed.ok, true);
+  runtime.exec.commandPolicy.deny.push("*");
+  const denied = await runtime.exec.run({ command: process.execPath, args: ["-e", ""], cwd: root, principal: owner });
+  assert.equal(denied.error?.code, "command_denied");
+  const escaped = await runtime.exec.run({ command: process.execPath, args: ["-e", ""], cwd: outside, principal: owner });
+  assert.equal(escaped.ok, false);
+  assert.ok(["policy_denied", "command_denied"].includes(escaped.error?.code ?? ""));
+});
+
 test("file mutation keeps transport attribution, rejects symlink escapes, and serializes expected-hash commits", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "gateway-security-file-"));
   const outside = await mkdtemp(join(tmpdir(), "gateway-security-outside-"));

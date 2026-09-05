@@ -31,6 +31,7 @@ export interface FileServiceOptions {
   principal?: GatewayPrincipal;
   security?: Partial<GatewayFileSecurityConfig>;
   maxResults?: number;
+  trustedFullAccess?: boolean;
 }
 
 export interface FileRequest {
@@ -281,6 +282,7 @@ export class FileService {
   private readonly defaultPrincipal: GatewayPrincipal;
   private readonly security: Partial<GatewayFileSecurityConfig>;
   private readonly defaultMaxResults: number;
+  private readonly trustedFullAccess: boolean;
   private mutationTail: Promise<void> = Promise.resolve();
 
   constructor(options: FileServiceOptions = {}) {
@@ -290,6 +292,7 @@ export class FileService {
       ? createLocalGatewayPrincipal("gateway-file", this.workspaceRoot ? { workspacePath: this.workspaceRoot } : {})
       : parseGatewayPrincipal(options.principal);
     this.security = { ...(options.security ?? {}) };
+    this.trustedFullAccess = options.trustedFullAccess === true;
     const defaultMax = options.maxResults ?? DEFAULT_RESULTS;
     if (!Number.isSafeInteger(defaultMax) || defaultMax < 1 || defaultMax > 4096) throw new Error("maxResults must be an integer in [1, 4096]");
     this.defaultMaxResults = defaultMax;
@@ -599,7 +602,7 @@ export class FileService {
     const rechecked = canonicalizeWorkspaceChild(canonicalWorkspace, requestedPath);
     if (!isPathWithin(canonicalWorkspace, rechecked)) throw new GatewayPolicyError("path escapes the registered workspace", "policy_denied");
     if (rechecked !== path) throw new GatewayPolicyError("path changed during authorization", "path_changed");
-    this.assertFilePolicy(relativePath(canonicalWorkspace, path), operation);
+    this.assertFilePolicy(relativePath(canonicalWorkspace, path), operation, canonicalWorkspace);
     return { workspace: canonicalWorkspace, path, requestedPath };
   }
 
@@ -611,12 +614,14 @@ export class FileService {
     if (canonicalParent !== canonicalizeWorkspacePath(parent)) throw new GatewayPolicyError("file parent changed during authorization", "path_changed");
   }
 
-  private assertFilePolicy(relativeName: string, operation: "read" | "write" | "patch"): void {
+  private assertFilePolicy(relativeName: string, operation: "read" | "write" | "patch", workspace: string): void {
     const matches = (pattern: string): boolean => patternMatches(pattern, relativeName);
     if ((this.security.deny ?? []).some(matches)) throw new GatewayPolicyError(`file ${operation} is denied by Gateway policy`, "file_denied");
     if ((this.security.confirm ?? []).some(matches)) throw new GatewayPolicyError(`file ${operation} requires confirmation`, "confirmation_required");
     const allow = this.security.allow ?? [];
-    if (allow.length > 0 && !allow.some(matches)) throw new GatewayPolicyError(`file ${operation} is not in the allow list`, "file_denied");
+    if (allow.length > 0 && !allow.some(matches) && !(this.trustedFullAccess && this.policy?.isTrustedWorkspace(workspace))) {
+      throw new GatewayPolicyError(`file ${operation} is not in the allow list`, "file_denied");
+    }
   }
 
   private readLimit(): number {

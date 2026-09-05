@@ -24,6 +24,13 @@ test("rejects open authentication on a non-loopback HTTP listener", async (t) =>
   await assert.rejects(() => startGatewayHttpServer(runtime, { host: "127.0.0.1", port: 0 }), /open is allowed only on loopback/);
 });
 
+test("rejects authenticated plaintext on a non-loopback listener", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "gateway-http-plaintext-"));
+  const runtime = await runtimeFor(root, { mode: "bearer", token: "test-bearer-token" });
+  t.after(async () => { await runtime.close(); await rm(root, { recursive: true, force: true }); });
+  await assert.rejects(() => startGatewayHttpServer(runtime, { host: "0.0.0.0", port: 0 }), /requires native TLS/);
+});
+
 test("bearer HTTP sessions authenticate and share the eight-tool catalog", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "gateway-http-bearer-"));
   const runtime = await runtimeFor(root, { mode: "bearer", token: "test-bearer-token" });
@@ -55,6 +62,27 @@ test("bearer HTTP sessions authenticate and share the eight-tool catalog", async
 
   const unknown = await fetch(new URL("/", server.url));
   assert.equal(unknown.status, 404);
+});
+
+test("health/readiness expose no secrets and persisted pairing tokens authenticate", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "gateway-http-health-"));
+  const runtime = await runtimeFor(root, { mode: "bearer", token: "configured-secret" });
+  const issued = await runtime.pairingStore.issue({ ttlMs: 60_000 });
+  const server = await startGatewayHttpServer(runtime, { host: "127.0.0.1", port: 0 });
+  t.after(async () => { await server.close(); await runtime.close(); await rm(root, { recursive: true, force: true }); });
+  const health = await fetch(new URL("/healthz", server.url));
+  assert.equal(health.status, 200);
+  assert.doesNotMatch(await health.text(), /configured-secret|pair-/);
+  assert.equal((await fetch(new URL("/readyz", server.url))).status, 200);
+  server.setReady(false);
+  assert.equal((await fetch(new URL("/readyz", server.url))).status, 503);
+  server.setReady(true);
+
+  const client = new Client({ name: "gateway-pairing-test", version: "1" });
+  const transport = new StreamableHTTPClientTransport(new URL(server.url), { requestInit: { headers: { authorization: `Bearer ${issued.token}` } } });
+  await client.connect(transport);
+  assert.equal((await client.listTools()).tools.length, 8);
+  await client.close();
 });
 
 test("OAuth metadata, password authorization callback, token exchange, and MCP access work", async (t) => {

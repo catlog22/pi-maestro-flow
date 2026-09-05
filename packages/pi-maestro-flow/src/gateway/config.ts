@@ -49,9 +49,14 @@ export interface GatewayFileSecurityConfig {
   confirm: string[];
   deny: string[];
 }
+export interface GatewayTrustedFullAccessConfig {
+  enabled: boolean;
+  workspaceRoots: string[];
+}
 export interface GatewaySecurityConfig {
   commands: GatewayCommandSecurityConfig;
   files: GatewayFileSecurityConfig;
+  trustedFullAccess: GatewayTrustedFullAccessConfig;
 }
 export interface GatewayWorkspaceConfig {
   path: string;
@@ -60,9 +65,14 @@ export interface GatewayWorkspaceConfig {
   ttlMs?: number;
   generation?: number;
 }
+export interface GatewayTlsConfig {
+  enabled: boolean;
+  certFile?: string;
+  keyFile?: string;
+}
 export interface GatewayTransportConfig {
   stdio: { enabled: boolean };
-  http: { enabled: boolean; host: string; port: number; path: string };
+  http: { enabled: boolean; host: string; port: number; path: string; tls: GatewayTlsConfig };
   ssh: { enabled: boolean };
 }
 export interface GatewayLimitsConfig {
@@ -91,6 +101,8 @@ export interface GatewayStateConfig {
   ownerPath?: string;
   workspaceRegistryPath?: string;
   sessionsRoot?: string;
+  pairingPath?: string;
+  serviceManifestPath?: string;
 }
 export interface GatewayRetentionConfig {
   jobsMs: number;
@@ -146,10 +158,11 @@ const DEFAULT_AUTH: GatewayAuthConfig = { mode: "open" };
 const DEFAULT_SECURITY: GatewaySecurityConfig = {
   commands: { default: "allow", allow: [], confirm: [], deny: [], autoAllowReadonly: null },
   files: { maxReadBytes: GATEWAY_DEFAULT_LIMITS.maxFileReadBytes, maxPatchFiles: GATEWAY_DEFAULT_LIMITS.maxPatchFiles, allow: [], confirm: [], deny: [] },
+  trustedFullAccess: { enabled: false, workspaceRoots: [] },
 };
 const DEFAULT_TRANSPORT: GatewayTransportConfig = {
   stdio: { enabled: true },
-  http: { enabled: true, host: "127.0.0.1", port: 9090, path: "/mcp" },
+  http: { enabled: true, host: "127.0.0.1", port: 9090, path: "/mcp", tls: { enabled: false } },
   ssh: { enabled: true },
 };
 const DEFAULT_RETENTION: GatewayRetentionConfig = {
@@ -275,7 +288,7 @@ export function normalizeGatewayConfig(value: unknown): GatewayConfig {
   const auth: GatewayAuthConfig = { mode: authMode, ...(token === undefined ? {} : { token }), ...(oauth === undefined ? {} : { oauth }) };
 
   const securityRaw = optionalObject(root.security, "security");
-  knownKeys(securityRaw, ["commands", "files"], "security");
+  knownKeys(securityRaw, ["commands", "files", "trustedFullAccess", "trusted_full_access"], "security");
   const commandsRaw = optionalObject(securityRaw.commands, "security.commands");
   knownKeys(commandsRaw, ["default", "allow", "confirm", "deny", "auto_allow_readonly", "autoAllowReadonly"], "security.commands");
   const commandDefault = commandsRaw.default === undefined ? DEFAULT_SECURITY.commands.default : commandsRaw.default;
@@ -298,6 +311,13 @@ export function normalizeGatewayConfig(value: unknown): GatewayConfig {
     confirm: stringList(filesRaw.confirm, "security.files.confirm"),
     deny: stringList(filesRaw.deny, "security.files.deny"),
   };
+  const trustedRaw = optionalObject(securityRaw.trustedFullAccess ?? securityRaw.trusted_full_access, "security.trustedFullAccess");
+  knownKeys(trustedRaw, ["enabled", "workspaceRoots", "workspace_roots"], "security.trustedFullAccess");
+  const trustedFullAccess: GatewayTrustedFullAccessConfig = {
+    enabled: bool(trustedRaw.enabled, "security.trustedFullAccess.enabled", false),
+    workspaceRoots: stringList(trustedRaw.workspaceRoots ?? trustedRaw.workspace_roots, "security.trustedFullAccess.workspaceRoots", 64),
+  };
+  if (trustedFullAccess.enabled && authMode === "open") throw new GatewayConfigValidationError("security.trustedFullAccess requires authenticated HTTP (auth.mode cannot be open)");
 
   const workspacesRaw = root.workspaces;
   if (workspacesRaw !== undefined && !Array.isArray(workspacesRaw) && (typeof workspacesRaw !== "object" || workspacesRaw === null)) throw new GatewayConfigValidationError("workspaces must be a list or mapping");
@@ -340,7 +360,16 @@ export function normalizeGatewayConfig(value: unknown): GatewayConfig {
   const stdioRaw = optionalObject(transportRaw.stdio, "transport.stdio");
   knownKeys(stdioRaw, ["enabled"], "transport.stdio");
   const httpRaw = optionalObject(transportRaw.http, "transport.http");
-  knownKeys(httpRaw, ["enabled", "host", "port", "path"], "transport.http");
+  knownKeys(httpRaw, ["enabled", "host", "port", "path", "tls"], "transport.http");
+  const tlsRaw = optionalObject(httpRaw.tls, "transport.http.tls");
+  knownKeys(tlsRaw, ["enabled", "certFile", "cert_file", "keyFile", "key_file"], "transport.http.tls");
+  const tlsEnabled = bool(tlsRaw.enabled, "transport.http.tls.enabled", false);
+  const tls = {
+    enabled: tlsEnabled,
+    ...(optionalString(tlsRaw.certFile ?? tlsRaw.cert_file, "transport.http.tls.certFile", 4096) ? { certFile: optionalString(tlsRaw.certFile ?? tlsRaw.cert_file, "transport.http.tls.certFile", 4096) } : {}),
+    ...(optionalString(tlsRaw.keyFile ?? tlsRaw.key_file, "transport.http.tls.keyFile", 4096) ? { keyFile: optionalString(tlsRaw.keyFile ?? tlsRaw.key_file, "transport.http.tls.keyFile", 4096) } : {}),
+  };
+  if (tlsEnabled && (!tls.certFile || !tls.keyFile)) throw new GatewayConfigValidationError("transport.http.tls requires certFile and keyFile when enabled");
   const sshRaw = optionalObject(transportRaw.ssh, "transport.ssh");
   knownKeys(sshRaw, ["enabled"], "transport.ssh");
   const transport: GatewayTransportConfig = {
@@ -350,6 +379,7 @@ export function normalizeGatewayConfig(value: unknown): GatewayConfig {
       host: httpRaw.host === undefined ? server.host : stringValue(httpRaw.host, "transport.http.host", 255),
       port: integer(httpRaw.port, "transport.http.port", 1, 65535, server.port),
       path: httpRaw.path === undefined ? DEFAULT_TRANSPORT.http.path : stringValue(httpRaw.path, "transport.http.path", 1024),
+      tls,
     },
     ssh: { enabled: bool(sshRaw.enabled, "transport.ssh.enabled", DEFAULT_TRANSPORT.ssh.enabled) },
   };
@@ -386,12 +416,14 @@ export function normalizeGatewayConfig(value: unknown): GatewayConfig {
     ...(optionalString(loggingRaw.auditFile ?? loggingRaw.audit_file, "logging.auditFile", 4096) === undefined ? {} : { auditFile: optionalString(loggingRaw.auditFile ?? loggingRaw.audit_file, "logging.auditFile", 4096) }),
   };
   const stateRaw = optionalObject(root.state, "state");
-  knownKeys(stateRaw, ["rootDir", "root_dir", "ownerPath", "owner_path", "workspaceRegistryPath", "workspace_registry_path", "sessionsRoot", "sessions_root", "retention"], "state");
+  knownKeys(stateRaw, ["rootDir", "root_dir", "ownerPath", "owner_path", "workspaceRegistryPath", "workspace_registry_path", "sessionsRoot", "sessions_root", "pairingPath", "pairing_path", "serviceManifestPath", "service_manifest_path", "retention"], "state");
   const state: GatewayStateConfig = {
     ...(optionalString(stateRaw.rootDir ?? stateRaw.root_dir, "state.rootDir", 4096) === undefined ? {} : { rootDir: optionalString(stateRaw.rootDir ?? stateRaw.root_dir, "state.rootDir", 4096) }),
     ...(optionalString(stateRaw.ownerPath ?? stateRaw.owner_path, "state.ownerPath", 4096) === undefined ? {} : { ownerPath: optionalString(stateRaw.ownerPath ?? stateRaw.owner_path, "state.ownerPath", 4096) }),
     ...(optionalString(stateRaw.workspaceRegistryPath ?? stateRaw.workspace_registry_path, "state.workspaceRegistryPath", 4096) === undefined ? {} : { workspaceRegistryPath: optionalString(stateRaw.workspaceRegistryPath ?? stateRaw.workspace_registry_path, "state.workspaceRegistryPath", 4096) }),
     ...(optionalString(stateRaw.sessionsRoot ?? stateRaw.sessions_root, "state.sessionsRoot", 4096) === undefined ? {} : { sessionsRoot: optionalString(stateRaw.sessionsRoot ?? stateRaw.sessions_root, "state.sessionsRoot", 4096) }),
+    ...(optionalString(stateRaw.pairingPath ?? stateRaw.pairing_path, "state.pairingPath", 4096) === undefined ? {} : { pairingPath: optionalString(stateRaw.pairingPath ?? stateRaw.pairing_path, "state.pairingPath", 4096) }),
+    ...(optionalString(stateRaw.serviceManifestPath ?? stateRaw.service_manifest_path, "state.serviceManifestPath", 4096) === undefined ? {} : { serviceManifestPath: optionalString(stateRaw.serviceManifestPath ?? stateRaw.service_manifest_path, "state.serviceManifestPath", 4096) }),
   };
   const retentionRaw = optionalObject(root.retention, "retention");
   knownKeys(retentionRaw, ["jobsMs", "jobs_ms", "jobs", "tasksMs", "tasks_ms", "tasks", "resultsMs", "results_ms", "results", "workspacesMs", "workspaces_ms", "workspaces"], "retention");
@@ -405,7 +437,7 @@ export function normalizeGatewayConfig(value: unknown): GatewayConfig {
     version: GATEWAY_STATE_VERSION,
     server,
     auth,
-    security: { commands, files },
+    security: { commands, files, trustedFullAccess },
     workspaces,
     transport,
     limits,

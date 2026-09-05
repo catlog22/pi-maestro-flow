@@ -284,6 +284,28 @@ test("independent SSH extension binds #ssh selection to a hostless tool without 
     async invalidateHost(hostId: string) { invalidatedGatewayHosts.push(hostId); },
     async close() { gatewayCloseCount += 1; },
   } as unknown as SshGatewayClientPool;
+  const syncAudit: unknown[] = [];
+  let syncSawSentinel = false;
+  let failSync = false;
+  const syncSentinel = "FAKE_SYNC_SECRET_SENTINEL";
+  const configSource = {
+    async read(category: "models" | "auth" | "teammate") {
+      return Buffer.from(JSON.stringify(category === "models"
+        ? { providers: { fake: { apiKey: syncSentinel, models: [] } } }
+        : category === "auth"
+          ? { fake: syncSentinel }
+          : { version: 3, defaultProfile: "default", profiles: { default: { name: "Default", mappings: {}, thinkingLevels: {} } } }));
+    },
+  };
+  const configSyncTransport = () => ({
+    async apply(payload: Buffer) {
+      syncSawSentinel = payload.includes(Buffer.from(syncSentinel));
+      if (failSync) throw new Error(`unsafe ${syncSentinel}`);
+      const newline = payload.indexOf(0x0a);
+      const header = JSON.parse(payload.subarray(0, newline).toString("utf8")) as { entries: Array<{ category: string; bytes: number; digest: string }> };
+      return { ok: true, receipts: header.entries.map((entry) => ({ ...entry, backup: true })) };
+    },
+  });
   const api = {
     registerTool(tool: ToolDefinition) { tools.set(tool.name, tool); },
     registerCommand(name: string, command: unknown) { commands.set(name, command); },
@@ -306,7 +328,7 @@ test("independent SSH extension binds #ssh selection to a hostless tool without 
   } as unknown as ExtensionContext;
 
   try {
-    registerSshManager(api, { store, executor, gatewayPool });
+    registerSshManager(api, { store, executor, gatewayPool, configSource, configSyncTransport, configSyncAudit: { record(event) { syncAudit.push(event); } } });
     assert.ok(getSshHostProvider());
     assert.deepEqual(await listSshHostRefs(), [{
       id: "server-1",
@@ -342,6 +364,8 @@ test("independent SSH extension binds #ssh selection to a hostless tool without 
     assert.equal(Value.Check(tool.parameters, { action: "targets" }), true);
     assert.equal(Value.Check(tool.parameters, { action: "status" }), true);
     assert.equal(Value.Check(tool.parameters, { action: "status", targetId: "server-1" }), true);
+    assert.equal(Value.Check(tool.parameters, { action: "sync_pi_config", targetId: "server-1", categories: ["models", "auth"] }), true);
+    assert.equal(Value.Check(tool.parameters, { action: "sync_pi_config", targetId: "server-1", categories: ["models"], path: "secret" }), false);
     assert.equal(Value.Check(tool.parameters, { command: "id", action: "status" }), false);
     assert.equal(Value.Check(tool.parameters, { action: "status", targetId: "../server-1" }), false);
     assert.equal(Value.Check(tool.parameters, { action: "status", host: "other.example.test" }), false);
@@ -396,6 +420,18 @@ test("independent SSH extension binds #ssh selection to a hostless tool without 
       shell: "bash",
     });
     assert.doesNotMatch(JSON.stringify(result.details), /encrypted-secret|SHA256/);
+
+    const synced = await tool.execute("ssh-sync", { action: "sync_pi_config", targetId: "server-1", categories: ["models", "auth"] }, new AbortController().signal);
+    assert.equal(synced.isError, undefined);
+    assert.equal(syncSawSentinel, true, "the fake secret crosses only the injected byte transport");
+    assert.doesNotMatch(JSON.stringify(synced), new RegExp(syncSentinel));
+    assert.doesNotMatch(JSON.stringify(syncAudit), new RegExp(syncSentinel));
+    assert.equal((synced.details as { action?: string }).action, "sync_pi_config");
+    failSync = true;
+    const syncFailure = await tool.execute("ssh-sync-failure", { action: "sync_pi_config", targetId: "server-1", categories: ["auth"] }, new AbortController().signal);
+    assert.equal(syncFailure.isError, true);
+    assert.doesNotMatch(JSON.stringify(syncFailure), new RegExp(syncSentinel));
+    failSync = false;
 
     const gatewayStatus = await tool.execute("ssh-gateway", { action: "status" }, new AbortController().signal);
     assert.equal(gatewayStatus.isError, undefined);

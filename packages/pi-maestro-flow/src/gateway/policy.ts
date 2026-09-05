@@ -4,7 +4,7 @@ import {
   GATEWAY_HARD_LIMITS,
   type GatewayPrincipal,
 } from "./contracts.ts";
-import type { GatewayLimitsConfig, GatewayWorkspaceConfig } from "./config.ts";
+import type { GatewayLimitsConfig, GatewayTrustedFullAccessConfig, GatewayWorkspaceConfig } from "./config.ts";
 import { principalKey } from "./principal.ts";
 import {
   canonicalizeWorkspaceChild,
@@ -31,6 +31,7 @@ export interface GatewayPolicyOptions {
   registry?: WorkspaceRegistry;
   limits?: Partial<GatewayPolicyLimits>;
   now?: () => number;
+  trustedFullAccess?: Partial<GatewayTrustedFullAccessConfig>;
 }
 
 export interface GatewayPolicyDecision {
@@ -97,6 +98,7 @@ export class GatewayPolicy {
   private readonly workspaceRoot?: string;
   private readonly configuredWorkspaces: Array<{ path: string; id: string; expiresAt?: number }>;
   private readonly registry?: WorkspaceRegistry;
+  private readonly trustedRoots: string[];
   private readonly now: () => number;
   private readonly active = new Map<GatewayConcurrencyKind, number>();
 
@@ -104,6 +106,9 @@ export class GatewayPolicy {
     this.limits = normalizeGatewayPolicyLimits(options.limits);
     this.workspaceRoot = options.workspaceRoot === undefined ? undefined : canonicalizeWorkspacePath(options.workspaceRoot);
     this.registry = options.registry;
+    this.trustedRoots = options.trustedFullAccess?.enabled === true
+      ? (options.trustedFullAccess.workspaceRoots ?? []).map(canonicalizeWorkspacePath)
+      : [];
     this.now = options.now ?? (() => Date.now());
     this.configuredWorkspaces = (options.workspaces ?? []).map((entry) => {
       const path = configuredWorkspacePath(entry);
@@ -125,6 +130,11 @@ export class GatewayPolicy {
     return canonicalizeWorkspacePath(input);
   }
   normalizeWorkspace(input: string): string { return this.canonicalWorkspace(input); }
+
+  isTrustedWorkspace(input: string): boolean {
+    const workspace = this.canonicalWorkspace(input);
+    return this.trustedRoots.some((root) => isPathWithin(root, workspace));
+  }
 
   canonicalPath(workspace: string, requestedPath: string): string {
     const canonicalWorkspace = this.canonicalWorkspace(workspace);

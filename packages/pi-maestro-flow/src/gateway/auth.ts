@@ -4,6 +4,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { isIP } from "node:net";
 import type { GatewayAuthConfig, GatewayConfig } from "./config.ts";
 import type { GatewayPrincipal } from "./contracts.ts";
+import type { GatewayPairingStore } from "./pairing-store.ts";
 import { createGatewayPrincipal } from "./principal.ts";
 
 const OAUTH_BODY_LIMIT = 64 * 1024;
@@ -24,9 +25,17 @@ export function isLoopbackHost(value: string): boolean {
 }
 
 export function validateGatewayHttpSecurity(config: GatewayConfig, host = config.transport.http.host): void {
+  const loopback = isLoopbackHost(host);
   const tunneled = Boolean(config.auth.oauth?.serverUrl) || config.server.disableLocalhostProtection;
-  if (config.auth.mode === "open" && (!isLoopbackHost(host) || tunneled)) {
+  if (config.auth.mode === "open" && (!loopback || tunneled)) {
     throw new Error("Gateway auth.mode=open is allowed only on loopback without a public tunnel");
+  }
+  const nativeTls = config.transport.http.tls?.enabled === true;
+  const trustedHttpsProxy = loopback
+    && config.server.trustProxyHeaders
+    && config.auth.oauth?.serverUrl?.startsWith("https://") === true;
+  if (!loopback && !nativeTls && !trustedHttpsProxy) {
+    throw new Error("Non-loopback Gateway HTTP requires native TLS; alternatively bind loopback behind an explicitly configured HTTPS reverse proxy");
   }
 }
 
@@ -56,15 +65,17 @@ export interface GatewayHttpAuthResult {
 
 export class GatewayHttpAuth {
   private readonly auth: GatewayAuthConfig;
+  private readonly pairingStore?: GatewayPairingStore;
   private readonly codes = new Map<string, OAuthCode>();
   private readonly tokens = new Map<string, OAuthToken>();
   private readonly clients = new Map<string, RegisteredClient>();
 
-  constructor(auth: GatewayAuthConfig) {
+  constructor(auth: GatewayAuthConfig, pairingStore?: GatewayPairingStore) {
     this.auth = auth;
+    this.pairingStore = pairingStore;
   }
 
-  authenticate(request: IncomingMessage, resourceMetadataUrl: string): GatewayHttpAuthResult {
+  async authenticate(request: IncomingMessage, resourceMetadataUrl: string): Promise<GatewayHttpAuthResult> {
     const remote = request.socket.remoteAddress ?? "unknown";
     if (this.auth.mode === "open") {
       return { principal: createGatewayPrincipal("http", `open:${remote}`, { authenticated: false, source: remote, scopes: ["gateway"] }) };
@@ -81,6 +92,11 @@ export class GatewayHttpAuth {
       if (issued && issued.expiresAt > Date.now()) accepted = true;
       else if (issued) this.tokens.delete(token);
     }
+    let pairingId: string | undefined;
+    if (!accepted && this.pairingStore) {
+      const pairing = await this.pairingStore.authenticate(token);
+      if (pairing) { accepted = true; pairingId = pairing.id; }
+    }
     if (!accepted) {
       return {
         status: 401,
@@ -89,7 +105,7 @@ export class GatewayHttpAuth {
       };
     }
     const fingerprint = createHash("sha256").update(token, "utf8").digest("hex").slice(0, 24);
-    return { principal: createGatewayPrincipal("http", `bearer:${fingerprint}`, { authenticated: true, source: remote, scopes: ["gateway"] }) };
+    return { principal: createGatewayPrincipal("http", pairingId ? `pairing:${pairingId}` : `bearer:${fingerprint}`, { authenticated: true, source: remote, scopes: ["gateway"] }) };
   }
 
   async handleOAuthRoute(request: IncomingMessage, response: ServerResponse, url: URL, baseUrl: string, mcpPath: string): Promise<boolean> {

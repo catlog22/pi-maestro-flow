@@ -11,6 +11,8 @@ export const GATEWAY_STATE_DIRECTORY = "gateway" as const;
 export const GATEWAY_STATE_VERSION_DIRECTORY = "v1" as const;
 export const GATEWAY_WORKSPACE_REGISTRY_FILE = "workspaces.json" as const;
 export const GATEWAY_OWNER_FILE = "owner.json" as const;
+export const GATEWAY_PAIRINGS_FILE = "pairings.json" as const;
+export const GATEWAY_SERVICE_MANIFEST_FILE = "service.json" as const;
 export const GATEWAY_SESSIONS_DIRECTORY = "sessions" as const;
 export const GATEWAY_LEGACY_OWNER_FILES = ["mcpx-server.pid", "gateway.pid"] as const;
 
@@ -54,6 +56,12 @@ export const workspaceRegistryPath = gatewayWorkspaceRegistryPath;
 export function gatewayOwnerPath(homeDir = homedir()): string {
   return join(gatewayGlobalStateRoot(homeDir), GATEWAY_OWNER_FILE);
 }
+export function gatewayPairingPath(homeDir = homedir()): string {
+  return join(gatewayGlobalStateRoot(homeDir), GATEWAY_PAIRINGS_FILE);
+}
+export function gatewayServiceManifestPath(homeDir = homedir()): string {
+  return join(gatewayGlobalStateRoot(homeDir), GATEWAY_SERVICE_MANIFEST_FILE);
+}
 export function gatewayLegacyOwnerPath(homeDir = homedir()): string {
   return join(homeDir, GATEWAY_CONFIG_DIRECTORY, "gateway-owner.json");
 }
@@ -90,6 +98,8 @@ export interface GatewayStatePaths {
   globalRoot: string;
   ownerPath: string;
   workspaceRegistryPath: string;
+  pairingPath: string;
+  serviceManifestPath: string;
   workspaceRoot: string;
   jobsRoot: string;
   tasksRoot: string;
@@ -104,6 +114,8 @@ export function createGatewayStatePaths(cwd = process.cwd(), homeDir = homedir()
     globalRoot,
     ownerPath: join(globalRoot, GATEWAY_OWNER_FILE),
     workspaceRegistryPath: join(globalRoot, GATEWAY_WORKSPACE_REGISTRY_FILE),
+    pairingPath: join(globalRoot, GATEWAY_PAIRINGS_FILE),
+    serviceManifestPath: join(globalRoot, GATEWAY_SERVICE_MANIFEST_FILE),
     workspaceRoot,
     jobsRoot: join(workspaceRoot, "jobs"),
     tasksRoot: join(workspaceRoot, "tasks"),

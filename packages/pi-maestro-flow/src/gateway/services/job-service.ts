@@ -38,6 +38,7 @@ export interface JobServiceOptions {
   maxLogEvents?: number;
   retentionMs?: number;
   now?: () => number;
+  trustedFullAccess?: boolean;
 }
 
 export interface JobStartInput {
@@ -251,6 +252,7 @@ export class JobService {
   private readonly maxLogEvents: number;
   private readonly retentionMs?: number;
   private readonly now: () => number;
+  private readonly trustedFullAccess: boolean;
   private readonly jobs = new Map<string, RuntimeJob>();
   private loaded = false;
   private loading?: Promise<void>;
@@ -258,6 +260,7 @@ export class JobService {
   constructor(options: JobServiceOptions = {}) {
     this.policy = options.policy;
     this.commandPolicy = mergeCommandPolicy(options.commandPolicy ?? options.security?.commands);
+    this.trustedFullAccess = options.trustedFullAccess === true;
     this.workspaceRoot = options.workspaceRoot === undefined ? undefined : canonicalizeWorkspacePath(options.workspaceRoot);
     this.defaultPrincipal = options.principal === undefined
       ? createLocalGatewayPrincipal("gateway-job", this.workspaceRoot ? { workspacePath: this.workspaceRoot } : {})
@@ -287,7 +290,12 @@ export class JobService {
       const maximumCommand = this.policy?.limits.maxCommandBytes ?? 64 * 1024;
       if (utf8Bytes(identity) > maximumCommand) throw new GatewayJobServiceError("bounds_exceeded", `command exceeds ${maximumCommand} bytes`);
       if (this.policy) this.policy.checkCommand(identity);
-      const decision = evaluateCommandPolicy(identity, this.commandPolicy, input.readonly === true);
+      const requestedCwdForPolicy = input.cwd ?? input.workspace ?? principal.workspacePath ?? this.workspaceRoot ?? process.cwd();
+      const workspaceForPolicy = input.workspace ?? this.workspaceRoot ?? principal.workspacePath ?? requestedCwdForPolicy;
+      const trustedDefault = this.trustedFullAccess && this.policy?.isTrustedWorkspace(workspaceForPolicy)
+        ? { ...this.commandPolicy, default: "allow" as const }
+        : this.commandPolicy;
+      const decision = evaluateCommandPolicy(identity, trustedDefault, input.readonly === true);
       if (decision === "deny") throw new GatewayPolicyError("command is denied by Gateway policy", "command_denied");
       if (decision === "confirm") throw new GatewayPolicyError("command requires confirmation", "confirmation_required");
       if (this.jobs.size >= (this.policy?.limits.maxJobs ?? 64)) throw new GatewayPolicyError("job limit reached", "job_limit");

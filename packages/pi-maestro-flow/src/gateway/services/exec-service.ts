@@ -39,6 +39,7 @@ export interface ExecServiceOptions {
   workspaceRoot?: string;
   principal?: GatewayPrincipal;
   maxOutputBytes?: number;
+  trustedFullAccess?: boolean;
 }
 
 export interface ExecRunInput {
@@ -233,10 +234,12 @@ export class ExecService {
   private readonly workspaceRoot?: string;
   private readonly defaultPrincipal: GatewayPrincipal;
   private readonly configuredMaxOutputBytes: number;
+  private readonly trustedFullAccess: boolean;
 
   constructor(options: ExecServiceOptions = {}) {
     this.policy = options.policy;
     this.commandPolicy = mergeCommandPolicy(options.commandPolicy ?? options.security?.commands);
+    this.trustedFullAccess = options.trustedFullAccess === true;
     this.workspaceRoot = options.workspaceRoot === undefined ? undefined : canonicalizeWorkspacePath(options.workspaceRoot);
     this.defaultPrincipal = options.principal === undefined
       ? createLocalGatewayPrincipal("gateway-exec", this.workspaceRoot ? { workspacePath: this.workspaceRoot } : {})
@@ -261,7 +264,12 @@ export class ExecService {
       const maximumCommand = this.policy?.limits.maxCommandBytes ?? 64 * 1024;
       if (utf8Bytes(identity) > maximumCommand) throw new GatewayExecServiceError("bounds_exceeded", `command exceeds ${maximumCommand} bytes`);
       if (this.policy) this.policy.checkCommand(identity);
-      const decision = evaluateCommandPolicy(identity, this.commandPolicy, input.readonly === true);
+      const requestedCwdForPolicy = input.cwd ?? input.workspace ?? principal.workspacePath ?? this.workspaceRoot ?? process.cwd();
+      const workspaceForPolicy = input.workspace ?? this.workspaceRoot ?? principal.workspacePath ?? requestedCwdForPolicy;
+      const trustedDefault = this.trustedFullAccess && this.policy?.isTrustedWorkspace(workspaceForPolicy)
+        ? { ...this.commandPolicy, default: "allow" as const }
+        : this.commandPolicy;
+      const decision = evaluateCommandPolicy(identity, trustedDefault, input.readonly === true);
       if (decision === "deny") throw new GatewayPolicyError("command is denied by Gateway policy", "command_denied");
       if (decision === "confirm") throw new GatewayPolicyError("command requires confirmation", "confirmation_required");
 

@@ -192,6 +192,40 @@ test("IPC status stays responsive when the general runtime call path is blocked"
   assert.equal(status.ok, true);
 });
 
+test("owner-authenticated IPC pairing lists and revokes without persisting raw tokens", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "gateway-ipc-pairing-"));
+  const config = createTestGatewayConfig(root, { mode: "bearer", token: "configured-secret" });
+  config.state.pairingPath = join(root, "pairings.json");
+  const daemon = new GatewayDaemon({ config, cwd: root, http: false });
+  t.after(async () => { await daemon.stop(); await rm(root, { recursive: true, force: true }); });
+  await daemon.start();
+  const owner = daemon.owner!;
+  const issued = await requestGatewayIpcControl({ address: owner.socket!, ownerToken: owner.ownerToken, action: "pair", data: { ttlMs: 1_000, label: "ssh" } }) as { id: string; token: string };
+  assert.ok(issued.token.length >= 43);
+  await assert.rejects(
+    () => requestGatewayIpcControl({ address: owner.socket!, ownerToken: owner.ownerToken, action: "pair-bootstrap", data: { ttlMs: 1_000, label: "ssh" } }),
+    /Secure Gateway HTTPS is not ready/u,
+    "SSH bootstrap pairing never issues a direct binding without a ready TLS listener",
+  );
+  const disk = await import("node:fs/promises").then(({ readFile }) => readFile(config.state.pairingPath!, "utf8"));
+  assert.doesNotMatch(disk, new RegExp(issued.token));
+  const listed = await requestGatewayIpcControl({ address: owner.socket!, ownerToken: owner.ownerToken, action: "pair-list" }) as Array<{ id: string; token?: string }>;
+  assert.equal(listed[0]?.id, issued.id);
+  assert.equal(listed[0]?.token, undefined);
+  await assert.rejects(() => requestGatewayIpcControl({ address: owner.socket!, ownerToken: "wrong-owner-token", action: "pair-list" }), /owner token is invalid/);
+  assert.deepEqual(await requestGatewayIpcControl({ address: owner.socket!, ownerToken: owner.ownerToken, action: "pair-revoke", data: { id: issued.id } }), { revoked: true });
+});
+
+test("pairing is refused for non-loopback plaintext HTTP", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "gateway-ipc-insecure-pairing-"));
+  const config = createTestGatewayConfig(root, { mode: "bearer", token: "configured-secret" });
+  config.transport.http.host = "0.0.0.0";
+  const daemon = new GatewayDaemon({ config, cwd: root, http: false });
+  t.after(async () => { await daemon.stop(); await rm(root, { recursive: true, force: true }); });
+  await daemon.start();
+  await assert.rejects(() => requestGatewayIpcControl({ address: daemon.owner!.socket!, ownerToken: daemon.owner!.ownerToken, action: "pair" }), /non-loopback plaintext/);
+});
+
 test("authenticated IPC stop acknowledges before stopping and resolves daemon completion", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "gateway-ipc-control-stop-"));
   const config = createTestGatewayConfig(root);
