@@ -136,6 +136,11 @@ import {
   type AdvisorVerdict,
 } from "./advisor.ts";
 import { runSupervisedEvaluation } from "../supervision/evaluator.ts";
+import {
+  ensureAdvisorCommandRegistered,
+  registerAdvisorRuntime,
+  type AdvisorRuntimeLease,
+} from "../supervision/advisor-runtime.ts";
 import { SUPERVISION_EVENT, createSupervisionEvent } from "../supervision/types.ts";
 import {
   claimWorkspaceOwnerIdentity,
@@ -6726,7 +6731,11 @@ export default function registerTeammateExtension(
   // ---------------------------------------------------------------------------
 
   let advisorConfig: AdvisorConfig = { ...DEFAULT_ADVISOR_CONFIG };
-  const advisorState: AdvisorState = createAdvisorState(advisorConfig);
+  let advisorState: AdvisorState = createAdvisorState(advisorConfig);
+  let advisorEnabledOverride: boolean | undefined;
+  let advisorReviewAbort: AbortController | undefined;
+  let advisorOwnershipGeneration = 0;
+  let advisorRuntimeLease: AdvisorRuntimeLease | undefined;
 
   /** Load `.pi/settings.json` → `monitor.advisor` (or top-level `advisor`). */
   function loadAdvisorConfigForRoot(root: string): AdvisorConfig {
@@ -6743,12 +6752,75 @@ export default function registerTeammateExtension(
     return normalizeAdvisorConfig(section);
   }
 
+  function refreshAdvisorConfig(root: string): void {
+    advisorConfig = loadAdvisorConfigForRoot(root);
+    advisorState.enabled = advisorEnabledOverride ?? advisorConfig.enabled;
+  }
+
+  function abortAdvisorReview(reason: string): void {
+    advisorOwnershipGeneration += 1;
+    const controller = advisorReviewAbort;
+    advisorReviewAbort = undefined;
+    controller?.abort(new Error(reason));
+  }
+
+  function resetAdvisorSession(root: string): void {
+    abortAdvisorReview("Advisor session changed before the review completed.");
+    advisorEnabledOverride = undefined;
+    advisorConfig = loadAdvisorConfigForRoot(root);
+    advisorState = createAdvisorState(advisorConfig);
+  }
+
+  function handleAdvisorOwnershipChanged(owned: boolean): void {
+    abortAdvisorReview("Advisor runtime ownership changed before the review completed.");
+    if (owned && state.baseCwd) advisorConfig = loadAdvisorConfigForRoot(state.baseCwd);
+    advisorState = createAdvisorState({
+      ...advisorConfig,
+      enabled: owned && (advisorEnabledOverride ?? advisorConfig.enabled),
+    });
+  }
+
+  async function handleAdvisorCommand(args: string, ctx: ExtensionCommandContext): Promise<void> {
+    refreshAdvisorConfig(state.baseCwd || ctx.cwd);
+    const command = args.trim().toLowerCase();
+    if (command === "on") {
+      advisorEnabledOverride = true;
+      advisorState.enabled = true;
+      ctx.ui.notify("Advisor enabled — turn-level quality reviews on agent_end (cooldown-gated).", "info");
+      return;
+    }
+    if (command === "off") {
+      advisorEnabledOverride = false;
+      advisorState.enabled = false;
+      abortAdvisorReview("Advisor was disabled before the review completed.");
+      ctx.ui.notify("Advisor disabled.", "info");
+      return;
+    }
+    const lines = [
+      `ADVISOR ${advisorState.enabled ? "enabled" : "disabled"} · ${advisorState.reviews}/${advisorConfig.maxReviewsPerSession} reviews · cooldown ${Math.round(advisorConfig.cooldownMs / 1000)}s`,
+      ...(advisorState.lastVerdict
+        ? [`  last: ${advisorState.lastVerdict.status}${advisorState.lastVerdict.reason ? ` — ${advisorState.lastVerdict.reason.slice(0, 80)}` : ""}`]
+        : ["  last: no review yet"]),
+    ];
+    ctx.ui.notify(lines.join("\n"), "info");
+  }
+
+  advisorRuntimeLease = registerAdvisorRuntime({
+    id: "pi-maestro-teammate/advisor",
+    priority: 10,
+    handleCommand: handleAdvisorCommand,
+    onOwnershipChanged: handleAdvisorOwnershipChanged,
+  });
+  ensureAdvisorCommandRegistered(pi);
+
   /** Low-frequency turn review on agent_end (best-effort, never blocks). */
   async function runAdvisorReview(event: { messages?: unknown[] }, ctx: ExtensionContext): Promise<void> {
+    const lease = advisorRuntimeLease;
+    if (!lease?.isOwner() || advisorReviewAbort) return;
     const fence = captureRootSessionFence();
-    const root = state.baseCwd ?? ctx.cwd;
-    advisorConfig = loadAdvisorConfigForRoot(root);
-    if (!shouldReview(advisorState, advisorConfig, Date.now())) return;
+    const root = state.baseCwd || ctx.cwd;
+    refreshAdvisorConfig(root);
+    if (!lease.isOwner() || !shouldReview(advisorState, advisorConfig, Date.now())) return;
     const messages = Array.isArray(event.messages) ? event.messages as AdvisorMessageSlice[] : [];
     if (messages.length === 0) return;
     const { objective, transcript } = extractAdvisorTranscript(messages, {
@@ -6757,44 +6829,56 @@ export default function registerTeammateExtension(
     });
     if (transcript.length === 0) return;
 
-    const evaluation = await runSupervisedEvaluation<AdvisorVerdict>(
-      ({ task, signal, timeoutMs, outputSchema }) =>
-        runSingleTeammate(
-          { agent: "analyst", task, thinking: "low", timeoutMs, outputSchema },
-          { baseCwd: root, depth: 0, signal },
-        ),
-      {
-        task: buildAdvisorPrompt(objective, transcript),
-        timeoutMs: 30_000,
-        outputSchema: ADVISOR_VERDICT_SCHEMA,
-        fallbackTextParser: parseAdvisorVerdict,
-        signal: undefined,
-      },
-    );
+    const controller = new AbortController();
+    const ownershipGeneration = advisorOwnershipGeneration;
+    advisorReviewAbort = controller;
+    try {
+      if (!lease.isOwner() || ownershipGeneration !== advisorOwnershipGeneration) return;
+      const evaluation = await runSupervisedEvaluation<AdvisorVerdict>(
+        ({ task, signal, timeoutMs, outputSchema }) =>
+          runSingleTeammate(
+            { agent: "analyst", task, thinking: "low", timeoutMs, outputSchema },
+            { baseCwd: root, depth: 0, signal },
+          ),
+        {
+          task: buildAdvisorPrompt(objective, transcript),
+          timeoutMs: 30_000,
+          outputSchema: ADVISOR_VERDICT_SCHEMA,
+          fallbackTextParser: parseAdvisorVerdict,
+          signal: controller.signal,
+        },
+      );
 
-    if (!ownsRootSessionFence(fence)) return;
-    advisorState.lastReviewAt = Date.now();
-    advisorState.reviews += 1;
-    const verdict = evaluation.ok && evaluation.verdict ? evaluation.verdict : undefined;
-    advisorState.lastVerdict = verdict;
-    if (!verdict || verdict.status === "on-track") return;
+      if (advisorRuntimeLease !== lease
+        || !lease.isOwner()
+        || ownershipGeneration !== advisorOwnershipGeneration
+        || controller.signal.aborted
+        || !ownsRootSessionFence(fence)) return;
+      advisorState.lastReviewAt = Date.now();
+      advisorState.reviews += 1;
+      const verdict = evaluation.ok && evaluation.verdict ? evaluation.verdict : undefined;
+      advisorState.lastVerdict = verdict;
+      if (!verdict || verdict.status === "on-track") return;
 
-    // DeliveryGate: cooldown + dedup — the same frequency-control strategy
-    // as the fleet Monitor.
-    const guidance = verdict.guidance ?? verdict.reason ?? "review the last turn";
-    if (advisorState.gate.gate("advisor", guidance, "notify") === undefined) return;
-    const provenance = createVerifiedProvenance({
-      source: "advisor",
-      messageKind: "status",
-      deliveryMode: "notify",
-      sender: { kind: "system", ownerId: currentRootOwnerId(), label: "advisor" },
-    });
-    safeSendMessage(pi, {
-      customType: "teammate-message",
-      content: `[advisor] ${verdict.status === "blocker" ? "⚠ " : ""}${guidance}`,
-      display: true,
-      details: { source: "advisor", severity: verdict.status, provenance },
-    }, { triggerTurn: false });
+      // DeliveryGate: cooldown + dedup — the same frequency-control strategy
+      // as the fleet Monitor.
+      const guidance = verdict.guidance ?? verdict.reason ?? "review the last turn";
+      if (advisorState.gate.gate("advisor", guidance, "notify") === undefined) return;
+      const provenance = createVerifiedProvenance({
+        source: "advisor",
+        messageKind: "status",
+        deliveryMode: "notify",
+        sender: { kind: "system", ownerId: currentRootOwnerId(), label: "advisor" },
+      });
+      safeSendMessage(pi, {
+        customType: "teammate-message",
+        content: `[advisor] ${verdict.status === "blocker" ? "⚠ " : ""}${guidance}`,
+        display: true,
+        details: { source: "advisor", severity: verdict.status, provenance },
+      }, { triggerTurn: false });
+    } finally {
+      if (advisorReviewAbort === controller) advisorReviewAbort = undefined;
+    }
   }
 
   monitorRegistry.setControls({
@@ -9707,7 +9791,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
   async function showAttachOverlay(
     target: ActiveAgent | string,
     ctx: ExtensionContext,
-    initialTranscript = false,
+    initialTranscript = true,
     opts: { readOnly?: boolean } = {},
   ): Promise<void> {
     // A capturing overlay must preempt any active Cockpit split-pane resize:
@@ -10138,17 +10222,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
   };
 
   pi.registerCommand("teammate-models", {
-    description: "Open teammate roles, collaboration status, and model routing",
-    async handler(_args, ctx) {
-      preemptCockpitResize();
-      await showTeammateControlCenter(ctx);
-      tool.description = buildTeammateToolDescription(ctx.cwd);
-      pi.registerTool(tool);
-    },
-  });
-
-  pi.registerCommand("teammate-model", {
-    description: "Switch the saved teammate model routing template for this project; without arguments, open Profiles",
+    description: "Open teammate roles, collaboration status, and model routing; pass a Profile to activate it",
     getArgumentCompletions(prefix: string) {
       const cwd = widgetCtx?.cwd;
       if (!cwd) return null;
@@ -10179,7 +10253,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
       const reference = args.trim();
       if (!reference) {
         preemptCockpitResize();
-        await showTeammateControlCenter(ctx, "profiles");
+        await showTeammateControlCenter(ctx);
         tool.description = buildTeammateToolDescription(ctx.cwd);
         pi.registerTool(tool);
         return;
@@ -10585,34 +10659,6 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     },
   });
 
-  pi.registerCommand("advisor", {
-    description: "Turn-level advisor: /advisor on|off|status",
-    async handler(args: string, ctx: ExtensionCommandContext) {
-      const trimmed = args.trim().toLowerCase();
-      advisorConfig = loadAdvisorConfigForRoot(state.baseCwd ?? ctx.cwd);
-      if (trimmed === "on") {
-        advisorConfig.enabled = true;
-        advisorState.enabled = true;
-        ctx.ui.notify("Advisor enabled — turn-level quality reviews on agent_end (cooldown-gated).", "info");
-        return;
-      }
-      if (trimmed === "off") {
-        advisorConfig.enabled = false;
-        advisorState.enabled = false;
-        ctx.ui.notify("Advisor disabled.", "info");
-        return;
-      }
-      // status (default)
-      const lines = [
-        `ADVISOR ${advisorState.enabled ? "enabled" : "disabled"} · ${advisorState.reviews}/${advisorConfig.maxReviewsPerSession} reviews · cooldown ${Math.round(advisorConfig.cooldownMs / 1000)}s`,
-        ...(advisorState.lastVerdict
-          ? [`  last: ${advisorState.lastVerdict.status}${advisorState.lastVerdict.reason ? ` — ${advisorState.lastVerdict.reason.slice(0, 80)}` : ""}`]
-          : ["  last: no review yet"]),
-      ];
-      ctx.ui.notify(lines.join("\n"), "info");
-    },
-  });
-
   // =========================================================================
   // TUI — only in parent mode (child processes have no terminal)
   // =========================================================================
@@ -10886,6 +10932,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     state.sessionGeneration = (state.sessionGeneration ?? 0) + 1;
     state.currentSessionId = ctx.sessionManager?.getSessionId() ?? null;
     state.baseCwd = ctx.cwd;
+    resetAdvisorSession(ctx.cwd);
     state.currentWorkspaceId = completionWorkspaceId(ctx.cwd);
     state.currentSourceId = state.currentSessionId ?? undefined;
     reconcileSettledAgentsForSession(state, {
@@ -11127,6 +11174,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     state.currentSourceId = state.currentSessionId ?? undefined;
     const projectionChanged = !ownsRootSessionFence(previousFence);
     if (projectionChanged) {
+      abortAdvisorReview("Advisor session changed during compaction.");
       reconcileSettledAgentsForSession(state, { preserveExact: true });
       bindStateTurnRecorder();
       void initializeRuntimeReadModel(ctx.cwd, state.currentSourceId ?? "");
@@ -11145,6 +11193,9 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     const shutdownReason = event?.reason ?? "quit";
     const outgoingFence = captureRootSessionFence();
     state.settlementOwner = projectionForRootFence(outgoingFence);
+    abortAdvisorReview("Advisor session shut down before the review completed.");
+    advisorEnabledOverride = undefined;
+    advisorState = createAdvisorState({ ...advisorConfig, enabled: false });
     const closingRuntimeReadHandle = runtimeReadHandle;
     runtimeReadHandle = undefined;
     runtimeReadToken += 1;

@@ -5,3 +5,5 @@ export { DeliveryGate, normalizeDeliveryMessage } from "../../supervision/delive
 export type { DeliveryDedupOptions, DeliveryMode, DeliveryOptions, } from "../../supervision/delivery.ts";
 export { SUPERVISION_EVENT, createSupervisionEvent } from "../../supervision/types.ts";
 export type { SupervisionEvent, SupervisionKind, SupervisionSeverity, SupervisionSource, } from "../../supervision/types.ts";
+export { ensureAdvisorCommandRegistered, getAdvisorRuntimeOwner, registerAdvisorRuntime, } from "../../supervision/advisor-runtime.ts";
+export type { AdvisorRuntimeCandidate, AdvisorRuntimeLease, } from "../../supervision/advisor-runtime.ts";

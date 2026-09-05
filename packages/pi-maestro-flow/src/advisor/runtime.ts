@@ -19,27 +19,53 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 // Types
 // ---------------------------------------------------------------------------
 
+export const ADVISOR_MODES = ["automatic", "manual", "hybrid"] as const;
+export type AdvisorMode = typeof ADVISOR_MODES[number];
+
+export const ADVISOR_THINKING_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export type AdvisorThinkingLevel = typeof ADVISOR_THINKING_LEVELS[number];
+
+export type AdvisorDisabledForModel = string | {
+  model: string;
+  minThinking?: AdvisorThinkingLevel;
+};
+
 export interface AdvisorConfig {
-  /** Master switch; the advisor only evaluates while enabled. */
+  /** Master switch for both automatic reviews and manual consultation. */
   enabled: boolean;
+  /** Automatic reviews, manual consultation, or both. Legacy files default to automatic. */
+  mode: AdvisorMode;
   /** Dedicated `provider/model` for advisor evaluations; unset inherits the main session model. */
   model?: string;
+  /** Thinking level for manual consultations. */
+  consultThinking: AdvisorThinkingLevel;
+  /** Executor models for which the manual advisor tool is hidden. */
+  disabledForModels: AdvisorDisabledForModel[];
   /** Project-specific review priorities appended to the evaluation prompt. */
   guide: string;
   /** Cooldown between interrupting deliveries (ms). Default 300_000 (5 min). */
   cooldownMs: number;
+  /** Minimum gap between automatic review dispatches (ms). 0 disables the gap. */
+  automaticReviewCooldownMs: number;
+  /** Automatic review dispatch budget per session. 0 means unlimited. */
+  maxAutomaticReviewsPerSession: number;
   /** Max transcript tail messages included in the evaluation prompt. Default 8. */
   maxTailMessages: number;
   /** Max serialized transcript tail characters. Default 4_000. */
   maxTailChars: number;
-  /** Evaluate during execution after this many tool results. Default 3. */
+  /** Evaluate during execution after this many tool results. 0 disables tool-result checkpoints. */
   reviewEveryToolResults: number;
 }
 
 export const DEFAULT_ADVISOR_CONFIG: AdvisorConfig = {
   enabled: false,
+  mode: "automatic",
+  consultThinking: "high",
+  disabledForModels: [],
   guide: "",
   cooldownMs: 300_000,
+  automaticReviewCooldownMs: 0,
+  maxAutomaticReviewsPerSession: 0,
   maxTailMessages: 8,
   maxTailChars: 4_000,
   reviewEveryToolResults: 3,
@@ -78,30 +104,155 @@ export function createAdvisorRuntimeState(): AdvisorRuntimeState {
   return { evaluations: 0, failures: 0, deliveries: 0, suppressed: 0, uneventful: 0 };
 }
 
-/** Merge persisted settings while preserving defaults and legacy files. */
+export type AdvisorConfigSource = "canonical" | "legacy" | "defaults" | "canonical-invalid";
+
+function finiteNonNegative(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function positiveInteger(value: unknown): number | undefined {
+  const number = typeof value === "string" || typeof value === "number" ? Number(value) : NaN;
+  return Number.isFinite(number) && number > 0 ? Math.floor(number) : undefined;
+}
+
+function nonNegativeInteger(value: unknown): number | undefined {
+  const number = typeof value === "string" || typeof value === "number" ? Number(value) : NaN;
+  return Number.isFinite(number) && number >= 0 ? Math.floor(number) : undefined;
+}
+
+/** Normalize the canonical `.pi/advisor.json` format. */
 export function normalizeAdvisorConfig(raw: Partial<AdvisorConfig> | undefined): AdvisorConfig {
   const model = typeof raw?.model === "string" && raw.model.trim()
     ? raw.model.trim()
     : undefined;
+  const automaticReviewCooldownMs = finiteNonNegative(raw?.automaticReviewCooldownMs);
+  const maxAutomaticReviewsPerSession = nonNegativeInteger(raw?.maxAutomaticReviewsPerSession);
+  const reviewEveryToolResults = nonNegativeInteger(raw?.reviewEveryToolResults);
   return {
     enabled: typeof raw?.enabled === "boolean" ? raw.enabled : DEFAULT_ADVISOR_CONFIG.enabled,
+    mode: isAdvisorMode(raw?.mode) ? raw.mode : DEFAULT_ADVISOR_CONFIG.mode,
     ...(model ? { model } : {}),
+    consultThinking: isAdvisorThinkingLevel(raw?.consultThinking)
+      ? raw.consultThinking
+      : DEFAULT_ADVISOR_CONFIG.consultThinking,
+    disabledForModels: normalizeDisabledForModels(raw?.disabledForModels),
     guide: typeof raw?.guide === "string" ? raw.guide : DEFAULT_ADVISOR_CONFIG.guide,
-    cooldownMs: typeof raw?.cooldownMs === "number" && raw.cooldownMs >= 0
-      ? raw.cooldownMs
-      : DEFAULT_ADVISOR_CONFIG.cooldownMs,
-    maxTailMessages: typeof raw?.maxTailMessages === "number" && raw.maxTailMessages > 0
-      ? raw.maxTailMessages
-      : DEFAULT_ADVISOR_CONFIG.maxTailMessages,
-    maxTailChars: typeof raw?.maxTailChars === "number" && raw.maxTailChars > 0
-      ? raw.maxTailChars
-      : DEFAULT_ADVISOR_CONFIG.maxTailChars,
-    reviewEveryToolResults: typeof raw?.reviewEveryToolResults === "number"
-      && Number.isInteger(raw.reviewEveryToolResults)
-      && raw.reviewEveryToolResults > 0
-      ? raw.reviewEveryToolResults
-      : DEFAULT_ADVISOR_CONFIG.reviewEveryToolResults,
+    cooldownMs: finiteNonNegative(raw?.cooldownMs) ?? DEFAULT_ADVISOR_CONFIG.cooldownMs,
+    automaticReviewCooldownMs: automaticReviewCooldownMs ?? DEFAULT_ADVISOR_CONFIG.automaticReviewCooldownMs,
+    maxAutomaticReviewsPerSession: maxAutomaticReviewsPerSession ?? DEFAULT_ADVISOR_CONFIG.maxAutomaticReviewsPerSession,
+    maxTailMessages: positiveInteger(raw?.maxTailMessages) ?? DEFAULT_ADVISOR_CONFIG.maxTailMessages,
+    maxTailChars: positiveInteger(raw?.maxTailChars) ?? DEFAULT_ADVISOR_CONFIG.maxTailChars,
+    reviewEveryToolResults: reviewEveryToolResults ?? DEFAULT_ADVISOR_CONFIG.reviewEveryToolResults,
   };
+}
+
+/** Map the standalone Teammate Advisor settings into the canonical runtime. */
+export function normalizeLegacyAdvisorConfig(raw: unknown): AdvisorConfig {
+  const source = raw && typeof raw === "object" && !Array.isArray(raw)
+    ? raw as Record<string, unknown>
+    : {};
+  const cooldownMs = positiveInteger(source.cooldownMs) ?? 300_000;
+  const maxAutomaticReviewsPerSession = positiveInteger(source.maxReviewsPerSession) ?? 20;
+  const maxTailMessages = Math.min(100, positiveInteger(source.tailMessages) ?? 4);
+  const maxMessageChars = Math.min(100_000, positiveInteger(source.maxMessageChars) ?? 2_000);
+  return normalizeAdvisorConfig({
+    enabled: typeof source.enabled === "boolean" ? source.enabled : false,
+    mode: "automatic",
+    cooldownMs,
+    automaticReviewCooldownMs: cooldownMs,
+    maxAutomaticReviewsPerSession,
+    maxTailMessages,
+    maxTailChars: Math.min(100_000, maxTailMessages * maxMessageChars),
+    reviewEveryToolResults: 0,
+  });
+}
+
+const ADVISOR_TRUE_VALUES = new Set(["1", "true", "on", "yes", "enabled"]);
+const ADVISOR_FALSE_VALUES = new Set(["0", "false", "off", "no", "disabled"]);
+
+/** Apply the legacy `PI_ADVISOR*` environment contract after file/default loading. */
+export function applyAdvisorEnvOverrides(
+  config: AdvisorConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): AdvisorConfig {
+  let next = config;
+  const enabled = env.PI_ADVISOR?.trim().toLowerCase();
+  if (enabled && ADVISOR_TRUE_VALUES.has(enabled)) next = { ...next, enabled: true };
+  else if (enabled && ADVISOR_FALSE_VALUES.has(enabled)) next = { ...next, enabled: false };
+
+  const cooldownMs = nonNegativeInteger(env.PI_ADVISOR_COOLDOWN_MS);
+  if (cooldownMs !== undefined) {
+    next = { ...next, cooldownMs, automaticReviewCooldownMs: cooldownMs };
+  }
+  const maxReviews = nonNegativeInteger(env.PI_ADVISOR_MAX_REVIEWS);
+  if (maxReviews !== undefined) next = { ...next, maxAutomaticReviewsPerSession: maxReviews };
+  return next;
+}
+
+export function isAdvisorMode(value: unknown): value is AdvisorMode {
+  return typeof value === "string" && ADVISOR_MODES.includes(value as AdvisorMode);
+}
+
+export function isAdvisorThinkingLevel(value: unknown): value is AdvisorThinkingLevel {
+  return typeof value === "string" && ADVISOR_THINKING_LEVELS.includes(value as AdvisorThinkingLevel);
+}
+
+export function automaticAdvisorEnabled(config: AdvisorConfig): boolean {
+  return config.enabled && config.mode !== "manual";
+}
+
+export function manualAdvisorEnabled(config: AdvisorConfig): boolean {
+  return config.enabled && config.mode !== "automatic";
+}
+
+function normalizeModelReference(value: string): string {
+  const trimmed = value.trim();
+  const separator = trimmed.includes("/") ? "/" : ":";
+  const index = trimmed.indexOf(separator);
+  return index > 0 && index < trimmed.length - 1
+    ? `${trimmed.slice(0, index)}/${trimmed.slice(index + 1)}`
+    : trimmed;
+}
+
+function normalizeDisabledForModels(value: unknown): AdvisorDisabledForModel[] {
+  if (!Array.isArray(value)) return [];
+  const normalized: AdvisorDisabledForModel[] = [];
+  for (const entry of value) {
+    if (typeof entry === "string" && entry.trim()) {
+      normalized.push(normalizeModelReference(entry));
+      continue;
+    }
+    if (typeof entry !== "object" || entry === null) continue;
+    const record = entry as Record<string, unknown>;
+    if (typeof record.model !== "string" || !record.model.trim()) continue;
+    if (record.minThinking !== undefined && !isAdvisorThinkingLevel(record.minThinking)) continue;
+    normalized.push({
+      model: normalizeModelReference(record.model),
+      ...(isAdvisorThinkingLevel(record.minThinking) ? { minThinking: record.minThinking } : {}),
+    });
+  }
+  return normalized;
+}
+
+export function isAdvisorExecutorBlocked(
+  config: AdvisorConfig,
+  model: { provider: string; id: string } | undefined,
+  thinkingLevel?: string,
+): boolean {
+  if (!model) return false;
+  const reference = `${model.provider}/${model.id}`;
+  for (const entry of config.disabledForModels) {
+    if (typeof entry === "string") {
+      if (normalizeModelReference(entry) === reference) return true;
+      continue;
+    }
+    if (normalizeModelReference(entry.model) !== reference) continue;
+    if (!entry.minThinking) return true;
+    const current = ADVISOR_THINKING_LEVELS.indexOf(thinkingLevel as AdvisorThinkingLevel);
+    const threshold = ADVISOR_THINKING_LEVELS.indexOf(entry.minThinking);
+    if (current >= threshold) return true;
+  }
+  return false;
 }
 
 /** Resolve the explicit teammate model, defaulting to the active main-session model. */
@@ -170,6 +321,10 @@ export function redactAdvisorText(text: string): string {
       "$1$2[REDACTED]",
     )
     .replace(
+      /(^|[\s{,;:])(["']?(?:sessionToken|authToken|idToken|accessToken|refreshToken|apiKey|clientSecret|privateKey|connectionString)["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;}\]]+)/gi,
+      "$1$2[REDACTED]",
+    )
+    .replace(
       /(^|[\s{,;:])(["']?(?:(?:[a-z0-9]+[-_ ])*(?:api[-_ ]?key|password|passwd|pwd|secret|secret[-_ ]?access[-_ ]?key|private[-_ ]?key|client[-_ ]?secret|access[-_ ]?token|refresh[-_ ]?token|token|jwt|connection[-_ ]?string)|authorization|cookie|set[-_ ]?cookie)["']?\s*[:=]\s*)(?!["']?\[REDACTED\]["']?)(?:"[^"]*"|'[^']*'|[^\s,;}\]]+)/gim,
       "$1$2[REDACTED]",
     )
@@ -182,6 +337,111 @@ export function redactAdvisorText(text: string): string {
       "[REDACTED]",
     )
     .replace(/\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\b/g, "[REDACTED]");
+}
+
+export interface AdvisorConversationMessage {
+  role: string;
+  content: unknown;
+  timestamp?: number;
+  [key: string]: unknown;
+}
+
+export interface AdvisorToolInfo {
+  name: string;
+  description?: string;
+}
+
+/** Remove the unresolved advisor() call that invoked the consultation. */
+export function stripInflightAdvisorCall(
+  messages: readonly AdvisorConversationMessage[],
+  toolCallId?: string,
+): AdvisorConversationMessage[] {
+  const completedCalls = new Set(messages
+    .filter((message) => message.role === "toolResult" && typeof message.toolCallId === "string")
+    .map((message) => message.toolCallId as string));
+  const next: AdvisorConversationMessage[] = [];
+  for (const message of messages) {
+    if (message.role !== "assistant" || !Array.isArray(message.content)) {
+      next.push(message);
+      continue;
+    }
+    const filtered = message.content.filter((block) => {
+      if (typeof block !== "object" || block === null) return true;
+      const record = block as Record<string, unknown>;
+      if (record.type !== "toolCall" || record.name !== "advisor") return true;
+      if (toolCallId) return record.id !== toolCallId;
+      return typeof record.id === "string" && completedCalls.has(record.id);
+    });
+    if (filtered.length > 0) next.push(filtered.length === message.content.length ? message : { ...message, content: filtered });
+  }
+  return next;
+}
+
+/** Provider-neutral reviewers receive an explicit user request at the tail. */
+export function ensureAdvisorUserTail(
+  messages: readonly AdvisorConversationMessage[],
+): AdvisorConversationMessage[] {
+  if (messages.length === 0 || messages.at(-1)?.role === "user") return [...messages];
+  return [...messages, {
+    role: "user",
+    content: [{ type: "text", text: "Please advise on the executor's situation above." }],
+    timestamp: Date.now(),
+  }];
+}
+
+function stableJson(value: unknown): string {
+  if (value === undefined) return "";
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((item) => item === undefined ? "null" : stableJson(item)).join(",")}]`;
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, item]) => item !== undefined)
+    .sort(([left], [right]) => left.localeCompare(right));
+  return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`).join(",")}}`;
+}
+
+function serializeConversationContent(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return stableJson(content);
+  return content.map((block) => {
+    if (typeof block !== "object" || block === null) return stableJson(block);
+    const record = block as Record<string, unknown>;
+    if (record.type === "image") return `[image${typeof record.mimeType === "string" ? ` ${record.mimeType}` : ""}]`;
+    if (record.type === "text" && typeof record.text === "string") return record.text;
+    if (record.type === "thinking" && typeof record.thinking === "string") return `[thinking] ${record.thinking}`;
+    if (record.type === "toolCall") return `[tool call] ${String(record.name ?? "tool")} ${stableJson(record.arguments ?? {})}`;
+    return stableJson(record);
+  }).filter(Boolean).join("\n");
+}
+
+function serializeAdvisorMessage(message: AdvisorConversationMessage): string {
+  if (message.role === "bashExecution") {
+    if (message.excludeFromContext === true) return "";
+    const command = typeof message.command === "string" ? message.command : "";
+    const output = typeof message.output === "string" ? message.output : "";
+    return `BASH: ${command}${output ? `\n${output}` : ""}`.trim();
+  }
+  const label = message.role === "toolResult"
+    ? `TOOL RESULT ${String(message.toolName ?? "tool")}`
+    : message.role.toUpperCase();
+  const content = message.content !== undefined
+    ? serializeConversationContent(message.content)
+    : typeof message.summary === "string"
+      ? message.summary
+      : "";
+  return `${label}: ${content}`.trim();
+}
+
+/** Serialize the full resolved branch while preserving tool intent and redacting secrets. */
+export function serializeAdvisorConversation(messages: readonly AdvisorConversationMessage[]): string {
+  return redactAdvisorText(messages.map(serializeAdvisorMessage).filter(Boolean).join("\n\n"));
+}
+
+/** Stable compact inventory of the model-visible tools, without schema expansion. */
+export function buildAdvisorToolInventory(tools: readonly AdvisorToolInfo[]): string {
+  return [...tools]
+    .sort((left, right) => left.name.localeCompare(right.name))
+    .map((tool) => `- ${tool.name}${tool.description?.trim() ? `: ${tool.description.trim()}` : ""}`)
+    .join("\n");
 }
 
 /**
@@ -290,6 +550,31 @@ export function buildAdvisorPrompt(config: AdvisorConfig, tail: string): string 
     "<transcript-tail>",
     tail || "(no transcript tail available)",
     "</transcript-tail>",
+  ].filter(Boolean).join("\n");
+}
+
+export function buildManualAdvisorPrompt(
+  config: AdvisorConfig,
+  conversation: string,
+  toolInventory: string,
+): string {
+  const guideBlock = config.guide.trim()
+    ? `\nProject review priorities:\n<attention>\n${config.guide.trim()}\n</attention>`
+    : "";
+  return [
+    "You are a second-opinion reviewer for a coding agent executing a task end to end.",
+    "Return one concise response: a concrete plan, a correction, or a stop signal when the user must decide.",
+    "Do not call tools. Ground every recommendation in the supplied conversation and available tool inventory.",
+    "Name files, symbols, and exact verification steps when the context supports them. No preamble or meta-commentary.",
+    guideBlock,
+    "",
+    "<available-tools>",
+    toolInventory || "(none)",
+    "</available-tools>",
+    "",
+    "<resolved-conversation>",
+    conversation || "(no conversation available)",
+    "</resolved-conversation>",
   ].filter(Boolean).join("\n");
 }
 

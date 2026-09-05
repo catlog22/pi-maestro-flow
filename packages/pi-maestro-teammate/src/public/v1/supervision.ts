@@ -19,3 +19,12 @@ export type {
   SupervisionSeverity,
   SupervisionSource,
 } from "../../supervision/types.ts";
+export {
+  ensureAdvisorCommandRegistered,
+  getAdvisorRuntimeOwner,
+  registerAdvisorRuntime,
+} from "../../supervision/advisor-runtime.ts";
+export type {
+  AdvisorRuntimeCandidate,
+  AdvisorRuntimeLease,
+} from "../../supervision/advisor-runtime.ts";

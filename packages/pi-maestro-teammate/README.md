@@ -359,6 +359,12 @@ observe({ action: "watch", targets: [{ kind: "teammate", id: "reviewer" }], time
 
 A durable, per-workspace-isolated message queue backing cross-session delivery (staging → ready → claimed → accepted, atomic writes + idempotent receipts). Cold resume stays synchronous when the mailbox is authoritative; Windows file-lock renames retry automatically and orphaned state records are garbage-collected. External consumers (the Flow host) integrate through the `pi-maestro-teammate/v1/mailbox` subpath: the extension publishes a live `MailboxHostRegistry` on the shared-process bridge key `Symbol.for("pi-maestro-teammate.mailbox-registry")` (durable `enqueueTaskNotification`, per-recipient `pendingCount`, and `negotiate` capability v1/v2, with `taskId`-keyed dedup); `pi-maestro-flow` consumes it via `mailboxRegistry()` (see `packages/pi-maestro-flow/src/extension/index.ts`) and the contract is covered by `test/mailbox-registry.test.ts`.
 
+## Advisor Compatibility
+
+When installed by itself, `pi-maestro-teammate` keeps the low-frequency standalone Advisor. Configure its defaults in `.pi/settings.json` under `monitor.advisor` (or the top-level `advisor` key), or with `PI_ADVISOR`, `PI_ADVISOR_COOLDOWN_MS`, and `PI_ADVISOR_MAX_REVIEWS`. `/advisor on|off` is a current-session override; `/advisor status` shows the effective state.
+
+When `pi-maestro-flow` is also loaded, its `pi-maestro-flow/advisor` runtime is the canonical owner and this package's priority-10 fallback sleeps, even when the Flow Advisor is disabled. A process-wide registry and one dynamic `/advisor` broker prevent duplicate commands, double dispatch, and stale delivery in either package load order. Flow reads canonical `.pi/advisor.json` first, otherwise the legacy settings above, then defaults, and finally the same environment overrides. See the Flow Advisor guide for manual/hybrid mode, automatic review budgets, and `reviewEveryToolResults: 0`.
+
 ## Runtime
 
 - Foreground dispatch is the default and returns child results directly.

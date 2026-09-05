@@ -2820,6 +2820,46 @@ test("child bridge consumes teammate_complete_delivery and injects it locally", 
   assert.match(source, /sessionId: parentSessionId/);
 });
 
+test("standalone advisor command uses settings and env defaults with a session override", async () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-advisor-command-"));
+  fs.mkdirSync(path.join(project, ".pi"), { recursive: true });
+  fs.writeFileSync(path.join(project, ".pi", "settings.json"), JSON.stringify({
+    monitor: { advisor: { enabled: true, cooldownMs: 60_000, maxReviewsPerSession: 5 } },
+  }));
+  const previousAdvisorEnv = process.env.PI_ADVISOR;
+  const notices: string[] = [];
+  try {
+    process.env.PI_ADVISOR = "off";
+    const { commands } = createHarness();
+    const advisor = commands.get("advisor");
+    assert.ok(advisor, "the shared command broker must register /advisor");
+    const ctx = {
+      ...context(),
+      cwd: project,
+      ui: { notify(message: string) { notices.push(message); } },
+    };
+
+    await advisor.handler("status", ctx);
+    assert.match(notices.at(-1) ?? "", /ADVISOR disabled.*0\/5 reviews/);
+
+    delete process.env.PI_ADVISOR;
+    await advisor.handler("status", ctx);
+    assert.match(notices.at(-1) ?? "", /ADVISOR enabled.*0\/5 reviews/);
+
+    await advisor.handler("off", ctx);
+    await advisor.handler("status", ctx);
+    assert.match(notices.at(-1) ?? "", /ADVISOR disabled/);
+
+    await advisor.handler("on", ctx);
+    await advisor.handler("status", ctx);
+    assert.match(notices.at(-1) ?? "", /ADVISOR enabled/);
+  } finally {
+    if (previousAdvisorEnv === undefined) delete process.env.PI_ADVISOR;
+    else process.env.PI_ADVISOR = previousAdvisorEnv;
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
 test("workspace delivery paths retain the originating root session fence", () => {
   const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
   const sender = source.slice(
@@ -2870,18 +2910,36 @@ test("workspace delivery paths retain the originating root session fence", () =>
   );
   assert.match(route, /const result = await registry\.send\(request\);\s+if \(!ownsRootSessionFence\(fence\)\)/);
 
+  const advisorOwnership = source.slice(
+    source.indexOf("function handleAdvisorOwnershipChanged"),
+    source.indexOf("async function runAdvisorReview"),
+  );
+  assert.match(advisorOwnership, /abortAdvisorReview\("Advisor runtime ownership changed/);
+  assert.match(advisorOwnership, /id: "pi-maestro-teammate\/advisor"/);
+  assert.match(advisorOwnership, /priority: 10/);
+  assert.match(advisorOwnership, /ensureAdvisorCommandRegistered\(pi\)/);
+
   const advisor = source.slice(
     source.indexOf("async function runAdvisorReview"),
     source.indexOf("const monitorBindingRequest"),
   );
+  assert.match(advisor, /const lease = advisorRuntimeLease;\s+if \(!lease\?\.isOwner\(\) \|\| advisorReviewAbort\) return;/);
   assert.match(advisor, /const fence = captureRootSessionFence\(\)/);
-  assert.match(advisor, /const evaluation = await runSupervisedEvaluation[\s\S]+if \(!ownsRootSessionFence\(fence\)\) return;/);
+  assert.match(advisor, /signal: controller\.signal/);
+  assert.match(advisor, /advisorRuntimeLease !== lease[\s\S]+!lease\.isOwner\(\)[\s\S]+!ownsRootSessionFence\(fence\)/);
   assert.ok(
-    advisor.indexOf("if (!ownsRootSessionFence(fence)) return;") < advisor.indexOf("advisorState.lastReviewAt"),
+    advisor.indexOf("if (advisorRuntimeLease !== lease") < advisor.indexOf("advisorState.lastReviewAt"),
     "a stale advisor result must be rejected before shared state or message delivery",
   );
 
-  const shutdown = source.slice(source.lastIndexOf('pi.on("session_shutdown"'));
+  const sessionStart = source.slice(source.lastIndexOf('pi.on("session_start",'));
+  const advisorResetIndex = sessionStart.indexOf("resetAdvisorSession(ctx.cwd)");
+  const advisorAgentEndIndex = sessionStart.indexOf('pi.on("agent_end",');
+  assert.notEqual(advisorResetIndex, -1);
+  assert.notEqual(advisorAgentEndIndex, -1);
+  assert.ok(advisorResetIndex < advisorAgentEndIndex);
+  const shutdown = source.slice(source.lastIndexOf('pi.on("session_shutdown",'));
+  assert.ok(shutdown.indexOf("abortAdvisorReview(") < shutdown.indexOf("await "));
   assert.ok(shutdown.indexOf("state.sessionGeneration =") < shutdown.indexOf("await "));
   assert.ok(shutdown.indexOf("state.currentSessionId = null") < shutdown.indexOf("await "));
 });

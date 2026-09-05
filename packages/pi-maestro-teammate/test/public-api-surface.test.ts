@@ -116,6 +116,25 @@ test("the v1 sessions API is dependency-free", () => {
   );
 });
 
+test("the public V1 model-routing subpath exports the canonical V3 contracts", async () => {
+  const routing = await import("pi-maestro-teammate/v1/model-routing");
+  assert.equal(typeof routing.validateModelRoutingV3Rules, "function");
+  assert.equal(typeof routing.isModelRoutingProfileId, "function");
+  assert.equal(routing.isModelRoutingProfileId("1-public"), true);
+});
+
+test("the public V1 supervision subpath exports the shared Advisor runtime registry", async () => {
+  const supervision = await import("pi-maestro-teammate/v1/supervision");
+  assert.equal(typeof supervision.registerAdvisorRuntime, "function");
+  assert.equal(typeof supervision.getAdvisorRuntimeOwner, "function");
+  assert.equal(typeof supervision.ensureAdvisorCommandRegistered, "function");
+
+  const extensionEntry = path.resolve(SRC_DIR, "extension/index.ts");
+  const { modules } = runtimeGraph(path.join(PUBLIC_DIR, "supervision.ts"));
+  assert.equal(modules.has(extensionEntry), false, "the registry API must not load the teammate extension");
+  assert.ok(modules.has(path.resolve(SRC_DIR, "supervision/advisor-runtime.ts")));
+});
+
 test("every v1 module is reachable through a declared package export", () => {
   const packageJson: {
     exports?: Record<string, string | { default?: string }>;
