@@ -6,8 +6,7 @@
  *   - goal: Autonomous Goal read/create surface with automatic loop-end verification
  *   - ask-user-question: Structured questionnaire for user input
  *   - todo: Task management with plain context, optional skills, and step tracking
- *   - session_history: bounded read-only current/workspace/teammate session history
- *   - compact_history: bounded read-only recovery history for the current session
+ *   - session_history: bounded current-session recovery and authorized historical discovery
  *   - lsp: Language-server diagnostics, navigation, refactors, and raw requests
  *   - browser: Named-tab Chromium control and screenshots
  *   - computer_use: Serialized physical desktop observation and control
@@ -164,7 +163,7 @@ import {
 import { SessionOverlay, type SessionOverlayAction } from "../tui/session-overlay.ts";
 import { McpxOverlay } from "../tui/mcpx-overlay.ts";
 import { McpxWizardOverlay } from "../tui/mcpx-wizard.ts";
-import { startWorkspaceLease, stopWorkspaceLease, registerMcpxWorkspacePermanent, removeMcpxWorkspace, isMcpxConfigured } from "../mcpx-bridge.ts";
+import { startWorkspaceLease, stopWorkspaceLease, registerMcpxWorkspacePermanent, removeGatewayWorkspaceByPath, isMcpxConfigured } from "../mcpx-bridge.ts";
 import { TodoOverlay } from "../tui/todo-overlay.ts";
 import { GoalOverlay, type GoalOverlayAction } from "../tui/goal-overlay.ts";
 import { KnowledgeOverlay, type KnowledgeOverlayAction } from "../tui/knowledge-overlay.ts";
@@ -264,7 +263,7 @@ import { registerFlowSchedule } from "../flow-schedule/register.ts";
 import { registerModelAvailability } from "../tools/model-availability.ts";
 import { registerTeammateSessionRouting } from "../tools/teammate-session-routing.ts";
 import { registerResourceTool } from "../tools/resource.ts";
-import { registerCompactHistoryTool, registerSessionHistoryTool } from "../tools/session-history.ts";
+import { registerSessionHistoryTool } from "../tools/session-history.ts";
 import { registerNewContextTool } from "../tools/new-context.ts";
 import { isNewContextCompactionEnabled } from "../compaction/compaction-settings.ts";
 import {
@@ -359,7 +358,6 @@ export const MAESTRO_CHILD_TOOL_NAMES = [
   "source_check",
   "resource",
   "session_history",
-  "compact_history",
   "new_context",
   "lsp",
   "browser",
@@ -1234,8 +1232,10 @@ function renderTodoToolResult(
 
 export default function registerMaestroExtension(pi: ExtensionAPI): void {
   installReturnedToolErrorBridge(pi);
-  const disposeCompletionDurabilityProvider = getCompletionDurabilityRegistry().register(
-    new FlowCompletionDurabilityProvider(),
+  const completionDurabilityRegistry = getCompletionDurabilityRegistry();
+  const completionDurabilityProvider = new FlowCompletionDurabilityProvider();
+  const disposeCompletionDurabilityProvider = completionDurabilityRegistry.register(
+    completionDurabilityProvider,
   );
   if (process.env.PI_TEAMMATE_CHILD === "1") {
     pi.on("session_shutdown", () => disposeCompletionDurabilityProvider());
@@ -1246,7 +1246,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   registerSshManager(pi);
   const disposeTuiLocaleEvents = registerTuiLocaleEvents(pi.events);
   // Dispose EventBus subscriptions on shutdown (defensive; framework may auto-dispose).
-  const disposers: Array<() => void> = [disposeCompletionDurabilityProvider];
+  const disposers: Array<() => void> = [];
 
   // pi install's SettingsManager overwrites postinstall's settings.json writes
   // with its stale in-memory cache. Re-register companion packages at load time
@@ -1263,8 +1263,8 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
     console.warn(`[pi-maestro-flow] Companion package registration skipped: ${error instanceof Error ? error.message : String(error)}`);
   }
 
-  // MCPX workspace auto-registration is deliberately opt-in: the /mcpx panel's
-  // e key registers/unregisters the current window with the local MCPX runtime
+  // Gateway workspace registration is deliberately opt-in: the /gateway panel's
+  // e key registers/unregisters the current window with the built-in runtime
   // (default: not registered), so startup never writes to ~/.mcpx/config.yaml.
 
   // UCL: capture only the locked extension-tool surface. pi.getAllTools() exposes
@@ -1331,11 +1331,12 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   disposers.push(pi.events.on(TEAMMATE_COMPLETE_EVENT, (payload) => {
     guiEvents.emit(GUI_EVENTS.teammateComplete, payload as TeammateCompleteEvent);
   }));
-  // Persist each published node before runGraph releases its dependents. The
-  // completion/tool-result hooks below remain compatibility fallbacks.
-  disposers.push(pi.events.on(TEAMMATE_RESULT_PUBLISHED_EVENT, (event) => {
+  // Persist each published node before runGraph releases its dependents. Keep
+  // this listener alive after provider retirement until every dispatch pinned
+  // to this Flow generation has drained.
+  const disposePublishedResultCapture = pi.events.on(TEAMMATE_RESULT_PUBLISHED_EVENT, (event) => {
     capturePublishedAgentResult(event, rememberPublishedResult);
-  }));
+  });
   // agent:// data source for background/detached runs: the root tool_result of
   // a background dispatch carries empty results, so the authoritative completion
   // event is the persistence channel for its structured outputs.
@@ -1446,13 +1447,12 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   const newContextController = createNewContextController(compactionArbiter, {
     continueAfterReset() {
       pi.sendUserMessage(
-        "Continue from the recovery capsule and the active Todo's exact next action.",
+        "Continue from the recovery capsule and the active Todo's exact next action. If a required current-session fact is absent, use session_history with scope=current_session.",
         { deliverAs: "followUp" },
       );
     },
   });
   const newContextToolSurface = createNewContextToolSurface(pi, () => {
-    registerCompactHistoryTool(pi, { isEnabled: (ctx) => newContextToolsEnabled(ctx.cwd) });
     registerNewContextTool(pi, newContextController, "root");
   });
   const midTurnAutoCompaction = createMidTurnAutoCompaction(pi, { arbiter: compactionArbiter });
@@ -2131,7 +2131,7 @@ When NOT to use:
   registerModelAvailability(pi);
   registerTeammateSessionRouting(pi);
   registerResourceTool(pi);
-  registerSessionHistoryTool(pi);
+  registerSessionHistoryTool(pi, { isCompactRecoveryEnabled: (ctx) => newContextToolsEnabled(ctx.cwd) });
   registerConflictTool(pi);
   registerDataManagerCommand(pi);
   registerKeybindingsCommand(pi);
@@ -2696,8 +2696,8 @@ When NOT to use:
         onRegisterWorkspacePermanent: async (path) => registerWindowWithMode(path, true),
         onUnregisterWorkspace: async (path) => {
           stopWorkspaceLease();
-          removeMcpxWorkspace(path);
-          return `unregistered: ${path}`;
+          const result = await removeGatewayWorkspaceByPath(path);
+          return result.ok ? `unregistered: ${path}` : `remove failed: ${result.message}`;
         },
         onOpenWizard: () => {
           reopenWizard = true;
@@ -2736,12 +2736,12 @@ When NOT to use:
           const registered = await registerMcpxWorkspacePermanent(path);
           return registered
             ? `registered（永久，无租约，窗口关闭后保留）: ${path}`
-            : `register failed（mcpx workspace register 未成功）: ${path}`;
+            : `register failed（Built-in Gateway workspace registry 未写入）: ${path}`;
         }
         const registered = await startWorkspaceLease(path);
         return registered
           ? `registered（动态租约，窗口存活期间自动续租）: ${path}`
-          : `register failed（mcpx workspace register 未成功）: ${path}`;
+          : `register failed（Built-in Gateway workspace registry 未写入）: ${path}`;
       };
       return overlay;
     }, {
@@ -2994,8 +2994,8 @@ When NOT to use:
     description: "Open the canonical Workflow Session control center",
     async handler(_args, ctx) { await openSessionOverlay(ctx); },
   });
-  pi.registerCommand("mcpx", {
-    description: "Open the MCPX connection monitor — binary/endpoint status, registered workspaces, discoverable Pi windows and cross-window message history (r refresh · e register current workspace · c config wizard). Usage: /mcpx [wizard]",
+  pi.registerCommand("gateway", {
+    description: "Open Pi Maestro Gateway management — daemon/tunnel/workspaces/config plus CollaborativeSession, independent Gateway Todo, member leases, and execution Monitor (G collaboration · r refresh · e register · c wizard). Gateway Todo is not synchronized with Pi Todo. Usage: /gateway [wizard]",
     async handler(args, ctx) {
       if (args.trim().toLowerCase() === "wizard") await openMcpxWizard(ctx);
       else await openMcpxOverlay(ctx);
@@ -3515,8 +3515,28 @@ When NOT to use:
   });
 
   pi.on("session_shutdown", async (event, ctx) => {
+    // Fence compaction and retire this provider before the first await. Retiring
+    // hides it from new dispatches; dispatch pins keep admitted publications on
+    // this exact generation until teammate shutdown drains them.
+    midTurnAutoCompaction.onSessionShutdown(ctx);
+    preserveCompletedTurnFromNativeThreshold = false;
+    lastCompactionCancel = undefined;
+    newContextController.onSessionShutdown();
+    newContextToolSurface.deactivate();
+    compactionArbiter.reset();
+    disposeCompletionDurabilityProvider();
+    const completionOwnershipDrained = completionDurabilityRegistry.waitForProviderIdle?.(
+      completionDurabilityProvider,
+    ) ?? Promise.resolve();
+    // ExtensionRunner awaits shutdown handlers serially. Do not await the pin
+    // barrier here: teammate shutdown may be the later handler that releases it.
+    // The listener disposer itself remains ordered after that release.
+    void completionOwnershipDrained.then(disposePublishedResultCapture).catch((error) => {
+      console.warn(`[pi-maestro-flow] completion capture shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
     if (event.reason === "quit" || event.reason === "reload") disposeTuiLocaleEvents();
-    // Dispose EventBus subscriptions on shutdown (defensive; framework may auto-dispose).
+    // Other observers do not own canonical result persistence and can leave
+    // immediately; disposePublishedResultCapture is released after the pin barrier.
     for (const d of disposers) {
       try { d(); } catch {}
     }
@@ -3531,14 +3551,6 @@ When NOT to use:
     artifactKnowledgeCandidateCount = 0;
     maestroUiPublisher.clear();
     await disposeTeammateSessionRegistrations();
-    // Fence callbacks and leases before the first await so teardown cannot
-    // enqueue continuation work into the departing session.
-    midTurnAutoCompaction.onSessionShutdown(ctx);
-    preserveCompletedTurnFromNativeThreshold = false;
-    lastCompactionCancel = undefined;
-    newContextController.onSessionShutdown();
-    newContextToolSurface.deactivate();
-    compactionArbiter.reset();
     // Non-destructive: preserve the prune manifest and spill resources so a
     // resumed session replays the identical transformed prefix. Destructive
     // teardown stays with reset()/onCompact().
@@ -4424,7 +4436,7 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
   const newContextController = createNewContextController(compactionArbiter, {
     continueAfterReset() {
       pi.sendUserMessage(
-        "Continue from the recovery capsule and the active Todo's exact next action.",
+        "Continue from the recovery capsule and the active Todo's exact next action. If a required current-session fact is absent, use session_history with scope=current_session.",
         { deliverAs: "followUp" },
       );
     },
@@ -4444,7 +4456,6 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
     },
   });
   const newContextToolSurface = createNewContextToolSurface(pi, () => {
-    registerCompactHistoryTool(pi, { isEnabled: (ctx) => newContextToolsEnabled(ctx.cwd) });
     registerNewContextTool(pi, newContextController, childActorId);
   });
   const autoCompaction = createMidTurnAutoCompaction(pi, { arbiter: compactionArbiter });
@@ -4663,7 +4674,7 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
   registerSmartSearchTool(pi);
   pi.registerTool(createSourceCheckTool() as never);
   registerResourceTool(pi);
-  registerSessionHistoryTool(pi);
+  registerSessionHistoryTool(pi, { isCompactRecoveryEnabled: (ctx) => newContextToolsEnabled(ctx.cwd) });
   pi.registerTool(createLspTool() as never);
   pi.registerTool(createTeammateChildBrowserTool());
   pi.registerTool(createTeammateChildComputerUseTool());
