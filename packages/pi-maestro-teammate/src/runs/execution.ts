@@ -1875,6 +1875,11 @@ async function runSingleTeammateV1(
       // not a blocked decision; only the fresh-replay paths below append
       // diagnostics.
       if (!resumableCheckpoint && fallbackFailure && !authoritativeFailure && !preActivityInfrastructureExit) {
+        addFailureDecision(
+          "settlement-authority-insufficient",
+          "fresh fallback denied: child settlement was not authoritative",
+          "settlementAuthority",
+        );
         candidateResult.messages.push({
           role: "system",
           content:
@@ -1904,6 +1909,11 @@ async function runSingleTeammateV1(
       } else if (modelSelectionUnsupported && failoverConditionsMet) {
         // Every other condition for failover held, so without this record the
         // result is indistinguishable from one that had no candidate left.
+        addFailureDecision(
+          "model-selection-unsupported",
+          "fallback denied: backend cannot select the remaining model candidates",
+          "capabilityDeliveries",
+        );
         candidateResult.capabilityDeliveries = [
           ...(candidateResult.capabilityDeliveries ?? []),
           {

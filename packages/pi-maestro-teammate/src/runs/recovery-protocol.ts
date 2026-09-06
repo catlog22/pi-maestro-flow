@@ -17,7 +17,7 @@ export interface RecoveryWakeReceiptV1 {
   state: RecoveryWakeReceiptState;
   sequence: number;
   deadlineAt: number;
-  runtimeGeneration?: number;
+  runtimeGeneration: number;
   sessionId?: string;
   branchCheckpointId?: string;
   messageId?: string;

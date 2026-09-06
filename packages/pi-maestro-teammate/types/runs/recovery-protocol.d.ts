@@ -2,6 +2,66 @@ export declare const RECOVERY_PROTOCOL_VERSION: 1;
 export type RecoveryProtocolVersion = typeof RECOVERY_PROTOCOL_VERSION;
 export type RecoveryScope = "main" | "teammate";
 export type RecoveryOwner = "pi-core" | "teammate";
+export declare const RECOVERY_WAKE_RECEIPT_VERSION: 1;
+export type RecoveryWakeReceiptState = "prepared" | "queued" | "consumed" | "turn-started" | "cancelled" | "failed";
+/** Additive companion to legacy teammate_compaction_state events. */
+export interface RecoveryWakeReceiptV1 {
+    version: typeof RECOVERY_WAKE_RECEIPT_VERSION;
+    recoveryId: string;
+    producer: string;
+    generation: number;
+    wakeId: string;
+    state: RecoveryWakeReceiptState;
+    sequence: number;
+    deadlineAt: number;
+    runtimeGeneration: number;
+    sessionId?: string;
+    branchCheckpointId?: string;
+    messageId?: string;
+    turnId?: string;
+    reason?: string;
+}
+export type ReplayEvidenceSource = "tool" | "proxy-request" | "unknown-ipc" | "stdout-protocol" | "stderr" | "legacy-unknown";
+export interface ReplayEvidenceEntry {
+    source: ReplayEvidenceSource;
+    reasonCode: string;
+    firstSequence: number;
+}
+export interface ReplayEvidenceV1 {
+    version: 1;
+    entries: readonly ReplayEvidenceEntry[];
+    overflowUnknown: boolean;
+    finalized: boolean;
+}
+/** Bounded, monotonic replay evidence. Overflow is itself fail-closed. */
+export declare class ReplayEvidenceCollector {
+    private sequence;
+    private overflowUnknown;
+    private readonly entries;
+    add(source: ReplayEvidenceSource, reasonCode: string): void;
+    snapshot(finalized?: boolean): ReplayEvidenceV1;
+}
+export declare function hasExternalReplayRisk(evidence: ReplayEvidenceV1 | undefined): boolean;
+export interface RecoveryFailureRecordV1 {
+    code: string;
+    layer: "provider" | "transport" | "recovery";
+    phase: string;
+    sequence: number;
+    sanitizedMessage: string;
+    model?: string;
+}
+export interface RecoveryDecisionRecordV1 {
+    code: string;
+    sequence: number;
+    decision: string;
+    evidenceRef?: string;
+}
+export interface RecoveryFailureChainV1 {
+    version: 1;
+    initiating?: RecoveryFailureRecordV1;
+    decisions: readonly RecoveryDecisionRecordV1[];
+    terminal?: RecoveryFailureRecordV1;
+}
 export interface RecoveryEventBase {
     protocolVersion: RecoveryProtocolVersion;
     recoveryId: string;

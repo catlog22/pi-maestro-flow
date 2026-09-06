@@ -226,6 +226,7 @@ interface AttemptState {
   /** A length-truncated turn is waiting for child-local compaction and continuation. */
   outputLimitRecoveryPending: boolean;
   /** A Flow synthetic compaction interruption must continue before this turn can settle. */
+  compactionWakeProtocolCapable: boolean;
   latestWakeReceipt?: RecoveryWakeReceiptV1;
   compactionRecovery?: {
     recoveryId: string;
@@ -233,6 +234,7 @@ interface AttemptState {
     generation: number;
     phase: "pending" | "continuation" | "completed";
     wakeProtocolVersion?: 1;
+    wakeId?: string;
     wakeReceipt?: RecoveryWakeReceiptV1;
     absoluteDeadlineAt?: number;
   };
@@ -304,6 +306,7 @@ export const TOOL_EXECUTION_HEARTBEAT_MS = 10_000;
  */
 interface AttemptTimers {
   firstActivity?: ReturnType<typeof setTimeout>;
+  compactionIpcDrain?: ReturnType<typeof setImmediate>;
   resultReadyGrace?: ReturnType<typeof setTimeout>;
   outputLimitRecovery?: ReturnType<typeof setTimeout>;
   compactionRecovery?: ReturnType<typeof setTimeout>;
@@ -389,9 +392,23 @@ function buildChildSpawnEnv(
   return spawnEnv;
 }
 
+interface ChildCompactionCapability {
+  type: "teammate_compaction_capability";
+  runtimeGeneration: number;
+}
+
+function childCompactionCapability(message: Record<string, unknown>): ChildCompactionCapability | undefined {
+  if (message.type !== "teammate_compaction_capability"
+    || message.version !== 1
+    || message.wakeProtocolVersion !== 1
+    || !Number.isSafeInteger(message.runtimeGeneration)) return undefined;
+  return { type: "teammate_compaction_capability", runtimeGeneration: message.runtimeGeneration as number };
+}
+
 /** Child IPC events that only publish identity or validated in-process recovery state. */
 function isReplayNeutralChildIpcMessage(message: Record<string, unknown>): boolean {
   return message.type === "teammate_session_ready"
+    || childCompactionCapability(message) !== undefined
     || childCompactionStateEvent(message) !== undefined
     || childWakeReceipt(message) !== undefined;
 }
@@ -405,10 +422,10 @@ function childWakeReceipt(message: Record<string, unknown>): RecoveryWakeReceipt
     || typeof message.wakeId !== "string"
     || !["prepared", "queued", "consumed", "turn-started", "cancelled", "failed"].includes(String(message.state))
     || !Number.isSafeInteger(message.sequence)
-    || !Number.isSafeInteger(message.deadlineAt)) return undefined;
+    || !Number.isSafeInteger(message.deadlineAt)
+    || !Number.isSafeInteger(message.runtimeGeneration)) return undefined;
   const optionalStrings = ["sessionId", "branchCheckpointId", "messageId", "turnId", "reason"] as const;
   if (optionalStrings.some((key) => message[key] !== undefined && typeof message[key] !== "string")) return undefined;
-  if (message.runtimeGeneration !== undefined && !Number.isSafeInteger(message.runtimeGeneration)) return undefined;
   return {
     version: RECOVERY_WAKE_RECEIPT_VERSION,
     recoveryId: message.recoveryId,
@@ -418,7 +435,7 @@ function childWakeReceipt(message: Record<string, unknown>): RecoveryWakeReceipt
     state: message.state as RecoveryWakeReceiptV1["state"],
     sequence: message.sequence as number,
     deadlineAt: message.deadlineAt as number,
-    ...(message.runtimeGeneration === undefined ? {} : { runtimeGeneration: message.runtimeGeneration as number }),
+    runtimeGeneration: message.runtimeGeneration as number,
     ...Object.fromEntries(optionalStrings.flatMap((key) => typeof message[key] === "string" ? [[key, message[key]]] : [])),
   } as RecoveryWakeReceiptV1;
 }
@@ -432,6 +449,8 @@ interface ChildCompactionStateEvent {
   phase: "pending" | "continuation" | "completed" | "failed" | "cancelled";
   /** Capability advertisement is carried on the ordered IPC state channel. */
   wakeProtocolVersion?: 1;
+  wakeId?: string;
+  wakeDeadlineAt?: number;
   reason?: string;
 }
 
@@ -444,7 +463,11 @@ function childCompactionStateEvent(message: Record<string, unknown>): ChildCompa
       && message.phase !== "completed"
       && message.phase !== "failed"
       && message.phase !== "cancelled")
-    || (message.wakeProtocolVersion !== undefined && message.wakeProtocolVersion !== 1)) return undefined;
+    || (message.wakeProtocolVersion !== undefined && message.wakeProtocolVersion !== 1)
+    || (message.wakeProtocolVersion === 1
+      && (typeof message.wakeId !== "string" || !Number.isSafeInteger(message.wakeDeadlineAt)))
+    || ((message.wakeId !== undefined || message.wakeDeadlineAt !== undefined)
+      && message.wakeProtocolVersion !== 1)) return undefined;
   return {
     type: "teammate_compaction_state",
     recoveryId: message.recoveryId,
@@ -455,7 +478,13 @@ function childCompactionStateEvent(message: Record<string, unknown>): ChildCompa
       : "legacy",
     generation: message.generation as number,
     phase: message.phase,
-    ...(message.wakeProtocolVersion === 1 ? { wakeProtocolVersion: 1 as const } : {}),
+    ...(message.wakeProtocolVersion === 1
+      ? {
+          wakeProtocolVersion: 1 as const,
+          wakeId: message.wakeId as string,
+          wakeDeadlineAt: message.wakeDeadlineAt as number,
+        }
+      : {}),
     ...(typeof message.reason === "string" ? { reason: message.reason } : {}),
   };
 }
@@ -554,6 +583,7 @@ export async function runSingleAttempt(
     turnLifecycleSettled: false,
     lastAssistantStopReason: undefined,
     outputLimitRecoveryPending: false,
+    compactionWakeProtocolCapable: false,
     compactionRecovery: undefined,
     structuredOutputAttemptFailed: false,
     resolvedModel: modelOverride ?? params.model ?? agentConfig.model ?? "unknown",
@@ -934,6 +964,13 @@ export async function runSingleAttempt(
     if (useIpc) {
       bindChildIpcRelay(child, correlationId, options, (message) => {
         state.receivedFirstActivity = true;
+        const compactionCapability = childCompactionCapability(message);
+        if (compactionCapability) {
+          if (compactionCapability.runtimeGeneration === (options.runtimeGeneration ?? 0)) {
+            state.compactionWakeProtocolCapable = true;
+          }
+          return;
+        }
         const compactionEvent = childCompactionStateEvent(message);
         if (compactionEvent) {
           handleChildCompactionState(compactionEvent);
@@ -966,6 +1003,7 @@ export async function runSingleAttempt(
     // treats a non-empty handle as "this window was already used".
     const clearAllTimers = (): void => {
       if (timers.firstActivity) clearTimeout(timers.firstActivity);
+      if (timers.compactionIpcDrain) clearImmediate(timers.compactionIpcDrain);
       if (timers.resultReadyGrace) clearTimeout(timers.resultReadyGrace);
       if (timers.outputLimitRecovery) clearTimeout(timers.outputLimitRecovery);
       if (timers.compactionRecovery) clearTimeout(timers.compactionRecovery);
@@ -1453,16 +1491,28 @@ export async function runSingleAttempt(
         || active.recoveryId !== receipt.recoveryId
         || active.producer !== receipt.producer
         || active.generation !== receipt.generation
-        || (receipt.runtimeGeneration !== undefined
-          && receipt.runtimeGeneration !== (options.runtimeGeneration ?? 0))) return;
+        || active.wakeId !== receipt.wakeId
+        || receipt.runtimeGeneration !== (options.runtimeGeneration ?? 0)) return;
       const previous = active.wakeReceipt;
       if (previous && (previous.wakeId !== receipt.wakeId || receipt.sequence <= previous.sequence)) return;
+      const absoluteDeadlineAt = Math.min(active.absoluteDeadlineAt ?? receipt.deadlineAt, receipt.deadlineAt);
+      if (Date.now() >= absoluteDeadlineAt && receipt.state !== "cancelled" && receipt.state !== "failed") return;
+      const transitionAllowed = previous === undefined
+        ? receipt.state === "prepared"
+        : previous.state === "prepared"
+          ? receipt.state === "prepared" || receipt.state === "queued" || receipt.state === "consumed"
+            || receipt.state === "cancelled" || receipt.state === "failed"
+          : previous.state === "queued"
+            ? receipt.state === "queued" || receipt.state === "consumed"
+              || receipt.state === "cancelled" || receipt.state === "failed"
+            : previous.state === "consumed"
+              ? receipt.state === "consumed" || receipt.state === "turn-started"
+                || receipt.state === "cancelled" || receipt.state === "failed"
+              : false;
+      if (!transitionAllowed) return;
       // A producer chooses the absolute deadline once. Later receipts may make
       // it earlier, but duplicates/retries can never extend it.
-      active.absoluteDeadlineAt = Math.min(
-        active.absoluteDeadlineAt ?? receipt.deadlineAt,
-        receipt.deadlineAt,
-      );
+      active.absoluteDeadlineAt = absoluteDeadlineAt;
       active.wakeReceipt = Object.freeze({ ...receipt, deadlineAt: active.absoluteDeadlineAt });
       state.latestWakeReceipt = active.wakeReceipt;
       for (const result of recordedRecoveryResults) result.recoveryWakeReceipt = active.wakeReceipt;
@@ -1481,6 +1531,8 @@ export async function runSingleAttempt(
           producer: receipt.producer,
           generation: receipt.generation,
           phase: receipt.state,
+          wakeProtocolVersion: 1,
+          wakeId: receipt.wakeId,
           ...(receipt.reason === undefined ? {} : { reason: receipt.reason }),
         });
         return;
@@ -1494,19 +1546,19 @@ export async function runSingleAttempt(
 
     function handleChildCompactionState(event: ChildCompactionStateEvent): void {
       if (state.terminal || state.turnLifecycleSettled) return;
+      const activeBeforeGenerationCheck = state.compactionRecovery;
+      if (activeBeforeGenerationCheck?.producer === event.producer) {
+        const sameCoreIdentity = activeBeforeGenerationCheck.generation === event.generation
+          && activeBeforeGenerationCheck.recoveryId === event.recoveryId;
+        const sameWakeIdentity = activeBeforeGenerationCheck.wakeProtocolVersion === 1
+          ? event.wakeProtocolVersion === 1 && event.wakeId === activeBeforeGenerationCheck.wakeId
+          : event.wakeProtocolVersion === undefined || event.wakeProtocolVersion === 1;
+        if (!sameCoreIdentity || !sameWakeIdentity) return;
+      }
       const latestGeneration = latestCompactionGenerationByProducer.get(event.producer) ?? -1;
       if (event.generation < latestGeneration) return;
       if (event.generation > latestGeneration) {
         latestCompactionGenerationByProducer.set(event.producer, event.generation);
-        const active = state.compactionRecovery;
-        if (active?.producer === event.producer) {
-          closeActiveCompactionRecovery();
-          state.compactionRecovery = undefined;
-          if (timers.compactionRecovery) {
-            clearTimeout(timers.compactionRecovery);
-            timers.compactionRecovery = undefined;
-          }
-        }
       }
 
       const eventKey = compactionRecoveryKey(event);
@@ -1515,7 +1567,10 @@ export async function runSingleAttempt(
       const matchesActive = active === undefined
         || (active.producer === event.producer
           && active.generation === event.generation
-          && active.recoveryId === event.recoveryId);
+          && active.recoveryId === event.recoveryId
+          && (active.wakeProtocolVersion === 1
+            ? event.wakeProtocolVersion === 1 && event.wakeId === active.wakeId
+            : event.wakeProtocolVersion === undefined || event.wakeProtocolVersion === 1));
       // Another producer may announce a deferred request while the current
       // recovery owns settlement. It must re-announce pending when it actually
       // acquires the compaction lease; never let incomparable counters replace
@@ -1581,10 +1636,20 @@ export async function runSingleAttempt(
         generation: event.generation,
         phase: event.phase,
         ...(event.wakeProtocolVersion === 1 || active?.wakeProtocolVersion === 1
-          ? { wakeProtocolVersion: 1 as const }
+          ? {
+              wakeProtocolVersion: 1 as const,
+              wakeId: event.wakeId ?? active?.wakeId,
+            }
           : {}),
         ...(active?.wakeReceipt === undefined ? {} : { wakeReceipt: active.wakeReceipt }),
-        ...(active?.absoluteDeadlineAt === undefined ? {} : { absoluteDeadlineAt: active.absoluteDeadlineAt }),
+        ...(event.wakeDeadlineAt === undefined && active?.absoluteDeadlineAt === undefined
+          ? {}
+          : {
+              absoluteDeadlineAt: Math.min(
+                event.wakeDeadlineAt ?? Number.POSITIVE_INFINITY,
+                active?.absoluteDeadlineAt ?? Number.POSITIVE_INFINITY,
+              ),
+            }),
       };
       // Legacy producers retain their prior per-phase conservative deadline.
       // Receipt-capable producers keep one absolute deadline for the wake.
@@ -2435,6 +2500,25 @@ export async function runSingleAttempt(
       }
     }
 
+    function settleAfterCompactionIpcDrain(): void {
+      if (timers.compactionIpcDrain) return;
+      const boundaryEpoch = turnBoundaryEpoch;
+      let remainingPasses = 2;
+      const drain = () => {
+        timers.compactionIpcDrain = setImmediate(() => {
+          timers.compactionIpcDrain = undefined;
+          if (state.terminal || state.turnLifecycleSettled || turnBoundaryEpoch !== boundaryEpoch) return;
+          remainingPasses -= 1;
+          if (state.compactionRecovery || remainingPasses === 0) {
+            settleAgentSession();
+            return;
+          }
+          drain();
+        });
+      };
+      drain();
+    }
+
     /** Pi's authoritative AgentSession idle boundary. */
     function onAgentSettled(): void {
       state.settlementCapability = "agent_settled";
@@ -2457,6 +2541,10 @@ export async function runSingleAttempt(
         });
         state.runtimeFailure = "output-limit recovery settled without continuation";
         completeTurn(readStructuredOutput(true), true, 1);
+        return;
+      }
+      if (state.compactionWakeProtocolCapable && !state.compactionRecovery) {
+        settleAfterCompactionIpcDrain();
         return;
       }
       settleAgentSession();

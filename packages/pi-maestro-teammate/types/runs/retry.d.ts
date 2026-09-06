@@ -19,6 +19,16 @@ export declare const RESOLVED_NETWORK_RETRY_POLICY: Readonly<{
     maxDelayMs: number;
 }>;
 export type RetryErrorKind = "network" | "provider" | "fallback-only" | "auth" | "non-retryable";
+export type RetryClassificationInput = {
+    source: "provider" | "transport";
+    message?: string;
+    status?: number;
+} | {
+    source: "recovery-diagnostic";
+    message: string;
+};
+/** Synthetic recovery diagnostics are terminal context, never fresh provider failures. */
+export declare function classifyRetryInput(input: RetryClassificationInput): RetryErrorKind | undefined;
 export type ModelHealthFailureScope = ModelHealthScope | "none";
 export interface ModelHealthFailureInput {
     message?: string;

@@ -2140,6 +2140,7 @@ test("mid-turn guard falls back to native compaction after exhausted failures tr
     callbacks.at(-1)?.onError(new Error(`failure ${attempt + 1}`));
     const recoveryPrompt = sent.at(-1)?.message;
     if (attempt < MAX_CONSECUTIVE_COMPACTION_FAILURES - 1 && recoveryPrompt) {
+      pending = false;
       guard.onBeforeAgentStart(recoveryPrompt, ctx);
       guard.onAgentStart(ctx);
     }
@@ -4085,8 +4086,7 @@ test("durable wake replays one wakeId across restart and lifecycle receipts are 
   assert.equal(replay.recoveryWake.wakeAttempts, 2);
 
   second.onAgentStart(ctx);
-  second.onBeforeAgentStart("unrelated user input", ctx);
-  assert.equal((journal.at(-1)!.data as { recoveryWake: { state: string } }).recoveryWake.state, "prepared", "foreign lifecycle cannot consume the wake");
+  assert.equal((journal.at(-1)!.data as { recoveryWake: { state: string } }).recoveryWake.state, "prepared", "an uncorrelated lifecycle event cannot consume the wake");
 
   const prompt = replayed[0] ?? "";
   branch = [
@@ -4114,6 +4114,102 @@ test("durable wake replays one wakeId across restart and lifecycle receipts are 
   second.onBeforeAgentStart(prompt, ctx);
   second.onAgentStart(ctx);
   assert.equal((journal.at(-1)!.data as { recoveryWake: { state: string } }).recoveryWake.state, "turn-started", "terminal receipts absorb replay");
+});
+
+test("a different post-dispatch input cancels the wake even when it copies the marker", async () => {
+  const journal: Array<Record<string, unknown>> = [];
+  const sent: string[] = [];
+  const guard = createMidTurnAutoCompaction({
+    appendEntry(_type: string, data: Record<string, unknown>) { journal.push(data); },
+    sendUserMessage(message: string) { sent.push(message); },
+  } as never, { readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }) });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 400_000, maxTokens: 32_000 },
+    getContextUsage: () => ({ tokens: 200_000, contextWindow: 400_000, percent: 50 }),
+    hasPendingMessages: () => false,
+    sessionManager: { getSessionId: () => "wake-copied-marker", getBranch: () => [] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  guard.onSessionStart(ctx);
+  await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
+  await guard.onAgentEnd(ctx);
+  const recoveryPrompt = sent[0] ?? "";
+  guard.onBeforeAgentStart(`${recoveryPrompt}\nquoted by a newer request`, ctx);
+  const cancelled = journal.at(-1) as { outputLimit: unknown; recoveryWake: { state: string; reason?: string } };
+  assert.equal(cancelled.outputLimit, null);
+  assert.equal(cancelled.recoveryWake.state, "cancelled");
+  assert.match(cancelled.recoveryWake.reason ?? "", /newer user input/);
+  guard.onAgentStart(ctx);
+  assert.equal((journal.at(-1) as { recoveryWake: { state: string } }).recoveryWake.state, "cancelled");
+});
+
+test("consumed receipt persistence failure clears the dispatch fence for the same wake retry", async () => {
+  const journal: Array<Record<string, unknown>> = [];
+  const sent: string[] = [];
+  let rejectConsumed = true;
+  const guard = createMidTurnAutoCompaction({
+    appendEntry(_type: string, data: Record<string, unknown>) {
+      if (rejectConsumed && (data.recoveryWake as { state?: string } | undefined)?.state === "consumed") {
+        rejectConsumed = false;
+        throw new Error("consumed receipt write failed");
+      }
+      journal.push(data);
+    },
+    sendUserMessage(message: string) { sent.push(message); },
+  } as never, { readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }) });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 400_000, maxTokens: 32_000 },
+    getContextUsage: () => ({ tokens: 200_000, contextWindow: 400_000, percent: 50 }),
+    hasPendingMessages: () => false,
+    sessionManager: { getSessionId: () => "wake-consumed-write", getBranch: () => [] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  guard.onSessionStart(ctx);
+  await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
+  await guard.onAgentEnd(ctx);
+  guard.onBeforeAgentStart(sent[0] ?? "", ctx);
+  assert.equal((journal.at(-1) as { recoveryWake: { state: string } }).recoveryWake.state, "prepared");
+  assert.equal(guard.ensureRecoveryWake(ctx), true);
+  assert.equal(sent.length, 2, "the retry reuses the prepared logical wake instead of remaining fenced");
+});
+
+test("terminal cancellation retries a transient journal failure without redispatch", async () => {
+  const journal: Array<Record<string, unknown>> = [];
+  const sent: string[] = [];
+  let rejectCancellation = true;
+  const guard = createMidTurnAutoCompaction({
+    appendEntry(_type: string, data: Record<string, unknown>) {
+      if (rejectCancellation && (data.recoveryWake as { state?: string } | undefined)?.state === "cancelled") {
+        rejectCancellation = false;
+        throw new Error("cancel receipt write failed");
+      }
+      journal.push(data);
+    },
+    sendUserMessage(message: string) { sent.push(message); },
+  } as never, { readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }) });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 400_000, maxTokens: 32_000 },
+    getContextUsage: () => ({ tokens: 200_000, contextWindow: 400_000, percent: 50 }),
+    hasPendingMessages: () => false,
+    sessionManager: { getSessionId: () => "wake-cancel-write", getBranch: () => [] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  guard.onSessionStart(ctx);
+  await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
+  await guard.onAgentEnd(ctx);
+  guard.onBeforeAgentStart(`${sent[0] ?? ""}\nnew request`, ctx);
+  assert.equal(guard.ensureRecoveryWake(ctx), false, "terminal-in-memory state remains fail-closed");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const cancelled = journal.at(-1) as { outputLimit: unknown; recoveryWake: { state: string } };
+  assert.equal(cancelled.outputLimit, null);
+  assert.equal(cancelled.recoveryWake.state, "cancelled");
+  assert.equal(sent.length, 1);
 });
 
 test("session shutdown preserves the durable wake identity for restart", async () => {
@@ -4149,17 +4245,50 @@ test("session shutdown preserves the durable wake identity for restart", async (
   assert.equal(parked.recoveryWake?.deadlineAt, beforeShutdown.recoveryWake.deadlineAt);
 
   branch = [{ type: "custom", customType: "maestro-auto-compaction-intent", data: parked }];
-  const replayed: string[] = [];
-  const second = makeGuard(replayed);
-  second.onSessionStart(ctx, { reason: "resume" });
-  assert.equal(replayed.length, 1);
+  first.onSessionStart(ctx, { reason: "resume" });
+  assert.equal(sent.length, 2, "the same guard instance explicitly redispatches after restart");
   assert.equal(
     (journal.at(-1)!.data as { recoveryWake: { wakeId: string } }).recoveryWake.wakeId,
     beforeShutdown.recoveryWake.wakeId,
   );
 });
 
-test("expired recovery wake fails without dispatch and keeps its original deadline", async () => {
+test("a newer user message durably cancels its matching output-limit wake", async () => {
+  let pending = false;
+  const sent: string[] = [];
+  const journal: Array<Record<string, unknown>> = [];
+  const guard = createMidTurnAutoCompaction({
+    appendEntry(_type: string, data: Record<string, unknown>) { journal.push(data); },
+    sendUserMessage(message: string) { sent.push(message); },
+  } as never, { readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }) });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 400_000, maxTokens: 32_000 },
+    getContextUsage: () => ({ tokens: 200_000, contextWindow: 400_000, percent: 50 }),
+    hasPendingMessages: () => pending,
+    sessionManager: { getSessionId: () => "wake-superseded", getBranch: () => [] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  guard.onSessionStart(ctx);
+  await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
+  await guard.onAgentEnd(ctx);
+  assert.equal(sent.length, 1);
+  pending = true;
+  await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
+  const cancelled = journal.at(-1) as { outputLimit: unknown; recoveryWake: { state: string; reason?: string } };
+  assert.equal(cancelled.outputLimit, null);
+  assert.equal(cancelled.recoveryWake.state, "cancelled");
+  assert.match(cancelled.recoveryWake.reason ?? "", /newer user message/);
+  assert.equal(guard.ensureRecoveryWake(ctx), false, "a superseded wake cannot become a ghost continuation");
+
+  pending = false;
+  await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
+  await guard.onAgentEnd(ctx);
+  assert.equal(sent.length, 2, "a later independent truncation can create a new logical wake");
+});
+
+test("expired pre-depth v4 recovery wake migrates and fails without extending its deadline", async () => {
   const sessionId = "wake-deadline";
   const deadlineAt = Date.now() - 1;
   const data = {
@@ -4192,6 +4321,52 @@ test("expired recovery wake fails without dispatch and keeps its original deadli
   } as never;
   guard.onSessionStart(ctx, { reason: "resume" });
   assert.equal(sent.length, 0);
+  const failed = journal.at(-1) as { recoveryWake: { state: string; deadlineAt: number } };
+  assert.equal(failed.recoveryWake.state, "failed");
+  assert.equal(failed.recoveryWake.deadlineAt, deadlineAt);
+});
+
+test("a recovery input arriving after its deadline cannot become consumed or turn-started", async () => {
+  const sessionId = "wake-late-input";
+  const deadlineAt = Date.now() + 100;
+  const data = {
+    version: 4,
+    sessionId,
+    phase: "continuation",
+    pending: null,
+    outputLimit: {
+      recoveryId: `${sessionId}:output-limit:1`, phase: "continuation",
+      settings: { enabled: true, reserveTokens: 100, keepRecentTokens: 100 },
+      usage: { tokens: 200_000, contextWindow: 400_000, percent: 50 }, threshold: 0.8,
+    },
+    recoveryWake: {
+      version: 1, recoveryId: `${sessionId}:output-limit:1`, wakeId: "late-wake", producer: "output-limit",
+      sessionId, branchCheckpointId: "checkpoint", branchCheckpointDepth: 1, producerGeneration: 1, runtimeGeneration: 0,
+      state: "prepared", promptKind: "continue", prompt: "continue", sequence: 2,
+      deadlineAt, wakeAttempts: 1,
+    },
+  };
+  const journal: Array<Record<string, unknown>> = [];
+  const sent: string[] = [];
+  const branch = [
+    { type: "custom", customType: "maestro-auto-compaction-intent", data },
+    { type: "message", id: "checkpoint", message: { role: "assistant", content: "checkpoint" } },
+  ];
+  const guard = createMidTurnAutoCompaction({
+    appendEntry(_type: string, value: Record<string, unknown>) { journal.push(value); },
+    sendUserMessage(message: string) { sent.push(message); },
+  } as never);
+  const ctx = {
+    cwd: "D:\\repo", hasPendingMessages: () => false,
+    sessionManager: { getSessionId: () => sessionId, getBranch: () => branch },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  guard.onSessionStart(ctx, { reason: "resume" });
+  assert.equal(sent.length, 1);
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  guard.onBeforeAgentStart(sent[0] ?? "", ctx);
+  guard.onAgentStart(ctx);
   const failed = journal.at(-1) as { recoveryWake: { state: string; deadlineAt: number } };
   assert.equal(failed.recoveryWake.state, "failed");
   assert.equal(failed.recoveryWake.deadlineAt, deadlineAt);
@@ -4813,7 +4988,10 @@ test("submitted mid-turn intent stays durable until settlement and recovers afte
     ...resumedCtx,
     sessionManager: {
       getSessionId: () => fx.sessionId,
-      getBranch: () => [{ type: "message", id: "recovery-input", message: { role: "user", content: replayedPrompt } }],
+      getBranch: () => [
+        { type: "compaction", id: "completed-after-submit" },
+        { type: "message", id: "recovery-input", message: { role: "user", content: replayedPrompt } },
+      ],
     },
   } as never;
   settled.onBeforeAgentStart(replayedPrompt, receiptCtx);

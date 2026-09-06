@@ -58,6 +58,7 @@ import { scoreRelevanceBatch, tokenizeRelevance, RELEVANCE_MAX_QUERY_TOKENS, typ
 import { dedupBlocks, type DedupBlock } from "./dedup.ts";
 import {
   isTeammateForkStartup,
+  publishTeammateCompactionCapability,
   publishTeammateCompactionState,
   publishTeammateCompactionWakeReceipt,
   type TeammateCompactionPhase,
@@ -304,6 +305,7 @@ export interface RecoveryWake {
   producer: TeammateCompactionProducer;
   sessionId: string;
   branchCheckpointId: string;
+  branchCheckpointDepth: number;
   producerGeneration: number;
   runtimeGeneration: number;
   state: TeammateCompactionWakeState;
@@ -632,7 +634,13 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       producer: "auto",
       phase,
       generation: wakeGeneration,
-      ...(state.recoveryWake?.recoveryId === recoveryId ? { wakeProtocolVersion: 1 as const } : {}),
+      ...(state.recoveryWake?.recoveryId === recoveryId
+        ? {
+            wakeProtocolVersion: 1 as const,
+            wakeId: state.recoveryWake.wakeId,
+            wakeDeadlineAt: state.recoveryWake.deadlineAt,
+          }
+        : {}),
       ...(reason ? { reason } : {}),
     });
   }
@@ -653,7 +661,13 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       producer: "output-limit",
       phase,
       generation: wakeGeneration,
-      ...(state.recoveryWake?.recoveryId === recoveryId ? { wakeProtocolVersion: 1 as const } : {}),
+      ...(state.recoveryWake?.recoveryId === recoveryId
+        ? {
+            wakeProtocolVersion: 1 as const,
+            wakeId: state.recoveryWake.wakeId,
+            wakeDeadlineAt: state.recoveryWake.deadlineAt,
+          }
+        : {}),
       ...(reason ? { reason } : {}),
     });
   }
@@ -677,21 +691,105 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
   }
   function branchCheckpointId(ctx: ExtensionContext): string {
     const branch = (ctx.sessionManager as { getBranch?: () => Array<{ id?: string }> }).getBranch?.() ?? [];
-    return branch.at(-1)?.id ?? `session:${state.sessionId ?? "unknown"}:root`;
+    const sessionId = state.sessionId ?? sessionIdOf(ctx) ?? "unknown-session";
+    return branch.at(-1)?.id ?? `session:${sessionId}:root`;
   }
-  function branchMessageForWake(ctx: ExtensionContext, wake: RecoveryWake): { id?: string } | undefined {
-    const marker = recoveryDeliveryMarker(wake.wakeId);
-    const branch = (ctx.sessionManager as {
+  function wakeBranch(ctx: ExtensionContext): Array<{ id?: string; type?: string; message?: unknown }> {
+    return (ctx.sessionManager as {
       getBranch?: () => Array<{ id?: string; type?: string; message?: unknown }>;
     }).getBranch?.() ?? [];
-    return branch.findLast((entry) => {
+  }
+  function userMessageText(message: unknown): string | undefined {
+    if (!message || typeof message !== "object") return undefined;
+    const value = message as { role?: unknown; content?: unknown };
+    if (value.role !== "user") return undefined;
+    if (typeof value.content === "string") return value.content;
+    if (!Array.isArray(value.content)) return undefined;
+    const text = value.content.flatMap((part) => {
+      if (!part || typeof part !== "object") return [];
+      const shape = part as { type?: unknown; text?: unknown };
+      return shape.type === "text" && typeof shape.text === "string" ? [shape.text] : [];
+    }).join("");
+    return text || undefined;
+  }
+  function entriesAfterWakeCheckpoint(ctx: ExtensionContext, wake: RecoveryWake): Array<{ id?: string; type?: string; message?: unknown }> | undefined {
+    const branch = wakeBranch(ctx);
+    if (wake.branchCheckpointId === `session:${wake.sessionId}:root`) {
+      return branch.slice(wake.branchCheckpointDepth);
+    }
+    const checkpointIndex = branch.findIndex((entry) => entry.id === wake.branchCheckpointId);
+    return checkpointIndex < 0 ? undefined : branch.slice(checkpointIndex + 1);
+  }
+  function branchMessageForWake(ctx: ExtensionContext, wake: RecoveryWake): { id?: string } | undefined {
+    const expected = recoveryDeliveryPrompt(wake.prompt, wake.wakeId);
+    return entriesAfterWakeCheckpoint(ctx, wake)?.findLast((entry) =>
+      entry.type === "message" && userMessageText(entry.message) === expected);
+  }
+  function branchHasSupersedingInput(ctx: ExtensionContext, wake: RecoveryWake): boolean {
+    const expected = recoveryDeliveryPrompt(wake.prompt, wake.wakeId);
+    return entriesAfterWakeCheckpoint(ctx, wake)?.some((entry) => {
       if (entry.type !== "message") return false;
-      try { return JSON.stringify(entry.message).includes(marker); }
-      catch { return false; }
-    });
+      const text = userMessageText(entry.message);
+      return text !== undefined && text !== expected;
+    }) === true;
+  }
+  function branchMatchesWake(ctx: ExtensionContext, wake: RecoveryWake): boolean {
+    return entriesAfterWakeCheckpoint(ctx, wake) !== undefined;
   }
   function wakeIsTerminal(wake: RecoveryWake): boolean {
     return wake.state === "turn-started" || wake.state === "cancelled" || wake.state === "failed";
+  }
+  function persistTerminalWake(wake: RecoveryWake, ctx: ExtensionContext): void {
+    if (persistPendingIntent(pi, state)) {
+      publishWake(wake);
+      return;
+    }
+    notifyBestEffort(ctx, `Recovery wake ${wake.wakeId} terminal receipt could not be persisted; retrying fail-closed.`, "error");
+    queueMicrotask(() => {
+      if (state.recoveryWake !== wake || !wakeIsTerminal(wake)) return;
+      if (persistPendingIntent(pi, state)) publishWake(wake);
+      else notifyBestEffort(ctx, `Recovery wake ${wake.wakeId} terminal receipt is still not durable.`, "error");
+    });
+  }
+  function transitionWakeTerminal(
+    wake: RecoveryWake,
+    terminalState: "cancelled" | "failed",
+    reason: string,
+    ctx: ExtensionContext,
+  ): void {
+    if (wakeIsTerminal(wake)) return;
+    wake.state = terminalState;
+    wake.reason = reason;
+    wake.sequence += 1;
+    if (state.pendingIntent && recoveryIdFor(state.pendingIntent) === wake.recoveryId) state.pendingIntent = undefined;
+    if (state.pendingContinuationIntent && recoveryIdFor(state.pendingContinuationIntent) === wake.recoveryId) {
+      state.pendingContinuationIntent = undefined;
+    }
+    if (state.pendingOutputLimitIntent?.recoveryId === wake.recoveryId) state.pendingOutputLimitIntent = undefined;
+    consumedWakeAwaitingStart = undefined;
+    dispatchedWakeThisLifecycle = undefined;
+    persistTerminalWake(wake, ctx);
+  }
+  function expireWakeIfNeeded(wake: RecoveryWake, ctx: ExtensionContext): boolean {
+    if (Date.now() < wake.deadlineAt) return false;
+    transitionWakeTerminal(
+      wake,
+      "failed",
+      "recovery wake deadline expired before an authoritative turn-started receipt",
+      ctx,
+    );
+    notifyBestEffort(ctx, wake.reason ?? "Recovery wake expired.", "error");
+    return true;
+  }
+  function cancelMatchingWake(recoveryId: string, reason: string, ctx: ExtensionContext): void {
+    const wake = state.recoveryWake;
+    if (!wake || wake.recoveryId !== recoveryId) return;
+    transitionWakeTerminal(wake, "cancelled", reason, ctx);
+  }
+  function failMatchingWake(recoveryId: string, reason: string, ctx: ExtensionContext): void {
+    const wake = state.recoveryWake;
+    if (!wake || wake.recoveryId !== recoveryId) return;
+    transitionWakeTerminal(wake, "failed", reason, ctx);
   }
   function publishWake(wake: RecoveryWake): void {
     publishTeammateCompactionWakeReceipt({
@@ -741,6 +839,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       producer,
       sessionId: state.sessionId ?? sessionIdOf(ctx) ?? "unknown-session",
       branchCheckpointId: branchCheckpointId(ctx),
+      branchCheckpointDepth: wakeBranch(ctx).length,
       producerGeneration,
       runtimeGeneration: runtimeGeneration(),
       state: "prepared",
@@ -761,12 +860,13 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
   function ensureRecoveryWake(ctx: ExtensionContext): boolean {
     const wake = state.recoveryWake;
     if (!wake || wakeIsTerminal(wake)) return false;
-    if (Date.now() >= wake.deadlineAt) {
-      wake.state = "failed";
-      wake.reason = "recovery wake deadline expired before an authoritative turn-started receipt";
-      wake.sequence += 1;
-      if (persistPendingIntent(pi, state)) publishWake(wake);
-      notifyBestEffort(ctx, wake.reason, "error");
+    if (expireWakeIfNeeded(wake, ctx)) return false;
+    if (!branchMatchesWake(ctx, wake)) {
+      transitionWakeTerminal(wake, "failed", "recovery wake branch checkpoint is no longer active", ctx);
+      return false;
+    }
+    if (branchHasSupersedingInput(ctx, wake)) {
+      transitionWakeTerminal(wake, "cancelled", "a newer user message superseded recovery wake", ctx);
       return false;
     }
     if (wake.state === "consumed") {
@@ -808,16 +908,24 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     if (state.pendingIntent === intent) state.pendingIntent = undefined;
     const durableContinuation = !intent.requestBlocked && (intent.contextExhausted || intent.loopCritical);
     const shouldContinue = intent.requestBlocked || durableContinuation;
-    if (!shouldContinue || ctx.hasPendingMessages?.()) {
+    const superseded = Boolean(ctx.hasPendingMessages?.());
+    if (!shouldContinue || superseded) {
       if (state.pendingContinuationIntent === intent) state.pendingContinuationIntent = undefined;
-      persistPendingIntent(pi, state);
+      if (superseded) {
+        cancelMatchingWake(recoveryIdFor(intent), "a newer user message superseded compaction recovery", ctx);
+      } else {
+        persistPendingIntent(pi, state);
+      }
       return;
     }
     if (durableContinuation) state.pendingContinuationIntent = intent;
     else persistPendingIntent(pi, state); // provider-pressure remains in-process only
     const recoveryId = recoveryIdFor(intent);
     const promptKind = prompt === COMPACTION_RETRY_PROMPT ? "retry-compaction" : "continue";
-    const wake = prepareWake(recoveryId, "auto", intent.generation, promptKind, prompt, ctx);
+    const producerGeneration = state.recoveryWake?.recoveryId === recoveryId
+      ? state.recoveryWake.producerGeneration
+      : intent.generation;
+    const wake = prepareWake(recoveryId, "auto", producerGeneration, promptKind, prompt, ctx);
     if (!wake) {
       notifyBestEffort(ctx, "Mid-turn continuation paused: durable recovery wake could not be saved.", "error");
       return;
@@ -930,6 +1038,8 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     state.pendingContinuationIntent = undefined;
     state.pendingOutputLimitIntent = undefined;
     state.recoveryWake = undefined;
+    consumedWakeAwaitingStart = undefined;
+    dispatchedWakeThisLifecycle = undefined;
     state.lastTriggerKey = undefined;
     state.lastNoCompactableKey = undefined;
     state.highPressureDroppedTurns = 0;
@@ -1729,6 +1839,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     if (state.pendingOutputLimitIntent !== intent) return false;
     if (ctx.hasPendingMessages?.()) {
       state.pendingOutputLimitIntent = undefined;
+      cancelMatchingWake(intent.recoveryId, "a newer user message superseded output-limit recovery", ctx);
       persistPendingIntent(pi, state);
       publishOutputRecoveryState(intent, "cancelled", "a newer user message superseded output-limit recovery");
       return true;
@@ -1737,7 +1848,11 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     const promptKind = prompt === OUTPUT_LIMIT_RETRY_PROMPT
       ? "retry-compaction"
       : prompt === OUTPUT_LIMIT_DIRECT_CONTINUE_PROMPT ? "direct-continue" : "continue";
-    const wake = prepareWake(outputRecoveryIdFor(intent), "output-limit", intent.generation, promptKind, prompt, ctx);
+    const recoveryId = outputRecoveryIdFor(intent);
+    const producerGeneration = state.recoveryWake?.recoveryId === recoveryId
+      ? state.recoveryWake.producerGeneration
+      : intent.generation;
+    const wake = prepareWake(recoveryId, "output-limit", producerGeneration, promptKind, prompt, ctx);
     if (!wake) {
       notifyBestEffort(ctx, "Output-limit continuation paused: durable recovery wake could not be saved.", "error");
       return false;
@@ -1760,6 +1875,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     }
     if (!sameSettings(settingsFor(ctx), intent.settings)) {
       state.pendingOutputLimitIntent = undefined;
+      cancelMatchingWake(intent.recoveryId, "compaction settings changed before output-limit recovery ran", ctx);
       persistPendingIntent(pi, state);
       publishOutputRecoveryState(intent, "cancelled", "compaction settings changed before output-limit recovery ran");
       return false;
@@ -1767,8 +1883,10 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     if (intent.phase === "continuation") {
       return queueOutputLimitWake(intent, ctx, OUTPUT_LIMIT_CONTINUE_PROMPT, { clearAfterSend: true, publishCompleted: true });
     }
-    const clearPending = () => {
+    const clearPending = (terminalState: "cancelled" | "failed", reason: string) => {
       if (state.pendingOutputLimitIntent === intent) state.pendingOutputLimitIntent = undefined;
+      if (terminalState === "cancelled") cancelMatchingWake(intent.recoveryId, reason, ctx);
+      else failMatchingWake(intent.recoveryId, reason, ctx);
       persistPendingIntent(pi, state);
     };
     if (dependencies.arbiter?.currentOwner()) return true;
@@ -1778,7 +1896,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       linkedThreshold = await linkedThresholdFor(ctx, intent.settings);
     } catch (error) {
       if (intent.generation !== state.generation) return false;
-      clearPending();
+      clearPending("failed", "output-limit compaction model resolution failed");
       ctx.ui.notify(`Output-limit compaction model resolution failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
       return false;
     }
@@ -1794,12 +1912,12 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       && usageTokens > linkedThreshold.thresholdTokens;
     if (contextConstrained === false && !linkedThresholdExceeded) {
       if (ctx.hasPendingMessages?.()) {
-        clearPending();
+        clearPending("cancelled", "a newer user message superseded output-limit recovery");
         publishOutputRecoveryState(intent, "cancelled", "a newer user message superseded output-limit recovery");
         return true;
       }
       if (state.outputLimitContinuations >= MAX_OUTPUT_LIMIT_CONTINUATIONS) {
-        clearPending();
+        clearPending("failed", "output-limit continuation budget exhausted");
         publishOutputRecoveryState(intent, "failed", "output-limit continuation budget exhausted");
         if (!state.outputLimitContinuationNotified) {
           state.outputLimitContinuationNotified = true;
@@ -1815,7 +1933,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     }
 
     if (state.outputLimitCompactions >= MAX_OUTPUT_LIMIT_COMPACTIONS) {
-      clearPending();
+      clearPending("failed", "output-limit compaction budget exhausted");
       publishOutputRecoveryState(intent, "failed", "output-limit compaction budget exhausted");
       if (!state.outputLimitBreakerNotified) {
         state.outputLimitBreakerNotified = true;
@@ -1852,13 +1970,13 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       try {
         preparation = internals.prepareCompaction(branch, intent.settings);
       } catch (error) {
-        clearPending();
+        clearPending("failed", error instanceof Error ? error.message : String(error));
         publishOutputRecoveryState(intent, "failed", error instanceof Error ? error.message : String(error));
         ctx.ui.notify(`Output-limit compaction preparation failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
         return false;
       }
       if (!preparation) {
-        clearPending();
+        clearPending("failed", "Pi reported no compactable history");
         publishOutputRecoveryState(intent, "failed", "Pi reported no compactable history");
         ctx.ui.notify(
           "Output-limit compaction skipped: Pi has no compactable history; the response keeps hitting the output token limit inside the recent keep window.",
@@ -1930,9 +2048,16 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       }
       ctx.ui.notify(`Output-limit compaction failed: ${error instanceof Error ? error.message : String(error)}`, "error");
       if (state.outputLimitCompactions >= MAX_OUTPUT_LIMIT_COMPACTIONS || ctx.hasPendingMessages?.()) {
+        const superseded = Boolean(ctx.hasPendingMessages?.());
         state.pendingOutputLimitIntent = undefined;
+        if (superseded) cancelMatchingWake(intent.recoveryId, "a newer user message superseded output-limit recovery", ctx);
+        else failMatchingWake(intent.recoveryId, "output-limit compaction budget exhausted", ctx);
         persistPendingIntent(pi, state);
-        publishOutputRecoveryState(intent, "failed", "output-limit compaction budget exhausted");
+        publishOutputRecoveryState(
+          intent,
+          superseded ? "cancelled" : "failed",
+          superseded ? "a newer user message superseded output-limit recovery" : "output-limit compaction budget exhausted",
+        );
         return;
       }
       // Keep the intent pending while the retry steer is sent. The next
@@ -2045,6 +2170,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       state.settingsCwd = undefined;
       resetCycleState();
       state.turnCount = 0;
+      publishTeammateCompactionCapability(runtimeGeneration());
       publishIdleStatus(ctx, settingsFor(ctx).enabled);
       if (state.recoveryWake) {
         if (!wakeIsTerminal(state.recoveryWake)) {
@@ -2079,7 +2205,16 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     onBeforeAgentStart(prompt, ctx) {
       const wake = state.recoveryWake;
       if (!wake || (wake.state !== "prepared" && wake.state !== "queued")) return;
-      if (!prompt.includes(recoveryDeliveryMarker(wake.wakeId))) return;
+      if (expireWakeIfNeeded(wake, ctx)) return;
+      if (!branchMatchesWake(ctx, wake)) {
+        transitionWakeTerminal(wake, "failed", "recovery wake branch checkpoint is no longer active", ctx);
+        return;
+      }
+      const expectedPrompt = recoveryDeliveryPrompt(wake.prompt, wake.wakeId);
+      if (prompt !== expectedPrompt || ctx.hasPendingMessages?.()) {
+        transitionWakeTerminal(wake, "cancelled", "a newer user input superseded recovery wake", ctx);
+        return;
+      }
       const previous = { ...wake };
       const recorded = branchMessageForWake(ctx, wake);
       wake.state = "consumed";
@@ -2087,6 +2222,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       if (recorded?.id) wake.messageId = recorded.id;
       if (!persistPendingIntent(pi, state)) {
         Object.assign(wake, previous);
+        dispatchedWakeThisLifecycle = undefined;
         notifyBestEffort(ctx, "Recovery input was observed but its consumed receipt could not be persisted; lifecycle completion is fail-closed.", "error");
         return;
       }
@@ -2096,6 +2232,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     onAgentStart(ctx) {
       const wake = state.recoveryWake;
       if (!wake || wake.state !== "consumed" || consumedWakeAwaitingStart !== wake.wakeId) return;
+      if (expireWakeIfNeeded(wake, ctx) || !branchMatchesWake(ctx, wake)) return;
       const previous = { ...wake };
       wake.state = "turn-started";
       wake.turnId = randomUUID();
@@ -2478,7 +2615,12 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       const settings = settingsFor(ctx);
       const finalStopReason = finalAssistantStopReason(messages);
       if (!settings.enabled || !ctx.model || finalStopReason !== "length") {
+        const superseded = state.pendingOutputLimitIntent;
         state.pendingOutputLimitIntent = undefined;
+        if (superseded) {
+          cancelMatchingWake(superseded.recoveryId, "a non-truncated turn superseded output-limit recovery", ctx);
+          publishOutputRecoveryState(superseded, "cancelled", "a non-truncated turn superseded output-limit recovery");
+        }
         persistPendingIntent(pi, state);
         state.outputLimitCompactions = 0;
         state.outputLimitContinuations = 0;
@@ -2488,7 +2630,12 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       }
       if (generation !== state.generation) return;
       if (ctx.hasPendingMessages?.()) {
+        const superseded = state.pendingOutputLimitIntent;
         state.pendingOutputLimitIntent = undefined;
+        if (superseded) {
+          cancelMatchingWake(superseded.recoveryId, "a newer user message superseded output-limit recovery", ctx);
+          publishOutputRecoveryState(superseded, "cancelled", "a newer user message superseded output-limit recovery");
+        }
         persistPendingIntent(pi, state);
         return;
       }
@@ -2532,7 +2679,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         && !state.pendingIntent.requestBlocked
         && (state.pendingIntent.contextExhausted || state.pendingIntent.loopCritical)
           ? state.pendingIntent
-          : undefined;
+          : state.pendingContinuationIntent;
       // Native/foreign compaction has no owned callback, so it delivers now.
       // An owned callback keeps the same durable continuation until onComplete.
       const settledIntent = wasPreempted || activeRequestOwner === undefined
@@ -2562,7 +2709,12 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         state.outputLimitBreakerNotified = outputLimitBreakerNotified;
       }
       persistPruneManifest(pi, state);
+      if (!state.pendingContinuationIntent && continuationIntent && ctx) {
+        cancelMatchingWake(recoveryIdFor(continuationIntent), "a newer user message superseded compaction recovery", ctx);
+        publishRecoveryState(continuationIntent, "cancelled", "a newer user message superseded compaction recovery");
+      }
       if (!state.pendingOutputLimitIntent && outputLimitIntent) {
+        if (ctx) cancelMatchingWake(outputLimitIntent.recoveryId, "a newer user message superseded output-limit recovery", ctx);
         publishOutputRecoveryState(outputLimitIntent, "cancelled", "a newer user message superseded output-limit recovery");
       }
       persistPendingIntent(pi, state);
@@ -3358,6 +3510,8 @@ function decodeRecoveryWake(value: unknown, sessionId: string | undefined): Reco
     || !["auto", "output-limit", "new-context"].includes(String(wake.producer))
     || typeof wake.sessionId !== "string" || wake.sessionId !== sessionId
     || typeof wake.branchCheckpointId !== "string"
+    || (wake.branchCheckpointDepth !== undefined
+      && (!Number.isSafeInteger(wake.branchCheckpointDepth) || (wake.branchCheckpointDepth as number) < 0))
     || !Number.isSafeInteger(wake.producerGeneration) || !Number.isSafeInteger(wake.runtimeGeneration)
     || !["prepared", "queued", "consumed", "turn-started", "cancelled", "failed"].includes(String(wake.state))
     || typeof wake.promptKind !== "string" || typeof wake.prompt !== "string"
@@ -3366,7 +3520,14 @@ function decodeRecoveryWake(value: unknown, sessionId: string | undefined): Reco
   for (const key of ["messageId", "turnId", "reason"] as const) {
     if (wake[key] !== undefined && typeof wake[key] !== "string") return undefined;
   }
-  return { ...wake } as unknown as RecoveryWake;
+  return {
+    ...wake,
+    // Early v4 writers predate the depth anchor. Real Pi entries still carry
+    // branchCheckpointId; zero is the conservative fallback for id-less fixtures.
+    branchCheckpointDepth: typeof wake.branchCheckpointDepth === "number"
+      ? wake.branchCheckpointDepth
+      : 0,
+  } as unknown as RecoveryWake;
 }
 
 function loadPersistedIntent(

@@ -20,6 +20,7 @@ import { type AgentConfig } from "../agents/agents.ts";
 import { type ReplyTarget } from "../shared/routing.ts";
 import type { SingleResult, MessageProvenanceV1 } from "../shared/types.ts";
 import { type LeaseToken } from "./session-handoff.ts";
+import { ReplayEvidenceCollector } from "./recovery-protocol.ts";
 import type { RunSingleTeammateParams, RunTeammateOptions } from "./execution-infra.ts";
 export declare const attemptReclamations: WeakMap<SingleResult, Promise<unknown>>;
 export type AttemptSettlementCapability = "agent_settled" | "legacy" | "unknown";
@@ -29,8 +30,9 @@ interface AttemptRecoveryFacts {
     inFlightToolCount: number;
     /** A non-zero close before any child event, stderr, or possible side effect. */
     preActivityInfrastructureExit: boolean;
-    /** IPC or non-protocol output that may represent untracked external work. */
+    /** Exact compatibility projection of replayEvidence. */
     externalReplayRisk: boolean;
+    replayEvidence?: ReturnType<ReplayEvidenceCollector["snapshot"]>;
     /** Non-JSON stdout was attributed as assistant content (protocol violation). Optional: not all settlement paths populate it. */
     stdoutProtocolViolation?: boolean;
 }

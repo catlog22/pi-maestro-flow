@@ -2492,6 +2492,8 @@ test("abnormal child exit cannot fresh-replay fallback without authoritative set
   assert.equal(attempts, 1);
   assert.deepEqual(retryErrors, []);
   assert.match(result.messages.at(-1)?.content ?? "", /authoritative settlement/);
+  assert.ok(result.recoveryFailureChain?.decisions.some((decision) =>
+    decision.code === "settlement-authority-insufficient"));
 });
 
 test("fresh agents publish follow-up turns while fork agents terminate after their first result", async () => {

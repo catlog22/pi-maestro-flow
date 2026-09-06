@@ -1,6 +1,7 @@
 /**
  * Core types for the teammate tool.
  */
+import type { RecoveryFailureChainV1, RecoveryWakeReceiptV1, ReplayEvidenceV1 } from "../runs/recovery-protocol.ts";
 export interface Usage {
     inputTokens: number;
     outputTokens: number;
@@ -103,6 +104,12 @@ export interface SingleResult {
     capabilityDeliveries?: CapabilityDelivery[];
     /** Pinned model-registry route identity; absent in legacy/backend-registry mode. */
     provenance?: TeammateExecutionProvenance;
+    /** Latest validated wake receipt; absent for legacy producers. */
+    recoveryWakeReceipt?: RecoveryWakeReceiptV1;
+    /** Bounded replay evidence. externalReplayRisk remains its compatibility projection. */
+    replayEvidence?: ReplayEvidenceV1;
+    /** Immutable initiating failure, ordered recovery decisions, and terminal reason. */
+    recoveryFailureChain?: RecoveryFailureChainV1;
 }
 /**
  * How a backend delivered a capability it was asked for.

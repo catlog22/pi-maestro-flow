@@ -2,6 +2,13 @@ export type TeammateCompactionPhase = "pending" | "continuation" | "completed" |
 export type TeammateCompactionProducer = "auto" | "new-context" | "output-limit";
 export type TeammateCompactionWakeState = "prepared" | "queued" | "consumed" | "turn-started" | "cancelled" | "failed";
 
+export interface TeammateCompactionCapability {
+  type: "teammate_compaction_capability";
+  version: 1;
+  wakeProtocolVersion: 1;
+  runtimeGeneration: number;
+}
+
 export interface TeammateCompactionWakeReceipt {
   type: "teammate_compaction_wake_receipt";
   version: 1;
@@ -12,7 +19,7 @@ export interface TeammateCompactionWakeReceipt {
   state: TeammateCompactionWakeState;
   sequence: number;
   deadlineAt: number;
-  runtimeGeneration?: number;
+  runtimeGeneration: number;
   sessionId?: string;
   branchCheckpointId?: string;
   messageId?: string;
@@ -29,6 +36,10 @@ export interface TeammateCompactionStateEvent {
   generation: number;
   /** Advertises correlated receipts before cross-channel delivery can reorder them behind stdout. */
   wakeProtocolVersion?: 1;
+  /** Binds the ordered state channel to the companion receipt identity. */
+  wakeId?: string;
+  /** Carries the original absolute deadline before companion IPC can be reordered. */
+  wakeDeadlineAt?: number;
   reason?: string;
 }
 
@@ -54,6 +65,15 @@ export function publishTeammateCompactionState(
   event: Omit<TeammateCompactionStateEvent, "type">,
 ): boolean {
   return publishTeammateEnvelope({ type: "teammate_compaction_state", ...event });
+}
+
+export function publishTeammateCompactionCapability(runtimeGeneration: number): boolean {
+  return publishTeammateEnvelope({
+    type: "teammate_compaction_capability",
+    version: 1,
+    wakeProtocolVersion: 1,
+    runtimeGeneration,
+  });
 }
 
 /** Publishing to IPC is telemetry only; its return value is never an acknowledgement. */

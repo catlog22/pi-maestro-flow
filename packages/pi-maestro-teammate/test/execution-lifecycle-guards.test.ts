@@ -1089,16 +1089,23 @@ test("receipt-capable compaction ignores unrelated turns and closes only on the 
     queueMicrotask(() => {
       handle!.child.emit("message", {
         type: "teammate_compaction_state", producer: "auto", recoveryId: "receipt-recovery",
-        generation: 3, phase: "pending", wakeProtocolVersion: 1,
+        generation: 3, phase: "pending",
       });
       handle!.child.emit("message", {
         type: "teammate_compaction_wake_receipt", version: 99, producer: "auto",
         recoveryId: "receipt-recovery", generation: 3, wakeId: "bad-version",
-        state: "prepared", sequence: 0, deadlineAt,
+        state: "prepared", sequence: 0, deadlineAt, runtimeGeneration: 0,
       });
       handle!.stdout.write(line({ type: "agent_end", willRetry: false }));
       handle!.stdout.write(line({ type: "agent_settled" }));
       setTimeout(() => {
+        // Flow announces pending before a wake exists. The first same-core v1
+        // state upgrades that legacy wait exactly once before stdout can race it.
+        handle!.child.emit("message", {
+          type: "teammate_compaction_state", producer: "auto", recoveryId: "receipt-recovery",
+          generation: 3, phase: "continuation", wakeProtocolVersion: 1,
+          wakeId: "wake-1", wakeDeadlineAt: deadlineAt,
+        });
         // Neither this arbitrary boundary nor foreign/stale receipts discharge
         // the correlated recovery obligation.
         handle!.stdout.write(line({ type: "agent_start" }));
@@ -1107,25 +1114,49 @@ test("receipt-capable compaction ignores unrelated turns and closes only on the 
         // receipt arrives after the turn boundary, the advertised protocol
         // prevents the boundary from being mistaken for legacy completion.
         handle!.child.emit("message", {
+          type: "teammate_compaction_state", producer: "auto", recoveryId: "receipt-recovery",
+          generation: 3, phase: "cancelled", wakeProtocolVersion: 1, wakeId: "other-wake", wakeDeadlineAt: deadlineAt,
+        });
+        handle!.child.emit("message", {
+          type: "teammate_compaction_state", producer: "auto", recoveryId: "receipt-recovery",
+          generation: 3, phase: "cancelled",
+        });
+        handle!.child.emit("message", {
+          type: "teammate_compaction_wake_receipt", version: 1, producer: "auto",
+          recoveryId: "receipt-recovery", generation: 3, wakeId: "other-wake",
+          state: "turn-started", sequence: 1, deadlineAt, runtimeGeneration: 0,
+        });
+        handle!.child.emit("message", {
           type: "teammate_compaction_wake_receipt", version: 1, producer: "auto",
           recoveryId: "receipt-recovery", generation: 3, wakeId: "wake-1",
-          state: "prepared", sequence: 1, deadlineAt,
+          state: "turn-started", sequence: 1, deadlineAt, runtimeGeneration: 0,
+        });
+        handle!.child.emit("message", {
+          type: "teammate_compaction_wake_receipt", version: 1, producer: "auto",
+          recoveryId: "receipt-recovery", generation: 3, wakeId: "wake-1",
+          state: "prepared", sequence: 1, deadlineAt, runtimeGeneration: 0,
         });
         handle!.child.emit("message", {
           type: "teammate_compaction_wake_receipt", version: 1, producer: "auto",
           recoveryId: "other", generation: 3, wakeId: "wake-1",
-          state: "turn-started", sequence: 9, deadlineAt: deadlineAt + 10_000,
+          state: "turn-started", sequence: 9, deadlineAt: deadlineAt + 10_000, runtimeGeneration: 0,
         });
         handle!.child.emit("message", {
           type: "teammate_compaction_wake_receipt", version: 1, producer: "auto",
           recoveryId: "receipt-recovery", generation: 3, wakeId: "wake-1",
-          state: "queued", sequence: 1, deadlineAt: deadlineAt + 10_000,
+          state: "queued", sequence: 1, deadlineAt: deadlineAt + 10_000, runtimeGeneration: 0,
         });
         handle!.child.emit("message", {
           type: "teammate_compaction_wake_receipt", version: 1, producer: "auto",
           recoveryId: "receipt-recovery", generation: 3, wakeId: "wake-1",
-          state: "turn-started", sequence: 2, deadlineAt: deadlineAt + 10_000,
-          turnId: "turn-wake-1",
+          state: "consumed", sequence: 2, deadlineAt: deadlineAt + 10_000,
+          runtimeGeneration: 0, messageId: "message-wake-1",
+        });
+        handle!.child.emit("message", {
+          type: "teammate_compaction_wake_receipt", version: 1, producer: "auto",
+          recoveryId: "receipt-recovery", generation: 3, wakeId: "wake-1",
+          state: "turn-started", sequence: 3, deadlineAt: deadlineAt + 10_000,
+          runtimeGeneration: 0, turnId: "turn-wake-1",
         });
         handle!.stdout.write(line(resultReadyTurnEnd("continued from matching wake")));
         handle!.stdout.write(line({ type: "agent_end", willRetry: false }));
@@ -1149,6 +1180,61 @@ test("receipt-capable compaction ignores unrelated turns and closes only on the 
     entry.source === "unknown-ipc" && entry.reasonCode === "unrecognized-child-ipc"));
 });
 
+test("receipt-capable settlement drains state IPC that arrives after stdout agent_settled", async () => {
+  let handle: FakeChildHandle | undefined;
+  const deadlineAt = Date.now() + 2_000;
+  const spawnChildProcess = (() => {
+    handle = createFakeChild();
+    queueMicrotask(() => {
+      handle!.child.emit("message", {
+        type: "teammate_compaction_capability", version: 1,
+        wakeProtocolVersion: 1, runtimeGeneration: 0,
+      });
+      handle!.stdout.write(line({ type: "agent_end", willRetry: false }));
+      handle!.stdout.write(line({ type: "agent_settled" }));
+      setImmediate(() => {
+        handle!.child.emit("message", {
+          type: "teammate_compaction_state", producer: "auto", recoveryId: "late-state",
+          generation: 1, phase: "pending", wakeProtocolVersion: 1, wakeId: "late-wake", wakeDeadlineAt: deadlineAt,
+        });
+        handle!.child.emit("message", {
+          type: "teammate_compaction_wake_receipt", version: 1, producer: "auto",
+          recoveryId: "late-state", generation: 1, wakeId: "late-wake",
+          state: "prepared", sequence: 1, deadlineAt, runtimeGeneration: 0,
+        });
+        handle!.child.emit("message", {
+          type: "teammate_compaction_state", producer: "auto", recoveryId: "late-state",
+          generation: 1, phase: "continuation", wakeProtocolVersion: 1, wakeId: "late-wake", wakeDeadlineAt: deadlineAt,
+        });
+        handle!.child.emit("message", {
+          type: "teammate_compaction_wake_receipt", version: 1, producer: "auto",
+          recoveryId: "late-state", generation: 1, wakeId: "late-wake",
+          state: "consumed", sequence: 2, deadlineAt, runtimeGeneration: 0,
+        });
+        handle!.child.emit("message", {
+          type: "teammate_compaction_wake_receipt", version: 1, producer: "auto",
+          recoveryId: "late-state", generation: 1, wakeId: "late-wake",
+          state: "turn-started", sequence: 3, deadlineAt, runtimeGeneration: 0,
+        });
+        handle!.stdout.write(line({ type: "agent_start" }));
+        handle!.stdout.write(line(resultReadyTurnEnd("continued after late state IPC")));
+        handle!.stdout.write(line({ type: "agent_end", willRetry: false }));
+        handle!.stdout.write(line({ type: "agent_settled" }));
+      });
+    });
+    return handle!.child;
+  }) as unknown as SpawnSeam;
+
+  const result = await runSingleTeammate(
+    { agent: "general", task: "late state ordering", context: "fresh" },
+    { baseCwd: process.cwd(), spawnChildProcess, outputLimitRecoveryTimeoutMs: 2_000 },
+  );
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.messages.at(-1)?.content, "continued after late state IPC");
+  assert.equal(result.recoveryWakeReceipt?.state, "turn-started");
+});
+
 test("receipt-capable compaction keeps the first absolute deadline despite later receipts", async () => {
   let handle: FakeChildHandle | undefined;
   const startedAt = Date.now();
@@ -1158,19 +1244,19 @@ test("receipt-capable compaction keeps the first absolute deadline despite later
     queueMicrotask(() => {
       handle!.child.emit("message", {
         type: "teammate_compaction_state", producer: "auto", recoveryId: "deadline-recovery",
-        generation: 1, phase: "pending",
+        generation: 1, phase: "pending", wakeProtocolVersion: 1, wakeId: "wake-deadline", wakeDeadlineAt: deadlineAt,
       });
       handle!.child.emit("message", {
         type: "teammate_compaction_wake_receipt", version: 1, producer: "auto",
         recoveryId: "deadline-recovery", generation: 1, wakeId: "wake-deadline",
-        state: "prepared", sequence: 1, deadlineAt,
+        state: "prepared", sequence: 1, deadlineAt, runtimeGeneration: 0,
       });
       handle!.stdout.write(line({ type: "agent_end", willRetry: false }));
       handle!.stdout.write(line({ type: "agent_settled" }));
       setTimeout(() => handle!.child.emit("message", {
         type: "teammate_compaction_wake_receipt", version: 1, producer: "auto",
         recoveryId: "deadline-recovery", generation: 1, wakeId: "wake-deadline",
-        state: "queued", sequence: 2, deadlineAt: deadlineAt + 5_000,
+        state: "queued", sequence: 2, deadlineAt: deadlineAt + 5_000, runtimeGeneration: 0,
       }), 25);
     });
     return handle!.child;

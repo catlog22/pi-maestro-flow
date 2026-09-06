@@ -8,8 +8,66 @@ import { dispatchChildIpcMessage } from "pi-maestro-teammate/v1/execution";
 import { registerTeammatePermissionBroker } from "pi-maestro-teammate/v1/child-extensions";
 import type { ActiveAgent, TeammateState } from "pi-maestro-teammate/v1/types";
 import { requestTeammateInteraction } from "../src/permissions/teammate-relay.ts";
-import { publishTeammateCompactionWakeReceipt } from "../src/compaction/teammate-compaction-relay.ts";
+import {
+  publishTeammateCompactionCapability,
+  publishTeammateCompactionState,
+  publishTeammateCompactionWakeReceipt,
+} from "../src/compaction/teammate-compaction-relay.ts";
 
+
+test("compaction capability handshake identifies receipt-aware child runtimes", () => {
+  const previousChild = process.env.PI_TEAMMATE_CHILD;
+  const sendDescriptor = Object.getOwnPropertyDescriptor(process, "send");
+  const sent: Array<Record<string, unknown>> = [];
+  process.env.PI_TEAMMATE_CHILD = "1";
+  Object.defineProperty(process, "send", {
+    configurable: true,
+    value(message: Record<string, unknown>) { sent.push(message); return true; },
+  });
+  try {
+    assert.equal(publishTeammateCompactionCapability(4), true);
+    assert.deepEqual(sent, [{
+      type: "teammate_compaction_capability", version: 1, wakeProtocolVersion: 1,
+      runtimeGeneration: 4, correlationId: process.env.PI_TEAMMATE_CORRELATION_ID,
+    }]);
+  } finally {
+    if (sendDescriptor) Object.defineProperty(process, "send", sendDescriptor);
+    else delete (process as typeof process & { send?: unknown }).send;
+    if (previousChild === undefined) delete process.env.PI_TEAMMATE_CHILD;
+    else process.env.PI_TEAMMATE_CHILD = previousChild;
+  }
+});
+
+test("compaction state advertises the correlated wake identity on the ordered IPC channel", () => {
+  const previousChild = process.env.PI_TEAMMATE_CHILD;
+  const previousCorrelation = process.env.PI_TEAMMATE_CORRELATION_ID;
+  const sendDescriptor = Object.getOwnPropertyDescriptor(process, "send");
+  const sent: Array<Record<string, unknown>> = [];
+  process.env.PI_TEAMMATE_CHILD = "1";
+  process.env.PI_TEAMMATE_CORRELATION_ID = "state-child";
+  Object.defineProperty(process, "send", {
+    configurable: true,
+    value(message: Record<string, unknown>) { sent.push(message); return true; },
+  });
+  try {
+    assert.equal(publishTeammateCompactionState({
+      recoveryId: "recovery", producer: "auto", generation: 7, phase: "continuation",
+      wakeProtocolVersion: 1, wakeId: "wake", wakeDeadlineAt: 1234,
+    }), true);
+    assert.deepEqual(sent, [{
+      type: "teammate_compaction_state", recoveryId: "recovery", producer: "auto",
+      generation: 7, phase: "continuation", wakeProtocolVersion: 1, wakeId: "wake", wakeDeadlineAt: 1234,
+      correlationId: "state-child",
+    }]);
+  } finally {
+    if (sendDescriptor) Object.defineProperty(process, "send", sendDescriptor);
+    else delete (process as typeof process & { send?: unknown }).send;
+    if (previousChild === undefined) delete process.env.PI_TEAMMATE_CHILD;
+    else process.env.PI_TEAMMATE_CHILD = previousChild;
+    if (previousCorrelation === undefined) delete process.env.PI_TEAMMATE_CORRELATION_ID;
+    else process.env.PI_TEAMMATE_CORRELATION_ID = previousCorrelation;
+  }
+});
 
 test("compaction wake receipt matches the teammate consumer envelope exactly", () => {
   const previousChild = process.env.PI_TEAMMATE_CHILD;
