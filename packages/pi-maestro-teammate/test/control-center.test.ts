@@ -85,6 +85,7 @@ function profileState(overridesEnabled = false): ModelRoutingState {
       mappings: { explore: overridesEnabled ? "anthropic/sonnet" : "missing/fast" },
       thinkingLevels: { explore: "low" },
     },
+    smartMode: "off",
     askBeforeDispatch: false,
     requestedProfile: "fast",
   };
@@ -230,6 +231,38 @@ test("control center keeps roles, routing and active collaboration visible", () 
 
   const narrow = center.render(40).join("\n");
   assert.match(narrow, /Teammate Control Center|Teammates/);
+});
+
+test("routing tab toggles smart model selection independently from confirmation", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-smart-toggle-"));
+  const globalFilePath = path.join(root, "teammate-models.json");
+  const state = profileState();
+  fs.writeFileSync(globalFilePath, `${JSON.stringify(state.global, null, 2)}\n`, "utf8");
+  try {
+    const { center } = makeCenter({ state, globalFilePath });
+    const initial = center.render(100).join("\n");
+    assert.match(initial, /Smart model selection: off/);
+    assert.match(initial, /Ask model before dispatch: off/);
+
+    center.handleInput("\x13");
+    assert.match(center.render(100).join("\n"), /Smart model selection: economy/);
+    assert.equal(JSON.parse(fs.readFileSync(globalFilePath, "utf8")).smartMode, "economy");
+
+    center.handleInput("\x13");
+    assert.match(center.render(100).join("\n"), /Smart model selection: balanced/);
+    assert.equal(JSON.parse(fs.readFileSync(globalFilePath, "utf8")).smartMode, "balanced");
+
+    center.handleInput("\x13");
+    assert.match(center.render(100).join("\n"), /Smart model selection: SOTA/);
+    assert.equal(JSON.parse(fs.readFileSync(globalFilePath, "utf8")).smartMode, "sota");
+    assert.match(center.render(100).join("\n"), /Ask model before dispatch: off/);
+
+    center.handleInput("\x13");
+    assert.match(center.render(100).join("\n"), /Smart model selection: off/);
+    assert.equal(JSON.parse(fs.readFileSync(globalFilePath, "utf8")).smartMode, undefined);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("arrow navigation switches tabs and opens role model settings", () => {

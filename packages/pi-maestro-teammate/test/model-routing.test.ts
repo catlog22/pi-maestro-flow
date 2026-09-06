@@ -11,6 +11,7 @@ import {
 import {
   activateModelRoutingProfile,
   applyModelRouting,
+  appendSmartModelSelectionContext,
   appendTaskTypeRoutingContext,
   clearProjectModelRoutingOverrides,
   createAndActivateGlobalModelRoutingProfile,
@@ -18,6 +19,7 @@ import {
   deleteGlobalModelRoutingProfile,
   discoverRoutingTaskTypes,
   getGlobalAskBeforeDispatch,
+  getGlobalSmartMode,
   getSessionModelRoutingPath,
   getProjectModelRoutingPath,
   inferTaskType,
@@ -48,6 +50,7 @@ import {
   saveSessionModelRoutingOverrides,
   setDefaultGlobalModelRoutingProfile,
   setGlobalAskBeforeDispatch,
+  setGlobalSmartMode,
   setProjectActiveModelRoutingProfile,
   setProjectModelRoutingOverridesEnabled,
   syncModelCircuitPolicies,
@@ -1517,6 +1520,30 @@ test("appendTaskTypeRoutingContext injects a concise, idempotent routing contrac
   }
 });
 
+test("appendSmartModelSelectionContext injects distinct strategy and confirmation policies without ranking data", () => {
+  const economy = appendSmartModelSelectionContext("Base prompt", "economy", true);
+  assert.match(economy, /teammate-smart-model-selection:start/);
+  assert.match(economy, /preference: "economy"/);
+  assert.match(economy, /Economy strategy: prefer the lowest reference price/);
+  assert.match(economy, /Preserve every user-explicit model/);
+  assert.match(economy, /runtime confirmation overlay is enabled/);
+  assert.doesNotMatch(economy, /OpenRouter|Artificial Analysis|benchmark_model_id/);
+
+  const balanced = appendSmartModelSelectionContext(economy, "balanced", false);
+  assert.equal(balanced.match(/teammate-smart-model-selection:start/g)?.length, 1);
+  assert.match(balanced, /preference: "balanced"/);
+  assert.match(balanced, /Balanced strategy: balance task-relevant ability/);
+  assert.match(balanced, /User confirmation is disabled/);
+  assert.doesNotMatch(balanced, /runtime confirmation overlay is enabled/);
+
+  const sota = appendSmartModelSelectionContext(balanced, "sota", false);
+  assert.match(sota, /preference: "sota"/);
+  assert.match(sota, /SOTA strategy: prioritize the strongest task-relevant/);
+
+  const disabled = appendSmartModelSelectionContext(sota, "off", false);
+  assert.equal(disabled, "Base prompt");
+});
+
 test('unreachableRoutingTargets flags catalog-missing task-type and role mappings', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mt-unreachable-'));
   const globalPath = path.join(root, 'home', 'teammate-models.json');
@@ -1811,25 +1838,41 @@ test("type role assignments update atomically and custom type deletion clears re
   }
 });
 
-test("ask-before-dispatch flag defaults off and persists on the global config", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-ask-flag-"));
+test("smart strategy and ask-before-dispatch settings default off and persist independently", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-mode-flags-"));
   const globalPath = path.join(root, "home", "teammate-models.json");
   const cwd = path.join(root, "project");
   fs.mkdirSync(cwd, { recursive: true });
   try {
+    assert.equal(getGlobalSmartMode(globalPath), "off");
     assert.equal(getGlobalAskBeforeDispatch(globalPath), false);
+    assert.equal(loadModelRoutingState(cwd, globalPath).smartMode, "off");
     assert.equal(loadModelRoutingState(cwd, globalPath).askBeforeDispatch, false);
 
+    // The transitional boolean spelling remains compatible and maps to balanced.
+    setGlobalSmartMode(true, globalPath);
     setGlobalAskBeforeDispatch(true, globalPath);
+    assert.equal(getGlobalSmartMode(globalPath), "balanced");
     assert.equal(getGlobalAskBeforeDispatch(globalPath), true);
+    assert.equal(loadModelRoutingState(cwd, globalPath).smartMode, "balanced");
     assert.equal(loadModelRoutingState(cwd, globalPath).askBeforeDispatch, true);
 
-    // Unrelated writers round-trip the flag (no silent reset).
+    // Unrelated writers round-trip both settings (no silent reset).
     saveGlobalProfileModelMapping(cwd, "default", "explore", "provider/explore", globalPath);
+    assert.equal(getGlobalSmartMode(globalPath), "balanced");
     assert.equal(getGlobalAskBeforeDispatch(globalPath), true);
 
+    setGlobalSmartMode("economy", globalPath);
+    assert.equal(getGlobalSmartMode(globalPath), "economy");
+    setGlobalSmartMode("sota", globalPath);
+    assert.equal(loadModelRoutingState(cwd, globalPath).smartMode, "sota");
+    assert.throws(() => setGlobalSmartMode("fastest" as never, globalPath), /Invalid teammate smart mode/);
+
+    setGlobalSmartMode(false, globalPath);
     setGlobalAskBeforeDispatch(false, globalPath);
+    assert.equal(getGlobalSmartMode(globalPath), "off");
     assert.equal(getGlobalAskBeforeDispatch(globalPath), false);
+    assert.equal(loadModelRoutingState(cwd, globalPath).smartMode, "off");
     assert.equal(loadModelRoutingState(cwd, globalPath).askBeforeDispatch, false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

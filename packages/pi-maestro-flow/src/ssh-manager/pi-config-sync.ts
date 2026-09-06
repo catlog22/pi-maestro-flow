@@ -162,7 +162,7 @@ export function validatePiConfigShape(category: PiConfigCategory, value: unknown
     return;
   }
   if (category !== "teammate") return;
-  if (Object.keys(value).some((key) => !["version", "defaultProfile", "profiles", "retiredProfileIds", "askBeforeDispatch"].includes(key))
+  if (Object.keys(value).some((key) => !["version", "defaultProfile", "profiles", "retiredProfileIds", "smartMode", "askBeforeDispatch"].includes(key))
     || value.version !== 3 || !isModelRoutingProfileId(value.defaultProfile) || !isRecord(value.profiles) || !hasOwn(value.profiles, value.defaultProfile)) {
     throw new Error("teammate configuration is invalid");
   }
@@ -174,6 +174,11 @@ export function validatePiConfigShape(category: PiConfigCategory, value: unknown
   if (value.retiredProfileIds !== undefined && (!Array.isArray(value.retiredProfileIds)
     || new Set(value.retiredProfileIds).size !== value.retiredProfileIds.length
     || value.retiredProfileIds.some((id) => !isModelRoutingProfileId(id) || hasOwn(value.profiles as Record<string, unknown>, id)))) {
+    throw new Error("teammate configuration is invalid");
+  }
+  if (value.smartMode !== undefined
+    && typeof value.smartMode !== "boolean"
+    && (typeof value.smartMode !== "string" || !["off", "economy", "balanced", "sota"].includes(value.smartMode))) {
     throw new Error("teammate configuration is invalid");
   }
   if (value.askBeforeDispatch !== undefined && typeof value.askBeforeDispatch !== "boolean") throw new Error("teammate configuration is invalid");

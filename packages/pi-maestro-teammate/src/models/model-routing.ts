@@ -82,11 +82,16 @@ export interface ModelRoutingProfile extends ModelRoutingRules {
   name: string;
 }
 
+export const TEAMMATE_SMART_MODES = ["off", "economy", "balanced", "sota"] as const;
+export type TeammateSmartMode = typeof TEAMMATE_SMART_MODES[number];
+
 export interface GlobalModelRoutingStore {
   version: 3;
   defaultProfile: string;
   profiles: Record<string, ModelRoutingProfile>;
   retiredProfileIds?: string[];
+  /** Require the root agent to consult model-availability using this selection strategy. */
+  smartMode?: Exclude<TeammateSmartMode, "off">;
   /** Ask the user to confirm/pick model provider + thinking before each root dispatch. */
   askBeforeDispatch?: boolean;
 }
@@ -118,6 +123,8 @@ export interface ModelRoutingState {
   global: GlobalModelRoutingStore;
   project: ProjectModelRoutingStore;
   config: ModelRoutingConfig;
+  /** Effective smart model-selection strategy (global store, default off). */
+  smartMode: TeammateSmartMode;
   /** Effective ask-before-dispatch flag (global store, default off). */
   askBeforeDispatch: boolean;
   requestedProfile?: string;
@@ -552,7 +559,7 @@ function invalidGlobalStore(): never {
 
 function normalizeGlobalStore(parsed: Record<string, unknown> | undefined): GlobalModelRoutingStore {
   if (parsed?.version === 3) {
-    assertKnownKeys(parsed, ["version", "defaultProfile", "profiles", "retiredProfileIds", "askBeforeDispatch"], "v3 global config");
+    assertKnownKeys(parsed, ["version", "defaultProfile", "profiles", "retiredProfileIds", "smartMode", "askBeforeDispatch"], "v3 global config");
     if (!parsed.profiles || typeof parsed.profiles !== "object" || Array.isArray(parsed.profiles)) {
       return invalidGlobalStore();
     }
@@ -588,6 +595,14 @@ function normalizeGlobalStore(parsed: Record<string, unknown> | undefined): Glob
         )
         ? [...new Set(parsed.retiredProfileIds as string[])]
         : invalidGlobalStore();
+    const smartMode: TeammateSmartMode = parsed.smartMode === true
+      ? "balanced"
+      : parsed.smartMode === false || parsed.smartMode === undefined
+        ? "off"
+        : typeof parsed.smartMode === "string"
+          && (TEAMMATE_SMART_MODES as readonly string[]).includes(parsed.smartMode)
+          ? parsed.smartMode as TeammateSmartMode
+          : invalidGlobalStore();
     if (parsed.askBeforeDispatch !== undefined && typeof parsed.askBeforeDispatch !== "boolean") {
       return invalidGlobalStore();
     }
@@ -596,6 +611,7 @@ function normalizeGlobalStore(parsed: Record<string, unknown> | undefined): Glob
       defaultProfile: requestedDefault,
       profiles,
       ...(retiredProfileIds.length > 0 ? { retiredProfileIds } : {}),
+      ...(smartMode === "off" ? {} : { smartMode }),
       ...(parsed.askBeforeDispatch === true ? { askBeforeDispatch: true } : {}),
     };
   }
@@ -1194,10 +1210,44 @@ function resolvedState(
       projectOverridesEnabled: project.applyOverrides,
       ...rules,
     },
+    smartMode: global.smartMode ?? "off",
     askBeforeDispatch: global.askBeforeDispatch === true,
     requestedProfile,
     ...(missingProfile ? { missingProfile } : {}),
   };
+}
+
+/** Persist the smart model-selection strategy on the global teammate model config. */
+export function setGlobalSmartMode(
+  value: TeammateSmartMode | boolean,
+  globalFilePath = getGlobalModelRoutingPath(),
+): TeammateSmartMode {
+  const mode: TeammateSmartMode = value === true ? "balanced" : value === false ? "off" : value;
+  if (!(TEAMMATE_SMART_MODES as readonly string[]).includes(mode)) {
+    throw new Error(`Invalid teammate smart mode: ${String(value)}`);
+  }
+  return withGlobalConfigLock(globalFilePath, () => {
+    const store = readGlobalStore(globalFilePath);
+    const next: GlobalModelRoutingStore = mode === "off"
+      ? (() => {
+        const { smartMode: _dropped, ...rest } = store;
+        return rest;
+      })()
+      : { ...store, smartMode: mode };
+    writeJson(globalFilePath, next);
+    return mode;
+  });
+}
+
+/** Effective smart model-selection strategy without a cwd (global store only). */
+export function getGlobalSmartMode(
+  globalFilePath = getGlobalModelRoutingPath(),
+): TeammateSmartMode {
+  try {
+    return readGlobalStore(globalFilePath).smartMode ?? "off";
+  } catch {
+    return "off";
+  }
 }
 
 /**
@@ -2394,6 +2444,8 @@ export function formatModelRoutingConfig(
 
 export const TASK_TYPE_ROUTING_START_MARKER = "<!-- teammate-tasktype-routing:start -->";
 export const TASK_TYPE_ROUTING_END_MARKER = "<!-- teammate-tasktype-routing:end -->";
+export const SMART_MODEL_SELECTION_START_MARKER = "<!-- teammate-smart-model-selection:start -->";
+export const SMART_MODEL_SELECTION_END_MARKER = "<!-- teammate-smart-model-selection:end -->";
 
 /**
  * Inject concise taskType model-routing guidance for agents that can dispatch
@@ -2431,6 +2483,52 @@ export function appendTaskTypeRoutingContext(
   const end = systemPrompt.indexOf(TASK_TYPE_ROUTING_END_MARKER);
   if (start >= 0 && end >= start) {
     return `${systemPrompt.slice(0, start)}${block}${systemPrompt.slice(end + TASK_TYPE_ROUTING_END_MARKER.length)}`;
+  }
+  return `${systemPrompt}\n\n${block}`;
+}
+
+/**
+ * Inject the root-agent smart selection workflow without embedding volatile
+ * benchmark data. model-availability remains the single runtime data source.
+ */
+export function appendSmartModelSelectionContext(
+  systemPrompt: string,
+  smartMode: TeammateSmartMode,
+  askBeforeDispatch: boolean,
+): string {
+  const start = systemPrompt.indexOf(SMART_MODEL_SELECTION_START_MARKER);
+  const end = systemPrompt.indexOf(SMART_MODEL_SELECTION_END_MARKER);
+  if (smartMode === "off") {
+    if (start < 0 || end < start) return systemPrompt;
+    const before = systemPrompt.slice(0, start).trimEnd();
+    const after = systemPrompt.slice(end + SMART_MODEL_SELECTION_END_MARKER.length).trimStart();
+    return after ? `${before}\n\n${after}` : before;
+  }
+
+  const confirmation = askBeforeDispatch
+    ? "The runtime confirmation overlay is enabled. Pass the selected candidate to `teammate`; the overlay owns user confirmation or modification. Do not ask a second confirmation question."
+    : "User confirmation is disabled. Do not ask a model-selection question; proceed with the selected candidate when evidence is current and sufficiently confident.";
+  const strategy = smartMode === "economy"
+    ? "Economy strategy: prefer the lowest reference price among candidates with current, non-low-confidence evidence for the task; pay more only when the cheaper candidate is materially weaker on the task-relevant ranks."
+    : smartMode === "sota"
+      ? "SOTA strategy: prioritize the strongest task-relevant intelligence, coding, or agentic ranks regardless of reference price; use price and latency only to break an evidence-level tie."
+      : "Balanced strategy: balance task-relevant ability, reference price, and latency; prefer a clear Pareto trade-off and retain configured routing when no candidate is materially better.";
+  const block = [
+    SMART_MODEL_SELECTION_START_MARKER,
+    `## Smart teammate model selection · ${smartMode}`,
+    "Before every root `teammate` dispatch containing a task without a user-explicit model:",
+    `1. Assign the concrete \`taskType\`; for each distinct task type call \`model-availability\` with that \`taskType\`, \`preference: "${smartMode}"\`, and \`limit: 5\`.`,
+    "2. Consider only ids in `teammate_models`. Treat `model_intelligence` as advisory reference evidence, not as availability or policy authority.",
+    `3. ${strategy}`,
+    "4. Preserve every user-explicit model. Otherwise pass the selected candidate's exact registration id as `model`.",
+    "5. If intelligence is unavailable or stale, confidence is low, candidates materially tie, or no ranked candidate matches, omit `model` and retain configured taskType/role routing.",
+    "6. Never treat unknown pricing as free, never send the task prompt to an external ranking service, and never rewrite persistent routing profiles from a recommendation.",
+    confirmation,
+    "This smart-mode rule is the only exception to the catalog default that says to omit `model` unless the user names one.",
+    SMART_MODEL_SELECTION_END_MARKER,
+  ].join("\n");
+  if (start >= 0 && end >= start) {
+    return `${systemPrompt.slice(0, start)}${block}${systemPrompt.slice(end + SMART_MODEL_SELECTION_END_MARKER.length)}`;
   }
   return `${systemPrompt}\n\n${block}`;
 }

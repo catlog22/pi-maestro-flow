@@ -42,11 +42,15 @@ export interface ModelRoutingRules {
 export interface ModelRoutingProfile extends ModelRoutingRules {
     name: string;
 }
+export declare const TEAMMATE_SMART_MODES: readonly ["off", "economy", "balanced", "sota"];
+export type TeammateSmartMode = typeof TEAMMATE_SMART_MODES[number];
 export interface GlobalModelRoutingStore {
     version: 3;
     defaultProfile: string;
     profiles: Record<string, ModelRoutingProfile>;
     retiredProfileIds?: string[];
+    /** Require the root agent to consult model-availability using this selection strategy. */
+    smartMode?: Exclude<TeammateSmartMode, "off">;
     /** Ask the user to confirm/pick model provider + thinking before each root dispatch. */
     askBeforeDispatch?: boolean;
 }
@@ -66,6 +70,8 @@ export interface ModelRoutingState {
     global: GlobalModelRoutingStore;
     project: ProjectModelRoutingStore;
     config: ModelRoutingConfig;
+    /** Effective smart model-selection strategy (global store, default off). */
+    smartMode: TeammateSmartMode;
     /** Effective ask-before-dispatch flag (global store, default off). */
     askBeforeDispatch: boolean;
     requestedProfile?: string;
@@ -104,6 +110,10 @@ export declare function isModelRoutingProfileId(value: unknown): value is string
  * ignored at read time, so a bad write never blocks dispatch.
  */
 export declare function saveSessionModelRoutingOverrides(cwd: string, sessionId: string, rules: ModelRoutingRules, globalFilePath?: string): ModelRoutingConfig;
+/** Persist the smart model-selection strategy on the global teammate model config. */
+export declare function setGlobalSmartMode(value: TeammateSmartMode | boolean, globalFilePath?: string): TeammateSmartMode;
+/** Effective smart model-selection strategy without a cwd (global store only). */
+export declare function getGlobalSmartMode(globalFilePath?: string): TeammateSmartMode;
 /**
  * Persist the ask-before-dispatch flag on the global teammate model config.
  * The flag is user-level (not per profile/project): it controls whether the
@@ -250,6 +260,8 @@ export declare function formatModelRoutingConfig(cwd: string, agents?: readonly 
 }[], globalFilePath?: string, availableModels?: readonly string[]): string;
 export declare const TASK_TYPE_ROUTING_START_MARKER = "<!-- teammate-tasktype-routing:start -->";
 export declare const TASK_TYPE_ROUTING_END_MARKER = "<!-- teammate-tasktype-routing:end -->";
+export declare const SMART_MODEL_SELECTION_START_MARKER = "<!-- teammate-smart-model-selection:start -->";
+export declare const SMART_MODEL_SELECTION_END_MARKER = "<!-- teammate-smart-model-selection:end -->";
 /**
  * Inject concise taskType model-routing guidance for agents that can dispatch
  * teammates. Replaces an existing block in place so repeated injection stays
@@ -258,3 +270,8 @@ export declare const TASK_TYPE_ROUTING_END_MARKER = "<!-- teammate-tasktype-rout
 export declare function appendTaskTypeRoutingContext(systemPrompt: string, cwd: string, agents?: readonly {
     taskType?: TeammateTaskType;
 }[], globalFilePath?: string, availableModels?: readonly string[]): string;
+/**
+ * Inject the root-agent smart selection workflow without embedding volatile
+ * benchmark data. model-availability remains the single runtime data source.
+ */
+export declare function appendSmartModelSelectionContext(systemPrompt: string, smartMode: TeammateSmartMode, askBeforeDispatch: boolean): string;

@@ -99,10 +99,59 @@ test("streams progressive detail updates and returns both model sources", async 
   ]);
   assert.ok(Array.isArray(details.delegate_tools));
   assert.ok(Array.isArray(details.delegate_fallback));
+  assert.equal(details.model_intelligence, null);
 
   const text = result.content[0].type === "text" ? result.content[0].text : "";
   const parsed = JSON.parse(text);
   assert.ok(parsed.hint.includes("--to"), "hint must warn about the mandatory --to flag");
+});
+
+test("taskType adds advisory model intelligence for session-available candidates", async () => {
+  const requests: unknown[] = [];
+  const tool = modelAvailabilityTool({
+    loadModelIntelligence: async (taskType, models, options) => {
+      requests.push({ taskType, models, preference: options.preference, limit: options.limit });
+      return {
+        status: "available",
+        task_type: taskType,
+        preference: options.preference ?? "balanced",
+        recommendation: models[0]?.registrationId ?? null,
+        candidates: models.slice(0, options.limit).map((model, index) => ({
+          registration_id: model.registrationId,
+          benchmark_model_id: model.modelId ?? model.registrationId,
+          strengths: ["coding"],
+          ranks: { coding: { rank: index + 1, total: models.length } },
+          confidence: "high",
+        })),
+        unmatched_models: [],
+        sources: [],
+        note: "test intelligence",
+      };
+    },
+  });
+  const result = await tool.execute("smart", {
+    taskType: "development",
+    preference: "economy",
+    limit: 1,
+  }, undefined, undefined, mockContext([
+    { provider: "openai", id: "gpt-5.6-sol" },
+    { provider: "google", id: "gemini-3.1-pro" },
+  ]));
+
+  assert.deepEqual(requests, [{
+    taskType: "development",
+    models: [
+      { registrationId: "google/gemini-3.1-pro" },
+      { registrationId: "openai/gpt-5.6-sol" },
+    ],
+    preference: "economy",
+    limit: 1,
+  }]);
+  assert.equal(result.details?.model_intelligence?.preference, "economy");
+  assert.equal(result.details?.model_intelligence?.recommendation, "google/gemini-3.1-pro");
+  assert.equal(result.details?.model_intelligence?.candidates.length, 1);
+  const text = result.content[0].type === "text" ? result.content[0].text : "";
+  assert.equal(JSON.parse(text).model_intelligence.task_type, "development");
 });
 
 test("model-registry diagnostics retain unavailable routes without exposing deployment config", async () => {

@@ -61,7 +61,7 @@ export declare const PROFILE_TUI_CATALOGS: {
         readonly "model.filterShown": "· {count} shown";
         readonly "model.readOnlyFooter": "Enter retry load · Esc close · navigation is read-only";
         readonly "model.footer.manage": "Enter manage";
-        readonly "model.footer.routing": "Enter settings · Ctrl+N new type · Ctrl+A ask model";
+        readonly "model.footer.routing": "Enter settings · Ctrl+N new type · Ctrl+S smart · Ctrl+A ask";
         readonly "model.footer.role": "Enter settings";
         readonly "model.footer.open": "Enter open";
         readonly "model.footer.close": "Esc close";
@@ -183,7 +183,7 @@ export declare const PROFILE_TUI_CATALOGS: {
         readonly "model.filterShown": "· 显示 {count} 项";
         readonly "model.readOnlyFooter": "Enter 重试加载 · Esc 关闭 · 导航为只读";
         readonly "model.footer.manage": "Enter 管理";
-        readonly "model.footer.routing": "Enter 设置 · Ctrl+N 新建 Type · Ctrl+A 询问 Model";
+        readonly "model.footer.routing": "Enter 设置 · Ctrl+N 新建 Type · Ctrl+S 智能 · Ctrl+A 询问";
         readonly "model.footer.role": "Enter 设置";
         readonly "model.footer.open": "Enter 打开";
         readonly "model.footer.close": "Esc 关闭";

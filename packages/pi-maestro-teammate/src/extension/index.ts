@@ -446,6 +446,7 @@ import {
 import {
   activateModelRoutingProfile,
   applyModelRouting,
+  appendSmartModelSelectionContext,
   appendTaskTypeRoutingContext,
   formatModelRoutingConfig,
   listModelRoutingProfiles,
@@ -838,7 +839,13 @@ export default function registerTeammateExtension(
     const withTaskType = canDispatchNestedTeammate
       ? appendTaskTypeRoutingContext(withAgents, ctx.cwd, discoverAgents(ctx.cwd), undefined, refreshModelCatalog(ctx).modelIds)
       : withAgents;
-    const withDepth = appendTeammateDepthContext(withTaskType, currentDepth, currentMaxDispatchDepth);
+    const smartState = isChild ? undefined : loadModelRoutingState(ctx.cwd);
+    const withSmartSelection = appendSmartModelSelectionContext(
+      withTaskType,
+      smartState?.smartMode ?? "off",
+      smartState?.askBeforeDispatch === true,
+    );
+    const withDepth = appendTeammateDepthContext(withSmartSelection, currentDepth, currentMaxDispatchDepth);
     if (!monitorInteractionModeActive) monitorToolExposure?.syncInactive();
     return { systemPrompt: applyMonitorModeContext(withDepth, monitorInteractionModeActive) };
   };

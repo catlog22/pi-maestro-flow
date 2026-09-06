@@ -207,6 +207,161 @@ test("heartbeat reuses the originally retained FileHandle", async () => {
   await rm(root, { recursive: true, force: true });
 });
 
+test("heartbeat writes are fixed-length positional loops without truncate and zero progress fails", async () => {
+  const durability = { async syncFile() {}, async syncDirectory() {} };
+  {
+    const { root, agent } = await fixture();
+    const positions: number[] = []; let truncateCalls = 0; let syncs = 0;
+    const openSeam = (async (...args: Parameters<typeof fsOpen>) => {
+      const handle = await fsOpen(...args);
+      if (!String(args[0]).endsWith("heartbeat")) return handle;
+      return new Proxy(handle, { get(target, property) {
+        if (property === "truncate") return async () => { truncateCalls++; throw new Error("truncate forbidden"); };
+        if (property === "write") return async (...writeArgs: Parameters<typeof target.write>) => {
+          const [buffer, offset, length, position] = writeArgs as [Uint8Array, number, number, number];
+          const limited = Math.min(length, 3); positions.push(position);
+          return target.write(buffer, offset, limited, position);
+        };
+        if (property === "sync") return async () => { syncs++; return target.sync(); };
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      } });
+    }) as typeof fsOpen;
+    const owned = await acquirePrivateStateLock({
+      directory: agent, name: ".probe.lock", heartbeatMs: 1000, now: () => 123,
+      processIdentity: async () => "birth:self", processLiveness: async () => true,
+      enforcePrivate: async () => undefined, durability, fs: { open: openSeam },
+    });
+    assert.equal(await readFile(join(agent, ".probe.lock", "heartbeat"), "ascii"), "0000000000000123\n");
+    assert.deepEqual(positions, [0, 3, 6, 9, 12, 15]);
+    assert.equal(truncateCalls, 0); assert.equal(syncs, 1);
+    assert.equal(await owned.release(), true);
+    await rm(root, { recursive: true, force: true });
+  }
+  {
+    const { root, agent } = await fixture();
+    const openSeam = (async (...args: Parameters<typeof fsOpen>) => {
+      const handle = await fsOpen(...args);
+      if (!String(args[0]).endsWith("heartbeat")) return handle;
+      return new Proxy(handle, { get(target, property) {
+        if (property === "write") return async (...writeArgs: Parameters<typeof target.write>) => ({ bytesWritten: 0, buffer: writeArgs[0] });
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      } });
+    }) as typeof fsOpen;
+    await assert.rejects(acquirePrivateStateLock({
+      directory: agent, name: ".probe.lock", heartbeatMs: 1000,
+      processIdentity: async () => "birth:self", processLiveness: async () => true,
+      enforcePrivate: async () => undefined, durability, fs: { open: openSeam },
+    }), /made no progress/u);
+    assert.deepEqual(await readdir(agent), []);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("unusable heartbeat states use the same immutable owner age while liveness remains fail-closed", async () => {
+  const variants = [
+    ["empty", ""],
+    ["partial", "00000000"],
+    ["non-digit", "00000000000000x1\n"],
+    ["future", "0000000000001000\n"],
+    ["missing", null],
+  ] as const;
+  const durability = { async syncFile() {}, async syncDirectory() {} };
+  for (const [variant, heartbeat] of variants) {
+    for (const scenario of ["dead", "reuse", "live", "unknown"] as const) {
+      const { root, agent } = await fixture();
+      const lockPath = join(agent, ".probe.lock");
+      const staleOwner = { version: 1, instance: randomUUID(), token: randomUUID(), pid: 9191, processIdentity: "birth:old", createdAt: 1 };
+      await mkdir(lockPath); await writeFile(join(lockPath, "owner.json"), JSON.stringify(staleOwner));
+      if (heartbeat !== null) await writeFile(join(lockPath, "heartbeat"), heartbeat);
+      let clock = 100; let probes = 0;
+      const attempt = acquirePrivateStateLock({
+        directory: agent, name: ".probe.lock", timeoutMs: 2, staleMs: 5, heartbeatMs: 1000,
+        now: () => clock, delay: async () => { clock += 3; }, pid: 8181,
+        processIdentity: async (pid) => pid === 8181 ? "birth:self" : scenario === "reuse" ? "birth:new" : "birth:old",
+        processLiveness: async () => { probes++; return scenario === "dead" ? false : scenario === "unknown" ? null : true; },
+        enforcePrivate: async () => undefined, durability,
+      });
+      if (scenario === "dead" || scenario === "reuse") {
+        const acquired = await attempt;
+        assert.ok(probes >= 2, `${variant}/${scenario} must prove death or PID reuse twice`);
+        assert.equal(await acquired.release(), true);
+      } else {
+        await assert.rejects(attempt, /lock timeout/u, `${variant}/${scenario} must fail closed`);
+        assert.equal(JSON.parse(await readFile(join(lockPath, "owner.json"), "utf8")).token, staleOwner.token);
+      }
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("fallback sampling revalidates the same owner and never removes a replacement", async () => {
+  const { root, agent } = await fixture();
+  const lockPath = join(agent, ".probe.lock");
+  const predecessor = { version: 1, instance: randomUUID(), token: randomUUID(), pid: 9191, processIdentity: "birth:old", createdAt: 1 };
+  const successor = { version: 1, instance: randomUUID(), token: randomUUID(), pid: 9292, processIdentity: "birth:successor", createdAt: 100 };
+  await mkdir(lockPath); await writeFile(join(lockPath, "owner.json"), JSON.stringify(predecessor));
+  await writeFile(join(lockPath, "heartbeat"), "partial");
+  let ownerReads = 0; let clock = 100;
+  const readFileSeam = (async (...args: Parameters<typeof readFile>) => {
+    if (String(args[0]).endsWith("owner.json") && ++ownerReads === 2) await writeFile(join(lockPath, "owner.json"), JSON.stringify(successor));
+    return readFile(...args);
+  }) as typeof readFile;
+  await assert.rejects(acquirePrivateStateLock({
+    directory: agent, name: ".probe.lock", timeoutMs: 2, staleMs: 5, heartbeatMs: 1000,
+    now: () => clock, delay: async () => { clock += 3; }, pid: 8181,
+    processIdentity: async (pid) => pid === 8181 ? "birth:self" : "birth:other",
+    processLiveness: async () => false, enforcePrivate: async () => undefined,
+    durability: { async syncFile() {}, async syncDirectory() {} }, fs: { readFile: readFileSeam },
+  }), /lock timeout/u);
+  assert.deepEqual(JSON.parse(await readFile(join(lockPath, "owner.json"), "utf8")), successor);
+  assert.deepEqual((await readdir(lockPath)).filter((name) => name.startsWith(".reclaim-")), []);
+  await rm(root, { recursive: true, force: true });
+});
+
+test("a dead owner can recover an abandoned token-specific reclaim marker but non-regular markers fail closed", async () => {
+  const durability = { async syncFile() {}, async syncDirectory() {} };
+  {
+    const { root, agent } = await fixture(); const lockPath = join(agent, ".probe.lock");
+    const staleOwner = { version: 1, instance: randomUUID(), token: randomUUID(), pid: 9191, processIdentity: "birth:dead", createdAt: 1 };
+    await mkdir(lockPath); await writeFile(join(lockPath, "owner.json"), JSON.stringify(staleOwner)); await writeFile(join(lockPath, "heartbeat"), "partial");
+    let firstClock = 100;
+    await assert.rejects(acquirePrivateStateLock({
+      directory: agent, name: ".probe.lock", timeoutMs: 2, staleMs: 5, heartbeatMs: 1000,
+      now: () => firstClock, delay: async () => { firstClock += 3; }, pid: 8181,
+      processIdentity: async (pid) => pid === 8181 ? "birth:first" : "birth:dead", processLiveness: async () => false,
+      enforcePrivate: async () => undefined, durability,
+      fault: async (point) => { if (point === "lock:reclaim-before-quarantine") throw new Error("simulated contender crash"); },
+    }), /lock timeout/u);
+    assert.match(await readFile(join(lockPath, `.reclaim-${staleOwner.token}`), "utf8"), /^[0-9a-f-]{36}\n$/u);
+    let secondClock = 200; let secondProofs = 0;
+    const acquired = await acquirePrivateStateLock({
+      directory: agent, name: ".probe.lock", timeoutMs: 10, staleMs: 5, heartbeatMs: 1000,
+      now: () => secondClock, delay: async () => { secondClock += 3; }, pid: 8282,
+      processIdentity: async (pid) => pid === 8282 ? "birth:second" : "birth:dead",
+      processLiveness: async () => { secondProofs++; return false; }, enforcePrivate: async () => undefined, durability,
+    });
+    assert.ok(secondProofs >= 2); assert.equal(await acquired.release(), true); assert.deepEqual(await readdir(agent), []);
+    await rm(root, { recursive: true, force: true });
+  }
+  {
+    const { root, agent } = await fixture(); const lockPath = join(agent, ".probe.lock");
+    const staleOwner = { version: 1, instance: randomUUID(), token: randomUUID(), pid: 9191, processIdentity: "birth:dead", createdAt: 1 };
+    await mkdir(lockPath); await writeFile(join(lockPath, "owner.json"), JSON.stringify(staleOwner)); await writeFile(join(lockPath, "heartbeat"), "partial");
+    await mkdir(join(lockPath, `.reclaim-${staleOwner.token}`));
+    let clock = 100;
+    await assert.rejects(acquirePrivateStateLock({
+      directory: agent, name: ".probe.lock", timeoutMs: 2, staleMs: 5, heartbeatMs: 1000,
+      now: () => clock, delay: async () => { clock += 3; }, pid: 8181,
+      processIdentity: async (pid) => pid === 8181 ? "birth:self" : "birth:dead", processLiveness: async () => false,
+      enforcePrivate: async () => undefined, durability,
+    }), /lock timeout/u);
+    assert.equal(JSON.parse(await readFile(join(lockPath, "owner.json"), "utf8")).token, staleOwner.token);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("release refuses a successor identity and leaves its canonical directory untouched", async () => {
   const { root, agent } = await fixture();
   const owned = await acquirePrivateStateLock({

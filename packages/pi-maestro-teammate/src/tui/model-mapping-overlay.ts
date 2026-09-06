@@ -42,6 +42,7 @@ import {
   saveProjectFallbackMapping,
   setDefaultGlobalModelRoutingProfile,
   setGlobalAskBeforeDispatch,
+  setGlobalSmartMode,
   setProjectActiveModelRoutingProfile,
   setProjectModelRoutingOverridesEnabled,
   type ModelRoutingConfig,
@@ -50,6 +51,7 @@ import {
   type ModelRoutingRules,
   type ModelRoutingState,
   type ModelRoutingTypeMeta,
+  type TeammateSmartMode,
   type TeammateTaskType,
 } from "../models/model-routing.ts";
 import { TEAMMATE_THINKING_LEVELS, type TeammateThinkingLevel } from "../shared/thinking.ts";
@@ -327,6 +329,7 @@ function stateFromLegacyConfig(config?: LegacyControlCenterConfig): ModelRouting
       projectOverridesEnabled: config?.projectOverridesEnabled ?? false,
       ...rulesFromProfile(profile),
     },
+    smartMode: "off",
     askBeforeDispatch: false,
     requestedProfile: profileId,
   };
@@ -610,6 +613,10 @@ export class TeammateControlCenter implements Component, Focusable {
     }
     if (matchesKey(data, Key.ctrl("a")) && this.tab === "routing") {
       this.toggleAskBeforeDispatch();
+      return;
+    }
+    if (matchesKey(data, Key.ctrl("s")) && this.tab === "routing") {
+      this.toggleSmartMode();
       return;
     }
     const input = printableInput(data);
@@ -2005,12 +2012,13 @@ export class TeammateControlCenter implements Component, Focusable {
     rows.push(this.filterLine(inner, this.queries[this.tab], items.length));
     rows.push(this.params.theme.fg("dim", "─".repeat(inner)));
     if (this.tab === "routing") {
+      rows.push(this.smartToggleLine(inner));
       rows.push(this.askToggleLine(inner));
       rows.push(this.params.theme.fg("dim", "─".repeat(inner)));
     }
 
     const terminalRows = Math.max(14, process.stdout?.rows ?? 30);
-    const listRows = Math.max(4, Math.min(10, terminalRows - 12));
+    const listRows = Math.max(4, Math.min(10, terminalRows - 12 - (this.tab === "routing" ? 1 : 0)));
     const list = this.renderListRows(items, listRows, width >= 76 ? Math.max(28, Math.floor(inner * 0.43)) : inner);
     const detail = this.detailLines(width >= 76 ? inner - Math.max(28, Math.floor(inner * 0.43)) - 1 : inner);
 
@@ -2407,6 +2415,41 @@ export class TeammateControlCenter implements Component, Focusable {
 
   private statusLine(width: number): string {
     return truncateToWidth(this.params.theme.fg(this.statusTone, displayText(this.statusText)), width, "…");
+  }
+
+  /** Routing tab toggle row: require the root agent to consult model-availability. */
+  private smartToggleLine(width: number): string {
+    const mode = this.state.smartMode;
+    const check = mode === "off"
+      ? this.params.theme.fg("dim", " ")
+      : this.params.theme.fg("success", "✓");
+    const label = this.t(`model.smartMode.${mode}` as TuiTranslationKey);
+    const hint = this.params.theme.fg("dim", this.t("model.smartToggleHint"));
+    return truncateToWidth(`${check} ${label} ${hint}`, width, "…");
+  }
+
+  private toggleSmartMode(): void {
+    if (this.params.readOnly) {
+      this.params.close({ kind: "reload", tab: this.tab });
+      return;
+    }
+    const modes: readonly TeammateSmartMode[] = ["off", "economy", "balanced", "sota"];
+    const current = modes.indexOf(this.state.smartMode);
+    const mode = modes[(current + 1) % modes.length] ?? "off";
+    try {
+      setGlobalSmartMode(mode, this.params.globalFilePath);
+      this.state.smartMode = mode;
+      this.statusTone = "success";
+      this.statusText = this.t("model.smartModeChanged", {
+        mode: this.t(`model.smartModeName.${mode}` as TuiTranslationKey),
+      });
+    } catch (error) {
+      this.statusTone = "error";
+      this.statusText = this.t("model.saveFailed", {
+        message: displayText(error instanceof Error ? error.message : String(error)),
+      });
+    }
+    this.params.requestRender();
   }
 
   /** Routing tab toggle row: ask the user to pick model provider before dispatch. */

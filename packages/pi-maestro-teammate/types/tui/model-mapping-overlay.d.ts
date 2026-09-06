@@ -204,6 +204,9 @@ export declare class TeammateControlCenter implements Component, Focusable {
     private remoteCount;
     private filterLine;
     private statusLine;
+    /** Routing tab toggle row: require the root agent to consult model-availability. */
+    private smartToggleLine;
+    private toggleSmartMode;
     /** Routing tab toggle row: ask the user to pick model provider before dispatch. */
     private askToggleLine;
     private toggleAskBeforeDispatch;

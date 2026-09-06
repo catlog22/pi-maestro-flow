@@ -12,9 +12,11 @@ import { probeSshCliExecutable } from "pi-maestro-teammate/v1/acp-cli";
 import { Text } from "@earendil-works/pi-tui";
 import { toolCallLine, toolResultLine } from "../quiet-render.ts";
 import {
+  TEAMMATE_TASK_TYPES,
   modelRegistrationAvailabilityDiagnostics,
   refreshModelRegistry,
   type ModelRegistrationAvailabilityDiagnostic,
+  type TeammateTaskType,
 } from "pi-maestro-teammate/v1/model-routing";
 import { modelRegistryPairSync } from "pi-maestro-teammate/v1/backends";
 import { sharedModelHealthCoordinator } from "pi-maestro-teammate/v1/retry";
@@ -24,9 +26,27 @@ import {
   TEAMMATE_MODEL_SESSION_QUERY_EVENT,
   type TeammateModelSessionEventV1,
 } from "pi-maestro-teammate/v1/events";
+import {
+  MODEL_INTELLIGENCE_PREFERENCES,
+  loadModelIntelligence,
+  type AvailableModelIdentity,
+  type ModelIntelligencePreference,
+  type ModelIntelligenceView,
+} from "../providers/model-intelligence.ts";
 
 export const ModelAvailabilityParams = Type.Object({
   filter: Type.Optional(Type.String({ description: "Optional substring to filter model/tool names" })),
+  taskType: Type.Optional(Type.Unsafe<TeammateTaskType>({
+    type: "string",
+    enum: [...TEAMMATE_TASK_TYPES],
+    description: "Task type used to request current model rankings and reference pricing",
+  })),
+  preference: Type.Optional(Type.Unsafe<ModelIntelligencePreference>({
+    type: "string",
+    enum: [...MODEL_INTELLIGENCE_PREFERENCES],
+    description: "Candidate ordering strategy: economy, balanced, or sota",
+  })),
+  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 10, description: "Maximum ranked candidates to return" })),
 });
 
 interface DelegateToolView {
@@ -55,6 +75,8 @@ export interface ModelAvailabilityDetails {
   delegate_config_path: string | null;
   /** Additive v2 diagnostics; null preserves the old-mode result shape. */
   model_registry: ModelRegistryAvailabilityView | null;
+  /** Populated only when taskType requests advisory benchmark and price data. */
+  model_intelligence?: ModelIntelligenceView | null;
 }
 
 interface ModelSessionAuthority {
@@ -66,6 +88,7 @@ export interface ModelAvailabilityToolOptions {
   sessionAuthority?: () => ModelSessionAuthority;
   loadDelegateConfig?: typeof loadCliToolsConfig;
   probeSshExecutable?: typeof probeSshCliExecutable;
+  loadModelIntelligence?: typeof loadModelIntelligence;
 }
 
 function modelId(entry: unknown): string | null {
@@ -120,6 +143,18 @@ function availableRegistrationIds(registry: ModelRegistryAvailabilityView): stri
       && entry.healthy)
     .map((entry) => entry.registrationId)
     .sort((left, right) => left.localeCompare(right));
+}
+
+function availableModelIdentities(
+  modelIds: readonly string[],
+  registry: ModelRegistryAvailabilityView | null,
+): AvailableModelIdentity[] {
+  if (registry === null) return modelIds.map((registrationId) => ({ registrationId }));
+  const byRegistration = new Map(registry.registrations.map((entry) => [entry.registrationId, entry]));
+  return modelIds.map((registrationId) => ({
+    registrationId,
+    modelId: byRegistration.get(registrationId)?.modelId,
+  }));
 }
 
 async function listDelegateTools(
@@ -181,11 +216,12 @@ export function createModelAvailabilityTool(
 - **model_registry**: secret-free registration identity/topology and registered, resolvable, sessionAvailable, healthy, and sanitized unavailableReason diagnostics. Remote routes remain listed outside Monitor with a deterministic session-unavailable reason.
 - **delegate_tools**: CLI tools enabled in teammate-cli-tools.json (~/.pi/agent + the active project .pi). Local status is checked on PATH; SSH status is reported as reachable only after the remote executable probe completes. The legacy projection can expose these as cli/<tool>; model-registry mode requires an exact ACP deployment route plus compatibility.teammateCliToolsProjection.enabled.
 - **delegate_fallback**: enabled delegate tools NOT available as teammate models.
+- **model_intelligence**: when \`taskType\` is supplied, current task-oriented benchmark ranks and reference pricing for session-available models. External data is advisory, timestamped, cached, and never overrides availability or an explicit user choice.
 
-Call this before routing to a specific external model (codex, gemini, claude, opencode) to confirm availability. For ordinary delegation, use the teammate tool directly.
+Call this with \`taskType\` before smart teammate routing, or without it for ordinary availability diagnostics. Call it before routing to a specific external model (codex, gemini, claude, opencode) to confirm availability. For ordinary delegation, use the teammate tool directly.
 
 Pitfall: the \`--to <tool>\` flag is mandatory. A bare \`maestro delegate codex\` treats "codex" as the prompt and falls back to the first enabled tool.`,
-    promptSnippet: "Check reachable teammate models + Maestro delegate CLI tools before routing to a specific external model (codex/gemini/claude).",
+    promptSnippet: "Check reachable teammate models and optionally task-oriented benchmark/pricing references before smart routing.",
     parameters: ModelAvailabilityParams,
     async execute(_id, params, signal, onUpdate, ctx): Promise<AgentToolResult<ModelAvailabilityDetails>> {
       const filter = (params.filter ?? "").trim();
@@ -200,6 +236,7 @@ Pitfall: the \`--to <tool>\` flag is mandatory. A bare \`maestro delegate codex\
             delegate_fallback: details.delegate_fallback ?? [],
             delegate_config_path: details.delegate_config_path ?? null,
             model_registry: details.model_registry ?? null,
+            model_intelligence: details.model_intelligence ?? null,
           },
         } as AgentToolResult<ModelAvailabilityDetails>);
       };
@@ -269,12 +306,34 @@ Pitfall: the \`--to <tool>\` flag is mandatory. A bare \`maestro delegate codex\
               || matchesFilter(entry.transport, filter)),
           };
 
+      let modelIntelligence: ModelIntelligenceView | null = null;
+      if (params.taskType) {
+        steps.push(`Loading ${params.taskType} model benchmark and reference pricing data…`);
+        emit({
+          teammate_models: filteredTeammate,
+          delegate_tools: filteredDelegate,
+          delegate_fallback: filteredFallback,
+          delegate_config_path: configPath,
+          model_registry: filteredModelRegistry,
+        });
+        modelIntelligence = await (options.loadModelIntelligence ?? loadModelIntelligence)(
+          params.taskType,
+          availableModelIdentities(filteredTeammate, filteredModelRegistry),
+          { limit: params.limit, preference: params.preference, signal },
+        );
+        steps.push(modelIntelligence.status === "unavailable"
+          ? "No benchmark snapshot is available; configured routing remains authoritative."
+          : `Loaded ${modelIntelligence.status} intelligence for ${modelIntelligence.candidates.length} candidate(s).`);
+        if (signal?.aborted) throw new Error("Tool execution aborted.");
+      }
+
       const details: ModelAvailabilityDetails = {
         teammate_models: filteredTeammate,
         delegate_tools: filteredDelegate,
         delegate_fallback: filteredFallback,
         delegate_config_path: configPath,
         model_registry: filteredModelRegistry,
+        model_intelligence: modelIntelligence,
       };
 
       const fallbackHint = fallback.length > 0
@@ -294,6 +353,7 @@ Pitfall: the \`--to <tool>\` flag is mandatory. A bare \`maestro delegate codex\
             delegate_fallback: filteredFallback,
             delegate_config_path: configPath,
             model_registry: filteredModelRegistry,
+            model_intelligence: modelIntelligence,
             hint: `${fallbackHint} The --to flag is mandatory; a bare \`maestro delegate codex\` treats "codex" as the prompt. ${cliHint}`,
           }, null, 2),
         }],
@@ -303,7 +363,12 @@ Pitfall: the \`--to <tool>\` flag is mandatory. A bare \`maestro delegate codex\
     renderShell: "self",
     renderCall(args, theme, ctx) {
       if (ctx?.isPartial === false) return new Text("", 0, 0);
-      return toolCallLine(theme, "model-availability", args.filter ? `"${String(args.filter)}"` : "");
+      const arg = args.taskType
+        ? String(args.taskType)
+        : args.filter
+          ? `"${String(args.filter)}"`
+          : "";
+      return toolCallLine(theme, "model-availability", arg);
     },
     renderResult(result, opts, theme, ctx) {
       if (opts.isPartial) return new Text("", 0, 0);
@@ -315,7 +380,11 @@ Pitfall: the \`--to <tool>\` flag is mandatory. A bare \`maestro delegate codex\
       return toolResultLine(theme, {
         name: "model-availability",
         ok: true,
-        arg: ctx.args.filter ? `"${String(ctx.args.filter)}"` : "",
+        arg: ctx.args.taskType
+          ? String(ctx.args.taskType)
+          : ctx.args.filter
+            ? `"${String(ctx.args.filter)}"`
+            : "",
         summary: `${tm} teammate · ${dt} delegate`,
         expanded: opts.expanded,
         detail: text,
@@ -337,6 +406,9 @@ function renderProgress(steps: string[], details: Partial<ModelAvailabilityDetai
   }
   if (details.model_registry) {
     lines.push(`   model_registry: revision ${details.model_registry.revision} · ${details.model_registry.registrations.length} registration(s)`);
+  }
+  if (details.model_intelligence) {
+    lines.push(`   model_intelligence: ${details.model_intelligence.status} · ${details.model_intelligence.candidates.length} candidate(s)`);
   }
   return lines.join("\n");
 }
