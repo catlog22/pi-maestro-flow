@@ -50,6 +50,11 @@ export interface GatewayTeammatePort {
   sendRpcMessage?(stdin: Writable, message: string, mode: RpcMessageMode): boolean | Promise<boolean>;
 }
 
+async function sendPublicRpcMessage(stdin: Writable, message: string, mode: RpcMessageMode): Promise<boolean> {
+  const { sendRpcMessage } = await import("pi-maestro-teammate/v1/execution");
+  return sendRpcMessage(stdin, message, mode);
+}
+
 export function createGatewayTeammatePort(): GatewayTeammatePort {
   return {
     async runTeammate(params, options) {
@@ -58,8 +63,7 @@ export function createGatewayTeammatePort(): GatewayTeammatePort {
     },
     async send(control, message, mode) {
       if (!control.stdin) return false;
-      const { sendRpcMessage } = await import("pi-maestro-teammate/v1/execution");
-      return sendRpcMessage(control.stdin, message, mode);
+      return sendPublicRpcMessage(control.stdin, message, mode);
     },
   };
 }
@@ -1047,12 +1051,12 @@ export class GatewayTeammateService {
     // control sender as a final fallback for runtimes without stdin.
     if (abort) {
       if (control.stdin && this.port.sendRpcMessage) return Boolean(await this.port.sendRpcMessage(control.stdin, message, "abort"));
-      if (control.stdin && !this.port.send) return sendRpcMessage(control.stdin, message, "abort");
+      if (control.stdin && !this.port.send) return sendPublicRpcMessage(control.stdin, message, "abort");
       if (control.sendControl) return control.sendControl({ type: "abort" });
     }
     if (this.port.send) return Boolean(await this.port.send(control, message, mode));
     if (control.stdin && this.port.sendRpcMessage) return Boolean(await this.port.sendRpcMessage(control.stdin, message, mode));
-    if (control.stdin) return sendRpcMessage(control.stdin, message, mode);
+    if (control.stdin) return sendPublicRpcMessage(control.stdin, message, mode);
     return false;
   }
 

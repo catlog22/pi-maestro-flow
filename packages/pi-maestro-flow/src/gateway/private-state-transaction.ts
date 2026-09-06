@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { mkdir, open, readFile, readdir, rename, rm, stat } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, readdir, rename, rm, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 import type { FileHandle } from "node:fs/promises";
 
@@ -11,6 +11,7 @@ export interface PrivateStateDurability {
 }
 
 export interface PrivateStateFs {
+  lstat: typeof lstat;
   mkdir: typeof mkdir;
   open: typeof open;
   readFile: typeof readFile;
@@ -59,7 +60,7 @@ interface OwnerRecord {
 
 const OWNER = "owner.json";
 const HEARTBEAT = "heartbeat";
-const DEFAULT_FS: PrivateStateFs = { mkdir, open, readFile, readdir, rename, rm, stat };
+const DEFAULT_FS: PrivateStateFs = { lstat, mkdir, open, readFile, readdir, rename, rm, stat };
 
 /**
  * A cooperative, crash-reclaimable lock whose identity never changes in place.
@@ -95,8 +96,9 @@ export async function acquirePrivateStateLock(options: PrivateStateLockOptions):
         await removeIncompleteOwnedLock(lockPath, owner, fs).catch(() => undefined);
         throw error;
       }
-      if (await staleByAge(lockPath, options.staleMs ?? 10_000, fs, now)) {
-        await reclaim(lockPath, owner.token, options, fs, identity, liveness).catch(() => false);
+      const staleOwner = await staleOwnerByAge(lockPath, options.staleMs ?? 10_000, fs, now);
+      if (staleOwner) {
+        await reclaim(lockPath, staleOwner, owner.token, options, fs, identity, liveness).catch(() => false);
       }
       if (now() >= deadline) throw new Error("private-state lock timeout");
       await wait(Math.min(50, Math.max(1, deadline - now())));
@@ -158,6 +160,7 @@ async function createOwner(lockPath: string, owner: OwnerRecord, options: Privat
   const bytes = Buffer.from(`${JSON.stringify(owner)}\n`, "utf8");
   let ownerHandle: FileHandle | undefined;
   let heartbeat: FileHandle | undefined;
+  let complete = false;
   try {
     ownerHandle = await fs.open(join(lockPath, OWNER), "wx", 0o600);
     await ownerHandle.writeFile(bytes);
@@ -168,45 +171,73 @@ async function createOwner(lockPath: string, owner: OwnerRecord, options: Privat
     await options.enforcePrivate(join(lockPath, HEARTBEAT), "file");
     await writeHeartbeat(heartbeat, at);
     await options.durability.syncDirectory(lockPath);
+    complete = true;
     return heartbeat;
   } finally {
     bytes.fill(0);
     await ownerHandle?.close().catch(() => undefined);
-    if (!heartbeat) await fs.rm(lockPath, { recursive: true, force: true }).catch(() => undefined);
+    if (!complete) {
+      await heartbeat?.close().catch(() => undefined);
+      await fs.rm(lockPath, { recursive: true, force: true }).catch(() => undefined);
+    }
   }
 }
 
 async function writeHeartbeat(handle: FileHandle, at: number): Promise<void> {
-  const bytes = Buffer.from(`${String(Math.max(0, Math.trunc(at))).padStart(16, "0")}\n`, "ascii");
-  try { await handle.truncate(0); await handle.write(bytes, 0, bytes.length, 0); await handle.sync(); }
-  finally { bytes.fill(0); }
+  const timestamp = Math.max(0, Math.trunc(at));
+  if (!Number.isSafeInteger(timestamp) || String(timestamp).length > 16) throw new Error("invalid private-state heartbeat timestamp");
+  const bytes = Buffer.from(`${String(timestamp).padStart(16, "0")}\n`, "ascii");
+  try {
+    let offset = 0;
+    while (offset < bytes.length) {
+      const { bytesWritten } = await handle.write(bytes, offset, bytes.length - offset, offset);
+      if (bytesWritten <= 0) throw new Error("private-state heartbeat write made no progress");
+      offset += bytesWritten;
+    }
+    await handle.sync();
+  } finally { bytes.fill(0); }
 }
 
-async function staleByAge(lockPath: string, staleMs: number, fs: PrivateStateFs, now: () => number): Promise<boolean> {
+async function staleOwnerByAge(lockPath: string, staleMs: number, fs: PrivateStateFs, now: () => number): Promise<OwnerRecord | null> {
+  const captured = await readOwner(lockPath, fs);
+  if (!captured) return null;
+  const sampledAt = now();
+  let heartbeatAt: number | null = null;
   try {
     const raw = await fs.readFile(join(lockPath, HEARTBEAT));
     try {
       const text = raw.toString("ascii");
-      if (!/^\d{16}\n$/u.test(text)) return false;
-      return now() - Number(text.trim()) > staleMs;
+      if (/^\d{16}\n$/u.test(text)) {
+        const parsed = Number(text.trim());
+        if (Number.isSafeInteger(parsed) && parsed <= sampledAt) heartbeatAt = parsed;
+      }
     } finally { raw.fill(0); }
-  } catch { return false; }
+  } catch { /* An unusable heartbeat falls back to the immutable owner age. */ }
+  if (!(await exactOwner(lockPath, captured, fs))) return null;
+  const ageBasis = heartbeatAt ?? captured.createdAt;
+  return sampledAt - ageBasis > staleMs ? captured : null;
 }
 
-async function reclaim(lockPath: string, contenderToken: string, options: PrivateStateLockOptions, fs: PrivateStateFs, identity: ProcessIdentity, liveness: ProcessLiveness): Promise<boolean> {
-  const captured = await readOwner(lockPath, fs);
-  if (!captured) return false;
+async function reclaim(lockPath: string, captured: OwnerRecord, contenderToken: string, options: PrivateStateLockOptions, fs: PrivateStateFs, identity: ProcessIdentity, liveness: ProcessLiveness): Promise<boolean> {
+  if (!(await exactOwner(lockPath, captured, fs))) return false;
   if (!(await deathOrReuseProven(captured, options.platform ?? process.platform, identity, liveness))) return false;
   const marker = join(lockPath, `.reclaim-${captured.token}`);
   let markerHandle: FileHandle | undefined;
   try {
-    markerHandle = await fs.open(marker, "wx", 0o600);
-    await markerHandle.writeFile(`${contenderToken}\n`);
-    await markerHandle.sync();
-    await markerHandle.close(); markerHandle = undefined;
+    try {
+      markerHandle = await fs.open(marker, "wx", 0o600);
+      await markerHandle.writeFile(`${contenderToken}\n`);
+      await options.enforcePrivate(marker, "file");
+      await markerHandle.sync();
+      await markerHandle.close(); markerHandle = undefined;
+    } catch (error) {
+      await markerHandle?.close().catch(() => undefined); markerHandle = undefined;
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST" || !(await validAbandonedReclaimMarker(marker, options, fs))) return false;
+    }
     if (!(await exactOwner(lockPath, captured, fs))) return false;
     if (!(await deathOrReuseProven(captured, options.platform ?? process.platform, identity, liveness))) return false;
     await options.fault?.("lock:reclaim-before-quarantine");
+    if (!(await exactOwner(lockPath, captured, fs))) return false;
     const quarantine = join(options.directory, `.${options.name}.${captured.instance}.stale-${randomUUID()}`);
     await fs.rename(lockPath, quarantine);
     await options.durability.syncDirectory(options.directory);
@@ -216,6 +247,16 @@ async function reclaim(lockPath: string, contenderToken: string, options: Privat
     return true;
   } catch { return false; }
   finally { await markerHandle?.close().catch(() => undefined); }
+}
+
+async function validAbandonedReclaimMarker(marker: string, options: PrivateStateLockOptions, fs: PrivateStateFs): Promise<boolean> {
+  try {
+    const before = await fs.lstat(marker);
+    if (!before.isFile() || before.isSymbolicLink()) return false;
+    await options.enforcePrivate(marker, "file");
+    const after = await fs.lstat(marker);
+    return after.isFile() && !after.isSymbolicLink() && before.dev === after.dev && before.ino === after.ino;
+  } catch { return false; }
 }
 
 async function deathOrReuseProven(owner: OwnerRecord, platform: NodeJS.Platform, identity: ProcessIdentity, liveness: ProcessLiveness): Promise<boolean> {

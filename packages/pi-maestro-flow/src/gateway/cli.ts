@@ -24,6 +24,13 @@ interface ServeFlags {
   json: boolean;
 }
 
+interface ServiceFlags {
+  configPath?: string;
+  json: boolean;
+  detachedFallback: boolean;
+  windowsStartup: boolean;
+}
+
 function write(stream: Writable, value: string): void {
   stream.write(value.endsWith("\n") ? value : `${value}\n`);
 }
@@ -43,6 +50,21 @@ function parseServeFlags(args: string[]): ServeFlags {
       result.port = value;
     } else throw new Error(`Unknown serve option: ${arg}`);
   }
+  return result;
+}
+
+function parseServiceFlags(args: string[]): ServiceFlags {
+  const result: ServiceFlags = { json: false, detachedFallback: false, windowsStartup: false };
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (arg === "--json") result.json = true;
+    else if (arg === "--detached-fallback") result.detachedFallback = true;
+    else if (arg === "--windows-startup") result.windowsStartup = true;
+    else if (arg === "--config") result.configPath = requiredValue(args, ++index, arg);
+    else throw new Error(`Unknown service option: ${arg}`);
+  }
+  if (result.detachedFallback && result.windowsStartup) throw new Error("--windows-startup and --detached-fallback are mutually exclusive");
+  if (result.windowsStartup && process.platform !== "win32") throw new Error("--windows-startup is only available on Windows");
   return result;
 }
 
@@ -104,26 +126,32 @@ export async function main(argv = process.argv.slice(2), io: GatewayCliIo = {}):
     }
     if (command === "service") {
       const action = args[0];
-      if (!action || !["install", "start", "stop", "restart", "status", "uninstall"].includes(action)) throw new Error("Usage: pi-maestro-gateway service install|start|stop|restart|status|uninstall [--json]");
-      const json = args.includes("--json");
-      const configIndex = args.indexOf("--config");
-      const configPath = configIndex < 0 ? undefined : requiredValue(args, configIndex + 1, "--config");
-      const fallback = args.includes("--detached-fallback");
+      if (!action || !["install", "ensure", "start", "stop", "restart", "status", "uninstall"].includes(action)) throw new Error("Usage: pi-maestro-gateway service install|ensure|start|stop|restart|status|uninstall [--json]");
+      const flags = parseServiceFlags(args.slice(1));
       const executableArg = process.argv[1];
-      const serviceConfig = await loadGatewayConfig(configPath);
-      const resident = new GatewayResidentService({ configPath, manifestPath: serviceConfig.state.serviceManifestPath, ownerPath: serviceConfig.state.ownerPath, command: process.execPath, argsPrefix: executableArg ? [executableArg] : [], allowDetachedFallback: fallback });
+      const serviceConfig = await loadGatewayConfig(flags.configPath);
+      const resident = new GatewayResidentService({
+        configPath: flags.configPath,
+        manifestPath: serviceConfig.state.serviceManifestPath,
+        ownerPath: serviceConfig.state.ownerPath,
+        command: process.execPath,
+        argsPrefix: executableArg ? [executableArg] : [],
+        allowDetachedFallback: flags.detachedFallback,
+        ...(flags.windowsStartup ? { preferredKind: "windows-startup" as const } : {}),
+      });
       const value = action === "install" ? await (() => resident.install().then((manifest) => ({
         installed: true,
         kind: manifest.kind,
         installationId: manifest.installationId,
         installedAt: manifest.installedAt,
       })))()
-        : action === "start" ? await resident.start()
-          : action === "stop" ? await resident.stop()
-            : action === "restart" ? await resident.restart()
-              : action === "status" ? await resident.status()
-                : await resident.uninstall();
-      write(stdout, json ? JSON.stringify(value) : typeof value === "object" ? JSON.stringify(value, null, 2) : String(value));
+        : action === "ensure" ? await resident.ensure()
+          : action === "start" ? await resident.start()
+            : action === "stop" ? await resident.stop()
+              : action === "restart" ? await resident.restart()
+                : action === "status" ? await resident.status()
+                  : await resident.uninstall();
+      write(stdout, flags.json ? JSON.stringify(value) : typeof value === "object" ? JSON.stringify(value, null, 2) : String(value));
       return 0;
     }
     if (command === "pair") {
@@ -178,7 +206,10 @@ export async function main(argv = process.argv.slice(2), io: GatewayCliIo = {}):
         "  serve [--config PATH] [--host HOST] [--port PORT] [--no-http] [--json]",
         "  connect --stdio",
         "  config-sync apply",
-        "  service install|start|stop|restart|status|uninstall [--json]",
+        "  service install|ensure|start|stop|restart|status|uninstall [--config PATH] [--json]",
+        "    install|ensure [--windows-startup | --detached-fallback]",
+        "    --windows-startup persists for the next interactive sign-in; it is not a Windows Service.",
+        "    In a non-interactive SSH session, ensure guarantees readiness only until that session ends.",
         "  pair create|bootstrap|list|revoke [ID]",
         "  version [--json]",
       ].join("\n"));

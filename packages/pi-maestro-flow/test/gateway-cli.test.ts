@@ -110,6 +110,56 @@ test("serve returns after authenticated IPC stop", async (t) => {
   assert.equal((await readFile(ownerPath, "utf8").catch(() => undefined)), undefined);
 });
 
+test("service help documents ensure and Windows Startup persistence", async () => {
+  const stdout = new PassThrough();
+  let output = "";
+  stdout.on("data", (chunk) => { output += chunk.toString(); });
+  assert.equal(await main(["help"], { stdout }), 0);
+  assert.match(output, /service install\|ensure\|start\|stop\|restart\|status\|uninstall/u);
+  assert.match(output, /--windows-startup/u);
+  assert.match(output, /next interactive sign-in/u);
+  assert.match(output, /not a Windows Service/u);
+  assert.match(output, /non-interactive SSH session/u);
+});
+
+test("service selectors are mutually exclusive and failures never emit partial JSON", async () => {
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  let output = "";
+  let errors = "";
+  stdout.on("data", (chunk) => { output += chunk.toString(); });
+  stderr.on("data", (chunk) => { errors += chunk.toString(); });
+  assert.equal(await main(["service", "ensure", "--windows-startup", "--detached-fallback", "--json"], { stdout, stderr }), 1);
+  assert.equal(output, "");
+  assert.match(errors, /mutually exclusive/u);
+});
+
+test("legacy service status keeps its JSON response shape", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "gateway-cli-status-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const configPath = join(root, "config.yaml");
+  const unix = (value: string) => value.replace(/\\/g, "/");
+  await writeFile(configPath, [
+    "transport:",
+    "  http:",
+    "    enabled: false",
+    "state:",
+    `  root_dir: "${unix(join(root, "state"))}"`,
+    "logging:",
+    "  level: silent",
+    "",
+  ].join("\n"));
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  let output = "";
+  let errors = "";
+  stdout.on("data", (chunk) => { output += chunk.toString(); });
+  stderr.on("data", (chunk) => { errors += chunk.toString(); });
+  assert.equal(await main(["service", "status", "--config", configPath, "--json"], { stdout, stderr }), 0, errors);
+  assert.deepEqual(JSON.parse(output), { installed: false, running: false, ready: false, degraded: false, fallback: false });
+  assert.equal(output.trim().split("\n").length, 1);
+});
+
 test("package manifest exposes the CLI and stable v1 API without removing source compatibility", async () => {
   const manifest = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8")) as {
     bin?: Record<string, string>;

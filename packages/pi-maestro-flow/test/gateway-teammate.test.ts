@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Writable } from "node:stream";
 import test from "node:test";
 import { createGatewayPrincipal } from "../src/gateway/principal.ts";
 import {
@@ -141,6 +142,45 @@ test("Gateway teammate routes steer/follow_up/interrupt and makes cancel idempot
   assert.equal(repeated.ok, true);
   assert.equal(repeated.data?.alreadyTerminal, true);
   port.resolveDeferred?.([]);
+  await service.shutdown();
+});
+
+test("Gateway teammate falls back to the public RPC sender when an injected port omits send", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "gateway-teammate-rpc-fallback-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const owner = createGatewayPrincipal("stdio", "owner", { workspacePath: root });
+  const writes: string[] = [];
+  const stdin = new Writable({
+    write(chunk, _encoding, callback) {
+      writes.push(chunk.toString());
+      callback();
+    },
+  });
+  let spawned = false;
+  let resolveRun!: (results: SingleResult[]) => void;
+  const deferred = new Promise<SingleResult[]>((resolve) => { resolveRun = resolve; });
+  const port: GatewayTeammatePort = {
+    async runTeammate(_params, options) {
+      options.onChildSpawned?.(stdin, () => true, undefined, "child", 1);
+      spawned = true;
+      return deferred;
+    },
+  };
+  const service = new GatewayTeammateService({ port, baseCwd: root, journal: new TaskJournal({ path: join(root, "tasks.json") }) });
+  const accepted = await service.start(owner, { tasks: [{ prompt: "work", agent: "general" }], cwd: root });
+  const taskId = accepted.data!.taskId;
+  await eventually(() => spawned);
+
+  const sent = await service.send(owner, taskId, { message: "direct", mode: "follow_up" });
+  assert.equal(sent.ok, true);
+  assert.equal(sent.data?.delivered, true);
+  assert.equal((await service.cancel(owner, taskId, "stop")).ok, true);
+  assert.deepEqual(writes.map((line) => JSON.parse(line)), [
+    { type: "follow_up", message: "direct" },
+    { type: "abort" },
+  ]);
+
+  resolveRun([]);
   await service.shutdown();
 });
 
