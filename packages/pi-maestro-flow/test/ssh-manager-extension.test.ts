@@ -330,6 +330,7 @@ test("independent SSH extension binds #ssh selection to a hostless tool without 
   try {
     registerSshManager(api, { store, executor, gatewayPool, configSource, configSyncTransport, configSyncAudit: { record(event) { syncAudit.push(event); } } });
     assert.ok(getSshHostProvider());
+    assert.equal(typeof getSshHostProvider()?.openTeammateRemoteChannel, "function");
     assert.deepEqual(await listSshHostRefs(), [{
       id: "server-1",
       label: "Production",

@@ -18,7 +18,6 @@ import {
 } from "pi-maestro-teammate/v1/ssh-hosts";
 import type {
   SshHostProfile,
-  SshHostReferenceIssue,
   SshHostReferenceSummary,
 } from "pi-maestro-backend-core/v1/ssh";
 import { EncryptedSshStore, defaultSshManagerStorePath } from "./encrypted-store.ts";
@@ -50,6 +49,10 @@ import {
   type OpenSshImportCandidate,
 } from "./openssh-config.ts";
 import { SshStatusMonitor, type SshHostOperationalStatus } from "./status-monitor.ts";
+import {
+  TeammateRemoteChannelBroker,
+  sshHostReferenceIssue,
+} from "./remote-channel.ts";
 import {
   CurrentUserPiConfigSource,
   SshPiConfigSyncTransport,
@@ -115,6 +118,7 @@ export function registerSshManager(
   const discoverOpenSsh = options.discoverOpenSsh ?? discoverOpenSshConfig;
   const configSource = options.configSource ?? new CurrentUserPiConfigSource();
   const configSyncTransport = options.configSyncTransport ?? ((host: SshHost) => new SshPiConfigSyncTransport(executor, host));
+  const remoteChannelBroker = new TeammateRemoteChannelBroker(store, executor);
   let selected: SelectedSshHost | undefined;
   let activeContext: ExtensionContext | undefined;
 
@@ -212,6 +216,7 @@ export function registerSshManager(
   const providerRegistration = registerSshHostProvider(createSshManagerHostProvider(store, {
     selectedId: () => selectedHostForDisplay()?.id,
     activate: activateHost,
+    openTeammateRemoteChannel: (hostRef, signal) => remoteChannelBroker.open(hostRef, signal),
   }));
 
   const sshTool: ToolDefinition<typeof SshToolParams, SshToolDetails> = {
@@ -494,6 +499,7 @@ Use action=targets to list provider-owned target ids, then pass targetId on a co
   pi.on("session_shutdown", async () => {
     selected = undefined;
     providerRegistration.dispose();
+    remoteChannelBroker.close();
     monitor.shutdown();
     store.lock();
     await gatewayPool.close();
@@ -503,6 +509,7 @@ Use action=targets to list provider-owned target ids, then pass targetId on a co
 interface SshManagerHostProviderOptions {
   selectedId?: () => string | undefined;
   activate?: (hostId: string) => Promise<void>;
+  openTeammateRemoteChannel?: NonNullable<SshHostProvider["openTeammateRemoteChannel"]>;
 }
 
 /** Build the non-secret runtime provider backed by one unlocked SSH manager. */
@@ -546,6 +553,9 @@ export function createSshManagerHostProvider(
       }));
     },
     ...(options.activate ? { activate: options.activate } : {}),
+    ...(options.openTeammateRemoteChannel
+      ? { openTeammateRemoteChannel: options.openTeammateRemoteChannel }
+      : {}),
     async resolve(hostRef: string): Promise<SshHostProfile> {
       const host = (await refreshedHosts()).find((candidate) => candidate.id === hostRef);
       if (!host) {
@@ -591,18 +601,6 @@ function sshHostProfile(host: SshHost): SshHostProfile {
     hostKeySha256: host.hostKey,
     authentication,
   };
-}
-
-function sshHostReferenceIssue(host: SshHost): SshHostReferenceIssue | undefined {
-  if (host.hostKey === null) return "untrusted-host";
-  if (host.jumpHostId !== null) return "unsupported-jump-host";
-  if (host.shell !== "bash") return "unsupported-shell";
-  if (host.auth.kind === "password") return "unsupported-password-authentication";
-  if (host.auth.kind === "key") return "unsupported-managed-key";
-  if (host.auth.kind === "identity" && host.auth.passphrase !== undefined) {
-    return "unsupported-identity-passphrase";
-  }
-  return undefined;
 }
 
 interface ManagerBindings {
