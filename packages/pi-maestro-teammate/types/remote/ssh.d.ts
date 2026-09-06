@@ -1,6 +1,7 @@
 import type { RemoteConnection, RemoteConnectionFactory } from "./driver.ts";
 import { type RemoteWindowBridgeNegotiation } from "./protocol.ts";
 import { type ResolvedRemoteTarget, type ResolvedRemoteWorkspace } from "./types.ts";
+/** @deprecated Import TEAMMATE_REMOTE_GATEWAY_COMMAND from the dependency-light v1/ssh-hosts subpath. */
 export declare const REMOTE_GATEWAY_COMMAND: "pi-teammate-remote connect --stdio";
 export declare const SSH_DEFAULT_CONNECT_TIMEOUT_MS = 10000;
 export declare const SSH_DEFAULT_HANDSHAKE_TIMEOUT_MS = 15000;
@@ -41,6 +42,8 @@ export interface SshClientConnectConfig {
 }
 export interface SshChannelLike extends NodeJS.ReadWriteStream {
     readonly stderr: NodeJS.ReadableStream;
+    readonly destroyed?: boolean;
+    readonly closed?: boolean;
     destroy(error?: Error): this;
 }
 export interface SshClientLike {

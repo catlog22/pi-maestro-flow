@@ -43,6 +43,7 @@ packages/pi-maestro-flow/.pi/
 .pi-sync/
 .maestro-lifecycle.coordinator
 .workflow/*.pid
+.workflow/*.lock
 .workflow/.backups/
 .workflow/recovery/
 .workflow/.csv-wave/
@@ -105,6 +106,7 @@ nul
 
 # Reference clones (nested repos, not vendored)
 .references/
+.reference/
 
 # Team swarm runtime session artifacts
 .workflow/.team/

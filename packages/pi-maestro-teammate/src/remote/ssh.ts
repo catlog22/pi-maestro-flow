@@ -4,7 +4,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Client } from "ssh2";
 import type { RemoteConnection, RemoteConnectionFactory } from "./driver.ts";
-import { resolveSshHostRef } from "../public/v1/ssh-hosts.ts";
+import {
+  TEAMMATE_REMOTE_GATEWAY_COMMAND,
+  openTeammateRemoteChannel,
+  resolveSshHostRef,
+  type SshHostTeammateRemoteChannel,
+} from "../public/v1/ssh-hosts.ts";
 import {
   REMOTE_MAX_LINE_BYTES,
   createRemoteRequest,
@@ -47,7 +52,8 @@ import {
   type ResolvedRemoteWorkspace,
 } from "./types.ts";
 
-export const REMOTE_GATEWAY_COMMAND = "pi-teammate-remote connect --stdio" as const;
+/** @deprecated Import TEAMMATE_REMOTE_GATEWAY_COMMAND from the dependency-light v1/ssh-hosts subpath. */
+export const REMOTE_GATEWAY_COMMAND = TEAMMATE_REMOTE_GATEWAY_COMMAND;
 export const SSH_DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 export const SSH_DEFAULT_HANDSHAKE_TIMEOUT_MS = 15_000;
 export const SSH_DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
@@ -130,6 +136,8 @@ export interface SshClientConnectConfig {
 
 export interface SshChannelLike extends NodeJS.ReadWriteStream {
   readonly stderr: NodeJS.ReadableStream;
+  readonly destroyed?: boolean;
+  readonly closed?: boolean;
   destroy(error?: Error): this;
 }
 
@@ -691,6 +699,9 @@ class SshRemoteConnection implements RemoteConnection {
       "Remote gateway stream failed",
       { cause: error },
     )));
+    if (stream.destroyed === true || stream.closed === true) {
+      this.#finalize(new SshTransportError("transport", "Remote gateway disconnected before connection handoff"));
+    }
   }
 
   get status(): RemoteStatus { return this.#status; }
@@ -835,6 +846,7 @@ export class SshRemoteConnectionFactory implements RemoteConnectionFactory {
   readonly #pools = new Map<string, HostConnectionPool>();
   readonly #allPools = new Set<HostConnectionPool>();
   readonly #referencePoolKeys = new Map<string, string>();
+  readonly #providerConnections = new Set<SshRemoteConnection>();
   #closed = false;
 
   constructor(options: SshRemoteConnectionFactoryOptions = {}) {
@@ -854,6 +866,10 @@ export class SshRemoteConnectionFactory implements RemoteConnectionFactory {
 
   async #connectHost(entry: RemoteHostEntry, signal?: AbortSignal): Promise<RemoteConnection> {
     if (this.#closed) throw new SshTransportError("transport", "SSH connection factory is closed");
+    if (isRemoteHostReferenceConfig(entry)) {
+      const provided = await openTeammateRemoteChannel(entry.sshHostRef, signal);
+      if (provided) return this.#prepareProviderConnection(provided);
+    }
     const resolved = await resolveRemoteHostEntry(entry);
     if (this.#closed) throw new SshTransportError("transport", "SSH connection factory is closed");
     validateHost(resolved.host);
@@ -893,12 +909,42 @@ export class SshRemoteConnectionFactory implements RemoteConnectionFactory {
     }
   }
 
+  #prepareProviderConnection(provided: SshHostTeammateRemoteChannel): SshRemoteConnection {
+    let connection: SshRemoteConnection | undefined;
+    let committed = false;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      if (committed && connection) this.#providerConnections.delete(connection);
+      provided.close();
+    };
+
+    try {
+      if (this.#closed) throw new SshTransportError("transport", "SSH connection factory is closed");
+      connection = new SshRemoteConnection(provided.stream, release, this.#options);
+      if (connection.status === "disconnected") {
+        throw new SshTransportError("transport", "Remote gateway disconnected before connection handoff");
+      }
+      this.#providerConnections.add(connection);
+      committed = true;
+      return connection;
+    } catch (error) {
+      release();
+      if (error instanceof SshTransportError) throw error;
+      throw new SshTransportError("transport", "Provider remote gateway connection setup failed");
+    }
+  }
+
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
+    const providerConnections = [...this.#providerConnections];
+    this.#providerConnections.clear();
     for (const pool of [...this.#allPools]) pool.close();
     this.#pools.clear();
     this.#allPools.clear();
     this.#referencePoolKeys.clear();
+    await Promise.allSettled(providerConnections.map((connection) => connection.close()));
   }
 }

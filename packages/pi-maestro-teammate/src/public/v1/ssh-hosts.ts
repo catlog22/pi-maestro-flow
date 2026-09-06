@@ -19,6 +19,25 @@ export interface SshHostPickerEntry {
   readonly selected: boolean;
 }
 
+/** The only remote command a host provider may open for teammate. */
+export const TEAMMATE_REMOTE_GATEWAY_COMMAND = "pi-teammate-remote connect --stdio" as const;
+
+/** Minimal fixed-purpose stream surface returned by a capable host provider. */
+export interface SshHostTeammateRemoteStream extends NodeJS.ReadWriteStream {
+  readonly stderr: NodeJS.ReadableStream;
+  destroy(error?: Error): this;
+}
+
+/** An already-open fixed teammate remote channel and its provider-owned release hook. */
+export interface SshHostTeammateRemoteChannel {
+  readonly stream: SshHostTeammateRemoteStream;
+  close(): void;
+  /** Optional bounded, non-secret identifier for provider-side fencing or diagnostics. */
+  readonly fence?: string;
+  /** Optional bounded, non-secret digest for provider-side fencing or diagnostics. */
+  readonly digest?: string;
+}
+
 /** Runtime provider owned by the system that stores SSH host references. */
 export interface SshHostProvider {
   list(): Promise<readonly SshHostReferenceSummary[]>;
@@ -27,6 +46,11 @@ export interface SshHostProvider {
   listPickerEntries?(): Promise<readonly SshHostPickerEntry[]>;
   /** Optional process-local activation of one provider-owned host id. */
   activate?(hostId: string): Promise<void>;
+  /** Open the provider's fixed teammate gateway; callers cannot supply a command. */
+  openTeammateRemoteChannel?(
+    hostRef: string,
+    signal?: AbortSignal,
+  ): Promise<SshHostTeammateRemoteChannel>;
 }
 
 export type SshHostProviderErrorCode =
@@ -77,7 +101,9 @@ export function registerSshHostProvider(provider: SshHostProvider): SshHostProvi
       && typeof provider.list === "function"
       && typeof provider.resolve === "function"
       && (provider.listPickerEntries === undefined || typeof provider.listPickerEntries === "function")
-      && (provider.activate === undefined || typeof provider.activate === "function");
+      && (provider.activate === undefined || typeof provider.activate === "function")
+      && (provider.openTeammateRemoteChannel === undefined
+        || typeof provider.openTeammateRemoteChannel === "function");
   } catch {
     valid = false;
   }
@@ -100,6 +126,8 @@ export function getSshHostProvider(): SshHostProvider | undefined {
     return typeof provider.list === "function" && typeof provider.resolve === "function"
       && (provider.listPickerEntries === undefined || typeof provider.listPickerEntries === "function")
       && (provider.activate === undefined || typeof provider.activate === "function")
+      && (provider.openTeammateRemoteChannel === undefined
+        || typeof provider.openTeammateRemoteChannel === "function")
       ? provider as SshHostProvider
       : undefined;
   } catch {
@@ -160,9 +188,54 @@ export async function activateSshHost(hostId: string): Promise<void> {
   }
 }
 
+/**
+ * Open a provider-owned fixed teammate channel when that optional capability exists.
+ * Undefined means only that no capable provider is registered; invocation and validation
+ * failures are sanitized and never converted into fallback.
+ */
+export async function openTeammateRemoteChannel(
+  hostRef: string,
+  signal?: AbortSignal,
+): Promise<SshHostTeammateRemoteChannel | undefined> {
+  validateHostRef(hostRef);
+  if (signal?.aborted) throw abortError();
+
+  let provider: SshHostProvider | undefined;
+  let open: SshHostProvider["openTeammateRemoteChannel"];
+  try {
+    provider = getSshHostProvider();
+    if (!provider) return undefined;
+    open = provider.openTeammateRemoteChannel;
+    if (typeof open !== "function") return undefined;
+  } catch (error) {
+    throw safeProviderError(error, `SSH host reference ${JSON.stringify(hostRef)} channel could not be opened`);
+  }
+
+  let value: unknown;
+  try {
+    value = await Reflect.apply(open, provider, [hostRef, signal]);
+  } catch (error) {
+    if (signal?.aborted) throw abortError();
+    throw safeProviderError(error, `SSH host reference ${JSON.stringify(hostRef)} channel could not be opened`);
+  }
+
+  let channel: SshHostTeammateRemoteChannel;
+  try {
+    channel = validateTeammateRemoteChannel(value);
+  } catch (error) {
+    closeInvalidTeammateRemoteChannel(value);
+    throw safeValidationError(error, invalidChannelResult);
+  }
+  if (signal?.aborted) {
+    channel.close();
+    throw abortError();
+  }
+  return channel;
+}
+
 /** Resolve and validate one host reference immediately before connection use. */
 export async function resolveSshHostRef(hostRef: string): Promise<SshHostProfile> {
-  if (typeof hostRef !== "string" || !HOST_ID.test(hostRef)) throw new Error("SSH host reference is invalid");
+  validateHostRef(hostRef);
   let value: unknown;
   try {
     const provider = requireProvider();
@@ -179,6 +252,83 @@ export async function resolveSshHostRef(hostRef: string): Promise<SshHostProfile
   } catch (error) {
     throw safeValidationError(error, invalidProviderResult);
   }
+}
+
+function validateHostRef(hostRef: string): void {
+  if (typeof hostRef !== "string" || !HOST_ID.test(hostRef)) throw new Error("SSH host reference is invalid");
+}
+
+function abortError(): Error {
+  const error = new Error("SSH host channel request was aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+function closeInvalidTeammateRemoteChannel(value: unknown): void {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  let descriptor: PropertyDescriptor | undefined;
+  try { descriptor = Object.getOwnPropertyDescriptor(value, "close"); } catch { return; }
+  if (!descriptor || !("value" in descriptor) || typeof descriptor.value !== "function") return;
+  try { Reflect.apply(descriptor.value, value, []); } catch { /* Invalid provider cleanup is best effort. */ }
+}
+
+function validateTeammateRemoteChannel(value: unknown): SshHostTeammateRemoteChannel {
+  const record = exactChannelRecord(value);
+  const stream = record.stream;
+  if (!stream || (typeof stream !== "object" && typeof stream !== "function")) throw invalidChannelResult();
+  const candidate = stream as Partial<SshHostTeammateRemoteStream>;
+  if (typeof candidate.on !== "function" || typeof candidate.once !== "function"
+    || typeof candidate.write !== "function" || typeof candidate.end !== "function"
+    || typeof candidate.destroy !== "function") {
+    throw invalidChannelResult();
+  }
+  const stderr = candidate.stderr;
+  if (!stderr || (typeof stderr !== "object" && typeof stderr !== "function")
+    || typeof stderr.on !== "function") {
+    throw invalidChannelResult();
+  }
+  if (typeof record.close !== "function") throw invalidChannelResult();
+  const fence = optionalChannelMetadata(record.fence);
+  const digest = optionalChannelMetadata(record.digest);
+  let closed = false;
+  const close = record.close;
+  return {
+    stream: candidate as SshHostTeammateRemoteStream,
+    close(): void {
+      if (closed) return;
+      closed = true;
+      try { Reflect.apply(close, value, []); } catch { /* Provider close failures are non-actionable here. */ }
+    },
+    ...(fence === undefined ? {} : { fence }),
+    ...(digest === undefined ? {} : { digest }),
+  };
+}
+
+function exactChannelRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw invalidChannelResult();
+  let keys: (string | symbol)[];
+  try { keys = Reflect.ownKeys(value); } catch { throw invalidChannelResult(); }
+  const allowed = ["stream", "close", "fence", "digest"];
+  if (keys.some((key) => typeof key !== "string" || !allowed.includes(key))
+    || !keys.includes("stream") || !keys.includes("close")) {
+    throw invalidChannelResult();
+  }
+  const result: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  for (const key of keys as string[]) {
+    let descriptor: PropertyDescriptor | undefined;
+    try { descriptor = Object.getOwnPropertyDescriptor(value, key); } catch { throw invalidChannelResult(); }
+    if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) throw invalidChannelResult();
+    result[key] = descriptor.value;
+  }
+  return result;
+}
+
+function optionalChannelMetadata(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.length < 1 || value.length > 256 || /\p{Cc}/u.test(value)) {
+    throw invalidChannelResult();
+  }
+  return value;
 }
 
 function requireProvider(): SshHostProvider {
@@ -231,6 +381,13 @@ function invalidPickerResult(): SshHostProviderError {
   return new SshHostProviderError(
     "invalid-provider-result",
     "SSH host provider returned invalid non-secret picker entries",
+  );
+}
+
+function invalidChannelResult(): SshHostProviderError {
+  return new SshHostProviderError(
+    "invalid-provider-result",
+    "SSH host provider returned an invalid fixed teammate remote channel",
   );
 }
 

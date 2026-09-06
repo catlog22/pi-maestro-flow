@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { PassThrough } from "node:stream";
 import test, { afterEach } from "node:test";
 import type { SshHostProfile } from "pi-maestro-backend-core/v1/ssh";
 import {
@@ -7,6 +8,7 @@ import {
   getSshHostProvider,
   listSshHostPickerEntries,
   listSshHostRefs,
+  openTeammateRemoteChannel,
   registerSshHostProvider,
   resolveSshHostRef,
   type SshHostPickerEntry,
@@ -30,6 +32,12 @@ function profile(id = "server-1"): SshHostProfile {
     hostKeySha256: PIN,
     authentication: { kind: "identity", identityFile: "/home/user/.ssh/id_ed25519" },
   };
+}
+
+function remoteChannel(close: () => void = () => {}) {
+  const stream = new PassThrough() as PassThrough & { stderr: PassThrough };
+  stream.stderr = new PassThrough();
+  return { stream, close, fence: "generation-1", digest: "sha256:test" };
 }
 
 function pickerEntry(id = "server-1", selected = true): SshHostPickerEntry {
@@ -73,6 +81,7 @@ test("legacy providers remain usable and report unsupported optional capabilitie
   disposers.push(registration.dispose);
 
   assert.deepEqual(await listSshHostRefs(), [{ id: "server-1", label: "Production", compatible: true }]);
+  assert.equal(await openTeammateRemoteChannel("server-1"), undefined);
   await assert.rejects(
     listSshHostPickerEntries(),
     (error: unknown) => error instanceof SshHostProviderError && error.code === "unsupported-capability",
@@ -81,6 +90,85 @@ test("legacy providers remain usable and report unsupported optional capabilitie
     activateSshHost("server-1"),
     (error: unknown) => error instanceof SshHostProviderError && error.code === "unsupported-capability",
   );
+});
+
+test("fixed-purpose channel capability is validated, bounded, and closes exactly once", async () => {
+  let receivedHostRef: string | undefined;
+  let receivedSignal: AbortSignal | undefined;
+  let closeCalls = 0;
+  const controller = new AbortController();
+  const registration = registerSshHostProvider({
+    async list() { return []; },
+    async resolve() { return profile(); },
+    async openTeammateRemoteChannel(hostRef, signal) {
+      receivedHostRef = hostRef;
+      receivedSignal = signal;
+      return remoteChannel(() => { closeCalls += 1; });
+    },
+  });
+  disposers.push(registration.dispose);
+
+  const opened = await openTeammateRemoteChannel("server-1", controller.signal);
+  assert.ok(opened);
+  assert.equal(receivedHostRef, "server-1");
+  assert.equal(receivedSignal, controller.signal);
+  assert.equal(opened.fence, "generation-1");
+  assert.equal(opened.digest, "sha256:test");
+  opened.close();
+  opened.close();
+  assert.equal(closeCalls, 1);
+});
+
+test("fixed-purpose channel errors and malformed results fail closed without fallback semantics", async () => {
+  const secret = "top-secret-channel-error";
+  let registration = registerSshHostProvider({
+    async list() { return []; },
+    async resolve() { return profile(); },
+    async openTeammateRemoteChannel() { throw new Error(secret); },
+  });
+  disposers.push(registration.dispose);
+  await assert.rejects(
+    openTeammateRemoteChannel("server-1"),
+    (error: unknown) => error instanceof SshHostProviderError
+      && error.code === "refresh-failed"
+      && !error.message.includes(secret),
+  );
+  registration.dispose();
+
+  let malformedCloseCalls = 0;
+  registration = registerSshHostProvider({
+    async list() { return []; },
+    async resolve() { return profile(); },
+    async openTeammateRemoteChannel() {
+      return { ...remoteChannel(() => { malformedCloseCalls += 1; }), password: secret } as never;
+    },
+  });
+  disposers.push(registration.dispose);
+  await assert.rejects(
+    openTeammateRemoteChannel("server-1"),
+    (error: unknown) => error instanceof SshHostProviderError
+      && error.code === "invalid-provider-result"
+      && !error.message.includes(secret),
+  );
+  assert.equal(malformedCloseCalls, 1, "malformed opened channels must be released");
+});
+
+test("fixed-purpose channel cancellation is bounded and does not invoke the provider", async () => {
+  let called = false;
+  const registration = registerSshHostProvider({
+    async list() { return []; },
+    async resolve() { return profile(); },
+    async openTeammateRemoteChannel() { called = true; return remoteChannel(); },
+  });
+  disposers.push(registration.dispose);
+  const controller = new AbortController();
+  controller.abort();
+
+  await assert.rejects(
+    openTeammateRemoteChannel("server-1", controller.signal),
+    (error: unknown) => error instanceof Error && error.name === "AbortError",
+  );
+  assert.equal(called, false);
 });
 
 test("a stale registration cannot dispose its replacement", async () => {

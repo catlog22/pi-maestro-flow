@@ -583,6 +583,11 @@ test("a backend that cannot select models keeps its own failure instead of a cap
       && (delivery.note ?? "").includes("modelSelection is unsupported")),
     "the withheld failover was never recorded, so the run looks like one with nothing left to try",
   );
+  assert.ok(
+    result.recoveryFailureChain?.decisions.some((decision) =>
+      decision.code === "model-selection-unsupported"),
+    "the structured failure chain must retain the fallback-denial decision",
+  );
 });
 
 test("a backend with native model selection still gets the second model candidate", async () => {

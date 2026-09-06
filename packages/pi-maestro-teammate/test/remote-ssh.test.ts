@@ -5,6 +5,7 @@ import { PassThrough } from "node:stream";
 import test from "node:test";
 import type { ClientChannel, ConnectConfig } from "ssh2";
 import {
+  TEAMMATE_REMOTE_GATEWAY_COMMAND,
   SshHostProviderError,
   registerSshHostProvider,
 } from "../src/public/v1/ssh-hosts.ts";
@@ -178,6 +179,7 @@ test("SSH uses identity-only auth, keepalive, and the literal fixed gateway comm
   assert.equal((config.privateKey as Buffer).every((byte) => byte === 0), true, "identity bytes are cleared after authentication");
   assert.deepEqual(client.commands, [REMOTE_GATEWAY_COMMAND]);
   assert.equal(client.commands[0], "pi-teammate-remote connect --stdio");
+  assert.equal(REMOTE_GATEWAY_COMMAND, TEAMMATE_REMOTE_GATEWAY_COMMAND);
   assert.equal(client.commands[0].includes("/srv/project"), false);
   assert.equal(client.commands[0].includes("touch"), false);
   await connection.close();
@@ -194,6 +196,174 @@ test("explicit workspaces reuse the pinned pool and fixed gateway without derivi
   await connection.close();
   await factory.close();
 });
+
+test("late-bound fixed-purpose channels serve targets and workspaces, bypass SSH, and release once", async () => {
+  const inlineClient = new FakeSshClient();
+  const factory = factoryFor([inlineClient]);
+  let openCalls = 0;
+  let resolveCalls = 0;
+  let closeCalls = 0;
+  const registration = registerSshHostProvider({
+    async list() { return []; },
+    async resolve() { resolveCalls += 1; return profileForRemote("managed-host"); },
+    async openTeammateRemoteChannel(hostRef) {
+      assert.equal(hostRef, "managed-host");
+      openCalls += 1;
+      return { stream: channel(), close() { closeCalls += 1; }, fence: `open-${openCalls}` };
+    },
+  });
+  const referenced = { sshHostRef: "managed-host" } as const;
+  try {
+    const targetConnection = await factory.connect({ ...target(), hostConfig: referenced });
+    const workspaceConnection = await factory.connectWorkspace({ ...workspace(), hostConfig: referenced });
+    assert.equal(openCalls, 2);
+    assert.equal(resolveCalls, 0, "capable providers must bypass profile resolution");
+    assert.equal(inlineClient.connectConfigs.length, 0, "capable providers must bypass internal SSH");
+
+    await targetConnection.close();
+    await targetConnection.close();
+    await workspaceConnection.close();
+    assert.equal(closeCalls, 2, "each provider channel must release exactly once");
+
+    const inlineConnection = await factory.connect(target());
+    assert.equal(openCalls, 2, "inline hosts must never invoke the host-ref capability");
+    assert.equal(inlineClient.connectConfigs.length, 1);
+    await inlineConnection.close();
+  } finally {
+    registration.dispose();
+    await factory.close();
+  }
+});
+
+test("factory shutdown closes and releases provider-backed connections", async () => {
+  const factory = factoryFor([]);
+  let closeCalls = 0;
+  const registration = registerSshHostProvider({
+    async list() { return []; },
+    async resolve() { return profileForRemote("managed-host"); },
+    async openTeammateRemoteChannel() {
+      return { stream: channel(), close() { closeCalls += 1; } };
+    },
+  });
+  try {
+    const connection = await factory.connect({ ...target(), hostConfig: { sshHostRef: "managed-host" } });
+    await factory.close();
+    assert.equal(closeCalls, 1);
+    assert.equal(connection.status, "disconnected");
+    await connection.close();
+    assert.equal(closeCalls, 1, "connection close after factory shutdown remains idempotent");
+  } finally {
+    registration.dispose();
+    await factory.close();
+  }
+});
+
+test("provider channels closed before handoff are rejected and released", async () => {
+  const factory = factoryFor([]);
+  const stream = channel();
+  const closed = new Promise<void>((resolve) => stream.once("close", resolve));
+  stream.destroy();
+  await closed;
+  let closeCalls = 0;
+  const registration = registerSshHostProvider({
+    async list() { return []; },
+    async resolve() { return profileForRemote("managed-host"); },
+    async openTeammateRemoteChannel() {
+      return { stream, close() { closeCalls += 1; } };
+    },
+  });
+  try {
+    await assert.rejects(
+      factory.connect({ ...target(), hostConfig: { sshHostRef: "managed-host" } }),
+      (error: unknown) => error instanceof SshTransportError
+        && /before connection handoff/u.test(error.message),
+    );
+    assert.equal(closeCalls, 1);
+  } finally {
+    registration.dispose();
+    await factory.close();
+  }
+});
+
+for (const failingListener of ["stream.on", "stream.stderr.on"] as const) {
+  test(`provider channel ${failingListener} setup failures are sanitized and released once`, async () => {
+    const factory = factoryFor([]);
+    const stream = channel();
+    const secret = `provider-stream-secret-${failingListener}`;
+    if (failingListener === "stream.on") {
+      (stream as unknown as { on: (...args: unknown[]) => never }).on = () => { throw new Error(secret); };
+    } else {
+      (stream.stderr as unknown as { on: (...args: unknown[]) => never }).on = () => { throw new Error(secret); };
+    }
+    let closeCalls = 0;
+    const registration = registerSshHostProvider({
+      async list() { return []; },
+      async resolve() { return profileForRemote("managed-host"); },
+      async openTeammateRemoteChannel() {
+        return {
+          stream,
+          close() {
+            closeCalls += 1;
+            stream.destroy();
+          },
+        };
+      },
+    });
+    try {
+      await assert.rejects(
+        factory.connect({ ...target(), hostConfig: { sshHostRef: "managed-host" } }),
+        (error: unknown) => error instanceof SshTransportError
+          && error.code === "transport"
+          && error.message.length <= 128
+          && !error.message.includes(secret),
+      );
+      await factory.close();
+      assert.equal(closeCalls, 1);
+    } finally {
+      registration.dispose();
+      await factory.close();
+    }
+  });
+}
+
+test("implemented fixed-purpose channel failure never falls back to resolve or internal SSH", async () => {
+  let resolveCalls = 0;
+  let clientCalls = 0;
+  const factory = new SshRemoteConnectionFactory({
+    createClient: () => { clientCalls += 1; return new FakeSshClient() as unknown as SshClientLike; },
+  });
+  const registration = registerSshHostProvider({
+    async list() { return []; },
+    async resolve() { resolveCalls += 1; return profileForRemote("managed-host"); },
+    async openTeammateRemoteChannel() { throw new Error("secret capability detail"); },
+  });
+  try {
+    await assert.rejects(
+      factory.connect({ ...target(), hostConfig: { sshHostRef: "managed-host" } }),
+      (error: unknown) => error instanceof SshHostProviderError
+        && error.code === "refresh-failed"
+        && !error.message.includes("secret capability detail"),
+    );
+    assert.equal(resolveCalls, 0);
+    assert.equal(clientCalls, 0);
+  } finally {
+    registration.dispose();
+    await factory.close();
+  }
+});
+
+function profileForRemote(id: string) {
+  return {
+    id,
+    label: "Managed",
+    host: "managed.example",
+    user: "dev",
+    port: 22,
+    shell: "bash" as const,
+    hostKeySha256: HOST_KEY,
+    authentication: { kind: "identity" as const, identityFile: "/local/managed-key" },
+  };
+}
 
 test("SSH host references resolve on every new connection and retire changed pools after active channels finish", async () => {
   const firstClient = new FakeSshClient();

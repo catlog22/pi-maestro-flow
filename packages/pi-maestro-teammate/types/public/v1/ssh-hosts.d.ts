@@ -11,6 +11,22 @@ export interface SshHostPickerEntry {
     readonly shell: SshHostPickerShell;
     readonly selected: boolean;
 }
+/** The only remote command a host provider may open for teammate. */
+export declare const TEAMMATE_REMOTE_GATEWAY_COMMAND: "pi-teammate-remote connect --stdio";
+/** Minimal fixed-purpose stream surface returned by a capable host provider. */
+export interface SshHostTeammateRemoteStream extends NodeJS.ReadWriteStream {
+    readonly stderr: NodeJS.ReadableStream;
+    destroy(error?: Error): this;
+}
+/** An already-open fixed teammate remote channel and its provider-owned release hook. */
+export interface SshHostTeammateRemoteChannel {
+    readonly stream: SshHostTeammateRemoteStream;
+    close(): void;
+    /** Optional bounded, non-secret identifier for provider-side fencing or diagnostics. */
+    readonly fence?: string;
+    /** Optional bounded, non-secret digest for provider-side fencing or diagnostics. */
+    readonly digest?: string;
+}
 /** Runtime provider owned by the system that stores SSH host references. */
 export interface SshHostProvider {
     list(): Promise<readonly SshHostReferenceSummary[]>;
@@ -19,6 +35,8 @@ export interface SshHostProvider {
     listPickerEntries?(): Promise<readonly SshHostPickerEntry[]>;
     /** Optional process-local activation of one provider-owned host id. */
     activate?(hostId: string): Promise<void>;
+    /** Open the provider's fixed teammate gateway; callers cannot supply a command. */
+    openTeammateRemoteChannel?(hostRef: string, signal?: AbortSignal): Promise<SshHostTeammateRemoteChannel>;
 }
 export type SshHostProviderErrorCode = "provider-unavailable" | "manager-locked" | "host-not-found" | "host-incompatible" | "refresh-failed" | "unsupported-capability" | "invalid-provider-result";
 /** A safe diagnostic whose message never contains provider credential values. */
@@ -40,5 +58,11 @@ export declare function listSshHostRefs(): Promise<readonly SshHostReferenceSumm
 export declare function listSshHostPickerEntries(): Promise<readonly SshHostPickerEntry[]>;
 /** Activate one provider-owned SSH host by its stable id. */
 export declare function activateSshHost(hostId: string): Promise<void>;
+/**
+ * Open a provider-owned fixed teammate channel when that optional capability exists.
+ * Undefined means only that no capable provider is registered; invocation and validation
+ * failures are sanitized and never converted into fallback.
+ */
+export declare function openTeammateRemoteChannel(hostRef: string, signal?: AbortSignal): Promise<SshHostTeammateRemoteChannel | undefined>;
 /** Resolve and validate one host reference immediately before connection use. */
 export declare function resolveSshHostRef(hostRef: string): Promise<SshHostProfile>;
