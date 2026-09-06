@@ -18,6 +18,7 @@ import {
 
 export const NEW_CONTEXT_MAX_BYTES = 32 * 1024;
 export const NEW_CONTEXT_MAX_CARRY_FORWARD_BYTES = 4 * 1024;
+export const NEW_CONTEXT_MAX_PLAN_HANDOFF_BYTES = 20 * 1024;
 const CAPSULE_BODY_MAX_BYTES = NEW_CONTEXT_MAX_BYTES - 1_500;
 const NEW_CONTEXT_INSTRUCTIONS = [
   "Perform the requested deterministic same-session context reset.",
@@ -28,12 +29,16 @@ const NEW_CONTEXT_INSTRUCTIONS = [
 export const NEW_CONTEXT_RECOVERY_BROKER_NAME = "maestro-new-context-recovery";
 
 export interface NewContextScheduleInput {
-  source: "todo-transition" | "tool";
+  source: "todo-transition" | "plan-confirm" | "tool";
   actorId: string;
   carryForward?: string;
   resourceUris?: readonly string[];
   /** Root-authorized shared state required when a child session owns the reset. */
   recoveryState?: MaestroRecoveryState;
+  /** In-memory continuation used by Plan confirmation after the checkpoint is committed. */
+  continueAfterReset?: () => boolean;
+  /** Clears a Plan handoff when the reset becomes stale before continuation. */
+  onCancelled?: (reason: string) => void;
 }
 
 export interface ScheduledNewContextRequest extends MaestroNewContextDetails {
@@ -42,6 +47,8 @@ export interface ScheduledNewContextRequest extends MaestroNewContextDetails {
   sessionId: string;
   todoRevision: number;
   recoveryState?: MaestroRecoveryState;
+  continueAfterReset?: () => boolean;
+  onCancelled?: (reason: string) => void;
 }
 
 export interface NewContextScheduleReceipt {
@@ -101,12 +108,12 @@ function boundedUtf8(value: string, maxBytes: number): string {
   return output;
 }
 
-function normalizedCarryForward(value: string | undefined): string | undefined {
+function normalizedCarryForward(value: string | undefined, maxBytes: number): string | undefined {
   if (value === undefined) return undefined;
   const normalized = value.trim();
   if (!normalized) return undefined;
-  if (Buffer.byteLength(normalized, "utf8") > NEW_CONTEXT_MAX_CARRY_FORWARD_BYTES) {
-    throw new Error(`carryForward exceeds ${NEW_CONTEXT_MAX_CARRY_FORWARD_BYTES} UTF-8 bytes`);
+  if (Buffer.byteLength(normalized, "utf8") > maxBytes) {
+    throw new Error(`carryForward exceeds ${maxBytes} UTF-8 bytes`);
   }
   return normalized;
 }
@@ -161,14 +168,29 @@ export function createNewContextController(
   ): boolean => {
     if (ctx.hasPendingMessages?.()) return false;
     try {
-      options.continueAfterReset?.(ctx, request);
-      return true;
+      const accepted = request.continueAfterReset?.() ?? options.continueAfterReset?.(ctx, request);
+      return accepted !== false;
     } catch (error) {
       ctx.ui.notify(
         `New-context continuation could not be queued: ${error instanceof Error ? error.message : String(error)}`,
         "warning",
       );
       return false;
+    }
+  };
+  const cancelRequest = (
+    request: ScheduledNewContextRequest,
+    reason: string,
+    ctx: Pick<ExtensionContext, "ui">,
+  ): void => {
+    publishRecoveryState(request, "cancelled", reason);
+    try {
+      request.onCancelled?.(reason);
+    } catch (error) {
+      ctx.ui.notify(
+        `New-context cancellation cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
+        "warning",
+      );
     }
   };
   const isRequestLifecycleCurrent = (
@@ -196,7 +218,7 @@ export function createNewContextController(
     pending = undefined;
     awaitingCompactionSettlement = false;
     deferredNoticeKey = undefined;
-    publishRecoveryState(request, "cancelled", "coalesced into the equivalent Plan context handoff");
+    cancelRequest(request, "coalesced into the equivalent Plan context handoff", ctx);
     ctx.ui.notify("New-context request was coalesced into the equivalent deterministic Plan context handoff.", "info");
     return true;
   };
@@ -211,7 +233,7 @@ export function createNewContextController(
       || (!request.recoveryState && getTodoCompactionSnapshot().revision < request.todoRevision)) {
       pending = undefined;
       awaitingCompactionSettlement = false;
-      publishRecoveryState(request, "cancelled", "the session generation changed");
+      cancelRequest(request, "the session generation changed", ctx);
       ctx.ui.notify("New-context request was discarded because the session generation changed.", "warning");
       return false;
     }
@@ -219,7 +241,7 @@ export function createNewContextController(
       pending = undefined;
       awaitingCompactionSettlement = false;
       deferredNoticeKey = undefined;
-      publishRecoveryState(request, "cancelled", "a newer turn or message is active");
+      cancelRequest(request, "a newer turn or message is active", ctx);
       ctx.ui.notify("New-context request was cancelled because a newer turn or message is active; continuing with the current context.", "info");
       return false;
     }
@@ -300,7 +322,7 @@ export function createNewContextController(
       pending = undefined;
       awaitingCompactionSettlement = false;
       deferredNoticeKey = undefined;
-      publishRecoveryState(request, "cancelled", "a newer turn or message arrived during recovery-state refresh");
+      cancelRequest(request, "a newer turn or message arrived during recovery-state refresh", ctx);
       return false;
     }
 
@@ -364,7 +386,7 @@ export function createNewContextController(
             || request.sessionId !== sessionIdOf(ctx)
             || ctx.hasPendingMessages?.()) {
             if (inFlight?.requestId === request.requestId) inFlight = undefined;
-            publishRecoveryState(request, "cancelled", "the reset became stale or a newer message is pending");
+            cancelRequest(request, "the reset became stale or a newer message is pending", ctx);
             return;
           }
           publishRecoveryState(request, "completed");
@@ -379,7 +401,7 @@ export function createNewContextController(
           if (inFlight?.requestId === request.requestId) inFlight = undefined;
           lease.release();
           if (!isRequestLifecycleCurrent(request, ctx)) {
-            publishRecoveryState(request, "cancelled", "the compaction failed after its lifecycle was replaced");
+            cancelRequest(request, "the compaction failed after its lifecycle was replaced", ctx);
             return;
           }
           ctx.ui.notify(`New-context reset failed; continuing with the current context: ${error.message}`, "warning");
@@ -408,7 +430,7 @@ export function createNewContextController(
           publishRecoveryState(request, "failed", "the rejected reset continuation could not be queued");
         }
       } else {
-        publishRecoveryState(request, "cancelled", "the compaction request belonged to a replaced lifecycle");
+        cancelRequest(request, "the compaction request belonged to a replaced lifecycle", ctx);
       }
       return false;
     }
@@ -430,7 +452,10 @@ export function createNewContextController(
       if (activeSessionId !== sessionId) {
         throw new Error("New-context request belongs to a stale session generation");
       }
-      const carryForward = normalizedCarryForward(input.carryForward);
+      const carryForward = normalizedCarryForward(
+        input.carryForward,
+        input.source === "plan-confirm" ? NEW_CONTEXT_MAX_PLAN_HANDOFF_BYTES : NEW_CONTEXT_MAX_CARRY_FORWARD_BYTES,
+      );
       const resourceUris = normalizeTodoResourceUris(input.resourceUris);
       const todoRevision = input.recoveryState?.todo.revision ?? getTodoCompactionSnapshot().revision;
       if (pending) {
@@ -441,8 +466,11 @@ export function createNewContextController(
         }
         pending.resourceUris = mergeResourceUris(pending.resourceUris, resourceUris);
         pending.todoRevision = todoRevision;
+        if (input.source === "plan-confirm") pending.source = input.source;
         if (input.recoveryState) pending.recoveryState = input.recoveryState;
         if (carryForward !== undefined) pending.carryForward = carryForward;
+        if (input.continueAfterReset) pending.continueAfterReset = input.continueAfterReset;
+        if (input.onCancelled) pending.onCancelled = input.onCancelled;
         return { requestId: pending.requestId, coalesced: true };
       }
       const requestId = ++nextRequestId;
@@ -455,6 +483,8 @@ export function createNewContextController(
         todoRevision,
         ...(input.recoveryState ? { recoveryState: input.recoveryState } : {}),
         ...(carryForward ? { carryForward } : {}),
+        ...(input.continueAfterReset ? { continueAfterReset: input.continueAfterReset } : {}),
+        ...(input.onCancelled ? { onCancelled: input.onCancelled } : {}),
         resourceUris,
       };
       publishRecoveryState(pending, "pending");
@@ -582,7 +612,13 @@ export function buildNewContextRecoveryCapsule(details: MaestroCompactionDetails
   }
 
   if (details.newContext?.carryForward) {
-    lines.push("", "## Carry Forward", boundedUtf8(details.newContext.carryForward, NEW_CONTEXT_MAX_CARRY_FORWARD_BYTES));
+    const title = details.newContext.source === "plan-confirm"
+      ? "## Plan Confirm Execution"
+      : "## Carry Forward";
+    const maxBytes = details.newContext.source === "plan-confirm"
+      ? NEW_CONTEXT_MAX_PLAN_HANDOFF_BYTES
+      : NEW_CONTEXT_MAX_CARRY_FORWARD_BYTES;
+    lines.push("", title, boundedUtf8(details.newContext.carryForward, maxBytes));
   }
 
   const tasks = details.todo.tasks.filter((task) => task.status !== "deleted");

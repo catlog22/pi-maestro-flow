@@ -176,6 +176,58 @@ test("new-context scheduler coalesces same-actor inputs and consumes only its fe
   }
 });
 
+test("plan-confirm New Context checkpoints its execution contract and resumes with the exact handoff", async () => {
+  const fixture = await enabledProject();
+  try {
+    const arbiter = new CompactionArbiter();
+    let genericContinuations = 0;
+    let planContinuations = 0;
+    const controller = createNewContextController(arbiter, {
+      continueAfterReset() { genericContinuations += 1; },
+    });
+    const harness = context(fixture.cwd);
+    controller.onSessionStart(harness.ctx as never);
+    const executionMessage = `The user selected Execute.\n${"checkpoint-boundary ".repeat(300).trim()}`;
+    const receipt = controller.schedule({
+      source: "plan-confirm",
+      actorId: "root",
+      carryForward: executionMessage,
+      continueAfterReset() {
+        planContinuations += 1;
+        return true;
+      },
+    }, harness.ctx as never);
+
+    assert.equal(await controller.onAgentSettled(harness.ctx as never), true);
+    const request = compactionRequestFromInstructions(harness.compactOptions?.customInstructions);
+    const observed = arbiter.observeStart(request);
+    assert.equal(observed.trigger?.owner, "new-context");
+    if (observed.trigger?.owner !== "new-context") assert.fail("missing new-context trigger");
+    const consumed = controller.consume(observed.trigger, harness.ctx as never);
+    assert.equal(consumed?.requestId, receipt.requestId);
+    assert.equal(consumed?.source, "plan-confirm");
+    assert.equal(consumed?.carryForward, executionMessage);
+
+    const checkpoint = details();
+    checkpoint.newContext = {
+      requestId: receipt.requestId,
+      source: "plan-confirm",
+      carryForward: executionMessage,
+      resourceUris: [],
+    };
+    const capsule = buildNewContextRecoveryCapsule(checkpoint);
+    assert.match(capsule, /## Plan Confirm Execution/);
+    assert.match(capsule, /The user selected Execute/);
+    assert.doesNotMatch(capsule, /## Carry Forward/);
+
+    harness.compactOptions?.onComplete?.();
+    assert.equal(planContinuations, 1);
+    assert.equal(genericContinuations, 0);
+  } finally {
+    await fixture.dispose();
+  }
+});
+
 test("child new-context publishes recovery phases and cancellation without reporting failure", async () => {
   const fixture = await enabledProject();
   const previousChild = process.env.PI_TEAMMATE_CHILD;
@@ -233,10 +285,15 @@ test("child new-context publishes recovery phases and cancellation without repor
 test("new-context cancels a pending reset when a newer message is queued", async () => {
   const fixture = await enabledProject();
   try {
+    let cancelledReason = "";
     const controller = createNewContextController(new CompactionArbiter());
     const harness = context(fixture.cwd);
     controller.onSessionStart(harness.ctx as never);
-    controller.schedule({ source: "tool", actorId: "root" }, harness.ctx as never);
+    controller.schedule({
+      source: "tool",
+      actorId: "root",
+      onCancelled(reason) { cancelledReason = reason; },
+    }, harness.ctx as never);
 
     const pendingMessageContext = {
       ...harness.ctx,
@@ -245,6 +302,7 @@ test("new-context cancels a pending reset when a newer message is queued", async
     assert.equal(await controller.onAgentSettled(pendingMessageContext as never), false);
     assert.equal(controller.hasPending(), false);
     assert.equal(harness.compactOptions, undefined);
+    assert.equal(cancelledReason, "a newer turn or message is active");
     assert.match(harness.notifications.join("\n"), /newer turn or message is active/);
     assert.match(harness.notifications.join("\n"), /continuing with the current context/);
   } finally {

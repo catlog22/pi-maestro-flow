@@ -2094,6 +2094,13 @@ When NOT to use:
   // === Plan Mode ===
   initPlan(pi, {
     compactionArbiter,
+    scheduleNewContext: (ctx, input) => newContextController.schedule({
+      source: "plan-confirm",
+      actorId: "root",
+      carryForward: input.executionMessage,
+      continueAfterReset: input.continueAfterReset,
+      onCancelled: input.onCancelled,
+    }, ctx),
     workflowConfirmation: planWorkflowConfirmation,
     publishWorkflowPlan: publishApprovedPlanToWorkflow,
   });

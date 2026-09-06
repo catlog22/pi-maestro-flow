@@ -164,7 +164,7 @@ export async function openPlanConfirmation(
         }
         if (row.kind === "context") {
           if (options.canCompactContext === false) {
-            status = "Context compaction is unavailable for this confirmation path.";
+            status = "New Context is unavailable for this confirmation path.";
             return;
           }
           contextMode = contextMode === "current" ? "compact" : "current";
@@ -370,7 +370,7 @@ function rowLabel(
     const id = options.workflow?.current?.sessionId ?? "current";
     return `Workflow target  [Current: ${id}]`;
   }
-  if (row.kind === "context") return `Context  [${context === "compact" ? "Compact current" : "Current"}]`;
+  if (row.kind === "context") return `Context  [${context === "compact" ? "New Context" : "Current"}]`;
   const number = actions.findIndex((item) => item.action === row.item.action);
   const prefix = number >= 0 ? `${number + 1}. ` : "";
   return `${prefix}${row.item.label}`;
@@ -383,7 +383,7 @@ function rowDescription(row: SelectionRow, options: PlanConfirmationOptions): st
       ? `Current intent: ${options.workflow.current.intent}`
       : "Select the canonical Workflow Session target";
   }
-  if (row.kind === "context") return "Keep this Pi session; compaction only replaces model context";
+  if (row.kind === "context") return "Save the Plan conversation as a checkpoint, then reset the same-session context deterministically";
   return row.item.description;
 }
 

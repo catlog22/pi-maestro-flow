@@ -202,7 +202,7 @@ test("Plan confirmation fails closed when the custom UI returns a malformed deci
   }
 });
 
-test("Plan confirmation selects compact execution in the current Pi session", async () => {
+test("Plan confirmation selects New Context execution in the current Pi session", async () => {
   const harness = createHarness();
   const pending = openPlanConfirmation(harness.ctx, {
     markdown: "# Approved Plan",
@@ -212,7 +212,7 @@ test("Plan confirmation selects compact execution in the current Pi session", as
   harness.component.render(100);
   harness.component.handleInput("\x1b[B");
   harness.component.handleInput("\x1b[C");
-  assert.match(harness.component.render(100).join("\n"), /Context\s+\[Compact current\]/);
+  assert.match(harness.component.render(100).join("\n"), /Context\s+\[New Context\]/);
   harness.component.handleInput("\x1b[27;5;13~");
   assert.deepEqual(await pending, {
     action: "execute",

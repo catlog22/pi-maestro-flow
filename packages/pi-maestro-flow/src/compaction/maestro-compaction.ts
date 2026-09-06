@@ -520,7 +520,7 @@ export interface MaestroCompactionReference {
 
 export interface MaestroNewContextDetails {
   requestId: number;
-  source: "todo-transition" | "tool";
+  source: "todo-transition" | "plan-confirm" | "tool";
   carryForward?: string;
   resourceUris: string[];
 }
@@ -1107,7 +1107,7 @@ export function normalizeMaestroCompactionDetails(value: unknown): MaestroCompac
       const context = candidate.newContext as Partial<MaestroNewContextDetails>;
       const requestId = context.requestId;
       if (!Number.isSafeInteger(requestId)
-        || (context.source !== "todo-transition" && context.source !== "tool")
+        || (context.source !== "todo-transition" && context.source !== "plan-confirm" && context.source !== "tool")
         || !Array.isArray(context.resourceUris)) return undefined;
       return {
         requestId: requestId as number,

@@ -26,6 +26,7 @@ import {
   registerPlanTools,
   setPlanModeChangeListener,
   PLAN_CLEAN_CONTEXT_COMPACTION_MARKER,
+  type PlanNewContextScheduleInput,
   type PlanWorkflowPublicationResult,
 } from "../src/tools/plan.ts";
 import {
@@ -99,6 +100,7 @@ function createHarness(
     onCompactionRequested?: () => void;
     sendUserMessageError?: string;
     confirmationResult?: unknown;
+    scheduleNewContext?: (input: PlanNewContextScheduleInput) => { requestId: number; coalesced: boolean };
     workflowConfirmation?: () => {
       current?: { sessionId: string; intent: string; available: boolean; reason?: string };
       allowNew: boolean;
@@ -261,6 +263,9 @@ function createHarness(
     compactionArbiter: runtime.arbiter,
     ...(runtime.compactionHandoffTimeoutMs !== undefined
       ? { compactionHandoffTimeoutMs: runtime.compactionHandoffTimeoutMs }
+      : {}),
+    ...(runtime.scheduleNewContext
+      ? { scheduleNewContext: (_ctx, input) => runtime.scheduleNewContext!(input) }
       : {}),
     ...(runtime.workflowConfirmation
       ? { workflowConfirmation: () => runtime.workflowConfirmation!() }
@@ -680,42 +685,53 @@ test("/plan approve compacts with an explicit approved-Plan link before executio
   }
 });
 
-test("plan-confirm tool defers compact until the current Pi turn settles", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pi-plan-confirm-tool-compact-"));
+test("plan-confirm defers New Context until settlement and passes the execution contract through the checkpoint", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-confirm-tool-new-context-"));
+  let scheduled: PlanNewContextScheduleInput | undefined;
   const harness = createHarness(
     root,
     false,
     false,
     false,
     false,
-    "compact-tool-chat",
+    "new-context-tool-chat",
     COMPACT_EXECUTION_INPUTS,
+    false,
+    { todoKeys: [] },
+    undefined,
+    {
+      scheduleNewContext(input) {
+        scheduled = input;
+        return { requestId: 17, coalesced: false };
+      },
+    },
   );
   harness.ctx.isIdle = () => false;
   try {
     await onSessionStartPlan(harness.ctx);
     await execute(harness, "plan-enter");
-    await execute(harness, "plan-update", { markdown: "# Compact Tool Plan" });
+    await execute(harness, "plan-update", { markdown: "# New Context Tool Plan" });
     const confirmed = await execute(harness, "plan-confirm");
     const toolText = confirmed.content[0]?.text ?? "";
     assert.equal(confirmed.details.approved, true);
     assert.equal(confirmed.terminate, true);
-    assert.equal(harness.compactions.length, 0, "the active plan-confirm tool must return before compact starts");
+    assert.equal(scheduled, undefined, "the active plan-confirm tool must return before New Context is scheduled");
     assert.equal(harness.messages.length, 0);
-    assert.match(toolText, /after this turn settles/);
+    assert.match(toolText, /saved as a checkpoint after this turn settles/);
     assert.match(toolText, /resumes automatically/);
 
     harness.ctx.isIdle = () => true;
     onAgentSettledPlan(harness.ctx);
-    assert.equal(harness.compactions.length, 1);
-    assert.match(harness.compactions[0]?.customInstructions ?? "", /authoritative execution contract/);
-    assert.doesNotMatch(harness.compactions[0]?.customInstructions ?? "", /maestro-plan-clean-context/);
-    harness.compactions[0]?.onComplete?.({});
+    assert.ok(scheduled);
+    assert.match(scheduled.executionMessage, /selected Execute/);
+    assert.match(scheduled.executionMessage, /Knowledge Gate/);
+    assert.match(scheduled.executionMessage, /approvals[\\/].*\.md/);
+    assert.equal(harness.compactions.length, 0, "Plan delegates deterministic reset ownership to New Context");
+    assert.equal(scheduled.continueAfterReset(), true);
     assert.equal(harness.messages.length, 1);
-    assert.match(harness.messages[0] ?? "", /selected Execute/);
-    assert.match(harness.messages[0] ?? "", /Knowledge Gate/);
+    assert.equal(harness.messages[0], scheduled.executionMessage);
     assert.equal(getMode(), "act");
-    assert.equal(harness.aborts, 1, "compact approval aborts the remaining mixed tool batch");
+    assert.equal(harness.aborts, 1, "New Context approval aborts the remaining mixed tool batch");
   } finally {
     onSessionShutdownPlan(harness.ctx);
     await rm(root, { recursive: true, force: true });

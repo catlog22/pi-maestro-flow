@@ -105,11 +105,26 @@ export interface PlanArtifactSummary {
   status: PlanToolDetails["status"];
 }
 
+export interface PlanNewContextScheduleInput {
+  executionMessage: string;
+  continueAfterReset(): boolean;
+  onCancelled(reason: string): void;
+}
+
+export interface PlanNewContextScheduleReceipt {
+  requestId: number;
+  coalesced: boolean;
+}
+
 interface PlanRuntimeOptions {
   storeFactory?: (cwd: string, session: PlanSessionIdentity) => PlanStore;
   hasExecutableTodo?: (handoffKey: string) => boolean;
   compactionArbiter?: CompactionArbiter;
   compactionHandoffTimeoutMs?: number;
+  scheduleNewContext?: (
+    ctx: PlanContext,
+    input: PlanNewContextScheduleInput,
+  ) => PlanNewContextScheduleReceipt;
   workflowConfirmation?: (
     ctx: PlanContext,
   ) => PlanWorkflowConfirmationOptions | Promise<PlanWorkflowConfirmationOptions>;
@@ -171,6 +186,7 @@ let pendingPlanExitReminder: string | undefined;
 let pendingPlanEnterNote: string | undefined;
 let compactionArbiter: CompactionArbiter | undefined;
 let planCompactionHandoffTimeoutMs = COMPACTION_LEASE_TIMEOUT_MS;
+let schedulePlanNewContext: PlanRuntimeOptions["scheduleNewContext"];
 let workflowConfirmation = async (_ctx: PlanContext): Promise<PlanWorkflowConfirmationOptions> => ({ allowNew: false });
 let publishWorkflowPlan: (
   ctx: PlanContext,
@@ -267,6 +283,7 @@ export function initPlan(pi: ExtensionAPI, options: PlanRuntimeOptions = {}): vo
   ));
   compactionArbiter = options.compactionArbiter;
   planCompactionHandoffTimeoutMs = Math.max(1, options.compactionHandoffTimeoutMs ?? COMPACTION_LEASE_TIMEOUT_MS);
+  schedulePlanNewContext = options.scheduleNewContext;
   workflowConfirmation = async (ctx) => options.workflowConfirmation?.(ctx) ?? { allowNew: false };
   publishWorkflowPlan = options.publishWorkflowPlan ?? (async () => {
     throw new Error("Workflow-backed Plan execution is unavailable");
@@ -1658,6 +1675,36 @@ function deliverPlanHandoff(ctx: PlanContext, handoff: PlanCompactHandoff): bool
 
 function startPlanCompaction(ctx: PlanContext, handoff: PlanCompactHandoff): void {
   const { request, operation, planPath, markdown, executionMessage } = handoff;
+  if (schedulePlanNewContext) {
+    if (pendingPlanCompactHandoff === handoff) pendingPlanCompactHandoff = undefined;
+    activePlanCompactHandoff = handoff;
+    try {
+      const receipt = schedulePlanNewContext(ctx, {
+        executionMessage,
+        continueAfterReset: () => deliverPlanHandoff(ctx, handoff),
+        onCancelled(reason) {
+          if (activePlanCompactHandoff === handoff) activePlanCompactHandoff = undefined;
+          if (!isCurrentPlanOperation(ctx, operation) || !isCurrentPlanHandoff(request)) return;
+          finishPlanHandoff(request);
+          ctx.ui.notify(`Plan New Context handoff was cancelled; execution was not started: ${reason}`, "warning");
+        },
+      });
+      ctx.ui.notify(
+        receipt.coalesced
+          ? `Plan execution joined New Context request ${receipt.requestId}; the Plan conversation will be checkpointed before execution.`
+          : `Plan New Context request ${receipt.requestId} scheduled; the Plan conversation will be checkpointed before execution.`,
+        "info",
+      );
+    } catch (error) {
+      if (activePlanCompactHandoff === handoff) activePlanCompactHandoff = undefined;
+      if (isCurrentPlanOperation(ctx, operation) && isCurrentPlanHandoff(request)) {
+        ctx.ui.notify(`Plan New Context could not be scheduled; executing with the current context: ${errorMessage(error)}`, "warning");
+        deliverPlanHandoff(ctx, handoff);
+      }
+    }
+    return;
+  }
+
   const lease = compactionArbiter?.request("plan-handoff", {
     owner: "plan-handoff",
     reason: "preserve-approved-plan",
@@ -1908,8 +1955,8 @@ export function registerPlanTools(
   const confirmTool: ToolDefinition<typeof EmptyPlanParams, PlanToolDetails> = {
     name: "plan-confirm",
     label: "Plan Confirm",
-    description: "Present the Markdown Plan in an interactive UI with choices to execute, modify, discuss, run role-based Review & Refine, or exit. Current-context execution returns through the tool result; compact execution settles the turn, compacts, then resumes automatically.",
-    promptSnippet: "Standard presentation step after plan-update. The user controls approval and may run role-based Review & Refine; choosing Execute authorizes immediate implementation, with compact execution resuming automatically after turn settlement.",
+    description: "Present the Markdown Plan in an interactive UI with choices to execute, modify, discuss, run role-based Review & Refine, or exit. Current-context execution returns through the tool result; New Context execution settles the turn, saves the Plan conversation as a checkpoint, resets deterministically, then resumes automatically.",
+    promptSnippet: "Standard presentation step after plan-update. The user controls approval and may run role-based Review & Refine; choosing Execute authorizes immediate implementation, with New Context execution preserving a checkpoint and resuming automatically after turn settlement.",
     parameters: EmptyPlanParams,
     executionMode: "sequential",
     async execute(_id, _params, signal, _onUpdate, ctx) {
@@ -1930,7 +1977,7 @@ export function registerPlanTools(
         ? outcome.executionChoice?.backend === "workflow" && latestWorkflowBinding?.status === "failed"
           ? "Plan approved; Workflow binding failed and execution was not started."
           : outcome.compactDeferred
-            ? `Plan approved; Act mode restored (${outcome.executionMode ?? "compact"} context, ${outcome.executionChoice?.backend ?? "standalone"}). Compaction will start after this turn settles, then execution resumes automatically.`
+            ? `Plan approved; Act mode restored (New Context, ${outcome.executionChoice?.backend ?? "standalone"}). The Plan conversation will be saved as a checkpoint after this turn settles, then execution resumes automatically.`
             : `Plan approved; Act mode restored (${outcome.executionMode ?? "current"} context, ${outcome.executionChoice?.backend ?? "standalone"}).`
         : outcome.exited
           ? buildPlanExitMessage()
