@@ -21,8 +21,8 @@
     "logo_alt": "Maestro Flow Logo"
   },
   "announcement": {
-    "title": "v0.27.1 is out — Cockpit last-column wrap fix + Todo numbering starts at #1. Upgrade:",
-    "install": "pi install npm:pi-maestro-flow@0.27.1",
+    "title": "v0.28.0 is out — SSH remote channels + smart model selection + receipt-bound wake protocol. Upgrade:",
+    "install": "pi install npm:pi-maestro-flow@0.28.0",
     "close": "Dismiss"
   },
   "accessibility": {

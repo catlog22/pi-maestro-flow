@@ -2917,8 +2917,10 @@ export function createChildTerminationController(
             // discover descendants that the in-flight graceful tree sweep did
             // not already capture. Avoid doubling a concurrent graph's taskkill
             // fan-out; retain a bounded confirmation window for that first sweep.
-            if (!isAlive()) armExitConfirmation();
-            else killWindowsTree(true);
+            if (!isAlive()) {
+              if (!child.pid) markReclaimed(false);
+              else armExitConfirmation();
+            } else killWindowsTree(true);
           }
           return;
         }
@@ -2930,7 +2932,7 @@ export function createChildTerminationController(
         const delivered = killDirect("SIGKILL");
         if (delivered && isAlive()) armExitConfirmation();
       }, graceMs);
-      forceTimer.unref?.();
+      if (child.pid) forceTimer.unref?.();
     },
     cleanup(): void {
       child.removeListener("exit", onExit);

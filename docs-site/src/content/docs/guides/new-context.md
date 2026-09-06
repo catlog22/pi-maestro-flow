@@ -213,6 +213,9 @@ flowchart TD
 
 ### 与 Plan handoff 协作
 
+Plan 确认后的 handoff 现在统一通过 New Context 调度：`scheduleNewContext` 使用 `source: "plan-confirm"`，先完成确定性 reset，再由内存回调 `continueAfterReset` 自动排入批准计划的执行消息，因此无需用户再次发送继续指令。若 Session generation 变化、新用户消息到达等原因让请求在续跑前过期，`onCancelled` 会清理对应的 stale handoff，避免以后误执行。
+
+- Plan handoff 的 `carryForward` 使用独立的 `NEW_CONTEXT_MAX_PLAN_HANDOFF_BYTES` 预算，最大 **20 KiB UTF-8**；普通 standalone `carryForward` 仍为 4 KiB；
 - Plan 正在执行确定性 handoff 时，New Context 会等待；
 - `clean-context` Plan handoff 与无独有 payload 的请求等价时可以合并；
 - 请求带有独有 `carryForward/resourceUris` 时不会被错误吞掉，而是在 Plan compact 后继续执行。

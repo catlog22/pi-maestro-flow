@@ -56,11 +56,17 @@ async function acknowledgePersistence(value: SingleResult): Promise<void> {
     events: {
       emit(
         _name: string,
-        event: { waitUntil(promise: Promise<unknown>): void; acknowledgeResource?(uri: string): void },
+        event: {
+          waitUntil(
+            promise: Promise<unknown>,
+            options?: { kind?: "canonical" | "observer" },
+          ): void;
+          acknowledgeResource?(uri: string): void;
+        },
       ) {
         event.waitUntil(Promise.resolve().then(() => {
-          event.acknowledgeResource?.(`agent://${value.correlationId}`);
-        }));
+          event.acknowledgeResource?.(`agent://${value.publicationId}`);
+        }), { kind: "canonical" });
       },
     },
   } as unknown as ExtensionAPI;
@@ -139,10 +145,16 @@ test("displayMessageForResult keeps the full result when durable persistence is 
     events: {
       emit(
         _name: string,
-        event: { waitUntil(promise: Promise<unknown>): void; acknowledgeResource?(uri: string): void },
+        event: {
+          waitUntil(
+            promise: Promise<unknown>,
+            options?: { kind?: "canonical" | "observer" },
+          ): void;
+          acknowledgeResource?(uri: string): void;
+        },
       ) {
-        event.acknowledgeResource?.("agent://run-abc");
-        event.waitUntil(Promise.reject(new Error("store unavailable")));
+        event.acknowledgeResource?.("agent://publication-rejected");
+        event.waitUntil(Promise.reject(new Error("store unavailable")), { kind: "canonical" });
       },
     },
   } as unknown as ExtensionAPI;

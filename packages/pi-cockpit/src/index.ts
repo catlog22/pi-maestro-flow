@@ -132,7 +132,6 @@ import {
 	type CockpitConfig,
 } from "./types.ts";
 import type { MailboxHostRegistry } from "pi-maestro-teammate/v1/mailbox";
-import { activateSshHost, listSshHostPickerEntries } from "pi-maestro-teammate/v1/ssh-hosts";
 import {
 	buildCockpitTargetCatalogue,
 	createTargetAutocompleteProvider,
@@ -161,6 +160,16 @@ export { makeWindowBarWidget, renderWindowBar } from "./window-bar.ts";
 export { makeWindowThreadWidget, renderWindowThreadView, windowThreadBody } from "./window-thread-view.ts";
 
 const MAILBOX_REGISTRY_KEY = Symbol.for("pi-maestro-teammate.mailbox-registry");
+
+async function listSshHostPickerEntries() {
+	const sshHosts = await import("pi-maestro-teammate/v1/ssh-hosts");
+	return sshHosts.listSshHostPickerEntries();
+}
+
+async function activateSshHost(hostId: string): Promise<void> {
+	const sshHosts = await import("pi-maestro-teammate/v1/ssh-hosts");
+	await sshHosts.activateSshHost(hostId);
+}
 
 const FOOTER_UTILS: WidthUtils = { measure: visibleWidth, clip: truncateToWidth };
 const BASH_BG_OVERLAY_KEY = "alt+j";

@@ -54,6 +54,18 @@ task model > 顶层 model > taskType 映射 > 角色 model > 父 Pi 模型
 
 > `taskType` 只影响模型路由，不改变角色行为。自定义 Agent 可声明新的小写类型标识，Control Center（`Alt+M` / `/teammate-models` 模型映射覆盖层，见 [TUI 操作指南](/guides/tui-guide)）自动合并。
 
+## SSH host-reference 远程通道
+
+当远程目标使用 SSH host reference，且已注册的 host provider 实现可选的 `openTeammateRemoteChannel` 能力时，teammate 会优先让 provider 打开专用于 RPC 的固定远程通道（命令固定为 `pi-teammate-remote connect --stdio`，调用方不能传入任意命令）。provider 返回的 stream、`stderr` 与幂等 `close()` 会经过严格校验；能力存在但打开或校验失败时会安全报错，不会把错误悄悄转换成另一条回退路径。
+
+Flow 的 ssh-manager 在 provider 前设置准入 broker：每个 host 最多 **2** 路、全局最多 **8** 路；请求可通过 `AbortSignal` 取消，shutdown 会停止新准入并关闭 pending/active 通道。通道打开前后还会复核 store revision 与 host digest，避免配置变化期间交付失效连接。
+
+host reference 的兼容性检查除既有 shell、密码认证与 identity passphrase 限制外，还会报告：
+
+- `unsupported-managed-key`：使用 manager 托管 key；
+- `unsupported-jump-host`：配置了 jump host；
+- `untrusted-host`：没有可信 host key。
+
 ## DAG 依赖图
 
 `{name}` 引用与 `dependsOn` 一起构成任务依赖图：引用注入输出，`dependsOn` 仅排序。示例：

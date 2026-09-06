@@ -1092,6 +1092,7 @@ test("teammate child registers interaction, local Bash, and parent-permission su
     "session_shutdown",
     "session_start",
     "before_agent_start",
+    "agent_start",
     "tool_call",
     "context",
     "before_provider_request",

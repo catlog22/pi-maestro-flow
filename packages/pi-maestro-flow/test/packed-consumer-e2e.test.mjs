@@ -17,10 +17,14 @@ import test from "node:test";
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const localTeammateRoot = resolve(packageRoot, "..", "pi-maestro-teammate");
 const localSettingsCoreRoot = resolve(packageRoot, "..", "pi-maestro-settings-core");
+const localBackendCoreRoot = resolve(packageRoot, "..", "pi-maestro-backend-core");
+const localBackendsRoot = resolve(packageRoot, "..", "pi-maestro-backends");
 const localCockpitRoot = resolve(packageRoot, "..", "pi-cockpit");
 const localFlowPackage = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
 const localTeammatePackage = JSON.parse(readFileSync(join(localTeammateRoot, "package.json"), "utf8"));
 const localSettingsCorePackage = JSON.parse(readFileSync(join(localSettingsCoreRoot, "package.json"), "utf8"));
+const localBackendCorePackage = JSON.parse(readFileSync(join(localBackendCoreRoot, "package.json"), "utf8"));
+const localBackendsPackage = JSON.parse(readFileSync(join(localBackendsRoot, "package.json"), "utf8"));
 const localCockpitPackage = JSON.parse(readFileSync(join(localCockpitRoot, "package.json"), "utf8"));
 const piSdkVersion = localFlowPackage.devDependencies["@earendil-works/pi-coding-agent"];
 const piCodingAgentEntry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
@@ -46,7 +50,7 @@ const require = createRequire(import.meta.url);
 const npmCommand = [process.execPath, process.env.npm_execpath ?? require.resolve("npm/bin/npm-cli.js")];
 const packTimeout = 360_000;
 const installTimeout = 600_000;
-const testTimeout = packTimeout * 4 + installTimeout + 600_000;
+const testTimeout = packTimeout * 6 + installTimeout + 600_000;
 
 test("packed consumer installs real tarballs and loads in a fresh Pi process", { timeout: testTimeout }, () => {
   const shortTempRoot = process.env.SystemDrive ? `${process.env.SystemDrive}\\tmp` : tmpdir();
@@ -67,6 +71,20 @@ test("packed consumer installs real tarballs and loads in a fresh Pi process", {
       npmCommand,
       ["pack", "--json", "--pack-destination", root],
       localSettingsCoreRoot,
+      process.env,
+      packTimeout,
+    ).stdout);
+    const backendCorePacked = parseTrailingJson(run(
+      npmCommand,
+      ["pack", "--json", "--pack-destination", root],
+      localBackendCoreRoot,
+      process.env,
+      packTimeout,
+    ).stdout);
+    const backendsPacked = parseTrailingJson(run(
+      npmCommand,
+      ["pack", "--json", "--pack-destination", root],
+      localBackendsRoot,
       process.env,
       packTimeout,
     ).stdout);
@@ -92,14 +110,20 @@ test("packed consumer installs real tarballs and loads in a fresh Pi process", {
       packTimeout,
     ).stdout);
     const settingsCoreTarball = join(root, settingsCorePacked[0].filename);
+    const backendCoreTarball = join(root, backendCorePacked[0].filename);
+    const backendsTarball = join(root, backendsPacked[0].filename);
     const cockpitTarball = join(root, cockpitPacked[0].filename);
     const teammateTarball = join(root, teammatePacked[0].filename);
     const flowTarball = join(root, flowPacked[0].filename);
     assert.equal(existsSync(settingsCoreTarball), true);
+    assert.equal(existsSync(backendCoreTarball), true);
+    assert.equal(existsSync(backendsTarball), true);
     assert.equal(existsSync(cockpitTarball), true);
     assert.equal(existsSync(teammateTarball), true);
     assert.equal(existsSync(flowTarball), true);
     assert.equal(settingsCorePacked[0].version, localSettingsCorePackage.version);
+    assert.equal(backendCorePacked[0].version, localBackendCorePackage.version);
+    assert.equal(backendsPacked[0].version, localBackendsPackage.version);
     assert.equal(cockpitPacked[0].version, localCockpitPackage.version);
     assert.equal(teammatePacked[0].version, localTeammatePackage.version);
     assert.equal(flowPacked[0].version, localFlowPackage.version);
@@ -150,6 +174,8 @@ test("packed consumer installs real tarballs and loads in a fresh Pi process", {
       [
         "install",
         settingsCoreTarball,
+        backendCoreTarball,
+        backendsTarball,
         cockpitTarball,
         teammateTarball,
         flowTarball,

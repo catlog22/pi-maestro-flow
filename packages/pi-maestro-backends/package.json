@@ -1,6 +1,6 @@
 {
   "name": "pi-maestro-backends",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Teammate execution backends. Every backend here implements the same pi-maestro-backend-core contract — including the Pi subprocess, which is an ordinary member rather than a bypass.",
   "type": "module",
   "engines": {
@@ -34,7 +34,7 @@
   "dependencies": {
     "@deepseek-ai/dsh-sdk-client": "next",
     "@modelcontextprotocol/sdk": "1.30.0",
-    "pi-maestro-backend-core": "*",
+    "pi-maestro-backend-core": "0.1.3",
     "typebox": "1.3.7"
   }
 }

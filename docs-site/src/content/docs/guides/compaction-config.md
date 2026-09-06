@@ -83,6 +83,15 @@ icon: "🧮"
 
 只应在 Todo 或阶段已经完成、`Todo.context` 与必要 `resourceUris` 已持久化、下一阶段弱耦合且能从 recovery capsule 恢复时使用。Todo completion checkpoint 决定 reset 时机，pressure 只决定紧迫度：late auto-prune 提供普通建议，critical 则应在开始下一 Todo 前优先 reset。任务执行中不要因 token 压力中断当前 Todo，automatic compact 继续承担容量安全兜底；没有 Todo completion 时不产生动态提醒。完整流程、调用示例、capsule 内容与故障语义见 [New Context 确定性上下文重置](/guides/new-context)。
 
+### Auto-compaction 唤醒协议 v1
+
+Automatic compaction 需要续跑被中断任务时，会先广播 capability envelope，再通过 receipt-bound wake 状态机交付续行；每次 wake 都绑定唯一 `wakeId`、Session/branch checkpoint 与 runtime generation，只有匹配的回执才能推进状态，避免旧回执或重复输入冒充当前续跑。
+
+- **绝对 deadline**：wake 在创建时写入固定的 `deadlineAt`（当前窗口为 5 分钟），重试或重启不会重置时限；到期且没有权威 `turn-started` 回执即转为 `failed`；
+- **Supersede**：checkpoint 之后出现新的用户消息时，旧 recovery wake 转为 `cancelled`，新输入优先，不再自动续跑旧任务；
+- **Fail closed 持久化**：prepared/attempt/terminal receipt 都必须先写入 durable pending intent；写入失败会暂停派发或重试终态持久化，不会把未落盘状态当作成功；
+- **能力围栏**：producer 与 teammate consumer 都校验协议版本、`wakeId`、sequence、generation 和 deadline；缺少兼容 capability 时不宣称已可靠唤醒。
+
 ### 设计权衡
 
 - `velocity` 默认关：它**提前**压缩，未显式配置时不得早于历史 token 比率行为；

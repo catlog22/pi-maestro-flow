@@ -5,7 +5,21 @@ icon: "🔄"
 
 这里记录 pi maestro flow 套件从上一稳定版本到当前版本的用户可见变化、行为调整、问题修复和升级要求。
 
-> **当前稳定版本：v0.27.0（2026-09-03）。** New Context 默认启用、跨工作区有界 Session History 与知识感知 Plan；引擎精确 pin `maestro-flow@0.5.84`；搭配 Teammate 2.5.0、Cockpit 0.22.0、Settings-Core 0.2.1、Backend-Core 0.1.2 与 Backends 0.1.2。
+> **当前稳定版本：v0.28.0（2026-09-06）。** SSH 远程通道、智能模型选择与 receipt-bound 唤醒协议；引擎精确 pin `maestro-flow@0.5.84`；搭配 Teammate 2.6.0、Cockpit 0.23.0、Settings-Core 0.2.1、Backend-Core 0.1.3 与 Backends 0.1.3。
+
+## v0.28.0（2026-09-06）
+
+> 本版发布 Flow 0.28.0、Teammate 2.6.0 与 Cockpit 0.23.0；Backend-Core 0.1.2 → 0.1.3、Backends 0.1.2 → 0.1.3；Settings-Core 0.2.1 保持不变；引擎精确 pin 维持 `maestro-flow@0.5.84`（上游 0.5.85/0.5.86 仅含 knowledge-CLI 与 release-machine 修复，本版显式接受落后）。26 个 commit，280 个文件 / +35,564 / −3,282（不含本发布元数据）。
+
+- **Flow + Teammate SSH 远程通道**：SSH host-reference provider 可声明 `openTeammateRemoteChannel` 能力，为 teammate RPC 打开专用通道；Flow 侧 `ssh-manager` 新增准入 broker（每 host 2 路 / 全局 8 路上限、abort 与 shutdown 安全），`sshHostReferenceIssue` 兼容性判定迁入 broker。`SshHostReferenceIssue` 新增 `unsupported-managed-key` / `unsupported-jump-host` / `untrusted-host`。
+- **智能模型选择**：Teammate 全局 Smart Mode（off/economy/balanced/sota）持久化于 model-routing v3 store，routing tab Ctrl+S 循环切换，root agent 系统提示注入可逆标记块；Flow 新增 `model_intelligence` 视图（OpenRouter 五维基准排名 + 24h 文件缓存），`model_availability` 支持 `taskType` 参数——排名仅供参考，绝不覆盖可用性。
+- **Receipt-bound 唤醒协议 v1**：auto-compaction 唤醒由 capability envelope、wakeId 绑定、绝对 deadline 与 supersede/过期检测共同围栏；Flow 中继广播 v1 能力，teammate 消费侧实现 receipt 状态机（prepared→queued→consumed→turn-started + cancel/fail）与 settle 前 IPC drain；失败决策新增 `settlement-authority-insufficient` / `model-selection-unsupported`。
+- **Plan New Context 延续**：Plan 确认通过 `scheduleNewContext` 执行确定性重置，`continueAfterReset` 在 checkpoint 提交后自动续跑执行消息、`onCancelled` 清理过期 handoff；carry-forward 预算提升至 20KB（`NEW_CONTEXT_MAX_PLAN_HANDOFF_BYTES`）。
+- **Gateway 常驻服务**：新增幂等 `service ensure` 动作与 Windows Startup resident 后端（Startup 文件夹快捷方式，明确不是 Windows Service），含 manifest 校验、schtasks 创建终止确认与 absent 观察时钟防护；private-state 锁加固（TOCTOU 收窄、reclaim marker 符号链接/替换检测、心跳部分写循环）；新增打包的 `pi-maestro-gateway` CLI 与公共 `gateway/v1` 导出。
+- **Cockpit 0.23.0**：新增 target routing / integration 组件与 compaction 摘要紧凑排版。
+- **本窗口早些时候已入库**：gateway 本地运行时与 SSH 编排、ssh 配对存储 / resident service / pi-config sync、session-history 恢复统一、`/advisor` 进程级 broker、持久化 completion 发布、浏览器生命周期加固、computer-use 指针反馈、Windows 子进程控制台隐藏、Plan handoff 串行化。
+
+升级：`pi install npm:pi-maestro-flow@0.28.0`
 
 ## v0.27.0（2026-09-03）
 

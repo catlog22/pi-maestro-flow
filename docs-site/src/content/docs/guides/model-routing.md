@@ -76,6 +76,19 @@ teammate({
 
 > 优先级仍为：任务级 `model` > 顶层 `model` > `taskType` 映射（含 profile 内映射）> 角色 model > 父 Pi 模型。
 
+## Teammate Smart Mode
+
+Smart Mode 是全局的智能选模策略，保存在 `~/.pi/agent/teammate-models.json` 的 model-routing v3 store 中。进入 Control Center 的 **Routing** tab 后，按 `Ctrl+S` 会按 `off → economy → balanced → sota → off` 循环切换；界面状态与提示均提供中英文 locale。
+
+| 模式 | 行为 |
+|------|------|
+| `off` | 关闭智能选模，继续使用既有 taskType/profile/角色路由（也是默认值） |
+| `economy` | 在任务证据可信的候选中优先参考价格，仅在便宜候选明显更弱时升级 |
+| `balanced` | 综合任务能力、参考价格与延迟，候选没有明显优势时保留既有路由 |
+| `sota` | 优先任务相关的 intelligence、coding 或 agentic 排名，价格和延迟只用于同级证据的决胜 |
+
+启用后，只有 root agent 的系统提示会注入带起止标记的可逆 Smart Mode 块：它要求按 `taskType` 查询 `model-availability`，并把 `model_intelligence` 当作建议性证据；已显式指定的模型和实际可用性始终优先。切回 `off` 时该标记块会被移除，child agent 不注入此块。智能推荐不会回写持久化 profile；证据过期、低置信或候选接近时仍沿用既有路由。
+
 ## taskType 与路由
 
 `taskType` 只影响模型路由，不改变角色行为。Control Center 自动合并内置类型、当前发现的内置/项目/用户 Agent YAML 类型及已有映射类型；自定义 Agent 可声明新的小写类型标识。

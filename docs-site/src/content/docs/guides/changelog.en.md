@@ -5,7 +5,21 @@ icon: "🔄"
 
 This page records user-visible features, behavior changes, fixes, and upgrade requirements from the previous stable release to the current version of the pi maestro flow suite.
 
-> **Current stable release: v0.27.0 (2026-09-03).** New Context enabled by default, bounded workspace Session History, and knowledge-aware Plans; exact engine pin `maestro-flow@0.5.84`; bundles Teammate 2.5.0, Cockpit 0.22.0, Settings-Core 0.2.1, Backend-Core 0.1.2, and Backends 0.1.2.
+> **Current stable release: v0.28.0 (2026-09-06).** SSH remote channels, smart model selection, and the receipt-bound wake protocol; exact engine pin `maestro-flow@0.5.84`; bundles Teammate 2.6.0, Cockpit 0.23.0, Settings-Core 0.2.1, Backend-Core 0.1.3, and Backends 0.1.3.
+
+## v0.28.0 (2026-09-06)
+
+> This release ships Flow 0.28.0, Teammate 2.6.0, and Cockpit 0.23.0; Backend-Core 0.1.2 → 0.1.3 and Backends 0.1.2 → 0.1.3; Settings-Core 0.2.1 is unchanged; the exact engine pin stays at `maestro-flow@0.5.84` (upstream 0.5.85/0.5.86 contain only knowledge-CLI and release-machine fixes; this release explicitly accepts the lag). 26 commits, 280 files / +35,564 / −3,282 (excluding release metadata).
+
+- **Flow + Teammate SSH remote channels**: an SSH host-reference provider can declare the `openTeammateRemoteChannel` capability to open a dedicated channel for teammate RPC; the Flow `ssh-manager` gains an admission broker (2 per host / 8 global caps, abort- and shutdown-safe), and `sshHostReferenceIssue` compatibility moves into the broker. `SshHostReferenceIssue` gains `unsupported-managed-key` / `unsupported-jump-host` / `untrusted-host`.
+- **Smart model selection**: a global Teammate Smart Mode (off/economy/balanced/sota) persisted in the model-routing v3 store, a routing-tab Ctrl+S toggle, and a reversible marked block injected into the root agent system prompt; Flow adds a `model_intelligence` view (OpenRouter five-dimension benchmark ranks + 24h file cache) and a `taskType` parameter on `model_availability` — ranks are advisory and never override availability.
+- **Receipt-bound wake protocol v1**: auto-compaction wakes are fenced by capability envelopes, wakeId binding, absolute deadlines, and supersede/expiry detection; the Flow relay broadcasts v1 capabilities, the teammate consumer implements the receipt state machine (prepared→queued→consumed→turn-started + cancel/fail) with pre-settlement IPC drain; failure decisions add `settlement-authority-insufficient` / `model-selection-unsupported`.
+- **Plan New Context continuation**: Plan confirmation executes the deterministic reset via `scheduleNewContext`, with `continueAfterReset` resuming execution messages after the checkpoint commits and `onCancelled` clearing stale handoffs; the carry-forward budget rises to 20KB (`NEW_CONTEXT_MAX_PLAN_HANDOFF_BYTES`).
+- **Gateway resident service**: an idempotent `service ensure` action and a Windows Startup resident backend (Startup-folder shortcut, explicitly not a Windows Service) with manifest validation, schtasks creation-termination tracking, and absence-observation clock guard; private-state lock hardening (TOCTOU narrowing, reclaim-marker symlink/replace detection, heartbeat partial-write loop); a packaged `pi-maestro-gateway` CLI and public `gateway/v1` export.
+- **Cockpit 0.23.0**: new target routing / integration widgets and compact-form styling for compaction summaries.
+- **Committed earlier in the window**: gateway local runtime and SSH orchestration, ssh pairing store / resident service / pi-config sync, session-history recovery unification, the process-wide `/advisor` broker, durable completion publication, browser lifecycle hardening, computer-use pointer feedback, hidden Windows child consoles, and serialized Plan handoff submission.
+
+Upgrade: `pi install npm:pi-maestro-flow@0.28.0`
 
 ## v0.27.0 (2026-09-03)
 
