@@ -1502,75 +1502,247 @@ export function normalizeTeammateParams(
 }
 
 // ---------------------------------------------------------------------------
-// AC3: Windows-safe pi binary resolution
+// AC3: shell-free, provenance-bearing Pi launcher resolution
 // ---------------------------------------------------------------------------
 
-export let resolvedPiEntryPoint: string | null | undefined;
+export type PiLaunchSource =
+  | "override"
+  | "path-native"
+  | "windows-shim"
+  | "host-entry"
+  | "path-fallback";
 
-export function resolvePiEntryPoint(): string | null {
-  if (resolvedPiEntryPoint !== undefined) return resolvedPiEntryPoint;
-
-  // Try current process argv (if pi is the host)
-  const argv1 = process.argv[1];
-  if (argv1 && (argv1.endsWith(".mjs") || argv1.endsWith(".js"))) {
-    resolvedPiEntryPoint = argv1;
-    return resolvedPiEntryPoint;
-  }
-
-  if (process.platform === "win32") {
-    // Parse pi.cmd to find the real .js entry point
-    const npmDir = process.env.APPDATA
-      ? path.join(process.env.APPDATA, "npm")
-      : null;
-    if (npmDir) {
-      const cmdFile = path.join(npmDir, "pi.cmd");
-      try {
-        const content = fs.readFileSync(cmdFile, "utf-8");
-        // pi.cmd contains: "%_prog%" "%dp0%\node_modules\...\cli.js" %*
-        const match = content.match(/"?%dp0%\\([^"*%\r\n]+\.(?:js|mjs))"?/);
-        if (match) {
-          const entryPoint = path.join(npmDir, match[1]);
-          if (fs.existsSync(entryPoint)) {
-            resolvedPiEntryPoint = entryPoint;
-            return resolvedPiEntryPoint;
-          }
-        }
-      } catch { /* fallback */ }
-    }
-  }
-
-  resolvedPiEntryPoint = null;
-  return null;
+export interface PiLaunchSpec {
+  command: string;
+  argsPrefix: string[];
+  source: PiLaunchSource;
 }
 
 export interface PiSpawnCommandOptions {
   envBinary?: string | null;
   entryPoint?: string | null;
   platform?: NodeJS.Platform;
+  pathValue?: string | null;
+  argv?: readonly string[];
+  execPath?: string;
+  appData?: string | null;
+  /** @internal deterministic filesystem seam for focused launcher tests. */
+  isFile?: (candidate: string) => boolean;
+  /** @internal deterministic package-manifest seam for focused launcher tests. */
+  readTextFile?: (candidate: string) => string;
+}
+
+function regularFileExists(candidate: string): boolean {
+  try {
+    return fs.statSync(candidate).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function pathPiCandidate(
+  platform: NodeJS.Platform,
+  pathValue: string | null | undefined,
+  isFile: (candidate: string) => boolean,
+): Pick<PiLaunchSpec, "command" | "source"> | undefined {
+  if (!pathValue) return undefined;
+  const directories = pathValue.split(platform === "win32" ? ";" : ":").filter(Boolean);
+  if (platform !== "win32") {
+    for (const directory of directories) {
+      const candidate = path.join(directory, "pi");
+      if (isFile(candidate)) return { command: candidate, source: "path-native" };
+    }
+    return undefined;
+  }
+
+  // Prefer a native executable anywhere on PATH before considering cmd/bat
+  // wrappers. Ignore npm's extensionless POSIX shim: cross-spawn follows its
+  // shebang through sh.exe, so the Pi Node process does not own the IPC channel.
+  for (const extension of [".exe", ".com"] as const) {
+    for (const directory of directories) {
+      const candidate = path.join(directory, `pi${extension}`);
+      if (isFile(candidate)) return { command: candidate, source: "path-native" };
+    }
+  }
+  for (const extension of [".cmd", ".bat"] as const) {
+    for (const directory of directories) {
+      const candidate = path.join(directory, `pi${extension}`);
+      if (isFile(candidate)) return { command: candidate, source: "windows-shim" };
+    }
+  }
+  return undefined;
+}
+
+const WINDOWS_PI_SHIM_ENTRY_PATTERN = /"?%dp0%[\\/]([^"*%\r\n]+?\.(?:js|mjs|cjs))"?/i;
+
+function resolvedWindowsPiShim(
+  shim: string,
+  isFile: (candidate: string) => boolean,
+  readTextFile: (candidate: string) => string,
+  execPath: string,
+): PiLaunchSpec | undefined {
+  try {
+    const match = WINDOWS_PI_SHIM_ENTRY_PATTERN.exec(readTextFile(shim));
+    if (!match) return undefined;
+    const entry = path.resolve(path.dirname(shim), match[1]!.replace(/[\\/]/g, path.sep));
+    const verified = verifiedHostPiEntry(entry, isFile, readTextFile);
+    return verified
+      ? { command: execPath, argsPrefix: [verified], source: "windows-shim" }
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function verifiedHostPiEntry(
+  entryPoint: string | null | undefined,
+  isFile: (candidate: string) => boolean,
+  readTextFile: (candidate: string) => string,
+): string | undefined {
+  if (!entryPoint || !/\.(?:js|mjs|cjs)$/i.test(entryPoint) || !isFile(entryPoint)) return undefined;
+  const absoluteEntry = path.resolve(entryPoint);
+  let directory = path.dirname(absoluteEntry);
+  for (let depth = 0; depth < 10; depth += 1) {
+    const manifestPath = path.join(directory, "package.json");
+    if (isFile(manifestPath)) {
+      try {
+        const manifest = JSON.parse(readTextFile(manifestPath)) as {
+          name?: unknown;
+          bin?: unknown;
+        };
+        const acceptedPackage = manifest.name === "@earendil-works/pi-coding-agent"
+          || manifest.name === "@mariozechner/pi-coding-agent";
+        const piBin = typeof manifest.bin === "object" && manifest.bin !== null
+          ? (manifest.bin as Record<string, unknown>).pi
+          : undefined;
+        if (acceptedPackage && typeof piBin === "string"
+          && path.resolve(directory, piBin) === absoluteEntry) return absoluteEntry;
+      } catch {
+        return undefined;
+      }
+      return undefined;
+    }
+    const parent = path.dirname(directory);
+    if (parent === directory) break;
+    directory = parent;
+  }
+  return undefined;
+}
+
+export let resolvedPiEntryPoint: string | null | undefined;
+
+/**
+ * Resolve process.argv[1] only when its owning package manifest proves it is
+ * Pi's declared CLI. A generic .js/.mjs suffix is never evidence of identity.
+ */
+export function resolvePiEntryPoint(): string | null {
+  if (resolvedPiEntryPoint !== undefined) return resolvedPiEntryPoint;
+  resolvedPiEntryPoint = verifiedHostPiEntry(
+    process.argv[1],
+    regularFileExists,
+    (candidate) => fs.readFileSync(candidate, "utf-8"),
+  ) ?? null;
+  return resolvedPiEntryPoint;
+}
+
+export function resolvePiLaunchSpec(options: PiSpawnCommandOptions = {}): PiLaunchSpec {
+  const envBinary = options.envBinary === undefined
+    ? process.env.PI_TEAMMATE_PI_BINARY
+    : options.envBinary;
+  if (envBinary?.trim()) {
+    return { command: envBinary, argsPrefix: [], source: "override" };
+  }
+
+  const platform = options.platform ?? process.platform;
+  const isFile = options.isFile ?? regularFileExists;
+  const readTextFile = options.readTextFile ?? ((candidate: string) => fs.readFileSync(candidate, "utf-8"));
+  const execPath = options.execPath ?? process.execPath;
+  const pathCandidate = pathPiCandidate(
+    platform,
+    options.pathValue === undefined ? process.env.PATH : options.pathValue,
+    isFile,
+  );
+  if (pathCandidate?.source === "path-native") return { ...pathCandidate, argsPrefix: [] };
+  if (pathCandidate?.source === "windows-shim") {
+    const resolved = resolvedWindowsPiShim(pathCandidate.command, isFile, readTextFile, execPath);
+    if (resolved) return resolved;
+  }
+
+  // APPDATA/npm is not guaranteed to be present in PATH for service/gateway
+  // processes, so retain an explicit, verified Windows shim fallback.
+  if (platform === "win32") {
+    const appData = options.appData === undefined ? process.env.APPDATA : options.appData;
+    if (appData) {
+      const shim = path.join(appData, "npm", "pi.cmd");
+      if (isFile(shim)) {
+        const resolved = resolvedWindowsPiShim(shim, isFile, readTextFile, execPath);
+        if (resolved) return resolved;
+      }
+    }
+  }
+  const injectedEntry = options.entryPoint !== undefined
+    ? verifiedHostPiEntry(options.entryPoint, isFile, readTextFile)
+    : options.argv !== undefined
+      ? verifiedHostPiEntry(options.argv[1], isFile, readTextFile)
+      : undefined;
+  const hostEntry = options.entryPoint === undefined && options.argv === undefined
+    ? resolvePiEntryPoint()
+    : injectedEntry;
+  if (hostEntry) {
+    return {
+      command: options.execPath ?? process.execPath,
+      argsPrefix: [hostEntry],
+      source: "host-entry",
+    };
+  }
+
+  // Preserve the historical ENOENT failure mode when no resolver candidate is
+  // installed, but make that unverified fallback explicit in diagnostics.
+  return { command: "pi", argsPrefix: [], source: "path-fallback" };
 }
 
 export function getPiSpawnCommand(
   args: string[],
   options: PiSpawnCommandOptions = {},
-): { command: string; args: string[]; shell: false } {
-  const envBinary = options.envBinary === undefined
-    ? process.env.PI_TEAMMATE_PI_BINARY
-    : options.envBinary;
-  if (envBinary) {
-    return { command: envBinary, args, shell: false };
-  }
+): PiLaunchSpec & { args: string[]; shell: false } {
+  const launch = resolvePiLaunchSpec(options);
+  return {
+    ...launch,
+    args: [...launch.argsPrefix, ...args],
+    shell: false,
+  };
+}
 
-  const entryPoint = options.entryPoint === undefined
-    ? resolvePiEntryPoint()
-    : options.entryPoint;
-  if (entryPoint) {
-    return { command: process.execPath, args: [entryPoint, ...args], shell: false };
-  }
+export interface PiLaunchDiagnostic {
+  type: "teammate_pi_launch_diagnostic";
+  source: PiLaunchSource;
+  phase: "spawn" | "child-error" | "close";
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  stderrTail: string;
+}
 
-  // cross-spawn resolves Windows .cmd shims without opting into shell mode
-  // and escapes each argv item before invoking cmd.exe internally.
-  void options.platform;
-  return { command: "pi", args, shell: false };
+export function piLaunchDiagnostic(
+  launch: Pick<PiLaunchSpec, "source">,
+  phase: PiLaunchDiagnostic["phase"],
+  exitCode: number | null,
+  signal: NodeJS.Signals | null,
+  stderr: string,
+): PiLaunchDiagnostic {
+  return {
+    type: "teammate_pi_launch_diagnostic",
+    source: launch.source,
+    phase,
+    exitCode,
+    signal,
+    stderrTail: truncateUtf8Tail(stderr.trim(), EXECUTION_BUFFER_LIMITS.stderrBytes),
+  };
+}
+
+export function formatPiLaunchDiagnostic(diagnostic: PiLaunchDiagnostic): string {
+  return `source=${diagnostic.source}, phase=${diagnostic.phase}, exit=${diagnostic.exitCode ?? "null"}, `
+    + `signal=${diagnostic.signal ?? "none"}`
+    + (diagnostic.stderrTail ? `\nstderr tail:\n${diagnostic.stderrTail}` : "");
 }
 
 export interface InteractiveTerminalLaunchOptions {

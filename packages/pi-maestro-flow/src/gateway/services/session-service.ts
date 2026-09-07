@@ -37,8 +37,14 @@ export class GatewaySessionService {
       switch (request.action) {
         case "create": {
           if (this.authMode === "open") throw new Error("auth.mode=open is read-only");
-          const workspacePath = id(request.workspacePath, "workspacePath");
-          const decision = await this.policy?.authorizeWorkspace(principal, workspacePath); if (decision && !decision.allowed) throw new Error(decision.reason);
+          const workspaceReference = id(request.workspaceId ?? request.workspacePath, "workspaceId or workspacePath");
+          const decision = await this.policy?.authorizeWorkspace(principal, workspaceReference);
+          if (decision && (!decision.allowed || decision.workspacePath === undefined)) throw new Error(decision.reason);
+          const workspacePath = decision?.workspacePath ?? id(request.workspacePath, "workspacePath");
+          if (request.workspaceId !== undefined && request.workspacePath !== undefined && this.policy) {
+            const pathDecision = await this.policy.authorizeWorkspace(principal, id(request.workspacePath, "workspacePath"));
+            if (!pathDecision.allowed || pathDecision.workspacePath !== workspacePath) throw new Error("workspaceId and workspacePath refer to different workspaces");
+          }
           const ownerId = id(request.ownerId, "ownerId");
           const state = await this.store.create({ id: request.sessionId as string | undefined, workspacePath, ownerId, ownerPrincipalId: principalKey(principal), leaseTtlMs: request.leaseTtlMs as number | undefined }, { expectedSessionRevision: integer(request.expectedSessionRevision, "expectedSessionRevision"), operationId: id(request.operationId, "operationId"), actorId: ownerId });
           return result(principal, request, { session: state.session, member: state.members[0] });

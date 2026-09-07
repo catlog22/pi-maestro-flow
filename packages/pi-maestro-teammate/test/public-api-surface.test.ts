@@ -62,6 +62,7 @@ const LEAF_SUBPATHS = [
   "agents.ts",
   "model-routing.ts",
   "observation.ts",
+  "foreground-detach.ts",
   "remote.ts",
   "child-extensions.ts",
   "scheduler.ts",

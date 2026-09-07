@@ -490,10 +490,12 @@ test("plan-model and permissions preserve both sections across concurrent proces
     });
   };
 
+  let planWorker: Promise<void> | undefined;
+  let permissionsWorker: Promise<void> | undefined;
   try {
-    const planWorker = startWorker("plan");
-    const permissionsWorker = startWorker("permissions");
-    const deadline = Date.now() + 10_000;
+    planWorker = startWorker("plan");
+    permissionsWorker = startWorker("permissions");
+    const deadline = Date.now() + 30_000;
     while ((!existsSync(join(root, "ready-plan")) || !existsSync(join(root, "ready-permissions"))) && Date.now() < deadline) {
       await new Promise((resolveReady) => setTimeout(resolveReady, 10));
     }
@@ -515,6 +517,10 @@ test("plan-model and permissions preserve both sections across concurrent proces
     assert.deepEqual(residue, []);
     if (process.platform !== "win32") assert.equal((await stat(settingsPath)).mode & 0o777, 0o600);
   } finally {
+    await writeFile(join(root, "go"), "").catch(() => undefined);
+    await Promise.allSettled(
+      [planWorker, permissionsWorker].filter((worker): worker is Promise<void> => worker !== undefined),
+    );
     await rm(root, { recursive: true, force: true });
   }
 });

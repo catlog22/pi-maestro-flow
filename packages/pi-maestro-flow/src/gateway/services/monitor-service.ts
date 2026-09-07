@@ -27,7 +27,7 @@ export class GatewayMonitorService {
       switch (request.action) {
         case "list": data = { monitors: (await this.options.teammate.monitorList(sessionId)).map((task) => ({ handle: task.id, task })) }; break;
         case "observe": data = { handle: id(request.handle, "handle"), ...(await this.options.teammate.monitorObserve(sessionId, id(request.handle, "handle"), cursor(request.cursor), limit(request.limit))) }; break;
-        case "wait": data = { handle: id(request.handle, "handle"), task: await this.options.teammate.monitorWait(sessionId, id(request.handle, "handle"), request.timeoutMs as number | undefined) }; break;
+        case "wait": data = { handle: id(request.handle, "handle"), ...(await this.options.teammate.monitorWait(sessionId, id(request.handle, "handle"), request.timeoutMs as number | undefined)) }; break;
         case "message": {
           const mode = request.mode ?? "follow_up"; if (mode !== "steer" && mode !== "follow_up" && mode !== "interrupt") throw new Error("mode must be steer, follow_up, or interrupt");
           const delivered = await this.options.teammate.monitorMessage(sessionId, id(request.handle, "handle"), id(request.message, "message"), mode as GatewayTeammateSendMode); data = { handle: request.handle, delivered, mode }; break;

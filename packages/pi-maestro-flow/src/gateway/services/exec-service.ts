@@ -47,6 +47,7 @@ export interface ExecRunInput {
   argv?: readonly string[];
   args?: readonly string[];
   cwd?: string;
+  workspaceId?: string;
   workspace?: string;
   timeoutMs?: number;
   maxOutputBytes?: number;
@@ -265,7 +266,7 @@ export class ExecService {
       if (utf8Bytes(identity) > maximumCommand) throw new GatewayExecServiceError("bounds_exceeded", `command exceeds ${maximumCommand} bytes`);
       if (this.policy) this.policy.checkCommand(identity);
       const requestedCwdForPolicy = input.cwd ?? input.workspace ?? principal.workspacePath ?? this.workspaceRoot ?? process.cwd();
-      const workspaceForPolicy = input.workspace ?? this.workspaceRoot ?? principal.workspacePath ?? requestedCwdForPolicy;
+      const workspaceForPolicy = input.workspaceId ?? input.workspace ?? this.workspaceRoot ?? principal.workspaceId ?? principal.workspacePath ?? requestedCwdForPolicy;
       const trustedDefault = this.trustedFullAccess && this.policy?.isTrustedWorkspace(workspaceForPolicy)
         ? { ...this.commandPolicy, default: "allow" as const }
         : this.commandPolicy;
@@ -280,8 +281,8 @@ export class ExecService {
       if (!Number.isSafeInteger(maximumOutput) || maximumOutput < 1 || maximumOutput > this.configuredMaxOutputBytes) {
         throw new GatewayExecServiceError("bounds_exceeded", `maxOutputBytes must be in [1, ${this.configuredMaxOutputBytes}]`);
       }
-      const requestedCwd = input.cwd ?? input.workspace ?? principal.workspacePath ?? this.workspaceRoot ?? process.cwd();
-      const workspace = input.workspace ?? this.workspaceRoot ?? principal.workspacePath ?? requestedCwd;
+      const requestedCwd = input.cwd ?? input.workspace ?? (input.workspaceId === undefined ? principal.workspacePath ?? this.workspaceRoot ?? process.cwd() : ".");
+      const workspace = input.workspaceId ?? input.workspace ?? this.workspaceRoot ?? principal.workspaceId ?? principal.workspacePath ?? requestedCwd;
       const cwd = this.policy
         ? await this.policy.assertPath(principal, workspace, requestedCwd, "exec")
         : canonicalizeWorkspaceChild(workspace, requestedCwd);

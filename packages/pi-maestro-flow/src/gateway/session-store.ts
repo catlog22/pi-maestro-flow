@@ -117,9 +117,9 @@ export class SessionStore {
       }
       if (state.session.revision !== options.expectedSessionRevision) throw new SessionConflictError(`Expected session revision ${options.expectedSessionRevision}, found ${state.session.revision}`);
       const nextRevision = state.session.revision + 1; const pendingEvents: SessionEventV1[] = [];
+      state.session = { ...state.session, revision: nextRevision, updatedAt: now };
       const context: SessionMutationContext = { state, revision: nextRevision, now, emit: (type, data = {}) => pendingEvents.push(createSessionEvent({ sessionId, revision: nextRevision, type, actorId: options.actorId, createdAt: now, data })) };
       const result = operation(context);
-      state.session = { ...state.session, revision: nextRevision, updatedAt: now };
       state.events.push(...pendingEvents);
       state.operations.push({ version: GATEWAY_STATE_VERSION, id: options.operationId, sessionId, actorId: options.actorId, kind, payloadHash, baseRevision: options.expectedSessionRevision, committedRevision: nextRevision, createdAt: now, result: clone(result) });
       const validated = parseCollaborativeSessionState(state); await this.persist(path, validated); return clone(result);

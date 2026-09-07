@@ -26,6 +26,7 @@ import {
   type TodoContext,
 } from "../src/tools/todo.ts";
 import { TodoToolParams } from "../src/extension/schemas.ts";
+import type { TodoHandoffInput } from "../src/tools/todo-contract.ts";
 import { renderTodoWidget } from "../src/extension/index.ts";
 import {
   addGoal,
@@ -91,6 +92,20 @@ test("todo schema uses non-negative integer indexes for batch dependencies", () 
     summary: "done",
     resourceUris: ["http://not-allowed"],
     transition: "invalid",
+  }), false);
+  assert.equal(Check(TodoToolParams, {
+    action: "advance",
+    id: "0",
+    summary: "done",
+    handoff: {
+      nextSteps: ["Run the focused test"],
+      files: [{ path: "src/api.ts", value: "required", reason: "Next edit target" }],
+    },
+  }), true);
+  assert.equal(Check(TodoToolParams, {
+    action: "update",
+    id: "0",
+    handoff: { files: [{ path: "src/api.ts", value: "required", reason: "ok", extra: true }] },
   }), false);
 });
 
@@ -1178,8 +1193,173 @@ test("todo widget unifies root and teammate tasks sorted by status priority", as
   }
 });
 
-test("todo state version is 6", () => {
-  assert.equal(getTodoCompactionSnapshot().stateVersion, 6);
+test("todo state version is 7", () => {
+  assert.equal(getTodoCompactionSnapshot().stateVersion, 7);
+});
+
+test("todo handoff persists, merges partial annotations, clears explicitly, and reloads defensively", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-file-handoff-"));
+  const loader = new TodoSkillLoader({ cwd: root });
+  const persisted: unknown[] = [];
+  initTodo({ appendEntry(_type: string, data: unknown) { persisted.push(data); } } as never);
+  let todoContext: TodoContext = {
+    cwd: root,
+    ui: { setStatus() {} },
+    skillLoader: loader,
+    sessionManager: { getEntries: () => [] },
+  };
+  onSessionStart(todoContext);
+  const ctx = makeExtensionContext();
+  const handoffInput = {
+    nextSteps: ["Run focused verification"],
+    files: [{ path: "src\\api.ts", value: "required" as const, reason: "Next edit target" }],
+  };
+
+  try {
+    const created = await executeTodo({
+      action: "create",
+      subject: "Annotated",
+      handoff: handoffInput as TodoHandoffInput,
+    }, ctx);
+    assert.equal(created.isError, undefined);
+    const id = getVisibleTasks()[0]!.id;
+    handoffInput.nextSteps[0] = "mutated caller value";
+    handoffInput.files[0]!.reason = "mutated caller reason";
+
+    let stored = getVisibleTasks()[0]!.handoff!;
+    assert.deepEqual(stored.nextSteps, ["Run focused verification"]);
+    assert.equal(stored.files[0]?.path, "src/api.ts");
+    assert.equal(stored.files[0]?.reason, "Next edit target");
+    const originalRevision = stored.files[0]!.annotationRevision;
+
+    await executeTodo({ action: "update", id, subject: "Renamed without handoff" }, ctx);
+    assert.equal(getVisibleTasks()[0]!.handoff!.files[0]!.annotationRevision, originalRevision);
+
+    const replaced = await executeTodo({
+      action: "update",
+      id,
+      updateFields: ["handoff"],
+      handoff: {
+        files: [
+          { path: "./src/api.ts", value: "skip", reason: "Conclusion is already preserved" },
+          { path: "agent://publication-1", value: "conditional", reason: "Only needed for review", when: "Review disputes the evidence" },
+        ],
+      },
+    }, ctx);
+    assert.equal(replaced.isError, undefined);
+    stored = getVisibleTasks()[0]!.handoff!;
+    assert.deepEqual(stored.nextSteps, ["Run focused verification"], "omitted child preserves its prior value");
+    assert.deepEqual(stored.files.map((file) => [file.path, file.value]), [
+      ["src/api.ts", "skip"],
+      ["agent://publication-1", "conditional"],
+    ]);
+    assert.ok(stored.files[0]!.annotationRevision > originalRevision);
+
+    await executeTodo({ action: "update", id, handoff: { nextSteps: [] } }, ctx);
+    assert.deepEqual(getVisibleTasks()[0]!.handoff!.nextSteps, []);
+    assert.equal(getVisibleTasks()[0]!.handoff!.files.length, 2);
+
+    const beforeInvalid = structuredClone(getVisibleTasks()[0]!.handoff);
+    const missingWhen = await executeTodo({
+      action: "update",
+      id,
+      handoff: { files: [{ path: "src/config.ts", value: "conditional", reason: "Failure-only input" }] },
+    }, ctx);
+    assert.equal(missingWhen.isError, true);
+    assert.deepEqual(getVisibleTasks()[0]!.handoff, beforeInvalid);
+    const oversized = await executeTodo({
+      action: "update",
+      id,
+      handoff: {
+        files: Array.from({ length: 4 }, (_, index) => ({
+          path: `src/large-${index}.ts`,
+          value: "required" as const,
+          reason: "x".repeat(2_040),
+        })),
+      },
+    }, ctx);
+    assert.equal(oversized.isError, true);
+    assert.deepEqual(getVisibleTasks()[0]!.handoff, beforeInvalid);
+
+    const getResult = await executeTodo({ action: "get", id }, ctx);
+    assert.match((getResult.content[0] as { text: string }).text, /Handoff files:/);
+    assert.match((getResult.content[0] as { text: string }).text, /src\/api\.ts \[skip\]/);
+
+    const saved = persisted.at(-1)!;
+    onSessionShutdown(todoContext);
+    todoContext = startTodo(root, loader, [{ type: "custom", customType: "todo-state", data: saved }]);
+    assert.deepEqual(getVisibleTasks()[0]!.handoff, beforeInvalid);
+    const reloadedRevision = getVisibleTasks()[0]!.handoff!.files[0]!.annotationRevision;
+    await executeTodo({
+      action: "update",
+      id,
+      handoff: { files: [{ path: "src/api.ts", value: "skip", reason: "Updated after reload" }] },
+    }, ctx);
+    assert.ok(getVisibleTasks()[0]!.handoff!.files[0]!.annotationRevision > reloadedRevision);
+
+    await executeTodo({ action: "update", id, handoff: { files: [] } }, ctx);
+    assert.equal(getVisibleTasks()[0]!.handoff, undefined, "clearing the final child removes the empty handoff");
+
+    await executeTodo({
+      action: "create",
+      tasks: [
+        { subject: "Batch A", handoff: { files: [{ path: "src/a.ts", value: "required", reason: "A" }] } },
+        { subject: "Batch B", handoff: { nextSteps: ["B next"] } },
+      ],
+    }, ctx);
+    const batch = getVisibleTasks().slice(-2);
+    const beforeBatch = batch.map((task) => structuredClone(task.handoff));
+    const atomicFailure = await executeTodo({
+      action: "update",
+      updates: [
+        { id: batch[0]!.id, handoff: { nextSteps: ["Changed"] } },
+        { id: batch[1]!.id, handoff: { files: [{ path: "src/b.ts", value: "conditional", reason: "Missing trigger" }] } },
+      ],
+    }, ctx);
+    assert.equal(atomicFailure.isError, true);
+    assert.deepEqual(getVisibleTasks().slice(-2).map((task) => task.handoff), beforeBatch);
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("todo handoff migrates to undefined for legacy and malformed persisted state", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-handoff-migration-"));
+  const loader = new TodoSkillLoader({ cwd: root });
+  const base = {
+    subject: "Legacy",
+    status: "pending",
+    blockedBy: [],
+    skills: [],
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const todoContext = startTodo(root, loader, [{
+    type: "custom",
+    customType: "todo-state",
+    data: {
+      version: 6,
+      tasks: {
+        legacy: { id: "legacy", ...base },
+        malformed: {
+          id: "malformed",
+          ...base,
+          handoff: {
+            nextSteps: ["x".repeat(2_049)],
+            files: [{ path: "src/bad.ts", value: "conditional", reason: "No trigger" }],
+          },
+        },
+      },
+    },
+  }]);
+  try {
+    assert.equal(getVisibleTasks().find((task) => task.id === "legacy")?.handoff, undefined);
+    assert.equal(getVisibleTasks().find((task) => task.id === "malformed")?.handoff, undefined);
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("todo resourceUris normalize across create, update, advance, and reload", async () => {
@@ -1464,10 +1644,21 @@ test("todo advance preserves completion when the next task skill cannot activate
     const [current, next] = getVisibleTasks();
     await executeTodo({ action: "advance" }, ctx);
 
-    const result = await executeTodo({ action: "advance", id: current.id, summary: "Current done" }, ctx);
+    const result = await executeTodo({
+      action: "advance",
+      id: current.id,
+      summary: "Current done",
+      handoff: {
+        nextSteps: ["Resolve the missing skill"],
+        files: [{ path: "src/current.ts", value: "required", reason: "Completed task output" }],
+      },
+    }, ctx);
     assert.equal(result.isError, true);
     assert.match((result.content[0] as { text: string }).text, /Completed #.*next task was not activated.*E_SKILL_NOT_FOUND/);
-    assert.equal(getVisibleTasks().find((task) => task.id === current.id)?.status, "completed");
+    const completed = getVisibleTasks().find((task) => task.id === current.id);
+    assert.equal(completed?.status, "completed");
+    assert.deepEqual(completed?.handoff?.nextSteps, ["Resolve the missing skill"]);
+    assert.equal(completed?.handoff?.files[0]?.path, "src/current.ts");
     assert.equal(getVisibleTasks().find((task) => task.id === next.id)?.status, "pending");
   } finally {
     onSessionShutdown(todoContext);

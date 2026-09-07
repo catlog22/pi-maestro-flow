@@ -9,6 +9,11 @@ import { Type } from "typebox";
 import { MAX_ACCEPTANCE_COMMAND_CHARS } from "../tools/goal-verification.ts";
 import {
   TODO_ADVANCE_TRANSITIONS,
+  TODO_HANDOFF_FILE_VALUES,
+  TODO_MAX_HANDOFF_FILES,
+  TODO_MAX_HANDOFF_NEXT_STEPS,
+  TODO_MAX_HANDOFF_PATH_BYTES,
+  TODO_MAX_HANDOFF_TEXT_BYTES,
   TODO_MAX_RESOURCE_URI_BYTES,
   TODO_MAX_RESOURCE_URIS,
   TODO_UPDATE_FIELDS,
@@ -196,6 +201,48 @@ const TodoResourceUrisSchema = Type.Array(
   },
 );
 
+export function createTodoHandoffSchema(
+  description = "Durable next-step and task-relative file loading annotations; omitted children preserve existing values on update and empty arrays clear them",
+) {
+  return Type.Object({
+    nextSteps: Type.Optional(Type.Array(Type.String({
+      minLength: 1,
+      maxLength: TODO_MAX_HANDOFF_TEXT_BYTES,
+      description: "Ordered recommendations for the next phase; runtime enforces UTF-8 byte limits",
+    }), {
+      maxItems: TODO_MAX_HANDOFF_NEXT_STEPS,
+    })),
+    files: Type.Optional(Type.Array(Type.Object({
+      path: Type.String({
+        minLength: 1,
+        maxLength: TODO_MAX_HANDOFF_PATH_BYTES,
+        description: "Exact local file path or supported durable resource URI",
+      }),
+      value: StringEnum(
+        [...TODO_HANDOFF_FILE_VALUES],
+        "Loading value: required=needed for the next action; conditional=load only when 'when' applies; skip=no incremental value by default; unknown=relevance is not established",
+      ),
+      reason: Type.String({
+        minLength: 1,
+        maxLength: TODO_MAX_HANDOFF_TEXT_BYTES,
+        description: "Task-relative reason for the loading value",
+      }),
+      when: Type.Optional(Type.String({
+        minLength: 1,
+        maxLength: TODO_MAX_HANDOFF_TEXT_BYTES,
+        description: "Reload condition or smallest useful symbol/line range; required for conditional",
+      })),
+    }, { additionalProperties: false }), {
+      maxItems: TODO_MAX_HANDOFF_FILES,
+    })),
+  }, {
+    additionalProperties: false,
+    description,
+  });
+}
+
+export const TodoHandoffSchema = createTodoHandoffSchema();
+
 const TodoFilterSchema = Type.Object({
   status: Type.Optional(
     StringEnum(["pending", "in_progress", "completed", "blocked"]),
@@ -220,6 +267,7 @@ const TodoBatchTaskSchema = Type.Object({
     Type.Array(TodoSkillBindingSchema, { description: "Ordered Pi skill bindings; exactly one primary when present" }),
   ),
   resourceUris: Type.Optional(TodoResourceUrisSchema),
+  handoff: Type.Optional(TodoHandoffSchema),
   assignee: Type.Optional(
     Type.String({ description: "Assignee selector; defaults to the calling actor" }),
   ),
@@ -246,6 +294,7 @@ const TodoBatchUpdateSchema = Type.Object({
   skills: Type.Optional(Type.Array(TodoSkillBindingSchema, { description: "Replacement ordered skill bindings; empty clears them" })),
   summary: Type.Optional(Type.String({ description: "Replacement completion summary; empty clears it" })),
   resourceUris: Type.Optional(TodoResourceUrisSchema),
+  handoff: Type.Optional(TodoHandoffSchema),
   updateFields: Type.Optional(Type.Array(StringEnum([...TODO_UPDATE_FIELDS]), {
     description: "Fields changed by this update; listed values must be present",
     uniqueItems: true,
@@ -288,6 +337,7 @@ export const TodoToolParams = Type.Object({
     }),
   ),
   resourceUris: Type.Optional(TodoResourceUrisSchema),
+  handoff: Type.Optional(TodoHandoffSchema),
   summary: Type.Optional(
     Type.String({ description: "Short completion summary carried into later todo steps" }),
   ),
@@ -304,7 +354,7 @@ export const TodoToolParams = Type.Object({
   tasks: Type.Optional(
     Type.Array(TodoBatchTaskSchema, {
       minItems: 1,
-      description: "Non-empty batch for create. Inside tasks[i].blockedBy, each integer N means tasks[N] in this same array and must satisfy 0 <= N < i. Cannot be combined with single-task fields (subject, description, blockedBy, assignee, context, skills, resourceUris, goalId)",
+      description: "Non-empty batch for create. Inside tasks[i].blockedBy, each integer N means tasks[N] in this same array and must satisfy 0 <= N < i. Cannot be combined with single-task fields (subject, description, blockedBy, assignee, context, skills, resourceUris, handoff, goalId)",
     }),
   ),
 

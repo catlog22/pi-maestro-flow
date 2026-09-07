@@ -22,6 +22,7 @@ import { buildPlanDecomposeContract, PlanDecomposeParams } from "./plan-decompos
 import { isRunControlReadAction, isRunControlReadArgv } from "./run-control.ts";
 import {
   openPlanConfirmation,
+  type PlanConfirmationModelTransition,
   type PlanWorkflowConfirmationOptions,
 } from "./plan-confirm.ts";
 import { openPlanEditor } from "./plan-editor.ts";
@@ -125,6 +126,8 @@ interface PlanRuntimeOptions {
     ctx: PlanContext,
     input: PlanNewContextScheduleInput,
   ) => PlanNewContextScheduleReceipt;
+  restoreActModel?: (ctx: PlanContext) => Promise<boolean>;
+  describeModelTransition?: (ctx: PlanContext) => PlanConfirmationModelTransition | undefined;
   workflowConfirmation?: (
     ctx: PlanContext,
   ) => PlanWorkflowConfirmationOptions | Promise<PlanWorkflowConfirmationOptions>;
@@ -187,6 +190,8 @@ let pendingPlanEnterNote: string | undefined;
 let compactionArbiter: CompactionArbiter | undefined;
 let planCompactionHandoffTimeoutMs = COMPACTION_LEASE_TIMEOUT_MS;
 let schedulePlanNewContext: PlanRuntimeOptions["scheduleNewContext"];
+let restorePlanActModel: NonNullable<PlanRuntimeOptions["restoreActModel"]> = async () => true;
+let describePlanModelTransition: NonNullable<PlanRuntimeOptions["describeModelTransition"]> = () => undefined;
 let workflowConfirmation = async (_ctx: PlanContext): Promise<PlanWorkflowConfirmationOptions> => ({ allowNew: false });
 let publishWorkflowPlan: (
   ctx: PlanContext,
@@ -284,6 +289,8 @@ export function initPlan(pi: ExtensionAPI, options: PlanRuntimeOptions = {}): vo
   compactionArbiter = options.compactionArbiter;
   planCompactionHandoffTimeoutMs = Math.max(1, options.compactionHandoffTimeoutMs ?? COMPACTION_LEASE_TIMEOUT_MS);
   schedulePlanNewContext = options.scheduleNewContext;
+  restorePlanActModel = options.restoreActModel ?? (async () => true);
+  describePlanModelTransition = options.describeModelTransition ?? (() => undefined);
   workflowConfirmation = async (ctx) => options.workflowConfirmation?.(ctx) ?? { allowNew: false };
   publishWorkflowPlan = options.publishWorkflowPlan ?? (async () => {
     throw new Error("Workflow-backed Plan execution is unavailable");
@@ -423,6 +430,16 @@ export function exitMode(ctx: PlanContext, operation = beginPlanOperation(ctx)):
   return mode;
 }
 
+export async function exitModeAndRestore(
+  ctx: PlanContext,
+  operation = beginPlanOperation(ctx),
+): Promise<Mode> {
+  const wasPlanMode = mode === "plan";
+  const nextMode = exitMode(ctx, operation);
+  if (wasPlanMode && nextMode === "act") await restorePlanActModel(ctx);
+  return nextMode;
+}
+
 export async function toggleMode(ctx: PlanContext, operation = beginPlanOperation(ctx)): Promise<Mode> {
   if (mode === "act") {
     await enterPlanMode(ctx, operation);
@@ -436,7 +453,7 @@ export async function toggleMode(ctx: PlanContext, operation = beginPlanOperatio
     onPlanModeChanged?.(ctx);
     return mode;
   }
-  return exitMode(ctx, operation);
+  return exitModeAndRestore(ctx, operation);
 }
 
 /** Bind the root UI/UCL to Plan/Act mode transitions. */
@@ -1090,6 +1107,7 @@ async function reviewPlan(
       contextPercent: ctx.getContextUsage?.()?.percent ?? undefined,
       defaultExecution: latestExecution,
       workflow,
+      modelTransition: describePlanModelTransition(ctx),
       drafts,
       signal,
     });
@@ -1232,7 +1250,7 @@ async function reviewPlan(
       return { approved: false, exited: false };
     }
     if (action === "exit-plan") {
-      exitMode(ctx, operation);
+      await exitModeAndRestore(ctx, operation);
       return { approved: false, exited: true };
     }
     if (action !== "execute") {
@@ -1450,6 +1468,7 @@ async function startImplementation(
     : approved.currentPath;
   const executionMode = executionChoice.context;
   exitPlanMode(ctx);
+  await restorePlanActModel(ctx);
   latestPlan = markdown;
   latestStatus = "approved";
   ctx.ui.notify("Plan approved · Act mode active", "info");
@@ -2088,7 +2107,7 @@ export function registerPlanTools(
       const operation = beginPlanOperation(ctx);
       const blocked = requirePlanMode("exit");
       if (blocked) return blocked;
-      exitMode(ctx, operation);
+      await exitModeAndRestore(ctx, operation);
       return result(buildPlanExitMessage(), currentDetails("exit"));
     },
     renderShell: "self",
@@ -2265,7 +2284,7 @@ export function registerPlanCommand(pi: ExtensionAPI): void {
       const command = trimmed.toLowerCase();
       if (command === "exit" || command === "off") {
         if (isPlanMode()) {
-          exitMode(ctx, operation);
+          await exitModeAndRestore(ctx, operation);
         } else if (isCurrentPlanOperation(ctx, operation, false)) {
           ctx.ui.notify("Act mode · draft preserved", "info");
         }

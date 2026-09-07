@@ -29,6 +29,8 @@ import {
   getInteractiveTerminalLaunchSpec,
   getPiSpawnCommand,
   isPiResultReadyTurn,
+  piLaunchDiagnostic,
+  resolvePiLaunchSpec,
   releasePublishedTurnHistory,
   resolveModelSpecifier,
   runGraph,
@@ -497,17 +499,125 @@ test("published turn result can survive while disposable transcript and tool his
   assert.equal(usage.inputTokens + usage.outputTokens, 0);
 });
 
+test("Pi launcher resolution is ordered, shell-free, and rejects a Gateway argv probe", () => {
+  const shim = path.normalize("C:/shim/pi.cmd");
+  const posixShim = path.normalize("C:/shim/pi");
+  const shimPackage = path.normalize("C:/shim/node_modules/@earendil-works/pi-coding-agent");
+  const shimEntry = path.join(shimPackage, "dist/bundle/cli.js");
+  const shimManifest = path.join(shimPackage, "package.json");
+  const files = new Set([
+    path.normalize("C:/native/pi.exe"),
+    shim,
+    posixShim,
+    path.normalize(shimEntry),
+    path.normalize(shimManifest),
+  ]);
+  const isFile = (candidate: string): boolean => files.has(path.normalize(candidate));
+  const readTextFile = (candidate: string): string => {
+    const normalized = path.normalize(candidate);
+    if (normalized === shim) return `"%dp0%\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js" %*`;
+    if (normalized === path.normalize(shimManifest)) return JSON.stringify({
+      name: "@earendil-works/pi-coding-agent",
+      bin: { pi: "dist/bundle/cli.js" },
+    });
+    throw new Error(`unexpected read: ${candidate}`);
+  };
+
+  assert.deepEqual(resolvePiLaunchSpec({
+    envBinary: "C:/configured/pi-custom.exe",
+    platform: "win32",
+    pathValue: "C:/native;C:/shim",
+    isFile,
+  }), {
+    command: "C:/configured/pi-custom.exe",
+    argsPrefix: [],
+    source: "override",
+  });
+
+  const native = resolvePiLaunchSpec({
+    envBinary: null,
+    platform: "win32",
+    pathValue: "C:/shim;C:/native",
+    entryPoint: null,
+    appData: null,
+    isFile,
+  });
+  assert.equal(native.source, "path-native", "a native binary wins even when a shim appears earlier on PATH");
+  assert.equal(path.normalize(native.command), path.normalize("C:/native/pi.exe"));
+
+  const shimSpec = resolvePiLaunchSpec({
+    envBinary: null,
+    platform: "win32",
+    pathValue: "C:/shim",
+    entryPoint: null,
+    appData: null,
+    execPath: "C:/node.exe",
+    isFile,
+    readTextFile,
+  });
+  assert.equal(shimSpec.source, "windows-shim");
+  assert.equal(path.normalize(shimSpec.command), path.normalize("C:/node.exe"));
+  assert.deepEqual(shimSpec.argsPrefix.map(path.normalize), [path.normalize(shimEntry)]);
+
+  const gatewayEntry = path.resolve("C:/gateway/pi-maestro-gateway.mjs");
+  const gateway = resolvePiLaunchSpec({
+    envBinary: null,
+    platform: "linux",
+    pathValue: null,
+    argv: [process.execPath, gatewayEntry],
+    isFile: (candidate) => candidate === gatewayEntry,
+    readTextFile: () => "{}",
+  });
+  assert.equal(gateway.source, "path-fallback");
+  assert.equal(gateway.command, "pi");
+  assert.deepEqual(gateway.argsPrefix, []);
+});
+
+test("verified host Pi entry is accepted only through its package bin declaration", () => {
+  const root = path.resolve("C:/pkg/node_modules/@earendil-works/pi-coding-agent");
+  const entry = path.join(root, "dist/bundle/cli.js");
+  const manifest = path.join(root, "package.json");
+  const files = new Set([entry, manifest].map((candidate) => path.normalize(candidate)));
+  const spec = resolvePiLaunchSpec({
+    envBinary: null,
+    platform: "linux",
+    pathValue: null,
+    entryPoint: entry,
+    execPath: "/usr/bin/node",
+    isFile: (candidate) => files.has(path.normalize(candidate)),
+    readTextFile: () => JSON.stringify({
+      name: "@earendil-works/pi-coding-agent",
+      bin: { pi: "dist/bundle/cli.js" },
+    }),
+  });
+  assert.deepEqual(spec, {
+    command: "/usr/bin/node",
+    argsPrefix: [path.resolve(entry)],
+    source: "host-entry",
+  });
+});
+
 test("Windows Pi fallback is shell-free and preserves hostile-looking argv as one item", () => {
   const argv = ["--model", "openai/gpt-5&whoami", "--mode", "rpc"];
   const spec = getPiSpawnCommand(argv, {
     platform: "win32",
     envBinary: null,
     entryPoint: null,
+    pathValue: null,
+    appData: null,
   });
   assert.equal(spec.command, "pi");
+  assert.equal(spec.source, "path-fallback");
   assert.equal(spec.shell, false);
   assert.deepEqual(spec.args, argv);
   assert.notEqual(spec.command, "pi.cmd");
+
+  const diagnostic = piLaunchDiagnostic(spec, "close", 1, "SIGTERM", "x".repeat(70_000));
+  assert.equal(diagnostic.source, "path-fallback");
+  assert.equal(diagnostic.phase, "close");
+  assert.equal(diagnostic.exitCode, 1);
+  assert.equal(diagnostic.signal, "SIGTERM");
+  assert.ok(Buffer.byteLength(diagnostic.stderrTail) <= EXECUTION_BUFFER_LIMITS.stderrBytes);
 
   assert.equal(validateModelSpecifier("openai/gpt-5.1-mini:latest"), "openai/gpt-5.1-mini:latest");
   for (const invalid of ["openai/gpt-5&whoami", "--help", "openai/gpt 5", "a//c", "x\n--tools"]) {

@@ -101,6 +101,8 @@ function createHarness(
     sendUserMessageError?: string;
     confirmationResult?: unknown;
     scheduleNewContext?: (input: PlanNewContextScheduleInput) => { requestId: number; coalesced: boolean };
+    restoreActModel?: (ctx: ExtensionContext) => Promise<boolean>;
+    describeModelTransition?: (ctx: ExtensionContext) => { current: string; act?: string } | undefined;
     workflowConfirmation?: () => {
       current?: { sessionId: string; intent: string; available: boolean; reason?: string };
       allowNew: boolean;
@@ -266,6 +268,12 @@ function createHarness(
       : {}),
     ...(runtime.scheduleNewContext
       ? { scheduleNewContext: (_ctx, input) => runtime.scheduleNewContext!(input) }
+      : {}),
+    ...(runtime.restoreActModel
+      ? { restoreActModel: (ctx) => runtime.restoreActModel!(ctx as ExtensionContext) }
+      : {}),
+    ...(runtime.describeModelTransition
+      ? { describeModelTransition: (ctx) => runtime.describeModelTransition!(ctx as ExtensionContext) }
       : {}),
     ...(runtime.workflowConfirmation
       ? { workflowConfirmation: () => runtime.workflowConfirmation!() }
@@ -551,6 +559,82 @@ test("Plan confirmation archives the exact draft before restoring Act and inject
     assert.equal(getPlanHandoffStatus(), "todo-required");
     harness.handoff.todoKeys.push(loaded.manifest.handoffKey!);
     assert.equal(getPlanHandoffStatus(), "ready");
+  } finally {
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("plan-confirm waits for Act-model restoration before returning current-context execution", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-confirm-model-restore-"));
+  let restoreCalls = 0;
+  const harness = createHarness(
+    root,
+    true,
+    false,
+    false,
+    false,
+    "session-main",
+    undefined,
+    false,
+    { todoKeys: [] },
+    undefined,
+    {
+      async restoreActModel() {
+        await Promise.resolve();
+        restoreCalls += 1;
+        return true;
+      },
+    },
+  );
+  try {
+    await onSessionStartPlan(harness.ctx);
+    await execute(harness, "plan-enter");
+    await execute(harness, "plan-update", { markdown: "# Restore Act Model" });
+
+    const confirmed = await execute(harness, "plan-confirm");
+
+    assert.equal(confirmed.details.approved, true);
+    assert.equal(getMode(), "act");
+    assert.equal(restoreCalls, 1);
+  } finally {
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("plan-confirm Exit Plan waits for Act-model restoration", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-exit-model-restore-"));
+  let restoreCalls = 0;
+  const harness = createHarness(
+    root,
+    false,
+    false,
+    false,
+    false,
+    "session-main",
+    undefined,
+    false,
+    { todoKeys: [] },
+    undefined,
+    {
+      confirmationResult: { action: "exit-plan" },
+      async restoreActModel() {
+        restoreCalls += 1;
+        return true;
+      },
+    },
+  );
+  try {
+    await onSessionStartPlan(harness.ctx);
+    await execute(harness, "plan-enter");
+    await execute(harness, "plan-update", { markdown: "# Exit Plan" });
+
+    const confirmed = await execute(harness, "plan-confirm");
+
+    assert.equal(confirmed.details.approved, false);
+    assert.equal(getMode(), "act");
+    assert.equal(restoreCalls, 1);
   } finally {
     onSessionShutdownPlan(harness.ctx);
     await rm(root, { recursive: true, force: true });

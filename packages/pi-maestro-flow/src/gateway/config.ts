@@ -34,6 +34,8 @@ export interface GatewayAuthConfig {
   mode: GatewayAuthMode;
   token?: string;
   oauth?: GatewayOAuthConfig;
+  /** Legacy open-HTTP mutation bridge. Omitted preserves v1 behavior with a runtime warning. */
+  allowOpenMutations?: boolean;
 }
 export interface GatewayCommandSecurityConfig {
   default: GatewayCommandPolicy;
@@ -90,6 +92,10 @@ export interface GatewayLimitsConfig {
   maxExecTimeoutMs: number;
   maxLeaseTtlMs: number;
   maxWorkspaceCount: number;
+  /** Board-only limits are optional in the structural type so legacy policy projections remain source-compatible. */
+  maxBoardTasks?: number;
+  maxBoardOperations?: number;
+  maxBoardEvents?: number;
 }
 export interface GatewayLoggingConfig {
   level: GatewayLogLevel;
@@ -101,6 +107,7 @@ export interface GatewayStateConfig {
   ownerPath?: string;
   workspaceRegistryPath?: string;
   sessionsRoot?: string;
+  boardRoot?: string;
   pairingPath?: string;
   serviceManifestPath?: string;
 }
@@ -109,6 +116,9 @@ export interface GatewayRetentionConfig {
   tasksMs: number;
   resultsMs: number;
   workspacesMs: number;
+  boardTasksMs: number;
+  boardOperationsMs: number;
+  boardEventsMs: number;
 }
 
 export interface GatewayConfig {
@@ -170,6 +180,9 @@ const DEFAULT_RETENTION: GatewayRetentionConfig = {
   tasksMs: 30 * 24 * 60 * 60 * 1000,
   resultsMs: 30 * 24 * 60 * 60 * 1000,
   workspacesMs: 24 * 60 * 60 * 1000,
+  boardTasksMs: 90 * 24 * 60 * 60 * 1000,
+  boardOperationsMs: 30 * 24 * 60 * 60 * 1000,
+  boardEventsMs: 30 * 24 * 60 * 60 * 1000,
 };
 
 function object(value: unknown, path: string): Record<string, unknown> {
@@ -249,7 +262,7 @@ export function normalizeGatewayConfig(value: unknown): GatewayConfig {
 
   const authRaw = optionalObject(root.auth, "auth");
   knownKeys(authRaw, [
-    "mode", "token", "oauth",
+    "mode", "token", "oauth", "allowOpenMutations", "allow_open_mutations",
     "oauth_password", "oauth_server_url", "oauth_token_ttl", "oauth_token_ttl_ms",
     "oauth_token_secret", "oauth_client_id", "oauth_client_secret", "oauth_redirect_uris",
   ], "auth");
@@ -285,7 +298,14 @@ export function normalizeGatewayConfig(value: unknown): GatewayConfig {
   }
   if ((authMode === "bearer" || authMode === "dual") && !token) throw new GatewayConfigValidationError(`auth.token is required when auth.mode=${authMode}`);
   if ((authMode === "oauth" || authMode === "dual") && !oauth) throw new GatewayConfigValidationError(`auth.oauth is required when auth.mode=${authMode}`);
-  const auth: GatewayAuthConfig = { mode: authMode, ...(token === undefined ? {} : { token }), ...(oauth === undefined ? {} : { oauth }) };
+  const allowOpenMutationsRaw = authRaw.allowOpenMutations ?? authRaw.allow_open_mutations;
+  if (allowOpenMutationsRaw !== undefined && typeof allowOpenMutationsRaw !== "boolean") throw new GatewayConfigValidationError("auth.allowOpenMutations must be boolean");
+  const auth: GatewayAuthConfig = {
+    mode: authMode,
+    ...(token === undefined ? {} : { token }),
+    ...(oauth === undefined ? {} : { oauth }),
+    ...(allowOpenMutationsRaw === undefined ? {} : { allowOpenMutations: allowOpenMutationsRaw }),
+  };
 
   const securityRaw = optionalObject(root.security, "security");
   knownKeys(securityRaw, ["commands", "files", "trustedFullAccess", "trusted_full_access"], "security");
@@ -404,6 +424,9 @@ export function normalizeGatewayConfig(value: unknown): GatewayConfig {
     maxExecTimeoutMs: boundedLimit(pick(limitsRaw, "maxExecTimeoutMs", "max_exec_timeout_ms"), "limits.maxExecTimeoutMs", GATEWAY_DEFAULT_LIMITS.maxExecTimeoutMs, GATEWAY_HARD_LIMITS.maxExecTimeoutMs),
     maxLeaseTtlMs: boundedLimit(pick(limitsRaw, "maxLeaseTtlMs", "max_lease_ttl_ms"), "limits.maxLeaseTtlMs", GATEWAY_DEFAULT_LIMITS.maxLeaseTtlMs, GATEWAY_HARD_LIMITS.maxLeaseTtlMs),
     maxWorkspaceCount: boundedLimit(pick(limitsRaw, "maxWorkspaceCount", "max_workspace_count"), "limits.maxWorkspaceCount", GATEWAY_DEFAULT_LIMITS.maxWorkspaceCount, GATEWAY_HARD_LIMITS.maxWorkspaceCount),
+    maxBoardTasks: boundedLimit(pick(limitsRaw, "maxBoardTasks", "max_board_tasks"), "limits.maxBoardTasks", GATEWAY_DEFAULT_LIMITS.maxBoardTasks, GATEWAY_HARD_LIMITS.maxBoardTasks),
+    maxBoardOperations: boundedLimit(pick(limitsRaw, "maxBoardOperations", "max_board_operations"), "limits.maxBoardOperations", GATEWAY_DEFAULT_LIMITS.maxBoardOperations, GATEWAY_HARD_LIMITS.maxBoardOperations),
+    maxBoardEvents: boundedLimit(pick(limitsRaw, "maxBoardEvents", "max_board_events"), "limits.maxBoardEvents", GATEWAY_DEFAULT_LIMITS.maxBoardEvents, GATEWAY_HARD_LIMITS.maxBoardEvents),
   };
 
   const loggingRaw = optionalObject(root.logging, "logging");
@@ -416,22 +439,26 @@ export function normalizeGatewayConfig(value: unknown): GatewayConfig {
     ...(optionalString(loggingRaw.auditFile ?? loggingRaw.audit_file, "logging.auditFile", 4096) === undefined ? {} : { auditFile: optionalString(loggingRaw.auditFile ?? loggingRaw.audit_file, "logging.auditFile", 4096) }),
   };
   const stateRaw = optionalObject(root.state, "state");
-  knownKeys(stateRaw, ["rootDir", "root_dir", "ownerPath", "owner_path", "workspaceRegistryPath", "workspace_registry_path", "sessionsRoot", "sessions_root", "pairingPath", "pairing_path", "serviceManifestPath", "service_manifest_path", "retention"], "state");
+  knownKeys(stateRaw, ["rootDir", "root_dir", "ownerPath", "owner_path", "workspaceRegistryPath", "workspace_registry_path", "sessionsRoot", "sessions_root", "boardRoot", "board_root", "pairingPath", "pairing_path", "serviceManifestPath", "service_manifest_path", "retention"], "state");
   const state: GatewayStateConfig = {
     ...(optionalString(stateRaw.rootDir ?? stateRaw.root_dir, "state.rootDir", 4096) === undefined ? {} : { rootDir: optionalString(stateRaw.rootDir ?? stateRaw.root_dir, "state.rootDir", 4096) }),
     ...(optionalString(stateRaw.ownerPath ?? stateRaw.owner_path, "state.ownerPath", 4096) === undefined ? {} : { ownerPath: optionalString(stateRaw.ownerPath ?? stateRaw.owner_path, "state.ownerPath", 4096) }),
     ...(optionalString(stateRaw.workspaceRegistryPath ?? stateRaw.workspace_registry_path, "state.workspaceRegistryPath", 4096) === undefined ? {} : { workspaceRegistryPath: optionalString(stateRaw.workspaceRegistryPath ?? stateRaw.workspace_registry_path, "state.workspaceRegistryPath", 4096) }),
     ...(optionalString(stateRaw.sessionsRoot ?? stateRaw.sessions_root, "state.sessionsRoot", 4096) === undefined ? {} : { sessionsRoot: optionalString(stateRaw.sessionsRoot ?? stateRaw.sessions_root, "state.sessionsRoot", 4096) }),
+    ...(optionalString(stateRaw.boardRoot ?? stateRaw.board_root, "state.boardRoot", 4096) === undefined ? {} : { boardRoot: optionalString(stateRaw.boardRoot ?? stateRaw.board_root, "state.boardRoot", 4096) }),
     ...(optionalString(stateRaw.pairingPath ?? stateRaw.pairing_path, "state.pairingPath", 4096) === undefined ? {} : { pairingPath: optionalString(stateRaw.pairingPath ?? stateRaw.pairing_path, "state.pairingPath", 4096) }),
     ...(optionalString(stateRaw.serviceManifestPath ?? stateRaw.service_manifest_path, "state.serviceManifestPath", 4096) === undefined ? {} : { serviceManifestPath: optionalString(stateRaw.serviceManifestPath ?? stateRaw.service_manifest_path, "state.serviceManifestPath", 4096) }),
   };
   const retentionRaw = optionalObject(root.retention, "retention");
-  knownKeys(retentionRaw, ["jobsMs", "jobs_ms", "jobs", "tasksMs", "tasks_ms", "tasks", "resultsMs", "results_ms", "results", "workspacesMs", "workspaces_ms", "workspaces"], "retention");
+  knownKeys(retentionRaw, ["jobsMs", "jobs_ms", "jobs", "tasksMs", "tasks_ms", "tasks", "resultsMs", "results_ms", "results", "workspacesMs", "workspaces_ms", "workspaces", "boardTasksMs", "board_tasks_ms", "board_tasks", "boardOperationsMs", "board_operations_ms", "board_operations", "boardEventsMs", "board_events_ms", "board_events"], "retention");
   const retention: GatewayRetentionConfig = {
     jobsMs: boundedLimit(retentionRaw.jobsMs ?? retentionRaw.jobs_ms ?? retentionRaw.jobs, "retention.jobsMs", DEFAULT_RETENTION.jobsMs, 365 * 24 * 60 * 60 * 1000),
     tasksMs: boundedLimit(retentionRaw.tasksMs ?? retentionRaw.tasks_ms ?? retentionRaw.tasks, "retention.tasksMs", DEFAULT_RETENTION.tasksMs, 365 * 24 * 60 * 60 * 1000),
     resultsMs: boundedLimit(retentionRaw.resultsMs ?? retentionRaw.results_ms ?? retentionRaw.results, "retention.resultsMs", DEFAULT_RETENTION.resultsMs, 365 * 24 * 60 * 60 * 1000),
     workspacesMs: boundedLimit(retentionRaw.workspacesMs ?? retentionRaw.workspaces_ms ?? retentionRaw.workspaces, "retention.workspacesMs", DEFAULT_RETENTION.workspacesMs, 365 * 24 * 60 * 60 * 1000),
+    boardTasksMs: boundedLimit(retentionRaw.boardTasksMs ?? retentionRaw.board_tasks_ms ?? retentionRaw.board_tasks, "retention.boardTasksMs", DEFAULT_RETENTION.boardTasksMs, 365 * 24 * 60 * 60 * 1000),
+    boardOperationsMs: boundedLimit(retentionRaw.boardOperationsMs ?? retentionRaw.board_operations_ms ?? retentionRaw.board_operations, "retention.boardOperationsMs", DEFAULT_RETENTION.boardOperationsMs, 365 * 24 * 60 * 60 * 1000),
+    boardEventsMs: boundedLimit(retentionRaw.boardEventsMs ?? retentionRaw.board_events_ms ?? retentionRaw.board_events, "retention.boardEventsMs", DEFAULT_RETENTION.boardEventsMs, 365 * 24 * 60 * 60 * 1000),
   };
   return {
     version: GATEWAY_STATE_VERSION,
@@ -523,7 +550,7 @@ function canonicalYamlSection(key: string, value: unknown): unknown {
   }
   if (key === "auth") {
     const v = value as Record<string, unknown>;
-    const { oauth: rawOauth, ...rest } = v;
+    const { oauth: rawOauth, allowOpenMutations, allow_open_mutations, ...rest } = v;
     let oauth: unknown = rawOauth;
     if (rawOauth && typeof rawOauth === "object" && !Array.isArray(rawOauth)) {
       const o = rawOauth as Record<string, unknown>;
@@ -536,7 +563,11 @@ function canonicalYamlSection(key: string, value: unknown): unknown {
           : { token_ttl: Math.floor((tokenTtlMs as number) / 1000) }),
       };
     }
-    return { ...rest, ...(oauth === undefined ? {} : { oauth }) };
+    return {
+      ...rest,
+      ...(allowOpenMutations === undefined ? (allow_open_mutations === undefined ? {} : { allow_open_mutations }) : { allow_open_mutations: allowOpenMutations }),
+      ...(oauth === undefined ? {} : { oauth }),
+    };
   }
   if (key === "security") {
     const v = value as Record<string, unknown>;

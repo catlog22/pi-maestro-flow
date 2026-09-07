@@ -28,7 +28,7 @@ const DEFAULT_REVIEW_TIMEOUT_MS = 180_000;
 const REVIEW_HISTORY_REPORT_BUDGET = 2000;
 
 /** Sentinel option shown in the review-model picker. */
-export const FOLLOW_SESSION_LABEL = "Follow session model";
+export const FOLLOW_SESSION_LABEL = "Follow current main model";
 
 export interface ReviewHistoryEntry {
   report: string;
@@ -94,10 +94,10 @@ export async function listAvailableReviewModels(
 function resolveReviewModelFallback(ctx: Pick<ExtensionContext, "model" | "ui">): ReviewModelChoice | undefined {
   const sessionKey = modelKey(ctx.model);
   if (!sessionKey) {
-    ctx.ui.notify("AI review unavailable: no session model is set.", "warning");
+    ctx.ui.notify("AI review unavailable: no current main model is set.", "warning");
     return undefined;
   }
-  return { model: sessionKey, label: FOLLOW_SESSION_LABEL };
+  return { model: sessionKey, label: `${FOLLOW_SESSION_LABEL} (${sessionKey})` };
 }
 
 /**
@@ -113,8 +113,14 @@ export async function pickReviewModel(
 ): Promise<ReviewModelChoice | undefined> {
   if (signal?.aborted) return undefined;
   if (!ctx.hasUI) return resolveReviewModelFallback(ctx);
-  const options = [FOLLOW_SESSION_LABEL, ...models];
-  const items = options.map((value) => ({ value, label: value }));
+  const sessionKey = modelKey(ctx.model);
+  const items = [
+    {
+      value: FOLLOW_SESSION_LABEL,
+      label: sessionKey ? `${FOLLOW_SESSION_LABEL} (${sessionKey})` : FOLLOW_SESSION_LABEL,
+    },
+    ...models.map((value) => ({ value, label: value })),
+  ];
   const result = await ctx.ui.custom<string | undefined>(
     (tui, theme, _keybindings, done) => {
       const listTheme: SelectListTheme = {
@@ -125,7 +131,7 @@ export async function pickReviewModel(
         noMatch: (text) => theme.fg("warning", text),
       };
       const input = new Input();
-      const maxVisible = Math.min(options.length, 10);
+      const maxVisible = Math.min(items.length, 10);
       const list = new SelectList(items, maxVisible, listTheme);
       let settled = false;
       const finish = (value: string | undefined): void => {
@@ -200,12 +206,7 @@ export async function pickReviewModel(
   );
   if (result === undefined) return undefined;
   if (result === FOLLOW_SESSION_LABEL) {
-    const sessionKey = modelKey(ctx.model);
-    if (!sessionKey) {
-      ctx.ui.notify("AI review unavailable: no session model is set.", "warning");
-      return undefined;
-    }
-    return { model: sessionKey, label: FOLLOW_SESSION_LABEL };
+    return resolveReviewModelFallback(ctx);
   }
   return { model: result, label: result };
 }

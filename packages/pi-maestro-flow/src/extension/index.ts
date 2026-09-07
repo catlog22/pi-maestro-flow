@@ -179,7 +179,7 @@ import {
   registerPlanTools,
   isPlanMode,
   toggleMode as planToggleMode,
-  exitMode as planExitMode,
+  exitModeAndRestore as planExitMode,
   onSessionStartPlan,
   onSessionShutdownPlan,
   onCompactPlan,
@@ -252,6 +252,7 @@ import type { UserAttentionHandler } from "../notify/user-attention.ts";
 import { registerSkillManager, runSkillManager } from "../skills/skill-manager.ts";
 import { SkillManagerStore } from "../skills/skill-manager-store.ts";
 import { registerIntelligenceTools, shutdownIntelligenceTools } from "../tools/intelligence.ts";
+import { registerGatewayBoardTool } from "../tools/gateway-board.ts";
 import { createLspTool } from "../tools/lsp-tool.ts";
 import { lspManager } from "../tools/lsp/manager.ts";
 import { registerSmartSearchTool } from "../tools/smart-search.ts";
@@ -359,6 +360,7 @@ export const MAESTRO_CHILD_TOOL_NAMES = [
   "resource",
   "session_history",
   "new_context",
+  "board",
   "lsp",
   "browser",
   "computer_use",
@@ -1608,7 +1610,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
     );
   }
 
-  registerPlanModelSelection(pi);
+  const planModelSelection = registerPlanModelSelection(pi);
   try {
     registerModelFailover(pi);
   } catch (error) {
@@ -1916,17 +1918,17 @@ Only request completion after all work is done; the extension verifies it indepe
     description: `Task management with plain-text context and optional Pi skill execution.
 
 Actions:
-- create (single): { action: "create", subject: "...", assignee: "self|root|id|unique-id-prefix|label|@label|label#id-prefix", context: "...", skills: [{ name, role: "primary|guard|support", args?: "..." }], resourceUris?: ["agent://..."] }
-- create (batch): { action: "create", tasks: [{ subject, description?, context?, blockedBy?, skills?, resourceUris?, goalId? }, ...] } — blockedBy integer N means the earlier array item tasks[N] (0-based), e.g. blockedBy: [0]
-- update (single): { action: "update", id, updateFields: [...], ... } — list changed fields; empty string/array clears clearable fields; resourceUris replaces the full reference list
+- create (single): { action: "create", subject: "...", assignee: "self|root|id|unique-id-prefix|label|@label|label#id-prefix", context: "...", skills: [{ name, role: "primary|guard|support", args?: "..." }], resourceUris?: ["agent://..."], handoff?: { nextSteps?, files? } }
+- create (batch): { action: "create", tasks: [{ subject, description?, context?, blockedBy?, skills?, resourceUris?, handoff?, goalId? }, ...] } — blockedBy integer N means the earlier array item tasks[N] (0-based), e.g. blockedBy: [0]
+- update (single): { action: "update", id, updateFields: [...], ... } — list changed fields; empty string/array clears clearable fields; resourceUris replaces the full reference list; handoff omitted children preserve and explicit empty arrays clear
 - update (batch): { action: "update", updates: [{ id, updateFields?, ... }, ...] } — validates the whole batch and commits atomically
 - delete: use id for one task or ids for an atomic batch
-- advance: omit id/summary/resourceUris to activate your first runnable task; with an active task pass its id, a non-empty summary, optional resourceUris, and optional transition (keep_context|new_context) to complete it and activate your next runnable task. transition=new_context requires compaction.newContext.enabled=true and otherwise fails before Todo mutation.
+- advance: omit id/summary/resourceUris/handoff to activate your first runnable task; with an active task pass its id, a non-empty summary, optional resourceUris/handoff, and optional transition (keep_context|new_context) to complete it and activate your next runnable task. transition=new_context requires compaction.newContext.enabled=true and otherwise fails before Todo mutation.
 - list / get / clear / next
 
 Parallel delegation: bind todo ids via teammate \`tasks[].todo\`; every actor advances only tasks assigned to itself. \`next\` remains the activation-only compatibility action.
 
-Contract: Todo is a live execution state machine, not a retrospective checklist. subject is the title; description is detail. status is update-only on create (never pass status to create). Each actor has at most one in_progress task. Skill binding requires exactly one primary. context carries current progress and the exact next action; summary carries outcome, evidence, decisions, and downstream impact. resourceUris are validated durable references; prefer exact immutable publication IDs (for example agent://<publication-id>) over aliases. advance transition is a request-only receipt for an active completion and is not persisted or scheduled by Todo.`,
+Contract: Todo is a live execution state machine, not a retrospective checklist. subject is the title; description is detail. status is update-only on create (never pass status to create). Each actor has at most one in_progress task. Skill binding requires exactly one primary. context carries current progress and the exact next action; summary carries outcome, evidence, decisions, and downstream impact. handoff carries up to 3 next-step recommendations and task-relative file loading value (required|conditional|skip|unknown) for later New Context selection. resourceUris are validated durable references; prefer exact immutable publication IDs (for example agent://<publication-id>) over aliases. advance transition is a request-only receipt for an active completion and is not persisted or scheduled by Todo.`,
 
     promptSnippet: "Lay out a whole multi-step plan in one batch create (≥3 steps), then keep it live by advancing each task immediately when its outcome is complete.",
     promptGuidelines: [
@@ -1935,6 +1937,7 @@ Contract: Todo is a live execution state machine, not a retrospective checklist.
       "Keep context focused on current progress and the exact next action; put outcome, evidence, decisions, and downstream impact in summary.",
       "Batch blockedBy: tasks[i].blockedBy = [N] means tasks[i] depends on tasks[N], where 0 <= N < i.",
       "Todo is a live execution state machine: immediately after a task meets its acceptance criteria, call todo advance with its id and summary before any tool call or work belonging to another Todo; never batch-complete finished tasks during finalization.",
+      "Only provide handoff.nextSteps when an authorized later phase exists; for final or blocked work, explicitly clear stale nextSteps with an empty array and report or settle instead of inventing work. At completion, annotate only files/resources relevant to resumption as required, conditional with an explicit trigger, skip with a reason that prevents wasteful reload, or unknown; clear stale files with an empty array when nothing remains worth carrying, and do not read extra files merely to classify them.",
       "On completion, attach validated resourceUris for durable evidence and prefer exact immutable publication IDs over mutable aliases.",
       "Advance transition is request-only: pass transition=keep_context or new_context only with an active completion-form advance; new_context requires compaction.newContext.enabled=true, the receipt is not persisted, and omission preserves the current behavior.",
       "When a completed todo advance result includes [context-pressure-advisory], inspect the task activated in that same result. Dynamic reminders exist only at this Todo completion checkpoint: late auto-prune recommends new_context, while critical makes it a priority before beginning the next Todo. Call the standalone new_context tool only if a next phase exists, persisted state is sufficient, the boundary is loosely coupled, and no messages are pending; otherwise continue or settle. During active Todo work, automatic compaction remains the capacity fallback. The advisory cannot change the completed advance retroactively and must not be carried to an unrelated Todo; never infer a pressure reminder without a Todo completion checkpoint.",
@@ -2094,6 +2097,8 @@ When NOT to use:
   // === Plan Mode ===
   initPlan(pi, {
     compactionArbiter,
+    restoreActModel: planModelSelection.restoreActModel,
+    describeModelTransition: planModelSelection.describeTransition,
     scheduleNewContext: (ctx, input) => newContextController.schedule({
       source: "plan-confirm",
       actorId: "root",
@@ -2129,6 +2134,7 @@ When NOT to use:
   // === Language intelligence, browser control, and tool discovery ===
   registerIntelligenceTools(pi);
   registerFff(pi);
+  registerGatewayBoardTool(pi);
   registerBashBg(pi);
   registerLoop(pi);
   registerFlowSchedule(pi, {
@@ -2161,7 +2167,7 @@ When NOT to use:
     onUserAttention: notifyController.requestInput,
     async setMode(mode, ctx) {
       if (mode === "plan" && !isPlanMode()) await planToggleMode(ctx);
-      if (mode !== "plan" && isPlanMode()) planExitMode(ctx);
+      if (mode !== "plan" && isPlanMode()) await planExitMode(ctx);
       approvalMode = mode;
       syncApprovalModeStatus(ctx, approvalMode);
       publishMaestroUi();
@@ -2183,7 +2189,7 @@ When NOT to use:
       if (action === "reload") {
         const configuredMode = await permissionController.reload(ctx);
         if (configuredMode === "plan" && !isPlanMode()) await planToggleMode(ctx);
-        if (configuredMode && configuredMode !== "plan" && isPlanMode()) planExitMode(ctx);
+        if (configuredMode && configuredMode !== "plan" && isPlanMode()) await planExitMode(ctx);
         if (configuredMode) approvalMode = configuredMode;
         syncApprovalModeStatus(ctx, approvalMode);
         publishMaestroUi();
@@ -3675,7 +3681,9 @@ When NOT to use:
           const newContext = {
             requestId: newContextRequest.requestId,
             source: newContextRequest.source,
+            actorId: newContextRequest.actorId,
             ...(newContextRequest.carryForward ? { carryForward: newContextRequest.carryForward } : {}),
+            ...(newContextRequest.handoff ? { handoff: newContextRequest.handoff } : {}),
             resourceUris: [...newContextRequest.resourceUris],
           };
           const compaction = await runWithCompactionStatus(event, ctx, () =>
@@ -4604,7 +4612,9 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
         const newContext = {
           requestId: newContextRequest.requestId,
           source: newContextRequest.source,
+          actorId: newContextRequest.actorId,
           ...(newContextRequest.carryForward ? { carryForward: newContextRequest.carryForward } : {}),
+          ...(newContextRequest.handoff ? { handoff: newContextRequest.handoff } : {}),
           resourceUris: [...newContextRequest.resourceUris],
         };
         const result = await runObservedCompaction(observed, () =>
@@ -4693,6 +4703,7 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
   pi.registerTool(createSourceCheckTool() as never);
   registerResourceTool(pi);
   registerSessionHistoryTool(pi, { isCompactRecoveryEnabled: (ctx) => newContextToolsEnabled(ctx.cwd) });
+  registerGatewayBoardTool(pi);
   pi.registerTool(createLspTool() as never);
   pi.registerTool(createTeammateChildBrowserTool());
   pi.registerTool(createTeammateChildComputerUseTool());
@@ -4704,12 +4715,13 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
 Tasks created here are attributed to this teammate and assigned to self by default.
 Use assignee="root" to hand work back to root. Teammates can update tasks they created or were assigned; only root can clear the shared list.
 
-If root delegated a task to you (spawned with todo: "<id>"), it is usually already active (in_progress) — check with \`todo list\`, work on it, and immediately finish it with \`todo advance\` using that id, a one-line summary, optional resourceUris, and optional transition (keep_context|new_context). Advance only completes or activates tasks assigned to you. Use \`todo advance\` without id/summary/resourceUris when you have no active task and need to activate your next assigned task; use \`todo update\` when blocked, paused, or completing without continuing.`,
+If root delegated a task to you (spawned with todo: "<id>"), it is usually already active (in_progress) — check with \`todo list\`, work on it, and immediately finish it with \`todo advance\` using that id, a one-line summary, optional resourceUris/handoff, and optional transition (keep_context|new_context). Advance only completes or activates tasks assigned to you. Use \`todo advance\` without id/summary/resourceUris/handoff when you have no active task and need to activate your next assigned task; use \`todo update\` when blocked, paused, or completing without continuing.`,
     promptSnippet: "Keep teammate-owned tasks live in the shared root Todo list and advance each one immediately when its work finishes.",
     promptGuidelines: [
       "Use todo for newly discovered follow-up work, explicit blockers, and resumable steps.",
       "Todo is live state tracking: immediately when your active task finishes, call todo advance with its id and summary before doing work for another Todo; never defer several completions until your final answer.",
       "Keep context to current progress and the exact next action; summaries should record outcome, evidence, decisions, and downstream impact. Attach durable resourceUris using exact immutable publication IDs when available.",
+      "Use durable Todo.handoff for up to 3 ordered next steps and task-relative file values: required, conditional with an explicit trigger, skip, or unknown. Only provide nextSteps when an authorized later phase exists; for final or blocked work, explicitly clear stale nextSteps with an empty array and report or settle instead of inventing work.",
       "Advance transition is request-only (keep_context|new_context), valid only with an active completion-form advance; new_context requires compaction.newContext.enabled=true and otherwise fails before Todo mutation; its receipt is not persisted.",
       "When a completed todo advance result includes [context-pressure-advisory], inspect the task activated in that same result. Dynamic reminders exist only at this Todo completion checkpoint: late auto-prune recommends new_context, while critical makes it a priority before beginning the next Todo. Call the standalone new_context tool only if a next phase exists, persisted state is sufficient, the boundary is loosely coupled, and no messages are pending; otherwise continue or settle. During active Todo work, automatic compaction remains the capacity fallback. The advisory cannot change the completed advance retroactively and must not be carried to an unrelated Todo; never infer a pressure reminder without a Todo completion checkpoint.",
       "Advance is actor-scoped. Complete, block, or pause your active Todo before activating another task assigned to you; a final-answer Todo check is recovery only, not the normal update boundary.",

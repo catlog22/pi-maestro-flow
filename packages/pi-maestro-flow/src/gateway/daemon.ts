@@ -80,6 +80,9 @@ export class GatewayDaemon {
             return { ...host, readiness: { ipc: true, http: httpReady, ready: httpReady } };
           }
           if (action === "stop") { void this.stop(); return; }
+          if (action === "workspace-list" || action === "workspace-register" || action === "workspace-renew" || action === "workspace-remove") {
+            return runtime.workspace.control(action, data);
+          }
           if (action === "pair" || action === "pair-bootstrap") {
             const http = config.transport.http;
             const effectiveHost = this.options.httpHost ?? http.host;

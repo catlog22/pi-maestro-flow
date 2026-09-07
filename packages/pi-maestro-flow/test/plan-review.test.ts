@@ -59,7 +59,7 @@ test("listAvailableReviewModels returns sorted provider/model references", async
   const harness = createReviewHarness();
   const models = await listAvailableReviewModels(harness.ctx);
   assert.deepEqual(models, ["provider/other", "provider/reviewer", "provider/session"]);
-  assert.equal(FOLLOW_SESSION_LABEL, "Follow session model");
+  assert.equal(FOLLOW_SESSION_LABEL, "Follow current main model");
 });
 
 test("pickReviewModel resolves a chosen provider/model", async () => {
@@ -77,7 +77,7 @@ test("pickReviewModel resolves a chosen provider/model", async () => {
   assert.deepEqual(harness.notifications, []);
 });
 
-test("pickReviewModel resolves FOLLOW_SESSION_LABEL to the session model", async () => {
+test("pickReviewModel resolves FOLLOW_SESSION_LABEL to the current main model", async () => {
   const harness = createReviewHarness({
     driveCustom: (factory) => {
       const component = factory(undefined as never, minimalTheme(), undefined as never, () => {});
@@ -86,7 +86,10 @@ test("pickReviewModel resolves FOLLOW_SESSION_LABEL to the session model", async
     },
   });
   const choice = await pickReviewModel(harness.ctx, ["provider/reviewer"]);
-  assert.deepEqual(choice, { model: "provider/session", label: FOLLOW_SESSION_LABEL });
+  assert.deepEqual(choice, {
+    model: "provider/session",
+    label: `${FOLLOW_SESSION_LABEL} (provider/session)`,
+  });
 });
 
 test("pickReviewModel returns undefined when the picker is cancelled", async () => {
@@ -128,26 +131,29 @@ test("pickReviewModel abort and disposal close the nested picker exactly once", 
   assert.equal(doneCalls, 1);
 });
 
-test("pickReviewModel falls back to the session model without a UI and warns when missing", async () => {
+test("pickReviewModel falls back to the current main model without a UI and warns when missing", async () => {
   const harness = createReviewHarness({ hasUI: false });
   const choice = await pickReviewModel(harness.ctx, []);
-  assert.deepEqual(choice, { model: "provider/session", label: FOLLOW_SESSION_LABEL });
+  assert.deepEqual(choice, {
+    model: "provider/session",
+    label: `${FOLLOW_SESSION_LABEL} (provider/session)`,
+  });
 
   const noModel = createReviewHarness({ hasUI: false });
   (noModel.ctx as unknown as { model: undefined }).model = undefined;
   const missing = await pickReviewModel(noModel.ctx, []);
   assert.equal(missing, undefined);
-  assert.match(noModel.notifications.join("\n"), /no session model/);
+  assert.match(noModel.notifications.join("\n"), /no current main model/);
 });
 
-test("pickReviewModel warns when FOLLOW_SESSION_LABEL is chosen but no session model exists", async () => {
+test("pickReviewModel warns when FOLLOW_SESSION_LABEL is chosen but no current main model exists", async () => {
   const harness = createReviewHarness({
     driveCustom: () => FOLLOW_SESSION_LABEL,
   });
   (harness.ctx as unknown as { model: undefined }).model = undefined;
   const choice = await pickReviewModel(harness.ctx, ["provider/reviewer"]);
   assert.equal(choice, undefined);
-  assert.match(harness.notifications.join("\n"), /no session model/);
+  assert.match(harness.notifications.join("\n"), /no current main model/);
 });
 
 test("buildReviewPrompt omits the history section when there is no prior review", () => {

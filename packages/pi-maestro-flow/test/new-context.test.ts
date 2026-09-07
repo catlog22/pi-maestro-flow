@@ -8,6 +8,7 @@ import {
   createNewContextController,
   NEW_CONTEXT_MAX_BYTES,
   newContextFirstKeptEntryId,
+  selectNewContextHandoff,
 } from "../src/compaction/new-context.ts";
 import {
   blocksNativeCompactionFallback,
@@ -19,7 +20,14 @@ import {
   type MaestroCompactionDetails,
   type MaestroRecoveryState,
 } from "../src/compaction/maestro-compaction.ts";
-import type { TodoTask } from "../src/tools/todo.ts";
+import {
+  executeTodo,
+  initTodo,
+  onSessionShutdown as todoSessionShutdown,
+  onSessionStart as todoSessionStart,
+  type TodoTask,
+} from "../src/tools/todo.ts";
+import { TODO_MAX_HANDOFF_BYTES } from "../src/tools/todo-contract.ts";
 import { createNewContextTool } from "../src/tools/new-context.ts";
 
 const renderTheme = {
@@ -125,6 +133,7 @@ function details(tasks: TodoTask[] = []): MaestroCompactionDetails {
     newContext: {
       requestId: 1,
       source: "tool",
+      actorId: "root",
       carryForward: "Continue with focused verification.",
       resourceUris: ["agent://publication-1"],
     },
@@ -147,12 +156,23 @@ test("new-context scheduler coalesces same-actor inputs and consumes only its fe
       source: "tool",
       actorId: "root",
       carryForward: "first",
+      handoff: {
+        nextSteps: ["First recommendation"],
+        files: [{ path: "src/a.ts", value: "required", reason: "First target" }],
+      },
       resourceUris: ["agent://one"],
     }, harness.ctx as never);
     const second = controller.schedule({
       source: "tool",
       actorId: "root",
       carryForward: "replacement",
+      handoff: {
+        nextSteps: ["Replacement recommendation"],
+        files: [
+          { path: "./src/a.ts", value: "skip", reason: "No longer useful" },
+          { path: "src/b.ts", value: "conditional", reason: "Failure-only target", when: "Focused verification fails" },
+        ],
+      },
       resourceUris: ["agent://two", "agent://one"],
     }, harness.ctx as never);
     assert.equal(second.requestId, first.requestId);
@@ -166,6 +186,11 @@ test("new-context scheduler coalesces same-actor inputs and consumes only its fe
     if (observed.trigger?.owner !== "new-context") assert.fail("missing new-context trigger");
     const consumed = controller.consume(observed.trigger, harness.ctx as never);
     assert.equal(consumed?.carryForward, "replacement");
+    assert.deepEqual(consumed?.handoff?.nextSteps, ["Replacement recommendation"]);
+    assert.deepEqual(consumed?.handoff?.files.map((file) => [file.path, file.value]), [
+      ["src/a.ts", "skip"],
+      ["src/b.ts", "conditional"],
+    ]);
     assert.deepEqual(consumed?.resourceUris, ["agent://one", "agent://two"]);
     assert.equal(controller.consume(observed.trigger, harness.ctx as never), undefined);
     harness.compactOptions?.onComplete?.();
@@ -212,6 +237,7 @@ test("plan-confirm New Context checkpoints its execution contract and resumes wi
     checkpoint.newContext = {
       requestId: receipt.requestId,
       source: "plan-confirm",
+      actorId: "root",
       carryForward: executionMessage,
       resourceUris: [],
     };
@@ -430,9 +456,28 @@ test("new-context recovery policy blocks native model summarization fallback", (
 test("child recovery state refresh happens at lease time and fails closed", async () => {
   const fixture = await enabledProject();
   try {
-    const runtime = details([task({ id: "1", subject: "active", status: "in_progress" })]);
+    const runtime = details([task({
+      id: "1",
+      subject: "active",
+      status: "in_progress",
+      handoff: {
+        nextSteps: [],
+        files: [{ path: "src/stale.ts", value: "required", reason: "Registration-time state", annotationRevision: 1 }],
+      },
+    })]);
+    const refreshedTask = task({
+      id: "1",
+      subject: "active",
+      status: "in_progress",
+      assignee: { kind: "teammate", id: "child", label: "child" },
+      handoff: {
+        nextSteps: ["Use the refreshed root snapshot"],
+        nextStepsRevision: 27,
+        files: [{ path: "src/fresh.ts", value: "required", reason: "Lease-time state", annotationRevision: 27 }],
+      },
+    });
     const refreshed: MaestroRecoveryState = {
-      todo: { ...runtime.todo, revision: 27 },
+      todo: { ...runtime.todo, revision: 27, tasks: [refreshedTask] },
       goal: runtime.goal!,
       plan: runtime.plan!,
       workflow: runtime.workflow,
@@ -455,6 +500,10 @@ test("child recovery state refresh happens at lease time and fails closed", asyn
     const observed = arbiter.observeStart(request);
     const consumed = controller.consume(observed.trigger!, harness.ctx as never);
     assert.equal(consumed?.recoveryState?.todo.revision, 27);
+    const selected = selectNewContextHandoff(consumed?.recoveryState?.todo.tasks ?? [], "child");
+    assert.deepEqual(selected.nextSteps, ["Use the refreshed root snapshot"]);
+    assert.deepEqual(selected.required.map((file) => file.path), ["src/fresh.ts"]);
+    assert.equal(selected.required.some((file) => file.path === "src/stale.ts"), false);
     harness.compactOptions?.onError?.(new Error("test cleanup"));
 
     const failedHarness = context(fixture.cwd, "session-2");
@@ -564,14 +613,299 @@ test("new_context guidance uses Todo checkpoints and pressure only for urgency",
   assert.match(guidance, /Do not emit or infer pressure-driven reminders without a Todo completion checkpoint/);
 });
 
+test("new_context guidance persists actionable recommendations and task-relative file value", () => {
+  const tool = createNewContextTool(createNewContextController(new CompactionArbiter()), "root");
+  const guidance = tool.promptGuidelines.join("\n");
+  assert.match(tool.description, /persist actionable next-step recommendations/);
+  assert.match(guidance, /up to 3 ordered next-step recommendations/);
+  assert.match(guidance, /concrete action, exact target or command when known, expected result/);
+  assert.match(guidance, /If work is complete or blocked/);
+  assert.match(guidance, /value=required\|conditional\|skip\|unknown/);
+  assert.match(guidance, /Do not infer value from filename, recency, previous reads\/edits, or ease of loading/);
+  assert.match(guidance, /do not read extra files just to classify them/);
+  assert.match(guidance, /Skip is not permission to delete or ignore governing knowledge/);
+  assert.match(tool.parameters.properties.carryForward.description, /Prefer structured handoff/);
+  assert.match(tool.parameters.properties.resourceUris.description, /never inside the URI/);
+  assert.match(tool.parameters.properties.handoff.description, /Reset-local/);
+  assert.match(tool.parameters.properties.handoff.description, /does not mutate or persist to Todo state/);
+});
+
+test("new-context structured handoff clears reset-local supplements without mutating Todo", async () => {
+  const fixture = await enabledProject();
+  try {
+    const arbiter = new CompactionArbiter();
+    const controller = createNewContextController(arbiter);
+    const harness = context(fixture.cwd);
+    controller.onSessionStart(harness.ctx as never);
+    controller.schedule({
+      source: "tool",
+      actorId: "root",
+      handoff: {
+        nextSteps: ["Temporary"],
+        files: [{ path: "src/temp.ts", value: "required", reason: "Temporary supplement" }],
+      },
+    }, harness.ctx as never);
+    const receipt = controller.schedule({
+      source: "tool",
+      actorId: "root",
+      handoff: { nextSteps: [], files: [] },
+    }, harness.ctx as never);
+    assert.equal(receipt.coalesced, true);
+    assert.equal(await controller.onAgentSettled(harness.ctx as never), true);
+    const request = compactionRequestFromInstructions(harness.compactOptions?.customInstructions);
+    const observed = arbiter.observeStart(request);
+    const consumed = controller.consume(observed.trigger!, harness.ctx as never);
+    assert.equal(consumed?.handoff, undefined);
+    harness.compactOptions?.onComplete?.();
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+test("new-context selects all relevant Todo handoffs by path precedence and actor scope", () => {
+  const completed = Array.from({ length: 7 }, (_, index) => task({
+    id: String(index + 1),
+    subject: `completed-${index + 1}`,
+    status: "completed",
+    planHandoffKey: "plan-a",
+    createdAt: index + 1,
+    completedAt: index + 1,
+    handoff: {
+      nextSteps: index === 6 ? ["Historical recommendation"] : [],
+      nextStepsRevision: index + 1,
+      files: index === 0
+        ? [
+          { path: "src/deep-history.ts", value: "required", reason: "Still needed beyond recent-five display", annotationRevision: 100 },
+          { path: "src/shared.ts", value: "required", reason: "Originally needed", annotationRevision: 1 },
+        ]
+        : index === 5
+          ? [{ path: "src/shared.ts", value: "skip", reason: "Conclusion already preserved", annotationRevision: 6 }]
+          : index === 6
+            ? [
+              { path: "src/config.ts", value: "conditional", reason: "Only on failure", when: "Focused test fails", annotationRevision: 7 },
+              { path: "src/unknown.ts", value: "unknown", reason: "Relevance not established", annotationRevision: 7 },
+            ]
+            : [],
+    },
+  }));
+  const active = task({
+    id: "8",
+    subject: "active",
+    status: "in_progress",
+    planHandoffKey: "plan-a",
+    createdAt: 8,
+    handoff: {
+      nextSteps: ["Active recommendation"],
+      nextStepsRevision: 8,
+      files: [{ path: "src/current.ts", value: "required", reason: "Current edit target", annotationRevision: 8 }],
+    },
+  });
+  const worker = task({
+    id: "worker",
+    subject: "other actor",
+    status: "completed",
+    planHandoffKey: "plan-a",
+    assignee: { kind: "teammate", id: "worker", label: "worker" },
+    handoff: {
+      nextSteps: [],
+      files: [{ path: "src/worker-only.ts", value: "required", reason: "Other actor state", annotationRevision: 99 }],
+    },
+  });
+
+  const selected = selectNewContextHandoff([...completed, active, worker], "root");
+  assert.deepEqual(selected.nextSteps, ["Active recommendation"]);
+  assert.equal(selected.nextStepsSource, "active");
+  assert.deepEqual(selected.required.map((file) => file.path), ["src/current.ts", "src/deep-history.ts"]);
+  assert.deepEqual(selected.conditional.map((file) => file.path), ["src/config.ts"]);
+  assert.deepEqual(selected.skip.map((file) => file.path), ["src/shared.ts"]);
+  assert.equal(selected.omitted.unknown, 1);
+  assert.equal(selected.required.some((file) => file.path === "src/worker-only.ts"), false);
+
+  const supplemented = selectNewContextHandoff([...completed, active], "root", {
+    nextSteps: ["Explicit reset recommendation"],
+    nextStepsRevision: 100,
+    files: [{ path: "src/shared.ts", value: "required", reason: "Reset-specific need", annotationRevision: 100 }],
+  });
+  assert.deepEqual(supplemented.nextSteps, ["Explicit reset recommendation"]);
+  assert.equal(supplemented.nextStepsSource, "request");
+  assert.equal(supplemented.required.find((file) => file.path === "src/shared.ts")?.source, "request");
+  assert.equal(supplemented.skip.some((file) => file.path === "src/shared.ts"), false);
+});
+
+test("an active Todo without annotations still anchors handoff scope", () => {
+  const planA = task({
+    id: "a",
+    subject: "plan A history",
+    status: "completed",
+    planHandoffKey: "plan-a",
+    createdAt: 1,
+    handoff: {
+      nextSteps: ["Continue plan A"],
+      nextStepsRevision: 1,
+      files: [{ path: "src/a.ts", value: "required", reason: "Plan A input", annotationRevision: 1 }],
+    },
+  });
+  const planB = task({
+    id: "b",
+    subject: "plan B history",
+    status: "completed",
+    planHandoffKey: "plan-b",
+    createdAt: 2,
+    handoff: {
+      nextSteps: ["Unrelated plan B"],
+      nextStepsRevision: 2,
+      files: [{ path: "src/b.ts", value: "required", reason: "Plan B input", annotationRevision: 2 }],
+    },
+  });
+  const active = task({
+    id: "current",
+    subject: "plan A active",
+    status: "in_progress",
+    planHandoffKey: "plan-a",
+    createdAt: 3,
+  });
+  const selected = selectNewContextHandoff([planA, planB, active], "root");
+  assert.deepEqual(selected.nextSteps, ["Continue plan A"]);
+  assert.deepEqual(selected.required.map((file) => file.path), ["src/a.ts"]);
+});
+
+test("new-context bounds the selected handoff projection before the capsule budget", () => {
+  const tasks = Array.from({ length: 16 }, (_, index) => task({
+    id: String(index + 1),
+    subject: `large-${index}`,
+    status: "completed",
+    createdAt: index,
+    handoff: {
+      nextSteps: [],
+      files: [{
+        path: `src/large-${index}.ts`,
+        value: "required",
+        reason: `${index}-`.padEnd(2_000, "x"),
+        annotationRevision: index + 1,
+      }],
+    },
+  }));
+  const selected = selectNewContextHandoff(tasks, "root");
+  assert.ok(Buffer.byteLength(JSON.stringify(selected), "utf8") <= TODO_MAX_HANDOFF_BYTES);
+  assert.ok(selected.omitted.positive > 0);
+});
+
+test("recovery guidance gives next steps without treating reference lineage as file value", () => {
+  const runtime = details();
+  runtime.newContext!.carryForward = [
+    "Next steps: run the focused test; expect it to pass.",
+    "D:/repo/reference.md — value=skip — superseded background; reconsider only if scope changes.",
+  ].join("\n");
+  const capsule = buildNewContextRecoveryCapsule(runtime);
+  assert.match(capsule, /## Next-Step Recommendations/);
+  assert.match(capsule, /If complete or blocked, report that instead of inventing work/);
+  assert.match(capsule, /recommendations do not override live state or actor ownership/);
+  assert.match(capsule, /## File Loading Guidance/);
+  assert.match(capsule, /Easy to load does not mean useful to load/);
+  assert.match(capsule, /Unannotated references have unknown value, not required value/);
+  assert.match(capsule, /not deletion or permission to bypass the project knowledge gate/);
+  assert.match(capsule, /Next steps: run the focused test; expect it to pass/);
+  assert.match(capsule, /value=skip — superseded background/);
+  assert.match(capsule, /## Checkpoint Reference Lineage\nValue: unknown unless annotated in the selected Todo\/new_context handoff/);
+  assert.match(capsule, /D:\/repo\/reference.md \(read; first=checkpoint-1; last=checkpoint-2\)/);
+  assert.doesNotMatch(capsule, /- Use resource for listed URIs\./);
+});
+
+test("root new-context capture selects Todo annotations added after reset registration", async () => {
+  initTodo({ appendEntry() {} } as never);
+  const todoContext = {
+    cwd: "D:/repo",
+    ui: { setStatus() {} },
+    sessionManager: { getEntries: () => [] },
+  };
+  todoSessionStart(todoContext);
+  const ctx = {
+    cwd: "D:/repo",
+    model: undefined,
+    sessionManager: { getSessionId: () => "session-1" },
+    ui: { notify() {} },
+  };
+  try {
+    await executeTodo({
+      action: "create",
+      subject: "Completed handoff",
+      handoff: { files: [{ path: "src/value.ts", value: "required", reason: "Registration-time value" }] },
+    }, ctx as never);
+    await executeTodo({ action: "update", id: "1", status: "completed", summary: "done" }, ctx as never);
+    const registeredRequest = { requestId: 1, source: "tool" as const, actorId: "root", resourceUris: [] };
+    await executeTodo({
+      action: "update",
+      id: "1",
+      handoff: { files: [{ path: "src/value.ts", value: "skip", reason: "Lease-time value supersedes it" }] },
+    }, ctx as never);
+
+    const result = await createMaestroCompaction({
+      preparation: {
+        firstKeptEntryId: "old-recent-entry",
+        messagesToSummarize: [],
+        turnPrefixMessages: [],
+        isSplitTurn: false,
+        tokensBefore: 1_200,
+        fileOps: { read: new Set<string>(), written: new Set<string>(), edited: new Set<string>() },
+        settings: { enabled: true, reserveTokens: 1_000, keepRecentTokens: 100 },
+      },
+      branchEntries: [],
+      customInstructions: "new context",
+    } as never, ctx as never, {
+      checkpointId: () => "latest-root-checkpoint",
+      now: () => new Date("2026-09-01T00:00:00.000Z"),
+      newContext: registeredRequest,
+      summaryOverrideFactory: buildNewContextRecoveryCapsule,
+      firstKeptEntryIdOverride: "new-context-entry",
+      failClosed: true,
+    });
+    assert.match(result?.compaction?.summary ?? "", /src\/value\.ts \[skip;/);
+    assert.match(result?.compaction?.summary ?? "", /Lease-time value supersedes it/);
+    assert.doesNotMatch(result?.compaction?.summary ?? "", /Registration-time value/);
+  } finally {
+    todoSessionShutdown(todoContext);
+  }
+});
+
+test("recovery capsule projects the selected Todo handoff without reading file contents", () => {
+  const runtime = details([
+    task({
+      id: "old",
+      subject: "old completed",
+      status: "completed",
+      createdAt: 1,
+      handoff: {
+        nextSteps: ["Run the focused check"],
+        nextStepsRevision: 1,
+        files: [
+          { path: "src/required.ts", value: "required", reason: "Next target", annotationRevision: 1 },
+          { path: "large.log", value: "skip", reason: "Raw trace has no incremental value", annotationRevision: 1 },
+        ],
+      },
+    }),
+  ]);
+  const capsule = buildNewContextRecoveryCapsule(runtime);
+  assert.match(capsule, /## Selected Todo Handoff/);
+  assert.match(capsule, /### Recommended Next Steps\n1\. Run the focused check/);
+  assert.match(capsule, /### Required For Next Action/);
+  assert.match(capsule, /src\/required\.ts \[required; source=Todo #old; annotationRevision=1\]/);
+  assert.match(capsule, /### Do Not Reload By Default/);
+  assert.match(capsule, /large\.log \[skip;/);
+  assert.match(capsule, /Handoff omitted: positive=0, skip=0, unknown=0/);
+});
+
 test("new_context renders a Todo-style card with compact recovery inputs", () => {
   const tool = createNewContextTool(createNewContextController(new CompactionArbiter()), "root");
   const args = {
     carryForward: "继续验证",
+    handoff: {
+      nextSteps: ["Run tests"],
+      files: [{ path: "src/a.ts", value: "required" as const, reason: "Next target" }],
+    },
     resourceUris: ["agent://publication-1", "session://session-1/entry/e1"],
   };
   const call = render(tool.renderCall?.(args, renderTheme as never, { isPartial: true } as never));
-  assert.match(call, /… new context schedule · 12B carry-forward · 2 resources/);
+  assert.match(call, /… new context schedule · 12B carry-forward · 1 step · 1 annotated file · 2 resources/);
 
   const compact = render(tool.renderResult?.({
     content: [{ type: "text", text: "New-context request 7 scheduled for the end of the current turn." }],
@@ -579,7 +913,7 @@ test("new_context renders a Todo-style card with compact recovery inputs", () =>
   }, { expanded: false, isPartial: false } as never, renderTheme as never, { args } as never));
   assert.match(compact, /✓ new context schedule · #7 scheduled/);
   assert.match(compact, /○ pending\s+#7\s+context reset/);
-  assert.match(compact, /after current turn settles · recovery capsule · 12B carry-forward · 2 resources/);
+  assert.match(compact, /after current turn settles · recovery capsule · 12B carry-forward · 1 step · 1 annotated file · 2 resources/);
   assert.doesNotMatch(compact, /New-context request 7 scheduled/);
 
   const expanded = render(tool.renderResult?.({

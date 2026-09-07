@@ -2,7 +2,9 @@
 import {
   GATEWAY_DEFAULT_LIMITS,
   GATEWAY_HARD_LIMITS,
+  GATEWAY_STATE_VERSION,
   type GatewayPrincipal,
+  type GatewayWorkspace,
 } from "./contracts.ts";
 import type { GatewayLimitsConfig, GatewayTrustedFullAccessConfig, GatewayWorkspaceConfig } from "./config.ts";
 import { principalKey } from "./principal.ts";
@@ -38,10 +40,13 @@ export interface GatewayPolicyDecision {
   allowed: boolean;
   reason: string;
   operation?: GatewayPolicyOperation;
+  workspaceId?: string;
   workspacePath?: string;
   canonicalPath?: string;
   principal?: string;
 }
+
+export type GatewayVisibleWorkspace = Omit<GatewayWorkspace, "ownerToken">;
 
 export class GatewayPolicyError extends Error {
   readonly code: string;
@@ -96,7 +101,7 @@ function configuredWorkspacePath(value: GatewayWorkspaceConfig | string | { path
 export class GatewayPolicy {
   readonly limits: GatewayPolicyLimits;
   private readonly workspaceRoot?: string;
-  private readonly configuredWorkspaces: Array<{ path: string; id: string; expiresAt?: number }>;
+  private readonly configuredWorkspaces: GatewayVisibleWorkspace[];
   private readonly registry?: WorkspaceRegistry;
   private readonly trustedRoots: string[];
   private readonly now: () => number;
@@ -117,10 +122,32 @@ export class GatewayPolicy {
         : workspaceIdForPath(path);
       const lease = typeof entry === "object" && entry !== null && "mode" in entry && entry.mode === "lease";
       const ttlMs = typeof entry === "object" && entry !== null && "ttlMs" in entry ? entry.ttlMs : undefined;
-      return { path, id, ...(lease ? { expiresAt: this.now() + (typeof ttlMs === "number" ? ttlMs : 0) } : {}) };
+      const generation = typeof entry === "object" && entry !== null && "generation" in entry && Number.isSafeInteger(entry.generation)
+        ? entry.generation as number
+        : 1;
+      return {
+        version: GATEWAY_STATE_VERSION,
+        id,
+        path,
+        canonicalPath: path,
+        mode: lease ? "lease" as const : "permanent" as const,
+        generation,
+        registeredAt: 0,
+        updatedAt: 0,
+        ...(lease ? { expiresAt: this.now() + (typeof ttlMs === "number" ? ttlMs : 0) } : {}),
+      };
     });
     if (this.workspaceRoot && !this.configuredWorkspaces.some((entry) => entry.path === this.workspaceRoot)) {
-      this.configuredWorkspaces.unshift({ path: this.workspaceRoot, id: workspaceIdForPath(this.workspaceRoot) });
+      this.configuredWorkspaces.unshift({
+        version: GATEWAY_STATE_VERSION,
+        path: this.workspaceRoot,
+        canonicalPath: this.workspaceRoot,
+        id: workspaceIdForPath(this.workspaceRoot),
+        mode: "permanent",
+        generation: 1,
+        registeredAt: 0,
+        updatedAt: 0,
+      });
     }
     if (this.configuredWorkspaces.length > this.limits.maxWorkspaceCount) throw new GatewayPolicyError("too many configured workspaces", "workspace_limit");
   }
@@ -143,58 +170,57 @@ export class GatewayPolicy {
   normalizePath(workspace: string, requestedPath: string): string { return this.canonicalPath(workspace, requestedPath); }
 
   authorizeWorkspaceSync(principal: GatewayPrincipal, workspaceInput: string): GatewayPolicyDecision {
-    const workspace = this.canonicalWorkspace(workspaceInput);
-    const entry = this.configuredWorkspaces.find((candidate) => candidate.path === workspace);
-    if (!entry) return { allowed: false, reason: "workspace is not registered", workspacePath: workspace, principal: principalKey(principal) };
-    if (entry.expiresAt !== undefined && entry.expiresAt <= this.now()) return { allowed: false, reason: "workspace lease has expired", workspacePath: workspace, principal: principalKey(principal) };
-    if (principal.workspaceId !== undefined && principal.workspaceId !== entry.id && principal.workspaceId !== workspace) {
-      return { allowed: false, reason: "principal is bound to a different workspace", workspacePath: workspace, principal: principalKey(principal) };
-    }
-    return { allowed: true, reason: "workspace is registered", workspacePath: workspace, principal: principalKey(principal) };
+    const entry = this.findWorkspace(this.configuredWorkspaces, workspaceInput);
+    if (!entry) return { allowed: false, reason: "workspace is not registered", principal: principalKey(principal) };
+    return this.authorizeKnownWorkspace(principal, entry);
   }
 
   async authorizeWorkspace(principal: GatewayPrincipal, workspaceInput: string): Promise<GatewayPolicyDecision> {
-    const workspace = this.canonicalWorkspace(workspaceInput);
-    const configured = await this.knownWorkspaces();
-    const entry = configured.find((candidate) => candidate.path === workspace);
-    if (!entry) return { allowed: false, reason: "workspace is not registered", workspacePath: workspace, principal: principalKey(principal) };
-    if (entry.expiresAt !== undefined && entry.expiresAt <= this.now()) return { allowed: false, reason: "workspace lease has expired", workspacePath: workspace, principal: principalKey(principal) };
-    if (principal.workspaceId !== undefined && principal.workspaceId !== entry.id && principal.workspaceId !== workspace) {
-      return { allowed: false, reason: "principal is bound to a different workspace", workspacePath: workspace, principal: principalKey(principal) };
+    const entry = this.findWorkspace(await this.knownWorkspaces(), workspaceInput);
+    if (!entry) return { allowed: false, reason: "workspace is not registered", principal: principalKey(principal) };
+    return this.authorizeKnownWorkspace(principal, entry);
+  }
+
+  async assertWorkspace(principal: GatewayPrincipal, workspaceInput: string): Promise<string> {
+    const decision = await this.authorizeWorkspace(principal, workspaceInput);
+    if (!decision.allowed || decision.workspacePath === undefined) throw new GatewayPolicyError(decision.reason);
+    return decision.workspacePath;
+  }
+
+  async listAuthorizedWorkspaces(principal: GatewayPrincipal): Promise<GatewayVisibleWorkspace[]> {
+    const result: GatewayVisibleWorkspace[] = [];
+    for (const workspace of await this.knownWorkspaces()) {
+      if (this.authorizeKnownWorkspace(principal, workspace).allowed) result.push(structuredClone(workspace));
     }
-    if (principal.workspacePath !== undefined && !isPathWithin(principal.workspacePath, workspace)) {
-      return { allowed: false, reason: "workspace is outside the principal workspace", workspacePath: workspace, principal: principalKey(principal) };
-    }
-    return { allowed: true, reason: "workspace is registered", workspacePath: workspace, principal: principalKey(principal) };
+    return result;
   }
 
   async authorizePath(principal: GatewayPrincipal, workspaceInput: string, requestedPath: string, operation: GatewayPolicyOperation = "read"): Promise<GatewayPolicyDecision> {
-    const workspace = this.canonicalWorkspace(workspaceInput);
+    const workspaceDecision = await this.authorizeWorkspace(principal, workspaceInput);
+    if (!workspaceDecision.allowed || workspaceDecision.workspacePath === undefined) return { ...workspaceDecision, operation };
+    const workspace = workspaceDecision.workspacePath;
     let canonicalPath: string;
     try { canonicalPath = this.canonicalPath(workspace, requestedPath); }
     catch (error) {
       return {
+        ...workspaceDecision,
         allowed: false,
         reason: error instanceof Error ? error.message : "path is outside the registered workspace",
         operation,
-        workspacePath: workspace,
-        principal: principalKey(principal),
       };
     }
-    const workspaceDecision = await this.authorizeWorkspace(principal, workspace);
-    if (!workspaceDecision.allowed) return { ...workspaceDecision, operation, canonicalPath };
-    return { allowed: true, reason: `${operation} path is within the registered workspace`, operation, workspacePath: workspace, canonicalPath, principal: principalKey(principal) };
+    return { ...workspaceDecision, allowed: true, reason: `${operation} path is within the registered workspace`, operation, canonicalPath };
   }
 
   authorizePathSync(principal: GatewayPrincipal, workspaceInput: string, requestedPath: string, operation: GatewayPolicyOperation = "read"): GatewayPolicyDecision {
-    const workspace = this.canonicalWorkspace(workspaceInput);
+    const decision = this.authorizeWorkspaceSync(principal, workspaceInput);
+    if (!decision.allowed || decision.workspacePath === undefined) return { ...decision, operation };
     let canonicalPath: string;
-    try { canonicalPath = this.canonicalPath(workspace, requestedPath); }
+    try { canonicalPath = this.canonicalPath(decision.workspacePath, requestedPath); }
     catch (error) {
-      return { allowed: false, reason: error instanceof Error ? error.message : "path is outside the registered workspace", operation, workspacePath: workspace, principal: principalKey(principal) };
+      return { ...decision, allowed: false, reason: error instanceof Error ? error.message : "path is outside the registered workspace", operation };
     }
-    const decision = this.authorizeWorkspaceSync(principal, workspace);
-    return decision.allowed ? { ...decision, allowed: true, operation, canonicalPath, reason: `${operation} path is within the registered workspace` } : { ...decision, operation, canonicalPath };
+    return { ...decision, allowed: true, operation, canonicalPath, reason: `${operation} path is within the registered workspace` };
   }
 
   assertPathSync(principal: GatewayPrincipal, workspaceInput: string, requestedPath: string, operation: GatewayPolicyOperation = "read"): string {
@@ -271,17 +297,40 @@ export class GatewayPolicy {
     return bytes;
   }
 
-  private async knownWorkspaces(): Promise<Array<{ path: string; id: string; expiresAt?: number }>> {
-    const configured = [...this.configuredWorkspaces];
+  private authorizeKnownWorkspace(principal: GatewayPrincipal, entry: GatewayVisibleWorkspace): GatewayPolicyDecision {
+    const workspace = entry.canonicalPath ?? entry.path;
+    const base = { workspaceId: entry.id, workspacePath: workspace, principal: principalKey(principal) };
+    if (entry.expiresAt !== undefined && entry.expiresAt <= this.now()) return { ...base, allowed: false, reason: "workspace lease has expired" };
+    if (principal.workspaceId !== undefined && principal.workspaceId !== entry.id && principal.workspaceId !== workspace) {
+      return { ...base, allowed: false, reason: "principal is bound to a different workspace" };
+    }
+    if (principal.workspacePath !== undefined && !isPathWithin(principal.workspacePath, workspace)) {
+      return { ...base, allowed: false, reason: "workspace is outside the principal workspace" };
+    }
+    return { ...base, allowed: true, reason: "workspace is registered" };
+  }
+
+  private findWorkspace(workspaces: readonly GatewayVisibleWorkspace[], input: string): GatewayVisibleWorkspace | undefined {
+    const byId = workspaces.filter((entry) => entry.id === input);
+    if (byId.length === 1) return byId[0];
+    if (byId.length > 1) return undefined;
+    let path: string;
+    try { path = canonicalizeWorkspacePath(input); } catch { return undefined; }
+    const byPath = workspaces.filter((entry) => (entry.canonicalPath ?? entry.path) === path);
+    return byPath.length === 1 ? byPath[0] : undefined;
+  }
+
+  private async knownWorkspaces(): Promise<GatewayVisibleWorkspace[]> {
+    const known = new Map(this.configuredWorkspaces.map((entry) => [entry.path, entry]));
     if (this.registry) {
       const registered = await this.registry.list();
       for (const workspace of registered) {
         const path = canonicalizeWorkspacePath(workspace.canonicalPath ?? workspace.path);
-        const id = workspace.id || workspaceIdForPath(path);
-        if (!configured.some((entry) => entry.path === path)) configured.push({ path, id });
+        const { ownerToken: _ownerToken, ...visible } = workspace;
+        known.set(path, { ...visible, path, canonicalPath: path, id: workspace.id || workspaceIdForPath(path) });
       }
     }
-    return configured;
+    return [...known.values()].sort((left, right) => left.path.localeCompare(right.path));
   }
 }
 

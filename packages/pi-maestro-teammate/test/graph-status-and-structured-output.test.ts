@@ -111,6 +111,7 @@ function createScriptedSpawn(
   return (() => {
     const child = new EventEmitter() as ChildProcess;
     const stdout = new PassThrough();
+    let terminated = false;
     Object.assign(child, {
       stdin: new PassThrough(),
       stdout,
@@ -119,7 +120,17 @@ function createScriptedSpawn(
       exitCode: null,
       signalCode: null,
       pid: undefined,
-      kill() { return true; },
+      kill(signal: NodeJS.Signals = "SIGTERM") {
+        if (terminated) return false;
+        terminated = true;
+        queueMicrotask(() => {
+          Object.assign(child, { signalCode: signal });
+          child.emit("exit", null, signal);
+          stdout.end();
+          child.emit("close", null, signal);
+        });
+        return true;
+      },
     });
     queueMicrotask(() => {
       stdout.write(`${JSON.stringify({ type: "error", error: providerCause })}\n`);

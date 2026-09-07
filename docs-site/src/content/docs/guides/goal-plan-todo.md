@@ -68,7 +68,7 @@ plan-confirm()               // 提交，用户批准后恢复编辑
 plan-exit()                  // 放弃并返回
 ```
 
-> Plan 模式支持独立 Plan 模型：规划与执行可分别使用不同模型，见[模型路由与思考深度](/guides/model-routing)。
+> Plan 模式支持独立 Plan 模型：规划与执行可分别使用不同模型；Execute 或 Exit 会恢复进入 Plan 前的 Act 模型，并在确认界面显示模型切换。见[模型路由与思考深度](/guides/model-routing)。
 
 ### plan-decompose — 批准后的分解（v0.22+）
 
@@ -132,6 +132,25 @@ todo({ action: "next" })
 
 任务携带 `resourceUris` 持久化资源引用（如 `agent://<publication-id>`）与计时元数据（开始/完成时间、耗时）；todo 结果渲染为任务卡片并附耗时图，可在 Cockpit 状态堆栈中查看。
 
+`handoff` 可持久化最多 3 条有序 `nextSteps`，并为后续阶段标注文件加载价值：`required`、`conditional`（必须带 `when`）、`skip` 或 `unknown`。它属于任务状态，不是临时聊天摘要：
+
+```javascript
+todo({
+  action: "advance",
+  id: "abc123",
+  summary: "实现阶段完成并通过聚焦测试",
+  handoff: {
+    nextSteps: ["运行集成测试并核对输出"],
+    files: [{
+      path: "src/auth.ts",
+      value: "conditional",
+      reason: "仅在集成测试失败时排查认证边界",
+      when: "测试报告认证失败"
+    }]
+  }
+})
+```
+
 ### Todo 阶段切换到 New Context
 
 启用 `compaction.newContext.enabled` 后，completion-form `advance` 可通过 `transition: "new_context"` 在任务提交后调度确定性上下文重置：
@@ -142,6 +161,7 @@ todo({
   id: "abc123",
   summary: "实现阶段完成并通过聚焦测试",
   resourceUris: ["agent://<publication-id>"],
+  handoff: { nextSteps: ["加载集成证据并继续下一阶段"] },
   transition: "new_context"
 })
 ```

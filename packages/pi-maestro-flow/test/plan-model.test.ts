@@ -52,12 +52,13 @@ function createHarness(
     },
   } as unknown as ExtensionAPI;
 
-  registerPlanModelSelection(pi, {
+  const controller = registerPlanModelSelection(pi, {
     isPlanMode: () => planMode,
     loadModel: () => loadModel(),
   });
   return {
     ctx,
+    controller,
     selected,
     notifications,
     setPlanMode(value: boolean) { planMode = value; },
@@ -170,6 +171,27 @@ test("leaving Plan mode restores the Act model when the current agent turn ends"
   assert.deepEqual(harness.selected, ["provider/plan"]);
 
   harness.setPlanMode(false);
+  await harness.fire("agent_end");
+  assert.deepEqual(harness.selected, ["provider/plan", "provider/act"]);
+});
+
+test("Plan model controller describes and restores the Act model before agent_end", async () => {
+  const harness = createHarness(() => "provider/plan");
+  harness.setPlanMode(true);
+  await harness.fire("before_agent_start");
+
+  assert.deepEqual(harness.controller.describeTransition(harness.ctx), {
+    current: "provider/plan",
+    act: "provider/act",
+  });
+
+  harness.setPlanMode(false);
+  assert.equal(await harness.controller.restoreActModel(harness.ctx), true);
+  assert.deepEqual(harness.selected, ["provider/plan", "provider/act"]);
+  assert.deepEqual(harness.controller.describeTransition(harness.ctx), {
+    current: "provider/act",
+  });
+
   await harness.fire("agent_end");
   assert.deepEqual(harness.selected, ["provider/plan", "provider/act"]);
 });

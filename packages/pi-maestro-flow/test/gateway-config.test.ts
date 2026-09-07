@@ -12,6 +12,7 @@ import {
   parseGatewayConfigDocument,
   writeGatewayConfigPatch,
 } from "../src/gateway/config.ts";
+import { createGatewayStatePaths, gatewayBoardPath, gatewayBoardRoot } from "../src/gateway/state-paths.ts";
 
 const yaml = `# keep this header\nserver:\n    host: "127.0.0.1"\n    port: 9191\nauth:\n    mode: bearer\n    token: "secret"\nsecurity:\n    commands:\n        default: confirm\n        allow:\n            - "^pi\\\\b"\n        confirm: []\n        deny: []\n        auto_allow_readonly: null\n    files:\n        max_read_bytes: 2048\n        max_patch_files: 3\n        allow: []\n        confirm: []\n        deny: []\nworkspaces:\n    - path: "."\n      ttl_seconds: 60\ntransport:\n    stdio:\n        enabled: true\nlimits:\n    max_request_bytes: 2048\nlogging:\n    level: info\nstate:\n    root_dir: ".pi/gateway/v1"\nretention:\n    jobs: 3600\nunknown_section:\n    keep: true\n    comment: "must survive"\n`;
 
@@ -37,7 +38,24 @@ test("Gateway config normalizes legacy snake-case sections and rejects invalid k
   assert.deepEqual(trusted.security.trustedFullAccess, { enabled: true, workspaceRoots: ["."] });
   assert.equal(trusted.transport.http.tls.enabled, true);
   assert.equal(normalizeGatewayConfig({ auth: { mode: "oauth", oauth: { password: "pw", token_secret: "legacy-secret" } } }).auth.mode, "oauth");
+  assert.equal(normalizeGatewayConfig({ auth: { mode: "open" } }).auth.allowOpenMutations, undefined);
+  assert.equal(normalizeGatewayConfig({ auth: { mode: "open", allow_open_mutations: false } }).auth.allowOpenMutations, false);
+  assert.equal(normalizeGatewayConfig({ auth: { mode: "open", allowOpenMutations: true } }).auth.allowOpenMutations, true);
+  assert.throws(() => normalizeGatewayConfig({ auth: { mode: "open", allow_open_mutations: "yes" } }), /allowOpenMutations must be boolean/);
   assert.equal(normalizeGatewayConfig({ state: { sessions_root: ".pi/gateway/v1/sessions" } }).state.sessionsRoot, ".pi/gateway/v1/sessions");
+  const boardConfig = normalizeGatewayConfig({
+    state: { board_root: ".pi/gateway/v1/board" },
+    limits: { max_board_tasks: 32, max_board_operations: 64, max_board_events: 128 },
+    retention: { board_tasks: 1_000, board_operations_ms: 2_000, boardEventsMs: 3_000 },
+  });
+  assert.equal(boardConfig.state.boardRoot, ".pi/gateway/v1/board");
+  assert.equal(boardConfig.limits.maxBoardTasks, 32);
+  assert.equal(boardConfig.limits.maxBoardOperations, 64);
+  assert.equal(boardConfig.limits.maxBoardEvents, 128);
+  assert.deepEqual(
+    [boardConfig.retention.boardTasksMs, boardConfig.retention.boardOperationsMs, boardConfig.retention.boardEventsMs],
+    [1_000, 2_000, 3_000],
+  );
   const legacyListener = normalizeGatewayConfig({ server: { host: "0.0.0.0", port: 9293 } });
   assert.equal(legacyListener.transport.http.host, "0.0.0.0");
   assert.equal(legacyListener.transport.http.port, 9293);
@@ -115,6 +133,11 @@ test("Gateway config patch distinguishes preserve, replace, and clear while reta
 
 test("default config is canonical and patch application keeps omitted values", () => {
   const base = defaultGatewayConfig();
+  assert.equal(base.limits.maxBoardTasks, 1024);
+  assert.ok(base.retention.boardTasksMs > 0);
+  const paths = createGatewayStatePaths(process.cwd(), tmpdir());
+  assert.equal(paths.boardRoot, gatewayBoardRoot(process.cwd()));
+  assert.equal(paths.boardPath, gatewayBoardPath(process.cwd()));
   const patched = applyGatewayConfigPatch(base, { server: { port: 9999 } as never });
   assert.equal(patched.server.port, 9999);
   assert.equal(patched.server.host, base.server.host);

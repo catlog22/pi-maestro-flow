@@ -35,6 +35,7 @@ export interface FileServiceOptions {
 }
 
 export interface FileRequest {
+  workspaceId?: string;
   workspace?: string;
   path?: string;
   principal?: GatewayPrincipal;
@@ -585,17 +586,19 @@ export class FileService {
   }
 
   private workspace(input: FileRequest, principal: GatewayPrincipal): string {
-    return input.workspace ?? this.workspaceRoot ?? principal.workspacePath ?? process.cwd();
+    return input.workspaceId ?? input.workspace ?? this.workspaceRoot ?? principal.workspaceId ?? principal.workspacePath ?? process.cwd();
   }
 
   private async resolve(input: FileRequest, operation: "read" | "write" | "patch", principal: GatewayPrincipal): Promise<ResolvedPath> {
     const workspace = this.workspace(input, principal);
     const requestedPath = input.path ?? ".";
     if (utf8Bytes(requestedPath) > 4096) throw new GatewayPolicyError("path exceeds 4096 UTF-8 bytes", "bounds_exceeded");
+    const canonicalWorkspace = this.policy
+      ? await this.policy.assertWorkspace(principal, workspace)
+      : canonicalizeWorkspacePath(workspace);
     const path = this.policy
-      ? await this.policy.assertPath(principal, workspace, requestedPath, operation)
-      : canonicalizeWorkspaceChild(workspace, requestedPath);
-    const canonicalWorkspace = canonicalizeWorkspacePath(workspace);
+      ? await this.policy.assertPath(principal, canonicalWorkspace, requestedPath, operation)
+      : canonicalizeWorkspaceChild(canonicalWorkspace, requestedPath);
     if (!isPathWithin(canonicalWorkspace, path)) throw new GatewayPolicyError("path escapes the registered workspace", "policy_denied");
     // Resolve once more immediately before I/O so a changed symlink cannot turn
     // a previously authorized path into an external path.

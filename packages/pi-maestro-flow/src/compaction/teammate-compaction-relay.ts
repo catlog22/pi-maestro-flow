@@ -51,12 +51,27 @@ export function isTeammateForkStartup(
     || (environment.PI_TEAMMATE_CHILD === "1" && environment.PI_TEAMMATE_CONTEXT_MODE === "fork");
 }
 
+function isClosedIpcError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === "EPIPE" || code === "ERR_IPC_CHANNEL_CLOSED";
+}
+
 function publishTeammateEnvelope(event: Record<string, unknown>): boolean {
-  if (process.env.PI_TEAMMATE_CHILD !== "1" || typeof process.send !== "function") return false;
+  if (process.env.PI_TEAMMATE_CHILD !== "1" || typeof process.send !== "function" || process.connected === false) return false;
   try {
-    process.send({ ...event, correlationId: process.env.PI_TEAMMATE_CORRELATION_ID });
-    return true;
-  } catch {
+    return process.send(
+      { ...event, correlationId: process.env.PI_TEAMMATE_CORRELATION_ID },
+      (error) => {
+        if (error && !isClosedIpcError(error)) {
+          console.warn(`[pi-maestro-flow] Teammate compaction telemetry send failed: ${error.message}`);
+        }
+      },
+    );
+  } catch (error) {
+    if (!isClosedIpcError(error)) {
+      console.warn(`[pi-maestro-flow] Teammate compaction telemetry send failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
     return false;
   }
 }

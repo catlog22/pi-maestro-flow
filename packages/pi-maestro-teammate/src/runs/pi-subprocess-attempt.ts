@@ -94,10 +94,12 @@ import {
   extractPiEventError,
   extractStructuredOutputCandidate,
   extractTextContent,
+  formatPiLaunchDiagnostic,
   getPiSpawnCommand,
   getTeammateDepth,
   getTeammateSessionRoot,
   isPiResultReadyTurn,
+  piLaunchDiagnostic,
   readRegularTextFile,
   releasePublishedTurnHistory,
   resetUsage,
@@ -876,8 +878,8 @@ export async function runSingleAttempt(
     );
 
     let useIpc = false;
+    const spawnSpec = getPiSpawnCommand(piArgs);
     try {
-      const spawnSpec = getPiSpawnCommand(piArgs);
       useIpc = !spawnSpec.shell;
       const spawnOpts: Parameters<typeof crossSpawn>[2] = {
         cwd,
@@ -892,6 +894,8 @@ export async function runSingleAttempt(
       if (schemaFile) cleanupFile(schemaFile);
       if (outputFile) cleanupFile(outputFile);
 
+      const spawnDiagnostic = piLaunchDiagnostic(spawnSpec, "spawn", null, null, "");
+      options.onChildEvent?.({ ...spawnDiagnostic, correlationId });
       const result: SingleResult = {
         agent: params.agent,
         name: params.name,
@@ -901,7 +905,8 @@ export async function runSingleAttempt(
           role: "system",
           content:
             `Failed to spawn pi subprocess (agent=${params.agent}, model=${state.resolvedModel || "unknown"}, `
-            + `correlationId=${correlationId}, phase=spawn): ${error instanceof Error ? error.message : String(error)}`,
+            + `correlationId=${correlationId}, ${formatPiLaunchDiagnostic(spawnDiagnostic)}): `
+            + `${error instanceof Error ? error.message : String(error)}`,
         }],
         usage: emptyUsage(),
         model: state.resolvedModel,
@@ -2869,24 +2874,31 @@ export async function runSingleAttempt(
       if (finalContent && !messages.some((message) => message.content === finalContent)) {
         appendDistinctAssistantMessage(messages, finalContent);
       }
-      let stderrAlreadyReported = false;
       if (messages.length === 0) {
         const content = state.lastContent.trim() || stderrTail || "(no output)";
-        stderrAlreadyReported = stderrTail.length > 0 && content === stderrTail;
         appendBoundedTranscriptMessage(messages, { role: "assistant", content });
       }
 
-      // An abnormal exit used to be a bare number: stderr was dropped whenever
-      // the child had produced any assistant text, and the signal was ignored.
+      // Gateway results and Monitor observers consume the same bounded,
+      // provenance-bearing diagnostic projection.
       if ((code ?? 1) !== 0) {
-        const detail = stderrAlreadyReported ? "" : stderrTail;
+        const closeDiagnostic = piLaunchDiagnostic(
+          spawnSpec,
+          "close",
+          code,
+          signal,
+          stderrTail,
+        );
+        options.onChildEvent?.({ ...closeDiagnostic, correlationId });
+        const transcriptDiagnostic = stderrTail && messages.some((message) => message.content === stderrTail)
+          ? { ...closeDiagnostic, stderrTail: "" }
+          : closeDiagnostic;
         appendBoundedTranscriptMessage(messages, {
           role: "system",
           content:
             `Teammate child process exited abnormally (agent=${params.agent}, `
-            + `correlationId=${correlationId}, exit=${code ?? "null"}, signal=${signal ?? "none"}, `
-            + `elapsed=${Date.now() - startTime}ms, tools=${progress.toolCount}).`
-            + (detail ? `\nstderr tail:\n${truncateUtf8Tail(detail, EXECUTION_BUFFER_LIMITS.stderrBytes)}` : ""),
+            + `correlationId=${correlationId}, ${formatPiLaunchDiagnostic(transcriptDiagnostic)}, `
+            + `elapsed=${Date.now() - startTime}ms, tools=${progress.toolCount}).`,
         });
       }
 
@@ -2989,9 +3001,17 @@ export async function runSingleAttempt(
       progress.durationMs = Date.now() - startTime;
       options.onProgress?.(progress);
 
+      const childErrorDiagnostic = piLaunchDiagnostic(
+        spawnSpec,
+        "child-error",
+        null,
+        child.signalCode,
+        state.stderrBuffer,
+      );
+      options.onChildEvent?.({ ...childErrorDiagnostic, correlationId });
       const processError =
         `Teammate child process error (agent=${params.agent}, model=${state.resolvedModel || "unknown"}, `
-        + `correlationId=${correlationId}, phase=child-error): ${error.message}`;
+        + `correlationId=${correlationId}, ${formatPiLaunchDiagnostic(childErrorDiagnostic)}): ${error.message}`;
       if (state.initialResultPublished) {
         appendBoundedTranscriptMessage(messages, {
           role: "system",

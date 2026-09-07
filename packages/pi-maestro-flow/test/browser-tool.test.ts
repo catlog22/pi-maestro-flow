@@ -661,7 +661,6 @@ test("browser manager scopes request interception listeners to one run", async (
     const second = await manager.run("interception", `
       await page.setRequestInterception(false);
       await page.goto(${JSON.stringify(`${baseUrl}normal`)});
-      await page.waitForNetworkIdle({ idleTime: 50, timeout: 2_000 });
       return { title: await page.title(), requestListeners: page.listenerCount("request") };
     `, process.cwd(), undefined, 15_000);
     assert.deepEqual(second.returnValue, { title: "Interception", requestListeners: firstResult.baseline });

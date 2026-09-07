@@ -46,6 +46,7 @@ export interface JobStartInput {
   argv?: readonly string[];
   args?: readonly string[];
   cwd?: string;
+  workspaceId?: string;
   workspace?: string;
   timeoutMs?: number;
   maxOutputBytes?: number;
@@ -63,7 +64,10 @@ export interface JobLookupInput {
 }
 
 export interface JobLogsInput extends JobLookupInput {
+  /** Legacy merged event cursor. Prefer the independent stream offsets. */
   cursor?: number;
+  stdoutOffset?: number;
+  stderrOffset?: number;
   limit?: number;
   maxBytes?: number;
 }
@@ -75,8 +79,14 @@ export interface JobStdinInput extends JobLookupInput {
 export interface JobLogEntry {
   cursor: number;
   stream: "stdout" | "stderr";
+  offset: number;
+  nextOffset: number;
   data: string;
   at: number;
+}
+
+interface PersistedJobLogEntry extends JobLogEntry {
+  dataBase64?: string;
 }
 
 export interface JobLogsData {
@@ -84,6 +94,10 @@ export interface JobLogsData {
   entries: JobLogEntry[];
   cursor: number;
   nextCursor: number;
+  stdoutOffset: number;
+  stderrOffset: number;
+  nextStdoutOffset: number;
+  nextStderrOffset: number;
   done: boolean;
   truncated: boolean;
 }
@@ -103,9 +117,12 @@ interface RuntimeJob {
   child?: ChildProcess;
   stdout: Buffer[];
   stderr: Buffer[];
+  stdoutOffset: number;
+  stderrOffset: number;
   outputBytes: number;
-  logs: JobLogEntry[];
+  logs: PersistedJobLogEntry[];
   nextCursor: number;
+  persistenceTail: Promise<void>;
   cancelRequested: boolean;
   timedOut: boolean;
   outputTruncated: boolean;
@@ -186,8 +203,78 @@ function addLog(runtime: RuntimeJob, stream: "stdout" | "stderr", chunk: unknown
   const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
   const accepted = data.subarray(0, Math.max(0, Math.min(data.byteLength, acceptedBytes)));
   if (accepted.byteLength === 0) return;
-  runtime.logs.push({ cursor: runtime.nextCursor++, stream, data: accepted.toString("utf8"), at });
+  const offset = stream === "stdout" ? runtime.stdoutOffset : runtime.stderrOffset;
+  const nextOffset = offset + accepted.byteLength;
+  if (stream === "stdout") runtime.stdoutOffset = nextOffset;
+  else runtime.stderrOffset = nextOffset;
+  runtime.logs.push({
+    cursor: runtime.nextCursor++,
+    stream,
+    offset,
+    nextOffset,
+    data: accepted.toString("utf8"),
+    dataBase64: accepted.toString("base64"),
+    at,
+  });
   while (runtime.logs.length > maxEvents) runtime.logs.shift();
+}
+
+interface PersistedJobRecord {
+  version: 1;
+  job: GatewayJob;
+  logs: PersistedJobLogEntry[];
+  nextCursor: number;
+  stdoutOffset: number;
+  stderrOffset: number;
+  stdoutBase64?: string;
+  stderrBase64?: string;
+}
+
+function nonNegativeInteger(value: unknown, fallback: number): number {
+  return Number.isSafeInteger(value) && (value as number) >= 0 ? value as number : fallback;
+}
+
+function persistedBytes(value: unknown, label: string): Buffer | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") throw new GatewayJobServiceError("invalid_state", `Persisted ${label} bytes are invalid`);
+  const decoded = Buffer.from(value, "base64");
+  if (decoded.toString("base64") !== value) throw new GatewayJobServiceError("invalid_state", `Persisted ${label} bytes are invalid`);
+  return decoded;
+}
+
+function publicLogEntry(entry: PersistedJobLogEntry): JobLogEntry {
+  const { dataBase64: _dataBase64, ...visible } = entry;
+  return visible;
+}
+
+function persistedLogEntries(value: unknown, stdoutLength: number, stderrLength: number): PersistedJobLogEntry[] {
+  if (!Array.isArray(value)) return [];
+  const entries: PersistedJobLogEntry[] = [];
+  let previousCursor = -1;
+  for (const item of value) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const source = item as Record<string, unknown>;
+    if (source.stream !== "stdout" && source.stream !== "stderr") continue;
+    const cursor = nonNegativeInteger(source.cursor, -1);
+    const offset = nonNegativeInteger(source.offset, -1);
+    const storedData = typeof source.data === "string" ? source.data : undefined;
+    const rawData = persistedBytes(source.dataBase64, "job log");
+    const data = rawData ?? (storedData === undefined ? undefined : Buffer.from(storedData, "utf8"));
+    const nextOffset = nonNegativeInteger(source.nextOffset, data === undefined || offset < 0 ? -1 : offset + data.byteLength);
+    const maximum = source.stream === "stdout" ? stdoutLength : stderrLength;
+    if (cursor <= previousCursor || offset < 0 || nextOffset < offset || nextOffset > maximum || data === undefined || nextOffset - offset !== data.byteLength) continue;
+    entries.push({
+      cursor,
+      stream: source.stream,
+      offset,
+      nextOffset,
+      data: data.toString("utf8"),
+      dataBase64: data.toString("base64"),
+      at: nonNegativeInteger(source.at, 0),
+    });
+    previousCursor = cursor;
+  }
+  return entries;
 }
 
 function delay(milliseconds: number): Promise<void> {
@@ -291,7 +378,7 @@ export class JobService {
       if (utf8Bytes(identity) > maximumCommand) throw new GatewayJobServiceError("bounds_exceeded", `command exceeds ${maximumCommand} bytes`);
       if (this.policy) this.policy.checkCommand(identity);
       const requestedCwdForPolicy = input.cwd ?? input.workspace ?? principal.workspacePath ?? this.workspaceRoot ?? process.cwd();
-      const workspaceForPolicy = input.workspace ?? this.workspaceRoot ?? principal.workspacePath ?? requestedCwdForPolicy;
+      const workspaceForPolicy = input.workspaceId ?? input.workspace ?? this.workspaceRoot ?? principal.workspaceId ?? principal.workspacePath ?? requestedCwdForPolicy;
       const trustedDefault = this.trustedFullAccess && this.policy?.isTrustedWorkspace(workspaceForPolicy)
         ? { ...this.commandPolicy, default: "allow" as const }
         : this.commandPolicy;
@@ -304,8 +391,8 @@ export class JobService {
       else if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new GatewayJobServiceError("invalid_input", "timeoutMs must be a positive safe integer");
       const maximumOutput = input.maxOutputBytes ?? this.configuredMaxOutputBytes;
       if (!Number.isSafeInteger(maximumOutput) || maximumOutput < 1 || maximumOutput > this.configuredMaxOutputBytes) throw new GatewayJobServiceError("bounds_exceeded", `maxOutputBytes must be in [1, ${this.configuredMaxOutputBytes}]`);
-      const requestedCwd = input.cwd ?? input.workspace ?? principal.workspacePath ?? this.workspaceRoot ?? process.cwd();
-      const workspace = input.workspace ?? this.workspaceRoot ?? principal.workspacePath ?? requestedCwd;
+      const requestedCwd = input.cwd ?? input.workspace ?? (input.workspaceId === undefined ? principal.workspacePath ?? this.workspaceRoot ?? process.cwd() : ".");
+      const workspace = input.workspaceId ?? input.workspace ?? this.workspaceRoot ?? principal.workspaceId ?? principal.workspacePath ?? requestedCwd;
       const cwd = this.policy
         ? await this.policy.assertPath(principal, workspace, requestedCwd, "job")
         : canonicalizeWorkspaceChild(workspace, requestedCwd);
@@ -332,9 +419,12 @@ export class JobService {
         args,
         stdout: [],
         stderr: [],
+        stdoutOffset: 0,
+        stderrOffset: 0,
         outputBytes: 0,
         logs: [],
         nextCursor: 0,
+        persistenceTail: Promise.resolve(),
         cancelRequested: false,
         timedOut: false,
         outputTruncated: false,
@@ -377,18 +467,7 @@ export class JobService {
     const runtime = this.ownedRuntime(input.id, principal);
     if (!runtime) return errorResult(new GatewayJobServiceError("not_found", `unknown job: ${input.id}`), principal, input.requestId, startedAt);
     if (runtime.finishing) await runtime.finished;
-    const data = { job: cloneJob(runtime.snapshot) };
-    if (runtime.snapshot.status === "failed" || runtime.snapshot.status === "cancelled" || runtime.snapshot.status === "lost") {
-      return errorResult(
-        new GatewayJobServiceError(`job_${runtime.snapshot.status}`, runtime.snapshot.error ?? `job is ${runtime.snapshot.status}`),
-        principal,
-        input.requestId,
-        startedAt,
-        data,
-        runtime.snapshot.status,
-      );
-    }
-    return gatewayOk(data, { ...requestOptions(principal, input.requestId, startedAt), status: this.resultStatus(runtime.snapshot.status) });
+    return gatewayOk({ job: cloneJob(runtime.snapshot) }, requestOptions(principal, input.requestId, startedAt));
   }
 
   async logs(input: JobLogsInput): Promise<GatewayResult<JobLogsData>> {
@@ -405,19 +484,70 @@ export class JobService {
       if (!Number.isSafeInteger(cursor) || cursor < 0) throw new GatewayJobServiceError("invalid_input", "cursor must be a non-negative safe integer");
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) throw new GatewayJobServiceError("invalid_input", "limit must be an integer in [1, 500]");
       if (!Number.isSafeInteger(maximum) || maximum < 1 || maximum > this.configuredMaxOutputBytes) throw new GatewayJobServiceError("bounds_exceeded", `maxBytes must be in [1, ${this.configuredMaxOutputBytes}]`);
+      const streamOffsetsRequested = input.stdoutOffset !== undefined || input.stderrOffset !== undefined;
+      if (streamOffsetsRequested) {
+        const stdout = Buffer.concat(runtime.stdout);
+        const stderr = Buffer.concat(runtime.stderr);
+        const stdoutOffset = input.stdoutOffset ?? 0;
+        const stderrOffset = input.stderrOffset ?? 0;
+        if (!Number.isSafeInteger(stdoutOffset) || stdoutOffset < 0 || stdoutOffset > stdout.byteLength) throw new GatewayJobServiceError("invalid_input", "stdoutOffset is outside the available stdout range");
+        if (!Number.isSafeInteger(stderrOffset) || stderrOffset < 0 || stderrOffset > stderr.byteLength) throw new GatewayJobServiceError("invalid_input", "stderrOffset is outside the available stderr range");
+        const entries: JobLogEntry[] = [];
+        let remaining = maximum;
+        let nextStdoutOffset = stdoutOffset;
+        let nextStderrOffset = stderrOffset;
+        const appendStream = (stream: "stdout" | "stderr", source: Buffer, offset: number): number => {
+          if (entries.length >= limit || remaining === 0 || offset >= source.byteLength) return offset;
+          const accepted = source.subarray(offset, Math.min(source.byteLength, offset + remaining));
+          const nextOffset = offset + accepted.byteLength;
+          entries.push({ cursor: runtime.nextCursor, stream, offset, nextOffset, data: accepted.toString("utf8"), at: runtime.snapshot.updatedAt });
+          remaining -= accepted.byteLength;
+          return nextOffset;
+        };
+        nextStdoutOffset = appendStream("stdout", stdout, stdoutOffset);
+        nextStderrOffset = appendStream("stderr", stderr, stderrOffset);
+        const terminal = ["completed", "failed", "cancelled", "lost"].includes(runtime.snapshot.status);
+        return gatewayOk({
+          id: input.id,
+          entries,
+          cursor,
+          nextCursor: runtime.nextCursor,
+          stdoutOffset,
+          stderrOffset,
+          nextStdoutOffset,
+          nextStderrOffset,
+          done: terminal && nextStdoutOffset === stdout.byteLength && nextStderrOffset === stderr.byteLength,
+          truncated: nextStdoutOffset < stdout.byteLength || nextStderrOffset < stderr.byteLength,
+        }, requestOptions(principal, input.requestId, startedAt));
+      }
       const entries: JobLogEntry[] = [];
       let bytes = 0;
       let truncated = runtime.logs.length > 0 && cursor < runtime.logs[0]!.cursor;
+      let nextStdoutOffset = 0;
+      let nextStderrOffset = 0;
       for (const entry of runtime.logs) {
         if (entry.cursor < cursor) continue;
         if (entries.length >= limit) { truncated = true; break; }
-        const entryBytes = Buffer.byteLength(entry.data, "utf8");
+        const entryBytes = entry.nextOffset - entry.offset;
         if (bytes + entryBytes > maximum) { truncated = true; break; }
-        entries.push({ ...entry });
+        entries.push(publicLogEntry(entry));
+        if (entry.stream === "stdout") nextStdoutOffset = entry.nextOffset;
+        else nextStderrOffset = entry.nextOffset;
         bytes += entryBytes;
       }
       const nextCursor = entries.length > 0 ? entries[entries.length - 1]!.cursor + 1 : cursor;
-      const data: JobLogsData = { id: input.id, entries, cursor, nextCursor, done: ["completed", "failed", "cancelled", "lost"].includes(runtime.snapshot.status), truncated };
+      const data: JobLogsData = {
+        id: input.id,
+        entries,
+        cursor,
+        nextCursor,
+        stdoutOffset: 0,
+        stderrOffset: 0,
+        nextStdoutOffset,
+        nextStderrOffset,
+        done: ["completed", "failed", "cancelled", "lost"].includes(runtime.snapshot.status),
+        truncated,
+      };
       return gatewayOk(data, requestOptions(principal, input.requestId, startedAt));
     } catch (error) { return errorResult(error, principal, input.requestId, startedAt); }
   }
@@ -502,6 +632,7 @@ export class JobService {
       child.stdout?.on("data", (chunk: unknown) => {
         const appended = appendOutput(runtime.stdout, chunk, runtime, maximumOutput);
         addLog(runtime, "stdout", chunk, appended.acceptedBytes, this.maxLogEvents, this.now());
+        this.schedulePersist(runtime);
         if (appended.truncated) {
           runtime.outputTruncated = true;
           void this.requestTermination(runtime);
@@ -510,6 +641,7 @@ export class JobService {
       child.stderr?.on("data", (chunk: unknown) => {
         const appended = appendOutput(runtime.stderr, chunk, runtime, maximumOutput);
         addLog(runtime, "stderr", chunk, appended.acceptedBytes, this.maxLogEvents, this.now());
+        this.schedulePersist(runtime);
         if (appended.truncated) {
           runtime.outputTruncated = true;
           void this.requestTermination(runtime);
@@ -550,6 +682,7 @@ export class JobService {
       catch (error) { runtime.spawnError ??= new GatewayJobServiceError("cleanup_failed", error instanceof Error ? error.message : String(error)); }
     }
     if (runtime.signal && runtime.abortHandler) runtime.signal.removeEventListener("abort", runtime.abortHandler);
+    await runtime.persistenceTail.catch(() => undefined);
     const stdout = Buffer.concat(runtime.stdout).toString("utf8");
     const stderr = Buffer.concat(runtime.stderr).toString("utf8");
     let status: GatewayJob["status"] = "completed";
@@ -598,7 +731,9 @@ export class JobService {
     for (const entry of files) {
       const raw = await readGatewayJson<unknown>(containedPath(this.jobsRoot, entry.name));
       if (raw === undefined) continue;
-      const snapshot = parseGatewayJob(raw);
+      const record = raw && typeof raw === "object" && !Array.isArray(raw) && "job" in raw ? raw as Record<string, unknown> : undefined;
+      if (record && record.version !== 1) throw new GatewayJobServiceError("unsupported_version", `Unsupported persisted job version ${String(record.version)}`);
+      const snapshot = parseGatewayJob(record?.job ?? raw);
       if (this.jobs.has(snapshot.id)) continue;
       let normalized = snapshot;
       if (snapshot.status === "queued" || snapshot.status === "running") {
@@ -615,14 +750,32 @@ export class JobService {
       let resolveFinished!: () => void;
       const finished = new Promise<void>((resolve) => { resolveFinished = resolve; });
       resolveFinished();
+      const stdoutBytes = persistedBytes(record?.stdoutBase64, "stdout") ?? Buffer.from(normalized.stdout ?? "", "utf8");
+      const stderrBytes = persistedBytes(record?.stderrBase64, "stderr") ?? Buffer.from(normalized.stderr ?? "", "utf8");
+      if (stdoutBytes.toString("utf8") !== (normalized.stdout ?? "")) throw new GatewayJobServiceError("invalid_state", "Persisted stdout bytes do not match the job snapshot");
+      if (stderrBytes.toString("utf8") !== (normalized.stderr ?? "")) throw new GatewayJobServiceError("invalid_state", "Persisted stderr bytes do not match the job snapshot");
+      const stdoutOffset = stdoutBytes.byteLength;
+      const stderrOffset = stderrBytes.byteLength;
+      if (record?.stdoutOffset !== undefined && record.stdoutOffset !== stdoutOffset) throw new GatewayJobServiceError("invalid_state", "Persisted stdout offset does not match stdout bytes");
+      if (record?.stderrOffset !== undefined && record.stderrOffset !== stderrOffset) throw new GatewayJobServiceError("invalid_state", "Persisted stderr offset does not match stderr bytes");
+      let logs = persistedLogEntries(record?.logs, stdoutOffset, stderrOffset).slice(-this.maxLogEvents);
+      if (!record && logs.length === 0) {
+        if (normalized.stdout) logs.push({ cursor: logs.length, stream: "stdout", offset: 0, nextOffset: stdoutOffset, data: normalized.stdout, at: normalized.updatedAt });
+        if (normalized.stderr) logs.push({ cursor: logs.length, stream: "stderr", offset: 0, nextOffset: stderrOffset, data: normalized.stderr, at: normalized.updatedAt });
+        logs = logs.slice(-this.maxLogEvents);
+      }
+      const nextCursor = Math.max(nonNegativeInteger(record?.nextCursor, 0), (logs.at(-1)?.cursor ?? -1) + 1);
       this.jobs.set(snapshot.id, {
         snapshot: normalized,
         args: [],
-        stdout: normalized.stdout ? [Buffer.from(normalized.stdout)] : [],
-        stderr: normalized.stderr ? [Buffer.from(normalized.stderr)] : [],
-        outputBytes: Buffer.byteLength(normalized.stdout ?? "", "utf8") + Buffer.byteLength(normalized.stderr ?? "", "utf8"),
-        logs: [],
-        nextCursor: 0,
+        stdout: stdoutBytes.byteLength > 0 ? [stdoutBytes] : [],
+        stderr: stderrBytes.byteLength > 0 ? [stderrBytes] : [],
+        stdoutOffset,
+        stderrOffset,
+        outputBytes: stdoutOffset + stderrOffset,
+        logs,
+        nextCursor,
+        persistenceTail: Promise.resolve(),
         cancelRequested: normalized.status === "cancelled",
         timedOut: false,
         outputTruncated: false,
@@ -630,13 +783,45 @@ export class JobService {
         finished,
         resolveFinished,
       });
-      if (normalized !== snapshot) await writeGatewayJsonAtomic(containedPath(this.jobsRoot, entry.name), normalized, { mode: 0o600 });
+      if (normalized !== snapshot) await this.persist(this.jobs.get(snapshot.id)!);
     }
+  }
+
+  private schedulePersist(runtime: RuntimeJob): void {
+    if (!this.jobsRoot) return;
+    const operation = runtime.persistenceTail.catch(() => undefined).then(() => this.writePersisted(runtime));
+    runtime.persistenceTail = operation;
+    void operation.catch((error) => {
+      runtime.spawnError ??= new GatewayJobServiceError("persistence_failed", error instanceof Error ? error.message : String(error));
+      void this.requestTermination(runtime);
+    });
   }
 
   private async persist(runtime: RuntimeJob): Promise<void> {
     if (!this.jobsRoot) return;
-    await writeGatewayJsonAtomic(containedPath(this.jobsRoot, `${runtime.snapshot.id}.json`), runtime.snapshot, { mode: 0o600 });
+    const operation = runtime.persistenceTail.catch(() => undefined).then(() => this.writePersisted(runtime));
+    runtime.persistenceTail = operation;
+    await operation;
+  }
+
+  private async writePersisted(runtime: RuntimeJob): Promise<void> {
+    if (!this.jobsRoot) return;
+    const job = parseGatewayJob({
+      ...runtime.snapshot,
+      stdout: Buffer.concat(runtime.stdout).toString("utf8"),
+      stderr: Buffer.concat(runtime.stderr).toString("utf8"),
+    });
+    const record: PersistedJobRecord = {
+      version: 1,
+      job,
+      logs: runtime.logs.map((entry) => ({ ...entry })),
+      nextCursor: runtime.nextCursor,
+      stdoutOffset: runtime.stdoutOffset,
+      stderrOffset: runtime.stderrOffset,
+      stdoutBase64: Buffer.concat(runtime.stdout).toString("base64"),
+      stderrBase64: Buffer.concat(runtime.stderr).toString("base64"),
+    };
+    await writeGatewayJsonAtomic(containedPath(this.jobsRoot, `${runtime.snapshot.id}.json`), record, { mode: 0o600 });
   }
 
   private expired(snapshot: GatewayJob): boolean {
@@ -651,16 +836,6 @@ export class JobService {
     await Promise.all(expired.map(([id]) => unlink(containedPath(this.jobsRoot!, `${id}.json`)).catch((error: unknown) => {
       if (!error || typeof error !== "object" || (error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     })));
-  }
-
-  private resultStatus(status: GatewayJob["status"]): "accepted" | "running" | "succeeded" | "failed" | "cancelled" | "lost" {
-    if (status === "queued") return "accepted";
-    if (status === "running") return "running";
-    if (status === "completed") return "succeeded";
-    if (status === "failed") return "failed";
-    if (status === "cancelled") return "cancelled";
-    if (status === "lost") return "lost";
-    throw new Error(`Unsupported Gateway job status: ${String(status)}`);
   }
 
   private ownedRuntime(id: string, principal: GatewayPrincipal): RuntimeJob | undefined {

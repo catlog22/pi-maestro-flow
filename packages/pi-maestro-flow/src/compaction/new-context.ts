@@ -1,5 +1,14 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { normalizeTodoResourceUris } from "../tools/todo-contract.ts";
+import {
+  cloneTodoHandoff,
+  normalizeTodoHandoff,
+  normalizeTodoResourceUris,
+  todoHandoffPathKey,
+  TODO_MAX_HANDOFF_BYTES,
+  type TodoHandoff,
+  type TodoHandoffFile,
+  type TodoHandoffInput,
+} from "../tools/todo-contract.ts";
 import { getTodoCompactionSnapshot, type TodoTask } from "../tools/todo.ts";
 import type {
   MaestroCompactionDetails,
@@ -32,6 +41,8 @@ export interface NewContextScheduleInput {
   source: "todo-transition" | "plan-confirm" | "tool";
   actorId: string;
   carryForward?: string;
+  /** Structured supplement for this reset; it does not mutate Todo state. */
+  handoff?: TodoHandoffInput;
   resourceUris?: readonly string[];
   /** Root-authorized shared state required when a child session owns the reset. */
   recoveryState?: MaestroRecoveryState;
@@ -42,7 +53,6 @@ export interface NewContextScheduleInput {
 }
 
 export interface ScheduledNewContextRequest extends MaestroNewContextDetails {
-  actorId: string;
   lifecycleGeneration: number;
   sessionId: string;
   todoRevision: number;
@@ -205,7 +215,7 @@ export function createNewContextController(
   ): boolean => isRequestLifecycleCurrent(request, ctx)
     && pending?.requestId === request.requestId;
   const hasUniquePayload = (request: ScheduledNewContextRequest): boolean =>
-    request.carryForward !== undefined || request.resourceUris.length > 0;
+    request.carryForward !== undefined || request.handoff !== undefined || request.resourceUris.length > 0;
   const coalesceIntoEquivalentPlan = (
     request: ScheduledNewContextRequest,
     ctx: Pick<ExtensionContext, "ui">,
@@ -469,10 +479,18 @@ export function createNewContextController(
         if (input.source === "plan-confirm") pending.source = input.source;
         if (input.recoveryState) pending.recoveryState = input.recoveryState;
         if (carryForward !== undefined) pending.carryForward = carryForward;
+        if (input.handoff !== undefined) {
+          const handoff = normalizeTodoHandoff(input.handoff, pending.handoff, pending.requestId);
+          if (handoff) pending.handoff = handoff;
+          else delete pending.handoff;
+        }
         if (input.continueAfterReset) pending.continueAfterReset = input.continueAfterReset;
         if (input.onCancelled) pending.onCancelled = input.onCancelled;
         return { requestId: pending.requestId, coalesced: true };
       }
+      const handoff = input.handoff === undefined
+        ? undefined
+        : normalizeTodoHandoff(input.handoff, undefined, nextRequestId + 1);
       const requestId = ++nextRequestId;
       pending = {
         requestId,
@@ -483,6 +501,7 @@ export function createNewContextController(
         todoRevision,
         ...(input.recoveryState ? { recoveryState: input.recoveryState } : {}),
         ...(carryForward ? { carryForward } : {}),
+        ...(handoff ? { handoff } : {}),
         ...(input.continueAfterReset ? { continueAfterReset: input.continueAfterReset } : {}),
         ...(input.onCancelled ? { onCancelled: input.onCancelled } : {}),
         resourceUris,
@@ -513,6 +532,7 @@ export function createNewContextController(
       inFlight = undefined;
       return {
         ...request,
+        ...(request.handoff ? { handoff: cloneTodoHandoff(request.handoff) } : {}),
         resourceUris: [...request.resourceUris],
       };
     },
@@ -563,16 +583,181 @@ function taskBlock(task: TodoTask, contextBytes: number, summaryBytes: number): 
   return lines.join("\n");
 }
 
+export interface SelectedNewContextHandoffFile extends TodoHandoffFile {
+  source: "request" | "active" | "completed";
+  sourceTodoId?: string;
+}
+
+export interface SelectedNewContextHandoff {
+  actorId: string;
+  nextSteps: string[];
+  nextStepsSource?: "request" | "active" | "completed";
+  nextStepsSourceTodoId?: string;
+  required: SelectedNewContextHandoffFile[];
+  conditional: SelectedNewContextHandoffFile[];
+  skip: SelectedNewContextHandoffFile[];
+  omitted: { positive: number; skip: number; unknown: number };
+}
+
+function taskSequence(left: TodoTask, right: TodoTask): number {
+  return left.createdAt - right.createdAt
+    || left.id.localeCompare(right.id, undefined, { numeric: true });
+}
+
+function completedAnnotationIsNewer(
+  candidate: TodoHandoffFile,
+  candidateTask: TodoTask,
+  current: SelectedNewContextHandoffFile | undefined,
+  currentTask: TodoTask | undefined,
+): boolean {
+  if (!current || !currentTask) return true;
+  return candidate.annotationRevision > current.annotationRevision
+    || (candidate.annotationRevision === current.annotationRevision
+      && taskSequence(candidateTask, currentTask) > 0);
+}
+
+function sameHandoffScope(candidate: TodoTask, anchor: TodoTask): boolean {
+  if (anchor.planHandoffKey && candidate.planHandoffKey === anchor.planHandoffKey) return true;
+  if (anchor.goalId && candidate.goalId === anchor.goalId) return true;
+  return !anchor.planHandoffKey && !anchor.goalId;
+}
+
+function selectedFileOrder(left: SelectedNewContextHandoffFile, right: SelectedNewContextHandoffFile): number {
+  const valueRank = (value: TodoHandoffFile["value"]): number => value === "required" ? 0 : value === "conditional" ? 1 : 2;
+  const sourceRank = (source: SelectedNewContextHandoffFile["source"]): number => source === "request" ? 0 : source === "active" ? 1 : 2;
+  return valueRank(left.value) - valueRank(right.value)
+    || sourceRank(left.source) - sourceRank(right.source)
+    || right.annotationRevision - left.annotationRevision
+    || left.path.localeCompare(right.path);
+}
+
+/** Deterministically project durable Todo handoffs plus one reset-local supplement. */
+export function selectNewContextHandoff(
+  tasks: readonly TodoTask[],
+  actorId: string,
+  supplement?: TodoHandoff,
+): SelectedNewContextHandoff {
+  const owned = tasks.filter((task) => task.status !== "deleted" && task.assignee.id === actorId);
+  // The active task defines relevance even before it has authored a handoff.
+  const active = owned.filter((task) => task.status === "in_progress").sort(taskSequence).at(-1);
+  const completed = owned.filter((task) => task.status === "completed" && task.handoff).sort(taskSequence);
+  const anchor = active ?? completed.at(-1);
+  const scopedCompleted = anchor
+    ? completed.filter((task) => sameHandoffScope(task, anchor))
+    : completed;
+  const history = scopedCompleted.length > 0 ? scopedCompleted : completed;
+
+  const files = new Map<string, SelectedNewContextHandoffFile>();
+  const completedFileTasks = new Map<string, TodoTask>();
+  for (const task of history) {
+    for (const file of task.handoff?.files ?? []) {
+      const key = todoHandoffPathKey(file.path);
+      if (!completedAnnotationIsNewer(file, task, files.get(key), completedFileTasks.get(key))) continue;
+      files.set(key, { ...file, source: "completed", sourceTodoId: task.id });
+      completedFileTasks.set(key, task);
+    }
+  }
+  if (active?.handoff) {
+    for (const file of active.handoff.files) {
+      files.set(todoHandoffPathKey(file.path), { ...file, source: "active", sourceTodoId: active.id });
+    }
+  }
+  for (const file of supplement?.files ?? []) {
+    files.set(todoHandoffPathKey(file.path), { ...file, source: "request" });
+  }
+
+  let nextSteps: string[] = [];
+  let nextStepsSource: SelectedNewContextHandoff["nextStepsSource"];
+  let nextStepsSourceTodoId: string | undefined;
+  if (supplement?.nextSteps.length) {
+    nextSteps = [...supplement.nextSteps];
+    nextStepsSource = "request";
+  } else if (active?.handoff?.nextSteps.length) {
+    nextSteps = [...active.handoff.nextSteps];
+    nextStepsSource = "active";
+    nextStepsSourceTodoId = active.id;
+  } else {
+    const source = history
+      .filter((task) => task.handoff?.nextSteps.length)
+      .sort((left, right) => (left.handoff?.nextStepsRevision ?? 0) - (right.handoff?.nextStepsRevision ?? 0)
+        || taskSequence(left, right))
+      .at(-1);
+    if (source?.handoff) {
+      nextSteps = [...source.handoff.nextSteps];
+      nextStepsSource = "completed";
+      nextStepsSourceTodoId = source.id;
+    }
+  }
+
+  const positive = [...files.values()]
+    .filter((file) => file.value === "required" || file.value === "conditional")
+    .sort(selectedFileOrder);
+  const skips = [...files.values()]
+    .filter((file) => file.value === "skip")
+    .sort(selectedFileOrder);
+  const unknown = [...files.values()].filter((file) => file.value === "unknown").length;
+  const result: SelectedNewContextHandoff = {
+    actorId,
+    nextSteps,
+    ...(nextStepsSource ? { nextStepsSource } : {}),
+    ...(nextStepsSourceTodoId ? { nextStepsSourceTodoId } : {}),
+    required: [],
+    conditional: [],
+    skip: [],
+    omitted: { positive: 0, skip: 0, unknown },
+  };
+  const fits = (candidate: SelectedNewContextHandoff): boolean =>
+    Buffer.byteLength(JSON.stringify(candidate), "utf8") <= TODO_MAX_HANDOFF_BYTES;
+  for (const file of positive) {
+    const target = file.value === "required" ? result.required : result.conditional;
+    if (result.required.length + result.conditional.length >= 16) {
+      result.omitted.positive += 1;
+      continue;
+    }
+    target.push(file);
+    if (!fits(result)) {
+      target.pop();
+      result.omitted.positive += 1;
+    }
+  }
+  for (const file of skips) {
+    if (result.skip.length >= 8) {
+      result.omitted.skip += 1;
+      continue;
+    }
+    result.skip.push(file);
+    if (!fits(result)) {
+      result.skip.pop();
+      result.omitted.skip += 1;
+    }
+  }
+  return result;
+}
+
+function selectedHandoffFileLine(file: SelectedNewContextHandoffFile): string {
+  const source = file.source === "request" ? "request" : `Todo #${file.sourceTodoId}`;
+  return `- ${file.path} [${file.value}; source=${source}; annotationRevision=${file.annotationRevision}]: ${file.reason}${file.when ? `; when=${file.when}` : ""}`;
+}
+
 /** Build the non-model recovery capsule used as Pi's required non-empty compaction summary. */
 export function buildNewContextRecoveryCapsule(details: MaestroCompactionDetails): string {
   const lines: string[] = [
     "<recovery_capsule version=\"2\">",
     "IMPORTANT:",
     "- This is the authoritative structured recovery state.",
-    "- Continue from the active Todo's exact next action.",
-    "- Use resource for listed URIs.",
+    "- Continue from the current Workflow/Plan and your own active Todo's exact next action; recommendations do not override live state or actor ownership.",
+    "- Listed paths and URIs are recovery pointers, not a mandatory reading list. Use read for local files and resource for protocol URIs only when needed.",
     "- If a required current-session fact or URI is absent, use session_history with scope=current_session; do not guess.",
     "- Capsule: Maestro New Context Recovery Capsule v2; no model summary was generated.",
+    "",
+    "## Next-Step Recommendations",
+    "- Use the persisted Todo context, Workflow Next Action, or approved Plan handoff to state 1–3 ordered actions with a target and expected result, then execute the first authorized action. If complete or blocked, report that instead of inventing work.",
+    "- Recover only a missing fact that blocks the next action; do not reconstruct the full conversation or repeat completed discovery/verification without a material invalidator.",
+    "",
+    "## File Loading Guidance",
+    "- Follow task-relative annotations: required = needed for the next action; conditional = load only on its stated trigger; skip = no incremental value now; unknown = relevance not established. Each annotation should identify the exact path/URI, reason, and smallest useful symbol/line range or reload condition.",
+    "- Easy to load does not mean useful to load. Do not bulk-read listed files, completed-task outputs, or historical references. Reuse preserved conclusions and still-valid evidence; read only the smallest missing slice. Do not read extra files merely to classify them.",
+    "- Unannotated references have unknown value, not required value. Prior read/edit roles and reference lineage are not relevance rankings. Skip is not deletion or permission to bypass the project knowledge gate; reassess when the task or evidence changes.",
     "",
     "## Session",
     `- Session ID: ${boundedUtf8(details.sessionId, 512)}`,
@@ -619,6 +804,42 @@ export function buildNewContextRecoveryCapsule(details: MaestroCompactionDetails
       ? NEW_CONTEXT_MAX_PLAN_HANDOFF_BYTES
       : NEW_CONTEXT_MAX_CARRY_FORWARD_BYTES;
     lines.push("", title, boundedUtf8(details.newContext.carryForward, maxBytes));
+  }
+
+  const selectedHandoff = selectNewContextHandoff(
+    details.todo.tasks,
+    details.newContext?.actorId ?? "root",
+    details.newContext?.handoff,
+  );
+  const hasSelectedHandoff = selectedHandoff.nextSteps.length > 0
+    || selectedHandoff.required.length > 0
+    || selectedHandoff.conditional.length > 0
+    || selectedHandoff.skip.length > 0
+    || selectedHandoff.omitted.positive > 0
+    || selectedHandoff.omitted.skip > 0
+    || selectedHandoff.omitted.unknown > 0;
+  if (hasSelectedHandoff) {
+    lines.push("", "## Selected Todo Handoff", `- Actor: ${boundedUtf8(selectedHandoff.actorId, 128)}`);
+    if (selectedHandoff.nextSteps.length > 0) {
+      const source = selectedHandoff.nextStepsSource === "request"
+        ? "request"
+        : `Todo #${selectedHandoff.nextStepsSourceTodoId}`;
+      lines.push(`- Recommendation source: ${source}; advisory only—live Workflow/Plan/Todo state wins.`, "### Recommended Next Steps");
+      for (const [index, step] of selectedHandoff.nextSteps.entries()) lines.push(`${index + 1}. ${step}`);
+    }
+    if (selectedHandoff.required.length > 0) {
+      lines.push("### Required For Next Action");
+      for (const file of selectedHandoff.required) lines.push(selectedHandoffFileLine(file));
+    }
+    if (selectedHandoff.conditional.length > 0) {
+      lines.push("### Conditional Reloads");
+      for (const file of selectedHandoff.conditional) lines.push(selectedHandoffFileLine(file));
+    }
+    if (selectedHandoff.skip.length > 0) {
+      lines.push("### Do Not Reload By Default");
+      for (const file of selectedHandoff.skip) lines.push(selectedHandoffFileLine(file));
+    }
+    lines.push(`- Handoff omitted: positive=${selectedHandoff.omitted.positive}, skip=${selectedHandoff.omitted.skip}, unknown=${selectedHandoff.omitted.unknown}`);
   }
 
   const tasks = details.todo.tasks.filter((task) => task.status !== "deleted");
@@ -683,7 +904,7 @@ export function buildNewContextRecoveryCapsule(details: MaestroCompactionDetails
     .filter((reference) => reference.status === "active")
     .sort((left, right) => left.path.localeCompare(right.path));
   if (references.length) {
-    lines.push("", "## Checkpoint Reference Lineage");
+    lines.push("", "## Checkpoint Reference Lineage", "Value: unknown unless annotated in the selected Todo/new_context handoff; reload only for a concrete next-step need.");
     const candidates = references.slice(0, 10);
     omitted.references = Math.max(0, references.length - candidates.length);
     for (const reference of candidates) {

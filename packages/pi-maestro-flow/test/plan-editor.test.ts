@@ -149,6 +149,7 @@ test("Plan confirmation renders execution controls without a New Pi session opti
     pathLabel: "current.md",
     canCompactContext: true,
     contextPercent: 75,
+    modelTransition: { current: "provider/plan", act: "provider/act" },
   });
   assert.ok(harness.component);
   for (const width of [20, 40, 80, 120]) {
@@ -166,6 +167,10 @@ test("Plan confirmation renders execution controls without a New Pi session opti
       assert.match(rendered, /3\. Review & Refine/);
       assert.match(rendered, /4\. Continue discussion/);
       assert.match(rendered, /5\. Exit Plan mode/);
+      if (width >= 120) {
+        assert.match(rendered, /Plan model provider\/plan → Act model provider\/act/);
+        assert.match(rendered, /restore the main model to provider\/act before implementation/);
+      }
       assert.ok(lines.length <= 28);
     }
     for (const line of lines) assert.ok(visibleWidth(line) <= width, `width ${width}: ${visibleWidth(line)} ${line}`);

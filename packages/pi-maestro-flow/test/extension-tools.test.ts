@@ -417,7 +417,7 @@ test("session_compact_failed settles only the extension compaction that owns the
   assert.equal(arbiter.currentOwner(), undefined);
 });
 
-test("extension registers LSP, browser, BM25 discovery, and the Gateway command", async () => {
+test("extension registers Board, LSP, browser, BM25 discovery, and the Gateway command", async () => {
   const tools: ToolDefinition[] = [];
   const active: string[] = [];
   const commands: string[] = [];
@@ -460,10 +460,12 @@ test("extension registers LSP, browser, BM25 discovery, and the Gateway command"
     "child extension inheritance must be session-owned",
   );
   const names = tools.map((tool) => tool.name);
+  assert.ok(names.includes("board"));
   assert.ok(names.includes("lsp"));
   assert.ok(names.includes("browser"));
   assert.ok(names.includes("computer_use"));
   assert.ok(names.includes("search_tool_bm25"));
+  assert.equal(names.filter((name) => name === "board").length, 1);
   assert.equal(names.filter((name) => name === "lsp").length, 1);
   assert.equal(names.filter((name) => name === "browser").length, 1);
   assert.equal(names.filter((name) => name === "computer_use").length, 1);
@@ -626,10 +628,16 @@ test("extension registers LSP, browser, BM25 discovery, and the Gateway command"
   assert.match(todoParametersJson, /advance/);
   assert.match(todoParametersJson, /"ids"/);
   assert.match(todoParametersJson, /"updates"/);
+  assert.match(todoParametersJson, /required=needed for the next action/);
+  assert.match(todoParametersJson, /conditional=load only when 'when' applies/);
+  assert.match(todoParametersJson, /skip=no incremental value by default/);
+  assert.match(todoParametersJson, /unknown=relevance is not established/);
   const todoGuidelines = todoTool?.promptGuidelines?.join("\n") ?? "";
   assert.match(todoGuidelines, /live execution state machine/);
   assert.match(todoGuidelines, /before any tool call or work belonging to another Todo/);
   assert.match(todoGuidelines, /never batch-complete/);
+  assert.match(todoGuidelines, /Only provide handoff\.nextSteps when an authorized later phase exists/);
+  assert.match(todoGuidelines, /for final or blocked work, explicitly clear stale nextSteps/);
   assert.match(todoGuidelines, /actor-scoped/);
   assert.match(todoGuidelines, /\[context-pressure-advisory\]/);
   assert.match(todoGuidelines, /task activated in that same result/);
@@ -1074,10 +1082,14 @@ test("teammate child registers interaction, local Bash, and parent-permission su
   assert.equal(tools.some((tool) => tool.name === "new_context"), false);
   const childTodo = tools.find((tool) => tool.name === "todo");
   assert.match(childTodo?.description ?? "", /immediately finish it with `todo advance`/);
+  assert.match(childTodo?.description ?? "", /optional resourceUris\/handoff/);
   assert.match(JSON.stringify(childTodo?.parameters), /advance/);
   const childTodoGuidelines = childTodo?.promptGuidelines?.join("\n") ?? "";
   assert.match(childTodoGuidelines, /immediately when your active task finishes/);
   assert.match(childTodoGuidelines, /never defer several completions until your final answer/);
+  assert.match(childTodoGuidelines, /durable Todo\.handoff for up to 3 ordered next steps/);
+  assert.match(childTodoGuidelines, /required, conditional with an explicit trigger, skip, or unknown/);
+  assert.match(childTodoGuidelines, /for final or blocked work, explicitly clear stale nextSteps/);
   assert.match(childTodoGuidelines, /actor-scoped/);
   assert.match(childTodoGuidelines, /\[context-pressure-advisory\]/);
   assert.match(childTodoGuidelines, /task activated in that same result/);

@@ -463,9 +463,9 @@ test("cycleRole wraps through all four roles in both directions", () => {
   assert.equal(cycleRole("brainstormer", -1), "optimizer");
 });
 
-test("createRefineSession uses Follow session model when no label is provided", () => {
+test("createRefineSession uses Follow current main model when no label is provided", () => {
   const session = createRefineSession("optimizer", "");
-  assert.equal(session.currentModel.label, "Follow session model");
+  assert.equal(session.currentModel.label, "Follow current main model");
 });
 
 test("buildReviewPrompt stays importable and unchanged from plan-review", () => {

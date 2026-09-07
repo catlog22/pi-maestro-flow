@@ -40,6 +40,11 @@ export interface PlanWorkflowConfirmationOptions {
   allowNew: boolean;
 }
 
+export interface PlanConfirmationModelTransition {
+  current: string;
+  act?: string;
+}
+
 export interface PlanConfirmationOptions {
   markdown: string;
   pathLabel?: string;
@@ -47,6 +52,7 @@ export interface PlanConfirmationOptions {
   contextPercent?: number;
   defaultExecution?: PlanExecutionChoice;
   workflow?: PlanWorkflowConfirmationOptions;
+  modelTransition?: PlanConfirmationModelTransition;
   signal?: AbortSignal;
   /** Archived draft revisions available for rollback. */
   drafts?: { revision: number; archivedAt: string; checksum: string }[];
@@ -220,8 +226,9 @@ export async function openPlanConfirmation(
             "Ctrl+Enter execute",
             "PgUp/PgDn scroll",
           ]);
+          const modelTransition = formatModelTransition(options.modelTransition);
           const rendered = [
-            `${theme.bold("Plan confirmation")}  ${theme.fg("dim", options.pathLabel ?? "current.md")}`,
+            `${theme.bold("Plan confirmation")}  ${theme.fg("dim", `${options.pathLabel ?? "current.md"}${modelTransition ? ` · ${modelTransition}` : ""}`)}`,
             theme.fg("dim", "─".repeat(innerWidth)),
             ...preview.map((line) => ` ${line}`),
           ];
@@ -384,7 +391,21 @@ function rowDescription(row: SelectionRow, options: PlanConfirmationOptions): st
       : "Select the canonical Workflow Session target";
   }
   if (row.kind === "context") return "Save the Plan conversation as a checkpoint, then reset the same-session context deterministically";
+  const actModel = options.modelTransition?.act;
+  if (actModel && row.item.action === "execute") {
+    return `Approve and restore the main model to ${actModel} before implementation`;
+  }
+  if (actModel && row.item.action === "exit-plan") {
+    return `Keep the draft and restore the main model to ${actModel}`;
+  }
   return row.item.description;
+}
+
+function formatModelTransition(transition: PlanConfirmationModelTransition | undefined): string {
+  if (!transition) return "";
+  return transition.act
+    ? `Plan model ${transition.current} → Act model ${transition.act} on Execute/Exit`
+    : `Main model ${transition.current}`;
 }
 
 function renderFrame(

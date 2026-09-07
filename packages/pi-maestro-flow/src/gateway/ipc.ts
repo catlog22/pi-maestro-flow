@@ -14,9 +14,20 @@ import { gatewayOwnerPath } from "./state-paths.ts";
 
 const AUTH_TYPE = "pi-maestro-gateway-auth";
 const MAX_AUTH_BYTES = 8 * 1024;
+const MAX_CONTROL_RESPONSE_BYTES = 4 * 1024 * 1024;
 const AUTH_TIMEOUT_MS = 5_000;
 
-export type GatewayIpcControlAction = "status" | "stop" | "pair" | "pair-bootstrap" | "pair-list" | "pair-revoke";
+export type GatewayIpcControlAction =
+  | "status"
+  | "stop"
+  | "pair"
+  | "pair-bootstrap"
+  | "pair-list"
+  | "pair-revoke"
+  | "workspace-list"
+  | "workspace-register"
+  | "workspace-renew"
+  | "workspace-remove";
 
 interface GatewayIpcAuthFrame {
   type: typeof AUTH_TYPE;
@@ -133,7 +144,10 @@ function authenticateSocket(
     if (frame.type !== AUTH_TYPE || frame.version !== GATEWAY_STATE_VERSION || typeof frame.ownerToken !== "string" || !constantTimeEqual(frame.ownerToken, options.ownerToken)) {
       return refuse("Gateway IPC owner token is invalid");
     }
-    if (frame.control !== undefined && !["status", "stop", "pair", "pair-bootstrap", "pair-list", "pair-revoke"].includes(frame.control)) {
+    if (frame.control !== undefined && ![
+      "status", "stop", "pair", "pair-bootstrap", "pair-list", "pair-revoke",
+      "workspace-list", "workspace-register", "workspace-renew", "workspace-remove",
+    ].includes(frame.control)) {
       return refuse("Gateway IPC control action is invalid");
     }
     settled = true;
@@ -301,7 +315,7 @@ function requestGatewayIpcControlOnce(
     };
     const onData = (chunk: Buffer): void => {
       buffer = Buffer.concat([buffer, chunk]);
-      if (buffer.byteLength > MAX_AUTH_BYTES) return finish(new Error("Gateway IPC control response is too large"));
+      if (buffer.byteLength > MAX_CONTROL_RESPONSE_BYTES) return finish(new Error("Gateway IPC control response is too large"));
       const newline = buffer.indexOf(0x0a);
       if (newline < 0) return;
       let ack: GatewayIpcAckFrame;

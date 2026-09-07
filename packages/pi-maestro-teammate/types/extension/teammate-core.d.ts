@@ -5,7 +5,8 @@
  * TUI: Alt+R mode-aware session list, widget above editor, Alt+B foreground→background detach
  * Mode: RPC subprocess — stdin open for steer/follow_up/abort
  */
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import { registerForegroundDetach, setPersistentUi } from "../public/v1/foreground-detach.ts";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { WorkspaceSessionScan } from "../transcript/session-transcript.ts";
 import type { RecentToolInfo } from "../shared/types.ts";
 import { type WorkspaceBackgroundJobSnapshot, type WorkspaceOwnerState } from "./workspace-peers.ts";
@@ -122,9 +123,7 @@ export declare function backgroundWaitGuidance(correlationId: string): string;
  * discoverable across the root single, root graph, and nested foreground paths.
  */
 export declare const FOREGROUND_DETACH_HINT: string;
-export declare function setPersistentUi(ui: ExtensionUIContext | undefined, resetOwners?: boolean): void;
-/** Registers one foreground owner; unregister is idempotent on every race path. */
-export declare function registerForegroundDetach(detach: () => void, ui?: ExtensionUIContext): () => void;
+export { registerForegroundDetach, setPersistentUi };
 export declare function foregroundWaitWindowMs(tasks: ReadonlyArray<{
     timeoutMs?: number;
 }>, fallbackMs?: number): number;

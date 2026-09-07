@@ -34,7 +34,8 @@ test("host service describes and probes only the local Gateway host", () => {
   assert.equal(described.ok, true);
   assert.equal(described.data?.service, "gateway");
   assert.equal(typeof described.data?.platform, "string");
-  assert.equal(service.status().ok, true);
+  assert.equal(described.data?.nodeVersion, process.version);
+  assert.equal(service.status().data?.nodeVersion, process.version);
   const probe = service.test();
   assert.equal(probe.ok, true);
   assert.equal(probe.data?.reachable, true);
@@ -92,13 +93,28 @@ test("job service exposes terminal states, cursor logs, stdin, and idempotent ca
   const id = started.data!.job.id;
   await waitFor(async () => (await service.status({ id })).data?.job.status === "completed");
   const completed = await service.status({ id });
+  assert.equal(completed.ok, true);
+  assert.equal(completed.status, "succeeded");
   assert.equal(completed.data?.job.status, "completed");
   const logs = await service.logs({ id, cursor: 0 });
   assert.equal(logs.ok, true);
   assert.deepEqual(logs.data?.entries.map((entry) => entry.data).join(""), "outerr");
   assert.ok((logs.data?.nextCursor ?? 0) > 0);
+
+  const failedJob = await service.start({ command: process.execPath, args: nodeArgs("process.stderr.write('failed'); process.exit(2)"), cwd: root });
+  const failedId = failedJob.data!.job.id;
+  await waitFor(async () => (await service.status({ id: failedId })).data?.job.status === "failed");
+  const failedStatus = await service.status({ id: failedId });
+  assert.equal(failedStatus.ok, true, "query success is independent from the target job state");
+  assert.equal(failedStatus.status, "succeeded");
+  assert.equal(failedStatus.data?.job.status, "failed");
+  const failedLogs = await service.logs({ id: failedId, stderrOffset: 0 });
+  assert.equal(failedLogs.ok, true);
+  assert.equal(failedLogs.status, "succeeded");
+  assert.equal(failedLogs.data?.entries.map((entry) => entry.data).join(""), "failed");
+
   const listed = await service.list();
-  assert.equal(listed.data?.jobs.length, 1);
+  assert.equal(listed.data?.jobs.length, 2);
   const otherPrincipal = createGatewayPrincipal("stdio", "other-gateway-client", {
     authenticated: true,
     workspacePath: root,
@@ -109,7 +125,7 @@ test("job service exposes terminal states, cursor logs, stdin, and idempotent ca
   const stdinJob = await service.start({ command: process.execPath, args: nodeArgs("process.stdin.once('data', d => { process.stdout.write(d); process.exit(0) })"), cwd: root });
   const stdinId = stdinJob.data!.job.id;
   await waitFor(async () => (await service.status({ id: stdinId })).data?.job.status === "running");
-  assert.equal((await service.status({ id: stdinId })).status, "running", "status envelope must match the running resource");
+  assert.equal((await service.status({ id: stdinId })).status, "succeeded", "query envelope reports the call outcome, not the running resource state");
   const sent = await service.stdin({ id: stdinId, data: "input" });
   assert.equal(sent.ok, true);
   await waitFor(async () => (await service.status({ id: stdinId })).data?.job.status === "completed");
@@ -133,11 +149,23 @@ test("job service restores terminal snapshots and fences interrupted snapshots a
   t.after(() => rm(root, { recursive: true, force: true }));
   const testPrincipal = principal(root);
   const first = new JobService({ workspaceRoot: root, principal: testPrincipal, jobsRoot });
-  const started = await first.start({ command: process.execPath, args: nodeArgs("process.stdout.write('saved')"), cwd: root });
+  const started = await first.start({ command: process.execPath, args: nodeArgs("process.stdout.write('saved'); process.stderr.write('errors')"), cwd: root });
   const completedId = started.data!.job.id;
   await waitFor(async () => (await first.status({ id: completedId })).data?.job.status === "completed");
+  const firstPage = await first.logs({ id: completedId, stdoutOffset: 0, stderrOffset: 0, maxBytes: 3 });
+  assert.deepEqual(firstPage.data?.entries.map((entry) => [entry.stream, entry.data]), [["stdout", "sav"]]);
+  assert.equal(firstPage.data?.nextStdoutOffset, 3);
+  assert.equal(firstPage.data?.nextStderrOffset, 0);
+  assert.equal(firstPage.data?.done, false);
   const restored = new JobService({ workspaceRoot: root, principal: testPrincipal, jobsRoot });
   assert.equal((await restored.status({ id: completedId })).data?.job.stdout, "saved");
+  const resumed = await restored.logs({ id: completedId, stdoutOffset: firstPage.data?.nextStdoutOffset, stderrOffset: firstPage.data?.nextStderrOffset });
+  assert.deepEqual(resumed.data?.entries.map((entry) => [entry.stream, entry.data]), [["stdout", "ed"], ["stderr", "errors"]]);
+  assert.equal(resumed.data?.nextStdoutOffset, 5);
+  assert.equal(resumed.data?.nextStderrOffset, 6);
+  assert.equal(resumed.data?.done, true);
+  const legacyLogs = await restored.logs({ id: completedId, cursor: 0 });
+  assert.equal(legacyLogs.data?.entries.map((entry) => entry.data).join(""), "savederrors", "legacy merged cursors survive restart");
 
   await writeFile(join(jobsRoot, "job-interrupted.json"), JSON.stringify({
     version: 1,
@@ -154,9 +182,39 @@ test("job service restores terminal snapshots and fences interrupted snapshots a
   }), "utf8");
   const restarted = new JobService({ workspaceRoot: root, principal: testPrincipal, jobsRoot });
   const lost = await restarted.status({ id: "job-interrupted" });
-  assert.equal(lost.ok, false);
-  assert.equal(lost.status, "lost");
+  assert.equal(lost.ok, true);
+  assert.equal(lost.status, "succeeded");
   assert.equal(lost.data?.job.status, "lost");
+  const interruptedLogs = await restarted.logs({ id: "job-interrupted", cursor: 0 });
+  assert.equal(interruptedLogs.data?.entries.map((entry) => entry.data).join(""), "partial", "legacy direct snapshots retain the shared cursor projection");
+});
+
+test("job byte offsets survive restart when output truncates inside a UTF-8 sequence", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "gateway-job-utf8-"));
+  const jobsRoot = join(root, "jobs");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const testPrincipal = principal(root);
+  const first = new JobService({ workspaceRoot: root, principal: testPrincipal, jobsRoot, maxOutputBytes: 1 });
+  const started = await first.start({
+    command: process.execPath,
+    args: nodeArgs("process.stdout.write(Buffer.from([0xf0, 0x9f, 0x98, 0x80]))"),
+    cwd: root,
+  });
+  const id = started.data!.job.id;
+  await waitFor(async () => ["completed", "failed", "cancelled", "lost"].includes((await first.status({ id })).data?.job.status ?? ""));
+
+  const restored = new JobService({ workspaceRoot: root, principal: testPrincipal, jobsRoot, maxOutputBytes: 1 });
+  const status = await restored.status({ id });
+  assert.equal(status.ok, true);
+  assert.equal(status.data?.job.stdout, "\ufffd");
+  const logs = await restored.logs({ id, stdoutOffset: 0, stderrOffset: 0 });
+  assert.equal(logs.ok, true);
+  assert.equal(logs.data?.entries.map((entry) => entry.data).join(""), "\ufffd");
+  assert.equal(logs.data?.nextStdoutOffset, 1);
+  assert.equal(logs.data?.done, true);
+  const legacyLogs = await restored.logs({ id, cursor: 0, maxBytes: 1 });
+  assert.equal(legacyLogs.data?.entries.map((entry) => entry.data).join(""), "\ufffd");
+  assert.equal("dataBase64" in (legacyLogs.data?.entries[0] ?? {}), false);
 });
 
 test("job logs cap tiny output events independently from terminal output evidence", async (t) => {

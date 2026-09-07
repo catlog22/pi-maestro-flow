@@ -9,6 +9,7 @@ import { GATEWAY_OFFLINE_MESSAGE, relayGatewayStdio } from "./stdio-relay.ts";
 import { GatewayResidentService } from "./resident-service.ts";
 import { loadGatewayConfig } from "./config.ts";
 import { applyPiConfigStream, serializePiConfigApplyError } from "./pi-config-apply.ts";
+import { GatewayControlClient } from "./control-client.ts";
 
 export interface GatewayCliIo {
   stdin?: Readable;
@@ -29,6 +30,15 @@ interface ServiceFlags {
   json: boolean;
   detachedFallback: boolean;
   windowsStartup: boolean;
+}
+
+interface WorkspaceFlags {
+  configPath?: string;
+  json: boolean;
+  target?: string;
+  ttlSeconds?: number;
+  expectedGeneration?: number;
+  permanent: boolean;
 }
 
 function write(stream: Writable, value: string): void {
@@ -66,6 +76,29 @@ function parseServiceFlags(args: string[]): ServiceFlags {
   if (result.detachedFallback && result.windowsStartup) throw new Error("--windows-startup and --detached-fallback are mutually exclusive");
   if (result.windowsStartup && process.platform !== "win32") throw new Error("--windows-startup is only available on Windows");
   return result;
+}
+
+function parseWorkspaceFlags(args: string[]): WorkspaceFlags {
+  const result: WorkspaceFlags = { json: false, permanent: false };
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (arg === "--json") result.json = true;
+    else if (arg === "--permanent") result.permanent = true;
+    else if (arg === "--config") result.configPath = requiredValue(args, ++index, arg);
+    else if (arg === "--ttl") result.ttlSeconds = positiveCliInteger(requiredValue(args, ++index, arg), arg);
+    else if (arg === "--generation") result.expectedGeneration = positiveCliInteger(requiredValue(args, ++index, arg), arg);
+    else if (arg.startsWith("--")) throw new Error(`Unknown workspace option: ${arg}`);
+    else if (result.target === undefined) result.target = arg;
+    else throw new Error(`Unexpected workspace argument: ${arg}`);
+  }
+  if (result.permanent && result.ttlSeconds !== undefined) throw new Error("--permanent and --ttl are mutually exclusive");
+  return result;
+}
+
+function positiveCliInteger(value: string, flag: string): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) throw new Error(`${flag} must be a positive integer`);
+  return parsed;
 }
 
 function requiredValue(args: string[], index: number, flag: string): string {
@@ -154,6 +187,31 @@ export async function main(argv = process.argv.slice(2), io: GatewayCliIo = {}):
       write(stdout, flags.json ? JSON.stringify(value) : typeof value === "object" ? JSON.stringify(value, null, 2) : String(value));
       return 0;
     }
+    if (command === "workspace") {
+      const action = args[0];
+      if (!action || !["list", "register", "renew", "remove"].includes(action)) throw new Error("Usage: pi-maestro-gateway workspace list|register|renew|remove [PATH_OR_ID] [--ttl SECONDS] [--generation N] [--json]");
+      const flags = parseWorkspaceFlags(args.slice(1));
+      const client = new GatewayControlClient({ configPath: flags.configPath });
+      let value: unknown;
+      if (action === "list") {
+        if (flags.target !== undefined || flags.ttlSeconds !== undefined || flags.expectedGeneration !== undefined || flags.permanent) throw new Error("workspace list accepts only --config and --json");
+        value = await client.listWorkspaces();
+      } else {
+        if (!flags.target) throw new Error(`workspace ${action} requires a path or workspace ID`);
+        if (action === "register") value = await client.registerWorkspace(flags.target, flags.permanent ? 0 : flags.ttlSeconds ?? 300, flags.expectedGeneration);
+        else {
+          if (flags.permanent) throw new Error(`workspace ${action} does not accept --permanent`);
+          if (flags.expectedGeneration === undefined) throw new Error(`workspace ${action} requires --generation`);
+          if (action === "renew") value = await client.renewWorkspace(flags.target, flags.ttlSeconds ?? 300, flags.expectedGeneration);
+          else {
+            if (flags.ttlSeconds !== undefined) throw new Error("workspace remove does not accept --ttl");
+            value = { removed: await client.unregisterWorkspace(flags.target, { expectedGeneration: flags.expectedGeneration }) };
+          }
+        }
+      }
+      write(stdout, flags.json ? JSON.stringify(value) : JSON.stringify(value, null, 2));
+      return 0;
+    }
     if (command === "pair") {
       const action = args[0];
       if (!action || !["create", "bootstrap", "list", "revoke"].includes(action)) throw new Error("Usage: pi-maestro-gateway pair create|bootstrap|list|revoke [ID] [--ttl SECONDS] [--label LABEL]");
@@ -211,6 +269,10 @@ export async function main(argv = process.argv.slice(2), io: GatewayCliIo = {}):
         "    --windows-startup persists for the next interactive sign-in; it is not a Windows Service.",
         "    In a non-interactive SSH session, ensure guarantees readiness only until that session ends.",
         "  pair create|bootstrap|list|revoke [ID]",
+        "  workspace list [--config PATH] [--json]",
+        "  workspace register PATH [--ttl SECONDS | --permanent] [--generation N] [--config PATH] [--json]",
+        "  workspace renew PATH_OR_ID --generation N [--ttl SECONDS] [--config PATH] [--json]",
+        "  workspace remove PATH_OR_ID --generation N [--config PATH] [--json]",
         "  version [--json]",
       ].join("\n"));
       return 0;

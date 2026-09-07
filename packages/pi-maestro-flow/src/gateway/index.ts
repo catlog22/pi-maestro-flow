@@ -1,4 +1,6 @@
 export * from "./auth.ts";
+export * from "./board-contracts.ts";
+export * from "./board-store.ts";
 export * from "./catalog.ts";
 export * from "./config.ts";
 export * from "./control-client.ts";
@@ -102,3 +104,5 @@ export * from "./services/teammate-service.ts";
 export * from "./services/session-service.ts";
 export * from "./services/todo-service.ts";
 export * from "./services/monitor-service.ts";
+export * from "./services/workspace-service.ts";
+export * from "./services/board-service.ts";

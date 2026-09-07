@@ -9,6 +9,7 @@ import {
   type ObservationSnapshot,
   type ObservationWaitOptions,
 } from "pi-maestro-teammate/v1/observation";
+import { registerForegroundDetach } from "pi-maestro-teammate/v1/foreground-detach";
 import { sanitizeCardText, toolCallLine, toolResultCard, toolResultLine, resultFirstLine } from "../quiet-render.ts";
 import { Type } from "typebox";
 import { spawn, spawnSync } from "node:child_process";
@@ -67,7 +68,7 @@ export interface BashBgSnapshotPayload {
 export const BashBgParams = Type.Object({
   action: Type.Union(
     [Type.Literal("run"), Type.Literal("start"), Type.Literal("status"), Type.Literal("wait"), Type.Literal("kill"), Type.Literal("list")],
-    { description: "run: block up to timeout then auto-background (recommended for uncertain-duration commands); start: background immediately; status: snapshot; wait: block until done/timeout; kill: terminate; list: all jobs" },
+    { description: "run: block up to timeout, or press Alt+B in the TUI to detach, then continue in background (recommended for uncertain-duration commands); start: background immediately; status: snapshot; wait: block until done/timeout; kill: terminate; list: all jobs" },
   ),
   command: Type.Optional(Type.String({ minLength: 1, description: "Shell command (required for run/start)" })),
   jobId: Type.Optional(Type.String({ description: "Job id returned by run/start (required for status/wait/kill)" })),
@@ -736,12 +737,13 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
     job: Job,
     timeoutMs: number,
     signal: AbortSignal | undefined,
-  ): Promise<"completed" | "timeout" | "aborted"> => {
+    manualDetach: Promise<void>,
+  ): Promise<"completed" | "timeout" | "manual" | "aborted"> => {
     if (signal?.aborted) return Promise.resolve("aborted");
     if (job.done) return Promise.resolve("completed");
     return new Promise((resolve) => {
       let settled = false;
-      const finish = (outcome: "completed" | "timeout" | "aborted"): void => {
+      const finish = (outcome: "completed" | "timeout" | "manual" | "aborted"): void => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
@@ -752,6 +754,7 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
       const timer = setTimeout(() => finish("timeout"), timeoutMs);
       signal?.addEventListener("abort", onAbort, { once: true });
       void job.terminal.then(() => finish("completed"));
+      void manualDetach.then(() => finish("manual"));
     });
   };
 
@@ -806,17 +809,17 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
     label: "Background Bash",
     description:
       "Run shell commands with adaptive foreground/background execution and job control. " +
-      "action=run (recommended) blocks like the bash tool for up to timeout seconds and returns the output inline if the command finishes in time; if it is still running, it automatically moves to the background and returns a jobId, with a bash-bg-complete notification (a new turn) on completion. " +
+      "action=run (recommended) blocks like the bash tool for up to timeout seconds and returns the output inline if the command finishes in time; press Alt+B in the TUI to detach sooner, otherwise a still-running command automatically moves to the background at timeout and returns a jobId, with a bash-bg-complete notification (a new turn) on completion. " +
       "action=start backgrounds immediately (ack now). action=status returns a live snapshot + output tail; action=wait blocks an existing job until done or timeout; action=kill terminates the job's process tree; action=list shows all jobs. " +
       "Example: { action: \"run\", command: \"npm run build\", timeout: 60 }.",
-    promptSnippet: "Run shell commands adaptively: action=run blocks like bash then auto-backgrounds on timeout; start/status/wait/kill/list for job control, with a completion notification that triggers a new turn.",
+    promptSnippet: "Run shell commands adaptively: action=run blocks like bash, Alt+B detaches it in the TUI, and timeout auto-backgrounds it; start/status/wait/kill/list provide job control, with a completion notification that triggers a new turn.",
     promptGuidelines: [
       "Default to the bash tool for ordinary commands — blocking for tens of seconds is fine. Reach for bash_bg when a command is unbounded (dev server, watcher, tail -f), expected to run for minutes, or you want to keep working concurrently.",
-      "When unsure how long a command will take, use bash_bg action=run: it blocks like bash for up to timeout seconds and returns output inline if fast, otherwise auto-backgrounds and notifies you (bash-bg-complete, a new turn) when done — no up-front guess required.",
+      "When unsure how long a command will take, use bash_bg action=run: it blocks like bash for up to timeout seconds and returns output inline if fast; Alt+B detaches it sooner in the TUI, otherwise it auto-backgrounds at timeout and notifies you (bash-bg-complete, a new turn) when done.",
       "Use action=start to background immediately without blocking. After a job backgrounds, do not poll; wait for the notification or call action=wait once. action=status peeks at output and action=kill stops a job.",
     ],
     parameters: BashBgParams,
-    async execute(_id, params, signal): Promise<AgentToolResult<BashBgDetails>> {
+    async execute(_id, params, signal, _onUpdate, ctx): Promise<AgentToolResult<BashBgDetails>> {
       const tailCount = params.tail ?? 20;
 
       if (params.action === "start") {
@@ -836,38 +839,50 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
 
       if (params.action === "run") {
         if (!params.command) throw new Error("bash_bg run requires 'command'.");
-        const job = startJob(params.command, params.cwd || process.cwd(), false);
-        const windowMs = (params.timeout ?? 30) * 1000;
-        const outcome = await waitForRunBoundary(job, windowMs, signal);
-        if (outcome === "aborted") {
-          job.background = false;
-          await terminateJob(job);
-          throw new Error("aborted");
-        }
-        if (outcome === "completed" || job.done) {
-          const out = tailOutput(job, params.tail ?? 200);
+        let detachResolve: (() => void) | undefined;
+        const detachPromise = new Promise<void>((resolve) => { detachResolve = resolve; });
+        const removeDetach = ctx?.hasUI
+          ? registerForegroundDetach(() => detachResolve?.(), ctx.ui)
+          : undefined;
+        try {
+          const job = startJob(params.command, params.cwd || process.cwd(), false);
+          const windowMs = (params.timeout ?? 30) * 1000;
+          const outcome = await waitForRunBoundary(job, windowMs, signal, detachPromise);
+          if (outcome === "aborted") {
+            job.background = false;
+            await terminateJob(job);
+            throw new Error("aborted");
+          }
+          if (outcome === "completed" || job.done) {
+            const out = tailOutput(job, params.tail ?? 200);
+            return {
+              content: [{
+                type: "text",
+                text: appendLogAccess(`${out.text || "(no output)"}\n(exit ${job.exitCode})`, job, out.truncated),
+              }],
+              details: jobDetails(job, "run", out.truncated),
+            };
+          }
+          job.background = true;
+          job.updatedAt = Date.now();
+          job.cachedSnapshot = undefined;
+          publishSnapshot();
+          const transfer = outcome === "manual"
+            ? `Detached to background as job ${job.id} (pid ${job.pid}).`
+            : `Still running after ${Math.round(windowMs / 1000)}s — moved to background as job ${job.id} (pid ${job.pid}).`;
           return {
             content: [{
               type: "text",
-              text: appendLogAccess(`${out.text || "(no output)"}\n(exit ${job.exitCode})`, job, out.truncated),
+              text:
+                `${transfer}\ncommand: ${job.command}\n` +
+                `You will receive a bash-bg-complete notification when it finishes. ` +
+                `Use bash_bg action=status jobId=${job.id} to peek, or action=wait to block.`,
             }],
-            details: jobDetails(job, "run", out.truncated),
+            details: jobDetails(job, "run"),
           };
+        } finally {
+          removeDetach?.();
         }
-        job.background = true;
-        job.updatedAt = Date.now();
-        job.cachedSnapshot = undefined;
-        publishSnapshot();
-        return {
-          content: [{
-            type: "text",
-            text:
-              `Still running after ${Math.round(windowMs / 1000)}s — moved to background as job ${job.id} (pid ${job.pid}).\ncommand: ${job.command}\n` +
-              `You will receive a bash-bg-complete notification when it finishes. ` +
-              `Use bash_bg action=status jobId=${job.id} to peek, or action=wait to block.`,
-          }],
-          details: jobDetails(job, "run"),
-        };
       }
 
       if (params.action === "list") {

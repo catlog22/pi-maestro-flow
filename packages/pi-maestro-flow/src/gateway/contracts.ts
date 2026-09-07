@@ -34,6 +34,9 @@ export const GATEWAY_HARD_LIMITS = {
   maxExecTimeoutMs: 10 * 60 * 1000,
   maxLeaseTtlMs: 7 * 24 * 60 * 60 * 1000,
   maxWorkspaceCount: 256,
+  maxBoardTasks: 4096,
+  maxBoardOperations: 16384,
+  maxBoardEvents: 32768,
 } as const;
 
 /** Safe defaults used when an existing ~/.mcpx/config.yaml omits a section. */
@@ -60,9 +63,15 @@ export const GATEWAY_DEFAULT_LIMITS = {
   maxExecTimeoutMs: 5 * 60 * 1000,
   maxLeaseTtlMs: 24 * 60 * 60 * 1000,
   maxWorkspaceCount: 64,
+  maxBoardTasks: 1024,
+  maxBoardOperations: 4096,
+  maxBoardEvents: 8192,
 } as const;
 
-export const GATEWAY_TOOL_NAMES = ["host", "exec", "job", "file", "teammate", "session", "todo", "monitor"] as const;
+/** Public order is part of the protocol. The original eight names remain unchanged. */
+export const GATEWAY_TOOL_NAMES = ["workspace", "board", "host", "exec", "job", "file", "teammate", "session", "todo", "monitor"] as const;
+/** The pre-Board catalog remains readable at migration boundaries. */
+export const GATEWAY_LEGACY_TOOL_NAMES = ["host", "exec", "job", "file", "teammate", "session", "todo", "monitor"] as const;
 export type GatewayToolName = typeof GATEWAY_TOOL_NAMES[number];
 /** Compatibility alias: every v1 tool kind is also its public tool name. */
 export const GATEWAY_TOOL_KINDS = GATEWAY_TOOL_NAMES;
@@ -70,12 +79,22 @@ export type GatewayToolKind = GatewayToolName;
 export const GATEWAY_TOOL_EXECUTION_MODES = ["sync", "async"] as const;
 export type GatewayToolExecutionMode = typeof GATEWAY_TOOL_EXECUTION_MODES[number];
 
+export const GATEWAY_TOOL_ANNOTATIONS_SCHEMA = Type.Object({
+  readOnlyHint: Type.Optional(Type.Boolean()),
+  destructiveHint: Type.Optional(Type.Boolean()),
+  idempotentHint: Type.Optional(Type.Boolean()),
+  openWorldHint: Type.Optional(Type.Boolean()),
+}, { additionalProperties: false });
+export type GatewayToolAnnotations = Static<typeof GATEWAY_TOOL_ANNOTATIONS_SCHEMA>;
+
 export const GATEWAY_TOOL_SCHEMA = Type.Object({
   version: Type.Literal(GATEWAY_STATE_VERSION),
   name: Type.String({ minLength: 1, maxLength: 128, pattern: GATEWAY_ID_PATTERN.source }),
+  title: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
   description: Type.String({ minLength: 1, maxLength: 16 * 1024 }),
   inputSchema: Type.Record(Type.String({ minLength: 1, maxLength: 128 }), Type.Unknown()),
   outputSchema: Type.Optional(Type.Record(Type.String({ minLength: 1, maxLength: 128 }), Type.Unknown())),
+  annotations: Type.Optional(GATEWAY_TOOL_ANNOTATIONS_SCHEMA),
   kind: Type.Optional(Type.Unsafe<GatewayToolKind>({ type: "string", enum: [...GATEWAY_TOOL_KINDS] })),
   executionMode: Type.Optional(Type.Unsafe<GatewayToolExecutionMode>({ type: "string", enum: [...GATEWAY_TOOL_EXECUTION_MODES] })),
   mutating: Type.Optional(Type.Boolean()),

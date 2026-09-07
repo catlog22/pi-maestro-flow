@@ -207,6 +207,47 @@ test("Gateway teammate closes only the matching child control generation", async
   await service.shutdown();
 });
 
+test("Gateway teammate bounded wait returns done=false without failing the query", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "gateway-teammate-wait-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const owner = createGatewayPrincipal("stdio", "owner", { workspacePath: root });
+  const port = new FakePort();
+  port.defer();
+  const service = new GatewayTeammateService({ port, baseCwd: root, journal: new TaskJournal({ path: join(root, "tasks.json") }) });
+  const accepted = await service.start(owner, { tasks: [{ prompt: "work", agent: "general" }], cwd: root });
+  const pending = await service.wait(owner, accepted.data!.taskId, { timeoutMs: 5 });
+  assert.equal(pending.ok, true);
+  assert.equal(pending.status, "succeeded");
+  assert.equal(pending.data?.done, false);
+  assert.equal(pending.data?.task.status, "running");
+  port.resolveDeferred?.([result("work", accepted.data!.taskId)]);
+  assert.equal((await service.wait(owner, accepted.data!.taskId, { timeoutMs: 2_000 })).data?.done, true);
+});
+
+test("Gateway teammate failed targets remain queryable through successful envelopes", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "gateway-teammate-failed-query-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const owner = createGatewayPrincipal("stdio", "owner", { workspacePath: root });
+  const port = new FakePort();
+  port.resultSet = [{ ...result("work", "failed-child"), exitCode: 1, messages: [{ role: "assistant", content: "child failed" }] }];
+  const service = new GatewayTeammateService({ port, baseCwd: root, journal: new TaskJournal({ path: join(root, "tasks.json") }) });
+  const accepted = await service.start(owner, { tasks: [{ prompt: "work", agent: "general" }], cwd: root });
+  const taskId = accepted.data!.taskId;
+  const waited = await service.wait(owner, taskId, { timeoutMs: 2_000 });
+  assert.equal(waited.ok, true);
+  assert.equal(waited.status, "succeeded");
+  assert.equal(waited.data?.done, true);
+  assert.equal(waited.data?.task.status, "failed");
+  const observed = await service.observe(owner, taskId);
+  const results = await service.result(owner, taskId);
+  assert.equal(observed.ok, true);
+  assert.equal(observed.status, "succeeded");
+  assert.equal(results.ok, true);
+  assert.equal(results.status, "succeeded");
+  assert.equal(results.data?.status, "failed");
+  assert.equal(results.data?.items[0]?.error, "child failed");
+});
+
 test("TaskJournal prunes expired terminal records at capacity but retains active records", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "gateway-teammate-prune-"));
   t.after(() => rm(root, { recursive: true, force: true }));

@@ -571,18 +571,46 @@ export declare function buildExpertLeaderPrompt(objective: string): string;
 export declare function prepareTeammateMode(params: RunTeammateParams): RunTeammateParams;
 /** Normalize the tasks-only public contract into executable graph tasks. */
 export declare function normalizeTeammateParams(params: RunTeammateParams): NormalizeTeammateResult;
-export declare let resolvedPiEntryPoint: string | null | undefined;
-export declare function resolvePiEntryPoint(): string | null;
+export type PiLaunchSource = "override" | "path-native" | "windows-shim" | "host-entry" | "path-fallback";
+export interface PiLaunchSpec {
+    command: string;
+    argsPrefix: string[];
+    source: PiLaunchSource;
+}
 export interface PiSpawnCommandOptions {
     envBinary?: string | null;
     entryPoint?: string | null;
     platform?: NodeJS.Platform;
+    pathValue?: string | null;
+    argv?: readonly string[];
+    execPath?: string;
+    appData?: string | null;
+    /** @internal deterministic filesystem seam for focused launcher tests. */
+    isFile?: (candidate: string) => boolean;
+    /** @internal deterministic package-manifest seam for focused launcher tests. */
+    readTextFile?: (candidate: string) => string;
 }
-export declare function getPiSpawnCommand(args: string[], options?: PiSpawnCommandOptions): {
-    command: string;
+export declare let resolvedPiEntryPoint: string | null | undefined;
+/**
+ * Resolve process.argv[1] only when its owning package manifest proves it is
+ * Pi's declared CLI. A generic .js/.mjs suffix is never evidence of identity.
+ */
+export declare function resolvePiEntryPoint(): string | null;
+export declare function resolvePiLaunchSpec(options?: PiSpawnCommandOptions): PiLaunchSpec;
+export declare function getPiSpawnCommand(args: string[], options?: PiSpawnCommandOptions): PiLaunchSpec & {
     args: string[];
     shell: false;
 };
+export interface PiLaunchDiagnostic {
+    type: "teammate_pi_launch_diagnostic";
+    source: PiLaunchSource;
+    phase: "spawn" | "child-error" | "close";
+    exitCode: number | null;
+    signal: NodeJS.Signals | null;
+    stderrTail: string;
+}
+export declare function piLaunchDiagnostic(launch: Pick<PiLaunchSpec, "source">, phase: PiLaunchDiagnostic["phase"], exitCode: number | null, signal: NodeJS.Signals | null, stderr: string): PiLaunchDiagnostic;
+export declare function formatPiLaunchDiagnostic(diagnostic: PiLaunchDiagnostic): string;
 export interface InteractiveTerminalLaunchOptions {
     platform?: NodeJS.Platform;
     terminalCommand?: string;

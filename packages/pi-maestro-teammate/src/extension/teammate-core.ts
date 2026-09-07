@@ -10,11 +10,11 @@ import { randomUUID } from "node:crypto";
 import { logDiagnosticError, logDiagnosticWarn } from "../shared/diagnostic-log.ts";
 
 import { altKey } from "pi-maestro-settings-core/v1";
+import { registerForegroundDetach, setPersistentUi } from "../public/v1/foreground-detach.ts";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
   ExtensionContext,
-  ExtensionUIContext,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { createHash } from "node:crypto";
@@ -896,81 +896,7 @@ export function backgroundWaitGuidance(correlationId: string): string {
  */
 export const FOREGROUND_DETACH_HINT = `${altKey("B")} detaches a foreground call to background.`;
 
-/**
- * One session-scoped Alt+B listener dispatches to the oldest active foreground
- * owner. This makes nested calls detach layer by layer from the outermost call
- * instead of relying on TUI listener registration order.
- */
-type ForegroundDetachOwner = {
-  active: boolean;
-  detach(): void;
-};
-
-let persistentUi: ExtensionUIContext | undefined;
-let persistentUiUnsubscribe: (() => void) | undefined;
-const foregroundDetachOwners: ForegroundDetachOwner[] = [];
-
-function uninstallForegroundDetachListener(): void {
-  const unsubscribe = persistentUiUnsubscribe;
-  persistentUiUnsubscribe = undefined;
-  unsubscribe?.();
-}
-
-function installForegroundDetachListener(): void {
-  if (!persistentUi || persistentUiUnsubscribe || foregroundDetachOwners.length === 0) return;
-  persistentUiUnsubscribe = persistentUi.onTerminalInput((data: string) => {
-    if (data !== "\x1bb") return undefined;
-    const owner = foregroundDetachOwners.shift();
-    if (!owner) return undefined;
-    owner.active = false;
-    if (foregroundDetachOwners.length === 0) uninstallForegroundDetachListener();
-    owner.detach();
-    return { consume: true };
-  });
-}
-
-export function setPersistentUi(
-  ui: ExtensionUIContext | undefined,
-  resetOwners = false,
-): void {
-  if (persistentUi !== ui || resetOwners) {
-    uninstallForegroundDetachListener();
-    persistentUi = ui;
-  }
-  if (!ui || resetOwners) {
-    for (const owner of foregroundDetachOwners) owner.active = false;
-    foregroundDetachOwners.length = 0;
-    if (!ui) return;
-  }
-  installForegroundDetachListener();
-}
-
-/** Registers one foreground owner; unregister is idempotent on every race path. */
-export function registerForegroundDetach(
-  detach: () => void,
-  ui?: ExtensionUIContext,
-): () => void {
-  if (ui) setPersistentUi(ui);
-  const owner: ForegroundDetachOwner = { active: true, detach };
-  foregroundDetachOwners.push(owner);
-  try {
-    installForegroundDetachListener();
-  } catch (error) {
-    owner.active = false;
-    const index = foregroundDetachOwners.indexOf(owner);
-    if (index >= 0) foregroundDetachOwners.splice(index, 1);
-    if (foregroundDetachOwners.length === 0) uninstallForegroundDetachListener();
-    throw error;
-  }
-
-  return () => {
-    if (!owner.active) return;
-    owner.active = false;
-    const index = foregroundDetachOwners.indexOf(owner);
-    if (index >= 0) foregroundDetachOwners.splice(index, 1);
-    if (foregroundDetachOwners.length === 0) uninstallForegroundDetachListener();
-  };
-}
+export { registerForegroundDetach, setPersistentUi };
 
 export function foregroundWaitWindowMs(
   tasks: ReadonlyArray<{ timeoutMs?: number }>,

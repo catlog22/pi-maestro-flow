@@ -1,152 +1,105 @@
-# v0.28.0 — SSH Remote Channels, Smart Model Selection & Receipt-Bound Wake Protocol
+# v0.29.0 — Shared Gateway Board, Durable Handoffs & Hardened Agent Launching
 
 ## Overview
 
-This is a feature release on top of v0.27.1. It publishes **Flow 0.28.0**,
-**Teammate 2.6.0**, **Cockpit 0.23.0**, **Backend-Core 0.1.3**, and
-**Backends 0.1.3**. **Settings-Core 0.2.1** is unchanged. The exact external
-engine pin stays at `maestro-flow@0.5.84` — upstream has since published
-0.5.85/0.5.86 (knowledge-CLI and release-machine fixes only), and this release
-explicitly accepts that lag rather than bumping the pin mid-release.
+This feature release publishes **Flow 0.29.0** and **Teammate 2.6.1** on top
+of v0.28.0. **Cockpit 0.23.0**, **Settings-Core 0.2.1**,
+**Backend-Core 0.1.3**, and **Backends 0.1.3** are unchanged. Flow now pins
+the current external engine, `maestro-flow@0.5.86`.
 
-Three headline capabilities ship together:
+Three capabilities define the release:
 
-1. **Provider-owned teammate remote channels** — an SSH host-reference
-   provider can now open a dedicated, admission-brokered channel for teammate
-   RPC instead of falling back to ad-hoc SSH exec. The Flow side owns a fixed
-   broker (2 per host / 8 global, abortable, shutdown-safe) exposed through
-   the ssh-manager host provider surface.
-2. **Smart teammate model selection** — a global Smart Mode
-   (off/economy/balanced/sota) persisted in the model-routing v3 store, a
-   routing-tab Ctrl+S toggle, and a `model_intelligence` view (OpenRouter
-   benchmark ranks with 24h file cache) surfaced through
-   `model_availability`. Intelligence ranks are advisory only and never
-   override availability.
-3. **Receipt-bound wake protocol v1** — auto-compaction wakes are fenced by
-   capability envelopes, wakeId binding, absolute deadlines, and
-   supersede/expiry detection on both the producer (Flow relay) and consumer
-   (teammate subprocess attempt) sides, with fail-closed durable persistence.
+1. **Workspace-shared Gateway Board** — versioned contracts, durable task
+   storage, optimistic revisions, claim leases, transitions, and Session,
+   Plan, Todo, and endpoint links are exposed through authenticated local IPC.
+2. **Durable execution handoffs** — Todo tasks persist bounded next-step
+   recommendations and task-relative file loading value; New Context recovery
+   deterministically selects the relevant actor-, Goal-, and Plan-scoped handoff.
+3. **Hardened teammate launching** — shell-free, provenance-bearing Pi binary
+   resolution handles native PATH entries and verified Windows shims while
+   structured child-process diagnostics preserve bounded failure evidence.
 
-Also included: Plan confirmation handoffs now execute through the New Context
-continuation (`continueAfterReset`/`onCancelled`, 20KB carry-forward budget),
-the gateway gains an idempotent `service ensure` action with a Windows
-Startup resident backend (Startup-folder shortcut, explicitly not a Windows
-Service) plus a hardened private-state lock (TOCTOU-narrowed stale reclaim,
-symlink/replace detection, heartbeat partial-write loop), and Cockpit ships
-target routing / integration widgets and compact-form styling.
+Plan mode also gains explicit model-transition reporting and deterministic Act
+model restoration. Foreground Teammate and `bash_bg run` calls now share one
+session-scoped Alt+B dispatcher, so nested work detaches outermost-first without
+terminating the process. Gateway workspace, job, file, session, and teammate
+services receive the contract and lifecycle updates needed by the shared board.
 
 ## Highlights
 
-### Flow 0.28.0
+### Flow 0.29.0
 
-- **SSH remote channel broker** - new `src/ssh-manager/remote-channel.ts`
-  (`TeammateRemoteChannelBroker`, 2/host + 8/global caps, abort + shutdown)
-  wired into the host provider `openTeammateRemoteChannel` capability;
-  `sshHostReferenceIssue` compatibility moves into the broker. Covered by
-  `test/ssh-manager-remote-channel.test.ts` (235 lines).
-- **Smart model selection surface** - new `src/providers/model-intelligence.ts`
-  (374 lines: OpenRouter five-dimension ranking, 24h atomic-write cache,
-  taskType + preference mapping, stale/unavailable degradation) and a
-  `taskType`-aware `model_intelligence` view in
-  `src/tools/model-availability.ts`. Covered by
-  `test/model-intelligence.test.ts` and `test/model-availability.test.ts`.
-- **Receipt-bound wake protocol v1** - `src/compaction/auto-compaction.ts`
-  wake lifecycle hardening (branch-checkpoint depth anchors, supersede on new
-  user input, deadline expiry, fail-closed durable persistence retry) and
-  relay capability envelopes in `src/compaction/teammate-compaction-relay.ts`.
-- **Plan New Context continuation** - `src/tools/plan.ts` /
-  `plan-confirm.ts` schedule a deterministic reset via `scheduleNewContext`
-  with in-memory `continueAfterReset` / `onCancelled` callbacks;
-  `src/compaction/new-context.ts` accepts `source: "plan-confirm"` and raises
-  the carry-forward budget to `NEW_CONTEXT_MAX_PLAN_HANDOFF_BYTES` (20KB).
-- **Gateway resident ensure + Windows Startup backend** -
-  `src/gateway/resident-service.ts` (+680: idempotent `ensure()` with 15s
-  readiness polling, adapter-per-manifest selection, startupName /
-  shortcutDigest / windowsCreate state machine, schtasks creation-termination
-  tracking, absence-observation clock guard); `cli.ts` gains `service ensure`
-  with `--windows-startup` / `--detached-fallback` mutual-exclusion
-  validation.
-- **Hardened private-state lock** - `src/gateway/private-state-transaction.ts`
-  captures the owner before re-validating staleness (TOCTOU narrowed),
-  detects symlink/replace on the reclaim marker (lstat dev+ino), and loops
-  heartbeat partial writes.
-- **RPC sender fallback** - `src/gateway/services/teammate-service.ts` falls
-  back to the public RPC sender when an injected port omits `send`.
-- **Gateway CLI binary** - `bin/pi-maestro-gateway.mjs` is now packaged
-  (`bin` entry + `bin/` in files), and a public `pi-maestro-flow/gateway/v1`
-  export is added.
-- **Committed earlier in the window** - gateway local runtime + SSH
-  orchestration, ssh pairing store / resident service / pi-config sync,
-  session-history recovery unification, the process-wide `/advisor` broker,
-  durable completion publication, browser lifecycle hardening, computer-use
-  pointer feedback, hidden Windows child consoles, and serialized Plan
-  handoff submission.
+- **Gateway Board contracts and storage** — new `src/gateway/board-contracts.ts`
+  and `board-store.ts` define the versioned board model, revision fencing,
+  dependency-aware state transitions, claim generations and lease expiry,
+  completion policy, and durable Session/Plan/Todo/resource links.
+- **Board and workspace services** — new `services/board-service.ts`,
+  `services/workspace-service.ts`, and `tools/gateway-board.ts` expose the board
+  through authenticated local IPC; `local-client.ts`, the gateway catalog,
+  policy, runtime, CLI, and service surfaces carry the new operations.
+- **Durable Todo handoffs** — Todo create/update/advance accept up to three
+  next steps plus file loading values (`required`, `conditional`, `skip`,
+  `unknown`) with bounded reasons and reload conditions. Serialization,
+  extension schemas, rendering, and child proxy guidance preserve the data.
+- **Deterministic New Context recovery** — recovery capsules select actor-owned
+  active/completed handoffs, scope them by the current Goal and approved Plan,
+  bound their payload, and emit explicit checkpoint/file-loading guidance.
+- **Plan/Act model restoration** — Plan entry records the selected planning
+  model, confirmation reports the transition, and Execute/Exit restore the
+  prior Act model without leaking Plan-mode state.
+- **Gateway lifecycle hardening** — job cancellation and output handling,
+  file/exec/session/teammate services, path ownership, IPC contracts, and
+  policy checks are aligned with the shared workspace surface.
+- **Shared foreground detach** — `bash_bg run` can be detached immediately with
+  Alt+B and continues under normal background job ownership; the shared
+  dispatcher handles nested foreground owners outermost-first with one TUI
+  listener and deterministic session cleanup.
+- **Compaction relay resilience** — teammate compaction telemetry avoids sends
+  on disconnected IPC and treats EPIPE/channel-closed failures as settled
+  transport loss rather than an unhandled error.
 
-### Teammate 2.6.0
+### Teammate 2.6.1
 
-- **Provider-owned remote channels** - `src/public/v1/ssh-hosts.ts` adds the
-  optional `openTeammateRemoteChannel` capability with strict stream/abort
-  validation; `src/remote/ssh.ts` prefers provider channels for
-  host-reference configs with convergent close().
-- **Smart mode** - `src/models/model-routing.ts` gains
-  `TeammateSmartMode` (off/economy/balanced/sota) persisted in the global v3
-  store, `setGlobalSmartMode` / `getGlobalSmartMode`, and
-  `appendSmartModelSelectionContext` with a reversible marked block injected
-  for the root agent only; routing tab Ctrl+S cycles modes (zh/en locales).
-- **Wake protocol v1 consumer** - `src/runs/pi-subprocess-attempt.ts`
-  (+134) implements capability negotiation, the receipt state machine
-  (prepared→queued→consumed→turn-started + cancel/fail), wakeId binding,
-  monotonic absolute deadlines, and pre-settlement IPC drain;
-  `src/runs/execution.ts` adds `settlement-authority-insufficient` and
-  `model-selection-unsupported` failure decisions.
-- **Stale declaration catch-up** - `types/runs/recovery-protocol.d.ts`,
-  `retry.d.ts`, and `shared/types.d.ts` are regenerated to match previously
-  committed src.
-
-### Cockpit 0.23.0
-
-- **Target routing & integration** - new `src/target-routing.ts` (667 lines)
-  and `src/target-integration.ts` (305 lines) with full test coverage
-  (`tests/target-routing.test.ts`, `tests/target-integration.test.ts`).
-- **Compact-form styling** - new `src/compaction-style.ts` (233 lines) for
-  compaction summaries, covered by `tests/compaction-style.test.ts`.
-- **Committed earlier in the window** - target routing / terminal
-  presentation improvements.
-
-### Backend-Core 0.1.3 / Backends 0.1.3
-
-- **`SshHostReferenceIssue` extension** - three new issues
-  (`unsupported-managed-key`, `unsupported-jump-host`, `untrusted-host`)
-  consumed by the remote-channel compatibility check.
-- **Spawn hardening** - the DSH keyscan runner spawns with
-  `shell: false, windowsHide: true`.
+- **Provenance-bearing Pi launcher resolution** — `execution-infra.ts`
+  resolves explicit overrides, native PATH binaries, verified Windows npm
+  shims, verified host package bins, and a final compatibility fallback without
+  enabling shell execution.
+- **Structured child diagnostics** — spawn, child-error, and close events now
+  include bounded stderr, exit code, signal, lifecycle phase, and launcher
+  source so failures remain actionable across process boundaries.
+- **Public foreground-detach coordination** — the new
+  `pi-maestro-teammate/v1/foreground-detach` surface lets Flow and Teammate
+  share one session-safe Alt+B ownership queue.
+- **Focused regression coverage and declarations** — launcher precedence,
+  Windows shim parsing, fallback behavior, and diagnostic projection are
+  covered in `performance-buffers-and-spawn.test.ts`; declarations are
+  regenerated from the release source.
 
 ## Package version table
 
 | Package | Previous | New |
 |---|---|---|
-| pi-maestro-flow | 0.27.1 | 0.28.0 |
-| pi-maestro-teammate | 2.5.0 | 2.6.0 |
-| pi-cockpit | 0.22.1 | 0.23.0 |
-| pi-maestro-backend-core | 0.1.2 | 0.1.3 |
-| pi-maestro-backends | 0.1.2 | 0.1.3 |
+| pi-maestro-flow | 0.28.0 | 0.29.0 |
+| pi-maestro-teammate | 2.6.0 | 2.6.1 |
+| pi-cockpit | 0.23.0 | 0.23.0 (unchanged) |
 | pi-maestro-settings-core | 0.2.1 | 0.2.1 (unchanged) |
-| maestro-flow (engine pin) | 0.5.84 | 0.5.84 (unchanged, lag accepted) |
+| pi-maestro-backend-core | 0.1.3 | 0.1.3 (unchanged) |
+| pi-maestro-backends | 0.1.3 | 0.1.3 (unchanged) |
+| maestro-flow (engine pin) | 0.5.84 | 0.5.86 |
 
 ## Stats
 
-- **26 commits** on top of v0.27.1 (20 pre-existing + 6 worktree-landing
-  commits), baseline tag `v0.27.1`, release range verified at
-  release-commit time
-- **280 files** changed, **+35,564 / -3,282** lines before release-note
-  updates
+- **1 release commit** on top of baseline tag `v0.28.0`; all selected worktree
+  changes are landed atomically in the release commit.
+- **83 implementation/test/support files**, **+5,694 / -455** lines before
+  Flow version/pin, lockfile, release-note, and documentation updates.
 
 ## Install / Upgrade
 
 ```bash
-pi install npm:pi-maestro-flow@0.28.0
+pi install npm:pi-maestro-flow@0.29.0
 ```
 
-This pulls the exact published companions `pi-maestro-teammate@2.6.0` and
-`pi-cockpit@0.23.0`, plus `pi-maestro-settings-core@0.2.1`,
+This pulls the exact published companion `pi-maestro-teammate@2.6.1` and
+existing `pi-cockpit@0.23.0`, `pi-maestro-settings-core@0.2.1`,
 `pi-maestro-backend-core@0.1.3`, and `pi-maestro-backends@0.1.3`.

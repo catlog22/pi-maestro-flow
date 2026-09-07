@@ -65,6 +65,24 @@ test("idempotent replay is payload-bound and does not write", async (t) => {
   assert.equal(await readFile(path, "utf8"), before);
 });
 
+test("close returns and replays the committed session snapshot", async (t) => {
+  const { store, state, identity, tick } = await fixture(t);
+  tick(42);
+  const closed = await store.close(state.session.id, mutation(1, "close", identity));
+  const persisted = await store.require(state.session.id);
+  const operation = persisted.operations.find((entry) => entry.id === "close");
+
+  assert.equal(closed.status, "closed");
+  assert.equal(closed.revision, 2);
+  assert.equal(closed.updatedAt, baseNow + 42);
+  assert.deepEqual(closed, persisted.session);
+  assert.equal(operation?.committedRevision, 2);
+  assert.deepEqual(operation?.result, persisted.session);
+
+  const replay = await store.close(state.session.id, mutation(1, "close", identity));
+  assert.deepEqual(replay, persisted.session);
+});
+
 test("Todo dependencies reject missing references and cycles", async (t) => {
   const { store, state, identity } = await fixture(t); const todos = new GatewayTodoStore(store);
   await assert.rejects(() => todos.create(state.session.id, { id: "bad", subject: "bad", dependencyIds: ["missing"] }, mutation(1, "bad", identity)), GatewayTodoDependencyError);

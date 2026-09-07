@@ -855,9 +855,10 @@ test("P7 acceptance block", async (t) => {
       const manifest = parseModelRegistryManifest(raw, file);
       const dshConfig = manifest.backends["dsh-local"]!.config!;
       assert.equal(dshConfig.cordisConfig, "cordis.yml");
-      // Declared defaults were shown and applied on empty input.
+      // Declared defaults were shown and applied on empty input. The local
+      // port fallback belongs to the runtime resolver, not the persisted manifest.
       assert.equal(dshConfig.provider, "deepseek-official");
-      assert.equal(dshConfig.port, 22);
+      assert.equal(dshConfig.port, undefined);
       assert.equal(dshConfig.requestTimeoutMs, 300_000);
       // Credential fields hold a NAME default, never a value.
       assert.equal(dshConfig.apiKeyEnv, "DEEPSEEK_API_KEY");

@@ -21,6 +21,16 @@ export interface PlanModelRuntimeOptions {
   loadModel?: (cwd: string, projectTrusted: boolean) => string | undefined;
 }
 
+export interface PlanModelTransition {
+  current: string;
+  act?: string;
+}
+
+export interface PlanModelController {
+  restoreActModel(ctx: Pick<ExtensionContext, "model" | "ui">): Promise<boolean>;
+  describeTransition(ctx: Pick<ExtensionContext, "model">): PlanModelTransition | undefined;
+}
+
 function readPlanModelPatch(filePath: string): PlanModelPatch {
   if (!existsSync(filePath)) return { present: false };
   try {
@@ -108,7 +118,7 @@ function parseModelReference(reference: string): { provider: string; id: string 
 export function registerPlanModelSelection(
   pi: ExtensionAPI,
   options: PlanModelRuntimeOptions = {},
-): void {
+): PlanModelController {
   const planModeActive = options.isPlanMode ?? isPlanMode;
   const configuredModel = options.loadModel ?? loadPlanModelSetting;
   let restoreModel: NonNullable<ExtensionContext["model"]> | undefined;
@@ -152,13 +162,13 @@ export function registerPlanModelSelection(
     },
   });
 
-  const warnOnce = (ctx: ExtensionContext, message: string): void => {
+  const warnOnce = (ctx: Pick<ExtensionContext, "ui">, message: string): void => {
     if (warnedMessages.has(message)) return;
     warnedMessages.add(message);
     ctx.ui.notify(message, "warning");
   };
 
-  const restore = async (ctx: ExtensionContext): Promise<boolean> => {
+  const restore = async (ctx: Pick<ExtensionContext, "model" | "ui">): Promise<boolean> => {
     if (!restoreModel) return true;
     if (modelKey(ctx.model) === modelKey(restoreModel)) {
       restoreModel = undefined;
@@ -227,4 +237,14 @@ export function registerPlanModelSelection(
   pi.on("session_shutdown", async (_event, ctx) => {
     if (await restore(ctx)) warnedMessages.clear();
   });
+
+  return {
+    restoreActModel: restore,
+    describeTransition(ctx) {
+      const current = modelKey(ctx.model);
+      if (!current) return undefined;
+      const act = modelKey(restoreModel);
+      return act && act !== current ? { current, act } : { current };
+    },
+  };
 }

@@ -21,8 +21,8 @@
     "logo_alt": "Maestro Flow Logo"
   },
   "announcement": {
-    "title": "v0.28.0 is out — SSH remote channels + smart model selection + receipt-bound wake protocol. Upgrade:",
-    "install": "pi install npm:pi-maestro-flow@0.28.0",
+    "title": "v0.29.0 is out — shared Gateway Board + durable handoffs + hardened agent launching. Upgrade:",
+    "install": "pi install npm:pi-maestro-flow@0.29.0",
     "close": "Dismiss"
   },
   "accessibility": {

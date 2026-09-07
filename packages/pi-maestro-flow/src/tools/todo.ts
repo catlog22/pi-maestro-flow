@@ -25,8 +25,12 @@ import {
 } from "../session/types.ts";
 import {
   appendTodoResourceUris,
+  cloneTodoHandoff,
+  normalizeTodoHandoff,
   normalizeTodoResourceUris,
   type TodoAdvanceTransition,
+  type TodoHandoff,
+  type TodoHandoffInput,
   type TodoUpdateField,
 } from "./todo-contract.ts";
 import {
@@ -86,6 +90,7 @@ export interface TodoTask {
   context?: string;
   skills: TodoSkillBinding[];
   resourceUris: string[];
+  handoff?: TodoHandoff;
   skillActivation?: SkillActivationMetadata;
   summary?: string;
   origin?: TodoTaskOrigin;
@@ -106,6 +111,7 @@ export interface TodoBatchSpec {
   context?: string;
   skills?: TodoSkillBinding[];
   resourceUris?: string[];
+  handoff?: TodoHandoffInput;
   assignee?: string;
   blockedBy?: number[];
   goalId?: string;
@@ -121,6 +127,7 @@ export interface TodoUpdateSpec {
   skills?: TodoSkillBinding[] | null;
   summary?: string;
   resourceUris?: string[];
+  handoff?: TodoHandoffInput;
   updateFields?: TodoUpdateField[];
   assignee?: string;
   goalId?: string;
@@ -136,6 +143,7 @@ export interface TodoParams {
   skills?: TodoSkillBinding[] | null;
   summary?: string;
   resourceUris?: string[];
+  handoff?: TodoHandoffInput;
   transition?: TodoAdvanceTransition;
   updateFields?: TodoUpdateField[];
   id?: string;
@@ -254,6 +262,7 @@ export function onSessionStart(ctx: TodoContext): void {
   activeSkillSnapshots = new Map();
   runSkillInjection = undefined;
   tasks = loadTasksFromSession(ctx);
+  syncTodoRevision();
   syncTaskIdCounter();
   knownActors = new Map([[ROOT_TODO_ACTOR.id, cloneActor(ROOT_TODO_ACTOR)]]);
   for (const task of tasks.values()) {
@@ -398,9 +407,10 @@ export function reconcileMirrorTasks(
       status: blockedBy.length > 0 && spec.status === "pending" ? "blocked" : spec.status,
       blockedBy,
       ...(spec.context ? { context: spec.context } : {}),
-      // Workflow mirrors do not own completion resources; preserve any local
-      // references already attached to an existing mirror task.
+      // Workflow mirrors do not own completion resources or handoff annotations;
+      // preserve local values already attached to an existing mirror task.
       resourceUris: existing?.resourceUris ? [...existing.resourceUris] : [],
+      ...(existing?.handoff ? { handoff: cloneTodoHandoff(existing.handoff) } : {}),
       skills: spec.skills.map((skill) => ({ ...skill })),
       ...(spec.summary ? { summary: spec.summary } : {}),
       origin,
@@ -769,6 +779,7 @@ function handleCreate(params: TodoParams, ctx: ExtensionContext, actor: TodoActo
     if (params.context !== undefined) conflicting.push("context");
     if (params.skills !== undefined) conflicting.push("skills");
     if (params.resourceUris !== undefined) conflicting.push("resourceUris");
+    if (params.handoff !== undefined) conflicting.push("handoff");
     if (params.goalId !== undefined) conflicting.push("goalId");
     if (conflicting.length > 0) {
       return err(`create accepts either a single task (subject) or a batch (tasks), not both; ${conflicting.join(", ")} cannot accompany tasks.`, "create");
@@ -786,6 +797,9 @@ function handleCreate(params: TodoParams, ctx: ExtensionContext, actor: TodoActo
   const blockedBy = blockerResolution.blockedBy;
   const assignee = resolveAssignee(params.assignee, actor);
   if ("error" in assignee) return err(assignee.error, "create");
+  const handoff = params.handoff === undefined
+    ? undefined
+    : normalizeTodoHandoff(params.handoff, undefined, todoRevision + 1);
 
   const task: TodoTask = {
     id,
@@ -795,6 +809,7 @@ function handleCreate(params: TodoParams, ctx: ExtensionContext, actor: TodoActo
     blockedBy,
     skills: params.skills ?? [],
     resourceUris: normalizeTodoResourceUris(params.resourceUris),
+    ...(handoff ? { handoff } : {}),
     ...(params.context ? { context: params.context } : {}),
     ...(params.planHandoffKey ? { planHandoffKey: params.planHandoffKey } : {}),
     ...(params.goalId ? { goalId: params.goalId } : {}),
@@ -864,8 +879,12 @@ function handleBatchCreate(specs: TodoBatchSpec[], actor: TodoActorRef, planHand
     if ("error" in assignee) return err(`tasks[${i}]: ${assignee.error}`, "create");
 
     let skills: TodoSkillBinding[];
+    let handoff: TodoHandoff | undefined;
     try {
       skills = spec.skills ? normalizeSkillBindings(spec.skills) : [];
+      handoff = spec.handoff === undefined
+        ? undefined
+        : normalizeTodoHandoff(spec.handoff, undefined, todoRevision + 1);
     } catch (e) {
       return err(`tasks[${i}]: ${e instanceof Error ? e.message : String(e)}`, "create");
     }
@@ -879,6 +898,7 @@ function handleBatchCreate(specs: TodoBatchSpec[], actor: TodoActorRef, planHand
       blockedBy,
       skills,
       resourceUris: normalizeTodoResourceUris(spec.resourceUris),
+      ...(handoff ? { handoff } : {}),
       ...(spec.context ? { context: spec.context } : {}),
       ...(planHandoffKey ? { planHandoffKey } : {}),
       ...(spec.goalId ? { goalId: spec.goalId } : {}),
@@ -943,6 +963,11 @@ function prepareTodoUpdate(
   }
   if (updates("resourceUris")) {
     draft.resourceUris = normalizeTodoResourceUris(params.resourceUris);
+  }
+  if (updates("handoff")) {
+    const handoff = normalizeTodoHandoff(params.handoff!, draft.handoff, todoRevision + 1);
+    if (handoff) draft.handoff = handoff;
+    else delete draft.handoff;
   }
   if (updates("goalId")) {
     if (params.goalId === "") delete draft.goalId;
@@ -1098,7 +1123,7 @@ async function handleUpdate(
   generation: number,
 ): Promise<FlowToolResult> {
   if (params.updates !== undefined) {
-    const conflicting = ["id", "subject", "description", "status", "blockedBy", "context", "skills", "summary", "resourceUris", "transition", "updateFields", "assignee", "goalId"]
+    const conflicting = ["id", "subject", "description", "status", "blockedBy", "context", "skills", "summary", "resourceUris", "handoff", "transition", "updateFields", "assignee", "goalId"]
       .filter((field) => params[field as keyof TodoParams] !== undefined);
     if (conflicting.length > 0) {
       return err(`update accepts either id with top-level fields or updates, not both; ${conflicting.join(", ")} cannot accompany updates`, "update");
@@ -1212,6 +1237,18 @@ function handleGet(params: TodoParams): FlowToolResult {
   }
 
   if (task.summary) lines.push(`Summary: ${task.summary}`);
+  if (task.handoff) {
+    if (task.handoff.nextSteps.length > 0) {
+      lines.push("Handoff next steps:");
+      for (const step of task.handoff.nextSteps) lines.push(`- ${step}`);
+    }
+    if (task.handoff.files.length > 0) {
+      lines.push("Handoff files:");
+      for (const file of task.handoff.files) {
+        lines.push(`- ${file.path} [${file.value}]: ${file.reason}${file.when ? `; when=${file.when}` : ""}`);
+      }
+    }
+  }
 
   if (task.context) lines.push(`Context: ${truncate(task.context, 120)}`);
   if (task.skills.length > 0) {
@@ -1291,8 +1328,8 @@ async function handleAdvance(
     ? undefined
     : normalizeTodoResourceUris(params.resourceUris);
   if (!active) {
-    if (params.id !== undefined || params.summary !== undefined || suppliedResources !== undefined || params.transition !== undefined) {
-      return err(`@${actor.label} has no in_progress task. Omit id, summary, resourceUris, and transition to activate the next runnable task.`, "advance");
+    if (params.id !== undefined || params.summary !== undefined || suppliedResources !== undefined || params.handoff !== undefined || params.transition !== undefined) {
+      return err(`@${actor.label} has no in_progress task. Omit id, summary, resourceUris, handoff, and transition to activate the next runnable task.`, "advance");
     }
     const next = runnableTasksForActor(actor.id)[0];
     if (next?.origin) {
@@ -1321,15 +1358,17 @@ async function handleAdvance(
   const completionResourceUris = suppliedResources === undefined
     ? undefined
     : appendTodoResourceUris(active.resourceUris, suppliedResources);
+  const completionFields: TodoUpdateField[] = ["status", "summary"];
+  if (completionResourceUris !== undefined) completionFields.push("resourceUris");
+  if (params.handoff !== undefined) completionFields.push("handoff");
   const completion = await handleUpdate({
     action: "update",
     id: active.id,
     status: "completed",
     summary,
     ...(completionResourceUris !== undefined ? { resourceUris: completionResourceUris } : {}),
-    updateFields: completionResourceUris !== undefined
-      ? ["status", "summary", "resourceUris"]
-      : ["status", "summary"],
+    ...(params.handoff !== undefined ? { handoff: params.handoff } : {}),
+    updateFields: completionFields,
   }, ctx, actor, generation);
   if (completion.isError) return relabelTodoResult(completion, "advance");
 
@@ -1570,6 +1609,7 @@ function cloneTodoTask(task: TodoTask): TodoTask {
     blockedBy: [...task.blockedBy],
     skills: task.skills.map((skill) => ({ ...skill })),
     resourceUris: task.resourceUris ? [...task.resourceUris] : [],
+    ...(task.handoff ? { handoff: cloneTodoHandoff(task.handoff) } : {}),
     createdBy: cloneActor(task.createdBy),
     assignee: cloneActor(task.assignee),
     ...(task.origin ? { origin: { ...task.origin } } : {}),
@@ -1600,6 +1640,17 @@ function syncTaskIdCounter(state: Map<string, TodoTask> = tasks): void {
     if (Number.isInteger(n) && n > max) max = n;
   }
   nextTaskId = max + 1;
+}
+
+/** Keep new handoff annotations newer than every revision restored from disk. */
+function syncTodoRevision(state: Map<string, TodoTask> = tasks): void {
+  for (const task of state.values()) {
+    if (!task.handoff) continue;
+    todoRevision = Math.max(todoRevision, task.handoff.nextStepsRevision ?? 0);
+    for (const file of task.handoff.files) {
+      todoRevision = Math.max(todoRevision, file.annotationRevision);
+    }
+  }
 }
 
 function cloneSkillActivation(activation: SkillActivationMetadata): SkillActivationMetadata {
@@ -1855,6 +1906,7 @@ function taskChanged(before: TodoTask, after: TodoTask): boolean {
     before.goalId !== after.goalId ||
     JSON.stringify(before.skills) !== JSON.stringify(after.skills) ||
     JSON.stringify(before.resourceUris) !== JSON.stringify(after.resourceUris) ||
+    JSON.stringify(before.handoff) !== JSON.stringify(after.handoff) ||
     JSON.stringify(before.origin) !== JSON.stringify(after.origin) ||
     JSON.stringify(before.createdBy) !== JSON.stringify(after.createdBy) ||
     JSON.stringify(before.assignee) !== JSON.stringify(after.assignee) ||

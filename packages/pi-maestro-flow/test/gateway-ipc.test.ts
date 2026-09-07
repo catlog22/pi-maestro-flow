@@ -75,7 +75,7 @@ test("real connect --stdio performs initialize, list, and call through the daemo
   const client = new Client({ name: "gateway-ipc-test", version: "1" });
   await client.connect(transport);
   const tools = await client.listTools();
-  assert.deepEqual(tools.tools.map((tool) => tool.name), ["host", "exec", "job", "file", "teammate", "session", "todo", "monitor"]);
+  assert.deepEqual(tools.tools.map((tool) => tool.name), ["workspace", "board", "host", "exec", "job", "file", "teammate", "session", "todo", "monitor"]);
   const called = await client.callTool({ name: "host", arguments: { action: "test" } });
   const text = called.content[0];
   assert.equal(text?.type, "text");
@@ -214,6 +214,35 @@ test("owner-authenticated IPC pairing lists and revokes without persisting raw t
   assert.equal(listed[0]?.token, undefined);
   await assert.rejects(() => requestGatewayIpcControl({ address: owner.socket!, ownerToken: "wrong-owner-token", action: "pair-list" }), /owner token is invalid/);
   assert.deepEqual(await requestGatewayIpcControl({ address: owner.socket!, ownerToken: owner.ownerToken, action: "pair-revoke", data: { id: issued.id } }), { revoked: true });
+});
+
+test("owner-authenticated IPC manages workspace leases with generation fences and redacted responses", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "gateway-ipc-workspaces-"));
+  const workspace = join(root, "workspace");
+  await mkdir(workspace);
+  const config = createTestGatewayConfig(root);
+  const daemon = new GatewayDaemon({ config, cwd: root, http: false });
+  t.after(async () => { await daemon.stop(); await rm(root, { recursive: true, force: true }); });
+  await daemon.start();
+  const owner = daemon.owner!;
+
+  const registered = await requestGatewayIpcControl({
+    address: owner.socket!, ownerToken: owner.ownerToken, action: "workspace-register", data: { path: workspace, ttlSeconds: 60 },
+  }) as { id: string; generation: number; ownerToken?: string };
+  assert.equal(registered.generation, 1);
+  assert.equal(registered.ownerToken, undefined);
+  await assert.rejects(
+    () => requestGatewayIpcControl({ address: owner.socket!, ownerToken: owner.ownerToken, action: "workspace-renew", data: { workspaceId: registered.id, ttlSeconds: 60, expectedGeneration: 2 } }),
+    /stale/u,
+  );
+  const renewed = await requestGatewayIpcControl({
+    address: owner.socket!, ownerToken: owner.ownerToken, action: "workspace-renew", data: { workspaceId: registered.id, ttlSeconds: 60, expectedGeneration: 1 },
+  }) as { generation: number; ownerToken?: string };
+  assert.equal(renewed.generation, 1);
+  assert.equal(renewed.ownerToken, undefined);
+  assert.deepEqual(await requestGatewayIpcControl({
+    address: owner.socket!, ownerToken: owner.ownerToken, action: "workspace-remove", data: { workspaceId: registered.id, expectedGeneration: 1 },
+  }), { removed: true });
 });
 
 test("pairing is refused for non-loopback plaintext HTTP", async (t) => {

@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import type { ExtensionAPI, Theme, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, Theme, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import {
 	BASH_BG_QUERY_EVENT,
@@ -79,6 +79,8 @@ interface ToolLike {
 			tail?: number;
 		},
 		signal?: AbortSignal,
+		onUpdate?: unknown,
+		ctx?: ExtensionContext,
 	): Promise<AgentToolResult<BashBgDetails>>;
 	renderResult(
 		result: AgentToolResult<BashBgDetails>,
@@ -102,6 +104,7 @@ interface Harness {
 		options?: { triggerTurn?: boolean; deliverAs?: string };
 	}>;
 	renderers: Map<string, MessageRendererLike>;
+	sendTerminalInput: (data: string) => unknown;
 	shutdown: () => Promise<void>;
 	startSession: () => void;
 }
@@ -113,6 +116,18 @@ function createHarness(options: RegisterBashBgOptions = {}): Harness {
 	const snapshots: BashBgSnapshotPayload[] = [];
 	const messages: Harness["messages"] = [];
 	const renderers = new Map<string, MessageRendererLike>();
+	let terminalInput: ((data: string) => unknown) | undefined;
+	const context = {
+		hasUI: true,
+		ui: {
+			onTerminalInput(handler: (data: string) => unknown) {
+				terminalInput = handler;
+				return () => {
+					if (terminalInput === handler) terminalInput = undefined;
+				};
+			},
+		},
+	} as unknown as ExtensionContext;
 	const emit = (channel: string, payload?: unknown): void => {
 		if (channel === BASH_BG_UPDATE_EVENT) snapshots.push(payload as BashBgSnapshotPayload);
 		for (const handler of eventHandlers.get(channel) ?? []) handler(payload);
@@ -142,12 +157,21 @@ function createHarness(options: RegisterBashBgOptions = {}): Harness {
 	} as unknown as ExtensionAPI;
 	registerBashBg(api, options);
 	assert.ok(registeredTool);
+	const tool = registeredTool;
 	return {
-		tool: registeredTool,
+		tool: {
+			execute: (id, params, signal) => tool.execute(id, params, signal, undefined, context),
+			renderResult: (result, renderOptions, theme) => tool.renderResult(result, renderOptions, theme),
+		},
 		emit,
 		snapshots,
 		messages,
 		renderers,
+		sendTerminalInput: (data) => {
+			const handler = terminalInput;
+			assert.ok(handler, "foreground run must register a terminal input listener");
+			return handler(data);
+		},
 		shutdown: async () => {
 			await Promise.all((lifecycleHandlers.get("session_shutdown") ?? []).map((handler) => handler()));
 		},
@@ -386,6 +410,37 @@ test("bash_bg run follows teammate detach semantics after the foreground timeout
 		assert.equal(harness.messages.length, 1);
 		assert.equal(harness.messages[0]?.options?.triggerTurn, true);
 		assert.equal(harness.messages[0]?.options?.deliverAs, undefined);
+	} finally {
+		await harness.shutdown();
+	}
+});
+
+test("bash_bg run Alt+B detaches to background without terminating the process", async () => {
+	const harness = createHarness();
+	try {
+		const running = harness.tool.execute("manual-background", {
+			action: "run",
+			command: 'node -e "setTimeout(()=>console.log(\'manual done\'),1500)"',
+			timeout: 30,
+		});
+		const started = harness.snapshots.at(-1)?.jobs[0];
+		assert.ok(started);
+		assert.equal(started.status, "running");
+		assert.equal(started.background, false);
+
+		assert.deepEqual(harness.sendTerminalInput("\x1bb"), { consume: true });
+		const result = await running;
+		const text = result.content[0] && "text" in result.content[0] ? result.content[0].text : "";
+		assert.match(text, /Detached to background as job/);
+		assert.equal(result.details?.jobId, started.id);
+		assert.equal(result.details?.running, true);
+		assert.equal(harness.snapshots.at(-1)?.jobs.find((job) => job.id === started.id)?.background, true);
+		assert.deepEqual(harness.messages, []);
+
+		const completed = await waitForStatus(harness.snapshots, started.id, "completed");
+		assert.equal(completed.pid, started.pid);
+		await waitForMessage(harness.messages, "bash-bg-complete");
+		assert.equal(harness.messages.length, 1);
 	} finally {
 		await harness.shutdown();
 	}

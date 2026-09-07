@@ -5,11 +5,11 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { GatewayConfig } from "./config.ts";
 import { loadGatewayConfig } from "./config.ts";
-import type { GatewayPrincipal, GatewayResult } from "./contracts.ts";
+import type { GatewayPrincipal, GatewayResult, GatewayToolName } from "./contracts.ts";
 import { GATEWAY_PROTOCOL_VERSION } from "./contracts.ts";
 import { GatewayCatalog } from "./catalog.ts";
 import { GatewayAuditSink } from "./audit.ts";
-import { GatewayPolicy } from "./policy.ts";
+import { GatewayPolicy, GatewayPolicyError } from "./policy.ts";
 import { GatewayPairingStore } from "./pairing-store.ts";
 import { gatewayError } from "./result.ts";
 import { validateGatewayValue } from "./validation.ts";
@@ -25,6 +25,8 @@ import { GatewayTodoStore } from "./todo-store.ts";
 import { GatewaySessionService } from "./services/session-service.ts";
 import { GatewayTodoService } from "./services/todo-service.ts";
 import { GatewayMonitorService } from "./services/monitor-service.ts";
+import { WorkspaceService } from "./services/workspace-service.ts";
+import { BoardService } from "./services/board-service.ts";
 
 export interface GatewayRuntimeOptions {
   config?: GatewayConfig;
@@ -33,6 +35,31 @@ export interface GatewayRuntimeOptions {
   workspaceRegistry?: WorkspaceRegistry;
   teammatePort?: GatewayTeammatePort;
   pairingStore?: GatewayPairingStore;
+  warningSink?: (message: string) => void;
+}
+
+const READ_ACTIONS: Partial<Record<GatewayToolName, ReadonlySet<string>>> = {
+  workspace: new Set(["list", "get"]),
+  board: new Set(["list", "get", "observe"]),
+  host: new Set(["describe", "status", "test"]),
+  job: new Set(["list", "status", "logs"]),
+  file: new Set(["list", "stat", "read", "find", "grep", "realpath"]),
+  teammate: new Set(["list", "observe", "wait", "result"]),
+  session: new Set(["get", "list", "events"]),
+  todo: new Set(["list", "get"]),
+  monitor: new Set(["list", "observe", "wait", "result"]),
+};
+
+function principalHasCapability(principal: GatewayPrincipal, capability: string, toolName: GatewayToolName): boolean {
+  if (principal.transport === "stdio") return true;
+  if (principal.authenticated === true && principal.scopes.length === 0) return true;
+  return principal.scopes.some((scope) => scope === "*"
+    || scope === "gateway"
+    || scope === "gateway.*"
+    || scope === capability
+    || scope === toolName
+    || scope.startsWith(`${toolName}.`)
+    || scope.startsWith(`${toolName}:`));
 }
 
 export class GatewayRuntime {
@@ -41,6 +68,7 @@ export class GatewayRuntime {
   readonly registry: WorkspaceRegistry;
   readonly policy: GatewayPolicy;
   readonly pairingStore: GatewayPairingStore;
+  readonly workspace: WorkspaceService;
   readonly host: HostService;
   readonly exec: ExecService;
   readonly job: JobService;
@@ -50,14 +78,18 @@ export class GatewayRuntime {
   readonly todoStore: GatewayTodoStore;
   readonly session: GatewaySessionService;
   readonly todo: GatewayTodoService;
+  readonly board: BoardService;
   readonly monitor: GatewayMonitorService;
   readonly catalog: GatewayCatalog;
   readonly audit: GatewayAuditSink;
+  private readonly warningSink: (message: string) => void;
   private closed = false;
+  private warnedOpenMutation = false;
 
   private constructor(config: GatewayConfig, options: GatewayRuntimeOptions) {
     this.config = config;
     this.cwd = options.cwd ?? process.cwd();
+    this.warningSink = options.warningSink ?? ((message) => process.emitWarning(message, { code: "PI_MAESTRO_GATEWAY_OPEN_MUTATION" }));
     if (config.security.trustedFullAccess?.enabled && config.auth.mode === "open") {
       throw new Error("security.trustedFullAccess requires authenticated Gateway HTTP (auth.mode cannot be open)");
     }
@@ -77,6 +109,7 @@ export class GatewayRuntime {
       },
     });
     this.pairingStore = options.pairingStore ?? new GatewayPairingStore({ path: config.state.pairingPath });
+    this.workspace = new WorkspaceService(this.policy, this.registry);
     const stateRoot = config.state.rootDir;
     const jobsRoot = stateRoot ? join(stateRoot, "jobs") : gatewayJobsRoot(this.cwd);
     const taskJournalPath = stateRoot ? join(stateRoot, "tasks", "journal.json") : join(gatewayTasksRoot(this.cwd), "journal.json");
@@ -120,8 +153,23 @@ export class GatewayRuntime {
     this.todoStore = new GatewayTodoStore(this.sessionStore);
     this.session = new GatewaySessionService({ store: this.sessionStore, todos: this.todoStore, teammate: this.teammate, authMode: config.auth.mode, policy: this.policy });
     this.todo = new GatewayTodoService({ store: this.todoStore, sessions: this.sessionStore, authMode: config.auth.mode });
+    this.board = new BoardService({
+      policy: this.policy,
+      sessions: this.sessionStore,
+      todos: this.todoStore,
+      boardRoot: config.state.boardRoot ?? (stateRoot ? join(stateRoot, "board") : undefined),
+      maxTasks: config.limits.maxBoardTasks,
+      maxOperations: config.limits.maxBoardOperations,
+      maxEvents: config.limits.maxBoardEvents,
+      maxLeaseTtlMs: config.limits.maxLeaseTtlMs,
+      taskRetentionMs: config.retention.boardTasksMs,
+      operationRetentionMs: config.retention.boardOperationsMs,
+      eventRetentionMs: config.retention.boardEventsMs,
+    });
     this.monitor = new GatewayMonitorService({ sessions: this.sessionStore, teammate: this.teammate, authMode: config.auth.mode });
     this.catalog = new GatewayCatalog({
+      workspace: this.workspace,
+      board: this.board,
       host: this.host,
       exec: this.exec,
       job: this.job,
@@ -155,6 +203,15 @@ export class GatewayRuntime {
         else if (!args || typeof args !== "object" || Array.isArray(args)) result = failure("invalid_arguments", "Gateway tool arguments must be an object");
         else {
           const parsed = validateGatewayValue<Record<string, unknown>>(tool.inputSchema, args, `${name} arguments`);
+          const missingCapabilities = (tool.requiredCapabilities ?? []).filter((capability) => !principalHasCapability(principal, capability, tool.name));
+          if (missingCapabilities.length > 0) throw new GatewayPolicyError(`Gateway principal lacks required capabilities: ${missingCapabilities.join(", ")}`, "capability_denied");
+          if (this.isOpenHttpMutation(principal, tool.name, tool.mutating === true, parsed)) {
+            if (this.config.auth.allowOpenMutations === false) throw new GatewayPolicyError("HTTP mutations are disabled when auth.mode=open", "open_mutation_denied");
+            if (this.config.auth.allowOpenMutations === undefined && !this.warnedOpenMutation) {
+              this.warnedOpenMutation = true;
+              this.warningSink("HTTP mutation under auth.mode=open is using the legacy compatibility bridge; set auth.allow_open_mutations explicitly. Set false for read-only HTTP or true to acknowledge legacy mutation access.");
+            }
+          }
           this.policy.checkRequest(parsed);
           result = await this.policy.withConcurrency("request", async () => {
             const serviceResult = await tool.handler(principal, parsed);
@@ -170,7 +227,7 @@ export class GatewayRuntime {
         ? "invalid_arguments" : declaredCode ?? "internal_error";
       result = failure(code, error instanceof Error ? error.message : String(error));
     }
-    const deniedCodes = new Set(["policy_denied", "file_denied", "command_denied", "confirmation_required", "invalid_arguments", "invalid_principal"]);
+    const deniedCodes = new Set(["policy_denied", "file_denied", "command_denied", "confirmation_required", "invalid_arguments", "invalid_principal", "capability_denied", "open_mutation_denied"]);
     await this.audit.write({
       requestId: result.meta.requestId,
       principal,
@@ -186,7 +243,7 @@ export class GatewayRuntime {
   createMcpServer(principal: GatewayPrincipal): Server {
     const server = new Server(
       { name: "pi-maestro-gateway", version: String(GATEWAY_PROTOCOL_VERSION) },
-      { capabilities: { tools: {} }, instructions: "Use the fixed host, exec, job, file, teammate, session, todo, and monitor tools. Tool results are versioned GatewayResult envelopes." },
+      { capabilities: { tools: {} }, instructions: "Discover an authorized workspace with workspace.list/get, inspect or claim work with board.list/claim, bind an active session, plan with session/todo, execute with teammate, and observe with monitor. Tool results are versioned GatewayResult envelopes." },
     );
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
       tools: this.catalog.list().map((tool) => ({
@@ -194,16 +251,24 @@ export class GatewayRuntime {
         description: tool.description,
         inputSchema: tool.inputSchema,
         ...(tool.outputSchema === undefined ? {} : { outputSchema: tool.outputSchema }),
+        ...(tool.annotations === undefined ? {} : { annotations: tool.annotations }),
       })),
     }));
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const result = await this.call(request.params.name, request.params.arguments ?? {}, principal);
       return {
         content: [{ type: "text", text: JSON.stringify(result) }],
-        ...(result.ok ? {} : { isError: true }),
+        structuredContent: result as unknown as Record<string, unknown>,
+        isError: !result.ok,
       };
     });
     return server;
+  }
+
+  private isOpenHttpMutation(principal: GatewayPrincipal, name: GatewayToolName, mutating: boolean, args: Record<string, unknown>): boolean {
+    if (!mutating || this.config.auth.mode !== "open" || principal.transport !== "http") return false;
+    const action = typeof args.action === "string" ? args.action : "";
+    return !READ_ACTIONS[name]?.has(action);
   }
 
   get isReady(): boolean { return !this.closed; }

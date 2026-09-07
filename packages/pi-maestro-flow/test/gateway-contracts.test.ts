@@ -8,8 +8,20 @@ import {
   GATEWAY_OWNER_RECORD_SCHEMA,
   GATEWAY_RESULT_SCHEMA,
   GATEWAY_STATE_VERSION,
+  GATEWAY_TOOL_NAMES,
   GATEWAY_TOOL_SCHEMA,
 } from "../src/gateway/contracts.ts";
+import {
+  BOARD_ENDPOINT_BINDING_SCHEMA,
+  BOARD_ENVELOPE_SCHEMA,
+  BOARD_EVENT_SCHEMA,
+  BOARD_OPERATION_SCHEMA,
+  BOARD_TASK_CLAIM_SCHEMA,
+  BOARD_TASK_SCHEMA,
+  BoardContractError,
+  parseBoardEnvelope,
+  parseBoardTask,
+} from "../src/gateway/board-contracts.ts";
 import {
   GatewayValidationError,
   parseGatewayCapabilities,
@@ -60,6 +72,47 @@ test("Gateway contracts are versioned and strict", () => {
   assert.deepEqual(parseGatewayResult(ok), ok);
   assert.equal(Value.Check(GATEWAY_RESULT_SCHEMA, { ...ok, extra: true }), false);
   assert.throws(() => parseGatewayResult({ ...ok, error: { code: "bad", message: "bad" } }), GatewayValidationError);
+});
+
+test("Board contracts are strict and enforce revision, claim, hash, cursor, and time invariants", () => {
+  assert.deepEqual(GATEWAY_TOOL_NAMES, ["workspace", "board", "host", "exec", "job", "file", "teammate", "session", "todo", "monitor"]);
+  const workspaceId = "a".repeat(64);
+  const claim = { claimantId: "agent-1", principalId: "stdio:agent-1", actorType: "pi", generation: 1, claimedAt: now, leaseExpiresAt: now + 60_000 };
+  const task = {
+    version: 1, id: "board-1", workspaceId, revision: 1, status: "active", phase: "execution",
+    title: "Implement Board", acceptanceCriteria: ["Board is usable"], priority: "high", labels: ["gateway"], dependencyIds: [],
+    createdBy: { actorId: "agent-1", actorType: "pi" }, claimGeneration: 1, claim,
+    sessionBinding: { sessionId: "session-1", memberId: "member-1", generation: 1, boundAt: now },
+    planBinding: { sessionId: "session-1", todoIds: ["4"], linkedAt: now },
+    completionPolicy: { requireLinkedTodosCompleted: true, requireReview: true },
+    createdAt: now, updatedAt: now,
+  };
+  const operation = {
+    version: 1, id: "op-1", workspaceId, taskId: "board-1", actorId: "agent-1", kind: "task.claim",
+    payloadHash: "c".repeat(64), baseRevision: 0, committedRevision: 1, createdAt: now, result: null,
+  };
+  const event = {
+    version: 1, id: "event-1", workspaceId, taskId: "board-1", revision: 1, cursor: 1,
+    type: "task.claimed", actorId: "agent-1", createdAt: now, claimGeneration: 1,
+  };
+  const envelope = { version: 1, workspaceId, revision: 1, cursor: 1, tasks: [task], operations: [operation], events: [event], createdAt: now, updatedAt: now };
+  assert.deepEqual(parseBoardEnvelope(envelope), envelope);
+  assert.equal(parseBoardTask(task).endpointBindings, undefined, "persisted tasks without endpointBindings remain valid");
+  const endpoint = { kind: "pi", endpointId: "pi-session-1", principalId: "stdio:agent-1", attachedAt: now };
+  assert.deepEqual(parseBoardTask({ ...task, endpointBindings: [endpoint] }).endpointBindings, [endpoint]);
+  for (const [schema, value] of [[BOARD_TASK_CLAIM_SCHEMA, claim], [BOARD_ENDPOINT_BINDING_SCHEMA, endpoint], [BOARD_TASK_SCHEMA, task], [BOARD_OPERATION_SCHEMA, operation], [BOARD_EVENT_SCHEMA, event], [BOARD_ENVELOPE_SCHEMA, envelope]] as const) {
+    assert.equal(Value.Check(schema, { ...value, unknown: true }), false);
+  }
+  assert.throws(() => parseBoardTask({ ...task, endpointBindings: [endpoint, endpoint] }), /Duplicate board endpoint/);
+  assert.throws(() => parseBoardTask({ ...task, endpointBindings: [{ ...endpoint, kind: "web" }] }), /principal transport/);
+  assert.throws(() => parseBoardTask({ ...task, endpointBindings: [{ ...endpoint, attachedAt: now + 1 }] }), /outside the task lifetime/);
+  assert.throws(() => parseBoardTask({ ...task, claim: { ...claim, generation: 0 } }), BoardContractError);
+  assert.throws(() => parseBoardTask({ ...task, claimGeneration: 2 }), /monotonic fence/);
+  assert.throws(() => parseBoardTask({ ...task, updatedAt: now - 1 }), /updatedAt precedes/);
+  assert.throws(() => parseBoardEnvelope({ ...envelope, operations: [{ ...operation, payloadHash: "BAD" }] }), BoardContractError);
+  assert.throws(() => parseBoardEnvelope({ ...envelope, events: [{ ...event, cursor: 2 }] }), /cursor invariant/);
+  assert.throws(() => parseBoardEnvelope({ ...envelope, tasks: [{ ...task, revision: 2 }] }), /revision precedes/);
+  assert.throws(() => parseBoardTask({ ...task, planBinding: { ...task.planBinding, sessionId: "session-2" } }), /bound Session/);
 });
 
 test("workspace registry normalizes, renews, and fences stale generations", async (t) => {

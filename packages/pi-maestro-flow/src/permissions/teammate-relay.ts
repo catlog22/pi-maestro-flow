@@ -19,7 +19,9 @@ interface RelayState {
 const relayKey = Symbol.for("pi-maestro-flow.teammate-interactions");
 
 export function isTeammateChild(): boolean {
-  return process.env.PI_TEAMMATE_CHILD === "1" && typeof process.send === "function";
+  return process.env.PI_TEAMMATE_CHILD === "1"
+    && typeof process.send === "function"
+    && process.connected !== false;
 }
 
 export async function requestTeammateInteraction<T>(

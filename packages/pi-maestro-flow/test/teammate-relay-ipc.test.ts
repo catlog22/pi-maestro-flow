@@ -38,6 +38,28 @@ test("compaction capability handshake identifies receipt-aware child runtimes", 
   }
 });
 
+test("compaction telemetry isolates asynchronous closed-channel send failures", async () => {
+  const previousChild = process.env.PI_TEAMMATE_CHILD;
+  const sendDescriptor = Object.getOwnPropertyDescriptor(process, "send");
+  process.env.PI_TEAMMATE_CHILD = "1";
+  Object.defineProperty(process, "send", {
+    configurable: true,
+    value(_message: Record<string, unknown>, callback: (error: Error) => void) {
+      queueMicrotask(() => callback(Object.assign(new Error("closed"), { code: "EPIPE" })));
+      return false;
+    },
+  });
+  try {
+    assert.equal(publishTeammateCompactionCapability(4), false);
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+  } finally {
+    if (sendDescriptor) Object.defineProperty(process, "send", sendDescriptor);
+    else delete (process as typeof process & { send?: unknown }).send;
+    if (previousChild === undefined) delete process.env.PI_TEAMMATE_CHILD;
+    else process.env.PI_TEAMMATE_CHILD = previousChild;
+  }
+});
+
 test("compaction state advertises the correlated wake identity on the ordered IPC channel", () => {
   const previousChild = process.env.PI_TEAMMATE_CHILD;
   const previousCorrelation = process.env.PI_TEAMMATE_CORRELATION_ID;
@@ -121,6 +143,33 @@ test("teammate relay reports synchronous IPC send failures explicitly", async ()
   } finally {
     if (sendDescriptor) Object.defineProperty(process, "send", sendDescriptor);
     else delete (process as typeof process & { send?: unknown }).send;
+    if (previousChild === undefined) delete process.env.PI_TEAMMATE_CHILD;
+    else process.env.PI_TEAMMATE_CHILD = previousChild;
+  }
+});
+
+test("teammate relay treats a disconnected parent IPC as unavailable", async () => {
+  const previousChild = process.env.PI_TEAMMATE_CHILD;
+  const sendDescriptor = Object.getOwnPropertyDescriptor(process, "send");
+  const connectedDescriptor = Object.getOwnPropertyDescriptor(process, "connected");
+  let sends = 0;
+  process.env.PI_TEAMMATE_CHILD = "1";
+  Object.defineProperty(process, "send", {
+    configurable: true,
+    value() { sends += 1; return true; },
+  });
+  Object.defineProperty(process, "connected", { configurable: true, value: false });
+  try {
+    assert.deepEqual(
+      await requestTeammateInteraction("permission", {}, 50),
+      { ok: false, reason: "unavailable" },
+    );
+    assert.equal(sends, 0);
+  } finally {
+    if (sendDescriptor) Object.defineProperty(process, "send", sendDescriptor);
+    else delete (process as typeof process & { send?: unknown }).send;
+    if (connectedDescriptor) Object.defineProperty(process, "connected", connectedDescriptor);
+    else delete (process as typeof process & { connected?: unknown }).connected;
     if (previousChild === undefined) delete process.env.PI_TEAMMATE_CHILD;
     else process.env.PI_TEAMMATE_CHILD = previousChild;
   }

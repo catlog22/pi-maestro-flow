@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -7,6 +7,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { startGatewayHttpServer } from "../src/gateway/http-server.ts";
 import { GatewayRuntime } from "../src/gateway/runtime.ts";
+import { createGatewayPrincipal } from "../src/gateway/principal.ts";
+import { workspaceIdForPath } from "../src/gateway/state-paths.ts";
 import { createTestGatewayConfig } from "./gateway-test-helpers.ts";
 
 async function runtimeFor(root: string, auth: Parameters<typeof createTestGatewayConfig>[1]): Promise<GatewayRuntime> {
@@ -31,9 +33,15 @@ test("rejects authenticated plaintext on a non-loopback listener", async (t) => 
   await assert.rejects(() => startGatewayHttpServer(runtime, { host: "0.0.0.0", port: 0 }), /requires native TLS/);
 });
 
-test("bearer HTTP sessions authenticate and share the eight-tool catalog", async (t) => {
+test("bearer HTTP sessions authenticate and share the workspace-first catalog", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "gateway-http-bearer-"));
   const runtime = await runtimeFor(root, { mode: "bearer", token: "test-bearer-token" });
+  const workspaceId = workspaceIdForPath(root);
+  const published = await runtime.call("board", {
+    action: "create", workspaceId, taskId: "http-board", title: "Claim over HTTP",
+    expectedRevision: 0, operationId: "http-board-create",
+  }, createGatewayPrincipal("stdio", "dispatcher", { authenticated: true, workspaceId }));
+  assert.equal(published.ok, true);
   const server = await startGatewayHttpServer(runtime, { host: "127.0.0.1", port: 0 });
   t.after(async () => { await server.close(); await runtime.close(); await rm(root, { recursive: true, force: true }); });
 
@@ -51,17 +59,69 @@ test("bearer HTTP sessions authenticate and share the eight-tool catalog", async
   });
   await client.connect(transport);
   const listed = await client.listTools();
-  assert.deepEqual(listed.tools.map((tool) => tool.name), ["host", "exec", "job", "file", "teammate", "session", "todo", "monitor"]);
+  assert.deepEqual(listed.tools.map((tool) => tool.name), ["workspace", "board", "host", "exec", "job", "file", "teammate", "session", "todo", "monitor"]);
+  for (const tool of listed.tools) {
+    assert.equal(tool.outputSchema?.type, "object");
+    assert.equal(typeof tool.annotations?.readOnlyHint, "boolean");
+    assert.equal(typeof tool.annotations?.destructiveHint, "boolean");
+    assert.equal(typeof tool.annotations?.idempotentHint, "boolean");
+    assert.equal(typeof tool.annotations?.openWorldHint, "boolean");
+  }
+  const boardList = await client.callTool({ name: "board", arguments: { action: "list", workspaceId } });
+  const boardBlock = boardList.content[0];
+  const boardEnvelope = JSON.parse(boardBlock && boardBlock.type === "text" ? boardBlock.text : "null") as { ok: boolean; data?: { tasks?: Array<{ id: string }> } };
+  assert.deepEqual(boardEnvelope.data?.tasks?.map((task) => task.id), ["http-board"]);
+  const claimed = await client.callTool({ name: "board", arguments: {
+    action: "claim", workspaceId, taskId: "http-board", leaseTtlMs: 60_000,
+    expectedRevision: 1, operationId: "http-board-claim",
+  } });
+  const claimBlock = claimed.content[0];
+  const claimEnvelope = JSON.parse(claimBlock && claimBlock.type === "text" ? claimBlock.text : "null") as { ok: boolean; data?: { task?: { claim?: { actorType: string } } } };
+  assert.equal(claimEnvelope.ok, true);
+  assert.equal(claimEnvelope.data?.task?.claim?.actorType, "web");
   const called = await client.callTool({ name: "host", arguments: { action: "describe" } });
   const block = called.content[0];
   const envelope = JSON.parse(block && block.type === "text" ? block.text : "null") as { ok: boolean; data?: { service?: string }; meta?: { principalId?: string } };
   assert.equal(envelope.ok, true);
   assert.equal(envelope.data?.service, "gateway");
   assert.match(envelope.meta?.principalId ?? "", /^bearer:/);
+  assert.equal(called.isError, false);
+  assert.deepEqual(called.structuredContent, envelope);
+  const invalid = await client.callTool({ name: "host", arguments: { action: "unknown" } });
+  assert.equal(invalid.isError, true);
+  assert.equal((invalid.structuredContent as { ok?: boolean } | undefined)?.ok, false);
   await client.close();
 
   const unknown = await fetch(new URL("/", server.url));
   assert.equal(unknown.status, 404);
+});
+
+test("open HTTP mutation migration is explicit, warns once for legacy access, and never restricts stdio owners", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "gateway-http-open-migration-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const workspaceId = workspaceIdForPath(root);
+  const openHttp = createGatewayPrincipal("http", "open-client", { authenticated: false, scopes: ["gateway"], workspaceId });
+  const stdioOwner = createGatewayPrincipal("stdio", "owner", { authenticated: true, workspaceId });
+  const warnings: string[] = [];
+  const legacyConfig = createTestGatewayConfig(root, { mode: "open" });
+  const legacy = await GatewayRuntime.create({ config: legacyConfig, cwd: root, warningSink: (message) => warnings.push(message) });
+  const legacyWrite = await legacy.call("file", { action: "write", workspaceId, path: "legacy.txt", content: "legacy" }, openHttp);
+  assert.equal(legacyWrite.ok, true);
+  assert.equal((await legacy.call("file", { action: "stat", workspaceId, path: "legacy.txt" }, openHttp)).ok, true);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0] ?? "", /allow_open_mutations/u);
+  await legacy.close();
+
+  const safeConfig = createTestGatewayConfig(root, { mode: "open", allowOpenMutations: false });
+  const safe = await GatewayRuntime.create({ config: safeConfig, cwd: root });
+  const denied = await safe.call("file", { action: "write", workspaceId, path: "http.txt", content: "denied" }, openHttp);
+  assert.equal(denied.error?.code, "open_mutation_denied");
+  const ownerWrite = await safe.call("file", { action: "write", workspaceId, path: "owner.txt", content: "owner" }, stdioOwner);
+  assert.equal(ownerWrite.ok, true);
+  assert.equal(await readFile(join(root, "owner.txt"), "utf8"), "owner");
+  const restricted = createGatewayPrincipal("http", "restricted", { authenticated: true, scopes: ["unrelated"] });
+  assert.equal((await safe.call("host", { action: "status" }, restricted)).error?.code, "capability_denied");
+  await safe.close();
 });
 
 test("health/readiness expose no secrets and persisted pairing tokens authenticate", async (t) => {
@@ -81,7 +141,7 @@ test("health/readiness expose no secrets and persisted pairing tokens authentica
   const client = new Client({ name: "gateway-pairing-test", version: "1" });
   const transport = new StreamableHTTPClientTransport(new URL(server.url), { requestInit: { headers: { authorization: `Bearer ${issued.token}` } } });
   await client.connect(transport);
-  assert.equal((await client.listTools()).tools.length, 8);
+  assert.equal((await client.listTools()).tools.length, 10);
   await client.close();
 });
 
@@ -152,6 +212,6 @@ test("OAuth metadata, password authorization callback, token exchange, and MCP a
     requestInit: { headers: { authorization: `Bearer ${accessToken}` } },
   });
   await client.connect(transport);
-  assert.equal((await client.listTools()).tools.length, 8);
+  assert.equal((await client.listTools()).tools.length, 10);
   await client.close();
 });

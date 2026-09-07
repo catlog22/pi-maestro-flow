@@ -19,12 +19,12 @@ import {
   normalizeSkillBinding,
   normalizeSkillConfig,
 } from "./todo-skill-engine.ts";
-import { readTodoResourceUris } from "./todo-contract.ts";
+import { readTodoHandoff, readTodoResourceUris } from "./todo-contract.ts";
 
 export { isSkillRole };
 
 export const TODO_STATE_ENTRY_TYPE = "todo-state";
-export const TODO_STATE_VERSION = 6;
+export const TODO_STATE_VERSION = 7;
 
 export interface TodoSerializationContext {
   getExtensionApi: () => ExtensionAPI | undefined;
@@ -177,6 +177,7 @@ export function normalizeLoadedTask(id: string, raw: unknown): TodoTask {
   const legacySkillActivation = skillActivation ?? readLegacySkillActivation(id, task.skillLoad, skills);
   const origin = readTodoOrigin(task.origin);
   const resourceUris = readTodoResourceUris(task.resourceUris);
+  const handoff = readTodoHandoff(task.handoff);
   const rootActor = requireSerializationContext().rootActor;
   const createdBy = readTodoActor(task.createdBy) ?? { ...rootActor };
   const assignee = readTodoActor(task.assignee) ?? { ...rootActor };
@@ -189,6 +190,7 @@ export function normalizeLoadedTask(id: string, raw: unknown): TodoTask {
     blockedBy,
     skills,
     resourceUris,
+    ...(handoff ? { handoff } : {}),
     ...(contextParts.length > 0 ? { context: contextParts.join("\n\n") } : {}),
     ...(legacySkillActivation ? { skillActivation: legacySkillActivation } : {}),
     ...(summary ? { summary } : {}),

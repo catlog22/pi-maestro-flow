@@ -1,6 +1,6 @@
 /** The single registration and dispatch source for every Gateway transport. */
 import type { GatewayPrincipal, GatewayResult, GatewayTool, GatewayToolName } from "./contracts.ts";
-import { GATEWAY_STATE_VERSION } from "./contracts.ts";
+import { GATEWAY_RESULT_SCHEMA, GATEWAY_STATE_VERSION } from "./contracts.ts";
 import type { ExecService } from "./services/exec-service.ts";
 import type { FileService } from "./services/file-service.ts";
 import type { HostService } from "./services/host-service.ts";
@@ -9,11 +9,13 @@ import type { GatewayTeammateService } from "./services/teammate-service.ts";
 import type { GatewaySessionService } from "./services/session-service.ts";
 import type { GatewayTodoService } from "./services/todo-service.ts";
 import type { GatewayMonitorService } from "./services/monitor-service.ts";
+import type { WorkspaceService } from "./services/workspace-service.ts";
+import type { BoardService } from "./services/board-service.ts";
 
 export type GatewayToolArguments = Record<string, unknown>;
 export type GatewayToolHandler = (principal: GatewayPrincipal, args: GatewayToolArguments) => GatewayResult<unknown> | Promise<GatewayResult<unknown>>;
 export interface GatewayCatalogEntry extends Omit<GatewayTool, "name"> { name: GatewayToolName; handler: GatewayToolHandler; }
-export interface GatewayCatalogServices { host: HostService; exec: ExecService; job: JobService; file: FileService; teammate: GatewayTeammateService; session: GatewaySessionService; todo: GatewayTodoService; monitor: GatewayMonitorService; }
+export interface GatewayCatalogServices { workspace: WorkspaceService; board: BoardService; host: HostService; exec: ExecService; job: JobService; file: FileService; teammate: GatewayTeammateService; session: GatewaySessionService; todo: GatewayTodoService; monitor: GatewayMonitorService; }
 
 type Schema = Record<string, unknown>;
 const string = (extra: Schema = {}): Schema => ({ type: "string", ...extra });
@@ -35,23 +37,114 @@ function actions(...schemas: Schema[]): Schema { return { type: "object", oneOf:
 
 const commandFields: Schema = {
   command: string(), argv: { ...stringArray, minItems: 1 }, args: stringArray,
-  cwd: path, workspace: path, timeoutMs: integer({ minimum: 1 }),
+  cwd: path, workspace: path, workspaceId: string({ minLength: 1, maxLength: 256 }), timeoutMs: integer({ minimum: 1 }),
   maxOutputBytes: integer({ minimum: 1 }), env: { type: "object", additionalProperties: { type: "string" } }, readonly: boolean,
 };
-const fileBase: Schema = { workspace: path, path };
+const fileBase: Schema = { workspace: path, workspaceId: string({ minLength: 1, maxLength: 256 }), path };
 const editOperation: Schema = {
   type: "object",
   properties: { oldText: string(), newText: string(), replaceAll: boolean },
   required: ["oldText", "newText"], additionalProperties: false,
 };
 const cursor: Schema = { oneOf: [integer({ minimum: 0 }), string({ minLength: 1 })] };
+const boundedIds = (maxItems = 256): Schema => ({ type: "array", items: string({ minLength: 1, maxLength: 128 }), maxItems, uniqueItems: true });
+const workspaceFields: Schema = {
+  workspaceId: string({ minLength: 1, maxLength: 256 }),
+  workspace: path,
+  workspacePath: path,
+  path,
+};
+function workspaceAction(name: string, properties: Schema = {}, required: string[] = []): Schema {
+  return {
+    ...action(name, { ...workspaceFields, ...properties }, required),
+    anyOf: [
+      { required: ["workspaceId"] },
+      { required: ["workspace"] },
+      { required: ["workspacePath"] },
+      { required: ["path"] },
+    ],
+  };
+}
 
+const WORKSPACE_GET_SCHEMA: Schema = {
+  ...action("get", {
+    workspaceId: string({ minLength: 1, maxLength: 256 }),
+    id: string({ minLength: 1, maxLength: 256 }),
+    workspace: path,
+    path,
+  }),
+  anyOf: [
+    { required: ["workspaceId"] },
+    { required: ["id"] },
+    { required: ["workspace"] },
+    { required: ["path"] },
+  ],
+};
+const WORKSPACE_SCHEMA = actions(
+  action("list", { cursor: integer({ minimum: 0 }), limit: integer({ minimum: 1, maximum: 256 }) }),
+  WORKSPACE_GET_SCHEMA,
+);
+const completionPolicy: Schema = {
+  type: "object",
+  properties: { requireLinkedTodosCompleted: boolean, requireReview: boolean },
+  required: ["requireLinkedTodosCompleted", "requireReview"],
+  additionalProperties: false,
+};
+const boardMutationFields: Schema = {
+  taskId: string({ minLength: 1, maxLength: 128 }),
+  expectedRevision: integer({ minimum: 0 }),
+  operationId: string({ minLength: 1, maxLength: 128 }),
+};
+const boardTaskFields: Schema = {
+  title: string({ minLength: 1, maxLength: 16384 }),
+  description: string({ minLength: 1, maxLength: 65536 }),
+  acceptanceCriteria: { type: "array", items: string({ minLength: 1, maxLength: 8192 }), maxItems: 32 },
+  priority: { enum: ["low", "normal", "high", "urgent"] },
+  labels: { type: "array", items: string({ minLength: 1, maxLength: 128 }), maxItems: 32, uniqueItems: true },
+  dependencyIds: boundedIds(),
+  completionPolicy,
+};
+const BOARD_UPDATE_SCHEMA: Schema = {
+  ...workspaceAction("update", { ...boardMutationFields, ...boardTaskFields, description: { oneOf: [boardTaskFields.description, { type: "null" }] } }, ["taskId", "expectedRevision", "operationId"]),
+  allOf: [{ anyOf: ["title", "description", "acceptanceCriteria", "priority", "labels", "dependencyIds", "completionPolicy"].map((field) => ({ required: [field] })) }],
+};
+const BOARD_CLAIM_SCHEMA: Schema = {
+  ...workspaceAction("claim", { ...boardMutationFields, leaseTtlMs: integer({ minimum: 1 }), sessionId: string({ minLength: 1, maxLength: 128 }), memberId: string({ minLength: 1, maxLength: 128 }) }, ["taskId", "expectedRevision", "operationId"]),
+  allOf: [{ anyOf: [{ not: { anyOf: [{ required: ["sessionId"] }, { required: ["memberId"] }] } }, { required: ["sessionId", "memberId"] }] }],
+};
+const BOARD_TRANSITION_SCHEMA: Schema = {
+  ...workspaceAction("transition", {
+    ...boardMutationFields,
+    status: { enum: ["open", "active", "blocked", "completed", "cancelled"] },
+    phase: { enum: ["intake", "planning", "execution", "review"] },
+    claimGeneration: integer({ minimum: 1 }),
+    summary: string({ minLength: 1, maxLength: 16384 }),
+    resourceUris: { type: "array", items: string({ minLength: 1, maxLength: 2048 }), maxItems: 16, uniqueItems: true },
+  }, ["taskId", "expectedRevision", "operationId"]),
+  allOf: [{ anyOf: [{ required: ["status"] }, { required: ["phase"] }] }],
+};
+const BOARD_SCHEMA = actions(
+  workspaceAction("create", { ...boardMutationFields, ...boardTaskFields }, ["title", "expectedRevision", "operationId"]),
+  workspaceAction("list", { status: { enum: ["open", "active", "blocked", "completed", "cancelled"] }, phase: { enum: ["intake", "planning", "execution", "review"] }, orphaned: boolean, limit: integer({ minimum: 1, maximum: 4096 }) }),
+  workspaceAction("get", { taskId: boardMutationFields.taskId }, ["taskId"]),
+  BOARD_UPDATE_SCHEMA,
+  BOARD_CLAIM_SCHEMA,
+  workspaceAction("renew", { ...boardMutationFields, claimGeneration: integer({ minimum: 1 }), leaseTtlMs: integer({ minimum: 1 }) }, ["taskId", "expectedRevision", "operationId", "claimGeneration"]),
+  workspaceAction("release", { ...boardMutationFields, claimGeneration: integer({ minimum: 1 }) }, ["taskId", "expectedRevision", "operationId", "claimGeneration"]),
+  workspaceAction("takeover", { ...boardMutationFields, leaseTtlMs: integer({ minimum: 1 }), reason: string({ minLength: 1, maxLength: 4096 }) }, ["taskId", "expectedRevision", "operationId", "reason"]),
+  workspaceAction("attach-endpoint", { ...boardMutationFields, endpointId: string({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" }) }, ["taskId", "expectedRevision", "operationId", "endpointId"]),
+  workspaceAction("detach-endpoint", { ...boardMutationFields, endpointId: string({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" }) }, ["taskId", "expectedRevision", "operationId", "endpointId"]),
+  workspaceAction("bind-session", { ...boardMutationFields, sessionId: string({ minLength: 1, maxLength: 128 }), memberId: string({ minLength: 1, maxLength: 128 }), claimGeneration: integer({ minimum: 1 }) }, ["taskId", "expectedRevision", "operationId", "sessionId", "memberId", "claimGeneration"]),
+  workspaceAction("link-plan", { ...boardMutationFields, sessionId: string({ minLength: 1, maxLength: 128 }), todoIds: boundedIds(), claimGeneration: integer({ minimum: 1 }) }, ["taskId", "expectedRevision", "operationId", "sessionId", "todoIds", "claimGeneration"]),
+  BOARD_TRANSITION_SCHEMA,
+  workspaceAction("observe", { cursor: integer({ minimum: 0 }), limit: integer({ minimum: 1, maximum: 512 }) }),
+);
 const HOST_SCHEMA = actions(action("describe"), action("status"), action("test"));
 const EXEC_SCHEMA = actions(action("run", commandFields));
 const JOB_SCHEMA = actions(
   action("start", commandFields), action("list"),
   action("status", { id: string({ minLength: 1 }) }, ["id"]),
-  action("logs", { id: string({ minLength: 1 }), cursor: integer({ minimum: 0 }), limit: integer({ minimum: 1 }), maxBytes: integer({ minimum: 1 }) }, ["id"]),
+  action("logs", { id: string({ minLength: 1 }), cursor: integer({ minimum: 0 }), stdoutOffset: integer({ minimum: 0 }), stderrOffset: integer({ minimum: 0 }), limit: integer({ minimum: 1 }), maxBytes: integer({ minimum: 1 }) }, ["id"]),
   action("stdin", { id: string({ minLength: 1 }), data: { oneOf: [string(), { type: "object" }] } }, ["id", "data"]),
   action("cancel", { id: string({ minLength: 1 }) }, ["id"]),
 );
@@ -62,13 +155,17 @@ const FILE_SCHEMA = actions(
   action("edit", { ...fileBase, content: { oneOf: [string(), { type: "object" }] }, expectedSha256: string({ pattern: "^[a-fA-F0-9]{64}$" }), expectedHash: string({ pattern: "^[a-fA-F0-9]{64}$" }), edits: { type: "array", items: editOperation }, oldText: string(), newText: string(), replaceAll: boolean }, ["path"]),
   action("find", { ...fileBase, pattern: string(), name: string(), maxResults: integer({ minimum: 1 }), maxDepth: integer({ minimum: 0 }), includeDirectories: boolean }),
   action("grep", { ...fileBase, query: string(), pattern: string(), regex: boolean, maxResults: integer({ minimum: 1 }), maxBytes: integer({ minimum: 1 }) }),
-  action("transfer", { workspace: path, source: path, from: path, destination: path, to: path, mode: { enum: ["copy", "move"] }, overwrite: boolean }),
+  action("transfer", { workspace: path, workspaceId: string({ minLength: 1, maxLength: 256 }), source: path, from: path, destination: path, to: path, mode: { enum: ["copy", "move"] }, overwrite: boolean }),
   action("realpath", fileBase),
 );
 const mutationFields: Schema = { sessionId: string({ minLength: 1, maxLength: 128 }), memberId: string({ minLength: 1, maxLength: 128 }), expectedSessionRevision: integer({ minimum: 0 }), operationId: string({ minLength: 1, maxLength: 128 }) };
 const todoIds: Schema = { type: "array", items: string({ minLength: 1, maxLength: 128 }), maxItems: 32, uniqueItems: true };
+const SESSION_CREATE_SCHEMA: Schema = {
+  ...action("create", { sessionId: string({ minLength: 1, maxLength: 128 }), workspaceId: string({ minLength: 1, maxLength: 256 }), workspacePath: path, ownerId: string({ minLength: 1, maxLength: 128 }), leaseTtlMs: integer({ minimum: 1 }), expectedSessionRevision: integer({ minimum: 0 }), operationId: string({ minLength: 1, maxLength: 128 }) }, ["ownerId", "expectedSessionRevision", "operationId"]),
+  anyOf: [{ required: ["workspaceId"] }, { required: ["workspacePath"] }],
+};
 const SESSION_SCHEMA = actions(
-  action("create", { sessionId: string({ minLength: 1, maxLength: 128 }), workspacePath: path, ownerId: string({ minLength: 1, maxLength: 128 }), leaseTtlMs: integer({ minimum: 1 }), expectedSessionRevision: integer({ minimum: 0 }), operationId: string({ minLength: 1, maxLength: 128 }) }, ["workspacePath", "ownerId", "expectedSessionRevision", "operationId"]),
+  SESSION_CREATE_SCHEMA,
   action("get", { sessionId: mutationFields.sessionId, memberId: mutationFields.memberId }, ["sessionId", "memberId"]),
   action("list", { memberId: mutationFields.memberId, limit: integer({ minimum: 1, maximum: 256 }) }, ["memberId"]),
   action("join", { ...mutationFields, joiningMemberId: string({ minLength: 1, maxLength: 128 }), joiningPrincipalId: string({ minLength: 1, maxLength: 256 }), role: { enum: ["owner", "agent", "web", "observer"] }, capabilities: stringArray, leaseTtlMs: integer({ minimum: 1 }) }, ["sessionId", "memberId", "expectedSessionRevision", "operationId", "joiningMemberId", "joiningPrincipalId", "role"]),
@@ -94,8 +191,74 @@ const MONITOR_SCHEMA = actions(
   action("cancel", { ...monitorBase, handle: string({ minLength: 1, maxLength: 128 }), reason: string({ maxLength: 512 }) }, ["sessionId", "memberId", "handle"]),
   action("result", { ...monitorBase, handle: string({ minLength: 1, maxLength: 128 }), cursor, limit: integer({ minimum: 1, maximum: 512 }) }, ["sessionId", "memberId", "handle"]),
 );
+const teammateOutputSchema: Schema = { type: "object", maxProperties: 256 };
+const teammateTask: Schema = {
+  type: "object",
+  properties: {
+    prompt: string({ minLength: 1, maxLength: 65536 }),
+    description: string({ maxLength: 16384 }),
+    agent: string({ minLength: 1, maxLength: 128 }),
+    taskType: string({ minLength: 1, maxLength: 64, pattern: "^[a-z][a-z0-9._-]*$" }),
+    name: string({ minLength: 1, maxLength: 128 }),
+    dependsOn: boundedIds(32),
+    context: { enum: ["fresh", "fork"] },
+    model: string({ minLength: 1, maxLength: 256 }),
+    fallbackModels: { type: "array", items: string({ minLength: 1, maxLength: 256 }), maxItems: 16, uniqueItems: true },
+    thinking: { enum: ["off", "minimal", "low", "medium", "high", "xhigh", "max"] },
+    cwd: path,
+    outputSchema: teammateOutputSchema,
+    timeoutMs: integer({ minimum: 1 }),
+    maxNestingDepth: integer({ minimum: 0, maximum: 2 }),
+    background: boolean,
+    todo: { oneOf: [string({ minLength: 1, maxLength: 128 }), boundedIds(32)] },
+    briefing: { type: "array", items: string({ minLength: 1, maxLength: 2048 }), maxItems: 32 },
+  },
+  required: ["prompt"],
+  additionalProperties: false,
+};
+const teammateParamFields: Schema = {
+  tasks: { type: "array", items: teammateTask, minItems: 1, maxItems: 32 },
+  mode: { enum: ["default", "expert"] },
+  agent: string({ minLength: 1, maxLength: 128 }),
+  taskType: string({ minLength: 1, maxLength: 64, pattern: "^[a-z][a-z0-9._-]*$" }),
+  reply_to: { enum: ["caller", "main"] },
+  background: boolean,
+  context: { enum: ["fresh", "fork"] },
+  model: string({ minLength: 1, maxLength: 256 }),
+  fallbackModels: { type: "array", items: string({ minLength: 1, maxLength: 256 }), maxItems: 16, uniqueItems: true },
+  thinking: { enum: ["off", "minimal", "low", "medium", "high", "xhigh", "max"] },
+  cwd: path,
+  timeoutMs: integer({ minimum: 1 }),
+  outputSchema: teammateOutputSchema,
+  concurrency: integer({ minimum: 1, maximum: 32 }),
+  concurrencyWaitMs: integer({ minimum: 1 }),
+  maxAgents: integer({ minimum: 1, maximum: 32 }),
+  maxNestingDepth: integer({ minimum: 0, maximum: 2 }),
+  steeringMode: { enum: ["all", "one-at-a-time"] },
+};
+const teammateParams: Schema = { type: "object", properties: teammateParamFields, required: ["tasks"], additionalProperties: false };
+const teammateOptions: Schema = {
+  type: "object",
+  properties: { enableRetryBackoff: boolean, inheritModel: string({ minLength: 1, maxLength: 256 }) },
+  additionalProperties: false,
+};
+const TEAMMATE_START_SCHEMA: Schema = {
+  ...action("start", {
+    ...teammateParamFields,
+    params: teammateParams,
+    prompt: string({ minLength: 1, maxLength: 65536 }),
+    objective: string({ minLength: 1, maxLength: 65536 }),
+    task: string({ minLength: 1, maxLength: 65536 }),
+    workspace: path,
+    workspacePath: path,
+    workspaceId: string({ minLength: 1, maxLength: 256 }),
+    options: teammateOptions,
+    runOptions: teammateOptions,
+  }),
+  anyOf: [{ required: ["params"] }, { required: ["tasks"] }, { required: ["prompt"] }, { required: ["task"] }],
+};
 const TEAMMATE_SCHEMA = actions(
-  action("start", { params: { type: "object" }, tasks: { type: "array" }, prompt: string(), objective: string(), task: string(), agent: string(), cwd: path, workspace: path, workspacePath: path, workspaceId: string(), options: { type: "object" }, runOptions: { type: "object" } }),
+  TEAMMATE_START_SCHEMA,
   action("list", { cursor, limit: integer({ minimum: 1 }) }),
   action("observe", { taskId: string(), cursor, afterCursor: cursor, limit: integer({ minimum: 1 }) }),
   action("wait", { taskId: string(), timeoutMs: integer({ minimum: 1 }) }),
@@ -105,12 +268,32 @@ const TEAMMATE_SCHEMA = actions(
 );
 
 function entry(name: GatewayToolName, description: string, inputSchema: Schema, handler: GatewayToolHandler, options: Pick<GatewayTool, "executionMode" | "mutating" | "readonly">): GatewayCatalogEntry {
-  return { version: GATEWAY_STATE_VERSION, name, description, inputSchema, kind: name, capability: `gateway.${name}`, requiredCapabilities: [], ...options, handler };
+  const readonly = options.readonly === true;
+  return {
+    version: GATEWAY_STATE_VERSION,
+    name,
+    description,
+    inputSchema,
+    outputSchema: structuredClone(GATEWAY_RESULT_SCHEMA) as unknown as Schema,
+    annotations: {
+      readOnlyHint: readonly,
+      destructiveHint: !readonly,
+      idempotentHint: readonly,
+      openWorldHint: !readonly,
+    },
+    kind: name,
+    capability: `gateway.${name}`,
+    requiredCapabilities: [`gateway.${name}`],
+    ...options,
+    handler,
+  };
 }
 
 export class GatewayCatalog {
   private readonly entries = new Map<GatewayToolName, GatewayCatalogEntry>();
   constructor(services: GatewayCatalogServices) {
+    this.register(entry("workspace", "Discover principal-authorized workspaces by stable ID without exposing owner credentials.", WORKSPACE_SCHEMA, (principal, args) => services.workspace.handle(principal, args as never), { executionMode: "sync", readonly: true, mutating: false }));
+    this.register(entry("board", "Publish, claim, attach participation endpoints, bind collaboration, plan, transition, and observe workspace-level work.", BOARD_SCHEMA, (principal, args) => services.board.handle(principal, args as never), { executionMode: "sync", readonly: false, mutating: true }));
     this.register(entry("host", "Describe, inspect, or test the machine running the Gateway.", HOST_SCHEMA, (principal, args) => services.host.handle({ ...args, principal } as never), { executionMode: "sync", readonly: true, mutating: false }));
     this.register(entry("exec", "Run one bounded argv-based command in an authorized workspace.", EXEC_SCHEMA, (principal, args) => services.exec.handle({ ...args, principal } as never), { executionMode: "sync", readonly: false, mutating: true }));
     this.register(entry("job", "Start and control bounded asynchronous commands and cursor-addressed logs.", JOB_SCHEMA, (principal, args) => services.job.handle({ ...args, principal } as never), { executionMode: "async", readonly: false, mutating: true }));

@@ -5,7 +5,22 @@ icon: "🔄"
 
 This page records user-visible features, behavior changes, fixes, and upgrade requirements from the previous stable release to the current version of the pi maestro flow suite.
 
-> **Current stable release: v0.28.0 (2026-09-06).** SSH remote channels, smart model selection, and the receipt-bound wake protocol; exact engine pin `maestro-flow@0.5.84`; bundles Teammate 2.6.0, Cockpit 0.23.0, Settings-Core 0.2.1, Backend-Core 0.1.3, and Backends 0.1.3.
+> **Current stable release: v0.29.0 (2026-09-07).** Workspace-shared Gateway Board, durable Todo handoffs, deterministic New Context recovery, and hardened Teammate launch diagnostics; exact engine pin `maestro-flow@0.5.86`; bundles Teammate 2.6.1, Cockpit 0.23.0, Settings-Core 0.2.1, Backend-Core 0.1.3, and Backends 0.1.3.
+
+## v0.29.0 (2026-09-07)
+
+> This release ships Flow 0.29.0 and Teammate 2.6.1. Cockpit 0.23.0, Settings-Core 0.2.1, Backend-Core 0.1.3, and Backends 0.1.3 are unchanged; the exact engine pin moves from `maestro-flow@0.5.84` to `0.5.86`. 83 implementation/test/support files, +5,694 / −455 lines (excluding Flow version/pin, lockfile, release-note, and documentation updates).
+
+- **Workspace-shared Gateway Board**: versioned board contracts, a durable store, optimistic revisions, claim generations and leases, dependency-aware transitions, completion policy, and Session/Plan/Todo/resource/endpoint links; the `board` tool operates shared state through authenticated local IPC.
+- **Gateway workspace services**: catalog, contracts, policy, runtime, CLI, and board/workspace/job/file/session/teammate services add workspace discovery, logs, file transfer, teammate starts, and lifecycle boundaries.
+- **Durable Todo handoffs**: create/update/advance persist up to three ordered next steps and task-relative file loading values (`required`, `conditional`, `skip`, `unknown`), projected through schemas, serialization, root/child guidance, and rendering.
+- **Deterministic New Context recovery**: recovery capsules select the relevant actor-, Goal-, and approved-Plan-scoped handoff, bound the payload, and emit checkpoint and file-loading guidance.
+- **Plan/Act model restoration**: Plan entry records the planning model, confirmation displays the transition, and Execute/Exit deterministically restore the prior Act model.
+- **Teammate 2.6.1**: shell-free, provenance-bearing Pi launcher resolution handles explicit overrides, native PATH entries, verified Windows shims and host package bins, plus a compatibility fallback; spawn/child-error/close events carry bounded stderr, exit code, signal, phase, and launcher source.
+- **Shared foreground detach**: Teammate and `bash_bg run` use the new public foreground-detach coordinator to share one session-scoped Alt+B listener; nested calls detach outermost-first while the process continues under background job lifecycle management.
+- **Compaction IPC resilience**: disconnected teammate IPC no longer receives telemetry, and EPIPE/channel-closed errors converge as known transport termination.
+
+Upgrade: `pi install npm:pi-maestro-flow@0.29.0`
 
 ## v0.28.0 (2026-09-06)
 

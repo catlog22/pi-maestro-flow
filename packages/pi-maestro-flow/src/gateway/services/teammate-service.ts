@@ -21,7 +21,6 @@ import { principalKey } from "../principal.ts";
 import { parseGatewayPrincipal } from "../validation.ts";
 import { canonicalizeWorkspacePath, workspaceIdForPath } from "../state-paths.ts";
 import {
-  GATEWAY_TASK_LOST_ERROR,
   TaskJournal,
   type GatewayTaskJournalRecord,
   type TaskJournalOptions,
@@ -225,6 +224,7 @@ export interface GatewayTeammateObserveData {
 
 export interface GatewayTeammateWaitData {
   task: GatewayTeammateTaskView;
+  done: boolean;
 }
 
 export interface GatewayTeammateSendData {
@@ -356,13 +356,6 @@ function principalValue(value: unknown): GatewayPrincipal {
 
 function terminalStatus(status: GatewayTaskState): boolean {
   return status === "completed" || status === "failed" || status === "cancelled" || status === "lost";
-}
-
-function resultStatus(status: GatewayTaskState): "accepted" | "running" | "succeeded" | "failed" | "cancelled" | "lost" {
-  if (status === "queued") return "accepted";
-  if (status === "running") return "running";
-  if (status === "completed") return "succeeded";
-  return status;
 }
 
 function operationResult<T>(
@@ -500,8 +493,9 @@ export class GatewayTeammateService {
       await this.pruneExpired();
       const request = this.normalizeStartInput(input);
       const params = request.params;
-      const workspacePath = this.resolveWorkspacePath(request, params);
-      const workspaceId = request.workspaceId ?? workspaceIdForPath(workspacePath);
+      const resolvedWorkspace = await this.resolveWorkspace(request, params, principal);
+      const workspacePath = resolvedWorkspace.path;
+      const workspaceId = resolvedWorkspace.id;
       await this.authorize(principal, workspacePath, "task");
       const releaseConcurrency = this.policy?.tryAcquire("task");
       if (this.policy && !releaseConcurrency) throw new Error("task concurrency limit reached");
@@ -579,7 +573,7 @@ export class GatewayTeammateService {
       const limit = positiveInteger(request.limit, "limit", this.maxPageItems, this.maxPageItems);
       const page = entry.events.page(after, limit);
       const data = { task: this.view(entry), ...page };
-      return operationResult(data, principal, request, resultStatus(entry.status));
+      return operationResult(data, principal, request);
     } catch (error) {
       return operationError("task_observe_failed", errorMessage(error), principal, request);
     }
@@ -593,16 +587,11 @@ export class GatewayTeammateService {
       await this.pruneExpired();
       const entry = this.findOwned(request.taskId, principal);
       if (!entry) return operationError("task_not_found", "Gateway task was not found", principal, request);
-      if (!terminalStatus(entry.status)) await this.waitForEntry(entry, request.timeoutMs, request.signal);
+      const done = terminalStatus(entry.status) || await this.waitForEntry(entry, request.timeoutMs, request.signal);
       // A terminal in-memory state is visible slightly before its durable
       // journal write completes; wait for that write before reporting done.
-      await entry.completion;
-      const data = { task: this.view(entry) };
-      if (entry.status === "completed") return operationResult(data, principal, request, "succeeded");
-      if (entry.status === "cancelled") return operationError("task_cancelled", entry.error ?? "Gateway task was cancelled", principal, request, "cancelled", data);
-      if (entry.status === "lost") return operationError("task_lost", entry.error ?? GATEWAY_TASK_LOST_ERROR, principal, request, "lost", data);
-      if (entry.status === "failed") return operationError("task_failed", entry.error ?? "Gateway task failed", principal, request, "failed", data);
-      return operationResult(data, principal, request, resultStatus(entry.status));
+      if (done) await entry.completion;
+      return operationResult({ task: this.view(entry), done }, principal, request);
     } catch (error) {
       return operationError("task_wait_failed", errorMessage(error), principal, request);
     }
@@ -696,11 +685,7 @@ export class GatewayTeammateService {
         hasMore: entry.results.some((item) => item.cursor > (values.at(-1)?.cursor ?? after)),
         done: terminalStatus(entry.status) && (values.at(-1)?.cursor ?? after) >= entry.results.length,
       };
-      const status = resultStatus(entry.status);
-      if (status === "failed") return operationError("task_failed", entry.error ?? "Gateway task failed", principal, request, "failed", page);
-      if (status === "cancelled") return operationError("task_cancelled", entry.error ?? "Gateway task was cancelled", principal, request, "cancelled", page);
-      if (status === "lost") return operationError("task_lost", entry.error ?? GATEWAY_TASK_LOST_ERROR, principal, request, "lost", page);
-      return operationResult(page, principal, request, status);
+      return operationResult(page, principal, request);
     } catch (error) {
       return operationError("task_result_failed", errorMessage(error), principal, request);
     }
@@ -714,8 +699,8 @@ export class GatewayTeammateService {
   async monitorObserve(sessionId: string, taskId: string, afterCursor = 0, limit = this.maxPageItems): Promise<GatewayTeammateObserveData> {
     await this.ready(); await this.pruneExpired(); const entry = this.findSessionEntry(sessionId, taskId); return { task: this.view(entry), ...entry.events.page(afterCursor, limit) };
   }
-  async monitorWait(sessionId: string, taskId: string, timeoutMs?: number): Promise<GatewayTeammateTaskView> {
-    await this.ready(); const entry = this.findSessionEntry(sessionId, taskId); if (!terminalStatus(entry.status)) await this.waitForEntry(entry, timeoutMs); await entry.completion; return this.view(entry);
+  async monitorWait(sessionId: string, taskId: string, timeoutMs?: number): Promise<GatewayTeammateWaitData> {
+    await this.ready(); const entry = this.findSessionEntry(sessionId, taskId); const done = terminalStatus(entry.status) || await this.waitForEntry(entry, timeoutMs); if (done) await entry.completion; return { task: this.view(entry), done };
   }
   async monitorMessage(sessionId: string, taskId: string, message: string, mode: GatewayTeammateSendMode): Promise<boolean> {
     await this.ready(); const entry = this.findSessionEntry(sessionId, taskId); if (terminalStatus(entry.status)) throw new Error("Gateway task is already terminal");
@@ -831,9 +816,24 @@ export class GatewayTeammateService {
     };
   }
 
-  private resolveWorkspacePath(request: { params: RunTeammateParams; workspacePath?: string }, params: RunTeammateParams): string {
-    const requested = request.workspacePath ?? params.cwd ?? params.tasks[0]?.cwd ?? this.baseCwd;
-    return canonicalizeWorkspacePath(requested ?? this.baseCwd);
+  private async resolveWorkspace(
+    request: { params: RunTeammateParams; workspacePath?: string; workspaceId?: string },
+    params: RunTeammateParams,
+    principal: GatewayPrincipal,
+  ): Promise<{ path: string; id: string }> {
+    const requestedPath = request.workspacePath ?? params.cwd ?? params.tasks[0]?.cwd;
+    const requested = request.workspaceId ?? requestedPath ?? this.baseCwd;
+    if (!this.policy) {
+      const path = canonicalizeWorkspacePath(requestedPath ?? this.baseCwd);
+      return { path, id: request.workspaceId ?? workspaceIdForPath(path) };
+    }
+    const decision = await this.policy.authorizeWorkspace(principal, requested);
+    if (!decision.allowed || decision.workspacePath === undefined || decision.workspaceId === undefined) throw new Error(decision.reason);
+    if (request.workspaceId !== undefined && requestedPath !== undefined) {
+      const pathDecision = await this.policy.authorizeWorkspace(principal, requestedPath);
+      if (!pathDecision.allowed || pathDecision.workspacePath !== decision.workspacePath) throw new Error("workspaceId and workspacePath refer to different workspaces");
+    }
+    return { path: decision.workspacePath, id: decision.workspaceId };
   }
 
   private async authorize(principal: GatewayPrincipal, workspacePath: string, operation: GatewayPolicyOperation): Promise<void> {
@@ -1060,8 +1060,8 @@ export class GatewayTeammateService {
     return false;
   }
 
-  private async waitForEntry(entry: TaskEntry, timeoutMs?: number, signal?: AbortSignal): Promise<void> {
-    if (terminalStatus(entry.status)) return;
+  private async waitForEntry(entry: TaskEntry, timeoutMs?: number, signal?: AbortSignal): Promise<boolean> {
+    if (terminalStatus(entry.status)) return true;
     if (signal?.aborted) throw new Error("Gateway task wait was aborted");
     const timeout = timeoutMs === undefined ? undefined : positiveInteger(timeoutMs, "timeoutMs", GATEWAY_HARD_LIMITS.maxExecTimeoutMs, GATEWAY_HARD_LIMITS.maxExecTimeoutMs);
     await new Promise<void>((resolve, reject) => {
@@ -1082,13 +1082,13 @@ export class GatewayTeammateService {
         timer = setTimeout(() => {
           entry.waiters.delete(done);
           signal?.removeEventListener("abort", onAbort);
-          reject(new Error("Timed out waiting for Gateway task"));
+          resolve();
         }, timeout);
-        timer.unref?.();
       }
       signal?.addEventListener("abort", onAbort, { once: true });
       if (terminalStatus(entry.status)) done();
     });
+    return terminalStatus(entry.status);
   }
 
   private async pruneExpired(): Promise<void> {

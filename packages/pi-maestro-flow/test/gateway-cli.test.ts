@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +9,7 @@ import test from "node:test";
 import { main } from "../src/gateway/cli.ts";
 import { locateGatewayBinary, resetGatewayBinaryCache } from "../src/gateway/control-client.ts";
 import { requestGatewayIpcControl } from "../src/gateway/ipc.ts";
+import { GatewayDaemon } from "../src/gateway/daemon.ts";
 
 const packageRoot = fileURLToPath(new URL("../", import.meta.url));
 const bin = join(packageRoot, "bin", "pi-maestro-gateway.mjs");
@@ -120,6 +121,10 @@ test("service help documents ensure and Windows Startup persistence", async () =
   assert.match(output, /next interactive sign-in/u);
   assert.match(output, /not a Windows Service/u);
   assert.match(output, /non-interactive SSH session/u);
+  assert.match(output, /workspace list/u);
+  assert.match(output, /workspace register/u);
+  assert.match(output, /workspace renew/u);
+  assert.match(output, /workspace remove/u);
 });
 
 test("service selectors are mutually exclusive and failures never emit partial JSON", async () => {
@@ -158,6 +163,63 @@ test("legacy service status keeps its JSON response shape", async (t) => {
   assert.equal(await main(["service", "status", "--config", configPath, "--json"], { stdout, stderr }), 0, errors);
   assert.deepEqual(JSON.parse(output), { installed: false, running: false, ready: false, degraded: false, fallback: false });
   assert.equal(output.trim().split("\n").length, 1);
+});
+
+test("workspace CLI emits redacted machine JSON and enforces generation fences through IPC", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "gateway-cli-workspace-"));
+  const workspace = join(root, "workspace");
+  await mkdir(workspace);
+  const configPath = join(root, "config.yaml");
+  const ownerPath = join(root, "owner.json");
+  const unix = (value: string) => value.replace(/\\/g, "/");
+  await writeFile(configPath, [
+    "transport:",
+    "  http:",
+    "    enabled: false",
+    "state:",
+    `  root_dir: "${unix(join(root, "state"))}"`,
+    `  owner_path: "${unix(ownerPath)}"`,
+    `  workspace_registry_path: "${unix(join(root, "workspaces.json"))}"`,
+    "logging:",
+    "  level: silent",
+    "",
+  ].join("\n"));
+  const daemon = new GatewayDaemon({ configPath, cwd: root, http: false });
+  await daemon.start();
+  t.after(async () => { await daemon.stop(); await rm(root, { recursive: true, force: true }); });
+
+  const invoke = async (args: string[]) => {
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    let output = "";
+    let errors = "";
+    stdout.on("data", (chunk) => { output += chunk.toString(); });
+    stderr.on("data", (chunk) => { errors += chunk.toString(); });
+    const code = await main(args, { stdout, stderr });
+    return { code, output, errors };
+  };
+
+  const registered = await invoke(["workspace", "register", workspace, "--permanent", "--config", configPath, "--json"]);
+  assert.equal(registered.code, 0, registered.errors);
+  const record = JSON.parse(registered.output) as { id: string; generation: number; ownerToken?: string };
+  assert.equal(record.generation, 1);
+  assert.equal(record.ownerToken, undefined);
+
+  const listed = await invoke(["workspace", "list", "--config", configPath, "--json"]);
+  assert.equal(listed.code, 0, listed.errors);
+  assert.ok((JSON.parse(listed.output) as Array<{ id: string; ownerToken?: string }>).some((entry) => entry.id === record.id && entry.ownerToken === undefined));
+
+  const stale = await invoke(["workspace", "renew", record.id, "--generation", "2", "--ttl", "60", "--config", configPath, "--json"]);
+  assert.equal(stale.code, 1);
+  assert.equal(stale.output, "");
+  assert.match(stale.errors, /stale/u);
+
+  const renewed = await invoke(["workspace", "renew", record.id, "--generation", "1", "--ttl", "60", "--config", configPath, "--json"]);
+  assert.equal(renewed.code, 0, renewed.errors);
+  assert.equal((JSON.parse(renewed.output) as { ownerToken?: string }).ownerToken, undefined);
+  const removed = await invoke(["workspace", "remove", record.id, "--generation", "1", "--config", configPath, "--json"]);
+  assert.equal(removed.code, 0, removed.errors);
+  assert.deepEqual(JSON.parse(removed.output), { removed: true });
 });
 
 test("package manifest exposes the CLI and stable v1 API without removing source compatibility", async () => {

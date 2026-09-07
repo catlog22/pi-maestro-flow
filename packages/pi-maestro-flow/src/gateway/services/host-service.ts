@@ -10,7 +10,6 @@ import {
   release,
   totalmem,
   uptime,
-  version as nodeVersion,
 } from "node:os";
 import type { GatewayPrincipal, GatewayResult } from "../contracts.ts";
 import { createLocalGatewayPrincipal } from "../principal.ts";
@@ -160,7 +159,7 @@ export class HostService {
       platform: platform(),
       arch: arch(),
       release: release(),
-      nodeVersion: nodeVersion(),
+      nodeVersion: process.version,
       hostname: hostname(),
       pid: process.pid,
       cwd: process.cwd(),

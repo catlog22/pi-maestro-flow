@@ -9,7 +9,7 @@ import type { GatewayOwnerRecord, GatewayWorkspace } from "./contracts.ts";
 import { loadGatewayConfig, type GatewayConfig } from "./config.ts";
 import { requestGatewayIpcControl } from "./ipc.ts";
 import { GatewayOwnerStore } from "./owner-store.ts";
-import { gatewayConfigPath, gatewayOwnerPath, gatewayTasksRoot, gatewayWorkspaceRegistryPath } from "./state-paths.ts";
+import { canonicalizeWorkspacePath, gatewayConfigPath, gatewayOwnerPath, gatewayTasksRoot, gatewayWorkspaceRegistryPath } from "./state-paths.ts";
 import { TaskJournal, type GatewayTaskJournalRecord } from "./task-journal.ts";
 import { WorkspaceRegistry, type WorkspaceUnregisterOptions } from "./workspace-registry.ts";
 
@@ -307,7 +307,11 @@ export class GatewayControlClient {
       }
     }
     const observed = await this.processIdentity(owner.pid);
-    if (!observed || observed !== owner.commandIdentity) {
+    if (observed !== owner.commandIdentity) {
+      if (!processAlive(owner.pid)) {
+        await ownerStore.release(owner.ownerToken);
+        return true;
+      }
       throw new Error("Refused to stop Gateway fallback process because its exact command identity could not be verified");
     }
     await killGatewayProcessTree(owner.pid);
@@ -323,32 +327,34 @@ export class GatewayControlClient {
   }
 
   async listWorkspaces(): Promise<GatewayWorkspace[]> {
-    return (await this.registry()).list();
+    return (await this.registry()).list().then((workspaces) => workspaces.map(({ ownerToken: _ownerToken, ...workspace }) => workspace));
   }
 
-  async registerWorkspace(path: string, ttlSeconds: number): Promise<GatewayWorkspace> {
-    const registry = await this.registry();
-    const current = await registry.get(path);
-    if (ttlSeconds > 0 && current?.mode === "lease" && current.ownerToken === this.workspaceOwnerToken) {
-      return registry.renew(path, {
-        ttlSeconds,
-        expectedGeneration: current.generation,
-        ownerToken: this.workspaceOwnerToken,
-      });
-    }
-    return registry.register(path, ttlSeconds > 0
-      ? { mode: "lease", ttlSeconds, ownerToken: this.workspaceOwnerToken, ...(current ? { expectedGeneration: current.generation } : {}) }
-      : { mode: "permanent", ...(current ? { expectedGeneration: current.generation, ownerToken: this.workspaceOwnerToken } : {}) });
+  async registerWorkspace(path: string, ttlSeconds: number, expectedGeneration?: number): Promise<GatewayWorkspace> {
+    const current = await this.registeredWorkspace(path);
+    return this.workspaceControl("workspace-register", {
+      path,
+      ttlSeconds,
+      ...((expectedGeneration ?? current?.generation) === undefined ? {} : { expectedGeneration: expectedGeneration ?? current?.generation }),
+    }) as Promise<GatewayWorkspace>;
+  }
+
+  async renewWorkspace(pathOrId: string, ttlSeconds: number, expectedGeneration: number): Promise<GatewayWorkspace> {
+    return this.workspaceControl("workspace-renew", {
+      workspaceId: pathOrId,
+      ttlSeconds,
+      expectedGeneration,
+    }) as Promise<GatewayWorkspace>;
   }
 
   async unregisterWorkspace(pathOrId: string, options?: WorkspaceUnregisterOptions): Promise<boolean> {
-    const registry = await this.registry();
-    if (options) return registry.unregister(pathOrId, options);
-    const current = await registry.get(pathOrId);
+    const current = await this.registeredWorkspace(pathOrId);
     if (!current) return false;
-    return registry.unregister(pathOrId, current.mode === "lease"
-      ? { expectedGeneration: current.generation, ...(current.ownerToken ? { ownerToken: current.ownerToken } : {}) }
-      : undefined);
+    const value = await this.workspaceControl("workspace-remove", {
+      workspaceId: pathOrId,
+      expectedGeneration: options?.expectedGeneration ?? options?.generation ?? current.generation,
+    }) as { removed?: unknown };
+    return value.removed === true;
   }
 
   async listTasks(): Promise<GatewayTaskJournalRecord[]> {
@@ -357,6 +363,26 @@ export class GatewayControlClient {
       ? join(config.state.rootDir, "tasks", "journal.json")
       : join(gatewayTasksRoot(this.cwd), "journal.json");
     return new TaskJournal({ path: journalPath, maxTasks: config.limits.maxTasks }).list();
+  }
+
+  private async registeredWorkspace(pathOrId: string): Promise<GatewayWorkspace | undefined> {
+    const workspaces = await (await this.registry()).list({ includeExpired: true });
+    const byId = workspaces.find((workspace) => workspace.id === pathOrId);
+    if (byId) return byId;
+    let path: string;
+    try { path = canonicalizeWorkspacePath(pathOrId); } catch { return undefined; }
+    return workspaces.find((workspace) => (workspace.canonicalPath ?? workspace.path) === path);
+  }
+
+  private async workspaceControl(action: "workspace-register" | "workspace-renew" | "workspace-remove", data: Record<string, unknown>): Promise<unknown> {
+    const status = await this.start();
+    if (!status.owner?.socket) throw new Error("Gateway owner control socket is unavailable");
+    return requestGatewayIpcControl({
+      address: status.owner.socket,
+      ownerToken: status.owner.ownerToken,
+      action,
+      data,
+    });
   }
 
   private async config(): Promise<GatewayConfig> {

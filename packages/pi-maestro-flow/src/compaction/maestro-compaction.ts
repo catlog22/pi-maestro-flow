@@ -17,6 +17,11 @@ import {
   type TodoTask,
 } from "../tools/todo.ts";
 import {
+  cloneTodoHandoff,
+  readTodoHandoff,
+  type TodoHandoff,
+} from "../tools/todo-contract.ts";
+import {
   getGoalCompactionSnapshot,
   type GoalCompactionSnapshot,
 } from "../tools/goal.ts";
@@ -521,7 +526,10 @@ export interface MaestroCompactionReference {
 export interface MaestroNewContextDetails {
   requestId: number;
   source: "todo-transition" | "plan-confirm" | "tool";
+  actorId: string;
   carryForward?: string;
+  /** Structured supplement for this reset; durable Todo handoffs remain authoritative. */
+  handoff?: TodoHandoff;
   resourceUris: string[];
 }
 
@@ -829,7 +837,13 @@ export async function captureMaestroCompactionDetails(
     activeSkills,
     references,
     knowhowPath,
-    ...(dependencies.newContext ? { newContext: { ...dependencies.newContext, resourceUris: [...dependencies.newContext.resourceUris] } } : {}),
+    ...(dependencies.newContext ? {
+      newContext: {
+        ...dependencies.newContext,
+        ...(dependencies.newContext.handoff ? { handoff: cloneTodoHandoff(dependencies.newContext.handoff) } : {}),
+        resourceUris: [...dependencies.newContext.resourceUris],
+      },
+    } : {}),
     ...(dependencies.trigger ? { trigger: dependencies.trigger } : {}),
   };
 }
@@ -1094,6 +1108,7 @@ export function normalizeMaestroCompactionDetails(value: unknown): MaestroCompac
       blockedBy: Array.isArray(task.blockedBy) ? [...task.blockedBy] : [],
       skills: Array.isArray(task.skills) ? task.skills.map((skill) => ({ ...skill })) : [],
       resourceUris: Array.isArray(task.resourceUris) ? task.resourceUris.filter((uri): uri is string => typeof uri === "string") : [],
+      handoff: readTodoHandoff(task.handoff),
     })),
   };
   const goal = candidate.goal && typeof candidate.goal === "object" && !Array.isArray(candidate.goal)
@@ -1112,7 +1127,9 @@ export function normalizeMaestroCompactionDetails(value: unknown): MaestroCompac
       return {
         requestId: requestId as number,
         source: context.source,
+        actorId: typeof context.actorId === "string" && context.actorId ? context.actorId : "root",
         ...(typeof context.carryForward === "string" ? { carryForward: context.carryForward } : {}),
+        handoff: readTodoHandoff(context.handoff),
         resourceUris: context.resourceUris.filter((uri): uri is string => typeof uri === "string"),
       } satisfies MaestroNewContextDetails;
     })()

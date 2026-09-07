@@ -14,6 +14,8 @@ export const GATEWAY_OWNER_FILE = "owner.json" as const;
 export const GATEWAY_PAIRINGS_FILE = "pairings.json" as const;
 export const GATEWAY_SERVICE_MANIFEST_FILE = "service.json" as const;
 export const GATEWAY_SESSIONS_DIRECTORY = "sessions" as const;
+export const GATEWAY_BOARD_DIRECTORY = "board" as const;
+export const GATEWAY_BOARD_FILE = "board.json" as const;
 export const GATEWAY_LEGACY_OWNER_FILES = ["mcpx-server.pid", "gateway.pid"] as const;
 
 /** Return UTF-8 byte length, used for every wire/durable bound. */
@@ -83,6 +85,18 @@ export function gatewayTasksRoot(cwd = process.cwd()): string {
 export function gatewaySessionsRoot(cwd = process.cwd()): string {
   return join(gatewayStateRoot(cwd), GATEWAY_SESSIONS_DIRECTORY);
 }
+/** Workspace-level authoritative Board state, separate from Session/Todo projections. */
+export function gatewayBoardRoot(cwd = process.cwd()): string {
+  return join(gatewayStateRoot(cwd), GATEWAY_BOARD_DIRECTORY);
+}
+export const getGatewayBoardRoot = gatewayBoardRoot;
+export function gatewayBoardPath(cwd = process.cwd(), boardRoot?: string): string {
+  const root = boardRoot ?? gatewayBoardRoot(cwd);
+  return boardRoot
+    ? containedPath(root, workspaceIdForPath(cwd), GATEWAY_BOARD_FILE)
+    : containedPath(root, GATEWAY_BOARD_FILE);
+}
+export const getGatewayBoardPath = gatewayBoardPath;
 export function gatewaySessionPath(id: string, cwd = process.cwd(), sessionsRoot?: string): string {
   return containedPath(sessionsRoot ?? gatewaySessionsRoot(cwd), `${safePathToken(id)}.json`);
 }
@@ -104,6 +118,8 @@ export interface GatewayStatePaths {
   jobsRoot: string;
   tasksRoot: string;
   sessionsRoot: string;
+  boardRoot: string;
+  boardPath: string;
 }
 
 export function createGatewayStatePaths(cwd = process.cwd(), homeDir = homedir()): GatewayStatePaths {
@@ -120,6 +136,8 @@ export function createGatewayStatePaths(cwd = process.cwd(), homeDir = homedir()
     jobsRoot: join(workspaceRoot, "jobs"),
     tasksRoot: join(workspaceRoot, "tasks"),
     sessionsRoot: join(workspaceRoot, GATEWAY_SESSIONS_DIRECTORY),
+    boardRoot: join(workspaceRoot, GATEWAY_BOARD_DIRECTORY),
+    boardPath: join(workspaceRoot, GATEWAY_BOARD_DIRECTORY, GATEWAY_BOARD_FILE),
   };
 }
 

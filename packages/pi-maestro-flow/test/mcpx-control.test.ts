@@ -147,3 +147,15 @@ test("GatewayControlClient refuses fallback stop when exact process identity dif
   await assert.rejects(() => client.stop(), /exact command identity/);
   assert.equal((await ownerStore.read())?.ownerToken, owner.ownerToken);
 });
+
+test("GatewayControlClient clears a stale owner when its process no longer exists", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "gateway-control-stale-owner-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const { configPath, ownerPath } = await createConfig(root);
+  const ownerStore = new GatewayOwnerStore({ ownerPath, commandIdentity: "expected gateway command" });
+  await ownerStore.claim({ pid: 2_147_483_647, commandIdentity: "expected gateway command" });
+  const client = new GatewayControlClient({ configPath, processIdentity: () => undefined });
+
+  assert.equal(await client.stop(), true);
+  assert.equal(await ownerStore.read(), undefined);
+});

@@ -5,7 +5,22 @@ icon: "🔄"
 
 这里记录 pi maestro flow 套件从上一稳定版本到当前版本的用户可见变化、行为调整、问题修复和升级要求。
 
-> **当前稳定版本：v0.28.0（2026-09-06）。** SSH 远程通道、智能模型选择与 receipt-bound 唤醒协议；引擎精确 pin `maestro-flow@0.5.84`；搭配 Teammate 2.6.0、Cockpit 0.23.0、Settings-Core 0.2.1、Backend-Core 0.1.3 与 Backends 0.1.3。
+> **当前稳定版本：v0.29.0（2026-09-07）。** 工作区共享 Gateway Board、持久化 Todo handoff、确定性 New Context 恢复与加固的 Teammate 启动诊断；引擎精确 pin `maestro-flow@0.5.86`；搭配 Teammate 2.6.1、Cockpit 0.23.0、Settings-Core 0.2.1、Backend-Core 0.1.3 与 Backends 0.1.3。
+
+## v0.29.0（2026-09-07）
+
+> 本版发布 Flow 0.29.0 与 Teammate 2.6.1；Cockpit 0.23.0、Settings-Core 0.2.1、Backend-Core 0.1.3 与 Backends 0.1.3 保持不变；引擎精确 pin `maestro-flow@0.5.84` → `0.5.86`。83 个实现/测试/支持文件，+5,694 / −455 行（不含 Flow 版本/pin、lockfile、发布说明与文档更新）。
+
+- **工作区共享 Gateway Board**：新增版本化 board contracts、持久化 store、乐观 revision、claim generation/lease、依赖与状态转换、completion policy，以及 Session/Plan/Todo/resource/endpoint 链接；`board` 工具通过认证本地 IPC 操作共享状态。
+- **Gateway 工作区服务**：catalog、contracts、policy、runtime、CLI 与 board/workspace/job/file/session/teammate services 补齐工作区发现、日志、文件传输、teammate 启动和生命周期边界。
+- **持久化 Todo handoff**：create/update/advance 支持最多 3 条有序 next steps，并用 `required` / `conditional` / `skip` / `unknown` 标记任务相对文件加载价值；schema、序列化、root/child 提示与渲染完整投影。
+- **确定性 New Context 恢复**：recovery capsule 按 actor、Goal 与 approved Plan 选择相关 handoff，约束 payload，并输出 checkpoint 与文件加载指导。
+- **Plan/Act 模型恢复**：Plan 入口记录规划模型，确认界面显示切换，Execute/Exit 确定性恢复原 Act 模型。
+- **Teammate 2.6.1**：shell-free、带来源的 Pi launcher resolution 支持显式 override、PATH native、验证后的 Windows shim/host package bin 与兼容 fallback；spawn/child-error/close 事件携带有界 stderr、exit code、signal、phase 和 launcher source。
+- **共享前台分离**：Teammate 与 `bash_bg run` 通过新的公共 foreground-detach 协调器共享单个会话级 Alt+B listener；嵌套调用按最外层优先分离，进程继续由后台作业生命周期管理。
+- **Compaction IPC 韧性**：断开的 teammate IPC 不再发送 telemetry，EPIPE/channel-closed 被收敛为已知传输终止。
+
+升级：`pi install npm:pi-maestro-flow@0.29.0`
 
 ## v0.28.0（2026-09-06）
 
