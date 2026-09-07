@@ -38,6 +38,14 @@ bash_bg({ action: "list" })
 | 后台完成 | 推送 bash-bg-complete 通知（新回合），完成与 loop 事件渲染为有界卡片 |
 | 常驻进程（dev server 等） | 用 `action: "start"` 立即后台化 |
 
+### Alt+B 共享前台分离（v0.29+）
+
+`bash_bg run` 与前台 teammate 共用同一个会话级 Alt+B 分发器：在 TUI 中按 `Alt+B` 可把正在前台阻塞的调用立刻转入后台，进程继续由后台作业生命周期管理，完成后同样推送完成通知。
+
+-  Uncertain-duration 命令优先用 `action: "run"`：快则前台直返，慢则超时自动转后台，期间随时可用 Alt+B 提前分离；
+- 嵌套的前台调用按最外层优先分离，内层继续等待，不会误杀进程；
+- 同一会话只有一个 TUI listener，会话清理时确定性移除。
+
 ### 与 observe 配合
 
 后台任务完成后会有通知；如需阻塞等待，用 observe：

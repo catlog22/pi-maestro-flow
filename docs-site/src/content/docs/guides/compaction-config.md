@@ -92,6 +92,10 @@ Automatic compaction 需要续跑被中断任务时，会先广播 capability en
 - **Fail closed 持久化**：prepared/attempt/terminal receipt 都必须先写入 durable pending intent；写入失败会暂停派发或重试终态持久化，不会把未落盘状态当作成功；
 - **能力围栏**：producer 与 teammate consumer 都校验协议版本、`wakeId`、sequence、generation 和 deadline；缺少兼容 capability 时不宣称已可靠唤醒。
 
+### 中继传输韧性（v0.29+）
+
+teammate compaction telemetry 在 IPC 已断开时不再发送；`EPIPE` / channel-closed 这类错误会被收敛为已知的传输终止（视为 settled 的传输丢失），而不是未处理异常抛给 Agent。wake 决策不受影响：失败的只是遥测投递，receipt 状态机仍以 durable pending intent 为准。
+
 ### 设计权衡
 
 - `velocity` 默认关：它**提前**压缩，未显式配置时不得早于历史 token 比率行为；

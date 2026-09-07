@@ -69,7 +69,7 @@ maestro load --type <type> [--id <id>]
 | **模型熔断与故障转移** | 电路断路器保护 API 调用，自动切备用模型 |
 | **GUI 子系统（UCL）** | `PI_GUI=1` 启用，UCL（Unified Communication Layer，统一通信层）HTTP 工具发现/调用 + SSE 事件 |
 | **TUI 界面组件** | Goal 面板、Todo 覆盖层、进度树、状态栏等 |
-| **Gateway Board** | 工作区共享任务、claim lease、依赖、状态转换与 Session/Plan/Todo/endpoint 链接；通过认证的本地 IPC 访问 |
+| **Gateway Board** | 工作区共享任务、claim lease、依赖、状态转换与 Session/Plan/Todo/endpoint 链接；通过认证的本地 IPC 访问，见 [Gateway Board](/guides/gateway-board) |
 | **self-evolve 自进化层** | 运行轨迹 → 知识沉淀闭环（M1-M5：候选信号、评审门、健康侧车、提案治理、canary 验证），默认禁用（见 [Self-Evolve 自进化](/guides/self-evolve)） |
 | **权限系统** | 5 种模式 + 细粒度 allow/ask/deny + 子进程 IPC 中继 |
 

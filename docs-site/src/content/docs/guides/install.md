@@ -54,7 +54,7 @@ pi install npm:pi-maestro-flow@<新版本>   # 升级到指定版本
 | pi-maestro-flow | `maestro` | 知识感知调度（explore / delegate / moa） |
 | pi-maestro-flow | `goal` | 长时目标生命周期管理 |
 | pi-maestro-flow | `todo` | 任务分解、持久化 handoff 与跟踪 |
-| pi-maestro-flow | `board` | 工作区共享 Gateway Board：任务、claim、依赖、Session/Plan/Todo 链接 |
+| pi-maestro-flow | `board` | 工作区共享 Gateway Board：任务、claim、依赖、Session/Plan/Todo 链接，见 [Gateway Board](/guides/gateway-board) |
 | pi-maestro-flow | `run-control` | 工作流 Run 生命周期 |
 | pi-maestro-flow | `ask-user-question` | 结构化用户输入收集 |
 | pi-maestro-flow | `lsp` / `browser` / `smart_search` / `ffgrep` / `fffind` / `search_tool_bm25` | 智能工具 |

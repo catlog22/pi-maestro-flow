@@ -162,6 +162,16 @@ export const guideRegistry: Array<{
     icon: 'send',
     category: 'core',
   },
+  {
+    slug: 'gateway-board',
+    file: 'gateway-board.md',
+    title: 'Gateway Board Shared Tasks',
+    description: 'Workspace-shared board: claims, transitions, and Session/Plan/Todo links over local IPC',
+    title_zh: 'Gateway Board 工作区共享任务',
+    description_zh: '工作区共享任务：认领、流转与 Session/Plan/Todo 链接，经本地 IPC 访问',
+    icon: 'pin',
+    category: 'core',
+  },
   // ─── Orchestration ─────────────────────────────────────────────────────────
   {
     slug: 'agents',

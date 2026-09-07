@@ -156,6 +156,12 @@ teammate-send({ to: "my-agent", message: "停止当前方案，改用替代方�
 - **进程清理**：Windows 进程树清理会确认真实回收，不只凭 `taskkill` 退出码判断；完成消息 outbox GC 有界，reconcile 期间节流；
 - **完成与停滞卡片**：completion / stalled 消息渲染为有界卡片，状态变化经事件通知，不要轮询。
 
+## 启动器解析与结构化诊断（v0.29+）
+
+teammate 启动子进程 Pi 时不经过 shell，按固定优先级解析可执行文件并记录来源（provenance）：显式覆盖 → 原生 PATH 二进制 → 校验过的 Windows npm shim → 校验过的宿主包 bin → 兼容 fallback。每一次 spawn、child-error、close 事件都携带结构化诊断：有界 stderr、exit code、signal、生命周期阶段与 launcher 来源，跨进程排障时直接看这些字段，不用猜测进程是怎么起来的。
+
+前台 teammate 与 `bash_bg run` 共享同一个会话级 Alt+B 分发器（`foreground-detach` 公共面）：TUI 中按 `Alt+B` 把前台调用立刻转入后台，嵌套调用按最外层优先分离。详见[bash_bg 与 observe](/guides/bash-bg-observe)。
+
 ## 结果记录（agent://）
 
 完成任务的输出可通过协议资源读取：`agent://<correlationId>` 返回结构化输出（带 outputSchema 的任务）或最终答案文本（普通任务）；路径段可取嵌套字段，如 `agent://reviewer-1/findings/0/path`。

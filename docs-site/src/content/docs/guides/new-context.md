@@ -150,6 +150,10 @@ Recovery Capsule v2 最大 32 KiB，由运行时确定性生成，主要包含�
 - 可恢复的 session/resource lineage；
 - 被省略或截断内容的计数与恢复指令。
 
+### Handoff 感知的恢复选择（v0.29+）
+
+capsule 中的 Todo handoff 不是全量堆叠，而是按相关性确定性选择的：优先取本次 reset 请求自带的 handoff，其次取调用 actor 名下仍活跃任务的 handoff，最后回退到最近已完成任务的 handoff；`nextSteps` 与 `required` / `conditional` 文件按当前 Goal 与已批准 Plan 的 scope 过滤，无关 scope 的条目会被省略并计数。payload 整体有界，超限时按 `skip` 优先、`unknown` 次之的顺序省略，并输出 checkpoint 与文件加载指导（哪些文件必须读、哪些仅在 `when` 条件满足时读）。因此 `handoff.nextSteps` 要写“下一阶段的第一动作”，`files` 要标准确的 `value` 与 `when`——它们直接决定 reset 后新上下文能看到什么。
+
 Reset 完成后，系统发送 follow-up：
 
 ```text
