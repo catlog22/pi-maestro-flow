@@ -514,7 +514,9 @@ test("terminal tombstone remains inspectable but rejects proxy commands", async 
     (message) => replies.push(message), undefined,
   );
   assert.equal(replies[0].result.isError, true);
-  assert.match(replies[0].result.content[0].text, /already failed/i);
+  assert.match(replies[0].result.content[0].text, /is failed and has no restorable runtime/);
+  assert.match(replies[0].result.content[0].text, /Dispatch a new teammate/);
+  assert.match(replies[0].result.content[0].text, /tasks\[\]\.briefing/);
   assert.equal(state.activeRuns.get(agent.correlationId)?.status, "failed");
 });
 
