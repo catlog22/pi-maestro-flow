@@ -226,6 +226,10 @@ maestro load --type <type> [--list] [--category <category>] [--tag <tag>] [--key
 
 Knowledge types: `spec`, `knowhow`, `domain`, `issue`, `session`, `scratch`, `note`, `project`, `roadmap`. Spec categories: `coding`, `arch`, `debug`, `test`, `review`, `learning`, `ui`; route decisions to `arch`, patterns to `coding`, pitfalls to `debug`/`learning`, rules to `review`, and tests to `test`.
 
+### Know-how capture
+
+`maestro-knowhow` captures reusable knowledge in `.workflow/knowhow/`. Automatically load and follow it when the user explicitly asks for “知识沉淀”, “沉淀经验”, “记录模板”, “记录决策”, or “存个技巧”; use `maestro-spec` instead for explicit project constraints, rules, conventions, or quality standards.
+
 Use one to three core keywords per query. Separate conceptual queries from code symbols. Follow relevant associations one hop:
 
 - Chunked result -> load its parent entry.
