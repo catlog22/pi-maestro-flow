@@ -46,9 +46,20 @@ export interface TodoHandoff {
   nextStepsRevision?: number;
 }
 
-/** Request-only completion transition; it is never persisted in Todo state. */
+/** Request-only context transition; update supports only new_context, while advance supports both values. */
 export const TODO_ADVANCE_TRANSITIONS = ["keep_context", "new_context"] as const;
 export type TodoAdvanceTransition = (typeof TODO_ADVANCE_TRANSITIONS)[number];
+
+/** Request-only progressive reads; offsets and limits count Unicode code points. */
+export const TODO_GET_FIELDS = [
+  "all", "subject", "description", "context", "summary", "resourceUris", "handoff", "skills",
+] as const;
+export type TodoGetField = (typeof TODO_GET_FIELDS)[number];
+export const TODO_GET_DEFAULT_LIMIT = 4 * 1024;
+export const TODO_GET_MAX_LIMIT = 16 * 1024;
+/** List pages count tasks, in creation order, after applying the filter. */
+export const TODO_LIST_DEFAULT_LIMIT = 20;
+export const TODO_LIST_MAX_LIMIT = 50;
 
 export const TODO_UPDATE_FIELDS = [
   "subject",

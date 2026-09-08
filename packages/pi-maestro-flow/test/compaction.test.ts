@@ -2150,7 +2150,10 @@ test("mid-turn guard falls back to native compaction after exhausted failures tr
   assert.equal(callbacks.length, MAX_CONSECUTIVE_COMPACTION_FAILURES);
   assert.equal(sent.length, MAX_CONSECUTIVE_COMPACTION_FAILURES - 1, "the tripping failure uses native fallback instead of another retry turn");
   assert.ok(sent.every(({ message }) => /compaction failed.*context was exhausted/i.test(message)));
-  assert.ok(sent.every(({ options }) => JSON.stringify(options) === JSON.stringify({ deliverAs: "steer" })));
+  assert.ok(
+    sent.every(({ options }) => JSON.stringify(options) === JSON.stringify({ deliverAs: "followUp" })),
+    "recovery follow-ups wake a stopped or sleeping agent session",
+  );
   assert.equal(nativeFallbacks.length, 1, "a breaker trip triggers exactly one untagged native fallback");
   assert.equal(
     nativeFallbacks[0]?.customInstructions,
@@ -4808,7 +4811,11 @@ test("sustained critical-band pressure inside a tool loop aborts once and settle
   assert.equal(fx.compactCalls.length, 1, "a loop-critical intent bypasses the two-turn defer");
   fx.compactCalls[0].onComplete();
   assert.match(fx.sent.at(-1) ?? "", /Continue the interrupted task/, "the interrupted loop resumes automatically");
-  assert.deepEqual(fx.sendOptions.at(-1), { deliverAs: "steer" }, "recovery must not wait on the already-settled turn");
+  assert.deepEqual(
+    fx.sendOptions.at(-1),
+    { deliverAs: "followUp" },
+    "recovery follow-up wakes the already-settled agent session",
+  );
 
   await fx.guard.evaluate(highUsageToolBatch(385_000), fx.ctx);
   await fx.guard.evaluate(highUsageToolBatch(385_000), fx.ctx);

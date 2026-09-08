@@ -891,7 +891,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     try {
       // ExtensionAPI is fire-and-forget. Synchronous return is deliberately not
       // promoted to queued/consumed and never clears the durable obligation.
-      pi.sendUserMessage(recoveryDeliveryPrompt(wake.prompt, wake.wakeId), { deliverAs: "steer" });
+      pi.sendUserMessage(recoveryDeliveryPrompt(wake.prompt, wake.wakeId), { deliverAs: "followUp" });
       return true;
     } catch (error) {
       dispatchedWakeThisLifecycle = undefined;

@@ -113,6 +113,7 @@ import {
   onBeforeAgentStartTodo,
   onContextTodo,
   registerTodoActor,
+  recordTodoActorCompletion,
   setTodoStateChangeListener,
   onSessionStart as todoSessionStart,
   onSessionShutdown as todoSessionShutdown,
@@ -1356,7 +1357,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   }));
   // Auto-seal delegated Todo work and reclaim browser tabs owned by the agent.
   disposers.push(pi.events.on(TEAMMATE_COMPLETE_EVENT, (event) => {
-    const record = event as { correlationId?: unknown; agent?: unknown; exitCode?: unknown; cancelled?: unknown };
+    const record = event as { correlationId?: unknown; agent?: unknown; exitCode?: unknown; cancelled?: unknown; wakeable?: unknown };
     const cid = typeof record.correlationId === "string" ? record.correlationId.trim() : "";
     if (!cid || cid === "unknown") return;
     trackChildBrowserCleanup(childBrowserBroker.closeActor(cid));
@@ -1371,6 +1372,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
       label: agent ?? cid.slice(0, 8),
       ...(agent ? { agentType: agent } : {}),
     };
+    recordTodoActorCompletion(actor, record.wakeable === true);
     void sealTodoTasksOnAgentComplete(actor, Number(record.exitCode ?? 1), record.cancelled === true, rootCtx)
       .then((result) => {
         if (result.sealed.length === 0 && result.failed.length === 0) return;
@@ -1915,31 +1917,32 @@ Only request completion after all work is done; the extension verifies it indepe
   const todoTool: ToolDefinition<typeof TodoToolParams> = {
     name: "todo",
     label: "Todo",
-    description: `Task management with plain-text context and optional Pi skill execution.
+    description: `Task management with progressive reads. Store full task state, return small indexes and execution briefs, and fetch details only when needed.
 
-Actions:
-- create (single): { action: "create", subject: "...", assignee: "self|root|id|unique-id-prefix|label|@label|label#id-prefix", context: "...", skills: [{ name, role: "primary|guard|support", args?: "..." }], resourceUris?: ["agent://..."], handoff?: { nextSteps?, files? } }
-- create (batch): { action: "create", tasks: [{ subject, description?, context?, blockedBy?, skills?, resourceUris?, handoff?, goalId? }, ...] } — blockedBy integer N means the earlier array item tasks[N] (0-based), e.g. blockedBy: [0]
-- update (single): { action: "update", id, updateFields: [...], ... } — list changed fields; empty string/array clears clearable fields; resourceUris replaces the full reference list; handoff omitted children preserve and explicit empty arrays clear
-- update (batch): { action: "update", updates: [{ id, updateFields?, ... }, ...] } — validates the whole batch and commits atomically
-- delete: use id for one task or ids for an atomic batch
-- advance: omit id/summary/resourceUris/handoff to activate your first runnable task; with an active task pass its id, a non-empty summary, optional resourceUris/handoff, and optional transition (keep_context|new_context) to complete it and activate your next runnable task. transition=new_context requires compaction.newContext.enabled=true and otherwise fails before Todo mutation.
-- list / get / clear / next
+Actions and results:
+- create: use subject for one task or tasks[] for an atomic batch. Returns an index of up to 20 created tasks and remaining IDs; does not activate tasks or echo detail. Batch blockedBy uses earlier 0-based array indexes; single-task dependencies use task IDs. Status and summary are update-only.
+- list: returns IDs, short titles, status, ownership, and dependencies. No detail or summaries. offset/limit page filtered tasks in creation order (0-based; default 20, max 50).
+- get: id alone returns a bounded overview with resourceUris. Add field (all|subject|description|context|summary|resourceUris|handoff|skills) to page full content. offset/limit count Unicode code points (0-based; default 4096, max 16384). Without field, paging selects all. Text fields are raw text; structured fields/all are JSON.
+- advance: without an active task, omit completion fields to activate the next assigned runnable task. With an active task, pass its id and non-empty summary to complete it and activate the next one. Returns a completion receipt and the next task's bounded brief. Optional resourceUris/handoff retain completion evidence and resumption guidance.
+- update: use id or atomic updates[]. updateFields selects changed fields; omission uses supplied fields. Empty strings/arrays clear clearable values. resourceUris replaces the reference list; omitted handoff children preserve existing values.
+- delete: id or atomic ids[]. clear removes the shared list (root only). next is the activation-only compatibility action.
 
-Parallel delegation: bind todo ids via teammate \`tasks[].todo\`; every actor advances only tasks assigned to itself. \`next\` remains the activation-only compatibility action.
+Read Continue/truncation hints only when more information is needed; field=summary retrieves a task's full outcome. Activation includes at most five bounded summaries from the same plan, or from the same assignee only when the task has no plan binding.
 
-Contract: Todo is a live execution state machine, not a retrospective checklist. subject is the title; description is detail. status is update-only on create (never pass status to create). Each actor has at most one in_progress task. Skill binding requires exactly one primary. context carries current progress and the exact next action; summary carries outcome, evidence, decisions, and downstream impact. handoff carries up to 3 next-step recommendations and task-relative file loading value (required|conditional|skip|unknown) for later New Context selection. resourceUris are validated durable references; prefer exact immutable publication IDs (for example agent://<publication-id>) over aliases. advance transition is a request-only receipt for an active completion and is not persisted or scheduled by Todo.`,
+Each actor has at most one in_progress task and advances only its own work. Bind teammate tasks[].todo for delegation. Skills are optional and require exactly one primary when present. context records current progress/next action; summary records outcome and evidence. resourceUris retain references without loading content; prefer immutable agent publication IDs. handoff stores up to 3 next steps and file reading values (required|conditional|skip|unknown) for New Context.
+
+Completion-form advance may request transition=keep_context|new_context. A single update of the caller's active in_progress task may request transition=new_context to persist intermediate state before scheduling the reset. new_context requires compaction.newContext.enabled=true or fails before mutation; transition receipts are not persisted. Omission keeps existing context behavior.`,
 
     promptSnippet: "Lay out a whole multi-step plan in one batch create (≥3 steps), then keep it live by advancing each task immediately when its outcome is complete.",
     promptGuidelines: [
       "Use todo when work has ≥3 steps/phases, step dependencies, or cross-turn context — create the COMPLETE plan in one batch create BEFORE executing.",
       "A task is a verifiable outcome (feature, phase, component), not a single edit or command; put affected files and verification criteria in description/context.",
-      "Keep context focused on current progress and the exact next action; put outcome, evidence, decisions, and downstream impact in summary.",
+      "Create short task outlines; keep large evidence in resourceUris. Use the activation brief first, then get only the fields needed; never automatically drain every Continue page.",
       "Batch blockedBy: tasks[i].blockedBy = [N] means tasks[i] depends on tasks[N], where 0 <= N < i.",
       "Todo is a live execution state machine: immediately after a task meets its acceptance criteria, call todo advance with its id and summary before any tool call or work belonging to another Todo; never batch-complete finished tasks during finalization.",
       "Only provide handoff.nextSteps when an authorized later phase exists; for final or blocked work, explicitly clear stale nextSteps with an empty array and report or settle instead of inventing work. At completion, annotate only files/resources relevant to resumption as required, conditional with an explicit trigger, skip with a reason that prevents wasteful reload, or unknown; clear stale files with an empty array when nothing remains worth carrying, and do not read extra files merely to classify them.",
       "On completion, attach validated resourceUris for durable evidence and prefer exact immutable publication IDs over mutable aliases.",
-      "Advance transition is request-only: pass transition=keep_context or new_context only with an active completion-form advance; new_context requires compaction.newContext.enabled=true, the receipt is not persisted, and omission preserves the current behavior.",
+      "Transitions are request-only: active completion-form advance accepts keep_context or new_context; a single update of the caller's active in_progress task accepts only new_context so progress/handoff/resources commit before reset scheduling. new_context requires compaction.newContext.enabled=true, receipts are not persisted, and omission preserves current behavior.",
       "When a completed todo advance result includes [context-pressure-advisory], inspect the task activated in that same result. Dynamic reminders exist only at this Todo completion checkpoint: late auto-prune recommends new_context, while critical makes it a priority before beginning the next Todo. Call the standalone new_context tool only if a next phase exists, persisted state is sufficient, the boundary is loosely coupled, and no messages are pending; otherwise continue or settle. During active Todo work, automatic compaction remains the capacity fallback. The advisory cannot change the completed advance retroactively and must not be carried to an unrelated Todo; never infer a pressure reminder without a Todo completion checkpoint.",
       "Advance is actor-scoped and only completes or activates tasks assigned to the caller. Use update immediately instead when work becomes blocked, is paused, or must be completed without activating another task.",
     ],
@@ -4713,16 +4716,17 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
     description: `Manage the shared root Todo list from this teammate.
 
 Tasks created here are attributed to this teammate and assigned to self by default.
+create returns a compact index (up to 20 entries, then remaining IDs). list discovers tasks without detail/summaries; offset/limit count filtered tasks (0-based, default 20, max 50). get returns a bounded overview with resourceUris; field/offset/limit page full details or summary (Unicode code points, default 4096, max 16384; field defaults to all when paging). advance returns a completion receipt and the next task's bounded execution brief. Related summaries come from the same plan, or the same assignee only when no plan is bound. Follow Continue/read hints only when more information is needed; never automatically drain every page.
 Use assignee="root" to hand work back to root. Teammates can update tasks they created or were assigned; only root can clear the shared list.
 
-If root delegated a task to you (spawned with todo: "<id>"), it is usually already active (in_progress) — check with \`todo list\`, work on it, and immediately finish it with \`todo advance\` using that id, a one-line summary, optional resourceUris/handoff, and optional transition (keep_context|new_context). Advance only completes or activates tasks assigned to you. Use \`todo advance\` without id/summary/resourceUris/handoff when you have no active task and need to activate your next assigned task; use \`todo update\` when blocked, paused, or completing without continuing.`,
+If root delegated a task to you (spawned with todo: "<id>"), it is usually already active (in_progress) — check with \`todo list\`, work on it, and immediately finish it with \`todo advance\` using that id, a one-line summary, optional resourceUris/handoff, and optional transition (keep_context|new_context). Advance only completes or activates tasks assigned to you. Use \`todo advance\` without id/summary/resourceUris/handoff when you have no active task and need to activate your next assigned task. Use a single \`todo update\` with transition=new_context to persist intermediate progress on your active task before scheduling a reset; use ordinary update when blocked, paused, or completing without continuing.`,
     promptSnippet: "Keep teammate-owned tasks live in the shared root Todo list and advance each one immediately when its work finishes.",
     promptGuidelines: [
       "Use todo for newly discovered follow-up work, explicit blockers, and resumable steps.",
       "Todo is live state tracking: immediately when your active task finishes, call todo advance with its id and summary before doing work for another Todo; never defer several completions until your final answer.",
       "Keep context to current progress and the exact next action; summaries should record outcome, evidence, decisions, and downstream impact. Attach durable resourceUris using exact immutable publication IDs when available.",
       "Use durable Todo.handoff for up to 3 ordered next steps and task-relative file values: required, conditional with an explicit trigger, skip, or unknown. Only provide nextSteps when an authorized later phase exists; for final or blocked work, explicitly clear stale nextSteps with an empty array and report or settle instead of inventing work.",
-      "Advance transition is request-only (keep_context|new_context), valid only with an active completion-form advance; new_context requires compaction.newContext.enabled=true and otherwise fails before Todo mutation; its receipt is not persisted.",
+      "Transitions are request-only: active completion-form advance accepts keep_context or new_context; a single update of your active in_progress task accepts only new_context so progress/handoff/resources commit before reset scheduling. new_context requires compaction.newContext.enabled=true and otherwise fails before Todo mutation; receipts are not persisted.",
       "When a completed todo advance result includes [context-pressure-advisory], inspect the task activated in that same result. Dynamic reminders exist only at this Todo completion checkpoint: late auto-prune recommends new_context, while critical makes it a priority before beginning the next Todo. Call the standalone new_context tool only if a next phase exists, persisted state is sufficient, the boundary is loosely coupled, and no messages are pending; otherwise continue or settle. During active Todo work, automatic compaction remains the capacity fallback. The advisory cannot change the completed advance retroactively and must not be carried to an unrelated Todo; never infer a pressure reminder without a Todo completion checkpoint.",
       "Advance is actor-scoped. Complete, block, or pause your active Todo before activating another task assigned to you; a final-answer Todo check is recovery only, not the normal update boundary.",
     ],

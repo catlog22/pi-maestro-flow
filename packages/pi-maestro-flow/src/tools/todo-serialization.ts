@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getGoalById } from "./goal.ts";
 import type { TodoSkillConfig } from "../skills/skill-loader.ts";
@@ -24,7 +25,9 @@ import { readTodoHandoff, readTodoResourceUris } from "./todo-contract.ts";
 export { isSkillRole };
 
 export const TODO_STATE_ENTRY_TYPE = "todo-state";
-export const TODO_STATE_VERSION = 7;
+export const TODO_CONTENT_ENTRY_TYPE = "todo-content";
+export const TODO_STATE_VERSION = 8;
+const TODO_CONTENT_VERSION = 1;
 
 export interface TodoSerializationContext {
   getExtensionApi: () => ExtensionAPI | undefined;
@@ -34,6 +37,7 @@ export interface TodoSerializationContext {
 }
 
 let serializationContext: TodoSerializationContext | undefined;
+let persistedTodoContentRefs = new Set<string>();
 
 export function configureTodoSerialization(context: TodoSerializationContext): void {
   serializationContext = context;
@@ -44,12 +48,70 @@ function requireSerializationContext(): TodoSerializationContext {
   return serializationContext;
 }
 
+function todoContent(task: TodoTask): Record<string, unknown> | undefined {
+  const content: Record<string, unknown> = {};
+  if (task.description !== undefined) content.description = task.description;
+  if (task.context !== undefined) content.context = task.context;
+  if (task.resourceUris.length > 0) content.resourceUris = [...task.resourceUris];
+  if (task.handoff !== undefined) content.handoff = task.handoff;
+  if (task.skillActivation !== undefined) content.skillActivation = task.skillActivation;
+  if (task.summary !== undefined) content.summary = task.summary;
+  return Object.keys(content).length > 0 ? content : undefined;
+}
+
+function todoContentRef(content: Record<string, unknown>): string {
+  return createHash("sha256").update(JSON.stringify(content)).digest("hex");
+}
+
+function todoStateTask(task: TodoTask, contentRef?: string): Record<string, unknown> {
+  return {
+    id: task.id,
+    subject: task.subject,
+    status: task.status,
+    blockedBy: [...task.blockedBy],
+    skills: task.skills.map((skill) => ({ ...skill })),
+    ...(task.origin !== undefined ? { origin: task.origin } : {}),
+    ...(task.planHandoffKey !== undefined ? { planHandoffKey: task.planHandoffKey } : {}),
+    ...(task.goalId !== undefined ? { goalId: task.goalId } : {}),
+    createdBy: { ...task.createdBy },
+    assignee: { ...task.assignee },
+    createdAt: task.createdAt,
+    updatedAt: task.updatedAt,
+    ...(task.activeStartedAt !== undefined ? { activeStartedAt: task.activeStartedAt } : {}),
+    ...(task.activeDurationMs !== undefined ? { activeDurationMs: task.activeDurationMs } : {}),
+    ...(task.completedAt !== undefined ? { completedAt: task.completedAt } : {}),
+    ...(contentRef !== undefined ? { contentRef } : {}),
+  };
+}
+
 export function persist(
   state: Map<string, TodoTask> = requireSerializationContext().getTasks(),
 ): void {
-  requireSerializationContext().getExtensionApi()?.appendEntry?.(TODO_STATE_ENTRY_TYPE, {
+  const api = requireSerializationContext().getExtensionApi();
+  if (!api?.appendEntry) return;
+
+  const newContents: Record<string, Record<string, unknown>> = {};
+  const stateTasks: Record<string, Record<string, unknown>> = {};
+  for (const [id, task] of state) {
+    const content = todoContent(task);
+    const contentRef = content === undefined ? undefined : todoContentRef(content);
+    if (content !== undefined && contentRef !== undefined && !persistedTodoContentRefs.has(contentRef)) {
+      newContents[contentRef] = content;
+    }
+    stateTasks[id] = todoStateTask(task, contentRef);
+  }
+
+  const newContentRefs = Object.keys(newContents);
+  if (newContentRefs.length > 0) {
+    api.appendEntry(TODO_CONTENT_ENTRY_TYPE, {
+      version: TODO_CONTENT_VERSION,
+      contents: newContents,
+    });
+    for (const ref of newContentRefs) persistedTodoContentRefs.add(ref);
+  }
+  api.appendEntry(TODO_STATE_ENTRY_TYPE, {
     version: TODO_STATE_VERSION,
-    tasks: Object.fromEntries(state),
+    tasks: stateTasks,
   });
 }
 
@@ -59,6 +121,20 @@ export function loadTasksFromSession(ctx: TodoContext): Map<string, TodoTask> {
     getEntries?: () => Array<{ type?: string; customType?: string; data?: unknown }>;
   } | undefined;
   const entries = sm?.getBranch?.() ?? sm?.getEntries?.() ?? [];
+  const contentsByRef = new Map<string, Record<string, unknown>>();
+  persistedTodoContentRefs = new Set<string>();
+  for (const candidate of entries) {
+    if (candidate.type !== "custom" || candidate.customType !== TODO_CONTENT_ENTRY_TYPE) continue;
+    const contents = asRecord(asRecord(candidate.data)?.contents);
+    if (!contents) continue;
+    for (const [ref, rawContent] of Object.entries(contents)) {
+      const content = asRecord(rawContent);
+      if (!content || todoContentRef(content) !== ref) continue;
+      contentsByRef.set(ref, content);
+      persistedTodoContentRefs.add(ref);
+    }
+  }
+
   const entry = entries
     .filter((e) => e.type === "custom" && e.customType === TODO_STATE_ENTRY_TYPE)
     .pop();
@@ -67,7 +143,10 @@ export function loadTasksFromSession(ctx: TodoContext): Map<string, TodoTask> {
   if (!rawTasks) return new Map();
   const loaded = new Map<string, TodoTask>();
   for (const [id, rawTask] of Object.entries(rawTasks)) {
-    loaded.set(id, normalizeLoadedTask(id, rawTask));
+    const task = asRecord(rawTask);
+    const contentRef = typeof task?.contentRef === "string" ? task.contentRef : undefined;
+    const content = contentRef === undefined ? undefined : contentsByRef.get(contentRef);
+    loaded.set(id, normalizeLoadedTask(id, content && task ? { ...content, ...task } : rawTask));
   }
   normalizeLoadedDependencies(loaded);
   normalizeLoadedGoalBindings(loaded);

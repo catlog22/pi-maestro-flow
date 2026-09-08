@@ -22,11 +22,17 @@ import {
   onSessionShutdown,
   onSessionStart,
   registerTodoActor,
+  recordTodoActorCompletion,
   type TodoActorRef,
   type TodoContext,
 } from "../src/tools/todo.ts";
 import { TodoToolParams } from "../src/extension/schemas.ts";
-import type { TodoHandoffInput } from "../src/tools/todo-contract.ts";
+import { TODO_GET_FIELDS, TODO_GET_MAX_LIMIT, type TodoHandoffInput } from "../src/tools/todo-contract.ts";
+import {
+  TODO_CONTENT_ENTRY_TYPE,
+  TODO_STATE_ENTRY_TYPE,
+  TODO_STATE_VERSION,
+} from "../src/tools/todo-serialization.ts";
 import { renderTodoWidget } from "../src/extension/index.ts";
 import {
   addGoal,
@@ -61,6 +67,406 @@ function startTodo(cwd: string, loader: TodoSkillLoader, entries: unknown[] = []
   return context;
 }
 
+function todoText(result: Awaited<ReturnType<typeof executeTodo>>): string {
+  return (result.content[0] as { text: string }).text;
+}
+
+function todoPageBody(text: string): string {
+  return text.slice(text.indexOf("\n") + 1, text.lastIndexOf("\n"));
+}
+
+test("todo get provides bounded overviews and lossless Unicode field pages without mutating state", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-pages-"));
+  const todoContext = startTodo(root, new TodoSkillLoader({ cwd: root }));
+  const ctx = makeExtensionContext();
+  try {
+    await executeTodo({
+      action: "create",
+      subject: "题😀".repeat(1200),
+      description: "Description\n界😀".repeat(700),
+      context: "中文😀\n".repeat(6000),
+      resourceUris: Array.from({ length: 16 }, (_, i) => `agent://${i}-${"r".repeat(1900)}`),
+      handoff: { nextSteps: ["一".repeat(500), "二".repeat(500), "三".repeat(500)] },
+    }, ctx);
+    const task = getVisibleTasks()[0]!;
+    await executeTodo({ action: "update", id: task.id, summary: "结果😀".repeat(3000) }, ctx);
+    const before = getTodoCompactionSnapshot();
+    const overview = todoText(await executeTodo({ action: "get", id: task.id }, ctx));
+    assert.ok(Buffer.byteLength(overview, "utf8") < 8 * 1024);
+    assert.match(overview, /Resource URIs:.*agent:\/\//s);
+    for (const field of ["subject", "description", "context", "summary", "resourceUris", "handoff"]) {
+      assert.ok(overview.includes(`"field":"${field}"`), field);
+    }
+    for (const field of TODO_GET_FIELDS) {
+      let offset = 0;
+      let assembled = "";
+      for (;;) {
+        const response = await executeTodo({ action: "get", id: task.id, field, offset, limit: 1001 }, ctx);
+        assert.equal(response.isError, undefined);
+        const text = todoText(response);
+        assert.match(text, /Unicode code points \(0-based\)/);
+        const body = todoPageBody(text);
+        const count = Array.from(body).length;
+        assert.ok(count <= 1001);
+        assembled += body;
+        offset += count;
+        if (text.endsWith("End of field.")) break;
+        assert.ok(count > 0);
+        assert.ok(text.includes(`"offset":${offset}`));
+        assert.ok(text.includes('"limit":1001'));
+      }
+      const stored = getVisibleTasks()[0]!;
+      if (field === "all") {
+        const { blocks, ...decoded } = JSON.parse(assembled);
+        assert.deepEqual(decoded, JSON.parse(JSON.stringify(stored)));
+        assert.deepEqual(blocks, []);
+      } else {
+        const expected = stored[field];
+        assert.equal(assembled, typeof expected === "string" ? expected : JSON.stringify(expected ?? null, null, 2));
+      }
+    }
+    const defaultPage = todoText(await executeTodo({ action: "get", id: task.id, field: "context" }, ctx));
+    assert.equal(Array.from(todoPageBody(defaultPage)).length, 4096);
+    const maxPage = todoText(await executeTodo({ action: "get", id: task.id, field: "context", limit: TODO_GET_MAX_LIMIT }, ctx));
+    assert.equal(Array.from(todoPageBody(maxPage)).length, TODO_GET_MAX_LIMIT);
+    const implicitAll = todoText(await executeTodo({ action: "get", id: task.id, offset: 0, limit: 10 }, ctx));
+    assert.match(implicitAll, / all: offset=0, returned=10/);
+    const beyond = todoText(await executeTodo({ action: "get", id: task.id, field: "context", offset: 999999 }, ctx));
+    assert.match(beyond, /returned=0/);
+    assert.equal(todoPageBody(beyond), "");
+    assert.deepEqual(getTodoCompactionSnapshot(), before);
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("todo read options validate get-only fields and get/list pagination at both boundaries", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-read-contract-"));
+  const todoContext = startTodo(root, new TodoSkillLoader({ cwd: root }));
+  const ctx = makeExtensionContext();
+  try {
+    await executeTodo({ action: "create", subject: "Small task" }, ctx);
+    const id = getVisibleTasks()[0]!.id;
+    const before = getTodoCompactionSnapshot();
+    for (const action of ["create", "update", "list", "delete", "clear", "next", "advance"]) {
+      for (const readOption of [{ field: "context" }, { offset: 0 }, { limit: 1 }]) {
+        if (action === "list" && !("field" in readOption)) continue;
+        const params = { action, id, ...readOption };
+        assert.equal(Check(TodoToolParams, params), false, JSON.stringify(params));
+        assert.match(todoText(await executeTodo(params as never, ctx)), /only valid for get/);
+      }
+    }
+    for (const invalid of [{ field: "unknown" }, { field: null }, { offset: null }, { limit: null }, { offset: -1 }, { offset: 1.5 }, { offset: Number.MAX_SAFE_INTEGER + 1 }, { limit: 0 }, { limit: 16385 }, { limit: 2.5 }]) {
+      const params = { action: "get", id, ...invalid };
+      assert.equal(Check(TodoToolParams, params), false, JSON.stringify(params));
+      assert.equal((await executeTodo(params as never, ctx)).isError, true);
+    }
+    for (const field of TODO_GET_FIELDS) assert.equal(Check(TodoToolParams, { action: "get", id, field, offset: 0, limit: 16384 }), true);
+    assert.equal(Check(TodoToolParams, { action: "get", id }), true);
+    for (const invalid of [{ field: "context" }, { offset: null }, { limit: null }, { offset: -1 }, { offset: 0.5 }, { limit: 0 }, { limit: 51 }, { limit: 4096 }]) {
+      const params = { action: "list", ...invalid };
+      assert.equal(Check(TodoToolParams, params), false, JSON.stringify(params));
+      assert.equal((await executeTodo(params as never, ctx)).isError, true);
+    }
+    assert.equal(Check(TodoToolParams, { action: "list", offset: 0, limit: 50 }), true);
+    assert.equal((await executeTodo({ action: "list", offset: 0, limit: 50 }, ctx)).isError, undefined);
+    const empty = todoText(await executeTodo({ action: "get", id, field: "context" }, ctx));
+    assert.equal(todoPageBody(empty), "null");
+    assert.deepEqual(getTodoCompactionSnapshot(), before);
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("todo create/list return bounded indexes and every task remains discoverable across list pages", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-index-pages-"));
+  const todoContext = startTodo(root, new TodoSkillLoader({ cwd: root }));
+  const ctx = makeExtensionContext();
+  try {
+    const batch = await executeTodo({
+      action: "create",
+      tasks: Array.from({ length: 53 }, (_, index) => ({
+        subject: `Item ${index} ${"题😀".repeat(1500)}`,
+        description: "DETAIL_ONLY_ON_GET",
+        context: "CONTEXT_ONLY_ON_GET",
+        blockedBy: Array.from({ length: index }, (_, dep) => dep),
+        resourceUris: ["agent://RESOURCE_ONLY_ON_GET"],
+      })),
+    }, ctx);
+    assert.equal(batch.isError, undefined);
+    const createdText = todoText(batch);
+    assert.ok(Buffer.byteLength(createdText, "utf8") < 14 * 1024);
+    assert.match(createdText, /Created 53 tasks/);
+    assert.match(createdText, /More created tasks: IDs #21 through #53/);
+    assert.doesNotMatch(createdText, /DETAIL_ONLY_ON_GET|CONTEXT_ONLY_ON_GET|RESOURCE_ONLY_ON_GET/);
+    assert.equal((createdText.match(/^#\d+:/gm) ?? []).length, 20);
+    const allTasks = getVisibleTasks();
+    await executeTodo({ action: "update", id: allTasks[0]!.id, summary: "SUMMARY_ONLY_ON_GET" }, ctx);
+    const snapshot = getTodoCompactionSnapshot();
+    const firstPage = await executeTodo({ action: "list" }, ctx);
+    assert.match(todoText(firstPage), /offset=0, returned=20, total=53/);
+    assert.match(todoText(firstPage), /"offset":20,"limit":20/);
+    const seen: string[] = [];
+    let params = { action: "list", offset: 0, limit: 17 } as const;
+    for (;;) {
+      const response = await executeTodo(params, ctx);
+      const text = todoText(response);
+      assert.ok(Buffer.byteLength(text, "utf8") < 12 * 1024);
+      assert.doesNotMatch(text, /DETAIL_ONLY_ON_GET|CONTEXT_ONLY_ON_GET|RESOURCE_ONLY_ON_GET|SUMMARY_ONLY_ON_GET/);
+      const ids = Array.from(text.matchAll(/^\[[^\n]\] #(\d+):/gm), (match) => match[1]!);
+      assert.ok(ids.length <= 17);
+      assert.deepEqual((response.details as { displayTaskIds: string[] }).displayTaskIds, ids);
+      seen.push(...ids);
+      const continuation = text.match(/Continue: todo (\{[^\n]+\})$/);
+      if (!continuation) { assert.match(text, /End of list\.$/); break; }
+      params = JSON.parse(continuation[1]!);
+      assert.equal(Check(TodoToolParams, params), true);
+    }
+    assert.deepEqual(seen, allTasks.map((task) => task.id));
+    assert.equal(new Set(seen).size, 53);
+    const max = todoText(await executeTodo({ action: "list", limit: 50 }, ctx));
+    assert.match(max, /returned=50/);
+    assert.ok(Buffer.byteLength(max, "utf8") < 34 * 1024);
+    const beyond = todoText(await executeTodo({ action: "list", offset: 99 }, ctx));
+    assert.match(beyond, /returned=0, total=53/);
+    assert.match(beyond, /End of list/);
+    const fullSummary = todoText(await executeTodo({ action: "get", id: seen[0], field: "summary" }, ctx));
+    assert.equal(todoPageBody(fullSummary), "SUMMARY_ONLY_ON_GET");
+    const omittedTask = todoText(await executeTodo({ action: "get", id: "53", field: "description" }, ctx));
+    assert.equal(todoPageBody(omittedTask), "DETAIL_ONLY_ON_GET");
+    assert.deepEqual(getTodoCompactionSnapshot(), snapshot);
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("todo list pagination preserves member/status filters and create indexes bound long actor labels", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-filter-pages-"));
+  const todoContext = startTodo(root, new TodoSkillLoader({ cwd: root }));
+  const ctx = makeExtensionContext();
+  const worker: TodoActorRef = { kind: "teammate", id: "paged-worker", label: "代理".repeat(1000) };
+  try {
+    const single = todoText(await executeTodo({ action: "create", subject: "Worker task", description: "private detail" }, ctx, worker));
+    assert.ok(Buffer.byteLength(single, "utf8") < 1024);
+    assert.match(single, /Created #1/);
+    assert.match(single, /Worker task/);
+    assert.match(single, /"field":"all"/);
+    assert.doesNotMatch(single, /private detail/);
+    await executeTodo({ action: "create", tasks: [{ subject: "Root one" }, { subject: "Root two" }] }, ctx);
+    await executeTodo({ action: "create", tasks: [{ subject: "Worker two" }, { subject: "Worker three" }] }, ctx, worker);
+    const filter = { memberId: "self", status: "pending" as const };
+    const first = todoText(await executeTodo({ action: "list", filter, limit: 2 }, ctx, worker));
+    assert.match(first, /returned=2, total=3/);
+    assert.doesNotMatch(first, /Root one|Root two/);
+    const nextParams = JSON.parse(first.match(/Continue: todo (\{[^\n]+\})$/)![1]!);
+    assert.deepEqual(nextParams.filter, filter);
+    assert.equal(nextParams.offset, 2);
+    assert.equal(nextParams.limit, 2);
+    const last = todoText(await executeTodo(nextParams, ctx, worker));
+    assert.match(last, /returned=1, total=3/);
+    assert.match(last, /#5:/);
+    assert.match(last, /Worker three/);
+    assert.match(last, /End of list/);
+    for (const match of last.matchAll(/todo (\{[^\n]+\})/g)) {
+      const response = await executeTodo(JSON.parse(match[1]!), ctx, worker);
+      assert.equal(response.isError, undefined);
+    }
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("todo next and advance bound prompts, select related summaries, and expose usable continuation calls", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-progressive-next-"));
+  const todoContext = startTodo(root, new TodoSkillLoader({ cwd: root }));
+  const ctx = makeExtensionContext();
+  const worker: TodoActorRef = { kind: "teammate", id: "other-worker", label: "worker" };
+  try {
+    registerTodoActor(worker);
+    for (let i = 0; i < 7; i++) {
+      await executeTodo({ action: "create", subject: `Related ${i}`, assignee: worker.id, planHandoffKey: "plan-a" }, ctx);
+      await executeTodo({ action: "update", id: getVisibleTasks().at(-1)!.id, status: "completed", summary: `summary-${i}: ${"果".repeat(3000)}` }, ctx);
+    }
+    await executeTodo({ action: "create", subject: "Same owner other plan", planHandoffKey: "plan-b" }, ctx);
+    const ownId = getVisibleTasks().at(-1)!.id;
+    await executeTodo({ action: "update", id: ownId, status: "completed", summary: "OWNER FALLBACK" }, ctx);
+    await executeTodo({ action: "create", subject: "Unrelated", assignee: worker.id, planHandoffKey: "other-plan" }, ctx);
+    await executeTodo({ action: "update", id: getVisibleTasks().at(-1)!.id, status: "completed", summary: "UNRELATED SUMMARY" }, ctx);
+    await executeTodo({
+      action: "create", subject: "题".repeat(4000), planHandoffKey: "plan-a",
+      description: "详".repeat(4000), context: "境".repeat(8000),
+      resourceUris: [`agent://${"r".repeat(1800)}`],
+      handoff: { nextSteps: ["步".repeat(600)] },
+    }, ctx);
+    const currentId = getVisibleTasks().at(-1)!.id;
+    await executeTodo({ action: "create", subject: "Next small", description: "Small detail", context: "Small context", planHandoffKey: "no-matches" }, ctx);
+    const nextId = getVisibleTasks().at(-1)!.id;
+    await executeTodo({ action: "create", subject: "Unbound step" }, ctx);
+    const next = todoText(await executeTodo({ action: "next" }, ctx));
+    assert.ok(Buffer.byteLength(next, "utf8") < 20 * 1024);
+    assert.equal((next.match(/summary-\d:/g) ?? []).length, 5);
+    assert.doesNotMatch(next, /summary-[01]:|OWNER FALLBACK|UNRELATED SUMMARY/);
+    assert.match(next, /summary-6:/);
+    assert.match(next, /"field":"subject"/);
+    assert.match(next, /"field":"description","offset":682/);
+    assert.match(next, /"field":"context","offset":1365/);
+    assert.match(next, /"field":"summary"/);
+    assert.match(next, /"field":"handoff","offset":0/);
+    assert.match(next, /"field":"resourceUris","offset":0/);
+    for (const match of next.matchAll(/todo (\{[^\n]+\})/g)) {
+      const read = JSON.parse(match[1]!);
+      assert.equal(Check(TodoToolParams, read), true);
+      const response = await executeTodo(read, ctx);
+      assert.equal(response.isError, undefined);
+      assert.ok(todoPageBody(todoText(response)).length > 0);
+    }
+    const advanced = todoText(await executeTodo({ action: "advance", id: currentId, summary: "Current completion" }, ctx));
+    assert.ok(Buffer.byteLength(advanced, "utf8") < 4096);
+    assert.doesNotMatch(advanced, /OWNER FALLBACK|Current completion|UNRELATED SUMMARY|summary-\d:|<prev_steps>/);
+    assert.match(advanced, /Small detail\n/);
+    assert.match(advanced, /<context>\nSmall context\n<\/context>/);
+    const unbound = todoText(await executeTodo({ action: "advance", id: nextId, summary: "No-matches plan completed" }, ctx));
+    assert.match(unbound, /OWNER FALLBACK/);
+    assert.match(unbound, /Current completion/);
+    assert.match(unbound, /No-matches plan completed/);
+    assert.doesNotMatch(unbound, /UNRELATED SUMMARY|summary-\d:/);
+    assert.equal(getVisibleTasks().find((task) => task.id === currentId)!.context, "境".repeat(8000));
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("todo next bounds a stopped Goal's text while preserving its instructions and goal get recovery", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-goal-preview-"));
+  const todoContext = startTodo(root, new TodoSkillLoader({ cwd: root }));
+  const ctx = makeExtensionContext();
+  initGoal({ appendEntry() {} } as never);
+  const goalCtx = { cwd: root, ui: { notify() {}, setStatus() {} }, abort() {} } as GoalContext;
+  goalSessionStart(goalCtx, { reason: "new" });
+  try {
+    const objective = "目标😀".repeat(3000);
+    const gate = addGoal(objective, goalCtx);
+    await executeGoalCommand({ action: "stop" }, goalCtx);
+    await executeTodo({ action: "create", subject: "Gated task", goalId: gate.id }, ctx);
+    const next = todoText(await executeTodo({ action: "next" }, ctx));
+    assert.ok(Buffer.byteLength(next, "utf8") < 4 * 1024);
+    assert.match(next, /goal \{"action":"get"\}/);
+    assert.match(next, /Do not resume the Goal yourself/);
+    assert.equal(getActiveGoal()?.pauseReason, "user");
+    const fullGoal = await executeGoal({ action: "get" }, goalCtx);
+    assert.ok(fullGoal.text.includes(objective));
+  } finally {
+    await executeGoalCommand({ action: "clear" }, goalCtx);
+    goalSessionShutdown(goalCtx);
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Todo v8 persistence deduplicates heavy content and restores references", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-content-ref-"));
+  const loader = new TodoSkillLoader({ cwd: root });
+  const journal: Array<{ type: "custom"; customType: string; data: unknown }> = [];
+  initTodo({
+    appendEntry(customType: string, data: unknown) {
+      journal.push({ type: "custom", customType, data: structuredClone(data) });
+    },
+  } as never);
+  let todoContext: TodoContext = {
+    cwd: root,
+    ui: { setStatus() {} },
+    skillLoader: loader,
+    sessionManager: { getEntries: () => [] },
+  };
+  onSessionStart(todoContext);
+  const ctx = makeExtensionContext();
+
+  try {
+    await executeTodo({
+      action: "create",
+      subject: "Referenced content",
+      description: "Detailed task description",
+      context: "long context ".repeat(400),
+      resourceUris: ["agent://publication-1"],
+      handoff: { nextSteps: ["Continue from the saved context"] },
+    }, ctx);
+    const id = getVisibleTasks()[0].id;
+    const firstState = journal.filter((entry) => entry.customType === TODO_STATE_ENTRY_TYPE).at(-1)?.data as {
+      version?: number;
+      tasks?: Record<string, Record<string, unknown>>;
+    };
+    const persistedTask = firstState.tasks?.[id];
+    assert.equal(firstState.version, TODO_STATE_VERSION);
+    assert.equal(typeof persistedTask?.contentRef, "string");
+    assert.equal(persistedTask?.description, undefined);
+    assert.equal(persistedTask?.context, undefined);
+    assert.deepEqual(persistedTask?.skills, []);
+    assert.equal(journal.filter((entry) => entry.customType === TODO_CONTENT_ENTRY_TYPE).length, 1);
+
+    await executeTodo({ action: "update", id, status: "in_progress" }, ctx);
+    assert.equal(journal.filter((entry) => entry.customType === TODO_STATE_ENTRY_TYPE).length, 2);
+    assert.equal(journal.filter((entry) => entry.customType === TODO_CONTENT_ENTRY_TYPE).length, 1);
+
+    const reloadEntries = structuredClone(journal);
+    onSessionShutdown(todoContext);
+    initTodo({ appendEntry() {} } as never);
+    todoContext = {
+      cwd: root,
+      ui: { setStatus() {} },
+      skillLoader: loader,
+      sessionManager: { getEntries: () => reloadEntries },
+    };
+    onSessionStart(todoContext);
+    const restored = getVisibleTasks()[0];
+    assert.equal(restored.description, "Detailed task description");
+    assert.equal(restored.context, "long context ".repeat(400));
+    assert.deepEqual(restored.resourceUris, ["agent://publication-1"]);
+    assert.deepEqual(restored.handoff?.nextSteps, ["Continue from the saved context"]);
+    assert.equal(restored.status, "in_progress");
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Todo activation rejects terminal teammates and scopes error details", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-terminal-assignee-"));
+  const loader = new TodoSkillLoader({ cwd: root });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+  const worker: TodoActorRef = { kind: "teammate", id: "settled-worker", label: "settled" };
+
+  try {
+    registerTodoActor(worker);
+    await executeTodo({ action: "create", subject: "Worker task", assignee: worker.id }, ctx);
+    await executeTodo({ action: "create", subject: "Unrelated task" }, ctx);
+    const workerTask = getVisibleTasks()[0];
+    await executeTodo({ action: "update", id: workerTask.id, summary: "Do not repeat this summary" }, ctx);
+    recordTodoActorCompletion(worker, false);
+
+    const rejected = await executeTodo({ action: "update", id: workerTask.id, status: "in_progress" }, ctx);
+    assert.equal(rejected.isError, true);
+    assert.match((rejected.content[0] as { text: string }).text, /no longer running or restorable/);
+    assert.match((rejected.content[0] as { text: string }).text, /tasks\[\]\.briefing/);
+    const detailTasks = (rejected.details as { tasks: Array<{ id: string; summary?: string }> }).tasks;
+    assert.deepEqual(detailTasks.map((task) => task.id), [workerTask.id]);
+    assert.equal(detailTasks[0].summary, undefined);
+
+    registerTodoActor(worker);
+    const restarted = await executeTodo({ action: "update", id: workerTask.id, status: "in_progress" }, ctx);
+    assert.equal(restarted.isError, undefined);
+    assert.equal(getVisibleTasks()[0].status, "in_progress");
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("todo schema uses non-negative integer indexes for batch dependencies", () => {
   assert.equal(Check(TodoToolParams, { action: "create", tasks: [] }), false);
   assert.equal(Check(TodoToolParams, {
@@ -86,6 +492,27 @@ test("todo schema uses non-negative integer indexes for batch dependencies", () 
     resourceUris: ["agent://publication-1"],
     transition: "new_context",
   }), true);
+  assert.equal(Check(TodoToolParams, {
+    action: "update",
+    id: "0",
+    context: "Persist before reset",
+    transition: "new_context",
+  }), true);
+  assert.equal(Check(TodoToolParams, {
+    action: "update",
+    id: "0",
+    transition: "keep_context",
+  }), false);
+  assert.equal(Check(TodoToolParams, {
+    action: "update",
+    updates: [{ id: "0", context: "Batch update" }],
+    transition: "new_context",
+  }), false);
+  assert.equal(Check(TodoToolParams, {
+    action: "create",
+    subject: "Invalid transition owner",
+    transition: "new_context",
+  }), false);
   assert.equal(Check(TodoToolParams, {
     action: "advance",
     id: "0",
@@ -1193,15 +1620,17 @@ test("todo widget unifies root and teammate tasks sorted by status priority", as
   }
 });
 
-test("todo state version is 7", () => {
-  assert.equal(getTodoCompactionSnapshot().stateVersion, 7);
+test("todo state version remains 8 for content-reference persistence", () => {
+  assert.equal(getTodoCompactionSnapshot().stateVersion, 8);
 });
 
 test("todo handoff persists, merges partial annotations, clears explicitly, and reloads defensively", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-todo-file-handoff-"));
   const loader = new TodoSkillLoader({ cwd: root });
   const persisted: unknown[] = [];
-  initTodo({ appendEntry(_type: string, data: unknown) { persisted.push(data); } } as never);
+  initTodo({ appendEntry(customType: string, data: unknown) {
+    persisted.push({ type: "custom", customType, data: structuredClone(data) });
+  } } as never);
   let todoContext: TodoContext = {
     cwd: root,
     ui: { setStatus() {} },
@@ -1285,9 +1714,9 @@ test("todo handoff persists, merges partial annotations, clears explicitly, and 
     assert.match((getResult.content[0] as { text: string }).text, /Handoff files:/);
     assert.match((getResult.content[0] as { text: string }).text, /src\/api\.ts \[skip\]/);
 
-    const saved = persisted.at(-1)!;
+    const saved = structuredClone(persisted);
     onSessionShutdown(todoContext);
-    todoContext = startTodo(root, loader, [{ type: "custom", customType: "todo-state", data: saved }]);
+    todoContext = startTodo(root, loader, saved);
     assert.deepEqual(getVisibleTasks()[0]!.handoff, beforeInvalid);
     const reloadedRevision = getVisibleTasks()[0]!.handoff!.files[0]!.annotationRevision;
     await executeTodo({
@@ -1430,6 +1859,14 @@ test("todo resourceUris normalize across create, update, advance, and reload", a
     }, ctx);
     assert.equal(tooLargeUtf8.isError, true);
     assert.deepEqual(getVisibleTasks()[0]!.resourceUris, []);
+    const gatedUpdate = await executeTodo({
+      action: "update",
+      id,
+      context: "Must not commit while disabled",
+      transition: "new_context",
+    }, ctx);
+    assert.equal(gatedUpdate.isError, true);
+    assert.equal(getVisibleTasks()[0]!.context, undefined);
     const transitionWithoutActive = await executeTodo({ action: "advance", transition: "new_context" }, ctx);
     assert.equal(transitionWithoutActive.isError, true);
     assert.equal((transitionWithoutActive.details as { transition?: string }).transition, undefined);
@@ -1450,6 +1887,41 @@ test("todo resourceUris normalize across create, update, advance, and reload", a
     await writeFile(join(root, ".pi", "settings.json"), JSON.stringify({
       compaction: { newContext: { enabled: true } },
     }));
+    const keepContextUpdate = await executeTodo({ action: "update", id, transition: "keep_context" }, ctx);
+    assert.equal(keepContextUpdate.isError, true);
+    const terminalUpdate = await executeTodo({
+      action: "update",
+      id,
+      status: "completed",
+      summary: "Must remain active",
+      transition: "new_context",
+    }, ctx);
+    assert.equal(terminalUpdate.isError, true);
+    assert.equal(getVisibleTasks()[0]!.status, "in_progress");
+
+    const progress = await executeTodo({
+      action: "update",
+      id,
+      context: "Implementation complete; focused verification remains",
+      resourceUris: ["agent://progress-publication"],
+      handoff: {
+        nextSteps: ["Run the focused Todo tests"],
+        files: [{ path: "src/tools/todo.ts", value: "required", reason: "Verify the transition contract" }],
+      },
+      transition: "new_context",
+    }, ctx);
+    assert.equal(progress.isError, undefined);
+    assert.equal((progress.details as { transition?: string }).transition, "new_context");
+    assert.equal(getVisibleTasks()[0]!.status, "in_progress");
+    assert.equal(getVisibleTasks()[0]!.context, "Implementation complete; focused verification remains");
+    assert.deepEqual(getVisibleTasks()[0]!.resourceUris, ["agent://progress-publication"]);
+    assert.deepEqual(getVisibleTasks()[0]!.handoff?.nextSteps, ["Run the focused Todo tests"]);
+    assert.doesNotMatch(JSON.stringify(persisted), /new_context/, "update transition must not be persisted");
+
+    const noChange = await executeTodo({ action: "update", id, transition: "new_context" }, ctx);
+    assert.equal(noChange.isError, undefined);
+    assert.equal((noChange.details as { transition?: string }).transition, "new_context");
+
     const completed = await executeTodo({
       action: "advance",
       id,
@@ -1459,8 +1931,11 @@ test("todo resourceUris normalize across create, update, advance, and reload", a
     }, ctx);
     assert.equal(completed.isError, undefined);
     assert.equal((completed.details as { transition?: string }).transition, "new_context");
-    assert.deepEqual(getVisibleTasks()[0]!.resourceUris, ["agent://publication-2"]);
+    assert.deepEqual(getVisibleTasks()[0]!.resourceUris, ["agent://progress-publication", "agent://publication-2"]);
     assert.doesNotMatch(JSON.stringify(persisted), /new_context/, "transition must not be persisted");
+    const updateWithoutActive = await executeTodo({ action: "update", id, transition: "new_context" }, ctx);
+    assert.equal(updateWithoutActive.isError, true);
+    assert.match(todoText(updateWithoutActive), /no in_progress task/);
   } finally {
     onSessionShutdown(todoContext);
     await rm(root, { recursive: true, force: true });
@@ -2148,8 +2623,7 @@ test("active skill metadata follows a path-only move by skill identity", async (
     agentDir: join(root, "agent"),
     resourceLoader: { async reload() {}, getSkills: () => ({ skills: [discovered], diagnostics: [] }) },
   });
-  let persisted: unknown;
-  initTodo({ appendEntry(_type: string, data: unknown) { persisted = structuredClone(data); } } as never);
+  initTodo({ appendEntry() {} } as never);
   const context = (entries: unknown[] = []): TodoContext => ({
     cwd: root,
     ui: { setStatus() {} },
@@ -2167,10 +2641,11 @@ test("active skill metadata follows a path-only move by skill identity", async (
     }, ctx);
     await executeTodo({ action: "next" }, ctx);
     const original = structuredClone(getVisibleTasks()[0].skillActivation);
-    const restoredState = structuredClone(persisted) as {
-      tasks?: Record<string, { skillActivation?: { bindings?: Array<{ requiredReadingContentHashes?: string[] }> } }>;
+    const restoredState = {
+      version: 7,
+      tasks: Object.fromEntries(getVisibleTasks().map((task) => [task.id, structuredClone(task)])),
     };
-    // Simulate metadata written before per-required-file content hashes existed.
+    // Simulate legacy inline metadata before per-required-file content hashes existed.
     for (const task of Object.values(restoredState.tasks ?? {})) {
       for (const binding of task.skillActivation?.bindings ?? []) {
         delete binding.requiredReadingContentHashes;
@@ -2220,8 +2695,10 @@ test("active skill metadata resumes and marks changed skill content stale", asyn
     agentDir: join(root, "agent"),
     resourceLoader: { async reload() {}, getSkills: () => ({ skills: [skill], diagnostics: [] }) },
   });
-  let persisted: unknown;
-  initTodo({ appendEntry(_type: string, data: unknown) { persisted = structuredClone(data); } } as never);
+  const persisted: unknown[] = [];
+  initTodo({ appendEntry(customType: string, data: unknown) {
+    persisted.push({ type: "custom", customType, data: structuredClone(data) });
+  } } as never);
   const context = (entries: unknown[] = []): TodoContext => ({
     cwd: root,
     ui: { setStatus() {} },
@@ -2243,7 +2720,7 @@ test("active skill metadata resumes and marks changed skill content stale", asyn
     assert.doesNotMatch(persistedText, /# Original/);
     assert.doesNotMatch(persistedText, /active_skill_stack/);
     assert.doesNotMatch(persistedText, /"prompt"\s*:/);
-    const entries = [{ type: "custom", customType: "todo-state", data: persisted }];
+    const entries = structuredClone(persisted);
 
     onSessionShutdown(context());
     onSessionStart(context(entries));

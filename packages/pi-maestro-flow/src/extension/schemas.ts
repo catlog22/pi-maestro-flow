@@ -9,6 +9,11 @@ import { Type } from "typebox";
 import { MAX_ACCEPTANCE_COMMAND_CHARS } from "../tools/goal-verification.ts";
 import {
   TODO_ADVANCE_TRANSITIONS,
+  TODO_GET_FIELDS,
+  TODO_GET_DEFAULT_LIMIT,
+  TODO_GET_MAX_LIMIT,
+  TODO_LIST_DEFAULT_LIMIT,
+  TODO_LIST_MAX_LIMIT,
   TODO_HANDOFF_FILE_VALUES,
   TODO_MAX_HANDOFF_FILES,
   TODO_MAX_HANDOFF_NEXT_STEPS,
@@ -358,6 +363,9 @@ export const TodoToolParams = Type.Object({
     }),
   ),
 
+  field: Type.Optional(StringEnum([...TODO_GET_FIELDS], "Get only: field to page; omit all read options for a bounded overview. Structured fields/all are JSON; text fields are raw text")),
+  offset: Type.Optional(Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER, description: "Get/list only: 0-based offset (get: Unicode code points; list: filtered task entries in creation order). Defaults to 0; get without field pages all" })),
+  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: TODO_GET_MAX_LIMIT, description: `Get/list only: page size. Get: Unicode code points (default ${TODO_GET_DEFAULT_LIMIT}, max ${TODO_GET_MAX_LIMIT}); list: tasks (default ${TODO_LIST_DEFAULT_LIMIT}, max ${TODO_LIST_MAX_LIMIT}). Follow Continue for the rest` })),
   id: Type.Optional(
     Type.String({ description: "Task ID (required for get and single update/delete)" }),
   ),
@@ -382,6 +390,27 @@ export const TodoToolParams = Type.Object({
     Type.String({ description: "Id of the Goal acting as this task's quality gate (bind sparingly, only for tasks with verifiable acceptance); empty string clears it on update" }),
   ),
   transition: Type.Optional(
-    StringEnum([...TODO_ADVANCE_TRANSITIONS], "Request-only completion transition for active advance; it is not persisted or scheduled by Todo"),
+    StringEnum([...TODO_ADVANCE_TRANSITIONS], "Request-only context transition. Completion-form advance supports keep_context or new_context; a single active update supports only new_context. It is never persisted in Todo state"),
   ),
+}, {
+  allOf: [{
+    if: { required: ["field"] },
+    then: { properties: { action: { const: "get" } }, required: ["action"] },
+  }, {
+    if: { anyOf: [{ required: ["offset"] }, { required: ["limit"] }] },
+    then: { properties: { action: { enum: ["get", "list"] } }, required: ["action"] },
+  }, {
+    if: { properties: { action: { const: "list" } }, required: ["action"] },
+    then: { properties: { limit: { maximum: TODO_LIST_MAX_LIMIT } } },
+  }, {
+    if: { required: ["transition"] },
+    then: { properties: { action: { enum: ["advance", "update"] } }, required: ["action"] },
+  }, {
+    if: { properties: { action: { const: "update" } }, required: ["action", "transition"] },
+    then: {
+      properties: { transition: { const: "new_context" } },
+      required: ["id"],
+      not: { required: ["updates"] },
+    },
+  }],
 });

@@ -28,6 +28,12 @@ import {
   cloneTodoHandoff,
   normalizeTodoHandoff,
   normalizeTodoResourceUris,
+  TODO_GET_FIELDS,
+  TODO_GET_DEFAULT_LIMIT,
+  TODO_GET_MAX_LIMIT,
+  TODO_LIST_DEFAULT_LIMIT,
+  TODO_LIST_MAX_LIMIT,
+  type TodoGetField,
   type TodoAdvanceTransition,
   type TodoHandoff,
   type TodoHandoffInput,
@@ -147,6 +153,9 @@ export interface TodoParams {
   transition?: TodoAdvanceTransition;
   updateFields?: TodoUpdateField[];
   id?: string;
+  field?: TodoGetField;
+  offset?: number;
+  limit?: number;
   ids?: string[];
   updates?: TodoUpdateSpec[];
   assignee?: string;
@@ -178,7 +187,7 @@ export interface TodoResultDetails {
   action: string;
   tasks: TodoTaskSnapshot[];
   displayTaskIds?: string[];
-  /** Request-only transition receipt emitted after a successful completion-form advance. */
+  /** Request-only transition receipt emitted after a successful completion-form advance or active update. */
   transition?: TodoAdvanceTransition;
   /** Extension scheduler outcome; never persisted in Todo state. */
   contextTransition?: "scheduled" | "coalesced" | "failed";
@@ -218,6 +227,7 @@ let tasks: Map<string, TodoTask> = new Map();
 // Task ids are user-facing sequence numbers, so they start at 1 ("#1" is the first task).
 let nextTaskId = 1;
 let knownActors: Map<string, TodoActorRef> = new Map([[ROOT_TODO_ACTOR.id, ROOT_TODO_ACTOR]]);
+let unavailableTodoActorIds = new Set<string>();
 let extensionApi: ExtensionAPI | undefined;
 let onTodoStateChanged: (() => void) | undefined;
 const todoStateChangeSubscribers = new Set<() => void>();
@@ -265,6 +275,7 @@ export function onSessionStart(ctx: TodoContext): void {
   syncTodoRevision();
   syncTaskIdCounter();
   knownActors = new Map([[ROOT_TODO_ACTOR.id, cloneActor(ROOT_TODO_ACTOR)]]);
+  unavailableTodoActorIds = new Set<string>();
   for (const task of tasks.values()) {
     rememberActor(task.createdBy);
     rememberActor(task.assignee);
@@ -281,6 +292,7 @@ export function onSessionShutdown(ctx: TodoContext): void {
   tasks.clear();
   nextTaskId = 1;
   knownActors = new Map([[ROOT_TODO_ACTOR.id, cloneActor(ROOT_TODO_ACTOR)]]);
+  unavailableTodoActorIds = new Set<string>();
   skillLoader = undefined;
   skillRuntime = undefined;
   activeSkillSnapshots.clear();
@@ -324,6 +336,13 @@ export function getTodoActors(): TodoActorRef[] {
 
 export function registerTodoActor(actor: TodoActorRef): void {
   rememberActor(actor);
+  unavailableTodoActorIds.delete(actor.id);
+}
+
+export function recordTodoActorCompletion(actor: TodoActorRef, wakeable: boolean): void {
+  rememberActor(actor);
+  if (wakeable) unavailableTodoActorIds.delete(actor.id);
+  else unavailableTodoActorIds.add(actor.id);
 }
 
 export function formatTodoActorSelector(
@@ -524,11 +543,12 @@ export async function executeTodo(
   actor: TodoActorRef = ROOT_TODO_ACTOR,
 ): Promise<FlowToolResult> {
   // Gate the explicit transition before entering the serialized mutation
-  // queue. A disabled request must not complete the active task, activate the
-  // next task, append a Todo entry, or schedule any future context reset.
-  if (input.action === "advance" && input.transition === "new_context"
+  // queue. A disabled request must not mutate Todo state or schedule any
+  // future context reset.
+  if ((input.action === "advance" || input.action === "update")
+    && input.transition === "new_context"
     && !isNewContextCompactionEnabled(ctx.cwd)) {
-    return err(NEW_CONTEXT_DISABLED_MESSAGE, "advance");
+    return err(NEW_CONTEXT_DISABLED_MESSAGE, input.action);
   }
   const generation = todoGeneration;
   const execute = () => executeTodoAction(input, ctx, actor, generation);
@@ -723,13 +743,19 @@ async function executeTodoAction(
     assertTodoGeneration(generation);
     rememberActor(actor);
     const params = normalizeTodoParams(input);
-    if (params.transition !== undefined && action !== "advance") {
-      return err("transition is only valid for active completion-form advance", action);
+    if (action !== "get" && params.field !== undefined) {
+      return err("field is only valid for get", action);
+    }
+    if (action !== "get" && action !== "list" && (params.offset !== undefined || params.limit !== undefined)) {
+      return err("offset and limit are only valid for get or list", action);
+    }
+    if (params.transition !== undefined && action !== "advance" && action !== "update") {
+      return err("transition is only valid for active completion-form advance or an active single-task update", action);
     }
     if (params.transition !== undefined
       && params.transition !== "keep_context"
       && params.transition !== "new_context") {
-      return err(`Invalid advance transition: ${String(params.transition)}`, "advance");
+      return err(`Invalid Todo transition: ${String(params.transition)}`, action);
     }
     switch (action) {
       case "create":
@@ -826,7 +852,7 @@ function handleCreate(params: TodoParams, ctx: ExtensionContext, actor: TodoActo
   nextTasks.set(id, task);
   commitTodoState(nextTasks);
 
-  return ok(`Created #${id}: ${task.subject} (${task.status})`, "create", [id]);
+  return ok(`Created ${todoIndexEntry(task)}`, "create", [id]);
 }
 
 /**
@@ -914,7 +940,11 @@ function handleBatchCreate(specs: TodoBatchSpec[], actor: TodoActorRef, planHand
   commitTaskIds(specs.length);
   commitTodoState(nextTasks);
 
-  const lines = created.map((t) => `#${t.id} ${t.subject} (${t.status})`);
+  const shown = created.slice(0, TODO_LIST_DEFAULT_LIMIT);
+  const lines = shown.map((task) => todoIndexEntry(task));
+  if (shown.length < created.length) {
+    lines.push(`More created tasks: IDs #${created[shown.length]!.id} through #${created.at(-1)!.id}. Browse with todo {"action":"list"}, or get a task by id.`);
+  }
   return ok(`Created ${created.length} tasks:\n${lines.join("\n")}`, "create", created.map((task) => task.id));
 }
 
@@ -1011,6 +1041,15 @@ function prepareTodoUpdate(
   }
   if (
     draft.status === "in_progress"
+    && draft.assignee.kind === "teammate"
+    && unavailableTodoActorIds.has(draft.assignee.id)
+  ) {
+    return {
+      error: `Teammate @${draft.assignee.label} is no longer running or restorable. Dispatch a new teammate bound to task #${draft.id} and pass the previous agent:// publication via tasks[].briefing.`,
+    };
+  }
+  if (
+    draft.status === "in_progress"
     && (before.status !== "in_progress" || before.assignee.id !== draft.assignee.id)
   ) {
     const active = findActiveTask(draft.assignee.id, draft.id, state);
@@ -1059,7 +1098,7 @@ async function handleBatchUpdate(
   const preparedUpdates: PreparedTodoUpdate[] = [];
   for (const [index, update] of updates.entries()) {
     const prepared = prepareTodoUpdate({ action: "update", ...update }, actor, candidate);
-    if ("error" in prepared) return err(`updates[${index}]: ${prepared.error}`, "update");
+    if ("error" in prepared) return err(`updates[${index}]: ${prepared.error}`, "update", [update.id]);
     candidate.set(prepared.draft.id, prepared.draft);
     if (prepared.draft.status === "completed" && prepared.before.status !== "completed") {
       autoUnblock(candidate, prepared.draft.id);
@@ -1131,9 +1170,29 @@ async function handleUpdate(
     return handleBatchUpdate(params.updates, actor, generation);
   }
 
+  if (params.transition !== undefined) {
+    if (params.transition !== "new_context") {
+      return err("transition=keep_context is only valid for completion-form advance; active update supports only new_context", "update", params.id ? [params.id] : undefined);
+    }
+    const active = findActiveTask(actor.id);
+    if (!active) {
+      return err(`@${actor.label} has no in_progress task to update before new_context`, "update", params.id ? [params.id] : undefined);
+    }
+    if (!params.id) {
+      return err(`id is required to update active task #${active.id} before new_context`, "update");
+    }
+    if (params.id !== active.id) {
+      return err(`Update id mismatch for @${actor.label}: active task is #${active.id}, not #${params.id}`, "update", [params.id]);
+    }
+  }
+
   const prepared = prepareTodoUpdate(params, actor, tasks);
-  if ("error" in prepared) return err(prepared.error, "update");
+  if ("error" in prepared) return err(prepared.error, "update", params.id ? [params.id] : undefined);
   const { before, draft, activationInputsChanged, shouldActivate } = prepared;
+  if (params.transition === "new_context"
+    && (draft.status !== "in_progress" || draft.assignee.id !== actor.id)) {
+    return err("update with transition=new_context must leave the caller's active task in_progress", "update", [draft.id]);
+  }
   const activation = shouldActivate ? await activateTask(draft) : undefined;
   if (shouldActivate) {
     revalidateAsyncTodoMutation({ generation, before, draft, actor });
@@ -1143,7 +1202,7 @@ async function handleUpdate(
 
   const changed = taskChanged(before, draft)
     || JSON.stringify(before.skillActivation) !== JSON.stringify(draft.skillActivation);
-  if (!changed) return ok(`No change: #${draft.id}`, "update");
+  if (!changed) return ok(`No change: #${draft.id}`, "update", [draft.id], params.transition);
 
   draft.updatedAt = Date.now();
   const nextTasks = new Map(tasks);
@@ -1161,10 +1220,11 @@ async function handleUpdate(
   }
 
   const statusNote = before.status !== draft.status ? ` (${before.status} → ${draft.status})` : "";
-  return ok(`Updated #${draft.id}: ${draft.subject}${statusNote}`, "update");
+  return ok(`Updated #${draft.id}: ${draft.subject}${statusNote}`, "update", [draft.id], params.transition);
 }
 
 function handleList(params: TodoParams, actor: TodoActorRef): FlowToolResult {
+  const { offset, limit } = todoPageOptions(params, "list");
   const visible = getVisibleTasks();
   let filtered = visible;
 
@@ -1197,69 +1257,138 @@ function handleList(params: TodoParams, actor: TodoActorRef): FlowToolResult {
     }
   }
 
-  const lines = filtered.map((t) => {
-    const tags: string[] = [];
-    if (t.blockedBy.length > 0) tags.push(`blocked by: ${t.blockedBy.join(", ")}`);
-    const blocks = blocksMap.get(t.id);
-    if (blocks && blocks.length > 0) tags.push(`blocks: ${blocks.join(", ")}`);
-    if (t.goalId) {
-      const gate = getGoalById(t.goalId);
-      const goalLabel = t.goalId.length > 8 ? t.goalId.slice(0, 8) : t.goalId;
-      tags.push(gate ? `goal: ${goalLabel} (${gate.status})` : `goal: ${goalLabel} (missing)`);
-    }
-    if (t.skills.length > 0) tags.push(`skills: ${t.skills.map((s) => s.name).join(", ")}`);
-    const tagStr = tags.length > 0 ? ` [${tags.join("] [")}]` : "";
-    return `${statusIcon(t.status)} ${actorTag(t)} #${t.id} ${t.subject}${tagStr}`;
-  });
+  const page = filtered.slice(offset, offset + limit);
+  const end = offset + page.length;
+  const lines = page.map((task) => `${statusIcon(task.status)} ${todoIndexEntry(task, blocksMap.get(task.id))}`);
+  const footer = end < filtered.length
+    ? `Continue: todo ${JSON.stringify({ action: "list", ...(params.filter ? { filter: params.filter } : {}), offset: end, limit })}`
+    : "End of list.";
+  return ok(
+    `Tasks: offset=${offset}, returned=${page.length}, total=${filtered.length} (task entries, creation order).\n${lines.join("\n")}\n${footer}`,
+    "list",
+    page.map((task) => task.id),
+  );
+}
 
-  return ok(lines.join("\n"), "list", filtered.map((task) => task.id));
+/** Minimal shared create/list projection; full fields remain available via get. */
+function todoIndexEntry(task: TodoTask, blocks?: readonly string[]): string {
+  const tags: string[] = [];
+  if (task.blockedBy.length > 0) tags.push(`blocked by: ${task.blockedBy.join(", ")}`);
+  if (blocks?.length) tags.push(`blocks: ${blocks.join(", ")}`);
+  const metadata = `(${task.status}) ${actorTag(task)}${tags.length ? ` [${tags.join("] [")}]` : ""}`;
+  // Reserve space for both title and routing/dependencies, so a long label or
+  // dependency list cannot consume the title's entire preview.
+  return `#${task.id}: ${todoPreview(task, "all", metadata, 128, true)} ${todoPreview(task, "subject", task.subject, TODO_SUBJECT_BYTES)}`;
+}
+
+function todoPageOptions(params: TodoParams, action: "get" | "list"): { offset: number; limit: number } {
+  const max = action === "get" ? TODO_GET_MAX_LIMIT : TODO_LIST_MAX_LIMIT;
+  const offset = params.offset === undefined ? 0 : params.offset;
+  const limit = params.limit === undefined
+    ? action === "get" ? TODO_GET_DEFAULT_LIMIT : TODO_LIST_DEFAULT_LIMIT
+    : params.limit;
+  const unit = action === "get" ? "Unicode code points" : "task entries";
+  if (!Number.isSafeInteger(offset) || offset < 0) throw new Error(`offset must be a non-negative safe integer (${unit})`);
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > max) {
+    throw new Error(`limit must be an integer from 1 to ${max} (${unit})`);
+  }
+  return { offset, limit };
+}
+
+// Content budgets exclude the small framing and actionable read notices.
+const TODO_SUBJECT_BYTES = 256;
+const TODO_DESCRIPTION_BYTES = 2 * 1024;
+const TODO_CONTEXT_BYTES = 4 * 1024;
+const TODO_SUMMARY_BYTES = 1024;
+const TODO_REFERENCE_BYTES = 1024;
+
+function todoReadHint(id: string, field: TodoGetField, offset = 0, limit = TODO_GET_DEFAULT_LIMIT): string {
+  return `todo ${JSON.stringify({ action: "get", id, field, offset, limit })}`;
+}
+
+/** Byte-bounded previews never split a code point; read offsets use code points. */
+function boundedTodoText(text: string, maxBytes: number, readHint: (offset: number) => string): string {
+  if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
+  let bytes = 0;
+  let offset = 0;
+  let prefix = "";
+  for (const point of text) {
+    const size = Buffer.byteLength(point, "utf8");
+    if (bytes + size > maxBytes) break;
+    prefix += point;
+    bytes += size;
+    offset++;
+  }
+  return `${prefix}\n[Truncated; continue with ${readHint(offset)}]`;
+}
+
+function todoPreview(task: TodoTask, field: TodoGetField, text: string, bytes: number, formatted = false): string {
+  return boundedTodoText(text, bytes, (offset) => todoReadHint(task.id, field, formatted ? 0 : offset));
+}
+
+function todoFieldText(task: TodoTask, field: TodoGetField): string {
+  if (field === "all") {
+    return JSON.stringify({
+      ...task,
+      blocks: [...tasks.values()].filter((t) => t.status !== "deleted" && t.blockedBy.includes(task.id)).map((t) => t.id),
+    }, null, 2);
+  }
+  const value = task[field];
+  return typeof value === "string" ? value : JSON.stringify(value ?? null, null, 2);
+}
+
+function formatTodoHandoff(task: TodoTask): string {
+  if (!task.handoff) return "";
+  const lines: string[] = [];
+  if (task.handoff.nextSteps.length > 0) {
+    lines.push("Handoff next steps:", ...task.handoff.nextSteps.map((step) => `- ${step}`));
+  }
+  if (task.handoff.files.length > 0) {
+    lines.push("Handoff files:", ...task.handoff.files.map((file) =>
+      `- ${file.path} [${file.value}]: ${file.reason}${file.when ? `; when=${file.when}` : ""}`));
+  }
+  return lines.join("\n");
 }
 
 function handleGet(params: TodoParams): FlowToolResult {
   if (!params.id) return err("id is required for get", "get");
   const task = tasks.get(params.id);
   if (!task) return err(`Task not found: ${params.id}`, "get");
+  if (params.field !== undefined && !(TODO_GET_FIELDS as readonly unknown[]).includes(params.field)) {
+    return err(`field must be one of: ${TODO_GET_FIELDS.join(", ")}`, "get");
+  }
+  const { offset, limit } = todoPageOptions(params, "get");
+  if (params.field !== undefined || params.offset !== undefined || params.limit !== undefined) {
+    const field = params.field ?? "all";
+    const points = Array.from(todoFieldText(task, field));
+    const end = Math.min(offset + limit, points.length);
+    const header = `#${task.id} ${field}: offset=${offset}, returned=${Math.max(0, end - offset)}, total=${points.length} Unicode code points (0-based).`;
+    const footer = end < points.length
+      ? `Continue: ${todoReadHint(task.id, field, end, limit)}`
+      : "End of field.";
+    return ok(`${header}\n${points.slice(offset, end).join("")}\n${footer}`, "get", [task.id]);
+  }
 
   const lines: string[] = [
-    `# #${task.id}: ${task.subject}`,
+    `# #${task.id}: ${todoPreview(task, "subject", task.subject, TODO_SUBJECT_BYTES)}`,
     `Status: ${task.status}`,
-    `Created by: @${task.createdBy.label}`,
-    `Assignee: @${task.assignee.label}`,
+    todoPreview(task, "all", `Created by: @${task.createdBy.label}\nAssignee: @${task.assignee.label}`, 512, true),
   ];
-  if (task.description) lines.push(`Description: ${task.description}`);
-  if (task.blockedBy.length > 0) lines.push(`Blocked by: ${task.blockedBy.join(", ")}`);
-
-  const blockers = [...tasks.values()].filter(
-    (t) => t.blockedBy.includes(task.id) && t.status !== "deleted",
-  );
-  if (blockers.length > 0) {
-    lines.push(`Blocks: ${blockers.map((b) => `#${b.id}`).join(", ")}`);
+  for (const [field, label] of [["description", "Description"], ["summary", "Summary"], ["context", "Context"]] as const) {
+    if (task[field]) lines.push(`${label}: ${todoPreview(task, field, task[field]!, 512)}`);
   }
-
-  if (task.summary) lines.push(`Summary: ${task.summary}`);
-  if (task.handoff) {
-    if (task.handoff.nextSteps.length > 0) {
-      lines.push("Handoff next steps:");
-      for (const step of task.handoff.nextSteps) lines.push(`- ${step}`);
-    }
-    if (task.handoff.files.length > 0) {
-      lines.push("Handoff files:");
-      for (const file of task.handoff.files) {
-        lines.push(`- ${file.path} [${file.value}]: ${file.reason}${file.when ? `; when=${file.when}` : ""}`);
-      }
-    }
-  }
-
-  if (task.context) lines.push(`Context: ${truncate(task.context, 120)}`);
-  if (task.skills.length > 0) {
-    lines.push(`Skills: ${task.skills.map(formatSkillBinding).join(", ")}`);
-  }
+  if (task.blockedBy.length > 0) lines.push(todoPreview(task, "all", `Blocked by: ${task.blockedBy.join(", ")}`, 512, true));
+  const blockers = [...tasks.values()].filter((t) => t.blockedBy.includes(task.id) && t.status !== "deleted");
+  if (blockers.length > 0) lines.push(todoPreview(task, "all", `Blocks: ${blockers.map((b) => `#${b.id}`).join(", ")}`, 512, true));
+  lines.push(`Resource URIs: ${todoPreview(task, "resourceUris", todoFieldText(task, "resourceUris"), TODO_REFERENCE_BYTES, true)}`);
+  if (task.handoff) lines.push(todoPreview(task, "handoff", formatTodoHandoff(task), TODO_REFERENCE_BYTES, true));
+  if (task.skills.length > 0) lines.push(`Skills: ${todoPreview(task, "skills", task.skills.map(formatSkillBinding).join(", "), 512, true)}`);
   if (task.skillActivation) {
-    lines.push(`Skill activation: ${task.skillActivation.activationId}`);
-    lines.push(`Stack revision: ${task.skillActivation.stackRevision}`);
+    lines.push(todoPreview(task, "all", `Skill activation: ${task.skillActivation.activationId}\nStack revision: ${task.skillActivation.stackRevision}`, 512, true));
   }
-
-  return ok(lines.join("\n"), "get");
+  if (task.goalId) lines.push(todoPreview(task, "all", `Goal: ${task.goalId}; read the current Goal with goal {"action":"get"}`, 512, true));
+  lines.push(`Full task/metadata: ${todoReadHint(task.id, "all")}. Text fields are raw text; structured fields are JSON. Follow Continue until End of field.`);
+  return ok(lines.join("\n"), "get", [task.id]);
 }
 
 function handleDelete(params: TodoParams, ctx: ExtensionContext, actor: TodoActorRef): FlowToolResult {
@@ -1372,7 +1501,7 @@ async function handleAdvance(
   }, ctx, actor, generation);
   if (completion.isError) return relabelTodoResult(completion, "advance");
 
-  const completedNote = `Completed #${active.id}: ${active.subject}`;
+  const completedNote = `Completed #${active.id}: ${todoPreview(active, "subject", active.subject, TODO_SUBJECT_BYTES)}`;
   const nextCandidate = runnableTasksForActor(actor.id)[0];
   if (nextCandidate?.origin) {
     return ok(
@@ -1445,15 +1574,18 @@ async function handleNext(
         && (task.status === "blocked" || (task.status === "pending" && task.blockedBy.length > 0)),
     );
     if (blocked.length > 0) {
-      const blockerDetails = blocked.map((task) => {
+      const blockerDetails = blocked.slice(0, PREV_CONTEXT_WINDOW).map((task) => {
         const dependencies = task.blockedBy.map((depId) => {
           const dependency = tasks.get(depId);
           return dependency
-            ? `#${depId} (${dependency.status}: ${dependency.subject})`
+            ? `#${depId} (${dependency.status})`
             : `#${depId} (missing)`;
         });
-        return `#${task.id} ${task.subject} blocked by ${dependencies.join(", ") || "an unresolved dependency"}`;
+        return `#${task.id} ${todoPreview(task, "subject", task.subject, TODO_SUBJECT_BYTES)} blocked by ${todoPreview(task, "all", dependencies.join(", ") || "an unresolved dependency", 512, true)}`;
       });
+      if (blocked.length > PREV_CONTEXT_WINDOW) {
+        blockerDetails.push(`${blocked.length - PREV_CONTEXT_WINDOW} more blocked tasks; use todo {"action":"list","filter":{"memberId":"self"}} for IDs, then get each task`);
+      }
       return err(
         `Dependency deadlock: no runnable pending task. ${blockerDetails.join("; ")}`,
         "next",
@@ -1486,9 +1618,9 @@ async function handleNext(
   const taskIndex = allTasks.findIndex((t) => t.id === task.id);
 
   const parts: string[] = [
-    `## Task #${task.id} [${taskIndex + 1}/${allTasks.length}]: ${task.subject}`,
+    `## Task #${task.id} [${taskIndex + 1}/${allTasks.length}]: ${todoPreview(task, "subject", task.subject, TODO_SUBJECT_BYTES)}`,
   ];
-  if (task.description) parts.push(task.description);
+  if (task.description) parts.push(todoPreview(task, "description", task.description, TODO_DESCRIPTION_BYTES));
 
   const prevContext = buildPrevContext(task.id);
   if (prevContext) {
@@ -1497,23 +1629,28 @@ async function handleNext(
 
   // Goal context reflects the gate that becomes active with this task (the
   // switch itself happens after the commit below).
-  const goalText = (task.goalId ? getGoalById(task.goalId)?.text : undefined)
-    ?? getActiveGoal()?.text;
-  if (goalText) {
-    parts.push(`\n<goal_context>\n${goalText}\n</goal_context>`);
+  const contextGoal = (task.goalId ? getGoalById(task.goalId) : undefined) ?? getActiveGoal();
+  const goalPreview = (text: string) => boundedTodoText(text, TODO_REFERENCE_BYTES,
+    () => 'goal {"action":"get"}');
+  if (contextGoal?.text) {
+    parts.push(`\n<goal_context>\n${goalPreview(contextGoal.text)}\n</goal_context>`);
   }
 
   if (userStoppedGate) {
     parts.push(
-      `\n<goal_stopped_by_user>\nThe quality-gate Goal "${userStoppedGate}" was stopped by the user and has been left stopped.`
+      `\n<goal_stopped_by_user>\nThe quality-gate Goal "${goalPreview(userStoppedGate)}" was stopped by the user and has been left stopped.`
       + `\nYou can work on this task, but completing it is blocked until the user runs /goal resume. Do not resume the Goal yourself.`
       + `\n</goal_stopped_by_user>`,
     );
   }
 
   if (task.context) {
-    parts.push(`\n<context>\n${task.context}\n</context>`);
+    parts.push(`\n<context>\n${todoPreview(task, "context", task.context, TODO_CONTEXT_BYTES)}\n</context>`);
   }
+  if (task.resourceUris.length > 0) {
+    parts.push(`\nResource URIs: ${todoPreview(task, "resourceUris", todoFieldText(task, "resourceUris"), TODO_REFERENCE_BYTES, true)}`);
+  }
+  if (task.handoff) parts.push(`\n${todoPreview(task, "handoff", formatTodoHandoff(task), TODO_REFERENCE_BYTES, true)}`);
 
   // Skill-less tasks skip activation entirely: there is nothing to load, and
   // without an await there is no concurrency window to revalidate against.
@@ -1538,7 +1675,7 @@ async function handleNext(
     const bound = activation.skills
       .map((binding) => `- ${binding.skill.name} (${binding.role})`)
       .join("\n");
-    parts.push(`\n<active_skills>\n${bound}\nFull skill instructions arrive as <active_skill_stack> context while this task is active.\n</active_skills>`);
+    parts.push(`\n<active_skills>\n${todoPreview(task, "skills", bound, 512, true)}\nFull skill instructions arrive as <active_skill_stack> context while this task is active.\n</active_skills>`);
   }
 
   draft.skillActivation = activation ? activationMetadata(activation) : undefined;
@@ -1580,15 +1717,22 @@ async function handleNext(
 const PREV_CONTEXT_WINDOW = 5;
 
 function buildPrevContext(currentId: string): string | null {
+  const current = tasks.get(currentId);
+  if (!current) return null;
+  // Completed dependencies are removed by autoUnblock. Use existing ownership
+  // and plan linkage rather than inventing a persisted dependency history.
   const completed = [...tasks.values()]
-    .filter((t) => t.status === "completed" && t.id !== currentId && t.summary)
+    .filter((t) => t.status === "completed" && t.id !== currentId && t.summary?.trim());
+  const samePlan = current.planHandoffKey
+    ? completed.filter((t) => t.planHandoffKey === current.planHandoffKey)
+    : [];
+  const related = (current.planHandoffKey ? samePlan : completed.filter((t) => t.assignee.id === current.assignee.id))
     .sort((a, b) => a.updatedAt - b.updatedAt);
 
-  if (completed.length === 0) return null;
-
-  return completed
+  if (related.length === 0) return null;
+  return related
     .slice(-PREV_CONTEXT_WINDOW)
-    .map((t) => `[#${t.id}] ${t.subject}: ${t.summary}`)
+    .map((t) => `[#${t.id}] ${todoPreview(t, "subject", t.subject, TODO_SUBJECT_BYTES)}: ${todoPreview(t, "summary", t.summary!, TODO_SUMMARY_BYTES)}`)
     .join("\n");
 }
 
@@ -1891,10 +2035,6 @@ function statusIcon(status: TaskStatus): string {
   }
 }
 
-function truncate(s: string, max: number): string {
-  return s.length > max ? `${s.slice(0, max)}…` : s;
-}
-
 function taskChanged(before: TodoTask, after: TodoTask): boolean {
   return (
     before.subject !== after.subject ||
@@ -2125,7 +2265,13 @@ function snapshotDetails(
   transition?: TodoAdvanceTransition,
 ): TodoResultDetails {
   const capturedAt = Date.now();
-  const tasks = getVisibleTasks().map((task): TodoTaskSnapshot => {
+  const visibleTasks = getVisibleTasks();
+  const scopedTasks = error === undefined
+    ? visibleTasks
+    : displayTaskIds === undefined
+      ? []
+      : visibleTasks.filter((task) => displayTaskIds.includes(task.id));
+  const tasks = scopedTasks.map((task): TodoTaskSnapshot => {
     const durationMs = (task.activeDurationMs ?? 0)
       + (task.status === "in_progress" && task.activeStartedAt !== undefined
         ? Math.max(0, capturedAt - task.activeStartedAt)
@@ -2136,7 +2282,7 @@ function snapshotDetails(
       status: task.status,
       assignee: cloneActor(task.assignee),
       ...(task.blockedBy.length > 0 ? { blockedBy: [...task.blockedBy] } : {}),
-      ...(task.summary ? { summary: task.summary } : {}),
+      ...(error === undefined && task.summary ? { summary: task.summary } : {}),
       ...(durationMs > 0 || task.status === "completed" ? { durationMs } : {}),
       ...(task.status === "completed" ? { completedAt: task.completedAt ?? task.updatedAt } : {}),
     };
@@ -2162,6 +2308,10 @@ function ok(
   };
 }
 
-function err(text: string, action = "unknown"): FlowToolResult {
-  return { content: [{ type: "text", text: `Error: ${text}` }], isError: true, details: snapshotDetails(action, text) };
+function err(text: string, action = "unknown", affectedTaskIds?: string[]): FlowToolResult {
+  return {
+    content: [{ type: "text", text: `Error: ${text}` }],
+    isError: true,
+    details: snapshotDetails(action, text, affectedTaskIds),
+  };
 }
