@@ -5,7 +5,21 @@ icon: "🔄"
 
 This page records user-visible features, behavior changes, fixes, and upgrade requirements from the previous stable release to the current version of the pi maestro flow suite.
 
-> **Current stable release: v0.29.0 (2026-09-07).** Workspace-shared Gateway Board, durable Todo handoffs, deterministic New Context recovery, and hardened Teammate launch diagnostics; exact engine pin `maestro-flow@0.5.86`; bundles Teammate 2.6.1, Cockpit 0.23.0, Settings-Core 0.2.1, Backend-Core 0.1.3, and Backends 0.1.3.
+> **Current stable release: v0.30.0 (2026-09-08).** Gateway handoff, Skill, and Maestro CLI control surfaces; progressive Todo reads and resumable New Context updates; exact engine pin `maestro-flow@0.5.86`; bundles Teammate 2.6.2, Cockpit 0.23.0, Settings-Core 0.2.1, Backend-Core 0.1.3, and Backends 0.1.3.
+
+## v0.30.0 (2026-09-08)
+
+> This release ships Flow 0.30.0 and Teammate 2.6.2. Cockpit 0.23.0, Settings-Core 0.2.1, Backend-Core 0.1.3, and Backends 0.1.3 are unchanged; the exact engine pin remains `maestro-flow@0.5.86`. Before release metadata: 14 commits, 82 implementation/test/support files, +4,037 / −270 lines.
+
+- **Expanded Gateway control plane**: durable handoff services, policy-bound Skill access, and fixed-schema Maestro CLI search/load/stage operations add authorization, idempotent projection, private execution authority, receipts, and duplicate-stage protection.
+- **Progressive Todo reads**: `list` returns compact indexes, `get` pages individual fields, activation returns a bounded execution brief, and Todo v8 deduplicates large content into referenced records.
+- **Resumable New Context updates**: an active Todo can atomically persist progress, handoff, and resources before scheduling `new_context`; agent completion also records whether its runtime remains wakeable.
+- **Knowledge and Skill safety**: knowledge staging uses private `--content-file` inputs so candidate content stays out of argv, and the final deduplicated Skill stack is checked against the context budget.
+- **Provider and SSH interoperability**: API Manager adds OpenCode request header presets and correct clearing behavior; SSH Gateway sessions expose `monitorHandle`, while dynamic calls require schema discovery first.
+- **Teammate 2.6.2**: built-in agent mirrors are deduplicated, settled-agent messaging consistently points callers to a fresh dispatch, and declarations are refreshed.
+- **Documentation and defaults**: the `/gateway`, Gateway MCP, `mcp` proxy, and Board boundaries are documented; spec/knowhow skills can auto-trigger and compaction uses the configured default model.
+
+Upgrade: `pi install npm:pi-maestro-flow@0.30.0`
 
 ## v0.29.0 (2026-09-07)
 

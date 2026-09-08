@@ -21,8 +21,8 @@
     "logo_alt": "Maestro Flow Logo"
   },
   "announcement": {
-    "title": "v0.29.0 is out — shared Gateway Board + durable handoffs + hardened agent launching. Upgrade:",
-    "install": "pi install npm:pi-maestro-flow@0.29.0",
+    "title": "v0.30.0 is out — Gateway control surfaces + progressive Todo reads + Teammate lifecycle fixes. Upgrade:",
+    "install": "pi install npm:pi-maestro-flow@0.30.0",
     "close": "Dismiss"
   },
   "accessibility": {

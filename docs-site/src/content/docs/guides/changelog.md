@@ -5,7 +5,21 @@ icon: "🔄"
 
 这里记录 pi maestro flow 套件从上一稳定版本到当前版本的用户可见变化、行为调整、问题修复和升级要求。
 
-> **当前稳定版本：v0.29.0（2026-09-07）。** 工作区共享 Gateway Board、持久化 Todo handoff、确定性 New Context 恢复与加固的 Teammate 启动诊断；引擎精确 pin `maestro-flow@0.5.86`；搭配 Teammate 2.6.1、Cockpit 0.23.0、Settings-Core 0.2.1、Backend-Core 0.1.3 与 Backends 0.1.3。
+> **当前稳定版本：v0.30.0（2026-09-08）。** Gateway handoff/Skill/Maestro CLI 控制面、渐进式 Todo 读取与可恢复 New Context 更新；引擎精确 pin `maestro-flow@0.5.86`；搭配 Teammate 2.6.2、Cockpit 0.23.0、Settings-Core 0.2.1、Backend-Core 0.1.3 与 Backends 0.1.3。
+
+## v0.30.0（2026-09-08）
+
+> 本版发布 Flow 0.30.0 与 Teammate 2.6.2；Cockpit 0.23.0、Settings-Core 0.2.1、Backend-Core 0.1.3 与 Backends 0.1.3 保持不变；引擎精确 pin 维持 `maestro-flow@0.5.86`。发布元数据提交前共 14 个 commit、82 个实现/测试/支持文件、+4,037 / −270 行。
+
+- **Gateway 控制面扩展**：新增持久化 handoff、受策略约束的 Skill 服务和固定 schema 的 Maestro CLI search/load/stage 服务，覆盖授权、幂等投影、私有 execution authority、receipt 与重复 stage 防护。
+- **渐进式 Todo 读取**：`list` 返回紧凑索引，`get` 支持字段分页，activation 返回有界 execution brief；Todo v8 将大字段去重到内容引用，降低状态文件和 prompt 膨胀。
+- **可恢复 New Context 更新**：active Todo 可在调度 `new_context` 前原子保存进度、handoff 和资源；agent completion 同步记录 runtime 是否仍可唤醒。
+- **知识与 Skill 安全**：knowledge stage 使用私有 `--content-file`，候选正文不再进入 argv；最终去重后的 Skill stack 重新执行 context budget 校验。
+- **Provider 与 SSH 互操作**：API Manager 新增 OpenCode 请求头 preset 和正确的清除语义；SSH Gateway session 暴露 `monitorHandle`，动态调用要求先读取工具 schema。
+- **Teammate 2.6.2**：内置 agent mirror 去重，settled agent 的消息失败统一给出 fresh dispatch 指引，并刷新声明文件。
+- **文档与项目默认值**：补充 `/gateway`、Gateway MCP、`mcp` 代理和 Board 的边界说明；spec/knowhow skill 允许自动触发，compaction 使用配置的默认模型。
+
+升级：`pi install npm:pi-maestro-flow@0.30.0`
 
 ## v0.29.0（2026-09-07）
 
