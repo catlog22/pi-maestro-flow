@@ -416,6 +416,32 @@ test("api manager commit expands an agent header preset into headers", async () 
   assert.equal(written.headers["X-Stainless-Lang"], "js");
 });
 
+test("api manager commit expands the official OpenCode request headers preset", async () => {
+  const { provider, modelsPath, context } = harness({
+    providers: { "opencode-go": { baseUrl: "https://opencode.ai/zen/go/v1", api: "openai-completions", models: [{ id: "deepseek-v4-flash" }] } },
+  });
+  const transactionId = "tx-opencode-headers";
+  await provider.prepare!({
+    context, transactionId,
+    changes: [{
+      operation: "set", key: "api.providers", scope: "global",
+      value: [
+        { id: "opencode-go", baseUrl: "https://opencode.ai/zen/go/v1", api: "openai-completions", enabled: true, headerPreset: "opencode", models: [{ id: "deepseek-v4-flash" }] },
+      ],
+    }],
+  });
+  await provider.commit!({ context, transactionId, prepareToken: transactionId });
+  const written = (JSON.parse(readFileSync(modelsPath, "utf8")) as { providers: Record<string, any> }).providers["opencode-go"];
+  assert.equal(written.headerPreset, "opencode");
+  assert.deepEqual(written.headers, {
+    "User-Agent": "opencode/1.15.3",
+    "x-opencode-client": "cli",
+    "x-opencode-session": "ses_01JQXYZ3K7MN0RSTUVWXYZabcd",
+    "x-opencode-request": "msg_01JQXYZ3K7MN0RSTUVWXYZefgh",
+    "x-opencode-project": "global",
+  }, "OpenCode receives its official static request headers");
+});
+
 test("api manager commit keeps hand-edited headers when no preset is chosen", async () => {
   const { provider, modelsPath, context } = harness({
     providers: { "p": { baseUrl: "https://p/v1", api: "openai-completions", headers: { "X-Keep": "yes" }, models: [{ id: "m1" }] } },
@@ -451,11 +477,19 @@ test("api manager validate rejects non-string header values", async () => {
   assert.equal(valid.valid, true);
 });
 
-test("agent header presets cover all sub2api agent identities", () => {
+test("agent header presets cover supported agent identities", () => {
   assert.ok("claude-code" in AGENT_HEADER_PRESETS);
   assert.ok("codex" in AGENT_HEADER_PRESETS);
   assert.ok("grok" in AGENT_HEADER_PRESETS);
   assert.ok("antigravity" in AGENT_HEADER_PRESETS);
+  assert.ok("opencode" in AGENT_HEADER_PRESETS);
+  assert.deepEqual(AGENT_HEADER_PRESETS.opencode, {
+    "User-Agent": "opencode/1.15.3",
+    "x-opencode-client": "cli",
+    "x-opencode-session": "ses_01JQXYZ3K7MN0RSTUVWXYZabcd",
+    "x-opencode-request": "msg_01JQXYZ3K7MN0RSTUVWXYZefgh",
+    "x-opencode-project": "global",
+  });
   assert.match(AGENT_HEADER_PRESETS["claude-code"]["User-Agent"], /^claude-cli\//);
   assert.match(AGENT_HEADER_PRESETS["codex"]["User-Agent"], /^codex-tui\//);
   assert.match(AGENT_HEADER_PRESETS["grok"]["User-Agent"], /^xai-grok-workspace\//);

@@ -65,6 +65,7 @@ const API_KINDS = [
  * - codex: codexCLIUserAgent = codex-tui/0.146.0 (Ubuntu 22.4.0; x86_64) xterm-256color
  * - grok: xai CLI identity = xai-grok-workspace/0.2.114 + x-grok-client-version + x-grok-client-identifier
  * - antigravity: antigravity/1.23.2 windows/amd64
+ * - opencode: official OpenCode CLI identity and session headers for Zen/Go gateways
  */
 export const AGENT_HEADER_PRESETS = {
   none: {},
@@ -91,6 +92,14 @@ export const AGENT_HEADER_PRESETS = {
   },
   antigravity: {
     "User-Agent": "antigravity/1.23.2 windows/amd64",
+  },
+  // Keep Authorization out of the preset so pi can send the provider's configured API key.
+  opencode: {
+    "User-Agent": "opencode/1.15.3",
+    "x-opencode-client": "cli",
+    "x-opencode-session": "ses_01JQXYZ3K7MN0RSTUVWXYZabcd",
+    "x-opencode-request": "msg_01JQXYZ3K7MN0RSTUVWXYZefgh",
+    "x-opencode-project": "global",
   },
 } as const;
 
@@ -359,13 +368,14 @@ const CATALOGS = {
     "api.field.api": "API protocol",
     "api.field.enabled": "Enabled",
     "api.field.apiKey": "API key",
-    "api.field.headerPreset": "Agent response headers",
+    "api.field.headerPreset": "Agent request headers",
     "api.field.headers": "Custom headers (JSON)",
     "api.headerPreset.none": "None (pi default)",
     "api.headerPreset.claude-code": "Claude Code CLI",
     "api.headerPreset.codex": "Codex CLI",
     "api.headerPreset.grok": "Grok CLI",
     "api.headerPreset.antigravity": "Antigravity CLI",
+    "api.headerPreset.opencode": "OpenCode session affinity",
     "api.field.providerId": "Provider",
     "api.field.modelId": "Model id",
     "api.field.modelName": "Name",
@@ -453,13 +463,14 @@ const CATALOGS = {
     "api.field.api": "API 协议",
     "api.field.enabled": "启用",
     "api.field.apiKey": "API Key",
-    "api.field.headerPreset": "Agent 响应头",
+    "api.field.headerPreset": "Agent 请求头",
     "api.field.headers": "自定义请求头（JSON）",
     "api.headerPreset.none": "无（pi 默认）",
     "api.headerPreset.claude-code": "Claude Code CLI",
     "api.headerPreset.codex": "Codex CLI",
     "api.headerPreset.grok": "Grok CLI",
     "api.headerPreset.antigravity": "Antigravity CLI",
+    "api.headerPreset.opencode": "OpenCode 会话路由",
     "api.field.providerId": "Provider",
     "api.field.modelId": "模型 ID",
     "api.field.modelName": "名称",
@@ -955,9 +966,10 @@ export function createApiManagerSettingsProvider(
                   if (!(key in config)) config[key] = value;
                 }
                 // Explicitly cleared managed fields must not be resurrected from
-                // the previous record: "none" clears the preset, null clears headers.
+                // the previous record: "none" clears the preset and any headers.
                 if (entry.headerPreset === "none") delete config.headerPreset;
-                if (raw !== null && typeof raw === "object" && !Array.isArray(raw)
+                if (entry.headerPreset === "none"
+                  && raw !== null && typeof raw === "object" && !Array.isArray(raw)
                   && (raw as Record<string, unknown>).headers == null) {
                   delete config.headers;
                 }
