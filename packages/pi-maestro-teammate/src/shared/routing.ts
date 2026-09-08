@@ -96,3 +96,13 @@ export function formatLocalAgentMessage(input: LocalAgentMessageInput): string {
     input.message,
   ].join("\n");
 }
+
+/** Explain why a settled local agent cannot accept another message and how to continue. */
+export function formatNoRestorableRuntimeError(label: string, status?: string): string {
+  const state = status === "completed"
+    ? "has completed"
+    : status
+      ? `is ${status}`
+      : "is unavailable";
+  return `Agent "${label}" ${state} and has no restorable runtime. Dispatch a new teammate and pass the previous agent:// publication via tasks[].briefing.`;
+}

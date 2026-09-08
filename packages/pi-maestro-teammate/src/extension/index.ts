@@ -487,7 +487,7 @@ import {
   type RuntimeReadModelSnapshotV2,
 } from "../runtime-v2/read-model.ts";
 import { RuntimeReadModelBrokerBridge } from "../runtime-v2/broker-read-model.ts";
-import { formatLocalAgentMessage } from "../shared/routing.ts";
+import { formatLocalAgentMessage, formatNoRestorableRuntimeError } from "../shared/routing.ts";
 export * from "./teammate-core.ts";
 import {
   appendTeammateDepthContext,
@@ -2704,7 +2704,7 @@ export default function registerTeammateExtension(
       const restarted = agent.status === "sleeping" && agent.restart?.(message, provenance) === true;
       if (!restarted) {
         restoreDeferredAgentContext(agent, deferredContext);
-        return { delivered: false, error: `Agent "${targetLabel}" has no restorable runtime.` };
+        return { delivered: false, error: formatNoRestorableRuntimeError(targetLabel, agent.status) };
       }
       const restartDelivery = agent.restartDelivery;
       if (restartDelivery) {
@@ -6201,7 +6201,7 @@ export default function registerTeammateExtension(
       const agent = cid ? state.activeRuns.get(cid) : undefined;
       if (agent && !LIVE_AGENT_STATUSES.has(agent.status)) {
         return {
-          content: [{ type: "text", text: `Agent "${params.to}" is already ${agent.status} and cannot receive commands.` }],
+          content: [{ type: "text", text: formatNoRestorableRuntimeError(params.to, agent.status) }],
           isError: true,
           details: { delivered: false },
         };

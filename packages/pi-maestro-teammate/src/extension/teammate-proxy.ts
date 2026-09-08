@@ -20,7 +20,11 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Check } from "typebox/value";
 import { isGuiTeammateToolAllowed, registerGuiTool, unregisterGuiTool } from "../shared/gui-registry.ts";
 import { aggregateAgentRunPhase, projectAgentRuntime } from "../shared/agent-status.ts";
-import { formatLocalAgentMessage, resolveAgentCompletionTarget } from "../shared/routing.ts";
+import {
+  formatLocalAgentMessage,
+  formatNoRestorableRuntimeError,
+  resolveAgentCompletionTarget,
+} from "../shared/routing.ts";
 import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchParams, TeammateWaitParams, TeammateMonitorParams, ObserveParams, LocalObserveParams } from "./schemas.ts";
 import {
@@ -3113,7 +3117,7 @@ export async function handleProxyRequest(
       const agent = state.activeRuns.get(cid);
       if (agent && !LIVE_AGENT_STATUSES.has(agent.status)) {
         reply({ type: "teammate_proxy_result", requestId, result: {
-          content: [{ type: "text", text: `Agent "${to}" is already ${agent.status} and cannot receive commands.` }],
+          content: [{ type: "text", text: formatNoRestorableRuntimeError(to, agent.status) }],
           isError: true, details: { delivered: false },
         }});
         return;
@@ -3298,7 +3302,7 @@ export async function handleProxyRequest(
         if (!restarted || !agent) {
           if (agent) restoreDeferredAgentContext(agent, deferredContext);
           reply({ type: "teammate_proxy_result", requestId, result: {
-            content: [{ type: "text", text: `Agent "${to}" has no restorable runtime.` }],
+            content: [{ type: "text", text: formatNoRestorableRuntimeError(to, agent?.status) }],
             isError: true, details: { delivered: false },
           }});
           return;

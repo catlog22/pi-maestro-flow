@@ -238,6 +238,36 @@ ${description} prompt.
   }
 });
 
+test("identical packaged builtin mirrors are deduplicated without warnings", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-builtin-mirror-"));
+  const project = path.join(root, "project");
+  const home = path.join(root, "home");
+  const packageDir = path.join(root, "package-agents");
+  fs.mkdirSync(project, { recursive: true });
+  fs.mkdirSync(packageDir, { recursive: true });
+
+  const previousPackageDir = process.env.PI_TEAMMATE_PACKAGE_AGENTS_DIR;
+  process.env.PI_TEAMMATE_PACKAGE_AGENTS_DIR = packageDir;
+  invalidateAgentCatalogCache();
+  try {
+    const baseline = discoverAgents(project, { includeDiagnostics: true, homeDir: home });
+    const builtinPlanner = resolveAgent(baseline, "planner");
+    assert.equal(builtinPlanner?.source, "builtin");
+    assert.ok(builtinPlanner?.filePath);
+    fs.copyFileSync(builtinPlanner.filePath, path.join(packageDir, "planner.md"));
+
+    const snapshot = discoverAgents(project, { includeDiagnostics: true, homeDir: home });
+    assert.equal(resolveAgent(snapshot, "planner")?.source, "builtin");
+    assert.equal(snapshot.diagnostics.some((entry) => entry.name === "planner"), false);
+    assert.equal(formatAgentShadowWarning(snapshot, "planner"), undefined);
+  } finally {
+    if (previousPackageDir === undefined) delete process.env.PI_TEAMMATE_PACKAGE_AGENTS_DIR;
+    else process.env.PI_TEAMMATE_PACKAGE_AGENTS_DIR = previousPackageDir;
+    invalidateAgentCatalogCache();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("dispatch exposes warnings only for the requested agent with shadow diagnostics", async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-shadow-dispatch-"));
   const compatDir = path.join(project, ".agents");

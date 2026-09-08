@@ -446,7 +446,7 @@ test("child proxy prefers a local owner-prefixed agent name", async () => {
     outputLog: [],
     lastActivityAt: now,
     depth: 0,
-    status: "running",
+    status: "completed",
     sleepMs: 0,
   } as never);
 
@@ -463,7 +463,9 @@ test("child proxy prefers a local owner-prefixed agent name", async () => {
   const result = envelope.result as { isError?: boolean; content?: Array<{ text?: string }> };
   assert.equal(remoteCalled, false);
   assert.equal(result.isError, true);
-  assert.match(result.content?.[0]?.text ?? "", /no restorable runtime/);
+  assert.match(result.content?.[0]?.text ?? "", /has completed and has no restorable runtime/);
+  assert.match(result.content?.[0]?.text ?? "", /Dispatch a new teammate/);
+  assert.match(result.content?.[0]?.text ?? "", /tasks\[\]\.briefing/);
 });
 
 test("child proxy rejects cross-session abort", async () => {

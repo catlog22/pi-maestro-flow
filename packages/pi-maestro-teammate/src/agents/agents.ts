@@ -197,6 +197,23 @@ function isReservedAgentName(name: string): boolean {
   return isBuiltinAgentName(name);
 }
 
+function agentDefinitionFingerprint(agent: AgentConfig): string {
+  return JSON.stringify([
+    agent.name,
+    agent.description,
+    agent.tools ?? null,
+    agent.model ?? null,
+    agent.fallbackModels ?? null,
+    agent.taskType ?? null,
+    agent.thinking ?? null,
+    agent.systemPromptMode,
+    agent.inheritProjectContext,
+    agent.inheritSkills,
+    agent.defaultContext ?? null,
+    agent.systemPrompt,
+  ]);
+}
+
 interface DiscoveryDirs {
   legacyUserAgentsDir: string;
   userPiAgentsDir: string;
@@ -394,8 +411,17 @@ export function discoverAgents(
   }> = [];
   const mergeAgent = (agent: AgentConfig): void => {
     // Builtin names are reserved so custom definitions cannot silently replace
-    // the stable general, exploration, and DAG orchestration roles.
+    // the stable general, exploration, and DAG orchestration roles. Package
+    // catalogs may carry byte-equivalent builtin mirrors for other consumers;
+    // those are duplicates, not attempted overrides.
     if (agent.source !== "builtin" && isReservedAgentName(agent.name)) {
+      const builtin = agentMap.get(agent.name);
+      if (
+        builtin?.source === "builtin"
+        && agentDefinitionFingerprint(builtin) === agentDefinitionFingerprint(agent)
+      ) {
+        return;
+      }
       rejectedCandidates.push({ name: agent.name, reason: "reserved-builtin", candidate: agent });
       return;
     }
