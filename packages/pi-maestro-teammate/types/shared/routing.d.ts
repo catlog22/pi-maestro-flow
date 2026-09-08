@@ -37,3 +37,5 @@ export interface LocalAgentMessageInput {
 }
 /** Canonical model-visible envelope for local agent-to-agent messages. */
 export declare function formatLocalAgentMessage(input: LocalAgentMessageInput): string;
+/** Explain why a settled local agent cannot accept another message and how to continue. */
+export declare function formatNoRestorableRuntimeError(label: string, status?: string): string;
