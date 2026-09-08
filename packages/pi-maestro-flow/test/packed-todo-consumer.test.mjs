@@ -148,11 +148,14 @@ export default function register(pi) {
   });
 }
 `);
+    const runtimeEnv = isolatedPiRuntimeEnv(env, home, {
+      PATH: `${join(consumer, "node_modules", ".bin")}${delimiter}${process.env.PATH ?? ""}`,
+    });
     run(piCommand, [
       "--offline", "--mode", "rpc", "--no-session", "--no-skills", "--no-context-files",
       "--extension", join(installedFlow, "src", "extension", "index.ts"),
       "--extension", discoveryVerifierPath,
-    ], workspace, { ...env, PATH: `${join(consumer, "node_modules", ".bin")}${delimiter}${process.env.PATH ?? ""}` }, 45_000, `${JSON.stringify({ id: "state", type: "get_state" })}\n`);
+    ], workspace, runtimeEnv, 45_000, `${JSON.stringify({ id: "state", type: "get_state" })}\n`);
     const discoveredTools = JSON.parse(readFileSync(discoveryEvidencePath, "utf8"));
     for (const toolName of ["teammate-send", "teammate-list", "observe"]) {
       assert.ok(discoveredTools.includes(toolName), `${toolName}: ${discoveredTools.join(",")}`);
@@ -167,17 +170,13 @@ export default function register(pi) {
   });
 }
 `);
-    const runtimeEnv = {
-      ...env,
-      PI_TEAMMATE_CHILD: "1",
-      PATH: `${join(consumer, "node_modules", ".bin")}${delimiter}${process.env.PATH ?? ""}`,
-    };
+    const childRuntimeEnv = { ...runtimeEnv, PI_TEAMMATE_CHILD: "1" };
     run(piCommand, [
       "--offline", "--mode", "rpc", "--no-session", "--no-skills",
       "--no-context-files",
       "--extension", join(installedFlow, "src", "extension", "index.ts"),
       "--extension", verifierPath,
-    ], workspace, runtimeEnv, 45_000, `${JSON.stringify({ id: "state", type: "get_state" })}\n`);
+    ], workspace, childRuntimeEnv, 45_000, `${JSON.stringify({ id: "state", type: "get_state" })}\n`);
 
     const tools = JSON.parse(readFileSync(evidencePath, "utf8"));
     assert.ok(tools.includes("ask-user-question"), tools.join(","));
@@ -197,6 +196,21 @@ export default function register(pi) {
 function parseTrailingJson(stdout) {
   const arrayStart = stdout.lastIndexOf("\n[");
   return JSON.parse(arrayStart >= 0 ? stdout.slice(arrayStart + 1) : stdout);
+}
+
+function isolatedPiRuntimeEnv(baseEnv, home, overrides = {}) {
+  const env = { ...baseEnv };
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("PI_") || key.startsWith("MCP_")) delete env[key];
+  }
+  return {
+    ...env,
+    PI_CODING_AGENT_DIR: join(home, ".pi", "agent"),
+    PI_GUI: "0",
+    MCP_DIRECT_TOOLS: "__none__",
+    XDG_CONFIG_HOME: join(home, ".config"),
+    ...overrides,
+  };
 }
 
 function run(command, args, cwd, env = process.env, timeout = 60_000, input) {

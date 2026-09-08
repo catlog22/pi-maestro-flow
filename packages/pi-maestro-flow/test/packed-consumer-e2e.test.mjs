@@ -244,10 +244,9 @@ test("packed consumer installs real tarballs and loads in a fresh Pi process", {
       process.execPath,
       join(consumer, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js"),
     ];
-    const runtimeEnv = {
-      ...installEnv,
+    const runtimeEnv = isolatedPiRuntimeEnv(installEnv, installHome, {
       PATH: `${join(consumer, "node_modules", ".bin")}${delimiter}${process.env.PATH ?? ""}`,
-    };
+    });
     const runtimeProbePath = join(consumer, "teammate-runtime-probe.json");
     const runtimeVerifierPath = join(consumer, "verify-teammate-runtime.ts");
     writeFileSync(
@@ -601,10 +600,9 @@ function verifyStandaloneCockpit({
       "--no-context-files", "--extension", join(installedCockpit, "src", "extension", "index.ts"),
     ],
     workflowRoot,
-    {
-      ...env,
+    isolatedPiRuntimeEnv(env, installHome, {
       PATH: `${join(consumer, "node_modules", ".bin")}${delimiter}${process.env.PATH ?? ""}`,
-    },
+    }),
     45_000,
     `${JSON.stringify({ id: "state", type: "get_state" })}\n`,
   );
@@ -628,6 +626,21 @@ function tarList(tarball) {
   const result = spawnSync("tar", args, { encoding: "utf8" });
   assert.equal(result.status, 0, `tar ${args.slice(0, -1).join(" ")} failed for ${tarball}: ${result.stderr}`);
   return result.stdout.split(/\r?\n/).filter(Boolean);
+}
+
+function isolatedPiRuntimeEnv(baseEnv, home, overrides = {}) {
+  const env = { ...baseEnv };
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("PI_") || key.startsWith("MCP_")) delete env[key];
+  }
+  return {
+    ...env,
+    PI_CODING_AGENT_DIR: join(home, ".pi", "agent"),
+    PI_GUI: "0",
+    MCP_DIRECT_TOOLS: "__none__",
+    XDG_CONFIG_HOME: join(home, ".config"),
+    ...overrides,
+  };
 }
 
 function run(command, args, cwd, env = process.env, timeout = 60_000, input) {
