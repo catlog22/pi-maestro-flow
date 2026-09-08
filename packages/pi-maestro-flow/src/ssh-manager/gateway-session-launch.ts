@@ -45,6 +45,8 @@ export interface SessionLaunchBindingV1 {
 export interface SshStartPiResult {
   readonly binding: SessionLaunchBindingV1;
   readonly executionHandle: string;
+  /** Alias for callers that pass the value directly to monitor.handle. */
+  readonly monitorHandle: string;
   readonly monitor: {
     readonly tool: "monitor";
     readonly args: Record<string, unknown>;
@@ -351,6 +353,7 @@ function resultForBinding(binding: SessionLaunchBindingV1): SshStartPiResult {
   return {
     binding: { ...binding },
     executionHandle: binding.executionHandle,
+    monitorHandle: binding.executionHandle,
     monitor: {
       tool: "monitor",
       args: {

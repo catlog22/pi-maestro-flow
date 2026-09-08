@@ -80,7 +80,10 @@ export const SshToolParams = Type.Union([
     action: sshAction("call"),
     targetId: sshTargetId(),
     tool: gatewayToolName,
-    args: Type.Optional(Type.Record(Type.String({ minLength: 1, maxLength: 128 }), Type.Unknown(), { maxProperties: 256 })),
+    args: Type.Optional(Type.Record(Type.String({ minLength: 1, maxLength: 128 }), Type.Unknown(), {
+      maxProperties: 256,
+      description: "Arguments for the selected Gateway tool. Call action=describe for that tool first; use its exact inputSchema and action names.",
+    })),
     timeout: Type.Optional(Type.Integer({
       minimum: 1,
       maximum: MAX_SSH_TIMEOUT_SECONDS,
@@ -89,7 +92,7 @@ export const SshToolParams = Type.Union([
   }, { additionalProperties: false }),
 ], {
   type: "object",
-  description: "List unlocked SSH targets, execute a legacy command, or use the built-in Gateway. targetId selects a provider-owned configured server; omission preserves the current #ssh selection. Host, authentication, and Gateway command parameters are never accepted.",
+  description: "List unlocked SSH targets, execute a legacy command, or use the built-in Gateway. targetId selects a provider-owned configured server; omission preserves the current #ssh selection. Host, authentication, and Gateway command parameters are never accepted. For dynamic Gateway calls, use action=describe tool=<name> to retrieve the authoritative inputSchema before action=call. session.start-pi returns taskId and monitorHandle; pass either value as monitor.handle."
 });
 
 export type SshCommandToolInput = Static<typeof SshCommandToolParams>;

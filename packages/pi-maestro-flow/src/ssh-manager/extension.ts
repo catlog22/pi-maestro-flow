@@ -231,6 +231,8 @@ Use action=targets to list provider-owned target ids, then pass targetId on a co
       "Use read-only inspection before mutations unless the user explicitly requested a change.",
       "Use action=guide for local Gateway setup instructions; it does not contact a server.",
       "Use action=targets after unlock and pass only a returned targetId; never invent target ids or connection parameters.",
+      "For action=call, first use action=describe with the targetId and Gateway tool name; pass the returned tool inputSchema exactly in args. Dynamic call args are intentionally generic at this outer tool boundary.",
+      "For session.start-pi, use the returned taskId or monitorHandle as monitor.handle; do not rename it to taskId when calling monitor.",
       "Never read or print private keys, passwords, tokens, credential stores, or host-key material.",
       "Do not claim access while the SSH manager is locked or to a target not returned by action=targets.",
     ],

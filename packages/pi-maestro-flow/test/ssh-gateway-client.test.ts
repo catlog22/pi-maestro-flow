@@ -225,8 +225,10 @@ test("start_pi survives transport reconnect and forwards only a fenced Monitor c
     const started = await pool.execute(host, "digest-a", {
       action: "start_pi", todoIds: ["28"], requestId: "launch-1",
     }, undefined, { piSessionRef: "pi-session-1", todos: [todo] });
-    const launch = started.data as { executionHandle: string; monitor: { args: Record<string, unknown> } };
+    const launch = started.data as { executionHandle: string; monitorHandle: string; monitor: { args: Record<string, unknown> } };
     assert.equal(launch.executionHandle, "remote-task-1");
+    assert.equal(launch.monitorHandle, launch.executionHandle);
+    assert.equal(launch.monitor.args.handle, launch.monitorHandle);
     assert.deepEqual(executor.requests, [{ command: SSH_GATEWAY_COMMAND, timeout: 30 }]);
     const startRpc = executor.channels[0]!.calls.find((request) => request.method === "tools/call"
       && (request.params?.name === "session")
