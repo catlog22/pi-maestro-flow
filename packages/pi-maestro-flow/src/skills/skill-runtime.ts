@@ -109,6 +109,9 @@ export class SkillRuntime {
         }),
       })),
     );
+    // Apply the same budget to the final stack after shared readings are deduplicated.
+    const prompt = renderSkillStack(loaded);
+    await this.loader.validateContext(context + prompt, configSnapshot);
     const stackRevision = createHash("sha256")
       .update(JSON.stringify(loaded.map(({ role, skill }) => ({
         role,
@@ -143,7 +146,7 @@ export class SkillRuntime {
       state: restored && !canRestore ? "stale" : "active",
       bindings: Object.freeze(metadataBindings) as SkillActivationBindingMetadata[],
       skills: Object.freeze(loaded) as LoadedTodoSkillBinding[],
-      prompt: renderSkillStack(loaded),
+      prompt,
     });
   }
 }

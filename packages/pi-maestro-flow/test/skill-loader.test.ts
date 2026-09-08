@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
+import { SkillRuntime } from "../src/skills/skill-runtime.ts";
 import type { Skill } from "@earendil-works/pi-coding-agent";
 import { SkillCache } from "../src/skills/skill-cache.ts";
 import {
@@ -329,4 +330,83 @@ description: manual only
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+async function runtimeFixture(t: TestContext, bodies: string[], sharedReading?: string) {
+  const root = await mkdtemp(join(tmpdir(), "pi-skill-stack-budget-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const skills: Skill[] = [];
+  await mkdir(join(root, ".pi"), { recursive: true });
+  if (sharedReading !== undefined) await writeFile(join(root, "shared.md"), sharedReading);
+  for (const [index, body] of bodies.entries()) {
+    const name = `skill-${index}`;
+    const filePath = join(root, `${name}.md`);
+    await writeFile(filePath, `---\nname: ${name}\ndescription: budget fixture\n---\n${body}`);
+    skills.push({
+      name,
+      description: "budget fixture",
+      filePath,
+      baseDir: root,
+      sourceInfo: {} as Skill["sourceInfo"],
+      disableModelInvocation: false,
+    });
+  }
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills, diagnostics: [] }) },
+  });
+  return {
+    loader,
+    runtime: new SkillRuntime(loader),
+    setBudget: (maxTotalBytes: number) => writeFile(join(root, ".pi", "skill-config.json"), JSON.stringify({
+      version: "1.0.0",
+      limits: { maxFileBytes: maxTotalBytes, maxTotalBytes },
+    })),
+  };
+}
+
+const budgetError = (error: unknown): boolean =>
+  error instanceof TodoSkillLoadError && error.code === "E_SKILL_BUDGET_EXCEEDED";
+
+test("skill runtime rejects a combined stack even when each skill fits the budget", async (t) => {
+  const { loader, runtime, setBudget } = await runtimeFixture(t, ["a".repeat(2048), "b".repeat(2048)]);
+  await setBudget(3000);
+  await loader.load({ name: "skill-0" });
+  await loader.load({ name: "skill-1" });
+  await assert.rejects(runtime.activate([
+    { name: "skill-0", role: "primary" },
+    { name: "skill-1", role: "support" },
+  ]), budgetError);
+});
+
+test("skill runtime budgets UTF-8 context and rendered wrappers at the exact boundary", async (t) => {
+  const { runtime, setBudget } = await runtimeFixture(t, ["任务🙂"]);
+  const bindings = [{ name: "skill-0", role: "primary" }] as const;
+  const context = "当前进度🙂";
+  const activation = await runtime.activate(bindings, context);
+  const totalBytes = Buffer.byteLength(context + activation.prompt, "utf8");
+  await setBudget(totalBytes);
+  const exact = await runtime.activate(bindings, context);
+  assert.equal(exact.prompt, activation.prompt);
+  await setBudget(totalBytes - 1);
+  await assert.rejects(runtime.activate(bindings, context), budgetError);
+});
+
+test("skill runtime counts shared required reading and task context only once in the final budget", async (t) => {
+  const reading = "共享内容".repeat(500);
+  const body = "<required_reading>\n@shared.md\n</required_reading>";
+  const { runtime, setBudget } = await runtimeFixture(t, [body, body], reading);
+  const bindings = [
+    { name: "skill-0", role: "primary" },
+    { name: "skill-1", role: "support" },
+  ] as const;
+  const context = "执行进度".repeat(100);
+  const initial = await runtime.activate(bindings, context);
+  const totalBytes = Buffer.byteLength(context + initial.prompt, "utf8");
+  assert.equal(initial.prompt.split(reading).length - 1, 1);
+  assert.ok(initial.bindings.reduce((sum, binding) => sum + binding.totalBytes, 0) > totalBytes);
+  await setBudget(totalBytes);
+  const bounded = await runtime.activate(bindings, context);
+  assert.equal(bounded.prompt, initial.prompt);
 });
