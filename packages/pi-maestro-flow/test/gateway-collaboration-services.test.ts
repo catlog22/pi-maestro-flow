@@ -39,7 +39,7 @@ test("shared catalog exposes workspace discovery and Session/Todo/Monitor collab
   const owner = createGatewayPrincipal("stdio", "owner", { authenticated: true });
   const observer = createGatewayPrincipal("http", "observer", { authenticated: true });
   const web = createGatewayPrincipal("http", "web", { authenticated: true });
-  assert.deepEqual(runtime.catalog.list().map((tool) => tool.name), ["workspace", "board", "host", "exec", "job", "file", "teammate", "session", "todo", "monitor"]);
+  assert.deepEqual(runtime.catalog.list().map((tool) => tool.name), ["workspace", "board", "host", "exec", "job", "file", "teammate", "session", "todo", "monitor", "handoff", "skill", "maestro_cli"]);
   assert.equal((await runtime.call("session", { action: "list", memberId: "owner", extra: true }, owner)).error?.code, "invalid_arguments");
 
   const created = await runtime.call("session", { action: "create", sessionId: "collab", workspacePath: root, ownerId: "owner", expectedSessionRevision: 0, operationId: "create" }, owner);
@@ -52,7 +52,8 @@ test("shared catalog exposes workspace discovery and Session/Todo/Monitor collab
   assert.equal(webJoined.ok, true);
 
   const started = await runtime.call("session", { action: "start-pi", sessionId: "collab", memberId: "web", prompt: "Perform the delegated work", todoIds: ["gateway-1"] }, web);
-  assert.equal(started.ok, true); const handle = (started.data as { taskId: string }).taskId;
+  assert.equal(started.ok, true); const handle = (started.data as { taskId: string; monitorHandle: string }).taskId;
+  assert.equal((started.data as { taskId: string; monitorHandle: string }).monitorHandle, handle);
   await eventually(() => port.params !== undefined);
   const delegatedPrompt = port.params!.tasks[0]!.prompt;
   assert.match(delegatedPrompt, /GATEWAY_TODO_SNAPSHOT_UNTRUSTED/);

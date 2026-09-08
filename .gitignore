@@ -35,6 +35,8 @@ Thumbs.db
 .pi/delegations/
 # Flow-schedule v2 runtime state (owner identity, leases, dispatches, schedules).
 .pi/flow-schedule/
+# Gateway runtime state (boards, jobs, sessions, tasks, and private receipts).
+.pi/gateway/
 # Materialized by prepare-package-skills/sync-pi; canonical sources live at
 # the workspace root .pi.
 packages/pi-maestro-flow/.pi/

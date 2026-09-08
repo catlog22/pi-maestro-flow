@@ -19,6 +19,8 @@ import {
   type BoardTaskResultV1,
   type BoardTaskV1,
 } from "./board-contracts.ts";
+import type { GatewayHandoffV1 } from "./handoff-contracts.ts";
+import type { GatewayHandoffOriginV1 } from "./handoff-record-contracts.ts";
 import { GATEWAY_HARD_LIMITS, GATEWAY_STATE_VERSION, type GatewayPrincipal } from "./contracts.ts";
 import { principalHasScope, principalKey } from "./principal.ts";
 import { SessionStore } from "./session-store.ts";
@@ -201,6 +203,35 @@ export class BoardStore {
       .filter((task) => options.status === undefined || task.status === options.status)
       .filter((task) => options.phase === undefined || task.phase === options.phase)
       .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id))
+      .slice(0, limit)
+      .map(clone);
+  }
+
+  async search(options: { query: string; status?: BoardTaskV1["status"]; phase?: BoardTaskV1["phase"]; limit?: number }): Promise<BoardTaskV1[]> {
+    const query = options.query.trim().toLocaleLowerCase();
+    if (!query) throw new BoardStoreError("query must be non-empty");
+    if (Buffer.byteLength(query, "utf8") > 4096) throw new BoardStoreError("query is too large");
+    const terms = query.split(/\s+/u);
+    const limit = options.limit ?? this.maxTasks;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > this.maxTasks) throw new BoardStoreError(`limit must be in [1, ${this.maxTasks}]`);
+    return (await this.load()).tasks
+      .filter((task) => options.status === undefined || task.status === options.status)
+      .filter((task) => options.phase === undefined || task.phase === options.phase)
+      .filter((task) => {
+        const searchable = JSON.stringify({
+          id: task.id,
+          title: task.title,
+          description: task.description,
+          acceptanceCriteria: task.acceptanceCriteria,
+          labels: task.labels,
+          sessionBinding: task.sessionBinding,
+          planBinding: task.planBinding,
+          handoff: task.handoff,
+          result: task.result,
+        }).toLocaleLowerCase();
+        return terms.every((term) => searchable.includes(term));
+      })
+      .sort((left, right) => right.updatedAt - left.updatedAt || left.id.localeCompare(right.id))
       .slice(0, limit)
       .map(clone);
   }
@@ -408,12 +439,34 @@ export class BoardStore {
     });
   }
 
+  async handoff(taskId: string, handoff: GatewayHandoffV1, options: BoardMutationOptions, origin?: GatewayHandoffOriginV1): Promise<BoardTaskV1> {
+    return this.mutate("board.handoff", taskId, origin === undefined ? handoff : { handoff, origin }, options, async (context) => {
+      const current = this.requireTask(context.task, taskId);
+      if (terminal(current)) throw new BoardConflictError("Terminal board task cannot receive a handoff");
+      if (this.isOrphaned(current, context.now)) throw new BoardClaimError("Expired active claim is orphaned and requires takeover");
+      this.assertMutableBy(current, context.principalId, context.actor.actorId, context.now);
+      const next = parseBoardTask({
+        ...current,
+        handoff: structuredClone(handoff),
+        ...(origin === undefined ? {} : { handoffOrigin: structuredClone(origin) }),
+        revision: current.revision + 1,
+        updatedAt: context.now,
+      });
+      this.replace(context.state, next);
+      context.emit("handoff.updated", next, { handoff: structuredClone(handoff) });
+      return next;
+    });
+  }
+
   async transition(taskId: string, input: {
     status?: BoardTaskV1["status"];
     phase?: BoardTaskV1["phase"];
     claimGeneration?: number;
     summary?: string;
     resourceUris?: string[];
+    handoff?: GatewayHandoffV1;
+    /** Internal server-derived provenance; never accepted from Gateway request input. */
+    handoffOrigin?: GatewayHandoffOriginV1;
   }, options: BoardMutationOptions): Promise<BoardTaskV1> {
     return this.mutate("board.transition", taskId, input, options, async (context) => {
       const current = this.requireTask(context.task, taskId);
@@ -434,11 +487,18 @@ export class BoardStore {
       this.assertTransition(current, status, phase);
       if (status === "active") this.assertDependenciesCompleted(context.state, current);
       let result: BoardTaskResultV1 | undefined;
+      const handoff = input.handoff ?? current.handoff;
       if (status === "completed") {
         if (current.completionPolicy.requireReview && current.phase !== "review") throw new BoardConflictError("Board task must enter the review phase before completion");
-        if (!input.summary?.trim()) throw new BoardConflictError("Completed board task requires a summary");
+        const summary = input.summary?.trim() || handoff?.summary?.trim();
+        if (!summary) throw new BoardConflictError("Completed board task requires a summary");
         if (current.completionPolicy.requireLinkedTodosCompleted) await this.assertLinkedTodosCompleted(current);
-        result = { summary: input.summary, resourceUris: input.resourceUris ?? [], completedAt: context.now };
+        result = {
+          summary,
+          resourceUris: input.resourceUris ?? handoff?.resourceUris ?? [],
+          ...(handoff === undefined ? {} : { handoff: structuredClone(handoff) }),
+          completedAt: context.now,
+        };
       }
       const next = parseBoardTask({
         ...current,
@@ -446,6 +506,10 @@ export class BoardStore {
         phase,
         revision: current.revision + 1,
         updatedAt: context.now,
+        ...(input.handoff === undefined ? {} : {
+          handoff: structuredClone(input.handoff),
+          ...(input.handoffOrigin === undefined ? {} : { handoffOrigin: structuredClone(input.handoffOrigin) }),
+        }),
         ...(result ? { result } : {}),
         ...(status === "cancelled" ? { cancelledAt: context.now } : {}),
       });
@@ -457,6 +521,7 @@ export class BoardStore {
         fromPhase: current.phase,
         toPhase: phase,
         ...(input.claimGeneration === undefined ? {} : { claimGeneration: input.claimGeneration }),
+        ...(handoff === undefined ? {} : { handoff: structuredClone(handoff) }),
       });
       return next;
     });

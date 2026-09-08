@@ -6,6 +6,8 @@ import { assertSessionScope, type SessionIdentityContext } from "../identity-sto
 import { principalKey } from "../principal.ts";
 import { buildGatewayDelegationPrompt } from "../prompt-delegation.ts";
 import { gatewayError, gatewayOk } from "../result.ts";
+import type { GatewayHandoffV1 } from "../handoff-contracts.ts";
+import { gatewayHandoffOriginForTransport } from "../handoff-record-contracts.ts";
 import type { SessionMemberV1 } from "../session-contracts.ts";
 import { SessionStore } from "../session-store.ts";
 import { GatewayTodoStore } from "../todo-store.ts";
@@ -13,7 +15,7 @@ import { workspaceIdForPath } from "../state-paths.ts";
 import type { GatewayPolicy } from "../policy.ts";
 import type { GatewayTeammateService } from "./teammate-service.ts";
 
-export type GatewaySessionAction = "create" | "get" | "list" | "join" | "renew" | "leave" | "close" | "start-pi";
+export type GatewaySessionAction = "create" | "get" | "list" | "join" | "renew" | "leave" | "handoff" | "close" | "start-pi";
 export interface GatewaySessionRequest { action: GatewaySessionAction; requestId?: string; [key: string]: unknown; }
 export interface GatewaySessionServiceOptions { store: SessionStore; todos: GatewayTodoStore; teammate: GatewayTeammateService; authMode: GatewayAuthMode; policy?: GatewayPolicy; }
 
@@ -66,8 +68,16 @@ export class GatewaySessionService {
         case "leave": {
           const context = identity(principal, request.memberId, this.authMode); const member = await this.store.setMemberStatus(id(request.sessionId, "sessionId"), id(request.leavingMemberId ?? request.memberId, "leavingMemberId"), "left", integer(request.expectedGeneration, "expectedGeneration"), mutation(request, context)); return result(principal, request, { member });
         }
+        case "handoff": {
+          const context = identity(principal, request.memberId, this.authMode);
+          const session = await this.store.handoff(id(request.sessionId, "sessionId"), request.handoff as GatewayHandoffV1, mutation(request, context), gatewayHandoffOriginForTransport(principal.transport));
+          return result(principal, request, { session });
+        }
         case "close": {
-          const context = identity(principal, request.memberId, this.authMode); const session = await this.store.close(id(request.sessionId, "sessionId"), mutation(request, context)); return result(principal, request, { session });
+          const context = identity(principal, request.memberId, this.authMode);
+          const handoff = request.handoff as GatewayHandoffV1 | undefined;
+          const session = await this.store.close(id(request.sessionId, "sessionId"), mutation(request, context), handoff, handoff === undefined ? undefined : gatewayHandoffOriginForTransport(principal.transport));
+          return result(principal, request, { session });
         }
         case "start-pi": {
           if (this.authMode === "open") throw new Error("auth.mode=open is read-only");
@@ -77,7 +87,11 @@ export class GatewaySessionService {
           if (todoIds.length > 0) assertSessionScope(state.session, state.members, context, "todo:read");
           const prompt = buildGatewayDelegationPrompt(id(request.prompt, "prompt"), await this.todos.list(sessionId), todoIds as string[]);
           const started = await this.teammate.start(principal, { prompt, agent: typeof request.agent === "string" ? request.agent : "general", workspacePath: state.session.workspacePath, workspaceId: workspaceIdForPath(state.session.workspacePath), objective: id(request.prompt, "prompt"), gatewaySessionId: sessionId, gatewayMemberId: context.memberId, requestId: request.requestId });
-          return started;
+          if (!started.ok || !started.data || typeof started.data !== "object" || Array.isArray(started.data)) return started;
+          const taskId = (started.data as { taskId?: unknown }).taskId;
+          return typeof taskId === "string" && taskId.length > 0
+            ? { ...started, data: { ...started.data, monitorHandle: taskId } }
+            : started;
         }
         default: throw new Error("Unsupported session action");
       }

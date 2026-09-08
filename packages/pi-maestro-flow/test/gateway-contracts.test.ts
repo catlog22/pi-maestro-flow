@@ -35,6 +35,14 @@ import { GatewayPolicy } from "../src/gateway/policy.ts";
 import { GatewayOwnerIdentityMismatchError, GatewayOwnerStore } from "../src/gateway/owner-store.ts";
 import { WorkspaceLeaseConflictError, WorkspaceRegistry } from "../src/gateway/workspace-registry.ts";
 import { Value } from "typebox/value";
+import { GATEWAY_HANDOFF_SCHEMA, GATEWAY_HANDOFF_WRITE_SCHEMA } from "../src/gateway/handoff-contracts.ts";
+import {
+  GATEWAY_HANDOFF_RECORD_SCHEMA,
+  boardHandoffProjection,
+  normalizeGatewayHandoffOrigin,
+} from "../src/gateway/handoff-record-contracts.ts";
+import { GATEWAY_SKILL_REQUEST_SCHEMA } from "../src/gateway/skill-contracts.ts";
+import { GATEWAY_MAESTRO_CLI_REQUEST_SCHEMA, GATEWAY_MAESTRO_RECEIPT_SCHEMA } from "../src/gateway/maestro-cli-contracts.ts";
 
 const ownerToken = "owner-token-123456";
 const now = 1_700_000_000_000;
@@ -75,7 +83,7 @@ test("Gateway contracts are versioned and strict", () => {
 });
 
 test("Board contracts are strict and enforce revision, claim, hash, cursor, and time invariants", () => {
-  assert.deepEqual(GATEWAY_TOOL_NAMES, ["workspace", "board", "host", "exec", "job", "file", "teammate", "session", "todo", "monitor"]);
+  assert.deepEqual(GATEWAY_TOOL_NAMES, ["workspace", "board", "host", "exec", "job", "file", "teammate", "session", "todo", "monitor", "handoff", "skill", "maestro_cli"]);
   const workspaceId = "a".repeat(64);
   const claim = { claimantId: "agent-1", principalId: "stdio:agent-1", actorType: "pi", generation: 1, claimedAt: now, leaseExpiresAt: now + 60_000 };
   const task = {
@@ -113,6 +121,36 @@ test("Board contracts are strict and enforce revision, claim, hash, cursor, and 
   assert.throws(() => parseBoardEnvelope({ ...envelope, events: [{ ...event, cursor: 2 }] }), /cursor invariant/);
   assert.throws(() => parseBoardEnvelope({ ...envelope, tasks: [{ ...task, revision: 2 }] }), /revision precedes/);
   assert.throws(() => parseBoardTask({ ...task, planBinding: { ...task.planBinding, sessionId: "session-2" } }), /bound Session/);
+});
+
+test("handoff, skill, and Maestro CLI contracts are bounded and backward-readable", () => {
+  const workspaceId = "a".repeat(64);
+  const digest = "b".repeat(64);
+  const legacyHandoff = { files: [{ path: "src/legacy.ts", value: "conditional", reason: "Only for legacy state" }] };
+  assert.equal(Value.Check(GATEWAY_HANDOFF_SCHEMA, legacyHandoff), true, "legacy conditional entries remain readable");
+  assert.equal(Value.Check(GATEWAY_HANDOFF_WRITE_SCHEMA, legacyHandoff), false, "new conditional writes require when");
+  assert.equal(Value.Check(GATEWAY_HANDOFF_WRITE_SCHEMA, { files: [{ ...legacyHandoff.files[0], when: "Reload before editing" }] }), true);
+  assert.deepEqual(normalizeGatewayHandoffOrigin(), { surface: "unknown", transport: "unknown", evidenceKind: "unknown" });
+  assert.deepEqual(["open", "active", "blocked", "completed", "cancelled"].map((status) => boardHandoffProjection(status as never)), ["incomplete", "incomplete", "incomplete", "completed", "cancelled"]);
+  assert.equal(Value.Check(GATEWAY_HANDOFF_RECORD_SCHEMA, {
+    version: 1, schema: "gateway-handoff/1", kind: "handoff", id: "record-1", workspaceId,
+    source: { authority: "board", entityId: "task-1", revision: 2 },
+    origin: { surface: "web", transport: "http", evidenceKind: "project" },
+    projection: "incomplete", lifecycleStatus: "active", resumable: true, governanceState: "operational",
+    createdAt: now, updatedAt: now, contentSha256: digest, content: { summary: "Resume safely" },
+  }), true);
+
+  const skillLoad = { action: "load", workspaceId, skillId: "workspace:review", resourceId: "reference-1" };
+  assert.equal(Value.Check(GATEWAY_SKILL_REQUEST_SCHEMA, skillLoad), true);
+  assert.equal(Value.Check(GATEWAY_SKILL_REQUEST_SCHEMA, { ...skillLoad, path: "C:/arbitrary" }), false);
+
+  const stage = { action: "stage", workspaceId, operationId: "stage-1", kind: "knowhow", title: "Bounded staging", content: "Candidate" };
+  assert.equal(Value.Check(GATEWAY_MAESTRO_CLI_REQUEST_SCHEMA, stage), true);
+  assert.equal(Value.Check(GATEWAY_MAESTRO_CLI_REQUEST_SCHEMA, { ...stage, argv: ["spec", "add"] }), false);
+  assert.equal(Value.Check(GATEWAY_MAESTRO_RECEIPT_SCHEMA, {
+    version: 1, operationId: "stage-1", workspaceId, action: "stage", state: "uncertain", payloadHash: digest,
+    createdAt: now, updatedAt: now,
+  }), true);
 });
 
 test("workspace registry normalizes, renews, and fences stale generations", async (t) => {

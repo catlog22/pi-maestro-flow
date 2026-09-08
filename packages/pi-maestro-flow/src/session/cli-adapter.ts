@@ -617,6 +617,8 @@ export interface DefaultRunCliOptions extends RunCliRunnerOptions {
   maxOutputBytes?: number;
   executable?: string;
   spawnProcess?: typeof crossSpawn;
+  /** Optional caller-owned environment. Omitted preserves the legacy inherited environment. */
+  environment?: NodeJS.ProcessEnv;
 }
 
 export async function defaultRunner(
@@ -642,7 +644,7 @@ export async function defaultRunner(
       // POSIX group isolation only: the CLI remains referenced and its group
       // is reclaimed on normal exit as well as abort/timeout/failure.
       detached: process.platform !== "win32",
-      env: {
+      env: options.environment ?? {
         ...process.env,
         MAESTRO_PI_PACKAGE_ROOT: process.env.MAESTRO_PI_PACKAGE_ROOT ?? advertisedPiPackageRoot(),
       },

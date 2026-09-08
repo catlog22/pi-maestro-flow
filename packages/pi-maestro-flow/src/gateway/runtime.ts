@@ -6,14 +6,14 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import type { GatewayConfig } from "./config.ts";
 import { loadGatewayConfig } from "./config.ts";
 import type { GatewayPrincipal, GatewayResult, GatewayToolName } from "./contracts.ts";
-import { GATEWAY_PROTOCOL_VERSION } from "./contracts.ts";
+import { GATEWAY_DEFAULT_LIMITS, GATEWAY_PROTOCOL_VERSION } from "./contracts.ts";
 import { GatewayCatalog } from "./catalog.ts";
 import { GatewayAuditSink } from "./audit.ts";
 import { GatewayPolicy, GatewayPolicyError } from "./policy.ts";
 import { GatewayPairingStore } from "./pairing-store.ts";
 import { gatewayError } from "./result.ts";
 import { validateGatewayValue } from "./validation.ts";
-import { gatewayJobsRoot, gatewaySessionsRoot, gatewayTasksRoot } from "./state-paths.ts";
+import { gatewayHandoffRoot, gatewayJobsRoot, gatewayMaestroReceiptRoot, gatewaySessionsRoot, gatewayTasksRoot } from "./state-paths.ts";
 import { WorkspaceRegistry } from "./workspace-registry.ts";
 import { ExecService } from "./services/exec-service.ts";
 import { FileService } from "./services/file-service.ts";
@@ -27,6 +27,14 @@ import { GatewayTodoService } from "./services/todo-service.ts";
 import { GatewayMonitorService } from "./services/monitor-service.ts";
 import { WorkspaceService } from "./services/workspace-service.ts";
 import { BoardService } from "./services/board-service.ts";
+import { GatewaySkillPolicy } from "./skill-policy.ts";
+import { GatewaySkillService } from "./services/skill-service.ts";
+import { GatewayHandoffRecordStore } from "./handoff-record-store.ts";
+import { GatewayHandoffService } from "./services/handoff-service.ts";
+import { GatewayMaestroReceiptStore } from "./maestro-cli-receipt-store.ts";
+import { GatewayMaestroCliService, type GatewayMaestroStageBinding } from "./services/maestro-cli-service.ts";
+import type { RunCliRunner } from "../session/cli-adapter.ts";
+import { GATEWAY_MCP_INSTRUCTIONS } from "./prompt-guidance.ts";
 
 export interface GatewayRuntimeOptions {
   config?: GatewayConfig;
@@ -36,11 +44,14 @@ export interface GatewayRuntimeOptions {
   teammatePort?: GatewayTeammatePort;
   pairingStore?: GatewayPairingStore;
   warningSink?: (message: string) => void;
+  maestroRunner?: RunCliRunner;
+  maestroEnvironment?: NodeJS.ProcessEnv;
+  resolveMaestroStageBinding?: (input: { workspacePath: string; workflowSessionId?: string; runId?: string }) => Promise<GatewayMaestroStageBinding | undefined>;
 }
 
 const READ_ACTIONS: Partial<Record<GatewayToolName, ReadonlySet<string>>> = {
   workspace: new Set(["list", "get"]),
-  board: new Set(["list", "get", "observe"]),
+  board: new Set(["list", "get", "search", "observe"]),
   host: new Set(["describe", "status", "test"]),
   job: new Set(["list", "status", "logs"]),
   file: new Set(["list", "stat", "read", "find", "grep", "realpath"]),
@@ -48,6 +59,9 @@ const READ_ACTIONS: Partial<Record<GatewayToolName, ReadonlySet<string>>> = {
   session: new Set(["get", "list", "events"]),
   todo: new Set(["list", "get"]),
   monitor: new Set(["list", "observe", "wait", "result"]),
+  handoff: new Set(["list", "get", "search"]),
+  skill: new Set(["list", "load"]),
+  maestro_cli: new Set(["search", "load"]),
 };
 
 function principalHasCapability(principal: GatewayPrincipal, capability: string, toolName: GatewayToolName): boolean {
@@ -79,6 +93,11 @@ export class GatewayRuntime {
   readonly session: GatewaySessionService;
   readonly todo: GatewayTodoService;
   readonly board: BoardService;
+  readonly handoffRecords: GatewayHandoffRecordStore;
+  readonly handoff: GatewayHandoffService;
+  readonly skill: GatewaySkillService;
+  readonly maestroReceipts: GatewayMaestroReceiptStore;
+  readonly maestroCli: GatewayMaestroCliService;
   readonly monitor: GatewayMonitorService;
   readonly catalog: GatewayCatalog;
   readonly audit: GatewayAuditSink;
@@ -166,6 +185,50 @@ export class GatewayRuntime {
       operationRetentionMs: config.retention.boardOperationsMs,
       eventRetentionMs: config.retention.boardEventsMs,
     });
+    this.handoffRecords = new GatewayHandoffRecordStore({
+      root: config.state.handoffRoot ?? (stateRoot ? join(stateRoot, "handoffs") : gatewayHandoffRoot(this.cwd)),
+      maxRecords: config.limits.maxHandoffRecords ?? GATEWAY_DEFAULT_LIMITS.maxHandoffRecords,
+    });
+    this.handoff = new GatewayHandoffService({
+      policy: this.policy,
+      sessions: this.sessionStore,
+      records: this.handoffRecords,
+      boardStoreForWorkspace: (workspacePath) => this.board.storeForWorkspace(workspacePath),
+      authMode: config.auth.mode,
+    });
+    this.skill = new GatewaySkillService(new GatewaySkillPolicy({
+      policy: this.policy,
+      security: config.security.skills,
+      baseCwd: this.cwd,
+      maxFiles: config.limits.maxSkillFiles ?? GATEWAY_DEFAULT_LIMITS.maxSkillFiles,
+      maxFileBytes: config.limits.maxSkillFileBytes ?? GATEWAY_DEFAULT_LIMITS.maxSkillFileBytes,
+      maxResponseBytes: config.limits.maxSkillResponseBytes ?? GATEWAY_DEFAULT_LIMITS.maxSkillResponseBytes,
+    }));
+    this.maestroReceipts = new GatewayMaestroReceiptStore(
+      config.state.maestroReceiptRoot ?? (stateRoot ? join(stateRoot, "maestro-receipts") : gatewayMaestroReceiptRoot(this.cwd)),
+    );
+    this.maestroCli = new GatewayMaestroCliService({
+      policy: this.policy,
+      security: config.security.maestroCli,
+      receipts: this.maestroReceipts,
+      maxOutputBytes: config.limits.maxMaestroOutputBytes ?? GATEWAY_DEFAULT_LIMITS.maxMaestroOutputBytes,
+      timeoutMs: config.limits.maxMaestroTimeoutMs ?? GATEWAY_DEFAULT_LIMITS.maxMaestroTimeoutMs,
+      ...(options.maestroRunner === undefined ? {} : { runner: options.maestroRunner }),
+      ...(options.maestroEnvironment === undefined ? {} : { environment: options.maestroEnvironment }),
+      ...(options.resolveMaestroStageBinding === undefined ? {} : { resolveStageBinding: options.resolveMaestroStageBinding }),
+      handoffs: {
+        search: async (principal, input) => {
+          const result = await this.handoff.handle(principal, { action: "search", workspaceId: input.workspaceId, query: input.query, limit: input.limit });
+          if (!result.ok) throw new Error(result.error?.message ?? "handoff search failed");
+          return (result.data as { records?: unknown[] } | undefined)?.records ?? [];
+        },
+        load: async (principal, input) => {
+          const result = await this.handoff.handle(principal, { action: "get", workspaceId: input.workspaceId, id: input.id });
+          if (!result.ok) throw new Error(result.error?.message ?? "handoff load failed");
+          return (result.data as { record?: unknown } | undefined)?.record;
+        },
+      },
+    });
     this.monitor = new GatewayMonitorService({ sessions: this.sessionStore, teammate: this.teammate, authMode: config.auth.mode });
     this.catalog = new GatewayCatalog({
       workspace: this.workspace,
@@ -178,6 +241,9 @@ export class GatewayRuntime {
       session: this.session,
       todo: this.todo,
       monitor: this.monitor,
+      handoff: this.handoff,
+      skill: this.skill,
+      maestroCli: this.maestroCli,
     });
     this.audit = new GatewayAuditSink(config.logging.auditFile);
   }
@@ -187,7 +253,7 @@ export class GatewayRuntime {
     return new GatewayRuntime(config, options);
   }
 
-  async call(name: string, args: unknown, principal: GatewayPrincipal): Promise<GatewayResult<unknown>> {
+  async call(name: string, args: unknown, principal: GatewayPrincipal, signal?: AbortSignal): Promise<GatewayResult<unknown>> {
     const startedAt = Date.now();
     const suppliedRequestId = args && typeof args === "object" && !Array.isArray(args) && typeof (args as Record<string, unknown>).requestId === "string"
       ? String((args as Record<string, unknown>).requestId)
@@ -214,7 +280,7 @@ export class GatewayRuntime {
           }
           this.policy.checkRequest(parsed);
           result = await this.policy.withConcurrency("request", async () => {
-            const serviceResult = await tool.handler(principal, parsed);
+            const serviceResult = await tool.handler(principal, parsed, signal);
             const attributed = { ...serviceResult, meta: { ...serviceResult.meta, principalId: principal.id } } as GatewayResult<unknown>;
             this.policy.checkOutput(attributed);
             return attributed;
@@ -243,7 +309,7 @@ export class GatewayRuntime {
   createMcpServer(principal: GatewayPrincipal): Server {
     const server = new Server(
       { name: "pi-maestro-gateway", version: String(GATEWAY_PROTOCOL_VERSION) },
-      { capabilities: { tools: {} }, instructions: "Discover an authorized workspace with workspace.list/get, inspect or claim work with board.list/claim, bind an active session, plan with session/todo, execute with teammate, and observe with monitor. Tool results are versioned GatewayResult envelopes." },
+      { capabilities: { tools: {} }, instructions: GATEWAY_MCP_INSTRUCTIONS },
     );
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
       tools: this.catalog.list().map((tool) => ({
@@ -254,8 +320,8 @@ export class GatewayRuntime {
         ...(tool.annotations === undefined ? {} : { annotations: tool.annotations }),
       })),
     }));
-    server.setRequestHandler(CallToolRequestSchema, async (request) => {
-      const result = await this.call(request.params.name, request.params.arguments ?? {}, principal);
+    server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+      const result = await this.call(request.params.name, request.params.arguments ?? {}, principal, extra.signal);
       return {
         content: [{ type: "text", text: JSON.stringify(result) }],
         structuredContent: result as unknown as Record<string, unknown>,

@@ -12,7 +12,7 @@ import {
   parseGatewayConfigDocument,
   writeGatewayConfigPatch,
 } from "../src/gateway/config.ts";
-import { createGatewayStatePaths, gatewayBoardPath, gatewayBoardRoot } from "../src/gateway/state-paths.ts";
+import { createGatewayStatePaths, gatewayBoardPath, gatewayBoardRoot, gatewayHandoffRoot, gatewayMaestroReceiptRoot } from "../src/gateway/state-paths.ts";
 
 const yaml = `# keep this header\nserver:\n    host: "127.0.0.1"\n    port: 9191\nauth:\n    mode: bearer\n    token: "secret"\nsecurity:\n    commands:\n        default: confirm\n        allow:\n            - "^pi\\\\b"\n        confirm: []\n        deny: []\n        auto_allow_readonly: null\n    files:\n        max_read_bytes: 2048\n        max_patch_files: 3\n        allow: []\n        confirm: []\n        deny: []\nworkspaces:\n    - path: "."\n      ttl_seconds: 60\ntransport:\n    stdio:\n        enabled: true\nlimits:\n    max_request_bytes: 2048\nlogging:\n    level: info\nstate:\n    root_dir: ".pi/gateway/v1"\nretention:\n    jobs: 3600\nunknown_section:\n    keep: true\n    comment: "must survive"\n`;
 
@@ -43,6 +43,22 @@ test("Gateway config normalizes legacy snake-case sections and rejects invalid k
   assert.equal(normalizeGatewayConfig({ auth: { mode: "open", allowOpenMutations: true } }).auth.allowOpenMutations, true);
   assert.throws(() => normalizeGatewayConfig({ auth: { mode: "open", allow_open_mutations: "yes" } }), /allowOpenMutations must be boolean/);
   assert.equal(normalizeGatewayConfig({ state: { sessions_root: ".pi/gateway/v1/sessions" } }).state.sessionsRoot, ".pi/gateway/v1/sessions");
+  const governed = normalizeGatewayConfig({
+    auth: { mode: "bearer", token: "secret" },
+    security: {
+      skills: { enabled: true, workspace_roots: [".pi/skills"], external_skill_roots: ["D:/approved-skills"], external_reference_roots: ["D:/approved-references"] },
+      maestro_cli: { enabled: true, executable: "maestro", minimum_version: "2.0.0", allow_search: true, allow_load: true, allow_stage: false },
+    },
+    limits: { max_handoff_records: 32, max_skill_files: 16, max_skill_file_bytes: 2048, max_skill_response_bytes: 4096, max_maestro_output_bytes: 8192, max_maestro_timeout_ms: 1000 },
+    state: { handoff_root: ".pi/gateway/v1/handoffs", maestro_receipt_root: ".pi/gateway/v1/maestro-receipts" },
+  });
+  assert.deepEqual(governed.security.skills.externalSkillRoots, ["D:/approved-skills"]);
+  assert.equal(governed.security.maestroCli.allowStage, false);
+  assert.equal(governed.limits.maxSkillFileBytes, 2048);
+  assert.equal(governed.state.maestroReceiptRoot, ".pi/gateway/v1/maestro-receipts");
+  assert.throws(() => normalizeGatewayConfig({ security: { skills: { enabled: true } } }), /require authenticated HTTP/);
+  assert.throws(() => normalizeGatewayConfig({ auth: { mode: "bearer", token: "secret" }, security: { skills: { typo: true } } }), /not a recognized field/);
+  assert.throws(() => normalizeGatewayConfig({ limits: { max_skill_files: 999999 } }), /maxSkillFiles/);
   const boardConfig = normalizeGatewayConfig({
     state: { board_root: ".pi/gateway/v1/board" },
     limits: { max_board_tasks: 32, max_board_operations: 64, max_board_events: 128 },
@@ -138,6 +154,8 @@ test("default config is canonical and patch application keeps omitted values", (
   const paths = createGatewayStatePaths(process.cwd(), tmpdir());
   assert.equal(paths.boardRoot, gatewayBoardRoot(process.cwd()));
   assert.equal(paths.boardPath, gatewayBoardPath(process.cwd()));
+  assert.equal(paths.handoffRoot, gatewayHandoffRoot(process.cwd()));
+  assert.equal(paths.maestroReceiptRoot, gatewayMaestroReceiptRoot(process.cwd()));
   const patched = applyGatewayConfigPatch(base, { server: { port: 9999 } as never });
   assert.equal(patched.server.port, 9999);
   assert.equal(patched.server.host, base.server.host);

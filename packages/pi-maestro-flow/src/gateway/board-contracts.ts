@@ -7,6 +7,8 @@ import {
   GATEWAY_STATE_VERSION,
   GATEWAY_WORKSPACE_ID_PATTERN,
 } from "./contracts.ts";
+import { GATEWAY_HANDOFF_SCHEMA } from "./handoff-contracts.ts";
+import { GATEWAY_HANDOFF_ORIGIN_SCHEMA } from "./handoff-record-contracts.ts";
 
 export const BOARD_TASK_STATUSES = ["open", "active", "blocked", "completed", "cancelled"] as const;
 export const BOARD_TASK_PHASES = ["intake", "planning", "execution", "review"] as const;
@@ -16,7 +18,7 @@ export const BOARD_PRIORITIES = ["low", "normal", "high", "urgent"] as const;
 export const BOARD_EVENT_TYPES = [
   "task.created", "task.updated", "task.claimed", "task.claim.renewed", "task.released",
   "task.taken_over", "endpoint.attached", "endpoint.detached", "session.bound", "plan.linked",
-  "status.changed", "task.completed", "task.cancelled",
+  "handoff.updated", "status.changed", "task.completed", "task.cancelled",
 ] as const;
 
 const strict = { additionalProperties: false } as const;
@@ -81,9 +83,11 @@ export type BoardCompletionPolicyV1 = Static<typeof BOARD_COMPLETION_POLICY_SCHE
 export const BOARD_TASK_RESULT_SCHEMA = Type.Object({
   summary: Type.String({ minLength: 1, maxLength: 16 * 1024 }),
   resourceUris: Type.Array(Type.String({ minLength: 1, maxLength: 2048 }), { maxItems: 16, uniqueItems: true }),
+  handoff: Type.Optional(GATEWAY_HANDOFF_SCHEMA),
   completedAt: timestamp,
 }, strict);
 export type BoardTaskResultV1 = Static<typeof BOARD_TASK_RESULT_SCHEMA>;
+export type { GatewayHandoffV1 } from "./handoff-contracts.ts";
 
 export const BOARD_TASK_SCHEMA = Type.Object({
   version: Type.Literal(GATEWAY_STATE_VERSION),
@@ -105,6 +109,10 @@ export const BOARD_TASK_SCHEMA = Type.Object({
   endpointBindings: Type.Optional(Type.Array(BOARD_ENDPOINT_BINDING_SCHEMA, { maxItems: 256 })),
   sessionBinding: Type.Optional(BOARD_SESSION_BINDING_SCHEMA),
   planBinding: Type.Optional(BOARD_PLAN_BINDING_SCHEMA),
+  /** Current resumable handoff; completion snapshots it into result.handoff. */
+  handoff: Type.Optional(GATEWAY_HANDOFF_SCHEMA),
+  /** Server-derived on new writes; absent on legacy records and normalized as unknown. */
+  handoffOrigin: Type.Optional(GATEWAY_HANDOFF_ORIGIN_SCHEMA),
   completionPolicy: BOARD_COMPLETION_POLICY_SCHEMA,
   result: Type.Optional(BOARD_TASK_RESULT_SCHEMA),
   createdAt: timestamp,
@@ -143,6 +151,7 @@ export const BOARD_EVENT_SCHEMA = Type.Object({
   endpointId: Type.Optional(id),
   sessionId: Type.Optional(id),
   todoIds: Type.Optional(Type.Array(id, { maxItems: 256, uniqueItems: true })),
+  handoff: Type.Optional(GATEWAY_HANDOFF_SCHEMA),
   fromStatus: Type.Optional(state(BOARD_TASK_STATUSES)),
   toStatus: Type.Optional(state(BOARD_TASK_STATUSES)),
   fromPhase: Type.Optional(state(BOARD_TASK_PHASES)),

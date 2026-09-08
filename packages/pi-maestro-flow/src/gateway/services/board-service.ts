@@ -3,6 +3,8 @@ import { randomUUID } from "node:crypto";
 import type { GatewayPrincipal, GatewayResult } from "../contracts.ts";
 import { principalHasScope, principalKey, isAuthenticatedPrincipal } from "../principal.ts";
 import type { GatewayPolicy } from "../policy.ts";
+import type { GatewayHandoffV1 } from "../handoff-contracts.ts";
+import { gatewayHandoffOriginForTransport } from "../handoff-record-contracts.ts";
 import { gatewayError, gatewayOk } from "../result.ts";
 import type { SessionStore } from "../session-store.ts";
 import type { GatewayTodoStore } from "../todo-store.ts";
@@ -21,7 +23,7 @@ import type { BoardCompletionPolicyV1, BoardEndpointBindingV1, BoardTaskV1 } fro
 
 export type GatewayBoardAction =
   | "create" | "list" | "get" | "update" | "claim" | "renew" | "release"
-  | "takeover" | "attach-endpoint" | "detach-endpoint" | "bind-session" | "link-plan" | "transition" | "observe";
+  | "takeover" | "attach-endpoint" | "detach-endpoint" | "bind-session" | "link-plan" | "handoff" | "transition" | "search" | "observe";
 
 export interface GatewayBoardRequest {
   action: GatewayBoardAction;
@@ -105,6 +107,15 @@ export class BoardService {
         const task = await store.get(text(request.taskId, "taskId"));
         if (!task) throw new HiddenBoardResourceError();
         return gatewayOk({ task, orphaned: store.isOrphaned(task) }, resultOptions);
+      }
+      if (request.action === "search") {
+        const tasks = await store.search({
+          query: text(request.query, "query"),
+          ...(request.status === undefined ? {} : { status: request.status as BoardTaskV1["status"] }),
+          ...(request.phase === undefined ? {} : { phase: request.phase as BoardTaskV1["phase"] }),
+          ...(request.limit === undefined ? {} : { limit: integer(request.limit, "limit") }),
+        });
+        return gatewayOk({ workspaceId: store.workspaceId, tasks }, resultOptions);
       }
       if (request.action === "observe") {
         const page = await store.observe(optionalInteger(request.cursor, "cursor") ?? 0, optionalInteger(request.limit, "limit") ?? 128);
@@ -203,6 +214,12 @@ export class BoardService {
           }, mutation);
           break;
         }
+        case "handoff": {
+          const taskId = text(request.taskId, "taskId");
+          await this.assertMutationVisible(store, taskId, principal, "handoff");
+          task = await store.handoff(taskId, request.handoff as GatewayHandoffV1, mutation, gatewayHandoffOriginForTransport(principal.transport));
+          break;
+        }
         case "transition": {
           const taskId = text(request.taskId, "taskId");
           await this.assertMutationVisible(store, taskId, principal, "transition");
@@ -212,6 +229,10 @@ export class BoardService {
             ...(request.claimGeneration === undefined ? {} : { claimGeneration: integer(request.claimGeneration, "claimGeneration") }),
             ...(request.summary === undefined ? {} : { summary: text(request.summary, "summary") }),
             ...(request.resourceUris === undefined ? {} : { resourceUris: stringArray(request.resourceUris, "resourceUris") }),
+            ...(request.handoff === undefined ? {} : {
+              handoff: request.handoff as GatewayHandoffV1,
+              handoffOrigin: gatewayHandoffOriginForTransport(principal.transport),
+            }),
           }, mutation);
           break;
         }
@@ -238,21 +259,12 @@ export class BoardService {
     };
   }
 
-  private async resolveStore(principal: GatewayPrincipal, request: GatewayBoardRequest): Promise<BoardStore> {
-    const references = [request.workspaceId, request.workspace, request.workspacePath, request.path]
-      .filter((value): value is string => typeof value === "string" && value.trim() !== "")
-      .map((value) => value.trim());
-    if (references.length === 0) throw new Error("workspaceId or workspace path is required");
-    const primary = await this.options.policy.authorizeWorkspace(principal, references[0]!);
-    if (!primary.allowed || !primary.workspacePath) throw new HiddenBoardResourceError();
-    for (const reference of references.slice(1)) {
-      const decision = await this.options.policy.authorizeWorkspace(principal, reference);
-      if (!decision.allowed || decision.workspacePath !== primary.workspacePath) throw new HiddenBoardResourceError();
-    }
-    let store = this.stores.get(primary.workspacePath);
+  /** Reuse the authoritative per-workspace store for derived read-model projection. */
+  storeForWorkspace(workspacePath: string): BoardStore {
+    let store = this.stores.get(workspacePath);
     if (!store) {
       store = new BoardStore({
-        workspacePath: primary.workspacePath,
+        workspacePath,
         sessionStore: this.options.sessions,
         todoStore: this.options.todos,
         ...(this.options.boardRoot === undefined ? {} : { boardRoot: this.options.boardRoot }),
@@ -265,16 +277,30 @@ export class BoardService {
         ...(this.options.eventRetentionMs === undefined ? {} : { eventRetentionMs: this.options.eventRetentionMs }),
         ...(this.options.now === undefined ? {} : { now: this.options.now }),
       });
-      this.stores.set(primary.workspacePath, store);
+      this.stores.set(workspacePath, store);
     }
     return store;
+  }
+
+  private async resolveStore(principal: GatewayPrincipal, request: GatewayBoardRequest): Promise<BoardStore> {
+    const references = [request.workspaceId, request.workspace, request.workspacePath, request.path]
+      .filter((value): value is string => typeof value === "string" && value.trim() !== "")
+      .map((value) => value.trim());
+    if (references.length === 0) throw new Error("workspaceId or workspace path is required");
+    const primary = await this.options.policy.authorizeWorkspace(principal, references[0]!);
+    if (!primary.allowed || !primary.workspacePath) throw new HiddenBoardResourceError();
+    for (const reference of references.slice(1)) {
+      const decision = await this.options.policy.authorizeWorkspace(principal, reference);
+      if (!decision.allowed || decision.workspacePath !== primary.workspacePath) throw new HiddenBoardResourceError();
+    }
+    return this.storeForWorkspace(primary.workspacePath);
   }
 
   private async assertMutationVisible(
     store: BoardStore,
     taskId: string,
     principal: GatewayPrincipal,
-    mode: "update" | "claim-owner" | "transition",
+    mode: "update" | "claim-owner" | "transition" | "handoff",
   ): Promise<void> {
     const task = await store.get(taskId);
     if (!task) throw new HiddenBoardResourceError();
@@ -283,7 +309,7 @@ export class BoardService {
     const administrator = principalHasScope(principal, "board.admin");
     const allowed = mode === "claim-owner"
       ? task.claim?.principalId === principalId
-      : mode === "update"
+      : mode === "update" || mode === "handoff"
         ? task.createdBy.actorId === actorId || task.claim?.principalId === principalId
         : task.claim ? task.claim.principalId === principalId || administrator : task.createdBy.actorId === actorId || administrator;
     if (!allowed) throw new HiddenBoardResourceError();

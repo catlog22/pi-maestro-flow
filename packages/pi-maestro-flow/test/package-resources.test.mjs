@@ -203,6 +203,19 @@ test("package contains the canonical workflow skill set", () => {
   assert.equal(existsSync(join(root, ".pi", "skills", "swarm", "SKILL.md")), false, "native swarm Skill must not be packaged");
 });
 
+test("knowledge capture skills are model-invocable and the system prompt introduces Know-how", () => {
+  const knowhowSkill = readFileSync(join(root, ".pi", "skills", "maestro-knowhow", "SKILL.md"), "utf8");
+  const specSkill = readFileSync(join(root, ".pi", "skills", "maestro-spec", "SKILL.md"), "utf8");
+  const systemPrompt = readFileSync(join(root, ".pi", "SYSTEM.md"), "utf8");
+
+  assert.match(knowhowSkill, /disable-model-invocation:\s*false/);
+  assert.match(specSkill, /disable-model-invocation:\s*false/);
+  assert.match(systemPrompt, /`maestro-knowhow` captures reusable knowledge in `\.workflow\/knowhow\/`/);
+  assert.match(systemPrompt, /Automatically load and follow it/);
+  assert.match(systemPrompt, /use `maestro-spec` instead for explicit project constraints/);
+  assert.doesNotMatch(systemPrompt, /docs\/knowhow\//);
+});
+
 test("package publishes optional skills from the repository root", () => {
   assert.equal(
     existsSync(join(root, "optional", "skills", "scholar-writing", "SKILL.md")),

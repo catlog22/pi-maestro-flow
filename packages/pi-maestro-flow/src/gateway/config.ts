@@ -55,10 +55,26 @@ export interface GatewayTrustedFullAccessConfig {
   enabled: boolean;
   workspaceRoots: string[];
 }
+export interface GatewaySkillSecurityConfig {
+  enabled: boolean;
+  workspaceRoots: string[];
+  externalSkillRoots: string[];
+  externalReferenceRoots: string[];
+}
+export interface GatewayMaestroCliSecurityConfig {
+  enabled: boolean;
+  executable?: string;
+  minimumVersion?: string;
+  allowSearch: boolean;
+  allowLoad: boolean;
+  allowStage: boolean;
+}
 export interface GatewaySecurityConfig {
   commands: GatewayCommandSecurityConfig;
   files: GatewayFileSecurityConfig;
   trustedFullAccess: GatewayTrustedFullAccessConfig;
+  skills: GatewaySkillSecurityConfig;
+  maestroCli: GatewayMaestroCliSecurityConfig;
 }
 export interface GatewayWorkspaceConfig {
   path: string;
@@ -96,6 +112,12 @@ export interface GatewayLimitsConfig {
   maxBoardTasks?: number;
   maxBoardOperations?: number;
   maxBoardEvents?: number;
+  maxHandoffRecords?: number;
+  maxSkillFiles?: number;
+  maxSkillFileBytes?: number;
+  maxSkillResponseBytes?: number;
+  maxMaestroOutputBytes?: number;
+  maxMaestroTimeoutMs?: number;
 }
 export interface GatewayLoggingConfig {
   level: GatewayLogLevel;
@@ -108,6 +130,8 @@ export interface GatewayStateConfig {
   workspaceRegistryPath?: string;
   sessionsRoot?: string;
   boardRoot?: string;
+  handoffRoot?: string;
+  maestroReceiptRoot?: string;
   pairingPath?: string;
   serviceManifestPath?: string;
 }
@@ -169,6 +193,8 @@ const DEFAULT_SECURITY: GatewaySecurityConfig = {
   commands: { default: "allow", allow: [], confirm: [], deny: [], autoAllowReadonly: null },
   files: { maxReadBytes: GATEWAY_DEFAULT_LIMITS.maxFileReadBytes, maxPatchFiles: GATEWAY_DEFAULT_LIMITS.maxPatchFiles, allow: [], confirm: [], deny: [] },
   trustedFullAccess: { enabled: false, workspaceRoots: [] },
+  skills: { enabled: false, workspaceRoots: [], externalSkillRoots: [], externalReferenceRoots: [] },
+  maestroCli: { enabled: false, allowSearch: false, allowLoad: false, allowStage: false },
 };
 const DEFAULT_TRANSPORT: GatewayTransportConfig = {
   stdio: { enabled: true },
@@ -308,7 +334,7 @@ export function normalizeGatewayConfig(value: unknown): GatewayConfig {
   };
 
   const securityRaw = optionalObject(root.security, "security");
-  knownKeys(securityRaw, ["commands", "files", "trustedFullAccess", "trusted_full_access"], "security");
+  knownKeys(securityRaw, ["commands", "files", "trustedFullAccess", "trusted_full_access", "skills", "maestroCli", "maestro_cli"], "security");
   const commandsRaw = optionalObject(securityRaw.commands, "security.commands");
   knownKeys(commandsRaw, ["default", "allow", "confirm", "deny", "auto_allow_readonly", "autoAllowReadonly"], "security.commands");
   const commandDefault = commandsRaw.default === undefined ? DEFAULT_SECURITY.commands.default : commandsRaw.default;
@@ -338,6 +364,25 @@ export function normalizeGatewayConfig(value: unknown): GatewayConfig {
     workspaceRoots: stringList(trustedRaw.workspaceRoots ?? trustedRaw.workspace_roots, "security.trustedFullAccess.workspaceRoots", 64),
   };
   if (trustedFullAccess.enabled && authMode === "open") throw new GatewayConfigValidationError("security.trustedFullAccess requires authenticated HTTP (auth.mode cannot be open)");
+  const skillsRaw = optionalObject(securityRaw.skills, "security.skills");
+  knownKeys(skillsRaw, ["enabled", "workspaceRoots", "workspace_roots", "externalSkillRoots", "external_skill_roots", "externalReferenceRoots", "external_reference_roots"], "security.skills");
+  const skills: GatewaySkillSecurityConfig = {
+    enabled: bool(skillsRaw.enabled, "security.skills.enabled", DEFAULT_SECURITY.skills.enabled),
+    workspaceRoots: stringList(skillsRaw.workspaceRoots ?? skillsRaw.workspace_roots, "security.skills.workspaceRoots", 64),
+    externalSkillRoots: stringList(skillsRaw.externalSkillRoots ?? skillsRaw.external_skill_roots, "security.skills.externalSkillRoots", 64),
+    externalReferenceRoots: stringList(skillsRaw.externalReferenceRoots ?? skillsRaw.external_reference_roots, "security.skills.externalReferenceRoots", 64),
+  };
+  const maestroRaw = optionalObject(securityRaw.maestroCli ?? securityRaw.maestro_cli, "security.maestroCli");
+  knownKeys(maestroRaw, ["enabled", "executable", "minimumVersion", "minimum_version", "allowSearch", "allow_search", "allowLoad", "allow_load", "allowStage", "allow_stage"], "security.maestroCli");
+  const maestroCli: GatewayMaestroCliSecurityConfig = {
+    enabled: bool(maestroRaw.enabled, "security.maestroCli.enabled", DEFAULT_SECURITY.maestroCli.enabled),
+    ...(optionalString(maestroRaw.executable, "security.maestroCli.executable", 4096) === undefined ? {} : { executable: optionalString(maestroRaw.executable, "security.maestroCli.executable", 4096) }),
+    ...(optionalString(maestroRaw.minimumVersion ?? maestroRaw.minimum_version, "security.maestroCli.minimumVersion", 128) === undefined ? {} : { minimumVersion: optionalString(maestroRaw.minimumVersion ?? maestroRaw.minimum_version, "security.maestroCli.minimumVersion", 128) }),
+    allowSearch: bool(maestroRaw.allowSearch ?? maestroRaw.allow_search, "security.maestroCli.allowSearch", DEFAULT_SECURITY.maestroCli.allowSearch),
+    allowLoad: bool(maestroRaw.allowLoad ?? maestroRaw.allow_load, "security.maestroCli.allowLoad", DEFAULT_SECURITY.maestroCli.allowLoad),
+    allowStage: bool(maestroRaw.allowStage ?? maestroRaw.allow_stage, "security.maestroCli.allowStage", DEFAULT_SECURITY.maestroCli.allowStage),
+  };
+  if ((skills.enabled || maestroCli.enabled) && authMode === "open") throw new GatewayConfigValidationError("Gateway skill and Maestro CLI surfaces require authenticated HTTP (auth.mode cannot be open)");
 
   const workspacesRaw = root.workspaces;
   if (workspacesRaw !== undefined && !Array.isArray(workspacesRaw) && (typeof workspacesRaw !== "object" || workspacesRaw === null)) throw new GatewayConfigValidationError("workspaces must be a list or mapping");
@@ -427,6 +472,12 @@ export function normalizeGatewayConfig(value: unknown): GatewayConfig {
     maxBoardTasks: boundedLimit(pick(limitsRaw, "maxBoardTasks", "max_board_tasks"), "limits.maxBoardTasks", GATEWAY_DEFAULT_LIMITS.maxBoardTasks, GATEWAY_HARD_LIMITS.maxBoardTasks),
     maxBoardOperations: boundedLimit(pick(limitsRaw, "maxBoardOperations", "max_board_operations"), "limits.maxBoardOperations", GATEWAY_DEFAULT_LIMITS.maxBoardOperations, GATEWAY_HARD_LIMITS.maxBoardOperations),
     maxBoardEvents: boundedLimit(pick(limitsRaw, "maxBoardEvents", "max_board_events"), "limits.maxBoardEvents", GATEWAY_DEFAULT_LIMITS.maxBoardEvents, GATEWAY_HARD_LIMITS.maxBoardEvents),
+    maxHandoffRecords: boundedLimit(pick(limitsRaw, "maxHandoffRecords", "max_handoff_records"), "limits.maxHandoffRecords", GATEWAY_DEFAULT_LIMITS.maxHandoffRecords, GATEWAY_HARD_LIMITS.maxHandoffRecords),
+    maxSkillFiles: boundedLimit(pick(limitsRaw, "maxSkillFiles", "max_skill_files"), "limits.maxSkillFiles", GATEWAY_DEFAULT_LIMITS.maxSkillFiles, GATEWAY_HARD_LIMITS.maxSkillFiles),
+    maxSkillFileBytes: boundedLimit(pick(limitsRaw, "maxSkillFileBytes", "max_skill_file_bytes"), "limits.maxSkillFileBytes", GATEWAY_DEFAULT_LIMITS.maxSkillFileBytes, GATEWAY_HARD_LIMITS.maxSkillFileBytes),
+    maxSkillResponseBytes: boundedLimit(pick(limitsRaw, "maxSkillResponseBytes", "max_skill_response_bytes"), "limits.maxSkillResponseBytes", GATEWAY_DEFAULT_LIMITS.maxSkillResponseBytes, GATEWAY_HARD_LIMITS.maxSkillResponseBytes),
+    maxMaestroOutputBytes: boundedLimit(pick(limitsRaw, "maxMaestroOutputBytes", "max_maestro_output_bytes"), "limits.maxMaestroOutputBytes", GATEWAY_DEFAULT_LIMITS.maxMaestroOutputBytes, GATEWAY_HARD_LIMITS.maxMaestroOutputBytes),
+    maxMaestroTimeoutMs: boundedLimit(pick(limitsRaw, "maxMaestroTimeoutMs", "max_maestro_timeout_ms"), "limits.maxMaestroTimeoutMs", GATEWAY_DEFAULT_LIMITS.maxMaestroTimeoutMs, GATEWAY_HARD_LIMITS.maxMaestroTimeoutMs),
   };
 
   const loggingRaw = optionalObject(root.logging, "logging");
@@ -439,13 +490,15 @@ export function normalizeGatewayConfig(value: unknown): GatewayConfig {
     ...(optionalString(loggingRaw.auditFile ?? loggingRaw.audit_file, "logging.auditFile", 4096) === undefined ? {} : { auditFile: optionalString(loggingRaw.auditFile ?? loggingRaw.audit_file, "logging.auditFile", 4096) }),
   };
   const stateRaw = optionalObject(root.state, "state");
-  knownKeys(stateRaw, ["rootDir", "root_dir", "ownerPath", "owner_path", "workspaceRegistryPath", "workspace_registry_path", "sessionsRoot", "sessions_root", "boardRoot", "board_root", "pairingPath", "pairing_path", "serviceManifestPath", "service_manifest_path", "retention"], "state");
+  knownKeys(stateRaw, ["rootDir", "root_dir", "ownerPath", "owner_path", "workspaceRegistryPath", "workspace_registry_path", "sessionsRoot", "sessions_root", "boardRoot", "board_root", "handoffRoot", "handoff_root", "maestroReceiptRoot", "maestro_receipt_root", "pairingPath", "pairing_path", "serviceManifestPath", "service_manifest_path", "retention"], "state");
   const state: GatewayStateConfig = {
     ...(optionalString(stateRaw.rootDir ?? stateRaw.root_dir, "state.rootDir", 4096) === undefined ? {} : { rootDir: optionalString(stateRaw.rootDir ?? stateRaw.root_dir, "state.rootDir", 4096) }),
     ...(optionalString(stateRaw.ownerPath ?? stateRaw.owner_path, "state.ownerPath", 4096) === undefined ? {} : { ownerPath: optionalString(stateRaw.ownerPath ?? stateRaw.owner_path, "state.ownerPath", 4096) }),
     ...(optionalString(stateRaw.workspaceRegistryPath ?? stateRaw.workspace_registry_path, "state.workspaceRegistryPath", 4096) === undefined ? {} : { workspaceRegistryPath: optionalString(stateRaw.workspaceRegistryPath ?? stateRaw.workspace_registry_path, "state.workspaceRegistryPath", 4096) }),
     ...(optionalString(stateRaw.sessionsRoot ?? stateRaw.sessions_root, "state.sessionsRoot", 4096) === undefined ? {} : { sessionsRoot: optionalString(stateRaw.sessionsRoot ?? stateRaw.sessions_root, "state.sessionsRoot", 4096) }),
     ...(optionalString(stateRaw.boardRoot ?? stateRaw.board_root, "state.boardRoot", 4096) === undefined ? {} : { boardRoot: optionalString(stateRaw.boardRoot ?? stateRaw.board_root, "state.boardRoot", 4096) }),
+    ...(optionalString(stateRaw.handoffRoot ?? stateRaw.handoff_root, "state.handoffRoot", 4096) === undefined ? {} : { handoffRoot: optionalString(stateRaw.handoffRoot ?? stateRaw.handoff_root, "state.handoffRoot", 4096) }),
+    ...(optionalString(stateRaw.maestroReceiptRoot ?? stateRaw.maestro_receipt_root, "state.maestroReceiptRoot", 4096) === undefined ? {} : { maestroReceiptRoot: optionalString(stateRaw.maestroReceiptRoot ?? stateRaw.maestro_receipt_root, "state.maestroReceiptRoot", 4096) }),
     ...(optionalString(stateRaw.pairingPath ?? stateRaw.pairing_path, "state.pairingPath", 4096) === undefined ? {} : { pairingPath: optionalString(stateRaw.pairingPath ?? stateRaw.pairing_path, "state.pairingPath", 4096) }),
     ...(optionalString(stateRaw.serviceManifestPath ?? stateRaw.service_manifest_path, "state.serviceManifestPath", 4096) === undefined ? {} : { serviceManifestPath: optionalString(stateRaw.serviceManifestPath ?? stateRaw.service_manifest_path, "state.serviceManifestPath", 4096) }),
   };
@@ -464,7 +517,7 @@ export function normalizeGatewayConfig(value: unknown): GatewayConfig {
     version: GATEWAY_STATE_VERSION,
     server,
     auth,
-    security: { commands, files, trustedFullAccess },
+    security: { commands, files, trustedFullAccess, skills, maestroCli },
     workspaces,
     transport,
     limits,

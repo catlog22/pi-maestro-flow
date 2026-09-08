@@ -59,7 +59,7 @@ test("bearer HTTP sessions authenticate and share the workspace-first catalog", 
   });
   await client.connect(transport);
   const listed = await client.listTools();
-  assert.deepEqual(listed.tools.map((tool) => tool.name), ["workspace", "board", "host", "exec", "job", "file", "teammate", "session", "todo", "monitor"]);
+  assert.deepEqual(listed.tools.map((tool) => tool.name), ["workspace", "board", "host", "exec", "job", "file", "teammate", "session", "todo", "monitor", "handoff", "skill", "maestro_cli"]);
   for (const tool of listed.tools) {
     assert.equal(tool.outputSchema?.type, "object");
     assert.equal(typeof tool.annotations?.readOnlyHint, "boolean");
@@ -141,7 +141,7 @@ test("health/readiness expose no secrets and persisted pairing tokens authentica
   const client = new Client({ name: "gateway-pairing-test", version: "1" });
   const transport = new StreamableHTTPClientTransport(new URL(server.url), { requestInit: { headers: { authorization: `Bearer ${issued.token}` } } });
   await client.connect(transport);
-  assert.equal((await client.listTools()).tools.length, 10);
+  assert.equal((await client.listTools()).tools.length, 13);
   await client.close();
 });
 
@@ -212,6 +212,6 @@ test("OAuth metadata, password authorization callback, token exchange, and MCP a
     requestInit: { headers: { authorization: `Bearer ${accessToken}` } },
   });
   await client.connect(transport);
-  assert.equal((await client.listTools()).tools.length, 10);
+  assert.equal((await client.listTools()).tools.length, 13);
   await client.close();
 });

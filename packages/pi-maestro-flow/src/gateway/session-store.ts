@@ -5,6 +5,8 @@ import { createRequire } from "node:module";
 import { dirname } from "node:path";
 import type { GatewayAuthMode } from "./config.ts";
 import { GATEWAY_STATE_VERSION } from "./contracts.ts";
+import type { GatewayHandoffV1 } from "./handoff-contracts.ts";
+import type { GatewayHandoffOriginV1 } from "./handoff-record-contracts.ts";
 import { assertSessionScope, defaultSessionCapabilities, type SessionIdentityContext, type SessionScope } from "./identity-store.ts";
 import { principalKey } from "./principal.ts";
 import { createSessionEvent } from "./session-events.ts";
@@ -175,10 +177,32 @@ export class SessionStore {
     });
   }
 
+  async handoff(sessionId: string, handoff: GatewayHandoffV1, options: AuthorizedSessionMutationOptions, origin?: GatewayHandoffOriginV1): Promise<CollaborativeSessionV1> {
+    return this.mutateAuthorized(sessionId, "session.handoff", origin === undefined ? handoff : { handoff, origin }, options, "session:write", ({ state, emit }) => {
+      if (state.session.status === "closed") throw new SessionConflictError("Cannot hand off a closed session");
+      state.session = {
+        ...state.session,
+        handoff: structuredClone(handoff),
+        ...(origin === undefined ? {} : { handoffOrigin: structuredClone(origin) }),
+      };
+      emit("session.handoff", { handoff: structuredClone(handoff) });
+      return state.session;
+    });
+  }
+
   /** Close is one durable operation; callers never have to race two CAS transitions. */
-  async close(sessionId: string, options: AuthorizedSessionMutationOptions): Promise<CollaborativeSessionV1> {
-    return this.mutateAuthorized(sessionId, "session.close", {}, options, "session:write", ({ state, now, emit }) => {
+  async close(sessionId: string, options: AuthorizedSessionMutationOptions, handoff?: GatewayHandoffV1, origin?: GatewayHandoffOriginV1): Promise<CollaborativeSessionV1> {
+    const payload = handoff === undefined ? {} : origin === undefined ? { handoff } : { handoff, origin };
+    return this.mutateAuthorized(sessionId, "session.close", payload, options, "session:write", ({ state, now, emit }) => {
       if (state.session.status !== "active" && state.session.status !== "closing") throw new SessionConflictError(`Cannot close session in state ${state.session.status}`);
+      if (handoff !== undefined) {
+        state.session = {
+          ...state.session,
+          handoff: structuredClone(handoff),
+          ...(origin === undefined ? {} : { handoffOrigin: structuredClone(origin) }),
+        };
+        emit("session.handoff", { handoff: structuredClone(handoff) });
+      }
       state.session = { ...state.session, status: "closed", closedAt: now };
       emit("session.transitioned", { status: "closed" });
       return state.session;

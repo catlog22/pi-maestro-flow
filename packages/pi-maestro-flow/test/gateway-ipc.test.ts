@@ -75,7 +75,7 @@ test("real connect --stdio performs initialize, list, and call through the daemo
   const client = new Client({ name: "gateway-ipc-test", version: "1" });
   await client.connect(transport);
   const tools = await client.listTools();
-  assert.deepEqual(tools.tools.map((tool) => tool.name), ["workspace", "board", "host", "exec", "job", "file", "teammate", "session", "todo", "monitor"]);
+  assert.deepEqual(tools.tools.map((tool) => tool.name), ["workspace", "board", "host", "exec", "job", "file", "teammate", "session", "todo", "monitor", "handoff", "skill", "maestro_cli"]);
   const called = await client.callTool({ name: "host", arguments: { action: "test" } });
   const text = called.content[0];
   assert.equal(text?.type, "text");

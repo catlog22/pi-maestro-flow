@@ -37,6 +37,12 @@ export const GATEWAY_HARD_LIMITS = {
   maxBoardTasks: 4096,
   maxBoardOperations: 16384,
   maxBoardEvents: 32768,
+  maxHandoffRecords: 32768,
+  maxSkillFiles: 1024,
+  maxSkillFileBytes: 4 * 1024 * 1024,
+  maxSkillResponseBytes: 8 * 1024 * 1024,
+  maxMaestroOutputBytes: 4 * 1024 * 1024,
+  maxMaestroTimeoutMs: 10 * 60 * 1000,
 } as const;
 
 /** Safe defaults used when an existing ~/.mcpx/config.yaml omits a section. */
@@ -66,10 +72,16 @@ export const GATEWAY_DEFAULT_LIMITS = {
   maxBoardTasks: 1024,
   maxBoardOperations: 4096,
   maxBoardEvents: 8192,
+  maxHandoffRecords: 4096,
+  maxSkillFiles: 256,
+  maxSkillFileBytes: 1024 * 1024,
+  maxSkillResponseBytes: 2 * 1024 * 1024,
+  maxMaestroOutputBytes: 1024 * 1024,
+  maxMaestroTimeoutMs: 2 * 60 * 1000,
 } as const;
 
-/** Public order is part of the protocol. The original eight names remain unchanged. */
-export const GATEWAY_TOOL_NAMES = ["workspace", "board", "host", "exec", "job", "file", "teammate", "session", "todo", "monitor"] as const;
+/** Public order is part of the protocol. New surfaces are appended; existing names remain unchanged. */
+export const GATEWAY_TOOL_NAMES = ["workspace", "board", "host", "exec", "job", "file", "teammate", "session", "todo", "monitor", "handoff", "skill", "maestro_cli"] as const;
 /** The pre-Board catalog remains readable at migration boundaries. */
 export const GATEWAY_LEGACY_TOOL_NAMES = ["host", "exec", "job", "file", "teammate", "session", "todo", "monitor"] as const;
 export type GatewayToolName = typeof GATEWAY_TOOL_NAMES[number];

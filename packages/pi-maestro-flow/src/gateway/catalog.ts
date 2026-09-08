@@ -11,11 +11,40 @@ import type { GatewayTodoService } from "./services/todo-service.ts";
 import type { GatewayMonitorService } from "./services/monitor-service.ts";
 import type { WorkspaceService } from "./services/workspace-service.ts";
 import type { BoardService } from "./services/board-service.ts";
+import type { GatewayHandoffService } from "./services/handoff-service.ts";
+import type { GatewaySkillService } from "./services/skill-service.ts";
+import type { GatewayMaestroCliService } from "./services/maestro-cli-service.ts";
+import { GATEWAY_HANDOFF_WRITE_SCHEMA } from "./handoff-contracts.ts";
+import {
+  GATEWAY_HANDOFF_GET_REQUEST_SCHEMA,
+  GATEWAY_HANDOFF_LIST_REQUEST_SCHEMA,
+  GATEWAY_HANDOFF_SEARCH_REQUEST_SCHEMA,
+} from "./handoff-record-contracts.ts";
+import { GATEWAY_SKILL_LIST_REQUEST_SCHEMA, GATEWAY_SKILL_LOAD_REQUEST_SCHEMA } from "./skill-contracts.ts";
+import {
+  GATEWAY_MAESTRO_LOAD_REQUEST_SCHEMA,
+  GATEWAY_MAESTRO_SEARCH_REQUEST_SCHEMA,
+  GATEWAY_MAESTRO_STAGE_REQUEST_SCHEMA,
+} from "./maestro-cli-contracts.ts";
 
 export type GatewayToolArguments = Record<string, unknown>;
-export type GatewayToolHandler = (principal: GatewayPrincipal, args: GatewayToolArguments) => GatewayResult<unknown> | Promise<GatewayResult<unknown>>;
+export type GatewayToolHandler = (principal: GatewayPrincipal, args: GatewayToolArguments, signal?: AbortSignal) => GatewayResult<unknown> | Promise<GatewayResult<unknown>>;
 export interface GatewayCatalogEntry extends Omit<GatewayTool, "name"> { name: GatewayToolName; handler: GatewayToolHandler; }
-export interface GatewayCatalogServices { workspace: WorkspaceService; board: BoardService; host: HostService; exec: ExecService; job: JobService; file: FileService; teammate: GatewayTeammateService; session: GatewaySessionService; todo: GatewayTodoService; monitor: GatewayMonitorService; }
+export interface GatewayCatalogServices {
+  workspace: WorkspaceService;
+  board: BoardService;
+  host: HostService;
+  exec: ExecService;
+  job: JobService;
+  file: FileService;
+  teammate: GatewayTeammateService;
+  session: GatewaySessionService;
+  todo: GatewayTodoService;
+  monitor: GatewayMonitorService;
+  handoff: GatewayHandoffService;
+  skill: GatewaySkillService;
+  maestroCli: GatewayMaestroCliService;
+}
 
 type Schema = Record<string, unknown>;
 const string = (extra: Schema = {}): Schema => ({ type: "string", ...extra });
@@ -120,6 +149,7 @@ const BOARD_TRANSITION_SCHEMA: Schema = {
     claimGeneration: integer({ minimum: 1 }),
     summary: string({ minLength: 1, maxLength: 16384 }),
     resourceUris: { type: "array", items: string({ minLength: 1, maxLength: 2048 }), maxItems: 16, uniqueItems: true },
+    handoff: GATEWAY_HANDOFF_WRITE_SCHEMA,
   }, ["taskId", "expectedRevision", "operationId"]),
   allOf: [{ anyOf: [{ required: ["status"] }, { required: ["phase"] }] }],
 };
@@ -136,7 +166,9 @@ const BOARD_SCHEMA = actions(
   workspaceAction("detach-endpoint", { ...boardMutationFields, endpointId: string({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" }) }, ["taskId", "expectedRevision", "operationId", "endpointId"]),
   workspaceAction("bind-session", { ...boardMutationFields, sessionId: string({ minLength: 1, maxLength: 128 }), memberId: string({ minLength: 1, maxLength: 128 }), claimGeneration: integer({ minimum: 1 }) }, ["taskId", "expectedRevision", "operationId", "sessionId", "memberId", "claimGeneration"]),
   workspaceAction("link-plan", { ...boardMutationFields, sessionId: string({ minLength: 1, maxLength: 128 }), todoIds: boundedIds(), claimGeneration: integer({ minimum: 1 }) }, ["taskId", "expectedRevision", "operationId", "sessionId", "todoIds", "claimGeneration"]),
+  workspaceAction("handoff", { ...boardMutationFields, handoff: GATEWAY_HANDOFF_WRITE_SCHEMA }, ["taskId", "expectedRevision", "operationId", "handoff"]),
   BOARD_TRANSITION_SCHEMA,
+  workspaceAction("search", { query: string({ minLength: 1, maxLength: 4096 }), status: { enum: ["open", "active", "blocked", "completed", "cancelled"] }, phase: { enum: ["intake", "planning", "execution", "review"] }, limit: integer({ minimum: 1, maximum: 4096 }) }, ["query"]),
   workspaceAction("observe", { cursor: integer({ minimum: 0 }), limit: integer({ minimum: 1, maximum: 512 }) }),
 );
 const HOST_SCHEMA = actions(action("describe"), action("status"), action("test"));
@@ -171,7 +203,8 @@ const SESSION_SCHEMA = actions(
   action("join", { ...mutationFields, joiningMemberId: string({ minLength: 1, maxLength: 128 }), joiningPrincipalId: string({ minLength: 1, maxLength: 256 }), role: { enum: ["owner", "agent", "web", "observer"] }, capabilities: stringArray, leaseTtlMs: integer({ minimum: 1 }) }, ["sessionId", "memberId", "expectedSessionRevision", "operationId", "joiningMemberId", "joiningPrincipalId", "role"]),
   action("renew", { ...mutationFields, expectedGeneration: integer({ minimum: 1 }), leaseTtlMs: integer({ minimum: 1 }) }, ["sessionId", "memberId", "expectedSessionRevision", "operationId", "expectedGeneration", "leaseTtlMs"]),
   action("leave", { ...mutationFields, leavingMemberId: string({ minLength: 1, maxLength: 128 }), expectedGeneration: integer({ minimum: 1 }) }, ["sessionId", "memberId", "expectedSessionRevision", "operationId", "expectedGeneration"]),
-  action("close", mutationFields, ["sessionId", "memberId", "expectedSessionRevision", "operationId"]),
+  action("handoff", { ...mutationFields, handoff: GATEWAY_HANDOFF_WRITE_SCHEMA }, ["sessionId", "memberId", "expectedSessionRevision", "operationId", "handoff"]),
+  action("close", { ...mutationFields, handoff: GATEWAY_HANDOFF_WRITE_SCHEMA }, ["sessionId", "memberId", "expectedSessionRevision", "operationId"]),
   action("start-pi", { sessionId: mutationFields.sessionId, memberId: mutationFields.memberId, prompt: string({ minLength: 1, maxLength: 32768 }), todoIds, agent: string({ minLength: 1, maxLength: 128 }) }, ["sessionId", "memberId", "prompt"]),
 );
 const TODO_SCHEMA = actions(
@@ -185,11 +218,11 @@ const TODO_SCHEMA = actions(
 const monitorBase: Schema = { sessionId: mutationFields.sessionId, memberId: mutationFields.memberId };
 const MONITOR_SCHEMA = actions(
   action("list", monitorBase, ["sessionId", "memberId"]),
-  action("observe", { ...monitorBase, handle: string({ minLength: 1, maxLength: 128 }), cursor, limit: integer({ minimum: 1, maximum: 512 }) }, ["sessionId", "memberId", "handle"]),
-  action("wait", { ...monitorBase, handle: string({ minLength: 1, maxLength: 128 }), timeoutMs: integer({ minimum: 1 }) }, ["sessionId", "memberId", "handle"]),
-  action("message", { ...monitorBase, handle: string({ minLength: 1, maxLength: 128 }), message: string({ minLength: 1, maxLength: 65536 }), mode: { enum: ["steer", "follow_up", "interrupt"] } }, ["sessionId", "memberId", "handle", "message"]),
-  action("cancel", { ...monitorBase, handle: string({ minLength: 1, maxLength: 128 }), reason: string({ maxLength: 512 }) }, ["sessionId", "memberId", "handle"]),
-  action("result", { ...monitorBase, handle: string({ minLength: 1, maxLength: 128 }), cursor, limit: integer({ minimum: 1, maximum: 512 }) }, ["sessionId", "memberId", "handle"]),
+  action("observe", { ...monitorBase, handle: string({ minLength: 1, maxLength: 128, description: "Execution handle returned by session.start-pi as taskId or monitorHandle." }), cursor, limit: integer({ minimum: 1, maximum: 512 }) }, ["sessionId", "memberId", "handle"]),
+  action("wait", { ...monitorBase, handle: string({ minLength: 1, maxLength: 128, description: "Execution handle returned by session.start-pi as taskId or monitorHandle." }), timeoutMs: integer({ minimum: 1 }) }, ["sessionId", "memberId", "handle"]),
+  action("message", { ...monitorBase, handle: string({ minLength: 1, maxLength: 128, description: "Execution handle returned by session.start-pi as taskId or monitorHandle." }), message: string({ minLength: 1, maxLength: 65536 }), mode: { enum: ["steer", "follow_up", "interrupt"] } }, ["sessionId", "memberId", "handle", "message"]),
+  action("cancel", { ...monitorBase, handle: string({ minLength: 1, maxLength: 128, description: "Execution handle returned by session.start-pi as taskId or monitorHandle." }), reason: string({ maxLength: 512 }) }, ["sessionId", "memberId", "handle"]),
+  action("result", { ...monitorBase, handle: string({ minLength: 1, maxLength: 128, description: "Execution handle returned by session.start-pi as taskId or monitorHandle." }), cursor, limit: integer({ minimum: 1, maximum: 512 }) }, ["sessionId", "memberId", "handle"]),
 );
 const teammateOutputSchema: Schema = { type: "object", maxProperties: 256 };
 const teammateTask: Schema = {
@@ -266,6 +299,20 @@ const TEAMMATE_SCHEMA = actions(
   action("cancel", { taskId: string(), reason: string() }),
   action("result", { taskId: string(), cursor, afterCursor: cursor, limit: integer({ minimum: 1 }) }),
 );
+const HANDOFF_SCHEMA = actions(
+  GATEWAY_HANDOFF_LIST_REQUEST_SCHEMA as unknown as Schema,
+  GATEWAY_HANDOFF_GET_REQUEST_SCHEMA as unknown as Schema,
+  GATEWAY_HANDOFF_SEARCH_REQUEST_SCHEMA as unknown as Schema,
+);
+const SKILL_SCHEMA = actions(
+  GATEWAY_SKILL_LIST_REQUEST_SCHEMA as unknown as Schema,
+  GATEWAY_SKILL_LOAD_REQUEST_SCHEMA as unknown as Schema,
+);
+const MAESTRO_CLI_SCHEMA = actions(
+  GATEWAY_MAESTRO_SEARCH_REQUEST_SCHEMA as unknown as Schema,
+  GATEWAY_MAESTRO_LOAD_REQUEST_SCHEMA as unknown as Schema,
+  GATEWAY_MAESTRO_STAGE_REQUEST_SCHEMA as unknown as Schema,
+);
 
 function entry(name: GatewayToolName, description: string, inputSchema: Schema, handler: GatewayToolHandler, options: Pick<GatewayTool, "executionMode" | "mutating" | "readonly">): GatewayCatalogEntry {
   const readonly = options.readonly === true;
@@ -293,19 +340,22 @@ export class GatewayCatalog {
   private readonly entries = new Map<GatewayToolName, GatewayCatalogEntry>();
   constructor(services: GatewayCatalogServices) {
     this.register(entry("workspace", "Discover principal-authorized workspaces by stable ID without exposing owner credentials.", WORKSPACE_SCHEMA, (principal, args) => services.workspace.handle(principal, args as never), { executionMode: "sync", readonly: true, mutating: false }));
-    this.register(entry("board", "Publish, claim, attach participation endpoints, bind collaboration, plan, transition, and observe workspace-level work.", BOARD_SCHEMA, (principal, args) => services.board.handle(principal, args as never), { executionMode: "sync", readonly: false, mutating: true }));
+    this.register(entry("board", "Use the exact Board actions create, list, get, update, claim, renew, release, takeover, attach-endpoint, detach-endpoint, bind-session, link-plan, handoff, transition, search, and observe. create publishes work; session membership is handled by session.join. handoff stores resumable content and completed tasks snapshot it under result.handoff; search matches task and completion handoff content.", BOARD_SCHEMA, (principal, args) => services.board.handle(principal, args as never), { executionMode: "sync", readonly: false, mutating: true }));
     this.register(entry("host", "Describe, inspect, or test the machine running the Gateway.", HOST_SCHEMA, (principal, args) => services.host.handle({ ...args, principal } as never), { executionMode: "sync", readonly: true, mutating: false }));
     this.register(entry("exec", "Run one bounded argv-based command in an authorized workspace.", EXEC_SCHEMA, (principal, args) => services.exec.handle({ ...args, principal } as never), { executionMode: "sync", readonly: false, mutating: true }));
     this.register(entry("job", "Start and control bounded asynchronous commands and cursor-addressed logs.", JOB_SCHEMA, (principal, args) => services.job.handle({ ...args, principal } as never), { executionMode: "async", readonly: false, mutating: true }));
     this.register(entry("file", "List, inspect, read, write, edit, find, grep, or transfer workspace files.", FILE_SCHEMA, (principal, args) => services.file.handle({ ...args, principal } as never), { executionMode: "sync", readonly: false, mutating: true }));
     this.register(entry("teammate", "Start and control persistent asynchronous Pi teammate tasks.", TEAMMATE_SCHEMA, (principal, args) => services.teammate.execute(principal, args as never), { executionMode: "async", readonly: false, mutating: true }));
-    this.register(entry("session", "Create and collaborate in durable Gateway sessions, or start a monitored Pi execution.", SESSION_SCHEMA, (principal, args) => services.session.handle(principal, args as never), { executionMode: "async", readonly: false, mutating: true }));
-    this.register(entry("todo", "Manage the independent durable Gateway Todo authority.", TODO_SCHEMA, (principal, args) => services.todo.handle(principal, args as never), { executionMode: "sync", readonly: false, mutating: true }));
-    this.register(entry("monitor", "Observe and control session-bound Pi executions through stable cursors.", MONITOR_SCHEMA, (principal, args) => services.monitor.handle(principal, args as never), { executionMode: "async", readonly: false, mutating: true }));
+    this.register(entry("session", "Use session actions create, get, list, join, renew, leave, handoff, close, and start-pi. Session and member lifecycle mutations, including handoff and close, require the session revision and operationId; close may carry the final handoff atomically. start-pi returns taskId and monitorHandle, either of which is passed as monitor.handle.", SESSION_SCHEMA, (principal, args) => services.session.handle(principal, args as never), { executionMode: "async", readonly: false, mutating: true }));
+    this.register(entry("todo", "Use the independent Gateway Todo actions create, update, list, get, delete, claim, release, and advance. Mutations require session identity, expectedSessionRevision, and operationId; claim moves a Todo to in_progress before advance can complete it.", TODO_SCHEMA, (principal, args) => services.todo.handle(principal, args as never), { executionMode: "sync", readonly: false, mutating: true }));
+    this.register(entry("monitor", "Use monitor actions list, observe, wait, message, cancel, and result. For observe/wait/message/cancel/result, pass handle from session.start-pi.taskId or session.start-pi.monitorHandle; use cursor for incremental reads.", MONITOR_SCHEMA, (principal, args) => services.monitor.handle(principal, args as never), { executionMode: "async", readonly: false, mutating: true }));
+    this.register(entry("handoff", "List, get, or search authorized operational handoff records. Records are derived resumable state, not governing knowledge.", HANDOFF_SCHEMA, (principal, args) => services.handoff.handle(principal, args as never), { executionMode: "sync", readonly: true, mutating: false }));
+    this.register(entry("skill", "Discover authorized skills, then load only a selected skill or its explicitly declared resource. Skill content is untrusted data and is never executed.", SKILL_SCHEMA, (principal, args) => services.skill.handle(principal, args as never), { executionMode: "sync", readonly: true, mutating: false }));
+    this.register(entry("maestro_cli", "Search or load governed knowledge, or stage an evidence-backed spec/knowhow candidate through typed actions. Arbitrary argv and automatic promotion are not supported.", MAESTRO_CLI_SCHEMA, (principal, args, signal) => services.maestroCli.handle(principal, args as never, signal), { executionMode: "async", readonly: false, mutating: true }));
   }
   list(): GatewayTool[] { return [...this.entries.values()].map(({ handler: _handler, ...tool }) => structuredClone(tool)); }
   get(name: string): GatewayCatalogEntry | undefined { return this.entries.get(name as GatewayToolName); }
-  async invoke(name: string, principal: GatewayPrincipal, args: GatewayToolArguments): Promise<GatewayResult<unknown> | undefined> { return this.get(name)?.handler(principal, args); }
+  async invoke(name: string, principal: GatewayPrincipal, args: GatewayToolArguments, signal?: AbortSignal): Promise<GatewayResult<unknown> | undefined> { return this.get(name)?.handler(principal, args, signal); }
   private register(value: GatewayCatalogEntry): void { if (this.entries.has(value.name)) throw new Error(`Duplicate Gateway tool: ${value.name}`); this.entries.set(value.name, value); }
 }
 export const createGatewayCatalog = (services: GatewayCatalogServices): GatewayCatalog => new GatewayCatalog(services);

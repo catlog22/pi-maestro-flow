@@ -2,12 +2,14 @@
 import { Type, type Static } from "typebox";
 import { Value } from "typebox/value";
 import { GATEWAY_COLLABORATION_LIMITS, GATEWAY_ID_PATTERN, GATEWAY_STATE_VERSION, GATEWAY_WORKSPACE_ID_PATTERN } from "./contracts.ts";
+import { GATEWAY_HANDOFF_SCHEMA } from "./handoff-contracts.ts";
+import { GATEWAY_HANDOFF_ORIGIN_SCHEMA } from "./handoff-record-contracts.ts";
 
 export const COLLABORATIVE_SESSION_STATES = ["creating", "active", "closing", "closed"] as const;
 export const SESSION_MEMBER_ROLES = ["owner", "agent", "web", "observer"] as const;
 export const SESSION_MEMBER_STATES = ["joining", "active", "disconnected", "left", "lost"] as const;
 export const GATEWAY_TODO_STATES = ["pending", "in_progress", "blocked", "completed", "cancelled"] as const;
-export const SESSION_EVENT_TYPES = ["session.created", "session.transitioned", "member.joined", "member.renewed", "member.state", "todo.created", "todo.updated", "todo.deleted", "todo.claimed", "todo.released", "todo.advanced"] as const;
+export const SESSION_EVENT_TYPES = ["session.created", "session.transitioned", "session.handoff", "member.joined", "member.renewed", "member.state", "todo.created", "todo.updated", "todo.deleted", "todo.claimed", "todo.released", "todo.advanced"] as const;
 
 const id = Type.String({ minLength: 1, maxLength: 128, pattern: GATEWAY_ID_PATTERN.source });
 const timestamp = Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER });
@@ -18,6 +20,9 @@ export const COLLABORATIVE_SESSION_SCHEMA = Type.Object({
   version: Type.Literal(GATEWAY_STATE_VERSION), id, status: state(COLLABORATIVE_SESSION_STATES), revision,
   workspaceId: Type.String({ minLength: 64, maxLength: 64, pattern: GATEWAY_WORKSPACE_ID_PATTERN.source }),
   workspacePath: Type.String({ minLength: 1, maxLength: 4096 }),
+  handoff: Type.Optional(GATEWAY_HANDOFF_SCHEMA),
+  /** Server-derived on new writes; absent on legacy records and normalized as unknown. */
+  handoffOrigin: Type.Optional(GATEWAY_HANDOFF_ORIGIN_SCHEMA),
   createdAt: timestamp, updatedAt: timestamp, closedAt: Type.Optional(timestamp),
 }, { additionalProperties: false });
 export type CollaborativeSessionV1 = Static<typeof COLLABORATIVE_SESSION_SCHEMA>;

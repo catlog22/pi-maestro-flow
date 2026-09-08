@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -9,10 +9,16 @@ import {
 } from "../src/knowledge/cli-adapter.ts";
 import type { RunCliResult, RunCliRunner } from "../src/session/cli-adapter.ts";
 
-test("knowledge stage assembles the full CLI argv", async () => {
-  const adapter = new KnowledgeCliAdapter("/proj", fakeRunner((args) => {
-    assert.deepEqual(args, [
-      "knowledge", "stage", "spec", "Decision: use the fence", "fence before mutation",
+test("knowledge stage assembles fixed argv and keeps candidate content in a private file", async () => {
+  let contentPath = "";
+  const adapter = new KnowledgeCliAdapter("/proj", fakeRunner(async (args) => {
+    const marker = args.indexOf("--content-file");
+    assert.ok(marker > 0);
+    contentPath = args[marker + 1]!;
+    assert.equal(await readFile(contentPath, "utf8"), "fence before mutation");
+    if (process.platform !== "win32") assert.equal((await stat(contentPath)).mode & 0o777, 0o600);
+    assert.deepEqual([...args.slice(0, marker), "--content-file", "<private>"], [
+      "knowledge", "stage", "spec", "Decision: use the fence",
       "--session", "session-1",
       "--run", "run-9",
       "--action", "supersede",
@@ -22,7 +28,9 @@ test("knowledge stage assembles the full CLI argv", async () => {
       "--signal-ids", "spec:project:rules-1,spec:project:rules-2",
       "--json",
       "--workflow-root", "/proj",
+      "--content-file", "<private>",
     ]);
+    assert.equal(args.includes("fence before mutation"), false);
     return {
       exitCode: 0,
       argv: args,
@@ -53,12 +61,15 @@ test("knowledge stage assembles the full CLI argv", async () => {
   assert.equal(result.signal_recorded, 2);
   assert.equal(result.session_id, "session-1");
   assert.equal(result.run_id, "run-9");
+  await assert.rejects(() => stat(contentPath), { code: "ENOENT" });
 });
 
 test("knowledge stage minimal invocation omits optional flags", async () => {
   const adapter = new KnowledgeCliAdapter("/proj", fakeRunner((args) => {
-    assert.deepEqual(args, [
-      "knowledge", "stage", "knowhow", "Reusable recipe", "content text",
+    const marker = args.indexOf("--content-file");
+    assert.ok(marker > 0);
+    assert.deepEqual(args.slice(0, marker), [
+      "knowledge", "stage", "knowhow", "Reusable recipe",
       "--json",
       "--workflow-root", "/proj",
     ]);
@@ -98,8 +109,10 @@ test("knowledge stage validates option pairing", async () => {
 
 test("knowledge stage allows session-only (session-source authority)", async () => {
   const adapter = new KnowledgeCliAdapter("/proj", fakeRunner((args) => {
-    assert.deepEqual(args, [
-      "knowledge", "stage", "spec", "Decision: use the fence", "fence before mutation",
+    const marker = args.indexOf("--content-file");
+    assert.ok(marker > 0);
+    assert.deepEqual(args.slice(0, marker), [
+      "knowledge", "stage", "spec", "Decision: use the fence",
       "--session", "session-1",
       "--json",
       "--workflow-root", "/proj",
@@ -322,7 +335,7 @@ test("knowledge adapter forwards AbortSignal without changing existing domain op
 
 type FakeRunner = (args: string[]) => Promise<RunCliResult>;
 
-function fakeRunner(handler: (args: string[]) => RunCliResult): FakeRunner {
+function fakeRunner(handler: (args: string[]) => RunCliResult | Promise<RunCliResult>): FakeRunner {
   return async (args) => handler(args);
 }
 

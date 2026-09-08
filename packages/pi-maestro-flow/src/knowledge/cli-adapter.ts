@@ -216,6 +216,8 @@ export interface KnowledgeStageOptions {
    * `--transcript-quote <path>` 透传（不新建临时文件）。
    */
   transcriptQuoteFile?: string;
+  /** Host-validated private execution authority descriptor for external writes. */
+  executionAuthorityFile?: string;
 }
 
 export interface KnowledgeStageResult {
@@ -224,6 +226,25 @@ export interface KnowledgeStageResult {
   origin?: "run" | "session";
   candidate_id: string;
   signal_recorded: number;
+}
+
+export interface KnowledgeSearchOptions {
+  kind?: "spec" | "knowhow";
+  limit?: number;
+  signal?: AbortSignal;
+}
+
+export interface KnowledgeSearchResult {
+  query: string;
+  count: number;
+  results: unknown[];
+  [key: string]: unknown;
+}
+
+export interface KnowledgeLoadResult {
+  id: string;
+  kind: "spec" | "knowhow";
+  content: string;
 }
 
 export interface KnowledgeResolveOptions {
@@ -259,6 +280,36 @@ export class KnowledgeCliAdapter {
       "--json",
       "--workflow-root", this.workflowRoot,
     ], options.signal);
+  }
+
+  async search(query: string, options: KnowledgeSearchOptions = {}): Promise<KnowledgeSearchResult> {
+    const limit = options.limit;
+    if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)) {
+      throw new Error("limit must be an integer in [1, 100]");
+    }
+    const result = await this.invokeJson<KnowledgeSearchResult>([
+      "search", required(query, "query"),
+      ...(options.kind ? ["--type", options.kind] : []),
+      ...(limit === undefined ? [] : ["--limit", String(limit)]),
+      "--json",
+      "--workflow-root", this.workflowRoot,
+    ], options.signal);
+    if (!Array.isArray(result.results) || !Number.isSafeInteger(result.count) || result.count < 0) {
+      throw new Error("maestro search returned an unsupported JSON schema");
+    }
+    return result;
+  }
+
+  async load(kind: "spec" | "knowhow", id: string, options: { signal?: AbortSignal } = {}): Promise<KnowledgeLoadResult> {
+    // `maestro load` resolves the repository from cwd and intentionally has no
+    // --workflow-root option in the supported CLI schema.
+    const args = ["load", "--type", kind, "--id", required(id, "id")];
+    const result = await this.runner(args, this.workflowRoot, { signal: options.signal });
+    if (result.exitCode !== 0) {
+      throw new Error(`maestro ${args.join(" ")} failed (${result.exitCode}): ${result.stderr || result.stdout}`);
+    }
+    if (!result.stdout.trim()) throw new Error(`maestro ${args.join(" ")} returned empty output`);
+    return { id, kind, content: result.stdout };
   }
 
   async audit(
@@ -359,7 +410,7 @@ export class KnowledgeCliAdapter {
       throw new Error("signalIds requires signal");
     }
     const args = [
-      "knowledge", "stage", target, title, content,
+      "knowledge", "stage", target, title,
       ...(options.sessionId ? ["--session", required(options.sessionId, "sessionId")] : []),
       ...(options.runId ? ["--run", required(options.runId, "runId")] : []),
       ...(options.action ? ["--action", options.action] : []),
@@ -367,6 +418,7 @@ export class KnowledgeCliAdapter {
       ...(options.evidence?.length ? ["--evidence", options.evidence.join(",")] : []),
       ...(options.signal ? ["--signal", options.signal] : []),
       ...(options.signalIds?.length ? ["--signal-ids", options.signalIds.join(",")] : []),
+      ...(options.executionAuthorityFile ? ["--execution-authority", required(options.executionAuthorityFile, "executionAuthorityFile")] : []),
       "--json",
       "--workflow-root", this.workflowRoot,
     ];
@@ -375,27 +427,35 @@ export class KnowledgeCliAdapter {
     // os.tmpdir() 下的私有临时目录；argv 只出现文件路径，quote 原文不进进程列表。
     // 显式 transcriptQuote（JSON 字符串）优先于 transcriptQuoteFile。
     let transcriptQuotePath: string | undefined;
-    let transcriptQuoteTmpDir: string | undefined;
+    let privateTmpDir: string | undefined;
     try {
+      // Candidate content is sensitive and may be large. Keep it out of argv and
+      // process listings; the current Maestro CLI accepts only --content-file.
+      privateTmpDir = await mkdtemp(join(tmpdir(), "pi-knowledge-stage-"));
+      const contentPath = join(privateTmpDir, "content.md");
+      await writeFile(contentPath, content, { encoding: "utf8", mode: 0o600 });
+      args.push("--content-file", contentPath);
       if (options.transcriptQuote !== undefined) {
-        transcriptQuoteTmpDir = await mkdtemp(join(tmpdir(), "pi-knowledge-transcript-"));
-        transcriptQuotePath = join(transcriptQuoteTmpDir, "quote.json");
+        transcriptQuotePath = join(privateTmpDir, "quote.json");
         await writeFile(transcriptQuotePath, options.transcriptQuote, { encoding: "utf8", mode: 0o600 });
       } else if (options.transcriptQuoteFile !== undefined) {
         transcriptQuotePath = required(options.transcriptQuoteFile, "transcriptQuoteFile");
       }
       if (transcriptQuotePath) args.push("--transcript-quote", transcriptQuotePath);
-      return await this.invokeJson<KnowledgeStageResult>(args, invocation.signal);
+      const result = await this.invokeJson<KnowledgeStageResult>(args, invocation.signal);
+      if (typeof result.candidate_id !== "string" || result.candidate_id.trim() === "") {
+        throw new Error("maestro knowledge stage returned an unsupported JSON schema");
+      }
+      return result;
     } finally {
-      if (transcriptQuoteTmpDir) {
+      if (privateTmpDir) {
         try {
-          await rm(transcriptQuoteTmpDir, { recursive: true, force: true });
+          await rm(privateTmpDir, { recursive: true, force: true });
         } catch (error) {
-          // Cleanup failure must be visible because the directory contains a
-          // transcript quote. Do not fail an otherwise successful stage, but
-          // surface the residual path for operator cleanup/audit.
+          // Cleanup failure must be visible because the directory contains
+          // candidate content and may contain a transcript quote.
           console.warn(
-            `[pi-maestro-flow][knowledge] failed to remove transcript temp directory ${transcriptQuoteTmpDir}: ${errorMessage(error)}`,
+            `[pi-maestro-flow][knowledge] failed to remove stage temp directory ${privateTmpDir}: ${errorMessage(error)}`,
           );
         }
       }

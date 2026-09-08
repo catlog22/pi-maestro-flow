@@ -83,6 +83,19 @@ test("close returns and replays the committed session snapshot", async (t) => {
   assert.deepEqual(replay, persisted.session);
 });
 
+test("close atomically stores a final handoff and replays it", async (t) => {
+  const { store, state, identity } = await fixture(t);
+  const handoff = { summary: "Continue verification", nextSteps: ["Run focused tests"], resourceUris: ["agent://session-handoff"] };
+  const closed = await store.close(state.session.id, mutation(1, "close-with-handoff", identity), handoff);
+  assert.equal(closed.status, "closed");
+  assert.deepEqual(closed.handoff, handoff);
+  const persisted = await store.require(state.session.id);
+  const operation = persisted.operations.find((entry) => entry.id === "close-with-handoff");
+  assert.deepEqual(operation?.result, persisted.session);
+  const replay = await store.close(state.session.id, mutation(1, "close-with-handoff", identity), handoff);
+  assert.deepEqual(replay, persisted.session);
+});
+
 test("Todo dependencies reject missing references and cycles", async (t) => {
   const { store, state, identity } = await fixture(t); const todos = new GatewayTodoStore(store);
   await assert.rejects(() => todos.create(state.session.id, { id: "bad", subject: "bad", dependencyIds: ["missing"] }, mutation(1, "bad", identity)), GatewayTodoDependencyError);

@@ -5,14 +5,15 @@ import { join } from "node:path";
 import test from "node:test";
 import { GatewayRuntime } from "../src/gateway/runtime.ts";
 import { createGatewayPrincipal } from "../src/gateway/principal.ts";
+import { GATEWAY_MCP_INSTRUCTIONS } from "../src/gateway/prompt-guidance.ts";
 import { workspaceIdForPath } from "../src/gateway/state-paths.ts";
 import { createTestGatewayConfig } from "./gateway-test-helpers.ts";
 
 function taskOf(result: Awaited<ReturnType<GatewayRuntime["call"]>>) {
-  return (result.data as { task?: { id: string; revision: number; status: string; phase: string; claim?: { generation: number }; endpointBindings?: Array<{ kind: string; endpointId: string; principalId: string }>; sessionBinding?: { sessionId: string }; planBinding?: { todoIds: string[] } } } | undefined)?.task;
+  return (result.data as { task?: { id: string; revision: number; status: string; phase: string; claim?: { generation: number }; endpointBindings?: Array<{ kind: string; endpointId: string; principalId: string }>; sessionBinding?: { sessionId: string }; planBinding?: { todoIds: string[] }; handoff?: { summary?: string; nextSteps?: string[]; resourceUris?: string[] }; result?: { handoff?: { summary?: string; nextSteps?: string[]; resourceUris?: string[] } } } } | undefined)?.task;
 }
 
-test("10-tool runtime closes the workspace Board to Session/Todo collaboration loop", async (t) => {
+test("13-tool runtime closes the workspace Board to Session/Todo collaboration loop", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "gateway-board-runtime-"));
   const otherRoot = await mkdtemp(join(tmpdir(), "gateway-board-runtime-other-"));
   const config = createTestGatewayConfig(root, { mode: "bearer", token: "secret" });
@@ -26,7 +27,7 @@ test("10-tool runtime closes the workspace Board to Session/Todo collaboration l
   const web = createGatewayPrincipal("http", "web", { authenticated: true, workspaceId });
   const foreign = createGatewayPrincipal("http", "foreign", { authenticated: true, workspaceId: otherWorkspaceId });
 
-  assert.deepEqual(runtime.catalog.list().map((tool) => tool.name), ["workspace", "board", "host", "exec", "job", "file", "teammate", "session", "todo", "monitor"]);
+  assert.deepEqual(runtime.catalog.list().map((tool) => tool.name), ["workspace", "board", "host", "exec", "job", "file", "teammate", "session", "todo", "monitor", "handoff", "skill", "maestro_cli"]);
   assert.equal((await runtime.call("board", { action: "list", workspaceId, extra: true }, web)).error?.code, "invalid_arguments");
   assert.equal((await runtime.call("teammate", { action: "start", workspaceId, params: { tasks: [{ prompt: "work", unknown: true }] } }, web)).error?.code, "invalid_arguments");
   assert.equal((await runtime.call("teammate", { action: "start", workspaceId, prompt: "work", options: { onProgress: "unsafe" } }, web)).error?.code, "invalid_arguments");
@@ -80,6 +81,12 @@ test("10-tool runtime closes the workspace Board to Session/Todo collaboration l
     claimGeneration: 1, expectedRevision: 3, operationId: "board-active",
   }, web);
   assert.equal(taskOf(active)?.status, "active");
+  const handoff = await runtime.call("board", {
+    action: "handoff", workspaceId, taskId: "board-1",
+    handoff: { summary: "Resume from review", nextSteps: ["Run the final verification"], resourceUris: ["agent://handoff"] },
+    expectedRevision: 4, operationId: "board-handoff",
+  }, web);
+  assert.equal(taskOf(handoff)?.handoff?.summary, "Resume from review");
 
   assert.equal((await runtime.call("todo", {
     action: "claim", sessionId: "board-session", memberId: "web-member", todoId: "todo-1",
@@ -92,29 +99,63 @@ test("10-tool runtime closes the workspace Board to Session/Todo collaboration l
 
   const review = await runtime.call("board", {
     action: "transition", workspaceId, taskId: "board-1", phase: "review", claimGeneration: 1,
-    expectedRevision: 4, operationId: "board-review",
+    expectedRevision: 5, operationId: "board-review",
   }, web);
   assert.equal(taskOf(review)?.phase, "review");
   const completed = await runtime.call("board", {
     action: "transition", workspaceId, taskId: "board-1", status: "completed", claimGeneration: 1,
-    summary: "Verified", resourceUris: ["agent://verified"], expectedRevision: 5, operationId: "board-complete",
+    summary: "Verified", resourceUris: ["agent://verified"], expectedRevision: 6, operationId: "board-complete",
   }, web);
   assert.equal(taskOf(completed)?.status, "completed");
 
   const released = await runtime.call("board", {
     action: "release", workspaceId, taskId: "board-1", claimGeneration: 1,
-    expectedRevision: 6, operationId: "board-release",
+    expectedRevision: 7, operationId: "board-release",
   }, web);
   assert.equal(released.ok, true);
   assert.equal(taskOf(released)?.status, "completed");
   assert.equal(taskOf(released)?.claim, undefined);
   assert.equal(taskOf(released)?.sessionBinding?.sessionId, "board-session");
   assert.deepEqual(taskOf(released)?.planBinding?.todoIds, ["todo-1"]);
+  assert.equal(taskOf(released)?.result?.handoff?.summary, "Resume from review");
+  const searched = await runtime.call("board", { action: "search", workspaceId, query: "Resume verification", limit: 8 }, web);
+  assert.deepEqual((searched.data as { tasks: Array<{ id: string }> }).tasks.map((task) => task.id), ["board-1"]);
 
   const observed = await runtime.call("board", { action: "observe", workspaceId, cursor: 0, limit: 32 }, web);
   const events = (observed.data as { events: Array<{ cursor: number; type: string }>; nextCursor: number }).events;
-  assert.deepEqual(events.map((event) => event.type), ["task.created", "task.claimed", "plan.linked", "status.changed", "status.changed", "task.completed", "task.released"]);
-  assert.equal((observed.data as { nextCursor: number }).nextCursor, 7);
+  assert.deepEqual(events.map((event) => event.type), ["task.created", "task.claimed", "plan.linked", "status.changed", "handoff.updated", "status.changed", "task.completed", "task.released"]);
+  assert.equal((observed.data as { nextCursor: number }).nextCursor, 8);
+});
+
+test("Gateway MCP publication keeps detailed action schemas and contract guidance", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "gateway-schema-publication-"));
+  const runtime = await GatewayRuntime.create({ config: createTestGatewayConfig(root), cwd: root });
+  t.after(async () => { await runtime.close(); await rm(root, { recursive: true, force: true }); });
+
+  const published = runtime.catalog.list();
+  const board = published.find((tool) => tool.name === "board");
+  const boardSchema = board?.inputSchema as { oneOf?: Array<{ properties?: { action?: { const?: string } }; required?: string[] }> };
+  assert.equal(boardSchema.oneOf?.length, 16);
+  const create = boardSchema.oneOf?.find((schema) => schema.properties?.action?.const === "create");
+  assert.deepEqual(create?.required, ["action", "title", "expectedRevision", "operationId"]);
+  assert.match(board?.description ?? "", /create publishes work/);
+  assert.doesNotMatch(board?.description ?? "", /publish, claim/);
+
+  const handoff = published.find((tool) => tool.name === "handoff");
+  const skill = published.find((tool) => tool.name === "skill");
+  const maestroCli = published.find((tool) => tool.name === "maestro_cli");
+  assert.equal((handoff?.inputSchema as { oneOf?: unknown[] }).oneOf?.length, 3);
+  assert.equal((skill?.inputSchema as { oneOf?: unknown[] }).oneOf?.length, 2);
+  assert.equal((maestroCli?.inputSchema as { oneOf?: unknown[] }).oneOf?.length, 3);
+  assert.match(GATEWAY_MCP_INSTRUCTIONS, /governing knowledge/);
+  assert.match(GATEWAY_MCP_INSTRUCTIONS, /never promote automatically/);
+  assert.doesNotMatch(GATEWAY_MCP_INSTRUCTIONS, /create, list, get, update/);
+
+  const monitor = published.find((tool) => tool.name === "monitor");
+  const monitorSchema = monitor?.inputSchema as { oneOf?: Array<{ properties?: { action?: { const?: string }; handle?: { description?: string } } }> };
+  const observe = monitorSchema.oneOf?.find((schema) => schema.properties?.action?.const === "observe");
+  assert.match(observe?.properties?.handle?.description ?? "", /session\.start-pi/);
+  assert.match(monitor?.description ?? "", /taskId or session\.start-pi\.monitorHandle/);
 });
 
 test("Board service derives Pi and Web endpoint kinds from authenticated transports", async (t) => {

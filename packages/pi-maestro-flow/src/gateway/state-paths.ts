@@ -16,6 +16,8 @@ export const GATEWAY_SERVICE_MANIFEST_FILE = "service.json" as const;
 export const GATEWAY_SESSIONS_DIRECTORY = "sessions" as const;
 export const GATEWAY_BOARD_DIRECTORY = "board" as const;
 export const GATEWAY_BOARD_FILE = "board.json" as const;
+export const GATEWAY_HANDOFF_DIRECTORY = "handoffs" as const;
+export const GATEWAY_MAESTRO_RECEIPT_DIRECTORY = "maestro-receipts" as const;
 export const GATEWAY_LEGACY_OWNER_FILES = ["mcpx-server.pid", "gateway.pid"] as const;
 
 /** Return UTF-8 byte length, used for every wire/durable bound. */
@@ -97,6 +99,12 @@ export function gatewayBoardPath(cwd = process.cwd(), boardRoot?: string): strin
     : containedPath(root, GATEWAY_BOARD_FILE);
 }
 export const getGatewayBoardPath = gatewayBoardPath;
+export function gatewayHandoffRoot(cwd = process.cwd()): string {
+  return join(gatewayStateRoot(cwd), GATEWAY_HANDOFF_DIRECTORY);
+}
+export function gatewayMaestroReceiptRoot(cwd = process.cwd()): string {
+  return join(gatewayStateRoot(cwd), GATEWAY_MAESTRO_RECEIPT_DIRECTORY);
+}
 export function gatewaySessionPath(id: string, cwd = process.cwd(), sessionsRoot?: string): string {
   return containedPath(sessionsRoot ?? gatewaySessionsRoot(cwd), `${safePathToken(id)}.json`);
 }
@@ -120,6 +128,8 @@ export interface GatewayStatePaths {
   sessionsRoot: string;
   boardRoot: string;
   boardPath: string;
+  handoffRoot: string;
+  maestroReceiptRoot: string;
 }
 
 export function createGatewayStatePaths(cwd = process.cwd(), homeDir = homedir()): GatewayStatePaths {
@@ -138,6 +148,8 @@ export function createGatewayStatePaths(cwd = process.cwd(), homeDir = homedir()
     sessionsRoot: join(workspaceRoot, GATEWAY_SESSIONS_DIRECTORY),
     boardRoot: join(workspaceRoot, GATEWAY_BOARD_DIRECTORY),
     boardPath: join(workspaceRoot, GATEWAY_BOARD_DIRECTORY, GATEWAY_BOARD_FILE),
+    handoffRoot: join(workspaceRoot, GATEWAY_HANDOFF_DIRECTORY),
+    maestroReceiptRoot: join(workspaceRoot, GATEWAY_MAESTRO_RECEIPT_DIRECTORY),
   };
 }
 

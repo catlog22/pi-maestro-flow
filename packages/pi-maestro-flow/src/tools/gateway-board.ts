@@ -5,12 +5,13 @@ import { Text } from "@earendil-works/pi-tui";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { Type, type Static } from "typebox";
 import { createGatewayLocalClient } from "../gateway/local-client.ts";
+import { GATEWAY_HANDOFF_SCHEMA } from "../gateway/handoff-contracts.ts";
 import { resultSummary, toolCallLine, toolResultLine } from "../quiet-render.ts";
 import type { FlowToolResult } from "./tool-result.ts";
 
 export const GATEWAY_BOARD_ACTIONS = [
   "create", "list", "get", "update", "claim", "renew", "release", "takeover",
-  "attach-endpoint", "detach-endpoint", "bind-session", "link-plan", "transition", "observe",
+  "attach-endpoint", "detach-endpoint", "bind-session", "link-plan", "handoff", "transition", "search", "observe",
 ] as const;
 
 type GatewayBoardAction = typeof GATEWAY_BOARD_ACTIONS[number];
@@ -45,6 +46,8 @@ export const GatewayBoardParams = Type.Object({
   reason: Type.Optional(Type.String({ minLength: 1, maxLength: 4 * 1024 })),
   summary: Type.Optional(Type.String({ minLength: 1, maxLength: 16 * 1024 })),
   resourceUris: Type.Optional(stringArray(16, 2048)),
+  query: Type.Optional(Type.String({ minLength: 1, maxLength: 4096 })),
+  handoff: Type.Optional(GATEWAY_HANDOFF_SCHEMA),
 }, { additionalProperties: false });
 
 export interface GatewayBoardToolDetails {
@@ -65,16 +68,19 @@ const defaultCaller: GatewayBoardCaller = {
   },
 };
 
-const readonlyActions = new Set<GatewayBoardAction>(["list", "get", "observe"]);
+const readonlyActions = new Set<GatewayBoardAction>(["list", "get", "search", "observe"]);
 const endpointActions = new Set<GatewayBoardAction>(["attach-endpoint", "detach-endpoint"]);
 
 export function createGatewayBoardTool(caller: GatewayBoardCaller = defaultCaller): ToolDefinition<typeof GatewayBoardParams, GatewayBoardToolDetails> {
   return {
     name: "board",
     label: "Board",
-    description: "Operate the workspace-shared Gateway Board through authenticated local IPC. Workspace, request IDs, operation IDs, and Pi endpoint identity are host-injected; supply expectedRevision for mutations.",
-    promptSnippet: "Use board to publish, join, claim, plan, transition, and observe workspace-level shared work across Pi and Web endpoints.",
+    description: "Operate the workspace-shared Gateway Board through authenticated local IPC. Actions are create, list, get, update, claim, renew, release, takeover, attach-endpoint, detach-endpoint, bind-session, link-plan, handoff, transition, search, and observe. handoff stores resumable content; completed transitions snapshot it under result.handoff; search matches task and completion content. Workspace, request IDs, operation IDs, and Pi endpoint identity are host-injected; supply expectedRevision for mutations.",
+    promptSnippet: "Use the Board actions exactly: create, list, get, update, claim, renew, release, takeover, attach-endpoint, detach-endpoint, bind-session, link-plan, handoff, transition, search, observe.",
+
     promptGuidelines: [
+      "Use create to publish work; Board has no publish, join, or plan action. Session membership uses session.join, and plan linkage uses link-plan.",
+      "Use handoff to persist resumable summary, next steps, files, and resource references; when completing, transition with status=completed and summary or handoff.summary. Use search with query to find current or completed handoff content.",
       "Read a task revision before mutating it; every mutation is CAS-fenced by expectedRevision.",
       "Use attach-endpoint/detach-endpoint for this Pi session. The host supplies its session ID and endpoint kind; never invent identity fields.",
       "Endpoint bindings describe participation only. Use claim/renew/release/takeover for the single execution owner.",

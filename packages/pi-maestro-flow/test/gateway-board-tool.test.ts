@@ -49,6 +49,14 @@ test("native Board tool injects workspace, operation ids, and the current Pi ses
   assert.equal(typeof calls[1]?.args.requestId, "string");
 });
 
+test("native Board guidance names only real actions", () => {
+  const tool = createGatewayBoardTool({ call: async () => okResult() });
+  assert.match(tool.promptSnippet ?? "", /create, list, get, update, claim, renew, release, takeover/);
+  assert.match(tool.promptSnippet ?? "", /attach-endpoint, detach-endpoint, bind-session, link-plan, handoff, transition, search, observe/);
+  assert.doesNotMatch(tool.promptSnippet ?? "", /\b(?:publish|join)\b|(?:^|[ ,])plan(?:$|[ ,.])/);
+  assert.match(tool.promptGuidelines?.join(" ") ?? "", /session\.join/);
+});
+
 test("GatewayLocalClient calls the persistent Gateway over authenticated IPC MCP", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "gateway-native-client-"));
   const runtime = await GatewayRuntime.create({ config: createTestGatewayConfig(root), cwd: root });
