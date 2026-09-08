@@ -619,11 +619,12 @@ test("extension registers Board, LSP, browser, BM25 discovery, and the Gateway c
   // guards against renderers that throw. Returning a non-Component therefore
   // escapes as an uncaughtException and kills the TUI.
   const todoTool = tools.find((tool) => tool.name === "todo");
-  assert.match(todoTool?.description ?? "", /blockedBy integer N means the earlier array item tasks\[N\]/);
-  assert.match(todoTool?.description ?? "", /blockedBy: \[0\]/);
-  assert.match(todoTool?.description ?? "", /advance: omit id\/summary/);
-  assert.match(todoTool?.description ?? "", /update \(batch\).*commits atomically/);
-  assert.match(todoTool?.description ?? "", /delete: use id for one task or ids for an atomic batch/);
+  assert.match(todoTool?.description ?? "", /progressive reads/);
+  assert.match(todoTool?.description ?? "", /Batch blockedBy uses earlier 0-based array indexes/);
+  assert.match(todoTool?.description ?? "", /single-task dependencies use task IDs/);
+  assert.match(todoTool?.description ?? "", /without an active task, omit completion fields/);
+  assert.match(todoTool?.description ?? "", /update: use id or atomic updates\[\]/);
+  assert.match(todoTool?.description ?? "", /delete: id or atomic ids\[\]/);
   const todoParametersJson = JSON.stringify(todoTool?.parameters);
   assert.match(todoParametersJson, /advance/);
   assert.match(todoParametersJson, /"ids"/);
