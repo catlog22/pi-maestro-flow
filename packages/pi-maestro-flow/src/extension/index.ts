@@ -1621,13 +1621,34 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   }
 
   let mcpAdapterHandle: ReturnType<typeof registerMcpAdapter> | undefined;
-  try {
-    mcpAdapterHandle = registerMcpAdapter(pi);
-  } catch (error) {
-    // MCP 注册失败不得阻断 Maestro 现有工具与 Provider。
+  // The vendored MCP adapter registers the tool "mcp" and the flag
+  // "--mcp-config" unconditionally. Both collide with the standalone
+  // `pi-mcp-adapter` package, and the host rejects the WHOLE extension on a
+  // name collision -- so `run-control` (registered further down) never
+  // registers, and the entire Session/Run lifecycle silently loses its
+  // transport while every /maestro-* skill still appears to work.
+  //
+  // The try/catch below cannot prevent this: the host rejects the extension
+  // before any throw reaches it. Detecting a peer-owned "mcp" tool is also
+  // not possible here -- `pi.getAllTools()` during extension loading fails
+  // with "Extension runtime not initialized. Action methods cannot be called
+  // during extension loading." So the escape hatch has to be declarative.
+  //
+  // Default behaviour is unchanged; set MAESTRO_DISABLE_VENDORED_MCP=1 on a
+  // host that gets its MCP surface from `pi-mcp-adapter` instead.
+  if (process.env.MAESTRO_DISABLE_VENDORED_MCP === "1") {
     console.error(
-      `[maestro] MCP adapter registration warning: ${error instanceof Error ? error.message : String(error)}`,
+      "[maestro] Vendored MCP adapter not registered (MAESTRO_DISABLE_VENDORED_MCP=1); Maestro's own tools are unaffected.",
     );
+  } else {
+    try {
+      mcpAdapterHandle = registerMcpAdapter(pi);
+    } catch (error) {
+      // MCP 注册失败不得阻断 Maestro 现有工具与 Provider。
+      console.error(
+        `[maestro] MCP adapter registration warning: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   registerMaestroPackageResources(pi);
