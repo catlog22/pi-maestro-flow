@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -16,9 +16,9 @@ import { composeInstallMessageForTest } from "../src/install/install-command.ts"
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-test("install registry declares eight items with stable ids", () => {
+test("install registry declares nine items with stable ids", () => {
   const ids = INSTALL_ITEMS.map((item) => item.id);
-  assert.deepEqual(ids, ["init", "teammate-models", "computer-use", "computer-use-weights", "self-evolve", "browser-bridge", "smart-search", "mcp"]);
+  assert.deepEqual(ids, ["init", "teammate-models", "computer-use", "computer-use-weights", "self-evolve", "browser-bridge", "smart-search", "mcp", "openai-tunnel"]);
   for (const item of INSTALL_ITEMS) {
     assert.ok(item.title.length > 0 && item.description.length > 0, `${item.id} needs title+description`);
     assert.ok(item.promptIntro.length > 0, `${item.id} needs promptIntro`);
@@ -28,6 +28,12 @@ test("install registry declares eight items with stable ids", () => {
   assert.match(`${browserBridge.title}\n${browserBridge.description}\n${browserBridge.promptIntro}`, /显式|app\.channel='extension'/);
   assert.match(browserBridge.promptIntro, /browser status/);
   assert.match(browserBridge.promptIntro, /断连不回退 managed/);
+  const openAiTunnel = INSTALL_ITEMS.find((item) => item.id === "openai-tunnel")!;
+  assert.equal(openAiTunnel.category, "external");
+  assert.match(`${openAiTunnel.title}\n${openAiTunnel.description}\n${openAiTunnel.promptIntro}`, /实验|experimental/i);
+  assert.match(openAiTunnel.promptIntro, /环境变量名称/);
+  assert.match(openAiTunnel.promptIntro, /不得自动下载/);
+  assert.match(openAiTunnel.promptIntro, /不得创建或预配 tunnel/);
 });
 
 test("categories are ordered core → optional → external", () => {
@@ -51,6 +57,66 @@ test("probeInstallStatus returns a known status for each item and never throws",
   }
   // unknown id does not throw
   assert.equal(probeInstallStatus("nonexistent"), "unknown");
+});
+
+test("OpenAI tunnel install probe uses native Gateway config and required env references", () => {
+  const agentDirectory = mkdtempSync(join(tmpdir(), "pi-openai-tunnel-install-probe-"));
+  const previousDirectory = process.env.PI_CODING_AGENT_DIR;
+  const previousTunnelId = process.env.CONTROL_PLANE_TUNNEL_ID;
+  const previousRuntimeKey = process.env.CONTROL_PLANE_API_KEY;
+  const previousCustomTunnelId = process.env.CUSTOM_TUNNEL_ID;
+  const previousCustomRuntimeKey = process.env.CUSTOM_RUNTIME_KEY;
+  process.env.PI_CODING_AGENT_DIR = agentDirectory;
+  delete process.env.CONTROL_PLANE_TUNNEL_ID;
+  delete process.env.CONTROL_PLANE_API_KEY;
+  const configPath = join(agentDirectory, "gateway", "config.yaml");
+  mkdirSync(dirname(configPath), { recursive: true });
+  const writeConfig = (enabled: boolean, tunnelIdEnv = "CONTROL_PLANE_TUNNEL_ID", runtimeKeyEnv = "CONTROL_PLANE_API_KEY") => writeFileSync(configPath, [
+    "version: 2",
+    "tunnels:",
+    "  openai:",
+    `    enabled: ${enabled}`,
+    `    binary_path: ${JSON.stringify(process.execPath)}`,
+    `    tunnel_id_env: ${tunnelIdEnv}`,
+    `    runtime_key_env: ${runtimeKeyEnv}`,
+    "    minimum_version: 0.0.14",
+    "    credential_ttl_ms: 300000",
+    "",
+  ].join("\n"));
+  try {
+    assert.equal(probeInstallStatus("openai-tunnel"), "not-installed");
+
+    writeFileSync(configPath, "version: 2\n");
+    assert.equal(probeInstallStatus("openai-tunnel"), "not-installed", "an unrelated Gateway config is not a tunnel setup");
+
+    writeConfig(false);
+    assert.equal(probeInstallStatus("openai-tunnel"), "partial", "the experimental provider requires explicit enablement");
+
+    writeConfig(true);
+    assert.equal(probeInstallStatus("openai-tunnel"), "partial", "missing referenced credentials are partial");
+
+    process.env.CONTROL_PLANE_TUNNEL_ID = "tunnel-test-reference";
+    process.env.CONTROL_PLANE_API_KEY = "runtime-test-reference";
+    assert.equal(probeInstallStatus("openai-tunnel"), "installed");
+
+    writeConfig(true, "CUSTOM_TUNNEL_ID", "CUSTOM_RUNTIME_KEY");
+    assert.equal(probeInstallStatus("openai-tunnel"), "partial", "probe follows configured env names instead of hard-coded defaults");
+    process.env.CUSTOM_TUNNEL_ID = "tunnel-custom-reference";
+    process.env.CUSTOM_RUNTIME_KEY = "runtime-custom-reference";
+    assert.equal(probeInstallStatus("openai-tunnel"), "installed");
+  } finally {
+    if (previousDirectory === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousDirectory;
+    if (previousTunnelId === undefined) delete process.env.CONTROL_PLANE_TUNNEL_ID;
+    else process.env.CONTROL_PLANE_TUNNEL_ID = previousTunnelId;
+    if (previousRuntimeKey === undefined) delete process.env.CONTROL_PLANE_API_KEY;
+    else process.env.CONTROL_PLANE_API_KEY = previousRuntimeKey;
+    if (previousCustomTunnelId === undefined) delete process.env.CUSTOM_TUNNEL_ID;
+    else process.env.CUSTOM_TUNNEL_ID = previousCustomTunnelId;
+    if (previousCustomRuntimeKey === undefined) delete process.env.CUSTOM_RUNTIME_KEY;
+    else process.env.CUSTOM_RUNTIME_KEY = previousCustomRuntimeKey;
+    rmSync(agentDirectory, { recursive: true, force: true });
+  }
 });
 
 test("browser bridge install probe requires a valid verified marker and config, never a port file", () => {
@@ -109,7 +175,7 @@ test("resolveInstallItems attaches status, glyph, and docPath to every item", ()
   }
 });
 
-test("readInstallDoc returns shipped content and browser setup states explicit limited semantics", () => {
+test("readInstallDoc returns shipped content and setup docs preserve explicit safety semantics", () => {
   const init = readInstallDoc("INIT-SETUP.md");
   assert.ok(typeof init === "string" && init.includes("## PURPOSE"), "INIT-SETUP.md must load with PURPOSE section");
   const browser = readInstallDoc("BROWSER-BRIDGE-SETUP.md") ?? "";
@@ -118,6 +184,18 @@ test("readInstallDoc returns shipped content and browser setup states explicit l
   assert.match(browser, /verified marker \+ 合法配置/);
   assert.match(browser, /不会 fallback/);
   assert.match(browser, /不是完整 Puppeteer/);
+  const openAiTunnel = readInstallDoc("OPENAI-TUNNEL-SETUP.md") ?? "";
+  for (const section of ["PURPOSE", "PREREQUISITES", "TASK", "INTERACTIVE INPUTS", "VERIFY", "ROLLBACK"]) {
+    assert.match(openAiTunnel, new RegExp(`## ${section}`), `OpenAI tunnel doc needs ${section}`);
+  }
+  assert.match(openAiTunnel, /experimental/i);
+  assert.match(openAiTunnel, /no auto-download/i);
+  assert.match(openAiTunnel, /no provisioning/i);
+  assert.match(openAiTunnel, /minimum_version: "0\.0\.14"/);
+  assert.match(openAiTunnel, /tunnel_id_env: "CONTROL_PLANE_TUNNEL_ID"/);
+  assert.match(openAiTunnel, /runtime_key_env: "CONTROL_PLANE_API_KEY"/);
+  assert.match(openAiTunnel, /只保存环境变量名称/);
+  assert.match(openAiTunnel, /不保存 tunnel id、runtime API key/);
   assert.equal(readInstallDoc("NONEXISTENT.md"), undefined);
 });
 

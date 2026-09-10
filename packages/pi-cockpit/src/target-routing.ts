@@ -131,6 +131,12 @@ const DIRECT_TARGET_KIND_SET = new Set<string>(DIRECT_TARGET_KINDS);
 const TARGET_SEND_MODE_SET = new Set<string>(TARGET_SEND_MODES);
 const BODY_CONTROL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u;
 const ID_CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/u;
+const SSH_ATTACHMENT_CONTROL_RE = /^#ssh:[+-][A-Za-z0-9][A-Za-z0-9._-]{0,63}$/iu;
+
+/** Exact local SSH attachment controls reserved for the Flow SSH manager. */
+export function isSshAttachmentControlInput(text: string): boolean {
+	return SSH_ATTACHMENT_CONTROL_RE.test(text.trim());
+}
 
 function isTargetKind(value: string): value is TargetKind {
 	return TARGET_KIND_SET.has(value);

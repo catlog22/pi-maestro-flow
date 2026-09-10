@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
   existsSync,
@@ -9,7 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join, resolve } from "node:path";
+import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import test from "node:test";
@@ -26,12 +27,16 @@ const localSettingsCorePackage = JSON.parse(readFileSync(join(localSettingsCoreR
 const localBackendCorePackage = JSON.parse(readFileSync(join(localBackendCoreRoot, "package.json"), "utf8"));
 const localBackendsPackage = JSON.parse(readFileSync(join(localBackendsRoot, "package.json"), "utf8"));
 const localCockpitPackage = JSON.parse(readFileSync(join(localCockpitRoot, "package.json"), "utf8"));
+const smartSearchSource = localFlowPackage.optionalDependencies["@konbakuyomu/smart-search"];
 const piSdkVersion = localFlowPackage.devDependencies["@earendil-works/pi-coding-agent"];
 const piCodingAgentEntry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
 const piCodingAgentPackage = JSON.parse(readFileSync(
   resolve(dirname(piCodingAgentEntry), "..", "package.json"),
   "utf8",
 ));
+const ffiRsPackage = readNearestPackageJson(fileURLToPath(import.meta.resolve("ffi-rs")));
+const ffiRsPlatformSpec = resolveFfiRsPlatformSpec(ffiRsPackage.optionalDependencies);
+const packedReceiptContractVersion = 1;
 const teammatePublicSpecifiers = [
   "pi-maestro-teammate",
   "pi-maestro-teammate/v1",
@@ -53,7 +58,12 @@ const installTimeout = 600_000;
 const testTimeout = packTimeout * 6 + installTimeout + 600_000;
 
 test("packed consumer installs real tarballs and loads in a fresh Pi process", { timeout: testTimeout }, () => {
-  const shortTempRoot = process.env.SystemDrive ? `${process.env.SystemDrive}\\tmp` : tmpdir();
+  // Prefer the caller-controlled temporary root so packed installs can avoid a
+  // full system drive (the Windows SystemDrive value is not overridable).
+  const configuredTempRoot = process.env.TMPDIR || process.env.TMP || process.env.TEMP;
+  const shortTempRoot = configuredTempRoot
+    ? resolve(configuredTempRoot)
+    : process.env.SystemDrive ? `${process.env.SystemDrive}\\tmp` : tmpdir();
   const root = join(shortTempRoot, `pme-${process.pid}-${Date.now()}`);
   const consumer = join(root, "consumer");
   const workflowRoot = join(root, "workflow");
@@ -127,6 +137,10 @@ test("packed consumer installs real tarballs and loads in a fresh Pi process", {
     assert.equal(cockpitPacked[0].version, localCockpitPackage.version);
     assert.equal(teammatePacked[0].version, localTeammatePackage.version);
     assert.equal(flowPacked[0].version, localFlowPackage.version);
+    assert.ok(flowPacked[0].files.some(({ path }) => path === "src/gateway/public/v1/index.ts"));
+    for (const removed of ["src/mcpx-bridge.ts", "src/tui/mcpx-overlay.ts", "src/tui/mcpx-wizard.ts", "src/tui/mcpx-client.ts"]) {
+      assert.equal(flowPacked[0].files.some(({ path }) => path === removed), false, `${removed} must not be packed`);
+    }
     assert.ok(settingsCorePacked[0].files.some(({ path }) => path === "src/public/v1/index.ts"));
     assert.ok(teammatePacked[0].files.some(({ path }) => path === "src/index.ts"));
     assert.ok(teammatePacked[0].files.some(({ path }) => path === "src/public/v1/execution.ts"));
@@ -149,6 +163,16 @@ test("packed consumer installs real tarballs and loads in a fresh Pi process", {
         `${label} tarball must bundle node_modules/pi-maestro-settings-core`,
       );
     }
+
+    const packedReceipt = createPackedReceipt(shortTempRoot, [
+      ["settings-core", settingsCoreTarball],
+      ["backend-core", backendCoreTarball],
+      ["backends", backendsTarball],
+      ["cockpit", cockpitTarball],
+      ["teammate", teammateTarball],
+      ["flow", flowTarball],
+    ]);
+    if (hasValidPackedReceipt(packedReceipt)) return;
 
     verifyStandaloneCockpit({
       consumer: join(root, "cockpit-standalone"),
@@ -179,6 +203,8 @@ test("packed consumer installs real tarballs and loads in a fresh Pi process", {
         cockpitTarball,
         teammateTarball,
         flowTarball,
+        smartSearchSource,
+        ffiRsPlatformSpec,
         `@earendil-works/pi-agent-core@${piSdkVersion}`,
         `@earendil-works/pi-ai@${piSdkVersion}`,
         `@earendil-works/pi-coding-agent@${piSdkVersion}`,
@@ -186,6 +212,8 @@ test("packed consumer installs real tarballs and loads in a fresh Pi process", {
         `@types/cross-spawn@${localFlowPackage.devDependencies["@types/cross-spawn"]}`,
         `@types/node@${piCodingAgentPackage.devDependencies["@types/node"]}`,
         `typescript@${piCodingAgentPackage.devDependencies.typescript}`,
+        "--omit=optional",
+        "--ignore-scripts",
         "--no-audit",
         "--no-fund",
       ],
@@ -195,8 +223,17 @@ test("packed consumer installs real tarballs and loads in a fresh Pi process", {
     );
 
     const installed = join(consumer, "node_modules", "pi-maestro-flow");
+    const installedSmartSearch = join(consumer, "node_modules", "@konbakuyomu", "smart-search");
+    run(npmCommand, ["run", "postinstall"], installed, installEnv, installTimeout);
+    run(npmCommand, ["run", "postinstall"], installedSmartSearch, installEnv, installTimeout);
+
     const installedPackage = JSON.parse(readFileSync(join(installed, "package.json"), "utf8"));
     assert.equal(installedPackage.version, localFlowPackage.version);
+    assert.equal(installedPackage.exports["./gateway/v1"], "./src/gateway/public/v1/index.ts");
+    assert.equal(installedPackage.exports["./src/*"], "./src/*", "the unrelated source wildcard export remains intact");
+    for (const removed of ["src/mcpx-bridge.ts", "src/tui/mcpx-overlay.ts", "src/tui/mcpx-wizard.ts", "src/tui/mcpx-client.ts"]) {
+      assert.equal(existsSync(join(installed, ...removed.split("/"))), false, `${removed} must stay absent after installation`);
+    }
     assert.equal(
       installedPackage.dependencies["maestro-flow"],
       localFlowPackage.dependencies["maestro-flow"],
@@ -207,7 +244,6 @@ test("packed consumer installs real tarballs and loads in a fresh Pi process", {
     const installedSettingsCore = join(consumer, "node_modules", "pi-maestro-settings-core");
     const installedCockpit = join(consumer, "node_modules", "pi-cockpit");
     const installedTeammate = join(consumer, "node_modules", "pi-maestro-teammate");
-    const installedSmartSearch = join(consumer, "node_modules", "@konbakuyomu", "smart-search");
     assert.equal(lstatSync(installed).isSymbolicLink(), false);
     assert.equal(lstatSync(installedMaestro).isSymbolicLink(), false);
     assert.equal(lstatSync(installedSettingsCore).isSymbolicLink(), false);
@@ -538,6 +574,7 @@ export default function register(pi) {
     const session = JSON.parse(readFileSync(join(workflowRoot, ".workflow", "sessions", sessionId, "session.json"), "utf8"));
     assert.equal(session.status, "completed");
     assert.deepEqual(session.chain.map((step) => step.status), ["completed", "completed", "completed", "completed"]);
+    writePackedReceipt(packedReceipt);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -574,6 +611,7 @@ function verifyStandaloneCockpit({
       `@earendil-works/pi-coding-agent@${piSdkVersion}`,
       `@earendil-works/pi-tui@${piSdkVersion}`,
       "--legacy-peer-deps",
+      "--ignore-scripts",
       "--no-audit",
       "--no-fund",
     ],
@@ -620,12 +658,67 @@ function parseTrailingJson(stdout) {
 }
 
 function tarList(tarball) {
-  const args = process.platform === "win32"
-    ? ["--force-local", "-tzf", tarball]
-    : ["-tzf", tarball];
-  const result = spawnSync("tar", args, { encoding: "utf8" });
-  assert.equal(result.status, 0, `tar ${args.slice(0, -1).join(" ")} failed for ${tarball}: ${result.stderr}`);
+  const args = ["-tzf", basename(tarball)];
+  const result = spawnSync("tar", args, { cwd: dirname(tarball), encoding: "utf8" });
+  assert.equal(result.status, 0, `tar -tzf failed for ${tarball}: ${result.stderr}`);
   return result.stdout.split(/\r?\n/).filter(Boolean);
+}
+
+function readNearestPackageJson(entry) {
+  let directory = dirname(entry);
+  while (true) {
+    const packagePath = join(directory, "package.json");
+    if (existsSync(packagePath)) return JSON.parse(readFileSync(packagePath, "utf8"));
+    const parent = dirname(directory);
+    assert.notEqual(parent, directory, `package.json not found above ${entry}`);
+    directory = parent;
+  }
+}
+
+function resolveFfiRsPlatformSpec(optionalDependencies) {
+  let platformSuffix;
+  if (process.platform === "win32") {
+    platformSuffix = `win32-${process.arch}-msvc`;
+  } else if (process.platform === "darwin") {
+    platformSuffix = `darwin-${process.arch}`;
+  } else if (process.platform === "android") {
+    platformSuffix = `android-${process.arch}`;
+  } else if (process.platform === "linux") {
+    const libc = process.report.getReport().header.glibcVersionRuntime ? "gnu" : "musl";
+    platformSuffix = process.arch === "arm" ? "linux-arm-gnueabihf" : `linux-${process.arch}-${libc}`;
+  }
+  const packageName = `@yuuang/ffi-rs-${platformSuffix}`;
+  const version = optionalDependencies?.[packageName];
+  assert.equal(typeof version, "string", `ffi-rs does not declare a package for ${process.platform}/${process.arch}`);
+  return `${packageName}@${version}`;
+}
+
+function createPackedReceipt(tempRoot, tarballs) {
+  const key = {
+    contractVersion: packedReceiptContractVersion,
+    platform: process.platform,
+    arch: process.arch,
+    nodeMajor: Number(process.versions.node.split(".")[0]),
+    tarballs: tarballs.map(([name, tarball]) => ({
+      name,
+      sha256: createHash("sha256").update(readFileSync(tarball)).digest("hex"),
+    })),
+  };
+  const digest = createHash("sha256").update(JSON.stringify(key)).digest("hex");
+  return {
+    path: join(tempRoot, "pi-maestro-packed-consumer-receipts", `${digest}.json`),
+    value: { key, passed: true },
+  };
+}
+
+function hasValidPackedReceipt(receipt) {
+  if (!existsSync(receipt.path)) return false;
+  return readFileSync(receipt.path, "utf8") === `${JSON.stringify(receipt.value, null, 2)}\n`;
+}
+
+function writePackedReceipt(receipt) {
+  mkdirSync(dirname(receipt.path), { recursive: true });
+  writeFileSync(receipt.path, `${JSON.stringify(receipt.value, null, 2)}\n`);
 }
 
 function isolatedPiRuntimeEnv(baseEnv, home, overrides = {}) {

@@ -1,44 +1,45 @@
 /**
- * McpxOverlay — configure and monitor the Pi Maestro Gateway:
+ * GatewayOverlay — configure and monitor the Pi Maestro Gateway:
  * daemon/HTTP status, registered workspaces, Gateway tasks, discoverable Pi
  * windows, and cross-window message history.
  *
- * Keys: ↑↓/jk select history · Enter details · r refresh · R restart · e register/unregister cwd (lease) · E register/unregister cwd (permanent) · s start · x stop · t tunnel refresh · w workspaces · c wizard · p password · Esc close
+ * Keys: 1 home · 2/c config · ↑↓/jk select · Enter details/edit · r refresh · R restart · e register/unregister cwd · s start · x stop · w workspaces · p password · Esc back/close
  */
 import { createHash, randomUUID } from "node:crypto";
 import { accessSync, constants, opendirSync, readdirSync, readFileSync, existsSync, statSync, type Dirent } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, join } from "node:path";
 import { Key, type Component, type Focusable, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { locateMcpx, readMcpxBearerToken, readTunnelState, probeTunnelHealth, restartQuickTunnel, stopQuickTunnel, updateConfigServerURL, restoreMcpxConfig, stopMcpx as stopGateway, startMcpx as startGateway, restartMcpx as restartGateway, readGatewayControlStatus, listGatewayWorkspaces, startWorkspaceLease, registerMcpxWorkspacePermanent, readOpsPassword, detectMcpxForPmf, removeGatewayWorkspaceByPath, readGatewayDelegatedTasks, readGatewayCollaborativeSessions, readMcpxConfigView, writeMcpxConfigChanges, type TunnelState, type DelegatedTask, type McpxConfigView } from "../mcpx-bridge.ts";
+import { locateGateway, readGatewayBearerToken, readTunnelState, readOpenAiTunnelState, restartQuickTunnel, startQuickTunnel, stopQuickTunnel, startOpenAiTunnel, stopOpenAiTunnel, updateGatewayConfigServerURL, restoreGatewayConfig, stopGateway, startGateway, restartGateway, readGatewayControlStatus, listGatewayWorkspaces, startWorkspaceLease, registerGatewayWorkspacePermanent, readGatewayOpsPassword, detectGateway, removeGatewayWorkspaceByPath, readGatewayTasks, readGatewayCollaborativeSessions, readGatewayConfigView, writeGatewayConfigChanges, type TunnelState, type GatewayJournalTask, type GatewayConfigView } from "../gateway/workspace-client.ts";
+import { gatewayConfigPath } from "../gateway/state-paths.ts";
 import type { CollaborativeSessionStateV1, GatewayTodoTaskV1 } from "../gateway/session-contracts.ts";
-import type { McpxConfigChanges } from "./mcpx-wizard.ts";
+import type { GatewayConfigChanges } from "./gateway-wizard.ts";
 import {
-  McpxClientError,
-  McpxStreamableHttpClient,
-  type McpxGatewayMonitor,
-  type McpxGatewayMonitorObservation,
-  type McpxRemoteSession,
-  type McpxRuntimeWindow,
-  type McpxWindowEvent,
-  type McpxWindowObservation,
-} from "./mcpx-client.ts";
+  GatewayClientError,
+  GatewayStreamableHttpClient,
+  type GatewayMonitor,
+  type GatewayMonitorObservation,
+  type GatewayRemoteSession,
+  type GatewayRuntimeWindow,
+  type GatewayWindowEvent,
+  type GatewayWindowObservation,
+} from "./gateway-client.ts";
 
-const MCPX_DEFAULT_ENDPOINT = "http://127.0.0.1:9090/mcp";
+const GATEWAY_DEFAULT_ENDPOINT = "http://127.0.0.1:9090/mcp";
 const PEER_STALE_MS = 20_000;
 const MAX_PEER_RUNTIME_ROOTS = 8;
 const MAX_PEER_OWNERS_PER_ROOT = 16;
 const MAX_PEER_FILES_PER_OWNER = 64;
 const MAX_PEER_FILE_METADATA = 128;
 
-export interface McpxWorkspaceInfo {
+export interface GatewayWorkspaceInfo {
   name: string;
   path: string;
   /** Lease expiry (ms epoch) for TTL-registered windows; undefined = permanent. */
   expiresAt?: number;
 }
 
-export interface McpxWindowInfo {
+export interface GatewayWindowInfo {
   displayName: string;
   ownerId: string;
   pid: number;
@@ -49,7 +50,7 @@ export interface McpxWindowInfo {
   workspace?: string;
 }
 
-export interface McpxThreadEntry {
+export interface GatewayThreadEntry {
   commandId: string;
   kind: "command" | "response";
   createdAt: number;
@@ -62,41 +63,42 @@ export interface McpxThreadEntry {
   workspace?: string;
 }
 
-export interface McpxMcpServerInfo {
+export interface GatewayMcpServerInfo {
   name: string;
   type: string;
   command: string;
-  source: "global" | "project" | "agents" | "mcpx";
+  source: "global" | "project" | "agents" | "pi";
   executable: boolean;
   description?: string;
 }
 
-export interface McpxConnectionInfo extends McpxRemoteSession {}
+export interface GatewayConnectionInfo extends GatewayRemoteSession {}
 
-export interface McpxSnapshot {
+export interface GatewaySnapshot {
   refreshing: boolean;
   binary?: string;
   version?: string;
   endpoint: "unknown" | "online" | "offline";
   endpointVersion?: string;
   configPath?: string;
-  workspaces: McpxWorkspaceInfo[];
+  workspaces: GatewayWorkspaceInfo[];
   cwdRegistered: boolean;
-  /** cwd is in config.yaml but its lease already expired and is waiting for mcpx's sweep. */
+  /** cwd is in config.yaml but its lease already expired and is waiting for gateway's sweep. */
   cwdLeaseStale?: boolean;
-  windows: McpxWindowInfo[];
-  thread: McpxThreadEntry[];
-  mcpServers: McpxMcpServerInfo[];
-  connections?: McpxConnectionInfo[];
+  windows: GatewayWindowInfo[];
+  thread: GatewayThreadEntry[];
+  mcpServers: GatewayMcpServerInfo[];
+  connections?: GatewayConnectionInfo[];
   /** Unified pi_window entries. Undefined means the Runtime is unavailable, auth-blocked, or too old. */
-  runtimeWindows?: McpxRuntimeWindow[];
+  runtimeWindows?: GatewayRuntimeWindow[];
   runtimeWindowFallback?: "auth" | "unsupported" | "unavailable";
   tunnel?: TunnelState;
+  openAiTunnel?: TunnelState;
   /** Gateway journal tasks followed by optional legacy read-only history. */
-  tasks?: DelegatedTask[];
+  tasks?: GatewayJournalTask[];
   /** Workspace-local collaboration authority. It is independent from Pi Todo. */
   collaborativeSessions?: CollaborativeSessionStateV1[];
-  collaborationMonitors?: Record<string, McpxGatewayMonitor[]>;
+  collaborationMonitors?: Record<string, GatewayMonitor[]>;
   collaborationMemberIds?: Record<string, string>;
   collaborationError?: string;
   /** Compatibility field names for verified built-in Gateway availability. */
@@ -107,7 +109,7 @@ export interface McpxSnapshot {
   error?: string;
 }
 
-export interface McpxWindowComposeResult {
+export interface GatewayWindowComposeResult {
   purpose: string;
   message: string;
   name?: string;
@@ -115,7 +117,7 @@ export interface McpxWindowComposeResult {
   mode?: "steer" | "follow_up";
 }
 
-export interface McpxOverlayParams {
+export interface GatewayOverlayParams {
   cwd: string;
   requestRender: () => void;
   close: () => void;
@@ -123,20 +125,23 @@ export interface McpxOverlayParams {
   /** E key: register cwd without a TTL lease (survives window close). */
   onRegisterWorkspacePermanent?: (path: string) => Promise<string>;
   onUnregisterWorkspace?: (path: string) => Promise<string>;
+  /** Compatibility callback retained for embedders; c/C now open the config page in-place. */
   onOpenWizard?: () => void;
+  /** Open directly on the requested top-level page. */
+  initialPage?: "home" | "config";
   /** Host-native text prompts used by m/n window actions. */
   onComposeWindowMessage?: (
-    target: McpxRuntimeWindow | undefined,
-    session: McpxConnectionInfo,
+    target: GatewayRuntimeWindow | undefined,
+    session: GatewayConnectionInfo,
     targetMode: "existing" | "new",
-  ) => Promise<McpxWindowComposeResult | undefined>;
+  ) => Promise<GatewayWindowComposeResult | undefined>;
   /** Test hook and transport injection point. */
-  createClient?: (endpoint: string) => McpxStreamableHttpClient;
+  createClient?: (endpoint: string) => GatewayStreamableHttpClient;
   /** Skip constructor refresh in deterministic overlay tests. */
   initialRefresh?: boolean;
   /** Runtime height for bounded window/event views. */
   getTerminalRows?: () => number;
-  /** Endpoint readiness wait for startMcpx (ms); tests shorten this. */
+  /** Endpoint readiness wait for startGateway (ms); tests shorten this. */
   endpointWaitMs?: number;
 }
 
@@ -228,8 +233,8 @@ function displayNameOf(sessionName: string | undefined, ownerId: string): string
   return label.length > 64 ? `${label.slice(0, 61)}...` : label;
 }
 
-function collectWindows(now: number, preferredCwd?: string): McpxWindowInfo[] {
-  const windows: McpxWindowInfo[] = [];
+function collectWindows(now: number, preferredCwd?: string): GatewayWindowInfo[] {
+  const windows: GatewayWindowInfo[] = [];
   for (const runtime of peerRuntimeRoots(preferredCwd)) {
     const owners = join(runtime, "owners");
     for (const entry of boundedDirectoryEntries(owners, MAX_PEER_OWNERS_PER_ROOT)) {
@@ -263,8 +268,8 @@ function collectWindows(now: number, preferredCwd?: string): McpxWindowInfo[] {
   return windows;
 }
 
-function collectThread(preferredCwd?: string): McpxThreadEntry[] {
-  const entries: McpxThreadEntry[] = [];
+function collectThread(preferredCwd?: string): GatewayThreadEntry[] {
+  const entries: GatewayThreadEntry[] = [];
   // PERF-RV-005: Instead of reading and parsing every JSON file (which grows
   // linearly with history), we stat each file's mtime, sort by mtime desc, and
   // only read+parse the most recent ~60 files. We then slice to 30 as before.
@@ -345,15 +350,15 @@ function collectThread(preferredCwd?: string): McpxThreadEntry[] {
   return entries.slice(0, 30);
 }
 
-function collectWorkspaces(configPath: string): McpxWorkspaceInfo[] {
+function collectWorkspaces(configPath: string): GatewayWorkspaceInfo[] {
   let raw: string;
   try {
     raw = readFileSync(configPath, "utf8");
   } catch {
     return [];
   }
-  const workspaces: McpxWorkspaceInfo[] = [];
-  let current: McpxWorkspaceInfo | undefined;
+  const workspaces: GatewayWorkspaceInfo[] = [];
+  let current: GatewayWorkspaceInfo | undefined;
   for (const line of raw.split(/\r?\n/)) {
     const nameMatch = line.match(/^\s{2,}-\s+name:\s*(.+)$/);
     if (nameMatch) {
@@ -386,16 +391,16 @@ interface McpJsonServer {
 // re-checks, but repeated renders within the same refresh reuse results.
 const executablePathCache = new Map<string, boolean>();
 
-// collectMcpServers mirrors the mcpx merge order for .mcp.json:
-// global → project → .agents/mcp.json → .mcpx/.mcp.json (later wins).
-export function collectMcpServers(cwd: string): McpxMcpServerInfo[] {
-  const files: Array<{ path: string; source: McpxMcpServerInfo["source"] }> = [
-    { path: join(homedir(), ".mcpx", ".mcp.json"), source: "global" },
+// collectMcpServers mirrors the gateway merge order for .mcp.json:
+// global → project → .agents/mcp.json → .pi/mcp.json (later wins).
+export function collectMcpServers(cwd: string): GatewayMcpServerInfo[] {
+  const files: Array<{ path: string; source: GatewayMcpServerInfo["source"] }> = [
+    { path: join(homedir(), ".mcp.json"), source: "global" },
     { path: join(cwd, ".mcp.json"), source: "project" },
     { path: join(cwd, ".agents", "mcp.json"), source: "agents" },
-    { path: join(cwd, ".mcpx", ".mcp.json"), source: "mcpx" },
+    { path: join(cwd, ".pi", "mcp.json"), source: "pi" },
   ];
-  const merged = new Map<string, McpxMcpServerInfo>();
+  const merged = new Map<string, GatewayMcpServerInfo>();
   for (const { path, source } of files) {
     let parsed: { mcpServers?: Record<string, McpJsonServer> };
     try {
@@ -443,8 +448,8 @@ function isExecutableOnPath(command: string): boolean {
 // exported for focused transport tests and callers that only need Remote Sessions.
 export async function collectConnections(
   endpoint: string,
-  client = new McpxStreamableHttpClient(endpoint, 3_000),
-): Promise<McpxConnectionInfo[] | undefined> {
+  client = new GatewayStreamableHttpClient(endpoint, 3_000),
+): Promise<GatewayConnectionInfo[] | undefined> {
   try {
     return await client.listRemoteSessions();
   } catch {
@@ -453,7 +458,7 @@ export async function collectConnections(
 }
 
 async function probeEndpoint(configPath: string): Promise<{ endpoint: string; reachable: boolean; endpointVersion?: string }> {
-  let endpoint = MCPX_DEFAULT_ENDPOINT;
+  let endpoint = GATEWAY_DEFAULT_ENDPOINT;
   try {
     const raw = readFileSync(configPath, "utf8");
     const portMatch = raw.match(/^\s{2,}port:\s*(\d+)/m);
@@ -466,10 +471,10 @@ async function probeEndpoint(configPath: string): Promise<{ endpoint: string; re
     const response = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "mcpx-tui", version: "1.0.0" } } }),
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "gateway-tui", version: "1.0.0" } } }),
       signal: AbortSignal.timeout(2_000),
     });
-    // Any HTTP response (even 401/403) proves mcpx is up and listening — only a
+    // Any HTTP response (even 401/403) proves gateway is up and listening — only a
     // network failure (thrown) means offline. auth-mode servers reject an
     // unauthenticated initialize with 401, which must NOT read as "未运行".
     const reachable = true;
@@ -495,7 +500,7 @@ async function probeEndpoint(configPath: string): Promise<{ endpoint: string; re
     }
     const info = payload?.result?.serverInfo;
     // 200 → real serverInfo; 401/403 → still reachable, surface an auth hint so
-    // the board shows "mcpx (需鉴权)" instead of bare "online" with no version.
+    // the board shows "gateway (需鉴权)" instead of bare "online" with no version.
     let endpointVersion: string | undefined;
     if (info) endpointVersion = `${info.name} ${info.version}`;
     else if (response.status === 401) endpointVersion = "Pi Maestro Gateway 需鉴权（401）";
@@ -507,7 +512,7 @@ async function probeEndpoint(configPath: string): Promise<{ endpoint: string; re
   }
 }
 
-export class McpxOverlay implements Component, Focusable {
+export class GatewayOverlay implements Component, Focusable {
   focused = false;
   private mode: OverlayMode = "list";
   private selected = 0;
@@ -518,15 +523,16 @@ export class McpxOverlay implements Component, Focusable {
   /** Inline config editor state (C key). `configView` is loaded lazily on
    *  first entry into config mode; edits accumulate in `configChanges` and are
    *  written atomically on save, so a user can change several fields then commit. */
-  private configView?: McpxConfigView;
-  private configChanges: McpxConfigChanges = {};
+  private configView?: GatewayConfigView;
+  private configChanges: GatewayConfigChanges = {};
   private configSelected = 0;
   private configEditing = false;
   private configDraft = "";
   /** Sub-mode within config mode: top menu, or inside a list editor. */
   private configListKey: "commandsAllow" | "commandsConfirm" | "commandsDeny" | "filesAllow" | "filesConfirm" | "filesDeny" | undefined;
   private configListSelected = 0;
-  private snapshot: McpxSnapshot = {
+  private tunnelProvider: "cloudflare" | "openai" = "cloudflare";
+  private snapshot: GatewaySnapshot = {
     refreshing: true, endpoint: "unknown", workspaces: [], cwdRegistered: false, windows: [], thread: [], mcpServers: [],
   };
   private status = "";
@@ -539,7 +545,7 @@ export class McpxOverlay implements Component, Focusable {
   private closed = false; // set on close() so async refresh/render skip work after close
   private windowSelected = 0;
   private windowSessionSelected = 0;
-  private windowObservation?: McpxWindowObservation;
+  private windowObservation?: GatewayWindowObservation;
   private observeTimer?: ReturnType<typeof setInterval>;
   private observeGeneration = 0;
   private observing = false;
@@ -547,15 +553,15 @@ export class McpxOverlay implements Component, Focusable {
   private collaborationSelected = 0;
   private collaborationItemSelected = 0;
   private collaborationBusy = false;
-  private monitorObservation?: McpxGatewayMonitorObservation;
-  private client?: McpxStreamableHttpClient;
+  private monitorObservation?: GatewayMonitorObservation;
+  private client?: GatewayStreamableHttpClient;
   private clientEndpoint?: string;
   private clientBearerToken?: string;
 
-  private clientForEndpoint(endpoint: string): McpxStreamableHttpClient {
-    const bearerToken = readMcpxBearerToken();
+  private clientForEndpoint(endpoint: string): GatewayStreamableHttpClient {
+    const bearerToken = readGatewayBearerToken();
     if (!this.client || this.clientEndpoint !== endpoint || this.clientBearerToken !== bearerToken) {
-      this.client = this.params.createClient?.(endpoint) ?? new McpxStreamableHttpClient(endpoint, 4_000, fetch, bearerToken);
+      this.client = this.params.createClient?.(endpoint) ?? new GatewayStreamableHttpClient(endpoint, 4_000, fetch, bearerToken);
       this.clientEndpoint = endpoint;
       this.clientBearerToken = bearerToken;
     }
@@ -567,7 +573,11 @@ export class McpxOverlay implements Component, Focusable {
     this.params.requestRender();
   }
 
-  constructor(private readonly params: McpxOverlayParams) {
+  constructor(private readonly params: GatewayOverlayParams) {
+    if (params.initialPage === "config") {
+      this.mode = "config";
+      this.configView = readGatewayConfigView() ?? undefined;
+    }
     if (params.initialRefresh !== false) void this.refresh();
   }
 
@@ -578,7 +588,7 @@ export class McpxOverlay implements Component, Focusable {
   }
 
   private configPath(): string {
-    return join(homedir(), ".mcpx", "config.yaml");
+    return gatewayConfigPath();
   }
 
   private listenPort(): number {
@@ -594,7 +604,7 @@ export class McpxOverlay implements Component, Focusable {
   }
 
   /** Start only the verified packaged Gateway through its authenticated control client. */
-  private async startMcpx(): Promise<void> {
+  private async startGateway(): Promise<void> {
     if (this.starting) return;
     this.starting = true;
     this.status = "正在启动 Pi Maestro Gateway…";
@@ -611,7 +621,7 @@ export class McpxOverlay implements Component, Focusable {
   }
 
   /** Stop through authenticated Gateway IPC; fallback requires exact owner identity. */
-  private async stopMcpx(): Promise<void> {
+  private async stopGateway(): Promise<void> {
     this.status = "正在停止 Pi Maestro Gateway…";
     this.safeRequestRender();
     try {
@@ -628,7 +638,7 @@ export class McpxOverlay implements Component, Focusable {
   }
 
   /** Restart the built-in daemon so config changes take effect. */
-  private async restartMcpx(): Promise<void> {
+  private async restartGateway(): Promise<void> {
     if (this.starting) return;
     this.starting = true;
     this.status = "正在重启 Pi Maestro Gateway…";
@@ -645,9 +655,9 @@ export class McpxOverlay implements Component, Focusable {
   }
 
   /** T restarts the Cloudflare quick tunnel, syncs its new URL into config.yaml's
-   *  server_url, and restarts mcpx so the OAuth issuer matches the new URL.
+   *  server_url, and restarts gateway so the OAuth issuer matches the new URL.
    *  One-click refresh for the quick-tunnel-URL-changed scenario. */
-  private async refreshTunnelAndMcpx(): Promise<void> {
+  private async refreshTunnelAndGateway(): Promise<void> {
     if (this.starting) return;
     this.starting = true;
     this.status = "正在重启隧道并同步 Pi Maestro Gateway…";
@@ -662,8 +672,10 @@ export class McpxOverlay implements Component, Focusable {
       previousConfig = readFileSync(this.configPath(), "utf8");
       // 1. Restart the quick tunnel — stops the old one, parses the new URL.
       newUrl = await restartQuickTunnel(this.listenPort());
-      // 2. Write the new URL into config.yaml so mcpx's OAuth issuer matches.
-      updateConfigServerURL(newUrl);
+      const tunnelState = await readTunnelState();
+      if (tunnelState.phase !== "ready" || tunnelState.url !== newUrl) throw new Error("Cloudflare tunnel generation changed before config synchronization");
+      // 2. Write only if the same native generation still owns this endpoint.
+      await updateGatewayConfigServerURL(newUrl, { generation: tunnelState.generation, endpoint: newUrl });
       configUpdated = true;
       // 3. Restart the authenticated built-in daemon to load the new issuer.
       await restartGateway(this.params.cwd);
@@ -675,8 +687,7 @@ export class McpxOverlay implements Component, Focusable {
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
       if (!online) throw new Error("Pi Maestro Gateway HTTP /mcp 端点未就绪");
-      const publicHealth = await probeTunnelHealth(newUrl);
-      const publicReady = publicHealth === "ok" || publicHealth === "auth";
+      const publicReady = tunnelState.health === "ok" || tunnelState.health === "auth";
       this.status = publicReady
         ? `隧道已更新: ${newUrl}/mcp · Pi Maestro Gateway 已重启 · 公网端点已就绪`
         : `隧道已更新: ${newUrl}/mcp · Pi Maestro Gateway 已重启，但公网端点仍未就绪（按 r 重试或 T 重启隧道）`;
@@ -693,7 +704,7 @@ export class McpxOverlay implements Component, Focusable {
       }
       if (configUpdated && previousConfig) {
         try {
-          restoreMcpxConfig(previousConfig);
+          restoreGatewayConfig(previousConfig);
           rolledBack = true;
         } catch {
           // Keep the failure visible; do not claim a rollback that did not land.
@@ -707,6 +718,70 @@ export class McpxOverlay implements Component, Focusable {
     }
     await this.refresh();
   }
+
+  /** Start one of the two alternative public tunnel providers. */
+  private async startTunnelProvider(provider: "cloudflare" | "openai"): Promise<void> {
+    if (this.starting) return;
+    this.starting = true;
+    this.status = `正在切换到 ${provider === "cloudflare" ? "Cloudflare Quick Tunnel" : "OpenAI Secure MCP Tunnel"}…`;
+    this.safeRequestRender();
+    try {
+      if (provider === "cloudflare") {
+        if (this.snapshot.openAiTunnel?.alive) await stopOpenAiTunnel(this.snapshot.openAiTunnel.generation);
+        const state = await startQuickTunnel(this.listenPort());
+        const endpoint = state.observed.endpoint;
+        if (state.observed.phase !== "ready" || !endpoint) throw new Error(state.observed.detail ?? "Cloudflare Quick Tunnel 未就绪");
+        await writeGatewayConfigChanges({ tunnelUrl: endpoint }, { generation: state.generation, endpoint });
+        this.status = `已切换到 Cloudflare · ${endpoint}/mcp · URL 已保存，按 R 重启 Gateway 应用 OAuth issuer`;
+      } else {
+        const openai = this.configView?.tunnels.openai;
+        if (!openai?.enabled) throw new Error("请先启用 OpenAI Tunnel，保存配置并按 R 重启 Gateway");
+        const pending = [
+          this.configChanges.openAiTunnelEnabled,
+          this.configChanges.openAiTunnelBinaryPath,
+          this.configChanges.openAiTunnelIdEnv,
+          this.configChanges.openAiRuntimeKeyEnv,
+          this.configChanges.openAiMinimumVersion,
+          this.configChanges.openAiCredentialTtlMs,
+        ].some((value) => value !== undefined);
+        if (pending) throw new Error("OpenAI Tunnel 配置尚未保存；请先保存并按 R 重启 Gateway");
+        if (this.snapshot.tunnel?.alive) await stopQuickTunnel(this.snapshot.tunnel.generation);
+        const state = await startOpenAiTunnel({
+          localPort: this.listenPort(),
+          ...(openai.binaryPath ? { binaryPath: openai.binaryPath } : {}),
+          tunnelIdEnv: openai.tunnelIdEnv,
+          runtimeKeyEnv: openai.runtimeKeyEnv,
+        });
+        if (state.observed.phase !== "ready") throw new Error(state.observed.detail ?? "OpenAI Tunnel 未就绪");
+        this.status = `已切换到 OpenAI Tunnel${state.observed.opaqueId ? ` · ${state.observed.opaqueId}` : ""}`;
+      }
+    } catch (error) {
+      this.status = `隧道切换失败: ${error instanceof Error ? error.message : String(error)}`;
+    } finally {
+      this.starting = false;
+      this.configView = readGatewayConfigView() ?? this.configView;
+    }
+    await this.refresh();
+  }
+
+  private async stopTunnelProvider(provider: "cloudflare" | "openai"): Promise<void> {
+    if (this.starting) return;
+    this.starting = true;
+    this.status = `正在停止 ${provider === "cloudflare" ? "Cloudflare" : "OpenAI"} Tunnel…`;
+    this.safeRequestRender();
+    try {
+      const state = provider === "cloudflare" ? this.snapshot.tunnel : this.snapshot.openAiTunnel;
+      if (provider === "cloudflare") await stopQuickTunnel(state?.generation);
+      else await stopOpenAiTunnel(state?.generation);
+      this.status = `${provider === "cloudflare" ? "Cloudflare" : "OpenAI"} Tunnel 已停止`;
+    } catch (error) {
+      this.status = `停止隧道失败: ${error instanceof Error ? error.message : String(error)}`;
+    } finally {
+      this.starting = false;
+    }
+    await this.refresh();
+  }
+
   async refresh(): Promise<void> {
     if (this.closed) return;
     if (this.refreshPromise) return this.refreshPromise;
@@ -728,11 +803,11 @@ export class McpxOverlay implements Component, Focusable {
     try {
       const cwd = this.params.cwd;
       const now = Date.now();
-      const binary = locateMcpx();
-      const fork = detectMcpxForPmf();
+      const binary = locateGateway();
+      const fork = detectGateway();
       const version = fork.version ? `pi-maestro-gateway ${fork.version}` : undefined;
       const controlStatus = await readGatewayControlStatus(cwd);
-      const configPath = join(homedir(), ".mcpx", "config.yaml");
+      const configPath = gatewayConfigPath();
       const workspaces = (await listGatewayWorkspaces()).map((workspace) => ({
         name: basename(workspace.path),
         path: workspace.path,
@@ -745,15 +820,15 @@ export class McpxOverlay implements Component, Focusable {
       } catch (error) {
         collaborationError = error instanceof Error ? error.message : String(error);
       }
-      const tunnel = readTunnelState();
+      const [tunnel, openAiTunnel] = await Promise.all([readTunnelState(), readOpenAiTunnelState()]);
       const { endpoint, reachable, endpointVersion } = await probeEndpoint(configPath);
       const online = reachable;
-      const opsPassword = readOpsPassword();
+      const opsPassword = readGatewayOpsPassword();
 
-      let connections: McpxConnectionInfo[] | undefined;
-      let runtimeWindows: McpxRuntimeWindow[] | undefined;
-      let runtimeWindowFallback: McpxSnapshot["runtimeWindowFallback"];
-      const collaborationMonitors: Record<string, McpxGatewayMonitor[]> = {};
+      let connections: GatewayConnectionInfo[] | undefined;
+      let runtimeWindows: GatewayRuntimeWindow[] | undefined;
+      let runtimeWindowFallback: GatewaySnapshot["runtimeWindowFallback"];
+      const collaborationMonitors: Record<string, GatewayMonitor[]> = {};
       const collaborationMemberIds: Record<string, string> = {};
       if (online) {
         const client = this.clientForEndpoint(endpoint);
@@ -763,9 +838,9 @@ export class McpxOverlay implements Component, Focusable {
           const windowGroups = await Promise.all(connections.map((session) => client.listWindows(session)));
           runtimeWindows = windowGroups.flat();
         } catch (error) {
-          runtimeWindowFallback = error instanceof McpxClientError && error.kind === "auth"
+          runtimeWindowFallback = error instanceof GatewayClientError && error.kind === "auth"
             ? "auth"
-            : error instanceof McpxClientError && error.kind === "unsupported"
+            : error instanceof GatewayClientError && error.kind === "unsupported"
               ? "unsupported"
               : "unavailable";
         }
@@ -805,7 +880,8 @@ export class McpxOverlay implements Component, Focusable {
           runtimeWindows,
           runtimeWindowFallback,
           tunnel,
-          tasks: await readGatewayDelegatedTasks(),
+          openAiTunnel,
+          tasks: await readGatewayTasks(cwd),
           collaborativeSessions,
           collaborationMonitors,
           collaborationMemberIds,
@@ -822,16 +898,8 @@ export class McpxOverlay implements Component, Focusable {
         this.collaborationSelected = Math.min(this.collaborationSelected, Math.max(0, collaborativeSessions.length - 1));
         this.collaborationItemSelected = Math.min(this.collaborationItemSelected, Math.max(0, this.collaborationItems().length - 1));
       }
-      if (tunnel.url) {
-        void probeTunnelHealth(tunnel.url).then((health) => {
-          if (generation === this.refreshGeneration && this.snapshot.tunnel === tunnel && !this.closed) {
-            this.snapshot.tunnel = { ...tunnel, health };
-            this.safeRequestRender();
-          }
-        }).catch(() => { /* probeTunnelHealth never rejects; defensive */ });
-      } else if (!tunnel.alive) {
-        tunnel.health = "dead";
-      }
+      if (!tunnel.url && !tunnel.alive) tunnel.health = "dead";
+      if (!openAiTunnel.opaqueId && !openAiTunnel.alive) openAiTunnel.health = "dead";
     } catch (error) {
       if (generation === this.refreshGeneration && !this.closed) {
         this.snapshot = { ...this.snapshot, refreshing: false, error: error instanceof Error ? error.message : String(error) };
@@ -844,17 +912,17 @@ export class McpxOverlay implements Component, Focusable {
     this.safeRequestRender();
   }
 
-  private currentWindowSession(): McpxConnectionInfo | undefined {
+  private currentWindowSession(): GatewayConnectionInfo | undefined {
     return this.snapshot.connections?.[this.windowSessionSelected];
   }
 
-  private windowEntries(): McpxRuntimeWindow[] {
+  private windowEntries(): GatewayRuntimeWindow[] {
     const session = this.currentWindowSession();
     if (!session) return [];
     return (this.snapshot.runtimeWindows ?? []).filter((window) => window.remoteSessionId === session.sessionId);
   }
 
-  private selectedRuntimeWindow(): McpxRuntimeWindow | undefined {
+  private selectedRuntimeWindow(): GatewayRuntimeWindow | undefined {
     return this.windowEntries()[this.windowSelected];
   }
 
@@ -883,7 +951,7 @@ export class McpxOverlay implements Component, Focusable {
     try {
       const next = await client.observeWindow(session, window, cursor, 20);
       if (generation !== this.observeGeneration || this.mode !== "window-detail" || this.selectedRuntimeWindow()?.id !== window.id) return;
-      const merged = new Map<string, McpxWindowEvent>();
+      const merged = new Map<string, GatewayWindowEvent>();
       for (const event of [...(this.windowObservation?.events ?? []), ...next.events]) {
         merged.set(windowEventKey(event), event);
       }
@@ -892,7 +960,7 @@ export class McpxOverlay implements Component, Focusable {
     } catch (error) {
       if (generation !== this.observeGeneration) return;
       this.status = `observe: ${error instanceof Error ? error.message : String(error)}`;
-      if (error instanceof McpxClientError && (error.kind === "auth" || error.kind === "unsupported")) {
+      if (error instanceof GatewayClientError && (error.kind === "auth" || error.kind === "unsupported")) {
         this.stopWindowObserve();
       }
       this.safeRequestRender();
@@ -951,7 +1019,7 @@ export class McpxOverlay implements Component, Focusable {
     return this.snapshot.collaborativeSessions?.[this.collaborationSelected];
   }
 
-  private collaborationItems(): Array<{ kind: "todo"; todo: GatewayTodoTaskV1 } | { kind: "monitor"; monitor: McpxGatewayMonitor }> {
+  private collaborationItems(): Array<{ kind: "todo"; todo: GatewayTodoTaskV1 } | { kind: "monitor"; monitor: GatewayMonitor }> {
     const state = this.currentCollaborativeSession();
     if (!state) return [];
     return [
@@ -1094,6 +1162,15 @@ export class McpxOverlay implements Component, Focusable {
         this.params.close();
       }
       this.params.requestRender();
+      return;
+    }
+    if (data === "1" && this.mode === "config" && !this.configEditing && !this.configListKey) {
+      this.mode = "list";
+      this.params.requestRender();
+      return;
+    }
+    if (data === "2" && this.mode === "list") {
+      this.enterConfigMode();
       return;
     }
     if (this.mode === "monitor-detail") {
@@ -1251,27 +1328,23 @@ export class McpxOverlay implements Component, Focusable {
       return;
     }
     if (data === "c" || data === "C") {
-      if (data === "C") {
-        this.enterConfigMode();
-      } else if (this.params.onOpenWizard) {
-        this.params.onOpenWizard();
-      }
+      this.enterConfigMode();
       return;
     }
     if (data === "s" || data === "S") {
-      void this.startMcpx();
+      void this.startGateway();
       return;
     }
     if (data === "x" || data === "X") {
-      void this.stopMcpx();
+      void this.stopGateway();
       return;
     }
     if (data === "R") {
-      void this.restartMcpx();
+      void this.restartGateway();
       return;
     }
     if (data === "t" || data === "T") {
-      void this.refreshTunnelAndMcpx();
+      void this.refreshTunnelAndGateway();
       return;
     }
     if (data === "w" || data === "W") {
@@ -1313,7 +1386,7 @@ export class McpxOverlay implements Component, Focusable {
         this.status = ok ? `unregistered: ${this.params.cwd}` : `remove failed: ${message}`;
       } else {
         const registeredNow = permanent
-          ? await registerMcpxWorkspacePermanent(this.params.cwd)
+          ? await registerGatewayWorkspacePermanent(this.params.cwd)
           : await startWorkspaceLease(this.params.cwd);
         this.status = registeredNow
           ? `registered: ${this.params.cwd}`
@@ -1335,40 +1408,70 @@ export class McpxOverlay implements Component, Focusable {
   private configEntries(): ConfigEntry[] {
     const v = this.configView;
     const listLen = (arr: string[] | undefined) => arr?.length ?? 0;
-    return [
-      { group: "server", key: "server.host", label: "host", kind: "text", value: v?.server.host ?? "127.0.0.1" },
-      { group: "server", key: "server.port", label: "port", kind: "number", value: String(v?.server.port ?? 9090) },
-      { group: "server", key: "server.disable_localhost_protection", label: "disable_localhost_protection", kind: "bool", value: String(v?.server.disableLocalhostProtection ?? false) },
-      { group: "server", key: "server.trust_proxy_headers", label: "trust_proxy_headers", kind: "bool", value: String(v?.server.trustProxyHeaders ?? false) },
-      { group: "auth", key: "auth.mode", label: "mode", kind: "cycle", value: v?.auth.mode ?? "open", options: ["open", "bearer", "oauth"] },
-      { group: "auth", key: "auth.token", label: "token", kind: "text", value: v?.auth.token ?? "" },
-      { group: "auth", key: "auth.oauthPassword", label: "oauth password", kind: "text", value: v?.auth.oauthPassword ?? "" },
-      { group: "auth", key: "auth.oauthServerURL", label: "oauth server_url", kind: "text", value: v?.auth.oauthServerURL ?? "" },
-      { group: "commands", key: "commands.default", label: "default", kind: "cycle", value: v?.commands.default ?? "allow", options: ["allow", "confirm", "deny"] },
-      { group: "commands", key: "commands.autoAllowReadonly", label: "auto_allow_readonly", kind: "cycle", value: String(v?.commands.autoAllowReadonly ?? "null"), options: ["null", "true", "false"] },
-      { group: "commands", key: "commandsAllow", label: `allow (${listLen(this.configChanges.commandsAllow)}/${v?.commands.allow.length ?? 0})`, kind: "list", listKey: "commandsAllow" },
-      { group: "commands", key: "commandsConfirm", label: `confirm (${listLen(this.configChanges.commandsConfirm)}/${v?.commands.confirm.length ?? 0})`, kind: "list", listKey: "commandsConfirm" },
-      { group: "commands", key: "commandsDeny", label: `deny (${listLen(this.configChanges.commandsDeny)}/${v?.commands.deny.length ?? 0})`, kind: "list", listKey: "commandsDeny" },
-      { group: "files", key: "files.max_read_bytes", label: "max_read_bytes", kind: "number", value: String(v?.files.maxReadBytes ?? 1048576) },
-      { group: "files", key: "files.max_patch_files", label: "max_patch_files", kind: "number", value: String(v?.files.maxPatchFiles ?? 20) },
-      { group: "files", key: "filesAllow", label: `allow (${listLen(this.configChanges.filesAllow)}/${v?.files.allow.length ?? 0})`, kind: "list", listKey: "filesAllow" },
-      { group: "files", key: "filesConfirm", label: `confirm (${listLen(this.configChanges.filesConfirm)}/${v?.files.confirm.length ?? 0})`, kind: "list", listKey: "filesConfirm" },
-      { group: "files", key: "filesDeny", label: `deny (${listLen(this.configChanges.filesDeny)}/${v?.files.deny.length ?? 0})`, kind: "list", listKey: "filesDeny" },
-      { group: "write", key: "save", label: "保存写入 config.yaml", kind: "action", action: "save" },
-      { group: "write", key: "discard", label: "放弃修改", kind: "action", action: "discard" },
+    const left: ConfigEntry[] = [
+      { column: 0, group: "server", key: "server.host", label: "host", kind: "text", value: v?.server.host ?? "127.0.0.1" },
+      { column: 0, group: "server", key: "server.port", label: "port", kind: "number", value: String(v?.server.port ?? 9090) },
+      { column: 0, group: "server", key: "server.disable_localhost_protection", label: "disable_localhost_protection", kind: "bool", value: String(v?.server.disableLocalhostProtection ?? false) },
+      { column: 0, group: "server", key: "server.trust_proxy_headers", label: "trust_proxy_headers", kind: "bool", value: String(v?.server.trustProxyHeaders ?? false) },
+      { column: 0, group: "auth", key: "auth.mode", label: "mode", kind: "cycle", value: v?.auth.mode ?? "open", options: ["open", "bearer", "oauth"] },
+      { column: 0, group: "auth", key: "auth.token", label: "token", kind: "text", value: v?.auth.token ?? "" },
+      { column: 0, group: "auth", key: "auth.oauthPassword", label: "oauth password", kind: "text", value: v?.auth.oauthPassword ?? "" },
+      { column: 0, group: "auth", key: "auth.oauthServerURL", label: "oauth server_url", kind: "text", value: v?.auth.oauthServerURL ?? "" },
+      { column: 0, group: "commands", key: "commands.default", label: "default", kind: "cycle", value: v?.commands.default ?? "allow", options: ["allow", "confirm", "deny"] },
+      { column: 0, group: "commands", key: "commands.autoAllowReadonly", label: "auto_allow_readonly", kind: "cycle", value: String(v?.commands.autoAllowReadonly ?? "null"), options: ["null", "true", "false"] },
+      { column: 0, group: "commands", key: "commandsAllow", label: `allow (${listLen(this.configChanges.commandsAllow)}/${v?.commands.allow.length ?? 0})`, kind: "list", listKey: "commandsAllow" },
+      { column: 0, group: "commands", key: "commandsConfirm", label: `confirm (${listLen(this.configChanges.commandsConfirm)}/${v?.commands.confirm.length ?? 0})`, kind: "list", listKey: "commandsConfirm" },
+      { column: 0, group: "commands", key: "commandsDeny", label: `deny (${listLen(this.configChanges.commandsDeny)}/${v?.commands.deny.length ?? 0})`, kind: "list", listKey: "commandsDeny" },
+      { column: 0, group: "write", key: "save", label: "保存写入 config.yaml", kind: "action", action: "save" },
+      { column: 0, group: "write", key: "discard", label: "放弃修改", kind: "action", action: "discard" },
     ];
+    const openai = v?.tunnels.openai;
+    const cloudflare = this.snapshot.tunnel;
+    const openAiState = this.snapshot.openAiTunnel;
+    const right: ConfigEntry[] = [
+      { column: 1, group: "tunnel", key: "tunnel.provider", label: "接入方式", kind: "cycle", value: this.tunnelProvider, options: ["cloudflare", "openai"] },
+      ...(this.tunnelProvider === "cloudflare" ? [
+        { column: 1 as const, group: "tunnel", key: "tunnel.cloudflare.status", label: "Cloudflare 状态", kind: "readonly" as const, value: cloudflare?.alive ? `${cloudflare.phase}${cloudflare.url ? ` · ${cloudflare.url}` : ""}` : "未运行" },
+        { column: 1 as const, group: "tunnel", key: "tunnel.cloudflare.start", label: "启动并切换到 Cloudflare", kind: "action" as const, action: "start-cloudflare" as const },
+        { column: 1 as const, group: "tunnel", key: "tunnel.cloudflare.stop", label: "停止 Cloudflare Tunnel", kind: "action" as const, action: "stop-cloudflare" as const },
+        { column: 1 as const, group: "tunnel", key: "tunnel.cloudflare.hint", label: "Quick Tunnel 自动生成 URL；无需账号", kind: "readonly" as const, value: "" },
+      ] : [
+        { column: 1 as const, group: "tunnel", key: "tunnel.openai.status", label: "OpenAI 状态", kind: "readonly" as const, value: openAiState?.alive ? `${openAiState.phase}${openAiState.opaqueId ? ` · ${openAiState.opaqueId}` : ""}` : "未运行" },
+        { column: 1 as const, group: "tunnel", key: "tunnel.openai.enabled", label: "enabled (experimental)", kind: "bool" as const, value: String(openai?.enabled ?? false) },
+        { column: 1 as const, group: "tunnel", key: "tunnel.openai.binaryPath", label: "binary_path", kind: "text" as const, value: openai?.binaryPath ?? "PATH: tunnel-client" },
+        { column: 1 as const, group: "tunnel", key: "tunnel.openai.tunnelIdEnv", label: "tunnel_id_env", kind: "text" as const, value: openai?.tunnelIdEnv ?? "CONTROL_PLANE_TUNNEL_ID" },
+        { column: 1 as const, group: "tunnel", key: "tunnel.openai.runtimeKeyEnv", label: "runtime_key_env", kind: "text" as const, value: openai?.runtimeKeyEnv ?? "CONTROL_PLANE_API_KEY" },
+        { column: 1 as const, group: "tunnel", key: "tunnel.openai.minimumVersion", label: "minimum_version", kind: "text" as const, value: openai?.minimumVersion ?? "0.0.14" },
+        { column: 1 as const, group: "tunnel", key: "tunnel.openai.credentialTtlMs", label: "credential_ttl_ms", kind: "number" as const, value: String(openai?.credentialTtlMs ?? 300000) },
+        { column: 1 as const, group: "tunnel", key: "tunnel.openai.start", label: "启动并切换到 OpenAI", kind: "action" as const, action: "start-openai" as const },
+        { column: 1 as const, group: "tunnel", key: "tunnel.openai.stop", label: "停止 OpenAI Tunnel", kind: "action" as const, action: "stop-openai" as const },
+        { column: 1 as const, group: "tunnel", key: "tunnel.openai.hint", label: "凭据只填 env 名；详情运行 /install openai-tunnel", kind: "readonly" as const, value: "" },
+      ]),
+      { column: 1, group: "files", key: "files.max_read_bytes", label: "max_read_bytes", kind: "number", value: String(v?.files.maxReadBytes ?? 1048576) },
+      { column: 1, group: "files", key: "files.max_patch_files", label: "max_patch_files", kind: "number", value: String(v?.files.maxPatchFiles ?? 20) },
+      { column: 1, group: "files", key: "filesAllow", label: `allow (${listLen(this.configChanges.filesAllow)}/${v?.files.allow.length ?? 0})`, kind: "list", listKey: "filesAllow" },
+      { column: 1, group: "files", key: "filesConfirm", label: `confirm (${listLen(this.configChanges.filesConfirm)}/${v?.files.confirm.length ?? 0})`, kind: "list", listKey: "filesConfirm" },
+      { column: 1, group: "files", key: "filesDeny", label: `deny (${listLen(this.configChanges.filesDeny)}/${v?.files.deny.length ?? 0})`, kind: "list", listKey: "filesDeny" },
+    ];
+    return [...left, ...right];
   }
 
   private enterConfigMode(): void {
-    this.configView = readMcpxConfigView() ?? undefined;
+    this.configView = readGatewayConfigView() ?? undefined;
     this.configChanges = {};
     this.configSelected = 0;
     this.configEditing = false;
     this.configDraft = "";
     this.configListKey = undefined;
     this.configListSelected = 0;
+    this.tunnelProvider = this.snapshot.openAiTunnel?.alive ? "openai" : "cloudflare";
     this.mode = "config";
     this.params.requestRender();
+  }
+
+  /** Used by first-run registration to stay inside the two-page Gateway surface. */
+  showConfigPage(): void {
+    this.enterConfigMode();
   }
 
   private handleConfigInput(data: string): void {
@@ -1425,13 +1528,19 @@ export class McpxOverlay implements Component, Focusable {
       return;
     }
     if (matchesKey(data, Key.up) || matchesKey(data, "k")) {
-      this.configSelected = Math.max(0, this.configSelected - 1);
-      this.params.requestRender();
+      this.moveConfigSelection(-1);
       return;
     }
     if (matchesKey(data, Key.down) || matchesKey(data, "j")) {
-      this.configSelected = Math.min(entries.length - 1, this.configSelected + 1);
-      this.params.requestRender();
+      this.moveConfigSelection(1);
+      return;
+    }
+    if (matchesKey(data, Key.left) || matchesKey(data, "h")) {
+      this.switchConfigColumn(0);
+      return;
+    }
+    if (matchesKey(data, Key.right) || matchesKey(data, "l")) {
+      this.switchConfigColumn(1);
       return;
     }
     if (isEnter(data)) {
@@ -1449,8 +1558,29 @@ export class McpxOverlay implements Component, Focusable {
     }
   }
 
+  private moveConfigSelection(delta: -1 | 1): void {
+    const entries = this.configEntries();
+    const current = entries[this.configSelected];
+    if (!current) return;
+    const column = entries.map((entry, index) => ({ entry, index })).filter(({ entry }) => entry.column === current.column);
+    const position = column.findIndex(({ entry }) => entry.key === current.key);
+    this.configSelected = column[Math.max(0, Math.min(column.length - 1, position + delta))]?.index ?? this.configSelected;
+    this.params.requestRender();
+  }
+
+  private switchConfigColumn(column: 0 | 1): void {
+    const entries = this.configEntries();
+    const current = entries[this.configSelected];
+    if (!current || current.column === column) return;
+    const source = entries.filter((entry) => entry.column === current.column);
+    const target = entries.map((entry, index) => ({ entry, index })).filter(({ entry }) => entry.column === column);
+    const position = Math.max(0, source.findIndex((entry) => entry.key === current.key));
+    this.configSelected = target[Math.min(position, target.length - 1)]?.index ?? this.configSelected;
+    this.params.requestRender();
+  }
+
   private activateConfigEntry(entry: ConfigEntry | undefined): void {
-    if (!entry) return;
+    if (!entry || entry.kind === "readonly") return;
     if (entry.kind === "list") {
       this.configListKey = entry.listKey;
       this.configListSelected = 0;
@@ -1461,9 +1591,13 @@ export class McpxOverlay implements Component, Focusable {
       if (entry.action === "save") void this.saveConfig();
       else if (entry.action === "discard") {
         this.configChanges = {};
+        this.configView = readGatewayConfigView() ?? this.configView;
         this.status = "已放弃未保存修改";
         this.params.requestRender();
-      }
+      } else if (entry.action === "start-cloudflare") void this.startTunnelProvider("cloudflare");
+      else if (entry.action === "stop-cloudflare") void this.stopTunnelProvider("cloudflare");
+      else if (entry.action === "start-openai") void this.startTunnelProvider("openai");
+      else if (entry.action === "stop-openai") void this.stopTunnelProvider("openai");
       return;
     }
     if (entry.kind === "cycle" && entry.options) {
@@ -1503,14 +1637,21 @@ export class McpxOverlay implements Component, Focusable {
       case "server.port": if (Number.isInteger(num) && num > 0 && num < 65536) { this.configChanges.port = num; if (this.configView) this.configView.server.port = num; } break;
       case "server.disable_localhost_protection": this.configChanges.disableLocalhostProtection = value === "true"; if (this.configView) this.configView.server.disableLocalhostProtection = value === "true"; break;
       case "server.trust_proxy_headers": this.configChanges.trustProxyHeaders = value === "true"; if (this.configView) this.configView.server.trustProxyHeaders = value === "true"; break;
-      case "auth.mode": this.configChanges.authMode = value as McpxConfigChanges["authMode"]; if (this.configView) this.configView.auth.mode = value; break;
+      case "auth.mode": this.configChanges.authMode = value as GatewayConfigChanges["authMode"]; if (this.configView) this.configView.auth.mode = value; break;
       case "auth.token": this.configChanges.authToken = value; if (this.configView) this.configView.auth.token = value; break;
       case "auth.oauthPassword": this.configChanges.oauthPassword = value; if (this.configView) this.configView.auth.oauthPassword = value; break;
       case "auth.oauthServerURL": this.configChanges.oauthServerURL = value; if (this.configView) this.configView.auth.oauthServerURL = value; break;
-      case "commands.default": this.configChanges.commandsDefault = value as McpxConfigChanges["commandsDefault"]; if (this.configView) this.configView.commands.default = value; break;
+      case "commands.default": this.configChanges.commandsDefault = value as GatewayConfigChanges["commandsDefault"]; if (this.configView) this.configView.commands.default = value; break;
       case "commands.autoAllowReadonly": { const ar = value === "null" ? null : value === "true"; this.configChanges.commandsAutoReadonly = ar; if (this.configView) this.configView.commands.autoAllowReadonly = ar; break; }
       case "files.max_read_bytes": if (Number.isInteger(num) && num > 0) { this.configChanges.filesMaxReadBytes = num; if (this.configView) this.configView.files.maxReadBytes = num; } break;
       case "files.max_patch_files": if (Number.isInteger(num) && num > 0) { this.configChanges.filesMaxPatchFiles = num; if (this.configView) this.configView.files.maxPatchFiles = num; } break;
+      case "tunnel.provider": this.tunnelProvider = value === "openai" ? "openai" : "cloudflare"; break;
+      case "tunnel.openai.enabled": this.configChanges.openAiTunnelEnabled = value === "true"; if (this.configView) this.configView.tunnels.openai.enabled = value === "true"; break;
+      case "tunnel.openai.binaryPath": this.configChanges.openAiTunnelBinaryPath = value === "PATH: tunnel-client" ? "" : value; if (this.configView) this.configView.tunnels.openai.binaryPath = value === "PATH: tunnel-client" ? "" : value; break;
+      case "tunnel.openai.tunnelIdEnv": this.configChanges.openAiTunnelIdEnv = value; if (this.configView) this.configView.tunnels.openai.tunnelIdEnv = value; break;
+      case "tunnel.openai.runtimeKeyEnv": this.configChanges.openAiRuntimeKeyEnv = value; if (this.configView) this.configView.tunnels.openai.runtimeKeyEnv = value; break;
+      case "tunnel.openai.minimumVersion": this.configChanges.openAiMinimumVersion = value; if (this.configView) this.configView.tunnels.openai.minimumVersion = value; break;
+      case "tunnel.openai.credentialTtlMs": if (Number.isInteger(num) && num >= 1_000 && num <= 3_600_000) { this.configChanges.openAiCredentialTtlMs = num; if (this.configView) this.configView.tunnels.openai.credentialTtlMs = num; } break;
     }
   }
 
@@ -1544,12 +1685,12 @@ export class McpxOverlay implements Component, Focusable {
     this.status = "正在写入 config.yaml…";
     this.params.requestRender();
     try {
-      const { summary } = writeMcpxConfigChanges(this.configChanges);
+      const { summary } = await writeGatewayConfigChanges(this.configChanges);
       this.status = summary.length > 0
         ? `已写入 ${summary.length} 项 — 重启 Pi Maestro Gateway 后生效（R 重启 · 或 /gateway 重入）`
         : "无修改需写入";
       // Reload the view so the rendered values match what is now on disk.
-      this.configView = readMcpxConfigView() ?? undefined;
+      this.configView = readGatewayConfigView() ?? undefined;
       this.configChanges = {};
       this.configListKey = undefined;
       this.params.requestRender();
@@ -1561,10 +1702,10 @@ export class McpxOverlay implements Component, Focusable {
 
   private renderConfig(width: number): string[] {
     const inner = width - 2;
-    const rows = [fitLine("Pi Maestro Gateway 配置 · ↑↓ 选择 · Enter/space 编辑 · Esc 返回", inner), rule(inner)];
+    const rows = [fitLine(`Pi Maestro Gateway · 1 主页 · ${fg("36", "[2 配置]")}`, inner), rule(inner)];
     if (!this.configView) {
-      rows.push(fitLine(fg("33", "未读取到 config.yaml — 可先按 c 走向导生成，或保存后即生成"), inner));
-      rows.push(...fitSegments(inner, ["Esc back"]));
+      rows.push(fitLine(fg("31", "配置读取失败；请检查 config.yaml 格式后按 Esc 返回主页"), inner));
+      rows.push(...fitSegments(inner, ["1 主页", "Esc 返回"]));
       return frame(rows, width);
     }
     if (this.configListKey) {
@@ -1574,21 +1715,46 @@ export class McpxOverlay implements Component, Focusable {
       return frame(rows, width);
     }
     const entries = this.configEntries();
+    if (inner >= 76) {
+      const gap = 3;
+      const leftWidth = Math.floor((inner - gap) / 2);
+      const rightWidth = inner - gap - leftWidth;
+      const left = this.renderConfigColumn(entries, 0, leftWidth);
+      const right = this.renderConfigColumn(entries, 1, rightWidth);
+      rows.push(fitLine(fg("36", "Gateway 基础与命令安全"), leftWidth) + " │ " + fitLine(fg("36", "公网隧道与文件安全"), rightWidth));
+      for (let index = 0; index < Math.max(left.length, right.length); index++) {
+        rows.push((left[index] ?? " ".repeat(leftWidth)) + " │ " + (right[index] ?? " ".repeat(rightWidth)));
+      }
+    } else {
+      rows.push(...this.renderConfigColumn(entries, 0, inner));
+      rows.push(...this.renderConfigColumn(entries, 1, inner));
+    }
+    rows.push(rule(inner));
+    rows.push(fitLine(fg("2", "OpenAI 只保存 tunnel-client 路径与 env 名，不保存密钥；切换 provider 会先停止另一侧"), inner));
+    if (this.status) rows.push(fitLine(this.status, inner));
+    rows.push(...fitSegments(inner, ["←→ 切栏", "↑↓ 选择", "Enter 编辑/执行", "space 切换", "1 主页", "Esc 返回"]));
+    return frame(rows, width);
+  }
+
+  private renderConfigColumn(entries: ConfigEntry[], column: 0 | 1, width: number): string[] {
+    const rows: string[] = [];
     let currentGroup = "";
-    for (let i = 0; i < entries.length; i++) {
-      const entry = entries[i]!;
+    entries.forEach((entry, index) => {
+      if (entry.column !== column) return;
       if (entry.group !== currentGroup) {
         currentGroup = entry.group;
-        rows.push(fitLine(fg("36", `「${groupLabel(currentGroup)}」`), inner));
+        rows.push(fitLine(fg("36", `「${groupLabel(currentGroup)}」`), width));
       }
-      const selected = i === this.configSelected && !this.configEditing;
+      const selected = index === this.configSelected && !this.configEditing;
       const marker = selected ? "›" : " ";
       let valueText: string;
-      if (entry.kind === "list") {
+      if (entry.key === "tunnel.provider") {
+        const cloudflare = this.tunnelProvider === "cloudflare" ? fg("32", "[Cloudflare]") : " Cloudflare ";
+        const openai = this.tunnelProvider === "openai" ? fg("32", "[OpenAI experimental]") : " OpenAI experimental ";
+        valueText = `${cloudflare} ↔ ${openai}`;
+      } else if (entry.kind === "list" || entry.kind === "action" || entry.kind === "readonly" && !entry.value) {
         valueText = entry.label;
-      } else if (this.configEditing && i === this.configSelected) {
-        // Show the current value in parens so the user sees what they are replacing,
-        // followed by the new draft being typed.
+      } else if (this.configEditing && index === this.configSelected) {
         valueText = `${entry.label} (${entry.value ?? ""}): ${this.configDraft}▌`;
       } else if (entry.kind === "bool") {
         valueText = `${entry.label}: ${entry.value === "true" ? fg("32", "true") : fg("31", "false")}`;
@@ -1597,13 +1763,9 @@ export class McpxOverlay implements Component, Focusable {
       } else {
         valueText = `${entry.label}: ${entry.value ?? ""}`;
       }
-      rows.push(fitLine(`${marker} ${valueText}`, inner));
-    }
-    rows.push(rule(inner));
-    rows.push(fitLine(fg("2", "  Enter/space 编辑标量 · 进入列表后 a 添加 d 删除 · 保存后按 R 重启 Pi Maestro Gateway"), inner));
-    if (this.status) rows.push(fitLine(this.status, inner));
-    rows.push(...fitSegments(inner, ["Enter 编辑", "space 切换", "Esc 返回"]));
-    return frame(rows, width);
+      rows.push(fitLine(`${marker} ${valueText}`, width));
+    });
+    return rows;
   }
 
   private renderConfigList(inner: number): string[] {
@@ -1633,90 +1795,46 @@ export class McpxOverlay implements Component, Focusable {
 
   private renderList(width: number): string[] {
     const inner = width - 2;
-    const rows = [fitLine("Pi Maestro Gateway · 连接监控", inner), rule(inner)];
+    const rows = [fitLine(`Pi Maestro Gateway · ${fg("36", "[1 主页]")} · 2 配置`, inner), rule(inner)];
+    rows.push(fitLine(fg("36", "服务概览"), inner));
     rows.push(...this.renderForkRows(inner));
     rows.push(this.renderConnectionRow(inner));
-    rows.push(rule(inner));
-    rows.push(fitLine(`MCP 服务器（${this.snapshot.mcpServers.length}）`, inner));
-    if (this.snapshot.mcpServers.length === 0) {
-      rows.push(fitLine("  ○ 未配置上游 MCP 服务器（.mcp.json）", inner));
-    } else {
-      for (const server of this.snapshot.mcpServers.slice(0, 4)) {
-        const mark = server.executable ? fg("32", "✓") : fg("31", "✗");
-        const extra = this.snapshot.mcpServers.length > 4 ? "…" : "";
-        rows.push(fitLine(`  ${mark} ${server.name} · ${server.type} · ${server.command}${server.description ? ` · ${server.description}` : ""}${extra}`, inner));
-      }
-    }
-    rows.push(rule(inner));
-    rows.push(fitLine(`客户端连接（${this.snapshot.connections?.length ?? "—"}）`, inner));
-    if (this.snapshot.endpoint === "offline" || this.snapshot.endpoint === "unknown") {
-      rows.push(fitLine("  ○ Gateway HTTP 未运行 — 按 s 启动 Pi Maestro Gateway", inner));
-    } else if (!this.snapshot.connections || this.snapshot.connections.length === 0) {
-      rows.push(fitLine("  ○ 无活跃 Remote Session 连接（按 x 停止 Pi Maestro Gateway）", inner));
-    } else {
-      for (const connection of this.snapshot.connections.slice(0, 3)) {
-        rows.push(fitLine(`  ${connection.workspace || "?"} · ${connection.status}${connection.label ? ` · ${connection.label}` : ""} · ${connection.sessionId.slice(0, 8)}`, inner));
-      }
-    }
+    const brokenMcp = this.snapshot.mcpServers.filter((server) => !server.executable).length;
+    rows.push(fitLine(`上游 MCP ${this.snapshot.mcpServers.length} · 客户端 ${this.snapshot.connections?.length ?? "—"} · 工作区 ${this.snapshot.workspaces.length}${brokenMcp ? ` · ${fg("31", `${brokenMcp} 个命令不可用`)}` : ""}`, inner));
     rows.push(rule(inner));
     rows.push(...this.renderTunnelRows(inner));
     rows.push(...this.renderOpsPasswordRows(inner));
-    rows.push(...this.renderDelegatedTaskRows(inner));
     rows.push(rule(inner));
-    rows.push(...this.renderCollaborationSummary(inner));
+    const sessionCount = this.snapshot.collaborativeSessions?.length ?? 0;
+    const todos = (this.snapshot.collaborativeSessions ?? []).reduce((count, state) => count + state.todos.length, 0);
+    const monitors = Object.values(this.snapshot.collaborationMonitors ?? {}).reduce((count, values) => count + values.length, 0);
+    const windowCount = this.snapshot.runtimeWindows?.length ?? this.snapshot.windows.length;
+    rows.push(fitLine(`协作概览 · ${sessionCount} Session · Gateway Todo ${todos} · Monitor ${monitors} · G 管理`, inner));
+    rows.push(fitLine(`Pi 窗口 ${windowCount} · V 查看 · Gateway Todo 与 Pi Todo 独立`, inner));
     rows.push(rule(inner));
-    const runtimeWindows = this.snapshot.runtimeWindows;
-    rows.push(fitLine(`Pi 窗口（${runtimeWindows?.length ?? this.snapshot.windows.length}） · V 查看`, inner));
-    if (runtimeWindows !== undefined) {
-      if (runtimeWindows.length === 0) {
-        rows.push(fitLine("  ○ Remote Sessions 当前无 registered/managed 窗口", inner));
-      } else {
-        for (const window of runtimeWindows.slice(0, 6)) {
-          const source = window.kind === "managed" ? "managed" : "registered";
-          rows.push(fitLine(`  ${source} · ${window.displayName} · ${window.status} · ${window.workspace || window.remoteSessionId.slice(0, 8)}`, inner));
-        }
-      }
-    } else {
-      const reason = this.snapshot.runtimeWindowFallback === "auth"
-        ? "Runtime 鉴权阻止 pi_window"
-        : this.snapshot.runtimeWindowFallback === "unsupported"
-          ? "Runtime 不支持统一 pi_window"
-          : "Runtime pi_window 不可用";
-      rows.push(fitLine(fg("33", `  ${reason} · local owner/task registry fallback`), inner));
-      if (this.snapshot.windows.length === 0) {
-        rows.push(fitLine("  ○ 无本地 fresh owner（e 注册当前窗口）", inner));
-      } else {
-        for (const window of this.snapshot.windows.slice(0, 6)) {
-          const pressure = window.contextPressure === undefined ? "" : ` ctx:${window.contextPressure}%`;
-          const ws = window.workspace ? `${basename(window.workspace)} · ` : "";
-          rows.push(fitLine(`  local · ${ws}${window.displayName} · ${window.ownerId.slice(0, 8)} · pid ${window.pid} · agents ${window.agentCount}${pressure}`, inner));
-        }
-      }
-    }
-    rows.push(rule(inner));
-    rows.push(fitLine(`消息历史（${this.snapshot.thread.length}）`, inner));
+    rows.push(fitLine(`最近消息（${this.snapshot.thread.length}）`, inner));
     if (this.snapshot.thread.length === 0) {
       rows.push(fitLine("  ○ 暂无跨窗口消息", inner));
     } else {
-      const start = Math.max(0, Math.min(this.selected - 3, this.snapshot.thread.length - 7));
-      for (let index = start; index < Math.min(this.snapshot.thread.length, start + 7); index++) {
+      const start = Math.max(0, Math.min(this.selected - 2, this.snapshot.thread.length - 5));
+      for (let index = start; index < Math.min(this.snapshot.thread.length, start + 5); index++) {
         rows.push(this.renderThreadRow(this.snapshot.thread[index], index === this.selected, inner));
       }
     }
     if (this.status) rows.push(fitLine(this.status, inner));
     if (this.snapshot.error) rows.push(fitLine(fg("31", `! ${this.snapshot.error}`), inner));
-    rows.push(...fitSegments(inner, ["Enter message detail", "G collaboration", "V windows", "r refresh", this.snapshot.endpoint === "online" ? "x stop" : "s start", "R restart", "T 隧道重建", "W workspaces", "e 注册(租约)", "E 注册(永久)", "c wizard", "C 配置", "P password", "Esc close"]));
+    rows.push(...fitSegments(inner, ["1 主页", "2/c 配置", "Enter 消息", "G 协作", "V 窗口", "W 工作区", "r 刷新", this.snapshot.endpoint === "online" ? "x 停止" : "s 启动", "R 重启", "T 重建 Cloudflare", "e 注册(租约)", "E 注册(永久)", "P 口令", "Esc 关闭"]));
     return frame(rows, width);
   }
 
   /** Classify the cwd's registration: present in config.yaml, and if so whether
-   *  its lease is still live or already expired (waiting for mcpx's sweep). */
-  private cwdRegistrationState(workspaces: McpxWorkspaceInfo[], cwd: string): { cwdRegistered: boolean; cwdLeaseStale?: boolean } {
+   *  its lease is still live or already expired (waiting for gateway's sweep). */
+  private cwdRegistrationState(workspaces: GatewayWorkspaceInfo[], cwd: string): { cwdRegistered: boolean; cwdLeaseStale?: boolean } {
     const normalized = cwd.replace(/\\/g, "/").toLowerCase();
     const match = workspaces.find((workspace) => workspace.path.replace(/\\/g, "/").toLowerCase() === normalized);
     if (!match) return { cwdRegistered: false };
     // A permanent entry (no expires_at) is always live; a TTL entry whose
-    // expires_at has passed is stale until mcpx's lease sweeper reclaims it.
+    // expires_at has passed is stale until gateway's lease sweeper reclaims it.
     const stale = match.expiresAt !== undefined && match.expiresAt <= Date.now();
     return { cwdRegistered: true, cwdLeaseStale: stale };
   }
@@ -1737,61 +1855,40 @@ export class McpxOverlay implements Component, Focusable {
         ? fg("31", "● offline")
         : fg("33", "● …");
     // "已注册" is green only when the lease is live; a stale-but-unswept entry
-    // is yellow so the user knows mcpx will reclaim it (config.yaml still lists
+    // is yellow so the user knows gateway will reclaim it (config.yaml still lists
     // it until the next ~5min sweep).
     const registered = this.snapshot.cwdRegistered
       ? (this.snapshot.cwdLeaseStale ? fg("33", "租约过期·待清理") : fg("32", "已注册"))
       : fg("33", "未注册");
-    // mcpx's registry is rebuilt only at startup and every ~5min (lease sweep);
+    // gateway's registry is rebuilt only at startup and every ~5min (lease sweep);
     // a freshly-registered window is recognized by the runtime after that delay.
     const sweepHint = this.snapshot.cwdRegistered && !this.snapshot.cwdLeaseStale ? " · Gateway workspace 已生效" : "";
     return fitLine(`binary: ${binary}${version} · endpoint: ${endpoint} · 工作区 ${this.snapshot.workspaces.length} · 当前目录 ${registered}${sweepHint}`, width);
   }
 
   private renderTunnelRows(width: number): string[] {
-    const tunnel = this.snapshot.tunnel;
-    const header = "公网隧道（Cloudflare）";
-    if (!tunnel || (!tunnel.pid && !tunnel.url)) {
-      return [fitLine(`${header}：未配置 — 在向导（c）启动快速隧道获取公网 URL`, width)];
-    }
-    const healthLabel: Record<TunnelState["health"], string> = {
-      ok: fg("33", "健康·无鉴权"),
-      auth: fg("32", "健康·鉴权正常"),
-      dead: fg("31", "异常"),
-      unknown: fg("33", "探测中"),
-    };
-    const proc = tunnel.alive ? fg("32", `进程存活·pid ${tunnel.pid}`) : fg("31", "进程已退出");
-    const rows = [fitLine(`${header} · ${proc} · ${healthLabel[tunnel.health]}`, width)];
-    if (tunnel.url) rows.push(fitLine(`  URL: ${tunnel.url}/mcp  ${fg("2", "← MCP 客户端填这个")}`, width));
-    if (tunnel.health === "ok") {
-      rows.push(fitLine(fg("33", "  ! 200 无鉴权 — 仅限本机 open 模式；公网暴露请用向导升级为 oauth"), width));
-    } else if (tunnel.health === "auth") {
-      // auth (401 + WWW-Authenticate) proves the tunnel and OAuth discovery are
-      // reachable, but a probe carries no credentials so it cannot reach the
-      // go-sdk Host guard that sits *after* auth. If mcpx was not restarted to
-      // load disable_localhost_protection, a real client gets 403 *after* auth.
-      rows.push(fitLine(fg("2", "  i 若客户端鉴权后仍 403：检查 server.disable_localhost_protection 并重启 Pi Maestro Gateway"), width));
-    } else if (!tunnel.alive) {
-      rows.push(fitLine(fg("31", "  ! 隧道进程未运行（PID 文件可能已陈旧）— 按 T 重建隧道并自动同步新 URL"), width));
-    } else if (tunnel.health === "dead") {
-      // quick-tunnel URL is ephemeral: a dead tunnel usually means the edge
-      // connection dropped and the URL can no longer be reached at all. T
-      // restarts the tunnel, writes the new URL into config, and restarts mcpx.
-      const hint = this.snapshot.endpoint === "online"
-        ? "按 R 重启 Pi Maestro Gateway 加载新配置，或按 T 重建隧道并自动同步新 URL"
-        : "按 s 启动 Pi Maestro Gateway，或按 T 重建隧道并自动同步新 URL";
-      rows.push(fitLine(fg("31", `  ! 隧道异常：Gateway 可能未重启加载新配置（403 Host/404 OAuth 路由）或隧道已断 — ${hint}`), width));
-    }
+    const cloudflare = this.snapshot.tunnel;
+    const openai = this.snapshot.openAiTunnel;
+    const stateLabel = (state: TunnelState | undefined) => state?.alive
+      ? fg("32", `${state.phase}${state.pid ? ` · pid ${state.pid}` : ""}`)
+      : state?.health === "dead" ? fg("31", "异常") : fg("2", "未运行");
+    const rows = [fitLine(`${fg("36", "公网接入")} · 两种模式在配置页并列切换（2/c）`, width)];
+    rows.push(fitLine(`  Cloudflare Quick Tunnel      ${stateLabel(cloudflare)}${cloudflare?.url ? ` · ${cloudflare.url}/mcp` : ""}`, width));
+    rows.push(fitLine(`  OpenAI Secure MCP Tunnel    ${stateLabel(openai)}${openai?.opaqueId ? ` · ${openai.opaqueId}` : ""} · experimental`, width));
+    const failureDetail = cloudflare?.health === "dead" && cloudflare.detail
+      ? cloudflare.detail
+      : openai?.health === "dead" ? openai.detail : undefined;
+    if (failureDetail) rows.push(fitLine(fg("31", `  ! ${failureDetail}`), width));
     return rows;
   }
 
   /** 运维口令 (OAuth authorize 页面所需) — 展示在隧道区块下方。 */
   private renderOpsPasswordRows(width: number): string[] {
     // PERF-RV-006: read from the snapshot (populated once during refresh)
-    // instead of calling readOpsPassword() on every render.
+    // instead of calling readGatewayOpsPassword() on every render.
     // SEC-RV-001: mask the password by default (last 4 chars only); the full
     // value is revealed only when the user presses P (revealOpsPassword).
-    // Full reveal is also available directly from ~/.mcpx/config.yaml.
+    // Full reveal is also available directly from the native Gateway config.
     const pw = this.snapshot.opsPassword;
     if (!pw) {
       return [fitLine(fg("33", "运维口令：未在 config 持久化（OAuth 授权需要配置 oauth.password）"), width)];
@@ -1803,12 +1900,12 @@ export class McpxOverlay implements Component, Focusable {
         : "●●●●";
     return [
       fitLine(`运维口令（OAuth 授权页填写）: ${fg("36", shown)}`, width),
-      fitLine(fg("2", `  按 P 显明/隐藏口令（完整值见 ~/.mcpx/config.yaml）`), width),
+      fitLine(fg("2", `  按 P 显明/隐藏口令（完整值见 the native Gateway config）`), width),
     ];
   }
 
-  /** 委派任务区块 — Gateway metadata journal first, then legacy history. */
-  private renderDelegatedTaskRows(width: number): string[] {
+  /** Gateway metadata-only task journal. */
+  private renderTaskJournalRows(width: number): string[] {
     const tasks = this.snapshot.tasks;
     if (!tasks || tasks.length === 0) return [];
     const rows = [fitLine(`委派任务（${tasks.length}）`, width)];
@@ -1821,13 +1918,11 @@ export class McpxOverlay implements Component, Focusable {
     };
     for (const task of tasks.slice(0, 6)) {
       const color = statusColor[task.status] ?? "33";
-      const action = task.action === "spawn" ? "spawn" : "delegate";
-      const tid = task.task_id.slice(0, 8);
-      const purpose = (task.purpose || task.message || "").replace(/\s+/g, " ").slice(0, 32);
-      rows.push(fitLine(`  ${fg(color, task.status)} · ${tid} · ${action} · ${task.workspace || "?"} · ${purpose}`, width));
-      if (task.status === "completed" && task.result_summary?.length) {
-        rows.push(fitLine(fg("2", `      结果: ${task.result_summary.slice(0, 2).join(" · ").slice(0, 60)}`), width));
-      } else if (task.status === "failed" && task.error) {
+      const tid = task.id.slice(0, 8);
+      rows.push(fitLine(`  ${fg(color, task.status)} · ${tid} · Gateway · ${task.cwd || "?"}`, width));
+      if (task.status === "completed" && task.publicationId) {
+        rows.push(fitLine(fg("2", `      结果: agent://${task.publicationId}`), width));
+      } else if ((task.status === "failed" || task.status === "lost") && task.error) {
         rows.push(fitLine(fg("31", `      错误: ${task.error.slice(0, 60)}`), width));
       }
     }
@@ -1931,7 +2026,7 @@ export class McpxOverlay implements Component, Focusable {
     return frame(rows, width);
   }
 
-  private renderThreadRow(entry: McpxThreadEntry, selected: boolean, width: number): string {
+  private renderThreadRow(entry: GatewayThreadEntry, selected: boolean, width: number): string {
     const marker = selected ? "›" : " ";
     const time = new Date(entry.createdAt).toLocaleTimeString("zh-CN", { hour12: false });
     const ws = entry.workspace ? `${basename(entry.workspace)} · ` : "";
@@ -2105,14 +2200,14 @@ function sanitizeTerminalText(value: string): string {
     .replace(/\r/g, "");
 }
 
-function windowEventKey(event: McpxWindowEvent): string {
+function windowEventKey(event: GatewayWindowEvent): string {
   if (event.kind === "assistant") return `assistant:${event.at}:${event.text}`;
   if (event.kind === "tool") return `tool:${event.at}:${event.toolCallId ?? ""}:${event.toolName}:${event.status ?? ""}`;
   if (event.kind === "lifecycle") return `lifecycle:${event.at}:${event.phase}`;
   return `rpc:${event.cursor}:${event.type}:${event.summary ?? ""}`;
 }
 
-function renderWindowEvent(event: McpxWindowEvent, width: number): string {
+function renderWindowEvent(event: GatewayWindowEvent, width: number): string {
   const time = Number.isFinite(event.at) && event.at > 0
     ? new Date(event.at).toLocaleTimeString("zh-CN", { hour12: false })
     : "--:--:--";
@@ -2179,14 +2274,15 @@ function isEnter(data: string): boolean {
 type ConfigListKey = "commandsAllow" | "commandsConfirm" | "commandsDeny" | "filesAllow" | "filesConfirm" | "filesDeny";
 
 interface ConfigEntry {
+  column: 0 | 1;
   group: string;
   key: string;
   label: string;
-  kind: "text" | "number" | "bool" | "cycle" | "list" | "action";
+  kind: "text" | "number" | "bool" | "cycle" | "list" | "action" | "readonly";
   value?: string;
   options?: string[];
   listKey?: ConfigListKey;
-  action?: "save" | "discard";
+  action?: "save" | "discard" | "start-cloudflare" | "stop-cloudflare" | "start-openai" | "stop-openai";
 }
 
 function groupLabel(group: string): string {
@@ -2195,12 +2291,13 @@ function groupLabel(group: string): string {
     case "auth": return "认证";
     case "commands": return "命令权限 security.commands";
     case "files": return "文件权限 security.files";
+    case "tunnel": return "公网隧道（Cloudflare ↔ OpenAI）";
     case "write": return "写入";
     default: return group;
   }
 }
 
-export const _mcpxTuiInternals = {
+export const _gatewayTuiInternals = {
   normalizeWorkspacePath,
   workspaceIdForCwd,
   collectWorkspaces,

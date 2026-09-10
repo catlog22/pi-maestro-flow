@@ -215,6 +215,72 @@ test("forked provider context excludes pre-compaction history and contains no st
   assert.doesNotMatch(providerContext, /"role":"system"/);
 });
 
+test("accepts a summary-only new-context compaction with an intentional missing anchor", () => {
+  const directory = fixtureDir();
+  const sourcePath = writeSession(directory, [
+    user("pre-reset-secret", null, "must not survive the context reset"),
+    entry("new-context-compact", "pre-reset-secret", {
+      type: "compaction",
+      summary: "deterministic recovery capsule",
+      firstKeptEntryId: "maestro-new-context-1-1",
+      tokensBefore: 120_000,
+      details: {
+        kind: "maestro-session-checkpoint",
+        schemaVersion: 4,
+        newContext: { requestId: 1, source: "tool", actorId: "root", resourceUris: [] },
+      },
+    }),
+    user("post-reset-user", "new-context-compact", "continue from the recovery capsule"),
+    assistant("spawn", "post-reset-user", ["spawn-call"]),
+  ]);
+
+  const snapshot = createForkSnapshot({
+    sourcePath,
+    spawningToolCallId: "spawn-call",
+    destination: { kind: "temp", directory },
+  });
+
+  assert.equal(snapshot.ok, true);
+  if (!snapshot.ok) return;
+  const storedEntries = readSnapshot(snapshot.snapshotPath);
+  const providerContext = JSON.stringify(buildSessionContext(
+    storedEntries as unknown as Parameters<typeof buildSessionContext>[0],
+  ).messages);
+  assert.match(providerContext, /deterministic recovery capsule/);
+  assert.match(providerContext, /continue from the recovery capsule/);
+  assert.doesNotMatch(providerContext, /must not survive the context reset/);
+});
+
+test("rejects a missing new-context-shaped anchor without matching checkpoint metadata", () => {
+  const directory = fixtureDir();
+  const destinationPath = path.join(directory, "snapshot.jsonl");
+  const sourcePath = writeSession(directory, [
+    user("pre-reset", null),
+    entry("invalid-compact", "pre-reset", {
+      type: "compaction",
+      summary: "untrusted summary-only boundary",
+      firstKeptEntryId: "maestro-new-context-1-1",
+      tokensBefore: 120_000,
+      details: {
+        kind: "maestro-session-checkpoint",
+        schemaVersion: 4,
+        newContext: { requestId: 2, source: "tool", actorId: "root", resourceUris: [] },
+      },
+    }),
+    user("post-reset", "invalid-compact"),
+    assistant("spawn", "post-reset", ["spawn-call"]),
+  ]);
+
+  const snapshot = createForkSnapshot({
+    sourcePath,
+    spawningToolCallId: "spawn-call",
+    destination: { kind: "path", path: destinationPath },
+  });
+
+  expectFailure(snapshot, "invalid-compaction");
+  assert.equal(fs.existsSync(destinationPath), false);
+});
+
 test("chooses the latest matching assistant on the active branch", () => {
   const directory = fixtureDir();
   const sourcePath = writeSession(directory, [

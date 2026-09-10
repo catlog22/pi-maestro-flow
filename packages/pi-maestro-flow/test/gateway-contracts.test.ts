@@ -5,7 +5,10 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   GATEWAY_CAPABILITIES_SCHEMA,
+  GATEWAY_CONFIG_VERSION,
+  GATEWAY_DURABLE_RECORD_VERSION,
   GATEWAY_OWNER_RECORD_SCHEMA,
+  GATEWAY_PROTOCOL_VERSION,
   GATEWAY_RESULT_SCHEMA,
   GATEWAY_STATE_VERSION,
   GATEWAY_TOOL_NAMES,
@@ -32,7 +35,6 @@ import {
 import { decodeGatewayResult, encodeGatewayResult, gatewayError, gatewayOk } from "../src/gateway/result.ts";
 import { createGatewayPrincipal } from "../src/gateway/principal.ts";
 import { GatewayPolicy } from "../src/gateway/policy.ts";
-import { GatewayOwnerIdentityMismatchError, GatewayOwnerStore } from "../src/gateway/owner-store.ts";
 import { WorkspaceLeaseConflictError, WorkspaceRegistry } from "../src/gateway/workspace-registry.ts";
 import { Value } from "typebox/value";
 import { GATEWAY_HANDOFF_SCHEMA, GATEWAY_HANDOFF_WRITE_SCHEMA } from "../src/gateway/handoff-contracts.ts";
@@ -59,7 +61,11 @@ function validTool(): Record<string, unknown> {
   };
 }
 
-test("Gateway contracts are versioned and strict", () => {
+test("Gateway protocol, config, and durable record versions are independent and strict", () => {
+  assert.equal(GATEWAY_PROTOCOL_VERSION, 1);
+  assert.equal(GATEWAY_CONFIG_VERSION, 2);
+  assert.equal(GATEWAY_DURABLE_RECORD_VERSION, 1);
+  assert.equal(GATEWAY_STATE_VERSION, GATEWAY_DURABLE_RECORD_VERSION);
   assert.deepEqual(parseGatewayTool(validTool()), validTool());
   assert.equal(Value.Check(GATEWAY_TOOL_SCHEMA, { ...validTool(), unknown: true }), false);
   assert.throws(() => parseGatewayTool({ ...validTool(), unknown: true }), GatewayValidationError);
@@ -205,30 +211,6 @@ test("stale lease removal cannot delete a newer generation and expiry cannot aut
   const policy = new GatewayPolicy({ registry });
   const principal = createGatewayPrincipal("stdio", "expired", { workspacePath: root });
   assert.equal((await policy.authorizePath(principal, root, ".", "read")).allowed, false);
-});
-
-test("owner store rejects stale legacy identity and only adopts exact matches", async (t) => {
-  const root = await mkdtemp(join(tmpdir(), "gateway-owner-"));
-  t.after(async () => { await import("node:fs/promises").then(({ rm }) => rm(root, { recursive: true, force: true })); });
-  const ownerPath = join(root, "owner.json");
-  const pidPath = join(root, "legacy.pid");
-  await import("node:fs/promises").then(({ writeFile }) => writeFile(pidPath, "42\n", "utf8"));
-  const options = {
-    path: ownerPath,
-    legacyPidPath: pidPath,
-    now: () => now,
-    isProcessAlive: (pid: number) => pid === 42,
-    getProcessIdentity: async (_pid: number) => "other-command",
-  };
-  const store = new GatewayOwnerStore(options);
-  await assert.rejects(() => store.adoptLegacyPid({ expectedCommandIdentity: "pi-maestro-gateway", socket: join(root, "gateway.sock") }), GatewayOwnerIdentityMismatchError);
-
-  const matching = new GatewayOwnerStore({ ...options, getProcessIdentity: async () => "pi-maestro-gateway" });
-  const owner = await matching.adoptLegacyPid({ expectedCommandIdentity: "pi-maestro-gateway", socket: join(root, "gateway.sock") });
-  assert.equal(owner?.pid, 42);
-  assert.equal(await matching.isOwned(owner!.ownerToken), true);
-  assert.equal(await matching.release(owner!.ownerToken), true);
-  assert.equal(await matching.read(), undefined);
 });
 
 test("policy canonicalizes paths before authorization and enforces hard bounds", async () => {

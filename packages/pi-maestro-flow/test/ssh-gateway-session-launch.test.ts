@@ -70,13 +70,13 @@ test("launcher clear monotonically fences pending and cached bindings", async ()
   const caller = async (tool: string, args: Record<string, unknown>): Promise<unknown> => {
     if (tool === "host") {
       if (gateFirstHost) { gateFirstHost = false; await gate.promise; }
-      return { ok: true, data: { cwd: "/remote/gateway-root" } };
+      return { ok: true, data: { cwd: "/remote/gateway-root" }, meta: { principalId: "local-owner" } };
     }
     if (tool === "session" && args.action === "create") {
       const now = Date.now();
-      return { ok: true, data: { session: { revision: 1 }, member: { generation: 1, leaseExpiresAt: now + 90_000, updatedAt: now } } };
+      return { ok: true, data: { session: { revision: 1 }, member: { id: args.ownerId, principalId: "stdio:local-owner", status: "active", generation: 1, leaseExpiresAt: now + 90_000, updatedAt: now } }, meta: { principalId: "local-owner" } };
     }
-    if (tool === "session" && args.action === "start-pi") return { ok: true, data: { taskId: `remote-${++handle}` } };
+    if (tool === "session" && args.action === "start-pi") return { ok: true, data: { taskId: `remote-${++handle}` }, meta: { principalId: "local-owner" } };
     throw new Error("unexpected call");
   };
   const input = { action: "start_pi" as const, todoIds: ["28"], requestId: "clear-race" };
@@ -103,16 +103,17 @@ test("session launcher creates or reuses a remote session and fences reconnectab
   let leaseExpiresAt = now + 90_000;
   const caller = async (tool: string, args: Record<string, unknown>): Promise<unknown> => {
     calls.push({ tool, args: structuredClone(args) });
-    if (tool === "host") return { ok: true, data: { cwd: "/remote/gateway-root" } };
-    if (tool === "session" && args.action === "create") return { ok: true, data: { session: { id: args.sessionId, revision: sessionRevision }, member: { generation: memberGeneration, leaseExpiresAt, updatedAt: leaseExpiresAt - 90_000 } } };
+    if (tool === "host") return { ok: true, data: { cwd: "/remote/gateway-root" }, meta: { principalId: "local-owner" } };
+    if (tool === "session" && args.action === "create") return { ok: true, data: { session: { id: args.sessionId, revision: sessionRevision }, member: { id: args.ownerId, principalId: "stdio:local-owner", status: "active", generation: memberGeneration, leaseExpiresAt, updatedAt: leaseExpiresAt - 90_000 } }, meta: { principalId: "local-owner" } };
     if (tool === "session" && args.action === "renew") {
       assert.equal(args.expectedSessionRevision, sessionRevision);
       assert.equal(args.expectedGeneration, memberGeneration);
       sessionRevision += 1; memberGeneration += 1; leaseExpiresAt = now + 90_000;
-      return { ok: true, data: { member: { generation: memberGeneration, leaseExpiresAt, updatedAt: now } } };
+      return { ok: true, data: { member: { id: args.memberId, principalId: "stdio:local-owner", status: "active", generation: memberGeneration, leaseExpiresAt, updatedAt: now } }, meta: { principalId: "local-owner" } };
     }
-    if (tool === "session" && args.action === "start-pi") return { ok: true, data: { taskId: `remote-${nextHandle++}` } };
-    if (tool === "monitor") return { ok: true, data: { nextCursor: 4 } };
+    if (tool === "session" && args.action === "get") return { ok: true, data: { session: { id: args.sessionId, revision: sessionRevision }, members: [{ id: args.memberId, principalId: "stdio:local-owner", status: "active", generation: memberGeneration, leaseExpiresAt }] }, meta: { principalId: "local-owner" } };
+    if (tool === "session" && args.action === "start-pi") return { ok: true, data: { taskId: `remote-${nextHandle++}` }, meta: { principalId: "local-owner" } };
+    if (tool === "monitor") return { ok: true, data: { nextCursor: 4 }, meta: { principalId: "local-owner" } };
     throw new Error("unexpected call");
   };
   const launcher = new GatewaySessionLauncher(() => now);

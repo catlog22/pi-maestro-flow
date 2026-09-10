@@ -112,6 +112,10 @@ export async function startGatewayHttpServer(runtime: GatewayRuntime, options: G
         jsonRpcError(response, 400, -32000, "Bad Request: No valid session ID provided");
         return;
       }
+      if (!runtime.canAcceptNewSessions) {
+        jsonRpcError(response, 503, -32002, "Gateway is quiescing; new sessions are refused");
+        return;
+      }
       let created!: HttpSession;
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
@@ -132,6 +136,10 @@ export async function startGatewayHttpServer(runtime: GatewayRuntime, options: G
     if (request.method === "GET" || request.method === "DELETE") {
       if (!current) {
         jsonRpcError(response, 400, -32000, "Invalid or missing MCP session ID");
+        return;
+      }
+      if (request.method === "GET" && runtime.isQuiescing) {
+        jsonRpcError(response, 503, -32002, "Gateway is quiescing; new subscriptions are refused");
         return;
       }
       await current.transport.handleRequest(request, response);

@@ -8,6 +8,7 @@ import type { EndpointStoreSnapshot } from "./endpoint-store.ts";
 import {
 	applyTargetSelectorCompletion,
 	buildTargetSelectorItems,
+	isSshAttachmentControlInput,
 	parseTargetInput,
 	parseTargetSelector,
 	resolveTargetId,
@@ -210,6 +211,7 @@ function errorText(error: unknown): string {
 export async function routeCanonicalTargetInput(
 	options: CanonicalTargetInputOptions,
 ): Promise<CanonicalTargetInputAction | undefined> {
+	if (isSshAttachmentControlInput(options.text)) return undefined;
 	const parsed = parseTargetInput(options.text);
 	if (parsed === undefined) return undefined;
 	const fail = (message: string, type: "warning" | "error" = "warning"): CanonicalTargetInputAction => {

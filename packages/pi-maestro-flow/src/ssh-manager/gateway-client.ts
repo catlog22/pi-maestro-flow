@@ -3,6 +3,7 @@ import { StreamableHTTPClientTransport, StreamableHTTPError } from "@modelcontex
 import { ReadBuffer, serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+import { createHash } from "node:crypto";
 import type { ClientChannel } from "ssh2";
 import {
   DEFAULT_SSH_TIMEOUT_SECONDS,
@@ -12,10 +13,17 @@ import {
 import { SSH_GATEWAY_COMMAND } from "./guide.ts";
 import {
   GatewaySessionLauncher,
+  type GatewayLaunchBindingPersistence,
   type SshStartPiInput,
 } from "./gateway-session-launch.ts";
 import type { TodoTask } from "../tools/todo.ts";
-import type { SshGatewayBinding, SshHost } from "./model.ts";
+import type { SshGatewayBinding, SshGatewayLaunchBinding, SshHost } from "./model.ts";
+import { GatewayObserver, type GatewayObservationSink } from "../gateway/observability.ts";
+import {
+  classifyGatewayOperation,
+  gatewayOperationMayReplay,
+  type GatewayOperationPolicy,
+} from "../gateway/operation-policy.ts";
 
 const DEFAULT_POOL_SIZE = 4;
 const MAX_STDIO_BUFFER_BYTES = 4 * 1024 * 1024;
@@ -54,16 +62,31 @@ export class SshGatewayCapabilityError extends Error {
   }
 }
 
+export class GatewayOutcomeUnknownError extends Error {
+  readonly code = "gateway_outcome_unknown" as const;
+  readonly retryable = false;
+
+  constructor(readonly operation: GatewayOperationPolicy, options?: ErrorOptions) {
+    const action = operation.action === undefined ? operation.tool : `${operation.tool}.${operation.action}`;
+    super(`gateway_outcome_unknown: ${action} may have reached the Gateway; it was not replayed on another transport`, options);
+    this.name = "GatewayOutcomeUnknownError";
+  }
+}
+
+const MCP_LIST_OPERATION: GatewayOperationPolicy = { retryClass: "read", tool: "$mcp", action: "tools/list" };
+
 interface GatewayPoolEntry {
   readonly key: string;
   readonly hostId: string;
   readonly client: Client;
   readonly transport: Transport;
   readonly mode: "https" | "stdio";
+  readonly endpointIdentity: string;
 }
 
-export interface SshGatewayBindingSource {
+export interface SshGatewayBindingSource extends Partial<GatewayLaunchBindingPersistence> {
   getGatewayBinding(hostId: string): SshGatewayBinding | undefined;
+  getGatewayLaunchBinding?(hostId: string, bindingId: string): SshGatewayLaunchBinding | undefined;
 }
 
 export interface SshGatewayClientPoolOptions {
@@ -71,12 +94,13 @@ export interface SshGatewayClientPoolOptions {
   bindingSource?: SshGatewayBindingSource;
   fetch?: typeof fetch;
   now?: () => number;
+  observer?: GatewayObservationSink;
 }
 
 /** A bounded pool of initialized MCP clients, isolated by SSH host id and full host digest. */
 export class SshGatewayClientPool {
   private readonly entries = new Map<string, Promise<GatewayPoolEntry>>();
-  private readonly launches = new GatewaySessionLauncher();
+  private readonly launches: GatewaySessionLauncher;
   private readonly hostFences = new Map<string, string>();
   private readonly hostEpochs = new Map<string, number>();
   private poolEpoch = 0;
@@ -84,6 +108,7 @@ export class SshGatewayClientPool {
   private readonly bindingSource?: SshGatewayBindingSource;
   private readonly fetchImpl: typeof fetch;
   private readonly now: () => number;
+  readonly observer: GatewayObservationSink;
 
   constructor(
     private readonly executor: Pick<SshExecutor, "openChannel">,
@@ -97,6 +122,13 @@ export class SshGatewayClientPool {
     this.bindingSource = options.bindingSource;
     this.fetchImpl = options.fetch ?? fetch;
     this.now = options.now ?? (() => Date.now());
+    this.observer = options.observer ?? new GatewayObserver();
+    const persistence = options.bindingSource
+      && options.bindingSource.getGatewayLaunchBinding
+      && options.bindingSource.saveGatewayLaunchBinding
+      ? options.bindingSource as GatewayLaunchBindingPersistence
+      : undefined;
+    this.launches = new GatewaySessionLauncher(this.now, persistence);
   }
 
   get size(): number {
@@ -122,10 +154,17 @@ export class SshGatewayClientPool {
     };
     let entry = await this.acquire(host, effectiveDigest, cacheFence, timeoutSeconds, signal);
     let reconnects = 0;
-    const invoke = async <T>(operation: (client: Client) => Promise<T>): Promise<T> => {
+    const invoke = async <T>(operation: (client: Client) => Promise<T>, policy: GatewayOperationPolicy): Promise<T> => {
       try { return await operation(entry.client); }
       catch (error) {
-        if (entry.mode !== "https" || reconnects >= 1 || !isHttpSessionLoss(error)) throw error;
+        if (entry.mode !== "https") throw error;
+        if (isHttpSessionLoss(error)) this.observer.observe({ category: "transport", event: "session-loss" });
+        if (!gatewayOperationMayReplay(policy)) {
+          if (!isOutcomeUncertainFailure(error)) throw error;
+          await this.retireEntry(entry);
+          throw new GatewayOutcomeUnknownError(policy, { cause: error });
+        }
+        if (reconnects >= 1 || !isReplayableTransportFailure(error)) throw error;
         reconnects += 1;
         await this.retireEntry(entry);
         entry = await this.acquire(host, effectiveDigest, cacheFence, timeoutSeconds, signal);
@@ -133,6 +172,7 @@ export class SshGatewayClientPool {
         catch (retryError) {
           if (entry.mode !== "https" || !isTransientServerFailure(retryError)) throw retryError;
           await this.retireEntry(entry);
+          this.observer.observe({ category: "transport", event: "fallback" });
           entry = await this.publishStdioReplacement(host, effectiveDigest, cacheFence, timeoutSeconds, signal);
           return operation(entry.client);
         }
@@ -141,7 +181,7 @@ export class SshGatewayClientPool {
     const callGateway = (tool: string, args: Record<string, unknown>, timeout: number, requestSignal?: AbortSignal) => invoke((client) => client.callTool(
       { name: tool, arguments: args }, undefined,
       { signal: requestSignal, timeout: timeout * 1000, maxTotalTimeout: timeout * 1000 },
-    ));
+    ), classifyGatewayOperation(tool, args));
     let data: unknown;
     let isError = false;
     let summary: string;
@@ -150,32 +190,41 @@ export class SshGatewayClientPool {
       if (!startPiContext) throw new Error("start_pi requires the current host Pi session context");
       data = await this.launches.start(
         async (tool, args, timeout, requestSignal) => decodeGatewayEnvelope(await callGateway(tool, args, timeout, requestSignal)),
-        host.id, cacheFence, startPiContext.piSessionRef, startPiContext.todos, input, signal,
+        host.id, effectiveDigest, startPiContext.piSessionRef, startPiContext.todos, input, signal, entry.endpointIdentity,
       );
       summary = `Pi execution ${(data as { executionHandle: string }).executionHandle} · monitor ready`;
     } else if (input.action === "status") {
-      const listed = await invoke((client) => client.listTools({}, requestOptions));
+      const listed = await invoke((client) => client.listTools({}, requestOptions), MCP_LIST_OPERATION);
       data = { connected: true, command: SSH_GATEWAY_COMMAND, server: entry.client.getServerVersion(), tools: listed.tools.map((tool) => tool.name) };
       summary = `gateway connected · ${listed.tools.length} tools`;
     } else if (input.action === "list") {
-      const listed = await invoke((client) => client.listTools({}, requestOptions));
+      const listed = await invoke((client) => client.listTools({}, requestOptions), MCP_LIST_OPERATION);
       data = { tools: listed.tools };
       summary = `${listed.tools.length} gateway tools`;
     } else if (input.action === "describe") {
-      const listed = await invoke((client) => client.listTools({}, requestOptions));
+      const listed = await invoke((client) => client.listTools({}, requestOptions), MCP_LIST_OPERATION);
       const tool = listed.tools.find((candidate) => candidate.name === input.tool);
       if (!tool) throw new Error(`Gateway tool ${JSON.stringify(input.tool)} is not available`);
       data = tool;
       summary = `gateway tool ${input.tool}`;
     } else {
-      const prepared = input.tool === "monitor" ? this.launches.prepareMonitorCall(host.id, cacheFence, input.args ?? {}) : { args: input.args ?? {}, record: undefined };
+      if (input.tool === "monitor") {
+        await this.launches.restoreMonitorBinding(
+          async (tool, args, timeout, requestSignal) => decodeGatewayEnvelope(await callGateway(tool, args, timeout, requestSignal)),
+          host.id, effectiveDigest, entry.endpointIdentity, input.args ?? {}, timeoutSeconds, signal,
+        );
+      }
+      const prepared = input.tool === "monitor" ? this.launches.prepareMonitorCall(host.id, effectiveDigest, input.args ?? {}) : { args: input.args ?? {}, record: undefined };
       if (input.tool === "monitor" && prepared.record) {
         await this.launches.refreshMonitorLease(async (tool, args, timeout, requestSignal) => decodeGatewayEnvelope(await callGateway(tool, args, timeout, requestSignal)), prepared.record, timeoutSeconds, signal);
       }
-      const result = await invoke((client) => client.callTool({ name: input.tool, arguments: prepared.args }, undefined, requestOptions));
+      const result = await invoke(
+        (client) => client.callTool({ name: input.tool, arguments: prepared.args }, undefined, requestOptions),
+        classifyGatewayOperation(input.tool, prepared.args),
+      );
       data = result;
       isError = result.isError === true;
-      if (!isError && input.tool === "monitor") this.launches.updateMonitorCursor(prepared.record, decodeGatewayEnvelope(result));
+      if (!isError && input.tool === "monitor") await this.launches.updateMonitorCursor(prepared.record, decodeGatewayEnvelope(result));
       summary = `${input.tool} · ${isError ? "failed" : "completed"}`;
     }
 
@@ -296,6 +345,7 @@ export class SshGatewayClientPool {
       return await this.createHttpEntry(key, host.id, binding, timeoutSeconds, signal);
     } catch (error) {
       if (!allowsStdioFallback(error)) throw error;
+      this.observer.observe({ category: "transport", event: "fallback" });
       return this.createStdioEntry(key, host, effectiveDigest, timeoutSeconds, signal);
     }
   }
@@ -329,7 +379,8 @@ export class SshGatewayClientPool {
     try {
       await client.connect(transport, { signal: requestController.signal, timeout: timeoutSeconds * 1000, maxTotalTimeout: timeoutSeconds * 1000 });
       await verifyGatewayIdentity(client, { signal: requestController.signal, timeout: timeoutSeconds * 1000, maxTotalTimeout: timeoutSeconds * 1000 });
-      return { key, hostId, client, transport, mode: "https" };
+      this.observer.observe({ category: "transport", event: "connect", transport: "https" });
+      return { key, hostId, client, transport, mode: "https", endpointIdentity: gatewayEndpointIdentity(binding) };
     } catch (error) {
       await client.close().catch(() => transport.close());
       throw error;
@@ -350,7 +401,8 @@ export class SshGatewayClientPool {
     try {
       await client.connect(transport, { signal, timeout: timeoutSeconds * 1000, maxTotalTimeout: timeoutSeconds * 1000 });
       await verifyGatewayIdentity(client, { signal, timeout: timeoutSeconds * 1000, maxTotalTimeout: timeoutSeconds * 1000 });
-      return { key, hostId: host.id, client, transport, mode: "stdio" };
+      this.observer.observe({ category: "transport", event: "connect", transport: "stdio" });
+      return { key, hostId: host.id, client, transport, mode: "stdio", endpointIdentity: gatewayEndpointIdentity() };
     } catch (error) {
       await client.close().catch(() => transport.close());
       throw error;
@@ -501,6 +553,17 @@ function isTransientServerFailure(error: unknown): boolean {
     || error instanceof StreamableHTTPError && error.code !== undefined && error.code >= 500 && error.code <= 599;
 }
 
+function isOutcomeUncertainFailure(error: unknown): boolean {
+  if (isHttpSessionLoss(error) || isTransientServerFailure(error)) return true;
+  if (error instanceof GatewayHttpFailure) return error.category === "availability";
+  if (!(error instanceof Error)) return false;
+  return /connection (?:closed|lost|reset)|socket|fetch failed|network|terminated|ECONNRESET|EPIPE/iu.test(error.message);
+}
+
+function isReplayableTransportFailure(error: unknown): boolean {
+  return isOutcomeUncertainFailure(error);
+}
+
 function allowsStdioFallback(error: unknown): boolean {
   if (error instanceof GatewayHttpFailure) return error.category === "availability" || error.category === "protocol";
   if (error instanceof StreamableHTTPError) return error.code === 404 || error.code === 405;
@@ -515,6 +578,11 @@ async function verifyGatewayIdentity(client: Client, requestOptions: { signal?: 
 
 function poolKey(hostId: string, hostDigest: string): string {
   return `${hostId}\0${hostDigest}`;
+}
+
+export function gatewayEndpointIdentity(binding?: Pick<SshGatewayBinding, "endpoint" | "pairingId">): string {
+  const value = binding ? `https\0${binding.endpoint}\0${binding.pairingId}` : `stdio\0${SSH_GATEWAY_COMMAND}`;
+  return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
 function decodeGatewayEnvelope(result: unknown): unknown {

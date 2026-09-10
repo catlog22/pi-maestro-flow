@@ -5,19 +5,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
-  _mcpxTuiInternals,
-  type McpxSnapshot,
-  type McpxThreadEntry,
-  type McpxWindowInfo,
-} from "../src/tui/mcpx-overlay.ts";
+  _gatewayTuiInternals,
+  type GatewaySnapshot,
+  type GatewayThreadEntry,
+  type GatewayWindowInfo,
+} from "../src/tui/gateway-overlay.ts";
 import type {
-  McpxRemoteSession,
-  McpxRuntimeWindow,
-  McpxWindowObservation,
-} from "../src/tui/mcpx-client.ts";
-import { collectMcpServers, collectConnections } from "../src/tui/mcpx-overlay.ts";
+  GatewayRemoteSession,
+  GatewayRuntimeWindow,
+  GatewayWindowObservation,
+} from "../src/tui/gateway-client.ts";
+import { collectMcpServers, collectConnections } from "../src/tui/gateway-overlay.ts";
 
-const { normalizeWorkspacePath, workspaceIdForCwd, collectWorkspaces, collectWindows, collectThread, displayNameOf } = _mcpxTuiInternals;
+const { normalizeWorkspacePath, workspaceIdForCwd, collectWorkspaces, collectWindows, collectThread, displayNameOf } = _gatewayTuiInternals;
 
 test("workspace path normalization matches the plugin algorithm", () => {
   assert.equal(normalizeWorkspacePath("D:\\pi-maestro-flow"), "d:/pi-maestro-flow");
@@ -35,8 +35,8 @@ test("display name falls back to a window prefix", () => {
   assert.equal(fallback, "window:01234567");
 });
 
-test("collectWorkspaces parses the mcpx global config", async (t) => {
-  const dir = await mkdtemp(join(tmpdir(), "mcpx-tui-"));
+test("collectWorkspaces parses the gateway global config", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "gateway-tui-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const config = join(dir, "config.yaml");
   await writeFile(config, [
@@ -61,7 +61,7 @@ test("collectWorkspaces parses the mcpx global config", async (t) => {
 });
 
 test("collectWindows aggregates fresh owner snapshots across all workspaces", async (t) => {
-  const dir = await mkdtemp(join(tmpdir(), "mcpx-tui-"));
+  const dir = await mkdtemp(join(tmpdir(), "gateway-tui-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const previousRoot = process.env.PI_PEER_WORKSPACES_ROOT;
   process.env.PI_PEER_WORKSPACES_ROOT = dir;
@@ -98,7 +98,7 @@ test("collectWindows aggregates fresh owner snapshots across all workspaces", as
 });
 
 test("collectThread aggregates commands and receipts newest first across workspaces", async (t) => {
-  const dir = await mkdtemp(join(tmpdir(), "mcpx-tui-"));
+  const dir = await mkdtemp(join(tmpdir(), "gateway-tui-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const previousRoot = process.env.PI_PEER_WORKSPACES_ROOT;
   process.env.PI_PEER_WORKSPACES_ROOT = dir;
@@ -159,7 +159,7 @@ test("collectThread aggregates commands and receipts newest first across workspa
 });
 
 test("collectMcpServers merges .mcp.json files with later-wins precedence", async (t) => {
-  const dir = await mkdtemp(join(tmpdir(), "mcpx-mcp-"));
+  const dir = await mkdtemp(join(tmpdir(), "gateway-mcp-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   await writeFile(join(dir, ".mcp.json"), JSON.stringify({
     mcpServers: { github: { type: "stdio", command: "npx", description: "github mcp" } },
@@ -231,13 +231,13 @@ test("collectConnections returns undefined when the endpoint is unreachable", as
 });
 
 test("e key routes register to onRegisterWorkspace (lease) and unregister to onUnregisterWorkspace", async (t) => {
-  const { McpxOverlay } = await import("../src/tui/mcpx-overlay.ts");
-  const dir = await mkdtemp(join(tmpdir(), "mcpx-toggle-"));
+  const { GatewayOverlay } = await import("../src/tui/gateway-overlay.ts");
+  const dir = await mkdtemp(join(tmpdir(), "gateway-toggle-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const binDir = join(dir, "bin");
   await mkdir(binDir);
   const isWin = process.platform === "win32";
-  const shim = join(binDir, isWin ? "mcpx.cmd" : "mcpx");
+  const shim = join(binDir, isWin ? "gateway.cmd" : "gateway");
   await writeFile(
     shim,
     isWin
@@ -245,19 +245,19 @@ test("e key routes register to onRegisterWorkspace (lease) and unregister to onU
       : `#!/bin/sh\nif [ "$1" = "workspace" ] && [ "$2" = "list" ]; then echo workspaces:; fi\nexit 0\n`,
   );
   if (!isWin) await (await import("node:fs/promises")).chmod(shim, 0o755);
-  const previousBin = process.env.MCPX_BIN;
+  const previousBin = process.env.PI_MAESTRO_GATEWAY_BIN;
   const previousPath = process.env.PATH;
-  process.env.MCPX_BIN = shim;
+  process.env.PI_MAESTRO_GATEWAY_BIN = shim;
   process.env.PATH = `${binDir}${isWin ? ";" : ":"}${previousPath ?? ""}`;
   t.after(() => {
-    if (previousBin === undefined) delete process.env.MCPX_BIN;
-    else process.env.MCPX_BIN = previousBin;
+    if (previousBin === undefined) delete process.env.PI_MAESTRO_GATEWAY_BIN;
+    else process.env.PI_MAESTRO_GATEWAY_BIN = previousBin;
     process.env.PATH = previousPath;
   });
 
   const registerCalls: string[] = [];
   const unregisterCalls: string[] = [];
-  const overlay = new McpxOverlay({
+  const overlay = new GatewayOverlay({
     cwd: "D:/toggle-demo",
     requestRender: () => undefined,
     close: () => undefined,
@@ -303,13 +303,13 @@ test("e key routes register to onRegisterWorkspace (lease) and unregister to onU
 });
 
 test("E key routes register to onRegisterWorkspacePermanent and unregister to onUnregisterWorkspace", async (t) => {
-  const { McpxOverlay } = await import("../src/tui/mcpx-overlay.ts");
-  const dir = await mkdtemp(join(tmpdir(), "mcpx-toggle-"));
+  const { GatewayOverlay } = await import("../src/tui/gateway-overlay.ts");
+  const dir = await mkdtemp(join(tmpdir(), "gateway-toggle-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const binDir = join(dir, "bin");
   await mkdir(binDir);
   const isWin = process.platform === "win32";
-  const shim = join(binDir, isWin ? "mcpx.cmd" : "mcpx");
+  const shim = join(binDir, isWin ? "gateway.cmd" : "gateway");
   await writeFile(
     shim,
     isWin
@@ -317,17 +317,17 @@ test("E key routes register to onRegisterWorkspacePermanent and unregister to on
       : `#!/bin/sh\nif [ "$1" = "workspace" ] && [ "$2" = "list" ]; then echo workspaces:; fi\nexit 0\n`,
   );
   if (!isWin) await (await import("node:fs/promises")).chmod(shim, 0o755);
-  const previousBin = process.env.MCPX_BIN;
-  process.env.MCPX_BIN = shim;
+  const previousBin = process.env.PI_MAESTRO_GATEWAY_BIN;
+  process.env.PI_MAESTRO_GATEWAY_BIN = shim;
   t.after(() => {
-    if (previousBin === undefined) delete process.env.MCPX_BIN;
-    else process.env.MCPX_BIN = previousBin;
+    if (previousBin === undefined) delete process.env.PI_MAESTRO_GATEWAY_BIN;
+    else process.env.PI_MAESTRO_GATEWAY_BIN = previousBin;
   });
 
   const permanentCalls: string[] = [];
   const leaseCalls: string[] = [];
   const unregisterCalls: string[] = [];
-  const overlay = new McpxOverlay({
+  const overlay = new GatewayOverlay({
     cwd: "D:/toggle-demo",
     requestRender: () => undefined,
     close: () => undefined,
@@ -368,7 +368,7 @@ test("E key routes register to onRegisterWorkspacePermanent and unregister to on
 });
 
 test("collectWorkspaces parses expires_at and distinguishes lease types", async (t) => {
-  const dir = await mkdtemp(join(tmpdir(), "mcpx-tui-"));
+  const dir = await mkdtemp(join(tmpdir(), "gateway-tui-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const config = join(dir, "config.yaml");
   const future = new Date(Date.now() + 300_000).toISOString();
@@ -393,37 +393,37 @@ test("collectWorkspaces parses expires_at and distinguishes lease types", async 
 });
 
 test("key dispatch: r=refresh, R=restart, w=workspaces (no r/R overlap)", async (t) => {
-  const { McpxOverlay } = await import("../src/tui/mcpx-overlay.ts");
-  const dir = await mkdtemp(join(tmpdir(), "mcpx-keys-"));
+  const { GatewayOverlay } = await import("../src/tui/gateway-overlay.ts");
+  const dir = await mkdtemp(join(tmpdir(), "gateway-keys-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const binDir = join(dir, "bin");
   await mkdir(binDir);
   const isWin = process.platform === "win32";
-  const shim = join(binDir, isWin ? "mcpx.cmd" : "mcpx");
+  const shim = join(binDir, isWin ? "gateway.cmd" : "gateway");
   await writeFile(shim, isWin ? "@echo off\r\nexit /b 0\r\n" : "#!/bin/sh\nexit 0\n");
   if (!isWin) await (await import("node:fs/promises")).chmod(shim, 0o755);
-  const prevBin = process.env.MCPX_BIN;
+  const prevBin = process.env.PI_MAESTRO_GATEWAY_BIN;
   const prevPath = process.env.PATH;
-  const prevPidFile = process.env.MCPX_PID_FILE;
+  const prevPidFile = process.env.PI_MAESTRO_GATEWAY_PID_FILE;
   // PID file points at pid 4 (unkillable system process) so R's stop phase is a
   // harmless no-op and never falls into the port-kill fallback (which would
-  // target a real mcpx on this machine).
-  const pidFile = join(dir, "mcpx-server.pid");
+  // target a real gateway on this machine).
+  const pidFile = join(dir, "gateway-server.pid");
   await writeFile(pidFile, "4", "utf8");
-  process.env.MCPX_BIN = shim;
-  process.env.MCPX_PID_FILE = pidFile;
+  process.env.PI_MAESTRO_GATEWAY_BIN = shim;
+  process.env.PI_MAESTRO_GATEWAY_PID_FILE = pidFile;
   process.env.PATH = `${binDir}${isWin ? ";" : ":"}${prevPath ?? ""}`;
   t.after(() => {
-    if (prevBin === undefined) delete process.env.MCPX_BIN;
-    else process.env.MCPX_BIN = prevBin;
+    if (prevBin === undefined) delete process.env.PI_MAESTRO_GATEWAY_BIN;
+    else process.env.PI_MAESTRO_GATEWAY_BIN = prevBin;
     process.env.PATH = prevPath;
-    if (prevPidFile === undefined) delete process.env.MCPX_PID_FILE;
-    else process.env.MCPX_PID_FILE = prevPidFile;
+    if (prevPidFile === undefined) delete process.env.PI_MAESTRO_GATEWAY_PID_FILE;
+    else process.env.PI_MAESTRO_GATEWAY_PID_FILE = prevPidFile;
   });
-  const overlay = new McpxOverlay({ cwd: "D:/key-demo", requestRender: () => undefined, close: () => undefined, endpointWaitMs: 150 });
+  const overlay = new GatewayOverlay({ cwd: "D:/key-demo", requestRender: () => undefined, close: () => undefined, endpointWaitMs: 150 });
   const s = overlay;
   t.after(() => overlay.dispose());
-  s["restartMcpx"] = async () => { s["status"] = "正在重启 Pi Maestro Gateway…"; };
+  s["restartGateway"] = async () => { s["status"] = "正在重启 Pi Maestro Gateway…"; };
   await overlay.refresh();
 
   // A stale tunnel remains a separate T action; s/R own only the built-in daemon.
@@ -433,8 +433,8 @@ test("key dispatch: r=refresh, R=restart, w=workspaces (no r/R overlap)", async 
     tunnel: { pid: 123, url: "https://stale.trycloudflare.com", alive: false, health: "dead" },
   };
   const staleTunnelView = overlay.render(100).join("\n");
-  assert.match(staleTunnelView, /PID 文件可能已陈旧/);
-  assert.match(staleTunnelView, /T 隧道重建/);
+  assert.match(staleTunnelView, /Cloudflare Quick Tunnel.*异常/);
+  assert.match(staleTunnelView, /T 重建 Cloudflare/);
 
   // lowercase w enters workspace mode (previously only uppercase W worked)
   overlay.handleInput("w");
@@ -456,9 +456,9 @@ test("key dispatch: r=refresh, R=restart, w=workspaces (no r/R overlap)", async 
 });
 
 test("window view renders unified sources and incrementally merges observe events", async (t) => {
-  const { McpxOverlay } = await import("../src/tui/mcpx-overlay.ts");
-  const session: McpxRemoteSession = { sessionId: "rs_1", workspace: "demo", label: "primary", status: "running" };
-  const window: McpxRuntimeWindow = {
+  const { GatewayOverlay } = await import("../src/tui/gateway-overlay.ts");
+  const session: GatewayRemoteSession = { sessionId: "rs_1", workspace: "demo", label: "primary", status: "running" };
+  const window: GatewayRuntimeWindow = {
     id: "piw_1", kind: "managed", managed: true, displayName: "worker", target: "piw_1", ownerId: "piw_1",
     pid: 42, publishedAt: Date.now(), agentCount: 0, status: "running", cursor: 1,
     remoteSessionId: session.sessionId, remoteSessionLabel: "primary", workspace: "demo",
@@ -466,7 +466,7 @@ test("window view renders unified sources and incrementally merges observe event
   let observeCalls = 0;
   const sent: Array<Record<string, unknown>> = [];
   const fakeClient = {
-    observeWindow: async (): Promise<McpxWindowObservation> => {
+    observeWindow: async (): Promise<GatewayWindowObservation> => {
       observeCalls++;
       return observeCalls === 1
         ? {
@@ -484,7 +484,7 @@ test("window view renders unified sources and incrementally merges observe event
     },
   };
   const composed: string[] = [];
-  const overlay = new McpxOverlay({
+  const overlay = new GatewayOverlay({
     cwd: "D:/window-view",
     requestRender: () => undefined,
     initialRefresh: false,
@@ -499,7 +499,7 @@ test("window view renders unified sources and incrementally merges observe event
   overlay["snapshot"] = {
     refreshing: false, endpoint: "online", workspaces: [], cwdRegistered: false, windows: [], thread: [], mcpServers: [],
     connections: [session], runtimeWindows: [window],
-  } satisfies McpxSnapshot;
+  } satisfies GatewaySnapshot;
   overlay["client"] = fakeClient as never;
 
   overlay.handleInput("v");
@@ -532,8 +532,8 @@ test("window view renders unified sources and incrementally merges observe event
 });
 
 test("window view keeps the local registry fallback when Runtime calls are auth-blocked", async (t) => {
-  const { McpxOverlay } = await import("../src/tui/mcpx-overlay.ts");
-  const overlay = new McpxOverlay({ cwd: "D:/fallback-view", requestRender: () => undefined, getTerminalRows: () => 12, initialRefresh: false, close: () => undefined });
+  const { GatewayOverlay } = await import("../src/tui/gateway-overlay.ts");
+  const overlay = new GatewayOverlay({ cwd: "D:/fallback-view", requestRender: () => undefined, getTerminalRows: () => 12, initialRefresh: false, close: () => undefined });
   t.after(() => overlay.dispose());
   overlay["refreshGeneration"]++;
   overlay["snapshot"] = {
@@ -544,8 +544,8 @@ test("window view keeps the local registry fallback when Runtime calls are auth-
       displayName: index === 0 ? "local-editor" : `local-${index}`,
       ownerId: String(index + 1).padStart(32, "0"), pid: 99 + index, publishedAt: Date.now(), agentCount: 1,
     })),
-    tasks: [{ task_id: "task-1", remote_session_id: "rs_1", workspace: "demo", action: "delegate", message: "work", purpose: "work", status: "executing", created_at: new Date().toISOString() }],
-  } satisfies McpxSnapshot;
+    tasks: [{ version: 1, id: "task-1", status: "running", cwd: "D:/fallback-view", workspaceId: "a".repeat(64), principalId: "test", createdAt: Date.now(), updatedAt: Date.now() }],
+  } satisfies GatewaySnapshot;
   overlay.handleInput("v");
   const rendered = overlay.render(100).join("\n");
   assert.match(rendered, /鉴权阻止 Runtime 调用 · 使用 local registry fallback/);
@@ -555,8 +555,8 @@ test("window view keeps the local registry fallback when Runtime calls are auth-
 });
 
 test("window rendering strips terminal control sequences from remote data", async (t) => {
-  const { McpxOverlay } = await import("../src/tui/mcpx-overlay.ts");
-  const overlay = new McpxOverlay({ cwd: "D:/sanitize-view", requestRender: () => undefined, initialRefresh: false, close: () => undefined });
+  const { GatewayOverlay } = await import("../src/tui/gateway-overlay.ts");
+  const overlay = new GatewayOverlay({ cwd: "D:/sanitize-view", requestRender: () => undefined, initialRefresh: false, close: () => undefined });
   t.after(() => overlay.dispose());
   overlay["snapshot"] = {
     refreshing: false, endpoint: "online", workspaces: [], cwdRegistered: false, thread: [], mcpServers: [], windows: [],
@@ -566,7 +566,7 @@ test("window rendering strips terminal control sequences from remote data", asyn
       pid: 1, publishedAt: Date.now(), agentCount: 0, status: "running", cursor: 1,
       remoteSessionId: "rs_1", remoteSessionLabel: "label", workspace: "demo",
     }],
-  } satisfies McpxSnapshot;
+  } satisfies GatewaySnapshot;
   overlay.handleInput("v");
   const rendered = overlay.render(100).join("\n");
   assert.doesNotMatch(rendered, /\x1b\]52/);
@@ -574,8 +574,8 @@ test("window rendering strips terminal control sequences from remote data", asyn
 });
 
 test("Gateway install prompt covers missing and verified built-in binaries", async () => {
-  const { McpxOverlay } = await import("../src/tui/mcpx-overlay.ts");
-  const overlay = new McpxOverlay({
+  const { GatewayOverlay } = await import("../src/tui/gateway-overlay.ts");
+  const overlay = new GatewayOverlay({
     cwd: "D:/fork-prompt-demo",
     requestRender: () => undefined,
     close: () => undefined,
@@ -583,29 +583,30 @@ test("Gateway install prompt covers missing and verified built-in binaries", asy
   const base = {
     refreshing: false, endpoint: "offline", workspaces: [], cwdRegistered: false,
     thread: [], mcpServers: [], windows: [],
-  } satisfies Partial<McpxSnapshot>;
+  } satisfies Partial<GatewaySnapshot>;
 
-  overlay["snapshot"] = { ...base, binary: undefined, forkInstalled: false } satisfies McpxSnapshot;
+  overlay["snapshot"] = { ...base, binary: undefined, forkInstalled: false } satisfies GatewaySnapshot;
   let rows = overlay["renderForkRows"](100).join("\n");
   assert.match(rows, /未找到 Pi Maestro Gateway/);
   assert.match(rows, /PI_MAESTRO_GATEWAY_BIN/);
-  assert.doesNotMatch(rows, /mcpx-for-pmf/);
+  assert.doesNotMatch(rows, /gateway-for-pmf/);
 
   rows = overlay.render(100).join("\n");
-  assert.match(rows, /Pi Maestro Gateway · 连接监控/);
-  assert.doesNotMatch(rows, /MCPX 连接监控|\/mcpx\b/);
+  assert.match(rows, /Pi Maestro Gateway/);
+  assert.match(rows, /1 主页/);
+  assert.match(rows, /2 配置/);
+  assert.doesNotMatch(rows, /连接监控|\/gateway\b/);
 
-  overlay["snapshot"] = { ...base, binary: "/usr/local/bin/pi-maestro-gateway", forkInstalled: true, forkVersion: "0.9.7" } satisfies McpxSnapshot;
+  overlay["snapshot"] = { ...base, binary: "/usr/local/bin/pi-maestro-gateway", forkInstalled: true, forkVersion: "0.9.7" } satisfies GatewaySnapshot;
   rows = overlay["renderForkRows"](100).join("\n");
   assert.match(rows, /Pi Maestro Gateway 已安装/);
   assert.match(rows, /v0\.9\.7/);
 });
 
-test("C enters inline config mode and edits scalars + lists then saves", async (t) => {
-  const { McpxOverlay } = await import("../src/tui/mcpx-overlay.ts");
-  const dir = await mkdtemp(join(tmpdir(), "mcpx-cfg-"));
+test("Gateway uses home/config pages, renders two columns, and saves OpenAI tunnel references", async (t) => {
+  const { GatewayOverlay } = await import("../src/tui/gateway-overlay.ts");
+  const dir = await mkdtemp(join(tmpdir(), "gateway-cfg-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  // Isolate HOME so readMcpxConfigView/writeMcpxConfigChanges hit the temp config.
   const prevHome = process.env.HOME;
   const prevProfile = process.env.USERPROFILE;
   process.env.HOME = dir;
@@ -614,8 +615,8 @@ test("C enters inline config mode and edits scalars + lists then saves", async (
     if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
     if (prevProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = prevProfile;
   });
-  await mkdir(join(dir, ".mcpx"), { recursive: true });
-  await writeFile(join(dir, ".mcpx", "config.yaml"), [
+  await mkdir(join(dir, ".pi", "agent", "gateway"), { recursive: true });
+  await writeFile(join(dir, ".pi", "agent", "gateway", "config.yaml"), [
     "server:",
     "    host: 127.0.0.1",
     "    port: 9090",
@@ -639,80 +640,74 @@ test("C enters inline config mode and edits scalars + lists then saves", async (
     "",
   ].join("\n"), "utf8");
 
-  let wizardCalls = 0;
-  const overlay = new McpxOverlay({ cwd: "D:/cfg-demo", requestRender: () => undefined, initialRefresh: false, close: () => undefined, onOpenWizard: () => { wizardCalls++; } });
-  const renderText = () => overlay.render(100).join("\n");
+  const overlay = new GatewayOverlay({ cwd: "D:/cfg-demo", requestRender: () => undefined, initialRefresh: false, close: () => undefined });
+  const renderText = () => overlay.render(110).join("\n");
+  const select = (key: string) => {
+    overlay["configSelected"] = overlay["configEntries"]().findIndex((entry) => entry.key === key);
+    assert.notEqual(overlay["configSelected"], -1, `missing config entry ${key}`);
+  };
 
-  // c keeps opening the wizard; C (capital) remains the inline editor.
   overlay.handleInput("c");
-  assert.equal(wizardCalls, 1);
-  assert.equal(overlay["mode"], "list");
-  overlay.handleInput("C");
   assert.equal(overlay["mode"], "config");
   let text = renderText();
-  assert.match(text, /Pi Maestro Gateway 配置/);
-  assert.match(text, /「服务器监听」/);
-  assert.match(text, /host: 127\.0\.0\.1/);
-  assert.match(text, /port: 9090/);
+  assert.match(text, /1 主页/);
+  assert.match(text, /\[2 配置\]/);
+  assert.match(text, /Gateway 基础与命令安全/);
+  assert.match(text, /公网隧道与文件安全/);
+  assert.match(text, /\[Cloudflare\].*OpenAI experimental/);
+  assert.match(text, / │ /, "wide config view must render two columns");
 
-  // Navigate to port (down once) and edit it inline with a fresh value.
-  overlay.handleInput("\x1b[B"); // down -> port entry
-  overlay.handleInput("\r"); // enter edit (draft starts empty)
-  overlay.handleInput("9");
-  overlay.handleInput("0");
-  overlay.handleInput("9");
-  overlay.handleInput("1");
-  overlay.handleInput("\r"); // commit -> port 9091
-  text = renderText();
-  assert.match(text, /port: 9091/);
+  select("server.port");
+  overlay.handleInput("\r");
+  for (const digit of "9091") overlay.handleInput(digit);
+  overlay.handleInput("\r");
 
-  // Cycle commands.default via space: move down to commands.default and space.
-  // Order: host(0) port(1) disable_localhost(2) trust_proxy(3) mode(4) token(5)
-  // oauthPassword(6) oauthServerURL(7) default(8) autoAllowReadonly(9)
-  // allow(10) confirm(11) deny(12) max_read_bytes(13) max_patch_files(14) ...
-  for (let i = 0; i < 7; i++) overlay.handleInput("\x1b[B"); // port -> default (8)
-  overlay.handleInput(" "); // cycle allow -> confirm
-  text = renderText();
-  assert.match(text, /default: \x1b\[33mconfirm/);
+  select("commands.default");
+  overlay.handleInput(" ");
+  assert.match(renderText(), /default: \x1b\[33mconfirm/);
 
-  // Open commands.allow list editor, add a rule, then return.
-  overlay.handleInput("\x1b[B"); // default -> autoAllowReadonly(9)
-  overlay.handleInput("\x1b[B"); // -> allow list(10)
-  overlay.handleInput("\r"); // enter list editor
-  text = renderText();
-  assert.match(text, /列表编辑/);
-  assert.match(text, /\^ls\\b/); // existing entry visible
-  // add a new rule
+  select("commandsAllow");
+  overlay.handleInput("\r");
   overlay.handleInput("a");
-  overlay.handleInput("^");
-  overlay.handleInput("p");
-  overlay.handleInput("i");
-  overlay.handleInput("\\");
-  overlay.handleInput("b");
-  overlay.handleInput("\r"); // commit add
-  text = renderText();
-  assert.match(text, /\^pi\\b/);
-  // Esc back to top menu
+  for (const char of "^pi\\b") overlay.handleInput(char);
+  overlay.handleInput("\r");
+  assert.match(renderText(), /\^pi\\b/);
   overlay.handleInput("\x1b");
-  assert.equal(overlay["configListKey"], undefined);
 
-  // Navigate to Save action and trigger it. The Save entry is near the bottom:
-  // entries 0..17 are scalars/lists, 18 = save, 19 = discard. From allow(10) go down 8.
-  for (let i = 0; i < 8; i++) overlay.handleInput("\x1b[B");
-  overlay.handleInput("\r"); // save
-  // write is synchronous (writeFileSync+rename) so the status is set immediately.
+  select("tunnel.provider");
+  overlay.handleInput(" ");
   text = renderText();
-  assert.match(text, /已写入/);
-  // Verify the file on disk reflects port + default + the new allow rule.
-  const after = await readFile(join(dir, ".mcpx", "config.yaml"), "utf8");
+  assert.match(text, /Cloudflare.*\[OpenAI experimental\]/);
+  assert.match(text, /binary_path/);
+  assert.match(text, /\/install openai-tunnel/);
+
+  select("tunnel.openai.enabled");
+  overlay.handleInput(" ");
+  select("tunnel.openai.tunnelIdEnv");
+  overlay.handleInput("\r");
+  for (const char of "MY_TUNNEL_ID") overlay.handleInput(char);
+  overlay.handleInput("\r");
+
+  select("save");
+  await overlay["saveConfig"]();
+  assert.match(renderText(), /已写入/);
+  const after = await readFile(join(dir, ".pi", "agent", "gateway", "config.yaml"), "utf8");
   assert.match(after, /port: 9091/);
   assert.match(after, /default: confirm/);
   assert.match(after, /\^pi\\b/);
-  assert.match(after, /\^ls\\b/); // existing allow preserved
+  assert.match(after, /\^ls\\b/);
+  assert.match(after, /tunnels:/);
+  assert.match(after, /enabled: true/);
+  assert.match(after, /tunnel_id_env: MY_TUNNEL_ID/);
+  assert.doesNotMatch(after, /CONTROL_PLANE_API_KEY:/, "only env names may be persisted, never secret values");
+
+  overlay.handleInput("1");
+  assert.equal(overlay["mode"], "list");
+  assert.match(renderText(), /\[1 主页\]/);
 });
 
 test("Gateway collaboration view distinguishes independent Todo and exposes members plus Monitor cursors", async (t) => {
-  const { McpxOverlay } = await import("../src/tui/mcpx-overlay.ts");
+  const { GatewayOverlay } = await import("../src/tui/gateway-overlay.ts");
   const now = Date.now();
   const todo = {
     version: 1, id: "gw-todo-1", sessionId: "collab-1", revision: 1,
@@ -734,7 +729,7 @@ test("Gateway collaboration view distinguishes independent Todo and exposes memb
       nextCursor: 7, oldestCursor: 7, hasMore: false, gap: true,
     }),
   };
-  const overlay = new McpxOverlay({ cwd: "D:/gateway-ui", requestRender: () => undefined, initialRefresh: false, close: () => undefined });
+  const overlay = new GatewayOverlay({ cwd: "D:/gateway-ui", requestRender: () => undefined, initialRefresh: false, close: () => undefined });
   t.after(() => overlay.dispose());
   overlay["snapshot"] = {
     refreshing: false, endpoint: "online", workspaces: [], cwdRegistered: false, windows: [], thread: [], mcpServers: [],
@@ -743,7 +738,7 @@ test("Gateway collaboration view distinguishes independent Todo and exposes memb
   overlay["client"] = fakeClient as never;
 
   let text = overlay.render(110).join("\n");
-  assert.match(text, /Gateway Todo is independent and is not synchronized with Pi Todo/);
+  assert.match(text, /Gateway Todo 与 Pi Todo 独立/);
   overlay.handleInput("g");
   assert.equal(overlay["mode"], "collaboration");
   text = overlay.render(110).join("\n");

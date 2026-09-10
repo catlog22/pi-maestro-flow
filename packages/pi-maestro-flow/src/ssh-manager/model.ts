@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 
-export const SSH_MANAGER_DATA_VERSION = 3 as const;
+export const SSH_MANAGER_DATA_VERSION = 4 as const;
 export const SSH_MANAGER_LEGACY_DATA_VERSION = 1 as const;
 export const SSH_MANAGER_V2_DATA_VERSION = 2 as const;
+export const SSH_MANAGER_V3_DATA_VERSION = 3 as const;
 export const SSH_HOST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 export const SSH_HOST_KEY_PATTERN = /^SHA256:[A-Za-z0-9+/]{43}$/;
 export const SSH_KEY_FINGERPRINT_PATTERN = SSH_HOST_KEY_PATTERN;
@@ -55,8 +56,37 @@ export interface SshGatewayBinding {
   effectiveHostDigest: string;
 }
 
+/** Non-secret client-side receipt for restoring observation after a plugin restart. */
+export interface SshGatewayLaunchBinding {
+  version: 1;
+  bindingId: string;
+  hostId: string;
+  effectiveHostDigest: string;
+  endpointIdentity: string;
+  gatewayPrincipalId: string;
+  gatewaySessionId: string;
+  gatewayMemberId: string;
+  sessionRevision: number;
+  memberGeneration: number;
+  leaseExpiresAt: number;
+  leaseTtlMs: number;
+  operationId: string;
+  executionHandle: string;
+  generation: number;
+  cursor: number;
+}
+
 export interface SshManagerData {
   version: typeof SSH_MANAGER_DATA_VERSION;
+  revision: number;
+  keys: SshKey[];
+  hosts: SshHost[];
+  gatewayBindings: SshGatewayBinding[];
+  gatewayLaunchBindings: SshGatewayLaunchBinding[];
+}
+
+export interface SshManagerDataV3 {
+  version: typeof SSH_MANAGER_V3_DATA_VERSION;
   revision: number;
   keys: SshKey[];
   hosts: SshHost[];
@@ -85,10 +115,16 @@ const AUTH_KEYS = new Map<string, ReadonlySet<string>>([
   ["password", new Set(["kind", "password"])],
   ["key", new Set(["kind", "keyId"])],
 ]);
-const DATA_KEYS = new Set(["version", "revision", "keys", "hosts", "gatewayBindings"]);
+const DATA_KEYS = new Set(["version", "revision", "keys", "hosts", "gatewayBindings", "gatewayLaunchBindings"]);
+const V3_DATA_KEYS = new Set(["version", "revision", "keys", "hosts", "gatewayBindings"]);
 const V2_DATA_KEYS = new Set(["version", "revision", "keys", "hosts"]);
 const LEGACY_DATA_KEYS = new Set(["version", "revision", "hosts"]);
 const GATEWAY_BINDING_KEYS = new Set(["hostId", "endpoint", "token", "pairingId", "expiresAt", "effectiveHostDigest"]);
+const GATEWAY_LAUNCH_BINDING_KEYS = new Set([
+  "version", "bindingId", "hostId", "effectiveHostDigest", "endpointIdentity", "gatewayPrincipalId",
+  "gatewaySessionId", "gatewayMemberId", "sessionRevision", "memberGeneration", "leaseExpiresAt",
+  "leaseTtlMs", "operationId", "executionHandle", "generation", "cursor",
+]);
 
 export function createSshHostId(): string { return randomUUID(); }
 export function createSshKeyId(): string { return randomUUID(); }
@@ -169,7 +205,20 @@ export function validateSshManagerData(value: unknown): SshManagerData {
   const hosts = validateStoredSshHosts(data.hosts);
   validateReferencesAndGraph(hosts, keys);
   const gatewayBindings = validateSshGatewayBindings(data.gatewayBindings, hosts);
-  return { version: SSH_MANAGER_DATA_VERSION, revision, keys, hosts, gatewayBindings };
+  const gatewayLaunchBindings = validateSshGatewayLaunchBindings(data.gatewayLaunchBindings, hosts);
+  return { version: SSH_MANAGER_DATA_VERSION, revision, keys, hosts, gatewayBindings, gatewayLaunchBindings };
+}
+
+export function validateSshManagerDataV3(value: unknown): SshManagerDataV3 {
+  const data = requireRecord(value, "SSH manager v3 data");
+  requireExactKeys(data, V3_DATA_KEYS, "SSH manager v3 data");
+  if (data.version !== SSH_MANAGER_V3_DATA_VERSION) throw new Error("Unsupported SSH manager v3 data version");
+  const revision = validateRevision(data.revision);
+  const keys = validateSshKeys(data.keys);
+  const hosts = validateStoredSshHosts(data.hosts);
+  validateReferencesAndGraph(hosts, keys);
+  const gatewayBindings = validateSshGatewayBindings(data.gatewayBindings, hosts);
+  return { version: SSH_MANAGER_V3_DATA_VERSION, revision, keys, hosts, gatewayBindings };
 }
 
 export function validateSshManagerDataV2(value: unknown): SshManagerDataV2 {
@@ -201,11 +250,15 @@ export function validateLegacySshManagerData(value: unknown): LegacySshManagerDa
 }
 
 export function migrateLegacySshManagerData(data: LegacySshManagerData): SshManagerData {
-  return validateSshManagerData({ version: SSH_MANAGER_DATA_VERSION, revision: data.revision + 1, keys: [], hosts: data.hosts.map((host) => ({ ...host, tags: [], jumpHostId: null, monitorEnabled: false })), gatewayBindings: [] });
+  return validateSshManagerData({ version: SSH_MANAGER_DATA_VERSION, revision: data.revision + 1, keys: [], hosts: data.hosts.map((host) => ({ ...host, tags: [], jumpHostId: null, monitorEnabled: false })), gatewayBindings: [], gatewayLaunchBindings: [] });
 }
 
 export function migrateSshManagerDataV2(data: SshManagerDataV2): SshManagerData {
-  return validateSshManagerData({ version: SSH_MANAGER_DATA_VERSION, revision: data.revision + 1, keys: data.keys, hosts: data.hosts, gatewayBindings: [] });
+  return validateSshManagerData({ version: SSH_MANAGER_DATA_VERSION, revision: data.revision + 1, keys: data.keys, hosts: data.hosts, gatewayBindings: [], gatewayLaunchBindings: [] });
+}
+
+export function migrateSshManagerDataV3(data: SshManagerDataV3): SshManagerData {
+  return validateSshManagerData({ version: SSH_MANAGER_DATA_VERSION, revision: data.revision + 1, keys: data.keys, hosts: data.hosts, gatewayBindings: data.gatewayBindings, gatewayLaunchBindings: [] });
 }
 
 export function validateSshGatewayBinding(value: unknown): SshGatewayBinding {
@@ -235,7 +288,43 @@ export function validateSshGatewayBindings(value: unknown, hosts: readonly SshHo
   return bindings;
 }
 
+export function validateSshGatewayLaunchBinding(value: unknown): SshGatewayLaunchBinding {
+  const binding = requireRecord(value, "SSH Gateway launch binding");
+  requireExactKeys(binding, GATEWAY_LAUNCH_BINDING_KEYS, "SSH Gateway launch binding");
+  if (binding.version !== 1) throw new Error("Unsupported SSH Gateway launch binding version");
+  const bindingId = requireSafeGatewayId(binding.bindingId, "launch binding id");
+  const hostId = requireId(binding.hostId, "host");
+  const effectiveHostDigest = requireDigest(binding.effectiveHostDigest, "effective host digest");
+  const endpointIdentity = requireDigest(binding.endpointIdentity, "endpoint identity");
+  const gatewayPrincipalId = requireCleanString(binding.gatewayPrincipalId, "Gateway principal id", 1, 256);
+  const gatewaySessionId = requireSafeGatewayId(binding.gatewaySessionId, "Gateway session id");
+  const gatewayMemberId = requireSafeGatewayId(binding.gatewayMemberId, "Gateway member id");
+  const operationId = requireSafeGatewayId(binding.operationId, "Gateway operation id");
+  const executionHandle = requireSafeGatewayId(binding.executionHandle, "Gateway execution handle");
+  return {
+    version: 1, bindingId, hostId, effectiveHostDigest, endpointIdentity, gatewayPrincipalId,
+    gatewaySessionId, gatewayMemberId,
+    sessionRevision: validateRevision(binding.sessionRevision),
+    memberGeneration: positiveSafeInteger(binding.memberGeneration, "Gateway member generation"),
+    leaseExpiresAt: nonNegativeSafeInteger(binding.leaseExpiresAt, "Gateway lease expiry"),
+    leaseTtlMs: positiveSafeInteger(binding.leaseTtlMs, "Gateway lease TTL"),
+    operationId, executionHandle,
+    generation: positiveSafeInteger(binding.generation, "launch generation"),
+    cursor: nonNegativeSafeInteger(binding.cursor, "Monitor cursor"),
+  };
+}
+
+export function validateSshGatewayLaunchBindings(value: unknown, hosts: readonly SshHost[]): SshGatewayLaunchBinding[] {
+  if (!Array.isArray(value) || value.length > SSH_MAX_HOSTS * 4) throw new Error("SSH Gateway launch bindings must be a bounded array");
+  const bindings = value.map(validateSshGatewayLaunchBinding);
+  requireUniqueIds(bindings.map((binding) => ({ id: binding.bindingId })), "Gateway launch binding");
+  const hostIds = new Set(hosts.map((host) => host.id));
+  if (bindings.some((binding) => !hostIds.has(binding.hostId))) throw new Error("SSH Gateway launch binding references a missing host");
+  return bindings;
+}
+
 export function cloneSshGatewayBinding(binding: SshGatewayBinding): SshGatewayBinding { return { ...binding }; }
+export function cloneSshGatewayLaunchBinding(binding: SshGatewayLaunchBinding): SshGatewayLaunchBinding { return { ...binding }; }
 
 export function replaceSshHost(hosts: readonly SshHost[], id: string, replacement: unknown): SshHost[] {
   const index = hosts.findIndex((host) => host.id === id);
@@ -321,6 +410,10 @@ function validateTags(value: unknown): string[] {
   return tags;
 }
 function validateRevision(value: unknown): number { if (!Number.isSafeInteger(value) || (value as number) < 0) throw new Error("SSH manager revision is invalid"); return value as number; }
+function positiveSafeInteger(value: unknown, name: string): number { if (!Number.isSafeInteger(value) || (value as number) < 1) throw new Error(`SSH ${name} must be a positive safe integer`); return value as number; }
+function nonNegativeSafeInteger(value: unknown, name: string): number { if (!Number.isSafeInteger(value) || (value as number) < 0) throw new Error(`SSH ${name} must be a non-negative safe integer`); return value as number; }
+function requireDigest(value: unknown, name: string): string { if (typeof value !== "string" || !/^[a-f0-9]{64}$/u.test(value)) throw new Error(`SSH ${name} must be a SHA256 digest`); return value; }
+function requireSafeGatewayId(value: unknown, name: string): string { const id = requireCleanString(value, name, 1, 128); if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(id)) throw new Error(`SSH ${name} is invalid`); return id; }
 function requireId(value: unknown, kind: string): string { const id = requireBoundedString(value, `${kind} id`, 1, 64); if (!SSH_HOST_ID_PATTERN.test(id)) throw new Error(`SSH ${kind} id is invalid`); return id; }
 function requireUniqueIds(values: Array<{ id: string }>, kind: string): void { const ids = new Set<string>(); for (const value of values) { if (ids.has(value.id)) throw new Error(`Duplicate SSH ${kind} id: ${value.id}`); ids.add(value.id); } }
 function requireRecord(value: unknown, name: string): Record<string, unknown> { if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${name} must be an object`); return value as Record<string, unknown>; }

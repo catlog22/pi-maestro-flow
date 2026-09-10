@@ -72,6 +72,7 @@ import {
   type MonitorQuerySnapshot,
   type MonitorQueryTimelineGroup,
 } from "./monitor.ts";
+import { createBackgroundStatusHeartbeat } from "./background-status-heartbeat.ts";
 import {
   MonitorToolExposureController,
   type MonitorCommunicationCapture,
@@ -1840,6 +1841,48 @@ export default function registerTeammateExtension(
   let workspacePeerLifecycle = Promise.resolve();
   let sessionHostRegistry: SessionHostRegistry | undefined;
 
+  const backgroundStatusHeartbeat = createBackgroundStatusHeartbeat({
+    capture: () => {
+      const activeAgents = [...state.activeRuns.values()]
+        .filter((agent) => (agent.status === "pending" || agent.status === "running" || agent.status === "retrying")
+          && !foregroundToolRuns.has(agent.correlationId));
+      const physicalAgents = activeAgents.filter((agent) => agent.ownsChildProcess !== false);
+      const visibleAgents = (physicalAgents.length > 0 ? physicalAgents : activeAgents)
+        .sort((left, right) => left.startedAt - right.startedAt);
+      return {
+        teammates: visibleAgents.map((agent) => ({
+          id: agent.correlationId,
+          label: agent.name ?? agent.agent,
+          status: agent.status,
+          ...(agent.phase ? { phase: agent.phase } : {}),
+          lastActivityAt: agent.lastActivityAt,
+        })),
+        bashJobs: workspaceBackgroundJobs
+          .filter((job) => job.background)
+          .map((job) => ({
+            id: job.id,
+            command: job.command,
+            status: job.status,
+            startedAt: job.startedAt,
+          })),
+      };
+    },
+    deliver: (heartbeat) => {
+      const fence = captureRootSessionFence();
+      if (!fence.sessionId || !ownsRootSessionFence(fence)) return false;
+      return safeSendMessage(pi, {
+        customType: "background-status-heartbeat",
+        content: heartbeat.content,
+        display: true,
+        details: {
+          ...heartbeat.details,
+          sessionId: fence.sessionId,
+          generation: fence.generation,
+        },
+      }, { triggerTurn: true });
+    },
+  });
+
   const currentRootOwnerId = (): string =>
     workspacePeerPublisher?.identity.ownerId
       ?? state.currentSessionId
@@ -2140,6 +2183,7 @@ export default function registerTeammateExtension(
     const next = activeWorkspaceBackgroundJobsFromPayload(payload);
     if (!next) return;
     workspaceBackgroundJobs = next;
+    backgroundStatusHeartbeat.refresh();
     markWorkspacePeerDirty();
   };
 
@@ -10904,6 +10948,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
   }));
   disposers.push(pi.events.on(RUNTIME_READ_MODEL_QUERY_EVENT, publishRuntimeReadSnapshot));
   disposers.push(pi.events.on(TEAMMATE_STARTED_EVENT, () => {
+    backgroundStatusHeartbeat.refresh();
     markWorkspacePeerDirty();
     publishRuntimeReadDelta();
     updateAgentWidget();
@@ -10911,6 +10956,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
   }));
   disposers.push(pi.events.on(TEAMMATE_COMPLETE_EVENT, () => {
     const fence = captureRootSessionFence();
+    backgroundStatusHeartbeat.refresh();
     markWorkspacePeerDirty();
     publishRuntimeReadDelta();
     setTimeout(() => {
@@ -10934,6 +10980,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
   // =========================================================================
 
   pi.on("session_start", (event, ctx) => {
+    backgroundStatusHeartbeat.reset();
     registerTeammateSettings();
     state.settlementOwner = undefined;
     state.sessionGeneration = (state.sessionGeneration ?? 0) + 1;
@@ -11096,6 +11143,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
   pi.on("before_agent_start", injectTeammateContext);
 
   pi.on("agent_start", () => {
+    backgroundStatusHeartbeat.markSessionActive();
     if (!workspaceTerminalResultState.settled || workspaceTerminalResultState.terminalPublished) {
       workspaceTerminalResultDraft = undefined;
       workspaceTerminalResultState = { settled: false, terminalPublished: false };
@@ -11104,6 +11152,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
   });
 
   pi.on("turn_start", () => {
+    backgroundStatusHeartbeat.markSessionActive();
     workspaceMainAssistantText = "";
     workspaceCurrentTurnAssistantMessage = undefined;
     appendWorkspaceMainProgressEvent({ kind: "lifecycle", at: Date.now(), phase: "turn_start" });
@@ -11161,6 +11210,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     recordWorkspaceMainSettle(at);
     appendWorkspaceMainProgressEvent({ kind: "lifecycle", at, phase: "agent_settled" });
     workspaceTerminalResultState.settled = true;
+    backgroundStatusHeartbeat.markSessionSettled();
     const terminalPublished = await publishWorkspaceWindowTerminalResults(
       workspaceTerminalResultDraft ?? { outcome: "no-result" },
     );
@@ -11171,6 +11221,8 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
   });
 
   pi.on("session_compact", (_event, ctx) => {
+    backgroundStatusHeartbeat.reset();
+    if (ctx.isIdle()) backgroundStatusHeartbeat.markSessionSettled();
     widgetCtx = ctx;
     installMonitorEscapeTap(ctx.ui);
     setPersistentUi(ctx.ui);
@@ -11197,6 +11249,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
   });
 
   pi.on("session_shutdown", async (event) => {
+    backgroundStatusHeartbeat.reset();
     const shutdownReason = event?.reason ?? "quit";
     const outgoingFence = captureRootSessionFence();
     state.settlementOwner = projectionForRootFence(outgoingFence);

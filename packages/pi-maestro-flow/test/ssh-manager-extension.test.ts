@@ -24,6 +24,7 @@ import {
 } from "../src/ssh-manager/extension.ts";
 import type { SshExecutionResult, SshExecutor } from "../src/ssh-manager/executor.ts";
 import type { SshGatewayClientPool, SshGatewayInput } from "../src/ssh-manager/gateway-client.ts";
+import type { SshStatusMonitor } from "../src/ssh-manager/status-monitor.ts";
 import type { SshHost } from "../src/ssh-manager/model.ts";
 
 const PIN = `SHA256:${"A".repeat(43)}`;
@@ -259,7 +260,7 @@ test("independent SSH extension binds #ssh selection to a hostless tool without 
   const commands = new Map<string, unknown>();
   const handlers = new Map<string, Array<(event: any, ctx: ExtensionContext) => any>>();
   const statuses = new Map<string, string | undefined>();
-  let selectorChoices: string[] = [];
+  let pickerCalls = 0;
   const executed: Array<{ host: SshHost; request: unknown }> = [];
   const executor = {
     async execute(selectedHost: SshHost, request: unknown): Promise<SshExecutionResult> {
@@ -318,9 +319,9 @@ test("independent SSH extension binds #ssh selection to a hostless tool without 
   const ctx = {
     cwd: root,
     ui: {
-      select: async (_title: string, choices: string[]) => {
-        selectorChoices = choices;
-        return choices[0];
+      async custom() {
+        pickerCalls += 1;
+        return ["server-1"];
       },
       notify() {},
       setStatus(key: string, value: string | undefined) { statuses.set(key, value); },
@@ -379,11 +380,11 @@ test("independent SSH extension binds #ssh selection to a hostless tool without 
     const input = handlers.get("input")![0]!;
     const handled = await input({ source: "interactive", text: "#ssh", images: [] }, ctx);
     assert.deepEqual(handled, { action: "handled" });
-    assert.equal(selectorChoices[0], "Production · deploy@192.0.2.10:22 · bash · id=server-1");
+    assert.equal(pickerCalls, 1);
     assert.equal(statuses.get("maestro-ssh"), "SSH · Production · 192.0.2.10:22");
     assert.equal((await listSshHostPickerEntries())[0]?.selected, true);
     await input({ source: "interactive", text: "  #SSH  ", images: [] }, ctx);
-    assert.equal(selectorChoices[0], "Production (current) · deploy@192.0.2.10:22 · bash · id=server-1");
+    assert.equal(pickerCalls, 2);
 
     const renderTheme = {
       fg: (_name: string, text: string) => text,
@@ -402,8 +403,8 @@ test("independent SSH extension binds #ssh selection to a hostless tool without 
 
     const before = handlers.get("before_agent_start")![0]!;
     const context = await before({ systemPrompt: "base" }, ctx);
-    assert.match(context.systemPrompt, /id "server-1", label "Production", and shell bash/);
-    assert.match(context.systemPrompt, /does not select or configure teammate routing/);
+    assert.match(context.systemPrompt, /"id":"server-1","label":"Production","shell":"bash"/);
+    assert.match(context.systemPrompt, /attachments do not select or configure teammate routing/);
     assert.match(context.systemPrompt, /Remote Monitor calls use the returned launch receipt/);
     assert.match(context.systemPrompt, /Never use remote-worker/);
     assert.doesNotMatch(context.systemPrompt, /192\.0\.2\.10|deploy|encrypted-secret|SHA256/);
@@ -469,14 +470,15 @@ test("independent SSH extension binds #ssh selection to a hostless tool without 
     );
     assert.equal((await listSshHostPickerEntries())[0]?.selected, true, "failed activation preserves selection");
 
-    selectorChoices = [];
+    const pickerCallsBeforeCanonical = pickerCalls;
     assert.deepEqual(
       await input({ source: "interactive", text: "#ssh:server-1", images: [] }, ctx),
       { action: "handled" },
     );
-    assert.deepEqual(selectorChoices, [], "canonical bind-only input does not open the legacy picker");
+    assert.equal(pickerCalls, pickerCallsBeforeCanonical, "canonical bind-only input does not open the picker");
 
     await input({ source: "interactive", text: "#ssh", images: [] }, ctx);
+    assert.equal(pickerCalls, pickerCallsBeforeCanonical + 1);
     assert.equal(statuses.get("maestro-ssh"), "SSH · Production · 192.0.2.10:22");
     await writeFile(store.path, "{}\n", "utf8");
     assert.equal(await before({ systemPrompt: "base" }, ctx), undefined);
@@ -546,10 +548,26 @@ test("unlocked SSH manager exposes all provider-owned targets without requiring 
       handlers.set(name, current);
     },
   } as unknown as ExtensionAPI;
-  const ctx = { ui: { setStatus() {} } } as unknown as ExtensionContext;
+  const statuses = new Map<string, string | undefined>();
+  const notifications: Array<{ message: string; type: string }> = [];
+  let monitorReconciles = 0;
+  const monitor = {
+    reconcile() { monitorReconciles += 1; },
+    lock() {},
+    shutdown() {},
+    getStatuses() { return new Map(); },
+    subscribe() { return () => undefined; },
+  } as unknown as SshStatusMonitor;
+  const ctx = {
+    ui: {
+      async custom() { return "master-password"; },
+      notify(message: string, type: string) { notifications.push({ message, type }); },
+      setStatus(key: string, value: string | undefined) { statuses.set(key, value); },
+    },
+  } as unknown as ExtensionContext;
 
   try {
-    registerSshManager(api, { store, executor, gatewayPool });
+    registerSshManager(api, { store, executor, gatewayPool, monitor });
     const tool = tools.get("ssh")!;
     const targetsResult = await tool.execute("ssh-targets", { action: "targets" }, new AbortController().signal);
     assert.equal(targetsResult.isError, undefined);
@@ -595,10 +613,50 @@ test("unlocked SSH manager exposes all provider-owned targets without requiring 
     const before = handlers.get("before_agent_start")![0]!;
     const context = await before({ systemPrompt: "base" }, ctx);
     assert.match(context.systemPrompt, /SSH manager is unlocked/u);
-    assert.match(context.systemPrompt, /No default server is selected; call action=targets/u);
+    assert.match(context.systemPrompt, /Attached SSH metadata \(id, label, and shell only\): \[\]/u);
+    assert.match(context.systemPrompt, /No SSH server is attached/u);
     assert.doesNotMatch(context.systemPrompt, /192\.0\.2|deploy|operator|encrypted-secret|second-secret|SHA256|Production|Staging/u);
 
-    await activateSshHost("server-2");
+    const input = handlers.get("input")![0]!;
+    store.lock();
+    await input({ source: "interactive", text: "#ssh:+server-1", images: [] }, ctx);
+    assert.equal(monitorReconciles, 1, "attachment controls initialize monitor state when they unlock the manager");
+    await input({ source: "interactive", text: "#ssh:-server-1", images: [] }, ctx);
+    assert.equal(monitorReconciles, 1, "attachment-only changes do not reprobe all monitored hosts");
+
+    await input({ source: "interactive", text: "#ssh:+server-1", images: [] }, ctx);
+    await input({ source: "interactive", text: "#ssh:+server-2", images: [] }, ctx);
+    assert.equal(monitorReconciles, 1);
+    const imageControl = await input({ source: "interactive", text: "#ssh:-server-1", images: [{}] }, ctx);
+    assert.deepEqual(imageControl, { action: "handled" });
+    assert.match(notifications.at(-1)?.message ?? "", /do not accept images/u);
+    assert.equal(statuses.get("maestro-ssh"), "SSH · 2 attached · Production, Staging");
+    assert.equal(statuses.get("maestro-ssh"), "SSH · 2 attached · Production, Staging");
+    assert.deepEqual(JSON.parse((await tool.execute("ssh-selected-targets", { action: "targets" }, new AbortController().signal)).content[0]!.text), {
+      targets: [
+        { targetId: "server-1", label: "Production", shell: "bash", selected: true },
+        { targetId: "server-2", label: "Staging", shell: "powershell", selected: true },
+      ],
+    });
+    const ambiguous = await tool.execute("ssh-ambiguous-default", { command: "id" }, new AbortController().signal);
+    assert.equal(ambiguous.isError, true);
+    assert.match(ambiguous.content[0]!.text, /Multiple SSH servers are attached.*one targetId per SSH call/u);
+    const attachedContext = await before({ systemPrompt: "base" }, ctx);
+    assert.match(attachedContext.systemPrompt, /"id":"server-1","label":"Production","shell":"bash"/u);
+    assert.match(attachedContext.systemPrompt, /"id":"server-2","label":"Staging","shell":"powershell"/u);
+    assert.match(attachedContext.systemPrompt, /every SSH call must pass one explicit targetId/u);
+    assert.doesNotMatch(attachedContext.systemPrompt, /192\.0\.2|deploy|operator|encrypted-secret|second-secret|SHA256/u);
+
+    await input({ source: "interactive", text: "#ssh:-server-1", images: [] }, ctx);
+    assert.equal(statuses.get("maestro-ssh"), "SSH · Staging · 192.0.2.20:22");
+    const singleDefault = await tool.execute("ssh-single-default", { command: "hostname" }, new AbortController().signal);
+    assert.equal(singleDefault.isError, undefined);
+    assert.equal(executions.at(-1)?.hostId, "server-2");
+
+    await input({ source: "interactive", text: "#ssh:server-2", images: [] }, ctx);
+    await input({ source: "interactive", text: "#ssh:+server-1", images: [] }, ctx);
+    assert.equal(statuses.get("maestro-ssh"), "SSH · 2 attached · Staging, Production");
+
     const writer = new EncryptedSshStore({ path: store.path });
     await writer.unlock("master-password");
     await writer.updateHost("server-2", {
@@ -615,10 +673,16 @@ test("unlocked SSH manager exposes all provider-owned targets without requiring 
     assert.equal(gatewayExecutions.length, 2);
     assert.equal(gatewayExecutions[1]!.digest, gatewayExecutions[0]!.digest, "credential rotation does not corrupt the effective chain digest contract");
     assert.notEqual(gatewayExecutions[1]!.cacheFence, gatewayExecutions[0]!.cacheFence, "credential rotation changes the Gateway cache fence");
-    const staleDefault = await tool.execute("ssh-stale-default", { command: "id" }, new AbortController().signal);
-    assert.equal(staleDefault.isError, true);
-    assert.match((staleDefault.content[0] as { text: string }).text, /selected SSH server changed/u);
-    assert.equal(executions.length, 1);
+    const remainingDefault = await tool.execute("ssh-stale-default", { command: "id" }, new AbortController().signal);
+    assert.equal(remainingDefault.isError, undefined, "a stale attachment is removed without clearing unaffected targets");
+    assert.equal(executions.at(-1)?.hostId, "server-1");
+    assert.deepEqual(JSON.parse((await tool.execute("ssh-targets-after-rotation", { action: "targets" }, new AbortController().signal)).content[0]!.text), {
+      targets: [
+        { targetId: "server-1", label: "Production", shell: "bash", selected: true },
+        { targetId: "server-2", label: "Staging", shell: "powershell", selected: false },
+      ],
+    });
+    assert.equal(executions.length, 3);
   } finally {
     await handlers.get("session_shutdown")?.[0]?.({}, ctx);
     store.lock();

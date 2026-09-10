@@ -164,7 +164,7 @@ export class HostService {
       pid: process.pid,
       cwd: process.cwd(),
       cpuCount: cpus().length,
-      features: ["host.describe", "host.status", "host.test", "bounded-process", "workspace-guard"],
+      features: ["host.describe", "host.status", "host.test", "bounded-process", "workspace-guard", "monitor-stream-v1"],
     };
   }
 }

@@ -125,6 +125,7 @@ test("service help documents ensure and Windows Startup persistence", async () =
   assert.match(output, /workspace register/u);
   assert.match(output, /workspace renew/u);
   assert.match(output, /workspace remove/u);
+  assert.match(output, /migrate-legacy --dry-run\|--apply/u);
 });
 
 test("service selectors are mutually exclusive and failures never emit partial JSON", async () => {
@@ -220,6 +221,53 @@ test("workspace CLI emits redacted machine JSON and enforces generation fences t
   const removed = await invoke(["workspace", "remove", record.id, "--generation", "1", "--config", configPath, "--json"]);
   assert.equal(removed.code, 0, removed.errors);
   assert.deepEqual(JSON.parse(removed.output), { removed: true });
+});
+
+test("tunnel CLI exposes the built-in Cloudflare provider through native supervisor state", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "gateway-cli-tunnel-"));
+  const configPath = join(root, "config.yaml");
+  const ownerPath = join(root, "owner.json");
+  const unix = (value: string) => value.replace(/\\/g, "/");
+  await writeFile(configPath, [
+    "transport:",
+    "  http:",
+    "    enabled: false",
+    "state:",
+    `  root_dir: "${unix(join(root, "state"))}"`,
+    `  owner_path: "${unix(ownerPath)}"`,
+    "logging:",
+    "  level: silent",
+    "",
+  ].join("\n"));
+  const daemon = new GatewayDaemon({ configPath, cwd: root, http: false });
+  await daemon.start();
+  t.after(async () => { await daemon.stop(); await rm(root, { recursive: true, force: true }); });
+
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  let output = "";
+  let errors = "";
+  stdout.on("data", (chunk) => { output += chunk.toString(); });
+  stderr.on("data", (chunk) => { errors += chunk.toString(); });
+  assert.equal(await main(["tunnel", "status", "cloudflare", "--config", configPath, "--json"], { stdout, stderr }), 0, errors);
+  const state = JSON.parse(output) as { provider: string; generation?: number; desiredState: string; observed: { phase: string }; ownerToken?: string };
+  assert.equal(state.provider, "cloudflare");
+  assert.equal(state.generation, undefined, "an unused provider has no fabricated durable generation");
+  assert.equal(state.desiredState, "stopped");
+  assert.equal(state.observed.phase, "stopped");
+  assert.equal(state.ownerToken, undefined);
+});
+
+test("tunnel CLI validates Cloudflare Quick Tunnel flags before IPC", async () => {
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  let output = "";
+  let errors = "";
+  stdout.on("data", (chunk) => { output += chunk.toString(); });
+  stderr.on("data", (chunk) => { errors += chunk.toString(); });
+  assert.equal(await main(["tunnel", "start", "cloudflare", "--local-port", "70000", "--json"], { stdout, stderr }), 1);
+  assert.equal(output, "");
+  assert.match(errors, /local-port must be in \[1, 65535\]/u);
 });
 
 test("package manifest exposes the CLI and stable v1 API without removing source compatibility", async () => {

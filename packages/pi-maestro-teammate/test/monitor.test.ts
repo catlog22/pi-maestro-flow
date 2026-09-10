@@ -72,6 +72,10 @@ test("root Monitor command entry points exclude the legacy evaluator runtime", a
   assert.equal(source.match(/pi\.registerCommand\("teammate-send"/g)?.length, 1);
   assert.match(source, /kind: "workspace",[\s\S]*?capabilities: \{ inspect: true, wait: true, cancel: false, message: true, supervise: true \}/);
   assert.match(source, /pi\.events\.on\("bash-bg:update", applyBashBgSnapshot\)/);
+  assert.match(source, /createBackgroundStatusHeartbeat\(\{[\s\S]*?customType: "background-status-heartbeat"[\s\S]*?triggerTurn: true/);
+  assert.match(source, /pi\.on\("agent_start"[\s\S]*?backgroundStatusHeartbeat\.markSessionActive\(\)/);
+  assert.match(source, /pi\.on\("agent_settled"[\s\S]*?backgroundStatusHeartbeat\.markSessionSettled\(\)/);
+  assert.match(source, /pi\.on\("session_shutdown"[\s\S]*?backgroundStatusHeartbeat\.reset\(\)/);
   assert.match(source, /workspaceMainSessionDeliveryDecision\(\s*command\.action,\s*workspaceBackgroundJobs/);
   assert.match(source, /deliverAs: delivery\.deliverAs/);
   assert.match(source, /steer deferred as follow_up while foreground bash_bg is active/);

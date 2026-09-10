@@ -288,11 +288,11 @@ function writeV2Fixture(path: string, password: string, revision = 6): Promise<v
   return writeFile(path, `${JSON.stringify(envelope)}\n`, { mode: 0o600 });
 }
 
-test("SSH v3 data validates managed keys, references, jump depth, cycles, bindings, and secret-free effective digests", () => {
+test("SSH v4 data validates managed keys, references, jump depth, cycles, bindings, and secret-free effective digests", () => {
   const key = managedKey();
   const jump = passwordHost({ id: "jump", auth: { kind: "agent" } });
   const leaf = passwordHost({ id: "leaf", auth: { kind: "key", keyId: key.id }, jumpHostId: jump.id, hostKey: null, tags: ["prod"] });
-  const data = validateSshManagerData({ version: 3, revision: 0, keys: [key], hosts: [jump, leaf], gatewayBindings: [] });
+  const data = validateSshManagerData({ version: 4, revision: 0, keys: [key], hosts: [jump, leaf], gatewayBindings: [], gatewayLaunchBindings: [] });
   assert.deepEqual(reverseSshHostDependencyClosure(data.hosts, "jump"), ["jump", "leaf"]);
   const digest = effectiveSshHostDigest(data, "leaf");
   assert.match(digest, /^[a-f0-9]{64}$/);
@@ -302,7 +302,7 @@ test("SSH v3 data validates managed keys, references, jump depth, cycles, bindin
   assert.throws(() => validateSshManagerData({ ...data, keys: [{ ...key, extra: true }] }), /unsupported field/);
   assert.throws(() => validateSshManagerData({ ...data, hosts: [{ ...jump, tags: Array.from({ length: 17 }, (_, index) => `t${index}`) }] }), /at most 16/);
   const chain = Array.from({ length: 7 }, (_, index) => passwordHost({ id: `h${index}`, jumpHostId: index === 6 ? null : `h${index + 1}` }));
-  assert.throws(() => validateSshManagerData({ version: 3, revision: 0, keys: [], hosts: chain, gatewayBindings: [] }), /depth exceeds 5/);
+  assert.throws(() => validateSshManagerData({ version: 4, revision: 0, keys: [], hosts: chain, gatewayBindings: [], gatewayLaunchBindings: [] }), /depth exceeds 5/);
 });
 
 test("encrypted SSH store provides fenced host/key CRUD and blocks referenced deletion", async () => {
@@ -388,7 +388,7 @@ test("v1 migration resumes when an interrupted publication left the matching bac
   }
 });
 
-test("v2 unlock migrates atomically to v3 with an empty independent binding store", async () => {
+test("v2 unlock migrates atomically to v4 with empty independent binding stores", async () => {
   const root = await mkdtemp(join(tmpdir(), "ssh-manager-v2-migrate-"));
   const path = join(root, "hosts.enc.json");
   const store = new EncryptedSshStore({ path });
@@ -428,7 +428,7 @@ test("fixed SSH bootstrap persists only an encrypted binding and returns a sanit
   } finally { store.lock(); await rm(root, { recursive: true, force: true }); }
 });
 
-test("v3 Gateway bindings are encrypted, separately fenced, rotated, and invalidated by host changes", async () => {
+test("v4 Gateway bindings are encrypted, separately fenced, rotated, and invalidated by host changes", async () => {
   const root = await mkdtemp(join(tmpdir(), "ssh-manager-v3-binding-"));
   const path = join(root, "hosts.enc.json");
   const store = new EncryptedSshStore({ path });

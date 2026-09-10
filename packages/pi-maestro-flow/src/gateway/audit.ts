@@ -2,6 +2,7 @@
 import { mkdir, open } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { GatewayPrincipal } from "./contracts.ts";
+import { projectGatewayObservation, type GatewayObservation } from "./observability.ts";
 
 export type GatewayAuditOutcome = "allowed" | "denied" | "error";
 
@@ -26,9 +27,9 @@ export class GatewayAuditSink {
   constructor(readonly path?: string) {}
 
   write(event: GatewayAuditEvent): Promise<void> {
-    if (!this.path) return Promise.resolve();
-    const record = {
+    return this.append({
       version: 1,
+      recordType: "rpc",
       at: new Date().toISOString(),
       requestId: event.requestId,
       principalId: event.principal.id,
@@ -38,7 +39,18 @@ export class GatewayAuditSink {
       outcome: event.outcome,
       ...(event.code === undefined ? {} : { code: event.code }),
       durationMs: Math.max(0, Math.floor(event.durationMs)),
-    };
+    });
+  }
+
+  writeObservation(observation: GatewayObservation): Promise<void> {
+    const projected = projectGatewayObservation(observation);
+    return this.append({ version: 1, recordType: "observation", at: new Date().toISOString(), ...projected });
+  }
+
+  flush(): Promise<void> { return this.tail; }
+
+  private append(record: Record<string, unknown>): Promise<void> {
+    if (!this.path) return Promise.resolve();
     const operation = this.tail.then(async () => {
       await mkdir(dirname(this.path!), { recursive: true, mode: 0o700 });
       const handle = await open(this.path!, "a", 0o600);

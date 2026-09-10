@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { _mcpxWizardInternals, type McpxConfigChanges } from "../src/tui/mcpx-wizard.ts";
+import { _gatewayWizardInternals, type GatewayConfigChanges } from "../src/tui/gateway-wizard.ts";
 
-const { splitSections, parseListItems, buildChangesYaml, resolveExecutable, extractFilesBlock, parseSubList } = _mcpxWizardInternals;
+const { splitSections, parseListItems, buildGatewayChangesYaml, resolveExecutable, extractFilesBlock, parseSubList } = _gatewayWizardInternals;
 
 const SAMPLE_CONFIG = [
   "server:",
@@ -44,12 +44,12 @@ test("parseListItems reads allow/confirm/deny lists", () => {
   assert.deepEqual(parseListItems(security, "deny"), ["^rm -rf /"]);
 });
 
-test("buildChangesYaml updates port, auth mode and preserves untouched sections", () => {
-  const changes: McpxConfigChanges = { port: 9091, authMode: "bearer", authToken: "mcpx_test" };
-  const { yaml, summary } = buildChangesYaml(SAMPLE_CONFIG, changes, "D:/demo");
+test("buildGatewayChangesYaml updates port, auth mode and preserves untouched sections", () => {
+  const changes: GatewayConfigChanges = { port: 9091, authMode: "bearer", authToken: "gateway_test" };
+  const { yaml, summary } = buildGatewayChangesYaml(SAMPLE_CONFIG, changes, "D:/demo");
   assert.match(yaml, /port: 9091/);
   assert.match(yaml, /mode: bearer/);
-  assert.match(yaml, /token: "mcpx_test"/);
+  assert.match(yaml, /token: "gateway_test"/);
   // untouched sections survive verbatim
   assert.match(yaml, /retention:/);
   assert.match(yaml, /enabled: true/);
@@ -59,9 +59,9 @@ test("buildChangesYaml updates port, auth mode and preserves untouched sections"
   assert.ok(summary.some((line) => line.includes("bearer")));
 });
 
-test("buildChangesYaml adds pi allow rule while keeping existing rules", () => {
-  const changes: McpxConfigChanges = { allowPi: true, commandsDefault: "confirm" };
-  const { yaml } = buildChangesYaml(SAMPLE_CONFIG, changes, "D:/demo");
+test("buildGatewayChangesYaml adds pi allow rule while keeping existing rules", () => {
+  const changes: GatewayConfigChanges = { allowPi: true, commandsDefault: "confirm" };
+  const { yaml } = buildGatewayChangesYaml(SAMPLE_CONFIG, changes, "D:/demo");
   assert.match(yaml, /default: confirm/);
   assert.doesNotMatch(yaml, /default:\s+default/); // no duplicated key prefix
   assert.match(yaml, /\^pi\\b/);
@@ -70,26 +70,26 @@ test("buildChangesYaml adds pi allow rule while keeping existing rules", () => {
   assert.match(yaml, /\^rm -rf \//);
 });
 
-test("buildChangesYaml appends skill dirs without duplicates", () => {
+test("buildGatewayChangesYaml appends skill dirs without duplicates", () => {
   const existing = SAMPLE_CONFIG + [
     "discovery:",
     "    skills:",
     "        enabled: true",
     "        dirs:",
-    "            - ~/.mcpx/skills",
+    "            - ~/.pi/agent/gateway/skills",
     "",
   ].join("\n");
-  const changes: McpxConfigChanges = { skillDirs: ["D:/pi-maestro-flow/.pi/skills", "~/.mcpx/skills"] };
-  const { yaml, summary } = buildChangesYaml(existing, changes, "D:/demo");
+  const changes: GatewayConfigChanges = { skillDirs: ["D:/pi-maestro-flow/.pi/skills", "~/.pi/agent/gateway/skills"] };
+  const { yaml, summary } = buildGatewayChangesYaml(existing, changes, "D:/demo");
   const dirCount = yaml.split("D:/pi-maestro-flow/.pi/skills").length - 1;
   assert.equal(dirCount, 1);
-  assert.equal(yaml.split("~/.mcpx/skills").length - 1, 1); // no duplicate
+  assert.equal(yaml.split("~/.pi/agent/gateway/skills").length - 1, 1); // no duplicate
   assert.ok(summary.some((line) => line.includes("D:/pi-maestro-flow/.pi/skills")));
 });
 
-test("buildChangesYaml sets oauth flags on the server section", () => {
-  const changes: McpxConfigChanges = { authMode: "oauth", oauthPassword: "secret", oauthServerURL: "https://mcp.example.com" };
-  const { yaml } = buildChangesYaml(SAMPLE_CONFIG, changes, "D:/demo");
+test("buildGatewayChangesYaml sets oauth flags on the server section", () => {
+  const changes: GatewayConfigChanges = { authMode: "oauth", oauthPassword: "secret", oauthServerURL: "https://mcp.example.com" };
+  const { yaml } = buildGatewayChangesYaml(SAMPLE_CONFIG, changes, "D:/demo");
   assert.match(yaml, /mode: oauth/);
   assert.match(yaml, /password: "secret"/);
   assert.match(yaml, /server_url: "https:\/\/mcp\.example\.com"/);
@@ -97,9 +97,9 @@ test("buildChangesYaml sets oauth flags on the server section", () => {
   assert.match(yaml, /trust_proxy_headers: true/);
 });
 
-test("buildChangesYaml works on an empty (first-run) config", () => {
-  const changes: McpxConfigChanges = { port: 9090, authMode: "open", commandsDefault: "confirm", allowPi: true };
-  const { yaml } = buildChangesYaml("", changes, "D:/demo");
+test("buildGatewayChangesYaml works on an empty (first-run) config", () => {
+  const changes: GatewayConfigChanges = { port: 9090, authMode: "open", commandsDefault: "confirm", allowPi: true };
+  const { yaml } = buildGatewayChangesYaml("", changes, "D:/demo");
   assert.match(yaml, /server:/);
   assert.match(yaml, /port: 9090/);
   assert.match(yaml, /auth:/);
@@ -108,22 +108,22 @@ test("buildChangesYaml works on an empty (first-run) config", () => {
   assert.match(yaml, /\^pi\\b/);
 });
 
-test("buildChangesYaml is idempotent on a clean config and keeps the commands header", () => {
-  const changes: McpxConfigChanges = { commandsDefault: "confirm", allowPi: true };
-  const first = buildChangesYaml(SAMPLE_CONFIG, changes, "D:/demo").yaml;
+test("buildGatewayChangesYaml is idempotent on a clean config and keeps the commands header", () => {
+  const changes: GatewayConfigChanges = { commandsDefault: "confirm", allowPi: true };
+  const first = buildGatewayChangesYaml(SAMPLE_CONFIG, changes, "D:/demo").yaml;
   // no headless residue: content lines must stay inside the commands block
   assert.match(first, /^\s{4}commands:\s*$/m);
   // security must not be followed by an empty line then content
   assert.doesNotMatch(first, /^security:\s*\n\s*\n/m);
   assert.equal((first.match(/^\s{4}commands:/gm) || []).length, 1);
-  const second = buildChangesYaml(first, changes, "D:/demo").yaml;
+  const second = buildGatewayChangesYaml(first, changes, "D:/demo").yaml;
   assert.equal(second, first);
   assert.equal((second.match(/default: confirm/g) || []).length, 1);
   assert.match(second, /^state:\s*$/m);
   assert.match(second, /\^pi\b/);
 });
 
-test("buildChangesYaml preserves proxy flags and OAuth password when only the listener changes", () => {
+test("buildGatewayChangesYaml preserves proxy flags and OAuth password when only the listener changes", () => {
   const existing = SAMPLE_CONFIG
     .replace("    port: 9090", [
       "    port: 9090",
@@ -136,14 +136,14 @@ test("buildChangesYaml preserves proxy flags and OAuth password when only the li
       "    oauth:",
       "        password: \"keep-me\"",
     ].join("\n"));
-  const { yaml } = buildChangesYaml(existing, { port: 9091, tunnelUrl: "https://new.example.com" }, "D:/demo");
+  const { yaml } = buildGatewayChangesYaml(existing, { port: 9091, tunnelUrl: "https://new.example.com" }, "D:/demo");
   assert.match(yaml, /port: 9091/);
   assert.match(yaml, /disable_localhost_protection: true/);
   assert.match(yaml, /trust_proxy_headers: true/);
   assert.match(yaml, /password: "keep-me"/);
 });
 
-test("buildChangesYaml preserves two-space YAML indentation and OAuth password", () => {
+test("buildGatewayChangesYaml preserves two-space YAML indentation and OAuth password", () => {
   const existing = [
     "server:",
     "  host: 127.0.0.1",
@@ -156,32 +156,32 @@ test("buildChangesYaml preserves two-space YAML indentation and OAuth password",
     "    server_url: \"https://old.example.com\"",
     "",
   ].join("\n");
-  const { yaml } = buildChangesYaml(existing, { host: "127.0.0.2", port: 9091, tunnelUrl: "https://new.example.com" }, "D:/demo");
+  const { yaml } = buildGatewayChangesYaml(existing, { host: "127.0.0.2", port: 9091, tunnelUrl: "https://new.example.com" }, "D:/demo");
   assert.equal((yaml.match(/^  port:/gm) || []).length, 1);
   assert.match(yaml, /  port: 9091/);
   assert.match(yaml, /  disable_localhost_protection: true/);
   assert.match(yaml, /password: "keep-two-space"/);
 });
 
-test("buildChangesYaml quotes a custom listen host", () => {
-  const { yaml } = buildChangesYaml(SAMPLE_CONFIG, { host: "127.0.0.1:9090 & invalid" }, "D:/demo");
+test("buildGatewayChangesYaml quotes a custom listen host", () => {
+  const { yaml } = buildGatewayChangesYaml(SAMPLE_CONFIG, { host: "127.0.0.1:9090 & invalid" }, "D:/demo");
   assert.match(yaml, /host: "127\.0\.0\.1:9090 & invalid"/);
 });
 
-test("buildChangesYaml enables proxy flags and upgrades open auth for a tunnel URL", () => {
-  const changes: McpxConfigChanges = { tunnelUrl: "https://mcpx.example.com" };
-  const { yaml, summary } = buildChangesYaml(SAMPLE_CONFIG, changes, "D:/demo");
+test("buildGatewayChangesYaml enables proxy flags and upgrades open auth for a tunnel URL", () => {
+  const changes: GatewayConfigChanges = { tunnelUrl: "https://gateway.example.com" };
+  const { yaml, summary } = buildGatewayChangesYaml(SAMPLE_CONFIG, changes, "D:/demo");
   assert.match(yaml, /disable_localhost_protection: true/);
   assert.match(yaml, /trust_proxy_headers: true/);
   assert.match(yaml, /mode: oauth/);
-  assert.match(yaml, /server_url: "https:\/\/mcpx\.example\.com"/);
+  assert.match(yaml, /server_url: "https:\/\/gateway\.example\.com"/);
   assert.ok(summary.some((line) => line.includes("oauth")));
   assert.ok(summary.some((line) => line.includes("隧道代理标志")));
 });
 
-test("buildChangesYaml keeps an explicit oauth server_url over the tunnel URL", () => {
-  const changes: McpxConfigChanges = { authMode: "oauth", oauthServerURL: "https://custom.example.com", tunnelUrl: "https://tunnel.example.com" };
-  const { yaml } = buildChangesYaml(SAMPLE_CONFIG, changes, "D:/demo");
+test("buildGatewayChangesYaml keeps an explicit oauth server_url over the tunnel URL", () => {
+  const changes: GatewayConfigChanges = { authMode: "oauth", oauthServerURL: "https://custom.example.com", tunnelUrl: "https://tunnel.example.com" };
+  const { yaml } = buildGatewayChangesYaml(SAMPLE_CONFIG, changes, "D:/demo");
   assert.match(yaml, /server_url: "https:\/\/custom\.example\.com"/);
   assert.doesNotMatch(yaml, /server_url: "https:\/\/tunnel\.example\.com"/);
 });
@@ -237,15 +237,15 @@ const FILES_CONFIG = [
   "",
 ].join("\n");
 
-test("buildChangesYaml writes security.files limits and rule lists", () => {
-  const changes: McpxConfigChanges = {
+test("buildGatewayChangesYaml writes security.files limits and rule lists", () => {
+  const changes: GatewayConfigChanges = {
     filesMaxReadBytes: 2097152,
     filesMaxPatchFiles: 50,
     filesAllow: ["^~/projects\\b", "^~/docs"],
     filesConfirm: ["^~/secrets", "^~/tmp"],
     filesDeny: ["^/etc", "^/root"],
   };
-  const { yaml, summary } = buildChangesYaml(FILES_CONFIG, changes, "D:/demo");
+  const { yaml, summary } = buildGatewayChangesYaml(FILES_CONFIG, changes, "D:/demo");
   assert.match(yaml, /max_read_bytes: 2097152/);
   assert.match(yaml, /max_patch_files: 50/);
   assert.match(yaml, /\^~\/docs/); // new allow entry added
@@ -260,14 +260,14 @@ test("buildChangesYaml writes security.files limits and rule lists", () => {
   assert.match(yaml, /default: allow/);
 });
 
-test("buildChangesYaml writes commands allow/confirm/deny lists and auto_allow_readonly", () => {
-  const changes: McpxConfigChanges = {
+test("buildGatewayChangesYaml writes commands allow/confirm/deny lists and auto_allow_readonly", () => {
+  const changes: GatewayConfigChanges = {
     commandsAllow: ["^ls\\b", "^git status", "^pi\\b"],
     commandsConfirm: ["^git push", "^npm install"],
     commandsDeny: ["^rm -rf /", "^mkfs"],
     commandsAutoReadonly: true,
   };
-  const { yaml, summary } = buildChangesYaml(FILES_CONFIG, changes, "D:/demo");
+  const { yaml, summary } = buildGatewayChangesYaml(FILES_CONFIG, changes, "D:/demo");
   assert.match(yaml, /\^pi\\b/);
   assert.match(yaml, /\^git push/);
   assert.match(yaml, /\^mkfs/);
@@ -276,15 +276,15 @@ test("buildChangesYaml writes commands allow/confirm/deny lists and auto_allow_r
   assert.ok(summary.some((line) => line.includes("auto_allow_readonly: true")));
 });
 
-test("buildChangesYaml auto_allow_readonly accepts null", () => {
-  const changes: McpxConfigChanges = { commandsAutoReadonly: null };
-  const { yaml } = buildChangesYaml(FILES_CONFIG.replace("auto_allow_readonly: null", "auto_allow_readonly: true"), changes, "D:/demo");
+test("buildGatewayChangesYaml auto_allow_readonly accepts null", () => {
+  const changes: GatewayConfigChanges = { commandsAutoReadonly: null };
+  const { yaml } = buildGatewayChangesYaml(FILES_CONFIG.replace("auto_allow_readonly: null", "auto_allow_readonly: true"), changes, "D:/demo");
   assert.match(yaml, /auto_allow_readonly: null/);
 });
 
-test("buildChangesYaml explicitly sets disable_localhost_protection and trust_proxy_headers", () => {
-  const changes: McpxConfigChanges = { disableLocalhostProtection: false, trustProxyHeaders: true };
-  const { yaml, summary } = buildChangesYaml(FILES_CONFIG, changes, "D:/demo");
+test("buildGatewayChangesYaml explicitly sets disable_localhost_protection and trust_proxy_headers", () => {
+  const changes: GatewayConfigChanges = { disableLocalhostProtection: false, trustProxyHeaders: true };
+  const { yaml, summary } = buildGatewayChangesYaml(FILES_CONFIG, changes, "D:/demo");
   // Inline-editor override wins over the oauth-derived default (which would set both true).
   assert.match(yaml, /disable_localhost_protection: false/);
   assert.match(yaml, /trust_proxy_headers: true/);

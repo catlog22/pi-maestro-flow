@@ -14,11 +14,11 @@ import {
 } from "../src/gateway/config.ts";
 import { createGatewayStatePaths, gatewayBoardPath, gatewayBoardRoot, gatewayHandoffRoot, gatewayMaestroReceiptRoot } from "../src/gateway/state-paths.ts";
 
-const yaml = `# keep this header\nserver:\n    host: "127.0.0.1"\n    port: 9191\nauth:\n    mode: bearer\n    token: "secret"\nsecurity:\n    commands:\n        default: confirm\n        allow:\n            - "^pi\\\\b"\n        confirm: []\n        deny: []\n        auto_allow_readonly: null\n    files:\n        max_read_bytes: 2048\n        max_patch_files: 3\n        allow: []\n        confirm: []\n        deny: []\nworkspaces:\n    - path: "."\n      ttl_seconds: 60\ntransport:\n    stdio:\n        enabled: true\nlimits:\n    max_request_bytes: 2048\nlogging:\n    level: info\nstate:\n    root_dir: ".pi/gateway/v1"\nretention:\n    jobs: 3600\nunknown_section:\n    keep: true\n    comment: "must survive"\n`;
+const yaml = `# keep this header\nversion: 2\nserver:\n    host: "127.0.0.1"\n    port: 9191\nauth:\n    mode: bearer\n    token: "secret"\nsecurity:\n    commands:\n        default: confirm\n        allow:\n            - "^pi\\\\b"\n        confirm: []\n        deny: []\n        auto_allow_readonly: null\n    files:\n        max_read_bytes: 2048\n        max_patch_files: 3\n        allow: []\n        confirm: []\n        deny: []\nworkspaces:\n    - path: "."\n      ttl_seconds: 60\ntransport:\n    stdio:\n        enabled: true\nlimits:\n    max_request_bytes: 2048\nlogging:\n    level: info\nstate:\n    root_dir: ".pi/gateway/v1"\nretention:\n    jobs: 3600\nunknown_section:\n    keep: true\n    comment: "must survive"\n`;
 
 test("Gateway config normalizes legacy snake-case sections and rejects invalid known fields", () => {
   const document = parseGatewayConfigDocument(yaml);
-  assert.equal(document.config.version, 1);
+  assert.equal(document.config.version, 2);
   assert.equal(document.config.server.port, 9191);
   assert.equal(document.config.transport.http.host, "127.0.0.1");
   assert.equal(document.config.transport.http.port, 9191);
@@ -28,6 +28,9 @@ test("Gateway config normalizes legacy snake-case sections and rejects invalid k
   assert.equal(document.config.workspaces[0]?.ttlMs, 60_000);
   assert.deepEqual(document.unknownSections.unknown_section, { keep: true, comment: "must survive" });
 
+  assert.equal(normalizeGatewayConfig({}).version, 2);
+  assert.throws(() => normalizeGatewayConfig({ version: 1 }), /config\.version must be 2/);
+  assert.throws(() => normalizeGatewayConfig({ version: 3 }), /config\.version must be 2/);
   assert.throws(() => normalizeGatewayConfig({ server: { port: "9191" } }), GatewayConfigValidationError);
   assert.throws(() => normalizeGatewayConfig({ security: { commands: { default: "maybe" } } }), GatewayConfigValidationError);
   assert.throws(() => normalizeGatewayConfig({ limits: { max_request_bytes: 99_999_999 } }), GatewayConfigValidationError);
@@ -42,6 +45,24 @@ test("Gateway config normalizes legacy snake-case sections and rejects invalid k
   assert.equal(normalizeGatewayConfig({ auth: { mode: "open", allow_open_mutations: false } }).auth.allowOpenMutations, false);
   assert.equal(normalizeGatewayConfig({ auth: { mode: "open", allowOpenMutations: true } }).auth.allowOpenMutations, true);
   assert.throws(() => normalizeGatewayConfig({ auth: { mode: "open", allow_open_mutations: "yes" } }), /allowOpenMutations must be boolean/);
+  const openAiTunnel = normalizeGatewayConfig({ tunnels: { openai: {
+    enabled: true,
+    binary_path: "/opt/openai/tunnel-client",
+    tunnel_id_env: "MY_TUNNEL_ID",
+    runtime_key_env: "MY_RUNTIME_KEY",
+    minimum_version: "0.0.14",
+    credential_ttl_ms: 60_000,
+  } } }).tunnels.openai;
+  assert.deepEqual(openAiTunnel, {
+    enabled: true,
+    binaryPath: "/opt/openai/tunnel-client",
+    tunnelIdEnv: "MY_TUNNEL_ID",
+    runtimeKeyEnv: "MY_RUNTIME_KEY",
+    minimumVersion: "0.0.14",
+    credentialTtlMs: 60_000,
+  });
+  assert.throws(() => normalizeGatewayConfig({ tunnels: { openai: { runtime_key: "literal-secret" } } }), /not a recognized field/);
+  assert.throws(() => normalizeGatewayConfig({ tunnels: { openai: { runtime_key_env: "bad-name" } } }), /environment variable name/);
   assert.equal(normalizeGatewayConfig({ state: { sessions_root: ".pi/gateway/v1/sessions" } }).state.sessionsRoot, ".pi/gateway/v1/sessions");
   const governed = normalizeGatewayConfig({
     auth: { mode: "bearer", token: "secret" },
@@ -117,7 +138,7 @@ test("Gateway config normalizes legacy snake-case sections and rejects invalid k
   assert.throws(() => normalizeGatewayConfig({ auth: { oauth_client_typo: "no" } }), /auth\.oauth_client_typo is not a recognized field/);
 });
 
-test("Gateway config patch distinguishes preserve, replace, and clear while retaining unknown sections", async (t) => {
+test("Gateway config patch distinguishes omitted preserve, array replace, object merge, and null clear", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "gateway-config-"));
   t.after(async () => { await import("node:fs/promises").then(({ rm }) => rm(root, { recursive: true, force: true })); });
   const path = join(root, "config.yaml");
@@ -145,10 +166,18 @@ test("Gateway config patch distinguishes preserve, replace, and clear while reta
   const loaded = await loadGatewayConfig(path);
   assert.equal(loaded.server.port, 9292);
   assert.equal(loaded.security.commands.allow[0], "echo *");
+
+  const nativePath = join(root, "native-config.yaml");
+  const native = await writeGatewayConfigPatch(nativePath, { server: { port: 9393 } as never });
+  assert.equal(native.config.version, 2);
+  assert.match(await readFile(nativePath, "utf8"), /^version: 2$/m);
 });
 
 test("default config is canonical and patch application keeps omitted values", () => {
   const base = defaultGatewayConfig();
+  assert.equal(base.version, 2);
+  assert.equal(base.tunnels.openai.enabled, false, "OpenAI Tunnel remains experimental/disabled by default");
+  assert.equal(base.tunnels.openai.runtimeKeyEnv, "CONTROL_PLANE_API_KEY");
   assert.equal(base.limits.maxBoardTasks, 1024);
   assert.ok(base.retention.boardTasksMs > 0);
   const paths = createGatewayStatePaths(process.cwd(), tmpdir());

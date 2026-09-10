@@ -51,7 +51,7 @@ test("shared catalog exposes workspace discovery and Session/Todo/Monitor collab
   const webJoined = await runtime.call("session", { action: "join", sessionId: "collab", memberId: "owner", expectedSessionRevision: 3, operationId: "join-web", joiningMemberId: "web", joiningPrincipalId: principalKey(web), role: "web", leaseTtlMs: 60_000 }, owner);
   assert.equal(webJoined.ok, true);
 
-  const started = await runtime.call("session", { action: "start-pi", sessionId: "collab", memberId: "web", prompt: "Perform the delegated work", todoIds: ["gateway-1"] }, web);
+  const started = await runtime.call("session", { action: "start-pi", sessionId: "collab", memberId: "web", operationId: "start-1", prompt: "Perform the delegated work", todoIds: ["gateway-1"] }, web);
   assert.equal(started.ok, true); const handle = (started.data as { taskId: string; monitorHandle: string }).taskId;
   assert.equal((started.data as { taskId: string; monitorHandle: string }).monitorHandle, handle);
   await eventually(() => port.params !== undefined);
@@ -68,23 +68,23 @@ test("shared catalog exposes workspace discovery and Session/Todo/Monitor collab
   assert.equal((pending.data as { done: boolean; task: { status: string } }).done, false);
   assert.equal((pending.data as { done: boolean; task: { status: string } }).task.status, "running");
 
-  const webControl = await runtime.call("monitor", { action: "message", sessionId: "collab", memberId: "web", handle, message: "continue" }, web);
+  const webControl = await runtime.call("monitor", { action: "message", sessionId: "collab", memberId: "web", operationId: "message-web", handle, message: "continue" }, web);
   assert.equal(webControl.ok, true, "Web members can control executions they start");
   const observed = await runtime.call("monitor", { action: "observe", sessionId: "collab", memberId: "observer", handle }, observer);
   assert.equal(observed.ok, true);
   assert.equal((observed.data as { handle: string }).handle, handle);
-  const denied = await runtime.call("monitor", { action: "message", sessionId: "collab", memberId: "observer", handle, message: "control" }, observer);
+  const denied = await runtime.call("monitor", { action: "message", sessionId: "collab", memberId: "observer", operationId: "message-denied", handle, message: "control" }, observer);
   assert.equal(denied.error?.code, "session_scope_denied", "evaluator/read identity must not acquire root control authority");
 
   for (let index = 0; index < 520; index += 1) {
-    const sent = await runtime.call("monitor", { action: "message", sessionId: "collab", memberId: "owner", handle, message: `message-${index}` }, owner);
+    const sent = await runtime.call("monitor", { action: "message", sessionId: "collab", memberId: "owner", operationId: `message-${index}`, handle, message: `message-${index}` }, owner);
     assert.equal(sent.ok, true);
   }
   const gap = await runtime.call("monitor", { action: "observe", sessionId: "collab", memberId: "owner", handle, cursor: 0, limit: 8 }, owner);
   const page = gap.data as { gap: boolean; oldestCursor: number; nextCursor: number; hasMore: boolean };
   assert.equal(page.gap, true); assert.ok(page.oldestCursor > 1); assert.ok(page.nextCursor >= page.oldestCursor); assert.equal(page.hasMore, true);
 
-  const cancelled = await runtime.call("monitor", { action: "cancel", sessionId: "collab", memberId: "owner", handle, reason: "stop" }, owner);
+  const cancelled = await runtime.call("monitor", { action: "cancel", sessionId: "collab", memberId: "owner", operationId: "cancel-1", handle, reason: "stop" }, owner);
   assert.equal(cancelled.ok, true); port.resolve?.([]);
   const terminal = await runtime.call("monitor", { action: "wait", sessionId: "collab", memberId: "owner", handle, timeoutMs: 2_000 }, owner);
   assert.equal(terminal.ok, true);

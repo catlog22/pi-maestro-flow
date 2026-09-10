@@ -89,6 +89,19 @@ After installation:
 - Companion extensions `pi-maestro-teammate` and `pi-cockpit` are pulled as dependencies and auto-registered into `settings.packages` on postinstall. Flow records the companion sources it manages so upgrades can replace those paths safely; an unowned same-name local registration is retained and logged rather than overwritten.
 - Maestro workflow docs installed at `~/.maestro/workflows/`
 
+### Gateway cutover
+
+The built-in Gateway is configured through `/gateway` and the `pi-maestro-gateway` CLI. Its supported package API is `pi-maestro-flow/gateway/v1`; the unrelated `pi-maestro-flow/src/*` wildcard export remains available.
+
+The MCPX compatibility facade, `/mcpx` command, legacy deep-import files, and `PI_MCPX_BRIDGE`, `MCPX_BIN`, and `MCPX_TUNNEL_*` environment variables have been removed. Existing legacy state is read only by the explicit offline migration command:
+
+```bash
+pi-maestro-gateway migrate-legacy --dry-run
+pi-maestro-gateway migrate-legacy --apply
+```
+
+Normal Gateway startup does not read legacy state. Calls that can safely replay are limited to reads and mutations backed by a canonical `operationId`; an unreceipted mutation that may have reached the server fails with `gateway_outcome_unknown` instead of switching transports and replaying.
+
 ## Commands
 
 > **macOS:** the `Alt+…` shortcuts below are the **option** key and render as `Option+…`. Your terminal must be set to send option as Meta; see [pi-cockpit's README](../pi-cockpit/README.md#commands) for the iTerm2 and Terminal.app settings.

@@ -1,6 +1,7 @@
 /** Host-owned orchestration for delegating read-only local Pi Todo snapshots. */
 import { createHash } from "node:crypto";
 import type { TodoTask } from "../tools/todo.ts";
+import type { SshGatewayLaunchBinding } from "./model.ts";
 
 export const SSH_START_PI_MAX_TODOS = 32;
 export const SSH_START_PI_MAX_PROMPT_BYTES = 64 * 1024;
@@ -70,12 +71,21 @@ interface LaunchLease {
 interface LaunchRecord {
   hostId: string;
   hostDigest: string;
+  endpointIdentity: string;
+  gatewayPrincipalId: string;
   hostEpoch: number;
   lifecycleEpoch: number;
   requestKey: string;
+  operationId: string;
   binding: SessionLaunchBindingV1;
   result: SshStartPiResult;
   lease: LaunchLease;
+}
+
+export interface GatewayLaunchBindingPersistence {
+  getGatewayLaunchBinding(hostId: string, bindingId: string): SshGatewayLaunchBinding | undefined;
+  saveGatewayLaunchBinding(binding: SshGatewayLaunchBinding): Promise<void>;
+  removeGatewayLaunchBinding?(hostId: string, bindingId: string): Promise<boolean>;
 }
 
 /**
@@ -88,8 +98,12 @@ export class GatewaySessionLauncher {
   private readonly generations = new Map<string, number>();
   private readonly hostEpochs = new Map<string, number>();
   private lifecycleEpoch = 0;
+  private persistenceTail: Promise<void> = Promise.resolve();
 
-  constructor(private readonly now: () => number = () => Date.now()) {}
+  constructor(
+    private readonly now: () => number = () => Date.now(),
+    private readonly persistence?: GatewayLaunchBindingPersistence,
+  ) {}
 
   async start(
     caller: GatewayLaunchCaller,
@@ -99,6 +113,7 @@ export class GatewaySessionLauncher {
     todos: readonly TodoTask[],
     input: SshStartPiInput,
     signal?: AbortSignal,
+    endpointIdentity = digest("stdio\0pi-maestro-gateway"),
   ): Promise<SshStartPiResult> {
     const requestKey = digest(`${hostDigest}\0${piSessionRef}\0${input.requestId}`);
     const hostEpoch = this.hostEpochs.get(hostId) ?? 0;
@@ -109,11 +124,12 @@ export class GatewaySessionLauncher {
       if (!this.isCurrent(record)) throw new Error("SSH launch handle is stale for the selected host");
       return cloneResult(record.result);
     }
-    const pending = this.launch(caller, hostId, hostDigest, hostEpoch, lifecycleEpoch, piSessionRef, todos, input, requestKey, signal);
+    const pending = this.launch(caller, hostId, hostDigest, endpointIdentity, hostEpoch, lifecycleEpoch, piSessionRef, todos, input, requestKey, signal);
     this.byRequest.set(requestKey, pending);
     try {
       const record = await pending;
       if (!this.isCurrent(record)) throw new Error("SSH launch handle is stale for the selected host");
+      await this.persist(record);
       this.byBinding.set(record.binding.bindingId, record);
       return cloneResult(record.result);
     } catch (error) {
@@ -122,17 +138,100 @@ export class GatewaySessionLauncher {
     }
   }
 
+  async restoreMonitorBinding(
+    caller: GatewayLaunchCaller,
+    hostId: string,
+    hostDigest: string,
+    endpointIdentity: string,
+    args: Record<string, unknown>,
+    timeoutSeconds: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const fence = parseLaunchFence(args._sshLaunch);
+    if (!fence || this.byBinding.has(fence.bindingId)) return;
+    const stored = this.persistence?.getGatewayLaunchBinding(hostId, fence.bindingId);
+    if (!stored) return;
+    const fail = async (message: string): Promise<never> => {
+      await this.persistence?.removeGatewayLaunchBinding?.(hostId, fence.bindingId).catch(() => false);
+      throw new Error(message);
+    };
+    if (stored.generation !== fence.generation) await fail("SSH launch Monitor handle generation is stale");
+    if (stored.hostId !== hostId || stored.effectiveHostDigest !== hostDigest) await fail("SSH launch Monitor host fence changed during restore");
+    if (stored.endpointIdentity !== endpointIdentity) await fail("SSH launch Monitor endpoint identity changed during restore");
+    if (stored.leaseExpiresAt <= this.now()) await fail("SSH launch Monitor member lease expired during restore");
+
+    const hostEnvelope = requireGatewayOk(await caller("host", { action: "describe", requestId: `${stored.bindingId}:restore-host` }, timeoutSeconds, signal));
+    if (!envelopeMatchesPrincipal(hostEnvelope, stored.gatewayPrincipalId)) await fail("SSH launch Monitor Gateway principal changed during restore");
+    const sessionEnvelope = requireGatewayOk(await caller("session", {
+      action: "get",
+      sessionId: stored.gatewaySessionId,
+      memberId: stored.gatewayMemberId,
+      requestId: `${stored.bindingId}:restore-session`,
+    }, timeoutSeconds, signal));
+    if (!envelopeMatchesPrincipal(sessionEnvelope, stored.gatewayPrincipalId)) await fail("SSH launch Monitor Gateway principal changed during restore");
+    const state = requiredObject(sessionEnvelope.data, "Gateway session state");
+    const session = requiredObject(state.session, "Gateway session");
+    if (session.id !== stored.gatewaySessionId || nonNegativeInteger(session.revision, "Gateway session revision") !== stored.sessionRevision) {
+      await fail("SSH launch Monitor session fence changed during restore");
+    }
+    const members = state.members;
+    if (!Array.isArray(members)) await fail("SSH launch Monitor session members are invalid during restore");
+    const memberValue = (members as unknown[]).find((candidate) => candidate && typeof candidate === "object" && (candidate as { id?: unknown }).id === stored.gatewayMemberId);
+    const member = requiredObject(memberValue, "Gateway session member");
+    if (member.principalId !== stored.gatewayPrincipalId
+      || member.status !== "active"
+      || positiveInteger(member.generation, "Gateway member generation") !== stored.memberGeneration
+      || nonNegativeInteger(member.leaseExpiresAt, "Gateway member lease expiry") !== stored.leaseExpiresAt) {
+      await fail("SSH launch Monitor member fence changed during restore");
+    }
+    const observed = requireGatewayOk(await caller("monitor", {
+      action: "observe",
+      sessionId: stored.gatewaySessionId,
+      memberId: stored.gatewayMemberId,
+      handle: stored.executionHandle,
+      cursor: stored.cursor,
+      limit: 1,
+      requestId: `${stored.bindingId}:restore-handle`,
+    }, timeoutSeconds, signal));
+    if (!envelopeMatchesPrincipal(observed, stored.gatewayPrincipalId)) await fail("SSH launch Monitor Gateway principal changed during restore");
+    const observedData = requiredObject(observed.data, "Gateway Monitor result");
+    if (observedData.handle !== stored.executionHandle) await fail("SSH launch Monitor execution handle changed during restore");
+
+    const binding: SessionLaunchBindingV1 = {
+      version: 1,
+      bindingId: stored.bindingId,
+      piSessionRef: "restored",
+      gatewaySessionId: stored.gatewaySessionId,
+      gatewayMemberId: stored.gatewayMemberId,
+      executionHandle: stored.executionHandle,
+      generation: stored.generation,
+      cursor: stored.cursor,
+    };
+    const record: LaunchRecord = {
+      hostId, hostDigest, endpointIdentity, gatewayPrincipalId: stored.gatewayPrincipalId,
+      hostEpoch: this.hostEpochs.get(hostId) ?? 0, lifecycleEpoch: this.lifecycleEpoch,
+      requestKey: stored.bindingId, operationId: stored.operationId, binding, result: resultForBinding(binding),
+      lease: {
+        workspacePath: "",
+        createOperationId: "",
+        sessionRevision: stored.sessionRevision,
+        memberGeneration: stored.memberGeneration,
+        leaseExpiresAt: stored.leaseExpiresAt,
+        leaseTtlMs: stored.leaseTtlMs,
+      },
+    };
+    this.generations.set(`${hostDigest}\0${stored.gatewaySessionId}`, Math.max(this.generations.get(`${hostDigest}\0${stored.gatewaySessionId}`) ?? 0, stored.generation));
+    this.byBinding.set(stored.bindingId, record);
+  }
+
   prepareMonitorCall(
     hostId: string,
     hostDigest: string,
     args: Record<string, unknown>,
   ): { args: Record<string, unknown>; record?: LaunchRecord } {
-    const fence = args._sshLaunch;
-    if (fence === undefined) return { args };
-    if (!fence || typeof fence !== "object" || Array.isArray(fence)) throw new Error("SSH launch Monitor fence is invalid");
-    const value = fence as Record<string, unknown>;
-    const bindingId = requiredString(value.bindingId, "bindingId", 128);
-    const generation = positiveInteger(value.generation, "generation");
+    const fence = parseLaunchFence(args._sshLaunch);
+    if (!fence) return { args };
+    const { bindingId, generation } = fence;
     const record = this.byBinding.get(bindingId);
     if (!record || !this.isCurrent(record) || record.hostId !== hostId || record.hostDigest !== hostDigest) throw new Error("SSH launch Monitor handle is stale for the selected host");
     if (record.binding.generation !== generation) throw new Error("SSH launch Monitor handle generation is stale");
@@ -161,11 +260,11 @@ export class GatewaySessionLauncher {
     if (record.lease.renewal) return record.lease.renewal;
     const pending = this.refreshLease(caller, record, timeoutSeconds, signal);
     record.lease.renewal = pending;
-    try { await pending; }
+    try { await pending; await this.persist(record); }
     finally { if (record.lease.renewal === pending) delete record.lease.renewal; }
   }
 
-  updateMonitorCursor(record: LaunchRecord | undefined, gatewayEnvelope: unknown): void {
+  async updateMonitorCursor(record: LaunchRecord | undefined, gatewayEnvelope: unknown): Promise<void> {
     if (!record || !gatewayEnvelope || typeof gatewayEnvelope !== "object") return;
     const data = (gatewayEnvelope as { data?: unknown }).data;
     if (!data || typeof data !== "object") return;
@@ -173,6 +272,7 @@ export class GatewaySessionLauncher {
     if (!Number.isSafeInteger(nextCursor) || (nextCursor as number) < record.binding.cursor) return;
     record.binding = { ...record.binding, cursor: nextCursor as number };
     record.result = resultForBinding(record.binding);
+    await this.persist(record);
   }
 
   invalidateHost(hostId: string): void {
@@ -200,6 +300,7 @@ export class GatewaySessionLauncher {
     caller: GatewayLaunchCaller,
     hostId: string,
     hostDigest: string,
+    endpointIdentity: string,
     hostEpoch: number,
     lifecycleEpoch: number,
     piSessionRef: string,
@@ -210,6 +311,7 @@ export class GatewaySessionLauncher {
   ): Promise<LaunchRecord> {
     const prompt = buildLocalPiTodoDelegationPrompt(todos, input.todoIds ?? [], input.objective);
     const hostEnvelope = requireGatewayOk(await caller("host", { action: "describe", requestId: `${input.requestId}:host` }, input.timeout ?? 30, signal));
+    const endpointPrincipalId = gatewayPrincipal(hostEnvelope);
     const remoteCwd = requiredString((hostEnvelope.data as { cwd?: unknown })?.cwd, "Gateway host cwd", 4096);
     const sessionHash = digest(`${hostDigest}\0${piSessionRef}`);
     const gatewaySessionId = `pi-ssh-${sessionHash.slice(0, 40)}`;
@@ -224,18 +326,26 @@ export class GatewaySessionLauncher {
       operationId: createOperationId,
       requestId: `${input.requestId}:session`,
     }, input.timeout ?? 30, signal));
-    const lease = launchLease(createdEnvelope.data, remoteCwd, createOperationId);
+    if (gatewayPrincipal(createdEnvelope) !== endpointPrincipalId) throw new Error("Gateway principal changed during launch");
+    const createdData = requiredObject(createdEnvelope.data, "Gateway session create result");
+    const createdMember = requiredObject(createdData.member, "Gateway session member");
+    const gatewayPrincipalId = requiredString(createdMember.principalId, "Gateway member principal id", 256);
+    if (!envelopeMatchesPrincipal(createdEnvelope, gatewayPrincipalId)) throw new Error("Gateway member principal does not match the endpoint principal");
+    const lease = launchLease(createdData, remoteCwd, createOperationId);
     if (lease.leaseExpiresAt <= this.now() + SESSION_LEASE_RENEW_WINDOW_MS) {
-      await this.renewLease(caller, gatewaySessionId, gatewayMemberId, requestKey, lease, input.timeout ?? 30, signal);
+      await this.renewLease(caller, gatewaySessionId, gatewayMemberId, gatewayPrincipalId, requestKey, lease, input.timeout ?? 30, signal);
     }
+    const operationId = `ssh-start-${requestKey.slice(0, 32)}`;
     const startedEnvelope = requireGatewayOk(await caller("session", {
       action: "start-pi",
       sessionId: gatewaySessionId,
       memberId: gatewayMemberId,
+      operationId,
       prompt,
       ...(input.agent === undefined ? {} : { agent: input.agent }),
       requestId: input.requestId,
     }, input.timeout ?? 30, signal));
+    if (!envelopeMatchesPrincipal(startedEnvelope, gatewayPrincipalId)) throw new Error("Gateway principal changed during launch");
     const executionHandle = requiredString((startedEnvelope.data as { taskId?: unknown })?.taskId, "Gateway execution handle", 128);
     const generationKey = `${hostDigest}\0${gatewaySessionId}`;
     const generation = (this.generations.get(generationKey) ?? 0) + 1;
@@ -250,32 +360,59 @@ export class GatewaySessionLauncher {
       generation,
       cursor: 0,
     };
-    return { hostId, hostDigest, hostEpoch, lifecycleEpoch, requestKey, binding, result: resultForBinding(binding), lease };
+    return { hostId, hostDigest, endpointIdentity, gatewayPrincipalId, hostEpoch, lifecycleEpoch, requestKey, operationId, binding, result: resultForBinding(binding), lease };
   }
 
   private async refreshLease(caller: GatewayLaunchCaller, record: LaunchRecord, timeoutSeconds: number, signal?: AbortSignal): Promise<void> {
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const createdEnvelope = requireGatewayOk(await caller("session", {
-        action: "create",
-        sessionId: record.binding.gatewaySessionId,
-        workspacePath: record.lease.workspacePath,
-        ownerId: record.binding.gatewayMemberId,
-        expectedSessionRevision: 0,
-        operationId: record.lease.createOperationId,
-        requestId: `${record.binding.bindingId}:lease`,
-      }, timeoutSeconds, signal));
-      Object.assign(record.lease, launchLease(createdEnvelope.data, record.lease.workspacePath, record.lease.createOperationId));
-      if (record.lease.leaseExpiresAt > this.now() + SESSION_LEASE_RENEW_WINDOW_MS) return;
-      try {
-        await this.renewLease(caller, record.binding.gatewaySessionId, record.binding.gatewayMemberId, record.binding.bindingId, record.lease, timeoutSeconds, signal);
-        return;
-      } catch (error) {
-        if (attempt === 1) throw error;
-      }
+    const envelope = requireGatewayOk(await caller("session", {
+      action: "get",
+      sessionId: record.binding.gatewaySessionId,
+      memberId: record.binding.gatewayMemberId,
+      requestId: `${record.binding.bindingId}:lease-fence`,
+    }, timeoutSeconds, signal));
+    if (!envelopeMatchesPrincipal(envelope, record.gatewayPrincipalId)) throw new Error("Gateway principal changed during lease refresh");
+    const state = requiredObject(envelope.data, "Gateway session state");
+    const session = requiredObject(state.session, "Gateway session");
+    const members = Array.isArray(state.members) ? state.members : [];
+    const member = requiredObject(members.find((candidate) => candidate && typeof candidate === "object" && (candidate as { id?: unknown }).id === record.binding.gatewayMemberId), "Gateway session member");
+    if (session.id !== record.binding.gatewaySessionId
+      || nonNegativeInteger(session.revision, "Gateway session revision") !== record.lease.sessionRevision
+      || member.principalId !== record.gatewayPrincipalId
+      || member.status !== "active"
+      || positiveInteger(member.generation, "Gateway member generation") !== record.lease.memberGeneration
+      || nonNegativeInteger(member.leaseExpiresAt, "Gateway member lease expiry") !== record.lease.leaseExpiresAt) {
+      throw new Error("Gateway session or member fence changed during lease refresh");
     }
+    if (record.lease.leaseExpiresAt > this.now() + SESSION_LEASE_RENEW_WINDOW_MS) return;
+    await this.renewLease(caller, record.binding.gatewaySessionId, record.binding.gatewayMemberId, record.gatewayPrincipalId, record.binding.bindingId, record.lease, timeoutSeconds, signal);
   }
 
-  private async renewLease(caller: GatewayLaunchCaller, sessionId: string, memberId: string, renewalKey: string, lease: LaunchLease, timeoutSeconds: number, signal?: AbortSignal): Promise<void> {
+  private persist(record: LaunchRecord): Promise<void> {
+    if (!this.persistence) return Promise.resolve();
+    const snapshot: SshGatewayLaunchBinding = {
+      version: 1,
+      bindingId: record.binding.bindingId,
+      hostId: record.hostId,
+      effectiveHostDigest: record.hostDigest,
+      endpointIdentity: record.endpointIdentity,
+      gatewayPrincipalId: record.gatewayPrincipalId,
+      gatewaySessionId: record.binding.gatewaySessionId,
+      gatewayMemberId: record.binding.gatewayMemberId,
+      sessionRevision: record.lease.sessionRevision,
+      memberGeneration: record.lease.memberGeneration,
+      leaseExpiresAt: record.lease.leaseExpiresAt,
+      leaseTtlMs: record.lease.leaseTtlMs,
+      operationId: record.operationId,
+      executionHandle: record.binding.executionHandle,
+      generation: record.binding.generation,
+      cursor: record.binding.cursor,
+    };
+    const operation = this.persistenceTail.then(() => this.persistence!.saveGatewayLaunchBinding(snapshot));
+    this.persistenceTail = operation.catch(() => undefined);
+    return operation;
+  }
+
+  private async renewLease(caller: GatewayLaunchCaller, sessionId: string, memberId: string, gatewayPrincipalId: string, renewalKey: string, lease: LaunchLease, timeoutSeconds: number, signal?: AbortSignal): Promise<void> {
     const renewedEnvelope = requireGatewayOk(await caller("session", {
       action: "renew",
       sessionId,
@@ -286,7 +423,9 @@ export class GatewaySessionLauncher {
       operationId: `ssh-renew-${digest(`${renewalKey}\0${lease.memberGeneration}`).slice(0, 40)}`,
       requestId: `${renewalKey}:renew`,
     }, timeoutSeconds, signal));
+    if (!envelopeMatchesPrincipal(renewedEnvelope, gatewayPrincipalId)) throw new Error("Gateway principal changed during lease renewal");
     const member = requiredObject((renewedEnvelope.data as { member?: unknown } | undefined)?.member, "Gateway session member");
+    if (member.id !== memberId || member.principalId !== gatewayPrincipalId || member.status !== "active") throw new Error("Gateway member fence changed during lease renewal");
     lease.sessionRevision += 1;
     lease.memberGeneration = positiveInteger(member.generation, "Gateway member generation");
     lease.leaseExpiresAt = nonNegativeInteger(member.leaseExpiresAt, "Gateway member lease expiry");
@@ -372,9 +511,30 @@ function cloneResult(result: SshStartPiResult): SshStartPiResult {
   return structuredClone(result);
 }
 
-function requireGatewayOk(value: unknown): { data?: unknown } {
+function parseLaunchFence(value: unknown): { bindingId: string; generation: number } | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("SSH launch Monitor fence is invalid");
+  const fence = value as Record<string, unknown>;
+  if (Object.keys(fence).length !== 2 || !("bindingId" in fence) || !("generation" in fence)) throw new Error("SSH launch Monitor fence is invalid");
+  return {
+    bindingId: requiredString(fence.bindingId, "bindingId", 128),
+    generation: positiveInteger(fence.generation, "generation"),
+  };
+}
+
+function gatewayPrincipal(envelope: { meta?: unknown }): string {
+  const meta = requiredObject(envelope.meta, "Gateway result metadata");
+  return requiredString(meta.principalId, "Gateway principal id", 256);
+}
+
+function envelopeMatchesPrincipal(envelope: { meta?: unknown }, principalKey: string): boolean {
+  const separator = principalKey.indexOf(":");
+  return separator > 0 && gatewayPrincipal(envelope) === principalKey.slice(separator + 1);
+}
+
+function requireGatewayOk(value: unknown): { data?: unknown; meta?: unknown } {
   if (!value || typeof value !== "object") throw new Error("Gateway returned an invalid result envelope");
-  const envelope = value as { ok?: unknown; error?: { message?: unknown }; data?: unknown };
+  const envelope = value as { ok?: unknown; error?: { message?: unknown }; data?: unknown; meta?: unknown };
   if (envelope.ok !== true) {
     const message = typeof envelope.error?.message === "string" ? envelope.error.message : "Gateway request failed";
     throw new Error(message);

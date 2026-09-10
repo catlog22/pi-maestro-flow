@@ -8,7 +8,7 @@ import type { JobService } from "./services/job-service.ts";
 import type { GatewayTeammateService } from "./services/teammate-service.ts";
 import type { GatewaySessionService } from "./services/session-service.ts";
 import type { GatewayTodoService } from "./services/todo-service.ts";
-import type { GatewayMonitorService } from "./services/monitor-service.ts";
+import type { GatewayMonitorService, GatewayMonitorStreamContext } from "./services/monitor-service.ts";
 import type { WorkspaceService } from "./services/workspace-service.ts";
 import type { BoardService } from "./services/board-service.ts";
 import type { GatewayHandoffService } from "./services/handoff-service.ts";
@@ -28,7 +28,8 @@ import {
 } from "./maestro-cli-contracts.ts";
 
 export type GatewayToolArguments = Record<string, unknown>;
-export type GatewayToolHandler = (principal: GatewayPrincipal, args: GatewayToolArguments, signal?: AbortSignal) => GatewayResult<unknown> | Promise<GatewayResult<unknown>>;
+export interface GatewayToolRequestContext { stream?: GatewayMonitorStreamContext; }
+export type GatewayToolHandler = (principal: GatewayPrincipal, args: GatewayToolArguments, signal?: AbortSignal, context?: GatewayToolRequestContext) => GatewayResult<unknown> | Promise<GatewayResult<unknown>>;
 export interface GatewayCatalogEntry extends Omit<GatewayTool, "name"> { name: GatewayToolName; handler: GatewayToolHandler; }
 export interface GatewayCatalogServices {
   workspace: WorkspaceService;
@@ -205,7 +206,7 @@ const SESSION_SCHEMA = actions(
   action("leave", { ...mutationFields, leavingMemberId: string({ minLength: 1, maxLength: 128 }), expectedGeneration: integer({ minimum: 1 }) }, ["sessionId", "memberId", "expectedSessionRevision", "operationId", "expectedGeneration"]),
   action("handoff", { ...mutationFields, handoff: GATEWAY_HANDOFF_WRITE_SCHEMA }, ["sessionId", "memberId", "expectedSessionRevision", "operationId", "handoff"]),
   action("close", { ...mutationFields, handoff: GATEWAY_HANDOFF_WRITE_SCHEMA }, ["sessionId", "memberId", "expectedSessionRevision", "operationId"]),
-  action("start-pi", { sessionId: mutationFields.sessionId, memberId: mutationFields.memberId, prompt: string({ minLength: 1, maxLength: 32768 }), todoIds, agent: string({ minLength: 1, maxLength: 128 }) }, ["sessionId", "memberId", "prompt"]),
+  action("start-pi", { sessionId: mutationFields.sessionId, memberId: mutationFields.memberId, operationId: mutationFields.operationId, prompt: string({ minLength: 1, maxLength: 32768 }), todoIds, agent: string({ minLength: 1, maxLength: 128 }) }, ["sessionId", "memberId", "operationId", "prompt"]),
 );
 const TODO_SCHEMA = actions(
   action("create", { ...mutationFields, todoId: string({ minLength: 1, maxLength: 128 }), subject: string({ minLength: 1, maxLength: 16384 }), description: string({ maxLength: 65536 }), dependencyIds: { ...todoIds, maxItems: 256 } }, ["sessionId", "memberId", "expectedSessionRevision", "operationId", "subject"]),
@@ -220,9 +221,11 @@ const MONITOR_SCHEMA = actions(
   action("list", monitorBase, ["sessionId", "memberId"]),
   action("observe", { ...monitorBase, handle: string({ minLength: 1, maxLength: 128, description: "Execution handle returned by session.start-pi as taskId or monitorHandle." }), cursor, limit: integer({ minimum: 1, maximum: 512 }) }, ["sessionId", "memberId", "handle"]),
   action("wait", { ...monitorBase, handle: string({ minLength: 1, maxLength: 128, description: "Execution handle returned by session.start-pi as taskId or monitorHandle." }), timeoutMs: integer({ minimum: 1 }) }, ["sessionId", "memberId", "handle"]),
-  action("message", { ...monitorBase, handle: string({ minLength: 1, maxLength: 128, description: "Execution handle returned by session.start-pi as taskId or monitorHandle." }), message: string({ minLength: 1, maxLength: 65536 }), mode: { enum: ["steer", "follow_up", "interrupt"] } }, ["sessionId", "memberId", "handle", "message"]),
-  action("cancel", { ...monitorBase, handle: string({ minLength: 1, maxLength: 128, description: "Execution handle returned by session.start-pi as taskId or monitorHandle." }), reason: string({ maxLength: 512 }) }, ["sessionId", "memberId", "handle"]),
+  action("message", { ...monitorBase, operationId: mutationFields.operationId, handle: string({ minLength: 1, maxLength: 128, description: "Execution handle returned by session.start-pi as taskId or monitorHandle." }), message: string({ minLength: 1, maxLength: 65536 }), mode: { enum: ["steer", "follow_up", "interrupt"] } }, ["sessionId", "memberId", "operationId", "handle", "message"]),
+  action("cancel", { ...monitorBase, operationId: mutationFields.operationId, handle: string({ minLength: 1, maxLength: 128, description: "Execution handle returned by session.start-pi as taskId or monitorHandle." }), reason: string({ maxLength: 512 }) }, ["sessionId", "memberId", "operationId", "handle"]),
   action("result", { ...monitorBase, handle: string({ minLength: 1, maxLength: 128, description: "Execution handle returned by session.start-pi as taskId or monitorHandle." }), cursor, limit: integer({ minimum: 1, maximum: 512 }) }, ["sessionId", "memberId", "handle"]),
+  action("subscribe", { ...monitorBase, handle: string({ minLength: 1, maxLength: 128 }), cursor }, ["sessionId", "memberId", "handle"]),
+  action("unsubscribe", { ...monitorBase, subscriptionId: string({ minLength: 1, maxLength: 128 }) }, ["sessionId", "memberId", "subscriptionId"]),
 );
 const teammateOutputSchema: Schema = { type: "object", maxProperties: 256 };
 const teammateTask: Schema = {
@@ -346,16 +349,16 @@ export class GatewayCatalog {
     this.register(entry("job", "Start and control bounded asynchronous commands and cursor-addressed logs.", JOB_SCHEMA, (principal, args) => services.job.handle({ ...args, principal } as never), { executionMode: "async", readonly: false, mutating: true }));
     this.register(entry("file", "List, inspect, read, write, edit, find, grep, or transfer workspace files.", FILE_SCHEMA, (principal, args) => services.file.handle({ ...args, principal } as never), { executionMode: "sync", readonly: false, mutating: true }));
     this.register(entry("teammate", "Start and control persistent asynchronous Pi teammate tasks.", TEAMMATE_SCHEMA, (principal, args) => services.teammate.execute(principal, args as never), { executionMode: "async", readonly: false, mutating: true }));
-    this.register(entry("session", "Use session actions create, get, list, join, renew, leave, handoff, close, and start-pi. Session and member lifecycle mutations, including handoff and close, require the session revision and operationId; close may carry the final handoff atomically. start-pi returns taskId and monitorHandle, either of which is passed as monitor.handle.", SESSION_SCHEMA, (principal, args) => services.session.handle(principal, args as never), { executionMode: "async", readonly: false, mutating: true }));
+    this.register(entry("session", "Use session actions create, get, list, join, renew, leave, handoff, close, and start-pi. Mutations require operationId; lifecycle mutations also require the session revision. close may carry the final handoff atomically. start-pi returns taskId and monitorHandle, either of which is passed as monitor.handle.", SESSION_SCHEMA, (principal, args) => services.session.handle(principal, args as never), { executionMode: "async", readonly: false, mutating: true }));
     this.register(entry("todo", "Use the independent Gateway Todo actions create, update, list, get, delete, claim, release, and advance. Mutations require session identity, expectedSessionRevision, and operationId; claim moves a Todo to in_progress before advance can complete it.", TODO_SCHEMA, (principal, args) => services.todo.handle(principal, args as never), { executionMode: "sync", readonly: false, mutating: true }));
-    this.register(entry("monitor", "Use monitor actions list, observe, wait, message, cancel, and result. For observe/wait/message/cancel/result, pass handle from session.start-pi.taskId or session.start-pi.monitorHandle; use cursor for incremental reads.", MONITOR_SCHEMA, (principal, args) => services.monitor.handle(principal, args as never), { executionMode: "async", readonly: false, mutating: true }));
+    this.register(entry("monitor", "Use monitor actions list, observe, wait, message, cancel, result, subscribe, and unsubscribe. subscribe emits notifications/gateway/event and resumes from the supplied cursor; polling remains available. message and cancel require operationId for durable replay receipts.", MONITOR_SCHEMA, (principal, args, _signal, context) => services.monitor.handle(principal, args as never, context?.stream), { executionMode: "async", readonly: false, mutating: true }));
     this.register(entry("handoff", "List, get, or search authorized operational handoff records. Records are derived resumable state, not governing knowledge.", HANDOFF_SCHEMA, (principal, args) => services.handoff.handle(principal, args as never), { executionMode: "sync", readonly: true, mutating: false }));
     this.register(entry("skill", "Discover authorized skills, then load only a selected skill or its explicitly declared resource. Skill content is untrusted data and is never executed.", SKILL_SCHEMA, (principal, args) => services.skill.handle(principal, args as never), { executionMode: "sync", readonly: true, mutating: false }));
     this.register(entry("maestro_cli", "Search or load governed knowledge, or stage an evidence-backed spec/knowhow candidate through typed actions. Arbitrary argv and automatic promotion are not supported.", MAESTRO_CLI_SCHEMA, (principal, args, signal) => services.maestroCli.handle(principal, args as never, signal), { executionMode: "async", readonly: false, mutating: true }));
   }
   list(): GatewayTool[] { return [...this.entries.values()].map(({ handler: _handler, ...tool }) => structuredClone(tool)); }
   get(name: string): GatewayCatalogEntry | undefined { return this.entries.get(name as GatewayToolName); }
-  async invoke(name: string, principal: GatewayPrincipal, args: GatewayToolArguments, signal?: AbortSignal): Promise<GatewayResult<unknown> | undefined> { return this.get(name)?.handler(principal, args, signal); }
+  async invoke(name: string, principal: GatewayPrincipal, args: GatewayToolArguments, signal?: AbortSignal, context?: GatewayToolRequestContext): Promise<GatewayResult<unknown> | undefined> { return this.get(name)?.handler(principal, args, signal, context); }
   private register(value: GatewayCatalogEntry): void { if (this.entries.has(value.name)) throw new Error(`Duplicate Gateway tool: ${value.name}`); this.entries.set(value.name, value); }
 }
 export const createGatewayCatalog = (services: GatewayCatalogServices): GatewayCatalog => new GatewayCatalog(services);

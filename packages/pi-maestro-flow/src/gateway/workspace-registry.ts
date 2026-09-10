@@ -49,7 +49,7 @@ export class WorkspaceNotFoundError extends WorkspaceRegistryError {
 }
 
 export interface WorkspaceRegistryOptions {
-  /** Durable registry path; defaults to ~/.mcpx/gateway/v1/workspaces.json. */
+  /** Durable registry path; defaults to the native Pi agent Gateway state root. */
   path?: string;
   registryPath?: string;
   now?: () => number;

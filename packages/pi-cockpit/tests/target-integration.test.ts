@@ -283,6 +283,16 @@ test("SSH references activate exact live ids, support bind-only input, and resto
 	assert.deepEqual(bindOnly, { action: "handled" });
 	assert.deepEqual(activated, ["server-1", "server-1"]);
 
+	for (const control of ["#ssh:+server-1", "  #SSH:-server-1  "]) {
+		assert.equal(await routeCanonicalTargetInput({
+			...host.options,
+			activateSsh: async (id) => { activated.push(id); },
+			text: control,
+			hasImages: false,
+		}), undefined, "attachment controls remain local to the Flow SSH manager");
+	}
+	assert.deepEqual(activated, ["server-1", "server-1"]);
+
 	const locked = routeHost([catalogue("one", false)]);
 	assert.deepEqual(await routeCanonicalTargetInput({
 		...locked.options,

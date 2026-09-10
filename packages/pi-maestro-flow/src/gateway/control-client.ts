@@ -1,17 +1,18 @@
-/** Local authenticated lifecycle and state client used by the `/mcpx` compatibility UI. */
+/** Local authenticated lifecycle and state client used by the canonical `/gateway` UI. */
 import { randomUUID } from "node:crypto";
 import { spawnSync, type SpawnOptions } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import crossSpawn from "cross-spawn";
 import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { GatewayOwnerRecord, GatewayWorkspace } from "./contracts.ts";
+import { GATEWAY_PROTOCOL_VERSION, type GatewayOwnerRecord, type GatewayWorkspace } from "./contracts.ts";
 import { loadGatewayConfig, type GatewayConfig } from "./config.ts";
 import { requestGatewayIpcControl } from "./ipc.ts";
 import { GatewayOwnerStore } from "./owner-store.ts";
 import { canonicalizeWorkspacePath, gatewayConfigPath, gatewayOwnerPath, gatewayTasksRoot, gatewayWorkspaceRegistryPath } from "./state-paths.ts";
 import { TaskJournal, type GatewayTaskJournalRecord } from "./task-journal.ts";
 import { WorkspaceRegistry, type WorkspaceUnregisterOptions } from "./workspace-registry.ts";
+import type { GatewayTunnelPublicState } from "./tunnel/provider.ts";
 
 const START_TIMEOUT_MS = 30_000;
 const STOP_TIMEOUT_MS = 5_000;
@@ -21,7 +22,7 @@ const POLL_MS = 100;
 export interface GatewayBinaryInfo {
   path: string;
   version: string;
-  source: "override" | "legacy-alias" | "package" | "path";
+  source: "override" | "package" | "path";
   command?: string;
   argsPrefix?: string[];
 }
@@ -68,7 +69,7 @@ function verifyGatewayBinary(
   if (result.status !== 0 || result.error) return undefined;
   try {
     const value = JSON.parse(String(result.stdout || "")) as { name?: unknown; version?: unknown; protocolVersion?: unknown };
-    if (value.name !== "pi-maestro-gateway" || typeof value.version !== "string" || value.protocolVersion !== 1) return undefined;
+    if (value.name !== "pi-maestro-gateway" || typeof value.version !== "string" || value.protocolVersion !== GATEWAY_PROTOCOL_VERSION) return undefined;
     return {
       path,
       version: value.version,
@@ -116,11 +117,6 @@ export function locateGatewayBinary(): GatewayBinaryInfo | undefined {
   if (packaged) {
     binaryCache = packaged;
     return binaryCache;
-  }
-  const legacy = process.env.MCPX_BIN?.trim();
-  if (legacy) {
-    binaryCache = verifyGatewayBinary(legacy, "legacy-alias") ?? null;
-    return binaryCache ?? undefined;
   }
   const discovered = executableOnPath();
   binaryCache = discovered ? verifyGatewayBinary(discovered, "path") ?? null : null;
@@ -243,7 +239,7 @@ export class GatewayControlClient {
     if (status.online) return status;
     const binary = this.binary ?? locateGatewayBinary();
     if (!binary) {
-      throw new Error("Built-in Gateway binary not found or did not self-identify; set PI_MAESTRO_GATEWAY_BIN. Unknown MCPX_BIN binaries are refused.");
+      throw new Error("Built-in Gateway binary not found or did not self-identify; set PI_MAESTRO_GATEWAY_BIN.");
     }
     const child = this.spawnProcess(binary.command ?? binary.path, [...(binary.argsPrefix ?? []), "serve", "--json", "--config", this.configPath], {
       cwd: this.cwd,
@@ -326,6 +322,22 @@ export class GatewayControlClient {
     return this.start();
   }
 
+  async tunnelStatus(provider?: string, instance = "default", timeoutMs = STATUS_TIMEOUT_MS): Promise<GatewayTunnelPublicState | { providers: unknown[] }> {
+    return this.tunnelControl("tunnel-status", provider, instance, { timeoutMs }, false) as Promise<GatewayTunnelPublicState | { providers: unknown[] }>;
+  }
+
+  async tunnelStart(provider: string, options: { instance?: string; timeoutMs?: number; expectedGeneration?: number; input?: Record<string, unknown> } = {}): Promise<GatewayTunnelPublicState> {
+    return this.tunnelControl("tunnel-start", provider, options.instance ?? "default", options, true) as Promise<GatewayTunnelPublicState>;
+  }
+
+  async tunnelStop(provider: string, options: { instance?: string; timeoutMs?: number; expectedGeneration?: number; input?: Record<string, unknown> } = {}): Promise<GatewayTunnelPublicState> {
+    return this.tunnelControl("tunnel-stop", provider, options.instance ?? "default", options, false) as Promise<GatewayTunnelPublicState>;
+  }
+
+  async tunnelRestart(provider: string, options: { instance?: string; timeoutMs?: number; expectedGeneration?: number; input?: Record<string, unknown> } = {}): Promise<GatewayTunnelPublicState> {
+    return this.tunnelControl("tunnel-restart", provider, options.instance ?? "default", options, true) as Promise<GatewayTunnelPublicState>;
+  }
+
   async listWorkspaces(): Promise<GatewayWorkspace[]> {
     return (await this.registry()).list().then((workspaces) => workspaces.map(({ ownerToken: _ownerToken, ...workspace }) => workspace));
   }
@@ -372,6 +384,32 @@ export class GatewayControlClient {
     let path: string;
     try { path = canonicalizeWorkspacePath(pathOrId); } catch { return undefined; }
     return workspaces.find((workspace) => (workspace.canonicalPath ?? workspace.path) === path);
+  }
+
+  private async tunnelControl(
+    action: "tunnel-status" | "tunnel-start" | "tunnel-stop" | "tunnel-restart",
+    provider: string | undefined,
+    instance: string,
+    options: { timeoutMs?: number; expectedGeneration?: number; input?: Record<string, unknown> },
+    startGateway: boolean,
+  ): Promise<unknown> {
+    const status = startGateway ? await this.start() : await this.status();
+    if (!status.online || !status.owner?.socket) throw new Error("Pi Maestro Gateway is offline. Start it with `pi-maestro-gateway serve`.");
+    const timeoutMs = options.timeoutMs ?? (action === "tunnel-status" ? STATUS_TIMEOUT_MS : this.startupTimeoutMs);
+    const deadlineAt = Date.now() + timeoutMs;
+    return requestGatewayIpcControl({
+      address: status.owner.socket,
+      ownerToken: status.owner.ownerToken,
+      action,
+      timeoutMs,
+      data: {
+        ...(provider === undefined ? {} : { provider }),
+        ...(provider === undefined ? {} : { instance }),
+        deadlineAt,
+        ...(options.expectedGeneration === undefined ? {} : { expectedGeneration: options.expectedGeneration }),
+        ...(options.input === undefined ? {} : { input: options.input }),
+      },
+    });
   }
 
   private async workspaceControl(action: "workspace-register" | "workspace-renew" | "workspace-remove", data: Record<string, unknown>): Promise<unknown> {

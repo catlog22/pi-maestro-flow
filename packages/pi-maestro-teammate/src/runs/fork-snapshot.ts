@@ -452,6 +452,22 @@ function injectBoundaryAt(
   return { entries: result, injected: true };
 }
 
+function isIntentionalEmptyNewContextBoundary(compaction: JsonObject): boolean {
+  const firstKeptEntryId = compaction.firstKeptEntryId;
+  if (!isNonEmptyString(firstKeptEntryId)) return false;
+  const match = /^maestro-new-context-(\d+)-(\d+)$/.exec(firstKeptEntryId);
+  if (!match) return false;
+  const lifecycleGeneration = Number(match[1]);
+  const requestId = Number(match[2]);
+  if (!Number.isSafeInteger(lifecycleGeneration) || lifecycleGeneration < 1
+    || !Number.isSafeInteger(requestId) || requestId < 1) return false;
+
+  const details = compaction.details;
+  if (!isObject(details) || details.kind !== "maestro-session-checkpoint") return false;
+  const newContext = details.newContext;
+  return isObject(newContext) && newContext.requestId === requestId;
+}
+
 function selectProtocolMessages(
   entries: JsonObject[],
   sourcePath: string,
@@ -490,20 +506,25 @@ function selectProtocolMessages(
       const firstKeptIndex = entries.findIndex((entry, index) => index < compactionIndex
         && entry.id === compaction.firstKeptEntryId);
       if (firstKeptIndex < 0) {
-        return failure(
-          sourcePath,
-          "invalid-compaction",
-          `Compaction ${compaction.id} refers to unavailable firstKeptEntryId ${compaction.firstKeptEntryId}`,
-          {
-            entryId: compaction.id as string,
-            line: lineByEntryId.get(compaction.id as string),
-          },
-        );
+        if (isIntentionalEmptyNewContextBoundary(compaction)) {
+          selectedEntries = entries.slice(compactionIndex + 1);
+        } else {
+          return failure(
+            sourcePath,
+            "invalid-compaction",
+            `Compaction ${compaction.id} refers to unavailable firstKeptEntryId ${compaction.firstKeptEntryId}`,
+            {
+              entryId: compaction.id as string,
+              line: lineByEntryId.get(compaction.id as string),
+            },
+          );
+        }
+      } else {
+        selectedEntries = [
+          ...entries.slice(firstKeptIndex, compactionIndex),
+          ...entries.slice(compactionIndex + 1),
+        ];
       }
-      selectedEntries = [
-        ...entries.slice(firstKeptIndex, compactionIndex),
-        ...entries.slice(compactionIndex + 1),
-      ];
     }
   }
 

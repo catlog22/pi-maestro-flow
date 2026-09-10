@@ -2,18 +2,18 @@ import { randomUUID } from "node:crypto";
 import type { CollaborativeSessionStateV1, GatewayTodoTaskV1 } from "../gateway/session-contracts.ts";
 import type { GatewayTaskEvent, GatewayTeammateTaskView } from "../gateway/services/teammate-service.ts";
 
-export type McpxWindowSource = "registered" | "managed";
+export type GatewayWindowSource = "registered" | "managed";
 
-export interface McpxRemoteSession {
+export interface GatewayRemoteSession {
   sessionId: string;
   workspace: string;
   label?: string;
   status: string;
 }
 
-export interface McpxRuntimeWindow {
+export interface GatewayRuntimeWindow {
   id: string;
-  kind: McpxWindowSource;
+  kind: GatewayWindowSource;
   managed: boolean;
   displayName: string;
   sessionName?: string;
@@ -30,26 +30,26 @@ export interface McpxRuntimeWindow {
   workspace: string;
 }
 
-export type McpxWindowEvent =
+export type GatewayWindowEvent =
   | { cursor: number; kind: "assistant"; at: number; text: string }
   | { cursor: number; kind: "tool"; at: number; toolCallId?: string; toolName: string; status?: string }
   | { cursor: number; kind: "lifecycle"; at: number; phase: string }
   | { cursor: number; kind: "rpc"; at: number; type: string; summary?: string; payload?: unknown };
 
-export interface McpxWindowObservation {
-  source: McpxWindowSource;
-  window: McpxRuntimeWindow;
+export interface GatewayWindowObservation {
+  source: GatewayWindowSource;
+  window: GatewayRuntimeWindow;
   status: string;
   cursor: number;
   nextCursor: number;
   oldestCursor: number;
-  events: McpxWindowEvent[];
+  events: GatewayWindowEvent[];
   hasMore: boolean;
   progress?: Record<string, unknown>;
   updatedAt?: number;
 }
 
-export interface McpxWindowSendInput {
+export interface GatewayWindowSendInput {
   remoteSessionId: string;
   purpose: string;
   message: string;
@@ -62,7 +62,7 @@ export interface McpxWindowSendInput {
   confirmed?: boolean;
 }
 
-export interface McpxWindowSendResult {
+export interface GatewayWindowSendResult {
   windowId?: string;
   action?: string;
   created?: boolean;
@@ -70,12 +70,12 @@ export interface McpxWindowSendResult {
   raw: Record<string, unknown>;
 }
 
-export interface McpxGatewayMonitor {
+export interface GatewayMonitor {
   handle: string;
   task: GatewayTeammateTaskView;
 }
 
-export interface McpxGatewayMonitorObservation {
+export interface GatewayMonitorObservation {
   handle: string;
   task: GatewayTeammateTaskView;
   events: GatewayTaskEvent[];
@@ -85,18 +85,18 @@ export interface McpxGatewayMonitorObservation {
   gap: boolean;
 }
 
-export type McpxClientErrorKind = "auth" | "unsupported" | "http" | "protocol" | "tool";
+export type GatewayClientErrorKind = "auth" | "unsupported" | "http" | "protocol" | "tool";
 
-export class McpxClientError extends Error {
+export class GatewayClientError extends Error {
   constructor(
     message: string,
-    readonly kind: McpxClientErrorKind,
+    readonly kind: GatewayClientErrorKind,
     readonly status?: number,
     readonly code?: string,
     readonly data?: Record<string, unknown>,
   ) {
     super(message);
-    this.name = "McpxClientError";
+    this.name = "GatewayClientError";
   }
 }
 
@@ -137,7 +137,7 @@ function booleanValue(value: unknown): boolean {
 }
 
 /** Parse either a JSON response or one/more Streamable-HTTP SSE data frames. */
-export function parseMcpxResponseBody(contentType: string, body: string): JsonRpcResponse | undefined {
+export function parseGatewayResponseBody(contentType: string, body: string): JsonRpcResponse | undefined {
   if (!body.trim()) return undefined;
   if (!contentType.toLowerCase().includes("text/event-stream")) {
     const parsed = JSON.parse(body) as unknown;
@@ -181,7 +181,7 @@ function structuredToolEnvelope(result: McpToolResult): Record<string, unknown> 
       // Fall through to a concise protocol error below.
     }
   }
-  throw new McpxClientError("MCP tool response has no structured content", "protocol");
+  throw new GatewayClientError("MCP tool response has no structured content", "protocol");
 }
 
 function envelopeData(envelope: Record<string, unknown>): Record<string, unknown> {
@@ -191,8 +191,8 @@ function envelopeData(envelope: Record<string, unknown>): Record<string, unknown
     const error = isRecord(envelope.error) ? envelope.error : undefined;
     const code = stringValue(error?.code ?? envelope.code);
     const message = stringValue(error?.message ?? envelope.message) || `MCP tool failed (${status})`;
-    const kind: McpxClientErrorKind = code.toLowerCase().includes("invalid_action") ? "unsupported" : "tool";
-    throw new McpxClientError(message, kind, undefined, code || undefined, data);
+    const kind: GatewayClientErrorKind = code.toLowerCase().includes("invalid_action") ? "unsupported" : "tool";
+    throw new GatewayClientError(message, kind, undefined, code || undefined, data);
   }
   return data;
 }
@@ -220,8 +220,8 @@ function schemaActionValues(schema: unknown): Set<string> {
 
 function normalizeWindow(
   raw: Record<string, unknown>,
-  session: McpxRemoteSession,
-): McpxRuntimeWindow | undefined {
+  session: GatewayRemoteSession,
+): GatewayRuntimeWindow | undefined {
   const kind = raw.kind === "managed" ? "managed" : raw.kind === "registered" ? "registered" : undefined;
   const id = stringValue(raw.id ?? raw.owner_id);
   if (!kind || !id) return undefined;
@@ -245,7 +245,7 @@ function normalizeWindow(
   };
 }
 
-function normalizeEvent(raw: unknown): McpxWindowEvent | undefined {
+function normalizeEvent(raw: unknown): GatewayWindowEvent | undefined {
   if (!isRecord(raw)) return undefined;
   const cursor = numberValue(raw.cursor);
   const atValue = raw.at ?? raw.created_at;
@@ -274,7 +274,7 @@ function normalizeEvent(raw: unknown): McpxWindowEvent | undefined {
   return { cursor, kind: "rpc", at, type, summary: optionalString(raw.summary), payload: raw.payload };
 }
 
-export class McpxStreamableHttpClient {
+export class GatewayStreamableHttpClient {
   private sessionId?: string;
   private requestId = 0;
   private initializePromise?: Promise<void>;
@@ -293,7 +293,7 @@ export class McpxStreamableHttpClient {
     this.capabilityPromise = undefined;
   }
 
-  async listRemoteSessions(memberIds?: readonly string[]): Promise<McpxRemoteSession[]> {
+  async listRemoteSessions(memberIds?: readonly string[]): Promise<GatewayRemoteSession[]> {
     const memberCandidates = memberIds && memberIds.length > 0 ? [...new Set(memberIds)] : [undefined];
     const outcomes = await Promise.all(memberCandidates.map(async (memberId) => {
       try {
@@ -311,7 +311,7 @@ export class McpxStreamableHttpClient {
     const collected = outcomes.flatMap((outcome) => outcome.sessions);
     const firstError = outcomes.find((outcome) => outcome.error !== undefined)?.error;
     if (collected.length === 0 && firstError && memberCandidates.length === 1) throw firstError;
-    const sessions = new Map<string, McpxRemoteSession>();
+    const sessions = new Map<string, GatewayRemoteSession>();
     for (const candidate of collected) {
       if (!isRecord(candidate)) continue;
       const sessionId = stringValue(candidate.remote_session_id ?? candidate.id);
@@ -329,7 +329,7 @@ export class McpxStreamableHttpClient {
   async getGatewaySession(sessionId: string, memberId: string): Promise<CollaborativeSessionStateV1> {
     const data = await this.callTool("session", { action: "get", sessionId, memberId });
     if (!isRecord(data.session) || !Array.isArray(data.members) || !Array.isArray(data.todos)) {
-      throw new McpxClientError("Gateway session response is malformed", "protocol");
+      throw new GatewayClientError("Gateway session response is malformed", "protocol");
     }
     return data as unknown as CollaborativeSessionStateV1;
   }
@@ -340,7 +340,7 @@ export class McpxStreamableHttpClient {
 
   async listGatewayTodos(sessionId: string, memberId: string): Promise<GatewayTodoTaskV1[]> {
     const data = await this.callTool("todo", { action: "list", sessionId, memberId });
-    if (!Array.isArray(data.todos)) throw new McpxClientError("Gateway Todo response is malformed", "protocol");
+    if (!Array.isArray(data.todos)) throw new GatewayClientError("Gateway Todo response is malformed", "protocol");
     return data.todos as GatewayTodoTaskV1[];
   }
 
@@ -357,21 +357,21 @@ export class McpxStreamableHttpClient {
       operationId: randomUUID(),
       ...(input.action === "advance" ? { status: input.status } : {}),
     });
-    if (!isRecord(data.todo)) throw new McpxClientError("Gateway Todo mutation response is malformed", "protocol");
+    if (!isRecord(data.todo)) throw new GatewayClientError("Gateway Todo mutation response is malformed", "protocol");
     return data.todo as unknown as GatewayTodoTaskV1;
   }
 
-  async listGatewayMonitors(sessionId: string, memberId: string): Promise<McpxGatewayMonitor[]> {
+  async listGatewayMonitors(sessionId: string, memberId: string): Promise<GatewayMonitor[]> {
     const data = await this.callTool("monitor", { action: "list", sessionId, memberId });
-    if (!Array.isArray(data.monitors)) throw new McpxClientError("Gateway Monitor response is malformed", "protocol");
+    if (!Array.isArray(data.monitors)) throw new GatewayClientError("Gateway Monitor response is malformed", "protocol");
     return data.monitors.flatMap((value) => isRecord(value) && typeof value.handle === "string" && isRecord(value.task)
       ? [{ handle: value.handle, task: value.task as unknown as GatewayTeammateTaskView }]
       : []);
   }
 
-  async observeGatewayMonitor(sessionId: string, memberId: string, handle: string, cursor = 0): Promise<McpxGatewayMonitorObservation> {
+  async observeGatewayMonitor(sessionId: string, memberId: string, handle: string, cursor = 0): Promise<GatewayMonitorObservation> {
     const data = await this.callTool("monitor", { action: "observe", sessionId, memberId, handle, cursor, limit: 64 });
-    if (!isRecord(data.task) || !Array.isArray(data.events)) throw new McpxClientError("Gateway Monitor observation is malformed", "protocol");
+    if (!isRecord(data.task) || !Array.isArray(data.events)) throw new GatewayClientError("Gateway Monitor observation is malformed", "protocol");
     return {
       handle,
       task: data.task as unknown as GatewayTeammateTaskView,
@@ -384,10 +384,10 @@ export class McpxStreamableHttpClient {
   }
 
   async cancelGatewayMonitor(sessionId: string, memberId: string, handle: string): Promise<void> {
-    await this.callTool("monitor", { action: "cancel", sessionId, memberId, handle, reason: "Cancelled from /gateway" });
+    await this.callTool("monitor", { action: "cancel", sessionId, memberId, operationId: `gateway-cancel-${randomUUID()}`, handle, reason: "Cancelled from /gateway" });
   }
 
-  async listWindows(session: McpxRemoteSession): Promise<McpxRuntimeWindow[]> {
+  async listWindows(session: GatewayRemoteSession): Promise<GatewayRuntimeWindow[]> {
     await this.requirePiWindowActions();
     const data = await this.callTool("pi_window", {
       action: "list",
@@ -398,11 +398,11 @@ export class McpxStreamableHttpClient {
   }
 
   async observeWindow(
-    session: McpxRemoteSession,
-    window: McpxRuntimeWindow,
+    session: GatewayRemoteSession,
+    window: GatewayRuntimeWindow,
     cursor = 0,
     limit = 50,
-  ): Promise<McpxWindowObservation> {
+  ): Promise<GatewayWindowObservation> {
     await this.requirePiWindowActions();
     const data = await this.callTool("pi_window", {
       action: "observe",
@@ -427,7 +427,7 @@ export class McpxStreamableHttpClient {
     };
   }
 
-  async sendWindow(input: McpxWindowSendInput): Promise<McpxWindowSendResult> {
+  async sendWindow(input: GatewayWindowSendInput): Promise<GatewayWindowSendResult> {
     await this.requirePiWindowActions();
     const args: Record<string, unknown> = {
       action: "send",
@@ -445,7 +445,7 @@ export class McpxStreamableHttpClient {
     try {
       data = await this.callTool("pi_window", args);
     } catch (error) {
-      if (!(error instanceof McpxClientError)
+      if (!(error instanceof GatewayClientError)
         || error.code?.toLowerCase() !== "user_confirmation_required"
         || input.confirmed !== true) throw error;
       data = await this.callTool("pi_window", { ...args, user_confirmed: true });
@@ -465,10 +465,10 @@ export class McpxStreamableHttpClient {
         const response = await this.rpc("tools/list", {});
         const tools = Array.isArray(response.result?.tools) ? response.result.tools : [];
         const tool = tools.find((candidate) => isRecord(candidate) && candidate.name === "pi_window");
-        if (!isRecord(tool)) throw new McpxClientError("Runtime does not expose pi_window", "unsupported");
+        if (!isRecord(tool)) throw new GatewayClientError("Runtime does not expose pi_window", "unsupported");
         const actions = schemaActionValues(tool.inputSchema);
         if (!["list", "send", "observe"].every((action) => actions.has(action))) {
-          throw new McpxClientError("Runtime pi_window lacks unified list/send/observe actions", "unsupported");
+          throw new GatewayClientError("Runtime pi_window lacks unified list/send/observe actions", "unsupported");
         }
       })();
       const recoverable = capability.catch((error) => {
@@ -485,7 +485,7 @@ export class McpxStreamableHttpClient {
     const result = (response.result ?? {}) as McpToolResult;
     const envelope = structuredToolEnvelope(result);
     if (result.isError === true && !stringValue(envelope.status)) {
-      throw new McpxClientError(`MCP tool ${name} failed`, "tool", undefined, undefined, envelope);
+      throw new GatewayClientError(`MCP tool ${name} failed`, "tool", undefined, undefined, envelope);
     }
     return envelopeData(envelope);
   }
@@ -496,7 +496,7 @@ export class McpxStreamableHttpClient {
         await this.rpcDirect("initialize", {
           protocolVersion: PROTOCOL_VERSION,
           capabilities: {},
-          clientInfo: { name: "pi-maestro-flow-mcpx", version: "1.0.0" },
+          clientInfo: { name: "pi-maestro-flow-gateway", version: "1.0.0" },
         }, false);
         await this.notify("notifications/initialized");
       })();
@@ -525,10 +525,10 @@ export class McpxStreamableHttpClient {
   ): Promise<JsonRpcResponse> {
     const id = ++this.requestId;
     const response = await this.post({ jsonrpc: "2.0", id, method, params }, includeSession);
-    if (!response) throw new McpxClientError(`Empty MCP response for ${method}`, "protocol");
+    if (!response) throw new GatewayClientError(`Empty MCP response for ${method}`, "protocol");
     if (response.error) {
       const unsupported = response.error.code === -32601;
-      throw new McpxClientError(
+      throw new GatewayClientError(
         response.error.message || `MCP ${method} failed`,
         unsupported ? "unsupported" : "protocol",
         undefined,
@@ -554,26 +554,26 @@ export class McpxStreamableHttpClient {
         signal: AbortSignal.timeout(this.timeoutMs),
       });
     } catch (error) {
-      throw new McpxClientError(error instanceof Error ? error.message : String(error), "http");
+      throw new GatewayClientError(error instanceof Error ? error.message : String(error), "http");
     }
     if (response.status === 401 || response.status === 403) {
       this.resetTransport();
-      throw new McpxClientError(`MCP authentication required (HTTP ${response.status})`, "auth", response.status);
+      throw new GatewayClientError(`MCP authentication required (HTTP ${response.status})`, "auth", response.status);
     }
     if (response.status === 404 && includeSession) {
       this.resetTransport();
-      throw new McpxClientError("MCP session expired (HTTP 404)", "http", response.status);
+      throw new GatewayClientError("MCP session expired (HTTP 404)", "http", response.status);
     }
     if (!response.ok) {
-      throw new McpxClientError(`MCP HTTP ${response.status}`, "http", response.status);
+      throw new GatewayClientError(`MCP HTTP ${response.status}`, "http", response.status);
     }
     const nextSession = response.headers.get("Mcp-Session-Id");
     if (nextSession) this.sessionId = nextSession;
     const body = await response.text();
     try {
-      return parseMcpxResponseBody(response.headers.get("content-type") ?? "", body);
+      return parseGatewayResponseBody(response.headers.get("content-type") ?? "", body);
     } catch (error) {
-      throw new McpxClientError(error instanceof Error ? error.message : String(error), "protocol");
+      throw new GatewayClientError(error instanceof Error ? error.message : String(error), "protocol");
     }
   }
 }

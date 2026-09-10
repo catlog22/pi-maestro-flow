@@ -1,4 +1,4 @@
-/** Gateway process ownership, stale detection and legacy PID adoption. */
+/** Gateway process ownership and stale detection for native durable state. */
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -6,13 +6,12 @@ import { mkdir } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname } from "node:path";
 import {
-  GATEWAY_STATE_VERSION,
+  GATEWAY_DURABLE_RECORD_VERSION,
   type GatewayOwnerRecord,
 } from "./contracts.ts";
 import { parseGatewayOwnerRecord } from "./validation.ts";
 import {
   gatewayOwnerPath,
-  readGatewayFile,
   readGatewayJson,
   writeGatewayJsonAtomic,
 } from "./state-paths.ts";
@@ -55,7 +54,6 @@ export class GatewayOwnerIdentityMismatchError extends GatewayOwnerStoreError {
 export interface GatewayOwnerStoreOptions {
   path?: string;
   ownerPath?: string;
-  legacyPidPath?: string;
   now?: () => number;
   pid?: number;
   commandIdentity?: string;
@@ -71,16 +69,6 @@ export interface GatewayClaimOptions {
   commandIdentity?: string;
   startedAt?: number;
   expectedOwnerToken?: string;
-}
-
-export interface LegacyPidAdoptionOptions {
-  pidPath?: string;
-  pid?: number;
-  expectedCommandIdentity: string;
-  port?: number;
-  socket?: string;
-  ownerToken?: string;
-  startedAt?: number;
 }
 
 function defaultIsProcessAlive(pid: number): boolean {
@@ -118,7 +106,6 @@ function normalizeIdentity(value: string | undefined): string {
 
 export class GatewayOwnerStore {
   readonly ownerPath: string;
-  readonly legacyPidPath?: string;
   private readonly now: () => number;
   private readonly defaultPid: number;
   private readonly defaultCommandIdentity: string;
@@ -128,7 +115,6 @@ export class GatewayOwnerStore {
 
   constructor(options: GatewayOwnerStoreOptions = {}) {
     this.ownerPath = options.path ?? options.ownerPath ?? gatewayOwnerPath();
-    this.legacyPidPath = options.legacyPidPath;
     this.now = options.now ?? (() => Date.now());
     this.defaultPid = options.pid ?? process.pid;
     this.defaultCommandIdentity = normalizeIdentity(options.commandIdentity ?? (process.argv.join(" ") || process.execPath));
@@ -201,45 +187,6 @@ export class GatewayOwnerStore {
   }
   async remove(ownerToken: string): Promise<boolean> { return this.release(ownerToken); }
 
-  /**
-   * Adopt a legacy numeric PID only when the observed command identity is an
-   * exact match. A live-but-mismatched PID is never taken over.
-   */
-  async adoptLegacyPid(options: LegacyPidAdoptionOptions = { expectedCommandIdentity: "" }): Promise<GatewayOwnerRecord | undefined> {
-    const expected = normalizeIdentity(options.expectedCommandIdentity);
-    let pid = options.pid;
-    if (pid === undefined) {
-      const path = options.pidPath ?? this.legacyPidPath;
-      if (!path) return undefined;
-      const raw = await readGatewayFile(path, 1024);
-      if (raw === undefined) return undefined;
-      const parsed = Number.parseInt(raw.trim(), 10);
-      if (!Number.isSafeInteger(parsed) || parsed <= 0) return undefined;
-      pid = parsed;
-    }
-    if (!this.isProcessAlive(pid)) return undefined;
-    const observed = await this.getProcessIdentity(pid);
-    if (observed === null || observed !== expected) {
-      throw new GatewayOwnerIdentityMismatchError();
-    }
-    return this.claim({
-      pid,
-      ownerToken: options.ownerToken,
-      port: options.port,
-      socket: options.socket,
-      commandIdentity: expected,
-      startedAt: options.startedAt,
-    });
-  }
-  async adoptLegacy(options: LegacyPidAdoptionOptions): Promise<GatewayOwnerRecord | undefined> { return this.adoptLegacyPid(options); }
-  async tryAdoptLegacyPid(options: LegacyPidAdoptionOptions): Promise<GatewayOwnerRecord | undefined> {
-    try { return await this.adoptLegacyPid(options); }
-    catch (error) {
-      if (error instanceof GatewayOwnerIdentityMismatchError) return undefined;
-      throw error;
-    }
-  }
-
   private buildRecord(options: GatewayClaimOptions): GatewayOwnerRecord {
     const pid = options.pid ?? this.defaultPid;
     if (!Number.isSafeInteger(pid) || pid <= 0) throw new GatewayOwnerStoreError("pid must be a positive safe integer");
@@ -251,7 +198,7 @@ export class GatewayOwnerStore {
       ? { socket: `${this.ownerPath}.sock` }
       : options.port === undefined ? { socket: options.socket! } : { port: options.port };
     return parseGatewayOwnerRecord({
-      version: GATEWAY_STATE_VERSION,
+      version: GATEWAY_DURABLE_RECORD_VERSION,
       pid,
       ownerToken,
       ...endpoint,

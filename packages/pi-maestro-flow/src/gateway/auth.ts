@@ -1,4 +1,4 @@
-/** HTTP exposure checks and the small OAuth surface retained from MCPX config. */
+/** HTTP exposure checks and the native Gateway OAuth surface. */
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { isIP } from "node:net";
@@ -92,10 +92,14 @@ export class GatewayHttpAuth {
       if (issued && issued.expiresAt > Date.now()) accepted = true;
       else if (issued) this.tokens.delete(token);
     }
-    let pairingId: string | undefined;
+    let pairing: Awaited<ReturnType<GatewayPairingStore["authenticate"]>>;
     if (!accepted && this.pairingStore) {
-      const pairing = await this.pairingStore.authenticate(token);
-      if (pairing) { accepted = true; pairingId = pairing.id; }
+      pairing = await this.pairingStore.authenticate(token, { audience: "gateway" });
+      // Tunnel-audience credentials are accepted only on the loopback hop used
+      // by an owned external tunnel client. They remain invalid at the public
+      // Gateway HTTP boundary and carry their narrow pairing scopes.
+      if (!pairing && isLoopbackHost(remote)) pairing = await this.pairingStore.authenticate(token, { audience: "gateway.tunnel" });
+      if (pairing) accepted = true;
     }
     if (!accepted) {
       return {
@@ -105,7 +109,12 @@ export class GatewayHttpAuth {
       };
     }
     const fingerprint = createHash("sha256").update(token, "utf8").digest("hex").slice(0, 24);
-    return { principal: createGatewayPrincipal("http", pairingId ? `pairing:${pairingId}` : `bearer:${fingerprint}`, { authenticated: true, source: remote, scopes: ["gateway"] }) };
+    return { principal: createGatewayPrincipal("http", pairing ? `pairing:${pairing.id}` : `bearer:${fingerprint}`, {
+      authenticated: true,
+      source: pairing?.provider ? `${remote}:${pairing.provider}` : remote,
+      scopes: pairing?.scopes ?? ["gateway"],
+      ...(pairing?.workspaceId === undefined ? {} : { workspaceId: pairing.workspaceId }),
+    }) };
   }
 
   async handleOAuthRoute(request: IncomingMessage, response: ServerResponse, url: URL, baseUrl: string, mcpPath: string): Promise<boolean> {

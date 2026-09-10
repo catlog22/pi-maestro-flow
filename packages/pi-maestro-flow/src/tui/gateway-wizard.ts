@@ -1,6 +1,5 @@
 /**
- * McpxWizardOverlay — guided mcpx configuration based on the mcpx README
- * (configuration overview / security recommendations / client setup):
+ * GatewayWizardOverlay — guided configuration for the built-in Pi Maestro Gateway:
  *
  *   1. listen address (host + port)
  *   2. command policy default (allow | confirm | deny) — README recommends
@@ -9,26 +8,25 @@
  *   4. skill discovery dirs (append the pi plugin skills dir when present)
  *   5. register the current workspace (lease-based via the /gateway panel; here
  *      the write step just merges config sections)
- *   6. public tunnel (Cloudflare Quick Tunnel only — the unique mode)
- *   7. write confirmation (section-preserving merge into ~/.mcpx/config.yaml)
+ *   6. public tunnel (Cloudflare Quick Tunnel; OpenAI is shown as experimental)
+ *   7. write confirmation (section-preserving merge into the native Gateway config)
  *
  * Keys: ↑↓/jk select · Enter confirm · Esc back/close · g start tunnel · x stop tunnel
  */
-import { randomUUID } from "node:crypto";
-import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync, renameSync, rmSync } from "node:fs";
-import { homedir } from "node:os";
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Key, type Component, type Focusable, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
-import { discoverQuickTunnelProcesses, isProcessOwnedBy, isValidTunnelPort, killProcessWithEscalation, quickTunnelArgs, readTunnelState, recordQuickTunnelOwner } from "../mcpx-bridge.ts";
+import { readTunnelState, startQuickTunnel as startCloudflareQuickTunnel, stopQuickTunnel as stopCloudflareQuickTunnel, writeGatewayConfigChanges } from "../gateway/workspace-client.ts";
+import { gatewayConfigPath } from "../gateway/state-paths.ts";
 
-export interface McpxWizardParams {
+export interface GatewayWizardParams {
   cwd: string;
   requestRender: () => void;
   close: () => void;
 }
 
-export interface McpxConfigChanges {
+export interface GatewayConfigChanges {
   host?: string;
   port?: number;
   authMode?: "open" | "bearer" | "oauth";
@@ -55,6 +53,13 @@ export interface McpxConfigChanges {
   filesAllow?: string[];
   filesConfirm?: string[];
   filesDeny?: string[];
+  /** Experimental OpenAI tunnel provider configuration. Values are env names, never secrets. */
+  openAiTunnelEnabled?: boolean;
+  openAiTunnelBinaryPath?: string;
+  openAiTunnelIdEnv?: string;
+  openAiRuntimeKeyEnv?: string;
+  openAiMinimumVersion?: string;
+  openAiCredentialTtlMs?: number;
 }
 
 type WizardStep =
@@ -72,7 +77,7 @@ const STEP_LABEL: Record<WizardStep, string> = {
   pi: "3/7 Pi 白名单",
   skills: "4/7 Skill 发现目录",
   workspace: "5/7 工作区注册",
-  tunnel: "6/7 公网隧道（Cloudflare）",
+  tunnel: "6/7 公网隧道（Cloudflare / OpenAI experimental）",
   write: "7/7 写入确认",
 };
 
@@ -86,7 +91,8 @@ function splitSections(text: string): Section[] {
   let current: Section | undefined;
   for (const line of text.split(/\r?\n/)) {
     // Top-level keys are anchored at column 0 (indented keys do not match).
-    const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*):\s*$/);
+    // Scalar sections such as `version: 2` must survive canonical rewrites too.
+    const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*):(?:\s.*)?$/);
     if (match) {
       if (current) sections.push(current);
       current = { key: match[1], raw: line };
@@ -194,8 +200,9 @@ function patchYamlScalar(section: string, key: string, value: string, fallbackIn
   return `${section}\n${childIndent}${key}: ${value}`;
 }
 
-export function buildChangesYaml(existing: string, changes: McpxConfigChanges, cwd: string): { yaml: string; summary: string[] } {
+export function buildGatewayChangesYaml(existing: string, changes: GatewayConfigChanges, cwd: string): { yaml: string; summary: string[] } {
   const sections = splitSections(existing);
+  if (!sections.some((section) => section.key === "version")) sections.unshift({ key: "version", raw: "version: 2" });
   const summary: string[] = [];
   const get = (key: string) => sections.find((section) => section.key === key);
   const existingAuth = get("auth")?.raw ?? "";
@@ -435,31 +442,22 @@ export function buildChangesYaml(existing: string, changes: McpxConfigChanges, c
   return { yaml, summary };
 }
 
-export class McpxWizardOverlay implements Component, Focusable {
+export class GatewayWizardOverlay implements Component, Focusable {
   focused = false;
   private step: WizardStep = "listen";
   private selected = 0;
   private editing = false;
   private draft = "";
   private status = "";
-  private tunnelProcess: ReturnType<typeof spawn> | undefined;
-  private tunnelAdoptedPid: number | undefined;
   private tunnelPort: number | undefined;
-  private tunnelOutput = "";
-  /** Exit code / signal captured when the cloudflared child died on its own (undefined while alive). */
-  private tunnelExit: { code: number | null; signal: NodeJS.Signals | null } | undefined;
-  /** Metrics server URL cloudflared prints once it is up — proof of life when the URL is late. */
-  private metricsUrl: string | undefined;
+  private tunnelGeneration: number | undefined;
+  private tunnelStarting = false;
   private tunnelOwnedHere = false;
   private configCommitted = false;
-
-  private tunnelPidPath(): string {
-    return process.env.MCPX_TUNNEL_PID_FILE ?? join(homedir(), ".mcpx", "cloudflared.pid");
-  }
-  private changes: McpxConfigChanges = {};
+  private changes: GatewayConfigChanges = {};
   private readonly existingConfig: string;
 
-  constructor(private readonly params: McpxWizardParams) {
+  constructor(private readonly params: GatewayWizardParams) {
     let existing = "";
     try {
       existing = readFileSync(this.configPath(), "utf8");
@@ -470,28 +468,16 @@ export class McpxWizardOverlay implements Component, Focusable {
   }
 
   private configPath(): string {
-    return join(homedir(), ".mcpx", "config.yaml");
+    return gatewayConfigPath();
   }
 
   invalidate(): void {}
 
   dispose(): void {
     if (this.configCommitted || !this.tunnelOwnedHere) return;
-    const child = this.tunnelProcess;
-    const pid = child?.pid ?? this.pidFromFile();
-    this.tunnelProcess = undefined;
+    const generation = this.tunnelGeneration;
     this.tunnelOwnedHere = false;
-    this.metricsUrl = undefined;
-    try {
-      if (pid && child) {
-        if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
-        else child.kill();
-      } else if (pid && isProcessOwnedBy(pid, "cloudflared")) {
-        if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
-        else process.kill(pid, "SIGTERM");
-      }
-    } catch { /* best-effort cleanup on overlay close */ }
-    try { rmSync(this.tunnelPidPath(), { force: true }); } catch { /* best-effort */ }
+    void stopCloudflareQuickTunnel(generation).catch(() => undefined);
   }
 
   render(width: number): string[] {
@@ -547,22 +533,22 @@ export class McpxWizardOverlay implements Component, Focusable {
       case "workspace":
         return [
           fitLine("窗口注册独立于本向导", inner),
-          fitLine("  本向导只写 ~/.mcpx/config.yaml（监听/认证/策略/隧道）。", inner),
+          fitLine(`  本向导只写 ${this.configPath()}（监听/认证/策略/隧道）。`, inner),
           fitLine("  注册当前工作区到 Pi Maestro Gateway（绑定 lease）请在 /gateway 看板按 e。", inner),
           fitLine("  未完成初始配置时按 e 会自动回到本向导。", inner),
           option(0, "继续"),
         ];
       case "tunnel": {
-        const hasCloudflared = isExecutableOnPath("cloudflared");
-        const cloudflared = hasCloudflared ? fg("32", "✓ 已安装") : fg("31", "✗ 未安装");
-        const running = this.tunnelProcess || this.tunnelAdoptedPid
-          ? fg("32", `运行中${this.changes.tunnelUrl ? ` · ${this.changes.tunnelUrl}` : "（等待 URL…）"}`)
+        const cloudflared = fg("2", "由 Gateway supervisor doctor 检测显式配置/PATH");
+        const running = this.tunnelStarting || this.tunnelGeneration !== undefined
+          ? fg("32", `${this.tunnelStarting ? "启动探活中" : "运行中"}${this.changes.tunnelUrl ? ` · ${this.changes.tunnelUrl}` : "（等待分层 readiness…）"}`)
           : fg("2", "未运行");
         return [
           fitLine(`公网隧道（Cloudflare Quick Tunnel）— cloudflared ${cloudflared}`, inner),
           fitLine(`  唯一模式：启动后自动绑定本地端口并生成公网 URL，无需手动填写`, inner),
           fitLine(`  状态: ${running}`, inner),
-          option(0, this.tunnelProcess ? "重启隧道" : "启动隧道", "Enter/g 自动获取 URL"),
+          fitLine("  OpenAI Secure MCP Tunnel: experimental；需显式配置受支持 tunnel-client + env 凭据，向导不下载/创建资源", inner),
+          option(0, this.tunnelGeneration ? "隧道已就绪" : "启动隧道", "Enter/g 由 Gateway supervisor 探活"),
           option(1, "→ 下一步（写入确认）", "需隧道已启动"),
           fitLine("  提示: Enter/g 启动 · x 停止 · Esc 返回", inner),
         ];
@@ -570,7 +556,7 @@ export class McpxWizardOverlay implements Component, Focusable {
       case "write": {
         const { summary } = this.build();
         const rows = [
-          fitLine("将写入 ~/.mcpx/config.yaml（保留未修改的 section）：", inner),
+          fitLine(`将写入 ${this.configPath()}（保留未修改的 section）：`, inner),
           ...summary.map((line) => fitLine(`  · ${line}`, inner)),
         ];
         rows.push(rule(inner));
@@ -762,283 +748,78 @@ export class McpxWizardOverlay implements Component, Focusable {
     this.params.requestRender();
   }
 
-  /** Start a Cloudflare quick tunnel bound to the local mcpx port and parse the generated URL. */
+  /** Start through the canonical Gateway control plane and native supervisor state. */
   private async startQuickTunnel(): Promise<void> {
     const port = this.changes.port ?? 9090;
-    if (!isValidTunnelPort(port)) {
+    if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
       this.status = "无效的隧道端口（必须为 1-65535）";
       this.params.requestRender();
       return;
     }
-    if (this.tunnelProcess || this.tunnelAdoptedPid) {
-      if (this.tunnelPort !== port) {
-        this.status = `已有隧道绑定端口 ${this.tunnelPort ?? "未知"}，请先停止后再更改端口`;
-        this.params.requestRender();
-        return;
-      }
-      if (this.changes.tunnelUrl) {
-        this.status = `隧道运行中: ${this.changes.tunnelUrl}`;
-        this.params.requestRender();
-        return;
-      }
-      if (!this.tunnelProcess) {
-        this.status = "隧道已认领但没有可读取的公网 URL，请检查 Pi Maestro Gateway 配置后再继续";
-        this.params.requestRender();
-        return;
-      }
-      // Process up but URL not parsed yet: resume waiting instead of a dead end.
-      this.status = "隧道正在启动，继续等待 URL…";
-      this.params.requestRender();
-      await this.waitForTunnelUrl();
-      return;
-    }
-
-    // Confirm the complete process list before adopting or spawning. An
-    // unavailable query is deliberately not treated as an empty result.
-    const candidates = discoverQuickTunnelProcesses(port);
-    if (!candidates) {
-      this.status = "无法确认 Quick Tunnel 进程，已停止启动以避免重复";
+    if (this.tunnelStarting) {
+      this.status = "Cloudflare Quick Tunnel 正在进行本地/provider/公网分层探活…";
       this.params.requestRender();
       return;
     }
-    if (candidates.length > 1) {
-      this.tunnelAdoptedPid = undefined;
-      this.status = `发现 ${candidates.length} 个相同端口的 Quick Tunnel，未启动新进程；请在 /gateway 面板按 T 清理并重启`;
+    if (this.tunnelGeneration !== undefined && this.changes.tunnelUrl) {
+      this.status = `隧道运行中: ${this.changes.tunnelUrl}`;
       this.params.requestRender();
       return;
     }
-    if (candidates.length === 1) {
-      const candidate = candidates[0]!;
-      this.tunnelAdoptedPid = candidate.pid;
-      this.tunnelPort = port;
-      try { recordQuickTunnelOwner(candidate.pid, port); } catch { /* best-effort */ }
-      const configuredUrl = this.configuredTunnelUrl();
-      if (!this.changes.tunnelUrl && configuredUrl) this.changes.tunnelUrl = configuredUrl;
-      this.status = configuredUrl
-        ? `隧道已在运行（PID ${candidate.pid}）: ${configuredUrl}`
-        : `隧道已在运行（PID ${candidate.pid}），未取得 URL；请继续配置或按 x 停止`;
-      this.params.requestRender();
-      return;
-    }
-
-    // Resolve the real executable path and spawn only after the fail-closed
-    // discovery proved that no exact Quick Tunnel is currently running.
-    const resolved = resolveExecutable("cloudflared");
-    if (!resolved) {
-      this.status = "未找到 cloudflared — 安装: winget install --id Cloudflare.cloudflared（Windows）/ brew install cloudflared（macOS）/ 官网安装包（Linux）";
-      this.params.requestRender();
-      return;
-    }
-    this.status = "正在启动 cloudflared 隧道…";
-    this.tunnelOutput = "";
-    this.tunnelExit = undefined;
-    this.metricsUrl = undefined;
-    this.tunnelAdoptedPid = undefined;
+    this.tunnelStarting = true;
+    this.tunnelPort = port;
+    this.status = "正在通过 Pi Maestro Gateway 启动 Cloudflare Quick Tunnel 并进行分层探活…";
     this.params.requestRender();
     try {
-      const isShim = process.platform === "win32" && /\.(cmd|bat)$/i.test(resolved);
-      const child = spawn(resolved, quickTunnelArgs(port), {
-        detached: !isShim,
-        stdio: ["ignore", "pipe", "pipe"],
-        shell: isShim,
-        windowsHide: true,
-      });
-      child.unref();
-      this.tunnelProcess = child;
-      this.tunnelPort = port;
+      const before = await readTunnelState();
+      if (before.phase === "ready" && before.url) {
+        this.tunnelGeneration = before.generation;
+        this.changes.tunnelUrl = before.url;
+        this.tunnelOwnedHere = false;
+        this.status = `隧道已在运行（generation ${before.generation}）: ${before.url}`;
+        return;
+      }
+      const state = await startCloudflareQuickTunnel(port);
+      const endpoint = state.observed.endpoint;
+      if (state.observed.phase !== "ready" || !endpoint) throw new Error(state.observed.detail ?? "Cloudflare Quick Tunnel 未就绪");
+      this.tunnelGeneration = state.generation;
+      this.changes.tunnelUrl = endpoint;
       this.tunnelOwnedHere = true;
-      child.stdout?.on("data", (chunk: Buffer) => this.onTunnelOutput(chunk.toString()));
-      child.stderr?.on("data", (chunk: Buffer) => this.onTunnelOutput(chunk.toString()));
-      // Lifecycle: if cloudflared dies before yielding a URL, surface the exit cause
-      // immediately instead of leaving the poll loop to time out 30s in the dark.
-      child.on("error", (err: Error) => {
-        this.tunnelExit = { code: null, signal: null };
-        if (this.tunnelProcess === child) {
-          this.tunnelProcess = undefined;
-          this.tunnelOwnedHere = false;
-          this.appendTunnelLine(`cloudflared 启动错误: ${err.message}`);
-          this.status = this.tunnelFailStatus();
-          this.params.requestRender();
-        }
-      });
-      child.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
-        this.tunnelExit = { code, signal };
-        if (this.tunnelProcess === child) {
-          this.tunnelProcess = undefined;
-          this.tunnelOwnedHere = false;
-          this.tunnelAdoptedPid = undefined;
-          this.metricsUrl = undefined; // dead child no longer serves metrics
-          try { rmSync(this.tunnelPidPath(), { force: true }); } catch { /* best-effort */ }
-          // Preserve any error text already captured from stdout/stderr.
-          if (code !== 0 && code !== null) {
-            this.appendTunnelLine(`cloudflared 退出（代码 ${code}）`);
-          } else if (signal) {
-            this.appendTunnelLine(`cloudflared 被信号终止（${signal}）`);
-          }
-          // A tunnel that died no longer serves its URL. If we never had one,
-          // surface the failure; if we did, clear it AND flip the status so the
-          // write step can't proceed on a stale "运行中" line.
-          if (!this.changes.tunnelUrl) {
-            this.status = this.tunnelFailStatus();
-          } else {
-            this.changes.tunnelUrl = undefined; // dead URL must not reach the write step
-            this.status = this.tunnelFailStatus();
-          }
-          this.params.requestRender();
-        }
-      });
-      if (child.pid) {
-        try { recordQuickTunnelOwner(child.pid, port); } catch { /* best-effort */ }
-      }
-      await this.waitForTunnelUrl();
+      this.status = `隧道已就绪（generation ${state.generation}）: ${endpoint}`;
     } catch (error) {
+      this.tunnelGeneration = undefined;
+      this.changes.tunnelUrl = undefined;
+      this.tunnelOwnedHere = false;
       this.status = `隧道启动失败: ${error instanceof Error ? error.message : String(error)}`;
-    }
-    this.params.requestRender();
-  }
-
-  /** Poll cloudflared output for the generated URL; keeps status consistent with stop. */
-  private async waitForTunnelUrl(): Promise<void> {
-    if (this.changes.tunnelUrl) {
-      this.status = `隧道运行中: ${this.changes.tunnelUrl}`;
-      this.params.requestRender();
-      return;
-    }
-    // Default 30s, but let tests (and slow networks) override via the env.
-    const waitMs = Number(process.env.MCPX_TUNNEL_URL_TIMEOUT_MS ?? 30_000);
-    const deadline = Date.now() + (Number.isFinite(waitMs) && waitMs > 0 ? waitMs : 30_000);
-    while (Date.now() < deadline && !this.changes.tunnelUrl && this.tunnelProcess) {
-      await new Promise((resolve) => setTimeout(resolve, 500));
-    }
-    // The child died on its own (exit/error handler already set tunnelProcess=undefined
-    // and composed the failure status). Do not clobber it with a timeout message.
-    if (this.tunnelExit) return;
-    if (!this.tunnelProcess) return; // stopped via stopTunnel — stopTunnel owns the status
-    if (this.changes.tunnelUrl) {
-      this.status = `隧道运行中: ${this.changes.tunnelUrl}`;
-    } else {
-      this.status = this.tunnelTimeoutStatus();
-    }
-    this.params.requestRender();
-  }
-
-  private onTunnelOutput(chunk: string): void {
-    // Ignore pipe chunks that arrive after stop/exit: a chunk already queued
-    // when `x` was pressed could otherwise re-populate changes.tunnelUrl and
-    // unblock the write step with a dead URL. Exit-time error text is appended
-    // directly via appendTunnelLine (bypassing this guard), so diagnostics survive.
-    if (!this.tunnelProcess) return;
-    this.tunnelOutput = (this.tunnelOutput + chunk).slice(-16_384);
-    // cloudflared prints its metrics server once the connector is up
-    // (e.g. "Starting metrics server on 127.0.0.1:20242/metrics"). Capture it as
-    // proof of life so a late URL surfaces a meaningful "already connected" status
-    // instead of a bare "未取得 URL".
-    if (!this.metricsUrl) {
-      const metricsMatch = this.tunnelOutput.match(/Starting metrics server on (\S+\/?\S*)/);
-      if (metricsMatch) this.metricsUrl = metricsMatch[1];
-    }
-    const match = this.tunnelOutput.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
-    if (match && !this.changes.tunnelUrl) {
-      this.changes.tunnelUrl = match[0];
+    } finally {
+      this.tunnelStarting = false;
       this.params.requestRender();
     }
   }
 
-  /** Append a synthetic diagnostic line into the captured output so the tail is visible. */
-  private appendTunnelLine(line: string): void {
-    this.tunnelOutput = (this.tunnelOutput + "\n" + line).slice(-16_384);
-  }
-
-  /** Last few non-empty cloudflared output lines, for surfacing diagnostics in the status. */
-  private tunnelOutputTail(max = 3): string {
-    const lines = this.tunnelOutput.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
-    return lines.slice(-max).join(" ⏐ ");
-  }
-
-  /** Status string when the cloudflared child died before yielding a URL. */
-  private tunnelFailStatus(): string {
-    const cause = this.tunnelExit
-      ? this.tunnelExit.signal
-        ? `被信号 ${this.tunnelExit.signal} 终止`
-        : this.tunnelExit.code === null
-          ? "启动错误"
-          : `退出代码 ${this.tunnelExit.code}`
-      : "已退出";
-    const tail = this.tunnelOutputTail();
-    return tail
-      ? `cloudflared ${cause} — ${tail}（按 g 重试 / 检查端口或 cloudflared 版本）`
-      : `cloudflared ${cause} — 按 g 重试（检查端口或 cloudflared 版本）`;
-  }
-
-  /** Status string when the poll deadline elapsed with the child still alive. */
-  private tunnelTimeoutStatus(): string {
-    const tail = this.tunnelOutputTail();
-    const alive = this.metricsUrl ? `cloudflared 已就绪（metrics ${this.metricsUrl}）但尚未打印 URL` : "隧道已启动但未取得 URL";
-    const hint = this.metricsUrl ? "Enter/g 继续等待，x 停止后重试" : "按 Enter/g 继续等待，x 停止后重试";
-    return tail
-      ? `${alive} — ${tail}（${hint}）`
-      : `${alive} — ${hint}`;
-  }
-
-  /** Stop the cloudflared tunnel, clear its PID file and the parsed URL. */
+  /** Explicit stop is generation-fenced by the native supervisor. */
   private async stopTunnel(): Promise<void> {
-    const port = this.tunnelPort ?? (this.changes.port ?? 9090);
-    const pid: number | undefined = this.tunnelProcess?.pid ?? this.tunnelAdoptedPid ?? this.pidFromFile();
-    if (!pid) {
-      this.status = "未找到 cloudflared 进程";
+    if (this.tunnelStarting) {
+      this.status = "隧道仍在启动探活，请稍后再停止";
       this.params.requestRender();
       return;
     }
-    if (!this.tunnelProcess) {
-      if (!isValidTunnelPort(port)) {
-        this.status = "无效的隧道端口（必须为 1-65535）";
-        this.params.requestRender();
-        return;
-      }
-      const candidates = discoverQuickTunnelProcesses(port);
-      if (!candidates) {
-        this.status = "无法确认 Quick Tunnel 进程，未停止任何进程";
-        this.params.requestRender();
-        return;
-      }
-      if (!candidates.some((candidate) => candidate.pid === pid)) {
-        try { rmSync(this.tunnelPidPath(), { force: true }); } catch { /* best-effort */ }
-        this.status = "未找到严格匹配当前端口的 Quick Tunnel 进程";
-        this.params.requestRender();
-        return;
-      }
+    if (this.tunnelGeneration === undefined) {
+      this.status = "未找到受 Gateway supervisor 管理的 cloudflared 进程";
+      this.params.requestRender();
+      return;
     }
     try {
-      if (process.platform === "win32") {
-        spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore", shell: false, windowsHide: true });
-      } else if (this.tunnelProcess && !this.tunnelProcess.killed) {
-        this.tunnelProcess.kill();
-      } else {
-        await killProcessWithEscalation(pid);
-      }
-      this.status = "已停止 cloudflared 隧道";
+      await stopCloudflareQuickTunnel(this.tunnelGeneration);
+      this.status = "已停止 Cloudflare Quick Tunnel";
+      this.tunnelGeneration = undefined;
+      this.tunnelPort = undefined;
+      this.tunnelOwnedHere = false;
+      this.changes.tunnelUrl = undefined;
     } catch (error) {
       this.status = `停止隧道失败: ${error instanceof Error ? error.message : String(error)}`;
     }
-    this.tunnelProcess = undefined;
-    this.tunnelAdoptedPid = undefined;
-    this.tunnelPort = undefined;
-    this.tunnelOwnedHere = false;
-    this.tunnelExit = undefined;
-    this.metricsUrl = undefined;
-    // A stopped tunnel's URL is dead — never let it reach the write step.
-    this.changes.tunnelUrl = undefined;
-    this.tunnelOutput = "";
-    try {
-      rmSync(this.tunnelPidPath(), { force: true });
-    } catch {
-      // best-effort
-    }
     this.params.requestRender();
-  }
-
-  private pidFromFile(): number | undefined {
-    return readTunnelState().pid;
   }
 
   /** Read an already configured URL for display only; never invent one. */
@@ -1055,25 +836,22 @@ export class McpxWizardOverlay implements Component, Focusable {
   }
 
   private build(): { yaml: string; summary: string[] } {
-    return buildChangesYaml(this.existingConfig, this.changes, this.params.cwd);
+    return buildGatewayChangesYaml(this.existingConfig, this.changes, this.params.cwd);
   }
 
   private async write(): Promise<void> {
     if (this.status === "写入中…") return;
     this.status = "写入中…";
     this.params.requestRender();
-    const temp = `${this.configPath()}.wizard-${process.pid}-${randomUUID()}.tmp`;
     try {
-      const { yaml } = this.build();
       const path = this.configPath();
-      writeFileSync(temp, yaml, { encoding: "utf8", flag: "wx", mode: 0o600 });
-      renameSync(temp, path);
+      await writeGatewayConfigChanges(this.changes, this.changes.tunnelUrl && this.tunnelGeneration !== undefined
+        ? { generation: this.tunnelGeneration, endpoint: this.changes.tunnelUrl }
+        : undefined);
       this.configCommitted = true;
       this.status = "已写入 " + path + " — 重启 Pi Maestro Gateway 后生效（可用 /gateway 查看）";
       this.params.requestRender();
     } catch (error) {
-      // COR-RV-001: clean up the orphaned .wizard.tmp file on renameSync failure.
-      try { rmSync(temp, { force: true }); } catch { /* best-effort */ }
       this.status = `写入失败: ${error instanceof Error ? error.message : String(error)}`;
       this.params.requestRender();
     }
@@ -1134,11 +912,11 @@ function resolveExecutable(command: string): string | undefined {
   return lines[0];
 }
 
-export const _mcpxWizardInternals = {
+export const _gatewayWizardInternals = {
   splitSections,
   parseListItems,
   parseSubList,
   extractFilesBlock,
-  buildChangesYaml,
+  buildGatewayChangesYaml,
   resolveExecutable,
 };

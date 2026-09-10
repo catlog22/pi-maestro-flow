@@ -162,9 +162,8 @@ import {
   requirePublishedExecutionRun,
 } from "../tools/plan-workflow.ts";
 import { SessionOverlay, type SessionOverlayAction } from "../tui/session-overlay.ts";
-import { McpxOverlay } from "../tui/mcpx-overlay.ts";
-import { McpxWizardOverlay } from "../tui/mcpx-wizard.ts";
-import { startWorkspaceLease, stopWorkspaceLease, registerMcpxWorkspacePermanent, removeGatewayWorkspaceByPath, isMcpxConfigured } from "../mcpx-bridge.ts";
+import { GatewayOverlay } from "../tui/gateway-overlay.ts";
+import { startWorkspaceLease, stopWorkspaceLease, registerGatewayWorkspacePermanent, removeGatewayWorkspaceByPath, isGatewayConfigured } from "../gateway/workspace-client.ts";
 import { TodoOverlay } from "../tui/todo-overlay.ts";
 import { GoalOverlay, type GoalOverlayAction } from "../tui/goal-overlay.ts";
 import { KnowledgeOverlay, type KnowledgeOverlayAction } from "../tui/knowledge-overlay.ts";
@@ -1268,7 +1267,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
 
   // Gateway workspace registration is deliberately opt-in: the /gateway panel's
   // e key registers/unregisters the current window with the built-in runtime
-  // (default: not registered), so startup never writes to ~/.mcpx/config.yaml.
+  // (default: not registered), so startup never mutates Gateway configuration.
 
   // UCL: capture only the locked extension-tool surface. pi.getAllTools() exposes
   // schemas but not execute(), so the registry is the invocation source for the
@@ -2700,11 +2699,11 @@ When NOT to use:
     lastRunStates = nextStates;
   }
 
-  async function openMcpxOverlay(ctx: ExtensionContext): Promise<void> {
-    let reopenWizard = false;
+  async function openGatewayOverlay(ctx: ExtensionContext, initialPage: "home" | "config" = "home"): Promise<void> {
     await ctx.ui.custom<void>((tui, _theme, _keybindings, done) => {
-      const overlay = new McpxOverlay({
+      const overlay = new GatewayOverlay({
         cwd: ctx.cwd,
+        initialPage,
         requestRender: () => tui.requestRender(),
         getTerminalRows: () => tui.terminal.rows,
         close: () => done(undefined),
@@ -2714,10 +2713,6 @@ When NOT to use:
           stopWorkspaceLease();
           const result = await removeGatewayWorkspaceByPath(path);
           return result.ok ? `unregistered: ${path}` : `remove failed: ${result.message}`;
-        },
-        onOpenWizard: () => {
-          reopenWizard = true;
-          done(undefined);
         },
         onComposeWindowMessage: async (target, session, targetMode) => {
           const title = targetMode === "new"
@@ -2734,22 +2729,16 @@ When NOT to use:
           return { purpose: message.trim(), message: message.trim(), name };
         },
       });
-      // Shared by the e (lease) and E (permanent) register actions. The wizard is
-      // the one-time initial config: if it has not been completed yet, surface it
-      // instead of registering against an unconfigured runtime.
+      // Shared by e (lease) and E (permanent). First-run configuration stays in
+      // the same two-page surface instead of opening a second wizard overlay.
       const registerWindowWithMode = async (path: string, permanent: boolean): Promise<string> => {
-        if (!isMcpxConfigured()) {
-          // Mark the overlay closed first so the in-flight toggleWorkspaceRegistration
-          // (which runs refresh() after this callback returns) stops touching the
-          // renderer — the wizard is about to replace this overlay.
-          overlay.markClosed();
-          reopenWizard = true;
-          ctx.ui.notify("未完成初始配置，已打开配置向导；完成后再按 e 注册窗口", "info");
-          done(undefined);
-          return "未完成初始配置，已打开配置向导（完成后再按 e 注册窗口）";
+        if (!isGatewayConfigured()) {
+          overlay.showConfigPage();
+          ctx.ui.notify("未完成初始配置，已切换到 Gateway 配置页；保存后再按 e 注册窗口", "info");
+          return "未完成初始配置，已切换到配置页（保存后再按 e 注册窗口）";
         }
         if (permanent) {
-          const registered = await registerMcpxWorkspacePermanent(path);
+          const registered = await registerGatewayWorkspacePermanent(path);
           return registered
             ? `registered（永久，无租约，窗口关闭后保留）: ${path}`
             : `register failed（Built-in Gateway workspace registry 未写入）: ${path}`;
@@ -2761,19 +2750,6 @@ When NOT to use:
       };
       return overlay;
     }, {
-      overlay: true,
-      overlayOptions: { anchor: "center", width: "92%", maxHeight: "90%" },
-    });
-    if (reopenWizard) await openMcpxWizard(ctx);
-  }
-
-  async function openMcpxWizard(ctx: ExtensionContext): Promise<void> {
-    await ctx.ui.custom<void>((tui, _theme, _keybindings, done) =>
-      new McpxWizardOverlay({
-        cwd: ctx.cwd,
-        requestRender: () => tui.requestRender(),
-        close: () => done(undefined),
-      }), {
       overlay: true,
       overlayOptions: { anchor: "center", width: "92%", maxHeight: "90%" },
     });
@@ -3011,10 +2987,10 @@ When NOT to use:
     async handler(_args, ctx) { await openSessionOverlay(ctx); },
   });
   pi.registerCommand("gateway", {
-    description: "Open Pi Maestro Gateway management — daemon/tunnel/workspaces/config plus CollaborativeSession, independent Gateway Todo, member leases, and execution Monitor (G collaboration · r refresh · e register · c wizard). Gateway Todo is not synchronized with Pi Todo. Usage: /gateway [wizard]",
+    description: "Open Pi Maestro Gateway — two-page home/config control center with Cloudflare ↔ OpenAI tunnel switching, workspaces, collaboration, and Monitor. Usage: /gateway [config|wizard]",
     async handler(args, ctx) {
-      if (args.trim().toLowerCase() === "wizard") await openMcpxWizard(ctx);
-      else await openMcpxOverlay(ctx);
+      const page = ["config", "wizard"].includes(args.trim().toLowerCase()) ? "config" : "home";
+      await openGatewayOverlay(ctx, page);
     },
   });
   pi.registerCommand("maestro-knowledge", {

@@ -10,6 +10,8 @@ import { GatewayResidentService } from "./resident-service.ts";
 import { loadGatewayConfig } from "./config.ts";
 import { applyPiConfigStream, serializePiConfigApplyError } from "./pi-config-apply.ts";
 import { GatewayControlClient } from "./control-client.ts";
+import { migrateLegacyGateway } from "./config-migration.ts";
+import { serializeGatewayLegacyMigrationError } from "./migration-contracts.ts";
 
 export interface GatewayCliIo {
   stdin?: Readable;
@@ -39,6 +41,20 @@ interface WorkspaceFlags {
   ttlSeconds?: number;
   expectedGeneration?: number;
   permanent: boolean;
+}
+
+interface TunnelFlags {
+  configPath?: string;
+  json: boolean;
+  provider?: string;
+  instance?: string;
+  timeoutMs?: number;
+  expectedGeneration?: number;
+  localPort?: number;
+  binaryPath?: string;
+  experimental: boolean;
+  tunnelIdEnv?: string;
+  runtimeKeyEnv?: string;
 }
 
 function write(stream: Writable, value: string): void {
@@ -95,6 +111,30 @@ function parseWorkspaceFlags(args: string[]): WorkspaceFlags {
   return result;
 }
 
+function parseTunnelFlags(args: string[]): TunnelFlags {
+  const result: TunnelFlags = { json: false, experimental: false };
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (arg === "--json") result.json = true;
+    else if (arg === "--config") result.configPath = requiredValue(args, ++index, arg);
+    else if (arg === "--timeout-ms") result.timeoutMs = positiveCliInteger(requiredValue(args, ++index, arg), arg);
+    else if (arg === "--generation") result.expectedGeneration = positiveCliInteger(requiredValue(args, ++index, arg), arg);
+    else if (arg === "--local-port") {
+      result.localPort = positiveCliInteger(requiredValue(args, ++index, arg), arg);
+      if (result.localPort > 65_535) throw new Error("--local-port must be in [1, 65535]");
+    }
+    else if (arg === "--binary") result.binaryPath = requiredValue(args, ++index, arg);
+    else if (arg === "--experimental") result.experimental = true;
+    else if (arg === "--tunnel-id-env") result.tunnelIdEnv = requiredValue(args, ++index, arg);
+    else if (arg === "--runtime-key-env") result.runtimeKeyEnv = requiredValue(args, ++index, arg);
+    else if (arg.startsWith("--")) throw new Error(`Unknown tunnel option: ${arg}`);
+    else if (result.provider === undefined) result.provider = arg;
+    else if (result.instance === undefined) result.instance = arg;
+    else throw new Error(`Unexpected tunnel argument: ${arg}`);
+  }
+  return result;
+}
+
 function positiveCliInteger(value: string, flag: string): number {
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < 1) throw new Error(`${flag} must be a positive integer`);
@@ -136,6 +176,15 @@ export async function main(argv = process.argv.slice(2), io: GatewayCliIo = {}):
     if (command === "config-sync") {
       if (args.length !== 1 || args[0] !== "apply") throw new Error("Usage: pi-maestro-gateway config-sync apply");
       write(stdout, JSON.stringify(await applyPiConfigStream(stdin)));
+      return 0;
+    }
+    if (command === "migrate-legacy") {
+      const dryRun = args.includes("--dry-run");
+      const apply = args.includes("--apply");
+      const json = args.includes("--json");
+      if (args.some((arg) => !["--dry-run", "--apply", "--json"].includes(arg)) || dryRun === apply) throw new Error("Usage: pi-maestro-gateway migrate-legacy --dry-run|--apply [--json]");
+      const value = await migrateLegacyGateway(dryRun ? "dry-run" : "apply");
+      write(stdout, json ? JSON.stringify(value) : JSON.stringify(value, null, 2));
       return 0;
     }
     if (command === "service-run") {
@@ -185,6 +234,38 @@ export async function main(argv = process.argv.slice(2), io: GatewayCliIo = {}):
                 : action === "status" ? await resident.status()
                   : await resident.uninstall();
       write(stdout, flags.json ? JSON.stringify(value) : typeof value === "object" ? JSON.stringify(value, null, 2) : String(value));
+      return 0;
+    }
+    if (command === "tunnel") {
+      const action = args[0];
+      if (!action || !["status", "start", "stop", "restart"].includes(action)) throw new Error("Usage: pi-maestro-gateway tunnel status|start|stop|restart [PROVIDER] [INSTANCE] [--timeout-ms MS] [--generation N] [--json]");
+      const flags = parseTunnelFlags(args.slice(1));
+      if (action !== "status" && !flags.provider) throw new Error(`tunnel ${action} requires a provider`);
+      if (action === "status" && (flags.expectedGeneration !== undefined || flags.localPort !== undefined || flags.binaryPath !== undefined || flags.experimental || flags.tunnelIdEnv !== undefined || flags.runtimeKeyEnv !== undefined)) throw new Error("tunnel status does not accept start/configuration options");
+      if (flags.provider && flags.provider !== "cloudflare" && flags.provider !== "openai" && (flags.localPort !== undefined || flags.binaryPath !== undefined || flags.experimental || flags.tunnelIdEnv !== undefined || flags.runtimeKeyEnv !== undefined)) throw new Error("Tunnel provider-specific options require cloudflare or openai");
+      if (flags.provider === "cloudflare" && (flags.experimental || flags.tunnelIdEnv !== undefined || flags.runtimeKeyEnv !== undefined)) throw new Error("--experimental and OpenAI credential references are OpenAI Tunnel options");
+      const client = new GatewayControlClient({ configPath: flags.configPath });
+      const common = {
+        ...(flags.instance === undefined ? {} : { instance: flags.instance }),
+        ...(flags.timeoutMs === undefined ? {} : { timeoutMs: flags.timeoutMs }),
+        ...(flags.expectedGeneration === undefined ? {} : { expectedGeneration: flags.expectedGeneration }),
+        ...(flags.localPort === undefined && flags.binaryPath === undefined && !flags.experimental && flags.tunnelIdEnv === undefined && flags.runtimeKeyEnv === undefined ? {} : { input: flags.provider === "openai" ? {
+          ...(flags.experimental ? { experimental: true } : {}),
+          ...(flags.localPort === undefined ? {} : { localPort: flags.localPort }),
+          ...(flags.binaryPath === undefined ? {} : { binaryPath: flags.binaryPath }),
+          ...(flags.tunnelIdEnv === undefined ? {} : { tunnelIdEnv: flags.tunnelIdEnv }),
+          ...(flags.runtimeKeyEnv === undefined ? {} : { runtimeKeyEnv: flags.runtimeKeyEnv }),
+        } : {
+          mode: "quick",
+          ...(flags.localPort === undefined ? {} : { localPort: flags.localPort }),
+          ...(flags.binaryPath === undefined ? {} : { binaryPath: flags.binaryPath }),
+        } }),
+      };
+      const value = action === "status" ? await client.tunnelStatus(flags.provider, flags.instance, flags.timeoutMs)
+        : action === "start" ? await client.tunnelStart(flags.provider!, common)
+          : action === "stop" ? await client.tunnelStop(flags.provider!, common)
+            : await client.tunnelRestart(flags.provider!, common);
+      write(stdout, flags.json ? JSON.stringify(value) : JSON.stringify(value, null, 2));
       return 0;
     }
     if (command === "workspace") {
@@ -264,22 +345,29 @@ export async function main(argv = process.argv.slice(2), io: GatewayCliIo = {}):
         "  serve [--config PATH] [--host HOST] [--port PORT] [--no-http] [--json]",
         "  connect --stdio",
         "  config-sync apply",
+        "  migrate-legacy --dry-run|--apply [--json]",
         "  service install|ensure|start|stop|restart|status|uninstall [--config PATH] [--json]",
         "    install|ensure [--windows-startup | --detached-fallback]",
         "    --windows-startup persists for the next interactive sign-in; it is not a Windows Service.",
         "    In a non-interactive SSH session, ensure guarantees readiness only until that session ends.",
         "  pair create|bootstrap|list|revoke [ID]",
+        "  tunnel status|start|stop|restart [PROVIDER] [INSTANCE] [--timeout-ms MS] [--generation N] [--local-port PORT] [--binary PATH] [--json]",
+        "    openai is experimental: explicitly configure env references or pass --experimental --tunnel-id-env NAME --runtime-key-env NAME; no auto-download/provisioning",
         "  workspace list [--config PATH] [--json]",
         "  workspace register PATH [--ttl SECONDS | --permanent] [--generation N] [--config PATH] [--json]",
         "  workspace renew PATH_OR_ID --generation N [--ttl SECONDS] [--config PATH] [--json]",
         "  workspace remove PATH_OR_ID --generation N [--config PATH] [--json]",
         "  version [--json]",
+        "",
+        "Breaking change: MCPX commands, paths, and environment variables are not runtime aliases.",
+        "Use /gateway, pi-maestro-gateway, native Gateway config, and the ./gateway/v1 package export.",
       ].join("\n"));
       return 0;
     }
     throw new Error(`Unknown command: ${command}`);
   } catch (error) {
     if (command === "config-sync") write(stderr, serializePiConfigApplyError(error));
+    else if (command === "migrate-legacy" && args.includes("--json")) write(stderr, serializeGatewayLegacyMigrationError(error));
     else {
       const message = error instanceof Error ? error.message : String(error);
       write(stderr, message || GATEWAY_OFFLINE_MESSAGE);

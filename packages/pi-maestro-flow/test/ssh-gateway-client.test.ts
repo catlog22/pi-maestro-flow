@@ -103,14 +103,14 @@ class FakeGatewayChannel extends Duplex {
       const params = request.params ?? {};
       const name = String(params.name ?? "");
       const args = params.arguments as Record<string, unknown> | undefined;
-      let envelope: unknown = { ok: name !== "missing", data: { name, arguments: args } };
-      if (name === "host" && args?.action === "describe") envelope = { ok: true, data: { cwd: "/remote/root" } };
+      let envelope: unknown = { ok: name !== "missing", data: { name, arguments: args }, meta: { principalId: "local-owner" } };
+      if (name === "host" && args?.action === "describe") envelope = { ok: true, data: { cwd: "/remote/root" }, meta: { principalId: "local-owner" } };
       if (name === "session" && args?.action === "create") {
         const now = Date.now();
-        envelope = { ok: true, data: { session: { id: args.sessionId, revision: 1 }, member: { generation: 1, leaseExpiresAt: now + 90_000, updatedAt: now } } };
+        envelope = { ok: true, data: { session: { id: args.sessionId, revision: 1 }, member: { id: args.ownerId, principalId: "stdio:local-owner", status: "active", generation: 1, leaseExpiresAt: now + 90_000, updatedAt: now } }, meta: { principalId: "local-owner" } };
       }
-      if (name === "session" && args?.action === "start-pi") envelope = { ok: true, data: { taskId: "remote-task-1" } };
-      if (name === "monitor") envelope = { ok: true, data: { handle: args?.handle, nextCursor: 2 } };
+      if (name === "session" && args?.action === "start-pi") envelope = { ok: true, data: { taskId: "remote-task-1" }, meta: { principalId: "local-owner" } };
+      if (name === "monitor") envelope = { ok: true, data: { handle: args?.handle, nextCursor: 2 }, meta: { principalId: "local-owner" } };
       this.respond(request.id, {
         content: [{ type: "text", text: JSON.stringify(envelope) }],
         ...(name === "missing" ? { isError: true } : {}),

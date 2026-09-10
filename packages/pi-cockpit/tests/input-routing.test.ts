@@ -35,6 +35,9 @@ test("main-session, local controls, bash and noninteractive input continue norma
 	const host = ui();
 	assert.equal(isLocalInputText("#ssh"), true);
 	assert.equal(isLocalInputText("  #SSH  "), true);
+	assert.equal(isLocalInputText("#ssh:+server-1"), true);
+	assert.equal(isLocalInputText("  #SSH:-server-1  "), true);
+	assert.equal(isLocalInputText("#ssh:+server-1 run this remotely"), false);
 	assert.equal(isLocalInputText("#ssh run this remotely"), false);
 	assert.equal(await routeAgentInput({ text: "hello", source: "interactive" }, undefined, undefined, host.value), "continue");
 	assert.equal(await routeAgentInput({ text: "/reload", source: "interactive" }, target, undefined, host.value), "continue");

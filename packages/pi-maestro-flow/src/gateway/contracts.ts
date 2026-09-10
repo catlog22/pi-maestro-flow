@@ -1,11 +1,16 @@
 /** Canonical, versioned data contracts shared by the built-in Gateway runtime. */
 import { Type, type Static } from "typebox";
 
+/** MCP/wire protocol version exposed by the packaged Gateway. */
+export const GATEWAY_PROTOCOL_VERSION = 1 as const;
+/** Native config document version. It evolves independently from the wire protocol. */
+export const GATEWAY_CONFIG_VERSION = 2 as const;
 /** Version written by every Gateway-owned durable record. */
-export const GATEWAY_STATE_VERSION = 1 as const;
-/** Protocol and durable state currently intentionally share one version. */
-export const GATEWAY_PROTOCOL_VERSION = GATEWAY_STATE_VERSION;
-export const GATEWAY_VERSION = GATEWAY_STATE_VERSION;
+export const GATEWAY_DURABLE_RECORD_VERSION = 1 as const;
+export const GATEWAY_RECORD_VERSION = GATEWAY_DURABLE_RECORD_VERSION;
+/** Compatibility alias for callers that historically named the durable version "state". */
+export const GATEWAY_STATE_VERSION = GATEWAY_DURABLE_RECORD_VERSION;
+export const GATEWAY_VERSION = GATEWAY_PROTOCOL_VERSION;
 export const GATEWAY_RESULT_TYPE = "gateway-result" as const;
 
 /** Identifiers are deliberately conservative: they are safe in logs and paths. */
@@ -45,7 +50,7 @@ export const GATEWAY_HARD_LIMITS = {
   maxMaestroTimeoutMs: 10 * 60 * 1000,
 } as const;
 
-/** Safe defaults used when an existing ~/.mcpx/config.yaml omits a section. */
+/** Safe defaults used when the native Gateway config omits a section. */
 export const GATEWAY_COLLABORATION_LIMITS = {
   maxSessions: 256,
   maxMembersPerSession: 1024,
@@ -100,7 +105,7 @@ export const GATEWAY_TOOL_ANNOTATIONS_SCHEMA = Type.Object({
 export type GatewayToolAnnotations = Static<typeof GATEWAY_TOOL_ANNOTATIONS_SCHEMA>;
 
 export const GATEWAY_TOOL_SCHEMA = Type.Object({
-  version: Type.Literal(GATEWAY_STATE_VERSION),
+  version: Type.Literal(GATEWAY_PROTOCOL_VERSION),
   name: Type.String({ minLength: 1, maxLength: 128, pattern: GATEWAY_ID_PATTERN.source }),
   title: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
   description: Type.String({ minLength: 1, maxLength: 16 * 1024 }),
@@ -121,7 +126,7 @@ export const GATEWAY_PRINCIPAL_TRANSPORTS = ["stdio", "http"] as const;
 export type GatewayPrincipalTransport = typeof GATEWAY_PRINCIPAL_TRANSPORTS[number];
 
 export const GATEWAY_PRINCIPAL_SCHEMA = Type.Object({
-  version: Type.Literal(GATEWAY_STATE_VERSION),
+  version: Type.Literal(GATEWAY_PROTOCOL_VERSION),
   id: Type.String({ minLength: 1, maxLength: 256 }),
   transport: Type.Unsafe<GatewayPrincipalTransport>({ type: "string", enum: [...GATEWAY_PRINCIPAL_TRANSPORTS] }),
   scopes: Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { maxItems: 64, uniqueItems: true }),
@@ -132,7 +137,7 @@ export const GATEWAY_PRINCIPAL_SCHEMA = Type.Object({
 }, { additionalProperties: false });
 export type GatewayPrincipal = Static<typeof GATEWAY_PRINCIPAL_SCHEMA>;
 export const GATEWAY_CAPABILITIES_SCHEMA = Type.Object({
-  version: Type.Literal(GATEWAY_STATE_VERSION),
+  version: Type.Literal(GATEWAY_PROTOCOL_VERSION),
   tools: Type.Array(Type.String({ minLength: 1, maxLength: 128, pattern: GATEWAY_ID_PATTERN.source }), { maxItems: 256, uniqueItems: true }),
   features: Type.Array(Type.String({ minLength: 1, maxLength: 128, pattern: GATEWAY_ID_PATTERN.source }), { maxItems: 256, uniqueItems: true }),
 }, { additionalProperties: false });
@@ -149,7 +154,7 @@ const nullableString = Type.Union([Type.String({ minLength: 1, maxLength: 64 * 1
 const stateString = (values: readonly string[]) => Type.Unsafe<string>({ type: "string", enum: [...values] });
 
 export const GATEWAY_JOB_SCHEMA = Type.Object({
-  version: Type.Literal(GATEWAY_STATE_VERSION),
+  version: Type.Literal(GATEWAY_DURABLE_RECORD_VERSION),
   id: Type.String({ minLength: 1, maxLength: 128, pattern: GATEWAY_ID_PATTERN.source }),
   status: stateString(GATEWAY_JOB_STATES),
   command: Type.String({ minLength: 1, maxLength: GATEWAY_HARD_LIMITS.maxCommandBytes }),
@@ -169,7 +174,7 @@ export const GATEWAY_JOB_SCHEMA = Type.Object({
 export type GatewayJob = Static<typeof GATEWAY_JOB_SCHEMA>;
 
 export const GATEWAY_TASK_SCHEMA = Type.Object({
-  version: Type.Literal(GATEWAY_STATE_VERSION),
+  version: Type.Literal(GATEWAY_DURABLE_RECORD_VERSION),
   id: Type.String({ minLength: 1, maxLength: 128, pattern: GATEWAY_ID_PATTERN.source }),
   status: stateString(GATEWAY_TASK_STATES),
   objective: Type.String({ minLength: 1, maxLength: 64 * 1024 }),
@@ -186,7 +191,7 @@ export const GATEWAY_TASK_SCHEMA = Type.Object({
 export type GatewayTask = Static<typeof GATEWAY_TASK_SCHEMA>;
 
 export const GATEWAY_WORKSPACE_SCHEMA = Type.Object({
-  version: Type.Literal(GATEWAY_STATE_VERSION),
+  version: Type.Literal(GATEWAY_DURABLE_RECORD_VERSION),
   id: Type.String({ minLength: 1, maxLength: 256, pattern: GATEWAY_ID_PATTERN.source }),
   path: Type.String({ minLength: 1, maxLength: 4096 }),
   canonicalPath: Type.Optional(Type.String({ minLength: 1, maxLength: 4096 })),
@@ -200,7 +205,7 @@ export const GATEWAY_WORKSPACE_SCHEMA = Type.Object({
 export type GatewayWorkspace = Static<typeof GATEWAY_WORKSPACE_SCHEMA>;
 
 export const GATEWAY_OWNER_RECORD_SCHEMA = Type.Object({
-  version: Type.Literal(GATEWAY_STATE_VERSION),
+  version: Type.Literal(GATEWAY_DURABLE_RECORD_VERSION),
   pid: Type.Integer({ minimum: 1, maximum: 0x7fffffff }),
   ownerToken: Type.String({ minLength: 16, maxLength: 256, pattern: GATEWAY_OWNER_TOKEN_PATTERN.source }),
   port: Type.Optional(Type.Integer({ minimum: 1, maximum: 65535 })),
@@ -239,7 +244,7 @@ export type GatewayResult<T = unknown> = Omit<Static<typeof GATEWAY_RESULT_SCHEM
 
 /** Canonical durable registry envelope. */
 export const GATEWAY_WORKSPACE_REGISTRY_SCHEMA = Type.Object({
-  version: Type.Literal(GATEWAY_STATE_VERSION),
+  version: Type.Literal(GATEWAY_DURABLE_RECORD_VERSION),
   workspaces: Type.Array(GATEWAY_WORKSPACE_SCHEMA, { maxItems: GATEWAY_HARD_LIMITS.maxWorkspaceCount }),
 }, { additionalProperties: false });
 export type GatewayWorkspaceRegistry = Static<typeof GATEWAY_WORKSPACE_REGISTRY_SCHEMA>;

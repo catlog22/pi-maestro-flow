@@ -64,17 +64,13 @@ import {
 import {
   MaskedSecretInput,
   SshHostManagerOverlay,
+  SshHostPickerOverlay,
   type SshHostManagerAction,
   type SshManagerTheme,
   type SshManagerView,
 } from "./tui.ts";
 
 const SSH_STATUS_KEY = "maestro-ssh";
-
-interface SelectedSshHost {
-  id: string;
-  digest: string;
-}
 
 interface SshToolTargetDetails {
   label: string;
@@ -119,42 +115,110 @@ export function registerSshManager(
   const configSource = options.configSource ?? new CurrentUserPiConfigSource();
   const configSyncTransport = options.configSyncTransport ?? ((host: SshHost) => new SshPiConfigSyncTransport(executor, host));
   const remoteChannelBroker = new TeammateRemoteChannelBroker(store, executor);
-  let selected: SelectedSshHost | undefined;
+  const selected = new Map<string, string>();
   let activeContext: ExtensionContext | undefined;
 
+  // Launch receipt/cursor persistence advances the encrypted document revision,
+  // but must not churn the transport cache. This HMAC changes only when the
+  // effective connection chain or Gateway endpoint credentials change.
+  const connectionFence = (hostId: string): string => store.getConnectionConfigFence(hostId);
+  const selectionFence = connectionFence;
+
+  const setSelectionStatus = (ctx: ExtensionContext | undefined, hosts: readonly SshHost[]): void => {
+    if (hosts.length === 0) {
+      ctx?.ui.setStatus(SSH_STATUS_KEY, undefined);
+      return;
+    }
+    if (hosts.length === 1) {
+      const host = hosts[0]!;
+      ctx?.ui.setStatus(SSH_STATUS_KEY, `SSH · ${host.label} · ${formatSshAddress(host.host, host.port)}`);
+      return;
+    }
+    ctx?.ui.setStatus(SSH_STATUS_KEY, `SSH · ${hosts.length} attached · ${hosts.map((host) => host.label).join(", ")}`);
+  };
+
+  const selectedHostsForDisplay = (): SshHost[] => {
+    if (store.locked) {
+      const staleIds = [...selected.keys()];
+      selected.clear();
+      for (const id of staleIds) void gatewayPool.invalidateHost(id).catch(() => undefined);
+      setSelectionStatus(activeContext, []);
+      return [];
+    }
+    const hosts = new Map(store.getHosts().map((host) => [host.id, host]));
+    const valid: SshHost[] = [];
+    const stale: string[] = [];
+    for (const [id, digest] of selected) {
+      const host = hosts.get(id);
+      if (host && selectionFence(id) === digest) valid.push(host);
+      else stale.push(id);
+    }
+    if (stale.length > 0) {
+      for (const id of stale) {
+        selected.delete(id);
+        void gatewayPool.invalidateHost(id).catch(() => undefined);
+      }
+      setSelectionStatus(activeContext, valid);
+    }
+    return valid;
+  };
+
+  const singleSelectedHostForDisplay = (): SshHost | undefined => {
+    const hosts = selectedHostsForDisplay();
+    return hosts.length === 1 ? hosts[0] : undefined;
+  };
+
+  const replaceSelection = (hosts: readonly SshHost[], ctx: ExtensionContext): void => {
+    activeContext = ctx;
+    const next = new Map(hosts.map((host) => [host.id, selectionFence(host.id)]));
+    for (const [id, digest] of selected) {
+      if (next.get(id) !== digest) void gatewayPool.invalidateHost(id).catch(() => undefined);
+    }
+    selected.clear();
+    for (const [id, digest] of next) selected.set(id, digest);
+    setSelectionStatus(ctx, hosts);
+  };
+
+  const attachHost = (host: SshHost, ctx: ExtensionContext): void => {
+    activeContext = ctx;
+    const digest = selectionFence(host.id);
+    if (selected.has(host.id) && selected.get(host.id) !== digest) {
+      void gatewayPool.invalidateHost(host.id).catch(() => undefined);
+    }
+    selected.set(host.id, digest);
+    setSelectionStatus(ctx, selectedHostsForDisplay());
+  };
+
+  const removeSelectionIds = (
+    hostIds: Iterable<string>,
+    ctx: ExtensionContext | undefined = activeContext,
+    invalidate = true,
+  ): void => {
+    for (const id of new Set(hostIds)) {
+      if (!selected.delete(id)) continue;
+      if (invalidate) void gatewayPool.invalidateHost(id).catch(() => undefined);
+    }
+    setSelectionStatus(ctx, selectedHostsForDisplay());
+  };
+
   const clearSelection = (ctx: ExtensionContext | undefined = activeContext): void => {
-    const previous = selected;
-    selected = undefined;
-    if (previous) void gatewayPool.invalidateHost(previous.id).catch(() => undefined);
+    const previousIds = [...selected.keys()];
+    selected.clear();
+    for (const id of previousIds) void gatewayPool.invalidateHost(id).catch(() => undefined);
     ctx?.ui.setStatus(SSH_STATUS_KEY, undefined);
   };
 
-  const connectionFence = (hostId: string): string => `${store.revision}:${store.getEffectiveHostDigest(hostId)}:${store.getGatewayBindingFence(hostId)}`;
-
-  const selectHost = (host: SshHost, ctx: ExtensionContext): void => {
-    activeContext = ctx;
-    const next = { id: host.id, digest: connectionFence(host.id) };
-    if (selected && (selected.id !== next.id || selected.digest !== next.digest)) {
-      void gatewayPool.invalidateHost(selected.id).catch(() => undefined);
-    }
-    selected = next;
-    ctx.ui.setStatus(SSH_STATUS_KEY, `SSH · ${host.label} · ${formatSshAddress(host.host, host.port)}`);
-  };
-
-  const selectedHostForDisplay = (): SshHost | undefined => {
-    if (!selected || store.locked) return undefined;
-    const host = store.getHosts().find((candidate) => candidate.id === selected!.id);
-    return host && connectionFence(host.id) === selected.digest ? host : undefined;
-  };
-
   const currentSelectedHost = (): SshHost => {
-    if (!selected) throw new Error("No SSH server is selected. Use action=targets with an unlocked manager and pass targetId, or send #ssh to choose a default.");
-    const host = selectedHostForDisplay();
-    if (!host) {
-      clearSelection();
-      throw new Error("The selected SSH server changed. Use action=targets or send #ssh to select it again.");
+    const hadSelection = selected.size > 0;
+    const hosts = selectedHostsForDisplay();
+    if (hosts.length === 0) {
+      if (hadSelection) throw new Error("The selected SSH server changed. Use action=targets or send #ssh to select it again.");
+      throw new Error("No SSH server is selected. Use action=targets with an unlocked manager and pass targetId, or send #ssh to choose a default.");
     }
-    return host;
+    if (hosts.length > 1) {
+      throw new Error("Multiple SSH servers are attached. Use action=targets and pass one targetId per SSH call.");
+    }
+    return hosts[0]!;
   };
 
   const resolveExecutionHost = (targetId?: string): SshHost => {
@@ -166,7 +230,7 @@ export function registerSshManager(
   };
 
   const targetHostForDisplay = (targetId?: string): SshHost | undefined => {
-    if (targetId === undefined) return selectedHostForDisplay();
+    if (targetId === undefined) return singleSelectedHostForDisplay();
     if (store.locked || !SSH_HOST_ID_PATTERN.test(targetId)) return undefined;
     return store.getHosts().find((candidate) => candidate.id === targetId);
   };
@@ -174,6 +238,14 @@ export function registerSshManager(
   const refreshStore = async (): Promise<void> => {
     if (store.locked) throw new Error("SSH manager is locked. Send #ssh or open /ssh to unlock it.");
     await store.reload();
+  };
+
+  const prepareAttachmentSelection = async (ctx: ExtensionContext): Promise<boolean> => {
+    const wasLocked = store.locked;
+    if (!await ensureUnlocked(ctx, store)) return false;
+    await refreshStore();
+    if (wasLocked) monitor.reconcile();
+    return true;
   };
 
   const activateHost = async (hostId: string): Promise<void> => {
@@ -210,11 +282,11 @@ export function registerSshManager(
         `SSH host reference ${JSON.stringify(hostId)} was not found in the unlocked manager.`,
       );
     }
-    selectHost(host, ctx);
+    replaceSelection([host], ctx);
   };
 
   const providerRegistration = registerSshHostProvider(createSshManagerHostProvider(store, {
-    selectedId: () => selectedHostForDisplay()?.id,
+    selectedIds: () => selectedHostsForDisplay().map((host) => host.id),
     activate: activateHost,
     openTeammateRemoteChannel: (hostRef, signal) => remoteChannelBroker.open(hostRef, signal),
   }));
@@ -225,7 +297,7 @@ export function registerSshManager(
     renderShell: "self",
     description: `Execute a bounded command or use the built-in Pi Maestro Gateway on any configured SSH server after the user unlocks the manager.
 
-Use action=targets to list provider-owned target ids, then pass targetId on a command or Gateway action. Omitting targetId preserves the optional #ssh default selection. The tool never accepts host or authentication parameters. Gateway actions and sync_pi_config use fixed remote commands that cannot be overridden. sync_pi_config accepts only fixed categories; the host resolves current-user Pi files internally and never exposes their paths or contents. start_pi snapshots only explicitly selected existing tasks from the current local Pi Todo and launches an independent remote Gateway session; it never synchronizes or completes either Todo authority. Server configuration stays in the encrypted user-level SSH manager. #ssh selection remains independent of teammate and remote-worker routing. Each resolved target decides whether ordinary commands run through bash or PowerShell.`,
+Use action=targets to list provider-owned target ids, then pass targetId on a command or Gateway action. Omitting targetId works only when exactly one #ssh server is attached and is an error when none or multiple are attached. The tool never accepts host or authentication parameters. Gateway actions and sync_pi_config use fixed remote commands that cannot be overridden. sync_pi_config accepts only fixed categories; the host resolves current-user Pi files internally and never exposes their paths or contents. start_pi snapshots only explicitly selected existing tasks from the current local Pi Todo and launches an independent remote Gateway session; it never synchronizes or completes either Todo authority. Server configuration stays in the encrypted user-level SSH manager. #ssh selection remains independent of teammate and remote-worker routing. Each resolved target decides whether ordinary commands run through bash or PowerShell.`,
     promptSnippet: "List unlocked SSH targets, execute a command, securely sync fixed Pi config categories, launch selected local Todo instructions with start_pi, or use Gateway actions by provider-owned targetId.",
     promptGuidelines: [
       "Use read-only inspection before mutations unless the user explicitly requested a change.",
@@ -250,8 +322,8 @@ Use action=targets to list provider-owned target ids, then pass targetId on a co
       ): SshToolDetails => ({
         ...(host
           ? { hostId: host.id, target: sshToolTargetDetails(host) }
-          : requestedTargetId === undefined && selected?.id
-            ? { hostId: selected.id }
+          : requestedTargetId === undefined && singleSelectedHostForDisplay()
+            ? { hostId: singleSelectedHostForDisplay()!.id }
             : {}),
         ...(gatewayResult ? {
           action: gatewayResult.action,
@@ -279,12 +351,12 @@ Use action=targets to list provider-owned target ids, then pass targetId on a co
       try {
         await refreshStore();
         if ("action" in params && params.action === "targets") {
-          const selectedId = selectedHostForDisplay()?.id;
+          const selectedIds = new Set(selectedHostsForDisplay().map((host) => host.id));
           const targets = store.getHosts().map((host) => ({
             targetId: host.id,
             label: host.label,
             shell: host.shell,
-            selected: host.id === selectedId,
+            selected: selectedIds.has(host.id),
           }));
           return {
             content: [{ type: "text" as const, text: JSON.stringify({ targets }, null, 2) }],
@@ -386,7 +458,7 @@ Use action=targets to list provider-owned target ids, then pass targetId on a co
       const text = result.content.find((item) => item.type === "text")?.text ?? "";
       const isError = (result as { isError?: boolean }).isError === true
         || (typeof details?.exitCode === "number" && details.exitCode !== 0);
-      const fallbackHost = selectedHostForDisplay();
+      const fallbackHost = singleSelectedHostForDisplay();
       return toolResultLine(theme, {
         name: "ssh",
         ok: !isError,
@@ -424,14 +496,19 @@ Use action=targets to list provider-owned target ids, then pass targetId on a co
             const removed = await unpairSshGateway(store, executor, hostId);
             ctx.ui.notify(removed ? "Secure Gateway pairing removed; stdio fallback is active." : "No Gateway pairing was stored for that target.", "info");
           }
+          removeSelectionIds([hostId], ctx, false);
         } catch (error) {
           ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
         }
         return;
       }
       await runManager(ctx, store, executor, monitor, discoverOpenSsh, {
-        selectedId: () => selected?.id,
-        select: (host) => selectHost(host, ctx),
+        selectedIds: () => selectedHostsForDisplay().map((host) => host.id),
+        replace: (host) => replaceSelection([host], ctx),
+        toggle: (host) => selected.has(host.id)
+          ? removeSelectionIds([host.id], ctx)
+          : attachHost(host, ctx),
+        remove: (hostIds) => removeSelectionIds(hostIds, ctx, false),
         clear: () => clearSelection(ctx),
         invalidate: (hostId) => gatewayPool.invalidateHost(hostId),
         invalidateAll: () => gatewayPool.close(),
@@ -440,18 +517,37 @@ Use action=targets to list provider-owned target ids, then pass targetId on a co
   });
 
   pi.on("input", async (event, ctx) => {
-    if (event.source !== "interactive" || (event.images?.length ?? 0) > 0) return;
+    if (event.source !== "interactive") return;
     const input = event.text.trim();
-    const isLegacyPicker = input.toLowerCase() === "#ssh";
-    const canonicalMatch = /^#ssh:([A-Za-z0-9][A-Za-z0-9._-]{0,63})$/u.exec(input);
-    if (!isLegacyPicker && !canonicalMatch) return;
+    const isPicker = input.toLowerCase() === "#ssh";
+    const canonicalMatch = /^#ssh:([+-]?)([A-Za-z0-9][A-Za-z0-9._-]{0,63})$/iu.exec(input);
+    if (!isPicker && !canonicalMatch) return;
+    if ((event.images?.length ?? 0) > 0) {
+      ctx.ui.notify("SSH selection controls do not accept images. Remove the image and try again.", "warning");
+      return { action: "handled" as const };
+    }
     activeContext = ctx;
 
     if (canonicalMatch) {
+      const operation = canonicalMatch[1]!;
+      const hostId = canonicalMatch[2]!;
       try {
-        await activateHost(canonicalMatch[1]!);
-        const host = currentSelectedHost();
-        ctx.ui.notify(`SSH server selected: ${host.label}.`, "info");
+        if (operation === "-") {
+          if (!await prepareAttachmentSelection(ctx)) return { action: "handled" as const };
+          const wasAttached = selected.has(hostId);
+          removeSelectionIds([hostId], ctx);
+          ctx.ui.notify(wasAttached ? `SSH server detached: ${hostId}.` : `SSH server was not attached: ${hostId}.`, "info");
+        } else if (operation === "+") {
+          if (!await prepareAttachmentSelection(ctx)) return { action: "handled" as const };
+          const host = store.getHosts().find((candidate) => candidate.id === hostId);
+          if (!host) throw new Error(`SSH target ${JSON.stringify(hostId)} is unavailable`);
+          attachHost(host, ctx);
+          ctx.ui.notify(`SSH server attached: ${host.label}.`, "info");
+        } else {
+          await activateHost(hostId);
+          const host = currentSelectedHost();
+          ctx.ui.notify(`SSH server selected exclusively: ${host.label}.`, "info");
+        }
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
       }
@@ -459,34 +555,51 @@ Use action=targets to list provider-owned target ids, then pass targetId on a co
     }
 
     if (!await ensureUnlocked(ctx, store)) return { action: "handled" as const };
+    try {
+      await refreshStore();
+    } catch (error) {
+      clearSelection(ctx);
+      ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
+      return { action: "handled" as const };
+    }
     monitor.reconcile();
     const hosts = store.getHosts();
     if (hosts.length === 0) {
       ctx.ui.notify("No SSH servers configured. Open /ssh and press A to add one.", "warning");
       return { action: "handled" as const };
     }
-    const rows = hosts.map((host) => `${host.label}${selected?.id === host.id ? " (current)" : ""} · ${host.user}@${formatSshAddress(host.host, host.port)} · ${host.shell} · id=${host.id}`);
-    const answer = await ctx.ui.select("Select SSH server", rows);
-    const index = answer === undefined ? -1 : rows.indexOf(answer);
-    if (index >= 0) {
-      const host = hosts[index]!;
-      selectHost(host, ctx);
-      ctx.ui.notify(`SSH server selected: ${host.label}. Send the management request in your next message.`, "info");
+    const hostIds = await showHostPickerOverlay(ctx, hosts, selectedHostsForDisplay().map((host) => host.id));
+    if (hostIds !== undefined) {
+      const byId = new Map(hosts.map((host) => [host.id, host]));
+      const picked = hostIds.map((id) => byId.get(id)).filter((host): host is SshHost => host !== undefined);
+      replaceSelection(picked, ctx);
+      ctx.ui.notify(picked.length === 0
+        ? "All SSH servers detached."
+        : `${picked.length} SSH server${picked.length === 1 ? "" : "s"} attached: ${picked.map((host) => host.label).join(", ")}.`, "info");
     }
     return { action: "handled" as const };
   });
 
   pi.on("before_agent_start", async (event, ctx) => {
     activeContext = ctx;
-    if (store.locked) return undefined;
+    if (store.locked) {
+      clearSelection(ctx);
+      return undefined;
+    }
     try {
       await store.reload();
-      const host = selectedHostForDisplay();
-      if (selected && !host) clearSelection(ctx);
-      const defaultTarget = host
-        ? `The optional current #ssh default has id ${JSON.stringify(host.id)}, label ${JSON.stringify(host.label)}, and shell ${host.shell}.`
-        : "No default server is selected; call action=targets and pass a returned targetId.";
-      const systemPrompt = `${event.systemPrompt}\n\n<ssh-management-context>\nThe independent encrypted SSH manager is unlocked. Gateway endpoint and credentials remain internal and are never included in this prompt. The agent may access any configured server through the ssh tool by first calling action=targets and then passing a provider-owned targetId. ${defaultTarget} targetId never contains host or authentication data, and omission uses only the optional #ssh default. sync_pi_config accepts only targetId and fixed categories (models, auth, teammate); local paths and contents are resolved and transferred by the host outside model-visible arguments and results. start_pi accepts only local todoIds, an optional objective/agent/timeout, targetId, and requestId; the host reads and sanitizes current local Pi Todo tasks and session identity. Gateway actions always use the fixed remote command and never accept host, authentication, command, remote cwd, sessionId, snapshot, or callback overrides. #ssh selection does not select or configure teammate routing. Remote Monitor calls use the returned launch receipt and never update local Pi Todo. Never use remote-worker or expose credentials.\n</ssh-management-context>`;
+      const attachedHosts = selectedHostsForDisplay();
+      const safeAttachments = JSON.stringify(attachedHosts.map((host) => ({
+        id: host.id,
+        label: host.label,
+        shell: host.shell,
+      }))).replace(/</gu, "\\u003c").replace(/>/gu, "\\u003e").replace(/&/gu, "\\u0026");
+      const omissionRule = attachedHosts.length === 1
+        ? "Exactly one SSH server is attached, so omitting targetId resolves to that attachment."
+        : attachedHosts.length > 1
+          ? "Multiple SSH servers are attached, so every SSH call must pass one explicit targetId; omission is an error."
+          : "No SSH server is attached, so omitting targetId is an error.";
+      const systemPrompt = `${event.systemPrompt}\n\n<ssh-management-context>\nThe independent encrypted SSH manager is unlocked. Gateway endpoint and credentials remain internal and are never included in this prompt. The agent may access any configured server through the ssh tool by first calling action=targets and then passing a provider-owned targetId. Attached SSH metadata (id, label, and shell only): ${safeAttachments}. ${omissionRule} targetId never contains host or authentication data. sync_pi_config accepts only targetId and fixed categories (models, auth, teammate); local paths and contents are resolved and transferred by the host outside model-visible arguments and results. start_pi accepts only local todoIds, an optional objective/agent/timeout, targetId, and requestId; the host reads and sanitizes current local Pi Todo tasks and session identity. Gateway actions always use the fixed remote command and never accept host, authentication, command, remote cwd, sessionId, snapshot, or callback overrides. #ssh attachments do not select or configure teammate routing. Remote Monitor calls use the returned launch receipt and never update local Pi Todo. Never use remote-worker or expose credentials.\n</ssh-management-context>`;
       return { systemPrompt };
     } catch {
       clearSelection(ctx);
@@ -499,7 +612,8 @@ Use action=targets to list provider-owned target ids, then pass targetId on a co
     clearSelection(ctx);
   });
   pi.on("session_shutdown", async () => {
-    selected = undefined;
+    selected.clear();
+    activeContext?.ui.setStatus(SSH_STATUS_KEY, undefined);
     providerRegistration.dispose();
     remoteChannelBroker.close();
     monitor.shutdown();
@@ -509,7 +623,9 @@ Use action=targets to list provider-owned target ids, then pass targetId on a co
 }
 
 interface SshManagerHostProviderOptions {
+  /** Backward-compatible scalar selection source for external provider callers. */
   selectedId?: () => string | undefined;
+  selectedIds?: () => readonly string[];
   activate?: (hostId: string) => Promise<void>;
   openTeammateRemoteChannel?: NonNullable<SshHostProvider["openTeammateRemoteChannel"]>;
 }
@@ -543,7 +659,8 @@ export function createSshManagerHostProvider(
     },
     async listPickerEntries() {
       const hosts = await refreshedHosts();
-      const selectedId = options.selectedId?.();
+      const scalarSelectedId = options.selectedId?.();
+      const selectedIds = new Set(options.selectedIds?.() ?? (scalarSelectedId ? [scalarSelectedId] : []));
       return hosts.map((host) => ({
         id: host.id,
         label: host.label,
@@ -551,7 +668,7 @@ export function createSshManagerHostProvider(
         user: host.user,
         port: host.port,
         shell: host.shell,
-        selected: host.id === selectedId,
+        selected: selectedIds.has(host.id),
       }));
     },
     ...(options.activate ? { activate: options.activate } : {}),
@@ -606,8 +723,10 @@ function sshHostProfile(host: SshHost): SshHostProfile {
 }
 
 interface ManagerBindings {
-  selectedId: () => string | undefined;
-  select: (host: SshHost) => void;
+  selectedIds: () => readonly string[];
+  replace: (host: SshHost) => void;
+  toggle: (host: SshHost) => void;
+  remove: (hostIds: readonly string[]) => void;
   clear: () => void;
   invalidate: (hostId: string) => Promise<void>;
   invalidateAll: () => Promise<void>;
@@ -625,11 +744,13 @@ async function runManager(
   monitor.reconcile();
   let query = "";
   let view: SshManagerView = "hosts";
+  let focusedHostId: string | undefined;
   let notice: string | undefined;
   while (!store.locked) {
-    const action = await showManagerOverlay(ctx, store.getHosts(), store.getKeys(), monitor.getStatuses(), query, view, notice);
+    const action = await showManagerOverlay(ctx, store.getHosts(), store.getKeys(), monitor.getStatuses(), bindings.selectedIds(), focusedHostId, query, view, notice);
     query = action.query;
     view = action.view ?? view;
+    focusedHostId = action.hostId ?? focusedHostId;
     notice = undefined;
     if (action.kind === "close") return;
     if (action.kind === "lock") {
@@ -678,7 +799,12 @@ async function runManager(
       }
       const host = store.getHosts().find((candidate) => candidate.id === action.hostId);
       if (!host) { notice = "Selected SSH server is no longer available"; continue; }
-      if (action.kind === "select") { bindings.select(host); ctx.ui.notify(`SSH server selected: ${host.label}.`, "info"); return; }
+      if (action.kind === "toggle-select") {
+        bindings.toggle(host);
+        notice = `${bindings.selectedIds().includes(host.id) ? "Attached" : "Detached"} ${host.label}`;
+        continue;
+      }
+      if (action.kind === "select") { bindings.replace(host); ctx.ui.notify(`SSH server selected exclusively: ${host.label}.`, "info"); return; }
       if (action.kind === "edit") {
         const before = store.getReverseDependencyClosure(host.id);
         const replacement = await editHostWizard(ctx, store.getHosts(), store.getKeys(), host);
@@ -997,7 +1123,7 @@ async function unpairGatewayHostIds(ids: Iterable<string>, store: EncryptedSshSt
 async function invalidateHostIds(ids: Iterable<string>, bindings: ManagerBindings): Promise<void> {
   const unique = [...new Set(ids)];
   await Promise.all(unique.map((id) => bindings.invalidate(id)));
-  if (bindings.selectedId() && unique.includes(bindings.selectedId()!)) bindings.clear();
+  bindings.remove(unique);
 }
 
 function dependencyClosureForKey(hosts: readonly SshHost[], keyId: string): string[] {
@@ -1166,18 +1292,34 @@ function showSecretInput(
   }), { overlay: true, overlayOptions: { anchor: "center", width: "70%", maxHeight: "50%" } });
 }
 
+function showHostPickerOverlay(
+  ctx: ExtensionContext,
+  hosts: readonly SshHost[],
+  selectedHostIds: readonly string[],
+): Promise<string[] | undefined> {
+  return ctx.ui.custom<string[] | undefined>((tui, theme, _keybindings, done) => new SshHostPickerOverlay({
+    hosts,
+    selectedHostIds,
+    theme: theme as SshManagerTheme,
+    requestRender: () => tui.requestRender(),
+    done,
+  }), { overlay: true, overlayOptions: { anchor: "center", width: "86%", maxHeight: "80%" } });
+}
+
 function showManagerOverlay(
   ctx: ExtensionContext,
   hosts: readonly SshHost[],
   keys: readonly SshKey[],
   statuses: ReadonlyMap<string, SshHostOperationalStatus>,
+  selectedHostIds: readonly string[],
+  initialHostId: string | undefined,
   initialQuery: string,
   initialView: SshManagerView,
   notice?: string,
 ): Promise<SshHostManagerAction> {
   return ctx.ui.custom<SshHostManagerAction>((tui, theme, _keybindings, done) => new SshHostManagerOverlay({
-    hosts, keys, statuses, theme: theme as SshManagerTheme, requestRender: () => tui.requestRender(), done,
-    initialQuery, initialView, ...(notice ? { notice } : {}),
+    hosts, keys, statuses, selectedHostIds, theme: theme as SshManagerTheme, requestRender: () => tui.requestRender(), done,
+    initialHostId, initialQuery, initialView, ...(notice ? { notice } : {}),
   }), { overlay: true, overlayOptions: { anchor: "center", width: "94%", maxHeight: "90%" } });
 }
 

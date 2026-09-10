@@ -10,24 +10,15 @@ import { GATEWAY_STATE_VERSION } from "./contracts.ts";
 import { constantTimeEqual } from "./auth.ts";
 import { createLocalGatewayPrincipal } from "./principal.ts";
 import type { GatewayRuntime } from "./runtime.ts";
-import { gatewayOwnerPath } from "./state-paths.ts";
+import { canonicalizeWorkspacePath, gatewayOwnerPath } from "./state-paths.ts";
+import { isGatewayControlAction, type GatewayControlAction } from "./control-dispatcher.ts";
 
 const AUTH_TYPE = "pi-maestro-gateway-auth";
 const MAX_AUTH_BYTES = 8 * 1024;
 const MAX_CONTROL_RESPONSE_BYTES = 4 * 1024 * 1024;
 const AUTH_TIMEOUT_MS = 5_000;
 
-export type GatewayIpcControlAction =
-  | "status"
-  | "stop"
-  | "pair"
-  | "pair-bootstrap"
-  | "pair-list"
-  | "pair-revoke"
-  | "workspace-list"
-  | "workspace-register"
-  | "workspace-renew"
-  | "workspace-remove";
+export type GatewayIpcControlAction = GatewayControlAction;
 
 interface GatewayIpcAuthFrame {
   type: typeof AUTH_TYPE;
@@ -144,11 +135,11 @@ function authenticateSocket(
     if (frame.type !== AUTH_TYPE || frame.version !== GATEWAY_STATE_VERSION || typeof frame.ownerToken !== "string" || !constantTimeEqual(frame.ownerToken, options.ownerToken)) {
       return refuse("Gateway IPC owner token is invalid");
     }
-    if (frame.control !== undefined && ![
-      "status", "stop", "pair", "pair-bootstrap", "pair-list", "pair-revoke",
-      "workspace-list", "workspace-register", "workspace-renew", "workspace-remove",
-    ].includes(frame.control)) {
+    if (frame.control !== undefined && !isGatewayControlAction(frame.control)) {
       return refuse("Gateway IPC control action is invalid");
+    }
+    if (frame.control === undefined && !runtime.canAcceptNewSessions) {
+      return refuse("Gateway is quiescing; new IPC sessions are refused");
     }
     settled = true;
     cleanup();
@@ -189,7 +180,7 @@ async function respondToControl(
   try {
     const data = action === "status"
       ? (onControl ? await onControl(action, requestData) : runtime.host.test(createLocalGatewayPrincipal("local-control", {
-        workspacePath: runtime.cwd,
+        workspacePath: canonicalizeWorkspacePath(runtime.cwd),
         source: "local-ipc-control",
         scopes: ["gateway.control"],
       })))
@@ -209,7 +200,7 @@ async function respondToControl(
 async function serveSocket(runtime: GatewayRuntime, socket: Socket, remainder: Buffer): Promise<void> {
   const input = new PassThrough();
   const principal = createLocalGatewayPrincipal("local-owner", {
-    workspacePath: runtime.cwd,
+    workspacePath: canonicalizeWorkspacePath(runtime.cwd),
     source: "local-ipc",
     scopes: ["gateway"],
   });

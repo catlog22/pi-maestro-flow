@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import test from "node:test";
 import {
-  McpxClientError,
-  McpxStreamableHttpClient,
-  parseMcpxResponseBody,
-  type McpxRemoteSession,
-} from "../src/tui/mcpx-client.ts";
+  GatewayClientError,
+  GatewayStreamableHttpClient,
+  parseGatewayResponseBody,
+  type GatewayRemoteSession,
+} from "../src/tui/gateway-client.ts";
 
 function rpc(id: unknown, result: Record<string, unknown>): string {
   return JSON.stringify({ jsonrpc: "2.0", id, result });
@@ -16,8 +16,8 @@ function toolResult(id: unknown, structuredContent: Record<string, unknown>, isE
   return rpc(id, { structuredContent, ...(isError ? { isError: true } : {}) });
 }
 
-test("parseMcpxResponseBody keeps the last valid SSE JSON-RPC frame", () => {
-  const parsed = parseMcpxResponseBody("text/event-stream", [
+test("parseGatewayResponseBody keeps the last valid SSE JSON-RPC frame", () => {
+  const parsed = parseGatewayResponseBody("text/event-stream", [
     "event: message",
     "data: {broken",
     "",
@@ -30,7 +30,7 @@ test("parseMcpxResponseBody keeps the last valid SSE JSON-RPC frame", () => {
 });
 
 test("Streamable HTTP client initializes, reuses the session header, and types pi_window calls", async (t) => {
-  const sessionHeader = "mcpx-session-test";
+  const sessionHeader = "gateway-session-test";
   const seen: Array<{ method: string; session?: string; args?: Record<string, unknown> }> = [];
   let sendAttempts = 0;
   const server = createServer((req, res) => {
@@ -42,7 +42,7 @@ test("Streamable HTTP client initializes, reuses the session header, and types p
       if (payload.method === "initialize") {
         res.setHeader("Content-Type", "application/json");
         res.setHeader("Mcp-Session-Id", sessionHeader);
-        res.end(rpc(payload.id, { protocolVersion: "2025-11-25", serverInfo: { name: "mcpx", version: "test" }, capabilities: {} }));
+        res.end(rpc(payload.id, { protocolVersion: "2025-11-25", serverInfo: { name: "gateway", version: "test" }, capabilities: {} }));
         return;
       }
       assert.equal(req.headers["mcp-session-id"], sessionHeader);
@@ -97,7 +97,7 @@ test("Streamable HTTP client initializes, reuses the session header, and types p
   t.after(() => server.close());
   const address = server.address();
   const endpoint = `http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}/mcp`;
-  const client = new McpxStreamableHttpClient(endpoint);
+  const client = new GatewayStreamableHttpClient(endpoint);
 
   const sessions = await client.listRemoteSessions();
   assert.deepEqual(sessions, [{ sessionId: "rs_1", workspace: "demo", label: "primary", status: "running" }]);
@@ -154,7 +154,7 @@ test("Streamable HTTP client sends bearer auth and recovers after initialization
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => server.close());
   const address = server.address();
-  const client = new McpxStreamableHttpClient(
+  const client = new GatewayStreamableHttpClient(
     `http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}/mcp`,
     1_000,
     fetch,
@@ -191,9 +191,9 @@ test("Streamable HTTP client retries pi_window capability discovery after a fail
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => server.close());
   const address = server.address();
-  const client = new McpxStreamableHttpClient(`http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}/mcp`);
-  const remote: McpxRemoteSession = { sessionId: "rs_retry", workspace: "demo", status: "running" };
-  await assert.rejects(client.listWindows(remote), (error: unknown) => error instanceof McpxClientError && error.kind === "unsupported");
+  const client = new GatewayStreamableHttpClient(`http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}/mcp`);
+  const remote: GatewayRemoteSession = { sessionId: "rs_retry", workspace: "demo", status: "running" };
+  await assert.rejects(client.listWindows(remote), (error: unknown) => error instanceof GatewayClientError && error.kind === "unsupported");
   assert.deepEqual(await client.listWindows(remote), []);
   assert.equal(capabilityAttempts, 2);
 });
@@ -206,8 +206,8 @@ test("Streamable HTTP client classifies authentication and old pi_window schemas
   await new Promise<void>((resolve) => authServer.listen(0, "127.0.0.1", resolve));
   t.after(() => authServer.close());
   const authAddress = authServer.address();
-  const authClient = new McpxStreamableHttpClient(`http://127.0.0.1:${typeof authAddress === "object" && authAddress ? authAddress.port : 0}/mcp`);
-  await assert.rejects(authClient.listRemoteSessions(), (error: unknown) => error instanceof McpxClientError && error.kind === "auth");
+  const authClient = new GatewayStreamableHttpClient(`http://127.0.0.1:${typeof authAddress === "object" && authAddress ? authAddress.port : 0}/mcp`);
+  await assert.rejects(authClient.listRemoteSessions(), (error: unknown) => error instanceof GatewayClientError && error.kind === "auth");
 
   let initialized = false;
   const oldServer = createServer((req, res) => {
@@ -230,9 +230,9 @@ test("Streamable HTTP client classifies authentication and old pi_window schemas
   await new Promise<void>((resolve) => oldServer.listen(0, "127.0.0.1", resolve));
   t.after(() => oldServer.close());
   const oldAddress = oldServer.address();
-  const oldClient = new McpxStreamableHttpClient(`http://127.0.0.1:${typeof oldAddress === "object" && oldAddress ? oldAddress.port : 0}/mcp`);
-  const remote: McpxRemoteSession = { sessionId: "rs_old", workspace: "demo", status: "running" };
-  await assert.rejects(oldClient.listWindows(remote), (error: unknown) => error instanceof McpxClientError && error.kind === "unsupported");
+  const oldClient = new GatewayStreamableHttpClient(`http://127.0.0.1:${typeof oldAddress === "object" && oldAddress ? oldAddress.port : 0}/mcp`);
+  const remote: GatewayRemoteSession = { sessionId: "rs_old", workspace: "demo", status: "running" };
+  await assert.rejects(oldClient.listWindows(remote), (error: unknown) => error instanceof GatewayClientError && error.kind === "unsupported");
   assert.equal(initialized, true);
 });
 
@@ -266,7 +266,7 @@ test("Streamable HTTP client types CollaborativeSession, Gateway Todo, and Monit
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => server.close());
   const address = server.address();
-  const client = new McpxStreamableHttpClient(`http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}/mcp`);
+  const client = new GatewayStreamableHttpClient(`http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}/mcp`);
 
   assert.deepEqual(await client.listRemoteSessions(["owner"]), [{ sessionId: "collab", workspace: "/work", label: undefined, status: "active" }]);
   assert.equal((await client.getGatewaySession("collab", "owner")).session.revision, 4);
@@ -308,7 +308,7 @@ test("remote session discovery probes member identities concurrently", async () 
       data: { sessions: [{ id: `session-${memberId}`, workspacePath: "/work", status: "active" }] },
     }), { headers: { "Content-Type": "application/json" } });
   }) as typeof fetch;
-  const client = new McpxStreamableHttpClient("http://gateway.test/mcp", 1_000, fetchImpl);
+  const client = new GatewayStreamableHttpClient("http://gateway.test/mcp", 1_000, fetchImpl);
 
   const sessions = await client.listRemoteSessions(["member-a", "member-b", "member-c"]);
   assert.equal(sessions.length, 3);

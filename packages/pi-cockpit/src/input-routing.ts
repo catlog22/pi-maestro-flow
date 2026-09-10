@@ -1,5 +1,6 @@
 import type { MailboxHostRegistry } from "pi-maestro-teammate/v1/mailbox";
 import type { SessionMessageRequest, SessionMessageResult } from "pi-maestro-teammate/v1/sessions";
+import { isSshAttachmentControlInput } from "./target-routing.ts";
 import { tuiT } from "./tui-i18n.ts";
 
 export interface AgentInputTarget {
@@ -40,7 +41,10 @@ export function isLegacyTodoOverlayInput(data: string): boolean {
 
 /** Inputs owned by the local Pi host rather than the selected Agent/Window route. */
 export function isLocalInputText(text: string): boolean {
-	return text.startsWith("/") || text.startsWith("!") || text.trim().toLocaleLowerCase("en") === "#ssh";
+	return text.startsWith("/")
+		|| text.startsWith("!")
+		|| text.trim().toLocaleLowerCase("en") === "#ssh"
+		|| isSshAttachmentControlInput(text);
 }
 
 function inputRegistries(provider: AgentInputRegistryProvider | undefined): AgentInputRegistries {

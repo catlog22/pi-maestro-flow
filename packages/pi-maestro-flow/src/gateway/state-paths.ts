@@ -5,7 +5,7 @@ import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
-export const GATEWAY_CONFIG_DIRECTORY = ".mcpx" as const;
+export const GATEWAY_CONFIG_DIRECTORY = "gateway" as const;
 export const GATEWAY_CONFIG_FILE = "config.yaml" as const;
 export const GATEWAY_STATE_DIRECTORY = "gateway" as const;
 export const GATEWAY_STATE_VERSION_DIRECTORY = "v1" as const;
@@ -17,24 +17,38 @@ export const GATEWAY_SESSIONS_DIRECTORY = "sessions" as const;
 export const GATEWAY_BOARD_DIRECTORY = "board" as const;
 export const GATEWAY_BOARD_FILE = "board.json" as const;
 export const GATEWAY_HANDOFF_DIRECTORY = "handoffs" as const;
+export const GATEWAY_OPERATION_RECEIPT_DIRECTORY = "operation-receipts" as const;
 export const GATEWAY_MAESTRO_RECEIPT_DIRECTORY = "maestro-receipts" as const;
-export const GATEWAY_LEGACY_OWNER_FILES = ["mcpx-server.pid", "gateway.pid"] as const;
+export const GATEWAY_TUNNELS_DIRECTORY = "tunnels" as const;
 
 /** Return UTF-8 byte length, used for every wire/durable bound. */
 export function utf8Bytes(value: string): number {
   return Buffer.byteLength(value, "utf8");
 }
 
-/** The config path remains ~/.mcpx/config.yaml for compatibility. */
+/** Resolve the Pi agent directory without consulting any legacy Gateway root. */
+export function gatewayAgentDirectory(homeDir = homedir()): string {
+  const configured = process.env.PI_CODING_AGENT_DIR?.trim();
+  if (!configured) return join(homeDir, ".pi", "agent");
+  if (configured === "~") return homeDir;
+  if (configured.startsWith("~/") || configured.startsWith("~\\")) return resolve(homeDir, configured.slice(2));
+  return resolve(configured);
+}
+
+/** Native root for all user-global Gateway configuration and durable state. */
+export function gatewayNativeRoot(homeDir = homedir()): string {
+  return join(gatewayAgentDirectory(homeDir), GATEWAY_STATE_DIRECTORY);
+}
+export const getGatewayNativeRoot = gatewayNativeRoot;
+
 export function gatewayConfigPath(homeDir = homedir()): string {
-  return join(homeDir, GATEWAY_CONFIG_DIRECTORY, GATEWAY_CONFIG_FILE);
+  return join(gatewayNativeRoot(homeDir), GATEWAY_CONFIG_FILE);
 }
 export const getGatewayConfigPath = gatewayConfigPath;
-export const mcpxConfigPath = gatewayConfigPath;
 
 /** Global state is shared by local Gateway hosts (owner + workspace registry). */
 export function gatewayGlobalStateRoot(homeDir = homedir()): string {
-  return join(homeDir, GATEWAY_CONFIG_DIRECTORY, GATEWAY_STATE_DIRECTORY, GATEWAY_STATE_VERSION_DIRECTORY);
+  return join(gatewayNativeRoot(homeDir), GATEWAY_STATE_VERSION_DIRECTORY);
 }
 export const getGatewayGlobalStateRoot = gatewayGlobalStateRoot;
 /** Compatibility alias for callers that refer to the global versioned state path. */
@@ -66,14 +80,9 @@ export function gatewayPairingPath(homeDir = homedir()): string {
 export function gatewayServiceManifestPath(homeDir = homedir()): string {
   return join(gatewayGlobalStateRoot(homeDir), GATEWAY_SERVICE_MANIFEST_FILE);
 }
-export function gatewayLegacyOwnerPath(homeDir = homedir()): string {
-  return join(homeDir, GATEWAY_CONFIG_DIRECTORY, "gateway-owner.json");
+export function gatewayTunnelsRoot(homeDir = homedir()): string {
+  return join(gatewayGlobalStateRoot(homeDir), GATEWAY_TUNNELS_DIRECTORY);
 }
-/** Legacy raw PID files are evidence only until exact process identity is verified. */
-export function gatewayLegacyPidPaths(homeDir = homedir()): string[] {
-  return GATEWAY_LEGACY_OWNER_FILES.map((name) => join(homeDir, GATEWAY_CONFIG_DIRECTORY, name));
-}
-export const getGatewayLegacyOwnerPath = gatewayLegacyOwnerPath;
 export const getGatewayOwnerPath = gatewayOwnerPath;
 export const gatewayOwnerRecordPath = gatewayOwnerPath;
 
@@ -102,6 +111,9 @@ export const getGatewayBoardPath = gatewayBoardPath;
 export function gatewayHandoffRoot(cwd = process.cwd()): string {
   return join(gatewayStateRoot(cwd), GATEWAY_HANDOFF_DIRECTORY);
 }
+export function gatewayOperationReceiptRoot(cwd = process.cwd()): string {
+  return join(gatewayStateRoot(cwd), GATEWAY_OPERATION_RECEIPT_DIRECTORY);
+}
 export function gatewayMaestroReceiptRoot(cwd = process.cwd()): string {
   return join(gatewayStateRoot(cwd), GATEWAY_MAESTRO_RECEIPT_DIRECTORY);
 }
@@ -122,6 +134,7 @@ export interface GatewayStatePaths {
   workspaceRegistryPath: string;
   pairingPath: string;
   serviceManifestPath: string;
+  tunnelsRoot: string;
   workspaceRoot: string;
   jobsRoot: string;
   tasksRoot: string;
@@ -129,6 +142,7 @@ export interface GatewayStatePaths {
   boardRoot: string;
   boardPath: string;
   handoffRoot: string;
+  operationReceiptRoot: string;
   maestroReceiptRoot: string;
 }
 
@@ -142,6 +156,7 @@ export function createGatewayStatePaths(cwd = process.cwd(), homeDir = homedir()
     workspaceRegistryPath: join(globalRoot, GATEWAY_WORKSPACE_REGISTRY_FILE),
     pairingPath: join(globalRoot, GATEWAY_PAIRINGS_FILE),
     serviceManifestPath: join(globalRoot, GATEWAY_SERVICE_MANIFEST_FILE),
+    tunnelsRoot: join(globalRoot, GATEWAY_TUNNELS_DIRECTORY),
     workspaceRoot,
     jobsRoot: join(workspaceRoot, "jobs"),
     tasksRoot: join(workspaceRoot, "tasks"),
@@ -149,6 +164,7 @@ export function createGatewayStatePaths(cwd = process.cwd(), homeDir = homedir()
     boardRoot: join(workspaceRoot, GATEWAY_BOARD_DIRECTORY),
     boardPath: join(workspaceRoot, GATEWAY_BOARD_DIRECTORY, GATEWAY_BOARD_FILE),
     handoffRoot: join(workspaceRoot, GATEWAY_HANDOFF_DIRECTORY),
+    operationReceiptRoot: join(workspaceRoot, GATEWAY_OPERATION_RECEIPT_DIRECTORY),
     maestroReceiptRoot: join(workspaceRoot, GATEWAY_MAESTRO_RECEIPT_DIRECTORY),
   };
 }

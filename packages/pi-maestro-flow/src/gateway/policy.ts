@@ -18,7 +18,20 @@ import {
 import type { WorkspaceRegistry } from "./workspace-registry.ts";
 
 export type GatewayPolicyOperation = "read" | "write" | "patch" | "exec" | "job" | "task" | "register";
-export type GatewayConcurrencyKind = "request" | "job" | "task";
+export type GatewayConcurrencyKind = "request" | "job" | "task" | "monitor-wait";
+
+export interface GatewayMonitorWaitLimits {
+  global: number;
+  perPrincipal: number;
+  defaultTimeoutMs: number;
+  maxTimeoutMs: number;
+}
+export const DEFAULT_GATEWAY_MONITOR_WAIT_LIMITS: GatewayMonitorWaitLimits = {
+  global: 32,
+  perPrincipal: 4,
+  defaultTimeoutMs: 30_000,
+  maxTimeoutMs: 60_000,
+};
 
 export interface GatewayPolicyLimits extends GatewayLimitsConfig {}
 
@@ -34,6 +47,7 @@ export interface GatewayPolicyOptions {
   limits?: Partial<GatewayPolicyLimits>;
   now?: () => number;
   trustedFullAccess?: Partial<GatewayTrustedFullAccessConfig>;
+  monitorWait?: Partial<GatewayMonitorWaitLimits>;
 }
 
 export interface GatewayPolicyDecision {
@@ -106,6 +120,8 @@ export class GatewayPolicy {
   private readonly trustedRoots: string[];
   private readonly now: () => number;
   private readonly active = new Map<GatewayConcurrencyKind, number>();
+  private readonly activeMonitorWaitByPrincipal = new Map<string, number>();
+  readonly monitorWaitLimits: GatewayMonitorWaitLimits;
 
   constructor(options: GatewayPolicyOptions = {}) {
     this.limits = normalizeGatewayPolicyLimits(options.limits);
@@ -115,6 +131,7 @@ export class GatewayPolicy {
       ? (options.trustedFullAccess.workspaceRoots ?? []).map(canonicalizeWorkspacePath)
       : [];
     this.now = options.now ?? (() => Date.now());
+    this.monitorWaitLimits = this.normalizeMonitorWaitLimits(options.monitorWait);
     this.configuredWorkspaces = (options.workspaces ?? []).map((entry) => {
       const path = configuredWorkspacePath(entry);
       const id = typeof entry === "object" && entry !== null && ("workspaceId" in entry || "id" in entry)
@@ -270,7 +287,10 @@ export class GatewayPolicy {
 
   acquire(kind: GatewayConcurrencyKind = "request"): () => void {
     const current = this.active.get(kind) ?? 0;
-    const maximum = kind === "request" ? this.limits.maxConcurrentRequests : kind === "job" ? this.limits.maxConcurrentJobs : this.limits.maxConcurrentTasks;
+    const maximum = kind === "request" ? this.limits.maxConcurrentRequests
+      : kind === "job" ? this.limits.maxConcurrentJobs
+        : kind === "task" ? this.limits.maxConcurrentTasks
+          : this.monitorWaitLimits.global;
     if (current >= maximum) throw new GatewayBoundsError(`${kind} concurrency limit ${maximum} reached`);
     this.active.set(kind, current + 1);
     let released = false;
@@ -281,14 +301,57 @@ export class GatewayPolicy {
       if (next <= 0) this.active.delete(kind); else this.active.set(kind, next);
     };
   }
+
+  acquireMonitorWait(principal: GatewayPrincipal): () => void {
+    const key = principalKey(principal);
+    const perPrincipal = this.activeMonitorWaitByPrincipal.get(key) ?? 0;
+    if (perPrincipal >= this.monitorWaitLimits.perPrincipal) {
+      throw new GatewayBoundsError(`monitor-wait principal concurrency limit ${this.monitorWaitLimits.perPrincipal} reached`);
+    }
+    const releaseGlobal = this.acquire("monitor-wait");
+    this.activeMonitorWaitByPrincipal.set(key, perPrincipal + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const next = (this.activeMonitorWaitByPrincipal.get(key) ?? 1) - 1;
+      if (next <= 0) this.activeMonitorWaitByPrincipal.delete(key); else this.activeMonitorWaitByPrincipal.set(key, next);
+      releaseGlobal();
+    };
+  }
+
+  normalizeMonitorWaitTimeout(timeoutMs: unknown): number {
+    const value = timeoutMs === undefined ? this.monitorWaitLimits.defaultTimeoutMs : timeoutMs;
+    if (!Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > this.monitorWaitLimits.maxTimeoutMs) {
+      throw new GatewayBoundsError(`monitor wait timeout must be in [1, ${this.monitorWaitLimits.maxTimeoutMs}]ms`);
+    }
+    return value as number;
+  }
   tryAcquire(kind: GatewayConcurrencyKind = "request"): (() => void) | undefined {
     try { return this.acquire(kind); } catch (error) { if (error instanceof GatewayBoundsError) return undefined; throw error; }
   }
   activeCount(kind: GatewayConcurrencyKind = "request"): number { return this.active.get(kind) ?? 0; }
+  activeMonitorWaitCount(principal?: GatewayPrincipal): number {
+    return principal === undefined ? this.activeCount("monitor-wait") : this.activeMonitorWaitByPrincipal.get(principalKey(principal)) ?? 0;
+  }
 
   async withConcurrency<T>(kind: GatewayConcurrencyKind, operation: () => Promise<T> | T): Promise<T> {
     const release = this.acquire(kind);
     try { return await operation(); } finally { release(); }
+  }
+
+  async withMonitorWait<T>(principal: GatewayPrincipal, operation: () => Promise<T> | T): Promise<T> {
+    const release = this.acquireMonitorWait(principal);
+    try { return await operation(); } finally { release(); }
+  }
+
+  private normalizeMonitorWaitLimits(input: Partial<GatewayMonitorWaitLimits> | undefined): GatewayMonitorWaitLimits {
+    const value = { ...DEFAULT_GATEWAY_MONITOR_WAIT_LIMITS, ...input };
+    for (const [name, candidate] of Object.entries(value)) {
+      if (!Number.isSafeInteger(candidate) || candidate < 1) throw new GatewayPolicyError(`monitorWait.${name} must be a positive integer`, "invalid_policy_limit");
+    }
+    if (value.defaultTimeoutMs > value.maxTimeoutMs) throw new GatewayPolicyError("monitorWait.defaultTimeoutMs cannot exceed maxTimeoutMs", "invalid_policy_limit");
+    return value;
   }
 
   private assertBytes(value: unknown, maximum: number, label: string): number {

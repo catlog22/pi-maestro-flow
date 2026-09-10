@@ -7,6 +7,7 @@ import {
   type GatewayPrincipalTransport,
 } from "./contracts.ts";
 import { parseGatewayPrincipal } from "./validation.ts";
+import { principalHasGatewayAction } from "./capabilities.ts";
 
 export interface GatewayPrincipalOptions {
   workspaceId?: string;
@@ -74,6 +75,10 @@ export function sameGatewayPrincipal(left: GatewayPrincipal | unknown, right: Ga
 
 export function principalHasScope(principal: GatewayPrincipal | unknown, scope: string): boolean {
   return parseGatewayPrincipal(principal).scopes.includes(scope);
+}
+
+export function principalHasAction(principal: GatewayPrincipal | unknown, tool: string, action: string): boolean {
+  return principalHasGatewayAction(parseGatewayPrincipal(principal), tool, action);
 }
 
 export function isAuthenticatedPrincipal(principal: GatewayPrincipal | unknown): boolean {

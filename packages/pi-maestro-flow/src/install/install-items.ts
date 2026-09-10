@@ -3,6 +3,9 @@ import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { parse as parseYaml } from "yaml";
+import { normalizeGatewayConfig } from "../gateway/config.ts";
+import { gatewayConfigPath } from "../gateway/state-paths.ts";
 import { resolveOwnPackageJson, resolvePackageOrWorkspaceResource } from "../resources/maestro-package.ts";
 
 /** An optional install item surfaced by `/install`. Mirrors the `OptionalSkill` pattern. */
@@ -102,6 +105,15 @@ export const INSTALL_ITEMS: readonly InstallItem[] = [
     promptIntro:
       "配置 MCP 服务器。按文档交互式询问要注册的 server，写入配置后用 /mcp auth 完成 OAuth。",
   },
+  {
+    id: "openai-tunnel",
+    title: "OpenAI Secure MCP Tunnel（实验性）",
+    description: "配置外部 tunnel-client 和仅含环境变量名的 Gateway OpenAI tunnel 引用；不会自动下载或预配 tunnel。",
+    docFile: "OPENAI-TUNNEL-SETUP.md",
+    category: "external",
+    promptIntro:
+      "配置实验性的 OpenAI Secure MCP Tunnel。只在原生 ~/.pi/agent/gateway/config.yaml 中写环境变量名称，绝不写入或索取 secret 值；不得自动下载 tunnel-client，也不得创建或预配 tunnel。按文档验证外部 client、Gateway doctor/start/status，并保留显式 opt-in 语义。",
+  },
 ];
 
 function probeComputerUseStatus(): InstallStatus {
@@ -143,6 +155,22 @@ function probeExecutable(executable: string): boolean {
     return false;
   }
 }
+function probeOpenAiTunnelStatus(): InstallStatus {
+  const configPath = gatewayConfigPath();
+  if (!existsSync(configPath)) return "not-installed";
+  const raw = parseYaml(readFileSync(configPath, "utf8")) as unknown;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return "unknown";
+  const tunnels = (raw as { tunnels?: unknown }).tunnels;
+  if (!tunnels || typeof tunnels !== "object" || Array.isArray(tunnels)
+    || !Object.prototype.hasOwnProperty.call(tunnels, "openai")) return "not-installed";
+
+  const openai = normalizeGatewayConfig(raw).tunnels.openai;
+  if (!openai.enabled) return "partial";
+  const tunnelId = process.env[openai.tunnelIdEnv]?.trim();
+  const runtimeKey = process.env[openai.runtimeKeyEnv]?.trim();
+  return tunnelId && runtimeKey ? "installed" : "partial";
+}
+
 function resolveDocPath(docFile: string): string | undefined {
   return resolvePackageOrWorkspaceResource(["optional", docFile], resolveOwnPackageJson());
 }
@@ -272,6 +300,8 @@ export function probeInstallStatus(id: string): InstallStatus {
         const config = readJson(join(directory, "browser-bridge.json")) as BrowserBridgeConfig | null;
         return isValidBrowserBridgeConfig(config) ? "installed" : "partial";
       }
+      case "openai-tunnel":
+        return probeOpenAiTunnelStatus();
       default:
         return "unknown";
     }

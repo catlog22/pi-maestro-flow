@@ -1,11 +1,11 @@
-/** ~/.mcpx/config.yaml compatibility reader and canonical Gateway config. */
+/** Native Pi agent Gateway configuration reader and writer. */
 import { readFile } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import {
+  GATEWAY_CONFIG_VERSION,
   GATEWAY_DEFAULT_LIMITS,
   GATEWAY_HARD_LIMITS,
-  GATEWAY_STATE_VERSION,
 } from "./contracts.ts";
 import {
   gatewayConfigPath,
@@ -131,6 +131,7 @@ export interface GatewayStateConfig {
   sessionsRoot?: string;
   boardRoot?: string;
   handoffRoot?: string;
+  operationReceiptRoot?: string;
   maestroReceiptRoot?: string;
   pairingPath?: string;
   serviceManifestPath?: string;
@@ -144,9 +145,21 @@ export interface GatewayRetentionConfig {
   boardOperationsMs: number;
   boardEventsMs: number;
 }
+export interface GatewayOpenAiTunnelConfig {
+  /** Experimental provider opt-in; false by default. */
+  enabled: boolean;
+  binaryPath?: string;
+  tunnelIdEnv: string;
+  runtimeKeyEnv: string;
+  minimumVersion: string;
+  credentialTtlMs: number;
+}
+export interface GatewayTunnelsConfig {
+  openai: GatewayOpenAiTunnelConfig;
+}
 
 export interface GatewayConfig {
-  version: typeof GATEWAY_STATE_VERSION;
+  version: typeof GATEWAY_CONFIG_VERSION;
   server: GatewayServerConfig;
   auth: GatewayAuthConfig;
   security: GatewaySecurityConfig;
@@ -156,6 +169,7 @@ export interface GatewayConfig {
   logging: GatewayLoggingConfig;
   state: GatewayStateConfig;
   retention: GatewayRetentionConfig;
+  tunnels: GatewayTunnelsConfig;
 }
 
 export type GatewayConfigPatch = {
@@ -178,7 +192,7 @@ export class GatewayConfigValidationError extends Error {
   }
 }
 
-const KNOWN_SECTIONS = new Set(["version", "server", "auth", "security", "workspaces", "transport", "limits", "logging", "state", "retention"]);
+const KNOWN_SECTIONS = new Set(["version", "server", "auth", "security", "workspaces", "transport", "limits", "logging", "state", "retention", "tunnels"]);
 const MAX_CONFIG_BYTES = 4 * 1024 * 1024;
 
 const DEFAULT_SERVER: GatewayServerConfig = {
@@ -200,6 +214,15 @@ const DEFAULT_TRANSPORT: GatewayTransportConfig = {
   stdio: { enabled: true },
   http: { enabled: true, host: "127.0.0.1", port: 9090, path: "/mcp", tls: { enabled: false } },
   ssh: { enabled: true },
+};
+const DEFAULT_TUNNELS: GatewayTunnelsConfig = {
+  openai: {
+    enabled: false,
+    tunnelIdEnv: "CONTROL_PLANE_TUNNEL_ID",
+    runtimeKeyEnv: "CONTROL_PLANE_API_KEY",
+    minimumVersion: "0.0.14",
+    credentialTtlMs: 5 * 60_000,
+  },
 };
 const DEFAULT_RETENTION: GatewayRetentionConfig = {
   jobsMs: 7 * 24 * 60 * 60 * 1000,
@@ -259,7 +282,7 @@ function boundedLimit(value: unknown, path: string, fallback: number, hard: numb
 
 export function defaultGatewayConfig(): GatewayConfig {
   return structuredClone({
-    version: GATEWAY_STATE_VERSION,
+    version: GATEWAY_CONFIG_VERSION,
     server: DEFAULT_SERVER,
     auth: DEFAULT_AUTH,
     security: DEFAULT_SECURITY,
@@ -269,12 +292,13 @@ export function defaultGatewayConfig(): GatewayConfig {
     logging: { level: "info" as const },
     state: {},
     retention: DEFAULT_RETENTION,
+    tunnels: DEFAULT_TUNNELS,
   });
 }
 
 export function normalizeGatewayConfig(value: unknown): GatewayConfig {
   const root = object(value ?? {}, "config");
-  if (root.version !== undefined && root.version !== GATEWAY_STATE_VERSION) throw new GatewayConfigValidationError(`config.version must be ${GATEWAY_STATE_VERSION}`);
+  if (root.version !== undefined && root.version !== GATEWAY_CONFIG_VERSION) throw new GatewayConfigValidationError(`config.version must be ${GATEWAY_CONFIG_VERSION}`);
 
   const serverRaw = optionalObject(root.server, "server");
   knownKeys(serverRaw, ["host", "port", "disable_localhost_protection", "trust_proxy_headers", "allowed_origins", "disableLocalhostProtection", "trustProxyHeaders", "allowedOrigins"], "server");
@@ -490,7 +514,7 @@ export function normalizeGatewayConfig(value: unknown): GatewayConfig {
     ...(optionalString(loggingRaw.auditFile ?? loggingRaw.audit_file, "logging.auditFile", 4096) === undefined ? {} : { auditFile: optionalString(loggingRaw.auditFile ?? loggingRaw.audit_file, "logging.auditFile", 4096) }),
   };
   const stateRaw = optionalObject(root.state, "state");
-  knownKeys(stateRaw, ["rootDir", "root_dir", "ownerPath", "owner_path", "workspaceRegistryPath", "workspace_registry_path", "sessionsRoot", "sessions_root", "boardRoot", "board_root", "handoffRoot", "handoff_root", "maestroReceiptRoot", "maestro_receipt_root", "pairingPath", "pairing_path", "serviceManifestPath", "service_manifest_path", "retention"], "state");
+  knownKeys(stateRaw, ["rootDir", "root_dir", "ownerPath", "owner_path", "workspaceRegistryPath", "workspace_registry_path", "sessionsRoot", "sessions_root", "boardRoot", "board_root", "handoffRoot", "handoff_root", "operationReceiptRoot", "operation_receipt_root", "maestroReceiptRoot", "maestro_receipt_root", "pairingPath", "pairing_path", "serviceManifestPath", "service_manifest_path", "retention"], "state");
   const state: GatewayStateConfig = {
     ...(optionalString(stateRaw.rootDir ?? stateRaw.root_dir, "state.rootDir", 4096) === undefined ? {} : { rootDir: optionalString(stateRaw.rootDir ?? stateRaw.root_dir, "state.rootDir", 4096) }),
     ...(optionalString(stateRaw.ownerPath ?? stateRaw.owner_path, "state.ownerPath", 4096) === undefined ? {} : { ownerPath: optionalString(stateRaw.ownerPath ?? stateRaw.owner_path, "state.ownerPath", 4096) }),
@@ -498,6 +522,7 @@ export function normalizeGatewayConfig(value: unknown): GatewayConfig {
     ...(optionalString(stateRaw.sessionsRoot ?? stateRaw.sessions_root, "state.sessionsRoot", 4096) === undefined ? {} : { sessionsRoot: optionalString(stateRaw.sessionsRoot ?? stateRaw.sessions_root, "state.sessionsRoot", 4096) }),
     ...(optionalString(stateRaw.boardRoot ?? stateRaw.board_root, "state.boardRoot", 4096) === undefined ? {} : { boardRoot: optionalString(stateRaw.boardRoot ?? stateRaw.board_root, "state.boardRoot", 4096) }),
     ...(optionalString(stateRaw.handoffRoot ?? stateRaw.handoff_root, "state.handoffRoot", 4096) === undefined ? {} : { handoffRoot: optionalString(stateRaw.handoffRoot ?? stateRaw.handoff_root, "state.handoffRoot", 4096) }),
+    ...(optionalString(stateRaw.operationReceiptRoot ?? stateRaw.operation_receipt_root, "state.operationReceiptRoot", 4096) === undefined ? {} : { operationReceiptRoot: optionalString(stateRaw.operationReceiptRoot ?? stateRaw.operation_receipt_root, "state.operationReceiptRoot", 4096) }),
     ...(optionalString(stateRaw.maestroReceiptRoot ?? stateRaw.maestro_receipt_root, "state.maestroReceiptRoot", 4096) === undefined ? {} : { maestroReceiptRoot: optionalString(stateRaw.maestroReceiptRoot ?? stateRaw.maestro_receipt_root, "state.maestroReceiptRoot", 4096) }),
     ...(optionalString(stateRaw.pairingPath ?? stateRaw.pairing_path, "state.pairingPath", 4096) === undefined ? {} : { pairingPath: optionalString(stateRaw.pairingPath ?? stateRaw.pairing_path, "state.pairingPath", 4096) }),
     ...(optionalString(stateRaw.serviceManifestPath ?? stateRaw.service_manifest_path, "state.serviceManifestPath", 4096) === undefined ? {} : { serviceManifestPath: optionalString(stateRaw.serviceManifestPath ?? stateRaw.service_manifest_path, "state.serviceManifestPath", 4096) }),
@@ -513,8 +538,31 @@ export function normalizeGatewayConfig(value: unknown): GatewayConfig {
     boardOperationsMs: boundedLimit(retentionRaw.boardOperationsMs ?? retentionRaw.board_operations_ms ?? retentionRaw.board_operations, "retention.boardOperationsMs", DEFAULT_RETENTION.boardOperationsMs, 365 * 24 * 60 * 60 * 1000),
     boardEventsMs: boundedLimit(retentionRaw.boardEventsMs ?? retentionRaw.board_events_ms ?? retentionRaw.board_events, "retention.boardEventsMs", DEFAULT_RETENTION.boardEventsMs, 365 * 24 * 60 * 60 * 1000),
   };
+
+  const tunnelsRaw = optionalObject(root.tunnels, "tunnels");
+  knownKeys(tunnelsRaw, ["openai"], "tunnels");
+  const openaiRaw = optionalObject(tunnelsRaw.openai, "tunnels.openai");
+  knownKeys(openaiRaw, ["enabled", "binaryPath", "binary_path", "tunnelIdEnv", "tunnel_id_env", "runtimeKeyEnv", "runtime_key_env", "minimumVersion", "minimum_version", "credentialTtlMs", "credential_ttl_ms"], "tunnels.openai");
+  const environmentName = (value: unknown, path: string, fallback: string): string => {
+    const result = value === undefined ? fallback : stringValue(value, path, 128);
+    if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/u.test(result)) throw new GatewayConfigValidationError(`${path} must be an environment variable name`);
+    return result;
+  };
+  const minimumVersion = openaiRaw.minimumVersion ?? openaiRaw.minimum_version;
+  const tunnels: GatewayTunnelsConfig = {
+    openai: {
+      enabled: bool(openaiRaw.enabled, "tunnels.openai.enabled", DEFAULT_TUNNELS.openai.enabled),
+      ...(optionalString(openaiRaw.binaryPath ?? openaiRaw.binary_path, "tunnels.openai.binaryPath", 4096) === undefined ? {} : { binaryPath: optionalString(openaiRaw.binaryPath ?? openaiRaw.binary_path, "tunnels.openai.binaryPath", 4096) }),
+      tunnelIdEnv: environmentName(openaiRaw.tunnelIdEnv ?? openaiRaw.tunnel_id_env, "tunnels.openai.tunnelIdEnv", DEFAULT_TUNNELS.openai.tunnelIdEnv),
+      runtimeKeyEnv: environmentName(openaiRaw.runtimeKeyEnv ?? openaiRaw.runtime_key_env, "tunnels.openai.runtimeKeyEnv", DEFAULT_TUNNELS.openai.runtimeKeyEnv),
+      minimumVersion: minimumVersion === undefined ? DEFAULT_TUNNELS.openai.minimumVersion : stringValue(minimumVersion, "tunnels.openai.minimumVersion", 64),
+      credentialTtlMs: integer(openaiRaw.credentialTtlMs ?? openaiRaw.credential_ttl_ms, "tunnels.openai.credentialTtlMs", 1_000, 60 * 60_000, DEFAULT_TUNNELS.openai.credentialTtlMs),
+    },
+  };
+  if (!/^\d+\.\d+\.\d+$/u.test(tunnels.openai.minimumVersion)) throw new GatewayConfigValidationError("tunnels.openai.minimumVersion must be a semantic version triplet");
+
   return {
-    version: GATEWAY_STATE_VERSION,
+    version: GATEWAY_CONFIG_VERSION,
     server,
     auth,
     security: { commands, files, trustedFullAccess, skills, maestroCli },
@@ -524,6 +572,7 @@ export function normalizeGatewayConfig(value: unknown): GatewayConfig {
     logging,
     state,
     retention,
+    tunnels,
   };
 }
 
@@ -643,10 +692,25 @@ function canonicalYamlSection(key: string, value: unknown): unknown {
       })() : rawFiles;
     return { ...rest, ...(normalizeCommands === undefined ? {} : { commands: normalizeCommands }), ...(normalizeFiles === undefined ? {} : { files: normalizeFiles }) };
   }
+  if (key === "tunnels") {
+    const v = value as Record<string, unknown>;
+    const rawOpenAi = v.openai;
+    if (!rawOpenAi || typeof rawOpenAi !== "object" || Array.isArray(rawOpenAi)) return value;
+    const o = rawOpenAi as Record<string, unknown>;
+    const { binaryPath, tunnelIdEnv, runtimeKeyEnv, minimumVersion, credentialTtlMs, ...rest } = o;
+    return { ...v, openai: {
+      ...rest,
+      ...(binaryPath === undefined ? {} : { binary_path: binaryPath }),
+      ...(tunnelIdEnv === undefined ? {} : { tunnel_id_env: tunnelIdEnv }),
+      ...(runtimeKeyEnv === undefined ? {} : { runtime_key_env: runtimeKeyEnv }),
+      ...(minimumVersion === undefined ? {} : { minimum_version: minimumVersion }),
+      ...(credentialTtlMs === undefined ? {} : { credential_ttl_ms: credentialTtlMs }),
+    } };
+  }
   return value;
 }
 
-/** Apply a patch while distinguishing omitted (preserve), object replacement, and null (clear). */
+/** Apply a patch with omitted=preserve, arrays=replace, objects=merge, and null=clear. */
 export function applyGatewayConfigPatch(base: GatewayConfig, patch: GatewayConfigPatch): GatewayConfig {
   const raw = structuredClone(base) as unknown as Record<string, unknown>;
   for (const [key, value] of Object.entries(patch)) {
@@ -704,11 +768,19 @@ export async function writeGatewayConfigPatch(
 ): Promise<GatewayConfigDocument> {
   const existing = await readGatewayFile(path, MAX_CONFIG_BYTES) ?? "";
   // Validate the effective result before committing, so malformed known fields
-  // never reach ~/.mcpx/config.yaml.
+  // never reach the native Gateway config.
   const current = parseRawDocument(existing);
   const changed: Record<string, unknown> = {};
+  if (current.version === undefined) {
+    current.version = GATEWAY_CONFIG_VERSION;
+    changed.version = GATEWAY_CONFIG_VERSION;
+  }
   for (const [key, value] of Object.entries(patch)) {
     if (value === undefined) continue;
+    if (key === "version") {
+      if (value !== GATEWAY_CONFIG_VERSION) throw new GatewayConfigValidationError(`config.version must be ${GATEWAY_CONFIG_VERSION}`);
+      continue;
+    }
     const yamlKey = topLevelRawKey(key);
     const next = mergeRawValue(current[yamlKey], value);
     if (next === undefined) {
@@ -726,7 +798,7 @@ export async function writeGatewayConfigPatch(
 }
 
 export async function writeGatewayConfig(path: string, config: GatewayConfig | GatewayConfigPatch): Promise<GatewayConfigDocument> {
-  const patch = (config as GatewayConfig).version === GATEWAY_STATE_VERSION
+  const patch = (config as GatewayConfig).version === GATEWAY_CONFIG_VERSION
     ? config as unknown as GatewayConfigPatch
     : config as GatewayConfigPatch;
   return writeGatewayConfigPatch(path, patch);

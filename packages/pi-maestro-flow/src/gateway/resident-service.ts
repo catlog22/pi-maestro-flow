@@ -1016,8 +1016,8 @@ export class GatewayResidentService {
     this.configPath = options.configPath;
     this.now = options.now ?? (() => Date.now());
     this.delay = options.delay ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
-    this.enforcePrivate = options.enforcePrivate ?? enforceResidentPrivatePath;
-    this.durability = options.durability ?? residentDurability();
+    this.enforcePrivate = options.enforcePrivate ?? enforceGatewayResidentPrivatePath;
+    this.durability = options.durability ?? gatewayResidentDurability();
     this.fault = options.fault;
     this.statusProbe = options.statusProbe;
     this.acquireLock = options.acquireLock ?? (async () => {
@@ -1054,6 +1054,14 @@ export class GatewayResidentService {
   async uninstall(): Promise<boolean> { return this.withMutation(() => this.uninstallUnlocked()); }
 
   async status(): Promise<GatewayResidentStatus> { return this.statusWithIpcTimeout(750, false); }
+
+  /** Read-only offline fence used by the explicit legacy migration command. */
+  async assertStoppedForMigration(): Promise<GatewayResidentStatus> {
+    const status = await this.status();
+    if (status.error || status.recoveryRequired) throw new Error("Gateway resident service state cannot be verified for migration");
+    if (status.running || status.ready) throw new Error("Gateway resident service must be stopped before migration");
+    return status;
+  }
 
   private async statusWithIpcTimeout(timeoutMs: number, requireExplicitReadiness: boolean): Promise<GatewayResidentStatus> {
     if (this.statusProbe) return this.statusProbe(timeoutMs);
@@ -1481,7 +1489,7 @@ function residentPersistence(kind: GatewayResidentKind): GatewayEnsureResult["pe
   return "current-session";
 }
 
-async function enforceResidentPrivatePath(path: string, kind: "directory" | "file"): Promise<void> {
+export async function enforceGatewayResidentPrivatePath(path: string, kind: "directory" | "file"): Promise<void> {
   if (process.platform === "win32") return verifyWindowsPrivatePath(path, kind);
   await chmod(path, kind === "directory" ? 0o700 : 0o600);
   const info = await lstat(path);
@@ -1489,7 +1497,7 @@ async function enforceResidentPrivatePath(path: string, kind: "directory" | "fil
 }
 const WINDOWS_DURABILITY_SCRIPT = `$ErrorActionPreference='Stop'\nAdd-Type -TypeDefinition @'\nusing System; using System.Runtime.InteropServices; using Microsoft.Win32.SafeHandles; public static class PiResidentSync { [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern SafeFileHandle CreateFile(string n,uint a,uint s,IntPtr x,uint c,uint f,IntPtr t); [DllImport("kernel32.dll", SetLastError=true)] public static extern bool FlushFileBuffers(SafeFileHandle h); }\n'@\n$p=$env:PI_MAESTRO_SYNC_PATH; $k=$env:PI_MAESTRO_SYNC_KIND; if([string]::IsNullOrWhiteSpace($p)){throw 'invalid'}; $flags=if($k -eq 'directory'){0x02000000}else{0}; $h=[PiResidentSync]::CreateFile($p,0x40000000,7,[IntPtr]::Zero,3,$flags,[IntPtr]::Zero); if($h.IsInvalid){throw 'open'}; try { if(-not [PiResidentSync]::FlushFileBuffers($h)){throw 'flush'} } finally {$h.Dispose()}`;
 const WINDOWS_DURABILITY_ARGS = ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", Buffer.from(WINDOWS_DURABILITY_SCRIPT, "utf16le").toString("base64")];
-function residentDurability(): PrivateStateDurability {
+export function gatewayResidentDurability(): PrivateStateDurability {
   if (process.platform === "win32") return {
     syncFile: (path) => runResidentDurability(path, "file"),
     syncDirectory: (path) => runResidentDurability(path, "directory"),

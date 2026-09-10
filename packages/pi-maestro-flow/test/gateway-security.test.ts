@@ -8,6 +8,7 @@ import { GatewayPolicy } from "../src/gateway/policy.ts";
 import { GatewayRuntime } from "../src/gateway/runtime.ts";
 import { FileService } from "../src/gateway/services/file-service.ts";
 import { createTestGatewayConfig } from "./gateway-test-helpers.ts";
+import { gatewayOk } from "../src/gateway/result.ts";
 
 const principal = (id: string, workspace: string) => createGatewayPrincipal("stdio", id, { authenticated: true, workspacePath: workspace });
 
@@ -29,13 +30,63 @@ test("Gateway runtime strictly rejects unknown and action-inapplicable RPC field
   assert.equal(denied.ok, false);
   assert.equal(denied.error?.code, "invalid_arguments");
   assert.equal(denied.meta.principalId, "transport-owner");
-  const errored = await runtime.call("missing", { action: "ignored", requestId: "error-1" }, transportPrincipal);
+  const errored = await runtime.call(secret, { action: secret, requestId: "error-1" }, transportPrincipal);
   assert.equal(errored.error?.code, "tool_not_found");
 
   const records = (await readFile(config.logging.auditFile, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
   assert.deepEqual(records.map((record) => record.outcome), ["allowed", "denied", "error"]);
   assert.ok(records.every((record) => record.principalId === "transport-owner"));
   assert.doesNotMatch(JSON.stringify(records), /raw-secret|forged/);
+});
+
+test("Monitor waits use finite defaults and isolated global/per-principal concurrency", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "gateway-security-monitor-wait-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const config = createTestGatewayConfig(root, { mode: "bearer", token: "secret" });
+  config.limits.maxConcurrentRequests = 1;
+  const runtime = await GatewayRuntime.create({ config, cwd: root });
+  t.after(() => runtime.close());
+  const owner = createGatewayPrincipal("http", "monitor-owner", { authenticated: true, scopes: ["gateway"] });
+  let releaseHost!: () => void;
+  let releaseMonitor!: () => void;
+  let hostEntered!: () => void;
+  let monitorEntered!: () => void;
+  const hostStarted = new Promise<void>((resolve) => { hostEntered = resolve; });
+  const monitorStarted = new Promise<void>((resolve) => { monitorEntered = resolve; });
+  const hostGate = new Promise<void>((resolve) => { releaseHost = resolve; });
+  const monitorGate = new Promise<void>((resolve) => { releaseMonitor = resolve; });
+  let observedTimeout: unknown;
+  runtime.catalog.get("host")!.handler = async () => { hostEntered(); await hostGate; return gatewayOk({}, { requestId: "host", principalId: owner.id }); };
+  runtime.catalog.get("monitor")!.handler = async (_principal, args) => {
+    observedTimeout = args.timeoutMs;
+    monitorEntered();
+    await monitorGate;
+    return gatewayOk({}, { requestId: "monitor", principalId: owner.id });
+  };
+
+  const ordinary = runtime.call("host", { action: "status" }, owner);
+  await hostStarted;
+  assert.equal(runtime.policy.activeCount("request"), 1);
+  const waiting = runtime.call("monitor", { action: "wait", sessionId: "session", memberId: "member", handle: "task" }, owner);
+  await monitorStarted;
+  assert.equal(observedTimeout, 30_000);
+  assert.equal(runtime.policy.activeCount("request"), 1, "Monitor wait does not consume a normal request slot");
+  assert.equal(runtime.policy.activeMonitorWaitCount(owner), 1);
+
+  const releases = Array.from({ length: runtime.policy.monitorWaitLimits.perPrincipal - 1 }, () => runtime.policy.acquireMonitorWait(owner));
+  assert.throws(() => runtime.policy.acquireMonitorWait(owner), /principal concurrency limit/u);
+  releases.forEach((release) => release());
+  releaseMonitor();
+  releaseHost();
+  assert.equal((await waiting).ok, true);
+  assert.equal((await ordinary).ok, true);
+  assert.equal(runtime.policy.activeCount("monitor-wait"), 0);
+
+  const globallyBounded = new GatewayPolicy({ monitorWait: { global: 1, perPrincipal: 1 } });
+  const releaseGlobal = globallyBounded.acquireMonitorWait(owner);
+  const other = createGatewayPrincipal("http", "other-monitor", { authenticated: true, scopes: ["gateway"] });
+  assert.throws(() => globallyBounded.acquireMonitorWait(other), /monitor-wait concurrency limit 1/u);
+  releaseGlobal();
 });
 
 test("policy uses one-way principal containment and expires configured leases", async (t) => {

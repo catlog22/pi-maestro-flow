@@ -31,7 +31,7 @@ const sshTargetId = () => Type.Optional(Type.String({
   pattern: SSH_HOST_ID_PATTERN.source,
   minLength: 1,
   maxLength: 64,
-  description: "Provider-owned target id returned by action=targets; omitted uses the current #ssh selection",
+  description: "Provider-owned target id returned by action=targets; omit only when exactly one #ssh server is attached",
 }));
 
 export const SshCommandToolParams = Type.Object(sshCommandProperties, { additionalProperties: false });
@@ -92,7 +92,7 @@ export const SshToolParams = Type.Union([
   }, { additionalProperties: false }),
 ], {
   type: "object",
-  description: "List unlocked SSH targets, execute a legacy command, or use the built-in Gateway. targetId selects a provider-owned configured server; omission preserves the current #ssh selection. Host, authentication, and Gateway command parameters are never accepted. For dynamic Gateway calls, use action=describe tool=<name> to retrieve the authoritative inputSchema before action=call. session.start-pi returns taskId and monitorHandle; pass either value as monitor.handle."
+  description: "List unlocked SSH targets, execute a legacy command, or use the built-in Gateway. targetId selects a provider-owned configured server; omission works only when exactly one #ssh server is attached and errors for none or multiple. Host, authentication, and Gateway command parameters are never accepted. For dynamic Gateway calls, use action=describe tool=<name> to retrieve the authoritative inputSchema before action=call. session.start-pi returns taskId and monitorHandle; pass either value as monitor.handle."
 });
 
 export type SshCommandToolInput = Static<typeof SshCommandToolParams>;

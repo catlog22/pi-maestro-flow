@@ -16,6 +16,7 @@ import {
   type GatewayTaskState,
 } from "../contracts.ts";
 import { gatewayError, gatewayOk } from "../result.ts";
+import { GatewayEventJournal } from "../event-journal.ts";
 import { GatewayPolicy, type GatewayPolicyOperation } from "../policy.ts";
 import { principalKey } from "../principal.ts";
 import { parseGatewayPrincipal } from "../validation.ts";
@@ -72,6 +73,7 @@ export interface GatewayTeammateServiceOptions {
   journal?: TaskJournal;
   journalPath?: string;
   journalOptions?: TaskJournalOptions;
+  eventJournal?: GatewayEventJournal;
   /** Base directory used when a request omits cwd. */
   baseCwd?: string;
   policy?: GatewayPolicy;
@@ -449,6 +451,7 @@ export class GatewayTeammateEventBuffer {
 export class GatewayTeammateService {
   readonly port: GatewayTeammatePort;
   readonly journal: TaskJournal;
+  readonly eventJournal: GatewayEventJournal;
   readonly policy?: GatewayPolicy;
   readonly baseCwd: string;
   private readonly now: () => number;
@@ -478,6 +481,7 @@ export class GatewayTeammateService {
       terminalRetentionMs: options.journalOptions?.terminalRetentionMs ?? this.taskRetentionMs,
       now: options.journalOptions?.now ?? this.now,
     });
+    this.eventJournal = options.eventJournal ?? new GatewayEventJournal();
     this.maxEvents = positiveInteger(options.maxEvents, "maxEvents", 128, GATEWAY_HARD_LIMITS.maxTasks * 16);
     this.maxEventBytes = positiveInteger(options.maxEventBytes, "maxEventBytes", 256 * 1024, GATEWAY_HARD_LIMITS.maxOutputBytes);
     this.maxResultItems = positiveInteger(options.maxResultItems, "maxResultItems", GATEWAY_HARD_LIMITS.maxTasks, GATEWAY_HARD_LIMITS.maxTasks);
@@ -705,7 +709,10 @@ export class GatewayTeammateService {
   async monitorMessage(sessionId: string, taskId: string, message: string, mode: GatewayTeammateSendMode): Promise<boolean> {
     await this.ready(); const entry = this.findSessionEntry(sessionId, taskId); if (terminalStatus(entry.status)) throw new Error("Gateway task is already terminal");
     const control = this.selectControl(entry); if (!control) throw new Error("Gateway task has no live child control");
-    const delivered = await this.sendControl(control, message, mode); this.appendEvent(entry, "send", { mode, delivered }); return delivered;
+    const delivered = await this.sendControl(control, message, mode);
+    // Retain only delivery metadata; control text never enters task evidence.
+    this.appendEvent(entry, "send", { mode, delivered });
+    return delivered;
   }
   async monitorCancel(sessionId: string, taskId: string, reason = "Cancelled by Monitor caller"): Promise<GatewayTeammateTaskView> {
     await this.ready(); const entry = this.findSessionEntry(sessionId, taskId); if (!terminalStatus(entry.status)) {
@@ -784,6 +791,9 @@ export class GatewayTeammateService {
       };
       if (Array.isArray(record.monitorEvents)) entry.events.restore(record.monitorEvents as GatewayTaskEvent[]);
       if (entry.events.latestCursor() === 0) this.appendEvent(entry, "state", { status: record.status, ...(record.error === undefined ? {} : { error: record.error }) });
+      else if (entry.sessionId) {
+        for (const event of entry.events.page(0, this.maxEvents).events) this.publishEvent(entry, event);
+      }
       this.entries.set(record.id, entry);
     }
   }
@@ -888,7 +898,22 @@ export class GatewayTeammateService {
   }
 
   private appendEvent(entry: TaskEntry, type: GatewayTaskEvent["type"], data?: unknown): void {
-    entry.events.append({ taskId: entry.id, type, at: this.now(), ...(data === undefined ? {} : { data }) });
+    const event = entry.events.append({ taskId: entry.id, type, at: this.now(), ...(data === undefined ? {} : { data }) });
+    if (entry.sessionId) this.publishEvent(entry, event);
+  }
+
+  private publishEvent(entry: TaskEntry, event: GatewayTaskEvent): void {
+    this.eventJournal.append({
+      cursor: event.cursor,
+      workspaceId: entry.workspaceId,
+      sessionId: entry.sessionId!,
+      handle: entry.id,
+      kind: event.type,
+      // Streaming has a tighter producer bound than polling evidence. Project
+      // before append so an advisory child payload cannot break execution.
+      payload: boundedValue(event.data ?? {}, 48 * 1024),
+      at: event.at,
+    });
   }
 
   private setStatus(entry: TaskEntry, status: GatewayTaskState, error?: string): void {

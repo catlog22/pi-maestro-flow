@@ -45,10 +45,10 @@ test("concurrent daemon starts serialize ownership so exactly one instance wins"
 test("real connect --stdio performs initialize, list, and call through the daemon", async (t) => {
   const home = await mkdtemp(join(tmpdir(), "gateway-ipc-home-"));
   const workspace = await mkdtemp(join(tmpdir(), "gateway-ipc-workspace-"));
-  const ownerPath = join(home, ".mcpx", "gateway", "v1", "owner.json");
+  const ownerPath = join(home, ".pi", "agent", "gateway", "v1", "owner.json");
   const config = createTestGatewayConfig(workspace);
   config.state.ownerPath = ownerPath;
-  config.state.workspaceRegistryPath = join(home, ".mcpx", "gateway", "v1", "workspaces.json");
+  config.state.workspaceRegistryPath = join(home, ".pi", "agent", "gateway", "v1", "workspaces.json");
   const daemon = new GatewayDaemon({ config, cwd: workspace, http: false });
   t.after(async () => {
     await daemon.stop();
@@ -115,7 +115,7 @@ test("stale owner state is replaced and graceful stop releases the new generatio
   assert.equal(await missing(config.state.ownerPath!), true);
 });
 
-test("daemon startup safely migrates an exact legacy PID and refuses a duplicate", async (t) => {
+test("daemon startup ignores legacy PID files and claims only the native owner record", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "gateway-legacy-startup-"));
   const config = createTestGatewayConfig(root);
   const pidPath = join(root, "mcpx-server.pid");
@@ -123,27 +123,16 @@ test("daemon startup safely migrates an exact legacy PID and refuses a duplicate
   const address = gatewayIpcAddress(root, config.state.ownerPath);
   const store = new GatewayOwnerStore({
     ownerPath: config.state.ownerPath,
-    legacyPidPath: pidPath,
     commandIdentity: "pi-maestro-gateway serve",
     isProcessAlive: (pid) => pid === 42,
     getProcessIdentity: () => "pi-maestro-gateway serve",
   });
-  const daemon = new GatewayDaemon({
-    config,
-    ownerStore: store,
-    ipcAddress: address,
-    commandIdentity: "pi-maestro-gateway serve",
-    legacyPidPaths: [pidPath],
-  });
-  t.after(async () => {
-    const owner = await store.read();
-    if (owner) await store.release(owner.ownerToken);
-    await rm(root, { recursive: true, force: true });
-  });
-  await assert.rejects(() => daemon.start(), GatewayOwnerActiveError);
-  const migrated = await store.read();
-  assert.equal(migrated?.pid, 42);
-  assert.equal(migrated?.commandIdentity, "pi-maestro-gateway serve");
+  const daemon = new GatewayDaemon({ config, ownerStore: store, ipcAddress: address, commandIdentity: "pi-maestro-gateway serve" });
+  t.after(async () => { await daemon.stop(); await rm(root, { recursive: true, force: true }); });
+  await daemon.start();
+  const owner = await store.read();
+  assert.equal(owner?.pid, process.pid);
+  assert.equal(owner?.commandIdentity, "pi-maestro-gateway serve");
 });
 
 test("authenticated IPC status works but stop is refused when the server has no control handler", async (t) => {

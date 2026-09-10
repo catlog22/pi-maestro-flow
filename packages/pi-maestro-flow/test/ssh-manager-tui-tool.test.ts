@@ -7,6 +7,7 @@ import {
   MaskedSecretInput,
   SshExecutor,
   SshHostManagerOverlay,
+  SshHostPickerOverlay,
   SshToolParams,
   type SshHost,
   type SshHostManagerAction,
@@ -70,13 +71,15 @@ test("SSH host manager lists no secrets and implements explicit slash filtering 
   let action: SshHostManagerAction | undefined;
   const overlay = new SshHostManagerOverlay({
     hosts,
+    selectedHostIds: ["alpha-1"],
     theme,
     requestRender() {},
     done(next) { action = next; },
   });
 
   const rendered = overlay.render(140).join("\n");
-  assert.match(rendered, /Alpha server/);
+  assert.match(rendered, /\[x\].*Alpha server/);
+  assert.match(rendered, /\[ \].*Beta server/);
   assert.match(rendered, /alice@alpha\.example\.test:22/);
   assert.match(rendered, /tags production,linux.*jump direct.*trusted.*monitor checking/);
   assert.match(rendered, /jump Alpha server.*monitor disabled/);
@@ -86,7 +89,7 @@ test("SSH host manager lists no secrets and implements explicit slash filtering 
   }
 
   overlay.handleInput("/");
-  overlay.handleInput("windows");
+  overlay.handleInput("\x1b[200~windows\x1b[201~");
   const filtered = overlay.render(100).join("\n");
   assert.match(filtered, /Beta server/);
   assert.doesNotMatch(filtered, /Alpha server/);
@@ -110,9 +113,64 @@ test("SSH host manager lists no secrets and implements explicit slash filtering 
   const addOverlay = new SshHostManagerOverlay({ hosts, theme, requestRender() {}, done(next) { action = next; } });
   addOverlay.handleInput("A");
   assert.equal(action?.kind, "add");
+  const selectOverlay = new SshHostManagerOverlay({ hosts, selectedHostIds: ["alpha-1"], initialHostId: "beta-1", theme, requestRender() {}, done(next) { action = next; } });
+  selectOverlay.handleInput(" ");
+  assert.equal(action?.kind, "toggle-select");
+  assert.equal(action?.hostId, "beta-1");
+
+  action = undefined;
+  const exclusiveOverlay = new SshHostManagerOverlay({ hosts, selectedHostIds: ["alpha-1", "beta-1"], theme, requestRender() {}, done(next) { action = next; } });
+  exclusiveOverlay.handleInput("\x1b[B");
+  exclusiveOverlay.handleInput("\r");
+  assert.equal(action?.kind, "select");
+  assert.equal(action?.hostId, "beta-1");
+
+  action = undefined;
   const lockOverlay = new SshHostManagerOverlay({ hosts, theme, requestRender() {}, done(next) { action = next; } });
   lockOverlay.handleInput("L");
   assert.equal(action?.kind, "lock");
+});
+
+test("SSH attachment picker supports multi-select, legacy Enter, filtering, and cancel", () => {
+  let picked: string[] | undefined;
+  let completed = false;
+  const picker = new SshHostPickerOverlay({
+    hosts,
+    theme,
+    requestRender() {},
+    done(value) { completed = true; picked = value; },
+  });
+  assert.match(picker.render(120).join("\n"), /\[ \].*Alpha server[\s\S]*\[ \].*Beta server/);
+  assert.doesNotMatch(picker.render(120).join("\n"), /password-list-secret|passphrase-list-secret|SHA256:/);
+  picker.handleInput(" ");
+  picker.handleInput("\x1b[B");
+  picker.handleInput(" ");
+  picker.handleInput("\r");
+  assert.equal(completed, true);
+  assert.deepEqual(picked, ["alpha-1", "beta-1"]);
+
+  completed = false;
+  picked = undefined;
+  const legacyPicker = new SshHostPickerOverlay({ hosts, theme, requestRender() {}, done(value) { completed = true; picked = value; } });
+  legacyPicker.handleInput("\r");
+  assert.equal(completed, true);
+  assert.deepEqual(picked, ["alpha-1"], "Enter without prior toggles preserves the old single-select flow");
+
+  completed = false;
+  const filteredPicker = new SshHostPickerOverlay({ hosts, theme, requestRender() {}, done(value) { completed = true; picked = value; } });
+  filteredPicker.handleInput("/");
+  filteredPicker.handleInput("\x1b[200~win");
+  assert.match(filteredPicker.render(100).join("\n"), /Alpha server/, "an incomplete paste remains buffered");
+  filteredPicker.handleInput("dows\x1b[201~");
+  assert.match(filteredPicker.render(100).join("\n"), /Beta server/);
+  assert.doesNotMatch(filteredPicker.render(100).join("\n"), /Alpha server/);
+  filteredPicker.handleInput(" ");
+  assert.equal(completed, false, "Space remains filter text while filtering");
+  filteredPicker.handleInput("\x1b");
+  assert.match(filteredPicker.render(100).join("\n"), /Alpha server/);
+  filteredPicker.handleInput("\x1b");
+  assert.equal(completed, true);
+  assert.equal(picked, undefined);
 });
 
 test("SSH manager Keys view renders metadata only and exposes managed-key CRUD", () => {
