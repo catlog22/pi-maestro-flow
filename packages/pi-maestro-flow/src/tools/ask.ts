@@ -10,6 +10,7 @@ const FRAME_UTILS = {
 };
 import { isTeammateChild, requestTeammateInteraction } from "../permissions/teammate-relay.ts";
 import type { UserAttentionHandler } from "../notify/user-attention.ts";
+import { getAskTransports, type AskTransport, type AskTransportHandle } from "../ask-transport.ts";
 import {
   BracketedPasteDecoder,
   removeLastGrapheme,
@@ -17,27 +18,26 @@ import {
   type DecodedInputToken,
 } from "../tui/input-text.ts";
 
-interface QuestionOption {
+export interface AskQuestionOption {
   label: string;
   description?: string;
 }
+
+export interface AskQuestionSpec {
+  question: string;
+  header?: string;
+  options?: AskQuestionOption[];
+  multiSelect?: boolean;
+}
+
+type QuestionOption = AskQuestionOption;
+type QuestionSpec = AskQuestionSpec;
 
 const NONE_OPTION_LABEL = "以上都不是";
 
 const TWO_COL_MIN_WIDTH = 84;
 const TWO_COL_MIN_ROWS = 16;
 let nextQuestionAttentionId = 0;
-
-interface QuestionSpec {
-  question: string;
-  header?: string;
-  options?: QuestionOption[];
-  multiSelect?: boolean;
-}
-
-export interface AskParams {
-  questions: QuestionSpec[];
-}
 
 export interface AskAnswer {
   question: string;
@@ -47,6 +47,10 @@ export interface AskAnswer {
   details?: Record<string, string>;
   /** Free-form response: open-ended questions or a "以上都不是" custom answer. */
   text?: string;
+}
+
+export interface AskParams {
+  questions: AskQuestionSpec[];
 }
 
 export interface AskResultDetails {
@@ -59,7 +63,12 @@ type AskToolResult = AgentToolResult<AskResultDetails> & { isError?: boolean };
 export async function executeAsk(
   params: AskParams,
   ctx: ExtensionContext,
-  options: { onUserAttention?: UserAttentionHandler; requestId?: string; signal?: AbortSignal } = {},
+  options: {
+    onUserAttention?: UserAttentionHandler;
+    requestId?: string;
+    toolCallId?: string;
+    signal?: AbortSignal;
+  } = {},
 ): Promise<AskToolResult> {
   const questions = params.questions?.slice(0, 4) ?? [];
   if (questions.length === 0) {
@@ -98,6 +107,26 @@ export async function executeAsk(
   const mode = (ctx as ExtensionContext & { mode?: string }).mode;
   const terminalUi = mode === "tui"
     || (mode === undefined && Boolean(ctx.ui.custom) && Boolean(ctx.ui.onTerminalInput));
+  const transport = options.toolCallId && terminalUi
+    ? openAskTransport({
+        toolCallId: options.toolCallId,
+        questions,
+        cwd: ctx.cwd,
+        mode: ctx.mode,
+        sessionFile: ctx.sessionManager.getSessionFile(),
+        signal: signal ?? new AbortController().signal,
+      })
+    : undefined;
+  if (transport) {
+    const raced = await raceAskEndpoints(
+      (localSignal) => showAskWizard(questions, ctx, localSignal),
+      transport,
+      questions,
+      signal,
+    );
+    return raced.status === "answered" ? askSuccess(raced.answers) : cancelledAsk();
+  }
+
   if (!terminalUi) {
     const answers = await showAskDialogs(questions, ctx, signal);
     return answers ? askSuccess(answers) : cancelledAsk();
@@ -111,6 +140,142 @@ export async function executeAsk(
   return askSuccess(answers);
 }
 
+function cloneAskQuestions(questions: readonly QuestionSpec[]): QuestionSpec[] {
+  return questions.map((question) => ({
+    question: question.question,
+    ...(question.header === undefined ? {} : { header: question.header }),
+    ...(question.options === undefined ? {} : {
+      options: question.options.map((option) => ({
+        label: option.label,
+        ...(option.description === undefined ? {} : { description: option.description }),
+      })),
+    }),
+    ...(question.multiSelect === undefined ? {} : { multiSelect: question.multiSelect }),
+  }));
+}
+
+function openAskTransport(request: Parameters<AskTransport["open"]>[0]): AskTransportHandle | undefined {
+  for (const transport of getAskTransports()) {
+    try {
+      const handle = transport.open({ ...request, questions: cloneAskQuestions(request.questions) });
+      if (handle) return handle;
+    } catch (error) {
+      console.error(`[maestro] Ask transport open failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return undefined;
+}
+
+interface AskRaceAnswered {
+  status: "answered";
+  answers: AskAnswer[];
+}
+
+interface AskRaceCancelled {
+  status: "cancelled";
+}
+
+function cancelRemote(remote: AskTransportHandle, reason: Parameters<AskTransportHandle["cancel"]>[0]): void {
+  try {
+    void Promise.resolve(remote.cancel(reason)).catch((error) => {
+      console.error(`[maestro] Ask transport cancel failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  } catch (error) {
+    console.error(`[maestro] Ask transport cancel failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function validRemoteAnswers(value: unknown, questions: readonly QuestionSpec[]): value is AskAnswer[] {
+  if (!Array.isArray(value) || value.length !== questions.length) return false;
+  return value.every((answer: unknown, index) => {
+    const question = questions[index];
+    if (typeof answer !== "object" || answer === null) return false;
+    const item = answer as Record<string, unknown>;
+    if (item.question !== question.question || item.header !== question.header) return false;
+    const selected = item.selected;
+    if (!Array.isArray(selected) || !selected.every((choice: unknown) => typeof choice === "string")) return false;
+    const selectedLabels = selected as string[];
+    const options = question.options ?? [];
+    const labels = new Set(options.map((option) => option.label));
+    if (options.length > 0) labels.add(NONE_OPTION_LABEL);
+    if (selectedLabels.some((choice) => !labels.has(choice))) return false;
+    if (selectedLabels.includes(NONE_OPTION_LABEL) && selectedLabels.length > 1) return false;
+    if (!question.multiSelect && selectedLabels.length > 1) return false;
+    if (item.text !== undefined && typeof item.text !== "string") return false;
+    if (item.details !== undefined && (
+      typeof item.details !== "object" || item.details === null || Array.isArray(item.details)
+      || Object.entries(item.details).some(([key, detail]) => !selectedLabels.includes(key) || typeof detail !== "string")
+    )) return false;
+    return true;
+  });
+}
+
+async function raceAskEndpoints(
+  local: (signal: AbortSignal) => Promise<AskAnswer[] | undefined>,
+  remote: AskTransportHandle,
+  questions: readonly QuestionSpec[],
+  parentSignal?: AbortSignal,
+): Promise<AskRaceAnswered | AskRaceCancelled> {
+  const localController = new AbortController();
+  const localSignal = parentSignal
+    ? AbortSignal.any([parentSignal, localController.signal])
+    : localController.signal;
+  let localPending = true;
+  let remotePending = true;
+  let aborted = parentSignal?.aborted === true;
+
+  const localPromise = local(localSignal).then(
+    (answers) => ({ source: "local" as const, outcome: answers ? "answered" as const : "cancelled" as const, answers }),
+    (error) => ({ source: "local" as const, outcome: "failed" as const, error }),
+  );
+  const remotePromise = remote.promise.then(
+    (result) => ({ source: "remote" as const, outcome: result.status, ...(result.status === "answered" ? { answers: result.answers } : {}) }),
+    (error) => ({ source: "remote" as const, outcome: "failed" as const, error }),
+  );
+
+  let abortResolve!: () => void;
+  const abortPromise = new Promise<{ source: "abort"; outcome: "cancelled" }>((resolve) => {
+    abortResolve = () => resolve({ source: "abort", outcome: "cancelled" });
+  });
+  const onAbort = () => {
+    aborted = true;
+    localController.abort();
+    cancelRemote(remote, "aborted");
+    abortResolve();
+  };
+  parentSignal?.addEventListener("abort", onAbort, { once: true });
+  if (aborted) onAbort();
+
+  try {
+    while (localPending || remotePending) {
+      const candidates: Array<Promise<{
+        source: "local" | "remote" | "abort";
+        outcome: "answered" | "cancelled" | "failed";
+        answers?: AskAnswer[];
+        error?: unknown;
+      }>> = [abortPromise];
+      if (localPending) candidates.push(localPromise);
+      if (remotePending) candidates.push(remotePromise);
+      const winner = await Promise.race(candidates);
+      if (aborted || winner.source === "abort") return { status: "cancelled" };
+      if (winner.source === "local") localPending = false;
+      else remotePending = false;
+
+      if (winner.outcome === "answered") {
+        if (winner.source === "local" || validRemoteAnswers(winner.answers, questions)) {
+          if (winner.source === "remote") localController.abort();
+          else cancelRemote(remote, "tui_answered");
+          return { status: "answered", answers: winner.answers! };
+        }
+        cancelRemote(remote, "transport_error");
+      }
+    }
+  } finally {
+    parentSignal?.removeEventListener("abort", onAbort);
+  }
+
+  return { status: "cancelled" };
+}
 function cancelledAsk(): AskToolResult {
   return {
     content: [{ type: "text", text: "Questionnaire cancelled by the user." }],
