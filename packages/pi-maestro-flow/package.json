@@ -22,7 +22,7 @@
     "test:settings": "node --experimental-transform-types --test test/settings-provider.test.ts test/api-manager-settings-provider.test.ts test/mcp-settings-provider.test.ts test/skills-settings-provider.test.ts test/smart-search-settings-provider.test.ts test/teammate-backends-settings-provider.test.ts test/settings-provider-wiring.test.ts test/settings-catalogs.test.ts test/tui-locale.test.ts test/resource-lock.test.ts",
     "test:gui": "node --experimental-transform-types --test test/gui-server.test.ts test/gui-state.test.ts test/gui-events.test.ts test/gui-tools.test.ts test/gui-invoke.test.ts test/gui-e2e.test.ts",
     "test:hooks": "node --experimental-transform-types --test test/hooks.test.ts",
-    "test:permissions": "node --experimental-transform-types --test test/permissions.test.ts test/ask.test.ts test/ask-sessionbar-integration.test.ts test/approval-mode.test.ts test/notify-mode.test.ts test/teammate-relay-ipc.test.ts test/direct-teammate-runtime.test.ts",
+    "test:permissions": "node --experimental-transform-types --test test/permissions.test.ts test/ask.test.ts test/ask-transport.test.ts test/ask-sessionbar-integration.test.ts test/approval-mode.test.ts test/notify-mode.test.ts test/teammate-relay-ipc.test.ts test/direct-teammate-runtime.test.ts",
     "test:providers": "node --experimental-transform-types --test test/api-provider-config.test.ts test/api-model-editor.test.ts test/devin-auth.test.ts test/devin-transport.test.ts test/explore-config-manager.test.ts test/cost-backfill.test.ts test/model-discovery.test.ts",
     "test:next-suggest": "node --experimental-transform-types --test test/next-suggest.test.ts",
     "test:mcp": "node --experimental-transform-types --test test/mcp-config.test.ts test/mcp-manager.test.ts test/mcp-server-manager.test.ts test/mcp-lifecycle-leases.test.ts test/mcp-ui-server.test.ts test/fabric-mcp-mount.test.ts test/mcp-oauth-fence.test.ts",
@@ -80,6 +80,7 @@
     "optional/"
   ],
   "exports": {
+    "./ask-transport": "./src/ask-transport.ts",
     "./gui": "./src/gui/index.ts",
     "./gui/client": "./src/gui/client.ts",
     "./compaction/settings": "./src/compaction/compaction-settings.ts",
