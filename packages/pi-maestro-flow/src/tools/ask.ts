@@ -261,6 +261,11 @@ async function raceAskEndpoints(
       if (winner.source === "local") localPending = false;
       else remotePending = false;
 
+      if (winner.source === "local" && winner.outcome === "cancelled") {
+        cancelRemote(remote, "cancelled");
+        return { status: "cancelled" };
+      }
+
       if (winner.outcome === "answered") {
         if (winner.source === "local" || validRemoteAnswers(winner.answers, questions)) {
           if (winner.source === "remote") localController.abort();

@@ -88,7 +88,7 @@ test("remote answer wins and cancels the local TUI", async () => {
   }
 });
 
-test("cancelling the local TUI leaves the mobile endpoint available", async () => {
+test("cancelling the local TUI cancels the mobile endpoint", async () => {
   const harness = createRaceHarness();
   const remote = deferred<AskTransportResult>();
   const fixture = transportFixture(remote);
@@ -96,10 +96,10 @@ test("cancelling the local TUI leaves the mobile endpoint available", async () =
   try {
     const pending = executeAsk({ questions: [{ question: "Pick" }] }, harness.ctx, { toolCallId: "raw-call-1" });
     harness.cancelLocal();
-    remote.resolve({ status: "answered", answers: answer("mobile-after-tui-cancel") });
     const result = await pending;
-    assert.deepEqual(result.details, { answers: answer("mobile-after-tui-cancel") });
-    assert.deepEqual(fixture.cancellations, []);
+    assert.deepEqual(result.details, { answers: [], cancelled: true });
+    assert.deepEqual(fixture.cancellations, ["cancelled"]);
+    remote.resolve({ status: "answered", answers: answer("late-mobile") });
   } finally {
     dispose();
   }
