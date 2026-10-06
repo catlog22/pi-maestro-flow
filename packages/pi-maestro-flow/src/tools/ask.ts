@@ -238,6 +238,7 @@ async function raceAskEndpoints(
     abortResolve = () => resolve({ source: "abort", outcome: "cancelled" });
   });
   const onAbort = () => {
+    if (aborted) return;
     aborted = true;
     localController.abort();
     cancelRemote(remote, "aborted");
@@ -250,7 +251,7 @@ async function raceAskEndpoints(
     while (localPending || remotePending) {
       const candidates: Array<Promise<{
         source: "local" | "remote" | "abort";
-        outcome: "answered" | "cancelled" | "failed";
+        outcome: "answered" | "cancelled" | "disconnected" | "failed";
         answers?: AskAnswer[];
         error?: unknown;
       }>> = [abortPromise];
@@ -270,6 +271,16 @@ async function raceAskEndpoints(
         return { status: "cancelled" };
       }
 
+      // A remote disconnect only removes that projection. The TUI remains the
+      // operation authority and continues waiting until it answers or is cancelled.
+      if (winner.source === "remote" && winner.outcome === "disconnected") {
+        continue;
+      }
+      if (winner.source === "remote" && winner.outcome === "failed") {
+        // A rejected transport promise is not an explicit user cancellation.
+        // Leave the pending request registered so a reconnect can replay it.
+        continue;
+      }
       if (winner.outcome === "answered") {
         if (winner.source === "local" || validRemoteAnswers(winner.answers, questions)) {
           if (winner.source === "remote") localController.abort();

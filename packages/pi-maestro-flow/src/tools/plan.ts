@@ -935,26 +935,51 @@ async function racePlanTransport<T>(
 ): Promise<{ source: "local"; value: T } | { source: "remote"; result: PlanTransportResult }> {
   const localController = new AbortController();
   const localSignal = AbortSignal.any([signal, localController.signal]);
+  let localPending = true;
+  let remotePending = true;
   const localPromise = local(localSignal).then((value) => ({ source: "local" as const, value }));
-  const remotePromise: Promise<{ source: "remote"; result: PlanTransportResult } | { source: "remote-error" }> = remote.promise.then(
+  const remotePromise: Promise<
+    | { source: "remote"; result: PlanTransportResult }
+    | { source: "remote-error" }
+  > = remote.promise.then(
     (result): { source: "remote"; result: PlanTransportResult } => ({
       source: "remote",
       result: isPlanTransportResult(result) ? result : { status: "cancelled" },
     }),
     () => ({ source: "remote-error" as const }),
   );
-  const winner = await Promise.race([localPromise, remotePromise]);
-  if (winner.source === "remote-error") {
-    try { await remote.cancel("transport_error"); } catch { /* transport cleanup is best-effort */ }
-    return await localPromise;
-  }
-  if (winner.source === "remote") {
+
+  while (localPending || remotePending) {
+    const candidates: Array<Promise<
+      | { source: "local"; value: T }
+      | { source: "remote"; result: PlanTransportResult }
+      | { source: "remote-error" }
+    >> = [];
+    if (localPending) candidates.push(localPromise);
+    if (remotePending) candidates.push(remotePromise);
+    const winner = await Promise.race(candidates);
+    if (winner.source === "local") {
+      localPending = false;
+      try { await remote.cancel("tui_answered"); } catch { /* transport cleanup is best-effort */ }
+      return winner;
+    }
+    remotePending = false;
+    if (winner.source === "remote-error") {
+      // A remote transport error only removes that projection. Keep the local
+      // TUI alive; a reconnect replays the same request identity.
+      continue;
+    }
+    if (winner.result.status === "cancelled") {
+      localController.abort();
+      void localPromise.catch(() => undefined);
+      return winner;
+    }
     localController.abort();
     void localPromise.catch(() => undefined);
     return winner;
   }
-  try { await remote.cancel("tui_answered"); } catch { /* transport cleanup is best-effort */ }
-  return winner;
+
+  return await localPromise;
 }
 
 function transportRequest(
