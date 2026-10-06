@@ -64,7 +64,7 @@ import {
   lookupBuiltinPricing,
   matchOpenRouterPricing,
 } from "./cost-backfill.ts";
-import { discoverModels, type DiscoveredModel } from "./model-discovery.ts";
+import { discoverModels, modelsUrlForProvider, type DiscoveredModel } from "./model-discovery.ts";
 import {
   AGENT_HEADER_PRESETS,
   customAgentHeaders,
@@ -2524,11 +2524,11 @@ async function discoverAndInjectModels(
     apiKey = required(keyInput, "API key");
   }
 
-  const modelsUrl = `${baseUrl}/models`;
-  ctx.ui.notify(t("discovery.discovering", { url: modelsUrl }), "info");
+  const discoveryUrl = modelsUrlForProvider({ baseUrl, api });
+  ctx.ui.notify(t("discovery.discovering", { url: discoveryUrl }), "info");
   let discovered: DiscoveredModel[];
   try {
-    discovered = await discoverModels({ baseUrl, apiKey, timeoutMs: 8000 });
+    discovered = await discoverModels({ baseUrl, apiKey, api, timeoutMs: 8000 });
   } catch (error) {
     ctx.ui.notify(t("discovery.failed", { message: errorMessage(error) }), "warning");
     ctx.ui.notify(t("discovery.keepManual"), "info");
@@ -2611,12 +2611,14 @@ async function discoverFormModelIds(
   providerId: string,
   current: LoadedApiProviderSettings,
   modelsPath: string,
+  api = current.api,
 ): Promise<string[]> {
   const rawBaseUrl = formText(values, "baseUrl").trim() || current.baseUrl;
   if (!rawBaseUrl) throw new Error(t("discovery.noConnection"));
   const baseUrl = normalizeBaseUrl(rawBaseUrl);
   const apiKey = formText(values, "apiKey") || current.apiKey;
-  const discovered = await discoverModels({ baseUrl, apiKey: apiKey || undefined });
+  const discoveryApi = formText(values, "api") || api;
+  const discovered = await discoverModels({ baseUrl, api: discoveryApi, apiKey: apiKey || undefined });
   lastDiscoveredSpecs = new Map(discovered.map((model) => [model.id, model]));
   const configured = new Set(await configuredModelIds(providerId, modelsPath));
   return discovered.map((model) => model.id).filter((id) => !configured.has(id));
@@ -2955,7 +2957,7 @@ async function configurePresetModelWithForm(
       adding ? existingModelIds : existingModelIds.filter((id) => id !== modelId),
       !adding,
     ),
-    discoverModels: (values) => discoverFormModelIds(values, provider.id, current, modelsPath),
+    discoverModels: (values) => discoverFormModelIds(values, provider.id, current, modelsPath, provider.api),
     resolveModelSpecs: resolveFormModelSpec,
     headless: headless?.fields,
   });
@@ -3209,7 +3211,7 @@ async function configureCustomModelWithForm(
       }
       return errors;
     },
-    discoverModels: (values) => discoverFormModelIds(values, providerId, current, modelsPath),
+    discoverModels: (values) => discoverFormModelIds(values, providerId, current, modelsPath, formText(values, "api")),
     resolveModelSpecs: resolveFormModelSpec,
     headless: headless?.fields,
   });
