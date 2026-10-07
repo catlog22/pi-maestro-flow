@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
@@ -86,7 +86,7 @@ export const INSTALL_ITEMS: readonly InstallItem[] = [
     docFile: "BROWSER-BRIDGE-SETUP.md",
     category: "optional",
     promptIntro:
-      "安装浏览器扩展桥。先用 browser status 启动并读取 pi 侧实际端口，再引导用户从 ~/.pi/browser-bridge.json 复制端口和 token、在 chrome://extensions 加载 optional/browser-bridge 目录，最后用 browser status 验证认证连接。extension 仅在 app.channel='extension' 时使用，断连不回退 managed。",
+      "安装浏览器扩展桥。在 chrome://extensions 或 edge://extensions 加载 optional/browser-bridge 目录，更新后由用户重载扩展。先用 browser status 启动并读取 authMode、实际端口和 transportReady；默认 paired 需使用 popup 配对码与 browser pair 确认，PI_BROWSER_BRIDGE_AUTH_MODE=none 无需 token 或配对，transportReady=true 且 authenticatedConnected=false 才是正常状态。默认发现 19222..19231，自定义 PI_BROWSER_BRIDGE_PORT 也需在 popup 高级设置填写（无需 token）。/install installed 仅是当前模式历史就绪证据，不是实时连接；用 browser status 验证实时状态。extension 仅在 app.channel='extension' 时使用，断连不回退 managed。",
   },
   {
     id: "smart-search",
@@ -303,6 +303,26 @@ export function probeInstallStatus(id: string): InstallStatus {
         // proves that an extension authenticated. Live state belongs solely to
         // browser action=status.
         const directory = process.env.PI_BROWSER_BRIDGE_DIR?.trim() || join(homedir(), ".pi");
+        const mode = process.env.PI_BROWSER_BRIDGE_AUTH_MODE ?? "paired";
+        if (mode === "none") {
+          const historyDir = join(directory, "browser-bridge.none");
+          if (!existsSync(historyDir)) return "not-installed";
+          const records = readdirSync(historyDir).filter((name) => name.endsWith(".ready.json"));
+          const valid = records.some((name) => {
+            const value = readJson(join(historyDir, name));
+            if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+            const record = value as Record<string, unknown>;
+            return record.version === 1 && record.protocol === "probe-ready-v1"
+              && record.authMode === "none" && record.authenticated === false
+              && typeof record.serverInstanceId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(record.serverInstanceId)
+              && name === `${record.serverInstanceId}.ready.json`
+              && typeof record.installationId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(record.installationId)
+              && Number.isInteger(record.generation) && Number(record.generation) > 0
+              && isValidBridgePort(record.port) && typeof record.readyAt === "string" && Number.isFinite(Date.parse(record.readyAt));
+          });
+          return valid ? "installed" : records.length ? "partial" : "not-installed";
+        }
+        if (mode !== "paired") return "unknown";
         const markerPath = join(directory, "browser-bridge.verified");
         if (!existsSync(markerPath)) return "not-installed";
         const marker = readJson(markerPath) as BrowserBridgeVerifiedMarker | null;

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHmac, randomBytes, webcrypto } from "node:crypto";
+import { createHmac, randomBytes, randomUUID, webcrypto } from "node:crypto";
 import * as net from "node:net";
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { readFile, readdir, rm } from "node:fs/promises";
@@ -89,7 +89,23 @@ class MockExtension {
         }
         if (!message.cmd) return;
         socket.send(JSON.stringify({ type: "ack", id: message.id }));
-        const result = await this.reply(message);
+        // Manager-facing owner-lease contract. Legacy protocol-only commands
+        // still go directly to their original responder.
+        const owner = message.owner as { namespace: string; ownerId: string } | undefined;
+        const connection = message.connection as { serverInstanceId: string; generation: number };
+        const lease = () => ({ ...owner, serverInstanceId: connection.serverInstanceId, generation: connection.generation, claimId: randomUUID() });
+        let result: Reply;
+        if (message.cmd === "claim") {
+          result = { ok: true, data: { tabId: message.tabId, lease: lease() } };
+        } else if (message.cmd === "release") {
+          result = message.close ? await this.reply({ ...message, cmd: "tabs", method: "close" }) : { ok: true, data: { released: true } };
+        } else {
+          result = await this.reply(message);
+          if (owner && result?.ok !== false && result?.data && message.cmd === "tabs" && message.method === "create") {
+            result = { ...result, data: { ...result.data as object, lease: lease() } };
+          }
+          if (owner && result?.newTabs) result = { ...result, newTabs: result.newTabs.map((tab) => ({ ...tab, lease: lease() })) };
+        }
         if (result === null) return;
         socket.send(JSON.stringify({
           type: result.ok === false ? "error" : "result",
@@ -355,12 +371,18 @@ function backgroundVmContext(): vm.Context {
       constructor() { throw new Error("offline test harness"); }
     },
   });
-  vm.runInContext(source, context);
+  vm.runInContext(source.replace(/^startBridge\(\);$/m, ''), context);
   return context;
 }
 
 function startBackgroundIntegration(storage: Record<string, unknown>): { stop: () => void } {
-  const source = readFileSync(join(import.meta.dirname, "../optional/browser-bridge/background.js"), "utf8");
+  // Never send pairing proposals to a user's live bridge on an earlier port.
+  // Production source retains its bounded defaults; this VM uses only our listener.
+  const port = browserBridge.listeningPort();
+  assert.ok(port);
+  const source = readFileSync(join(import.meta.dirname, "../optional/browser-bridge/background.js"), "utf8")
+    .replace(/^const DEFAULT_WS_PORT = \d+;/m, `const DEFAULT_WS_PORT = ${port};`)
+    .replace(/^const DISCOVERY_LAST_PORT = \d+;/m, `const DISCOVERY_LAST_PORT = ${port};`);
   const event = { addListener() {}, removeListener() {} };
   const context = vm.createContext({
     btoa,
@@ -397,7 +419,7 @@ function startBackgroundIntegration(storage: Record<string, unknown>): { stop: (
     WebSocket,
   });
   vm.runInContext(source, context);
-  vm.runInContext(`globalThis.__stopIntegration = () => { if (ws) ws.close(); };`, context);
+  vm.runInContext(`globalThis.__stopIntegration = () => { for (const record of connections.values()) record.socket.close(); };`, context);
   return { stop: (context as { __stopIntegration: () => void }).__stopIntegration };
 }
 
@@ -405,9 +427,18 @@ function loadBackgroundTrackedProtocol(): BackgroundProtocolHarness {
   const context = backgroundVmContext();
   vm.runInContext(`
     globalThis.__trackedProtocol = {
-      install(socket, handler) { ws = socket; authenticated = true; status = 'connected'; dispatch = handler; },
-      execute: executeTrackedCommand,
-      cancel: cancelTrackedCommand,
+      install(socket, handler) {
+        const record = { port: 20000, socket, status: 'connected', commands: new Map(), localId: crypto.randomUUID(),
+          identity: { installationId: crypto.randomUUID(), serverInstanceId: crypto.randomUUID(), generation: 1, authMode: 'none', authenticated: false } };
+        connections.set(record.port, record); socket.__record = record; dispatch = handler;
+      },
+      async execute(socket, request) {
+        await executeTrackedCommand(socket.__record, { ...request, tabId: 1, connection: socket.__record.identity });
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        while (socket.__record.commands.has(request.id)) await new Promise((resolve) => setTimeout(resolve, 1));
+      },
+      cancel(socket, id) { cancelTrackedCommand(socket.__record, id); },
+
     };
   `, context);
   return (context as { __trackedProtocol: BackgroundProtocolHarness }).__trackedProtocol;
@@ -1244,7 +1275,7 @@ test("tracked cancel stopped=true is terminal without a synthetic result", async
   }
 });
 
-test("tracked terminals distinguish authenticated replacement from disconnect and fence the replacement generation", async () => {
+test("tracked terminals disconnect and fence the reconnected generation without live peer replacement", async () => {
   const { port, token } = await bridgeConfig();
   const original = await openAuthenticatedRaw(port, token);
   original.on("message", (raw) => {
@@ -1252,10 +1283,11 @@ test("tracked terminals distinguish authenticated replacement from disconnect an
     if (message.cmd) original.send(JSON.stringify({ type: "ack", id: message.id }));
   });
   const first = await browserBridge.sendTracked("exec", { tabId: 9, code: "pending" }, 500);
-  const firstRejected = assert.rejects(() => first.response, /connection replaced/i);
-  const replacement = await openAuthenticatedRaw(port, token);
+  const firstRejected = assert.rejects(() => first.response, /disconnected/i);
+  await closeRaw(original);
   await firstRejected;
-  assert.equal((await first.terminal).status, "replaced");
+  assert.equal((await first.terminal).status, "disconnected");
+  const replacement = await openAuthenticatedRaw(port, token);
   assert.throws(() => browserBridge.assertConnection(first.connection), /generation mismatch/i);
 
   replacement.on("message", (raw) => {
@@ -1468,9 +1500,10 @@ test("BrowserManager extension entries bind fixed tabs, expose limited adapters,
       /does not support page\.click.*Supported capabilities:/,
     );
 
-    const closesBeforeBorrowed = calls.filter((call) => call.cmd === "tabs" && call.method === "close").length;
+    const closesBeforeBorrowed = calls.filter((call) => call.cmd === "tabs" && call.method === "close" && call.tabId === 7).length;
     assert.equal(await manager.close("borrowed"), true);
-    assert.equal(calls.filter((call) => call.cmd === "tabs" && call.method === "close").length, closesBeforeBorrowed, "borrowed tabs must not be closed");
+    assert.equal(calls.filter((call) => call.cmd === "tabs" && call.method === "close" && call.tabId === 7).length, closesBeforeBorrowed, "borrowed tabs must not be closed");
+    assert.ok(calls.some((call) => call.cmd === "tabs" && call.method === "close" && call.tabId === 88), "lease-proven owned descendant is retired");
     assert.equal(statSync(screenshotPath, { throwIfNoEntry: false }), undefined, "entry-owned temporary screenshots must be removed on close");
 
     const owned = await manager.open({
@@ -1577,7 +1610,7 @@ test("failed owned extension open and concurrent closeAll wait for the real clos
   }
 });
 
-test("extension entries reject run and destructive close after authenticated transport replacement", async () => {
+test("extension entries reject run and destructive close after authenticated transport reconnect", async () => {
   const { BrowserManager } = await import("../src/tools/browser/manager.ts");
   const { port, token } = await bridgeConfig();
   const originalTabs = new Map<number, { id: number; url: string; title: string }>();
@@ -1613,8 +1646,8 @@ test("extension entries reject run and destructive close after authenticated tra
     });
     const originalIdentity = browserBridge.connectionIdentity();
     assert.ok(originalIdentity);
+    await original.close();
     await replacement.connect(port, token);
-    await original.waitForClose();
     await delay(20);
     const replacementIdentity = browserBridge.connectionIdentity();
     assert.ok(replacementIdentity);
@@ -2030,7 +2063,7 @@ test("extension token discovery sends only probes to a malicious candidate and a
           Promise.resolve().then(() => this.onmessage?.({ data: JSON.stringify({ type: 'foreign_listener' }) }));
           return;
         }
-        if (message.type === 'auth_probe') {
+        if (message.type === 'bridge_probe') {
           Promise.resolve().then(() => this.onmessage?.({ data: JSON.stringify({
             type: 'auth_challenge',
             protocol: HMAC_AUTH_PROTOCOL,
@@ -2047,6 +2080,7 @@ test("extension token discovery sends only probes to a malicious candidate and a
             protocol: BRIDGE_PROTOCOL,
             port: 19223,
             installationId: '22222222-2222-4222-8222-222222222222',
+            serverInstanceId: '33333333-3333-4333-8333-333333333333', generation: 8, authMode: 'paired', authenticated: true,
           }) }));
         }
       }
@@ -2057,18 +2091,16 @@ test("extension token discovery sends only probes to a malicious candidate and a
       }
     }
     WebSocket = DiscoverySocket;
-    connectionAttempt = 50;
-    ws = null;
-    status = 'connecting';
-    wsPort = 19223;
     globalThis.__discoveryHarness = {
       run: async () => {
-        const first = await connectCandidate(19222, 't'.repeat(43), '22222222-2222-4222-8222-222222222222', 50);
-        const second = await connectCandidate(19223, 't'.repeat(43), '22222222-2222-4222-8222-222222222222', 50);
-        return { first, second };
+        const credentials = [{ port: 19223, token: 't'.repeat(43), installationId: '22222222-2222-4222-8222-222222222222' }];
+        connectCandidate(19222, credentials, 'paired');
+        connectCandidate(19223, credentials, 'paired');
+        for (let i = 0; i < 100 && !ready(connections.get(19223)); i++) await new Promise((resolve) => setTimeout(resolve, 5));
+        return { first: connections.get(19222).status, second: connections.get(19223).status };
       },
       frames: () => Object.fromEntries([...__framesByPort].map(([port, frames]) => [port, frames])),
-      state: () => ({ status, authenticated }),
+      state: () => ({ status: connections.get(19223).status, authenticated: connections.get(19223).identity.authenticated }),
     };
   `, context);
   const harness = (context as unknown as {
@@ -2078,11 +2110,11 @@ test("extension token discovery sends only probes to a malicious candidate and a
       state: () => { status: string; authenticated: boolean };
     };
   }).__discoveryHarness;
-  assert.deepEqual(JSON.parse(JSON.stringify(await harness.run())), { first: "miss", second: "accepted" });
+  assert.deepEqual(JSON.parse(JSON.stringify(await harness.run())), { first: "auth-failed", second: "connected" });
   const frames = JSON.parse(JSON.stringify(harness.frames())) as Record<string, Array<Record<string, unknown>>>;
-  assert.deepEqual(frames["19222"]?.map((frame) => frame.type), ["auth_probe"]);
+  assert.deepEqual(frames["19222"]?.map((frame) => frame.type), ["bridge_probe"]);
   assert.equal(frames["19222"]?.some((frame) => "token" in frame), false);
-  assert.deepEqual(frames["19223"]?.slice(0, 2).map((frame) => frame.type), ["auth_probe", "auth_proof"]);
+  assert.deepEqual(frames["19223"]?.slice(0, 2).map((frame) => frame.type), ["bridge_probe", "auth_proof"]);
   assert.deepEqual(JSON.parse(JSON.stringify(harness.state())), { status: "connected", authenticated: true });
 });
 
@@ -2105,26 +2137,14 @@ test("delayed extension storage continuation cannot publish connected for a stal
       }
       send(frame) {
         const message = JSON.parse(frame);
-        if (message.type === 'auth_probe') {
-          const challenge = {
-            type: 'auth_challenge',
-            protocol: HMAC_AUTH_PROTOCOL,
-            clientNonce: message.clientNonce,
-            serverNonce: 's'.repeat(22),
-            installationId: '22222222-2222-4222-8222-222222222222',
-            port: 19223,
-            generation: 7,
-            expiresAt: Date.now() + 5000,
-          };
-          Promise.resolve().then(() => this.onmessage?.({ data: JSON.stringify(challenge) }));
-        } else if (message.type === 'auth_proof') {
-          const hello = {
-            type: 'auth_ok',
-            protocol: BRIDGE_PROTOCOL,
-            port: 19223,
-            installationId: '22222222-2222-4222-8222-222222222222',
-          };
-          Promise.resolve().then(() => this.onmessage?.({ data: JSON.stringify(hello) }));
+        if (message.type === 'pairing_request') {
+          const challenge = { type: 'pairing_challenge', protocol: BRIDGE_PROTOCOL,
+            requestId: '11111111-1111-4111-8111-111111111111', code: '123456', generation: 7, expiresAt: Date.now() + 5000 };
+          Promise.resolve().then(async () => {
+            await this.onmessage?.({ data: JSON.stringify(challenge) });
+            await this.onmessage?.({ data: JSON.stringify({ ...challenge, type: 'pairing_approved', port: 19223,
+              token: 't'.repeat(43), installationId: '22222222-2222-4222-8222-222222222222' }) });
+          });
         }
       }
       close(code = 1000) {
@@ -2134,22 +2154,15 @@ test("delayed extension storage continuation cannot publish connected for a stal
       }
     }
     WebSocket = AttemptSocket;
-    connectionAttempt = 40;
-    ws = null;
-    status = 'authenticating';
-    wsPort = 19222;
     globalThis.__attemptHarness = {
-      run: () => connectCandidate(19223, 't'.repeat(43), '22222222-2222-4222-8222-222222222222', 40),
+      run: () => connectCandidate(19223, [], 'pairing'),
       storageStarted: __storageStarted,
       replace: () => {
-        connectionAttempt = 41;
-        ws = { readyState: AttemptSocket.OPEN };
-        authenticated = false;
-        status = 'connecting';
+        connections.set(19223, { port: 19223, socket: { readyState: AttemptSocket.OPEN }, status: 'connecting', identity: null, localId: 'replacement' });
       },
       release: () => __releaseStorage(),
       closeOld: () => __lastSocket.close(),
-      state: () => ({ status, authenticated, attempt: connectionAttempt }),
+      state: () => ({ status: connections.get(19223).status, authenticated: Boolean(connections.get(19223).identity), attempt: 41 }),
     };
   `, context);
   const harness = (context as unknown as {
@@ -2169,7 +2182,7 @@ test("delayed extension storage continuation cannot publish connected for a stal
   await delay(20);
   assert.deepEqual(JSON.parse(JSON.stringify(harness.state())), { status: "connecting", authenticated: false, attempt: 41 });
   harness.closeOld();
-  assert.equal(await running, "miss");
+  assert.equal(await running, undefined);
 });
 
 test("extension discovery recognizes protocol frames, stays bounded, and stores credentials only for the exact approval", async () => {
@@ -2217,6 +2230,7 @@ test("extension discovery recognizes protocol frames, stays bounded, and stores 
     pi_ws_port: 19222,
     pi_ws_token: "t".repeat(43),
     pi_ws_installation_id: installationId,
+    pi_bridge_credentials_v1: [{ port: 19222, token: "t".repeat(43), installationId }],
   }]);
   assert.deepEqual(hostValue(protocol.auth({
     type: "auth_ok",
@@ -2231,10 +2245,9 @@ test("extension sources auto-discover/pair, preserve legacy fields, and implemen
   const background = readFileSync(join(import.meta.dirname, "../optional/browser-bridge/background.js"), "utf8");
   const popup = readFileSync(join(import.meta.dirname, "../optional/browser-bridge/popup.js"), "utf8");
   const popupHtml = readFileSync(join(import.meta.dirname, "../optional/browser-bridge/popup.html"), "utf8");
-  const probeFrame = background.indexOf("type: 'auth_probe'");
-  const proofFrame = background.indexOf("type: 'auth_proof'");
-  const readyFrame = background.indexOf("type: 'ext_ready'");
-  assert.ok(probeFrame >= 0 && proofFrame > probeFrame && readyFrame > proofFrame);
+  assert.match(background, /type: 'bridge_probe'/);
+  assert.match(background, /type: 'auth_proof'/);
+  assert.match(background, /publishTabs\(record, 'ext_ready'\)/);
   assert.doesNotMatch(background, /\{ type: 'auth', token \}/, "discovery must never publish the stored raw token");
   assert.match(background, /parseAuthChallenge/);
   assert.match(background, /createAuthProof/);
@@ -2251,8 +2264,8 @@ test("extension sources auto-discover/pair, preserve legacy fields, and implemen
   assert.match(background, /method === 'delete'/);
   assert.match(background, /data\.type === 'cancel'/);
   assert.match(background, /type: 'cancel_ack'/);
-  assert.match(background, /sendCancelAcknowledgement\(socket, id, true\)/);
-  assert.match(background, /sendCancelAcknowledgement\(socket, id, false\)/);
+  assert.match(background, /stopped = Boolean\(operation && !operation\.started\)/);
+  assert.match(background, /send\(record, \{ type: 'cancel_ack', id, stopped \}\)/);
   assert.match(popup, /STORAGE_PORT_KEY/);
   assert.match(popup, /STORAGE_TOKEN_KEY/);
   assert.match(popup, /pairing-pending/);

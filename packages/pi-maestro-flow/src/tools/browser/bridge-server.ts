@@ -8,10 +8,10 @@ import { WebSocketServer, WebSocket } from "ws";
 /**
  * BrowserBridgeServer — the pi side of the optional Chrome extension bridge.
  *
- * The bridge can execute page JavaScript and raw CDP, so binding to localhost is
- * not an authorization boundary. The server creates an owner-only config file
- * containing a random token and requires that token in the first WebSocket
- * frame. No extension message is processed before authentication succeeds.
+ * The bridge can execute page JavaScript and raw CDP. Default paired mode
+ * requires token possession; explicitly selected none mode requires only a
+ * nonce/instance continuity handshake, NOT authorization. Loopback and Origin
+ * filtering are hygiene, not protection from malicious local processes.
  *
  * New extensions scan only the bounded 19222..19231 range, require a marked
  * Browser Bridge pairing challenge, and receive credentials only after explicit
@@ -24,6 +24,10 @@ const DISCOVERY_PORT_COUNT = 10;
 const BRIDGE_PROTOCOL = "pi-browser-bridge/v1";
 const HMAC_AUTH_PROTOCOL = "challenge-hmac-sha256-v1";
 const LEGACY_AUTH_PROTOCOL = "first-frame-token-v1";
+const BRIDGE_READY_PROTOCOL = "probe-ready-v1";
+const BRIDGE_OWNER_PROTOCOL = "owner-lease-v1";
+const BRIDGE_CAPABILITIES = [BRIDGE_OWNER_PROTOCOL] as const;
+type BridgeAuthMode = "paired" | "none";
 const BRIDGE_DIRECTORY = process.env.PI_BROWSER_BRIDGE_DIR?.trim() || path.join(os.homedir(), ".pi");
 const AUTH_TIMEOUT_MS = 5_000;
 const AUTH_CHALLENGE_TTL_MS = 5_000;
@@ -177,15 +181,110 @@ interface BridgeConfig extends StoredBridgeConfig {
 interface BridgeConnectionIdentity {
   installationId: string;
   generation: number;
+  /** Optional only for legacy paired callers; mandatory for none-mode work. */
+  serverInstanceId?: string;
+  authMode?: BridgeAuthMode;
 }
 
-interface AuthenticatedConnection extends BridgeConnectionIdentity {
+interface BridgeTransportIdentity extends BridgeConnectionIdentity {
+  serverInstanceId: string;
+  authMode: BridgeAuthMode;
+  authenticated: boolean;
+}
+
+interface BridgeTransportState {
+  authMode: BridgeAuthMode;
+  ready: boolean;
+  authenticated: boolean;
+  serverInstanceId: string | null;
+  installationId: string | null;
+  generation: number | null;
+  port: number | null;
+  capabilities: readonly [typeof BRIDGE_OWNER_PROTOCOL];
+}
+
+interface BridgeProbeMessage {
+  type: "bridge_probe";
+  protocol: typeof BRIDGE_READY_PROTOCOL;
+  authMode: BridgeAuthMode;
+  clientNonce: string;
+}
+
+interface BridgeReadyChallenge extends BridgeTransportIdentity {
+  type: "bridge_challenge";
+  protocol: typeof BRIDGE_READY_PROTOCOL;
+  authMode: "none";
+  authenticated: false;
+  clientNonce: string;
+  serverNonce: string;
+  port: number;
+  expiresAt: number;
+  capabilities: readonly [typeof BRIDGE_OWNER_PROTOCOL];
+}
+
+/** Client echo: no token/proof; strictly binds this socket's live challenge. */
+interface BridgeReadyMessage {
+  type: "bridge_ready";
+  protocol: typeof BRIDGE_READY_PROTOCOL;
+  authMode: "none";
+  clientNonce: string;
+  serverNonce: string;
+  installationId: string;
+  serverInstanceId: string;
+  generation: number;
+}
+
+interface BridgeReadyFrame extends BridgeTransportIdentity {
+  type: "bridge_ready";
+  protocol: typeof BRIDGE_READY_PROTOCOL;
+  port: number;
+  capabilities: readonly [typeof BRIDGE_OWNER_PROTOCOL];
+}
+
+/** Owner/lease wire definitions only. Extension resource enforcement lives in T2. */
+interface BridgeOwnerIdentity {
+  namespace: string;
+  ownerId: string;
+}
+interface BridgeLeaseIdentity extends BridgeOwnerIdentity {
+  serverInstanceId: string;
+  generation: number;
+  claimId: string;
+}
+interface BridgeClaimCommand {
+  id: string;
+  cmd: "claim";
+  tabId: number;
+  owner: BridgeOwnerIdentity;
+  connection: BridgeTransportIdentity;
+}
+interface BridgeClaimResult {
+  tabId: number;
+  lease: BridgeLeaseIdentity;
+}
+interface BridgeReleaseCommand {
+  id: string;
+  cmd: "release";
+  tabId: number;
+  lease: BridgeLeaseIdentity;
+  connection: BridgeTransportIdentity;
+}
+interface BridgeOwnedCommandFields {
+  owner: BridgeOwnerIdentity;
+  lease?: BridgeLeaseIdentity;
+  connection: BridgeTransportIdentity;
+}
+
+interface AuthenticatedConnection extends BridgeTransportIdentity {
   socket: WebSocket;
 }
 
 interface SocketSession {
+  listenerGeneration: number;
   generation: number;
   authenticated: boolean;
+  ready: boolean;
+  readyChallenge: BridgeReadyChallenge | null;
   firstFrameSeen: boolean;
   pairingRequestId: string | null;
   authChallenge: AuthChallenge | null;
@@ -239,7 +338,18 @@ interface VerifiedMarkerWriteContext {
 
 type VerifiedMarkerWriter = (marker: VerifiedInstallMarker, context: VerifiedMarkerWriteContext) => Promise<void>;
 
+interface NoneReadyMarker extends BridgeTransportIdentity {
+  version: 1;
+  protocol: typeof BRIDGE_READY_PROTOCOL;
+  authMode: "none";
+  authenticated: false;
+  port: number;
+  readyAt: string;
+}
+type NoneReadyMarkerWriter = (marker: NoneReadyMarker, context: VerifiedMarkerWriteContext) => Promise<void>;
+
 interface AuthCommit {
+  serverInstanceId: string;
   serverGeneration: number;
   socketGeneration: number;
   socket: WebSocket;
@@ -250,6 +360,7 @@ interface AuthCommit {
 }
 
 interface BrowserBridgeServerOptions {
+  authMode?: BridgeAuthMode;
   directory?: string;
   anchorPort?: number;
   pairingTtlMs?: number;
@@ -257,9 +368,11 @@ interface BrowserBridgeServerOptions {
   cancelAckTimeoutMs?: number;
   persistConfig?: (config: BridgeConfig, paths: BridgePersistencePaths, signal: AbortSignal) => Promise<void>;
   writeVerifiedMarker?: VerifiedMarkerWriter;
+  writeNoneReadyMarker?: NoneReadyMarkerWriter;
 }
 
 interface ProvisionalStartAttempt {
+  serverInstanceId: string;
   generation: number;
   controller: AbortController;
   server: WebSocketServer | null;
@@ -286,8 +399,9 @@ class BrowserBridgeServer {
   #shutdownPromise: Promise<void> | null = null;
   #defaultTabId: number | null = null;
   #serverGeneration = 0;
-  #connectionGeneration = 0;
+  #serverInstanceId: string | null = null;
   #socketGeneration = 0;
+  readonly #authMode: BridgeAuthMode;
   readonly #directory: string;
   readonly #configFile: string;
   readonly #portFile: string;
@@ -299,8 +413,10 @@ class BrowserBridgeServer {
   readonly #cancelAckTimeoutMs: number;
   readonly #persistConfig: (config: BridgeConfig, paths: BridgePersistencePaths, signal: AbortSignal) => Promise<void>;
   readonly #writeVerifiedMarker: VerifiedMarkerWriter;
+  readonly #writeNoneReadyMarker: NoneReadyMarkerWriter;
 
   constructor(options: BrowserBridgeServerOptions = {}) {
+    this.#authMode = parseProductionAuthMode(options.authMode ?? process.env.PI_BROWSER_BRIDGE_AUTH_MODE);
     this.#directory = options.directory?.trim() || BRIDGE_DIRECTORY;
     this.#configFile = path.join(this.#directory, "browser-bridge.json");
     this.#portFile = path.join(this.#directory, "browser-bridge.port");
@@ -316,6 +432,7 @@ class BrowserBridgeServer {
     this.#cancelAckTimeoutMs = positiveDuration(options.cancelAckTimeoutMs, CANCEL_ACK_TIMEOUT_MS, "cancel acknowledgement timeout");
     this.#persistConfig = options.persistConfig ?? persistBridgeConfig;
     this.#writeVerifiedMarker = options.writeVerifiedMarker ?? persistVerifiedMarker;
+    this.#writeNoneReadyMarker = options.writeNoneReadyMarker ?? persistNoneReadyMarker;
   }
 
   /** Current authenticated connection state. */
@@ -328,17 +445,39 @@ class BrowserBridgeServer {
     return this.#port;
   }
 
-  /** A bridge extension completed the token handshake and is reachable. */
+  authMode(): BridgeAuthMode { return this.#authMode; }
+
+  /** Transport readiness is deliberately separate from credential authentication. */
+  transportState(): BridgeTransportState {
+    const ready = this.isConnected();
+    return {
+      authMode: this.#authMode,
+      ready,
+      authenticated: ready && this.#connection?.authenticated === true,
+      serverInstanceId: this.#serverInstanceId,
+      installationId: this.#installationId,
+      generation: ready ? this.#connection!.generation : null,
+      port: this.#port,
+      capabilities: BRIDGE_CAPABILITIES,
+    };
+  }
+
+  isAuthenticated(): boolean { return this.transportState().authenticated; }
+
+  /** A bridge extension completed the selected mode's handshake and is reachable. */
   isConnected(): boolean {
     return this.#status === "connected" && this.#connection !== null && this.#connection.socket.readyState === WebSocket.OPEN;
   }
 
   /** Capture the authenticated installation/generation identity for generation-owned work. */
-  connectionIdentity(): BridgeConnectionIdentity | null {
+  connectionIdentity(): BridgeTransportIdentity | null {
     if (!this.isConnected() || !this.#connection) return null;
     return {
       installationId: this.#connection.installationId,
       generation: this.#connection.generation,
+      serverInstanceId: this.#connection.serverInstanceId,
+      authMode: this.#connection.authMode,
+      authenticated: this.#connection.authenticated,
     };
   }
 
@@ -450,6 +589,9 @@ class BrowserBridgeServer {
       || !current
       || current.installationId !== identity.installationId
       || current.generation !== identity.generation
+      || (identity.serverInstanceId !== undefined && current.serverInstanceId !== identity.serverInstanceId)
+      || (current.authMode === "none" && identity.serverInstanceId !== current.serverInstanceId)
+      || (identity.authMode !== undefined && current.authMode !== identity.authMode)
     ) {
       const actual = current && current.socket.readyState === WebSocket.OPEN
         ? `${current.installationId}/${current.generation}`
@@ -480,7 +622,9 @@ class BrowserBridgeServer {
     }
     const fallback = this.defaultTabId();
     if (fallback !== null) return fallback;
-    throw new Error("browser-bridge: no authenticated tab connected. Open the extension, then use browser status and browser pair for first-time setup.");
+    throw new Error(this.#authMode === "none"
+      ? "browser-bridge: no ready tab connected. Open the extension with none mode selected."
+      : "browser-bridge: no authenticated tab connected. Open the extension, then use browser status and browser pair for first-time setup.");
   }
 
   /** Lazily start within the bounded discovery range (idempotent and abortable). */
@@ -494,6 +638,7 @@ class BrowserBridgeServer {
     if (!this.#startPromise) {
       createdAttempt = true;
       const startAttempt: ProvisionalStartAttempt = {
+        serverInstanceId: randomUUID(),
         generation: ++this.#serverGeneration,
         controller: new AbortController(),
         server: null,
@@ -526,19 +671,19 @@ class BrowserBridgeServer {
     await ensurePrivateDirectory(this.#directory);
     this.#assertStartGeneration(generation);
     throwIfSignalAborted(controller.signal);
-    const existingConfig = await readBridgeConfig(this.#configFile);
+    // NONE must not even read/chmod legacy credentials, including malformed files.
+    const existingConfig = this.#authMode === "paired" ? await readBridgeConfig(this.#configFile) : null;
     this.#assertStartGeneration(generation);
     throwIfSignalAborted(controller.signal);
-    const token = existingConfig?.token ?? randomBytes(32).toString("base64url");
+    const token = this.#authMode === "paired" ? existingConfig?.token ?? randomBytes(32).toString("base64url") : null;
     const installationId = existingConfig?.installationId ?? randomUUID();
 
     try {
       const { server, port } = await this.#bindBounded(attempt);
       this.#assertStartGeneration(generation);
       throwIfSignalAborted(controller.signal);
-      const config = { version: 1, port, token, installationId } satisfies BridgeConfig;
-      const persistence = this.#persistConfig(
-        config,
+      const persistence = token === null ? Promise.resolve() : this.#persistConfig(
+        { version: 1, port, token, installationId },
         { configFile: this.#configFile, portFile: this.#portFile },
         controller.signal,
       );
@@ -550,6 +695,7 @@ class BrowserBridgeServer {
       // Publish the live listener and credentials only after both persistence
       // boundaries commit for this exact start generation.
       this.#server = server;
+      this.#serverInstanceId = attempt.serverInstanceId;
       this.#port = port;
       this.#token = token;
       this.#installationId = installationId;
@@ -568,9 +714,16 @@ class BrowserBridgeServer {
         port,
         host: "127.0.0.1",
         maxPayload: MAX_PAYLOAD_BYTES,
+        verifyClient: ({ req }, done) => {
+          if (isAllowedBridgeOrigin(req.headers.origin)) done(true);
+          else done(false, 403, "Browser Bridge Origin rejected");
+        }
       });
       attempt.server = server;
-      server.on("connection", (socket) => this.#handleConnection(socket));
+      server.on("connection", (socket) => {
+        if (this.#serverGeneration !== attempt.generation) { socket.terminate(); return; }
+        this.#handleConnection(socket, attempt.generation);
+      });
       try {
         await abortableStartBoundary(waitForListening(server), attempt.controller.signal);
         return { server, port };
@@ -612,7 +765,9 @@ class BrowserBridgeServer {
       };
       waiter.timer = setTimeout(() => {
         waiter.reject(new Error(
-          `browser-bridge: no authenticated extension connected within ${timeoutMs}ms. Open the extension and approve its pending request with browser status/browser pair; legacy manual port/token configuration remains available.`,
+          this.#authMode === "none"
+            ? `browser-bridge: no ready extension connected within ${timeoutMs}ms. Open the extension with none mode selected; this mode provides no authorization.`
+            : `browser-bridge: no authenticated extension connected within ${timeoutMs}ms. Open the extension and approve its pending request with browser status/browser pair; legacy manual port/token configuration remains available.`,
         ));
       }, timeoutMs);
       this.#connectionWaiters.add(waiter);
@@ -621,11 +776,14 @@ class BrowserBridgeServer {
     });
   }
 
-  #handleConnection(socket: WebSocket): void {
+  #handleConnection(socket: WebSocket, listenerGeneration: number): void {
     this.#connections.add(socket);
     const session: SocketSession = {
+      listenerGeneration,
       generation: ++this.#socketGeneration,
       authenticated: false,
+      ready: false,
+      readyChallenge: null,
       firstFrameSeen: false,
       pairingRequestId: null,
       authChallenge: null,
@@ -636,13 +794,13 @@ class BrowserBridgeServer {
     if (this.#server && !this.isConnected()) this.#status = "connecting";
 
     const authenticationTimer = setTimeout(() => {
-      if (!session.authenticated && !session.pairingRequestId) this.#rejectUnauthenticated(socket, "authentication timeout");
+      if (!session.ready && !session.pairingRequestId) this.#rejectUnauthenticated(socket, "handshake timeout");
     }, AUTH_TIMEOUT_MS);
     this.#authenticationTimers.set(socket, authenticationTimer);
 
     socket.on("message", (raw, isBinary) => {
       const text = raw.toString();
-      if (!session.authenticated) {
+      if (!session.ready) {
         if (isBinary) {
           this.#rejectUnauthenticated(socket, "authentication requires text frames");
           return;
@@ -650,6 +808,21 @@ class BrowserBridgeServer {
         const parsed = parseJsonRecord(text);
         if (!session.firstFrameSeen) {
           session.firstFrameSeen = true;
+          const bridgeProbe = decodeBridgeProbe(parsed);
+          if (bridgeProbe) {
+            if (bridgeProbe.authMode !== this.#authMode) {
+              this.#rejectUnauthenticated(socket, "browser bridge auth mode mismatch; no downgrade permitted");
+            } else if (this.#authMode === "none") {
+              this.#issueReadyChallenge(socket, session, bridgeProbe);
+            } else {
+              this.#issueAuthChallenge(socket, session, { type: "auth_probe", protocol: HMAC_AUTH_PROTOCOL, clientNonce: bridgeProbe.clientNonce });
+            }
+            return;
+          }
+          if (this.#authMode === "none") {
+            this.#rejectUnauthenticated(socket, "none mode requires an explicit bridge_probe");
+            return;
+          }
           const pairingRequest = decodePairingRequest(parsed);
           if (pairingRequest) {
             this.#registerPairingRequest(socket, session, pairingRequest);
@@ -670,6 +843,17 @@ class BrowserBridgeServer {
             return;
           }
           this.#rejectUnauthenticated(socket, "invalid browser bridge authentication frame");
+          return;
+        }
+        if (this.#authMode === "none") {
+          const challenge = session.readyChallenge;
+          const ready = decodeBridgeReady(parsed);
+          if (!challenge || !ready || !this.#verifyReadyEcho(socket, session, challenge, ready)) {
+            this.#rejectUnauthenticated(socket, "invalid or expired browser bridge readiness echo");
+            return;
+          }
+          session.readyChallenge = null;
+          this.#completeAuthentication(socket, session, BRIDGE_READY_PROTOCOL);
           return;
         }
         if (session.pairingRequestId) {
@@ -784,6 +968,38 @@ class BrowserBridgeServer {
     this.#rejectUnauthenticated(request.socket, reason);
   }
 
+  #issueReadyChallenge(socket: WebSocket, session: SocketSession, probe: BridgeProbeMessage): void {
+    const state = this.transportState();
+    if (!this.#server || !state.serverInstanceId || !state.installationId || !state.port || !this.#connections.has(socket)) {
+      this.#rejectUnauthenticated(socket, "browser bridge listener generation is unavailable");
+      return;
+    }
+    const challenge: BridgeReadyChallenge = {
+      type: "bridge_challenge", protocol: BRIDGE_READY_PROTOCOL,
+      authMode: "none", authenticated: false,
+      clientNonce: probe.clientNonce, serverNonce: randomBytes(16).toString("base64url"),
+      serverInstanceId: state.serverInstanceId, installationId: state.installationId,
+      generation: session.generation, port: state.port,
+      expiresAt: Date.now() + this.#authChallengeTtlMs, capabilities: BRIDGE_CAPABILITIES,
+    };
+    session.readyChallenge = challenge;
+    try { socket.send(JSON.stringify(challenge)); } catch { socket.terminate(); }
+  }
+
+  #verifyReadyEcho(socket: WebSocket, session: SocketSession, challenge: BridgeReadyChallenge, ready: BridgeReadyMessage): boolean {
+    return challenge.expiresAt > Date.now()
+      && this.#socketSessions.get(socket) === session
+      && socket.readyState === WebSocket.OPEN
+      && session.generation === challenge.generation
+      && this.#serverInstanceId === challenge.serverInstanceId
+      && this.#installationId === challenge.installationId
+      && ready.clientNonce === challenge.clientNonce
+      && ready.serverNonce === challenge.serverNonce
+      && ready.serverInstanceId === challenge.serverInstanceId
+      && ready.installationId === challenge.installationId
+      && ready.generation === challenge.generation;
+  }
+
   #issueAuthChallenge(socket: WebSocket, session: SocketSession, probe: AuthProbeMessage): void {
     const installationId = this.#installationId;
     const port = this.#port;
@@ -806,6 +1022,10 @@ class BrowserBridgeServer {
         type: "auth_challenge",
         protocol: HMAC_AUTH_PROTOCOL,
         ...challenge,
+        authMode: "paired",
+        authenticated: false,
+        serverInstanceId: this.#serverInstanceId,
+        capabilities: BRIDGE_CAPABILITIES,
         consumed: undefined,
       }));
     } catch {
@@ -837,22 +1057,25 @@ class BrowserBridgeServer {
   #completeAuthentication(
     socket: WebSocket,
     session: SocketSession,
-    protocol: typeof LEGACY_AUTH_PROTOCOL | typeof HMAC_AUTH_PROTOCOL,
+    protocol: typeof LEGACY_AUTH_PROTOCOL | typeof HMAC_AUTH_PROTOCOL | typeof BRIDGE_READY_PROTOCOL,
   ): void {
     void this.#acceptAuthenticatedSocket(socket, session, protocol).then((accepted) => {
       const current = this.#socketSessions.get(socket);
-      if (!accepted || current !== session || current.generation !== session.generation || socket.readyState !== WebSocket.OPEN) return;
-      session.authenticated = true;
+      if (!accepted || current !== session || current.generation !== session.generation || this.#connection?.socket !== socket || socket.readyState !== WebSocket.OPEN) return;
+      session.ready = true;
+      session.authenticated = this.#authMode === "paired";
       try {
         socket.send(JSON.stringify({
-          type: "auth_ok",
-          protocol: BRIDGE_PROTOCOL,
-          authProtocol: protocol,
+          type: this.#authMode === "none" ? "bridge_ready" : "auth_ok",
+          protocol: this.#authMode === "none" ? BRIDGE_READY_PROTOCOL : BRIDGE_PROTOCOL,
+          ...(this.#authMode === "paired" ? { authProtocol: protocol } : {}),
           port: this.#port,
-          installationId: this.#installationId,
+          ...this.connectionIdentity(),
+          capabilities: BRIDGE_CAPABILITIES,
         }));
       } catch {
         session.authenticated = false;
+        session.ready = false;
         socket.terminate();
         return;
       }
@@ -865,10 +1088,12 @@ class BrowserBridgeServer {
     const session = this.#socketSessions.get(commit.socket);
     if (
       this.#serverGeneration !== commit.serverGeneration
+      || this.#serverInstanceId !== commit.serverInstanceId
       || this.#server !== commit.server
       || this.#installationId !== commit.installationId
       || !session
       || session.generation !== commit.socketGeneration
+      || session.listenerGeneration !== commit.serverGeneration
       || !this.#connections.has(commit.socket)
       || commit.socket.readyState !== WebSocket.OPEN
     ) throw new Error("browser-bridge authentication commit generation was revoked");
@@ -877,18 +1102,22 @@ class BrowserBridgeServer {
   #startAuthCommit(
     socket: WebSocket,
     session: SocketSession,
-    protocol: typeof LEGACY_AUTH_PROTOCOL | typeof HMAC_AUTH_PROTOCOL,
+    protocol: typeof LEGACY_AUTH_PROTOCOL | typeof HMAC_AUTH_PROTOCOL | typeof BRIDGE_READY_PROTOCOL,
   ): AuthCommit {
     const server = this.#server;
     const installationId = this.#installationId;
     const port = this.#port;
-    if (!server || !installationId || !port) throw new Error("browser-bridge authentication generation is unavailable");
+    const serverInstanceId = this.#serverInstanceId;
+    if (!server || !installationId || !port || !serverInstanceId || session.listenerGeneration !== this.#serverGeneration) {
+      throw new Error("browser-bridge handshake generation is unavailable");
+    }
     for (const existing of this.#authCommits) {
       if (existing.socketGeneration < session.generation) {
         existing.controller.abort(new Error("browser-bridge authentication commit replaced by newer socket generation"));
       }
     }
     const commit = {
+      serverInstanceId,
       serverGeneration: this.#serverGeneration,
       socketGeneration: session.generation,
       socket,
@@ -897,20 +1126,24 @@ class BrowserBridgeServer {
       controller: new AbortController(),
       promise: Promise.resolve(false),
     } satisfies AuthCommit;
-    const marker = {
-      version: 1,
-      protocol,
-      port,
-      installationId,
-      verifiedAt: new Date().toISOString(),
-    } satisfies VerifiedInstallMarker;
     commit.promise = (async () => {
       this.#assertAuthCommitOwner(commit);
-      await this.#writeVerifiedMarker(marker, {
+      const context = {
         path: this.#verifiedInstallFile,
         signal: commit.controller.signal,
         assertOwner: () => this.#assertAuthCommitOwner(commit),
-      });
+      };
+      if (protocol === BRIDGE_READY_PROTOCOL) {
+        await this.#writeNoneReadyMarker({
+          version: 1, protocol, authMode: "none", authenticated: false,
+          serverInstanceId, installationId, generation: session.generation,
+          port, readyAt: new Date().toISOString(),
+        }, { ...context, path: path.join(this.#directory, "browser-bridge.none", `${serverInstanceId}.ready.json`) });
+      } else {
+        await this.#writeVerifiedMarker({
+          version: 1, protocol, port, installationId, verifiedAt: new Date().toISOString(),
+        }, context);
+      }
       this.#assertAuthCommitOwner(commit);
       return true;
     })();
@@ -922,8 +1155,12 @@ class BrowserBridgeServer {
   async #acceptAuthenticatedSocket(
     socket: WebSocket,
     session: SocketSession,
-    protocol: typeof LEGACY_AUTH_PROTOCOL | typeof HMAC_AUTH_PROTOCOL,
+    protocol: typeof LEGACY_AUTH_PROTOCOL | typeof HMAC_AUTH_PROTOCOL | typeof BRIDGE_READY_PROTOCOL,
   ): Promise<boolean> {
+    if (this.isConnected() && this.#connection?.socket !== socket) {
+      this.#rejectUnauthenticated(socket, "browser bridge busy: a ready extension peer is already selected");
+      return false;
+    }
     let commit: AuthCommit;
     try {
       commit = this.#startAuthCommit(socket, session, protocol);
@@ -936,15 +1173,21 @@ class BrowserBridgeServer {
     const installationId = commit.installationId;
     const previous = this.#connection;
     if (previous && previous.socket !== socket) {
-      this.#terminateCommandsForConnection(previous, "replaced", new Error("browser-bridge connection replaced"));
-      try { previous.socket.close(1000, "replaced by authenticated connection"); } catch { previous.socket.terminate(); }
+      if (previous.socket.readyState === WebSocket.OPEN) {
+        this.#rejectUnauthenticated(socket, "browser bridge busy: a ready extension peer is already selected");
+        return false;
+      }
+      this.#terminateCommandsForConnection(previous, "disconnected", new Error("browser-bridge disconnected"));
     }
     this.#tabs = [];
     this.#defaultTabId = null;
     this.#connection = {
       socket,
       installationId,
-      generation: ++this.#connectionGeneration,
+      generation: session.generation,
+      serverInstanceId: commit.serverInstanceId,
+      authMode: this.#authMode,
+      authenticated: this.#authMode === "paired",
     };
     this.#clearAuthenticationTimer(socket);
     this.#status = "connected";
@@ -1167,6 +1410,7 @@ class BrowserBridgeServer {
     await Promise.allSettled(closing);
     if (starting) await starting.catch(() => {});
     this.#server = null;
+    this.#serverInstanceId = null;
     this.#port = null;
     this.#token = null;
     this.#installationId = null;
@@ -1195,12 +1439,11 @@ class BrowserBridgeServer {
     if (expectedConnection) this.assertConnection(expectedConnection);
     const active = this.#connection;
     if (!this.isConnected() || !active) {
-      throw new Error("browser-bridge: authenticated extension not connected. Open the extension and approve its pending request with browser status/browser pair.");
+      throw new Error(this.#authMode === "none"
+        ? "browser-bridge: ready extension not connected. Open the extension with none mode selected."
+        : "browser-bridge: authenticated extension not connected. Open the extension and approve its pending request with browser status/browser pair.");
     }
-    const connection = {
-      installationId: active.installationId,
-      generation: active.generation,
-    } satisfies BridgeConnectionIdentity;
+    const connection = this.connectionIdentity()!;
     const socket = active.socket;
     const id = randomUUID();
     let responseResolve!: (value: BridgeResult) => void;
@@ -1247,7 +1490,7 @@ class BrowserBridgeServer {
       cancel: () => this.#cancelTrackedCommand(pending),
     };
     try {
-      socket.send(JSON.stringify({ id, cmd, ...payload }), (error) => {
+      socket.send(JSON.stringify({ ...payload, id, cmd, connection }), (error) => {
         if (!error || this.#pending.get(id) !== pending) return;
         this.#settleTrackedCommand(pending, {
           status: "send_failed",
@@ -1382,6 +1625,35 @@ function hasOnlyKeys(value: Record<string, unknown>, required: readonly string[]
   const keys = Object.keys(value);
   return required.every((key) => Object.hasOwn(value, key))
     && keys.every((key) => required.includes(key) || optional.includes(key));
+}
+
+function parseProductionAuthMode(value: string | undefined): BridgeAuthMode {
+  if (value === undefined) return "paired";
+  if (value === "paired" || value === "none") return value;
+  throw new Error("PI_BROWSER_BRIDGE_AUTH_MODE must be paired or none");
+}
+
+/** Upgrade hygiene only: native clients can omit/spoof Origin, not authentication. */
+function isAllowedBridgeOrigin(origin: string | undefined): boolean {
+  if (origin === undefined) return true;
+  return /^chrome-extension:\/\/[a-p]{32}\/?$/.test(origin)
+    || /^moz-extension:\/\/[0-9a-f-]{36}\/?$/i.test(origin);
+}
+
+function decodeBridgeProbe(value: Record<string, unknown> | null): BridgeProbeMessage | null {
+  if (!value || !hasOnlyKeys(value, ["type", "protocol", "authMode", "clientNonce"])) return null;
+  if (value.type !== "bridge_probe" || value.protocol !== BRIDGE_READY_PROTOCOL
+    || (value.authMode !== "none" && value.authMode !== "paired") || !isNonce(value.clientNonce)) return null;
+  return value as unknown as BridgeProbeMessage;
+}
+
+function decodeBridgeReady(value: Record<string, unknown> | null): BridgeReadyMessage | null {
+  if (!value || !hasOnlyKeys(value, ["type", "protocol", "authMode", "clientNonce", "serverNonce", "installationId", "serverInstanceId", "generation"])) return null;
+  if (value.type !== "bridge_ready" || value.protocol !== BRIDGE_READY_PROTOCOL || value.authMode !== "none"
+    || !isNonce(value.clientNonce) || !isNonce(value.serverNonce)
+    || !isInstallationId(value.installationId) || !isInstallationId(value.serverInstanceId)
+    || !Number.isSafeInteger(value.generation) || Number(value.generation) <= 0) return null;
+  return value as unknown as BridgeReadyMessage;
 }
 
 function decodeLegacyAuth(value: Record<string, unknown> | null): AuthMessage | null {
@@ -1537,6 +1809,10 @@ async function readBridgeConfig(configFile: string): Promise<StoredBridgeConfig 
 
 function isInstallationId(value: unknown): value is string {
   return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+async function persistNoneReadyMarker(marker: NoneReadyMarker, context: VerifiedMarkerWriteContext): Promise<void> {
+  await writePrivateFile(context.path, `${JSON.stringify(marker, null, 2)}\n`, context.signal, context.assertOwner);
 }
 
 async function persistVerifiedMarker(marker: VerifiedInstallMarker, context: VerifiedMarkerWriteContext): Promise<void> {
@@ -1695,6 +1971,11 @@ export {
   DEFAULT_PORT,
   DISCOVERY_PORT_COUNT,
   HMAC_AUTH_PROTOCOL,
+  BRIDGE_READY_PROTOCOL,
+  BRIDGE_OWNER_PROTOCOL,
+  BRIDGE_CAPABILITIES,
+  isAllowedBridgeOrigin,
+  parseProductionAuthMode,
   authTranscript,
   parseProductionAnchorPort,
 };
@@ -1703,6 +1984,21 @@ export type {
   BridgeCommandTerminal,
   BridgeCommandTerminalStatus,
   BridgeConnectionIdentity,
+  BridgeAuthMode,
+  BridgeTransportIdentity,
+  BridgeTransportState,
+  BridgeProbeMessage,
+  BridgeReadyChallenge,
+  BridgeReadyMessage,
+  BridgeReadyFrame,
+  BridgeOwnerIdentity,
+  BridgeLeaseIdentity,
+  BridgeClaimCommand,
+  BridgeClaimResult,
+  BridgeReleaseCommand,
+  BridgeOwnedCommandFields,
+  NoneReadyMarker,
+  NoneReadyMarkerWriter,
   BridgeResult,
   BridgeStatus,
   BridgeTab,

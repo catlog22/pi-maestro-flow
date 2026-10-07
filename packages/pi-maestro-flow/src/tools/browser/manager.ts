@@ -1,5 +1,5 @@
-import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -14,6 +14,9 @@ import {
   browserBridge,
   type BridgeCommandTerminal,
   type BridgeConnectionIdentity,
+  type BridgeAuthMode,
+  type BridgeOwnerIdentity,
+  type BridgeLeaseIdentity,
   type BridgeResult,
   type BridgeStatus,
   type PairingApproval,
@@ -271,7 +274,12 @@ export interface BrowserManagerStatus {
     state: BridgeStatus;
     listeningPort: number | null;
     authenticatedConnected: boolean;
-    /** Number of live Chrome tabs last reported by the authenticated extension. */
+    authMode: BridgeAuthMode;
+    transportConnected: boolean;
+    transportReady: boolean;
+    serverInstanceId: string | null;
+    connectionGeneration: number | null;
+    /** Number of live Chrome tabs last reported by the ready transport. */
     tabCount: number;
     /** Short-lived, command-inert discovery requests awaiting explicit approval. */
     pendingPairings: PairingRequestInfo[];
@@ -359,6 +367,10 @@ interface ExtensionTrackedOperation {
 }
 
 interface ExtensionOperationOwner {
+  owner: BridgeOwnerIdentity;
+  bridgeIdentity: BridgeConnectionIdentity;
+  leases: Map<number, { lease: BridgeLeaseIdentity; owned: boolean }>;
+  claims: Map<number, Promise<void>>;
   /** False after timeout/abort or once close starts; no new commands may begin. */
   acceptingCommands: boolean;
   /** Every command terminal owned by this entry, including caller-finished work. */
@@ -535,7 +547,7 @@ export class BrowserManager implements BrowserManagerLike {
     await raceAbort(browserBridge.waitUntilConnected(options.timeoutMs), options.signal, options.timeoutMs);
     throwIfAborted(options.signal);
     const bridgeIdentity = requireExtensionConnection();
-    const operationOwner = createExtensionOperationOwner();
+    const operationOwner = createExtensionOperationOwner(bridgeIdentity);
     this.#provisionalExtensionOwners.add(operationOwner);
     let entry: ExtensionEntry | undefined;
     let ownedTab = false;
@@ -552,14 +564,14 @@ export class BrowserManager implements BrowserManagerLike {
           bridgeIdentity,
           options.signal,
           options.timeoutMs,
-          () => browserBridge.sendTracked("tabs", { method: "create", url: options.url, active: false }, options.timeoutMs, bridgeIdentity),
+          () => sendOwnedExtensionCommand(operationOwner, "tabs", { method: "create", url: options.url, active: false }, options.timeoutMs),
           operationOwner,
         );
         selected = parseExtensionTab(result.data, "tabs.create");
         ownedTab = true;
       } else {
         selected = reported[0];
-        if (!selected) throw new Error("browser-bridge: the authenticated extension reported no scriptable tabs; pass url to create an owned tab.");
+        if (!selected) throw new Error("browser-bridge: the ready extension reported no scriptable tabs; pass url to create an owned tab.");
       }
 
       entry = {
@@ -578,6 +590,9 @@ export class BrowserManager implements BrowserManagerLike {
         url: selected.url,
         title: selected.title,
         bridgeIdentity,
+        owner: operationOwner.owner,
+        leases: operationOwner.leases,
+        claims: operationOwner.claims,
         closed: false,
         acceptingCommands: operationOwner.acceptingCommands,
         terminalOperations: operationOwner.terminalOperations,
@@ -589,6 +604,7 @@ export class BrowserManager implements BrowserManagerLike {
       };
       this.#provisionalExtensionOwners.delete(operationOwner);
 
+      await ensureExtensionClaim(entry, selected.id, options.timeoutMs);
       await this.#configureEntry(entry, options, ownedTab && !options.target);
       assertExtensionEntryActive(entry, options.signal);
       this.#registerEntry(entry);
@@ -600,17 +616,16 @@ export class BrowserManager implements BrowserManagerLike {
         entry.closed = true;
         entry.acceptingCommands = false;
         cancelExtensionOperations(entry);
-        if (ownedTab) {
-          entry.disposePromise ??= disposeEntry(entry);
-          try {
-            await entry.disposePromise;
-          } catch (caught) {
-            cleanupError = caught;
-          }
+        entry.disposePromise ??= disposeEntry(entry);
+        try {
+          await entry.disposePromise;
+        } catch (caught) {
+          cleanupError = caught;
         }
         if (this.#tabs.get(entry.name) === entry) this.#tabs.delete(entry.name);
       } else {
         cancelExtensionOperations(operationOwner);
+        try { await releaseExtensionOwner(operationOwner); } catch (caught) { cleanupError = caught; }
       }
       this.#retireProvisionalExtensionOwner(operationOwner);
       if (cleanupError !== undefined) {
@@ -664,7 +679,7 @@ export class BrowserManager implements BrowserManagerLike {
           entry.bridgeIdentity,
           combined.signal,
           timeoutMs,
-          () => browserBridge.sendTracked("exec", { tabId: entry.tabId, code }, timeoutMs, entry.bridgeIdentity),
+          () => sendOwnedExtensionCommand(entry, "exec", { tabId: entry.tabId, code }, timeoutMs),
           entry,
         );
         assertExtensionEntryActive(entry, combined.signal);
@@ -930,9 +945,10 @@ export class BrowserManager implements BrowserManagerLike {
     // extension open and explicit pair approval are the other startup surfaces.
     await browserBridge.start(signal);
     const listeningPort = browserBridge.listeningPort();
-    const authenticatedConnected = browserBridge.isConnected();
+    const transport = browserBridge.transportState();
+    const authenticatedConnected = transport.authenticated;
     const reportedState = browserBridge.status();
-    const state: BridgeStatus = authenticatedConnected
+    const state: BridgeStatus = transport.ready
       ? "connected"
       : reportedState === "connected"
         ? "disconnected"
@@ -951,8 +967,13 @@ export class BrowserManager implements BrowserManagerLike {
         state,
         listeningPort,
         authenticatedConnected,
-        tabCount: authenticatedConnected ? browserBridge.tabs().length : 0,
-        pendingPairings: browserBridge.pairingRequests(),
+        authMode: transport.authMode,
+        transportConnected: transport.ready,
+        transportReady: transport.ready,
+        serverInstanceId: transport.serverInstanceId,
+        connectionGeneration: transport.generation,
+        tabCount: transport.ready ? browserBridge.tabs().length : 0,
+        pendingPairings: transport.authMode === "none" ? [] : browserBridge.pairingRequests(),
         drainingCommands: this.#drainingExtensionCommands(),
       },
       namedTabs,
@@ -1081,7 +1102,7 @@ export class BrowserManager implements BrowserManagerLike {
           entry.bridgeIdentity,
           options.signal,
           options.timeoutMs,
-          () => browserBridge.sendTracked("tabs", { method: "update", tabId: entry.tabId, url: options.url }, options.timeoutMs, entry.bridgeIdentity),
+          () => sendOwnedExtensionCommand(entry, "tabs", { method: "update", tabId: entry.tabId, url: options.url }, options.timeoutMs),
           entry,
         );
         assertExtensionEntryActive(entry, options.signal);
@@ -1223,11 +1244,100 @@ function assertExtensionEntryActive(entry: ExtensionEntry, signal?: AbortSignal)
   assertExtensionConnection(entry.bridgeIdentity, signal);
 }
 
-function createExtensionOperationOwner(): ExtensionOperationOwner {
-  return { acceptingCommands: true, terminalOperations: new Set(), hostOperations: new Set() };
+function createExtensionOperationOwner(bridgeIdentity: BridgeConnectionIdentity): ExtensionOperationOwner {
+  return {
+    owner: { namespace: "pi-browser-manager", ownerId: randomUUID() }, bridgeIdentity,
+    leases: new Map(), claims: new Map(),
+    acceptingCommands: true, terminalOperations: new Set(), hostOperations: new Set(),
+  };
+}
+
+function adoptExtensionLease(owner: ExtensionOperationOwner, tabId: number, value: unknown, owned: boolean): void {
+  if (!isRecord(value) || value.namespace !== owner.owner.namespace || value.ownerId !== owner.owner.ownerId
+    || value.serverInstanceId !== owner.bridgeIdentity.serverInstanceId || value.generation !== owner.bridgeIdentity.generation
+    || typeof value.claimId !== "string" || !value.claimId) {
+    throw new Error(`browser-bridge returned invalid owner lease for tabId ${tabId}.`);
+  }
+  owner.leases.set(tabId, { lease: value as unknown as BridgeLeaseIdentity, owned });
+}
+
+function captureExtensionLeases(owner: ExtensionOperationOwner, result: BridgeResult, created = false): void {
+  if (created) {
+    const tab = parseExtensionTab(result.data, "tabs.create");
+    adoptExtensionLease(owner, tab.id, (result.data as Record<string, unknown>).lease, true);
+  }
+  for (const item of result.newTabs ?? []) {
+    const lease = (item as unknown as Record<string, unknown>).lease;
+    if (Number.isInteger(item.id) && lease) adoptExtensionLease(owner, item.id!, lease, true);
+  }
+}
+
+function ensureExtensionClaim(owner: ExtensionOperationOwner, tabId: number, timeoutMs: number): Promise<void> {
+  if (!owner.acceptingCommands) return Promise.reject(new Error("Browser extension command owner is draining."));
+  assertExtensionConnection(owner.bridgeIdentity);
+  if (owner.leases.has(tabId)) return Promise.resolve();
+  const existing = owner.claims.get(tabId);
+  if (existing) return existing;
+  const claim = trackExtensionHostOperation(owner, (async () => {
+    const handle = await browserBridge.sendTracked("claim", { tabId, owner: owner.owner }, timeoutMs, owner.bridgeIdentity);
+    const adopt = (result: BridgeResult) => {
+      if (!isRecord(result.data) || result.data.tabId !== tabId) throw new Error("browser-bridge claim returned invalid tabId.");
+      adoptExtensionLease(owner, tabId, result.data.lease, false);
+    };
+    void handle.terminal.then((terminal) => { if (terminal.result) adopt(terminal.result); }).catch(() => {});
+    const tracked = trackExtensionOperation(owner, handle);
+    try { adopt(await handle.response); }
+    catch (error) { if (isInterruptError(error)) markExtensionOperationDraining(owner, tracked); throw error; }
+  })());
+  owner.claims.set(tabId, claim);
+  void claim.finally(() => { if (owner.claims.get(tabId) === claim) owner.claims.delete(tabId); }).catch(() => {});
+  return claim;
+}
+
+function sendOwnedExtensionCommand(owner: ExtensionOperationOwner, cmd: string, payload: Record<string, unknown>, timeoutMs: number): Promise<TrackedBridgeCommand> {
+  return trackExtensionHostOperation(owner, (async () => {
+    if (!owner.acceptingCommands) throw new Error("Browser extension command owner is draining.");
+    if (typeof payload.tabId === "number") await ensureExtensionClaim(owner, payload.tabId, timeoutMs);
+    if (!owner.acceptingCommands) throw new Error("Browser extension command owner is draining.");
+    assertExtensionConnection(owner.bridgeIdentity);
+    const lease = typeof payload.tabId === "number" ? owner.leases.get(payload.tabId)?.lease : undefined;
+    const handle = await browserBridge.sendTracked(cmd, { ...payload, owner: owner.owner, ...(lease ? { lease } : {}) }, timeoutMs, owner.bridgeIdentity);
+    const created = cmd === "tabs" && payload.method === "create";
+    void handle.terminal.then((terminal) => { if (terminal.result) captureExtensionLeases(owner, terminal.result, created); }).catch(() => {});
+    trackExtensionOperation(owner, handle);
+    const response = handle.response.then((result) => { captureExtensionLeases(owner, result, created); return result; });
+    void response.catch(() => {});
+    handle.response = response;
+    return handle;
+  })());
+}
+
+async function releaseExtensionOwner(owner: ExtensionOperationOwner): Promise<void> {
+  cancelExtensionOperations(owner);
+  while (owner.terminalOperations.size || owner.hostOperations.size) {
+    await Promise.all([
+      ...[...owner.terminalOperations].map((operation) => operation.handle.terminal),
+      ...owner.hostOperations,
+    ]);
+  }
+  if (!owner.leases.size) return;
+  if (!browserBridge.isConnected() && ![...owner.leases.values()].some((binding) => binding.owned)) return;
+  assertExtensionConnection(owner.bridgeIdentity);
+  const errors: unknown[] = [];
+  for (const [tabId, binding] of owner.leases) {
+    try {
+      await awaitExtensionBridgeTerminal(owner.bridgeIdentity, 2_000,
+        () => browserBridge.sendTracked("release", { tabId, lease: binding.lease, close: binding.owned }, 2_000, owner.bridgeIdentity), owner);
+      if (owner.leases.get(tabId) === binding) owner.leases.delete(tabId);
+    } catch (error) { errors.push(error); }
+  }
+  if (errors.length === 1) throw errors[0];
+  if (errors.length) throw new AggregateError(errors, "Browser extension lease retirement failed.");
 }
 
 function trackExtensionOperation(owner: ExtensionOperationOwner, handle: TrackedBridgeCommand): ExtensionTrackedOperation {
+  const existing = [...owner.terminalOperations].find((item) => item.handle === handle);
+  if (existing) return existing;
   const operation = { handle, draining: false } satisfies ExtensionTrackedOperation;
   owner.terminalOperations.add(operation);
   void handle.terminal.then(() => owner.terminalOperations.delete(operation));
@@ -1318,7 +1428,7 @@ async function queryExtensionTabs(
     identity,
     signal,
     timeoutMs,
-    () => browserBridge.sendTracked("tabs", { method: "query" }, timeoutMs, identity),
+    () => owner ? sendOwnedExtensionCommand(owner, "tabs", { method: "query" }, timeoutMs) : browserBridge.sendTracked("tabs", { method: "query" }, timeoutMs, identity),
     owner,
   );
   if (!Array.isArray(result.data)) throw new Error("browser-bridge tabs.query returned invalid tab metadata.");
@@ -1336,7 +1446,7 @@ async function getExtensionTab(
     identity,
     signal,
     timeoutMs,
-    () => browserBridge.sendTracked("tabs", { method: "get", tabId }, timeoutMs, identity),
+    () => owner ? sendOwnedExtensionCommand(owner, "tabs", { method: "get", tabId }, timeoutMs) : browserBridge.sendTracked("tabs", { method: "get", tabId }, timeoutMs, identity),
     owner,
   );
   const tab = parseExtensionTab(result.data, "tabs.get");
@@ -1441,7 +1551,7 @@ function createExtensionAdapters(
 ): { page: object; browser: object; tab: object } {
   const recordNewTabs = (items: Array<{ id?: number; url?: string }> | undefined) => {
     for (const item of items ?? []) {
-      if (!item.url) continue;
+      if (!item.url || !(item as unknown as Record<string, unknown>).lease) continue;
       if (createdTabs.length >= output.maxCollectionItems()) output.fail(`Browser opened more than ${output.maxCollectionItems()} new tabs in one run.`);
       const tab = { id: item.id, url: item.url };
       output.reserve(tab);
@@ -1469,7 +1579,7 @@ function createExtensionAdapters(
         entry.bridgeIdentity,
         signal,
         timeoutMs,
-        () => browserBridge.sendTracked("tabs", { method: "update", tabId: state.id, url }, timeoutMs, entry.bridgeIdentity),
+        () => sendOwnedExtensionCommand(entry, "tabs", { method: "update", tabId: state.id, url }, timeoutMs),
         entry,
       );
       assertExtensionEntryActive(entry, signal);
@@ -1490,7 +1600,7 @@ function createExtensionAdapters(
         entry.bridgeIdentity,
         signal,
         timeoutMs,
-        () => browserBridge.sendTracked("exec", { tabId: state.id, code }, timeoutMs, entry.bridgeIdentity),
+        () => sendOwnedExtensionCommand(entry, "exec", { tabId: state.id, code }, timeoutMs),
         entry,
       );
       assertExtensionEntryActive(entry, signal);
@@ -1512,7 +1622,7 @@ function createExtensionAdapters(
       entry.bridgeIdentity,
       signal,
       timeoutMs,
-      () => browserBridge.sendTracked("cdp", { tabId: entry.tabId, method, params: params ?? {} }, timeoutMs, entry.bridgeIdentity),
+      () => sendOwnedExtensionCommand(entry, "cdp", { tabId: entry.tabId, method, params: params ?? {} }, timeoutMs),
       entry,
     );
     assertExtensionEntryActive(entry, signal);
@@ -1526,7 +1636,7 @@ function createExtensionAdapters(
       entry.bridgeIdentity,
       signal,
       timeoutMs,
-      () => browserBridge.sendTracked("batch", { commands: bridged, tabId: entry.tabId }, timeoutMs, entry.bridgeIdentity),
+      () => sendOwnedExtensionCommand(entry, "batch", { commands: bridged, tabId: entry.tabId }, timeoutMs),
       entry,
     );
     assertExtensionEntryActive(entry, signal);
@@ -1565,7 +1675,7 @@ function createExtensionAdapters(
         entry.bridgeIdentity,
         signal,
         timeoutMs,
-        () => browserBridge.sendTracked("cookies", { method: "get", tabId: entry.tabId, filter }, timeoutMs, entry.bridgeIdentity),
+        () => sendOwnedExtensionCommand(entry, "cookies", { method: "get", tabId: entry.tabId, filter }, timeoutMs),
         entry,
       );
       assertExtensionEntryActive(entry, signal);
@@ -1577,7 +1687,7 @@ function createExtensionAdapters(
         entry.bridgeIdentity,
         signal,
         timeoutMs,
-        () => browserBridge.sendTracked("cookies", { method: "set", tabId: entry.tabId, cookies: list }, timeoutMs, entry.bridgeIdentity),
+        () => sendOwnedExtensionCommand(entry, "cookies", { method: "set", tabId: entry.tabId, cookies: list }, timeoutMs),
         entry,
       );
       assertExtensionEntryActive(entry, signal);
@@ -1588,7 +1698,7 @@ function createExtensionAdapters(
         entry.bridgeIdentity,
         signal,
         timeoutMs,
-        () => browserBridge.sendTracked("cookies", { method: "delete", tabId: entry.tabId, filter }, timeoutMs, entry.bridgeIdentity),
+        () => sendOwnedExtensionCommand(entry, "cookies", { method: "delete", tabId: entry.tabId, filter }, timeoutMs),
         entry,
       );
       assertExtensionEntryActive(entry, signal);
@@ -2100,13 +2210,10 @@ async function connectBrowser(options: CanonicalBrowserOpenOptions, key: string)
     if (!options.userProfileDir) throw new Error("attach_user_profile requires app.user_profile_dir pointing at a Chrome user-data-dir whose browser runs with --remote-debugging-port.");
     let endpoint = await devToolsEndpointFor(options.userProfileDir);
     if (!endpoint) {
-      // No live debug port: start the user's own Chrome with remote debugging on
-      // their profile (zero-setup attach). This mirrors GenericAgent's extension
-      // convenience without a second WS control channel — pi still drives via CDP.
-      // We never own this browser (owned=false) so it stays alive after close.
+      // Borrowed profiles are never reclaimed: an existing user browser may
+      // still own the directory even when it exposes no debugging endpoint.
       const executablePath = await findBrowserExecutable(options.executablePath, options.cwd);
       if (!executablePath) throw new Error("No Chromium browser found to launch for attach_user_profile. Set app.path, PUPPETEER_EXECUTABLE_PATH, or CHROME_PATH, or start Chrome manually with --remote-debugging-port.");
-      if (await staleProfileProcessesExist(options.userProfileDir)) await reclaimProfileProcesses(options.userProfileDir);
       endpoint = await launchAttachedChrome(executablePath, options.userProfileDir, options);
     }
     const browser = await connectViaDevtoolsEndpoint(endpoint, options, options.timeoutMs);
@@ -2165,9 +2272,8 @@ async function devToolsEndpointFor(profileDir: string): Promise<{ port: number; 
   }
 }
 
-// Chrome 147+ can refuse /json/version on the default profile; the
-// DevToolsActivePort ws path still answers, so fall back to a direct
-// browserWSEndpoint connect. The original discovery error is the one surfaced.
+// If HTTP discovery fails, try the recorded WebSocket endpoint directly.
+// This cannot bypass a browser's default-profile debugging restriction.
 async function connectViaDevtoolsEndpoint(endpoint: { port: number; wsPath: string }, options: BrowserOpenOptions, timeoutMs: number): Promise<Browser> {
   try {
     return await acquireResource(
@@ -2265,27 +2371,56 @@ function runCapture(command: string, args: string[], timeoutMs: number): Promise
 // so it survives pi's exit — the user keeps using their own browser. We do not
 // own it; a later attach call in the same session will reuse the live port via
 // devToolsEndpointFor + tryReuseBrowser path.
-async function launchAttachedChrome(executablePath: string, userProfileDir: string, options: BrowserOpenOptions): Promise<{ port: number; wsPath: string }> {
-  const port = 9222;
+export async function launchAttachedChrome(
+  executablePath: string,
+  userProfileDir: string,
+  options: BrowserOpenOptions,
+  spawnBrowser: (command: string, args: string[], options: SpawnOptions) => ChildProcess = spawn,
+): Promise<{ port: number; wsPath: string }> {
+  throwIfAborted(options.signal);
+  if (options.args?.some((arg) => (arg.startsWith("--remote-debugging-port") && arg !== "--remote-debugging-port=0") || arg === "--remote-debugging-pipe")) {
+    throw new Error('Profile auto-launch requires --remote-debugging-port=0 to publish DevToolsActivePort. For a fixed debugging port, start the browser manually and use app.channel:"cdp" with app.cdp_url.');
+  }
   const args = [
-    `--remote-debugging-port=${port}`,
+    // Chromium writes DevToolsActivePort only when it selects a dynamic port.
+    "--remote-debugging-port=0",
     `--user-data-dir=${userProfileDir}`,
     "--no-first-run",
     "--no-default-browser-check",
     ...(options.visible ? [] : ["--headless=new"]),
     ...(options.args ?? []),
   ];
-  const child = spawn(executablePath, args, { windowsHide: !options.visible, detached: true, stdio: "ignore" });
+  const child = spawnBrowser(executablePath, args, { windowsHide: !options.visible, detached: true, stdio: ["ignore", "ignore", "pipe"] });
   child.unref();
-  child.on("error", () => { /* best-effort; port poll will fail and surface a clear error */ });
-  const deadline = Date.now() + Math.min(options.timeoutMs, 15_000);
-  while (Date.now() < deadline) {
-    if (options.signal?.aborted) throw abortError();
-    const ready = await devToolsEndpointFor(userProfileDir);
-    if (ready) return ready;
-    await new Promise((resolve) => setTimeout(resolve, 300));
+  let launchError: Error | undefined;
+  let exited: string | undefined;
+  let stderr = "";
+  child.once("error", (error) => { launchError = error; });
+  child.once("exit", (code, signal) => { exited = signal ? `signal ${signal}` : `code ${code}`; });
+  child.stderr?.on("data", (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-4_096); });
+  const timeoutMs = Math.min(options.timeoutMs, 15_000);
+  const deadline = Date.now() + timeoutMs;
+  const failure = (reason: string) => new Error(
+    `Could not attach ${executablePath} to ${userProfileDir}: ${reason}. ` +
+    'Possible causes include a profile already in use or remote debugging disabled by the browser/policy. Chrome 136+ blocks remote debugging of its default user-data directory; closing windows does not remove that restriction. Use an explicitly chosen non-default app.user_profile_dir, or install/pair Pi Browser Bridge and explicitly select app.channel:"extension" for the daily browser. No profile is copied or switched automatically.' +
+    (stderr.trim() ? `\nBrowser stderr: ${stderr.trim()}` : ""),
+  );
+  try {
+    while (Date.now() < deadline) {
+      throwIfAborted(options.signal);
+      const ready = await devToolsEndpointFor(userProfileDir);
+      throwIfAborted(options.signal);
+      if (launchError) throw new Error(`Failed to launch ${executablePath}: ${launchError.message}`, { cause: launchError });
+      if (ready) return ready;
+      // Windows launchers can exit successfully after handing off to the browser.
+      if (exited && exited !== "code 0") throw failure(`browser exited with ${exited} before publishing DevToolsActivePort`);
+      if (stderr.includes("requires a non-default data directory")) throw failure("browser rejected remote debugging on the default data directory");
+      await abortableDelay(Math.min(300, Math.max(0, deadline - Date.now())), options.signal);
+    }
+    throw failure(`no DevToolsActivePort appeared within ${timeoutMs / 1000}s after --remote-debugging-port=0`);
+  } finally {
+    child.stderr?.destroy();
   }
-  throw new Error(`Started ${executablePath} with --remote-debugging-port=${port} but no DevToolsActivePort appeared at ${userProfileDir} within ${Math.min(options.timeoutMs, 15_000) / 1000}s. The profile may be locked by another Chrome instance; close it and retry.`);
 }
 
 async function launchBrowser(executablePath: string, options: BrowserOpenOptions, profileDir: string): Promise<{ browser: Browser; kind: "headless" | "headed" }> {
@@ -2504,29 +2639,9 @@ async function disposeEntry(entry: TabEntry): Promise<void> {
         await activeRun.promise.catch(() => {});
         if (entry.activeRun === activeRun) entry.activeRun = null;
       }
-      // The caller-facing run/response is not the lifecycle terminal. Join every
-      // result/error/cancelled/disconnect terminal before releasing the binding
-      // or issuing the destructive owned-tab close.
-      cancelExtensionOperations(entry);
-      while (entry.terminalOperations.size > 0 || entry.hostOperations.size > 0) {
-        await Promise.all([
-          ...[...entry.terminalOperations].map((operation) => operation.handle.terminal),
-          ...entry.hostOperations,
-        ]);
-      }
-      if (browserBridge.isConnected()) {
-        browserBridge.assertConnection(entry.bridgeIdentity);
-        if (entry.ownedTab) {
-          await awaitExtensionBridgeTerminal(
-            entry.bridgeIdentity,
-            2_000,
-            () => browserBridge.sendTracked("tabs", { method: "close", tabId: entry.tabId }, 2_000, entry.bridgeIdentity),
-            entry,
-          );
-        }
-      } else if (entry.ownedTab) {
-        throw extensionDisconnectedError(entry);
-      }
+      // The caller-facing response is not terminal; release only after all
+      // generation-owned commands, claims and post-processing have settled.
+      await releaseExtensionOwner(entry);
     } catch (error) {
       disposeError = error;
     } finally {

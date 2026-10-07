@@ -21,6 +21,12 @@ class FakeBrowserManager implements BrowserManagerLike {
       state: "connected",
       listeningPort: 19222,
       authenticatedConnected: true,
+      drainingCommands: 0,
+      authMode: "paired",
+      transportConnected: true,
+      transportReady: true,
+      serverInstanceId: "11111111-1111-4111-8111-111111111111",
+      connectionGeneration: 1,
       tabCount: 3,
       pendingPairings: [{
         requestId: "11111111-1111-4111-8111-111111111111",
@@ -121,7 +127,7 @@ test("browser dialog settlement reports unexpected failures", async () => {
 });
 
 test("browser schema preserves legacy actions and adds explicit status/pair surfaces", () => {
-  assert.deepEqual((BrowserParams.properties.action as { enum: string[] }).enum, ["open", "close", "run", "guide", "status", "pair", "pick"]);
+  assert.deepEqual((BrowserParams.properties.action as unknown as { enum: string[] }).enum, ["open", "close", "run", "guide", "status", "pair", "pick"]);
   assert.deepEqual(Object.keys(BrowserParams.properties).sort(), [
     "action", "all", "app", "code", "dialogs", "kill", "name", "request_id", "timeout", "topic", "url", "viewport", "visible", "wait_until",
   ]);
@@ -144,7 +150,7 @@ test("browser tool guidelines expose probe/snapshot/diff/monitor helpers", async
   const tool = createBrowserTool(manager);
   const snippet = tool.promptSnippet ?? "";
   const guidelines = tool.promptGuidelines ?? [];
-  const joined = [snippet, ...guidelines].join("\n");
+  const joined = [tool.description, snippet, ...guidelines].join("\n");
   // Each new probe capability is mentioned in the agent-facing prompt surface.
   assert.match(joined, /extract\(['"]probe['"]\)/, "guidelines must mention extract('probe')");
   assert.match(joined, /tab\.snapshot\(\)/, "guidelines must mention tab.snapshot()");
@@ -167,10 +173,23 @@ test("browser tool guidelines expose probe/snapshot/diff/monitor helpers", async
   assert.match(joined, /tab\.cdpBatch\(/, "guidelines must mention tab.cdpBatch()");
   assert.match(joined, /action:status/, "guidelines must identify status as the live bridge probe");
   assert.match(joined, /pendingPairings/, "guidelines must expose pending pairing requests");
+  for (const surface of [tool.description, snippet, ...guidelines.filter((text) => text.startsWith("Use action:status"))]) {
+    assert.match(surface, /PI_BROWSER_BRIDGE_AUTH_MODE=none|NONE/);
+    assert.match(surface, /transportReady/);
+    assert.match(surface, /authenticatedConnected=false/);
+  }
+  assert.match(joined, /opaque owner/);
+  assert.match(joined, /lazily claim/);
+  assert.match(joined, /Cookies\/login state are not isolated/);
   assert.match(joined, /action:pair/, "guidelines must expose one-time pairing approval");
   assert.match(joined, /total wall-clock budget/, "guidelines must explain the outer timeout budget");
   assert.match(joined, /closes the named tab/, "guidelines must explain managed timeout cleanup");
   assert.match(joined, /never falls back|no managed-browser fallback/, "guidelines must state that extension fails closed without fallback");
+  assert.match(joined, /--remote-debugging-port=0/, "profile launch must describe dynamic-port discovery");
+  assert.match(joined, /Chrome 136\+ blocks debugging of the default profile even after all windows close/);
+  assert.doesNotMatch(joined, /auto-launches Chrome with --remote-debugging-port=9222/);
+  assert.match((BrowserParams.properties.app.properties.attach_user_profile as unknown as { description?: string }).description ?? "", /dynamic debugging port/);
+  assert.match((BrowserParams.properties.app.properties.user_profile_dir as unknown as { description?: string }).description ?? "", /never copied or switched automatically/);
   // Channel stays nested under app; pairing adds only its explicit request id.
   assert.deepEqual(Object.keys(BrowserParams.properties).sort(), [
     "action", "all", "app", "code", "dialogs", "kill", "name", "request_id", "timeout", "topic", "url", "viewport", "visible", "wait_until",
@@ -411,6 +430,15 @@ test("browser guide returns registry index; topic loads one document", async () 
   assert.match(coreText, /evalInFrame/, "core SOP must mention evalInFrame");
   assert.match(coreText, /cdpClick/, "core SOP must mention cdpClick");
   assert.match(coreText, /attach_user_profile/, "core SOP must mention attach_user_profile");
+  assert.match(coreText, /--remote-debugging-port=0/);
+  assert.match(coreText, /Chrome 136\+ blocks remote debugging/);
+  assert.match(coreText, /Pi Browser Bridge in Chrome\/Edge/);
+  assert.match(coreText, /PI_BROWSER_BRIDGE_AUTH_MODE=none requires no token or pairing/);
+  assert.match(coreText, /transportReady=true, authenticatedConnected=false/);
+  assert.match(coreText, /exclusive lease/);
+  assert.match(coreText, /historical evidence/);
+  assert.match(coreText, /fixed port need not produce DevToolsActivePort/);
+  assert.doesNotMatch(coreText, /Chrome 147\+ may refuse|the profile may be locked by another Chrome instance/);
   const antipatterns = await tool.execute("guide", { action: "guide", topic: "automation-antipatterns" }, undefined, undefined, ctx);
   const antipatternText = antipatterns.content.filter((item) => item.type === "text").map((item) => "text" in item ? item.text : "").join("\n");
   assert.match(antipatternText, /total wall-clock budget/i, "automation SOP must explain the outer timeout budget");
