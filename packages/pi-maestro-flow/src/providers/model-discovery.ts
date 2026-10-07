@@ -34,7 +34,9 @@ export interface DiscoverOptions {
   baseUrl: string;
   /** API key; sent as `Authorization: Bearer <key>` when present. */
   apiKey?: string;
-  /** Explicit override; otherwise derived as `${baseUrl}/models`. */
+  /** API format; Anthropic Messages exposes discovery under `/v1/models`. */
+  api?: string;
+  /** Explicit override; otherwise derived from the API format and Base URL. */
   modelsUrl?: string;
   /** Extra request headers merged on top of the auth header. */
   headers?: Record<string, string>;
@@ -51,12 +53,17 @@ const DEFAULT_DISCOVER_TIMEOUT_MS = 8000;
 /**
  * Resolve the models-list URL for a Provider. An explicit `modelsUrl` wins;
  * otherwise the Base URL is stripped of trailing slashes and suffixed with
- * `/models`. `https://relay/v1` → `https://relay/v1/models`.
+ * `/models`, or `/v1/models` for Anthropic Messages. `https://relay/v1` →
+ * `https://relay/v1/models`; `https://relay/anthropic` →
+ * `https://relay/anthropic/v1/models`.
  */
-export function modelsUrlForProvider(opts: Pick<DiscoverOptions, "baseUrl" | "modelsUrl">): string {
+export function modelsUrlForProvider(opts: Pick<DiscoverOptions, "api" | "baseUrl" | "modelsUrl">): string {
   const explicit = opts.modelsUrl?.trim();
   if (explicit) return explicit;
   const base = normalizeBaseUrl(opts.baseUrl);
+  if (opts.api === "anthropic-messages") {
+    return /\/v1$/i.test(base) ? `${base}/models` : `${base}/v1/models`;
+  }
   return `${base}/models`;
 }
 

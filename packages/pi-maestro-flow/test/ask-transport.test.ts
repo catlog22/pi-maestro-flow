@@ -105,6 +105,29 @@ test("cancelling the local TUI cancels the mobile endpoint", async () => {
   }
 });
 
+test("remote transport rejection leaves the local TUI authoritative", async () => {
+  const harness = createRaceHarness();
+  const remote = deferred<AskTransportResult>();
+  const fixture = transportFixture(remote);
+  const dispose = registerAskTransport({
+    open(request) {
+      const handle = fixture.transport.open(request)!;
+      return {
+        promise: handle.promise.then(() => { throw new Error("disconnected"); }),
+        cancel: handle.cancel,
+      };
+    },
+  });
+  try {
+    const pending = executeAsk({ questions: [{ question: "Pick" }] }, harness.ctx, { toolCallId: "raw-call-1" });
+    remote.reject(new Error("disconnected"));
+    harness.answerLocal(answer("native-after-disconnect"));
+    const result = await pending;
+    assert.deepEqual(result.details, { answers: answer("native-after-disconnect") });
+  } finally {
+    dispose();
+  }
+});
 test("cancelling from Mobile cancels the local TUI", async () => {
   const harness = createRaceHarness();
   const remote = deferred<AskTransportResult>();

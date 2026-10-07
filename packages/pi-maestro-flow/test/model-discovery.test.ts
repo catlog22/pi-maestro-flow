@@ -16,13 +16,15 @@ import {
 async function startServer(
   handler: (req: { url?: string; headers: Record<string, string | string[] | undefined> }) =>
     { status?: number; body: unknown; delayMs?: number },
-): Promise<{ server: Server; base: string; lastHeaders: () => Record<string, string | string[] | undefined>; close: () => Promise<void> }> {
+): Promise<{ server: Server; base: string; lastHeaders: () => Record<string, string | string[] | undefined>; lastUrl: () => string | undefined; close: () => Promise<void> }> {
   let lastHeaders: Record<string, string | string[] | undefined> = {};
+  let lastUrl: string | undefined;
   const server = createServer((req, res) => {
     let body = "";
     req.on("data", (chunk) => (body += chunk));
     req.on("end", () => {
       lastHeaders = { ...req.headers };
+      lastUrl = req.url;
       const response = handler({ url: req.url, headers: req.headers });
       if (response.delayMs) {
         setTimeout(() => {
@@ -43,6 +45,7 @@ async function startServer(
     server,
     base,
     lastHeaders: () => lastHeaders,
+    lastUrl: () => lastUrl,
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
 }
@@ -50,6 +53,12 @@ async function startServer(
 test("modelsUrlForProvider derives /models and strips trailing slashes", () => {
   assert.equal(modelsUrlForProvider({ baseUrl: "https://relay.example.com/v1" }), "https://relay.example.com/v1/models");
   assert.equal(modelsUrlForProvider({ baseUrl: "https://relay.example.com/v1///" }), "https://relay.example.com/v1/models");
+});
+
+test("modelsUrlForProvider derives API-specific discovery paths and preserves Anthropic gateway prefixes", () => {
+  assert.equal(modelsUrlForProvider({ baseUrl: "https://relay.example.com/v1", api: "openai-responses" }), "https://relay.example.com/v1/models");
+  assert.equal(modelsUrlForProvider({ baseUrl: "https://relay.example.com/anthropic", api: "anthropic-messages" }), "https://relay.example.com/anthropic/v1/models");
+  assert.equal(modelsUrlForProvider({ baseUrl: "https://relay.example.com/anthropic/v1/", api: "anthropic-messages" }), "https://relay.example.com/anthropic/v1/models");
 });
 
 test("modelsUrlForProvider honors an explicit modelsUrl override", () => {
@@ -87,12 +96,14 @@ test("discoverModels parses the OpenAI-style { data: [...] } envelope", async ()
 test("discoverModels parses a bare { models: [...] } object", async () => {
   const srv = await startServer(() => ({ body: { models: [{ id: "claude-x" }, { id: "claude-y" }] } }));
   try {
-    const models = await discoverModels({ baseUrl: srv.base, apiKey: "secret" });
+    const models = await discoverModels({ baseUrl: srv.base, api: "anthropic-messages", apiKey: "secret" });
     assert.deepEqual(models.map((m) => m.id), ["claude-x", "claude-y"]);
+    assert.equal(srv.lastUrl(), "/v1/models");
   } finally {
     await srv.close();
   }
 });
+
 
 test("discoverModels parses a top-level array of id strings", async () => {
   const srv = await startServer(() => ({ body: ["model-a", "model-b", "model-b"] }));
