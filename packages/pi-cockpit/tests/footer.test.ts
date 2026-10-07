@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Theme } from "@earendil-works/pi-coding-agent";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
 	renderFooter,
 	getUsageTotals,
@@ -174,6 +175,48 @@ test("context and token usage form one right-aligned resource group on line one"
 	assert.match(lines[0], /\[██░░░░░░░░\] 20% · 80\.6k\/400k · ↑84\.8k · ↓21k · ⚡99%$/);
 });
 
+test("Codex Fast appears beside the model on line one without a duplicate status row", () => {
+	const lines = renderFooter(parts({
+		width: 120,
+		model: "gpt-5.6-sol",
+		thinking: "high",
+		extensionStatuses: [
+			{ key: "approval-mode", text: "APPROVAL YOLO" },
+			{ key: "codex-fast", text: "Codex Fast: on" },
+		],
+	}));
+	assert.equal(lines.length, 1);
+	assert.match(lines[0], /^YOLO · ⚡ gpt-5\.6-sol · FAST · high/);
+	assert.equal(lines[0].match(/FAST/g)?.length, 1);
+	assert.doesNotMatch(lines[0], /Codex Fast: on/);
+
+	const disabled = renderFooter(parts({ model: "gpt-5.6-sol", thinking: "high" }));
+	assert.doesNotMatch(disabled.join("\n"), /FAST/);
+});
+
+test("Codex Fast is success-colored, never partially clipped, and preserves unsafe approval priority", () => {
+	const colored = renderFooter(parts({
+		width: 160,
+		theme: { fg: (color, text) => `[${color}]${text}` },
+		extensionStatuses: [{ key: "codex-fast", text: "Codex Fast: on" }],
+	}));
+	assert.match(colored[0], /\[success\]FAST/);
+	for (let width = 1; width <= 120; width++) {
+		const lines = renderFooter(parts({
+			width,
+			thinking: "high",
+			extensionStatuses: [
+				{ key: "approval-mode", text: "APPROVAL YOLO" },
+				{ key: "codex-fast", text: "Codex Fast: on" },
+			],
+		}));
+		assert.equal(lines.length, 1);
+		assert.ok(lines[0].length <= Math.max(1, width - 1));
+		assert.doesNotMatch(lines[0], /(?:F|FA|FAS)…/);
+		if (width >= 5) assert.match(lines[0], /YOLO/);
+	}
+});
+
 test("medium footer uses the compact five-cell context bar", () => {
 	const lines = renderFooter(parts({
 		width: 60,
@@ -333,6 +376,74 @@ test("ambient MCP and auto compact statuses stay out of the footer", () => {
 	})).join("\n");
 	assert.doesNotMatch(line, /MCP:|AUTO COMPACT|AUTO ON/);
 	assert.match(line, /PLAN/);
+});
+
+test("decision policy status uses the existing second footer line without displacing resource identity", () => {
+	for (const text of ["DEC ○ A:enforce E:shadow · auto", "DEC ▶ A:enforce E:shadow · LLM 问答 判别中", "DEC ? A:enforce E:shadow · LLM 问答 等待用户", "DEC ✓ A:enforce E:shadow · LLM 内部建议"]) {
+		const lines = renderFooter(parts({ width: 160, extensionStatuses: [{ key: "decision-policy", text }] }));
+		assert.equal(lines.length, 2);
+		assert.match(lines[0], /stream-70b/);
+		assert.doesNotMatch(lines[0], /DEC/);
+		assert.ok(lines[1].includes(text));
+	}
+});
+
+test("ambient policy states and duplicate effort metadata stay out of the footer", () => {
+	const lines = renderFooter(parts({
+		width: 160,
+		thinking: "high",
+		extensionStatuses: [
+			{ key: "decision-policy", text: "DEC ○ 未配置" },
+			{ key: "maestro-effort", text: "high · model=global" },
+			{ key: "maestro-plan-auto", text: "PLAN-AUTO off" },
+			{ key: "self-evolve", text: "EVOL ● 0·0·0" },
+		],
+	}));
+	assert.equal(lines.length, 2);
+	assert.equal(lines.join("\n").match(/high/g)?.length, 1);
+	assert.doesNotMatch(lines.join("\n"), /DEC|model=|PLAN-AUTO/);
+	assert.equal(lines[1], "EVOL ● 0·0·0");
+
+	const disabled = renderFooter(parts({ extensionStatuses: [
+		{ key: "decision-policy", text: "DEC ○ A:off E:off" },
+		{ key: "maestro-plan-auto", text: "PLAN-AUTO off" },
+		{ key: "self-evolve", text: "EVOL off" },
+	] }));
+	assert.equal(disabled.length, 1);
+});
+
+test("policy activity and errors remain visible even without configured automation", () => {
+	for (const text of [
+		"DEC ? 未配置 · 问答 等待用户",
+		"DEC ? A:off E:off · 配置中",
+		"DEC ! 规范无效",
+		"DEC ! A:enforce E:shadow · LLM · 已降级",
+	]) {
+		const lines = renderFooter(parts({ width: 160, extensionStatuses: [{ key: "decision-policy", text }] }));
+		assert.equal(lines[1], text);
+	}
+});
+
+test("automation markers use theme semantic colors with muted labels and counters", () => {
+	const coloredTheme: Pick<Theme, "fg"> = { fg: (color, text) => `<${color}>${text}</${color}>` };
+	for (const [mark, color] of [["○", "muted"], ["▶", "warning"], ["?", "accent"], ["✓", "success"], ["!", "error"]]) {
+		const lines = renderFooter(parts({ width: 400, theme: coloredTheme, extensionStatuses: [
+			{ key: "decision-policy", text: `DEC ${mark} A:enforce E:shadow` },
+			{ key: "maestro-plan-auto", text: "PLAN-AUTO ask g7" },
+			{ key: "self-evolve", text: "EVOL ● 0·0·0" },
+		] }));
+		assert.ok(lines[1].includes(`<muted>DEC </muted><${color}>${mark}</${color}><muted> A:enforce E:shadow</muted>`));
+		assert.ok(lines[1].includes("<warning>PLAN-AUTO ask g7</warning>"));
+		assert.ok(lines[1].includes("<muted>EVOL </muted><success>●</success><muted> 0·0·0</muted>"));
+	}
+});
+
+test("decision policy status respects Unicode footer widths from 1 to 120 columns", () => {
+	const realUtils: WidthUtils = { measure: visibleWidth, clip: (text, width, ellipsis) => truncateToWidth(text, width, ellipsis) };
+	for (let width = 1; width <= 120; width++) {
+		const lines = renderFooter(parts({ width, utils: realUtils, extensionStatuses: [{ key: "decision-policy", text: "DEC ? A:enforce E:shadow · LLM 问答 等待用户 ×2" }] }));
+		assert.ok(lines.every((line) => visibleWidth(line) <= width), `width ${width}`);
+	}
 });
 
 test("disabled self-evolve status stays out of the footer", () => {

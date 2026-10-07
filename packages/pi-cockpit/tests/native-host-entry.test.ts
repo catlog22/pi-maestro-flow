@@ -11,7 +11,7 @@ const createAllToolDefinitions = (cwd: string) => Object.fromEntries([
 ].map((tool) => [tool.name, tool]));
 
 test("real native Cockpit entry defers decoration until binding, preserves active tools and theme delegation", async () => {
-	assert.equal(VERSION, "0.99.0", "fixture verifies the installed public SDK");
+	assert.ok(["0.99.0", "0.99.2"].includes(VERSION), `fixture verifies the installed public SDK (${VERSION})`);
 	const agentDir = mkdtempSync(join(tmpdir(), "cockpit-native-entry-"));
 	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 	process.env.PI_CODING_AGENT_DIR = agentDir;
@@ -71,6 +71,7 @@ test("real native Cockpit entry defers decoration until binding, preserves activ
 		assert.ok(handlers.get("tool_call")?.length, "native edit policy is wired to the actual entry");
 		bound = true;
 		await fire("session_start");
+		assert.deepEqual(notices, [], "compatible native startup must not emit a stale host-version warning");
 		assert.deepEqual(registered.sort(), [...builtinNames].sort());
 		assert.deepEqual(active, ["read", "bash", "edit", "write", "third_party"]);
 		assert.strictEqual(definitions.get("third_party"), thirdParty);

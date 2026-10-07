@@ -196,6 +196,14 @@ function extensionStatusColor(status: ExtensionStatusSegment): ThemeColor {
 		if (mode === "READY" || mode === "PLAN READY") return "accent";
 		return "muted";
 	}
+	if (status.key === "maestro-plan-auto") return "warning";
+	if (status.key === "self-evolve") return "success";
+	if (status.key === "decision-policy") {
+		if (status.text.startsWith("DEC !")) return "error";
+		if (status.text.startsWith("DEC ?")) return "accent";
+		if (status.text.startsWith("DEC ▶")) return "warning";
+		if (status.text.startsWith("DEC ✓")) return "success";
+	}
 	if (status.key !== "approval-mode") return "muted";
 	const mode = approvalMode(status);
 	if (UNSAFE_APPROVAL_MODES.has(mode)) return "error";
@@ -207,6 +215,8 @@ function extensionStatusColor(status: ExtensionStatusSegment): ThemeColor {
 
 const HIDDEN_EXTENSION_STATUS_KEYS = new Set([
 	"maestro-auto-compact-mode",
+	// The active thinking level already belongs to the model identity on line one.
+	"maestro-effort",
 	"mcp",
 	"swarm-best",
 	"team-swarm",
@@ -216,6 +226,8 @@ function isVisibleExtensionStatus(status: ExtensionStatusSegment, thinking?: str
 	if (status.text === "" || status.text === thinking) return false;
 	if (HIDDEN_EXTENSION_STATUS_KEYS.has(status.key)) return false;
 	if (status.key === "self-evolve" && /^EVOL off$/i.test(status.text.trim())) return false;
+	if (status.key === "maestro-plan-auto" && /^PLAN-AUTO off$/i.test(status.text.trim())) return false;
+	if (status.key === "decision-policy" && /^DEC ○ (?:未配置|A:off E:off)$/i.test(status.text.trim())) return false;
 	return !/^(?:TEAM SWARM\b|BEST\b|COMPLETED$|ACT$)/i.test(status.text.trim());
 }
 
@@ -223,6 +235,14 @@ function paintExtensionStatus(
 	status: ExtensionStatusSegment,
 	theme: PaintTheme,
 ): string {
+	const marker = status.key === "decision-policy"
+		? /^(DEC) ([○!?▶✓])(.*)$/.exec(status.text)
+		: status.key === "self-evolve" ? /^(EVOL) (●)(.*)$/.exec(status.text) : null;
+	if (marker) {
+		return theme.fg("muted", `${marker[1]} `)
+			+ theme.fg(extensionStatusColor(status), marker[2])
+			+ theme.fg("muted", marker[3]);
+	}
 	const text = status.key === "approval-mode" && UNSAFE_APPROVAL_MODES.has(approvalMode(status))
 		? "YOLO"
 		: status.key === "maestro-auto-compact-mode"
@@ -307,6 +327,7 @@ export function renderFooter(p: FooterParts): string[] {
 	const visibleStatuses = (p.extensionStatuses ?? []).filter(
 		(status) => isVisibleExtensionStatus(status, p.thinking),
 	);
+	const fastStatus = visibleStatuses.find((status) => status.key === "codex-fast");
 	const controlStatuses = visibleStatuses.filter(
 		(status) => status.key === "mode"
 			|| status.key === "approval-mode"
@@ -331,6 +352,9 @@ export function renderFooter(p: FooterParts): string[] {
 		priority: 5,
 		minWidth: utils.measure(g.model) + 1 + utils.measure(g.ellipsis) + 3,
 	});
+	if (fastStatus) {
+		leftParts.push({ text: theme.fg("success", "FAST"), priority: 4, clippable: false });
+	}
 	if (p.thinking && p.thinking !== "off") {
 		leftParts.push({ text: theme.fg("muted", p.thinking), priority: 4, clippable: false });
 	}
@@ -454,7 +478,7 @@ export function renderFooter(p: FooterParts): string[] {
 	if (p.maestroWorkflow) {
 		lines.push(utils.clip(renderMaestroWorkflowLine(p.maestroWorkflow, theme, g), width, ell));
 	}
-	const statuses = visibleStatuses.filter((status) => !controlStatuses.includes(status));
+	const statuses = visibleStatuses.filter((status) => status !== fastStatus && !controlStatuses.includes(status));
 	if (statuses.length > 0) {
 		const statusSeparator = ` ${sep} `;
 		const fittedStatuses = fitSegmentsByPriority(

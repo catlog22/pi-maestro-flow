@@ -389,24 +389,6 @@ export default function (pi: ExtensionAPI): void {
 	let viewportStabilityPatch: ViewportStabilityPatch | undefined;
 	let compactionStylePatch: CompactionStylePatch | undefined;
 
-	// Host SDK versions the TUI patches were validated against. A mismatch does
-	// not block anything — every patch fails closed — but the user should know
-	// the cockpit is running on an unverified host shape.
-	const VERIFIED_PI_TUI = /^(0\.83\.|0\.84\.|0\.99\.0$)/;
-	let hostVersionWarned = false;
-	const checkHostVersion = (ctx: ExtensionContext): void => {
-		if (hostVersionWarned) return;
-		try {
-			// Public coding-agent VERSION is the host compatibility diagnostic;
-			// package.json deep exports are not part of the SDK contract.
-			const version = VERSION;
-			if (VERIFIED_PI_TUI.test(version)) return;
-			hostVersionWarned = true;
-			ctx.ui.notify(tuiT("notice.hostVersion", { version }), "warning");
-		} catch {
-			// version probe is best-effort; never block session start
-		}
-	};
 	const ensureViewportStability = (tui: TUI): void => {
 		// Native fullscreen owns a fixed application viewport and has no main-screen
 		// applyLineResets hook. Do not cache that expected miss: the same dynamic TUI
@@ -2025,7 +2007,6 @@ export default function (pi: ExtensionAPI): void {
 		publishUiOwnership();
 		lastCtx = ctx;
 		uiPromptDepth = 0;
-		checkHostVersion(ctx);
 		ambientSurfaces.reset();
 		agentReads.bindSession(ctx.sessionManager.getSessionId());
 		agents = agentReads.current;
