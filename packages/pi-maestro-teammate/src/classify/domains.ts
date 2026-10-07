@@ -64,7 +64,7 @@ export const retryErrorDomain: ClassifyDomain<RetryErrorKind, RetryErrorInput> =
     const answer = answers.kind;
     if (answer?.type !== "choice") return undefined;
     const label = answer.choice as RetryErrorKind;
-    if (!(label in RETRY_ERROR_CRITERIA)) return undefined;
+    if (!Object.hasOwn(RETRY_ERROR_CRITERIA, label)) return undefined;
     return {
       label,
       confidence: answer.confidence ?? answer.probabilities?.[answer.choice] ?? 0.5,
@@ -124,7 +124,7 @@ export const fileValueDomain: ClassifyDomain<FileValueLabel, FileValueInput> = {
     const answer = answers.value;
     if (answer?.type !== "choice") return undefined;
     const label = answer.choice as FileValueLabel;
-    if (!(label in FILE_VALUE_CRITERIA)) return undefined;
+    if (!Object.hasOwn(FILE_VALUE_CRITERIA, label)) return undefined;
     return {
       label,
       confidence: answer.confidence ?? answer.probabilities?.[answer.choice] ?? 0.5,

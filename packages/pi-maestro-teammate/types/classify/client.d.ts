@@ -29,6 +29,12 @@ export interface JevClientOptions {
 export interface JevClient {
     decide(request: Omit<JevRequest, "model">): Promise<JevResponse>;
 }
+interface PreparedJevDecision {
+    identity: string;
+    decide(): Promise<JevResponse>;
+}
+/** @internal Resolve the effective transport/model before looking in the cache. */
+export declare function prepareJevDecision(client: JevClient, request: Omit<JevRequest, "model">): Promise<PreparedJevDecision>;
 /** Parse the top-level response; every requested question must have a valid answer. */
 export declare function parseJevResponse(payload: unknown, questions: JevQuestions): JevResponse | undefined;
 export interface ClassifierRuntime {
@@ -43,3 +49,4 @@ export declare function resolveJevEndpoint(preferred: JevEndpoint | undefined, e
     endpoint: JevEndpoint;
     apiKey: string;
 } | undefined;
+export {};

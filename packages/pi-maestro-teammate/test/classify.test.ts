@@ -16,6 +16,7 @@ import {
   retryErrorDomain,
 } from "../src/classify/domains.ts";
 import { parseJevResponse } from "../src/classify/client.ts";
+import { signalTypeDomain } from "../../pi-maestro-flow/src/classifier/domains.ts";
 import { classifyRetryError, classifyRetryErrorDetailed } from "../src/runs/retry.ts";
 import type { ClassifyDomain, JevResponse } from "../src/classify/types.ts";
 
@@ -77,6 +78,124 @@ test("parseJevResponse validates answers against question types", () => {
   assert.equal(parseJevResponse({ answers: { kind: { type: "choice", choice: "a" } } }, questions), undefined);
   // Malformed payload → invalid.
   assert.equal(parseJevResponse("nope", questions), undefined);
+});
+
+test("choice validation and builtin decisions reject inherited option names", () => {
+  const criteria = Object.assign(Object.create({ inherited: "not an option" }), { valid: "Valid" });
+  for (const choice of ["__proto__", "constructor", "toString", "inherited"]) {
+    assert.equal(parseJevResponse({ answers: { q: { choice } } }, {
+      q: { type: "choice", instructions: "choose", criteria },
+    }), undefined);
+    assert.equal(fileValueDomain.decide({ value: { type: "choice", choice } }), undefined);
+    assert.equal(retryErrorDomain.decide({ kind: { type: "choice", choice } }), undefined);
+    assert.equal(signalTypeDomain.decide({ type: { type: "choice", choice } }), undefined);
+  }
+  // An explicitly declared own option is legal for custom domains.
+  const ownCriteria = JSON.parse('{"constructor":"An explicit option"}');
+  assert.equal(parseJevResponse({ answers: { q: { choice: "constructor" } } }, {
+    q: { type: "choice", instructions: "choose", criteria: ownCriteria },
+  })?.answers.q.type, "choice");
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: Error) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+const JEV_SKIP_RESPONSE: JevResponse = {
+  answers: { value: { type: "choice", choice: "skip", confidence: 0.8 } },
+};
+
+function delayedFetch() {
+  const started = deferred<void>();
+  const reply = deferred<Response>();
+  const fetchFn = (async () => { started.resolve(); return reply.promise; }) as typeof fetch;
+  return { started, reply, fetchFn };
+}
+
+for (const oldFirst of [true, false]) {
+  test(`configure fences late HTTP success (old finishes ${oldFirst ? "first" : "last"})`, async () => {
+    resetClassifierForTest();
+    const old = delayedFetch();
+    configureClassifier(baseConfig({ fetchFn: old.fetchFn, domains: { "file-value": "jev" } }));
+    const oldResult = classify(fileValueDomain, { path: "same.ts" });
+    await old.started.promise;
+    const current = delayedFetch();
+    configureClassifier(baseConfig({ fetchFn: current.fetchFn, domains: { "file-value": "jev" } }));
+    const currentResult = classify(fileValueDomain, { path: "same.ts" });
+    await current.started.promise;
+    if (oldFirst) {
+      old.reply.resolve(new Response(JSON.stringify(JEV_FILE_VALUE_RESPONSE)));
+      assert.equal((await oldResult).layer, "degraded");
+      // An old completion must not delete the current single-flight reservation.
+      const joined = classify(fileValueDomain, { path: "same.ts" });
+      current.reply.resolve(new Response(JSON.stringify(JEV_SKIP_RESPONSE)));
+      assert.equal((await joined).label, "skip");
+    } else {
+      current.reply.resolve(new Response(JSON.stringify(JEV_SKIP_RESPONSE)));
+      assert.equal((await currentResult).label, "skip");
+      old.reply.resolve(new Response(JSON.stringify(JEV_FILE_VALUE_RESPONSE)));
+    }
+    assert.match((await oldResult).degradedReason ?? "", /generation changed/);
+    assert.equal((await currentResult).label, "skip");
+    assert.equal((await classify(fileValueDomain, { path: "same.ts" })).label, "skip");
+    assert.equal(classifierStatus().cacheSize, 1);
+    assert.equal(classifierStatus().callsUsed, 1);
+  });
+}
+
+for (const finish of ["success", "failure"] as const) {
+  test(`late shadow ${finish} cannot report through a new generation sink`, async () => {
+    resetClassifierForTest();
+    const old = delayedFetch();
+    const oldShadows: ClassifyShadowRecord[] = [];
+    const newShadows: ClassifyShadowRecord[] = [];
+    configureClassifier(baseConfig({ fetchFn: old.fetchFn, domains: { "file-value": "shadow" }, onShadow: (record) => oldShadows.push(record) }));
+    classifySync(fileValueDomain, { path: "same.ts" });
+    await old.started.promise;
+    configureClassifier(baseConfig({ fetchFn: fakeFetch(JEV_SKIP_RESPONSE), domains: { "file-value": "shadow" }, onShadow: (record) => newShadows.push(record) }));
+    classifySync(fileValueDomain, { path: "same.ts" });
+    await waitFor(() => newShadows.length === 1);
+    if (finish === "success") old.reply.resolve(new Response(JSON.stringify(JEV_FILE_VALUE_RESPONSE)));
+    else old.reply.reject(new Error("old transport failed"));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(oldShadows.length, 0);
+    assert.equal(newShadows.length, 1);
+    assert.equal(newShadows[0]?.jev?.label, "skip");
+    assert.equal(classifierStatus().cacheSize, 1);
+  });
+}
+
+test("HTTP endpoint/model reconfiguration cannot reuse an old answer", async () => {
+  resetClassifierForTest();
+  const calls: string[] = [];
+  const fetchFn = (async (url: string | URL | Request, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body));
+    calls.push(`${url}/${body.model}`);
+    return new Response(JSON.stringify(calls.length === 1 ? JEV_FILE_VALUE_RESPONSE : JEV_SKIP_RESPONSE));
+  }) as typeof fetch;
+  configureClassifier(baseConfig({ fetchFn, domains: { "file-value": "jev" } }));
+  assert.equal((await classify(fileValueDomain, { path: "same.ts" })).label, "required");
+  configureClassifier(baseConfig({ endpoint: "typesafe", baseUrl: "https://test.invalid", model: "new-model", fetchFn, domains: { "file-value": "jev" } }));
+  assert.equal((await classify(fileValueDomain, { path: "same.ts" })).label, "skip");
+  assert.deepEqual(calls, ["https://openrouter.ai/api/alpha/decisions/typesafe/jev-1.13", "https://test.invalid/new-model"]);
+});
+
+test("async shadow observes terminal rules without changing their authority", async () => {
+  resetClassifierForTest();
+  const shadows: ClassifyShadowRecord[] = [];
+  configureClassifier(baseConfig({
+    fetchFn: fakeFetch({ answers: { kind: { type: "choice", choice: "auth", confidence: 0.9 } } }),
+    domains: { "retry-error": "shadow" }, onShadow: (record) => shadows.push(record),
+  }));
+  const rule = await classify(retryErrorDomain, { message: "fetch failed" });
+  assert.deepEqual(rule, { label: "network", confidence: 1, layer: "rule" });
+  await waitFor(() => shadows.length === 1);
+  assert.deepEqual(shadows[0]?.rule, { label: "network", terminal: true });
+  assert.equal(shadows[0]?.jev?.label, "auth");
+  assert.equal(shadows[0]?.agree, false);
 });
 
 test("classifyRetryErrorDetailed flags the unknown-failure default branch", () => {

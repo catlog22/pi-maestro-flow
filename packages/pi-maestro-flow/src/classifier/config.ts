@@ -3,15 +3,16 @@
  * mirroring the self-evolve workspace-config pattern.
  *
  * Resolution order (same convention as self-evolve):
- *   1. `PI_CLASSIFIER=1` env force-enables;
- *   2. `.pi/classifier.json` `{ "enabled": true }`;
- *   3. `/classifier on` writes the config file.
+ *   1. `PI_CLASSIFIER`, `PI_CLASSIFIER_ENDPOINT`, `PI_CLASSIFIER_MODEL` env overrides;
+ *   2. `.pi/classifier.json` (including values saved by `/classifier`).
  *
  * API keys never live in this file — the engine resolves
  * `TYPESAFE_API_KEY` / `OPENROUTER_API_KEY` from the environment.
  */
 
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { lstatSync } from "node:fs";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import type { ClassifierDomainMode, JevEndpoint } from "pi-maestro-teammate/v1/classify";
 
@@ -83,7 +84,10 @@ export function normalizeClassifierConfig(raw: unknown): FlowClassifierConfig {
   return config;
 }
 
-export async function loadClassifierConfig(cwd: string): Promise<FlowClassifierConfig> {
+export async function loadClassifierConfig(
+  cwd: string,
+  { applyEnv = true }: { applyEnv?: boolean } = {},
+): Promise<FlowClassifierConfig> {
   let raw: unknown;
   try {
     raw = JSON.parse(await readFile(classifierConfigPath(cwd), "utf8"));
@@ -91,23 +95,44 @@ export async function loadClassifierConfig(cwd: string): Promise<FlowClassifierC
     raw = undefined;
   }
   const config = normalizeClassifierConfig(raw);
-  const envEnabled = envOverrideForClassifier(process.env[CLASSIFIER_ENV_FLAG]);
-  if (envEnabled !== undefined) config.enabled = envEnabled;
-  return config;
+  return applyEnv ? applyClassifierEnvOverrides(config) : config;
+}
+
+export function assertClassifierConfigTarget(path: string): void {
+  try {
+    if (!lstatSync(path).isFile()) throw new Error("Classifier configuration target must be a regular file, not a symlink or directory");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
 }
 
 export async function saveClassifierConfig(config: FlowClassifierConfig, cwd: string): Promise<void> {
   const path = classifierConfigPath(cwd);
+  assertClassifierConfigTarget(path);
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  const temporaryPath = `${path}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporaryPath, `${JSON.stringify(config, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    assertClassifierConfigTarget(path);
+    await rename(temporaryPath, path);
+  } finally {
+    await rm(temporaryPath, { force: true });
+  }
 }
 
-/** Apply env-var model/endpoint overrides on top of the file config. */
-export function applyClassifierEnvOverrides(config: FlowClassifierConfig): FlowClassifierConfig {
-  const next = { ...config, domains: { ...config.domains } };
+/** Valid env overrides, shared by runtime application and settings provenance. */
+export function classifierEnvOverrides(): Pick<FlowClassifierConfig, "endpoint" | "model"> & { enabled?: boolean } {
+  const overrides: ReturnType<typeof classifierEnvOverrides> = {};
+  const enabled = envOverrideForClassifier(process.env[CLASSIFIER_ENV_FLAG]);
+  if (enabled !== undefined) overrides.enabled = enabled;
   const endpoint = process.env[CLASSIFIER_ENDPOINT_ENV]?.trim();
-  if (endpoint === "typesafe" || endpoint === "openrouter") next.endpoint = endpoint;
+  if (endpoint === "typesafe" || endpoint === "openrouter") overrides.endpoint = endpoint;
   const model = process.env[CLASSIFIER_MODEL_ENV]?.trim();
-  if (model) next.model = model;
-  return next;
+  if (model) overrides.model = model;
+  return overrides;
+}
+
+/** Apply all env overrides without mutating or persisting the configured values. */
+export function applyClassifierEnvOverrides(config: FlowClassifierConfig): FlowClassifierConfig {
+  return { ...config, ...classifierEnvOverrides(), domains: { ...config.domains } };
 }

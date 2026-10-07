@@ -29,6 +29,7 @@ import {
   createJevClient,
   createNativeJevClient,
   type ClassifierRuntime,
+  prepareJevDecision,
   resolveJevEndpoint,
   type JevClient,
   type JevClientOptions,
@@ -36,7 +37,6 @@ import {
 } from "./client.ts";
 import type {
   ClassifierDomainMode,
-  ClassifierLayer,
   ClassifyDomain,
   ClassifyResult,
   ClassifyShadowRecord,
@@ -97,6 +97,26 @@ let unavailableReason = "Classifier host runtime unavailable";
 let callsUsed = 0;
 const registry = new Map<string, ClassifyDomain<string, unknown>>();
 const cache = new Map<string, { response: JevResponse; at: number }>();
+const pending = new Map<string, Promise<JevResponse>>();
+// One live token, not an ever-growing collection of per-generation caches.
+let generation = {};
+
+function fenceGeneration(): void {
+  generation = {};
+  callsUsed = 0;
+  cache.clear();
+  pending.clear();
+}
+
+function captureGeneration() {
+  return { generation, config, client, unavailableReason };
+}
+
+type Generation = ReturnType<typeof captureGeneration>;
+
+function assertCurrent(owner: Generation): void {
+  if (owner.generation !== generation) throw new Error("Classifier generation changed");
+}
 
 /** Bind only the current process's host facade, never a child/remote runtime. */
 export function bindClassifierRuntime(binding: { hostVersion: string; runtime: ClassifierRuntime }): void {
@@ -106,17 +126,16 @@ export function bindClassifierRuntime(binding: { hostVersion: string; runtime: C
 
 export function unbindClassifierRuntime(runtime: ClassifierRuntime): void {
   if (hostBinding?.runtime !== runtime) return;
+  fenceGeneration();
   hostBinding = undefined;
   client = undefined;
-  cache.clear();
   unavailableReason = "Classifier host runtime unavailable";
 }
 
 /** Inject classifier configuration (host loads `.pi/classifier.json` / env). */
 export function configureClassifier(next: ClassifierConfig): void {
-  config = { ...next };
-  callsUsed = 0;
-  cache.clear();
+  fenceGeneration();
+  config = { ...next, ...(next.domains ? { domains: { ...next.domains } } : {}) };
   const runtime = hostBinding?.runtime;
   const owner = getPiFeatureOwner(hostBinding?.hostVersion ?? next.hostVersion, !!runtime && typeof runtime.classify === "function" && typeof runtime.getAvailableOfType === "function" && typeof runtime.getModelOfType === "function");
   client = undefined;
@@ -149,13 +168,12 @@ export function classifierConfig(): ClassifierConfig {
 
 /** @internal Test seam: restore the disabled-by-default engine state. */
 export function resetClassifierForTest(): void {
+  fenceGeneration();
   config = { enabled: false };
   client = undefined;
   hostBinding = undefined;
   unavailableReason = "Classifier host runtime unavailable";
-  callsUsed = 0;
   registry.clear();
-  cache.clear();
 }
 
 export function registerClassifyDomain<D extends string, I>(domain: ClassifyDomain<D, I>): void {
@@ -219,33 +237,49 @@ function degraded<D extends string, I>(
   return { label: fallback.label, confidence: fallback.confidence, layer: "degraded", degradedReason: reason };
 }
 
-function cacheKey(domain: ClassifyDomain<string, unknown>, state: string): string {
-  const questions = JSON.stringify(domain.questions());
-  return createHash("sha256")
-    .update(`${domain.name}${config.model ?? ""}${questions}\0${state}`)
-    .digest("hex");
-}
-
-function cachedResponse(key: string): JevResponse | undefined {
-  const entry = cache.get(key);
-  if (!entry) return undefined;
-  if (Date.now() - entry.at > (config.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS)) {
-    cache.delete(key);
-    return undefined;
-  }
-  return entry.response;
-}
-
 async function jevDecide<D extends string, I>(
   domain: ClassifyDomain<D, I>,
   state: string,
+  owner: Generation,
 ): Promise<JevResponse> {
-  if (!client) throw new Error(unavailableReason);
-  if (callsUsed >= (config.maxCallsPerSession ?? DEFAULT_MAX_CALLS)) {
+  assertCurrent(owner);
+  if (!owner.client) throw new Error(owner.unavailableReason);
+  const questions = domain.questions();
+  const prepared = await prepareJevDecision(owner.client, { state, questions });
+  assertCurrent(owner);
+  const key = createHash("sha256")
+    .update(JSON.stringify([domain.name, prepared.identity, questions, state]))
+    .digest("hex");
+  const entry = cache.get(key);
+  if (entry && Date.now() - entry.at <= (owner.config.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS)) {
+    return entry.response;
+  }
+  cache.delete(key);
+  const existing = pending.get(key);
+  if (existing) {
+    const response = await existing;
+    assertCurrent(owner);
+    return response;
+  }
+  if (callsUsed >= (owner.config.maxCallsPerSession ?? DEFAULT_MAX_CALLS)) {
     throw new Error("JEV session call budget exhausted");
   }
   callsUsed += 1;
-  return client.decide({ state, questions: domain.questions() });
+  // Reserve before invoking host code, which may re-enter configuration.
+  const decision = Promise.resolve().then(() => {
+    assertCurrent(owner);
+    return prepared.decide();
+  });
+  pending.set(key, decision);
+  try {
+    const response = await decision;
+    assertCurrent(owner);
+    cache.set(key, { response, at: Date.now() });
+    return response;
+  } finally {
+    // A late old request must not remove a new generation's reservation.
+    if (owner.generation === generation && pending.get(key) === decision) pending.delete(key);
+  }
 }
 
 /**
@@ -256,8 +290,8 @@ function fireShadow<D extends string, I>(
   domain: ClassifyDomain<D, I>,
   input: I,
   verdict: RuleVerdict<D> | undefined,
-  mode: ClassifierDomainMode,
 ): void {
+  const owner = captureGeneration();
   const record: ClassifyShadowRecord = {
     domain: domain.name,
     at: new Date().toISOString(),
@@ -267,12 +301,8 @@ function fireShadow<D extends string, I>(
   void (async () => {
     try {
       record.state = domain.state(input).slice(0, 4_000);
-      const key = cacheKey(domain, record.state);
-      let response = cachedResponse(key);
-      if (!response) {
-        response = await jevDecide(domain, record.state);
-        cache.set(key, { response, at: Date.now() });
-      }
+      const response = await jevDecide(domain, record.state, owner);
+      assertCurrent(owner);
       const decided = domain.decide(response.answers);
       if (!decided) {
         record.error = "JEV answers did not map to a domain label";
@@ -288,7 +318,7 @@ function fireShadow<D extends string, I>(
       record.error = error instanceof Error ? error.message : String(error);
     }
     try {
-      config.onShadow?.(record);
+      if (owner.generation === generation) owner.config.onShadow?.(record);
     } catch {
       // Shadow reporting must never break the caller.
     }
@@ -311,7 +341,7 @@ export function classifySync<D extends string, I>(
   if (!domain) throw new Error(`Unknown classifier domain: ${String(domainOrName)}`);
   const verdict = safeRules(domain, input);
   const mode = config.enabled === true ? effectiveMode(domain as ClassifyDomain<string, unknown>) : "off";
-  if (mode !== "off") fireShadow(domain, input, verdict, mode);
+  if (mode !== "off") fireShadow(domain, input, verdict);
   if (verdict) {
     return {
       label: verdict.label,
@@ -340,10 +370,11 @@ export async function classify<D extends string, I>(
   const verdict = safeRules(domain, input);
   const mode = config.enabled === true ? effectiveMode(domain as ClassifyDomain<string, unknown>) : "off";
   if (verdict?.terminal === true) {
+    if (mode === "shadow") fireShadow(domain, input, verdict);
     return { label: verdict.label, confidence: 1, layer: "rule" };
   }
   if (mode !== "jev") {
-    if (mode === "shadow") fireShadow(domain, input, verdict, mode);
+    if (mode === "shadow") fireShadow(domain, input, verdict);
     if (verdict) {
       return {
         label: verdict.label,
@@ -355,15 +386,13 @@ export async function classify<D extends string, I>(
     const fallback = domain.fallback(mode === "off" ? "classifier disabled" : "no rule verdict");
     return { label: fallback.label, confidence: fallback.confidence, layer: "degraded", degradedReason: mode === "off" ? "classifier disabled" : "no rule verdict" };
   }
-  const state = domain.state(input);
-  const key = cacheKey(domain, state);
+  const owner = captureGeneration();
   try {
-    let response = cachedResponse(key);
-    if (!response) {
-      response = await jevDecide(domain, state);
-      cache.set(key, { response, at: Date.now() });
-    }
+    const state = domain.state(input);
+    const response = await jevDecide(domain, state, owner);
+    assertCurrent(owner);
     const decided = domain.decide(response.answers);
+    assertCurrent(owner);
     if (!decided) return degraded(domain, verdict, "JEV answers did not map to a domain label");
     return {
       label: decided.label,

@@ -83,7 +83,7 @@ export default function registerClassifier(pi: ExtensionAPI): void {
           modes: status.domains[name]?.supportedModes ?? DOMAIN_MODES,
         }));
       },
-      apply: (next) => applyConfig(applyClassifierEnvOverrides(next)),
+      apply: (_effective, configured) => applyConfig(configured),
     }));
   }
 
@@ -94,8 +94,9 @@ export default function registerClassifier(pi: ExtensionAPI): void {
       .catch(() => undefined);
   };
 
-  function applyConfig(next: FlowClassifierConfig): void {
-    config = next;
+  function applyConfig(configured: FlowClassifierConfig): void {
+    config = configured;
+    const next = applyClassifierEnvOverrides(configured);
     configureClassifier({
       enabled: next.enabled,
       ...(next.endpoint ? { endpoint: next.endpoint } : {}),
@@ -118,13 +119,15 @@ export default function registerClassifier(pi: ExtensionAPI): void {
     if (configCwd === cwd) return config;
     bindClassifierRuntime({ hostVersion: VERSION, runtime: ctx.modelRegistry });
     configCwd = cwd;
-    const loaded = applyClassifierEnvOverrides(await loadClassifierConfig(cwd));
+    const loaded = await loadClassifierConfig(cwd, { applyEnv: false });
     applyConfig(loaded);
     return config;
   }
 
-  function persistConfig(ctx: ExtensionContext): Promise<void> {
-    return saveClassifierConfig(config, ctx.cwd);
+  async function persistConfig(next: FlowClassifierConfig, ctx: ExtensionContext): Promise<void> {
+    // Never publish runtime changes (or persist env overrides) before saving succeeds.
+    await saveClassifierConfig(next, ctx.cwd);
+    applyConfig(next);
   }
 
   function formatStatus(): string {
@@ -166,17 +169,15 @@ export default function registerClassifier(pi: ExtensionAPI): void {
         return;
       }
       if (cmd === "on" || cmd === "off") {
-        config = { ...config, enabled: cmd === "on", domains: { ...config.domains } };
-        applyConfig(config);
-        await persistConfig(ctx);
-        ctx.ui.notify(`Classifier ${cmd === "on" ? "enabled" : "disabled"} (saved to .pi/classifier.json).`, "info");
+        await persistConfig({ ...config, enabled: cmd === "on", domains: { ...config.domains } }, ctx);
+        const enabled = applyClassifierEnvOverrides(config).enabled;
+        const override = envOverrideForClassifier(process.env[CLASSIFIER_ENV_FLAG]);
+        ctx.ui.notify(`Classifier ${enabled ? "enabled" : "disabled"} (saved ${cmd} to .pi/classifier.json${override === undefined ? "" : `; overridden by ${CLASSIFIER_ENV_FLAG}`}).`, "info");
         return;
       }
       if (cmd === "reset") {
-        config = { ...DEFAULT_CLASSIFIER_CONFIG, domains: { ...DEFAULT_CLASSIFIER_CONFIG.domains } };
-        applyConfig(config);
-        await persistConfig(ctx);
-        ctx.ui.notify("Classifier config reset to defaults.", "info");
+        await persistConfig({ ...DEFAULT_CLASSIFIER_CONFIG, domains: { ...DEFAULT_CLASSIFIER_CONFIG.domains } }, ctx);
+        ctx.ui.notify(`Classifier config reset to defaults.\n${formatStatus()}`, "info");
         return;
       }
       if (cmd === "mode") {
@@ -197,9 +198,7 @@ export default function registerClassifier(pi: ExtensionAPI): void {
           );
           return;
         }
-        config = { ...config, domains: { ...config.domains, [domain]: mode as ClassifierDomainMode } };
-        applyConfig(config);
-        await persistConfig(ctx);
+        await persistConfig({ ...config, domains: { ...config.domains, [domain]: mode as ClassifierDomainMode } }, ctx);
         ctx.ui.notify(`Domain "${domain}" mode → ${mode} (saved).`, "info");
         return;
       }

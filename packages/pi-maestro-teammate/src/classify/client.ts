@@ -54,6 +54,20 @@ export interface JevClient {
   decide(request: Omit<JevRequest, "model">): Promise<JevResponse>;
 }
 
+interface PreparedJevDecision {
+  identity: string;
+  decide(): Promise<JevResponse>;
+}
+
+// Keep preparation internal to these clients: cache identity and execution must
+// use the same resolved native model, even when the host registry changes.
+const preparations = new WeakMap<JevClient, (request: Omit<JevRequest, "model">) => Promise<PreparedJevDecision>>();
+
+/** @internal Resolve the effective transport/model before looking in the cache. */
+export function prepareJevDecision(client: JevClient, request: Omit<JevRequest, "model">): Promise<PreparedJevDecision> {
+  return preparations.get(client)!(request);
+}
+
 function isFinite01(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 }
@@ -71,7 +85,7 @@ function parseAnswer(raw: unknown, question: JevQuestion): JevAnswer | undefined
   const answer = raw as Record<string, unknown>;
   if (question.type === "choice") {
     const choice = typeof answer.choice === "string" ? answer.choice : undefined;
-    if (!choice || !(choice in question.criteria)) return undefined;
+    if (!choice || !Object.hasOwn(question.criteria, choice)) return undefined;
     return {
       type: "choice",
       choice,
@@ -123,38 +137,44 @@ export interface ClassifierRuntime {
 }
 
 export function createNativeJevClient(runtime: ClassifierRuntime, options: Pick<JevClientOptions, "endpoint" | "model" | "timeoutMs">): JevClient {
-  return {
-    async decide(request) {
-      const signal = AbortSignal.timeout(Math.max(1, options.timeoutMs ?? JEV_DEFAULT_TIMEOUT_MS));
-      const provider = options.endpoint;
-      const available = await runtime.getAvailableOfType("classifier", options.model?.includes("/") ? undefined : provider, { signal });
-      const reference = options.model;
-      const slash = reference?.indexOf("/") ?? -1;
-      const model = reference
-        ? (slash > 0
-          ? runtime.getModelOfType("classifier", reference.slice(0, slash), reference.slice(slash + 1))
-          : available.find((entry) => entry.id === reference))
-        : available[0];
-      if (!model) throw new Error("Native classifier unavailable (no matching authenticated classifier model)");
-      const questions: ClassifierContext["questions"] = {};
-      for (const [id, question] of Object.entries(request.questions)) {
-        questions[id] = question.type === "noul"
-          ? { type: "bool", instructions: question.instructions, criteria: { true: question.criteria?.true ?? "Yes", false: question.criteria?.false ?? "No" } }
-          : question.type === "score"
-            ? { ...question, criteria: [...question.criteria] }
-            : question;
-      }
-      const result = await runtime.classify(model, { state: { text: request.state }, questions }, { signal });
-      if (result.stopReason !== "stop") throw new Error(result.errorMessage ?? `Native classifier ${result.stopReason}`);
-      const answers: Record<string, unknown> = {};
-      for (const [id, answer] of Object.entries(result.answers)) {
-        answers[id] = answer.type === "bool" ? { type: "noul", noul: answer.probability } : answer;
-      }
-      const parsed = parseJevResponse({ model: `${result.provider}/${result.model}`, answers }, request.questions);
-      if (!parsed) throw new Error("Native classifier response did not match the requested question schema");
-      return parsed;
-    },
+  const prepare = async (request: Omit<JevRequest, "model">): Promise<PreparedJevDecision> => {
+    const signal = AbortSignal.timeout(Math.max(1, options.timeoutMs ?? JEV_DEFAULT_TIMEOUT_MS));
+    const provider = options.endpoint;
+    const available = await runtime.getAvailableOfType("classifier", options.model?.includes("/") ? undefined : provider, { signal });
+    const reference = options.model;
+    const slash = reference?.indexOf("/") ?? -1;
+    const model = reference
+      ? (slash > 0
+        ? runtime.getModelOfType("classifier", reference.slice(0, slash), reference.slice(slash + 1))
+        : available.find((entry) => entry.id === reference))
+      : available[0];
+    if (!model) throw new Error("Native classifier unavailable (no matching authenticated classifier model)");
+    const questions: ClassifierContext["questions"] = {};
+    for (const [id, question] of Object.entries(request.questions)) {
+      questions[id] = question.type === "noul"
+        ? { type: "bool", instructions: question.instructions, criteria: { true: question.criteria?.true ?? "Yes", false: question.criteria?.false ?? "No" } }
+        : question.type === "score"
+          ? { ...question, criteria: [...question.criteria] }
+          : question;
+    }
+    return {
+      identity: JSON.stringify(["native", options.endpoint, model.provider, model.api, model.baseUrl, model.id]),
+      async decide() {
+        const result = await runtime.classify(model, { state: { text: request.state }, questions }, { signal });
+        if (result.stopReason !== "stop") throw new Error(result.errorMessage ?? `Native classifier ${result.stopReason}`);
+        const answers: Record<string, unknown> = {};
+        for (const [id, answer] of Object.entries(result.answers)) {
+          answers[id] = answer.type === "bool" ? { type: "noul", noul: answer.probability } : answer;
+        }
+        const parsed = parseJevResponse({ model: `${result.provider}/${result.model}`, answers }, request.questions);
+        if (!parsed) throw new Error("Native classifier response did not match the requested question schema");
+        return parsed;
+      },
+    };
   };
+  const client: JevClient = { decide: async (request) => (await prepare(request)).decide() };
+  preparations.set(client, prepare);
+  return client;
 }
 
 export function createJevClient(options: JevClientOptions): JevClient {
@@ -162,7 +182,7 @@ export function createJevClient(options: JevClientOptions): JevClient {
   const model = options.model ?? JEV_DEFAULT_MODELS[options.endpoint];
   const timeoutMs = Math.max(1, options.timeoutMs ?? JEV_DEFAULT_TIMEOUT_MS);
   const fetchFn = options.fetchFn ?? fetch;
-  return {
+  const client: JevClient = {
     async decide(request) {
       const timeoutSignal = AbortSignal.timeout(timeoutMs);
       const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
@@ -182,6 +202,11 @@ export function createJevClient(options: JevClientOptions): JevClient {
       return parsed;
     },
   };
+  preparations.set(client, async (request) => ({
+    identity: JSON.stringify(["http", options.endpoint, url, model]),
+    decide: () => client.decide(request),
+  }));
+  return client;
 }
 
 /** Pick an endpoint from an explicit choice, or infer from which API key env exists. */

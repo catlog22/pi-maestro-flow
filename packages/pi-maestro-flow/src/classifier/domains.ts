@@ -53,7 +53,7 @@ export const signalTypeDomain: ClassifyDomain<CandidateType, SignalTypeInput> = 
     const answer = answers.type;
     if (answer?.type !== "choice") return undefined;
     const label = answer.choice as CandidateType;
-    if (!(label in SIGNAL_TYPE_CRITERIA)) return undefined;
+    if (!Object.hasOwn(SIGNAL_TYPE_CRITERIA, label)) return undefined;
     return {
       label,
       confidence: answer.confidence ?? answer.probabilities?.[answer.choice] ?? 0.5,

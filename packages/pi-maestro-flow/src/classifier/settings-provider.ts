@@ -41,7 +41,13 @@ import {
 } from "pi-maestro-settings-core/v1";
 import type { ClassifierDomainMode } from "pi-maestro-teammate/v1/classify";
 import {
+  applyClassifierEnvOverrides,
+  assertClassifierConfigTarget,
   classifierConfigPath,
+  classifierEnvOverrides,
+  CLASSIFIER_ENV_FLAG,
+  CLASSIFIER_ENDPOINT_ENV,
+  CLASSIFIER_MODEL_ENV,
   DEFAULT_CLASSIFIER_CONFIG,
   normalizeClassifierConfig,
   type FlowClassifierConfig,
@@ -90,12 +96,13 @@ export interface ClassifierSettingsProviderOptions {
   getConfigPath?: (cwd: string) => string;
   /** Live domain registry — called per describe/read so new domains appear. */
   getDomains?: () => readonly ClassifierDomainInfo[];
-  /** Hot-apply hook: normalized config → running engine (configureClassifier). */
-  apply?: (config: FlowClassifierConfig) => void;
+  /** Hot-apply effective config; configured values remain separate for persistence. */
+  apply?: (config: FlowClassifierConfig, configured: FlowClassifierConfig) => void;
 }
 
 interface ClassifierDocument {
   path: string;
+  exists: boolean;
   content: string;
   raw?: Record<string, unknown>;
   config: FlowClassifierConfig;
@@ -109,6 +116,7 @@ interface PreparedClassifierChange {
   path: string;
   temporaryPath: string;
   beforeContent: string;
+  beforeExists: boolean;
   changedKeys: readonly string[];
   release: () => Promise<void>;
   committedRevision?: SettingsResourceRevision;
@@ -144,6 +152,7 @@ const CATALOGS = {
     "classifier.option.off": "Off",
     "classifier.option.shadow": "Shadow",
     "classifier.option.jev": "JEV",
+    "classifier.settings.envOverride": "Overridden by a classifier environment variable; saving changes the file, not the effective value.",
     "classifier.settings.unknownKey": "Unknown classifier setting",
     "classifier.settings.invalidValue": "Invalid value for this classifier setting",
     "classifier.settings.unsupportedMode": "Mode not supported by this domain",
@@ -172,6 +181,7 @@ const CATALOGS = {
     "classifier.option.off": "关闭",
     "classifier.option.shadow": "Shadow",
     "classifier.option.jev": "JEV",
+    "classifier.settings.envOverride": "分类器环境变量覆盖此设置；保存仅改变文件，不改变实际值。",
     "classifier.settings.unknownKey": "未知的分类器设置",
     "classifier.settings.invalidValue": "该分类器设置的取值无效",
     "classifier.settings.unsupportedMode": "该域不支持此模式",
@@ -296,7 +306,7 @@ export function createClassifierSettingsProvider(
   const readDocument = (cwd: string): ClassifierDocument => {
     const path = getPath(cwd);
     if (!existsSync(path)) {
-      return { path, content: "", config: normalizeClassifierConfig(undefined), revision: revision(path, "") };
+      return { path, exists: false, content: "", config: normalizeClassifierConfig(undefined), revision: revision(path, "", false) };
     }
     const content = readFileSync(path, "utf8");
     try {
@@ -305,10 +315,11 @@ export function createClassifierSettingsProvider(
         ? parsed as Record<string, unknown>
         : undefined;
       const config = normalizeClassifierConfig(raw);
-      return { path, content, raw, config, revision: revision(path, content) };
+      return { path, exists: true, content, raw, config, revision: revision(path, content) };
     } catch (error) {
       return {
         path,
+        exists: true,
         content,
         config: normalizeClassifierConfig(undefined),
         revision: revision(path, content),
@@ -363,6 +374,13 @@ export function createClassifierSettingsProvider(
 
   const snapshot = (doc: ClassifierDocument): SettingsSnapshot => {
     const domains = getDomains();
+    const env = classifierEnvOverrides();
+    const effectiveConfig = applyClassifierEnvOverrides(doc.config);
+    const envSources: Record<string, string | undefined> = {
+      "classifier.enabled": env.enabled === undefined ? undefined : CLASSIFIER_ENV_FLAG,
+      "classifier.endpoint": env.endpoint === undefined ? undefined : CLASSIFIER_ENDPOINT_ENV,
+      "classifier.model": env.model === undefined ? undefined : CLASSIFIER_MODEL_ENV,
+    };
     const configured: ConfiguredSettingValue[] = [];
     const effective: SettingsSnapshot["effective"]["values"][number][] = [];
     for (const key of SCALAR_KEYS) {
@@ -374,8 +392,12 @@ export function createClassifierSettingsProvider(
         state: doc.error ? "invalid" : configuredValue === undefined ? "absent" : "set",
         ...(doc.error ? { messageKey: doc.error } : configuredValue === undefined ? {} : { value }),
         resource: doc.revision.resource,
+        ...(!doc.error && envSources[key] ? { messageKey: "classifier.settings.envOverride" } : {}),
       });
-      effective.push({ key, value, source: configuredValue === undefined ? "default" : "configured", scope: "project", resource: doc.revision.resource });
+      const envSource = envSources[key];
+      effective.push(envSource
+        ? { key, value: valueFor(effectiveConfig, key), source: "runtime", scope: "session", resource: { providerId: PROVIDER_ID, scope: "session", id: `env:${envSource}` } }
+        : { key, value, source: configuredValue === undefined ? "default" : "configured", scope: "project", resource: doc.revision.resource });
     }
     for (const domain of domains) {
       const key = `${DOMAIN_KEY_PREFIX}${domain.name}`;
@@ -417,11 +439,34 @@ export function createClassifierSettingsProvider(
     return undefined;
   };
 
-  let requestRevisions: readonly SettingsResourceRevision[] | undefined;
+  const applyDocument = (doc: ClassifierDocument): void => {
+    options.apply?.(applyClassifierEnvOverrides(doc.config), doc.config);
+  };
+
+  const restoreDocument = (entry: PreparedClassifierChange, cwd: string): ClassifierDocument => {
+    assertClassifierConfigTarget(entry.path);
+    if (entry.beforeExists) {
+      const temporaryPath = `${entry.path}.${randomUUID()}.restore.tmp`;
+      try {
+        writeFileSync(temporaryPath, entry.beforeContent, { encoding: "utf8", flag: "wx", mode: 0o600 });
+        assertClassifierConfigTarget(entry.path);
+        renameSync(temporaryPath, entry.path);
+        entry.committedRevision = revision(entry.path, entry.beforeContent, true);
+      } finally {
+        rmSync(temporaryPath, { force: true });
+      }
+    } else {
+      rmSync(entry.path, { force: true });
+      entry.committedRevision = revision(entry.path, entry.beforeContent, false);
+    }
+    // Retry ownership is recorded before cleanup, reading or live application.
+    return readDocument(cwd);
+  };
 
   const validateChanges = (
     changes: readonly SettingsChange[],
     doc: ClassifierDocument,
+    expectedRevisions?: readonly SettingsResourceRevision[],
   ): { issues: SettingsValidationIssue[]; conflicts: SettingsResourceConflict[] } => {
     const issues: SettingsValidationIssue[] = [];
     const domainInfo = new Map(getDomains().map((domain) => [domain.name, domain.modes]));
@@ -462,7 +507,7 @@ export function createClassifierSettingsProvider(
       issues.push({ severity: "error", messageKey: "classifier.settings.unknownKey", key: change.key, scope: change.scope });
     }
     const conflicts: SettingsResourceConflict[] = [];
-    for (const expected of requestRevisions ?? []) {
+    for (const expected of expectedRevisions ?? []) {
       if (expected.resource.providerId !== PROVIDER_ID) continue;
       if (doc.revision.etag !== expected.etag) {
         conflicts.push({ resource: doc.revision.resource, expectedEtag: expected.etag, actualEtag: doc.revision.etag, messageKey: "settings.conflict" });
@@ -487,25 +532,33 @@ export function createClassifierSettingsProvider(
     }),
     read: (request) => snapshot(readDocument(request.context.cwd)),
     validate: (request) => {
-      requestRevisions = request.expectedRevisions;
-      const { issues, conflicts } = validateChanges(request.changes, readDocument(request.context.cwd));
+      const { issues, conflicts } = validateChanges(request.changes, readDocument(request.context.cwd), request.expectedRevisions);
       return { valid: issues.length === 0 && conflicts.length === 0, issues, conflicts };
     },
     prepare: async (request) => {
-      requestRevisions = request.expectedRevisions;
       const cwd = request.context.cwd;
       const doc = readDocument(cwd);
-      const { issues, conflicts } = validateChanges(request.changes, doc);
+      const { issues, conflicts } = validateChanges(request.changes, doc, request.expectedRevisions);
       if (issues.length > 0 || conflicts.length > 0) {
         return { prepared: false, validation: { valid: false, issues, conflicts } };
       }
       const path = getPath(cwd);
+      assertClassifierConfigTarget(path);
+      mkdirSync(dirname(path), { recursive: true });
       const release = await properLockfile.lock(path, {
         realpath: false, stale: 10_000, update: 2_000,
         retries: { retries: 4, factor: 1.5, minTimeout: 25, maxTimeout: 250 },
       });
       try {
-        const next = applyChanges(doc.config, request.changes);
+        // Revalidate CAS and merge from a locked read after any lock contention.
+        assertClassifierConfigTarget(path);
+        const current = readDocument(cwd);
+        const validation = validateChanges(request.changes, current, request.expectedRevisions);
+        if (validation.issues.length > 0 || validation.conflicts.length > 0) {
+          await release();
+          return { prepared: false, validation: { valid: false, ...validation } };
+        }
+        const next = applyChanges(current.config, request.changes);
         const content = `${JSON.stringify(next, null, 2)}\n`;
         const token = randomUUID();
         const temporaryPath = `${path}.${process.pid}.${token}.tmp`;
@@ -516,7 +569,8 @@ export function createClassifierSettingsProvider(
           transactionId: request.transactionId,
           path,
           temporaryPath,
-          beforeContent: doc.content,
+          beforeContent: current.content,
+          beforeExists: current.exists,
           changedKeys: request.changes.map((change) => change.key),
           release,
         });
@@ -538,11 +592,12 @@ export function createClassifierSettingsProvider(
       }
       let published = false;
       try {
+        assertClassifierConfigTarget(state.path);
         renameSync(state.temporaryPath, state.path);
         published = true;
         const doc = readDocument(request.context.cwd);
         state.committedRevision = doc.revision;
-        options.apply?.(doc.config);
+        applyDocument(doc);
         return {
           snapshot: snapshot(doc),
           revisions: [doc.revision],
@@ -551,7 +606,14 @@ export function createClassifierSettingsProvider(
         };
       } catch (error) {
         if (published) {
-          try { writeFileSync(state.path, state.beforeContent); } catch { /* best effort */ }
+          try {
+            const restored = restoreDocument(state, request.context.cwd);
+            state.committedRevision = restored.revision;
+            applyDocument(restored);
+            prepared.delete(state.token);
+          } catch (restoreError) {
+            throw new AggregateError([error, restoreError], "classifier commit and restoration failed");
+          }
         }
         throw error;
       } finally {
@@ -569,6 +631,12 @@ export function createClassifierSettingsProvider(
       let rolledBack = false;
       for (const [token, entry] of [...prepared.entries()]) {
         if (entry.transactionId !== request.transactionId) continue;
+        // Uncommitted entries only own a staged file/lock, not the destination.
+        if (!entry.committedRevision) {
+          prepared.delete(token);
+          try { rmSync(entry.temporaryPath, { force: true }); } finally { await entry.release().catch(() => undefined); }
+          continue;
+        }
         const release = await properLockfile.lock(entry.path, {
           realpath: false, stale: 10_000, update: 2_000,
           retries: { retries: 4, factor: 1.5, minTimeout: 25, maxTimeout: 250 },
@@ -576,8 +644,9 @@ export function createClassifierSettingsProvider(
         try {
           const current = readDocument(request.context.cwd);
           if (entry.committedRevision && current.revision.etag !== entry.committedRevision.etag) continue;
-          writeFileSync(entry.path, entry.beforeContent);
-          options.apply?.(current.config);
+          const restored = restoreDocument(entry, request.context.cwd);
+          entry.committedRevision = restored.revision;
+          applyDocument(restored);
           rolledBack = true;
           prepared.delete(token);
         } finally {
@@ -587,15 +656,16 @@ export function createClassifierSettingsProvider(
       return { rolledBack, snapshot: snapshot(readDocument(request.context.cwd)) };
     },
     applyRuntime: (request) => {
+      const keys = request.changes.map((change) => change.key);
+      const doc = readDocument(request.context.cwd);
+      // Retain rollback state if runtime publication fails.
+      applyDocument(doc);
       for (const [token, entry] of [...prepared.entries()]) {
         if (entry.transactionId === request.transactionId) {
           prepared.delete(token);
-          void entry.release();
+          void entry.release().catch(() => undefined);
         }
       }
-      const keys = request.changes.map((change) => change.key);
-      const doc = readDocument(request.context.cwd);
-      options.apply?.(doc.config);
       return { appliedKeys: keys, deferred: [], failed: [] };
     },
     invokeAction: async () => ({ handled: false }),
@@ -623,10 +693,10 @@ export function registerClassifierSettingsProvider(
   return () => { if (typeof result === "function") result(); };
 }
 
-function revision(path: string, content: string): SettingsResourceRevision {
+function revision(path: string, content: string, exists = true): SettingsResourceRevision {
   return {
     resource: { providerId: PROVIDER_ID, scope: "project", id: RESOURCE_ID },
-    etag: createHash("sha256").update(content || "<missing>").digest("hex"),
+    etag: createHash("sha256").update(exists ? `file:${content}` : "<missing>").digest("hex"),
     size: Buffer.byteLength(content),
   };
 }
