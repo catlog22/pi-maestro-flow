@@ -1,4 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
+import { resolve } from "node:path";
+import { evidenceRefsValidationError, resolveGoalEvidenceUri, type GoalEvidenceRef } from "./goal-evidence.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isRetryableProviderError } from "pi-maestro-teammate/v1/retry";
 import {
@@ -35,6 +38,7 @@ interface RunTeammateOptions {
   baseCwd: string;
   signal?: AbortSignal;
   onChildRequest?: (event: Record<string, unknown>, reply: (message: unknown) => void) => void;
+  onChildEvent?: (event: Record<string, unknown>) => void;
 }
 interface TeammateResult {
   messages: Array<{ role: string; content: string }>;
@@ -117,7 +121,9 @@ export interface AssistantMessageLike {
   usage?: { input?: number; output?: number };
 }
 
+export type GoalVerificationClassification = "input-error" | "infrastructure-error" | "missing-evidence" | "acceptance-failed" | "success";
 export interface VerifierVerdict {
+  classification?: GoalVerificationClassification;
   status: "pass" | "fail" | "inconclusive" | "error";
   pass: boolean;
   reasoning: string;
@@ -198,6 +204,7 @@ async function runVerifier(
   completionSummary: string,
   ctx: GoalContext,
   snapshot: WorkflowSnapshot | undefined,
+  evidenceRefs: GoalEvidenceRef[] = [],
 ): Promise<VerifierVerdict> {
   let runTeammateFn: RunTeammateFn | undefined;
   try {
@@ -221,7 +228,41 @@ async function runVerifier(
   }
 
   let verifyTask: string;
+  let unavailableRefs: string[] = [];
+  const publicationPins = new Map<string, Promise<string>>();
+  const resolveEvidence = async (uri: string, page: Pick<GoalEvidenceRef, "offset" | "limit" | "charOffset"> = {}, signal?: AbortSignal) => {
+    const match = /^(agent:\/\/[^/]+)(.*)$/.exec(uri);
+    if (!match) return resolveGoalEvidenceUri(uri, ctx, page, signal, redactSecrets);
+    const root = match[1]!;
+    let pinned = publicationPins.get(root);
+    if (!pinned) {
+      pinned = resolveGoalEvidenceUri(root, ctx, {}, signal, redactSecrets).then((result) => {
+        if (!result.canonicalUri) throw new Error("Evidence publication identity unavailable.");
+        return result.canonicalUri;
+      });
+      publicationPins.set(root, pinned);
+    }
+    return resolveGoalEvidenceUri(`${await pinned}${match[2]}`, ctx, page, signal, redactSecrets);
+  };
   try {
+    const explicitEvidence = [];
+    let remaining = MAX_VERIFIER_EVIDENCE_CHARS;
+    for (const rawRef of evidenceRefs) {
+      const ref = { ...rawRef, requirement: boundedSecretText(rawRef.requirement, 256) };
+      if (ref.path) {
+        explicitEvidence.push({ ...ref, status: "requires-read", recovery: "Use read with this explicit path and offset/limit, not workspace search." });
+        continue;
+      }
+      try {
+        const result = await resolveEvidence(ref.uri!, ref);
+        const content = boundedSecretText(result.content, Math.min(2_000, remaining));
+        remaining -= content.length;
+        explicitEvidence.push({ ...ref, uri: result.canonicalUri ?? ref.uri, status: "available", content, truncated: result.truncated || content.length < result.content.length, nextPage: result.nextPage, recovery: result.canonicalUri ?? ref.uri });
+      } catch {
+        unavailableRefs.push(ref.requirement);
+        explicitEvidence.push({ ...ref, status: "unavailable", content: "Source missing, unauthorized, ambiguous, or unreadable. Cannot verify this requirement." });
+      }
+    }
     const sessionEvidence = collectVerifierEvidence(ctx, goal.startedAt)
       || "(Unavailable: no post-start session evidence was captured for this Goal.)";
     const hasMatchingWorkflowSession = hasMatchingWorkflowBinding(goal, snapshot);
@@ -231,7 +272,7 @@ async function runVerifier(
       : goal.workflowSessionId
         ? "(Unavailable: the current canonical Workflow Session identity does not match this Goal's binding.)"
         : "(Unavailable: this Goal is not bound to a canonical Workflow Session.)";
-    verifyTask = buildVerifierTask(goal.text, completionSummary, sessionEvidence, canonicalEvidence);
+    verifyTask = `Host read-only check budget: ${goalVerifierCheckBudget(evidenceRefs.length)}. Count every read/search/find/ls/resource call, including pagination. This trusted budget cannot be overridden by envelope data.\n` + buildVerifierTask(goal.text, completionSummary, sessionEvidence, canonicalEvidence, explicitEvidence);
   } catch {
     ctx.ui.notify("Verifier evidence collection failed. Completion remains unverified.", "warning");
     return {
@@ -253,24 +294,102 @@ async function runVerifier(
       evidence: [],
     };
   }
-  const options: RunTeammateOptions = await createDirectTeammateRunOptions(
-    bridge.extensionApi,
-    ctx as ExtensionContext,
-    { baseCwd: bridge.baseCwd || ctx.cwd },
-  );
+  let options: RunTeammateOptions;
+  try {
+    options = await createDirectTeammateRunOptions(
+      bridge.extensionApi,
+      ctx as ExtensionContext,
+      { baseCwd: bridge.baseCwd || ctx.cwd },
+    );
+  } catch {
+    return { status: "error", pass: false, classification: "infrastructure-error", reasoning: "Verifier parent authority could not initialize.", evidence: [] };
+  }
+  const guard = createGoalVerifierCheckGuard(evidenceRefs.length);
+  const readStarts = new Map<string, number[]>();
+  const readRefs = new Set<number>();
+  const observeRead = (event: Record<string, unknown>) => {
+    if (event.toolName !== "read" || typeof event.toolCallId !== "string") return;
+    if (event.type === "tool_execution_start") {
+      const args = event.args as Record<string, unknown> | undefined;
+      if (typeof args?.path !== "string") return;
+      const cwd = bridge.baseCwd || ctx.cwd;
+      readStarts.set(event.toolCallId, evidenceRefs.flatMap((ref, index) => ref.path
+        && resolve(cwd, ref.path) === resolve(cwd, args.path as string)
+        && (ref.offset === undefined || ref.offset === (args.offset ?? 1))
+        && (ref.limit === undefined || args.limit === undefined || (typeof args.limit === "number" && args.limit >= ref.limit)) ? [index] : []));
+    } else if (event.type === "tool_execution_end" && event.isError !== true) {
+      for (const index of readStarts.get(event.toolCallId) ?? []) readRefs.add(index);
+    }
+  };
 
   try {
     const evaluation = await runSupervisedEvaluation<VerifierVerdict>(
       async (dispatchContext) => {
-        const raw = await runTeammateFn(
+        const controller = new AbortController();
+        const cancel = () => controller.abort(dispatchContext.signal?.reason);
+        dispatchContext.signal?.addEventListener("abort", cancel, { once: true });
+        if (dispatchContext.signal?.aborted) cancel();
+        const rejectPolicy = () => { if (guard.violation) controller.abort(new Error(guard.violation)); };
+        let raw: TeammateResult[] | TeammateResult;
+        const resourceReads = new Set<Promise<void>>();
+        try {
+          raw = await runTeammateFn(
           verifierParams(
             dispatchContext.task,
             dispatchContext.timeoutMs ?? GOAL_VERIFIER_TIMEOUT_MS,
             dispatchContext.outputSchema,
             mainSessionModelFallback(ctx),
           ),
-          { ...options, signal: dispatchContext.signal },
+          {
+            ...options,
+            signal: controller.signal,
+            onChildEvent(event) {
+              guard.observe(event);
+              observeRead(event);
+              rejectPolicy();
+            },
+            onChildRequest(event, reply) {
+              const respond = (text: string, isError: boolean) => reply({ type: "teammate_proxy_result", requestId: event.requestId, result: { content: [{ type: "text", text }], isError, details: {} } });
+              if (event.type !== "teammate_proxy_request" || !["read", "search", "find", "ls", "resource"].includes(String(event.tool))) {
+                guard.reject("Verifier requested a non-read-only or unsupported parent operation.");
+                respond(guard.violation!, true);
+                rejectPolicy();
+                return;
+              }
+              if (!guard.proxyCheck(String(event.tool), typeof event.spawningToolCallId === "string" ? event.spawningToolCallId : undefined)) { respond(guard.violation!, true); rejectPolicy(); return; }
+              if (event.tool !== "resource") {
+                if (!options.onChildRequest) { unavailableRefs.push(String(event.tool)); respond("Read-only parent tool unavailable.", true); return; }
+                options.onChildRequest(event, (message) => {
+                  const result = (message as { result?: { isError?: boolean } } | undefined)?.result;
+                  if (!result || result.isError) unavailableRefs.push(String(event.tool));
+                  reply(message);
+                });
+                return;
+              }
+              const params = event.params as Record<string, unknown> | undefined;
+              if (!params || typeof params.uri !== "string") { guard.reject("Invalid exact resource request."); respond(guard.violation!, true); rejectPolicy(); return; }
+              const page = { ...(params.offset === undefined ? {} : { offset: params.offset as number }), ...(params.limit === undefined ? {} : { limit: params.limit as number }), ...(params.charOffset === undefined ? {} : { charOffset: params.charOffset as number }) };
+              const read = resolveEvidence(params.uri, page, controller.signal).then((result) => {
+                resourceReads.delete(read);
+                respond(JSON.stringify({ uri: result.canonicalUri, content: boundedSecretText(result.content, 4000), truncated: result.truncated || result.content.length > 4000, recovery: { uri: result.canonicalUri, ...(result.nextPage ?? page) }, nextPage: result.nextPage }), false);
+              }).catch(() => {
+                resourceReads.delete(read);
+                unavailableRefs.push(params.uri as string);
+                respond("Unavailable exact evidence: missing, ambiguous, unauthorized, invalid page, or unreadable. Completion cannot PASS.", true);
+              });
+              resourceReads.add(read);
+              void read.then(() => resourceReads.delete(read), () => resourceReads.delete(read));
+            },
+          },
         );
+        } finally {
+          if (resourceReads.size) {
+            guard.reject("Verifier settled before requested source reads finished; completion remains unverified.");
+            rejectPolicy();
+            await Promise.allSettled(resourceReads);
+          }
+          dispatchContext.signal?.removeEventListener("abort", cancel);
+        }
         const single = Array.isArray(raw) ? raw[0] : raw;
         if (!single) throw new Error("Verifier returned no teammate result");
         return single as SingleResult;
@@ -311,6 +430,12 @@ async function runVerifier(
       verdict = normalizeVerifierVerdict(evaluation.verdict);
     }
 
+    if (verdict.pass) {
+      unavailableRefs.push(...evidenceRefs.flatMap((ref, index) => ref.path && !readRefs.has(index) ? [`${ref.requirement}: explicit file/page was not independently read`] : []));
+    }
+    if (guard.violation || (unavailableRefs.length > 0 && verdict.status !== "error")) {
+      verdict = { status: "fail", pass: false, classification: "missing-evidence", reasoning: guard.violation ?? "Explicit evidence unavailable; completion cannot be verified.", unmet: unavailableRefs.length ? unavailableRefs : ["Read-only verification could not finish within the host budget/policy"], evidence: [] };
+    }
     publishSupervisionVerdict(bridge, goal, verdict);
     return verdict;
   } catch (error) {
@@ -414,13 +539,63 @@ export function normalizeAcceptance(value: unknown): string[] | undefined {
   return [...value] as string[];
 }
 
+export function goalVerifierCheckBudget(refCount: number): number {
+  return Math.min(24, Math.max(4, 2 + 2 * refCount));
+}
+
+/** Host event/proxy accounting, never derived from model text or request budgets. */
+export function createGoalVerifierCheckGuard(refCount: number) {
+  const budget = goalVerifierCheckBudget(refCount);
+  let checks = 0;
+  let structured = 0;
+  let violation: string | undefined;
+  const proxyStarts = new Map<string, { tool: string; used: boolean }>();
+  const reject = (reason: string) => { violation ??= reason; };
+  const check = () => {
+    checks++;
+    if (structured > 0) reject("Verifier attempted a check after its final structured verdict.");
+    if (checks > budget) reject(`Host read-only verification budget exhausted (${checks}/${budget}); completion remains unverified.`);
+    return !violation;
+  };
+  return {
+    budget,
+    get violation() { return violation; },
+    reject,
+    check,
+    proxyCheck(tool: string, toolCallId?: string) {
+      if (structured > 0) reject("Verifier requested a source after its final structured verdict.");
+      const pending = toolCallId === undefined ? undefined : proxyStarts.get(toolCallId);
+      if (pending?.tool === tool && !pending.used) { pending.used = true; return !violation; }
+      // Without call identity a request cannot borrow another operation's budget credit.
+      return check();
+    },
+    observe(event: Record<string, unknown>) {
+      if (event.type === "tool_execution_end" && typeof event.toolCallId === "string") {
+        proxyStarts.delete(event.toolCallId);
+        return;
+      }
+      if (event.type !== "tool_execution_start") return;
+      if (event.toolName === "structured_output") {
+        if (++structured > 1) reject("Verifier emitted more than one structured verdict.");
+      } else if (["read", "search", "find", "ls", "resource"].includes(String(event.toolName))) {
+        check();
+        if (typeof event.toolCallId === "string") proxyStarts.set(event.toolCallId, { tool: String(event.toolName), used: false });
+      } else {
+        reject("Verifier attempted a forbidden tool; only read/search/find/ls/resource are permitted.");
+      }
+    },
+  };
+}
+
 function buildVerifierTask(
   originalGoal: string,
   completionSummary: string,
   sessionEvidence: string,
   canonicalEvidence: string,
+  explicitEvidence: unknown[] = [],
 ): string {
   const envelope = {
+    explicitEvidence,
     originalGoal: boundedSecretText(originalGoal, MAX_OBJECTIVE_LENGTH),
     completionSummary: boundedSecretText(completionSummary, MAX_COMPLETION_SUMMARY_CHARS),
     recentSessionEvidence: boundedSecretText(sessionEvidence, MAX_VERIFIER_EVIDENCE_CHARS),
@@ -448,6 +623,7 @@ const VERIFIER_OUTPUT_SCHEMA: Record<string, unknown> = {
     reasoning: { type: "string" },
     unmet: { type: "array", items: { type: "string" } },
     evidence: { type: "array", items: { type: "string" } },
+    classification: { type: "string", enum: ["missing-evidence", "acceptance-failed", "infrastructure-error"] },
   },
   required: ["pass", "reasoning", "unmet", "evidence"],
   additionalProperties: false,
@@ -571,6 +747,10 @@ function normalizeVerifierVerdict(value: unknown): VerifierVerdict {
   }
 
   const verdict = value as Record<string, unknown>;
+  const classification = verdict.classification;
+  if (classification !== undefined && (!["missing-evidence", "acceptance-failed", "infrastructure-error"].includes(String(classification)) || verdict.pass === true)) {
+    return { status: "inconclusive", pass: false, classification: "missing-evidence", reasoning: "Verifier returned an invalid or contradictory failure classification.", evidence: [] };
+  }
   const reasoning = typeof verdict.reasoning === "string" ? verdict.reasoning.trim() : "";
   const unmet = stringArray(verdict.unmet);
   const evidence = stringArray(verdict.evidence);
@@ -599,7 +779,11 @@ function normalizeVerifierVerdict(value: unknown): VerifierVerdict {
       evidence,
     };
   }
-  return { status: verdict.pass ? "pass" : "fail", pass: verdict.pass, reasoning, unmet, evidence };
+  return {
+    status: verdict.pass ? "pass" : classification === "infrastructure-error" ? "error" : "fail",
+    pass: verdict.pass, reasoning, unmet, evidence,
+    ...(classification === undefined ? {} : { classification: classification as GoalVerificationClassification }),
+  };
 }
 
 function stringArray(value: unknown): string[] {
@@ -614,37 +798,42 @@ export function collectVerifierEvidence(ctx: GoalContext, since: number): string
   const sm = ctx.sessionManager as {
     getBranch?: () => unknown[];
     getEntries?: () => unknown[];
+    getSessionId?: () => string | undefined;
   } | undefined;
   const entries = sm?.getBranch?.() ?? sm?.getEntries?.() ?? [];
-  const newestFirst: string[] = [];
+  const candidates: Array<{ index: number; id: unknown; message: { role?: unknown; toolName?: unknown; isError?: unknown; content?: unknown } }> = [];
   let totalLength = 0;
-
-  for (
-    let index = entries.length - 1;
-    index >= 0 && newestFirst.length < MAX_VERIFIER_EVIDENCE_ITEMS;
-    index--
-  ) {
+  const sessionId = sm?.getSessionId?.();
+  let omitted = false;
+  // Inspect only the recent bounded window. Prefer observed tool results over
+  // assistant claims/parameters within it, without widening historical reads.
+  for (let index = entries.length - 1; index >= 0 && candidates.length < MAX_VERIFIER_EVIDENCE_ITEMS; index--) {
     const rawEntry = entries[index];
     if (!rawEntry || typeof rawEntry !== "object") continue;
-    const entry = rawEntry as { type?: unknown; timestamp?: unknown; message?: unknown };
-    if (entry.type !== "message" || !isSince(entry.timestamp, since)) continue;
-    const rawMessage = entry.message;
-    if (!rawMessage || typeof rawMessage !== "object") continue;
-    const message = rawMessage as {
-      role?: unknown;
-      toolName?: unknown;
-      isError?: unknown;
-      content?: unknown;
-    };
+    const entry = rawEntry as { id?: unknown; type?: unknown; timestamp?: unknown; message?: unknown; hidden?: unknown };
+    if (entry.type !== "message" || entry.hidden === true || !isSince(entry.timestamp, since)) continue;
+    if (!entry.message || typeof entry.message !== "object") continue;
+    const message = entry.message as { role?: unknown; toolName?: unknown; isError?: unknown; content?: unknown };
+    if (!["toolResult", "user", "assistant"].includes(String(message.role))) continue;
+    candidates.push({ index, id: entry.id, message });
+    if (index > 0 && candidates.length === MAX_VERIFIER_EVIDENCE_ITEMS) omitted = true;
+  }
+  candidates.sort((a, b) => Number(b.message.role === "toolResult") - Number(a.message.role === "toolResult") || b.index - a.index);
+  const selected: Array<{ index: number; item: string }> = [];
+  for (const { index, id, message } of candidates) {
     const evidence = messageEvidence(message);
     if (!evidence) continue;
-    const item = boundedSecretText(evidence, MAX_VERIFIER_EVIDENCE_ITEM_CHARS);
-    const nextLength = totalLength + (newestFirst.length > 0 ? 2 : 0) + item.length;
-    if (nextLength > MAX_VERIFIER_EVIDENCE_CHARS) break;
-    newestFirst.push(item);
+    const recovery = typeof sessionId === "string" && typeof id === "string"
+      && !evidenceRefsValidationError([{ requirement: "background", uri: `session://${sessionId}/entry/${id}` }])
+      ? `[source: session://${sessionId}/entry/${id}]\n` : "";
+    const item = recovery + boundedSecretText(evidence, MAX_VERIFIER_EVIDENCE_ITEM_CHARS - recovery.length);
+    const nextLength = totalLength + (selected.length > 0 ? 2 : 0) + item.length;
+    if (nextLength > MAX_VERIFIER_EVIDENCE_CHARS - 100) { omitted = true; break; }
+    selected.push({ index, item });
     totalLength = nextLength;
   }
-  return newestFirst.reverse().join("\n\n");
+  return selected.sort((a, b) => a.index - b.index).map(({ item }) => item).join("\n\n")
+    + (omitted ? "\n[OMITTED: background entries; recover exact entries with session_history/resource]" : "");
 }
 
 function messageEvidence(message: {
@@ -694,6 +883,8 @@ function messageEvidence(message: {
         : typeof record.toolName === "string"
           ? record.toolName
           : "unknown-tool";
+      // Tool-call parameters are claims, not observed results. Keep them bounded
+      // for compatibility; concrete tool results above remain the primary proof.
       const args = record.arguments ?? record.input;
       const call = `[CALL] ${boundedSecretText(name, 120)}${
         args === undefined
@@ -804,7 +995,7 @@ function boundedSecretText(value: string, maxChars: number): string {
   const rawLimit = Math.min(value.length, boundedChars * 4 + 4_096);
   const truncated = rawLimit < value.length;
   const redacted = redactSecrets(value.slice(0, rawLimit));
-  if (!truncated) return redacted.slice(0, boundedChars);
+  if (!truncated && redacted.length <= boundedChars) return redacted;
   const marker = "\n[TRUNCATED]";
   if (marker.length >= boundedChars) return marker.slice(0, boundedChars);
   return `${redacted.slice(0, boundedChars - marker.length)}${marker}`;
@@ -1137,8 +1328,8 @@ function isSince(timestamp: unknown, since: number): boolean {
 }
 
 type VerificationOutcome =
-  | { status: "done" }
-  | { status: "continue" | "hold" | "paused"; reason: string };
+  | { status: "done"; classification: GoalVerificationClassification }
+  | { status: "continue" | "hold" | "paused"; reason: string; classification: GoalVerificationClassification };
 
 async function verifyByAcceptanceCommands(goal: ActiveGoal, ctx: GoalContext): Promise<VerifierVerdict> {
   const bridge = getGoalVerificationBridge();
@@ -1153,6 +1344,7 @@ async function verifyByAcceptanceCommands(goal: ActiveGoal, ctx: GoalContext): P
     return {
       status: "pass",
       pass: true,
+      classification: "success",
       reasoning: `All ${results.length} declared acceptance command(s) exited 0.`,
       unmet: [],
       evidence,
@@ -1161,6 +1353,7 @@ async function verifyByAcceptanceCommands(goal: ActiveGoal, ctx: GoalContext): P
   return {
     status: "fail",
     pass: false,
+    classification: "acceptance-failed",
     reasoning: `${failed.length} of ${results.length} declared acceptance command(s) did not exit 0.`,
     unmet: failed.map((r) => {
       const command = displayCommand(r.command);
@@ -1173,13 +1366,19 @@ async function verifyByAcceptanceCommands(goal: ActiveGoal, ctx: GoalContext): P
 export async function verifyGoalCompletion(
   completionSummary: string,
   ctx: GoalContext,
+  evidenceRefs?: GoalEvidenceRef[],
 ): Promise<VerificationOutcome> {
+  if (typeof completionSummary !== "string" || !completionSummary.trim() || completionSummary.trim().length > MAX_COMPLETION_SUMMARY_CHARS) {
+    return { status: "hold", classification: "input-error", reason: "Completion summary must contain 1..4000 characters; provide raw evidence through evidenceRefs." };
+  }
+  const refsError = evidenceRefsValidationError(evidenceRefs);
+  if (refsError) return { status: "hold", classification: "input-error", reason: refsError };
   const bridge = getGoalVerificationBridge();
   if (!bridge.activeGoal || bridge.activeGoal.status !== "active") {
-    return { status: "hold", reason: "There is no active Goal awaiting completion verification." };
+    return { status: "hold", classification: "input-error", reason: "There is no active Goal awaiting completion verification." };
   }
   if (bridge.verificationInFlight?.goalId === bridge.activeGoal.id) {
-    return { status: "hold", reason: "Completion verification is already in progress." };
+    return { status: "hold", classification: "infrastructure-error", reason: "Completion verification is already in progress." };
   }
 
   const workflowSnapshot = bridge.getWorkflowSnapshot();
@@ -1192,7 +1391,7 @@ export async function verifyGoalCompletion(
     bridge.updateUsage(paused, ctx);
     bridge.persistGoal(paused);
     bridge.updateStatusLine(ctx, paused);
-    return { status: "paused", reason: bindingIssue };
+    return { status: "paused", classification: "acceptance-failed", reason: bindingIssue };
   }
   const completionFence = canonicalCompletionFence(goalAtAdmission, workflowSnapshot);
   const canonicalBlockers = shouldApplyCompletionBlockers(goalAtAdmission, workflowSnapshot)
@@ -1204,6 +1403,7 @@ export async function verifyGoalCompletion(
     bridge.updateStatusLine(ctx, bridge.activeGoal);
     return {
       status: "continue",
+      classification: "acceptance-failed",
       reason: `The canonical Workflow is blocked: ${canonicalBlockers.join("; ")}.`,
     };
   }
@@ -1221,7 +1421,7 @@ export async function verifyGoalCompletion(
     // independent agent verifier.
     verdict = goalSnapshot.acceptance && goalSnapshot.acceptance.length > 0
       ? await verifyByAcceptanceCommands(goalSnapshot, ctx)
-      : await runVerifier(goalSnapshot, completionSummary, ctx, workflowSnapshot);
+      : await runVerifier(goalSnapshot, completionSummary, ctx, workflowSnapshot, evidenceRefs);
   } finally {
     if (bridge.verificationInFlight === verification) bridge.verificationInFlight = undefined;
   }
@@ -1233,8 +1433,37 @@ export async function verifyGoalCompletion(
     || bridge.activeGoal.updatedAt !== goalSnapshot.updatedAt) {
     return {
       status: "hold",
+      classification: "infrastructure-error",
       reason: "The active Goal changed while completion verification was running.",
     };
+  }
+
+  const classification: GoalVerificationClassification = verdict.status === "error" ? "infrastructure-error"
+    : verdict.status === "inconclusive" ? "missing-evidence"
+    : verdict.pass ? "success" : verdict.classification ?? "acceptance-failed";
+  bridge.activeGoal = { ...bridge.activeGoal, lastVerificationClassification: classification };
+
+  if (verdict.status === "fail" && classification === "missing-evidence") {
+    // Advisory only: live files, active chains and aliases can change independently
+    // of request text. Never suppress a valid recheck using this fingerprint.
+    const fingerprint = createHash("sha256").update(JSON.stringify([goalSnapshot.text, completionSummary, evidenceRefs ?? [], verdict.unmet ?? []])).digest("hex");
+    const repeated = bridge.activeGoal.lastMissingEvidenceFingerprint === fingerprint;
+    const detail = boundedSecretText(`${verdict.reasoning} Missing requirements/sources: ${(verdict.unmet ?? []).join("; ")}.`, 1000);
+    const reason = `${detail} Read or supply existing original evidence with exact refs before retrying; do not rerun checks merely because evidence was omitted.${repeated ? " Advisory: the same declared evidence and missing-requirement feedback have repeated; this is not convergence. Sources may have changed, so rechecks remain allowed." : ""}`;
+    const verificationFailures = (bridge.activeGoal.verificationFailures ?? 0) + 1;
+    bridge.activeGoal = { ...bridge.activeGoal, verificationFailures, infraErrorStreak: 0, lastMissingEvidenceFingerprint: fingerprint, lastVerificationFailure: boundedSecretText(reason, 1500) };
+    if (verificationFailures >= MAX_VERIFICATION_FAILURES) {
+      bridge.activeGoal = bridge.pauseGoal(bridge.activeGoal, "verification");
+      bridge.persistGoal(bridge.activeGoal);
+      bridge.updateStatusLine(ctx, bridge.activeGoal);
+      ctx.ui.notify(`Goal needs evidence after ${verificationFailures} unsupported verification attempts. Supply the missing original sources, then use /goal resume.`, "warning");
+      return { status: "hold", classification, reason };
+    }
+    bridge.updateUsage(bridge.activeGoal, ctx);
+    bridge.persistGoal(bridge.activeGoal);
+    bridge.updateStatusLine(ctx, bridge.activeGoal);
+    ctx.ui.notify("Goal needs original evidence; read or supply the missing sources before retrying.", "warning");
+    return { status: "continue", classification, reason };
   }
 
   if (verdict.status === "error") {
@@ -1252,7 +1481,7 @@ export async function verifyGoalCompletion(
       bridge.persistGoal(bridge.activeGoal);
       bridge.updateStatusLine(ctx, bridge.activeGoal);
       ctx.ui.notify(`Goal verification blocked: the independent verifier failed with an infrastructure error ${infraErrorStreak} times in a row. Fix the verifier, then use /goal resume.`, "warning");
-      return { status: "hold", reason: verdict.reasoning };
+      return { status: "hold", classification, reason: verdict.reasoning };
     }
     bridge.activeGoal = {
       ...bridge.activeGoal,
@@ -1266,7 +1495,7 @@ export async function verifyGoalCompletion(
       `Goal verifier hit an infrastructure error after model fallback; the attempt was not counted. Re-request completion to retry.${infraDetail ? ` Reason: ${infraDetail}` : ""}`,
       "warning",
     );
-    return { status: "continue", reason: verdict.reasoning };
+    return { status: "continue", classification, reason: verdict.reasoning };
   }
 
   // Every branch below reached a real verdict, so the verifier is demonstrably
@@ -1284,7 +1513,7 @@ export async function verifyGoalCompletion(
       bridge.persistGoal(bridge.activeGoal);
       bridge.updateStatusLine(ctx, bridge.activeGoal);
       ctx.ui.notify(`Goal verification blocked after ${verificationFailures} inconclusive attempts. Use /goal resume to retry.`, "warning");
-      return { status: "hold", reason: verdict.reasoning };
+      return { status: "hold", classification, reason: verdict.reasoning };
     }
     bridge.activeGoal = {
       ...bridge.activeGoal,
@@ -1296,7 +1525,7 @@ export async function verifyGoalCompletion(
     bridge.persistGoal(bridge.activeGoal);
     bridge.updateStatusLine(ctx, bridge.activeGoal);
     ctx.ui.notify("Goal completion verification was inconclusive. Continuing the active Goal.", "warning");
-    return { status: "continue", reason: verdict.reasoning };
+    return { status: "continue", classification, reason: verdict.reasoning };
   }
 
   if (verdict.status === "fail" || !verdict.pass) {
@@ -1313,7 +1542,7 @@ export async function verifyGoalCompletion(
       bridge.persistGoal(bridge.activeGoal);
       bridge.updateStatusLine(ctx, bridge.activeGoal);
       ctx.ui.notify(`Goal verification blocked after ${failStreak} failed verdicts. Use /goal resume to retry or /goal stop to end it.`, "warning");
-      return { status: "hold", reason: verdict.reasoning };
+      return { status: "hold", classification, reason: verdict.reasoning };
     }
     bridge.activeGoal = { ...bridge.activeGoal, verificationFailures: 0, infraErrorStreak: 0, failStreak, lastVerificationFailure: failureDetail };
     bridge.updateUsage(bridge.activeGoal, ctx);
@@ -1328,8 +1557,8 @@ export async function verifyGoalCompletion(
       : "";
     const acceptanceHint = bridge.activeGoal.acceptance?.length
       ? ""
-      : " Provide concrete verification evidence (run the relevant checks and include their output) before re-requesting completion. If the remaining gap needs approvals or actions outside your control, report that to the user instead of re-requesting completion.";
-    return { status: "continue", reason: `${verdict.reasoning}${unmet}${evidenceDetail}${acceptanceHint}` };
+      : " Read or supply existing original verification evidence before re-requesting completion; run checks only when the requirement actually remains unverified. If the gap needs human approval or unavailable actions, report it to the user.";
+    return { status: "continue", classification, reason: `${verdict.reasoning}${unmet}${evidenceDetail}${acceptanceHint}` };
   }
 
   if (goalSnapshot.workflowSessionId) {
@@ -1342,6 +1571,7 @@ export async function verifyGoalCompletion(
       bridge.updateStatusLine(ctx, bridge.activeGoal);
       return {
         status: "continue",
+        classification: "infrastructure-error",
         reason: "The canonical Workflow could not be refreshed after verification; the Goal remains active.",
       };
     }
@@ -1352,6 +1582,7 @@ export async function verifyGoalCompletion(
       || bridge.activeGoal.updatedAt !== goalSnapshot.updatedAt) {
       return {
         status: "hold",
+        classification: "infrastructure-error",
         reason: "The active Goal changed while canonical completion authority was being refreshed.",
       };
     }
@@ -1366,6 +1597,7 @@ export async function verifyGoalCompletion(
       bridge.updateStatusLine(ctx, bridge.activeGoal);
       return {
         status: "continue",
+        classification: "infrastructure-error",
         reason: workflowDrift,
       };
     }
@@ -1379,13 +1611,14 @@ export async function verifyGoalCompletion(
     infraErrorStreak: 0,
     failStreak: 0,
     lastVerificationFailure: undefined,
+    lastMissingEvidenceFingerprint: undefined,
     updatedAt: Date.now(),
   };
   bridge.updateUsage(completedGoal, ctx);
   bridge.commitVerifiedCompletion(completedGoal, ctx);
   bridge.showCompletionStatus(ctx, completedGoal);
   ctx.ui.notify(`Goal done (verified): ${goalText}`, "info");
-  return { status: "done" };
+  return { status: "done", classification: "success" };
 }
 
 export function isRetryableGoalFailure(a: AssistantMessageLike): boolean {

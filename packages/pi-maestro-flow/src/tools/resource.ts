@@ -41,9 +41,20 @@ export const ResourceParams = Type.Object({
     description:
       "Protocol resource URI: pr://owner/repo/N (or pr://N, optional /diff or /files), issue://owner/repo/N (or issue://N), skill://name, rule://name, agent://<correlationId>[/key[/index]], or session://<sessionId>/entry/<entryId>. See the tool description for scheme semantics.",
   }),
+  offset: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000_000, description: "1-based line offset for exact session/agent evidence recovery." })),
+  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 2_000, description: "Line page size for exact session/agent evidence recovery; each page is a read." })),
+  charOffset: Type.Optional(Type.Integer({ minimum: 0, maximum: 10_000_000, description: "0-based UTF-16 character offset within the selected line page, for oversized single-line evidence." })),
 });
 
 export interface ResourceResolveOptions {
+  /** Exact Goal evidence reads reject task-name discovery and pin aliases. */
+  exactEvidence?: boolean;
+  /** 1-based line page; each page is independently bounded. */
+  offset?: number;
+  limit?: number;
+  charOffset?: number;
+  /** Host-only transformation before paging, so redaction cannot split across pages. */
+  redactEvidence?: (text: string) => string;
   /** Fresh host-authorized session inventory used by session:// reads. */
   sessionHistory?: SessionHistoryInventorySource | SessionHistoryService;
   /** Fabric artifact source for artifact:// reads, when the host serves one. */
@@ -65,6 +76,9 @@ export interface ResourceDetails {
   resource: string;
   cached: boolean;
   bytes: number;
+  canonicalUri?: string;
+  truncated?: boolean;
+  nextPage?: { offset: number; limit: number; charOffset: number };
 }
 
 interface CachedEntry {
@@ -395,7 +409,7 @@ export async function resolveResource(
   cwd: string,
   signal?: AbortSignal,
   options: ResourceResolveOptions = {},
-): Promise<{ content: string; title: string; cached: boolean }> {
+): Promise<{ content: string; title: string; cached: boolean; canonicalUri?: string; truncated?: boolean; nextPage?: { offset: number; limit: number; charOffset: number } }> {
   const parsed = parseResourceUri(uri);
   if (!parsed) {
     throw new Error(
@@ -442,6 +456,7 @@ export async function resolveResource(
       if (!id) throw new Error('Invalid agent:// URI. Expected agent://<correlationId>[/key[/index[/field]]].');
       const resolved = await resolveAgentOutput(id, cwd);
       if (resolved.kind === "ambiguous") {
+        if (options.exactEvidence) throw new Error("Ambiguous agent evidence; use an exact publication ID.");
         return {
           content: trimOutput(formatAgentMatchListing(resolved.name, resolved.matches)),
           title: `agent://${id}`,
@@ -449,6 +464,13 @@ export async function resolveResource(
         };
       }
       const record = resolved.record;
+      if (options.exactEvidence && id !== record.publicationId && id !== record.correlationId) {
+        throw new Error("Agent evidence requires an exact publication or correlation ID, not a task name.");
+      }
+      if (options.exactEvidence && id !== record.publicationId && (options.offset !== undefined || options.limit !== undefined || options.charOffset !== undefined)) {
+        throw new Error("Paged agent evidence requires the immutable publication URI from the initial exact read.");
+      }
+      const canonicalUri = `agent://${record.publicationId ?? record.correlationId}${pathSegments.length ? `/${pathSegments.join("/")}` : ""}`;
       const value = pathSegments.length === 0
         ? record.output
         : (() => {
@@ -462,7 +484,9 @@ export async function resolveResource(
             return hit.value;
           })();
       const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
-      return { content: trimOutput(text), title: `agent://${id}`, cached: false };
+      return options.exactEvidence
+        ? { ...resourceEvidencePage(text, options), title: canonicalUri, canonicalUri, cached: false }
+        : { content: trimOutput(text), title: `agent://${id}`, cached: false };
     }
     case "session": {
       const sessionUri = uri.trim().replace(/^session:\/\//i, "session://");
@@ -507,8 +531,11 @@ export async function resolveResource(
         const body = selected.entries.map((entry) => entry.text).filter((text) => text.length > 0).join("\n");
         const header = `[${selected.resourceUri} · ${selected.entries[0]?.kind ?? "entry"} · turn ${selected.turn}]`;
         return {
-          content: trimOutput(`${header}\n\n${body || "(no text content)"}`),
+          ...(options.exactEvidence
+            ? resourceEvidencePage(`${header}\n\n${body || "(no text content)"}`, options)
+            : { content: trimOutput(`${header}\n\n${body || "(no text content)"}`) }),
           title: sessionUri,
+          canonicalUri: selected.resourceUri,
           cached: false,
         };
       }
@@ -531,6 +558,28 @@ export async function resolveResource(
   }
 }
 
+/** Shared bounded exact-resource paging, including recoverable tail locations. */
+export function resourceEvidencePage(text: string, options: Pick<ResourceResolveOptions, "offset" | "limit" | "charOffset" | "redactEvidence">): { content: string; truncated: boolean; nextPage?: { offset: number; limit: number; charOffset: number } } {
+  const offset = options.offset ?? 1;
+  const limit = options.limit ?? 200;
+  if (!Number.isSafeInteger(offset) || offset < 1 || offset > 1_000_000
+    || !Number.isSafeInteger(limit) || limit < 1 || limit > 2_000) {
+    throw new Error("Evidence page requires offset 1..1000000 and limit 1..2000.");
+  }
+  const charOffset = options.charOffset ?? 0;
+  if (!Number.isSafeInteger(charOffset) || charOffset < 0 || charOffset > 10_000_000) throw new Error("Evidence charOffset requires an integer 0..10000000.");
+  const lines = (options.redactEvidence ? options.redactEvidence(text) : text).split("\n");
+  if (offset > lines.length) throw new Error("Evidence page starts beyond the source.");
+  const body = lines.slice(offset - 1, offset - 1 + limit).join("\n");
+  if (charOffset > body.length) throw new Error("Evidence character page starts beyond the selected lines.");
+  // Keep original text below the smaller Goal envelope/reply cap; recovery metadata stays separate.
+  const end = Math.min(charOffset + 2_000, body.length);
+  const nextPage = end < body.length
+    ? { offset, limit, charOffset: end }
+    : offset - 1 + limit < lines.length ? { offset: offset + limit, limit, charOffset: 0 } : undefined;
+  return { content: body.slice(charOffset, end), truncated: offset > 1 || charOffset > 0 || nextPage !== undefined, ...(nextPage ? { nextPage } : {}) };
+}
+
 export function createResourceTool(
   options: ResourceToolOptions = {},
 ): ToolDefinition<typeof ResourceParams, ResourceDetails> {
@@ -545,6 +594,7 @@ export function createResourceTool(
 - \`rule://name\` — project rule files (agents → AGENTS.md, rules → RULES.md, cursor → .cursorrules, cline → .clinerules, plus .pi/rules/ and docs/).
 - \`agent://<id>[/key[/index[/field]]]\` — published teammate output. Exact correlation and publication IDs resolve globally across workspace buckets; task-name discovery remains scoped to the caller's workspace/subtree and may return a disambiguation list. A correlation ID follows that task's latest publication, while a publication ID pins one immutable result; use task names only to discover candidates, then retain an exact ID. Bare \`agent://<id>\` returns the whole output; optional path segments load one nested field, e.g. \`agent://catalog-audit-correlation/findings/0/path\`. Do NOT append \`/json\`. Agent resources are not cached: reuse content already present in the current context instead of loading the same immutable URI again.
 - \`session://<sessionId>/entry/<entryId>\` — one visible active-chain entry from host-authorized session history. Obtain exact URIs from \`session_history\`; this URI API rejects filesystem paths and unauthorized sessions and omits hidden rows, thinking blocks, abandoned branches, and tool-call arguments. Session reads are never cached.
+- Exact session/agent evidence supports optional 1-based line \`offset\`/\`limit\` (max 2000) and 0-based UTF-16 \`charOffset\` within those lines. Replies contain \`nextPage\` recovery coordinates for long single-line output. Use the pinned publication URI for every subsequent agent page; task names cannot be paged as evidence.
 - \`artifact://<artifactId>\` — a Fabric artifact's identity and state (metadata only; fetching bytes is an explicit-destination download).
 
 pr:// and issue:// require the gh CLI (https://cli.github.com). Results are cached in memory for 5 minutes — re-reads within the window return the cached copy, so refetch after state changes only when the window has expired.
@@ -566,19 +616,26 @@ Read local files with the built-in read tool — resource is for protocol resour
       const sessionHistory = options.sessionHistory
         ?? options.sessionHistoryFactory?.(ctx)
         ?? createSessionHistoryInventoryProvider(ctx, "all", requestedSessionId);
-      const { content, title, cached } = await resolveResource(uri, cwd, signal, {
+      if ((params.offset !== undefined || params.limit !== undefined || params.charOffset !== undefined) && !["session", "agent"].includes(parseResourceUri(uri)?.scheme ?? "")) {
+        throw new Error("Resource paging is supported only for exact session/agent evidence.");
+      }
+      const { content, title, cached, canonicalUri, truncated, nextPage } = await resolveResource(uri, cwd, signal, {
         sessionHistory,
+        ...(params.offset === undefined && params.limit === undefined && params.charOffset === undefined ? {} : { exactEvidence: true, offset: params.offset, limit: params.limit, charOffset: params.charOffset }),
         ...(options.fabricArtifacts === undefined ? {} : { fabricArtifacts: options.fabricArtifacts }),
       });
       if (signal?.aborted) throw new Error("Tool execution aborted.");
       return {
-        content: [{ type: "text", text: content }],
+        content: [{ type: "text", text: nextPage ? `${content}\n[TRUNCATED/PAGED: recover ${canonicalUri} with ${JSON.stringify(nextPage)}]` : content }],
         details: {
           uri,
           scheme: parseResourceUri(uri)?.scheme ?? "",
           resource: title,
           cached,
           bytes: content.length,
+          ...(canonicalUri ? { canonicalUri } : {}),
+          ...(truncated === undefined ? {} : { truncated }),
+          ...(nextPage ? { nextPage } : {}),
         },
       } as AgentToolResult<ResourceDetails>;
     },

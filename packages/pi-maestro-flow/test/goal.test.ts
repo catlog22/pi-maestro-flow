@@ -3141,6 +3141,7 @@ test("completion summary accepts 4000 characters and rejects 4001 before verifie
       "tokenBudget", "tokensUsed", "timeUsedSeconds", "baselineTokens", "workflowSessionId",
       "planHandoffKey", "workflowSessionGeneration", "supersededByGoalId", "verificationFailures",
       "infraErrorStreak", "failStreak", "lastVerificationFailure", "acceptance",
+      "lastVerificationClassification", "lastMissingEvidenceFingerprint",
       "prevTokensUsed", "lowProgressCount",
     ]);
     assert.ok(Object.keys(getActiveGoal() ?? {}).every((key) => allowedGoalFields.has(key)));

@@ -102,7 +102,7 @@ import {
   setGoalStateChangeListener,
   setGoalPanelOwnership,
   setGoalStaticMode,
-  type GoalParams as GoalActionParams,
+  parseGoalActionParams,
 } from "../tools/goal.ts";
 import {
   executeAsk,
@@ -772,44 +772,6 @@ export function todoActorFromTeammateStarted(event: unknown): TodoActorRef | und
 export function mailboxRegistry(): MailboxHostRegistry | undefined {
   const bridge = globalThis as typeof globalThis & Record<symbol, unknown>;
   return bridge[Symbol.for("pi-maestro-teammate.mailbox-registry")] as MailboxHostRegistry | undefined;
-}
-
-function parseGoalActionParams(params: Record<string, unknown>): GoalActionParams | undefined {
-  const action = params.action;
-  if (action === "get") return { action };
-  if (action === "complete") {
-    return typeof params.summary === "string"
-      ? { action, summary: params.summary }
-      : undefined;
-  }
-  if (action !== "create" && action !== "update") return undefined;
-  if (typeof params.objective !== "string") return undefined;
-  const acceptance = params.acceptance;
-  if (acceptance !== undefined && (
-    !Array.isArray(acceptance)
-    || acceptance.some((command) => typeof command !== "string")
-  )) {
-    return undefined;
-  }
-  const validatedAcceptance = acceptance === undefined ? undefined : acceptance.filter(
-    (command): command is string => typeof command === "string",
-  );
-  if (action === "update") {
-    return {
-      action,
-      objective: params.objective,
-      acceptance: validatedAcceptance,
-    };
-  }
-  if (params.tokenBudget !== undefined && typeof params.tokenBudget !== "string") return undefined;
-  if (params.planHandoffKey !== undefined && typeof params.planHandoffKey !== "string") return undefined;
-  return {
-    action,
-    objective: params.objective,
-    tokenBudget: params.tokenBudget,
-    planHandoffKey: params.planHandoffKey,
-    acceptance: validatedAcceptance,
-  };
 }
 
 const CHINESE_RESPONSE_STATE_ENTRY = "maestro-chinese-response-mode";
@@ -1942,6 +1904,7 @@ When NOT to use:
 Only request completion after all work is done; the extension verifies it independently. The model cannot stop, resume, or clear a Goal.`,
 
     promptSnippet: "Read, create, update, or request independent verification for an autonomous Goal",
+- optional evidenceRefs on complete: Up to 16 requirement-labelled exact session://id/entry/id or agent://publication-id[/subpath] URIs, or explicit local paths (including outside the workspace), with optional 1-based offset/limit and URI-only 0-based UTF-16 charOffset to recover long single-line evidence. Keep summary <= 4000 characters. Prefer immutable publications and original test output, not executor PASS reports. Unavailable/ambiguous sources cannot verify completion.
     promptGuidelines: [
       "When a goal is active, keep working until it is complete; do not stop with only a plan or partial progress.",
       "Use goal get to inspect state. Use goal create only when no Goal exists; use goal update to replace its objective and resume it.",
@@ -1963,16 +1926,16 @@ Only request completion after all work is done; the extension verifies it indepe
       const goalParams = parseGoalActionParams(params);
       if (!goalParams) {
         return {
-          content: [{ type: "text", text: "Invalid Goal parameters for the requested action." }],
+          content: [{ type: "text", text: "Invalid Goal parameters: complete requires summary <= 4000 characters and at most 16 valid, unambiguous evidenceRefs." }],
           isError: true,
-          details: {},
+          details: { classification: "input-error" },
         };
       }
       const result = await executeGoal(goalParams, ctx);
       return {
         content: [{ type: "text", text: result.text }],
         isError: result.isError,
-        details: {},
+        details: result.details ?? {},
       };
     },
 

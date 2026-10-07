@@ -132,7 +132,19 @@ export const GoalToolParams = Type.Object({
   objective: Type.Optional(
     Type.String({ description: "Goal objective; required when action is 'create' or 'update'" }),
   ),
-  summary: Type.Optional(Type.String({ description: "Completion evidence; required when action is 'complete'" })),
+  summary: Type.Optional(Type.String({ maxLength: 4000, description: "Completion claim (max 4000 characters); required on complete. Put original evidence in evidenceRefs." })),
+  evidenceRefs: Type.Optional(Type.Array(Type.Object({
+    requirement: Type.String({ minLength: 1, maxLength: 256 }),
+    uri: Type.Optional(Type.String({ minLength: 1, maxLength: 2048 })),
+    path: Type.Optional(Type.String({ minLength: 1, maxLength: 2048 })),
+    offset: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000_000 })),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 2_000 })),
+    charOffset: Type.Optional(Type.Integer({ minimum: 0, maximum: 10_000_000, description: "URI only: UTF-16 character offset within the selected lines." })),
+  }, { additionalProperties: false, oneOf: [{ required: ["uri"], not: { required: ["path"] } }, { required: ["path"], not: { required: ["uri"] } }] }), {
+    maxItems: 16,
+    uniqueItems: true,
+    description: "Complete only: requirement-labelled original evidence. Exactly one exact session://id/entry/id or agent://exact-id[/subpath] URI, or local path; optional 1-based line offset/limit. Correlations are pinned to their current publication; task names are not evidence.",
+  })),
   tokenBudget: Type.Optional(
     Type.String({ description: "Optional explicit Token budget; omit for no budget. Accepts plain, k, or m values, e.g. '100000', '100k', or '1.5m'; create only" }),
   ),

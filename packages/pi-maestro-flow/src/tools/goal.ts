@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { evidenceRefsValidationError, normalizeEvidenceRefs, type GoalEvidenceRef } from "./goal-evidence.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   consumeModelFailoverSettlement,
@@ -28,6 +29,7 @@ import {
   verifyGoalCompletion,
   type AgentStopReason,
   type AssistantMessageLike,
+  type GoalVerificationClassification,
 } from "./goal-verification.ts";
 import {
   detachTasksFromGoal,
@@ -64,6 +66,8 @@ export interface GoalCompactionEntry {
   verificationFailures?: number;
   infraErrorStreak?: number;
   failStreak?: number;
+  lastVerificationClassification?: GoalVerificationClassification;
+  lastMissingEvidenceFingerprint?: string;
   lastVerificationFailure?: string;
   acceptance?: string[];
   planHandoffKey?: string;
@@ -107,6 +111,8 @@ export interface ActiveGoal {
    * one.
    */
   failStreak?: number;
+  lastVerificationClassification?: GoalVerificationClassification;
+  lastMissingEvidenceFingerprint?: string;
   lastVerificationFailure?: string;
   acceptance?: string[];
   prevTokensUsed?: number;
@@ -238,7 +244,7 @@ export interface GoalUpdateParams {
   objective: string;
   acceptance?: string[];
 }
-export interface GoalCompleteParams { action: "complete"; summary: string; }
+export interface GoalCompleteParams { action: "complete"; summary: string; evidenceRefs?: GoalEvidenceRef[]; }
 
 export type GoalParams = GoalGetParams | GoalCreateParams | GoalUpdateParams | GoalCompleteParams;
 
@@ -256,7 +262,7 @@ export type GoalCommandParams =
 export async function executeGoal(
   params: GoalParams,
   ctx: GoalContext,
-): Promise<{ text: string; isError: boolean; terminate?: boolean }> {
+): Promise<{ text: string; isError: boolean; terminate?: boolean; details?: { classification: GoalVerificationClassification } }> {
   switch (params.action) {
     case "get":
       return showStatus(ctx);
@@ -274,16 +280,19 @@ export async function executeGoal(
     }
     case "complete": {
       if (typeof params.summary !== "string" || params.summary.trim().length === 0) {
-        return { text: "Goal complete requires a non-empty summary.", isError: true };
+        return { text: "Goal complete requires a non-empty summary.", isError: true, details: { classification: "input-error" } };
       }
       const completionSummary = params.summary.trim();
       if (completionSummary.length > MAX_COMPLETION_SUMMARY_CHARS) {
         return {
-          text: `Goal completion summary too long (${completionSummary.length}/${MAX_COMPLETION_SUMMARY_CHARS}).`,
+          text: `Goal completion summary too long (${completionSummary.length}/${MAX_COMPLETION_SUMMARY_CHARS}). Keep summary <= 4000 characters; put raw evidence in optional evidenceRefs instead.`,
           isError: true,
+          details: { classification: "input-error" },
         };
       }
-      const outcome = await verifyGoalCompletion(completionSummary, ctx);
+      const refsError = evidenceRefsValidationError(params.evidenceRefs);
+      if (refsError) return { text: refsError, isError: true, details: { classification: "input-error" } };
+      const outcome = await verifyGoalCompletion(completionSummary, ctx, normalizeEvidenceRefs(params.evidenceRefs));
       const text = outcome.status === "done"
         ? "Goal done (verified)."
         : outcome.status === "paused"
@@ -291,7 +300,7 @@ export async function executeGoal(
           : outcome.status === "hold"
             ? `Goal completion was not started. Reason: ${outcome.reason}`
             : `Goal completion was not verified; continue the active Goal. Reason: ${outcome.reason}`;
-      return { text, isError: false };
+      return { text, isError: false, details: { classification: outcome.classification } };
     }
     default:
       return { text: "Unknown action. Valid: get, create, update, complete", isError: true };
@@ -788,7 +797,7 @@ export function switchCurrentGoal(
   const target = goalRegistry.find((goal) => goal.id === goalId);
   if (!target || isSupersededWorkflowProjection(target)) return undefined;
   const nextGoal = opts.resume && target.status === "paused"
-    ? { ...target, status: "active" as const, pauseReason: undefined, verificationFailures: 0, infraErrorStreak: 0, failStreak: 0, updatedAt: Date.now() }
+    ? { ...target, status: "active" as const, pauseReason: undefined, verificationFailures: 0, infraErrorStreak: 0, failStreak: 0, lastMissingEvidenceFingerprint: undefined, lastVerificationClassification: undefined, updatedAt: Date.now() }
     : target;
   persistGoal(nextGoal);
   if (ctx) updateStatusLine(ctx, nextGoal);
@@ -954,7 +963,7 @@ async function handleResume(
   return { text: `Goal resumed: ${activated.text}`, isError: false };
 }
 
-function showStatus(ctx: GoalContext): { text: string; isError: boolean } {
+function showStatus(ctx: GoalContext): { text: string; isError: boolean; details?: { classification: GoalVerificationClassification } } {
   if (!activeGoal) {
     clearGoalDisplay(ctx);
     return { text: "No goal set.", isError: false };
@@ -963,7 +972,7 @@ function showStatus(ctx: GoalContext): { text: string; isError: boolean } {
   updateUsage(refreshed, ctx);
   persistGoal(refreshed);
   updateStatusLine(ctx, refreshed);
-  return { text: goalSummary(refreshed), isError: false };
+  return { text: goalSummary(refreshed), isError: false, ...(refreshed.lastVerificationClassification ? { details: { classification: refreshed.lastVerificationClassification } } : {}) };
 }
 
 // ---------------------------------------------------------------------------
@@ -1057,6 +1066,8 @@ function activateResumedGoal(goal: ActiveGoal): ActiveGoal {
     verificationFailures: 0,
     infraErrorStreak: 0,
     failStreak: 0,
+    lastMissingEvidenceFingerprint: undefined,
+    lastVerificationClassification: undefined,
     lowProgressCount: 0,
     prevTokensUsed: goal.tokensUsed,
     updatedAt: Date.now(),
@@ -1456,6 +1467,8 @@ function isGoal(v: unknown): v is ActiveGoal {
     && (g.infraErrorStreak === undefined || (typeof g.infraErrorStreak === "number" && g.infraErrorStreak >= 0))
     && (g.failStreak === undefined || (typeof g.failStreak === "number" && g.failStreak >= 0))
     && (g.acceptance === undefined || (Array.isArray(g.acceptance) && g.acceptance.every((item) => typeof item === "string")))
+    && (g.lastVerificationClassification === undefined || ["input-error", "infrastructure-error", "missing-evidence", "acceptance-failed", "success"].includes(g.lastVerificationClassification))
+    && (g.lastMissingEvidenceFingerprint === undefined || /^[a-f0-9]{64}$/.test(g.lastMissingEvidenceFingerprint))
     && (g.lastVerificationFailure === undefined || typeof g.lastVerificationFailure === "string")
     && (g.prevTokensUsed === undefined || typeof g.prevTokensUsed === "number")
     && (g.lowProgressCount === undefined || (typeof g.lowProgressCount === "number" && g.lowProgressCount >= 0))
@@ -1830,6 +1843,8 @@ export function getGoalCompactionSnapshot(): GoalCompactionSnapshot {
       ...(goal.infraErrorStreak ? { infraErrorStreak: goal.infraErrorStreak } : {}),
       ...(goal.failStreak ? { failStreak: goal.failStreak } : {}),
       ...(goal.lastVerificationFailure ? { lastVerificationFailure: goal.lastVerificationFailure } : {}),
+      ...(goal.lastVerificationClassification ? { lastVerificationClassification: goal.lastVerificationClassification } : {}),
+      ...(goal.lastMissingEvidenceFingerprint ? { lastMissingEvidenceFingerprint: goal.lastMissingEvidenceFingerprint } : {}),
       ...(goal.acceptance?.length ? { acceptance: [...goal.acceptance] } : {}),
       ...(goal.planHandoffKey ? { planHandoffKey: goal.planHandoffKey } : {}),
       ...(goal.workflowSessionId ? { workflowSessionId: goal.workflowSessionId } : {}),
@@ -1995,9 +2010,8 @@ export function parseGoalActionParams(params: Record<string, unknown>): GoalPara
   const action = params.action;
   if (action === "get") return { action };
   if (action === "complete") {
-    return typeof params.summary === "string"
-      ? { action, summary: params.summary }
-      : undefined;
+    if (typeof params.summary !== "string" || evidenceRefsValidationError(params.evidenceRefs)) return undefined;
+    return { action, summary: params.summary, evidenceRefs: normalizeEvidenceRefs(params.evidenceRefs) };
   }
   if (action !== "create" && action !== "update") return undefined;
   if (typeof params.objective !== "string") return undefined;
