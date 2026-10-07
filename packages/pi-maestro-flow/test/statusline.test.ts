@@ -530,6 +530,27 @@ test("statusline accumulates cache usage incrementally across message_end events
   }
 });
 
+test("statusline hides inactive Plan-auto and projects active memory state without claiming footer ownership", () => {
+  const harness = createHarness();
+  try {
+    harness.statuses.set("maestro-plan-auto", "PLAN-AUTO off");
+    assert.ok(harness.render(120).every((line) => !stripAnsi(line).includes("PLAN-AUTO")));
+    for (const value of ["PLAN-AUTO confirm+ask g7", "PLAN-AUTO ask g7"]) {
+      harness.statuses.set("maestro-plan-auto", value);
+      assert.ok(harness.render(120).some((line) => stripAnsi(line).includes(value)));
+      for (let width = 1; width <= 120; width++) assertLiveRows(harness.render(width), width);
+    }
+    harness.statuses.set("maestro-plan-auto", "PLAN-AUTO off");
+    for (let width = 1; width <= 120; width++) {
+      const lines = harness.render(width);
+      assert.ok(lines.every((line) => !stripAnsi(line).includes("PLAN-AUTO")));
+      assertLiveRows(lines, width);
+    }
+    harness.statuses.delete("maestro-plan-auto");
+    assert.ok(harness.render(120).every((line) => !stripAnsi(line).includes("PLAN-AUTO")));
+  } finally { harness.dispose(); }
+});
+
 test("statusline links approval mode with ACT, PLAN and READY using width-aware labels", () => {
   const harness = createHarness();
   try {

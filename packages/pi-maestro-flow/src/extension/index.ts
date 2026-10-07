@@ -106,6 +106,7 @@ import {
 } from "../tools/goal.ts";
 import {
   executeAsk,
+  resolvePlanAutoAskPolicyGrant,
   type AskParams,
   type AskResultDetails,
 } from "../tools/ask.ts";
@@ -219,9 +220,12 @@ import {
   getPlanNewContextPayload,
   getPlanHandoffStatus,
   setPlanModeChangeListener,
+  refreshPlanModeStatus,
   type PlanContext,
   type PlanWorkflowPublicationResult,
 } from "../tools/plan.ts";
+import { registerPlanAuto } from "../tools/plan-auto.ts";
+import type { HostAskPolicyGrant } from "../decision-policy/service.ts";
 import type { PlanWorkflowConfirmationOptions } from "../tools/plan-confirm.ts";
 import type { LoadedPlan, PlanExecutionChoice, PlanWorkflowBinding } from "../tools/plan-store.ts";
 import { registerPlanModelSelection } from "../tools/plan-model.ts";
@@ -304,6 +308,7 @@ import {
   persistStructuredResults,
 } from "../teammate/agent-output-capture.ts";
 import { registerDataManagerCommand } from "../tools/data-manager.ts";
+import { isDecisionPolicyConfiguring } from "../decision-policy/extension.ts";
 import {
   createTeammateChildComputerUseTool,
   TeammateComputerUseBroker,
@@ -1340,6 +1345,13 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
     return contained;
   };
   let todoRootContext: ExtensionContext | undefined;
+  // Only this root host resolves memory authorization. Never read a root grant
+  // through a child cwd wrapper (that would revoke an unrelated root scope).
+  const resolveRootAskGrant = (ctx: ExtensionContext, actor?: { correlationId: string; cwd?: string }): HostAskPolicyGrant | undefined => {
+    const root = todoRootContext;
+    const grant = resolvePlanAutoAskPolicyGrant(ctx, root, actor, actor ? getVisibleTasks() : []);
+    return grant ? { ...grant, isCurrent: () => todoRootContext === root && grant.isCurrent() } : undefined;
+  };
   let guiServer: GuiServerHandle | null = null;
   let guiLifecycleGeneration = 0;
   const guiEvents = createGuiEventForwarder();
@@ -1892,6 +1904,7 @@ The --to flag is MANDATORY. A bare \`maestro delegate codex\` treats "codex" as 
 - create: Create a new Goal without a budget by default. { action: "create", objective: "..." }
 - update: Replace the active Goal objective and resume it automatically. { action: "update", objective: "..." }
 - complete: Request completion verification after all work is done. Declared acceptance commands are rerun and decide the result directly; without them, an independent agent verifier is used. { action: "complete", summary: "..." }
+- optional evidenceRefs on complete: Up to 16 requirement-labelled exact session://id/entry/id or agent://publication-id[/subpath] URIs, or explicit local paths (including outside the workspace), with optional 1-based offset/limit and URI-only 0-based UTF-16 charOffset to recover long single-line evidence. Keep summary <= 4000 characters. Prefer immutable publications and original test output, not executor PASS reports. Unavailable/ambiguous sources cannot verify completion.
 - optional budget: Include tokenBudget only when the user explicitly requests one. { action: "create", objective: "...", tokenBudget: "100k" }
 - optional acceptance: Declare or replace up to 5 acceptance commands on create or update. Commands run from the workspace with the platform system shell, so keep them focused and cross-platform. { action: "create", objective: "...", acceptance: ["npm test -- foo.test.ts"] }
 
@@ -1904,7 +1917,6 @@ When NOT to use:
 Only request completion after all work is done; the extension verifies it independently. The model cannot stop, resume, or clear a Goal.`,
 
     promptSnippet: "Read, create, update, or request independent verification for an autonomous Goal",
-- optional evidenceRefs on complete: Up to 16 requirement-labelled exact session://id/entry/id or agent://publication-id[/subpath] URIs, or explicit local paths (including outside the workspace), with optional 1-based offset/limit and URI-only 0-based UTF-16 charOffset to recover long single-line evidence. Keep summary <= 4000 characters. Prefer immutable publications and original test output, not executor PASS reports. Unavailable/ambiguous sources cannot verify completion.
     promptGuidelines: [
       "When a goal is active, keep working until it is complete; do not stop with only a plan or partial progress.",
       "Use goal get to inspect state. Use goal create only when no Goal exists; use goal update to replace its objective and resume it.",
@@ -2036,7 +2048,7 @@ Self-driven review (delegate mode): preview → collect diffs per returned refs 
   });
 
   // === Ask User Question Tool ===
-  registerAskUserQuestionTool(pi, notifyController.requestInput);
+  registerAskUserQuestionTool(pi, notifyController.requestInput, resolveRootAskGrant);
 
   // === Todo Tool ===
   initTodo(pi);
@@ -2272,6 +2284,7 @@ When NOT to use:
   });
   registerPlanTools(pi, { onUserAttention: notifyController.requestInput });
   registerPlanCommand(pi);
+  registerPlanAuto(pi, { isPlanMode, onStateChange: refreshPlanModeStatus });
   registerArtifactCommand(pi, {
     getKnowledgeSessionId: () => workflowArtifactKnowledgeSessionId(
       workflowSnapshotForUi(),
@@ -4666,6 +4679,21 @@ When NOT to use:
           };
         }
       }, { owner: `${teammateAuthorityOwner}:search` }));
+      nextDisposers.push(registerTeammateChildToolBroker("ask-user-question", async (request) => {
+        if (generation !== teammateRegistrationGeneration || todoRootContext !== ctx || request.actor.correlationId === "unknown") {
+          return { content: [{ type: "text", text: "Root question authority is unavailable or belongs to a newer session." }], isError: true, details: {} };
+        }
+        // The task cwd is supplied by the parent's active-run registry, not child params.
+        const questionCtx = Object.create(ctx) as ExtensionContext;
+        Object.defineProperty(questionCtx, "cwd", { value: request.actor.cwd ?? ctx.cwd });
+        return executeAsk(request.input as unknown as AskParams, questionCtx, {
+          signal: request.signal,
+          humanOnly: isDecisionPolicyConfiguring(ctx) || !request.actor.cwd || request.actor.cwd.startsWith("remote:"),
+          resolveAskGrant: () => generation === teammateRegistrationGeneration ? resolveRootAskGrant(ctx, request.actor) : undefined,
+          onUserAttention: notifyController.requestInput,
+          requestId: `question:${request.actor.correlationId}`,
+        });
+      }, { owner: `${teammateAuthorityOwner}:ask-user-question` }));
       const sessionPermissionBroker: TeammatePermissionBroker = async (call, requestCtx) => {
         if (generation !== teammateRegistrationGeneration) {
           return { action: "deny", reason: "Root permission authority belongs to a newer session generation." };
@@ -5073,12 +5101,12 @@ If root delegated a task to you (spawned with todo: "<id>"), it is usually alrea
       "Search workspace file contents via the root session's shared index — literal, regex, or fuzzy matching with lines/files/count output. Falls back to ripgrep when the index cannot serve the query. Prefer this over the built-in grep for workspace content search.",
     promptSnippet: "Search workspace file contents (literal/regex/fuzzy) via the shared root index.",
     parameters: SearchToolParameters,
-    async execute(_id, params, signal, _onUpdate, ctx) {
+    async execute(id, params, signal, _onUpdate, ctx) {
       // Resolve path against the child's cwd before forwarding: tasks[].cwd may
       // differ from the root workspace, and the broker re-checks the absolute
       // path against the root workspace boundary.
       const forwarded = { ...params, path: resolveSearchScopePath(params.path, ctx.cwd) };
-      return proxyTeammateChildTool("search", forwarded as unknown as Record<string, unknown>, signal);
+      return proxyTeammateChildTool("search", forwarded as unknown as Record<string, unknown>, signal, id);
     },
   });
   const permissionController = createPermissionController();
@@ -5093,6 +5121,7 @@ If root delegated a task to you (spawned with todo: "<id>"), it is usually alrea
 function registerAskUserQuestionTool(
   pi: ExtensionAPI,
   onUserAttention?: UserAttentionHandler,
+  resolveAskGrant?: (ctx: ExtensionContext) => HostAskPolicyGrant | undefined,
 ): void {
   const askTool: ToolDefinition<typeof AskUserQuestionParams> = {
     name: "ask-user-question",
@@ -5106,7 +5135,7 @@ function registerAskUserQuestionTool(
 
 Users may add supplementary details to any option (including a free-form answer for "None of the above"); these come back in each answer's details map and text field.
 
-The tool returns structured answers only.
+The tool returns structured human answers. An enabled project decision policy may instead return explicit machine recommendations in decisions; these are NOT user answers or approval. Mixed batches preserve original questionIndex.
 
 When to use:
 - A genuine decision fork the user must own (approach A vs B, which features, naming) that you cannot resolve by reading code or docs.
@@ -5117,7 +5146,7 @@ When NOT to use:
 
     promptSnippet: "Collect a structured user decision via a keyboard-first TUI wizard (up to 4 questions)",
     promptGuidelines: [
-      "Use ask-user-question only for genuine decisions the user must own; before asking, do up to a minute of read-only investigation (grep/docs/knowledge) so the question is specific rather than open-ended.",
+      "Before asking, investigate code/docs/knowledge and consult the confirmed project decision policy. The runtime may return advisory decisions instead of asking a human; use those recommendations to continue, never as user approval. Configuration, Plan, permission, and knowledge-promotion approvals remain human.",
     ],
 
     parameters: AskUserQuestionParams,
@@ -5135,6 +5164,7 @@ When NOT to use:
         requestId: `question:${_id}`,
         toolCallId: _id,
         signal,
+        resolveAskGrant: resolveAskGrant ? () => resolveAskGrant(ctx) : undefined,
       });
     },
 
@@ -5161,21 +5191,22 @@ When NOT to use:
         return toolResultLine(theme, { name: "ask", ok: false, arg, summary: fallback });
       }
       const count = details.answers.length;
+      const recommendations = details.decisions?.filter((decision) => decision.evaluation.owner === "internal" && decision.evaluation.advice) ?? [];
       const answerLines = details.answers.map((answer, index) => {
         const chosen = answer.selected.map((label) => {
           const detail = answer.details?.[label];
           return detail ? `${label} (${detail})` : label;
         });
         const value = [...chosen, ...(answer.text ? [answer.text] : [])].join(" — ") || "No answer";
-        return `${index + 1}. ${answer.question} → ${value}`;
+        return `${(answer.questionIndex ?? index) + 1}. ${answer.question} → ${value}`;
       });
       return toolResultLine(theme, {
         name: "ask",
         ok: true,
         arg,
-        summary: `${count} answer${count !== 1 ? "s" : ""}`,
+        summary: `${count} answer${count !== 1 ? "s" : ""}${recommendations.length ? ` · ${recommendations.length} machine recommendation(s)` : ""}`,
         expanded: opts.expanded,
-        detail: answerLines.join("\n"),
+        detail: [...answerLines, ...recommendations.map((decision) => `${decision.questionIndex + 1}. ${decision.question} → [machine advisory] ${decision.evaluation.advice!.recommendation}`)].join("\n"),
       });
     },
   };

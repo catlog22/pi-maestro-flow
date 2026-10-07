@@ -127,6 +127,7 @@ Normal Gateway startup does not read legacy state. Calls that can safely replay 
 | `/gateway` | Open the native Gateway management overlay; `/gateway wizard` opens guided setup |
 | `/gateway tunnel` / `/gateway-tunnel` | Open the dedicated Gateway Tunnel operator page |
 | `/plan`, `Alt+Shift+P` | Enter durable Plan mode |
+| `/plan-auto [on\|off\|status]`, `Alt+Shift+A` | Toggle human, session-only Plan preauthorization (default off) |
 | `/plan-model` | Select or disable a dedicated Plan model |
 | `/goal` | Goal lifecycle: `/goal stop`, `/goal resume`, `/goal clear` |
 | `/maestro-session` | Canonical Maestro Session management |
@@ -357,6 +358,37 @@ If the configured model is unavailable or has no authentication, Plan mode warns
 continues with the session model. Run `/plan-model` to select an available model,
 `/plan-model provider/model` to set one directly, or `/plan-model off` to follow the
 session model. The command saves to `.pi/settings.local.json`.
+
+### Session-only Plan auto-confirm
+
+After entering Plan mode, type `/plan-auto on` in the parent TUI or press
+`Alt+Shift+A`. `/plan-auto` without arguments toggles; `status` reports the grant,
+and `off` revokes it. Only physical TUI submission or the shortcut can enable it;
+model-injected commands, child agents, RPC and resumed audit entries cannot.
+
+The next `plan-confirm` approves the exact persisted draft through the normal
+archive/manifest transaction and starts **standalone, current-context** execution.
+Enabling does not approve an existing draft immediately; `plan-update` only saves
+and `plan-review` remains manual. Old Workflow/New Context settings are not inherited.
+
+During planning and execution, `ask-user-question` can return classified internal
+technical recommendations instead of opening a dialog. Existing project rules
+remain additional restrictions. Without project ask rules, only reversible,
+code/spec-grounded choices inside the authorized task qualify. Classification
+uses the existing backend: `auto` may fall back from classifier to LLM; strict
+`classifier` failures require a human. Advice is a separate LLM stage. No classifier
+configuration or project policy is changed. Machine results stay in `decisions`,
+never in human `answers`, and are not approval for Plan, permissions or governance.
+Sensitive choices, personal preferences, uncertain scope, low confidence, invalid
+output, timeouts and exhausted budgets require a human; configuration and remote
+human-only flows are unchanged.
+
+The footer shows `PLAN-AUTO confirm+ask` or `PLAN-AUTO ask`. The grant survives
+revision, ordinary compaction and same-session `new_context`, but is revoked by
+off, manual Plan exit/clear, a new Plan cycle, session/cwd change, fork, reload,
+restart or shutdown. It is never restored from disk. Turning it off stops future
+automatic decisions, not already-started execution. Approval already committed
+before revocation remains recorded, but an unstarted automatic handoff is stopped.
 
 ### Approval-mode shortcut
 

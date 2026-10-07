@@ -8,6 +8,13 @@
  */
 
 import { join } from "node:path";
+import { createHash } from "node:crypto";
+import {
+  beginPlanAutoCycle, getPlanAutoSnapshot, markPlanAutoConfirmed,
+  isCurrentPlanAutoGrant, PLAN_AUTO_AUDIT_ENTRY,
+  planAutoStatusLabel, resetPlanAuto, revokePlanAuto, updatePlanAutoTaskContext,
+  type PlanAutoGrantSnapshot,
+} from "./plan-auto.ts";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -74,6 +81,19 @@ interface PlanReviewOutcome {
   executionMessage?: string;
   discussionMessage?: string;
   compactDeferred?: boolean;
+  approvalAudit?: PlanApprovalAudit;
+  committedPlan?: LoadedPlan;
+  canHandoff?: () => boolean;
+}
+
+export interface PlanApprovalAudit {
+  source: "human-confirmation" | "human-preauthorization";
+  generation?: number;
+  revision: number;
+  checksum: string;
+  handoffKey?: string;
+  result: "requested" | "not-approved" | "committed" | "handoff-ready" | "handed-off" | "committed-handoff-stopped";
+  reason?: string;
 }
 
 type PlanHandoffDelivery = "message" | "tool-result";
@@ -90,6 +110,8 @@ export interface PlanToolDetails {
   execution?: PlanExecutionChoice;
   workflowBinding?: PlanWorkflowBinding;
   approved?: boolean;
+  approvalAudit?: PlanApprovalAudit;
+  planAuto?: { enabled: boolean; generation?: number; confirmPending?: boolean };
   error?: string;
 }
 
@@ -299,7 +321,14 @@ let hasExecutableTodoForHandoff = (handoffKey: string) => getVisibleTasks().some
 );
 
 function syncModeStatus(ctx: PlanContext): void {
+  ctx.ui.setStatus("maestro-plan-auto", planAutoStatusLabel(ctx));
   ctx.ui.setStatus(STATUS_KEY, mode === "act" ? "ACT" : hasPlan() ? "READY" : "PLAN");
+}
+
+/** Reuse the existing mode status/listener projection for authorization changes. */
+export function refreshPlanModeStatus(ctx: PlanContext): void {
+  syncModeStatus(ctx);
+  onPlanModeChanged?.(ctx);
 }
 
 export function initPlan(pi: ExtensionAPI, options: PlanRuntimeOptions = {}): void {
@@ -359,6 +388,7 @@ export async function loadCurrentPlanArtifacts(ctx: PlanContext): Promise<Loaded
 }
 
 export function clearPlan(): void {
+  revokePlanAuto("plan-clear");
   latestPlan = undefined;
   latestRevision = 0;
   latestStatus = "empty";
@@ -434,6 +464,7 @@ async function enterPlanMode(ctx: PlanContext, operation: PlanOperationIdentity)
   pendingPlanExitReminder = undefined;
   pendingPlanEnterNote = buildPlanEnterNote();
   mode = "plan";
+  beginPlanAutoCycle(ctx, { markdown: latestPlan ?? "", revision: latestRevision });
   activatePlanToolSurface();
   syncModeStatus(ctx);
   onPlanModeChanged?.(ctx);
@@ -441,7 +472,8 @@ async function enterPlanMode(ctx: PlanContext, operation: PlanOperationIdentity)
   return true;
 }
 
-function exitPlanMode(ctx: PlanContext): void {
+function exitPlanMode(ctx: PlanContext, approved = false): void {
+  if (!approved) revokePlanAuto("manual-plan-exit");
   mode = "act";
   pendingPlanEnterNote = undefined;
   restoreActToolSurface();
@@ -526,6 +558,7 @@ export function onSessionShutdownPlan(ctx: PlanContext): void {
   restoreActToolSurface();
   resetRuntimeState();
   ctx.ui.setStatus(STATUS_KEY, undefined);
+  ctx.ui.setStatus("maestro-plan-auto", undefined);
 }
 
 function beginPlanOperation(ctx: PlanContext): PlanOperationIdentity {
@@ -553,9 +586,13 @@ function bindPlanOperation(
 }
 
 function planOperationMatchesContext(ctx: PlanContext, operation: PlanOperationIdentity): boolean {
-  const session = currentPlanSession(ctx);
-  return session.id === operation.sessionId
-    && `${ctx.cwd}\0${session.id}` === operation.storeKey;
+  try {
+    const session = currentPlanSession(ctx);
+    return session.id === operation.sessionId
+      && `${ctx.cwd}\0${session.id}` === operation.storeKey;
+  } catch {
+    return false; // Pi invalidates context getters after replacement/reload.
+  }
 }
 
 function isCurrentPlanOperation(
@@ -691,6 +728,7 @@ async function acknowledgeWorkflowDelivery(
 }
 
 function resetRuntimeState(): void {
+  resetPlanAuto("plan-runtime-reset");
   planLifecycleGeneration++;
   activePlanOperation = undefined;
   activePlanHandoffRequest = undefined;
@@ -861,6 +899,7 @@ export async function onAgentEndPlan(event: { messages: unknown[] }, ctx: PlanCo
     const saved = await store.saveDraft(proposedPlan, latestRevision);
     if (!isCurrentPlanOperation(ctx, operation)) return;
     applyLoadedPlan(saved);
+    updatePlanAutoTaskContext(ctx, { markdown: saved.markdown, revision: latestRevision });
     latestArtifactAvailable = Boolean(saved.markdown.trim()) || latestArtifactAvailable;
     syncModeStatus(ctx);
     onPlanModeChanged?.(ctx);
@@ -882,6 +921,8 @@ async function savePlan(
   const saved = await store.saveDraft(markdown, expectedRevision);
   if (!isCurrentPlanOperation(ctx, operation)) return undefined;
   applyLoadedPlan(saved);
+  if (!saved.markdown.trim()) revokePlanAuto("plan-clear");
+  updatePlanAutoTaskContext(ctx, { markdown: saved.markdown, revision: latestRevision });
   latestArtifactAvailable = Boolean(saved.markdown.trim()) || latestArtifactAvailable;
   syncModeStatus(ctx);
   onPlanModeChanged?.(ctx);
@@ -986,8 +1027,16 @@ async function reviewPlan(
   operation: PlanOperationIdentity,
   signal?: AbortSignal,
   onUserAttention?: UserAttentionHandler,
+  autoGrant?: PlanAutoGrantSnapshot,
 ): Promise<PlanReviewOutcome> {
-  signal = signal ?? ctx.signal ?? new AbortController().signal;
+  signal = signal && ctx.signal ? AbortSignal.any([signal, ctx.signal])
+    : signal ?? ctx.signal ?? new AbortController().signal;
+  if (autoGrant) {
+    const store = await ensureStore(ctx);
+    if (!bindPlanOperation(ctx, operation, store)) return { approved: false, exited: false };
+    return approveAndImplement(ctx, store, { backend: "standalone", context: "current" },
+      handoffDelivery, operation, signal, autoGrant);
+  }
   if (signal.aborted) return { approved: false, exited: false };
   if (!ctx.hasUI) {
     if (isCurrentPlanOperation(ctx, operation, false)) {
@@ -1219,6 +1268,7 @@ async function reviewPlan(
           const restored = await store.restoreDraft(rollback.selected.revision, latestRevision);
           if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
           applyLoadedPlan(restored);
+          updatePlanAutoTaskContext(ctx, { markdown: restored.markdown, revision: latestRevision });
           refineSession = undefined;
           refineSessionRevision = -1;
           refineLatestOutput = undefined;
@@ -1259,39 +1309,97 @@ async function reviewPlan(
       return { approved: false, exited: false };
     }
 
-    const markdown = latestPlan ?? "";
     const executionChoice = decision.execution ?? { backend: "standalone", context: "current" };
-    let approved: LoadedPlan;
-    try {
-      approved = await store.approve(markdown, latestRevision, { execution: executionChoice });
-      if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
-      applyLoadedPlan(approved);
-    } catch (error) {
-      if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
-      const loaded = await store.load();
-      if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
-      applyLoadedPlan(loaded);
-      const draftNote = error instanceof PlanApprovalError && error.draftPersisted
-        ? ` Your draft is intact at revision ${error.revision}; retry the approval.`
-        : "";
-      ctx.ui.notify(`Plan approval failed: ${errorMessage(error)}${draftNote}`, "warning");
-      return { approved: false, exited: false };
-    }
-
-    const executionMode = executionChoice.context;
-    const executionMessage = await startImplementation(
-      ctx,
-      store,
-      approved,
-      executionChoice,
-      handoffDelivery,
-      operation,
-    );
-    if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
-    const compactDeferred = pendingPlanCompactHandoff?.operation === operation;
-    return { approved: true, exited: true, executionMode, executionChoice, executionMessage, compactDeferred };
+    return approveAndImplement(ctx, store, executionChoice, handoffDelivery, operation, signal);
   }
   return { approved: false, exited: false };
+}
+
+/** Both human UI decisions and host preauthorization use this one approval transaction. */
+async function approveAndImplement(
+  ctx: PlanContext, store: PlanStore, executionChoice: PlanExecutionChoice,
+  handoffDelivery: PlanHandoffDelivery, operation: PlanOperationIdentity,
+  signal: AbortSignal, autoGrant?: PlanAutoGrantSnapshot,
+): Promise<PlanReviewOutcome> {
+  const markdown = latestPlan ?? "";
+  const revision = latestRevision;
+  const consumptionGrant = autoGrant ?? getPlanAutoSnapshot(ctx);
+  const fresh = () => !signal.aborted && isCurrentPlanOperation(ctx, operation)
+    && (!autoGrant || isCurrentPlanAutoGrant(autoGrant, ctx));
+  const assertCurrent = () => {
+    if (!fresh() || (autoGrant && !getPlanAutoSnapshot(ctx)?.confirmPending)) {
+      throw new Error("Plan approval cancelled, superseded, or preauthorization revoked/consumed");
+    }
+  };
+  let audit: PlanApprovalAudit = {
+    source: autoGrant ? "human-preauthorization" : "human-confirmation",
+    ...(autoGrant ? { generation: autoGrant.generation } : {}),
+    revision, checksum: createHash("sha256").update(markdown).digest("hex"), result: "requested",
+  };
+  let approved: LoadedPlan;
+  try {
+    assertCurrent();
+    if (!markdown.trim()) throw new Error("Cannot approve an empty Plan");
+    if (autoGrant) appendApprovalAudit(ctx, operation, audit);
+    approved = await store.approve(markdown, revision, {
+      execution: executionChoice, assertCurrent,
+      onCommitted(committed) {
+        // Consume after manifest rename, not after cleanup. This also fences a
+        // duplicate confirm captured while cleanup is still in flight.
+        if (consumptionGrant) markPlanAutoConfirmed(ctx, consumptionGrant, {
+          markdown: committed.markdown, revision: committed.manifest.revision,
+          handoffKey: committed.manifest.handoffKey,
+        });
+      },
+    });
+  } catch (error) {
+    audit = { ...audit, result: "not-approved", reason: errorMessage(error) };
+    if (isCurrentPlanOperation(ctx, operation)) {
+      const loaded = await store.load();
+      if (isCurrentPlanOperation(ctx, operation)) {
+        applyLoadedPlan(loaded);
+        updatePlanAutoTaskContext(ctx, { markdown: loaded.markdown, revision: latestRevision });
+        const draftNote = error instanceof PlanApprovalError && error.draftPersisted
+          ? ` Your draft is intact at revision ${error.revision}; retry the approval.` : "";
+        ctx.ui.notify(`Plan approval failed: ${errorMessage(error)}${draftNote}`, "warning");
+      }
+    }
+    try { appendApprovalAudit(ctx, operation, audit); } catch { /* tool result retains the outcome */ }
+    return { approved: false, exited: false, approvalAudit: audit };
+  }
+  audit = { ...audit, revision: approved.manifest.revision,
+    checksum: approved.manifest.approvedChecksum!, handoffKey: approved.manifest.handoffKey, result: "committed" };
+  if (isCurrentPlanOperation(ctx, operation)) applyLoadedPlan(approved);
+  const stopped = (reason: string): PlanReviewOutcome => {
+    const stoppedAudit: PlanApprovalAudit = { ...audit, result: "committed-handoff-stopped", reason };
+    try { appendApprovalAudit(ctx, operation, stoppedAudit); } catch { /* tool result retains the outcome */ }
+    return { approved: true, exited: mode === "act", executionChoice,
+      executionMode: executionChoice.context, committedPlan: approved, approvalAudit: stoppedAudit };
+  };
+  if (!fresh()) return stopped("Approval committed; execution was not started because the operation, signal, or preauthorization changed.");
+  try {
+    appendApprovalAudit(ctx, operation, audit);
+    const executionMessage = await startImplementation(ctx, store, approved, executionChoice,
+      handoffDelivery, operation, fresh, autoGrant !== undefined);
+    if (!fresh()) return stopped("Approval committed; execution was not started because the operation, signal, or preauthorization changed.");
+    const compactDeferred = pendingPlanCompactHandoff?.operation === operation;
+    return { approved: true, exited: true, executionMode: executionChoice.context, executionChoice,
+      executionMessage, compactDeferred, committedPlan: approved,
+      ...(autoGrant ? { canHandoff: fresh } : {}),
+      approvalAudit: { ...audit, result: compactDeferred || handoffDelivery === "tool-result" ? "handoff-ready" : "handed-off" } };
+  } catch (error) {
+    return stopped(`Approval committed; execution was not started: ${errorMessage(error)}`);
+  }
+}
+
+function appendApprovalAudit(ctx: PlanContext, operation: PlanOperationIdentity, audit: PlanApprovalAudit): void {
+  // Never append an old session's outcome to a newly selected chat. The tool
+  // result carries immutable approval identity even when the operation is stale.
+  if (planLifecycleGeneration !== operation.lifecycleGeneration || !planOperationMatchesContext(ctx, operation)) return;
+  extensionApi?.appendEntry?.(PLAN_AUTO_AUDIT_ENTRY, {
+    action: "approval", ...audit, sessionId: operation.sessionId, storeKey: operation.storeKey,
+    replayable: false,
+  });
 }
 
 function buildRefineFeedbackMessage(output: string, roleLabel?: string): string {
@@ -1460,15 +1568,19 @@ async function startImplementation(
   executionChoice: PlanExecutionChoice,
   handoffDelivery: PlanHandoffDelivery,
   operation: PlanOperationIdentity,
+  canHandoff: () => boolean = () => isCurrentPlanOperation(ctx, operation),
+  preauthorized = false,
 ): Promise<string | undefined> {
-  if (!isCurrentPlanOperation(ctx, operation)) return undefined;
+  if (!canHandoff()) return undefined;
   const markdown = approved.markdown;
   const planPath = approved.manifest.approvedPath
     ? join(approved.plansDir, approved.manifest.approvedPath)
     : approved.currentPath;
   const executionMode = executionChoice.context;
-  exitPlanMode(ctx);
-  await restorePlanActModel(ctx);
+  const restored = await restorePlanActModel(ctx);
+  if (!canHandoff()) return undefined;
+  if (preauthorized && !restored) throw new Error("Act model restoration failed");
+  exitPlanMode(ctx, true);
   latestPlan = markdown;
   latestStatus = "approved";
   ctx.ui.notify("Plan approved · Act mode active", "info");
@@ -1482,6 +1594,7 @@ async function startImplementation(
     refineFeedback,
     refineLatestRoleLabel,
     approved.manifest.sourceDocuments?.[0],
+    preauthorized,
   );
   let executionMessage = executionContract;
   let workflowDelivery: { handoffKey: string; binding: PlanWorkflowBinding } | undefined;
@@ -1489,13 +1602,13 @@ async function startImplementation(
   if (executionChoice.backend === "workflow") {
     try {
       const publication = await publishWorkflowPlan(ctx, approved, executionChoice);
-      if (!isCurrentPlanOperation(ctx, operation)) return undefined;
+      if (!canHandoff()) return undefined;
       if (publication.binding.status !== "bound") {
         throw new Error("Workflow publisher returned a non-bound result");
       }
       const pendingDelivery = withPendingWorkflowDelivery(publication.binding);
       const bound = await store.updateWorkflowBinding(publication.binding.handoffKey, pendingDelivery);
-      if (!isCurrentPlanOperation(ctx, operation)) return undefined;
+      if (!canHandoff()) return undefined;
       applyLoadedPlan(bound);
       workflowDelivery = {
         handoffKey: publication.binding.handoffKey,
@@ -1507,7 +1620,7 @@ async function startImplementation(
         "info",
       );
     } catch (error) {
-      if (!isCurrentPlanOperation(ctx, operation)) return undefined;
+      if (!canHandoff()) return undefined;
       const message = errorMessage(error);
       const handoffKey = approved.manifest.handoffKey;
       const checksum = approved.manifest.approvedChecksum;
@@ -1521,20 +1634,21 @@ async function startImplementation(
         };
         try {
           const failedPlan = await store.updateWorkflowBinding(handoffKey, failed);
-          if (!isCurrentPlanOperation(ctx, operation)) return undefined;
+          if (!canHandoff()) return undefined;
           applyLoadedPlan(failedPlan);
         } catch (bindingError) {
-          if (!isCurrentPlanOperation(ctx, operation)) return undefined;
+          if (!canHandoff()) return undefined;
           ctx.ui.notify(`Workflow binding state could not be persisted: ${errorMessage(bindingError)}`, "error");
         }
       }
-      if (!isCurrentPlanOperation(ctx, operation)) return undefined;
+      if (!canHandoff()) return undefined;
       const failureMessage = `Plan approved, but Workflow binding failed; execution was not started: ${message}`;
       ctx.ui.notify(failureMessage, "error");
       return failureMessage;
     }
   }
 
+  if (!canHandoff()) return undefined;
   const delivered = await deliverImplementation(
     ctx,
     planPath,
@@ -1562,9 +1676,12 @@ function buildPlanExecutionContract(
   refineFeedback?: string,
   refineRoleLabel?: string,
   sourceDocument?: string,
+  preauthorized = false,
 ): string {
   const base = [
-    "The user selected Execute and explicitly authorized immediate implementation of the approved Plan.",
+    preauthorized
+      ? "The user preauthorized this Plan-confirm through Plan-auto; no per-confirm click was made. Immediate implementation of this approved Plan is authorized."
+      : "The user selected Execute and explicitly authorized immediate implementation of the approved Plan.",
     "Begin execution now. Do not ask the user to trigger implementation again.",
     "The approved Plan is already in the current context for current-context execution; after a deterministic reset, reload it from the source path below before decomposition.",
     `Plan source: ${planPath}`,
@@ -2009,17 +2126,37 @@ export function registerPlanTools(
   const confirmTool: ToolDefinition<typeof EmptyPlanParams, PlanToolDetails> = {
     name: "plan-confirm",
     label: "Plan Confirm",
-    description: "Present the Markdown Plan in an interactive UI with choices to execute, modify, discuss, run role-based Review & Refine, or exit. Current-context execution returns through the tool result; New Context execution settles the turn, saves the Plan conversation as a checkpoint, resets deterministically, then resumes automatically.",
-    promptSnippet: "Standard presentation step after plan-update. The user controls approval and may run role-based Review & Refine; choosing Execute authorizes immediate implementation, with New Context execution preserving a checkpoint and resuming automatically after turn settlement.",
+    description: "Only a valid human Plan-auto preauthorization bypasses the UI, approves this exact draft, and executes standalone/current without inheriting Workflow, New Context, or decision documents. Otherwise present the Markdown Plan in an interactive UI with choices to execute, modify, discuss, run role-based Review & Refine, or exit. Current-context execution returns through the tool result; New Context execution settles the turn, saves the Plan conversation as a checkpoint, resets deterministically, then resumes automatically.",
+    promptSnippet: "Standard presentation step after plan-update. Default is manual; only an explicit human Plan-auto grant preauthorizes this confirm and immediate standalone/current execution. The user controls approval and may run role-based Review & Refine; choosing Execute authorizes immediate implementation, with New Context execution preserving a checkpoint and resuming automatically after turn settlement.",
     parameters: EmptyPlanParams,
     executionMode: "sequential",
     async execute(_id, _params, signal, _onUpdate, ctx) {
       const operation = beginPlanOperation(ctx);
       const blocked = requirePlanMode("confirm");
       if (blocked) return blocked;
-      const outcome = await reviewPlan(ctx, true, "tool-result", operation, signal, options.onUserAttention);
-      if (!isCurrentPlanOperation(ctx, operation)) return supersededResult("confirm");
-      onPlanModeChanged?.(ctx);
+      const snapshot = getPlanAutoSnapshot(ctx);
+      const autoGrant = snapshot?.confirmPending ? snapshot : undefined;
+      const outcome = await reviewPlan(ctx, true, "tool-result", operation, signal, options.onUserAttention, autoGrant);
+      if (isCurrentPlanOperation(ctx, operation)) onPlanModeChanged?.(ctx);
+      if (outcome.canHandoff && !outcome.canHandoff()) {
+        outcome.executionMessage = undefined;
+        outcome.approvalAudit = { ...outcome.approvalAudit!, result: "committed-handoff-stopped",
+          reason: "Approval committed; execution was not started because preauthorization or context changed before tool-result delivery." };
+      } else if (outcome.approvalAudit?.result === "handoff-ready" && !outcome.compactDeferred) {
+        outcome.approvalAudit = { ...outcome.approvalAudit, result: "handed-off" };
+      }
+      if (outcome.approvalAudit) {
+        try { appendApprovalAudit(ctx, operation, outcome.approvalAudit); } catch { /* result retains the outcome */ }
+      }
+      // The host audit append is synchronous, but may notify lifecycle listeners.
+      // No await or host callback remains between this fence and result delivery.
+      if (outcome.canHandoff && !outcome.canHandoff() && outcome.executionMessage) {
+        outcome.executionMessage = undefined;
+        outcome.approvalAudit = { ...outcome.approvalAudit!, result: "committed-handoff-stopped",
+          reason: "Approval committed; execution was not started because preauthorization or context changed during audit delivery." };
+        try { appendApprovalAudit(ctx, operation, outcome.approvalAudit); } catch { /* result retains the outcome */ }
+      }
+      if (!isCurrentPlanOperation(ctx, operation) && !outcome.approvalAudit) return supersededResult("confirm");
       if (outcome.compactDeferred) {
         try {
           ctx.abort?.();
@@ -2027,7 +2164,9 @@ export function registerPlanTools(
           ctx.ui.notify(`Plan could not stop the current tool batch before compaction: ${errorMessage(error)}`, "warning");
         }
       }
-      const summary = outcome.approved
+      const summary = outcome.approvalAudit?.result === "committed-handoff-stopped"
+        ? `Plan approval is committed and preserved; execution was not started. ${outcome.approvalAudit.reason ?? ""}${autoGrant ? " No automatic retry or recovery handoff will run." : ""}`
+        : outcome.approved
         ? outcome.executionChoice?.backend === "workflow" && latestWorkflowBinding?.status === "failed"
           ? "Plan approved; Workflow binding failed and execution was not started."
           : outcome.compactDeferred
@@ -2044,8 +2183,16 @@ export function registerPlanTools(
         : summary;
       return result(text, {
         ...currentDetails("confirm"),
+        ...(outcome.committedPlan ? {
+          revision: outcome.committedPlan.manifest.revision,
+          status: "approved" as const, sessionId: outcome.committedPlan.manifest.sessionId ?? operation.sessionId,
+          path: outcome.committedPlan.currentPath, handoffKey: outcome.committedPlan.manifest.handoffKey,
+          execution: outcome.committedPlan.manifest.execution,
+        } : {}),
         approved: outcome.approved,
-      }, false, outcome.compactDeferred === true);
+        ...(outcome.approvalAudit ? { approvalAudit: outcome.approvalAudit } : {}),
+        ...(!isCurrentPlanOperation(ctx, operation) ? { error: "E_PLAN_OPERATION_SUPERSEDED" } : {}),
+      }, !isCurrentPlanOperation(ctx, operation), outcome.compactDeferred === true);
     },
     renderShell: "self",
     renderCall(_args, theme, ctx) {
@@ -2168,8 +2315,12 @@ export function registerPlanTools(
       beginPlanOperation(ctx);
       const blocked = requirePlanMode("status");
       if (blocked) return blocked;
-      const details = currentDetails("status");
-      return result(`${details.mode} · ${details.status} · r${details.revision} · ${details.sessionId} · ${details.path}`, details);
+      const snapshot = getPlanAutoSnapshot(ctx);
+      const details = { ...currentDetails("status"), planAuto: {
+        enabled: !!snapshot,
+        ...(snapshot ? { generation: snapshot.generation, confirmPending: snapshot.confirmPending } : {}),
+      } };
+      return result(`${details.mode} · ${details.status} · r${details.revision} · ${details.sessionId} · ${details.path} · ${planAutoStatusLabel(ctx)}`, details);
     },
     renderShell: "self",
     renderCall(_args, theme, ctx) {
@@ -2226,7 +2377,7 @@ function buildPlanEnterNote(): string {
     "- Plan tools: plan-update, plan-review, plan-confirm, plan-exit, plan-status.",
     "",
     "Workflow: research → plan-update (persist draft) → plan-confirm (present to user) in the same turn.",
-    "plan-confirm gives the user a choice (execute, modify, discuss, or exit) — it does NOT force execution.",
+    "plan-confirm defaults to a human choice (execute, modify, discuss, or exit). Only a valid human /plan-auto grant preauthorizes the next confirm and immediate standalone/current execution; plan-update and plan-review never automatically approve.",
     "If the user wants changes: plan-update again, then plan-confirm again.",
     "plan-exit leaves Plan mode without approving; the draft is preserved.",
     "",

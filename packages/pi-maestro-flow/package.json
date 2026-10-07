@@ -96,6 +96,7 @@
       "./src/self-evolve/extension.ts",
       "./src/submit-gate/extension.ts",
       "./src/classifier/extension.ts",
+      "./src/decision-policy/extension.ts",
       "./src/providers/codex-fast.ts"
     ],
     "skills": [

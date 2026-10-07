@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
   configureTeammateAgentsDiscovery,
@@ -77,6 +78,24 @@ test("prefers .pi/SYSTEM.md over AGENTS.md when both exist", () => {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("canonical SYSTEM delegates knowledge closeout without granting implicit publication", () => {
+  const sourcePath = fileURLToPath(new URL("../../../.pi/SYSTEM.md", import.meta.url));
+  const instructions = loadBundledAgentsInstructions(sourcePath);
+  assert.ok(instructions);
+  const knowledge = instructions.split("## Run Knowledge")[1]?.split("# Execution Order")[0];
+  assert.ok(knowledge);
+  assert.match(knowledge, /Read @~\/\.maestro\/ref\/knowledge-closeout\.md explicitly before closeout/);
+  assert.match(knowledge, /completion owner/);
+  assert.match(knowledge, /workers return candidate IDs\/warnings without repeating approval questions/);
+  assert.match(knowledge, /ask-user-question.*matching prior explicit authorization/);
+  assert.match(knowledge, /are not publication approval/);
+  assert.match(knowledge, /Read execution results and re-read review/);
+  assert.match(knowledge, /Only repair missing\/stale receipts/);
+  assert.match(knowledge, /fresh session receipt.*not Session completion/);
+  assert.match(knowledge, /do not block otherwise valid completion/);
+  assert.doesNotMatch(knowledge, /-y.*auto-adjudication is allowed|sealed Session \+ fresh session receipt/);
 });
 
 test("resolves .pi/SYSTEM.md when AGENTS.md is absent", () => {

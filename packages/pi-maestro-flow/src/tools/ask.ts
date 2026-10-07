@@ -1,4 +1,11 @@
+import { existsSync } from "node:fs";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
+import { decisionPolicyPath, loadDecisionPolicy, policyFingerprint } from "../decision-policy/config.ts";
+import { isDecisionPolicyConfiguring } from "../decision-policy/extension.ts";
+import { evaluateDecisionPolicy, hostAskGrantFingerprint, PolicyAdviceSchema, type HostAskPolicyResolver, type PolicyEvaluation } from "../decision-policy/service.ts";
+import { beginDecisionPolicyStatus } from "../decision-policy/status.ts";
+import { getPlanAutoSnapshot, isCurrentPlanAutoTask } from "./plan-auto.ts";
+import type { TodoTask } from "./todo.ts";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { makeFrameBorderLine, resolveGlyphs } from "pi-maestro-settings-core/ui";
@@ -40,6 +47,8 @@ const TWO_COL_MIN_ROWS = 16;
 let nextQuestionAttentionId = 0;
 
 export interface AskAnswer {
+  /** Original index when an enabled policy routes a mixed batch. */
+  questionIndex?: number;
   question: string;
   header?: string;
   selected: string[];
@@ -53,24 +62,70 @@ export interface AskParams {
   questions: AskQuestionSpec[];
 }
 
+export interface AskDecision {
+  questionIndex: number;
+  question: string;
+  evaluation: PolicyEvaluation;
+}
 export interface AskResultDetails {
   answers: AskAnswer[];
+  /** Machine recommendations/observations, never user answers or approvals. */
+  decisions?: AskDecision[];
   cancelled?: boolean;
+}
+export interface AskExecutionOptions {
+  onUserAttention?: UserAttentionHandler;
+  requestId?: string;
+  toolCallId?: string;
+  signal?: AbortSignal;
+  /** Trusted host configuration conversation; never a tool parameter. */
+  humanOnly?: boolean;
+  /** Host test seam; not exposed in the tool parameter schema. */
+  policyEvaluator?: typeof evaluateDecisionPolicy;
+  /** Root-host memory authorization, never accepted from questionnaire params. */
+  resolveAskGrant?: HostAskPolicyResolver;
 }
 
 type AskToolResult = AgentToolResult<AskResultDetails> & { isError?: boolean };
 
+/** Host-only root boundary. Actor identity and tasks must come from the active-run/Todo registry. */
+export function resolvePlanAutoAskPolicyGrant(
+  ctx: ExtensionContext, root: ExtensionContext | undefined,
+  actor?: { correlationId: string; cwd?: string }, tasks: readonly TodoTask[] = [],
+): ReturnType<HostAskPolicyResolver> {
+  if (isTeammateChild() || !root) return undefined;
+  let rootCwd: string;
+  try {
+    rootCwd = root.cwd;
+    if (rootCwd !== ctx.cwd || root.sessionManager.getSessionId() !== ctx.sessionManager.getSessionId()) return undefined;
+  } catch {
+    return undefined; // Pi invalidates context getters after replacement/reload.
+  }
+  if (actor && (!actor.correlationId || actor.correlationId === "unknown" || actor.cwd !== rootCwd || actor.cwd.startsWith("remote:"))) return undefined;
+  const snapshot = getPlanAutoSnapshot(root);
+  if (!snapshot) return undefined;
+  if (!actor) return { snapshot, isCurrent: () => isCurrentPlanAutoTask(snapshot, root) };
+  const scoped = tasks.filter((task) => task.assignee.id === actor.correlationId && task.status === "in_progress"
+    && !!snapshot.taskContext.handoffKey && task.planHandoffKey === snapshot.taskContext.handoffKey);
+  if (!scoped.length) return undefined;
+  // The complete canonical task is classification input and part of its freshness identity.
+  return { snapshot, actorTaskInput: JSON.stringify(scoped),
+    isCurrent: () => isCurrentPlanAutoTask(snapshot, root) };
+}
+
 export async function executeAsk(
   params: AskParams,
   ctx: ExtensionContext,
-  options: {
-    onUserAttention?: UserAttentionHandler;
-    requestId?: string;
-    toolCallId?: string;
-    signal?: AbortSignal;
-  } = {},
+  options: AskExecutionOptions = {},
 ): Promise<AskToolResult> {
-  const questions = params.questions?.slice(0, 4) ?? [];
+  if (!Array.isArray(params.questions) || params.questions.some((question) => !question
+    || typeof question.question !== "string" || !question.question.trim()
+    || (question.header !== undefined && typeof question.header !== "string")
+    || (question.multiSelect !== undefined && typeof question.multiSelect !== "boolean")
+    || (question.options !== undefined && (!Array.isArray(question.options) || question.options.some((option) => !option || typeof option.label !== "string" || (option.description !== undefined && typeof option.description !== "string")))))) {
+    return askError("Invalid questionnaire input.");
+  }
+  const questions = cloneAskQuestions(params.questions.slice(0, 4));
   if (questions.length === 0) {
     return askError("At least one question is required.");
   }
@@ -81,6 +136,7 @@ export async function executeAsk(
     const relay = await requestTeammateInteraction<{
       action: "answer" | "cancel";
       answers?: AskAnswer[];
+      decisions?: AskDecision[];
     }>("question", { questions }, undefined, signal);
     if (!relay.ok) {
       if (relay.reason === "aborted") return cancelledAsk();
@@ -89,14 +145,108 @@ export async function executeAsk(
     }
     const relayed = relay.result;
     if (relayed.action === "answer" && Array.isArray(relayed.answers)) {
-      return askSuccess(relayed.answers);
+      return askSuccess(relayed.answers, relayed.decisions);
     }
     if (relayed.action === "cancel") return cancelledAsk();
     return askError("The parent session returned an invalid teammate questionnaire response.");
   }
 
+  // Missing/disabled policies keep the original synchronous UI startup contract.
+  const configured = typeof ctx.cwd === "string" && !!ctx.sessionManager
+    && existsSync(decisionPolicyPath(ctx.cwd));
+  if (!configured && !options.policyEvaluator && !options.resolveAskGrant) return executeHumanAsk(questions, ctx, options);
+  const humanOnly = options.humanOnly || isDecisionPolicyConfiguring(ctx);
+  const initialGrant = humanOnly ? undefined : options.resolveAskGrant?.();
+  const initialGrantFingerprint = initialGrant ? hostAskGrantFingerprint(initialGrant) : undefined;
+  if ((configured || options.policyEvaluator || initialGrant) && !humanOnly) {
+    const decisions: AskDecision[] = [];
+    const initialCwd = ctx.cwd;
+    const initialSession = ctx.sessionManager.getSessionId();
+    const ownerFresh = (): boolean => {
+      try {
+        if (ctx.cwd !== initialCwd || ctx.sessionManager.getSessionId() !== initialSession || signal?.aborted || isDecisionPolicyConfiguring(ctx)) return false;
+        if (!initialGrant) return true;
+        const current = options.resolveAskGrant?.();
+        return !!current && initialGrant.isCurrent() && current.isCurrent() && hostAskGrantFingerprint(current) === initialGrantFingerprint;
+      } catch {
+        return false; // An invalidated Pi context is stale, not a questionnaire failure.
+      }
+    };
+    const fresh = async (): Promise<boolean> => {
+      if (!ownerFresh()) return false;
+      if (!decisions.some((item) => item.evaluation.projectFingerprint || item.evaluation.policyFingerprint)) return true;
+      try {
+        const policy = await loadDecisionPolicy(initialCwd);
+        const fingerprint = policy ? policyFingerprint(policy) : "missing";
+        return ownerFresh()
+          && decisions.every((item) => !(item.evaluation.projectFingerprint ?? item.evaluation.policyFingerprint)
+            || (item.evaluation.projectFingerprint ?? item.evaluation.policyFingerprint) === fingerprint);
+      } catch { return false; }
+    };
+    const external: Array<{ index: number; question: AskQuestionSpec }> = [];
+    for (let index = 0; index < questions.length; index++) {
+      if (signal?.aborted) return cancelledAsk();
+      const question = questions[index];
+      if (requiresHumanDecision(question)) { external.push({ index, question }); continue; }
+      if (!await fresh() || !ownerFresh()) return askError("Project policy, session or Plan-auto authorization changed; retry the questionnaire.");
+      const evaluation = await (options.policyEvaluator ?? evaluateDecisionPolicy)("ask", JSON.stringify(question), ctx, { signal, resolveAskGrant: initialGrant ? options.resolveAskGrant : undefined });
+      if (signal?.aborted) return cancelledAsk();
+      const advice = evaluation.advice;
+      const validAdvice = PolicyAdviceSchema.safeParse(advice).success
+        && advice!.matchedRuleIds.length > 0 && advice!.matchedRuleIds.every((id) => evaluation.matchedRuleIds.includes(id));
+      const unsafeAdvice = validAdvice && requiresHumanDecision([advice!.recommendation, advice!.rationale, ...advice!.assumptions].join("\n"));
+      const needsHuman = evaluation.mode !== "enforce" || evaluation.owner !== "internal" || !Number.isFinite(evaluation.confidence)
+        || evaluation.confidence < (evaluation.minConfidence ?? 0.8) || !evaluation.matchedRuleIds.length
+        || !validAdvice || advice!.needsExternalDecision || unsafeAdvice || !!evaluation.degradedReason
+        || !!(initialGrant && evaluation.sessionGrantFingerprint !== initialGrantFingerprint);
+      if (needsHuman) external.push({ index, question });
+      if (evaluation.mode !== "off" || evaluation.degradedReason) {
+        // Rejected recommendations must not reach the caller via details or tool JSON.
+        const { advice: _discarded, ...diagnostic } = evaluation;
+        decisions.push({ questionIndex: index, question: question.question,
+          evaluation: needsHuman ? { ...diagnostic, owner: evaluation.owner === "internal" ? "external" : evaluation.owner } : evaluation });
+      }
+    }
+    if (decisions.length > 0) {
+      if (!await fresh() || !ownerFresh()) return askError("Project policy, session or Plan-auto authorization changed; discard these recommendations and retry.");
+      if (!external.length) return askSuccess([], decisions);
+      const human = await executeHumanAsk(external.map((item) => item.question), ctx, options);
+      if (human.isError || human.details.cancelled) return human;
+      if (!await fresh() || !ownerFresh()) return askError("Project policy, session or Plan-auto authorization changed while awaiting human answers; recommendations were discarded.");
+      return askSuccess(human.details.answers.map((answer, index) => ({ ...answer, questionIndex: external[index].index })), decisions);
+    }
+  }
+  return executeHumanAsk(questions, ctx, options);
+}
+
+/** Ordinary choices cannot stand in for explicit governance or safety approval. */
+export function requiresHumanDecision(question: string | AskQuestionSpec): boolean {
+  const text = typeof question === "string" ? question : [
+    question.question,
+    question.header ?? "",
+    ...(question.options ?? []).flatMap((option) => [option.label, option.description ?? ""]),
+  ].join("\n");
+  if (/\b(?:config\w*|settings?|authentication|authorization|personal\s+prefer\w*|unknown\s+facts?|ignore\s+(?:all\s+)?(?:previous|prior|rules|instructions)|override\s+(?:the\s+)?(?:policy|rules)|system\s+prompt)\b|(?:配置|设置|设定|认证|鉴权|个人偏好|未知事实|忽略.{0,12}(?:规则|指令)|覆盖.{0,8}(?:策略|规则))/i.test(text)) return true;
+  return /\b(?:approv\w*|permission|promot\w*|supersede|deprecat\w*|credential\w*|payment|purchase|secret\w*|api[ -]?key|delet\w*|eras\w*|destruct\w*|drop|wipe|publish\w*|deploy\w*|scope[ -]?(?:expansion|change)|(?:expand|change)\s+(?:the\s+)?scope|confirm\w*\s+(?:(?:this|the)\s+)?plan)\b|(?:批准|审批|授权|权限确认|晋升|取代规范|废弃规范|支付|购买|密钥|凭据|删除|清空|销毁|破坏性|发布|部署|扩大范围|扩展范围|变更范围|修改范围|确认.{0,8}(?:计划|方案))/i.test(text);
+}
+
+async function executeHumanAsk(questions: AskQuestionSpec[], ctx: ExtensionContext, options: AskExecutionOptions): Promise<AskToolResult> {
+  const status = typeof ctx.sessionManager?.getSessionId === "function" ? beginDecisionPolicyStatus(ctx, "ask", "waiting-user") : undefined;
+  try {
+    const result = await executeHumanAskDialog(questions, ctx, options);
+    status?.finish({ humanAnswered: !result.isError && !result.details.cancelled, cancelled: !!result.details.cancelled, degraded: !!result.isError });
+    return result;
+  } catch (error) {
+    status?.finish({ cancelled: options.signal?.aborted ?? ctx.signal?.aborted, degraded: true });
+    throw error;
+  }
+}
+
+async function executeHumanAskDialog(questions: AskQuestionSpec[], ctx: ExtensionContext, options: AskExecutionOptions): Promise<AskToolResult> {
+  const signal = options.signal ?? ctx.signal;
+  if (signal?.aborted) return cancelledAsk();
   if (!ctx.hasUI) {
-    return askError("Interactive questions require a dialog-capable Pi mode.");
+    return askError("External decisions require a dialog-capable Pi mode.");
   }
 
   options.onUserAttention?.({
@@ -383,7 +533,7 @@ async function selectMultipleDialog(
   }
 }
 
-function askSuccess(answers: AskAnswer[]): AskToolResult {
+function askSuccess(answers: AskAnswer[], decisions?: AskDecision[]): AskToolResult {
   return {
     content: [{
       type: "text",
@@ -395,12 +545,13 @@ function askSuccess(answers: AskAnswer[]): AskToolResult {
             return detail ? `${label} (${detail})` : label;
           });
           const finalChoice = [...chosen, ...(answer.text ? [answer.text] : [])].join(" — ");
-          return [`${index + 1}. ${answer.question}`, `   ${finalChoice}`];
+          return [`${(answer.questionIndex ?? index) + 1}. ${answer.question}`, `   ${finalChoice}`];
         }),
-        JSON.stringify({ answers }, null, 2),
+        ...(decisions?.length ? ["Internal machine policy recommendations may be used to continue within task scope; they are NOT user answers or approval."] : []),
+        JSON.stringify({ answers, ...(decisions?.length ? { decisions } : {}) }, null, 2),
       ].join("\n"),
     }],
-    details: { answers },
+    details: { answers, ...(decisions?.length ? { decisions } : {}) },
   };
 }
 

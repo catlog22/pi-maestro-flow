@@ -84,6 +84,10 @@ export interface LoadedApprovedPlan {
 export interface PlanApprovalOptions {
   inheritedHandoffKey?: string;
   execution?: PlanExecutionChoice;
+  /** Host-only freshness fence; never persisted or accepted from tool parameters. */
+  assertCurrent?: () => void;
+  /** Notification of durable commit, before best-effort cleanup awaits. Must not throw. */
+  onCommitted?: (approved: LoadedPlan) => void;
 }
 
 export interface PlanStoreOptions {
@@ -550,11 +554,13 @@ export class PlanStore {
     options: PlanApprovalOptions = {},
   ): Promise<LoadedPlan> {
     return this.withWorkspaceLock(async (ownerToken) => {
+      options.assertCurrent?.();
       const draft = await this.saveDraftUnlocked(markdown, expectedRevision, ownerToken);
       let archivePath: string | undefined;
       let pendingToken: string | undefined;
       let committed: LoadedPlan | undefined;
       try {
+        options.assertCurrent?.();
         const approvedAt = this.now().toISOString();
         const checksum = checksumText(markdown);
         const handoffKey = options.inheritedHandoffKey
@@ -570,10 +576,14 @@ export class PlanStore {
           checksum,
           createdAt: approvedAt,
         };
-        await atomicWriteJson(this.pendingPath, pending);
-        await atomicWriteText(archivePath, markdown);
+        await atomicWriteJson(this.pendingPath, pending, options.assertCurrent);
+        options.assertCurrent?.();
+        await atomicWriteText(archivePath, markdown, options.assertCurrent);
+        options.assertCurrent?.();
         await this.approvalCommitHook?.();
+        options.assertCurrent?.();
         await this.assertLockOwnership(ownerToken);
+        options.assertCurrent?.();
         const approvedPath = join("approvals", archiveName);
 
         const manifest: PlanManifest = {
@@ -600,7 +610,8 @@ export class PlanStore {
           approvals: [...draft.manifest.approvals, approvedPath],
           updatedAt: approvedAt,
         };
-        await atomicWriteJson(this.manifestPath, manifest);
+        await atomicWriteJson(this.manifestPath, manifest, options.assertCurrent);
+        // After rename this is a committed fact, even if the fence now fails.
         committed = { ...draft, manifest };
       } catch (error) {
         if (archivePath) await rm(archivePath, { force: true }).catch(() => {});
@@ -611,6 +622,7 @@ export class PlanStore {
           true,
         );
       }
+      options.onCommitted?.(committed!);
       await this.approvalCleanupHook?.().catch(() => {});
       if (pendingToken) await this.removePendingIfOwned(pendingToken).catch(() => {});
       return committed!;
@@ -1123,7 +1135,7 @@ function approvalHandoffKey(
     .digest("hex");
 }
 
-async function atomicWriteText(filePath: string, content: string): Promise<void> {
+async function atomicWriteText(filePath: string, content: string, assertCurrent?: () => void): Promise<void> {
   await ensurePrivateDirectory(dirname(filePath));
   await secureExistingPrivateFile(filePath);
   const temporaryPath = `${filePath}.${process.pid}-${randomUUID()}.tmp`;
@@ -1136,6 +1148,7 @@ async function atomicWriteText(filePath: string, content: string): Promise<void>
       await handle.close();
     }
     await secureExistingPrivateFile(filePath);
+    assertCurrent?.();
     await rename(temporaryPath, filePath);
   } catch (error) {
     await rm(temporaryPath, { force: true }).catch(() => {});
@@ -1143,8 +1156,8 @@ async function atomicWriteText(filePath: string, content: string): Promise<void>
   }
 }
 
-async function atomicWriteJson(filePath: string, value: unknown): Promise<void> {
-  await atomicWriteText(filePath, `${JSON.stringify(value, null, 2)}\n`);
+async function atomicWriteJson(filePath: string, value: unknown, assertCurrent?: () => void): Promise<void> {
+  await atomicWriteText(filePath, `${JSON.stringify(value, null, 2)}\n`, assertCurrent);
 }
 
 async function atomicWriteJsonExistingDir(filePath: string, value: unknown): Promise<void> {

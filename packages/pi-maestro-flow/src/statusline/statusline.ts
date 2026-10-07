@@ -716,6 +716,12 @@ export function installStatusline(
 						width,
 					));
 
+					// Host-memory authorization is projected here, not restored from footer/session data.
+					const planAutoStatus = footerData.getExtensionStatuses().get("maestro-plan-auto");
+					if (planAutoStatus && planAutoStatus.trim() !== "PLAN-AUTO off") {
+						lines.push(truncateToWidth(theme.fg("warning", planAutoStatus), liveWidth));
+					}
+
 					const pressureLine = renderPressureLine(theme, pressureStatus, liveWidth, width);
 					if (pressureLine) lines.push(pressureLine);
 

@@ -32,6 +32,7 @@ import { readAgentOutput } from "../src/teammate/agent-output-store.ts";
 import { isRunControlReadAction } from "../src/tools/run-control.ts";
 import { setTodoDurationChartEnabled } from "../src/todo-chart-state.ts";
 import { PLAN_TOGGLE_KEY } from "../src/tools/plan.ts";
+import { PLAN_AUTO_KEY } from "../src/tools/plan-auto.ts";
 import { CompactionArbiter, NATIVE_FALLBACK_COMPACTION_MARKER } from "../src/compaction/compaction-arbiter.ts";
 import {
   MAESTRO_GLOBAL_SHORTCUTS,
@@ -337,6 +338,10 @@ test("statusless Plan current target uses Execution lifecycle and chain authorit
 test("shortcut audit covers built-in, configured, and companion extension collisions", () => {
   assert.equal(PLAN_TOGGLE_KEY, "alt+shift+p");
   assert.equal(matchesKey("\x1b[112;4u", PLAN_TOGGLE_KEY), true);
+  assert.equal(PLAN_AUTO_KEY, "alt+shift+a");
+  assert.equal(matchesKey("\x1b[97;4u", PLAN_AUTO_KEY), true);
+  assert.deepEqual(MAESTRO_GLOBAL_SHORTCUTS.find((shortcut) => shortcut.key === PLAN_AUTO_KEY),
+    { key: PLAN_AUTO_KEY, owner: "Maestro Plan-auto authorization" });
   assert.deepEqual(
     MAESTRO_GLOBAL_SHORTCUTS.find((shortcut) => shortcut.owner === "Maestro Plan mode"),
     { key: PLAN_TOGGLE_KEY, owner: "Maestro Plan mode" },
@@ -424,11 +429,13 @@ test("extension registers Board, LSP, browser, host-owned discovery, and the Gat
   const active: string[] = [];
   const commands: string[] = [];
   const renderers: string[] = [];
+  const shortcuts: string[] = [];
   const handlers = new Map<string, Array<(...args: unknown[]) => unknown>>();
   const api = new Proxy({} as ExtensionAPI, {
     get(_target, property) {
       if (property === "registerTool") return (tool: ToolDefinition) => { tools.push(tool); active.push(tool.name); };
       if (property === "registerCommand") return (name: string) => { commands.push(name); };
+      if (property === "registerShortcut") return (name: string) => { shortcuts.push(name); };
       if (property === "registerMessageRenderer") return (name: string) => { renderers.push(name); };
       if (property === "getAllTools") return () => tools.map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters, sourceInfo: { path: "test", type: "extension" } }));
       if (property === "getActiveTools") return () => [...active];
@@ -490,6 +497,9 @@ test("extension registers Board, LSP, browser, host-owned discovery, and the Gat
   assert.ok(commands.includes("maestro-knowledge-record"));
   assert.ok(commands.includes("maestro-skills"));
   assert.ok(commands.includes("maestro-keybindings"));
+  assert.ok(commands.includes("plan-auto"));
+  assert.equal(shortcuts.filter((key) => key === PLAN_AUTO_KEY).length, 1);
+  assert.equal(names.includes("plan-auto"), false, "preauthorization is never a model tool");
   assert.ok(commands.includes("export-session-info"));
   assert.ok(commands.includes("gateway"));
   assert.ok(commands.includes("open-code-review"));

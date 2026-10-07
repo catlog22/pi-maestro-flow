@@ -18,6 +18,7 @@ const DEFAULT_THINKING_KEY = "shift+tab";
 export const MAESTRO_GLOBAL_SHORTCUTS = [
   { key: "shift+tab", owner: "Maestro approval mode" },
   { key: "alt+shift+p", owner: "Maestro Plan mode" },
+  { key: "alt+shift+a", owner: "Maestro Plan-auto authorization" },
   { key: "alt+t", owner: "Maestro Todo panel" },
   { key: "alt+g", owner: "Maestro Goal center" },
   { key: "alt+r", owner: "Teammate/Cockpit session list" },
