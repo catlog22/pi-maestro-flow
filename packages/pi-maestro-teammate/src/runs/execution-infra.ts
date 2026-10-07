@@ -88,6 +88,8 @@ export interface TeammateTaskSpec {
   model?: string;
   fallbackModels?: string[];
   thinking?: TeammateThinkingInput;
+  /** Codex priority tier for Pi requests only; omitted inherits routing/project defaults. */
+  fast?: boolean;
   cwd?: string;
   outputSchema?: Record<string, unknown>;
   timeoutMs?: number;
@@ -140,6 +142,8 @@ export interface RunTeammateParams {
   model?: string;
   fallbackModels?: string[];
   thinking?: TeammateThinkingInput;
+  /** Codex priority tier for Pi requests only; omitted inherits routing/project defaults. */
+  fast?: boolean;
   cwd?: string;
   /** Default Fabric route placement for tasks that name none. */
   placement?: TeammatePlacementV1;
@@ -183,6 +187,8 @@ export interface RunSingleTeammateParams {
   model?: string;
   fallbackModels?: string[];
   thinking?: TeammateThinkingInput;
+  /** Codex priority tier for Pi requests only; omitted inherits routing/project defaults. */
+  fast?: boolean;
   cwd?: string;
   timeoutMs?: number;
   outputSchema?: Record<string, unknown>;
@@ -436,6 +442,7 @@ export interface NormalizedTask {
   model?: string;
   fallbackModels?: string[];
   thinking?: TeammateThinkingLevel;
+  fast?: boolean;
   cwd?: string;
   outputSchema?: Record<string, unknown>;
   timeoutMs?: number;
@@ -495,6 +502,7 @@ export function singleRunParamsOf(
     model: source.model,
     fallbackModels: source.fallbackModels,
     thinking: source.thinking,
+    fast: source.fast,
     cwd: source.cwd,
     outputSchema: source.outputSchema,
     // Copied rather than aliased: the roster record keeps its own array of the
@@ -1368,6 +1376,11 @@ export function normalizeTeammateParams(
     };
   }
 
+  if ((params.fast !== undefined && typeof params.fast !== "boolean")
+    || params.tasks.some((task) => task.fast !== undefined && typeof task.fast !== "boolean")) {
+    return { tasks: [], isMultiTask: false, warnings, error: "Fast must be a boolean when supplied." };
+  }
+
   if (params.mode === "expert" && params.tasks.length !== 1) {
     return {
       tasks: [],
@@ -1470,6 +1483,7 @@ export function normalizeTeammateParams(
     model: task.model ?? params.model,
     fallbackModels: task.fallbackModels ?? params.fallbackModels,
     thinking: parseTeammateThinkingLevel(task.thinking ?? params.thinking),
+    fast: task.fast ?? params.fast,
     cwd: task.cwd ?? params.cwd,
     outputSchema: task.outputSchema ?? params.outputSchema,
     timeoutMs: task.timeoutMs ?? params.timeoutMs,

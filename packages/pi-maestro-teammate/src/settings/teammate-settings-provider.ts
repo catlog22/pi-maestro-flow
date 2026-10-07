@@ -104,6 +104,8 @@ const BASE_CATALOGS = {
     "teammate.routing.model": "Primary model",
     "teammate.routing.fallbacks": "Fallback models",
     "teammate.routing.thinking": "Thinking level",
+    "teammate.routing.fast": "Codex Fast",
+    "teammate.routing.fast.description": "Pi openai-codex only; priority tier may consume more quota. Unset inherits routing/project defaults.",
     "teammate.roles": "Discovered roles",
     "teammate.roles.description": "Read-only catalog of the discovered teammate roles.",
     "teammate.roles.row": "Role",
@@ -126,6 +128,8 @@ const BASE_CATALOGS = {
     "teammate.routing.model": "主 Model",
     "teammate.routing.fallbacks": "Fallbacks",
     "teammate.routing.thinking": "Thinking",
+    "teammate.routing.fast": "Codex Fast",
+    "teammate.routing.fast.description": "仅限 Pi openai-codex；优先级可能消耗更多额度。不设置时继承路由 / 项目默认值。",
     "teammate.roles": "发现 Roles",
     "teammate.roles.description": "发现的 teammate Roles 只读目录。",
     "teammate.roles.row": "Role",
@@ -267,6 +271,7 @@ export function createTeammateSettingsProvider(options: TeammateSettingsProvider
         state.next,
         state.before,
         state.committedContent,
+        state.beforeContent,
       );
       prepared.delete(request.prepareToken);
       const restored = readResources(request.context.cwd, getGlobalPath, getProjectPath);
@@ -333,7 +338,7 @@ function definitions(taskTypes: readonly TeammateTaskType[], roles: readonly str
     {
       key: settingKey(taskType, "model"),
       group: `routing.${taskType}`,
-      order: index * 3,
+      order: index * 4,
       labelKey: "teammate.routing.model",
       scopes: ["global", "project"],
       merge: "override",
@@ -345,7 +350,7 @@ function definitions(taskTypes: readonly TeammateTaskType[], roles: readonly str
     {
       key: settingKey(taskType, "fallbacks"),
       group: `routing.${taskType}`,
-      order: index * 3 + 1,
+      order: index * 4 + 1,
       labelKey: "teammate.routing.fallbacks",
       scopes: ["global", "project"],
       merge: "override",
@@ -357,7 +362,7 @@ function definitions(taskTypes: readonly TeammateTaskType[], roles: readonly str
     {
       key: settingKey(taskType, "thinking"),
       group: `routing.${taskType}`,
-      order: index * 3 + 2,
+      order: index * 4 + 2,
       labelKey: "teammate.routing.thinking",
       scopes: ["global", "project"],
       merge: "override",
@@ -368,6 +373,19 @@ function definitions(taskTypes: readonly TeammateTaskType[], roles: readonly str
         kind: "enum",
         options: TEAMMATE_THINKING_LEVELS.map((value) => ({ value, labelKey: `teammate.option.${value}` })),
       },
+    },
+    {
+      key: settingKey(taskType, "fast"),
+      group: `routing.${taskType}`,
+      order: index * 4 + 3,
+      labelKey: "teammate.routing.fast",
+      descriptionKey: "teammate.routing.fast.description",
+      scopes: ["global", "project"],
+      merge: "override",
+      activation: "next-invocation",
+      sensitivity: "public",
+      reversibility: "full",
+      editor: { kind: "boolean" },
     },
   ]);
   if (includeHeartbeat) settings.unshift({
@@ -393,7 +411,7 @@ function definitions(taskTypes: readonly TeammateTaskType[], roles: readonly str
     {
       key: roleSettingKey(role, "model"),
       group: `role.${role}`,
-      order: 10_000 + index * 3,
+      order: 10_000 + index * 4,
       labelKey: "teammate.routing.model",
       scopes: ["global", "project"],
       merge: "override",
@@ -405,7 +423,7 @@ function definitions(taskTypes: readonly TeammateTaskType[], roles: readonly str
     {
       key: roleSettingKey(role, "fallbacks"),
       group: `role.${role}`,
-      order: 10_000 + index * 3 + 1,
+      order: 10_000 + index * 4 + 1,
       labelKey: "teammate.routing.fallbacks",
       scopes: ["global", "project"],
       merge: "override",
@@ -417,7 +435,7 @@ function definitions(taskTypes: readonly TeammateTaskType[], roles: readonly str
     {
       key: roleSettingKey(role, "thinking"),
       group: `role.${role}`,
-      order: 10_000 + index * 3 + 2,
+      order: 10_000 + index * 4 + 2,
       labelKey: "teammate.routing.thinking",
       scopes: ["global", "project"],
       merge: "override",
@@ -428,6 +446,19 @@ function definitions(taskTypes: readonly TeammateTaskType[], roles: readonly str
         kind: "enum",
         options: TEAMMATE_THINKING_LEVELS.map((value) => ({ value, labelKey: `teammate.option.${value}` })),
       },
+    },
+    {
+      key: roleSettingKey(role, "fast"),
+      group: `role.${role}`,
+      order: 10_000 + index * 4 + 3,
+      labelKey: "teammate.routing.fast",
+      descriptionKey: "teammate.routing.fast.description",
+      scopes: ["global", "project"],
+      merge: "override",
+      activation: "next-invocation",
+      sensitivity: "public",
+      reversibility: "full",
+      editor: { kind: "boolean" },
     },
   ]));
   settings.push({
@@ -498,7 +529,7 @@ function snapshot(
     });
   }
   for (const taskType of taskTypes) {
-    for (const field of ["model", "fallbacks", "thinking"] as const) {
+    for (const field of ["model", "fallbacks", "thinking", "fast"] as const) {
       const key = settingKey(taskType, field);
       const globalValue = rawValue(profile, taskType, field);
       const projectValue = rawValue(stores.project.overrides, taskType, field);
@@ -532,7 +563,7 @@ function snapshot(
     }
   }
   for (const role of roles) {
-    for (const field of ["model", "fallbacks", "thinking"] as const) {
+    for (const field of ["model", "fallbacks", "thinking", "fast"] as const) {
       const key = roleSettingKey(role, field);
       const globalValue = rawRoleValue(profile, role, field);
       const projectValue = rawRoleValue(stores.project.overrides, role, field);
@@ -733,6 +764,7 @@ function applyChanges(before: ModelRoutingStorePair, changes: readonly SettingsC
       } else {
         values[parsed.taskType] = change.value as never;
       }
+      if (section === "fastModes") rules.fastModes = values as NonNullable<typeof rules.fastModes>;
       if (section === "fallbackMappings") {
         rules.fallbackMappings = values as NonNullable<typeof rules.fallbackMappings>;
       }
@@ -744,24 +776,25 @@ function applyChanges(before: ModelRoutingStorePair, changes: readonly SettingsC
 }
 
 function rawRoleValue(
-  raw: { roleMappings?: Record<string, { model?: string | null; fallbackModels?: string[] | null; thinking?: string | null } | null> },
+  raw: { roleMappings?: Record<string, { model?: string | null; fallbackModels?: string[] | null; thinking?: string | null; fast?: boolean | null } | null> },
   role: string,
-  field: "model" | "fallbacks" | "thinking",
+  field: "model" | "fallbacks" | "thinking" | "fast",
 ): { present: boolean; value?: JsonValue } {
   const rules = raw.roleMappings?.[role];
-  if (!rules || !Object.hasOwn(rules, field === "model" ? "model" : field === "fallbacks" ? "fallbackModels" : "thinking")) {
+  if (!rules || !Object.hasOwn(rules, field === "model" ? "model" : field === "fallbacks" ? "fallbackModels" : field)) {
     return { present: false };
   }
-  const value = field === "model" ? rules.model : field === "fallbacks" ? rules.fallbackModels : rules.thinking;
+  const value = field === "model" ? rules.model : field === "fallbacks" ? rules.fallbackModels : field === "fast" ? rules.fast : rules.thinking;
   if (field === "model") return { present: true, value: typeof value === "string" ? value : null };
   if (field === "fallbacks") return { present: true, value: Array.isArray(value) ? [...value] : null };
+  if (field === "fast") return { present: true, value: typeof value === "boolean" ? value : null };
   return { present: true, value: parseTeammateThinkingLevel(value) ?? null };
 }
 
 function rawValue(
-  raw: { mappings: Record<string, unknown> | object; fallbackMappings?: Record<string, unknown> | object; thinkingLevels: Record<string, unknown> | object },
+  raw: { mappings: Record<string, unknown> | object; fallbackMappings?: Record<string, unknown> | object; thinkingLevels: Record<string, unknown> | object; fastModes?: Record<string, unknown> | object },
   taskType: TeammateTaskType,
-  field: "model" | "fallbacks" | "thinking",
+  field: "model" | "fallbacks" | "thinking" | "fast",
 ): { present: boolean; value?: JsonValue } {
   const section = isRecord(raw[sectionFor(field)]) ? raw[sectionFor(field)] as Record<string, unknown> : {};
   if (!Object.hasOwn(section, taskType)) return { present: false };
@@ -775,21 +808,22 @@ function rawValue(
         : null,
     };
   }
+  if (field === "fast") return { present: true, value: typeof value === "boolean" ? value : null };
   return { present: true, value: parseTeammateThinkingLevel(value) ?? null };
 }
 
-function settingKey(taskType: TeammateTaskType, field: "model" | "fallbacks" | "thinking"): string {
+function settingKey(taskType: TeammateTaskType, field: "model" | "fallbacks" | "thinking" | "fast"): string {
   return `routing.${taskType}.${field}`;
 }
 
-type RoutingField = "model" | "fallbacks" | "thinking";
+type RoutingField = "model" | "fallbacks" | "thinking" | "fast";
 
 type ParsedSetting =
   | { kind: "runtime"; field: "backgroundStatusHeartbeatMs" }
   | { kind: "task"; taskType: TeammateTaskType; field: RoutingField }
   | { kind: "role"; role: string; field: RoutingField };
 
-function roleSettingKey(role: string, field: "model" | "fallbacks" | "thinking"): string {
+function roleSettingKey(role: string, field: "model" | "fallbacks" | "thinking" | "fast"): string {
   return `role.${role}.${field}`;
 }
 
@@ -797,20 +831,21 @@ function parseSettingKey(key: string): ParsedSetting | undefined {
   if (key === BACKGROUND_STATUS_HEARTBEAT_SETTING_KEY) {
     return { kind: "runtime", field: "backgroundStatusHeartbeatMs" };
   }
-  const taskMatch = /^routing\.([a-z][a-z0-9._-]*)\.(model|fallbacks|thinking)$/.exec(key);
+  const taskMatch = /^routing\.([a-z][a-z0-9._-]*)\.(model|fallbacks|thinking|fast)$/.exec(key);
   if (taskMatch) {
     const taskType = parseTeammateTaskType(taskMatch[1]);
     if (!taskType) return undefined;
     return { kind: "task", taskType, field: taskMatch[2] as RoutingField };
   }
-  const roleMatch = /^role\.([a-z][a-z0-9._-]*)\.(model|fallbacks|thinking)$/.exec(key);
+  const roleMatch = /^role\.([a-z][a-z0-9._-]*)\.(model|fallbacks|thinking|fast)$/.exec(key);
   if (!roleMatch) return undefined;
   return { kind: "role", role: roleMatch[1], field: roleMatch[2] as RoutingField };
 }
 
-function sectionFor(field: "model" | "fallbacks" | "thinking"): "mappings" | "fallbackMappings" | "thinkingLevels" {
+function sectionFor(field: "model" | "fallbacks" | "thinking" | "fast"): "mappings" | "fallbackMappings" | "thinkingLevels" | "fastModes" {
   if (field === "model") return "mappings";
   if (field === "fallbacks") return "fallbackMappings";
+  if (field === "fast") return "fastModes";
   return "thinkingLevels";
 }
 
@@ -821,6 +856,7 @@ function validValue(setting: ParsedSetting, value: JsonValue): boolean {
       && value >= BACKGROUND_STATUS_HEARTBEAT_MIN_MS
       && value <= BACKGROUND_STATUS_HEARTBEAT_MAX_MS;
   }
+  if (setting.field === "fast") return value === null || typeof value === "boolean";
   if (setting.field === "model") return value === null || (typeof value === "string" && value.trim().length > 0);
   if (setting.field === "fallbacks") return value === null || (Array.isArray(value) && value.every((entry) => typeof entry === "string" && entry.trim().length > 0));
   return value === null || parseTeammateThinkingLevel(value) !== undefined;
@@ -851,7 +887,7 @@ function contentPair(resources: readonly RoutingResourceState[]): ModelRoutingSt
 
 function defaultGlobalStore(): GlobalModelRoutingStore {
   return {
-    version: 3,
+    version: 4,
     defaultProfile: "default",
     profiles: {
       default: { name: "Default", mappings: {}, thinkingLevels: {} },
@@ -861,7 +897,7 @@ function defaultGlobalStore(): GlobalModelRoutingStore {
 
 function defaultProjectStore(): ProjectModelRoutingStore {
   return {
-    version: 3,
+    version: 4,
     applyOverrides: false,
     overrides: { mappings: {}, thinkingLevels: {} },
   };
@@ -870,6 +906,7 @@ function defaultProjectStore(): ProjectModelRoutingStore {
 function hasRoutingRules(rules: ProjectModelRoutingStore["overrides"]): boolean {
   return Object.keys(rules.mappings).length > 0
     || Object.keys(rules.thinkingLevels).length > 0
+    || Object.keys(rules.fastModes ?? {}).length > 0
     || Object.keys(rules.fallbackMappings ?? {}).length > 0
     || Object.keys(rules.roleMappings ?? {}).length > 0
     || Object.keys(rules.typeMeta ?? {}).length > 0;

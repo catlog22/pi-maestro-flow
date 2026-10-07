@@ -47,6 +47,7 @@ export interface AgentConfig {
   fallbackModels?: string[];
   taskType?: TeammateTaskType;
   thinking?: TeammateThinkingLevel;
+  fast?: boolean;
   systemPromptMode: SystemPromptMode;
   inheritProjectContext: boolean;
   inheritSkills: boolean;
@@ -176,6 +177,7 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
       fallbackModels: rawFallbackModels && rawFallbackModels.length > 0 ? rawFallbackModels : undefined,
       taskType: parseTeammateTaskType(frontmatter.taskType),
       thinking: parseTeammateThinkingLevel(frontmatter.thinking),
+      fast: frontmatter.fast === "true" ? true : frontmatter.fast === "false" ? false : undefined,
       systemPromptMode,
       inheritProjectContext,
       inheritSkills,
@@ -206,6 +208,7 @@ function agentDefinitionFingerprint(agent: AgentConfig): string {
     agent.fallbackModels ?? null,
     agent.taskType ?? null,
     agent.thinking ?? null,
+    agent.fast ?? null,
     agent.systemPromptMode,
     agent.inheritProjectContext,
     agent.inheritSkills,

@@ -2139,6 +2139,19 @@ export async function handleChildInteractionRequest(
       result = broker && toolName && input && ctx
         ? { ...await broker({ toolName, input }, ctx) }
         : { action: "deny", reason: "No parent permission broker is available." };
+    } else if (interaction === "question" && ctx && agent && getTeammateChildToolBroker("ask-user-question")) {
+      decisionSource = "broker";
+      const broker = getTeammateChildToolBroker("ask-user-question")!;
+      const response = await broker({
+        toolName: "ask-user-question",
+        input: { questions: payload.questions },
+        actor: { correlationId: agent.correlationId, name: agent.name, agent: agent.agent, cwd: agent.cwd },
+        signal,
+      });
+      const details = isRecord(response.details) ? response.details : {};
+      result = response.isError || details.cancelled || !Array.isArray(details.answers)
+        ? { action: "cancel", error: response.isError ? "Root question broker failed" : undefined }
+        : { action: "answer", answers: details.answers, ...(Array.isArray(details.decisions) ? { decisions: details.decisions } : {}) };
     } else if (!ctx?.hasUI) {
       decisionSource = "headless";
       result = interaction === "permission" ? { action: "deny" } : { action: "cancel" };

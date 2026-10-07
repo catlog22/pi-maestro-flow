@@ -85,6 +85,10 @@
       "types": "./types/public/v1/fabric-runtime.d.ts",
       "default": "./src/public/v1/fabric-runtime.ts"
     },
+    "./v1/codex-fast": {
+      "types": "./types/public/v1/codex-fast.d.ts",
+      "default": "./src/public/v1/codex-fast.ts"
+    },
     "./v1/model-routing": {
       "types": "./types/public/v1/model-routing.d.ts",
       "default": "./src/public/v1/model-routing.ts"

@@ -44,6 +44,8 @@ export interface TeammateTaskSpec {
     model?: string;
     fallbackModels?: string[];
     thinking?: TeammateThinkingInput;
+    /** Codex priority tier for Pi requests only; omitted inherits routing/project defaults. */
+    fast?: boolean;
     cwd?: string;
     outputSchema?: Record<string, unknown>;
     timeoutMs?: number;
@@ -94,6 +96,8 @@ export interface RunTeammateParams {
     model?: string;
     fallbackModels?: string[];
     thinking?: TeammateThinkingInput;
+    /** Codex priority tier for Pi requests only; omitted inherits routing/project defaults. */
+    fast?: boolean;
     cwd?: string;
     /** Default Fabric route placement for tasks that name none. */
     placement?: TeammatePlacementV1;
@@ -136,6 +140,8 @@ export interface RunSingleTeammateParams {
     model?: string;
     fallbackModels?: string[];
     thinking?: TeammateThinkingInput;
+    /** Codex priority tier for Pi requests only; omitted inherits routing/project defaults. */
+    fast?: boolean;
     cwd?: string;
     timeoutMs?: number;
     outputSchema?: Record<string, unknown>;
@@ -361,6 +367,7 @@ export interface NormalizedTask {
     model?: string;
     fallbackModels?: string[];
     thinking?: TeammateThinkingLevel;
+    fast?: boolean;
     cwd?: string;
     outputSchema?: Record<string, unknown>;
     timeoutMs?: number;

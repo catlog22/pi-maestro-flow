@@ -360,6 +360,7 @@ function modelRegistrationBackendSpecOf(
         ? { model: selector.value }
         : {}),
     ...(params.thinking === undefined ? {} : { thinking: params.thinking as TeammateRunSpec["thinking"] }),
+    ...(params.fast === undefined ? {} : { fast: params.fast }),
     ...(params.outputSchema === undefined ? {} : { outputSchema: params.outputSchema }),
     ...(params.todos === undefined ? {} : { todos: params.todos }),
     ...(params.placement === undefined ? {} : { placement: params.placement }),
@@ -544,6 +545,7 @@ function backendSpecOf(
     ...(params.context === undefined ? {} : { context: params.context }),
     ...(model === undefined ? {} : { model }),
     ...(params.thinking === undefined ? {} : { thinking: params.thinking as TeammateRunSpec["thinking"] }),
+    ...(params.fast === undefined ? {} : { fast: params.fast }),
     ...(params.outputSchema === undefined ? {} : { outputSchema: params.outputSchema }),
     ...(params.todos === undefined ? {} : { todos: params.todos }),
     ...(params.placement === undefined ? {} : { placement: params.placement }),
@@ -1976,6 +1978,8 @@ async function runSingleTeammateV1(
           spec = registrationCandidate === undefined
             ? backendSpecOf(params, cwd, modelToUse, remoteRouting)
             : modelRegistrationBackendSpecOf(params, cwd, registrationCandidate);
+          // Do not advertise or transport Pi-only Fast to CLI/remote adapters.
+          if (prepared.backendName !== PI_SUBPROCESS) delete spec.fast;
           // Whether the backend published a channel of its own. Tracked rather
           // than decided by backend name: a backend that spawns a child hands
           // the host a real pipe carrying lease control and a session dir, and
@@ -2060,6 +2064,10 @@ async function runSingleTeammateV1(
           // forgot to name itself would otherwise be indistinguishable from the
           // legacy path, which names nothing because no backend served it.
           attempt.result.backend = prepared.backendName;
+          if (params.fast === true && prepared.backendName !== PI_SUBPROCESS) {
+            attempt.result.warnings = [...(attempt.result.warnings ?? []),
+              `Codex Fast is not applied by backend "${prepared.backendName}"; only the local Pi Codex driver supports it.`];
+          }
           // Emulation is recorded per run, so a consumer reading a structured
           // value can tell whether it came from a native contract or from
           // host-side extraction. Derived from the same adjudication the graph
@@ -2555,6 +2563,7 @@ export async function runGraph(
           model: task.model,
           fallbackModels: task.fallbackModels,
           thinking: task.thinking,
+          fast: task.fast,
           cwd: task.cwd,
           outputSchema: task.outputSchema,
           todos: task.todos,
@@ -2938,6 +2947,7 @@ export async function runGraph(
           model: task.model,
           fallbackModels: task.fallbackModels,
           thinking: task.thinking,
+          fast: task.fast,
           cwd: task.cwd,
           outputSchema: task.outputSchema,
           todos: task.todos,

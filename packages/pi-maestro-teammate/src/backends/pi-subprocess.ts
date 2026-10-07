@@ -260,6 +260,7 @@ function paramsOf(spec: TeammateRunSpec, cwd: string): RunSingleTeammateParams {
     ...(spec.context === undefined ? {} : { context: spec.context }),
     ...(spec.model === undefined ? {} : { model: spec.model }),
     ...(spec.thinking === undefined ? {} : { thinking: spec.thinking }),
+    ...(spec.fast === undefined ? {} : { fast: spec.fast }),
     ...(spec.outputSchema === undefined ? {} : { outputSchema: spec.outputSchema }),
     ...(spec.todos === undefined ? {} : { todos: spec.todos }),
     cwd,

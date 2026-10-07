@@ -443,7 +443,7 @@ function mergeCategory(category: PiConfigCategory, local: Record<string, unknown
   validatePiConfigShape(category, remote);
   if (category === "models") return { ...remote, ...local, providers: { ...(remote.providers as Record<string, unknown>), ...(local.providers as Record<string, unknown>) } };
   if (category === "auth") return { ...remote, ...local };
-  return { ...remote, ...local, profiles: { ...(remote.profiles as Record<string, unknown>), ...(local.profiles as Record<string, unknown>) } };
+  return { ...remote, ...local, version: local.version === 4 || remote.version === 4 ? 4 : 3, profiles: { ...(remote.profiles as Record<string, unknown>), ...(local.profiles as Record<string, unknown>) } };
 }
 
 async function readExisting(path: string, category: PiConfigCategory): Promise<{ bytes: Buffer; value: Record<string, unknown> } | undefined> {

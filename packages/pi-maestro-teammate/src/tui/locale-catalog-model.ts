@@ -2,6 +2,11 @@ import type { TranslationCatalogs } from "pi-maestro-settings-core/v1";
 
 export const MODEL_TUI_CATALOGS = {
   en: {
+    "model.setting.fast": "Codex Fast",
+    "model.fast.inherit": "Inherit / default",
+    "model.fast.on": "On",
+    "model.fast.off": "Off",
+    "model.fast.detail": "Pi openai-codex only; priority may consume more quota.",
     "model.title": "Teammate Control Center",
     "model.tab.profiles": "Profiles",
     "model.tab.routing": "Routing",
@@ -286,6 +291,11 @@ export const MODEL_TUI_CATALOGS = {
     "task.testing.description": "Tests, coverage, and regression validation",
   },
   "zh-CN": {
+    "model.setting.fast": "Codex Fast",
+    "model.fast.inherit": "继承 / 默认",
+    "model.fast.on": "开",
+    "model.fast.off": "关",
+    "model.fast.detail": "仅 Pi openai-codex；优先级可能消耗更多额度。",
     "model.title": "Teammate 控制中心",
     "model.tab.profiles": "配置方案",
     "model.tab.routing": "路由",

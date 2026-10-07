@@ -391,6 +391,7 @@ function buildChildSpawnEnv(
   schemaFile: string | undefined,
   outputFile: string | undefined,
   forkSessionFile: string | undefined,
+  fast: boolean | undefined,
 ): Record<string, string | undefined> {
   const spawnEnv: Record<string, string | undefined> = {
     ...process.env,
@@ -408,6 +409,8 @@ function buildChildSpawnEnv(
     PI_CACHE_RETENTION: resolveAgentCacheRetention(process.env),
     ...options.childEnvironment,
     PI_TEAMMATE_CONTEXT_MODE: forkSessionFile ? "fork" : undefined,
+    // Clear any inherited child override; false must survive without a CLI flag.
+    PI_TEAMMATE_CODEX_FAST: fast === undefined ? undefined : String(fast),
   };
   if (options.maxDispatchDepth !== undefined) {
     spawnEnv.PI_TEAMMATE_MAX_DISPATCH_DEPTH = String(options.maxDispatchDepth);
@@ -869,6 +872,7 @@ export async function runSingleAttempt(
     schemaFile,
     outputFile,
     forkSessionFile,
+    params.fast ?? agentConfig.fast,
   );
   const spawnSpec = getPiSpawnCommand(piArgs);
   const probedChildVersion = options.spawnChildProcess

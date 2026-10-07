@@ -62,6 +62,7 @@ export interface ModelRoutingRoleRules {
   model?: string | null;
   fallbackModels?: string[] | null;
   thinking?: TeammateThinkingLevel | null;
+  fast?: boolean | null;
   /** Per-role circuit breaker policy applied to the role's mapped model. */
   circuit?: ModelCircuitPolicy | null;
   /** Legacy persisted metadata. Task types only affect routing when supplied by the dispatch. */
@@ -78,6 +79,7 @@ export interface ModelRoutingRules {
   mappings: Partial<Record<TeammateTaskType, string | null>>;
   fallbackMappings?: Partial<Record<TeammateTaskType, string[] | null>>;
   thinkingLevels: Partial<Record<TeammateTaskType, TeammateThinkingLevel | null>>;
+  fastModes?: Partial<Record<TeammateTaskType, boolean | null>>;
   roleMappings?: Record<string, ModelRoutingRoleRules | null>;
   /** Trigger-keyword metadata per task type; `null` clears an override. */
   typeMeta?: Record<string, ModelRoutingTypeMeta | null>;
@@ -91,7 +93,7 @@ export const TEAMMATE_SMART_MODES = ["off", "economy", "balanced", "sota"] as co
 export type TeammateSmartMode = typeof TEAMMATE_SMART_MODES[number];
 
 export interface GlobalModelRoutingStore {
-  version: 3;
+  version: 4;
   defaultProfile: string;
   profiles: Record<string, ModelRoutingProfile>;
   retiredProfileIds?: string[];
@@ -104,7 +106,7 @@ export interface GlobalModelRoutingStore {
 }
 
 export interface ProjectModelRoutingStore {
-  version: 3;
+  version: 4;
   activeProfile?: string;
   applyOverrides: boolean;
   overrides: ModelRoutingRules;
@@ -117,10 +119,12 @@ interface ModelRoutingTransaction {
   globalBefore: GlobalModelRoutingStore;
   globalAfter: GlobalModelRoutingStore;
   projectAfter: ProjectModelRoutingStore;
+  /** Preserve pre-migration bytes across Settings rollback and crash recovery. */
+  content?: { globalBefore: string; globalAfter?: string; projectAfter?: string };
 }
 
 export interface ModelRoutingConfig extends ModelRoutingRules {
-  version: 3;
+  version: 4;
   profileId: string;
   profileName: string;
   projectOverridesEnabled: boolean;
@@ -177,7 +181,7 @@ export function getSessionModelRoutingPath(cwd: string, sessionId: string): stri
 }
 
 export interface SessionModelRoutingStore {
-  version: 3;
+  version: 4;
   sessionId: string;
   createdAtMs: number;
   rules: ModelRoutingRules;
@@ -197,6 +201,7 @@ function cloneRoleMappings(roleMappings: ModelRoutingRules["roleMappings"]): Mod
         ? { fallbackModels: rules.fallbackModels === null ? null : [...(rules.fallbackModels ?? [])] }
         : {}),
       ...(hasOwn(rules, "thinking") ? { thinking: rules.thinking } : {}),
+      ...(hasOwn(rules, "fast") ? { fast: rules.fast } : {}),
       ...(hasOwn(rules, "circuit") ? { circuit: rules.circuit === null ? null : { ...rules.circuit } } : {}),
       ...(hasOwn(rules, "taskType") ? { taskType: rules.taskType } : {}),
     },
@@ -224,6 +229,7 @@ function cloneRules(rules: ModelRoutingRules): ModelRoutingRules {
     mappings: { ...rules.mappings },
     ...(fallbackMappings && Object.keys(fallbackMappings).length > 0 ? { fallbackMappings } : {}),
     thinkingLevels: { ...rules.thinkingLevels },
+    ...(rules.fastModes ? { fastModes: { ...rules.fastModes } } : {}),
     ...(roleMappings && Object.keys(roleMappings).length > 0 ? { roleMappings } : {}),
     ...(typeMeta && Object.keys(typeMeta).length > 0 ? { typeMeta } : {}),
   };
@@ -261,7 +267,7 @@ function assertRoleName(role: string): void {
   }
 }
 
-function validateRoleMappings(value: unknown, label: string): void {
+function validateRoleMappings(value: unknown, label: string, allowFast = false): void {
   if (value === undefined) return;
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`Invalid ${label} roleMappings`);
   for (const [role, rawRules] of Object.entries(value as Record<string, unknown>)) {
@@ -271,7 +277,7 @@ function validateRoleMappings(value: unknown, label: string): void {
       throw new Error(`Invalid ${label} role mapping: ${role}`);
     }
     const rules = rawRules as Record<string, unknown>;
-    assertKnownKeys(rules, ["model", "fallbackModels", "thinking", "circuit", "taskType"], `Role ${role}`);
+    assertKnownKeys(rules, ["model", "fallbackModels", "thinking", "circuit", "taskType", ...(allowFast ? ["fast"] : [])], `Role ${role}`);
     if (rules.model !== undefined && rules.model !== null && (typeof rules.model !== "string" || !rules.model.trim())) {
       throw new Error(`Invalid ${label} role model: ${role}`);
     }
@@ -282,6 +288,9 @@ function validateRoleMappings(value: unknown, label: string): void {
     }
     if (rules.thinking !== undefined && rules.thinking !== null && !parseTeammateThinkingLevel(rules.thinking)) {
       throw new Error(`Invalid ${label} role thinking level: ${role}`);
+    }
+    if (rules.fast !== undefined && rules.fast !== null && typeof rules.fast !== "boolean") {
+      throw new Error(`Invalid ${label} role Fast mode: ${role}`);
     }
     if (rules.taskType !== undefined && rules.taskType !== null && !parseTeammateTaskType(rules.taskType)) {
       throw new Error(`Invalid ${label} role task type: ${role}`);
@@ -304,8 +313,8 @@ function validateRoleMappings(value: unknown, label: string): void {
   }
 }
 
-function validateV3Rules(value: Record<string, unknown>, label: string): void {
-  assertKnownKeys(value, ["mappings", "fallbackMappings", "thinkingLevels", "roleMappings", "typeMeta"], label);
+function validateV3Rules(value: Record<string, unknown>, label: string, allowFast = false): void {
+  assertKnownKeys(value, ["mappings", "fallbackMappings", "thinkingLevels", "roleMappings", "typeMeta", ...(allowFast ? ["fastModes"] : [])], label);
   if (!value.mappings || typeof value.mappings !== "object" || Array.isArray(value.mappings)
     || !value.thinkingLevels || typeof value.thinkingLevels !== "object" || Array.isArray(value.thinkingLevels)
     || (value.fallbackMappings !== undefined
@@ -331,7 +340,13 @@ function validateV3Rules(value: Record<string, unknown>, label: string): void {
       throw new Error(`Invalid ${label} thinking level: ${taskType}`);
     }
   }
-  validateRoleMappings(value.roleMappings, label);
+  if (value.fastModes !== undefined) {
+    if (!value.fastModes || typeof value.fastModes !== "object" || Array.isArray(value.fastModes)) throw new Error(`Invalid ${label} fastModes`);
+    for (const [taskType, fast] of Object.entries(value.fastModes as Record<string, unknown>)) {
+      if (!parseTeammateTaskType(taskType) || (fast !== null && typeof fast !== "boolean")) throw new Error(`Invalid ${label} Fast mode: ${taskType}`);
+    }
+  }
+  validateRoleMappings(value.roleMappings, label, allowFast);
   if (value.typeMeta !== undefined) {
     if (!value.typeMeta || typeof value.typeMeta !== "object" || Array.isArray(value.typeMeta)) {
       throw new Error(`Invalid ${label} typeMeta`);
@@ -361,6 +376,12 @@ export function validateModelRoutingV3Rules(value: unknown): asserts value is Mo
   validateV3Rules(value as Record<string, unknown>, "model routing v3 rules");
 }
 
+/** Validate the V4 independent Fast routing map and role overrides. */
+export function validateModelRoutingV4Rules(value: unknown): asserts value is ModelRoutingRules {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid model routing v4 rules");
+  validateV3Rules(value as Record<string, unknown>, "model routing v4 rules", true);
+}
+
 function normalizeRules(value: unknown): ModelRoutingRules {
   const parsed = value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -368,6 +389,7 @@ function normalizeRules(value: unknown): ModelRoutingRules {
   const mappings: Partial<Record<TeammateTaskType, string | null>> = {};
   const fallbackMappings: Partial<Record<TeammateTaskType, string[] | null>> = {};
   const thinkingLevels: Partial<Record<TeammateTaskType, TeammateThinkingLevel | null>> = {};
+  const fastModes: Partial<Record<TeammateTaskType, boolean | null>> = {};
   const roleMappings: Record<string, ModelRoutingRoleRules | null> = {};
   const rawMappings = parsed.mappings && typeof parsed.mappings === "object" && !Array.isArray(parsed.mappings)
     ? parsed.mappings as Record<string, unknown>
@@ -381,6 +403,12 @@ function normalizeRules(value: unknown): ModelRoutingRules {
   const rawRoleMappings = parsed.roleMappings && typeof parsed.roleMappings === "object" && !Array.isArray(parsed.roleMappings)
     ? parsed.roleMappings as Record<string, unknown>
     : {};
+  const rawFast = parsed.fastModes && typeof parsed.fastModes === "object" && !Array.isArray(parsed.fastModes)
+    ? parsed.fastModes as Record<string, unknown> : {};
+  for (const [key, fast] of Object.entries(rawFast)) {
+    const taskType = parseTeammateTaskType(key);
+    if (taskType && (fast === null || typeof fast === "boolean")) fastModes[taskType] = fast;
+  }
   const taskTypes = new Set([...Object.keys(rawMappings), ...Object.keys(rawFallbacks), ...Object.keys(rawThinking)]);
   for (const rawTaskType of taskTypes) {
     const taskType = parseTeammateTaskType(rawTaskType);
@@ -426,6 +454,7 @@ function normalizeRules(value: unknown): ModelRoutingRules {
       const normalizedThinking = parseTeammateThinkingLevel(rules.thinking);
       if (normalizedThinking) normalized.thinking = normalizedThinking;
     }
+    if (rules.fast === null || typeof rules.fast === "boolean") normalized.fast = rules.fast;
     if (rules.taskType === null) normalized.taskType = null;
     else {
       const normalizedTaskType = parseTeammateTaskType(rules.taskType);
@@ -476,6 +505,7 @@ function normalizeRules(value: unknown): ModelRoutingRules {
     mappings,
     ...(Object.keys(fallbackMappings).length > 0 ? { fallbackMappings } : {}),
     thinkingLevels,
+    ...(Object.keys(fastModes).length > 0 ? { fastModes } : {}),
     ...(Object.keys(roleMappings).length > 0 ? { roleMappings } : {}),
     ...(Object.keys(typeMeta).length > 0 ? { typeMeta } : {}),
   };
@@ -508,6 +538,7 @@ function mergeRules(base: ModelRoutingRules, overrides: ModelRoutingRules): Mode
     mappings: { ...base.mappings, ...overrides.mappings },
     ...(Object.keys(fallbackMappings).length > 0 ? { fallbackMappings } : {}),
     thinkingLevels: { ...base.thinkingLevels, ...overrides.thinkingLevels },
+    ...((base.fastModes || overrides.fastModes) ? { fastModes: { ...base.fastModes, ...overrides.fastModes } } : {}),
     ...(Object.keys(roleMappings).length > 0 ? { roleMappings } : {}),
     ...(Object.keys(typeMeta).length > 0 ? { typeMeta } : {}),
   };
@@ -517,6 +548,7 @@ function hasRules(rules: ModelRoutingRules): boolean {
   return Object.keys(rules.mappings).length > 0
     || Object.keys(rules.fallbackMappings ?? {}).length > 0
     || Object.keys(rules.thinkingLevels).length > 0
+    || Object.keys(rules.fastModes ?? {}).length > 0
     || Object.keys(rules.roleMappings ?? {}).length > 0
     || Object.keys(rules.typeMeta ?? {}).length > 0;
 }
@@ -565,7 +597,7 @@ function invalidGlobalStore(): never {
 }
 
 function normalizeGlobalStore(parsed: Record<string, unknown> | undefined): GlobalModelRoutingStore {
-  if (parsed?.version === 3) {
+  if ((parsed?.version === 3 || parsed?.version === 4)) {
     assertKnownKeys(parsed, ["version", "defaultProfile", "profiles", "retiredProfileIds", "smartMode", "askBeforeDispatch", "backgroundStatusHeartbeatMs"], "v3 global config");
     if (!parsed.profiles || typeof parsed.profiles !== "object" || Array.isArray(parsed.profiles)) {
       return invalidGlobalStore();
@@ -576,15 +608,16 @@ function normalizeGlobalStore(parsed: Record<string, unknown> | undefined): Glob
         return invalidGlobalStore();
       }
       const profile = rawProfile as Record<string, unknown>;
-      assertKnownKeys(profile, ["name", "mappings", "fallbackMappings", "thinkingLevels", "roleMappings", "typeMeta"], `Profile ${profileId}`);
+      assertKnownKeys(profile, ["name", "mappings", "fallbackMappings", "thinkingLevels", "roleMappings", "typeMeta", ...(parsed.version === 4 ? ["fastModes"] : [])], `Profile ${profileId}`);
       if (typeof profile.name !== "string" || !normalizeProfileName(profile.name, "")) return invalidGlobalStore();
       validateV3Rules({
         mappings: profile.mappings,
         ...(hasOwn(profile, "fallbackMappings") ? { fallbackMappings: profile.fallbackMappings } : {}),
         thinkingLevels: profile.thinkingLevels,
+        ...(hasOwn(profile, "fastModes") ? { fastModes: profile.fastModes } : {}),
         ...(hasOwn(profile, "roleMappings") ? { roleMappings: profile.roleMappings } : {}),
         ...(hasOwn(profile, "typeMeta") ? { typeMeta: profile.typeMeta } : {}),
-      }, `Profile ${profileId}`);
+      }, `Profile ${profileId}`, parsed.version === 4);
       profiles[profileId] = {
         name: normalizeProfileName(profile.name, profileId),
         ...normalizeRules(profile),
@@ -622,7 +655,7 @@ function normalizeGlobalStore(parsed: Record<string, unknown> | undefined): Glob
       return invalidGlobalStore();
     }
     return {
-      version: 3,
+      version: 4,
       defaultProfile: requestedDefault,
       profiles,
       ...(retiredProfileIds.length > 0 ? { retiredProfileIds } : {}),
@@ -636,7 +669,7 @@ function normalizeGlobalStore(parsed: Record<string, unknown> | undefined): Glob
   }
   const legacyRules = normalizeRules(parsed);
   return {
-    version: 3,
+    version: 4,
     defaultProfile: DEFAULT_PROFILE_ID,
     profiles: {
       [DEFAULT_PROFILE_ID]: { name: DEFAULT_PROFILE_NAME, ...legacyRules },
@@ -649,7 +682,7 @@ function readGlobalStore(filePath = getGlobalModelRoutingPath()): GlobalModelRou
 }
 
 function normalizeProjectStore(parsed: Record<string, unknown> | undefined): ProjectModelRoutingStore {
-  if (parsed?.version === 3) {
+  if ((parsed?.version === 3 || parsed?.version === 4)) {
     assertKnownKeys(parsed, ["version", "activeProfile", "applyOverrides", "overrides"], "v3 project config");
     if (typeof parsed.applyOverrides !== "boolean"
       || !parsed.overrides
@@ -665,10 +698,10 @@ function normalizeProjectStore(parsed: Record<string, unknown> | undefined): Pro
       ? parsed.activeProfile.trim()
       : undefined;
     const overridesRecord = parsed.overrides as Record<string, unknown>;
-    validateV3Rules(overridesRecord, "project overrides");
+    validateV3Rules(overridesRecord, "project overrides", parsed.version === 4);
     const overrides = normalizeRules(overridesRecord);
     return {
-      version: 3,
+      version: 4,
       ...(activeProfile ? { activeProfile } : {}),
       applyOverrides: parsed.applyOverrides,
       overrides,
@@ -679,7 +712,7 @@ function normalizeProjectStore(parsed: Record<string, unknown> | undefined): Pro
   }
   const overrides = normalizeRules(parsed);
   return {
-    version: 3,
+    version: 4,
     applyOverrides: hasRules(overrides),
     overrides,
   };
@@ -963,7 +996,8 @@ function isPublishedWriteError(error: unknown): error is PublishedWriteError {
   return error instanceof PublishedWriteError;
 }
 
-function writeJson(filePath: string, value: unknown): void {
+function writeJson(filePath: string, value: unknown, content?: string): void {
+  if (content === "") { fs.rmSync(filePath, { force: true }); return; }
   const directoryPath = path.dirname(filePath);
   fs.mkdirSync(directoryPath, { recursive: true });
   const temporaryPath = `${filePath}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`;
@@ -971,7 +1005,7 @@ function writeJson(filePath: string, value: unknown): void {
   let published = false;
   try {
     handle = fs.openSync(temporaryPath, "wx", 0o600);
-    fs.writeFileSync(handle, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+    fs.writeFileSync(handle, content ?? `${JSON.stringify(value, null, 2)}\n`, "utf8");
     fs.fsyncSync(handle);
     fs.closeSync(handle);
     handle = undefined;
@@ -993,13 +1027,13 @@ function writeJson(filePath: string, value: unknown): void {
  * durability-sync failure, immediately restore the previous value so a failed single-file
  * commit cannot leave a published-but-unreported change on disk.
  */
-function writeJsonRestoringOnPublish(filePath: string, next: unknown, previous: unknown): void {
+function writeJsonRestoringOnPublish(filePath: string, next: unknown, previous: unknown, previousContent?: string, nextContent?: string): void {
   try {
-    writeJson(filePath, next);
+    writeJson(filePath, next, nextContent);
   } catch (error) {
     if (!isPublishedWriteError(error)) throw error;
     try {
-      writeJson(filePath, previous);
+      writeJson(filePath, previous, previousContent);
     } catch (restoreError) {
       throw new AggregateError(
         [error, restoreError],
@@ -1035,13 +1069,37 @@ function readTransaction(globalFilePath: string): ModelRoutingTransaction | unde
   const globalBeforeValue = requiredRecord(parsed.globalBefore, "globalBefore");
   const globalAfterValue = requiredRecord(parsed.globalAfter, "globalAfter");
   const projectAfterValue = requiredRecord(parsed.projectAfter, "projectAfter");
-  if (globalBeforeValue.version !== 3 || globalAfterValue.version !== 3 || projectAfterValue.version !== 3) {
+  if (![3, 4].includes(Number(globalBeforeValue.version)) || ![3, 4].includes(Number(globalAfterValue.version)) || ![3, 4].includes(Number(projectAfterValue.version))) {
     throw new Error("Invalid store version in teammate model transaction");
+  }
+  let content: ModelRoutingTransaction["content"];
+  if (parsed.content !== undefined) {
+    const raw = requiredRecord(parsed.content, "content");
+    if (typeof raw.globalBefore !== "string") throw new Error("Invalid transaction content");
+    content = { globalBefore: raw.globalBefore };
+    for (const key of ["globalAfter", "projectAfter"] as const) {
+      if (raw[key] !== undefined) {
+        if (typeof raw[key] !== "string") throw new Error("Invalid transaction content");
+        content[key] = raw[key];
+      }
+    }
+    for (const [key, normalized] of [
+      ["globalBefore", normalizeGlobalStore(globalBeforeValue)],
+      ["globalAfter", normalizeGlobalStore(globalAfterValue)],
+      ["projectAfter", normalizeProjectStore(projectAfterValue)],
+    ] as const) {
+      const text = content[key];
+      if (text === undefined) continue;
+      const value = text ? JSON.parse(text) : undefined;
+      const store = key === "projectAfter" ? normalizeProjectStore(value) : normalizeGlobalStore(value);
+      if (JSON.stringify(store) !== JSON.stringify(normalized)) throw new Error("Transaction content disagrees with store");
+    }
   }
   return {
     version: 1,
     mode: parsed.mode,
     projectFilePath,
+    ...(content ? { content } : {}),
     globalBefore: normalizeGlobalStore(globalBeforeValue),
     globalAfter: normalizeGlobalStore(globalAfterValue),
     projectAfter: normalizeProjectStore(projectAfterValue),
@@ -1062,13 +1120,13 @@ function recoverPendingTransactionLocked(globalFilePath: string): void {
   const transaction = readTransaction(globalFilePath);
   if (!transaction) return;
   if (transaction.mode === "rollback") {
-    writeJson(globalFilePath, transaction.globalBefore);
+    writeJson(globalFilePath, transaction.globalBefore, transaction.content?.globalBefore);
     removeTransaction(globalFilePath);
     return;
   }
   withConfigLock(transaction.projectFilePath, () => {
-    writeJson(globalFilePath, transaction.globalAfter);
-    writeJson(transaction.projectFilePath, transaction.projectAfter);
+    writeJson(globalFilePath, transaction.globalAfter, transaction.content?.globalAfter);
+    writeJson(transaction.projectFilePath, transaction.projectAfter, transaction.content?.projectAfter);
     removeTransaction(globalFilePath);
   });
 }
@@ -1079,6 +1137,7 @@ function writeGlobalAndProject(
   global: GlobalModelRoutingStore,
   projectFilePath: string,
   project: ProjectModelRoutingStore,
+  content?: ModelRoutingTransaction["content"],
 ): void {
   const journal: ModelRoutingTransaction = {
     version: 1,
@@ -1087,14 +1146,15 @@ function writeGlobalAndProject(
     globalBefore: originalGlobal,
     globalAfter: global,
     projectAfter: project,
+    ...(content ? { content } : {}),
   };
   writeJson(transactionPath(globalFilePath), journal);
   try {
-    writeJson(globalFilePath, global);
+    writeJson(globalFilePath, global, content?.globalAfter);
   } catch (error) {
     if (isPublishedWriteError(error)) {
       try {
-        writeJson(globalFilePath, global);
+        writeJson(globalFilePath, global, content?.globalAfter);
       } catch (retryError) {
         throw new AggregateError(
           [error, retryError],
@@ -1111,11 +1171,11 @@ function writeGlobalAndProject(
     }
   }
   try {
-    writeJson(projectFilePath, project);
+    writeJson(projectFilePath, project, content?.projectAfter);
   } catch (projectError) {
     if (isPublishedWriteError(projectError)) {
       try {
-        writeJson(projectFilePath, project);
+        writeJson(projectFilePath, project, content?.projectAfter);
       } catch (retryError) {
         throw new AggregateError(
           [projectError, retryError],
@@ -1130,7 +1190,7 @@ function writeGlobalAndProject(
         journalError = error;
       }
       try {
-        writeJson(globalFilePath, originalGlobal);
+        writeJson(globalFilePath, originalGlobal, content?.globalBefore);
         removeTransaction(globalFilePath);
       } catch (rollbackError) {
         throw new AggregateError(
@@ -1156,9 +1216,9 @@ function writeGlobalAndProject(
 
 function readSessionStore(filePath: string): SessionModelRoutingStore | undefined {
   const parsed = readJsonObject(filePath);
-  if (!parsed || parsed.version !== 3 || typeof parsed.sessionId !== "string") return undefined;
+  if (!parsed || (parsed.version !== 3 && parsed.version !== 4) || typeof parsed.sessionId !== "string") return undefined;
   return {
-    version: 3,
+    version: 4,
     sessionId: parsed.sessionId as string,
     createdAtMs: typeof parsed.createdAtMs === "number" && Number.isFinite(parsed.createdAtMs)
       ? parsed.createdAtMs
@@ -1183,7 +1243,7 @@ export function saveSessionModelRoutingOverrides(
   const sessionFilePath = getSessionModelRoutingPath(cwd, sessionId);
   return withConfigLock(sessionFilePath, () => {
     const store: SessionModelRoutingStore = {
-      version: 3,
+      version: 4,
       sessionId,
       createdAtMs: Date.now(),
       rules: normalizeRules(rules),
@@ -1220,7 +1280,7 @@ function resolvedState(
     global,
     project,
     config: {
-      version: 3,
+      version: 4,
       profileId,
       profileName: profile.name,
       projectOverridesEnabled: project.applyOverrides,
@@ -1386,6 +1446,7 @@ export function replaceModelRoutingStores(
   expected: ModelRoutingStorePair,
   next: ModelRoutingStorePair,
   expectedContent?: ModelRoutingStoreContentPair,
+  restoreContent?: ModelRoutingStoreContentPair,
 ): ModelRoutingStorePair {
   const resolvedProjectPath = path.resolve(projectFilePath);
   return withGlobalConfigLock(globalFilePath, () => withConfigLock(resolvedProjectPath, () => {
@@ -1415,11 +1476,12 @@ export function replaceModelRoutingStores(
         normalized.global,
         resolvedProjectPath,
         normalized.project,
+        { globalBefore: readConfigContent(globalFilePath), ...restoreContent && { globalAfter: restoreContent.global, projectAfter: restoreContent.project } },
       );
     } else if (globalChanged) {
-      writeJsonRestoringOnPublish(globalFilePath, normalized.global, current.global);
+      writeJsonRestoringOnPublish(globalFilePath, normalized.global, current.global, readConfigContent(globalFilePath), restoreContent?.global);
     } else if (projectChanged) {
-      writeJsonRestoringOnPublish(resolvedProjectPath, normalized.project, current.project);
+      writeJsonRestoringOnPublish(resolvedProjectPath, normalized.project, current.project, readConfigContent(resolvedProjectPath), restoreContent?.project);
     }
     return normalized;
   }));
@@ -1445,6 +1507,7 @@ export function discoverRoutingTaskTypes(
     ...Object.keys(config.mappings),
     ...Object.keys(config.fallbackMappings ?? {}),
     ...Object.keys(config.thinkingLevels),
+    ...Object.keys(config.fastModes ?? {}),
     ...Object.keys(config.typeMeta ?? {}),
   ]) {
     const normalized = parseTeammateTaskType(taskType);
@@ -1497,6 +1560,19 @@ export function saveProjectThinkingLevel(
   }, globalFilePath);
 }
 
+export function saveProjectFastMode(
+  cwd: string, taskType: TeammateTaskType, fast: boolean | null,
+  globalFilePath = getGlobalModelRoutingPath(),
+): ModelRoutingConfig {
+  const normalized = parseTeammateTaskType(taskType);
+  if (!normalized) throw new Error(`Invalid teammate task type: ${taskType}`);
+  if (fast !== null && typeof fast !== "boolean") throw new Error("Fast must be boolean or null");
+  return saveProjectOverride(cwd, (rules) => {
+    rules.fastModes ??= {};
+    rules.fastModes[normalized] = fast;
+  }, globalFilePath);
+}
+
 export function saveProjectModelMapping(
   cwd: string,
   taskType: TeammateTaskType,
@@ -1540,6 +1616,10 @@ function normalizeRoleRulesInput(rules: ModelRoutingRoleRules | null): ModelRout
       : [...new Set(rules.fallbackModels.map((model) => model.trim()).filter(Boolean))];
   }
   if (rules.thinking !== undefined) normalized.thinking = rules.thinking;
+  if (rules.fast !== undefined) {
+    if (rules.fast !== null && typeof rules.fast !== "boolean") throw new Error("Role Fast must be boolean or null");
+    normalized.fast = rules.fast;
+  }
   if (rules.taskType !== undefined) {
     if (rules.taskType === null) normalized.taskType = null;
     else {
@@ -1703,6 +1783,19 @@ export function saveGlobalProfileThinkingLevel(
   }, globalFilePath);
 }
 
+export function saveGlobalProfileFastMode(
+  cwd: string, profileId: string, taskType: TeammateTaskType, fast: boolean | null,
+  globalFilePath = getGlobalModelRoutingPath(),
+): ModelRoutingState {
+  const normalized = parseTeammateTaskType(taskType);
+  if (!normalized) throw new Error(`Invalid teammate task type: ${taskType}`);
+  if (fast !== null && typeof fast !== "boolean") throw new Error("Fast must be boolean or null");
+  return saveGlobalProfile(cwd, profileId, (profile) => {
+    profile.fastModes ??= {};
+    profile.fastModes[normalized] = fast;
+  }, globalFilePath);
+}
+
 export function saveGlobalProfileFallbackMapping(
   cwd: string,
   profileId: string,
@@ -1840,6 +1933,7 @@ export function deleteGlobalProfileCustomType(
     delete profile.mappings[normalizedTaskType];
     if (profile.fallbackMappings) delete profile.fallbackMappings[normalizedTaskType];
     if (profile.thinkingLevels) delete profile.thinkingLevels[normalizedTaskType];
+    if (profile.fastModes) delete profile.fastModes[normalizedTaskType];
     if (profile.typeMeta) delete profile.typeMeta[normalizedTaskType];
     if (profile.roleMappings) {
       for (const [role, rules] of Object.entries(profile.roleMappings)) {
@@ -2177,6 +2271,8 @@ export function applyModelRouting(
         agent,
         task: task.prompt,
       }, availableModels),
+      fast: task.fast ?? params.fast ?? (taskType ? config.fastModes?.[taskType] : undefined)
+        ?? roleRules(config, { agent })?.fast ?? agentConfig?.fast,
       thinking: parseTeammateThinkingLevel(task.thinking) ?? topLevelThinking ?? mappedThinking(config, {
         taskType,
         agent,

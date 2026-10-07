@@ -1,17 +1,3 @@
-/**
- * Cross-package registry for teammate child extensions and the authorities
- * (permission broker, child tool brokers, IPC proxy caller) that the parent
- * session contributes to child processes.
- *
- * Ownership model — read before adding an authority: the `owner` on
- * {@link RegisterTeammateAuthorityOptions} is a *collaboration convention*, not
- * a security boundary. It is a self-declared string that the registry cannot
- * authenticate: any module sharing this globalThis registry may claim any owner
- * key. Its purpose is to let one package replace its own prior generation on
- * reload while making an unrelated package's collision a loud error instead of
- * a silent takeover. Do not treat a matching owner as proof of identity; the
- * real trust boundary is which modules get loaded into the process at all.
- */
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 /** Environment marker carried only by independently managed workspace windows. */
@@ -56,10 +42,13 @@ export interface TeammatePermissionBrokerResult {
     updatedInput?: Record<string, unknown>;
 }
 export type TeammatePermissionBroker = (request: TeammatePermissionBrokerRequest, ctx: ExtensionContext) => Promise<TeammatePermissionBrokerResult>;
+export declare function resolvedRunLocation(requested: string | undefined, base: string): string;
 export interface TeammateChildToolActor {
     correlationId: string;
     name?: string;
     agent?: string;
+    /** Resolved task workspace from the parent's active-run registry, never IPC input. */
+    cwd?: string;
 }
 export interface TeammateChildToolBrokerRequest {
     toolName: string;
@@ -74,7 +63,7 @@ export interface TeammateChildToolResult {
     isError?: boolean;
 }
 export type TeammateChildToolBroker = (request: TeammateChildToolBrokerRequest) => Promise<TeammateChildToolResult>;
-export type TeammateChildProxyCaller = <T = unknown>(toolName: string, input: Record<string, unknown>, signal?: AbortSignal) => Promise<AgentToolResult<T>>;
+export type TeammateChildProxyCaller = <T = unknown>(toolName: string, input: Record<string, unknown>, signal?: AbortSignal, spawningToolCallId?: string) => Promise<AgentToolResult<T>>;
 /**
  * Registers an extension that must also be loaded by every teammate child.
  *
@@ -111,4 +100,4 @@ export declare function resolveTeammateChildToolBroker(toolName: string): Teamma
  * last-registration-wins behaviour for the package's own reload path.
  */
 export declare function registerTeammateChildProxyCaller(caller: TeammateChildProxyCaller, options?: RegisterTeammateAuthorityOptions): () => void;
-export declare function proxyTeammateChildTool<T = unknown>(toolName: string, input: Record<string, unknown>, signal?: AbortSignal): Promise<AgentToolResult<T>>;
+export declare function proxyTeammateChildTool<T = unknown>(toolName: string, input: Record<string, unknown>, signal?: AbortSignal, spawningToolCallId?: string): Promise<AgentToolResult<T>>;

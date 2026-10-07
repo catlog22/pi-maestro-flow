@@ -485,14 +485,14 @@ test("v1 routing configs migrate without losing models and thinking saves indepe
       mappings: { analysis: "openai/gpt-5", review: "anthropic/sonnet", testing: null },
     }));
     const migrated = loadModelRoutingConfig(cwd, globalPath);
-    assert.equal(migrated.version, 3);
+    assert.equal(migrated.version, 4);
     assert.equal(migrated.mappings.analysis, "openai/gpt-5");
     assert.equal(migrated.mappings.review, "anthropic/sonnet");
     assert.equal(migrated.mappings.testing, null);
 
     saveProjectThinkingLevel(cwd, "analysis", "high", globalPath);
     const persisted = JSON.parse(fs.readFileSync(getProjectModelRoutingPath(cwd), "utf8"));
-    assert.equal(persisted.version, 3);
+    assert.equal(persisted.version, 4);
     assert.equal(persisted.activeProfile, "default");
     assert.equal(persisted.applyOverrides, true);
     assert.deepEqual(persisted.overrides.mappings, {
@@ -523,7 +523,7 @@ test("legacy routing saves migrate valid custom task routes atomically", () => {
     saveProjectModelMapping(cwd, "analysis", "openai/gpt-5", globalPath);
     saveProjectThinkingLevel(cwd, "analysis", "high", globalPath);
     const persisted = JSON.parse(fs.readFileSync(configPath, "utf8"));
-    assert.equal(persisted.version, 3);
+    assert.equal(persisted.version, 4);
     assert.equal(persisted.applyOverrides, true);
     assert.equal(persisted.overrides.mappings.future, "future/model");
     assert.deepEqual(persisted.overrides.fallbackMappings.future, ["future/backup"]);
@@ -556,7 +556,7 @@ test("teammate model and thinking saves never mutate the original model configur
     assert.equal(fs.readFileSync(originalModelsPath, "utf8"), originalModels);
     assert.equal(fs.readFileSync(originalSettingsPath, "utf8"), originalSettings);
     assert.deepEqual(JSON.parse(fs.readFileSync(getProjectModelRoutingPath(cwd), "utf8")), {
-      version: 3,
+      version: 4,
       activeProfile: "default",
       applyOverrides: true,
       overrides: {
@@ -1250,7 +1250,7 @@ test("legacy project routing migrates as preserved overrides and can be promoted
     assert.deepEqual(cleared.project.overrides, { mappings: {}, thinkingLevels: {} });
     assert.equal(cleared.project.applyOverrides, false);
     const persistedGlobal = JSON.parse(fs.readFileSync(globalPath, "utf8"));
-    assert.equal(persistedGlobal.version, 3);
+    assert.equal(persistedGlobal.version, 4);
     assert.equal(persistedGlobal.profiles.default.mappings.analysis, "provider/global");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

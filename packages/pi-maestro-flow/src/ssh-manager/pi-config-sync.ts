@@ -7,6 +7,7 @@ import type { ClientChannel } from "ssh2";
 import {
   isModelRoutingProfileId,
   validateModelRoutingV3Rules,
+  validateModelRoutingV4Rules,
 } from "pi-maestro-teammate/v1/model-routing";
 import { SshExecutor } from "./executor.ts";
 import type { SshHost } from "./model.ts";
@@ -163,13 +164,16 @@ export function validatePiConfigShape(category: PiConfigCategory, value: unknown
   }
   if (category !== "teammate") return;
   if (Object.keys(value).some((key) => !["version", "defaultProfile", "profiles", "retiredProfileIds", "smartMode", "askBeforeDispatch"].includes(key))
-    || value.version !== 3 || !isModelRoutingProfileId(value.defaultProfile) || !isRecord(value.profiles) || !hasOwn(value.profiles, value.defaultProfile)) {
+    || (value.version !== 3 && value.version !== 4) || !isModelRoutingProfileId(value.defaultProfile) || !isRecord(value.profiles) || !hasOwn(value.profiles, value.defaultProfile)) {
     throw new Error("teammate configuration is invalid");
   }
   for (const [profileId, rawProfile] of Object.entries(value.profiles)) {
     if (!isModelRoutingProfileId(profileId) || !isRecord(rawProfile) || typeof rawProfile.name !== "string" || !rawProfile.name.trim()) throw new Error("teammate configuration is invalid");
     const { name: _name, ...rules } = rawProfile;
-    try { validateModelRoutingV3Rules(rules); } catch { throw new Error("teammate configuration is invalid"); }
+    try {
+      if (value.version === 4) validateModelRoutingV4Rules(rules);
+      else validateModelRoutingV3Rules(rules);
+    } catch { throw new Error("teammate configuration is invalid"); }
   }
   if (value.retiredProfileIds !== undefined && (!Array.isArray(value.retiredProfileIds)
     || new Set(value.retiredProfileIds).size !== value.retiredProfileIds.length

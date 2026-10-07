@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { PassThrough } from "node:stream";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   createTeammateDirectChildRequestHandler,
@@ -21,6 +23,7 @@ import {
   registerTeammateChildExtension,
   registerTeammateChildToolBroker,
   registerTeammatePermissionBroker,
+  resolvedRunLocation,
 } from "../src/runs/child-extensions.ts";
 import type { ActiveAgent, TeammateState } from "../src/shared/types.ts";
 
@@ -58,6 +61,46 @@ function createPi() {
   } as unknown as ExtensionAPI;
   return { pi, messages, events };
 }
+
+test("question broker workspace resolution is wired at root and nested task creation", async () => {
+  const base = resolve("workspace");
+  assert.equal(resolvedRunLocation(undefined, base), base);
+  assert.equal(resolvedRunLocation("child", base), resolve(base, "child"));
+  assert.equal(resolvedRunLocation("remote:worker", base), "remote:worker");
+  const root = await readFile(new URL("../src/extension/index.ts", import.meta.url), "utf8");
+  const nested = await readFile(new URL("../src/extension/teammate-proxy.ts", import.meta.url), "utf8");
+  assert.match(root, /cwd: resolvedRunLocation\(task\.cwd \?\? params\.cwd, state\.baseCwd \|\| ctx\.cwd\)/);
+  assert.match(nested, /cwd: normalizedTasks \? undefined : resolvedRunLocation\(singleTask\.cwd \?\? p\.cwd, dispatchOriginCwd\)/);
+  assert.match(nested, /cwd: resolvedRunLocation\(task\.cwd \?\? p\.cwd, dispatchOriginCwd\)/);
+});
+
+test("root question broker returns advisory decisions in headless mode using authoritative task cwd", async () => {
+  const { state, agent } = createState();
+  agent.cwd = "D:/workspace/child-project";
+  const { pi } = createPi();
+  const replies: unknown[] = [];
+  const decisions = [{ questionIndex: 0, question: "Which helper?", evaluation: { owner: "internal", advice: { recommendation: "Reuse helper" } } }];
+  const dispose = registerTeammateChildToolBroker("ask-user-question", async (request) => {
+    assert.equal(request.actor.cwd, agent.cwd);
+    assert.deepEqual(request.input, { questions: [{ question: "Which helper?" }] });
+    return { content: [{ type: "text", text: "Machine recommendation, not a user answer" }], details: { answers: [], decisions } };
+  });
+  try {
+    await handleChildInteractionRequest(pi, state, { requestId: "question-policy", interaction: "question", correlationId: agent.correlationId, payload: { questions: [{ question: "Which helper?" }], cwd: "D:/forged", decisions: [{ approved: true }] } }, (message) => replies.push(message), { hasUI: false } as ExtensionContext);
+    assert.deepEqual(replies, [{ type: "teammate_interaction_response", requestId: "question-policy", result: { action: "answer", answers: [], decisions } }]);
+  } finally { dispose(); }
+});
+
+test("unknown child cannot access root question broker", async () => {
+  const { state } = createState();
+  const { pi } = createPi();
+  const replies: unknown[] = [];
+  const dispose = registerTeammateChildToolBroker("ask-user-question", async () => { throw new Error("must not reach broker"); });
+  try {
+    await handleChildInteractionRequest(pi, state, { requestId: "question-unknown", interaction: "question", correlationId: "unknown", payload: { questions: [{ question: "Approve?" }] } }, (message) => replies.push(message), { hasUI: false } as ExtensionContext);
+    assert.deepEqual(replies, [{ type: "teammate_interaction_response", requestId: "question-unknown", result: { action: "cancel" } }]);
+  } finally { dispose(); }
+});
 
 test("teammate permission request is displayed, captured, and replied to", async () => {
   const { state, agent } = createState();

@@ -24,6 +24,7 @@ export declare const TaskSpec: Type.TObject<{
     model: Type.TOptional<Type.TString>;
     fallbackModels: Type.TOptional<Type.TArray<Type.TString>>;
     thinking: Type.TOptional<Type.TUnsafe<"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max">>;
+    fast: Type.TOptional<Type.TBoolean>;
     cwd: Type.TOptional<Type.TString>;
     placement: Type.TOptional<Type.TUnsafe<TeammatePlacementV1>>;
     outputSchema: Type.TOptional<Type.TUnsafe<Record<string, unknown>>>;
@@ -49,6 +50,7 @@ export declare const TeammateParams: Type.TObject<{
         model: Type.TOptional<Type.TString>;
         fallbackModels: Type.TOptional<Type.TArray<Type.TString>>;
         thinking: Type.TOptional<Type.TUnsafe<"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max">>;
+        fast: Type.TOptional<Type.TBoolean>;
         cwd: Type.TOptional<Type.TString>;
         placement: Type.TOptional<Type.TUnsafe<TeammatePlacementV1>>;
         outputSchema: Type.TOptional<Type.TUnsafe<Record<string, unknown>>>;
@@ -69,6 +71,7 @@ export declare const TeammateParams: Type.TObject<{
     model: Type.TOptional<Type.TString>;
     fallbackModels: Type.TOptional<Type.TArray<Type.TString>>;
     thinking: Type.TOptional<Type.TUnsafe<"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max">>;
+    fast: Type.TOptional<Type.TBoolean>;
     cwd: Type.TOptional<Type.TString>;
     placement: Type.TOptional<Type.TUnsafe<TeammatePlacementV1>>;
     timeoutMs: Type.TOptional<Type.TInteger>;

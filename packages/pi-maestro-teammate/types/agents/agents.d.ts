@@ -19,6 +19,7 @@ export interface AgentConfig {
     fallbackModels?: string[];
     taskType?: TeammateTaskType;
     thinking?: TeammateThinkingLevel;
+    fast?: boolean;
     systemPromptMode: SystemPromptMode;
     inheritProjectContext: boolean;
     inheritSkills: boolean;

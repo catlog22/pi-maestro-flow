@@ -215,6 +215,7 @@ import {
   getTeammateChildToolBroker,
   getTeammatePermissionBroker,
   registerTeammateChildProxyCaller,
+  resolvedRunLocation,
 } from "../runs/child-extensions.ts";
 import {
   markPermissionRequestAuditAdmission,
@@ -791,6 +792,7 @@ export async function dispatchRegisteredChildTool(
       correlationId,
       ...(active?.name ? { name: active.name } : {}),
       ...(active?.agent ? { agent: active.agent } : {}),
+      ...(active?.cwd ? { cwd: active.cwd } : {}),
     },
     ...(signal ? { signal } : {}),
   });
@@ -1434,6 +1436,7 @@ export async function handleProxyRequest(
           ? p.outputSchema !== undefined
           : singleTask.outputSchema !== undefined,
         replyTo: routedParams.reply_to,
+        cwd: normalizedTasks ? undefined : resolvedRunLocation(singleTask.cwd ?? p.cwd, dispatchOriginCwd),
         ...(normalizedTasks ? { progress: progressSnapshot() } : {}),
       };
       state.activeRuns.set(cid, activeAgent);
@@ -1912,6 +1915,7 @@ export async function handleProxyRequest(
           lease: createChildLease(),
           promptSeq: 1,
           expectsStructuredOutput: (task.outputSchema ?? p.outputSchema) !== undefined,
+          cwd: resolvedRunLocation(task.cwd ?? p.cwd, dispatchOriginCwd),
           ...(task.todos ? { todos: [...task.todos] } : {}),
         };
         state.activeRuns.set(childId, childAgent);

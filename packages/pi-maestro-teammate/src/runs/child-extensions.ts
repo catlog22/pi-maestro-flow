@@ -12,6 +12,7 @@
  * a silent takeover. Do not treat a matching owner as proof of identity; the
  * real trust boundary is which modules get loaded into the process at all.
  */
+import { isAbsolute, normalize, resolve } from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -91,10 +92,18 @@ export type TeammatePermissionBroker = (
   ctx: ExtensionContext,
 ) => Promise<TeammatePermissionBrokerResult>;
 
+export function resolvedRunLocation(requested: string | undefined, base: string): string {
+  if (!requested) return base;
+  if (requested.startsWith("remote:")) return requested;
+  return isAbsolute(requested) ? normalize(requested) : resolve(base, requested);
+}
+
 export interface TeammateChildToolActor {
   correlationId: string;
   name?: string;
   agent?: string;
+  /** Resolved task workspace from the parent's active-run registry, never IPC input. */
+  cwd?: string;
 }
 
 export interface TeammateChildToolBrokerRequest {
@@ -119,6 +128,7 @@ export type TeammateChildProxyCaller = <T = unknown>(
   toolName: string,
   input: Record<string, unknown>,
   signal?: AbortSignal,
+  spawningToolCallId?: string,
 ) => Promise<AgentToolResult<T>>;
 
 /**
@@ -301,12 +311,13 @@ export async function proxyTeammateChildTool<T = unknown>(
   toolName: string,
   input: Record<string, unknown>,
   signal?: AbortSignal,
+  spawningToolCallId?: string,
 ): Promise<AgentToolResult<T>> {
   const registry = getRegistry();
   // Prefer the owned registration; fall back to the legacy single slot so a
   // caller installed by an older package generation keeps working.
   const caller = [...registry.proxyCallers.values()].at(-1) ?? registry.proxyCaller;
-  if (caller) return caller<T>(toolName, input, signal);
+  if (caller) return caller<T>(toolName, input, signal, spawningToolCallId);
   return {
     content: [{ type: "text", text: `Parent IPC proxy is unavailable for child tool "${toolName}".` }],
     details: undefined as T,

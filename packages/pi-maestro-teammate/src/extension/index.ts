@@ -21,6 +21,7 @@ import type {
 import { VERSION as PI_VERSION } from "@earendil-works/pi-coding-agent";
 import { bindClassifierRuntime, unbindClassifierRuntime } from "../classify/engine.ts";
 import { modelOnlyControlTool } from "./native-tool-policy.ts";
+import { registerChildCodexFast } from "./child-codex-fast.ts";
 import { nativeChildBuiltinArgs, probePiChildVersion } from "../runs/native-child.ts";
 import { TEAMMATE_TOOL_EXECUTION_EVENT } from "../public/v1/events.ts";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
@@ -479,6 +480,7 @@ import {
   getTeammateChildToolBroker,
   getTeammatePermissionBroker,
   registerTeammateChildProxyCaller,
+  resolvedRunLocation,
 } from "../runs/child-extensions.ts";
 import { setQuietMode } from "pi-maestro-settings-core/ui";
 import {
@@ -724,12 +726,6 @@ function workspaceIdentityMatchesCwd(workspaceId: string, cwd: string): boolean 
   return workspaceId === identity.workspaceId || identity.legacyWorkspaceIds.includes(workspaceId);
 }
 
-function resolvedRunLocation(requested: string | undefined, base: string): string {
-  if (!requested) return base;
-  if (requested.startsWith("remote:")) return requested;
-  return isAbsolute(requested) ? normalize(requested) : resolve(base, requested);
-}
-
 function graphRunLocations(tasks: readonly { cwd?: string }[], base: string): string {
   const locations = [...new Set(tasks.map((task) => resolvedRunLocation(task.cwd, base)))];
   return locations.length === 1 ? locations[0]! : `graph · ${locations.length} locations`;
@@ -940,6 +936,7 @@ export default function registerTeammateExtension(
   // =========================================================================
 
   if (isChild) {
+    registerChildCodexFast(pi);
     const bridgeKey = Symbol.for("pi-maestro-teammate.child-handoff");
     interface ChildHandoffBridge {
       ctx?: ExtensionContext;
@@ -1231,8 +1228,8 @@ export default function registerTeammateExtension(
     }
 
     function installChildProxyCaller(): void {
-      unregisterChildProxyCaller ??= registerTeammateChildProxyCaller((toolName, input, signal) =>
-        proxyCall(toolName, input, signal)
+      unregisterChildProxyCaller ??= registerTeammateChildProxyCaller((toolName, input, signal, spawningToolCallId) =>
+        proxyCall(toolName, input, signal, spawningToolCallId)
       );
     }
 
@@ -4768,6 +4765,7 @@ export default function registerTeammateExtension(
             lease: createChildLease(),
             promptSeq: 1,
             expectsStructuredOutput: (task.outputSchema ?? params.outputSchema) !== undefined,
+            cwd: resolvedRunLocation(task.cwd ?? params.cwd, state.baseCwd || ctx.cwd),
             ...(task.todos ? { todos: [...task.todos] } : {}),
           };
           state.activeRuns.set(childId, childAgent);

@@ -10,6 +10,7 @@ export interface AgentFrontmatter {
     tools?: string;
     taskType?: string;
     thinking?: string;
+    fast?: string;
     systemPromptMode?: string;
     inheritProjectContext?: string;
     inheritSkills?: string;

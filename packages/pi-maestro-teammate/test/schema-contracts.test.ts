@@ -113,6 +113,108 @@ test("registered tool guard rejects original conditional violations before side 
   assert.equal(executed, 1);
 });
 
+test("observe conditional errors explain conflicting fields before side effects", async () => {
+  const targets = [{ kind: "teammate", id: "worker" }];
+  const workspace = [{ kind: "workspace", id: "owner:worker" }];
+  const cases: Array<{ params: Record<string, unknown>; reason: RegExp; monitorOnly?: boolean }> = [];
+  for (const action of ["status", "diagnose"]) {
+    for (const [field, value] of Object.entries({ timeoutMs: 600000, waitMode: "all", waitCount: 1, until: "completed" })) {
+      cases.push({ params: { action, targets, [field]: value }, reason: /omit waitMode, waitCount, until, and timeoutMs/ });
+    }
+  }
+  for (const [field, value] of Object.entries({ waitMode: "all", waitCount: 1, until: "completed" })) {
+    cases.push({ params: { action: "watch", targets, [field]: value }, reason: /omit waitMode, waitCount, and until/ });
+  }
+  cases.push(
+    { params: { action: "wait", targets, waitMode: "count" }, reason: /provide waitCount/ },
+    { params: { action: "wait", targets, waitCount: 1 }, reason: /waitCount requires action="wait" and waitMode="count"/ },
+    { params: { action: "wait", targets, waitMode: "all", waitCount: 1 }, reason: /waitCount requires action="wait" and waitMode="count"/ },
+    { params: { action: "status", targets, turn: 1 }, reason: /turn requires view="turns" and action="status"/ },
+    { params: { action: "status", targets, view: "live", turn: 1 }, reason: /turn requires view="turns"/ },
+  );
+  for (const action of ["wait", "watch", "diagnose"]) {
+    cases.push({ params: { action, targets, view: "turns" }, reason: /view="turns" requires action="status"/ });
+  }
+  for (const action of ["wait", "diagnose"]) {
+    cases.push(
+      { params: { action, targets: workspace, view: "session" }, reason: /view="session" requires action="status" or "watch"/, monitorOnly: true },
+      { params: { action, targets: workspace, view: "todos" }, reason: /view="todos" requires action="status" or "watch"/, monitorOnly: true },
+    );
+  }
+  cases.push(
+    { params: { action: "status", targets, view: "todos" }, reason: /every target must have kind="workspace"/, monitorOnly: true },
+    { params: { action: "status", targets: [...workspace, ...targets], view: "todos" }, reason: /every target must have kind="workspace"/, monitorOnly: true },
+    { params: { action: "status", targets: [{ ...workspace[0], cursor: "cursor-1" }] }, reason: /target.cursor requires view="session"/, monitorOnly: true },
+  );
+  for (const schema of [ObserveParams, LocalObserveParams]) {
+    let executed = 0;
+    const tool = projectConditionalTeammateTool({
+      name: "observe", label: "observe", description: "observe", parameters: schema,
+      async execute() { executed++; return { content: [], details: {} }; },
+    });
+    for (const { params, reason, monitorOnly } of cases) {
+      if (monitorOnly && schema === LocalObserveParams) continue;
+      assert.equal(Check(tool.parameters, params), true, "flattened schema accepts the field shapes");
+      const result = await tool.execute("call", params as never, undefined, undefined, {} as never);
+      assert.equal((result as typeof result & { isError?: boolean }).isError, true);
+      const message = result.content[0]?.type === "text" ? result.content[0].text : "";
+      assert.match(message, reason, JSON.stringify(params));
+      assert.doesNotMatch(message, /must match "then" schema/);
+      assert.equal(executed, 0);
+    }
+    const invalidField = await tool.execute("call", { action: "status", targets: [] } as never, undefined, undefined, {} as never);
+    assert.match(invalidField.content[0]?.type === "text" ? invalidField.content[0].text : "", /at \/targets: must not have fewer than 1 items/);
+  }
+});
+
+test("observe guard forwards valid arguments unchanged", async () => {
+  const targets = [{ kind: "teammate", id: "worker" }];
+  const workspace = [{ kind: "workspace", id: "owner:worker" }];
+  const local = [
+    { action: "status", targets },
+    { action: "diagnose", targets },
+    { action: "watch", targets, timeoutMs: 100 },
+    { action: "wait", targets, until: "completed", timeoutMs: 100 },
+    { action: "wait", targets, waitMode: "count", waitCount: 1 },
+    { action: "status", targets, view: "turns", turn: 1 },
+  ];
+  const monitor = [
+    { action: "status", targets: workspace, view: "session" },
+    { action: "watch", targets: [{ ...workspace[0], cursor: "cursor-1" }], view: "session", timeoutMs: 100 },
+    { action: "status", targets: workspace, view: "todos" },
+    { action: "watch", targets: workspace, view: "todos", timeoutMs: 100 },
+  ];
+  for (const schema of [ObserveParams, LocalObserveParams]) {
+    let received: unknown;
+    const tool = projectConditionalTeammateTool({
+      name: "observe", label: "observe", description: "observe", parameters: schema,
+      async execute(_id, params) { received = params; return { content: [], details: {} }; },
+    });
+    for (const params of [...local, ...(schema === ObserveParams ? monitor : [])]) {
+      const result = await tool.execute("call", params as never, undefined, undefined, {} as never);
+      assert.equal((result as typeof result & { isError?: boolean }).isError, undefined);
+      assert.equal(received, params);
+    }
+  }
+});
+
+test("observe advertised fields preserve conditional usage guidance", () => {
+  for (const schema of [ObserveParams, LocalObserveParams]) {
+    const advertised = projectConditionalTeammateTool({
+      name: "observe", label: "observe", description: "observe", parameters: schema,
+      async execute() { return { content: [], details: {} }; },
+    }).parameters;
+    const fields = (advertised as TSchema & { properties: Record<string, { description?: string }> }).properties;
+    assert.match(fields.action.description ?? "", /neither accepts timeoutMs, waitMode, waitCount, or until/);
+    assert.match(fields.timeoutMs.description ?? "", /Omit for status and diagnose/);
+    assert.match(fields.waitMode.description ?? "", /"count" requires waitCount/);
+    assert.match(fields.waitCount.description ?? "", /action="wait" and waitMode="count"/);
+    assert.match(fields.until.description ?? "", /Omit for status, diagnose, and watch/);
+    assert.match(fields.view.description ?? "", /(?:action="status" only|requires action="status")/);
+    assert.match(fields.turn.description ?? "", /requires view="turns" and action="status"/);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // maxNestingDepth bounds (P1/B1): schema rejects out-of-range values at the
 // parameter layer instead of failing only at normalize/runtime.

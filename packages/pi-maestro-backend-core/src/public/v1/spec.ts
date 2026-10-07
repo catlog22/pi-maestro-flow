@@ -58,6 +58,8 @@ export interface TeammateRunSpec {
   /** The single model for this attempt; the host owns the fallback sequence. */
   model?: string;
   thinking?: ThinkingLevel;
+  /** Opt-in Codex priority tier; implemented only by the local Pi driver. */
+  fast?: boolean;
   /** Working directory, already resolved against the host's base cwd. */
   cwd?: string;
   outputSchema?: Record<string, unknown>;

@@ -21,6 +21,7 @@ export interface ModelRoutingRoleRules {
     model?: string | null;
     fallbackModels?: string[] | null;
     thinking?: TeammateThinkingLevel | null;
+    fast?: boolean | null;
     /** Per-role circuit breaker policy applied to the role's mapped model. */
     circuit?: ModelCircuitPolicy | null;
     /** Legacy persisted metadata. Task types only affect routing when supplied by the dispatch. */
@@ -35,6 +36,7 @@ export interface ModelRoutingRules {
     mappings: Partial<Record<TeammateTaskType, string | null>>;
     fallbackMappings?: Partial<Record<TeammateTaskType, string[] | null>>;
     thinkingLevels: Partial<Record<TeammateTaskType, TeammateThinkingLevel | null>>;
+    fastModes?: Partial<Record<TeammateTaskType, boolean | null>>;
     roleMappings?: Record<string, ModelRoutingRoleRules | null>;
     /** Trigger-keyword metadata per task type; `null` clears an override. */
     typeMeta?: Record<string, ModelRoutingTypeMeta | null>;
@@ -45,7 +47,7 @@ export interface ModelRoutingProfile extends ModelRoutingRules {
 export declare const TEAMMATE_SMART_MODES: readonly ["off", "economy", "balanced", "sota"];
 export type TeammateSmartMode = typeof TEAMMATE_SMART_MODES[number];
 export interface GlobalModelRoutingStore {
-    version: 3;
+    version: 4;
     defaultProfile: string;
     profiles: Record<string, ModelRoutingProfile>;
     retiredProfileIds?: string[];
@@ -57,13 +59,13 @@ export interface GlobalModelRoutingStore {
     backgroundStatusHeartbeatMs?: number;
 }
 export interface ProjectModelRoutingStore {
-    version: 3;
+    version: 4;
     activeProfile?: string;
     applyOverrides: boolean;
     overrides: ModelRoutingRules;
 }
 export interface ModelRoutingConfig extends ModelRoutingRules {
-    version: 3;
+    version: 4;
     profileId: string;
     profileName: string;
     projectOverridesEnabled: boolean;
@@ -95,13 +97,15 @@ export declare function getProjectModelRoutingPath(cwd: string): string;
  */
 export declare function getSessionModelRoutingPath(cwd: string, sessionId: string): string;
 export interface SessionModelRoutingStore {
-    version: 3;
+    version: 4;
     sessionId: string;
     createdAtMs: number;
     rules: ModelRoutingRules;
 }
 /** Validate the canonical persisted V3 routing-rules grammar without normalizing it. */
 export declare function validateModelRoutingV3Rules(value: unknown): asserts value is ModelRoutingRules;
+/** Validate the V4 independent Fast routing map and role overrides. */
+export declare function validateModelRoutingV4Rules(value: unknown): asserts value is ModelRoutingRules;
 /** Return whether a value is a canonical 1..48 character V3 routing profile ID. */
 export declare function isModelRoutingProfileId(value: unknown): value is string;
 /**
@@ -140,11 +144,12 @@ export interface ModelRoutingStoreContentPair {
 /** @internal Shared persistence bridge for the unified Settings provider. */
 export declare function loadModelRoutingStores(globalFilePath: string, projectFilePath: string): ModelRoutingStorePair;
 /** @internal Publish a prepared Settings transaction through the routing lock/journal protocol. */
-export declare function replaceModelRoutingStores(globalFilePath: string, projectFilePath: string, expected: ModelRoutingStorePair, next: ModelRoutingStorePair, expectedContent?: ModelRoutingStoreContentPair): ModelRoutingStorePair;
+export declare function replaceModelRoutingStores(globalFilePath: string, projectFilePath: string, expected: ModelRoutingStorePair, next: ModelRoutingStorePair, expectedContent?: ModelRoutingStoreContentPair, restoreContent?: ModelRoutingStoreContentPair): ModelRoutingStorePair;
 export declare function discoverRoutingTaskTypes(cwd: string, _agents?: readonly {
     taskType?: TeammateTaskType;
 }[], loadedConfig?: ModelRoutingConfig): TeammateTaskType[];
 export declare function saveProjectThinkingLevel(cwd: string, taskType: TeammateTaskType, thinking: TeammateThinkingLevel | null, globalFilePath?: string): ModelRoutingConfig;
+export declare function saveProjectFastMode(cwd: string, taskType: TeammateTaskType, fast: boolean | null, globalFilePath?: string): ModelRoutingConfig;
 export declare function saveProjectModelMapping(cwd: string, taskType: TeammateTaskType, model: string | null, globalFilePath?: string): ModelRoutingConfig;
 export declare function saveProjectFallbackMapping(cwd: string, taskType: TeammateTaskType, models: string[] | null, globalFilePath?: string): ModelRoutingConfig;
 export declare function saveProjectRoleMapping(cwd: string, role: string, rules: ModelRoutingRoleRules | null, globalFilePath?: string): ModelRoutingConfig;
@@ -161,6 +166,7 @@ export declare function listModelRoutingProfiles(cwd: string, globalFilePath?: s
 export declare function resolveModelRoutingProfile(cwd: string, reference: string, globalFilePath?: string): ModelRoutingProfileSummary;
 export declare function saveGlobalProfileModelMapping(cwd: string, profileId: string, taskType: TeammateTaskType, model: string | null, globalFilePath?: string): ModelRoutingState;
 export declare function saveGlobalProfileThinkingLevel(cwd: string, profileId: string, taskType: TeammateTaskType, thinking: TeammateThinkingLevel | null, globalFilePath?: string): ModelRoutingState;
+export declare function saveGlobalProfileFastMode(cwd: string, profileId: string, taskType: TeammateTaskType, fast: boolean | null, globalFilePath?: string): ModelRoutingState;
 export declare function saveGlobalProfileFallbackMapping(cwd: string, profileId: string, taskType: TeammateTaskType, models: string[] | null, globalFilePath?: string): ModelRoutingState;
 export declare function saveGlobalProfileRoleMapping(cwd: string, profileId: string, role: string, rules: ModelRoutingRoleRules | null, globalFilePath?: string): ModelRoutingState;
 /** Atomically assign a task type to the requested roles and clear stale assignments to that type. */

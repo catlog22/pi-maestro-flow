@@ -61,7 +61,7 @@ test("Teammate provider exposes model, fallback and thinking routing per task ty
     const description = await provider.describe({ context: context(root) });
     assert.equal(description.id, "pi-maestro-teammate");
     assert.equal(description.capabilities.rollback, "compensating");
-    assert.equal(description.settings.filter((setting) => setting.group === "routing.analysis").length, 3);
+    assert.equal(description.settings.filter((setting) => setting.group === "routing.analysis").length, 4);
     assert.ok(description.settings.some((setting) => setting.key === "routing.analysis.model" && setting.editor.kind === "model"));
     assert.ok(description.settings.some((setting) => setting.key === "routing.testing.thinking" && setting.editor.kind === "enum"));
     const keys = new Set(description.settings.flatMap((entry) => [

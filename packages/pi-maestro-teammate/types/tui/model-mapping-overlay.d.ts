@@ -57,7 +57,7 @@ export interface TeammateControlCenterOptions {
     locale?: SupportedSettingsLocale;
 }
 interface LegacyControlCenterConfig extends ModelRoutingRules {
-    version: 2 | 3;
+    version: 2 | 3 | 4;
     profileId?: string;
     profileName?: string;
     projectOverridesEnabled?: boolean;
@@ -86,6 +86,7 @@ interface TeammateControlCenterParams {
     close: (action: ControlCenterAction | null) => void;
     saveMapping?: (taskType: TeammateTaskType, model: string | null) => void;
     saveThinking?: (taskType: TeammateTaskType, thinking: TeammateThinkingLevel | null) => void;
+    saveFast?: (taskType: TeammateTaskType, fast: boolean | null) => void;
     saveFallbacks?: (taskType: TeammateTaskType, models: string[] | null) => void;
     saveRoleRules?: (role: string, rules: ModelRoutingRoleRules | null) => void;
     saveTypeRoles?: (taskType: TeammateTaskType, roles: readonly string[]) => void;
@@ -187,6 +188,8 @@ export declare class TeammateControlCenter implements Component, Focusable {
     private modelPickerItems;
     private modelItems;
     private roleModelItems;
+    private fastValue;
+    private fastPickerItems;
     private thinkingPickerItems;
     private thinkingItems;
     private roleThinkingItems;

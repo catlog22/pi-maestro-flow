@@ -95,7 +95,8 @@
       "./src/advisor/extension.ts",
       "./src/self-evolve/extension.ts",
       "./src/submit-gate/extension.ts",
-      "./src/classifier/extension.ts"
+      "./src/classifier/extension.ts",
+      "./src/providers/codex-fast.ts"
     ],
     "skills": [
       "./.pi/skills"

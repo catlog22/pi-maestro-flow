@@ -55,7 +55,7 @@ function active(id: string, status: ControlCenterActiveAgent["status"] = "runnin
 function profileState(overridesEnabled = false): ModelRoutingState {
   return {
     global: {
-      version: 3,
+      version: 4,
       defaultProfile: "balanced",
       profiles: {
         balanced: {
@@ -72,13 +72,13 @@ function profileState(overridesEnabled = false): ModelRoutingState {
       },
     },
     project: {
-      version: 3,
+      version: 4,
       activeProfile: "fast",
       applyOverrides: overridesEnabled,
       overrides: { mappings: { explore: "anthropic/sonnet" }, thinkingLevels: {} },
     },
     config: {
-      version: 3,
+      version: 4,
       profileId: "fast",
       profileName: "Fast",
       projectOverridesEnabled: overridesEnabled,

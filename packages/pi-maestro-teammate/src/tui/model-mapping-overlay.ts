@@ -37,6 +37,7 @@ import {
   saveGlobalProfileRoleMapping,
   saveGlobalProfileTypeRoles,
   saveGlobalProfileThinkingLevel,
+  saveGlobalProfileFastMode,
   saveGlobalProfileCustomType,
   saveGlobalProfileTypeMeta,
   saveProjectFallbackMapping,
@@ -135,7 +136,7 @@ export interface TeammateControlCenterOptions {
 }
 
 interface LegacyControlCenterConfig extends ModelRoutingRules {
-  version: 2 | 3;
+  version: 2 | 3 | 4;
   profileId?: string;
   profileName?: string;
   projectOverridesEnabled?: boolean;
@@ -165,6 +166,7 @@ interface TeammateControlCenterParams {
   close: (action: ControlCenterAction | null) => void;
   saveMapping?: (taskType: TeammateTaskType, model: string | null) => void;
   saveThinking?: (taskType: TeammateTaskType, thinking: TeammateThinkingLevel | null) => void;
+  saveFast?: (taskType: TeammateTaskType, fast: boolean | null) => void;
   saveFallbacks?: (taskType: TeammateTaskType, models: string[] | null) => void;
   saveRoleRules?: (role: string, rules: ModelRoutingRoleRules | null) => void;
   saveTypeRoles?: (taskType: TeammateTaskType, roles: readonly string[]) => void;
@@ -303,6 +305,7 @@ function rulesFromProfile(profile: ModelRoutingProfile): ModelRoutingRules {
       ])),
     } : {}),
     thinkingLevels: { ...profile.thinkingLevels },
+    ...(profile.fastModes ? { fastModes: { ...profile.fastModes } } : {}),
     ...(profile.roleMappings ? { roleMappings: { ...profile.roleMappings } } : {}),
     ...(profile.typeMeta ? { typeMeta: { ...profile.typeMeta } } : {}),
   };
@@ -316,14 +319,15 @@ function stateFromLegacyConfig(config?: LegacyControlCenterConfig): ModelRouting
     mappings: { ...config?.mappings },
     ...(config?.fallbackMappings ? { fallbackMappings: { ...config.fallbackMappings } } : {}),
     thinkingLevels: { ...config?.thinkingLevels },
+    ...(config?.fastModes ? { fastModes: { ...config.fastModes } } : {}),
     ...(config?.roleMappings ? { roleMappings: { ...config.roleMappings } } : {}),
     ...(config?.typeMeta ? { typeMeta: { ...config.typeMeta } } : {}),
   };
   return {
-    global: { version: 3, defaultProfile: profileId, profiles: { [profileId]: profile } },
-    project: { version: 3, activeProfile: profileId, applyOverrides: false, overrides: { mappings: {}, thinkingLevels: {} } },
+    global: { version: 4, defaultProfile: profileId, profiles: { [profileId]: profile } },
+    project: { version: 4, activeProfile: profileId, applyOverrides: false, overrides: { mappings: {}, thinkingLevels: {} } },
     config: {
-      version: 3,
+      version: 4,
       profileId,
       profileName,
       projectOverridesEnabled: config?.projectOverridesEnabled ?? false,
@@ -340,6 +344,7 @@ function ruleCount(profile: ModelRoutingProfile): number {
     ...Object.keys(profile.mappings),
     ...Object.keys(profile.fallbackMappings ?? {}),
     ...Object.keys(profile.thinkingLevels),
+    ...Object.keys(profile.fastModes ?? {}),
     ...Object.keys(profile.roleMappings ?? {}),
     ...Object.keys(profile.typeMeta ?? {}),
   ]).size;
@@ -349,6 +354,7 @@ function hasRoutingRules(rules: ModelRoutingRules): boolean {
   return Object.keys(rules.mappings).length > 0
     || Object.keys(rules.fallbackMappings ?? {}).length > 0
     || Object.keys(rules.thinkingLevels).length > 0
+    || Object.keys(rules.fastModes ?? {}).length > 0
     || Object.keys(rules.roleMappings ?? {}).length > 0
     || Object.keys(rules.typeMeta ?? {}).length > 0;
 }
@@ -358,7 +364,7 @@ export class TeammateControlCenter implements Component, Focusable {
   private tab: ControlCenterTab;
   private modelTaskType: TeammateTaskType | null = null;
   private modelRole: string | null = null;
-  private editorKind: "menu" | "model" | "thinking" | "fallback" | "circuit" | "type" | "roles" = "menu";
+  private editorKind: "menu" | "model" | "thinking" | "fast" | "fallback" | "circuit" | "type" | "roles" = "menu";
   private circuitCustomMode = false;
   private readonly roleAssignmentDraft = new Set<string>();
   private customTypeInput = false;
@@ -407,7 +413,7 @@ export class TeammateControlCenter implements Component, Focusable {
     const activeProfile = this.state.global.profiles[this.state.config.profileId];
     const activeRules = rulesFromProfile(activeProfile);
     this.config = {
-      version: 3,
+      version: 4,
       profileId: this.state.config.profileId,
       profileName: activeProfile.name,
       projectOverridesEnabled: this.state.project.applyOverrides,
@@ -430,6 +436,7 @@ export class TeammateControlCenter implements Component, Focusable {
       ...Object.keys(activeProfile.mappings),
       ...Object.keys(activeProfile.fallbackMappings ?? {}),
       ...Object.keys(activeProfile.thinkingLevels),
+      ...Object.keys(activeProfile.fastModes ?? {}),
       ...Object.keys(activeProfile.typeMeta ?? {}),
     ];
     this.taskTypes = [...new Set([...discoveredTaskTypes, ...profileTaskTypes])];
@@ -840,6 +847,10 @@ export class TeammateControlCenter implements Component, Focusable {
           active: Boolean(rules?.circuit),
           unavailable: false,
         },
+        {
+          value: "fast", label: this.t("model.setting.fast"),
+          detail: this.fastValue(rules?.fast), active: rules?.fast != null, unavailable: false,
+        },
       ];
     }
     if (!taskType) return [];
@@ -875,6 +886,11 @@ export class TeammateControlCenter implements Component, Focusable {
         active: keywords.length > 0,
         unavailable: false,
       },
+      {
+        value: "fast", label: this.t("model.setting.fast"),
+        detail: this.fastValue(this.config.fastModes?.[taskType]),
+        active: this.config.fastModes?.[taskType] != null, unavailable: false,
+      },
     ];
   }
 
@@ -885,7 +901,7 @@ export class TeammateControlCenter implements Component, Focusable {
   }
 
   private openSelectedSetting(): void {
-    const target = this.settingsMenuItems()[this.modelSelected]?.value;
+    const target = this.filteredEditorItems()[this.modelSelected]?.value;
     const role = this.modelRole;
     const taskType = this.modelTaskType;
     if (!target || (!role && !taskType)) return;
@@ -897,7 +913,7 @@ export class TeammateControlCenter implements Component, Focusable {
       this.params.requestRender();
       return;
     }
-    this.editorKind = target as "model" | "thinking" | "fallback" | "circuit" | "type" | "roles";
+    this.editorKind = target as "model" | "thinking" | "fast" | "fallback" | "circuit" | "type" | "roles";
     if (target === "fallback") {
       this.fallbackDraft = role
         ? [...(this.roleRules(role)?.fallbackModels ?? [])]
@@ -1081,7 +1097,11 @@ export class TeammateControlCenter implements Component, Focusable {
             const existing = this.roleRules(role) ?? {};
             let rules: ModelRoutingRoleRules;
             let savedText: string;
-            if (editorKind === "thinking") {
+            if (editorKind === "fast") {
+              const fast = item.value === "__auto__" ? null : item.value === "on";
+              rules = { ...existing, fast };
+              savedText = this.fastValue(fast);
+            } else if (editorKind === "thinking") {
               const thinking = item.value === "__auto__" ? null : item.value as TeammateThinkingLevel;
               rules = { ...existing, thinking };
               savedText = thinking ?? this.t("model.route.inheritThinking");
@@ -1114,7 +1134,13 @@ export class TeammateControlCenter implements Component, Focusable {
             return;
           }
           const value = item.value === "__auto__" ? null : item.value;
-          if (editorKind === "thinking") {
+          if (editorKind === "fast") {
+            const fast = value === null ? null : value === "on";
+            if (this.params.saveFast) this.params.saveFast(taskType as TeammateTaskType, fast);
+            else saveGlobalProfileFastMode(this.params.cwd, this.config.profileId, taskType as TeammateTaskType, fast, this.params.globalFilePath);
+            this.config.fastModes ??= {};
+            this.config.fastModes[taskType as TeammateTaskType] = fast;
+          } else if (editorKind === "thinking") {
             const thinking = value as TeammateThinkingLevel | null;
             if (this.params.saveThinking) this.params.saveThinking(taskType as TeammateTaskType, thinking);
             else saveGlobalProfileThinkingLevel(this.params.cwd, this.config.profileId, taskType as TeammateTaskType, thinking, this.params.globalFilePath);
@@ -1129,7 +1155,7 @@ export class TeammateControlCenter implements Component, Focusable {
           this.statusText = this.t("model.saved", {
             target: taskType as TeammateTaskType,
             kind: this.editorSaveLabel(),
-            value: value ?? (editorKind === "thinking"
+            value: editorKind === "fast" ? this.fastValue(value === null ? null : value === "on") : value ?? (editorKind === "thinking"
               ? this.t("model.route.inheritThinking")
               : this.t("model.route.autoMain")),
           });
@@ -1504,6 +1530,7 @@ export class TeammateControlCenter implements Component, Focusable {
         delete this.config.mappings[taskType];
         if (this.config.fallbackMappings) delete this.config.fallbackMappings[taskType];
         if (this.config.thinkingLevels) delete this.config.thinkingLevels[taskType];
+        if (this.config.fastModes) delete this.config.fastModes[taskType];
         if (this.config.typeMeta) delete this.config.typeMeta[taskType];
         this.refreshTaskTypes();
         this.selected.routing = clampIndex(this.selected.routing, this.filteredTaskTypes().length);
@@ -1527,6 +1554,7 @@ export class TeammateControlCenter implements Component, Focusable {
   }
 
   private editorSaveLabel(): string {
+    if (this.editorKind === "fast") return this.t("model.setting.fast");
     if (this.editorKind === "thinking") return this.t("model.kind.thinking");
     if (this.editorKind === "circuit") return this.t("model.kind.circuit");
     if (this.editorKind === "type") return this.t("model.kind.type");
@@ -1642,6 +1670,7 @@ export class TeammateControlCenter implements Component, Focusable {
   private editorLabel(): string {
     if (this.editorKind === "menu") return this.t("model.editor.settings");
     if (this.editorKind === "fallback") return this.t("model.editor.fallback");
+    if (this.editorKind === "fast") return this.t("model.setting.fast");
     if (this.editorKind === "thinking") return this.t("model.editor.thinking");
     if (this.editorKind === "circuit") return this.t("model.editor.circuit");
     if (this.editorKind === "type") return this.t("model.editor.type");
@@ -1859,6 +1888,18 @@ export class TeammateControlCenter implements Component, Focusable {
     return this.modelPickerItems(this.roleRules(role)?.model ?? undefined, `@${role}`);
   }
 
+  private fastValue(fast: boolean | null | undefined): string {
+    return this.t(fast == null ? "model.fast.inherit" : fast ? "model.fast.on" : "model.fast.off");
+  }
+
+  private fastPickerItems(configured: boolean | null | undefined) {
+    return [null, true, false].map((fast) => ({
+      value: fast === null ? "__auto__" : fast ? "on" : "off",
+      label: this.fastValue(fast), detail: this.t("model.fast.detail"),
+      active: (configured ?? null) === fast, unavailable: false,
+    }));
+  }
+
   private thinkingPickerItems(configured: TeammateThinkingLevel | undefined, routedModel: string | undefined, ownerLabel: string) {
     const items = [{
       value: "__auto__",
@@ -1953,6 +1994,8 @@ export class TeammateControlCenter implements Component, Focusable {
     if (!role && !taskType) return [];
     const items = this.editorKind === "menu"
       ? this.settingsMenuItems()
+      : this.editorKind === "fast"
+        ? this.fastPickerItems(role ? this.roleRules(role)?.fast : this.config.fastModes?.[taskType as TeammateTaskType])
       : this.editorKind === "thinking"
         ? (role ? this.roleThinkingItems(role) : this.thinkingItems(taskType as TeammateTaskType))
         : this.editorKind === "fallback"
@@ -2257,6 +2300,7 @@ export class TeammateControlCenter implements Component, Focusable {
           value: unhealthy.map((entry) => `${displayText(entry.model)} ${entry.health.state}`).join(", "),
         })));
       }
+      lines.push(this.params.theme.fg("dim", `${this.t("model.setting.fast")}: ${this.fastValue(this.config.fastModes?.[taskType])}`));
       lines.push(this.params.theme.fg("dim", this.t("model.thinkingValue", {
         thinking: displayText(this.config.thinkingLevels[taskType] ?? this.t("model.route.inheritThinking")),
       })));
@@ -2285,6 +2329,7 @@ export class TeammateControlCenter implements Component, Focusable {
       const effectiveModel = roleRules?.model ?? agent.model;
       const effectiveFallbacks = roleRules?.fallbackModels ?? agent.fallbackModels;
       const effectiveThinking = roleRules?.thinking ?? agent.thinking;
+      lines.push(this.params.theme.fg("dim", `${this.t("model.setting.fast")}: ${this.fastValue(roleRules?.fast ?? agent.fast)}`));
       const modelSource = roleRules?.model
         ? this.t("model.source.roleOverride")
         : agent.model

@@ -105,6 +105,7 @@ export const TaskSpec = Type.Object({
     }),
   ),
   thinking: Type.Optional(ThinkingLevel),
+  fast: Type.Optional(Type.Boolean({ description: "Codex Fast priority tier (may consume more quota). Pi openai-codex only; false disables, omitted inherits routing/project defaults." })),
   cwd: Type.Optional(
     Type.String({ description: "Working directory for this task" }),
   ),
@@ -282,6 +283,7 @@ export const TeammateParams = Type.Object({
     }),
   ),
   thinking: Type.Optional(ThinkingLevel),
+  fast: Type.Optional(Type.Boolean({ description: "Codex Fast priority tier (may consume more quota). Pi openai-codex only; false disables, omitted inherits routing/project defaults." })),
 
   cwd: Type.Optional(
     Type.String({
@@ -474,7 +476,7 @@ export const ObserveParams = Type.Object({
     type: "string",
     enum: ["status", "diagnose", "wait", "watch"],
     description:
-      '"status" takes a one-shot snapshot; "diagnose" adds canonical runtime diagnosis; "wait" blocks on a multi-target barrier; "watch" polls until timeoutMs and returns the full status-transition timeline.',
+      '"status" takes a one-shot snapshot; "diagnose" adds canonical runtime diagnosis; neither accepts timeoutMs, waitMode, waitCount, or until. "wait" blocks on a multi-target barrier; "watch" polls until timeoutMs and returns the full status-transition timeline, but accepts no waitMode, waitCount, or until.',
   }),
   targets: Type.Array(
     Type.Object({
@@ -483,7 +485,7 @@ export const ObserveParams = Type.Object({
       cursor: Type.Optional(Type.String({
         minLength: 1,
         maxLength: 2_048,
-        description: "Opaque provider cursor for incremental views such as workspace session activity.",
+        description: "Opaque provider cursor for incremental workspace/remote session activity. Requires view=\"session\" with action=\"status\" or \"watch\".",
       })),
     }, { additionalProperties: false }),
     { minItems: 1, maxItems: 15, description: "Mixed targets to observe in the requested order." },
@@ -499,27 +501,27 @@ export const ObserveParams = Type.Object({
     type: "string",
     enum: ["all", "any", "count"],
     default: "all",
-    description: "Barrier mode for wait only.",
+    description: 'Barrier mode for action="wait" only. "count" requires waitCount; omit this field for status, diagnose, and watch.',
   })),
-  waitCount: Type.Optional(Type.Integer({ minimum: 1, description: "Number of targets required when waitMode is count." })),
+  waitCount: Type.Optional(Type.Integer({ minimum: 1, description: 'Required when action="wait" and waitMode="count". Omit for all other actions and wait modes.' })),
   until: Type.Optional(Type.Unsafe<"result-ready" | "completed">({
     type: "string",
     enum: ["result-ready", "completed"],
     default: "result-ready",
     description:
-      "Wait-only completion threshold: first result (default) or full terminal completion.",
+      'Completion threshold for action="wait" only: first result (default) or full terminal completion. Omit for status, diagnose, and watch.',
   })),
-  timeoutMs: Type.Optional(Type.Integer({ minimum: 1, default: 600_000, description: "Request-level wait/watch timeout in milliseconds (default: 600000, 10 minutes)." })),
+  timeoutMs: Type.Optional(Type.Integer({ minimum: 1, default: 600_000, description: 'Timeout for action="wait" or "watch" only (default: 600000 ms, 10 minutes). Omit for status and diagnose, even when using the default value.' })),
   view: Type.Optional(Type.Unsafe<"live" | "turns" | "session" | "todos">({
     type: "string",
     enum: ["live", "turns", "session", "todos"],
     default: "live",
     description:
-      '"live" shows the current snapshot; "turns" lists target history; "session" shows sanitized workspace root-session activity; "todos" shows the worker root-session Todo projections.',
+      '"live" shows the current snapshot; "turns" lists target history (action="status" only); "session" shows sanitized workspace/remote progress (status/watch only); "todos" shows workspace Todo projections (status/watch only, all targets must have kind="workspace").',
   })),
   turn: Type.Optional(Type.Integer({
     minimum: 1,
-    description: '1-based turn index to expand when view="turns"; omitted lists all turns.',
+    description: '1-based turn index to expand; requires view="turns" and action="status". Omit to list all turns.',
   })),
 }, {
   additionalProperties: false,
@@ -529,6 +531,7 @@ export const ObserveParams = Type.Object({
         properties: { action: { enum: ["status", "diagnose"] } },
         required: ["action"],
       },
+      description: 'For action="status" or "diagnose", omit waitMode, waitCount, until, and timeoutMs. Use action="wait" or "watch" for bounded observation.',
       then: { not: { anyOf: [
         { required: ["waitMode"] },
         { required: ["waitCount"] },
@@ -538,6 +541,7 @@ export const ObserveParams = Type.Object({
     },
     {
       if: { properties: { action: { const: "watch" } }, required: ["action"] },
+      description: 'For action="watch", omit waitMode, waitCount, and until; timeoutMs is allowed. Use action="wait" for a completion barrier.',
       then: { not: { anyOf: [
         { required: ["waitMode"] },
         { required: ["waitCount"] },
@@ -549,18 +553,22 @@ export const ObserveParams = Type.Object({
         properties: { action: { const: "wait" }, waitMode: { const: "count" } },
         required: ["action", "waitMode"],
       },
+      description: 'For action="wait" with waitMode="count", provide waitCount (a positive integer).',
       then: { required: ["waitCount"] },
     },
     {
       if: { properties: { view: { const: "turns" } }, required: ["view"] },
+      description: 'view="turns" requires action="status". Use view="live" for wait or watch.',
       then: { properties: { action: { const: "status" } }, required: ["action"] },
     },
     {
       if: { properties: { view: { const: "session" } }, required: ["view"] },
+      description: 'view="session" requires action="status" or "watch".',
       then: { properties: { action: { enum: ["status", "watch"] } }, required: ["action"] },
     },
     {
       if: { properties: { view: { const: "todos" } }, required: ["view"] },
+      description: 'view="todos" requires action="status" or "watch", and every target must have kind="workspace".',
       then: {
         properties: {
           action: { enum: ["status", "watch"] },
@@ -585,14 +593,17 @@ export const ObserveParams = Type.Object({
         },
         required: ["targets"],
       },
+      description: 'target.cursor requires view="session" with action="status" or "watch".',
       then: { properties: { view: { const: "session" } }, required: ["view"] },
     },
     {
       if: { required: ["turn"] },
+      description: 'turn requires view="turns" and action="status". Omit turn for other views.',
       then: { properties: { view: { const: "turns" } }, required: ["view"] },
     },
     {
       if: { required: ["waitCount"] },
+      description: 'waitCount requires action="wait" and waitMode="count". Omit waitCount for other actions or wait modes.',
       then: {
         properties: { action: { const: "wait" }, waitMode: { const: "count" } },
         required: ["action", "waitMode"],
@@ -614,7 +625,7 @@ export const LocalObserveParams = Type.Unsafe<LocalObserveParamsInput>({
       type: "string",
       enum: ["live", "turns"],
       default: "live",
-      description: 'Local observation supports only "live" and "turns" views.',
+      description: 'Local observation supports only "live" and "turns" views. "turns" requires action="status".',
     })),
     targets: Type.Array(
       Type.Object({
@@ -906,7 +917,10 @@ export function projectConditionalTeammateTool<T extends TSchema, D>(
     async execute(id, params, signal, onUpdate, ctx) {
       if (!Check(original, params)) {
         const failure = [...Errors(original, params)][0];
-        const message = `Invalid ${tool.name} arguments at ${failure?.instancePath || "/"}: ${failure?.message ?? "schema validation failed"}.`;
+        const conditionPath = failure?.keyword === "if" ? /^#\/allOf\/(\d+)$/.exec(failure.schemaPath) : null;
+        const conditions = (original as TSchema & { allOf?: Array<{ description?: string }> }).allOf;
+        const reason = conditionPath ? conditions?.[Number(conditionPath[1])]?.description : undefined;
+        const message = `Invalid ${tool.name} arguments at ${failure?.instancePath || "/"}: ${reason ?? `${failure?.message ?? "schema validation failed"}.`}`;
         // Failed tool calls have no successful result details to return.
         return { content: [{ type: "text", text: message }], isError: true, details: undefined as D };
       }

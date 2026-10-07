@@ -1,5 +1,10 @@
 export declare const MODEL_TUI_CATALOGS: {
     readonly en: {
+        readonly "model.setting.fast": "Codex Fast";
+        readonly "model.fast.inherit": "Inherit / default";
+        readonly "model.fast.on": "On";
+        readonly "model.fast.off": "Off";
+        readonly "model.fast.detail": "Pi openai-codex only; priority may consume more quota.";
         readonly "model.title": "Teammate Control Center";
         readonly "model.tab.profiles": "Profiles";
         readonly "model.tab.routing": "Routing";
@@ -284,6 +289,11 @@ export declare const MODEL_TUI_CATALOGS: {
         readonly "task.testing.description": "Tests, coverage, and regression validation";
     };
     readonly "zh-CN": {
+        readonly "model.setting.fast": "Codex Fast";
+        readonly "model.fast.inherit": "继承 / 默认";
+        readonly "model.fast.on": "开";
+        readonly "model.fast.off": "关";
+        readonly "model.fast.detail": "仅 Pi openai-codex；优先级可能消耗更多额度。";
         readonly "model.title": "Teammate 控制中心";
         readonly "model.tab.profiles": "配置方案";
         readonly "model.tab.routing": "路由";
