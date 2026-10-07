@@ -20,6 +20,30 @@ test("convert-pi: missing destination roots produce an empty conversion result",
 
 const cases = [
   {
+    name: "preserves shared closeout references and explicit approval routing",
+    file: "D:/fixture/skills/maestro-knowledge/SKILL.md",
+    input: `---
+name: maestro-knowledge
+allowed-tools: Read Bash Agent AskUserQuestion
+session-mode: none
+---
+<required_reading>
+@~/.maestro/ref/knowledge-closeout.md
+</required_reading>
+Read @~/.maestro/ref/knowledge-closeout.md explicitly before closeout.
+Use ask-user-question or matching prior explicit authorization.
+Publish fixed approved IDs with promote --candidate; confirmed adjudication uses promote --resolve.
+`,
+    verify(output) {
+      assert.match(output, /^session-mode: none$/m);
+      assert.match(output, /Read ~\/\.maestro\/ref\/knowledge-closeout\.md explicitly before closeout/);
+      assert.doesNotMatch(output, /@~\/\.maestro/);
+      assert.match(output, /ask-user-question or matching prior explicit authorization/);
+      assert.match(output, /fixed approved IDs with promote --candidate/);
+      assert.match(output, /confirmed adjudication uses promote --resolve/);
+    },
+  },
+  {
     name: "keeps tool remapping inside frontmatter and preserves fenced examples",
     file: "D:/fixture/skills/example/SKILL.md",
     input: `---
