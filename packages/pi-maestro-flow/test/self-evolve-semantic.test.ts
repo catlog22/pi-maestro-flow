@@ -582,7 +582,16 @@ describe("resultToRecord", () => {
     assert.equal(rec.status, "heuristic_fallback");
   });
 
-  it("drops unknown evidence ids and notes the count", () => {
+  it("fails closed on mismatched result ids and absent evidence", () => {
+    for (const result of [
+      { signalId: "se-other", worthCapturing: true, candidateType: "knowhow" as const, title: "t", summary: "s", evidenceIds: ["ev-1"] },
+      { signalId: signal.id, worthCapturing: true, candidateType: "knowhow" as const, title: "t", summary: "s", evidenceIds: [] },
+    ]) {
+      assert.equal(resultToRecord(result, signal, 1, "test/model", availableIds).status, "heuristic_fallback");
+    }
+  });
+
+  it("fails closed on unknown evidence ids", () => {
     const rec = resultToRecord(
       {
         signalId: "se-aaa",
@@ -597,8 +606,8 @@ describe("resultToRecord", () => {
       "test/model",
       availableIds,
     );
-    assert.equal(rec.status, "semantic");
-    assert.deepEqual(rec.evidenceIds, ["ev-1"]);
+    assert.equal(rec.status, "heuristic_fallback");
+    assert.equal(rec.evidenceIds, undefined);
     assert.match(rec.error ?? "", /unknown evidence id/);
   });
 });
@@ -606,5 +615,40 @@ describe("resultToRecord", () => {
 describe("ENRICHMENT_OUTPUT_SCHEMA", () => {
   it("requires results array", () => {
     assert.equal(ENRICHMENT_OUTPUT_SCHEMA.required?.[0], "results");
+  });
+});
+
+describe("enrichment exact-key projection", () => {
+  it("cannot join a matching short id from a different trace or session", () => {
+    const raw = makeRawSignal();
+    for (const mismatch of [{ traceHash: "b".repeat(64) }, { sessionId: "different-session" }]) {
+      const record = makeSemanticRecord(mismatch);
+      assert.equal(resolveSignal(raw, record).enrichmentStatus, "skipped");
+      assert.equal(resolveSignalCorpus([raw], selectEnrichment([record]))[0].candidateType, raw.candidateType);
+    }
+  });
+});
+
+// Decision-policy provenance is a separate exact-key projection, never a raw rewrite.
+import { resolveCapturePolicyCorpus, type EvolutionPolicyRecord } from "../src/self-evolve/enrichment.ts";
+function captureRecord(overrides: Partial<EvolutionPolicyRecord> = {}): EvolutionPolicyRecord {
+  return { schemaVersion: 1, kind: "decision-policy", signalId: "se-aaaaaaaaaaaa", traceHash: "a".repeat(64), sessionId: "session-A", project: "test", accepted: true, completedAt: "2026-08-23T00:00:00.000Z", evaluation: { domain: "evolve-capture", mode: "enforce", backend: "classifier", owner: "internal", candidateType: "spec", worthCapturing: true, confidence: .99, matchedRuleIds: ["capture"], rationale: "Confirmed local constraint", policyRevision: 1 }, ...overrides };
+}
+describe("capture policy sidecar projection", () => {
+  it("projects enforcement without rewriting raw and rejects session/hash collisions", () => {
+    const raw = makeRawSignal();
+    const resolved = resolveSignal(raw, undefined);
+    const rec = captureRecord();
+    assert.equal(resolveCapturePolicyCorpus([resolved], [rec])[0].candidateType, "spec");
+    assert.equal(raw.candidateType, "unknown");
+    for (const mismatch of [{ traceHash: "b".repeat(64) }, { sessionId: "session-B" }]) {
+      assert.equal(resolveCapturePolicyCorpus([resolved], [rec, captureRecord(mismatch)])[0].candidateType, "unknown");
+    }
+  });
+  it("off/shadow/degraded/rejected sidecars cannot make raw signals actionable", () => {
+    const resolved = resolveSignal(makeRawSignal(), undefined);
+    for (const rec of [captureRecord({ accepted: false }), captureRecord({ evaluation: { ...captureRecord().evaluation, mode: "off" } }), captureRecord({ evaluation: { ...captureRecord().evaluation, mode: "shadow" } }), captureRecord({ evaluation: { ...captureRecord().evaluation, degradedReason: "timeout" } })]) {
+      assert.equal(resolveCapturePolicyCorpus([resolved], [rec])[0].capturePolicyApplied, undefined);
+    }
   });
 });

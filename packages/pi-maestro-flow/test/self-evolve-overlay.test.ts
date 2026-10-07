@@ -73,3 +73,24 @@ test("self-evolve overlay cancels the confirmation with Esc and does not persist
   assert.doesNotMatch(overlay.render(80).join("\n"), /Confirm save/);
   assert.equal(actions.length, 0);
 });
+
+test("self-evolve overlay edits persistent capture mode and semantic budgets without clipping controls", async () => {
+  const actions: SelfEvolveOverlayAction[] = [];
+  const overlay = new SelfEvolveOverlay({ view: makeView(), requestRender() {}, close() {}, onAction(action) { actions.push(action); }, theme } as never);
+  for (let i = 0; i < 11; i++) overlay.handleInput("\x1b[B"); // captureMode
+  overlay.handleInput("\r");
+  for (let i = 0; i < "heuristic".length; i++) overlay.handleInput("\x7f");
+  overlay.handleInput("hybrid");
+  overlay.handleInput("\r");
+  overlay.handleInput("\x1b[B"); // maxSemanticCallsPerSession
+  overlay.handleInput("\r"); overlay.handleInput("\x7f"); overlay.handleInput("9"); overlay.handleInput("\r");
+  const rows = overlay.render(100);
+  assert.ok(rows.length <= 27, `bounded 30-row terminal menu: ${rows.length}`);
+  assert.match(rows.join("\n"), /Ctrl\+S save/);
+  overlay.handleInput("\x13"); overlay.handleInput("\r");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(actions[0]?.type, "save");
+  const saved = (actions[0] as { config: SelfEvolveConfig }).config;
+  assert.equal(saved.captureMode, "hybrid");
+  assert.equal(saved.maxSemanticCallsPerSession, 9);
+});

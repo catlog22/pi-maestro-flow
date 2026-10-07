@@ -31,7 +31,8 @@
  */
 
 import { createHash } from "node:crypto";
-import type { EvidenceRef, SelfEvolveSignal, CandidateType } from "./runtime.ts";
+import type { PolicyEvaluation } from "../decision-policy/service.ts";
+import type { ReviewVerdict, EvidenceRef, SelfEvolveSignal, CandidateType } from "./runtime.ts";
 
 // ---------------------------------------------------------------------------
 // Enrichment record schema
@@ -125,6 +126,8 @@ export interface ResolvedSignal extends SelfEvolveSignal {
   enrichmentConfidence?: number;
   /** Enrichment-attempt number (0 = no enrichment). */
   enrichmentAttempt: number;
+  /** Exact-key capture-policy projection; raw records remain heuristic. */
+  capturePolicyApplied?: boolean;
 }
 
 /**
@@ -143,7 +146,7 @@ export function resolveSignal(
   raw: SelfEvolveSignal,
   enrichment: EnrichmentRecord | undefined,
 ): ResolvedSignal {
-  if (!enrichment || enrichment.signalId !== raw.id) {
+  if (!enrichment || enrichment.signalId !== raw.id || enrichment.traceHash !== raw.traceHash || enrichment.sessionId !== raw.sessionId) {
     return {
       ...raw,
       enrichmentStatus: "skipped",
@@ -677,9 +680,8 @@ export function parseEnrichmentResults(rawText: string): EnrichmentResult[] {
  *
  * - `worthCapturing=false` or missing fields → `heuristic_fallback`.
  * - `worthCapturing=true` with valid fields → `semantic`.
- * - Evidence ids are validated against the available set; invalid ids are
- *   dropped (the caller may downgrade the record via
- *   {@link downgradeInvalidEvidence}).
+ * - The result must match the signal id, and every evidence claim must be
+ *   non-empty and belong to this signal's available set; otherwise fallback.
  */
 export function resultToRecord(
   result: EnrichmentResult,
@@ -699,10 +701,14 @@ export function resultToRecord(
     model,
     completedAt: new Date().toISOString(),
   };
+  if (result.signalId !== signal.id) return { ...base, error: "enrichment signal id mismatch" };
   if (!result.worthCapturing || !result.candidateType || result.candidateType === "unknown" || !result.title || !result.summary) {
     return { ...base, error: "enrichment deemed signal not worth capturing or incomplete" };
   }
   const validIds = (result.evidenceIds ?? []).filter((id) => availableEvidenceIds.has(id));
+  if (validIds.length === 0 || validIds.length !== result.evidenceIds?.length) {
+    return { ...base, error: "enrichment referenced missing or unknown evidence id(s)" };
+  }
   return {
     ...base,
     status: "semantic",
@@ -717,4 +723,51 @@ export function resultToRecord(
       ? { error: `${(result.evidenceIds?.length ?? 0) - validIds.length} unknown evidence id(s) dropped` }
       : {}),
   };
+}
+
+/** Audit-only sidecar: never joined by a short id or used as authorization. */
+export interface EvolutionPolicyRecord {
+  schemaVersion: 1;
+  kind: "decision-policy";
+  signalId: string;
+  traceHash: string;
+  sessionId: string;
+  project: string;
+  evaluation: PolicyEvaluation;
+  accepted?: boolean;
+  completedAt: string;
+}
+
+export function applyCapturePolicy(
+  evaluation: PolicyEvaluation, heuristicType: CandidateType, heuristicMoment: boolean,
+): { accepted: boolean; candidateType: CandidateType } {
+  const semantic = evaluation.mode === "enforce" && !evaluation.degradedReason && evaluation.backend !== "none";
+  return semantic && typeof evaluation.worthCapturing === "boolean"
+    ? { accepted: evaluation.worthCapturing, candidateType: evaluation.candidateType }
+    : { accepted: heuristicMoment, candidateType: heuristicType };
+}
+
+/** Advice never creates a stage verdict; external ownership only tightens the gate. */
+export function applyReviewPolicy(verdict: ReviewVerdict, evaluation: PolicyEvaluation): ReviewVerdict {
+  if (evaluation.mode !== "enforce") return verdict;
+  const recommendation = evaluation.advice?.recommendation;
+  const external = evaluation.owner !== "internal";
+  const unconfirmed = external || !!evaluation.degradedReason || evaluation.backend === "none" || !evaluation.advice;
+  return {
+    ...verdict,
+    action: unconfirmed && verdict.action === "stage" ? "uncertain" : verdict.action,
+    reason: `${verdict.reason} (policy ${evaluation.owner}: ${recommendation ?? evaluation.rationale}; recommendation only, not authorization${unconfirmed ? "; human review required" : ""}${evaluation.degradedReason ? `; degraded: ${evaluation.degradedReason}` : ""})`,
+  };
+}
+
+/** Exact triple-key, fail-closed projection: sidecars never mutate the raw corpus. */
+export function resolveCapturePolicyCorpus(signals: readonly ResolvedSignal[], records: readonly EvolutionPolicyRecord[]): ResolvedSignal[] {
+  return signals.map((signal) => {
+    const bucket = records.filter((r) => r.signalId === signal.id && r.evaluation?.domain === "evolve-capture");
+    if (bucket.some((r) => r.traceHash !== signal.traceHash || r.sessionId !== signal.sessionId)) return signal;
+    const record = bucket.at(-1);
+    if (!record || record.accepted !== true || record.evaluation.mode !== "enforce" || record.evaluation.degradedReason || !["classifier", "llm"].includes(record.evaluation.backend) || record.evaluation.worthCapturing !== true || !["knowhow", "spec"].includes(record.evaluation.candidateType)) return signal;
+    // Evidence-grounded enrichment remains authoritative when it completed successfully.
+    return { ...signal, candidateType: signal.enrichmentStatus === "semantic" ? signal.candidateType : record.evaluation.candidateType, capturePolicyApplied: true };
+  });
 }

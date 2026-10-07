@@ -75,7 +75,12 @@ type MenuField =
   | "maxEvidence"
   | "maxFiles"
   | "maxReviewFiles"
-  | "reviewScoreThreshold";
+  | "reviewScoreThreshold"
+  | "captureMode"
+  | "maxSemanticCallsPerSession"
+  | "maxSemanticCandidatesPerSession"
+  | "semanticBatchSize"
+  | "semanticTimeoutMs";
 
 const MENU_FIELDS: readonly MenuField[] = [
   "enabled",
@@ -89,6 +94,11 @@ const MENU_FIELDS: readonly MenuField[] = [
   "maxFiles",
   "maxReviewFiles",
   "reviewScoreThreshold",
+  "captureMode",
+  "maxSemanticCallsPerSession",
+  "maxSemanticCandidatesPerSession",
+  "semanticBatchSize",
+  "semanticTimeoutMs",
 ];
 
 type SaveState = "clean" | "dirty" | "saving" | "saved" | "failed";
@@ -261,7 +271,13 @@ export class SelfEvolveOverlay implements Component, Focusable {
   // -------------------------------------------------------------------------
 
   private configRows(width: number): string[] {
-    return MENU_FIELDS.map((field, index) => this.renderField(field, index === this.selected, width));
+    // Keep new semantic settings reachable without clipping the bottom controls.
+    const count = Math.min(8, MENU_FIELDS.length);
+    const start = Math.max(0, Math.min(this.selected - count + 1, MENU_FIELDS.length - count));
+    return [
+      this.params.theme.fg("dim", fit(`settings ${start + 1}–${start + count}/${MENU_FIELDS.length} · ↑↓ scroll`, width)),
+      ...MENU_FIELDS.slice(start, start + count).map((field, index) => this.renderField(field, start + index === this.selected, width)),
+    ];
   }
 
   private renderField(field: MenuField, selected: boolean, width: number): string {
@@ -285,6 +301,11 @@ export class SelfEvolveOverlay implements Component, Focusable {
       case "maxFiles": return "retention";
       case "maxReviewFiles": return "review retention";
       case "reviewScoreThreshold": return "review score gate";
+      case "captureMode": return "capture mode";
+      case "maxSemanticCallsPerSession": return "semantic calls";
+      case "maxSemanticCandidatesPerSession": return "semantic candidates";
+      case "semanticBatchSize": return "semantic batch";
+      case "semanticTimeoutMs": return "semantic timeout";
     }
   }
 
@@ -303,6 +324,11 @@ export class SelfEvolveOverlay implements Component, Focusable {
           : "";
         return `${model}${theme.fg("dim", resolved)}`;
       }
+      case "captureMode": return draft.captureMode;
+      case "maxSemanticCallsPerSession": return `${draft.maxSemanticCallsPerSession} calls/session`;
+      case "maxSemanticCandidatesPerSession": return `${draft.maxSemanticCandidatesPerSession} candidates/session`;
+      case "semanticBatchSize": return `${draft.semanticBatchSize} candidates/batch`;
+      case "semanticTimeoutMs": return `${draft.semanticTimeoutMs}ms`;
       case "cooldownMs":
         return formatDurationMs(draft.cooldownMs);
       case "maxSignalsPerSession":
@@ -329,6 +355,11 @@ export class SelfEvolveOverlay implements Component, Focusable {
         return "master switch · Enter/Space toggles collection on/off";
       case "mode":
         return `${SELF_EVOLVE_MODES.join(" | ")} — Enter/Space toggles; dry-run: review only; auto-deposit: gate-passing candidates auto-staged (pending pool, never auto-promoted)`;
+      case "captureMode": return "heuristic | hybrid — hybrid adds evidence-grounded LLM enrichment; policy mode is governed separately";
+      case "maxSemanticCallsPerSession": return "hard session limit for enrichment LLM calls";
+      case "maxSemanticCandidatesPerSession": return "hard session limit for enriched candidates";
+      case "semanticBatchSize": return "maximum candidates per semantic batch";
+      case "semanticTimeoutMs": return "hard timeout for enrichment LLM calls (positive milliseconds)";
       case "model":
         return 'Phase 2B LLM steps (review) · "provider/model" or "auto" to inherit the session model';
       case "cooldownMs":
@@ -560,7 +591,7 @@ export class SelfEvolveOverlay implements Component, Focusable {
     if (!printable) return;
     if (field === "model") {
       this.editValue += printable;
-    } else if (field === "mode") {
+    } else if (field === "mode" || field === "captureMode") {
       this.editValue += printable.replace(/[^a-z-]/gi, "");
     } else if (field === "cooldownMs") {
       const clean = printable.replace(/[^0-9a-z.]/gi, "");
@@ -613,6 +644,7 @@ export class SelfEvolveOverlay implements Component, Focusable {
       case "maxFiles": return String(config.maxFiles);
       case "maxReviewFiles": return String(config.maxReviewFiles);
       case "reviewScoreThreshold": return String(config.reviewScoreThreshold);
+      default: return String(config[field]);
     }
   }
 

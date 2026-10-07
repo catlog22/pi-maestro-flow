@@ -22,6 +22,7 @@ import { redactAdvisorText } from "../advisor/runtime.ts";
 // type-only import: trajectory.ts runtime-imports SOP_TOOL_NAMES from this module,
 // so a value import here would form a runtime cycle. Type-only is erased.
 import type { TrajectoryEpisode } from "./trajectory.ts";
+import { DEFAULT_ENRICHMENT_BUDGET, type EnrichmentBudget } from "./enrichment.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -64,7 +65,7 @@ export type SelfEvolveMode = "dry-run" | "auto-deposit";
 /** All currently legal evolution modes, in display order. */
 export const SELF_EVOLVE_MODES: readonly SelfEvolveMode[] = ["dry-run", "auto-deposit"];
 
-export interface SelfEvolveConfig {
+export interface SelfEvolveConfig extends EnrichmentBudget {
   /** Master switch; the extension only observes events while enabled. */
   enabled: boolean;
   /**
@@ -104,6 +105,7 @@ export interface SelfEvolveConfig {
 }
 
 export const DEFAULT_SELF_EVOLVE_CONFIG: SelfEvolveConfig = {
+  ...DEFAULT_ENRICHMENT_BUDGET,
   enabled: false,
   mode: "dry-run",
   cooldownMs: 300_000,
@@ -134,6 +136,10 @@ export function normalizeSelfEvolveConfig(raw: Partial<SelfEvolveConfig> | undef
   return {
     enabled: typeof raw?.enabled === "boolean" ? raw.enabled : defaults.enabled,
     mode,
+    captureMode: raw?.captureMode === "hybrid" || raw?.captureMode === "heuristic" ? raw.captureMode : defaults.captureMode,
+    ...Object.fromEntries((["maxSemanticCallsPerSession", "maxSemanticCandidatesPerSession", "semanticBatchSize", "semanticTimeoutMs"] as const).map((key) => [key,
+      typeof raw?.[key] === "number" && Number.isSafeInteger(raw[key]) && raw[key]! > 0 ? raw[key] : defaults[key],
+    ])) as Pick<SelfEvolveConfig, "maxSemanticCallsPerSession" | "maxSemanticCandidatesPerSession" | "semanticBatchSize" | "semanticTimeoutMs">,
     ...(model ? { model } : {}),
     cooldownMs: typeof raw?.cooldownMs === "number" && raw.cooldownMs >= 0
       ? raw.cooldownMs
@@ -833,6 +839,10 @@ export interface SelfEvolveCounters {
 
 /** Config keys settable through `/self-evolve config <key>=<value>`. */
 export const EDITABLE_CONFIG_KEYS = [
+  "maxSemanticCallsPerSession",
+  "maxSemanticCandidatesPerSession",
+  "semanticBatchSize",
+  "semanticTimeoutMs",
   "cooldownMs",
   "maxSignalsPerSession",
   "maxTraceChars",
@@ -899,6 +909,12 @@ export function setConfigValue(
     }
     return { config, error: `enabled expects true/false (got "${raw.trim()}")` };
   }
+  if (normalizedKey === "captureMode") {
+    const value = raw.trim();
+    return value === "heuristic" || value === "hybrid"
+      ? { config: { ...config, captureMode: value } }
+      : { config, error: 'captureMode expects heuristic | hybrid' };
+  }
   if (normalizedKey === "mode") {
     const value = raw.trim();
     if ((SELF_EVOLVE_MODES as readonly string[]).includes(value)) {
@@ -964,6 +980,7 @@ export function formatConfigSummary(
     `  model: ${config.model ?? "auto"}${opts.resolvedModel && opts.resolvedModel !== config.model ? ` → ${opts.resolvedModel}` : ""} (Phase 2B LLM steps)`,
     `  cooldown: ${formatDurationMs(config.cooldownMs)} (${config.cooldownMs}ms)`,
     `  budget: ${config.maxSignalsPerSession} signals/session`,
+    `  capture mode: ${config.captureMode} · semantic budget: ${config.maxSemanticCallsPerSession} calls / ${config.maxSemanticCandidatesPerSession} candidates · batch ${config.semanticBatchSize} · timeout ${config.semanticTimeoutMs}ms`,
     `  trace: ${config.maxTraceMessages} msgs / ${config.maxTraceChars} chars`,
     `  evidence: ${config.maxEvidence} refs/candidate`,
     `  review gate: stage below score ${config.reviewScoreThreshold} downgraded to uncertain`,

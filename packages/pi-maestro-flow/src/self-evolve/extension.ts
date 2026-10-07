@@ -34,6 +34,8 @@ import type {
   SessionCompactEvent,
 } from "@earendil-works/pi-coding-agent";
 import { serializeTranscriptTail } from "../advisor/runtime.ts";
+import { evaluateDecisionPolicy } from "../decision-policy/service.ts";
+import { decisionPolicyPath } from "../decision-policy/config.ts";
 import { supportsCustomOverlay } from "pi-maestro-settings-core/ui";
 import { SelfEvolveOverlay, type SelfEvolveOverlayView } from "../tui/self-evolve-overlay.ts";
 import {
@@ -104,9 +106,13 @@ import {
   type SelfEvolveSource,
   type StageExecutionResult,
 } from "./runtime.ts";
-import { classifySync } from "pi-maestro-teammate/v1/classify";
+import { classify, classifySync, classifierConfig } from "pi-maestro-teammate/v1/classify";
 import { signalTypeDomain } from "../classifier/domains.ts";
 import {
+  applyCapturePolicy,
+  applyReviewPolicy,
+  resolveCapturePolicyCorpus,
+  type EvolutionPolicyRecord,
   buildEnrichmentInput,
   buildEnrichmentPrompt,
   canEnrich,
@@ -465,6 +471,12 @@ function resolveDepositExecutor(): DepositExecutor {
   return _depositExecutor ?? defaultStageExecutor;
 }
 
+let policyEvaluator = evaluateDecisionPolicy;
+/** @internal Offline routing seam. */
+export function setSelfEvolvePolicyEvaluatorForTest(evaluate?: typeof evaluateDecisionPolicy): void {
+  policyEvaluator = evaluate ?? evaluateDecisionPolicy;
+}
+
 export default function registerSelfEvolve(pi: ExtensionAPI): void {
   let config: SelfEvolveConfig = { ...DEFAULT_SELF_EVOLVE_CONFIG };
   const state = createSelfEvolveRuntimeState();
@@ -488,8 +500,21 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
   let compactPrepCount = 0;
   let pendingCompact: PendingCompactPrep | undefined;
   // Phase 2: semantic enrichment budget state (per-session). Reset on reload.
-  let enrichmentBudget: EnrichmentBudget = DEFAULT_ENRICHMENT_BUDGET;
+  let enrichmentBudget: EnrichmentBudget = { ...DEFAULT_ENRICHMENT_BUDGET };
+  let asyncGeneration = 0;
+  let asyncController = new AbortController();
+  let pendingCaptures = 0;
+  let pendingCaptureBySource: Partial<Record<SelfEvolveSource, { submittedAt: number }>> = {};
   let enrichmentState: EnrichmentBudgetState = freshBudgetState();
+  type EnrichmentCandidate = { signal: SelfEvolveSignal; digest?: string; episodes?: TrajectoryEpisode[]; ctx: ExtensionContext; fence: ReturnType<typeof asyncFence> };
+  let enrichmentQueue: EnrichmentCandidate[] = [];
+  let enrichmentFlushTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function discardEnrichmentQueue(): void {
+    if (enrichmentFlushTimer) clearTimeout(enrichmentFlushTimer);
+    enrichmentFlushTimer = undefined;
+    enrichmentQueue = [];
+  }
   // Phase 4: session wrap/nudge flags (per-session). Reset on reload.
   let sessionWrapped = false;
   let reviewNudgedThisSession = false;
@@ -499,6 +524,13 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
   }
 
   function resetSessionState(): void {
+    discardEnrichmentQueue();
+    asyncGeneration++;
+    asyncController.abort();
+    asyncController = new AbortController();
+    pendingCaptures = 0;
+    pendingCaptureBySource = {};
+    enrichmentBudget = { ...config };
     agentEndCount = 0;
     sessionSignals = 0;
     lastSignalBySource = {};
@@ -687,11 +719,22 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
    * `unknown` by a semantic enrichment become actionable (the enrichment
    * supplied a candidateType + title + summary).
    */
-  async function loadResolvedSignals(limit?: number): Promise<ResolvedSignal[]> {
-    const raw = await loadSignals({ limit });
+  async function loadResolvedSignals(limit?: number, loaded?: SelfEvolveSignal[]): Promise<ResolvedSignal[]> {
+    const raw = loaded ?? await loadSignals({ limit });
     const records = await loadEnrichmentRecords();
     const selection = selectEnrichment(records);
-    return resolveSignalCorpus(raw, selection);
+    const policyRecords: EvolutionPolicyRecord[] = [];
+    try {
+      const dir = resolve(resolvedOutputRoot(), "decision-policy");
+      const names = (await readdir(dir)).filter((n) => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(n)).sort().slice(-config.maxFiles);
+      for (const name of names) for (const line of (await readFile(join(dir, name), "utf8")).split("\n")) {
+        try {
+          const rec = JSON.parse(line) as EvolutionPolicyRecord;
+          if (rec.schemaVersion === 1 && rec.kind === "decision-policy" && typeof rec.signalId === "string" && typeof rec.traceHash === "string" && typeof rec.sessionId === "string" && rec.evaluation && typeof rec.evaluation === "object") policyRecords.push(rec);
+        } catch { /* malformed sidecar is never actionable */ }
+      }
+    } catch { /* absent ledger: legacy heuristic projection */ }
+    return resolveCapturePolicyCorpus(resolveSignalCorpus(raw, selection), policyRecords);
   }
 
   /**
@@ -739,7 +782,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
    */
   function resolvedIsActionable(signal: ResolvedSignal): boolean {
     if (typeof signal.suggestion === "string" && signal.suggestion.length > 0) return true;
-    if (signal.enrichmentStatus === "semantic" && signal.candidateType !== "unknown") return true;
+    if ((signal.enrichmentStatus === "semantic" || signal.capturePolicyApplied) && signal.candidateType !== "unknown") return true;
     return false;
   }
 
@@ -758,7 +801,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
       return buildStageCommandArgs(signal, evidenceFile);
     }
     // Synthesize for rescued signals.
-    if (signal.enrichmentStatus !== "semantic") return undefined;
+    if (signal.enrichmentStatus !== "semantic" && !signal.capturePolicyApplied) return undefined;
     const type = signal.candidateType === "spec" ? "spec" : "knowhow";
     const refs = (signal.evidence ?? []).map((e) => e.ref).slice(0, 8).join(", ");
     const args = ["knowledge", "stage", type, signal.title, "--content-file", evidenceFile];
@@ -802,7 +845,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
       source: configSourceLabel(),
       config,
       counters: buildCounters(),
-      recentSignals: await loadRecentSignals(8),
+      recentSignals: await loadResolvedSignals(8),
       resolvedModel: resolveSelfEvolveModel(ctx),
       suggestionsDir: resolvedSuggestionsDir(),
     };
@@ -824,7 +867,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
   }
 
   function signalDue(source: SelfEvolveSource): boolean {
-    const last = lastSignalBySource[source];
+    const last = pendingCaptureBySource[source]?.submittedAt ?? lastSignalBySource[source];
     if (last === undefined) return true;
     return Date.now() - last >= config.cooldownMs;
   }
@@ -850,6 +893,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
     const load = loadConfig(cwd).then((loaded) => {
       if (generation !== configGeneration || configCwd !== cwd) return;
       config = loaded;
+      enrichmentBudget = { ...loaded };
       // Config load is async; session_start already rendered the default
       // (disabled) state. Refresh now so an enabled config shows EV● instead
       // of a stale EVOL off until the first agent_end.
@@ -889,7 +933,76 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
   // Suggestion writes
   // -------------------------------------------------------------------------
 
+  function asyncFence(ctx: ExtensionContext) {
+    const generation = asyncGeneration;
+    const cwd = ctx.cwd;
+    const sessionId = ctx.sessionManager.getSessionId();
+    const signal = ctx.signal ? AbortSignal.any([ctx.signal, asyncController.signal]) : asyncController.signal;
+    const current = () => {
+      try { return !signal.aborted && generation === asyncGeneration && cwd === ctx.cwd && sessionId === ctx.sessionManager.getSessionId(); }
+      catch { return false; }
+    };
+    // Fence the bytes even when parsing fails; the policy service owns semantic
+    // validation and must be allowed to return the conservative heuristic fallback.
+    const fingerprint = async () => {
+      try { return sha256Hex(await readFile(decisionPolicyPath(cwd), "utf8")); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return "missing"; throw error; }
+    };
+    const initial = fingerprint().then((value) => ({ ok: true as const, value }), (error: unknown) => ({ ok: false as const, error }));
+    return { current, signal, async valid() {
+      if (!current()) return false;
+      const before = await initial;
+      if (!before.ok) throw before.error;
+      const after = await fingerprint();
+      return current() && before.value === after;
+    } };
+  }
+
+  async function appendPolicyRecord(record: EvolutionPolicyRecord, fence: ReturnType<typeof asyncFence>): Promise<void> {
+    const dir = resolve(resolvedOutputRoot(), "decision-policy");
+    await mkdir(dir, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
+    if (!await fence.valid()) return;
+    await writeFile(join(dir, dailySuggestionFileName()), `${JSON.stringify(record)}\n`, {
+      encoding: "utf8", flag: "a", mode: PRIVATE_FILE_MODE,
+    });
+  }
+
+  // Fire-and-forget from observation hooks: never block agent completion or compaction.
+  async function captureSignalAsync(params: Parameters<typeof writeSignal>[0], heuristicMoment = true, classifierInput?: string, momentForType?: (type: CandidateType) => boolean): Promise<void> {
+    if (sessionSignals + pendingCaptures >= config.maxSignalsPerSession) { state.suppressed++; return; }
+    const fence = asyncFence(params.ctx);
+    pendingCaptures++;
+    const reservation = { submittedAt: Date.now() };
+    pendingCaptureBySource[params.source] = reservation; // reserve before awaiting
+    try {
+      if (!await fence.valid()) return;
+      if (classifierInput !== undefined) {
+        const classified = await classify(signalTypeDomain, { text: classifierInput });
+        if (!await fence.valid()) return;
+        params = { ...params, candidateType: classified.label };
+        heuristicMoment = momentForType?.(classified.label) ?? heuristicMoment;
+      }
+      const evaluation = await policyEvaluator("evolve-capture", params.digest ?? params.summary, params.ctx, { signal: fence.signal, advice: false });
+      if (!await fence.valid()) return;
+      const decision = applyCapturePolicy(evaluation, params.candidateType, heuristicMoment);
+      await appendPolicyRecord({ schemaVersion: 1, kind: "decision-policy", signalId: `se-${params.traceHash.slice(0, 12)}`,
+        traceHash: params.traceHash, sessionId: params.ctx.sessionManager.getSessionId(), project: projectNameFor(params.ctx.cwd),
+        evaluation, accepted: decision.accepted, completedAt: new Date().toISOString() }, fence);
+      if (!await fence.valid()) return;
+      if (!decision.accepted) { state.suppressed++; updateStatusBar(params.ctx); return; }
+      // The raw signal keeps its heuristic type. Exact-key sidecar projection
+      // supplies semantic routing to review/panel/deposit without rewriting history.
+      await writeSignal({ ...params, fence });
+    } finally {
+      if (fence.current()) {
+        pendingCaptures--;
+        if (pendingCaptureBySource[params.source] === reservation) delete pendingCaptureBySource[params.source];
+      }
+    }
+  }
+
   async function writeSignal(params: {
+    fence?: ReturnType<typeof asyncFence>;
     source: SelfEvolveSource;
     ctx: ExtensionContext;
     traceHash: string;
@@ -904,6 +1017,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
     /** Trajectory episodes for enrichment input (Phase 2). */
     episodes?: TrajectoryEpisode[];
   }): Promise<void> {
+    if (params.fence && !await params.fence.valid()) return;
     if (sessionSignals >= config.maxSignalsPerSession) {
       state.suppressed++;
       return;
@@ -925,7 +1039,8 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
     });
     // Persist the evidence file first so the stage template below is
     // copy-paste executable (no dead `<evidence-file>` placeholder).
-    const suggestion = await writeSignalEvidence(record);
+    if (params.fence && !await params.fence.valid()) return;
+    const suggestion = await writeSignalEvidence(record, params.fence);
     const withSuggestion: SelfEvolveSignal = suggestion
       ? { ...record, suggestion }
       : record;
@@ -938,6 +1053,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
     }
     await mkdir(dir, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
     const filePath = join(dir, dailySuggestionFileName());
+    if (params.fence && !await params.fence.valid()) return;
     await writeFile(filePath, `${JSON.stringify(withSuggestion)}\n`, {
       encoding: "utf8",
       flag: "a",
@@ -954,10 +1070,8 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
     // enrichment never blocks the signal write — it runs async and appends a
     // terminal record to the enrichment ledger. On any failure it writes a
     // `heuristic_fallback` so the raw signal stays usable.
-    if (canEnrich(record, enrichmentBudget, enrichmentState)) {
-      void enrichSignalAsync(record, params.digest, params.episodes, params.ctx).catch((error) =>
-        recordFailure(error, params.ctx),
-      );
+    if ((!params.fence || await params.fence.valid()) && canEnrich(record, enrichmentBudget, enrichmentState)) {
+      enqueueEnrichment({ signal: record, digest: params.digest, episodes: params.episodes, ctx: params.ctx, fence: params.fence ?? asyncFence(params.ctx) });
     }
   }
 
@@ -993,7 +1107,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
    * The ledger lives at `{outputRoot}/enrichments/<date>.jsonl`, separate from
    * the suggestions JSONL so raw signals stay untouched.
    */
-  async function appendEnrichmentRecord(record: EnrichmentRecord): Promise<void> {
+  async function appendEnrichmentRecord(record: EnrichmentRecord, fence: ReturnType<typeof asyncFence>): Promise<void> {
     const outputRoot = resolvedOutputRoot();
     const dir = resolve(outputRoot, "enrichments");
     if (!isPathInside(outputRoot, dir)) {
@@ -1001,6 +1115,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
     }
     await mkdir(dir, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
     const filePath = join(dir, dailySuggestionFileName());
+    if (!await fence.valid()) return;
     await writeFile(filePath, `${formatEnrichmentLine(record)}\n`, {
       encoding: "utf8",
       flag: "a",
@@ -1016,99 +1131,99 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
    * evidence id) a `heuristic_fallback` record is appended so the raw signal
    * remains usable.
    */
-  async function enrichSignalAsync(
-    signal: SelfEvolveSignal,
-    digest: string | undefined,
-    episodes: Array<{ kind: string; tool: string; operation: string; outcomes: string[] }> | undefined,
-    ctx: ExtensionContext,
-  ): Promise<void> {
-    markSubmitted(signal.id, enrichmentState);
+  function enqueueEnrichment(candidate: EnrichmentCandidate): void {
+    // Queued candidates reserve candidate capacity, but a call is charged only
+    // when its batch leaves the queue. No await between checking and reserving.
+    const remaining = enrichmentBudget.maxSemanticCandidatesPerSession - enrichmentState.candidatesEnriched;
+    if (!candidate.fence.current() || !canEnrich(candidate.signal, enrichmentBudget, enrichmentState) || enrichmentQueue.length >= remaining) return;
+    markSubmitted(candidate.signal.id, enrichmentState);
+    enrichmentQueue.push(candidate);
+    if (enrichmentQueue.length >= Math.min(enrichmentBudget.semanticBatchSize, remaining)) {
+      flushEnrichmentQueue();
+    } else if (!enrichmentFlushTimer) {
+      // Coalesce adjacent observations; a lone candidate must not wait forever.
+      enrichmentFlushTimer = setTimeout(flushEnrichmentQueue, 50);
+      enrichmentFlushTimer.unref?.();
+    }
+  }
+
+  function flushEnrichmentQueue(): void {
+    if (enrichmentFlushTimer) clearTimeout(enrichmentFlushTimer);
+    enrichmentFlushTimer = undefined;
+    const batch = enrichmentQueue.splice(0).filter((candidate) => candidate.fence.current());
+    if (!batch.length || enrichmentBudget.captureMode !== "hybrid" || enrichmentState.callsUsed >= enrichmentBudget.maxSemanticCallsPerSession) return;
+    const budget = { ...enrichmentBudget };
+    recordAttempt(batch.length, enrichmentState); // reserve the actual batch before any await
+    const attempt = enrichmentState.callsUsed;
+    void enrichBatchAsync(batch, budget, attempt).catch((error) => {
+      if (batch[0].fence.current()) recordFailure(error, batch[0].ctx);
+    });
+  }
+
+  async function enrichBatchAsync(batch: EnrichmentCandidate[], budget: EnrichmentBudget, attempt: number): Promise<void> {
+    const { ctx, fence } = batch[0];
+    if (!await fence.valid()) return;
     const model = resolveSelfEvolveModel(ctx);
     const availableModels = ctx.modelRegistry.getAvailable().map((m) => `${m.provider}/${m.id}`);
-    const fallback = (error: string): EnrichmentRecord => ({
-      schemaVersion: 1,
-      kind: "enrichment",
-      signalId: signal.id,
-      traceHash: signal.traceHash,
-      sessionId: signal.sessionId,
-      attempt: enrichmentState.callsUsed + 1,
-      status: "heuristic_fallback",
-      model,
-      error,
-      completedAt: new Date().toISOString(),
+    const inputs = batch.map(({ signal, digest, episodes }) => buildEnrichmentInput(signal, digest ?? "", episodes ?? []));
+    const fallback = (signal: SelfEvolveSignal, error: string): EnrichmentRecord => ({
+      schemaVersion: 1, kind: "enrichment", signalId: signal.id,
+      traceHash: signal.traceHash, sessionId: signal.sessionId, attempt,
+      status: "heuristic_fallback", model, error, completedAt: new Date().toISOString(),
     });
-    let record: EnrichmentRecord;
+    let results: EnrichmentResult[] = [];
+    let failure: string | undefined;
     if (!model || !availableModels.includes(model)) {
-      record = fallback("enrichment model unavailable");
+      failure = "enrichment model unavailable";
     } else {
       const runtime = await loadReviewTeammate();
       if (!runtime) {
-        record = fallback("teammate runtime unavailable");
+        failure = "teammate runtime unavailable";
       } else {
         try {
-          const input = buildEnrichmentInput(
-            signal,
-            digest ?? "",
-            episodes ?? [],
-          );
-          const prompt = buildEnrichmentPrompt([input]);
-          const availableIds = new Set(input.evidence.map((e) => e.id));
+          if (!await fence.valid()) return;
           const { supervision, runTeammate } = runtime;
-          const evaluation = await supervision.runSupervisedEvaluation<EnrichmentResult[]>(
+          const evaluation = await supervision.runSupervisedEvaluation<{ results: EnrichmentResult[] }>(
             async (dispatchContext) => {
-              const results = await runTeammate(
-                {
-                  tasks: [{
-                    agent: "analyst",
-                    prompt: dispatchContext.task,
-                    taskType: "analysis",
-                    model,
-                    fallbackModels: [],
-                    thinking: "low",
-                    timeoutMs: dispatchContext.timeoutMs ?? enrichmentBudget.semanticTimeoutMs,
-                    outputSchema: dispatchContext.outputSchema,
-                  }],
-                },
-                { baseCwd: ctx.cwd, signal: dispatchContext.signal },
-              );
-              const single = Array.isArray(results) ? results[0] : results;
+              const dispatched = await runTeammate({ tasks: [{
+                agent: "analyst", prompt: dispatchContext.task, taskType: "analysis",
+                model, fallbackModels: [], thinking: "low",
+                timeoutMs: dispatchContext.timeoutMs ?? budget.semanticTimeoutMs,
+                outputSchema: dispatchContext.outputSchema,
+              }] }, { baseCwd: ctx.cwd, signal: dispatchContext.signal ? AbortSignal.any([dispatchContext.signal, fence.signal]) : fence.signal });
+              const single = Array.isArray(dispatched) ? dispatched[0] : dispatched;
               if (!single) throw new Error("enrichment returned no teammate result");
               return single;
             },
             {
-              task: prompt,
-              timeoutMs: enrichmentBudget.semanticTimeoutMs,
-              deadlineMs: enrichmentBudget.semanticTimeoutMs * 2,
+              task: buildEnrichmentPrompt(inputs), signal: fence.signal,
+              timeoutMs: budget.semanticTimeoutMs, deadlineMs: budget.semanticTimeoutMs * 2,
               outputSchema: ENRICHMENT_OUTPUT_SCHEMA,
-              fallbackTextParser: (text) => ({ results: parseEnrichmentResults(text) } as { results: EnrichmentResult[] }),
-              maxFailures: 0,
+              fallbackTextParser: (text) => ({ results: parseEnrichmentResults(text) }),
+              maxFailures: 1, // one dispatch, no retries (each dispatch consumes a call)
             },
           );
-          if (!evaluation.ok || !evaluation.verdict || evaluation.verdict.length === 0) {
-            record = fallback(evaluation.reason ?? "enrichment produced no result");
-          } else {
-            const result = evaluation.verdict[0];
-            record = resultToRecord(result, signal, enrichmentState.callsUsed + 1, model, availableIds);
-          }
+          if (!evaluation.ok) failure = evaluation.reason ?? "enrichment produced no result";
+          else results = parseEnrichmentResults(JSON.stringify(evaluation.verdict));
         } catch (error) {
-          record = fallback(
-            error instanceof Error ? error.message : "enrichment failed",
-          );
+          failure = error instanceof Error ? error.message : "enrichment failed";
         }
       }
     }
-    await appendEnrichmentRecord(record);
-    recordAttempt(1, enrichmentState);
-    // If the enrichment rescued an unknown signal, surface one aggregate notify
-    // so the user knows a hybrid-mode capture happened.
-    if (record.status === "semantic" && signal.candidateType === "unknown") {
-      try {
-        ctx.ui.notify(
-          `Self-evolve hybrid: rescued ${record.candidateType ?? "signal"} · ${record.title?.slice(0, 80) ?? ""} · /self-evolve review`,
-          "info",
-        );
-      } catch {
-        // best-effort
+    for (let index = 0; index < batch.length; index++) {
+      const candidate = batch[index];
+      if (!await candidate.fence.valid()) continue;
+      const matches = results.filter((result) => result.signalId === candidate.signal.id);
+      const record = failure || !model ? fallback(candidate.signal, failure ?? "enrichment model unavailable")
+        : matches.length !== 1 ? fallback(candidate.signal, "enrichment result missing or duplicate signal id")
+        : resultToRecord(matches[0], candidate.signal, attempt, model,
+          new Set(inputs[index].evidence.map((e) => e.id)));
+      await appendEnrichmentRecord(record, candidate.fence);
+      if (!await candidate.fence.valid()) continue;
+      if (record.status === "semantic" && candidate.signal.candidateType === "unknown") {
+        try {
+          candidate.ctx.ui.notify(`Self-evolve hybrid: rescued ${record.candidateType ?? "signal"} · ${record.title?.slice(0, 80) ?? ""} · /self-evolve review`, "info");
+        } catch { /* best-effort */ }
       }
     }
   }
@@ -1118,7 +1233,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
    * and build the executable stage template. Returns undefined for
    * non-actionable signals (unknown type → no stage suggestion).
    */
-  async function writeSignalEvidence(signal: SelfEvolveSignal): Promise<string | undefined> {
+  async function writeSignalEvidence(signal: SelfEvolveSignal, fence?: ReturnType<typeof asyncFence>): Promise<string | undefined> {
     if (signal.candidateType === "unknown") return undefined;
     const outputRoot = resolvedOutputRoot();
     const evidenceDir = join(outputRoot, "evidence");
@@ -1127,6 +1242,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
     }
     await mkdir(evidenceDir, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
     const filePath = join(evidenceDir, `${signal.id}.md`);
+    if (fence && !await fence.valid()) return undefined;
     await writeFile(filePath, `${signalEvidenceContent(signal)}\n`, {
       encoding: "utf8",
       mode: PRIVATE_FILE_MODE,
@@ -1169,7 +1285,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
   }
 
   /** Append a dry-run review record to the global reviews dir (never stages). */
-  async function writeReview(review: SelfEvolveReview): Promise<string> {
+  async function writeReview(review: SelfEvolveReview, fence: ReturnType<typeof asyncFence>): Promise<string | undefined> {
     const root = outputDir ?? selfEvolveOutputRoot(process.env[SELF_EVOLVE_OUTPUT_DIR_FLAG]);
     const dir = reviewsDirPath(root);
     if (!isPathInside(root, dir)) {
@@ -1177,6 +1293,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
     }
     await mkdir(dir, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
     const filePath = join(dir, reviewFileName());
+    if (!await fence.valid()) return undefined;
     await writeFile(filePath, `${JSON.stringify(review)}\n`, {
       encoding: "utf8",
       flag: "a",
@@ -1251,7 +1368,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
     } catch {
       evidenceMissing = true;
     }
-    if (evidenceMissing && signal.enrichmentStatus === "semantic" && signal.candidateType !== "unknown") {
+    if (evidenceMissing && (signal.enrichmentStatus === "semantic" || signal.capturePolicyApplied) && signal.candidateType !== "unknown") {
       try {
         await writeSignalEvidence(signal as SelfEvolveSignal);
         await access(evidenceFile);
@@ -1471,18 +1588,14 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
         .map((ep) => `${ep.tool} ${ep.kind} ${ep.operation}`)
         .join(" ");
       const toolHint = [toolCallHint, episodeHint].filter(Boolean).join(" ");
-      const candidateType = classifySync(signalTypeDomain, {
-        text: `${summary}\n${title}${toolHint ? `\n${toolHint}` : ""}`,
-      }).label;
-      // Knowledge-moment gate: drop turns with no knowledge signal (no failure,
-      // no reflective lexicon, no classifier hit) at the source. Replaces the
-      // prior unknown+failure gate with the lexicon-aware isKnowledgeMoment.
-      if (!isKnowledgeMoment(toolCalls, episodes, assistantText, candidateType)) {
-        state.suppressed++;
-        updateStatusBar(ctx);
-        return;
-      }
-      void writeSignal({
+      const classifierInput = `${summary}\n${title}${toolHint ? `\n${toolHint}` : ""}`;
+      const settings = classifierConfig();
+      const adjudicate = settings.enabled && settings.domains?.[signalTypeDomain.name] === "jev";
+      const candidateType = adjudicate
+        ? signalTypeDomain.rules({ text: classifierInput })!.label
+        : classifySync(signalTypeDomain, { text: classifierInput }).label;
+      const heuristicMoment = isKnowledgeMoment(toolCalls, episodes, assistantText, candidateType);
+      void captureSignalAsync({
         source: "agent_end",
         ctx,
         traceHash: hash,
@@ -1494,7 +1607,8 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
         digest,
         episodes,
         trigger: { turnIndex: agentEndCount },
-      }).catch((error) => recordFailure(error, ctx));
+      }, heuristicMoment, adjudicate ? classifierInput : undefined,
+      (type) => isKnowledgeMoment(toolCalls, episodes, assistantText, type)).catch((error) => recordFailure(error, ctx));
     } catch (error) {
       recordFailure(error, ctx);
     }
@@ -1548,8 +1662,12 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
         updateStatusBar(ctx);
         return;
       }
-      const candidateType = classifySync(signalTypeDomain, { text: summary }).label;
-      void writeSignal({
+      const settings = classifierConfig();
+      const adjudicate = settings.enabled && settings.domains?.[signalTypeDomain.name] === "jev";
+      const candidateType = adjudicate
+        ? signalTypeDomain.rules({ text: summary })!.label
+        : classifySync(signalTypeDomain, { text: summary }).label;
+      void captureSignalAsync({
         source: "session_compact",
         ctx,
         traceHash: hash,
@@ -1557,8 +1675,9 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
         summary: summarizeText(summary),
         evidence,
         candidateType,
+        digest,
         trigger: { reason: compact.reason },
-      }).catch((error) => recordFailure(error, ctx));
+      }, true, adjudicate ? summary : undefined).catch((error) => recordFailure(error, ctx));
       // Phase 4: low-frequency pending-review nudge (informational — never
       // auto-runs a review).
       void maybeNudgeReview(ctx).catch(() => undefined);
@@ -1571,6 +1690,9 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
   // starts an LLM, review, or stage; only snapshots counters, writes a
   // session summary (or checkpoint for reload), and best-effort notifies.
   pi.on("session_shutdown", (event, ctx) => {
+    discardEnrichmentQueue();
+    asyncGeneration++;
+    asyncController.abort();
     if (!effectiveEnabled() || configCwd !== ctx.cwd) return;
     try {
       const shutdown = event as { type: string; reason: ShutdownReason };
@@ -1658,7 +1780,6 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
         // Set one or more key=value pairs (all-or-nothing on validation).
         let next = config;
         const errors: string[] = [];
-        let nextCaptureMode = enrichmentBudget.captureMode;
         for (const pair of rest) {
           const eq = pair.indexOf("=");
           if (eq <= 0) {
@@ -1667,16 +1788,6 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
           }
           const key = pair.slice(0, eq);
           const value = pair.slice(eq + 1);
-          // captureMode is an enrichment-budget setting (not persisted in
-          // SelfEvolveConfig) — handle it here so users toggle hybrid mode.
-          if (key === "captureMode") {
-            if (value !== "heuristic" && value !== "hybrid") {
-              errors.push(`captureMode must be "heuristic" or "hybrid" (got "${value}")`);
-            } else {
-              nextCaptureMode = value;
-            }
-            continue;
-          }
           const result = setConfigValue(next, key, value);
           if (result.error) errors.push(result.error);
           else next = result.config;
@@ -1692,12 +1803,6 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
           return;
         }
         config = next;
-        if (nextCaptureMode !== enrichmentBudget.captureMode) {
-          enrichmentBudget = { ...enrichmentBudget, captureMode: nextCaptureMode };
-          // Resetting the enrichment budget state on a mode switch gives a
-          // clean budget window for the new mode.
-          enrichmentState = freshBudgetState();
-        }
         resetSessionState();
         updateStatusBar(ctx);
         ctx.ui.notify(formatConfigSummary(config, source, { resolvedModel: resolveSelfEvolveModel(ctx), enabled: effectiveEnabled(), suggestionsDir: resolvedSuggestionsDir() }), "info");
@@ -1793,12 +1898,12 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
         }
         // `signals [N] [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--project <p>]`
         const flags = parseSignalFlags(rest);
-        const signals = await loadSignals({
+        const signals = await loadResolvedSignals(undefined, await loadSignals({
           limit: flags.limit,
           since: flags.since,
           until: flags.until,
           project: flags.project,
-        });
+        }));
         if (signals.length === 0) {
           ctx.ui.notify(
             "Self-evolve: no signals yet. Enable with /self-evolve on, then signals appear at agent_end / session_compact boundaries.",
@@ -1815,6 +1920,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
       }
 
       if (cmd === "review") {
+        const reviewFence = asyncFence(ctx);
         // `/self-evolve review pending [N]` — session-scoped review of signals
         // not yet reviewed in the current session. Falls back to the global
         // `/self-evolve review [N]` behavior when `pending` is absent.
@@ -1869,6 +1975,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
         }
         const { supervision, runTeammate } = runtime;
         try {
+          if (!await reviewFence.valid()) return;
           const evaluation = await supervision.runSupervisedEvaluation<{ verdicts: ReviewVerdict[] }>(
             async (dispatchContext) => {
               const results = await runTeammate(
@@ -1891,6 +1998,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
               return single;
             },
             {
+              signal: reviewFence.signal,
               task: buildReviewPrompt(reviewSignals, config.reviewScoreThreshold),
               timeoutMs: REVIEW_TIMEOUT_MS,
               deadlineMs: REVIEW_DEADLINE_MS,
@@ -1919,6 +2027,19 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
             config.reviewScoreThreshold,
             actionableIds,
           );
+          if (!await reviewFence.valid()) return;
+          // Quality first, ownership second. Internal advice never authorizes stage/promote.
+          for (const signal of reviewSignals) {
+            const evaluation = await policyEvaluator("evolve-review", JSON.stringify({ signal, qualityVerdict: gate.verdicts.find((v) => v.id === signal.id) }), ctx,
+              { signal: reviewFence.signal, advice: true });
+            if (!await reviewFence.valid()) return;
+            await appendPolicyRecord({ schemaVersion: 1, kind: "decision-policy", signalId: signal.id,
+              traceHash: signal.traceHash, sessionId: signal.sessionId, project: signal.project ?? currentProject,
+              evaluation, completedAt: new Date().toISOString() }, reviewFence);
+            gate.verdicts = gate.verdicts.map((v) => v.id === signal.id ? applyReviewPolicy(v, evaluation) : v);
+            if (evaluation.advice) ctx.ui.notify(`Self-evolve policy recommendation (${evaluation.owner}; not authorization): ${evaluation.advice.recommendation}`, "info");
+          }
+          if (!await reviewFence.valid()) return;
           const review: SelfEvolveReview = {
             schemaVersion: 1,
             kind: "review",
@@ -1952,6 +2073,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
               if (!staged.has(signal.id)) continue;
               if (signal.project !== currentProject) continue; // cross-project guard
               try {
+                if (!await reviewFence.valid()) return;
                 const result = await depositSignal(signal, ctx);
                 if (result) {
                   depositAttempts += 1;
@@ -1966,7 +2088,9 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
             }
             review.deposited = depositedCount;
           }
-          const path = await writeReview(review);
+          if (!await reviewFence.valid()) return;
+          const path = await writeReview(review, reviewFence);
+          if (!path) return;
           const gateNote = [
             gate.droppedInvalid > 0 ? `${gate.droppedInvalid} invalid verdict id(s) dropped` : "",
             gate.downgraded > 0 ? `${gate.downgraded} low-score stage(s) downgraded` : "",
