@@ -51,6 +51,10 @@ npm install -g @alibaba-group/open-code-review@1.12.9
 2. 在任一 git 仓库内运行 `ocr delegate preview --format json` → 返回含 `schema_version` 与 `reviewable_files` 数组的 JSON（无 LLM 需求）。
 3. 在 pi 会话中调用 `open-code-review` 工具 `action=health`：`version` 必须成功；`llm` 连通性依赖当前 api-manager 模型及运行时网关认证，失败只影响 `review` action，`preview`/`rules` 委派模式仍可用。
 
+## 运行边界（v0.32.0）
+
+`open-code-review` 通过 PATH 选中的安装执行 `ocr`（Windows 优先解析该安装的 native launcher，不另找其他全局版本）。Runner 有硬 timeout、合并 stdout/stderr **10 MiB** 上限、abort 与进程树回收，错误保留有界 stderr 尾部；回收未确认视为错误，不冒充成功。Preview 在过滤前可能构建完整 diff，大仓库可调整工具 `overallTimeoutMinutes`，但不能把超时当作评审通过。这是 OpenCodeReview 代码评审 CLI，和 browser/computer-use 的图像 OCR 无关。
+
 ## ROLLBACK
 
 ```bash

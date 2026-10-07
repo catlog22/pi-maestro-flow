@@ -46,13 +46,27 @@ export ANTHROPIC_API_KEY=sk-ant-...
 
 ```bash
 # Install or upgrade the suite (teammate auto-installs as a dependency)
-pi install npm:pi-maestro-flow@0.31.3
+pi install npm:pi-maestro-flow@0.32.0
 
 # Verify that the suite components are listed, then restart Pi or reload extensions.
 pi list
 ```
 
 A Flow-managed companion registration is migrated during upgrade. A same-name local development registration is intentionally preserved and reported in the startup log; update or remove that override explicitly.
+
+### v0.32.0 behavior boundaries
+
+Plan-auto is default off: a human in the parent TUI enables `/plan-auto on`
+during the current Plan cycle; the next confirm executes standalone/current.
+Decision-policy recommendations are not human answers, permissions, or knowledge
+promotion. See the [Goal/Plan guide](docs-site/src/content/docs/guides/goal-plan-todo.md).
+
+For browser setup, see [Browser Bridge Setup](packages/pi-maestro-flow/optional/BROWSER-BRIDGE-SETUP.md):
+explicit `app.channel` selects managed/profile/cdp/extension. NONE needs no token
+or pairing (`transportReady:true`, `authenticatedConnected:false`); paired is the
+default. The extension connects multiple listeners in `19222..19231` and shares
+cookies/login state. Chrome 136+ profile debugging requires an explicitly chosen
+non-default user-data-dir; closing the default browser does not lift the restriction.
 
 ### First Run
 
@@ -807,7 +821,7 @@ teammate({ agent: "delegate", context: "fresh", task: "PURPOSE: Read state and c
 
 ```bash
 # ─── Installation ───
-pi install npm:pi-maestro-flow@0.31.3
+pi install npm:pi-maestro-flow@0.32.0
 pi list
 
 # ─── Knowledge ───

@@ -7,7 +7,7 @@ Self-Evolve turns real Pi execution traces into **auditable, reviewable, and rev
 
 > Self-Evolve is disabled by default. It never gives a model direct write access to the knowledge corpus or Skills. Even in `auto-deposit` mode, it only stages gate-passing candidates after an explicit `/self-evolve review`; **promotion is always a separate governance action and is never automatic**.
 
-> **Version availability:** stable 0.16.0 supports dry-run candidate signals; v0.17.0, which introduced `auto-deposit`, was withdrawn. This page retains current-source auto-deposit, health, canary, and proposal contracts for review before a fixed release. Do not install v0.17.0.
+> **v0.32.0:** advisory capture/review policy and budgeted grounded hybrid enrichment; disabled/dry-run defaults and human promotion boundaries remain unchanged.
 
 ---
 
@@ -154,6 +154,14 @@ The model inherits the main session by default:
 ```
 
 An explicit model must be available in the current model registry.
+
+### Advisory Policy and Grounded Enrichment (v0.32.0)
+
+Manually invoke `/skill:decision-policy` and confirm the selfEvolve rules in `.pi/decision-policy.json`. `off` preserves the heuristic flow; `shadow` is diagnostic only; `enforce` routes internal evolve-capture/evolve-review within confirmed rules. Review runs the existing quality gate before ownership/advice. Uncertain/external, low-confidence, or unavailable-backend results degrade conservatively. Advice is not stage/promote authorization; spec governance remains human.
+
+With `captureMode:hybrid`, enrichment receives numbered evidence and may reference supplied evidence IDs only; adjacent signals coalesce into budgeted batches. Failures/timeouts/invalid outputs preserve heuristic fallback. Raw suggestions stay unchanged. Independent `enrichments/<date>.jsonl` and `decision-policy/<date>.jsonl` sidecars join on **signalId + full traceHash + sessionId**; collisions are non-actionable and stale session/config/policy work cannot publish. Status/review use the resolved projection, never treating machine advice as project norms.
+
+Auto-deposit stages reviewed pending candidates only. Promotion still requires explicit human approval for concrete candidates; approving a Plan, completing work, or receiving machine advice is not promotion authority.
 
 ## 7. Command Reference
 

@@ -125,7 +125,7 @@ test("packed install runs the runtime broker bin under supported Node without na
     const tarball = path.join(root, packed.filename);
     assert.equal(fs.existsSync(tarball), true);
 
-    const dependencyTarballs = ["pi-maestro-settings-core", "pi-maestro-backends"].map((name) => {
+    const dependencyTarballs = ["pi-maestro-settings-core", "pi-maestro-backend-core", "pi-maestro-backends"].map((name) => {
       const dependency = parsePackResult(npmRun(
         ["pack", "--json", "--ignore-scripts", "--pack-destination", root],
         path.resolve(packageRoot, "..", name),

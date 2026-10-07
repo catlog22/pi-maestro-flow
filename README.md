@@ -40,7 +40,7 @@
 - 🌐 **DSH 直连 SSH 部署** — `mode: ssh` 通过 OpenSSH 在远端主机启动 DeepSeek Harness 运行时：BatchMode 免提示认证、主机密钥指纹预检固定、按请求超时调优告警
 - 🌉 **原生 Gateway 与持久公网入口** — 独立 CLI/TUI 可在无 Pi 环境配置和托管 Gateway；统一 tunnel profile 支持 Cloudflare Quick/Named、实验性 OpenAI Secure 与 Managed OpenSSH Reverse
 - 🎯 **Goal 自主长时目标** — 设定目标与 Token 预算，跨多轮自主循环，完成后由独立验证器审计
-- 📝 **Plan 先批准再动手** — 只读起草 Markdown 计划，用户批准后才放行编辑；支持独立 Plan 模型
+- 📝 **Plan 先批准再动手** — 只读起草 Markdown 计划；支持独立 Plan 模型及默认关闭、真人 TUI 开启的当轮 Plan-auto 预授权（`/plan-auto`）
 - 🛰️ **Pi Cockpit 可视化** — 实时呈现运行中的 teammate 与 todo 计划，内置 9 套主题；Quiet 模式压缩工具输出与思考折叠
 - 🏷️ **终端标题** — Claude Code 风格 Tab 标题 + 可选 LLM 生成会话摘要
 - 🖼️ **Vision 多模态委托** — 纯文本主模型自动激活 `describe_image`，委托多模态模型分析图片（首选/回退/缓存/重试可配）
@@ -79,7 +79,7 @@ pi-maestro-flow 是 **Pi 插件**，用 `pi install` 安装（不是普通 npm �
 
 ```bash
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent   # 宿主运行时
-pi install npm:pi-maestro-flow@0.31.3                              # 安装或升级插件（单入口）
+pi install npm:pi-maestro-flow@0.32.0                              # 安装或升级插件（单入口）
 pi list                                                            # 确认 Flow、Teammate 与 Cockpit 均已列出
 ```
 
@@ -127,7 +127,8 @@ Maestro Flow 自动分类意图并路由：**简单任务**直接执行 · **多
 | **[OpenAI Secure MCP Tunnel 安装指南](packages/pi-maestro-flow/optional/OPENAI-TUNNEL-SETUP.md)** | 实验性外部 `tunnel-client`、环境变量引用、managed-forward MCP access、验证与回滚 |
 | **[Gateway 命令与 MCP 工具边界](docs/gateway-command-mcp-tool-design.md)** | `/gateway` 管理面、Gateway MCP 控制面与模型侧 `mcp` 工具的职责划分 |
 | **[多设备 Fabric 架构](docs/fabric/README.md)** | Endpoint-first、connection-first 的目标架构及 `pi-maestro-fabric-core` Phase 1 契约基线 |
-| **[发布说明](RELEASE.md)** | 版本历史与变更日志 |
+| **[发布说明](RELEASE.md)** | v0.32.0：范围化决策、精确证据与浏览器桥接 |
+| **[浏览器桥接安装指南](packages/pi-maestro-flow/optional/BROWSER-BRIDGE-SETUP.md)** | 多监听器、NONE/paired、显式通道、共享登录态与排障 |
 | **[更新说明](docs/UPDATES.md)** | 历史提交变更记录 |
 | **[新特性使用说明](docs/new-features-usage.md)** | Vision 委托 · 终端标题 · Mailbox · observe watch · self-evolve 快速上手 |
 | 各插件 README | [flow](packages/pi-maestro-flow/README.md) · [teammate](packages/pi-maestro-teammate/README.md) · [cockpit](packages/pi-cockpit/README.md) |

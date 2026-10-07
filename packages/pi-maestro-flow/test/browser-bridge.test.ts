@@ -20,6 +20,8 @@ const PORT_FILE = join(TEST_DIRECTORY, "browser-bridge.port");
 const CONFIG_FILE = join(TEST_DIRECTORY, "browser-bridge.json");
 const VERIFIED_FILE = join(TEST_DIRECTORY, "browser-bridge.verified");
 process.env.PI_BROWSER_BRIDGE_DIR = TEST_DIRECTORY;
+const inheritedAuthMode = process.env.PI_BROWSER_BRIDGE_AUTH_MODE;
+process.env.PI_BROWSER_BRIDGE_AUTH_MODE = "paired";
 // Import after isolation env is set because bridge paths are module constants.
 const {
   authTranscript,
@@ -486,6 +488,8 @@ test.before(async () => {
 test.after(async () => {
   await browserBridge.shutdown();
   rmSync(TEST_DIRECTORY, { recursive: true, force: true });
+  if (inheritedAuthMode === undefined) delete process.env.PI_BROWSER_BRIDGE_AUTH_MODE;
+  else process.env.PI_BROWSER_BRIDGE_AUTH_MODE = inheritedAuthMode;
 });
 
 test("start creates owner-only port/token config and exposes disconnected status", async () => {
@@ -1980,14 +1984,17 @@ test("extension cancel state machine stops queued work but keeps started work te
   let queuedDispatches = 0;
   const queuedSocket = {
     readyState: 1,
-    send: (frame: string) => queuedFrames.push(JSON.parse(frame) as Record<string, unknown>),
+    send: (frame: string) => {
+      const message = JSON.parse(frame) as Record<string, unknown>;
+      queuedFrames.push(message);
+      if (message.type === "ack") protocol.cancel(queuedSocket, "queued");
+    },
   };
   protocol.install(queuedSocket, async () => {
     queuedDispatches += 1;
     return { ok: true, data: "must-not-run" };
   });
   const queuedExecution = protocol.execute(queuedSocket, { id: "queued", cmd: "exec" });
-  protocol.cancel(queuedSocket, "queued");
   await queuedExecution;
   assert.equal(queuedDispatches, 0);
   assert.deepEqual(queuedFrames, [
@@ -2266,12 +2273,14 @@ test("extension sources auto-discover/pair, preserve legacy fields, and implemen
   assert.match(background, /type: 'cancel_ack'/);
   assert.match(background, /stopped = Boolean\(operation && !operation\.started\)/);
   assert.match(background, /send\(record, \{ type: 'cancel_ack', id, stopped \}\)/);
-  assert.match(popup, /STORAGE_PORT_KEY/);
-  assert.match(popup, /STORAGE_TOKEN_KEY/);
+  assert.match(popup, /CUSTOM_PORTS_KEY/);
+  assert.match(popup, /pi_ws_port: ports\[0\], pi_ws_token: token/);
   assert.match(popup, /pairing-pending/);
   assert.match(popupHtml, /<details id="advanced">/);
-  assert.match(popupHtml, /browser status/);
-  assert.match(popupHtml, /browser pair/);
+  assert.match(popup, /browser pair/);
+  assert.match(popupHtml, /id="status"/);
+  assert.match(popupHtml, /NONE 无授权/);
+  assert.match(popupHtml, /PAIRED 需在 Pi 确认配对码/);
 });
 
 test("shutdown terminalizes tracked work, closes sockets, and waits until the port is reusable", async () => {

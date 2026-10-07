@@ -65,6 +65,12 @@ flowchart LR
 | `pi-cockpit` | 界面配置（`~/.pi/agent/cockpit.json`） |
 | 集成 providers | MCP（`mcp-settings-provider`）、Skills（`skills-settings-provider`）、Smart Search（`smart-search-settings-provider`）、API Manager（`api-manager-settings-provider`） |
 
+## Classifier 与 advisory policy（v0.32.0）
+
+项目 `.pi/classifier.json` 通过 classifier settings provider 配置 enabled、endpoint/model、timeout、预算与 domain mode。原生 Pi 绑定 host classifier registry，校验 stop reason/问题 schema，并把 cache 绑定到实际模型；配置变更围栏旧代结果。保存使用锁、revision/ownership 检查与临时文件原子 publish；非法配置/路径不伪装成正常默认值。环境变量 override 与持久化 configured 值分开显示，保存不会消除有效 env override。
+
+Classifier 与 policy 是不同开关：classifier `off/shadow/jev` 不等于 policy `off/shadow/enforce`。项目 decision policy 默认关闭，需人工 `/skill:decision-policy` 提出并 host-confirm 精确草稿后保存 `.pi/decision-policy.json`；`auto` backend 的 classifier 不可用时可能使用有界 LLM fallback，仍只给建议、不授予权限。详情见[Goal/Plan](/guides/goal-plan-todo)。
+
 ## 持久化与并发
 
 - **资源锁**：`resource-lock` 防止多会话并发写同一配置文件；

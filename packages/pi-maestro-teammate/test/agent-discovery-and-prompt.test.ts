@@ -535,7 +535,7 @@ test("verifier is the bundled read-only Goal fallback role", () => {
     assert.equal(verifier?.source, "builtin");
     assert.equal(verifier?.taskType, undefined);
     assert.equal(verifier?.thinking, "low");
-    assert.deepEqual(verifier?.tools, ["read", "search", "find", "ls"]);
+    assert.deepEqual(verifier?.tools, ["read", "search", "find", "ls", "resource"]);
     assert.equal(verifier?.systemPromptMode, "replace");
     assert.equal(verifier?.inheritProjectContext, false);
     assert.equal(verifier?.inheritSkills, false);
@@ -968,7 +968,7 @@ Proxy specialist prompt.
     assert.match(String(tools.get("observe")?.description), /local teammate and background Bash/);
     assert.doesNotMatch(String(tools.get("teammate-list")?.description), /cross-session windows/);
 
-    assert.equal(sessionStartHandlers.length, 2, "classifier and teammate lifecycle both register");
+    assert.equal(sessionStartHandlers.length, 3, "classifier, Codex Fast, and teammate lifecycle register");
     const context = {
       cwd: project,
       modelRegistry: { getAvailable: () => [] },

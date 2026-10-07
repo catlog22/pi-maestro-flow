@@ -70,7 +70,9 @@ icon: "🌿"
 | 变量 | 说明 |
 |------|------|
 | `CHROME_PATH` / `PUPPETEER_EXECUTABLE_PATH` | Chromium/Chrome/Edge 可执行文件路径（browser 工具 `app.path` 的备用来源） |
-| `PI_BROWSER_BRIDGE_PORT` | extension bridge server 的十端口起点（默认 `19222`，即 `19222..19231`；非法/越界值明确失败）。空配置扩展不会读取 Pi 进程环境，自定义起点还需在 popup 高级设置中填写端口；不触发自动回退 |
+| `PI_BROWSER_BRIDGE_PORT` | server 十端口起点（默认 `19222`，范围 `19222..19231`；合法起点 1..65526）。每个 Pi 占一个可用端口，扩展连接多个 listener；自定义端口须把 status 实际 listeningPort 加到 popup Advanced，扩展无法读取 Pi env |
+| `PI_BROWSER_BRIDGE_AUTH_MODE` | 默认 `paired`；显式 `none` 无 token/pair、无凭证授权。ready 时 transportReady=true、authenticatedConnected=false 是正常状态；启动 Pi 前设置 |
+| `PI_BROWSER_BRIDGE_DIR` | bridge 历史配置/marker 目录，默认 `~/.pi`；NONE ready marker 独立于 paired legacy token 文件 |
 | `BROWSER` | 默认浏览器提示 |
 
 ## 说明

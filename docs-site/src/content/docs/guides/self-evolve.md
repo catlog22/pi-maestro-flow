@@ -7,7 +7,7 @@ Self-Evolve 把 Pi 的真实运行轨迹转成**可审计、可评审、可回�
 
 > Self-Evolve 默认禁用。它不会让模型直接改写知识库或 Skill。即使启用 `auto-deposit`，也只会在用户显式运行 `/self-evolve review` 后自动 **stage** 过门候选；**promotion 始终是独立治理动作，绝不自动执行**。
 
-> **版本可用性：** 当前稳定版 0.16.0 支持 dry-run 候选信号；包含 `auto-deposit` 的 v0.17.0 已撤回。本页保留当前源码中的 auto-deposit、health、canary 与 proposal 契约供修复版审阅，请勿安装 0.17.0。
+> **v0.32.0：** 新增建议性 capture/review policy 与受预算的 grounded hybrid enrichment；默认禁用、默认 dry-run 和人工 promotion 边界不变。
 
 ---
 
@@ -168,6 +168,14 @@ Review gate 会：
 ```
 
 指定模型必须出现在当前 `modelRegistry.getAvailable()` 中。
+
+### 建议性 policy 与 grounded enrichment（v0.32.0）
+
+人工 `/skill:decision-policy` 配置并确认 `.pi/decision-policy.json` 的 selfEvolve 规则。`off` 保留 heuristic 流程；`shadow` 只诊断，不替代原判断；`enforce` 可在已确认规则内判定 evolve-capture / evolve-review 的内部路由。review 先走原质量门，再走 ownership/advice；不确定、外部、低置信或不可用 backend 保守回退，建议不是 stage/promote 授权，spec 治理仍人工。
+
+`captureMode:hybrid` 的 enrichment 为模型提供已编号证据，只能引用 supplied evidence IDs；合并相邻信号到受预算 batch。失败/超时/无效输出保留 heuristic fallback。原始 suggestions 不改写，`enrichments/<date>.jsonl` 与 `decision-policy/<date>.jsonl` 独立 sidecar 用 **signalId + 完整 traceHash + sessionId** 精确 join；碰撞不行动，旧会话/config/policy 的异步结果不能发布。状态和 review 读取 resolved projection，而不是把 machine advice 当成规范。
+
+即使 auto-deposit 只 stage 过门 pending candidates，最终 promotion 仍必须针对具体候选获得显式人工批准；批准 Plan、完成任务或自动建议均不授权知识晋升。
 
 ## 7. 命令速查
 

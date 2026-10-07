@@ -13,6 +13,7 @@ export * from "./backends.ts";
 export * from "./child-extensions.ts";
 export * from "./classify.ts";
 export * from "./cli-tools.ts";
+export * from "./codex-fast.ts";
 export * from "./completion-durability.ts";
 export * from "./events.ts";
 export * from "./external-agent-projections.ts";

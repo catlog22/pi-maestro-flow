@@ -5,7 +5,23 @@ icon: "🔄"
 
 This page records user-visible features, behavior changes, fixes, and upgrade requirements from the previous stable release to the current version of the pi maestro flow suite.
 
-> **Current version: v0.31.3 — Native Pi Host & Reliable Tool Lifecycles.** Pi 0.99.0 validation baseline; version-gated legacy compatibility for 0.87–0.98; engine range remains `maestro-flow >=0.5.87`.
+> **Current version: v0.32.0 — Scoped Decisions, Exact Evidence & Browser Bridge.** Pi 0.99.0 baseline; version-gated legacy compatibility for 0.87–0.98; engine range remains `maestro-flow >=0.5.87`, with registry latest 0.5.90 at preparation.
+
+## v0.32.0 — Scoped Decisions, Exact Evidence & Browser Bridge
+
+> Updates Flow 0.32.0, Teammate 2.8.0, Cockpit 0.24.2, Backend-Core 0.1.5, and Backends 0.1.6; Settings-Core 0.2.3, Fabric/Fabric-Core 0.1.0, and pi-fluent-tui 0.1.2 are unchanged. **Pre-release feature range** `v0.31.3..aa054f450da2440c44b604bb8e6d3e1f41ced0a3`: 12 commits, 130 files, +11,047 / −1,491 lines, excluding this version/lockfile/docs preparation and future release commits. Runtime gates, publication, registry SHA comparison, and fresh-install smoke are not yet claimed passed here; final verification belongs in RELEASE.md.
+
+- **Human-scoped Plan-auto**: default off; parent TUI `/plan-auto on` or Alt+Shift+A enables the current Plan cycle. The next confirm uses durable approval and executes standalone/current. Session/cwd/cycle/generation fences reject RPC, children, and history as authority; off does not stop already-started execution.
+- **Advisory decision policy**: manually invoke `/skill:decision-policy` and human-confirm the exact revision-checked draft. Ask/self-evolve support off/shadow/enforce with classifier and bounded LLM fallback/advice. Machine recommendations are separate from human answers, not Plan/permission/publication/knowledge-promotion authority. Uncertain/external, low-confidence, unavailable-model, and exhausted-budget cases remain human.
+- **Multi-listener browser bridge and NONE**: extension maintains multiple `19222..19231` listeners. Default paired; explicit `PI_BROWSER_BRIDGE_AUTH_MODE=none` needs no token/pair, with transportReady=true and authenticatedConnected=false. Custom actual ports require popup Advanced. Explicit channels, tab leases, busy/draining, and shared-cookie boundaries are detailed in the browser guide. Chrome136's default-directory restriction survives closing windows; profile auto-launch uses dynamic port 0.
+- **Exact Goal evidence**: complete binds up to 16 requirements to exact session/agent URIs or local paths, with bounded pages and immutable publication pins; missing evidence cannot pass. Acceptance commands remain primary, and fallback verifiers cannot replace exact evidence with broad exploration.
+- **Bounded OpenCodeReview**: external ocr runner timeout, 10 MiB combined-output cap, abort/process-tree cleanup, bounded stderr, and Windows launcher handling. This is code review, not image OCR.
+- **Codex Fast and scoped child routing**: `/fast` / `--fast`, teammate task/dispatch/taskType/role boolean overrides, matching Codex Responses priority payloads only, authoritative false, and child hooks even with no-extensions. May consume more quota; no speed guarantee.
+- **Native classifier and local TUI**: effective-model cache identity, schema/stop-reason validation, stale-result fencing, and atomic config saves. Failed remote Ask/Plan promises no longer cancel local prompts; reconnect requests remain pending, while explicit cancel/abort still clean up.
+- **Governed self-evolve**: bounded grounded hybrid enrichment and exact-key policy sidecars preserve raw signals and reject stale publication. Disabled/dry-run by default; never auto-promotes. Closeout requests explicit approval for concrete knowledge candidates.
+- **Compatibility fixes**: Cockpit native-host/status badges and Anthropic Messages discovery through `/v1/models`.
+
+Upgrade: `pi install npm:pi-maestro-flow@0.32.0`. Node.js ≥ 22.19.0 and Pi 0.99.0 baseline unchanged. Close Pi before upgrading, restart afterward, and update preserved local companion overrides explicitly.
 
 ## v0.31.3 — Native Pi Host & Reliable Tool Lifecycles
 

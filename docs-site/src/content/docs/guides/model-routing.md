@@ -65,7 +65,7 @@ teammate({
 
 ## 路由 Profiles（v0.25+）
 
-命名 profile 把 `mappings` / `fallbackMappings` / `thinkingLevels` / `roleMappings` 打包为一套可切换的路由配置，运行时附带 safeguards（ Authority 生成围栏、完成消息 outbox GC 有界、进程树清理确认回收而非仅凭退出码判断）。
+命名 profile 把 `mappings` / `fallbackMappings` / `thinkingLevels` / `fastModes` / `roleMappings` 打包为一套可切换的路由配置，运行时附带 safeguards（ Authority 生成围栏、完成消息 outbox GC 有界、进程树清理确认回收而非仅凭退出码判断）。
 
 | 项 | 说明 |
 |----|------|
@@ -78,7 +78,7 @@ teammate({
 
 ## Teammate Smart Mode
 
-Smart Mode 是全局的智能选模策略，保存在 `~/.pi/agent/teammate-models.json` 的 model-routing v3 store 中。进入 Control Center 的 **Routing** tab 后，按 `Ctrl+S` 会按 `off → economy → balanced → sota → off` 循环切换；界面状态与提示均提供中英文 locale。
+Smart Mode 是全局的智能选模策略，保存在 `~/.pi/agent/teammate-models.json` 的 model-routing v4 store 中。进入 Control Center 的 **Routing** tab 后，按 `Ctrl+S` 会按 `off → economy → balanced → sota → off` 循环切换；界面状态与提示均提供中英文 locale。
 
 | 模式 | 行为 |
 |------|------|
@@ -113,6 +113,21 @@ teammate({
 ```
 
 配置了[模型故障转移](/guides/api-provider-config)时，熔断触发后自动按 fallback 链切换；切换可不重启 run，经 `set_model` RPC 在进程内热切换，手动切换模型会重置该模型的熔断器。
+
+## Codex Fast 与 scoped child routing（v0.32.0）
+
+`/fast on|off|status` 保存项目 `.pi/codex-fast.json`（`{"enabled":true}`）；`pi --fast` 仅启动启用。只对 provider `openai-codex`、API `openai-codex-responses` 且 payload.model/input 匹配的请求设置 `service_tier:"priority"`，不影响其他 provider，也不保证低延迟，可能消耗更多配额。
+
+Teammate 可用 boolean `fast`，显式 false 不被默认值覆盖：
+
+```javascript
+teammate({ fast: true, tasks: [
+  { agent: "general", prompt: "实现模块" },
+  { agent: "analyst", prompt: "审查模块", fast: false }
+] })
+```
+
+优先级：task.fast > 顶层 fast > taskType `fastModes` > roleMappings.fast > Agent frontmatter.fast > 子项目 Codex Fast 默认。路由 store v4 保留旧配置迁移；Routing 面板可维护 fast。子进程使用 scoped override（包括 false），并显式注册 child hook，`--no-extensions` 也不丢失这一偏好；它不是其他 backend 的通用“加速”承诺。
 
 ## 下一步
 

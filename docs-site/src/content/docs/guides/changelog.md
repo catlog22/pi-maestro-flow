@@ -5,7 +5,23 @@ icon: "🔄"
 
 这里记录 pi maestro flow 套件从上一稳定版本到当前版本的用户可见变化、行为调整、问题修复和升级要求。
 
-> **当前版本：v0.31.3 — Native Pi Host & Reliable Tool Lifecycles。** Pi 验证基线 0.99.0；0.87–0.98 版本门控 legacy 兼容；引擎保持 `maestro-flow >=0.5.87` 范围。
+> **当前版本：v0.32.0 — 范围化决策、精确证据与浏览器桥接。** Pi 验证基线 0.99.0；0.87–0.98 版本门控 legacy 兼容；引擎保持 `maestro-flow >=0.5.87` 范围，准备时 registry latest 为 0.5.90。
+
+## v0.32.0 — 范围化决策、精确证据与浏览器桥接
+
+> 更新 Flow 0.32.0、Teammate 2.8.0、Cockpit 0.24.2、Backend-Core 0.1.5、Backends 0.1.6；Settings-Core 0.2.3、Fabric/Fabric-Core 0.1.0、pi-fluent-tui 0.1.2 不变。**发布准备前功能范围** `v0.31.3..aa054f450da2440c44b604bb8e6d3e1f41ced0a3`：12 commits、130 文件、+11,047 / −1,491 行，不含本次版本/lockfile/文档及未来发布提交。运行时门禁、发布、registry SHA 和 fresh-install smoke 尚未在此声明通过，最终验证见 RELEASE.md。
+
+- **真人范围化 Plan-auto**：默认关闭；当前 Plan 周期中由父 TUI 的 `/plan-auto on` 或 Alt+Shift+A 开启，下一 `plan-confirm` 经正常 durable approval 执行 standalone/current。会话/cwd/cycle/generation 围栏，RPC/子代理/历史不授予；off 不终止已开始执行。
+- **建议性 decision policy**：人工 `/skill:decision-policy` 配置并确认精确 revision 草稿；Ask/self-evolve 支持 off/shadow/enforce，classifier 与有界 LLM fallback/advice。机器 recommendations 与 human answers 分开，不是 Plan/权限/发布/知识晋升授权；不确定、外部、低置信、不可用模型或预算仍回到人工。
+- **浏览器多监听器与 NONE**：扩展同时发现/连接 `19222..19231` listener；默认 paired，显式 `PI_BROWSER_BRIDGE_AUTH_MODE=none` 不需 token/pair，transportReady=true 而 authenticatedConnected=false。自定义实际端口须填 popup Advanced；显式 channel、物理 tab 租约、busy/draining 与共享 cookies 边界见[浏览器指南](/guides/lsp-browser)。Chrome136 默认目录调试限制不会因关窗消失，profile 自动启动用动态端口 0。
+- **Goal 精确证据**：complete 可绑定最多 16 个 requirement→精确 session/agent URI 或本地 path；有界分页、不可变 publication pin、缺失证据不通过。acceptance commands 优先，fallback verifier 不以广域探索替代精确证据。
+- **有界 OpenCodeReview**：外部 ocr runner 的 timeout、10 MiB 合并输出上限、abort/进程树回收、stderr 尾部与 Windows launcher 处理加固；不是图像 OCR。
+- **Codex Fast 与 scoped child routing**：`/fast` / `--fast` 与 teammate task/dispatch/taskType/role fast 布尔覆盖；仅匹配 Codex Responses 请求添加 priority tier，false 优先、子 hook 在 no-extensions 启动仍生效，可能消耗更多配额而非速度保证。
+- **原生 classifier 与本地 TUI**：缓存绑定真实模型、schema/stop reason 校验、过期结果围栏和原子配置写入；Ask/Plan 远程 transport promise 失败不再误取消本地界面，保留重连请求，明确 cancel/abort 仍清理。
+- **Self-evolve 治理**：有界 grounded hybrid enrichment 与 exact-key policy sidecar，原始信号不改写、stale 结果不发布；默认禁用/dry-run，不自动 promote，closeout 对具体候选请求显式人工批准。
+- **兼容性修复**：Cockpit 原生宿主/状态徽章同步，Anthropic Messages 模型发现走 `/v1/models`。
+
+升级：`pi install npm:pi-maestro-flow@0.32.0`。Node.js ≥ 22.19.0 与 Pi 0.99.0 基线不变；升级前关闭 Pi、之后重启，保留的本地 companion 覆盖需自行更新。
 
 ## v0.31.3 — 原生 Pi 宿主与可靠工具生命周期
 

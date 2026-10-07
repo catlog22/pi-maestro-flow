@@ -114,8 +114,8 @@ const FEATURES: Feature[] = [
   },
   {
     icon: 'sparkles',
-    zh: { title: 'self-evolve 自进化（M1-M5）', desc: '0.16.0 提供 dry-run 候选信号；含 auto-deposit 的 v0.17.0 已撤回，等待修复版' },
-    en: { title: 'Self-Evolve Automation (M1-M5)', desc: '0.16.0 provides dry-run signals; v0.17.0 auto-deposit was withdrawn pending a fix' },
+    zh: { title: 'self-evolve 自进化（M1-M5）', desc: 'v0.32.0 支持证据约束的丰富化与建议策略路由；默认关闭、dry-run 优先，知识发布仍需人工批准' },
+    en: { title: 'Self-Evolve Automation (M1-M5)', desc: 'v0.32.0 adds grounded enrichment and advisory routing; disabled by default, dry-run first, with human approval for publication' },
     guide: 'self-evolve',
   },
 ];

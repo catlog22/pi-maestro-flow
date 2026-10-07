@@ -60,7 +60,7 @@
 
 ```bash
 # 安装或升级（pi-maestro-teammate 作为依赖自动安装）
-pi install npm:pi-maestro-flow@0.31.3
+pi install npm:pi-maestro-flow@0.32.0
 
 # 验证 Flow、Teammate 和 Cockpit 均已列出，然后重启 Pi 或 reload extensions
 pi list
@@ -416,13 +416,16 @@ lsp({ action: "symbols", file: "*" })  // 工作区符号
 
 ### 3.2 browser — 浏览器控制
 
-通过 CDP 控制 Chromium，支持命名标签页、截图和页面内 JavaScript 执行：
+通过显式 `app.channel: "managed" | "profile" | "cdp" | "extension"` 选择 Chromium 后端；未选通道时默认 managed headless，不自动接管日常 Chrome。操作前先调用 `browser({ action: "guide" })` 并加载相关 SOP。
 
 | Action | 说明 |
 |--------|------|
 | `open` | 打开/附加浏览器标签页 |
 | `close` | 关闭标签页（`all: true` 关闭全部） |
-| `run` | 在页面中执行 JavaScript |
+| `run` | 在宿主执行 JS；页面 JS 用 `page.evaluate` |
+| `guide` | SOP 索引/主题 |
+| `status` | 启动并实时探测 bridge 与命名 tab |
+| `pair` | 仅 paired 模式批准 requestId/code |
 
 ```javascript
 // 打开页面
@@ -432,7 +435,7 @@ browser({ action: "open", url: "http://localhost:3000", name: "app" })
 browser({
   action: "run",
   name: "app",
-  code: "await page.screenshot({ path: 'screenshot.png' }); return document.title;"
+  code: "await page.screenshot({ path: 'screenshot.png' }); return await page.title();"
 })
 
 // 设置视口
@@ -445,9 +448,20 @@ browser({ action: "close", all: true })
 
 支持配置：
 - `app.path` — 自定义 Chromium/Chrome/Edge 路径
-- `app.cdp_url` — 连接已有浏览器 CDP 端点
-- `wait_until` — 导航等待策略（load / domcontentloaded / networkidle0 / networkidle2）
-- `dialogs` — 对话框处理（accept / dismiss）
+- `app.cdp_url` — `channel:"cdp"` 附加已有端点（borrowed）
+- `app.user_profile_dir` — `channel:"profile"` 明确选择非默认 user-data-dir；旧 `attach_user_profile:true` 兼容
+- `visible:true` — 显示 Pi 启动的 managed/profile 进程；已有附加不受影响，extension 拒绝此参数
+- `wait_until` / `dialogs` — managed/profile/cdp 导航等待与对话框策略
+
+**扩展桥**：`/install browser-bridge` 后调用 `browser({action:"status"})`。扩展同时发现/连接默认 `19222..19231` 的多个 listener；每个 Pi 占一个可用端口。默认 `paired`：比对 popup 与 `pendingPairings` 的 requestId/code，调用 `browser pair`，等待独立认证重连后 `authenticatedConnected:true`。显式在启动 Pi 前设置 `PI_BROWSER_BRIDGE_AUTH_MODE=none`：不需要 token 或 pair，成功为 `transportReady:true`、`authenticatedConnected:false`、`pendingPairings:[]`；NONE 是无凭证授权模式，不是认证成功。自定义 `PI_BROWSER_BRIDGE_PORT` 改变十端口起点，必须把 status 的实际 listeningPort 加到 popup **Advanced**（NONE 留空 token）。
+
+```javascript
+browser({ action: "open", name: "daily", app: { channel: "extension", target: "example.com" } })
+```
+
+extension 仅支持 URL/title/goto/evaluate、`browser.pages`、raw CDP/batch、cookies、tabs 和 CDP screenshot，不承诺 Puppeteer/ElementHandle/DOM helper/OCR parity；未实现 API 或断连失败关闭、不回退。borrowed close 释放映射/租约，owned close 关闭真实 tab；物理 tab 租约跨 listener 独占，busy/draining 不代表页面工作停止，cookies/登录态仍共享而非隔离。
+
+profile 自动启动使用 `--remote-debugging-port=0` 并读取 `DevToolsActivePort`，或复用已有 endpoint。Chrome 136+ 即使关闭窗口仍禁止调试默认 user-data-dir；明确选择非默认 profile，或用 extension 访问日常 Chrome。不会自动复制/切换 profile，真实登录环境也不保证 CAPTCHA 成功。安全风险及排障见[安装指南](../packages/pi-maestro-flow/optional/BROWSER-BRIDGE-SETUP.md)。
 
 ---
 
@@ -1246,7 +1260,7 @@ teammate({ tasks: [{ agent: "general", context: "fresh", prompt: "PURPOSE: 读�
 
 ```bash
 # ─── 安装 ───
-pi install npm:pi-maestro-flow@0.31.3
+pi install npm:pi-maestro-flow@0.32.0
 
 # ─── 知识 ───
 maestro search "查询" --code

@@ -39,7 +39,7 @@ It ships as three plugins (install one, get all three):
 - 🖥️ **pi-teammate-models CLI** — maintain `.pi/teammate-backends.json` from the terminal: static route table, field-level edit, and a guided registration wizard with compile validation before every write and undoable `.bak`/`.bak.1` backup rotation
 - 🌐 **DSH direct-SSH deployments** — `mode: ssh` launches the DeepSeek Harness runtime on a remote host over OpenSSH: BatchMode prompt-free auth, pre-flight host-key fingerprint pinning, and per-request timeout guidance
 - 🎯 **Goal — autonomous long-running objectives** — set an objective and token budget, loop autonomously across turns, audited by an independent verifier
-- 📝 **Plan — approve before you change** — draft a Markdown plan read-only; edits are released only after user approval; supports a dedicated Plan model
+- 📝 **Plan — approve before you change** — read-only Markdown drafts, a dedicated Plan model, and default-off, human-TUI Plan-auto preauthorization scoped to the current cycle (`/plan-auto`)
 - 🛰️ **Pi Cockpit visualization** — live view of running teammates and the todo plan, with 9 built-in themes; Quiet mode compresses tool output and folds thinking blocks
 - ⏱️ **bash_bg adaptive shell** — long commands auto-background on timeout and notify on completion, without blocking the conversation
 - 🧠 **Persistent knowledge system** — semantic search, spec & knowhow capture, survives across sessions
@@ -73,7 +73,7 @@ pi-maestro-flow is a **Pi plugin** — install it with `pi install` (not a regul
 
 ```bash
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent   # host runtime
-pi install npm:pi-maestro-flow@0.31.3                              # install or upgrade the plugin (single entry)
+pi install npm:pi-maestro-flow@0.32.0                              # install or upgrade the plugin (single entry)
 pi list                                                            # confirm Flow, Teammate, and Cockpit are listed
 ```
 
@@ -116,7 +116,8 @@ Full tool parameters and workflow definitions live in the **[Usage Guide](docs/U
 | **[Usage Guide](docs/USAGE_EN.md)** / **[中文](docs/USAGE.md)** | Complete feature documentation — all tools, MCP, permissions, thinking depth, agents, workflows |
 | **[User Guide](GUIDE.md)** | In-depth tutorial with examples for every subsystem |
 | **[Smart Search Provider Config](docs/smart-search-provider-config.md)** | Search provider setup — dual-path architecture, API keys, credential syntax, TUI config, sync |
-| **[Release Notes](RELEASE.md)** | Version history and changelog |
+| **[Release Notes](RELEASE.md)** | v0.32.0: scoped decisions, exact evidence, and browser bridging |
+| **[Browser Bridge Setup](packages/pi-maestro-flow/optional/BROWSER-BRIDGE-SETUP.md)** | Multiple listeners, NONE/paired auth, explicit channels, shared login state, and troubleshooting |
 | Per-plugin READMEs | [flow](packages/pi-maestro-flow/README.md) · [teammate](packages/pi-maestro-teammate/README.md) · [cockpit](packages/pi-cockpit/README.md) |
 
 ---

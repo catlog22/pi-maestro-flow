@@ -60,7 +60,7 @@
 
 ```bash
 # Install or upgrade (pi-maestro-teammate is installed as a dependency)
-pi install npm:pi-maestro-flow@0.31.3
+pi install npm:pi-maestro-flow@0.32.0
 
 # Confirm Flow, Teammate, and Cockpit are listed, then restart Pi or reload extensions.
 pi list
@@ -422,13 +422,16 @@ The plugin also registers **LSP auto-diagnostics**: automatically triggers diagn
 
 ### 3.2 browser — Browser Control
 
-Control Chromium via CDP with named tabs, screenshots, and in-page JavaScript execution:
+Choose the backend explicitly with `app.channel: "managed" | "profile" | "cdp" | "extension"`. Without a selector, managed headless remains the default; daily Chrome is never taken over automatically. Before operations, call `browser({ action: "guide" })` and load the relevant SOP.
 
 | Action | Description |
 |--------|-------------|
 | `open` | Open/attach browser tab |
 | `close` | Close tab (`all: true` closes all) |
-| `run` | Execute JavaScript in page |
+| `run` | Execute host JS; use `page.evaluate` for page JS |
+| `guide` | SOP index/topic |
+| `status` | Start/probe bridge and named tabs live |
+| `pair` | Approve requestId/code in paired mode only |
 
 ```javascript
 // Open page
@@ -438,7 +441,7 @@ browser({ action: "open", url: "http://localhost:3000", name: "app" })
 browser({
   action: "run",
   name: "app",
-  code: "await page.screenshot({ path: 'screenshot.png' }); return document.title;"
+  code: "await page.screenshot({ path: 'screenshot.png' }); return await page.title();"
 })
 
 // Set viewport
@@ -451,9 +454,20 @@ browser({ action: "close", all: true })
 
 Configuration options:
 - `app.path` — custom Chromium/Chrome/Edge path
-- `app.cdp_url` — connect to existing browser CDP endpoint
-- `wait_until` — navigation wait strategy (load / domcontentloaded / networkidle0 / networkidle2)
-- `dialogs` — dialog handling (accept / dismiss)
+- `app.cdp_url` — attach an existing endpoint with `channel:"cdp"` (borrowed)
+- `app.user_profile_dir` — explicitly chosen non-default user-data-dir for `channel:"profile"`; legacy `attach_user_profile:true` remains supported
+- `visible:true` — show Pi-launched managed/profile processes; ignored for existing attachments and rejected for extension
+- `wait_until` / `dialogs` — managed/profile/cdp navigation and dialog policies
+
+**Extension bridge:** after `/install browser-bridge`, call `browser({action:"status"})`. The extension discovers and connects multiple listeners in the default `19222..19231` range; each Pi binds one available port. Default `paired` mode requires matching the popup requestId/code with `pendingPairings`, approving via `browser pair`, then waiting for independent authenticated reconnection (`authenticatedConnected:true`). Set `PI_BROWSER_BRIDGE_AUTH_MODE=none` before starting Pi for token-free setup: no token or pair; readiness is `transportReady:true`, `authenticatedConnected:false`, `pendingPairings:[]`. NONE removes credential authorization; it is not authenticated success. A custom `PI_BROWSER_BRIDGE_PORT` shifts the ten-port server range: add status's actual listeningPort to popup **Advanced** (leave token empty for NONE).
+
+```javascript
+browser({ action: "open", name: "daily", app: { channel: "extension", target: "example.com" } })
+```
+
+Extension supports only URL/title/goto/evaluate, `browser.pages`, raw CDP/batch, cookies, tabs, and CDP screenshots—not Puppeteer/ElementHandle/DOM helpers/image OCR parity. Unsupported APIs and disconnects fail closed without fallback. Borrowed close releases mapping/lease; owned close closes the real tab. Physical-tab leases are exclusive across listeners; busy/draining does not mean page work stopped. Cookies/login state remain shared, not isolated.
+
+Profile auto-launch uses `--remote-debugging-port=0` and reads `DevToolsActivePort`, or reuses a recorded endpoint. Chrome 136+ blocks debugging the default user-data-dir even after all windows close: choose a non-default profile explicitly or use extension for daily Chrome. Profiles are never copied/switched automatically, and a real login environment does not guarantee CAPTCHA success. See [setup, security, and troubleshooting](../packages/pi-maestro-flow/optional/BROWSER-BRIDGE-SETUP.md).
 
 ---
 
@@ -1235,7 +1249,7 @@ teammate({ tasks: [{ agent: "general", context: "fresh", prompt: "PURPOSE: Read 
 
 ```bash
 # ─── Install ───
-pi install npm:pi-maestro-flow@0.31.3
+pi install npm:pi-maestro-flow@0.32.0
 
 # ─── Knowledge ───
 maestro search "query" --code

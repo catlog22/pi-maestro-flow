@@ -134,7 +134,7 @@ test("one coordinator commits Cockpit, Flow and Teammate without merging their s
 		assert.equal(JSON.parse(readFileSync(state.paths.projectSettings, "utf8")).compaction.enabled, false);
 		assert.equal(JSON.parse(readFileSync(state.paths.projectFailover, "utf8")).enabled, true);
 		const teammateRaw = JSON.parse(readFileSync(state.paths.projectTeammate, "utf8"));
-		assert.equal(teammateRaw.version, 3);
+		assert.equal(teammateRaw.version, 4);
 		assert.equal(teammateRaw.applyOverrides, true);
 		assert.equal(teammateRaw.overrides.mappings.analysis, "provider/model");
 		assert.equal(events.emitted.filter((entry) => entry.event === SETTINGS_CHANGED_EVENT).length, 3);

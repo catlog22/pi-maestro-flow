@@ -15,9 +15,9 @@
 
 ---
 
-**pi-maestro-flow** is the **all-in-one** entry point of the three-plugin suite. A single `pi install npm:pi-maestro-flow@0.31.3` upgrades the [Pi coding agent](https://github.com/earendil-works/pi) into a coordinated engineering team:
+**pi-maestro-flow** is the **all-in-one** entry point of the three-plugin suite. A single `pi install npm:pi-maestro-flow@0.32.0` upgrades the [Pi coding agent](https://github.com/earendil-works/pi) into a coordinated engineering team:
 
-> **v0.31.3 — Native Pi Host & Reliable Tool Lifecycles:** validated against Pi 0.99.0; legacy 0.87–0.98 compatibility stays version-gated. Native Pi owns tool discovery, model/classifier runtime, MCP, and keyboard handling.
+> **v0.32.0 — Scoped Decisions, Exact Evidence & Browser Bridge:** human-scoped Plan-auto, advisory policy, exact Goal evidence, multi-listener extension bridging, and scoped Codex Fast. Pi baseline remains 0.99.0; legacy 0.87–0.98 is version-gated. Release verification/publication is tracked in [RELEASE.md](../../RELEASE.md).
 
 | Layer | Package | What you get |
 |-------|---------|--------------|
@@ -73,7 +73,7 @@ Skills (63, maintained by [Maestro Flow](https://github.com/catlog22/maestro-flo
 
 ```bash
 # From npm, including upgrades
-pi install npm:pi-maestro-flow@0.31.3
+pi install npm:pi-maestro-flow@0.32.0
 
 # Or from local path (development)
 pi install ./packages/pi-maestro-flow
@@ -94,6 +94,26 @@ After installation:
 - Session export is available through `/export-session-info`
 - Companion extensions `pi-maestro-teammate` and `pi-cockpit` are pulled as dependencies and auto-registered into `settings.packages` on postinstall. Flow records the companion sources it manages so upgrades can replace those paths safely; an unowned same-name local registration is retained and logged rather than overwritten.
 - Maestro workflow docs installed at `~/.maestro/workflows/`
+
+### Browser Bridge and runtime safety (v0.32.0)
+
+See [Browser Bridge Setup](optional/BROWSER-BRIDGE-SETUP.md) for multiple
+listeners in `19222..19231`, default paired vs explicit
+`PI_BROWSER_BRIDGE_AUTH_MODE=none`, and popup Advanced custom ports. NONE is
+ready without token/pair (`transportReady:true`, `authenticatedConnected:false`),
+not authenticated. Select `app.channel` explicitly; extension has limited APIs,
+physical-tab leases, and shared cookies/login state, not full Puppeteer isolation.
+Chrome136 profile debugging requires a chosen non-default user-data-dir;
+auto-launch uses dynamic port 0, never copies/switches profiles.
+
+`/skill:decision-policy` is a manual configuration lane with exact human-confirmed
+revision saves; machine recommendations are not user answers or approval.
+`goal complete` accepts requirement-bound `evidenceRefs` with exact URI/path
+sources. `/fast` and teammate `fast` overrides request Codex priority only for
+matching Codex Responses payloads (possibly more quota, not a speed guarantee).
+Remote Ask/Plan failures keep local TUI prompts alive for reconnect; explicit
+cancel/abort still clean up. The external OpenCodeReview runner has bounded
+output/timeouts and process-tree cleanup; it is not image OCR.
 
 ### Gateway cutover
 

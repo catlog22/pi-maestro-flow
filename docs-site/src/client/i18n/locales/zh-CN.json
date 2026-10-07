@@ -21,8 +21,8 @@
     "logo_alt": "Maestro Flow 标志"
   },
   "announcement": {
-    "title": "v0.31.3 — 原生 Pi 宿主与可靠工具生命周期。升级：",
-    "install": "pi install npm:pi-maestro-flow@0.31.3",
+    "title": "v0.32.0 — 范围化决策、精确证据与浏览器桥接。升级：",
+    "install": "pi install npm:pi-maestro-flow@0.32.0",
     "close": "关闭提示"
   },
   "accessibility": {

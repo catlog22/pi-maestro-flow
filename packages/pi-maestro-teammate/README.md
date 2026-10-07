@@ -6,7 +6,7 @@ Pi extension for dispatching one or more role-based teammate tasks through a sin
 
 ## Breaking Changes In 1.0
 
-> Current version: **2.0.0**. The 1.0 breaking changes below remain in effect; later releases added circuit breaker, retry resilience, quiet state, duration tracking, observe `watch`/`until=completed`, per-workspace mailbox isolation, lifecycle hardening, and explicit model-registry routing without breaking the v1 public import paths.
+> Current version: **2.8.0**. The 1.0 breaking changes below remain in effect; later releases added circuit breaker, retry resilience, quiet state, duration tracking, observe `watch`/`until=completed`, per-workspace mailbox isolation, lifecycle hardening, and explicit model-registry routing without breaking the v1 public import paths.
 
 - Every public `teammate` call requires a non-empty `tasks` array.
 - Single-agent work is represented by `tasks` with one item.
@@ -106,6 +106,7 @@ interface TeammateParams {
   tasks: TaskSpec[];
 
   // Defaults inherited by tasks
+  fast?: boolean; // Codex priority tier only; explicit false wins
   agent?: string;
   taskType?: string; // validated lower-case identifier; custom agent types are supported
   model?: string;
@@ -128,6 +129,7 @@ interface TaskSpec {
   taskType?: TeammateParams["taskType"];
   model?: string;
   thinking?: TeammateParams["thinking"];
+  fast?: boolean;
   name?: string;
   dependsOn?: string[];
   context?: "fresh" | "fork";
@@ -138,6 +140,16 @@ interface TaskSpec {
 ```
 
 `tasks` must contain at least one item and every `prompt` must be non-empty. `background` defaults to `false`. `context` defaults to `fresh`.
+
+## Codex Fast (2.8.0)
+
+`fast` resolves task > dispatch > taskType `fastModes` > role mapping > Agent
+frontmatter; if unset, the child uses its project's `.pi/codex-fast.json` default.
+Explicit false is authoritative. Child hooks are registered even with
+`--no-extensions`; only matching `openai-codex` / `openai-codex-responses`
+payloads receive `service_tier:"priority"`. Other providers/backends are not
+sped up. Priority may consume more quota and does not guarantee lower latency.
+Routing configuration migrates to v4 without dropping existing profiles.
 
 ## Built-In Roles
 

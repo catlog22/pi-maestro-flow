@@ -40,6 +40,19 @@ goal({ action: "complete", summary: "所有模块已实现并通过测试" })
 
 > 有 acceptance commands 时优先运行它们判定结果；未声明 commands 时才调用 `verifier` 角色独立审计。
 
+### 精确完成证据（v0.32.0）
+
+`goal complete` 可带最多 16 个 `evidenceRefs`，每项用 `requirement` 绑定一条需求，并且只能选 `path` 或 `uri` 之一：
+
+```javascript
+goal({ action: "complete", summary: "实现完成，提交精确证据", evidenceRefs: [
+  { requirement: "测试覆盖认证模块", path: "test/auth.test.ts", offset: 1, limit: 100 },
+  { requirement: "独立审查结论", uri: "agent://<publication-id>/verification/0", limit: 100 }
+] })
+```
+
+URI 只接受精确 `session://<id>/entry/<id>` 或 `agent://<exact-id>[/subpath]`；任务名称不是精确证据 ID。行 offset 为 1-based、limit 最多 2000；URI 可用 0-based UTF-16 `charOffset` 恢复超长行。有界输出附 `nextPage`，后续 agent 页使用 pinned immutable publication URI。显式 path 应直接 read，不用 workspace 搜索替代。缺失、未授权、歧义或未读证据不能被 verifier 声明通过；fallback verifier 受宿主只读调用预算约束。
+
 ### Goal 面板
 
 Goal 存在时，输入编辑器上方渲染 `goal-panel`：状态（ACTIVE / WAITING / VERIFYING / VERIFIED / STOPPED / BUDGET / BLOCKED）、目标描述、已用时间、循环次数、Token 预算（未配置时不显示）。
@@ -57,13 +70,25 @@ Goal 存在时，输入编辑器上方渲染 `goal-panel`：状态（ACTIVE / WA
 - `plan-confirm`（或 `/plan approve`）提交计划并恢复 Act 工具；
 - `plan-exit` 放弃计划返回 Act 模式。
 
+### 真人范围化 Plan-auto（v0.32.0）
+
+默认关闭。进入 Plan 后，在**父会话 TUI**手动输入 `/plan-auto on` 或按 `Alt+Shift+A`；`off` 关闭，`status` 查看，无参数切换。只有物理 TUI 提交/快捷键可开启，RPC、模型注入、子代理或历史审计记录不能授予权限。
+
+下一次 `plan-confirm` 通过正常 archive/manifest 事务批准精确草稿，并立即执行 **standalone/current**：不继承 Workflow/New Context/decision-document 权限。启用不是立即批准，`plan-update` 仍仅保存，`plan-review` 仍人工。grant 限 session/cwd/Plan cycle/generation；普通压缩和同会话 reset 不重授予，off、新周期、exit/clear、切换/fork/reload/restart/shutdown 会撤销。关闭不终止已开始执行；若批准已提交但 handoff 尚未开始，保留批准并停止自动执行、不静默重试。
+
+### 建议性 decision policy（v0.32.0）
+
+人工调用 `/skill:decision-policy` 配置 `.pi/decision-policy.json`，用 host UI 确认精确 staged draft 并 CAS 保存；不能自动调用 Skill 或直接写 policy 代替确认。Ask 与 self-evolve 域支持 `off`、`shadow`（诊断，不抑制人工）、`enforce`（仅已确认规则内的内部建议）。
+
+`backend:auto` 可从可用且 jev 模式的 classifier 回退到预算内 LLM；`classifier` 严格模式没有 classification LLM fallback，`llm` 绕过 classifier。Advice 是另一个有界 LLM 阶段。Plan-auto 不启用 classifier、不改项目 policy；已有项目规则只增加限制。可逆、code/spec 有依据且在授权任务内的内部选择可返回 `decisions`，与真正人工 `answers` 分开并保留 questionIndex；**不是用户答案或批准**。不确定/外部/低置信/模型不可用/预算耗尽、敏感操作、权限、配置、发布、支付、凭证与知识晋升仍交人工。
+
 ### 可选远程 Ask / Plan transport（v0.31.3）
 
 宿主集成可通过 `pi-maestro-flow/ask-transport` 与 `pi-maestro-flow/plan-transport` 注册外部交互面。未注册或 transport 返回 undefined 时仍由本地 TUI 控制；它们不是用户开启即可得到的完整 Desktop/Mobile Plan UI。
 
-- Ask 本地/远程竞速只结算一次；回答后取消另一端，本地取消会关闭远程请求，Mobile 取消也关闭本地向导；abort 与 transport error 走清理路径。
+- Ask 本地/远程竞速只结算一次；回答后取消另一端，本地取消会关闭远程请求，Mobile 取消也关闭本地向导；abort 清理所有 surface。v0.32.0 中远程 promise 失败不等于人工取消：本地 TUI 保持可用、远程 pending request 留给重连。
 - Plan seam 用于 confirm/review，携带当前 revision、可用 action、draft 与模型切换信息；远程 edit 要提交 expectedRevision，避免覆盖更新的计划。
-- Plan 本地/远程 decision/edit/cancel 竞速，取消或中止清理剩余 surface；集成不能绕过现有批准与 revision 边界。
+- Plan 本地/远程 decision/edit/cancel 竞速；v0.32.0 中 transport promise 失败保留本地界面与重连请求，明确取消/中止才清理剩余 surface。集成不能绕过批准与 revision 边界。
 
 ### 切换方式
 

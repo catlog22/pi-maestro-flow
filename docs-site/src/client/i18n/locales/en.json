@@ -21,8 +21,8 @@
     "logo_alt": "Maestro Flow Logo"
   },
   "announcement": {
-    "title": "v0.31.3 — Native Pi Host & Reliable Tool Lifecycles. Upgrade:",
-    "install": "pi install npm:pi-maestro-flow@0.31.3",
+    "title": "v0.32.0 — Scoped Decisions, Exact Evidence & Browser Bridge. Upgrade:",
+    "install": "pi install npm:pi-maestro-flow@0.32.0",
     "close": "Dismiss"
   },
   "accessibility": {

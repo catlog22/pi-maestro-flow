@@ -5,7 +5,7 @@ icon: "🚀"
 
 10 分钟了解 Maestro Flow 的核心功能和使用方法。完整安装步骤见[安装与初始化](/guides/install)。
 
-> 当前安装版本为 `0.31.3`（Native Pi Host & Reliable Tool Lifecycles：原生宿主能力、并行完成持久化与可靠工具渲染）。
+> 当前安装版本为 `0.32.0`（范围化决策、精确证据与浏览器桥接：真人 Plan-auto、建议性 policy、Goal 精确证据与多监听器扩展桥）。
 
 ---
 
@@ -16,7 +16,7 @@ icon: "🚀"
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 
 # 2. 安装或升级插件（teammate 与 cockpit 自动随附）
-pi install npm:pi-maestro-flow@0.31.3
+pi install npm:pi-maestro-flow@0.32.0
 
 # 3. 验证 Flow、Teammate 与 Cockpit 均已列出
 pi list
