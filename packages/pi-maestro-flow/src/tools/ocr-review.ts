@@ -11,13 +11,13 @@
  * - health: `ocr version` + `ocr llm test` (with the same env injection).
  */
 
-import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { statSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { getAgentDir, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadOcrConfig } from "../ocr-review/config.ts";
+import { OcrError, runOcr } from "../ocr-review/runner.ts";
+export { ocrInstalled } from "../ocr-review/runner.ts";
 import type { FlowToolResult } from "./tool-result.ts";
 
 export interface OcrReviewInput {
@@ -34,7 +34,7 @@ export interface OcrReviewInput {
   repo?: string;
   /** Per-file-group OCR timeout in minutes (review action). */
   timeoutMinutes?: number;
-  /** Wall-clock cap for the whole ocr process in minutes. */
+  /** Wall-clock cap for each OCR process in minutes (all actions). */
   overallTimeoutMinutes?: number;
   /**
    * Review model override: "provider/modelId" or "session" (default). Falls
@@ -43,172 +43,12 @@ export interface OcrReviewInput {
   model?: string;
 }
 
-const MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
 const DEFAULT_TIMEOUTS: Record<string, number> = {
   preview: 120_000,
   rules: 120_000,
   health: 90_000,
   review: 45 * 60_000,
 };
-
-// ---------------------------------------------------------------------------
-// Install probe — PATH scan honoring PATHEXT so a missing `ocr` reports a clean
-// install hint instead of a spawn ENOENT.
-// ---------------------------------------------------------------------------
-
-let ocrPresent: boolean | undefined;
-
-/** Probe PATH (PATHEXT-aware) so a missing install reports a clean install hint. */
-export function ocrInstalled(): boolean {
-  if (ocrPresent !== undefined) return ocrPresent;
-  const dirs = (process.env.PATH ?? "").split(delimiter)
-    .map((entry) => entry.trim().replace(/^"|"$/g, ""))
-    .filter(Boolean);
-  const exts = process.platform === "win32"
-    ? (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";")
-    : [""];
-  outer: for (const dir of dirs) {
-    for (const ext of exts) {
-      const candidate = join(dir, `ocr${ext.toLowerCase()}`);
-      try {
-        if (existsSync(candidate) && statSync(candidate).isFile()) {
-          ocrPresent = true;
-          break outer;
-        }
-      } catch {
-        // keep scanning
-      }
-    }
-  }
-  return (ocrPresent ??= false);
-}
-
-// ---------------------------------------------------------------------------
-// Process runner
-// ---------------------------------------------------------------------------
-
-interface OcrRunResult {
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-}
-
-class OcrError extends Error {
-  readonly exitCode: number | null;
-  readonly stderr: string;
-
-  constructor(message: string, opts: { exitCode?: number | null; stderr?: string } = {}) {
-    super(message);
-    this.name = "OcrError";
-    this.exitCode = opts.exitCode ?? null;
-    this.stderr = opts.stderr ?? "";
-  }
-}
-
-function quoteCmdArg(arg: string): string {
-  if (!/[\s"&|<>^%]/.test(arg)) return arg;
-  return `"${arg.replace(/"/g, '\\"')}"`;
-}
-
-async function runOcr(
-  args: string[],
-  opts: { cwd: string; env?: Record<string, string>; timeoutMs?: number; signal?: AbortSignal },
-): Promise<OcrRunResult> {
-  if (!ocrInstalled()) {
-    throw new OcrError(
-      "ocr CLI not found on PATH. Install with: npm i -g @alibaba-group/open-code-review",
-    );
-  }
-  const { cwd, signal } = opts;
-  const timeoutMs = opts.timeoutMs ?? 120_000;
-
-  // Bare "ocr" + cmd.exe on Windows: cmd resolves the npm ocr.cmd shim itself,
-  // which sidesteps spawn's broken quoting of absolute .cmd paths.
-  const command = process.platform === "win32" ? (process.env.ComSpec ?? "cmd.exe") : "ocr";
-  const spawnArgs = process.platform === "win32"
-    ? ["/d", "/s", "/c", "ocr", ...args.map(quoteCmdArg)]
-    : args;
-
-  return await new Promise<OcrRunResult>((resolvePromise, rejectPromise) => {
-    const child = spawn(command, spawnArgs, {
-      cwd,
-      env: opts.env ? { ...process.env, ...opts.env } : process.env,
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-    });
-
-    const stdoutChunks: Buffer[] = [];
-    const stderrChunks: Buffer[] = [];
-    let outputBytes = 0;
-    let settled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let aborted = false;
-
-    const finish = (fn: () => void) => {
-      if (settled) return;
-      settled = true;
-      if (timer) clearTimeout(timer);
-      signal?.removeEventListener("abort", onAbort);
-      fn();
-    };
-    const kill = () => {
-      if (child.killed) return;
-      if (process.platform === "win32" && child.pid !== undefined) {
-        spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
-      } else {
-        child.kill("SIGTERM");
-      }
-    };
-    const onAbort = () => {
-      aborted = true;
-      kill();
-      finish(() => rejectPromise(new OcrError("ocr run aborted.")));
-    };
-    signal?.addEventListener("abort", onAbort, { once: true });
-    if (signal?.aborted) {
-      onAbort();
-      return;
-    }
-
-    const collect = (sink: Buffer[]) => (chunk: Buffer) => {
-      outputBytes += chunk.byteLength;
-      if (outputBytes > MAX_OUTPUT_BYTES) {
-        kill();
-        finish(() => rejectPromise(new OcrError(`ocr output exceeded ${MAX_OUTPUT_BYTES}-byte limit.`)));
-        return;
-      }
-      sink.push(chunk);
-    };
-    child.stdout.on("data", collect(stdoutChunks));
-    child.stderr.on("data", collect(stderrChunks));
-
-    child.on("error", (error) => {
-      finish(() => rejectPromise(new OcrError(`Failed to start ocr: ${error.message}`)));
-    });
-    child.on("close", (code) => {
-      const stdout = Buffer.concat(stdoutChunks).toString("utf8").trim();
-      const stderr = Buffer.concat(stderrChunks).toString("utf8").trim();
-      finish(() => {
-        if (aborted) return;
-        if (code === 0) {
-          resolvePromise({ stdout, stderr, exitCode: 0 });
-          return;
-        }
-        rejectPromise(new OcrError(
-          stderr || stdout || `ocr exited with code ${code ?? 1}`,
-          { exitCode: code, stderr },
-        ));
-      });
-    });
-
-    timer = setTimeout(() => {
-      kill();
-      finish(() => rejectPromise(new OcrError(
-        `ocr timed out after ${Math.round(timeoutMs / 1000)}s.`,
-      )));
-    }, timeoutMs);
-  });
-}
 
 // ---------------------------------------------------------------------------
 // Model injection — pi api-manager provider → OCR_LLM_* env overlay.
@@ -377,18 +217,25 @@ export async function executeOcrReview(
   params: OcrReviewInput,
   signal: AbortSignal | undefined,
   ctx: ExtensionContext,
+  runner: typeof runOcr = runOcr,
 ): Promise<FlowToolResult> {
   const action = params.action ?? "review";
   const repo = params.repo ? resolve(ctx.cwd, params.repo) : ctx.cwd;
 
   try {
+    const timeoutMs = params.overallTimeoutMinutes === undefined
+      ? DEFAULT_TIMEOUTS[action]!
+      : params.overallTimeoutMinutes * 60_000;
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      throw new OcrError("overallTimeoutMinutes must be positive and finite.");
+    }
     switch (action) {
       case "preview": {
         const args = ["delegate", "preview", "--format", "json", "--repo", repo, ...scopeArgs(params)];
         const bg = await writeBackgroundFile(params.background);
         try {
           if (bg) args.push("--background-file", bg.path);
-          const result = await runOcr(args, { cwd: repo, timeoutMs: DEFAULT_TIMEOUTS.preview, signal });
+          const result = await runner(args, { cwd: repo, timeoutMs, signal });
           return okText(result.stdout || "No files changed.");
         } finally {
           await bg?.cleanup();
@@ -401,7 +248,7 @@ export async function executeOcrReview(
           return errText("action=rules requires non-empty 'paths' (files from a preview run).");
         }
         const args = ["delegate", "rule", "--format", "json", "--repo", repo, ...paths];
-        const result = await runOcr(args, { cwd: repo, timeoutMs: DEFAULT_TIMEOUTS.rules, signal });
+        const result = await runner(args, { cwd: repo, timeoutMs, signal });
         return okText(result.stdout || "No rules matched.");
       }
 
@@ -412,9 +259,9 @@ export async function executeOcrReview(
           return undefined;
         });
         const [version, llm] = await Promise.allSettled([
-          runOcr(["version"], { cwd: repo, timeoutMs: 30_000, signal }),
+          runner(["version"], { cwd: repo, timeoutMs: params.overallTimeoutMinutes === undefined ? 30_000 : timeoutMs, signal }),
           env
-            ? runOcr(["llm", "test"], { cwd: repo, env, timeoutMs: DEFAULT_TIMEOUTS.health, signal })
+            ? runner(["llm", "test"], { cwd: repo, env, timeoutMs, signal })
             : Promise.resolve(undefined),
         ]);
         const parts: string[] = [];
@@ -445,8 +292,7 @@ export async function executeOcrReview(
           if (params.timeoutMinutes) args.push("--timeout", String(params.timeoutMinutes));
           const bg = await writeBackgroundFile(params.background, tmp);
           if (bg) args.push("--background-file", bg.path);
-          const timeoutMs = (params.overallTimeoutMinutes ?? 45) * 60_000;
-          await runOcr(args, { cwd: repo, env, timeoutMs, signal });
+          await runner(args, { cwd: repo, env, timeoutMs, signal });
           let body = "";
           try {
             body = await readFile(outputPath, "utf8");

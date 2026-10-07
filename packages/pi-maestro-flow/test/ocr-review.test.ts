@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
-import { delimiter, dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { delimiter, join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { existsSync, statSync } from "node:fs";
 import test from "node:test";
 import { Check } from "typebox/value";
@@ -36,6 +38,9 @@ test("ocr-review params schema validates actions and scope flags", () => {
   assert.ok(Check(OcrReviewParams, { action: "health" }));
   assert.ok(!Check(OcrReviewParams, { action: "bogus" }));
   assert.ok(!Check(OcrReviewParams, { action: "review", extra: 1 }));
+  assert.ok(Check(OcrReviewParams, { action: "preview", overallTimeoutMinutes: 5 }));
+  assert.ok(!Check(OcrReviewParams, { action: "preview", overallTimeoutMinutes: 0 }));
+  assert.ok(!Check(OcrReviewParams, { action: "preview", overallTimeoutMinutes: 35792 }));
 });
 
 test("ocr-review scopeArgs maps flags and rejects conflicts", () => {
@@ -125,8 +130,56 @@ test("open-code-review adapts inherited OpenAI Codex Responses auth", async () =
   });
 });
 
-test("open-code-review preview returns JSON file selection (requires ocr)", { skip: !ocrOnPath(), timeout: 120_000 }, async () => {
-  const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+test("open-code-review deterministic actions honor explicit deadlines without resolving model auth", async () => {
+  const ctx = { cwd: process.cwd(), model: undefined } as unknown as ExtensionContext;
+  const calls: { args: string[]; timeoutMs?: number }[] = [];
+  const runner: Parameters<typeof executeOcrReview>[3] = async (args, opts) => {
+    calls.push({ args, timeoutMs: opts.timeoutMs });
+    return { stdout: "{}", stderr: "", exitCode: 0 };
+  };
+  assert.notEqual((await executeOcrReview({ action: "preview", overallTimeoutMinutes: 5 }, undefined, ctx, runner)).isError, true);
+  assert.equal(calls.at(-1)?.timeoutMs, 300_000);
+  assert.notEqual((await executeOcrReview({ action: "rules", paths: ["a.ts"], overallTimeoutMinutes: 3 }, undefined, ctx, runner)).isError, true);
+  assert.equal(calls.at(-1)?.timeoutMs, 180_000);
+  await executeOcrReview({ action: "preview" }, undefined, ctx, runner);
+  assert.equal(calls.at(-1)?.timeoutMs, 120_000);
+  for (const overallTimeoutMinutes of [0, Number.NaN, Number.POSITIVE_INFINITY]) {
+    const count = calls.length;
+    assert.equal((await executeOcrReview({ action: "preview", overallTimeoutMinutes }, undefined, ctx, runner)).isError, true);
+    assert.equal(calls.length, count);
+  }
+});
+
+test("open-code-review health applies explicit deadlines to both processes and keeps defaults", async () => {
+  const model = { provider: "test", id: "review", api: "openai-responses", baseUrl: "https://example.invalid" };
+  const ctx = {
+    cwd: process.cwd(), model,
+    modelRegistry: { async getApiKeyAndHeaders() { return { ok: true, apiKey: "fixture" }; } },
+  } as unknown as ExtensionContext;
+  const calls: { args: string[]; timeoutMs?: number }[] = [];
+  const runner: Parameters<typeof executeOcrReview>[3] = async (args, opts) => {
+    calls.push({ args, timeoutMs: opts.timeoutMs });
+    return { stdout: "ok", stderr: "", exitCode: 0 };
+  };
+  await executeOcrReview({ action: "health", model: "session", overallTimeoutMinutes: 5 }, undefined, ctx, runner);
+  assert.deepEqual(calls.map((call) => call.timeoutMs), [300_000, 300_000]);
+  calls.length = 0;
+  await executeOcrReview({ action: "health", model: "session" }, undefined, ctx, runner);
+  assert.deepEqual(calls.map((call) => call.timeoutMs), [30_000, 90_000]);
+  calls.length = 0;
+  await executeOcrReview({ action: "review", model: "session", overallTimeoutMinutes: 7 }, undefined, ctx, runner);
+  assert.equal(calls[0]?.timeoutMs, 420_000);
+});
+
+test("open-code-review preview returns JSON file selection (requires ocr)", { skip: !ocrOnPath(), timeout: 120_000 }, async (t) => {
+  const repo = await mkdtemp(join(tmpdir(), "ocr-preview "));
+  t.after(() => rm(repo, { recursive: true, force: true }));
+  execFileSync("git", ["init", "-q"], { cwd: repo, windowsHide: true });
+  await writeFile(join(repo, "source file.ts"), "export const value = 1;\n");
+  execFileSync("git", ["add", "."], { cwd: repo, windowsHide: true });
+  execFileSync("git", ["-c", "user.name=OCR Test", "-c", "user.email=ocr@example.invalid", "commit", "-qm", "fixture"], { cwd: repo, windowsHide: true });
+  await writeFile(join(repo, "source file.ts"), "export const value = 2;\n");
+  await writeFile(join(repo, "new.ts"), "export const added = true;\n");
   const ctx = { cwd: repo, model: undefined } as unknown as ExtensionContext;
   const result = await executeOcrReview({ action: "preview" }, undefined, ctx);
   assert.notEqual(result.isError, true);
@@ -139,4 +192,7 @@ test("open-code-review preview returns JSON file selection (requires ocr)", { sk
   assert.equal(parsed.schema_version, "1");
   assert.ok(["workspace", "range", "commit"].includes(parsed.mode ?? ""));
   assert.ok(Array.isArray(parsed.reviewable_files));
+  const files = parsed.reviewable_files as { path: string; status: string }[];
+  assert.ok(files.some((file) => file.path === "source file.ts"));
+  assert.ok(files.some((file) => file.path === "new.ts" && file.status === "added"));
 });

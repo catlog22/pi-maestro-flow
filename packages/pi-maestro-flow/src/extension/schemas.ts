@@ -179,7 +179,7 @@ export const OcrReviewParams = Type.Object({
   exclude: Type.Optional(Type.String({ description: "Comma-separated gitignore-style exclusion patterns" })),
   repo: Type.Optional(Type.String({ description: "Repository root; defaults to the workspace cwd" })),
   timeoutMinutes: Type.Optional(Type.Integer({ minimum: 1, description: "Per-file-group OCR timeout in minutes (review)" })),
-  overallTimeoutMinutes: Type.Optional(Type.Integer({ minimum: 1, description: "Wall-clock cap for the whole ocr process (review; default 45)" })),
+  overallTimeoutMinutes: Type.Optional(Type.Integer({ minimum: 1, maximum: 35791, description: "Wall-clock cap per OCR process for all actions (defaults: preview/rules 2, health 1.5, review 45 minutes). Preview builds full diffs; use an explicit larger cap for large repositories." })),
   model: Type.Optional(
     Type.String({
       description: "Review model override: 'provider/modelId' pins a registered model, 'session' follows the current session model and its runtime-resolved gateway auth (default). Falls back to the api-manager.json ocr.modelRef pin.",
