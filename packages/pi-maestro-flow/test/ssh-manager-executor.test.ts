@@ -354,21 +354,77 @@ test("SSH executor rejects symlinked identity files", async (t) => {
   }
 });
 
-test("SSH executor uses PowerShell EncodedCommand and makes cwd failure terminating", () => {
+function powerShellPayload(remote: string): string {
+  const payload = remote.match(/FromBase64String\('([A-Za-z0-9+/=]+)'\)/)?.[1];
+  assert.ok(payload);
+  return Buffer.from(payload, "base64").toString("utf16le");
+}
+
+test("SSH executor uses a static PowerShell Command bootstrap without consuming stdin", () => {
   const remote = buildRemoteCommand("powershell", "Get-ChildItem", "C:\\A'B");
-  assert.match(remote, /^powershell\.exe .* -EncodedCommand /);
-  const encoded = remote.split(" ").at(-1)!;
-  const script = Buffer.from(encoded, "base64").toString("utf16le");
+  assert.match(remote, /^powershell\.exe -NoLogo -NoProfile -NonInteractive -Command "\. /);
+  assert.doesNotMatch(remote, /-EncodedCommand|Invoke-Expression|ExecutionPolicy|Console.*Read|\$|%|!/);
+  const script = powerShellPayload(remote);
   assert.match(script, /\$ErrorActionPreference = 'Stop'/);
+  assert.match(script, /Console\]::OutputEncoding.*UTF8Encoding/);
   assert.match(script, /Set-Location -LiteralPath 'C:\\A''B' -ErrorAction Stop/);
   assert.ok(script.indexOf("Set-Location") < script.indexOf("Get-ChildItem"));
+});
+
+test("SSH PowerShell keeps Unicode, quotes, multiline commands, and shell metacharacters in the payload", () => {
+  const command = "Write-Output '中文🙂 %PATH% !X! & | < > \\\"'\n# trailing comment";
+  const cwd = "C:\\中文🙂 %PATH% !X! & '目录";
+  const remote = buildRemoteCommand("powershell", command, cwd);
+  assert.doesNotMatch(remote, /中文|PATH|!X!|trailing comment/);
+  const script = powerShellPayload(remote);
+  assert.ok(script.includes(command + "\nif ($?)"));
+  assert.ok(script.includes("Set-Location -LiteralPath 'C:\\中文🙂 %PATH% !X! & ''目录' -ErrorAction Stop"));
+  assert.ok(script.endsWith("if ($?) { exit 0 } elseif ($LASTEXITCODE) { exit $LASTEXITCODE } else { exit 1 }"));
+});
+
+test("all SSH executor entry points use one PowerShell bootstrap and never replay a command", async () => {
+  const target = { ...host(), shell: "powershell" as const };
+  const expected = buildRemoteCommand("powershell", "Write-Output hello");
+  const once = new FakeClient();
+  await new SshExecutor(() => once as unknown as Client).execute(target, { command: "Write-Output hello" });
+  assert.deepEqual(once.commands, [expected]);
+
+  const channelClient = new FakeClient(); channelClient.keepChannelOpen = true;
+  const channel = await new SshExecutor(() => channelClient as unknown as Client).openChannel(target, { command: "Write-Output hello" });
+  assert.deepEqual(channelClient.commands, [expected]);
+  assert.equal(channel.channel.writableEnded, false);
+  channel.close();
+
+  const sessionClient = new FakeClient(); sessionClient.keepChannelOpen = true;
+  const session = await new SshExecutor(() => sessionClient as unknown as Client).openSession(target);
+  const first = await session.openChannel({ command: "Write-Output hello" });
+  const second = await session.openChannel({ command: "Write-Output hello" });
+  assert.deepEqual(sessionClient.commands, [expected, expected]);
+  first.close();
+  assert.equal(second.channel.destroyed, false);
+  assert.equal(second.channel.writableEnded, false);
+  second.close(); session.close();
+});
+
+test("SSH PowerShell bounds the complete bootstrap invocation before executing", async () => {
+  let low = 0, high = 5_000;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    try { buildRemoteCommand("powershell", "x".repeat(middle)); low = middle; }
+    catch { high = middle - 1; }
+  }
+  assert.ok(buildRemoteCommand("powershell", "x".repeat(low)).length <= 8_000);
+  assert.throws(() => buildRemoteCommand("powershell", "x".repeat(low + 1)), /bounded Windows command execution/);
+  const client = new FakeClient();
+  await assert.rejects(new SshExecutor(() => client as unknown as Client).execute({ ...host(), shell: "powershell" }, { command: "x".repeat(low + 1) }), /bounded Windows command execution/);
+  assert.deepEqual(client.commands, []);
 });
 
 test("SSH executor fails closed on missing pin, bounds, overflow, and abort", async () => {
   const executor = new SshExecutor(() => new FakeClient() as unknown as Client);
   await assert.rejects(executor.execute({ ...host(), hostKey: "" }, { command: "id" }), /pinned SHA256/);
   await assert.rejects(executor.execute(host(), { command: "x".repeat(65_537) }), /1-65536 UTF-8 bytes/);
-  assert.throws(() => buildRemoteCommand("powershell", "x".repeat(5_000)), /too large for bounded Windows EncodedCommand/);
+  assert.throws(() => buildRemoteCommand("powershell", "x".repeat(5_000)), /too large for bounded Windows command execution/);
   await assert.rejects(executor.execute(host(), { command: "id", timeout: 301 }), /between 1 and 300/);
 
   const overflow = new FakeClient();

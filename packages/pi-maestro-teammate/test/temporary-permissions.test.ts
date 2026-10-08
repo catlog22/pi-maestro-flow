@@ -101,6 +101,32 @@ test("child prompt inlines bounded search guidance instead of loading user-home 
   }
 });
 
+test("child prompt preserves compaction recovery discipline with and without Todo binding", () => {
+  for (const systemPromptMode of ["append", "replace"] as const) {
+    for (const todos of [undefined, ["#12"]]) {
+      const promptFile = writeSystemPromptFile({
+        ...promptAgent,
+        systemPromptMode,
+      }, `compact-recovery-${randomUUID()}`, { type: "object" }, todos);
+      try {
+        const prompt = fs.readFileSync(promptFile, "utf8");
+        assert.match(prompt, /## Compaction recovery discipline/);
+        assert.match(prompt, /original target, scope, acceptance condition, output contract, caller identity/);
+        assert.match(prompt, /even without an assigned Todo/);
+        assert.match(prompt, /searched paths and negative results/);
+        assert.match(prompt, /Compaction does not reset the task's cumulative budget/);
+        assert.match(prompt, /correlation IDs and known result\/publication URIs/);
+        assert.match(prompt, /missing completion notification is not proof a child is still running/);
+        assert.match(prompt, /budget is exhausted, return the consolidated result/);
+        assert.match(prompt, /report the blocker to the caller instead of guessing/);
+        assert.match(prompt, /must finish by calling the structured_output tool exactly once/);
+      } finally {
+        fs.rmSync(promptFile, { force: true });
+      }
+    }
+  }
+});
+
 test("structured output tightens a pre-existing result file before writing", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-structured-permissions-"));
   const outputFile = path.join(root, "result.json");

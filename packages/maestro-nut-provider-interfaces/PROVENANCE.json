@@ -1,0 +1,46 @@
+{
+  "upstream": {
+    "name": "@nut-tree-fork/provider-interfaces",
+    "version": "4.2.6",
+    "tarball": "https://registry.npmjs.org/@nut-tree-fork/provider-interfaces/-/provider-interfaces-4.2.6.tgz",
+    "integrity": "sha512-brtRegDkLSV0sa5DUAigjWf6hCoamBNPb/hKK9AQlW+j3BxQ/8djaEdEB2cihqUh1ZjEtgPyXRqpCWSdKCX68A==",
+    "sourceRepository": "https://github.com/ZachJW34/nut.js",
+    "sourceCommit": "0bcbcdc6d080c0fe007b8000a3915d4461a7685d",
+    "sourcePath": "core/provider-interfaces",
+    "sourceArchiveSha256": "b770c11e91a770bd4a83e6f577a3ebec1c7eb2723b17145880b5cdbc0b517cbb",
+    "sourceFileSha256": {
+      ".gitignore": "f824b8a7c1a99541c6a6f41e725408069eec118a15565162de7a688a845b49cd",
+      ".npmignore": "2c34dca8ae2e61ff792a3462450a8fa962e5c4bb53319c923bd28f6044dc05ef",
+      "CHANGELOG.md": "75353011946387da9bc0d81d3787eb6ed13918fa495d61640c10e9ef01c858f1",
+      "index.ts": "6f308b141358ac799edc3e83e887441852205dc1348310d30b62c69438b93ca0",
+      "lib/clipboard-provider.interface.ts": "c93bfd91b8d1a1e4314ada2a189b915c2b377074e602a54d626c03d02f234bed",
+      "lib/color-finder.interface.ts": "f428839859402c7f899c9da510984a77e2789faba4e0caaa1fbf3e46154e550f",
+      "lib/data-sink.interface.ts": "d7b3bb59f5e35ea16c6cf3949bb27d4acafeaeae3ddd46784794f34125231c28",
+      "lib/data-source.interface.ts": "d70d011b1d9340d2556dd5f2cc8b532074b2bd9de7922eeecb04477ea53ba337",
+      "lib/element-inspection-provider.interface.ts": "79606be1e75a05beb5c9af02d4251d55a13cefa2f3bcdb2b5566237da1306bd0",
+      "lib/image-finder.interface.ts": "35e9278aad57f55e4558d4ae8c1e153c74116d4c76571c328ca9e3c0cd595254",
+      "lib/image-processor.interface.ts": "9b1d1462908a1c5d06060b931a2d00bc6b9074b904e43113d84331906ebdc756",
+      "lib/image-reader.type.ts": "ed6c7beb63118a6c6321e3f4ef7effb7b8a17b11f228e82670a5345c6ae8789b",
+      "lib/image-writer.type.ts": "30ba072dbd061ae678b9a052634a2d267f548e1c3692d9dd205fd6d17f639ce3",
+      "lib/index.ts": "1ef82adc6499a95f1a8d38ff6b4b080fd965264a63af0b1bdd9ae98764a9ce60",
+      "lib/keyboard-provider.interface.ts": "c34e256bb8cf670a93e228e0b8a03e8251fda892561184994c527a7a9c9fd9d6",
+      "lib/log-provider.interface.ts": "424256565363f955b478ab7d8823571f987484639bc108308f272e5487acbafd",
+      "lib/mouse-provider.interface.ts": "2a51316aefc0c83fe28268fcc7c2514b03ba52dadcdf29ea0c689503aeafe842",
+      "lib/provider-registry.interface.ts": "f164699b60000a1fad0446b6ef8db3766e9d650315b99b2c53c9bd8281ce1ace",
+      "lib/screen-provider.interface.ts": "b9c4bf2183ba624a8a40c9ff625c8896f8e21406831ca4c3b409fd7e259b5acb",
+      "lib/text-finder.interface.ts": "6fff46c6f5c11f6d4f4a6024a613eabd33b5548e80fdbdf4f3aa28cf582028fe",
+      "lib/window-finder.interface.ts": "6dd9f43e6d19f85c3638d63af74b8f722eb0c0ef59f965891f827f95f293d360",
+      "lib/window-provider.interface.ts": "17bf65725d7ff12a60ff8bbbda6597df84ff122affb876e23d7c0e442c27ff12",
+      "package.json": "5d6a2b799112dda593725ddde78a3675e1e102d210c303ec49e178c876962d5f",
+      "README.md": "45e4afb047d452e97fbe4fde7e0a6b2dc8c5b816527032c0bf32d0e288451b48",
+      "tsconfig.json": "fcda32bee3194ec30132e87e60df878e0efab60f0e3a7a83a2bb137aaf1cec8f",
+      "typedoc.json": "ce32d5598c6e22a53eaf37281286c1060aafad38bfba521af4bfb1ccb3112b99"
+    },
+    "notice": "No upstream NOTICE exists in the immutable source tree or npm tarballs. Shared/interfaces tarballs omit LICENSE; Apache-2.0 license retained from the same source commit."
+  },
+  "changes": [
+    "Scoped 4.2.7 compatibility fork; original import keys preserved using npm aliases.",
+    "Node >=22.19.0; standalone reproducible TypeScript build."
+  ],
+  "build": "npm install --foreground-scripts --ignore-scripts=false && npm run compile (after dependency aliases are published). Current verification: node packages/maestro-nut-js/test/staging-no-pack.mjs; source-directory file links temporarily replace unpublished aliases, NOT tarball or final registry validation. No packing performed."
+}

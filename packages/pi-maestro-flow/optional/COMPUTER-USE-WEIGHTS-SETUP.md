@@ -11,8 +11,10 @@
 - Python 3.10+（下载权重 + ultralytics 转换）
 - `huggingface_hub` Python 包（`pip install huggingface_hub`）
 - `ultralytics==8.4.126`（转换工具，会装 torch）
-- `onnxruntime-node` 已作为 optionalDependency 安装
+- `onnxruntime-node` 必须已实际安装并可加载；待发布 Flow 0.32.1 的 optionalDependency 准备为 `1.30.0`，声明不代表安装/推理成功
 - 本地 RapidOCR 模型路径（`RAPIDOCR_ONNX_ROOT` 环境变量，detect 的 OCR 标签匹配需要）
+
+> **Flow 0.32.1 为 UNRELEASED，仍待验证/发布。** 本次只同步依赖文案，未执行本文的下载、安装、转换、测试、构建或打包命令；下方预期输出不构成 `onnxruntime-node@1.30.0` 或新引擎的推理证明。发布门禁仍暂停。
 
 ## 前置约束
 

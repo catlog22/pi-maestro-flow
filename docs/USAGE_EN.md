@@ -58,6 +58,8 @@
 
 ### Install
 
+> **v0.32.1 dependency repair is UNRELEASED:** prepares Flow 0.32.1, Backends 0.1.7, Teammate 2.8.1, Cockpit 0.24.3, and `maestro-flow >=0.5.91`. Fork identities and unchanged contracts are in [RELEASE.md](../RELEASE.md). Validation/publication remain pending, without security or compatibility acceptance. Install commands retain npm-published 0.32.0, without this repair; formal release closeout is paused.
+
 ```bash
 # Install or upgrade (pi-maestro-teammate is installed as a dependency)
 pi install npm:pi-maestro-flow@0.32.0

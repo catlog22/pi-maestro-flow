@@ -5,7 +5,9 @@ icon: "📦"
 
 pi-maestro-flow 是 **Pi 插件**，用 `pi install` 安装（不是普通 npm 依赖）。装一个即得全部三个插件：flow、teammate、cockpit。
 
-> **当前版本 v0.32.0：** 范围化决策、精确证据与浏览器桥接 — 真人 Plan-auto、建议性 policy、Goal 精确证据与多监听器扩展桥。引擎范围为 `maestro-flow >=0.5.87`，不是精确 pin。已安装旧版的用户直接覆盖安装即可升级，不要先运行 `pi remove`。
+> **v0.32.1 依赖修补待发布（UNRELEASED）：** 准备 Flow 0.32.1、Backends 0.1.7、Teammate 2.8.1、Cockpit 0.24.3；引擎要求 `maestro-flow >=0.5.91`（范围而非精确 pin）。四个 `@dyw1234` 修补 fork 及不变契约见[更新日志](/guides/changelog)。验证和发布仍待完成，不声称安全/兼容验收通过。
+>
+> 下方安装命令保留 npm 已发布 **0.32.0** 功能基线，不包含本次修补，正式发布收尾暂停。已安装旧版的用户直接覆盖安装，不要先运行 `pi remove`；不要把未发布的 0.32.1 当作当前可安装最新版。
 
 ---
 
@@ -90,7 +92,7 @@ pi list                # 三个插件均已列出
 更新核心 `pi-coding-agent` 后启动时若报 `TypeError: Cannot read properties of undefined (reading 'runtime')`（`model-registry.js` 的 `refresh` 中），多半是**本地旧版 teammate 覆盖被保留**：启动日志会出现 `Preserved local companion override for pi-maestro-teammate: ...`。修复：
 
 ```bash
-# 方式 A：升级本地覆盖到最新
+# 方式 A：同步到 0.32.0 的 companion 基线（不含未发布修补）
 cd /mnt/c/Users/<用户名>          # Windows: cd C:\Users\<用户名>
 npm install pi-maestro-teammate@2.8.0 pi-cockpit@0.24.2
 

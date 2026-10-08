@@ -21,7 +21,7 @@
     "logo_alt": "Maestro Flow 标志"
   },
   "announcement": {
-    "title": "v0.32.0 — 范围化决策、精确证据与浏览器桥接。升级：",
+    "title": "v0.32.1 修补 UNRELEASED，待验证/发布。已发布 0.32.0 基线（不含修补）：",
     "install": "pi install npm:pi-maestro-flow@0.32.0",
     "close": "关闭提示"
   },

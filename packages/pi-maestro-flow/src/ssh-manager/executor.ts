@@ -446,9 +446,21 @@ function forward(client: Client, host: string, port: number, timeout: number, si
 export function buildRemoteCommand(shell: SshHost["shell"], command: string, cwd?: string): string {
   validateCommandText(command, cwd);
   if (shell === "bash") { const script = cwd ? `cd -- ${quoteBash(cwd)} && ${command}` : command; return `exec bash -lc ${quoteBash(script)}`; }
-  const script = ["$ErrorActionPreference = 'Stop'", ...(cwd ? [`Set-Location -LiteralPath ${quotePowerShell(cwd)} -ErrorAction Stop`] : []), command].join("; ");
-  const invocation = `powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(script, "utf16le").toString("base64")}`;
-  if (invocation.length > POWERSHELL_MAX_INVOCATION_CHARS) throw new Error("PowerShell command is too large for bounded Windows EncodedCommand execution");
+  // Keep user text out of the outer Windows shell, without using the
+  // EncodedCommand switch (which some SSH environments cannot execute).
+  // Do not read stdin: reusable Gateway channels own that protocol stream.
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false",
+    "$OutputEncoding = [Console]::OutputEncoding",
+    ...(cwd ? [`Set-Location -LiteralPath ${quotePowerShell(cwd)} -ErrorAction Stop`] : []),
+    command,
+    // A newline protects this status check from a user's trailing comment.
+    "if ($?) { exit 0 } elseif ($LASTEXITCODE) { exit $LASTEXITCODE } else { exit 1 }",
+  ].join("\n");
+  const payload = Buffer.from(script, "utf16le").toString("base64");
+  const invocation = `powershell.exe -NoLogo -NoProfile -NonInteractive -Command ". ([ScriptBlock]::Create([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${payload}'))))"`;
+  if (invocation.length > POWERSHELL_MAX_INVOCATION_CHARS) throw new Error("PowerShell command is too large for bounded Windows command execution");
   return invocation;
 }
 export function sha256HostKeyFingerprint(key: Buffer): string { return `SHA256:${createHash("sha256").update(key).digest("base64").replace(/=+$/u, "")}`; }

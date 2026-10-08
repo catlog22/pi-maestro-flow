@@ -1,0 +1,10 @@
+{
+  "name": "active-win",
+  "version": "9.0.0",
+  "gitHead": "94b6bf100ee4b94311e4b8a12e9e6df45f615e44",
+  "tarball": "https://registry.npmjs.org/active-win/-/active-win-9.0.0.tgz",
+  "integrity": "sha512-aiDwWcottgi/DO1/XWnXPHpuTh9qtMxzLUzD9nZj66Fub8SPNGvBLnEdaQsx44O9p8TEZG9d5NNAXGxzbes8CA==",
+  "shasum": "23dd8d287c46333eaff0b305b47d8921023103ed",
+  "license": "MIT",
+  "preservedBinaryRelease": "v9.0.0"
+}

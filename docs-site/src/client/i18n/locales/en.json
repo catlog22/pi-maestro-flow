@@ -21,7 +21,7 @@
     "logo_alt": "Maestro Flow Logo"
   },
   "announcement": {
-    "title": "v0.32.0 — Scoped Decisions, Exact Evidence & Browser Bridge. Upgrade:",
+    "title": "v0.32.1 repair: UNRELEASED, validation/publication pending. Published 0.32.0 baseline (without repair):",
     "install": "pi install npm:pi-maestro-flow@0.32.0",
     "close": "Dismiss"
   },

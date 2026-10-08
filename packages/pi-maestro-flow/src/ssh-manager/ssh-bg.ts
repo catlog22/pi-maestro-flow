@@ -1,3 +1,4 @@
+import { StringDecoder } from "node:string_decoder";
 import { Type, type Static } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
@@ -128,6 +129,8 @@ interface SshBgJob {
   command: string;
   cwd?: string;
   channel: SshCommandChannel;
+  stdoutDecoder: StringDecoder;
+  stderrDecoder: StringDecoder;
   startedAt: number;
   updatedAt: number;
   finishedAt?: number;
@@ -157,16 +160,22 @@ function tailLines(value: string, lines: number): string {
   return normalized.split("\n").slice(-lines).join("\n");
 }
 
-function appendOutput(job: SshBgJob, chunk: Buffer | string): void {
-  const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : chunk;
-  job.outputBytes += Buffer.byteLength(text, "utf8");
+function appendOutput(job: SshBgJob, text: string): void {
   job.outputTail += text;
   if (Buffer.byteLength(job.outputTail, "utf8") > MAX_TAIL_BYTES) {
-    const bytes = Buffer.from(job.outputTail, "utf8").subarray(-MAX_TAIL_BYTES);
-    job.outputTail = bytes.toString("utf8");
+    const bytes = Buffer.from(job.outputTail, "utf8");
+    let start = bytes.length - MAX_TAIL_BYTES;
+    while ((bytes[start]! & 0xc0) === 0x80) start++;
+    job.outputTail = bytes.subarray(start).toString("utf8");
     job.tailTruncated = true;
   }
   job.updatedAt = Date.now();
+}
+
+function decodeOutput(job: SshBgJob, decoder: StringDecoder, chunk: Buffer | string): void {
+  const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, "utf8");
+  job.outputBytes += bytes.length;
+  appendOutput(job, decoder.write(bytes));
 }
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
@@ -276,6 +285,8 @@ export class SshBgManager {
         command,
         ...(requestedCwd === undefined ? {} : { cwd: requestedCwd }),
         channel,
+        stdoutDecoder: new StringDecoder("utf8"),
+        stderrDecoder: new StringDecoder("utf8"),
         startedAt: Date.now(),
         updatedAt: Date.now(),
         exitCode: null,
@@ -339,13 +350,13 @@ export class SshBgManager {
     const stream = job.channel.channel;
     stream.on("data", (chunk: Buffer | string) => {
       if (!job.done) {
-        appendOutput(job, chunk);
+        decodeOutput(job, job.stdoutDecoder, chunk);
         this.publishSnapshot();
       }
     });
     stream.stderr.on("data", (chunk: Buffer | string) => {
       if (!job.done) {
-        appendOutput(job, chunk);
+        decodeOutput(job, job.stderrDecoder, chunk);
         this.publishSnapshot();
       }
     });
@@ -363,6 +374,8 @@ export class SshBgManager {
   private finishJob(session: SshBgSession, job: SshBgJob): void {
     if (job.done) return;
     job.done = true;
+    appendOutput(job, job.stdoutDecoder.end());
+    appendOutput(job, job.stderrDecoder.end());
     job.finishedAt = Date.now();
     job.updatedAt = job.finishedAt;
     job.resolveTerminal();

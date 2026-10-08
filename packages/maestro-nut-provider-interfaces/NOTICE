@@ -1,0 +1,6 @@
+Derived from @nut-tree-fork/provider-interfaces@4.2.6 (Apache-2.0).
+Original author: dry Software UG (haftungsbeschränkt), info@dry.software.
+Fork source: ZachJW34/nut.js, commit 0bcbcdc6d080c0fe007b8000a3915d4461a7685d.
+Modified for @dyw1234: scoped manifests, standalone build, Node >=22.19.0.
+Original copyright and attribution notices retained in source and LICENSE.
+No upstream NOTICE file was present; this is a fork attribution notice.

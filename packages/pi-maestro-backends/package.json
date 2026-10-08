@@ -1,6 +1,6 @@
 {
   "name": "pi-maestro-backends",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Teammate execution backends. Every backend here implements the same pi-maestro-backend-core contract — including the Pi subprocess, which is an ordinary member rather than a bypass.",
   "type": "module",
   "engines": {
@@ -33,7 +33,7 @@
   ],
   "license": "ISC",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.30.0",
+    "@modelcontextprotocol/sdk": "1.32.1",
     "pi-maestro-backend-core": "0.1.5",
     "pi-maestro-fabric-core": "0.1.0",
     "typebox": "1.3.27"

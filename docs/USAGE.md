@@ -58,6 +58,8 @@
 
 ### 安装
 
+> **v0.32.1 依赖修补待发布（UNRELEASED）：** 准备 Flow 0.32.1、Backends 0.1.7、Teammate 2.8.1、Cockpit 0.24.3 与 `maestro-flow >=0.5.91`。修补 fork 身份及不变契约见 [RELEASE.md](../RELEASE.md)。验证/发布仍待完成，不声称安全或兼容验收通过；本文安装命令保留 npm 已发布 0.32.0，不包含本次修补，正式发布收尾暂停。
+
 ```bash
 # 安装或升级（pi-maestro-teammate 作为依赖自动安装）
 pi install npm:pi-maestro-flow@0.32.0

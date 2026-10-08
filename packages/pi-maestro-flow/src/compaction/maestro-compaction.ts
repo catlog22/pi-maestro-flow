@@ -727,6 +727,9 @@ Merge rules:
 8. Record supersession instead of silently replacing an important reference.
 9. Do not embed full skill instructions. Preserve skill identity and reload metadata.
 10. Keep the checkpoint concise, but never omit state required for safe resumption.
+11. For a teammate session, preserve its original dispatched target, scope, acceptance condition, output contract, caller identity, and exact next action even when no Todo is assigned. Do not replace its bounded task with the parent's broader objective.
+12. In Critical Context and Pending, preserve confirmed findings and exact evidence references, searched paths and negative results, unresolved targets, consumed search rounds/tool-call limits, remaining budget, and stop condition. Compaction does not reset cumulative task budgets; preserve what can be recovered and mark unknown values rather than inventing them. If the target is answered or the budget exhausted, the next action is to return the consolidated result, not restart discovery.
+13. Preserve dispatched child correlation IDs, known result/publication URIs, and last observed states when present in the evidence. Distinguish running, result-ready, completed, and unknown; a missing notification is not proof of running. Recover the exact child/result before redispatching, and do not infer live state from an old summary.
 
 Use this EXACT format:
 

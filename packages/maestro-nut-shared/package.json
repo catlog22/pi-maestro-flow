@@ -1,0 +1,46 @@
+{
+  "name": "@dyw1234/nut-shared",
+  "version": "4.2.7",
+  "description": "Shared objects, data types and functions for @nut-tree-fork/nut-js",
+  "main": "dist/index",
+  "typings": "dist/index",
+  "dependencies": {
+    "node-abort-controller": "3.1.1",
+    "jimp": "1.6.1",
+    "@types/pngjs": "6.0.5"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "@types/node": "22.19.0"
+  },
+  "keywords": [
+    "nut-js"
+  ],
+  "author": {
+    "name": "dry Software UG (haftungsbeschränkt)",
+    "email": "info@dry.software",
+    "url": "https://dry.software"
+  },
+  "license": "Apache-2.0",
+  "scripts": {
+    "compile": "tsc -p ."
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "files": [
+    "dist",
+    "lib",
+    "index.ts",
+    "tsconfig.json",
+    "LICENSE",
+    "NOTICE",
+    "PROVENANCE.json",
+    "README.md",
+    "CHANGELOG.md",
+    "test"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

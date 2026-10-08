@@ -1,16 +1,40 @@
-# v0.32.0 — Scoped Decisions, Exact Evidence & Browser Bridge
+# v0.32.1 — Dependency Security Repair (UNRELEASED)
+
+> **Pending validation and publication; modification-only preparation.**
+> Flow 0.32.0 was published to npm, but its formal release closeout is paused.
+> The versions below are prepared source metadata, not presently installable
+> repair releases or a claim that security/compatibility gates have passed.
 
 ## Overview
 
-Flow **0.32.0**, Teammate **2.8.0**, Cockpit **0.24.2**, Backend-Core
-**0.1.5**, and Backends **0.1.6** add human-scoped Plan preauthorization,
-advisory decision routing, exact Goal evidence, and multi-listener browser bridging.
-Settings-Core **0.2.3** is unchanged.
+Flow **0.32.1**, Teammate **2.8.1**, Cockpit **0.24.3**, and Backends
+**0.1.7** prepare a dependency security repair. Backend-Core **0.1.5**,
+Settings-Core **0.2.3**, and Fabric/Fabric-Core **0.1.0** are unchanged from
+0.32.0. The baseline feature notes below are retained: human-scoped Plan
+preauthorization, advisory decision routing, exact Goal evidence, and
+multi-listener browser bridging.
 The validation baseline is **Pi 0.99.0**. Legacy **0.87–0.98** compatibility
 remains explicitly version-gated; optional host peers keep their `*` ranges.
 Missing native APIs do not authorize a second legacy runtime on a native host.
 
-## Highlights
+## Dependency repair preparation
+
+- Flow keeps the `active-win` import key via
+  `npm:@dyw1234/active-win@9.0.1`, a compatibility/security fork of
+  `active-win@9.0.0` (MIT). Native assets still use upstream `v9.0.0` identity;
+  a scoped package name does not imply new upstream binaries or official support.
+- Flow keeps `@nut-tree-fork/nut-js` via `npm:@dyw1234/nut-js@4.2.7`.
+  Its `@nut-tree-fork/shared` and `@nut-tree-fork/provider-interfaces` keys
+  resolve through aliases to `@dyw1234/nut-shared@4.2.7` and
+  `@dyw1234/nut-provider-interfaces@4.2.7`. These Apache-2.0 forks derive from
+  the corresponding `@nut-tree-fork` 4.2.6 packages, not upstream official releases.
+- Provenance and retained licensing are recorded in
+  `packages/maestro-active-win/UPSTREAM.json` / `PROVENANCE.md` and each
+  `packages/maestro-nut-*/PROVENANCE.json`, `LICENSE`, and `NOTICE`.
+- Node.js minimum remains **22.19.0**; the prepared engine range is
+  **`maestro-flow >=0.5.91`**, not an exact pin or proof of an installed engine.
+
+## Baseline feature highlights (0.32.0)
 
 ### Human-scoped Plan auto and advisory policy
 
@@ -117,33 +141,49 @@ Missing native APIs do not authorize a second legacy runtime on a native host.
 
 | Package | Version | Release scope |
 |---|---|---|
-| pi-maestro-flow | 0.32.0 | updated |
-| pi-maestro-teammate | 2.8.0 | updated |
-| pi-cockpit | 0.24.2 | updated |
+| pi-maestro-flow | 0.32.1 | prepared, unreleased |
+| pi-maestro-teammate | 2.8.1 | prepared, unreleased |
+| pi-cockpit | 0.24.3 | prepared, unreleased |
 | pi-maestro-settings-core | 0.2.3 | unchanged |
-| pi-maestro-backends | 0.1.6 | updated |
-| pi-maestro-backend-core | 0.1.5 | updated |
+| pi-maestro-backends | 0.1.7 | prepared, unreleased |
+| pi-maestro-backend-core | 0.1.5 | unchanged |
+| @dyw1234/active-win | 9.0.1 | prepared fork, unreleased |
+| @dyw1234/nut-shared | 4.2.7 | prepared fork, unreleased |
+| @dyw1234/nut-provider-interfaces | 4.2.7 | prepared fork, unreleased |
+| @dyw1234/nut-js | 4.2.7 | prepared fork, unreleased |
 | pi-maestro-fabric | 0.1.0 | unchanged |
 | pi-maestro-fabric-core | 0.1.0 | unchanged |
 | pi-fluent-tui | 0.1.2 | unchanged |
 
-The external engine dependency remains **`maestro-flow >=0.5.87`**, not an
-exact pin. The release preparation environment has **0.5.87** installed;
-registry latest was **0.5.90** at preparation time. The release operator will
-check the latest resolution in a fresh registry smoke before tagging.
+The external engine requirement is prepared as **`maestro-flow >=0.5.91`**.
+Download/install attempts in the engine repair lane failed; no successful
+installation or inference proof is claimed. No registry latest assertion is
+made for this preparation.
 
 The DSH SDK is now an **optional peer** (`*`): install
 `@deepseek-ai/dsh-sdk-client` manually when using DSH. The development baseline
 is **0.1.0-rc.6**; ordinary Pi users do not need that SDK.
 
-## Scope
+## Baseline scope (0.32.0; not repair-diff statistics)
 
 Pre-release feature range: **`v0.31.3..aa054f450da2440c44b604bb8e6d3e1f41ced0a3`**.
 It contains **12 commits, 130 files changed, +11,047 / −1,491 lines**.
-These statistics exclude this release's version, lockfile, and documentation
-preparation and any later release commit; they are not final-tag statistics.
+These statistics exclude the 0.32.0 baseline's version, lockfile, and documentation
+preparation and any later release or repair changes; they are not final-tag statistics.
 
-## Verification
+## Repair validation status
+
+Only existing documentation was synchronized in this step. No build, test,
+install, network validation, audit, pack, commit, publication, or push was run.
+Release gates and consumer validation remain suspended. Active-win acceptance
+on Node 22.19.0, macOS, and Linux remains unverified; no cross-platform native
+compatibility claim is made. Neither audit-zero nor closure of all 31 baseline
+findings is claimed for the final consumer dependency graph.
+
+### Historical 0.32.0 preparation evidence (not 0.32.1 acceptance)
+
+The following prior preparation notes are retained only as baseline history;
+changed dependency versions invalidate reuse as final repair acceptance.
 
 - All selected `test:release` targets passed. The initial command stopped on
   stale integration contracts and a missing Codex Fast barrel export; those
@@ -166,14 +206,15 @@ preparation and any later release commit; they are not final-tag statistics.
   persistence, no horizontal overflow, and the updated browser bridge guide.
 - Four unchanged workspace package dry-run SHAs matched their registry versions.
 
-Publication and registry-backed fresh-install smoke are performed after this
-preparation commit. The release tag is created only after registry SHA comparison
-and isolated HOME/USERPROFILE Pi RPC/tool-catalog smoke pass.
+Those prior results do not authorize resuming release work. Publication,
+registry comparison, fresh-install smoke, packing, and tagging are paused.
 
-## Locked publication artifacts
+## Historical 0.32.0 preparation artifacts (not repair artifacts)
 
-Each workspace dry-run matched its actual tarball SHA; `npm publish --dry-run`
-passed for the locked tarballs. No private Pi host SDK/typebox copy is bundled.
+The prior preparation recorded matching dry-run/tarball SHAs and passing
+`npm publish --dry-run` for the tarballs below. They are not locked 0.32.1
+artifacts and do not validate the changed dependency graph. The prior notes
+recorded no bundled private Pi host SDK/typebox copy.
 
 | Package | Files | Packed / unpacked bytes | SHA-1 |
 |---|---:|---:|---|
@@ -183,7 +224,11 @@ passed for the locked tarballs. No private Pi host SDK/typebox copy is bundled.
 | pi-cockpit@0.24.2 | 115 | 332,557 / 1,248,528 | `427d4097afe3da0ac74a874915a45bed7cc7eaec` |
 | pi-maestro-flow@0.32.0 | 1,154 | 3,765,034 / 14,520,453 | `c203fe91c562921875f9b59ad734ded2adeffaf4` |
 
-## Install / upgrade
+## Published baseline install / upgrade (not the repair)
+
+The command below intentionally remains on npm-published **0.32.0**; it does
+not install the unreleased dependency repair. Do not substitute 0.32.1 until
+validation and publication are separately authorized and completed.
 
 Requires **Node.js ≥ 22.19.0**. Use **Pi 0.99.0** as the validation baseline;
 legacy Pi **0.87–0.98** uses version-gated compatibility paths.

@@ -1,0 +1,45 @@
+{
+  "name": "@dyw1234/nut-provider-interfaces",
+  "version": "4.2.7",
+  "description": "Public provider interfaces for @nut-tree-fork/nut-js",
+  "main": "dist/index",
+  "typings": "dist/index",
+  "keywords": [
+    "nut-js",
+    "provider"
+  ],
+  "author": {
+    "name": "dry Software UG (haftungsbeschränkt)",
+    "email": "info@dry.software",
+    "url": "https://dry.software"
+  },
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@nut-tree-fork/shared": "npm:@dyw1234/nut-shared@4.2.7"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "@types/node": "22.19.0"
+  },
+  "scripts": {
+    "compile": "tsc -p ."
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "files": [
+    "dist",
+    "lib",
+    "index.ts",
+    "tsconfig.json",
+    "LICENSE",
+    "NOTICE",
+    "PROVENANCE.json",
+    "README.md",
+    "CHANGELOG.md",
+    "test"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

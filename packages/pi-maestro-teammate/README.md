@@ -6,7 +6,7 @@ Pi extension for dispatching one or more role-based teammate tasks through a sin
 
 ## Breaking Changes In 1.0
 
-> Current version: **2.8.0**. The 1.0 breaking changes below remain in effect; later releases added circuit breaker, retry resilience, quiet state, duration tracking, observe `watch`/`until=completed`, per-workspace mailbox isolation, lifecycle hardening, and explicit model-registry routing without breaking the v1 public import paths.
+> Prepared repair version: **2.8.1 (UNRELEASED)**, with `pi-maestro-backends@0.1.7`; Backend-Core 0.1.5 and Settings-Core 0.2.3 remain unchanged. Validation/publication are pending; no final security/compatibility acceptance is claimed. The feature baseline remains **2.8.0**; see [RELEASE.md](../../RELEASE.md). The 1.0 breaking changes below remain in effect; later releases added circuit breaker, retry resilience, quiet state, duration tracking, observe `watch`/`until=completed`, per-workspace mailbox isolation, lifecycle hardening, and explicit model-registry routing without breaking the v1 public import paths.
 
 - Every public `teammate` call requires a non-empty `tasks` array.
 - Single-agent work is represented by `tasks` with one item.

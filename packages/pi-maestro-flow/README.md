@@ -17,7 +17,9 @@
 
 **pi-maestro-flow** is the **all-in-one** entry point of the three-plugin suite. A single `pi install npm:pi-maestro-flow@0.32.0` upgrades the [Pi coding agent](https://github.com/earendil-works/pi) into a coordinated engineering team:
 
-> **v0.32.0 — Scoped Decisions, Exact Evidence & Browser Bridge:** human-scoped Plan-auto, advisory policy, exact Goal evidence, multi-listener extension bridging, and scoped Codex Fast. Pi baseline remains 0.99.0; legacy 0.87–0.98 is version-gated. Release verification/publication is tracked in [RELEASE.md](../../RELEASE.md).
+> **Prepared v0.32.1 dependency repair (UNRELEASED):** Flow 0.32.1, Backends 0.1.7, Teammate 2.8.1, Cockpit 0.24.3, and `maestro-flow >=0.5.91`; validation/publication remain pending. The `active-win` and `@nut-tree-fork/nut-js` import keys use scoped `@dyw1234` forks; provenance and unchanged contracts are documented in [RELEASE.md](../../RELEASE.md). Npm commands retain published 0.32.0 without this repair; formal release closeout is paused. No final security/compatibility acceptance is claimed.
+
+> **v0.32.0 baseline — Scoped Decisions, Exact Evidence & Browser Bridge:** human-scoped Plan-auto, advisory policy, exact Goal evidence, multi-listener extension bridging, and scoped Codex Fast. Pi baseline remains 0.99.0; legacy 0.87–0.98 is version-gated. Release verification/publication is tracked in [RELEASE.md](../../RELEASE.md).
 
 | Layer | Package | What you get |
 |-------|---------|--------------|
@@ -563,7 +565,7 @@ Project system instructions use `.pi/SYSTEM.md` as their single authority; the
 previous bundled `AGENTS.md` injection is retired. Migrate projects that depended
 on that old injection to `.pi/SYSTEM.md`.
 
-`pi-maestro-flow` depends on `maestro-flow >=0.5.87` as an associated workflow resource package (a range, not an exact pin).
+The unreleased `pi-maestro-flow@0.32.1` manifest requires `maestro-flow >=0.5.91` as an associated workflow resource package (a range, not an exact pin); this is not proof of successful engine installation or inference.
 During postinstall it calls Maestro's workflows-only installer from the prepared registry
 artifact, which includes the complete runtime `dist` tree and canonical workflow documents.
 The installer writes to `~/.maestro/workflows`. The active Maestro CLI remains an environment

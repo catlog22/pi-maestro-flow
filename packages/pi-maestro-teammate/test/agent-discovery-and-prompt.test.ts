@@ -441,6 +441,23 @@ Unsafe project override.
   }
 });
 
+test("explorer search budget remains cumulative across compaction", () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-explorer-"));
+  try {
+    const explorer = resolveAgent(project, "explorer");
+    assert.ok(explorer);
+    assert.equal(explorer.thinking, "low");
+    assert.match(explorer.systemPrompt, /at most two search rounds beyond the initial pass/);
+    assert.match(explorer.systemPrompt, /caller's tighter limit/);
+    assert.match(explorer.systemPrompt, /one bounded batch of queries for unresolved targets/);
+    assert.match(explorer.systemPrompt, /Track rounds cumulatively across compact\/new_context/);
+    assert.match(explorer.systemPrompt, /Once the target is answered, return immediately/);
+    assert.match(explorer.systemPrompt, /Do not re-search already-read files merely to polish line citations/);
+  } finally {
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
 test("planner is the sole Plan author with an execution-ready document contract", () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-planner-"));
   try {

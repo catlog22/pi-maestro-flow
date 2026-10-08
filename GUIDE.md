@@ -44,6 +44,13 @@ export ANTHROPIC_API_KEY=sk-ant-...
 
 ### Install pi-maestro-flow
 
+> **Prepared v0.32.1 repair is UNRELEASED**, pending validation/publication:
+> Flow 0.32.1, Backends 0.1.7, Teammate 2.8.1, Cockpit 0.24.3, and
+> `maestro-flow >=0.5.91`. Fork identities and unchanged contracts are in
+> [RELEASE.md](RELEASE.md). The npm commands here retain published 0.32.0;
+> they do not install the repair or certify security/compatibility. Formal
+> release closeout is paused.
+
 ```bash
 # Install or upgrade the suite (teammate auto-installs as a dependency)
 pi install npm:pi-maestro-flow@0.32.0

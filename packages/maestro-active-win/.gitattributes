@@ -1,0 +1,2 @@
+# Preserve the immutable upstream byte identity, including native assets.
+* -text

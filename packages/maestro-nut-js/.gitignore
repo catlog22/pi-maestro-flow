@@ -1,0 +1,4 @@
+# Ship reproducible compiled runtime and declarations with this compatibility fork.
+!dist/
+!dist/**
+node_modules/

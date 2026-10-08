@@ -230,6 +230,19 @@ test("compaction input keeps operator focus as non-privileged structured data", 
   assert.match(MAESTRO_COMPACTION_SYSTEM_PROMPT, /## Compaction Lineage/);
 });
 
+test("compaction checkpoint preserves bounded teammate tasks and child result references", () => {
+  assert.match(MAESTRO_COMPACTION_SYSTEM_PROMPT, /original dispatched target, scope, acceptance condition, output contract, caller identity/);
+  assert.match(MAESTRO_COMPACTION_SYSTEM_PROMPT, /even when no Todo is assigned/);
+  assert.match(MAESTRO_COMPACTION_SYSTEM_PROMPT, /searched paths and negative results/);
+  assert.match(MAESTRO_COMPACTION_SYSTEM_PROMPT, /consumed search rounds\/tool-call limits, remaining budget, and stop condition/);
+  assert.match(MAESTRO_COMPACTION_SYSTEM_PROMPT, /Compaction does not reset cumulative task budgets/);
+  assert.match(MAESTRO_COMPACTION_SYSTEM_PROMPT, /mark unknown values rather than inventing them/);
+  assert.match(MAESTRO_COMPACTION_SYSTEM_PROMPT, /next action is to return the consolidated result, not restart discovery/);
+  assert.match(MAESTRO_COMPACTION_SYSTEM_PROMPT, /child correlation IDs, known result\/publication URIs/);
+  assert.match(MAESTRO_COMPACTION_SYSTEM_PROMPT, /Distinguish running, result-ready, completed, and unknown/);
+  assert.match(MAESTRO_COMPACTION_SYSTEM_PROMPT, /do not infer live state from an old summary/);
+});
+
 test("compaction summary completion disables provider prompt caching", () => {
   const options = buildSummaryCompletionOptions({
     apiKey: "test-key",

@@ -1,0 +1,6 @@
+.verification/
+node_modules/
+build/
+lib/binding/napi-9-*/
+*.tgz
+package-lock.json

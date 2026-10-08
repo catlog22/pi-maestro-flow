@@ -28,7 +28,9 @@
 
 窗口截图只有在 client bounds 已被平台 provider 验证时才会启用；macOS/Linux 当前应使用 `screen` 或 `region`，不能把外层窗口 bounds 当成 client origin。
 
-项目已经声明以下 optional dependencies。安装或更新插件后，用包管理器的 optional 依赖模式安装它们：
+> **0.32.1 修补待发布（UNRELEASED）：** 表中的导入键不变，准备声明为 `active-win` → `npm:@dyw1234/active-win@9.0.1`、`@nut-tree-fork/nut-js` → `npm:@dyw1234/nut-js@4.2.7`；shared/provider-interfaces 使用 `@dyw1234/nut-shared@4.2.7` / `@dyw1234/nut-provider-interfaces@4.2.7` aliases。这些是修补 fork，不是官方支持承诺；来源和许可见 [RELEASE.md](../../../RELEASE.md)。验证/发布仍待完成，active-win 的 Node 22.19.0/macOS/Linux 验收未验证，表格不代表修补后兼容认证。
+
+项目已声明这些 optional dependencies；未发布修补声明不代表依赖已可从 registry 安装。本次仅修改文档，未运行下方安装/验证命令，也不恢复发布门禁。对于已发布且经用户授权安装的版本，可用包管理器的 optional 依赖模式：
 
 ```bash
 npm install --include=optional

@@ -2,9 +2,24 @@
 
 CU-0 records contracts for optional native providers only. Package startup must continue when any of these packages are not installed; callers must load them lazily and surface a diagnostic when unavailable.
 
-## Native packages
+## Prepared dependency repair (0.32.1, UNRELEASED)
 
-The package versions in `computer-use-manifest.json` were inspected from npm registry tarballs on this worktree and are optional dependencies:
+The Flow manifest prepares optional `onnxruntime-node@1.30.0`,
+`active-win` → `npm:@dyw1234/active-win@9.0.1`, and
+`@nut-tree-fork/nut-js` → `npm:@dyw1234/nut-js@4.2.7`.
+The nut shared/provider-interfaces aliases use `@dyw1234/nut-shared@4.2.7`
+and `@dyw1234/nut-provider-interfaces@4.2.7`. These are scoped repair forks,
+not official upstream releases or support guarantees; retained MIT/Apache-2.0
+licenses and provenance are summarized in [RELEASE.md](../../../RELEASE.md).
+Validation/publication remain pending. CU-0 probes below do not validate these
+new versions; active-win Node 22.19.0/macOS/Linux acceptance is unverified.
+No final-consumer audit-zero or full finding closure is claimed.
+
+## Historical CU-0 native package inspection
+
+The following baseline versions were inspected from npm registry tarballs for
+the CU-0 record in `computer-use-manifest.json`; they are not the prepared
+0.32.1 dependency versions:
 
 - `onnxruntime-node@1.21.0` - MIT; local probe passed through the existing `maestro-flow` dependency graph. The package declares Windows, macOS, and Linux support and exposes CPU and DirectML backends in the local build.
 - `@nut-tree-fork/nut-js@4.2.6` - Apache-2.0; registry declarations expose mouse, keyboard, screen, and window APIs. No input API was invoked during CU-0.

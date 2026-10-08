@@ -5,7 +5,15 @@ icon: "🔄"
 
 这里记录 pi maestro flow 套件从上一稳定版本到当前版本的用户可见变化、行为调整、问题修复和升级要求。
 
-> **当前版本：v0.32.0 — 范围化决策、精确证据与浏览器桥接。** Pi 验证基线 0.99.0；0.87–0.98 版本门控 legacy 兼容；引擎保持 `maestro-flow >=0.5.87` 范围，准备时 registry latest 为 0.5.90。
+> **v0.32.1 依赖安全修补：UNRELEASED，待验证与发布。** 仅准备源代码版本/依赖声明，不代表已发布、当前可安装最新版或安全/兼容验收通过。npm 已发布的 0.32.0 正式发布收尾仍暂停；历史版本记录与安装命令保留原值。
+
+## v0.32.1 — 依赖安全修补（UNRELEASED）
+
+- 准备 Flow **0.32.1**、Backends **0.1.7**、Teammate **2.8.1**、Cockpit **0.24.3**。Backend-Core **0.1.5**、Settings-Core **0.2.3**、Fabric/Fabric-Core **0.1.0** 不变。
+- 引擎要求提高为 **`maestro-flow >=0.5.91`**，仍是范围依赖；Node.js 最低 **22.19.0** 和 Pi **0.99.0** 验证基线不变。引擎下载/安装未成功，不声称推理验证通过。
+- 保留导入键：`active-win` → `npm:@dyw1234/active-win@9.0.1`；`@nut-tree-fork/nut-js` → `npm:@dyw1234/nut-js@4.2.7`。后者的 shared/provider-interfaces 键分别 alias 到 `@dyw1234/nut-shared@4.2.7` / `@dyw1234/nut-provider-interfaces@4.2.7`。
+- 四个包是修补 fork，不是上游官方发布/支持承诺：active-win 源自 MIT `active-win@9.0.0`，native 资产仍保持上游 v9.0.0 身份；nut 三包源自 Apache-2.0 `@nut-tree-fork` 4.2.6。来源、许可及变更记录在各 fork 的 provenance 文件中，汇总见仓库 `RELEASE.md`。
+- 本次文档步骤只修改既有文案，未执行 build/test/install/network validation/audit/pack/commit/publish/push；发布门禁暂停。Active-win 的 Node 22.19.0/macOS/Linux 兼容验收未验证，不声称最终 consumer audit-zero 或 31 项 findings 全部关闭。0.32.0 功能说明保留如下，不作为修补后的验收证据。
 
 ## v0.32.0 — 范围化决策、精确证据与浏览器桥接
 
