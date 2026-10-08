@@ -191,6 +191,114 @@ test("FFF loads its native index and searches a selected workspace subdirectory"
   }
 });
 
+test("FFF search and fffind report results omitted by the requested limit", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-fff-limits-"));
+  const tools: ToolDefinition[] = [];
+  let shutdown: (() => void) | undefined;
+  try {
+    await mkdir(join(root, "src"));
+    await writeFile(join(root, "src", "needle-a.ts"), "NEEDLE\nNEEDLE\n");
+    await writeFile(join(root, "src", "needle-b.ts"), "NEEDLE\n");
+    registerFff({
+      registerTool(tool: ToolDefinition) { tools.push(tool); },
+      on(event: string, handler: () => void) {
+        if (event === "session_shutdown") shutdown = handler;
+      },
+    } as unknown as ExtensionAPI);
+    const ctx = { cwd: root } as unknown as ExtensionContext;
+    const search = tools.find((tool) => tool.name === "search")!;
+    for (const output of ["lines", "files", "count"]) {
+      const result = await search.execute("fff-limit", {
+        pattern: "NEEDLE", path: "src", output, limit: 1,
+      }, undefined, undefined, ctx);
+      assert.match(result.content[0]?.text ?? "", /limit reached/, `${output} must disclose omitted rows`);
+      assert.equal(result.details?.truncated, true);
+      assert.equal(result.details?.exhausted, true, "the native scan itself completed");
+    }
+    const find = tools.find((tool) => tool.name === "fffind")!;
+    const found = await find.execute("fff-find-limit", {
+      pattern: "needle", path: "src", limit: 1,
+    }, undefined, undefined, ctx);
+    assert.match(found.content[0]?.text ?? "", /limit reached/);
+    assert.equal(found.details?.truncated, true);
+  } finally {
+    shutdown?.();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("FFF search and fffind cancellation does not wait for a shared index scan", async () => {
+  for (const name of ["search", "fffind"]) {
+    const { tools, register } = fakeRegister();
+    let finishScan!: (result: { ok: true; value: boolean }) => void;
+    let queried = false;
+    const finder = {
+      isDestroyed: false,
+      destroy() { finder.isDestroyed = true; },
+      waitForScan() {
+        return new Promise<{ ok: true; value: boolean }>((resolve) => { finishScan = resolve; });
+      },
+      grep() { queried = true; return { ok: true, value: { items: [], nextCursor: null } }; },
+      fileSearch() { queried = true; return { ok: true, value: { items: [], totalMatched: 0 } }; },
+    };
+    const handle = registerFff(register, { createFinder: () => ({ ok: true, value: finder }) as never });
+    const controller = new AbortController();
+    const root = join(tmpdir(), `pi-fff-cancel-${name}`);
+    // search uses the broker handle directly: it must also honor cancellation.
+    const pending = name === "search"
+      ? handle.search({ pattern: "needle", path: "src" }, root, controller.signal)
+      : tools.find((tool) => tool.name === name)!.execute("fff-cancel", {
+          pattern: "needle", path: "src",
+        }, controller.signal, undefined, { cwd: root } as unknown as ExtensionContext);
+    let settled = false;
+    let failure: unknown;
+    void pending.then(() => { settled = true; }, (error) => { settled = true; failure = error; });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    try {
+      controller.abort();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(settled, true, `${name} must settle before waitForScan completes`);
+      assert.equal((failure as Error)?.name, "AbortError");
+      assert.equal(finder.isDestroyed, false, "one caller must not destroy the shared scan");
+    } finally {
+      finishScan({ ok: true, value: true });
+      await pending.catch(() => undefined);
+      finder.destroy();
+    }
+    assert.equal(queried, false, "cancelled calls must not start native queries after the scan");
+  }
+});
+
+test("fffind discloses an incomplete scoped drain instead of definitive empty results", async () => {
+  const { tools, register } = fakeRegister();
+  let pages = 0;
+  const finder = {
+    isDestroyed: false,
+    destroy() { finder.isDestroyed = true; },
+    async waitForScan() { return { ok: true as const, value: true }; },
+    fileSearch(_pattern: string, options: { pageIndex: number; pageSize: number }) {
+      pages += 1;
+      return {
+        ok: true as const,
+        value: {
+          items: Array.from({ length: options.pageSize }, (_, index) => ({
+            relativePath: `other/needle-${options.pageIndex * options.pageSize + index}.ts`,
+          })),
+          totalMatched: 10_001,
+        },
+      };
+    },
+  };
+  registerFff(register, { createFinder: () => ({ ok: true, value: finder }) as never });
+  const result = await tools.find((tool) => tool.name === "fffind")!.execute("fff-drain", {
+    pattern: "needle", path: "src", limit: 1,
+  }, undefined, undefined, { cwd: join(tmpdir(), "pi-fff-scoped-drain") } as unknown as ExtensionContext);
+  assert.equal(pages, 200, "the drain remains bounded");
+  assert.match(result.content[0]?.text ?? "", /index drain stopped early.*incomplete/);
+  assert.equal(result.details?.exhausted, false);
+  assert.equal(result.details?.truncated, true);
+});
+
 function fakeRegister(): {
   tools: ToolDefinition[];
   register: ExtensionAPI;

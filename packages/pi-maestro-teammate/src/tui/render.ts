@@ -195,6 +195,19 @@ function renderSafeText(value: unknown): string {
     .trim();
 }
 
+/**
+ * Shared tool-call row grammar, mirroring Cockpit's toolCallLine:
+ * `  {mark} {toolTitle name} {accent arg}`. Every teammate-family renderCall
+ * uses it so quiet and default mode differ only in glyph set, never in shape.
+ */
+export function teammateCallLine(theme: Theme, name: string, arg = ""): Component {
+  const glyph = theme.fg("warning", quietStatusMark("running"));
+  const argText = arg ? ` ${theme.fg("accent", arg)}` : "";
+  return dynamicComponent((w) => [
+    truncateToWidth(`  ${glyph} ${theme.fg("toolTitle", theme.bold(name))}${argText}`, liveRenderWidth(w), "…"),
+  ]);
+}
+
 function isExpertRenderArgs(args: Record<string, unknown> | undefined): boolean {
   return args?.mode === "expert";
 }
@@ -271,8 +284,9 @@ export function renderTeammateCall(
       if (context?.isPartial === false || context?.state?.teammateResultVisible === true || width <= 1) return [];
       const task = Array.isArray(args.tasks) ? recordOf(args.tasks[0]) : args;
       const label = renderSafeText(task?.name ?? task?.agent);
+      const argText = label ? ` ${theme.fg("accent", `@${label}`)}` : "";
       const glyph = theme.fg("warning", quietStatusMark("running"));
-      return [truncateToWidth(qLine(theme, glyph, "teammate", label ? `@${label}` : ""), liveRenderWidth(width), "…")];
+      return [truncateToWidth(`  ${glyph} ${theme.fg("toolTitle", theme.bold("teammate"))}${argText}`, liveRenderWidth(width), "…")];
     });
   }
   const objective = expertObjective(args);
@@ -295,13 +309,15 @@ export function renderTeammateListCall(
 ): Component {
   if (context?.isPartial === false) return new Text("", 0, 0);
   const view = typeof args.view === "string" ? args.view : "active";
-  return new Text(`  ${theme.fg("warning", "…")} ${theme.bold("teammate-list")} ${theme.fg("dim", view)}`, 0, 0);
+  return teammateCallLine(theme, "teammate-list", view);
 }
 
 type ToolCardStatus = "success" | "failure";
 
 interface TeammateToolCardOptions {
   name: string;
+  /** Accent-colored argument segment between the name and the dim summary. */
+  arg?: string;
   summary: string;
   status: ToolCardStatus;
   expanded?: boolean;
@@ -484,7 +500,7 @@ function renderTeammateToolCard(
     const tone = options.status === "failure" ? "error" : "success";
     const mark = theme.fg(tone, quietStatusMark(options.status));
     const label = [
-      `${mark} ${theme.bold(options.name)}`,
+      `${mark} ${theme.fg("toolTitle", theme.bold(options.name))}${options.arg ? ` ${theme.fg("accent", options.arg)}` : ""}`,
       options.summary ? theme.fg("dim", `· ${options.summary}`) : "",
     ].filter(Boolean).join(" ");
     const cardWidth = safeWidth - 1;
@@ -531,17 +547,12 @@ export function renderTeammateListResult(
   rendererError = false,
 ): Component {
   if (options.isPartial) return new Text("", 0, 0);
-  if (!isQuietMode()) {
-    const text = resultText(result);
-    return dynamicComponent((width) => text.split("\n").map((line) =>
-      truncateToWidth(line, Math.max(1, width), theme.fg("dim", "…"))
-    ));
-  }
   const count = result.details?.agents.length ?? 0;
   const view = typeof args?.view === "string" ? args.view : "active";
   return renderTeammateToolCard(result, {
     name: "teammate-list",
-    summary: `${view} · ${count} item${count === 1 ? "" : "s"}`,
+    arg: view,
+    summary: `${count} item${count === 1 ? "" : "s"}`,
     status: rendererError || isErrorResult(result) ? "failure" : "success",
     expanded: options.expanded,
     groups: teammateListGroups(result.details?.agents ?? [], resultText(result)),
@@ -556,8 +567,7 @@ export function renderTeammateSendCall(
 ): Component {
   if (context?.isPartial === false) return new Text("", 0, 0);
   const mode = typeof args.mode === "string" ? args.mode : "steer";
-  return renderQuietTeammateAux("teammate-send", `@${String(args.to ?? "?")} · ${mode}`, "running", theme)
-    ?? auxToolCallFallback("teammate-send", theme);
+  return teammateCallLine(theme, "teammate-send", `@${String(args.to ?? "?")} · ${mode}`);
 }
 
 export function renderTeammateSendResult(
@@ -568,12 +578,12 @@ export function renderTeammateSendResult(
   rendererError = false,
 ): Component {
   if (options.isPartial) return new Text("", 0, 0);
-  if (!isQuietMode()) return auxToolResultFallback(result, theme);
   const failed = rendererError || isErrorResult(result) || result.details?.delivered !== true;
   const mode = typeof args?.mode === "string" ? args.mode : "steer";
   return renderTeammateToolCard(result, {
     name: "teammate-send",
-    summary: `@${String(args?.to ?? "?")} · ${mode} · ${failed ? "delivery failed" : "delivered"}`,
+    arg: `@${String(args?.to ?? "?")} · ${mode}`,
+    summary: failed ? "delivery failed" : "delivered",
     status: failed ? "failure" : "success",
     expanded: options.expanded,
     groups: resultText(result) ? [resultText(result).split("\n")] : [],
@@ -599,8 +609,7 @@ export function renderObserveCall(
   const action = String(args.action ?? "status");
   const count = Array.isArray(args.targets) ? args.targets.length : 0;
   const targetLabel = `${count} target${count === 1 ? "" : "s"}`;
-  return renderQuietTeammateAux("observe", `${action} · ${targetLabel}`, "running", theme)
-    ?? auxToolCallFallback("observe", theme);
+  return teammateCallLine(theme, "observe", `${action} · ${targetLabel}`);
 }
 
 export function renderObserveResult(
@@ -610,7 +619,6 @@ export function renderObserveResult(
   rendererError = false,
 ): Component {
   if (options.isPartial) return new Text("", 0, 0);
-  if (!isQuietMode()) return auxToolResultFallback(result, theme);
   const details = result.details as ObserveCardDetails | undefined;
   const observed = details?.result;
   const failed = rendererError || isErrorResult(result);
@@ -619,7 +627,8 @@ export function renderObserveResult(
   const reason = observed?.reason ?? (failed ? "failed" : "completed");
   return renderTeammateToolCard(result, {
     name: "observe",
-    summary: `${action} · ${count} target${count === 1 ? "" : "s"} · ${reason}`,
+    arg: action,
+    summary: `${count} target${count === 1 ? "" : "s"} · ${reason}`,
     status: failed ? "failure" : "success",
     expanded: options.expanded,
     groups: observeGroups(details, details?.output?.join("\n") ?? resultText(result), options.expanded === true),
@@ -641,13 +650,13 @@ export function renderMonitorResult(
   rendererError = false,
 ): Component {
   if (options.isPartial) return new Text("", 0, 0);
-  if (!isQuietMode()) return auxToolResultFallback(result, theme);
   const details = result.details as MonitorCardDetails | undefined;
   const failed = rendererError || isErrorResult(result);
   const count = details?.windows?.length ?? 0;
   return renderTeammateToolCard(result, {
     name: "monitor",
-    summary: `${details?.action ?? "list"} · ${details?.status ?? (failed ? "failed" : "ok")} · ${count} window${count === 1 ? "" : "s"}`,
+    arg: details?.action ?? "list",
+    summary: `${details?.status ?? (failed ? "failed" : "ok")} · ${count} window${count === 1 ? "" : "s"}`,
     status: failed ? "failure" : "success",
     expanded: options.expanded,
     groups: monitorGroups(details, resultText(result), options.expanded === true),
@@ -1269,40 +1278,39 @@ export function renderTeammateStalledMessage(
   }, theme);
 }
 
-export function renderQuietTeammateAux(
+/**
+ * One status row for compact auxiliary outcomes (`teammate-started` notices,
+ * quiet watch/wait/monitor results). Renders in every mode — only the glyph
+ * set changes — so these surfaces are never the host's plain-text fallback.
+ */
+export function teammateStatusRow(
   name: "teammate-send" | "teammate-wait" | "teammate-watch" | "teammate-started" | "teammate-monitor" | "observe",
   rest: string,
   status: "running" | "success" | "failure",
   theme: Theme,
-): Component | undefined {
-  if (!isQuietMode()) return undefined;
+): Component {
   const tone = status === "failure" ? "error" : status === "success" ? "success" : "warning";
   const glyph = theme.fg(tone, quietStatusMark(status));
   return dynamicComponent((w) => [truncateToWidth(qLine(theme, glyph, name, rest), liveRenderWidth(w), "…")]);
 }
 
-/**
- * Host-contract fallbacks for auxiliary tool renderers when quiet mode is off.
- * pi's ToolExecutionComponent addChild()s whatever renderCall/renderResult
- * return and only guards against throws, so renderQuietTeammateAux's quiet-only
- * undefined must never leak into a tool slot — Box.render would call
- * child.render on undefined and kill pi with an uncaughtException. This is the
- * exact state every /resume history render sees: pi renders resumed history
- * before session_start, while the Cockpit-driven quiet mirror is still false.
- * The fallbacks mirror the host's own default call/result rendering.
- */
-export function auxToolCallFallback(name: string, theme: Theme): Component {
-  return new Text(theme.fg("toolTitle", theme.bold(name)), 0, 0);
-}
-
-export function auxToolResultFallback(result: AgentToolResult<unknown>, theme: Theme): Component {
-  const text = typeof result.content === "string"
-    ? result.content
-    : result.content
-      .map((entry) => entry.type === "text" ? entry.text : "")
-      .filter(Boolean)
-      .join("\n");
-  return new Text(text ? theme.fg("toolOutput", text) : "", 0, 0);
+/** Card-shaped result for auxiliary tools without structured details. */
+export function auxToolResultCard(
+  name: string,
+  result: AgentToolResult<unknown>,
+  theme: Theme,
+  options: { expanded?: boolean } = {},
+): Component {
+  const lines = boundedMessageLines(messageCardLines(resultText(result)), options.expanded === true);
+  return renderTeammateToolCard(result, {
+    name,
+    summary: isErrorResult(result) ? "failed" : "ok",
+    status: isErrorResult(result) ? "failure" : "success",
+    expanded: options.expanded,
+    groups: lines.length > 0 ? [lines] : [],
+    maxCollapsedGroups: 1,
+    maxCollapsedRows: 8,
+  }, theme);
 }
 
 function quietFirstError(r: SingleResult): string {

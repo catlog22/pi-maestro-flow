@@ -69,13 +69,13 @@ teammate({
 
 pi-maestro-flow is a **Pi plugin** — install it with `pi install` (not a regular npm dependency). A single command installs the whole suite: Flow acts as the install entry and automatically pulls in and registers the remaining extensions and dependencies.
 
-> **v0.32.1 dependency repair (UNRELEASED):** prepares Flow 0.32.1, Backends 0.1.7, Teammate 2.8.1, and Cockpit 0.24.3, with engine requirement `maestro-flow >=0.5.91`. See [RELEASE.md](RELEASE.md) for the four `@dyw1234` forks and licensing. Validation and publication remain pending; this is not security/compatibility acceptance. Commands below retain npm-published 0.32.0, without this repair; formal release closeout is paused.
+> **v0.32.1:** dependency repairs, SSH PowerShell/UTF-8 hardening, and bounded teammate compaction recovery. Suite: Flow 0.32.1, Backends 0.1.7, Teammate 2.8.1, Cockpit 0.24.3; engine requirement `maestro-flow >=0.5.91`. See [RELEASE.md](RELEASE.md) for the four `@dyw1234` forks, licensing, and verification scope. Native checks cover Windows x64 / Node 22.22 only; minimum Node and macOS/Linux remain unverified. No cross-platform or whole-graph vulnerability-free claim is made.
 
 **Prerequisites:** [Node.js](https://nodejs.org) ≥ 22.19.0 · [Pi Coding Agent](https://github.com/earendil-works/pi) 0.99.0 (validation baseline; 0.87–0.98 uses version-gated legacy compatibility)
 
 ```bash
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent   # host runtime
-pi install npm:pi-maestro-flow@0.32.0                              # install or upgrade the plugin (single entry)
+pi install npm:pi-maestro-flow@0.32.1                              # install or upgrade the plugin (single entry)
 pi list                                                            # confirm Flow, Teammate, and Cockpit are listed
 ```
 
@@ -118,7 +118,7 @@ Full tool parameters and workflow definitions live in the **[Usage Guide](docs/U
 | **[Usage Guide](docs/USAGE_EN.md)** / **[中文](docs/USAGE.md)** | Complete feature documentation — all tools, MCP, permissions, thinking depth, agents, workflows |
 | **[User Guide](GUIDE.md)** | In-depth tutorial with examples for every subsystem |
 | **[Smart Search Provider Config](docs/smart-search-provider-config.md)** | Search provider setup — dual-path architecture, API keys, credential syntax, TUI config, sync |
-| **[Release Notes](RELEASE.md)** | v0.32.1 UNRELEASED: dependency repair; retained 0.32.0 feature baseline |
+| **[Release Notes](RELEASE.md)** | v0.32.1: dependency repairs and runtime hardening |
 | **[Browser Bridge Setup](packages/pi-maestro-flow/optional/BROWSER-BRIDGE-SETUP.md)** | Multiple listeners, NONE/paired auth, explicit channels, shared login state, and troubleshooting |
 | Per-plugin READMEs | [flow](packages/pi-maestro-flow/README.md) · [teammate](packages/pi-maestro-teammate/README.md) · [cockpit](packages/pi-cockpit/README.md) |
 
@@ -128,7 +128,7 @@ Full tool parameters and workflow definitions live in the **[Usage Guide](docs/U
 
 - **[Maestro-Flow](https://github.com/catlog22/maestro-flow)** — intent-driven workflow orchestration by [@catlog22](https://github.com/catlog22)
 - **[Pi Coding Agent](https://github.com/earendil-works/pi)** — terminal coding harness (host runtime) by [@earendil-works](https://github.com/earendil-works)
-- Upstream libraries powering built-in tools: [@modelcontextprotocol/sdk](https://modelcontextprotocol.io) (`mcp`; SDK `1.32.1` prepared for the unreleased repair) · [Puppeteer](https://github.com/puppeteer/puppeteer) (`browser`; `puppeteer-core 25.12.0` prepared for the unreleased repair) · [@ff-labs/fff-node](https://github.com/dmtrKovalenko/fff) (`search`/`fffind`) · [@konbakuyomu/smart-search](https://github.com/konbakuyomu/smartsearch) (`smart_search`) · [pi-web-access](https://github.com/nicobailon/pi-web-access) (native web search/extraction/curator)
+- Upstream libraries powering built-in tools: [@modelcontextprotocol/sdk](https://modelcontextprotocol.io) (`mcp`; SDK `1.32.1`) · [Puppeteer](https://github.com/puppeteer/puppeteer) (`browser`; `puppeteer-core 25.12.0`) · [@ff-labs/fff-node](https://github.com/dmtrKovalenko/fff) (`search`/`fffind`) · [@konbakuyomu/smart-search](https://github.com/konbakuyomu/smartsearch) (`smart_search`) · [pi-web-access](https://github.com/nicobailon/pi-web-access) (native web search/extraction/curator)
 
 ## License
 

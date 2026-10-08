@@ -9,6 +9,12 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type Component } from "@earendil-works/pi-tui";
 import type { Details } from "../shared/types.ts";
 type Theme = ExtensionContext["ui"]["theme"];
+/**
+ * Shared tool-call row grammar, mirroring Cockpit's toolCallLine:
+ * `  {mark} {toolTitle name} {accent arg}`. Every teammate-family renderCall
+ * uses it so quiet and default mode differ only in glyph set, never in shape.
+ */
+export declare function teammateCallLine(theme: Theme, name: string, arg?: string): Component;
 type TeammateRenderContext = {
     expanded?: boolean;
     isPartial?: boolean;
@@ -63,17 +69,14 @@ export interface TeammateStalledRenderDetails {
     diagnosis?: unknown;
 }
 export declare function renderTeammateStalledMessage(content: string, details: TeammateStalledRenderDetails | undefined, expanded: boolean, theme: Theme): Component;
-export declare function renderQuietTeammateAux(name: "teammate-send" | "teammate-wait" | "teammate-watch" | "teammate-started" | "teammate-monitor" | "observe", rest: string, status: "running" | "success" | "failure", theme: Theme): Component | undefined;
 /**
- * Host-contract fallbacks for auxiliary tool renderers when quiet mode is off.
- * pi's ToolExecutionComponent addChild()s whatever renderCall/renderResult
- * return and only guards against throws, so renderQuietTeammateAux's quiet-only
- * undefined must never leak into a tool slot — Box.render would call
- * child.render on undefined and kill pi with an uncaughtException. This is the
- * exact state every /resume history render sees: pi renders resumed history
- * before session_start, while the Cockpit-driven quiet mirror is still false.
- * The fallbacks mirror the host's own default call/result rendering.
+ * One status row for compact auxiliary outcomes (`teammate-started` notices,
+ * quiet watch/wait/monitor results). Renders in every mode — only the glyph
+ * set changes — so these surfaces are never the host's plain-text fallback.
  */
-export declare function auxToolCallFallback(name: string, theme: Theme): Component;
-export declare function auxToolResultFallback(result: AgentToolResult<unknown>, theme: Theme): Component;
+export declare function teammateStatusRow(name: "teammate-send" | "teammate-wait" | "teammate-watch" | "teammate-started" | "teammate-monitor" | "observe", rest: string, status: "running" | "success" | "failure", theme: Theme): Component;
+/** Card-shaped result for auxiliary tools without structured details. */
+export declare function auxToolResultCard(name: string, result: AgentToolResult<unknown>, theme: Theme, options?: {
+    expanded?: boolean;
+}): Component;
 export {};

@@ -13,19 +13,27 @@
  *   4. publish a `SupervisionEvent` (source "advisor") for cockpit-style surfaces
  */
 
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { lstatSync, renameSync } from "node:fs";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { buildSessionContext, convertToLlm, type AgentToolUpdateCallback, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
+  createSupervisionEvent,
+  SUPERVISION_EVENT,
   ensureAdvisorCommandRegistered,
   getAdvisorRuntimeOwner,
   registerAdvisorRuntime,
   type AdvisorRuntimeLease,
 } from "pi-maestro-teammate/v1/supervision";
 import { createDirectTeammateRunOptions } from "../tools/direct-teammate.ts";
+import { classify } from "pi-maestro-teammate/v1/classify";
+import { todoProgressDomain } from "../classifier/domains.ts";
+import { TodoReviewHost } from "./todo-review-host.ts";
+import { todoReflection, type TodoReviewTicket } from "./todo-review.ts";
 import {
   advisorConfigPath,
   applyAdvisorEnvOverrides,
@@ -323,10 +331,37 @@ export async function loadAdvisorWorkspaceConfig(
   }
 }
 
-async function saveConfig(config: AdvisorConfig, cwd: string): Promise<void> {
+const configWrites = new Map<string, Promise<void>>();
+let configWriteBarrier: (() => Promise<void>) | undefined;
+/** @internal Deterministic lifecycle interleavings at the durable replacement boundary. */
+export function setAdvisorConfigWriteBarrierForTest(barrier: (() => Promise<void>) | undefined): void {
+  configWriteBarrier = barrier;
+}
+
+async function saveConfig(config: AdvisorConfig, cwd: string, assertFresh: () => void): Promise<void> {
   const path = advisorConfigPath(cwd);
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  const write = async (): Promise<void> => {
+    assertFresh();
+    await mkdir(dirname(path), { recursive: true });
+    assertFresh();
+    const temporary = `${path}.${randomUUID()}.tmp`;
+    let committed = false;
+    try {
+      await writeFile(temporary, `${JSON.stringify(config, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+      if (configWriteBarrier) await configWriteBarrier();
+      assertFresh();
+      try {
+        if (!lstatSync(path).isFile()) throw new Error("Advisor config target must be a regular file, not a link or directory.");
+      } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      // No await between the authority fence and the atomic durable replacement.
+      renameSync(temporary, path);
+      committed = true;
+    } finally { if (!committed) await rm(temporary, { force: true }); }
+  };
+  const operation = (configWrites.get(path) ?? Promise.resolve()).then(write, write);
+  configWrites.set(path, operation);
+  try { await operation; }
+  finally { if (configWrites.get(path) === operation) configWrites.delete(path); }
 }
 
 // ---------------------------------------------------------------------------
@@ -356,13 +391,22 @@ export default function registerAdvisor(pi: ExtensionAPI): void {
   let activeContext: ExtensionContext | undefined;
   let ownershipGeneration = 0;
   let advisorRuntimeLease: AdvisorRuntimeLease | undefined;
-  type EvaluationSource = "tool_result" | "agent_end";
-  let pendingEvaluation: {
+  type EvaluationSource = "tool_result" | "agent_end" | "todo_progress";
+  interface EvaluationItem {
     tail: string;
     ctx: ExtensionContext;
     source: EvaluationSource;
     ownershipGeneration: number;
-  } | undefined;
+    ticket?: TodoReviewTicket;
+    steer?: (message: string) => boolean;
+  }
+  const pendingEvaluations: EvaluationItem[] = [];
+  let todoHost: TodoReviewHost;
+  function currentItem(item: EvaluationItem, signal: AbortSignal): boolean {
+    if (signal.aborted || !ownsAdvisorRuntime(item.ownershipGeneration) || !automaticAdvisorEnabled(config)) return false;
+    if (item.ticket) { todoHost.sync(); return config.todoReview.enabled && todoHost.monitor.fresh(item.ticket); }
+    return !todoHost.monitored();
+  }
 
   function notifyUnavailable(ctx: ExtensionContext, reason: string): void {
     if (unavailableNotified) return;
@@ -373,7 +417,8 @@ export default function registerAdvisor(pi: ExtensionAPI): void {
   function resetAdvisorLifecycle(): void {
     lifecycleController.abort();
     lifecycleController = new AbortController();
-    pendingEvaluation = undefined;
+    pendingEvaluations.length = 0;
+    todoHost.reset(config.todoReview, true);
     toolResultsSinceEvaluation = 0;
     toolCheckpoints = [];
     gate?.reset();
@@ -419,7 +464,7 @@ export default function registerAdvisor(pi: ExtensionAPI): void {
   function loadWorkspaceConfig(ctx: ExtensionContext, resetSession = false): void {
     activeContext = ctx;
     resetAdvisorLifecycle();
-    if (resetSession) resetAdvisorSessionState();
+    if (resetSession) { resetAdvisorSessionState(); todoHost.monitor.reset(config.todoReview); }
     const generation = ++configGeneration;
     let cwd: string;
     try {
@@ -443,6 +488,7 @@ export default function registerAdvisor(pi: ExtensionAPI): void {
       configEnvOverridden = loaded.envOverridden;
       if (loaded.warning) ctx.ui.notify(loaded.warning, "warning");
       syncManualTool(ctx);
+      todoHost.reset(config.todoReview, true);
       if (config.enabled) pi.events?.emit?.("advisor:enabled", { enabled: true });
     }).finally(() => {
       if (configLoadPromise === load) configLoadPromise = undefined;
@@ -451,6 +497,7 @@ export default function registerAdvisor(pi: ExtensionAPI): void {
   }
 
   async function ensureWorkspaceConfig(ctx: ExtensionContext): Promise<void> {
+    activeContext = ctx;
     if (configCwd !== ctx.cwd) loadWorkspaceConfig(ctx);
     await configLoadPromise;
   }
@@ -477,16 +524,28 @@ export default function registerAdvisor(pi: ExtensionAPI): void {
   ): Promise<boolean> {
     const generation = ownershipGeneration;
     if (!ownsAdvisorRuntime(generation)) return false;
+    const epoch = configGeneration;
+    const signal = lifecycleController.signal;
     const normalized = normalizeAdvisorConfig(next);
+    const cwd = ctx.cwd;
+    const sessionId = ctx.sessionManager?.getSessionId?.();
+    const assertFresh = (): void => {
+      if (!ownsAdvisorRuntime(generation) || epoch !== configGeneration || signal.aborted
+        || configCwd !== cwd || ctx.sessionManager?.getSessionId?.() !== sessionId) {
+        throw new Error("Advisor configuration save is stale; reopen settings.");
+      }
+    };
     try {
-      await saveConfig(normalized, ctx.cwd);
+      await saveConfig(normalized, cwd, assertFresh);
+      assertFresh();
     } catch (error) {
-      if (ownsAdvisorRuntime(generation)) {
+      if (!signal.aborted && epoch === configGeneration && ownsAdvisorRuntime(generation)) {
         ctx.ui.notify(`Failed to save Advisor configuration: ${error instanceof Error ? error.message : String(error)}`, "error");
       }
       return false;
     }
-    if (!ownsAdvisorRuntime(generation)) return false;
+    if (!ownsAdvisorRuntime(generation) || epoch !== configGeneration || signal.aborted) return false;
+    configGeneration++;
     storedConfig = normalized;
     config = applyAdvisorEnvOverrides(storedConfig);
     configSource = "canonical";
@@ -622,18 +681,39 @@ export default function registerAdvisor(pi: ExtensionAPI): void {
 
   /** Evaluate one queued snapshot and inject only after a valid background result arrives. */
   async function runAdvisorEvaluation(
-    item: { tail: string; ctx: ExtensionContext; source: EvaluationSource; ownershipGeneration: number },
+    item: EvaluationItem,
     signal: AbortSignal,
   ): Promise<void> {
-    if (!ownsAdvisorRuntime(item.ownershipGeneration)
-      || !automaticAdvisorEnabled(config)
-      || !automaticReviewAvailable()
-      || signal.aborted) return;
+    if (!currentItem(item, signal) || (!item.ticket && !automaticReviewAvailable())) return;
+    let taskAction: "reflect" | "escalate" | undefined;
+    if (item.ticket) {
+      const progress = await waitForDispatchOrAbort(classify(todoProgressDomain, item.ticket.input), signal);
+      if (!currentItem(item, signal)) return;
+      const shadow = config.todoReview.mode === "shadow";
+      state.lastTodoReview = { taskId: item.ticket.taskId, actor: item.ticket.actor,
+        status: progress.label, confidence: progress.confidence, layer: progress.layer,
+        shadow, at: Date.now(), ...(progress.degradedReason ? { degradedReason: progress.degradedReason } : {}) };
+      if (shadow) {
+        state.todoShadowReviews = (state.todoShadowReviews ?? 0) + 1;
+        try {
+          pi.events?.emit?.(SUPERVISION_EVENT, createSupervisionEvent("advisor", "verdict", "info", {
+            target: item.ticket.actor, verdict: { status: progress.label },
+            meta: { checkpoint: "todo_progress", taskId: item.ticket.taskId, shadow: true,
+              confidence: progress.confidence, layer: progress.layer },
+          }));
+        } catch (error) { if (currentItem(item, signal)) recordEvaluationFailure(`Todo shadow telemetry failed: ${String(error)}`); }
+        todoHost.monitor.observed(item.ticket);
+        return;
+      }
+      taskAction = todoHost.monitor.decide(item.ticket, progress);
+      if (!taskAction) return;
+      if (taskAction === "escalate" && !automaticReviewAvailable()) return;
+    }
     state.evaluations++;
     gate?.beginWindow();
     try {
       const loaded = await loadTeammate();
-      if (!ownsAdvisorRuntime(item.ownershipGeneration) || signal.aborted) return;
+      if (!currentItem(item, signal)) return;
       if (!loaded) {
         state.lastEvaluatedAt = Date.now();
         recordEvaluationFailure("pi-maestro-teammate is not installed");
@@ -644,16 +724,25 @@ export default function registerAdvisor(pi: ExtensionAPI): void {
       if (!gate) {
         gate = new supervision.DeliveryGate({
           cooldownMs: config.cooldownMs,
-          dedup: { scope: "global" },
+          dedup: { scope: "target" },
           perWindowLimit: 1,
           downgradeAfter: GATE_DOWNGRADE_WINDOWS,
         });
       }
 
+      if (item.ticket && taskAction === "reflect") {
+        const message = todoReflection(item.ticket);
+        const mode = gate.gate(`${item.ticket.actor}:${item.ticket.key}`, message, "batch");
+        if (!mode || !currentItem(item, signal)) { state.suppressed++; return; }
+        if (deliverTask(item, message, "concern", mode)) {
+          todoHost.monitor.delivered(item.ticket, "reflect"); state.deliveries++;
+        }
+        return;
+      }
       const prompt = buildAdvisorPrompt(config, item.tail);
       const selectedModel = resolveAdvisorModel(config, item.ctx.model);
       const options = await createDirectTeammateRunOptions(pi, item.ctx, { baseCwd: item.ctx.cwd });
-      if (!ownsAdvisorRuntime(item.ownershipGeneration) || signal.aborted) return;
+      if (!currentItem(item, signal)) return;
       const availableModels = item.ctx.modelRegistry.getAvailable()
         .map((model) => `${model.provider}/${model.id}`);
       if (!selectedModel || !availableModels.includes(selectedModel)) {
@@ -664,10 +753,11 @@ export default function registerAdvisor(pi: ExtensionAPI): void {
 
       if (!automaticReviewAvailable()) return;
       automaticReviews++;
+      if (item.ticket) todoHost.monitor.delivered(item.ticket, "escalate");
       lastAutomaticReviewStartedAt = Date.now();
       const evaluation = await supervision.runSupervisedEvaluation<AdvisorVerdict>(
         async (dispatchContext) => {
-          if (!ownsAdvisorRuntime(item.ownershipGeneration) || dispatchContext.signal?.aborted) {
+          if (!currentItem(item, dispatchContext.signal ?? signal)) {
             throw new Error("Advisor runtime ownership changed before evaluation dispatch.");
           }
           const results = await waitForDispatchOrAbort(runTeammate(
@@ -707,9 +797,7 @@ export default function registerAdvisor(pi: ExtensionAPI): void {
         },
       );
 
-      if (signal.aborted
-        || !ownsAdvisorRuntime(item.ownershipGeneration)
-        || !automaticAdvisorEnabled(config)) return;
+      if (!currentItem(item, signal)) return;
       state.lastEvaluatedAt = Date.now();
       state.lastModel = evaluation.raw?.model ?? selectedModel;
       if (!evaluation.ok) {
@@ -725,19 +813,18 @@ export default function registerAdvisor(pi: ExtensionAPI): void {
       state.lastStatus = verdict.status;
       if (verdict.status === "on-track") {
         state.uneventful++;
+        if (item.ticket) todoHost.monitor.decide(item.ticket, { label: "on-track", confidence: 1, layer: "rule" });
         return;
       }
 
       const requested = verdictDeliveryMode(verdict);
       if (!requested
         || !gate
-        || signal.aborted
-        || !ownsAdvisorRuntime(item.ownershipGeneration)
-        || !automaticAdvisorEnabled(config)) return;
+        || !currentItem(item, signal)) return;
       const message = verdict.message?.trim() || verdict.reason?.trim();
       if (!message) return;
 
-      const mode = gate.gate(ADVISOR_TARGET, message, requested);
+      const mode = gate.gate(item.ticket ? `${item.ticket.actor}:${item.ticket.key}` : ADVISOR_TARGET, message, requested);
       if (mode === undefined) {
         state.suppressed++;
         return;
@@ -747,7 +834,9 @@ export default function registerAdvisor(pi: ExtensionAPI): void {
       const interrupting = mode === "interrupt";
       const blocker = verdict.status === "blocker";
 
-      pi.sendMessage(
+      if (item.ticket) {
+        if (!currentItem(item, signal) || !deliverTask(item, message, severity, mode)) return;
+      } else pi.sendMessage(
         {
           customType: ADVISOR_CUSTOM_TYPE,
           content: advisory,
@@ -765,16 +854,14 @@ export default function registerAdvisor(pi: ExtensionAPI): void {
         pi.events?.emit?.(
           supervision.SUPERVISION_EVENT,
           supervision.createSupervisionEvent("advisor", "intervention", severity, {
-            target: ADVISOR_TARGET,
+            target: item.ticket?.actor ?? ADVISOR_TARGET,
             message,
             meta: { status: verdict.status, delivery: mode, checkpoint: item.source },
           }),
         );
       } catch { /* best effort — supervision telemetry must never break the turn */ }
     } catch (error) {
-      if (signal.aborted
-        || !ownsAdvisorRuntime(item.ownershipGeneration)
-        || !automaticAdvisorEnabled(config)) return;
+      if (!currentItem(item, signal)) return;
       state.lastEvaluatedAt = Date.now();
       const reason = error instanceof Error ? error.message : String(error);
       recordEvaluationFailure(reason);
@@ -785,6 +872,16 @@ export default function registerAdvisor(pi: ExtensionAPI): void {
     }
   }
 
+  function deliverTask(item: EvaluationItem, message: string, severity: "concern" | "blocker", mode: "interrupt" | "batch" | "notify"): boolean {
+    if (!item.ticket || !currentItem(item, lifecycleController.signal) || config.todoReview.mode === "shadow") return false;
+    const content = formatAdvisory(message, severity);
+    if (item.ticket.actor !== "root") return item.steer?.(content) === true;
+    pi.sendMessage({ customType: ADVISOR_CUSTOM_TYPE, content, display: true,
+      details: { source: "advisor", checkpoint: "todo_progress", taskId: item.ticket.taskId, actor: item.ticket.actor, severity } },
+      { triggerTurn: false, deliverAs: mode === "notify" ? "nextTurn" : "steer" });
+    return true;
+  }
+
   async function drainEvaluationQueue(): Promise<void> {
     if (evaluationInFlight || !ownsAdvisorRuntime()) return;
     evaluationInFlight = true;
@@ -793,17 +890,18 @@ export default function registerAdvisor(pi: ExtensionAPI): void {
       while (ownsAdvisorRuntime()
         && automaticAdvisorEnabled(config)
         && !signal.aborted
-        && pendingEvaluation) {
-        const item = pendingEvaluation;
-        pendingEvaluation = undefined;
-        await runAdvisorEvaluation(item, signal);
+        && pendingEvaluations.length) {
+        const item = pendingEvaluations.shift()!;
+        try { await runAdvisorEvaluation(item, signal); }
+        catch (error) { if (currentItem(item, signal)) recordEvaluationFailure(String(error)); }
+        finally { if (item.ticket) todoHost.monitor.release(item.ticket); }
       }
     } finally {
       evaluationInFlight = false;
       if (ownsAdvisorRuntime()
         && automaticAdvisorEnabled(config)
         && !lifecycleController.signal.aborted
-        && pendingEvaluation) {
+        && pendingEvaluations.length) {
         void drainEvaluationQueue();
       }
     }
@@ -815,7 +913,11 @@ export default function registerAdvisor(pi: ExtensionAPI): void {
       || !automaticReviewAvailable()
       || configCwd !== ctx.cwd
       || !tail.trim()) return;
-    pendingEvaluation = { tail, ctx, source, ownershipGeneration };
+    if (todoHost.monitored()) return;
+    const legacy = pendingEvaluations.findIndex((item) => !item.ticket);
+    const item = { tail, ctx, source, ownershipGeneration };
+    if (legacy >= 0) pendingEvaluations[legacy] = item;
+    else if (pendingEvaluations.length < 64) pendingEvaluations.push(item);
     void drainEvaluationQueue();
   }
 
@@ -837,7 +939,8 @@ export default function registerAdvisor(pi: ExtensionAPI): void {
   pi.on("tool_result", (event, ctx) => {
     if (!ownsAdvisorRuntime()
       || !automaticAdvisorEnabled(config)
-      || config.reviewEveryToolResults === 0) return;
+      || config.reviewEveryToolResults === 0
+      || todoHost.monitored()) return;
     toolResultsSinceEvaluation++;
     toolCheckpoints.push(serializeToolCheckpoint({
       toolName: event.toolName,
@@ -854,7 +957,7 @@ export default function registerAdvisor(pi: ExtensionAPI): void {
   });
 
   pi.on("agent_end", (event, ctx) => {
-    if (!ownsAdvisorRuntime() || !automaticAdvisorEnabled(config)) return;
+    if (!ownsAdvisorRuntime() || !automaticAdvisorEnabled(config) || todoHost.monitored()) return;
     toolResultsSinceEvaluation = 0;
     toolCheckpoints = [];
     const tail = serializeTranscriptTail(
@@ -871,17 +974,22 @@ export default function registerAdvisor(pi: ExtensionAPI): void {
     syncManualTool(ctx);
   });
   pi.on("model_select", async (event, ctx) => {
+    resetAdvisorLifecycle();
     await ensureWorkspaceConfig(ctx);
     syncManualTool(ctx, event.model, pi.getThinkingLevel());
   });
   pi.on("thinking_level_select", async (event, ctx) => {
+    resetAdvisorLifecycle();
     await ensureWorkspaceConfig(ctx);
     syncManualTool(ctx, ctx.model, event.level);
   });
   pi.on("session_compact", () => resetAdvisorLifecycle());
+  pi.on("session_before_switch", () => { activeContext = undefined; resetAdvisorLifecycle(); });
+  pi.on("session_before_fork", () => { activeContext = undefined; resetAdvisorLifecycle(); });
   pi.on("session_shutdown", () => {
     lifecycleController.abort();
-    pendingEvaluation = undefined;
+    pendingEvaluations.length = 0;
+    todoHost.close();
     activeContext = undefined;
     resetAdvisorSessionState();
     configGeneration++;
@@ -896,6 +1004,48 @@ export default function registerAdvisor(pi: ExtensionAPI): void {
     if (!ownsAdvisorRuntime(generation)) return;
     const rawArgs = args.trim();
       const trimmed = rawArgs.toLowerCase();
+      if (trimmed === "todo" || trimmed === "settings") {
+        const configEpoch = configGeneration;
+        const signal = lifecycleController.signal;
+        const configuredFingerprint = JSON.stringify(storedConfig);
+        const panelCwd = ctx.cwd;
+        const panelSession = ctx.sessionManager?.getSessionId?.();
+        const panelCurrent = (): boolean => {
+          try {
+            return ownsAdvisorRuntime(generation) && configEpoch === configGeneration && !signal.aborted
+              && JSON.stringify(storedConfig) === configuredFingerprint && ctx.cwd === panelCwd
+              && ctx.sessionManager?.getSessionId?.() === panelSession
+              && activeContext?.cwd === panelCwd && activeContext.sessionManager?.getSessionId?.() === panelSession;
+          } catch { return false; }
+        };
+        const { showAdvisorTodoSettings } = await import("../tui/advisor-todo-settings.ts");
+        if (!panelCurrent()) return;
+        await showAdvisorTodoSettings(ctx, {
+          configured: storedConfig, effective: config,
+          models: ctx.modelRegistry.getAvailable().map((model) => `${model.provider}/${model.id}`), signal,
+          isCurrent: panelCurrent,
+          save: async (next) => {
+            if (!panelCurrent()) throw new Error("Advisor settings are stale; reopen the panel.");
+            return commitConfig(next, ctx, "Advisor Todo settings saved.");
+          },
+        });
+        return;
+      }
+      if (trimmed === "todo on" || trimmed === "todo off") {
+        await commitConfig({ ...storedConfig, todoReview: { ...storedConfig.todoReview, enabled: trimmed === "todo on" } }, ctx,
+          `Todo review ${trimmed === "todo on" ? "enabled (Advisor master switch unchanged)" : "disabled"}.`);
+        return;
+      }
+      if (trimmed.startsWith("todo mode ")) {
+        const mode = trimmed.slice("todo mode ".length).trim();
+        if (mode !== "active" && mode !== "shadow") { ctx.ui.notify("Usage: /advisor todo mode <active|shadow>", "warning"); return; }
+        await commitConfig({ ...storedConfig, todoReview: { ...storedConfig.todoReview, mode } }, ctx, `Todo review mode: ${mode}`);
+        return;
+      }
+      if (trimmed.startsWith("todo ")) {
+        ctx.ui.notify("Usage: /advisor todo (settings) | todo on|off | todo mode active|shadow. Thresholds: .pi/advisor.json todoReview or settings panel.", "info");
+        return;
+      }
       if (trimmed === "on") {
         await commitConfig(
           { ...storedConfig, enabled: true },
@@ -983,11 +1133,15 @@ export default function registerAdvisor(pi: ExtensionAPI): void {
         `  cadence: ${automaticAdvisorEnabled(config)
           ? config.reviewEveryToolResults === 0 ? "agent end only" : `every ${config.reviewEveryToolResults} tool results + agent end`
           : "automatic reviews disabled"}`,
-        `  background: ${evaluationInFlight ? "running" : "idle"}${pendingEvaluation ? " · pending latest checkpoint" : ""}`,
+        `  background: ${evaluationInFlight ? "running" : "idle"}${pendingEvaluations.length ? ` · pending ${pendingEvaluations.length} checkpoint(s)` : ""}`,
+        `  todo review: ${config.todoReview.enabled ? config.todoReview.mode : "off"} · /advisor todo (settings) · ${config.todoReview.reviewSteps} steps OR ${config.todoReview.reviewActiveMs}ms effective · failures ${config.todoReview.sameFailureLimit}`,
+        `  todo escalation: reflection + ${config.todoReview.reflectionSteps} steps; unresolved ${config.todoReview.unresolvedSteps} steps OR ${config.todoReview.unresolvedActiveMs}ms · max ${config.todoReview.maxReviewsPerTask} reviews / ${config.todoReview.maxEscalationsPerTask} escalations per task`,
         `  automatic budget: ${automaticReviews}/${config.maxAutomaticReviewsPerSession || "unlimited"} · cooldown: ${config.automaticReviewCooldownMs}ms`,
         `  delivery cooldown: ${config.cooldownMs}ms · tail: ${config.maxTailMessages} msgs / ${config.maxTailChars} chars`,
         config.guide ? `  guide: ${config.guide.slice(0, 120)}${config.guide.length > 120 ? "…" : ""}` : "  guide: (none)",
         `  last automatic: ${state.lastStatus ?? "never"}${state.lastEvaluatedAt ? ` · ${new Date(state.lastEvaluatedAt).toLocaleTimeString()}` : ""}`,
+        `  TODO shadow records: ${state.todoShadowReviews ?? 0}`,
+        state.lastTodoReview ? `  last TODO: #${state.lastTodoReview.taskId} @${state.lastTodoReview.actor} · ${state.lastTodoReview.status} · confidence ${state.lastTodoReview.confidence} · ${state.lastTodoReview.layer}${state.lastTodoReview.shadow ? " · shadow" : ""}${state.lastTodoReview.degradedReason ? ` · ${state.lastTodoReview.degradedReason}` : ""}` : "  last TODO: (none)",
         `  evaluations: ${state.evaluations} · failures: ${state.failures} · uneventful: ${state.uneventful}`,
         `  deliveries: ${state.deliveries} · suppressed: ${state.suppressed}`,
         `  consultations: ${consultations} · failures: ${consultationFailures}${lastConsultedAt ? ` · last ${new Date(lastConsultedAt).toLocaleTimeString()}` : ""}`,
@@ -997,6 +1151,15 @@ export default function registerAdvisor(pi: ExtensionAPI): void {
     ctx.ui.notify(lines.join("\n"), "info");
   }
 
+  todoHost = new TodoReviewHost(pi, config.todoReview, {
+    enabled: () => ownsAdvisorRuntime() && automaticAdvisorEnabled(config) && config.todoReview.enabled,
+    context: () => activeContext,
+    review: (ticket, ctx, steer) => {
+      if (pendingEvaluations.length >= 64) { todoHost.monitor.release(ticket); return; }
+      pendingEvaluations.push({ tail: todoReflection(ticket), ctx, source: "todo_progress", ownershipGeneration, ticket, steer });
+      void drainEvaluationQueue();
+    },
+  });
   advisorRuntimeLease = registerAdvisorRuntime({
     id: "pi-maestro-flow/advisor",
     priority: 100,

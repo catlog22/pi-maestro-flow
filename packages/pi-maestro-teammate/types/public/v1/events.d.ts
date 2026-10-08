@@ -5,6 +5,8 @@
  * updates on the shared `pi.events` bus. Consumers should import event names
  * and payload types from this leaf module instead of the extension entry point.
  */
+export { registerTeammateHostObserver } from "../../runs/host-observers.ts";
+export type { TeammateHostBoundary } from "../../runs/host-observers.ts";
 import type { AgentActivity, AgentProgressSnapshot, AgentRunOutcome, AgentStatus, MessageProvenanceV1, SessionProjectionIdentity, StructuredResult, TeammateResultPublishedEvent } from "../../shared/types.ts";
 import type { SessionHostSnapshot, WindowThreadSnapshot } from "../../sessions/session-core.ts";
 export type { MessageProvenanceV1, SessionProjectionIdentity, StructuredResult, TeammateExecutionProvenance, TeammateResultPublishedEvent, } from "../../shared/types.ts";

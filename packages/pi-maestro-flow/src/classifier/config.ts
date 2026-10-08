@@ -34,6 +34,7 @@ export const DEFAULT_CLASSIFIER_CONFIG: FlowClassifierConfig = {
     "file-value": "off",
     "signal-type": "shadow",
     "prompt-route": "shadow",
+    "todo-progress": "off",
   },
 };
 

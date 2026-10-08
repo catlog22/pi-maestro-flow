@@ -5,15 +5,19 @@ icon: "🔄"
 
 This page records user-visible features, behavior changes, fixes, and upgrade requirements from the previous stable release to the current version of the pi maestro flow suite.
 
-> **v0.32.1 dependency security repair: UNRELEASED, pending validation/publication.** Prepared source versions/declarations are not published, presently installable latest releases or security/compatibility acceptance. Formal release closeout of npm-published 0.32.0 remains paused; historical versions and install commands retain their original values.
+> **Current version: v0.32.1 — Dependency Repairs & Runtime Hardening.** Node.js minimum 22.19.0, Pi 0.99.0 baseline; native checks cover Windows x64 / Node 22.22 only. Minimum Node and macOS/Linux remain unverified. Historical versions and install commands retain their original values.
 
-## v0.32.1 — Dependency Security Repair (UNRELEASED)
+## v0.32.1 — Dependency Repairs & Runtime Hardening
 
-- Prepares Flow **0.32.1**, Backends **0.1.7**, Teammate **2.8.1**, and Cockpit **0.24.3**. Backend-Core **0.1.5**, Settings-Core **0.2.3**, and Fabric/Fabric-Core **0.1.0** are unchanged.
-- Raises the engine requirement to **`maestro-flow >=0.5.91`**, still a range; Node.js minimum **22.19.0** and Pi **0.99.0** validation baseline are unchanged. Engine download/install did not succeed; no inference proof is claimed.
-- Preserves import keys: `active-win` → `npm:@dyw1234/active-win@9.0.1`; `@nut-tree-fork/nut-js` → `npm:@dyw1234/nut-js@4.2.7`. The latter's shared/provider-interfaces keys alias to `@dyw1234/nut-shared@4.2.7` / `@dyw1234/nut-provider-interfaces@4.2.7`.
-- These four packages are repair forks, not official upstream releases/support: active-win derives from MIT `active-win@9.0.0` and retains upstream v9.0.0 native-asset identity; the nut trio derives from Apache-2.0 `@nut-tree-fork` 4.2.6. Fork provenance files record sources, licensing, and changes; repository `RELEASE.md` summarizes them.
-- This documentation step only modifies existing text; no build/test/install/network validation/audit/pack/commit/publish/push was run. Release gates remain suspended. Active-win acceptance on Node 22.19.0/macOS/Linux is unverified; neither final-consumer audit-zero nor closure of all 31 findings is claimed. The 0.32.0 feature baseline is preserved below, not reused as repair acceptance.
+- Flow **0.32.1**, Backends **0.1.7**, Teammate **2.8.1**, and Cockpit **0.24.3**. Backend-Core **0.1.5**, Settings-Core **0.2.3**, and Fabric/Fabric-Core **0.1.0** are unchanged.
+- Engine requirement **`maestro-flow >=0.5.91`** remains a range; MCP SDK **1.32.1**, Puppeteer Core **25.12.0**, and ONNX Runtime **1.30.0**. Installation declarations are not model inference proof.
+- Preserves import keys: `active-win` → `npm:@dyw1234/active-win@9.0.1`; `@nut-tree-fork/nut-js` → `npm:@dyw1234/nut-js@4.2.7`; shared/provider-interfaces alias to `@dyw1234/nut-shared@4.2.7` / `@dyw1234/nut-provider-interfaces@4.2.7`.
+- These are repair forks, not official upstream releases/support: active-win derives from MIT 9.0.0 and retains upstream v9.0.0 native assets; the nut trio derives from Apache-2.0 4.2.6. Provenance and licenses are recorded in each fork and summarized in repository `RELEASE.md`.
+- Unified classifier settings, diagnostics, and session runtime quotas; advice remains distinct from human approval. SSH uses a PowerShell payload bootstrap that leaves stdin open and fixes Unicode, exit status, and UTF-8 chunk/tail handling.
+- Teammate compaction preserves the original task, cumulative search budget, and exact result references. Nut image conversion preserves RGB/BGR, alpha, and three-channel buffer/stride consistency.
+- All four fork registry SHAs match publish dry-runs. A real Windows consumer passed read-only native APIs and image regressions with zero production audit findings. This does not claim whole-Flow-graph audit-zero, input-injection acceptance, or cross-platform compatibility.
+
+Upgrade: `pi install npm:pi-maestro-flow@0.32.1`. Close Pi first, restart afterward, and update preserved local companion overrides explicitly.
 
 ## v0.32.0 — Scoped Decisions, Exact Evidence & Browser Bridge
 

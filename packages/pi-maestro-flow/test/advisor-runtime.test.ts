@@ -701,7 +701,7 @@ test("tool checkpoints are non-blocking, reject failed runs, and recover after l
       reviewEveryToolResults: 0,
     }));
     handlers.get("session_start")?.[0]?.({}, ctx);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await handlers.get("before_agent_start")?.[0]?.({}, ctx);
     const beforeBudget = runCount;
     emitToolBatch();
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -726,7 +726,7 @@ test("tool checkpoints are non-blocking, reject failed runs, and recover after l
       reviewEveryToolResults: 0,
     }));
     handlers.get("session_start")?.[0]?.({}, ctx);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await handlers.get("before_agent_start")?.[0]?.({}, ctx);
     const beforeCooldown = runCount;
     handlers.get("agent_end")?.[0]?.({ messages: [message("user", "first cooled review")] }, ctx);
     await waitFor(() => runCount === beforeCooldown + 1 && finishRun !== undefined);

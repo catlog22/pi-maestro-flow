@@ -1,14 +1,13 @@
-# v0.32.1 — Dependency Security Repair (UNRELEASED)
+# v0.32.1 — Dependency Repairs & Runtime Hardening
 
-> **Pending validation and publication; modification-only preparation.**
-> Flow 0.32.0 was published to npm, but its formal release closeout is paused.
-> The versions below are prepared source metadata, not presently installable
-> repair releases or a claim that security/compatibility gates have passed.
+> Release candidate: all four fork registry SHAs are verified; suite validation
+> and publication are in progress. Native verification is limited to Windows
+> x64 / Node 22.22.0; minimum Node and macOS/Linux remain unverified.
 
 ## Overview
 
 Flow **0.32.1**, Teammate **2.8.1**, Cockpit **0.24.3**, and Backends
-**0.1.7** prepare a dependency security repair. Backend-Core **0.1.5**,
+**0.1.7** deliver dependency repairs and runtime hardening. Backend-Core **0.1.5**,
 Settings-Core **0.2.3**, and Fabric/Fabric-Core **0.1.0** are unchanged from
 0.32.0. The baseline feature notes below are retained: human-scoped Plan
 preauthorization, advisory decision routing, exact Goal evidence, and
@@ -17,7 +16,7 @@ The validation baseline is **Pi 0.99.0**. Legacy **0.87–0.98** compatibility
 remains explicitly version-gated; optional host peers keep their `*` ranges.
 Missing native APIs do not authorize a second legacy runtime on a native host.
 
-## Dependency repair preparation
+## Dependency repairs
 
 - Flow keeps the `active-win` import key via
   `npm:@dyw1234/active-win@9.0.1`, a compatibility/security fork of
@@ -31,8 +30,32 @@ Missing native APIs do not authorize a second legacy runtime on a native host.
 - Provenance and retained licensing are recorded in
   `packages/maestro-active-win/UPSTREAM.json` / `PROVENANCE.md` and each
   `packages/maestro-nut-*/PROVENANCE.json`, `LICENSE`, and `NOTICE`.
-- Node.js minimum remains **22.19.0**; the prepared engine range is
-  **`maestro-flow >=0.5.91`**, not an exact pin or proof of an installed engine.
+- Node.js minimum remains **22.19.0**; the engine range is
+  **`maestro-flow >=0.5.91`**, not an exact pin. Registry latest was **0.5.91**
+  at release preflight; installation is not model inference validation.
+
+## Runtime hardening since 0.32.0
+
+- **Classifier settings and diagnostics** — unified configuration UI,
+  configured/effective model reporting, session-scoped runtime quotas, and
+  bounded handoff advice (`src/classifier/`, `src/decision-policy/`,
+  `pi-maestro-teammate/src/classify/`). Advice is not human approval.
+- **SSH PowerShell transport** — a static `-Command` bootstrap decodes a
+  bounded payload without `-EncodedCommand` or reading the protocol stdin.
+  Unicode output, literal working directories, explicit/final exit status,
+  and repeated stdio exchanges have real Windows regressions
+  (`src/ssh-manager/executor.ts`).
+- **UTF-8 background output** — independent stdout/stderr decoders retain
+  split Chinese/emoji characters, count raw bytes, truncate on character
+  boundaries, and flush exactly once on terminal events
+  (`src/ssh-manager/ssh-bg.ts`).
+- **Bounded teammate recovery** — child prompts and compaction checkpoints
+  preserve the dispatched task, cumulative search budget, negative results,
+  caller/output contract, and exact child/publication identities. Recovery
+  must not restart discovery or infer live child state from an old summary.
+- **Image layout compatibility** — the Nut repair uses Jimp 1.6.1, preserves
+  copied RGB/BGR data and alpha, and keeps three-channel buffer layouts
+  consistent with channels/stride metadata across conversion paths.
 
 ## Baseline feature highlights (0.32.0)
 
@@ -141,24 +164,23 @@ Missing native APIs do not authorize a second legacy runtime on a native host.
 
 | Package | Version | Release scope |
 |---|---|---|
-| pi-maestro-flow | 0.32.1 | prepared, unreleased |
-| pi-maestro-teammate | 2.8.1 | prepared, unreleased |
-| pi-cockpit | 0.24.3 | prepared, unreleased |
+| pi-maestro-flow | 0.32.1 | release candidate |
+| pi-maestro-teammate | 2.8.1 | release candidate |
+| pi-cockpit | 0.24.3 | release candidate |
 | pi-maestro-settings-core | 0.2.3 | unchanged |
-| pi-maestro-backends | 0.1.7 | prepared, unreleased |
+| pi-maestro-backends | 0.1.7 | release candidate |
 | pi-maestro-backend-core | 0.1.5 | unchanged |
-| @dyw1234/active-win | 9.0.1 | prepared fork, unreleased |
-| @dyw1234/nut-shared | 4.2.7 | prepared fork, unreleased |
-| @dyw1234/nut-provider-interfaces | 4.2.7 | prepared fork, unreleased |
-| @dyw1234/nut-js | 4.2.7 | prepared fork, unreleased |
+| @dyw1234/active-win | 9.0.1 | published repair fork |
+| @dyw1234/nut-shared | 4.2.7 | published repair fork |
+| @dyw1234/nut-provider-interfaces | 4.2.7 | published repair fork |
+| @dyw1234/nut-js | 4.2.7 | published repair fork |
 | pi-maestro-fabric | 0.1.0 | unchanged |
 | pi-maestro-fabric-core | 0.1.0 | unchanged |
 | pi-fluent-tui | 0.1.2 | unchanged |
 
-The external engine requirement is prepared as **`maestro-flow >=0.5.91`**.
-Download/install attempts in the engine repair lane failed; no successful
-installation or inference proof is claimed. No registry latest assertion is
-made for this preparation.
+The external engine requirement is **`maestro-flow >=0.5.91`**.
+The four forks are compatibility/security repairs, not official upstream
+releases or a claim of upstream support. No model inference proof is claimed.
 
 The DSH SDK is now an **optional peer** (`*`): install
 `@deepseek-ai/dsh-sdk-client` manually when using DSH. The development baseline
@@ -173,12 +195,23 @@ preparation and any later release or repair changes; they are not final-tag stat
 
 ## Repair validation status
 
-Only existing documentation was synchronized in this step. No build, test,
-install, network validation, audit, pack, commit, publication, or push was run.
-Release gates and consumer validation remain suspended. Active-win acceptance
-on Node 22.19.0, macOS, and Linux remains unverified; no cross-platform native
-compatibility claim is made. Neither audit-zero nor closure of all 31 baseline
-findings is claimed for the final consumer dependency graph.
+- Focused Flow SSH/compaction regressions: **287/287 passed**. Teammate prompt
+  regressions: **34 passed, 1 existing skip**. Active-win immutable-upstream
+  contracts: **4/4 passed**.
+- Three Nut source builds matched checked-in dist byte-for-byte. Following
+  review, three-channel conversion was corrected, dist rebuilt, and the image
+  regressions passed **7/7** in a real registry-alias consumer.
+- Fresh Windows registry consumer executed native install scripts, loaded
+  all four active-win APIs and Nut native providers, and observed windows
+  without input injection. Its production audit returned **0 vulnerabilities**;
+  this result is scoped to the fork consumer, not the entire Flow graph.
+- All four fork registry SHAs match locked publish dry-runs. All five
+  unchanged publishable workspaces match their existing registry tarballs.
+- Suite dependency installation, affected release checks, documentation build,
+  final suite tarballs and registry Pi smoke remain in progress.
+- Active-win acceptance on Node 22.19.0, macOS, and Linux remains unverified;
+  the user explicitly approved a release limited to the verified scope.
+  No cross-platform native or whole-graph audit-zero claim is made.
 
 ### Historical 0.32.0 preparation evidence (not 0.32.1 acceptance)
 
@@ -206,8 +239,8 @@ changed dependency versions invalidate reuse as final repair acceptance.
   persistence, no horizontal overflow, and the updated browser bridge guide.
 - Four unchanged workspace package dry-run SHAs matched their registry versions.
 
-Those prior results do not authorize resuming release work. Publication,
-registry comparison, fresh-install smoke, packing, and tagging are paused.
+These historical results are not reused for changed dependency boundaries;
+current-request evidence above and the final registry smoke govern this repair.
 
 ## Historical 0.32.0 preparation artifacts (not repair artifacts)
 
@@ -224,18 +257,14 @@ recorded no bundled private Pi host SDK/typebox copy.
 | pi-cockpit@0.24.2 | 115 | 332,557 / 1,248,528 | `427d4097afe3da0ac74a874915a45bed7cc7eaec` |
 | pi-maestro-flow@0.32.0 | 1,154 | 3,765,034 / 14,520,453 | `c203fe91c562921875f9b59ad734ded2adeffaf4` |
 
-## Published baseline install / upgrade (not the repair)
-
-The command below intentionally remains on npm-published **0.32.0**; it does
-not install the unreleased dependency repair. Do not substitute 0.32.1 until
-validation and publication are separately authorized and completed.
+## Install / upgrade
 
 Requires **Node.js ≥ 22.19.0**. Use **Pi 0.99.0** as the validation baseline;
 legacy Pi **0.87–0.98** uses version-gated compatibility paths.
 
 ```bash
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent
-pi install npm:pi-maestro-flow@0.32.0
+pi install npm:pi-maestro-flow@0.32.1
 pi list
 ```
 

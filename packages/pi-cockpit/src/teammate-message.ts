@@ -1,7 +1,8 @@
 import { stripVTControlCharacters } from "node:util";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
-import { Box, Text, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
+import type { Component } from "@earendil-works/pi-tui";
 import { tuiT } from "./tui-i18n.ts";
+import { toolResultCard } from "./quiet-tools.ts";
 
 export const TEAMMATE_MESSAGE_CUSTOM_TYPE = "teammate-message";
 
@@ -93,27 +94,6 @@ function kindLabel(kind: string | undefined): string | undefined {
 	return key ? tuiT(key) : kind;
 }
 
-const COLLAPSED_BODY_LINES = 2;
-
-function collapsedBody(value: string, width: number): string {
-	const text = value.replace(/\s+/g, " ").trim();
-	if (!text) return "";
-	const lineWidth = Math.max(1, width);
-	const lines = wrapTextWithAnsi(text, lineWidth);
-	if (lines.length <= COLLAPSED_BODY_LINES) return lines.join("\n");
-
-	const preview = lines.slice(0, COLLAPSED_BODY_LINES);
-	const last = preview.length - 1;
-	const ellipsisWidth = Math.max(1, visibleWidth("…"));
-	const prefix = truncateToWidth(
-		preview[last] ?? "",
-		Math.max(0, lineWidth - ellipsisWidth),
-		"",
-	);
-	preview[last] = `${prefix}…`;
-	return preview.join("\n");
-}
-
 export function renderIncomingTeammateMessage(
 	message: { content: MessageContent; details?: TeammateMessageDetails },
 	options: { expanded: boolean; outputPad: number },
@@ -121,26 +101,19 @@ export function renderIncomingTeammateMessage(
 ): Component {
 	const envelope = parseTeammateMessageEnvelope(message.content, message.details);
 	const kind = kindLabel(envelope.kind);
-	const header = [
-		`${theme.fg("accent", "←")} ${theme.bold(tuiT("message.receivedFrom", { sender: envelope.sender }))}`,
-		kind ? theme.fg("muted", `· ${kind}`) : "",
-	].filter(Boolean).join(" ");
-	const box = new Box(options.outputPad, 1, (text) => theme.bg("customMessageBg", text));
-	box.addChild({
-		render(width: number): string[] {
-			const sections = [header];
-			if (options.expanded && envelope.guidance) sections.push(theme.fg("dim", envelope.guidance));
-			if (envelope.body) {
-				const body = options.expanded ? envelope.body : collapsedBody(envelope.body, width);
-				sections.push(theme.fg("text", body));
-			} else if (!options.expanded && envelope.guidance) {
-				sections.push(theme.fg("text", collapsedBody(envelope.guidance, width)));
-			}
-			return new Text(sections.join("\n"), 0, 0).render(width);
-		},
-		invalidate(): void {},
+	const groups: string[][] = [];
+	if (options.expanded && envelope.guidance) {
+		groups.push(envelope.guidance.split("\n").map((line) => theme.fg("dim", line)));
+	}
+	const bodySource = envelope.body || (!options.expanded ? envelope.guidance : "");
+	if (bodySource) groups.push(bodySource.split("\n"));
+	return toolResultCard(theme, {
+		name: tuiT("message.receivedFrom", { sender: envelope.sender }),
+		mark: theme.fg("accent", "←"),
+		...(kind ? { summary: kind } : {}),
+		groups,
+		maxBodyRows: options.expanded ? undefined : 8,
 	});
-	return box;
 }
 
 export function registerTeammateMessageRenderer(

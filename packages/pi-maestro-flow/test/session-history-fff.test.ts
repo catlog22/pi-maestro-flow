@@ -318,6 +318,104 @@ test("session history falls back to bounded inventory without exposing accelerat
   }
 });
 
+test("session history verifies empty FFF results against the authorized inventory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-flow-session-history-fff-empty-"));
+  try {
+    const current = join(root, "current.jsonl");
+    await writeFile(current, `${header("current")}\n${user("u1", "fallback needle")}\n`, "utf8");
+    const accelerator: SessionHistoryFffCandidateAccelerator = {
+      async search() { return { available: true, complete: true, entries: [] }; },
+      destroy() {},
+    };
+    const result = await executeSessionHistory(
+      { action: "search", scope: "workspace_sessions", query: "needle" },
+      context(root, current), { candidateAccelerator: accelerator },
+    );
+    const payload = JSON.parse(resultText(result));
+    assert.deepEqual(payload.matches.map((item: { sessionId: string }) => item.sessionId), ["current"]);
+    assert.equal(payload.discovery?.reason, "no-visible-matches");
+    assert.equal(payload.truncated, false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("session history bypasses raw-line FFF for queries spanning projected text blocks", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-flow-session-history-fff-projection-"));
+  const accelerator = createSessionHistoryFffAccelerator();
+  try {
+    const current = join(root, "current.jsonl");
+    const split = JSON.stringify({
+      type: "message", id: "u1", parentId: null,
+      timestamp: "2026-08-01T00:00:01.000Z",
+      message: { role: "user", content: [
+        { type: "text", text: "first" }, { type: "text", text: "second" },
+      ], timestamp: 1 },
+    });
+    await writeFile(current, `${header("current")}\n${split}\n`, "utf8");
+    const result = await executeSessionHistory(
+      { action: "search", scope: "workspace_sessions", query: "first\nsecond" },
+      context(root, current), { candidateAccelerator: accelerator },
+    );
+    const payload = JSON.parse(resultText(result));
+    assert.deepEqual(payload.matches.map((item: { entryId: string }) => item.entryId), ["u1"]);
+    assert.equal(payload.discovery?.reason, "projection-sensitive-query");
+    assert.equal(payload.truncated, false);
+  } finally {
+    accelerator.destroy();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("session history rejects invalid queries before invoking FFF", async () => {
+  let calls = 0;
+  const accelerator: SessionHistoryFffCandidateAccelerator = {
+    async search() { calls += 1; return { available: true, complete: true, entries: [] }; },
+    destroy() {},
+  };
+  for (const query of ["x".repeat(4097), "invalid\0query"]) {
+    const result = await executeSessionHistory(
+      { action: "search", scope: "workspace_sessions", query },
+      context(process.cwd(), join(process.cwd(), "current.jsonl")),
+      { candidateAccelerator: accelerator },
+    );
+    assert.equal((result as { isError?: boolean }).isError, true);
+    assert.match(resultText(result), /query must be/);
+  }
+  assert.equal(calls, 0);
+});
+
+test("session history verifies FFF candidates with no visible matches and preserves fallback limits", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-flow-session-history-fff-visible-"));
+  try {
+    const current = join(root, "current.jsonl");
+    await writeFile(current, `${header("current")}\n${JSON.stringify({
+      type: "custom_message", id: "hidden", parentId: null,
+      customType: "internal", content: "needle", display: false,
+    })}\n`, "utf8");
+    await Promise.all(Array.from({ length: MAX_SESSION_HISTORY_FILES }, (_, index) =>
+      writeFile(join(root, `older-${String(index).padStart(3, "0")}.jsonl`),
+        `${header(`older-${index}`)}\n${user("u1", "visible needle")}\n`, "utf8")));
+    const accelerator: SessionHistoryFffCandidateAccelerator = {
+      async search() { return { available: true, complete: true, entries: [{ path: current }] }; },
+      destroy() {},
+    };
+    const payload = JSON.parse(resultText(await executeSessionHistory(
+      { action: "search", scope: "workspace_sessions", query: "needle", limit: 1 },
+      context(root, current), { candidateAccelerator: accelerator },
+    )));
+    assert.equal(payload.matches.length, 1);
+    assert.notEqual(payload.matches[0].sessionId, "current");
+    assert.equal(payload.filesRead, MAX_SESSION_HISTORY_FILES + 1);
+    assert.equal(payload.truncated, true);
+    assert.ok(payload.omissions.some((item: { reason: string }) => item.reason === "file-limit"));
+    assert.ok(payload.omissions.some((item: { reason: string }) => item.reason === "result-limit"));
+    assert.equal(payload.discovery?.reason, "no-visible-matches");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("session history preserves top-level truncation for incomplete FFF candidates", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-flow-session-history-fff-truncated-"));
   try {

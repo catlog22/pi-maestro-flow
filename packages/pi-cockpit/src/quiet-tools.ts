@@ -483,6 +483,8 @@ export function toolResultCard(
 	o: {
 		name: string;
 		ok?: boolean;
+		/** Pre-colored glyph overriding the ✓/✗ status mark (e.g. "←" for incoming messages). */
+		mark?: string;
 		arg?: string;
 		summary?: string;
 		rows?: string[];
@@ -493,9 +495,9 @@ export function toolResultCard(
 	const bold = theme.bold ?? ((text: string) => text);
 	return {
 		render(width: number): string[] {
-			const mark = o.ok === false
+			const mark = o.mark ?? (o.ok === false
 				? theme.fg("error", quietStatusMark("failure"))
-				: theme.fg("success", quietStatusMark("success"));
+				: theme.fg("success", quietStatusMark("success")));
 			const safeWidth = Math.max(1, width);
 			if (safeWidth <= 1) return [];
 			const label = `${mark} ${theme.fg("toolTitle", bold(o.name))}${o.arg ? ` ${theme.fg("accent", o.arg)}` : ""}${o.summary ? ` ${theme.fg("dim", `· ${o.summary}`)}` : ""}`;

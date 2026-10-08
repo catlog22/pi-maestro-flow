@@ -15,9 +15,9 @@
 
 ---
 
-**pi-maestro-flow** is the **all-in-one** entry point of the three-plugin suite. A single `pi install npm:pi-maestro-flow@0.32.0` upgrades the [Pi coding agent](https://github.com/earendil-works/pi) into a coordinated engineering team:
+**pi-maestro-flow** is the **all-in-one** entry point of the three-plugin suite. A single `pi install npm:pi-maestro-flow@0.32.1` upgrades the [Pi coding agent](https://github.com/earendil-works/pi) into a coordinated engineering team:
 
-> **Prepared v0.32.1 dependency repair (UNRELEASED):** Flow 0.32.1, Backends 0.1.7, Teammate 2.8.1, Cockpit 0.24.3, and `maestro-flow >=0.5.91`; validation/publication remain pending. The `active-win` and `@nut-tree-fork/nut-js` import keys use scoped `@dyw1234` forks; provenance and unchanged contracts are documented in [RELEASE.md](../../RELEASE.md). Npm commands retain published 0.32.0 without this repair; formal release closeout is paused. No final security/compatibility acceptance is claimed.
+> **v0.32.1 — Dependency Repairs & Runtime Hardening:** Flow 0.32.1, Backends 0.1.7, Teammate 2.8.1, Cockpit 0.24.3, and `maestro-flow >=0.5.91`. The `active-win` and `@nut-tree-fork/nut-js` import keys use scoped `@dyw1234` forks; provenance and verification scope are in [RELEASE.md](../../RELEASE.md). Native checks cover Windows x64 / Node 22.22 only; minimum Node and macOS/Linux remain unverified, with no whole-graph vulnerability-free claim.
 
 > **v0.32.0 baseline — Scoped Decisions, Exact Evidence & Browser Bridge:** human-scoped Plan-auto, advisory policy, exact Goal evidence, multi-listener extension bridging, and scoped Codex Fast. Pi baseline remains 0.99.0; legacy 0.87–0.98 is version-gated. Release verification/publication is tracked in [RELEASE.md](../../RELEASE.md).
 
@@ -38,7 +38,7 @@ The companion plugins are dependencies and **auto-register on postinstall** — 
 - 🔌 **Full protocol connectivity** — MCP (OAuth auto-auth) · LSP · Browser (CDP) · Smart Search · source verification
 - 🌉 **Native Gateway ingress** — standalone configuration TUI plus managed Cloudflare Quick/Named, experimental OpenAI Secure, and persistent OpenSSH Reverse tunnel profiles
 - 🛰️ **Live cockpit visualization** — running teammates & todo plan in real time, 9 built-in themes
-- 🧐 **Turn-level Advisor** — optional second-model quality reviewer (`/advisor on`); raises `concern`/`blocker` notes into the session, throttled by the shared supervision gate
+- 🧐 **Advisor & TODO supervision** — optional second-model quality reviewer (`/advisor on`); `/advisor todo` opens task-progress settings for step/time thresholds, history-backed reflection and bounded second opinions. Off by default; see the [usage guide](../../docs/USAGE_EN.md#single-todo-progress-supervision).
 - 👁️ **Unified supervision telemetry** — goal/monitor/advisor events on one bus; cockpit `SUP` footer segment + `/supervision` command
 - ⏱️ **Adaptive shell** — `bash_bg` auto-backgrounds long commands and notifies on completion
 - 🔒 **Permission control** — 5 modes (YOLO enabled by default) · fine-grained allow/ask/deny
@@ -75,7 +75,7 @@ Skills (63, maintained by [Maestro Flow](https://github.com/catlog22/maestro-flo
 
 ```bash
 # From npm, including upgrades
-pi install npm:pi-maestro-flow@0.32.0
+pi install npm:pi-maestro-flow@0.32.1
 
 # Or from local path (development)
 pi install ./packages/pi-maestro-flow
@@ -565,7 +565,7 @@ Project system instructions use `.pi/SYSTEM.md` as their single authority; the
 previous bundled `AGENTS.md` injection is retired. Migrate projects that depended
 on that old injection to `.pi/SYSTEM.md`.
 
-The unreleased `pi-maestro-flow@0.32.1` manifest requires `maestro-flow >=0.5.91` as an associated workflow resource package (a range, not an exact pin); this is not proof of successful engine installation or inference.
+`pi-maestro-flow@0.32.1` requires `maestro-flow >=0.5.91` as an associated workflow resource package (a range, not an exact pin). Package installation does not imply model inference validation.
 During postinstall it calls Maestro's workflows-only installer from the prepared registry
 artifact, which includes the complete runtime `dist` tree and canonical workflow documents.
 The installer writes to `~/.maestro/workflows`. The active Maestro CLI remains an environment

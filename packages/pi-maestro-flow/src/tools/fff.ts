@@ -192,6 +192,32 @@ export function registerFff(pi: ExtensionAPI, options: RegisterFffOptions = {}):
     return initPromise;
   };
 
+  // Cancellation belongs to the caller, not to the shared initializer. Stop
+  // waiting promptly without destroying an index other calls may still need.
+  const waitForFinder = (root: string, signal?: AbortSignal): Promise<FileFinderApi> => {
+    if (signal?.aborted) return Promise.reject(fffAbortError());
+    const pending = ensureFinder(root);
+    if (!signal) return pending;
+    return new Promise((resolveFinder, rejectFinder) => {
+      const onAbort = () => {
+        signal.removeEventListener("abort", onAbort);
+        rejectFinder(fffAbortError());
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      pending.then(
+        (finder) => {
+          signal.removeEventListener("abort", onAbort);
+          resolveFinder(finder);
+        },
+        (error) => {
+          signal.removeEventListener("abort", onAbort);
+          rejectFinder(error);
+        },
+      );
+      if (signal.aborted) onAbort();
+    });
+  };
+
   pi.on("session_start", (_event, ctx) => {
     void ensureFinder(resolve(ctx.cwd)).catch(() => undefined);
   });
@@ -326,18 +352,21 @@ export function registerFff(pi: ExtensionAPI, options: RegisterFffOptions = {}):
       text = matches.length ? formatLines(matches.slice(0, limit)) : "No matches found";
     }
 
+    const rowCount = output === "lines" ? matches.length : filesSeen.size;
+    const limitReached = rowCount > limit || (!exhausted && rowCount >= limit);
     const notes: string[] = [];
     if (regexFallbackNote) notes.push(regexFallbackNote);
-    if (!exhausted) {
-      notes.push(output === "lines"
-        ? `stopped at ${limit} matches — refine the pattern or raise limit for more`
-        : output === "files"
-          ? `stopped at ${limit} files — refine the pattern or raise limit for more`
-          : "index drain stopped early — counts may be incomplete");
+    if (limitReached) {
+      notes.push(`${limit} ${output === "lines" ? "matches" : "rows"} limit reached — refine the pattern or raise limit`);
+    }
+    if (!exhausted && (output === "count" || !limitReached)) {
+      notes.push(output === "count"
+        ? "index drain stopped early — counts may be incomplete"
+        : "index drain stopped early — results may be incomplete; narrow path, glob, or pattern");
     }
     return {
       content: [{ type: "text", text: notes.length ? `${text}\n\n[${notes.join("; ")}]` : text }],
-      details: { engine: "fff", exhausted, filesSearched },
+      details: { engine: "fff", exhausted, filesSearched, truncated: !exhausted || limitReached },
     };
   };
 
@@ -379,6 +408,7 @@ export function registerFff(pi: ExtensionAPI, options: RegisterFffOptions = {}):
   };
 
   const search: FffSearchHandle["search"] = async (input, workspaceRoot, signal) => {
+    if (signal?.aborted) throw fffAbortError();
     const root = resolve(workspaceRoot);
     const denied = unsafeBasePathReason(root);
     if (denied) {
@@ -413,7 +443,7 @@ export function registerFff(pi: ExtensionAPI, options: RegisterFffOptions = {}):
     let finder: FileFinderApi | undefined;
     let rgReason: string | undefined;
     if (mode === "fuzzy") {
-      finder = await ensureFinder(root);
+      finder = await waitForFinder(root, signal);
     } else if (forcedInsensitive) {
       rgReason = "forced case-insensitive matching";
     } else if (globNeedsRg) {
@@ -421,8 +451,9 @@ export function registerFff(pi: ExtensionAPI, options: RegisterFffOptions = {}):
     } else {
       const generation = lifecycleGeneration;
       try {
-        finder = await ensureFinder(root);
+        finder = await waitForFinder(root, signal);
       } catch (error) {
+        if (signal?.aborted) throw fffAbortError();
         // A mid-init session shutdown must abort the search, not spawn rg on a
         // session that is already tearing down.
         if (generation !== lifecycleGeneration) throw error;
@@ -499,10 +530,12 @@ export function registerFff(pi: ExtensionAPI, options: RegisterFffOptions = {}):
       const scopePath = resolveSearchScopePath(params.path, root);
       const scopePrefix = scopePrefixOf(root, scopePath);
       const limit = Math.min(Math.max(params.limit ?? DEFAULT_LIMIT, 1), 200);
-      const finder = await ensureFinder(root);
+      const finder = await waitForFinder(root, signal);
       const items: FileItem[] = [];
+      let exhausted = false;
       const pageSize = Math.min(Math.max(limit * 2, 50), 500);
       for (let pageIndex = 0; items.length < limit && pageIndex < MAX_DRAIN_PAGES; pageIndex += 1) {
+        if (signal?.aborted) throw fffAbortError("fffind");
         const result = finder.fileSearch(params.pattern, { pageIndex, pageSize });
         if (!result.ok) {
           throw new Error(`fffind failed: ${result.error}`);
@@ -510,12 +543,18 @@ export function registerFff(pi: ExtensionAPI, options: RegisterFffOptions = {}):
         for (const item of result.value.items) {
           if (inScope(item.relativePath, scopePrefix)) items.push(item);
         }
-        if (result.value.items.length === 0 || (pageIndex + 1) * pageSize >= result.value.totalMatched) break;
+        exhausted = result.value.items.length === 0 || (pageIndex + 1) * pageSize >= result.value.totalMatched;
+        if (exhausted) break;
       }
       const rows = items.slice(0, limit).map((item) => item.relativePath);
+      const limitReached = items.length > limit || (!exhausted && items.length >= limit);
+      const text = rows.length ? rows.join("\n") : "No files found";
+      const note = limitReached
+        ? `${limit} files limit reached — refine the pattern or raise limit`
+        : !exhausted ? "index drain stopped early — results may be incomplete; narrow path or pattern" : undefined;
       return {
-        content: [{ type: "text", text: rows.length ? rows.join("\n") : "No files found" }],
-        details: { engine: "fff" },
+        content: [{ type: "text", text: note ? `${text}\n\n[${note}]` : text }],
+        details: { engine: "fff", exhausted, truncated: !exhausted || limitReached },
       };
     },
     renderShell: "self",
@@ -538,4 +577,10 @@ export function registerFff(pi: ExtensionAPI, options: RegisterFffOptions = {}):
   });
 
   return { search };
+}
+
+function fffAbortError(toolName = "search"): Error {
+  const error = new Error(`${toolName} aborted.`);
+  error.name = "AbortError";
+  return error;
 }

@@ -17,6 +17,7 @@
    - [maestro — 知识感知调度](#22-maestro--知识感知调度)
    - [goal — 长时目标生命周期](#23-goal--长时目标生命周期)
    - [todo — 任务管理](#24-todo--任务管理)
+     - [TODO 单步骤进展监护](#todo-单步骤进展监护)
    - [run-control — 工作流运行控制](#25-run-control--工作流运行控制)
 3. [智能工具](#3-智能工具)
    - [lsp — 语言服务器集成](#31-lsp--语言服务器集成)
@@ -58,11 +59,11 @@
 
 ### 安装
 
-> **v0.32.1 依赖修补待发布（UNRELEASED）：** 准备 Flow 0.32.1、Backends 0.1.7、Teammate 2.8.1、Cockpit 0.24.3 与 `maestro-flow >=0.5.91`。修补 fork 身份及不变契约见 [RELEASE.md](../RELEASE.md)。验证/发布仍待完成，不声称安全或兼容验收通过；本文安装命令保留 npm 已发布 0.32.0，不包含本次修补，正式发布收尾暂停。
+> **v0.32.1：** Flow 0.32.1、Backends 0.1.7、Teammate 2.8.1、Cockpit 0.24.3 与 `maestro-flow >=0.5.91`。fork 来源与验证范围见 [RELEASE.md](../RELEASE.md)；原生验证限 Windows x64 / Node 22.22，最低 Node 与 macOS/Linux 未验证。
 
 ```bash
 # 安装或升级（pi-maestro-teammate 作为依赖自动安装）
-pi install npm:pi-maestro-flow@0.32.0
+pi install npm:pi-maestro-flow@0.32.1
 
 # 验证 Flow、Teammate 和 Cockpit 均已列出，然后重启 Pi 或 reload extensions
 pi list
@@ -359,6 +360,63 @@ todo({ action: "create", subject: "探索代码库", assignee: "explorer-1" })
 | `next` | 兼容操作：只激活下一个待办任务，返回解析后的上下文 |
 
 `advance` 按调用 actor 隔离：它只能完成或激活分配给调用者的任务，但任务完成仍会全局解除跨角色依赖。一个逻辑目标需要多个角色时，应创建一个父任务和多个分别分配的角色子任务，不让多个角色共同写同一 Todo 的终态。Canonical Workflow Session/Run 的镜像 Todo 仍由 Run lifecycle 驱动，不使用普通 `advance` 代替 Run 控制。
+
+---
+
+#### TODO 单步骤进展监护
+
+Advisor 可对当前普通 `in_progress` TODO 做任务级进展审查：步数或有效时长达到阈值后，先用 `todo-progress` 分类器判断，再选择继续、回溯提示或独立建议 agent。**达到阈值不等于卡住**；该功能默认关闭，不改变 Goal 续跑和 TODO 生命周期。
+
+```text
+/advisor on                    # Advisor 总开关
+/advisor mode automatic        # automatic 或 hybrid 才运行自动监护
+/advisor todo                  # 打开 TODO 监护 TUI；/advisor settings 同一入口
+/advisor todo on               # 单独开启 TODO 监护
+/advisor todo mode shadow      # 仅观察；改为 active 才允许提示/建议
+/advisor status                # 查看实际生效配置和运行状态
+```
+
+TUI 可编辑 Advisor 总开关、模式、建议模型，以及 TODO 监护开关、模式、全部阈值、冷却和预算。`↑↓` 选择、`Enter` 修改、`Ctrl+S` 后 `Enter` 确认保存、`Ctrl+R` 还原草稿、`Esc` 返回／取消；有未保存修改时再按一次 `Esc` 放弃。配置写入项目 `.pi/advisor.json`；取消不写入，不会隐式开启 Advisor 或分类器。面板区分已配置与实际生效值，并保留当前不可用的模型钉选。
+
+| `todoReview` 字段 | 默认值 | 含义 |
+|---|---:|---|
+| `enabled` | `false` | 独立监护开关；同时需要 Advisor 已开启 |
+| `mode` | `active` | `active` 允许干预；`shadow` 仅记录分类 |
+| `reviewSteps` / `reviewActiveMs` | `12` / `480000` | 12 个模型迭代或 8 分钟有效运行后轻审查 |
+| `sameFailureLimit` | `3` | 同类连续失败提前触发回溯 |
+| `reflectionSteps` | `6` | 回溯后追加 6 步仍无新证据时考虑建议 agent |
+| `unresolvedSteps` / `unresolvedActiveMs` | `24` / `900000` | 已回溯且仍未收敛时的升级阈值：24 步或 15 分钟 |
+| `cooldownMs` | `30000` | 同任务审查冷却，另受 Advisor 投递门控约束 |
+| `maxReviewsPerTask` / `maxEscalationsPerTask` | `3` / `1` | 每任务激活周期的审查／独立建议预算 |
+
+例如 `.pi/advisor.json`：
+
+```json
+{
+  "enabled": true,
+  "mode": "automatic",
+  "todoReview": {
+    "enabled": true,
+    "mode": "shadow",
+    "reviewSteps": 12,
+    "reviewActiveMs": 480000,
+    "sameFailureLimit": 3,
+    "reflectionSteps": 6,
+    "unresolvedSteps": 24,
+    "unresolvedActiveMs": 900000,
+    "cooldownMs": 30000,
+    "maxReviewsPerTask": 3,
+    "maxEscalationsPerTask": 1
+  }
+}
+```
+
+建议先 shadow 观察，再通过 TUI 切换 active。`/advisor status` 显示 shadow 观察次数，以及最近一次任务／actor、分类、置信度和来源；shadow 分类也通过 `supervision:event` 发布只读 verdict。观察数据是当前会话的有界状态，不是持久化审查报告。审查预算按任务激活累计，切换模式／模型或压缩不会补充预算；预算耗尽时可在 TUI 显式调整，或在下一任务激活后使用新预算。分类器仍使用独立开关和域模式：需要语义判断时显式运行 `/classifier on` 和 `/classifier mode todo-progress jev`；`off` 使用规则，`shadow` 的语义结果不成为执行依据。分类器不可用或证据／置信度不足时保守回溯，不把建议当成授权，也不自动启用分类器。
+
+- 一步是模型推理／行动迭代，不是工具结果数。有效时间只计在线运行，排除已知工具执行、人工／依赖／容量等待、压缩和离线；不会用 TODO 的状态挂起时长直接判断卡住。
+- `on-track` 不干预；`waiting` 等待；`looping` 先要求通过 `session_history` 回看假设、操作和结果，并与当前源码核对；回溯后仍不收敛才请求独立 Advisor。`blocked` 或 `uncertain` 不授予权限，缺凭证、资源或用户决策须明确报告。
+- 主会话与本地绑定 TODO 的子 agent 使用宿主权威的任务／actor 身份；完成、转交、重新激活或会话变更后的旧结果不投递。Canonical Workflow 镜像 TODO 不在普通任务监护范围；不要把该功能理解为远端 Fabric 监控。
+- 提示在安全模型边界消费，不中断正在执行的工具、不自动完成或转交 TODO、不因空闲计时启动新轮次。旧 Advisor 审查与 TODO 审查去重，仍保留手动咨询；建议不是审批，也不能替代真实完成证据。
 
 ---
 
@@ -1262,7 +1320,7 @@ teammate({ tasks: [{ agent: "general", context: "fresh", prompt: "PURPOSE: 读�
 
 ```bash
 # ─── 安装 ───
-pi install npm:pi-maestro-flow@0.32.0
+pi install npm:pi-maestro-flow@0.32.1
 
 # ─── 知识 ───
 maestro search "查询" --code

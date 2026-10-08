@@ -43,7 +43,7 @@ import {
   loadClassifierConfig,
   type FlowClassifierConfig,
 } from "./config.ts";
-import { signalTypeDomain } from "./domains.ts";
+import { signalTypeDomain, todoProgressDomain } from "./domains.ts";
 import {
   createClassifierSettingsProvider,
   registerClassifierSettingsProvider,
@@ -88,6 +88,7 @@ export default function registerClassifier(pi: ExtensionAPI): void {
   // Eager registration so `/classifier` works before the first session_start.
   registerBuiltinClassifyDomains();
   registerClassifyDomain(signalTypeDomain);
+  registerClassifyDomain(todoProgressDomain);
 
   // Settings shell surface — same event-bus protocol as the other providers.
   // `apply` hot-pushes committed config into the engine (activation: live).
@@ -204,6 +205,7 @@ export default function registerClassifier(pi: ExtensionAPI): void {
     configCwd = undefined;
     registerBuiltinClassifyDomains();
     registerClassifyDomain(signalTypeDomain);
+    registerClassifyDomain(todoProgressDomain);
     void ensureConfig(ctx);
   });
 

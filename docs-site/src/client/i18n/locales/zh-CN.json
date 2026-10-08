@@ -21,8 +21,8 @@
     "logo_alt": "Maestro Flow 标志"
   },
   "announcement": {
-    "title": "v0.32.1 修补 UNRELEASED，待验证/发布。已发布 0.32.0 基线（不含修补）：",
-    "install": "pi install npm:pi-maestro-flow@0.32.0",
+    "title": "v0.32.1 — 依赖修补与运行时加固。升级：",
+    "install": "pi install npm:pi-maestro-flow@0.32.1",
     "close": "关闭提示"
   },
   "accessibility": {

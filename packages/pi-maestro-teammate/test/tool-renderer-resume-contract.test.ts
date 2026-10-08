@@ -151,22 +151,25 @@ test("auxiliary tool renderers return a Component in both quiet modes (resume co
   }
 });
 
-test("non-quiet fallback mirrors the host default rendering instead of hiding output", () => {
+test("non-quiet mode renders the same call row and result card grammar as quiet mode", () => {
   setQuietMode(false, "check");
   const tools = registerAuxTools();
   const send = tools.get("teammate-send") as (ToolDefinition & LooseRenderer) | undefined;
   assert.ok(send);
 
   const call = send.renderCall?.({ to: "worker", mode: "steer" }, theme, { args: {}, isPartial: true });
-  assert.deepEqual(call?.render(80).map((line) => line.trimEnd()), ["teammate-send"]);
+  assert.match(call?.render(80).join("\n") ?? "", /… teammate-send @worker · steer/);
 
   const result = send.renderResult?.(
     { content: [{ type: "text", text: "Message interrupted + injected for \"worker\"." }], details: { delivered: true } },
     { expanded: false, isPartial: false },
     theme,
-    { args: {}, isPartial: false },
+    { args: { to: "worker", mode: "steer" }, isPartial: false },
   );
-  assert.deepEqual(result?.render(80).map((line) => line.trimEnd()), ["Message interrupted + injected for \"worker\"."]);
+  const lines = result?.render(80) ?? [];
+  assert.match(lines[0] ?? "", /^╭ ✓ teammate-send @worker · steer · delivered.*╮$/);
+  assert.match(lines[1] ?? "", /^│ Message interrupted \+ injected for "worker"\.\s+│$/);
+  assert.match(lines[2] ?? "", /^╰─+╯$/);
 
   const empty = send.renderResult?.(
     { content: [], details: { delivered: false } },
@@ -175,7 +178,10 @@ test("non-quiet fallback mirrors the host default rendering instead of hiding ou
     { args: {}, isPartial: false },
   );
   assert.equal(typeof empty?.render, "function");
-  assert.deepEqual(empty?.render(80), []);
+  const emptyCard = empty?.render(80) ?? [];
+  assert.equal(emptyCard.length, 2);
+  assert.match(emptyCard[0] ?? "", /^╭ ✕ teammate-send @\? · steer · delivery failed.*╮$/);
+  assert.match(emptyCard[1] ?? "", /^╰─+╯$/);
 });
 
 test("quiet mode renders auxiliary communication as a structured card", () => {
@@ -191,17 +197,17 @@ test("quiet mode renders auxiliary communication as a structured card", () => {
   );
   const lines = result?.render(80) ?? [];
   assert.equal(lines.length, 3);
-  assert.match(lines[0] ?? "", /^╭ ✓ teammate-send · @\? · steer · delivered.*╮$/);
+  assert.match(lines[0] ?? "", /^╭ ✓ teammate-send @\? · steer · delivered.*╮$/);
   assert.match(lines[1] ?? "", /^│ delivered\s+│$/);
   assert.match(lines[2] ?? "", /^╰─+╯$/);
   assert.ok(lines.every((line) => line.length === 79), "self-rendered cards must leave the final terminal column empty");
 });
 
-test("auxiliary renderers never leak the quiet-only undefined through an as-never cast", () => {
+test("auxiliary renderers never leak a quiet-only undefined through an as-never cast", () => {
   const source = readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf8");
   assert.doesNotMatch(
     source,
-    /renderQuietTeammateAux\([\s\S]{0,220}?\) as never/,
-    "renderQuietTeammateAux returns undefined outside quiet mode; tool slots must fall back to a Component",
+    /teammateStatusRow\([\s\S]{0,220}?\) as never/,
+    "teammateStatusRow always returns a Component; wrapping it in as never would hide a regression",
   );
 });

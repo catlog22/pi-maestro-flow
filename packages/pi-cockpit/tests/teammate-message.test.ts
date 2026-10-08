@@ -41,6 +41,9 @@ test("teammate-message renderer presents receipt direction and keeps protocol gu
 		{ expanded: false, outputPad: 0 },
 		theme,
 	).render(100).join("\n");
+	// Shared tool-result card chrome: rounded border, status mark, bold title.
+	assert.match(collapsed, /╭/);
+	assert.match(collapsed, /╰/);
 	assert.match(collapsed, /← (?:Received from @flow-trace|收到来自 @flow-trace 的消息) · (?:coordination|协调)/);
 	assert.match(collapsed, /Avoid editing the same file/);
 	assert.doesNotMatch(collapsed, /\[teammate-message\]|\[teammate:coordination\]|Coordination only/);

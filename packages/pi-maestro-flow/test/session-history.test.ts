@@ -9,6 +9,7 @@ import {
   createCompactHistoryInventoryProvider,
   createSessionHistoryInventoryProvider,
   createSessionHistoryTool,
+  executeSessionHistory,
 } from "../src/tools/session-history.ts";
 import { resolveResource } from "../src/tools/resource.ts";
 import {
@@ -367,6 +368,20 @@ test("session_history checkpoint recovery fails closed when new context is disab
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("session_history reports an unavailable host transcript instead of a complete empty search", async () => {
+  const ctx = { cwd: process.cwd(), sessionManager: {} } as unknown as ExtensionContext;
+  const result = await executeSessionHistory({ action: "search", query: "needle" }, ctx);
+  assert.equal((result as { isError?: boolean }).isError, true);
+  assert.match(resultText(result), /current session transcript is unavailable/i);
+  assert.doesNotMatch(resultText(result), /matchCount/);
+
+  const supplied = await executeSessionHistory(
+    { action: "search", query: "needle" }, ctx, { inventory: [] },
+  );
+  assert.equal((supplied as { isError?: boolean }).isError, undefined);
+  assert.equal(JSON.parse(resultText(supplied)).matchCount, 0);
 });
 
 test("session history registration exposes unified recovery and historical discovery", () => {

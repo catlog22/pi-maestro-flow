@@ -271,8 +271,7 @@ import type {
 } from "../runs/execution.ts";
 import { createForkSnapshot } from "../runs/fork-snapshot.ts";
 import {
-  auxToolCallFallback,
-  auxToolResultFallback,
+  auxToolResultCard,
   renderCompletionOutboxMessage,
   renderMonitorResult,
   renderTeammateCompletionFallbackMessage,
@@ -280,13 +279,14 @@ import {
   renderTeammateStalledMessage,
   renderObserveCall,
   renderObserveResult,
-  renderQuietTeammateAux,
+  teammateCallLine,
   renderTeammateCall,
   renderTeammateListCall,
   renderTeammateListResult,
   renderTeammateResult,
   renderTeammateSendCall,
   renderTeammateSendResult,
+  teammateStatusRow,
 } from "../tui/render.ts";
 import { AttachOverlay } from "../tui/attach-overlay.ts";
 import {
@@ -482,7 +482,7 @@ import {
   registerTeammateChildProxyCaller,
   resolvedRunLocation,
 } from "../runs/child-extensions.ts";
-import { setQuietMode } from "pi-maestro-settings-core/ui";
+import { isQuietMode, setQuietMode } from "pi-maestro-settings-core/ui";
 import {
   aggregateAgentRunPhase,
   diagnoseAgentRuntime,
@@ -743,7 +743,7 @@ export default function registerTeammateExtension(
       const content = typeof message.content === "string"
         ? message.content.replace(/^●\s*/, "")
         : "agent spawned";
-      return renderQuietTeammateAux("teammate-started", content, "success", theme as ExtensionContext["ui"]["theme"]);
+      return teammateStatusRow("teammate-started", content, "success", theme as ExtensionContext["ui"]["theme"]);
     },
   );
 
@@ -6929,15 +6929,15 @@ export default function registerTeammateExtension(
     renderCall(args, theme, context) {
       if (context.isPartial === false) return new Text("", 0, 0);
       const lines = typeof args.lines === "number" ? ` · ${args.lines} lines` : "";
-      return renderQuietTeammateAux("teammate-watch", `@${String(args.name ?? "?")}${lines}`, "running", theme)
-        ?? auxToolCallFallback("teammate-watch", theme);
+      return teammateCallLine(theme, "teammate-watch", `@${String(args.name ?? "?")}${lines}`);
     },
 
     renderResult(result, options, theme, context) {
       if (options.isPartial) return new Text("", 0, 0);
       const failed = context.isError || (result as { isError?: boolean }).isError === true;
-      return renderQuietTeammateAux("teammate-watch", failed ? "inspection failed" : "inspected", failed ? "failure" : "success", theme)
-        ?? auxToolResultFallback(result, theme);
+      return isQuietMode()
+        ? teammateStatusRow("teammate-watch", failed ? "inspection failed" : "inspected", failed ? "failure" : "success", theme)
+        : auxToolResultCard("teammate-watch", result, theme, options);
     },
   };
 
@@ -6984,16 +6984,16 @@ export default function registerTeammateExtension(
     renderCall(args, theme, context) {
       if (context.isPartial === false) return new Text("", 0, 0);
       const target = args.name ? `@${String(args.name)}` : `${String(args.waitMs ?? 0)}ms`;
-      return renderQuietTeammateAux("teammate-wait", target, "running", theme)
-        ?? auxToolCallFallback("teammate-wait", theme);
+      return teammateCallLine(theme, "teammate-wait", target);
     },
 
     renderResult(result, options, theme, context) {
       if (options.isPartial) return new Text("", 0, 0);
       const status = result.details?.status ?? "timeout";
       const failed = context.isError || (result as { isError?: boolean }).isError === true;
-      return renderQuietTeammateAux("teammate-wait", status, failed ? "failure" : "success", theme)
-        ?? auxToolResultFallback(result, theme);
+      return isQuietMode()
+        ? teammateStatusRow("teammate-wait", status, failed ? "failure" : "success", theme)
+        : auxToolResultCard("teammate-wait", result, theme, options);
     },
   };
 
@@ -9638,9 +9638,9 @@ Use list for an attention-first overview, get for one complete normalized window
         details: query,
       };
     },
-    renderCall(_args, theme, context) {
+    renderCall(_args: Record<string, unknown>, theme, context) {
       if (context.isPartial === false) return new Text("", 0, 0);
-      return auxToolCallFallback("monitor", theme);
+      return teammateCallLine(theme, "monitor", String(_args.action ?? "list"));
     },
     renderResult(result, options, theme, context) {
       return renderMonitorResult(result, options, theme, context.isError);
@@ -9721,15 +9721,15 @@ Use list for an attention-first overview, get for one complete normalized window
       if (context.isPartial === false) return new Text("", 0, 0);
       const action = String(args.action ?? "status");
       const targets = Array.isArray(args.targets) ? (args.targets as string[]).join(", ") : "";
-      return renderQuietTeammateAux("teammate-monitor", `${action} ${targets}`, "running", theme)
-        ?? auxToolCallFallback("teammate-monitor", theme);
+      return teammateCallLine(theme, "teammate-monitor", `${action} ${targets}`);
     },
 
     renderResult(result, options, theme, context) {
       if (options.isPartial) return new Text("", 0, 0);
       const failed = context.isError || (result as { isError?: boolean }).isError === true;
-      return renderQuietTeammateAux("teammate-monitor", failed ? "failed" : "ok", failed ? "failure" : "success", theme)
-        ?? auxToolResultFallback(result, theme);
+      return isQuietMode()
+        ? teammateStatusRow("teammate-monitor", failed ? "failed" : "ok", failed ? "failure" : "success", theme)
+        : auxToolResultCard("teammate-monitor", result, theme, options);
     },
   };
 
@@ -9951,13 +9951,13 @@ This lifecycle tool is available only after the user enters Monitor mode with /m
         created.handle,
       );
     },
-    renderCall(_args, theme, context) {
+    renderCall(_args: Record<string, unknown>, theme, context) {
       if (context.isPartial === false) return new Text("", 0, 0);
-      return auxToolCallFallback("workspace-window", theme);
+      return teammateCallLine(theme, "workspace-window", String(_args.action ?? ""));
     },
     renderResult(result, options, theme) {
       if (options.isPartial) return new Text("", 0, 0);
-      return auxToolResultFallback(result, theme);
+      return auxToolResultCard("workspace-window", result, theme, options);
     },
   };
 
@@ -10058,13 +10058,13 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
         return result(sanitizeRemoteMonitorError(error, "worker operation"), true);
       }
     },
-    renderCall(_args, theme, context) {
+    renderCall(_args: Record<string, unknown>, theme, context) {
       if (context.isPartial === false) return new Text("", 0, 0);
-      return auxToolCallFallback("remote-worker", theme);
+      return teammateCallLine(theme, "remote-worker", String(_args.action ?? ""));
     },
     renderResult(result, options, theme) {
       if (options.isPartial) return new Text("", 0, 0);
-      return auxToolResultFallback(result, theme);
+      return auxToolResultCard("remote-worker", result, theme, options);
     },
   };
 

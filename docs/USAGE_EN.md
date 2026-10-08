@@ -17,6 +17,7 @@
    - [maestro — Knowledge-Aware Dispatch](#22-maestro--knowledge-aware-dispatch)
    - [goal — Long-Running Objective Lifecycle](#23-goal--long-running-objective-lifecycle)
    - [todo — Task Management](#24-todo--task-management)
+     - [Single-TODO Progress Supervision](#single-todo-progress-supervision)
    - [run-control — Workflow Run Control](#25-run-control--workflow-run-control)
 3. [Intelligence Tools](#3-intelligence-tools)
    - [lsp — Language Server Integration](#31-lsp--language-server-integration)
@@ -58,11 +59,11 @@
 
 ### Install
 
-> **v0.32.1 dependency repair is UNRELEASED:** prepares Flow 0.32.1, Backends 0.1.7, Teammate 2.8.1, Cockpit 0.24.3, and `maestro-flow >=0.5.91`. Fork identities and unchanged contracts are in [RELEASE.md](../RELEASE.md). Validation/publication remain pending, without security or compatibility acceptance. Install commands retain npm-published 0.32.0, without this repair; formal release closeout is paused.
+> **v0.32.1:** Flow 0.32.1, Backends 0.1.7, Teammate 2.8.1, Cockpit 0.24.3, and `maestro-flow >=0.5.91`. Fork provenance and verification scope are in [RELEASE.md](../RELEASE.md). Native checks cover Windows x64 / Node 22.22; minimum Node and macOS/Linux remain unverified.
 
 ```bash
 # Install or upgrade (pi-maestro-teammate is installed as a dependency)
-pi install npm:pi-maestro-flow@0.32.0
+pi install npm:pi-maestro-flow@0.32.1
 
 # Confirm Flow, Teammate, and Cockpit are listed, then restart Pi or reload extensions.
 pi list
@@ -359,6 +360,63 @@ todo({ action: "create", subject: "Explore codebase", assignee: "explorer-1" })
 | `next` | Compatibility action: activate the next pending task and return resolved context |
 
 `advance` is actor-scoped: it only completes or activates tasks assigned to the caller, while completion still releases cross-role dependencies globally. When one logical outcome needs several roles, use a parent task with singly owned role-specific child tasks instead of shared terminal ownership of one Todo. Canonical Workflow Session/Run mirror Todos remain lifecycle projections and continue to be driven through Run control.
+
+---
+
+#### Single-TODO Progress Supervision
+
+Advisor can supervise the current ordinary `in_progress` TODO. A step or active-time threshold triggers `todo-progress` classification, followed by continued execution, a history-backed reflection prompt, or an independent advisor. **Crossing a threshold does not mean the task is stuck.** This feature is off by default and does not change Goal continuation or TODO lifecycle authority.
+
+```text
+/advisor on                    # Advisor master switch
+/advisor mode automatic        # automatic or hybrid permits automatic supervision
+/advisor todo                  # TODO settings TUI; /advisor settings opens the same panel
+/advisor todo on               # Enable TODO supervision separately
+/advisor todo mode shadow      # Observe only; active permits reflection/advice
+/advisor status                # Effective configuration and runtime status
+```
+
+The TUI edits the Advisor master switch, mode and model, plus TODO supervision, thresholds, cooldown and budgets. Use `↑↓` to select, `Enter` to edit, `Ctrl+S` then `Enter` to confirm saving, `Ctrl+R` to reset the draft, and `Esc` to return/cancel; press `Esc` again to discard an unsaved draft. Changes go to project `.pi/advisor.json`. Cancelling does not write or implicitly enable Advisor/classification. Configured and effective values are shown separately; unavailable model pins are preserved.
+
+| `todoReview` field | Default | Meaning |
+|---|---:|---|
+| `enabled` | `false` | Separate switch; Advisor must also be enabled |
+| `mode` | `active` | `active` permits intervention; `shadow` records classifications only |
+| `reviewSteps` / `reviewActiveMs` | `12` / `480000` | Light review after 12 model iterations or 8 active minutes |
+| `sameFailureLimit` | `3` | Repeated same-problem failures trigger earlier reflection |
+| `reflectionSteps` | `6` | Consider advice after 6 additional steps without new evidence |
+| `unresolvedSteps` / `unresolvedActiveMs` | `24` / `900000` | Escalation thresholds after reflection while unresolved: 24 steps or 15 active minutes |
+| `cooldownMs` | `30000` | Per-task review cooldown; Advisor delivery gating also applies |
+| `maxReviewsPerTask` / `maxEscalationsPerTask` | `3` / `1` | Review/advisor budgets per task activation |
+
+Example `.pi/advisor.json`:
+
+```json
+{
+  "enabled": true,
+  "mode": "automatic",
+  "todoReview": {
+    "enabled": true,
+    "mode": "shadow",
+    "reviewSteps": 12,
+    "reviewActiveMs": 480000,
+    "sameFailureLimit": 3,
+    "reflectionSteps": 6,
+    "unresolvedSteps": 24,
+    "unresolvedActiveMs": 900000,
+    "cooldownMs": 30000,
+    "maxReviewsPerTask": 3,
+    "maxEscalationsPerTask": 1
+  }
+}
+```
+
+Start in shadow, then switch to active in the TUI. `/advisor status` shows the shadow count and the latest task/actor, classification, confidence and source; shadow also emits a read-only verdict on `supervision:event`. Observations are bounded session state, not a persisted review report. Review budgets accumulate per activation: mode/model changes and compaction do not replenish them. If exhausted, explicitly adjust the budget in the TUI or use a new budget on the next task activation. Classification has its own switch and domain mode: explicitly use `/classifier on` and `/classifier mode todo-progress jev` for semantic adjudication. `off` uses rules; semantic shadow results are not authoritative. Unavailable classification, insufficient evidence or low confidence produce conservative reflection, not permission escalation or implicit classifier activation.
+
+- A step is a model/action iteration, not a tool-result count. Active time excludes known tool execution, human/dependency/capacity waits, compaction and offline periods; elapsed TODO status age is not a stall detector.
+- `on-track` needs no intervention; `waiting` waits; `looping` first requests `session_history` recovery of hypotheses, actions and results, verified against current source. An independent Advisor is requested only when reflection does not converge. `blocked`/`uncertain` never grant permissions; report missing credentials, resources or human decisions explicitly.
+- Main-session and local TODO-bound child agents use host-authoritative task/actor identities. Results for completed, reassigned, reactivated or replaced sessions are discarded. Canonical Workflow mirror TODOs are excluded; this is not remote Fabric monitoring.
+- Prompts are consumed at safe model boundaries. Tools are not aborted, TODOs are not automatically completed/transferred, and idle timers do not start new turns. Legacy Advisor reviews are deduplicated against TODO reviews; manual consultation remains available. Advice is not approval or proof of completion.
 
 ---
 
@@ -1251,7 +1309,7 @@ teammate({ tasks: [{ agent: "general", context: "fresh", prompt: "PURPOSE: Read 
 
 ```bash
 # ─── Install ───
-pi install npm:pi-maestro-flow@0.32.0
+pi install npm:pi-maestro-flow@0.32.1
 
 # ─── Knowledge ───
 maestro search "query" --code

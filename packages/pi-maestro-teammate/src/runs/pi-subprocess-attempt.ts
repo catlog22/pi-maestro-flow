@@ -21,6 +21,7 @@ import {
   type ChildProcess,
 } from "node:child_process";
 import { logDiagnosticError, logDiagnosticWarn } from "../shared/diagnostic-log.ts";
+import { nextTeammateHostSequence, publishTeammateHostBoundary } from "./host-observers.ts";
 import {
   randomUUID,
 } from "node:crypto";
@@ -1020,6 +1021,21 @@ export async function runSingleAttempt(
       );
     }
 
+    const observerIncarnation = randomUUID();
+    const observerSequence = nextTeammateHostSequence();
+    const observeBoundary = (event: Record<string, unknown>): void => {
+      publishTeammateHostBoundary({
+        correlationId, incarnation: observerIncarnation, sequence: observerSequence,
+        parentSessionFile: options.parentSessionFile,
+        runtimeGeneration: options.runtimeGeneration ?? 0, event,
+        steer: (message) => !state.terminal && !options.signal?.aborted && !!child.stdin
+          && sendRpcMessage(child.stdin, message, "steer"),
+      });
+    };
+
+    const observerAborted = (): void => observeBoundary({ type: "host_offline" });
+    options.signal?.addEventListener("abort", observerAborted, { once: true });
+
     // Identity publication is observational only. Request/control envelopes
     // and unknown lifecycle events remain replay-risking until explicitly
     // proven side-effect free.
@@ -1036,6 +1052,7 @@ export async function runSingleAttempt(
         const compactionEvent = childCompactionStateEvent(message);
         if (compactionEvent) {
           handleChildCompactionState(compactionEvent);
+          observeBoundary({ type: "host_compaction", phase: compactionEvent.phase });
           return;
         }
         const wakeReceipt = childWakeReceipt(message);
@@ -2916,6 +2933,7 @@ export async function runSingleAttempt(
         options.onChildEvent?.({ ...event, correlationId });
       }
       eventHandlers.get(event.type)?.(event);
+      observeBoundary(event);
     }
 
     const stderrDecoder = new StringDecoder("utf8");
@@ -2930,6 +2948,8 @@ export async function runSingleAttempt(
     });
 
     const notifyChildClosed = (code: number | null, signal: NodeJS.Signals | null): void => {
+      options.signal?.removeEventListener("abort", observerAborted);
+      observeBoundary({ type: "host_offline" });
       if (child.stdin) rejectRpcResponses(child.stdin);
       options.onChildClosed?.(correlationId, options.runtimeGeneration, {
         code,

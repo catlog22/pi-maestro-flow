@@ -5,7 +5,7 @@ icon: "🚀"
 
 10 分钟了解 Maestro Flow 的核心功能和使用方法。完整安装步骤见[安装与初始化](/guides/install)。
 
-> **v0.32.1 依赖修补为 UNRELEASED，待验证/发布**；准备版本和 fork 身份见[更新日志](/guides/changelog)。下方命令保留 npm 已发布的 `0.32.0` 功能基线（范围化决策、精确证据与浏览器桥接），不包含本次修补；正式发布收尾暂停，不声称安全/兼容验收通过。
+> 当前版本为 **v0.32.1 — 依赖修补与运行时加固**；套件版本、fork 来源及验证限制见[更新日志](/guides/changelog)。最低 Node 与 macOS/Linux 原生兼容性仍未验证，不代表全平台验收。
 
 ---
 
@@ -16,7 +16,7 @@ icon: "🚀"
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 
 # 2. 安装或升级插件（teammate 与 cockpit 自动随附）
-pi install npm:pi-maestro-flow@0.32.0
+pi install npm:pi-maestro-flow@0.32.1
 
 # 3. 验证 Flow、Teammate 与 Cockpit 均已列出
 pi list

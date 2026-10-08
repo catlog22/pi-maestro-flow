@@ -6,6 +6,9 @@
  * and payload types from this leaf module instead of the extension entry point.
  */
 
+export { registerTeammateHostObserver } from "../../runs/host-observers.ts";
+export type { TeammateHostBoundary } from "../../runs/host-observers.ts";
+
 import type {
   AgentActivity,
   AgentProgressSnapshot,

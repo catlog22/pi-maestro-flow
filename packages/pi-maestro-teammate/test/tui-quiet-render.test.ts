@@ -5,12 +5,11 @@ import test, { afterEach } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { isQuietMode, setQuietMode } from "pi-maestro-settings-core/ui";
 import {
-  auxToolCallFallback,
-  auxToolResultFallback,
+  auxToolResultCard,
   renderCompletionOutboxMessage,
   renderMonitorResult,
   renderObserveResult,
-  renderQuietTeammateAux,
+  teammateCallLine,
   renderTeammateCompletionFallbackMessage,
   renderTeammateCompletionMessage,
   renderTeammateStalledMessage,
@@ -19,6 +18,7 @@ import {
   renderTeammateListResult,
   renderTeammateResult,
   renderTeammateSendResult,
+  teammateStatusRow,
 } from "../src/tui/render.ts";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { Details, SingleResult } from "../src/shared/types.ts";
@@ -73,35 +73,47 @@ test("quiet auxiliary teammate surfaces use lifecycle rows without message bodie
   ] as const;
 
   for (const [name, rest, status] of cases) {
-    const rendered = renderQuietTeammateAux(name, rest, status, theme as never)?.render(100);
+    const rendered = teammateStatusRow(name, rest, status, theme as never).render(100);
     assert.equal(rendered?.length, 1);
     assert.match(rendered?.[0] ?? "", new RegExp(name));
     assert.ok((rendered?.[0] ?? "").includes(rest));
   }
 
   for (const width of [20, 40, 80, 120]) {
-    const rendered = renderQuietTeammateAux("teammate-send", "@" + "child".repeat(50), "running", theme as never)?.render(width) ?? [];
+    const rendered = teammateStatusRow("teammate-send", "@" + "child".repeat(50), "running", theme as never).render(width) ?? [];
     assert.equal(rendered.length, 1);
     assert.ok(visibleWidth(rendered[0]) <= width - 1, `width ${width}: ${visibleWidth(rendered[0])}`);
   }
 
+  // Unified style: the status row renders in default mode too — only the
+  // glyph set follows quiet symbols.
   setQuietMode(false);
-  assert.equal(renderQuietTeammateAux("teammate-send", "SECRET_MESSAGE", "running", theme as never), undefined);
+  const row = teammateStatusRow("teammate-send", "@child · follow_up", "running", theme as never).render(100);
+  assert.equal(row.length, 1);
+  assert.match(row[0] ?? "", /teammate-send @child · follow_up/);
 });
 
-test("auxiliary tool fallbacks are total Components mirroring host default rendering", () => {
-  const call = auxToolCallFallback("teammate-send", theme as never);
+test("auxiliary tool renderers produce the shared call row and result card in every mode", () => {
+  // Default mode (quiet mirror unset, as on /resume history renders).
+  const call = teammateCallLine(theme as never, "teammate-send", "@worker · steer");
   assert.equal(typeof call.render, "function");
-  assert.deepEqual(call.render(80).map((line) => line.trimEnd()), ["teammate-send"]);
+  assert.match(call.render(80).join("\n"), /… teammate-send @worker · steer/);
 
-  const result = auxToolResultFallback({
+  const result = auxToolResultCard("teammate-send", {
     content: [{ type: "text", text: "Message delivered." }, { type: "text", text: "Second line." }],
   } as never, theme as never);
-  assert.deepEqual(result.render(80).map((line) => line.trimEnd()), ["Message delivered.", "Second line."]);
+  const card = result.render(80);
+  assert.match(card[0] ?? "", /^╭ ✓ teammate-send · ok.*╮$/);
+  assert.match(card[1] ?? "", /^│ Message delivered\.\s+│$/);
+  assert.match(card[2] ?? "", /^│ Second line\.\s+│$/);
+  assert.match(card.at(-1) ?? "", /^╰─+╯$/);
 
-  const empty = auxToolResultFallback({ content: [] } as never, theme as never);
+  const empty = auxToolResultCard("teammate-send", { content: [] } as never, theme as never);
   assert.equal(typeof empty.render, "function");
-  assert.deepEqual(empty.render(80), []);
+  const emptyCard = empty.render(80);
+  assert.equal(emptyCard.length, 2, "empty result still renders the card frame");
+  assert.match(emptyCard[0] ?? "", /^╭ ✓ teammate-send · ok.*╮$/);
+  assert.match(emptyCard[1] ?? "", /^╰─+╯$/);
 });
 
 test("completion and stalled custom messages render bounded full-width cards", () => {
@@ -366,7 +378,7 @@ test("teammate-list call and result own mutually exclusive unbacked phases", () 
   assert.match(call[0], /teammate-list active/);
   assert.deepEqual(settledCall, []);
   assert.deepEqual(partialResult, []);
-  assert.match(result[0], /^╭ ✓ teammate-list · active · 2 items.*─╮$/);
+  assert.match(result[0], /^╭ ✓ teammate-list active · 2 items.*─╮$/);
   assert.match(result[1], /^│ ● @worker · running\s+│$/);
   assert.match(result[2], /^│ role general · id worker-c\s+│$/);
   assert.match(result[3], /^│ active 5s · phase prompting\s+│$/);
@@ -385,11 +397,14 @@ test("teammate-list call and result own mutually exclusive unbacked phases", () 
   assert.match(narrow.at(-1) ?? "", /^╰─+╯$/);
 
   setQuietMode(false);
+  // Default mode renders the same structured card.
   const fallback = renderTeammateListResult({
     content: [{ type: "text", text: "@worker running" }],
     details: { agents: [{ name: "worker" }] },
   }, { isPartial: false }, theme as never, { view: "active" }).render(80);
-  assert.deepEqual(fallback, ["@worker running"]);
+  assert.match(fallback[0] ?? "", /^╭ ✓ teammate-list active · 1 item.*╮$/);
+  assert.ok(fallback.some((line) => line.includes("worker")));
+  assert.match(fallback.at(-1) ?? "", /^╰─+╯$/);
 });
 
 test("communication and Monitor results use bounded structured cards", () => {
@@ -398,7 +413,7 @@ test("communication and Monitor results use bounded structured cards", () => {
     content: [{ type: "text", text: "Message queued for worker." }],
     details: { delivered: true },
   }, { isPartial: false, expanded: false }, theme as never, { to: "worker", mode: "follow_up" }).render(80);
-  assert.match(sent[0], /^╭ ✓ teammate-send · @worker · follow_up · delivered.*╮$/);
+  assert.match(sent[0], /^╭ ✓ teammate-send @worker · follow_up · delivered.*╮$/);
   assert.match(sent[1], /^│ Message queued for worker\.\s+│$/);
   assert.ok(sent.every((line) => visibleWidth(line) === 79));
 
@@ -406,7 +421,7 @@ test("communication and Monitor results use bounded structured cards", () => {
     content: [{ type: "text", text: "Delivery rejected." }],
     details: { delivered: true },
   }, { isPartial: false, expanded: false }, theme as never, { to: "worker", mode: "steer" }, true).render(80);
-  assert.match(failedSent[0], /^╭ ✕ teammate-send · @worker · steer · delivery failed.*╮$/);
+  assert.match(failedSent[0], /^╭ ✕ teammate-send @worker · steer · delivery failed.*╮$/);
 
   const observed = renderObserveResult({
     content: [{ type: "text", text: "2 targets: snapshot" }],
@@ -422,7 +437,7 @@ test("communication and Monitor results use bounded structured cards", () => {
       },
     },
   }, { isPartial: false, expanded: false }, theme as never).render(80);
-  assert.match(observed[0], /^╭ ✓ observe · status · 2 targets · snapshot.*╮$/);
+  assert.match(observed[0], /^╭ ✓ observe status · 2 targets · snapshot.*╮$/);
   assert.ok(observed.some((line) => /^│ ● teammate:a · running\s+│$/.test(line)));
   assert.ok(observed.some((line) => /^│ ✓ bash_bg:b · completed\s+│$/.test(line)));
   assert.doesNotMatch(observed.join("\n"), /^├─+┤$/m, "observations share one uninterrupted outer box");
@@ -447,7 +462,7 @@ test("communication and Monitor results use bounded structured cards", () => {
       }],
     },
   }, { isPartial: false, expanded: true }, theme as never).render(80);
-  assert.match(monitored[0], /^╭ ✓ monitor · list · ok · 1 window.*╮$/);
+  assert.match(monitored[0], /^╭ ✓ monitor list · ok · 1 window.*╮$/);
   assert.ok(monitored.some((line) => /^│ ● worker-a · running\s+│$/.test(line)));
   assert.ok(monitored.some((line) => /^│ target owner:abc\s+│$/.test(line)));
   assert.ok(monitored.some((line) => line.includes("FULL TIMELINE DETAIL · expanded")));
@@ -627,7 +642,7 @@ test("dot symbol mode applies to teammate running, success, and failure rows", (
 test("auxiliary teammate surfaces are wired to quiet rows or shared result cards", () => {
   const source = readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf8");
   for (const name of ["teammate-started", "teammate-wait", "teammate-watch", "teammate-monitor"]) {
-    assert.match(source, new RegExp(`renderQuietTeammateAux\\(\\"${name}\\"`));
+    assert.match(source, new RegExp(`teammateStatusRow\\(\\"${name}\\"`));
   }
   assert.equal((source.match(/return renderTeammateSendCall\(/g) ?? []).length, 2);
   assert.equal((source.match(/return renderTeammateSendResult\(/g) ?? []).length, 2);

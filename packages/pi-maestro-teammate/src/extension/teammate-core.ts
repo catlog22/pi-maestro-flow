@@ -109,9 +109,6 @@ import type {
   NormalizedTask,
 } from "../runs/execution.ts";
 import {
-  auxToolCallFallback,
-  auxToolResultFallback,
-  renderQuietTeammateAux,
   renderTeammateCall,
   renderTeammateListCall,
   renderTeammateListResult,

@@ -64,7 +64,7 @@ test("package manifest publishes the extension and canonical Pi skills", () => {
   assert.ok(pkg.files.includes("!.pi/settings.local.json"));
   assert.ok(pkg.files.includes("!.pi/model-failover.json"));
   assert.ok(pkg.files.includes("!.pi/scratch/**"));
-  assert.equal(pkg.dependencies["maestro-flow"], ">=0.5.87");
+  assert.equal(pkg.dependencies["maestro-flow"], ">=0.5.91");
   assert.equal(pkg.dependencies["pi-maestro-settings-core"], settingsCorePkg.version);
   assert.equal(teammatePkg.dependencies["pi-maestro-settings-core"], settingsCorePkg.version);
   assert.equal(cockpitPkg.dependencies["pi-maestro-settings-core"], settingsCorePkg.version);
@@ -72,7 +72,11 @@ test("package manifest publishes the extension and canonical Pi skills", () => {
   assert.equal(pkg.dependencies["pi-cockpit"], cockpitPkg.version);
   assert.equal(pkg.dependencies["@konbakuyomu/smart-search"], undefined);
   assert.equal(pkg.optionalDependencies["@konbakuyomu/smart-search"], smartSearchSource);
-  assert.equal(pkg.dependencies["puppeteer-core"], "24.31.0");
+  assert.equal(pkg.dependencies["puppeteer-core"], "25.12.0");
+  assert.equal(pkg.dependencies["@modelcontextprotocol/sdk"], "1.32.1");
+  assert.equal(pkg.optionalDependencies["active-win"], "npm:@dyw1234/active-win@9.0.1");
+  assert.equal(pkg.optionalDependencies["@nut-tree-fork/nut-js"], "npm:@dyw1234/nut-js@4.2.7");
+  assert.equal(pkg.optionalDependencies["onnxruntime-node"], "1.30.0");
   assert.equal(pkg.dependencies["cross-spawn"], "7.0.6");
   assert.equal(pkg.devDependencies.typescript, "5.7.3");
   assert.equal(pkg.engines.node, ">=22.19.0");

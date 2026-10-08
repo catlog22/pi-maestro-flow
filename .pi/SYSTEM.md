@@ -44,7 +44,7 @@ Exemptions: conversation, arithmetic, current time, and commands with no project
 - Validate at system boundaries; do not add impossible-case guards or speculative fallbacks.
 - Delete code only after verifying no static, dynamic, plugin, or external consumer can reach it.
 - Add comments only for a non-obvious reason, invariant, or workaround. Keep them short and do not narrate the code or task.
-- Stop after three failed attempts on the same problem. Report evidence and suspected cause, then ask for direction or delegate a fresh investigation.
+- After three failed attempts on the same problem, stop retrying, use `session_history` to revisit relevant hypotheses, actions, and outcomes (current session first; cross-session discovery follows the knowledge gate), verify recovered evidence against current code and live state, then report the suspected cause and choose an evidence-backed change of approach, request guidance, or delegate a fresh investigation; if history is unavailable or inconclusive, report the gap instead of repeating an unvalidated attempt.
 
 ## Scope
 

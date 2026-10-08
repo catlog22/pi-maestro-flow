@@ -14,6 +14,7 @@
 
 import { resolve } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { normalizeTodoReviewConfig, type TodoReviewConfig, type TodoProgressLabel } from "./todo-review.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -55,6 +56,8 @@ export interface AdvisorConfig {
   maxTailChars: number;
   /** Evaluate during execution after this many tool results. 0 disables tool-result checkpoints. */
   reviewEveryToolResults: number;
+  /** Explicit opt-in task-scoped supervision; ephemeral host-owned statistics. */
+  todoReview: TodoReviewConfig;
 }
 
 export const DEFAULT_ADVISOR_CONFIG: AdvisorConfig = {
@@ -69,6 +72,12 @@ export const DEFAULT_ADVISOR_CONFIG: AdvisorConfig = {
   maxTailMessages: 8,
   maxTailChars: 4_000,
   reviewEveryToolResults: 3,
+  todoReview: {
+    enabled: false, mode: "active", reviewSteps: 12, reviewActiveMs: 480_000,
+    sameFailureLimit: 3, reflectionSteps: 6, unresolvedSteps: 24,
+    unresolvedActiveMs: 900_000, cooldownMs: 30_000, maxReviewsPerTask: 3,
+    maxEscalationsPerTask: 1,
+  },
 };
 
 export type AdvisorVerdictStatus = "on-track" | "concern" | "blocker";
@@ -98,6 +107,18 @@ export interface AdvisorRuntimeState {
   suppressed: number;
   /** Number of valid on-track verdicts that produced no advisory. */
   uneventful: number;
+  todoShadowReviews?: number;
+  /** Bounded last classification; shadow observations are visible without intervention. */
+  lastTodoReview?: {
+    taskId: string;
+    actor: string;
+    status: TodoProgressLabel;
+    confidence: number;
+    layer: string;
+    shadow: boolean;
+    at: number;
+    degradedReason?: string;
+  };
 }
 
 export function createAdvisorRuntimeState(): AdvisorRuntimeState {
@@ -143,6 +164,7 @@ export function normalizeAdvisorConfig(raw: Partial<AdvisorConfig> | undefined):
     maxTailMessages: positiveInteger(raw?.maxTailMessages) ?? DEFAULT_ADVISOR_CONFIG.maxTailMessages,
     maxTailChars: positiveInteger(raw?.maxTailChars) ?? DEFAULT_ADVISOR_CONFIG.maxTailChars,
     reviewEveryToolResults: reviewEveryToolResults ?? DEFAULT_ADVISOR_CONFIG.reviewEveryToolResults,
+    todoReview: normalizeTodoReviewConfig(raw?.todoReview),
   };
 }
 

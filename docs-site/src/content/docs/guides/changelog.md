@@ -5,15 +5,19 @@ icon: "🔄"
 
 这里记录 pi maestro flow 套件从上一稳定版本到当前版本的用户可见变化、行为调整、问题修复和升级要求。
 
-> **v0.32.1 依赖安全修补：UNRELEASED，待验证与发布。** 仅准备源代码版本/依赖声明，不代表已发布、当前可安装最新版或安全/兼容验收通过。npm 已发布的 0.32.0 正式发布收尾仍暂停；历史版本记录与安装命令保留原值。
+> **当前版本：v0.32.1 — 依赖修补与运行时加固。** Node.js 最低 22.19.0，Pi 验证基线 0.99.0；原生实测限 Windows x64 / Node 22.22，最低 Node 与 macOS/Linux 未验证。历史版本记录与安装命令保留原值。
 
-## v0.32.1 — 依赖安全修补（UNRELEASED）
+## v0.32.1 — 依赖修补与运行时加固
 
-- 准备 Flow **0.32.1**、Backends **0.1.7**、Teammate **2.8.1**、Cockpit **0.24.3**。Backend-Core **0.1.5**、Settings-Core **0.2.3**、Fabric/Fabric-Core **0.1.0** 不变。
-- 引擎要求提高为 **`maestro-flow >=0.5.91`**，仍是范围依赖；Node.js 最低 **22.19.0** 和 Pi **0.99.0** 验证基线不变。引擎下载/安装未成功，不声称推理验证通过。
-- 保留导入键：`active-win` → `npm:@dyw1234/active-win@9.0.1`；`@nut-tree-fork/nut-js` → `npm:@dyw1234/nut-js@4.2.7`。后者的 shared/provider-interfaces 键分别 alias 到 `@dyw1234/nut-shared@4.2.7` / `@dyw1234/nut-provider-interfaces@4.2.7`。
-- 四个包是修补 fork，不是上游官方发布/支持承诺：active-win 源自 MIT `active-win@9.0.0`，native 资产仍保持上游 v9.0.0 身份；nut 三包源自 Apache-2.0 `@nut-tree-fork` 4.2.6。来源、许可及变更记录在各 fork 的 provenance 文件中，汇总见仓库 `RELEASE.md`。
-- 本次文档步骤只修改既有文案，未执行 build/test/install/network validation/audit/pack/commit/publish/push；发布门禁暂停。Active-win 的 Node 22.19.0/macOS/Linux 兼容验收未验证，不声称最终 consumer audit-zero 或 31 项 findings 全部关闭。0.32.0 功能说明保留如下，不作为修补后的验收证据。
+- Flow **0.32.1**、Backends **0.1.7**、Teammate **2.8.1**、Cockpit **0.24.3**。Backend-Core **0.1.5**、Settings-Core **0.2.3**、Fabric/Fabric-Core **0.1.0** 不变。
+- 引擎要求为 **`maestro-flow >=0.5.91`**，仍是范围依赖；MCP SDK **1.32.1**、Puppeteer Core **25.12.0**、ONNX Runtime **1.30.0**。安装声明不构成模型推理证明。
+- 保留导入键：`active-win` → `npm:@dyw1234/active-win@9.0.1`；`@nut-tree-fork/nut-js` → `npm:@dyw1234/nut-js@4.2.7`；shared/provider-interfaces alias 到 `@dyw1234/nut-shared@4.2.7` / `@dyw1234/nut-provider-interfaces@4.2.7`。
+- 四个包是修补 fork，不是上游官方发布/支持承诺：active-win 源自 MIT 9.0.0，native 资产保留上游 v9.0.0 身份；nut 三包源自 Apache-2.0 4.2.6。来源和许可见各包 provenance 及仓库 `RELEASE.md`。
+- Classifier 统一设置、诊断与会话运行额度；建议仍不是真人批准。SSH 使用不消耗 stdin 的 PowerShell payload bootstrap，修复 Unicode、退出状态与 UTF-8 分块/截断。
+- 子代理压缩恢复保留原任务、累计搜索预算及精确结果引用；Nut 图像转换保留 RGB/BGR、alpha 和三通道 buffer/stride 一致性。
+- 四个 fork registry SHA 与发布 dry-run 一致；真实 Windows consumer 的只读原生 API 和图像回归通过，fork consumer production audit 为 0。该结论不扩展到整个 Flow 依赖图，也不声称输入注入或跨平台兼容验收。
+
+升级：`pi install npm:pi-maestro-flow@0.32.1`。升级前关闭 Pi，完成后重启；本地 companion 覆盖需自行升级。
 
 ## v0.32.0 — 范围化决策、精确证据与浏览器桥接
 

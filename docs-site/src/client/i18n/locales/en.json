@@ -21,8 +21,8 @@
     "logo_alt": "Maestro Flow Logo"
   },
   "announcement": {
-    "title": "v0.32.1 repair: UNRELEASED, validation/publication pending. Published 0.32.0 baseline (without repair):",
-    "install": "pi install npm:pi-maestro-flow@0.32.0",
+    "title": "v0.32.1 — Dependency Repairs & Runtime Hardening. Upgrade:",
+    "install": "pi install npm:pi-maestro-flow@0.32.1",
     "close": "Dismiss"
   },
   "accessibility": {

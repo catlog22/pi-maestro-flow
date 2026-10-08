@@ -18,6 +18,7 @@ import { Text } from "@earendil-works/pi-tui";
 import {
   MAX_SESSION_HISTORY_FILES,
   MAX_SESSION_HISTORY_MATCHES,
+  MAX_SESSION_HISTORY_OMISSIONS,
   MAX_SESSION_HISTORY_QUERY_CHARS,
   SESSION_HISTORY_INCLUDES,
   SessionHistoryService,
@@ -307,6 +308,9 @@ function safeQuery(value: unknown): string {
   if (typeof value !== "string" || value.length === 0) {
     throw new TypeError("query is required for search.");
   }
+  if (value.length > MAX_SESSION_HISTORY_QUERY_CHARS || value.includes("\0")) {
+    throw new TypeError(`query must be a non-empty string of at most ${MAX_SESSION_HISTORY_QUERY_CHARS} characters.`);
+  }
   return value;
 }
 
@@ -460,6 +464,9 @@ export async function executeSessionHistory(
 
   try {
     if (signal?.aborted) throw signal.reason ?? new Error("Session history read aborted.");
+    if (options.inventory === undefined && options.inventoryFactory === undefined && !currentSessionFile(ctx)) {
+      throw new Error("The current session transcript is unavailable. Session history cannot be searched or read.");
+    }
     const compactRecovery = action === "timeline" || action === "read_checkpoint";
     if (compactRecovery && scope !== "current_session") {
       throw new TypeError(`${action} is available only with scope=current_session.`);
@@ -565,7 +572,11 @@ export async function executeSessionHistory(
         && options.candidateAccelerator !== undefined
         && options.inventory === undefined
         && options.inventoryFactory === undefined;
-      if (useAccelerator) {
+      // Projection joins text blocks with newlines that never exist as a
+      // contiguous literal in the raw JSONL searched by FFF.
+      if (useAccelerator && query.includes("\n")) {
+        discovery = { accelerator: "fff", source: "bounded-inventory", reason: "projection-sensitive-query" };
+      } else if (useAccelerator) {
         let candidate: Awaited<ReturnType<SessionHistoryFffCandidateAccelerator["search"]>> | undefined;
         try {
           candidate = await options.candidateAccelerator!.search(query, ctx, signal);
@@ -608,7 +619,20 @@ export async function executeSessionHistory(
     if (action === "list_sessions") {
       result = sanitizeResult(await service.list({ ...scanOptions, signal })) as unknown as Record<string, unknown>;
     } else if (action === "search") {
-      result = sanitizeResult(await service.search(query!, { ...scanOptions, signal })) as unknown as Record<string, unknown>;
+      const searched = sanitizeResult(await service.search(query!, { ...scanOptions, signal }));
+      result = searched as unknown as Record<string, unknown>;
+      // A raw index can lag appends or miss JSON-encoded text. Verify a
+      // negative candidate result against the fresh authorized inventory.
+      if (searched.matchCount === 0 && source !== fallbackSource) {
+        const verified = sanitizeResult(await new SessionHistoryService(fallbackSource).search(query!, { ...scanOptions, signal }));
+        result = {
+          ...verified,
+          filesRead: searched.filesRead + verified.filesRead,
+          bytesRead: searched.bytesRead + verified.bytesRead,
+          omissions: [...searched.omissions, ...verified.omissions].slice(0, MAX_SESSION_HISTORY_OMISSIONS),
+        };
+        discovery = { accelerator: "fff", source: "bounded-inventory", reason: "no-visible-matches" };
+      }
       if (candidateSearchIncomplete) result.truncated = true;
       if (discovery) result.discovery = discovery;
     } else {
@@ -651,7 +675,7 @@ export function createSessionHistoryTool(
 
 Actions:
 - list_sessions: list validated sessions and exact session:// URIs.
-- search: literal case-insensitive search over visible active-chain text; each match includes an exact session://<sessionId>/entry/<entryId> URI.
+- search: literal case-insensitive search over visible active-chain text; use one phrase per call, not a keyword list, regex, or quoted search syntax. Each match includes an exact session://<sessionId>/entry/<entryId> URI.
 - read_turn: read one session turn by 1-based turn number (0 is the preamble); current_session uses the host-selected session when sessionId is omitted.
 - timeline: list newest compaction checkpoints for current_session only.
 - read_checkpoint: read one compaction entry by checkpoint id or timeline entry id for current_session only.
@@ -668,7 +692,8 @@ The include categories are user, assistant, visible_custom, compaction, and tool
     promptGuidelines: [
       "Recover from the capsule and live Todo/Goal/Plan/Workflow state first; only when a required current-session fact is absent, use session_history with scope=current_session and the smallest suitable action.",
       "Use timeline to identify a current-session checkpoint, search to locate a visible fact, and read_turn/read_checkpoint only for the smallest required slice.",
-      "Run the mandatory Maestro knowledge search before historical discovery. Only when it completes with no relevant hits, use session_history search with scope=workspace_sessions and 1-3 subject keywords.",
+      "Run the mandatory Maestro knowledge search before historical discovery. Only when it completes with no relevant hits, use session_history search with scope=workspace_sessions and one literal subject phrase per call.",
+      "To investigate tool errors, include tool_result explicitly; defaults exclude tool output. A zero match count with omissions or truncated=true is not proof the text is absent.",
       "Historical session content is not authoritative knowledge: verify useful findings against current specs, code, configuration, and live state before acting.",
       "Use list_sessions before cross-session read_turn when the exact session id or turn is unknown; preserve exact match URIs for resource reads.",
       "Choose current_session, workspace_sessions, or teammates explicitly; session_history parameters accept session IDs, not filesystem paths.",

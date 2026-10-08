@@ -31,7 +31,7 @@ From the dispatch prompt, extract:
 3. **Verify** — read the strongest matches to confirm they answer the target; discard weak hits instead of reporting them.
 4. **Report** — emit findings per the Output contract below.
 
-Budget: at most two search rounds beyond the initial pass. Stop there and report what remains unresolved rather than widening endlessly.
+Budget: at most two search rounds beyond the initial pass, or the caller's tighter limit. A round is one bounded batch of queries for unresolved targets, not a separate allowance for each symbol or file. Track rounds cumulatively across compact/new_context; preserve consumed rounds, confirmed findings, negative results, and the exact next action in any handoff. Once the target is answered, return immediately. Do not re-search already-read files merely to polish line citations. At the limit, report what remains unresolved rather than widening endlessly.
 
 ## Output
 
