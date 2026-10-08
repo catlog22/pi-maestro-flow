@@ -74,6 +74,7 @@ const SCALAR_KEYS = [
   "classifier.endpoint",
   "classifier.model",
   "classifier.timeoutMs",
+  "classifier.cacheTtlMs",
   "classifier.maxCallsPerSession",
 ] as const;
 
@@ -142,6 +143,8 @@ const CATALOGS = {
     "classifier.model.description": "Model id sent to the endpoint (e.g. jev-latest or typesafe/jev-1.13). Empty uses the endpoint default.",
     "classifier.timeoutMs": "Timeout (ms)",
     "classifier.timeoutMs.description": "Per-call JEV timeout. JEV is a low-latency decision model; default 4000.",
+    "classifier.cacheTtlMs": "Cache TTL (ms)",
+    "classifier.cacheTtlMs.description": "Answer cache lifetime; default 600000 ms.",
     "classifier.maxCallsPerSession": "Max calls per session",
     "classifier.maxCallsPerSession.description": "Session budget for JEV calls across all domains; default 30.",
     "classifier.domain.mode": "Mode",
@@ -171,6 +174,8 @@ const CATALOGS = {
     "classifier.model.description": "发送到端点的模型 ID（如 jev-latest 或 typesafe/jev-1.13）；留空使用端点默认。",
     "classifier.timeoutMs": "超时（毫秒）",
     "classifier.timeoutMs.description": "单次 JEV 调用超时；JEV 是低延迟决策模型，默认 4000。",
+    "classifier.cacheTtlMs": "缓存有效期（毫秒）",
+    "classifier.cacheTtlMs.description": "分类答案缓存有效期；默认 600000 毫秒。",
     "classifier.maxCallsPerSession": "每 Session 最大调用数",
     "classifier.maxCallsPerSession.description": "所有域共享的 JEV 会话预算；默认 30。",
     "classifier.domain.mode": "模式",
@@ -245,6 +250,17 @@ function definitions(domains: readonly ClassifierDomainInfo[]): SettingDefinitio
       sensitivity: "public",
       reversibility: "full",
       editor: { kind: "integer", min: 500, max: 30_000, step: 500 },
+    },
+    {
+      key: "classifier.cacheTtlMs",
+      group: "classifier.group.general",
+      order: 4,
+      labelKey: "classifier.cacheTtlMs",
+      descriptionKey: "classifier.cacheTtlMs.description",
+      defaultValue: 600_000,
+      scopes: ["project"], merge: "override", activation: "live",
+      sensitivity: "public", reversibility: "full",
+      editor: { kind: "integer", min: 1 },
     },
     {
       key: "classifier.maxCallsPerSession",
@@ -334,6 +350,7 @@ export function createClassifierSettingsProvider(
     if (key === "classifier.endpoint") return config.endpoint ?? "auto";
     if (key === "classifier.model") return config.model ?? "";
     if (key === "classifier.timeoutMs") return config.timeoutMs ?? 4000;
+    if (key === "classifier.cacheTtlMs") return config.cacheTtlMs ?? 600_000;
     if (key === "classifier.maxCallsPerSession") return config.maxCallsPerSession ?? 30;
     if (key.startsWith(DOMAIN_KEY_PREFIX)) return config.domains[key.slice(DOMAIN_KEY_PREFIX.length)] ?? "off";
     return null;
@@ -357,15 +374,19 @@ export function createClassifierSettingsProvider(
         const value = change.operation === "set" && typeof change.value === "number" ? Math.floor(change.value) : undefined;
         if (value !== undefined) next.timeoutMs = value;
         else delete next.timeoutMs;
+      } else if (change.key === "classifier.cacheTtlMs") {
+        const value = change.operation === "set" && typeof change.value === "number" ? change.value : undefined;
+        if (value !== undefined) next.cacheTtlMs = value;
+        else delete next.cacheTtlMs;
       } else if (change.key === "classifier.maxCallsPerSession") {
         const value = change.operation === "set" && typeof change.value === "number" ? Math.floor(change.value) : undefined;
         if (value !== undefined) next.maxCallsPerSession = value;
         else delete next.maxCallsPerSession;
       } else if (change.key.startsWith(DOMAIN_KEY_PREFIX)) {
         const name = change.key.slice(DOMAIN_KEY_PREFIX.length);
-        const mode = change.operation === "set" ? change.value : "off";
-        if (typeof mode === "string" && (DOMAIN_MODES as readonly string[]).includes(mode)) {
-          next.domains[name] = mode as ClassifierDomainMode;
+        if (change.operation === "unset") delete next.domains[name];
+        else if (typeof change.value === "string" && (DOMAIN_MODES as readonly string[]).includes(change.value)) {
+          next.domains[name] = change.value as ClassifierDomainMode;
         }
       }
     }
@@ -428,6 +449,7 @@ export function createClassifierSettingsProvider(
     if (key === "classifier.endpoint") return raw.endpoint === "typesafe" || raw.endpoint === "openrouter" ? raw.endpoint : undefined;
     if (key === "classifier.model") return typeof raw.model === "string" && raw.model ? raw.model : undefined;
     if (key === "classifier.timeoutMs") return typeof raw.timeoutMs === "number" ? raw.timeoutMs : undefined;
+    if (key === "classifier.cacheTtlMs") return typeof raw.cacheTtlMs === "number" ? raw.cacheTtlMs : undefined;
     if (key === "classifier.maxCallsPerSession") return typeof raw.maxCallsPerSession === "number" ? raw.maxCallsPerSession : undefined;
     if (key.startsWith(DOMAIN_KEY_PREFIX)) {
       const name = key.slice(DOMAIN_KEY_PREFIX.length);
@@ -481,8 +503,10 @@ export function createClassifierSettingsProvider(
             (change.key === "classifier.enabled" && typeof change.value !== "boolean")
             || (change.key === "classifier.endpoint" && !(change.value === "auto" || change.value === "typesafe" || change.value === "openrouter"))
             || (change.key === "classifier.model" && typeof change.value !== "string")
-            || ((change.key === "classifier.timeoutMs" || change.key === "classifier.maxCallsPerSession")
-              && (typeof change.value !== "number" || !Number.isFinite(change.value) || change.value <= 0));
+            || ((change.key === "classifier.timeoutMs" || change.key === "classifier.cacheTtlMs" || change.key === "classifier.maxCallsPerSession")
+              && (typeof change.value !== "number" || !Number.isSafeInteger(change.value) || change.value <= 0))
+            || (change.key === "classifier.timeoutMs" && typeof change.value === "number" && (change.value < 500 || change.value > 30_000))
+            || (change.key === "classifier.maxCallsPerSession" && typeof change.value === "number" && change.value > 500);
           if (bad) issues.push({ severity: "error", messageKey: "classifier.settings.invalidValue", key: change.key, scope: change.scope });
         }
         continue;
@@ -491,6 +515,9 @@ export function createClassifierSettingsProvider(
         const name = change.key.slice(DOMAIN_KEY_PREFIX.length);
         const modes = domainInfo.get(name);
         if (!modes) {
+          // Reset may remove a persisted domain that is no longer registered.
+          if (change.operation === "unset" && Object.hasOwn(doc.config.domains, name)) continue;
+          if (change.operation === "set" && Object.hasOwn(DEFAULT_CLASSIFIER_CONFIG.domains, name) && change.value === DEFAULT_CLASSIFIER_CONFIG.domains[name]) continue;
           issues.push({ severity: "error", messageKey: "classifier.settings.unknownKey", key: change.key, scope: change.scope });
           continue;
         }

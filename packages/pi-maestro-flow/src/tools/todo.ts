@@ -37,6 +37,7 @@ import {
   type TodoAdvanceTransition,
   type TodoHandoff,
   type TodoHandoffInput,
+  type TodoHandoffFileInput,
   type TodoUpdateField,
 } from "./todo-contract.ts";
 import {
@@ -239,6 +240,7 @@ let todoRevision = 0;
 let todoGeneration = 0;
 let todoSessionLoaded = false;
 let todoMutationQueue: Promise<void> = Promise.resolve();
+let todoHostContext: { cwd: string; sessionManager: unknown; sessionId?: string } | undefined;
 
 configureTodoSerialization({
   getExtensionApi: () => extensionApi,
@@ -264,6 +266,9 @@ export function initTodo(pi: ExtensionAPI): void {
 }
 
 export function onSessionStart(ctx: TodoContext): void {
+  const manager = ctx.sessionManager as { getSessionId?: () => string } | undefined;
+  // Extension contexts have live getters. Capture immutable host scope, not ctx.
+  todoHostContext = { cwd: ctx.cwd, sessionManager: manager, sessionId: manager?.getSessionId?.() };
   todoGeneration++;
   todoSessionLoaded = false;
   todoMutationQueue = Promise.resolve();
@@ -286,6 +291,7 @@ export function onSessionStart(ctx: TodoContext): void {
 }
 
 export function onSessionShutdown(ctx: TodoContext): void {
+  todoHostContext = undefined;
   todoGeneration++;
   todoSessionLoaded = false;
   todoMutationQueue = Promise.resolve();
@@ -559,6 +565,102 @@ export async function executeTodo(
   return result;
 }
 
+/** Opaque, process-local host snapshot; not a model tool parameter. */
+export interface TodoHandoffAdviceSnapshot {
+  readonly task: TodoTask;
+  readonly revision: number;
+}
+
+interface HandoffAdviceFence {
+  generation: number;
+  revision: number;
+  cwd: string;
+  sessionId: string;
+  sessionManager: ExtensionContext["sessionManager"];
+  fingerprint: string;
+  taskId: string;
+}
+const handoffAdviceFences = new WeakMap<TodoHandoffAdviceSnapshot, HandoffAdviceFence>();
+
+function assertHandoffAdviceHost(ctx: ExtensionContext): string {
+  const sessionId = ctx.sessionManager?.getSessionId();
+  if (!todoSessionLoaded || !todoHostContext || !sessionId
+    || ctx.cwd !== todoHostContext.cwd || sessionId !== todoHostContext.sessionId
+    || ctx.sessionManager !== todoHostContext.sessionManager
+    || process.env.PI_TEAMMATE_CHILD === "1"
+    || process.env.PI_TEAMMATE_MANAGED_WINDOW === "1") {
+    throw new Error("Handoff advice requires the current canonical root Todo host/session/workspace.");
+  }
+  return sessionId;
+}
+
+/** List only locally canonical root-owned tasks, detached from live state. */
+export function listTodoHandoffAdviceTasks(ctx: ExtensionContext): TodoTask[] {
+  assertHandoffAdviceHost(ctx);
+  return getVisibleTasks().filter((task) => task.assignee.kind === "root"
+    && task.assignee.id === ROOT_TODO_ACTOR.id && !task.origin).map(cloneTodoTask);
+}
+
+export function captureTodoHandoffAdvice(ctx: ExtensionContext, taskId: string): TodoHandoffAdviceSnapshot {
+  const sessionId = assertHandoffAdviceHost(ctx);
+  const task = listTodoHandoffAdviceTasks(ctx).find((candidate) => candidate.id === taskId);
+  if (!task) throw new Error(`Task #${taskId} is not a canonical root-owned Todo.`);
+  const snapshot = { task, revision: todoRevision };
+  handoffAdviceFences.set(snapshot, {
+    generation: todoGeneration, revision: todoRevision, cwd: ctx.cwd, sessionId,
+    sessionManager: ctx.sessionManager, fingerprint: JSON.stringify(task), taskId,
+  });
+  return snapshot;
+}
+
+export function assertTodoHandoffAdviceCurrent(ctx: ExtensionContext, snapshot: TodoHandoffAdviceSnapshot): void {
+  const fence = handoffAdviceFences.get(snapshot);
+  const sessionId = assertHandoffAdviceHost(ctx);
+  const task = fence && tasks.get(fence.taskId);
+  if (!fence || fence.generation !== todoGeneration || fence.revision !== todoRevision
+    || fence.cwd !== ctx.cwd || fence.sessionId !== sessionId || fence.sessionManager !== ctx.sessionManager
+    || !task || task.origin || task.assignee.kind !== "root" || task.assignee.id !== ROOT_TODO_ACTOR.id
+    || JSON.stringify(task) !== fence.fingerprint) {
+    throw new Error("Todo changed; preview and confirm handoff advice again.");
+  }
+}
+
+/** Trusted host-only CAS: the check and owner update share the real mutation queue. */
+export function applyTodoHandoffAdviceCAS(
+  ctx: ExtensionContext,
+  snapshot: TodoHandoffAdviceSnapshot,
+  files: readonly TodoHandoffFileInput[],
+  assertAuthorizedCurrent: () => void,
+): Promise<FlowToolResult> {
+  // Detach at enqueue, so a caller cannot change a previously confirmed patch.
+  const patch = files.map((file) => ({ ...file }));
+  const execute = async (): Promise<FlowToolResult> => {
+    try {
+      assertAuthorizedCurrent();
+      assertTodoHandoffAdviceCurrent(ctx, snapshot);
+      const fence = handoffAdviceFences.get(snapshot)!;
+      const task = tasks.get(fence.taskId)!;
+      if (!patch.length || new Set(patch.map((file) => file.path)).size !== patch.length
+        || patch.some((file) => !task.handoff?.files.some((old) => old.path === file.path && old.value === "unknown")
+          || !["required", "conditional", "skip"].includes(file.value)
+          || (file.value === "conditional" && !file.when?.trim()))) {
+        throw new Error("Advice may update only selected existing unknown annotations with concrete conditions.");
+      }
+      // No nested executeTodo enqueue: no interleaving after the CAS check.
+      // Metadata-only owner update must not load skills or mutate activation.
+      return await executeTodoAction({ action: "update", id: fence.taskId,
+        updateFields: ["handoff"], handoff: { files: patch } }, ctx, ROOT_TODO_ACTOR, fence.generation, true);
+    } catch (error) {
+      return err(error instanceof Error ? error.message : String(error), "update");
+    } finally {
+      handoffAdviceFences.delete(snapshot);
+    }
+  };
+  const result = todoMutationQueue.then(execute, execute);
+  todoMutationQueue = result.then(() => undefined, () => undefined);
+  return result;
+}
+
 /**
  * Auto-delegation hook for `teammate:started` events that carry `todo`
  * bindings (tasks[].todo at dispatch time, single id or ordered array). Each
@@ -737,6 +839,7 @@ async function executeTodoAction(
   ctx: ExtensionContext,
   actor: TodoActorRef,
   generation: number,
+  handoffOnly = false,
 ): Promise<FlowToolResult> {
   const { action } = input;
   try {
@@ -761,7 +864,7 @@ async function executeTodoAction(
       case "create":
         return handleCreate(params, ctx, actor);
       case "update":
-        return await handleUpdate(params, ctx, actor, generation);
+        return await handleUpdate(params, ctx, actor, generation, handoffOnly);
       case "list":
         return handleList(params, actor);
       case "get":
@@ -1160,6 +1263,7 @@ async function handleUpdate(
   ctx: ExtensionContext,
   actor: TodoActorRef,
   generation: number,
+  handoffOnly = false,
 ): Promise<FlowToolResult> {
   if (params.updates !== undefined) {
     const conflicting = ["id", "subject", "description", "status", "blockedBy", "context", "skills", "summary", "resourceUris", "handoff", "transition", "updateFields", "assignee", "goalId"]
@@ -1193,12 +1297,12 @@ async function handleUpdate(
     && (draft.status !== "in_progress" || draft.assignee.id !== actor.id)) {
     return err("update with transition=new_context must leave the caller's active task in_progress", "update", [draft.id]);
   }
-  const activation = shouldActivate ? await activateTask(draft) : undefined;
-  if (shouldActivate) {
+  const activation = shouldActivate && !handoffOnly ? await activateTask(draft) : undefined;
+  if (shouldActivate && !handoffOnly) {
     revalidateAsyncTodoMutation({ generation, before, draft, actor });
   }
   if (activation) draft.skillActivation = activationMetadata(activation);
-  if (draft.status === "pending" || draft.skills.length === 0) draft.skillActivation = undefined;
+  if (!handoffOnly && (draft.status === "pending" || draft.skills.length === 0)) draft.skillActivation = undefined;
 
   const changed = taskChanged(before, draft)
     || JSON.stringify(before.skillActivation) !== JSON.stringify(draft.skillActivation);

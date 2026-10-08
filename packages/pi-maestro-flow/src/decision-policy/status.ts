@@ -3,7 +3,10 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { DecisionPolicy, PolicyDomain } from "./config.ts";
 
 export const DECISION_POLICY_STATUS_KEY = "decision-policy";
-type Identity = Pick<ExtensionContext, "cwd" | "sessionManager">;
+interface Identity {
+  cwd: string;
+  sessionManager: Pick<ExtensionContext["sessionManager"], "getSessionId">;
+}
 type Backend = "none" | "classifier" | "llm";
 type Phase = "loading" | "classifying" | "advising" | "waiting-user";
 interface Outcome {
@@ -75,6 +78,13 @@ export function connectDecisionPolicyStatus(ctx: Identity, emit: StatusState["em
       catch (error) { console.warn("[decision-policy] Status cleanup failed:", error instanceof Error ? error.message : String(error)); }
     },
   };
+}
+export function configureDecisionPolicyStatus(ctx: Identity, policy: DecisionPolicy): void {
+  const id = ctx.sessionManager.getSessionId();
+  const state = states.get(id);
+  if (!state || state.cwd !== resolve(ctx.cwd)) return;
+  state.policy = policy; state.loaded = true; state.invalid = false;
+  publish(id, state);
 }
 export function setDecisionPolicyConfiguring(ctx: Identity, configuring: boolean): void {
   const id = ctx.sessionManager.getSessionId();

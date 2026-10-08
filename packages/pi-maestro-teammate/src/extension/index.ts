@@ -842,7 +842,8 @@ export default function registerTeammateExtension(
   let classifierRuntime: ExtensionContext["modelRegistry"] | undefined;
   pi.on("session_start", (_event, ctx) => {
     classifierRuntime = ctx.modelRegistry;
-    bindClassifierRuntime({ hostVersion: PI_VERSION, runtime: classifierRuntime });
+    bindClassifierRuntime({ hostVersion: PI_VERSION, runtime: classifierRuntime,
+      sessionId: ctx.sessionManager.getSessionId(), cwd: ctx.cwd });
   });
   pi.on("session_shutdown", () => {
     if (classifierRuntime) unbindClassifierRuntime(classifierRuntime);

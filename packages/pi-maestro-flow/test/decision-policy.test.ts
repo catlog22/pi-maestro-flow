@@ -219,7 +219,7 @@ test("classification cache and budget are per session; concurrent reservations b
   assert.match((await service.evaluate("ask", "different", context())).degradedReason ?? "", /budget/);
   assert.deepEqual(calls, ["classification"]);
   service.invalidateSession("session");
-  assert.equal((await service.evaluate("ask", "different", context(), { advice: false })).owner, "internal");
+  assert.match((await service.evaluate("ask", "different", context(), { advice: false })).degradedReason ?? "", /budget/);
   const race = setup({}, policy({ classification: { maxCallsPerSession: 1 } }));
   const results = await Promise.all([race.service.evaluate("ask", "one", context(), { advice: false }), race.service.evaluate("ask", "two", context(), { advice: false })]);
   assert.equal(results.filter((result) => result.owner === "internal").length, 1);
@@ -392,4 +392,125 @@ test("host authorization retains default .8/15s/30-call limits and all unavailab
   const keepAlive = setInterval(() => {}, 200);
   try { assert.equal((await stalled.service.evaluate("ask", "choice", context(), { resolveAskGrant: grant.resolve })).owner, "uncertain"); }
   finally { clearInterval(keepAlive); }
+});
+
+test("policy quota survives invalidation, revision and on/off; session/project identity restores spent stages", async () => {
+  const lane = setup({}, policy({ classification: { maxCallsPerSession: 1 }, advice: { maxCallsPerSession: 1 } }));
+  const ctx = context();
+  let session = "session";
+  ctx.sessionManager.getSessionId = () => session;
+  assert.equal((await lane.service.evaluate("ask", "same", ctx)).owner, "internal");
+  lane.service.invalidateSession(session);
+  assert.match((await lane.service.evaluate("ask", "same", ctx)).degradedReason ?? "", /classification budget/);
+  lane.change(policy({ revision: 1, ask: { mode: "off" }, classification: { maxCallsPerSession: 1 }, advice: { maxCallsPerSession: 1 } }));
+  assert.equal((await lane.service.evaluate("ask", "off", ctx)).mode, "off");
+  lane.change(policy({ revision: 2, classification: { maxCallsPerSession: 2 }, advice: { maxCallsPerSession: 1 } }));
+  assert.match((await lane.service.evaluate("ask", "raised", ctx)).degradedReason ?? "", /advice budget/);
+  lane.change(policy({ revision: 3, classification: { maxCallsPerSession: 3 }, advice: { maxCallsPerSession: 2 } }));
+  assert.equal((await lane.service.evaluate("ask", "delta", ctx)).owner, "internal");
+  lane.change(policy({ revision: 4, classification: { maxCallsPerSession: 1 }, advice: { maxCallsPerSession: 1 } }));
+  assert.match((await lane.service.evaluate("ask", "lower", ctx)).degradedReason ?? "", /classification budget/);
+  session = "new";
+  assert.equal((await lane.service.evaluate("ask", "new session", ctx)).owner, "internal");
+  session = "session";
+  ctx.cwd = "/other-project";
+  assert.equal((await lane.service.evaluate("ask", "new project", ctx)).owner, "internal");
+  ctx.cwd = "/workspace";
+  assert.match((await lane.service.evaluate("ask", "return", ctx)).degradedReason ?? "", /classification budget/);
+});
+
+for (const stage of ["classification", "advice"] as const) {
+  test("policy invalidation during " + stage + " fences authority and never refunds spent stage", async () => {
+    let release!: () => void;
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const lane = setup({ structured: async (request) => {
+      if (request.kind === stage) { entered(); await new Promise<void>((resolve) => { release = resolve; }); }
+      return { value: request.kind === "classification" ? verdict : advice };
+    } }, policy({ classification: { maxCallsPerSession: stage === "classification" ? 1 : 2 }, advice: { maxCallsPerSession: 1 } }));
+    const old = lane.service.evaluate("ask", "one", context());
+    await started;
+    lane.service.invalidateSession("session");
+    release();
+    assert.match((await old).degradedReason ?? "", /session changed/);
+    const next = await lane.service.evaluate("ask", "two", context());
+    assert.match(next.degradedReason ?? "", stage === "classification" ? /classification budget/ : /advice budget/);
+  });
+}
+
+test("cancelled policy classification and advice consume reservations without refund", async () => {
+  for (const stage of ["classification", "advice"] as const) {
+    const controller = new AbortController();
+    const lane = setup({ structured: async (request) => {
+      if (request.kind === stage) { controller.abort(new Error("cancelled policy")); throw new Error("cancelled policy"); }
+      return { value: verdict };
+    } }, policy({ classification: { maxCallsPerSession: 1 }, advice: { maxCallsPerSession: 1 } }));
+    assert.equal((await lane.service.evaluate("ask", "same", context(controller))).owner, "uncertain");
+    lane.service.invalidateSession("session");
+    assert.match((await lane.service.evaluate("ask", "same", context())).degradedReason ?? "", /classification budget/);
+  }
+});
+
+test("policy readiness and execution share auto resolution when only openrouter is authenticated", async () => {
+  resetClassifierForTest();
+  let calls = 0;
+  const selected = { type: "classifier" as const, provider: "openrouter", id: "typesafe/jev-1.13", api: "openrouter-decisions" as const, name: "JEV", baseUrl: "https://openrouter.ai", input: ["text" as const], contextWindow: 32000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
+  const runtime = {
+    getAvailableOfType: async (_type: "classifier", provider?: string) => provider && provider !== "openrouter" ? [] : [selected],
+    getModelOfType: () => selected,
+    classify: async (actual: unknown, input: { questions: Record<string, unknown> }) => {
+      assert.equal(actual, selected); calls++;
+      const value: Record<string, unknown> = { verdict: { type: "choice", choice: "internal", confidence: .95 }, rule: { type: "choice", choice: "local", confidence: .95 }, worth: { type: "bool", probability: 0 } };
+      return { api: selected.api, provider: selected.provider, model: selected.id, stopReason: "stop" as const, timestamp: 0, answers: Object.fromEntries(Object.keys(input.questions).map((key) => [key, value[key]])) };
+    },
+  };
+  bindClassifierRuntime({ hostVersion: "0.99.0", runtime: runtime as Parameters<typeof bindClassifierRuntime>[0]["runtime"], sessionId: "session", cwd: "/workspace" });
+  configureClassifier({ enabled: true, domains: { [POLICY_CLASSIFY_NAMES.ask]: "jev" } });
+  const current = policy({ backend: "classifier", classification: { maxCallsPerSession: 1 } });
+  const service = createDecisionPolicyService({ loadPolicy: async () => current, loadSpecs: async () => "" });
+  const reply = await service.evaluate("ask", "Which helper?", context(), { advice: false });
+  assert.equal(reply.backend, "classifier", reply.degradedReason);
+  assert.equal(reply.owner, "internal", reply.degradedReason);
+  assert.equal(calls, 1);
+  assert.equal(classifierStatus().effectiveModel, "openrouter/typesafe/jev-1.13");
+  resetClassifierForTest();
+});
+
+test("legacy unknown readiness permits verification by policy execution", async () => {
+  for (const backend of ["classifier", "auto"] as const) {
+    resetClassifierForTest();
+    let requests = 0;
+    let llmCalls = 0;
+    configureClassifier({ enabled: true, hostVersion: "0.98.0", apiKey: "mock-only",
+      domains: { [POLICY_CLASSIFY_NAMES.ask]: "jev" },
+      fetchFn: async () => {
+        requests++;
+        return new Response(JSON.stringify({ answers: {
+          verdict: { type: "choice", choice: "internal", confidence: .95 },
+          rule: { type: "choice", choice: "local", confidence: .95 },
+          worth: { type: "noul", noul: 0 },
+        } }));
+      } });
+    const current = policy({ backend });
+    const service = createDecisionPolicyService({ loadPolicy: async () => current,
+      loadSpecs: async () => "", structured: async () => { llmCalls++; return { value: verdict }; } });
+    try {
+      assert.equal(classifierStatus().runtimeStatus, "unknown");
+      const reply = await service.evaluate("ask", "Which helper?", context(), { advice: false });
+      assert.equal(reply.backend, "classifier", reply.degradedReason);
+      assert.equal(reply.owner, "internal", reply.degradedReason);
+      assert.equal(requests, 1);
+      assert.equal(llmCalls, 0);
+      assert.equal(classifierStatus().runtimeStatus, "available");
+    } finally { resetClassifierForTest(); }
+  }
+});
+
+test("concurrent policy advice reserves the separate one-call budget before execution", async () => {
+  const lane = setup({}, policy({ classification: { maxCallsPerSession: 2 }, advice: { maxCallsPerSession: 1 } }));
+  const replies = await Promise.all(["one", "two"].map((input) => lane.service.evaluate("ask", input, context())));
+  assert.equal(replies.filter((reply) => reply.owner === "internal").length, 1);
+  assert.equal(lane.calls.filter((kind) => kind === "classification").length, 2);
+  assert.equal(lane.calls.filter((kind) => kind === "advice").length, 1);
+  assert.match(replies.find((reply) => reply.owner !== "internal")?.degradedReason ?? "", /advice budget/);
 });

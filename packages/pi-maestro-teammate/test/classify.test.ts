@@ -142,7 +142,7 @@ for (const oldFirst of [true, false]) {
     assert.equal((await currentResult).label, "skip");
     assert.equal((await classify(fileValueDomain, { path: "same.ts" })).label, "skip");
     assert.equal(classifierStatus().cacheSize, 1);
-    assert.equal(classifierStatus().callsUsed, 1);
+    assert.equal(classifierStatus().callsUsed, 2);
   });
 }
 

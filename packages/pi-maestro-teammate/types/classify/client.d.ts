@@ -31,8 +31,19 @@ export interface JevClient {
 }
 interface PreparedJevDecision {
     identity: string;
+    effectiveModel?: string;
+    /** Present only after native authenticated model resolution. */
+    authenticatedModel?: string;
     decide(): Promise<JevResponse>;
 }
+export interface ClassifierRuntimeReadiness {
+    status: "disabled" | "unknown" | "available" | "unavailable";
+    available: boolean;
+    reason?: string;
+    model?: string;
+}
+/** @internal Authentication-only probe; never submits a model request. */
+export declare function probeJevClient(client: JevClient, signal?: AbortSignal): Promise<ClassifierRuntimeReadiness>;
 /** @internal Resolve the effective transport/model before looking in the cache. */
 export declare function prepareJevDecision(client: JevClient, request: Omit<JevRequest, "model">): Promise<PreparedJevDecision>;
 /** Parse the top-level response; every requested question must have a valid answer. */
@@ -42,7 +53,13 @@ export interface ClassifierRuntime {
     getModelOfType(type: "classifier", provider: string, id: string): ClassifierModel<ClassifierApi> | undefined;
     classify(model: ClassifierModel<ClassifierApi>, context: ClassifierContext, options?: ModelsClassifierOptions): Promise<ClassifierResult>;
 }
-export declare function createNativeJevClient(runtime: ClassifierRuntime, options: Pick<JevClientOptions, "endpoint" | "model" | "timeoutMs">): JevClient;
+export interface NativeJevClientOptions {
+    /** Absent means auto across authenticated classifier providers. */
+    endpoint?: JevEndpoint;
+    model?: string;
+    timeoutMs?: number;
+}
+export declare function createNativeJevClient(runtime: ClassifierRuntime, options?: NativeJevClientOptions): JevClient;
 export declare function createJevClient(options: JevClientOptions): JevClient;
 /** Pick an endpoint from an explicit choice, or infer from which API key env exists. */
 export declare function resolveJevEndpoint(preferred: JevEndpoint | undefined, env?: Record<string, string | undefined>): {

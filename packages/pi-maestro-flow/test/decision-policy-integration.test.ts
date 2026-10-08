@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DecisionPolicySchema, loadDecisionPolicy, saveDecisionPolicy } from "../src/decision-policy/config.ts";
@@ -31,6 +32,25 @@ test("under-lock owner cancellation prevents late publication and cleans tempora
     await assert.rejects(saveDecisionPolicy(cwd, draft, 0, () => { checks++; if (checks === 2) throw new Error("owner cancelled"); }), /owner cancelled/);
     assert.equal(await loadDecisionPolicy(cwd), undefined);
     assert.deepEqual(await readdir(join(cwd, ".pi")), []);
+  } finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
+test("policy publication shares a synchronous commit point with the final owner check", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "policy-commit-point-"));
+  const abort = new AbortController();
+  let checks = 0;
+  let publishedAtCancellation = false;
+  try {
+    const saved = await saveDecisionPolicy(cwd, DecisionPolicySchema.parse({ backend: "llm" }), 0, () => {
+      abort.signal.throwIfAborted();
+      if (++checks === 2) queueMicrotask(() => {
+        publishedAtCancellation = existsSync(join(cwd, ".pi", "decision-policy.json"));
+        abort.abort();
+      });
+    });
+    assert.equal(publishedAtCancellation, true, "no event-loop turn may separate owner check and publication");
+    assert.equal(saved.revision, 1);
+    assert.equal((await loadDecisionPolicy(cwd))?.backend, "llm");
   } finally { await rm(cwd, { recursive: true, force: true }); }
 });
 

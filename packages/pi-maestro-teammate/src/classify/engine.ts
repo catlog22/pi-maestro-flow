@@ -29,6 +29,8 @@ import {
   createJevClient,
   createNativeJevClient,
   type ClassifierRuntime,
+  type ClassifierRuntimeReadiness,
+  probeJevClient,
   prepareJevDecision,
   resolveJevEndpoint,
   type JevClient,
@@ -61,7 +63,7 @@ export interface ClassifierConfig {
   timeoutMs?: number;
   /** Answer cache TTL (default 10min — error text repeats heavily). */
   cacheTtlMs?: number;
-  /** Max JEV calls per configure cycle (default 30). */
+  /** Max JEV calls per process-local session + cwd identity (default 30). */
   maxCallsPerSession?: number;
   /** domain name → mode. Absent = "off". */
   domains?: Record<string, ClassifierDomainMode>;
@@ -81,6 +83,9 @@ export interface ClassifierStatus {
   endpoint?: JevEndpoint;
   apiKeyPresent: boolean;
   model?: string;
+  runtimeStatus?: ClassifierRuntimeReadiness["status"];
+  runtimeReason?: string;
+  effectiveModel?: string;
   callsUsed: number;
   maxCalls: number;
   cacheSize: number;
@@ -92,9 +97,22 @@ const DEFAULT_MAX_CALLS = 30;
 
 let config: ClassifierConfig = { enabled: false };
 let client: JevClient | undefined;
-let hostBinding: { hostVersion: string; runtime: ClassifierRuntime } | undefined;
+export interface ClassifierRuntimeBinding {
+  hostVersion: string;
+  runtime: ClassifierRuntime;
+  sessionId?: string;
+  cwd?: string;
+}
+export type { ClassifierRuntimeReadiness } from "./client.ts";
+
+let hostBinding: ClassifierRuntimeBinding | undefined;
 let unavailableReason = "Classifier host runtime unavailable";
-let callsUsed = 0;
+let apiKeyPresent = false;
+let readiness: ClassifierRuntimeReadiness = { status: "disabled", available: false };
+let readinessSequence = 0;
+// Quota survives lifecycle fencing; intentionally no disk persistence.
+let budgetKey = JSON.stringify(["", ""]);
+const budgets = new Map<string, number>();
 const registry = new Map<string, ClassifyDomain<string, unknown>>();
 const cache = new Map<string, { response: JevResponse; at: number }>();
 const pending = new Map<string, Promise<JevResponse>>();
@@ -103,13 +121,13 @@ let generation = {};
 
 function fenceGeneration(): void {
   generation = {};
-  callsUsed = 0;
+  readinessSequence++;
   cache.clear();
   pending.clear();
 }
 
 function captureGeneration() {
-  return { generation, config, client, unavailableReason };
+  return { generation, config, client, unavailableReason, budgetKey, legacy: apiKeyPresent };
 }
 
 type Generation = ReturnType<typeof captureGeneration>;
@@ -119,8 +137,9 @@ function assertCurrent(owner: Generation): void {
 }
 
 /** Bind only the current process's host facade, never a child/remote runtime. */
-export function bindClassifierRuntime(binding: { hostVersion: string; runtime: ClassifierRuntime }): void {
-  hostBinding = binding;
+export function bindClassifierRuntime(binding: ClassifierRuntimeBinding): void {
+  hostBinding = { ...binding };
+  budgetKey = JSON.stringify([binding.sessionId ?? "", binding.cwd ?? ""]);
   configureClassifier(config);
 }
 
@@ -130,6 +149,8 @@ export function unbindClassifierRuntime(runtime: ClassifierRuntime): void {
   hostBinding = undefined;
   client = undefined;
   unavailableReason = "Classifier host runtime unavailable";
+  apiKeyPresent = false;
+  readiness = config.enabled ? { status: "unavailable", available: false, reason: unavailableReason } : { status: "disabled", available: false };
 }
 
 /** Inject classifier configuration (host loads `.pi/classifier.json` / env). */
@@ -139,10 +160,13 @@ export function configureClassifier(next: ClassifierConfig): void {
   const runtime = hostBinding?.runtime;
   const owner = getPiFeatureOwner(hostBinding?.hostVersion ?? next.hostVersion, !!runtime && typeof runtime.classify === "function" && typeof runtime.getAvailableOfType === "function" && typeof runtime.getModelOfType === "function");
   client = undefined;
+  apiKeyPresent = false;
   unavailableReason = "Classifier host runtime unavailable";
+  readiness = config.enabled ? { status: "unavailable", available: false, reason: unavailableReason } : { status: "disabled", available: false };
   if (!config.enabled) return;
   if (owner === "native" && runtime) {
-    client = createNativeJevClient(runtime, { endpoint: next.endpoint ?? "typesafe", model: next.model, timeoutMs: next.timeoutMs });
+    client = createNativeJevClient(runtime, { endpoint: next.endpoint, model: next.model, timeoutMs: next.timeoutMs });
+    readiness = { status: "unknown", available: false, reason: "Native classifier authentication has not been probed" };
     return;
   }
   if (owner !== "legacy") return;
@@ -160,6 +184,33 @@ export function configureClassifier(next: ClassifierConfig): void {
       ...(next.fetchFn ? { fetchFn: next.fetchFn } : {}),
     } as JevClientOptions)
     : undefined;
+  apiKeyPresent = !!resolved;
+  readiness = resolved
+    ? { status: "unknown", available: false, reason: "Legacy classifier credentials configured but not verified" }
+    : { status: "unavailable", available: false, reason: unavailableReason };
+}
+
+/** Refresh authentication/model readiness without spending model-call quota. */
+export async function probeClassifierRuntime(signal?: AbortSignal): Promise<ClassifierRuntimeReadiness> {
+  const owner = captureGeneration();
+  // Legacy probes do not authenticate, so they cannot supersede request evidence.
+  const sequence = owner.legacy ? readinessSequence : ++readinessSequence;
+  if (!owner.config.enabled || !owner.client) return { ...readiness };
+  let result: ClassifierRuntimeReadiness;
+  try {
+    result = await probeJevClient(owner.client, signal);
+  } catch (error) {
+    result = { status: "unavailable", available: false, reason: error instanceof Error ? error.message : String(error) };
+  }
+  if (owner.generation !== generation) {
+    return { status: "unknown", available: false, reason: "Classifier readiness superseded by runtime/config/session generation" };
+  }
+  // A non-verifying legacy probe must preserve same-generation execution evidence.
+  if (owner.legacy && result.status === "unknown") result = { ...readiness };
+  // Concurrent same-generation consumers may use their own auth result, but
+  // only the newest refresh owns the synchronous status projection.
+  if (sequence === readinessSequence && !signal?.aborted) readiness = result;
+  return { ...result };
 }
 
 export function classifierConfig(): ClassifierConfig {
@@ -173,6 +224,10 @@ export function resetClassifierForTest(): void {
   client = undefined;
   hostBinding = undefined;
   unavailableReason = "Classifier host runtime unavailable";
+  apiKeyPresent = false;
+  readiness = { status: "disabled", available: false };
+  budgets.clear();
+  budgetKey = JSON.stringify(["", ""]);
   registry.clear();
 }
 
@@ -196,9 +251,12 @@ export function classifierStatus(): ClassifierStatus {
   return {
     enabled: config.enabled === true,
     ...(config.endpoint ? { endpoint: config.endpoint } : {}),
-    apiKeyPresent: client !== undefined,
+    apiKeyPresent,
     ...(config.model ? { model: config.model } : {}),
-    callsUsed,
+    runtimeStatus: readiness.status,
+    ...(readiness.reason ? { runtimeReason: readiness.reason } : {}),
+    ...(readiness.model ? { effectiveModel: readiness.model } : {}),
+    callsUsed: budgets.get(budgetKey) ?? 0,
     maxCalls: config.maxCallsPerSession ?? DEFAULT_MAX_CALLS,
     cacheSize: cache.size,
     domains,
@@ -245,26 +303,56 @@ async function jevDecide<D extends string, I>(
   assertCurrent(owner);
   if (!owner.client) throw new Error(owner.unavailableReason);
   const questions = domain.questions();
-  const prepared = await prepareJevDecision(owner.client, { state, questions });
+  // Native preparation is auth evidence. Legacy owns status only after cache,
+  // pending or quota admission; a rejected request must not supersede execution.
+  let sequence = owner.legacy ? undefined : ++readinessSequence;
+  let prepared: Awaited<ReturnType<typeof prepareJevDecision>>;
+  try {
+    prepared = await prepareJevDecision(owner.client, { state, questions });
+  } catch (error) {
+    assertCurrent(owner);
+    if (sequence === readinessSequence) readiness = { status: "unavailable", available: false, reason: error instanceof Error ? error.message : String(error) };
+    throw error;
+  }
   assertCurrent(owner);
+  if (prepared.authenticatedModel && sequence === readinessSequence) {
+    readiness = { status: "available", available: true, model: prepared.authenticatedModel };
+  }
   const key = createHash("sha256")
     .update(JSON.stringify([domain.name, prepared.identity, questions, state]))
     .digest("hex");
+  const publishSuccess = (response: JevResponse): JevResponse => {
+    assertCurrent(owner);
+    if (sequence === readinessSequence) readiness = {
+      status: "available", available: true,
+      model: prepared.authenticatedModel ?? response.model ?? prepared.effectiveModel,
+    };
+    return response;
+  };
+  const publishFailure = (error: unknown): void => {
+    if (owner.generation === generation && sequence === readinessSequence) readiness = {
+      status: "unavailable", available: false, reason: error instanceof Error ? error.message : String(error),
+      ...(prepared.authenticatedModel ? { model: prepared.authenticatedModel } : {}),
+    };
+  };
   const entry = cache.get(key);
   if (entry && Date.now() - entry.at <= (owner.config.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS)) {
-    return entry.response;
+    sequence ??= ++readinessSequence;
+    return publishSuccess(entry.response);
   }
   cache.delete(key);
   const existing = pending.get(key);
   if (existing) {
-    const response = await existing;
-    assertCurrent(owner);
-    return response;
+    sequence ??= ++readinessSequence;
+    try { return publishSuccess(await existing); }
+    catch (error) { publishFailure(error); throw error; }
   }
+  const callsUsed = budgets.get(owner.budgetKey) ?? 0;
   if (callsUsed >= (owner.config.maxCallsPerSession ?? DEFAULT_MAX_CALLS)) {
     throw new Error("JEV session call budget exhausted");
   }
-  callsUsed += 1;
+  budgets.set(owner.budgetKey, callsUsed + 1);
+  sequence ??= ++readinessSequence;
   // Reserve before invoking host code, which may re-enter configuration.
   const decision = Promise.resolve().then(() => {
     assertCurrent(owner);
@@ -275,7 +363,10 @@ async function jevDecide<D extends string, I>(
     const response = await decision;
     assertCurrent(owner);
     cache.set(key, { response, at: Date.now() });
-    return response;
+    return publishSuccess(response);
+  } catch (error) {
+    publishFailure(error);
+    throw error;
   } finally {
     // A late old request must not remove a new generation's reservation.
     if (owner.generation === generation && pending.get(key) === decision) pending.delete(key);

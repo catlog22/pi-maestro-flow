@@ -4,7 +4,7 @@ import { Type } from "typebox";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import { VERSION, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getPiFeatureOwner } from "pi-maestro-settings-core/v1";
-import { classify, classifierConfig, classifierStatus, registerClassifyDomain } from "pi-maestro-teammate/v1/classify";
+import { classify, classifierStatus, probeClassifierRuntime, registerClassifyDomain } from "pi-maestro-teammate/v1/classify";
 import { defaultRunner } from "../session/cli-adapter.ts";
 import type { PlanAutoGrantSnapshot } from "../tools/plan-auto.ts";
 import { defaultDecisionPolicy, loadDecisionPolicy, policyFingerprint, type DecisionPolicy, type PolicyDomain } from "./config.ts";
@@ -114,18 +114,11 @@ const defaultDependencies: PolicyServiceDependencies = {
     registerClassifyDomain(spec);
     const status = classifierStatus();
     if (!status.enabled || status.domains[spec.name]?.mode !== "jev") return `Classifier disabled or ${spec.name} is not in jev mode`;
-    if (!status.apiKeyPresent) return "Classifier runtime unavailable";
-    const runtime = ctx.modelRegistry;
-    if (getPiFeatureOwner(VERSION, !!runtime && typeof runtime.getAvailableOfType === "function" && typeof runtime.getModelOfType === "function" && typeof runtime.classify === "function") === "native") {
-      const config = classifierConfig();
-      const reference = config.model;
-      const available = await runtime.getAvailableOfType("classifier", reference?.includes("/") ? undefined : config.endpoint ?? "typesafe", { signal });
-      const model = reference
-        ? available.find((entry) => reference.includes("/") ? `${entry.provider}/${entry.id}` === reference : entry.id === reference)
-        : available[0];
-      if (!model) return "Native classifier unavailable (no matching authenticated classifier model)";
-    }
-    return undefined;
+    const readiness = await probeClassifierRuntime(signal);
+    signal.throwIfAborted();
+    // Legacy credentials cannot be probed without a request; execution verifies them.
+    return readiness.available || (readiness.status === "unknown" && status.apiKeyPresent)
+      ? undefined : readiness.reason ?? "Classifier runtime unavailable";
   },
   async classifier(domain, policy, text, signal) {
     signal.throwIfAborted();
@@ -140,7 +133,8 @@ const defaultDependencies: PolicyServiceDependencies = {
   },
   structured: completePolicyStructured,
 };
-interface SessionState { generation: number; classificationCalls: number; adviceCalls: number; cache: Map<string, { value: PolicyClassification; backend: "classifier" | "llm"; model?: string; fallbackReason?: string }>; }
+interface SessionBudget { classificationCalls: number; adviceCalls: number; }
+interface SessionState { sessionId: string; generation: number; budget: SessionBudget; cache: Map<string, { value: PolicyClassification; backend: "classifier" | "llm"; model?: string; fallbackReason?: string }>; }
 export function createDecisionPolicyService(dependencies: Partial<PolicyServiceDependencies> = {}) {
   const deps = {
     ...defaultDependencies,
@@ -150,16 +144,23 @@ export function createDecisionPolicyService(dependencies: Partial<PolicyServiceD
       ?? (dependencies.classifier ? () => undefined : defaultDependencies.classifierUnavailableReason),
   };
   const sessions = new Map<string, SessionState>();
-  const sessionKey = (ctx: ExtensionContext) => `${ctx.cwd}\0${ctx.sessionManager.getSessionId()}`;
+  // Factory-local, process-memory quota survives config/session invalidation.
+  const budgets = new Map<string, SessionBudget>();
+  const sessionKey = (ctx: ExtensionContext) => JSON.stringify([ctx.cwd, ctx.sessionManager.getSessionId()]);
   function invalidateSession(sessionId: string): void {
-    for (const [key, state] of sessions) if (key.endsWith(`\0${sessionId}`)) { state.generation++; sessions.delete(key); }
+    for (const [key, state] of sessions) if (state.sessionId === sessionId) { state.generation++; state.cache.clear(); sessions.delete(key); }
     resetDecisionPolicyStatus(sessionId);
   }
   async function evaluateInternal(domain: PolicyDomain, text: string, ctx: ExtensionContext, options: PolicyEvaluationOptions = {}, projectRestriction = false): Promise<PolicyEvaluation> {
     const base: PolicyEvaluation = { domain, mode: "off", backend: "none", owner: "uncertain", candidateType: "unknown", confidence: 0, matchedRuleIds: [], rationale: "Policy is not enabled" };
     const initialKey = sessionKey(ctx);
     let state = sessions.get(initialKey);
-    if (!state) { state = { generation: 0, classificationCalls: 0, adviceCalls: 0, cache: new Map() }; sessions.set(initialKey, state); }
+    if (!state) {
+      let budget = budgets.get(initialKey);
+      if (!budget) { budget = { classificationCalls: 0, adviceCalls: 0 }; budgets.set(initialKey, budget); }
+      state = { sessionId: ctx.sessionManager.getSessionId(), generation: 0, budget, cache: new Map() };
+      sessions.set(initialKey, state);
+    }
     let policy: DecisionPolicy | undefined;
     let fingerprint = "";
     let hostGrant: HostAskPolicyGrant | undefined;
@@ -244,8 +245,9 @@ export function createDecisionPolicyService(dependencies: Partial<PolicyServiceD
       if (!entry) {
         const reserve = () => {
           signal.throwIfAborted();
-          if (state!.classificationCalls >= policy!.classification.maxCallsPerSession) throw new Error("Policy classification budget exhausted");
-          state.classificationCalls++;
+          checkOwner();
+          if (state!.budget.classificationCalls >= policy!.classification.maxCallsPerSession) throw new Error("Policy classification budget exhausted");
+          state.budget.classificationCalls++;
         };
         let answer: { value: unknown; model?: string } | undefined;
         let value: PolicyClassification | undefined;
@@ -295,8 +297,9 @@ export function createDecisionPolicyService(dependencies: Partial<PolicyServiceD
       if (result.confidence < policy.minConfidence) return finish({ ...result, owner: "uncertain", worthCapturing: undefined, degradedReason: "Policy classification confidence below threshold" });
       if (base.mode === "shadow") return finish(result);
       if (result.owner === "internal" && (options.advice ?? domain !== "evolve-capture")) {
-        if (state.adviceCalls >= policy.advice.maxCallsPerSession) throw new Error("Policy advice budget exhausted");
-        state.adviceCalls++;
+        checkOwner();
+        if (state.budget.adviceCalls >= policy.advice.maxCallsPerSession) throw new Error("Policy advice budget exhausted");
+        state.budget.adviceCalls++;
         operation.update("advising", "llm");
         const adviceTimeout = AbortSignal.timeout(policy.advice.timeoutMs);
         const adviceSignal = parent ? AbortSignal.any([parent, adviceTimeout]) : adviceTimeout;

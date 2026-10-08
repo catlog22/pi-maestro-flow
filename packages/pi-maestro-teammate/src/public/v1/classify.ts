@@ -6,6 +6,7 @@ export {
   classifySync,
   configureClassifier,
   bindClassifierRuntime,
+  probeClassifierRuntime,
   unbindClassifierRuntime,
   classifyDomain,
   listClassifyDomains,
@@ -14,6 +15,8 @@ export {
 } from "../../classify/engine.ts";
 export type {
   ClassifierConfig,
+  ClassifierRuntimeBinding,
+  ClassifierRuntimeReadiness,
   ClassifierDomainStatus,
   ClassifierStatus,
 } from "../../classify/engine.ts";
@@ -43,6 +46,7 @@ export type {
   JevClient,
   ClassifierRuntime,
   JevClientOptions,
+  NativeJevClientOptions,
   JevEndpoint,
 } from "../../classify/client.ts";
 

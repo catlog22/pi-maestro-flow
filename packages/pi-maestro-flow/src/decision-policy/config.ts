@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { renameSync } from "node:fs";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { z } from "zod";
 
@@ -50,7 +51,8 @@ export async function saveDecisionPolicy(cwd: string, draft: unknown, expectedRe
     const next = { ...policy, revision: expectedRevision + 1 };
     await writeFile(temporary, `${JSON.stringify(next, null, 2)}\n`, { flag: "wx", mode: 0o600 });
     validateOwner();
-    await rename(temporary, path);
+    // Ownership check and atomic publication share one synchronous commit point.
+    renameSync(temporary, path);
     return next;
   } finally {
     try { await rm(temporary, { force: true }); } finally { await release(); }

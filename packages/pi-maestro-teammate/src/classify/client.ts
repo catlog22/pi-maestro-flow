@@ -56,7 +56,26 @@ export interface JevClient {
 
 interface PreparedJevDecision {
   identity: string;
+  effectiveModel?: string;
+  /** Present only after native authenticated model resolution. */
+  authenticatedModel?: string;
   decide(): Promise<JevResponse>;
+}
+
+export interface ClassifierRuntimeReadiness {
+  status: "disabled" | "unknown" | "available" | "unavailable";
+  available: boolean;
+  reason?: string;
+  model?: string;
+}
+
+const probes = new WeakMap<JevClient, (signal?: AbortSignal) => Promise<ClassifierRuntimeReadiness>>();
+
+/** @internal Authentication-only probe; never submits a model request. */
+export async function probeJevClient(client: JevClient, signal?: AbortSignal): Promise<ClassifierRuntimeReadiness> {
+  signal?.throwIfAborted();
+  const probe = probes.get(client);
+  return probe ? probe(signal) : { status: "unknown", available: false, reason: "Legacy classifier credentials configured but not verified" };
 }
 
 // Keep preparation internal to these clients: cache identity and execution must
@@ -136,19 +155,55 @@ export interface ClassifierRuntime {
   classify(model: ClassifierModel<ClassifierApi>, context: ClassifierContext, options?: ModelsClassifierOptions): Promise<ClassifierResult>;
 }
 
-export function createNativeJevClient(runtime: ClassifierRuntime, options: Pick<JevClientOptions, "endpoint" | "model" | "timeoutMs">): JevClient {
+export interface NativeJevClientOptions {
+  /** Absent means auto across authenticated classifier providers. */
+  endpoint?: JevEndpoint;
+  model?: string;
+  timeoutMs?: number;
+}
+
+function nativeSignal(options: NativeJevClientOptions, signal?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(Math.max(1, options.timeoutMs ?? JEV_DEFAULT_TIMEOUT_MS));
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
+/** One resolver for both execution and readiness; registry entries alone are not auth evidence. */
+async function resolveNativeClassifierModel(runtime: ClassifierRuntime, options: NativeJevClientOptions, signal: AbortSignal): Promise<ClassifierModel<ClassifierApi>> {
+  signal.throwIfAborted();
+  const reference = options.model?.trim() || undefined;
+  const slash = reference?.indexOf("/") ?? -1;
+  const pinnedProvider = slash > 0 ? reference!.slice(0, slash) : undefined;
+  if (options.endpoint && pinnedProvider && pinnedProvider !== options.endpoint) {
+    throw new Error("Native classifier unavailable (model provider conflicts with explicit endpoint)");
+  }
+  const provider = options.endpoint ?? pinnedProvider;
+  let abort!: () => void;
+  const cancelled = new Promise<never>((_resolve, reject) => {
+    abort = () => reject(signal.reason ?? new Error("Classifier probe aborted"));
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) abort();
+  });
+  let available: readonly ClassifierModel<ClassifierApi>[];
+  try {
+    available = await Promise.race([runtime.getAvailableOfType("classifier", provider, { signal }), cancelled]);
+    signal.throwIfAborted();
+  } finally {
+    signal.removeEventListener("abort", abort);
+  }
+  const candidates = available.filter((entry) => !provider || entry.provider === provider);
+  // Stable preference within provider tiers: never manufacture a default model.
+  const rank = (entry: ClassifierModel<ClassifierApi>) => entry.provider === "typesafe" ? 0 : entry.provider === "openrouter" ? 1 : 2;
+  const model = reference
+    ? candidates.find((entry) => slash > 0 ? entry.provider === pinnedProvider && entry.id === reference.slice(slash + 1) : entry.id === reference)
+    : candidates.reduce<ClassifierModel<ClassifierApi> | undefined>((best, entry) => !best || rank(entry) < rank(best) ? entry : best, undefined);
+  if (!model) throw new Error("Native classifier unavailable (no matching authenticated classifier model)");
+  return model;
+}
+
+export function createNativeJevClient(runtime: ClassifierRuntime, options: NativeJevClientOptions = {}): JevClient {
   const prepare = async (request: Omit<JevRequest, "model">): Promise<PreparedJevDecision> => {
-    const signal = AbortSignal.timeout(Math.max(1, options.timeoutMs ?? JEV_DEFAULT_TIMEOUT_MS));
-    const provider = options.endpoint;
-    const available = await runtime.getAvailableOfType("classifier", options.model?.includes("/") ? undefined : provider, { signal });
-    const reference = options.model;
-    const slash = reference?.indexOf("/") ?? -1;
-    const model = reference
-      ? (slash > 0
-        ? runtime.getModelOfType("classifier", reference.slice(0, slash), reference.slice(slash + 1))
-        : available.find((entry) => entry.id === reference))
-      : available[0];
-    if (!model) throw new Error("Native classifier unavailable (no matching authenticated classifier model)");
+    const signal = nativeSignal(options);
+    const model = await resolveNativeClassifierModel(runtime, options, signal);
     const questions: ClassifierContext["questions"] = {};
     for (const [id, question] of Object.entries(request.questions)) {
       questions[id] = question.type === "noul"
@@ -159,6 +214,7 @@ export function createNativeJevClient(runtime: ClassifierRuntime, options: Pick<
     }
     return {
       identity: JSON.stringify(["native", options.endpoint, model.provider, model.api, model.baseUrl, model.id]),
+      authenticatedModel: `${model.provider}/${model.id}`,
       async decide() {
         const result = await runtime.classify(model, { state: { text: request.state }, questions }, { signal });
         if (result.stopReason !== "stop") throw new Error(result.errorMessage ?? `Native classifier ${result.stopReason}`);
@@ -174,6 +230,10 @@ export function createNativeJevClient(runtime: ClassifierRuntime, options: Pick<
   };
   const client: JevClient = { decide: async (request) => (await prepare(request)).decide() };
   preparations.set(client, prepare);
+  probes.set(client, async (parent) => {
+    const model = await resolveNativeClassifierModel(runtime, options, nativeSignal(options, parent));
+    return { status: "available", available: true, model: `${model.provider}/${model.id}` };
+  });
   return client;
 }
 
@@ -204,6 +264,7 @@ export function createJevClient(options: JevClientOptions): JevClient {
   };
   preparations.set(client, async (request) => ({
     identity: JSON.stringify(["http", options.endpoint, url, model]),
+    effectiveModel: model,
     decide: () => client.decide(request),
   }));
   return client;

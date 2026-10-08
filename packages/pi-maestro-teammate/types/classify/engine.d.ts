@@ -22,7 +22,7 @@
  * the engine never reads files, the env, or UI surfaces itself — except the
  * two documented env lookups delegated to `resolveJevEndpoint`.
  */
-import { type ClassifierRuntime, type JevEndpoint } from "./client.ts";
+import { type ClassifierRuntime, type ClassifierRuntimeReadiness, type JevEndpoint } from "./client.ts";
 import type { ClassifierDomainMode, ClassifyDomain, ClassifyResult, ClassifyShadowRecord } from "./types.ts";
 export interface ClassifierConfig {
     /** Master switch. When false, every call is L0-only regardless of domain modes. */
@@ -41,7 +41,7 @@ export interface ClassifierConfig {
     timeoutMs?: number;
     /** Answer cache TTL (default 10min — error text repeats heavily). */
     cacheTtlMs?: number;
-    /** Max JEV calls per configure cycle (default 30). */
+    /** Max JEV calls per process-local session + cwd identity (default 30). */
     maxCallsPerSession?: number;
     /** domain name → mode. Absent = "off". */
     domains?: Record<string, ClassifierDomainMode>;
@@ -59,19 +59,28 @@ export interface ClassifierStatus {
     endpoint?: JevEndpoint;
     apiKeyPresent: boolean;
     model?: string;
+    runtimeStatus?: ClassifierRuntimeReadiness["status"];
+    runtimeReason?: string;
+    effectiveModel?: string;
     callsUsed: number;
     maxCalls: number;
     cacheSize: number;
     domains: Record<string, ClassifierDomainStatus>;
 }
-/** Bind only the current process's host facade, never a child/remote runtime. */
-export declare function bindClassifierRuntime(binding: {
+export interface ClassifierRuntimeBinding {
     hostVersion: string;
     runtime: ClassifierRuntime;
-}): void;
+    sessionId?: string;
+    cwd?: string;
+}
+export type { ClassifierRuntimeReadiness } from "./client.ts";
+/** Bind only the current process's host facade, never a child/remote runtime. */
+export declare function bindClassifierRuntime(binding: ClassifierRuntimeBinding): void;
 export declare function unbindClassifierRuntime(runtime: ClassifierRuntime): void;
 /** Inject classifier configuration (host loads `.pi/classifier.json` / env). */
 export declare function configureClassifier(next: ClassifierConfig): void;
+/** Refresh authentication/model readiness without spending model-call quota. */
+export declare function probeClassifierRuntime(signal?: AbortSignal): Promise<ClassifierRuntimeReadiness>;
 export declare function classifierConfig(): ClassifierConfig;
 /** @internal Test seam: restore the disabled-by-default engine state. */
 export declare function resetClassifierForTest(): void;

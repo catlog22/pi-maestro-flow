@@ -5,9 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test, { before, after } from "node:test";
-import registerDecisionPolicy, { isDecisionPolicyConfiguring } from "../src/decision-policy/extension.ts";
+import registerDecisionPolicy, { isDecisionPolicyConfiguring, openDecisionPolicyPanel } from "../src/decision-policy/extension.ts";
 import { defaultDecisionPolicy, loadDecisionPolicy, saveDecisionPolicy } from "../src/decision-policy/config.ts";
-import { classifierConfig, classifierStatus, configureClassifier, listClassifyDomains } from "pi-maestro-teammate/v1/classify";
+import { bindClassifierRuntime, probeClassifierRuntime, resetClassifierForTest, classifierConfig, classifierStatus, configureClassifier, listClassifyDomains } from "pi-maestro-teammate/v1/classify";
 
 // The test runner itself may be launched by a teammate. Harnesses model a parent host.
 const childEnvironment = ["PI_TEAMMATE_CHILD", "PI_TEAMMATE_MANAGED_WINDOW"] as const;
@@ -65,7 +65,7 @@ async function harness(t: any, cwd?: string, id = "manual-session") {
   };
   const input = (text = "/skill:decision-policy", source = "interactive") => emit("input", { text, source });
   const call = (params: any, signal?: AbortSignal, context = ctx) => tools.get("policy_config").execute("call", params, signal, undefined, context);
-  const draft = () => ({ ...defaultDecisionPolicy(), description: "Project-approved trial", ask: { mode: "shadow" }, rules: [{ id: "human-risk", domain: "ask", instruction: "Keep destructive changes human." }] });
+  const draft = () => ({ ...defaultDecisionPolicy(), description: "Project-approved trial", rules: [{ id: "human-risk", domain: "ask", instruction: "Keep destructive changes human." }] });
   const propose = async () => { await input(); return call({ action: "propose", draft: draft(), expectedRevision: 0 }); };
   return { pi, ctx, tools, input, emit, call, draft, propose, notices, confirmations,
     active: () => active,
@@ -114,10 +114,11 @@ test("confirmation separates classifier effective settings from policy fallback 
   configureClassifier({ enabled: true, apiKey: "must-never-be-shown", endpoint: "typesafe", model: "classifier-model", maxCallsPerSession: 7, domains: { "decision-owner": "jev", "evolve-capture": "shadow", "evolve-review": "off" } });
   for (const backend of ["auto", "classifier", "llm"]) {
     const h = await harness(t);
+    await saveDecisionPolicy(h.ctx.cwd, { ...h.draft(), backend, ask: { mode: "shadow" } }, 0);
     await h.input();
     const read = await h.call({ action: "read" });
     assert.equal(read.details.backendSummary.classifierEffectiveSettings.model, "classifier-model");
-    const proposed = await h.call({ action: "propose", draft: { ...h.draft(), backend }, expectedRevision: 0 });
+    const proposed = await h.call({ action: "propose", draft: read.details.policy, expectedRevision: 1 });
     const summary = proposed.details.backendSummary;
     assert.equal(summary.classifierEffectiveSettings.enabled, true);
     assert.equal(summary.classifierEffectiveSettings.maxCallsPerSession, 7);
@@ -126,12 +127,36 @@ test("confirmation separates classifier effective settings from policy fallback 
     assert.equal(summary.policySettings.ask, "shadow");
     assert.equal(summary.policySettings.selfEvolve, "off");
     h.setConfirm(async () => false);
-    await h.call({ action: "commit", expectedRevision: 0 });
+    await h.call({ action: "commit", expectedRevision: 1 });
     assert.match(h.confirmations[0], /Classifier effective settings vs policy fallback/);
     assert.ok(h.confirmations[0].includes(JSON.stringify(summary, null, 2)));
     assert.ok(!h.confirmations[0].includes("must-never-be-shown"));
     assert.match(summary.fallback, backend === "auto" ? /falls back to the policy classification LLM/ : backend === "classifier" ? /no LLM classification fallback/ : /bypass classifier/);
   }
+});
+
+test("policy summary reflects native auto readiness and effective model rather than client presence", async (t) => {
+  resetClassifierForTest();
+  t.after(() => resetClassifierForTest());
+  const selected = { type: "classifier" as const, provider: "openrouter", id: "typesafe/jev-1.13", api: "openrouter-decisions" as const, name: "JEV", baseUrl: "https://openrouter.ai", input: ["text" as const], contextWindow: 32000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
+  const runtime = { getAvailableOfType: async () => [selected], getModelOfType: () => selected,
+    classify: async () => { throw new Error("probe must not submit a request"); } };
+  bindClassifierRuntime({ hostVersion: "0.99.0", runtime, sessionId: "manual-session", cwd: "/workspace" });
+  configureClassifier({ enabled: true });
+  const h = await harness(t);
+  await h.input();
+  let summary = (await h.call({ action: "read" })).details.backendSummary.classifierEffectiveSettings;
+  assert.equal(summary.runtimeAvailable, false);
+  assert.equal(summary.runtimeStatus, "unknown");
+  assert.equal(summary.endpoint, "auto");
+  await probeClassifierRuntime();
+  assert.equal(classifierStatus().apiKeyPresent, false);
+  summary = (await h.call({ action: "read" })).details.backendSummary.classifierEffectiveSettings;
+  assert.equal(summary.runtimeAvailable, true);
+  assert.equal(summary.runtimeStatus, "available");
+  assert.equal(summary.endpoint, "auto");
+  assert.equal(summary.model, "auto");
+  assert.equal(summary.effectiveModel, "openrouter/typesafe/jev-1.13");
 });
 
 test("exact normalized draft is confirmed in real UI; save increments revision and cleans only its activation", async (t) => {
@@ -300,7 +325,7 @@ test("before-agent guidance is opt-in and configuration dialogue always stays hu
   assert.equal(await h.emit("before_agent_start", event), undefined);
   await saveDecisionPolicy(h.ctx.cwd, defaultDecisionPolicy(), 0);
   assert.equal(await h.emit("before_agent_start", event), undefined);
-  await saveDecisionPolicy(h.ctx.cwd, h.draft(), 1);
+  await saveDecisionPolicy(h.ctx.cwd, { ...h.draft(), ask: { mode: "shadow" } }, 1);
   const policyGuidance = await h.emit("before_agent_start", event);
   assert.ok(policyGuidance.systemPrompt.startsWith(event.systemPrompt));
   assert.match(policyGuidance.systemPrompt, /\[Project decision policy\]/);
@@ -342,7 +367,7 @@ test("CAS catches concurrent external revision change after UI opened", async (t
 test("invalid drafts, mismatched revision and replacement commit drafts fail closed", async (t) => {
   const h = await harness(t);
   for (const params of [
-    { action: "propose", draft: { ...h.draft(), rules: [] }, expectedRevision: 0 },
+    { action: "propose", draft: { ...h.draft(), version: 2 }, expectedRevision: 0 },
     { action: "propose", draft: h.draft(), expectedRevision: 1 },
     { action: "commit", draft: h.draft(), expectedRevision: 0 },
     { action: "commit", expectedRevision: 1 },
@@ -407,6 +432,152 @@ test("manual Skill discovery and no-ideas project-to-suggestions-to-confirm cont
     assert.match(extension, new RegExp(`pi\\.on\\("${boundary}",[^\\n]*resetSession`));
   }
   assert.match(skill, /classifier effective settings versus policy fallback/);
+  assert.match(skill, /changing only `description`, `rules/);
+  assert.match(skill, /host rejects runtime changes/);
+  assert.match(skill, /unified `\/classifier` TUI/);
+});
+
+test("Skill feature edits preserve runtime settings and cannot enable automation", async (t) => {
+  const h = await harness(t);
+  const changes = [
+    { ask: { mode: "shadow" } }, { selfEvolve: { mode: "enforce" } },
+    { backend: "llm" }, { minConfidence: 0.9 },
+    { classification: { ...defaultDecisionPolicy().classification, model: "other/model" } },
+    { advice: { ...defaultDecisionPolicy().advice, timeoutMs: 20000 } },
+  ];
+  for (const change of changes) {
+    await h.input();
+    const draft = { ...h.draft(), rules: [...h.draft().rules, { id: "capture", domain: "evolve-capture", instruction: "Only reusable lessons." }], ...change };
+    await assert.rejects(h.call({ action: "propose", draft, expectedRevision: 0 }), /Use \/classifier/);
+    assert.equal(await loadDecisionPolicy(h.ctx.cwd), undefined);
+    assert.equal(isDecisionPolicyConfiguring(h.ctx), false);
+  }
+  await h.propose();
+  const result = await h.call({ action: "commit", expectedRevision: 0 });
+  assert.equal(result.details.policy.ask.mode, "off");
+  assert.equal(result.details.policy.selfEvolve.mode, "off");
+});
+
+test("panel saves runtime settings with exact confirmation, preserves rules and refreshes status", async (t) => {
+  const h = await harness(t);
+  const statuses: Array<string | undefined> = [];
+  h.ctx.ui.setStatus = (_key: string, text: string | undefined) => statuses.push(text);
+  await h.emit("session_start");
+  const initial = await saveDecisionPolicy(h.ctx.cwd, h.draft(), 0);
+  const panel = await openDecisionPolicyPanel(h.ctx);
+  assert.equal(isDecisionPolicyConfiguring(h.ctx), true);
+  assert.ok(!h.active().includes("policy_config"));
+  await assert.rejects(h.call({ action: "read" }), /interactively/);
+  const draft = { ...panel.policy, ask: { mode: "enforce" as const }, backend: "llm" as const };
+  const saved = await panel.save(draft, 1);
+  assert.equal(saved?.revision, 2);
+  assert.deepEqual(saved?.rules, initial.rules);
+  assert.deepEqual(panel.policy, saved);
+  assert.ok(h.confirmations[0].includes(JSON.stringify(draft, null, 2)));
+  assert.ok(statuses.at(-1)?.includes("A:enforce"));
+  assert.equal(isDecisionPolicyConfiguring(h.ctx), true, "panel stays open after saving");
+  const again = await panel.save({ ...panel.policy, minConfidence: 0.9 }, 2);
+  assert.equal(again?.revision, 3);
+  panel.close();
+  assert.equal(isDecisionPolicyConfiguring(h.ctx), false);
+});
+
+test("panel decline and close leave configuration unchanged; no-rule modes and feature edits fail", async (t) => {
+  const h = await harness(t);
+  await h.emit("session_start");
+  let panel = await openDecisionPolicyPanel(h.ctx);
+  h.setConfirm(async () => false);
+  assert.equal(await panel.save({ ...panel.policy, backend: "llm" }, 0), undefined);
+  assert.equal(await loadDecisionPolicy(h.ctx.cwd), undefined);
+  panel.close();
+  await assert.rejects(panel.save(panel.policy, 0), /reopen \/classifier/);
+  for (const change of [{ ask: { mode: "shadow" } }, { rules: h.draft().rules }]) {
+    panel = await openDecisionPolicyPanel(h.ctx);
+    await assert.rejects(panel.save({ ...panel.policy, ...change } as typeof panel.policy, 0));
+    assert.equal(isDecisionPolicyConfiguring(h.ctx), false);
+    assert.equal(await loadDecisionPolicy(h.ctx.cwd), undefined);
+  }
+});
+
+test("panel lifecycle, identity, replacement and abort fence delayed confirmations", async (t) => {
+  for (const boundary of ["session_start", "session_before_switch", "session_before_fork", "session_shutdown", "reload", "identity", "workspace", "invalidated", "close", "replacement", "abort", "host-abort"]) {
+    const h = await harness(t, undefined, `panel-${boundary}`);
+    const hostAbort = new AbortController();
+    h.ctx.signal = hostAbort.signal;
+    await h.emit("session_start");
+    const panel = await openDecisionPolicyPanel(h.ctx);
+    const gate = deferred<boolean>();
+    const opened = deferred<boolean>();
+    h.setConfirm(async () => { opened.resolve(true); return gate.promise; });
+    const abort = new AbortController();
+    const pending = panel.save({ ...panel.policy, backend: "llm" }, 0, abort.signal);
+    const rejected = assert.rejects(pending, /reopen \/classifier/);
+    await opened.promise;
+    let replacement: Awaited<ReturnType<typeof openDecisionPolicyPanel>> | undefined;
+    const cwd = h.ctx.cwd;
+    if (boundary.startsWith("session_")) await h.emit(boundary);
+    if (boundary === "reload") h.reload();
+    if (boundary === "identity") h.switchIdentity("other");
+    if (boundary === "workspace") h.ctx.cwd = join(cwd, "other");
+    if (boundary === "invalidated") Object.defineProperty(h.ctx, "cwd", { configurable: true, get() { throw new Error("context invalidated"); } });
+    if (boundary === "close") panel.close();
+    if (boundary === "replacement") replacement = await openDecisionPolicyPanel(h.ctx);
+    if (boundary === "abort") abort.abort();
+    if (boundary === "host-abort") hostAbort.abort();
+    gate.resolve(true);
+    await rejected;
+    Object.defineProperty(h.ctx, "cwd", { configurable: true, writable: true, value: cwd });
+    assert.equal(await loadDecisionPolicy(cwd), undefined, boundary);
+    if (replacement) assert.equal(isDecisionPolicyConfiguring(h.ctx), true, "old completion cannot close replacement");
+    replacement?.close();
+  }
+});
+
+test("panel CAS, lock-wait cancellation and parallel saves cannot publish stale drafts", async (t) => {
+  const h = await harness(t);
+  await h.emit("session_start");
+  let panel = await openDecisionPolicyPanel(h.ctx);
+  h.setConfirm(async () => { await saveDecisionPolicy(h.ctx.cwd, defaultDecisionPolicy(), 0); return true; });
+  await assert.rejects(panel.save({ ...panel.policy, backend: "llm" }, 0), /revision conflict/);
+  assert.equal((await loadDecisionPolicy(h.ctx.cwd))?.backend, "auto");
+  panel = await openDecisionPolicyPanel(h.ctx);
+  const gate = deferred<boolean>();
+  const opened = deferred<boolean>();
+  h.setConfirm(async () => { opened.resolve(true); return gate.promise; });
+  const pending = panel.save({ ...panel.policy, backend: "llm" }, 1);
+  await opened.promise;
+  await assert.rejects(panel.save(panel.policy, 1), /already in progress/);
+  gate.resolve(true);
+  assert.equal((await pending)?.revision, 2);
+  panel.close();
+  panel = await openDecisionPolicyPanel(h.ctx);
+  h.setConfirm(async () => true);
+  const lockfile = createRequire(import.meta.url)("proper-lockfile");
+  const original = lockfile.lock;
+  const entered = deferred<boolean>();
+  const unlock = deferred<boolean>();
+  lockfile.lock = async (...args: any[]) => { entered.resolve(true); await unlock.promise; return original(...args); };
+  try {
+    const saving = panel.save({ ...panel.policy, backend: "classifier" }, 2);
+    const rejected = assert.rejects(saving, /reopen \/classifier/);
+    await entered.promise;
+    panel.close();
+    unlock.resolve(true);
+    await rejected;
+    assert.equal((await loadDecisionPolicy(h.ctx.cwd))?.backend, "llm");
+    assert.equal((await loadDecisionPolicy(h.ctx.cwd))?.revision, 2);
+  } finally { lockfile.lock = original; unlock.resolve(true); }
+});
+
+test("host abort still closes panel after a save using the same lifetime signal", async (t) => {
+  const h = await harness(t);
+  const abort = new AbortController();
+  h.ctx.signal = abort.signal;
+  await h.emit("session_start");
+  const panel = await openDecisionPolicyPanel(h.ctx);
+  await panel.save({ ...panel.policy, backend: "llm" }, 0, abort.signal);
+  abort.abort();
+  assert.equal(isDecisionPolicyConfiguring(h.ctx), false);
 });
 
 test("native Pi discovers the manual Skill but omits it from model prompts", async () => {

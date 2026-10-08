@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ClassifierModel, ClassifierResult } from "@earendil-works/pi-ai";
-import { bindClassifierRuntime, unbindClassifierRuntime, configureClassifier, classify, classifySync, resetClassifierForTest, classifierStatus } from "../src/classify/engine.ts";
+import { bindClassifierRuntime, unbindClassifierRuntime, configureClassifier, classify, classifySync, resetClassifierForTest, classifierStatus, probeClassifierRuntime } from "../src/classify/engine.ts";
 import { createNativeJevClient, type ClassifierRuntime } from "../src/classify/client.ts";
 import { fileValueDomain } from "../src/classify/domains.ts";
 
@@ -49,7 +49,7 @@ test("native domain pipeline preserves cache, shadow, and call budget; never cal
   const shadow = new Promise<void>((resolve) => configureClassifier({ enabled: true, domains: { "file-value": "shadow" }, onShadow: (record) => { assert.equal(record.jev?.label, "required"); resolve(); } }));
   assert.notEqual(classifySync(fileValueDomain, input).layer, "jev");
   await shadow;
-  assert.equal(classifierStatus().callsUsed, 1);
+  assert.equal(classifierStatus().callsUsed, 2);
 });
 
 test("classifier shutdown clears the current runtime but cannot unbind a newer host", async () => {
@@ -104,7 +104,7 @@ for (const operation of ["configure", "bind", "unbind", "reset"] as const) {
         if (operation === "unbind") unbindClassifierRuntime(old.runtime);
         else resetClassifierForTest();
         assert.equal(classifierStatus().cacheSize, 0);
-        assert.equal(classifierStatus().callsUsed, 0);
+        assert.equal(classifierStatus().callsUsed, operation === "reset" ? 0 : 1);
         if (oldFirst) {
           old.reply.resolve(choiceResult("required"));
           assert.equal((await obsolete).layer, "degraded");
@@ -130,7 +130,7 @@ for (const operation of ["configure", "bind", "unbind", "reset"] as const) {
       assert.equal((await fresh).label, "skip");
       assert.equal((await classify(fileValueDomain, { path: "same.ts" })).label, "skip");
       assert.equal(classifierStatus().cacheSize, 1);
-      assert.equal(classifierStatus().callsUsed, 1);
+      assert.equal(classifierStatus().callsUsed, operation === "reset" ? 1 : 2);
     });
   }
 }
@@ -226,7 +226,7 @@ for (const operation of ["bind", "unbind", "reset"] as const) {
       assert.equal(oldRecords, 0);
       assert.equal(newRecords, 1);
       assert.equal(classifierStatus().cacheSize, 1);
-      assert.equal(classifierStatus().callsUsed, 1);
+      assert.equal(classifierStatus().callsUsed, operation === "reset" ? 1 : 2);
     });
   }
 }
@@ -249,4 +249,247 @@ test("native and unknown hosts fail explicitly rather than using HTTP; auth erro
   bindClassifierRuntime({ hostVersion: "0.99.0", runtime: fakeRuntime(async () => ({ ...result({}), stopReason: "error", errorMessage: "typesafe authentication unavailable" })) });
   configureClassifier({ enabled: true, domains: { "file-value": "jev" } });
   assert.match((await classify(fileValueDomain, { path: "a.ts" })).degradedReason ?? "", /authentication unavailable/);
+});
+
+const routerModel = { ...model, provider: "openrouter", id: "typesafe/jev-1.13", api: "openrouter-decisions" as const, baseUrl: "https://openrouter.ai" };
+
+test("auto resolves only authenticated classifiers with stable provider preference; explicit endpoint never drifts", async () => {
+  resetClassifierForTest();
+  let available: readonly (typeof model | typeof routerModel)[] = [routerModel];
+  let selected: unknown;
+  const runtime = fakeRuntime(async (actual) => { selected = actual; return { ...choiceResult("required"), provider: actual.provider, model: actual.id }; });
+  runtime.getAvailableOfType = async () => available;
+  bindClassifierRuntime({ hostVersion: "0.99.0", runtime });
+  configureClassifier(nativeConfig);
+  assert.equal(classifierStatus().runtimeStatus, "unknown");
+  assert.equal(classifierStatus().apiKeyPresent, false);
+  assert.deepEqual(await probeClassifierRuntime(), { status: "available", available: true, model: "openrouter/typesafe/jev-1.13" });
+  assert.equal(classifierStatus().callsUsed, 0);
+  assert.equal((await classify(fileValueDomain, { path: "router.ts" })).layer, "jev");
+  assert.equal(selected, routerModel);
+  available = [routerModel, { ...model, provider: "other" }, model];
+  assert.equal((await probeClassifierRuntime()).model, "typesafe/jev-latest");
+  configureClassifier({ ...nativeConfig, endpoint: "openrouter" });
+  assert.equal((await probeClassifierRuntime()).model, "openrouter/typesafe/jev-1.13");
+  configureClassifier({ ...nativeConfig, endpoint: "typesafe" });
+  available = [routerModel];
+  assert.equal((await probeClassifierRuntime()).status, "unavailable");
+  assert.equal((await classify(fileValueDomain, { path: "no-drift.ts" })).layer, "degraded");
+  assert.equal(classifierStatus().callsUsed, 1);
+});
+
+test("pinned native registry models must also be authenticated; conflicting endpoints and auth errors fail visibly", async () => {
+  resetClassifierForTest();
+  let calls = 0;
+  const runtime = fakeRuntime(async () => { calls++; return choiceResult("required"); });
+  runtime.getAvailableOfType = async () => [];
+  bindClassifierRuntime({ hostVersion: "0.99.0", runtime });
+  configureClassifier({ ...nativeConfig, model: "typesafe/jev-latest" });
+  assert.match((await probeClassifierRuntime()).reason ?? "", /authenticated/);
+  assert.match((await classify(fileValueDomain, { path: "pin.ts" })).degradedReason ?? "", /authenticated/);
+  configureClassifier({ ...nativeConfig, endpoint: "openrouter", model: "typesafe/jev-latest" });
+  assert.match((await probeClassifierRuntime()).reason ?? "", /conflicts/);
+  runtime.getAvailableOfType = async () => { throw new Error("classifier authentication unavailable"); };
+  configureClassifier(nativeConfig);
+  assert.match((await probeClassifierRuntime()).reason ?? "", /authentication unavailable/);
+  assert.equal(classifierStatus().runtimeStatus, "unavailable");
+  runtime.getAvailableOfType = async () => [model];
+  assert.equal((await probeClassifierRuntime()).status, "available");
+  assert.equal(calls, 0);
+  assert.equal(classifierStatus().callsUsed, 0);
+});
+
+for (const operation of ["configure", "rebind", "session", "unbind", "reset", "refresh"] as const) {
+  test(operation + " fences late readiness without quota or stale status writes", async () => {
+    resetClassifierForTest();
+    const available = deferred<readonly typeof model[]>();
+    const entered = deferred<void>();
+    const runtime = fakeRuntime(async () => choiceResult("required"));
+    runtime.getAvailableOfType = async () => { entered.resolve(); return available.promise; };
+    bindClassifierRuntime({ hostVersion: "0.99.0", runtime, sessionId: "old", cwd: "/project" });
+    configureClassifier(nativeConfig);
+    const old = probeClassifierRuntime();
+    await entered.promise;
+    runtime.getAvailableOfType = async () => [model];
+    if (operation === "configure") configureClassifier({ enabled: false });
+    else if (operation === "unbind") unbindClassifierRuntime(runtime);
+    else if (operation === "reset") resetClassifierForTest();
+    else if (operation !== "refresh") bindClassifierRuntime({ hostVersion: "0.99.0", runtime, sessionId: operation === "session" ? "new" : "old", cwd: "/project" });
+    if (["rebind", "session", "refresh"].includes(operation)) assert.equal((await probeClassifierRuntime()).status, "available");
+    const status = classifierStatus();
+    available.resolve([]);
+    assert.equal((await old).status, operation === "refresh" ? "unavailable" : "unknown");
+    assert.deepEqual(classifierStatus(), status);
+    assert.equal(status.callsUsed, 0);
+  });
+}
+
+test("cancelled native readiness is bounded and never replaces status or consumes quota", async () => {
+  resetClassifierForTest();
+  const runtime = fakeRuntime(async () => choiceResult("required"));
+  runtime.getAvailableOfType = async () => new Promise(() => {});
+  bindClassifierRuntime({ hostVersion: "0.99.0", runtime });
+  configureClassifier(nativeConfig);
+  const controller = new AbortController();
+  const probe = probeClassifierRuntime(controller.signal);
+  controller.abort(new Error("cancelled probe"));
+  assert.match((await probe).reason ?? "", /cancelled probe/);
+  assert.equal(classifierStatus().runtimeStatus, "unknown");
+  assert.equal(classifierStatus().callsUsed, 0);
+});
+
+test("quota survives configure, on/off, rebind and unbind; identities isolate and restore, lower/raise gives only delta", async () => {
+  resetClassifierForTest();
+  let calls = 0;
+  const runtime = fakeRuntime(async () => { calls++; return choiceResult("required"); });
+  const bind = (sessionId = "one", cwd = "/project") => bindClassifierRuntime({ hostVersion: "0.99.0", runtime, sessionId, cwd });
+  bind();
+  configureClassifier({ ...nativeConfig, maxCallsPerSession: 1 });
+  assert.equal((await classify(fileValueDomain, { path: "first.ts" })).layer, "jev");
+  assert.equal((await classify(fileValueDomain, { path: "first.ts" })).layer, "jev");
+  configureClassifier({ ...nativeConfig, enabled: false });
+  configureClassifier({ ...nativeConfig, maxCallsPerSession: 1, model: "jev-latest", cacheTtlMs: 1 });
+  bind();
+  unbindClassifierRuntime(runtime);
+  bind();
+  assert.match((await classify(fileValueDomain, { path: "next.ts" })).degradedReason ?? "", /budget/);
+  for (const [session, cwd] of [["two", "/project"], ["one", "/other"]]) {
+    bind(session, cwd);
+    assert.equal(classifierStatus().callsUsed, 0);
+    assert.equal((await classify(fileValueDomain, { path: "other.ts" })).layer, "jev");
+  }
+  bind();
+  assert.equal(classifierStatus().callsUsed, 1);
+  configureClassifier({ ...nativeConfig, maxCallsPerSession: 0 });
+  assert.match((await classify(fileValueDomain, { path: "lower.ts" })).degradedReason ?? "", /budget/);
+  configureClassifier({ ...nativeConfig, maxCallsPerSession: 2 });
+  assert.equal((await classify(fileValueDomain, { path: "delta.ts" })).layer, "jev");
+  assert.match((await classify(fileValueDomain, { path: "excess.ts" })).degradedReason ?? "", /budget/);
+  assert.equal(calls, 4);
+});
+
+test("concurrent native calls reserve quota, identical pending calls join, failures never refund", async () => {
+  resetClassifierForTest();
+  const lane = delayedRuntime();
+  bindClassifierRuntime({ hostVersion: "0.99.0", runtime: lane.runtime });
+  configureClassifier({ ...nativeConfig, maxCallsPerSession: 1 });
+  const first = classify(fileValueDomain, { path: "one.ts" });
+  await lane.started.promise;
+  const same = classify(fileValueDomain, { path: "one.ts" });
+  assert.match((await classify(fileValueDomain, { path: "two.ts" })).degradedReason ?? "", /budget/);
+  lane.reply.reject(new Error("cancelled model request"));
+  assert.match((await first).degradedReason ?? "", /cancelled/);
+  assert.match((await same).degradedReason ?? "", /cancelled/);
+  configureClassifier({ ...nativeConfig, maxCallsPerSession: 1 });
+  assert.match((await classify(fileValueDomain, { path: "three.ts" })).degradedReason ?? "", /budget/);
+  assert.equal(classifierStatus().callsUsed, 1);
+});
+
+test("auto supports other authenticated providers and fully qualified openrouter pins", async () => {
+  resetClassifierForTest();
+  const other = { ...model, provider: "other", id: "classifier" };
+  const runtime = fakeRuntime(async (selected) => ({ ...choiceResult("required"), provider: selected.provider, model: selected.id }));
+  runtime.getAvailableOfType = async () => [other];
+  bindClassifierRuntime({ hostVersion: "0.99.0", runtime });
+  configureClassifier(nativeConfig);
+  assert.equal((await probeClassifierRuntime()).model, "other/classifier");
+  assert.equal((await classify(fileValueDomain, { path: "other.ts" })).model, "other/classifier");
+  runtime.getAvailableOfType = async () => [model, routerModel];
+  configureClassifier({ ...nativeConfig, model: "openrouter/typesafe/jev-1.13" });
+  assert.equal((await probeClassifierRuntime()).model, "openrouter/typesafe/jev-1.13");
+  assert.equal((await classify(fileValueDomain, { path: "pin.ts" })).model, "openrouter/typesafe/jev-1.13");
+});
+
+test("legacy quota rejection and non-verifying probes cannot supersede in-flight readiness evidence", async () => {
+  for (const fail of [false, true]) {
+    for (const probeFirst of [false, true]) {
+      resetClassifierForTest();
+      const entered = deferred<void>();
+      const reply = deferred<Response>();
+      let calls = 0;
+      configureClassifier({ ...nativeConfig, hostVersion: "0.98.0", apiKey: "mock-only", maxCallsPerSession: 1,
+        fetchFn: async () => { calls++; entered.resolve(); return reply.promise; } });
+      try {
+        const first = classify(fileValueDomain, { path: "accepted.ts" });
+        await entered.promise;
+        if (probeFirst) assert.equal((await probeClassifierRuntime()).status, "unknown");
+        assert.match((await classify(fileValueDomain, { path: "rejected.ts" })).degradedReason ?? "", /budget/);
+        if (!probeFirst) assert.equal((await probeClassifierRuntime()).status, "unknown");
+        if (fail) reply.reject(new Error("mock auth failed"));
+        else reply.resolve(new Response(JSON.stringify({ model: "verified-model", answers: {
+          value: { type: "choice", choice: "required", confidence: .9 },
+        } })));
+        assert.equal((await first).layer, fail ? "degraded" : "jev");
+        assert.equal(classifierStatus().runtimeStatus, fail ? "unavailable" : "available");
+        assert.equal(classifierStatus().callsUsed, 1);
+        assert.equal(calls, 1);
+      } finally { resetClassifierForTest(); }
+    }
+  }
+});
+
+test("joined legacy success or failure owns readiness; probes preserve execution evidence", async () => {
+  for (const fail of [false, true]) {
+    resetClassifierForTest();
+    const entered = deferred<void>();
+    const reply = deferred<Response>();
+    let calls = 0;
+    configureClassifier({ ...nativeConfig, hostVersion: "0.98.0", apiKey: "mock-only",
+      fetchFn: async () => { calls++; entered.resolve(); return reply.promise; } });
+    try {
+      const first = classify(fileValueDomain, { path: "joined.ts" });
+      await entered.promise;
+      const joined = classify(fileValueDomain, { path: "joined.ts" });
+      await new Promise(resolve => setImmediate(resolve));
+      if (fail) reply.reject(new Error("mock auth failed"));
+      else reply.resolve(new Response(JSON.stringify({ model: "verified-model", answers: {
+        value: { type: "choice", choice: "required", confidence: .9 },
+      } })));
+      assert.equal((await first).layer, fail ? "degraded" : "jev");
+      assert.equal((await joined).layer, fail ? "degraded" : "jev");
+      assert.equal(classifierStatus().runtimeStatus, fail ? "unavailable" : "available");
+      assert.equal(classifierStatus().callsUsed, 1);
+      assert.equal(calls, 1);
+      const executed = classifierStatus();
+      const probed = await probeClassifierRuntime();
+      assert.equal(probed.status, fail ? "unavailable" : "available");
+      if (fail) assert.match(probed.reason ?? "", /mock auth failed/);
+      assert.deepEqual(classifierStatus(), executed, "non-verifying probe must preserve failure reason, model and quota");
+      if (!fail) {
+        assert.equal(classifierStatus().effectiveModel, "verified-model");
+        assert.equal((await classify(fileValueDomain, { path: "joined.ts" })).layer, "jev");
+        assert.equal(classifierStatus().runtimeStatus, "available");
+        assert.equal(calls, 1);
+      }
+    } finally { resetClassifierForTest(); }
+  }
+});
+
+test("readiness distinguishes disabled, unknown host, unverified legacy credentials and successful transport", async () => {
+  resetClassifierForTest();
+  assert.deepEqual(await probeClassifierRuntime(), { status: "disabled", available: false });
+  let calls = 0;
+  const fetchFn = (async () => { calls++; return new Response(JSON.stringify({ answers: { value: { type: "choice", choice: "required", confidence: .9 } } })); }) as typeof fetch;
+  configureClassifier({ ...nativeConfig, hostVersion: "unknown", apiKey: "fixture", fetchFn });
+  assert.equal((await probeClassifierRuntime()).status, "unavailable");
+  assert.equal((await classify(fileValueDomain, { path: "closed.ts" })).layer, "degraded");
+  assert.equal(calls, 0);
+  const oldTypesafe = process.env.TYPESAFE_API_KEY;
+  const oldRouter = process.env.OPENROUTER_API_KEY;
+  try {
+    delete process.env.TYPESAFE_API_KEY;
+    process.env.OPENROUTER_API_KEY = "fixture-key";
+    configureClassifier({ ...nativeConfig, hostVersion: "0.98.0", fetchFn });
+    assert.equal(classifierStatus().apiKeyPresent, true);
+    assert.equal(classifierStatus().runtimeStatus, "unknown");
+    assert.equal((await probeClassifierRuntime()).available, false);
+    assert.equal(calls, 0);
+    assert.equal((await classify(fileValueDomain, { path: "legacy.ts" })).layer, "jev");
+    assert.equal(classifierStatus().runtimeStatus, "available");
+    assert.equal(classifierStatus().effectiveModel, "typesafe/jev-1.13");
+    assert.equal(calls, 1);
+  } finally {
+    if (oldTypesafe === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = oldTypesafe;
+    if (oldRouter === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = oldRouter;
+  }
 });
