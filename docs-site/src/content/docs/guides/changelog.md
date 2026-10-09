@@ -15,6 +15,9 @@ icon: "🔄"
 - 四个包是修补 fork，不是上游官方发布/支持承诺：active-win 源自 MIT 9.0.0，native 资产保留上游 v9.0.0 身份；nut 三包源自 Apache-2.0 4.2.6。来源和许可见各包 provenance 及仓库 `RELEASE.md`。
 - Classifier 统一设置、诊断与会话运行额度；建议仍不是真人批准。SSH 使用不消耗 stdin 的 PowerShell payload bootstrap，修复 Unicode、退出状态与 UTF-8 分块/截断。
 - 子代理压缩恢复保留原任务、累计搜索预算及精确结果引用；Nut 图像转换保留 RGB/BGR、alpha 和三通道 buffer/stride 一致性。
+- 可选 Todo 进展监护：`/advisor todo` 打开配置；默认关闭，shadow 仅记录分类。以宿主拥有的 root/本地 child 事件计算进展，工具/人工等待不计有效时长；有界回溯与建议升级不更改 Todo 状态、不终止工具、不授予批准。
+- root-wide 字面/正则搜索使用有时限的 ripgrep；FFF 原生索引隔离到独立 Node worker，退出确认后才释放所有权。session-history 验证候选的可见文本并有界回退，缺失宿主 transcript 明确报错。Teammate 正常/quiet/resume 共用工具卡片语法，Cockpit 避免重复外框。
+- Plan/planner/Monitor/压缩恢复优先最小端到端交付路径：阻断依赖需有需求或已确认缺陷依据，累计失败预算不因换 worker/任务/上下文而重置；原有批准与生命周期门禁不被绕过。
 - 四个 fork registry SHA 与发布 dry-run 一致；真实 Windows consumer 的只读原生 API 和图像回归通过，fork consumer production audit 为 0。该结论不扩展到整个 Flow 依赖图，也不声称输入注入或跨平台兼容验收。
 
 升级：`pi install npm:pi-maestro-flow@0.32.1`。升级前关闭 Pi，完成后重启；本地 companion 覆盖需自行升级。

@@ -1,8 +1,9 @@
 # v0.32.1 — Dependency Repairs & Runtime Hardening
 
-> Release candidate: all four fork registry SHAs are verified; suite validation
-> and publication are in progress. Native verification is limited to Windows
-> x64 / Node 22.22.0; minimum Node and macOS/Linux remain unverified.
+> Scoped release validation: 268 focused tests passed, with one existing
+> platform skip; all nine unchanged workspace tarballs match npm. Native
+> verification is limited to Windows x64 / Node 22.22.0; minimum Node and
+> macOS/Linux remain unverified.
 
 ## Overview
 
@@ -36,6 +37,24 @@ Missing native APIs do not authorize a second legacy runtime on a native host.
 
 ## Runtime hardening since 0.32.0
 
+- **Task-scoped Advisor supervision** — optional `/advisor todo` settings
+  monitor host-owned root/local-child Todo progress, pause active-time accounting
+  during tools and human/capacity waits, and fence stale task/model/session results.
+  Supervision defaults off; shadow records classifications only. Active mode
+  provides bounded reflection/escalation advice without aborting tools, changing
+  Todo status, or granting approval (`src/advisor/todo-review*.ts`).
+- **Bounded search and session history** — root-wide literal/regex search uses
+  time-bounded ripgrep; FFF session candidates are verified against visible
+  transcript projections with bounded fallback, and an unavailable host transcript
+  reports an error instead of a misleading complete empty result
+  (`src/tools/fff.ts`, `src/tools/session-history.ts`). Native FFF indexing
+  now runs in an isolated plain-Node worker; cancellation and shutdown retain
+  worker ownership until close is confirmed, with literal/regex fallback.
+- **Consistent teammate tool cards** — call/result renderers share the same
+  bounded grammar in normal and quiet modes, including resumed histories;
+  Cockpit avoids duplicate shell chrome (`pi-maestro-teammate/src/tui/render.ts`,
+  `pi-cockpit/src/quiet-tools.ts`).
+
 - **Classifier settings and diagnostics** — unified configuration UI,
   configured/effective model reporting, session-scoped runtime quotas, and
   bounded handoff advice (`src/classifier/`, `src/decision-policy/`,
@@ -56,6 +75,12 @@ Missing native APIs do not authorize a second legacy runtime on a native host.
 - **Image layout compatibility** — the Nut repair uses Jimp 1.6.1, preserves
   copied RGB/BGR data and alpha, and keeps three-channel buffer layouts
   consistent with channels/stride metadata across conversion paths.
+
+- **Outcome-first orchestration** — Plan, planner, Monitor, and compaction
+  recovery distinguish human-locked requirements from revisable implementation
+  means. Blocking dependencies need a requirement or confirmed defect; correction
+  budgets stay cumulative across workers and resets. Existing approval and
+  lifecycle gates remain authoritative.
 
 ## Baseline feature highlights (0.32.0)
 
@@ -164,11 +189,11 @@ Missing native APIs do not authorize a second legacy runtime on a native host.
 
 | Package | Version | Release scope |
 |---|---|---|
-| pi-maestro-flow | 0.32.1 | release candidate |
-| pi-maestro-teammate | 2.8.1 | release candidate |
-| pi-cockpit | 0.24.3 | release candidate |
+| pi-maestro-flow | 0.32.1 | this release |
+| pi-maestro-teammate | 2.8.1 | this release |
+| pi-cockpit | 0.24.3 | this release |
 | pi-maestro-settings-core | 0.2.3 | unchanged |
-| pi-maestro-backends | 0.1.7 | release candidate |
+| pi-maestro-backends | 0.1.7 | this release |
 | pi-maestro-backend-core | 0.1.5 | unchanged |
 | @dyw1234/active-win | 9.0.1 | published repair fork |
 | @dyw1234/nut-shared | 4.2.7 | published repair fork |
@@ -205,10 +230,28 @@ preparation and any later release or repair changes; they are not final-tag stat
   all four active-win APIs and Nut native providers, and observed windows
   without input injection. Its production audit returned **0 vulnerabilities**;
   this result is scoped to the fork consumer, not the entire Flow graph.
-- All four fork registry SHAs match locked publish dry-runs. All five
-  unchanged publishable workspaces match their existing registry tarballs.
-- Suite dependency installation, affected release checks, documentation build,
-  final suite tarballs and registry Pi smoke remain in progress.
+- All nine unchanged publishable workspaces, including the four repair forks,
+  match their existing registry tarballs in this release preflight.
+- Current scoped regressions: search/history/recovery/package resources **113/113**;
+  Plan decomposition/lifecycle **54/54**; Advisor/history **70/70**; Teammate
+  Monitor/permissions **31 passed, 1 existing Windows skip**. Two TypeScript
+  inference errors were fixed with explicit result types, without runtime changes.
+- Flow, Teammate, Cockpit, and Backends typechecks and Teammate declaration
+  consistency passed. Passing focused results are reused; the broad root
+  `test:release`, repeated native tests, and documentation build were not rerun
+  for this fast release. Documentation changes were inspected as Markdown.
+- Publication uses immutable tarballs matching these locked dry-run SHAs,
+  in order Backends → Teammate → Cockpit → Flow. Registry SHA equality and
+  a fresh registry-consumer Pi startup smoke are required before tagging.
+
+### Locked 0.32.1 artifacts
+
+| Package | Files | Packed / unpacked bytes | SHA-1 |
+|---|---:|---:|---|
+| pi-maestro-backends@0.1.7 | 20 | 58,017 / 200,470 | `4e5f2f45e189a7cca01eadda6028cbd0f24a006b` |
+| pi-maestro-teammate@2.8.1 | 487 | 1,241,126 / 5,561,837 | `616c5afaaa92dc62076bb146fdec967312c72aea` |
+| pi-cockpit@0.24.3 | 115 | 332,409 / 1,247,872 | `0d327d36e1f39ab85b02c393058d7678f3ba8563` |
+| pi-maestro-flow@0.32.1 | 1,164 | 3,810,245 / 14,687,734 | `16b1601b711b46fb7ca24fb344b63cad55f43b8a` |
 - Active-win acceptance on Node 22.19.0, macOS, and Linux remains unverified;
   the user explicitly approved a release limited to the verified scope.
   No cross-platform native or whole-graph audit-zero claim is made.
