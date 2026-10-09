@@ -115,6 +115,10 @@ test("child prompt preserves compaction recovery discipline with and without Tod
         assert.match(prompt, /even without an assigned Todo/);
         assert.match(prompt, /searched paths and negative results/);
         assert.match(prompt, /Compaction does not reset the task's cumulative budget/);
+        assert.match(prompt, /neither do replacement workers, task names, or approaches/);
+        assert.match(prompt, /same shared interface\/state machine and delivery blocker/);
+        assert.match(prompt, /report its necessity and any simpler equivalent option to the caller/);
+        assert.match(prompt, /rather than expanding the assignment or bypassing gates/);
         assert.match(prompt, /correlation IDs and known result\/publication URIs/);
         assert.match(prompt, /missing completion notification is not proof a child is still running/);
         assert.match(prompt, /budget is exhausted, return the consolidated result/);

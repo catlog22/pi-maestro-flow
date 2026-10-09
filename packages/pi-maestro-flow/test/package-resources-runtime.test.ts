@@ -98,6 +98,34 @@ test("canonical SYSTEM delegates knowledge closeout without granting implicit pu
   assert.doesNotMatch(knowledge, /-y.*auto-adjudication is allowed|sealed Session \+ fresh session receipt/);
 });
 
+test("canonical SYSTEM keeps delivery gates justified and correction budgets cumulative", () => {
+  const sourcePath = fileURLToPath(new URL("../../../.pi/SYSTEM.md", import.meta.url));
+  const instructions = loadBundledAgentsInstructions(sourcePath);
+  assert.ok(instructions);
+  assert.match(instructions, /user-required outcomes and human-locked safety\/compatibility constraints from agent-selected implementation means/);
+  assert.match(instructions, /risk enumeration alone does not create a gate/);
+  assert.match(instructions, /Measure progress by user-visible acceptance evidence/);
+  assert.match(instructions, /across task names, workers, approaches, and context resets/);
+  assert.match(instructions, /A fresh investigation.*does not reset this budget/);
+  assert.match(instructions, /Changes to approved scope, explicit locked decisions, or safety boundaries require renewed approval/);
+  assert.match(instructions, /In Monitor mode.*reuse an existing execution worker or ask the user to exit Monitor/);
+});
+
+test("planner role mirrors distinguish locked requirements from revisable implementation means", () => {
+  const project = loadBundledAgentsInstructions(fileURLToPath(new URL("../../../.pi/agents/planner.md", import.meta.url)));
+  const bundled = loadBundledAgentsInstructions(fileURLToPath(new URL("../../pi-maestro-teammate/agents/planner.md", import.meta.url)));
+  assert.ok(project);
+  assert.equal(project, bundled);
+  assert.match(project, /select the smallest end-to-end path using existing authorities/);
+  assert.match(project, /without treating those means as immutable human requirements/);
+  assert.match(project, /justify each blocking dependency with its requirement or confirmed defect/);
+  assert.match(project, /first end-to-end acceptance milestone, cumulative correction budget/);
+  assert.match(project, /Risks are not automatically acceptance gates/);
+  assert.match(project, /across workers, task names, approaches, and resets/);
+  assert.match(project, /after three unsuccessful attempts, stop the correction chain/);
+  assert.match(project, /require renewed approval, never silent gate removal/);
+});
+
 test("resolves .pi/SYSTEM.md when AGENTS.md is absent", () => {
   const root = join(tmpdir(), `pi-maestro-system-only-${process.pid}-${Date.now()}`);
   const packageJson = join(root, "package.json");

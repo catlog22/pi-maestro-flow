@@ -26,6 +26,7 @@ export interface NewContextRecoveryFocus {
 // Keep the focus usable even when its caller has no budget for task or Plan bodies.
 const MAX_LINES = 8;
 const MAX_LINE_BYTES = 480;
+const AUXILIARY_BLOCKER_GUIDANCE = "If auxiliary work blocks the requested outcome, report the dependency's necessity and any simpler equivalent option to the root/user; keep the block until resolved through the authorized lifecycle. Failed-attempt budgets remain cumulative across workers and resets.";
 
 function bounded(value: string, maxBytes = 160): string {
   const text = value.replace(/[\r\n\t]+/g, " ").trim();
@@ -133,6 +134,7 @@ export function describeNewContextRecoveryFocus(input: RecoveryFocusInput): NewC
     if (unmet.length > 0) {
       return finish("blocked", [
         `Todo #${bounded(selected.id)} is blocked by ${unmet.slice(0, 4).map((id) => `#${bounded(id, 64)}`).join(", ")}${unmet.length > 4 ? " (more dependencies omitted)" : ""}. Recover the recorded blocker; do not bypass dependencies or re-decompose the Plan.`,
+        AUXILIARY_BLOCKER_GUIDANCE,
         ...(selected.context ? [`Recorded Todo context: ${bounded(selected.context, 320)}`] : []),
         ...(planReference ? [planReference] : []),
       ]);
@@ -145,7 +147,7 @@ export function describeNewContextRecoveryFocus(input: RecoveryFocusInput): NewC
     }
     if (workflowFor(selected)) taskLines.push(...workflowLines());
     if (planReference) taskLines.push(planReference);
-    taskLines.push("Reuse still-valid task evidence. Todo completion is not evidence that a Goal has completed.");
+    taskLines.push("Reuse still-valid task evidence. Todo completion is not evidence that a Goal has completed. Carry cumulative failed-attempt budgets across workers and resets; if auxiliary work blocks the requested outcome, report its necessity and a simpler equivalent option to the root/user, without bypassing gates or re-decomposing the Plan.");
     return finish(active ? "todo-active" : "todo-pending", taskLines);
   }
 
@@ -158,6 +160,7 @@ export function describeNewContextRecoveryFocus(input: RecoveryFocusInput): NewC
     const unmet = dependencies(blocked);
     return finish("blocked", [
       `Owned Todo #${bounded(blocked.id)} remains blocked${unmet.length ? ` by ${unmet.slice(0, 4).map((id) => `#${bounded(id, 64)}`).join(", ")}` : ""}. Read its recorded blocker and report it; do not invent work, bypass the block, or re-decompose the Plan.`,
+      AUXILIARY_BLOCKER_GUIDANCE,
       ...(blocked.context ? [`Recorded Todo context: ${bounded(blocked.context, 320)}`] : []),
       ...(planReference ? [planReference] : []),
     ]);

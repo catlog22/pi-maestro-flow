@@ -21,6 +21,14 @@ test("plan-decompose injects an approved-Plan decomposition prompt for the main 
   assert.match(contract, /Save location: the Todo batch itself/);
   assert.match(contract, /Naming: each task's `subject` is an outcome title/);
   assert.match(contract, /DAG decomposition/);
+  assert.match(contract, /user-required outcomes and explicit locked constraints from agent-selected implementation means/);
+  assert.match(contract, /enumerated risks do not automatically create delivery gates/);
+  assert.match(contract, /Explain each edge in context/);
+  assert.match(contract, /required behavior or confirmed material defect/);
+  assert.match(contract, /shared input\/authority contracts available before consumers/);
+  assert.match(contract, /new task names, workers, approaches, or resets do not reset the budget/);
+  assert.match(contract, /obtain renewed approval for changes to approved scope/);
+  assert.match(contract, /Do not silently drop acceptance conditions or bypass existing gates/);
   assert.match(contract, /Each task maps to one independent, agent-ready work unit with its own boundary and done-when condition/);
   assert.match(contract, /executing agent's independent work document/);
   assert.match(contract, /blockedBy contains only zero-based indexes of earlier tasks/);

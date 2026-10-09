@@ -1719,6 +1719,9 @@ function buildPlanExecutionContract(
     "   - Load every relevant governing hit with `maestro load --type <type> --id <id>`; search is exposure only, loading records consumption.",
     "   - Follow the injected knowledge_context; re-search when entering a new subsystem or before an architecture decision.",
     "2. Reconcile the Plan with every user requirement; do not shrink or reinterpret the approved scope.",
+    "   - Distinguish user-required outcomes and explicit locked constraints from agent-selected implementation means. Prefer the smallest end-to-end path using existing authorities; risk enumeration alone does not make auxiliary infrastructure a delivery prerequisite.",
+    "   - Explain each blocking dependency with a requirement or confirmed material defect. If a simpler equivalent implementation is supported by evidence, reconcile it with the approved Plan; obtain renewed approval for scope, explicit locked-decision, or safety-boundary changes. Never silently drop acceptance conditions or bypass existing gates.",
+    "   - Carry cumulative failed-attempt counts by shared interface/state machine and delivery blocker across workers, task names, approaches, and resets. After three unsuccessful attempts, stop the correction chain and report the effect on the requested outcome plus a simpler option or need for redesign/user guidance.",
     "3. Decompose the Plan into an ordered Todo dependency graph before implementation.",
     ...(handoffKey
       ? [
@@ -2413,7 +2416,8 @@ function buildPlanEnterNote(): string {
     // invalidating it per turn — so there is no cache argument for keeping it terse.
     "Planning quality:",
     "- Ground every decision in codebase evidence, not assumption.",
-    "- Align every user requirement with a planned outcome and a verifiable acceptance check.",
+    "- Align every user requirement with a planned outcome and a verifiable acceptance check; separate user-required outcomes and explicit locked constraints from agent-selected implementation means.",
+    "- Prefer the smallest end-to-end path using existing authorities. Justify every blocking dependency by a requirement or confirmed material defect; risks and optional diagnostics/provenance/hardening are not automatic delivery gates. Make shared authorities available before their consumers need production-path acceptance.",
     "- Require every Plan to include an end-of-execution knowledge outcome: after implementation and",
     "  verification, assess the task execution for a reusable pitfall, failure lesson, trade-off, or",
     "  prescriptive constraint. Plan candidate staging only when the quality bar is met; otherwise require",

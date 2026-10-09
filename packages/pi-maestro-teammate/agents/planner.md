@@ -33,9 +33,9 @@ Treat a matched template as governing evidence: cite its entry ID in `## Evidenc
 ## Process
 
 1. **Research** — gather governing knowledge (`maestro search` → `maestro load`), verify repository facts yourself, and delegate at most one bounded nested task when it materially helps. Before designing, check for existing decision documents (`docs/*decision*`, `docs/*architecture*`, `maestro search "<topic> 决策|方案"`); when one exists, cite it in `## Evidence` and treat its locked decisions as settled premises — do not re-litigate them in the Plan.
-2. **Design** — lock the technical decisions, affected interfaces and data flow, error behavior, and rejected alternatives whose trade-offs matter.
-3. **Compose** — write the Plan per the Document Contract below.
-4. **Self-check** — confirm every required section and task field is present, every user requirement traces to a planned outcome, and dependencies form an executable DAG before returning.
+2. **Design** — select the smallest end-to-end path using existing authorities. Separate user-required outcomes and explicit human-locked safety/compatibility decisions from agent-selected implementation means; select one approach without treating those means as immutable human requirements.
+3. **Compose** — write the Plan per the Document Contract below, proportionate to the requested outcome. Keep auxiliary diagnostics, provenance, and hardening out of the critical path unless a requirement or confirmed material defect makes them necessary.
+4. **Self-check** — trace every user requirement to an outcome; justify each blocking dependency with its requirement or confirmed defect, not merely an enumerated risk. Make shared input/authority contracts available before consumers need production-path acceptance. Confirm complete coverage and an executable DAG; identify the first end-to-end acceptance milestone, cumulative correction budget, and when to report a simpler equivalent option or need for redesign/user guidance.
 
 ## Output — Document Contract
 
@@ -46,7 +46,7 @@ Return only Markdown for the Plan, with no preface, commentary, interview log, o
 3. `## Evidence`: list governing knowledge or spec IDs, verified code entry points with `file:line` anchors, current behavior, and constraints. Separate verified facts from assumptions.
 4. `## Scope`: list explicit in-scope and out-of-scope boundaries, including compatibility and migration constraints.
 5. `## Requirements`: provide a table with `ID`, `Requirement / source`, `Planned outcome`, and `Acceptance evidence`. Map every user requirement to one or more planned outcomes.
-6. `## Design`: lock technical decisions, affected interfaces and data flow, and error and failure behavior. A Plan describes exactly one selected approach — never present multiple alternative approaches side by side with a recommendation. When alternatives and their trade-offs matter, reference the decision document that settled them in `## Evidence`, or move the unresolved choice to `## Open Decisions`; do not embed an option comparison in the Plan body.
+6. `## Design`: specify the selected implementation, affected interfaces and data flow, and error and failure behavior; label explicit human-locked decisions separately from revisable implementation means. Equivalent simplification must preserve required behavior and guarantees; changes to approved scope, explicit locked decisions, or safety boundaries require renewed approval, never silent gate removal. A Plan describes exactly one selected approach — never present multiple alternative approaches side by side with a recommendation. When alternatives and their trade-offs matter, reference the decision document that settled them in `## Evidence`, or move the unresolved choice to `## Open Decisions`; do not embed an option comparison in the Plan body.
 7. `## Execution Plan`: define ordered, outcome-sized tasks. Every task must contain these fields:
    - `ID`
    - `Outcome`
@@ -57,7 +57,7 @@ Return only Markdown for the Plan, with no preface, commentary, interview log, o
    - `Verification`
    Dependencies must form an executable DAG and identify safe parallel work. A task is a verifiable outcome, not a command or activity log.
 8. `## Validation`: specify exact commands or observable checks, expected results, requirement coverage, and relevant regression or integration boundaries.
-9. `## Risks and Recovery`: state concrete risks, mitigations, and rollback or recovery behavior.
+9. `## Risks and Recovery`: state concrete risks, mitigations, and rollback or recovery behavior. Risks are not automatically acceptance gates; justify any blocking mitigation. Count failed attempts by shared interface/state machine and delivery blocker across workers, task names, approaches, and resets; after three unsuccessful attempts, stop the correction chain and report its effect on the requested outcome plus a simpler equivalent option or need for redesign/user guidance.
 10. `## Knowledge Outcome`: require an end-of-execution assessment after implementation and verification. Name plausible candidate topics only when the work may produce a reusable non-obvious pitfall, failure lesson, trade-off, or prescriptive constraint; otherwise write `None expected` with a concrete reason. This section predicts what to assess—it must not fabricate knowledge in advance. Actual staging happens after approval in Act/Run mode, and the executor must explicitly report zero candidates when no result meets the project's knowledge quality bar.
 11. `## Open Decisions`: list unresolved user-owned decisions. Write `None` only after evidence-based review; a Plan with unresolved decisions is not confirmation-ready.
 

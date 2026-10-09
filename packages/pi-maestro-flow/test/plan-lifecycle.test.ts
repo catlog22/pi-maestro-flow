@@ -547,6 +547,13 @@ test("Plan confirmation archives the exact draft before restoring Act and inject
     assert.match(toolText, /maestro search/);
     assert.match(toolText, /maestro load/);
     assert.match(toolText, /Todo dependency graph/);
+    assert.match(toolText, /user-required outcomes and explicit locked constraints from agent-selected implementation means/);
+    assert.match(toolText, /smallest end-to-end path using existing authorities/);
+    assert.match(toolText, /Explain each blocking dependency with a requirement or confirmed material defect/);
+    assert.match(toolText, /across workers, task names, approaches, and resets/);
+    assert.match(toolText, /After three unsuccessful attempts, stop the correction chain/);
+    assert.match(toolText, /obtain renewed approval for scope/);
+    assert.match(toolText, /Never silently drop acceptance conditions or bypass existing gates/);
     assert.match(toolText, /Goal creation is optional/);
     assert.match(toolText, /Do not create a Goal solely because the Plan was approved/);
     assert.match(toolText, /A Todo without a Goal completes through its own acceptance criteria/);
@@ -1347,6 +1354,10 @@ test("Plan hooks preserve read-only discovery and block mutations before approva
     assert.equal(planResult?.message?.customType, "plan-mode-reminder");
     assert.match(planPrompt, /Align every user requirement/);
     assert.match(planPrompt, /verifiable acceptance check/);
+    assert.match(planPrompt, /separate user-required outcomes and explicit locked constraints from agent-selected implementation means/);
+    assert.match(planPrompt, /Justify every blocking dependency by a requirement or confirmed material defect/);
+    assert.match(planPrompt, /not automatic delivery gates/);
+    assert.match(planPrompt, /Make shared authorities available before their consumers/);
     for (const role of ["explorer", "planner"]) {
       assert.ok(planPrompt.includes(`\`${role}\``), role);
     }

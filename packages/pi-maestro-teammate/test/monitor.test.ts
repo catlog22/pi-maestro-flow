@@ -255,6 +255,15 @@ test("monitor mode context is persistent, structured, idempotent, and supervisio
   assert.match(injected, /execute a phase DAG/);
   assert.match(injected, /settled windows alone do not prove project success/);
   assert.match(injected, /Release or deployment is not implied by implementation/);
+  assert.match(injected, /smallest end-to-end path to the user-required outcome/);
+  assert.match(injected, /justify every blocking edge with a requirement or confirmed material defect/);
+  assert.match(injected, /do not automatically gate unrelated delivery/);
+  assert.match(injected, /across workers, task names, approaches, and resets/);
+  assert.match(injected, /After three unsuccessful attempts, stop the correction chain/);
+  assert.match(injected, /Reuse an existing execution worker for bounded corrections/);
+  assert.match(injected, /ask the user to exit Monitor first/);
+  assert.match(injected, /this control window remains supervision-only/);
+  assert.match(injected, /obtain renewed approval for scope/);
 
   assert.match(injected, /workspace-window only for local Pi workers/);
   assert.match(injected, /provider=herdr requires an already-running local Herdr session/);

@@ -116,6 +116,34 @@ test("explicit blocked status remains blocked even without a dependency edge", (
   assert.match(text(value), /report it; do not invent work/);
 });
 
+test("auxiliary blocker recovery preserves gates, failure budgets and actor ownership", () => {
+  for (const actor of ["root", "child-1"]) {
+    const assignee = actor === "root" ? { kind: "root" as const, id: "root", label: "root" } : child;
+    for (const status of ["in_progress", "blocked"] as const) {
+      const dependencyOwner = actor === "root" ? child : { kind: "root" as const, id: "root", label: "root" };
+      const value = input([task("1", "pending", { assignee: dependencyOwner }), task("2", status, { assignee, blockedBy: ["1"], planHandoffKey: "approval-3" })], actor);
+      const before = structuredClone(value);
+      const focus = describeNewContextRecoveryFocus(value);
+      assert.equal(focus.kind, "blocked");
+      assert.match(focus.lines.join("\n"), /dependency's necessity and any simpler equivalent option/);
+      assert.match(focus.lines.join("\n"), /keep the block until resolved through the authorized lifecycle/);
+      assert.match(focus.lines.join("\n"), /budgets remain cumulative across workers and resets/);
+      assert.deepEqual(value, before);
+    }
+  }
+});
+
+test("active auxiliary work recovery reports alternatives without restarting the Plan", () => {
+  for (const actor of ["root", "child-1"]) {
+    const assignee = actor === "root" ? { kind: "root" as const, id: "root", label: "root" } : child;
+    const value = input([task("1", "in_progress", { assignee, planHandoffKey: "approval-3" })], actor);
+    assert.equal(describeNewContextRecoveryFocus(value).kind, "todo-active");
+    assert.match(text(value), /Carry cumulative failed-attempt budgets across workers and resets/);
+    assert.match(text(value), /report its necessity and a simpler equivalent option to the root\/user/);
+    assert.match(text(value), /without bypassing gates or re-decomposing the Plan/);
+  }
+});
+
 test("owned active task takes precedence over pending tasks and old unrelated Plan", () => {
   const value = input([task("1", "pending", { planHandoffKey: "approval-3" }), task("2", "in_progress", { planHandoffKey: "newer-plan" })]);
   value.todo.activeTaskId = "2";
