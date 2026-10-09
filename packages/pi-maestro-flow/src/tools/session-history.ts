@@ -735,8 +735,6 @@ export function registerSessionHistoryTool(
   const ownsCandidateAccelerator = options.candidateAccelerator === undefined;
   pi.registerTool(createSessionHistoryTool({ ...options, candidateAccelerator }) as never);
   if (ownsCandidateAccelerator) {
-    pi.on("session_shutdown", () => {
-      candidateAccelerator.destroy();
-    });
+    pi.on("session_shutdown", () => candidateAccelerator.destroy());
   }
 }

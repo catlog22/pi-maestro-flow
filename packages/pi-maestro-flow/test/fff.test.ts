@@ -117,7 +117,7 @@ test("FFF destroys an initializing finder when the session shuts down", async ()
   );
   await new Promise<void>((resolve) => setImmediate(resolve));
 
-  for (const handler of handlers.get("session_shutdown") ?? []) await handler();
+  const firstShutdown = Promise.all((handlers.get("session_shutdown") ?? []).map((handler) => handler()));
   assert.equal(firstDestroyCount, 1);
   const replacement = grep.execute(
     "fff-replacement",
@@ -131,7 +131,8 @@ test("FFF destroys an initializing finder when the session shuts down", async ()
 
   finishFirstScan({ ok: true, value: true });
   await assert.rejects(execution, /session ended/);
-  for (const handler of handlers.get("session_shutdown") ?? []) await handler();
+  await firstShutdown;
+  const replacementShutdown = Promise.all((handlers.get("session_shutdown") ?? []).map((handler) => handler()));
   assert.equal(
     replacementDestroyCount,
     1,
@@ -139,6 +140,7 @@ test("FFF destroys an initializing finder when the session shuts down", async ()
   );
   finishReplacementScan({ ok: true, value: true });
   await assert.rejects(replacement, /session ended/);
+  await replacementShutdown;
 });
 
 test("FFF loads its native index and searches a selected workspace subdirectory", async () => {
@@ -222,7 +224,7 @@ test("FFF search and fffind report results omitted by the requested limit", asyn
     assert.match(found.content[0]?.text ?? "", /limit reached/);
     assert.equal(found.details?.truncated, true);
   } finally {
-    shutdown?.();
+    await shutdown?.();
     await rm(root, { recursive: true, force: true });
   }
 });

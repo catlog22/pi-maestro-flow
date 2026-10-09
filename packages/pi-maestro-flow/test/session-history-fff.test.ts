@@ -279,7 +279,7 @@ test("native FFF discovers history files larger than 32 MiB", async () => {
     assert.deepEqual(payload.matches.map((match) => match.sessionId), ["large"]);
     assert.equal(payload.truncated, false);
   } finally {
-    accelerator.destroy();
+    await accelerator.destroy();
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -362,7 +362,7 @@ test("session history bypasses raw-line FFF for queries spanning projected text 
     assert.equal(payload.discovery?.reason, "projection-sensitive-query");
     assert.equal(payload.truncated, false);
   } finally {
-    accelerator.destroy();
+    await accelerator.destroy();
     await rm(root, { recursive: true, force: true });
   }
 });

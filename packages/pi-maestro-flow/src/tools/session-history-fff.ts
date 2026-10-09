@@ -1,4 +1,5 @@
-import { FileFinder, type FileFinderApi, type GrepCursor, type GrepMatch, type InitOptions, type Result } from "@ff-labs/fff-node";
+import type { GrepCursor, GrepMatch, InitOptions, Result } from "@ff-labs/fff-node";
+import { awaitFffTeardown, createFffProcessFinder, type CreateFffFinder, type FffFinder } from "./fff-process.ts";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import {
   MAX_SESSION_HISTORY_FILES,
@@ -47,11 +48,11 @@ export interface SessionHistoryFffCandidateAccelerator {
     ctx: SessionHistoryFffHostContext,
     signal?: AbortSignal,
   ): Promise<SessionHistoryFffSearchResult>;
-  destroy(): void;
+  destroy(): void | Promise<void>;
 }
 
 export interface SessionHistoryFffOptions {
-  createFinder?: typeof FileFinder.create;
+  createFinder?: CreateFffFinder;
   scanTimeoutMs?: number;
   searchTimeBudgetMs?: number;
   pageSize?: number;
@@ -67,7 +68,7 @@ interface Candidate {
 }
 
 interface FinderState {
-  finder: FileFinderApi;
+  finder: FffFinder;
   basePath: string;
 }
 
@@ -228,7 +229,7 @@ function unavailableResult(diagnostic: SessionHistoryFffDiagnostic): SessionHist
 export function createSessionHistoryFffAccelerator(
   options: SessionHistoryFffOptions = {},
 ): SessionHistoryFffCandidateAccelerator {
-  const createFinder = options.createFinder ?? FileFinder.create;
+  const createFinder = options.createFinder ?? createFffProcessFinder;
   const scanTimeoutMs = Math.min(
     boundedPositive(options.scanTimeoutMs, SESSION_HISTORY_FFF_SCAN_TIMEOUT_MS),
     SESSION_HISTORY_FFF_SCAN_TIMEOUT_MS,
@@ -248,36 +249,42 @@ export function createSessionHistoryFffAccelerator(
   const now = options.now ?? Date.now;
 
   let state: FinderState | undefined;
-  let initializing: Promise<FileFinderApi> | undefined;
-  let initializingFinder: FileFinderApi | undefined;
+  let initializing: Promise<FffFinder> | undefined;
   let initializingBasePath: string | undefined;
+  const ownedFinders = new Set<FffFinder>();
+  const pendingScans = new Set<Promise<FffFinder>>();
   let generation = 0;
   let destroyed = false;
   let failedBasePath: string | undefined;
 
-  const ensureFinder = async (basePath: string, signal?: AbortSignal): Promise<FileFinderApi> => {
+  const retireFinder = async (finder: FffFinder): Promise<void> => {
+    await finder.destroy();
+    await finder.closed;
+    ownedFinders.delete(finder);
+  };
+  const ensureFinder = async (basePath: string, signal?: AbortSignal): Promise<FffFinder> => {
     checkAbort(signal);
     if (destroyed) throw new Error("FFF accelerator destroyed.");
     if (state && !state.finder.isDestroyed && samePath(state.basePath, basePath)) return state.finder;
-    if (state) {
-      generation += 1;
-      state.finder.destroy();
-      state = undefined;
-    }
     if (failedBasePath && samePath(failedBasePath, basePath)) {
       throw new Error("FFF initialization previously failed.");
     }
     if (initializing && initializingBasePath && samePath(initializingBasePath, basePath)) {
       return await awaitAbortable(initializing, signal);
     }
-    if (initializingFinder) {
-      generation += 1;
-      initializingFinder.destroy();
-    }
-    const requestedGeneration = generation;
-    let ownedFinder: FileFinderApi | undefined;
-    const task = (async (): Promise<FileFinderApi> => {
-      let finder: FileFinderApi | undefined;
+    const requestedGeneration = ++generation;
+    state = undefined;
+    const assertOwner = (): void => {
+      if (requestedGeneration !== generation || destroyed) throw new Error("FFF accelerator was destroyed.");
+    };
+    const task = Promise.resolve().then(async (): Promise<FffFinder> => {
+      assertOwner();
+      // Never overlap an old worker with its replacement, even after a failed kill.
+      for (const previous of ownedFinders) {
+        await retireFinder(previous);
+        assertOwner();
+      }
+      let finder: FffFinder | undefined;
       try {
         const created = createFinder({ basePath, aiMode: true } satisfies InitOptions);
         if (!created.ok) {
@@ -285,36 +292,36 @@ export function createSessionHistoryFffAccelerator(
           throw new Error(resultError(created));
         }
         finder = created.value;
-        ownedFinder = finder;
-        initializingFinder = finder;
-        // Keep the shared initialization independent of an individual search
-        // caller's cancellation; each caller races its own await below.
-        const scanned = await finder.waitForScan(scanTimeoutMs);
-        if (requestedGeneration !== generation || destroyed || finder.isDestroyed) {
-          if (!finder.isDestroyed) finder.destroy();
-          throw new Error("FFF accelerator was destroyed.");
+        ownedFinders.add(finder);
+        if (finder.closed) {
+          const owned = finder;
+          void finder.closed.then(() => ownedFinders.delete(owned));
         }
+        // Keep the shared initialization independent of caller cancellation.
+        const scanned = await finder.waitForScan(scanTimeoutMs);
+        assertOwner();
+        if (finder.isDestroyed) throw new Error("FFF worker stopped.");
         if (!scanned.ok || !scanned.value) {
-          finder.destroy();
           failedBasePath = basePath;
           throw new Error(scanned.ok ? "FFF initial scan timed out." : `FFF initial scan failed: ${scanned.error}`);
         }
         state = { finder, basePath };
         return finder;
       } catch (error) {
-        // Abort and native failures must not strand a watcher/index. The
-        // caller maps non-abort errors to a bounded-inventory fallback.
-        if (finder) failedBasePath = basePath;
-        if (finder && !finder.isDestroyed) finder.destroy();
+        if (requestedGeneration === generation && !destroyed && finder && !finder.isDestroyed) {
+          failedBasePath = basePath;
+        }
+        if (finder) await retireFinder(finder);
         throw error;
       }
-    })().finally(() => {
-      if (initializingFinder === ownedFinder) initializingFinder = undefined;
+    }).finally(() => {
+      pendingScans.delete(task);
       if (initializing === task) {
         initializing = undefined;
         initializingBasePath = undefined;
       }
     });
+    pendingScans.add(task);
     initializing = task;
     initializingBasePath = basePath;
     return await awaitAbortable(task, signal);
@@ -332,7 +339,7 @@ export function createSessionHistoryFffAccelerator(
     if (!basePath || !activeFile) return unavailableResult("session-directory-unavailable");
     const activeFileName = basename(activeFile);
 
-    let finder: FileFinderApi;
+    let finder: FffFinder;
     try {
       finder = await ensureFinder(basePath, signal);
     } catch (error) {
@@ -380,7 +387,8 @@ export function createSessionHistoryFffAccelerator(
       for (let pageIndex = 0; pageIndex < maxPages; pageIndex += 1) {
         checkAbort(signal);
         if (now() >= deadline) { complete = false; break; }
-        const files = finder.glob("*.jsonl", { pageIndex, pageSize });
+        const files = await awaitAbortable(Promise.resolve(finder.glob("*.jsonl", { pageIndex, pageSize })), signal);
+        if (destroyed || finder.isDestroyed) throw new Error("FFF accelerator was destroyed.");
         if (!files.ok) throw new Error(files.error);
         for (const file of files.value.items) {
           if (file.size > NATIVE_GREP_DEFAULT_MAX_FILE_BYTES) addCandidate(file);
@@ -401,7 +409,7 @@ export function createSessionHistoryFffAccelerator(
             break;
           }
           pages += 1;
-          const result = finder.grep(form, {
+          const result: Awaited<ReturnType<FffFinder["grep"]>> = await awaitAbortable(Promise.resolve(finder.grep(form, {
             mode: "plain",
             smartCase: false,
             // The native U64 parameter cannot represent Infinity.
@@ -413,7 +421,8 @@ export function createSessionHistoryFffAccelerator(
             beforeContext: 0,
             afterContext: 0,
             classifyDefinitions: false,
-          });
+          })), signal);
+          if (destroyed || finder.isDestroyed) throw new Error("FFF accelerator was destroyed.");
           if (!result.ok) throw new Error(result.error);
           for (const match of result.value.items) addCandidate(match);
           cursor = result.value.nextCursor;
@@ -437,17 +446,15 @@ export function createSessionHistoryFffAccelerator(
 
   return {
     search,
-    destroy(): void {
-      if (destroyed) return;
+    async destroy(): Promise<void> {
       destroyed = true;
       generation += 1;
-      initializingFinder?.destroy();
-      initializingFinder = undefined;
-      state?.finder.destroy();
+      const scans = [...pendingScans];
       state = undefined;
       initializing = undefined;
       initializingBasePath = undefined;
       failedBasePath = undefined;
+      await awaitFffTeardown([...ownedFinders].map(retireFinder), scans);
     },
   };
 }
