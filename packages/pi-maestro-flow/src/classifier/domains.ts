@@ -12,7 +12,7 @@
 import type { ClassifyDomain } from "pi-maestro-teammate/v1/classify";
 import { classifyCandidateType } from "../self-evolve/runtime.ts";
 import type { CandidateType } from "../self-evolve/runtime.ts";
-import type { TodoProgressInput, TodoProgressLabel } from "../advisor/todo-review.ts";
+import type { TodoProgressInput, TodoProgressLabel } from "../advisor/todo-progress.ts";
 
 export interface SignalTypeInput {
   /** Signal text: title + summary + optional tool/episode hints. */

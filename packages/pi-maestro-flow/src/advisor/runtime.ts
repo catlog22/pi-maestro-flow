@@ -14,7 +14,7 @@
 
 import { resolve } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { normalizeTodoReviewConfig, type TodoReviewConfig, type TodoProgressLabel } from "./todo-review.ts";
+import { normalizeTodoReviewConfig, type TodoReviewConfig, type TodoProgressLabel } from "./todo-progress.ts";
 
 // ---------------------------------------------------------------------------
 // Types

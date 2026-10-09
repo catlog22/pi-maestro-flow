@@ -49,6 +49,14 @@ Advisor 监督的是**当前主会话自己的工作质量**，不是一个可�
 
 只安装 `pi-maestro-teammate` 时，`/advisor on|off|status` 控制 standalone 实现；on/off 是当前会话 override，项目 settings 和环境变量仍是下一会话的默认来源。
 
+## Todo 进展监护（v0.32.1）
+
+`/advisor todo`（或 `/advisor settings`）打开中英文配置面板，展示 configured/effective 值；Ctrl+S 后确认保存至 `.pi/advisor.json`。`/advisor todo on|off` 只修改 Todo 监护开关，不隐式开启 Advisor；监护需要 Advisor 已开启且模式为 `automatic` 或 `hybrid`。
+
+Todo 监护默认关闭，`/advisor todo mode active|shadow` 可切换：shadow 仅记录分类，不注入回溯提示或调用建议模型。active 基于宿主拥有的 root 与本地 subprocess 事件观察当前 in-progress Todo，在模型步数、有效时长或同类连续失败达到阈值后轻审查，必要时提供有界回溯/升级建议。工具执行、人工等待和容量重试不计有效时长；任务、会话、模型及 child incarnation 的变化围栏过期结果。建议不是批准，不终止工具，也不修改 Todo 状态；未被 Todo 监护覆盖的工作仍使用原有逐轮评审。
+
+默认阈值：12 模型步或 480,000ms 有效时长、3 次同类失败；回溯后 6 步、未收敛 24 步或 900,000ms；冷却 30,000ms，每任务最多 3 次轻审查、1 次建议升级。配置字段位于 `todoReview`，可在面板中修改，无持久化 Todo shape 变更。
+
 ## 3. 项目级配置
 
 配置文件路径为：
