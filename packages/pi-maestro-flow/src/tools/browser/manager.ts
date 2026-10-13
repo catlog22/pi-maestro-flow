@@ -6,7 +6,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Script, constants as vmConstants } from "node:vm";
 import { performance } from "node:perf_hooks";
-import type { Browser, CDPSession, CookieParam, Dialog, ElementHandle, Frame, HTTPRequest, HTTPResponse, KeyInput, Page, Target, WaitForOptions } from "puppeteer-core";
+import type { Browser, CDPSession, CookieParam, Dialog, ElementHandle, Frame, HTTPResponse, KeyInput, Page, Target, WaitForOptions } from "puppeteer-core";
 import puppeteer from "puppeteer-core";
 import { PROBE_JS, FIND_LISTS_JS, foldListsJs, monitorStartJs, MONITOR_STOP_JS, optimizeHtmlForTokens, smartTruncate, diffHtml, type HtmlDiff } from "./simplify.ts";
 import { PICKER_INJECT_JS, PICKER_POLL_JS, PICKER_TEARDOWN_JS } from "./picker.ts";
@@ -334,8 +334,9 @@ function reportBrowserDialogError(error: unknown): void {
   console.warn(`[pi-maestro-flow] browser dialog handling failed: ${reason}`);
 }
 
-interface RequestListenerScope {
+interface BrowserListenerScope {
   failure: Promise<unknown>;
+  readonly failedEvent: string | undefined;
   settle(): Promise<void>;
   cleanup(): void;
 }
@@ -360,7 +361,7 @@ interface PuppeteerEntry extends BaseEntry {
   ownedPage: boolean;
   profileDir?: string;
   dialogHandler?: (dialog: Dialog) => void;
-  requestScope?: RequestListenerScope;
+  requestScope?: BrowserListenerScope;
   elementSelectors: Map<number, string>;
   cdpSession?: CDPSession;
   /** Compiled navigation guard from open options; undefined disables guarding. */
@@ -835,7 +836,7 @@ export class BrowserManager implements BrowserManagerLike {
     const onTargetDestroyed = (target: Target) => { createdTargets.delete(target); };
     entry.browser.on("targetcreated", onTargetCreated);
     entry.browser.on("targetdestroyed", onTargetDestroyed);
-    let requestScope: RequestListenerScope | undefined;
+    let requestScope: BrowserListenerScope | undefined;
     let runFailed = false;
     let requestFailed = false;
     let cleanupFailed = false;
@@ -871,7 +872,7 @@ export class BrowserManager implements BrowserManagerLike {
         dialogSession.on("Page.javascriptDialogClosed", onDialogClosed);
         await dialogSession.send("Page.enable");
         throwIfAborted(runSignal);
-        requestScope = installRequestListenerScope(entry.page);
+        requestScope = installRequestListenerScope(entry.page, entry.browser);
         entry.requestScope = requestScope;
         const tab = createTabApi(entry, cwd, displays, screenshots, runSignal, timeoutMs, output, deadline.remaining);
         const navGuard = entry.policy
@@ -950,10 +951,12 @@ export class BrowserManager implements BrowserManagerLike {
       }
       diagnostics.cleanupDurationMs += Math.round(performance.now() - cleanupStarted);
       if (requestFailed && error instanceof Error) {
-        error.message += "\nBrowser run hint: a request handler failed; the named binding was retired. " +
+        error.message += `\nBrowser run hint: a ${requestScope?.failedEvent ?? "browser event"} handler failed; the named binding was retired. ` +
           "Owned resources were closed; an existing borrowed profile/CDP page may still execute. " +
-          "Inspect application state before reopening; do not replay earlier actions. Before continue/abort/respond, await page.setRequestInterception(true) in the same run, " +
-          "and return or await the request resolution promise.";
+          "Inspect application state before reopening; do not replay earlier actions. " +
+          (requestScope?.failedEvent === "page.request"
+            ? "Before continue/abort/respond, await page.setRequestInterception(true) in the same run, and return or await the request resolution promise."
+            : "Return or await event-handler promises. For JavaScript dialogs, configure dialogs on open or handle the dialog in one custom listener, not both.");
       }
       throw browserRunErrorHint(error);
     } finally {
@@ -2623,99 +2626,120 @@ async function pickPage(browser: Browser, target?: string): Promise<Page | undef
   return pages.find((page) => page.url() !== "about:blank") ?? pages[0];
 }
 
-export function installRequestListenerScope(page: Page): RequestListenerScope {
-  const originalOn = page.on;
-  const originalOff = page.off;
-  const originalOnce = page.once;
-  const callOn = originalOn.bind(page) as unknown as (type: PageEventType, handler: GenericPageHandler) => Page;
-  const callOff = originalOff.bind(page) as unknown as (type: PageEventType, handler?: GenericPageHandler) => Page;
-  const callOnce = originalOnce.bind(page) as unknown as (type: PageEventType, handler: GenericPageHandler) => Page;
-  const wrappers = new Map<GenericPageHandler, GenericPageHandler>();
-  const ownedHandlers: GenericPageHandler[] = [];
-  const trackedRequests = new WeakSet<HTTPRequest>();
+// Retain the exported request-scope API while containing all run-owned events.
+export function installRequestListenerScope(page: Page, browser?: Browser): BrowserListenerScope {
+  const trackedArguments = new WeakSet<object>();
   const pending = new Set<Promise<void>>();
+  const cleanups: Array<() => void> = [];
   let active = true;
   let failed = false;
+  let failedEvent: string | undefined;
   let failureReason: unknown;
-  let reportFailure!: (error: unknown) => void;
-  const failure = new Promise<unknown>((resolve) => {
-    reportFailure = (error) => {
-      if (!active || failed) return;
-      failed = true;
-      failureReason = error;
-      resolve(error);
-    };
-  });
-  const track = (promise: Promise<unknown>): void => {
-    const observed = promise.then(() => {}, reportFailure).finally(() => { pending.delete(observed); });
+  let resolveFailure!: (error: unknown) => void;
+  const failure = new Promise<unknown>((resolve) => { resolveFailure = resolve; });
+  const reportFailure = (event: string, error: unknown): void => {
+    if (!active || failed) return;
+    failed = true;
+    failedEvent = event;
+    failureReason = error;
+    resolveFailure(error);
+  };
+  const track = (event: string, promise: Promise<unknown>): void => {
+    const observed = promise.then(() => {}, (error) => reportFailure(event, error))
+      .finally(() => { pending.delete(observed); });
     pending.add(observed);
   };
-  const trackRequest = (request: HTTPRequest): void => {
-    if (trackedRequests.has(request)) return;
-    trackedRequests.add(request);
-    // Keep request identity intact and observe even fire-and-forget resolutions.
-    const wrapMethod = <K extends "continue" | "abort" | "respond">(method: K): void => {
-      const original = request[method].bind(request) as (...args: Parameters<HTTPRequest[K]>) => Promise<void>;
-      request[method] = ((...args: Parameters<HTTPRequest[K]>) => {
+  const trackArgument = (value: object, methods: readonly string[], event: string): void => {
+    if (trackedArguments.has(value)) return;
+    trackedArguments.add(value);
+    // Preserve identity and contain even fire-and-forget request/dialog actions.
+    for (const method of methods) {
+      const original = Reflect.get(value, method) as (...args: unknown[]) => Promise<unknown>;
+      Reflect.set(value, method, (...args: unknown[]) => {
         const result = (async () => {
-          if (!active) throw new Error("Browser request handler belongs to a finished run.");
-          return await original(...args);
+          if (!active) throw new Error(`Browser ${event} handler belongs to a finished run.`);
+          return await Reflect.apply(original, value, args);
         })();
-        track(result);
+        track(event, result);
         return result;
-      }) as HTTPRequest[K];
-    };
-    for (const method of ["continue", "abort", "respond"] as const) wrapMethod(method);
+      });
+    }
   };
-  const scopedOn = (type: PageEventType, handler: GenericPageHandler): Page => {
-    if (type !== "request") return callOn(type, handler);
-    let wrapper = wrappers.get(handler);
-    if (!wrapper) {
-      wrapper = (...args: never[]) => {
-        // Puppeteer queues handlers; off() cannot cancel already queued calls.
-        if (!active) return;
-        const work = (async () => {
-          try {
-            trackRequest(args[0] as HTTPRequest);
+  const install = (emitter: Page | Browser, label: string): void => {
+    const originalOn = emitter.on;
+    const originalOff = emitter.off;
+    const originalOnce = emitter.once;
+    const callOn = originalOn.bind(emitter) as unknown as (type: PageEventType, handler: GenericPageHandler) => Page | Browser;
+    const callOff = originalOff.bind(emitter) as unknown as (type: PageEventType, handler?: GenericPageHandler) => Page | Browser;
+    const wrappers = new Map<PageEventType, Map<GenericPageHandler, GenericPageHandler>>();
+    const ownedHandlers: Array<{ type: PageEventType; handler: GenericPageHandler }> = [];
+    const scopedOn = (type: PageEventType, handler: GenericPageHandler): Page | Browser => {
+      let eventWrappers = wrappers.get(type);
+      if (!eventWrappers) { eventWrappers = new Map(); wrappers.set(type, eventWrappers); }
+      let wrapper = eventWrappers.get(handler);
+      if (!wrapper) {
+        const event = `${label}.${String(type)}`;
+        wrapper = (...args: never[]) => {
+          // Queued calls can survive off(); fence them after run cleanup.
+          if (!active) return;
+          const work = (async () => {
+            if (label === "page" && type === "request") trackArgument(args[0], ["continue", "abort", "respond"], event);
+            if (label === "page" && type === "dialog") trackArgument(args[0], ["accept", "dismiss"], event);
             await handler(...args);
-          } catch (error) {
-            reportFailure(error);
-          }
-        })();
-        track(work);
-        return work;
-      };
-      wrappers.set(handler, wrapper);
-    }
-    const result = callOn(type, wrapper);
-    ownedHandlers.push(handler);
-    return result;
-  };
-  const scopedOff = (type: PageEventType, handler?: GenericPageHandler): Page => {
-    const result = callOff(type, type === "request" && handler ? wrappers.get(handler) ?? handler : handler);
-    if (type === "request") {
-      if (handler === undefined) {
-        ownedHandlers.length = 0;
-      } else {
-        const index = ownedHandlers.lastIndexOf(handler);
-        if (index >= 0) ownedHandlers.splice(index, 1);
+          })();
+          track(event, work);
+          // Emitters ignore callback promises, but queued request actions await them.
+          return work.catch(() => undefined);
+        };
+        eventWrappers.set(handler, wrapper);
       }
-    }
-    return result;
-  };
-  const scopedOnce = (type: PageEventType, handler: GenericPageHandler): Page => {
-    if (type !== "request") return callOnce(type, handler);
-    const onceHandler: GenericPageHandler = (...args) => {
-      try { return handler(...args); }
-      finally { scopedOff(type, onceHandler); }
+      const result = callOn(type, wrapper);
+      ownedHandlers.push({ type, handler });
+      return result;
     };
-    return scopedOn(type, onceHandler);
+    const scopedOff = (type: PageEventType, handler?: GenericPageHandler): Page | Browser => {
+      const result = callOff(type, handler ? wrappers.get(type)?.get(handler) ?? handler : handler);
+      for (let index = ownedHandlers.length - 1; index >= 0; index -= 1) {
+        const owned = ownedHandlers[index]!;
+        if (owned.type === type && (handler === undefined || owned.handler === handler)) {
+          ownedHandlers.splice(index, 1);
+          if (handler !== undefined) break;
+        }
+      }
+      return result;
+    };
+    const scopedOnce = (type: PageEventType, handler: GenericPageHandler): Page | Browser => {
+      const onceHandler: GenericPageHandler = (...args) => {
+        scopedOff(type, onceHandler);
+        return handler(...args);
+      };
+      return scopedOn(type, onceHandler);
+    };
+    emitter.on = scopedOn as typeof emitter.on;
+    emitter.off = scopedOff as typeof emitter.off;
+    emitter.once = scopedOnce as typeof emitter.once;
+    cleanups.push(() => {
+      let firstError: unknown;
+      try {
+        for (const { type, handler } of ownedHandlers) {
+          try { callOff(type, wrappers.get(type)!.get(handler)!); }
+          catch (error) { firstError ??= error; }
+        }
+      } finally {
+        ownedHandlers.length = 0;
+        wrappers.clear();
+        emitter.on = originalOn;
+        emitter.off = originalOff;
+        emitter.once = originalOnce;
+      }
+      if (firstError) throw firstError;
+    });
   };
-  page.on = scopedOn as unknown as Page["on"];
-  page.off = scopedOff as unknown as Page["off"];
-  page.once = scopedOnce as unknown as Page["once"];
+  install(page, "page");
+  if (browser) install(browser, "browser");
   return {
     failure,
+    get failedEvent() { return failedEvent; },
     async settle() {
       while (pending.size > 0) await Promise.all([...pending]);
       if (failed) throw failureReason;
@@ -2724,20 +2748,9 @@ export function installRequestListenerScope(page: Page): RequestListenerScope {
       if (!active) return;
       active = false;
       let firstError: unknown;
-      try {
-        for (let index = ownedHandlers.length - 1; index >= 0; index -= 1) {
-          try {
-            callOff("request", wrappers.get(ownedHandlers[index]!)!);
-          } catch (error) {
-            firstError ??= error;
-          }
-        }
-      } finally {
-        ownedHandlers.length = 0;
-        wrappers.clear();
-        page.on = originalOn;
-        page.off = originalOff;
-        page.once = originalOnce;
+      for (const cleanup of cleanups) {
+        try { cleanup(); }
+        catch (error) { firstError ??= error; }
       }
       if (firstError) throw firstError;
     },

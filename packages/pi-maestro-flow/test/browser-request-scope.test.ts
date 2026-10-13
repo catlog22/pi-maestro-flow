@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { HTTPRequest, Page } from "puppeteer-core";
+import { EventEmitter } from "node:events";
+import type { Browser, HTTPRequest, Page } from "puppeteer-core";
 import { installRequestListenerScope } from "../src/tools/browser/manager.ts";
 
 type Handler = (request: HTTPRequest) => unknown;
@@ -35,6 +36,91 @@ function requestWith(actions: Partial<Pick<HTTPRequest, "continue" | "abort" | "
     ...actions,
   } as unknown as HTTPRequest;
 }
+
+for (const event of ["dialog", "console", "targetcreated"] as const) {
+  for (const once of [false, true]) {
+    test(`browser event scope contains sync/async ${once ? "once" : "on"} ${event} failures`, async () => {
+      for (const asyncHandler of [false, true]) {
+        const page = new EventEmitter() as unknown as Page;
+        const browser = new EventEmitter() as unknown as Browser;
+        const scope = installRequestListenerScope(page, browser);
+        const emitter = event === "targetcreated" ? browser : page;
+        const failure = new Error("event callback failed");
+        const handler = asyncHandler ? async () => { throw failure; } : () => { throw failure; };
+        emitter[once ? "once" : "on"](event as never, handler);
+        assert.doesNotThrow(() => emitter.emit(event as never, { accept() {}, dismiss() {} } as never));
+        assert.equal(await scope.failure, failure);
+        assert.equal(scope.failedEvent, `${event === "targetcreated" ? "browser" : "page"}.${event}`);
+        await assert.rejects(scope.settle(), (error) => error === failure);
+        scope.cleanup();
+      }
+    });
+  }
+}
+
+for (const method of ["accept", "dismiss"] as const) {
+  test(`dialog scope contains fire-and-forget ${method} protocol failure and fences late actions`, async () => {
+    const page = new EventEmitter() as unknown as Page;
+    const scope = installRequestListenerScope(page);
+    const failure = new Error("Protocol error (Page.handleJavaScriptDialog): No dialog is showing");
+    let calls = 0;
+    const dialog = {
+      accept: async () => { calls++; throw failure; },
+      dismiss: async () => { calls++; throw failure; },
+    };
+    page.on("dialog", (received) => {
+      assert.equal(received, dialog);
+      void received[method]();
+    });
+    page.emit("dialog", dialog as never);
+    assert.equal(await scope.failure, failure);
+    await assert.rejects(scope.settle(), (error) => error === failure);
+    scope.cleanup();
+    await assert.rejects(dialog[method](), /finished run/);
+    assert.equal(calls, 1);
+  });
+}
+
+test("browser event scope drains pending callbacks and removes only run listeners", async () => {
+  const rawPage = new EventEmitter();
+  const rawBrowser = new EventEmitter();
+  const page = rawPage as unknown as Page;
+  const browser = rawBrowser as unknown as Browser;
+  const external = () => {};
+  page.on("console", external);
+  const original = { on: page.on, off: page.off, once: page.once, browserOn: browser.on };
+  const scope = installRequestListenerScope(page, browser);
+  let release!: () => void;
+  page.on("console", () => new Promise<void>((resolve) => { release = resolve; }));
+  page.emit("console", {} as never);
+  let settled = false;
+  const drain = scope.settle().then(() => { settled = true; });
+  await Promise.resolve();
+  assert.equal(settled, false);
+  release();
+  await drain;
+  let calls = 0;
+  const handler = () => { calls++; };
+  page.on("console", handler);
+  page.on("close", handler);
+  page.off("console", handler);
+  page.once("close", () => { calls++; page.emit("close", undefined); });
+  page.emit("close", undefined);
+  await scope.settle();
+  assert.equal(calls, 3, "once is removed before reentrant emission; off stays event-specific");
+  browser.on("targetcreated", handler);
+  const queued = rawBrowser.listeners("targetcreated")[0]!;
+  scope.cleanup();
+  queued({});
+  assert.equal(calls, 3);
+  assert.deepEqual(rawPage.listeners("console"), [external]);
+  assert.equal(page.listenerCount("close"), 0);
+  assert.equal(browser.listenerCount("targetcreated"), 0);
+  assert.equal(page.on, original.on);
+  assert.equal(page.off, original.off);
+  assert.equal(page.once, original.once);
+  assert.equal(browser.on, original.browserOn);
+});
 
 test("request scope fences callbacks queued before cleanup and restores page methods", async () => {
   const { page, handlers, enqueue } = requestPage();
