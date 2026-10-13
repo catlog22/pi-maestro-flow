@@ -25,6 +25,61 @@ test("standalone transport terminations and timeouts classify as network errors"
   assert.equal(isFallbackProviderError("Error: terminated"), true);
 });
 
+test("unknown provider failures and upstream HTTP/2 stream errors are retryable", () => {
+  const unknownError = "Error: An unknown error occurred";
+  const http2Error = "Error: stream_error: error: Upstream HTTP/2 stream failed, code: upstream_http2_stream_error, type: error";
+
+  assert.equal(classifyRetryError(unknownError), "provider");
+  assert.equal(isRetryableProviderError(unknownError), true);
+  assert.equal(isFallbackProviderError(unknownError), true);
+
+  const normalizedUnknown = normalizePiRetryErrorMessage(unknownError);
+  assert.equal(normalizedUnknown, `${unknownError} (service unavailable)`);
+  assert.equal(normalizePiRetryErrorMessage(normalizedUnknown), normalizedUnknown);
+  assert.equal(isRetryableAssistantError({
+    role: "assistant",
+    content: [],
+    api: "openai-responses",
+    provider: "openai",
+    model: "test-model",
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "error",
+    errorMessage: normalizedUnknown,
+    timestamp: 0,
+  }), true);
+
+  assert.equal(classifyRetryError(http2Error), "network");
+  assert.equal(isRetryableProviderError(http2Error), true);
+  const normalizedHttp2 = normalizePiRetryErrorMessage(http2Error);
+  assert.equal(normalizedHttp2, `${http2Error} (network error)`);
+  assert.equal(isRetryableAssistantError({
+    role: "assistant",
+    content: [],
+    api: "openai-responses",
+    provider: "openai",
+    model: "test-model",
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "error",
+    errorMessage: normalizedHttp2,
+    timestamp: 0,
+  }), true);
+  assert.equal(classifyRetryError("upstream_http2_stream_error"), "network");
+
+});
 test("stream_read_error is normalized into Pi-owned provider retry", () => {
   const raw = "stream_read_error: upstream response body closed";
   assert.equal(classifyRetryError(raw), "network");

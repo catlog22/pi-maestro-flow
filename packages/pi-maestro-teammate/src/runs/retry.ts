@@ -143,8 +143,12 @@ const FALLBACK_ONLY_ERROR =
 
 const STREAM_READ_ERROR = /\bstream[_\s-]*read[_\s-]*error\b/i;
 
+const UPSTREAM_HTTP2_STREAM_ERROR = /\b(?:upstream http\/?2 stream failed|upstream_http2_stream_error)\b/i;
+
 const NETWORK_ERROR =
   /\b(?:econnreset|econnrefused|econnaborted|enetunreach|enetdown|ehostunreach|enotfound|eai_again|etimedout|epipe|socket hang up|fetch failed|failed to fetch|getaddrinfo|network(?: ?error| request)?|connection (?:error|failed|failure|reset|refused|lost|timed out|timeout|closed|terminated)|other side closed|upstream connect|reset before headers|request timed out|timed out waiting|signal timed out|timed? out|timeout|terminated|(?:web)?socket (?:was )?(?:closed|error)|sse response headers timed out|headers timed out|stream ended (?:without|before)|http2 request did not get a response|connectionerror|connectionreseterror|connectionrefusederror|connectionabortederror|brokenpipeerror|timeouterror|remotedisconnected|read timed out|requests\.exceptions)\b/i;
+
+const UNKNOWN_PROVIDER_ERROR = /\ban unknown error occurred\b/i;
 
 const PROVIDER_ERROR =
   /\b(?:408|429|500|502|503|504|524|rate[_\s-]*limit(?:ed|[_\s-]*exceeded|[_\s-]*error)?|too many (?:concurrent |simultaneous )?requests?|requests too quickly|concurr(?:ency|ent)|capacity|overloaded(?:_error)?|service[_\s-]*unavailable|provider returned error|server[_\s-]*error|internal[_\s-]*error|resource[_\s-]*exhausted)\b/i;
@@ -225,8 +229,11 @@ export function classifyRetryErrorDetailed(
   if (NON_RETRYABLE_ERROR.test(diagnostic)) return { kind: "non-retryable", defaulted: false };
   if (LOCAL_INFRASTRUCTURE_ERROR.test(diagnostic)) return { kind: "non-retryable", defaulted: false };
   if (FALLBACK_ONLY_ERROR.test(diagnostic)) return { kind: "fallback-only", defaulted: false };
-  if (STREAM_READ_ERROR.test(diagnostic)) return { kind: "network", defaulted: false };
+  if (STREAM_READ_ERROR.test(diagnostic) || UPSTREAM_HTTP2_STREAM_ERROR.test(diagnostic)) {
+    return { kind: "network", defaulted: false };
+  }
   if (NETWORK_ERROR.test(diagnostic)) return { kind: "network", defaulted: false };
+  if (UNKNOWN_PROVIDER_ERROR.test(diagnostic)) return { kind: "provider", defaulted: false };
   if (PROVIDER_ERROR.test(diagnostic)) return { kind: "provider", defaulted: false };
   return { kind: "provider", defaulted: true };
 }
@@ -356,10 +363,18 @@ export function normalizePiRetryErrorMessage(message: string | undefined): strin
   ) {
     return `${message} (service unavailable)`;
   }
+  const retryKind = classifyRetryError(message);
   if (
-    classifyRetryError(message) !== "network"
-    || !STREAM_READ_ERROR.test(message)
-    || /\bnetwork(?: ?error| request)?\b/i.test(message)
+    retryKind === "provider"
+    && UNKNOWN_PROVIDER_ERROR.test(diagnostic)
+    && !/\bservice.?unavailable\b/i.test(diagnostic)
+  ) {
+    return `${message} (service unavailable)`;
+  }
+  if (
+    retryKind !== "network"
+    || !(STREAM_READ_ERROR.test(diagnostic) || UPSTREAM_HTTP2_STREAM_ERROR.test(diagnostic))
+    || /\bnetwork(?: ?error| request)?\b/i.test(diagnostic)
   ) {
     return message;
   }
