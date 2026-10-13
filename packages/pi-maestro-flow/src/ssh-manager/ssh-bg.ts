@@ -13,6 +13,7 @@ import {
   type SshCommandSession,
 } from "./executor.ts";
 import { SSH_HOST_ID_PATTERN, type SshHost } from "./model.ts";
+import { runToolNotification } from "../tools/tool-result.ts";
 
 const MAX_SESSIONS = 16;
 const MAX_ACTIVE_JOBS = 32;
@@ -98,8 +99,8 @@ export interface SshBgResolvedTarget {
 export interface SshBgManagerOptions {
   executor: Pick<SshExecutor, "openSession">;
   resolveTarget(targetId?: string): Promise<SshBgResolvedTarget>;
-  onCompletion?: (completion: SshBgCompletion) => void;
-  onSnapshot?: (snapshot: SshBgSnapshotPayload) => void;
+  onCompletion?: (completion: SshBgCompletion) => unknown;
+  onSnapshot?: (snapshot: SshBgSnapshotPayload) => unknown;
 }
 
 export interface SshBgCompletion {
@@ -381,7 +382,7 @@ export class SshBgManager {
     job.resolveTerminal();
     this.publishSnapshot();
     if (job.background && !this.closed && !session.closed) {
-      this.options.onCompletion?.({
+      runToolNotification("ssh_bg completion", () => this.options.onCompletion?.({
         jobId: job.id,
         sessionId: job.sessionId,
         command: job.command,
@@ -390,7 +391,7 @@ export class SshBgManager {
         signal: job.signal,
         outputTail: tailLines(job.outputTail, 20),
         tailTruncated: job.tailTruncated,
-      });
+      }));
     }
   }
 
@@ -544,7 +545,7 @@ export class SshBgManager {
 
   private publishSnapshot(): void {
     if (this.closed) return;
-    this.options.onSnapshot?.({
+    runToolNotification("ssh_bg snapshot", () => this.options.onSnapshot?.({
       sessions: [...this.sessions.values()].map((session) => ({
         id: session.id,
         hostId: session.hostId,
@@ -566,7 +567,7 @@ export class SshBgManager {
           tailTruncated: job.tailTruncated,
         })),
       })),
-    });
+    }));
   }
 }
 
@@ -581,7 +582,7 @@ export function registerSshBg(
     onCompletion: (completion) => {
       const status = completion.status;
       const output = completion.outputTail || "(empty)";
-      pi.sendMessage({
+      return pi.sendMessage({
         customType: "ssh-bg-complete",
         content: [
           `Background SSH job ${completion.jobId} ${status} (exit ${completion.exitCode ?? "unknown"}).`,

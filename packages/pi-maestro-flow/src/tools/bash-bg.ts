@@ -17,6 +17,7 @@ import type { ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { runToolNotification } from "./tool-result.ts";
 
 const MAX_TAIL_BYTES = 64 * 1024;
 const MAX_LOG_BYTES = 16 * 1024 * 1024;
@@ -124,6 +125,7 @@ interface Job {
   terminationInProgress: boolean;
   treeCleanupConfirmed: boolean;
   terminationFailure?: string;
+  outputFailure?: string;
   termination?: Promise<void>;
   terminal: Promise<void>;
   resolveTerminal: () => void;
@@ -159,6 +161,7 @@ function tailOutput(job: Job, lines: number): TailOutput {
 function jobStatus(job: Job): BashBgJobStatus {
   if (job.terminationFailure) return "failed";
   if (job.terminationInProgress) return "stopping";
+  if (job.outputFailure) return "failed";
   if (!job.done) return job.stopRequested ? "stopping" : "running";
   if (job.stopRequested) return "killed";
   return job.exitCode === 0 ? "completed" : "failed";
@@ -363,7 +366,7 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
       ] }),
       updatedAt: job.updatedAt,
       capabilities: observationCapabilities,
-      ...(job.terminationFailure ? { error: job.terminationFailure } : {}),
+      ...(job.terminationFailure || job.outputFailure ? { error: job.terminationFailure ?? job.outputFailure } : {}),
     };
   };
 
@@ -435,7 +438,7 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
         .sort((a, b) => b.startedAt - a.startedAt)
         .map(jobSnapshot),
     };
-    pi.events.emit(BASH_BG_UPDATE_EVENT, payload);
+    runToolNotification("bash_bg snapshot", () => pi.events.emit(BASH_BG_UPDATE_EVENT, payload));
   };
   const publishSnapshotSoon = (): void => {
     if (disposed || snapshotTimer) return;
@@ -465,7 +468,7 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
       tail.text ? `output (tail):\n${tail.text}` : "output: (empty)",
       ...(tail.truncated ? [logAccess(job)] : []),
     ].join("\n");
-    pi.sendMessage(
+    runToolNotification("bash_bg completion", () => pi.sendMessage(
       {
         customType: "bash-bg-complete",
         content: body,
@@ -480,7 +483,7 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
         } satisfies BashBgCompletionDetails,
       },
       { triggerTurn: true },
-    );
+    ));
   };
 
   const waitForTerminationBoundary = async (job: Job, includeProcessGroup: boolean, timeoutMs: number): Promise<boolean> => {
@@ -571,6 +574,15 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
     const outFile = path.join(baseDir, `${id}.log`);
     const logFd = fs.openSync(outFile, "wx", 0o600);
     const ws = fs.createWriteStream(outFile, { fd: logFd, autoClose: true });
+    let logFailed = false;
+    let reportLogError = (error: Error): void => {
+      runToolNotification("bash_bg log stream", () => { throw error; });
+    };
+    // Keep this listener even after end/destroy: disk failures can arrive late.
+    ws.on("error", (error: Error) => {
+      logFailed = true;
+      reportLogError(error);
+    });
     const shellConfig = getShellConfig();
     let child: ReturnType<typeof spawn>;
     try {
@@ -618,15 +630,7 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
     };
     jobs.set(id, job);
     publishSnapshot();
-    const append = (d: Buffer): void => {
-      if (disposed || generation !== runtimeGeneration) return;
-      const remainingLogBytes = Math.max(0, maxLogBytes - job.logBytes);
-      if (remainingLogBytes > 0) {
-        const retained = d.byteLength <= remainingLogBytes ? d : d.subarray(0, remainingLogBytes);
-        ws.write(retained);
-        job.logBytes += retained.byteLength;
-      }
-      if (d.byteLength > remainingLogBytes) job.logTruncated = true;
+    const appendTail = (d: Buffer): void => {
       job.tail += d.toString("utf8");
       if (job.tail.length > MAX_TAIL_BYTES) {
         job.tail = job.tail.slice(-MAX_TAIL_BYTES);
@@ -635,6 +639,37 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
       job.outputBytes += d.byteLength;
       job.updatedAt = Date.now();
       publishSnapshotSoon();
+    };
+    const onStreamError = (source: string, error: Error): void => {
+      if (disposed || generation !== runtimeGeneration) return;
+      const firstFailure = !job.outputFailure;
+      job.outputFailure ??= `${source} stream failed: ${error.message}`;
+      job.cachedSnapshot = undefined;
+      // Never send diagnostics through the possibly broken log writer.
+      appendTail(Buffer.from(`\n${source} stream failed: ${error.message}\n`));
+      publishSnapshot();
+      if (firstFailure && jobIsActive(job)) {
+        // terminateJob owns the cleanup result; a rejected stop remains visible
+        // and retryable, not an unhandled rejection or a fabricated leader exit.
+        void terminateJob(job).catch(() => {});
+      }
+    };
+    reportLogError = (error) => onStreamError("log", error);
+    const append = (d: Buffer): void => {
+      if (disposed || generation !== runtimeGeneration) return;
+      appendTail(d);
+      const remainingLogBytes = Math.max(0, maxLogBytes - job.logBytes);
+      if (!logFailed && remainingLogBytes > 0) {
+        const retained = d.byteLength <= remainingLogBytes ? d : d.subarray(0, remainingLogBytes);
+        try {
+          ws.write(retained);
+          job.logBytes += retained.byteLength;
+        } catch (error) {
+          logFailed = true;
+          reportLogError(error instanceof Error ? error : new Error(String(error)));
+        }
+      }
+      if (d.byteLength > remainingLogBytes) job.logTruncated = true;
     };
     let exitCode: number | null = null;
     let processReleased = false;
@@ -648,7 +683,6 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
       child.stderr?.off("data", append);
       child.off("exit", onExit);
       child.off("close", onClose);
-      child.off("error", onError);
       child.stdout?.destroy();
       child.stderr?.destroy();
       ws.end();
@@ -719,10 +753,14 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
       if (!job.terminationInProgress) finalizeOutput();
     };
     onError = (error) => {
+      if (processReleased) return;
       append(Buffer.from(`\n${error.message}\n`));
       markDone(exitCode ?? -1);
       if (!job.terminationInProgress) finalizeOutput();
     };
+    // Error listeners intentionally survive pipe destruction and late cleanup.
+    child.stdout?.on("error", (error: Error) => onStreamError("stdout", error));
+    child.stderr?.on("error", (error: Error) => onStreamError("stderr", error));
     child.stdout?.on("data", append);
     child.stderr?.on("data", append);
     child.on("exit", onExit);
@@ -860,6 +898,7 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
                 type: "text",
                 text: appendLogAccess(`${out.text || "(no output)"}\n(exit ${job.exitCode})`, job, out.truncated),
               }],
+              ...(job.outputFailure ? { isError: true } : {}),
               details: jobDetails(job, "run", out.truncated),
             };
           }
@@ -909,6 +948,7 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
         const text = `job ${job.id}: ${state}\ncommand: ${job.command}\noutput (tail):\n${out.text || "(empty)"}`;
         return {
           content: [{ type: "text", text: appendLogAccess(text, job, out.truncated) }],
+          ...(job.outputFailure ? { isError: true } : {}),
           details: jobDetails(job, "status", out.truncated),
         };
       }
@@ -943,6 +983,7 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
       const text = `job ${job.id}: ${state}\ncommand: ${job.command}\noutput (tail):\n${out.text || "(empty)"}`;
       return {
         content: [{ type: "text", text: appendLogAccess(text, job, out.truncated) }],
+        ...(job.outputFailure ? { isError: true } : {}),
         details: jobDetails(job, "wait", out.truncated),
       };
     },

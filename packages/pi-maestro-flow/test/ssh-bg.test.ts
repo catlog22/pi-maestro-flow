@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import test from "node:test";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Value } from "typebox/value";
 import {
   SshBgManager,
+  registerSshBg,
   SshBgParams,
   type SshBgCompletion,
   type SshBgResolvedTarget,
@@ -315,3 +317,70 @@ test("ssh_bg can be initialized again after session shutdown", async () => {
   const listed = await fixture.instance.execute({ action: "job_list" });
   assert.match(listed.content[0]!.type === "text" ? listed.content[0]!.text : "", /No SSH background sessions/);
 });
+
+for (const mode of ["throw", "reject"] as const) {
+  test(`ssh_bg contains ${mode}ing observer callbacks without altering command results`, async (t) => {
+    const warnings: string[] = [];
+    t.mock.method(console, "warn", (message: string) => warnings.push(message));
+    const executor = new FakeExecutor();
+    const completions: SshBgCompletion[] = [];
+    const fail = () => {
+      if (mode === "throw") throw new Error("observer unavailable");
+      return Promise.reject(new Error("observer unavailable"));
+    };
+    const instance = new SshBgManager({
+      executor,
+      resolveTarget: async () => target(),
+      onSnapshot: fail,
+      onCompletion: (completion) => {
+        completions.push(completion);
+        return fail();
+      },
+    });
+    try {
+      for (const exitCode of [0, 7]) {
+        const started = await instance.execute({ action: "job_start", command: "actual command" });
+        const channel = executor.sessions.at(-1)!.channels[0]!;
+        assert.doesNotThrow(() => channel.complete("actual output\n", "", exitCode));
+        await tick();
+        const status = await instance.execute({ action: "job_status", jobId: started.details!.jobId! });
+        assert.equal(status.details!.status, exitCode === 0 ? "completed" : "failed");
+        assert.equal(status.details!.exitCode, exitCode);
+        assert.equal(status.details!.signal, null);
+        assert.equal(status.details!.outputTail, "actual output");
+        assert.equal(completions.at(-1)!.exitCode, exitCode);
+        assert.equal(executor.sessions.at(-1)!.closed, false, "observer failure must not close a valid session");
+        assert.equal(completions.length, exitCode === 0 ? 1 : 2);
+      }
+      assert.ok(warnings.some((warning) => /ssh_bg snapshot failed.*observer unavailable/.test(warning)));
+      assert.ok(warnings.some((warning) => /ssh_bg completion failed.*observer unavailable/.test(warning)));
+    } finally {
+      await instance.close();
+    }
+  });
+
+  test(`ssh_bg contains ${mode}ing API notifications including sendMessage promises`, async (t) => {
+    const warnings: string[] = [];
+    t.mock.method(console, "warn", (message: string) => warnings.push(message));
+    const executor = new FakeExecutor();
+    const fail = () => {
+      if (mode === "throw") throw new Error("API unavailable");
+      return Promise.reject(new Error("API unavailable"));
+    };
+    const api = { events: { emit: fail }, sendMessage: fail } as unknown as ExtensionAPI;
+    const instance = registerSshBg(api, { executor, resolveTarget: async () => target() }, false);
+    try {
+      const started = await instance.execute({ action: "job_start", command: "notification test" });
+      assert.doesNotThrow(() => executor.sessions[0]!.channels[0]!.complete("done\n"));
+      await tick();
+      const status = await instance.execute({ action: "job_status", jobId: started.details!.jobId! });
+      assert.equal(status.details!.status, "completed");
+      assert.equal(status.details!.exitCode, 0);
+      assert.equal(status.details!.outputTail, "done");
+      assert.ok(warnings.some((warning) => /ssh_bg snapshot failed.*API unavailable/.test(warning)));
+      assert.ok(warnings.some((warning) => /ssh_bg completion failed.*API unavailable/.test(warning)));
+    } finally {
+      await instance.close();
+    }
+  });
+}

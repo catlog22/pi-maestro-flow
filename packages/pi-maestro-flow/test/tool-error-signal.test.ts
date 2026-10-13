@@ -8,8 +8,22 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import {
   installReturnedToolErrorBridge,
+  runToolNotification,
   type FlowToolResult,
 } from "../src/tools/tool-result.ts";
+
+test("tool notifications report sync and async failures without changing execution outcomes", async (t) => {
+  const warnings: string[] = [];
+  t.mock.method(console, "warn", (message: string) => { warnings.push(message); });
+  assert.doesNotThrow(() => runToolNotification("sync notification", () => { throw new Error("sync failure"); }));
+  runToolNotification("async notification", async () => { throw new Error("async failure"); });
+  runToolNotification("normal notification", () => undefined);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(warnings, [
+    "[pi-maestro-flow] sync notification failed: sync failure",
+    "[pi-maestro-flow] async notification failed: async failure",
+  ]);
+});
 
 test("returned tool errors become canonical tool-result errors without changing the result", async () => {
   const tools: ToolDefinition[] = [];

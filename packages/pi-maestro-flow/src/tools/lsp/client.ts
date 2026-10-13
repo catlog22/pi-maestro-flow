@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import crossSpawn from "cross-spawn";
 import type { Diagnostic, LspClientLike, LspServerConfig } from "./types.ts";
+import { runToolNotification } from "../tool-result.ts";
 
 interface PendingRequest {
   resolve(value: unknown): void;
@@ -95,6 +96,8 @@ export class LspClient implements LspClientLike {
   ) {
     this.#child = child;
     child.stdout.on("data", (chunk: Buffer) => this.#read(chunk));
+    child.stdout.on("error", (error) => { this.#closeWithError(error); this.#terminate(); });
+    child.stderr.on("error", (error) => { this.#closeWithError(error); this.#terminate(); });
     child.stderr.resume();
     child.stdin.on("error", (error) => this.#closeWithError(error));
     child.on("error", (error) => this.#closeWithError(error));
@@ -218,16 +221,17 @@ export class LspClient implements LspClientLike {
         if (pending.signal && pending.abort) pending.signal.removeEventListener("abort", pending.abort);
         this.#pending.delete(id);
       };
-      const timer = setTimeout(() => {
+      const cancel = (reason: Error): void => {
         cleanup();
-        this.notify("$/cancelRequest", { id });
-        reject(new Error(`LSP ${method} timed out after ${timeoutMs}ms.`));
-      }, timeoutMs);
-      const abort = () => {
-        cleanup();
-        this.notify("$/cancelRequest", { id });
-        reject(abortError());
+        reject(reason);
+        try {
+          this.notify("$/cancelRequest", { id });
+        } catch (error) {
+          this.#failProtocol(`cancel request write failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
       };
+      const timer = setTimeout(() => cancel(new Error(`LSP ${method} timed out after ${timeoutMs}ms.`)), timeoutMs);
+      const abort = () => cancel(abortError());
       if (signal) signal.addEventListener("abort", abort, { once: true });
       this.#pending.set(id, {
         resolve: (value) => { cleanup(); resolve(value); },
@@ -461,10 +465,17 @@ export class LspClient implements LspClientLike {
       if (this.#buffer.length < bodyStart + length) return;
       const body = this.#buffer.subarray(bodyStart, bodyStart + length).toString("utf8");
       this.#buffer = this.#buffer.subarray(bodyStart + length);
+      let message: JsonRpcMessage;
       try {
-        void this.#handle(JSON.parse(body) as JsonRpcMessage);
+        message = JSON.parse(body) as JsonRpcMessage;
       } catch {
         this.#failProtocol("body is not valid JSON");
+        return;
+      }
+      try {
+        this.#handle(message);
+      } catch (error) {
+        this.#failProtocol(`message handling failed: ${error instanceof Error ? error.message : String(error)}`);
         return;
       }
     }
@@ -476,7 +487,7 @@ export class LspClient implements LspClientLike {
     try { this.#child.kill(); } catch {}
   }
 
-  async #handle(message: JsonRpcMessage): Promise<void> {
+  #handle(message: JsonRpcMessage): void {
     if (typeof message.id === "number" && !message.method) {
       const pending = this.#pending.get(message.id);
       if (!pending) return;
@@ -560,7 +571,7 @@ export class LspClient implements LspClientLike {
     this.#failAll(error);
     if (!this.#closeReported) {
       this.#closeReported = true;
-      this.onClose?.(error);
+      runToolNotification(`LSP ${this.config.name} close notification`, () => this.onClose?.(error));
     }
   }
 
@@ -568,7 +579,7 @@ export class LspClient implements LspClientLike {
     if (!this.#closed) this.#failAll(new Error(`Language server ${this.config.name} shut down.`));
     if (!this.#closeReported) {
       this.#closeReported = true;
-      this.onClose?.();
+      runToolNotification(`LSP ${this.config.name} close notification`, () => this.onClose?.());
     }
   }
 

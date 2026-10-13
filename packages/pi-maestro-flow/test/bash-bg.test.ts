@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
@@ -110,7 +112,10 @@ interface Harness {
 	startSession: () => void;
 }
 
-function createHarness(options: RegisterBashBgOptions = {}): Harness {
+function createHarness(options: RegisterBashBgOptions = {}, notifications: {
+	onSnapshot?: () => unknown;
+	onCompletion?: () => unknown;
+} = {}): Harness {
 	let registeredTool: ToolLike | undefined;
 	const eventHandlers = new Map<string, Array<(payload: unknown) => void>>();
 	const lifecycleHandlers = new Map<string, Array<(event?: unknown) => unknown>>();
@@ -129,8 +134,11 @@ function createHarness(options: RegisterBashBgOptions = {}): Harness {
 			},
 		},
 	} as unknown as ExtensionContext;
-	const emit = (channel: string, payload?: unknown): void => {
-		if (channel === BASH_BG_UPDATE_EVENT) snapshots.push(payload as BashBgSnapshotPayload);
+	const emit = (channel: string, payload?: unknown): unknown => {
+		if (channel === BASH_BG_UPDATE_EVENT) {
+			snapshots.push(payload as BashBgSnapshotPayload);
+			return notifications.onSnapshot?.();
+		}
 		for (const handler of eventHandlers.get(channel) ?? []) handler(payload);
 	};
 	const api = {
@@ -151,6 +159,7 @@ function createHarness(options: RegisterBashBgOptions = {}): Harness {
 		},
 		sendMessage(message: Harness["messages"][number]["message"], options?: Harness["messages"][number]["options"]) {
 			messages.push({ message, options });
+			return notifications.onCompletion?.();
 		},
 		registerMessageRenderer(type: string, renderer: MessageRendererLike) {
 			renderers.set(type, renderer);
@@ -931,6 +940,153 @@ test("observe waits for mixed teammate and bash_bg targets through one barrier",
 		assert.match(waited.observations[1]?.summary ?? "", /built|completed/);
 	} finally {
 		disposeTeammate();
+		await harness.shutdown();
+	}
+});
+
+for (const mode of ["throw", "reject"] as const) {
+	test(`bash_bg contains ${mode}ing snapshot and completion notifications`, async (t) => {
+		const warnings: string[] = [];
+		t.mock.method(console, "warn", (message: string) => warnings.push(message));
+		const fail = () => {
+			if (mode === "throw") throw new Error("notification unavailable");
+			return Promise.reject(new Error("notification unavailable"));
+		};
+		const harness = createHarness({}, { onSnapshot: fail, onCompletion: fail });
+		try {
+			const started = await harness.tool.execute("notify-fault", {
+				action: "start", command: `node -e "console.log('actual output');process.exit(3)"`,
+			});
+			const jobId = started.details!.jobId!;
+			await waitForMessage(harness.messages, "bash-bg-complete");
+			await delay(0);
+			const status = await harness.tool.execute("actual-result", { action: "status", jobId });
+			assert.equal(status.details!.exitCode, 3);
+			assert.equal(status.details!.running, false);
+			assert.match(harness.snapshots.at(-1)!.jobs[0]!.outputTail, /actual output/);
+			assert.equal(harness.snapshots.at(-1)!.jobs[0]!.status, "failed");
+			assert.equal(harness.messages.length, 1);
+			assert.ok(warnings.some((warning) => /bash_bg snapshot failed.*notification unavailable/.test(warning)));
+			assert.ok(warnings.some((warning) => /bash_bg completion failed.*notification unavailable/.test(warning)));
+		} finally {
+			await harness.shutdown();
+		}
+	});
+}
+
+for (const source of ["log", "stdout", "stderr"] as const) {
+	test(`bash_bg contains ${source} stream errors and retains late error listeners`, async (t) => {
+		let writer: fs.WriteStream | undefined;
+		let child: childProcess.ChildProcess | undefined;
+		const createWriteStream = fs.createWriteStream;
+		const spawn = childProcess.spawn;
+		t.mock.method(fs, "createWriteStream", (...args: Parameters<typeof createWriteStream>) => {
+			writer = createWriteStream(...args);
+			if (source === "log") {
+				t.mock.method(writer, "_write", (_chunk: unknown, _encoding: string, callback: (error?: Error) => void) => {
+					callback(new Error("injected disk full"));
+				});
+			}
+			return writer;
+		});
+		t.mock.method(childProcess, "spawn", (...args: Parameters<typeof spawn>) => {
+			child = spawn(...args);
+			return child;
+		});
+		syncBuiltinESMExports();
+		const harness = createHarness();
+		try {
+			const started = await harness.tool.execute("stream-fault", {
+				action: "start", command: `node -e "console.log('ready');setInterval(()=>{},1000)"`,
+			});
+			assert.ok(child);
+			assert.ok(writer);
+			const jobId = started.details!.jobId!;
+			if (source !== "log") {
+				await waitForOutput(harness.snapshots, jobId, /ready/);
+				assert.doesNotThrow(() => child![source]!.emit("error", new Error(`injected ${source} read failure`)));
+			}
+			await waitForMessage(harness.messages, "bash-bg-complete");
+			const final = harness.snapshots.at(-1)!.jobs.find((job) => job.id === jobId)!;
+			assert.equal(final.status, "failed", "successful cleanup must not hide output failure");
+			assert.equal(final.treeCleanupConfirmed, true);
+			assert.match(final.outputTail, new RegExp(`${source} stream failed: injected`));
+			assert.equal(isProcessRunning(final.pid), false);
+			assert.ok(harness.snapshots.some((snapshot) => snapshot.jobs.some((job) => job.id === jobId && job.status === "stopping")));
+			const status = await harness.tool.execute("stream-fault-status", { action: "status", jobId });
+			assert.equal(status.details!.running, false);
+			assert.equal((status as { isError?: boolean }).isError, true);
+			assert.doesNotThrow(() => child!.stdout!.emit("error", new Error("late stdout failure")));
+			assert.doesNotThrow(() => child!.stderr!.emit("error", new Error("late stderr failure")));
+			assert.doesNotThrow(() => writer!.emit("error", new Error("late disk failure")));
+			assert.equal(harness.messages.length, 1);
+			await harness.shutdown();
+			harness.startSession();
+			const snapshotCount = harness.snapshots.length;
+			assert.doesNotThrow(() => writer!.emit("error", new Error("retired generation failure")));
+			assert.doesNotThrow(() => child!.stderr!.emit("error", new Error("retired read failure")));
+			await delay(150);
+			assert.equal(harness.snapshots.length, snapshotCount, "retired streams cannot publish into a new generation");
+		} finally {
+			await harness.shutdown();
+			t.mock.restoreAll();
+			syncBuiltinESMExports();
+		}
+	});
+}
+
+test("bash_bg stream failure preserves active ownership when cleanup is unconfirmed", async (t) => {
+	let child: childProcess.ChildProcess | undefined;
+	const spawn = childProcess.spawn;
+	t.mock.method(childProcess, "spawn", (...args: Parameters<typeof spawn>) => {
+		child = spawn(...args);
+		return child;
+	});
+	syncBuiltinESMExports();
+	const harness = createHarness({ maxActiveJobs: 1 });
+	const originalKill = process.kill;
+	const spawnSync = childProcess.spawnSync;
+	try {
+		const started = await harness.tool.execute("unconfirmed-stream-cleanup", {
+			action: "start", command: `node -e "console.log('ready');setInterval(()=>{},1000)"`,
+		});
+		const jobId = started.details!.jobId!;
+		const pid = started.details!.pid!;
+		await waitForOutput(harness.snapshots, jobId, /ready/);
+		t.mock.method(process, "kill", (targetPid: number, signal?: string | number) => {
+			if (targetPid === -pid) return true;
+			return originalKill(targetPid, signal);
+		});
+		t.mock.method(childProcess, "spawnSync", (...args: Parameters<typeof spawnSync>) => {
+			if (args[0] === "taskkill") return { status: 5, signal: null };
+			return spawnSync(...args);
+		});
+		syncBuiltinESMExports();
+		assert.doesNotThrow(() => child!.stdout!.emit("error", new Error("read failed with live process")));
+		const observed = await observeTargets({ action: "wait", targets: [{ kind: "bash_bg", id: jobId }], timeoutMs: 3_000 });
+		assert.equal(observed.reason, "timeout", "failed cleanup does not settle live ownership");
+		const current = await observeTargets({ action: "status", targets: [{ kind: "bash_bg", id: jobId }] });
+		assert.equal(current.observations[0]!.phase, "active");
+		assert.equal(current.observations[0]!.nativeStatus, "failed");
+		assert.match(current.observations[0]!.error!, /Failed to terminate bash job/);
+		const status = await harness.tool.execute("still-owned", { action: "status", jobId });
+		assert.equal(status.details!.running, true);
+		assert.equal(status.details!.exitCode, null);
+		assert.equal(status.details!.treeCleanupConfirmed, false);
+		assert.equal(harness.messages.length, 0);
+		await assert.rejects(harness.tool.execute("quota", { action: "start", command: "echo no" }), /Too many active/);
+		assert.doesNotThrow(() => child!.stderr!.emit("error", new Error("late read during failed cleanup")));
+		assert.equal(harness.snapshots.some((snapshot) => snapshot.jobs.some((job) => job.id === jobId && job.status === "killed")), false);
+		t.mock.restoreAll();
+		syncBuiltinESMExports();
+		const retried = await harness.tool.execute("retry-cleanup", { action: "kill", jobId });
+		assert.equal(retried.details!.running, false);
+		assert.equal(retried.details!.treeCleanupConfirmed, true);
+		assert.equal(isProcessRunning(pid), false);
+		assert.equal(harness.snapshots.at(-1)!.jobs[0]!.status, "failed");
+	} finally {
+		t.mock.restoreAll();
+		syncBuiltinESMExports();
 		await harness.shutdown();
 	}
 });

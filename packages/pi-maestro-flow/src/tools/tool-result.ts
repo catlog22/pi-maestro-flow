@@ -17,6 +17,18 @@ import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-age
  */
 export type FlowToolResult<T = unknown> = AgentToolResult<T> & { isError?: boolean };
 
+// Notifications may outlive execute(); their failure must not undo a settled job.
+export function runToolNotification(label: string, notify: () => unknown): void {
+  const report = (error: unknown): void => {
+    console.warn(`[pi-maestro-flow] ${label} failed: ${error instanceof Error ? error.message : String(error)}`);
+  };
+  try {
+    void Promise.resolve(notify()).catch(report);
+  } catch (error) {
+    report(error);
+  }
+}
+
 /** Bridge returned `isError` flags into pi's canonical tool-result error state. */
 export function installReturnedToolErrorBridge(pi: ExtensionAPI): void {
   const returnedFailures = new Set<string>();
