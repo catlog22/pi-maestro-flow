@@ -4,7 +4,7 @@ import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GoalToolParams } from "../src/extension/schemas.ts";
-import { registerTeammateChildToolBroker, registerTeammateChildProxyCaller, proxyTeammateChildTool } from "pi-maestro-teammate/v1/child-extensions";
+import { registerTeammateChildToolBroker, registerTeammateChildProxyCaller, registerTeammatePermissionBroker, proxyTeammateChildTool } from "pi-maestro-teammate/v1/child-extensions";
 import { evidenceRefsValidationError, resolveGoalEvidenceUri } from "../src/tools/goal-evidence.ts";
 import { resolveResource, resourceEvidencePage } from "../src/tools/resource.ts";
 import { persistAgentOutputChecked } from "../src/teammate/agent-output-store.ts";
@@ -320,6 +320,117 @@ test("Goal evidence T2 read-only search proxy reuses host broker without double-
       assert.equal(result.details?.classification, "success"); assert.equal(searches, 4);
     });
   } finally { dispose(); }
+});
+
+async function childRequest(options: Parameters<RunTeammateFn>[1], event: Record<string, unknown>) {
+  assert.ok(options.onChildRequest);
+  return new Promise<Record<string, unknown>>((resolve) => options.onChildRequest!(event, (message) => resolve(message as Record<string, unknown>)));
+}
+
+function permissionRequest(toolName: string, requestId = `permission-${toolName}`) {
+  return { type: "teammate_interaction_request", interaction: "permission", requestId, payload: { authorization: "parent", toolName, input: {} } };
+}
+
+test("Goal verifier IPC routes read-only permissions without spending check credits and returns structured output headlessly", async () => {
+  const authorized: string[] = [];
+  const disposePermission = registerTeammatePermissionBroker(async ({ toolName }) => {
+    authorized.push(toolName);
+    return { action: "allow_once" };
+  });
+  const disposeSearch = registerTeammateChildToolBroker("search", async () => ({ content: [{ type: "text", text: "original source" }], details: {}, isError: false }), { owner: "goal-ipc-test" });
+  try {
+    await withGoal(async (params, options) => {
+      assert.ok(params.tasks[0]!.outputSchema);
+      for (const tool of ["read", "find", "ls", "resource"]) {
+        const reply = await childRequest(options, permissionRequest(tool));
+        assert.equal(reply.type, "teammate_interaction_response");
+        assert.deepEqual(reply.result, { action: "allow_once" });
+      }
+      for (let i = 0; i < 4; i++) {
+        const id = `authorized-search-${i}`;
+        // Native start may precede the child's tool_call permission hook.
+        options.onChildEvent?.({ type: "tool_execution_start", toolName: "search", toolCallId: id });
+        const permission = await childRequest(options, permissionRequest("search", `permission-${id}`));
+        assert.equal(permission.requestId, `permission-${id}`);
+        assert.deepEqual(permission.result, { action: "allow_once" });
+        const proxy = await childRequest(options, { type: "teammate_proxy_request", tool: "search", requestId: id, spawningToolCallId: id, params: { pattern: "source" } });
+        assert.equal((proxy.result as { isError: boolean }).isError, false);
+        options.onChildEvent?.({ type: "tool_execution_end", toolName: "search", toolCallId: id });
+      }
+      options.onChildEvent?.({ type: "tool_execution_start", toolName: "structured_output", toolCallId: "verdict" });
+      const permission = await childRequest(options, permissionRequest("structured_output"));
+      assert.equal(permission.type, "teammate_interaction_response");
+      assert.deepEqual(permission.result, { action: "allow_once", updatedInput: {} });
+      options.onChildEvent?.({ type: "tool_execution_end", toolName: "structured_output", toolCallId: "verdict" });
+      assert.equal(options.signal?.aborted, false);
+      return passing();
+    }, async (ctx) => {
+      const result = await executeGoal({ action: "complete", summary: "original sources checked through permission relay" }, ctx);
+      assert.equal(result.details?.classification, "success", result.text);
+      assert.equal(getActiveGoal(), undefined);
+    });
+    assert.deepEqual(authorized, ["read", "find", "ls", "resource", "search", "search", "search", "search"]);
+  } finally { disposePermission(); disposeSearch(); }
+});
+
+test("Goal verifier IPC preserves parent permission denials and rejects fake PASS", async () => {
+  const dispose = registerTeammatePermissionBroker(async () => ({ action: "deny", reason: "locked parent policy" }));
+  try {
+    await withGoal(async (_params, options) => {
+      const reply = await childRequest(options, permissionRequest("read"));
+      assert.equal(reply.type, "teammate_interaction_response");
+      assert.deepEqual(reply.result, { action: "deny", reason: "locked parent policy" });
+      return passing();
+    }, async (ctx) => {
+      const result = await executeGoal({ action: "complete", summary: "fake PASS after denial" }, ctx);
+      assert.equal(result.details?.classification, "missing-evidence");
+      assert.equal(getActiveGoal()?.status, "active");
+    });
+  } finally { dispose(); }
+});
+
+test("Goal verifier IPC denies forbidden permissions and unsupported interactions with matching envelopes", async () => {
+  for (const event of [permissionRequest("bash"), permissionRequest("edit"), permissionRequest("teammate"),
+    { ...permissionRequest("read"), payload: { toolName: "read", input: {} } },
+    { type: "teammate_interaction_request", requestId: "question", interaction: "question", payload: {} },
+    { type: "teammate_rpc_ui_request", id: "ui-request", method: "confirm" }]) {
+    await withGoal(async (_params, options) => {
+      const reply = await childRequest(options, event);
+      if (event.type === "teammate_rpc_ui_request") {
+        assert.deepEqual(reply, { type: "extension_ui_response", id: "ui-request", cancelled: true });
+      } else {
+        assert.equal(reply.type, "teammate_interaction_response");
+        assert.equal(reply.requestId, event.requestId);
+        assert.equal((reply.result as { action: string }).action, "interaction" in event && event.interaction === "question" ? "cancel" : "deny");
+      }
+      assert.equal(options.signal?.aborted, true);
+      return passing();
+    }, async (ctx) => {
+      const result = await executeGoal({ action: "complete", summary: "fake PASS after forbidden request" }, ctx);
+      assert.equal(result.details?.classification, "missing-evidence");
+      assert.equal(getActiveGoal()?.status, "active");
+    });
+  }
+});
+
+test("Goal verifier IPC permits cancellation but denies repeated verdict permissions and reads after final submission", async () => {
+  for (const next of [permissionRequest("structured_output", "second-verdict"), permissionRequest("resource", "late-read")]) {
+    await withGoal(async (_params, options) => {
+      options.onChildRequest?.({ type: "teammate_proxy_cancel", requestId: "cancelled-read" }, () => assert.fail("Cancellation should not reply"));
+      assert.equal(options.signal?.aborted, false);
+      const initial = await childRequest(options, permissionRequest("structured_output"));
+      assert.equal((initial.result as { action: string }).action, "allow_once");
+      options.onChildEvent?.({ type: "tool_execution_start", toolName: "structured_output", toolCallId: "verdict" });
+      const denied = await childRequest(options, next);
+      assert.equal((denied.result as { action: string }).action, "deny");
+      assert.equal(options.signal?.aborted, true);
+      return passing();
+    }, async (ctx) => {
+      const result = await executeGoal({ action: "complete", summary: "invalid final verdict sequence" }, ctx);
+      assert.equal(result.details?.classification, "missing-evidence");
+      assert.equal(getActiveGoal()?.status, "active");
+    });
+  }
 });
 
 test("Goal evidence correction long single-line character pages recover the whole original", () => {

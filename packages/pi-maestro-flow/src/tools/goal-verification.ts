@@ -349,7 +349,42 @@ async function runVerifier(
               rejectPolicy();
             },
             onChildRequest(event, reply) {
-              const respond = (text: string, isError: boolean) => reply({ type: "teammate_proxy_result", requestId: event.requestId, result: { content: [{ type: "text", text }], isError, details: {} } });
+              const respond = (text: string, isError: boolean) => {
+                if (event.type === "teammate_interaction_request") {
+                  reply({ type: "teammate_interaction_response", requestId: event.requestId, result: { action: event.interaction === "permission" ? "deny" : "cancel", reason: text } });
+                } else if (event.type === "teammate_rpc_ui_request") {
+                  reply({ type: "extension_ui_response", id: event.id, cancelled: true });
+                } else {
+                  reply({ type: "teammate_proxy_result", requestId: event.requestId, result: { content: [{ type: "text", text }], isError, details: {} } });
+                }
+              };
+              if (event.type === "teammate_proxy_cancel") {
+                options.onChildRequest?.(event, reply);
+                return;
+              }
+              if (event.type === "teammate_interaction_request" && event.interaction === "permission") {
+                const payload = event.payload as Record<string, unknown> | undefined;
+                if (!payload || payload.authorization !== "parent" || typeof payload.toolName !== "string"
+                  || !payload.input || typeof payload.input !== "object" || Array.isArray(payload.input)) {
+                  guard.reject("Verifier requested an invalid parent permission operation.");
+                  respond(guard.violation!, true);
+                  rejectPolicy();
+                  return;
+                }
+                if (!guard.authorize(payload.toolName)) { respond(guard.violation!, true); rejectPolicy(); return; }
+                // This dispatch always owns a schema; structured_output only returns its verdict.
+                if (payload.toolName === "structured_output") {
+                  reply({ type: "teammate_interaction_response", requestId: event.requestId, result: { action: "allow_once", updatedInput: payload.input } });
+                  return;
+                }
+                if (!options.onChildRequest) { unavailableRefs.push(payload.toolName); respond("Read-only parent permission unavailable.", true); return; }
+                options.onChildRequest(event, (message) => {
+                  const result = (message as { result?: { action?: string } } | undefined)?.result;
+                  if (result?.action !== "allow_once") unavailableRefs.push(String(payload.toolName));
+                  reply(message);
+                });
+                return;
+              }
               if (event.type !== "teammate_proxy_request" || !["read", "search", "find", "ls", "resource"].includes(String(event.tool))) {
                 guard.reject("Verifier requested a non-read-only or unsupported parent operation.");
                 respond(guard.violation!, true);
@@ -548,12 +583,14 @@ export function createGoalVerifierCheckGuard(refCount: number) {
   const budget = goalVerifierCheckBudget(refCount);
   let checks = 0;
   let structured = 0;
+  let structuredPermission = false;
+  let structuredFinished = false;
   let violation: string | undefined;
   const proxyStarts = new Map<string, { tool: string; used: boolean }>();
   const reject = (reason: string) => { violation ??= reason; };
   const check = () => {
     checks++;
-    if (structured > 0) reject("Verifier attempted a check after its final structured verdict.");
+    if (structured > 0 || structuredPermission) reject("Verifier attempted a check after its final structured verdict.");
     if (checks > budget) reject(`Host read-only verification budget exhausted (${checks}/${budget}); completion remains unverified.`);
     return !violation;
   };
@@ -562,16 +599,28 @@ export function createGoalVerifierCheckGuard(refCount: number) {
     get violation() { return violation; },
     reject,
     check,
+    authorize(tool: string) {
+      if (tool === "structured_output") {
+        if (structuredPermission || structuredFinished) reject("Verifier requested more than one structured verdict permission.");
+        structuredPermission = true;
+      } else if (["read", "search", "find", "ls", "resource"].includes(tool)) {
+        if (structured > 0 || structuredPermission) reject("Verifier requested a source after its final structured verdict.");
+      } else {
+        reject("Verifier requested a forbidden tool permission; only read/search/find/ls/resource and structured_output are permitted.");
+      }
+      return !violation;
+    },
     proxyCheck(tool: string, toolCallId?: string) {
-      if (structured > 0) reject("Verifier requested a source after its final structured verdict.");
+      if (structured > 0 || structuredPermission) reject("Verifier requested a source after its final structured verdict.");
       const pending = toolCallId === undefined ? undefined : proxyStarts.get(toolCallId);
       if (pending?.tool === tool && !pending.used) { pending.used = true; return !violation; }
       // Without call identity a request cannot borrow another operation's budget credit.
       return check();
     },
     observe(event: Record<string, unknown>) {
-      if (event.type === "tool_execution_end" && typeof event.toolCallId === "string") {
-        proxyStarts.delete(event.toolCallId);
+      if (event.type === "tool_execution_end") {
+        if (event.toolName === "structured_output") structuredFinished = true;
+        if (typeof event.toolCallId === "string") proxyStarts.delete(event.toolCallId);
         return;
       }
       if (event.type !== "tool_execution_start") return;
