@@ -3,6 +3,7 @@ import test from "node:test";
 import { isRetryableAssistantError } from "@earendil-works/pi-ai/compat";
 import {
   classifyRetryError,
+  classifyRetryErrorDetailed,
   extractRetryAfterMs,
   isAuthError,
   isFallbackProviderError,
@@ -78,8 +79,44 @@ test("unknown provider failures and upstream HTTP/2 stream errors are retryable"
     timestamp: 0,
   }), true);
   assert.equal(classifyRetryError("upstream_http2_stream_error"), "network");
-
 });
+
+test("upstream_stream_read_error is normalized into Pi-owned network retry", () => {
+  const upstreamStreamReadError = "Error: stream_error: error: Upstream response stream was interrupted, code: upstream_stream_read_error, type: error";
+
+  assert.deepEqual(classifyRetryErrorDetailed(upstreamStreamReadError), { kind: "network", defaulted: false });
+  assert.equal(classifyRetryError("upstream_stream_read_error"), "network");
+  assert.equal(isRetryableProviderError(upstreamStreamReadError), true);
+  assert.equal(isFallbackProviderError(upstreamStreamReadError), true);
+  const normalizedUpstreamStreamRead = normalizePiRetryErrorMessage(upstreamStreamReadError);
+  assert.equal(normalizedUpstreamStreamRead, `${upstreamStreamReadError} (network error)`);
+  assert.equal(normalizePiRetryErrorMessage(normalizedUpstreamStreamRead), normalizedUpstreamStreamRead);
+  assert.equal(classifyRetryError(upstreamStreamReadError, 401), "auth");
+  assert.equal(classifyRetryError(upstreamStreamReadError, 400), "non-retryable");
+  const cancelled = markPiRetryErrorCancelled(upstreamStreamReadError);
+  assert.equal(normalizePiRetryErrorMessage(cancelled), cancelled);
+  assert.equal(normalizePiRetryErrorMessage("upstream_stream_read_error: HTTP 400 bad request"),
+    "upstream_stream_read_error: HTTP 400 bad request");
+  assert.equal(isRetryableAssistantError({
+    role: "assistant",
+    content: [],
+    api: "openai-responses",
+    provider: "openai",
+    model: "test-model",
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "error",
+    errorMessage: normalizedUpstreamStreamRead,
+    timestamp: 0,
+  }), true);
+});
+
 test("stream_read_error is normalized into Pi-owned provider retry", () => {
   const raw = "stream_read_error: upstream response body closed";
   assert.equal(classifyRetryError(raw), "network");
