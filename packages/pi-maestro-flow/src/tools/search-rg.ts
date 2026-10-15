@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { basename, isAbsolute, relative, sep } from "node:path";
+import { SearchText } from "./search-output.ts";
 
 export type SearchOutputMode = "lines" | "files" | "count";
 
@@ -21,7 +22,10 @@ export interface RgSearchRequest {
 }
 
 export interface RgSearchResult {
+  /** Bounded row preview; the search tool reserves space for final notices. */
   text: string;
+  /** Bytes of observed rows before preview clipping (not unseen matches). */
+  originalBytes?: number;
   /** true when collection stopped early because the limit was reached. */
   limitReached: boolean;
   timedOut?: boolean;
@@ -81,7 +85,7 @@ async function collectRows(args: string[], request: RgSearchRequest): Promise<Rg
     const trySpawn = (): void => {
       const child = spawn(RG_BINARIES[binaryIndex]!, args, { stdio: ["ignore", "pipe", "pipe"] });
       const rl = createInterface({ input: child.stdout });
-      const rows: string[] = [];
+      const rows = new SearchText();
       let stderr = "";
       let killedForLimit = false;
       let timedOut = false;
@@ -142,7 +146,8 @@ async function collectRows(args: string[], request: RgSearchRequest): Promise<Rg
           return;
         }
         settle(() => resolvePromise({
-          text: rows.length ? rows.join("\n") : "No matches found",
+          text: rows.originalBytes ? rows.text : "No matches found",
+          originalBytes: rows.originalBytes || Buffer.byteLength("No matches found", "utf8"),
           limitReached: killedForLimit,
           timedOut,
         }));

@@ -9,6 +9,7 @@ import { awaitFffTeardown, createFffProcessFinder, type CreateFffFinder, type Ff
 import { Type } from "typebox";
 import { resolveSearchScopePath } from "./search-scope-guard.ts";
 import { runRgSearch } from "./search-rg.ts";
+import { finishSearchText, SearchText } from "./search-output.ts";
 
 export const SearchToolParameters = Type.Object({
   pattern: Type.String({
@@ -285,8 +286,8 @@ export function registerFff(pi: ExtensionAPI, options: RegisterFffOptions = {}):
     return files;
   };
 
-  const formatLines = (matches: GrepMatch[]): string => {
-    const rows: string[] = [];
+  const formatLines = (matches: GrepMatch[]): SearchText => {
+    const rows = new SearchText();
     for (const match of matches) {
       const before = match.contextBefore ?? [];
       for (const [index, line] of before.entries()) {
@@ -298,7 +299,7 @@ export function registerFff(pi: ExtensionAPI, options: RegisterFffOptions = {}):
         rows.push(`${match.relativePath}-${match.lineNumber + 1 + index}- ${line}`);
       }
     }
-    return rows.join("\n");
+    return rows;
   };
 
   const fffSearch = async (
@@ -315,7 +316,11 @@ export function registerFff(pi: ExtensionAPI, options: RegisterFffOptions = {}):
     if (input.glob) {
       globSet = await collectGlobSet(finder, input.glob, signal);
       if (globSet.size === 0) {
-        return { content: [{ type: "text", text: "No matches found" }], details: { engine: "fff", exhausted: true } };
+        const bounded = finishSearchText({ text: "No matches found" });
+        return {
+          content: [{ type: "text", text: bounded.text }],
+          details: { engine: "fff", exhausted: true, ...bounded.details },
+        };
       }
     }
     const matches: GrepMatch[] = [];
@@ -364,18 +369,17 @@ export function registerFff(pi: ExtensionAPI, options: RegisterFffOptions = {}):
     }
     exhausted = cursor === null;
 
-    let text: string;
+    let body = new SearchText();
     if (output === "files") {
-      const rows = [...new Set(matches.map((match) => match.relativePath))].slice(0, limit);
-      text = rows.length ? rows.join("\n") : "No matches found";
+      for (const file of [...filesSeen].slice(0, limit)) body.push(file);
     } else if (output === "count") {
       const counts = new Map<string, number>();
       for (const match of matches) counts.set(match.relativePath, (counts.get(match.relativePath) ?? 0) + 1);
-      const rows = [...counts.entries()].slice(0, limit).map(([file, count]) => `${file}:${count}`);
-      text = rows.length ? rows.join("\n") : "No matches found";
+      for (const [file, count] of [...counts.entries()].slice(0, limit)) body.push(`${file}:${count}`);
     } else {
-      text = matches.length ? formatLines(matches.slice(0, limit)) : "No matches found";
+      body = formatLines(matches.slice(0, limit));
     }
+    if (matches.length === 0) body.push("No matches found");
 
     const rowCount = output === "lines" ? matches.length : filesSeen.size;
     const limitReached = rowCount > limit || (!exhausted && rowCount >= limit);
@@ -389,9 +393,14 @@ export function registerFff(pi: ExtensionAPI, options: RegisterFffOptions = {}):
         ? "index drain stopped early — counts may be incomplete"
         : "index drain stopped early — results may be incomplete; narrow path, glob, or pattern");
     }
+    const bounded = finishSearchText(body, notes);
     return {
-      content: [{ type: "text", text: notes.length ? `${text}\n\n[${notes.join("; ")}]` : text }],
-      details: { engine: "fff", exhausted, filesSearched, truncated: !exhausted || limitReached },
+      content: [{ type: "text", text: bounded.text }],
+      details: {
+        engine: "fff", exhausted, filesSearched,
+        truncated: !exhausted || limitReached || bounded.details.byteTruncated,
+        ...bounded.details,
+      },
     };
   };
 
@@ -426,9 +435,13 @@ export function registerFff(pi: ExtensionAPI, options: RegisterFffOptions = {}):
     if (regexFallback) notes.push("invalid regex — matched literally");
     if (result.limitReached) notes.push(`${limit} ${output === "lines" ? "matches" : "rows"} limit reached — refine the pattern or raise limit`);
     if (result.timedOut) notes.push("search timed out — results may be incomplete; narrow path, glob, or pattern");
+    const bounded = finishSearchText(result, notes);
     return {
-      content: [{ type: "text", text: `${result.text}\n\n[${notes.join("; ")}]` }],
-      details: { engine: "rg", truncated: result.limitReached || result.timedOut },
+      content: [{ type: "text", text: bounded.text }],
+      details: {
+        engine: "rg", truncated: result.limitReached || result.timedOut || bounded.details.byteTruncated,
+        ...bounded.details,
+      },
     };
   };
 

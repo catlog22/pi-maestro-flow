@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { registerFff } from "../src/tools/fff.ts";
+import { registerFff, type FffSearchHandle } from "../src/tools/fff.ts";
+import { finishSearchText, SearchText, SEARCH_OUTPUT_MAX_BYTES } from "../src/tools/search-output.ts";
 import { buildArgs } from "../src/tools/search-rg.ts";
 
 test("FFF tools are registered for the root Maestro session", () => {
@@ -601,6 +602,136 @@ test("search aggregates files/count output and filters by path prefix", async ()
     ctx,
   );
   assert.equal(counts.content[0]?.text, "src/a.ts:2\nsrc/c.ts:1");
+});
+
+test("search byte bounds preserve exact-fit output and Unicode prefixes at the boundary", () => {
+  for (const bytes of [SEARCH_OUTPUT_MAX_BYTES - 1, SEARCH_OUTPUT_MAX_BYTES, SEARCH_OUTPUT_MAX_BYTES + 1]) {
+    const body = new SearchText();
+    body.push("x".repeat(bytes));
+    const bounded = finishSearchText(body);
+    assert.equal(bounded.details.originalBytes, bytes);
+    assert.equal(bounded.details.byteTruncated, bytes > SEARCH_OUTPUT_MAX_BYTES);
+    assert.equal(bounded.details.returnedBytes, Buffer.byteLength(bounded.text, "utf8"));
+    assert.ok(bounded.details.returnedBytes <= SEARCH_OUTPUT_MAX_BYTES);
+    if (bytes <= SEARCH_OUTPUT_MAX_BYTES) assert.equal(bounded.text, body.text);
+  }
+  for (const char of ["é", "中", "🙂"]) {
+    const raw = "x".repeat(SEARCH_OUTPUT_MAX_BYTES - 1) + char;
+    const body = new SearchText();
+    body.push(raw);
+    body.push("later rows must not be appended after an omitted code point");
+    assert.equal(body.text, "x".repeat(SEARCH_OUTPUT_MAX_BYTES - 1));
+    assert.equal(body.originalBytes, Buffer.byteLength(raw + "\nlater rows must not be appended after an omitted code point", "utf8"));
+    const bounded = finishSearchText(body);
+    assert.ok(!bounded.text.includes("\ufffd"));
+    assert.ok(bounded.details.returnedBytes <= SEARCH_OUTPUT_MAX_BYTES);
+  }
+});
+
+test("FFF bounds huge matches, context, aggregate rows, and Unicode without changing scan semantics", async (t) => {
+  const cases = [
+    { name: "huge first match", lines: ["needle" + "x".repeat(100_000)] },
+    { name: "before context", lines: ["needle"], before: ["x".repeat(100_000)] },
+    { name: "after context", lines: ["needle"], after: ["x".repeat(100_000)] },
+    { name: "many moderate lines", lines: Array.from({ length: 100 }, () => "needle" + "x".repeat(800)) },
+    { name: "multibyte and astral Unicode", lines: ["needle" + "中🙂é".repeat(20_000)] },
+  ];
+  for (const fixture of cases) await t.test(fixture.name, async () => {
+    const { register } = fakeRegister();
+    const items = fixture.lines.map((lineContent, index) => ({
+      relativePath: "src/a.ts", lineNumber: index + 2, lineContent,
+      contextBefore: fixture.before, contextAfter: fixture.after,
+    }));
+    let calls = 0;
+    const finder = {
+      isDestroyed: false,
+      async waitForScan() { return { ok: true as const, value: true }; },
+      grep() {
+        calls += 1;
+        return { ok: true as const, value: { items, nextCursor: null, totalFilesSearched: 7 } };
+      },
+    };
+    const handle = registerFff(register, { createFinder: () => ({ ok: true, value: finder }) as never });
+    const result = await handle.search({ pattern: "needle", path: "src", context: 1, limit: 1000 }, join(tmpdir(), "pi-fff-byte-bound"));
+    const expectedRows = items.flatMap((item) => [
+      ...(item.contextBefore ?? []).map((line, index, before) => `src/a.ts-${item.lineNumber - before.length + index}- ${line}`),
+      `src/a.ts:${item.lineNumber}: ${item.lineContent}`,
+      ...(item.contextAfter ?? []).map((line, index) => `src/a.ts-${item.lineNumber + 1 + index}- ${line}`),
+    ]);
+    assertByteBounded(result, Buffer.byteLength(expectedRows.join("\n"), "utf8"), "fff");
+    assert.equal(result.details?.exhausted, true, "byte clipping must not imply scan exhaustion changed");
+    assert.equal(result.details?.filesSearched, 7);
+    assert.equal(calls, 1);
+  });
+});
+
+function assertByteBounded(result: Awaited<ReturnType<FffSearchHandle["search"]>>, originalBytes: number, engine: string): void {
+  const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+  const details = result.details as Record<string, unknown>;
+  assert.ok(Buffer.byteLength(text, "utf8") <= SEARCH_OUTPUT_MAX_BYTES);
+  assert.equal(details.returnedBytes, Buffer.byteLength(text, "utf8"));
+  assert.equal(details.originalBytes, originalBytes);
+  assert.equal(details.maxBytes, SEARCH_OUTPUT_MAX_BYTES);
+  assert.equal(details.byteTruncated, true);
+  assert.equal(details.truncated, true);
+  assert.equal(details.engine, engine);
+  assert.match(text, /Output byte truncation/);
+  assert.match(text, /read on an existing matched file with bounded offset\/limit/);
+  assert.ok(!text.includes("\ufffd"), "clipping must not corrupt Unicode");
+  assert.doesNotMatch(text, /next page|cursor|offset=/i);
+}
+
+test("FFF byte clipping preserves count/files aggregation and row-limit notes", async () => {
+  for (const output of ["count", "files", "lines"] as const) {
+    const { register } = fakeRegister();
+    const items = [
+      { relativePath: "src/first.ts", lineNumber: 1, lineContent: "needle" },
+      { relativePath: "src/first.ts", lineNumber: 2, lineContent: "needle" },
+      ...Array.from({ length: 801 }, (_, index) => ({
+        relativePath: `src/${index}-${"a".repeat(100)}.ts`, lineNumber: 1, lineContent: "needle",
+      })),
+    ];
+    const finder = {
+      isDestroyed: false,
+      async waitForScan() { return { ok: true as const, value: true }; },
+      grep() { return { ok: true as const, value: { items, nextCursor: null } }; },
+    };
+    const handle = registerFff(register, { createFinder: () => ({ ok: true, value: finder }) as never });
+    const result = await handle.search({ pattern: "needle", path: "src", output, limit: 800 }, join(tmpdir(), "pi-fff-byte-aggregate"));
+    const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+    const expectedRows = output === "lines"
+      ? items.slice(0, 800).map((item) => `${item.relativePath}:${item.lineNumber}: ${item.lineContent}`)
+      : [...new Set(items.map((item) => item.relativePath))].slice(0, 800).map((file) => output === "count" ? `${file}:${file === "src/first.ts" ? 2 : 1}` : file);
+    const note = `\n\n[800 ${output === "lines" ? "matches" : "rows"} limit reached — refine the pattern or raise limit]`;
+    assertByteBounded(result, Buffer.byteLength(expectedRows.join("\n") + note, "utf8"), "fff");
+    assert.equal(result.details?.exhausted, true);
+    assert.match(text, /800 (matches|rows) limit reached/);
+    if (output === "count") assert.ok(text.startsWith("src/first.ts:2\n"));
+    if (output === "files") assert.ok(text.startsWith("src/first.ts\n"));
+  }
+});
+
+test("the final RG cap includes engine notes and bounds unusually large fallback notes", async () => {
+  for (const hugeReason of [false, true]) {
+    const { register } = fakeRegister();
+    const body = "src/a.ts:1: " + "🙂".repeat(12_790);
+    assert.ok(Buffer.byteLength(body, "utf8") < SEARCH_OUTPUT_MAX_BYTES, "the notes alone must push this output over the cap");
+    const error = hugeReason ? "x".repeat(100_000) : "missing";
+    const handle = registerFff(register, {
+      createFinder: () => ({ ok: false, error }) as never,
+      runRg: async () => ({ text: body, limitReached: true, timedOut: true }),
+    });
+    const result = await handle.search({ pattern: "needle", path: "src" }, join(tmpdir(), "pi-fff-byte-rg-notes"));
+    const reason = `index unavailable: search index unavailable (${error})`;
+    const note = `\n\n[engine: rg (${reason}); 50 matches limit reached — refine the pattern or raise limit; search timed out — results may be incomplete; narrow path, glob, or pattern]`;
+    assertByteBounded(result, Buffer.byteLength(body + note, "utf8"), "rg");
+    const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+    assert.match(text, /engine: rg/);
+    if (!hugeReason) {
+      assert.match(text, /limit reached/);
+      assert.match(text, /search timed out/);
+    }
+  }
 });
 
 test("search routes forced-insensitive uppercase patterns to ripgrep", async () => {
