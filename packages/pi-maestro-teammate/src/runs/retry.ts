@@ -141,7 +141,7 @@ const TEMPORARY_THIRD_PARTY_PROVIDER_ERROR =
 const FALLBACK_ONLY_ERROR =
   /\b(?:402|insufficient[_\s-]*(?:quota|balance|credits?)|credits? exhausted|billing quota|quota exceeded|out of budget)\b/i;
 
-const STREAM_READ_ERROR = /\bstream[_\s-]*read[_\s-]*error\b/i;
+const STREAM_READ_ERROR = /\b(?:upstream[_\s-]*)?stream[_\s-]*read[_\s-]*error\b/i;
 
 const UPSTREAM_HTTP2_STREAM_ERROR = /\b(?:upstream http\/?2 stream failed|upstream_http2_stream_error)\b/i;
 
