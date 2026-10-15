@@ -1375,7 +1375,7 @@ test("observe full detail returns the structured output of a settled schema succ
   assert.deepEqual(observation.structuredOutput, { verdict: "ok" });
   const output = (snap.details.output as string[]).join("\n");
   assert.match(output, /--- structured output ---/);
-  assert.match(output, /"verdict": "ok"/);
+  assert.match(output, /"verdict":\s*"ok"/);
 
   // Public snapshots are independent clones; mutating one cannot alter owner state.
   (observation.structuredOutput as { verdict: string }).verdict = "mutated";

@@ -27,6 +27,7 @@ import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchParams, TeammateWaitParams, TeammateMonitorParams, ObserveParams } from "./schemas.ts";
 import {
   formatObserveResult,
+  observationJson,
   observeTargets,
   registerObservationProvider,
   type ObserveParams as UnifiedObserveParams,
@@ -405,19 +406,20 @@ function formatChars(chars: number): string {
   return `${(chars / 1_024).toFixed(1)}K chars`;
 }
 
-function describeStructuredResult(result: SingleResult, serialized: string): string {
+function describeStructuredResult(result: SingleResult, serialized?: string): string {
   const prose = finalResultText(result);
   if (prose && !isStructuredOutputConfirmation(prose)) return compactPreview(prose);
   const value = result.structuredOutput;
+  const size = serialized === undefined ? "" : `${formatChars(serialized.length)}; `;
   if (Array.isArray(value)) {
-    return `Structured result saved (${formatChars(serialized.length)}, ${value.length} items).`;
+    return `Structured result saved (${size}${value.length} items).`;
   }
   if (value !== null && typeof value === "object") {
     const keys = Object.keys(value as Record<string, unknown>);
     const visible = keys.slice(0, 8).join(", ") || "no fields";
-    return `Structured result saved (${formatChars(serialized.length)}; fields: ${visible}${keys.length > 8 ? ", ..." : ""}).`;
+    return `Structured result saved (${size}fields: ${visible}${keys.length > 8 ? ", ..." : ""}).`;
   }
-  return `Structured result saved (${formatChars(serialized.length)}; ${value === null ? "null" : typeof value}).`;
+  return `Structured result saved (${size}${value === null ? "null" : typeof value}).`;
 }
 
 /** Bounded inline rendering for a result that has no agent:// reference. */
@@ -451,13 +453,8 @@ function formatPersistedSuccess(
 
 function formatStructuredOutputForDisplay(result: SingleResult): string | undefined {
   if (result.structuredOutput === undefined) return undefined;
-  let text: string;
-  try {
-    text = JSON.stringify(result.structuredOutput, null, 2);
-  } catch {
-    return "[structured_output] (value is not JSON-serializable)";
-  }
-  return `[structured_output] ${text}`;
+  const text = observationJson(result.structuredOutput, UNPERSISTED_RESULT_INLINE_CAP_CHARS);
+  return `[structured_output] ${text ?? "[structured output omitted: display budget exceeded; canonical value unchanged]"}`;
 }
 
 function isStructuredOutputConfirmation(text: string): boolean {
@@ -498,7 +495,22 @@ export function displayMessageForResult(result: SingleResult): string {
     const kept = warnings.filter((warning) => warning !== carriedBelow);
     return kept.length ? `${kept.map((warning) => `[warn] ${warning}`).join("\n")}\n\n` : "";
   };
-  const structured = formatStructuredOutputForDisplay(result);
+  const reference = acknowledgedResultReference(result);
+  // Select the durable display first. Probe only an inline-sized compact value,
+  // never pretty-serialize a large schema result merely to discard it below.
+  let structured: string | undefined;
+  if (result.exitCode === 0 && reference && result.structuredOutput !== undefined) {
+    const prose = result.messages.at(-1)?.content;
+    const small = prose && prose.length > INLINE_PERSISTED_RESULT_CHARS && !isStructuredOutputConfirmation(prose)
+      ? undefined
+      : observationJson(result.structuredOutput, INLINE_PERSISTED_RESULT_CHARS);
+    if (small === undefined) {
+      return warningPrefixExcept() + `${describeStructuredResult(result)}\n\nFull result: ${reference}`;
+    }
+    structured = `[structured_output] ${small}`;
+  } else {
+    structured = formatStructuredOutputForDisplay(result);
+  }
   const lastMessage = result.messages.at(-1)?.content ?? structured ?? "(no output)";
   // A structured_output completion ends with the tool's generic confirmation,
   // not the answer. When the transcript tail is only that confirmation (or
@@ -509,7 +521,6 @@ export function displayMessageForResult(result: SingleResult): string {
       ? structured
       : `${lastMessage}\n\n${structured}`
     : lastMessage;
-  const reference = acknowledgedResultReference(result);
   if (result.exitCode === 0) {
     return warningPrefixExcept() + (reference
       ? formatPersistedSuccess(result, effective, structured, reference)

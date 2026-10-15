@@ -8,9 +8,10 @@ import {
   toStructuredResults,
   UNPERSISTED_RESULT_INLINE_CAP_CHARS,
 } from "../src/extension/teammate-core.ts";
-import { buildWatchOutput } from "../src/extension/teammate-helpers.ts";
+import { buildWatchOutput, waitForTeammate, waitOutput } from "../src/extension/teammate-helpers.ts";
+import { OBSERVATION_TEXT_MAX_BYTES } from "../src/public/v1/observation.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { ActiveAgent, SingleResult } from "../src/shared/types.ts";
+import type { ActiveAgent, SingleResult, TeammateState } from "../src/shared/types.ts";
 
 function result(overrides: Partial<SingleResult>): SingleResult {
   return {
@@ -79,7 +80,7 @@ test("displayMessageForResult surfaces the structured output when the transcript
     structuredOutput: { total: 39, verdict: "ok" },
   }));
   assert.match(out, /\[structured_output\]/);
-  assert.match(out, /"total": 39/);
+  assert.match(out, /"total":39/);
   assert.doesNotMatch(out, /Structured output saved\./);
 });
 
@@ -90,7 +91,7 @@ test("displayMessageForResult keeps prose answers and appends the structured val
   }));
   assert.ok(out.startsWith("The review found 39 issues."));
   assert.match(out, /\[structured_output\]/);
-  assert.match(out, /"verdict": "ok"/);
+  assert.match(out, /"verdict":"ok"/);
 });
 
 test("displayMessageForResult leaves non-structured results unchanged without persistence acknowledgement", () => {
@@ -117,7 +118,7 @@ test("displayMessageForResult delivers large structured outputs in full without 
   }));
   assert.doesNotMatch(out, /truncated/);
   assert.ok(out.includes(data), "full structured value must remain when no durable reference exists");
-  assert.ok(out.endsWith(`${data}"\n}`), "value must not be cut off");
+  assert.ok(out.endsWith(`${data}"}`), "value must not be cut off");
 });
 
 test("displayMessageForResult replaces large persisted structured outputs with a description and id", async () => {
@@ -129,7 +130,7 @@ test("displayMessageForResult replaces large persisted structured outputs with a
   });
   await acknowledgePersistence(persisted);
   const out = displayMessageForResult(persisted);
-  assert.match(out, /^Structured result saved \(19\.6K chars; fields: data\)\./);
+  assert.match(out, /^Structured result saved \(fields: data\)\./);
   assert.match(out, /Full result: agent:\/\/run-abc$/);
   assert.equal(out.includes(data), false);
 });
@@ -314,7 +315,7 @@ test("buildWatchOutput shows the structured output of a settled agent", () => {
     agent: agentFixture({ structuredOutput: { total: 39, verdict: "ok" } }),
   }, 20).join("\n");
   assert.match(watched, /--- structured output ---/);
-  assert.match(watched, /"verdict": "ok"/);
+  assert.match(watched, /"verdict":"ok"/);
 });
 
 test("buildWatchOutput omits the structured output block when absent", () => {
@@ -323,6 +324,84 @@ test("buildWatchOutput omits the structured output block when absent", () => {
     agent: agentFixture({ correlationId: "run-xyz" }),
   }, 20).join("\n");
   assert.doesNotMatch(watched, /structured output/);
+});
+
+test("persisted structured display selects a durable summary before traversing an oversized schema", async () => {
+  const persisted = result({ publicationId: "publication-bounded-probe", structuredOutput: { data: "x".repeat(100_000) } });
+  await acknowledgePersistence(persisted);
+  let reads = 0;
+  Object.defineProperty(persisted.structuredOutput, "later", { enumerable: true, get() { reads++; return "unneeded"; } });
+  const out = displayMessageForResult(persisted);
+  assert.equal(reads, 0);
+  assert.match(out, /Structured result saved/);
+  assert.match(out, /Full result: agent:\/\/run-abc/);
+});
+
+test("persisted long prose display never serializes its structured value", async () => {
+  const persisted = result({ publicationId: "publication-prose-first", structuredOutput: { ok: true },
+    messages: [{ role: "assistant", content: "Long answer. ".repeat(300) }] });
+  await acknowledgePersistence(persisted);
+  let reads = 0;
+  Object.defineProperty(persisted.structuredOutput, "toJSON", { value() { reads++; return {}; } });
+  assert.match(displayMessageForResult(persisted), /Full result: agent:\/\/run-abc/);
+  assert.equal(reads, 0);
+});
+
+test("small persisted structured values stay inline and canonical snapshots remain exact", async () => {
+  const value = { count: 2, nested: { answer: "界😀" } };
+  const persisted = result({ publicationId: "publication-small-structured", structuredOutput: value });
+  await acknowledgePersistence(persisted);
+  const out = displayMessageForResult(persisted);
+  assert.ok(out.includes(JSON.stringify(value)));
+  assert.match(out, /Full result: agent:\/\/run-abc/);
+  const projected = toStructuredResults([persisted], "D:/workspace");
+  assert.deepEqual(projected?.[0]?.structuredOutput, value);
+  assert.deepEqual(persisted.structuredOutput, value);
+});
+
+test("watch formatting bounds all UTF-8 text including headers and graph output", () => {
+  const huge = "界😀".repeat(20_000);
+  for (const overrides of [{ name: huge }, { task: huge }, { outputLog: [huge] }, { lastResult: huge }]) {
+    const out = buildWatchOutput({ kind: "agent", agent: agentFixture(overrides) }, 20).join("\n");
+    assert.ok(Buffer.byteLength(out) <= OBSERVATION_TEXT_MAX_BYTES);
+    assert.match(out, /observation text truncated/);
+    assert.doesNotMatch(out, /\ufffd/);
+  }
+  const graph = buildWatchOutput({ kind: "graph-task", agent: agentFixture({}), progress: {
+    agent: "analyst", correlationId: "task-abc", taskIndex: 0, dependencies: [], status: "completed", lastMessage: huge,
+  } }, 20).join("\n");
+  assert.ok(Buffer.byteLength(graph) <= OBSERVATION_TEXT_MAX_BYTES);
+  assert.match(graph, /observation text truncated/);
+});
+
+test("wait notices and combined watch output share the UTF-8 display ceiling", async () => {
+  const huge = "😀界".repeat(20_000);
+  const notice = waitOutput("result-ready", huge).join("\n");
+  assert.ok(Buffer.byteLength(notice) <= OBSERVATION_TEXT_MAX_BYTES);
+  assert.match(notice, /observation text truncated/);
+  const agent = agentFixture({ lastResult: huge });
+  const state = { activeRuns: new Map([[agent.correlationId, agent]]), namedAgents: new Map() } as TeammateState;
+  const watched = await waitForTeammate(state, { name: agent.correlationId });
+  assert.equal(watched.status, "completed");
+  assert.ok(Buffer.byteLength(watched.output.join("\n")) <= OBSERVATION_TEXT_MAX_BYTES);
+  const missing = await waitForTeammate(state, { name: huge });
+  assert.equal(missing.status, "not-found");
+  assert.ok(Buffer.byteLength(missing.output.join("\n")) <= OBSERVATION_TEXT_MAX_BYTES);
+});
+
+test("watch and unpersisted structured display omit oversized values without canonical mutation", () => {
+  let deep: unknown = { ok: true };
+  for (let i = 0; i < 5_000; i++) deep = { nested: deep };
+  for (const value of [deep, { data: "界".repeat(30_000) }]) {
+    const agent = agentFixture({ structuredOutput: value });
+    const out = buildWatchOutput({ kind: "agent", agent }, 20).join("\n");
+    assert.match(out, /structured output omitted: display budget exceeded/);
+    assert.ok(Buffer.byteLength(out) <= OBSERVATION_TEXT_MAX_BYTES);
+    assert.equal(agent.structuredOutput, value);
+    const unpersisted = result({ structuredOutput: value });
+    assert.match(displayMessageForResult(unpersisted), /structured output omitted: display budget exceeded/);
+    assert.equal(unpersisted.structuredOutput, value);
+  }
 });
 
 test("the model display names what ran, keeping the dispatched route as what was requested", () => {

@@ -98,7 +98,17 @@ export interface ObserveResult {
     reason: "snapshot" | "all" | "any" | "count" | "timeout" | "aborted" | "watch";
     observations: ObservationSnapshot[];
     durationMs: number;
+    /** Watch history can be evicted; these remain the latest canonical snapshots, in target order. */
+    latestObservations?: ObservationSnapshot[];
+    evictedTransitions?: number;
 }
+export declare const WATCH_MAX_TRANSITIONS = 128;
+export declare const WATCH_MAX_TRANSITION_BYTES: number;
+export declare const OBSERVATION_TEXT_MAX_BYTES: number;
+/** Display-only bound, including separators and the truncation notice. */
+export declare function boundObservationText(lines: Iterable<string>): string[];
+/** Compact, bounded display serialization; never alters the canonical value. */
+export declare function observationJson(value: unknown, maxBytes?: number): string | undefined;
 export declare function registerObservationProvider(provider: ObservationProvider): () => void;
 export declare function getObservationProvider(kind: string): ObservationProvider | undefined;
 export declare function listObservationProviders(): ObservationProvider[];

@@ -116,6 +116,62 @@ export interface ObserveResult {
   reason: "snapshot" | "all" | "any" | "count" | "timeout" | "aborted" | "watch";
   observations: ObservationSnapshot[];
   durationMs: number;
+  /** Watch history can be evicted; these remain the latest canonical snapshots, in target order. */
+  latestObservations?: ObservationSnapshot[];
+  evictedTransitions?: number;
+}
+
+export const WATCH_MAX_TRANSITIONS = 128;
+export const WATCH_MAX_TRANSITION_BYTES = 256 * 1024;
+export const OBSERVATION_TEXT_MAX_BYTES = 32 * 1024;
+const DISPLAY_TRUNCATED = "[observation text truncated; canonical result unchanged]";
+
+function utf8Head(text: string, bytes: number): string {
+  const encoded = Buffer.from(text.slice(0, bytes), "utf8");
+  let end = Math.min(bytes, encoded.length);
+  // A cut inside a multibyte sequence retreats to its leading byte.
+  while (end > 0 && end < encoded.length && (encoded[end]! & 0xc0) === 0x80) end--;
+  return encoded.subarray(0, end).toString("utf8");
+}
+
+/** Display-only bound, including separators and the truncation notice. */
+export function boundObservationText(lines: Iterable<string>): string[] {
+  const maxBytes = OBSERVATION_TEXT_MAX_BYTES;
+  const kept: string[] = [];
+  let bytes = 0;
+  for (const line of lines) {
+    const nextBytes = bytes + (kept.length ? 1 : 0) + Buffer.byteLength(line, "utf8");
+    if (nextBytes > maxBytes) {
+      const prefix = utf8Head([...kept, line.slice(0, maxBytes)].join("\n"),
+        Math.max(0, maxBytes - Buffer.byteLength(DISPLAY_TRUNCATED) - 1));
+      return `${prefix}\n${DISPLAY_TRUNCATED}`.split("\n");
+    }
+    kept.push(line);
+    bytes = nextBytes;
+  }
+  return kept;
+}
+
+/** Compact, bounded display serialization; never alters the canonical value. */
+export function observationJson(value: unknown, maxBytes = OBSERVATION_TEXT_MAX_BYTES): string | undefined {
+  const limit = {};
+  let budget = maxBytes;
+  let nodes = 0;
+  const ancestors: unknown[] = [];
+  try {
+    const text = JSON.stringify(value, function (key, item) {
+      while (ancestors.length && ancestors.at(-1) !== this) ancestors.pop();
+      if (++nodes > maxBytes || ancestors.length > 64) throw limit;
+      budget -= Buffer.byteLength(key, "utf8") + 4;
+      budget -= typeof item === "string" ? Buffer.byteLength(item, "utf8") : 8;
+      if (budget < 0) throw limit;
+      if (item !== null && typeof item === "object") ancestors.push(item);
+      return item;
+    });
+    return text !== undefined && Buffer.byteLength(text, "utf8") <= maxBytes ? text : undefined;
+  } catch (error) {
+    return error === limit ? undefined : "(not JSON-serializable)";
+  }
 }
 
 const REGISTRY_KEY = Symbol.for("pi-maestro.observation-providers.v1");
@@ -270,8 +326,8 @@ export async function observeTargets(params: ObserveParams, signal?: AbortSignal
 
   if (params.action === "watch") {
     // Persistent observation: poll every target until the deadline, recording
-    // every status transition. Returns the full transition timeline (initial
-    // snapshot plus each change), which is richer than a one-shot status and
+    // every status transition within a bounded history (with latest snapshots
+    // retained separately), which is richer than a one-shot status and
     // does not require a barrier condition like wait.
     return watchTargets(params, options, startedAt, signal);
   }
@@ -340,9 +396,8 @@ export async function observeTargets(params: ObserveParams, signal?: AbortSignal
 
 /**
  * Persistent observation: poll every target until the deadline, recording each
- * status transition. Returns the initial snapshot plus every change as a
- * timeline. Unlike wait, no barrier condition is required — the caller sees the
- * full progression until timeoutMs elapses (or until aborted).
+ * status transition within a count/byte-bounded timeline. Latest snapshots are
+ * retained separately even when history is evicted. No lifecycle barrier is required.
  */
 async function watchTargets(
   params: ObserveParams,
@@ -354,15 +409,38 @@ async function watchTargets(
   const deadline = startedAt + options.timeoutMs;
   const providers = params.targets.map((target) => getObservationProvider(target.kind));
   const lastSeen = new Map<number, string>();
-  const transitions: ObservationSnapshot[] = [];
+  const transitions: Array<{ observation: ObservationSnapshot; bytes: number }> = [];
+  const latest = new Array<ObservationSnapshot>(params.targets.length);
+  let transitionBytes = 2; // JSON array brackets; each entry also reserves a comma.
+  let evictedTransitions = 0;
+  const record = (index: number, observation: ObservationSnapshot, key: string): void => {
+    latest[index] = observation;
+    if (lastSeen.get(index) === key) return;
+    lastSeen.set(index, key);
+    let bytes: number;
+    try {
+      bytes = Buffer.byteLength(JSON.stringify(observation), "utf8") + 1;
+    } catch {
+      bytes = WATCH_MAX_TRANSITION_BYTES + 1;
+    }
+    if (bytes + 2 > WATCH_MAX_TRANSITION_BYTES) {
+      evictedTransitions++;
+      return;
+    }
+    transitions.push({ observation, bytes });
+    transitionBytes += bytes;
+    while (transitions.length > WATCH_MAX_TRANSITIONS || transitionBytes > WATCH_MAX_TRANSITION_BYTES) {
+      transitionBytes -= transitions.shift()!.bytes;
+      evictedTransitions++;
+    }
+  };
 
   const snapshotAll = async (): Promise<void> => {
     await Promise.all(params.targets.map(async (target, index) => {
       const provider = providers[index];
       if (!provider) {
         if (!lastSeen.has(index)) {
-          transitions.push(unavailable(target, "not-found", `No observation provider for kind \"${target.kind}\".`));
-          lastSeen.set(index, "not-found");
+          record(index, unavailable(target, "not-found", `No observation provider for kind \"${target.kind}\".`), "not-found");
         }
         return;
       }
@@ -374,14 +452,10 @@ async function watchTargets(
           ...(target.cursor ? { cursor: target.cursor } : {}),
         });
         const key = `${observation.nativeStatus}|${observation.phase}|${observation.revision ?? ""}`;
-        if (lastSeen.get(index) !== key) {
-          transitions.push(observation);
-          lastSeen.set(index, key);
-        }
+        record(index, observation, key);
       } catch (error) {
         if (!lastSeen.has(index)) {
-          transitions.push(failedObservation(target, error));
-          lastSeen.set(index, "error");
+          record(index, failedObservation(target, error), "error");
         }
       }
     }));
@@ -397,7 +471,9 @@ async function watchTargets(
   return {
     action: "watch",
     reason: signal?.aborted ? "aborted" : "watch",
-    observations: transitions,
+    observations: transitions.map((entry) => entry.observation),
+    latestObservations: latest,
+    evictedTransitions,
     durationMs: Date.now() - startedAt,
   };
 }
@@ -449,40 +525,39 @@ function lastResultExcerpt(text: string): string {
 }
 
 export function formatObserveResult(result: ObserveResult, verbose = false): string[] {
-  const header = `${result.observations.length} targets: ${result.reason} (${result.durationMs}ms)`;
-  const lines = [header];
-  for (const observation of result.observations) {
-    const label = `${observation.target.kind}:${observation.target.id}`;
-    lines.push(`${label}\t${observation.nativeStatus}\t${observation.summary}`.trimEnd());
-    if (observation.diagnosis) {
-      lines.push("  --- diagnosis ---", ...diagnosisDetail(observation.diagnosis).map((line) => `  ${line}`));
+  const observations = result.evictedTransitions ? result.latestObservations ?? result.observations : result.observations;
+  const targetCount = result.latestObservations?.length ?? result.observations.length;
+  function* render(): Generator<string> {
+    yield `${targetCount} targets: ${result.reason} (${result.durationMs}ms)`;
+    if (result.evictedTransitions) {
+      yield `[watch history truncated: ${result.evictedTransitions} transitions evicted; showing latest snapshots]`;
     }
-    if (verbose && observation.detail) {
-      for (const detail of observation.detail) lines.push(`  ${detail}`);
-    }
-    const detailHasLastResult = observation.detail?.includes("--- last result ---") === true;
-    // The target's own account of what it finished. `nativeStatus` and `summary`
-    // are inferred from agent counts and idle time, so on their own they cannot
-    // separate "finished the work" from "has not started it"; this is the run
-    // saying so. Rendered unconditionally because that distinction is the whole
-    // reading a polling observer takes.
-    if (observation.lastResult && !detailHasLastResult) {
-      if (verbose) {
-        lines.push("  --- last result ---", ...observation.lastResult.split("\n").map((line) => `  ${line}`));
-      } else {
-        lines.push(`  result: ${lastResultExcerpt(observation.lastResult)}`);
+    for (const observation of observations) {
+      const label = `${observation.target.kind}:${observation.target.id}`;
+      yield `${label}\t${observation.nativeStatus}\t${observation.summary}`.trimEnd();
+      if (observation.diagnosis) {
+        yield "  --- diagnosis ---";
+        for (const line of diagnosisDetail(observation.diagnosis)) yield `  ${line}`;
       }
-    }
-    const detailHasStructuredOutput = observation.detail?.includes("--- structured output ---") === true;
-    if (verbose && observation.structuredOutput !== undefined && !detailHasStructuredOutput) {
-      let text: string;
-      try {
-        text = JSON.stringify(observation.structuredOutput, null, 2);
-      } catch {
-        text = "(not JSON-serializable)";
+      if (verbose && observation.detail) {
+        for (const detail of observation.detail) yield `  ${detail}`;
       }
-      lines.push("  --- structured output ---", ...text.split("\n").map((line) => `  ${line}`));
+      const detailHasLastResult = observation.detail?.includes("--- last result ---") === true;
+      // Render the target's own account, not just inferred status/idle counts.
+      if (observation.lastResult && !detailHasLastResult) {
+        if (verbose) {
+          yield "  --- last result ---";
+          for (const line of observation.lastResult.split("\n")) yield `  ${line}`;
+        } else {
+          yield `  result: ${lastResultExcerpt(observation.lastResult)}`;
+        }
+      }
+      const detailHasStructuredOutput = observation.detail?.includes("--- structured output ---") === true;
+      if (verbose && observation.structuredOutput !== undefined && !detailHasStructuredOutput) {
+        yield "  --- structured output ---";
+        yield `  ${observationJson(observation.structuredOutput) ?? "[structured output omitted: display budget exceeded; canonical value unchanged]"}`;
+      }
     }
   }
-  return lines;
+  return boundObservationText(render());
 }

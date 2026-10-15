@@ -22,6 +22,8 @@ import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchParams, TeammateWaitParams, TeammateMonitorParams, ObserveParams } from "./schemas.ts";
 import {
   formatObserveResult,
+  boundObservationText,
+  observationJson,
   observeTargets,
   registerObservationProvider,
   type ObserveParams as UnifiedObserveParams,
@@ -606,13 +608,9 @@ export function buildWatchOutput(target: WatchTarget, lineCount: number): string
       output.push("Waiting for model capacity or first activity…");
     }
     if (agent.structuredOutput !== undefined) {
-      let text: string;
-      try {
-        text = JSON.stringify(agent.structuredOutput, null, 2);
-      } catch {
-        text = "(not JSON-serializable)";
-      }
-      output.push("--- structured output ---", ...text.split("\n").slice(-lineCount));
+      const text = observationJson(agent.structuredOutput)
+        ?? "[structured output omitted: display budget exceeded; canonical value unchanged]";
+      output.push("--- structured output ---", text);
     }
     if (agent.status === "sleeping") {
       output.push("", "[sleeping — messages remain visible; use teammate-send to wake]");
@@ -624,7 +622,7 @@ export function buildWatchOutput(target: WatchTarget, lineCount: number): string
         output.push(`[${time}] ◀ ${message.from}: ${message.payload.slice(0, 120)}`);
       }
     }
-    return output;
+    return boundObservationText(output);
   }
 
   const { agent, progress } = target;
@@ -664,7 +662,7 @@ export function buildWatchOutput(target: WatchTarget, lineCount: number): string
   if (agent.status === "sleeping") {
     output.push("", "[graph is sleeping — this task's captured messages remain available]");
   }
-  return output;
+  return boundObservationText(output);
 }
 
 export type TeammateWaitStatus = "completed" | "failed" | "terminated" | "result-ready" | "stalled" | "timeout" | "not-found" | "delayed" | "aborted";
@@ -687,15 +685,16 @@ export const teammateWaiters = new WeakMap<TeammateState, Map<string, Set<Pendin
 
 export function waitOutput(status: TeammateWaitStatus, target?: string): string[] {
   const subject = target ? `Agent "${target}"` : "Delay";
-  if (status === "completed") return [`${subject} completed.`];
-  if (status === "failed") return [`${subject} failed.`];
-  if (status === "terminated") return [`${subject} was terminated.`];
-  if (status === "result-ready") return [`${subject} produced a final no-tool assistant turn; final agent_settled confirmation is pending.`];
-  if (status === "stalled") return [`${subject} stopped reporting activity; inspect its captured output before retrying or terminating it.`];
-  if (status === "timeout") return [`${subject} did not settle before the wait timeout.`];
-  if (status === "aborted") return [`${subject} wait was aborted.`];
-  if (status === "not-found") return [`${subject} was not found.`];
-  return [`${subject} elapsed.`];
+  const text = status === "completed" ? `${subject} completed.`
+    : status === "failed" ? `${subject} failed.`
+    : status === "terminated" ? `${subject} was terminated.`
+    : status === "result-ready" ? `${subject} produced a final no-tool assistant turn; final agent_settled confirmation is pending.`
+    : status === "stalled" ? `${subject} stopped reporting activity; inspect its captured output before retrying or terminating it.`
+    : status === "timeout" ? `${subject} did not settle before the wait timeout.`
+    : status === "aborted" ? `${subject} wait was aborted.`
+    : status === "not-found" ? `${subject} was not found.`
+    : `${subject} elapsed.`;
+  return boundObservationText([text]);
 }
 
 export function clearWaiter(waiters: Set<PendingTeammateWaiter>, waiter: PendingTeammateWaiter): void {
@@ -930,21 +929,21 @@ export function waitForTeammate(
       const label = settledRecord.name ?? settledRecord.agent;
       return Promise.resolve({
         status: settledRecord.status,
-        output: [
+        output: boundObservationText([
           `@${label} already ${settledRecord.status} ${agoSeconds}s ago; it is no longer running.`,
           ...(settledRecord.lastResult ? [settledRecord.lastResult] : []),
-        ],
+        ]),
       });
     }
-    return Promise.resolve({ status: "not-found", output: [
+    return Promise.resolve({ status: "not-found", output: boundObservationText([
       resolved.error ?? `Agent "${params.name}" not found.${resolved.available.length ? ` Available: ${resolved.available.join(", ")}` : ""}`,
-    ] });
+    ]) });
   }
   const settled = statusForWatchTarget(resolved.match, Date.now(), state);
   if (settled) {
     return Promise.resolve({
       status: settled,
-      output: [...waitOutput(settled, params.name), ...buildWatchOutput(resolved.match, 20)],
+      output: boundObservationText([...waitOutput(settled, params.name), ...buildWatchOutput(resolved.match, 20)]),
     });
   }
   if (signal?.aborted) return Promise.resolve({ status: "aborted", output: waitOutput("aborted", params.name) });
@@ -969,7 +968,7 @@ export function waitForTeammate(
         || status === "terminated"
         ? [...waitOutput(status, params.name), ...buildWatchOutput(resolved.match!, 20)]
         : waitOutput(status, params.name);
-      resolve({ status, output });
+      resolve({ status, output: boundObservationText(output) });
     };
     // Never unbounded: an omitted timeoutMs previously meant "wait forever",
     // and a target that never reaches a terminal status left the tool call

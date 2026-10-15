@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   formatObserveResult,
+  boundObservationText,
+  observationJson,
+  OBSERVATION_TEXT_MAX_BYTES,
+  WATCH_MAX_TRANSITIONS,
+  WATCH_MAX_TRANSITION_BYTES,
   getObservationProvider,
   observeTargets,
   registerObservationProvider,
@@ -603,6 +608,94 @@ test("watch respects abort signal", async () => {
   }
 });
 
+test("watch bounds transition count and preserves the latest snapshot per target", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  const controller = new AbortController();
+  const calls = new Map<string, number>();
+  const dispose = registerObservationProvider({
+    kind: "test-watch-count-bound",
+    capabilities: { inspect: true, wait: true },
+    snapshot: (id) => {
+      const count = (calls.get(id) ?? 0) + 1;
+      calls.set(id, count);
+      if (id === "b" && count === 70) controller.abort();
+      return { ...snapshot("test-watch-count-bound", id), revision: String(count) };
+    },
+    wait: async (id) => snapshot("test-watch-count-bound", id),
+  });
+  try {
+    const watching = observeTargets({ action: "watch", timeoutMs: 200_000,
+      targets: ["a", "b"].map((id) => ({ kind: "test-watch-count-bound", id })) }, controller.signal);
+    await new Promise(setImmediate);
+    for (let tick = 0; tick < 69; tick++) {
+      t.mock.timers.tick(1_000);
+      await new Promise(setImmediate);
+    }
+    const watched = await watching;
+    assert.equal(watched.reason, "aborted");
+    assert.equal(watched.observations.length, WATCH_MAX_TRANSITIONS);
+    assert.equal(watched.evictedTransitions, 140 - WATCH_MAX_TRANSITIONS);
+    assert.deepEqual(watched.latestObservations?.map((item) => [item.target.id, item.revision]), [["a", "70"], ["b", "70"]]);
+    assert.match(formatObserveResult(watched).join("\n"), /12 transitions evicted/);
+  } finally {
+    dispose();
+    t.mock.timers.reset();
+  }
+});
+
+test("watch bounds serialized history bytes without changing oversized latest canonical values", async () => {
+  const value = { data: "界".repeat(WATCH_MAX_TRANSITION_BYTES) };
+  const originals = new Map<string, ObservationSnapshot>();
+  const dispose = registerObservationProvider({
+    kind: "test-watch-byte-bound",
+    capabilities: { inspect: true, wait: true },
+    snapshot: (id) => {
+      const item = { ...snapshot("test-watch-byte-bound", id),
+        detail: ["界".repeat(10_000)],
+        ...(id === "large" ? { structuredOutput: value } : {}) };
+      originals.set(id, item);
+      return item;
+    },
+    wait: async (id) => snapshot("test-watch-byte-bound", id),
+  });
+  const controller = new AbortController();
+  controller.abort();
+  try {
+    const ids = [...Array.from({ length: 14 }, (_, i) => String(i)), "large"];
+    const watched = await observeTargets({ action: "watch", timeoutMs: 1,
+      targets: ids.map((id) => ({ kind: "test-watch-byte-bound", id })) }, controller.signal);
+    assert.ok(Buffer.byteLength(JSON.stringify(watched.observations)) <= WATCH_MAX_TRANSITION_BYTES);
+    assert.ok(watched.observations.length < ids.length);
+    assert.equal(watched.evictedTransitions, ids.length - watched.observations.length);
+    assert.deepEqual(watched.latestObservations?.map((item) => item.target.id), ids);
+    for (const item of watched.latestObservations ?? []) assert.equal(item, originals.get(item.target.id));
+    assert.equal(watched.latestObservations?.at(-1)?.structuredOutput, value);
+  } finally {
+    dispose();
+  }
+});
+
+test("watch latest snapshots refresh even without a revision transition", async () => {
+  let calls = 0;
+  const controller = new AbortController();
+  const dispose = registerObservationProvider({
+    kind: "test-watch-latest",
+    capabilities: { inspect: true, wait: true },
+    snapshot: (id) => {
+      if (++calls === 2) controller.abort();
+      return { ...snapshot("test-watch-latest", id), summary: `snapshot ${calls}` };
+    },
+    wait: async (id) => snapshot("test-watch-latest", id),
+  });
+  try {
+    const watched = await observeTargets({ action: "watch", timeoutMs: 250,
+      targets: [{ kind: "test-watch-latest", id: "a" }] }, controller.signal);
+    assert.equal(watched.observations.length, 1);
+    assert.equal(watched.latestObservations?.[0]?.summary, "snapshot 2");
+    assert.equal(watched.evictedTransitions, 0);
+  } finally { dispose(); }
+});
+
 // --- until: wait for terminal completion ---
 
 test("until option is forwarded to providers", async () => {
@@ -711,10 +804,45 @@ test("formatObserveResult renders structured output only in verbose detail", () 
 
   const verbose = formatObserveResult(result, true).join("\n");
   assert.match(verbose, /--- structured output ---/);
-  assert.match(verbose, /"verdict": "ok"/);
-  assert.match(verbose, /"count": 2/);
+  assert.match(verbose, /"verdict":"ok"/);
+  assert.match(verbose, /"count":2/);
 
   const compact = formatObserveResult(result, false).join("\n");
   assert.doesNotMatch(compact, /structured output/);
   assert.match(compact, /teammate:job/);
+});
+
+test("observation formatting bounds UTF-8 headers, notices, detail and huge single lines", () => {
+  const huge = "😀界".repeat(30_000);
+  for (const field of ["id", "summary", "detail", "lastResult"] as const) {
+    const item = snapshot("test", field);
+    if (field === "id") item.target.id = huge;
+    else if (field === "detail") item.detail = [huge];
+    else item[field] = huge;
+    const text = formatObserveResult({ action: "status", reason: "snapshot", observations: [item], durationMs: 0 }, true).join("\n");
+    assert.ok(Buffer.byteLength(text) <= OBSERVATION_TEXT_MAX_BYTES, field);
+    assert.match(text, /observation text truncated/);
+    assert.doesNotMatch(text, /\ufffd/);
+  }
+  const exact = "x".repeat(OBSERVATION_TEXT_MAX_BYTES);
+  assert.deepEqual(boundObservationText([exact]), [exact]);
+  assert.ok(Buffer.byteLength(boundObservationText([exact, "tail"]).join("\n")) <= OBSERVATION_TEXT_MAX_BYTES);
+});
+
+test("structured display is compact and bounded for deep, wide, escaped and multibyte values", () => {
+  assert.equal(observationJson({ ok: true, nested: { n: 2 } }), '{"ok":true,"nested":{"n":2}}');
+  let deep: unknown = { end: true };
+  for (let i = 0; i < 5_000; i++) deep = { child: deep };
+  const values = [deep, Array(10_000).fill("value"), { text: "😀".repeat(20_000) }, { text: "\u0001".repeat(10_000) }];
+  for (const value of values) {
+    assert.equal(observationJson(value), undefined);
+    const item = { ...snapshot("test", "json"), structuredOutput: value };
+    const text = formatObserveResult({ action: "status", reason: "snapshot", observations: [item], durationMs: 0 }, true).join("\n");
+    assert.match(text, /structured output omitted: display budget exceeded/);
+    assert.ok(Buffer.byteLength(text) <= OBSERVATION_TEXT_MAX_BYTES);
+    assert.equal(item.structuredOutput, value);
+  }
+  const cyclic: { self?: unknown } = {};
+  cyclic.self = cyclic;
+  assert.equal(observationJson(cyclic), "(not JSON-serializable)");
 });
