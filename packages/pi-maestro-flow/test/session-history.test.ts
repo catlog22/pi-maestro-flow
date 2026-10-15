@@ -12,6 +12,7 @@ import {
   executeSessionHistory,
 } from "../src/tools/session-history.ts";
 import { resolveResource } from "../src/tools/resource.ts";
+import { COMMAND_HISTORY_BOOTSTRAP } from "../src/compaction/recovery-focus.ts";
 import {
   MAX_SESSION_HISTORY_FILES,
   sessionEntryUri,
@@ -412,6 +413,69 @@ test("session history reports workspace inventory enumeration errors instead of 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("session_history command bootstrap reads the checkpoint turn, not a newer user turn", async (t) => {
+  for (const answerCount of [1, 8]) {
+    await t.test(answerCount === 1 ? "preceding exchange" : "truncated exchange", async () => {
+      const root = await mkdtemp(join(tmpdir(), "pi-flow-command-history-"));
+      try {
+        const file = join(root, "current.jsonl");
+        const answers = Array.from({ length: answerCount }, (_, index) =>
+          assistant(`a2-${index}`, index === 0 ? "u2" : `a2-${index - 1}`, `constraint acknowledged ${index}`));
+        await writeTranscript(file, [
+          header("current-session"),
+          user("u1", null, "superseded request"),
+          assistant("a1", "u1", "old answer"),
+          user("u2", "a1", "confirmed constraint: do not deploy"),
+          ...answers,
+          compaction("cp-entry", `a2-${answerCount - 1}`, [
+            '<recovery_capsule version="2">',
+            "- Capsule: Maestro New Context Recovery Capsule v2; no model summary was generated.",
+            "- Checkpoint ID: command-checkpoint",
+            "</recovery_capsule>",
+          ].join("\n")),
+          user("u3", "cp-entry", "new request after reset"),
+        ]);
+        const ctx = context(root, file);
+        const timeline = await executeSessionHistory({
+          action: "timeline", scope: "current_session", limit: 1,
+        }, ctx);
+        assert.notEqual(timeline.isError, true);
+        const payload = JSON.parse(resultText(timeline)) as {
+          checkpoints: Array<{ sessionId: string; checkpointId: string; turn: number }>;
+        };
+        assert.equal(payload.checkpoints.length, 1);
+        const checkpoint = payload.checkpoints[0]!;
+        assert.equal(checkpoint.sessionId, "current-session");
+        assert.equal(checkpoint.checkpointId, "command-checkpoint");
+        assert.equal(checkpoint.turn, 2);
+        const recovered = await executeSessionHistory({
+          action: "read_turn", scope: "current_session", turn: checkpoint.turn,
+          include: ["user", "assistant"], limit: 6,
+        }, ctx);
+        assert.notEqual(recovered.isError, true);
+        const result = JSON.parse(resultText(recovered)) as {
+          found: boolean; truncated: boolean;
+          turn: { entries: Array<{ kind: string; text: string }> };
+        };
+        assert.equal(result.found, true);
+        assert.equal(result.truncated, answerCount === 8);
+        assert.equal(result.turn.entries.length, Math.min(answerCount + 1, 6));
+        assert.equal(result.turn.entries[0]?.text, "confirmed constraint: do not deploy");
+        assert.ok(result.turn.entries.every((entry) => entry.kind === "user" || entry.kind === "assistant"));
+        assert.doesNotMatch(resultText(recovered), /superseded request|new request after reset|must stay hidden|secret-path/);
+
+        const missing = await executeSessionHistory({
+          action: "read_turn", scope: "current_session", turn: 99,
+          include: ["user", "assistant"], limit: 6,
+        }, ctx);
+        assert.equal(JSON.parse(resultText(missing)).found, false);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
 test("session history allows absent teammate roots but reports other enumeration errors", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-flow-session-history-teammate-inventory-error-"));
   try {
@@ -447,6 +511,10 @@ test("session history registration exposes unified recovery and historical disco
   const guidance = tool.promptGuidelines?.join("\n") ?? "";
   assert.match(guidance, /capsule and live Todo\/Goal\/Plan\/Workflow state first/);
   assert.match(guidance, /scope=current_session/);
+  assert.ok(tool.description.includes(COMMAND_HISTORY_BOOTSTRAP));
+  assert.match(guidance, /even without an apparent missing fact/);
+  assert.match(guidance, /Do not repeat a completed bootstrap for the same checkpoint/);
+  assert.match(guidance, /other resets and subsequent reads remain need-driven/);
   assert.match(guidance, /mandatory Maestro knowledge search/);
   assert.match(guidance, /no relevant hits/);
   assert.match(guidance, /scope=workspace_sessions/);

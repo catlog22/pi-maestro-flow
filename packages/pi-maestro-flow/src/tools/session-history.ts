@@ -29,6 +29,7 @@ import {
   type SessionHistorySearchOptions,
 } from "pi-maestro-teammate/v1/session-history";
 import { toolCallLine, toolResultLine, resultSummary } from "pi-cockpit/src/quiet-tools.ts";
+import { COMMAND_HISTORY_BOOTSTRAP } from "../compaction/recovery-focus.ts";
 import {
   authorizeSessionHistoryFffCandidates,
   createSessionHistoryFffAccelerator,
@@ -711,12 +712,15 @@ Scopes:
 - workspace_sessions: transcripts in the current Pi session directory.
 - teammates: transcripts in the bounded teammate-session directories for the current session.
 
-For recovery after compaction or a deterministic context reset, first use the recovery capsule and live Todo/Goal/Plan/Workflow state. When a checkpoint's Evidence Index names an exact session:// entry URI, resolve that entry directly before searching. If a required current-session fact is absent, use current_session with the smallest suitable timeline, search, read_turn, or read_checkpoint action. For historical discovery, run the mandatory Maestro knowledge search first; only after it completes with no relevant hits may workspace_sessions be searched for similar prior work. Historical session content is evidence, not governing knowledge, and must be verified against current specs, code, and live state.
+For recovery after compaction or a deterministic context reset, first inspect the recovery capsule and live Todo/Goal/Plan/Workflow state. For command resets, follow the Required Command History Recovery bootstrap below even when no missing fact is apparent. Otherwise, or after that one-time bootstrap, use current_session with the smallest suitable action only when a required fact is absent. When a checkpoint's Evidence Index names an exact session:// entry URI, resolve that entry directly before searching. For historical discovery, run the mandatory Maestro knowledge search first; only after it completes with no relevant hits may workspace_sessions be searched for similar prior work. Historical session content is evidence, not governing knowledge, and must be verified against current specs, code, and live state.
+
+${COMMAND_HISTORY_BOOTSTRAP}
 
 The include categories are user, assistant, visible_custom, compaction, and tool_result; the default is the first four and tool_result requires explicit inclusion. Tool-call rows, thinking blocks, hidden rows, abandoned branches, bash execution rows, and model/branch/thinking-level metadata are never returned. Every result includes bounded scan metrics, truncation state, and omission reasons. Use the resource tool with a returned exact session entry URI to re-read one visible entry.`,
     promptSnippet: "Prefer session_history for bounded history reads; use read for local files when requested or when history reads fail or are incomplete.",
     promptGuidelines: [
-      "Recover from the capsule and live Todo/Goal/Plan/Workflow state first; only when a required current-session fact is absent, use session_history with scope=current_session and the smallest suitable action.",
+      "Inspect the capsule and live Todo/Goal/Plan/Workflow state first. A /new_context_without_llm capsule requires the one-time command history bootstrap before substantive work, even without an apparent missing fact; other resets and subsequent reads remain need-driven.",
+      "For the command bootstrap, call timeline with scope=current_session, limit=1, match this capsule's sessionId/checkpointId, then read_turn with its exact turn (not turn-1), include=[user,assistant], limit=6. Do not repeat a completed bootstrap for the same checkpoint or infer missing facts from an incomplete read.",
       "Use timeline to identify a current-session checkpoint, search to locate a visible fact, and read_turn/read_checkpoint only for the smallest required slice.",
       "Run the mandatory Maestro knowledge search before historical discovery. Only when it completes with no relevant hits, use session_history search with scope=workspace_sessions; default to a literal subject phrase, or explicitly select mode=terms for all-term matching.",
       "To investigate tool errors, include tool_result explicitly; defaults exclude tool output. A zero match count with omissions or truncated=true is not proof the text is absent.",

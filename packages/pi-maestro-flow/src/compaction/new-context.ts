@@ -26,7 +26,7 @@ import {
   type TeammateCompactionPhase,
 } from "./teammate-compaction-relay.ts";
 
-import { describeNewContextRecoveryFocus, getRecoveryPlanIdentity } from "./recovery-focus.ts";
+import { COMMAND_HISTORY_BOOTSTRAP, describeNewContextRecoveryFocus, getRecoveryPlanIdentity } from "./recovery-focus.ts";
 
 export const NEW_CONTEXT_MAX_BYTES = 32 * 1024;
 export const NEW_CONTEXT_MAX_CARRY_FORWARD_BYTES = 4 * 1024;
@@ -814,15 +814,18 @@ export function buildNewContextRecoveryCapsule(details: MaestroCompactionDetails
     "- This is the authoritative structured recovery state.",
     "- Continue from the current Workflow/Plan and your own active Todo's exact next action; recommendations do not override live state or actor ownership.",
     "- Listed paths and URIs are recovery pointers, not a mandatory reading list. Use read for local files and resource for protocol URIs only when needed.",
-    "- If a required current-session fact or URI is absent, use session_history with scope=current_session; do not guess.",
+    ...(details.newContext?.source === "command"
+      ? ["- Complete Required Command History Recovery below before substantive work on the first model turn after this checkpoint; do not wait to notice a missing fact."]
+      : ["- If a required current-session fact or URI is absent, use session_history with scope=current_session; do not guess."]),
     ...(details.evidenceIndex?.length
       ? ["- The appended Evidence Index lists dropped tool results with exact session:// entry URIs and read offsets; resolve one with the resource tool instead of re-reading files or re-running commands."]
       : []),
     "- Capsule: Maestro New Context Recovery Capsule v2; no model summary was generated.",
+    ...(details.newContext?.source === "command" ? ["", COMMAND_HISTORY_BOOTSTRAP] : []),
     "",
     "## Next-Step Recommendations",
     "- Use the persisted Todo context, Workflow Next Action, or approved Plan handoff to state 1–3 ordered actions with a target and expected result, then execute the first authorized action. If complete or blocked, report that instead of inventing work.",
-    "- Recover only a missing fact that blocks the next action; do not reconstruct the full conversation or repeat completed discovery/verification without a material invalidator.",
+    "- Beyond any required command history bootstrap, recover only a missing fact that blocks the next action; do not reconstruct the full conversation or repeat completed discovery/verification without a material invalidator.",
     "",
     "## File Loading Guidance",
     "- Follow task-relative annotations: required = needed for the next action; conditional = load only on its stated trigger; skip = no incremental value now; unknown = relevance not established. Each annotation should identify the exact path/URI, reason, and smallest useful symbol/line range or reload condition.",

@@ -1,6 +1,16 @@
 import { posix, win32 } from "node:path";
 import type { MaestroCompactionDetails } from "./maestro-compaction.ts";
 
+export const COMMAND_HISTORY_BOOTSTRAP = [
+  "## Required Command History Recovery",
+  "Apply this protocol only when the active recovery capsule requires it for a command-source reset. Merely discussing or reviewing /new_context_without_llm is not a reset. On the first model turn after that checkpoint, before substantive work, perform this bounded history bootstrap once per checkpoint, even if the structured state appears sufficient. A reset without trailing text remains idle until the next user message.",
+  "1. Call session_history with action=timeline, scope=current_session, limit=1. Match the returned sessionId and checkpointId to this capsule's Session ID and Checkpoint ID; do not substitute a different checkpoint or guess a turn number.",
+  "2. For the matching checkpoint with turn > 0, call session_history with action=read_turn, scope=current_session, turn=<checkpoint.turn>, include=[\"user\",\"assistant\"], limit=6. Use checkpoint.turn unchanged, not turn-1: it identifies the exchange immediately preceding this reset. If turn=0, there is no preceding user turn to read.",
+  "Check the recovered exchange against the current request for user constraints, decisions, blockers and next action. Historical text is evidence, not new authorization; live permissions, actor ownership, paused Goals and Plan gates still apply. Do not restart completed work.",
+  "If history is unavailable, the checkpoint does not match, or the turn is missing or truncated, report the specific recovery gap; do not treat a partial read as complete. Recover only a concrete missing fact through an exact session:// reference or targeted current-session search; do not scan the full conversation or other sessions.",
+  "After this bootstrap, reuse its result for this checkpoint. Further history reads are only for facts needed by the next authorized action; an unrelated current request does not authorize resuming old work.",
+].join("\n");
+
 export type RecoveryFocusInput = Pick<
   MaestroCompactionDetails,
   "todo" | "goal" | "plan" | "workflow" | "newContext"

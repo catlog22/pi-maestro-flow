@@ -691,7 +691,8 @@ test("new_context guidance persists actionable recommendations and task-relative
   assert.match(tool.parameters.properties.handoff.description, /does not mutate or persist to Todo state/);
 });
 
-test("new_context_without_llm records and separately sends trailing text after the reset", async () => {
+for (const message of [undefined, "Preserve this exact operator note."]) {
+test(`new_context_without_llm ${message ? "records and separately sends trailing text" : "remains idle without trailing text"} after the reset`, async () => {
   const fixture = await enabledProject();
   try {
     const arbiter = new CompactionArbiter();
@@ -727,7 +728,7 @@ test("new_context_without_llm records and separately sends trailing text after t
       isIdle: () => true,
       hasPendingMessages: () => false,
     } as unknown as ExtensionCommandContext;
-    await command.handler("  Preserve this exact operator note.  ", commandContext);
+    await command.handler(message ? `  ${message}  ` : "   ", commandContext);
 
     const request = compactionRequestFromInstructions(harness.compactOptions?.customInstructions);
     const observed = arbiter.observeStart(request);
@@ -735,20 +736,58 @@ test("new_context_without_llm records and separately sends trailing text after t
     if (observed.trigger?.owner !== "new-context") assert.fail("missing new-context trigger");
     assert.equal(observed.trigger.source, "command");
     const consumed = controller.consume(observed.trigger, harness.ctx as never);
-    assert.equal(consumed?.carryForward, "Preserve this exact operator note.");
+    assert.equal(consumed?.carryForward, message);
     const runtime = details();
     runtime.newContext = consumed;
-    assert.match(buildNewContextRecoveryCapsule(runtime), /## Carry Forward\nPreserve this exact operator note\./);
+    const capsule = buildNewContextRecoveryCapsule(runtime);
+    assert.match(capsule, /## Required Command History Recovery/);
+    if (message) assert.ok(capsule.includes(`## Carry Forward\n${message}`));
+    else assert.doesNotMatch(capsule, /## Carry Forward/);
     assert.deepEqual(sentMessages, []);
 
     harness.compactOptions?.onComplete?.();
-    assert.deepEqual(sentMessages, [{
-      content: "Preserve this exact operator note.",
+    assert.deepEqual(sentMessages, message ? [{
+      content: message,
       deliverAs: "followUp",
-    }]);
+    }] : []);
     assert.equal(defaultContinuations, 0);
   } finally {
     await fixture.dispose();
+  }
+});
+
+}
+
+test("command recovery capsule requires a bounded one-time history bootstrap only for command resets", () => {
+  for (const source of ["command", "tool", "todo-transition", "plan-confirm"] as const) {
+    const runtime = details();
+    runtime.newContext!.source = source;
+    const before = structuredClone(runtime);
+    const capsule = buildNewContextRecoveryCapsule(runtime);
+    assert.equal(capsule, buildNewContextRecoveryCapsule(runtime));
+    assert.ok(Buffer.byteLength(capsule, "utf8") <= NEW_CONTEXT_MAX_BYTES);
+    assert.deepEqual(runtime, before);
+    if (source !== "command") {
+      assert.doesNotMatch(capsule, /## Required Command History Recovery|action=timeline/);
+      assert.match(capsule, /If a required current-session fact or URI is absent/);
+      continue;
+    }
+    assert.match(capsule, /only when the active recovery capsule requires it for a command-source reset/);
+    assert.match(capsule, /Merely discussing or reviewing \/new_context_without_llm is not a reset/);
+    assert.match(capsule, /before substantive work.*once per checkpoint/);
+    assert.match(capsule, /even if the structured state appears sufficient/);
+    assert.match(capsule, /action=timeline, scope=current_session, limit=1/);
+    assert.match(capsule, /Match the returned sessionId and checkpointId/);
+    assert.match(capsule, /action=read_turn, scope=current_session, turn=<checkpoint.turn>, include=\["user","assistant"\], limit=6/);
+    assert.match(capsule, /not turn-1/);
+    assert.match(capsule, /If turn=0, there is no preceding user turn/);
+    assert.match(capsule, /Historical text is evidence, not new authorization/);
+    assert.match(capsule, /unrelated current request does not authorize resuming old work/);
+    assert.match(capsule, /turn is missing or truncated, report the specific recovery gap/);
+    assert.match(capsule, /do not scan the full conversation or other sessions/);
+    assert.ok(capsule.indexOf("## Required Command History Recovery") < capsule.indexOf("## Goal"));
+    assert.match(capsule, /Session ID: session-1/);
+    assert.match(capsule, /Checkpoint ID: checkpoint-2/);
   }
 });
 
@@ -1215,6 +1254,7 @@ test("recovery capsule is deterministic, priority ordered, bounded, and includes
     context: "🧭".repeat(2_000),
     updatedAt: 100 - index,
   })));
+  oversized.newContext!.source = "command";
   oversized.newContext!.resourceUris = Array.from(
     { length: 16 },
     (_, index) => `agent://${index}-${"é".repeat(900)}`,
@@ -1380,14 +1420,15 @@ test("model summary facts are not silently promoted into a ledger by successive 
     settings: { enabled: true, reserveTokens: 1000, keepRecentTokens: 100 },
   };
   const ctx = { cwd: "D:/repo", model: { id: "fixture" }, sessionManager: { getSessionId: () => "session-1" }, ui: { notify() {} } };
-  const ordinary = await createMaestroCompaction({ preparation, branchEntries: [] } as never, ctx as never, {
+  const signal = new AbortController().signal;
+  const ordinary = await createMaestroCompaction({ preparation, branchEntries: [], signal } as never, ctx as never, {
     detailsSnapshot: runtime,
     completeSummary: async () => ({ stopReason: "stop", content: [{ type: "text", text: "Earlier user evidence: CONFIRMED_WALL_1_3" }] } as never),
   });
   assert.match(ordinary!.compaction!.summary, /CONFIRMED_WALL_1_3/);
   let previousSummary = ordinary!.compaction!.summary;
   for (let index = 0; index < 2; index++) {
-    const reset = await createMaestroCompaction({ preparation: { ...preparation, previousSummary }, branchEntries: [] } as never, ctx as never, {
+    const reset = await createMaestroCompaction({ preparation: { ...preparation, previousSummary }, branchEntries: [], signal } as never, ctx as never, {
       detailsSnapshot: runtime,
       summaryOverrideFactory: buildNewContextRecoveryCapsule,
       firstKeptEntryIdOverride: `retain-none-${index}`,
